@@ -1,8 +1,7 @@
 # The type system
 
-Status: **proposal; §5 and §7's `const` are now implemented.** §1–4 are the part concurrency forces and I would commit
-to them. §5 onward is a sketch with real forks left open — those are language
-design, not consequences, and they are yours.
+Status: §1–5 and `const` **decided**; §5 implemented. §6–8 decided, not yet
+implemented. Nothing here is open any more except where marked.
 
 ---
 
@@ -143,13 +142,15 @@ where Go or C would put it in a register or on the stack. The answer is
 compiler unboxing for provably non-escaping values — an optimisation, not a
 language feature, and therefore addable after the freeze.
 
-**The fork you may want instead:** value structs (`Point` copied by value,
-heap types marked somehow). That is what Go does and it is a real performance
-difference for numeric code. It is also a second concept, a second set of
-rules for assignment and argument passing, and a `&`-shaped thing eventually.
-I lean to reference-only, but this is a genuine decision and not mine.
+Value structs were considered and **rejected**: they are a second concept, a
+second set of rules for assignment and argument passing, and eventually a
+`&`-shaped thing. Having two answers to "does `=` copy or alias?" is a
+permanent source of confusion in C# and Swift.
 
-## 6. Errors — sketch
+When a copy is genuinely wanted, it is **explicit: `clone(v)`.** That is one
+visible operation rather than an invisible rule that depends on the type.
+
+## 6. Errors
 
 Errors are values (already decided). The open question is what shape.
 
@@ -164,10 +165,10 @@ generics are deliberately deferred. Options:
 - **Wait for generics** and use `Result<T, E>` from the start — which means
   generics move from "later" to "now".
 
-Go shipped multiple returns at 1.0 and had no generics for a decade; the
-stdlib was fine. That is the pragmatic evidence, and I would follow it.
+**Decided: multiple return values**, Go style. Needs no generics, and
+composes with generics later rather than being replaced by them.
 
-## 7. Absence — sketch
+## 7. Absence
 
 §6.6 of Oro's feasibility doc said **non-nullable by default**, and that
 should hold: there is no `null` for ordinary types.
@@ -176,25 +177,71 @@ Absence needs an optional — `str? name` — plus narrowing so that after
 `if (name != null)` the value is a plain `str`. Flow-sensitive narrowing is
 contained and worth it; it is the same CFG walk as the move checker.
 
-## 8. Polymorphism — sketch
+## 8. Polymorphism
 
-Two separate things, and they do not have to arrive together:
+**Interfaces are structural**, Go style: having the methods is the proof, no
+`implements` clause. Chosen for retrofit — an interface can be satisfied by a
+type written before the interface existed, including one in a library you do
+not control. That is what makes a stdlib compose without a type hierarchy.
 
-- **Interfaces** — needed for a stdlib that reads and writes different things.
-  Structural (Go) or declared (Java)? Go's structural interfaces are pleasant
-  and make the stdlib composable without a type hierarchy.
-- **Generics** — strategy already fixed as monomorphisation, which keeps them
-  out of the IR entirely. Decide *whether* before 1.0, since Go's single worst
-  compatibility scar came from deferring exactly this.
+The known hazard is accidental satisfaction: a `Shape.draw()` silently
+satisfying a `Cowboy.draw()`. Rare, and the cost is accepted.
+
+**Generics arrive from day one**, monomorphised. The reason is not
+convenience, it is that **containers are generic and we need `Chan<T>`
+immediately.** The alternative is special-casing channels, arrays and maps in
+the compiler so users cannot write their own — which is what Go did for ten
+years and then spent its worst compatibility scar undoing.
+
+### Constraints: interfaces only
+
+A type parameter may be constrained by an **interface** and nothing else.
+
+```c
+T max<T: Ordered>(T a, T b)         // NO -- would need `<` on T
+T pick<T>(T a, T b, fn(T, T) bool)  // yes -- pass the comparison
+```
+
+**No type sets.** Go had to invent `interface { ~int | ~float64 }` because a
+method-based interface cannot express "supports `<`", and the result is two
+different things sharing one keyword — the ugliest corner of Go generics, and
+one they cannot now remove.
+
+We avoid it because our motivation is containers, and containers need nothing
+of their element type. `Chan<T>` only moves values. `List<T>` needs nothing.
+Only `Map<K,V>` needs anything of `K`, and that is an ordinary interface.
+Where an operation is genuinely needed, **pass a function** — which is already
+Oro's style for `sort`.
+
+### Dispatch lives in the object header
+
+Monomorphised generics need no dispatch. Interfaces do, and the obvious answer
+is Go's fat pointer: an interface value is `(data, vtable)`, two words, a
+second shape of reference in the IR.
+
+**We do not need that, because the header already has a slot.** Widen
+`DropFn` into a `TypeInfo *` carrying the drop function *and* the method
+table:
+
+```c
+struct Obj { long rc; const TypeInfo *ty; };
+```
+
+An interface value is then **just an `Obj *`** — the object knows its own
+type, as in Java. `ref` stays the only reference shape in the IR, the word is
+one we already spend, and the cost is one extra load on dispatch
+(`obj -> ty -> method`) against Go's one. Worth it.
 
 ---
 
-## 9. The forks that are actually yours
+## 9. Settled
 
-1. **Value structs, or reference-only?** (§5) — performance vs one concept.
-2. **Error shape** (§6) — multiple returns now, or generics first.
-3. **Interfaces: structural or declared?** (§8)
-4. **Generics before or after 1.0?** — the decision, not the strategy.
+1. ~~Value structs or reference-only~~ — **reference-only**, with explicit
+   `clone(v)` when a copy is wanted.
+2. ~~Error shape~~ — **multiple return values**.
+3. ~~Interfaces~~ — **structural**, for retrofit.
+4. ~~Generics before or after 1.0~~ — **day one**, monomorphised,
+   interface-only constraints, because `Chan<T>` needs them.
 5. ~~**Mutability**~~ — decided: `const` exists, on locals. Assignment to a
    const is a compile error. Const fields are not yet a thing.
 
@@ -204,10 +251,13 @@ The move checker (§4a) is the only part concurrency is waiting on, and it is
 the smallest: one bit per local over the existing CFG. Everything else in this
 document can follow at its own pace.
 
-1. `type` declarations and field access — the thing every other feature needs
-2. Move checking, with the diagnostic in §4a
-3. `send`/`recv` and the runtime uniqueness check
-4. Optionals and narrowing
-5. Errors, in whatever shape §6 resolves to
-6. Interfaces
-7. Generics
+1. ~~`type` declarations and field access~~ — done
+2. **Generics**, monomorphised — moved ahead of everything else because
+   `Chan<T>` needs them and retrofitting generics into an existing stdlib is
+   the expensive order
+3. Move checking, with the diagnostic in §4a
+4. `send`/`recv` and the runtime uniqueness check
+5. `clone`
+6. Interfaces, and the `TypeInfo` header change
+7. Multiple returns, then errors
+8. Optionals and narrowing
