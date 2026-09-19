@@ -98,8 +98,29 @@ fn emit_func(o: &mut String, f: &crate::ir::Func) {
         o.push('\n');
     }
 
+    // Only blocks that are actually jumped to get a label. C warns about
+    // unused labels, run.sh treats warnings as failures, and the entry block
+    // is fallen into rather than branched to.
+    let mut targeted = std::collections::BTreeSet::new();
     for b in &f.blocks {
-        writeln!(o, "b{}:; /* {} */", b.id.0, b.id).unwrap();
+        match &b.term {
+            Term::Jump { to, .. } => {
+                targeted.insert(*to);
+            }
+            Term::Brif { then, els, .. } => {
+                targeted.insert(*then);
+                targeted.insert(*els);
+            }
+            Term::Ret { .. } => {}
+        }
+    }
+
+    for b in &f.blocks {
+        if targeted.contains(&b.id) {
+            writeln!(o, "b{}:; /* {} */", b.id.0, b.id).unwrap();
+        } else if b.id != f.entry {
+            writeln!(o, "    /* {} (unreachable) */", b.id).unwrap();
+        }
         for i in &b.insts {
             emit_inst(o, f, i);
         }
