@@ -12,11 +12,15 @@ there is one; it rewrites `config.sh` and moves the corpus files with it.
 which gcc and clang both build clean at `-O0` and `-O2`.
 
 ```
-./gates.sh        build, test, clippy, fmt, no-deps, no-unsafe, corpus
-./run.sh          the corpus alone
+./build.sh examples/tour.src && ./tour    compile and run a program
+./gates.sh                                every gate
+./run.sh                                  the corpus alone
 ```
 
-- 41 corpus programs, 0 failing
+`examples/tour.src` is a tour of every feature, and is also in the corpus so
+it cannot rot.
+
+- 42 corpus programs, 0 failing
 - 36 unit tests
 - 0 dependencies, 0 `unsafe`, clippy clean at `-D warnings`
 
@@ -129,6 +133,7 @@ match the compiler.
 ```
 config.sh              name, binary, extension — the only place they appear
 rename.sh              renames the language and moves the corpus with it
+build.sh               compile a source file to an executable
 gates.sh               every gate, run after every commit
 run.sh                 the differential corpus runner
 src/                   the compiler
@@ -148,7 +153,20 @@ docs/
   concurrency.md           the evidence behind it, and what was rejected
   types.md                 type system: proposal, plus the forks left open
 corpus/{core,twin,traps,errors}/
+examples/tour.src      every feature in one file
 ```
+
+## Three layers, so they do not get confused
+
+1. **The language** — C/Java shaped: type-first declarations, semicolons,
+   braces. The angle brackets on generics are Java's `List<String>`, not
+   Rust's.
+2. **The IR** — internal, sixteen instructions, SSA with block parameters.
+   `--emit-ir` prints it; nothing else exposes it.
+3. **The backend** — emits C and hands it to `cc`. `build.sh` does this in a
+   temp directory and deletes it. **You never see or keep the C.** It is
+   replaceable — Cranelift is the planned second backend — which is exactly
+   why nothing about the language depends on it.
 
 ## Two rules that look like details and are not
 
