@@ -12,8 +12,6 @@ int fib(int n) {
     return fib(n - 1) + fib(n - 2);
 }
 
-void main() {
-    print(fact(10));
-    print(fact(20));
-    print(fib(20));
-}
+print(fact(10));
+print(fact(20));
+print(fib(20));

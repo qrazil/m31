@@ -1,11 +1,10 @@
 // Both arms reassign x, so the join block needs a parameter for it. This is
 // the SSA construction in src/lower.rs::lower_if.
-void main() {
-    int x = 10;
-    if (x > 5) {
-        x = x * 2;
-    } else {
-        x = 0;
-    }
-    print(x);
+
+int x = 10;
+if (x > 5) {
+    x = x * 2;
+} else {
+    x = 0;
 }
+print(x);

@@ -1,1 +1,1 @@
-corpus/errors/002-unknown-var.src:2:11: unknown variable `nope`
+corpus/errors/002-unknown-var.src:1:7: unknown variable `nope`

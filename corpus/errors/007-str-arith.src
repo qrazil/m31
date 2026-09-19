@@ -1,4 +1,2 @@
-void main() {
-    str s = "a";
-    print(s + s);
-}
+str s = "a";
+print(s + s);

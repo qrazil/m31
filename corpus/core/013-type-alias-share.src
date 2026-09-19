@@ -8,11 +8,9 @@ void bump(Counter c) {
     c.n = c.n + 1;
 }
 
-void main() {
-    Counter a = Counter(n: 0);
-    Counter b = a;
-    bump(a);
-    bump(b);
-    print(a.n);
-    print(b.n);
-}
+Counter a = Counter(n: 0);
+Counter b = a;
+bump(a);
+bump(b);
+print(a.n);
+print(b.n);

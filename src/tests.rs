@@ -108,7 +108,7 @@ fn comments_are_trivia() {
 fn arithmetic_precedence_matches_c() {
     // 2 + 3 * 4 must multiply first: the imul has to consume the constants,
     // and the iadd has to consume the imul's result.
-    let out = ir("void main() { print(2 + 3 * 4); }");
+    let out = ir("print(2 + 3 * 4);");
     let mul = out.find("imul").expect("expected a multiply");
     let add = out.find("iadd").expect("expected an add");
     assert!(mul < add, "multiply must be emitted before add:\n{out}");
@@ -116,7 +116,7 @@ fn arithmetic_precedence_matches_c() {
 
 #[test]
 fn comparison_binds_looser_than_arithmetic() {
-    let out = ir("void main() { print(1 + 2 < 4); }");
+    let out = ir("print(1 + 2 < 4);");
     let add = out.find("iadd").expect("expected an add");
     let cmp = out.find("icmp").expect("expected a compare");
     assert!(add < cmp, "add must be emitted before compare:\n{out}");
@@ -128,9 +128,8 @@ fn comparison_binds_looser_than_arithmetic() {
 fn borrowed_argument_causes_no_refcount_traffic() {
     // docs/ir-v0.md §5.1: arguments are borrowed. Passing a value a caller
     // already holds to a function that only reads it must cost nothing.
-    let out =
-        ir("int take(str s) { return len(s); }\nvoid main() { str s = \"hi\"; print(take(s)); }");
-    let take = out.split("func main").next().unwrap();
+    let out = ir("int take(str s) { return len(s); }\nstr s = \"hi\"; print(take(s));");
+    let take = out.split("func $main").next().unwrap();
     assert!(
         !take.contains("rc_inc") && !take.contains("rc_dec"),
         "callee must not touch the refcount of a borrowed argument:\n{take}"
@@ -141,7 +140,7 @@ fn borrowed_argument_causes_no_refcount_traffic() {
 fn owned_call_result_is_not_retained_again() {
     // concat returns +1. Binding it to a local must NOT add a second retain;
     // the local takes the existing one over.
-    let out = ir("void main() { str c = concat(\"a\", \"b\"); print(c); }");
+    let out = ir("str c = concat(\"a\", \"b\"); print(c);");
     assert_eq!(
         out.matches("rc_inc").count(),
         0,
@@ -158,7 +157,7 @@ fn owned_call_result_is_not_retained_again() {
 fn borrowed_source_is_retained_when_bound() {
     // Binding one local from another creates a second reference, so the new
     // local must retain, and both must release.
-    let out = ir("void main() { str a = concat(\"a\", \"b\"); str b = a; print(b); }");
+    let out = ir("str a = concat(\"a\", \"b\"); str b = a; print(b);");
     assert_eq!(
         out.matches("rc_inc").count(),
         1,
@@ -175,8 +174,8 @@ fn borrowed_source_is_retained_when_bound() {
 fn returning_a_borrowed_local_retains_before_release() {
     // Returns are owned (+1). Returning a local must retain it before the
     // scope releases it, or the caller receives a freed object.
-    let out = ir("str f() { str s = \"x\"; return s; }\nvoid main() { print(f()); }");
-    let f = out.split("func main").next().unwrap();
+    let out = ir("str f() { str s = \"x\"; return s; }\nprint(f());");
+    let f = out.split("func $main").next().unwrap();
     let inc = f.find("rc_inc").expect("return of a local must retain");
     let dec = f.find("rc_dec").expect("scope must still release");
     assert!(inc < dec, "retain must precede release:\n{f}");
@@ -187,7 +186,7 @@ fn returning_a_borrowed_local_retains_before_release() {
 #[test]
 fn if_merge_introduces_a_block_parameter() {
     // Both arms reassign x, so the join block carries it as a parameter.
-    let out = ir("void main() { int x = 1; if (x > 0) { x = 2; } else { x = 3; } print(x); }");
+    let out = ir("int x = 1; if (x > 0) { x = 2; } else { x = 3; } print(x);");
     assert!(
         out.contains("block3(v") || out.contains("block2(v") || out.contains("block1(v"),
         "expected a join block with a parameter:\n{out}"
@@ -196,7 +195,7 @@ fn if_merge_introduces_a_block_parameter() {
 
 #[test]
 fn short_circuit_and_is_lowered_as_branches() {
-    let out = ir("void main() { if (true && false) { print(1); } }");
+    let out = ir("if (true && false) { print(1); }");
     assert!(
         out.contains("brif"),
         "&& must lower to control flow:\n{out}"
@@ -206,7 +205,7 @@ fn short_circuit_and_is_lowered_as_branches() {
 #[test]
 fn unary_minus_goes_through_checked_subtraction() {
     // Lowering -x as 0 - x is what makes -INT64_MIN trap instead of wrapping.
-    let out = ir("void main() { int x = 1; print(-x); }");
+    let out = ir("int x = 1; print(-x);");
     assert!(
         out.contains("isub"),
         "negation must use checked subtraction:\n{out}"
@@ -218,41 +217,41 @@ fn unary_minus_goes_through_checked_subtraction() {
 #[test]
 fn rejects_type_errors() {
     assert_eq!(
-        err("void main() { int a = \"s\"; print(a); }"),
-        "1:23: type mismatch: expected int, found str"
+        err("int a = \"s\"; print(a);"),
+        "1:9: type mismatch: expected int, found str"
     );
+    assert_eq!(err("print(nope);"), "1:7: unknown variable `nope`");
     assert_eq!(
-        err("void main() { print(nope); }"),
-        "1:21: unknown variable `nope`"
-    );
-    assert_eq!(
-        err("void main() { if (1) { print(1); } }"),
-        "1:19: type mismatch: expected bool, found int"
+        err("if (1) { print(1); }"),
+        "1:5: type mismatch: expected bool, found int"
     );
 }
 
 #[test]
 fn rejects_malformed_programs() {
-    // Needs a `main`, because the missing-`main` check runs first.
-    assert!(err("int f() { }\nvoid main() { }").contains("must return a value"));
-    assert!(err("void main() { return 1; }").contains("cannot return a value"));
-    assert!(err("void f() { }").contains("no `main`"));
-    assert!(err("void main(int x) { }").contains("takes no parameters"));
-    assert!(err("int main() { return 0; }").contains("must return `void`"));
-    assert!(err("void main() { int a = 1; int a = 2; print(a); }").contains("already declared"));
-    assert!(err("void f() { } void f() { } void main() { }").contains("already defined"));
-    assert!(err("void main() { int a = 1; a = \"s\"; print(a); }").contains("type mismatch"));
+    assert!(err("int f() { }\nprint(1);").contains("must return a value"));
+    // `return` at the top level: the program's body returns nothing.
+    assert!(err("return 1;").contains("cannot return a value"));
+    // Writing `main` is a habit from C, Java and Go, and without a
+    // diagnostic it would declare a function nothing calls and the program
+    // would silently do nothing.
+    assert!(err("void main() { print(1); }").contains("there is no `main`"));
+    assert!(err("int main() { return 0; }").contains("there is no `main`"));
+    assert!(err("int a = 1; int a = 2; print(a);").contains("already declared"));
+    assert!(err("void f() { } void f() { } print(1);").contains("already defined"));
+    assert!(err("void f() { } void f() { } print(1);").contains("already defined"));
+    assert!(err("int a = 1; a = \"s\"; print(a);").contains("type mismatch"));
 }
 
 #[test]
 fn bool_supports_only_equality() {
-    assert!(err("void main() { print(true < false); }").contains("only `==` and `!=`"));
+    assert!(err("print(true < false);").contains("only `==` and `!=`"));
 }
 
 #[test]
 fn str_cannot_be_compared_or_added() {
-    assert!(err("void main() { str a = \"x\"; print(a + a); }").contains("cannot apply `+`"));
-    assert!(err("void main() { str a = \"x\"; print(a == a); }").contains("cannot compare"));
+    assert!(err("str a = \"x\"; print(a + a);").contains("cannot apply `+`"));
+    assert!(err("str a = \"x\"; print(a == a);").contains("cannot compare"));
 }
 
 // ---- lowering: loops --------------------------------------------------
@@ -261,9 +260,7 @@ fn str_cannot_be_compared_or_added() {
 fn while_creates_a_header_with_loop_carried_parameters() {
     // The header dominates its own body, so its parameters must exist before
     // the body is lowered. Both i and total are carried.
-    let out = ir(
-        "void main() { int i = 0; int t = 0; while (i < 3) { t = t + i; i = i + 1; } print(t); }",
-    );
+    let out = ir("int i = 0; int t = 0; while (i < 3) { t = t + i; i = i + 1; } print(t);");
     assert!(
         out.contains("block1(v") && out.contains("jump block1("),
         "expected a parameterised loop header with a back edge:\n{out}"
@@ -284,8 +281,7 @@ fn while_creates_a_header_with_loop_carried_parameters() {
 fn loop_body_declarations_are_not_loop_carried() {
     // `b` is declared inside the body, so it is fresh each iteration and must
     // NOT become a header parameter.
-    let out =
-        ir("void main() { int a = 0; while (a < 3) { int b = a; a = a + b + 1; } print(a); }");
+    let out = ir("int a = 0; while (a < 3) { int b = a; a = a + b + 1; } print(a);");
     let header = out
         .lines()
         .find(|l| l.starts_with("block1("))
@@ -300,9 +296,8 @@ fn loop_body_declarations_are_not_loop_carried() {
 fn loop_reassigning_a_str_releases_the_previous_value() {
     // Without the release, every iteration leaks. The corpus proves this at
     // runtime via __rc_live; this proves the instruction is emitted at all.
-    let out = ir(
-        "void main() { str s = \"\"; int i = 0; while (i < 2) { s = concat(s, \"x\"); i = i + 1; } print(s); }",
-    );
+    let out =
+        ir("str s = \"\"; int i = 0; while (i < 2) { s = concat(s, \"x\"); i = i + 1; } print(s);");
     assert!(
         out.matches("rc_dec").count() >= 2,
         "expected a release inside the loop and one at scope end:\n{out}"
@@ -314,7 +309,7 @@ fn break_releases_locals_declared_in_the_loop_body() {
     // The break path leaves the body scope, so it must release what the body
     // allocated -- release_to_depth exists for exactly this.
     let out = ir(
-        "void main() { int i = 0; while (i < 3) { str t = concat(\"a\",\"b\"); if (len(t) == 2) { break; } i = i + 1; } print(i); }",
+        "int i = 0; while (i < 3) { str t = concat(\"a\",\"b\"); if (len(t) == 2) { break; } i = i + 1; } print(i);",
     );
     // One release on the break path, one at the normal end of the iteration.
     assert!(
@@ -325,16 +320,17 @@ fn break_releases_locals_declared_in_the_loop_body() {
 
 #[test]
 fn break_and_continue_outside_a_loop_are_rejected() {
-    assert!(err("void main() { break; }").contains("`break` outside a loop"));
-    assert!(err("void main() { continue; }").contains("`continue` outside a loop"));
+    assert!(err("break;").contains("`break` outside a loop"));
+    assert!(err("continue;").contains("`continue` outside a loop"));
 }
 
 #[test]
 fn break_makes_the_exit_block_a_merge_point() {
     // Without break the exit needs no parameters. With it, the exit merges the
     // header's values with the break site's, so it must take parameters.
-    let out =
-        ir("void main() { int i = 0; int f = 0; while (i < 9) { if (i > 3) { f = i; break; } i = i + 1; } print(f); }");
+    let out = ir(
+        "int i = 0; int f = 0; while (i < 9) { if (i > 3) { f = i; break; } i = i + 1; } print(f);",
+    );
     let exit_has_params = out
         .lines()
         .filter(|l| l.starts_with("block") && l.contains("(v") && l.ends_with("):"))
@@ -351,7 +347,7 @@ fn break_makes_the_exit_block_a_merge_point() {
 fn a_type_with_no_references_needs_no_drop() {
     // rc_dec checks drop for NULL, so a type holding no references pays a
     // predictable branch instead of a call.
-    let out = ir("type P { int x; }\nvoid main() { P p = P(x: 1); print(p.x); }");
+    let out = ir("type P { int x; }\nP p = P(x: 1); print(p.x);");
     assert!(
         out.contains("alloc type0"),
         "expected an allocation:\n{out}"
@@ -362,16 +358,14 @@ fn a_type_with_no_references_needs_no_drop() {
 fn construction_retains_a_borrowed_field_but_not_an_owned_one() {
     // concat returns +1 and is handed straight over; a local is borrowed and
     // must be retained, because the object now holds a reference too.
-    let owned =
-        ir("type B { str s; }\nvoid main() { B b = B(s: concat(\"a\",\"b\")); print(b.s); }");
+    let owned = ir("type B { str s; }\nB b = B(s: concat(\"a\",\"b\")); print(b.s);");
     assert_eq!(
         owned.matches("rc_inc").count(),
         0,
         "an owned value must be moved into the field:\n{owned}"
     );
 
-    let borrowed =
-        ir("type B { str s; }\nvoid main() { str t = \"x\"; B b = B(s: t); print(b.s); }");
+    let borrowed = ir("type B { str s; }\nstr t = \"x\"; B b = B(s: t); print(b.s);");
     assert!(
         borrowed.contains("rc_inc"),
         "a borrowed value must be retained when stored:\n{borrowed}"
@@ -382,9 +376,7 @@ fn construction_retains_a_borrowed_field_but_not_an_owned_one() {
 fn assigning_a_reference_field_releases_the_old_value() {
     // Load old, retain new, store, release old -- in that order, so
     // `p.f = p.f;` cannot free what it is assigning.
-    let out = ir(
-        "type B { str s; }\nvoid main() { B b = B(s: \"a\"); b.s = concat(\"c\",\"d\"); print(b.s); }",
-    );
+    let out = ir("type B { str s; }\nB b = B(s: \"a\"); b.s = concat(\"c\",\"d\"); print(b.s);");
     // Compare against the LAST store, not the first: the first store belongs
     // to the construction above, which legitimately precedes any load.
     let lines: Vec<&str> = out.lines().collect();
@@ -409,7 +401,7 @@ fn assigning_a_reference_field_releases_the_old_value() {
 #[test]
 fn field_reads_are_borrowed() {
     // Reading a field does not take a reference: the object holds the +1.
-    let out = ir("type B { str s; }\nvoid main() { B b = B(s: \"a\"); print(b.s); }");
+    let out = ir("type B { str s; }\nB b = B(s: \"a\"); print(b.s);");
     // One release for b at scope end, and nothing extra for the read.
     assert_eq!(
         out.matches("rc_dec").count(),
@@ -420,26 +412,17 @@ fn field_reads_are_borrowed() {
 
 #[test]
 fn const_locals_reject_assignment() {
-    assert!(err("void main() { const int x = 1; x = 2; print(x); }")
-        .contains("cannot assign to const `x`"));
+    assert!(err("const int x = 1; x = 2; print(x);").contains("cannot assign to const `x`"));
 }
 
 #[test]
 fn type_errors_on_user_types_are_reported() {
-    assert!(
-        err("type P { int x; }\nvoid main() { P p = P(x: \"s\"); print(p.x); }")
-            .contains("field `x` is int, found str")
-    );
-    assert!(
-        err("type P { int x; }\nvoid main() { P p = P(); print(p.x); }")
-            .contains("missing field `x`")
-    );
-    assert!(
-        err("type P { int x; }\nvoid main() { P p = P(x: 1, x: 2); print(p.x); }")
-            .contains("given twice")
-    );
-    assert!(err("type P { int x; } type P { int y; }\nvoid main() { }").contains("already defined"));
-    assert!(err("void main() { int i = 1; print(i.x); }").contains("has no fields"));
+    assert!(err("type P { int x; }\nP p = P(x: \"s\"); print(p.x);")
+        .contains("field `x` is int, found str"));
+    assert!(err("type P { int x; }\nP p = P(); print(p.x);").contains("missing field `x`"));
+    assert!(err("type P { int x; }\nP p = P(x: 1, x: 2); print(p.x);").contains("given twice"));
+    assert!(err("type P { int x; } type P { int y; }\nprint(1);").contains("already defined"));
+    assert!(err("int i = 1; print(i.x);").contains("has no fields"));
 }
 
 // ---- generics ---------------------------------------------------------
@@ -447,7 +430,7 @@ fn type_errors_on_user_types_are_reported() {
 #[test]
 fn generics_are_erased_before_lowering() {
     // The IR must contain no type parameters at all -- only instantiations.
-    let out = ir("type Box<T> { T value; }\nvoid main() { Box<int> b = Box<int>(value: 1); print(b.value); }");
+    let out = ir("type Box<T> { T value; }\nBox<int> b = Box<int>(value: 1); print(b.value);");
     assert!(
         out.contains("type Box$int"),
         "expected an instantiation:\n{out}"
@@ -461,7 +444,7 @@ fn generics_are_erased_before_lowering() {
 #[test]
 fn each_distinct_instantiation_is_emitted_once() {
     let out = ir(
-        "type Box<T> { T value; }\nvoid main() { Box<int> a = Box<int>(value: 1); Box<int> b = Box<int>(value: 2); Box<str> c = Box<str>(value: \"s\"); print(a.value + b.value); print(c.value); }",
+        "type Box<T> { T value; }\nBox<int> a = Box<int>(value: 1); Box<int> b = Box<int>(value: 2); Box<str> c = Box<str>(value: \"s\"); print(a.value + b.value); print(c.value);",
     );
     assert_eq!(
         out.matches("type Box$int").count(),
@@ -475,7 +458,7 @@ fn each_distinct_instantiation_is_emitted_once() {
 fn an_unused_generic_is_never_instantiated() {
     // Instantiation is a worklist over the reachable set, so an unused
     // generic is never type-checked against types it was not written for.
-    let out = ir("type Unused<T> { T v; }\nvoid main() { print(1); }");
+    let out = ir("type Unused<T> { T v; }\nprint(1);");
     assert!(
         !out.contains("Unused"),
         "an unused generic must not be emitted:\n{out}"
@@ -485,7 +468,7 @@ fn an_unused_generic_is_never_instantiated() {
 #[test]
 fn generic_function_type_arguments_are_inferred() {
     let out = ir(
-        "type Box<T> { T value; }\nT unwrap<T>(Box<T> b) { return b.value; }\nvoid main() { Box<int> b = Box<int>(value: 1); print(unwrap(b)); }",
+        "type Box<T> { T value; }\nT unwrap<T>(Box<T> b) { return b.value; }\nBox<int> b = Box<int>(value: 1); print(unwrap(b));",
     );
     assert!(
         out.contains("func unwrap$int"),
@@ -495,18 +478,17 @@ fn generic_function_type_arguments_are_inferred() {
 
 #[test]
 fn generic_misuse_is_rejected() {
+    assert!(err(
+        "type Box<T> { T value; }\nBox<int,str> b = Box<int,str>(value: 1); print(b.value);"
+    )
+    .contains("takes 1 type argument(s), found 2"));
     assert!(
-        err("type Box<T> { T value; }\nvoid main() { Box<int,str> b = Box<int,str>(value: 1); print(b.value); }")
-            .contains("takes 1 type argument(s), found 2")
-    );
-    assert!(
-        err("type P { int x; }\nvoid main() { P<int> p = P<int>(x: 1); print(p.x); }")
-            .contains("is not generic")
+        err("type P { int x; }\nP<int> p = P<int>(x: 1); print(p.x);").contains("is not generic")
     );
     // Inference cannot see through a nested call; the diagnostic says what to
     // do rather than guessing.
     assert!(err(
-        "type Box<T> { T value; }\nT unwrap<T>(Box<T> b) { return b.value; }\nvoid main() { Box<Box<int>> n = Box<Box<int>>(value: Box<int>(value: 1)); print(unwrap(unwrap(n))); }"
+        "type Box<T> { T value; }\nT unwrap<T>(Box<T> b) { return b.value; }\nBox<Box<int>> n = Box<Box<int>>(value: Box<int>(value: 1)); print(unwrap(unwrap(n)));"
     )
     .contains("bind the argument to a local"));
 }

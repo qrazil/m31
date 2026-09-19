@@ -1,1 +1,1 @@
-corpus/errors/013-wrong-arity.src:6:23: type `Box` takes 1 type argument(s), found 2
+corpus/errors/013-wrong-arity.src:5:19: type `Box` takes 1 type argument(s), found 2

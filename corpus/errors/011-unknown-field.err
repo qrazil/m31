@@ -1,1 +1,1 @@
-corpus/errors/011-unknown-field.src:7:12: type `Point` has no field `y`
+corpus/errors/011-unknown-field.src:6:8: type `Point` has no field `y`

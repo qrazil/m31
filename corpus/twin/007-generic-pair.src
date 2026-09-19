@@ -7,11 +7,9 @@ A left<A, B>(Pair<A, B> p) {
     return p.first;
 }
 
-void main() {
-    Pair<int, int> a = Pair<int, int>(first: 12, second: 30);
-    print(left(a));
-    print(a.second % 7);
+Pair<int, int> a = Pair<int, int>(first: 12, second: 30);
+print(left(a));
+print(a.second % 7);
 
-    Pair<int, bool> b = Pair<int, bool>(first: -5, second: true);
-    print(left(b) * 3);
-}
+Pair<int, bool> b = Pair<int, bool>(first: -5, second: true);
+print(left(b) * 3);

@@ -1,4 +1,2 @@
-void main() {
-    int a = "not an int";
-    print(a);
-}
+int a = "not an int";
+print(a);

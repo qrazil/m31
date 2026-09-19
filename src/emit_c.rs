@@ -68,6 +68,20 @@ pub fn emit(m: &Module) -> String {
         o.push('\n');
     }
 
+    // Escaping `$` could in principle collide two distinct IR names, so
+    // check rather than assume. A collision here would be a silent
+    // miscompile, which is the category worth an assertion.
+    {
+        let mut seen = std::collections::BTreeSet::new();
+        for f in &m.funcs {
+            assert!(
+                seen.insert(c_name(&f.name)),
+                "two functions map to the same C name: {}",
+                c_name(&f.name)
+            );
+        }
+    }
+
     // Prototypes first, so definition order does not constrain call order.
     for f in &m.funcs {
         writeln!(o, "{};", signature(f)).unwrap();
@@ -79,8 +93,23 @@ pub fn emit(m: &Module) -> String {
         o.push('\n');
     }
 
-    o.push_str("int main(void) {\n    fn_main();\n    return 0;\n}\n");
+    writeln!(
+        o,
+        "int main(void) {{\n    {}();\n    return 0;\n}}",
+        c_name("$main")
+    )
+    .unwrap();
     o
+}
+
+/// Turn an IR function name into a C identifier.
+///
+/// Monomorphisation mangles with `$` (`unwrap$int`) and the synthesised entry
+/// point is `$main`. Both gcc and clang accept `$` in identifiers, but it is
+/// a GNU extension, not standard C -- and the whole point of the C backend is
+/// reaching compilers we have not tested. So it is escaped here.
+fn c_name(name: &str) -> String {
+    format!("fn_{}", name.replace('$', "__"))
 }
 
 fn signature(f: &crate::ir::Func) -> String {
@@ -100,7 +129,7 @@ fn signature(f: &crate::ir::Func) -> String {
     };
     // A space only where the type does not already end in `*`.
     let sep = if ret.ends_with('*') { "" } else { " " };
-    format!("{ret}{sep}fn_{}({plist})", f.name)
+    format!("{ret}{sep}{}({plist})", c_name(&f.name))
 }
 
 fn emit_func(o: &mut String, f: &crate::ir::Func, types: &[TypeDef]) {
@@ -215,10 +244,17 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
             writeln!(o, "    {dst} = !{src};").unwrap();
         }
         Inst::Call { dst, func, args } => {
+            // Runtime helpers are already C names; user functions are IR
+            // names and need escaping and the prefix.
+            let callee = if func.starts_with("rt_") {
+                func.clone()
+            } else {
+                c_name(func)
+            };
             let a: Vec<String> = args.iter().map(|v| v.to_string()).collect();
             match dst {
-                Some(d) => writeln!(o, "    {d} = {func}({});", a.join(", ")).unwrap(),
-                None => writeln!(o, "    {func}({});", a.join(", ")).unwrap(),
+                Some(d) => writeln!(o, "    {d} = {callee}({});", a.join(", ")).unwrap(),
+                None => writeln!(o, "    {callee}({});", a.join(", ")).unwrap(),
             }
         }
         Inst::Alloc { dst, tid } => {

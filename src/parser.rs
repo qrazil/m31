@@ -234,18 +234,81 @@ impl Parser {
     pub fn parse_program(&mut self) -> Result<Program, Diag> {
         let mut funcs = Vec::new();
         let mut types = Vec::new();
+        let mut toplevel = Vec::new();
         while self.peek() != &Tok::Eof {
             if self.peek() == &Tok::KwType {
                 types.push(self.parse_type_decl()?);
-            } else {
+            } else if self.starts_func() {
                 funcs.push(self.parse_func()?);
+            } else {
+                // Anything else at the top level is a statement, and runs.
+                toplevel.push(self.parse_stmt()?);
             }
         }
         Ok(Program {
             types,
             funcs,
+            toplevel,
             ty_exprs: std::mem::take(&mut self.ty_exprs),
         })
+    }
+
+    /// Distinguish a function declaration from a top-level statement.
+    ///
+    /// Both can begin with a type: `int f(..) {` declares, `int x = ..;`
+    /// does not. The difference is a `(` after the name -- and after any
+    /// generic parameter list. Three tokens of lookahead, no backtracking.
+    fn starts_func(&self) -> bool {
+        // The return type may be a type parameter the parser has not met yet
+        // -- `T unwrap<T>(Box<T> b)` -- so accept any identifier here and let
+        // the shape decide. A statement can never be IDENT IDENT `(`.
+        if !matches!(self.peek(), Tok::Ident(_)) && Self::ty_of(self.peek()).is_none() {
+            return false;
+        }
+        let mut i = 1;
+        // Skip type arguments on the return type: `Box<int> f(..)`.
+        if self.peek_at(1) == &Tok::Lt {
+            let mut depth = 0;
+            loop {
+                match self.peek_at(i) {
+                    Tok::Lt => depth += 1,
+                    Tok::Gt => {
+                        depth -= 1;
+                        if depth == 0 {
+                            i += 1;
+                            break;
+                        }
+                    }
+                    Tok::Eof => return false,
+                    _ => {}
+                }
+                i += 1;
+            }
+        }
+        if !matches!(self.peek_at(i), Tok::Ident(_)) {
+            return false;
+        }
+        i += 1;
+        // Skip the function's own type parameters: `T id<T>(T x)`.
+        if self.peek_at(i) == &Tok::Lt {
+            let mut depth = 0;
+            loop {
+                match self.peek_at(i) {
+                    Tok::Lt => depth += 1,
+                    Tok::Gt => {
+                        depth -= 1;
+                        if depth == 0 {
+                            i += 1;
+                            break;
+                        }
+                    }
+                    Tok::Eof => return false,
+                    _ => {}
+                }
+                i += 1;
+            }
+        }
+        self.peek_at(i) == &Tok::LParen
     }
 
     fn parse_type_decl(&mut self) -> Result<TypeDecl, Diag> {

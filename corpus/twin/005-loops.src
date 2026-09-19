@@ -8,27 +8,25 @@ int sum_to(int n) {
     return total;
 }
 
-void main() {
-    print(sum_to(10));
-    print(sum_to(100));
+print(sum_to(10));
+print(sum_to(100));
 
-    // nested, with the inner loop's counter reset each time
-    int r = 0;
-    int a = 0;
-    while (a < 5) {
-        int b = 0;
-        while (b < 5) {
-            r = r + a * b;
-            b = b + 1;
-        }
-        a = a + 1;
+// nested, with the inner loop's counter reset each time
+int r = 0;
+int a = 0;
+while (a < 5) {
+    int b = 0;
+    while (b < 5) {
+        r = r + a * b;
+        b = b + 1;
     }
-    print(r);
-
-    // a loop whose body never runs
-    int z = 0;
-    while (false) {
-        z = 99;
-    }
-    print(z);
+    a = a + 1;
 }
+print(r);
+
+// a loop whose body never runs
+int z = 0;
+while (false) {
+    z = 99;
+}
+print(z);

@@ -1,1 +1,1 @@
-corpus/errors/009-break-outside-loop.src:2:5: `break` outside a loop
+corpus/errors/009-break-outside-loop.src:1:1: `break` outside a loop

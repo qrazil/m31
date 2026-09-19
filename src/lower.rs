@@ -186,6 +186,15 @@ impl Lowerer {
         }
 
         for f in &p.funcs {
+            // Habit from C, Java and Go. Without this it declares an ordinary
+            // function nothing calls, and the program silently does nothing --
+            // the worst failure mode for someone who has written C before.
+            if f.name == "main" {
+                return Err(Diag::new(
+                    f.span,
+                    "there is no `main`: statements at the top level are the program",
+                ));
+            }
             if self.sigs.contains_key(&f.name) {
                 return Err(Diag::new(
                     f.span,
@@ -201,20 +210,24 @@ impl Lowerer {
             );
         }
 
-        let Some(main) = p.funcs.iter().find(|f| f.name == "main") else {
-            return Err(Diag::new(Span::new(1, 1), "no `main` function"));
+        // There is no `main`. The statements written at the top level are
+        // the program, in source order, and they are lowered as the body of
+        // one synthesised function. Declarations are order-independent, so a
+        // function may be called above its own definition.
+        let entry = Func {
+            ret: Ty::Void,
+            name: "$main".to_string(),
+            tparams: Vec::new(),
+            params: Vec::new(),
+            body: p.toplevel.clone(),
+            span: Span::new(1, 1),
         };
-        if !main.params.is_empty() {
-            return Err(Diag::new(main.span, "`main` takes no parameters"));
-        }
-        if main.ret != Ty::Void {
-            return Err(Diag::new(main.span, "`main` must return `void`"));
-        }
 
         let mut funcs = Vec::new();
         for f in &p.funcs {
             funcs.push(self.lower_func(f)?);
         }
+        funcs.push(self.lower_func(&entry)?);
         Ok(ir::Module {
             funcs,
             strings: self.strings,
@@ -1392,7 +1405,8 @@ impl Lowerer {
         let rt_name = match name {
             "len" => "rt_len".to_string(),
             "concat" => "rt_concat".to_string(),
-            other => format!("fn_{other}"),
+            // The emitter escapes and prefixes; give it the raw name.
+            other => other.to_string(),
         };
 
         if ret == Ty::Void {

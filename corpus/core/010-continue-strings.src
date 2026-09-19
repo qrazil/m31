@@ -1,15 +1,14 @@
 // Same for `continue`: the jump back to the header leaves the body scope, so
 // each skipped iteration must still release what it allocated.
-void main() {
-    int i = 0;
-    int n = 0;
-    while (i < 5) {
-        i = i + 1;
-        str tmp = concat("ab", "cd");
-        if (i % 2 == 0) {
-            continue;
-        }
-        n = n + len(tmp);
+
+int i = 0;
+int n = 0;
+while (i < 5) {
+    i = i + 1;
+    str tmp = concat("ab", "cd");
+    if (i % 2 == 0) {
+        continue;
     }
-    print(n);
+    n = n + len(tmp);
 }
+print(n);

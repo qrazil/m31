@@ -1,7 +1,6 @@
 // INT64_MIN / -1 is undefined behaviour in C and faults with SIGFPE on x86.
 // rt_idiv turns it into the same diagnosable trap as any other overflow.
-void main() {
-    int a = -9223372036854775807;
-    int b = a - 1;
-    print(b / -1);
-}
+
+int a = -9223372036854775807;
+int b = a - 1;
+print(b / -1);

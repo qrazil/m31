@@ -56,7 +56,7 @@ impl Mono {
         };
 
         let mut concrete_types = Vec::new();
-        for t in p.types {
+        for t in p.types.clone() {
             if t.tparams.is_empty() {
                 concrete_types.push(t);
             } else {
@@ -64,7 +64,7 @@ impl Mono {
             }
         }
         let mut concrete_funcs = Vec::new();
-        for f in p.funcs {
+        for f in p.funcs.clone() {
             if f.tparams.is_empty() {
                 concrete_funcs.push(f);
             } else {
@@ -84,6 +84,12 @@ impl Mono {
             m.out_funcs.push(f);
         }
 
+        // The top level is a function body in all but name.
+        m.env.clear();
+        m.env.push(HashMap::new());
+        let toplevel = m.subst_block(&p.toplevel, &empty)?;
+        m.env.clear();
+
         while let Some((name, args, span)) = m.queue.pop() {
             m.instantiate_func(&name, &args, span)?;
         }
@@ -91,6 +97,7 @@ impl Mono {
         Ok(Program {
             types: m.out_types,
             funcs: m.out_funcs,
+            toplevel,
             ty_exprs: m.out_exprs,
         })
     }

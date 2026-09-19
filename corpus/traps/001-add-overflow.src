@@ -4,7 +4,5 @@
 // a Go twin would print -9223372036854775808 and be confidently wrong about
 // us on purpose. See docs/ir-v0.md §3.
 
-void main() {
-    int a = 9223372036854775807;
-    print(a + 1);
-}
+int a = 9223372036854775807;
+print(a + 1);

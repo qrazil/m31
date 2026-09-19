@@ -36,17 +36,21 @@ int sum(Point p) {
     return p.x + p.y;
 }
 
-void main() {
-    const int scale = 3;
-    Point p = Point(x: 3, y: 4);
-    print(sum(p) * scale);
+// No `main`. Statements at the top level are the program, as in Python
+// or Oro; declarations are order-independent, so this could come first.
+const int scale = 3;
+Point p = Point(x: 3, y: 4);
+print(sum(p) * scale);
 
-    str s = concat("hel", "lo");
-    if (len(s) > 3) {
-        print(s);
-    }
+str s = concat("hel", "lo");
+if (len(s) > 3) {
+    print(s);
 }
 ```
+
+**There is no `main`** — statements at the top level are the program, in
+source order. Writing one is an error rather than a silent no-op, because it
+is a habit worth catching.
 
 Types `int`, `bool`, `str`, `void`, and user-defined `type` declarations.
 Functions, recursion, `if`/`else if`/`else`, `while` with `break`/`continue`,

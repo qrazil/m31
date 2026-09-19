@@ -7,7 +7,5 @@ int take(str s) {
     return len(s);
 }
 
-void main() {
-    str s = "hello";
-    print(take(s));
-}
+str s = "hello";
+print(take(s));

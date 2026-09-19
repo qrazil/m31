@@ -1,8 +1,7 @@
 // -INT64_MIN has no representable result. Unary minus lowers to 0 - x so it
 // shares the checked subtraction, which is what makes this trap rather than
 // silently returning INT64_MIN. See src/lower.rs, UnOp::Neg.
-void main() {
-    int a = -9223372036854775807;
-    int b = a - 1;
-    print(-b);
-}
+
+int a = -9223372036854775807;
+int b = a - 1;
+print(-b);

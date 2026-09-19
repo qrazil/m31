@@ -204,6 +204,9 @@ pub struct Func {
 pub struct Program {
     pub types: Vec<TypeDecl>,
     pub funcs: Vec<Func>,
+    /// Statements written at the top level, in source order. They become the
+    /// program's body -- there is no `main`.
+    pub toplevel: Vec<Stmt>,
     /// Interned type expressions; `Ty::User` indexes this.
     pub ty_exprs: Vec<TyExpr>,
 }

@@ -3,7 +3,5 @@ type Point {
     int y;
 }
 
-void main() {
-    Point p = Point(x: 1);
-    print(p.x);
-}
+Point p = Point(x: 1);
+print(p.x);
