@@ -308,3 +308,39 @@ fn loop_reassigning_a_str_releases_the_previous_value() {
         "expected a release inside the loop and one at scope end:\n{out}"
     );
 }
+
+#[test]
+fn break_releases_locals_declared_in_the_loop_body() {
+    // The break path leaves the body scope, so it must release what the body
+    // allocated -- release_to_depth exists for exactly this.
+    let out = ir(
+        "void main() { int i = 0; while (i < 3) { str t = concat(\"a\",\"b\"); if (len(t) == 2) { break; } i = i + 1; } print(i); }",
+    );
+    // One release on the break path, one at the normal end of the iteration.
+    assert!(
+        out.matches("rc_dec").count() >= 2,
+        "break must release body-scope locals:\n{out}"
+    );
+}
+
+#[test]
+fn break_and_continue_outside_a_loop_are_rejected() {
+    assert!(err("void main() { break; }").contains("`break` outside a loop"));
+    assert!(err("void main() { continue; }").contains("`continue` outside a loop"));
+}
+
+#[test]
+fn break_makes_the_exit_block_a_merge_point() {
+    // Without break the exit needs no parameters. With it, the exit merges the
+    // header's values with the break site's, so it must take parameters.
+    let out =
+        ir("void main() { int i = 0; int f = 0; while (i < 9) { if (i > 3) { f = i; break; } i = i + 1; } print(f); }");
+    let exit_has_params = out
+        .lines()
+        .filter(|l| l.starts_with("block") && l.contains("(v") && l.ends_with("):"))
+        .count();
+    assert!(
+        exit_has_params >= 2,
+        "expected both a parameterised header and a parameterised exit:\n{out}"
+    );
+}

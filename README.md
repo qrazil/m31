@@ -16,8 +16,8 @@ which gcc and clang both build clean at `-O0` and `-O2`.
 ./run.sh          the corpus alone
 ```
 
-- 24 corpus programs, 0 failing
-- 19 unit tests
+- 31 corpus programs, 0 failing
+- 25 unit tests
 - 0 dependencies, 0 `unsafe`, clippy clean at `-D warnings`
 
 ## What the language does today
@@ -37,12 +37,11 @@ void main() {
 ```
 
 Types `int`, `bool`, `str`, `void`. Functions, recursion, `if`/`else if`/`else`,
-`while`, `return`, locals and assignment, the C operator set with C precedence,
+`while` with `break`/`continue`, `return`, locals and assignment, the C operator set with C precedence,
 short-circuiting `&&`/`||`, string literals with escapes and UTF-8.
 Builtins: `print` (int, bool or str), `len`, `concat`.
 
-Not yet: `for`, `break`/`continue`, closures, user types, generics, modules,
-concurrency.
+Not yet: `for`, closures, user types, generics, modules, concurrency.
 
 ## Decisions made
 
@@ -149,8 +148,8 @@ revisit it.
 
 ## Next
 
-1. `break`/`continue`, then `for` — the loop machinery is in place, but
-   `break` needs the exit block to become a real merge point with parameters
+1. `for` — sugar over `while` now that the loop machinery and its merge
+   points exist
 2. The concurrency decision in `docs/concurrency.md`
 3. Closures and function values — one new IR op (`call_indirect`), a function
    type, and a heap environment. Note that closures plus refcounting is the

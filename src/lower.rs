@@ -58,6 +58,19 @@ struct Sig {
     ret: Ty,
 }
 
+/// One entry per enclosing `while`, so `break` and `continue` know where to
+/// jump and which values to carry.
+struct LoopCtx {
+    header: BlockId,
+    exit: BlockId,
+    /// Loop-carried variable names, in the same order as the header's and
+    /// exit's block parameters.
+    carried: Vec<String>,
+    /// Scope depth at the top of the loop body. `break`/`continue` must
+    /// release every scope inside this one before jumping.
+    depth: usize,
+}
+
 struct BlockBuf {
     id: BlockId,
     params: Vec<Value>,
@@ -77,6 +90,7 @@ pub struct Lowerer {
     owned: Vec<Vec<String>>,
     /// Owned temporaries produced while lowering the current statement.
     stmt_temps: Vec<Value>,
+    loops: Vec<LoopCtx>,
     ret_ty: Ty,
 }
 
@@ -100,6 +114,7 @@ impl Lowerer {
             scopes: Vec::new(),
             owned: Vec::new(),
             stmt_temps: Vec::new(),
+            loops: Vec::new(),
             ret_ty: Ty::Void,
         }
     }
@@ -220,6 +235,7 @@ impl Lowerer {
         self.blocks.clear();
         self.scopes.clear();
         self.owned.clear();
+        self.loops.clear();
         self.cur = 0;
         self.ret_ty = f.ret;
 
@@ -311,6 +327,22 @@ impl Lowerer {
     fn release_all(&mut self) {
         let all: Vec<Vec<String>> = self.owned.clone();
         for names in all.iter().rev() {
+            for name in names.iter().rev() {
+                if let Some((ty, v)) = self.lookup(name) {
+                    if ty.is_ref() {
+                        self.push(Inst::RcDec { val: v });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Release owned locals from the innermost scope down to (but not
+    /// including) `depth`. Used by `break` and `continue`, which leave every
+    /// scope inside the loop body.
+    fn release_to_depth(&mut self, depth: usize) {
+        let all: Vec<Vec<String>> = self.owned.clone();
+        for names in all.iter().skip(depth).rev() {
             for name in names.iter().rev() {
                 if let Some((ty, v)) = self.lookup(name) {
                     if ty.is_ref() {
@@ -478,6 +510,34 @@ impl Lowerer {
             } => self.lower_if(cond, then, els.as_deref(), *span),
 
             Stmt::While { cond, body, span } => self.lower_while(cond, body, *span),
+
+            Stmt::Break { span } => {
+                let Some(l) = self.loops.last() else {
+                    return Err(Diag::new(*span, "`break` outside a loop"));
+                };
+                let (exit, carried, depth) = (l.exit, l.carried.clone(), l.depth);
+                self.release_to_depth(depth);
+                let args: Vec<Value> = carried
+                    .iter()
+                    .map(|n| self.lookup(n).map(|x| x.1).unwrap())
+                    .collect();
+                self.terminate(Term::Jump { to: exit, args });
+                Ok(())
+            }
+
+            Stmt::Continue { span } => {
+                let Some(l) = self.loops.last() else {
+                    return Err(Diag::new(*span, "`continue` outside a loop"));
+                };
+                let (header, carried, depth) = (l.header, l.carried.clone(), l.depth);
+                self.release_to_depth(depth);
+                let args: Vec<Value> = carried
+                    .iter()
+                    .map(|n| self.lookup(n).map(|x| x.1).unwrap())
+                    .collect();
+                self.terminate(Term::Jump { to: header, args });
+                Ok(())
+            }
         }
     }
 
@@ -505,7 +565,11 @@ impl Lowerer {
                     }
                 }
                 Stmt::While { body, .. } => Self::assigned_names(body, out),
-                Stmt::Decl { .. } | Stmt::Return { .. } | Stmt::Eval { .. } => {}
+                Stmt::Decl { .. }
+                | Stmt::Return { .. }
+                | Stmt::Eval { .. }
+                | Stmt::Break { .. }
+                | Stmt::Continue { .. } => {}
             }
         }
     }
@@ -521,9 +585,11 @@ impl Lowerer {
     ///     jump header(x', ..)
     ///   exit:
     ///
-    /// `exit` needs no parameters of its own: the header dominates both body
-    /// and exit, so after the loop a variable simply resolves to the header
-    /// parameter, which already holds the merged value.
+    /// `exit` carries the same parameters as the header. Without `break` it
+    /// would not need any -- the header dominates exit, so a variable could
+    /// just resolve to the header parameter. But a `break` jumps to exit from
+    /// inside the body with *different* values, so exit is a genuine merge
+    /// point and needs its own parameters.
     fn lower_while(&mut self, cond: &Expr, body: &[Stmt], span: Span) -> Result<(), Diag> {
         let mut names = Vec::new();
         Self::assigned_names(body, &mut names);
@@ -557,6 +623,13 @@ impl Lowerer {
         let hi = self.blocks.iter().position(|b| b.id == header).unwrap();
         self.blocks[hi].params = header_params.clone();
 
+        let mut exit_params = Vec::new();
+        for (_, ty, _) in &carried {
+            exit_params.push(self.new_val(ir_ty(*ty)));
+        }
+        let ei = self.blocks.iter().position(|b| b.id == exit_bb).unwrap();
+        self.blocks[ei].params = exit_params.clone();
+
         self.switch_to(header);
         for ((name, _, _), p) in carried.iter().zip(header_params.iter()) {
             self.rebind(name, *p);
@@ -575,13 +648,23 @@ impl Lowerer {
             then: body_bb,
             then_args: Vec::new(),
             els: exit_bb,
-            els_args: Vec::new(),
+            els_args: header_params.clone(),
         });
 
         self.switch_to(body_bb);
         self.scopes.push(HashMap::new());
         self.owned.push(Vec::new());
-        self.lower_block(body)?;
+        self.loops.push(LoopCtx {
+            header,
+            exit: exit_bb,
+            carried: carried.iter().map(|(n, _, _)| n.clone()).collect(),
+            // The body scope we just pushed is the boundary: break and
+            // continue release everything inside it, and nothing outside.
+            depth: self.owned.len() - 1,
+        });
+        let lowered = self.lower_block(body);
+        self.loops.pop();
+        lowered?;
         let body_live = !self.terminated();
         if body_live {
             // Release anything the body declared, once per iteration.
@@ -602,8 +685,9 @@ impl Lowerer {
         }
 
         self.switch_to(exit_bb);
-        // After the loop, each carried variable is the header parameter.
-        for ((name, _, _), p) in carried.iter().zip(header_params.iter()) {
+        // After the loop, each carried variable is the exit parameter, which
+        // merges the header's value with whatever any `break` supplied.
+        for ((name, _, _), p) in carried.iter().zip(exit_params.iter()) {
             self.rebind(name, *p);
         }
         let _ = span;
@@ -1069,6 +1153,8 @@ fn stmt_span(s: &Stmt) -> Span {
         | Stmt::Return { span, .. }
         | Stmt::Eval { span, .. }
         | Stmt::While { span, .. }
+        | Stmt::Break { span, .. }
+        | Stmt::Continue { span, .. }
         | Stmt::If { span, .. } => *span,
     }
 }

@@ -77,8 +77,20 @@ fn emit_func(o: &mut String, f: &crate::ir::Func) {
     );
     writeln!(o, "{} {{", signature(f)).unwrap();
 
-    // Declare every value up front. Parameters are already declared by the
-    // signature, so skip those.
+    // A block parameter is allowed to be dead: a merge point carries every
+    // variable the arms disagree about, and nothing is obliged to read them
+    // afterwards. A loop that mutates `i` but only uses `found` after the
+    // loop produces exactly this. Mark those declarations so -Wunused-but-set
+    // stays meaningful for ordinary instruction results, where a dead value
+    // really would indicate a lowering bug.
+    let block_params: std::collections::BTreeSet<Value> = f
+        .blocks
+        .iter()
+        .flat_map(|b| b.params.iter().copied())
+        .collect();
+
+    // Declare every value up front. Function parameters are already declared
+    // by the signature, so skip those.
     let is_param = |v: Value| f.params.contains(&v);
     for (i, t) in f.types.iter().enumerate() {
         let v = Value(i as u32);
@@ -96,7 +108,12 @@ fn emit_func(o: &mut String, f: &crate::ir::Func) {
             IrTy::I1 => "false",
             IrTy::Ref => "NULL",
         };
-        writeln!(o, "    {name}{sep}{v} = {zero};").unwrap();
+        let attr = if block_params.contains(&v) {
+            "__attribute__((unused)) "
+        } else {
+            ""
+        };
+        writeln!(o, "    {attr}{name}{sep}{v} = {zero};").unwrap();
     }
     if f.types.len() > f.params.len() {
         o.push('\n');

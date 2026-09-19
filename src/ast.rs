@@ -117,6 +117,10 @@ pub enum Stmt {
     Return { value: Option<Expr>, span: Span },
     /// A call evaluated for effect.
     Eval { expr: Expr, span: Span },
+    /// `break;`
+    Break { span: Span },
+    /// `continue;`
+    Continue { span: Span },
     /// `while (cond) { .. }`
     While {
         cond: Expr,

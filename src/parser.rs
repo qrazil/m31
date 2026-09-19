@@ -218,6 +218,16 @@ impl Parser {
             return Ok(Stmt::Return { value, span });
         }
 
+        if self.eat(&Tok::KwBreak) {
+            self.expect(Tok::Semi)?;
+            return Ok(Stmt::Break { span });
+        }
+
+        if self.eat(&Tok::KwContinue) {
+            self.expect(Tok::Semi)?;
+            return Ok(Stmt::Continue { span });
+        }
+
         if self.eat(&Tok::KwWhile) {
             self.expect(Tok::LParen)?;
             let cond = self.parse_expr(0)?;

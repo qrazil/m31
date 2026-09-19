@@ -1,0 +1,16 @@
+// `break` leaves the loop body scope, so it must release anything declared
+// there before jumping. tmp is allocated every iteration and the break path
+// exits holding one; __rc_live=0 proves that path releases it too. This is
+// the case release_to_depth exists for.
+void main() {
+    int i = 0;
+    while (i < 10) {
+        str tmp = concat("x", "y");
+        if (len(tmp) == 2) {
+            print(tmp);
+            break;
+        }
+        i = i + 1;
+    }
+    print(i);
+}
