@@ -1,0 +1,1 @@
+corpus/errors/008-while-not-bool.src:3:12: type mismatch: expected bool, found int

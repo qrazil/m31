@@ -24,6 +24,7 @@ pub enum Tok {
     KwReturn,
     KwIf,
     KwElse,
+    KwWhile,
     KwTrue,
     KwFalse,
 
@@ -76,6 +77,7 @@ impl Tok {
             Tok::KwReturn => "return",
             Tok::KwIf => "if",
             Tok::KwElse => "else",
+            Tok::KwWhile => "while",
             Tok::KwTrue => "true",
             Tok::KwFalse => "false",
             Tok::LParen => "(",
@@ -302,6 +304,7 @@ impl<'a> Lexer<'a> {
             "return" => Tok::KwReturn,
             "if" => Tok::KwIf,
             "else" => Tok::KwElse,
+            "while" => Tok::KwWhile,
             "true" => Tok::KwTrue,
             "false" => Tok::KwFalse,
             _ => Tok::Ident(w.to_string()),

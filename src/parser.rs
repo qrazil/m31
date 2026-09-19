@@ -218,6 +218,14 @@ impl Parser {
             return Ok(Stmt::Return { value, span });
         }
 
+        if self.eat(&Tok::KwWhile) {
+            self.expect(Tok::LParen)?;
+            let cond = self.parse_expr(0)?;
+            self.expect(Tok::RParen)?;
+            let body = self.parse_block()?;
+            return Ok(Stmt::While { cond, body, span });
+        }
+
         if self.eat(&Tok::KwIf) {
             self.expect(Tok::LParen)?;
             let cond = self.parse_expr(0)?;

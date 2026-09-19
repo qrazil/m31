@@ -37,11 +37,12 @@ void main() {
 ```
 
 Types `int`, `bool`, `str`, `void`. Functions, recursion, `if`/`else if`/`else`,
-`return`, locals and assignment, the C operator set with C precedence,
+`while`, `return`, locals and assignment, the C operator set with C precedence,
 short-circuiting `&&`/`||`, string literals with escapes and UTF-8.
 Builtins: `print` (int, bool or str), `len`, `concat`.
 
-Not yet: loops, closures, user types, generics, modules, concurrency.
+Not yet: `for`, `break`/`continue`, closures, user types, generics, modules,
+concurrency.
 
 ## Decisions made
 
@@ -148,8 +149,8 @@ revisit it.
 
 ## Next
 
-1. Loops (`while`, then `for`) — needs SSA with back edges, which is the first
-   thing v0's acyclic shortcut does not cover
+1. `break`/`continue`, then `for` — the loop machinery is in place, but
+   `break` needs the exit block to become a real merge point with parameters
 2. The concurrency decision in `docs/concurrency.md`
 3. Closures and function values — one new IR op (`call_indirect`), a function
    type, and a heap environment. Note that closures plus refcounting is the

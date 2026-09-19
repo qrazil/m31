@@ -476,7 +476,138 @@ impl Lowerer {
                 els,
                 span,
             } => self.lower_if(cond, then, els.as_deref(), *span),
+
+            Stmt::While { cond, body, span } => self.lower_while(cond, body, *span),
         }
+    }
+
+    /// Collect the names a statement list assigns to, including inside
+    /// nested `if`/`while` bodies.
+    ///
+    /// Loops need this up front. An `if` can compare the two arms after
+    /// lowering them, but a loop header dominates its own body, so its block
+    /// parameters must exist *before* the body is lowered -- and we only know
+    /// which variables are loop-carried by looking. This is the cheap
+    /// alternative to incremental SSA construction with incomplete blocks,
+    /// and it is exact for the statements v0 has.
+    fn assigned_names(stmts: &[Stmt], out: &mut Vec<String>) {
+        for s in stmts {
+            match s {
+                Stmt::Assign { name, .. } => {
+                    if !out.contains(name) {
+                        out.push(name.clone());
+                    }
+                }
+                Stmt::If { then, els, .. } => {
+                    Self::assigned_names(then, out);
+                    if let Some(e) = els {
+                        Self::assigned_names(e, out);
+                    }
+                }
+                Stmt::While { body, .. } => Self::assigned_names(body, out),
+                Stmt::Decl { .. } | Stmt::Return { .. } | Stmt::Eval { .. } => {}
+            }
+        }
+    }
+
+    /// `while` lowering. This is the first construct with a back edge.
+    ///
+    ///     jump header(x0, ..)
+    ///   header(xh, ..):          <- loop-carried variables live here
+    ///     cond = ..
+    ///     brif cond, body, exit
+    ///   body:
+    ///     ..
+    ///     jump header(x', ..)
+    ///   exit:
+    ///
+    /// `exit` needs no parameters of its own: the header dominates both body
+    /// and exit, so after the loop a variable simply resolves to the header
+    /// parameter, which already holds the merged value.
+    fn lower_while(&mut self, cond: &Expr, body: &[Stmt], span: Span) -> Result<(), Diag> {
+        let mut names = Vec::new();
+        Self::assigned_names(body, &mut names);
+        // Only variables that exist in the enclosing scope are loop-carried;
+        // anything declared inside the body is fresh each iteration.
+        names.retain(|n| self.lookup(n).is_some());
+        names.sort();
+
+        let carried: Vec<(String, Ty, Value)> = names
+            .iter()
+            .map(|n| {
+                let (ty, v) = self.lookup(n).unwrap();
+                (n.clone(), ty, v)
+            })
+            .collect();
+
+        let header = self.new_block();
+        let body_bb = self.new_block();
+        let exit_bb = self.new_block();
+
+        let entry_args: Vec<Value> = carried.iter().map(|(_, _, v)| *v).collect();
+        self.terminate(Term::Jump {
+            to: header,
+            args: entry_args,
+        });
+
+        let mut header_params = Vec::new();
+        for (_, ty, _) in &carried {
+            header_params.push(self.new_val(ir_ty(*ty)));
+        }
+        let hi = self.blocks.iter().position(|b| b.id == header).unwrap();
+        self.blocks[hi].params = header_params.clone();
+
+        self.switch_to(header);
+        for ((name, _, _), p) in carried.iter().zip(header_params.iter()) {
+            self.rebind(name, *p);
+        }
+
+        let c = self.lower_expr(cond)?;
+        if c.ty != Ty::Bool {
+            return Err(Diag::new(
+                cond.span(),
+                format!("type mismatch: expected bool, found {}", c.ty.name()),
+            ));
+        }
+        self.flush_temps();
+        self.terminate(Term::Brif {
+            cond: c.val(),
+            then: body_bb,
+            then_args: Vec::new(),
+            els: exit_bb,
+            els_args: Vec::new(),
+        });
+
+        self.switch_to(body_bb);
+        self.scopes.push(HashMap::new());
+        self.owned.push(Vec::new());
+        self.lower_block(body)?;
+        let body_live = !self.terminated();
+        if body_live {
+            // Release anything the body declared, once per iteration.
+            self.release_scope();
+        }
+        self.scopes.pop();
+        self.owned.pop();
+
+        if body_live {
+            let back_args: Vec<Value> = carried
+                .iter()
+                .map(|(n, _, _)| self.lookup(n).map(|x| x.1).unwrap())
+                .collect();
+            self.terminate(Term::Jump {
+                to: header,
+                args: back_args,
+            });
+        }
+
+        self.switch_to(exit_bb);
+        // After the loop, each carried variable is the header parameter.
+        for ((name, _, _), p) in carried.iter().zip(header_params.iter()) {
+            self.rebind(name, *p);
+        }
+        let _ = span;
+        Ok(())
     }
 
     /// Structured `if` lowering with block parameters at the join.
@@ -937,6 +1068,7 @@ fn stmt_span(s: &Stmt) -> Span {
         | Stmt::Assign { span, .. }
         | Stmt::Return { span, .. }
         | Stmt::Eval { span, .. }
+        | Stmt::While { span, .. }
         | Stmt::If { span, .. } => *span,
     }
 }

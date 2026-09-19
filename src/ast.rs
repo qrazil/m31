@@ -117,6 +117,12 @@ pub enum Stmt {
     Return { value: Option<Expr>, span: Span },
     /// A call evaluated for effect.
     Eval { expr: Expr, span: Span },
+    /// `while (cond) { .. }`
+    While {
+        cond: Expr,
+        body: Vec<Stmt>,
+        span: Span,
+    },
     /// `if (cond) { .. } else { .. }`
     If {
         cond: Expr,

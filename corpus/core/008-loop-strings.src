@@ -1,0 +1,13 @@
+// Refcount stress. Each iteration allocates a new string and must release the
+// previous one, so __rc_live=0 at exit proves five intermediate allocations
+// were each freed exactly once. A leak here would be invisible in the output.
+void main() {
+    str s = "";
+    int i = 0;
+    while (i < 5) {
+        s = concat(s, "ab");
+        i = i + 1;
+    }
+    print(s);
+    print(len(s));
+}

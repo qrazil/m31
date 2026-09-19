@@ -254,3 +254,57 @@ fn str_cannot_be_compared_or_added() {
     assert!(err("void main() { str a = \"x\"; print(a + a); }").contains("cannot apply `+`"));
     assert!(err("void main() { str a = \"x\"; print(a == a); }").contains("cannot compare"));
 }
+
+// ---- lowering: loops --------------------------------------------------
+
+#[test]
+fn while_creates_a_header_with_loop_carried_parameters() {
+    // The header dominates its own body, so its parameters must exist before
+    // the body is lowered. Both i and total are carried.
+    let out = ir(
+        "void main() { int i = 0; int t = 0; while (i < 3) { t = t + i; i = i + 1; } print(t); }",
+    );
+    assert!(
+        out.contains("block1(v") && out.contains("jump block1("),
+        "expected a parameterised loop header with a back edge:\n{out}"
+    );
+    // Two carried variables means two header parameters.
+    let header = out
+        .lines()
+        .find(|l| l.starts_with("block1("))
+        .expect("no header line");
+    assert_eq!(
+        header.matches(',').count(),
+        1,
+        "expected exactly two header parameters, got: {header}"
+    );
+}
+
+#[test]
+fn loop_body_declarations_are_not_loop_carried() {
+    // `b` is declared inside the body, so it is fresh each iteration and must
+    // NOT become a header parameter.
+    let out =
+        ir("void main() { int a = 0; while (a < 3) { int b = a; a = a + b + 1; } print(a); }");
+    let header = out
+        .lines()
+        .find(|l| l.starts_with("block1("))
+        .expect("no header line");
+    assert!(
+        !header.contains(","),
+        "only `a` should be carried, got: {header}"
+    );
+}
+
+#[test]
+fn loop_reassigning_a_str_releases_the_previous_value() {
+    // Without the release, every iteration leaks. The corpus proves this at
+    // runtime via __rc_live; this proves the instruction is emitted at all.
+    let out = ir(
+        "void main() { str s = \"\"; int i = 0; while (i < 2) { s = concat(s, \"x\"); i = i + 1; } print(s); }",
+    );
+    assert!(
+        out.matches("rc_dec").count() >= 2,
+        "expected a release inside the loop and one at scope end:\n{out}"
+    );
+}
