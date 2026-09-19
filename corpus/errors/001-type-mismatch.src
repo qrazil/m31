@@ -1,4 +1,4 @@
 fn main() {
-    let a: Int = "not an int"
+    let a: int = "not an int"
     print(a)
 }

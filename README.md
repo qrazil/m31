@@ -16,6 +16,7 @@ which is correct — **the harness is commit #1, before the lexer.** The first
 
 | Decision | Choice | Note |
 |---|---|---|
+| `int` | **64-bit everywhere, traps on overflow** | Surface types are lowercase keywords (`int`, `bool`, `str`), as in Oro. The IR may represent `int` as `i32`/`i64`/`i128` as hardware suits, **provided observable behaviour is identical** — that makes width an optimisation needing no spec. What must not vary is the promise: arch-dependent `int` is the mistake C is still paying for, and it would make a freeze promise nothing. An arch-native width, if ever wanted, is a separate named type. |
 | Memory | refcount, **non-atomic** | Single-threaded v0. Atomic later is a lowering change — *provided* refcount ops stay IR-level and are never hand-inlined into the emitter. |
 | Errors | values, not unwinding | Needs nothing from the IR. Unwinding plus refcounts means every unwind path must decrement correctly; that bug class never fully closes. |
 | Generics | **monomorphisation**, implemented later | Deciding the strategy now means generics never touch the IR: instantiation happens in the frontend, so the IR only sees concrete types. Deferring the *decision* is what cost Go ten years. |
@@ -51,6 +52,11 @@ So:
   hold most of the corpus, because it scales without hand-auditing.
 - **`corpus/core/`** — only what Go cannot express: our own semantics, refcount
   behaviour, output formatting. Small, deliberate, every `.out` hand-checked.
+- **`corpus/traps/`** — programs that must abort at runtime, with their
+  expected trap message and exit 134. Overflow lives here rather than in
+  `twin/` because Go wraps: a Go twin would print `-9223372036854775808` and
+  be confidently wrong about us. The refcount invariant is not checked for
+  these, because `abort()` skips `atexit`.
 - **`corpus/errors/`** — programs that must be rejected, with their expected
   diagnostic. Diagnostics rot silently without this.
 

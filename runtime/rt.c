@@ -41,3 +41,16 @@ int64_t rt_len(Obj *o) {
 void rt_print(int64_t v) {
     printf("%lld\n", (long long)v);
 }
+
+/* Flush stdout first so anything the program already printed is not lost
+ * behind the trap message -- the corpus compares both streams. abort()
+ * gives a deterministic exit status of 134 across gcc and clang.
+ *
+ * Note that abort() skips atexit handlers, so a trapping program never
+ * prints __rc_live. run.sh therefore does not require the refcount
+ * invariant on corpus/traps/ programs. */
+_Noreturn void rt_trap(const char *msg) {
+    fflush(stdout);
+    fprintf(stderr, "trap: %s\n", msg);
+    abort();
+}

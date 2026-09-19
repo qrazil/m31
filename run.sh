@@ -130,6 +130,50 @@ for src in corpus/twin/*."$LANG_EXT"; do
   run_one "$src" "$(go run "$twin")" "twin/$(basename "$src")"
 done
 
+# --- traps: must abort at runtime, with the expected trap message -----------
+# abort() skips atexit, so a trapping program never prints __rc_live. The
+# refcount invariant is therefore not checked here, which is why these are a
+# separate category rather than a flavour of core/.
+for src in corpus/traps/*."$LANG_EXT"; do
+  [ -e "$src" ] || continue
+  label="traps/$(basename "$src")"
+  base=$(basename "$src" ".$LANG_EXT")
+  want=$(cat "${src%.$LANG_EXT}.trap")
+
+  if ! "$LANGC" --emit-c "$src" -o "$WORK/$base.c" 2>"$WORK/$base.diag"; then
+    fail_test "$label" "compile failed: $(head -1 "$WORK/$base.diag")"
+    continue
+  fi
+
+  trap_ok=1
+  for entry in "${CCS[@]}"; do
+    cc=${entry%%:*}
+    opt=${entry##*:}
+    bin="$WORK/$base.t.$cc$opt"
+    if ! "$cc" "$opt" -Wall -Wextra -DRC_DEBUG -I runtime \
+         -o "$bin" "$WORK/$base.c" runtime/rt.c 2>"$WORK/$base.tcc"; then
+      fail_test "$label [$cc $opt]" "C compiler rejected emitted code"
+      trap_ok=0; break
+    fi
+    if [ -s "$WORK/$base.tcc" ]; then
+      fail_test "$label [$cc $opt]" "emitted C produced warnings"
+      head -4 "$WORK/$base.tcc" | sed 's/^/      /'
+      trap_ok=0; break
+    fi
+    got=$("$bin" 2>&1 >/dev/null); rc=$?
+    if [ $rc -ne 134 ]; then
+      fail_test "$label [$cc $opt]" "expected abort (134), got exit $rc"
+      trap_ok=0; break
+    fi
+    if [ "$got" != "$want" ]; then
+      fail_test "$label [$cc $opt]" "wrong trap message"
+      diff <(echo "$want") <(echo "$got") | head -4 | sed 's/^/      /'
+      trap_ok=0; break
+    fi
+  done
+  [ $trap_ok -eq 1 ] && pass=$((pass + 1))
+done
+
 # --- errors: must fail to compile, with the expected diagnostic -------------
 for src in corpus/errors/*."$LANG_EXT"; do
   [ -e "$src" ] || continue

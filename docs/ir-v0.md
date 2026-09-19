@@ -37,18 +37,46 @@ once. Values are function-scoped (`v0`, `v1`, …); blocks are `block0`,
 
 ## 2. Types
 
-Three, and no more until something forces a fourth.
+Surface types are lowercase keywords, as in Oro. They are **not** the same
+thing as IR types, and keeping the two apart is deliberate.
 
-| Type | Meaning | C |
+| Surface | IR (today) | C |
 |---|---|---|
-| `i64` | 64-bit signed integer | `int64_t` |
-| `i1` | boolean | `bool` |
-| `ref` | pointer to a refcounted heap object | `Obj *` |
+| `int` | `i64` | `int64_t` |
+| `bool` | `i1` | `bool` |
+| `str` | `ref` | `Obj *` |
+
+Three IR types, and no more until something forces a fourth.
 
 **`ref` is the only managed type.** That is what makes the refcount pass
 mechanical rather than clever: it inserts `rc_inc`/`rc_dec` for `ref`-typed
 values and ignores everything else. No raw untyped pointer in v0 — you do not
 need one yet, and adding it later is additive.
+
+### 2.1 What `int` promises, and what the IR may do with it
+
+The IR is free to represent `int` as `i32`, `i64` or `i128` — narrowing where
+it can prove the range fits, widening for intermediates — **on one condition:
+observable behaviour must be identical.** Under that rule, width selection is
+an optimisation, it needs no spec, and it can arrive at any time.
+
+What must not vary is the surface promise. **`int` is 64-bit and traps on
+overflow, on every target.** Not "whatever the hardware likes."
+
+This distinction is worth being strict about, because the alternative is the
+one mistake C is still paying for. If `int` is arch-dependent:
+
+- the same program traps at different values on different machines, so the
+  language has no single meaning and a freeze promises nothing;
+- `corpus/core/*.out` becomes arch-dependent and the oracle stops being a
+  fixed target;
+- Go twins break, because Go's `int` is 64-bit on amd64/arm64 and 32-bit
+  elsewhere — the twin would be comparing against a moving target too.
+
+If an arch-native width is ever genuinely wanted, it should be a **separate
+named type** (Rust spells it `isize`, Go spells it `int` and regrets the
+collision), never a reinterpretation of `int`. Explicit `i32`/`i128` surface
+types are additive and can come later; they do not change anything here.
 
 ## 3. Instructions
 
@@ -66,13 +94,29 @@ Sixteen.
 
 | Op | Signature |
 |---|---|
-| `iadd a, b` | `(i64, i64) -> i64` |
-| `isub a, b` | `(i64, i64) -> i64` |
-| `imul a, b` | `(i64, i64) -> i64` |
+| `iadd a, b` | `(i64, i64) -> i64`, **traps on overflow** |
+| `isub a, b` | `(i64, i64) -> i64`, **traps on overflow** |
+| `imul a, b` | `(i64, i64) -> i64`, **traps on overflow** |
 | `icmp <cond> a, b` | `(i64, i64) -> i1`, `cond ∈ {eq ne lt le gt ge}` |
 
-Overflow behaviour is **not decided** and is deliberately not encoded here.
-See §8.
+**Overflow traps.** There is no wrapping variant — one way to do each thing.
+A `wrapping_add` can be added the day something needs it, and until then its
+absence is a feature.
+
+Lowered to `__builtin_add_overflow` and friends, which are gcc 5+ and
+clang 3.8+. The check is `static inline` in `rt.h` while `rt_trap` is
+out-of-line and `_Noreturn`, so the compiler treats the trap edge as cold
+and the hot path stays straight. Arithmetic is the hottest thing in the
+language; a call per add would be indefensible.
+
+Verified 2026-09-18: identical values and identical trap behaviour under gcc
+and clang at `-O0` and `-O2`, exit status 134, no warnings.
+
+**Consequence for the oracle:** Go wraps here, so an overflowing program
+cannot have a Go twin — the twin would print `-9223372036854775808` and be
+confidently wrong about us. Overflow cases live in `corpus/traps/` with an
+expected trap message instead. This is a clean split rather than a
+compromise, and overflow tests are rare.
 
 ### Control flow
 
@@ -259,12 +303,12 @@ exactly the kind of bug the `-O0` vs `-O2` differential will *not* catch.
 `corpus/core/002-refcount.src`:
 
 ```
-fn take(s: Str) -> Int {
+fn take(s: str) -> int {
     return len(s)
 }
 
 fn main() {
-    let s: Str = "hello"
+    let s: str = "hello"
     print(take(s))
 }
 ```
@@ -331,9 +375,8 @@ unsigned · arrays and indexing · modules · unwinding (errors are values)
 
 ## 9. Open questions
 
-1. **Integer overflow** — wrap, trap, or saturate? Affects whether `iadd`
-   needs a checked variant, and it is the first thing a Go twin will disagree
-   with us about. Decide before the corpus grows.
+1. ~~**Integer overflow**~~ — **settled 2026-09-18: `int` is 64-bit and
+   arithmetic traps.** See §2.1 and §3.
 2. **Where the refcount pass places `rc_dec`** — last use, or end of scope?
    Last-use frees earlier and is what you eventually want; end-of-scope is
    simpler and is what v0 does. Note that last-use placement interacts with
