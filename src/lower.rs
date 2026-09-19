@@ -31,11 +31,19 @@ struct Val {
 
 impl Val {
     fn new(v: Value, ty: Ty, owned: bool) -> Self {
-        Val { v: Some(v), ty, owned }
+        Val {
+            v: Some(v),
+            ty,
+            owned,
+        }
     }
 
     fn void() -> Self {
-        Val { v: None, ty: Ty::Void, owned: false }
+        Val {
+            v: None,
+            ty: Ty::Void,
+            owned: false,
+        }
     }
 
     /// The value. Every caller reaches this only after a type check that
@@ -109,11 +117,17 @@ impl Lowerer {
 
         for f in &p.funcs {
             if self.sigs.contains_key(&f.name) {
-                return Err(Diag::new(f.span, format!("`{}` is already defined", f.name)));
+                return Err(Diag::new(
+                    f.span,
+                    format!("`{}` is already defined", f.name),
+                ));
             }
             self.sigs.insert(
                 f.name.clone(),
-                Sig { params: f.params.iter().map(|p| p.ty).collect(), ret: f.ret },
+                Sig {
+                    params: f.params.iter().map(|p| p.ty).collect(),
+                    ret: f.ret,
+                },
             );
         }
 
@@ -131,7 +145,10 @@ impl Lowerer {
         for f in &p.funcs {
             funcs.push(self.lower_func(f)?);
         }
-        Ok(ir::Module { funcs, strings: self.strings })
+        Ok(ir::Module {
+            funcs,
+            strings: self.strings,
+        })
     }
 
     // ---- function scaffolding ----------------------------------------
@@ -144,16 +161,28 @@ impl Lowerer {
 
     fn new_block(&mut self) -> BlockId {
         let id = BlockId(self.blocks.len() as u32);
-        self.blocks.push(BlockBuf { id, params: Vec::new(), insts: Vec::new(), term: None });
+        self.blocks.push(BlockBuf {
+            id,
+            params: Vec::new(),
+            insts: Vec::new(),
+            term: None,
+        });
         id
     }
 
     fn switch_to(&mut self, b: BlockId) {
-        self.cur = self.blocks.iter().position(|x| x.id == b).expect("unknown block");
+        self.cur = self
+            .blocks
+            .iter()
+            .position(|x| x.id == b)
+            .expect("unknown block");
     }
 
     fn push(&mut self, i: Inst) {
-        debug_assert!(self.blocks[self.cur].term.is_none(), "instruction after terminator");
+        debug_assert!(
+            self.blocks[self.cur].term.is_none(),
+            "instruction after terminator"
+        );
         self.blocks[self.cur].insts.push(i);
     }
 
@@ -203,7 +232,10 @@ impl Lowerer {
             let v = self.new_val(ir_ty(p.ty));
             params.push(v);
             if scope.insert(p.name.clone(), (p.ty, v)).is_some() {
-                return Err(Diag::new(p.span, format!("duplicate parameter `{}`", p.name)));
+                return Err(Diag::new(
+                    p.span,
+                    format!("duplicate parameter `{}`", p.name),
+                ));
             }
         }
         self.blocks[self.cur].params = params.clone();
@@ -219,7 +251,11 @@ impl Lowerer {
             if f.ret != Ty::Void {
                 return Err(Diag::new(
                     f.span,
-                    format!("function `{}` must return a value of type {}", f.name, f.ret.name()),
+                    format!(
+                        "function `{}` must return a value of type {}",
+                        f.name,
+                        f.ret.name()
+                    ),
                 ));
             }
             self.release_all();
@@ -245,7 +281,11 @@ impl Lowerer {
         Ok(ir::Func {
             name: f.name.clone(),
             params,
-            ret: if f.ret == Ty::Void { None } else { Some(ir_ty(f.ret)) },
+            ret: if f.ret == Ty::Void {
+                None
+            } else {
+                Some(ir_ty(f.ret))
+            },
             blocks,
             types: self.types.clone(),
             entry,
@@ -304,12 +344,21 @@ impl Lowerer {
 
     fn lower_stmt(&mut self, s: &Stmt) -> Result<(), Diag> {
         match s {
-            Stmt::Decl { ty, name, init, span } => {
+            Stmt::Decl {
+                ty,
+                name,
+                init,
+                span,
+            } => {
                 let val = self.lower_expr(init)?;
                 if val.ty != *ty {
                     return Err(Diag::new(
                         init.span(),
-                        format!("type mismatch: expected {}, found {}", ty.name(), val.ty.name()),
+                        format!(
+                            "type mismatch: expected {}, found {}",
+                            ty.name(),
+                            val.ty.name()
+                        ),
                     ));
                 }
                 if self.scopes.last().unwrap().contains_key(name) {
@@ -326,7 +375,10 @@ impl Lowerer {
                     }
                     self.owned.last_mut().unwrap().push(name.clone());
                 }
-                self.scopes.last_mut().unwrap().insert(name.clone(), (*ty, val.val()));
+                self.scopes
+                    .last_mut()
+                    .unwrap()
+                    .insert(name.clone(), (*ty, val.val()));
                 self.flush_temps();
                 Ok(())
             }
@@ -339,7 +391,11 @@ impl Lowerer {
                 if val.ty != ty {
                     return Err(Diag::new(
                         value.span(),
-                        format!("type mismatch: expected {}, found {}", ty.name(), val.ty.name()),
+                        format!(
+                            "type mismatch: expected {}, found {}",
+                            ty.name(),
+                            val.ty.name()
+                        ),
                     ));
                 }
                 if ty.is_ref() {
@@ -371,7 +427,10 @@ impl Lowerer {
                     }
                     (Some(e), Ty::Void) => {
                         let _ = e;
-                        return Err(Diag::new(*span, "cannot return a value from a void function"));
+                        return Err(Diag::new(
+                            *span,
+                            "cannot return a value from a void function",
+                        ));
                     }
                     (Some(e), want) => {
                         let val = self.lower_expr(e)?;
@@ -396,20 +455,27 @@ impl Lowerer {
                         }
                         self.flush_temps();
                         self.release_all();
-                        self.terminate(Term::Ret { val: Some(val.val()) });
+                        self.terminate(Term::Ret {
+                            val: Some(val.val()),
+                        });
                     }
                 }
                 Ok(())
             }
 
-            Stmt::ExprStmt { expr, .. } => {
+            Stmt::Eval { expr, .. } => {
                 let val = self.lower_expr(expr)?;
                 let _ = val;
                 self.flush_temps();
                 Ok(())
             }
 
-            Stmt::If { cond, then, els, span } => self.lower_if(cond, then, els.as_deref(), *span),
+            Stmt::If {
+                cond,
+                then,
+                els,
+                span,
+            } => self.lower_if(cond, then, els.as_deref(), *span),
         }
     }
 
@@ -492,8 +558,16 @@ impl Lowerer {
         // Which variables do the two arms disagree about?
         let mut changed: Vec<(String, Ty)> = Vec::new();
         for (name, (ty, v0)) in &before {
-            let a = if then_live { after_then.get(name).map(|x| x.1) } else { None };
-            let b = if else_live { after_else.get(name).map(|x| x.1) } else { None };
+            let a = if then_live {
+                after_then.get(name).map(|x| x.1)
+            } else {
+                None
+            };
+            let b = if else_live {
+                after_else.get(name).map(|x| x.1)
+            } else {
+                None
+            };
             let differs = match (a, b) {
                 (Some(x), Some(y)) => x != y,
                 (Some(x), None) => x != *v0,
@@ -604,7 +678,12 @@ impl Lowerer {
                         let z = self.new_val(IrTy::I64);
                         self.push(Inst::IConst { dst: z, val: 0 });
                         let d = self.new_val(IrTy::I64);
-                        self.push(Inst::Arith { dst: d, op: ArithOp::Sub, lhs: z, rhs: a.val() });
+                        self.push(Inst::Arith {
+                            dst: d,
+                            op: ArithOp::Sub,
+                            lhs: z,
+                            rhs: a.val(),
+                        });
                         Ok(Val::new(d, Ty::Int, false))
                     }
                     UnOp::Not => {
@@ -615,7 +694,10 @@ impl Lowerer {
                             ));
                         }
                         let d = self.new_val(IrTy::I1);
-                        self.push(Inst::Not { dst: d, src: a.val() });
+                        self.push(Inst::Not {
+                            dst: d,
+                            src: a.val(),
+                        });
                         Ok(Val::new(d, Ty::Bool, false))
                     }
                 }
@@ -640,7 +722,10 @@ impl Lowerer {
             let rhs_bb = self.new_block();
             let join_bb = self.new_block();
             let short = self.new_val(IrTy::I1);
-            self.push(Inst::BConst { dst: short, val: op == Or });
+            self.push(Inst::BConst {
+                dst: short,
+                val: op == Or,
+            });
 
             if op == And {
                 self.terminate(Term::Brif {
@@ -670,7 +755,10 @@ impl Lowerer {
             }
             let rhs_end = self.blocks[self.cur].id;
             self.switch_to(rhs_end);
-            self.terminate(Term::Jump { to: join_bb, args: vec![b.val()] });
+            self.terminate(Term::Jump {
+                to: join_bb,
+                args: vec![b.val()],
+            });
 
             let p = self.new_val(IrTy::I1);
             let ji = self.blocks.iter().position(|x| x.id == join_bb).unwrap();
@@ -704,7 +792,12 @@ impl Lowerer {
                 ));
             }
             let d = self.new_val(IrTy::I64);
-            self.push(Inst::Arith { dst: d, op: aop, lhs: a.val(), rhs: b.val() });
+            self.push(Inst::Arith {
+                dst: d,
+                op: aop,
+                lhs: a.val(),
+                rhs: b.val(),
+            });
             return Ok(Val::new(d, Ty::Int, false));
         }
 
@@ -720,11 +813,7 @@ impl Lowerer {
         if a.ty != b.ty {
             return Err(Diag::new(
                 span,
-                format!(
-                    "cannot compare {} with {}",
-                    a.ty.name(),
-                    b.ty.name()
-                ),
+                format!("cannot compare {} with {}", a.ty.name(), b.ty.name()),
             ));
         }
         if a.ty != Ty::Int && a.ty != Ty::Bool {
@@ -737,7 +826,12 @@ impl Lowerer {
             return Err(Diag::new(span, "bool supports only `==` and `!=`"));
         }
         let d = self.new_val(IrTy::I1);
-        self.push(Inst::ICmp { dst: d, cmp, lhs: a.val(), rhs: b.val() });
+        self.push(Inst::ICmp {
+            dst: d,
+            cmp,
+            lhs: a.val(),
+            rhs: b.val(),
+        });
         Ok(Val::new(d, Ty::Bool, false))
     }
 
@@ -761,7 +855,11 @@ impl Lowerer {
             if a.owned {
                 self.stmt_temps.push(a.val());
             }
-            self.push(Inst::Call { dst: None, func: f.to_string(), args: vec![a.val()] });
+            self.push(Inst::Call {
+                dst: None,
+                func: f.to_string(),
+                args: vec![a.val()],
+            });
             return Ok(Val::void());
         }
 
@@ -773,7 +871,11 @@ impl Lowerer {
         if args.len() != want.len() {
             return Err(Diag::new(
                 span,
-                format!("`{name}` takes {} argument(s), found {}", want.len(), args.len()),
+                format!(
+                    "`{name}` takes {} argument(s), found {}",
+                    want.len(),
+                    args.len()
+                ),
             ));
         }
 
@@ -783,7 +885,11 @@ impl Lowerer {
             if v.ty != *w {
                 return Err(Diag::new(
                     a.span(),
-                    format!("type mismatch: expected {}, found {}", w.name(), v.ty.name()),
+                    format!(
+                        "type mismatch: expected {}, found {}",
+                        w.name(),
+                        v.ty.name()
+                    ),
                 ));
             }
             // Arguments are borrowed (§5.1): no retain at the call site. An
@@ -802,11 +908,19 @@ impl Lowerer {
         };
 
         if ret == Ty::Void {
-            self.push(Inst::Call { dst: None, func: rt_name, args: vals });
+            self.push(Inst::Call {
+                dst: None,
+                func: rt_name,
+                args: vals,
+            });
             Ok(Val::void())
         } else {
             let d = self.new_val(ir_ty(ret));
-            self.push(Inst::Call { dst: Some(d), func: rt_name, args: vals });
+            self.push(Inst::Call {
+                dst: Some(d),
+                func: rt_name,
+                args: vals,
+            });
             // Returns are owned (§5.2).
             let owned = ret.is_ref();
             if owned {
@@ -822,7 +936,7 @@ fn stmt_span(s: &Stmt) -> Span {
         Stmt::Decl { span, .. }
         | Stmt::Assign { span, .. }
         | Stmt::Return { span, .. }
-        | Stmt::ExprStmt { span, .. }
+        | Stmt::Eval { span, .. }
         | Stmt::If { span, .. } => *span,
     }
 }

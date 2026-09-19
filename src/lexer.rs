@@ -119,15 +119,28 @@ pub struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     pub fn new(src: &'a str) -> Self {
-        Lexer { src: src.as_bytes(), pos: 0, line: 1, col: 1 }
+        Lexer {
+            src: src.as_bytes(),
+            pos: 0,
+            line: 1,
+            col: 1,
+        }
     }
 
     fn peek(&self) -> u8 {
-        if self.pos < self.src.len() { self.src[self.pos] } else { 0 }
+        if self.pos < self.src.len() {
+            self.src[self.pos]
+        } else {
+            0
+        }
     }
 
     fn peek2(&self) -> u8 {
-        if self.pos + 1 < self.src.len() { self.src[self.pos + 1] } else { 0 }
+        if self.pos + 1 < self.src.len() {
+            self.src[self.pos + 1]
+        } else {
+            0
+        }
     }
 
     fn bump(&mut self) -> u8 {
@@ -143,7 +156,10 @@ impl<'a> Lexer<'a> {
     }
 
     fn here(&self) -> Span {
-        Span { line: self.line, col: self.col }
+        Span {
+            line: self.line,
+            col: self.col,
+        }
     }
 
     /// Skip whitespace and both comment forms. Returns Err on an unterminated
@@ -184,7 +200,10 @@ impl<'a> Lexer<'a> {
             self.skip_trivia()?;
             let span = self.here();
             if self.pos >= self.src.len() {
-                out.push(Token { tok: Tok::Eof, span });
+                out.push(Token {
+                    tok: Tok::Eof,
+                    span,
+                });
                 return Ok(out);
             }
             let tok = self.next_tok(span)?;
@@ -291,9 +310,9 @@ impl<'a> Lexer<'a> {
 
     fn lex_str(&mut self, span: Span) -> Result<Tok, Diag> {
         self.bump(); // opening quote
-        // Accumulate BYTES, not chars. Pushing `byte as char` would decode
-        // each UTF-8 continuation byte as its own Latin-1 codepoint and
-        // silently mangle any non-ASCII literal.
+                     // Accumulate BYTES, not chars. Pushing `byte as char` would decode
+                     // each UTF-8 continuation byte as its own Latin-1 codepoint and
+                     // silently mangle any non-ASCII literal.
         let mut bytes: Vec<u8> = Vec::new();
         loop {
             if self.pos >= self.src.len() {

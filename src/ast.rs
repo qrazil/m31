@@ -101,15 +101,29 @@ impl Expr {
 #[derive(Debug, Clone)]
 pub enum Stmt {
     /// `int x = expr;`
-    Decl { ty: Ty, name: String, init: Expr, span: Span },
+    Decl {
+        ty: Ty,
+        name: String,
+        init: Expr,
+        span: Span,
+    },
     /// `x = expr;`
-    Assign { name: String, value: Expr, span: Span },
+    Assign {
+        name: String,
+        value: Expr,
+        span: Span,
+    },
     /// `return expr;` / `return;`
     Return { value: Option<Expr>, span: Span },
     /// A call evaluated for effect.
-    ExprStmt { expr: Expr, span: Span },
+    Eval { expr: Expr, span: Span },
     /// `if (cond) { .. } else { .. }`
-    If { cond: Expr, then: Vec<Stmt>, els: Option<Vec<Stmt>>, span: Span },
+    If {
+        cond: Expr,
+        then: Vec<Stmt>,
+        els: Option<Vec<Stmt>>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone)]

@@ -15,6 +15,9 @@ mod lexer;
 mod lower;
 mod parser;
 
+#[cfg(test)]
+mod tests;
+
 use std::process::ExitCode;
 
 fn usage() -> ExitCode {
@@ -60,7 +63,9 @@ fn main() -> ExitCode {
         i += 1;
     }
 
-    let (Some(mode), Some(path)) = (mode, input) else { return usage() };
+    let (Some(mode), Some(path)) = (mode, input) else {
+        return usage();
+    };
 
     let src = match std::fs::read_to_string(&path) {
         Ok(s) => s,

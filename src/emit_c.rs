@@ -57,7 +57,11 @@ fn signature(f: &crate::ir::Func) -> String {
         .iter()
         .map(|p| format!("{} {}", f.ty_of(*p).c_name(), p))
         .collect();
-    let plist = if params.is_empty() { "void".to_string() } else { params.join(", ") };
+    let plist = if params.is_empty() {
+        "void".to_string()
+    } else {
+        params.join(", ")
+    };
     // A space only where the type does not already end in `*`.
     let sep = if ret.ends_with('*') { "" } else { " " };
     format!("{ret}{sep}fn_{}({plist})", f.name)
@@ -179,7 +183,11 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, i: &Inst) {
 /// not being clever about.
 fn emit_jump(o: &mut String, f: &crate::ir::Func, to: crate::ir::BlockId, args: &[Value]) {
     let target = f.block(to);
-    debug_assert_eq!(target.params.len(), args.len(), "block argument arity mismatch");
+    debug_assert_eq!(
+        target.params.len(),
+        args.len(),
+        "block argument arity mismatch"
+    );
     if args.is_empty() {
         writeln!(o, "    goto b{};", to.0).unwrap();
         return;
@@ -201,7 +209,13 @@ fn emit_jump(o: &mut String, f: &crate::ir::Func, to: crate::ir::BlockId, args: 
 fn emit_term(o: &mut String, f: &crate::ir::Func, t: &Term) {
     match t {
         Term::Jump { to, args } => emit_jump(o, f, *to, args),
-        Term::Brif { cond, then, then_args, els, els_args } => {
+        Term::Brif {
+            cond,
+            then,
+            then_args,
+            els,
+            els_args,
+        } => {
             writeln!(o, "    if ({cond}) {{").unwrap();
             emit_jump(o, f, *then, then_args);
             writeln!(o, "    }} else {{").unwrap();

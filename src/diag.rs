@@ -26,13 +26,19 @@ pub struct Diag {
 
 impl Diag {
     pub fn new(span: Span, msg: impl Into<String>) -> Self {
-        Diag { span, msg: msg.into() }
+        Diag {
+            span,
+            msg: msg.into(),
+        }
     }
 
     /// Render with the path exactly as it was given on the command line, so
     /// the corpus can compare against a stable relative path.
     pub fn render(&self, path: &str) -> String {
-        format!("{}:{}:{}: {}", path, self.span.line, self.span.col, self.msg)
+        format!(
+            "{}:{}:{}: {}",
+            path, self.span.line, self.span.col, self.msg
+        )
     }
 }
 

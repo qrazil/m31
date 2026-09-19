@@ -80,7 +80,11 @@ impl Parser {
         } else {
             Err(Diag::new(
                 self.span(),
-                format!("expected `{}`, found {}", t.spelling(), self.peek().describe()),
+                format!(
+                    "expected `{}`, found {}",
+                    t.spelling(),
+                    self.peek().describe()
+                ),
             ))
         }
     }
@@ -147,7 +151,11 @@ impl Parser {
                     return Err(Diag::new(pspan, "a parameter cannot have type `void`"));
                 }
                 let (pname, _) = self.expect_ident()?;
-                params.push(Param { ty, name: pname, span: pspan });
+                params.push(Param {
+                    ty,
+                    name: pname,
+                    span: pspan,
+                });
                 if !self.eat(&Tok::Comma) {
                     break;
                 }
@@ -155,7 +163,13 @@ impl Parser {
         }
         self.expect(Tok::RParen)?;
         let body = self.parse_block()?;
-        Ok(Func { ret, name, params, body, span })
+        Ok(Func {
+            ret,
+            name,
+            params,
+            body,
+            span,
+        })
     }
 
     fn parse_block(&mut self) -> Result<Vec<Stmt>, Diag> {
@@ -186,7 +200,12 @@ impl Parser {
             self.expect(Tok::Assign)?;
             let init = self.parse_expr(0)?;
             self.expect(Tok::Semi)?;
-            return Ok(Stmt::Decl { ty, name, init, span });
+            return Ok(Stmt::Decl {
+                ty,
+                name,
+                init,
+                span,
+            });
         }
 
         if self.eat(&Tok::KwReturn) {
@@ -214,7 +233,12 @@ impl Parser {
             } else {
                 None
             };
-            return Ok(Stmt::If { cond, then, els, span });
+            return Ok(Stmt::If {
+                cond,
+                then,
+                els,
+                span,
+            });
         }
 
         // Assignment: IDENT `=`, distinguished from an expression statement by
@@ -229,15 +253,14 @@ impl Parser {
 
         let expr = self.parse_expr(0)?;
         self.expect(Tok::Semi)?;
-        Ok(Stmt::ExprStmt { expr, span })
+        Ok(Stmt::Eval { expr, span })
     }
 
     // ---- expressions (Pratt) -----------------------------------------
 
     fn parse_expr(&mut self, min_bp: u8) -> Result<Expr, Diag> {
         let mut lhs = self.parse_prefix()?;
-        loop {
-            let Some((op, bp)) = infix_bp(self.peek()) else { break };
+        while let Some((op, bp)) = infix_bp(self.peek()) {
             if bp < min_bp {
                 break;
             }

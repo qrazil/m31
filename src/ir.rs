@@ -97,13 +97,27 @@ pub enum Inst {
     /// `v = <string literal>`; immortal, see docs/ir-v0.md §5.4
     SConst { dst: Value, idx: u32 },
     /// `v = <op> a, b`  -- traps rather than wrapping
-    Arith { dst: Value, op: ArithOp, lhs: Value, rhs: Value },
+    Arith {
+        dst: Value,
+        op: ArithOp,
+        lhs: Value,
+        rhs: Value,
+    },
     /// `v = icmp <cond> a, b`
-    ICmp { dst: Value, cmp: Cmp, lhs: Value, rhs: Value },
+    ICmp {
+        dst: Value,
+        cmp: Cmp,
+        lhs: Value,
+        rhs: Value,
+    },
     /// `v = not a`
     Not { dst: Value, src: Value },
     /// `v? = call f(args)`
-    Call { dst: Option<Value>, func: String, args: Vec<Value> },
+    Call {
+        dst: Option<Value>,
+        func: String,
+        args: Vec<Value>,
+    },
     /// `rc_inc v`
     RcInc { val: Value },
     /// `rc_dec v`
@@ -112,9 +126,20 @@ pub enum Inst {
 
 #[derive(Debug, Clone)]
 pub enum Term {
-    Jump { to: BlockId, args: Vec<Value> },
-    Brif { cond: Value, then: BlockId, then_args: Vec<Value>, els: BlockId, els_args: Vec<Value> },
-    Ret { val: Option<Value> },
+    Jump {
+        to: BlockId,
+        args: Vec<Value>,
+    },
+    Brif {
+        cond: Value,
+        then: BlockId,
+        then_args: Vec<Value>,
+        els: BlockId,
+        els_args: Vec<Value>,
+    },
+    Ret {
+        val: Option<Value>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -142,7 +167,10 @@ impl Func {
     }
 
     pub fn block(&self, id: BlockId) -> &Block {
-        self.blocks.iter().find(|b| b.id == id).expect("dangling block id")
+        self.blocks
+            .iter()
+            .find(|b| b.id == id)
+            .expect("dangling block id")
     }
 }
 
@@ -203,7 +231,10 @@ impl fmt::Display for Func {
 }
 
 fn args(vs: &[Value]) -> String {
-    vs.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ")
+    vs.iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn show_inst(i: &Inst) -> String {
@@ -238,9 +269,23 @@ fn show_term(t: &Term) -> String {
     match t {
         Term::Jump { to, args: a } if a.is_empty() => format!("jump {to}"),
         Term::Jump { to, args: a } => format!("jump {to}({})", args(a)),
-        Term::Brif { cond, then, then_args, els, els_args } => {
-            let ta = if then_args.is_empty() { String::new() } else { format!("({})", args(then_args)) };
-            let ea = if els_args.is_empty() { String::new() } else { format!("({})", args(els_args)) };
+        Term::Brif {
+            cond,
+            then,
+            then_args,
+            els,
+            els_args,
+        } => {
+            let ta = if then_args.is_empty() {
+                String::new()
+            } else {
+                format!("({})", args(then_args))
+            };
+            let ea = if els_args.is_empty() {
+                String::new()
+            } else {
+                format!("({})", args(els_args))
+            };
             format!("brif {cond}, {then}{ta}, {els}{ea}")
         }
         Term::Ret { val: Some(v) } => format!("ret {v}"),
