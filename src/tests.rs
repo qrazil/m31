@@ -344,3 +344,100 @@ fn break_makes_the_exit_block_a_merge_point() {
         "expected both a parameterised header and a parameterised exit:\n{out}"
     );
 }
+
+// ---- user types -------------------------------------------------------
+
+#[test]
+fn a_type_with_no_references_needs_no_drop() {
+    // rc_dec checks drop for NULL, so a type holding no references pays a
+    // predictable branch instead of a call.
+    let out = ir("type P { int x; }\nvoid main() { P p = P(x: 1); print(p.x); }");
+    assert!(
+        out.contains("alloc type0"),
+        "expected an allocation:\n{out}"
+    );
+}
+
+#[test]
+fn construction_retains_a_borrowed_field_but_not_an_owned_one() {
+    // concat returns +1 and is handed straight over; a local is borrowed and
+    // must be retained, because the object now holds a reference too.
+    let owned =
+        ir("type B { str s; }\nvoid main() { B b = B(s: concat(\"a\",\"b\")); print(b.s); }");
+    assert_eq!(
+        owned.matches("rc_inc").count(),
+        0,
+        "an owned value must be moved into the field:\n{owned}"
+    );
+
+    let borrowed =
+        ir("type B { str s; }\nvoid main() { str t = \"x\"; B b = B(s: t); print(b.s); }");
+    assert!(
+        borrowed.contains("rc_inc"),
+        "a borrowed value must be retained when stored:\n{borrowed}"
+    );
+}
+
+#[test]
+fn assigning_a_reference_field_releases_the_old_value() {
+    // Load old, retain new, store, release old -- in that order, so
+    // `p.f = p.f;` cannot free what it is assigning.
+    let out = ir(
+        "type B { str s; }\nvoid main() { B b = B(s: \"a\"); b.s = concat(\"c\",\"d\"); print(b.s); }",
+    );
+    // Compare against the LAST store, not the first: the first store belongs
+    // to the construction above, which legitimately precedes any load.
+    let lines: Vec<&str> = out.lines().collect();
+    let load = lines
+        .iter()
+        .position(|l| l.contains("load"))
+        .expect("must read the old value");
+    let last_store = lines
+        .iter()
+        .rposition(|l| l.contains("store"))
+        .expect("must store the new one");
+    assert!(
+        load < last_store,
+        "old value must be read before the assigning store:\n{out}"
+    );
+    assert!(
+        out.matches("rc_dec").count() >= 2,
+        "old field value and the object itself must both be released:\n{out}"
+    );
+}
+
+#[test]
+fn field_reads_are_borrowed() {
+    // Reading a field does not take a reference: the object holds the +1.
+    let out = ir("type B { str s; }\nvoid main() { B b = B(s: \"a\"); print(b.s); }");
+    // One release for b at scope end, and nothing extra for the read.
+    assert_eq!(
+        out.matches("rc_dec").count(),
+        1,
+        "a field read must not add refcount traffic:\n{out}"
+    );
+}
+
+#[test]
+fn const_locals_reject_assignment() {
+    assert!(err("void main() { const int x = 1; x = 2; print(x); }")
+        .contains("cannot assign to const `x`"));
+}
+
+#[test]
+fn type_errors_on_user_types_are_reported() {
+    assert!(
+        err("type P { int x; }\nvoid main() { P p = P(x: \"s\"); print(p.x); }")
+            .contains("field `x` is int, found str")
+    );
+    assert!(
+        err("type P { int x; }\nvoid main() { P p = P(); print(p.x); }")
+            .contains("missing field `x`")
+    );
+    assert!(
+        err("type P { int x; }\nvoid main() { P p = P(x: 1, x: 2); print(p.x); }")
+            .contains("given twice")
+    );
+    assert!(err("type P { int x; } type P { int y; }\nvoid main() { }").contains("already defined"));
+    assert!(err("void main() { int i = 1; print(i.x); }").contains("has no fields"));
+}

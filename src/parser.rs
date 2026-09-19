@@ -14,6 +14,10 @@ use crate::lexer::{Tok, Token};
 pub struct Parser {
     toks: Vec<Token>,
     pos: usize,
+    /// Declared type names, in declaration order; the index is the `Ty::User`
+    /// id. Collected in a pre-pass so a type can be used before it is
+    /// declared and so `IDENT IDENT` is decidable with two tokens.
+    type_names: Vec<String>,
 }
 
 /// Binding powers. Higher binds tighter. Mirrors C's precedence for the
@@ -41,7 +45,38 @@ const UNARY_BP: u8 = 7;
 
 impl Parser {
     pub fn new(toks: Vec<Token>) -> Self {
-        Parser { toks, pos: 0 }
+        // Pre-pass: every `type IDENT` in the stream. This is what makes a
+        // type-first grammar decidable without C's lexer hack -- the parser
+        // knows the type names before it starts, so `Point p` is a
+        // declaration and `foo p` is an error, not an ambiguity.
+        let mut type_names = Vec::new();
+        for w in toks.windows(2) {
+            if w[0].tok == Tok::KwType {
+                if let Tok::Ident(n) = &w[1].tok {
+                    type_names.push(n.clone());
+                }
+            }
+        }
+        Parser {
+            toks,
+            pos: 0,
+            type_names,
+        }
+    }
+
+    fn user_ty(&self, name: &str) -> Option<Ty> {
+        self.type_names
+            .iter()
+            .position(|n| n == name)
+            .map(|i| Ty::User(i as u32))
+    }
+
+    /// Is the token at `n` the start of a type?
+    fn is_ty_at(&self, n: usize) -> bool {
+        match self.peek_at(n) {
+            Tok::Ident(name) => self.user_ty(name).is_some(),
+            t => Self::ty_of(t).is_some(),
+        }
     }
 
     fn peek(&self) -> &Tok {
@@ -100,6 +135,12 @@ impl Parser {
     }
 
     fn expect_ty(&mut self) -> Result<Ty, Diag> {
+        if let Tok::Ident(name) = self.peek().clone() {
+            if let Some(t) = self.user_ty(&name) {
+                self.bump();
+                return Ok(t);
+            }
+        }
         match Self::ty_of(self.peek()) {
             Some(t) => {
                 self.bump();
@@ -130,10 +171,42 @@ impl Parser {
 
     pub fn parse_program(&mut self) -> Result<Program, Diag> {
         let mut funcs = Vec::new();
+        let mut types = Vec::new();
         while self.peek() != &Tok::Eof {
-            funcs.push(self.parse_func()?);
+            if self.peek() == &Tok::KwType {
+                types.push(self.parse_type_decl()?);
+            } else {
+                funcs.push(self.parse_func()?);
+            }
         }
-        Ok(Program { funcs })
+        Ok(Program { types, funcs })
+    }
+
+    fn parse_type_decl(&mut self) -> Result<TypeDecl, Diag> {
+        let span = self.span();
+        self.expect(Tok::KwType)?;
+        let (name, _) = self.expect_ident()?;
+        self.expect(Tok::LBrace)?;
+        let mut fields = Vec::new();
+        while self.peek() != &Tok::RBrace {
+            if self.peek() == &Tok::Eof {
+                return Err(Diag::new(self.span(), "expected `}`, found end of file"));
+            }
+            let fspan = self.span();
+            let ty = self.expect_ty()?;
+            if ty == Ty::Void {
+                return Err(Diag::new(fspan, "a field cannot have type `void`"));
+            }
+            let (fname, _) = self.expect_ident()?;
+            self.expect(Tok::Semi)?;
+            fields.push(Param {
+                ty,
+                name: fname,
+                span: fspan,
+            });
+        }
+        self.expect(Tok::RBrace)?;
+        Ok(TypeDecl { name, fields, span })
     }
 
     fn parse_func(&mut self) -> Result<Func, Diag> {
@@ -190,9 +263,19 @@ impl Parser {
     fn parse_stmt(&mut self) -> Result<Stmt, Diag> {
         let span = self.span();
 
-        // Declaration: a type keyword at statement position, never anything else.
-        if let Some(ty) = Self::ty_of(self.peek()) {
-            self.bump();
+        // Declaration. Three spellings, all decidable with two tokens:
+        //   const <ty> x = ..    a type keyword or type name after `const`
+        //   int x = ..           a type keyword at statement position
+        //   Point p = ..         a known type NAME followed by an identifier
+        let is_const = self.peek() == &Tok::KwConst;
+        let is_decl = is_const
+            || Self::ty_of(self.peek()).is_some()
+            || (self.is_ty_at(0) && matches!(self.peek_at(1), Tok::Ident(_)));
+        if is_decl {
+            if is_const {
+                self.bump();
+            }
+            let ty = self.expect_ty()?;
             if ty == Ty::Void {
                 return Err(Diag::new(span, "a variable cannot have type `void`"));
             }
@@ -204,6 +287,7 @@ impl Parser {
                 ty,
                 name,
                 init,
+                is_const,
                 span,
             });
         }
@@ -259,19 +343,26 @@ impl Parser {
             });
         }
 
-        // Assignment: IDENT `=`, distinguished from an expression statement by
-        // one token of lookahead.
-        if matches!(self.peek(), Tok::Ident(_)) && self.peek_at(1) == &Tok::Assign {
-            let (name, _) = self.expect_ident()?;
-            self.expect(Tok::Assign)?;
+        // Otherwise: parse an expression, then look for `=`. Doing it this
+        // way rather than with lookahead means `x` and `o.f` and any future
+        // lvalue form all take the same path.
+        let lhs = self.parse_expr(0)?;
+        if self.eat(&Tok::Assign) {
             let value = self.parse_expr(0)?;
             self.expect(Tok::Semi)?;
-            return Ok(Stmt::Assign { name, value, span });
+            return match lhs {
+                Expr::Var(name, _) => Ok(Stmt::Assign { name, value, span }),
+                Expr::Field(obj, field, _) => Ok(Stmt::SetField {
+                    obj: *obj,
+                    field,
+                    value,
+                    span,
+                }),
+                other => Err(Diag::new(other.span(), "cannot assign to this expression")),
+            };
         }
-
-        let expr = self.parse_expr(0)?;
         self.expect(Tok::Semi)?;
-        Ok(Stmt::Eval { expr, span })
+        Ok(Stmt::Eval { expr: lhs, span })
     }
 
     // ---- expressions (Pratt) -----------------------------------------
@@ -292,7 +383,23 @@ impl Parser {
         Ok(lhs)
     }
 
+    /// Postfix chain: `.field` for now.
+    fn parse_postfix(&mut self, mut e: Expr) -> Result<Expr, Diag> {
+        while self.peek() == &Tok::Dot {
+            let span = self.span();
+            self.bump();
+            let (name, _) = self.expect_ident()?;
+            e = Expr::Field(Box::new(e), name, span);
+        }
+        Ok(e)
+    }
+
     fn parse_prefix(&mut self) -> Result<Expr, Diag> {
+        let e = self.parse_atom()?;
+        self.parse_postfix(e)
+    }
+
+    fn parse_atom(&mut self) -> Result<Expr, Diag> {
         let span = self.span();
         match self.peek().clone() {
             Tok::Minus => {
@@ -326,6 +433,25 @@ impl Parser {
                 let e = self.parse_expr(0)?;
                 self.expect(Tok::RParen)?;
                 Ok(e)
+            }
+            Tok::Ident(name) if self.user_ty(&name).is_some() => {
+                // Construction: always by field name, so reordering fields in
+                // the declaration cannot silently transpose arguments.
+                self.bump();
+                self.expect(Tok::LParen)?;
+                let mut args = Vec::new();
+                if self.peek() != &Tok::RParen {
+                    loop {
+                        let (f, _) = self.expect_ident()?;
+                        self.expect(Tok::Colon)?;
+                        args.push((f, self.parse_expr(0)?));
+                        if !self.eat(&Tok::Comma) {
+                            break;
+                        }
+                    }
+                }
+                self.expect(Tok::RParen)?;
+                Ok(Expr::New(name, args, span))
             }
             Tok::Ident(name) => {
                 self.bump();

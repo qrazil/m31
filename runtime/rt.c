@@ -10,9 +10,6 @@
  *
  * Measured 2026-09-18: separate TU is clean under gcc and clang at -O0 and
  * -O2 with -Wall -Wextra; -flto reintroduces the warning.
- *
- * If LTO ever becomes worth having, the alternative is to drop immortality
- * and heap-allocate literals once at startup, so no static Obj exists.
  */
 #include "rt.h"
 #include "rc_debug.h"
@@ -31,34 +28,49 @@ void rc_dec(Obj *o) {
     if (o->rc == RC_IMMORTAL) return;
     RC_ASSERT(o->rc > 0, "decrement below zero");
     if (--o->rc == 0) {
+        /* Release what this object holds before releasing the object. A type
+         * with no reference-typed fields has no drop function at all, so the
+         * common case is one predictable branch, not a call. */
+        if (o->drop != NULL) {
+            o->drop(o);
+        }
         RC_TRACK_FREE();
         free(o);
     }
 }
 
+Obj *rt_alloc(size_t size, DropFn drop) {
+    Obj *o = malloc(size);
+    if (o == NULL) rt_trap("out of memory");
+    o->rc = 1;
+    o->drop = drop;
+    RC_TRACK_ALLOC();
+    return o;
+}
+
 int64_t rt_len(Obj *o) {
-    return o->len;
+    return ((Str *)o)->len;
 }
 
 Obj *rt_concat(Obj *a, Obj *b) {
+    const Str *x = (const Str *)a;
+    const Str *y = (const Str *)b;
+
     int64_t n;
-    if (__builtin_add_overflow(a->len, b->len, &n)) rt_trap("string too long");
+    if (__builtin_add_overflow(x->len, y->len, &n)) rt_trap("string too long");
 
     /* One block: header, then bytes, then a NUL so the data is also a valid
-     * C string for printing. */
-    Obj *o = malloc(sizeof(Obj) + (size_t)n + 1);
-    if (o == NULL) rt_trap("out of memory");
+     * C string. Strings hold no references, so no drop function. */
+    Str *s = (Str *)rt_alloc(sizeof(Str) + (size_t)n + 1, NULL);
 
-    char *buf = (char *)(o + 1);
-    memcpy(buf, a->data, (size_t)a->len);
-    memcpy(buf + a->len, b->data, (size_t)b->len);
+    char *buf = (char *)(s + 1);
+    memcpy(buf, x->data, (size_t)x->len);
+    memcpy(buf + x->len, y->data, (size_t)y->len);
     buf[n] = '\0';
 
-    o->rc = 1;
-    o->len = n;
-    o->data = buf;
-    RC_TRACK_ALLOC();
-    return o;
+    s->len = n;
+    s->data = buf;
+    return (Obj *)s;
 }
 
 void rt_print(int64_t v) {
@@ -70,9 +82,10 @@ void rt_print_bool(bool v) {
 }
 
 void rt_print_str(Obj *o) {
+    const Str *s = (const Str *)o;
     /* fwrite rather than puts: the string may contain NUL bytes, and len is
      * authoritative. */
-    fwrite(o->data, 1, (size_t)o->len, stdout);
+    fwrite(s->data, 1, (size_t)s->len, stdout);
     putchar('\n');
 }
 

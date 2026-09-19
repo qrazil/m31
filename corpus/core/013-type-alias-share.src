@@ -1,0 +1,18 @@
+// Assignment aliases rather than copies, which is the whole point of
+// reference types. Both names see the mutation, and the object is freed once.
+type Counter {
+    int n;
+}
+
+void bump(Counter c) {
+    c.n = c.n + 1;
+}
+
+void main() {
+    Counter a = Counter(n: 0);
+    Counter b = a;
+    bump(a);
+    bump(b);
+    print(a.n);
+    print(b.n);
+}

@@ -16,32 +16,46 @@ which gcc and clang both build clean at `-O0` and `-O2`.
 ./run.sh          the corpus alone
 ```
 
-- 31 corpus programs, 0 failing
-- 25 unit tests
+- 37 corpus programs, 0 failing
+- 31 unit tests
 - 0 dependencies, 0 `unsafe`, clippy clean at `-D warnings`
 
 ## What the language does today
 
 ```c
-int take(str s) {
-    return len(s);
+type Point {
+    int x;
+    int y;
+}
+
+int sum(Point p) {
+    return p.x + p.y;
 }
 
 void main() {
+    const int scale = 3;
+    Point p = Point(x: 3, y: 4);
+    print(sum(p) * scale);
+
     str s = concat("hel", "lo");
-    if (len(s) > 3 && take(s) < 100) {
+    if (len(s) > 3) {
         print(s);
     }
-    print(6 * 7);
 }
 ```
 
-Types `int`, `bool`, `str`, `void`. Functions, recursion, `if`/`else if`/`else`,
-`while` with `break`/`continue`, `return`, locals and assignment, the C operator set with C precedence,
-short-circuiting `&&`/`||`, string literals with escapes and UTF-8.
-Builtins: `print` (int, bool or str), `len`, `concat`.
+Types `int`, `bool`, `str`, `void`, and user-defined `type` declarations.
+Functions, recursion, `if`/`else if`/`else`, `while` with `break`/`continue`,
+`return`, locals, `const`, assignment, field access and field assignment, the
+C operator set with C precedence, short-circuiting `&&`/`||`, string literals
+with escapes and UTF-8. Builtins: `print` (int, bool or str), `len`, `concat`.
 
-Not yet: `for`, closures, user types, generics, modules, concurrency.
+**User types are reference types** — refcounted, heap allocated, aliased by
+assignment, constructed by field name. A type holding no references gets no
+drop function at all; one that does gets a generated one, and `rc_dec` checks
+for `NULL` so the common case is a branch rather than a call.
+
+Not yet: `for`, closures, interfaces, generics, modules, concurrency.
 
 ## Decisions made
 

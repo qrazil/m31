@@ -1,0 +1,1 @@
+corpus/errors/010-const-assign.src:3:5: cannot assign to const `x`

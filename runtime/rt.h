@@ -19,18 +19,39 @@
 
 #define RC_IMMORTAL (-1)
 
-/* A heap string is allocated as one block: the header, then its bytes, with
- * `data` pointing just past the header. One malloc, one free, good locality.
- * A literal is static storage with RC_IMMORTAL and `data` pointing at a
- * string constant, so it is never freed. */
-typedef struct Obj {
-    long        rc;
+typedef struct Obj Obj;
+
+/* Called when a refcount reaches zero, BEFORE the block is freed, to release
+ * whatever references the object holds. NULL means "holds none, just free" --
+ * which is the common case and worth not paying a call for. Emitted code
+ * generates one of these per user type that has reference-typed fields. */
+typedef void (*DropFn)(Obj *);
+
+/* Every heap object starts with this. Keeping it to two words matters: a
+ * two-field user type is then four words total, and unboxing small objects
+ * later is a compiler optimisation rather than a layout change. */
+struct Obj {
+    long   rc;
+    DropFn drop;
+};
+
+/* A string is allocated as one block -- header, then bytes -- with `data`
+ * pointing just past the struct. One malloc, one free, good locality. A
+ * literal is static storage with RC_IMMORTAL and `data` pointing at a C
+ * string constant, so it is never freed and needs no drop. */
+typedef struct {
+    Obj         hdr;
     int64_t     len;
     const char *data;
-} Obj;
+} Str;
 
 void rc_inc(Obj *o);
 void rc_dec(Obj *o);
+
+/* Allocate `size` bytes of object, refcount 1, with the given drop function
+ * (NULL if the type holds no references). The header is initialised; the
+ * caller fills in the rest. */
+Obj *rt_alloc(size_t size, DropFn drop);
 
 int64_t rt_len(Obj *o);
 Obj    *rt_concat(Obj *a, Obj *b);

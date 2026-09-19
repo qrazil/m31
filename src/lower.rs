@@ -16,7 +16,11 @@ use std::collections::HashMap;
 
 use crate::ast::*;
 use crate::diag::{Diag, Span};
-use crate::ir::{self, ArithOp, Block, BlockId, Cmp, Inst, IrTy, Term, Value};
+use crate::ir::{self, ArithOp, Block, BlockId, Cmp, Inst, IrTy, Term, TypeDef, Value};
+
+/// A local binding: its type, its current SSA value, and whether it was
+/// declared `const`.
+type Binding = (Ty, Value, bool);
 
 /// A lowered expression, plus whether we are holding a +1 on it that somebody
 /// must release. Literals are immortal and variables are borrowed from their
@@ -80,12 +84,18 @@ struct BlockBuf {
 
 pub struct Lowerer {
     sigs: HashMap<String, Sig>,
+    /// User-defined types, indexed by `Ty::User` id. Distinct from `types`
+    /// below, which is the per-function map from Value to IrTy.
+    typedefs: Vec<TypeDef>,
+    /// Surface types of each type's fields, parallel to `typedefs`. The IR
+    /// only records `Ref`, which cannot distinguish `str` from a user type.
+    field_surface: Vec<Vec<Ty>>,
     strings: Vec<String>,
     // per-function state
     types: Vec<IrTy>,
     blocks: Vec<BlockBuf>,
     cur: usize,
-    scopes: Vec<HashMap<String, (Ty, Value)>>,
+    scopes: Vec<HashMap<String, Binding>>,
     /// Names, innermost scope last, whose locals hold a +1 to release on exit.
     owned: Vec<Vec<String>>,
     /// Owned temporaries produced while lowering the current statement.
@@ -94,11 +104,20 @@ pub struct Lowerer {
     ret_ty: Ty,
 }
 
+/// `ir_ty` for types that may be void, used where a mismatch is possible.
+fn ir_ty_opt(t: Ty) -> Option<IrTy> {
+    match t {
+        Ty::Void => None,
+        other => Some(ir_ty(other)),
+    }
+}
+
 fn ir_ty(t: Ty) -> IrTy {
     match t {
         Ty::Int => IrTy::I64,
         Ty::Bool => IrTy::I1,
         Ty::Str => IrTy::Ref,
+        Ty::User(_) => IrTy::Ref,
         Ty::Void => unreachable!("void is not a value type"),
     }
 }
@@ -107,6 +126,8 @@ impl Lowerer {
     pub fn new() -> Self {
         Lowerer {
             sigs: HashMap::new(),
+            typedefs: Vec::new(),
+            field_surface: Vec::new(),
             strings: Vec::new(),
             types: Vec::new(),
             blocks: Vec::new(),
@@ -129,6 +150,33 @@ impl Lowerer {
         // that is not user-visible overloading, which does not exist.
         self.builtin("len", vec![Ty::Str], Ty::Int);
         self.builtin("concat", vec![Ty::Str, Ty::Str], Ty::Str);
+
+        // Type table first: signatures and field types may refer to any type,
+        // including one declared later in the file.
+        for t in &p.types {
+            if self.typedefs.iter().any(|d| d.name == t.name) {
+                return Err(Diag::new(
+                    t.span,
+                    format!("type `{}` is already defined", t.name),
+                ));
+            }
+            let mut fields = Vec::new();
+            for f in &t.fields {
+                if fields.iter().any(|(n, _): &(String, IrTy)| *n == f.name) {
+                    return Err(Diag::new(
+                        f.span,
+                        format!("duplicate field `{}` in type `{}`", f.name, t.name),
+                    ));
+                }
+                fields.push((f.name.clone(), ir_ty(f.ty)));
+            }
+            self.typedefs.push(TypeDef {
+                name: t.name.clone(),
+                fields,
+            });
+            self.field_surface
+                .push(t.fields.iter().map(|f| f.ty).collect());
+        }
 
         for f in &p.funcs {
             if self.sigs.contains_key(&f.name) {
@@ -163,6 +211,7 @@ impl Lowerer {
         Ok(ir::Module {
             funcs,
             strings: self.strings,
+            types: self.typedefs,
         })
     }
 
@@ -212,12 +261,25 @@ impl Lowerer {
     }
 
     fn lookup(&self, name: &str) -> Option<(Ty, Value)> {
+        self.binding(name).map(|(t, v, _)| (t, v))
+    }
+
+    fn binding(&self, name: &str) -> Option<Binding> {
         for s in self.scopes.iter().rev() {
             if let Some(x) = s.get(name) {
                 return Some(*x);
             }
         }
         None
+    }
+
+    /// A type's name, for diagnostics. `Ty::name()` cannot do this because it
+    /// has no access to the type table.
+    fn tyname(&self, t: Ty) -> String {
+        match t {
+            Ty::User(i) => self.typedefs[i as usize].name.clone(),
+            other => other.name().to_string(),
+        }
     }
 
     fn rebind(&mut self, name: &str, v: Value) {
@@ -228,6 +290,14 @@ impl Lowerer {
             }
         }
         unreachable!("rebind of unknown name");
+    }
+
+    fn field_of(&self, tid: u32, name: &str) -> Option<(u32, IrTy)> {
+        self.typedefs[tid as usize]
+            .fields
+            .iter()
+            .position(|(n, _)| n == name)
+            .map(|i| (i as u32, self.typedefs[tid as usize].fields[i].1))
     }
 
     fn lower_func(&mut self, f: &Func) -> Result<ir::Func, Diag> {
@@ -247,7 +317,7 @@ impl Lowerer {
         for p in &f.params {
             let v = self.new_val(ir_ty(p.ty));
             params.push(v);
-            if scope.insert(p.name.clone(), (p.ty, v)).is_some() {
+            if scope.insert(p.name.clone(), (p.ty, v, false)).is_some() {
                 return Err(Diag::new(
                     p.span,
                     format!("duplicate parameter `{}`", p.name),
@@ -380,6 +450,7 @@ impl Lowerer {
                 ty,
                 name,
                 init,
+                is_const,
                 span,
             } => {
                 let val = self.lower_expr(init)?;
@@ -410,15 +481,18 @@ impl Lowerer {
                 self.scopes
                     .last_mut()
                     .unwrap()
-                    .insert(name.clone(), (*ty, val.val()));
+                    .insert(name.clone(), (*ty, val.val(), *is_const));
                 self.flush_temps();
                 Ok(())
             }
 
             Stmt::Assign { name, value, span } => {
-                let Some((ty, old)) = self.lookup(name) else {
+                let Some((ty, old, is_const)) = self.binding(name) else {
                     return Err(Diag::new(*span, format!("unknown variable `{name}`")));
                 };
+                if is_const {
+                    return Err(Diag::new(*span, format!("cannot assign to const `{name}`")));
+                }
                 let val = self.lower_expr(value)?;
                 if val.ty != ty {
                     return Err(Diag::new(
@@ -511,6 +585,70 @@ impl Lowerer {
 
             Stmt::While { cond, body, span } => self.lower_while(cond, body, *span),
 
+            Stmt::SetField {
+                obj,
+                field,
+                value,
+                span,
+            } => {
+                let o = self.lower_expr(obj)?;
+                let Ty::User(tid) = o.ty else {
+                    return Err(Diag::new(
+                        obj.span(),
+                        format!("type {} has no fields", self.tyname(o.ty)),
+                    ));
+                };
+                let Some((idx, fty)) = self.field_of(tid, field) else {
+                    return Err(Diag::new(
+                        *span,
+                        format!("type `{}` has no field `{field}`", self.tyname(o.ty)),
+                    ));
+                };
+                let v = self.lower_expr(value)?;
+                if ir_ty_opt(v.ty) != Some(fty) {
+                    return Err(Diag::new(
+                        value.span(),
+                        format!(
+                            "type mismatch: field `{field}` is {}, found {}",
+                            self.field_tyname(tid, idx),
+                            self.tyname(v.ty)
+                        ),
+                    ));
+                }
+                // Retain the new value, then release the old -- in that order,
+                // so `p.f = p.f;` cannot free what it is assigning.
+                if fty == IrTy::Ref {
+                    let old = self.new_val(IrTy::Ref);
+                    self.push(Inst::LoadField {
+                        dst: old,
+                        obj: o.val(),
+                        tid,
+                        idx,
+                    });
+                    if v.owned {
+                        self.stmt_temps.retain(|t| *t != v.val());
+                    } else {
+                        self.push(Inst::RcInc { val: v.val() });
+                    }
+                    self.push(Inst::StoreField {
+                        obj: o.val(),
+                        tid,
+                        idx,
+                        val: v.val(),
+                    });
+                    self.push(Inst::RcDec { val: old });
+                } else {
+                    self.push(Inst::StoreField {
+                        obj: o.val(),
+                        tid,
+                        idx,
+                        val: v.val(),
+                    });
+                }
+                self.flush_temps();
+                Ok(())
+            }
+
             Stmt::Break { span } => {
                 let Some(l) = self.loops.last() else {
                     return Err(Diag::new(*span, "`break` outside a loop"));
@@ -569,7 +707,8 @@ impl Lowerer {
                 | Stmt::Return { .. }
                 | Stmt::Eval { .. }
                 | Stmt::Break { .. }
-                | Stmt::Continue { .. } => {}
+                | Stmt::Continue { .. }
+                | Stmt::SetField { .. } => {}
             }
         }
     }
@@ -772,7 +911,7 @@ impl Lowerer {
 
         // Which variables do the two arms disagree about?
         let mut changed: Vec<(String, Ty)> = Vec::new();
-        for (name, (ty, v0)) in &before {
+        for (name, (ty, v0, _)) in &before {
             let a = if then_live {
                 after_then.get(name).map(|x| x.1)
             } else {
@@ -829,7 +968,7 @@ impl Lowerer {
         Ok(())
     }
 
-    fn snapshot(&self) -> HashMap<String, (Ty, Value)> {
+    fn snapshot(&self) -> HashMap<String, Binding> {
         let mut out = HashMap::new();
         for s in &self.scopes {
             for (k, v) in s {
@@ -839,8 +978,8 @@ impl Lowerer {
         out
     }
 
-    fn restore(&mut self, snap: &HashMap<String, (Ty, Value)>) {
-        for (name, (_, v)) in snap {
+    fn restore(&mut self, snap: &HashMap<String, Binding>) {
+        for (name, (_, v, _)) in snap {
             if self.lookup(name).is_some() {
                 self.rebind(name, *v);
             }
@@ -919,6 +1058,34 @@ impl Lowerer {
             }
             Expr::Bin(op, l, r, span) => self.lower_bin(*op, l, r, *span),
             Expr::Call(name, args, span) => self.lower_call(name, args, *span),
+
+            Expr::Field(obj, field, span) => {
+                let o = self.lower_expr(obj)?;
+                let Ty::User(tid) = o.ty else {
+                    return Err(Diag::new(
+                        *span,
+                        format!("type {} has no fields", self.tyname(o.ty)),
+                    ));
+                };
+                let Some((idx, fty)) = self.field_of(tid, field) else {
+                    return Err(Diag::new(
+                        *span,
+                        format!("type `{}` has no field `{field}`", self.tyname(o.ty)),
+                    ));
+                };
+                let d = self.new_val(fty);
+                self.push(Inst::LoadField {
+                    dst: d,
+                    obj: o.val(),
+                    tid,
+                    idx,
+                });
+                // A field read is BORROWED from the object, exactly like a
+                // local: the object holds the +1, we do not.
+                Ok(Val::new(d, self.field_ty(tid, idx), false))
+            }
+
+            Expr::New(name, args, span) => self.lower_new(name, args, *span),
         }
     }
 
@@ -1050,6 +1217,81 @@ impl Lowerer {
         Ok(Val::new(d, Ty::Bool, false))
     }
 
+    /// The surface type of a field, recovered from the declaration.
+    fn field_ty(&self, tid: u32, idx: u32) -> Ty {
+        self.field_surface[tid as usize][idx as usize]
+    }
+
+    fn field_tyname(&self, tid: u32, idx: u32) -> String {
+        self.tyname(self.field_ty(tid, idx))
+    }
+
+    fn lower_new(&mut self, name: &str, args: &[(String, Expr)], span: Span) -> Result<Val, Diag> {
+        let Some(tid) = self.typedefs.iter().position(|t| t.name == name) else {
+            return Err(Diag::new(span, format!("unknown type `{name}`")));
+        };
+        let tid = tid as u32;
+        let nfields = self.typedefs[tid as usize].fields.len();
+
+        // Every field must be given exactly once. Construction is by name, so
+        // a missing field is a clear error rather than a silent zero.
+        let mut given: Vec<Option<Val>> = (0..nfields).map(|_| None).collect();
+        for (fname, e) in args {
+            let Some((idx, _)) = self.field_of(tid, fname) else {
+                return Err(Diag::new(
+                    e.span(),
+                    format!("type `{name}` has no field `{fname}`"),
+                ));
+            };
+            if given[idx as usize].is_some() {
+                return Err(Diag::new(e.span(), format!("field `{fname}` given twice")));
+            }
+            let v = self.lower_expr(e)?;
+            let want = self.field_ty(tid, idx);
+            if v.ty != want {
+                return Err(Diag::new(
+                    e.span(),
+                    format!(
+                        "type mismatch: field `{fname}` is {}, found {}",
+                        self.tyname(want),
+                        self.tyname(v.ty)
+                    ),
+                ));
+            }
+            given[idx as usize] = Some(v);
+        }
+        for (i, g) in given.iter().enumerate() {
+            if g.is_none() {
+                let fname = self.typedefs[tid as usize].fields[i].0.clone();
+                return Err(Diag::new(span, format!("missing field `{fname}`")));
+            }
+        }
+
+        let obj = self.new_val(IrTy::Ref);
+        self.push(Inst::Alloc { dst: obj, tid });
+        for (i, g) in given.into_iter().enumerate() {
+            let v = g.unwrap();
+            // The object takes a +1 on every reference field. An owned
+            // temporary is handed straight over; a borrowed one is retained.
+            if v.ty.is_ref() {
+                if v.owned {
+                    self.stmt_temps.retain(|t| *t != v.val());
+                } else {
+                    self.push(Inst::RcInc { val: v.val() });
+                }
+            }
+            self.push(Inst::StoreField {
+                obj,
+                tid,
+                idx: i as u32,
+                val: v.val(),
+            });
+        }
+        let ty = Ty::User(tid);
+        self.stmt_temps.push(obj);
+        Ok(Val::new(obj, ty, true))
+    }
+
     fn lower_call(&mut self, name: &str, args: &[Expr], span: Span) -> Result<Val, Diag> {
         // `print` accepts int, bool or str and selects the runtime helper from
         // the static argument type. Not user-visible overloading.
@@ -1066,6 +1308,15 @@ impl Lowerer {
                 Ty::Bool => "rt_print_bool",
                 Ty::Str => "rt_print_str",
                 Ty::Void => return Err(Diag::new(args[0].span(), "cannot print a void value")),
+                // No printing of user types until there is a way for a type
+                // to say how it prints. Better a clear refusal than an
+                // address.
+                Ty::User(_) => {
+                    return Err(Diag::new(
+                        args[0].span(),
+                        format!("cannot print a value of type `{}`", self.tyname(a.ty)),
+                    ))
+                }
             };
             if a.owned {
                 self.stmt_temps.push(a.val());
@@ -1155,6 +1406,7 @@ fn stmt_span(s: &Stmt) -> Span {
         | Stmt::While { span, .. }
         | Stmt::Break { span, .. }
         | Stmt::Continue { span, .. }
+        | Stmt::SetField { span, .. }
         | Stmt::If { span, .. } => *span,
     }
 }

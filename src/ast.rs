@@ -11,6 +11,8 @@ pub enum Ty {
     Bool,
     Str,
     Void,
+    /// A user-defined type, indexed into the program's type table.
+    User(u32),
 }
 
 impl Ty {
@@ -20,13 +22,16 @@ impl Ty {
             Ty::Bool => "bool",
             Ty::Str => "str",
             Ty::Void => "void",
+            // Named through the type table by the caller where a real name
+            // is needed; this fallback only appears in internal messages.
+            Ty::User(_) => "<type>",
         }
     }
 
     /// Whether values of this type are reference counted. Only `str` today;
     /// this is the single predicate the refcount pass consults.
     pub fn is_ref(self) -> bool {
-        matches!(self, Ty::Str)
+        matches!(self, Ty::Str | Ty::User(_))
     }
 }
 
@@ -73,6 +78,14 @@ pub enum UnOp {
     Not,
 }
 
+/// A user-defined type declaration.
+#[derive(Debug, Clone)]
+pub struct TypeDecl {
+    pub name: String,
+    pub fields: Vec<Param>,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone)]
 pub enum Expr {
     Int(i64, Span),
@@ -82,6 +95,11 @@ pub enum Expr {
     Bin(BinOp, Box<Expr>, Box<Expr>, Span),
     Un(UnOp, Box<Expr>, Span),
     Call(String, Vec<Expr>, Span),
+    /// `expr.field`
+    Field(Box<Expr>, String, Span),
+    /// `Point(x: 1, y: 2)` -- construction is always by field name, so a
+    /// field reordering in the declaration cannot silently transpose values.
+    New(String, Vec<(String, Expr)>, Span),
 }
 
 impl Expr {
@@ -93,23 +111,33 @@ impl Expr {
             | Expr::Var(_, s)
             | Expr::Bin(_, _, _, s)
             | Expr::Un(_, _, s)
-            | Expr::Call(_, _, s) => *s,
+            | Expr::Call(_, _, s)
+            | Expr::Field(_, _, s)
+            | Expr::New(_, _, s) => *s,
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum Stmt {
-    /// `int x = expr;`
+    /// `int x = expr;` / `const int x = expr;`
     Decl {
         ty: Ty,
         name: String,
         init: Expr,
+        is_const: bool,
         span: Span,
     },
     /// `x = expr;`
     Assign {
         name: String,
+        value: Expr,
+        span: Span,
+    },
+    /// `obj.field = expr;`
+    SetField {
+        obj: Expr,
+        field: String,
         value: Expr,
         span: Span,
     },
@@ -154,5 +182,6 @@ pub struct Func {
 
 #[derive(Debug, Clone)]
 pub struct Program {
+    pub types: Vec<TypeDecl>,
     pub funcs: Vec<Func>,
 }

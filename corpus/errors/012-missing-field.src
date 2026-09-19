@@ -1,0 +1,9 @@
+type Point {
+    int x;
+    int y;
+}
+
+void main() {
+    Point p = Point(x: 1);
+    print(p.x);
+}

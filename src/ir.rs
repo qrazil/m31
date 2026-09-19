@@ -88,6 +88,22 @@ impl ArithOp {
     }
 }
 
+/// A user-defined type's layout. The emitter turns each of these into a C
+/// struct and, if any field is a `ref`, a drop function that releases them.
+#[derive(Debug, Clone)]
+pub struct TypeDef {
+    pub name: String,
+    pub fields: Vec<(String, IrTy)>,
+}
+
+impl TypeDef {
+    /// Whether this type holds references, and therefore needs a drop
+    /// function. Types that hold none pay no call when freed.
+    pub fn needs_drop(&self) -> bool {
+        self.fields.iter().any(|(_, t)| *t == IrTy::Ref)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Inst {
     /// `v = <n>`
@@ -117,6 +133,27 @@ pub enum Inst {
         dst: Option<Value>,
         func: String,
         args: Vec<Value>,
+    },
+    /// `v = alloc <type>`; refcount 1, fields uninitialised. The lowering
+    /// always follows this with a store to every field.
+    Alloc { dst: Value, tid: u32 },
+    /// `v = load obj.<field>`
+    LoadField {
+        dst: Value,
+        obj: Value,
+        tid: u32,
+        idx: u32,
+    },
+    /// `store obj.<field>, v`
+    ///
+    /// Deliberately dumb: any retain or release the store implies is emitted
+    /// by the lowering as separate rc_inc/rc_dec instructions, so no backend
+    /// has to reason about ownership (docs/ir-v0.md §4).
+    StoreField {
+        obj: Value,
+        tid: u32,
+        idx: u32,
+        val: Value,
     },
     /// `rc_inc v`
     RcInc { val: Value },
@@ -179,12 +216,25 @@ pub struct Module {
     pub funcs: Vec<Func>,
     /// Interned string literals; `SConst.idx` indexes this.
     pub strings: Vec<String>,
+    /// User-defined types; `Alloc.tid` and the field instructions index this.
+    pub types: Vec<TypeDef>,
 }
 
 // ---- textual form, for --emit-ir and for debugging -----------------------
 
 impl fmt::Display for Module {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for t in &self.types {
+            let fs: Vec<String> = t
+                .fields
+                .iter()
+                .map(|(n, ty)| format!("{n}: {ty:?}"))
+                .collect();
+            writeln!(f, "type {} {{ {} }}", t.name, fs.join(", "))?;
+        }
+        if !self.types.is_empty() {
+            writeln!(f)?;
+        }
         for (i, s) in self.strings.iter().enumerate() {
             writeln!(f, "str{i} = {s:?}")?;
         }
@@ -260,6 +310,13 @@ fn show_inst(i: &Inst) -> String {
             Some(d) => format!("{d} = call {func}({})", args(a)),
             None => format!("call {func}({})", args(a)),
         },
+        Inst::Alloc { dst, tid } => format!("{dst} = alloc type{tid}"),
+        Inst::LoadField { dst, obj, tid, idx } => {
+            format!("{dst} = load {obj}.type{tid}[{idx}]")
+        }
+        Inst::StoreField { obj, tid, idx, val } => {
+            format!("store {obj}.type{tid}[{idx}], {val}")
+        }
         Inst::RcInc { val } => format!("rc_inc {val}"),
         Inst::RcDec { val } => format!("rc_dec {val}"),
     }

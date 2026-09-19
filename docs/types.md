@@ -1,6 +1,6 @@
 # The type system
 
-Status: **proposal.** §1–4 are the part concurrency forces and I would commit
+Status: **proposal; §5 and §7's `const` are now implemented.** §1–4 are the part concurrency forces and I would commit
 to them. §5 onward is a sketch with real forks left open — those are language
 design, not consequences, and they are yours.
 
@@ -122,8 +122,8 @@ runtime Swift pays and we do not.
 
 ## 5. User types — sketch
 
-**Proposal: all user-defined types are reference types, refcounted.** Like
-Java, not like Go or C.
+**Decided and implemented: all user-defined types are reference types,
+refcounted.** Like Java, not like Go or C.
 
 ```c
 type Point {
@@ -195,9 +195,8 @@ Two separate things, and they do not have to arrive together:
 2. **Error shape** (§6) — multiple returns now, or generics first.
 3. **Interfaces: structural or declared?** (§8)
 4. **Generics before or after 1.0?** — the decision, not the strategy.
-5. **Mutability**: is there a `const`, or is everything mutable? The move
-   checker does not need immutability, so this is free to decide later — but
-   it is cheaper to add `const` before the freeze than after.
+5. ~~**Mutability**~~ — decided: `const` exists, on locals. Assignment to a
+   const is a compile error. Const fields are not yet a thing.
 
 ## 10. Order of implementation
 
