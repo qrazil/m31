@@ -4,37 +4,73 @@ A statically typed, compiled, high-level language. Go altitude, not embedded.
 Refcounted, no GC. Small and opinionated, intended to freeze.
 
 The name is a placeholder held in one file. Run `./rename.sh <name>` when
-there is one; it rewrites `config.sh` and moves the corpus files together.
+there is one; it rewrites `config.sh` and moves the corpus files with it.
 
 ## Status
 
-Nothing is built yet. `./run.sh` fails because the compiler does not exist,
-which is correct — **the harness is commit #1, before the lexer.** The first
-`1 passed` is the walking-skeleton milestone.
+**The walking skeleton is green.** `langc` compiles the corpus language to C,
+which gcc and clang both build clean at `-O0` and `-O2`.
+
+```
+./gates.sh        build, test, clippy, fmt, no-deps, no-unsafe, corpus
+./run.sh          the corpus alone
+```
+
+- 24 corpus programs, 0 failing
+- 19 unit tests
+- 0 dependencies, 0 `unsafe`, clippy clean at `-D warnings`
+
+## What the language does today
+
+```c
+int take(str s) {
+    return len(s);
+}
+
+void main() {
+    str s = concat("hel", "lo");
+    if (len(s) > 3 && take(s) < 100) {
+        print(s);
+    }
+    print(6 * 7);
+}
+```
+
+Types `int`, `bool`, `str`, `void`. Functions, recursion, `if`/`else if`/`else`,
+`return`, locals and assignment, the C operator set with C precedence,
+short-circuiting `&&`/`||`, string literals with escapes and UTF-8.
+Builtins: `print` (int, bool or str), `len`, `concat`.
+
+Not yet: loops, closures, user types, generics, modules, concurrency.
 
 ## Decisions made
 
 | Decision | Choice | Note |
 |---|---|---|
-| `int` | **64-bit everywhere, traps on overflow** | Surface types are lowercase keywords (`int`, `bool`, `str`), as in Oro. The IR may represent `int` as `i32`/`i64`/`i128` as hardware suits, **provided observable behaviour is identical** — that makes width an optimisation needing no spec. What must not vary is the promise: arch-dependent `int` is the mistake C is still paying for, and it would make a freeze promise nothing. An arch-native width, if ever wanted, is a separate named type. |
-| Memory | refcount, **non-atomic** | Single-threaded v0. Atomic later is a lowering change — *provided* refcount ops stay IR-level and are never hand-inlined into the emitter. |
+| Syntax | **type-first, semicolons, braces** (C/Java) | Parseable without C's lexer hack because type names are keywords and there are no pointer declarators. `IDENT IDENT` with two tokens of lookahead is how Java manages the same grammar. |
+| `int` | **64-bit everywhere, traps on overflow** | The IR may use i32/i64/i128 as hardware suits, *provided observable behaviour is identical* — that makes width an optimisation needing no spec. What must not vary is the promise. An arch-dependent `int` is the mistake C is still paying for, and would make a freeze promise nothing. |
+| Memory | refcount, **non-atomic** | Single-threaded today. Atomic later is a lowering change — *provided* refcount ops stay IR-level and are never hand-inlined into a backend. See `docs/concurrency.md`. |
+| Ownership | **arguments borrowed, returns owned (+1)** | Swift's default. Passing a value you already hold to a function that only reads it costs nothing. |
 | Errors | values, not unwinding | Needs nothing from the IR. Unwinding plus refcounts means every unwind path must decrement correctly; that bug class never fully closes. |
-| Generics | **monomorphisation**, implemented later | Deciding the strategy now means generics never touch the IR: instantiation happens in the frontend, so the IR only sees concrete types. Deferring the *decision* is what cost Go ten years. |
-| Backend | C emitter only, to start | Zero dependencies, `gcc` already present, every target including 32-bit, and it hands us two oracle layers for free. Cranelift becomes the second backend when cross-compilation gets real. |
-| Closures, concurrency, dynamic dispatch, cycles | deferred | None of them change the minimal IR. |
+| Generics | **monomorphisation**, implemented later | Deciding the strategy now keeps generics out of the IR entirely: instantiation happens in the frontend, so the IR only sees concrete types. Deferring the *decision* is what cost Go ten years. |
+| Backend | **C emitter only**, for now | Zero dependencies, `gcc` already present, every target including 32-bit, and it hands us two oracle layers free. Cranelift becomes the second backend when cross-compilation gets real or `gcc`-per-build gets painful. |
+| Concurrency | **open** | Researched, not decided. `docs/concurrency.md` has the evidence and a recommendation. |
 
 ## The oracle
 
 Four layers, all of which must agree. This matters more than usual: a new
-language has no external check on its own correctness, and three engines you
-wrote yourself would only ever prove they agree with each other.
+language has no external check on its own correctness, and three engines
+written by the same person would only ever prove they agree with each other.
 
 | Layer | Catches | Where |
 |---|---|---|
 | `gcc` vs `clang` | emitted UB — the C emitter's signature failure mode | `run.sh` matrix |
-| `-O0` vs `-O2` | optimiser-visible UB, our own bugs | `run.sh` matrix |
+| `-O0` vs `-O2` | optimiser-visible UB, and our own bugs | `run.sh` matrix |
 | Go twin programs | frontend and IR-pass bugs — real external truth | `corpus/twin/` |
 | refcount invariant | leaks, double-free, use-after-free | `runtime/rc_debug.h` |
+
+Plus `-Wall -Wextra` treated as failure: a warning in generated code is a
+defect in the emitter, and usually the early form of a UB bug.
 
 ### The rule that makes it an oracle
 
@@ -46,61 +82,78 @@ only checking that the compiler agrees with itself. Oro's README already names
 this trap: self-generated fixtures *"can never catch Oro being wrong from the
 start."*
 
-So:
-
-- **`corpus/twin/`** — anything computational. Truth comes from Go. This should
-  hold most of the corpus, because it scales without hand-auditing.
+- **`corpus/twin/`** — anything computational. Truth comes from Go. Should hold
+  most of the corpus, because it scales without hand-auditing.
 - **`corpus/core/`** — only what Go cannot express: our own semantics, refcount
   behaviour, output formatting. Small, deliberate, every `.out` hand-checked.
-- **`corpus/traps/`** — programs that must abort at runtime, with their
-  expected trap message and exit 134. Overflow lives here rather than in
-  `twin/` because Go wraps: a Go twin would print `-9223372036854775808` and
-  be confidently wrong about us. The refcount invariant is not checked for
-  these, because `abort()` skips `atexit`.
+- **`corpus/traps/`** — programs that must abort, with their trap message and
+  exit 134. Overflow lives here rather than `twin/` because Go wraps: a Go twin
+  would print `-9223372036854775808` and be confidently wrong about us. The
+  refcount invariant is not checked here, because `abort()` skips `atexit`.
 - **`corpus/errors/`** — programs that must be rejected, with their expected
   diagnostic. Diagnostics rot silently without this.
 
+The unit tests in `src/tests.rs` cover what the corpus structurally cannot
+see. A redundant retain/release pair, an unreachable block or a stray
+temporary all still produce correct output, so the refcount tests assert on
+the IR directly.
+
 ### Normative engine
 
-When two layers disagree and it is not obvious which is wrong, **the Go twin
-wins** for anything with a universal answer, and otherwise the hand-authored
-`.out` wins. Write the reasoning into the test rather than adjusting the
-expectation to match the compiler.
+When layers disagree and it is not obvious which is wrong, **the Go twin wins**
+for anything with a universal answer; otherwise the hand-authored `.out` wins.
+Write the reasoning into the test rather than adjusting the expectation to
+match the compiler.
 
 ## Layout
 
 ```
 config.sh              name, binary, extension — the only place they appear
 rename.sh              renames the language and moves the corpus with it
-run.sh                 the differential runner
-runtime/rc_debug.h     refcount invariant, compiled in under -DRC_DEBUG
-corpus/core/           *.src + hand-written *.out
-corpus/twin/           *.src + *.twin.go
-corpus/errors/         *.src + expected *.err
+gates.sh               every gate, run after every commit
+run.sh                 the differential corpus runner
+src/                   the compiler
+  lexer.rs             hand-written; type names are keywords
+  parser.rs            recursive descent + Pratt, C precedence
+  lower.rs             typecheck and lower in ONE pass, deliberately fused
+  ir.rs                docs/ir-v0.md made real
+  emit_c.rs            post-refcount IR to C
+  tests.rs             unit tests, mostly IR assertions
+runtime/
+  rt.h rt.c            the runtime — a SEPARATE translation unit, see §7.1
+  rc_debug.h           refcount invariant, compiled in under -DRC_DEBUG
+docs/
+  ir-v0.md             the IR specification
+  concurrency.md       concurrency and refcounting: evidence, open decision
+corpus/{core,twin,traps,errors}/
 ```
 
-## Running
+## Two rules that look like details and are not
 
-```sh
-./run.sh                    # uses ./target/debug/$LANG_BIN
-LANGC=/path/to/compiler ./run.sh
-```
+**The runtime is a separate translation unit, and `-flto` is off.** Either
+change lets the C compiler see a `free()` whose argument is a static string
+literal object, and it warns with `-Wfree-nonheap-object`. The `RC_IMMORTAL`
+guard makes that path unreachable at runtime, but the compiler cannot prove
+it. `gates.sh` enforces both. Full reasoning in `docs/ir-v0.md` §7.1.
 
-`clang` is optional — the matrix adapts to whatever is installed — but without
-it the UB differential is off, and that is the layer that catches the C
-emitter's worst failure mode.
+**Refcount operations stay IR-level.** No backend may inline `rc_inc`/`rc_dec`
+by hand. That is what keeps atomic-vs-non-atomic a lowering switch instead of
+a rewrite when concurrency lands.
 
 ## Provisional
 
-The syntax in the corpus and the diagnostic format in `corpus/errors/*.err`
-are both placeholders, written to make the walking skeleton concrete. Expect
-to rewrite them once the real decisions land.
+The diagnostic format in `corpus/errors/*.err` is observable surface — the
+corpus compares it byte for byte — but it has had no design pass. Expect to
+revisit it.
 
 ## Next
 
-1. Minimal IR: `i64 bool ptr` / `iconst iadd isub imul icmp` /
-   `block brif jump call ret` / `alloc load store rc_inc rc_dec`
-2. Lexer, parser, typechecker
-3. C emitter
-4. Walking skeleton green: `corpus/core/002-refcount.src` passing under all
-   four combinations with `__rc_live=0`
+1. Loops (`while`, then `for`) — needs SSA with back edges, which is the first
+   thing v0's acyclic shortcut does not cover
+2. The concurrency decision in `docs/concurrency.md`
+3. Closures and function values — one new IR op (`call_indirect`), a function
+   type, and a heap environment. Note that closures plus refcounting is the
+   most common source of reference cycles, which makes weak references a
+   near-term need rather than a deferred one
+4. User-defined types
+5. A C-emitter second look once there is enough language to benchmark
