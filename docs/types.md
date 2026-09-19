@@ -187,7 +187,8 @@ not control. That is what makes a stdlib compose without a type hierarchy.
 The known hazard is accidental satisfaction: a `Shape.draw()` silently
 satisfying a `Cowboy.draw()`. Rare, and the cost is accepted.
 
-**Generics arrive from day one**, monomorphised. The reason is not
+**Generics arrive from day one**, monomorphised. **Implemented** — see
+`src/mono.rs`. The reason is not
 convenience, it is that **containers are generic and we need `Chan<T>`
 immediately.** The alternative is special-casing channels, arrays and maps in
 the compiler so users cannot write their own — which is what Go did for ten
@@ -212,6 +213,34 @@ of their element type. `Chan<T>` only moves values. `List<T>` needs nothing.
 Only `Map<K,V>` needs anything of `K`, and that is an ordinary interface.
 Where an operation is genuinely needed, **pass a function** — which is already
 Oro's style for `sort`.
+
+### What is implemented, and what is not
+
+Working: generic types and generic functions, any arity, nested
+instantiations (`Box<Box<int>>`), and a worklist so an unused generic is never
+instantiated — and therefore never type-checked against types it was not
+written for.
+
+**Type arguments on function calls are inferred, never written.** There is no
+`f<int>(x)` syntax, deliberately: after a name that is *not* known to be a
+type, `<` is ambiguous with comparison. That is the problem that pushed Go to
+`f[int](x)` and Rust to the turbofish, and it is worth not inheriting. On a
+type it is unambiguous — `Box<int>` works — because the parser already knows
+every type name from its pre-pass.
+
+Inference unifies structurally, so `Box<T>` against `Box<int>` binds `T`. Its
+limit is that it reads argument types syntactically — literals,
+constructions, and locals with a written type — so a *nested* call is opaque:
+
+```c
+print(unwrap(unwrap(nested)));   // cannot infer
+Box<int> inner = unwrap(nested); // write the type once
+print(unwrap(inner));            // fine
+```
+
+Lifting that needs a real type checker running before monomorphisation, which
+is the right eventual architecture. Until then the diagnostic says exactly
+what to do rather than guessing.
 
 ### Dispatch lives in the object header
 

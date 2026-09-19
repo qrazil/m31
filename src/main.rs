@@ -13,6 +13,7 @@ mod emit_c;
 mod ir;
 mod lexer;
 mod lower;
+mod mono;
 mod parser;
 
 #[cfg(test)]
@@ -98,6 +99,9 @@ fn main() -> ExitCode {
 fn compile(src: &str, mode: &str) -> Result<String, diag::Diag> {
     let toks = lexer::Lexer::new(src).tokenize()?;
     let prog = parser::Parser::new(toks).parse_program()?;
+    // Generics are erased before lowering, which is why the IR has never
+    // needed to know about them. See src/mono.rs.
+    let prog = mono::Mono::run(prog)?;
     let module = lower::Lowerer::new().lower_program(&prog)?;
     Ok(match mode {
         "ir" => module.to_string(),

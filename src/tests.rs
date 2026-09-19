@@ -441,3 +441,72 @@ fn type_errors_on_user_types_are_reported() {
     assert!(err("type P { int x; } type P { int y; }\nvoid main() { }").contains("already defined"));
     assert!(err("void main() { int i = 1; print(i.x); }").contains("has no fields"));
 }
+
+// ---- generics ---------------------------------------------------------
+
+#[test]
+fn generics_are_erased_before_lowering() {
+    // The IR must contain no type parameters at all -- only instantiations.
+    let out = ir("type Box<T> { T value; }\nvoid main() { Box<int> b = Box<int>(value: 1); print(b.value); }");
+    assert!(
+        out.contains("type Box$int"),
+        "expected an instantiation:\n{out}"
+    );
+    assert!(
+        !out.contains("<T>"),
+        "no type parameter may survive:\n{out}"
+    );
+}
+
+#[test]
+fn each_distinct_instantiation_is_emitted_once() {
+    let out = ir(
+        "type Box<T> { T value; }\nvoid main() { Box<int> a = Box<int>(value: 1); Box<int> b = Box<int>(value: 2); Box<str> c = Box<str>(value: \"s\"); print(a.value + b.value); print(c.value); }",
+    );
+    assert_eq!(
+        out.matches("type Box$int").count(),
+        1,
+        "Box<int> must be instantiated exactly once:\n{out}"
+    );
+    assert!(out.contains("type Box$str"), "Box<str> missing:\n{out}");
+}
+
+#[test]
+fn an_unused_generic_is_never_instantiated() {
+    // Instantiation is a worklist over the reachable set, so an unused
+    // generic is never type-checked against types it was not written for.
+    let out = ir("type Unused<T> { T v; }\nvoid main() { print(1); }");
+    assert!(
+        !out.contains("Unused"),
+        "an unused generic must not be emitted:\n{out}"
+    );
+}
+
+#[test]
+fn generic_function_type_arguments_are_inferred() {
+    let out = ir(
+        "type Box<T> { T value; }\nT unwrap<T>(Box<T> b) { return b.value; }\nvoid main() { Box<int> b = Box<int>(value: 1); print(unwrap(b)); }",
+    );
+    assert!(
+        out.contains("func unwrap$int"),
+        "expected the inferred instantiation:\n{out}"
+    );
+}
+
+#[test]
+fn generic_misuse_is_rejected() {
+    assert!(
+        err("type Box<T> { T value; }\nvoid main() { Box<int,str> b = Box<int,str>(value: 1); print(b.value); }")
+            .contains("takes 1 type argument(s), found 2")
+    );
+    assert!(
+        err("type P { int x; }\nvoid main() { P<int> p = P<int>(x: 1); print(p.x); }")
+            .contains("is not generic")
+    );
+    // Inference cannot see through a nested call; the diagnostic says what to
+    // do rather than guessing.
+    assert!(err(
+        "type Box<T> { T value; }\nT unwrap<T>(Box<T> b) { return b.value; }\nvoid main() { Box<Box<int>> n = Box<Box<int>>(value: Box<int>(value: 1)); print(unwrap(unwrap(n))); }"
+    )
+    .contains("bind the argument to a local"));
+}

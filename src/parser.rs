@@ -14,10 +14,15 @@ use crate::lexer::{Tok, Token};
 pub struct Parser {
     toks: Vec<Token>,
     pos: usize,
-    /// Declared type names, in declaration order; the index is the `Ty::User`
-    /// id. Collected in a pre-pass so a type can be used before it is
-    /// declared and so `IDENT IDENT` is decidable with two tokens.
+    /// Names declared by `type`, from a pre-pass, so a type can be used
+    /// before it is declared and `IDENT IDENT` is decidable with two tokens.
     type_names: Vec<String>,
+    /// Type parameter names in scope while parsing a generic declaration.
+    /// `T` inside `type Box<T>` must parse as a type even though no `type T`
+    /// exists.
+    tparams: Vec<String>,
+    /// Interned type expressions; `Ty::User` indexes this.
+    ty_exprs: Vec<TyExpr>,
 }
 
 /// Binding powers. Higher binds tighter. Mirrors C's precedence for the
@@ -61,22 +66,67 @@ impl Parser {
             toks,
             pos: 0,
             type_names,
+            tparams: Vec::new(),
+            ty_exprs: Vec::new(),
         }
     }
 
-    fn user_ty(&self, name: &str) -> Option<Ty> {
-        self.type_names
-            .iter()
-            .position(|n| n == name)
-            .map(|i| Ty::User(i as u32))
+    /// Is this name usable as a type here -- a declared type, or a type
+    /// parameter currently in scope?
+    fn is_ty_name(&self, name: &str) -> bool {
+        self.type_names.iter().any(|n| n == name) || self.tparams.iter().any(|n| n == name)
+    }
+
+    fn intern(&mut self, name: String, args: Vec<Ty>) -> Ty {
+        let e = TyExpr { name, args };
+        match self.ty_exprs.iter().position(|x| *x == e) {
+            Some(i) => Ty::User(i as u32),
+            None => {
+                self.ty_exprs.push(e);
+                Ty::User((self.ty_exprs.len() - 1) as u32)
+            }
+        }
     }
 
     /// Is the token at `n` the start of a type?
     fn is_ty_at(&self, n: usize) -> bool {
         match self.peek_at(n) {
-            Tok::Ident(name) => self.user_ty(name).is_some(),
+            Tok::Ident(name) => self.is_ty_name(name),
             t => Self::ty_of(t).is_some(),
         }
+    }
+
+    /// Does a declaration start here? A type keyword always does. A type
+    /// NAME does when an identifier follows it, possibly past a `<...>`
+    /// argument list -- `Box<int> b` is a declaration, `Box<int>(..)` is a
+    /// construction.
+    fn decl_starts_here(&self) -> bool {
+        if Self::ty_of(self.peek()).is_some() {
+            return true;
+        }
+        if !self.is_ty_at(0) {
+            return false;
+        }
+        let mut i = 1;
+        if self.peek_at(1) == &Tok::Lt {
+            let mut depth = 0;
+            loop {
+                match self.peek_at(i) {
+                    Tok::Lt => depth += 1,
+                    Tok::Gt => {
+                        depth -= 1;
+                        if depth == 0 {
+                            i += 1;
+                            break;
+                        }
+                    }
+                    Tok::Eof => return false,
+                    _ => {}
+                }
+                i += 1;
+            }
+        }
+        matches!(self.peek_at(i), Tok::Ident(_))
     }
 
     fn peek(&self) -> &Tok {
@@ -136,9 +186,21 @@ impl Parser {
 
     fn expect_ty(&mut self) -> Result<Ty, Diag> {
         if let Tok::Ident(name) = self.peek().clone() {
-            if let Some(t) = self.user_ty(&name) {
+            if self.is_ty_name(&name) {
                 self.bump();
-                return Ok(t);
+                // Type arguments: `Box<int>`, `Pair<K, V>`.
+                let mut args = Vec::new();
+                if self.peek() == &Tok::Lt {
+                    self.bump();
+                    loop {
+                        args.push(self.expect_ty()?);
+                        if !self.eat(&Tok::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(Tok::Gt)?;
+                }
+                return Ok(self.intern(name, args));
             }
         }
         match Self::ty_of(self.peek()) {
@@ -179,13 +241,19 @@ impl Parser {
                 funcs.push(self.parse_func()?);
             }
         }
-        Ok(Program { types, funcs })
+        Ok(Program {
+            types,
+            funcs,
+            ty_exprs: std::mem::take(&mut self.ty_exprs),
+        })
     }
 
     fn parse_type_decl(&mut self) -> Result<TypeDecl, Diag> {
         let span = self.span();
         self.expect(Tok::KwType)?;
         let (name, _) = self.expect_ident()?;
+        let tparams = self.parse_tparams()?;
+        self.tparams = tparams.clone();
         self.expect(Tok::LBrace)?;
         let mut fields = Vec::new();
         while self.peek() != &Tok::RBrace {
@@ -206,13 +274,45 @@ impl Parser {
             });
         }
         self.expect(Tok::RBrace)?;
-        Ok(TypeDecl { name, fields, span })
+        self.tparams.clear();
+        Ok(TypeDecl {
+            name,
+            tparams,
+            fields,
+            span,
+        })
+    }
+
+    /// `<T>` / `<K, V>` after a declaration's name, or nothing.
+    fn parse_tparams(&mut self) -> Result<Vec<String>, Diag> {
+        let mut out = Vec::new();
+        if self.eat(&Tok::Lt) {
+            loop {
+                let (n, s) = self.expect_ident()?;
+                if out.contains(&n) {
+                    return Err(Diag::new(s, format!("duplicate type parameter `{n}`")));
+                }
+                out.push(n);
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+            self.expect(Tok::Gt)?;
+        }
+        Ok(out)
     }
 
     fn parse_func(&mut self) -> Result<Func, Diag> {
         let span = self.span();
+        // A generic function's return type may mention its own parameters, so
+        // the `<T>` list has to be read before the return type. It sits after
+        // the name in the source, so scan ahead for it first.
+        let tparams = self.scan_fn_tparams()?;
+        self.tparams = tparams.clone();
         let ret = self.expect_ty()?;
         let (name, _) = self.expect_ident()?;
+        let after = self.parse_tparams()?;
+        debug_assert_eq!(after, tparams);
         self.expect(Tok::LParen)?;
 
         let mut params = Vec::new();
@@ -236,13 +336,60 @@ impl Parser {
         }
         self.expect(Tok::RParen)?;
         let body = self.parse_block()?;
+        self.tparams.clear();
         Ok(Func {
             ret,
             name,
+            tparams,
             params,
             body,
             span,
         })
+    }
+
+    /// Look ahead past `<ret> <name>` for a `<T, ..>` list, without consuming
+    /// anything. Needed because a generic function's return type can mention
+    /// its own type parameters.
+    fn scan_fn_tparams(&mut self) -> Result<Vec<String>, Diag> {
+        let save = self.pos;
+        let mut out = Vec::new();
+        // Skip the return type: a keyword, or a name with optional arguments.
+        if matches!(self.peek(), Tok::Ident(_)) || Self::ty_of(self.peek()).is_some() {
+            self.bump();
+            if self.peek() == &Tok::Lt {
+                let mut depth = 0;
+                loop {
+                    match self.peek() {
+                        Tok::Lt => depth += 1,
+                        Tok::Gt => {
+                            depth -= 1;
+                            if depth == 0 {
+                                self.bump();
+                                break;
+                            }
+                        }
+                        Tok::Eof => break,
+                        _ => {}
+                    }
+                    self.bump();
+                }
+            }
+        }
+        if matches!(self.peek(), Tok::Ident(_)) {
+            self.bump();
+            if self.peek() == &Tok::Lt {
+                self.bump();
+                while let Tok::Ident(n) = self.peek().clone() {
+                    out.push(n);
+                    self.bump();
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+            }
+        }
+        self.pos = save;
+        Ok(out)
     }
 
     fn parse_block(&mut self) -> Result<Vec<Stmt>, Diag> {
@@ -268,9 +415,7 @@ impl Parser {
         //   int x = ..           a type keyword at statement position
         //   Point p = ..         a known type NAME followed by an identifier
         let is_const = self.peek() == &Tok::KwConst;
-        let is_decl = is_const
-            || Self::ty_of(self.peek()).is_some()
-            || (self.is_ty_at(0) && matches!(self.peek_at(1), Tok::Ident(_)));
+        let is_decl = is_const || self.decl_starts_here();
         if is_decl {
             if is_const {
                 self.bump();
@@ -434,10 +579,26 @@ impl Parser {
                 self.expect(Tok::RParen)?;
                 Ok(e)
             }
-            Tok::Ident(name) if self.user_ty(&name).is_some() => {
+            Tok::Ident(name) if self.is_ty_name(&name) => {
                 // Construction: always by field name, so reordering fields in
                 // the declaration cannot silently transpose arguments.
+                //
+                // `<` here is unambiguously type arguments, not a comparison,
+                // because `name` is known to be a type -- the same pre-pass
+                // that makes the type-first grammar decidable.
                 self.bump();
+                let mut targs = Vec::new();
+                if self.peek() == &Tok::Lt {
+                    self.bump();
+                    loop {
+                        targs.push(self.expect_ty()?);
+                        if !self.eat(&Tok::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(Tok::Gt)?;
+                }
+                let ty = self.intern(name, targs);
                 self.expect(Tok::LParen)?;
                 let mut args = Vec::new();
                 if self.peek() != &Tok::RParen {
@@ -451,7 +612,7 @@ impl Parser {
                     }
                 }
                 self.expect(Tok::RParen)?;
-                Ok(Expr::New(name, args, span))
+                Ok(Expr::New(ty, args, span))
             }
             Tok::Ident(name) => {
                 self.bump();

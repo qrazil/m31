@@ -16,8 +16,8 @@ which gcc and clang both build clean at `-O0` and `-O2`.
 ./run.sh          the corpus alone
 ```
 
-- 37 corpus programs, 0 failing
-- 31 unit tests
+- 41 corpus programs, 0 failing
+- 36 unit tests
 - 0 dependencies, 0 `unsafe`, clippy clean at `-D warnings`
 
 ## What the language does today
@@ -50,12 +50,17 @@ Functions, recursion, `if`/`else if`/`else`, `while` with `break`/`continue`,
 C operator set with C precedence, short-circuiting `&&`/`||`, string literals
 with escapes and UTF-8. Builtins: `print` (int, bool or str), `len`, `concat`.
 
+**Generics are monomorphised** and erased before lowering, which is why the
+IR has never needed to know about them. `Box<int>` becomes a plain type named
+`Box$int`. Type arguments are explicit on types and inferred on function
+calls.
+
 **User types are reference types** — refcounted, heap allocated, aliased by
 assignment, constructed by field name. A type holding no references gets no
 drop function at all; one that does gets a generated one, and `rc_dec` checks
 for `NULL` so the common case is a branch rather than a call.
 
-Not yet: `for`, closures, interfaces, generics, modules, concurrency.
+Not yet: `for`, closures, interfaces, modules, concurrency.
 
 ## Decisions made
 
@@ -129,6 +134,7 @@ run.sh                 the differential corpus runner
 src/                   the compiler
   lexer.rs             hand-written; type names are keywords
   parser.rs            recursive descent + Pratt, C precedence
+  mono.rs              monomorphisation; generics are erased here
   lower.rs             typecheck and lower in ONE pass, deliberately fused
   ir.rs                docs/ir-v0.md made real
   emit_c.rs            post-refcount IR to C

@@ -1,0 +1,1 @@
+corpus/errors/014-not-generic.src:6:20: type `Point` is not generic

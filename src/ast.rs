@@ -11,7 +11,12 @@ pub enum Ty {
     Bool,
     Str,
     Void,
-    /// A user-defined type, indexed into the program's type table.
+    /// A named type -- user-defined, generic instance, or type parameter --
+    /// indexed into the program's `ty_exprs` arena.
+    ///
+    /// Interning keeps `Ty` `Copy` and one word wide even though a type
+    /// expression like `Box<Pair<int, str>>` is a tree. Monomorphisation
+    /// resolves every one of these to a concrete declaration.
     User(u32),
 }
 
@@ -78,10 +83,21 @@ pub enum UnOp {
     Not,
 }
 
-/// A user-defined type declaration.
+/// One interned type expression: a name plus type arguments.
+/// `Point` is `("Point", [])`; `Box<int>` is `("Box", [Int])`; the `T` inside
+/// a generic declaration is `("T", [])` and is resolved by substitution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TyExpr {
+    pub name: String,
+    pub args: Vec<Ty>,
+}
+
+/// A user-defined type declaration, possibly generic.
 #[derive(Debug, Clone)]
 pub struct TypeDecl {
     pub name: String,
+    /// Type parameter names, empty for a non-generic type.
+    pub tparams: Vec<String>,
     pub fields: Vec<Param>,
     pub span: Span,
 }
@@ -97,9 +113,11 @@ pub enum Expr {
     Call(String, Vec<Expr>, Span),
     /// `expr.field`
     Field(Box<Expr>, String, Span),
-    /// `Point(x: 1, y: 2)` -- construction is always by field name, so a
-    /// field reordering in the declaration cannot silently transpose values.
-    New(String, Vec<(String, Expr)>, Span),
+    /// `Point(x: 1, y: 2)` / `Box<int>(value: 5)` -- construction is always
+    /// by field name, so reordering fields in a declaration cannot silently
+    /// transpose values. Carries the interned type, so type arguments survive
+    /// to monomorphisation.
+    New(Ty, Vec<(String, Expr)>, Span),
 }
 
 impl Expr {
@@ -175,6 +193,8 @@ pub struct Param {
 pub struct Func {
     pub ret: Ty,
     pub name: String,
+    /// Type parameter names, empty for a non-generic function.
+    pub tparams: Vec<String>,
     pub params: Vec<Param>,
     pub body: Vec<Stmt>,
     pub span: Span,
@@ -184,4 +204,6 @@ pub struct Func {
 pub struct Program {
     pub types: Vec<TypeDecl>,
     pub funcs: Vec<Func>,
+    /// Interned type expressions; `Ty::User` indexes this.
+    pub ty_exprs: Vec<TyExpr>,
 }

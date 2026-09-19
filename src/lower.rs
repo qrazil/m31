@@ -90,6 +90,8 @@ pub struct Lowerer {
     /// Surface types of each type's fields, parallel to `typedefs`. The IR
     /// only records `Ref`, which cannot distinguish `str` from a user type.
     field_surface: Vec<Vec<Ty>>,
+    /// The monomorphised program's interned type expressions.
+    ty_exprs: Vec<TyExpr>,
     strings: Vec<String>,
     // per-function state
     types: Vec<IrTy>,
@@ -128,6 +130,7 @@ impl Lowerer {
             sigs: HashMap::new(),
             typedefs: Vec::new(),
             field_surface: Vec::new(),
+            ty_exprs: Vec::new(),
             strings: Vec::new(),
             types: Vec::new(),
             blocks: Vec::new(),
@@ -150,6 +153,10 @@ impl Lowerer {
         // that is not user-visible overloading, which does not exist.
         self.builtin("len", vec![Ty::Str], Ty::Int);
         self.builtin("concat", vec![Ty::Str, Ty::Str], Ty::Str);
+
+        // After monomorphisation every Ty::User names a concrete declaration
+        // with no arguments, so resolution is a name lookup.
+        self.ty_exprs = p.ty_exprs.clone();
 
         // Type table first: signatures and field types may refer to any type,
         // including one declared later in the file.
@@ -274,12 +281,24 @@ impl Lowerer {
     }
 
     /// A type's name, for diagnostics. `Ty::name()` cannot do this because it
-    /// has no access to the type table.
+    /// has no access to the interning arena.
     fn tyname(&self, t: Ty) -> String {
         match t {
-            Ty::User(i) => self.typedefs[i as usize].name.clone(),
+            Ty::User(i) => self.ty_exprs[i as usize].name.clone(),
             other => other.name().to_string(),
         }
+    }
+
+    /// The declaration a type names. `Ty::User` indexes the interning arena;
+    /// the IR and the emitter want an index into the type table, and after
+    /// monomorphisation the two are related by name alone.
+    fn tdef_of(&self, t: Ty) -> Option<u32> {
+        let Ty::User(i) = t else { return None };
+        let name = &self.ty_exprs[i as usize].name;
+        self.typedefs
+            .iter()
+            .position(|d| d.name == *name)
+            .map(|x| x as u32)
     }
 
     fn rebind(&mut self, name: &str, v: Value) {
@@ -592,7 +611,7 @@ impl Lowerer {
                 span,
             } => {
                 let o = self.lower_expr(obj)?;
-                let Ty::User(tid) = o.ty else {
+                let Some(tid) = self.tdef_of(o.ty) else {
                     return Err(Diag::new(
                         obj.span(),
                         format!("type {} has no fields", self.tyname(o.ty)),
@@ -1061,7 +1080,7 @@ impl Lowerer {
 
             Expr::Field(obj, field, span) => {
                 let o = self.lower_expr(obj)?;
-                let Ty::User(tid) = o.ty else {
+                let Some(tid) = self.tdef_of(o.ty) else {
                     return Err(Diag::new(
                         *span,
                         format!("type {} has no fields", self.tyname(o.ty)),
@@ -1085,7 +1104,7 @@ impl Lowerer {
                 Ok(Val::new(d, self.field_ty(tid, idx), false))
             }
 
-            Expr::New(name, args, span) => self.lower_new(name, args, *span),
+            Expr::New(ty, args, span) => self.lower_new(*ty, args, *span),
         }
     }
 
@@ -1226,11 +1245,15 @@ impl Lowerer {
         self.tyname(self.field_ty(tid, idx))
     }
 
-    fn lower_new(&mut self, name: &str, args: &[(String, Expr)], span: Span) -> Result<Val, Diag> {
-        let Some(tid) = self.typedefs.iter().position(|t| t.name == name) else {
-            return Err(Diag::new(span, format!("unknown type `{name}`")));
+    fn lower_new(&mut self, ty: Ty, args: &[(String, Expr)], span: Span) -> Result<Val, Diag> {
+        let Some(tid) = self.tdef_of(ty) else {
+            return Err(Diag::new(
+                span,
+                format!("unknown type `{}`", self.tyname(ty)),
+            ));
         };
-        let tid = tid as u32;
+        let name = self.typedefs[tid as usize].name.clone();
+        let name = name.as_str();
         let nfields = self.typedefs[tid as usize].fields.len();
 
         // Every field must be given exactly once. Construction is by name, so
@@ -1287,7 +1310,6 @@ impl Lowerer {
                 val: v.val(),
             });
         }
-        let ty = Ty::User(tid);
         self.stmt_temps.push(obj);
         Ok(Val::new(obj, ty, true))
     }

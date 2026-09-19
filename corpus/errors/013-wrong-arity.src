@@ -1,0 +1,8 @@
+type Box<T> {
+    T value;
+}
+
+void main() {
+    Box<int, str> b = Box<int, str>(value: 1);
+    print(b.value);
+}
