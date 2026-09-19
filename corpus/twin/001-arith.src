@@ -1,0 +1,7 @@
+fn main() {
+    let x: Int = 1000000
+    print(x * 3 + 7)
+    print((x - 1) / 7)
+    print(x % 97)
+    print(0 - x)
+}

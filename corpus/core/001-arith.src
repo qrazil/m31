@@ -1,0 +1,5 @@
+fn main() {
+    let a: Int = 6
+    let b: Int = 7
+    print(a * b)
+}

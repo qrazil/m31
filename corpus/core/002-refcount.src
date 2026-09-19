@@ -1,0 +1,13 @@
+// The walking skeleton: allocate a refcounted value, pass it across a call
+// boundary, drop it, print an integer. When this passes under all four
+// compiler/optimisation combinations with __rc_live=0, the IR has proven
+// itself and everything after is addition rather than redesign.
+
+fn take(s: Str) -> Int {
+    return len(s)
+}
+
+fn main() {
+    let s: Str = "hello"
+    print(take(s))
+}
