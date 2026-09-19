@@ -1,0 +1,6 @@
+type P {
+    int x;
+}
+
+P p = P(x: 1);
+print(p.x);

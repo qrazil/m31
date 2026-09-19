@@ -13,17 +13,17 @@ T unwrap<T>(Box<T> b) {
     return b.value;
 }
 
-Box<int> bi = Box<int>(value: 21);
+Box<int> bi = Box<int>(21);
 print(unwrap(bi) * 2);
 
-Box<str> bs = Box<str>(value: concat("hel", "lo"));
+Box<str> bs = Box<str>(concat("hel", "lo"));
 print(unwrap(bs));
 
-Pair<int, str> p = Pair<int, str>(first: 7, second: "seven");
+Pair<int, str> p = Pair<int, str>(7, "seven");
 print(p.first);
 print(p.second);
 
 // A generic instantiated at another instantiation of itself.
-Box<Box<int>> nested = Box<Box<int>>(value: bi);
+Box<Box<int>> nested = Box<Box<int>>(bi);
 Box<int> inner = unwrap(nested);
 print(unwrap(inner));

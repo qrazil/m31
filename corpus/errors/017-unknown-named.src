@@ -1,0 +1,5 @@
+int f(int a, int b = 1) {
+    return a + b;
+}
+
+print(f(1, c: 2));

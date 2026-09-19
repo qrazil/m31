@@ -110,14 +110,14 @@ pub enum Expr {
     Var(String, Span),
     Bin(BinOp, Box<Expr>, Box<Expr>, Span),
     Un(UnOp, Box<Expr>, Span),
-    Call(String, Vec<Expr>, Span),
+    Call(String, Args, Span),
     /// `expr.field`
     Field(Box<Expr>, String, Span),
     /// `Point(x: 1, y: 2)` / `Box<int>(value: 5)` -- construction is always
     /// by field name, so reordering fields in a declaration cannot silently
     /// transpose values. Carries the interned type, so type arguments survive
     /// to monomorphisation.
-    New(Ty, Vec<(String, Expr)>, Span),
+    New(Ty, Args, Span),
 }
 
 impl Expr {
@@ -182,11 +182,32 @@ pub enum Stmt {
     },
 }
 
+/// A parameter or a field.
+///
+/// Oro's rule, applied to both: **a parameter with no default is positional,
+/// one with a default is named.** Never both. That removes the question of
+/// whether to pass something positionally and the question of what order
+/// optional arguments come in.
 #[derive(Debug, Clone)]
 pub struct Param {
     pub ty: Ty,
     pub name: String,
+    pub default: Option<Expr>,
     pub span: Span,
+}
+
+impl Param {
+    pub fn is_optional(&self) -> bool {
+        self.default.is_some()
+    }
+}
+
+/// A call's or construction's arguments: positional ones fill the mandatory
+/// parameters in order, named ones fill the optional parameters in any order.
+#[derive(Debug, Clone, Default)]
+pub struct Args {
+    pub pos: Vec<Expr>,
+    pub named: Vec<(String, Expr)>,
 }
 
 #[derive(Debug, Clone)]

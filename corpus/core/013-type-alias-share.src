@@ -8,7 +8,7 @@ void bump(Counter c) {
     c.n = c.n + 1;
 }
 
-Counter a = Counter(n: 0);
+Counter a = Counter(0);
 Counter b = a;
 bump(a);
 bump(b);

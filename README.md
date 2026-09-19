@@ -20,8 +20,8 @@ which gcc and clang both build clean at `-O0` and `-O2`.
 `examples/tour.src` is a tour of every feature, and is also in the corpus so
 it cannot rot.
 
-- 42 corpus programs, 0 failing
-- 36 unit tests
+- 47 corpus programs, 0 failing
+- 40 unit tests
 - 0 dependencies, 0 `unsafe`, clippy clean at `-D warnings`
 
 ## What the language does today
@@ -64,9 +64,24 @@ IR has never needed to know about them. `Box<int>` becomes a plain type named
 calls.
 
 **User types are reference types** — refcounted, heap allocated, aliased by
-assignment, constructed by field name. A type holding no references gets no
+assignment, constructed by the argument rule below. A type holding no references gets no
 drop function at all; one that does gets a generated one, and `rc_dec` checks
 for `NULL` so the common case is a branch rather than a call.
+
+**Arguments follow Oro's rule, for calls and construction alike: a parameter
+with no default is positional, one with a default is named.** Never both.
+
+```c
+type Point { int x; int y; str label = "unnamed"; }
+int volume(int w, int h = 1, int depth = 1) { return w * h * depth; }
+
+Point b = Point(3, 4, label: "corner");
+print(volume(5, depth: 3, h: 2));    // named arguments need no order
+```
+
+Naming a mandatory parameter is an error, as is passing an optional one
+positionally. The two halves never overlap, so there is no question of which
+form to use and no question of what order optional arguments come in.
 
 Not yet: `for`, closures, interfaces, modules, concurrency.
 

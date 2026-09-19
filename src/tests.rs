@@ -347,7 +347,7 @@ fn break_makes_the_exit_block_a_merge_point() {
 fn a_type_with_no_references_needs_no_drop() {
     // rc_dec checks drop for NULL, so a type holding no references pays a
     // predictable branch instead of a call.
-    let out = ir("type P { int x; }\nP p = P(x: 1); print(p.x);");
+    let out = ir("type P { int x; }\nP p = P(1); print(p.x);");
     assert!(
         out.contains("alloc type0"),
         "expected an allocation:\n{out}"
@@ -358,14 +358,14 @@ fn a_type_with_no_references_needs_no_drop() {
 fn construction_retains_a_borrowed_field_but_not_an_owned_one() {
     // concat returns +1 and is handed straight over; a local is borrowed and
     // must be retained, because the object now holds a reference too.
-    let owned = ir("type B { str s; }\nB b = B(s: concat(\"a\",\"b\")); print(b.s);");
+    let owned = ir("type B { str s; }\nB b = B(concat(\"a\",\"b\")); print(b.s);");
     assert_eq!(
         owned.matches("rc_inc").count(),
         0,
         "an owned value must be moved into the field:\n{owned}"
     );
 
-    let borrowed = ir("type B { str s; }\nstr t = \"x\"; B b = B(s: t); print(b.s);");
+    let borrowed = ir("type B { str s; }\nstr t = \"x\"; B b = B(t); print(b.s);");
     assert!(
         borrowed.contains("rc_inc"),
         "a borrowed value must be retained when stored:\n{borrowed}"
@@ -376,7 +376,7 @@ fn construction_retains_a_borrowed_field_but_not_an_owned_one() {
 fn assigning_a_reference_field_releases_the_old_value() {
     // Load old, retain new, store, release old -- in that order, so
     // `p.f = p.f;` cannot free what it is assigning.
-    let out = ir("type B { str s; }\nB b = B(s: \"a\"); b.s = concat(\"c\",\"d\"); print(b.s);");
+    let out = ir("type B { str s; }\nB b = B(\"a\"); b.s = concat(\"c\",\"d\"); print(b.s);");
     // Compare against the LAST store, not the first: the first store belongs
     // to the construction above, which legitimately precedes any load.
     let lines: Vec<&str> = out.lines().collect();
@@ -401,7 +401,7 @@ fn assigning_a_reference_field_releases_the_old_value() {
 #[test]
 fn field_reads_are_borrowed() {
     // Reading a field does not take a reference: the object holds the +1.
-    let out = ir("type B { str s; }\nB b = B(s: \"a\"); print(b.s);");
+    let out = ir("type B { str s; }\nB b = B(\"a\"); print(b.s);");
     // One release for b at scope end, and nothing extra for the read.
     assert_eq!(
         out.matches("rc_dec").count(),
@@ -417,10 +417,11 @@ fn const_locals_reject_assignment() {
 
 #[test]
 fn type_errors_on_user_types_are_reported() {
-    assert!(err("type P { int x; }\nP p = P(x: \"s\"); print(p.x);")
+    assert!(err("type P { int x; }\nP p = P(\"s\"); print(p.x);")
         .contains("field `x` is int, found str"));
-    assert!(err("type P { int x; }\nP p = P(); print(p.x);").contains("missing field `x`"));
-    assert!(err("type P { int x; }\nP p = P(x: 1, x: 2); print(p.x);").contains("given twice"));
+    assert!(err("type P { int x; }\nP p = P(); print(p.x);")
+        .contains("takes 1 positional argument(s), found 0"));
+    assert!(err("type P { int x; }\nP p = P(1, x: 2); print(p.x);").contains("is mandatory"));
     assert!(err("type P { int x; } type P { int y; }\nprint(1);").contains("already defined"));
     assert!(err("int i = 1; print(i.x);").contains("has no fields"));
 }
@@ -430,7 +431,7 @@ fn type_errors_on_user_types_are_reported() {
 #[test]
 fn generics_are_erased_before_lowering() {
     // The IR must contain no type parameters at all -- only instantiations.
-    let out = ir("type Box<T> { T value; }\nBox<int> b = Box<int>(value: 1); print(b.value);");
+    let out = ir("type Box<T> { T value; }\nBox<int> b = Box<int>(1); print(b.value);");
     assert!(
         out.contains("type Box$int"),
         "expected an instantiation:\n{out}"
@@ -444,7 +445,7 @@ fn generics_are_erased_before_lowering() {
 #[test]
 fn each_distinct_instantiation_is_emitted_once() {
     let out = ir(
-        "type Box<T> { T value; }\nBox<int> a = Box<int>(value: 1); Box<int> b = Box<int>(value: 2); Box<str> c = Box<str>(value: \"s\"); print(a.value + b.value); print(c.value);",
+        "type Box<T> { T value; }\nBox<int> a = Box<int>(1); Box<int> b = Box<int>(2); Box<str> c = Box<str>(\"s\"); print(a.value + b.value); print(c.value);",
     );
     assert_eq!(
         out.matches("type Box$int").count(),
@@ -468,7 +469,7 @@ fn an_unused_generic_is_never_instantiated() {
 #[test]
 fn generic_function_type_arguments_are_inferred() {
     let out = ir(
-        "type Box<T> { T value; }\nT unwrap<T>(Box<T> b) { return b.value; }\nBox<int> b = Box<int>(value: 1); print(unwrap(b));",
+        "type Box<T> { T value; }\nT unwrap<T>(Box<T> b) { return b.value; }\nBox<int> b = Box<int>(1); print(unwrap(b));",
     );
     assert!(
         out.contains("func unwrap$int"),
@@ -478,17 +479,67 @@ fn generic_function_type_arguments_are_inferred() {
 
 #[test]
 fn generic_misuse_is_rejected() {
-    assert!(err(
-        "type Box<T> { T value; }\nBox<int,str> b = Box<int,str>(value: 1); print(b.value);"
-    )
-    .contains("takes 1 type argument(s), found 2"));
     assert!(
-        err("type P { int x; }\nP<int> p = P<int>(x: 1); print(p.x);").contains("is not generic")
+        err("type Box<T> { T value; }\nBox<int,str> b = Box<int,str>(1); print(b.value);")
+            .contains("takes 1 type argument(s), found 2")
     );
+    assert!(err("type P { int x; }\nP<int> p = P<int>(1); print(p.x);").contains("is not generic"));
     // Inference cannot see through a nested call; the diagnostic says what to
     // do rather than guessing.
     assert!(err(
-        "type Box<T> { T value; }\nT unwrap<T>(Box<T> b) { return b.value; }\nBox<Box<int>> n = Box<Box<int>>(value: Box<int>(value: 1)); print(unwrap(unwrap(n)));"
+        "type Box<T> { T value; }\nT unwrap<T>(Box<T> b) { return b.value; }\nBox<Box<int>> n = Box<Box<int>>(Box<int>(1)); print(unwrap(unwrap(n)));"
     )
     .contains("bind the argument to a local"));
+}
+
+// ---- arguments --------------------------------------------------------
+
+#[test]
+fn mandatory_is_positional_and_optional_is_named() {
+    let out = ir("int f(int a, int b = 7) { return a + b; }\nprint(f(1));\nprint(f(1, b: 2));");
+    assert!(out.contains("func f"), "expected the function:\n{out}");
+}
+
+#[test]
+fn defaults_are_filled_in_at_the_call_site() {
+    // The default is an expression evaluated at the call, so the constant
+    // appears in the caller rather than the callee.
+    let out = ir("int f(int a, int b = 7) { return a + b; }\nprint(f(1));");
+    let caller = out.split("func $main").nth(1).unwrap();
+    assert!(
+        caller.contains("iconst 7"),
+        "the default must be materialised by the caller:\n{caller}"
+    );
+}
+
+#[test]
+fn the_argument_rule_is_enforced() {
+    // Naming a mandatory parameter is the mistake someone arriving from
+    // Python makes, and it gets the specific message rather than an arity one.
+    assert!(err("int f(int a) { return a; }\nprint(f(a: 1));")
+        .contains("`a` is mandatory, so it is positional"));
+    assert!(
+        err("int f(int a, int b = 1) { return a; }\nprint(f(1, 2));")
+            .contains("takes 1 positional argument(s), found 2")
+    );
+    assert!(
+        err("int f(int a, int b = 1) { return a; }\nprint(f(1, c: 2));")
+            .contains("has no parameter `c`")
+    );
+    assert!(
+        err("int f(int a, int b = 1) { return a; }\nprint(f(b: 2, 1));")
+            .contains("positional arguments must come before named ones")
+    );
+    assert!(
+        err("int f(int a, int b = 1) { return a; }\nprint(f(1, b: 2, b: 3));")
+            .contains("given twice")
+    );
+}
+
+#[test]
+fn construction_uses_the_same_rule() {
+    let out = ir("type P { int x; str tag = \"none\"; }\nP p = P(1);\nprint(p.tag);");
+    assert!(out.contains("alloc type0"), "expected construction:\n{out}");
+    assert!(err("type P { int x; }\nP p = P(x: 1);\nprint(p.x);")
+        .contains("`x` is mandatory, so it is positional"));
 }

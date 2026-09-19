@@ -78,7 +78,7 @@ print(fib(20));
 print(factorial(20));      // the largest that fits in an int
 
 // ---- types and fields --------------------------------------------------
-Rect r = Rect(origin: Point(x: 0, y: 0), w: 4, h: 5);
+Rect r = Rect(Point(0, 0), 4, 5);
 print(area(r) * scale);
 print(r.origin.x);
 
@@ -93,13 +93,13 @@ same.h = 1;
 print(area(r));
 
 // ---- generics ----------------------------------------------------------
-Cell<int> bi = Cell<int>(value: 21);
+Cell<int> bi = Cell<int>(21);
 print(unwrap(bi) * 2);
 
-Cell<str> bs = Cell<str>(value: "boxed");
+Cell<str> bs = Cell<str>("boxed");
 print(unwrap(bs));
 
-Pair<int, str> p = Pair<int, str>(first: 7, second: "seven");
+Pair<int, str> p = Pair<int, str>(7, "seven");
 print(p.first);
 print(p.second);
 

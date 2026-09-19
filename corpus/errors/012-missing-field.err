@@ -1,1 +1,1 @@
-corpus/errors/012-missing-field.src:6:11: missing field `y`
+corpus/errors/012-missing-field.src:6:11: `Point` takes 2 positional argument(s), found 1

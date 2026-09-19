@@ -2,5 +2,5 @@ type Box<T> {
     T value;
 }
 
-Box<int, str> b = Box<int, str>(value: 1);
+Box<int, str> b = Box<int, str>(1);
 print(b.value);

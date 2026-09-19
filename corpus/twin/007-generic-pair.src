@@ -7,9 +7,9 @@ A left<A, B>(Pair<A, B> p) {
     return p.first;
 }
 
-Pair<int, int> a = Pair<int, int>(first: 12, second: 30);
+Pair<int, int> a = Pair<int, int>(12, 30);
 print(left(a));
 print(a.second % 7);
 
-Pair<int, bool> b = Pair<int, bool>(first: -5, second: true);
+Pair<int, bool> b = Pair<int, bool>(-5, true);
 print(left(b) * 3);

@@ -150,6 +150,32 @@ permanent source of confusion in C# and Swift.
 When a copy is genuinely wanted, it is **explicit: `clone(v)`.** That is one
 visible operation rather than an invisible rule that depends on the type.
 
+## 5a. Arguments
+
+**Oro's rule, applied to calls and construction alike: a parameter with no
+default is positional; one with a default is named. Never both.**
+
+```c
+int volume(int w, int h = 1, int depth = 1) { ... }
+
+volume(5)                    // ok
+volume(5, h: 2)              // ok
+volume(5, depth: 3, h: 2)    // ok -- named arguments need no order
+volume(5, 2)                 // error: h is optional, so it is named
+volume(w: 5)                 // error: w is mandatory, so it is positional
+```
+
+The two halves never overlap, which removes two questions at once: which form
+to use for a given parameter, and what order the optional ones come in.
+
+It also gives up something, and it is worth naming: `Point(3, 4)` can
+transpose `x` and `y` silently, where the earlier name-everything rule could
+not. That is the trade Oro already makes, and the exposure is limited to
+adjacent parameters of the same type.
+
+Positional arguments must precede named ones, so a reader never counts commas
+to work out where a value lands.
+
 ## 6. Errors
 
 Errors are values (already decided). The open question is what shape.

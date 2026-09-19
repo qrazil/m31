@@ -1,0 +1,24 @@
+// Oro's argument rule, applied to both calls and construction:
+// a parameter with no default is POSITIONAL; one with a default is NAMED.
+// Never both, so there is never a question of which form to use, and
+// optional arguments need no order.
+
+type Point {
+    int x;
+    int y;
+    str label = "unnamed";
+}
+
+int volume(int w, int h = 1, int depth = 1) {
+    return w * h * depth;
+}
+
+Point a = Point(3, 4);
+print(a.label);
+
+Point b = Point(3, 4, label: "corner");
+print(b.label);
+
+print(volume(5));
+print(volume(5, h: 2));
+print(volume(5, depth: 3, h: 2));   // named arguments need no order

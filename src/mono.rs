@@ -198,6 +198,10 @@ impl Mono {
             fields.push(Param {
                 ty: self.subst_ty(f.ty, &sub, f.span)?,
                 name: f.name.clone(),
+                default: match &f.default {
+                    Some(e) => Some(self.subst_expr(e, &sub)?),
+                    None => None,
+                },
                 span: f.span,
             });
         }
@@ -250,6 +254,10 @@ impl Mono {
             fields.push(Param {
                 ty: self.subst_ty(f.ty, sub, f.span)?,
                 name: f.name.clone(),
+                default: match &f.default {
+                    Some(e) => Some(self.subst_expr(e, sub)?),
+                    None => None,
+                },
                 span: f.span,
             });
         }
@@ -270,6 +278,10 @@ impl Mono {
             params.push(Param {
                 ty: self.subst_ty(p.ty, sub, p.span)?,
                 name: p.name.clone(),
+                default: match &p.default {
+                    Some(e) => Some(self.subst_expr(e, sub)?),
+                    None => None,
+                },
                 span: p.span,
             });
         }
@@ -395,23 +407,16 @@ impl Mono {
             Expr::Field(o, f, s) => Expr::Field(Box::new(self.subst_expr(o, sub)?), f.clone(), *s),
             Expr::New(ty, args, s) => {
                 let ty = self.subst_ty(*ty, sub, *s)?;
-                let mut out = Vec::new();
-                for (n, a) in args {
-                    out.push((n.clone(), self.subst_expr(a, sub)?));
-                }
-                Expr::New(ty, out, *s)
+                Expr::New(ty, self.subst_args(args, sub)?, *s)
             }
             Expr::Call(name, args, s) => {
-                let mut out = Vec::new();
-                for a in args {
-                    out.push(self.subst_expr(a, sub)?);
-                }
+                let out = self.subst_args(args, sub)?;
                 // A call to a generic function needs its type arguments
                 // inferred from the argument types, then the instantiation
                 // queued and the name rewritten to the mangled one. Inference
                 // is deliberately shallow -- see `infer`.
                 if let Some(decl) = self.generic_funcs.get(name).cloned() {
-                    let targs = self.infer(&decl, &out, sub, *s)?;
+                    let targs = self.infer(&decl, &out.pos, sub, *s)?;
                     let mangled = self.mangle(name, &targs);
                     self.queue.push((name.clone(), targs, *s));
                     return Ok(Expr::Call(mangled, out, *s));
@@ -419,6 +424,18 @@ impl Mono {
                 Expr::Call(name.clone(), out, *s)
             }
         })
+    }
+
+    fn subst_args(&mut self, a: &Args, sub: &Subst) -> Result<Args, Diag> {
+        let mut pos = Vec::new();
+        for e in &a.pos {
+            pos.push(self.subst_expr(e, sub)?);
+        }
+        let mut named = Vec::new();
+        for (n, e) in &a.named {
+            named.push((n.clone(), self.subst_expr(e, sub)?));
+        }
+        Ok(Args { pos, named })
     }
 
     /// Infer a generic function's type arguments from its call.
@@ -437,19 +454,12 @@ impl Mono {
         sub: &Subst,
         span: Span,
     ) -> Result<Vec<Ty>, Diag> {
-        if args.len() != decl.params.len() {
-            return Err(Diag::new(
-                span,
-                format!(
-                    "`{}` takes {} argument(s), found {}",
-                    decl.name,
-                    decl.params.len(),
-                    args.len()
-                ),
-            ));
-        }
+        // Only mandatory parameters are positional, so those are what the
+        // positional arguments line up with. Arity itself is checked later,
+        // by the lowering, against a better error.
+        let mandatory: Vec<&Param> = decl.params.iter().filter(|p| !p.is_optional()).collect();
         let mut found: Subst = Subst::new();
-        for (p, a) in decl.params.iter().zip(args.iter()) {
+        for (p, a) in mandatory.iter().zip(args.iter()) {
             if let Some(aty) = self.arg_ty(a) {
                 self.unify(p.ty, aty, &decl.tparams, sub, span, &mut found);
             }

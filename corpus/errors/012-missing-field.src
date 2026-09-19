@@ -3,5 +3,5 @@ type Point {
     int y;
 }
 
-Point p = Point(x: 1);
+Point p = Point(1);
 print(p.x);

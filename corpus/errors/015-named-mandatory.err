@@ -1,0 +1,1 @@
+corpus/errors/015-named-mandatory.src:5:12: `x` is mandatory, so it is positional; drop the `x:`

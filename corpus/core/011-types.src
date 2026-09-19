@@ -15,14 +15,14 @@ int sum(Point p) {
     return p.x + p.y;
 }
 
-Point p = Point(x: 3, y: 4);
+Point p = Point(3, 4);
 print(sum(p));
 
-Named n = Named(label: concat("pt-", "A"), at: p);
+Named n = Named(concat("pt-", "A"), p);
 print(n.label);
 print(n.at.x);
 
 // Reassigning a reference field must release the old value.
-n.at = Point(x: 10, y: 20);
+n.at = Point(10, 20);
 print(sum(n.at));
 print(p.x);

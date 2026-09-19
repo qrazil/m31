@@ -58,7 +58,7 @@ impl Val {
 }
 
 struct Sig {
-    params: Vec<Ty>,
+    params: Vec<Param>,
     ret: Ty,
 }
 
@@ -90,6 +90,9 @@ pub struct Lowerer {
     /// Surface types of each type's fields, parallel to `typedefs`. The IR
     /// only records `Ref`, which cannot distinguish `str` from a user type.
     field_surface: Vec<Vec<Ty>>,
+    /// Field declarations, parallel to `typedefs`, so construction can bind
+    /// arguments by the same rule as a call.
+    field_params: Vec<Vec<Param>>,
     /// The monomorphised program's interned type expressions.
     ty_exprs: Vec<TyExpr>,
     strings: Vec<String>,
@@ -130,6 +133,7 @@ impl Lowerer {
             sigs: HashMap::new(),
             typedefs: Vec::new(),
             field_surface: Vec::new(),
+            field_params: Vec::new(),
             ty_exprs: Vec::new(),
             strings: Vec::new(),
             types: Vec::new(),
@@ -144,7 +148,85 @@ impl Lowerer {
     }
 
     fn builtin(&mut self, name: &str, params: Vec<Ty>, ret: Ty) {
+        let params = params
+            .into_iter()
+            .enumerate()
+            .map(|(i, ty)| Param {
+                ty,
+                name: format!("a{i}"),
+                default: None,
+                span: Span::new(0, 0),
+            })
+            .collect();
         self.sigs.insert(name.to_string(), Sig { params, ret });
+    }
+
+    /// Bind a call's arguments to a parameter list, by Oro's rule:
+    /// **mandatory parameters are positional, optional ones are named.**
+    /// Never both, so there is no question of which form to use and no
+    /// question of what order optional arguments come in.
+    ///
+    /// Returns one expression per parameter, in declaration order, with
+    /// defaults filled in.
+    fn bind_args<'a>(
+        &self,
+        what: &str,
+        params: &'a [Param],
+        args: &'a Args,
+        span: Span,
+    ) -> Result<Vec<&'a Expr>, Diag> {
+        let mandatory: Vec<&Param> = params.iter().filter(|p| !p.is_optional()).collect();
+        let mut out: Vec<Option<&Expr>> = vec![None; params.len()];
+
+        // Named arguments first: "you named a mandatory parameter" is a more
+        // useful thing to say than "wrong number of positional arguments",
+        // and it is the mistake someone coming from Python will make.
+        for (n, e) in &args.named {
+            let Some(i) = params.iter().position(|p| p.name == *n) else {
+                return Err(Diag::new(
+                    e.span(),
+                    format!("`{what}` has no parameter `{n}`"),
+                ));
+            };
+            if !params[i].is_optional() {
+                return Err(Diag::new(
+                    e.span(),
+                    format!("`{n}` is mandatory, so it is positional; drop the `{n}:`"),
+                ));
+            }
+            if out[i].is_some() {
+                return Err(Diag::new(e.span(), format!("`{n}` given twice")));
+            }
+            out[i] = Some(e);
+        }
+
+        if args.pos.len() != mandatory.len() {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`{what}` takes {} positional argument(s), found {}",
+                    mandatory.len(),
+                    args.pos.len()
+                ),
+            ));
+        }
+
+        let mut next = 0;
+        for a in &args.pos {
+            while params[next].is_optional() {
+                next += 1;
+            }
+            out[next] = Some(a);
+            next += 1;
+        }
+
+        Ok(params
+            .iter()
+            .zip(out)
+            .map(|(p, given)| {
+                given.unwrap_or_else(|| p.default.as_ref().expect("mandatory unbound"))
+            })
+            .collect())
     }
 
     pub fn lower_program(mut self, p: &Program) -> Result<ir::Module, Diag> {
@@ -183,6 +265,7 @@ impl Lowerer {
             });
             self.field_surface
                 .push(t.fields.iter().map(|f| f.ty).collect());
+            self.field_params.push(t.fields.clone());
         }
 
         for f in &p.funcs {
@@ -204,7 +287,7 @@ impl Lowerer {
             self.sigs.insert(
                 f.name.clone(),
                 Sig {
-                    params: f.params.iter().map(|p| p.ty).collect(),
+                    params: f.params.clone(),
                     ret: f.ret,
                 },
             );
@@ -1258,7 +1341,7 @@ impl Lowerer {
         self.tyname(self.field_ty(tid, idx))
     }
 
-    fn lower_new(&mut self, ty: Ty, args: &[(String, Expr)], span: Span) -> Result<Val, Diag> {
+    fn lower_new(&mut self, ty: Ty, args: &Args, span: Span) -> Result<Val, Diag> {
         let Some(tid) = self.tdef_of(ty) else {
             return Err(Diag::new(
                 span,
@@ -1267,40 +1350,24 @@ impl Lowerer {
         };
         let name = self.typedefs[tid as usize].name.clone();
         let name = name.as_str();
-        let nfields = self.typedefs[tid as usize].fields.len();
+        let fields = self.field_params[tid as usize].clone();
+        let slots = self.bind_args(name, &fields, args, span)?;
 
-        // Every field must be given exactly once. Construction is by name, so
-        // a missing field is a clear error rather than a silent zero.
-        let mut given: Vec<Option<Val>> = (0..nfields).map(|_| None).collect();
-        for (fname, e) in args {
-            let Some((idx, _)) = self.field_of(tid, fname) else {
-                return Err(Diag::new(
-                    e.span(),
-                    format!("type `{name}` has no field `{fname}`"),
-                ));
-            };
-            if given[idx as usize].is_some() {
-                return Err(Diag::new(e.span(), format!("field `{fname}` given twice")));
-            }
+        let mut given: Vec<Option<Val>> = Vec::new();
+        for (e, f) in slots.iter().zip(fields.iter()) {
             let v = self.lower_expr(e)?;
-            let want = self.field_ty(tid, idx);
-            if v.ty != want {
+            if v.ty != f.ty {
                 return Err(Diag::new(
                     e.span(),
                     format!(
-                        "type mismatch: field `{fname}` is {}, found {}",
-                        self.tyname(want),
+                        "type mismatch: field `{}` is {}, found {}",
+                        f.name,
+                        self.tyname(f.ty),
                         self.tyname(v.ty)
                     ),
                 ));
             }
-            given[idx as usize] = Some(v);
-        }
-        for (i, g) in given.iter().enumerate() {
-            if g.is_none() {
-                let fname = self.typedefs[tid as usize].fields[i].0.clone();
-                return Err(Diag::new(span, format!("missing field `{fname}`")));
-            }
+            given.push(Some(v));
         }
 
         let obj = self.new_val(IrTy::Ref);
@@ -1327,28 +1394,31 @@ impl Lowerer {
         Ok(Val::new(obj, ty, true))
     }
 
-    fn lower_call(&mut self, name: &str, args: &[Expr], span: Span) -> Result<Val, Diag> {
+    fn lower_call(&mut self, name: &str, args: &Args, span: Span) -> Result<Val, Diag> {
         // `print` accepts int, bool or str and selects the runtime helper from
         // the static argument type. Not user-visible overloading.
         if name == "print" {
-            if args.len() != 1 {
+            if args.pos.len() != 1 || !args.named.is_empty() {
                 return Err(Diag::new(
                     span,
-                    format!("`print` takes 1 argument, found {}", args.len()),
+                    format!(
+                        "`print` takes 1 argument, found {}",
+                        args.pos.len() + args.named.len()
+                    ),
                 ));
             }
-            let a = self.lower_expr(&args[0])?;
+            let a = self.lower_expr(&args.pos[0])?;
             let f = match a.ty {
                 Ty::Int => "rt_print",
                 Ty::Bool => "rt_print_bool",
                 Ty::Str => "rt_print_str",
-                Ty::Void => return Err(Diag::new(args[0].span(), "cannot print a void value")),
+                Ty::Void => return Err(Diag::new(args.pos[0].span(), "cannot print a void value")),
                 // No printing of user types until there is a way for a type
                 // to say how it prints. Better a clear refusal than an
                 // address.
                 Ty::User(_) => {
                     return Err(Diag::new(
-                        args[0].span(),
+                        args.pos[0].span(),
                         format!("cannot print a value of type `{}`", self.tyname(a.ty)),
                     ))
                 }
@@ -1367,29 +1437,21 @@ impl Lowerer {
         let Some(sig) = self.sigs.get(name) else {
             return Err(Diag::new(span, format!("unknown function `{name}`")));
         };
-        let (want, ret) = (sig.params.clone(), sig.ret);
+        let params = sig.params.clone();
+        let ret = sig.ret;
 
-        if args.len() != want.len() {
-            return Err(Diag::new(
-                span,
-                format!(
-                    "`{name}` takes {} argument(s), found {}",
-                    want.len(),
-                    args.len()
-                ),
-            ));
-        }
+        let slots = self.bind_args(name, &params, args, span)?;
 
         let mut vals = Vec::new();
-        for (a, w) in args.iter().zip(want.iter()) {
+        for (a, p) in slots.iter().zip(params.iter()) {
             let v = self.lower_expr(a)?;
-            if v.ty != *w {
+            if v.ty != p.ty {
                 return Err(Diag::new(
                     a.span(),
                     format!(
                         "type mismatch: expected {}, found {}",
-                        w.name(),
-                        v.ty.name()
+                        self.tyname(p.ty),
+                        self.tyname(v.ty)
                     ),
                 ));
             }

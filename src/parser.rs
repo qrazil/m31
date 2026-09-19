@@ -229,6 +229,63 @@ impl Parser {
         }
     }
 
+    /// `f(a, b, opt: c)` -- positional arguments first, then named ones.
+    /// Once a named argument appears, everything after it must be named too,
+    /// so a reader never has to count commas to find which parameter a value
+    /// lands in.
+    fn parse_args(&mut self) -> Result<Args, Diag> {
+        let mut args = Args::default();
+        self.expect(Tok::LParen)?;
+        if self.peek() != &Tok::RParen {
+            loop {
+                let named = matches!(self.peek(), Tok::Ident(_)) && self.peek_at(1) == &Tok::Colon;
+                if named {
+                    let (n, s) = self.expect_ident()?;
+                    self.expect(Tok::Colon)?;
+                    if args.named.iter().any(|(x, _)| *x == n) {
+                        return Err(Diag::new(s, format!("`{n}` given twice")));
+                    }
+                    args.named.push((n, self.parse_expr(0)?));
+                } else {
+                    let s = self.span();
+                    if !args.named.is_empty() {
+                        return Err(Diag::new(
+                            s,
+                            "positional arguments must come before named ones",
+                        ));
+                    }
+                    args.pos.push(self.parse_expr(0)?);
+                }
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(Tok::RParen)?;
+        Ok(args)
+    }
+
+    /// A parameter or field: `int x` is mandatory, `int x = 0` is optional.
+    fn parse_param(&mut self) -> Result<Param, Diag> {
+        let span = self.span();
+        let ty = self.expect_ty()?;
+        if ty == Ty::Void {
+            return Err(Diag::new(span, "`void` is not a value type"));
+        }
+        let (name, _) = self.expect_ident()?;
+        let default = if self.eat(&Tok::Assign) {
+            Some(self.parse_expr(0)?)
+        } else {
+            None
+        };
+        Ok(Param {
+            ty,
+            name,
+            default,
+            span,
+        })
+    }
+
     // ---- items -------------------------------------------------------
 
     pub fn parse_program(&mut self) -> Result<Program, Diag> {
@@ -323,18 +380,8 @@ impl Parser {
             if self.peek() == &Tok::Eof {
                 return Err(Diag::new(self.span(), "expected `}`, found end of file"));
             }
-            let fspan = self.span();
-            let ty = self.expect_ty()?;
-            if ty == Ty::Void {
-                return Err(Diag::new(fspan, "a field cannot have type `void`"));
-            }
-            let (fname, _) = self.expect_ident()?;
+            fields.push(self.parse_param()?);
             self.expect(Tok::Semi)?;
-            fields.push(Param {
-                ty,
-                name: fname,
-                span: fspan,
-            });
         }
         self.expect(Tok::RBrace)?;
         self.tparams.clear();
@@ -381,17 +428,7 @@ impl Parser {
         let mut params = Vec::new();
         if self.peek() != &Tok::RParen {
             loop {
-                let pspan = self.span();
-                let ty = self.expect_ty()?;
-                if ty == Ty::Void {
-                    return Err(Diag::new(pspan, "a parameter cannot have type `void`"));
-                }
-                let (pname, _) = self.expect_ident()?;
-                params.push(Param {
-                    ty,
-                    name: pname,
-                    span: pspan,
-                });
+                params.push(self.parse_param()?);
                 if !self.eat(&Tok::Comma) {
                     break;
                 }
@@ -662,34 +699,13 @@ impl Parser {
                     self.expect(Tok::Gt)?;
                 }
                 let ty = self.intern(name, targs);
-                self.expect(Tok::LParen)?;
-                let mut args = Vec::new();
-                if self.peek() != &Tok::RParen {
-                    loop {
-                        let (f, _) = self.expect_ident()?;
-                        self.expect(Tok::Colon)?;
-                        args.push((f, self.parse_expr(0)?));
-                        if !self.eat(&Tok::Comma) {
-                            break;
-                        }
-                    }
-                }
-                self.expect(Tok::RParen)?;
+                let args = self.parse_args()?;
                 Ok(Expr::New(ty, args, span))
             }
             Tok::Ident(name) => {
                 self.bump();
-                if self.eat(&Tok::LParen) {
-                    let mut args = Vec::new();
-                    if self.peek() != &Tok::RParen {
-                        loop {
-                            args.push(self.parse_expr(0)?);
-                            if !self.eat(&Tok::Comma) {
-                                break;
-                            }
-                        }
-                    }
-                    self.expect(Tok::RParen)?;
+                if self.peek() == &Tok::LParen {
+                    let args = self.parse_args()?;
                     Ok(Expr::Call(name, args, span))
                 } else {
                     Ok(Expr::Var(name, span))
