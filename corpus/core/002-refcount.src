@@ -3,11 +3,11 @@
 // compiler/optimisation combinations with __rc_live=0, the IR has proven
 // itself and everything after is addition rather than redesign.
 
-fn take(s: str) -> int {
-    return len(s)
+int take(str s) {
+    return len(s);
 }
 
-fn main() {
-    let s: str = "hello"
-    print(take(s))
+void main() {
+    str s = "hello";
+    print(take(s));
 }

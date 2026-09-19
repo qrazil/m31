@@ -1,0 +1,18 @@
+[package]
+name = "langc"
+version = "0.0.0"
+edition = "2021"
+
+# No dependencies. Not "few" -- none. The whole compiler is std Rust, and the
+# backend emits C text, so there is nothing to pull in. See docs/ir-v0.md.
+[dependencies]
+
+[[bin]]
+name = "langc"
+path = "src/main.rs"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

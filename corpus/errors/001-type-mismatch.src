@@ -1,4 +1,4 @@
-fn main() {
-    let a: int = "not an int"
-    print(a)
+void main() {
+    int a = "not an int";
+    print(a);
 }

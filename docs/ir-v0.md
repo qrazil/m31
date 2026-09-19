@@ -303,15 +303,20 @@ exactly the kind of bug the `-O0` vs `-O2` differential will *not* catch.
 `corpus/core/002-refcount.src`:
 
 ```
-fn take(s: str) -> int {
-    return len(s)
+int take(str s) {
+    return len(s);
 }
 
-fn main() {
-    let s: str = "hello"
-    print(take(s))
+void main() {
+    str s = "hello";
+    print(take(s));
 }
 ```
+
+Syntax is C/Java-shaped: type-first declarations, semicolons, braces. That
+is parseable here without C's lexer hack because there are no raw pointer
+declarators and no `typedef` — `IDENT IDENT` is an unambiguous declaration
+with two tokens of lookahead, the same way Java manages it.
 
 Post-refcount IR:
 

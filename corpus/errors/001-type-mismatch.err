@@ -1,1 +1,1 @@
-corpus/errors/001-type-mismatch.src:2:18: type mismatch: expected int, found str
+corpus/errors/001-type-mismatch.src:2:13: type mismatch: expected int, found str

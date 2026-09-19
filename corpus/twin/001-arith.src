@@ -1,7 +1,7 @@
-fn main() {
-    let x: int = 1000000
-    print(x * 3 + 7)
-    print((x - 1) / 7)
-    print(x % 97)
-    print(0 - x)
+void main() {
+    int x = 1000000;
+    print(x * 3 + 7);
+    print((x - 1) / 7);
+    print(x % 97);
+    print(0 - x);
 }

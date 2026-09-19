@@ -1,10 +1,10 @@
-// int is i64 and overflow traps. This program must abort rather than wrap.
+// int is 64-bit and overflow traps. This program must abort rather than wrap.
 //
 // It lives in corpus/traps/ rather than corpus/twin/ because Go wraps here:
-// a Go twin would print -9223372036854775808 and be wrong about us on
-// purpose. See docs/ir-v0.md §3.
+// a Go twin would print -9223372036854775808 and be confidently wrong about
+// us on purpose. See docs/ir-v0.md §3.
 
-fn main() {
-    let a: int = 9223372036854775807
-    print(a + 1)
+void main() {
+    int a = 9223372036854775807;
+    print(a + 1);
 }
