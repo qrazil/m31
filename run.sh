@@ -60,8 +60,20 @@ run_one() {
     opt=${entry##*:}
     bin="$WORK/$base.$cc$opt"
 
-    if ! "$cc" "$opt" -DRC_DEBUG -I runtime -o "$bin" "$WORK/$base.c" 2>"$WORK/$base.cc"; then
+    # The runtime is a separate translation unit on purpose, and -flto is
+    # deliberately absent — see docs/ir-v0.md §7.1 and runtime/rt.c.
+    if ! "$cc" "$opt" -Wall -Wextra -DRC_DEBUG -I runtime \
+         -o "$bin" "$WORK/$base.c" runtime/rt.c 2>"$WORK/$base.cc"; then
       fail_test "$label [$cc $opt]" "C compiler rejected emitted code: $(head -1 "$WORK/$base.cc")"
+      return
+    fi
+
+    # Emitted C must be warning-free, same instinct as Oro's
+    # `clippy -D warnings` gate. A warning in generated code is a defect in
+    # the emitter, and it is usually the early form of a UB bug.
+    if [ -s "$WORK/$base.cc" ]; then
+      fail_test "$label [$cc $opt]" "emitted C produced warnings"
+      head -4 "$WORK/$base.cc" | sed 's/^/      /'
       return
     fi
 
