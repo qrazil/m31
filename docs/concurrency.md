@@ -1,6 +1,9 @@
 # Concurrency and refcounting
 
-Status: **research complete, decision open.** Nothing here is implemented.
+Status: **research complete; the decision is made in
+`docs/concurrency-decision.md`.** This document keeps the evidence and the
+rejected alternatives, because the reasoning is worth more than the verdict
+and one section of it was wrong once already. Nothing here is implemented.
 This exists so the decision gets made once, on evidence, before anything
 depends on it — concurrency is one of the few things that genuinely cannot
 be bolted on afterwards.

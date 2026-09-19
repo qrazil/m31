@@ -54,7 +54,7 @@ Not yet: `for`, closures, user types, generics, modules, concurrency.
 | Errors | values, not unwinding | Needs nothing from the IR. Unwinding plus refcounts means every unwind path must decrement correctly; that bug class never fully closes. |
 | Generics | **monomorphisation**, implemented later | Deciding the strategy now keeps generics out of the IR entirely: instantiation happens in the frontend, so the IR only sees concrete types. Deferring the *decision* is what cost Go ten years. |
 | Backend | **C emitter only**, for now | Zero dependencies, `gcc` already present, every target including 32-bit, and it hands us two oracle layers free. Cranelift becomes the second backend when cross-compilation gets real or `gcc`-per-build gets painful. |
-| Concurrency | **open** | Researched, not decided. `docs/concurrency.md` has the evidence and a recommendation. |
+| Concurrency | **stackful green threads, moved not shared** | Uncoloured — one kind of function, no sync/async split, because colouring forks the stdlib permanently. Values crossing threads are moved, which is what keeps refcounts non-atomic. Fixed stacks, but no guard pages: the compiler emits a stack probe instead, so stacks pack densely and the ~32k VMA ceiling disappears. `docs/concurrency-decision.md`; evidence in `docs/concurrency.md`. |
 
 ## The oracle
 
@@ -123,8 +123,9 @@ runtime/
   rt.h rt.c            the runtime — a SEPARATE translation unit, see §7.1
   rc_debug.h           refcount invariant, compiled in under -DRC_DEBUG
 docs/
-  ir-v0.md             the IR specification
-  concurrency.md       concurrency and refcounting: evidence, open decision
+  ir-v0.md                 the IR specification
+  concurrency-decision.md  the concurrency decision
+  concurrency.md           the evidence behind it, and what was rejected
 corpus/{core,twin,traps,errors}/
 ```
 
@@ -150,7 +151,8 @@ revisit it.
 
 1. `for` — sugar over `while` now that the loop machinery and its merge
    points exist
-2. The concurrency decision in `docs/concurrency.md`
+2. **The type system with ownership** — `moved` has to be expressible and
+   checked, and it blocks the rest of the concurrency work
 3. Closures and function values — one new IR op (`call_indirect`), a function
    type, and a heap environment. Note that closures plus refcounting is the
    most common source of reference cycles, which makes weak references a
