@@ -61,6 +61,29 @@ So: **atomic-everywhere is roughly a 25% tax, and a shared hot object is a
 | **Pony** | no shared counter at all | Actors own their refcounts privately; dropping a remote reference **sends a DEC message** rather than touching a shared counter. |
 | **Erlang/BEAM** | none for ordinary terms | Messages are **deep-copied** between private heaps. The one genuinely shared thing — refc binaries >64 bytes — uses a real atomic. |
 | **Rust** | both, chosen at compile time | `Rc` is non-atomic and `!Send`; `Arc` is atomic and `Send`. The type system enforces the split at zero runtime cost. |
+| **Koka** | **sign-bit hybrid** | `rc > 0` non-atomic, `rc < 0` thread-shared and atomic, `INT32_MIN..` sticky/immortal. Escaping to another thread promotes the reachable graph once. |
+
+### Read Koka before writing any of this
+
+**Koka is a precisely reference-counted language (Perceus) whose compiler
+emits C.** That is our exact design, already shipped. Its answer to the
+atomicity question is one bit:
+
+```c
+//  > 0        : non-thread-shared reference  (plain ++/--)
+//  < 0        : thread-shared                (atomic)
+//  INT32_MIN..: sticky (overflow) -- never freed
+static inline bool kk_refcount_is_thread_shared(kk_refcount_t rc);
+```
+
+A decrement already needs a zero test, so the marginal cost of the sign test
+is near nil. `kklib/include/kklib.h` and `kklib/src/refcount.c` are the
+blueprint.
+
+Pair it with **Nim's `--mm:atomicArc` fast path** (merged Aug 2026): do an
+acquire-load first and skip the read-modify-write entirely when the count is
+already unique. That took Nim's atomic overhead from **+33% to +1.5%** on
+gcbench.
 
 Two things stand out.
 
@@ -92,10 +115,11 @@ another core — which is exactly why Tokio has `LocalSet`, a whole separate
 API existing only to host `!Send`/`Rc` futures that the work-stealing
 scheduler cannot.
 
-## 4. The finding that reframes the question
+## 4. One way to dodge the problem entirely
 
-The user asked: *can we do green threads in C?* The more useful question
-turned out to be **do we need stacks at all?**
+Before §6 establishes that stackful green threads *are* achievable from
+emitted C, it is worth recording the option that needs no stacks at all —
+because it remains the cheapest thing to build.
 
 **Pony's actors are stackless.** Verified in `pony_actor_t` (`actor.h`): it
 contains a message queue, a per-actor heap, GC bookkeeping and flags — and
@@ -105,9 +129,9 @@ is an ordinary loop on the scheduler thread's own native C stack, and
 runs to completion and returns. No `setjmp`, no `ucontext`, no fiber library
 anywhere in the runtime.
 
-That matters enormously here, because **the entire difficulty of green
-threads in emitted C is stack switching**, and a run-to-completion actor
-never switches stacks.
+That matters because stack switching is the whole of the difficulty, and a
+run-to-completion actor never switches stacks. Every item in §6's debugging
+list — CFI, ASan fake stacks, TLS caching, shadow stacks — simply evaporates.
 
 The cost is real and should not be glossed: run-to-completion means a
 behaviour **cannot block or yield in the middle**. You write message-driven
@@ -120,111 +144,170 @@ code, not Go-style blocking code. Go's whole ergonomic pitch is that
 |---|---|---|---|
 | Feels like | Go | Erlang, Pony | Java, C++ |
 | Blocking-looking code | yes | **no** | yes |
-| Stack switching in C | **the hard problem** | none needed | none needed |
+| Stack switching in C | **possible, fixed stacks only** | none needed | none needed |
 | Cheap to spawn | yes (~KB) | yes (~100s of bytes) | no (~MB, ~10µs) |
 | Refcount atomicity | atomic, unless pinned | non-atomic if messages move | atomic |
-| Effort with the C backend | high | **low** | low |
+| Effort with the C backend | ~35 engineer-weeks | **low** | low |
 
-**A** is what was asked for, and is the one the C backend fights.
-**B** sidesteps the problem entirely and is what Pony and Erlang prove out.
+**A** is what was asked for, and §6 establishes it is genuinely available —
+at the price of permanently fixed stacks and about eight months of work.
+**B** sidesteps the problem and is what Pony and Erlang prove out.
 **C** is the boring fallback and composes with either later.
 
 ## 6. Can we have Go-style green threads from emitted C?
 
-**Not while using the C stack.** This is the clearest result of the whole
-investigation, and it comes from surveying every C-emitting language that
-tried.
+**Yes — and an earlier draft of this document said no. That was wrong, and the
+correction matters, so it is recorded rather than quietly edited away.**
 
-> Every C-emitting language that got **real** green threads abandoned the C
-> call stack entirely as its execution stack. Every one that kept the ordinary
-> C stack per logical thread ended up with OS threads instead.
+The first survey found that CHICKEN, Cyclone, Gambit and GHC-via-C all
+abandoned the C call stack, and generalised that into "you must abandon the C
+stack to get green threads." The deeper pass falsifies the generalisation:
 
-| language | what it actually does |
-|---|---|
-| **CHICKEN Scheme** | Cheney on the M.T.A. The C stack pointer *is* a bump allocator for the nursery; CPS code never returns; a stack-limit check Cheney-copies live data to the heap and `longjmp`s to a trampoline. Green threads are cooperative, single OS thread, **no multicore**. |
-| **Cyclone Scheme** | One full Cheney-on-the-MTA engine **per pthread** — genuine parallel green threads, shared heap, concurrent Doligez-Leroy-Gonthier collector, write barrier relocating objects before sharing. The most complete answer anyone has. MIT. |
-| **Gambit** | Continuations kept entirely separate from the C stack. Manual is explicit: *"at most one OS thread"* — no multicore. (Worth noting against the "millions of threads across cores" folklore.) |
-| **GHC via C** | The STG stack is a heap object — `move_STACK()` relocates a thread's stack during GC, which is only possible because it is not the C stack. M:N TSOs onto Capabilities. |
-| **V (vlang)** | `go` and `spawn` are literally the **same AST node**, and both codegen to `pthread_create`. Its docs claim "a lightweight thread managed by the V runtime"; the source falsifies that. A real M:N scheduler exists in `vlib/goroutines/` but is **not wired to the compiler** — the wiring existed in 0.3.5 behind `-use-coroutines` and was dropped mid-2026 during a self-hosted rewrite. |
-| **Haxe/hxcpp**, **Ur/Web** server, **Bigloo** | Plain OS threads. |
+- **Go 1.0–1.4 shipped a complete M:N scheduler written in C**
+  (`src/runtime/proc.c`) with three small assembly functions. `runtime·gogo`
+  is fourteen instructions.
+- **Inko's context switch is thirteen instructions of assembly**; nothing else
+  in its work-stealing scheduler depends on LLVM.
+- **Gambit ships M:N green threads from generated C today.**
 
-Note the CHICKEN detail that inverts the usual assumption: Cheney-on-the-MTA
-does **not** depend on the C compiler performing tail-call optimisation. The
-opposite — ordinary non-optimised C calls are *allowed* to grow the stack,
-because the stack growth **is** the allocation.
+Those Scheme implementations abandoned the C stack to get *unbounded recursion
+and cheap first-class continuations*, not because green threads demanded it.
 
-### The third pattern: stackless CPS in the compiler
+### The real constraint, and it is absolute
 
-Nim, Vala and Zig's late stage1 all took a different route — transform async
-functions into heap-allocated state machines, no second stack at all:
+> **Fixed-size stacks, forever.** You can never have growable or copying
+> stacks.
 
-- **Nim**: `async` is a macro that rewrites the proc into a
-  `iterator {.closure.}` and turns every `await` into a `yield`. Chronos uses
-  the identical technique.
-- **Vala**: each async method becomes a `g_slice_new0`'d `<Method>Data` struct
-  with an `int _state_` field, `yield` emits `_state_ = N; return FALSE;
-  _state_N:`, and entry is a `switch (_state_)` dispatcher. Duff's device,
-  driven by the GLib main loop.
+Copying a stack means rewriting every pointer into it, which means knowing,
+for every pointer-sized word of every frame, whether it is a pointer. Go gets
+this from `FUNCDATA_LocalsPointerMaps`, emitted by the Go compiler. With
+gcc/clang you control neither frame layout, spill slots, callee-saved spills,
+the red zone, nor register-resident derived pointers.
 
-Portable and cheap, and the complaints are consistent and documented: **function
-colouring** (named explicitly on the Nim forum — *"not only blue/red function
-[but] all color spectrum"*) and **useless async stack traces** (dom96, Nim's
-own async author, agreeing they are "usually useless"; Araq's suggested
-workaround at the time was "add echo statements"). Still unresolved — the
-issue was reopened in October 2025.
+WG21 P1364R0 states it directly: pointer adjustment is *"possible ... in a
+programming language with precise garbage collector, such as Go, but
+unfeasible in more traditional languages ... Recognizing that limitation Rust
+developers went with the virtual memory and guard page approach."*
 
-**Zig is worth watching.** async/await is permanently gone as syntax
-(issue #6025 closed July 2025), but 0.16.0 (April 2026) ships `std.Io` with
-`Io.Threaded` feature-complete and **`Io.Evented` experimental**, described in
-Zig's own release notes as *"userspace stack switching with work stealing,
-also known as M:N threading, 'green threads,' or stackful coroutines."* That
-is the closest live experiment to what we would be attempting.
+Note the supporting detail from Go's own release notes: Go 1.5 removed its
+in-tree C compiler, which existed *"in part to guarantee the C code would work
+with the stack management of goroutines."* Go needed a **custom C compiler**
+to make C coexist with growable stacks. We would be using gcc.
 
-### What this costs us
+Segmented stacks are not a way out either. `gcc -fsplit-stack` is x86-Linux
+only, needs the deprecated gold linker, breaks at every uninstrumented call
+boundary — and reintroduces the **hot split** problem that made Go abandon
+segmented stacks in 1.3 (a call at a segment boundary inside a loop pays an
+allocate/free pair every iteration). Rust hit the same wall and also fled.
 
-To get Go-style green threads on the C backend, we would have to stop using
-the C stack as the execution stack — meaning a CPS/trampoline architecture
-through the *entire* compiler, not a library we link. That is a different
-compiler, decided now, affecting every function we ever emit.
+### What that costs, concretely
 
-**Copying stacks are impossible for us either way.** Go moved from segmented to
-contiguous copying stacks in 1.3 (to fix the "hot split" problem), but
-copying a stack requires rewriting every pointer into it, which requires
-knowing where those pointers are. The C compiler owns the stack layout and
-exposes no pointer map. So the options are fixed-size stacks with a guard
-page, or mmap reserve-and-commit — **not** growth by copying.
+Real stack sizes in shipping systems: **Inko 512 KiB**, libdill 256 KB, State
+Threads 128 KB, V 256 KB. Go's 2 KB is unavailable to us precisely because it
+depends on copying.
 
-For scale: **Inko uses 512 KiB fixed mmap'd stacks with a guard page**
-(`rt/src/config.rs`; note its design doc still says 1 MiB and is stale —
-changed Feb 2024, commit `a9df553c`). Growable stacks were explicitly
-rejected there for masking runaway recursion and complicating FFI.
+And the ceiling nobody mentions: **the binding limit is VMA count, not
+memory.** One `mmap` plus one `PROT_NONE` guard page is **2 VMAs per green
+thread**, against a `vm.max_map_count` that defaults to **65530** — so
+**~32,000 green threads**, then `mmap` starts failing. (This machine ships
+1,048,576, so it is distro-dependent.) Budget for **10⁵ green threads with
+64–256 KB stacks, given a raised limit** — not Go's millions. Any project
+claiming otherwise on a default kernel is wrong, and that should be in our
+docs from day one rather than discovered by a user.
 
-**Debugging degrades, and the fixes are known.** This is the part usually
-discovered too late:
+**One advantage we have that no library runtime does:** because we emit the C,
+we can emit a stack probe at function entry and skip guard pages entirely,
+packing stacks densely in one slab — 1 VMA for thousands. CHICKEN has shipped
+exactly this for 25 years; its generated C contains
+`if(!C_stack_probe(&a)){ ... }` on every function entry, using the address of
+a local as a stack-pointer proxy. Gambit's `___POLL_TRIGGER` does stack
+overflow, GC request **and preemption** in one compare-and-branch.
 
-- **gdb and `perf` backtraces run off the end of a switched stack.** The fix
-  is one line of CFI at the fiber entry point: `.cfi_undefined rip`
-  (`rbp`/`lr`/`x30`/`ra` per architecture), telling the DWARF unwinder to
-  stop. Boost.Context does this in its asm trampolines; Seastar does it
-  per-architecture in `thread.cc`. It is a real production fix —
-  scylladb/scylla#1909 was `perf record --call-graph dwarf` producing *no
-  backtrace for the vast majority of samples*.
-- **gdb has no fiber-aware mode.** `libthread_db` only understands pthreads.
-  Runtimes that want real support ship a Python extension; Go's
-  `runtime-gdb.py` is 703 lines and exists to implement `info goroutines`.
-- **ASan and TSan have fiber APIs in both GCC and Clang** —
-  `__sanitizer_start_switch_fiber`/`__sanitizer_finish_switch_fiber`, and
-  `__tsan_create_fiber`/`__tsan_switch_to_fiber`. But Boost.Context's own
-  docs say ASan support works **only with its slow `ucontext` backend, not
-  the fast assembly one**. Seastar doubles its stack size under ASan and
-  zeroes every stack on allocation to avoid false positives.
-- **Valgrind's own manual** says `VALGRIND_STACK_REGISTER` is *"unreliable
-  and best avoided"* — while Boost.Context and Seastar both use it anyway,
-  because there is no alternative. libaco documents that Memcheck produces
-  many false positives with shared coroutine stacks.
-- **Signals are a live hazard.** libaco documents that a signal arriving
-  while the stack pointer points into a heap-allocated shared stack corrupts
-  state, and notes you can trigger it from gdb.
+### Mechanism
+
+| | switch cost | portability | health |
+|---|---|---|---|
+| **own asm switch** | **~9 ns / 19 cycles** | ~40–60 lines per arch | — |
+| **Boost.Context** `fcontext` | 9 ns | widest arch coverage anywhere | **alive**, commits Sept 2026, BSL-1.0 |
+| `ucontext` `swapcontext` | **547 ns** | removed from POSIX 2008; **absent from musl entirely** | obsolescent |
+| Windows fibers | 49 ns | Windows only | stable |
+| libaco / libco / libdill / libmill | ~6–10 ns | narrow | **all dead**; libdill.org now redirects to a domain squatter |
+
+The 60× `ucontext` gap is fully explained: glibc's `swapcontext.S` performs an
+`rt_sigprocmask` syscall on every switch. Boost's rationale says it in one
+line — *"Context switches do not preserve the signal mask on UNIX systems."*
+And **musl has no `ucontext` implementation at all** — the header declares the
+functions, there is no source directory. You get a link error, so Alpine is a
+hard no.
+
+libaco's 10.29 ns claim independently verifies against Boost's 9 ns for the
+same six-register save, but it is x86-only and dead since 2022. Contrary to
+common belief it has **no CFI directives** — and neither does Boost's
+`jump_fcontext`. The folklore that these libraries handle the debugger problem
+for you is wrong.
+
+### The correction to the stackless-CPS section
+
+Everything said earlier about function colouring stands, and one consequence
+deserves more weight than it got: **for a language whose stdlib is written in
+itself, colouring forks the stdlib permanently.** The moment `read_line` or
+`Socket.recv` can suspend, they are coloured, and so is every function that
+transitively calls them — so there is no uncoloured `sort` that takes a
+comparator which might do IO. That is the "two ecosystems" complaint Nim users
+have, structurally.
+
+`musttail` does not rescue it. It is real now (Clang 13, **GCC 15**, even
+MSVC) and works through function pointers at `-O0`, but on
+riscv64/arm32/ppc64le/mips64/loongarch64 it produces *"fatal error: error in
+backend: failed to perform tail call elimination"* — a backend abort you
+cannot feature-detect from C source. And it solves control transfer, not frame
+allocation. (Also worth knowing: CPython's headline "10–15%" from tail calls
+was an artefact of a poisoned Clang baseline; their docs now say **3–5%**.)
+
+**Zig is the decisive data point.** A systems language with no GC and a
+full-time team shipped stackless `async`/`await`, **deleted it** (issue #6025,
+closed as not planned), spent five years, and in **0.16.0, April 2026**,
+landed `Io.Evented` — *"userspace stack switching with work stealing (M:N
+threading / green threads / stackful coroutines)."* They arrived at stackful.
+
+### Debugging: real, fixable, and one silent-corruption class
+
+- **gdb/perf backtraces** run off a fresh mmap'd stack. Fix: `.cfi_undefined
+  rip` in the trampoline **and** zero the return-address slot (libgcc honours
+  either; gdb needs the CFI). glibc's `clone.S` does exactly this. Parked
+  green threads are in no thread's register set, so plan a Go-style
+  `goroutine` gdb command regardless.
+- **ASan is not cosmetic here.** `detect_stack_use_after_return` is **on by
+  default on Linux**, locals move to a per-*thread* fake-stack arena, and two
+  fibers on one carrier will hand each other the same fake frames — **genuine
+  cross-fiber corruption, not a false positive.** Call
+  `__sanitizer_start_switch_fiber`/`__sanitizer_finish_switch_fiber` around
+  every switch, and keep an annotated slow path beside the fast asm one.
+- **TSan actually works** — `__tsan_create_fiber`/`__tsan_switch_to_fiber` give
+  each fiber its own vector clock, and upstream tests migrate a fiber between
+  two pthreads 1000 times cleanly. Caveat: fiber states skip stack discovery,
+  so **pooled and reused stacks produce false races**; add a no-pooling TSan
+  mode.
+- **Intel CET shadow stacks** fault on the first `ret` in a resumed coroutine
+  unless you allocate and swap a parallel shadow stack.
+- **Do not disable `-fstack-protector`** to make this work. Nim's `std/coro`
+  disables `_FORTIFY_SOURCE` *for the entire program* as a workaround — a
+  permanent hardening regression imposed on every user by a green-thread
+  feature.
+
+**The one that will silently cost a week** is TLS caching. P1364R0, verbatim:
+a compiler may cache a TLS address in a callee-saved register, and after the
+fiber migrates, *"if we are lucky, the original thread is still alive, and we
+simply corrupt the value of the thread local of a different thread ...; if we
+are unlucky, the thread could have quit, and its memory could have been reused
+resulting in use after free."* Microsoft's answer was a compiler flag "off by
+default and rarely turned on."
+
+**We can fix this where C++ fiber libraries structurally cannot**, because we
+emit the C: make every yield point an opaque barrier that clobbers the
+relevant registers, and never emit a cached TLS base across one. This is why
+Go reloads `g` from TLS after any call that can switch stacks. It is a
+silent-corruption class, so it has to be designed in, not debugged later.
 
 ## 7. IO, which the concurrency model is useless without
 
@@ -270,45 +353,118 @@ whose thread has been in a syscall for more than one tick.
 
 ## 8. Recommendation
 
-**Decide the sharing model now; implement in stages.**
+**Decide the sharing model now; build in stages; do not wait for Cranelift.**
 
-1. **Commit to move-on-send.** Values transferred between concurrent units
-   are moved, not aliased. This is what buys non-atomic refcounting, and it
-   is what Nim, Inko, Pony and Erlang each arrived at independently. It is a
-   *type system* decision, so it must precede the type system.
-2. **Keep `rc_inc`/`rc_dec` IR-level, never inlined by hand into a backend.**
-   Already a rule in the README. It is what makes atomic-vs-non-atomic a
-   lowering switch rather than a rewrite.
-3. **Ship OS threads + channels first** (model C). Weeks, composes with
-   anything, and unblocks real programs.
-4. **Then choose A or B**, with the bar being: does the language want
-   blocking-looking IO badly enough to pay for stack switching in emitted C,
-   plus the debugging degradation in §6?
+### The Cranelift question is settled, and the answer is "it would not help"
 
-My reading: **model B, stackless actors**, is the strongest fit, and §6
-strengthened rather than weakened that.
+This was the assumption worth checking, because an earlier draft suggested
+deferring green threads until Cranelift. Cranelift offers two relevant things,
+and neither unblocks anything:
 
-Model B is the only option that gets real concurrency **without** either of
-the two costs every other C-emitting language paid:
+1. **A prologue stack-limit check** (`FunctionStencil::stack_limit`). Real,
+   and more precise than C — Cranelift knows the true frame size. But CHICKEN
+   has emitted `if(!C_stack_probe(&a))` on every function entry for 25 years,
+   and with fixed stacks plus a guard page we may not want the check at all.
+   Nicer, not enabling.
+2. **Precise stack maps** (`declare_value_needs_stack_map`). These are
+   **GC-reference maps for a moving collector** — they let the collector
+   relocate *heap objects* the frames point at. They are **not** Go's
+   `FUNCDATA_LocalsPointerMaps`, which classify every pointer-sized word in
+   every frame so the *stack itself* can be relocated.
 
-- it does not abandon the C stack, because a run-to-completion behaviour never
-  needs to be suspended mid-call (what CHICKEN, Cyclone, Gambit and GHC each
-  had to do, at the price of restructuring their entire compiler);
-- it does not colour functions, because nothing yields in the middle of a
-  function (what Nim and Vala pay, with a decade of documented complaints
-  about it and about the stack traces it produces).
+So **even on Cranelift we would not get copying stacks** — and being reference
+counted with no tracing GC, we do not need precise roots. The thing we would
+be waiting for does not exist in the thing we would be waiting for.
 
-It also makes non-atomic refcounting sound by construction, and it matches
-decisions already made — errors as values, no unwinding, one way to do each
-thing.
+Meanwhile the entire design below is backend-independent. Nothing in Inko's
+scheduler touches LLVM, and Go shipped all of it in C in 2012.
 
-The honest argument against it stands: run-to-completion is a real ergonomic
-difference from Go, and Go-like ergonomics may be exactly the point. If so,
-the choice is not "green threads or not" but **"CPS through the whole
-compiler, or wait for Cranelift"** — and that is the strongest argument yet
-for bringing Cranelift forward, because its prologue stack-limit check is
-precisely the primitive emitted C cannot provide.
+### Order of work
 
-What is *not* on the table is a middle path where we keep the C stack and add
-green threads as a library. Nobody has done it, and V is the cautionary tale
-of claiming to.
+1. **Commit to move-on-send.** Values transferred between concurrent units are
+   moved, not aliased. This is what buys non-atomic refcounting, and Nim, Inko,
+   Pony and Erlang each arrived at it independently. It is a *type system*
+   decision, so it must precede the type system.
+   **Note the negative result:** Swift proves a `Sendable`-style isolation
+   system does **not** buy non-atomic refcounts — SE-0430 states flatly that it
+   "does not change how any existing code is compiled". Isolation proves
+   non-concurrent *access*; you need *ownership* (Inko's `uni`, Nim's
+   `Isolated[T]`, Pony's `iso`).
+2. **Do static refcount elision before worrying about atomicity.** Swift's
+   optimiser already removes up to 97% of RC operations and RC is *still* 32%
+   of runtime. That ordering matters more than the atomic/non-atomic choice.
+   Then add Koka's sign bit and Nim's unique-check fast path (§3).
+3. **Keep `rc_inc`/`rc_dec` IR-level, never hand-inlined into a backend.**
+   Already a rule in the README, and it is what makes atomicity a lowering
+   switch rather than a rewrite.
+4. **Ship OS threads + channels first** (model C). Weeks, composes with
+   anything, unblocks real programs.
+5. **Then choose A or B.**
+
+### If model A (stackful green threads)
+
+The shape, all of it verified in shipping systems: **own ~40–60 lines of
+assembly per architecture** (x86-64 SysV and aarch64 first; read Boost.Context's
+`.S` files for the per-arch quirks), **fixed mmap'd stacks with a guard page**,
+64 KB default, power-of-two aligned so `sp & -SIZE` finds the green thread with
+no TLS lookup (Inko's trick), **one carrier per core with work stealing**,
+**cooperative preemption via an epoch counter checked at loop back-edges** —
+not signal-based, because every precondition Go checks for that is per-PC
+compiler metadata we cannot emit from C.
+
+Rough estimate for Linux + macOS on x86-64 + arm64: **~35 engineer-weeks**, of
+which the two riskiest line items are not the obvious ones — the **park/unpark
+↔ netpoll CAS state machine** (~3 weeks; it closes the lost-wakeup race where
+data arrives between EAGAIN and parking) and the **TLS-caching discipline in
+codegen** (~2 weeks, silent corruption if wrong). A Linux-x86-64-only proof of
+concept is **6–8 weeks**.
+
+**Our structural advantage, and it is the largest one available:** because we
+emit the C, we can wrap every FFI call site in compiler-emitted
+`enter_blocking()`/`exit_blocking()` — Go's cgo model — and *warn at compile
+time* when an unannotated foreign function is called from a green thread. No
+library runtime can do that. Erlang requires manual annotation; Java's Loom
+explicitly refuses to compensate for native-frame pinning; async-std tried
+automatic detection without compiler support and it never merged.
+
+### If model B (stackless actors)
+
+Cheaper by roughly an order of magnitude, needs none of §6's debugging work,
+and makes non-atomic refcounting sound by construction. The cost is
+run-to-completion ergonomics.
+
+### My reading
+
+**Model B remains my recommendation**, but on narrower grounds than before. It
+is no longer "A is impossible" — A is possible, and Go/Inko/Gambit prove it.
+It is that A costs about eight months plus a permanent ceiling of ~10⁵ threads
+with fixed stacks, and B gets concurrency now with neither.
+
+If Go-like ergonomics are the point, **build A, and build it now rather than
+after Cranelift** — the verdict there is unambiguous, and waiting would also
+mean retrofitting concurrency into a stdlib written without it, which means
+rewriting the stdlib.
+
+One thing to design in either way: **async machinery creates reference
+cycles**, and a refcounted language feels that specifically. Chronos's
+maintainer on Nim's stdlib: the closure and the iterator "would reference each
+other ... nothing would be released until the (extremely slow) mark and sweep
+pass would run." Nim shipped a cycle collector largely because of this. Make
+the callback edge weak, or make the green thread itself the continuation —
+which stackful does for free.
+
+### Deferred, with reasons
+
+- **io_uring** — see §7. Blocked by default in Docker *and* Podman (I checked
+  both seccomp profiles: 428 and 479 allowed syscalls respectively, **zero**
+  io_uring entries), disabled on all production Google servers, and libuv
+  spent eighteen months adding it and then disabled SQPOLL by default. Go has
+  declined for seven years.
+- **Windows** — libuv spends 27,032 lines on Windows against 26,464 for
+  thirteen Unix variants. When it happens, use AFD readiness emulation, not
+  native IOCP: IOCP forces buffer pinning into the memory model, and Go's
+  cancellation path blocks *uninterruptibly* waiting for the kernel to return
+  a buffer. Ignore Windows IoRing entirely — its opcode list contains no
+  socket operations at all.
+- **Anything above ~10⁵ green threads.** Say so in the docs rather than
+  letting a user discover `vm.max_map_count`.
