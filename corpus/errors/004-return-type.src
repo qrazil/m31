@@ -1,0 +1,7 @@
+int f() {
+    return "nope";
+}
+
+void main() {
+    print(f());
+}

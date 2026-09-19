@@ -1,0 +1,9 @@
+// Binding a str from another local is a BORROWED source, so the new local
+// must retain. Both then release at scope end and the heap string is freed
+// exactly once.
+void main() {
+    str h = concat("hel", "lo");
+    str g = h;
+    print(g);
+    print(len(h));
+}

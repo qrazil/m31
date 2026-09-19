@@ -1,0 +1,1 @@
+corpus/errors/007-str-arith.src:3:13: cannot apply `+` to str and str

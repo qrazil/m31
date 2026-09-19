@@ -1,0 +1,10 @@
+// Heap allocation and a real free. concat returns an owned (+1) value which
+// the local takes over; the literals are immortal. __rc_live=0 at exit proves
+// the heap string was released exactly once.
+void main() {
+    str a = "foo";
+    str b = "bar";
+    str c = concat(a, b);
+    print(c);
+    print(len(c));
+}

@@ -1,0 +1,16 @@
+// These would TRAP if && and || did not short-circuit: the right-hand side
+// divides by zero. Reaching the print means control flow was correct, which
+// a value comparison alone could not establish.
+void main() {
+    int x = 0;
+    if (x != 0 && 10 / x > 1) {
+        print(1);
+    } else {
+        print(2);
+    }
+    if (x == 0 || 10 / x > 1) {
+        print(3);
+    } else {
+        print(4);
+    }
+}

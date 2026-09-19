@@ -1,0 +1,1 @@
+corpus/errors/006-cond-not-bool.src:3:9: type mismatch: expected bool, found int
