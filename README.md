@@ -126,6 +126,7 @@ docs/
   ir-v0.md                 the IR specification
   concurrency-decision.md  the concurrency decision
   concurrency.md           the evidence behind it, and what was rejected
+  types.md                 type system: proposal, plus the forks left open
 corpus/{core,twin,traps,errors}/
 ```
 
@@ -151,8 +152,9 @@ revisit it.
 
 1. `for` — sugar over `while` now that the loop machinery and its merge
    points exist
-2. **The type system with ownership** — `moved` has to be expressible and
-   checked, and it blocks the rest of the concurrency work
+2. **The type system** — `docs/types.md`. The move checker is the only part
+   concurrency is waiting on, and it is the smallest part: one bit per local
+   over the CFG we already build
 3. Closures and function values — one new IR op (`call_indirect`), a function
    type, and a heap environment. Note that closures plus refcounting is the
    most common source of reference cycles, which makes weak references a
