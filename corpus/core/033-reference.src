@@ -61,6 +61,10 @@ print(unwrap(Box<str>("boxed")));   // boxed
 Box<int> bi = Box<int>(7);
 print(unwrap(bi));                  // 7 -- and from a local
 
+// Nested, so inference has to recurse through the type arguments.
+T inner<T>(Box<Box<T>> b) { return b.item.item; }
+print(inner(Box<Box<int>>(Box<int>(5))));   // 5
+
 // --- 3.8 collections ----------------------------------------------------
 Array<int> arr = Array<int>(3, 0);
 arr[0] = 10;
