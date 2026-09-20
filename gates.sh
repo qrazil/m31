@@ -79,6 +79,19 @@ run "runtime compiles clean" bash -c '
 # The formatter must not change what a program means, and must reach a fixed
 # point. Both are checked against every corpus program rather than asserted:
 # a formatter that quietly alters a program is worse than no formatter.
+# Two checks, because neither alone is enough.
+#
+# The emitted C is compared with its lines SORTED, not byte-for-byte. The
+# formatter deliberately reorders top-level items -- it groups methods under
+# their type and hoists functions above the statements that make up the
+# program -- so the definitions come out in a different order while every
+# definition is identical. Sorting ignores exactly that and nothing else: a
+# renamed value, a dropped field or a changed type still shows up.
+#
+# Order-insensitivity is a real loss, so the second check buys it back where
+# it can: a core program is compiled and RUN after formatting and its output
+# compared to the .out the corpus already expects. That is the property the
+# byte-compare was standing in for, checked directly.
 run "formatter preserves meaning" bash -c '
     bad=0
     for f in corpus/*/*.'"$LANG_EXT"' examples/tour.'"$LANG_EXT"'; do
@@ -88,9 +101,25 @@ run "formatter preserves meaning" bash -c '
         if ./target/debug/'"$LANG_BIN"' --emit-c "$f" -o "$w/a.c" 2>/dev/null; then
             ./target/debug/'"$LANG_BIN"' fmt "$w/t.'"$LANG_EXT"'" 2>/dev/null
             ./target/debug/'"$LANG_BIN"' --emit-c "$w/t.'"$LANG_EXT"'" -o "$w/b.c" 2>/dev/null
-            if ! diff -q "$w/a.c" "$w/b.c" >/dev/null 2>&1; then
+            if ! diff -q <(sort "$w/a.c") <(sort "$w/b.c") >/dev/null 2>&1; then
                 echo "formatting changed the emitted C: $f"
+                diff <(sort "$w/a.c") <(sort "$w/b.c") | head -6
                 bad=1
+            fi
+            # Behaviour, not just text -- but only where an expectation exists.
+            exp="${f%.'"$LANG_EXT"'}.out"
+            if [ -e "$exp" ]; then
+                if gcc -O0 -I runtime "$w/b.c" runtime/rt.c -lpthread \
+                       -o "$w/b" 2>/dev/null; then
+                    if ! diff -q <("$w/b" 2>&1) "$exp" >/dev/null 2>&1; then
+                        echo "formatted program prints something else: $f"
+                        diff <("$w/b" 2>&1) "$exp" | head -6
+                        bad=1
+                    fi
+                else
+                    echo "formatted program no longer compiles: $f"
+                    bad=1
+                fi
             fi
         fi
         rm -rf "$w"
