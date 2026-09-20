@@ -1,0 +1,4 @@
+// Byte offsets outside the string are a bug at the call site, the same as an
+// out-of-range index, so they trap rather than clamping.
+str s = "abc";
+print(s.substr(0, 9));

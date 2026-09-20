@@ -1,0 +1,62 @@
+// The string library. Methods on `str`, which became possible when `str`
+// gained method dispatch -- that absence is why `len` used to be a free
+// function.
+//
+// EVERYTHING HERE WORKS IN BYTES, not characters. `size()` is a byte count,
+// `substr` takes byte offsets, and the case conversions touch only ASCII.
+// That is Go's choice too and it is the honest one for a type that carries
+// bytes; the alternative is pretending to understand an encoding the
+// language has no other opinion about.
+
+str s = "Hello, World";
+print(s.size());                        // 12
+print(s.substr(0, 5));                  // Hello
+print(s.substr(7, 12));                 // World
+print(s.substr(5, 5));                  // empty: a half-open range
+
+print(s.contains("World"));             // true
+print(s.contains("xyz"));               // false
+print(s.contains(""));                  // true -- an empty needle is found
+print(s.starts_with("Hello"));          // true
+print(s.starts_with("World"));          // false
+print(s.ends_with("World"));            // true
+
+// index_of returns an Option, like every other search in the language.
+print(s.index_of("World").or(-1));      // 7
+print(s.index_of("zzz").or(-1));        // -1
+match (s.index_of("o")) {
+    case Some(int i): { print(i); }     // 4
+    case None: { print(-1); }
+}
+
+print(s.to_upper());                    // HELLO, WORLD
+print(s.to_lower());                    // hello, world
+print("  padded\t\n".trim());           // padded
+print("".trim().size());                // 0
+print("ab".repeat(3));                  // ababab
+print("ab".repeat(0).size());           // 0
+
+// split keeps empty fields, including leading and trailing ones, so the
+// parts always rejoin to the original.
+List<str> parts = "a,b,,c".split(",");
+print(parts.size());                    // 4
+print(parts[0]);                        // a
+print(parts[2].size());                 // 0 -- the empty field is kept
+print(parts.join(","));                 // a,b,,c -- round trips
+print(parts.join("-"));                 // a-b--c
+print(parts.join(""));                  // abc
+
+print(",x,".split(",").size());         // 3 -- leading and trailing kept
+print("nosep".split(",").size());       // 1
+
+List<str> one = List<str>();
+one.push("solo");
+print(one.join("-"));                   // solo -- no separator on its own
+print(List<str>().join("-").size());    // 0 -- nothing joins to nothing
+
+// The results are ordinary owned strings, so they compose.
+print("a,b".split(",").join("+").to_upper());   // A+B
+print(s.substr(0, 5).to_lower().repeat(2));     // hellohello
+
+// Bytes, not characters: two bytes for the one accented character.
+print("é".size());                      // 2

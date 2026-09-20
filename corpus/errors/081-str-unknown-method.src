@@ -1,0 +1,2 @@
+str s = "a";
+print(s.reverse());

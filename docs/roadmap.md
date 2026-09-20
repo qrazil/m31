@@ -17,7 +17,7 @@ Anything marked done there is tested; the corpus is the proof.
 
 | | |
 |---|---|
-| Corpus | 141 programs — 42 behaviour, 79 diagnostics, 13 traps, 7 Go twins |
+| Corpus | 146 programs — 43 behaviour, 81 diagnostics, 15 traps, 7 Go twins |
 | Oracle | gcc and clang, each at -O0 and -O2, all four must agree |
 | Leaks | every behaviour program asserts `__rc_live=0` at exit |
 | Warnings | emitted C must be clean under `-Wall -Wextra` |
@@ -60,6 +60,12 @@ literals. No GC — and therefore no cycle collection: a cycle leaks.
 `close`. Values crossing a thread boundary are moved, checked at compile time
 and backed at run time by a transitive uniqueness check: the whole graph
 reachable from a moved value must be unreachable from anywhere else.
+
+**Strings.** `size`, `substr`, `contains`, `index_of`, `starts_with`,
+`ends_with`, `split`, `trim`, `to_upper`, `to_lower`, `repeat`, and `join` on
+a collection of them. Byte-oriented and ASCII-only where case is involved,
+said so in the reference. Still missing: `int`/`float` to and from `str`,
+which waits on the conversion interfaces and on what an error's type is.
 
 **Tooling.** A C emitter, a formatter with one canonical layout and no
 options, single-line diagnostics with the source line echoed, and `gates.sh`.
@@ -147,31 +153,21 @@ Parsing therefore waits for errors. Conversion does not.
 cast is undefined there, which is exactly the kind of thing the gcc/clang
 differential would catch later rather than sooner.
 
-### 3. A string library
-
-`size()` and `concat` are the whole of it today. A usable language needs
-`substr`, `index_of`, `contains`, `starts_with`, `ends_with`, `split`,
-`join`, `trim`, case conversion, and conversion between `int` and `str`.
-
-None of it is hard. It is deliberately after errors, because `to_int("abc")`
-has to return something, and what it returns is the errors decision. These
-land as methods on `str`, which now has method dispatch.
-
-### 4. Modules
+### 3. Modules
 
 One file is the whole program today. That is tolerable for a corpus and not
 for anything else. Needs: a unit of compilation, a visibility rule, and a
 name resolution order. Kept behind errors because a module system that has to
 be revised once errors land is a module system written twice.
 
-### 5. Standard library
+### 4. Standard library
 
 The stated goal is Oro's and Go's: a standard library good enough that most
 programs need nothing else. Needs modules to live in and errors to report
 with. Minimum: strings, sorting, a file and stdin API, time, math, and a
 `Hashable` interface so `Map` takes a user type as a key.
 
-### 6. Closures
+### 5. Closures
 
 Also gates a nicer `spawn`. The reason they are late is that closures plus
 reference counting is the most common way to build a cycle, and a cycle leaks

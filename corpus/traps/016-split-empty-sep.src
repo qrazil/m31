@@ -1,0 +1,2 @@
+// Splitting on an empty separator has no answer that is not arbitrary.
+print("abc".split("").size());

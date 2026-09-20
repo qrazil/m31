@@ -651,7 +651,35 @@ Map<str, int>()
 Chan<int>(8)
 ```
 
-### 6.5 Built-in functions
+### 6.5 Methods on `str`
+
+**Everything here works in BYTES, not characters.** `size()` is a byte count,
+`substr` takes byte offsets, and the case conversions touch only ASCII. Go
+makes the same choice, and it is the honest one for a type that carries
+bytes — the alternative is pretending to understand an encoding the language
+has no other opinion about. `"é".size()` is 2.
+
+| | |
+|---|---|
+| `s.size()` | length in bytes |
+| `s.substr(from, to)` | half-open byte range; **traps** if out of bounds |
+| `s.contains(sub)` | substring search; an empty needle is found |
+| `s.index_of(sub)` | `Option<int>`, a byte offset |
+| `s.starts_with(p)`, `s.ends_with(p)` | |
+| `s.split(sep)` | `List<str>`; keeps empty fields, **traps** on an empty separator |
+| `s.trim()` | ASCII whitespace from both ends |
+| `s.to_upper()`, `s.to_lower()` | ASCII only |
+| `s.repeat(n)` | |
+
+And on a collection of `str`:
+
+| | |
+|---|---|
+| `xs.join(sep)` | the inverse of `split` — the parts always rejoin |
+
+A `str` is immutable, so every one of these returns a new string.
+
+### 6.6 Built-in functions
 
 | | |
 |---|---|
@@ -671,12 +699,10 @@ is a question only the program can answer. `clone` works on a `str`, an
 `Array`, a `List` and a struct; a channel and an interface value cannot be
 cloned.
 
-There is no string library yet: no `substr`, no `split`, no case
-conversion, and no way to turn an `int` into a `str` or back. Parsing can
-fail, so it waits for errors; rendering a user type as text waits for a
-`Display`-shaped interface, which is also what would let `print` accept one.
-
-There is no `float`. `int` is the only number.
+There is still no way to turn an `int` into a `str` or back. Parsing can
+fail, so it waits on what an error's type is; rendering a value as text waits
+for a `to_str`-shaped interface, which is also what would let `print` accept
+a user type.
 
 ---
 

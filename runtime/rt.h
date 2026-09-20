@@ -165,6 +165,15 @@ void    rt_index_set(Obj *o, int64_t i, int64_t v);
 void    rt_list_push(Obj *o, int64_t v);
 Obj    *rt_seq_clone(Obj *o);         /* shallow copy of an array or list */
 Obj    *rt_str_clone(Obj *o);         /* a str copy with its own refcount */
+Obj    *rt_str_substr(Obj *o, int64_t from, int64_t to);
+int64_t rt_str_find(Obj *o, Obj *needle);
+bool    rt_str_starts_with(Obj *o, Obj *p);
+bool    rt_str_ends_with(Obj *o, Obj *p);
+Obj    *rt_str_trim(Obj *o);
+Obj    *rt_str_case(Obj *o, bool upper);
+Obj    *rt_str_repeat(Obj *o, int64_t n);
+Obj    *rt_str_split(Obj *o, Obj *sep);
+Obj    *rt_str_join(Obj *parts, Obj *sep);
 
 /* A hash map. Keys are `int` or `str`; the compiler restricts it, because
  * hashing a user type would need a Hashable interface that does not exist

@@ -194,11 +194,37 @@ impl Lowerer {
         if !args.named.is_empty() {
             return Err(Diag::new(span, format!("`{m}` takes no named arguments")));
         }
+        // How many positional arguments each takes, and of what.
+        let want: &[Ty] = match m {
+            "size" | "trim" | "to_upper" | "to_lower" => &[],
+            "substr" => &[Ty::Int, Ty::Int],
+            "repeat" => &[Ty::Int],
+            "contains" | "starts_with" | "ends_with" | "index_of" | "split" => &[Ty::Str],
+            _ => &[Ty::Void], // unknown; reported below
+        };
+        if want != [Ty::Void] && args.pos.len() != want.len() {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`{m}` takes {} argument(s), found {}",
+                    want.len(),
+                    args.pos.len()
+                ),
+            ));
+        }
+        let mut av = Vec::new();
+        if want != [Ty::Void] {
+            for (a, w) in args.pos.iter().zip(want.iter()) {
+                let v = self.lower_expr(a)?;
+                if !self.assignable(v.ty, *w) {
+                    return Err(Diag::new(a.span(), self.mismatch(*w, v.ty)));
+                }
+                av.push(v.val());
+            }
+        }
+
         match m {
             "size" => {
-                if !args.pos.is_empty() {
-                    return Err(Diag::new(span, "`size` takes no arguments"));
-                }
                 let d = self.new_val(IrTy::I64);
                 self.push(Inst::Call {
                     dst: Some(d),
@@ -207,8 +233,106 @@ impl Lowerer {
                 });
                 Ok(Val::new(d, Ty::Int, false))
             }
+            // Every one of these builds a NEW string, so the caller owns it.
+            "substr" | "trim" | "to_upper" | "to_lower" | "repeat" => {
+                let (func, extra): (&str, Vec<Value>) = match m {
+                    "substr" => ("rt_str_substr", av.clone()),
+                    "trim" => ("rt_str_trim", vec![]),
+                    "repeat" => ("rt_str_repeat", av.clone()),
+                    _ => {
+                        let up = self.new_val(IrTy::I1);
+                        self.push(Inst::BConst {
+                            dst: up,
+                            val: m == "to_upper",
+                        });
+                        ("rt_str_case", vec![up])
+                    }
+                };
+                let d = self.new_val(IrTy::Ref);
+                let mut a = vec![o.val()];
+                a.extend(extra);
+                self.push(Inst::Call {
+                    dst: Some(d),
+                    func: func.to_string(),
+                    args: a,
+                });
+                self.stmt_temps.push(d);
+                Ok(Val::new(d, Ty::Str, true))
+            }
+            "starts_with" | "ends_with" | "contains" => {
+                let d = self.new_val(IrTy::I1);
+                if m == "contains" {
+                    // Substring search, reusing find: "is it in there" is the
+                    // same question `contains` answers on a collection.
+                    let at = self.new_val(IrTy::I64);
+                    self.push(Inst::Call {
+                        dst: Some(at),
+                        func: "rt_str_find".to_string(),
+                        args: vec![o.val(), av[0]],
+                    });
+                    let zero = self.new_val(IrTy::I64);
+                    self.push(Inst::IConst { dst: zero, val: 0 });
+                    self.push(Inst::ICmp {
+                        dst: d,
+                        cmp: Cmp::Ge,
+                        lhs: at,
+                        rhs: zero,
+                    });
+                } else {
+                    let func = if m == "starts_with" {
+                        "rt_str_starts_with"
+                    } else {
+                        "rt_str_ends_with"
+                    };
+                    self.push(Inst::Call {
+                        dst: Some(d),
+                        func: func.to_string(),
+                        args: vec![o.val(), av[0]],
+                    });
+                }
+                Ok(Val::new(d, Ty::Bool, false))
+            }
+            "index_of" => {
+                let Some((oty, otid, none_tag, some_tag)) = self.option_of(Ty::Int) else {
+                    return Err(Diag::new(
+                        span,
+                        "`index_of` has no Option type to return; this is a compiler bug",
+                    ));
+                };
+                let raw = self.new_val(IrTy::I64);
+                self.push(Inst::Call {
+                    dst: Some(raw),
+                    func: "rt_str_find".to_string(),
+                    args: vec![o.val(), av[0]],
+                });
+                let d = self.wrap_option(raw, otid, some_tag, none_tag);
+                Ok(Val::new(d, oty, true))
+            }
+            "split" => {
+                let Some(lty) = self.list_of(Ty::Str) else {
+                    return Err(Diag::new(
+                        span,
+                        "`split` has no List type to return; this is a compiler bug",
+                    ));
+                };
+                let d = self.new_val(IrTy::Ref);
+                self.push(Inst::Call {
+                    dst: Some(d),
+                    func: "rt_str_split".to_string(),
+                    args: vec![o.val(), av[0]],
+                });
+                self.stmt_temps.push(d);
+                Ok(Val::new(d, lty, true))
+            }
             "len" => Err(Diag::new(span, "`str` has no method `len`; it is `size()`")),
-            other => Err(Diag::new(span, format!("`str` has no method `{other}`"))),
+            other => Err(Diag::new(
+                span,
+                format!(
+                    "`str` has no method `{other}`; it has size, substr, contains, \
+                     index_of, starts_with, ends_with, split, trim, to_upper, \
+                     to_lower and repeat"
+                ),
+            )),
         }
     }
 
@@ -514,6 +638,35 @@ impl Lowerer {
                 });
                 Ok(Val::new(d, Ty::Bool, false))
             }
+            "join" => {
+                if args.pos.len() != 1 {
+                    return Err(Diag::new(span, "`join` takes one argument"));
+                }
+                if self.underlying(elem) != Ty::Str {
+                    return Err(Diag::new(
+                        span,
+                        format!(
+                            "`join` needs a collection of `str`; this one holds {}",
+                            self.tyname(elem)
+                        ),
+                    ));
+                }
+                let sep = self.lower_expr(&args.pos[0])?;
+                if !self.assignable(sep.ty, Ty::Str) {
+                    return Err(Diag::new(
+                        args.pos[0].span(),
+                        self.mismatch(Ty::Str, sep.ty),
+                    ));
+                }
+                let d = self.new_val(IrTy::Ref);
+                self.push(Inst::Call {
+                    dst: Some(d),
+                    func: "rt_str_join".to_string(),
+                    args: vec![o.val(), sep.val()],
+                });
+                self.stmt_temps.push(d);
+                Ok(Val::new(d, Ty::Str, true))
+            }
             "push" | "pop" | "insert" | "remove_at" | "clear" => Err(Diag::new(
                 span,
                 format!("`{m}` needs a List; an Array has a fixed length"),
@@ -753,6 +906,57 @@ impl Lowerer {
             .iter()
             .position(|v| v.name == "Some")? as u32;
         Some((ty, tid, none, some))
+    }
+
+    /// Wrap a runtime index into an `Option<int>`: negative is `None`.
+    ///
+    /// The sentinel never reaches the language -- it is turned into a None
+    /// here, which is the whole reason `index_of` waited for Option instead
+    /// of shipping a -1 into something meant to be frozen.
+    fn wrap_option(&mut self, raw: Value, tid: u32, some_tag: u32, none_tag: u32) -> Value {
+        let zero = self.new_val(IrTy::I64);
+        self.push(Inst::IConst { dst: zero, val: 0 });
+        let found = self.new_val(IrTy::I1);
+        self.push(Inst::ICmp {
+            dst: found,
+            cmp: Cmp::Ge,
+            lhs: raw,
+            rhs: zero,
+        });
+
+        let some_bb = self.new_block();
+        let none_bb = self.new_block();
+        let join_bb = self.new_block();
+        self.terminate(Term::Brif {
+            cond: found,
+            then: some_bb,
+            then_args: Vec::new(),
+            els: none_bb,
+            els_args: Vec::new(),
+        });
+
+        self.switch_to(some_bb);
+        let some = self.make_option(tid, some_tag, Some(raw));
+        self.stmt_temps.retain(|t| *t != some);
+        self.terminate(Term::Jump {
+            to: join_bb,
+            args: vec![some],
+        });
+
+        self.switch_to(none_bb);
+        let nothing = self.make_option(tid, none_tag, None);
+        self.stmt_temps.retain(|t| *t != nothing);
+        self.terminate(Term::Jump {
+            to: join_bb,
+            args: vec![nothing],
+        });
+
+        self.switch_to(join_bb);
+        let d = self.new_val(IrTy::Ref);
+        let ji = self.blocks.iter().position(|b| b.id == join_bb).unwrap();
+        self.blocks[ji].params = vec![d];
+        self.stmt_temps.push(d);
+        d
     }
 
     /// Build `Some(v)` or `None` of the given Option type.

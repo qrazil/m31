@@ -63,6 +63,18 @@ impl Mono {
                 m.generic_types.insert(t.name.clone(), t);
             }
         }
+        // Two instantiations every program can reach through a built-in
+        // method whose return type the source never spells: `split` gives a
+        // List<str>, and every `index_of` gives an Option<int>. Nothing else
+        // would create them, and the alternative -- working out from the
+        // syntax whether the program could possibly call one -- is a guess
+        // where this is a fact. A container carries no drop or walk
+        // function, and Option<int> holds no reference, so an unused one
+        // costs a typedef.
+        let span = Span::new(1, 1);
+        m.builtin_decl("List", &[Ty::Str], span);
+        m.enum_decl("Option", &[Ty::Int], span)?;
+
         let mut concrete_funcs = Vec::new();
         for f in p.funcs.clone() {
             if f.tparams.is_empty() {

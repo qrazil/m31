@@ -348,11 +348,12 @@ fn break_makes_the_exit_block_a_merge_point() {
 fn a_type_with_no_references_needs_no_drop() {
     // rc_dec checks drop for NULL, so a type holding no references pays a
     // predictable branch instead of a call.
+    // Not `alloc type0`: the compiler always declares List$str and
+    // Option$int, so a user type's index is not zero and asserting on it
+    // would be testing the numbering rather than the property.
     let out = ir("type P { int x; }\nP p = P(1); print(p.x);");
-    assert!(
-        out.contains("alloc type0"),
-        "expected an allocation:\n{out}"
-    );
+    assert!(out.contains("type P { x: I64 }"), "expected P:\n{out}");
+    assert!(out.contains(" = alloc "), "expected an allocation:\n{out}");
 }
 
 #[test]
@@ -540,7 +541,7 @@ fn the_argument_rule_is_enforced() {
 #[test]
 fn construction_uses_the_same_rule() {
     let out = ir("type P { int x; str tag = \"none\"; }\nP p = P(1);\nprint(p.tag);");
-    assert!(out.contains("alloc type0"), "expected construction:\n{out}");
+    assert!(out.contains(" = alloc "), "expected construction:\n{out}");
     assert!(err("type P { int x; }\nP p = P(x: 1);\nprint(p.x);")
         .contains("`x` is mandatory, so it is positional"));
 }

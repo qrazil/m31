@@ -107,6 +107,167 @@ Obj *rt_str_clone(Obj *o) {
     return (Obj *)s;
 }
 
+/* ---- strings ----------------------------------------------------------
+ *
+ * Everything here works in BYTES, not characters. `size()` is a byte count,
+ * `substr` takes byte offsets, and `to_upper` touches only ASCII. That is
+ * Go's choice too, and it is the honest one for a type that carries bytes --
+ * the alternative is pretending to understand an encoding the language has
+ * no other opinion about. It is written down in the reference so nobody has
+ * to discover it.
+ */
+
+/* Defined with the collections below; a string joins a List of them. */
+static int64_t *slots(Obj *o);
+
+/* One allocation, header and bytes together, with a NUL so the data is also
+ * a valid C string. */
+static Obj *str_new(const char *src, int64_t n) {
+    Str *s = (Str *)rt_alloc(sizeof(Str) + (size_t)n + 1, &rt_str_type);
+    char *buf = (char *)(s + 1);
+    if (n > 0) memcpy(buf, src, (size_t)n);
+    buf[n] = '\0';
+    s->len = n;
+    s->data = buf;
+    return (Obj *)s;
+}
+
+/* Byte offsets, half-open, and an out-of-range one traps the way an
+ * out-of-range index does: it is a bug at the call site, not a condition to
+ * handle. */
+Obj *rt_str_substr(Obj *o, int64_t from, int64_t to) {
+    const Str *s = (const Str *)o;
+    if (from < 0 || to < from || to > s->len) rt_trap("substring range out of bounds");
+    return str_new(s->data + from, to - from);
+}
+
+/* -1 for absent; the lowering turns it into a None. An empty needle is found
+ * at 0, which is what every library that answers this question says. */
+int64_t rt_str_find(Obj *o, Obj *needle) {
+    const Str *h = (const Str *)o;
+    const Str *n = (const Str *)needle;
+    if (n->len == 0) return 0;
+    if (n->len > h->len) return -1;
+    for (int64_t i = 0; i + n->len <= h->len; i++) {
+        if (memcmp(h->data + i, n->data, (size_t)n->len) == 0) return i;
+    }
+    return -1;
+}
+
+bool rt_str_starts_with(Obj *o, Obj *p) {
+    const Str *s = (const Str *)o;
+    const Str *q = (const Str *)p;
+    if (q->len > s->len) return false;
+    return memcmp(s->data, q->data, (size_t)q->len) == 0;
+}
+
+bool rt_str_ends_with(Obj *o, Obj *p) {
+    const Str *s = (const Str *)o;
+    const Str *q = (const Str *)p;
+    if (q->len > s->len) return false;
+    return memcmp(s->data + (s->len - q->len), q->data, (size_t)q->len) == 0;
+}
+
+static bool is_space(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
+Obj *rt_str_trim(Obj *o) {
+    const Str *s = (const Str *)o;
+    int64_t a = 0;
+    int64_t b = s->len;
+    while (a < b && is_space(s->data[a])) a++;
+    while (b > a && is_space(s->data[b - 1])) b--;
+    return str_new(s->data + a, b - a);
+}
+
+/* ASCII only, deliberately: anything else needs a Unicode table this
+ * language has no business carrying, and a half-done one would be worse
+ * than an honest limit. */
+Obj *rt_str_case(Obj *o, bool upper) {
+    const Str *s = (const Str *)o;
+    Obj *out = str_new(s->data, s->len);
+    char *buf = (char *)(((Str *)out) + 1);
+    for (int64_t i = 0; i < s->len; i++) {
+        char c = buf[i];
+        if (upper && c >= 'a' && c <= 'z') buf[i] = (char)(c - 32);
+        if (!upper && c >= 'A' && c <= 'Z') buf[i] = (char)(c + 32);
+    }
+    return out;
+}
+
+Obj *rt_str_repeat(Obj *o, int64_t n) {
+    const Str *s = (const Str *)o;
+    if (n < 0) rt_trap("cannot repeat a string a negative number of times");
+    int64_t total;
+    if (__builtin_mul_overflow(s->len, n, &total)) rt_trap("string too long");
+    Str *out = (Str *)rt_alloc(sizeof(Str) + (size_t)total + 1, &rt_str_type);
+    char *buf = (char *)(out + 1);
+    for (int64_t i = 0; i < n; i++) {
+        memcpy(buf + i * s->len, s->data, (size_t)s->len);
+    }
+    buf[total] = '\0';
+    out->len = total;
+    out->data = buf;
+    return (Obj *)out;
+}
+
+/* Splitting on an EMPTY separator would have no answer that is not
+ * arbitrary, so it traps rather than picking one. */
+Obj *rt_str_split(Obj *o, Obj *sep) {
+    const Str *s = (const Str *)o;
+    const Str *d = (const Str *)sep;
+    if (d->len == 0) rt_trap("cannot split on an empty separator");
+
+    Obj *out = rt_list_new(true);
+    int64_t start = 0;
+    for (int64_t i = 0; i + d->len <= s->len;) {
+        if (memcmp(s->data + i, d->data, (size_t)d->len) == 0) {
+            rt_list_push(out, (int64_t)(intptr_t)str_new(s->data + start, i - start));
+            i += d->len;
+            start = i;
+        } else {
+            i++;
+        }
+    }
+    rt_list_push(out, (int64_t)(intptr_t)str_new(s->data + start, s->len - start));
+    return out;
+}
+
+Obj *rt_str_join(Obj *parts, Obj *sep) {
+    const Str *d = (const Str *)sep;
+    int64_t n = rt_len_of(parts);
+    int64_t *el = slots(parts);
+
+    int64_t total = 0;
+    for (int64_t i = 0; i < n; i++) {
+        const Str *p = (const Str *)(intptr_t)el[i];
+        if (__builtin_add_overflow(total, p->len, &total)) rt_trap("string too long");
+    }
+    if (n > 1) {
+        int64_t gaps;
+        if (__builtin_mul_overflow(d->len, n - 1, &gaps)) rt_trap("string too long");
+        if (__builtin_add_overflow(total, gaps, &total)) rt_trap("string too long");
+    }
+
+    Str *out = (Str *)rt_alloc(sizeof(Str) + (size_t)total + 1, &rt_str_type);
+    char *buf = (char *)(out + 1);
+    int64_t at = 0;
+    for (int64_t i = 0; i < n; i++) {
+        const Str *p = (const Str *)(intptr_t)el[i];
+        if (i > 0 && d->len > 0) {
+            memcpy(buf + at, d->data, (size_t)d->len);
+            at += d->len;
+        }
+        memcpy(buf + at, p->data, (size_t)p->len);
+        at += p->len;
+    }
+    buf[total] = '\0';
+    out->len = total;
+    out->data = buf;
+    return (Obj *)out;
+}
+
 void rt_print(int64_t v) {
     printf("%" PRId64 "\n", v);
 }
