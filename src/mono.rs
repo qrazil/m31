@@ -170,28 +170,17 @@ impl Mono {
                     ),
                 ));
             }
-            let mangled = self.mangle(&e.name, &args);
-            if self.done.insert(mangled.clone()) {
-                self.out_types.push(TypeDecl {
-                    name: mangled.clone(),
-                    tparams: Vec::new(),
-                    fields: args
-                        .iter()
-                        .enumerate()
-                        .map(|(i, a)| Param {
-                            ty: *a,
-                            name: format!("$t{i}"),
-                            default: None,
-                            embedded: false,
-                            span,
-                        })
-                        .collect(),
-                    methods: Vec::new(),
-                    is_interface: false,
-                    distinct_base: None,
-                    span,
-                });
+            // `keys()` and `values()` hand back a List whose element type
+            // is only implied by the map's -- nothing in the source spells
+            // `List<K>`, so nothing would instantiate it. Do it here, where
+            // the map's arguments are known. A container carries no drop or
+            // walk function, so an unused one costs a typedef and nothing
+            // else.
+            if e.name == "Map" && args.len() == 2 {
+                self.builtin_decl("List", &args[0..1], span);
+                self.builtin_decl("List", &args[1..2], span);
             }
+            let mangled = self.builtin_decl(&e.name, &args, span);
             return Ok(self.intern(mangled, Vec::new()));
         }
 
@@ -291,6 +280,35 @@ impl Mono {
         f.tparams = Vec::new();
         self.out_funcs.push(f);
         Ok(())
+    }
+
+    /// Declare one instantiation of a runtime-owned container, and return its
+    /// mangled name. The runtime owns the layout, so the declaration only has
+    /// to carry the type arguments for the rest of the compiler to read.
+    fn builtin_decl(&mut self, name: &str, args: &[Ty], span: Span) -> String {
+        let mangled = self.mangle(name, args);
+        if self.done.insert(mangled.clone()) {
+            self.out_types.push(TypeDecl {
+                name: mangled.clone(),
+                tparams: Vec::new(),
+                fields: args
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| Param {
+                        ty: *a,
+                        name: format!("$t{i}"),
+                        default: None,
+                        embedded: false,
+                        span,
+                    })
+                    .collect(),
+                methods: Vec::new(),
+                is_interface: false,
+                distinct_base: None,
+                span,
+            });
+        }
+        mangled
     }
 
     fn subst_type_decl(&mut self, t: &TypeDecl, sub: &Subst) -> Result<TypeDecl, Diag> {

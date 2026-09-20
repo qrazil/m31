@@ -159,6 +159,9 @@ int64_t rt_map_get(Obj *o, int64_t k);
 bool    rt_map_has(Obj *o, int64_t k);
 void    rt_map_remove(Obj *o, int64_t k);
 int64_t rt_map_len(Obj *o);
+Obj    *rt_map_keys(Obj *o);
+Obj    *rt_map_values(Obj *o);
+void    rt_map_clear(Obj *o);
 int64_t rt_list_pop(Obj *o);
 
 /* ---- concurrency -------------------------------------------------------

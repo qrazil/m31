@@ -476,6 +476,55 @@ int64_t rt_map_len(Obj *o) {
     return ((Map *)o)->len;
 }
 
+/* Keys and values come out as a List, rather than the map being iterable
+ * directly.
+ *
+ * A map's slots are sparse -- EMPTY and DEAD sit among the FULL ones -- so an
+ * index-based loop over them would need a cursor that skips, which is a
+ * different loop shape from the one `for .. in` has. Copying into a dense
+ * List reuses that shape exactly, and the allocation is visible at the call
+ * site rather than hidden in the loop.
+ *
+ * Insertion order is NOT preserved: the order is the table's, which changes
+ * when the table rehashes. Nothing promises otherwise.
+ *
+ * The list holds its own reference to each element, like any container. */
+static Obj *map_collect(Obj *o, bool want_keys) {
+    Map *m = (Map *)o;
+    bool refs = want_keys ? m->key_is_ref : m->val_is_ref;
+    Obj *out = rt_list_new(refs);
+
+    for (int64_t i = 0; i < m->cap; i++) {
+        if (m->slots[i].state != SLOT_FULL) continue;
+        int64_t e = want_keys ? m->slots[i].k : m->slots[i].v;
+        rt_list_push(out, e);
+        if (refs) rc_inc((Obj *)(intptr_t)e);
+    }
+    return out;
+}
+
+Obj *rt_map_keys(Obj *o) {
+    return map_collect(o, true);
+}
+
+Obj *rt_map_values(Obj *o) {
+    return map_collect(o, false);
+}
+
+void rt_map_clear(Obj *o) {
+    Map *m = (Map *)o;
+    for (int64_t i = 0; i < m->cap; i++) {
+        if (m->slots[i].state != SLOT_FULL) continue;
+        if (m->key_is_ref) rc_dec((Obj *)(intptr_t)m->slots[i].k);
+        if (m->val_is_ref) rc_dec((Obj *)(intptr_t)m->slots[i].v);
+    }
+    free(m->slots);
+    m->slots = NULL;
+    m->cap = 0;
+    m->len = 0;
+    m->used = 0;
+}
+
 /* ---- concurrency ------------------------------------------------------ */
 
 struct Chan {

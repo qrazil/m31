@@ -1,0 +1,55 @@
+// A map could be filled and never enumerated: there was no way to get a key
+// out that you did not already have. keys() and values() close that.
+//
+// They hand back a List rather than the map being iterable directly: a map's
+// slots are sparse -- EMPTY and DEAD sit among the FULL ones -- so an
+// index-based loop over them needs a cursor that skips, which is a different
+// loop shape from the one `for .. in` has. The allocation is visible at the
+// call site instead of hidden in the loop.
+//
+// The order is the table's, not insertion order, so nothing here depends on
+// which order the elements come back in.
+
+Map<str, int> m = Map<str, int>();
+m.set("a", 1);
+m.set("b", 2);
+m.set("c", 3);
+m.remove("b");
+
+int total = 0;
+for (int v in m.values()) {
+    total = total + v;
+}
+print(total);                   // 4
+
+int klen = 0;
+for (str k in m.keys()) {
+    klen = klen + len(k);
+}
+print(klen);                    // 2
+
+print(m.keys().len());          // 2
+print(m.values().len());        // 2
+
+// Reference keys and reference values: the list retains each element, so it
+// stays valid after the map lets go of them.
+Map<str, str> refs = Map<str, str>();
+refs.set(concat("k", "1"), concat("v", "1"));
+refs.set(concat("k", "2"), concat("v", "2"));
+
+List<str> held = refs.keys();
+refs.clear();
+print(refs.len());              // 0
+print(held.len());              // 2
+
+int hl = 0;
+for (str k in held) {
+    hl = hl + len(k);
+}
+print(hl);                      // 4
+
+// clear() leaves a usable map, not a broken one.
+refs.set("after", "clear");
+print(refs.len());              // 1
+print(refs.get("after"));       // clear
+print(refs.keys().len());       // 1

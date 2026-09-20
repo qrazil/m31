@@ -248,10 +248,20 @@ Methods:
 | `Map` | `get(k)` | **traps** on a missing key |
 | `Map` | `has(k)` | is the key present |
 | `Map` | `remove(k)` | delete if present |
+| `Map` | `clear()` | remove every entry |
+| `Map` | `keys()` | a fresh `List<K>` of the keys |
+| `Map` | `values()` | a fresh `List<V>` of the values |
 
 `get` traps rather than returning a default, because there is no null to
 return: the honest choices are to trap or to force every read through a
 check, and `has` is the check.
+
+A map is enumerated through `keys()` and `values()`, which each build a new
+`List`. It is not iterable directly: its slots are sparse, so a loop over
+them needs a cursor that skips, which is not the shape `for ... in` has.
+Building a list makes the allocation visible at the call site instead of
+hiding it in the loop. **The order is the table's, not insertion order**, and
+it changes when the table rehashes — do not depend on it.
 
 ---
 

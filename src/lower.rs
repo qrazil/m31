@@ -259,6 +259,45 @@ impl Lowerer {
         }
     }
 
+    /// Find the `Ty` for an already-declared type, by name.
+    ///
+    /// The arena is populated by monomorphisation from types the source
+    /// spells. A container the source only implies -- `List<K>` behind
+    /// `Map<K, V>.keys()` -- has a declaration but no arena entry until
+    /// something asks for one.
+    fn ty_named(&mut self, name: &str) -> Option<Ty> {
+        if let Some(i) = self
+            .ty_exprs
+            .iter()
+            .position(|e| e.name == name && e.args.is_empty())
+        {
+            return Some(Ty::User(i as u32));
+        }
+        if !self.typedefs.iter().any(|d| d.name == name) {
+            return None;
+        }
+        self.ty_exprs.push(TyExpr {
+            name: name.to_string(),
+            args: Vec::new(),
+        });
+        Some(Ty::User((self.ty_exprs.len() - 1) as u32))
+    }
+
+    /// The `List<T>` type for a given element type. Monomorphisation
+    /// declares one alongside every `Map<K, V>`, so this cannot fail for a
+    /// map's key or value type.
+    fn list_of(&mut self, elem: Ty) -> Option<Ty> {
+        let name = self
+            .typedefs
+            .iter()
+            .enumerate()
+            .find(|(i, d)| {
+                d.name.starts_with("List$") && self.field_surface[*i].first() == Some(&elem)
+            })
+            .map(|(_, d)| d.name.clone())?;
+        self.ty_named(&name)
+    }
+
     /// `m.set(k, v)`, `m.get(k)`, `m.has(k)`, `m.remove(k)`, `m.len()`.
     ///
     /// `get` on a missing key traps, like an out-of-range index: there is no
@@ -277,7 +316,7 @@ impl Lowerer {
             return Err(Diag::new(span, format!("`{m}` takes no named arguments")));
         }
         let arity = match m {
-            "len" => 0,
+            "len" | "keys" | "values" | "clear" => 0,
             "set" => 2,
             "get" | "has" | "remove" => 1,
             other => return Err(Diag::new(span, format!("a map has no method `{other}`"))),
@@ -296,6 +335,39 @@ impl Lowerer {
                 args: vec![o.val()],
             });
             return Ok(Val::new(d, Ty::Int, false));
+        }
+
+        if m == "clear" {
+            self.push(Inst::Call {
+                dst: None,
+                func: "rt_map_clear".to_string(),
+                args: vec![o.val()],
+            });
+            return Ok(Val::void());
+        }
+
+        // A fresh List, so the caller owns it (§5.2) and it holds its own
+        // reference to every element.
+        if m == "keys" || m == "values" {
+            let elem = if m == "keys" { k } else { v };
+            let Some(lty) = self.list_of(elem) else {
+                return Err(Diag::new(
+                    span,
+                    format!("`{m}` has no List type to return; this is a compiler bug"),
+                ));
+            };
+            let d = self.new_val(IrTy::Ref);
+            self.push(Inst::Call {
+                dst: Some(d),
+                func: if m == "keys" {
+                    "rt_map_keys".to_string()
+                } else {
+                    "rt_map_values".to_string()
+                },
+                args: vec![o.val()],
+            });
+            self.stmt_temps.push(d);
+            return Ok(Val::new(d, lty, true));
         }
 
         let key = self.lower_expr(&args.pos[0])?;
