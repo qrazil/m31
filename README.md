@@ -45,7 +45,7 @@ Point p = Point(x: 3, y: 4);
 print(sum(p) * scale);
 
 str s = concat("hel", "lo");
-if (len(s) > 3) {
+if (s.size() > 3) {
     print(s);
 }
 ```
@@ -58,7 +58,7 @@ Types `int`, `bool`, `str`, `void`, and user-defined `type` declarations.
 Functions, recursion, `if`/`else if`/`else`, `while` with `break`/`continue`,
 `return`, locals, `const`, assignment, field access and field assignment, the
 C operator set with C precedence, short-circuiting `&&`/`||`, string literals
-with escapes and UTF-8. Builtins: `print` (int, bool or str), `len`, `concat`.
+with escapes and UTF-8. Builtins: `print` (int, bool or str) and `concat`; `size()` and `contains()` are methods on every collection and on `str`.
 
 **Generics are monomorphised** and erased before lowering, which is why the
 IR has never needed to know about them. `Box<int>` becomes a plain type named
@@ -114,14 +114,14 @@ has to start as *something*, and only the caller can say what.
 Map<str, int> counts = Map<str, int>();
 counts.set("a", 1);
 print(counts.get("a"));
-print(counts.has("b"));
+print(counts.contains("b"));
 ```
 
 `Map<K, V>` is open-addressed with linear probing — one allocation for the
 whole table. Keys are `int` or `str`; hashing a user type would need a
 `Hashable` interface that does not exist yet. `get` on a missing key **traps**,
 like an out-of-range index: there is no null to return, so the honest choices
-are to trap or to force every read through a check, and `has` is the check.
+are to trap or to force every read through a check, and `contains` is the check.
 
 `clone(x)` is a **shallow** copy — we chose reference types, so `=` aliases
 and this is the explicit way to get a second object.

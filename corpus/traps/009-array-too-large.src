@@ -1,4 +1,4 @@
 // 2^61 elements times 8 bytes wraps a 64-bit size_t to zero, which would
 // allocate 16 bytes and then write it as if it held 2^61 elements.
 Array<int> a = Array<int>(2305843009213693952, 0);
-print(a.len());
+print(a.size());

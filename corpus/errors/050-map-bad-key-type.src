@@ -3,4 +3,4 @@ type P {
 }
 
 Map<P, int> m = Map<P, int>();
-print(m.len());
+print(m.size());

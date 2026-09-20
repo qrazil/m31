@@ -6,13 +6,13 @@ xs.push(2);
 xs.push(4);
 xs.insert(2, 3);            // in the middle
 xs.insert(0, 0);            // at the front
-print(xs.len());            // 5
+print(xs.size());            // 5
 print(xs[0]);               // 0
 print(xs[3]);               // 3
 print(xs[4]);               // 4
 
 print(xs.remove_at(0));     // 0 -- returns what it removed
-print(xs.len());            // 4
+print(xs.size());            // 4
 print(xs[0]);               // 1
 
 xs.reverse();
@@ -23,7 +23,7 @@ print(xs.contains(3));      // true
 print(xs.contains(99));     // false
 
 xs.clear();
-print(xs.len());            // 0
+print(xs.size());            // 0
 xs.push(7);                 // still usable after clear
 print(xs[0]);               // 7
 
@@ -38,9 +38,9 @@ print(ws.contains("zz"));   // false
 
 str taken = ws.remove_at(0);
 print(taken);               // cd
-print(ws.len());            // 1
+print(ws.size());            // 1
 ws.clear();
-print(ws.len());            // 0
+print(ws.size());            // 0
 
 // Insert at the very end is allowed; one past that is not.
 List<int> tail = List<int>();

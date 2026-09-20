@@ -48,7 +48,7 @@ reserved only in the sense that nothing may shadow a type name (§4.1).
 | String | `"..."`, with escapes `\\` `\"` `\n` `\t` `\0` |
 
 A `str` carries its length, so `\0` is an ordinary character:
-`len("a\0b")` is 3. Strings are not NUL-terminated.
+`"a\0b".size()` is 3. Strings are not NUL-terminated.
 
 String literals are **immortal**: their refcount never reaches zero, so they
 are never freed (§7.3).
@@ -240,7 +240,7 @@ Methods:
 
 | Receiver | Method | Meaning |
 |---|---|---|
-| `Array`, `List` | `len()` | element count |
+| `Array`, `List`, `Map`, `str` | `size()` | element count |
 | `Array`, `List` | `contains(v)` | `int`, `bool` and `str` elements only |
 | `Array`, `List` | `reverse()` | in place |
 | `Array`, `List` | `sort()` | in place, ascending; `int` and `str` only |
@@ -249,14 +249,21 @@ Methods:
 | `List` | `insert(i, v)` | at `i`; `i == len` appends, beyond that traps |
 | `List` | `remove_at(i)` | remove and return the element at `i` |
 | `List` | `clear()` | drop every element |
-| `Map` | `len()` | entry count |
 | `Map` | `set(k, v)` | insert or replace |
 | `Map` | `get(k)` | **traps** on a missing key |
-| `Map` | `has(k)` | is the key present |
+| `Map` | `contains(k)` | is the key present |
 | `Map` | `remove(k)` | delete if present |
 | `Map` | `clear()` | remove every entry |
 | `Map` | `keys()` | a fresh `List<K>` of the keys |
 | `Map` | `values()` | a fresh `List<V>` of the values |
+
+**One name for each question.** `size()` answers "how big" on a `str`, an
+`Array`, a `List` and a `Map`; `contains()` answers "is it in there" on all
+of them. There is no `len`, and no `has`. A free function for strings and a
+method for everything else was two spellings of one idea.
+
+On a `Map`, `contains` asks about a **key** — the same thing `get` and
+`remove` take.
 
 `contains` compares the way `==` does — `str` by value, `int` and `bool`
 directly — and refuses a user type, which would need its own comparison.
@@ -278,7 +285,7 @@ which it means.
 
 `get` traps rather than returning a default, because there is no null to
 return: the honest choices are to trap or to force every read through a
-check, and `has` is the check.
+check, and `contains` is the check.
 
 A map is enumerated through `keys()` and `values()`, which each build a new
 `List`. It is not iterable directly: its slots are sparse, so a loop over
@@ -525,7 +532,6 @@ Chan<int>(8)
 | | |
 |---|---|
 | `print(x)` | `int`, `bool` or `str`, one argument, newline-terminated |
-| `len(s)` | length of a `str` |
 | `concat(a, b)` | joins two `str` |
 | `clone(x)` | a **shallow** copy |
 | `int(x)`, `bool(x)`, `str(x)` | convert a distinct value to its base |

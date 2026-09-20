@@ -6,4 +6,4 @@ str a = "foo";
 str b = "bar";
 str c = concat(a, b);
 print(c);
-print(len(c));
+print(c.size());

@@ -6,7 +6,7 @@
 int i = 0;
 while (i < 10) {
     str tmp = concat("x", "y");
-    if (len(tmp) == 2) {
+    if (tmp.size() == 2) {
         print(tmp);
         break;
     }

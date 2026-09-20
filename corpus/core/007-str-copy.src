@@ -5,4 +5,4 @@
 str h = concat("hel", "lo");
 str g = h;
 print(g);
-print(len(h));
+print(h.size());

@@ -9,6 +9,6 @@ while (i < 5) {
     if (i % 2 == 0) {
         continue;
     }
-    n = n + len(tmp);
+    n = n + tmp.size();
 }
 print(n);

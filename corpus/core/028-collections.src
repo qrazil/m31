@@ -12,7 +12,7 @@ Array<int> a = Array<int>(4, 0);
 a[0] = 10;
 a[1] = 20;
 a[3] = a[0] + a[1];
-print(a.len());
+print(a.size());
 print(a[3]);
 
 Array<str> names = Array<str>(2, "?");
@@ -24,10 +24,10 @@ print(names[0]);
 List<str> words = List<str>();
 words.push("one");
 words.push("tw" + "o");
-print(words.len());
+print(words.size());
 print(words[1]);
 print(words.pop());
-print(words.len());
+print(words.size());
 
 // Indexing is bounds-checked, and an index can be any expression.
 int i = 1;

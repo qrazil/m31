@@ -27,28 +27,28 @@ str firstpair(List<str> a, List<str> b) {
 str t = "he" + "llo";
 reassign(t);
 print(t);
-print(len(t));
+print(t.size());
 
 List<str> p = List<str>();
 p.push("a");
 List<str> q = List<str>();
 q.push("b");
 print(firstpair(p, q));
-print(p.len());
-print(q.len());
+print(p.size());
+print(q.size());
 
 // 3. An owned temporary in the right-hand operand of `&&` or `||` was
 //    released in the merge block, which the short-circuit edge reaches
 //    without ever computing it. Segfault.
 str a = "aa";
 bool no = false;
-if (no && len(a + "y") == 3) {
+if (no && (a + "y").size() == 3) {
     print("unreachable");
 } else {
     print("short-circuited");
 }
 bool yes = true;
-if (yes || len(a + "z") == 3) {
+if (yes || (a + "z").size() == 3) {
     print("short-circuited too");
 }
 

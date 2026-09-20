@@ -132,7 +132,8 @@ compromise, and overflow tests are rare.
 |---|---|
 | `call f(args...) -> v?` | direct call; result optional |
 
-Builtins (`print`, `len`, …) are ordinary `call`s to runtime functions. This
+Builtins (`print`, `concat`, …) and the built-in methods are ordinary
+`call`s to runtime functions. This
 keeps them out of the instruction set entirely, which is where they belong.
 
 ### Memory and refcounting
@@ -348,7 +349,7 @@ exactly the kind of bug the `-O0` vs `-O2` differential will *not* catch.
 
 ```
 int take(str s) {
-    return len(s);
+    return s.size();
 }
 
 void main() {
@@ -367,7 +368,7 @@ Post-refcount IR:
 ```
 func take(s: ref) -> i64 {
 block0(s: ref):
-    v0 = call len(s)          ; borrowed — no refcount traffic
+    v0 = call rt_len(s)       ; borrowed — no refcount traffic
     ret v0
 }
 

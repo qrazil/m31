@@ -28,5 +28,5 @@ List<int> xs = List<int>();
 xs.push(1);
 List<int> ys = clone(xs);
 ys.push(2);
-print(xs.len());
-print(ys.len());
+print(xs.size());
+print(ys.size());

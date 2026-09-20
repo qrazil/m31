@@ -128,7 +128,7 @@ fn comparison_binds_looser_than_arithmetic() {
 fn borrowed_argument_causes_no_refcount_traffic() {
     // docs/ir-v0.md §5.1: arguments are borrowed. Passing a value a caller
     // already holds to a function that only reads it must cost nothing.
-    let out = ir("int take(str s) { return len(s); }\nstr s = \"hi\"; print(take(s));");
+    let out = ir("int take(str s) { return s.size(); }\nstr s = \"hi\"; print(take(s));");
     let take = out.split("func $main").next().unwrap();
     assert!(
         !take.contains("rc_inc") && !take.contains("rc_dec"),
@@ -310,7 +310,7 @@ fn break_releases_locals_declared_in_the_loop_body() {
     // The break path leaves the body scope, so it must release what the body
     // allocated -- release_to_depth exists for exactly this.
     let out = ir(
-        "int i = 0; while (i < 3) { str t = concat(\"a\",\"b\"); if (len(t) == 2) { break; } i = i + 1; } print(i);",
+        "int i = 0; while (i < 3) { str t = concat(\"a\",\"b\"); if (t.size() == 2) { break; } i = i + 1; } print(i);",
     );
     // One release on the break path, one at the normal end of the iteration.
     assert!(

@@ -4,7 +4,7 @@
 // itself and everything after is addition rather than redesign.
 
 int take(str s) {
-    return len(s);
+    return s.size();
 }
 
 str s = "hello";

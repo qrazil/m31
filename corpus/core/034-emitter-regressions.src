@@ -32,7 +32,7 @@ List<Map<str, int>> nested = List<Map<str, int>>();
 Map<str, int> inner = Map<str, int>();
 inner.set("a", 1);
 nested.push(inner);
-print(nested.len());        // 1
+print(nested.size());        // 1
 print(nested[0].get("a"));  // 1
 
 // 8. Tombstones are swept by a same-capacity rehash, so a map that is
@@ -44,7 +44,7 @@ while (i < 20000) {
     churn.remove(i);
     i = i + 1;
 }
-print(churn.len());         // 0
+print(churn.size());         // 0
 churn.set(1, 100);
 print(churn.get(1));        // 100 -- still correct after the sweep
 

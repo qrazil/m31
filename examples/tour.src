@@ -120,7 +120,7 @@ print(p.second);
 // ---- strings -----------------------------------------------------------
 str title = banner("tour", 8);
 print(title);
-print(len(title));
+print(title.size());
 
 // ---- interfaces ----------------------------------------------------
 // Structural: having the methods is the proof, no `implements` clause.
@@ -157,20 +157,20 @@ words.push("fox");
 
 str sentence = "";
 for (str w in words) {
-    if (len(w) == 3) {
+    if (w.size() == 3) {
         continue;
     }
     sentence = sentence + w;
 }
 print(sentence);
-print(words.len());
+print(words.size());
 
 // `=` aliases, because user types are reference types; clone is the
 // explicit copy.
 List<str> copy = clone(words);
 copy.push("more");
-print(words.len());
-print(copy.len());
+print(words.size());
+print(copy.size());
 
 // ---- concurrency ---------------------------------------------------
 // Threads and channels. A reference sent to another thread is MOVED, which
@@ -215,5 +215,5 @@ if (z != 0 && 10 / z > 1) {
     print(0);
 }
 
-bool ok = len(title) > 3;
+bool ok = title.size() > 3;
 print(ok);

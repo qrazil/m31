@@ -35,8 +35,10 @@ erased before the IR so they cost nothing. Monomorphised generics on types
 and functions.
 
 **Collections.** `Array<T>` fixed-length, `List<T>` growable, `Map<K, V>`
-open-addressed with tombstones. Indexing, `len`, `push`, `pop`, `set`, `get`,
-`has`, `remove`.
+open-addressed with tombstones. One name per question across all of them and
+across `str`: `size()` and `contains()`. Plus indexing, `push`, `pop`,
+`insert`, `remove_at`, `clear`, `reverse`, a stable `sort()`, and `keys()` /
+`values()` on a map.
 
 **Functions.** Default arguments, with one calling rule: mandatory
 parameters are positional, optional ones are named. Methods on any type, with
@@ -88,7 +90,7 @@ matching to be usable, which is a second feature.
 
 ### 3. A string library
 
-`len` and `concat` are the whole of it today. A usable language needs
+`size()` and `concat` are the whole of it today. A usable language needs
 `substr`, `index_of`, `contains`, `starts_with`, `ends_with`, `split`,
 `join`, `trim`, case conversion, and conversion between `int` and `str`.
 

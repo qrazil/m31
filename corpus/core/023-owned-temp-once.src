@@ -22,4 +22,4 @@ Box b = Box("hi");
 print(b.get());
 print(shout(b.get()));
 print(shout(shout("a")));
-print(len(shout("abc")));
+print(shout("abc").size());

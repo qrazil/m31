@@ -9,7 +9,7 @@ void eat(Holder h, int n) {
     int t = 0;
     while (i < n) {
         str x = h.s;
-        t = t + len(x);
+        t = t + x.size();
         i = i + 1;
     }
 }
@@ -20,4 +20,4 @@ while (k < 8) {
     spawn eat(Holder(shared), 200000);
     k = k + 1;
 }
-print(len(shared));
+print(shared.size());

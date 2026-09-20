@@ -42,7 +42,7 @@ for (str w in ws) {
 // one, and an odd length that is not a power of two.
 List<int> none = List<int>();
 none.sort();
-print(none.len());              // 0
+print(none.size());              // 0
 
 List<int> one = List<int>();
 one.push(42);
@@ -74,4 +74,4 @@ print(odd[6]);                  // 7
 odd.push(0);
 odd.sort();
 print(odd[0]);                  // 0
-print(odd.len());               // 8
+print(odd.size());               // 8

@@ -1,0 +1,4 @@
+corpus/errors/062-len-is-size.src:4:7: there is no `len`; every collection and `str` answers `.size()`
+  |
+4 | print(len("ab"));
+  |       ^

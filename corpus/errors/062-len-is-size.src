@@ -1,0 +1,4 @@
+// One name for each question, across every collection and `str`. There is
+// no `len` and no `has`; a free function for strings and a method for
+// everything else was two spellings of one idea.
+print(len("ab"));

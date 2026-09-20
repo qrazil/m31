@@ -1,5 +1,5 @@
 void e(Chan<int> d, str s) {
-    send(d, len(s));
+    send(d, s.size());
 }
 
 // `borrowed` is a parameter: the caller still holds it, so handing it to a

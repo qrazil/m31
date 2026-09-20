@@ -13,17 +13,17 @@ Map<str, int> counts = Map<str, int>();
 counts.set("a", 1);
 counts.set("b", 2);
 counts.set("a", 10);        // replaces, does not grow
-print(counts.len());
+print(counts.size());
 print(counts.get("a"));
-print(counts.has("b"));
-print(counts.has("zz"));
+print(counts.contains("b"));
+print(counts.contains("zz"));
 counts.remove("b");
-print(counts.len());
-print(counts.has("b"));
+print(counts.size());
+print(counts.contains("b"));
 
 // str keys compare by content, not by identity.
 str built = "a" + "";
-print(counts.has(built));
+print(counts.contains(built));
 
 Map<int, str> names = Map<int, str>();
 names.set(1, "one");
@@ -37,13 +37,13 @@ while (i < 200) {
     big.set(i, i * i);
     i = i + 1;
 }
-print(big.len());
+print(big.size());
 print(big.get(7));
 print(big.get(199));
 
 // Removing then re-adding must reuse the tombstone, not lose the key.
 big.remove(7);
-print(big.has(7));
+print(big.contains(7));
 big.set(7, 777);
 print(big.get(7));
-print(big.len());
+print(big.size());

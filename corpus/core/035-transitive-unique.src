@@ -4,7 +4,7 @@ type Holder { str s; }
 Chan<int> out = Chan<int>(8);
 
 void eat(Holder h, Chan<int> ch) {
-    send(ch, len(h.s));
+    send(ch, h.s.size());
 }
 
 // A fresh graph each iteration: unique all the way down.
@@ -21,7 +21,7 @@ print(recv(out) + recv(out) + recv(out) + recv(out));   // 16
 type Two { str a; str b; }
 
 void both(Two t, Chan<int> ch) {
-    send(ch, len(t.a) + len(t.b));
+    send(ch, t.a.size() + t.b.size());
 }
 
 str inner = concat("xy", "zw");
@@ -34,7 +34,7 @@ print(recv(out));               // 8
 void total(List<str> xs, Chan<int> ch) {
     int n = 0;
     for (str s in xs) {
-        n = n + len(s);
+        n = n + s.size();
     }
     send(ch, n);
 }

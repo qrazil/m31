@@ -19,7 +19,7 @@ int got = 0;
 int total = 0;
 while (got < 3) {
     str s = recv(c);
-    total = total + len(s);
+    total = total + s.size();
     got = got + 1;
 }
 print(total);

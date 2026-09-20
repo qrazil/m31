@@ -182,7 +182,31 @@ impl Lowerer {
         self.sigs.insert(name.to_string(), Sig { params, ret });
     }
 
-    /// `xs.len()`, `xs.push(v)`, `xs.pop()`.
+    /// `s.size()`. The only method a `str` has for now; the string library
+    /// will land here rather than as free functions.
+    fn lower_str_method(&mut self, o: &Val, m: &str, args: &Args, span: Span) -> Result<Val, Diag> {
+        if !args.named.is_empty() {
+            return Err(Diag::new(span, format!("`{m}` takes no named arguments")));
+        }
+        match m {
+            "size" => {
+                if !args.pos.is_empty() {
+                    return Err(Diag::new(span, "`size` takes no arguments"));
+                }
+                let d = self.new_val(IrTy::I64);
+                self.push(Inst::Call {
+                    dst: Some(d),
+                    func: "rt_len".to_string(),
+                    args: vec![o.val()],
+                });
+                Ok(Val::new(d, Ty::Int, false))
+            }
+            "len" => Err(Diag::new(span, "`str` has no method `len`; it is `size()`")),
+            other => Err(Diag::new(span, format!("`str` has no method `{other}`"))),
+        }
+    }
+
+    /// `xs.size()`, `xs.push(v)`, `xs.pop()`.
     fn lower_seq_method(
         &mut self,
         o: &Val,
@@ -196,9 +220,9 @@ impl Lowerer {
         }
         let growable = self.is_list(o.ty);
         match m {
-            "len" => {
+            "size" => {
                 if !args.pos.is_empty() {
-                    return Err(Diag::new(span, "`len` takes no arguments"));
+                    return Err(Diag::new(span, "`size` takes no arguments"));
                 }
                 let d = self.new_val(IrTy::I64);
                 self.push(Inst::Call {
@@ -399,6 +423,20 @@ impl Lowerer {
                 span,
                 format!("`{m}` needs a List; an Array has a fixed length"),
             )),
+            "len" => Err(Diag::new(
+                span,
+                format!(
+                    "`{}` has no method `len`; it is `size()`",
+                    self.tyname(o.ty)
+                ),
+            )),
+            "has" => Err(Diag::new(
+                span,
+                format!(
+                    "`{}` has no method `has`; it is `contains()`",
+                    self.tyname(o.ty)
+                ),
+            )),
             // Java has both remove(int) and remove(Object) and the overload
             // is a standing trap. One name, and it says which it means.
             "remove" => Err(Diag::new(
@@ -473,9 +511,16 @@ impl Lowerer {
             return Err(Diag::new(span, format!("`{m}` takes no named arguments")));
         }
         let arity = match m {
-            "len" | "keys" | "values" | "clear" => 0,
+            "size" | "keys" | "values" | "clear" => 0,
             "set" => 2,
-            "get" | "has" | "remove" => 1,
+            "get" | "contains" | "remove" => 1,
+            "len" => return Err(Diag::new(span, "a map has no method `len`; it is `size()`")),
+            "has" => {
+                return Err(Diag::new(
+                    span,
+                    "a map has no method `has`; it is `contains()`, which asks about a key",
+                ))
+            }
             other => return Err(Diag::new(span, format!("a map has no method `{other}`"))),
         };
         if args.pos.len() != arity {
@@ -484,7 +529,7 @@ impl Lowerer {
                 format!("`{m}` takes {arity} argument(s), found {}", args.pos.len()),
             ));
         }
-        if m == "len" {
+        if m == "size" {
             let d = self.new_val(IrTy::I64);
             self.push(Inst::Call {
                 dst: Some(d),
@@ -556,7 +601,7 @@ impl Lowerer {
                 // Borrowed from the map, which holds the +1.
                 Ok(Val::new(d, v, false))
             }
-            "has" => {
+            "contains" => {
                 let d = self.new_val(IrTy::I1);
                 self.push(Inst::Call {
                     dst: Some(d),
@@ -992,7 +1037,6 @@ impl Lowerer {
         // Builtins. `print` is special-cased in the call path because it
         // accepts int, bool or str and picks the runtime helper statically;
         // that is not user-visible overloading, which does not exist.
-        self.builtin("len", vec![Ty::Str], Ty::Int);
         self.builtin("concat", vec![Ty::Str, Ty::Str], Ty::Str);
 
         // After monomorphisation every Ty::User names a concrete declaration
@@ -2681,6 +2725,13 @@ impl Lowerer {
 
             Expr::MethodCall(obj, m, args, span) => {
                 let o = self.lower_expr(obj)?;
+                // `str` is not a declared type, so it has no entry in the
+                // type table -- but it still answers `size()`, because one
+                // rule for asking how big a thing is beats a free function
+                // for strings and a method for everything else.
+                if self.underlying(o.ty) == Ty::Str {
+                    return self.lower_str_method(&o, m, args, *span);
+                }
                 let Some(tid) = self.tdef_of(o.ty) else {
                     return Err(Diag::new(
                         *span,
@@ -3493,6 +3544,13 @@ impl Lowerer {
         }
 
         let Some(sig) = self.sigs.get(name) else {
+            if name == "len" {
+                return Err(Diag::new(
+                    span,
+                    "there is no `len`; every collection and `str` answers \
+                     `.size()`",
+                ));
+            }
             return Err(Diag::new(span, format!("unknown function `{name}`")));
         };
         let params = sig.params.clone();
@@ -3513,7 +3571,6 @@ impl Lowerer {
         }
 
         let rt_name = match name {
-            "len" => "rt_len".to_string(),
             "concat" => "rt_concat".to_string(),
             // The emitter escapes and prefixes; give it the raw name.
             other => other.to_string(),
