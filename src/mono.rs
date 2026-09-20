@@ -202,6 +202,7 @@ impl Mono {
                     Some(e) => Some(self.subst_expr(e, &sub)?),
                     None => None,
                 },
+                embedded: f.embedded,
                 span: f.span,
             });
         }
@@ -260,6 +261,7 @@ impl Mono {
                     Some(e) => Some(self.subst_expr(e, sub)?),
                     None => None,
                 },
+                embedded: f.embedded,
                 span: f.span,
             });
         }
@@ -286,6 +288,7 @@ impl Mono {
                     Some(e) => Some(self.subst_expr(e, sub)?),
                     None => None,
                 },
+                embedded: p.embedded,
                 span: p.span,
             });
         }

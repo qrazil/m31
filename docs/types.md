@@ -306,6 +306,26 @@ Lifting that needs a real type checker running before monomorphisation, which
 is the right eventual architecture. Until then the diagnostic says exactly
 what to do rather than guessing.
 
+### Embedding, in place of inheritance
+
+An anonymous field -- a bare type with no name -- is embedded, and takes the
+type's own name. Its fields and methods are promoted onto the outer type.
+Breadth-first, so a direct member always wins over a promoted one and a
+shallower promotion wins over a deeper one; Go's rule.
+
+Methods are promoted by **synthesising forwarders** rather than by teaching
+every call site about embedding, which leaves direct calls, vtables and
+interface satisfaction working unchanged.
+
+Forwarder generation runs to a **fixpoint**. Transitivity does not fall out
+for free: when `Puppy` embeds `Dog` which embeds `Animal`, `Dog.count_legs`
+is itself a forwarder generated in the same pass, so it is invisible until
+the round that created it has finished.
+
+This is the whole of the inheritance replacement: polymorphism comes from
+interfaces, reuse from embedding, and there is no subtyping between concrete
+types.
+
 ### Dispatch lives in the object header
 
 Monomorphised generics need no dispatch. Interfaces do, and the obvious answer

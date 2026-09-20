@@ -1,0 +1,25 @@
+// Regression: a call returning str, passed straight to another call, must be
+// released exactly ONCE. An owned temporary is registered by whatever
+// produces it; a consumer must not register it again.
+//
+// This shape -- print(f()) where f returns str -- did not appear in the
+// corpus until embedding added it, and the double rc_dec it caused corrupted
+// the heap rather than failing a comparison.
+
+type Box {
+    str s;
+}
+
+str Box.get() {
+    return s;
+}
+
+str shout(str x) {
+    return x + "!";
+}
+
+Box b = Box("hi");
+print(b.get());
+print(shout(b.get()));
+print(shout(shout("a")));
+print(len(shout("abc")));

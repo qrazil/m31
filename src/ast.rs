@@ -204,6 +204,10 @@ pub struct Param {
     pub ty: Ty,
     pub name: String,
     pub default: Option<Expr>,
+    /// An embedded field: written as a bare type with no name, and named
+    /// after its type. Its fields and methods are promoted onto the outer
+    /// type -- composition in place of inheritance.
+    pub embedded: bool,
     pub span: Span,
 }
 

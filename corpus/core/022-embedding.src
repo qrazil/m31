@@ -1,0 +1,59 @@
+// Embedding: an anonymous field, named after its type. Its fields and
+// methods are promoted onto the outer type. This is composition in place of
+// inheritance -- reuse without subtyping.
+//
+// Methods are promoted by SYNTHESISING FORWARDERS rather than by teaching
+// every call site about embedding, so direct calls, vtables and interface
+// satisfaction all work unchanged -- and transitivity falls out, because an
+// inner type's own forwarders are already methods by the time the outer one
+// looks.
+
+type Animal {
+    str species;
+    int legs;
+}
+
+str Animal.describe() {
+    return species;
+}
+
+int Animal.count_legs() {
+    return legs;
+}
+
+type Dog {
+    Animal;
+    str name;
+}
+
+// The outer type's own method wins over the promoted one.
+str Dog.describe() {
+    return name + " the " + species;
+}
+
+// Two levels: Puppy embeds Dog, which embeds Animal.
+type Puppy {
+    Dog;
+    int weeks;
+}
+
+type Speaker interface {
+    int count_legs();
+}
+
+Dog d = Dog(Animal("dog", 4), "Rex");
+print(d.species);
+print(d.legs);
+print(d.name);
+print(d.describe());
+print(d.count_legs());
+
+Speaker sp = d;
+print(sp.count_legs());
+
+Puppy p = Puppy(Dog(Animal("wolf", 4), "Cub"), 6);
+print(p.species);        // promoted two levels
+print(p.name);
+print(p.weeks);
+print(p.describe());     // Dog's, promoted one level
+print(p.count_legs());   // Animal's, promoted two levels

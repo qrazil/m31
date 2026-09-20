@@ -272,6 +272,22 @@ impl Parser {
         if ty == Ty::Void {
             return Err(Diag::new(span, "`void` is not a value type"));
         }
+        // `Animal;` with no name is an embedded field, named after its type.
+        if self.peek() == &Tok::Semi {
+            let Ty::User(i) = ty else {
+                return Err(Diag::new(
+                    span,
+                    "only a user type can be embedded; give this field a name",
+                ));
+            };
+            return Ok(Param {
+                ty,
+                name: self.ty_exprs[i as usize].name.clone(),
+                default: None,
+                embedded: true,
+                span,
+            });
+        }
         let (name, _) = self.expect_ident()?;
         let default = if self.eat(&Tok::Assign) {
             Some(self.parse_expr(0)?)
@@ -282,6 +298,7 @@ impl Parser {
             ty,
             name,
             default,
+            embedded: false,
             span,
         })
     }

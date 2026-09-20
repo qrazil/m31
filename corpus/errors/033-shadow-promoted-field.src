@@ -1,0 +1,14 @@
+type A {
+    int v;
+}
+
+type B {
+    A;
+}
+
+int B.bad() {
+    int v = 1;
+    return v;
+}
+
+print(1);

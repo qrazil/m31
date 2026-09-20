@@ -751,3 +751,50 @@ fn interface_misuse_is_rejected_with_the_reason() {
             .contains("has no method `nope`")
     );
 }
+
+// ---- embedding --------------------------------------------------------
+
+#[test]
+fn embedding_promotes_fields_and_methods() {
+    let src = "type A { int v; }\nint A.get() { return v; }\ntype B { A; int w; }\nB b = B(A(1), 2); print(b.v); print(b.get());";
+    let out = ir(src);
+    assert!(out.contains("func B.get"), "expected a forwarder:\n{out}");
+}
+
+#[test]
+fn the_outer_types_own_method_wins() {
+    let src = "type A { int v; }\nint A.get() { return v; }\ntype B { A; }\nint B.get() { return 99; }\nB b = B(A(1)); print(b.get());";
+    let out = ir(src);
+    // Exactly one B.get, and it is the hand-written one, not a forwarder.
+    assert_eq!(out.matches("func B.get").count(), 1, "{out}");
+    assert!(
+        out.contains("iconst 99"),
+        "the hand-written body must win:\n{out}"
+    );
+}
+
+#[test]
+fn promotion_is_transitive() {
+    // Needs a fixpoint: B.get is itself a forwarder when C embeds B, so it is
+    // not visible until the round that created it has finished.
+    let src = "type A { int v; }\nint A.get() { return v; }\ntype B { A; }\ntype C { B; }\nC c = C(B(A(7))); print(c.get()); print(c.v);";
+    let out = ir(src);
+    assert!(
+        out.contains("func C.get"),
+        "expected a transitive forwarder:\n{out}"
+    );
+}
+
+#[test]
+fn an_owned_temporary_is_released_exactly_once() {
+    // Regression: producers register owned temporaries; consumers must not
+    // register them again. The duplicate produced two rc_dec calls on the
+    // same value, which corrupted the heap rather than failing a comparison.
+    let out = ir("str f() { return \"a\" + \"b\"; }\nprint(f());");
+    let main = out.split("func $main").nth(1).unwrap();
+    assert_eq!(
+        main.matches("rc_dec").count(),
+        1,
+        "exactly one release for the temporary:\n{main}"
+    );
+}

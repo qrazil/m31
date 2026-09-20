@@ -20,8 +20,8 @@ which gcc and clang both build clean at `-O0` and `-O2`.
 `examples/tour.src` is a tour of every feature, and is also in the corpus so
 it cannot rot.
 
-- 65 corpus programs, 0 failing
-- 57 unit tests
+- 69 corpus programs, 0 failing
+- 61 unit tests
 - 0 dependencies, 0 `unsafe`, clippy clean at `-D warnings`
 
 ## What the language does today
@@ -86,6 +86,28 @@ void Rect.scale(int f) {
 
 That is safe only because of the next rule.
 
+**Embedding** is composition in place of inheritance: an anonymous field,
+named after its type, whose fields and methods are promoted.
+
+```c
+type Animal { str species; int legs; }
+int Animal.count_legs() { return legs; }
+
+type Dog {
+    Animal;          // embedded
+    str name;
+}
+
+Dog d = Dog(Animal("dog", 4), "Rex");
+print(d.species);       // promoted field
+print(d.count_legs());  // promoted method
+```
+
+Methods are promoted by synthesising forwarders, so direct calls, vtables and
+interface satisfaction all work unchanged. A method the outer type defines
+itself always wins. There is no inheritance and no subtyping — polymorphism
+is the interface above, reuse is this.
+
 **Interfaces are structural** — having the methods is the proof, with no
 `implements` clause, so a type written before the interface existed can
 satisfy it:
@@ -143,7 +165,7 @@ Naming a mandatory parameter is an error, as is passing an optional one
 positionally. The two halves never overlap, so there is no question of which
 form to use and no question of what order optional arguments come in.
 
-Not yet: `for`, closures, embedding, modules, concurrency.
+Not yet: `for`, closures, modules, concurrency.
 
 ## Decisions made
 

@@ -1,0 +1,5 @@
+type Bad {
+    int;
+}
+
+print(1);

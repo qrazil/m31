@@ -160,10 +160,123 @@ impl Lowerer {
                 ty,
                 name: format!("a{i}"),
                 default: None,
+                embedded: false,
                 span: Span::new(0, 0),
             })
             .collect();
         self.sigs.insert(name.to_string(), Sig { params, ret });
+    }
+
+    /// One forwarder per promoted method: `void Dog.speak()` calling
+    /// `Animal.speak()` on the embedded field.
+    ///
+    /// A method the outer type defines itself always wins.
+    ///
+    /// Run to a FIXPOINT, because transitivity does not fall out for free:
+    /// when Puppy embeds Dog which embeds Animal, `Dog.count_legs` is itself
+    /// a forwarder generated in this same pass, so it is not visible until
+    /// the round that created it has finished. Each round consults the
+    /// forwarders the previous rounds produced.
+    fn embed_forwarders(&self, p: &Program) -> Result<Vec<Func>, Diag> {
+        let mut out: Vec<Func> = Vec::new();
+        loop {
+            let before = out.len();
+            self.forward_round(p, &mut out)?;
+            if out.len() == before {
+                return Ok(out);
+            }
+        }
+    }
+
+    fn forward_round(&self, p: &Program, out: &mut Vec<Func>) -> Result<(), Diag> {
+        for (tid, t) in p.types.iter().enumerate() {
+            if t.is_interface {
+                continue;
+            }
+            for f in t.fields.iter().filter(|f| f.embedded) {
+                let Some(inner) = self.tdef_of(f.ty) else {
+                    continue;
+                };
+                let iname = self.typedefs[inner as usize].name.clone();
+                // Every method of the embedded type, by name.
+                let prefix = format!("{iname}.");
+                let mut promoted: Vec<(String, Sig)> = self
+                    .sigs
+                    .iter()
+                    .filter_map(|(k, sig)| {
+                        let m = k.strip_prefix(&prefix)?;
+                        Some((
+                            m.to_string(),
+                            Sig {
+                                params: sig.params.clone(),
+                                ret: sig.ret,
+                            },
+                        ))
+                    })
+                    .collect();
+                // Forwarders already generated count as the inner type's
+                // methods, which is what makes deeper embedding work.
+                for g in out.iter() {
+                    if g.recv.as_deref() == Some(iname.as_str()) {
+                        promoted.push((
+                            g.name.clone(),
+                            Sig {
+                                params: g.params.clone(),
+                                ret: g.ret,
+                            },
+                        ));
+                    }
+                }
+                for (mname, sig) in promoted {
+                    let key = format!("{}.{mname}", t.name);
+                    if self.sigs.contains_key(&key) || out.iter().any(|x| x.key() == key) {
+                        continue; // the outer type defines it itself
+                    }
+                    let args = Args {
+                        pos: sig
+                            .params
+                            .iter()
+                            .filter(|q| !q.is_optional())
+                            .map(|q| Expr::Var(q.name.clone(), f.span))
+                            .collect(),
+                        named: sig
+                            .params
+                            .iter()
+                            .filter(|q| q.is_optional())
+                            .map(|q| (q.name.clone(), Expr::Var(q.name.clone(), f.span)))
+                            .collect(),
+                    };
+                    let call = Expr::MethodCall(
+                        Box::new(Expr::Var(f.name.clone(), f.span)),
+                        mname.clone(),
+                        args,
+                        f.span,
+                    );
+                    let body = if sig.ret == Ty::Void {
+                        vec![Stmt::Eval {
+                            expr: call,
+                            span: f.span,
+                        }]
+                    } else {
+                        vec![Stmt::Return {
+                            value: Some(call),
+                            span: f.span,
+                        }]
+                    };
+                    out.push(Func {
+                        ret: sig.ret,
+                        recv: Some(t.name.clone()),
+                        name: mname,
+                        tparams: Vec::new(),
+                        params: sig.params.clone(),
+                        body,
+                        span: f.span,
+                    });
+                }
+            }
+            let _ = tid;
+        }
+        Ok(())
     }
 
     /// Bind a call's arguments to a parameter list, by Oro's rule:
@@ -320,6 +433,23 @@ impl Lowerer {
             );
         }
 
+        // Embedding promotes methods by SYNTHESISING FORWARDERS, one per
+        // promoted method, rather than by teaching every call site about
+        // embedding. Everything downstream -- direct calls, vtables,
+        // interface satisfaction -- then works unchanged, and transitivity
+        // falls out for free, because an inner type's own forwarders are
+        // already methods by the time the outer one looks.
+        let forwarders = self.embed_forwarders(p)?;
+        for f in &forwarders {
+            self.sigs.insert(
+                f.key(),
+                Sig {
+                    params: f.params.clone(),
+                    ret: f.ret,
+                },
+            );
+        }
+
         // There is no `main`. The statements written at the top level are
         // the program, in source order, and they are lowered as the body of
         // one synthesised function. Declarations are order-independent, so a
@@ -336,6 +466,9 @@ impl Lowerer {
 
         let mut funcs = Vec::new();
         for f in &p.funcs {
+            funcs.push(self.lower_func(f)?);
+        }
+        for f in &forwarders {
             funcs.push(self.lower_func(f)?);
         }
         funcs.push(self.lower_func(&entry)?);
@@ -442,7 +575,7 @@ impl Lowerer {
             ));
         }
         if let Some((tid, _)) = self.recv {
-            if self.field_of(tid, name).is_some() {
+            if self.field_path(tid, name).is_some() {
                 return Err(Diag::new(
                     span,
                     format!(
@@ -455,11 +588,12 @@ impl Lowerer {
         Ok(())
     }
 
-    /// Read a bare name that is a field of the receiver.
-    fn recv_field(&self, name: &str) -> Option<(u32, Value, u32, IrTy)> {
+    /// A bare name that names a field of the receiver, promoted fields
+    /// included. Returns the receiver and the path to reach it.
+    fn recv_field(&self, name: &str) -> Option<(u32, Value, Vec<u32>)> {
         let (tid, obj) = self.recv?;
-        let (idx, fty) = self.field_of(tid, name)?;
-        Some((tid, obj, idx, fty))
+        let path = self.field_path(tid, name)?;
+        Some((tid, obj, path))
     }
 
     fn binding(&self, name: &str) -> Option<Binding> {
@@ -570,6 +704,56 @@ impl Lowerer {
             }
         }
         unreachable!("rebind of unknown name");
+    }
+
+    /// The path of field indices to reach `name` from `tid`, promoting
+    /// through embedded fields. Empty prefix means a direct field.
+    ///
+    /// Breadth-first, so a direct field always wins over a promoted one, and
+    /// a shallower promotion wins over a deeper one -- the same rule Go uses.
+    fn field_path(&self, tid: u32, name: &str) -> Option<Vec<u32>> {
+        if self.field_of(tid, name).is_some() {
+            let (i, _) = self.field_of(tid, name).unwrap();
+            return Some(vec![i]);
+        }
+        for (i, p) in self.field_params[tid as usize].iter().enumerate() {
+            if !p.embedded {
+                continue;
+            }
+            let Some(inner) = self.tdef_of(p.ty) else {
+                continue;
+            };
+            if let Some(mut rest) = self.field_path(inner, name) {
+                let mut path = vec![i as u32];
+                path.append(&mut rest);
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    /// Walk a field path, emitting a load per step, and return the final
+    /// value and its surface type.
+    fn load_path(&mut self, tid: u32, obj: Value, path: &[u32]) -> (Value, Ty) {
+        let mut cur_tid = tid;
+        let mut cur = obj;
+        let mut ty = Ty::Void;
+        for idx in path {
+            let (_, fty) = self.typedefs[cur_tid as usize].fields[*idx as usize].clone();
+            let d = self.new_val(fty);
+            self.push(Inst::LoadField {
+                dst: d,
+                obj: cur,
+                tid: cur_tid,
+                idx: *idx,
+            });
+            ty = self.field_ty(cur_tid, *idx);
+            cur = d;
+            if let Some(next) = self.tdef_of(ty) {
+                cur_tid = next;
+            }
+        }
+        (cur, ty)
     }
 
     fn field_of(&self, tid: u32, name: &str) -> Option<(u32, IrTy)> {
@@ -782,7 +966,18 @@ impl Lowerer {
             Stmt::Assign { name, value, span } => {
                 // A bare name inside a method may be a field of the receiver.
                 if self.binding(name).is_none() {
-                    if let Some((tid, obj, idx, fty)) = self.recv_field(name) {
+                    if let Some((rtid, robj, path)) = self.recv_field(name) {
+                        // Walk to the object that actually owns the field.
+                        let (owner, owner_tid) = if path.len() == 1 {
+                            (robj, rtid)
+                        } else {
+                            let (o, oty) = self.load_path(rtid, robj, &path[..path.len() - 1]);
+                            (o, self.tdef_of(oty).expect("embedded field is a type"))
+                        };
+                        let idx = *path.last().unwrap();
+                        let tid = owner_tid;
+                        let obj = owner;
+                        let (_, fty) = self.typedefs[tid as usize].fields[idx as usize].clone();
                         let v = self.lower_expr(value)?;
                         let want = self.field_ty(tid, idx);
                         if !self.assignable(v.ty, want) {
@@ -1359,16 +1554,10 @@ impl Lowerer {
                 }
                 // Inside a method, a bare name may be a field of the
                 // receiver. Unambiguous because nothing shadows anything.
-                if let Some((tid, obj, idx, fty)) = self.recv_field(name) {
-                    let d = self.new_val(fty);
-                    self.push(Inst::LoadField {
-                        dst: d,
-                        obj,
-                        tid,
-                        idx,
-                    });
+                if let Some((tid, obj, path)) = self.recv_field(name) {
+                    let (d, fty) = self.load_path(tid, obj, &path);
                     // Borrowed from the receiver, which holds the +1.
-                    return Ok(Val::new(d, self.field_ty(tid, idx), false));
+                    return Ok(Val::new(d, fty, false));
                 }
                 Err(Diag::new(*span, format!("unknown variable `{name}`")))
             }
@@ -1422,22 +1611,16 @@ impl Lowerer {
                         format!("type {} has no fields", self.tyname(o.ty)),
                     ));
                 };
-                let Some((idx, fty)) = self.field_of(tid, field) else {
+                let Some(path) = self.field_path(tid, field) else {
                     return Err(Diag::new(
                         *span,
                         format!("type `{}` has no field `{field}`", self.tyname(o.ty)),
                     ));
                 };
-                let d = self.new_val(fty);
-                self.push(Inst::LoadField {
-                    dst: d,
-                    obj: o.val(),
-                    tid,
-                    idx,
-                });
+                let (d, fty) = self.load_path(tid, o.val(), &path);
                 // A field read is BORROWED from the object, exactly like a
                 // local: the object holds the +1, we do not.
-                Ok(Val::new(d, self.field_ty(tid, idx), false))
+                Ok(Val::new(d, fty, false))
             }
 
             Expr::MethodCall(obj, m, args, span) => {
@@ -1472,16 +1655,10 @@ impl Lowerer {
                     let slots =
                         self.bind_args(&format!("{iname}.{m}"), &decl.params, args, *span)?;
                     let mut vals = vec![o.val()];
-                    if o.owned {
-                        self.stmt_temps.push(o.val());
-                    }
                     for (a, p) in slots.iter().zip(decl.params.iter()) {
                         let v = self.lower_expr(a)?;
                         if !self.assignable(v.ty, p.ty) {
                             return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
-                        }
-                        if v.owned {
-                            self.stmt_temps.push(v.val());
                         }
                         vals.push(v.val());
                     }
@@ -1528,16 +1705,10 @@ impl Lowerer {
                 // The receiver is the hidden first argument, and is borrowed
                 // like every other argument (docs/ir-v0.md §5.1).
                 let mut vals = vec![o.val()];
-                if o.owned {
-                    self.stmt_temps.push(o.val());
-                }
                 for (a, p) in slots.iter().zip(params.iter()) {
                     let v = self.lower_expr(a)?;
                     if !self.assignable(v.ty, p.ty) {
                         return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
-                    }
-                    if v.owned {
-                        self.stmt_temps.push(v.val());
                     }
                     vals.push(v.val());
                 }
@@ -1947,9 +2118,6 @@ impl Lowerer {
                     ))
                 }
             };
-            if a.owned {
-                self.stmt_temps.push(a.val());
-            }
             self.push(Inst::Call {
                 dst: None,
                 func: f.to_string(),
@@ -1973,11 +2141,8 @@ impl Lowerer {
                 return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
             }
             // Arguments are borrowed (§5.1): no retain at the call site. An
-            // owned temporary still has to be released after the call, so it
-            // stays on the statement's pending list.
-            if v.owned {
-                self.stmt_temps.push(v.val());
-            }
+            // owned temporary is already on the statement's pending list --
+            // the producer put it there -- so it must NOT be added again.
             vals.push(v.val());
         }
 
