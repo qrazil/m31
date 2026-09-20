@@ -1,0 +1,4 @@
+corpus/errors/073-float-rem.src:2:9: `%` is integer remainder; it does not apply to float
+  |
+2 | print(x % 2.0);
+  |         ^

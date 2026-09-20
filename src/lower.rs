@@ -138,6 +138,7 @@ pub struct Lowerer {
 fn ir_ty(t: Ty) -> IrTy {
     match t {
         Ty::Int => IrTy::I64,
+        Ty::Float => IrTy::F64,
         Ty::Bool => IrTy::I1,
         Ty::Str => IrTy::Ref,
         Ty::User(_) => IrTy::Ref,
@@ -354,6 +355,7 @@ impl Lowerer {
                 // one mechanism later than a second one bolted on here.
                 let f = match self.underlying(elem) {
                     Ty::Int => "rt_sort_int",
+                    Ty::Float => "rt_sort_float",
                     Ty::Str => "rt_sort_str",
                     _ => {
                         return Err(Diag::new(
@@ -400,27 +402,28 @@ impl Lowerer {
                     return Err(Diag::new(
                         span,
                         format!(
-                            "`contains` compares `int`, `bool` and `str`; \
-                             {} would need its own comparison",
+                            "`contains` compares `int`, `float`, `bool` and \
+                             `str`; {} would need its own comparison",
                             self.tyname(elem)
                         ),
                     ));
                 }
-                let is_ref = self.new_val(IrTy::I1);
-                self.push(Inst::BConst {
-                    dst: is_ref,
-                    val: self.is_ref(elem),
-                });
-                let is_str = self.new_val(IrTy::I1);
-                self.push(Inst::BConst {
-                    dst: is_str,
-                    val: u == Ty::Str,
+                // A slot is one machine word whatever it holds, so the
+                // runtime is told what is in it.
+                let kind = self.new_val(IrTy::I64);
+                self.push(Inst::IConst {
+                    dst: kind,
+                    val: match u {
+                        Ty::Str => 1,
+                        Ty::Float => 2,
+                        _ => 0,
+                    },
                 });
                 let d = self.new_val(IrTy::I1);
                 self.push(Inst::Call {
                     dst: Some(d),
                     func: "rt_seq_contains".to_string(),
-                    args: vec![o.val(), v.val(), is_ref, is_str],
+                    args: vec![o.val(), v.val(), kind],
                 });
                 Ok(Val::new(d, Ty::Bool, false))
             }
@@ -2983,6 +2986,11 @@ impl Lowerer {
 
     fn lower_expr(&mut self, e: &Expr) -> Result<Val, Diag> {
         match e {
+            Expr::Float(x, _) => {
+                let v = self.new_val(IrTy::F64);
+                self.push(Inst::FConst { dst: v, val: *x });
+                Ok(Val::new(v, Ty::Float, false))
+            }
             Expr::Int(n, _) => {
                 let v = self.new_val(IrTy::I64);
                 self.push(Inst::IConst { dst: v, val: *n });
@@ -3028,6 +3036,23 @@ impl Lowerer {
             Expr::Un(op, inner, span) => {
                 let a = self.lower_expr(inner)?;
                 match op {
+                    UnOp::Neg if self.underlying(a.ty) == Ty::Float => {
+                        // Multiply by -1.0, NOT `0.0 - x`. Subtraction gets
+                        // zero wrong: IEEE says 0.0 - 0.0 is +0.0, so `-0.0`
+                        // would come out positive. Multiplication flips the
+                        // sign bit in every case, zeroes and infinities
+                        // included.
+                        let m = self.new_val(IrTy::F64);
+                        self.push(Inst::FConst { dst: m, val: -1.0 });
+                        let d = self.new_val(IrTy::F64);
+                        self.push(Inst::Arith {
+                            dst: d,
+                            op: ArithOp::Mul,
+                            lhs: a.val(),
+                            rhs: m,
+                        });
+                        Ok(Val::new(d, Ty::Float, false))
+                    }
                     UnOp::Neg => {
                         if a.ty != Ty::Int {
                             return Err(Diag::new(
@@ -3515,6 +3540,42 @@ impl Lowerer {
         };
 
         if let Some(aop) = arith {
+            // Both operands, not just the left one. This was never checked:
+            // the type came from the left operand alone, so `1 + true` was
+            // accepted and printed 2, and once float arrived `1.5 + 2` was
+            // accepted and silently widened. Nothing here is implicit.
+            if a.ty != b.ty {
+                return Err(Diag::new(
+                    span,
+                    format!(
+                        "cannot apply `{}` to {} and {}; convert one of them",
+                        op.spelling(),
+                        self.tyname(a.ty),
+                        self.tyname(b.ty)
+                    ),
+                ));
+            }
+            // Float arithmetic is IEEE: it does not trap, it produces an
+            // infinity or a NaN. Integer arithmetic traps. Two number types,
+            // two honest answers -- and `%` is left off floats the way Go
+            // leaves it off, because fmod is a different operation wearing
+            // the same spelling.
+            if ty == Ty::Float {
+                if op == Rem {
+                    return Err(Diag::new(
+                        span,
+                        "`%` is integer remainder; it does not apply to float",
+                    ));
+                }
+                let d = self.new_val(IrTy::F64);
+                self.push(Inst::Arith {
+                    dst: d,
+                    op: aop,
+                    lhs: a.val(),
+                    rhs: b.val(),
+                });
+                return Ok(Val::new(d, Ty::Float, false));
+            }
             if ty != Ty::Int {
                 return Err(Diag::new(
                     span,
@@ -3555,7 +3616,7 @@ impl Lowerer {
                 ),
             ));
         }
-        if ty != Ty::Int && ty != Ty::Bool {
+        if ty != Ty::Int && ty != Ty::Bool && ty != Ty::Float {
             return Err(Diag::new(
                 span,
                 format!("cannot compare values of type {}", self.tyname(a.ty)),
@@ -3791,6 +3852,7 @@ impl Lowerer {
             let a = self.lower_expr(&args.pos[0])?;
             let f = match self.underlying(a.ty) {
                 Ty::Int => "rt_print",
+                Ty::Float => "rt_print_float",
                 Ty::Bool => "rt_print_bool",
                 Ty::Str => "rt_print_str",
                 Ty::Void => return Err(Diag::new(args.pos[0].span(), "cannot print a void value")),
@@ -3814,8 +3876,16 @@ impl Lowerer {
 
         // `int(x)` and friends: convert a distinct value back to its base.
         // Same representation, so nothing is emitted.
+        // `int(x)`, `float(x)`, `bool(x)`, `str(x)`.
+        //
+        // Two jobs behind one spelling: unwrapping a distinct type back to
+        // its base, which is free and changes only identity, and converting
+        // between the two number types, which is a real conversion. The
+        // argument is lowered ONCE and then dispatched on, because lowering
+        // it in each branch would evaluate `int(f())` twice.
         if let Some(base) = match name {
             "int" => Some(Ty::Int),
+            "float" => Some(Ty::Float),
             "bool" => Some(Ty::Bool),
             "str" => Some(Ty::Str),
             _ => None,
@@ -3824,10 +3894,38 @@ impl Lowerer {
                 return Err(Diag::new(span, format!("`{name}` converts one value")));
             }
             let v = self.lower_expr(&args.pos[0])?;
-            if self.underlying(v.ty) != base {
-                return Err(Diag::new(args.pos[0].span(), self.mismatch(base, v.ty)));
+            let from = self.underlying(v.ty);
+
+            // Same representation: nothing is emitted.
+            if from == base {
+                return Ok(Val::new(v.val(), base, v.owned));
             }
-            return Ok(Val::new(v.val(), base, v.owned));
+
+            // Nothing here is implicit, so a mixed expression stays an error
+            // the writer resolves rather than a silent widening.
+            if base == Ty::Float && from == Ty::Int {
+                let d = self.new_val(IrTy::F64);
+                self.push(Inst::Call {
+                    dst: Some(d),
+                    func: "rt_i2f_val".to_string(),
+                    args: vec![v.val()],
+                });
+                return Ok(Val::new(d, Ty::Float, false));
+            }
+            if base == Ty::Int && from == Ty::Float {
+                // The C cast is UNDEFINED for a NaN or for a value outside
+                // the integer range -- exactly the sort of thing gcc and
+                // clang disagree about at -O2. Truncate toward zero, and
+                // trap rather than take whatever the hardware felt like.
+                let d = self.new_val(IrTy::I64);
+                self.push(Inst::Call {
+                    dst: Some(d),
+                    func: "rt_f2i_checked".to_string(),
+                    args: vec![v.val()],
+                });
+                return Ok(Val::new(d, Ty::Int, false));
+            }
+            return Err(Diag::new(args.pos[0].span(), self.mismatch(base, v.ty)));
         }
 
         // `clone(x)` -- a SHALLOW copy. We chose reference types, so `=`

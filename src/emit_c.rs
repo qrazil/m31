@@ -315,6 +315,30 @@ fn emit_enum_slot_switch(o: &mut String, t: &TypeDef, action: &str) {
     writeln!(o, "    }}").unwrap();
 }
 
+/// Put a value into a generic slot -- a collection's element, an enum's
+/// payload -- which is always one machine word.
+///
+/// A reference rides as its pointer. A double does NOT fit by conversion,
+/// only by bit pattern, so it goes through rt_f2i; `(int64_t)3.5` would
+/// store 3.
+fn to_slot(expr: &str, t: IrTy) -> String {
+    match t {
+        IrTy::Ref => format!("(int64_t)(intptr_t){expr}"),
+        IrTy::F64 => format!("rt_f2i({expr})"),
+        _ => format!("(int64_t){expr}"),
+    }
+}
+
+/// Read a value back out of a generic slot, undoing `to_slot`.
+fn from_slot(expr: &str, t: IrTy) -> String {
+    match t {
+        IrTy::Ref => format!("(Obj *)(intptr_t){expr}"),
+        IrTy::F64 => format!("rt_i2f({expr})"),
+        IrTy::I1 => format!("(bool){expr}"),
+        IrTy::I64 => expr.to_string(),
+    }
+}
+
 fn c_name(name: &str) -> String {
     format!("fn_{}", c_ident(name))
 }
@@ -399,7 +423,7 @@ fn emit_func(o: &mut String, f: &crate::ir::Func, types: &[TypeDef]) {
                 // to agree with the emission below or the operand is declared
                 // used and then never used, which is its own warning.
                 Inst::ICmp { lhs, rhs, .. } => {
-                    if lhs != rhs {
+                    if lhs != rhs || f.ty_of(*lhs) == IrTy::F64 {
                         read.insert(*lhs);
                         read.insert(*rhs);
                     }
@@ -413,6 +437,7 @@ fn emit_func(o: &mut String, f: &crate::ir::Func, types: &[TypeDef]) {
                 Inst::LoadField { obj, .. } => {
                     read.insert(*obj);
                 }
+                Inst::FConst { .. } => {}
                 Inst::EnumPack { args, .. } => read.extend(args.iter().copied()),
                 Inst::EnumTag { obj, .. } | Inst::EnumPayload { obj, .. } => {
                     read.insert(*obj);
@@ -465,6 +490,7 @@ fn emit_func(o: &mut String, f: &crate::ir::Func, types: &[TypeDef]) {
         // failures.
         let zero = match t {
             IrTy::I64 => "0",
+            IrTy::F64 => "0.0",
             IrTy::I1 => "false",
             IrTy::Ref => "NULL",
         };
@@ -513,6 +539,14 @@ fn emit_func(o: &mut String, f: &crate::ir::Func, types: &[TypeDef]) {
 
 fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
     match i {
+        Inst::FConst { dst, val } => {
+            // 17 significant digits round-trips any double exactly, and the
+            // hex form would be exact but unreadable in emitted source.
+            // `inf` and `nan` cannot appear: a literal that does not fit is
+            // rejected by the lexer, and arithmetic producing them happens at
+            // run time, not here.
+            writeln!(o, "    {dst} = {val:.17e};").unwrap();
+        }
         Inst::IConst { dst, val } => {
             // INT64_MIN has no positive literal form in C; write it as an
             // expression the preprocessor already defines correctly.
@@ -529,11 +563,22 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
             writeln!(o, "    {dst} = (Obj *)&str{idx};").unwrap();
         }
         Inst::Arith { dst, op, lhs, rhs } => {
-            writeln!(o, "    {dst} = {}({lhs}, {rhs});", op.rt_fn()).unwrap();
-            let _ = op;
+            if f.ty_of(*dst) == IrTy::F64 {
+                // IEEE: no trap, no checked helper. Overflow is an infinity
+                // and 0.0/0.0 is a NaN, which is the defined answer rather
+                // than a fault -- unlike the integer case, where wrapping
+                // would be the silent wrong answer.
+                writeln!(o, "    {dst} = {lhs} {} {rhs};", op.c_op()).unwrap();
+            } else {
+                writeln!(o, "    {dst} = {}({lhs}, {rhs});", op.rt_fn()).unwrap();
+            }
         }
         Inst::ICmp { dst, cmp, lhs, rhs } => {
-            if lhs == rhs {
+            // NOT for a float: `x == x` is FALSE when x is a NaN, so the
+            // answer does depend on the value and the fold would be wrong.
+            // The C compilers do not warn about a self-comparison on a
+            // double for exactly the same reason.
+            if lhs == rhs && f.ty_of(*lhs) != IrTy::F64 {
                 // `x == x` is a warning under -Wall (-Wtautological-compare)
                 // on both gcc and clang, and the warning gate reads any
                 // warning as a failure. The answer does not depend on the
@@ -566,6 +611,8 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
                     ("rt_chan_send", 0) | ("rt_chan_recv", 0) | ("rt_chan_close", 0) => {
                         format!("(Chan *){v}")
                     }
+                    // Everything below takes a generic slot: one machine
+                    // word whatever the element type is.
                     ("rt_chan_send", 1)
                     | ("rt_index_set", 2)
                     | ("rt_list_push", 1)
@@ -577,9 +624,9 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
                     | ("rt_map_get", 1)
                     | ("rt_map_has", 1)
                     | ("rt_map_remove", 1)
-                        if f.ty_of(*v) == IrTy::Ref =>
+                        if matches!(f.ty_of(*v), IrTy::Ref | IrTy::F64) =>
                     {
-                        format!("(int64_t)(intptr_t){v}")
+                        to_slot(&v.to_string(), f.ty_of(*v))
                     }
                     _ => v.to_string(),
                 })
@@ -593,9 +640,10 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
                             | "rt_list_pop"
                             | "rt_list_remove_at"
                             | "rt_map_get"
-                    ) && f.ty_of(*d) == IrTy::Ref =>
+                    ) && matches!(f.ty_of(*d), IrTy::Ref | IrTy::F64) =>
                 {
-                    writeln!(o, "    {d} = (Obj *)(intptr_t){callee}({});", a.join(", ")).unwrap()
+                    let call = format!("{callee}({})", a.join(", "));
+                    writeln!(o, "    {d} = {};", from_slot(&call, f.ty_of(*d))).unwrap()
                 }
                 Some(d)
                     if matches!(
@@ -625,13 +673,7 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
             writeln!(o, "    {dst} = rt_alloc(sizeof(T{tid}), &ti_T{tid});").unwrap();
             writeln!(o, "    ((T{tid} *){dst})->tag = {tag};").unwrap();
             for (k, a) in args.iter().enumerate() {
-                // Every payload slot is a machine word; a reference rides as
-                // its pointer.
-                let v = if f.ty_of(*a) == IrTy::Ref {
-                    format!("(int64_t)(intptr_t){a}")
-                } else {
-                    format!("(int64_t){a}")
-                };
+                let v = to_slot(&a.to_string(), f.ty_of(*a));
                 writeln!(o, "    ((T{tid} *){dst})->p{k} = {v};").unwrap();
             }
         }
@@ -642,12 +684,8 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
             // The slot is a machine word whatever it holds; the destination's
             // type says how to read it, and the lowering only emits this
             // where the tag is already known.
-            let cast = match f.ty_of(*dst) {
-                IrTy::Ref => "(Obj *)(intptr_t)",
-                IrTy::I1 => "(bool)",
-                IrTy::I64 => "",
-            };
-            writeln!(o, "    {dst} = {cast}((T{tid} *){obj})->p{idx};").unwrap();
+            let raw = format!("((T{tid} *){obj})->p{idx}");
+            writeln!(o, "    {dst} = {};", from_slot(&raw, f.ty_of(*dst))).unwrap();
         }
         Inst::LoadField { dst, obj, tid, idx } => {
             let name = c_ident(&types[*tid as usize].fields[*idx as usize].0);

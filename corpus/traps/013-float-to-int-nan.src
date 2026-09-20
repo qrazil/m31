@@ -1,0 +1,4 @@
+// Casting a NaN to an integer is UNDEFINED in C -- the sort of thing gcc and
+// clang would disagree about at -O2 rather than agreeing on a wrong answer.
+float nan = 0.0 / 0.0;
+print(int(nan));

@@ -126,6 +126,11 @@ are to trap or to force every read through a check, and `contains` is the check.
 `clone(x)` is a **shallow** copy — we chose reference types, so `=` aliases
 and this is the explicit way to get a second object.
 
+`float` is an IEEE double and is a separate type from `int` with **no
+implicit conversion** — `1.5 + 2` is an error, and `float(n)` / `int(x)` are
+how you cross. `int` traps on overflow; `float` gives you an infinity or a
+NaN, because those are IEEE's defined answers rather than faults.
+
 **Distinct types** are the same representation as their base with a
 different identity — erased before the IR, so they cost nothing:
 

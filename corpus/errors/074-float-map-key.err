@@ -1,0 +1,4 @@
+corpus/errors/074-float-map-key.src:1:21: a map key must be int or str, found float; hashing a user type would need a Hashable interface, which does not exist yet
+  |
+1 | Map<float, int> m = Map<float, int>();
+  |                     ^

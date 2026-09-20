@@ -430,6 +430,7 @@ impl Fmt {
         // from the interned name by the caller of `format`.
         match t {
             Ty::Int => "int".into(),
+            Ty::Float => "float".into(),
             Ty::Bool => "bool".into(),
             Ty::Str => "str".into(),
             Ty::Void => "void".into(),
@@ -461,6 +462,7 @@ impl Fmt {
                 }
             }
             Expr::Int(n, _) => n.to_string(),
+            Expr::Float(x, _) => fmt_float(*x),
             Expr::Bool(b, _) => b.to_string(),
             Expr::Str(s, _) => format!("{s:?}"),
             Expr::Var(n, _) => n.clone(),
@@ -523,6 +525,7 @@ pub fn set_type_names(p: &Program) {
 fn render_ty(exprs: &[TyExpr], t: &Ty) -> String {
     match t {
         Ty::Int => "int".into(),
+        Ty::Float => "float".into(),
         Ty::Bool => "bool".into(),
         Ty::Str => "str".into(),
         Ty::Void => "void".into(),
@@ -553,4 +556,18 @@ fn stmt_line(s: &Stmt) -> u32 {
         | Stmt::ForIn { span, .. }
         | Stmt::If { span, .. } => span.line,
     }
+}
+
+/// A float literal, printed so it reads like what was written and parses back
+/// to the same value. An integral value keeps its `.0`, or it would come back
+/// as an `int` and change the program's meaning -- which the formatter gate
+/// would catch, but only after the fact.
+fn fmt_float(x: f64) -> String {
+    for p in 1..=17 {
+        let s = format!("{x:.p$}", p = p);
+        if s.parse::<f64>() == Ok(x) {
+            return s;
+        }
+    }
+    format!("{x:?}")
 }

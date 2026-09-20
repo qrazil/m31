@@ -128,6 +128,7 @@ impl Mono {
     fn ty_key(&self, t: Ty) -> String {
         match t {
             Ty::Int => "int".into(),
+            Ty::Float => "float".into(),
             Ty::Bool => "bool".into(),
             Ty::Str => "str".into(),
             Ty::Void => "void".into(),
@@ -583,7 +584,9 @@ impl Mono {
 
     fn subst_expr(&mut self, e: &Expr, sub: &Subst) -> Result<Expr, Diag> {
         Ok(match e {
-            Expr::Int(..) | Expr::Bool(..) | Expr::Str(..) | Expr::Var(..) => e.clone(),
+            Expr::Int(..) | Expr::Float(..) | Expr::Bool(..) | Expr::Str(..) | Expr::Var(..) => {
+                e.clone()
+            }
             Expr::Bin(op, l, r, s) => Expr::Bin(
                 *op,
                 Box::new(self.subst_expr(l, sub)?),

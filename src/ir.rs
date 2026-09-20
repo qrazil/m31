@@ -9,6 +9,7 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IrTy {
     I64,
+    F64,
     I1,
     Ref,
 }
@@ -17,6 +18,7 @@ impl IrTy {
     pub fn c_name(self) -> &'static str {
         match self {
             IrTy::I64 => "int64_t",
+            IrTy::F64 => "double",
             IrTy::I1 => "bool",
             IrTy::Ref => "Obj *",
         }
@@ -86,6 +88,18 @@ impl ArithOp {
     /// Runtime helper implementing this op. Add/sub/mul are checked and trap
     /// on overflow (docs/ir-v0.md §3); div and rem trap on zero and on the
     /// one signed-overflow case, INT64_MIN / -1.
+    /// The plain C operator, for floats -- where IEEE already defines every
+    /// case and there is nothing to check.
+    pub fn c_op(self) -> &'static str {
+        match self {
+            ArithOp::Add => "+",
+            ArithOp::Sub => "-",
+            ArithOp::Mul => "*",
+            ArithOp::Div => "/",
+            ArithOp::Rem => "%",
+        }
+    }
+
     pub fn rt_fn(self) -> &'static str {
         match self {
             ArithOp::Add => "rt_iadd",
@@ -158,6 +172,9 @@ impl TypeDef {
 pub enum Inst {
     /// `v = <n>`
     IConst { dst: Value, val: i64 },
+    /// `v = <x>` -- a float constant, emitted with enough digits to round
+    /// trip exactly.
+    FConst { dst: Value, val: f64 },
     /// `v = <true|false>`
     BConst { dst: Value, val: bool },
     /// `v = <string literal>`; immortal, see docs/ir-v0.md §5.4
@@ -376,6 +393,7 @@ fn args(vs: &[Value]) -> String {
 fn show_inst(i: &Inst) -> String {
     match i {
         Inst::IConst { dst, val } => format!("{dst} = iconst {val}"),
+        Inst::FConst { dst, val } => format!("{dst} = fconst {val:?}"),
         Inst::BConst { dst, val } => format!("{dst} = bconst {val}"),
         Inst::SConst { dst, idx } => format!("{dst} = sconst str{idx}"),
         Inst::Arith { dst, op, lhs, rhs } => {

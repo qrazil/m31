@@ -11,6 +11,7 @@ use crate::diag::{Diag, Span};
 pub enum Tok {
     // literals and names
     Int(i64),
+    Float(f64),
     Str(String),
     Ident(String),
 
@@ -32,6 +33,7 @@ pub enum Tok {
     KwInterface,
     KwSpawn,
     KwDistinct,
+    KwFloat,
     KwEnum,
     KwMatch,
     KwCase,
@@ -77,6 +79,7 @@ impl Tok {
     pub fn describe(&self) -> String {
         match self {
             Tok::Int(n) => format!("integer `{n}`"),
+            Tok::Float(x) => format!("float `{x}`"),
             Tok::Str(_) => "string literal".to_string(),
             Tok::Ident(s) => format!("`{s}`"),
             Tok::Eof => "end of file".to_string(),
@@ -101,6 +104,7 @@ impl Tok {
             Tok::KwInterface => "interface",
             Tok::KwSpawn => "spawn",
             Tok::KwDistinct => "distinct",
+            Tok::KwFloat => "float",
             Tok::KwEnum => "enum",
             Tok::KwMatch => "match",
             Tok::KwCase => "case",
@@ -352,10 +356,54 @@ impl<'a> Lexer<'a> {
         })
     }
 
+    /// An integer, or a float.
+    ///
+    /// **A float literal always has a dot with digits on both sides.**
+    /// `1.0`, not `1.` and not `.5`. The rule earns its keep twice: `1.` is
+    /// hard to distinguish from a member access being typed, and a leading
+    /// dot makes `x[.5]` read strangely. An exponent is allowed only after
+    /// the dot form -- `1.0e9`, not `1e9` -- so that whether a literal is a
+    /// float is decided by one character, not by scanning to the end.
     fn lex_int(&mut self, span: Span) -> Result<Tok, Diag> {
         let start = self.pos;
         while self.peek().is_ascii_digit() || self.peek() == b'_' {
             self.bump();
+        }
+        if self.peek() == b'.' && self.peek2().is_ascii_digit() {
+            self.bump();
+            while self.peek().is_ascii_digit() || self.peek() == b'_' {
+                self.bump();
+            }
+            if self.peek() == b'e' || self.peek() == b'E' {
+                let save = self.pos;
+                self.bump();
+                if self.peek() == b'+' || self.peek() == b'-' {
+                    self.bump();
+                }
+                if self.peek().is_ascii_digit() {
+                    while self.peek().is_ascii_digit() {
+                        self.bump();
+                    }
+                } else {
+                    self.pos = save;
+                }
+            }
+            if self.peek() == b'_' || self.peek().is_ascii_alphabetic() {
+                return Err(Diag::new(span, "invalid suffix on float literal"));
+            }
+            let text: String = std::str::from_utf8(&self.src[start..self.pos])
+                .unwrap()
+                .chars()
+                .filter(|c| *c != '_')
+                .collect();
+            return match text.parse::<f64>() {
+                Ok(x) if x.is_finite() => Ok(Tok::Float(x)),
+                // A literal that does not fit is a mistake, not an infinity.
+                _ => Err(Diag::new(
+                    span,
+                    format!("float literal `{text}` does not fit in float"),
+                )),
+            };
         }
         // A digit run followed immediately by a letter is a typo, not two
         // tokens. Catching it here gives a better message than the parser can.
@@ -400,6 +448,7 @@ impl<'a> Lexer<'a> {
             "interface" => Tok::KwInterface,
             "spawn" => Tok::KwSpawn,
             "distinct" => Tok::KwDistinct,
+            "float" => Tok::KwFloat,
             "enum" => Tok::KwEnum,
             "match" => Tok::KwMatch,
             "case" => Tok::KwCase,

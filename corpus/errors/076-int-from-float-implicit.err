@@ -1,0 +1,4 @@
+corpus/errors/076-int-from-float-implicit.src:1:9: type mismatch: expected int, found float
+  |
+1 | int n = 3.5;
+  |         ^

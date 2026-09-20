@@ -1,0 +1,3 @@
+// Arithmetic took its type from the LEFT operand alone and never checked the
+// right, so this was accepted and printed 2.
+print(1 + true);

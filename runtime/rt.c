@@ -111,6 +111,70 @@ void rt_print(int64_t v) {
     printf("%" PRId64 "\n", v);
 }
 
+/* Printed so it reads back as the same double and still looks like what was
+ * written: the shortest precision that round-trips, tried in order. `%.17g`
+ * always round-trips but renders 0.1 as 0.10000000000000001.
+ *
+ * All four oracle builds share a libc, so this is deterministic across them.
+ * A Go twin is not comparable here -- Go prints shortest-round-trip by a
+ * different algorithm and spells infinities `+Inf` -- so float programs stay
+ * out of corpus/twin. */
+void rt_print_float(double x) {
+    if (x != x) {
+        puts("nan");
+        return;
+    }
+    if (x > 1.7976931348623157e308) {
+        puts("inf");
+        return;
+    }
+    if (x < -1.7976931348623157e308) {
+        puts("-inf");
+        return;
+    }
+    char buf[64];
+    for (int p = 1; p <= 17; p++) {
+        snprintf(buf, sizeof buf, "%.*g", p, x);
+        if (strtod(buf, NULL) == x) break;
+    }
+
+    /* %g reaches for an exponent as soon as the exponent exceeds the
+     * precision, so the shortest round-trip of 2500.0 is "2.5e+03". That is
+     * correct and surprising. For magnitudes a reader would write out in
+     * full, prefer the plain form -- which is what Go and Rust print too. */
+    if (strpbrk(buf, "eE") != NULL) {
+        double mag = x < 0 ? -x : x;
+        if (mag >= 1e-4 && mag < 1e17) {
+            char plain[64];
+            for (int p = 0; p <= 17; p++) {
+                snprintf(plain, sizeof plain, "%.*f", p, x);
+                if (strtod(plain, NULL) == x) {
+                    memcpy(buf, plain, sizeof buf);
+                    break;
+                }
+            }
+        }
+    }
+    puts(buf);
+}
+
+double rt_i2f_val(int64_t n) {
+    return (double)n;
+}
+
+/* Truncates toward zero. Casting a NaN, or a value outside the integer
+ * range, is UNDEFINED in C -- so it is checked here rather than left to
+ * whatever the target happens to do. The bound is written as a double on
+ * purpose: INT64_MAX is not representable, and comparing against it after
+ * conversion would be the same undefined cast again. */
+int64_t rt_f2i_checked(double x) {
+    if (x != x) rt_trap("cannot convert NaN to int");
+    if (!(x >= -9223372036854775808.0 && x < 9223372036854775808.0)) {
+        rt_trap("float is out of range for int");
+    }
+    return (int64_t)x;
+}
+
 void rt_print_bool(bool v) {
     puts(v ? "true" : "false");
 }
@@ -396,19 +460,51 @@ void rt_sort_str(Obj *o) {
     rt_sort_with(o, rt_cmp_str);
 }
 
-/* Membership by value for a str, by identity for anything else -- the same
- * rule `==` follows, so `contains` and `==` cannot disagree. */
-bool rt_seq_contains(Obj *o, int64_t v, bool elems_are_refs, bool elems_are_str) {
+/* Sorting floats needs a TOTAL order, and `<` is not one: every comparison
+ * with a NaN is false, so a NaN anywhere makes the merge's decisions
+ * inconsistent and the result depends on the order elements happened to be
+ * in. That is a silent wrong answer, not a crash.
+ *
+ * So: -inf < ... < -0.0 < +0.0 < ... < +inf < NaN. Zeroes compare equal, as
+ * `==` says they are, and a stable sort then leaves them in the order they
+ * arrived. NaNs sort to the end, together. This is the same shape as Rust's
+ * total_cmp, minus distinguishing the two signs of zero. */
+static int64_t rt_cmp_float(int64_t a, int64_t b) {
+    double x = rt_i2f(a);
+    double y = rt_i2f(b);
+    bool xn = x != x;
+    bool yn = y != y;
+    if (xn || yn) {
+        if (xn && yn) return 0;
+        return xn ? 1 : -1;
+    }
+    if (x < y) return -1;
+    return x > y ? 1 : 0;
+}
+
+void rt_sort_float(Obj *o) {
+    rt_sort_with(o, rt_cmp_float);
+}
+
+/* Membership, following exactly the rule `==` follows so the two cannot
+ * disagree: a str by value, a float as a float, anything else by word.
+ *
+ * A float has to be compared AS a float, not as the word holding it. The bit
+ * patterns of 0.0 and -0.0 differ while the values are equal, and two NaNs
+ * can share a bit pattern while comparing unequal. Both would be wrong the
+ * other way round. */
+bool rt_seq_contains(Obj *o, int64_t v, int kind) {
     int64_t n = rt_len_of(o);
     int64_t *d = slots(o);
     for (int64_t i = 0; i < n; i++) {
-        if (elems_are_str) {
+        if (kind == SEQ_STR) {
             if (rt_str_eq((Obj *)(intptr_t)d[i], (Obj *)(intptr_t)v)) return true;
+        } else if (kind == SEQ_FLOAT) {
+            if (rt_i2f(d[i]) == rt_i2f(v)) return true;
         } else if (d[i] == v) {
             return true;
         }
     }
-    (void)elems_are_refs;
     return false;
 }
 

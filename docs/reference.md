@@ -32,9 +32,9 @@ A letter or `_`, then letters, digits or `_`. Case-sensitive.
 ### 1.4 Keywords
 
     bool     break     case      const     continue  distinct  else
-    enum     false     for       if        in        int       interface
-    match    return    spawn     str       true      type      void
-    while
+    enum     false     float     for       if        in        int
+    interface          match     return    spawn     str       true
+    type     void      while
 
 Keywords are reserved: none may be used as an identifier. `Array`, `Chan`,
 `List` and `Map` are not keywords — they are predeclared type names, and are
@@ -45,6 +45,7 @@ reserved only in the sense that nothing may shadow a type name (§4.1).
 | | |
 |---|---|
 | Integer | `0`, `42`. Decimal only. No sign — `-1` is unary minus applied to `1`. |
+| Float | `1.0`, `3.14`, `2.5e3`. **Always a dot with digits on both sides** — not `1.` and not `.5`. An exponent only after the dot form: `1.0e9`, not `1e9`. |
 | Boolean | `true`, `false` |
 | String | `"..."`, with escapes `\\` `\"` `\n` `\t` `\0` |
 
@@ -87,8 +88,27 @@ There are no modules. One file is the whole program.
 
 ### 3.1 Value types
 
-`int` is a 64-bit signed integer. `bool` is `true` or `false`. Neither is a
-reference; both are copied by assignment.
+`int` is a 64-bit signed integer. `float` is an IEEE 754 double. `bool` is
+`true` or `false`. None is a reference; all are copied by assignment.
+
+**There is no implicit conversion, in either direction.** `1.5 + 2` is an
+error, not a widening — convert explicitly with `float(n)` or `int(x)`.
+`int(x)` truncates toward zero and **traps** on a NaN or a value outside the
+integer range, because the C cast is undefined there.
+
+The two number types differ in what they do when an operation has no
+in-range answer, and both are right for what they are:
+
+| | |
+|---|---|
+| `int` | **traps** on overflow and on division by zero |
+| `float` | follows IEEE: an infinity, or a NaN. Those are defined answers, not faults |
+
+`%` is integer remainder and does not apply to `float`.
+
+A NaN is not equal to itself, so `x == x` is `false` for one. Sorting needs
+a total order that `<` does not give, so `sort()` places NaNs last (§3.9).
+A `float` cannot be a `Map` key.
 
 `int` is deliberately unqualified. The IR may lower it to i32 or i128 for a
 target that wants that; the source spells one integer type.

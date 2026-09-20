@@ -194,6 +194,7 @@ impl Parser {
     fn ty_of(t: &Tok) -> Option<Ty> {
         Some(match t {
             Tok::KwInt => Ty::Int,
+            Tok::KwFloat => Ty::Float,
             Tok::KwBool => Ty::Bool,
             Tok::KwStr => Ty::Str,
             Tok::KwVoid => Ty::Void,
@@ -979,6 +980,10 @@ impl Parser {
             Tok::Int(n) => {
                 self.bump();
                 Ok(Expr::Int(n, span))
+            }
+            Tok::Float(x) => {
+                self.bump();
+                Ok(Expr::Float(x, span))
             }
             Tok::KwTrue => {
                 self.bump();

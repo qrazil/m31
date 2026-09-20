@@ -1,0 +1,85 @@
+// float: the second number type. Separate from int, with no implicit
+// conversion either way -- a mixed expression is an error the writer
+// resolves, not a silent widening.
+
+float pi = 3.14159;
+float r = 2.0;
+print(pi * r * r);              // 12.56636
+print(1.0 / 3.0);               // 0.3333333333333333
+print(0.1 + 0.2);               // 0.30000000000000004 -- IEEE, not a bug
+print(2.0 - 5.0);               // -3
+print(7.0 / 2.0);               // 3.5
+
+// A float literal always has a dot with digits on both sides, so whether a
+// literal is a float is decided by one character.
+print(2.5e3);                   // 2500
+print(1.0e-3);                  // 0.001
+print(100.0);                   // 100 -- an integral float prints plain
+
+// Negation flips the sign bit, so signed zero survives. `0.0 - x` would not:
+// IEEE says 0.0 - 0.0 is +0.0.
+print(-0.0);                    // -0
+print(-pi);                     // -3.14159
+
+// IEEE arithmetic does not trap the way integer arithmetic does: overflow is
+// an infinity and 0.0/0.0 is a NaN, because those are the defined answers.
+print(1.0 / 0.0);               // inf
+print(-1.0 / 0.0);              // -inf
+print(0.0 / 0.0);               // nan
+
+float nan = 0.0 / 0.0;
+print(nan == nan);              // false -- a NaN is not equal to itself
+print(nan != nan);              // true
+print(1.0 < 2.0);               // true
+print(2.0 >= 2.0);              // true
+
+// Conversion is explicit in both directions.
+print(float(7) / 2.0);          // 3.5
+print(int(3.9));                // 3 -- truncates toward zero
+print(int(-3.9));               // -3
+
+// Floats live in every container, where a slot is one machine word and a
+// double rides as its bit pattern rather than by conversion.
+type P { float x; float y; }
+P p = P(1.5, 2.5);
+print(p.x + p.y);               // 4
+
+Array<float> a = Array<float>(3, 0.5);
+a[0] = 1.25;
+print(a[0]);                    // 1.25
+print(a[2]);                    // 0.5
+
+List<float> l = List<float>();
+l.push(3.5);
+l.push(1.5);
+print(l[0] + l[1]);             // 5
+
+Map<str, float> m = Map<str, float>();
+m.set("k", 2.25);
+print(m.get("k"));              // 2.25
+
+enum Maybe { Nothing; Val(float); }
+match (Maybe.Val(9.75)) {
+    case Val(float v): { print(v); }
+    case Nothing: { print(0.0); }
+}                               // 9.75
+
+// Sorting floats needs a TOTAL order: `<` is not one, because every
+// comparison with a NaN is false and the result would depend on the order
+// the elements happened to be in. NaNs sort to the end.
+List<float> xs = List<float>();
+xs.push(2.5);
+xs.push(0.0 / 0.0);
+xs.push(-1.5);
+xs.push(0.0);
+xs.push(1.0 / 0.0);
+xs.sort();
+for (float v in xs) {
+    print(v);                   // -1.5 0 2.5 inf nan
+}
+
+// contains compares AS a float, not as the word holding it: 0.0 and -0.0
+// have different bit patterns and equal values.
+print(xs.contains(2.5));        // true
+print(xs.contains(-0.0));       // true
+print(xs.contains(9.0));        // false

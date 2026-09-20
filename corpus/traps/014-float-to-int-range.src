@@ -1,0 +1,3 @@
+// Likewise a value outside the integer range.
+float big = 1.0e300;
+print(int(big));

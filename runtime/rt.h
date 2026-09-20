@@ -99,6 +99,27 @@ bool    rt_str_eq(Obj *a, Obj *b);
 void rt_print(int64_t v);
 void rt_print_bool(bool v);
 void rt_print_str(Obj *o);
+void rt_print_float(double x);
+
+/* int <-> float, both explicit in the source. */
+double  rt_i2f_val(int64_t n);
+int64_t rt_f2i_checked(double x);
+
+/* A generic slot -- a collection's element, an enum's payload -- is a machine
+ * word, and a double does not fit one by CONVERSION, only by bit pattern.
+ * memcpy is the portable spelling of that, and both compilers turn it into a
+ * register move. */
+static inline int64_t rt_f2i(double x) {
+    int64_t n;
+    __builtin_memcpy(&n, &x, sizeof n);
+    return n;
+}
+
+static inline double rt_i2f(int64_t n) {
+    double x;
+    __builtin_memcpy(&x, &n, sizeof x);
+    return x;
+}
 
 /* ---- collections -------------------------------------------------------
  *
@@ -169,7 +190,11 @@ void    rt_list_clear(Obj *o, bool elems_are_refs);
 void    rt_seq_reverse(Obj *o);
 void    rt_sort_int(Obj *o);
 void    rt_sort_str(Obj *o);
-bool    rt_seq_contains(Obj *o, int64_t v, bool elems_are_refs, bool elems_are_str);
+void    rt_sort_float(Obj *o);
+/* How a sequence's elements compare. A slot is one machine word whatever it
+ * holds, so the caller has to say what is in it. */
+enum { SEQ_WORD = 0, SEQ_STR = 1, SEQ_FLOAT = 2 };
+bool    rt_seq_contains(Obj *o, int64_t v, int kind);
 
 /* ---- concurrency -------------------------------------------------------
  *

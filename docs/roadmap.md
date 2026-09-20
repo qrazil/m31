@@ -17,7 +17,7 @@ Anything marked done there is tested; the corpus is the proof.
 
 | | |
 |---|---|
-| Corpus | 129 programs — 40 behaviour, 70 diagnostics, 12 traps, 7 Go twins |
+| Corpus | 138 programs — 41 behaviour, 76 diagnostics, 14 traps, 7 Go twins |
 | Oracle | gcc and clang, each at -O0 and -O2, all four must agree |
 | Leaks | every behaviour program asserts `__rc_live=0` at exit |
 | Warnings | emitted C must be clean under `-Wall -Wextra` |
@@ -28,7 +28,7 @@ Anything marked done there is tested; the corpus is the proof.
 
 ## Done
 
-**Types.** `int`, `bool`, `str`, `void`. Structs with per-field defaults.
+**Types.** `int`, `float`, `bool`, `str`, `void`. Structs with per-field defaults.
 **Enums with payloads**, generic, matched exhaustively with no fallthrough
 and no `default` -- which is what makes `Option<T>` and `Result<T, E>`
 ordinary library types rather than language primitives.
@@ -97,45 +97,47 @@ around them:
     index out of range should probably stay a trap; a file that is not there
     should not be one.
 
-### 2. Conversions, and a `Display` interface
+### 2. Conversions: every `to_X` is an interface
 
-Two different problems that look like one.
+The rule is one rule, and it turns on which side of the conversion varies.
 
-**Rendering a value as text is an interface.** A user type has to be able to
-say how it prints, and only an interface lets it -- Go's `Stringer`, Rust's
-`Display`. It also closes a hole that exists today: `print` refuses a user
-type with the diagnostic "there is no way for a type to say how it prints",
-and this is that way. One method, and `print` accepts anything with it.
+**Conversion dispatches on the SOURCE, so it is an interface.** All of them,
+uniformly:
 
-**Parsing is not an interface.** `"abc".to_int()` can fail, and dispatching
-on a *return* type needs static or associated functions the language does not
-have. These are methods on `str` returning a `Result`, so they wait for
-errors -- this is the concrete reason the string library sits behind them.
+```c
+interface ToStr   { str to_str(); }
+interface ToInt   { int to_int(); }
+interface ToFloat { float to_float(); }
+```
 
-**Numeric conversion is built in.** `int` to `float` and back has no user
-extension point, so `float(x)` and `int(f)` fit the conversion syntax
-`distinct` already uses. Truncating, and explicit.
+A type implements whichever make sense -- `Price` has `to_int` and `to_str`,
+`Point` has only `to_str`. Two things make this cheap: interfaces are
+structural, so a type with a `to_str` method satisfies `ToStr` with no
+`implements` clause, which lets `print` find the method by name AND lets a
+user write `void show(ToStr x)` from the same declaration. And it matches the
+precedent operator methods already set -- `eq`, `cmp` and `add` are found by
+name too.
 
-### 3. `float`
+It also closes a hole that exists today: `print` refuses a user type with the
+diagnostic "there is no way for a type to say how it prints". This is that
+way.
 
-The missing primitive. Everything else the language lacks is a convenience;
-this one blocks whole categories of program, and `examples/enums.src` already
-has to apologise for using 3 as pi.
+**Parsing is a different operation and gets a different name.** `"42"` to an
+int reads text and can fail; the source is always `str` and it is the TARGET
+that varies, which single dispatch cannot express. So `str.parse_int()`
+returning a `Result`, not `to_int`. Calling both `to_int` is what made them
+look like one inconsistent family; they are two consistent ones.
 
-It is not just another type. It brings decisions worth making deliberately:
+Parsing therefore waits for errors. Conversion does not.
 
-  - `==` on floats is a footgun, and this language already refuses `==`
-    where it would be meaningless;
-  - NaN makes comparison non-total, which breaks the total order `sort`
-    assumes;
-  - a float as a `Map` key is almost always a mistake and should probably be
-    refused, the way a user type already is.
+**Numeric conversion between built-in types stays built in.** `int` to
+`float` and back has no user extension point and no failure worth a
+`Result`, so `float(x)` and `int(f)` fit the syntax `distinct` already uses.
+`int(f)` truncates, and traps on NaN or a value outside the range -- the C
+cast is undefined there, which is exactly the kind of thing the gcc/clang
+differential would catch later rather than sooner.
 
-Sized and unsigned integers (`u8`, `i32`) matter for binary formats and FFI,
-and a `byte` or `char` type matters once strings are indexed. Neither blocks
-anything yet.
-
-### 4. A string library
+### 3. A string library
 
 `size()` and `concat` are the whole of it today. A usable language needs
 `substr`, `index_of`, `contains`, `starts_with`, `ends_with`, `split`,
@@ -145,21 +147,21 @@ None of it is hard. It is deliberately after errors, because `to_int("abc")`
 has to return something, and what it returns is the errors decision. These
 land as methods on `str`, which now has method dispatch.
 
-### 5. Modules
+### 4. Modules
 
 One file is the whole program today. That is tolerable for a corpus and not
 for anything else. Needs: a unit of compilation, a visibility rule, and a
 name resolution order. Kept behind errors because a module system that has to
 be revised once errors land is a module system written twice.
 
-### 6. Standard library
+### 5. Standard library
 
 The stated goal is Oro's and Go's: a standard library good enough that most
 programs need nothing else. Needs modules to live in and errors to report
 with. Minimum: strings, sorting, a file and stdin API, time, math, and a
 `Hashable` interface so `Map` takes a user type as a key.
 
-### 7. Closures
+### 6. Closures
 
 Also gates a nicer `spawn`. The reason they are late is that closures plus
 reference counting is the most common way to build a cycle, and a cycle leaks
@@ -230,6 +232,8 @@ Written down because they are unresolved, not because they are unimportant.
     is checked, naming the instantiation, which is C++'s error experience.
   - Integer width. `int` is 64-bit and deliberately unqualified so the IR can
     choose per target. Whether sized types ever become spellable is open.
+  - Whether `float` ever gets a `%`-shaped remainder (`fmod`), and under
+    what name. It is left out today because `%` means integer remainder.
   - **`str.size()` counts bytes, not characters.** `"héllo".size()` is 6.
     Go does the same and it is defensible, but it has to be decided and
     written down before the freeze rather than discovered after it.
