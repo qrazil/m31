@@ -1,0 +1,1 @@
+corpus/errors/046-wrong-element.src:2:9: type mismatch: expected int, found str

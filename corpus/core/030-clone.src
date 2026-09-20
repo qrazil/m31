@@ -1,0 +1,32 @@
+// We chose reference types, so `=` aliases. `clone` is the explicit way to
+// get a second object -- SHALLOW, because a deep copy would have to decide
+// what copying each field means, which only the program can answer.
+
+type Point { int x; int y; }
+type Named { str tag; Point at; }
+
+Point a = Point(1, 2);
+Point b = a;            // aliases a
+Point c = clone(a);     // an independent copy
+
+b.x = 99;               // seen through a
+c.y = 77;               // not seen through a
+print(a.x);
+print(a.y);
+print(c.x);
+print(c.y);
+
+// Shallow: the clone shares the inner Point.
+Named n = Named("orig", a);
+Named m = clone(n);
+m.tag = "copy";
+print(n.tag);
+print(m.tag);
+print(m.at.x);
+
+List<int> xs = List<int>();
+xs.push(1);
+List<int> ys = clone(xs);
+ys.push(2);
+print(xs.len());
+print(ys.len());

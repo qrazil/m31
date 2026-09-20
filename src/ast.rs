@@ -127,6 +127,8 @@ pub enum Expr {
     MethodCall(Box<Expr>, String, Args, Span),
     /// `expr.field`
     Field(Box<Expr>, String, Span),
+    /// `expr[index]`
+    Index(Box<Expr>, Box<Expr>, Span),
     /// `Point(x: 1, y: 2)` / `Box<int>(value: 5)` -- construction is always
     /// by field name, so reordering fields in a declaration cannot silently
     /// transpose values. Carries the interned type, so type arguments survive
@@ -146,6 +148,7 @@ impl Expr {
             | Expr::Call(_, _, s)
             | Expr::MethodCall(_, _, _, s)
             | Expr::Field(_, _, s)
+            | Expr::Index(_, _, s)
             | Expr::New(_, _, s) => *s,
         }
     }
@@ -164,6 +167,13 @@ pub enum Stmt {
     /// `x = expr;`
     Assign {
         name: String,
+        value: Expr,
+        span: Span,
+    },
+    /// `obj[i] = expr;`
+    SetIndex {
+        obj: Expr,
+        index: Expr,
         value: Expr,
         span: Span,
     },
@@ -188,6 +198,14 @@ pub enum Stmt {
     Break { span: Span },
     /// `continue;`
     Continue { span: Span },
+    /// `for (int x in xs) { .. }`
+    ForIn {
+        ty: Ty,
+        name: String,
+        iter: Expr,
+        body: Vec<Stmt>,
+        span: Span,
+    },
     /// `while (cond) { .. }`
     While {
         cond: Expr,

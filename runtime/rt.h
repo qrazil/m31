@@ -89,6 +89,51 @@ void rt_print(int64_t v);
 void rt_print_bool(bool v);
 void rt_print_str(Obj *o);
 
+/* ---- collections -------------------------------------------------------
+ *
+ * Two shapes, and the difference is layout rather than stack-versus-heap:
+ *
+ *   Array<T>  fixed length, elements stored INLINE right after the header.
+ *             One allocation, one pointer chase, no capacity slack, and it
+ *             can never reallocate. This is the fast one.
+ *
+ *   List<T>   growable, elements in a separate buffer that push may
+ *             reallocate. Two pointer chases. This is the convenient one.
+ *
+ * A slot is 64 bits either way. The compiler knows the element type
+ * statically, so an int rides in the slot and a reference rides as its
+ * pointer -- no tagging, exactly as for channels.
+ *
+ * Whether the elements are references is baked into the TypeInfo at
+ * construction, because only the drop function needs to know.
+ */
+typedef struct {
+    Obj     hdr;
+    int64_t len;
+    int64_t data[];   /* inline: one allocation for header and elements */
+} Arr;
+
+typedef struct {
+    Obj      hdr;
+    int64_t  len;
+    int64_t  cap;
+    int64_t *data;    /* separate buffer, so it can grow */
+} Lst;
+
+/* `fill` is the initial value of every element. There is no null in the
+ * language, so an array cannot start with empty slots: the caller must say
+ * what an unset element is. For references the fill is retained once per
+ * element. */
+Obj *rt_array_new(int64_t len, int64_t fill, bool elems_are_refs);
+Obj *rt_list_new(bool elems_are_refs);
+
+int64_t rt_len_of(Obj *o);            /* works for both */
+int64_t rt_index_get(Obj *o, int64_t i);
+void    rt_index_set(Obj *o, int64_t i, int64_t v);
+void    rt_list_push(Obj *o, int64_t v);
+Obj    *rt_seq_clone(Obj *o);         /* shallow copy of an array or list */
+int64_t rt_list_pop(Obj *o);
+
 /* ---- concurrency -------------------------------------------------------
  *
  * OS threads and blocking channels, which is stage 2 of

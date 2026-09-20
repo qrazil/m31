@@ -921,3 +921,92 @@ fn conversions_go_both_ways_and_emit_nothing() {
     assert!(out.contains("iconst 5"), "{out}");
     assert!(!out.contains("convert") && !out.contains("cast"), "{out}");
 }
+
+// ---- collections, for-in, clone ---------------------------------------
+
+#[test]
+fn an_array_allocates_once_and_a_list_has_a_buffer() {
+    let a = ir("Array<int> a = Array<int>(4, 0); print(a[0]);");
+    assert!(a.contains("rt_array_new"), "{a}");
+    let l = ir("List<int> l = List<int>(); l.push(1); print(l[0]);");
+    assert!(l.contains("rt_list_new"), "{l}");
+}
+
+#[test]
+fn indexing_a_reference_element_is_borrowed() {
+    // Reading an element does not retain: the collection holds the +1, the
+    // same rule as reading a field.
+    let out = ir("Array<str> a = Array<str>(2, \"\"); print(a[0]);");
+    let main = out.split("func $main").nth(1).unwrap();
+    // One retain for the fill argument, and no extra for the read.
+    assert_eq!(
+        main.matches("rc_inc").count(),
+        0,
+        "the read must add no refcount traffic:\n{main}"
+    );
+}
+
+#[test]
+fn assigning_an_element_releases_the_old_one() {
+    let out = ir("Array<str> a = Array<str>(2, \"x\"); a[0] = \"y\"; print(a[0]);");
+    let main = out.split("func $main").nth(1).unwrap();
+    assert!(
+        main.contains("rt_index_get") && main.contains("rt_index_set"),
+        "old value must be read before the store:\n{main}"
+    );
+    assert!(
+        main.contains("rc_dec"),
+        "the old element must be released:\n{main}"
+    );
+}
+
+#[test]
+fn for_in_increments_before_the_body() {
+    // This is what makes `continue` advance the loop. An increment at the
+    // bottom of the body would be skipped by it and the loop would hang.
+    let out = ir("List<int> xs = List<int>(); xs.push(1); for (int x in xs) { print(x); }");
+    let body = out
+        .split("block2:")
+        .nth(1)
+        .expect("expected a loop body block");
+    let add = body.find("iadd").expect("the index must be incremented");
+    let get = body.find("rt_index_get").expect("the element must be read");
+    assert!(
+        add < get,
+        "the increment must come before the element read:\n{body}"
+    );
+}
+
+#[test]
+fn for_in_reads_the_length_once() {
+    let out = ir("List<int> xs = List<int>(); for (int x in xs) { print(x); }");
+    assert_eq!(
+        out.matches("rt_len_of").count(),
+        1,
+        "the length is read once, before the loop:\n{out}"
+    );
+}
+
+#[test]
+fn clone_copies_a_struct_field_by_field() {
+    let out = ir("type P { int x; str s; }\nP a = P(1, \"t\"); P b = clone(a); print(b.x);");
+    let main = out.split("func $main").nth(1).unwrap();
+    assert!(main.contains("alloc"), "clone must allocate:\n{main}");
+    assert!(
+        main.matches("store").count() >= 4,
+        "both fields must be copied into the new object:\n{main}"
+    );
+}
+
+#[test]
+fn collection_misuse_is_rejected() {
+    assert!(err("Array<int> a = Array<int>(4); print(a[0]);").contains("two arguments"));
+    assert!(err("Array<int> a = Array<int>(2, 0); a.push(1);").contains("needs a List"));
+    assert!(err("int x = 1; print(x[0]);").contains("cannot be indexed"));
+    assert!(err("List<int> xs = List<int>(); xs.push(\"no\");").contains("expected int"));
+    assert!(err("int x = 1; print(clone(x));").contains("nothing to clone"));
+    assert!(
+        err("List<int> xs = List<int>(); for (str s in xs) { print(s); }")
+            .contains("expected str, found int")
+    );
+}

@@ -381,17 +381,32 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
                     ("rt_chan_send", 0) | ("rt_chan_recv", 0) | ("rt_chan_close", 0) => {
                         format!("(Chan *){v}")
                     }
-                    ("rt_chan_send", 1) if f.ty_of(*v) == IrTy::Ref => {
+                    ("rt_chan_send", 1)
+                    | ("rt_index_set", 2)
+                    | ("rt_list_push", 1)
+                    | ("rt_array_new", 1)
+                        if f.ty_of(*v) == IrTy::Ref =>
+                    {
                         format!("(int64_t)(intptr_t){v}")
                     }
                     _ => v.to_string(),
                 })
                 .collect();
             match dst {
-                Some(d) if func == "rt_chan_recv" && f.ty_of(*d) == IrTy::Ref => {
+                Some(d)
+                    if matches!(
+                        func.as_str(),
+                        "rt_chan_recv" | "rt_index_get" | "rt_list_pop"
+                    ) && f.ty_of(*d) == IrTy::Ref =>
+                {
                     writeln!(o, "    {d} = (Obj *)(intptr_t){callee}({});", a.join(", ")).unwrap()
                 }
-                Some(d) if func == "rt_chan_new" => {
+                Some(d)
+                    if matches!(
+                        func.as_str(),
+                        "rt_chan_new" | "rt_array_new" | "rt_list_new"
+                    ) =>
+                {
                     writeln!(o, "    {d} = (Obj *){callee}({});", a.join(", ")).unwrap()
                 }
                 Some(d) => writeln!(o, "    {d} = {callee}({});", a.join(", ")).unwrap(),

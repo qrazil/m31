@@ -158,14 +158,14 @@ impl Mono {
         // layout. Emit an opaque type carrying the element type, so the rest
         // of the compiler can see what a channel carries without knowing how
         // it is built.
-        if e.name == "Chan" {
+        if matches!(e.name.as_str(), "Chan" | "Array" | "List") {
             if args.len() != 1 {
                 return Err(Diag::new(
                     span,
-                    format!("`Chan` takes 1 type argument, found {}", args.len()),
+                    format!("`{}` takes 1 type argument, found {}", e.name, args.len()),
                 ));
             }
-            let mangled = self.mangle("Chan", &args);
+            let mangled = self.mangle(&e.name, &args);
             if self.done.insert(mangled.clone()) {
                 self.out_types.push(TypeDecl {
                     name: mangled.clone(),
@@ -393,6 +393,17 @@ impl Mono {
                 value: self.subst_expr(value, sub)?,
                 span: *span,
             },
+            Stmt::SetIndex {
+                obj,
+                index,
+                value,
+                span,
+            } => Stmt::SetIndex {
+                obj: self.subst_expr(obj, sub)?,
+                index: self.subst_expr(index, sub)?,
+                value: self.subst_expr(value, sub)?,
+                span: *span,
+            },
             Stmt::SetField {
                 obj,
                 field,
@@ -427,6 +438,19 @@ impl Mono {
                     Some(e) => Some(self.subst_block(e, sub)?),
                     None => None,
                 },
+                span: *span,
+            },
+            Stmt::ForIn {
+                ty,
+                name,
+                iter,
+                body,
+                span,
+            } => Stmt::ForIn {
+                ty: self.subst_ty(*ty, sub, *span)?,
+                name: name.clone(),
+                iter: self.subst_expr(iter, sub)?,
+                body: self.subst_block(body, sub)?,
                 span: *span,
             },
             Stmt::While { cond, body, span } => Stmt::While {
@@ -468,6 +492,11 @@ impl Mono {
             ),
             Expr::Un(op, x, s) => Expr::Un(*op, Box::new(self.subst_expr(x, sub)?), *s),
             Expr::Field(o, f, s) => Expr::Field(Box::new(self.subst_expr(o, sub)?), f.clone(), *s),
+            Expr::Index(o, i, s) => Expr::Index(
+                Box::new(self.subst_expr(o, sub)?),
+                Box::new(self.subst_expr(i, sub)?),
+                *s,
+            ),
             Expr::New(ty, args, s) => {
                 let ty = self.subst_ty(*ty, sub, *s)?;
                 Expr::New(ty, self.subst_args(args, sub)?, *s)

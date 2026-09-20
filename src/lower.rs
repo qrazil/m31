@@ -179,6 +179,83 @@ impl Lowerer {
         self.sigs.insert(name.to_string(), Sig { params, ret });
     }
 
+    /// `xs.len()`, `xs.push(v)`, `xs.pop()`.
+    fn lower_seq_method(
+        &mut self,
+        o: &Val,
+        elem: Ty,
+        m: &str,
+        args: &Args,
+        span: Span,
+    ) -> Result<Val, Diag> {
+        if !args.named.is_empty() {
+            return Err(Diag::new(span, format!("`{m}` takes no named arguments")));
+        }
+        let growable = self.is_list(o.ty);
+        match m {
+            "len" => {
+                if !args.pos.is_empty() {
+                    return Err(Diag::new(span, "`len` takes no arguments"));
+                }
+                let d = self.new_val(IrTy::I64);
+                self.push(Inst::Call {
+                    dst: Some(d),
+                    func: "rt_len_of".to_string(),
+                    args: vec![o.val()],
+                });
+                Ok(Val::new(d, Ty::Int, false))
+            }
+            "push" if growable => {
+                if args.pos.len() != 1 {
+                    return Err(Diag::new(span, "`push` takes one argument"));
+                }
+                let v = self.lower_expr(&args.pos[0])?;
+                if !self.assignable(v.ty, elem) {
+                    return Err(Diag::new(args.pos[0].span(), self.mismatch(elem, v.ty)));
+                }
+                // The list takes a reference, exactly as a field would.
+                if self.is_ref(elem) {
+                    if v.owned {
+                        self.stmt_temps.retain(|t| *t != v.val());
+                    } else {
+                        self.push(Inst::RcInc { val: v.val() });
+                    }
+                }
+                self.push(Inst::Call {
+                    dst: None,
+                    func: "rt_list_push".to_string(),
+                    args: vec![o.val(), v.val()],
+                });
+                Ok(Val::void())
+            }
+            "pop" if growable => {
+                if !args.pos.is_empty() {
+                    return Err(Diag::new(span, "`pop` takes no arguments"));
+                }
+                let d = self.new_val(self.irty(elem));
+                self.push(Inst::Call {
+                    dst: Some(d),
+                    func: "rt_list_pop".to_string(),
+                    args: vec![o.val()],
+                });
+                // The list gives up its reference; the caller receives it.
+                let owned = self.is_ref(elem);
+                if owned {
+                    self.stmt_temps.push(d);
+                }
+                Ok(Val::new(d, elem, owned))
+            }
+            "push" | "pop" => Err(Diag::new(
+                span,
+                format!("`{m}` needs a List; an Array has a fixed length"),
+            )),
+            other => Err(Diag::new(
+                span,
+                format!("`{}` has no method `{other}`", self.tyname(o.ty)),
+            )),
+        }
+    }
+
     /// `send(c, v)`, `recv(c)`, `close(c)`.
     ///
     /// `send` MOVES its value: the sender gives up its reference and the
@@ -492,7 +569,9 @@ impl Lowerer {
                 name: t.name.clone(),
                 fields,
                 is_interface: t.is_interface,
-                is_chan: t.name.starts_with("Chan$"),
+                is_chan: t.name.starts_with("Chan$")
+                    || t.name.starts_with("Array$")
+                    || t.name.starts_with("List$"),
                 is_distinct: t.distinct_base.is_some(),
                 vtable: Vec::new(),
             });
@@ -763,8 +842,24 @@ impl Lowerer {
     }
 
     fn chan_elem(&self, t: Ty) -> Option<Ty> {
+        self.builtin_elem(t, "Chan$")
+    }
+
+    /// The element type of an `Array<T>` or `List<T>`, if it is one.
+    fn seq_elem(&self, t: Ty) -> Option<Ty> {
+        self.builtin_elem(t, "Array$")
+            .or_else(|| self.builtin_elem(t, "List$"))
+    }
+
+    fn is_list(&self, t: Ty) -> bool {
+        self.builtin_elem(t, "List$").is_some()
+    }
+
+    /// A builtin generic stores its element type as its only "field", which
+    /// is never laid out -- the runtime owns the representation.
+    fn builtin_elem(&self, t: Ty, prefix: &str) -> Option<Ty> {
         let tid = self.tdef_of(t)?;
-        if !self.typedefs[tid as usize].is_chan {
+        if !self.typedefs[tid as usize].name.starts_with(prefix) {
             return None;
         }
         Some(self.field_surface[tid as usize][0])
@@ -1277,6 +1372,66 @@ impl Lowerer {
 
             Stmt::While { cond, body, span } => self.lower_while(cond, body, *span),
 
+            Stmt::ForIn {
+                ty,
+                name,
+                iter,
+                body,
+                span,
+            } => self.lower_forin(*ty, name, iter, body, *span),
+
+            Stmt::SetIndex {
+                obj,
+                index,
+                value,
+                span,
+            } => {
+                let o = self.lower_expr(obj)?;
+                let Some(elem) = self.seq_elem(o.ty) else {
+                    return Err(Diag::new(
+                        *span,
+                        format!("{} cannot be indexed", self.tyname(o.ty)),
+                    ));
+                };
+                let i = self.lower_expr(index)?;
+                if self.underlying(i.ty) != Ty::Int {
+                    return Err(Diag::new(index.span(), self.mismatch(Ty::Int, i.ty)));
+                }
+                let v = self.lower_expr(value)?;
+                if !self.assignable(v.ty, elem) {
+                    return Err(Diag::new(value.span(), self.mismatch(elem, v.ty)));
+                }
+                // Retain the new element, store, then release the old -- in
+                // that order, so `xs[i] = xs[i];` cannot free what it stores.
+                if self.is_ref(elem) {
+                    let old = self.new_val(IrTy::Ref);
+                    self.push(Inst::Call {
+                        dst: Some(old),
+                        func: "rt_index_get".to_string(),
+                        args: vec![o.val(), i.val()],
+                    });
+                    if v.owned {
+                        self.stmt_temps.retain(|t| *t != v.val());
+                    } else {
+                        self.push(Inst::RcInc { val: v.val() });
+                    }
+                    self.push(Inst::Call {
+                        dst: None,
+                        func: "rt_index_set".to_string(),
+                        args: vec![o.val(), i.val(), v.val()],
+                    });
+                    self.push(Inst::RcDec { val: old });
+                } else {
+                    self.push(Inst::Call {
+                        dst: None,
+                        func: "rt_index_set".to_string(),
+                        args: vec![o.val(), i.val(), v.val()],
+                    });
+                }
+                self.flush_temps();
+                Ok(())
+            }
+
             Stmt::Spawn { name, args, span } => {
                 let Some(sig) = self.sigs.get(name) else {
                     return Err(Diag::new(*span, format!("unknown function `{name}`")));
@@ -1438,15 +1593,209 @@ impl Lowerer {
                     }
                 }
                 Stmt::While { body, .. } => Self::assigned_names(body, out),
+                Stmt::ForIn { body, .. } => Self::assigned_names(body, out),
                 Stmt::Decl { .. }
                 | Stmt::Return { .. }
                 | Stmt::Eval { .. }
                 | Stmt::Break { .. }
                 | Stmt::Continue { .. }
                 | Stmt::Spawn { .. }
+                | Stmt::SetIndex { .. }
                 | Stmt::SetField { .. } => {}
             }
         }
+    }
+
+    /// `for (T x in xs) { .. }`
+    ///
+    /// Structured like `while`, with one wrinkle that decides the shape: the
+    /// index must be incremented at the TOP of the body, not the bottom.
+    /// `continue` jumps to the header carrying the loop variables as they
+    /// stand, so an increment at the bottom would be skipped and the loop
+    /// would never advance. Incrementing first, and reading the element at
+    /// the pre-increment value, makes `continue` correct for free.
+    ///
+    /// The length is read once, before the loop. Pushing to a list while
+    /// iterating it therefore does not extend the iteration -- the same
+    /// choice Go makes for slices, and the predictable one.
+    fn lower_forin(
+        &mut self,
+        ty: Ty,
+        name: &str,
+        iter: &Expr,
+        body: &[Stmt],
+        span: Span,
+    ) -> Result<(), Diag> {
+        self.check_shadow(name, span)?;
+
+        // Evaluate the collection once, into a scope of its own so it is
+        // released when the loop ends.
+        self.scopes.push(HashMap::new());
+        self.owned.push(Vec::new());
+
+        let coll = self.lower_expr(iter)?;
+        let Some(elem) = self.seq_elem(coll.ty) else {
+            self.scopes.pop();
+            self.owned.pop();
+            return Err(Diag::new(
+                iter.span(),
+                format!("{} cannot be iterated", self.tyname(coll.ty)),
+            ));
+        };
+        if !self.assignable(elem, ty) {
+            self.scopes.pop();
+            self.owned.pop();
+            return Err(Diag::new(span, self.mismatch(ty, elem)));
+        }
+        if coll.owned {
+            self.stmt_temps.retain(|t| *t != coll.val());
+        } else {
+            self.push(Inst::RcInc { val: coll.val() });
+        }
+        self.scopes
+            .last_mut()
+            .unwrap()
+            .insert("$coll".to_string(), (coll.ty, coll.val(), true));
+        self.owned.last_mut().unwrap().push("$coll".to_string());
+
+        let n = self.new_val(IrTy::I64);
+        self.push(Inst::Call {
+            dst: Some(n),
+            func: "rt_len_of".to_string(),
+            args: vec![coll.val()],
+        });
+
+        let zero = self.new_val(IrTy::I64);
+        self.push(Inst::IConst { dst: zero, val: 0 });
+        self.scopes
+            .last_mut()
+            .unwrap()
+            .insert("$i".to_string(), (Ty::Int, zero, false));
+        self.flush_temps();
+
+        // From here the shape is `while ($i < $n)`, hand-built so the
+        // increment can sit at the top of the body.
+        let mut names = vec!["$i".to_string()];
+        Self::assigned_names(body, &mut names);
+        names.retain(|x| self.lookup(x).is_some());
+        names.sort();
+        let carried: Vec<(String, Ty, Value)> = names
+            .iter()
+            .map(|x| {
+                let (t, v) = self.lookup(x).unwrap();
+                (x.clone(), t, v)
+            })
+            .collect();
+
+        let header = self.new_block();
+        let body_bb = self.new_block();
+        let exit_bb = self.new_block();
+
+        let entry_args: Vec<Value> = carried.iter().map(|(_, _, v)| *v).collect();
+        self.terminate(Term::Jump {
+            to: header,
+            args: entry_args,
+        });
+
+        let mut hp = Vec::new();
+        let mut ep = Vec::new();
+        for (_, t, _) in &carried {
+            hp.push(self.new_val(self.irty(*t)));
+            ep.push(self.new_val(self.irty(*t)));
+        }
+        let hi = self.blocks.iter().position(|b| b.id == header).unwrap();
+        self.blocks[hi].params = hp.clone();
+        let ei = self.blocks.iter().position(|b| b.id == exit_bb).unwrap();
+        self.blocks[ei].params = ep.clone();
+
+        self.switch_to(header);
+        for ((x, _, _), p) in carried.iter().zip(hp.iter()) {
+            self.rebind(x, *p);
+        }
+        let idx = self.lookup("$i").unwrap().1;
+        let cond = self.new_val(IrTy::I1);
+        self.push(Inst::ICmp {
+            dst: cond,
+            cmp: Cmp::Lt,
+            lhs: idx,
+            rhs: n,
+        });
+        self.terminate(Term::Brif {
+            cond,
+            then: body_bb,
+            then_args: Vec::new(),
+            els: exit_bb,
+            els_args: hp.clone(),
+        });
+
+        self.switch_to(body_bb);
+        // Increment FIRST, so `continue` advances; read at the old index.
+        let one = self.new_val(IrTy::I64);
+        self.push(Inst::IConst { dst: one, val: 1 });
+        let next = self.new_val(IrTy::I64);
+        self.push(Inst::Arith {
+            dst: next,
+            op: ArithOp::Add,
+            lhs: idx,
+            rhs: one,
+        });
+        self.rebind("$i", next);
+
+        self.scopes.push(HashMap::new());
+        self.owned.push(Vec::new());
+        let e = self.new_val(self.irty(elem));
+        self.push(Inst::Call {
+            dst: Some(e),
+            func: "rt_index_get".to_string(),
+            args: vec![coll.val(), idx],
+        });
+        // The element is borrowed from the collection, so the loop variable
+        // retains it for the duration of the body, exactly like a binding.
+        if self.is_ref(elem) {
+            self.push(Inst::RcInc { val: e });
+            self.owned.last_mut().unwrap().push(name.to_string());
+        }
+        self.scopes
+            .last_mut()
+            .unwrap()
+            .insert(name.to_string(), (ty, e, true));
+
+        self.loops.push(LoopCtx {
+            header,
+            exit: exit_bb,
+            carried: carried.iter().map(|(x, _, _)| x.clone()).collect(),
+            depth: self.owned.len() - 1,
+        });
+        let lowered = self.lower_block(body);
+        self.loops.pop();
+        lowered?;
+
+        let live = !self.terminated();
+        if live {
+            self.release_scope();
+        }
+        self.scopes.pop();
+        self.owned.pop();
+
+        if live {
+            let back: Vec<Value> = carried
+                .iter()
+                .map(|(x, _, _)| self.lookup(x).unwrap().1)
+                .collect();
+            self.terminate(Term::Jump {
+                to: header,
+                args: back,
+            });
+        }
+
+        self.switch_to(exit_bb);
+        for ((x, _, _), p) in carried.iter().zip(ep.iter()) {
+            self.rebind(x, *p);
+        }
+        self.release_scope();
+        self.scopes.pop();
+        self.owned.pop();
+        Ok(())
     }
 
     /// `while` lowering. This is the first construct with a back edge.
@@ -1841,6 +2190,12 @@ impl Lowerer {
                         format!("type {} has no methods", self.tyname(o.ty)),
                     ));
                 };
+                // Collections have built-in methods, typed against their
+                // element type rather than declared anywhere.
+                if let Some(elem) = self.seq_elem(o.ty) {
+                    return self.lower_seq_method(&o, elem, m, args, *span);
+                }
+
                 // On an interface value the implementation is not known
                 // statically: dispatch through the receiver's type header.
                 if self.typedefs[tid as usize].is_interface {
@@ -1943,6 +2298,29 @@ impl Lowerer {
                     }
                     Ok(Val::new(d, ret, owned))
                 }
+            }
+
+            Expr::Index(obj, idx, span) => {
+                let o = self.lower_expr(obj)?;
+                let Some(elem) = self.seq_elem(o.ty) else {
+                    return Err(Diag::new(
+                        *span,
+                        format!("{} cannot be indexed", self.tyname(o.ty)),
+                    ));
+                };
+                let i = self.lower_expr(idx)?;
+                if self.underlying(i.ty) != Ty::Int {
+                    return Err(Diag::new(idx.span(), self.mismatch(Ty::Int, i.ty)));
+                }
+                let d = self.new_val(self.irty(elem));
+                self.push(Inst::Call {
+                    dst: Some(d),
+                    func: "rt_index_get".to_string(),
+                    args: vec![o.val(), i.val()],
+                });
+                // Borrowed from the collection, which holds the +1 -- the
+                // same rule as reading a field.
+                Ok(Val::new(d, elem, false))
             }
 
             Expr::New(ty, args, span) => self.lower_new(*ty, args, *span),
@@ -2318,6 +2696,60 @@ impl Lowerer {
             }
             return Ok(Val::new(v.val(), ty, v.owned));
         }
+        let tname = self.typedefs[tid as usize].name.clone();
+        if tname.starts_with("Array$") || tname.starts_with("List$") {
+            let elem = self.seq_elem(ty).expect("collection has an element type");
+            let refs = self.is_ref(elem);
+            let is_lst = tname.starts_with("List$");
+            let want = if is_lst { 0 } else { 2 };
+            if args.pos.len() != want || !args.named.is_empty() {
+                return Err(Diag::new(
+                    span,
+                    if is_lst {
+                        "a list takes no arguments".to_string()
+                    } else {
+                        "an array takes two arguments: its length and the value \
+                         every element starts at"
+                            .to_string()
+                    },
+                ));
+            }
+            let mut a = Vec::new();
+            if !is_lst {
+                let n = self.lower_expr(&args.pos[0])?;
+                if self.underlying(n.ty) != Ty::Int {
+                    return Err(Diag::new(args.pos[0].span(), self.mismatch(Ty::Int, n.ty)));
+                }
+                let fill = self.lower_expr(&args.pos[1])?;
+                if !self.assignable(fill.ty, elem) {
+                    return Err(Diag::new(args.pos[1].span(), self.mismatch(elem, fill.ty)));
+                }
+                // The array retains the fill once per element, in the
+                // runtime, so an owned temporary here is still released by
+                // the statement as usual.
+                a.push(n.val());
+                a.push(fill.val());
+            }
+            let flag = self.new_val(IrTy::I1);
+            self.push(Inst::BConst {
+                dst: flag,
+                val: refs,
+            });
+            a.push(flag);
+            let d = self.new_val(IrTy::Ref);
+            self.push(Inst::Call {
+                dst: Some(d),
+                func: if is_lst {
+                    "rt_list_new"
+                } else {
+                    "rt_array_new"
+                }
+                .to_string(),
+                args: a,
+            });
+            self.stmt_temps.push(d);
+            return Ok(Val::new(d, ty, true));
+        }
         if self.typedefs[tid as usize].is_chan {
             // `Chan<int>(8)` -- one positional argument, the capacity.
             if args.pos.len() != 1 || !args.named.is_empty() {
@@ -2443,6 +2875,75 @@ impl Lowerer {
             return Ok(Val::new(v.val(), base, v.owned));
         }
 
+        // `clone(x)` -- a SHALLOW copy. We chose reference types, so `=`
+        // aliases; this is the explicit way to get a second object. Shallow
+        // because a deep copy would have to decide what copying each field
+        // means, which is a question only the program can answer.
+        if name == "clone" {
+            if args.pos.len() != 1 || !args.named.is_empty() {
+                return Err(Diag::new(span, "`clone` takes one argument"));
+            }
+            let v = self.lower_expr(&args.pos[0])?;
+            if self.seq_elem(v.ty).is_some() {
+                let d = self.new_val(IrTy::Ref);
+                self.push(Inst::Call {
+                    dst: Some(d),
+                    func: "rt_seq_clone".to_string(),
+                    args: vec![v.val()],
+                });
+                self.stmt_temps.push(d);
+                return Ok(Val::new(d, v.ty, true));
+            }
+            let Some(tid) = self.tdef_of(v.ty) else {
+                return Err(Diag::new(
+                    args.pos[0].span(),
+                    format!(
+                        "{} is copied by assignment; there is nothing to clone",
+                        self.tyname(v.ty)
+                    ),
+                ));
+            };
+            let td = &self.typedefs[tid as usize];
+            if td.is_interface || td.is_chan || td.is_distinct {
+                return Err(Diag::new(
+                    args.pos[0].span(),
+                    format!("`{}` cannot be cloned", self.tyname(v.ty)),
+                ));
+            }
+            if v.ty == Ty::Str {
+                return Err(Diag::new(
+                    args.pos[0].span(),
+                    "a str is immutable; cloning one would change nothing",
+                ));
+            }
+            // Field by field: the copy holds the same references, each
+            // retained once more.
+            let n = self.typedefs[tid as usize].fields.len();
+            let d = self.new_val(IrTy::Ref);
+            self.push(Inst::Alloc { dst: d, tid });
+            for i in 0..n {
+                let (_, fty) = self.typedefs[tid as usize].fields[i].clone();
+                let cur = self.new_val(fty);
+                self.push(Inst::LoadField {
+                    dst: cur,
+                    obj: v.val(),
+                    tid,
+                    idx: i as u32,
+                });
+                if fty == IrTy::Ref {
+                    self.push(Inst::RcInc { val: cur });
+                }
+                self.push(Inst::StoreField {
+                    obj: d,
+                    tid,
+                    idx: i as u32,
+                    val: cur,
+                });
+            }
+            self.stmt_temps.push(d);
+            return Ok(Val::new(d, v.ty, true));
+        }
+
         // Channel builtins. They are here rather than in `sigs` because
         // their types depend on the channel's element type.
         if matches!(name, "send" | "recv" | "close") {
@@ -2509,7 +3010,9 @@ fn stmt_span(s: &Stmt) -> Span {
         | Stmt::While { span, .. }
         | Stmt::Break { span, .. }
         | Stmt::Continue { span, .. }
+        | Stmt::ForIn { span, .. }
         | Stmt::Spawn { span, .. }
+        | Stmt::SetIndex { span, .. }
         | Stmt::SetField { span, .. }
         | Stmt::If { span, .. } => *span,
     }

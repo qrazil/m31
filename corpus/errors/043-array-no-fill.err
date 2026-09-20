@@ -1,0 +1,1 @@
+corpus/errors/043-array-no-fill.src:1:16: an array takes two arguments: its length and the value every element starts at

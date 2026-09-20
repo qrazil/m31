@@ -1,0 +1,34 @@
+// Two shapes, and the difference is layout rather than stack-versus-heap.
+//
+//   Array<T>  fixed length, elements stored INLINE after the header. One
+//             allocation, one pointer chase, never reallocates. The fast one.
+//   List<T>   growable, elements in a separate buffer that push may
+//             reallocate. Two pointer chases. The convenient one.
+//
+// An array takes a fill value because there is no null: a reference element
+// has to start as *something*, and the caller is the only one who can say.
+
+Array<int> a = Array<int>(4, 0);
+a[0] = 10;
+a[1] = 20;
+a[3] = a[0] + a[1];
+print(a.len());
+print(a[3]);
+
+Array<str> names = Array<str>(2, "?");
+print(names[0]);
+names[0] = "ana";
+names[1] = "bob";
+print(names[0]);
+
+List<str> words = List<str>();
+words.push("one");
+words.push("tw" + "o");
+print(words.len());
+print(words[1]);
+print(words.pop());
+print(words.len());
+
+// Indexing is bounds-checked, and an index can be any expression.
+int i = 1;
+print(a[i * 2]);

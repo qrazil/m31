@@ -57,7 +57,7 @@ impl Parser {
         // `Chan` is built in: the runtime owns its representation, so there
         // is no `type Chan<T>` to find in the source, but it must parse as a
         // type name like any other.
-        let mut type_names = vec!["Chan".to_string()];
+        let mut type_names = vec!["Chan".to_string(), "Array".to_string(), "List".to_string()];
         for w in toks.windows(2) {
             if w[0].tok == Tok::KwType || w[0].tok == Tok::KwInterface {
                 if let Tok::Ident(n) = &w[1].tok {
@@ -683,6 +683,26 @@ impl Parser {
             return Ok(Stmt::Continue { span });
         }
 
+        if self.eat(&Tok::KwFor) {
+            self.expect(Tok::LParen)?;
+            let ty = self.expect_ty()?;
+            if ty == Ty::Void {
+                return Err(Diag::new(span, "`void` is not a value type"));
+            }
+            let (name, _) = self.expect_ident()?;
+            self.expect(Tok::KwIn)?;
+            let iter = self.parse_expr(0)?;
+            self.expect(Tok::RParen)?;
+            let body = self.parse_block()?;
+            return Ok(Stmt::ForIn {
+                ty,
+                name,
+                iter,
+                body,
+                span,
+            });
+        }
+
         if self.eat(&Tok::KwWhile) {
             self.expect(Tok::LParen)?;
             let cond = self.parse_expr(0)?;
@@ -729,6 +749,12 @@ impl Parser {
                     value,
                     span,
                 }),
+                Expr::Index(obj, index, _) => Ok(Stmt::SetIndex {
+                    obj: *obj,
+                    index: *index,
+                    value,
+                    span,
+                }),
                 other => Err(Diag::new(other.span(), "cannot assign to this expression")),
             };
         }
@@ -766,6 +792,18 @@ impl Parser {
             } else {
                 Expr::Field(Box::new(e), name, span)
             };
+        }
+        // Indexing, and chains of it: `grid[i][j]`.
+        while self.peek() == &Tok::LBracket {
+            let span = self.span();
+            self.bump();
+            let i = self.parse_expr(0)?;
+            self.expect(Tok::RBracket)?;
+            e = Expr::Index(Box::new(e), Box::new(i), span);
+            // A postfix chain may continue after an index: `xs[0].name`.
+            if self.peek() == &Tok::Dot {
+                return self.parse_postfix(e);
+            }
         }
         Ok(e)
     }

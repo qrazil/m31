@@ -1,0 +1,54 @@
+// `for` over a collection. The index is incremented at the TOP of the body,
+// which is what makes `continue` advance the loop -- an increment at the
+// bottom would be skipped. The length is read once, so pushing while
+// iterating does not extend the iteration.
+
+List<int> xs = List<int>();
+xs.push(1);
+xs.push(2);
+xs.push(3);
+xs.push(4);
+
+int sum = 0;
+for (int x in xs) {
+    sum = sum + x;
+}
+print(sum);
+
+int odds = 0;
+for (int x in xs) {
+    if (x % 2 == 0) {
+        continue;
+    }
+    odds = odds + x;
+}
+print(odds);
+
+int first = 0;
+for (int x in xs) {
+    if (x > 2) {
+        first = x;
+        break;
+    }
+}
+print(first);
+
+Array<str> names = Array<str>(2, "");
+names[0] = "ana";
+names[1] = "bob";
+str joined = "";
+for (str n in names) {
+    joined = joined + n;
+}
+print(joined);
+
+// Nested, over the same collection.
+int pairs = 0;
+for (int x in xs) {
+    for (int y in xs) {
+        if (x < y) {
+            pairs = pairs + 1;
+        }
+    }
+}
+print(pairs);

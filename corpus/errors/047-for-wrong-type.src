@@ -1,0 +1,6 @@
+List<int> xs = List<int>();
+xs.push(1);
+
+for (str s in xs) {
+    print(s);
+}

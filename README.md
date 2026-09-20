@@ -20,8 +20,8 @@ which gcc and clang both build clean at `-O0` and `-O2`.
 `examples/tour.src` is a tour of every feature, and is also in the corpus so
 it cannot rot.
 
-- 82 corpus programs, 0 failing
-- 71 unit tests
+- 91 corpus programs, 0 failing
+- 78 unit tests
 - 0 dependencies, 0 `unsafe`, clippy clean at `-D warnings`
 
 ## What the language does today
@@ -85,6 +85,31 @@ void Rect.scale(int f) {
 ```
 
 That is safe only because of the next rule.
+
+**Collections** come in two shapes, and the difference is layout:
+
+```c
+Array<int> a = Array<int>(4, 0);   // fixed length, elements INLINE
+a[2] = 7;
+
+List<str> xs = List<str>();        // growable, separate buffer
+xs.push("one");
+
+for (str x in xs) {
+    print(x);
+}
+```
+
+`Array<T>` is one allocation with the elements stored directly after the
+header — one pointer chase, no capacity slack, never reallocates. `List<T>`
+keeps a separate buffer that `push` may grow. Indexing is bounds-checked and
+traps, like integer overflow.
+
+An array takes a **fill value** because there is no null: a reference element
+has to start as *something*, and only the caller can say what.
+
+`clone(x)` is a **shallow** copy — we chose reference types, so `=` aliases
+and this is the explicit way to get a second object.
 
 **Distinct types** are the same representation as their base with a
 different identity — erased before the IR, so they cost nothing:
@@ -213,7 +238,7 @@ Naming a mandatory parameter is an error, as is passing an optional one
 positionally. The two halves never overlap, so there is no question of which
 form to use and no question of what order optional arguments come in.
 
-Not yet: `for`, closures, modules. Concurrency is OS threads for now;
+Not yet: closures, errors, modules. Concurrency is OS threads for now;
 green threads are stage 3 of `docs/concurrency-decision.md`.
 
 ## Decisions made

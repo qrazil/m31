@@ -108,6 +108,127 @@ void rt_print_str(Obj *o) {
     putchar('\n');
 }
 
+/* ---- collections ------------------------------------------------------ */
+
+static void arr_drop_refs(Obj *o) {
+    Arr *a = (Arr *)o;
+    for (int64_t i = 0; i < a->len; i++) {
+        rc_dec((Obj *)(intptr_t)a->data[i]);
+    }
+}
+
+static void lst_drop_refs(Obj *o) {
+    Lst *l = (Lst *)o;
+    for (int64_t i = 0; i < l->len; i++) {
+        rc_dec((Obj *)(intptr_t)l->data[i]);
+    }
+    free(l->data);
+}
+
+static void lst_drop_vals(Obj *o) {
+    free(((Lst *)o)->data);
+}
+
+static const TypeInfo rt_arr_val_type = { NULL, NULL };
+static const TypeInfo rt_arr_ref_type = { arr_drop_refs, NULL };
+static const TypeInfo rt_lst_val_type = { lst_drop_vals, NULL };
+static const TypeInfo rt_lst_ref_type = { lst_drop_refs, NULL };
+
+Obj *rt_array_new(int64_t len, int64_t fill, bool elems_are_refs) {
+    if (len < 0) rt_trap("array length cannot be negative");
+    /* One allocation: header plus the elements. Every slot starts at `fill`
+     * -- there is no null, so there is no such thing as an unset element. */
+    Arr *a = (Arr *)rt_alloc(sizeof(Arr) + sizeof(int64_t) * (size_t)len,
+                             elems_are_refs ? &rt_arr_ref_type : &rt_arr_val_type);
+    a->len = len;
+    for (int64_t i = 0; i < len; i++) {
+        a->data[i] = fill;
+        if (elems_are_refs) rc_inc((Obj *)(intptr_t)fill);
+    }
+    return (Obj *)a;
+}
+
+Obj *rt_list_new(bool elems_are_refs) {
+    Lst *l = (Lst *)rt_alloc(sizeof(Lst),
+                             elems_are_refs ? &rt_lst_ref_type : &rt_lst_val_type);
+    l->len = 0;
+    l->cap = 0;
+    l->data = NULL;
+    return (Obj *)l;
+}
+
+/* A list and an array share a header shape up to `len`, so one accessor
+ * serves both. The compiler knows which it has; the runtime does not need
+ * to, except to find the elements. */
+static bool is_list(const Obj *o) {
+    return o->ty == &rt_lst_val_type || o->ty == &rt_lst_ref_type;
+}
+
+static int64_t *slots(Obj *o) {
+    return is_list(o) ? ((Lst *)o)->data : ((Arr *)o)->data;
+}
+
+int64_t rt_len_of(Obj *o) {
+    return is_list(o) ? ((Lst *)o)->len : ((Arr *)o)->len;
+}
+
+int64_t rt_index_get(Obj *o, int64_t i) {
+    int64_t n = rt_len_of(o);
+    if (i < 0 || i >= n) rt_trap("index out of range");
+    return slots(o)[i];
+}
+
+void rt_index_set(Obj *o, int64_t i, int64_t v) {
+    int64_t n = rt_len_of(o);
+    if (i < 0 || i >= n) rt_trap("index out of range");
+    slots(o)[i] = v;
+}
+
+void rt_list_push(Obj *o, int64_t v) {
+    Lst *l = (Lst *)o;
+    if (l->len == l->cap) {
+        int64_t cap = l->cap == 0 ? 4 : l->cap * 2;
+        int64_t *buf = realloc(l->data, sizeof(int64_t) * (size_t)cap);
+        if (buf == NULL) rt_trap("out of memory");
+        l->data = buf;
+        l->cap = cap;
+    }
+    l->data[l->len++] = v;
+}
+
+/* Shallow: the new collection holds the same elements, each retained once
+ * more. Deep copying would have to know what an element's own copy means,
+ * which is a question only the program can answer. */
+Obj *rt_seq_clone(Obj *o) {
+    int64_t n = rt_len_of(o);
+    bool refs = o->ty == &rt_arr_ref_type || o->ty == &rt_lst_ref_type;
+    int64_t *src = slots(o);
+
+    if (is_list(o)) {
+        Lst *l = (Lst *)rt_list_new(refs);
+        for (int64_t i = 0; i < n; i++) {
+            rt_list_push((Obj *)l, src[i]);
+            if (refs) rc_inc((Obj *)(intptr_t)src[i]);
+        }
+        return (Obj *)l;
+    }
+
+    Arr *a = (Arr *)rt_alloc(sizeof(Arr) + sizeof(int64_t) * (size_t)n,
+                             refs ? &rt_arr_ref_type : &rt_arr_val_type);
+    a->len = n;
+    for (int64_t i = 0; i < n; i++) {
+        a->data[i] = src[i];
+        if (refs) rc_inc((Obj *)(intptr_t)src[i]);
+    }
+    return (Obj *)a;
+}
+
+int64_t rt_list_pop(Obj *o) {
+    Lst *l = (Lst *)o;
+    if (l->len == 0) rt_trap("pop from an empty list");
+    return l->data[--l->len];
+}
+
 /* ---- concurrency ------------------------------------------------------ */
 
 struct Chan {
