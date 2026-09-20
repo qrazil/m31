@@ -138,7 +138,7 @@ is the interface above, reuse is this.
 satisfy it:
 
 ```c
-type Shape interface {
+interface Shape {
     int area();
     str name();
 }

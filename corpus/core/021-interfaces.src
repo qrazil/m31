@@ -6,7 +6,7 @@
 // through the header, as in Java -- so `ref` stays the only reference shape
 // in the IR and there are no fat pointers. Dispatch is one extra load.
 
-type Shape interface {
+interface Shape {
     int area();
     str name();
 }

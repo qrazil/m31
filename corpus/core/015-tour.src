@@ -125,7 +125,7 @@ print(len(title));
 // ---- interfaces ----------------------------------------------------
 // Structural: having the methods is the proof, no `implements` clause.
 
-type Sized interface {
+interface Sized {
     int area();
 }
 

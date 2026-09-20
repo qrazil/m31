@@ -243,8 +243,21 @@ contained and worth it; it is the same CFG walk as the move checker.
 
 ## 8. Polymorphism
 
-**Interfaces are structural**, Go style: having the methods is the proof, no
-`implements` clause. Chosen for retrofit — an interface can be satisfied by a
+**Interfaces are structural**: having the methods is the proof, no
+`implements` clause.
+
+The keyword comes first, as the kind word does for a struct:
+
+```c
+type Point { int x; int y; }
+interface HasArea { int area(); }
+```
+
+Go writes `type X interface { .. }` because in Go a kind word *always*
+follows `type` — `type X struct { .. }`. We dropped `struct`, so following
+Go here would have left one form with a kind word and the other without.
+`type` still earns the keyword for aliases later, where there is no `{`:
+`type Id = int;` Chosen for retrofit — an interface can be satisfied by a
 type written before the interface existed, including one in a library you do
 not control. That is what makes a stdlib compose without a type hierarchy.
 

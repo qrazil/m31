@@ -59,7 +59,7 @@ impl Parser {
         // type name like any other.
         let mut type_names = vec!["Chan".to_string()];
         for w in toks.windows(2) {
-            if w[0].tok == Tok::KwType {
+            if w[0].tok == Tok::KwType || w[0].tok == Tok::KwInterface {
                 if let Tok::Ident(n) = &w[1].tok {
                     type_names.push(n.clone());
                 }
@@ -313,7 +313,7 @@ impl Parser {
         let mut types = Vec::new();
         let mut toplevel = Vec::new();
         while self.peek() != &Tok::Eof {
-            if self.peek() == &Tok::KwType {
+            if self.peek() == &Tok::KwType || self.peek() == &Tok::KwInterface {
                 types.push(self.parse_type_decl()?);
             } else if self.starts_func() {
                 funcs.push(self.parse_func()?);
@@ -398,11 +398,14 @@ impl Parser {
 
     fn parse_type_decl(&mut self) -> Result<TypeDecl, Diag> {
         let span = self.span();
-        self.expect(Tok::KwType)?;
+        // Keyword first, so the kind is known before the name:
+        //   type Point { .. }        a struct
+        //   interface HasArea { .. } an interface
+        let is_interface = self.peek() == &Tok::KwInterface;
+        self.bump();
         let (name, _) = self.expect_ident()?;
         let tparams = self.parse_tparams()?;
         self.tparams = tparams.clone();
-        let is_interface = self.eat(&Tok::KwInterface);
         self.expect(Tok::LBrace)?;
 
         if is_interface {

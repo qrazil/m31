@@ -37,7 +37,7 @@ type Puppy {
     int weeks;
 }
 
-type Speaker interface {
+interface Speaker {
     int count_legs();
 }
 
