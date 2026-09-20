@@ -5,7 +5,7 @@
 
 // ---- user types --------------------------------------------------------
 // Reference types: heap allocated, refcounted, aliased by assignment.
-// Constructed by field name, so reordering fields never transposes values.
+// A field with no default is positional; one with a default is named.
 
 type Point {
     int x;
@@ -100,8 +100,8 @@ r.w = 10;                  // field assignment
 print(r.area());
 
 // ---- aliasing ----------------------------------------------------------
-// Assignment aliases; both names see the change. `clone` will be the
-// explicit way to copy, once it exists.
+// Assignment aliases; both names see the change. `clone` is the explicit
+// way to get a second object.
 Rect same = r;
 same.h = 1;
 print(r.area());

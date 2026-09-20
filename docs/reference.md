@@ -428,8 +428,16 @@ Arithmetic on a distinct type yields **that same distinct type**, not the
 base — `Price + Price` is a `Price`. Mixing two distinct types, or a distinct
 type and its base, is an error; convert explicitly (§3.6).
 
-Division or remainder by zero traps. There is no unsigned type and no
-bitwise operator yet.
+**Integer arithmetic traps on overflow** — `+`, `-`, `*`, `/`, `%` and
+unary `-`, on every target. There is no wrapping variant; one way to do each
+thing, and a `wrapping_add` can arrive the day something needs it. Division
+and remainder by zero trap too, as does `INT_MIN / -1`.
+
+Overflow trapping is why an overflowing program cannot have a Go twin in the
+corpus: Go wraps, so the twin would be confidently wrong. Those cases live in
+`corpus/traps/` instead.
+
+There is no unsigned type and no bitwise operator yet.
 
 ### 6.2 Operators on user types
 
@@ -536,9 +544,16 @@ loop costs nothing.
 A trap prints a message to stderr and aborts. It is not catchable — there are
 no exceptions and no error values yet.
 
-Trapping conditions: index out of range, `Map.get` on a missing key, `pop` on
-an empty list, division or remainder by zero, and a uniqueness violation at a
-thread boundary (§8.3).
+Trapping conditions:
+
+  - integer overflow, on any arithmetic operator including unary minus
+  - division or remainder by zero, and `INT_MIN / -1`
+  - an index outside `0 .. len-1`
+  - `Map.get` on a key that is not there
+  - `pop` on an empty list
+  - `recv` on a channel that is closed and drained
+  - a length or capacity too large to allocate
+  - a uniqueness violation at a thread boundary (§8.3)
 
 ---
 
