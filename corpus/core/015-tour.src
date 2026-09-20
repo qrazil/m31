@@ -132,6 +132,46 @@ interface Sized {
 Sized shape = r;
 print(shape.area());
 
+// ---- collections ---------------------------------------------------
+// Array is fixed length with its elements stored inline -- one allocation,
+// one pointer chase. List is growable, with a separate buffer. An array
+// needs a fill value because there is no null.
+
+Array<int> squares = Array<int>(5, 0);
+int k = 0;
+while (k < 5) {
+    squares[k] = k * k;
+    k = k + 1;
+}
+
+int sq_total = 0;
+for (int s in squares) {
+    sq_total = sq_total + s;
+}
+print(sq_total);
+
+List<str> words = List<str>();
+words.push("the");
+words.push("quick");
+words.push("fox");
+
+str sentence = "";
+for (str w in words) {
+    if (len(w) == 3) {
+        continue;
+    }
+    sentence = sentence + w;
+}
+print(sentence);
+print(words.len());
+
+// `=` aliases, because user types are reference types; clone is the
+// explicit copy.
+List<str> copy = clone(words);
+copy.push("more");
+print(words.len());
+print(copy.len());
+
 // ---- concurrency ---------------------------------------------------
 // Threads and channels. A reference sent to another thread is MOVED, which
 // is what keeps refcounts non-atomic. A channel is exempt -- it is how
