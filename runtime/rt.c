@@ -493,6 +493,24 @@ void rt_sort_float(Obj *o) {
  * patterns of 0.0 and -0.0 differ while the values are equal, and two NaNs
  * can share a bit pattern while comparing unequal. Both would be wrong the
  * other way round. */
+/* -1 for absent. The sentinel does not escape: the lowering turns it into a
+ * None before anyone can see it, which is the whole reason index_of waited
+ * for Option rather than shipping a -1 into the language. */
+int64_t rt_seq_index_of(Obj *o, int64_t v, int kind) {
+    int64_t n = rt_len_of(o);
+    int64_t *d = slots(o);
+    for (int64_t i = 0; i < n; i++) {
+        if (kind == SEQ_STR) {
+            if (rt_str_eq((Obj *)(intptr_t)d[i], (Obj *)(intptr_t)v)) return i;
+        } else if (kind == SEQ_FLOAT) {
+            if (rt_i2f(d[i]) == rt_i2f(v)) return i;
+        } else if (d[i] == v) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 bool rt_seq_contains(Obj *o, int64_t v, int kind) {
     int64_t n = rt_len_of(o);
     int64_t *d = slots(o);

@@ -262,6 +262,36 @@ There is no subtyping here. `Circle` is not a type and not a subclass of
 `Shape`; it is one of the shapes a `Shape` can be. The only way to get at a
 payload is `match`.
 
+### 3.7a `Option` and `Result`
+
+Two enums the language declares for you:
+
+```c
+enum Option<T>    { None; Some(T); }
+enum Result<T, E> { Ok(T); Err(E); }
+```
+
+They are built in for a hard reason rather than a convenient one: **a
+built-in method cannot return a type the program defines**, because the
+compiler has to know what `xs.index_of(v)` gives back. Without a blessed
+`Option` that method cannot exist at all. The second reason is composition —
+two libraries with their own `Result` cannot pass one through the other.
+
+A program may not redeclare either.
+
+Past the declaration they are ordinary enums: the same `match`, the same
+exhaustiveness, no special construction syntax. `Option` has three methods,
+and no more:
+
+| | |
+|---|---|
+| `o.is_some()`, `o.is_none()` | the question, without a `match` |
+| `o.or(v)` | the value, or `v` if there is none |
+
+There is no `unwrap`. Trapping on `None` is what `Map.get` used to do, and
+putting it back behind a shorter name would undo the reason for the change.
+Taking the value out and keeping it is what `match` is for.
+
 ### 3.8 Generics
 
 Type parameters on a type or a function:
@@ -302,7 +332,8 @@ Methods:
 | Receiver | Method | Meaning |
 |---|---|---|
 | `Array`, `List`, `Map`, `str` | `size()` | element count |
-| `Array`, `List` | `contains(v)` | `int`, `bool` and `str` elements only |
+| `Array`, `List` | `contains(v)` | `int`, `float`, `bool` and `str` elements only |
+| `Array`, `List` | `index_of(v)` | `Option<int>` — `None` if it is not there |
 | `Array`, `List` | `reverse()` | in place |
 | `Array`, `List` | `sort()` | in place, ascending; `int` and `str` only |
 | `List` | `push(v)` | append |
@@ -311,7 +342,7 @@ Methods:
 | `List` | `remove_at(i)` | remove and return the element at `i` |
 | `List` | `clear()` | drop every element |
 | `Map` | `set(k, v)` | insert or replace |
-| `Map` | `get(k)` | **traps** on a missing key |
+| `Map` | `get(k)` | `Option<V>` — `None` if the key is not there |
 | `Map` | `contains(k)` | is the key present |
 | `Map` | `remove(k)` | delete if present |
 | `Map` | `clear()` | remove every entry |
@@ -328,10 +359,9 @@ On a `Map`, `contains` asks about a **key** — the same thing `get` and
 
 `contains` compares the way `==` does — `str` by value, `int` and `bool`
 directly — and refuses a user type, which would need its own comparison.
-There is no `index_of` yet: with no null there is nothing honest for it to
-return when the element is absent, and a `-1` sentinel is not something to
-lock into a language that intends to freeze. It waits for `Option<int>`,
-which waits for enums.
+`index_of` returns `Option<int>`. The runtime finds `-1` for absent and the
+compiler turns that into a `None` before anything can see it — the sentinel
+never reaches the language.
 
 `sort` is a **stable** merge sort — equal elements keep their order — because
 sorting by one key and then another is the ordinary way to get a compound
@@ -345,9 +375,10 @@ does not exist yet and is the same thing closures will need.
 `remove(Object)` and the overload is a standing trap. One name, and it says
 which it means.
 
-`get` traps rather than returning a default, because there is no null to
-return: the honest choices are to trap or to force every read through a
-check, and `contains` is the check.
+`get` returns an `Option<V>` (§3.7a). It used to trap, because with no way
+to express absence the only honest choices were to trap or to make every read
+go through a separate check — and an `Option` cannot be forgotten the way a
+preceding `contains` can, nor does it hash the key twice.
 
 A map is enumerated through `keys()` and `values()`, which each build a new
 `List`. It is not iterable directly: its slots are sparse, so a loop over

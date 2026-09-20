@@ -5,9 +5,12 @@
 //    m.set(k, m.get(k)) freed the value and then resurrected the block.
 Map<str, str> mv = Map<str, str>();
 mv.set("k", concat("ab", "cd"));
-mv.set("k", mv.get("k"));
+match (mv.get("k")) {
+    case Some(str cur): { mv.set("k", cur); }
+    case None: { }
+}
 str junk = concat("ZZ", "ZZ");
-print(mv.get("k"));         // abcd, not ZZZZ
+print(mv.get("k").or("?"));  // abcd, not ZZZZ
 print(junk);
 
 // 5. `?` is escaped in emitted C literals: `??!` and friends are trigraphs,
@@ -33,7 +36,7 @@ Map<str, int> inner = Map<str, int>();
 inner.set("a", 1);
 nested.push(inner);
 print(nested.size());        // 1
-print(nested[0].get("a"));  // 1
+print(nested[0].get("a").or(0)); // 1
 
 // 8. Tombstones are swept by a same-capacity rehash, so a map that is
 //    filled and emptied does not grow without bound.
@@ -46,7 +49,7 @@ while (i < 20000) {
 }
 print(churn.size());         // 0
 churn.set(1, 100);
-print(churn.get(1));        // 100 -- still correct after the sweep
+print(churn.get(1).or(0));  // 100 -- still correct after the sweep
 
 // 4. Embedding promotes methods in a deterministic order. Three of them,
 //    because the bug needed two or more to show.

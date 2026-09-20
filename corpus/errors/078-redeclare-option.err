@@ -1,0 +1,4 @@
+corpus/errors/078-redeclare-option.src:1:1: `Option` is declared by the language; it cannot be redeclared
+  |
+1 | enum Option<T> { None; Some(T); }
+  | ^

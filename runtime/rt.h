@@ -195,6 +195,7 @@ void    rt_sort_float(Obj *o);
  * holds, so the caller has to say what is in it. */
 enum { SEQ_WORD = 0, SEQ_STR = 1, SEQ_FLOAT = 2 };
 bool    rt_seq_contains(Obj *o, int64_t v, int kind);
+int64_t rt_seq_index_of(Obj *o, int64_t v, int kind);
 
 /* ---- concurrency -------------------------------------------------------
  *

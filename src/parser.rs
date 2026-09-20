@@ -62,6 +62,11 @@ impl Parser {
             "Array".to_string(),
             "List".to_string(),
             "Map".to_string(),
+            // Declared by the compiler rather than by the program -- see
+            // `prelude_types`. Named here so a source file can write
+            // `Option<int>` without having declared it.
+            "Option".to_string(),
+            "Result".to_string(),
         ];
         for w in toks.windows(2) {
             if w[0].tok == Tok::KwType || w[0].tok == Tok::KwInterface || w[0].tok == Tok::KwEnum {
@@ -323,6 +328,63 @@ impl Parser {
 
     // ---- items -------------------------------------------------------
 
+    /// The two enums the language declares for you.
+    ///
+    /// They are built in for one hard reason: a built-in method cannot
+    /// return a user-defined type, because the compiler has to know what
+    /// `xs.index_of(v)` gives back. Without a blessed `Option` that method
+    /// cannot exist at all, and neither can `parse_int`. The second reason is
+    /// composition -- two libraries with their own `Result` cannot pass one
+    /// through the other.
+    ///
+    /// They are built AS AST, not parsed from a prelude string, so they land
+    /// in the same interned type arena as the program and shift nobody's line
+    /// numbers. Past that they are completely ordinary enums: the same
+    /// `match`, the same exhaustiveness, no special construction syntax.
+    fn prelude_types(&mut self) -> Vec<TypeDecl> {
+        // Nothing here can fail, so the span is never rendered. It still has
+        // to be a real line, because a diagnostic would try to quote it.
+        let span = Span::new(1, 1);
+        let mut out = Vec::new();
+
+        for (name, tparams, variants) in [
+            (
+                "Option",
+                vec!["T"],
+                vec![("None", vec![]), ("Some", vec!["T"])],
+            ),
+            (
+                "Result",
+                vec!["T", "E"],
+                vec![("Ok", vec!["T"]), ("Err", vec!["E"])],
+            ),
+        ] {
+            let variants = variants
+                .into_iter()
+                .map(|(vname, payload): (&str, Vec<&str>)| EnumVariant {
+                    name: vname.to_string(),
+                    payload: payload
+                        .into_iter()
+                        .map(|p| self.intern(p.to_string(), Vec::new()))
+                        .collect(),
+                    span,
+                })
+                .collect();
+            out.push(TypeDecl {
+                name: name.to_string(),
+                tparams: tparams.into_iter().map(str::to_string).collect(),
+                fields: Vec::new(),
+                methods: Vec::new(),
+                is_interface: false,
+                variants,
+                is_enum: true,
+                distinct_base: None,
+                span,
+            });
+        }
+        out
+    }
+
     pub fn parse_program(&mut self) -> Result<Program, Diag> {
         let mut funcs = Vec::new();
         let mut types = Vec::new();
@@ -341,8 +403,23 @@ impl Parser {
                 toplevel.push(self.parse_stmt()?);
             }
         }
+        let prelude = self.prelude_types();
+        // A program may not redeclare what the compiler already declared.
+        for t in &types {
+            if let Some(p) = prelude.iter().find(|p| p.name == t.name) {
+                let _ = p;
+                return Err(Diag::new(
+                    t.span,
+                    format!(
+                        "`{}` is declared by the language; it cannot be redeclared",
+                        t.name
+                    ),
+                ));
+            }
+        }
         Ok(Program {
             types,
+            prelude,
             funcs,
             toplevel,
             ty_exprs: std::mem::take(&mut self.ty_exprs),

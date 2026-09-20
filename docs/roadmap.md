@@ -17,7 +17,7 @@ Anything marked done there is tested; the corpus is the proof.
 
 | | |
 |---|---|
-| Corpus | 138 programs — 41 behaviour, 76 diagnostics, 14 traps, 7 Go twins |
+| Corpus | 141 programs — 42 behaviour, 79 diagnostics, 13 traps, 7 Go twins |
 | Oracle | gcc and clang, each at -O0 and -O2, all four must agree |
 | Leaks | every behaviour program asserts `__rc_live=0` at exit |
 | Warnings | emitted C must be clean under `-Wall -Wextra` |
@@ -29,7 +29,8 @@ Anything marked done there is tested; the corpus is the proof.
 ## Done
 
 **Types.** `int`, `float`, `bool`, `str`, `void`. Structs with per-field defaults.
-**Enums with payloads**, generic, matched exhaustively with no fallthrough
+Built-in `Option<T>` and `Result<T, E>`, with `Map.get` and `index_of`
+returning an `Option`. **Enums with payloads**, generic, matched exhaustively with no fallthrough
 and no `default` -- which is what makes `Option<T>` and `Result<T, E>`
 ordinary library types rather than language primitives.
 Structural interfaces dispatched through a vtable in the object header.

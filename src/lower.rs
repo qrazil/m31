@@ -387,6 +387,93 @@ impl Lowerer {
                 });
                 Ok(Val::void())
             }
+            "index_of" => {
+                if args.pos.len() != 1 {
+                    return Err(Diag::new(span, "`index_of` takes one argument"));
+                }
+                let v = self.lower_expr(&args.pos[0])?;
+                if !self.assignable(v.ty, elem) {
+                    return Err(Diag::new(args.pos[0].span(), self.mismatch(elem, v.ty)));
+                }
+                let u = self.underlying(elem);
+                if u.is_ref() && u != Ty::Str {
+                    return Err(Diag::new(
+                        span,
+                        format!(
+                            "`index_of` compares `int`, `float`, `bool` and \
+                             `str`; {} would need its own comparison",
+                            self.tyname(elem)
+                        ),
+                    ));
+                }
+                let Some((oty, otid, none_tag, some_tag)) = self.option_of(Ty::Int) else {
+                    return Err(Diag::new(
+                        span,
+                        "`index_of` has no Option type to return; this is a compiler bug",
+                    ));
+                };
+                let kind = self.new_val(IrTy::I64);
+                self.push(Inst::IConst {
+                    dst: kind,
+                    val: match u {
+                        Ty::Str => 1,
+                        Ty::Float => 2,
+                        _ => 0,
+                    },
+                });
+                let raw = self.new_val(IrTy::I64);
+                self.push(Inst::Call {
+                    dst: Some(raw),
+                    func: "rt_seq_index_of".to_string(),
+                    args: vec![o.val(), v.val(), kind],
+                });
+                // The runtime's -1 never reaches the language: it becomes a
+                // None here, which is why index_of waited for Option instead
+                // of shipping a sentinel into a language meant to be frozen.
+                let zero = self.new_val(IrTy::I64);
+                self.push(Inst::IConst { dst: zero, val: 0 });
+                let found = self.new_val(IrTy::I1);
+                self.push(Inst::ICmp {
+                    dst: found,
+                    cmp: Cmp::Ge,
+                    lhs: raw,
+                    rhs: zero,
+                });
+
+                let some_bb = self.new_block();
+                let none_bb = self.new_block();
+                let join_bb = self.new_block();
+                self.terminate(Term::Brif {
+                    cond: found,
+                    then: some_bb,
+                    then_args: Vec::new(),
+                    els: none_bb,
+                    els_args: Vec::new(),
+                });
+
+                self.switch_to(some_bb);
+                let some = self.make_option(otid, some_tag, Some(raw));
+                self.stmt_temps.retain(|t| *t != some);
+                self.terminate(Term::Jump {
+                    to: join_bb,
+                    args: vec![some],
+                });
+
+                self.switch_to(none_bb);
+                let nothing = self.make_option(otid, none_tag, None);
+                self.stmt_temps.retain(|t| *t != nothing);
+                self.terminate(Term::Jump {
+                    to: join_bb,
+                    args: vec![nothing],
+                });
+
+                self.switch_to(join_bb);
+                let d = self.new_val(IrTy::Ref);
+                let ji = self.blocks.iter().position(|b| b.id == join_bb).unwrap();
+                self.blocks[ji].params = vec![d];
+                self.stmt_temps.push(d);
+                Ok(Val::new(d, oty, true))
+            }
             "contains" => {
                 if args.pos.len() != 1 {
                     return Err(Diag::new(span, "`contains` takes one argument"));
@@ -501,7 +588,187 @@ impl Lowerer {
         self.ty_named(&name)
     }
 
-    /// `m.set(k, v)`, `m.get(k)`, `m.has(k)`, `m.remove(k)`, `m.len()`.
+    /// `o.is_some()`, `o.is_none()`, `o.or(default)`.
+    ///
+    /// Three, deliberately. An Option that can only be opened with `match`
+    /// turns every map read into four lines, which would make returning one
+    /// a downgrade; an Option with a full library of combinators is a second
+    /// language to learn. These are the ones that carry their weight, and
+    /// `match` remains the only way to get at the payload and keep it.
+    ///
+    /// There is no `unwrap`. Trapping on None is what `get` used to do, and
+    /// putting it back behind a shorter name would undo the point.
+    fn lower_option_method(
+        &mut self,
+        o: &Val,
+        tid: u32,
+        m: &str,
+        args: &Args,
+        span: Span,
+    ) -> Result<Val, Diag> {
+        if !args.named.is_empty() {
+            return Err(Diag::new(span, format!("`{m}` takes no named arguments")));
+        }
+        let inner = self.variant_surface[tid as usize]
+            .iter()
+            .find_map(|p| p.first().copied())
+            .expect("Option always carries one payload type");
+        let some_tag = self.typedefs[tid as usize]
+            .variants
+            .iter()
+            .position(|v| v.name == "Some")
+            .expect("Option has Some") as u32;
+
+        let is_some = |lw: &mut Self| {
+            let tag = lw.new_val(IrTy::I64);
+            lw.push(Inst::EnumTag {
+                dst: tag,
+                obj: o.val(),
+                tid,
+            });
+            let k = lw.new_val(IrTy::I64);
+            lw.push(Inst::IConst {
+                dst: k,
+                val: some_tag as i64,
+            });
+            let c = lw.new_val(IrTy::I1);
+            lw.push(Inst::ICmp {
+                dst: c,
+                cmp: Cmp::Eq,
+                lhs: tag,
+                rhs: k,
+            });
+            c
+        };
+
+        match m {
+            "is_some" | "is_none" => {
+                if !args.pos.is_empty() {
+                    return Err(Diag::new(span, format!("`{m}` takes no arguments")));
+                }
+                let c = is_some(self);
+                if m == "is_some" {
+                    return Ok(Val::new(c, Ty::Bool, false));
+                }
+                let d = self.new_val(IrTy::I1);
+                self.push(Inst::Not { dst: d, src: c });
+                Ok(Val::new(d, Ty::Bool, false))
+            }
+            "or" => {
+                if args.pos.len() != 1 {
+                    return Err(Diag::new(span, "`or` takes one argument"));
+                }
+                let c = is_some(self);
+                let some_bb = self.new_block();
+                let else_bb = self.new_block();
+                let join_bb = self.new_block();
+                self.terminate(Term::Brif {
+                    cond: c,
+                    then: some_bb,
+                    then_args: Vec::new(),
+                    els: else_bb,
+                    els_args: Vec::new(),
+                });
+
+                self.switch_to(some_bb);
+                let got = self.new_val(self.irty(inner));
+                self.push(Inst::EnumPayload {
+                    dst: got,
+                    obj: o.val(),
+                    tid,
+                    idx: 0,
+                });
+                // Borrowed from the Option, like any payload -- so it is
+                // retained here and released by the statement, which is what
+                // makes both arms agree about who owns the result.
+                if self.is_ref(inner) {
+                    self.push(Inst::RcInc { val: got });
+                }
+                self.terminate(Term::Jump {
+                    to: join_bb,
+                    args: vec![got],
+                });
+
+                self.switch_to(else_bb);
+                let d = self.lower_expr(&args.pos[0])?;
+                if !self.assignable(d.ty, inner) {
+                    return Err(Diag::new(args.pos[0].span(), self.mismatch(inner, d.ty)));
+                }
+                if self.is_ref(inner) {
+                    if d.owned {
+                        self.stmt_temps.retain(|t| *t != d.val());
+                    } else {
+                        self.push(Inst::RcInc { val: d.val() });
+                    }
+                }
+                self.terminate(Term::Jump {
+                    to: join_bb,
+                    args: vec![d.val()],
+                });
+
+                self.switch_to(join_bb);
+                let out = self.new_val(self.irty(inner));
+                let ji = self.blocks.iter().position(|b| b.id == join_bb).unwrap();
+                self.blocks[ji].params = vec![out];
+                let owned = self.is_ref(inner);
+                if owned {
+                    self.stmt_temps.push(out);
+                }
+                Ok(Val::new(out, inner, owned))
+            }
+            other => Err(Diag::new(
+                span,
+                format!(
+                    "an Option has `is_some`, `is_none` and `or`; \
+                     `{other}` is not one of them -- use `match` to take the value out"
+                ),
+            )),
+        }
+    }
+
+    /// The `Option<T>` type for a given payload type, and the tags of its
+    /// two variants. Monomorphisation instantiates one wherever a built-in
+    /// method needs it, so this cannot fail for those.
+    fn option_of(&mut self, inner: Ty) -> Option<(Ty, u32, u32, u32)> {
+        let name = self
+            .typedefs
+            .iter()
+            .enumerate()
+            .find(|(i, d)| {
+                d.is_enum
+                    && d.name.starts_with("Option$")
+                    && self.variant_surface[*i]
+                        .iter()
+                        .any(|p| p.first() == Some(&inner))
+            })
+            .map(|(_, d)| d.name.clone())?;
+        let ty = self.ty_named(&name)?;
+        let tid = self.tdef_of(ty)?;
+        let none = self.typedefs[tid as usize]
+            .variants
+            .iter()
+            .position(|v| v.name == "None")? as u32;
+        let some = self.typedefs[tid as usize]
+            .variants
+            .iter()
+            .position(|v| v.name == "Some")? as u32;
+        Some((ty, tid, none, some))
+    }
+
+    /// Build `Some(v)` or `None` of the given Option type.
+    fn make_option(&mut self, tid: u32, tag: u32, payload: Option<Value>) -> Value {
+        let d = self.new_val(IrTy::Ref);
+        self.push(Inst::EnumPack {
+            dst: d,
+            tid,
+            tag,
+            args: payload.into_iter().collect(),
+        });
+        self.stmt_temps.push(d);
+        d
+    }
+
+    /// `m.set(k, v)`, `m.get(k)`, `m.contains(k)`, `m.remove(k)`, `m.size()`.
     ///
     /// `get` on a missing key traps, like an out-of-range index: there is no
     /// null to return, so the honest choices are to trap or to force every
@@ -600,14 +867,70 @@ impl Lowerer {
                 Ok(Val::void())
             }
             "get" => {
-                let d = self.new_val(self.irty(v));
+                // Returns `Option<V>`, not the value.
+                //
+                // It used to trap on a missing key, because with no way to
+                // express absence the honest choices were to trap or to make
+                // every read go through a check. Absence is expressible now,
+                // and an Option cannot be forgotten the way a preceding
+                // `contains` can -- nor does it hash the key twice.
+                let Some((oty, otid, none_tag, some_tag)) = self.option_of(v) else {
+                    return Err(Diag::new(
+                        span,
+                        "`get` has no Option type to return; this is a compiler bug",
+                    ));
+                };
+                let has = self.new_val(IrTy::I1);
                 self.push(Inst::Call {
-                    dst: Some(d),
+                    dst: Some(has),
+                    func: "rt_map_has".to_string(),
+                    args: vec![o.val(), key.val()],
+                });
+
+                let some_bb = self.new_block();
+                let none_bb = self.new_block();
+                let join_bb = self.new_block();
+                self.terminate(Term::Brif {
+                    cond: has,
+                    then: some_bb,
+                    then_args: Vec::new(),
+                    els: none_bb,
+                    els_args: Vec::new(),
+                });
+
+                self.switch_to(some_bb);
+                let raw = self.new_val(self.irty(v));
+                self.push(Inst::Call {
+                    dst: Some(raw),
                     func: "rt_map_get".to_string(),
                     args: vec![o.val(), key.val()],
                 });
-                // Borrowed from the map, which holds the +1.
-                Ok(Val::new(d, v, false))
+                // The map keeps its reference; the Option takes one of its
+                // own, exactly as any container would.
+                if self.is_ref(v) {
+                    self.push(Inst::RcInc { val: raw });
+                }
+                let some = self.make_option(otid, some_tag, Some(raw));
+                self.stmt_temps.retain(|t| *t != some);
+                self.terminate(Term::Jump {
+                    to: join_bb,
+                    args: vec![some],
+                });
+
+                self.switch_to(none_bb);
+                let nothing = self.make_option(otid, none_tag, None);
+                self.stmt_temps.retain(|t| *t != nothing);
+                self.terminate(Term::Jump {
+                    to: join_bb,
+                    args: vec![nothing],
+                });
+
+                self.switch_to(join_bb);
+                let d = self.new_val(IrTy::Ref);
+                let ji = self.blocks.iter().position(|b| b.id == join_bb).unwrap();
+                self.blocks[ji].params = vec![d];
+                self.stmt_temps.push(d);
+                Ok(Val::new(d, oty, true))
             }
             "contains" => {
                 let d = self.new_val(IrTy::I1);
@@ -3137,6 +3460,11 @@ impl Lowerer {
                 }
                 if let Some((k, v)) = self.map_kv(o.ty) {
                     return self.lower_map_method(&o, k, v, m, args, *span);
+                }
+                if self.typedefs[tid as usize].is_enum
+                    && self.typedefs[tid as usize].name.starts_with("Option$")
+                {
+                    return self.lower_option_method(&o, tid, m, args, *span);
                 }
 
                 // On an interface value the implementation is not known

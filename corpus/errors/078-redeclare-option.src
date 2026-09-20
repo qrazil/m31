@@ -1,0 +1,2 @@
+enum Option<T> { None; Some(T); }
+print(1);

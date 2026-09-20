@@ -13,11 +13,11 @@
 // This is what the language has instead of null. Only something typed
 // `Option<T>` can be absent, and you cannot read the value without saying
 // what happens when it is not there.
-
-enum Option<T> {
-    None;
-    Some(T);
-}
+//
+// `Option` and `Result` are declared by the compiler, not here. They have to
+// be: a built-in method cannot return a type the program defines, so without
+// them `index_of` and `Map.get` could not hand back "nothing" at all. Past
+// that they are ordinary enums -- the same match, the same exhaustiveness.
 
 int or_else(Option<int> o, int fallback) {
     match (o) {
@@ -33,14 +33,28 @@ int or_else(Option<int> o, int fallback) {
 print(or_else(Option<int>.Some(7), 0));         // 7
 print(or_else(Option<int>.None, -1));           // -1
 
+// Three methods spare you a `match` when all you want is a fallback or a
+// yes/no. Taking the value OUT and keeping it still needs `match`.
+print(Option<int>.Some(3).or(0));               // 3
+print(Option<int>.None.or(0));                  // 0
+print(Option<int>.Some(3).is_some());           // true
+print(Option<int>.None.is_none());              // true
+
+// Where they come from in practice: a lookup that might find nothing.
+Map<str, int> ages = Map<str, int>();
+ages.set("ada", 36);
+print(ages.get("ada").or(-1));                  // 36
+print(ages.get("nobody").or(-1));               // -1
+
+List<str> names = List<str>();
+names.push("ada");
+names.push("grace");
+print(names.index_of("grace").or(-1));          // 1
+print(names.index_of("nobody").or(-1));         // -1
+
 // ---- Result: an answer or a reason it failed ----------------------------
 // Errors as values. No exceptions, no unwinding, nothing hidden in the
 // control flow -- a function that can fail says so in its return type.
-
-enum Result<T, E> {
-    Ok(T);
-    Err(E);
-}
 
 Result<int, str> half(int n) {
     if (n % 2 == 0) {

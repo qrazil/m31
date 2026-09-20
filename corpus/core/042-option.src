@@ -1,0 +1,81 @@
+// Option and Result are declared by the compiler. They have to be: a
+// built-in method cannot return a type the program defines, so without them
+// `Map.get` and `index_of` could not hand back "nothing" at all.
+
+// A lookup that might find nothing. `get` used to TRAP on a missing key,
+// because with no way to express absence the only choices were to trap or to
+// make every read go through a separate check. An Option cannot be
+// forgotten the way a preceding `contains` can, and it hashes the key once.
+Map<str, int> ages = Map<str, int>();
+ages.set("ada", 36);
+
+print(ages.get("ada").or(-1));          // 36
+print(ages.get("nobody").or(-1));       // -1
+print(ages.get("ada").is_some());       // true
+print(ages.get("nobody").is_none());    // true
+
+match (ages.get("ada")) {
+    case Some(int n): { print(n); }     // 36
+    case None: { print(-1); }
+}
+match (ages.get("nobody")) {
+    case Some(int n): { print(n); }
+    case None: { print(-1); }           // -1
+}
+
+// A reference payload: the Option holds its own reference, so it stays valid
+// after the map lets go.
+Map<str, str> who = Map<str, str>();
+who.set("k", concat("va", "l"));
+Option<str> held = who.get("k");
+who.clear();
+print(held.or("gone"));                 // val
+print(who.get("k").or("gone"));         // gone
+
+// index_of. The runtime finds -1 for absent and the lowering turns that into
+// a None before anyone can see it -- which is why index_of waited for Option
+// rather than shipping a sentinel into a language meant to be frozen.
+List<str> names = List<str>();
+names.push("ada");
+names.push("grace");
+print(names.index_of("grace").or(-1));  // 1
+print(names.index_of("nobody").or(-1)); // -1
+
+Array<int> nums = Array<int>(3, 0);
+nums[1] = 7;
+print(nums.index_of(7).or(-1));         // 1
+print(nums.index_of(99).or(-1));        // -1
+
+Array<float> fs = Array<float>(2, 0.5);
+fs[1] = 2.5;
+print(fs.index_of(2.5).or(-1));         // 1
+
+// `or` evaluates its argument only when there is nothing there, and an owned
+// temporary as the fallback is released either way.
+print(who.get("missing").or(concat("de", "fault")));    // default
+
+// Option is an ordinary enum: it can be built, passed and returned.
+Option<int> maybe(bool yes) {
+    if (yes) {
+        return Option<int>.Some(1);
+    }
+    return Option<int>.None;
+}
+print(maybe(true).or(0));               // 1
+print(maybe(false).or(0));              // 0
+
+// Result carries a reason rather than just absence.
+Result<int, str> half(int n) {
+    if (n % 2 == 0) {
+        return Result<int, str>.Ok(n / 2);
+    }
+    return Result<int, str>.Err("odd");
+}
+match (half(8)) {
+    case Ok(int v): { print(v); }       // 4
+    case Err(str e): { print(e); }
+}
+match (half(3)) {
+    case Ok(int v): { print(v); }
+    case Err(str e): { print(e); }      // odd
+}

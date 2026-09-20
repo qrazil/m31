@@ -1,0 +1,4 @@
+Map<str,int> m = Map<str,int>();
+m.set("a", 1);
+int n = m.get("a");
+print(n);

@@ -83,7 +83,7 @@ Map<str, int> m = Map<str, int>();
 m.set("one", 1);
 m.set("two", 2);
 print(m.size());             // 2
-print(m.get("two"));        // 2
+print(m.get("two").or(0));  // 2
 print(m.contains("three"));      // false
 m.remove("one");
 print(m.size());             // 1

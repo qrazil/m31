@@ -76,7 +76,14 @@ making it now rather than after the standard library is written.
 
 ## Open, with a recommendation
 
-### 1. Does `Map.get` keep trapping?
+### 1. Does `Map.get` keep trapping? — DECIDED: no
+
+Implemented. `get` returns `Option<V>`, and `index_of` exists at last.
+`Option` grew exactly three methods (`is_some`, `is_none`, `or`) so that a
+lookup is one line rather than a four-line `match`; without them the change
+would have been a downgrade. No `unwrap`, deliberately.
+
+The original question, kept because the reasoning is the record:
 
 Today `get` traps on a missing key and `contains` is the check. With `Option`
 built in, `get` could return `Option<V>` instead, which cannot be forgotten
@@ -154,12 +161,13 @@ The language has no warnings today and should not grow a category for this.
 
 ## Order of work
 
-1. Blessed `Option<T>` and `Result<T, E>`, declared by the compiler and
-   usable with today's `match`. No new syntax. Changes nothing else.
-2. `Map.get` returns `Option<V>`; `index_of` arrives at last.
+1. ~~Blessed `Option<T>` and `Result<T, E>`.~~ **Done.** Declared by the
+   compiler, usable with today's `match`, no new syntax.
+2. ~~`Map.get` returns `Option<V>`; `index_of` arrives at last.~~ **Done**,
+   along with the three `Option` methods that keep a lookup to one line.
 3. The `?` operator, with exact error-type matching.
 4. Unused-`Result` is an error.
 5. `str.parse_int` and friends, which unblocks the string library.
 
-Steps 1 and 2 are worth landing on their own: they are useful immediately and
-they are what the string library is actually waiting for.
+Steps 1 and 2 landed on their own, as planned: they are useful immediately
+and they are what the string library was actually waiting for.

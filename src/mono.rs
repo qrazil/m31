@@ -56,7 +56,7 @@ impl Mono {
         };
 
         let mut concrete_types = Vec::new();
-        for t in p.types.clone() {
+        for t in p.types.iter().chain(p.prelude.iter()).cloned() {
             if t.tparams.is_empty() {
                 concrete_types.push(t);
             } else {
@@ -96,6 +96,9 @@ impl Mono {
 
         Ok(Program {
             types: m.out_types,
+            // Monomorphisation emits concrete instantiations into `types`;
+            // past this point there is no generic Option left to keep apart.
+            prelude: Vec::new(),
             funcs: m.out_funcs,
             toplevel,
             ty_exprs: m.out_exprs,
@@ -180,6 +183,13 @@ impl Mono {
             if e.name == "Map" && args.len() == 2 {
                 self.builtin_decl("List", &args[0..1], span);
                 self.builtin_decl("List", &args[1..2], span);
+                // `get` hands back an Option<V>. Nothing in the source spells
+                // it, so nothing else would instantiate it.
+                self.enum_decl("Option", &args[1..2], span)?;
+            }
+            // `index_of` hands back an Option<int> whatever the elements are.
+            if matches!(e.name.as_str(), "Array" | "List") && args.len() == 1 {
+                self.enum_decl("Option", &[Ty::Int], span)?;
             }
             let mangled = self.builtin_decl(&e.name, &args, span);
             return Ok(self.intern(mangled, Vec::new()));
@@ -296,6 +306,16 @@ impl Mono {
         f.tparams = Vec::new();
         self.out_funcs.push(f);
         Ok(())
+    }
+
+    /// Instantiate one of the compiler's own generic enums, for a built-in
+    /// method whose return type the source never spells.
+    fn enum_decl(&mut self, name: &str, args: &[Ty], span: Span) -> Result<(), Diag> {
+        let Some(decl) = self.generic_types.get(name).cloned() else {
+            return Ok(());
+        };
+        let mangled = self.mangle(name, args);
+        self.instantiate_type(&decl, &mangled, args, span)
     }
 
     /// Declare one instantiation of a runtime-owned container, and return its

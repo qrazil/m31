@@ -1,2 +1,0 @@
-Map<str, int> m = Map<str, int>();
-print(m.get("nope"));

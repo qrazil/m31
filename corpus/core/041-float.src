@@ -56,7 +56,7 @@ print(l[0] + l[1]);             // 5
 
 Map<str, float> m = Map<str, float>();
 m.set("k", 2.25);
-print(m.get("k"));              // 2.25
+print(m.get("k").or(0.0));      // 2.25
 
 enum Maybe { Nothing; Val(float); }
 match (Maybe.Val(9.75)) {

@@ -329,6 +329,11 @@ impl Func {
 #[derive(Debug, Clone)]
 pub struct Program {
     pub types: Vec<TypeDecl>,
+    /// Declarations the compiler supplies rather than the program: `Option`
+    /// and `Result`. Kept apart from `types` because they are not part of
+    /// the source text -- the formatter must not print them back out, and a
+    /// program that redeclares one is redeclaring, not shadowing.
+    pub prelude: Vec<TypeDecl>,
     pub funcs: Vec<Func>,
     /// Statements written at the top level, in source order. They become the
     /// program's body -- there is no `main`.
