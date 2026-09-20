@@ -353,6 +353,8 @@ runtime/
   rt.h rt.c            the runtime — a SEPARATE translation unit, see §7.1
   rc_debug.h           refcount invariant, compiled in under -DRC_DEBUG
 docs/
+  reference.md             the language, stated normatively -- start here
+  roadmap.md               what exists, what the freeze needs, what is out
   ir-v0.md                 the IR specification
   concurrency-decision.md  the concurrency decision
   concurrency.md           the evidence behind it, and what was rejected
