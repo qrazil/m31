@@ -249,9 +249,10 @@ fn bool_supports_only_equality() {
 }
 
 #[test]
-fn str_cannot_be_compared_or_added() {
-    assert!(err("str a = \"x\"; print(a + a);").contains("cannot apply `+`"));
-    assert!(err("str a = \"x\"; print(a == a);").contains("cannot compare"));
+fn str_supports_only_plus_and_equality() {
+    // `+` and `==` are built in; nothing else is.
+    assert!(err("str a = \"x\"; print(a - a);").contains("cannot apply `-`"));
+    assert!(err("str a = \"x\"; print(a < a);").contains("cannot compare"));
 }
 
 // ---- lowering: loops --------------------------------------------------
@@ -628,4 +629,64 @@ fn sibling_scopes_may_reuse_a_name() {
         "int t = 0; if (true) { int s = 1; t = s; } if (t > 0) { int s = 2; t = t + s; } print(t);",
     );
     assert!(out.contains("func $main"), "expected it to compile:\n{out}");
+}
+
+// ---- operator overloading ---------------------------------------------
+
+#[test]
+fn operators_desugar_to_methods() {
+    let src = "type M { int c; }\nM M.add(M o) { return M(c + o.c); }\nM a = M(1); M b = M(2); print((a + b).c);";
+    let out = ir(src);
+    assert!(
+        out.contains("call M.add"),
+        "`+` must call the method:\n{out}"
+    );
+}
+
+#[test]
+fn comparison_goes_through_a_single_cmp() {
+    // One implementation gives a total order; four separate methods could be
+    // made inconsistent with each other.
+    let src = "type M { int c; }\nint M.cmp(M o) { return c - o.c; }\nM a = M(1); M b = M(2); print(a < b); print(a >= b);";
+    let out = ir(src);
+    assert_eq!(
+        out.matches("call M.cmp").count(),
+        2,
+        "both comparisons go through cmp:\n{out}"
+    );
+    assert!(
+        out.contains("icmp"),
+        "cmp's result is compared to 0:\n{out}"
+    );
+}
+
+#[test]
+fn ne_is_eq_negated() {
+    let src = "type M { int c; }\nbool M.eq(M o) { return c == o.c; }\nM a = M(1); M b = M(2); print(a != b);";
+    let out = ir(src);
+    assert!(out.contains("call M.eq"), "`!=` uses eq:\n{out}");
+    assert!(out.contains("not"), "`!=` negates it:\n{out}");
+}
+
+#[test]
+fn str_has_plus_and_equals_built_in() {
+    let out = ir("str x = \"a\" + \"b\"; print(x == \"ab\");");
+    assert!(out.contains("rt_concat"), "`+` on str concatenates:\n{out}");
+    assert!(out.contains("rt_str_eq"), "`==` on str compares:\n{out}");
+}
+
+#[test]
+fn a_missing_or_wrong_operator_method_is_rejected() {
+    assert!(
+        err("type P { int x; }\nP a = P(1); P b = P(2); print((a + b).x);")
+            .contains("needs a method")
+    );
+    assert!(
+        err("type P { int x; }\nbool P.cmp(P o) { return true; }\nP a = P(1); P b = P(2); print(a < b);")
+            .contains("must return int")
+    );
+    assert!(
+        err("type P { int x; }\nint P.add(P o) { return 1; }\nP a = P(1); P b = P(2); print((a + b).x);")
+            .contains("must return P")
+    );
 }

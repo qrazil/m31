@@ -73,6 +73,14 @@ Obj *rt_concat(Obj *a, Obj *b) {
     return (Obj *)s;
 }
 
+bool rt_str_eq(Obj *a, Obj *b) {
+    const Str *x = (const Str *)a;
+    const Str *y = (const Str *)b;
+    if (x == y) return true;
+    if (x->len != y->len) return false;
+    return memcmp(x->data, y->data, (size_t)x->len) == 0;
+}
+
 void rt_print(int64_t v) {
     printf("%" PRId64 "\n", v);
 }

@@ -1,0 +1,7 @@
+type P {
+    int x;
+}
+
+P a = P(1);
+P b = P(2);
+print((a + b).x);

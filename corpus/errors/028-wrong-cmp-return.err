@@ -1,0 +1,1 @@
+corpus/errors/028-wrong-cmp-return.src:11:9: `P.cmp` must return int to support `<`

@@ -1,0 +1,47 @@
+// Operators desugar to methods. Comparison goes through a single `cmp`
+// returning an int rather than four separate methods: one implementation
+// gives a total order, and `<` and `>=` cannot be defined inconsistently.
+//
+//   a + b   ->  a.add(b)      a == b  ->  a.eq(b)
+//   a - b   ->  a.sub(b)      a != b  ->  !a.eq(b)
+//   a * b   ->  a.mul(b)      a <  b  ->  a.cmp(b) <  0
+//   a / b   ->  a.div(b)      a >= b  ->  a.cmp(b) >= 0
+//   a % b   ->  a.rem(b)
+
+type Money {
+    int cents;
+}
+
+Money Money.add(Money other) {
+    return Money(cents + other.cents);
+}
+
+Money Money.sub(Money other) {
+    return Money(cents - other.cents);
+}
+
+bool Money.eq(Money other) {
+    return cents == other.cents;
+}
+
+int Money.cmp(Money other) {
+    return cents - other.cents;
+}
+
+Money a = Money(250);
+Money b = Money(175);
+
+print((a + b).cents);
+print((a - b).cents);
+print(a == b);
+print(a != b);
+print(a < b);
+print(a > b);
+print(a >= b);
+
+// str has `+` and `==` built in: the two everyone reaches for.
+str x = "he" + "llo";
+print(x);
+print(x == "hello");
+print(x != "hello");
+print(("a" + "b") + "c");

@@ -1,0 +1,11 @@
+type P {
+    int x;
+}
+
+bool P.cmp(P other) {
+    return true;
+}
+
+P a = P(1);
+P b = P(2);
+print(a < b);

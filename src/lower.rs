@@ -1414,6 +1414,123 @@ impl Lowerer {
         }
     }
 
+    /// The method an operator desugars to, and whether the result is negated.
+    ///
+    /// Comparison goes through a single `cmp` returning an int, rather than
+    /// four separate methods: one implementation gives a total order, and it
+    /// cannot be made inconsistent by defining `<` and `>=` differently.
+    fn op_method(op: BinOp) -> Option<(&'static str, bool)> {
+        use BinOp::*;
+        Some(match op {
+            Add => ("add", false),
+            Sub => ("sub", false),
+            Mul => ("mul", false),
+            Div => ("div", false),
+            Rem => ("rem", false),
+            Eq => ("eq", false),
+            Ne => ("eq", true),
+            Lt | Le | Gt | Ge => ("cmp", false),
+            And | Or => return None,
+        })
+    }
+
+    /// `a OP b` where `a` is a user type: dispatch to the operator's method.
+    fn lower_op_overload(&mut self, op: BinOp, a: &Val, b: &Val, span: Span) -> Result<Val, Diag> {
+        use BinOp::*;
+        let Some((mname, negate)) = Self::op_method(op) else {
+            return Err(Diag::new(
+                span,
+                format!("`{}` cannot be overloaded", op.spelling()),
+            ));
+        };
+        let tid = self.tdef_of(a.ty).expect("checked by caller");
+        let tname = self.typedefs[tid as usize].name.clone();
+        let key = format!("{tname}.{mname}");
+
+        let Some(sig) = self.sigs.get(&key) else {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`{}` on `{tname}` needs a method `{} {tname}.{mname}(..)`",
+                    op.spelling(),
+                    if mname == "cmp" {
+                        "int"
+                    } else if mname == "eq" {
+                        "bool"
+                    } else {
+                        &tname
+                    }
+                ),
+            ));
+        };
+        let (params, ret) = (sig.params.clone(), sig.ret);
+        if params.len() != 1 || params[0].ty != b.ty {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`{key}` must take one {} parameter to support `{}`",
+                    self.tyname(a.ty),
+                    op.spelling()
+                ),
+            ));
+        }
+
+        let want_ret = match mname {
+            "cmp" => Ty::Int,
+            "eq" => Ty::Bool,
+            _ => a.ty,
+        };
+        if ret != want_ret {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`{key}` must return {} to support `{}`",
+                    self.tyname(want_ret),
+                    op.spelling()
+                ),
+            ));
+        }
+
+        let d = self.new_val(ir_ty(ret));
+        self.push(Inst::Call {
+            dst: Some(d),
+            func: key,
+            args: vec![a.val(), b.val()],
+        });
+        if ret.is_ref() {
+            self.stmt_temps.push(d);
+        }
+
+        match mname {
+            "cmp" => {
+                // `a < b` is `a.cmp(b) < 0`.
+                let zero = self.new_val(IrTy::I64);
+                self.push(Inst::IConst { dst: zero, val: 0 });
+                let cmp = match op {
+                    Lt => Cmp::Lt,
+                    Le => Cmp::Le,
+                    Gt => Cmp::Gt,
+                    Ge => Cmp::Ge,
+                    _ => unreachable!(),
+                };
+                let out = self.new_val(IrTy::I1);
+                self.push(Inst::ICmp {
+                    dst: out,
+                    cmp,
+                    lhs: d,
+                    rhs: zero,
+                });
+                Ok(Val::new(out, Ty::Bool, false))
+            }
+            "eq" if negate => {
+                let out = self.new_val(IrTy::I1);
+                self.push(Inst::Not { dst: out, src: d });
+                Ok(Val::new(out, Ty::Bool, false))
+            }
+            _ => Ok(Val::new(d, ret, ret.is_ref())),
+        }
+    }
+
     fn lower_bin(&mut self, op: BinOp, l: &Expr, r: &Expr, span: Span) -> Result<Val, Diag> {
         use BinOp::*;
 
@@ -1476,6 +1593,40 @@ impl Lowerer {
 
         let a = self.lower_expr(l)?;
         let b = self.lower_expr(r)?;
+
+        // str has built-in `+` and `==`; they are the two everyone reaches
+        // for, and making them methods on a builtin would need no less code.
+        if a.ty == Ty::Str && b.ty == Ty::Str {
+            if op == Add {
+                let d = self.new_val(IrTy::Ref);
+                self.push(Inst::Call {
+                    dst: Some(d),
+                    func: "rt_concat".to_string(),
+                    args: vec![a.val(), b.val()],
+                });
+                self.stmt_temps.push(d);
+                return Ok(Val::new(d, Ty::Str, true));
+            }
+            if op == Eq || op == Ne {
+                let d = self.new_val(IrTy::I1);
+                self.push(Inst::Call {
+                    dst: Some(d),
+                    func: "rt_str_eq".to_string(),
+                    args: vec![a.val(), b.val()],
+                });
+                if op == Ne {
+                    let out = self.new_val(IrTy::I1);
+                    self.push(Inst::Not { dst: out, src: d });
+                    return Ok(Val::new(out, Ty::Bool, false));
+                }
+                return Ok(Val::new(d, Ty::Bool, false));
+            }
+        }
+
+        // A user type on the left: dispatch to the operator's method.
+        if matches!(a.ty, Ty::User(_)) {
+            return self.lower_op_overload(op, &a, &b, span);
+        }
 
         let arith = match op {
             Add => Some(ArithOp::Add),

@@ -1,2 +1,3 @@
-str s = "a";
-print(s + s);
+// `+` and `==` are built in for str; the rest are not.
+str a = "x";
+print(a - a);

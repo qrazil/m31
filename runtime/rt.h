@@ -55,6 +55,7 @@ Obj *rt_alloc(size_t size, DropFn drop);
 
 int64_t rt_len(Obj *o);
 Obj    *rt_concat(Obj *a, Obj *b);
+bool    rt_str_eq(Obj *a, Obj *b);
 
 void rt_print(int64_t v);
 void rt_print_bool(bool v);

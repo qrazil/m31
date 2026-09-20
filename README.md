@@ -20,8 +20,8 @@ which gcc and clang both build clean at `-O0` and `-O2`.
 `examples/tour.src` is a tour of every feature, and is also in the corpus so
 it cannot rot.
 
-- 58 corpus programs, 0 failing
-- 48 unit tests
+- 61 corpus programs, 0 failing
+- 53 unit tests
 - 0 dependencies, 0 `unsafe`, clippy clean at `-D warnings`
 
 ## What the language does today
@@ -85,6 +85,20 @@ void Rect.scale(int f) {
 ```
 
 That is safe only because of the next rule.
+
+**Operators desugar to methods**, so a user type can define them:
+
+```c
+Money Money.add(Money other) { return Money(cents + other.cents); }
+int   Money.cmp(Money other) { return cents - other.cents; }
+bool  Money.eq(Money other)  { return cents == other.cents; }
+
+print(a + b);  print(a < b);  print(a != b);
+```
+
+Comparison goes through a single `cmp` returning an int rather than four
+methods, so one implementation gives a total order and `<` and `>=` cannot be
+defined inconsistently. `str` has `+` and `==` built in.
 
 **Nothing shadows anything, anywhere.** Not an outer local, not a parameter,
 not a function, not a type, not a field of the receiver. It is a compile
