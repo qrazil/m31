@@ -302,9 +302,17 @@ scale(10, 3);           // error: `by` is optional, so it is named
 scale(v: 10, by: 3);    // error: `v` is mandatory, so it is positional
 ```
 
-Positional arguments come before named ones. The reason for the rule is that
-a reader should never have to count commas to find which parameter a value
-lands in, and should never meet the same call spelled two ways.
+Positional arguments come before named ones. Named arguments may appear in
+any order, since they carry their own name:
+
+```c
+int volume(int w, int h = 1, int depth = 1) { return w * h * depth; }
+volume(5, depth: 3, h: 2);      // order among named arguments is free
+```
+
+The reason for the rule is that a reader should never have to count commas to
+find which parameter a value lands in, and should never meet the same call
+spelled two ways.
 
 A function returning non-`void` must return on every path; falling off the
 end is a compile error. There are no multiple return values yet.

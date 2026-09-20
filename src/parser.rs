@@ -862,8 +862,10 @@ impl Parser {
                 Ok(Expr::Call(name, args, span))
             }
             Tok::Ident(name) if self.is_ty_name(&name) => {
-                // Construction: always by field name, so reordering fields in
-                // the declaration cannot silently transpose arguments.
+                // Construction takes the same argument shape as a call: a
+                // field with no default is positional, one with a default is
+                // named. The parser does not enforce that -- `bind_args` in
+                // lower.rs does, for calls and constructions alike.
                 //
                 // `<` here is unambiguously type arguments, not a comparison,
                 // because `name` is known to be a type -- the same pre-pass
