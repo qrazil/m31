@@ -1,0 +1,23 @@
+// Nothing requires a type name to be capitalised. The parser knows every
+// type from a pre-pass over `type IDENT`, so recognition is by declaration,
+// not by spelling.
+type point {
+    int x;
+    int y;
+}
+
+type named_point {
+    point at;
+    str  label;
+}
+
+int area(point p) {
+    return p.x * p.y;
+}
+
+point origin = point(3, 4);
+print(area(origin));
+
+named_point np = named_point(origin, "origin");
+print(np.label);
+print(np.at.y);

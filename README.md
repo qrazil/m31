@@ -20,8 +20,8 @@ which gcc and clang both build clean at `-O0` and `-O2`.
 `examples/tour.src` is a tour of every feature, and is also in the corpus so
 it cannot rot.
 
-- 47 corpus programs, 0 failing
-- 40 unit tests
+- 49 corpus programs, 0 failing
+- 42 unit tests
 - 0 dependencies, 0 `unsafe`, clippy clean at `-D warnings`
 
 ## What the language does today

@@ -1,0 +1,1 @@
+corpus/errors/019-type-fn-collision.src:5:1: `foo` is already a type

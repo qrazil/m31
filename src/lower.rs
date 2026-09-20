@@ -284,6 +284,13 @@ impl Lowerer {
                     format!("`{}` is already defined", f.name),
                 ));
             }
+            // A type name wins in construction position, so a function
+            // sharing one is silently unreachable. Names are case-blind here
+            // -- nothing requires a type to be capitalised -- which makes the
+            // collision easy to hit by accident.
+            if self.typedefs.iter().any(|d| d.name == f.name) {
+                return Err(Diag::new(f.span, format!("`{}` is already a type", f.name)));
+            }
             self.sigs.insert(
                 f.name.clone(),
                 Sig {

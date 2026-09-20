@@ -543,3 +543,23 @@ fn construction_uses_the_same_rule() {
     assert!(err("type P { int x; }\nP p = P(x: 1);\nprint(p.x);")
         .contains("`x` is mandatory, so it is positional"));
 }
+
+#[test]
+fn type_names_need_no_capital() {
+    // Recognition is by declaration, not by spelling: the parser collects
+    // every `type IDENT` in a pre-pass. Capitalisation is a convention the
+    // language does not enforce.
+    let out = ir("type point { int x; }\npoint p = point(1);\nprint(p.x);");
+    assert!(out.contains("type point"), "expected the type:\n{out}");
+}
+
+#[test]
+fn a_function_may_not_share_a_name_with_a_type() {
+    // A type wins in construction position, so the function would be
+    // silently unreachable -- and with no capitalisation rule, the collision
+    // is easy to hit by accident.
+    assert!(
+        err("type foo { int x; }\nint foo(int n) { return n; }\nprint(1);")
+            .contains("`foo` is already a type")
+    );
+}

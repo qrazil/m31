@@ -1,0 +1,10 @@
+type foo {
+    int x;
+}
+
+int foo(int n) {
+    return n;
+}
+
+foo f = foo(1);
+print(f.x);
