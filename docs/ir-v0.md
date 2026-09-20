@@ -208,6 +208,37 @@ atomic later is a change to **two runtime functions**, not to the IR and not
 to the emitter — *provided* no backend ever inlines the refcount operation by
 hand. That is a rule, not a preference.
 
+### 5.6 Moves across a thread boundary
+
+§5.5 holds only while one thread can reach a value at a time. `send` and
+`spawn` are the two places a reference can leave the thread that made it, so
+they **move**: the sender's reference becomes the receiver's, with no
+`rc_inc` and no `rc_dec` in between. Using the local afterwards is a compile
+error.
+
+A move may only take a value the current block **owns**:
+
+  - an owned temporary (a call result, §5.2) — moved directly;
+  - a local declared in *this* block — moved, and marked moved.
+
+Everything else is refused at compile time. A parameter is borrowed (§5.1),
+so the caller still holds it. A local from an enclosing block is refused too:
+the move is a property of the *program point*, but the local outlives it, so
+a loop body or one arm of an `if` would move the same reference twice. The
+diagnostic points at `clone(x)` in both cases.
+
+Retaining rather than moving is not the fix. Two threads sharing one
+non-atomic counter is the defect; a `rc_inc` before the handoff only makes
+the race begin at 2.
+
+Aliasing the compiler cannot see — two locals reaching one object through a
+field — is caught at run time. Every move emits a call to `rt_check_unique`,
+which traps if the refcount is above 1 at the boundary. It is a real check,
+not a debug assertion: corrupting the heap silently is worse than stopping.
+
+Channels are exempt. A channel is *how* threads share, so it is aliased
+rather than moved, and is immortal in v0 (`rt_chan_new`).
+
 ---
 
 ## 6. Calling convention

@@ -1194,6 +1194,11 @@ impl Lowerer {
         self.owned.clear();
         self.loops.clear();
         self.moved.clear();
+        // Every statement flushes its own temporaries, so this is empty in a
+        // well-formed lowering. Clearing it anyway keeps a value from one
+        // function's block list out of the next one's, where its number would
+        // name a different value entirely.
+        self.stmt_temps.clear();
         self.synth = 0;
         self.cur = 0;
         self.ret_ty = f.ret;

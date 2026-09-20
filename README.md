@@ -168,6 +168,20 @@ receiver acquires it, with no retain or release in between. Using a moved
 local afterwards is a compile error. That is what keeps `rc_inc`/`rc_dec`
 non-atomic — only one thread can reach a value at a time.
 
+Only a value you **own** can be moved: a temporary, or a local declared in
+the block doing the move. A parameter is borrowed — the caller still holds
+it — so handing one to another thread is refused, and so is moving a local
+declared in an enclosing scope, because a loop or an `if` arm would move it
+more than once. The fix in both cases is `clone(x)`, which hands over a
+copy and leaves the original alone.
+
+Retaining instead of moving would not help. Two threads on one *non-atomic*
+counter is the bug; a `rc_inc` before the handoff just makes the race start
+at 2. So the rule is compile-time refusal, backed at run time by
+`rt_check_unique`: a value crossing a thread boundary with a refcount above
+one traps rather than corrupting the heap, which catches the aliasing the
+compiler cannot see (two locals reaching the same object through a field).
+
 A **channel is exempt**, because it is how threads share; it is aliased
 rather than moved, and is immortal for now (see `rt_chan_new`).
 
