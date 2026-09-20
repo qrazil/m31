@@ -40,6 +40,27 @@ impl Diag {
             path, self.span.line, self.span.col, self.msg
         )
     }
+
+    /// Render with the offending source line beneath it.
+    ///
+    /// A location alone makes the reader go and look; showing the line means
+    /// the error is legible where it is printed. The caret is a single
+    /// column because a span records where a construct starts and not how far
+    /// it runs -- widening it means threading end positions through the lexer
+    /// and parser, which is worth doing and is not free.
+    pub fn render_with_source(&self, path: &str, src: &str) -> String {
+        let head = self.render(path);
+        let Some(text) = src.lines().nth(self.span.line as usize - 1) else {
+            return head;
+        };
+        let num = self.span.line.to_string();
+        let pad = " ".repeat(num.len());
+        // A tab would put the caret in the wrong column, so the echoed line
+        // renders one as a single space too.
+        let shown = text.replace('\t', " ");
+        let caret = " ".repeat(self.span.col.saturating_sub(1) as usize);
+        format!("{head}\n{pad} |\n{num} | {shown}\n{pad} | {caret}^")
+    }
 }
 
 impl fmt::Display for Diag {

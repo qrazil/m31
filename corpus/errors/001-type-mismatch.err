@@ -1,1 +1,4 @@
 corpus/errors/001-type-mismatch.src:1:9: type mismatch: expected int, found str
+  |
+1 | int a = "not an int";
+  |         ^

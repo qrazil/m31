@@ -1,1 +1,4 @@
 corpus/errors/002-unknown-var.src:1:7: unknown variable `nope`
+  |
+1 | print(nope);
+  |       ^

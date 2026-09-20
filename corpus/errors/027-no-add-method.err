@@ -1,1 +1,4 @@
 corpus/errors/027-no-add-method.src:7:10: `+` on `P` needs a method `P P.add(..)`
+  |
+7 | print((a + b).x);
+  |          ^

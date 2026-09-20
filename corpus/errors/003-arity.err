@@ -1,1 +1,4 @@
 corpus/errors/003-arity.src:5:7: `add` takes 2 positional argument(s), found 1
+  |
+5 | print(add(1));
+  |       ^

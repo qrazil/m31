@@ -1,1 +1,4 @@
 corpus/errors/014-not-generic.src:5:16: type `Point` is not generic
+  |
+5 | Point<int> p = Point<int>(1);
+  |                ^

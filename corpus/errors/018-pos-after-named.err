@@ -1,1 +1,4 @@
 corpus/errors/018-pos-after-named.src:5:15: positional arguments must come before named ones
+  |
+5 | print(f(b: 2, 1));
+  |               ^

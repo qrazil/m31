@@ -1,1 +1,4 @@
 corpus/errors/013-wrong-arity.src:5:19: type `Box` takes 1 type argument(s), found 2
+  |
+5 | Box<int, str> b = Box<int, str>(1);
+  |                   ^

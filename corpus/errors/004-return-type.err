@@ -1,1 +1,4 @@
 corpus/errors/004-return-type.src:2:12: type mismatch: expected int, found str
+  |
+2 |     return "nope";
+  |            ^

@@ -86,7 +86,7 @@ fn main() -> ExitCode {
         let formatted = match reformat(&src) {
             Ok(s) => s,
             Err(d) => {
-                eprintln!("{}", d.render(&path));
+                eprintln!("{}", d.render_with_source(&path, &src));
                 return ExitCode::FAILURE;
             }
         };
@@ -107,7 +107,7 @@ fn main() -> ExitCode {
     let out = match compile(&src, mode) {
         Ok(s) => s,
         Err(d) => {
-            eprintln!("{}", d.render(&path));
+            eprintln!("{}", d.render_with_source(&path, &src));
             return ExitCode::FAILURE;
         }
     };

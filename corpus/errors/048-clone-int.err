@@ -1,1 +1,4 @@
 corpus/errors/048-clone-int.src:2:13: int is copied by assignment; there is nothing to clone
+  |
+2 | print(clone(x));
+  |             ^
