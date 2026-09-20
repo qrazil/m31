@@ -1,0 +1,2 @@
+static int foo() { return 1; }
+print(foo());

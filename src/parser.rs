@@ -432,6 +432,11 @@ impl Parser {
     /// does not. The difference is a `(` after the name -- and after any
     /// generic parameter list. Three tokens of lookahead, no backtracking.
     fn starts_func(&self) -> bool {
+        // `static` can only begin a function declaration, so it settles the
+        // question by itself.
+        if self.peek() == &Tok::KwStatic {
+            return true;
+        }
         // The return type may be a type parameter the parser has not met yet
         // -- `T unwrap<T>(Box<T> b)` -- so accept any identifier here and let
         // the shape decide. A statement can never be IDENT IDENT `(`.
@@ -551,6 +556,9 @@ impl Parser {
                 self.expect(Tok::Semi)?;
                 methods.push(Func {
                     ret,
+                    // An interface lists instance methods: a static one has
+                    // no receiver, so there is nothing to dispatch on.
+                    is_static: false,
                     recv: Some(name.clone()),
                     name: mname,
                     tparams: Vec::new(),
@@ -698,6 +706,9 @@ impl Parser {
     fn parse_func(&mut self) -> Result<Func, Diag> {
         let span = self.span();
         // A generic function's return type may mention its own parameters, so
+        // `static Point Point.origin()` -- a method on the TYPE. Read first,
+        // so everything after it parses exactly like an ordinary method.
+        let is_static = self.eat(&Tok::KwStatic);
         // the `<T>` list has to be read before the return type. It sits after
         // the name in the source, so scan ahead for it first.
         let tparams = self.scan_fn_tparams()?;
@@ -710,6 +721,13 @@ impl Parser {
         } else {
             (None, first)
         };
+        if is_static && recv.is_none() {
+            return Err(Diag::new(
+                span,
+                "`static` describes a method on a type; write it as \
+                 `static T Type.name(..)`",
+            ));
+        }
         let after = self.parse_tparams()?;
         debug_assert_eq!(after, tparams);
         self.expect(Tok::LParen)?;
@@ -728,6 +746,7 @@ impl Parser {
         self.tparams.clear();
         Ok(Func {
             ret,
+            is_static,
             recv,
             name,
             tparams,

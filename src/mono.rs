@@ -426,6 +426,7 @@ impl Mono {
         self.env.clear();
         Ok(Func {
             ret,
+            is_static: f.is_static,
             recv: f.recv.clone(),
             name: f.name.clone(),
             tparams: Vec::new(),

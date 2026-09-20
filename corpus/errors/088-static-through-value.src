@@ -1,0 +1,7 @@
+type P { int x; }
+static P P.origin() { return P(0); }
+
+// A static method has no receiver, so it cannot be reached through a value
+// even though the spelling looks the same.
+P p = P(1);
+print(p.origin().x);

@@ -1,0 +1,6 @@
+enum E { A; B(int); }
+
+// `Type.name(..)` is also how a variant is written, so there would be no way
+// to say which was meant.
+static E E.A() { return E.B(1); }
+print(1);

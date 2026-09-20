@@ -1,0 +1,4 @@
+corpus/errors/089-static-uses-field.src:4:29: unknown variable `x`
+  |
+4 | static int P.bad() { return x; }
+  |                             ^

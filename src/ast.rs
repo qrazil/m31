@@ -309,6 +309,14 @@ pub struct Args {
 #[derive(Debug, Clone)]
 pub struct Func {
     pub ret: Ty,
+    /// A method on the TYPE rather than on a value: `static Point
+    /// Point.origin()`. It has no receiver, so a bare field name means
+    /// nothing inside it, and it is called as `Point.origin()`.
+    ///
+    /// This is what lets a conversion dispatch on its TARGET -- `Price.parse`
+    /// reads text and produces a Price, which single dispatch on a receiver
+    /// cannot express because there is no Price yet to dispatch on.
+    pub is_static: bool,
     /// For a method, the receiver type's name: `int Rect.area()` has
     /// `recv = Some("Rect")`. Methods are declared outside the type body so
     /// they can be added to any type, and so a type declaration stays a list

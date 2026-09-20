@@ -1,0 +1,81 @@
+// A method on the TYPE rather than on a value.
+//
+// This is what lets a conversion dispatch on its TARGET. `x.to_str()`
+// dispatches on the source and an interface handles it; reading a Price out
+// of text cannot, because there is no Price yet to dispatch on. A static
+// method is where that lives.
+
+type Point { int x; int y; }
+
+static Point Point.origin() {
+    return Point(0, 0);
+}
+static Point Point.diagonal(int n) {
+    return Point(n, n);
+}
+
+// An ordinary method alongside them, for contrast: it has a receiver and
+// reaches fields by bare name.
+int Point.sum() {
+    return x + y;
+}
+
+Point o = Point.origin();
+print(o.x);                     // 0
+print(o.y);                     // 0
+
+Point d = Point.diagonal(4);
+print(d.sum());                 // 8
+
+// The shape a parse takes: text in, a value of this type out, and a failure
+// that is a value rather than a trap.
+type Money { int cents; }
+
+static Result<Money, str> Money.parse(str s) {
+    if (!s.starts_with("$")) {
+        return Result<Money, str>.Err("expected a leading $");
+    }
+    str digits = s.substr(1, s.size());
+    if (digits.size() == 0) {
+        return Result<Money, str>.Err("no amount");
+    }
+    return Result<Money, str>.Ok(Money(digits.size()));
+}
+
+match (Money.parse("$1234")) {
+    case Ok(Money m): { print(m.cents); }       // 4
+    case Err(str e): { print(e); }
+}
+match (Money.parse("1234")) {
+    case Ok(Money m): { print(m.cents); }
+    case Err(str e): { print(e); }              // expected a leading $
+}
+match (Money.parse("$")) {
+    case Ok(Money m): { print(m.cents); }
+    case Err(str e): { print(e); }              // no amount
+}
+
+// And it composes with `?`, which is the point of the whole arrangement.
+Result<int, str> total(str a, str b) {
+    Money x = Money.parse(a)?;
+    Money y = Money.parse(b)?;
+    return Result<int, str>.Ok(x.cents + y.cents);
+}
+match (total("$12", "$345")) {
+    case Ok(int v): { print(v); }               // 2 + 3 = 5
+    case Err(str e): { print(e); }
+}
+match (total("$12", "nope")) {
+    case Ok(int v): { print(v); }
+    case Err(str e): { print(e); }              // expected a leading $
+}
+
+// A static method can take and return references without leaking.
+static str Point.describe(Point p) {
+    if (p.x == p.y) {
+        return concat("diagonal ", "point");
+    }
+    return "other";
+}
+print(Point.describe(d));       // diagonal point
+print(Point.describe(Point(1, 2)));     // other

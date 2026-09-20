@@ -1,0 +1,5 @@
+type P { int x; }
+
+// No receiver means no bare field names.
+static int P.bad() { return x; }
+print(P.bad());

@@ -248,8 +248,9 @@ impl Fmt {
             Some(r) => format!("{r}.{}", f.name),
             None => f.name.clone(),
         };
+        let kw = if f.is_static { "static " } else { "" };
         self.line(&format!(
-            "{} {name}{tp}({}) {{",
+            "{kw}{} {name}{tp}({}) {{",
             self.ty(f.ret),
             self.params(&f.params)
         ));

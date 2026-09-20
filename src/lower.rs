@@ -99,6 +99,9 @@ pub struct Lowerer {
     /// records only `Ref`, which cannot tell `str` from a user type, and a
     /// match arm has to bind the payload at its real type.
     variant_surface: Vec<Vec<Vec<Ty>>>,
+    /// Keys of methods declared `static`. They are called on the type and
+    /// take no receiver, so a call site has to know which kind it has.
+    statics: std::collections::HashSet<String>,
     /// The monomorphised program's interned type expressions.
     ty_exprs: Vec<TyExpr>,
     /// Required methods per interface, parallel to `typedefs`; empty for a
@@ -155,6 +158,7 @@ impl Lowerer {
             field_params: Vec::new(),
             distinct_base: Vec::new(),
             variant_surface: Vec::new(),
+            statics: std::collections::HashSet::new(),
             ty_exprs: Vec::new(),
             iface_methods: Vec::new(),
             iface_slots: Vec::new(),
@@ -1495,6 +1499,7 @@ impl Lowerer {
                     };
                     out.push(Func {
                         ret: sig.ret,
+                        is_static: false,
                         recv: Some(t.name.clone()),
                         name: mname,
                         tparams: Vec::new(),
@@ -1659,6 +1664,26 @@ impl Lowerer {
                     format!("`{}` is already defined", f.key()),
                 ));
             }
+            if f.is_static {
+                // `Type.name(..)` is also how an enum variant is written, so
+                // a static method may not take a variant's name -- there
+                // would be no way to say which was meant.
+                if let Some(r) = &f.recv {
+                    if let Some(d) = self.typedefs.iter().find(|d| d.name == *r) {
+                        if d.variants.iter().any(|v| v.name == f.name) {
+                            return Err(Diag::new(
+                                f.span,
+                                format!(
+                                    "`{r}` already has a variant `{}`, and \
+                                     `{r}.{}` would be both",
+                                    f.name, f.name
+                                ),
+                            ));
+                        }
+                    }
+                }
+                self.statics.insert(f.key());
+            }
             if let Some(r) = &f.recv {
                 if !self.typedefs.iter().any(|d| d.name == *r) {
                     return Err(Diag::new(f.span, format!("unknown type `{r}`")));
@@ -1704,6 +1729,7 @@ impl Lowerer {
         // function may be called above its own definition.
         let entry = Func {
             ret: Ty::Void,
+            is_static: false,
             recv: None,
             name: "$main".to_string(),
             tparams: Vec::new(),
@@ -2105,7 +2131,9 @@ impl Lowerer {
         // A method takes its receiver as a hidden first parameter. It is not
         // nameable, because fields are reached bare.
         self.recv = None;
-        if let Some(rname) = &f.recv {
+        // A static method is qualified by a type but takes no receiver, so
+        // no hidden first parameter and no bare field names inside it.
+        if let Some(rname) = f.recv.as_ref().filter(|_| !f.is_static) {
             let tid = self
                 .typedefs
                 .iter()
@@ -3047,7 +3075,43 @@ impl Lowerer {
     /// needs no fixpoint: take a snapshot of each variable before the branch,
     /// compare after each arm, and give the join a parameter for every
     /// variable the two arms disagree about.
-    /// `Option<int>.Some(1)`
+    /// `Type.name(args)` where `name` is a static method: an ordinary direct
+    /// call, with no receiver to pass.
+    fn lower_static_call(&mut self, key: &str, args: &Args, span: Span) -> Result<Val, Diag> {
+        let sig = self.sigs.get(key).expect("checked by the caller");
+        let params = sig.params.clone();
+        let ret = sig.ret;
+        let slots = self.bind_args(key, &params, args, span)?;
+        let slots: Vec<Expr> = slots.into_iter().cloned().collect();
+        let mut vals = Vec::new();
+        for (a, p) in slots.iter().zip(params.iter()) {
+            let v = self.lower_expr(a)?;
+            if !self.assignable(v.ty, p.ty) {
+                return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
+            }
+            vals.push(v.val());
+        }
+        if ret == Ty::Void {
+            self.push(Inst::Call {
+                dst: None,
+                func: key.to_string(),
+                args: vals,
+            });
+            return Ok(Val::void());
+        }
+        let d = self.new_val(self.irty(ret));
+        self.push(Inst::Call {
+            dst: Some(d),
+            func: key.to_string(),
+            args: vals,
+        });
+        let owned = self.is_ref(ret);
+        if owned {
+            self.stmt_temps.push(d);
+        }
+        Ok(Val::new(d, ret, owned))
+    }
+
     fn lower_enum_new(
         &mut self,
         ty: Ty,
@@ -3061,11 +3125,24 @@ impl Lowerer {
                 format!("unknown type `{}`", self.tyname(ty)),
             ));
         };
+        // `Type.name(..)` is two things wearing one spelling: an enum
+        // variant, and a call to a static method. The variant wins when
+        // there is one, because a type cannot have a variant and a static
+        // method of the same name -- that is refused where methods are
+        // registered.
+        let key = format!("{}.{variant}", self.typedefs[tid as usize].name);
+        let is_variant = self.typedefs[tid as usize]
+            .variants
+            .iter()
+            .any(|v| v.name == variant);
+        if !is_variant && self.statics.contains(&key) {
+            return self.lower_static_call(&key, args, span);
+        }
         if !self.typedefs[tid as usize].is_enum {
             return Err(Diag::new(
                 span,
                 format!(
-                    "`{}` is not an enum, so it has no variants",
+                    "`{}` has no static method `{variant}`, and is not an enum",
                     self.tyname(ty)
                 ),
             ));
@@ -3882,6 +3959,19 @@ impl Lowerer {
                     && self.typedefs[tid as usize].name.starts_with("Option$")
                 {
                     return self.lower_option_method(&o, tid, m, args, *span);
+                }
+                // A static method has no receiver, so it cannot be reached
+                // through a value even though the spelling looks the same.
+                let skey = format!("{}.{m}", self.typedefs[tid as usize].name);
+                if self.statics.contains(&skey) {
+                    return Err(Diag::new(
+                        *span,
+                        format!(
+                            "`{m}` is a static method; call it on the type, as \
+                             `{}.{m}(..)`",
+                            self.typedefs[tid as usize].name
+                        ),
+                    ));
                 }
 
                 // On an interface value the implementation is not known
