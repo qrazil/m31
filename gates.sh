@@ -144,6 +144,33 @@ run "formatter is idempotent" bash -c '
     done
     exit $bad'
 
+# The same input must always produce the same C.
+#
+# It did not: the promoted-method list for embedding was built by iterating a
+# HashMap, and Rust's randomised hasher reordered the emitted definitions
+# between runs of the compiler -- twelve distinct outputs from twelve runs of
+# one program. Nothing caught it, because every other check compiles the C
+# rather than comparing it. A build that is not a function of its input
+# cannot be cached, bisected, or reproduced from a hash.
+run "emission is reproducible" bash -c '
+    bad=0
+    for f in corpus/*/*.'"$LANG_EXT"' examples/tour.'"$LANG_EXT"'; do
+        [ -e "$f" ] || continue
+        w=$(mktemp -d)
+        ./target/debug/'"$LANG_BIN"' --emit-c "$f" -o "$w/1.c" 2>/dev/null || { rm -rf "$w"; continue; }
+        for _ in 1 2 3 4 5; do
+            ./target/debug/'"$LANG_BIN"' --emit-c "$f" -o "$w/n.c" 2>/dev/null
+            if ! diff -q "$w/1.c" "$w/n.c" >/dev/null 2>&1; then
+                echo "emitted C differs between runs of the compiler: $f"
+                diff "$w/1.c" "$w/n.c" | head -6
+                bad=1
+                break
+            fi
+        done
+        rm -rf "$w"
+    done
+    exit $bad'
+
 if [ $quick -eq 0 ]; then
     run "corpus" bash run.sh
 fi
