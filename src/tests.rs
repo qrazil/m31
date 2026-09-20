@@ -237,7 +237,7 @@ fn rejects_malformed_programs() {
     // would silently do nothing.
     assert!(err("void main() { print(1); }").contains("there is no `main`"));
     assert!(err("int main() { return 0; }").contains("there is no `main`"));
-    assert!(err("int a = 1; int a = 2; print(a);").contains("already declared"));
+    assert!(err("int a = 1; int a = 2; print(a);").contains("shadowing is not allowed"));
     assert!(err("void f() { } void f() { } print(1);").contains("already defined"));
     assert!(err("void f() { } void f() { } print(1);").contains("already defined"));
     assert!(err("int a = 1; a = \"s\"; print(a);").contains("type mismatch"));
@@ -562,4 +562,70 @@ fn a_function_may_not_share_a_name_with_a_type() {
         err("type foo { int x; }\nint foo(int n) { return n; }\nprint(1);")
             .contains("`foo` is already a type")
     );
+}
+
+// ---- methods and shadowing --------------------------------------------
+
+#[test]
+fn methods_are_declared_by_qualified_name() {
+    let out = ir("type R { int w; }\nint R.area() { return w; }\nR r = R(2); print(r.area());");
+    assert!(out.contains("func R.area"), "expected the method:\n{out}");
+}
+
+#[test]
+fn a_bare_name_in_a_method_reads_the_field() {
+    // No `this`: the field is reached bare, and borrowed from the receiver.
+    let out = ir(
+        "type R { int w; int h; }\nint R.area() { return w * h; }\nR r = R(2,3); print(r.area());",
+    );
+    let m = out.split("func $main").next().unwrap();
+    assert_eq!(
+        m.matches("load").count(),
+        2,
+        "both fields must be read from the receiver:\n{m}"
+    );
+}
+
+#[test]
+fn a_method_may_assign_a_field_by_bare_name() {
+    let out =
+        ir("type R { int w; }\nvoid R.grow() { w = w + 1; }\nR r = R(1); r.grow(); print(r.w);");
+    let m = out.split("func $main").next().unwrap();
+    assert!(m.contains("store"), "expected a field store:\n{m}");
+}
+
+#[test]
+fn the_receiver_is_borrowed_like_any_argument() {
+    let out = ir("type R { int w; }\nint R.get() { return w; }\nR r = R(1); print(r.get());");
+    let m = out.split("func $main").next().unwrap();
+    assert!(
+        !m.contains("rc_inc") && !m.contains("rc_dec"),
+        "a method must not touch its receiver's refcount:\n{m}"
+    );
+}
+
+#[test]
+fn nothing_shadows_anything() {
+    let msg = "shadowing is not allowed";
+    // an outer local
+    assert!(err("int x = 1; if (true) { int x = 2; print(x); } print(x);").contains(msg));
+    // a parameter
+    assert!(err("int f(int a) { int a = 2; return a; }\nprint(f(1));").contains(msg));
+    // a loop's enclosing local
+    assert!(err("int i = 0; while (i < 3) { int i = 9; print(i); }").contains(msg));
+    // a function
+    assert!(err("int helper() { return 1; }\nint helper = 5; print(helper);").contains(msg));
+    // a field of the receiver
+    assert!(
+        err("type R { int w; }\nint R.bad() { int w = 5; return w; }\nprint(1);").contains(msg)
+    );
+}
+
+#[test]
+fn sibling_scopes_may_reuse_a_name() {
+    // Not shadowing: neither is visible to the other.
+    let out = ir(
+        "int t = 0; if (true) { int s = 1; t = s; } if (t > 0) { int s = 2; t = t + s; } print(t);",
+    );
+    assert!(out.contains("func $main"), "expected it to compile:\n{out}");
 }

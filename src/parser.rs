@@ -346,6 +346,14 @@ impl Parser {
             return false;
         }
         i += 1;
+        // A qualified method name: `int Rect.area()`.
+        if self.peek_at(i) == &Tok::Dot {
+            i += 1;
+            if !matches!(self.peek_at(i), Tok::Ident(_)) {
+                return false;
+            }
+            i += 1;
+        }
         // Skip the function's own type parameters: `T id<T>(T x)`.
         if self.peek_at(i) == &Tok::Lt {
             let mut depth = 0;
@@ -420,7 +428,13 @@ impl Parser {
         let tparams = self.scan_fn_tparams()?;
         self.tparams = tparams.clone();
         let ret = self.expect_ty()?;
-        let (name, _) = self.expect_ident()?;
+        let (first, _) = self.expect_ident()?;
+        let (recv, name) = if self.eat(&Tok::Dot) {
+            let (m, _) = self.expect_ident()?;
+            (Some(first), m)
+        } else {
+            (None, first)
+        };
         let after = self.parse_tparams()?;
         debug_assert_eq!(after, tparams);
         self.expect(Tok::LParen)?;
@@ -439,6 +453,7 @@ impl Parser {
         self.tparams.clear();
         Ok(Func {
             ret,
+            recv,
             name,
             tparams,
             params,
@@ -634,7 +649,12 @@ impl Parser {
             let span = self.span();
             self.bump();
             let (name, _) = self.expect_ident()?;
-            e = Expr::Field(Box::new(e), name, span);
+            e = if self.peek() == &Tok::LParen {
+                let args = self.parse_args()?;
+                Expr::MethodCall(Box::new(e), name, args, span)
+            } else {
+                Expr::Field(Box::new(e), name, span)
+            };
         }
         Ok(e)
     }
@@ -697,6 +717,12 @@ impl Parser {
                         }
                     }
                     self.expect(Tok::Gt)?;
+                }
+                if self.peek() != &Tok::LParen {
+                    // Nothing shadows a type, so a bare type name here is
+                    // never a variable -- say that rather than demanding a
+                    // `(` the writer did not mean to type.
+                    return Err(Diag::new(span, format!("`{name}` is a type, not a value")));
                 }
                 let ty = self.intern(name, targs);
                 let args = self.parse_args()?;

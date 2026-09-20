@@ -111,6 +111,8 @@ pub enum Expr {
     Bin(BinOp, Box<Expr>, Box<Expr>, Span),
     Un(UnOp, Box<Expr>, Span),
     Call(String, Args, Span),
+    /// `obj.method(args)`
+    MethodCall(Box<Expr>, String, Args, Span),
     /// `expr.field`
     Field(Box<Expr>, String, Span),
     /// `Point(x: 1, y: 2)` / `Box<int>(value: 5)` -- construction is always
@@ -130,6 +132,7 @@ impl Expr {
             | Expr::Bin(_, _, _, s)
             | Expr::Un(_, _, s)
             | Expr::Call(_, _, s)
+            | Expr::MethodCall(_, _, _, s)
             | Expr::Field(_, _, s)
             | Expr::New(_, _, s) => *s,
         }
@@ -213,12 +216,29 @@ pub struct Args {
 #[derive(Debug, Clone)]
 pub struct Func {
     pub ret: Ty,
+    /// For a method, the receiver type's name: `int Rect.area()` has
+    /// `recv = Some("Rect")`. Methods are declared outside the type body so
+    /// they can be added to any type, and so a type declaration stays a list
+    /// of fields.
+    pub recv: Option<String>,
     pub name: String,
     /// Type parameter names, empty for a non-generic function.
     pub tparams: Vec<String>,
     pub params: Vec<Param>,
     pub body: Vec<Stmt>,
     pub span: Span,
+}
+
+impl Func {
+    /// The name this function is known by: `area` for a plain function,
+    /// `Rect.area` for a method. `.` cannot appear in a source identifier, so
+    /// the two namespaces cannot collide.
+    pub fn key(&self) -> String {
+        match &self.recv {
+            Some(r) => format!("{r}.{}", self.name),
+            None => self.name.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

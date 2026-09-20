@@ -291,6 +291,7 @@ impl Mono {
         self.env.clear();
         Ok(Func {
             ret,
+            recv: f.recv.clone(),
             name: f.name.clone(),
             tparams: Vec::new(),
             params,
@@ -409,6 +410,12 @@ impl Mono {
                 let ty = self.subst_ty(*ty, sub, *s)?;
                 Expr::New(ty, self.subst_args(args, sub)?, *s)
             }
+            Expr::MethodCall(obj, m, args, s) => Expr::MethodCall(
+                Box::new(self.subst_expr(obj, sub)?),
+                m.clone(),
+                self.subst_args(args, sub)?,
+                *s,
+            ),
             Expr::Call(name, args, s) => {
                 let out = self.subst_args(args, sub)?;
                 // A call to a generic function needs its type arguments

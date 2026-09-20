@@ -1,0 +1,1 @@
+corpus/errors/023-shadow-loop.src:3:5: `i` is already in scope; shadowing is not allowed, rename one

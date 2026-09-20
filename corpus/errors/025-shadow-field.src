@@ -1,0 +1,10 @@
+type Rect {
+    int w;
+}
+
+int Rect.bad() {
+    int w = 5;
+    return w;
+}
+
+print(1);

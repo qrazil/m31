@@ -1,0 +1,6 @@
+type Rect {
+    int w;
+}
+
+Rect r = Rect(1);
+print(r.nope());

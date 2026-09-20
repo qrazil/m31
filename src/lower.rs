@@ -106,6 +106,10 @@ pub struct Lowerer {
     /// Owned temporaries produced while lowering the current statement.
     stmt_temps: Vec<Value>,
     loops: Vec<LoopCtx>,
+    /// Inside a method: the receiver's type id and its SSA value. Fields are
+    /// reached by bare name, which is safe only because nothing shadows
+    /// anything -- see `check_shadow`.
+    recv: Option<(u32, Value)>,
     ret_ty: Ty,
 }
 
@@ -143,6 +147,7 @@ impl Lowerer {
             owned: Vec::new(),
             stmt_temps: Vec::new(),
             loops: Vec::new(),
+            recv: None,
             ret_ty: Ty::Void,
         }
     }
@@ -272,17 +277,22 @@ impl Lowerer {
             // Habit from C, Java and Go. Without this it declares an ordinary
             // function nothing calls, and the program silently does nothing --
             // the worst failure mode for someone who has written C before.
-            if f.name == "main" {
+            if f.recv.is_none() && f.name == "main" {
                 return Err(Diag::new(
                     f.span,
                     "there is no `main`: statements at the top level are the program",
                 ));
             }
-            if self.sigs.contains_key(&f.name) {
+            if self.sigs.contains_key(&f.key()) {
                 return Err(Diag::new(
                     f.span,
-                    format!("`{}` is already defined", f.name),
+                    format!("`{}` is already defined", f.key()),
                 ));
+            }
+            if let Some(r) = &f.recv {
+                if !self.typedefs.iter().any(|d| d.name == *r) {
+                    return Err(Diag::new(f.span, format!("unknown type `{r}`")));
+                }
             }
             // A type name wins in construction position, so a function
             // sharing one is silently unreachable. Names are case-blind here
@@ -292,7 +302,7 @@ impl Lowerer {
                 return Err(Diag::new(f.span, format!("`{}` is already a type", f.name)));
             }
             self.sigs.insert(
-                f.name.clone(),
+                f.key(),
                 Sig {
                     params: f.params.clone(),
                     ret: f.ret,
@@ -306,6 +316,7 @@ impl Lowerer {
         // function may be called above its own definition.
         let entry = Func {
             ret: Ty::Void,
+            recv: None,
             name: "$main".to_string(),
             tparams: Vec::new(),
             params: Vec::new(),
@@ -374,6 +385,55 @@ impl Lowerer {
         self.binding(name).map(|(t, v, _)| (t, v))
     }
 
+    /// Refuse any name that is already visible.
+    ///
+    /// **Nothing shadows anything, anywhere.** Not an outer local, not a
+    /// parameter, not a function, not a type. This is what removes the need
+    /// for a `this` keyword -- a bare name can only ever mean one thing, so
+    /// there is nothing to disambiguate -- and it deletes the entire class of
+    /// bugs where a reader and the compiler disagree about which `x` is meant.
+    ///
+    /// The cost is real and deliberate: the programmer renames.
+    fn check_shadow(&self, name: &str, span: Span) -> Result<(), Diag> {
+        if self.binding(name).is_some() {
+            return Err(Diag::new(
+                span,
+                format!("`{name}` is already in scope; shadowing is not allowed, rename one"),
+            ));
+        }
+        if self.sigs.contains_key(name) {
+            return Err(Diag::new(
+                span,
+                format!("`{name}` is already a function; shadowing is not allowed, rename one"),
+            ));
+        }
+        if self.typedefs.iter().any(|d| d.name == name) {
+            return Err(Diag::new(
+                span,
+                format!("`{name}` is already a type; shadowing is not allowed, rename one"),
+            ));
+        }
+        if let Some((tid, _)) = self.recv {
+            if self.field_of(tid, name).is_some() {
+                return Err(Diag::new(
+                    span,
+                    format!(
+                        "`{name}` is already a field of `{}`; shadowing is not allowed, rename one",
+                        self.typedefs[tid as usize].name
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Read a bare name that is a field of the receiver.
+    fn recv_field(&self, name: &str) -> Option<(u32, Value, u32, IrTy)> {
+        let (tid, obj) = self.recv?;
+        let (idx, fty) = self.field_of(tid, name)?;
+        Some((tid, obj, idx, fty))
+    }
+
     fn binding(&self, name: &str) -> Option<Binding> {
         for s in self.scopes.iter().rev() {
             if let Some(x) = s.get(name) {
@@ -436,6 +496,21 @@ impl Lowerer {
 
         let mut scope = HashMap::new();
         let mut params = Vec::new();
+
+        // A method takes its receiver as a hidden first parameter. It is not
+        // nameable, because fields are reached bare.
+        self.recv = None;
+        if let Some(rname) = &f.recv {
+            let tid = self
+                .typedefs
+                .iter()
+                .position(|d| d.name == *rname)
+                .expect("receiver type checked above") as u32;
+            let v = self.new_val(IrTy::Ref);
+            params.push(v);
+            self.recv = Some((tid, v));
+        }
+
         for p in &f.params {
             let v = self.new_val(ir_ty(p.ty));
             params.push(v);
@@ -487,7 +562,7 @@ impl Lowerer {
             .collect();
 
         Ok(ir::Func {
-            name: f.name.clone(),
+            name: f.key(),
             params,
             ret: if f.ret == Ty::Void {
                 None
@@ -586,9 +661,7 @@ impl Lowerer {
                         ),
                     ));
                 }
-                if self.scopes.last().unwrap().contains_key(name) {
-                    return Err(Diag::new(*span, format!("`{name}` is already declared")));
-                }
+                self.check_shadow(name, *span)?;
                 // The local must hold a +1. A borrowed source needs one added;
                 // an owned temp is handed straight over, so drop it from the
                 // pending list rather than releasing it.
@@ -609,6 +682,53 @@ impl Lowerer {
             }
 
             Stmt::Assign { name, value, span } => {
+                // A bare name inside a method may be a field of the receiver.
+                if self.binding(name).is_none() {
+                    if let Some((tid, obj, idx, fty)) = self.recv_field(name) {
+                        let v = self.lower_expr(value)?;
+                        let want = self.field_ty(tid, idx);
+                        if v.ty != want {
+                            return Err(Diag::new(
+                                value.span(),
+                                format!(
+                                    "type mismatch: field `{name}` is {}, found {}",
+                                    self.tyname(want),
+                                    self.tyname(v.ty)
+                                ),
+                            ));
+                        }
+                        if fty == IrTy::Ref {
+                            let old = self.new_val(IrTy::Ref);
+                            self.push(Inst::LoadField {
+                                dst: old,
+                                obj,
+                                tid,
+                                idx,
+                            });
+                            if v.owned {
+                                self.stmt_temps.retain(|t| *t != v.val());
+                            } else {
+                                self.push(Inst::RcInc { val: v.val() });
+                            }
+                            self.push(Inst::StoreField {
+                                obj,
+                                tid,
+                                idx,
+                                val: v.val(),
+                            });
+                            self.push(Inst::RcDec { val: old });
+                        } else {
+                            self.push(Inst::StoreField {
+                                obj,
+                                tid,
+                                idx,
+                                val: v.val(),
+                            });
+                        }
+                        self.flush_temps();
+                        return Ok(());
+                    }
+                }
                 let Some((ty, old, is_const)) = self.binding(name) else {
                     return Err(Diag::new(*span, format!("unknown variable `{name}`")));
                 };
@@ -1135,10 +1255,25 @@ impl Lowerer {
                 // Immortal: borrowed, never owned. docs/ir-v0.md §5.4
                 Ok(Val::new(v, Ty::Str, false))
             }
-            Expr::Var(name, span) => match self.lookup(name) {
-                Some((ty, v)) => Ok(Val::new(v, ty, false)),
-                None => Err(Diag::new(*span, format!("unknown variable `{name}`"))),
-            },
+            Expr::Var(name, span) => {
+                if let Some((ty, v)) = self.lookup(name) {
+                    return Ok(Val::new(v, ty, false));
+                }
+                // Inside a method, a bare name may be a field of the
+                // receiver. Unambiguous because nothing shadows anything.
+                if let Some((tid, obj, idx, fty)) = self.recv_field(name) {
+                    let d = self.new_val(fty);
+                    self.push(Inst::LoadField {
+                        dst: d,
+                        obj,
+                        tid,
+                        idx,
+                    });
+                    // Borrowed from the receiver, which holds the +1.
+                    return Ok(Val::new(d, self.field_ty(tid, idx), false));
+                }
+                Err(Diag::new(*span, format!("unknown variable `{name}`")))
+            }
             Expr::Un(op, inner, span) => {
                 let a = self.lower_expr(inner)?;
                 match op {
@@ -1205,6 +1340,74 @@ impl Lowerer {
                 // A field read is BORROWED from the object, exactly like a
                 // local: the object holds the +1, we do not.
                 Ok(Val::new(d, self.field_ty(tid, idx), false))
+            }
+
+            Expr::MethodCall(obj, m, args, span) => {
+                let o = self.lower_expr(obj)?;
+                let Some(tid) = self.tdef_of(o.ty) else {
+                    return Err(Diag::new(
+                        *span,
+                        format!("type {} has no methods", self.tyname(o.ty)),
+                    ));
+                };
+                let key = format!("{}.{m}", self.typedefs[tid as usize].name);
+                let Some(sig) = self.sigs.get(&key) else {
+                    return Err(Diag::new(
+                        *span,
+                        format!(
+                            "type `{}` has no method `{m}`",
+                            self.typedefs[tid as usize].name
+                        ),
+                    ));
+                };
+                let params = sig.params.clone();
+                let ret = sig.ret;
+                let slots = self.bind_args(&key, &params, args, *span)?;
+
+                // The receiver is the hidden first argument, and is borrowed
+                // like every other argument (docs/ir-v0.md §5.1).
+                let mut vals = vec![o.val()];
+                if o.owned {
+                    self.stmt_temps.push(o.val());
+                }
+                for (a, p) in slots.iter().zip(params.iter()) {
+                    let v = self.lower_expr(a)?;
+                    if v.ty != p.ty {
+                        return Err(Diag::new(
+                            a.span(),
+                            format!(
+                                "type mismatch: expected {}, found {}",
+                                self.tyname(p.ty),
+                                self.tyname(v.ty)
+                            ),
+                        ));
+                    }
+                    if v.owned {
+                        self.stmt_temps.push(v.val());
+                    }
+                    vals.push(v.val());
+                }
+
+                if ret == Ty::Void {
+                    self.push(Inst::Call {
+                        dst: None,
+                        func: key,
+                        args: vals,
+                    });
+                    Ok(Val::void())
+                } else {
+                    let d = self.new_val(ir_ty(ret));
+                    self.push(Inst::Call {
+                        dst: Some(d),
+                        func: key,
+                        args: vals,
+                    });
+                    let owned = ret.is_ref();
+                    if owned {
+                        self.stmt_temps.push(d);
+                    }
+                    Ok(Val::new(d, ret, owned))
+                }
             }
 
             Expr::New(ty, args, span) => self.lower_new(*ty, args, *span),

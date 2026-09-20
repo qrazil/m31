@@ -1,0 +1,1 @@
+corpus/errors/021-shadow-param.src:2:5: `a` is already in scope; shadowing is not allowed, rename one

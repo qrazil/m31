@@ -1,0 +1,1 @@
+corpus/errors/020-shadow-outer.src:3:5: `x` is already in scope; shadowing is not allowed, rename one

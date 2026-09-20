@@ -104,12 +104,16 @@ pub fn emit(m: &Module) -> String {
 
 /// Turn an IR function name into a C identifier.
 ///
-/// Monomorphisation mangles with `$` (`unwrap$int`) and the synthesised entry
-/// point is `$main`. Both gcc and clang accept `$` in identifiers, but it is
-/// a GNU extension, not standard C -- and the whole point of the C backend is
-/// reaching compilers we have not tested. So it is escaped here.
+/// Monomorphisation mangles with `$` (`unwrap$int`), methods are qualified
+/// with `.` (`Rect.area`), and the synthesised entry point is `$main`. None
+/// of those are valid in standard C -- gcc and clang accept `$` as a GNU
+/// extension, but the whole point of the C backend is reaching compilers we
+/// have not tested.
+///
+/// The two escapes are different lengths on purpose, so `a$b` and `a.b`
+/// cannot both become the same C name. `emit` asserts no collision anyway.
 fn c_name(name: &str) -> String {
-    format!("fn_{}", name.replace('$', "__"))
+    format!("fn_{}", name.replace('$', "__").replace('.', "___"))
 }
 
 fn signature(f: &crate::ir::Func) -> String {
@@ -117,10 +121,19 @@ fn signature(f: &crate::ir::Func) -> String {
         Some(t) => t.c_name(),
         None => "void",
     };
+    // A parameter the body never reads is the author's choice, not a defect
+    // in the emitter -- a method may legitimately ignore its receiver. The
+    // warning gate exists to catch emitter bugs, so this one is suppressed
+    // rather than allowed to fail a user's build.
     let params: Vec<String> = f
         .params
         .iter()
-        .map(|p| format!("{} {}", f.ty_of(*p).c_name(), p))
+        .map(|p| {
+            // After the declarator, not before it: clang accepts either
+            // placement, gcc only this one. The gcc/clang differential
+            // caught that.
+            format!("{} {} __attribute__((unused))", f.ty_of(*p).c_name(), p)
+        })
         .collect();
     let plist = if params.is_empty() {
         "void".to_string()

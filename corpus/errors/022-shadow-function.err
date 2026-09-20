@@ -1,0 +1,1 @@
+corpus/errors/022-shadow-function.src:5:1: `helper` is already a function; shadowing is not allowed, rename one

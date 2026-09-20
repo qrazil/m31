@@ -1,0 +1,20 @@
+// Nothing shadows anything, anywhere -- not an outer local, a parameter, a
+// function or a type. That is what removes the need for a `this` keyword:
+// a bare name can only ever mean one thing.
+//
+// Reusing a name in SIBLING scopes is fine; neither is visible to the other.
+int total = 0;
+int i = 0;
+
+while (i < 3) {
+    int step = i * 2;
+    total = total + step;
+    i = i + 1;
+}
+
+if (total > 5) {
+    int step = 100;      // a sibling of the loop's `step`, not a shadow
+    total = total + step;
+}
+
+print(total);

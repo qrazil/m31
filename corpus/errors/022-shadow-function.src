@@ -1,0 +1,6 @@
+int helper() {
+    return 1;
+}
+
+int helper = 5;
+print(helper);

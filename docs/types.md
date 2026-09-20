@@ -150,6 +150,44 @@ permanent source of confusion in C# and Swift.
 When a copy is genuinely wanted, it is **explicit: `clone(v)`.** That is one
 visible operation rather than an invisible rule that depends on the type.
 
+## 5b. Methods, and no shadowing
+
+Methods are declared by **qualified name**, outside the type body:
+
+```c
+type Rect { int w; int h; }
+
+int Rect.area() { return w * h; }
+void Rect.scale(int f) { w = w * f; h = h * f; }
+```
+
+Chosen over methods-inside-the-type because it **retrofits** — a method can
+be added to any type, including one declared elsewhere — and because it keeps
+a type declaration a list of fields. The cost, accepted deliberately, is that
+a type's methods can scatter through a file; that is a formatter's job, not
+the grammar's.
+
+Also considered and rejected: an `impl` block (a new keyword and two places
+to look per type) and Go's receiver-in-the-signature (`int (Rect r) area()`,
+where the return type and the receiver fight for the front of the line).
+
+### Fields are bare, because nothing shadows anything
+
+There is **no `this`**. Inside a method a field is reached by its bare name.
+That is only safe given the rule that pays for it:
+
+> **Nothing shadows anything, anywhere.** Not an outer local, not a
+> parameter, not a function, not a type, not a field of the receiver.
+> Shadowing is a compile error; rename one of them.
+
+A bare name can therefore only ever mean one thing, so there is nothing for a
+`this` to disambiguate. The rule also deletes the whole class of bugs where a
+reader and the compiler disagree about which `x` is meant — Java allows bare
+field access *and* shadowing, and pays for it with a culture of `this.`
+conventions and `m_` prefixes.
+
+Reusing a name in **sibling** scopes is fine: neither is visible to the other.
+
 ## 5a. Arguments
 
 **Oro's rule, applied to calls and construction alike: a parameter with no

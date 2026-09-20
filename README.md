@@ -20,8 +20,8 @@ which gcc and clang both build clean at `-O0` and `-O2`.
 `examples/tour.src` is a tour of every feature, and is also in the corpus so
 it cannot rot.
 
-- 49 corpus programs, 0 failing
-- 42 unit tests
+- 58 corpus programs, 0 failing
+- 48 unit tests
 - 0 dependencies, 0 `unsafe`, clippy clean at `-D warnings`
 
 ## What the language does today
@@ -67,6 +67,31 @@ calls.
 assignment, constructed by the argument rule below. A type holding no references gets no
 drop function at all; one that does gets a generated one, and `rc_dec` checks
 for `NULL` so the common case is a branch rather than a call.
+
+**Methods are declared by qualified name**, outside the type body, so they
+can be added to any type and a type declaration stays a list of fields.
+**Fields are reached by bare name — there is no `this`.**
+
+```c
+type Rect { int w; int h; }
+
+int Rect.area() {
+    return w * h;
+}
+
+void Rect.scale(int f) {
+    w = w * f;
+}
+```
+
+That is safe only because of the next rule.
+
+**Nothing shadows anything, anywhere.** Not an outer local, not a parameter,
+not a function, not a type, not a field of the receiver. It is a compile
+error; rename one of them. This is what removes the need for `this` — a bare
+name can only ever mean one thing — and it deletes the class of bugs where a
+reader and the compiler disagree about which `x` is meant. Reusing a name in
+*sibling* scopes is fine, since neither is visible to the other.
 
 **Arguments follow Oro's rule, for calls and construction alike: a parameter
 with no default is positional, one with a default is named.** Never both.
