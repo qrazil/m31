@@ -17,7 +17,7 @@ Anything marked done there is tested; the corpus is the proof.
 
 | | |
 |---|---|
-| Corpus | 109 programs — 35 behaviour, 56 diagnostics, 11 traps, 7 Go twins |
+| Corpus | 119 programs — 38 behaviour, 62 diagnostics, 12 traps, 7 Go twins |
 | Oracle | gcc and clang, each at -O0 and -O2, all four must agree |
 | Leaks | every behaviour program asserts `__rc_live=0` at exit |
 | Warnings | emitted C must be clean under `-Wall -Wextra` |
@@ -67,7 +67,36 @@ options, single-line diagnostics with the source line echoed, and `gates.sh`.
 These are the things whose absence would make a frozen language not worth
 freezing. Roughly in order.
 
-### 1. Errors
+### 1. Enums with payloads, and pattern matching
+
+One feature, not two: an enum you cannot match on is useless.
+
+```c
+enum Option<T> { None; Some(T); }
+enum Result<T, E> { Ok(T); Err(E); }
+```
+
+This moved ahead of errors because `Option` and `Result` are not
+primitives -- they are ordinary enums, and errors-as-values is a *use* of
+them rather than a separate mechanism. Building errors first would mean
+building a one-off `(T, error)` shape and then rebuilding it.
+
+It is also the answer to null. The language has none and is not getting any:
+with null every reference might be absent and nothing makes you check, while
+with `Option<T>` only the things typed that way can be, and the compiler will
+not let you skip it. JSON's `null` is then a *variant* of a JSON sum type, not
+a pointer that can blow up -- the same for an empty CSV field and a nullable
+database column. Absence needs representing; it does not need a hole in every
+type.
+
+Origin, since it comes up: not Rust's. ML had `option` with `NONE`/`SOME`
+around 1973, Haskell has `Maybe` and `Either`, and Rust took both from that
+family -- its contribution was making them ordinary in a systems language and
+adding `?` so propagation is not painful. The null they replace is older:
+Tony Hoare put it in ALGOL W in 1965 and later called it his billion-dollar
+mistake.
+
+### 2. Errors
 
 The largest hole. Today every fault traps: a bad index, a missing key, a
 closed channel. That is fine for a bug and wrong for a condition a program
@@ -82,11 +111,9 @@ sum type, which is why the next item is entangled with this one.
 **Blocks the freeze.** A language that cannot report a recoverable failure
 cannot have a standard library worth the name.
 
-### 2. Multiple returns or sum types
-
-Pick one. Go's `(T, error)` is the cheap answer and leaks into every
-signature; a `Result<T, E>` sum type is the honest one and needs pattern
-matching to be usable, which is a second feature.
+Once enums exist, errors are a `Result<T, E>` and a propagation operator,
+not a new mechanism. The open question is only how much sugar to put on
+propagation, and whether a trap can ever be turned into an error.
 
 ### 3. A string library
 
@@ -95,7 +122,8 @@ matching to be usable, which is a second feature.
 `join`, `trim`, case conversion, and conversion between `int` and `str`.
 
 None of it is hard. It is deliberately after errors, because `to_int("abc")`
-has to return something, and what it returns is the errors decision.
+has to return something, and what it returns is the errors decision. These
+land as methods on `str`, which now has method dispatch.
 
 ### 4. Modules
 
@@ -157,7 +185,9 @@ From `docs/reference.md` §9, with the reasons:
   - **Function overloading.** One name, one function. `print` picks a runtime
     helper by static type, which is not user-visible.
   - **Operators beyond the fixed set**, and no changing them on a built-in.
-  - **Null.** Every declaration initialises. There is no zero value.
+  - **Null.** Every declaration initialises, there is no zero value, and
+    absence is spelled `Option<T>` once enums exist. Not a gap -- the
+    replacement is strictly better, because the compiler enforces the check.
   - **Type aliases.** An alias that does not enforce is a comment with
     syntax; `distinct` is the version that enforces.
   - **Shadowing.** A name means one thing where a reader can see it.

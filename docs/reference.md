@@ -269,7 +269,8 @@ On a `Map`, `contains` asks about a **key** — the same thing `get` and
 directly — and refuses a user type, which would need its own comparison.
 There is no `index_of` yet: with no null there is nothing honest for it to
 return when the element is absent, and a `-1` sentinel is not something to
-lock into a language that intends to freeze. It waits for optionals.
+lock into a language that intends to freeze. It waits for `Option<int>`,
+which waits for enums.
 
 `sort` is a **stable** merge sort — equal elements keep their order — because
 sorting by one key and then another is the ordinary way to get a compound
