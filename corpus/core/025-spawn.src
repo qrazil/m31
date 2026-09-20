@@ -1,0 +1,28 @@
+// Threads, results collected over a channel. The output is a SUM, so it does
+// not depend on the order the threads finish -- a corpus test has to be
+// deterministic.
+void worker(Chan<int> out, int id, int n) {
+    int i = 0;
+    int total = 0;
+    while (i < n) {
+        total = total + i * id;
+        i = i + 1;
+    }
+    send(out, total);
+}
+
+Chan<int> results = Chan<int>(8);
+
+int k = 1;
+while (k <= 4) {
+    spawn worker(results, k, 100);
+    k = k + 1;
+}
+
+int got = 0;
+int sum = 0;
+while (got < 4) {
+    sum = sum + recv(results);
+    got = got + 1;
+}
+print(sum);

@@ -154,6 +154,37 @@ impl Mono {
             args.push(self.subst_ty(*a, sub, span)?);
         }
 
+        // `Chan<T>` has no declaration to instantiate: the runtime owns its
+        // layout. Emit an opaque type carrying the element type, so the rest
+        // of the compiler can see what a channel carries without knowing how
+        // it is built.
+        if e.name == "Chan" {
+            if args.len() != 1 {
+                return Err(Diag::new(
+                    span,
+                    format!("`Chan` takes 1 type argument, found {}", args.len()),
+                ));
+            }
+            let mangled = self.mangle("Chan", &args);
+            if self.done.insert(mangled.clone()) {
+                self.out_types.push(TypeDecl {
+                    name: mangled.clone(),
+                    tparams: Vec::new(),
+                    fields: vec![Param {
+                        ty: args[0],
+                        name: "$elem".to_string(),
+                        default: None,
+                        embedded: false,
+                        span,
+                    }],
+                    methods: Vec::new(),
+                    is_interface: false,
+                    span,
+                });
+            }
+            return Ok(self.intern(mangled, Vec::new()));
+        }
+
         if let Some(decl) = self.generic_types.get(&e.name).cloned() {
             if args.len() != decl.tparams.len() {
                 return Err(Diag::new(
@@ -397,6 +428,24 @@ impl Mono {
                 body: self.subst_block(body, sub)?,
                 span: *span,
             },
+            Stmt::Spawn { name, args, span } => {
+                let out = self.subst_args(args, sub)?;
+                if let Some(decl) = self.generic_funcs.get(name).cloned() {
+                    let targs = self.infer(&decl, &out.pos, sub, *span)?;
+                    let mangled = self.mangle(name, &targs);
+                    self.queue.push((name.clone(), targs, *span));
+                    return Ok(Stmt::Spawn {
+                        name: mangled,
+                        args: out,
+                        span: *span,
+                    });
+                }
+                Stmt::Spawn {
+                    name: name.clone(),
+                    args: out,
+                    span: *span,
+                }
+            }
             Stmt::Break { span } => Stmt::Break { span: *span },
             Stmt::Continue { span } => Stmt::Continue { span: *span },
         })

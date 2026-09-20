@@ -77,6 +77,10 @@ void rc_dec(Obj *o);
  * caller fills in the rest. */
 Obj *rt_alloc(size_t size, const TypeInfo *ty);
 
+/* Allocate an object that is never freed. It is NOT counted by the refcount
+ * invariant, because an object that can never be released is not a leak. */
+Obj *rt_alloc_immortal(size_t size, const TypeInfo *ty);
+
 int64_t rt_len(Obj *o);
 Obj    *rt_concat(Obj *a, Obj *b);
 bool    rt_str_eq(Obj *a, Obj *b);
@@ -84,6 +88,36 @@ bool    rt_str_eq(Obj *a, Obj *b);
 void rt_print(int64_t v);
 void rt_print_bool(bool v);
 void rt_print_str(Obj *o);
+
+/* ---- concurrency -------------------------------------------------------
+ *
+ * OS threads and blocking channels, which is stage 2 of
+ * docs/concurrency-decision.md: get the channel semantics right against a
+ * simple scheduler before building a real one. Green threads replace the
+ * thread half later; the channel surface does not change.
+ *
+ * A slot is 64 bits. The compiler knows the element type statically, so an
+ * int rides in the slot directly and a reference rides as its pointer --
+ * there is no tagging and no dynamic type test.
+ *
+ * Values are MOVED across a channel: the sender gives up its reference and
+ * the receiver acquires it, with no retain or release in between. That is
+ * what keeps rc_inc/rc_dec non-atomic. */
+typedef struct Chan Chan;
+
+Chan *rt_chan_new(int64_t capacity);
+void  rt_chan_send(Chan *c, int64_t slot);
+int64_t rt_chan_recv(Chan *c);
+void  rt_chan_close(Chan *c);
+void  rt_chan_drop(Chan *c);
+
+/* Spawn a thread running `entry(arg)`. The thread is detached: there is no
+ * join yet, and `rt_wait_all` below is what the program end waits on. */
+void rt_spawn(void *(*entry)(void *), void *arg);
+
+/* Block until every spawned thread has finished. Emitted at the end of the
+ * program, so a spawn cannot outlive main and silently lose its output. */
+void rt_wait_all(void);
 
 /* Aborts with "trap: <msg>" on stderr and exit status 134 (SIGABRT).
  * Out-of-line and _Noreturn so the checks below stay cheap: the compiler

@@ -1,0 +1,1 @@
+corpus/errors/038-chan-wrong-elem.src:2:9: type mismatch: expected int, found str

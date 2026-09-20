@@ -15,6 +15,7 @@
 #include "rc_debug.h"
 
 #include <inttypes.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,6 +41,14 @@ void rc_dec(Obj *o) {
 }
 
 const TypeInfo rt_str_type = { NULL, NULL };
+
+Obj *rt_alloc_immortal(size_t size, const TypeInfo *ty) {
+    Obj *o = malloc(size);
+    if (o == NULL) rt_trap("out of memory");
+    o->rc = RC_IMMORTAL;
+    o->ty = ty;
+    return o;
+}
 
 Obj *rt_alloc(size_t size, const TypeInfo *ty) {
     Obj *o = malloc(size);
@@ -97,6 +106,130 @@ void rt_print_str(Obj *o) {
      * authoritative. */
     fwrite(s->data, 1, (size_t)s->len, stdout);
     putchar('\n');
+}
+
+/* ---- concurrency ------------------------------------------------------ */
+
+struct Chan {
+    Obj             hdr;
+    pthread_mutex_t lock;
+    pthread_cond_t  not_empty;
+    pthread_cond_t  not_full;
+    int64_t        *buf;
+    int64_t         cap;
+    int64_t         len;
+    int64_t         head;
+    bool            closed;
+};
+
+static void chan_drop(Obj *o) {
+    Chan *c = (Chan *)o;
+    pthread_mutex_destroy(&c->lock);
+    pthread_cond_destroy(&c->not_empty);
+    pthread_cond_destroy(&c->not_full);
+    free(c->buf);
+}
+
+static const TypeInfo rt_chan_type = { chan_drop, NULL };
+
+Chan *rt_chan_new(int64_t capacity) {
+    if (capacity < 1) rt_trap("channel capacity must be at least 1");
+    Chan *c = (Chan *)rt_alloc_immortal(sizeof(Chan), &rt_chan_type);
+    /* NOTE: channels are IMMORTAL, and that is a deliberate v0 simplification.
+     *
+     * A channel is the one value that must be reachable from several threads
+     * at once -- that is its whole job -- so it is exempt from the move rule
+     * that keeps everything else single-threaded. But that exemption is
+     * exactly what would make its own refcount race, and refcounts are
+     * non-atomic by design.
+     *
+     * So a channel is never freed. A program creates few of them, and the
+     * leak is bounded by that count. The real fix is an atomic refcount for
+     * this one type, which is the same machinery a threaded refcount needs
+     * in general -- see docs/concurrency-decision.md. */
+
+    c->buf = malloc(sizeof(int64_t) * (size_t)capacity);
+    if (c->buf == NULL) rt_trap("out of memory");
+    c->cap = capacity;
+    c->len = 0;
+    c->head = 0;
+    c->closed = false;
+    pthread_mutex_init(&c->lock, NULL);
+    pthread_cond_init(&c->not_empty, NULL);
+    pthread_cond_init(&c->not_full, NULL);
+    return c;
+}
+
+void rt_chan_send(Chan *c, int64_t slot) {
+    pthread_mutex_lock(&c->lock);
+    while (c->len == c->cap && !c->closed) {
+        pthread_cond_wait(&c->not_full, &c->lock);
+    }
+    if (c->closed) {
+        pthread_mutex_unlock(&c->lock);
+        rt_trap("send on a closed channel");
+    }
+    c->buf[(c->head + c->len) % c->cap] = slot;
+    c->len++;
+    pthread_cond_signal(&c->not_empty);
+    pthread_mutex_unlock(&c->lock);
+}
+
+int64_t rt_chan_recv(Chan *c) {
+    pthread_mutex_lock(&c->lock);
+    while (c->len == 0 && !c->closed) {
+        pthread_cond_wait(&c->not_empty, &c->lock);
+    }
+    if (c->len == 0) {
+        pthread_mutex_unlock(&c->lock);
+        rt_trap("receive on a closed and empty channel");
+    }
+    int64_t v = c->buf[c->head];
+    c->head = (c->head + 1) % c->cap;
+    c->len--;
+    pthread_cond_signal(&c->not_full);
+    pthread_mutex_unlock(&c->lock);
+    return v;
+}
+
+void rt_chan_close(Chan *c) {
+    pthread_mutex_lock(&c->lock);
+    c->closed = true;
+    pthread_cond_broadcast(&c->not_empty);
+    pthread_cond_broadcast(&c->not_full);
+    pthread_mutex_unlock(&c->lock);
+}
+
+void rt_chan_drop(Chan *c) {
+    rc_dec((Obj *)c);
+}
+
+/* Spawned threads are tracked so the program can wait for them. A fixed
+ * table keeps this dependency-free; exceeding it is a trap rather than a
+ * silent drop, because a lost thread is a lost result. */
+#define RT_MAX_THREADS 1024
+static pthread_t   rt_threads[RT_MAX_THREADS];
+static int         rt_nthreads = 0;
+static pthread_mutex_t rt_threads_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void rt_spawn(void *(*entry)(void *), void *arg) {
+    pthread_mutex_lock(&rt_threads_lock);
+    if (rt_nthreads >= RT_MAX_THREADS) {
+        pthread_mutex_unlock(&rt_threads_lock);
+        rt_trap("too many spawned threads");
+    }
+    int slot = rt_nthreads++;
+    pthread_mutex_unlock(&rt_threads_lock);
+
+    if (pthread_create(&rt_threads[slot], NULL, entry, arg) != 0) {
+        rt_trap("could not spawn a thread");
+    }
+}
+
+void rt_wait_all(void) {
+    for (int i = 0; i < rt_nthreads; i++) {
+        pthread_join(rt_threads[i], NULL);
+    }
 }
 
 /* Flush stdout first so anything already printed is not lost behind the trap

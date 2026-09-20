@@ -16,5 +16,5 @@ CC=${CC:-cc}
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
 "./target/debug/$LANG_BIN" --emit-c "$src" -o "$tmp/out.c"
-"$CC" -O2 -I runtime -o "$out" "$tmp/out.c" runtime/rt.c
+"$CC" -O2 -pthread -I runtime -o "$out" "$tmp/out.c" runtime/rt.c
 echo "$out"

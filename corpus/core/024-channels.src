@@ -1,0 +1,17 @@
+// Channels are the sanctioned way for threads to share. A slot is 64 bits
+// and the compiler knows the element type statically, so an int rides in the
+// slot and a reference rides as its pointer -- no tagging, no dynamic test.
+Chan<int> nums = Chan<int>(4);
+send(nums, 10);
+send(nums, 20);
+print(recv(nums));
+print(recv(nums));
+
+Chan<str> words = Chan<str>(2);
+str msg = "hello" + " world";
+send(words, msg);          // msg is MOVED: the receiver owns it now
+print(recv(words));
+
+Chan<bool> flags = Chan<bool>(1);
+send(flags, true);
+print(recv(flags));

@@ -1,0 +1,25 @@
+// A reference sent to another thread is MOVED: the sender gives up its
+// reference and the receiver acquires it, with no retain or release in
+// between. That is what keeps rc_inc/rc_dec non-atomic -- only one thread
+// can reach the value at a time -- and __rc_live=0 proves every moved
+// string was released exactly once, by whoever ended up owning it.
+void producer(Chan<str> out, int n) {
+    int i = 0;
+    while (i < n) {
+        str s = "item" + "!";
+        send(out, s);
+        i = i + 1;
+    }
+}
+
+Chan<str> c = Chan<str>(4);
+spawn producer(c, 3);
+
+int got = 0;
+int total = 0;
+while (got < 3) {
+    str s = recv(c);
+    total = total + len(s);
+    got = got + 1;
+}
+print(total);

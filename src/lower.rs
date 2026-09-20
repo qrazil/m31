@@ -112,6 +112,12 @@ pub struct Lowerer {
     /// Owned temporaries produced while lowering the current statement.
     stmt_temps: Vec<Value>,
     loops: Vec<LoopCtx>,
+    /// Locals that have been moved out of. Any later use is refused.
+    ///
+    /// One bit per local, as docs/types.md §4a describes: this is the whole
+    /// of the ownership discipline, and it applies only at the boundary
+    /// where a value leaves the thread.
+    moved: Vec<String>,
     /// Inside a method: the receiver's type id and its SSA value. Fields are
     /// reached by bare name, which is safe only because nothing shadows
     /// anything -- see `check_shadow`.
@@ -147,6 +153,7 @@ impl Lowerer {
             owned: Vec::new(),
             stmt_temps: Vec::new(),
             loops: Vec::new(),
+            moved: Vec::new(),
             recv: None,
             ret_ty: Ty::Void,
         }
@@ -165,6 +172,105 @@ impl Lowerer {
             })
             .collect();
         self.sigs.insert(name.to_string(), Sig { params, ret });
+    }
+
+    /// `send(c, v)`, `recv(c)`, `close(c)`.
+    ///
+    /// `send` MOVES its value: the sender gives up its reference and the
+    /// receiver acquires it, with no retain or release in between. That is
+    /// the rule that keeps rc_inc/rc_dec non-atomic -- only one thread can
+    /// reach the value at a time -- and it is enforced by the move checker,
+    /// which refuses any later use of a moved local.
+    fn lower_chan_builtin(&mut self, name: &str, args: &Args, span: Span) -> Result<Val, Diag> {
+        if !args.named.is_empty() {
+            return Err(Diag::new(
+                span,
+                format!("`{name}` takes no named arguments"),
+            ));
+        }
+        let want = if name == "send" { 2 } else { 1 };
+        if args.pos.len() != want {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`{name}` takes {want} argument(s), found {}",
+                    args.pos.len()
+                ),
+            ));
+        }
+        let c = self.lower_expr(&args.pos[0])?;
+        let Some(elem) = self.chan_elem(c.ty) else {
+            return Err(Diag::new(
+                args.pos[0].span(),
+                format!("`{name}` needs a channel, found {}", self.tyname(c.ty)),
+            ));
+        };
+
+        match name {
+            "close" => {
+                self.push(Inst::Call {
+                    dst: None,
+                    func: "rt_chan_close".to_string(),
+                    args: vec![c.val()],
+                });
+                Ok(Val::void())
+            }
+            "send" => {
+                let v = self.lower_expr(&args.pos[1])?;
+                if !self.assignable(v.ty, elem) {
+                    return Err(Diag::new(args.pos[1].span(), self.mismatch(elem, v.ty)));
+                }
+                // A move, so the sender must not release it: take it off the
+                // pending list if it was an owned temporary, and mark the
+                // local dead if it was one.
+                if v.owned {
+                    self.stmt_temps.retain(|t| *t != v.val());
+                }
+                if elem.is_ref() && self.chan_elem(elem).is_none() {
+                    if let Expr::Var(n, s) = &args.pos[1] {
+                        self.mark_moved(n, *s)?;
+                    }
+                }
+                self.push(Inst::Call {
+                    dst: None,
+                    func: "rt_chan_send".to_string(),
+                    args: vec![c.val(), v.val()],
+                });
+                Ok(Val::void())
+            }
+            _ => {
+                let d = self.new_val(ir_ty(elem));
+                self.push(Inst::Call {
+                    dst: Some(d),
+                    func: "rt_chan_recv".to_string(),
+                    args: vec![c.val()],
+                });
+                // The receiver acquires the sender's reference: owned, with
+                // no retain, because the send gave one up.
+                let owned = elem.is_ref();
+                if owned {
+                    self.stmt_temps.push(d);
+                }
+                Ok(Val::new(d, elem, owned))
+            }
+        }
+    }
+
+    /// Mark a local as moved. Any later use is a compile error.
+    fn mark_moved(&mut self, name: &str, span: Span) -> Result<(), Diag> {
+        if self.binding(name).is_none() {
+            return Ok(());
+        }
+        if self.moved.contains(&name.to_string()) {
+            return Err(Diag::new(span, format!("`{name}` was already moved")));
+        }
+        self.moved.push(name.to_string());
+        // A moved local must not be released at scope end: the value now
+        // belongs to whoever received it.
+        for names in self.owned.iter_mut() {
+            names.retain(|n| n != name);
+        }
+        Ok(())
     }
 
     /// One forwarder per promoted method: `void Dog.speak()` calling
@@ -381,6 +487,7 @@ impl Lowerer {
                 name: t.name.clone(),
                 fields,
                 is_interface: t.is_interface,
+                is_chan: t.name.starts_with("Chan$"),
                 vtable: Vec::new(),
             });
             self.iface_methods.push(t.methods.clone());
@@ -475,7 +582,7 @@ impl Lowerer {
         // Fill each concrete type's vtable now that every method is known.
         let slots = self.iface_slots.clone();
         for i in 0..self.typedefs.len() {
-            if self.typedefs[i].is_interface {
+            if self.typedefs[i].is_interface || self.typedefs[i].is_chan {
                 continue;
             }
             let tname = self.typedefs[i].name.clone();
@@ -612,6 +719,15 @@ impl Lowerer {
             Ty::User(i) => self.ty_exprs[i as usize].name.clone(),
             other => other.name().to_string(),
         }
+    }
+
+    /// The element type of a channel type, if it is one.
+    fn chan_elem(&self, t: Ty) -> Option<Ty> {
+        let tid = self.tdef_of(t)?;
+        if !self.typedefs[tid as usize].is_chan {
+            return None;
+        }
+        Some(self.field_surface[tid as usize][0])
     }
 
     /// Is `from` usable where `to` is expected?
@@ -770,6 +886,7 @@ impl Lowerer {
         self.scopes.clear();
         self.owned.clear();
         self.loops.clear();
+        self.moved.clear();
         self.cur = 0;
         self.ret_ty = f.ret;
 
@@ -1120,6 +1237,49 @@ impl Lowerer {
 
             Stmt::While { cond, body, span } => self.lower_while(cond, body, *span),
 
+            Stmt::Spawn { name, args, span } => {
+                let Some(sig) = self.sigs.get(name) else {
+                    return Err(Diag::new(*span, format!("unknown function `{name}`")));
+                };
+                let params = sig.params.clone();
+                if sig.ret != Ty::Void {
+                    return Err(Diag::new(
+                        *span,
+                        format!("`spawn` needs a void function; `{name}` returns a value"),
+                    ));
+                }
+                let slots = self.bind_args(name, &params, args, *span)?;
+                let mut vals = Vec::new();
+                for (a, p) in slots.iter().zip(params.iter()) {
+                    let v = self.lower_expr(a)?;
+                    if !self.assignable(v.ty, p.ty) {
+                        return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
+                    }
+                    // A spawn MOVES every reference it captures: the new
+                    // thread is the only one that may reach it afterwards,
+                    // which is what keeps refcounts non-atomic.
+                    // A channel is exempt: it is the sanctioned way for
+                    // threads to share, so it is aliased rather than moved.
+                    // Everything else IS moved -- the new thread becomes the
+                    // only one that can reach it.
+                    if p.ty.is_ref() && self.chan_elem(p.ty).is_none() {
+                        if v.owned {
+                            self.stmt_temps.retain(|t| *t != v.val());
+                        }
+                        if let Expr::Var(n, s) = a {
+                            self.mark_moved(n, *s)?;
+                        }
+                    }
+                    vals.push(v.val());
+                }
+                self.push(Inst::Spawn {
+                    func: name.clone(),
+                    args: vals,
+                });
+                self.flush_temps();
+                Ok(())
+            }
+
             Stmt::SetField {
                 obj,
                 field,
@@ -1243,6 +1403,7 @@ impl Lowerer {
                 | Stmt::Eval { .. }
                 | Stmt::Break { .. }
                 | Stmt::Continue { .. }
+                | Stmt::Spawn { .. }
                 | Stmt::SetField { .. } => {}
             }
         }
@@ -1549,6 +1710,12 @@ impl Lowerer {
                 Ok(Val::new(v, Ty::Str, false))
             }
             Expr::Var(name, span) => {
+                if self.moved.iter().any(|n| n == name) {
+                    return Err(Diag::new(
+                        *span,
+                        format!("`{name}` was moved and cannot be used again"),
+                    ));
+                }
                 if let Some((ty, v)) = self.lookup(name) {
                     return Ok(Val::new(v, ty, false));
                 }
@@ -2043,6 +2210,30 @@ impl Lowerer {
                 ),
             ));
         }
+        if self.typedefs[tid as usize].is_chan {
+            // `Chan<int>(8)` -- one positional argument, the capacity.
+            if args.pos.len() != 1 || !args.named.is_empty() {
+                return Err(Diag::new(
+                    span,
+                    "a channel takes one argument: its capacity".to_string(),
+                ));
+            }
+            let cap = self.lower_expr(&args.pos[0])?;
+            if cap.ty != Ty::Int {
+                return Err(Diag::new(
+                    args.pos[0].span(),
+                    self.mismatch(Ty::Int, cap.ty),
+                ));
+            }
+            let d = self.new_val(IrTy::Ref);
+            self.push(Inst::Call {
+                dst: Some(d),
+                func: "rt_chan_new".to_string(),
+                args: vec![cap.val()],
+            });
+            self.stmt_temps.push(d);
+            return Ok(Val::new(d, ty, true));
+        }
         let name = self.typedefs[tid as usize].name.clone();
         let name = name.as_str();
         let fields = self.field_params[tid as usize].clone();
@@ -2126,6 +2317,12 @@ impl Lowerer {
             return Ok(Val::void());
         }
 
+        // Channel builtins. They are here rather than in `sigs` because
+        // their types depend on the channel's element type.
+        if matches!(name, "send" | "recv" | "close") {
+            return self.lower_chan_builtin(name, args, span);
+        }
+
         let Some(sig) = self.sigs.get(name) else {
             return Err(Diag::new(span, format!("unknown function `{name}`")));
         };
@@ -2186,6 +2383,7 @@ fn stmt_span(s: &Stmt) -> Span {
         | Stmt::While { span, .. }
         | Stmt::Break { span, .. }
         | Stmt::Continue { span, .. }
+        | Stmt::Spawn { span, .. }
         | Stmt::SetField { span, .. }
         | Stmt::If { span, .. } => *span,
     }

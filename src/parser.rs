@@ -54,7 +54,10 @@ impl Parser {
         // type-first grammar decidable without C's lexer hack -- the parser
         // knows the type names before it starts, so `Point p` is a
         // declaration and `foo p` is an error, not an ambiguity.
-        let mut type_names = Vec::new();
+        // `Chan` is built in: the runtime owns its representation, so there
+        // is no `type Chan<T>` to find in the source, but it must parse as a
+        // type name like any other.
+        let mut type_names = vec!["Chan".to_string()];
         for w in toks.windows(2) {
             if w[0].tok == Tok::KwType {
                 if let Tok::Ident(n) = &w[1].tok {
@@ -624,6 +627,13 @@ impl Parser {
             };
             self.expect(Tok::Semi)?;
             return Ok(Stmt::Return { value, span });
+        }
+
+        if self.eat(&Tok::KwSpawn) {
+            let (name, _) = self.expect_ident()?;
+            let args = self.parse_args()?;
+            self.expect(Tok::Semi)?;
+            return Ok(Stmt::Spawn { name, args, span });
         }
 
         if self.eat(&Tok::KwBreak) {

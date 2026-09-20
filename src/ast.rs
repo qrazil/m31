@@ -174,6 +174,12 @@ pub enum Stmt {
     Return { value: Option<Expr>, span: Span },
     /// A call evaluated for effect.
     Eval { expr: Expr, span: Span },
+    /// `spawn f(args);` -- run `f` on its own thread.
+    Spawn {
+        name: String,
+        args: Args,
+        span: Span,
+    },
     /// `break;`
     Break { span: Span },
     /// `continue;`

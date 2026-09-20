@@ -97,6 +97,10 @@ pub struct TypeDef {
     /// An interface has no fields and is never allocated; it exists so a
     /// value can be typed by what it can do rather than what it is.
     pub is_interface: bool,
+    /// A channel: the runtime owns its layout, so the emitter produces no
+    /// struct, no drop function and no TypeInfo for it. Field 0 records the
+    /// element type and is never stored.
+    pub is_chan: bool,
     /// One entry per interface-method slot in the program: the IR name of
     /// this type's implementation, or `None` if it has none.
     pub vtable: Vec<Option<String>>,
@@ -170,6 +174,9 @@ pub enum Inst {
         idx: u32,
         val: Value,
     },
+    /// `spawn f(args)` -- run `f` on its own thread. The emitter generates
+    /// one argument struct and one trampoline per spawned function.
+    Spawn { func: String, args: Vec<Value> },
     /// `rc_inc v`
     RcInc { val: Value },
     /// `rc_dec v`
@@ -345,6 +352,7 @@ fn show_inst(i: &Inst) -> String {
             Some(d) => format!("{d} = call_iface [{slot}]{name}({})", args(a)),
             None => format!("call_iface [{slot}]{name}({})", args(a)),
         },
+        Inst::Spawn { func, args: a } => format!("spawn {func}({})", args(a)),
         Inst::RcInc { val } => format!("rc_inc {val}"),
         Inst::RcDec { val } => format!("rc_dec {val}"),
     }

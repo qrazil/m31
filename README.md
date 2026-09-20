@@ -20,8 +20,8 @@ which gcc and clang both build clean at `-O0` and `-O2`.
 `examples/tour.src` is a tour of every feature, and is also in the corpus so
 it cannot rot.
 
-- 69 corpus programs, 0 failing
-- 61 unit tests
+- 77 corpus programs, 0 failing
+- 66 unit tests
 - 0 dependencies, 0 `unsafe`, clippy clean at `-D warnings`
 
 ## What the language does today
@@ -85,6 +85,31 @@ void Rect.scale(int f) {
 ```
 
 That is safe only because of the next rule.
+
+**Concurrency** is `spawn` plus channels, and values crossing a thread are
+**moved**:
+
+```c
+void worker(Chan<int> out, int id) {
+    send(out, id * 10);
+}
+
+Chan<int> results = Chan<int>(8);
+spawn worker(results, 1);
+spawn worker(results, 2);
+print(recv(results) + recv(results));
+```
+
+Sending a reference moves it: the sender gives up its reference and the
+receiver acquires it, with no retain or release in between. Using a moved
+local afterwards is a compile error. That is what keeps `rc_inc`/`rc_dec`
+non-atomic — only one thread can reach a value at a time.
+
+A **channel is exempt**, because it is how threads share; it is aliased
+rather than moved, and is immortal for now (see `rt_chan_new`).
+
+These are OS threads. The channel surface does not change when green threads
+replace them.
 
 **Embedding** is composition in place of inheritance: an anonymous field,
 named after its type, whose fields and methods are promoted.
@@ -165,7 +190,8 @@ Naming a mandatory parameter is an error, as is passing an optional one
 positionally. The two halves never overlap, so there is no question of which
 form to use and no question of what order optional arguments come in.
 
-Not yet: `for`, closures, modules, concurrency.
+Not yet: `for`, closures, modules. Concurrency is OS threads for now;
+green threads are stage 3 of `docs/concurrency-decision.md`.
 
 ## Decisions made
 

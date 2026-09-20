@@ -195,6 +195,24 @@ of it in C in 2012.
 
 ---
 
+## Progress
+
+- [x] **Type system with ownership** — done
+- [x] **OS threads + channels** — done: `spawn`, `Chan<T>`, `send`/`recv`/
+      `close`, and the move checker. A slot is 64 bits and the element type
+      is known statically, so an int rides in the slot and a reference rides
+      as its pointer.
+- [ ] Context switch, slab stacks with probes
+- [ ] Scheduler, work stealing, probe-based preemption
+- [ ] epoll reactor, park/unpark
+- [ ] Blocking-FFI handoff
+
+**Known v0 simplification: channels are immortal.** A channel must be
+reachable from several threads at once, so it is exempt from the move rule --
+and that exemption is exactly what would make its own refcount race. Rather
+than make one refcount atomic ahead of the general answer, a channel is never
+freed. A program creates few, so the leak is bounded by that count.
+
 ## Order of work
 
 1. **Type system with ownership** — `moved` has to be expressible and checked.

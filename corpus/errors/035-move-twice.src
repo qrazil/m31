@@ -1,0 +1,4 @@
+Chan<str> c = Chan<str>(2);
+str s = "hello";
+send(c, s);
+send(c, s);

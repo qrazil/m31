@@ -1,0 +1,2 @@
+Chan<int> c = Chan<int>(2);
+send(c, "not an int");

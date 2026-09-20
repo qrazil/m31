@@ -1,0 +1,1 @@
+corpus/errors/036-send-non-channel.src:2:6: `send` needs a channel, found int
