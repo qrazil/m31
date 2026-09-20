@@ -1,0 +1,73 @@
+// Bugs found by an adversarial review of the emitter and runtime.
+// Each section is one reproduced defect.
+
+// 1. rt_map_set released the old value BEFORE retaining the new one, so
+//    m.set(k, m.get(k)) freed the value and then resurrected the block.
+Map<str, str> mv = Map<str, str>();
+mv.set("k", concat("ab", "cd"));
+mv.set("k", mv.get("k"));
+str junk = concat("ZZ", "ZZ");
+print(mv.get("k"));         // abcd, not ZZZZ
+print(junk);
+
+// 5. `?` is escaped in emitted C literals: `??!` and friends are trigraphs,
+//    and both compilers warn under -Wall that they are ignoring one.
+print("what??!");
+print("a??/b");
+print("x??(y??)z");
+
+// 6. Comparing a value with itself is emitted as the constant it must be,
+//    because `x == x` in C is -Wtautological-compare under -Wall.
+int self = 5;
+print(self == self);        // true
+print(self != self);        // false
+print(self < self);         // false
+print(self <= self);        // true
+print(self > self);         // false
+print(self >= self);        // true
+
+// 3. Monomorphised containers mangle with `$`, which is not an identifier
+//    character in standard C. Nested generics exercise the field path.
+List<Map<str, int>> nested = List<Map<str, int>>();
+Map<str, int> inner = Map<str, int>();
+inner.set("a", 1);
+nested.push(inner);
+print(nested.len());        // 1
+print(nested[0].get("a"));  // 1
+
+// 8. Tombstones are swept by a same-capacity rehash, so a map that is
+//    filled and emptied does not grow without bound.
+Map<int, int> churn = Map<int, int>();
+int i = 0;
+while (i < 20000) {
+    churn.set(i, i);
+    churn.remove(i);
+    i = i + 1;
+}
+print(churn.len());         // 0
+churn.set(1, 100);
+print(churn.get(1));        // 100 -- still correct after the sweep
+
+// 4. Embedding promotes methods in a deterministic order. Three of them,
+//    because the bug needed two or more to show.
+type Animal { int legs; }
+int Animal.count_legs() { return legs; }
+int Animal.age() { return 3; }
+int Animal.speed() { return 9; }
+
+type Dog { Animal; }
+Dog dog = Dog(Animal(4));
+print(dog.count_legs());    // 4
+print(dog.age());           // 3
+print(dog.speed());         // 9
+
+// 10. An ambiguous promotion is refused, but an explicit method still
+//     breaks the tie.
+type G { int g; }
+int G.val() { return g; }
+type E { G; }
+type F { G; }
+type D { E; F; }
+int D.val() { return 42; }
+D dd = D(E(G(1)), F(G(2)));
+print(dd.val());            // 42

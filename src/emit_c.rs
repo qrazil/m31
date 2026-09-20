@@ -35,6 +35,7 @@ pub fn emit(m: &Module) -> String {
         for (fname, fty) in &t.fields {
             let c = fty.c_name();
             let sep = if c.ends_with('*') { "" } else { " " };
+            let fname = c_ident(fname);
             writeln!(o, "    {c}{sep}f_{fname};").unwrap();
         }
         writeln!(o, "}} T{i};").unwrap();
@@ -53,6 +54,7 @@ pub fn emit(m: &Module) -> String {
         writeln!(o, "    T{i} *p = (T{i} *)o;").unwrap();
         for (fname, fty) in &t.fields {
             if *fty == IrTy::Ref {
+                let fname = c_ident(fname);
                 writeln!(o, "    rc_dec(p->f_{fname});").unwrap();
             }
         }
@@ -131,15 +133,18 @@ pub fn emit(m: &Module) -> String {
         o.push('\n');
     }
 
-    // Escaping `$` could in principle collide two distinct IR names, so
-    // check rather than assume. A collision here would be a silent
-    // miscompile, which is the category worth an assertion.
+    // Escaping `$` could collide two distinct IR names, and a collision here
+    // is a silent miscompile. `lower` rejects it with a proper diagnostic
+    // before we get this far -- see `check_c_name_collisions` -- so reaching
+    // this assertion means that check has a hole, not that the user did
+    // something wrong.
     {
         let mut seen = std::collections::BTreeSet::new();
         for f in &m.funcs {
             assert!(
                 seen.insert(c_name(&f.name)),
-                "two functions map to the same C name: {}",
+                "two functions map to the same C name: {} \
+                 (lower::check_c_name_collisions should have caught this)",
                 c_name(&f.name)
             );
         }
@@ -236,7 +241,18 @@ pub fn emit(m: &Module) -> String {
 /// The two escapes are different lengths on purpose, so `a$b` and `a.b`
 /// cannot both become the same C name. `emit` asserts no collision anyway.
 fn c_name(name: &str) -> String {
-    format!("fn_{}", name.replace('$', "__").replace('.', "___"))
+    format!("fn_{}", c_ident(name))
+}
+
+/// The identifier-safe spelling of a source or synthesised name.
+///
+/// Monomorphisation mangles with `$` (`Map$str$int`, and the container's
+/// synthesised fields `$t0`, `$t1`), and `$` is not a valid identifier
+/// character in standard C -- gcc and clang take it as a GNU extension, and
+/// refuse under `-fno-dollars-in-identifiers` or `-pedantic`. Function names
+/// were already escaped here; field names were being written raw.
+pub fn c_ident(name: &str) -> String {
+    name.replace('$', "__").replace('.', "___")
 }
 
 fn signature(f: &crate::ir::Func) -> String {
@@ -299,9 +315,19 @@ fn emit_func(o: &mut String, f: &crate::ir::Func, types: &[TypeDef]) {
     for b in &f.blocks {
         for i in &b.insts {
             match i {
-                Inst::Arith { lhs, rhs, .. } | Inst::ICmp { lhs, rhs, .. } => {
+                Inst::Arith { lhs, rhs, .. } => {
                     read.insert(*lhs);
                     read.insert(*rhs);
+                }
+                // A comparison of a value with itself is emitted as the
+                // constant it must be, so it reads neither operand. This has
+                // to agree with the emission below or the operand is declared
+                // used and then never used, which is its own warning.
+                Inst::ICmp { lhs, rhs, .. } => {
+                    if lhs != rhs {
+                        read.insert(*lhs);
+                        read.insert(*rhs);
+                    }
                 }
                 Inst::Not { src, .. } => {
                     read.insert(*src);
@@ -428,7 +454,17 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
             let _ = op;
         }
         Inst::ICmp { dst, cmp, lhs, rhs } => {
-            writeln!(o, "    {dst} = ({lhs} {} {rhs});", cmp.c_op()).unwrap();
+            if lhs == rhs {
+                // `x == x` is a warning under -Wall (-Wtautological-compare)
+                // on both gcc and clang, and the warning gate reads any
+                // warning as a failure. The answer does not depend on the
+                // value, so emit the answer. Comparing a name with itself is
+                // odd but legal, and the emitter is not the place to say so.
+                let val = cmp.holds_for_equal_operands();
+                writeln!(o, "    {dst} = {};", if val { "true" } else { "false" }).unwrap();
+            } else {
+                writeln!(o, "    {dst} = ({lhs} {} {rhs});", cmp.c_op()).unwrap();
+            }
         }
         Inst::Not { dst, src } => {
             writeln!(o, "    {dst} = !{src};").unwrap();
@@ -492,11 +528,11 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
             writeln!(o, "    {dst} = rt_alloc(sizeof(T{tid}), &ti_T{tid});").unwrap();
         }
         Inst::LoadField { dst, obj, tid, idx } => {
-            let name = &types[*tid as usize].fields[*idx as usize].0;
+            let name = c_ident(&types[*tid as usize].fields[*idx as usize].0);
             writeln!(o, "    {dst} = ((T{tid} *){obj})->f_{name};").unwrap();
         }
         Inst::StoreField { obj, tid, idx, val } => {
-            let name = &types[*tid as usize].fields[*idx as usize].0;
+            let name = c_ident(&types[*tid as usize].fields[*idx as usize].0);
             writeln!(o, "    ((T{tid} *){obj})->f_{name} = {val};").unwrap();
         }
         Inst::CallIface {
@@ -612,6 +648,12 @@ fn c_string_literal(bytes: &[u8]) -> String {
             b'\n' => s.push_str("\\n"),
             b'\t' => s.push_str("\\t"),
             b'\r' => s.push_str("\\r"),
+            // A `?` is escaped so `??x` can never appear in the emitted
+            // literal. `??!` and friends are trigraphs: C99 replaces them,
+            // and both gcc and clang warn under -Wall that they are ignoring
+            // one -- which the warning gate reads as a failure. `\?` is the
+            // same character and cannot start a trigraph.
+            b'?' => s.push_str("\\?"),
             0x20..=0x7e => s.push(b as char),
             other => {
                 write!(s, "\\{:03o}", other).unwrap();

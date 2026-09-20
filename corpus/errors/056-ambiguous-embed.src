@@ -1,0 +1,11 @@
+// Two embedded types offer `val`, and the outer type does not break the tie.
+// Picking one would be picking by declaration order.
+type G { int g; }
+int G.val() { return g; }
+
+type E { G; }
+type F { G; }
+type D { E; F; }
+
+D d = D(E(G(1)), F(G(2)));
+print(d.val());

@@ -1,0 +1,7 @@
+// `id<int>` mangles to `id$int`, and the C emitter rewrites `$` to `__`.
+// A hand-written `id__int` would land on the same C function.
+T id<T>(T x) { return x; }
+int id__int(int x) { return x + 100; }
+
+print(id(1));
+print(id__int(1));

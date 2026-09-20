@@ -149,11 +149,28 @@ static const TypeInfo rt_arr_ref_type = { arr_drop_refs, NULL };
 static const TypeInfo rt_lst_val_type = { lst_drop_vals, NULL };
 static const TypeInfo rt_lst_ref_type = { lst_drop_refs, NULL };
 
+
+/* Bytes for `n` slots plus a `head` header, trapping rather than wrapping.
+ *
+ * `sizeof(T) * n` is a silent wrap on a 64-bit size_t: 2^61 elements times 8
+ * bytes is 0, which allocates a 16-byte block that the caller then writes as
+ * if it held 2^61 elements. rt_concat already guards its length this way;
+ * these paths did not. */
+static size_t slot_bytes(size_t head, int64_t n) {
+    size_t bytes;
+    if (n < 0) rt_trap("length cannot be negative");
+    if (__builtin_mul_overflow((size_t)n, sizeof(int64_t), &bytes))
+        rt_trap("length too large");
+    if (__builtin_add_overflow(bytes, head, &bytes))
+        rt_trap("length too large");
+    return bytes;
+}
+
 Obj *rt_array_new(int64_t len, int64_t fill, bool elems_are_refs) {
     if (len < 0) rt_trap("array length cannot be negative");
     /* One allocation: header plus the elements. Every slot starts at `fill`
      * -- there is no null, so there is no such thing as an unset element. */
-    Arr *a = (Arr *)rt_alloc(sizeof(Arr) + sizeof(int64_t) * (size_t)len,
+    Arr *a = (Arr *)rt_alloc(slot_bytes(sizeof(Arr), len),
                              elems_are_refs ? &rt_arr_ref_type : &rt_arr_val_type);
     a->len = len;
     for (int64_t i = 0; i < len; i++) {
@@ -203,7 +220,7 @@ void rt_list_push(Obj *o, int64_t v) {
     Lst *l = (Lst *)o;
     if (l->len == l->cap) {
         int64_t cap = l->cap == 0 ? 4 : l->cap * 2;
-        int64_t *buf = realloc(l->data, sizeof(int64_t) * (size_t)cap);
+        int64_t *buf = realloc(l->data, slot_bytes(0, cap));
         if (buf == NULL) rt_trap("out of memory");
         l->data = buf;
         l->cap = cap;
@@ -228,7 +245,7 @@ Obj *rt_seq_clone(Obj *o) {
         return (Obj *)l;
     }
 
-    Arr *a = (Arr *)rt_alloc(sizeof(Arr) + sizeof(int64_t) * (size_t)n,
+    Arr *a = (Arr *)rt_alloc(slot_bytes(sizeof(Arr), n),
                              refs ? &rt_arr_ref_type : &rt_arr_val_type);
     a->len = n;
     for (int64_t i = 0; i < n; i++) {
@@ -339,8 +356,17 @@ static int64_t map_probe(const Map *m, int64_t k, bool *found) {
     }
 }
 
-static void map_grow(Map *m) {
-    int64_t cap = m->cap == 0 ? 8 : m->cap * 2;
+/* Rebuild the table at `cap`, dropping tombstones.
+ *
+ * `cap` is not always larger. A removed slot has to stay DEAD rather than
+ * EMPTY so a probe does not stop short at it, and `used` counts those --
+ * which means a map that is repeatedly filled and emptied grows without
+ * bound while `len()` stays 0. Measured before this: 8M set/remove pairs on
+ * a map that was never larger than one entry reached 100 MB resident.
+ *
+ * So when the load is tombstones rather than entries, rehash at the SAME
+ * capacity and sweep them instead of doubling. */
+static void map_rehash(Map *m, int64_t cap) {
     Slot *old = m->slots;
     int64_t oldcap = m->cap;
 
@@ -361,16 +387,26 @@ static void map_grow(Map *m) {
 
 void rt_map_set(Obj *o, int64_t k, int64_t v) {
     Map *m = (Map *)o;
-    /* Grow before probing, so a full table can never spin forever. */
-    if (m->cap == 0 || (m->used + 1) * 10 >= m->cap * 7) map_grow(m);
+    /* Rehash before probing, so a full table can never spin forever. Double
+     * only when live entries are what fills it; when the load is mostly
+     * tombstones, sweep them at the current capacity instead. */
+    if (m->cap == 0) {
+        map_rehash(m, 8);
+    } else if ((m->used + 1) * 10 >= m->cap * 7) {
+        map_rehash(m, (m->len + 1) * 10 >= m->cap * 4 ? m->cap * 2 : m->cap);
+    }
 
     bool found;
     int64_t i = map_probe(m, k, &found);
     if (found) {
-        /* Replacing a value releases the old one; the key stays as it was. */
-        if (m->val_is_ref) rc_dec((Obj *)(intptr_t)m->slots[i].v);
-        m->slots[i].v = v;
+        /* Retain BEFORE releasing. `m.set(k, m.get(k))` hands us the value
+         * the slot already holds; releasing first would free it and the
+         * retain would then resurrect freed memory. Every other overwrite
+         * path -- StoreField, rt_index_set -- orders it this way too. */
+        Obj *old = (Obj *)(intptr_t)m->slots[i].v;
         if (m->val_is_ref) rc_inc((Obj *)(intptr_t)v);
+        m->slots[i].v = v;
+        if (m->val_is_ref) rc_dec(old);
         return;
     }
     if (m->slots[i].state == SLOT_EMPTY) m->used++;
@@ -455,7 +491,7 @@ Chan *rt_chan_new(int64_t capacity) {
      * this one type, which is the same machinery a threaded refcount needs
      * in general -- see docs/concurrency-decision.md. */
 
-    c->buf = malloc(sizeof(int64_t) * (size_t)capacity);
+    c->buf = malloc(slot_bytes(0, capacity));
     if (c->buf == NULL) rt_trap("out of memory");
     c->cap = capacity;
     c->len = 0;

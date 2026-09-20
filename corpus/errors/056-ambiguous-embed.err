@@ -1,0 +1,4 @@
+corpus/errors/056-ambiguous-embed.src:8:13: `D` gets `val` from both `E` and `F`; give `D` its own `val` to say which one it means
+  |
+8 | type D { E; F; }
+  |             ^

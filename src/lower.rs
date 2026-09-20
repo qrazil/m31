@@ -528,16 +528,53 @@ impl Lowerer {
     /// forwarders the previous rounds produced.
     fn embed_forwarders(&self, p: &Program) -> Result<Vec<Func>, Diag> {
         let mut out: Vec<Func> = Vec::new();
+        // Which embedded field each forwarder came through, keyed the same
+        // way as `out`. Two fields offering one name is ambiguous, and
+        // telling them apart needs to know where each came from.
+        let mut via: HashMap<String, String> = HashMap::new();
         loop {
             let before = out.len();
-            self.forward_round(p, &mut out)?;
+            self.forward_round(p, &mut out, &mut via)?;
             if out.len() == before {
                 return Ok(out);
             }
         }
     }
 
-    fn forward_round(&self, p: &Program, out: &mut Vec<Func>) -> Result<(), Diag> {
+    /// Two functions must not reach the C backend with the same C name.
+    ///
+    /// Monomorphisation mangles with `$`, and the emitter rewrites `$` to
+    /// `__` -- which a source identifier may also contain. So a generic
+    /// `id<T>` instantiated at `int` becomes `id$int` becomes `fn_id__int`,
+    /// and a hand-written `id__int` collides with it. The emitter asserts
+    /// this, but an assertion is a panic and a core dump on input that is
+    /// otherwise valid; the user deserves a diagnostic with a location.
+    fn check_c_name_collisions(p: &Program, forwarders: &[Func]) -> Result<(), Diag> {
+        let mut seen: HashMap<String, String> = HashMap::new();
+        for f in p.funcs.iter().chain(forwarders.iter()) {
+            let key = f.key();
+            let c = crate::emit_c::c_ident(&key);
+            if let Some(other) = seen.insert(c, key.clone()) {
+                if other != key {
+                    return Err(Diag::new(
+                        f.span,
+                        format!(
+                            "`{key}` and `{other}` would both be emitted as the same \
+                             C function; rename one"
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn forward_round(
+        &self,
+        p: &Program,
+        out: &mut Vec<Func>,
+        via: &mut HashMap<String, String>,
+    ) -> Result<(), Diag> {
         for (tid, t) in p.types.iter().enumerate() {
             if t.is_interface {
                 continue;
@@ -576,11 +613,37 @@ impl Lowerer {
                         ));
                     }
                 }
+                // `self.sigs` is a HashMap with a randomised hasher, so the
+                // order methods come out of it differs between runs of the
+                // compiler. Emission follows this order, which made the
+                // emitted C non-reproducible whenever a type promoted two or
+                // more methods. Sort, so a build is a function of its input.
+                promoted.sort_by(|a, b| a.0.cmp(&b.0));
+                promoted.dedup_by(|a, b| a.0 == b.0);
+
                 for (mname, sig) in promoted {
                     let key = format!("{}.{mname}", t.name);
-                    if self.sigs.contains_key(&key) || out.iter().any(|x| x.key() == key) {
-                        continue; // the outer type defines it itself
+                    if self.sigs.contains_key(&key) {
+                        continue; // the outer type defines it itself, and wins
                     }
+                    if let Some(other) = via.get(&key) {
+                        if *other == f.name {
+                            continue; // already forwarded through this field
+                        }
+                        // Two embedded types offer this name and the outer
+                        // type does not break the tie. Picking one would be
+                        // picking by declaration order, which is not a rule
+                        // anyone should have to know. Go rejects this too.
+                        return Err(Diag::new(
+                            f.span,
+                            format!(
+                                "`{}` gets `{mname}` from both `{other}` and `{}`; \
+                                 give `{}` its own `{mname}` to say which one it means",
+                                t.name, f.name, t.name
+                            ),
+                        ));
+                    }
+                    via.insert(key, f.name.clone());
                     let args = Args {
                         pos: sig
                             .params
@@ -795,6 +858,7 @@ impl Lowerer {
         // falls out for free, because an inner type's own forwarders are
         // already methods by the time the outer one looks.
         let forwarders = self.embed_forwarders(p)?;
+        Self::check_c_name_collisions(p, &forwarders)?;
         for f in &forwarders {
             self.sigs.insert(
                 f.key(),

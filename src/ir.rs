@@ -62,6 +62,15 @@ impl Cmp {
             Cmp::Ge => ">=",
         }
     }
+
+    /// The result when both operands are the same value.
+    ///
+    /// Comparing a value with itself is legal and the answer does not depend
+    /// on what it holds, so the emitter writes the answer rather than a C
+    /// comparison the C compiler would warn about.
+    pub fn holds_for_equal_operands(self) -> bool {
+        matches!(self, Cmp::Eq | Cmp::Le | Cmp::Ge)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

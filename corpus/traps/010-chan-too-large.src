@@ -1,0 +1,4 @@
+// The same wrap, on a channel's capacity.
+Chan<int> c = Chan<int>(2305843009213693953);
+send(c, 1);
+print(recv(c));

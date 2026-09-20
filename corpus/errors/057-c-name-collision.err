@@ -1,0 +1,4 @@
+corpus/errors/057-c-name-collision.src:3:1: `id$int` and `id__int` would both be emitted as the same C function; rename one
+  |
+3 | T id<T>(T x) { return x; }
+  | ^
