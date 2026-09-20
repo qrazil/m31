@@ -17,7 +17,7 @@ Anything marked done there is tested; the corpus is the proof.
 
 | | |
 |---|---|
-| Corpus | 102 programs — 33 behaviour, 54 diagnostics, 8 traps, 7 Go twins |
+| Corpus | 109 programs — 35 behaviour, 56 diagnostics, 11 traps, 7 Go twins |
 | Oracle | gcc and clang, each at -O0 and -O2, all four must agree |
 | Leaks | every behaviour program asserts `__rc_live=0` at exit |
 | Warnings | emitted C must be clean under `-Wall -Wextra` |
@@ -52,7 +52,8 @@ literals. No GC — and therefore no cycle collection: a cycle leaks.
 
 **Concurrency.** `spawn` and `Chan<T>` on OS threads, with `send`, `recv`,
 `close`. Values crossing a thread boundary are moved, checked at compile time
-and backed by `rt_check_unique` at run time.
+and backed at run time by a transitive uniqueness check: the whole graph
+reachable from a moved value must be unreachable from anywhere else.
 
 **Tooling.** A C emitter, a formatter with one canonical layout and no
 options, single-line diagnostics with the source line echoed, and `gates.sh`.
@@ -182,6 +183,15 @@ Written down because they are unresolved, not because they are unimportant.
 
 ## Known bugs
 
+  - `rc_debug.h`'s `__rc_live` is a plain non-atomic `static long` mutated
+    from every spawned thread, so the leak oracle can report a wrong count on
+    a threaded program. The oracle checking the refcounts is itself racy.
+  - Vtable slots are assigned per method *name*, while each call site casts
+    the slot to the signature it computed. Two interfaces declaring the same
+    method name with different signatures share a slot. Not reachable today —
+    assignment demands an exact per-method signature match and refuses
+    interface-to-interface assignment — but it becomes type confusion through
+    a function-pointer cast the day interface embedding arrives.
   - Generic inference does not see through a constructed temporary:
     `unwrap(Box<int>(41))` is refused while `Box<int> b = Box<int>(41);
     unwrap(b)` is accepted. `arg_ty` in `src/mono.rs` handles `Expr::New`, so

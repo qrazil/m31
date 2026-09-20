@@ -27,6 +27,16 @@ typedef struct Obj Obj;
  * generates one of these per user type that has reference-typed fields. */
 typedef void (*DropFn)(Obj *);
 
+/* Enumerate the references an object holds, for the transitive uniqueness
+ * check at a thread boundary (rt_check_unique).
+ *
+ * A separate function from DropFn because the two differ: drop releases and
+ * is allowed to free, walk only reports. NULL means the type holds no
+ * references -- a string, or a struct of ints. Emitted code generates one per
+ * user type that has reference-typed fields. */
+typedef void (*VisitFn)(void *ctx, Obj *child);
+typedef void (*WalkFn)(Obj *o, VisitFn visit, void *ctx);
+
 /* A vtable slot. Every entry is cast to its real signature at the call site,
  * which the compiler knows statically; only the indirection is dynamic. */
 typedef void (*AnyFn)(void);
@@ -41,6 +51,7 @@ typedef void (*AnyFn)(void);
 typedef struct TypeInfo {
     DropFn       drop;
     const AnyFn *vtable;
+    WalkFn       walk;
 } TypeInfo;
 
 /* Every heap object starts with this. Two words: the count, and a pointer to

@@ -1,0 +1,46 @@
+// The other side of corpus/traps/011: graphs that a thread may legitimately
+// take, which a conservative "every refcount is 1" test would refuse.
+type Holder { str s; }
+Chan<int> out = Chan<int>(8);
+
+void eat(Holder h, Chan<int> ch) {
+    send(ch, len(h.s));
+}
+
+// A fresh graph each iteration: unique all the way down.
+int k = 0;
+while (k < 4) {
+    Holder h = Holder(concat("ab", "cd"));
+    spawn eat(h, out);
+    k = k + 1;
+}
+print(recv(out) + recv(out) + recv(out) + recv(out));   // 16
+
+// An internal diamond. Both fields point at one object and nothing outside
+// the graph does, so one thread still owns the whole of it.
+type Two { str a; str b; }
+
+void both(Two t, Chan<int> ch) {
+    send(ch, len(t.a) + len(t.b));
+}
+
+str inner = concat("xy", "zw");
+Two t = Two(inner, inner);
+inner = concat("q", "");        // drop the reference from outside the graph
+spawn both(t, out);
+print(recv(out));               // 8
+
+// A list of unique strings, moved whole.
+void total(List<str> xs, Chan<int> ch) {
+    int n = 0;
+    for (str s in xs) {
+        n = n + len(s);
+    }
+    send(ch, n);
+}
+
+List<str> xs = List<str>();
+xs.push(concat("a", "bc"));
+xs.push(concat("de", "f"));
+spawn total(xs, out);
+print(recv(out));               // 6

@@ -588,9 +588,24 @@ Retaining instead of moving is not an alternative. Two threads on one
 non-atomic counter is the defect; a retain before the handoff only makes the
 race start at 2.
 
-Aliasing the compiler cannot see — two locals reaching one object through a
-field — is caught at run time. Every move checks that the refcount is 1 at
-the boundary and traps if it is not. A trap is better than a corrupted heap.
+Aliasing the compiler cannot see is caught at run time, and the check is
+**transitive**. A unique wrapper is not enough:
+
+```c
+type Holder { str s; }
+str shared = concat("ab", "cd");
+spawn eat(Holder(shared));      // each Holder is unique -- the str is not
+```
+
+So the whole graph reachable from the moved value must be unreachable from
+anywhere else. The check counts the references into each reachable object
+from within the graph and requires that to equal its refcount. An object
+reached twice *inside* the graph is fine — one thread still owns all of it.
+Immortal objects are skipped, which is why a literal and a channel cost
+nothing here.
+
+It traps rather than corrupting the heap, and costs time proportional to the
+graph, paid once per crossing.
 
 ---
 

@@ -41,7 +41,7 @@ void rc_dec(Obj *o) {
     }
 }
 
-const TypeInfo rt_str_type = { NULL, NULL };
+const TypeInfo rt_str_type = { NULL, NULL, NULL };
 
 Obj *rt_alloc_immortal(size_t size, const TypeInfo *ty) {
     Obj *o = malloc(size);
@@ -144,10 +144,26 @@ static void lst_drop_vals(Obj *o) {
     free(((Lst *)o)->data);
 }
 
-static const TypeInfo rt_arr_val_type = { NULL, NULL };
-static const TypeInfo rt_arr_ref_type = { arr_drop_refs, NULL };
-static const TypeInfo rt_lst_val_type = { lst_drop_vals, NULL };
-static const TypeInfo rt_lst_ref_type = { lst_drop_refs, NULL };
+/* Walks report references; they do not release them. A channel has none of
+ * these because it is immortal, and the uniqueness check skips immortals. */
+static void arr_walk_refs(Obj *o, VisitFn visit, void *ctx) {
+    Arr *a = (Arr *)o;
+    for (int64_t i = 0; i < a->len; i++) {
+        visit(ctx, (Obj *)(intptr_t)a->data[i]);
+    }
+}
+
+static void lst_walk_refs(Obj *o, VisitFn visit, void *ctx) {
+    Lst *l = (Lst *)o;
+    for (int64_t i = 0; i < l->len; i++) {
+        visit(ctx, (Obj *)(intptr_t)l->data[i]);
+    }
+}
+
+static const TypeInfo rt_arr_val_type = { NULL, NULL, NULL };
+static const TypeInfo rt_arr_ref_type = { arr_drop_refs, NULL, arr_walk_refs };
+static const TypeInfo rt_lst_val_type = { lst_drop_vals, NULL, NULL };
+static const TypeInfo rt_lst_ref_type = { lst_drop_refs, NULL, lst_walk_refs };
 
 
 /* Bytes for `n` slots plus a `head` header, trapping rather than wrapping.
@@ -296,7 +312,16 @@ static void map_drop(Obj *o) {
     free(m->slots);
 }
 
-static const TypeInfo rt_map_type = { map_drop, NULL };
+static void map_walk(Obj *o, VisitFn visit, void *ctx) {
+    Map *m = (Map *)o;
+    for (int64_t i = 0; i < m->cap; i++) {
+        if (m->slots[i].state != SLOT_FULL) continue;
+        if (m->key_is_ref) visit(ctx, (Obj *)(intptr_t)m->slots[i].k);
+        if (m->val_is_ref) visit(ctx, (Obj *)(intptr_t)m->slots[i].v);
+    }
+}
+
+static const TypeInfo rt_map_type = { map_drop, NULL, map_walk };
 
 static uint64_t hash_int(int64_t x) {
     /* splitmix64's finaliser: cheap and mixes the low bits, which matters
@@ -473,7 +498,7 @@ static void chan_drop(Obj *o) {
     free(c->buf);
 }
 
-static const TypeInfo rt_chan_type = { chan_drop, NULL };
+static const TypeInfo rt_chan_type = { chan_drop, NULL, NULL };
 
 Chan *rt_chan_new(int64_t capacity) {
     if (capacity < 1) rt_trap("channel capacity must be at least 1");
@@ -582,11 +607,143 @@ void rt_wait_all(void) {
  * abort() skips atexit handlers, so a trapping program never prints
  * __rc_live. run.sh therefore does not require the refcount invariant on
  * corpus/traps/ programs. */
+/* ---- transitive uniqueness -------------------------------------------- */
+
+/* Checking only the moved object is not enough.
+ *
+ *     type Holder { str s; }
+ *     str shared = concat("ab", "cd");
+ *     spawn eat(Holder(shared), n);      // repeated
+ *
+ * Each Holder really is unique, so a shallow check passes -- and every one
+ * of them points at the same Str, whose non-atomic refcount is then
+ * incremented and decremented from several threads at once. Measured before
+ * this: eight spawns, eight runs, eight failures, split between a refcount
+ * going negative, a corrupted malloc arena and a segfault.
+ *
+ * So the whole graph reachable from the moved value has to be unreachable
+ * from anywhere else. The test is exact rather than "every rc is 1": count
+ * the references INTO each object from within the graph, treating the
+ * mover's own reference to the root as one, and require that count to equal
+ * the object's refcount. An object shared twice *inside* the graph is fine
+ * -- one thread still owns all of it -- and is what a conservative rc == 1
+ * test would wrongly refuse.
+ *
+ * Immortal objects are skipped and not walked: literals are never freed, and
+ * a channel is immortal precisely because it is the one thing threads are
+ * meant to share.
+ *
+ * Cost is proportional to the graph, paid once per value crossing a
+ * boundary. A boundary crossing already costs a lock and a condition
+ * variable, and a moved value cannot be sent twice. */
+
+typedef struct {
+    Obj    **keys;   /* open addressing, NULL is empty */
+    int64_t *cnt;    /* references seen into keys[i] */
+    Obj    **todo;   /* objects whose walk has not run yet */
+    int64_t  todo_len;
+    int64_t  todo_cap;
+    int64_t  cap;    /* a power of two */
+    int64_t  len;
+} Reach;
+
+static void reach_add(Reach *r, Obj *o);
+
+static void reach_grow(Reach *r) {
+    int64_t cap = r->cap == 0 ? 64 : r->cap * 2;
+    Obj **keys = calloc((size_t)cap, sizeof(Obj *));
+    int64_t *cnt = calloc((size_t)cap, sizeof(int64_t));
+    if (keys == NULL || cnt == NULL) rt_trap("out of memory");
+
+    Obj **oldk = r->keys;
+    int64_t *oldc = r->cnt;
+    int64_t oldcap = r->cap;
+    int64_t mask = cap - 1;
+
+    for (int64_t i = 0; i < oldcap; i++) {
+        if (oldk[i] == NULL) continue;
+        int64_t j = (int64_t)((((uintptr_t)oldk[i]) >> 4) & (uintptr_t)mask);
+        while (keys[j] != NULL) j = (j + 1) & mask;
+        keys[j] = oldk[i];
+        cnt[j] = oldc[i];
+    }
+    free(oldk);
+    free(oldc);
+    r->keys = keys;
+    r->cnt = cnt;
+    r->cap = cap;
+}
+
+/* Record one reference into `o`, and queue it for walking the first time. */
+static void reach_add(Reach *r, Obj *o) {
+    if (o == NULL || o->rc == RC_IMMORTAL) return;
+    if (r->cap == 0 || (r->len + 1) * 10 >= r->cap * 7) reach_grow(r);
+
+    int64_t mask = r->cap - 1;
+    int64_t i = (int64_t)((((uintptr_t)o) >> 4) & (uintptr_t)mask);
+    while (r->keys[i] != NULL && r->keys[i] != o) i = (i + 1) & mask;
+
+    if (r->keys[i] == NULL) {
+        r->keys[i] = o;
+        r->cnt[i] = 1;
+        r->len++;
+        if (r->todo_len == r->todo_cap) {
+            int64_t cap = r->todo_cap == 0 ? 64 : r->todo_cap * 2;
+            Obj **bigger = realloc(r->todo, (size_t)cap * sizeof(Obj *));
+            if (bigger == NULL) rt_trap("out of memory");
+            r->todo = bigger;
+            r->todo_cap = cap;
+        }
+        r->todo[r->todo_len++] = o;
+    } else {
+        r->cnt[i]++;
+    }
+}
+
+static void reach_visit(void *ctx, Obj *child) {
+    reach_add((Reach *)ctx, child);
+}
+
 void rt_check_unique(Obj *o) {
     if (o->rc == RC_IMMORTAL) return;
-    if (o->rc != 1) {
-        rt_trap("value crossing a thread boundary is still referenced elsewhere; "
-                "clone() it, or drop the other reference first");
+
+    /* The common case by far: a leaf the mover alone holds. Answer it
+     * without allocating anything. */
+    if (o->ty == NULL || o->ty->walk == NULL) {
+        if (o->rc != 1) {
+            rt_trap("value crossing a thread boundary is still referenced "
+                    "elsewhere; clone() it, or drop the other reference first");
+        }
+        return;
+    }
+
+    Reach r = { NULL, NULL, NULL, 0, 0, 0, 0 };
+
+    /* Each object is walked exactly once, the first time it is seen, so a
+     * cycle terminates. */
+    reach_add(&r, o);
+    while (r.todo_len > 0) {
+        Obj *cur = r.todo[--r.todo_len];
+        if (cur->ty != NULL && cur->ty->walk != NULL) {
+            cur->ty->walk(cur, reach_visit, &r);
+        }
+    }
+
+    bool ok = true;
+    for (int64_t i = 0; i < r.cap; i++) {
+        if (r.keys[i] == NULL) continue;
+        if (r.keys[i]->rc != r.cnt[i]) {
+            ok = false;
+            break;
+        }
+    }
+    free(r.keys);
+    free(r.cnt);
+    free(r.todo);
+
+    if (!ok) {
+        rt_trap("value crossing a thread boundary is still referenced "
+                "elsewhere; clone() it, or drop the other reference first");
     }
 }
 

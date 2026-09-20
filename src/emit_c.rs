@@ -64,6 +64,33 @@ pub fn emit(m: &Module) -> String {
         o.push('\n');
     }
 
+    // A walk function reports the references an object holds, without
+    // releasing them. rt_check_unique uses it to decide whether the whole
+    // graph reachable from a value crossing a thread boundary is reachable
+    // from anywhere else -- see runtime/rt.c. Same condition as the drop
+    // function: a type with no reference fields needs neither.
+    for (i, t) in m.types.iter().enumerate() {
+        if t.is_interface || t.is_chan || t.is_distinct || !t.needs_drop() {
+            continue;
+        }
+        writeln!(
+            o,
+            "static void walk_T{i}(Obj *o, VisitFn visit, void *ctx) {{"
+        )
+        .unwrap();
+        writeln!(o, "    T{i} *p = (T{i} *)o;").unwrap();
+        for (fname, fty) in &t.fields {
+            if *fty == IrTy::Ref {
+                let fname = c_ident(fname);
+                writeln!(o, "    visit(ctx, p->f_{fname});").unwrap();
+            }
+        }
+        writeln!(o, "}}").unwrap();
+    }
+    if m.types.iter().any(TypeDef::needs_drop) {
+        o.push('\n');
+    }
+
     // One TypeInfo per concrete type: its drop function and its vtable. The
     // vtable has one slot per distinct interface method name in the program,
     // so a dispatch index is a compile-time constant.
@@ -77,15 +104,16 @@ pub fn emit(m: &Module) -> String {
         if t.is_interface || t.is_chan || t.is_distinct {
             continue;
         }
-        let drop = if t.needs_drop() {
-            format!("drop_T{i}")
+        let (drop, walk) = if t.needs_drop() {
+            (format!("drop_T{i}"), format!("walk_T{i}"))
         } else {
-            "NULL".to_string()
+            ("NULL".to_string(), "NULL".to_string())
         };
         if m.iface_slots.is_empty() {
             writeln!(
                 o,
-                "static const TypeInfo ti_T{i} __attribute__((unused)) = {{ {drop}, NULL }};"
+                "static const TypeInfo ti_T{i} __attribute__((unused)) = \
+                 {{ {drop}, NULL, {walk} }};"
             )
             .unwrap();
         } else {
@@ -105,7 +133,8 @@ pub fn emit(m: &Module) -> String {
             .unwrap();
             writeln!(
                 o,
-                "static const TypeInfo ti_T{i} __attribute__((unused)) = {{ {drop}, vt_T{i} }};"
+                "static const TypeInfo ti_T{i} __attribute__((unused)) = \
+                 {{ {drop}, vt_T{i}, {walk} }};"
             )
             .unwrap();
         }

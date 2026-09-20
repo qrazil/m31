@@ -231,10 +231,23 @@ Retaining rather than moving is not the fix. Two threads sharing one
 non-atomic counter is the defect; a `rc_inc` before the handoff only makes
 the race begin at 2.
 
-Aliasing the compiler cannot see — two locals reaching one object through a
-field — is caught at run time. Every move emits a call to `rt_check_unique`,
-which traps if the refcount is above 1 at the boundary. It is a real check,
-not a debug assertion: corrupting the heap silently is worse than stopping.
+Aliasing the compiler cannot see is caught at run time by `rt_check_unique`,
+and the check is **transitive**. Checking only the moved object is not
+enough: a uniquely-owned wrapper can hold a reference that is shared, and
+then several threads touch one non-atomic count through it.
+
+So the check walks the graph reachable from the moved value and requires,
+for every object in it, that the references into it from *within* the graph
+account for its whole refcount — the mover's own reference to the root
+counting as one. An object reached twice inside the graph is accepted: one
+thread still owns all of it, and a conservative `rc == 1` test would refuse
+it wrongly. Immortal objects — literals, and channels — are skipped and not
+walked.
+
+This needs a per-type `WalkFn` in `TypeInfo` alongside the `DropFn`: drop
+releases and may free, walk only reports. It is a real check, not a debug
+assertion, and costs time proportional to the graph, paid once per crossing
+— against a lock and a condition variable that the crossing already pays.
 
 Channels are exempt. A channel is *how* threads share, so it is aliased
 rather than moved, and is immortal in v0 (`rt_chan_new`).
