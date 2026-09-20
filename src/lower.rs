@@ -256,6 +256,94 @@ impl Lowerer {
         }
     }
 
+    /// `m.set(k, v)`, `m.get(k)`, `m.has(k)`, `m.remove(k)`, `m.len()`.
+    ///
+    /// `get` on a missing key traps, like an out-of-range index: there is no
+    /// null to return, so the honest choices are to trap or to force every
+    /// read through a check. `has` is the check.
+    fn lower_map_method(
+        &mut self,
+        o: &Val,
+        k: Ty,
+        v: Ty,
+        m: &str,
+        args: &Args,
+        span: Span,
+    ) -> Result<Val, Diag> {
+        if !args.named.is_empty() {
+            return Err(Diag::new(span, format!("`{m}` takes no named arguments")));
+        }
+        let arity = match m {
+            "len" => 0,
+            "set" => 2,
+            "get" | "has" | "remove" => 1,
+            other => return Err(Diag::new(span, format!("a map has no method `{other}`"))),
+        };
+        if args.pos.len() != arity {
+            return Err(Diag::new(
+                span,
+                format!("`{m}` takes {arity} argument(s), found {}", args.pos.len()),
+            ));
+        }
+        if m == "len" {
+            let d = self.new_val(IrTy::I64);
+            self.push(Inst::Call {
+                dst: Some(d),
+                func: "rt_map_len".to_string(),
+                args: vec![o.val()],
+            });
+            return Ok(Val::new(d, Ty::Int, false));
+        }
+
+        let key = self.lower_expr(&args.pos[0])?;
+        if !self.assignable(key.ty, k) {
+            return Err(Diag::new(args.pos[0].span(), self.mismatch(k, key.ty)));
+        }
+        match m {
+            "set" => {
+                let val = self.lower_expr(&args.pos[1])?;
+                if !self.assignable(val.ty, v) {
+                    return Err(Diag::new(args.pos[1].span(), self.mismatch(v, val.ty)));
+                }
+                // The map retains the key and the value itself, so an owned
+                // temporary here is still released by the statement.
+                self.push(Inst::Call {
+                    dst: None,
+                    func: "rt_map_set".to_string(),
+                    args: vec![o.val(), key.val(), val.val()],
+                });
+                Ok(Val::void())
+            }
+            "get" => {
+                let d = self.new_val(self.irty(v));
+                self.push(Inst::Call {
+                    dst: Some(d),
+                    func: "rt_map_get".to_string(),
+                    args: vec![o.val(), key.val()],
+                });
+                // Borrowed from the map, which holds the +1.
+                Ok(Val::new(d, v, false))
+            }
+            "has" => {
+                let d = self.new_val(IrTy::I1);
+                self.push(Inst::Call {
+                    dst: Some(d),
+                    func: "rt_map_has".to_string(),
+                    args: vec![o.val(), key.val()],
+                });
+                Ok(Val::new(d, Ty::Bool, false))
+            }
+            _ => {
+                self.push(Inst::Call {
+                    dst: None,
+                    func: "rt_map_remove".to_string(),
+                    args: vec![o.val(), key.val()],
+                });
+                Ok(Val::void())
+            }
+        }
+    }
+
     /// `send(c, v)`, `recv(c)`, `close(c)`.
     ///
     /// `send` MOVES its value: the sender gives up its reference and the
@@ -571,7 +659,8 @@ impl Lowerer {
                 is_interface: t.is_interface,
                 is_chan: t.name.starts_with("Chan$")
                     || t.name.starts_with("Array$")
-                    || t.name.starts_with("List$"),
+                    || t.name.starts_with("List$")
+                    || t.name.starts_with("Map$"),
                 is_distinct: t.distinct_base.is_some(),
                 vtable: Vec::new(),
             });
@@ -853,6 +942,16 @@ impl Lowerer {
 
     fn is_list(&self, t: Ty) -> bool {
         self.builtin_elem(t, "List$").is_some()
+    }
+
+    /// The key and value types of a `Map<K, V>`, if it is one.
+    fn map_kv(&self, t: Ty) -> Option<(Ty, Ty)> {
+        let tid = self.tdef_of(t)?;
+        if !self.typedefs[tid as usize].name.starts_with("Map$") {
+            return None;
+        }
+        let f = &self.field_surface[tid as usize];
+        Some((f[0], f[1]))
     }
 
     /// A builtin generic stores its element type as its only "field", which
@@ -2195,6 +2294,9 @@ impl Lowerer {
                 if let Some(elem) = self.seq_elem(o.ty) {
                     return self.lower_seq_method(&o, elem, m, args, *span);
                 }
+                if let Some((k, v)) = self.map_kv(o.ty) {
+                    return self.lower_map_method(&o, k, v, m, args, *span);
+                }
 
                 // On an interface value the implementation is not known
                 // statically: dispatch through the receiver's type header.
@@ -2697,6 +2799,37 @@ impl Lowerer {
             return Ok(Val::new(v.val(), ty, v.owned));
         }
         let tname = self.typedefs[tid as usize].name.clone();
+        if tname.starts_with("Map$") {
+            let (k, v) = self.map_kv(ty).expect("a map has a key and a value");
+            let ku = self.underlying(k);
+            if ku != Ty::Int && ku != Ty::Str {
+                return Err(Diag::new(
+                    span,
+                    format!(
+                        "a map key must be int or str, found {}; hashing a user \
+                         type would need a Hashable interface, which does not exist yet",
+                        self.tyname(k)
+                    ),
+                ));
+            }
+            if !args.pos.is_empty() || !args.named.is_empty() {
+                return Err(Diag::new(span, "a map takes no arguments"));
+            }
+            let mut flags = Vec::new();
+            for b in [ku == Ty::Str, self.is_ref(k), self.is_ref(v)] {
+                let f = self.new_val(IrTy::I1);
+                self.push(Inst::BConst { dst: f, val: b });
+                flags.push(f);
+            }
+            let d = self.new_val(IrTy::Ref);
+            self.push(Inst::Call {
+                dst: Some(d),
+                func: "rt_map_new".to_string(),
+                args: flags,
+            });
+            self.stmt_temps.push(d);
+            return Ok(Val::new(d, ty, true));
+        }
         if tname.starts_with("Array$") || tname.starts_with("List$") {
             let elem = self.seq_elem(ty).expect("collection has an element type");
             let refs = self.is_ref(elem);

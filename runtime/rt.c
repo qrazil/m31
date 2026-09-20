@@ -16,6 +16,7 @@
 
 #include <inttypes.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -227,6 +228,177 @@ int64_t rt_list_pop(Obj *o) {
     Lst *l = (Lst *)o;
     if (l->len == 0) rt_trap("pop from an empty list");
     return l->data[--l->len];
+}
+
+/* ---- map --------------------------------------------------------------
+ *
+ * Open addressing with linear probing and a 70% load factor. One allocation
+ * for the whole table, no per-entry node, and deletion leaves a tombstone so
+ * a probe sequence is never broken.
+ */
+enum { SLOT_EMPTY = 0, SLOT_FULL = 1, SLOT_DEAD = 2 };
+
+typedef struct {
+    int64_t k;
+    int64_t v;
+    uint8_t state;
+} Slot;
+
+typedef struct {
+    Obj     hdr;
+    Slot   *slots;
+    int64_t cap;
+    int64_t len;      /* live entries */
+    int64_t used;     /* live + tombstones, for the load factor */
+    bool    key_is_str;
+    bool    key_is_ref;
+    bool    val_is_ref;
+} Map;
+
+static void map_drop(Obj *o) {
+    Map *m = (Map *)o;
+    for (int64_t i = 0; i < m->cap; i++) {
+        if (m->slots[i].state != SLOT_FULL) continue;
+        if (m->key_is_ref) rc_dec((Obj *)(intptr_t)m->slots[i].k);
+        if (m->val_is_ref) rc_dec((Obj *)(intptr_t)m->slots[i].v);
+    }
+    free(m->slots);
+}
+
+static const TypeInfo rt_map_type = { map_drop, NULL };
+
+static uint64_t hash_int(int64_t x) {
+    /* splitmix64's finaliser: cheap and mixes the low bits, which matters
+     * because linear probing is sensitive to clustering. */
+    uint64_t z = (uint64_t)x + 0x9e3779b97f4a7c15ULL;
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    return z ^ (z >> 31);
+}
+
+static uint64_t hash_key(const Map *m, int64_t k) {
+    if (!m->key_is_str) return hash_int(k);
+    const Str *s = (const Str *)(intptr_t)k;
+    uint64_t h = 1469598103934665603ULL;      /* FNV-1a */
+    for (int64_t i = 0; i < s->len; i++) {
+        h ^= (unsigned char)s->data[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static bool key_eq(const Map *m, int64_t a, int64_t b) {
+    if (!m->key_is_str) return a == b;
+    return rt_str_eq((Obj *)(intptr_t)a, (Obj *)(intptr_t)b);
+}
+
+Obj *rt_map_new(bool key_is_str, bool key_is_ref, bool val_is_ref) {
+    Map *m = (Map *)rt_alloc(sizeof(Map), &rt_map_type);
+    m->slots = NULL;
+    m->cap = 0;
+    m->len = 0;
+    m->used = 0;
+    m->key_is_str = key_is_str;
+    m->key_is_ref = key_is_ref;
+    m->val_is_ref = val_is_ref;
+    return (Obj *)m;
+}
+
+/* Index of the slot holding `k`, or of the first free slot for it. */
+static int64_t map_probe(const Map *m, int64_t k, bool *found) {
+    uint64_t h = hash_key(m, k);
+    int64_t mask = m->cap - 1;
+    int64_t i = (int64_t)(h & (uint64_t)mask);
+    int64_t first_dead = -1;
+    for (;;) {
+        if (m->slots[i].state == SLOT_EMPTY) {
+            *found = false;
+            return first_dead >= 0 ? first_dead : i;
+        }
+        if (m->slots[i].state == SLOT_DEAD) {
+            if (first_dead < 0) first_dead = i;
+        } else if (key_eq(m, m->slots[i].k, k)) {
+            *found = true;
+            return i;
+        }
+        i = (i + 1) & mask;
+    }
+}
+
+static void map_grow(Map *m) {
+    int64_t cap = m->cap == 0 ? 8 : m->cap * 2;
+    Slot *old = m->slots;
+    int64_t oldcap = m->cap;
+
+    Slot *fresh = calloc((size_t)cap, sizeof(Slot));
+    if (fresh == NULL) rt_trap("out of memory");
+    m->slots = fresh;
+    m->cap = cap;
+    m->used = m->len;
+
+    for (int64_t i = 0; i < oldcap; i++) {
+        if (old[i].state != SLOT_FULL) continue;
+        bool found;
+        int64_t j = map_probe(m, old[i].k, &found);
+        m->slots[j] = old[i];
+    }
+    free(old);
+}
+
+void rt_map_set(Obj *o, int64_t k, int64_t v) {
+    Map *m = (Map *)o;
+    /* Grow before probing, so a full table can never spin forever. */
+    if (m->cap == 0 || (m->used + 1) * 10 >= m->cap * 7) map_grow(m);
+
+    bool found;
+    int64_t i = map_probe(m, k, &found);
+    if (found) {
+        /* Replacing a value releases the old one; the key stays as it was. */
+        if (m->val_is_ref) rc_dec((Obj *)(intptr_t)m->slots[i].v);
+        m->slots[i].v = v;
+        if (m->val_is_ref) rc_inc((Obj *)(intptr_t)v);
+        return;
+    }
+    if (m->slots[i].state == SLOT_EMPTY) m->used++;
+    m->slots[i].state = SLOT_FULL;
+    m->slots[i].k = k;
+    m->slots[i].v = v;
+    m->len++;
+    if (m->key_is_ref) rc_inc((Obj *)(intptr_t)k);
+    if (m->val_is_ref) rc_inc((Obj *)(intptr_t)v);
+}
+
+int64_t rt_map_get(Obj *o, int64_t k) {
+    Map *m = (Map *)o;
+    if (m->cap == 0) rt_trap("key not in map");
+    bool found;
+    int64_t i = map_probe(m, k, &found);
+    if (!found) rt_trap("key not in map");
+    return m->slots[i].v;
+}
+
+bool rt_map_has(Obj *o, int64_t k) {
+    Map *m = (Map *)o;
+    if (m->cap == 0) return false;
+    bool found;
+    map_probe(m, k, &found);
+    return found;
+}
+
+void rt_map_remove(Obj *o, int64_t k) {
+    Map *m = (Map *)o;
+    if (m->cap == 0) return;
+    bool found;
+    int64_t i = map_probe(m, k, &found);
+    if (!found) return;
+    if (m->key_is_ref) rc_dec((Obj *)(intptr_t)m->slots[i].k);
+    if (m->val_is_ref) rc_dec((Obj *)(intptr_t)m->slots[i].v);
+    m->slots[i].state = SLOT_DEAD;   /* not EMPTY: a probe must not stop here */
+    m->len--;
+}
+
+int64_t rt_map_len(Obj *o) {
+    return ((Map *)o)->len;
 }
 
 /* ---- concurrency ------------------------------------------------------ */

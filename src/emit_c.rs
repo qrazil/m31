@@ -385,6 +385,11 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
                     | ("rt_index_set", 2)
                     | ("rt_list_push", 1)
                     | ("rt_array_new", 1)
+                    | ("rt_map_set", 1)
+                    | ("rt_map_set", 2)
+                    | ("rt_map_get", 1)
+                    | ("rt_map_has", 1)
+                    | ("rt_map_remove", 1)
                         if f.ty_of(*v) == IrTy::Ref =>
                     {
                         format!("(int64_t)(intptr_t){v}")
@@ -396,7 +401,7 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
                 Some(d)
                     if matches!(
                         func.as_str(),
-                        "rt_chan_recv" | "rt_index_get" | "rt_list_pop"
+                        "rt_chan_recv" | "rt_index_get" | "rt_list_pop" | "rt_map_get"
                     ) && f.ty_of(*d) == IrTy::Ref =>
                 {
                     writeln!(o, "    {d} = (Obj *)(intptr_t){callee}({});", a.join(", ")).unwrap()

@@ -54,10 +54,15 @@ impl Parser {
         // type-first grammar decidable without C's lexer hack -- the parser
         // knows the type names before it starts, so `Point p` is a
         // declaration and `foo p` is an error, not an ambiguity.
-        // `Chan` is built in: the runtime owns its representation, so there
-        // is no `type Chan<T>` to find in the source, but it must parse as a
-        // type name like any other.
-        let mut type_names = vec!["Chan".to_string(), "Array".to_string(), "List".to_string()];
+        // The builtin collections and channels: the runtime owns their
+        // representation, so there is no `type Chan<T>` in the source to
+        // find, but they must parse as type names like any other.
+        let mut type_names = vec![
+            "Chan".to_string(),
+            "Array".to_string(),
+            "List".to_string(),
+            "Map".to_string(),
+        ];
         for w in toks.windows(2) {
             if w[0].tok == Tok::KwType || w[0].tok == Tok::KwInterface {
                 if let Tok::Ident(n) = &w[1].tok {

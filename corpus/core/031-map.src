@@ -1,0 +1,49 @@
+// Open addressing with linear probing: one allocation for the whole table,
+// no per-entry node, and deletion leaves a tombstone so a probe sequence is
+// never broken.
+//
+// `get` on a missing key TRAPS, the same as an out-of-range index -- there
+// is no null to return, so the honest choices are to trap or to force every
+// read through a check. `has` is the check.
+//
+// Keys are int or str. Hashing a user type would need a Hashable interface,
+// which does not exist yet.
+
+Map<str, int> counts = Map<str, int>();
+counts.set("a", 1);
+counts.set("b", 2);
+counts.set("a", 10);        // replaces, does not grow
+print(counts.len());
+print(counts.get("a"));
+print(counts.has("b"));
+print(counts.has("zz"));
+counts.remove("b");
+print(counts.len());
+print(counts.has("b"));
+
+// str keys compare by content, not by identity.
+str built = "a" + "";
+print(counts.has(built));
+
+Map<int, str> names = Map<int, str>();
+names.set(1, "one");
+names.set(2, "tw" + "o");
+print(names.get(2));
+
+// Enough entries to force several growths and exercise probing.
+Map<int, int> big = Map<int, int>();
+int i = 0;
+while (i < 200) {
+    big.set(i, i * i);
+    i = i + 1;
+}
+print(big.len());
+print(big.get(7));
+print(big.get(199));
+
+// Removing then re-adding must reuse the tombstone, not lose the key.
+big.remove(7);
+print(big.has(7));
+big.set(7, 777);
+print(big.get(7));
+print(big.len());

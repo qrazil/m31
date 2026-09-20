@@ -1,0 +1,6 @@
+type P {
+    int x;
+}
+
+Map<P, int> m = Map<P, int>();
+print(m.len());

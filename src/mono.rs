@@ -158,11 +158,16 @@ impl Mono {
         // layout. Emit an opaque type carrying the element type, so the rest
         // of the compiler can see what a channel carries without knowing how
         // it is built.
-        if matches!(e.name.as_str(), "Chan" | "Array" | "List") {
-            if args.len() != 1 {
+        if matches!(e.name.as_str(), "Chan" | "Array" | "List" | "Map") {
+            let want = if e.name == "Map" { 2 } else { 1 };
+            if args.len() != want {
                 return Err(Diag::new(
                     span,
-                    format!("`{}` takes 1 type argument, found {}", e.name, args.len()),
+                    format!(
+                        "`{}` takes {want} type argument(s), found {}",
+                        e.name,
+                        args.len()
+                    ),
                 ));
             }
             let mangled = self.mangle(&e.name, &args);
@@ -170,13 +175,17 @@ impl Mono {
                 self.out_types.push(TypeDecl {
                     name: mangled.clone(),
                     tparams: Vec::new(),
-                    fields: vec![Param {
-                        ty: args[0],
-                        name: "$elem".to_string(),
-                        default: None,
-                        embedded: false,
-                        span,
-                    }],
+                    fields: args
+                        .iter()
+                        .enumerate()
+                        .map(|(i, a)| Param {
+                            ty: *a,
+                            name: format!("$t{i}"),
+                            default: None,
+                            embedded: false,
+                            span,
+                        })
+                        .collect(),
                     methods: Vec::new(),
                     is_interface: false,
                     distinct_base: None,

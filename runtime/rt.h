@@ -132,6 +132,21 @@ int64_t rt_index_get(Obj *o, int64_t i);
 void    rt_index_set(Obj *o, int64_t i, int64_t v);
 void    rt_list_push(Obj *o, int64_t v);
 Obj    *rt_seq_clone(Obj *o);         /* shallow copy of an array or list */
+
+/* A hash map. Keys are `int` or `str`; the compiler restricts it, because
+ * hashing a user type would need a Hashable interface that does not exist
+ * yet. Open addressing with linear probing, which keeps the whole table in
+ * one allocation and needs no per-entry node.
+ *
+ * `get` on a missing key TRAPS, the same as an out-of-range index: there is
+ * no null to return, so the honest options are trap or force every read
+ * through a check. `has` is there for the check. */
+Obj    *rt_map_new(bool key_is_str, bool key_is_ref, bool val_is_ref);
+void    rt_map_set(Obj *o, int64_t k, int64_t v);
+int64_t rt_map_get(Obj *o, int64_t k);
+bool    rt_map_has(Obj *o, int64_t k);
+void    rt_map_remove(Obj *o, int64_t k);
+int64_t rt_map_len(Obj *o);
 int64_t rt_list_pop(Obj *o);
 
 /* ---- concurrency -------------------------------------------------------
