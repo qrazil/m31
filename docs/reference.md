@@ -620,7 +620,12 @@ is a question only the program can answer. `clone` works on a `str`, an
 `Array`, a `List` and a struct; a channel and an interface value cannot be
 cloned.
 
-There is no string library yet: no `substr`, no `split`, no `contains`.
+There is no string library yet: no `substr`, no `split`, no case
+conversion, and no way to turn an `int` into a `str` or back. Parsing can
+fail, so it waits for errors; rendering a user type as text waits for a
+`Display`-shaped interface, which is also what would let `print` accept one.
+
+There is no `float`. `int` is the only number.
 
 ---
 

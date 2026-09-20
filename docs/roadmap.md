@@ -97,7 +97,45 @@ around them:
     index out of range should probably stay a trap; a file that is not there
     should not be one.
 
-### 2. A string library
+### 2. Conversions, and a `Display` interface
+
+Two different problems that look like one.
+
+**Rendering a value as text is an interface.** A user type has to be able to
+say how it prints, and only an interface lets it -- Go's `Stringer`, Rust's
+`Display`. It also closes a hole that exists today: `print` refuses a user
+type with the diagnostic "there is no way for a type to say how it prints",
+and this is that way. One method, and `print` accepts anything with it.
+
+**Parsing is not an interface.** `"abc".to_int()` can fail, and dispatching
+on a *return* type needs static or associated functions the language does not
+have. These are methods on `str` returning a `Result`, so they wait for
+errors -- this is the concrete reason the string library sits behind them.
+
+**Numeric conversion is built in.** `int` to `float` and back has no user
+extension point, so `float(x)` and `int(f)` fit the conversion syntax
+`distinct` already uses. Truncating, and explicit.
+
+### 3. `float`
+
+The missing primitive. Everything else the language lacks is a convenience;
+this one blocks whole categories of program, and `examples/enums.src` already
+has to apologise for using 3 as pi.
+
+It is not just another type. It brings decisions worth making deliberately:
+
+  - `==` on floats is a footgun, and this language already refuses `==`
+    where it would be meaningless;
+  - NaN makes comparison non-total, which breaks the total order `sort`
+    assumes;
+  - a float as a `Map` key is almost always a mistake and should probably be
+    refused, the way a user type already is.
+
+Sized and unsigned integers (`u8`, `i32`) matter for binary formats and FFI,
+and a `byte` or `char` type matters once strings are indexed. Neither blocks
+anything yet.
+
+### 4. A string library
 
 `size()` and `concat` are the whole of it today. A usable language needs
 `substr`, `index_of`, `contains`, `starts_with`, `ends_with`, `split`,
@@ -107,21 +145,21 @@ None of it is hard. It is deliberately after errors, because `to_int("abc")`
 has to return something, and what it returns is the errors decision. These
 land as methods on `str`, which now has method dispatch.
 
-### 3. Modules
+### 5. Modules
 
 One file is the whole program today. That is tolerable for a corpus and not
 for anything else. Needs: a unit of compilation, a visibility rule, and a
 name resolution order. Kept behind errors because a module system that has to
 be revised once errors land is a module system written twice.
 
-### 4. Standard library
+### 6. Standard library
 
 The stated goal is Oro's and Go's: a standard library good enough that most
 programs need nothing else. Needs modules to live in and errors to report
 with. Minimum: strings, sorting, a file and stdin API, time, math, and a
 `Hashable` interface so `Map` takes a user type as a key.
 
-### 5. Closures
+### 7. Closures
 
 Also gates a nicer `spawn`. The reason they are late is that closures plus
 reference counting is the most common way to build a cycle, and a cycle leaks
@@ -192,14 +230,14 @@ Written down because they are unresolved, not because they are unimportant.
     is checked, naming the instantiation, which is C++'s error experience.
   - Integer width. `int` is 64-bit and deliberately unqualified so the IR can
     choose per target. Whether sized types ever become spellable is open.
+  - **`str.size()` counts bytes, not characters.** `"héllo".size()` is 6.
+    Go does the same and it is defensible, but it has to be decided and
+    written down before the freeze rather than discovered after it.
 
 ---
 
 ## Known bugs
 
-  - `rc_debug.h`'s `__rc_live` is a plain non-atomic `static long` mutated
-    from every spawned thread, so the leak oracle can report a wrong count on
-    a threaded program. The oracle checking the refcounts is itself racy.
   - Vtable slots are assigned per method *name*, while each call site casts
     the slot to the signature it computed. Two interfaces declaring the same
     method name with different signatures share a slot. Not reachable today —
