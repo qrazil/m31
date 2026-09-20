@@ -192,7 +192,3 @@ Written down because they are unresolved, not because they are unimportant.
     assignment demands an exact per-method signature match and refuses
     interface-to-interface assignment — but it becomes type confusion through
     a function-pointer cast the day interface embedding arrives.
-  - Generic inference does not see through a constructed temporary:
-    `unwrap(Box<int>(41))` is refused while `Box<int> b = Box<int>(41);
-    unwrap(b)` is accepted. `arg_ty` in `src/mono.rs` handles `Expr::New`, so
-    the fault is downstream of it in unification.

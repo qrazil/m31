@@ -56,10 +56,10 @@ print(int(total));          // 500
 type Box<T> { T item; }
 T unwrap<T>(Box<T> b) { return b.item; }
 
-Box<int> bi = Box<int>(41);
-Box<str> bs = Box<str>("boxed");
-print(unwrap(bi) + 1);      // 42
-print(unwrap(bs));          // boxed
+print(unwrap(Box<int>(41)) + 1);    // 42 -- inferred from the temporary
+print(unwrap(Box<str>("boxed")));   // boxed
+Box<int> bi = Box<int>(7);
+print(unwrap(bi));                  // 7 -- and from a local
 
 // --- 3.8 collections ----------------------------------------------------
 Array<int> arr = Array<int>(3, 0);

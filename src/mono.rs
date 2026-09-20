@@ -523,7 +523,16 @@ impl Mono {
                 // queued and the name rewritten to the mangled one. Inference
                 // is deliberately shallow -- see `infer`.
                 if let Some(decl) = self.generic_funcs.get(name).cloned() {
-                    let targs = self.infer(&decl, &out.pos, sub, *s)?;
+                    // Infer from the arguments AS WRITTEN, not from `out`.
+                    // There are two type arenas -- `src_exprs` for the input
+                    // program and `out_exprs` for what substitution produces
+                    // -- and `unify` reads `src_exprs`. A substituted
+                    // `Expr::New` carries an `out_exprs` index, so unifying
+                    // against it indexed the wrong arena and inference
+                    // failed for a constructed temporary while succeeding
+                    // for a local. `unify` substitutes what it binds, which
+                    // is what `sub` is threaded through for.
+                    let targs = self.infer(&decl, &args.pos, sub, *s)?;
                     let mangled = self.mangle(name, &targs);
                     self.queue.push((name.clone(), targs, *s));
                     return Ok(Expr::Call(mangled, out, *s));
