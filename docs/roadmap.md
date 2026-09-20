@@ -72,6 +72,15 @@ freezing. Roughly in order.
 
 ### 1. Errors
 
+**Designed: `docs/errors-decision.md`.** Settled there: errors are values
+and not exceptions; `Option<T>` and `Result<T, E>` are built in, because a
+built-in method cannot return a user-defined type and without them
+`index_of` and `parse_int` cannot exist at all; and no trap that exists
+today becomes an error, because a trap is for a bug in the program and an
+error is for the world. Open there, with recommendations: whether `Map.get`
+starts returning `Option<V>`, what propagation looks like, and whether an
+ignored `Result` is an error.
+
 The largest hole. Today every fault traps: a bad index, a missing key, a
 closed channel. That is fine for a bug and wrong for a condition a program
 should handle — a file that is not there is not a bug.
