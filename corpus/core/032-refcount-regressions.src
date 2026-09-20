@@ -1,0 +1,66 @@
+distinct int Price;
+
+// Each of these was a real bug found by an adversarial review of the
+// refcount insertion, and each one's symptom was heap corruption or a leak
+// rather than a wrong answer -- which is exactly why they need to be here.
+
+// 1. Assigning to a reference PARAMETER released the caller's reference and
+//    leaked the new one. A parameter is borrowed, so it is not registered as
+//    owned; assignment has to take ownership rather than release.
+void reassign(str s) {
+    s = "x" + "y";
+    print(s);
+}
+
+// 2. Nested for-in shared the synthetic names `$coll` and `$i`, so releasing
+//    by name found the innermost binding twice: the inner collection was
+//    released twice and the outer never.
+str firstpair(List<str> a, List<str> b) {
+    for (str x in a) {
+        for (str y in b) {
+            return x + y;
+        }
+    }
+    return "none";
+}
+
+str t = "he" + "llo";
+reassign(t);
+print(t);
+print(len(t));
+
+List<str> p = List<str>();
+p.push("a");
+List<str> q = List<str>();
+q.push("b");
+print(firstpair(p, q));
+print(p.len());
+print(q.len());
+
+// 3. An owned temporary in the right-hand operand of `&&` or `||` was
+//    released in the merge block, which the short-circuit edge reaches
+//    without ever computing it. Segfault.
+str a = "aa";
+bool no = false;
+if (no && len(a + "y") == 3) {
+    print("unreachable");
+} else {
+    print("short-circuited");
+}
+bool yes = true;
+if (yes || len(a + "z") == 3) {
+    print("short-circuited too");
+}
+
+// 8. A distinct type carried through an if-join or a loop header was typed
+//    as a reference, and the emitted C did not compile.
+Price acc = Price(1);
+if (yes) {
+    acc = acc + Price(1);
+}
+int n = 0;
+while (n < 3) {
+    acc = acc + Price(10);
+    n = n + 1;
+}
+print(int(acc));

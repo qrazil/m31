@@ -93,6 +93,20 @@ bool rt_str_eq(Obj *a, Obj *b) {
     return memcmp(x->data, y->data, (size_t)x->len) == 0;
 }
 
+/* A str is immutable, so a copy is indistinguishable by value -- but not by
+ * IDENTITY, and identity is what a thread boundary cares about. Sending a
+ * string you also keep needs a second object, not a second reference. */
+Obj *rt_str_clone(Obj *o) {
+    const Str *x = (const Str *)o;
+    Str *s = (Str *)rt_alloc(sizeof(Str) + (size_t)x->len + 1, &rt_str_type);
+    char *buf = (char *)(s + 1);
+    memcpy(buf, x->data, (size_t)x->len);
+    buf[x->len] = '\0';
+    s->len = x->len;
+    s->data = buf;
+    return (Obj *)s;
+}
+
 void rt_print(int64_t v) {
     printf("%" PRId64 "\n", v);
 }
@@ -532,6 +546,14 @@ void rt_wait_all(void) {
  * abort() skips atexit handlers, so a trapping program never prints
  * __rc_live. run.sh therefore does not require the refcount invariant on
  * corpus/traps/ programs. */
+void rt_check_unique(Obj *o) {
+    if (o->rc == RC_IMMORTAL) return;
+    if (o->rc != 1) {
+        rt_trap("value crossing a thread boundary is still referenced elsewhere; "
+                "clone() it, or drop the other reference first");
+    }
+}
+
 _Noreturn void rt_trap(const char *msg) {
     fflush(stdout);
     fprintf(stderr, "trap: %s\n", msg);

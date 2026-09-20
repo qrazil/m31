@@ -1,0 +1,7 @@
+Chan<str> c = Chan<str>(4);
+str m = "he" + "llo";
+int i = 0;
+while (i < 3) {
+    send(c, m);
+    i = i + 1;
+}

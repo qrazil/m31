@@ -1,0 +1,1 @@
+trap: value crossing a thread boundary is still referenced elsewhere; clone() it, or drop the other reference first

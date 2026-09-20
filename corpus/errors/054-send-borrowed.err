@@ -1,0 +1,4 @@
+corpus/errors/054-send-borrowed.src:4:11: this value is borrowed from something else and cannot cross a thread boundary; wrap it in clone(..) to send a copy
+  |
+4 | send(c, xs[0]);
+  |           ^

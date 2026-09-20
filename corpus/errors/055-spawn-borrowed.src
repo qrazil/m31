@@ -1,0 +1,12 @@
+void e(Chan<int> d, str s) {
+    send(d, len(s));
+}
+
+// `borrowed` is a parameter: the caller still holds it, so handing it to a
+// new thread would leave two threads sharing one non-atomic refcount.
+void f(Chan<int> d, str borrowed) {
+    spawn e(d, borrowed);
+}
+
+Chan<int> d = Chan<int>(1);
+f(d, "hi");

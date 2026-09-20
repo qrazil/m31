@@ -114,6 +114,8 @@ pub struct Lowerer {
     /// Owned temporaries produced while lowering the current statement.
     stmt_temps: Vec<Value>,
     loops: Vec<LoopCtx>,
+    /// Counter for synthetic names, so nested loops do not collide.
+    synth: u32,
     /// Locals that have been moved out of. Any later use is refused.
     ///
     /// One bit per local, as docs/types.md §4a describes: this is the whole
@@ -158,6 +160,7 @@ impl Lowerer {
             owned: Vec::new(),
             stmt_temps: Vec::new(),
             loops: Vec::new(),
+            synth: 0,
             moved: Vec::new(),
             recv: None,
             ret_ty: Ty::Void,
@@ -390,17 +393,7 @@ impl Lowerer {
                 if !self.assignable(v.ty, elem) {
                     return Err(Diag::new(args.pos[1].span(), self.mismatch(elem, v.ty)));
                 }
-                // A move, so the sender must not release it: take it off the
-                // pending list if it was an owned temporary, and mark the
-                // local dead if it was one.
-                if v.owned {
-                    self.stmt_temps.retain(|t| *t != v.val());
-                }
-                if self.is_ref(elem) && self.chan_elem(elem).is_none() {
-                    if let Expr::Var(n, s) = &args.pos[1] {
-                        self.mark_moved(n, *s)?;
-                    }
-                }
+                self.transfer(&v, &args.pos[1], span)?;
                 self.push(Inst::Call {
                     dst: None,
                     func: "rt_chan_send".to_string(),
@@ -426,6 +419,63 @@ impl Lowerer {
         }
     }
 
+    /// Hand a reference across a thread boundary -- `send` or `spawn`.
+    ///
+    /// Two cases, and conflating them was three separate bugs:
+    ///
+    /// - We **own** the reference (an owned temporary, or a local this scope
+    ///   registered). Then it is a MOVE: transfer it, emit nothing, and
+    ///   refuse any later use.
+    /// - We only **borrow** it (an element, a field, a parameter). Then the
+    ///   +1 belongs to somebody else, so the receiver needs one of its own:
+    ///   retain. The value stays usable here, because nothing was given up.
+    ///
+    /// The receiving side always releases, so both cases balance.
+    fn transfer(&mut self, v: &Val, arg: &Expr, span: Span) -> Result<(), Diag> {
+        if !self.is_ref(v.ty) || self.chan_elem(v.ty).is_some() {
+            return Ok(());
+        }
+        // The value must be UNIQUE when it crosses. Retaining a borrowed one
+        // instead would leave two threads sharing a non-atomic refcount,
+        // which is precisely the race moved-not-shared exists to prevent --
+        // so a borrowed value cannot cross at all, and `clone` is the way to
+        // send something you also want to keep.
+        self.push(Inst::Call {
+            dst: None,
+            func: "rt_check_unique".to_string(),
+            args: vec![v.val()],
+        });
+
+        if v.owned {
+            self.stmt_temps.retain(|t| *t != v.val());
+            return Ok(());
+        }
+        if let Expr::Var(n, s) = arg {
+            if self.owns_local(n) {
+                return self.mark_moved(n, *s);
+            }
+            return Err(Diag::new(
+                *s,
+                format!(
+                    "`{n}` is borrowed here and cannot cross a thread boundary; \
+                     a reference two threads can reach would race on a non-atomic \
+                     refcount. Use clone({n}) to send a copy."
+                ),
+            ));
+        }
+        let _ = span;
+        Err(Diag::new(
+            arg.span(),
+            "this value is borrowed from something else and cannot cross a thread \
+             boundary; wrap it in clone(..) to send a copy"
+                .to_string(),
+        ))
+    }
+
+    fn owns_local(&self, name: &str) -> bool {
+        self.owned.iter().any(|ns| ns.iter().any(|n| n == name))
+    }
+
     /// Mark a local as moved. Any later use is a compile error.
     fn mark_moved(&mut self, name: &str, span: Span) -> Result<(), Diag> {
         if self.binding(name).is_none() {
@@ -433,6 +483,29 @@ impl Lowerer {
         }
         if self.moved.contains(&name.to_string()) {
             return Err(Diag::new(span, format!("`{name}` was already moved")));
+        }
+        // A move may only take a local declared in THIS scope.
+        //
+        // The move set is one flat set of names per function, with no notion
+        // of the control-flow graph, so a move inside a loop body is checked
+        // once and executed every iteration, and a move inside one arm of an
+        // `if` silently suppresses the release on the arm that did not move.
+        // Both are real bugs and both vanish if a move can only reach
+        // something the current scope owns. The cost is a rename or an inner
+        // binding, which the diagnostic asks for.
+        if !self
+            .owned
+            .last()
+            .is_some_and(|ns| ns.iter().any(|n| n == name))
+        {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`{name}` is declared outside this block and cannot be moved from \
+                     here; a move inside a loop or a branch would run a different \
+                     number of times than it was checked. Bind it in this block first."
+                ),
+            ));
         }
         self.moved.push(name.to_string());
         // A moved local must not be released at scope end: the value now
@@ -1121,6 +1194,7 @@ impl Lowerer {
         self.owned.clear();
         self.loops.clear();
         self.moved.clear();
+        self.synth = 0;
         self.cur = 0;
         self.ret_ty = f.ret;
 
@@ -1250,6 +1324,21 @@ impl Lowerer {
                     }
                 }
             }
+        }
+    }
+
+    /// Release only the temporaries registered since `mark`.
+    ///
+    /// Needed by `&&` and `||`: the right-hand operand is lowered into its
+    /// own block, and anything it allocates must be released THERE. Left to
+    /// the statement's flush, the release lands in the merge block, which the
+    /// short-circuit edge reaches without ever having run the operand -- so
+    /// the value does not dominate its own release, and the emitted C reads
+    /// an uninitialised pointer.
+    fn flush_temps_since(&mut self, mark: usize) {
+        let temps: Vec<Value> = self.stmt_temps.split_off(mark);
+        for v in temps {
+            self.push(Inst::RcDec { val: v });
         }
     }
 
@@ -1396,9 +1485,21 @@ impl Lowerer {
                     } else {
                         self.push(Inst::RcInc { val: val.val() });
                     }
-                    // Release the previous value only after the new one is
-                    // retained, so `s = s;` cannot free what it is assigning.
-                    self.push(Inst::RcDec { val: old });
+                    // Release the previous value only if we held it. A
+                    // PARAMETER is borrowed (docs/ir-v0.md §5.1) and is
+                    // deliberately not registered as owned, so releasing its
+                    // old value would free the caller's reference -- and
+                    // never registering the new one would leak it. Assigning
+                    // to a parameter therefore takes ownership from here on.
+                    let held = self
+                        .owned
+                        .iter()
+                        .any(|names| names.iter().any(|n| n == name));
+                    if held {
+                        self.push(Inst::RcDec { val: old });
+                    } else {
+                        self.owned.last_mut().unwrap().push(name.clone());
+                    }
                 }
                 self.rebind(name, val.val());
                 self.flush_temps();
@@ -1549,21 +1650,10 @@ impl Lowerer {
                     if !self.assignable(v.ty, p.ty) {
                         return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
                     }
-                    // A spawn MOVES every reference it captures: the new
-                    // thread is the only one that may reach it afterwards,
-                    // which is what keeps refcounts non-atomic.
-                    // A channel is exempt: it is the sanctioned way for
-                    // threads to share, so it is aliased rather than moved.
-                    // Everything else IS moved -- the new thread becomes the
-                    // only one that can reach it.
-                    if self.is_ref(p.ty) && self.chan_elem(p.ty).is_none() {
-                        if v.owned {
-                            self.stmt_temps.retain(|t| *t != v.val());
-                        }
-                        if let Expr::Var(n, s) = a {
-                            self.mark_moved(n, *s)?;
-                        }
-                    }
+                    // A spawn hands every reference to the new thread, which
+                    // becomes the only one that may reach it. A channel is
+                    // exempt -- it is how threads share.
+                    self.transfer(&v, a, *span)?;
                     vals.push(v.val());
                 }
                 self.push(Inst::Spawn {
@@ -1727,6 +1817,16 @@ impl Lowerer {
     ) -> Result<(), Diag> {
         self.check_shadow(name, span)?;
 
+        // Synthetic names must be UNIQUE per loop. Release resolves an owned
+        // name through `lookup`, which finds the innermost binding -- so two
+        // nested loops both using `$coll` made the outer one's release
+        // resolve to the inner collection: released twice, and the outer
+        // never. Nothing in the surface language shadows, which is exactly
+        // why the released-by-name scheme is otherwise safe.
+        self.synth += 1;
+        let coll_name = format!("$coll{}", self.synth);
+        let idx_name = format!("$i{}", self.synth);
+
         // Evaluate the collection once, into a scope of its own so it is
         // released when the loop ends.
         self.scopes.push(HashMap::new());
@@ -1754,8 +1854,8 @@ impl Lowerer {
         self.scopes
             .last_mut()
             .unwrap()
-            .insert("$coll".to_string(), (coll.ty, coll.val(), true));
-        self.owned.last_mut().unwrap().push("$coll".to_string());
+            .insert(coll_name.clone(), (coll.ty, coll.val(), true));
+        self.owned.last_mut().unwrap().push(coll_name.clone());
 
         let n = self.new_val(IrTy::I64);
         self.push(Inst::Call {
@@ -1769,12 +1869,12 @@ impl Lowerer {
         self.scopes
             .last_mut()
             .unwrap()
-            .insert("$i".to_string(), (Ty::Int, zero, false));
+            .insert(idx_name.clone(), (Ty::Int, zero, false));
         self.flush_temps();
 
         // From here the shape is `while ($i < $n)`, hand-built so the
         // increment can sit at the top of the body.
-        let mut names = vec!["$i".to_string()];
+        let mut names = vec![idx_name.clone()];
         Self::assigned_names(body, &mut names);
         names.retain(|x| self.lookup(x).is_some());
         names.sort();
@@ -1811,7 +1911,7 @@ impl Lowerer {
         for ((x, _, _), p) in carried.iter().zip(hp.iter()) {
             self.rebind(x, *p);
         }
-        let idx = self.lookup("$i").unwrap().1;
+        let idx = self.lookup(&idx_name).unwrap().1;
         let cond = self.new_val(IrTy::I1);
         self.push(Inst::ICmp {
             dst: cond,
@@ -1838,7 +1938,7 @@ impl Lowerer {
             lhs: idx,
             rhs: one,
         });
-        self.rebind("$i", next);
+        self.rebind(&idx_name, next);
 
         self.scopes.push(HashMap::new());
         self.owned.push(Vec::new());
@@ -1941,14 +2041,14 @@ impl Lowerer {
 
         let mut header_params = Vec::new();
         for (_, ty, _) in &carried {
-            header_params.push(self.new_val(ir_ty(*ty)));
+            header_params.push(self.new_val(self.irty(*ty)));
         }
         let hi = self.blocks.iter().position(|b| b.id == header).unwrap();
         self.blocks[hi].params = header_params.clone();
 
         let mut exit_params = Vec::new();
         for (_, ty, _) in &carried {
-            exit_params.push(self.new_val(ir_ty(*ty)));
+            exit_params.push(self.new_val(self.irty(*ty)));
         }
         let ei = self.blocks.iter().position(|b| b.id == exit_bb).unwrap();
         self.blocks[ei].params = exit_params.clone();
@@ -2120,7 +2220,7 @@ impl Lowerer {
 
         let mut join_params = Vec::new();
         for (_, ty) in &changed {
-            join_params.push(self.new_val(ir_ty(*ty)));
+            join_params.push(self.new_val(self.irty(*ty)));
         }
         let ji = self.blocks.iter().position(|b| b.id == join_bb).unwrap();
         self.blocks[ji].params = join_params.clone();
@@ -2585,6 +2685,7 @@ impl Lowerer {
             }
 
             self.switch_to(rhs_bb);
+            let mark = self.stmt_temps.len();
             let b = self.lower_expr(r)?;
             if b.ty != Ty::Bool {
                 return Err(Diag::new(
@@ -2592,6 +2693,8 @@ impl Lowerer {
                     format!("type mismatch: expected bool, found {}", self.tyname(b.ty)),
                 ));
             }
+            // Release what the operand allocated before leaving its block.
+            self.flush_temps_since(mark);
             let rhs_end = self.blocks[self.cur].id;
             self.switch_to(rhs_end);
             self.terminate(Term::Jump {
@@ -3027,6 +3130,19 @@ impl Lowerer {
                 self.stmt_temps.push(d);
                 return Ok(Val::new(d, v.ty, true));
             }
+            if self.underlying(v.ty) == Ty::Str {
+                // Immutable, so a copy is indistinguishable by value -- but
+                // not by identity, and identity is what a thread boundary
+                // cares about.
+                let d = self.new_val(IrTy::Ref);
+                self.push(Inst::Call {
+                    dst: Some(d),
+                    func: "rt_str_clone".to_string(),
+                    args: vec![v.val()],
+                });
+                self.stmt_temps.push(d);
+                return Ok(Val::new(d, v.ty, true));
+            }
             let Some(tid) = self.tdef_of(v.ty) else {
                 return Err(Diag::new(
                     args.pos[0].span(),
@@ -3043,12 +3159,7 @@ impl Lowerer {
                     format!("`{}` cannot be cloned", self.tyname(v.ty)),
                 ));
             }
-            if v.ty == Ty::Str {
-                return Err(Diag::new(
-                    args.pos[0].span(),
-                    "a str is immutable; cloning one would change nothing",
-                ));
-            }
+
             // Field by field: the copy holds the same references, each
             // retained once more.
             let n = self.typedefs[tid as usize].fields.len();

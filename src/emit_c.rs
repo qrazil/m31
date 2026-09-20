@@ -187,6 +187,15 @@ pub fn emit(m: &Module) -> String {
             .map(|i| format!("a->a{i}"))
             .collect();
         writeln!(o, "    {cn}({});", passed.join(", ")).unwrap();
+        // The spawning side handed this thread a reference per argument --
+        // moved if it owned one, retained if it only borrowed. Parameters are
+        // borrowed inside the callee (docs/ir-v0.md §5.1), so nobody there
+        // will release them: the trampoline is where the transfer ends.
+        for (i, p) in target.params.iter().enumerate() {
+            if target.ty_of(*p) == IrTy::Ref {
+                writeln!(o, "    rc_dec(a->a{i});").unwrap();
+            }
+        }
         writeln!(o, "    free(a);").unwrap();
         writeln!(o, "    return NULL;").unwrap();
         writeln!(o, "}}").unwrap();
@@ -200,9 +209,16 @@ pub fn emit(m: &Module) -> String {
         o.push('\n');
     }
 
+    // rt_wait_all joins every spawned thread. Without it a spawn can
+    // outlive the program: its output is lost, and the refcount invariant
+    // is reported by atexit while threads are still running.
     writeln!(
         o,
-        "int main(void) {{\n    {}();\n    return 0;\n}}",
+        "int main(void) {{
+    {}();
+    rt_wait_all();
+    return 0;
+}}",
         c_name("$main")
     )
     .unwrap();
@@ -274,6 +290,60 @@ fn emit_func(o: &mut String, f: &crate::ir::Func, types: &[TypeDef]) {
         .flat_map(|b| b.params.iter().copied())
         .collect();
 
+    // A value nothing reads is legitimate in emitted code: a loop whose body
+    // always returns still computes the index increment its back edge would
+    // have used, and that edge does not exist. gcc warns, run.sh treats a
+    // warning as failure, so such a declaration says it may be unused. A dead
+    // value is not a defect the way a dead *label* was.
+    let mut read: std::collections::BTreeSet<Value> = std::collections::BTreeSet::new();
+    for b in &f.blocks {
+        for i in &b.insts {
+            match i {
+                Inst::Arith { lhs, rhs, .. } | Inst::ICmp { lhs, rhs, .. } => {
+                    read.insert(*lhs);
+                    read.insert(*rhs);
+                }
+                Inst::Not { src, .. } => {
+                    read.insert(*src);
+                }
+                Inst::Call { args, .. }
+                | Inst::CallIface { args, .. }
+                | Inst::Spawn { args, .. } => read.extend(args.iter().copied()),
+                Inst::LoadField { obj, .. } => {
+                    read.insert(*obj);
+                }
+                Inst::StoreField { obj, val, .. } => {
+                    read.insert(*obj);
+                    read.insert(*val);
+                }
+                Inst::RcInc { val } | Inst::RcDec { val } => {
+                    read.insert(*val);
+                }
+                Inst::IConst { .. }
+                | Inst::BConst { .. }
+                | Inst::SConst { .. }
+                | Inst::Alloc { .. } => {}
+            }
+        }
+        match &b.term {
+            Term::Jump { args, .. } => read.extend(args.iter().copied()),
+            Term::Brif {
+                cond,
+                then_args,
+                els_args,
+                ..
+            } => {
+                read.insert(*cond);
+                read.extend(then_args.iter().copied());
+                read.extend(els_args.iter().copied());
+            }
+            Term::Ret { val: Some(v) } => {
+                read.insert(*v);
+            }
+            Term::Ret { val: None } => {}
+        }
+    }
+
     // Declare every value up front. Function parameters are already declared
     // by the signature, so skip those.
     let is_param = |v: Value| f.params.contains(&v);
@@ -293,7 +363,7 @@ fn emit_func(o: &mut String, f: &crate::ir::Func, types: &[TypeDef]) {
             IrTy::I1 => "false",
             IrTy::Ref => "NULL",
         };
-        let attr = if block_params.contains(&v) {
+        let attr = if block_params.contains(&v) || !read.contains(&v) {
             "__attribute__((unused)) "
         } else {
             ""

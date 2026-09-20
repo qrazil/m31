@@ -1,0 +1,6 @@
+Chan<str> c = Chan<str>(4);
+str m = "he" + "llo";
+bool go = false;
+if (go) {
+    send(c, m);
+}

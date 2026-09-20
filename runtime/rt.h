@@ -132,6 +132,7 @@ int64_t rt_index_get(Obj *o, int64_t i);
 void    rt_index_set(Obj *o, int64_t i, int64_t v);
 void    rt_list_push(Obj *o, int64_t v);
 Obj    *rt_seq_clone(Obj *o);         /* shallow copy of an array or list */
+Obj    *rt_str_clone(Obj *o);         /* a str copy with its own refcount */
 
 /* A hash map. Keys are `int` or `str`; the compiler restricts it, because
  * hashing a user type would need a Hashable interface that does not exist
@@ -183,6 +184,15 @@ void rt_wait_all(void);
  * Out-of-line and _Noreturn so the checks below stay cheap: the compiler
  * treats the trap edge as cold and keeps the hot path straight. */
 _Noreturn void rt_trap(const char *msg);
+
+/* Traps unless `o` is the only reference to its object.
+ *
+ * A value crossing a thread boundary must be UNIQUE, or two threads end up
+ * mutating one non-atomic refcount -- which is the race the whole
+ * moved-not-shared design exists to prevent. The compiler refuses the cases
+ * it can see; this catches the ones it cannot, such as a local that was
+ * aliased earlier. Immortal objects pass: nothing ever counts them. */
+void rt_check_unique(Obj *o);
 
 /* Checked arithmetic. int is 64-bit and overflow TRAPS -- docs/ir-v0.md §3.
  * There is no wrapping variant; one way to do each thing.
