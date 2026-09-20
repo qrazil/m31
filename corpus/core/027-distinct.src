@@ -1,0 +1,39 @@
+// A distinct type has the SAME REPRESENTATION as its base and a different
+// identity to the type checker. It is erased before the IR -- there is no
+// object, no header and no refcount -- so `distinct int Price` is an i64 at
+// runtime, exactly like `int`.
+//
+// It inherits every operation of its base, because it is an int: Price + Price
+// is a Price. Mixing with the base needs an explicit conversion, which is the
+// whole point.
+
+distinct int Price;
+distinct int UserId;
+distinct str Email;
+
+type User {
+    UserId id;       // stored as a plain i64, not a wrapper
+    Email  contact;
+    str    name;
+}
+
+Price total(Price unit, int qty) {
+    return unit * Price(qty);
+}
+
+Price p = Price(250);
+Price q = Price(100);
+print(p + q);
+print(p - q);
+print(p > q);
+print(p == q);
+print(total(p, 3));
+
+User u = User(UserId(7), Email("a@b.c"), "ana");
+print(u.id);
+print(u.contact);
+print(u.name);
+
+// Converting back out, explicitly.
+print(int(u.id) + 1);
+print(len(str(u.contact)));

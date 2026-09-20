@@ -46,7 +46,7 @@ pub fn emit(m: &Module) -> String {
     // A drop function only exists for types that hold references; rc_dec
     // checks for NULL, so types holding none pay a branch instead of a call.
     for (i, t) in m.types.iter().enumerate() {
-        if t.is_interface || t.is_chan || !t.needs_drop() {
+        if t.is_interface || t.is_chan || t.is_distinct || !t.needs_drop() {
             continue;
         }
         writeln!(o, "static void drop_T{i}(Obj *o) {{").unwrap();
@@ -72,7 +72,7 @@ pub fn emit(m: &Module) -> String {
         o.push('\n');
     }
     for (i, t) in m.types.iter().enumerate() {
-        if t.is_interface || t.is_chan {
+        if t.is_interface || t.is_chan || t.is_distinct {
             continue;
         }
         let drop = if t.needs_drop() {
@@ -108,7 +108,11 @@ pub fn emit(m: &Module) -> String {
             .unwrap();
         }
     }
-    if !m.types.iter().all(|t| t.is_interface || t.is_chan) {
+    if !m
+        .types
+        .iter()
+        .all(|t| t.is_interface || t.is_chan || t.is_distinct)
+    {
         o.push('\n');
     }
 

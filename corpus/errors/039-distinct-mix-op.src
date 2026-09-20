@@ -1,0 +1,4 @@
+distinct int Price;
+
+Price p = Price(1);
+print(p + 2);

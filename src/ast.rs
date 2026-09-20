@@ -107,6 +107,10 @@ pub struct TypeDecl {
     /// are empty.
     pub methods: Vec<Func>,
     pub is_interface: bool,
+    /// `distinct int Price;` -- same representation as the base type, a
+    /// different identity to the type checker, and nothing at all at
+    /// runtime. Erased before the IR, like generics.
+    pub distinct_base: Option<Ty>,
     pub span: Span,
 }
 

@@ -179,6 +179,7 @@ impl Mono {
                     }],
                     methods: Vec::new(),
                     is_interface: false,
+                    distinct_base: None,
                     span,
                 });
             }
@@ -244,6 +245,7 @@ impl Mono {
             fields,
             methods: decl.methods.clone(),
             is_interface: decl.is_interface,
+            distinct_base: decl.distinct_base,
             span: decl.span,
         });
         Ok(())
@@ -302,6 +304,10 @@ impl Mono {
             fields,
             methods: t.methods.clone(),
             is_interface: t.is_interface,
+            distinct_base: match t.distinct_base {
+                Some(b) => Some(self.subst_ty(b, sub, t.span)?),
+                None => None,
+            },
             span: t.span,
         })
     }

@@ -20,8 +20,8 @@ which gcc and clang both build clean at `-O0` and `-O2`.
 `examples/tour.src` is a tour of every feature, and is also in the corpus so
 it cannot rot.
 
-- 77 corpus programs, 0 failing
-- 66 unit tests
+- 82 corpus programs, 0 failing
+- 71 unit tests
 - 0 dependencies, 0 `unsafe`, clippy clean at `-D warnings`
 
 ## What the language does today
@@ -85,6 +85,29 @@ void Rect.scale(int f) {
 ```
 
 That is safe only because of the next rule.
+
+**Distinct types** are the same representation as their base with a
+different identity — erased before the IR, so they cost nothing:
+
+```c
+distinct int Price;
+distinct int UserId;
+
+Price p = Price(250);
+print(p + Price(100));   // inherits int's operations: it IS an int
+print(p + 2);            // error: convert one of them
+int n = int(p);          // explicit, emits nothing
+```
+
+`distinct int Price` is an `i64` at runtime — no object, no header, no
+refcount — and a `UserId` field stores as a plain `i64`, not a wrapper. A
+distinct type inherits every operation of its base, and the result keeps the
+distinct type; mixing with the base needs a conversion, which is the point.
+
+There are **no type aliases**. An alias is a second name for the same type,
+so it gives documentation and no safety — you could still pass an `OrderId`
+where a `UserId` was wanted. Go added them for cross-package migration during
+refactors, which is a module problem we do not have.
 
 **Concurrency** is `spawn` plus channels, and values crossing a thread are
 **moved**:

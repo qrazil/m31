@@ -859,3 +859,65 @@ fn channel_misuse_is_rejected() {
     assert!(err("int f(int a) { return a; }\nspawn f(1);").contains("needs a void function"));
     assert!(err("Chan<int> c = Chan<int>(2);\nsend(c, \"s\");").contains("expected int"));
 }
+
+// ---- distinct types ---------------------------------------------------
+
+#[test]
+fn a_distinct_type_costs_nothing_at_runtime() {
+    // The whole claim: same representation as the base. No alloc, no header,
+    // no refcount -- the distinctness is erased before the IR.
+    let out = ir("distinct int Price;\nPrice f(Price p) { return p + p; }\nprint(f(Price(2)));");
+    assert!(
+        out.contains("func f(v0: I64) -> I64"),
+        "must be a plain i64:\n{out}"
+    );
+    assert!(!out.contains("alloc"), "must not allocate:\n{out}");
+    assert!(!out.contains("rc_"), "must not be refcounted:\n{out}");
+}
+
+#[test]
+fn a_distinct_field_is_stored_unwrapped() {
+    let out = ir(
+        "distinct int UserId;\ntype User { UserId id; }\nUser u = User(UserId(7)); print(u.id);",
+    );
+    assert!(
+        out.contains("type User { id: I64 }"),
+        "the field must be a plain i64, not a reference:\n{out}"
+    );
+}
+
+#[test]
+fn a_distinct_type_inherits_its_bases_operations() {
+    let out = ir(
+        "distinct int Price;\nPrice a = Price(3); Price b = Price(4); print(a + b); print(a < b);",
+    );
+    assert!(out.contains("iadd"), "arithmetic is the base's:\n{out}");
+    assert!(out.contains("icmp"), "comparison is the base's:\n{out}");
+}
+
+#[test]
+fn a_distinct_type_does_not_mix_with_its_base_or_its_peers() {
+    assert!(
+        err("distinct int Price;\nPrice p = Price(1); print(p + 2);")
+            .contains("cannot apply `+` to Price and int")
+    );
+    assert!(
+        err("distinct int Price;\nPrice p = Price(1); int n = p; print(n);")
+            .contains("expected int, found Price")
+    );
+    assert!(
+        err("distinct int Price;\nPrice p = 5; print(p);").contains("expected Price, found int")
+    );
+    assert!(err(
+        "distinct int Price;\ndistinct int UserId;\nvoid f(Price p) { print(p); }\nf(UserId(1));"
+    )
+    .contains("expected Price, found UserId"));
+}
+
+#[test]
+fn conversions_go_both_ways_and_emit_nothing() {
+    let out = ir("distinct int Price;\nPrice p = Price(5); print(int(p));");
+    // One constant, one print. No conversion instruction of any kind.
+    assert!(out.contains("iconst 5"), "{out}");
+    assert!(!out.contains("convert") && !out.contains("cast"), "{out}");
+}

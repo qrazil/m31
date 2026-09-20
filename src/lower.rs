@@ -93,6 +93,8 @@ pub struct Lowerer {
     /// Field declarations, parallel to `typedefs`, so construction can bind
     /// arguments by the same rule as a call.
     field_params: Vec<Vec<Param>>,
+    /// Base type of each distinct type, parallel to `typedefs`.
+    distinct_base: Vec<Option<Ty>>,
     /// The monomorphised program's interned type expressions.
     ty_exprs: Vec<TyExpr>,
     /// Required methods per interface, parallel to `typedefs`; empty for a
@@ -125,6 +127,8 @@ pub struct Lowerer {
     ret_ty: Ty,
 }
 
+/// The representation of a surface type, WITHOUT resolving distinct types.
+/// Use `Lowerer::irty` instead wherever a distinct type can appear.
 fn ir_ty(t: Ty) -> IrTy {
     match t {
         Ty::Int => IrTy::I64,
@@ -142,6 +146,7 @@ impl Lowerer {
             typedefs: Vec::new(),
             field_surface: Vec::new(),
             field_params: Vec::new(),
+            distinct_base: Vec::new(),
             ty_exprs: Vec::new(),
             iface_methods: Vec::new(),
             iface_slots: Vec::new(),
@@ -226,7 +231,7 @@ impl Lowerer {
                 if v.owned {
                     self.stmt_temps.retain(|t| *t != v.val());
                 }
-                if elem.is_ref() && self.chan_elem(elem).is_none() {
+                if self.is_ref(elem) && self.chan_elem(elem).is_none() {
                     if let Expr::Var(n, s) = &args.pos[1] {
                         self.mark_moved(n, *s)?;
                     }
@@ -239,7 +244,7 @@ impl Lowerer {
                 Ok(Val::void())
             }
             _ => {
-                let d = self.new_val(ir_ty(elem));
+                let d = self.new_val(self.irty(elem));
                 self.push(Inst::Call {
                     dst: Some(d),
                     func: "rt_chan_recv".to_string(),
@@ -247,7 +252,7 @@ impl Lowerer {
                 });
                 // The receiver acquires the sender's reference: owned, with
                 // no retain, because the send gave one up.
-                let owned = elem.is_ref();
+                let owned = self.is_ref(elem);
                 if owned {
                     self.stmt_temps.push(d);
                 }
@@ -481,15 +486,17 @@ impl Lowerer {
                         format!("duplicate field `{}` in type `{}`", f.name, t.name),
                     ));
                 }
-                fields.push((f.name.clone(), ir_ty(f.ty)));
+                fields.push((f.name.clone(), self.irty(f.ty)));
             }
             self.typedefs.push(TypeDef {
                 name: t.name.clone(),
                 fields,
                 is_interface: t.is_interface,
                 is_chan: t.name.starts_with("Chan$"),
+                is_distinct: t.distinct_base.is_some(),
                 vtable: Vec::new(),
             });
+            self.distinct_base.push(t.distinct_base);
             self.iface_methods.push(t.methods.clone());
             // One dispatch slot per distinct interface method name, for the
             // whole program.
@@ -582,7 +589,10 @@ impl Lowerer {
         // Fill each concrete type's vtable now that every method is known.
         let slots = self.iface_slots.clone();
         for i in 0..self.typedefs.len() {
-            if self.typedefs[i].is_interface || self.typedefs[i].is_chan {
+            if self.typedefs[i].is_interface
+                || self.typedefs[i].is_chan
+                || self.typedefs[i].is_distinct
+            {
                 continue;
             }
             let tname = self.typedefs[i].name.clone();
@@ -721,7 +731,37 @@ impl Lowerer {
         }
     }
 
+    /// The representation of a surface type. A distinct type is represented
+    /// exactly as its base -- that is the whole point: `distinct int Price`
+    /// is an `i64` at runtime, with no object, no header and no refcount.
+    fn irty(&self, t: Ty) -> IrTy {
+        match self.base_of(t) {
+            Some(b) => self.irty(b),
+            None => ir_ty(t),
+        }
+    }
+
+    /// The base type of a distinct type, if it is one.
+    fn base_of(&self, t: Ty) -> Option<Ty> {
+        let tid = self.tdef_of(t)?;
+        self.distinct_base[tid as usize]
+    }
+
+    /// Strip distinctness down to the underlying ordinary type.
+    fn underlying(&self, t: Ty) -> Ty {
+        match self.base_of(t) {
+            Some(b) => self.underlying(b),
+            None => t,
+        }
+    }
+
     /// The element type of a channel type, if it is one.
+    /// Does this type need refcounting? A distinct type follows its base --
+    /// `distinct int Price` is not a reference, however it is spelled.
+    fn is_ref(&self, t: Ty) -> bool {
+        self.underlying(t).is_ref()
+    }
+
     fn chan_elem(&self, t: Ty) -> Option<Ty> {
         let tid = self.tdef_of(t)?;
         if !self.typedefs[tid as usize].is_chan {
@@ -911,7 +951,7 @@ impl Lowerer {
         }
 
         for p in &f.params {
-            let v = self.new_val(ir_ty(p.ty));
+            let v = self.new_val(self.irty(p.ty));
             params.push(v);
             if scope.insert(p.name.clone(), (p.ty, v, false)).is_some() {
                 return Err(Diag::new(
@@ -966,7 +1006,7 @@ impl Lowerer {
             ret: if f.ret == Ty::Void {
                 None
             } else {
-                Some(ir_ty(f.ret))
+                Some(self.irty(f.ret))
             },
             blocks,
             types: self.types.clone(),
@@ -981,7 +1021,7 @@ impl Lowerer {
         let names = self.owned.last().cloned().unwrap_or_default();
         for name in names.iter().rev() {
             if let Some((ty, v)) = self.lookup(name) {
-                if ty.is_ref() {
+                if self.is_ref(ty) {
                     self.push(Inst::RcDec { val: v });
                 }
             }
@@ -995,7 +1035,7 @@ impl Lowerer {
         for names in all.iter().rev() {
             for name in names.iter().rev() {
                 if let Some((ty, v)) = self.lookup(name) {
-                    if ty.is_ref() {
+                    if self.is_ref(ty) {
                         self.push(Inst::RcDec { val: v });
                     }
                 }
@@ -1011,7 +1051,7 @@ impl Lowerer {
         for names in all.iter().skip(depth).rev() {
             for name in names.iter().rev() {
                 if let Some((ty, v)) = self.lookup(name) {
-                    if ty.is_ref() {
+                    if self.is_ref(ty) {
                         self.push(Inst::RcDec { val: v });
                     }
                 }
@@ -1055,8 +1095,8 @@ impl Lowerer {
                         init.span(),
                         format!(
                             "type mismatch: expected {}, found {}",
-                            ty.name(),
-                            val.ty.name()
+                            self.tyname(*ty),
+                            self.tyname(val.ty)
                         ),
                     ));
                 }
@@ -1064,7 +1104,7 @@ impl Lowerer {
                 // The local must hold a +1. A borrowed source needs one added;
                 // an owned temp is handed straight over, so drop it from the
                 // pending list rather than releasing it.
-                if ty.is_ref() {
+                if self.is_ref(*ty) {
                     if val.owned {
                         self.stmt_temps.retain(|t| *t != val.val());
                     } else {
@@ -1151,12 +1191,12 @@ impl Lowerer {
                         value.span(),
                         format!(
                             "type mismatch: expected {}, found {}",
-                            ty.name(),
-                            val.ty.name()
+                            self.tyname(ty),
+                            self.tyname(val.ty)
                         ),
                     ));
                 }
-                if ty.is_ref() {
+                if self.is_ref(ty) {
                     if val.owned {
                         self.stmt_temps.retain(|t| *t != val.val());
                     } else {
@@ -1197,15 +1237,15 @@ impl Lowerer {
                                 e.span(),
                                 format!(
                                     "type mismatch: expected {}, found {}",
-                                    want.name(),
-                                    val.ty.name()
+                                    self.tyname(want),
+                                    self.tyname(val.ty)
                                 ),
                             ));
                         }
                         // Returns are owned (+1). Retain a borrowed value
                         // before releasing locals, or returning a local would
                         // hand back a freed object.
-                        if want.is_ref() && !val.owned {
+                        if self.is_ref(want) && !val.owned {
                             self.push(Inst::RcInc { val: val.val() });
                         }
                         if val.owned {
@@ -1262,7 +1302,7 @@ impl Lowerer {
                     // threads to share, so it is aliased rather than moved.
                     // Everything else IS moved -- the new thread becomes the
                     // only one that can reach it.
-                    if p.ty.is_ref() && self.chan_elem(p.ty).is_none() {
+                    if self.is_ref(p.ty) && self.chan_elem(p.ty).is_none() {
                         if v.owned {
                             self.stmt_temps.retain(|t| *t != v.val());
                         }
@@ -1474,7 +1514,7 @@ impl Lowerer {
         if c.ty != Ty::Bool {
             return Err(Diag::new(
                 cond.span(),
-                format!("type mismatch: expected bool, found {}", c.ty.name()),
+                format!("type mismatch: expected bool, found {}", self.tyname(c.ty)),
             ));
         }
         self.flush_temps();
@@ -1546,7 +1586,7 @@ impl Lowerer {
         if c.ty != Ty::Bool {
             return Err(Diag::new(
                 cond.span(),
-                format!("type mismatch: expected bool, found {}", c.ty.name()),
+                format!("type mismatch: expected bool, found {}", self.tyname(c.ty)),
             ));
         }
         self.flush_temps();
@@ -1735,7 +1775,7 @@ impl Lowerer {
                         if a.ty != Ty::Int {
                             return Err(Diag::new(
                                 *span,
-                                format!("cannot negate a value of type {}", a.ty.name()),
+                                format!("cannot negate a value of type {}", self.tyname(a.ty)),
                             ));
                         }
                         // Lower as 0 - x so the overflow check is shared; this
@@ -1755,7 +1795,10 @@ impl Lowerer {
                         if a.ty != Ty::Bool {
                             return Err(Diag::new(
                                 *span,
-                                format!("cannot apply `!` to a value of type {}", a.ty.name()),
+                                format!(
+                                    "cannot apply `!` to a value of type {}",
+                                    self.tyname(a.ty)
+                                ),
                             ));
                         }
                         let d = self.new_val(IrTy::I1);
@@ -1840,15 +1883,15 @@ impl Lowerer {
                         });
                         return Ok(Val::void());
                     }
-                    let d = self.new_val(ir_ty(decl.ret));
+                    let d = self.new_val(self.irty(decl.ret));
                     self.push(Inst::CallIface {
                         dst: Some(d),
                         slot,
                         name: m.clone(),
                         args: vals,
-                        ret: Some(ir_ty(decl.ret)),
+                        ret: Some(self.irty(decl.ret)),
                     });
-                    let owned = decl.ret.is_ref();
+                    let owned = self.is_ref(decl.ret);
                     if owned {
                         self.stmt_temps.push(d);
                     }
@@ -1888,13 +1931,13 @@ impl Lowerer {
                     });
                     Ok(Val::void())
                 } else {
-                    let d = self.new_val(ir_ty(ret));
+                    let d = self.new_val(self.irty(ret));
                     self.push(Inst::Call {
                         dst: Some(d),
                         func: key,
                         args: vals,
                     });
-                    let owned = ret.is_ref();
+                    let owned = self.is_ref(ret);
                     if owned {
                         self.stmt_temps.push(d);
                     }
@@ -1983,13 +2026,13 @@ impl Lowerer {
             ));
         }
 
-        let d = self.new_val(ir_ty(ret));
+        let d = self.new_val(self.irty(ret));
         self.push(Inst::Call {
             dst: Some(d),
             func: key,
             args: vec![a.val(), b.val()],
         });
-        if ret.is_ref() {
+        if self.is_ref(ret) {
             self.stmt_temps.push(d);
         }
 
@@ -2019,7 +2062,7 @@ impl Lowerer {
                 self.push(Inst::Not { dst: out, src: d });
                 Ok(Val::new(out, Ty::Bool, false))
             }
-            _ => Ok(Val::new(d, ret, ret.is_ref())),
+            _ => Ok(Val::new(d, ret, self.is_ref(ret))),
         }
     }
 
@@ -2032,7 +2075,7 @@ impl Lowerer {
             if a.ty != Ty::Bool {
                 return Err(Diag::new(
                     l.span(),
-                    format!("type mismatch: expected bool, found {}", a.ty.name()),
+                    format!("type mismatch: expected bool, found {}", self.tyname(a.ty)),
                 ));
             }
             let rhs_bb = self.new_block();
@@ -2066,7 +2109,7 @@ impl Lowerer {
             if b.ty != Ty::Bool {
                 return Err(Diag::new(
                     r.span(),
-                    format!("type mismatch: expected bool, found {}", b.ty.name()),
+                    format!("type mismatch: expected bool, found {}", self.tyname(b.ty)),
                 ));
             }
             let rhs_end = self.blocks[self.cur].id;
@@ -2115,11 +2158,51 @@ impl Lowerer {
             }
         }
 
+        // A distinct type behaves exactly as its base -- it IS an int -- so
+        // arithmetic and comparison work, and the result keeps the distinct
+        // type. Mixing with the base needs an explicit conversion, which is
+        // the point: Price + Price is a Price, Price + int is a mistake.
+        if self.base_of(a.ty).is_some() && a.ty == b.ty {
+            let u = self.underlying(a.ty);
+            let inner = self.lower_bin_prim(op, u, &a, &b, span)?;
+            let out_ty = if inner.ty == Ty::Bool { Ty::Bool } else { a.ty };
+            return Ok(Val::new(inner.val(), out_ty, false));
+        }
+
+        // A distinct type mixed with something else. Blaming a missing
+        // operator method would be misleading -- the type has the operator,
+        // it is the operands that disagree.
+        if self.base_of(a.ty).is_some() || self.base_of(b.ty).is_some() {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "cannot apply `{}` to {} and {}; convert one of them",
+                    op.spelling(),
+                    self.tyname(a.ty),
+                    self.tyname(b.ty)
+                ),
+            ));
+        }
+
         // A user type on the left: dispatch to the operator's method.
         if matches!(a.ty, Ty::User(_)) {
             return self.lower_op_overload(op, &a, &b, span);
         }
 
+        self.lower_bin_prim(op, a.ty, &a, &b, span)
+    }
+
+    /// Arithmetic and comparison on primitives, shared by `int` and by any
+    /// distinct type whose base is a primitive.
+    fn lower_bin_prim(
+        &mut self,
+        op: BinOp,
+        ty: Ty,
+        a: &Val,
+        b: &Val,
+        span: Span,
+    ) -> Result<Val, Diag> {
+        use BinOp::*;
         let arith = match op {
             Add => Some(ArithOp::Add),
             Sub => Some(ArithOp::Sub),
@@ -2130,14 +2213,14 @@ impl Lowerer {
         };
 
         if let Some(aop) = arith {
-            if a.ty != Ty::Int || b.ty != Ty::Int {
+            if ty != Ty::Int {
                 return Err(Diag::new(
                     span,
                     format!(
                         "cannot apply `{}` to {} and {}",
                         op.spelling(),
-                        a.ty.name(),
-                        b.ty.name()
+                        self.tyname(a.ty),
+                        self.tyname(b.ty)
                     ),
                 ));
             }
@@ -2163,16 +2246,20 @@ impl Lowerer {
         if a.ty != b.ty {
             return Err(Diag::new(
                 span,
-                format!("cannot compare {} with {}", a.ty.name(), b.ty.name()),
+                format!(
+                    "cannot compare {} with {}",
+                    self.tyname(a.ty),
+                    self.tyname(b.ty)
+                ),
             ));
         }
-        if a.ty != Ty::Int && a.ty != Ty::Bool {
+        if ty != Ty::Int && ty != Ty::Bool {
             return Err(Diag::new(
                 span,
-                format!("cannot compare values of type {}", a.ty.name()),
+                format!("cannot compare values of type {}", self.tyname(a.ty)),
             ));
         }
-        if a.ty == Ty::Bool && !matches!(op, Eq | Ne) {
+        if ty == Ty::Bool && !matches!(op, Eq | Ne) {
             return Err(Diag::new(span, "bool supports only `==` and `!=`"));
         }
         let d = self.new_val(IrTy::I1);
@@ -2209,6 +2296,27 @@ impl Lowerer {
                     self.typedefs[tid as usize].name
                 ),
             ));
+        }
+        if self.typedefs[tid as usize].is_distinct {
+            // `Price(100)` is a CONVERSION, not a construction: same
+            // representation, different identity, nothing emitted.
+            if args.pos.len() != 1 || !args.named.is_empty() {
+                return Err(Diag::new(
+                    span,
+                    format!(
+                        "`{}` converts one value; it is a distinct type, not a struct",
+                        self.typedefs[tid as usize].name
+                    ),
+                ));
+            }
+            let v = self.lower_expr(&args.pos[0])?;
+            if self.underlying(v.ty) != self.underlying(ty) {
+                return Err(Diag::new(
+                    args.pos[0].span(),
+                    self.mismatch(self.underlying(ty), v.ty),
+                ));
+            }
+            return Ok(Val::new(v.val(), ty, v.owned));
         }
         if self.typedefs[tid as usize].is_chan {
             // `Chan<int>(8)` -- one positional argument, the capacity.
@@ -2262,7 +2370,7 @@ impl Lowerer {
             let v = g.unwrap();
             // The object takes a +1 on every reference field. An owned
             // temporary is handed straight over; a borrowed one is retained.
-            if v.ty.is_ref() {
+            if self.is_ref(v.ty) {
                 if v.owned {
                     self.stmt_temps.retain(|t| *t != v.val());
                 } else {
@@ -2294,7 +2402,7 @@ impl Lowerer {
                 ));
             }
             let a = self.lower_expr(&args.pos[0])?;
-            let f = match a.ty {
+            let f = match self.underlying(a.ty) {
                 Ty::Int => "rt_print",
                 Ty::Bool => "rt_print_bool",
                 Ty::Str => "rt_print_str",
@@ -2315,6 +2423,24 @@ impl Lowerer {
                 args: vec![a.val()],
             });
             return Ok(Val::void());
+        }
+
+        // `int(x)` and friends: convert a distinct value back to its base.
+        // Same representation, so nothing is emitted.
+        if let Some(base) = match name {
+            "int" => Some(Ty::Int),
+            "bool" => Some(Ty::Bool),
+            "str" => Some(Ty::Str),
+            _ => None,
+        } {
+            if args.pos.len() != 1 || !args.named.is_empty() {
+                return Err(Diag::new(span, format!("`{name}` converts one value")));
+            }
+            let v = self.lower_expr(&args.pos[0])?;
+            if self.underlying(v.ty) != base {
+                return Err(Diag::new(args.pos[0].span(), self.mismatch(base, v.ty)));
+            }
+            return Ok(Val::new(v.val(), base, v.owned));
         }
 
         // Channel builtins. They are here rather than in `sigs` because
@@ -2358,14 +2484,14 @@ impl Lowerer {
             });
             Ok(Val::void())
         } else {
-            let d = self.new_val(ir_ty(ret));
+            let d = self.new_val(self.irty(ret));
             self.push(Inst::Call {
                 dst: Some(d),
                 func: rt_name,
                 args: vals,
             });
             // Returns are owned (§5.2).
-            let owned = ret.is_ref();
+            let owned = self.is_ref(ret);
             if owned {
                 self.stmt_temps.push(d);
             }

@@ -101,6 +101,9 @@ pub struct TypeDef {
     /// struct, no drop function and no TypeInfo for it. Field 0 records the
     /// element type and is never stored.
     pub is_chan: bool,
+    /// A distinct type: identical representation to its base, a different
+    /// identity to the type checker, and no existence at all at runtime.
+    pub is_distinct: bool,
     /// One entry per interface-method slot in the program: the IR name of
     /// this type's implementation, or `None` if it has none.
     pub vtable: Vec<Option<String>>,

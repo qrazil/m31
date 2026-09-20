@@ -31,6 +31,7 @@ pub enum Tok {
     KwConst,
     KwInterface,
     KwSpawn,
+    KwDistinct,
     KwTrue,
     KwFalse,
 
@@ -92,6 +93,7 @@ impl Tok {
             Tok::KwConst => "const",
             Tok::KwInterface => "interface",
             Tok::KwSpawn => "spawn",
+            Tok::KwDistinct => "distinct",
             Tok::Colon => ":",
             Tok::Dot => ".",
             Tok::KwTrue => "true",
@@ -329,6 +331,7 @@ impl<'a> Lexer<'a> {
             "const" => Tok::KwConst,
             "interface" => Tok::KwInterface,
             "spawn" => Tok::KwSpawn,
+            "distinct" => Tok::KwDistinct,
             "true" => Tok::KwTrue,
             "false" => Tok::KwFalse,
             _ => Tok::Ident(w.to_string()),

@@ -214,6 +214,38 @@ adjacent parameters of the same type.
 Positional arguments must precede named ones, so a reader never counts commas
 to work out where a value lands.
 
+## 5c. Distinct types, and no aliases
+
+```c
+distinct int Price;
+distinct int UserId;
+```
+
+Same representation as the base, different identity to the type checker,
+**erased before the IR** — the same trick monomorphisation uses, and the same
+surface-versus-IR split that already lets `int` be an `i64`. There is no
+object, no header and no refcount, and a distinct field stores unwrapped.
+
+A distinct type **inherits every operation of its base**, because it is one:
+`Price + Price` is a `Price`. Mixing with the base is an error and needs an
+explicit `Price(n)` or `int(p)`, both of which emit nothing. That asymmetry
+is the whole feature — `Price` and `UserId` cannot be confused, while
+`Price * Price` still works for the cases where arithmetic is meaningful.
+
+Nim makes a distinct type lose all of its base's operations, to be added back
+one at a time. Rejected: the motivating cases here are `Price`, `Meters`,
+`Celsius`, where the arithmetic is the point.
+
+**Type aliases are rejected.** An alias is a second name for the same type,
+so it reads like a safety feature and is not one — an `OrderId` would still
+pass where a `UserId` was wanted. Go added them in 1.9 for moving a type
+between packages during a refactor, which is a module-system problem we do
+not have. Purely additive if it ever becomes one.
+
+Note the trap this avoids: a wrapper struct, `type UserId { int v; }`, does
+work today and costs a heap allocation, a refcount and a pointer chase to
+hold one integer. A distinct type costs none of that.
+
 ## 6. Errors
 
 Errors are values (already decided). The open question is what shape.

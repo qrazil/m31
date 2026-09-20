@@ -1,0 +1,1 @@
+corpus/errors/039-distinct-mix-op.src:4:9: cannot apply `+` to Price and int; convert one of them

@@ -65,6 +65,15 @@ impl Parser {
                 }
             }
         }
+        // `distinct <type> Name;` -- the name is the third token, and the
+        // type in the middle may itself be a name.
+        for w in toks.windows(3) {
+            if w[0].tok == Tok::KwDistinct {
+                if let Tok::Ident(n) = &w[2].tok {
+                    type_names.push(n.clone());
+                }
+            }
+        }
         Parser {
             toks,
             pos: 0,
@@ -313,7 +322,9 @@ impl Parser {
         let mut types = Vec::new();
         let mut toplevel = Vec::new();
         while self.peek() != &Tok::Eof {
-            if self.peek() == &Tok::KwType || self.peek() == &Tok::KwInterface {
+            if self.peek() == &Tok::KwDistinct {
+                types.push(self.parse_distinct()?);
+            } else if self.peek() == &Tok::KwType || self.peek() == &Tok::KwInterface {
                 types.push(self.parse_type_decl()?);
             } else if self.starts_func() {
                 funcs.push(self.parse_func()?);
@@ -396,6 +407,27 @@ impl Parser {
         self.peek_at(i) == &Tok::LParen
     }
 
+    /// `distinct int Price;`
+    fn parse_distinct(&mut self) -> Result<TypeDecl, Diag> {
+        let span = self.span();
+        self.expect(Tok::KwDistinct)?;
+        let base = self.expect_ty()?;
+        if base == Ty::Void {
+            return Err(Diag::new(span, "`void` is not a value type"));
+        }
+        let (name, _) = self.expect_ident()?;
+        self.expect(Tok::Semi)?;
+        Ok(TypeDecl {
+            name,
+            tparams: Vec::new(),
+            fields: Vec::new(),
+            methods: Vec::new(),
+            is_interface: false,
+            distinct_base: Some(base),
+            span,
+        })
+    }
+
     fn parse_type_decl(&mut self) -> Result<TypeDecl, Diag> {
         let span = self.span();
         // Keyword first, so the kind is known before the name:
@@ -448,6 +480,7 @@ impl Parser {
                 fields: Vec::new(),
                 methods,
                 is_interface: true,
+                distinct_base: None,
                 span,
             });
         }
@@ -467,6 +500,7 @@ impl Parser {
             fields,
             methods: Vec::new(),
             is_interface: false,
+            distinct_base: None,
             span,
         })
     }
@@ -775,6 +809,14 @@ impl Parser {
                 let e = self.parse_expr(0)?;
                 self.expect(Tok::RParen)?;
                 Ok(e)
+            }
+            // `int(x)` -- a conversion back to a base type. A type keyword
+            // is not otherwise an expression, so this is unambiguous.
+            t if Self::ty_of(&t).is_some() && self.peek_at(1) == &Tok::LParen => {
+                let name = t.spelling().to_string();
+                self.bump();
+                let args = self.parse_args()?;
+                Ok(Expr::Call(name, args, span))
             }
             Tok::Ident(name) if self.is_ty_name(&name) => {
                 // Construction: always by field name, so reordering fields in

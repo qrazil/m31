@@ -1,0 +1,1 @@
+corpus/errors/041-distinct-no-literal.src:3:11: type mismatch: expected Price, found int

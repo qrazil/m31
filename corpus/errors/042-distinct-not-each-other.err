@@ -1,0 +1,1 @@
+corpus/errors/042-distinct-not-each-other.src:8:3: type mismatch: expected Price, found UserId
