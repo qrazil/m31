@@ -8,6 +8,7 @@
 #   ./gates.sh --quick    skip the corpus (compiler-only checks)
 set -uo pipefail
 cd "$(dirname "$0")"
+. ./config.sh
 
 quick=0
 [ "${1:-}" = "--quick" ] && quick=1
@@ -74,6 +75,45 @@ run "runtime compiles clean" bash -c '
             if [ -n "$out" ]; then echo "$cc $opt:"; echo "$out"; exit 1; fi
         done
     done'
+
+# The formatter must not change what a program means, and must reach a fixed
+# point. Both are checked against every corpus program rather than asserted:
+# a formatter that quietly alters a program is worse than no formatter.
+run "formatter preserves meaning" bash -c '
+    bad=0
+    for f in corpus/*/*.'"$LANG_EXT"' examples/tour.'"$LANG_EXT"'; do
+        [ -e "$f" ] || continue
+        w=$(mktemp -d)
+        cp "$f" "$w/t.'"$LANG_EXT"'"
+        if ./target/debug/'"$LANG_BIN"' --emit-c "$f" -o "$w/a.c" 2>/dev/null; then
+            ./target/debug/'"$LANG_BIN"' fmt "$w/t.'"$LANG_EXT"'" 2>/dev/null
+            ./target/debug/'"$LANG_BIN"' --emit-c "$w/t.'"$LANG_EXT"'" -o "$w/b.c" 2>/dev/null
+            if ! diff -q "$w/a.c" "$w/b.c" >/dev/null 2>&1; then
+                echo "formatting changed the emitted C: $f"
+                bad=1
+            fi
+        fi
+        rm -rf "$w"
+    done
+    exit $bad'
+
+run "formatter is idempotent" bash -c '
+    bad=0
+    for f in corpus/*/*.'"$LANG_EXT"'; do
+        [ -e "$f" ] || continue
+        w=$(mktemp -d)
+        cp "$f" "$w/t.'"$LANG_EXT"'"
+        if ./target/debug/'"$LANG_BIN"' fmt "$w/t.'"$LANG_EXT"'" 2>/dev/null; then
+            cp "$w/t.'"$LANG_EXT"'" "$w/once.'"$LANG_EXT"'"
+            ./target/debug/'"$LANG_BIN"' fmt "$w/t.'"$LANG_EXT"'" 2>/dev/null
+            if ! diff -q "$w/once.'"$LANG_EXT"'" "$w/t.'"$LANG_EXT"'" >/dev/null 2>&1; then
+                echo "formatting twice differs from once: $f"
+                bad=1
+            fi
+        fi
+        rm -rf "$w"
+    done
+    exit $bad'
 
 if [ $quick -eq 0 ]; then
     run "corpus" bash run.sh

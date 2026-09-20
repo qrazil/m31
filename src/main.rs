@@ -10,6 +10,7 @@
 mod ast;
 mod diag;
 mod emit_c;
+mod fmt;
 mod ir;
 mod lexer;
 mod lower;
@@ -22,7 +23,8 @@ mod tests;
 use std::process::ExitCode;
 
 fn usage() -> ExitCode {
-    eprintln!("usage: langc --emit-c|--emit-ir <source> [-o <output>]");
+    eprintln!("usage: langc --emit-c|--emit-ir|fmt <source> [-o <output>]");
+    eprintln!("       langc fmt --check <source>   exit 1 if it is not formatted");
     ExitCode::from(2)
 }
 
@@ -30,12 +32,15 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     let mut mode: Option<&str> = None;
+    let mut check = false;
     let mut input: Option<String> = None;
     let mut output: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "fmt" => mode = Some("fmt"),
+            "--check" => check = true,
             "--emit-c" => mode = Some("c"),
             "--emit-ir" => mode = Some("ir"),
             "-o" => {
@@ -46,7 +51,8 @@ fn main() -> ExitCode {
                 }
             }
             "--help" => {
-                println!("usage: langc --emit-c|--emit-ir <source> [-o <output>]");
+                println!("usage: langc --emit-c|--emit-ir|fmt <source> [-o <output>]");
+                println!("       langc fmt --check <source>");
                 return ExitCode::SUCCESS;
             }
             other if other.starts_with('-') => {
@@ -76,6 +82,28 @@ fn main() -> ExitCode {
         }
     };
 
+    if mode == "fmt" {
+        let formatted = match reformat(&src) {
+            Ok(s) => s,
+            Err(d) => {
+                eprintln!("{}", d.render(&path));
+                return ExitCode::FAILURE;
+            }
+        };
+        if check {
+            if formatted != src {
+                eprintln!("{path}: not formatted");
+                return ExitCode::FAILURE;
+            }
+            return ExitCode::SUCCESS;
+        }
+        if let Err(e) = std::fs::write(&path, formatted) {
+            eprintln!("cannot write {path}: {e}");
+            return ExitCode::FAILURE;
+        }
+        return ExitCode::SUCCESS;
+    }
+
     let out = match compile(&src, mode) {
         Ok(s) => s,
         Err(d) => {
@@ -94,6 +122,15 @@ fn main() -> ExitCode {
         None => print!("{out}"),
     }
     ExitCode::SUCCESS
+}
+
+/// Format a source file. Parses only -- it must work on a program that does
+/// not typecheck, because that is exactly when you reach for the formatter.
+fn reformat(src: &str) -> Result<String, diag::Diag> {
+    let (toks, comments) = lexer::Lexer::tokenize_with_comments(src)?;
+    let prog = parser::Parser::new(toks).parse_program()?;
+    fmt::set_type_names(&prog);
+    Ok(fmt::format(&prog, comments))
 }
 
 fn compile(src: &str, mode: &str) -> Result<String, diag::Diag> {

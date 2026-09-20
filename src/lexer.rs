@@ -138,11 +138,28 @@ pub struct Token {
     pub span: Span,
 }
 
+/// A comment, kept aside so the formatter can put it back.
+///
+/// Comments are trivia to the parser and invisible in the AST, so a
+/// formatter that only walks the AST silently deletes them -- which makes it
+/// useless. They are collected here with their position and re-emitted by
+/// line.
+#[derive(Debug, Clone)]
+pub struct Comment {
+    pub line: u32,
+    pub text: String,
+    /// Whether the comment is alone on its line, as opposed to trailing code.
+    pub own_line: bool,
+}
+
 pub struct Lexer<'a> {
     src: &'a [u8],
     pos: usize,
     line: u32,
     col: u32,
+    comments: Vec<Comment>,
+    /// Whether anything but whitespace has been seen on the current line.
+    code_on_line: bool,
 }
 
 impl<'a> Lexer<'a> {
@@ -152,7 +169,16 @@ impl<'a> Lexer<'a> {
             pos: 0,
             line: 1,
             col: 1,
+            comments: Vec::new(),
+            code_on_line: false,
         }
+    }
+
+    /// Tokenize, and also return the comments, for the formatter.
+    pub fn tokenize_with_comments(src: &str) -> Result<(Vec<Token>, Vec<Comment>), Diag> {
+        let mut lx = Lexer::new(src);
+        let toks = lx.run()?;
+        Ok((toks, std::mem::take(&mut lx.comments)))
     }
 
     fn peek(&self) -> u8 {
@@ -196,13 +222,28 @@ impl<'a> Lexer<'a> {
         loop {
             let c = self.peek();
             if c == b' ' || c == b'\t' || c == b'\r' || c == b'\n' {
+                if c == b'\n' {
+                    self.code_on_line = false;
+                }
                 self.bump();
             } else if c == b'/' && self.peek2() == b'/' {
+                let at = self.here();
+                let own = !self.code_on_line;
+                let from = self.pos;
                 while self.pos < self.src.len() && self.peek() != b'\n' {
                     self.bump();
                 }
+                self.comments.push(Comment {
+                    line: at.line,
+                    text: String::from_utf8_lossy(&self.src[from..self.pos])
+                        .trim_end()
+                        .to_string(),
+                    own_line: own,
+                });
             } else if c == b'/' && self.peek2() == b'*' {
                 let start = self.here();
+                let own = !self.code_on_line;
+                let from = self.pos;
                 self.bump();
                 self.bump();
                 loop {
@@ -216,13 +257,23 @@ impl<'a> Lexer<'a> {
                     }
                     self.bump();
                 }
+                self.comments.push(Comment {
+                    line: start.line,
+                    text: String::from_utf8_lossy(&self.src[from..self.pos]).to_string(),
+                    own_line: own,
+                });
             } else {
                 return Ok(());
             }
         }
     }
 
-    pub fn tokenize(mut self) -> Result<Vec<Token>, Diag> {
+    pub fn tokenize(self) -> Result<Vec<Token>, Diag> {
+        let mut lx = self;
+        lx.run()
+    }
+
+    fn run(&mut self) -> Result<Vec<Token>, Diag> {
         let mut out = Vec::new();
         loop {
             self.skip_trivia()?;
@@ -234,6 +285,7 @@ impl<'a> Lexer<'a> {
                 });
                 return Ok(out);
             }
+            self.code_on_line = true;
             let tok = self.next_tok(span)?;
             out.push(Token { tok, span });
         }

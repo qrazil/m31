@@ -13,6 +13,8 @@ which gcc and clang both build clean at `-O0` and `-O2`.
 
 ```
 ./build.sh examples/tour.src && ./tour    compile and run a program
+./target/debug/langc fmt <file>           format in place
+./target/debug/langc fmt --check <file>   exit 1 if it is not formatted
 ./gates.sh                                every gate
 ./run.sh                                  the corpus alone
 ```
@@ -318,6 +320,7 @@ src/                   the compiler
   lower.rs             typecheck and lower in ONE pass, deliberately fused
   ir.rs                docs/ir-v0.md made real
   emit_c.rs            post-refcount IR to C
+  fmt.rs               the formatter: one layout, no options
   tests.rs             unit tests, mostly IR assertions
 runtime/
   rt.h rt.c            the runtime — a SEPARATE translation unit, see §7.1
@@ -342,6 +345,24 @@ examples/tour.src      every feature in one file
    temp directory and deletes it. **You never see or keep the C.** It is
    replaceable — Cranelift is the planned second backend — which is exactly
    why nothing about the language depends on it.
+
+## The formatter
+
+`langc fmt` has **one canonical layout and no options**. That is the other
+half of the braces decision: the case for braces over significant indentation
+was that a formatter gives you one correct layout without putting whitespace
+in the grammar, so the language owes you the formatter.
+
+It **groups methods under their type**. Declaring them by qualified name lets
+them scatter through a file, which was accepted on exactly this basis. Safe,
+because declarations are order-independent; statements keep their order.
+
+Two properties are gated rather than asserted, because a formatter that
+quietly alters a program is worse than no formatter:
+
+- **it preserves meaning** — every corpus program emits byte-identical C
+  before and after formatting
+- **it is idempotent** — formatting twice matches formatting once
 
 ## Two rules that look like details and are not
 
