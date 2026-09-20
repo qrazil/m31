@@ -1,0 +1,4 @@
+corpus/errors/069-enum-unknown-variant.src:3:11: `Color` has no variant `Pink`; it has Red, Green
+  |
+3 | Color c = Color.Pink;
+  |           ^

@@ -190,7 +190,13 @@ impl Fmt {
             self.line(&format!("distinct {} {};", self.ty(b), t.name));
             return;
         }
-        let kw = if t.is_interface { "interface" } else { "type" };
+        let kw = if t.is_interface {
+            "interface"
+        } else if t.is_enum {
+            "enum"
+        } else {
+            "type"
+        };
         let tp = if t.tparams.is_empty() {
             String::new()
         } else {
@@ -198,6 +204,15 @@ impl Fmt {
         };
         self.line(&format!("{kw} {}{tp} {{", t.name));
         self.depth += 1;
+        for v in &t.variants {
+            self.comments_before(v.span.line);
+            if v.payload.is_empty() {
+                self.line(&format!("{};", v.name));
+            } else {
+                let ps: Vec<String> = v.payload.iter().map(|p| self.ty(*p)).collect();
+                self.line(&format!("{}({});", v.name, ps.join(", ")));
+            }
+        }
         for f in &t.fields {
             self.comments_before(f.span.line);
             if f.embedded {
@@ -341,6 +356,32 @@ impl Fmt {
                 self.depth -= 1;
                 self.line("}");
             }
+            Stmt::Match {
+                scrutinee, arms, ..
+            } => {
+                self.line(&format!("match ({}) {{", self.expr(scrutinee)));
+                self.depth += 1;
+                for a in arms {
+                    self.comments_before(a.span.line);
+                    let binds: Vec<String> = a
+                        .binds
+                        .iter()
+                        .map(|b| format!("{} {}", self.ty(b.ty), b.name))
+                        .collect();
+                    let head = if binds.is_empty() {
+                        a.variant.clone()
+                    } else {
+                        format!("{}({})", a.variant, binds.join(", "))
+                    };
+                    self.line(&format!("case {head}: {{"));
+                    self.depth += 1;
+                    self.block(&a.body);
+                    self.depth -= 1;
+                    self.line("}");
+                }
+                self.depth -= 1;
+                self.line("}");
+            }
             Stmt::If {
                 cond, then, els, ..
             } => {
@@ -411,6 +452,14 @@ impl Fmt {
 
     fn expr(&self, e: &Expr) -> String {
         match e {
+            Expr::EnumNew(ty, variant, args, _) => {
+                let a = self.args(args);
+                if a.is_empty() {
+                    format!("{}.{variant}", self.ty(*ty))
+                } else {
+                    format!("{}.{variant}({a})", self.ty(*ty))
+                }
+            }
             Expr::Int(n, _) => n.to_string(),
             Expr::Bool(b, _) => b.to_string(),
             Expr::Str(s, _) => format!("{s:?}"),
@@ -494,6 +543,7 @@ fn stmt_line(s: &Stmt) -> u32 {
         | Stmt::Assign { span, .. }
         | Stmt::SetField { span, .. }
         | Stmt::SetIndex { span, .. }
+        | Stmt::Match { span, .. }
         | Stmt::Return { span, .. }
         | Stmt::Eval { span, .. }
         | Stmt::Break { span }

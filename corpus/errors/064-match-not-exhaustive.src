@@ -1,0 +1,8 @@
+enum Color { Red; Green; Blue(int); }
+
+// No `default`: leaving it out is what makes adding a variant a compile
+// error at every match that has to learn about it.
+Color c = Color.Red;
+match (c) {
+    case Red: { print(1); }
+}

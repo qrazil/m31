@@ -1,0 +1,49 @@
+// A function where every arm of an `if` returns has a join block that
+// nothing reaches. The lowering fills it with a valueless return, which C
+// rejects inside a function that returns something -- so `int f(bool c) {
+// if (c) { return 1; } else { return 2; } }` did not compile at all. A
+// perfectly ordinary program that the corpus happened never to contain.
+int pick(bool c) {
+    if (c) {
+        return 1;
+    } else {
+        return 2;
+    }
+}
+
+print(pick(true));
+print(pick(false));
+
+// The same shape through a match, which is where it was found.
+enum Side { Left; Right; }
+
+int side_of(Side s) {
+    match (s) {
+        case Left: {
+            return 10;
+        }
+        case Right: {
+            return 20;
+        }
+    }
+}
+
+print(side_of(Side.Left));
+print(side_of(Side.Right));
+
+// Nested, so the filler terminator appears more than once in one function.
+int both(bool a, bool b) {
+    if (a) {
+        if (b) {
+            return 1;
+        } else {
+            return 2;
+        }
+    } else {
+        return 3;
+    }
+}
+
+print(both(true, true));
+print(both(true, false));
+print(both(false, true));

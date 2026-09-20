@@ -95,6 +95,10 @@ pub struct Lowerer {
     field_params: Vec<Vec<Param>>,
     /// Base type of each distinct type, parallel to `typedefs`.
     distinct_base: Vec<Option<Ty>>,
+    /// Surface payload types per variant, parallel to `typedefs`. The IR
+    /// records only `Ref`, which cannot tell `str` from a user type, and a
+    /// match arm has to bind the payload at its real type.
+    variant_surface: Vec<Vec<Vec<Ty>>>,
     /// The monomorphised program's interned type expressions.
     ty_exprs: Vec<TyExpr>,
     /// Required methods per interface, parallel to `typedefs`; empty for a
@@ -149,6 +153,7 @@ impl Lowerer {
             field_surface: Vec::new(),
             field_params: Vec::new(),
             distinct_base: Vec::new(),
+            variant_surface: Vec::new(),
             ty_exprs: Vec::new(),
             iface_methods: Vec::new(),
             iface_slots: Vec::new(),
@@ -1062,9 +1067,21 @@ impl Lowerer {
                 }
                 fields.push((f.name.clone(), self.irty(f.ty)));
             }
+            let mut variants = Vec::new();
+            let mut vsurface = Vec::new();
+            for v in &t.variants {
+                variants.push(ir::Variant {
+                    name: v.name.clone(),
+                    payload: v.payload.iter().map(|p| self.irty(*p)).collect(),
+                });
+                vsurface.push(v.payload.clone());
+            }
+            self.variant_surface.push(vsurface);
             self.typedefs.push(TypeDef {
                 name: t.name.clone(),
                 fields,
+                variants,
+                is_enum: t.is_enum,
                 is_interface: t.is_interface,
                 is_chan: t.name.starts_with("Chan$")
                     || t.name.starts_with("Array$")
@@ -1913,6 +1930,11 @@ impl Lowerer {
             } => self.lower_if(cond, then, els.as_deref(), *span),
 
             Stmt::While { cond, body, span } => self.lower_while(cond, body, *span),
+            Stmt::Match {
+                scrutinee,
+                arms,
+                span,
+            } => self.lower_match(scrutinee, arms, *span),
 
             Stmt::ForIn {
                 ty,
@@ -2115,6 +2137,11 @@ impl Lowerer {
                 Stmt::Assign { name, .. } => {
                     if !out.contains(name) {
                         out.push(name.clone());
+                    }
+                }
+                Stmt::Match { arms, .. } => {
+                    for a in arms {
+                        Self::assigned_names(&a.body, out);
                     }
                 }
                 Stmt::If { then, els, .. } => {
@@ -2465,6 +2492,346 @@ impl Lowerer {
     /// needs no fixpoint: take a snapshot of each variable before the branch,
     /// compare after each arm, and give the join a parameter for every
     /// variable the two arms disagree about.
+    /// `Option<int>.Some(1)`
+    fn lower_enum_new(
+        &mut self,
+        ty: Ty,
+        variant: &str,
+        args: &Args,
+        span: Span,
+    ) -> Result<Val, Diag> {
+        let Some(tid) = self.tdef_of(ty) else {
+            return Err(Diag::new(
+                span,
+                format!("unknown type `{}`", self.tyname(ty)),
+            ));
+        };
+        if !self.typedefs[tid as usize].is_enum {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`{}` is not an enum, so it has no variants",
+                    self.tyname(ty)
+                ),
+            ));
+        }
+        if !args.named.is_empty() {
+            return Err(Diag::new(
+                span,
+                "a variant's payload is positional; it has no field names",
+            ));
+        }
+        let Some(tag) = self.typedefs[tid as usize]
+            .variants
+            .iter()
+            .position(|v| v.name == variant)
+        else {
+            let known: Vec<&str> = self.typedefs[tid as usize]
+                .variants
+                .iter()
+                .map(|v| v.name.as_str())
+                .collect();
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`{}` has no variant `{variant}`; it has {}",
+                    self.tyname(ty),
+                    known.join(", ")
+                ),
+            ));
+        };
+
+        let want = self.variant_surface[tid as usize][tag].clone();
+        if args.pos.len() != want.len() {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`{variant}` carries {} value(s), found {}",
+                    want.len(),
+                    args.pos.len()
+                ),
+            ));
+        }
+
+        let mut vals = Vec::new();
+        for (a, w) in args.pos.iter().zip(want.iter()) {
+            let v = self.lower_expr(a)?;
+            if !self.assignable(v.ty, *w) {
+                return Err(Diag::new(a.span(), self.mismatch(*w, v.ty)));
+            }
+            // The enum holds the payload, exactly as a field would: an owned
+            // temporary is handed over, a borrowed value is retained.
+            if self.is_ref(*w) {
+                if v.owned {
+                    self.stmt_temps.retain(|t| *t != v.val());
+                } else {
+                    self.push(Inst::RcInc { val: v.val() });
+                }
+            }
+            vals.push(v.val());
+        }
+
+        let d = self.new_val(IrTy::Ref);
+        self.push(Inst::EnumPack {
+            dst: d,
+            tid,
+            tag: tag as u32,
+            args: vals,
+        });
+        self.stmt_temps.push(d);
+        Ok(Val::new(d, ty, true))
+    }
+
+    /// `match (e) { case V(int x): { .. } .. }`
+    ///
+    /// Exhaustive and without fallthrough, so the shape is a chain of tag
+    /// tests ending in an unconditional jump: the last variant needs no test,
+    /// because if it were not that one the match would not have compiled.
+    fn lower_match(&mut self, scrutinee: &Expr, arms: &[MatchArm], span: Span) -> Result<(), Diag> {
+        // The scrutinee has to outlive every arm, and it may be a temporary,
+        // so it is bound into a scope of its own -- the same shape `for .. in`
+        // uses for the collection it walks.
+        self.synth += 1;
+        let hold = format!("$match{}", self.synth);
+        self.scopes.push(HashMap::new());
+        self.owned.push(Vec::new());
+
+        let sc = match self.lower_expr(scrutinee) {
+            Ok(v) => v,
+            Err(e) => {
+                self.scopes.pop();
+                self.owned.pop();
+                return Err(e);
+            }
+        };
+        let Some(tid) = self
+            .tdef_of(sc.ty)
+            .filter(|t| self.typedefs[*t as usize].is_enum)
+        else {
+            self.scopes.pop();
+            self.owned.pop();
+            return Err(Diag::new(
+                scrutinee.span(),
+                format!("`match` needs an enum; {} is not one", self.tyname(sc.ty)),
+            ));
+        };
+
+        if sc.owned {
+            self.stmt_temps.retain(|t| *t != sc.val());
+        } else {
+            self.push(Inst::RcInc { val: sc.val() });
+        }
+        self.scopes
+            .last_mut()
+            .unwrap()
+            .insert(hold.clone(), (sc.ty, sc.val(), true));
+        self.owned.last_mut().unwrap().push(hold.clone());
+
+        let names: Vec<String> = self.typedefs[tid as usize]
+            .variants
+            .iter()
+            .map(|v| v.name.clone())
+            .collect();
+
+        // Resolve every arm to a tag first, so a bad arm is reported before
+        // any code is emitted for it.
+        let mut seen: Vec<usize> = Vec::new();
+        for a in arms {
+            let Some(tag) = names.iter().position(|n| *n == a.variant) else {
+                return Err(Diag::new(
+                    a.span,
+                    format!(
+                        "`{}` has no variant `{}`; it has {}",
+                        self.tyname(sc.ty),
+                        a.variant,
+                        names.join(", ")
+                    ),
+                ));
+            };
+            if seen.contains(&tag) {
+                return Err(Diag::new(
+                    a.span,
+                    format!("`{}` is already handled by an earlier case", a.variant),
+                ));
+            }
+            let want = self.variant_surface[tid as usize][tag].clone();
+            if a.binds.len() != want.len() {
+                return Err(Diag::new(
+                    a.span,
+                    format!(
+                        "`{}` carries {} value(s), and this case binds {}",
+                        a.variant,
+                        want.len(),
+                        a.binds.len()
+                    ),
+                ));
+            }
+            for (b, w) in a.binds.iter().zip(want.iter()) {
+                if !self.assignable(*w, b.ty) {
+                    return Err(Diag::new(b.span, self.mismatch(b.ty, *w)));
+                }
+            }
+            seen.push(tag);
+        }
+
+        // Exhaustive: no `default`, so adding a variant is a compile error at
+        // every match that has to learn about it. That is the whole reason to
+        // have the compiler check this.
+        let missing: Vec<&str> = names
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !seen.contains(i))
+            .map(|(_, n)| n.as_str())
+            .collect();
+        if !missing.is_empty() {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`match` must handle every variant of `{}`; missing {}",
+                    self.tyname(sc.ty),
+                    missing.join(", ")
+                ),
+            ));
+        }
+
+        self.flush_temps();
+
+        let tag_v = self.new_val(IrTy::I64);
+        self.push(Inst::EnumTag {
+            dst: tag_v,
+            obj: sc.val(),
+            tid,
+        });
+
+        let join_bb = self.new_block();
+        let before = self.snapshot();
+
+        let mut ends: Vec<(BlockId, HashMap<String, Binding>)> = Vec::new();
+        for (i, a) in arms.iter().enumerate() {
+            let tag = seen[i];
+            let body_bb = self.new_block();
+            let last = i + 1 == arms.len();
+
+            if last {
+                // Exhaustive, so whatever is left must be this one.
+                self.terminate(Term::Jump {
+                    to: body_bb,
+                    args: Vec::new(),
+                });
+            } else {
+                let next_bb = self.new_block();
+                let k = self.new_val(IrTy::I64);
+                self.push(Inst::IConst {
+                    dst: k,
+                    val: tag as i64,
+                });
+                let c = self.new_val(IrTy::I1);
+                self.push(Inst::ICmp {
+                    dst: c,
+                    cmp: Cmp::Eq,
+                    lhs: tag_v,
+                    rhs: k,
+                });
+                self.terminate(Term::Brif {
+                    cond: c,
+                    then: body_bb,
+                    then_args: Vec::new(),
+                    els: next_bb,
+                    els_args: Vec::new(),
+                });
+                self.switch_to(next_bb);
+                self.restore(&before);
+            }
+
+            let resume = self.blocks[self.cur].id;
+            self.switch_to(body_bb);
+            self.restore(&before);
+            self.scopes.push(HashMap::new());
+            self.owned.push(Vec::new());
+
+            // Payload bindings are BORROWED from the enum, exactly like a
+            // field read: the scrutinee holds the +1 for the whole match.
+            for (idx, b) in a.binds.iter().enumerate() {
+                self.check_shadow(&b.name, b.span)?;
+                let d = self.new_val(self.irty(b.ty));
+                self.push(Inst::EnumPayload {
+                    dst: d,
+                    obj: sc.val(),
+                    tid,
+                    idx: idx as u32,
+                });
+                self.scopes
+                    .last_mut()
+                    .unwrap()
+                    .insert(b.name.clone(), (b.ty, d, false));
+            }
+
+            self.lower_block(&a.body)?;
+            let live = !self.terminated();
+            if live {
+                self.release_scope();
+            }
+            self.scopes.pop();
+            self.owned.pop();
+            if live {
+                ends.push((self.blocks[self.cur].id, self.snapshot()));
+            }
+            if !last {
+                self.switch_to(resume);
+            }
+        }
+
+        if ends.is_empty() {
+            // Every arm returned; nothing reaches the join.
+            self.switch_to(join_bb);
+            self.restore(&before);
+            self.release_scope();
+            self.scopes.pop();
+            self.owned.pop();
+            self.terminate(Term::Ret { val: None });
+            return Ok(());
+        }
+
+        // Which variables do the arms disagree about?
+        let mut changed: Vec<(String, Ty)> = Vec::new();
+        for (name, (ty, v0, _)) in &before {
+            if ends
+                .iter()
+                .any(|(_, snap)| snap.get(name).map(|x| x.1).unwrap_or(*v0) != *v0)
+            {
+                changed.push((name.clone(), *ty));
+            }
+        }
+        changed.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut join_params = Vec::new();
+        for (_, ty) in &changed {
+            join_params.push(self.new_val(self.irty(*ty)));
+        }
+        let ji = self.blocks.iter().position(|b| b.id == join_bb).unwrap();
+        self.blocks[ji].params = join_params.clone();
+
+        for (end, snap) in &ends {
+            let args: Vec<Value> = changed
+                .iter()
+                .map(|(n, _)| snap.get(n).map(|x| x.1).unwrap_or(before[n].1))
+                .collect();
+            self.switch_to(*end);
+            self.terminate(Term::Jump { to: join_bb, args });
+        }
+
+        self.switch_to(join_bb);
+        self.restore(&before);
+        for ((name, _), p) in changed.iter().zip(join_params.iter()) {
+            self.rebind(name, *p);
+        }
+        // Release the scrutinee now that no arm can still be reading it.
+        self.release_scope();
+        self.scopes.pop();
+        self.owned.pop();
+        Ok(())
+    }
+
     fn lower_if(
         &mut self,
         cond: &Expr,
@@ -2875,6 +3242,9 @@ impl Lowerer {
             }
 
             Expr::New(ty, args, span) => self.lower_new(*ty, args, *span),
+            Expr::EnumNew(ty, variant, args, span) => {
+                self.lower_enum_new(*ty, variant, args, *span)
+            }
         }
     }
 
@@ -3613,6 +3983,7 @@ fn stmt_span(s: &Stmt) -> Span {
         | Stmt::Spawn { span, .. }
         | Stmt::SetIndex { span, .. }
         | Stmt::SetField { span, .. }
+        | Stmt::Match { span, .. }
         | Stmt::If { span, .. } => *span,
     }
 }

@@ -17,7 +17,7 @@ Anything marked done there is tested; the corpus is the proof.
 
 | | |
 |---|---|
-| Corpus | 119 programs — 38 behaviour, 62 diagnostics, 12 traps, 7 Go twins |
+| Corpus | 129 programs — 40 behaviour, 70 diagnostics, 12 traps, 7 Go twins |
 | Oracle | gcc and clang, each at -O0 and -O2, all four must agree |
 | Leaks | every behaviour program asserts `__rc_live=0` at exit |
 | Warnings | emitted C must be clean under `-Wall -Wextra` |
@@ -29,6 +29,9 @@ Anything marked done there is tested; the corpus is the proof.
 ## Done
 
 **Types.** `int`, `bool`, `str`, `void`. Structs with per-field defaults.
+**Enums with payloads**, generic, matched exhaustively with no fallthrough
+and no `default` -- which is what makes `Option<T>` and `Result<T, E>`
+ordinary library types rather than language primitives.
 Structural interfaces dispatched through a vtable in the object header.
 Embedding with forwarder methods synthesised to a fixpoint. `distinct` types,
 erased before the IR so they cost nothing. Monomorphised generics on types
@@ -67,36 +70,7 @@ options, single-line diagnostics with the source line echoed, and `gates.sh`.
 These are the things whose absence would make a frozen language not worth
 freezing. Roughly in order.
 
-### 1. Enums with payloads, and pattern matching
-
-One feature, not two: an enum you cannot match on is useless.
-
-```c
-enum Option<T> { None; Some(T); }
-enum Result<T, E> { Ok(T); Err(E); }
-```
-
-This moved ahead of errors because `Option` and `Result` are not
-primitives -- they are ordinary enums, and errors-as-values is a *use* of
-them rather than a separate mechanism. Building errors first would mean
-building a one-off `(T, error)` shape and then rebuilding it.
-
-It is also the answer to null. The language has none and is not getting any:
-with null every reference might be absent and nothing makes you check, while
-with `Option<T>` only the things typed that way can be, and the compiler will
-not let you skip it. JSON's `null` is then a *variant* of a JSON sum type, not
-a pointer that can blow up -- the same for an empty CSV field and a nullable
-database column. Absence needs representing; it does not need a hole in every
-type.
-
-Origin, since it comes up: not Rust's. ML had `option` with `NONE`/`SOME`
-around 1973, Haskell has `Maybe` and `Either`, and Rust took both from that
-family -- its contribution was making them ordinary in a systems language and
-adding `?` so propagation is not painful. The null they replace is older:
-Tony Hoare put it in ALGOL W in 1965 and later called it his billion-dollar
-mistake.
-
-### 2. Errors
+### 1. Errors
 
 The largest hole. Today every fault traps: a bad index, a missing key, a
 closed channel. That is fine for a bug and wrong for a condition a program
@@ -111,11 +85,19 @@ sum type, which is why the next item is entangled with this one.
 **Blocks the freeze.** A language that cannot report a recoverable failure
 cannot have a standard library worth the name.
 
-Once enums exist, errors are a `Result<T, E>` and a propagation operator,
-not a new mechanism. The open question is only how much sugar to put on
-propagation, and whether a trap can ever be turned into an error.
+Enums exist now, so `Result<T, E>` is already writable -- see
+`examples/enums.src`. What is missing is the ergonomics and the decisions
+around them:
 
-### 3. A string library
+  - a propagation operator, so a chain of fallible calls is not a staircase
+    of `match`;
+  - whether the standard library ships one blessed `Result`, or every module
+    declares its own;
+  - whether any of today's traps become recoverable errors, and which. An
+    index out of range should probably stay a trap; a file that is not there
+    should not be one.
+
+### 2. A string library
 
 `size()` and `concat` are the whole of it today. A usable language needs
 `substr`, `index_of`, `contains`, `starts_with`, `ends_with`, `split`,
@@ -125,21 +107,21 @@ None of it is hard. It is deliberately after errors, because `to_int("abc")`
 has to return something, and what it returns is the errors decision. These
 land as methods on `str`, which now has method dispatch.
 
-### 4. Modules
+### 3. Modules
 
 One file is the whole program today. That is tolerable for a corpus and not
 for anything else. Needs: a unit of compilation, a visibility rule, and a
 name resolution order. Kept behind errors because a module system that has to
 be revised once errors land is a module system written twice.
 
-### 5. Standard library
+### 4. Standard library
 
 The stated goal is Oro's and Go's: a standard library good enough that most
 programs need nothing else. Needs modules to live in and errors to report
 with. Minimum: strings, sorting, a file and stdin API, time, math, and a
 `Hashable` interface so `Map` takes a user type as a key.
 
-### 6. Closures
+### 5. Closures
 
 Also gates a nicer `spawn`. The reason they are late is that closures plus
 reference counting is the most common way to build a cycle, and a cycle leaks

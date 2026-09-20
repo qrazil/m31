@@ -92,11 +92,21 @@ pub struct TyExpr {
     pub args: Vec<Ty>,
 }
 
+/// One variant of an enum: a name and the types it carries.
+///
+/// The payload is positional and unnamed. A variant is not a struct -- if
+/// there is enough in it to want field names, the payload should be a struct.
+#[derive(Debug, Clone)]
+pub struct EnumVariant {
+    pub name: String,
+    pub payload: Vec<Ty>,
+    pub span: Span,
+}
+
 /// A user-defined type declaration, possibly generic.
 ///
-/// Two shapes share one keyword: a struct (`fields`) and an interface
-/// (`methods`, signatures only). Keeping `type` for both is what lets more
-/// shapes -- enums, aliases -- arrive later without another keyword.
+/// Three shapes: a struct (`fields`), an interface (`methods`, signatures
+/// only) and an enum (`variants`).
 #[derive(Debug, Clone)]
 pub struct TypeDecl {
     pub name: String,
@@ -107,6 +117,10 @@ pub struct TypeDecl {
     /// are empty.
     pub methods: Vec<Func>,
     pub is_interface: bool,
+    /// Non-empty only for an enum: the variants, in declaration order. The
+    /// index in this list is the runtime tag.
+    pub variants: Vec<EnumVariant>,
+    pub is_enum: bool,
     /// `distinct int Price;` -- same representation as the base type, a
     /// different identity to the type checker, and nothing at all at
     /// runtime. Erased before the IR, like generics.
@@ -129,6 +143,11 @@ pub enum Expr {
     Field(Box<Expr>, String, Span),
     /// `expr[index]`
     Index(Box<Expr>, Box<Expr>, Span),
+    /// `Option<int>.Some(1)` -- the enum type, the variant name, the
+    /// payload. The type is written in full rather than inferred: a variant
+    /// with no payload has nothing to infer from, and one rule beats a rule
+    /// with an exception.
+    EnumNew(Ty, String, Args, Span),
     /// `Point(x: 1, y: 2)` / `Box<int>(value: 5)` -- construction is always
     /// by field name, so reordering fields in a declaration cannot silently
     /// transpose values. Carries the interned type, so type arguments survive
@@ -149,7 +168,8 @@ impl Expr {
             | Expr::MethodCall(_, _, _, s)
             | Expr::Field(_, _, s)
             | Expr::Index(_, _, s)
-            | Expr::New(_, _, s) => *s,
+            | Expr::New(_, _, s)
+            | Expr::EnumNew(_, _, _, s) => *s,
         }
     }
 }
@@ -212,6 +232,16 @@ pub enum Stmt {
         body: Vec<Stmt>,
         span: Span,
     },
+    /// `match (e) { case V(int x): { .. } .. }`
+    ///
+    /// Exhaustive, and with no fallthrough. There is no `default`: leaving it
+    /// out means adding a variant is a compile error at every match that
+    /// needs updating, which is the entire reason to have enums checked.
+    Match {
+        scrutinee: Expr,
+        arms: Vec<MatchArm>,
+        span: Span,
+    },
     /// `if (cond) { .. } else { .. }`
     If {
         cond: Expr,
@@ -219,6 +249,17 @@ pub enum Stmt {
         els: Option<Vec<Stmt>>,
         span: Span,
     },
+}
+
+/// One arm of a `match`: a variant name, the bindings for its payload, and
+/// the body. Bindings are type-first like every other binding in the
+/// language -- `case Some(int v)`.
+#[derive(Debug, Clone)]
+pub struct MatchArm {
+    pub variant: String,
+    pub binds: Vec<Param>,
+    pub body: Vec<Stmt>,
+    pub span: Span,
 }
 
 /// A parameter or a field.

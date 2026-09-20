@@ -1,0 +1,4 @@
+corpus/errors/068-match-non-enum.src:2:8: `match` needs an enum; int is not one
+  |
+2 | match (x) {
+  |        ^

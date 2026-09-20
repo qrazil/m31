@@ -31,9 +31,10 @@ A letter or `_`, then letters, digits or `_`. Case-sensitive.
 
 ### 1.4 Keywords
 
-    bool     break     const     continue  distinct  else      false
-    for      if        in        int       interface return    spawn
-    str      true      type      void      while
+    bool     break     case      const     continue  distinct  else
+    enum     false     for       if        in        int       interface
+    match    return    spawn     str       true      type      void
+    while
 
 Keywords are reserved: none may be used as an identifier. `Array`, `Chan`,
 `List` and `Map` are not keywords — they are predeclared type names, and are
@@ -201,7 +202,47 @@ error; convert first.
 There are no type aliases. An alias that is not distinct documents and does
 not enforce, which is a comment with syntax.
 
-### 3.7 Generics
+### 3.7 Enums
+
+A value that is exactly one of several shapes, each able to carry its own
+data:
+
+```c
+enum Option<T> {
+    None;
+    Some(T);
+}
+
+enum Shape {
+    Empty;
+    Circle(int);
+    Rect(int, int);
+}
+```
+
+A payload is **positional and unnamed**. A variant is not a struct — if
+there is enough in it to want field names, the payload should *be* a struct.
+An enum with no variants is an error: no value of it could ever exist.
+
+Construction writes the enum type in full:
+
+```c
+Option<int> a = Option<int>.Some(1);
+Option<int> b = Option<int>.None;
+Shape c = Shape.Rect(3, 4);
+```
+
+The type is written rather than inferred because a variant with no payload
+has nothing to infer it from, and one rule beats a rule with an exception.
+
+An enum is a reference type like a struct, and it owns its payload: a
+reference going in is retained, and released when the enum is freed.
+
+There is no subtyping here. `Circle` is not a type and not a subclass of
+`Shape`; it is one of the shapes a `Shape` can be. The only way to get at a
+payload is `match`.
+
+### 3.8 Generics
 
 Type parameters on a type or a function:
 
@@ -218,7 +259,7 @@ There are no constraints on type parameters yet. A generic body that does
 something a given argument cannot do fails when that instantiation is
 checked, naming the instantiation.
 
-### 3.8 Collections
+### 3.9 Collections
 
 | | |
 |---|---|
@@ -424,18 +465,49 @@ iteration and is **borrowed** from the collection; it is not a copy.
 Mutating the collection's length while iterating it is not defined and is not
 checked. Do not.
 
-### 5.6 `break`, `continue`
+### 5.6 `match`
+
+The only way to read an enum's payload:
+
+```c
+match (s) {
+    case Empty: {
+        print(0);
+    }
+    case Circle(int r): {
+        print(3 * r * r);
+    }
+    case Rect(int w, int h): {
+        print(w * h);
+    }
+}
+```
+
+Bindings are **type-first**, like every other binding in the language, and
+they bind the payload positionally. A binding is borrowed from the enum,
+which stays alive for the whole `match`.
+
+**Exhaustive**: every variant must have a case. **No fallthrough** — one case
+runs. **No `default`**, so adding a variant to an enum is a compile error at
+every `match` that has to learn about it, which is the entire reason to have
+the compiler check this. A `default` can be added later without breaking
+anything; taking one away could not.
+
+Duplicate cases, unknown variants, and a case that binds the wrong number of
+values are all errors.
+
+### 5.7 `break`, `continue`
 
 Innermost enclosing loop. There are no labels.
 
-### 5.7 `return`
+### 5.8 `return`
 
 ```c
 return;         // in a void function
 return expr;
 ```
 
-### 5.8 `spawn`
+### 5.9 `spawn`
 
 ```c
 spawn worker(ch, 1);
@@ -670,7 +742,9 @@ graph, paid once per crossing.
 Stated so the absence is a decision and not an oversight:
 
   - modules, imports, visibility — one file is the program
-  - errors, exceptions, multiple returns — a fault traps
+  - exceptions and unwinding; a fault traps, and a recoverable failure is a
+    `Result`-shaped enum the program declares itself
+  - multiple returns
   - closures, function values, lambdas
   - inheritance, method overriding, abstract types
   - defining an operator outside the fixed set of §6.2, or changing one on a
@@ -696,10 +770,12 @@ EBNF. `{ x }` is zero or more, `[ x ]` optional.
 
 ```ebnf
 program     = { item } ;
-item        = typedecl | interface | distinct | func | stmt ;
+item        = typedecl | interface | enumdecl | distinct | func | stmt ;
 
 typedecl    = "type" IDENT [ tparams ] "{" { field ";" } "}" ;
 interface   = "interface" IDENT [ tparams ] "{" { sig ";" } "}" ;
+enumdecl    = "enum" IDENT [ tparams ] "{" { variant ";" } "}" ;
+variant     = IDENT [ "(" type { "," type } ")" ] ;
 distinct    = "distinct" type IDENT ";" ;
 field       = type IDENT [ "=" expr ] | type ;        (* bare type = embedded *)
 sig         = type IDENT "(" [ params ] ")" ;
@@ -713,9 +789,12 @@ type        = "int" | "bool" | "str" | "void"
             | IDENT [ "<" type { "," type } ">" ] ;
 
 block       = "{" { stmt } "}" ;
-stmt        = decl | assign | eval | if | while | forin
+stmt        = decl | assign | eval | if | while | forin | match
             | "return" [ expr ] ";" | "break" ";" | "continue" ";"
             | "spawn" IDENT args ";" ;
+match       = "match" "(" expr ")" "{" { case } "}" ;
+case        = "case" IDENT [ "(" bind { "," bind } ")" ] ":" block ;
+bind        = type IDENT ;
 
 decl        = [ "const" ] type IDENT "=" expr ";" ;
 assign      = lvalue "=" expr ";" ;
@@ -731,6 +810,7 @@ postfix     = atom { "." IDENT [ args ] | "[" expr "]" } ;
 atom        = INT | STR | "true" | "false"
             | IDENT [ args ]
             | type args                               (* construction *)
+            | type "." IDENT [ args ]                 (* enum variant *)
             | "(" expr ")" ;
 
 args        = "(" [ arg { "," arg } ] ")" ;

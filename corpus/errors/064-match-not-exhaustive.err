@@ -1,0 +1,4 @@
+corpus/errors/064-match-not-exhaustive.src:6:1: `match` must handle every variant of `Color`; missing Green, Blue
+  |
+6 | match (c) {
+  | ^

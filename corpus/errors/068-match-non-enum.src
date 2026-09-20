@@ -1,0 +1,4 @@
+int x = 1;
+match (x) {
+    case Red: { print(1); }
+}

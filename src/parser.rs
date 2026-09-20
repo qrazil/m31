@@ -64,7 +64,7 @@ impl Parser {
             "Map".to_string(),
         ];
         for w in toks.windows(2) {
-            if w[0].tok == Tok::KwType || w[0].tok == Tok::KwInterface {
+            if w[0].tok == Tok::KwType || w[0].tok == Tok::KwInterface || w[0].tok == Tok::KwEnum {
                 if let Tok::Ident(n) = &w[1].tok {
                     type_names.push(n.clone());
                 }
@@ -329,6 +329,8 @@ impl Parser {
         while self.peek() != &Tok::Eof {
             if self.peek() == &Tok::KwDistinct {
                 types.push(self.parse_distinct()?);
+            } else if self.peek() == &Tok::KwEnum {
+                types.push(self.parse_enum_decl()?);
             } else if self.peek() == &Tok::KwType || self.peek() == &Tok::KwInterface {
                 types.push(self.parse_type_decl()?);
             } else if self.starts_func() {
@@ -428,6 +430,8 @@ impl Parser {
             fields: Vec::new(),
             methods: Vec::new(),
             is_interface: false,
+            variants: Vec::new(),
+            is_enum: false,
             distinct_base: Some(base),
             span,
         })
@@ -485,6 +489,8 @@ impl Parser {
                 fields: Vec::new(),
                 methods,
                 is_interface: true,
+                variants: Vec::new(),
+                is_enum: false,
                 distinct_base: None,
                 span,
             });
@@ -505,6 +511,88 @@ impl Parser {
             fields,
             methods: Vec::new(),
             is_interface: false,
+            variants: Vec::new(),
+            is_enum: false,
+            distinct_base: None,
+            span,
+        })
+    }
+
+    /// `enum Option<T> { None; Some(T); }`
+    ///
+    /// Variants are semicolon-terminated like fields, so a declaration reads
+    /// the same shape whichever kind it is. A payload is a positional list of
+    /// types with no names: a variant is not a struct, and if there is enough
+    /// in it to want field names then the payload should BE a struct.
+    fn parse_enum_decl(&mut self) -> Result<TypeDecl, Diag> {
+        let span = self.span();
+        self.expect(Tok::KwEnum)?;
+        let (name, _) = self.expect_ident()?;
+        let tparams = self.parse_tparams()?;
+        self.tparams = tparams.clone();
+        self.expect(Tok::LBrace)?;
+
+        let mut variants: Vec<EnumVariant> = Vec::new();
+        while self.peek() != &Tok::RBrace {
+            if self.peek() == &Tok::Eof {
+                return Err(Diag::new(self.span(), "expected `}`, found end of file"));
+            }
+            let vspan = self.span();
+            let (vname, _) = self.expect_ident()?;
+            if variants.iter().any(|v| v.name == vname) {
+                return Err(Diag::new(
+                    vspan,
+                    format!("duplicate variant `{vname}` in enum `{name}`"),
+                ));
+            }
+            let mut payload = Vec::new();
+            if self.eat(&Tok::LParen) {
+                if self.peek() == &Tok::RParen {
+                    return Err(Diag::new(
+                        self.span(),
+                        format!(
+                            "`{vname}` has an empty payload; write `{vname};` for a \
+                             variant that carries nothing"
+                        ),
+                    ));
+                }
+                loop {
+                    let pspan = self.span();
+                    let t = self.expect_ty()?;
+                    if t == Ty::Void {
+                        return Err(Diag::new(pspan, "`void` is not a value type"));
+                    }
+                    payload.push(t);
+                    if !self.eat(&Tok::Comma) {
+                        break;
+                    }
+                }
+                self.expect(Tok::RParen)?;
+            }
+            self.expect(Tok::Semi)?;
+            variants.push(EnumVariant {
+                name: vname,
+                payload,
+                span: vspan,
+            });
+        }
+        self.expect(Tok::RBrace)?;
+        self.tparams.clear();
+
+        if variants.is_empty() {
+            return Err(Diag::new(
+                span,
+                format!("enum `{name}` has no variants, so no value of it can exist"),
+            ));
+        }
+        Ok(TypeDecl {
+            name,
+            tparams,
+            fields: Vec::new(),
+            methods: Vec::new(),
+            is_interface: false,
+            variants,
+            is_enum: true,
             distinct_base: None,
             span,
         })
@@ -716,6 +804,63 @@ impl Parser {
             return Ok(Stmt::While { cond, body, span });
         }
 
+        if self.eat(&Tok::KwMatch) {
+            self.expect(Tok::LParen)?;
+            let scrutinee = self.parse_expr(0)?;
+            self.expect(Tok::RParen)?;
+            self.expect(Tok::LBrace)?;
+            let mut arms: Vec<MatchArm> = Vec::new();
+            while self.peek() != &Tok::RBrace {
+                if self.peek() == &Tok::Eof {
+                    return Err(Diag::new(self.span(), "expected `}`, found end of file"));
+                }
+                let aspan = self.span();
+                self.expect(Tok::KwCase)?;
+                let (variant, _) = self.expect_ident()?;
+                // `case Some(int v):` -- bindings are type-first, like every
+                // other binding in the language.
+                let mut binds = Vec::new();
+                if self.eat(&Tok::LParen) {
+                    loop {
+                        let bspan = self.span();
+                        let ty = self.expect_ty()?;
+                        if ty == Ty::Void {
+                            return Err(Diag::new(bspan, "`void` is not a value type"));
+                        }
+                        let (name, _) = self.expect_ident()?;
+                        binds.push(Param {
+                            ty,
+                            name,
+                            default: None,
+                            embedded: false,
+                            span: bspan,
+                        });
+                        if !self.eat(&Tok::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(Tok::RParen)?;
+                }
+                self.expect(Tok::Colon)?;
+                // Braces are mandatory, as they are for `if` and `while`, so
+                // there is no dangling-statement question and no fallthrough
+                // to wonder about.
+                let body = self.parse_block()?;
+                arms.push(MatchArm {
+                    variant,
+                    binds,
+                    body,
+                    span: aspan,
+                });
+            }
+            self.expect(Tok::RBrace)?;
+            return Ok(Stmt::Match {
+                scrutinee,
+                arms,
+                span,
+            });
+        }
+
         if self.eat(&Tok::KwIf) {
             self.expect(Tok::LParen)?;
             let cond = self.parse_expr(0)?;
@@ -881,6 +1026,21 @@ impl Parser {
                         }
                     }
                     self.expect(Tok::Gt)?;
+                }
+                // `Option<int>.Some(1)` -- an enum variant. The enum type is
+                // written out because a variant with no payload has nothing
+                // to infer it from, and one rule beats a rule with an
+                // exception.
+                if self.peek() == &Tok::Dot {
+                    self.bump();
+                    let (variant, _) = self.expect_ident()?;
+                    let ty = self.intern(name, targs);
+                    let args = if self.peek() == &Tok::LParen {
+                        self.parse_args()?
+                    } else {
+                        Args::default()
+                    };
+                    return Ok(Expr::EnumNew(ty, variant, args, span));
                 }
                 if self.peek() != &Tok::LParen {
                     // Nothing shadows a type, so a bare type name here is

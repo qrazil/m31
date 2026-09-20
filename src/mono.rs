@@ -236,6 +236,19 @@ impl Mono {
                 span: f.span,
             });
         }
+        // A variant's payload types substitute like a field's.
+        let mut variants = Vec::new();
+        for v in &decl.variants {
+            let mut payload = Vec::new();
+            for t in &v.payload {
+                payload.push(self.subst_ty(*t, &sub, v.span)?);
+            }
+            variants.push(EnumVariant {
+                name: v.name.clone(),
+                payload,
+                span: v.span,
+            });
+        }
         let _ = span;
         self.out_types.push(TypeDecl {
             name: mangled.to_string(),
@@ -243,6 +256,8 @@ impl Mono {
             fields,
             methods: decl.methods.clone(),
             is_interface: decl.is_interface,
+            variants,
+            is_enum: decl.is_enum,
             distinct_base: decl.distinct_base,
             span: decl.span,
         });
@@ -304,6 +319,8 @@ impl Mono {
                     .collect(),
                 methods: Vec::new(),
                 is_interface: false,
+                variants: Vec::new(),
+                is_enum: false,
                 distinct_base: None,
                 span,
             });
@@ -325,12 +342,26 @@ impl Mono {
                 span: f.span,
             });
         }
+        let mut variants = Vec::new();
+        for v in &t.variants {
+            let mut payload = Vec::new();
+            for p in &v.payload {
+                payload.push(self.subst_ty(*p, sub, v.span)?);
+            }
+            variants.push(EnumVariant {
+                name: v.name.clone(),
+                payload,
+                span: v.span,
+            });
+        }
         Ok(TypeDecl {
             name: t.name.clone(),
             tparams: Vec::new(),
             fields,
             methods: t.methods.clone(),
             is_interface: t.is_interface,
+            variants,
+            is_enum: t.is_enum,
             distinct_base: match t.distinct_base {
                 Some(b) => Some(self.subst_ty(b, sub, t.span)?),
                 None => None,
@@ -453,6 +484,48 @@ impl Mono {
                 expr: self.subst_expr(expr, sub)?,
                 span: *span,
             },
+            Stmt::Match {
+                scrutinee,
+                arms,
+                span,
+            } => {
+                let scrutinee = self.subst_expr(scrutinee, sub)?;
+                let mut out = Vec::new();
+                for a in arms {
+                    // A binding's written type may name a type parameter, so
+                    // it substitutes like any other declaration.
+                    let mut binds = Vec::new();
+                    for b in &a.binds {
+                        binds.push(Param {
+                            ty: self.subst_ty(b.ty, sub, b.span)?,
+                            name: b.name.clone(),
+                            default: None,
+                            embedded: false,
+                            span: b.span,
+                        });
+                    }
+                    self.env.push(HashMap::new());
+                    for b in &a.binds {
+                        self.env
+                            .last_mut()
+                            .expect("no scope")
+                            .insert(b.name.clone(), b.ty);
+                    }
+                    let body = self.subst_block(&a.body, sub);
+                    self.env.pop();
+                    out.push(MatchArm {
+                        variant: a.variant.clone(),
+                        binds,
+                        body: body?,
+                        span: a.span,
+                    });
+                }
+                Stmt::Match {
+                    scrutinee,
+                    arms: out,
+                    span: *span,
+                }
+            }
             Stmt::If {
                 cond,
                 then,
@@ -527,6 +600,10 @@ impl Mono {
             Expr::New(ty, args, s) => {
                 let ty = self.subst_ty(*ty, sub, *s)?;
                 Expr::New(ty, self.subst_args(args, sub)?, *s)
+            }
+            Expr::EnumNew(ty, variant, args, s) => {
+                let ty = self.subst_ty(*ty, sub, *s)?;
+                Expr::EnumNew(ty, variant.clone(), self.subst_args(args, sub)?, *s)
             }
             Expr::MethodCall(obj, m, args, s) => Expr::MethodCall(
                 Box::new(self.subst_expr(obj, sub)?),

@@ -267,7 +267,7 @@ Naming a mandatory parameter is an error, as is passing an optional one
 positionally. The two halves never overlap, so there is no question of which
 form to use and no question of what order optional arguments come in.
 
-Not yet: closures, errors, modules. Concurrency is OS threads for now;
+Not yet: closures, modules. Concurrency is OS threads for now;
 green threads are stage 3 of `docs/concurrency-decision.md`.
 
 ## Decisions made
@@ -361,6 +361,7 @@ docs/
   types.md                 type system: proposal, plus the forks left open
 corpus/{core,twin,traps,errors}/
 examples/tour.src      every feature in one file
+examples/enums.src     enums and match, including Option, Result and JSON
 ```
 
 ## Three layers, so they do not get confused

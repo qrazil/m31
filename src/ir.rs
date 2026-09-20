@@ -97,6 +97,14 @@ impl ArithOp {
     }
 }
 
+/// One variant of an enum: its name and the IR types of its payload slots.
+/// Its index in `TypeDef::variants` is the runtime tag.
+#[derive(Debug, Clone)]
+pub struct Variant {
+    pub name: String,
+    pub payload: Vec<IrTy>,
+}
+
 /// A user-defined type's layout. The emitter turns each of these into a C
 /// struct and, if any field is a `ref`, a drop function that releases them.
 #[derive(Debug, Clone)]
@@ -116,13 +124,33 @@ pub struct TypeDef {
     /// One entry per interface-method slot in the program: the IR name of
     /// this type's implementation, or `None` if it has none.
     pub vtable: Vec<Option<String>>,
+    /// Non-empty only for an enum. An enum is laid out as a tag followed by
+    /// `payload_slots()` generic slots, and which slots hold references
+    /// depends on the tag -- so its drop and walk functions switch on it.
+    pub variants: Vec<Variant>,
+    pub is_enum: bool,
 }
 
 impl TypeDef {
     /// Whether this type holds references, and therefore needs a drop
     /// function. Types that hold none pay no call when freed.
     pub fn needs_drop(&self) -> bool {
+        if self.is_enum {
+            return self.variants.iter().any(|v| v.payload.contains(&IrTy::Ref));
+        }
         self.fields.iter().any(|(_, t)| *t == IrTy::Ref)
+    }
+
+    /// How many payload slots an enum's object needs: the widest variant.
+    /// Every variant shares the slots, so a slot's C type cannot depend on
+    /// the variant -- they are all machine words, and a reference rides as
+    /// its pointer, the same way a collection's elements do.
+    pub fn payload_slots(&self) -> usize {
+        self.variants
+            .iter()
+            .map(|v| v.payload.len())
+            .max()
+            .unwrap_or(0)
     }
 }
 
@@ -168,6 +196,27 @@ pub enum Inst {
     /// `v = alloc <type>`; refcount 1, fields uninitialised. The lowering
     /// always follows this with a store to every field.
     Alloc { dst: Value, tid: u32 },
+    /// `v = enum <type>.<tag>(args)` -- allocate, write the tag, write the
+    /// payload. One instruction rather than three because a half-built enum
+    /// has a tag that does not describe its slots, and nothing should be able
+    /// to observe that state.
+    EnumPack {
+        dst: Value,
+        tid: u32,
+        tag: u32,
+        args: Vec<Value>,
+    },
+    /// `v = tag obj` -- which variant this is, as its declaration index.
+    EnumTag { dst: Value, obj: Value, tid: u32 },
+    /// `v = payload obj.<idx>` -- one payload slot. The slot is a machine
+    /// word; the destination's type says how to read it, and the lowering
+    /// only emits this where the tag is already known.
+    EnumPayload {
+        dst: Value,
+        obj: Value,
+        tid: u32,
+        idx: u32,
+    },
     /// `v = load obj.<field>`
     LoadField {
         dst: Value,
@@ -342,6 +391,17 @@ fn show_inst(i: &Inst) -> String {
         Inst::ICmp { dst, cmp, lhs, rhs } => {
             format!("{dst} = icmp {} {lhs}, {rhs}", cmp.c_op())
         }
+        Inst::EnumPack {
+            dst,
+            tid,
+            tag,
+            args,
+        } => {
+            let a: Vec<String> = args.iter().map(|v| v.to_string()).collect();
+            format!("{dst} = enum T{tid}.{tag}({})", a.join(", "))
+        }
+        Inst::EnumTag { dst, obj, tid } => format!("{dst} = tag T{tid} {obj}"),
+        Inst::EnumPayload { dst, obj, tid, idx } => format!("{dst} = payload T{tid} {obj}.{idx}"),
         Inst::Not { dst, src } => format!("{dst} = not {src}"),
         Inst::Call { dst, func, args: a } => match dst {
             Some(d) => format!("{d} = call {func}({})", args(a)),

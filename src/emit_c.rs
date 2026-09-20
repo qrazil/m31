@@ -32,6 +32,16 @@ pub fn emit(m: &Module) -> String {
         writeln!(o, "/* {} */", t.name).unwrap();
         writeln!(o, "typedef struct {{").unwrap();
         writeln!(o, "    Obj hdr;").unwrap();
+        if t.is_enum {
+            // A tag and as many machine-word slots as the widest variant
+            // needs. The slots are shared between variants, so their C type
+            // cannot depend on which variant it is; a reference rides as its
+            // pointer, the same way a collection's elements do.
+            writeln!(o, "    int64_t tag;").unwrap();
+            for k in 0..t.payload_slots() {
+                writeln!(o, "    int64_t p{k};").unwrap();
+            }
+        }
         for (fname, fty) in &t.fields {
             let c = fty.c_name();
             let sep = if c.ends_with('*') { "" } else { " " };
@@ -52,6 +62,9 @@ pub fn emit(m: &Module) -> String {
         }
         writeln!(o, "static void drop_T{i}(Obj *o) {{").unwrap();
         writeln!(o, "    T{i} *p = (T{i} *)o;").unwrap();
+        if t.is_enum {
+            emit_enum_slot_switch(&mut o, t, "rc_dec((Obj *)(intptr_t)p->p{k});");
+        }
         for (fname, fty) in &t.fields {
             if *fty == IrTy::Ref {
                 let fname = c_ident(fname);
@@ -79,6 +92,9 @@ pub fn emit(m: &Module) -> String {
         )
         .unwrap();
         writeln!(o, "    T{i} *p = (T{i} *)o;").unwrap();
+        if t.is_enum {
+            emit_enum_slot_switch(&mut o, t, "visit(ctx, (Obj *)(intptr_t)p->p{k});");
+        }
         for (fname, fty) in &t.fields {
             if *fty == IrTy::Ref {
                 let fname = c_ident(fname);
@@ -269,6 +285,36 @@ pub fn emit(m: &Module) -> String {
 ///
 /// The two escapes are different lengths on purpose, so `a$b` and `a.b`
 /// cannot both become the same C name. `emit` asserts no collision anyway.
+/// The body of an enum's drop or walk: which payload slots hold references
+/// depends on the tag, so both have to switch on it.
+///
+/// `action` is a template with `{k}` standing for the slot number. Only the
+/// variants that actually carry a reference get a case; the rest fall to the
+/// default and do nothing.
+fn emit_enum_slot_switch(o: &mut String, t: &TypeDef, action: &str) {
+    let any = t.variants.iter().any(|v| v.payload.contains(&IrTy::Ref));
+    if !any {
+        return;
+    }
+    writeln!(o, "    switch (p->tag) {{").unwrap();
+    for (tag, v) in t.variants.iter().enumerate() {
+        if !v.payload.contains(&IrTy::Ref) {
+            continue;
+        }
+        writeln!(o, "    case {tag}:").unwrap();
+        for (k, pty) in v.payload.iter().enumerate() {
+            if *pty == IrTy::Ref {
+                writeln!(o, "        {}", action.replace("{k}", &k.to_string())).unwrap();
+            }
+        }
+        writeln!(o, "        break;").unwrap();
+    }
+    // Every other tag carries no reference. Named so the C compiler does not
+    // warn about the enumeration being incompletely handled.
+    writeln!(o, "    default: break;").unwrap();
+    writeln!(o, "    }}").unwrap();
+}
+
 fn c_name(name: &str) -> String {
     format!("fn_{}", c_ident(name))
 }
@@ -365,6 +411,10 @@ fn emit_func(o: &mut String, f: &crate::ir::Func, types: &[TypeDef]) {
                 | Inst::CallIface { args, .. }
                 | Inst::Spawn { args, .. } => read.extend(args.iter().copied()),
                 Inst::LoadField { obj, .. } => {
+                    read.insert(*obj);
+                }
+                Inst::EnumPack { args, .. } => read.extend(args.iter().copied()),
+                Inst::EnumTag { obj, .. } | Inst::EnumPayload { obj, .. } => {
                     read.insert(*obj);
                 }
                 Inst::StoreField { obj, val, .. } => {
@@ -566,6 +616,39 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
         Inst::Alloc { dst, tid } => {
             writeln!(o, "    {dst} = rt_alloc(sizeof(T{tid}), &ti_T{tid});").unwrap();
         }
+        Inst::EnumPack {
+            dst,
+            tid,
+            tag,
+            args,
+        } => {
+            writeln!(o, "    {dst} = rt_alloc(sizeof(T{tid}), &ti_T{tid});").unwrap();
+            writeln!(o, "    ((T{tid} *){dst})->tag = {tag};").unwrap();
+            for (k, a) in args.iter().enumerate() {
+                // Every payload slot is a machine word; a reference rides as
+                // its pointer.
+                let v = if f.ty_of(*a) == IrTy::Ref {
+                    format!("(int64_t)(intptr_t){a}")
+                } else {
+                    format!("(int64_t){a}")
+                };
+                writeln!(o, "    ((T{tid} *){dst})->p{k} = {v};").unwrap();
+            }
+        }
+        Inst::EnumTag { dst, obj, tid } => {
+            writeln!(o, "    {dst} = ((T{tid} *){obj})->tag;").unwrap();
+        }
+        Inst::EnumPayload { dst, obj, tid, idx } => {
+            // The slot is a machine word whatever it holds; the destination's
+            // type says how to read it, and the lowering only emits this
+            // where the tag is already known.
+            let cast = match f.ty_of(*dst) {
+                IrTy::Ref => "(Obj *)(intptr_t)",
+                IrTy::I1 => "(bool)",
+                IrTy::I64 => "",
+            };
+            writeln!(o, "    {dst} = {cast}((T{tid} *){obj})->p{idx};").unwrap();
+        }
         Inst::LoadField { dst, obj, tid, idx } => {
             let name = c_ident(&types[*tid as usize].fields[*idx as usize].0);
             writeln!(o, "    {dst} = ((T{tid} *){obj})->f_{name};").unwrap();
@@ -669,6 +752,15 @@ fn emit_term(o: &mut String, f: &crate::ir::Func, t: &Term) {
             writeln!(o, "    }}").unwrap();
         }
         Term::Ret { val: Some(v) } => writeln!(o, "    return {v};").unwrap(),
+        // A valueless return in a function that returns something is the
+        // lowering's filler for an UNREACHABLE block -- every arm of an `if`
+        // or a `match` already returned, so the join has no predecessor. C
+        // rejects a bare `return` there, so say what it means instead:
+        // rt_trap is _Noreturn, which also satisfies C that the function
+        // cannot fall off its end.
+        Term::Ret { val: None } if f.ret.is_some() => {
+            writeln!(o, "    rt_trap(\"unreachable\");").unwrap()
+        }
         Term::Ret { val: None } => writeln!(o, "    return;").unwrap(),
     }
 }

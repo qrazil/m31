@@ -1,0 +1,4 @@
+corpus/errors/070-enum-named-payload.src:4:11: a variant's payload is positional; it has no field names
+  |
+4 | Color c = Color.Blue(n: 1);
+  |           ^

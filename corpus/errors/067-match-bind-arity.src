@@ -1,0 +1,7 @@
+enum Color { Red; Blue(int); }
+
+Color c = Color.Red;
+match (c) {
+    case Red(int x): { print(x); }
+    case Blue(int n): { print(n); }
+}

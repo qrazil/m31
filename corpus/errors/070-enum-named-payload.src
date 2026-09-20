@@ -1,0 +1,4 @@
+enum Color { Blue(int); }
+
+// A variant is not a struct: its payload is positional and has no names.
+Color c = Color.Blue(n: 1);
