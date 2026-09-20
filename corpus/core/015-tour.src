@@ -122,6 +122,36 @@ str title = banner("tour", 8);
 print(title);
 print(len(title));
 
+// ---- interfaces ----------------------------------------------------
+// Structural: having the methods is the proof, no `implements` clause.
+
+type Sized interface {
+    int area();
+}
+
+Sized shape = r;
+print(shape.area());
+
+// ---- concurrency ---------------------------------------------------
+// Threads and channels. A reference sent to another thread is MOVED, which
+// is what keeps refcounts non-atomic. A channel is exempt -- it is how
+// threads share.
+
+void adder(Chan<int> out, int from, int to) {
+    int i = from;
+    int total = 0;
+    while (i <= to) {
+        total = total + i;
+        i = i + 1;
+    }
+    send(out, total);
+}
+
+Chan<int> sums = Chan<int>(4);
+spawn adder(sums, 1, 50);
+spawn adder(sums, 51, 100);
+print(recv(sums) + recv(sums));   // order-independent
+
 // ---- control flow ------------------------------------------------------
 int i = 0;
 int evens = 0;
