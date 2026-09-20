@@ -1,0 +1,7 @@
+// `contains` compares the way `==` does, and a user type needs its own
+// comparison. Better to refuse than to compare addresses silently.
+type P { int x; }
+
+List<P> ps = List<P>();
+ps.push(P(1));
+print(ps.contains(P(1)));

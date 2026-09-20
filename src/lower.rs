@@ -248,9 +248,134 @@ impl Lowerer {
                 }
                 Ok(Val::new(d, elem, owned))
             }
-            "push" | "pop" => Err(Diag::new(
+            "insert" if growable => {
+                if args.pos.len() != 2 {
+                    return Err(Diag::new(span, "`insert` takes an index and a value"));
+                }
+                let i = self.lower_expr(&args.pos[0])?;
+                if self.underlying(i.ty) != Ty::Int {
+                    return Err(Diag::new(args.pos[0].span(), self.mismatch(Ty::Int, i.ty)));
+                }
+                let v = self.lower_expr(&args.pos[1])?;
+                if !self.assignable(v.ty, elem) {
+                    return Err(Diag::new(args.pos[1].span(), self.mismatch(elem, v.ty)));
+                }
+                // The list takes a reference, exactly as `push` does.
+                if self.is_ref(elem) {
+                    if v.owned {
+                        self.stmt_temps.retain(|t| *t != v.val());
+                    } else {
+                        self.push(Inst::RcInc { val: v.val() });
+                    }
+                }
+                self.push(Inst::Call {
+                    dst: None,
+                    func: "rt_list_insert".to_string(),
+                    args: vec![o.val(), i.val(), v.val()],
+                });
+                Ok(Val::void())
+            }
+            "remove_at" if growable => {
+                if args.pos.len() != 1 {
+                    return Err(Diag::new(span, "`remove_at` takes one argument"));
+                }
+                let i = self.lower_expr(&args.pos[0])?;
+                if self.underlying(i.ty) != Ty::Int {
+                    return Err(Diag::new(args.pos[0].span(), self.mismatch(Ty::Int, i.ty)));
+                }
+                let d = self.new_val(self.irty(elem));
+                self.push(Inst::Call {
+                    dst: Some(d),
+                    func: "rt_list_remove_at".to_string(),
+                    args: vec![o.val(), i.val()],
+                });
+                // The list gives up its reference; the caller receives it.
+                let owned = self.is_ref(elem);
+                if owned {
+                    self.stmt_temps.push(d);
+                }
+                Ok(Val::new(d, elem, owned))
+            }
+            "clear" if growable => {
+                if !args.pos.is_empty() {
+                    return Err(Diag::new(span, "`clear` takes no arguments"));
+                }
+                let refs = self.new_val(IrTy::I1);
+                let is_ref = self.is_ref(elem);
+                self.push(Inst::BConst {
+                    dst: refs,
+                    val: is_ref,
+                });
+                self.push(Inst::Call {
+                    dst: None,
+                    func: "rt_list_clear".to_string(),
+                    args: vec![o.val(), refs],
+                });
+                Ok(Val::void())
+            }
+            "reverse" => {
+                if !args.pos.is_empty() {
+                    return Err(Diag::new(span, "`reverse` takes no arguments"));
+                }
+                self.push(Inst::Call {
+                    dst: None,
+                    func: "rt_seq_reverse".to_string(),
+                    args: vec![o.val()],
+                });
+                Ok(Val::void())
+            }
+            "contains" => {
+                if args.pos.len() != 1 {
+                    return Err(Diag::new(span, "`contains` takes one argument"));
+                }
+                let v = self.lower_expr(&args.pos[0])?;
+                if !self.assignable(v.ty, elem) {
+                    return Err(Diag::new(args.pos[0].span(), self.mismatch(elem, v.ty)));
+                }
+                // A user type would need its own `eq`, which this does not
+                // reach -- say so rather than comparing addresses silently.
+                let u = self.underlying(elem);
+                if u.is_ref() && u != Ty::Str {
+                    return Err(Diag::new(
+                        span,
+                        format!(
+                            "`contains` compares `int`, `bool` and `str`; \
+                             {} would need its own comparison",
+                            self.tyname(elem)
+                        ),
+                    ));
+                }
+                let is_ref = self.new_val(IrTy::I1);
+                self.push(Inst::BConst {
+                    dst: is_ref,
+                    val: self.is_ref(elem),
+                });
+                let is_str = self.new_val(IrTy::I1);
+                self.push(Inst::BConst {
+                    dst: is_str,
+                    val: u == Ty::Str,
+                });
+                let d = self.new_val(IrTy::I1);
+                self.push(Inst::Call {
+                    dst: Some(d),
+                    func: "rt_seq_contains".to_string(),
+                    args: vec![o.val(), v.val(), is_ref, is_str],
+                });
+                Ok(Val::new(d, Ty::Bool, false))
+            }
+            "push" | "pop" | "insert" | "remove_at" | "clear" => Err(Diag::new(
                 span,
                 format!("`{m}` needs a List; an Array has a fixed length"),
+            )),
+            // Java has both remove(int) and remove(Object) and the overload
+            // is a standing trap. One name, and it says which it means.
+            "remove" => Err(Diag::new(
+                span,
+                format!(
+                    "`{}` has no method `remove`; use `remove_at(i)` to drop \
+                     the element at an index",
+                    self.tyname(o.ty)
+                ),
             )),
             other => Err(Diag::new(
                 span,

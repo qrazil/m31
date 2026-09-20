@@ -1,0 +1,5 @@
+// Java has both remove(int) and remove(Object); the overload is a standing
+// trap. One name, and it says which it means.
+List<int> xs = List<int>();
+xs.push(1);
+xs.remove(0);

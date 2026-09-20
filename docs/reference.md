@@ -241,8 +241,13 @@ Methods:
 | Receiver | Method | Meaning |
 |---|---|---|
 | `Array`, `List` | `len()` | element count |
+| `Array`, `List` | `contains(v)` | `int`, `bool` and `str` elements only |
+| `Array`, `List` | `reverse()` | in place |
 | `List` | `push(v)` | append |
 | `List` | `pop()` | remove and return the last element; traps if empty |
+| `List` | `insert(i, v)` | at `i`; `i == len` appends, beyond that traps |
+| `List` | `remove_at(i)` | remove and return the element at `i` |
+| `List` | `clear()` | drop every element |
 | `Map` | `len()` | entry count |
 | `Map` | `set(k, v)` | insert or replace |
 | `Map` | `get(k)` | **traps** on a missing key |
@@ -251,6 +256,16 @@ Methods:
 | `Map` | `clear()` | remove every entry |
 | `Map` | `keys()` | a fresh `List<K>` of the keys |
 | `Map` | `values()` | a fresh `List<V>` of the values |
+
+`contains` compares the way `==` does — `str` by value, `int` and `bool`
+directly — and refuses a user type, which would need its own comparison.
+There is no `index_of` yet: with no null there is nothing honest for it to
+return when the element is absent, and a `-1` sentinel is not something to
+lock into a language that intends to freeze. It waits for optionals.
+
+`remove_at` is spelled that way because Java has both `remove(int)` and
+`remove(Object)` and the overload is a standing trap. One name, and it says
+which it means.
 
 `get` traps rather than returning a default, because there is no null to
 return: the honest choices are to trap or to force every read through a

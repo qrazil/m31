@@ -1,0 +1,4 @@
+corpus/errors/060-contains-user-type.src:7:9: `contains` compares `int`, `bool` and `str`; P would need its own comparison
+  |
+7 | print(ps.contains(P(1)));
+  |         ^

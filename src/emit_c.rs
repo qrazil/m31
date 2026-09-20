@@ -519,6 +519,8 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
                     ("rt_chan_send", 1)
                     | ("rt_index_set", 2)
                     | ("rt_list_push", 1)
+                    | ("rt_list_insert", 2)
+                    | ("rt_seq_contains", 1)
                     | ("rt_array_new", 1)
                     | ("rt_map_set", 1)
                     | ("rt_map_set", 2)
@@ -536,7 +538,11 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
                 Some(d)
                     if matches!(
                         func.as_str(),
-                        "rt_chan_recv" | "rt_index_get" | "rt_list_pop" | "rt_map_get"
+                        "rt_chan_recv"
+                            | "rt_index_get"
+                            | "rt_list_pop"
+                            | "rt_list_remove_at"
+                            | "rt_map_get"
                     ) && f.ty_of(*d) == IrTy::Ref =>
                 {
                     writeln!(o, "    {d} = (Obj *)(intptr_t){callee}({});", a.join(", ")).unwrap()
@@ -544,7 +550,11 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
                 Some(d)
                     if matches!(
                         func.as_str(),
-                        "rt_chan_new" | "rt_array_new" | "rt_list_new"
+                        "rt_chan_new"
+                            | "rt_array_new"
+                            | "rt_list_new"
+                            | "rt_map_keys"
+                            | "rt_map_values"
                     ) =>
                 {
                     writeln!(o, "    {d} = (Obj *){callee}({});", a.join(", ")).unwrap()

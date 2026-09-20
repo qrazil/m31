@@ -277,6 +277,70 @@ int64_t rt_list_pop(Obj *o) {
     return l->data[--l->len];
 }
 
+/* `insert` and `remove_at` transfer ownership the same way push and pop do:
+ * the caller hands a reference in, and gets one back out. Neither touches a
+ * refcount here -- the lowering does it, so every container agrees. */
+void rt_list_insert(Obj *o, int64_t i, int64_t v) {
+    Lst *l = (Lst *)o;
+    if (i < 0 || i > l->len) rt_trap("insert index out of range");
+    rt_list_push(o, 0);              /* grow by one; the value is overwritten */
+    for (int64_t j = l->len - 1; j > i; j--) {
+        l->data[j] = l->data[j - 1];
+    }
+    l->data[i] = v;
+}
+
+int64_t rt_list_remove_at(Obj *o, int64_t i) {
+    Lst *l = (Lst *)o;
+    if (i < 0 || i >= l->len) rt_trap("index out of range");
+    int64_t gone = l->data[i];
+    for (int64_t j = i; j + 1 < l->len; j++) {
+        l->data[j] = l->data[j + 1];
+    }
+    l->len--;
+    return gone;
+}
+
+/* Releasing is the container's job here, because after this there is nothing
+ * left to hand the references to. */
+void rt_list_clear(Obj *o, bool elems_are_refs) {
+    Lst *l = (Lst *)o;
+    if (elems_are_refs) {
+        for (int64_t i = 0; i < l->len; i++) {
+            rc_dec((Obj *)(intptr_t)l->data[i]);
+        }
+    }
+    l->len = 0;
+}
+
+/* In place, so no ownership changes: the same references, different order.
+ * Works for an Array too -- only the slots move. */
+void rt_seq_reverse(Obj *o) {
+    int64_t n = rt_len_of(o);
+    int64_t *d = slots(o);
+    for (int64_t i = 0, j = n - 1; i < j; i++, j--) {
+        int64_t t = d[i];
+        d[i] = d[j];
+        d[j] = t;
+    }
+}
+
+/* Membership by value for a str, by identity for anything else -- the same
+ * rule `==` follows, so `contains` and `==` cannot disagree. */
+bool rt_seq_contains(Obj *o, int64_t v, bool elems_are_refs, bool elems_are_str) {
+    int64_t n = rt_len_of(o);
+    int64_t *d = slots(o);
+    for (int64_t i = 0; i < n; i++) {
+        if (elems_are_str) {
+            if (rt_str_eq((Obj *)(intptr_t)d[i], (Obj *)(intptr_t)v)) return true;
+        } else if (d[i] == v) {
+            return true;
+        }
+    }
+    (void)elems_are_refs;
+    return false;
+}
+
 /* ---- map --------------------------------------------------------------
  *
  * Open addressing with linear probing and a 70% load factor. One allocation

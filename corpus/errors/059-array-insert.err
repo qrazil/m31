@@ -1,0 +1,4 @@
+corpus/errors/059-array-insert.src:3:2: `insert` needs a List; an Array has a fixed length
+  |
+3 | a.insert(0, 1);
+  |  ^
