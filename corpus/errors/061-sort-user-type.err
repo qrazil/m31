@@ -1,4 +1,4 @@
-corpus/errors/061-sort-user-type.src:9:3: `sort` orders `int` and `str`; P would need the compiler to call its own `cmp`, which is not possible yet
+corpus/errors/061-sort-user-type.src:9:3: `sort` orders `int`, `float` and `str`; P would need the compiler to call its own `cmp`, which is not possible yet
   |
 9 | ps.sort();
   |   ^

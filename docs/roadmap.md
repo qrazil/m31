@@ -17,7 +17,7 @@ Anything marked done there is tested; the corpus is the proof.
 
 | | |
 |---|---|
-| Corpus | 152 programs — 44 behaviour, 86 diagnostics, 15 traps, 7 Go twins |
+| Corpus | 158 programs — 46 behaviour, 90 diagnostics, 15 traps, 7 Go twins |
 | Oracle | gcc and clang, each at -O0 and -O2, all four must agree |
 | Leaks | every behaviour program asserts `__rc_live=0` at exit |
 | Warnings | emitted C must be clean under `-Wall -Wextra` |
@@ -66,6 +66,10 @@ exact error-type matching, and a discarded `Result` as a compile error. The
 one thing left is what `E` should be in a standard library, which
 `docs/errors-decision.md` says to settle last -- once there is a library to
 say what actually fails.
+
+**Static methods.** `static Point Point.origin()` -- a method on the type
+rather than on a value, which is what a conversion dispatching on its
+TARGET needs.
 
 **Strings.** `size`, `substr`, `contains`, `index_of`, `starts_with`,
 `ends_with`, `split`, `trim`, `to_upper`, `to_lower`, `repeat`, and `join` on

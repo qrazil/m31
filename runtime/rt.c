@@ -203,8 +203,13 @@ Obj *rt_str_repeat(Obj *o, int64_t n) {
     if (__builtin_mul_overflow(s->len, n, &total)) rt_trap("string too long");
     Str *out = (Str *)rt_alloc(sizeof(Str) + (size_t)total + 1, &rt_str_type);
     char *buf = (char *)(out + 1);
-    for (int64_t i = 0; i < n; i++) {
-        memcpy(buf + i * s->len, s->data, (size_t)s->len);
+    /* An empty string repeated any number of times is empty. Without this
+     * the overflow guard above passes -- the total really is 0 -- and the
+     * loop then runs n no-op iterations, which for a large n never ends. */
+    if (s->len > 0) {
+        for (int64_t i = 0; i < n; i++) {
+            memcpy(buf + i * s->len, s->data, (size_t)s->len);
+        }
     }
     buf[total] = '\0';
     out->len = total;
@@ -310,7 +315,11 @@ void rt_print_float(double x) {
             for (int p = 0; p <= 17; p++) {
                 snprintf(plain, sizeof plain, "%.*f", p, x);
                 if (strtod(plain, NULL) == x) {
-                    memcpy(buf, plain, sizeof buf);
+                    /* Only what was written. `sizeof buf` would copy the
+                     * whole scratch array, most of which snprintf never
+                     * touched -- harmless for puts, and still a read of
+                     * uninitialised memory. */
+                    memcpy(buf, plain, strlen(plain) + 1);
                     break;
                 }
             }
@@ -1039,23 +1048,40 @@ static pthread_t   rt_threads[RT_MAX_THREADS];
 static int         rt_nthreads = 0;
 static pthread_mutex_t rt_threads_lock = PTHREAD_MUTEX_INITIALIZER;
 
+/* The handle and the count are published TOGETHER, under the lock.
+ *
+ * Reserving the slot first and writing the handle after unlocking made the
+ * count say a thread existed before its handle did, so rt_wait_all could
+ * join a slot that was still zero. ThreadSanitizer found the race on the
+ * counter; the join was the part that mattered. */
 void rt_spawn(void *(*entry)(void *), void *arg) {
+    pthread_t t;
+    if (pthread_create(&t, NULL, entry, arg) != 0) {
+        rt_trap("could not spawn a thread");
+    }
     pthread_mutex_lock(&rt_threads_lock);
     if (rt_nthreads >= RT_MAX_THREADS) {
         pthread_mutex_unlock(&rt_threads_lock);
         rt_trap("too many spawned threads");
     }
-    int slot = rt_nthreads++;
+    rt_threads[rt_nthreads++] = t;
     pthread_mutex_unlock(&rt_threads_lock);
-
-    if (pthread_create(&rt_threads[slot], NULL, entry, arg) != 0) {
-        rt_trap("could not spawn a thread");
-    }
 }
 
+/* A spawned thread may spawn more, so the count is re-read after each pass
+ * rather than snapshotted once. The lock is released before joining: a
+ * thread that spawns while we hold it would otherwise deadlock. */
 void rt_wait_all(void) {
-    for (int i = 0; i < rt_nthreads; i++) {
-        pthread_join(rt_threads[i], NULL);
+    int joined = 0;
+    for (;;) {
+        pthread_mutex_lock(&rt_threads_lock);
+        int n = rt_nthreads;
+        pthread_mutex_unlock(&rt_threads_lock);
+        if (joined >= n) return;
+        for (int i = joined; i < n; i++) {
+            pthread_join(rt_threads[i], NULL);
+        }
+        joined = n;
     }
 }
 

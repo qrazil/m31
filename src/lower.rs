@@ -489,9 +489,9 @@ impl Lowerer {
                         return Err(Diag::new(
                             span,
                             format!(
-                                "`sort` orders `int` and `str`; {} would need \
-                                 the compiler to call its own `cmp`, which is \
-                                 not possible yet",
+                                "`sort` orders `int`, `float` and `str`; {} would \
+                                 need the compiler to call its own `cmp`, which \
+                                 is not possible yet",
                                 self.tyname(elem)
                             ),
                         ))
@@ -856,6 +856,15 @@ impl Lowerer {
                 });
 
                 self.switch_to(else_bb);
+                // The fallback is LAZY -- it is lowered into its own block
+                // and the `Some` path never runs it. So anything it
+                // allocates has to be released HERE. Left to the statement's
+                // flush, the release lands in the join block, which the
+                // `Some` edge reaches without ever having evaluated the
+                // fallback: it read an uninitialised pointer and segfaulted,
+                // or freed a stale one twice on a later pass. Exactly the
+                // hazard `&&` and `||` already have `flush_temps_since` for.
+                let mark = self.stmt_temps.len();
                 let d = self.lower_expr(&args.pos[0])?;
                 if !self.assignable(d.ty, inner) {
                     return Err(Diag::new(args.pos[0].span(), self.mismatch(inner, d.ty)));
@@ -867,6 +876,7 @@ impl Lowerer {
                         self.push(Inst::RcInc { val: d.val() });
                     }
                 }
+                self.flush_temps_since(mark);
                 self.terminate(Term::Jump {
                     to: join_bb,
                     args: vec![d.val()],
@@ -3625,9 +3635,16 @@ impl Lowerer {
         };
         let out = self.make_option(rtid, fail_tag, carried);
         self.stmt_temps.retain(|t| *t != out);
+        // The early return has to release what the statement has allocated
+        // so far -- but only on THIS path. `flush_temps` empties the pending
+        // list, and the success path continues in the same statement and
+        // still needs it: without restoring it, every temporary created
+        // before the `?` leaked whenever the value was Ok.
+        let pending = self.stmt_temps.clone();
         self.flush_temps();
         self.release_all();
         self.terminate(Term::Ret { val: Some(out) });
+        self.stmt_temps = pending;
 
         // The succeeding path: the payload, retained because it is borrowed
         // from a value whose scope ends here.

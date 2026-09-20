@@ -45,7 +45,7 @@ reserved only in the sense that nothing may shadow a type name (§4.1).
 | | |
 |---|---|
 | Integer | `0`, `42`. Decimal only. No sign — `-1` is unary minus applied to `1`. |
-| Float | `1.0`, `3.14`, `2.5e3`. **Always a dot with digits on both sides** — not `1.` and not `.5`. An exponent only after the dot form: `1.0e9`, not `1e9`. |
+| Float | `1.0`, `3.14`, `2.5e3`. **Always a dot with digits on both sides** — not `1.` and not `.5`. An exponent only after the dot form: `1.0e9`, not `1e9`. A literal too large **or too small** to represent is an error: one that parses to exactly zero has lost its whole value. Arithmetic that underflows at run time is ordinary IEEE. |
 | Boolean | `true`, `false` |
 | String | `"..."`, with escapes `\\` `\"` `\n` `\t` `\0` |
 

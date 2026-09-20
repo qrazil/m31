@@ -404,6 +404,16 @@ impl<'a> Lexer<'a> {
                 .filter(|c| *c != '_')
                 .collect();
             return match text.parse::<f64>() {
+                // Underflow is as much "does not fit" as overflow is. A
+                // literal with a nonzero digit that parses to exactly zero
+                // has lost the whole value, and saying so is better than
+                // silently agreeing the program meant 0.
+                Ok(x) if x == 0.0 && text.chars().any(|c| c.is_ascii_digit() && c != '0') => {
+                    Err(Diag::new(
+                        span,
+                        format!("float literal `{text}` is too small for float"),
+                    ))
+                }
                 Ok(x) if x.is_finite() => Ok(Tok::Float(x)),
                 // A literal that does not fit is a mistake, not an infinity.
                 _ => Err(Diag::new(

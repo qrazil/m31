@@ -1,0 +1,89 @@
+// Two bugs an adversarial review found in `or` and `?`, both about a
+// temporary created on one path being released on another.
+
+Option<int> some() { return Option<int>.Some(4); }
+Option<int> pick(int i) {
+    if (i == 0) {
+        return Option<int>.None;
+    }
+    return Option<int>.Some(9);
+}
+
+// 1. `or`'s fallback is LAZY -- it is lowered into its own block and the
+//    `Some` path never runs it. Anything it allocates has to be released
+//    THERE. Left to the statement's flush, the release landed in the join
+//    block, which the `Some` edge reaches without having evaluated the
+//    fallback: it read an uninitialised pointer and segfaulted.
+Option<int> present = Option<int>.Some(1);
+print(present.or(concat("c", "d").size()));     // 1, and no crash
+
+Option<str> text = Option<str>.Some(concat("z", "z"));
+print(text.or(concat("a", "b").to_upper()));    // zz
+
+Map<str, int> m = Map<str, int>();
+m.set("k", 3);
+print(m.get("k").or("a,b".split(",").size()));  // 3
+
+// Alternating is the dangerous shape: the None pass frees the temporary and
+// the Some pass then released the stale slot again. No crash, no warning,
+// and __rc_live still read 0 because the freed header kept its count.
+int i = 0;
+while (i < 4) {
+    print(pick(i % 2).or(concat("c", "d").size()));  // 2 9 2 9
+    i = i + 1;
+}
+
+// 2. `?` releases the statement's pending temporaries before returning --
+//    but only on the failing path. Emptying the shared pending list took
+//    them away from the success path too, which then leaked every temporary
+//    created before the `?`.
+Option<int> before_try() {
+    int r = concat("aa", "bb").size() + some()?;
+    return Option<int>.Some(r);
+}
+print(before_try().or(-1));                     // 4 + 4 = 8
+
+Result<int, str> ok() { return Result<int, str>.Ok(4); }
+Result<int, str> before_try_result() {
+    int r = concat("aa", "bb").size() + ok()?;
+    return Result<int, str>.Ok(r);
+}
+match (before_try_result()) {
+    case Ok(int v): { print(v); }               // 8
+    case Err(str e): { print(e); }
+}
+
+// A whole list allocated before the `?`.
+Option<int> list_before() {
+    int r = "a,b".split(",").size() + some()?;
+    return Option<int>.Some(r);
+}
+print(list_before().or(-1));                    // 2 + 4 = 6
+
+// Temporaries on both sides of the `?`.
+Option<int> both_sides() {
+    int r = concat("a", "b").size() + some()? + concat("c", "d").size();
+    return Option<int>.Some(r);
+}
+print(both_sides().or(-1));                     // 2 + 4 + 2 = 8
+
+// And inside other statement shapes.
+Option<int> in_push(List<int> acc) {
+    acc.push(concat("a", "b").size() + some()?);
+    return Option<int>.Some(acc.size());
+}
+List<int> acc = List<int>();
+print(in_push(acc).or(-1));                     // 1
+
+Option<int> in_cond() {
+    if (concat("a", "b").size() + some()? > 5) {
+        return Option<int>.Some(1);
+    }
+    return Option<int>.Some(0);
+}
+print(in_cond().or(-1));                        // 1
+
+// 3. An empty string repeated any number of times is empty. The overflow
+//    guard passes -- the total really is 0 -- and the copy loop then ran the
+//    full count of no-op iterations, which never finished.
+print("".repeat(1000000000).size());            // 0

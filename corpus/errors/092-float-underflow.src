@@ -1,0 +1,5 @@
+// Underflow is as much "does not fit" as overflow. A literal with a nonzero
+// digit that parses to exactly zero has lost its whole value, and saying so
+// beats silently agreeing the program meant 0. Arithmetic that underflows at
+// run time is still ordinary IEEE.
+print(1.0e-400);
