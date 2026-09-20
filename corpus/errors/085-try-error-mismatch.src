@@ -1,0 +1,12 @@
+Result<int, str> f() { return Result<int, str>.Ok(1); }
+
+// The error types must match exactly: there is no conversion mechanism, and
+// inventing one here would be a large feature hiding inside a small one.
+Result<int, int> g() {
+    int x = f()?;
+    return Result<int, int>.Ok(x);
+}
+match (g()) {
+    case Ok(int v): { print(v); }
+    case Err(int e): { print(e); }
+}

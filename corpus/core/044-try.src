@@ -1,0 +1,104 @@
+// `?` -- give me the value, or return the failure from here.
+//
+// It hides a return, which is a fair thing to dislike. But it hides ONE
+// specific return, always in the same place, and the signature still says
+// the function can fail. Go's verbosity buys visibility this language
+// already gets from the type.
+
+Result<int, str> half(int n) {
+    if (n % 2 == 0) {
+        return Result<int, str>.Ok(n / 2);
+    }
+    return Result<int, str>.Err("odd");
+}
+
+// Without `?` each of these is a four-line match.
+Result<int, str> quarter(int n) {
+    int a = half(n)?;
+    int b = half(a)?;
+    return Result<int, str>.Ok(b);
+}
+
+match (quarter(8)) {
+    case Ok(int v): { print(v); }       // 2
+    case Err(str e): { print(e); }
+}
+match (quarter(6)) {
+    case Ok(int v): { print(v); }
+    case Err(str e): { print(e); }      // odd -- the second call failed
+}
+match (quarter(5)) {
+    case Ok(int v): { print(v); }
+    case Err(str e): { print(e); }      // odd -- the first one did
+}
+
+// The failure is rebuilt at the enclosing function's own return type, so the
+// payload survives even when the success types differ.
+Result<str, str> describe(int n) {
+    int h = half(n)?;
+    if (h > 2) {
+        return Result<str, str>.Ok("big");
+    }
+    return Result<str, str>.Ok("small");
+}
+match (describe(10)) {
+    case Ok(str s): { print(s); }       // big
+    case Err(str e): { print(e); }
+}
+match (describe(7)) {
+    case Ok(str s): { print(s); }
+    case Err(str e): { print(e); }      // odd
+}
+
+// An owned error payload crosses the boundary without leaking.
+Result<int, str> fails() {
+    return Result<int, str>.Err(concat("bad ", "input"));
+}
+Result<int, str> forwards() {
+    int v = fails()?;
+    return Result<int, str>.Ok(v);
+}
+match (forwards()) {
+    case Ok(int v): { print(v); }
+    case Err(str e): { print(e); }      // bad input
+}
+
+// On an Option, in a function returning one.
+Option<int> length_of(Map<str, str> m, str k) {
+    str v = m.get(k)?;
+    return Option<int>.Some(v.size());
+}
+Map<str, str> m = Map<str, str>();
+m.set("a", concat("hel", "lo"));
+print(length_of(m, "a").or(-1));        // 5
+print(length_of(m, "zz").or(-1));       // -1
+
+// `?` chains through the rest of a postfix expression, so it applies to the
+// whole thing rather than to the receiver.
+Option<int> chained(Map<str, str> src) {
+    int n = src.get("a")?.size();
+    return Option<int>.Some(n + 1);
+}
+print(chained(m).or(-1));               // 6
+
+// In a loop, where the early return leaves the loop as well.
+Result<int, str> sum_halves(Array<int> xs) {
+    int total = 0;
+    for (int x in xs) {
+        total = total + half(x)?;
+    }
+    return Result<int, str>.Ok(total);
+}
+Array<int> evens = Array<int>(3, 2);
+evens[1] = 4;
+evens[2] = 6;
+match (sum_halves(evens)) {
+    case Ok(int v): { print(v); }       // 1 + 2 + 3 = 6
+    case Err(str e): { print(e); }
+}
+Array<int> hasodd = Array<int>(2, 2);
+hasodd[1] = 5;
+match (sum_halves(hasodd)) {
+    case Ok(int v): { print(v); }
+    case Err(str e): { print(e); }      // odd
+}

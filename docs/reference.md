@@ -285,8 +285,12 @@ and no more:
 
 | | |
 |---|---|
-| `o.is_some()`, `o.is_none()` | the question, without a `match` |
+| `o.is_some()` | the question, without a `match` |
 | `o.or(v)` | the value, or `v` if there is none |
+
+There is no `is_none`: it is exactly `!o.is_some()`, and this is the same
+reason all four orderings go through a single `cmp` rather than four methods
+— one implementation cannot disagree with itself.
 
 There is no `unwrap`. Trapping on `None` is what `Map.get` used to do, and
 putting it back behind a shorter name would undo the reason for the change.
@@ -477,6 +481,12 @@ A method may be declared anywhere in the file, including before its type.
 f(x);
 ```
 
+**A discarded `Result` is an error**, not a warning — the language has no
+warnings and should not grow the category for one thing. Handle it with
+`match`, propagate it with `?`, or bind it to a name. An `Option` is exempt:
+ignoring one is often reasonable, and what it reports is absence rather than
+something going wrong.
+
 ### 5.2 Assignment
 
 ```c
@@ -637,8 +647,36 @@ change an operator's meaning on a built-in type.
 
 ### 6.3 Postfix
 
-`a.field`, `a.method(..)`, `a[i]`, and chains of them: `xs[0].name`,
-`grid[i][j]`.
+`a.field`, `a.method(..)`, `a[i]`, `a?`, and chains of them in any order:
+`xs[0].name`, `grid[i][j]`, `m.get(k)?.size()`.
+
+#### `?` — propagate a failure
+
+```c
+Result<int, str> quarter(int n) {
+    int a = half(n)?;       // or return the Err from here
+    int b = half(a)?;
+    return Result<int, str>.Ok(b);
+}
+```
+
+`e?` gives the payload of an `Ok` or a `Some`, and otherwise **returns** the
+failure from the enclosing function. It is sugar for a `match` whose failing
+arm returns unchanged.
+
+  - It is only allowed in a function that returns an `Option` or a `Result`,
+    and the two must be the same kind — `?` on an `Option` needs a function
+    returning an `Option`.
+  - For a `Result`, the **error types must match exactly**. There is no
+    conversion mechanism, and inventing one here would be a large feature
+    hiding inside a small one. Relaxing this later cannot change what an
+    existing program means.
+  - The success types need not match: the failure is rebuilt at the
+    enclosing function's own return type.
+
+It hides a return, which is a fair thing to dislike — but it hides *one*
+specific return, always in the same place, and the signature still says the
+function can fail.
 
 ### 6.4 Construction
 

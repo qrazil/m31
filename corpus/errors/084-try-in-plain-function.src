@@ -1,0 +1,8 @@
+Result<int, str> f() { return Result<int, str>.Ok(1); }
+
+// `?` has to have somewhere to return the failure to.
+int g() {
+    int x = f()?;
+    return x;
+}
+print(g());

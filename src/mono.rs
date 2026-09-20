@@ -636,6 +636,7 @@ impl Mono {
                 let ty = self.subst_ty(*ty, sub, *s)?;
                 Expr::New(ty, self.subst_args(args, sub)?, *s)
             }
+            Expr::Try(e, s) => Expr::Try(Box::new(self.subst_expr(e, sub)?), *s),
             Expr::EnumNew(ty, variant, args, s) => {
                 let ty = self.subst_ty(*ty, sub, *s)?;
                 Expr::EnumNew(ty, variant.clone(), self.subst_args(args, sub)?, *s)

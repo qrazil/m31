@@ -1,0 +1,4 @@
+corpus/errors/083-option-is-none.src:5:17: an Option has no `is_none`; write `!o.is_some()`
+  |
+5 | print(m.get("a").is_none());
+  |                 ^

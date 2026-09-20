@@ -1,0 +1,5 @@
+// `is_none` is exactly `!o.is_some()`, and one implementation cannot
+// disagree with itself -- the same reason there is one `cmp` and not four
+// comparison methods.
+Map<str, int> m = Map<str, int>();
+print(m.get("a").is_none());

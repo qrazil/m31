@@ -1,0 +1,4 @@
+corpus/errors/084-try-in-plain-function.src:5:16: `?` can only be used in a function returning an Option or a Result; this one returns int
+  |
+5 |     int x = f()?;
+  |                ^

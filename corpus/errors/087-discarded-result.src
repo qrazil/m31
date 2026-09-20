@@ -1,0 +1,6 @@
+Result<int, str> f() {
+    return Result<int, str>.Ok(1);
+}
+
+// A Result thrown away is the classic quiet bug -- C fclose.
+f();

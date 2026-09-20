@@ -17,7 +17,7 @@ Anything marked done there is tested; the corpus is the proof.
 
 | | |
 |---|---|
-| Corpus | 146 programs — 43 behaviour, 81 diagnostics, 15 traps, 7 Go twins |
+| Corpus | 152 programs — 44 behaviour, 86 diagnostics, 15 traps, 7 Go twins |
 | Oracle | gcc and clang, each at -O0 and -O2, all four must agree |
 | Leaks | every behaviour program asserts `__rc_live=0` at exit |
 | Warnings | emitted C must be clean under `-Wall -Wextra` |
@@ -60,6 +60,12 @@ literals. No GC — and therefore no cycle collection: a cycle leaks.
 `close`. Values crossing a thread boundary are moved, checked at compile time
 and backed at run time by a transitive uniqueness check: the whole graph
 reachable from a moved value must be unreachable from anywhere else.
+
+**Errors.** Built-in `Option<T>` and `Result<T, E>`, the `?` operator with
+exact error-type matching, and a discarded `Result` as a compile error. The
+one thing left is what `E` should be in a standard library, which
+`docs/errors-decision.md` says to settle last -- once there is a library to
+say what actually fails.
 
 **Strings.** `size`, `substr`, `contains`, `index_of`, `starts_with`,
 `ends_with`, `split`, `trim`, `to_upper`, `to_lower`, `repeat`, and `join` on

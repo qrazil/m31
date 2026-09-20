@@ -1,0 +1,8 @@
+Result<int, str> g() {
+    int x = 5?;
+    return Result<int, str>.Ok(x);
+}
+match (g()) {
+    case Ok(int v): { print(v); }
+    case Err(str e): { print(e); }
+}

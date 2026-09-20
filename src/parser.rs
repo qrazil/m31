@@ -1008,32 +1008,39 @@ impl Parser {
         Ok(lhs)
     }
 
-    /// Postfix chain: `.field` for now.
+    /// Postfix chain: `.field`, `.method(..)`, `[i]` and `?`, in any order
+    /// and any number of times.
+    ///
+    /// ONE loop, not one per form. Three separate loops could not parse
+    /// `src.get(k)?.size()`: the `?` ended the chain and the `.size()` after
+    /// it had nowhere to attach.
     fn parse_postfix(&mut self, mut e: Expr) -> Result<Expr, Diag> {
-        while self.peek() == &Tok::Dot {
+        loop {
             let span = self.span();
-            self.bump();
-            let (name, _) = self.expect_ident()?;
-            e = if self.peek() == &Tok::LParen {
-                let args = self.parse_args()?;
-                Expr::MethodCall(Box::new(e), name, args, span)
-            } else {
-                Expr::Field(Box::new(e), name, span)
-            };
-        }
-        // Indexing, and chains of it: `grid[i][j]`.
-        while self.peek() == &Tok::LBracket {
-            let span = self.span();
-            self.bump();
-            let i = self.parse_expr(0)?;
-            self.expect(Tok::RBracket)?;
-            e = Expr::Index(Box::new(e), Box::new(i), span);
-            // A postfix chain may continue after an index: `xs[0].name`.
-            if self.peek() == &Tok::Dot {
-                return self.parse_postfix(e);
+            match self.peek() {
+                Tok::Dot => {
+                    self.bump();
+                    let (name, _) = self.expect_ident()?;
+                    e = if self.peek() == &Tok::LParen {
+                        let args = self.parse_args()?;
+                        Expr::MethodCall(Box::new(e), name, args, span)
+                    } else {
+                        Expr::Field(Box::new(e), name, span)
+                    };
+                }
+                Tok::LBracket => {
+                    self.bump();
+                    let i = self.parse_expr(0)?;
+                    self.expect(Tok::RBracket)?;
+                    e = Expr::Index(Box::new(e), Box::new(i), span);
+                }
+                Tok::Question => {
+                    self.bump();
+                    e = Expr::Try(Box::new(e), span);
+                }
+                _ => return Ok(e),
             }
         }
-        Ok(e)
     }
 
     fn parse_prefix(&mut self) -> Result<Expr, Diag> {

@@ -1,0 +1,4 @@
+corpus/errors/085-try-error-mismatch.src:6:16: `?` needs the same error type on both sides: this fails with str, and the function returns int
+  |
+6 |     int x = f()?;
+  |                ^

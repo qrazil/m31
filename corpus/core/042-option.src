@@ -12,7 +12,7 @@ ages.set("ada", 36);
 print(ages.get("ada").or(-1));          // 36
 print(ages.get("nobody").or(-1));       // -1
 print(ages.get("ada").is_some());       // true
-print(ages.get("nobody").is_none());    // true
+print(!ages.get("nobody").is_some()); // true
 
 match (ages.get("ada")) {
     case Some(int n): { print(n); }     // 36

@@ -79,7 +79,7 @@ making it now rather than after the standard library is written.
 ### 1. Does `Map.get` keep trapping? — DECIDED: no
 
 Implemented. `get` returns `Option<V>`, and `index_of` exists at last.
-`Option` grew exactly three methods (`is_some`, `is_none`, `or`) so that a
+`Option` grew exactly two methods (`is_some` and `or`) so that a
 lookup is one line rather than a four-line `match`; without them the change
 would have been a downgrade. No `unwrap`, deliberately.
 
@@ -96,7 +96,13 @@ pattern is also a double hash of the same key.
 It is a breaking change, which is exactly why it should happen before the
 freeze rather than after.
 
-### 2. What does propagation look like?
+### 2. What does propagation look like? — DECIDED: postfix `?`
+
+Implemented. Parsed as part of the one postfix chain rather than a loop of
+its own, which is what lets `m.get(k)?.size()` work.
+
+The original reasoning:
+
 
 Without sugar, every fallible call is a staircase:
 
@@ -124,7 +130,12 @@ already gets from the signature.
 
 `?` on an `Option` in a function returning `Option` should work the same way.
 
-### 3. Do the error types have to match exactly?
+### 3. Do the error types have to match exactly? — DECIDED: yes
+
+Implemented, with a diagnostic naming both types.
+
+The original reasoning:
+
 
 `?` in a function returning `Result<T, E1>`, applied to a `Result<U, E2>`.
 
@@ -148,7 +159,12 @@ branch, and the enum has to be right on the first try because it is frozen.
 can say what failures it actually has. Nothing about `?` or the built-in
 `Result` depends on it.
 
-### 5. Must a `Result` be used?
+### 5. Must a `Result` be used? — DECIDED: yes, and it is an error
+
+Implemented. `Option` stays exempt.
+
+The original reasoning:
+
 
 A function returning `Result` whose caller ignores it is the classic quiet
 bug — C's `fclose` problem. Rust warns via `#[must_use]`.
@@ -165,9 +181,10 @@ The language has no warnings today and should not grow a category for this.
    compiler, usable with today's `match`, no new syntax.
 2. ~~`Map.get` returns `Option<V>`; `index_of` arrives at last.~~ **Done**,
    along with the three `Option` methods that keep a lookup to one line.
-3. The `?` operator, with exact error-type matching.
-4. Unused-`Result` is an error.
-5. `str.parse_int` and friends, which unblocks the string library.
+3. ~~The `?` operator, with exact error-type matching.~~ **Done.**
+4. ~~Unused-`Result` is an error.~~ **Done.**
+5. `str.parse_int` and friends. Still blocked on question 4 — what `E` is —
+   which is now the only open one.
 
 Steps 1 and 2 landed on their own, as planned: they are useful immediately
 and they are what the string library was actually waiting for.

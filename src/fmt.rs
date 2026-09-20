@@ -461,6 +461,7 @@ impl Fmt {
                     format!("{}.{variant}({a})", self.ty(*ty))
                 }
             }
+            Expr::Try(e, _) => format!("{}?", self.expr(e)),
             Expr::Int(n, _) => n.to_string(),
             Expr::Float(x, _) => fmt_float(*x),
             Expr::Bool(b, _) => b.to_string(),

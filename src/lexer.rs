@@ -51,6 +51,9 @@ pub enum Tok {
     RBracket,
     Comma,
     Semi,
+    /// Postfix `?`: propagate a failure. Free as a token because there is no
+    /// ternary and there is never going to be one.
+    Question,
     Colon,
     Assign,
     Dot,
@@ -122,6 +125,7 @@ impl Tok {
             Tok::RBracket => "]",
             Tok::Comma => ",",
             Tok::Semi => ";",
+            Tok::Question => "?",
             Tok::Assign => "=",
             Tok::Plus => "+",
             Tok::Minus => "-",
@@ -328,6 +332,7 @@ impl<'a> Lexer<'a> {
             b']' => Tok::RBracket,
             b',' => Tok::Comma,
             b';' => Tok::Semi,
+            b'?' => Tok::Question,
             b':' => Tok::Colon,
             b'.' => Tok::Dot,
             b'+' => Tok::Plus,

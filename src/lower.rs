@@ -741,16 +741,20 @@ impl Lowerer {
         self.ty_named(&name)
     }
 
-    /// `o.is_some()`, `o.is_none()`, `o.or(default)`.
+    /// `o.is_some()` and `o.or(default)`. Two, and no more.
     ///
-    /// Three, deliberately. An Option that can only be opened with `match`
-    /// turns every map read into four lines, which would make returning one
-    /// a downgrade; an Option with a full library of combinators is a second
-    /// language to learn. These are the ones that carry their weight, and
-    /// `match` remains the only way to get at the payload and keep it.
+    /// An Option that can only be opened with `match` turns every map read
+    /// into four lines, which would make returning one a downgrade. An
+    /// Option with a library of combinators is a second language to learn.
+    /// These two carry their weight; `match` remains the only way to get at
+    /// the payload and keep it.
     ///
-    /// There is no `unwrap`. Trapping on None is what `get` used to do, and
-    /// putting it back behind a shorter name would undo the point.
+    /// No `is_none`, because it is exactly `!o.is_some()` -- the same reason
+    /// all four orderings go through a single `cmp` rather than four
+    /// methods. One implementation cannot disagree with itself.
+    ///
+    /// No `unwrap`. Trapping on None is what `get` used to do, and putting
+    /// it back behind a shorter name would undo the point.
     fn lower_option_method(
         &mut self,
         o: &Val,
@@ -795,18 +799,17 @@ impl Lowerer {
         };
 
         match m {
-            "is_some" | "is_none" => {
+            "is_some" => {
                 if !args.pos.is_empty() {
-                    return Err(Diag::new(span, format!("`{m}` takes no arguments")));
+                    return Err(Diag::new(span, "`is_some` takes no arguments"));
                 }
                 let c = is_some(self);
-                if m == "is_some" {
-                    return Ok(Val::new(c, Ty::Bool, false));
-                }
-                let d = self.new_val(IrTy::I1);
-                self.push(Inst::Not { dst: d, src: c });
-                Ok(Val::new(d, Ty::Bool, false))
+                Ok(Val::new(c, Ty::Bool, false))
             }
+            "is_none" => Err(Diag::new(
+                span,
+                "an Option has no `is_none`; write `!o.is_some()`",
+            )),
             "or" => {
                 if args.pos.len() != 1 {
                     return Err(Diag::new(span, "`or` takes one argument"));
@@ -872,8 +875,8 @@ impl Lowerer {
             other => Err(Diag::new(
                 span,
                 format!(
-                    "an Option has `is_some`, `is_none` and `or`; \
-                     `{other}` is not one of them -- use `match` to take the value out"
+                    "an Option has `is_some` and `or`; `{other}` is not one of \
+                     them -- use `match` to take the value out"
                 ),
             )),
         }
@@ -2445,9 +2448,25 @@ impl Lowerer {
                 Ok(())
             }
 
-            Stmt::Eval { expr, .. } => {
+            Stmt::Eval { expr, span } => {
                 let val = self.lower_expr(expr)?;
-                let _ = val;
+                // A Result thrown away is the classic quiet bug -- C's
+                // fclose problem. It is an ERROR rather than a warning
+                // because the language has no warnings and should not grow
+                // the category for this.
+                //
+                // An Option is exempt: ignoring one is often reasonable, and
+                // the failure it reports is absence rather than something
+                // going wrong.
+                if let Some(tid) = self.tdef_of(val.ty) {
+                    if self.typedefs[tid as usize].name.starts_with("Result$") {
+                        return Err(Diag::new(
+                            *span,
+                            "this Result is discarded; handle it with `match`, \
+                             propagate it with `?`, or bind it to a name",
+                        ));
+                    }
+                }
                 self.flush_temps();
                 Ok(())
             }
@@ -3362,6 +3381,194 @@ impl Lowerer {
         Ok(())
     }
 
+    /// `e?` -- give me the value, or return the failure from here.
+    ///
+    /// Sugar for a `match` whose failing arm returns unchanged:
+    ///
+    ///     match (e) {
+    ///         case Ok(T v):   { v }
+    ///         case Err(E x):  { return Result<_, E>.Err(x); }
+    ///     }
+    ///
+    /// It works on an `Option` in a function returning an `Option` too.
+    ///
+    /// The error types must match EXACTLY. Rust converts via `From`; we have
+    /// no such mechanism and inventing one here would be a large feature
+    /// hiding inside a small one. Requiring a match is restrictive and
+    /// honest, and relaxing it later cannot change what an existing program
+    /// means.
+    fn lower_try(&mut self, inner: &Expr, span: Span) -> Result<Val, Diag> {
+        let v = self.lower_expr(inner)?;
+
+        let Some(vtid) = self
+            .tdef_of(v.ty)
+            .filter(|t| self.typedefs[*t as usize].is_enum)
+        else {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`?` needs an Option or a Result; {} is neither",
+                    self.tyname(v.ty)
+                ),
+            ));
+        };
+        let vname = self.typedefs[vtid as usize].name.clone();
+        let is_result = vname.starts_with("Result$");
+        if !is_result && !vname.starts_with("Option$") {
+            return Err(Diag::new(
+                span,
+                format!("`?` needs an Option or a Result; {vname} is neither"),
+            ));
+        }
+
+        // The enclosing function has to be able to carry the failure out.
+        let ret = self.ret_ty;
+        let Some(rtid) = self
+            .tdef_of(ret)
+            .filter(|t| self.typedefs[*t as usize].is_enum)
+        else {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`?` can only be used in a function returning an Option or a \
+                     Result; this one returns {}",
+                    self.tyname(ret)
+                ),
+            ));
+        };
+        let rname = self.typedefs[rtid as usize].name.clone();
+        if is_result != rname.starts_with("Result$") {
+            return Err(Diag::new(
+                span,
+                format!("`?` on a {vname} needs a function returning a Result, not {rname}"),
+            ));
+        }
+
+        // Exact error types, for a Result.
+        if is_result {
+            let ve = self.variant_surface[vtid as usize][1][0];
+            let re = self.variant_surface[rtid as usize][1][0];
+            if ve != re {
+                return Err(Diag::new(
+                    span,
+                    format!(
+                        "`?` needs the same error type on both sides: this fails with \
+                         {}, and the function returns {}",
+                        self.tyname(ve),
+                        self.tyname(re)
+                    ),
+                ));
+            }
+        }
+
+        let ok_tag = self.typedefs[vtid as usize]
+            .variants
+            .iter()
+            .position(|x| x.name == "Ok" || x.name == "Some")
+            .expect("Option and Result each have a success variant") as u32;
+        let payload = self.variant_surface[vtid as usize][ok_tag as usize][0];
+
+        // The scrutinee has to outlive both paths and may be a temporary, so
+        // it is held the way `match` holds one.
+        self.synth += 1;
+        let hold = format!("$try{}", self.synth);
+        self.scopes.push(HashMap::new());
+        self.owned.push(Vec::new());
+        if v.owned {
+            self.stmt_temps.retain(|t| *t != v.val());
+        } else {
+            self.push(Inst::RcInc { val: v.val() });
+        }
+        self.scopes
+            .last_mut()
+            .unwrap()
+            .insert(hold.clone(), (v.ty, v.val(), true));
+        self.owned.last_mut().unwrap().push(hold.clone());
+
+        let tag = self.new_val(IrTy::I64);
+        self.push(Inst::EnumTag {
+            dst: tag,
+            obj: v.val(),
+            tid: vtid,
+        });
+        let k = self.new_val(IrTy::I64);
+        self.push(Inst::IConst {
+            dst: k,
+            val: ok_tag as i64,
+        });
+        let good = self.new_val(IrTy::I1);
+        self.push(Inst::ICmp {
+            dst: good,
+            cmp: Cmp::Eq,
+            lhs: tag,
+            rhs: k,
+        });
+
+        let ok_bb = self.new_block();
+        let bad_bb = self.new_block();
+        self.terminate(Term::Brif {
+            cond: good,
+            then: ok_bb,
+            then_args: Vec::new(),
+            els: bad_bb,
+            els_args: Vec::new(),
+        });
+
+        // The failing path: rebuild the failure at the function's own return
+        // type and leave. A Result and an Option differ only in whether
+        // there is a payload to carry.
+        self.switch_to(bad_bb);
+        let fail_tag = self.typedefs[rtid as usize]
+            .variants
+            .iter()
+            .position(|x| x.name == "Err" || x.name == "None")
+            .expect("Option and Result each have a failure variant") as u32;
+        let carried = if is_result {
+            let e = self.new_val(self.irty(self.variant_surface[vtid as usize][1][0]));
+            self.push(Inst::EnumPayload {
+                dst: e,
+                obj: v.val(),
+                tid: vtid,
+                idx: 0,
+            });
+            // Borrowed from the value we are about to release, so the new
+            // failure takes a reference of its own.
+            if self.is_ref(self.variant_surface[vtid as usize][1][0]) {
+                self.push(Inst::RcInc { val: e });
+            }
+            Some(e)
+        } else {
+            None
+        };
+        let out = self.make_option(rtid, fail_tag, carried);
+        self.stmt_temps.retain(|t| *t != out);
+        self.flush_temps();
+        self.release_all();
+        self.terminate(Term::Ret { val: Some(out) });
+
+        // The succeeding path: the payload, retained because it is borrowed
+        // from a value whose scope ends here.
+        self.switch_to(ok_bb);
+        let got = self.new_val(self.irty(payload));
+        self.push(Inst::EnumPayload {
+            dst: got,
+            obj: v.val(),
+            tid: vtid,
+            idx: 0,
+        });
+        let owned = self.is_ref(payload);
+        if owned {
+            self.push(Inst::RcInc { val: got });
+        }
+        self.release_scope();
+        self.scopes.pop();
+        self.owned.pop();
+        if owned {
+            self.stmt_temps.push(got);
+        }
+        Ok(Val::new(got, payload, owned))
+    }
+
     fn lower_if(
         &mut self,
         cond: &Expr,
@@ -3802,6 +4009,7 @@ impl Lowerer {
             Expr::EnumNew(ty, variant, args, span) => {
                 self.lower_enum_new(*ty, variant, args, *span)
             }
+            Expr::Try(inner, span) => self.lower_try(inner, *span),
         }
     }
 

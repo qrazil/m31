@@ -146,6 +146,13 @@ pub enum Expr {
     Field(Box<Expr>, String, Span),
     /// `expr[index]`
     Index(Box<Expr>, Box<Expr>, Span),
+    /// `f()?` -- give me the value, or return the failure from here.
+    ///
+    /// Sugar for a `match` that returns the `Err` or `None` arm unchanged.
+    /// It hides a return, which is a fair thing to dislike -- but it hides
+    /// one specific return, always in the same place, and the signature
+    /// still says the function can fail.
+    Try(Box<Expr>, Span),
     /// `Option<int>.Some(1)` -- the enum type, the variant name, the
     /// payload. The type is written in full rather than inferred: a variant
     /// with no payload has nothing to infer from, and one rule beats a rule
@@ -173,7 +180,8 @@ impl Expr {
             | Expr::Field(_, _, s)
             | Expr::Index(_, _, s)
             | Expr::New(_, _, s)
-            | Expr::EnumNew(_, _, _, s) => *s,
+            | Expr::EnumNew(_, _, _, s)
+            | Expr::Try(_, s) => *s,
         }
     }
 }
