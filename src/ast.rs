@@ -93,12 +93,20 @@ pub struct TyExpr {
 }
 
 /// A user-defined type declaration, possibly generic.
+///
+/// Two shapes share one keyword: a struct (`fields`) and an interface
+/// (`methods`, signatures only). Keeping `type` for both is what lets more
+/// shapes -- enums, aliases -- arrive later without another keyword.
 #[derive(Debug, Clone)]
 pub struct TypeDecl {
     pub name: String,
     /// Type parameter names, empty for a non-generic type.
     pub tparams: Vec<String>,
     pub fields: Vec<Param>,
+    /// Required method signatures; non-empty only for an interface. Bodies
+    /// are empty.
+    pub methods: Vec<Func>,
+    pub is_interface: bool,
     pub span: Span,
 }
 

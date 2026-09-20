@@ -20,8 +20,8 @@ which gcc and clang both build clean at `-O0` and `-O2`.
 `examples/tour.src` is a tour of every feature, and is also in the corpus so
 it cannot rot.
 
-- 61 corpus programs, 0 failing
-- 53 unit tests
+- 65 corpus programs, 0 failing
+- 57 unit tests
 - 0 dependencies, 0 `unsafe`, clippy clean at `-D warnings`
 
 ## What the language does today
@@ -86,6 +86,27 @@ void Rect.scale(int f) {
 
 That is safe only because of the next rule.
 
+**Interfaces are structural** — having the methods is the proof, with no
+`implements` clause, so a type written before the interface existed can
+satisfy it:
+
+```c
+type Shape interface {
+    int area();
+    str name();
+}
+
+void report(Shape sh) {     // any type with area() and name()
+    print(sh.name());
+}
+```
+
+An interface value is just an `Obj *`: the object knows its own type through
+the header, as in Java, so `ref` stays the only reference shape in the IR and
+there are no fat pointers. Dispatch costs one extra load. A call on a
+*concrete* receiver stays a direct call, so interfaces cost nothing where
+they are not used.
+
 **Operators desugar to methods**, so a user type can define them:
 
 ```c
@@ -122,7 +143,7 @@ Naming a mandatory parameter is an error, as is passing an optional one
 positionally. The two halves never overlap, so there is no question of which
 form to use and no question of what order optional arguments come in.
 
-Not yet: `for`, closures, interfaces, modules, concurrency.
+Not yet: `for`, closures, embedding, modules, concurrency.
 
 ## Decisions made
 

@@ -1,0 +1,49 @@
+// Interfaces are STRUCTURAL: having the methods is the proof, with no
+// `implements` clause, so a type written before the interface existed can
+// satisfy it.
+//
+// An interface value is just an `Obj *` -- the object knows its own type
+// through the header, as in Java -- so `ref` stays the only reference shape
+// in the IR and there are no fat pointers. Dispatch is one extra load.
+
+type Shape interface {
+    int area();
+    str name();
+}
+
+type Sq {
+    int s;
+}
+
+type Rect {
+    int w;
+    int h;
+}
+
+int Sq.area() { return s * s; }
+str Sq.name() { return "square"; }
+
+int Rect.area() { return w * h; }
+str Rect.name() { return "rect"; }
+
+// Not a Shape: no area(). Proves satisfaction is checked, not assumed.
+type Tag {
+    str t;
+}
+str Tag.name() { return t; }
+
+void report(Shape sh) {
+    print(sh.name());
+    print(sh.area());
+}
+
+Sq a = Sq(4);
+Rect b = Rect(3, 5);
+report(a);
+report(b);
+
+// Assignment to an interface-typed local, then dispatch.
+Shape s = a;
+print(s.area());
+s = b;
+print(s.area());

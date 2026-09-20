@@ -31,19 +31,21 @@ void rc_dec(Obj *o) {
         /* Release what this object holds before releasing the object. A type
          * with no reference-typed fields has no drop function at all, so the
          * common case is one predictable branch, not a call. */
-        if (o->drop != NULL) {
-            o->drop(o);
+        if (o->ty != NULL && o->ty->drop != NULL) {
+            o->ty->drop(o);
         }
         RC_TRACK_FREE();
         free(o);
     }
 }
 
-Obj *rt_alloc(size_t size, DropFn drop) {
+const TypeInfo rt_str_type = { NULL, NULL };
+
+Obj *rt_alloc(size_t size, const TypeInfo *ty) {
     Obj *o = malloc(size);
     if (o == NULL) rt_trap("out of memory");
     o->rc = 1;
-    o->drop = drop;
+    o->ty = ty;
     RC_TRACK_ALLOC();
     return o;
 }
@@ -61,7 +63,7 @@ Obj *rt_concat(Obj *a, Obj *b) {
 
     /* One block: header, then bytes, then a NUL so the data is also a valid
      * C string. Strings hold no references, so no drop function. */
-    Str *s = (Str *)rt_alloc(sizeof(Str) + (size_t)n + 1, NULL);
+    Str *s = (Str *)rt_alloc(sizeof(Str) + (size_t)n + 1, &rt_str_type);
 
     char *buf = (char *)(s + 1);
     memcpy(buf, x->data, (size_t)x->len);

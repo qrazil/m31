@@ -1,0 +1,1 @@
+corpus/errors/029-missing-method.src:14:5: type mismatch: expected Shape, found Tag: `Tag` needs a method `int area(..)` to satisfy `Shape`

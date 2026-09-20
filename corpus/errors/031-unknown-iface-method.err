@@ -1,0 +1,1 @@
+corpus/errors/031-unknown-iface-method.src:12:13: interface `Shape` has no method `nope`

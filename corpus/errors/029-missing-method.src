@@ -1,0 +1,14 @@
+type Shape interface {
+    int area();
+}
+
+type Tag {
+    str t;
+}
+
+void use(Shape s) {
+    print(s.area());
+}
+
+Tag t = Tag("x");
+use(t);

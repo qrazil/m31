@@ -210,6 +210,8 @@ impl Mono {
             name: mangled.to_string(),
             tparams: Vec::new(),
             fields,
+            methods: decl.methods.clone(),
+            is_interface: decl.is_interface,
             span: decl.span,
         });
         Ok(())
@@ -265,6 +267,8 @@ impl Mono {
             name: t.name.clone(),
             tparams: Vec::new(),
             fields,
+            methods: t.methods.clone(),
+            is_interface: t.is_interface,
             span: t.span,
         })
     }

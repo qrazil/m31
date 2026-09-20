@@ -27,13 +27,37 @@ typedef struct Obj Obj;
  * generates one of these per user type that has reference-typed fields. */
 typedef void (*DropFn)(Obj *);
 
-/* Every heap object starts with this. Keeping it to two words matters: a
- * two-field user type is then four words total, and unboxing small objects
- * later is a compiler optimisation rather than a layout change. */
+/* A vtable slot. Every entry is cast to its real signature at the call site,
+ * which the compiler knows statically; only the indirection is dynamic. */
+typedef void (*AnyFn)(void);
+
+/* Per-type metadata, emitted once per concrete type.
+ *
+ * `vtable` is a POINTER rather than an inline array so that TypeInfo has a
+ * fixed size here even though the slot count is decided per program. Slot
+ * numbers are assigned by the compiler: one per distinct interface method
+ * name in the program, NULL where a type does not have it.
+ */
+typedef struct TypeInfo {
+    DropFn       drop;
+    const AnyFn *vtable;
+} TypeInfo;
+
+/* Every heap object starts with this. Two words: the count, and a pointer to
+ * the type.
+ *
+ * Putting the type here rather than in a fat interface pointer is what keeps
+ * `ref` the only reference shape in the IR -- an interface value is just an
+ * `Obj *`, because the object knows what it is. Java's model. It costs one
+ * extra load on dispatch against Go's fat pointer, using a word that was
+ * already being spent on the drop function. */
 struct Obj {
-    long   rc;
-    DropFn drop;
+    long            rc;
+    const TypeInfo *ty;
 };
+
+/* Strings carry no methods and need no drop. */
+extern const TypeInfo rt_str_type;
 
 /* A string is allocated as one block -- header, then bytes -- with `data`
  * pointing just past the struct. One malloc, one free, good locality. A
@@ -51,7 +75,7 @@ void rc_dec(Obj *o);
 /* Allocate `size` bytes of object, refcount 1, with the given drop function
  * (NULL if the type holds no references). The header is initialised; the
  * caller fills in the rest. */
-Obj *rt_alloc(size_t size, DropFn drop);
+Obj *rt_alloc(size_t size, const TypeInfo *ty);
 
 int64_t rt_len(Obj *o);
 Obj    *rt_concat(Obj *a, Obj *b);

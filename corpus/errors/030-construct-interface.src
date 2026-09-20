@@ -1,0 +1,6 @@
+type Shape interface {
+    int area();
+}
+
+Shape s = Shape();
+print(1);

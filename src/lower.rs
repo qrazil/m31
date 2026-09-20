@@ -95,6 +95,12 @@ pub struct Lowerer {
     field_params: Vec<Vec<Param>>,
     /// The monomorphised program's interned type expressions.
     ty_exprs: Vec<TyExpr>,
+    /// Required methods per interface, parallel to `typedefs`; empty for a
+    /// struct.
+    iface_methods: Vec<Vec<Func>>,
+    /// Interface method names, one per dispatch slot, assigned once for the
+    /// whole program so a vtable index is a constant at every call site.
+    iface_slots: Vec<String>,
     strings: Vec<String>,
     // per-function state
     types: Vec<IrTy>,
@@ -111,14 +117,6 @@ pub struct Lowerer {
     /// anything -- see `check_shadow`.
     recv: Option<(u32, Value)>,
     ret_ty: Ty,
-}
-
-/// `ir_ty` for types that may be void, used where a mismatch is possible.
-fn ir_ty_opt(t: Ty) -> Option<IrTy> {
-    match t {
-        Ty::Void => None,
-        other => Some(ir_ty(other)),
-    }
 }
 
 fn ir_ty(t: Ty) -> IrTy {
@@ -139,6 +137,8 @@ impl Lowerer {
             field_surface: Vec::new(),
             field_params: Vec::new(),
             ty_exprs: Vec::new(),
+            iface_methods: Vec::new(),
+            iface_slots: Vec::new(),
             strings: Vec::new(),
             types: Vec::new(),
             blocks: Vec::new(),
@@ -267,7 +267,17 @@ impl Lowerer {
             self.typedefs.push(TypeDef {
                 name: t.name.clone(),
                 fields,
+                is_interface: t.is_interface,
+                vtable: Vec::new(),
             });
+            self.iface_methods.push(t.methods.clone());
+            // One dispatch slot per distinct interface method name, for the
+            // whole program.
+            for m in &t.methods {
+                if !self.iface_slots.contains(&m.name) {
+                    self.iface_slots.push(m.name.clone());
+                }
+            }
             self.field_surface
                 .push(t.fields.iter().map(|f| f.ty).collect());
             self.field_params.push(t.fields.clone());
@@ -329,10 +339,28 @@ impl Lowerer {
             funcs.push(self.lower_func(f)?);
         }
         funcs.push(self.lower_func(&entry)?);
+        // Fill each concrete type's vtable now that every method is known.
+        let slots = self.iface_slots.clone();
+        for i in 0..self.typedefs.len() {
+            if self.typedefs[i].is_interface {
+                continue;
+            }
+            let tname = self.typedefs[i].name.clone();
+            let vt: Vec<Option<String>> = slots
+                .iter()
+                .map(|m| {
+                    let key = format!("{tname}.{m}");
+                    self.sigs.contains_key(&key).then_some(key)
+                })
+                .collect();
+            self.typedefs[i].vtable = vt;
+        }
+
         Ok(ir::Module {
             funcs,
             strings: self.strings,
             types: self.typedefs,
+            iface_slots: self.iface_slots,
         })
     }
 
@@ -450,6 +478,76 @@ impl Lowerer {
             Ty::User(i) => self.ty_exprs[i as usize].name.clone(),
             other => other.name().to_string(),
         }
+    }
+
+    /// Is `from` usable where `to` is expected?
+    ///
+    /// Identical types always. Beyond that, a concrete type is assignable to
+    /// an interface when it has every required method with a matching
+    /// signature -- structurally, with no `implements` clause, so a type
+    /// written before the interface existed can satisfy it.
+    fn assignable(&self, from: Ty, to: Ty) -> bool {
+        if from == to {
+            return true;
+        }
+        let (Some(ft), Some(tt)) = (self.tdef_of(from), self.tdef_of(to)) else {
+            return false;
+        };
+        if !self.typedefs[tt as usize].is_interface || self.typedefs[ft as usize].is_interface {
+            return false;
+        }
+        self.missing_method(ft, tt).is_none()
+    }
+
+    /// "expected X, found Y", plus the reason when Y nearly satisfies an
+    /// interface X. Naming the missing method is the difference between a
+    /// diagnostic you can act on and one you have to investigate.
+    fn mismatch(&self, want: Ty, got: Ty) -> String {
+        let base = format!(
+            "type mismatch: expected {}, found {}",
+            self.tyname(want),
+            self.tyname(got)
+        );
+        let (Some(tt), Some(ft)) = (self.tdef_of(want), self.tdef_of(got)) else {
+            return base;
+        };
+        if !self.typedefs[tt as usize].is_interface || self.typedefs[ft as usize].is_interface {
+            return base;
+        }
+        match self.missing_method(ft, tt) {
+            Some(m) => format!(
+                "{base}: `{}` needs a method `{m}` to satisfy `{}`",
+                self.tyname(got),
+                self.tyname(want)
+            ),
+            None => base,
+        }
+    }
+
+    /// The first required method `ft` does not satisfy, for diagnostics.
+    fn missing_method(&self, ft: u32, tt: u32) -> Option<String> {
+        let fname = &self.typedefs[ft as usize].name;
+        for m in &self.iface_methods[tt as usize] {
+            let key = format!("{fname}.{}", m.name);
+            let Some(sig) = self.sigs.get(&key) else {
+                return Some(format!("{} {}(..)", self.tyname(m.ret), m.name));
+            };
+            let same = sig.ret == m.ret
+                && sig.params.len() == m.params.len()
+                && sig
+                    .params
+                    .iter()
+                    .zip(m.params.iter())
+                    .all(|(a, b)| a.ty == b.ty);
+            if !same {
+                return Some(format!(
+                    "{} {}(..) with a matching signature",
+                    self.tyname(m.ret),
+                    m.name
+                ));
+            }
+        }
+        None
     }
 
     /// The declaration a type names. `Ty::User` indexes the interning arena;
@@ -651,7 +749,7 @@ impl Lowerer {
                 span,
             } => {
                 let val = self.lower_expr(init)?;
-                if val.ty != *ty {
+                if !self.assignable(val.ty, *ty) {
                     return Err(Diag::new(
                         init.span(),
                         format!(
@@ -687,7 +785,7 @@ impl Lowerer {
                     if let Some((tid, obj, idx, fty)) = self.recv_field(name) {
                         let v = self.lower_expr(value)?;
                         let want = self.field_ty(tid, idx);
-                        if v.ty != want {
+                        if !self.assignable(v.ty, want) {
                             return Err(Diag::new(
                                 value.span(),
                                 format!(
@@ -736,7 +834,7 @@ impl Lowerer {
                     return Err(Diag::new(*span, format!("cannot assign to const `{name}`")));
                 }
                 let val = self.lower_expr(value)?;
-                if val.ty != ty {
+                if !self.assignable(val.ty, ty) {
                     return Err(Diag::new(
                         value.span(),
                         format!(
@@ -782,7 +880,7 @@ impl Lowerer {
                     }
                     (Some(e), want) => {
                         let val = self.lower_expr(e)?;
-                        if val.ty != want {
+                        if !self.assignable(val.ty, want) {
                             return Err(Diag::new(
                                 e.span(),
                                 format!(
@@ -847,7 +945,7 @@ impl Lowerer {
                     ));
                 };
                 let v = self.lower_expr(value)?;
-                if ir_ty_opt(v.ty) != Some(fty) {
+                if !self.assignable(v.ty, self.field_ty(tid, idx)) {
                     return Err(Diag::new(
                         value.span(),
                         format!(
@@ -1350,6 +1448,69 @@ impl Lowerer {
                         format!("type {} has no methods", self.tyname(o.ty)),
                     ));
                 };
+                // On an interface value the implementation is not known
+                // statically: dispatch through the receiver's type header.
+                if self.typedefs[tid as usize].is_interface {
+                    let iname = self.typedefs[tid as usize].name.clone();
+                    let Some(decl) = self.iface_methods[tid as usize]
+                        .iter()
+                        .find(|x| x.name == *m)
+                        .cloned()
+                    else {
+                        return Err(Diag::new(
+                            *span,
+                            format!("interface `{iname}` has no method `{m}`"),
+                        ));
+                    };
+                    let slot = self
+                        .iface_slots
+                        .iter()
+                        .position(|x| *x == *m)
+                        .expect("every interface method has a slot")
+                        as u32;
+
+                    let slots =
+                        self.bind_args(&format!("{iname}.{m}"), &decl.params, args, *span)?;
+                    let mut vals = vec![o.val()];
+                    if o.owned {
+                        self.stmt_temps.push(o.val());
+                    }
+                    for (a, p) in slots.iter().zip(decl.params.iter()) {
+                        let v = self.lower_expr(a)?;
+                        if !self.assignable(v.ty, p.ty) {
+                            return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
+                        }
+                        if v.owned {
+                            self.stmt_temps.push(v.val());
+                        }
+                        vals.push(v.val());
+                    }
+
+                    if decl.ret == Ty::Void {
+                        self.push(Inst::CallIface {
+                            dst: None,
+                            slot,
+                            name: m.clone(),
+                            args: vals,
+                            ret: None,
+                        });
+                        return Ok(Val::void());
+                    }
+                    let d = self.new_val(ir_ty(decl.ret));
+                    self.push(Inst::CallIface {
+                        dst: Some(d),
+                        slot,
+                        name: m.clone(),
+                        args: vals,
+                        ret: Some(ir_ty(decl.ret)),
+                    });
+                    let owned = decl.ret.is_ref();
+                    if owned {
+                        self.stmt_temps.push(d);
+                    }
+                    return Ok(Val::new(d, decl.ret, owned));
+                }
+
                 let key = format!("{}.{m}", self.typedefs[tid as usize].name);
                 let Some(sig) = self.sigs.get(&key) else {
                     return Err(Diag::new(
@@ -1372,15 +1533,8 @@ impl Lowerer {
                 }
                 for (a, p) in slots.iter().zip(params.iter()) {
                     let v = self.lower_expr(a)?;
-                    if v.ty != p.ty {
-                        return Err(Diag::new(
-                            a.span(),
-                            format!(
-                                "type mismatch: expected {}, found {}",
-                                self.tyname(p.ty),
-                                self.tyname(v.ty)
-                            ),
-                        ));
+                    if !self.assignable(v.ty, p.ty) {
+                        return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
                     }
                     if v.owned {
                         self.stmt_temps.push(v.val());
@@ -1709,6 +1863,15 @@ impl Lowerer {
                 format!("unknown type `{}`", self.tyname(ty)),
             ));
         };
+        if self.typedefs[tid as usize].is_interface {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`{}` is an interface; construct a type that satisfies it",
+                    self.typedefs[tid as usize].name
+                ),
+            ));
+        }
         let name = self.typedefs[tid as usize].name.clone();
         let name = name.as_str();
         let fields = self.field_params[tid as usize].clone();
@@ -1717,7 +1880,7 @@ impl Lowerer {
         let mut given: Vec<Option<Val>> = Vec::new();
         for (e, f) in slots.iter().zip(fields.iter()) {
             let v = self.lower_expr(e)?;
-            if v.ty != f.ty {
+            if !self.assignable(v.ty, f.ty) {
                 return Err(Diag::new(
                     e.span(),
                     format!(
@@ -1806,15 +1969,8 @@ impl Lowerer {
         let mut vals = Vec::new();
         for (a, p) in slots.iter().zip(params.iter()) {
             let v = self.lower_expr(a)?;
-            if v.ty != p.ty {
-                return Err(Diag::new(
-                    a.span(),
-                    format!(
-                        "type mismatch: expected {}, found {}",
-                        self.tyname(p.ty),
-                        self.tyname(v.ty)
-                    ),
-                ));
+            if !self.assignable(v.ty, p.ty) {
+                return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
             }
             // Arguments are borrowed (§5.1): no retain at the call site. An
             // owned temporary still has to be released after the call, so it

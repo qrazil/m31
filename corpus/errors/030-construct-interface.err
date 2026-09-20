@@ -1,0 +1,1 @@
+corpus/errors/030-construct-interface.src:5:11: `Shape` is an interface; construct a type that satisfies it

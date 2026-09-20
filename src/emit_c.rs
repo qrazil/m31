@@ -20,6 +20,15 @@ pub fn emit(m: &Module) -> String {
     // One C struct per user type. Every object starts with the Obj header, so
     // a `ref` is always an `Obj *` and the field access casts.
     for (i, t) in m.types.iter().enumerate() {
+        if t.is_interface {
+            writeln!(
+                o,
+                "/* interface {} -- no layout; values are Obj * */",
+                t.name
+            )
+            .unwrap();
+            continue;
+        }
         writeln!(o, "/* {} */", t.name).unwrap();
         writeln!(o, "typedef struct {{").unwrap();
         writeln!(o, "    Obj hdr;").unwrap();
@@ -37,7 +46,7 @@ pub fn emit(m: &Module) -> String {
     // A drop function only exists for types that hold references; rc_dec
     // checks for NULL, so types holding none pay a branch instead of a call.
     for (i, t) in m.types.iter().enumerate() {
-        if !t.needs_drop() {
+        if t.is_interface || !t.needs_drop() {
             continue;
         }
         writeln!(o, "static void drop_T{i}(Obj *o) {{").unwrap();
@@ -53,12 +62,62 @@ pub fn emit(m: &Module) -> String {
         o.push('\n');
     }
 
+    // One TypeInfo per concrete type: its drop function and its vtable. The
+    // vtable has one slot per distinct interface method name in the program,
+    // so a dispatch index is a compile-time constant.
+    if !m.types.is_empty() {
+        for f in &m.funcs {
+            writeln!(o, "{};", signature(f)).unwrap();
+        }
+        o.push('\n');
+    }
+    for (i, t) in m.types.iter().enumerate() {
+        if t.is_interface {
+            continue;
+        }
+        let drop = if t.needs_drop() {
+            format!("drop_T{i}")
+        } else {
+            "NULL".to_string()
+        };
+        if m.iface_slots.is_empty() {
+            writeln!(
+                o,
+                "static const TypeInfo ti_T{i} __attribute__((unused)) = {{ {drop}, NULL }};"
+            )
+            .unwrap();
+        } else {
+            let entries: Vec<String> = t
+                .vtable
+                .iter()
+                .map(|e| match e {
+                    Some(fname) => format!("(AnyFn){}", c_name(fname)),
+                    None => "NULL".to_string(),
+                })
+                .collect();
+            writeln!(
+                o,
+                "static const AnyFn vt_T{i}[] __attribute__((unused)) = {{ {} }};",
+                entries.join(", ")
+            )
+            .unwrap();
+            writeln!(
+                o,
+                "static const TypeInfo ti_T{i} __attribute__((unused)) = {{ {drop}, vt_T{i} }};"
+            )
+            .unwrap();
+        }
+    }
+    if !m.types.iter().all(|t| t.is_interface) {
+        o.push('\n');
+    }
+
     // String literals are immortal: static storage, RC_IMMORTAL, never freed.
     for (i, s) in m.strings.iter().enumerate() {
         let bytes = s.as_bytes();
         writeln!(
             o,
-            "static Str str{i} = {{ {{ RC_IMMORTAL, NULL }}, {}, {} }};",
+            "static Str str{i} = {{ {{ RC_IMMORTAL, &rt_str_type }}, {}, {} }};",
             bytes.len(),
             c_string_literal(bytes)
         )
@@ -271,13 +330,7 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
             }
         }
         Inst::Alloc { dst, tid } => {
-            let t = &types[*tid as usize];
-            let drop = if t.needs_drop() {
-                format!("drop_T{tid}")
-            } else {
-                "NULL".to_string()
-            };
-            writeln!(o, "    {dst} = rt_alloc(sizeof(T{tid}), {drop});").unwrap();
+            writeln!(o, "    {dst} = rt_alloc(sizeof(T{tid}), &ti_T{tid});").unwrap();
         }
         Inst::LoadField { dst, obj, tid, idx } => {
             let name = &types[*tid as usize].fields[*idx as usize].0;
@@ -286,6 +339,30 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
         Inst::StoreField { obj, tid, idx, val } => {
             let name = &types[*tid as usize].fields[*idx as usize].0;
             writeln!(o, "    ((T{tid} *){obj})->f_{name} = {val};").unwrap();
+        }
+        Inst::CallIface {
+            dst,
+            slot,
+            name,
+            args,
+            ret,
+        } => {
+            // The slot is cast back to its real signature here; only the
+            // indirection is dynamic, and the compiler checked the signature
+            // structurally before emitting this.
+            let rty = match ret {
+                Some(t) => t.c_name(),
+                None => "void",
+            };
+            let ptypes: Vec<&str> = args.iter().map(|a| f.ty_of(*a).c_name()).collect();
+            let a: Vec<String> = args.iter().map(|v| v.to_string()).collect();
+            let recv = &a[0];
+            let cast = format!("({rty} (*)({}))", ptypes.join(", "));
+            let call = format!("({cast}{recv}->ty->vtable[{slot}])({})", a.join(", "));
+            match dst {
+                Some(d) => writeln!(o, "    {d} = {call}; /* .{name} */").unwrap(),
+                None => writeln!(o, "    {call}; /* .{name} */").unwrap(),
+            }
         }
         Inst::RcInc { val } => writeln!(o, "    rc_inc({val});").unwrap(),
         Inst::RcDec { val } => writeln!(o, "    rc_dec({val});").unwrap(),

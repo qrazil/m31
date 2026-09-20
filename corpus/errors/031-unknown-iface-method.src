@@ -1,0 +1,15 @@
+type Shape interface {
+    int area();
+}
+
+type Sq {
+    int s;
+}
+
+int Sq.area() { return s; }
+
+void use(Shape sh) {
+    print(sh.nope());
+}
+
+use(Sq(1));

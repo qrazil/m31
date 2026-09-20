@@ -94,6 +94,12 @@ impl ArithOp {
 pub struct TypeDef {
     pub name: String,
     pub fields: Vec<(String, IrTy)>,
+    /// An interface has no fields and is never allocated; it exists so a
+    /// value can be typed by what it can do rather than what it is.
+    pub is_interface: bool,
+    /// One entry per interface-method slot in the program: the IR name of
+    /// this type's implementation, or `None` if it has none.
+    pub vtable: Vec<Option<String>>,
 }
 
 impl TypeDef {
@@ -133,6 +139,15 @@ pub enum Inst {
         dst: Option<Value>,
         func: String,
         args: Vec<Value>,
+    },
+    /// `v? = call_iface obj.<slot>(args)` -- dynamic dispatch through the
+    /// receiver's type header. The first argument is the receiver.
+    CallIface {
+        dst: Option<Value>,
+        slot: u32,
+        name: String,
+        args: Vec<Value>,
+        ret: Option<IrTy>,
     },
     /// `v = alloc <type>`; refcount 1, fields uninitialised. The lowering
     /// always follows this with a store to every field.
@@ -218,6 +233,9 @@ pub struct Module {
     pub strings: Vec<String>,
     /// User-defined types; `Alloc.tid` and the field instructions index this.
     pub types: Vec<TypeDef>,
+    /// Interface method names, one per dispatch slot. Assigned once for the
+    /// whole program, so a vtable index is a constant at every call site.
+    pub iface_slots: Vec<String>,
 }
 
 // ---- textual form, for --emit-ir and for debugging -----------------------
@@ -317,6 +335,16 @@ fn show_inst(i: &Inst) -> String {
         Inst::StoreField { obj, tid, idx, val } => {
             format!("store {obj}.type{tid}[{idx}], {val}")
         }
+        Inst::CallIface {
+            dst,
+            slot,
+            name,
+            args: a,
+            ..
+        } => match dst {
+            Some(d) => format!("{d} = call_iface [{slot}]{name}({})", args(a)),
+            None => format!("call_iface [{slot}]{name}({})", args(a)),
+        },
         Inst::RcInc { val } => format!("rc_inc {val}"),
         Inst::RcDec { val } => format!("rc_dec {val}"),
     }

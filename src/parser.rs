@@ -382,7 +382,52 @@ impl Parser {
         let (name, _) = self.expect_ident()?;
         let tparams = self.parse_tparams()?;
         self.tparams = tparams.clone();
+        let is_interface = self.eat(&Tok::KwInterface);
         self.expect(Tok::LBrace)?;
+
+        if is_interface {
+            // Signatures only: `int area();`
+            let mut methods = Vec::new();
+            while self.peek() != &Tok::RBrace {
+                if self.peek() == &Tok::Eof {
+                    return Err(Diag::new(self.span(), "expected `}`, found end of file"));
+                }
+                let mspan = self.span();
+                let ret = self.expect_ty()?;
+                let (mname, _) = self.expect_ident()?;
+                self.expect(Tok::LParen)?;
+                let mut params = Vec::new();
+                if self.peek() != &Tok::RParen {
+                    loop {
+                        params.push(self.parse_param()?);
+                        if !self.eat(&Tok::Comma) {
+                            break;
+                        }
+                    }
+                }
+                self.expect(Tok::RParen)?;
+                self.expect(Tok::Semi)?;
+                methods.push(Func {
+                    ret,
+                    recv: Some(name.clone()),
+                    name: mname,
+                    tparams: Vec::new(),
+                    params,
+                    body: Vec::new(),
+                    span: mspan,
+                });
+            }
+            self.expect(Tok::RBrace)?;
+            self.tparams.clear();
+            return Ok(TypeDecl {
+                name,
+                tparams,
+                fields: Vec::new(),
+                methods,
+                is_interface: true,
+                span,
+            });
+        }
         let mut fields = Vec::new();
         while self.peek() != &Tok::RBrace {
             if self.peek() == &Tok::Eof {
@@ -397,6 +442,8 @@ impl Parser {
             name,
             tparams,
             fields,
+            methods: Vec::new(),
+            is_interface: false,
             span,
         })
     }
