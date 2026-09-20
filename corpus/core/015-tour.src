@@ -31,13 +31,27 @@ type Pair<A, B> {
     B second;
 }
 
+// ---- methods -----------------------------------------------------------
+// Declared by qualified name, outside the type body, so they can be added to
+// any type. Fields are reached by BARE NAME -- there is no `this`, because
+// nothing shadows anything anywhere, so a bare name means one thing.
+
+int Rect.area() {
+    return w * h;
+}
+
+void Rect.scale(int f) {
+    w = w * f;
+    h = h * f;
+}
+
+bool Rect.is_square() {
+    return w == h;
+}
+
 // ---- functions ---------------------------------------------------------
 // Type-first, like C and Java. Type arguments on a generic function are
 // inferred from the call, never written.
-
-int area(Rect r) {
-    return r.w * r.h;
-}
 
 T unwrap<T>(Cell<T> b) {
     return b.value;
@@ -79,18 +93,18 @@ print(factorial(20));      // the largest that fits in an int
 
 // ---- types and fields --------------------------------------------------
 Rect r = Rect(Point(0, 0), 4, 5);
-print(area(r) * scale);
+print(r.area() * scale);
 print(r.origin.x);
 
 r.w = 10;                  // field assignment
-print(area(r));
+print(r.area());
 
 // ---- aliasing ----------------------------------------------------------
 // Assignment aliases; both names see the change. `clone` will be the
 // explicit way to copy, once it exists.
 Rect same = r;
 same.h = 1;
-print(area(r));
+print(r.area());
 
 // ---- generics ----------------------------------------------------------
 Cell<int> bi = Cell<int>(21);
