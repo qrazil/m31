@@ -1,0 +1,77 @@
+// A stable merge sort: O(n log n) always, one scratch buffer, and equal
+// elements keep their order. Stability is promised because sorting by one
+// key then another is the ordinary way to get a compound order, and that
+// only works if the second sort leaves ties alone -- and an unstable sort is
+// not something that can be fixed after a freeze.
+
+List<int> xs = List<int>();
+xs.push(5);
+xs.push(1);
+xs.push(4);
+xs.push(1);
+xs.push(3);
+xs.sort();
+for (int v in xs) {
+    print(v);                   // 1 1 3 4 5
+}
+
+// Negative values, and an even length.
+Array<int> a = Array<int>(4, 0);
+a[0] = 9;
+a[1] = -2;
+a[2] = 7;
+a[3] = 0;
+a.sort();
+print(a[0]);                    // -2
+print(a[1]);                    // 0
+print(a[2]);                    // 7
+print(a[3]);                    // 9
+
+// Strings order lexicographically, and a prefix sorts before what extends it.
+List<str> ws = List<str>();
+ws.push("pear");
+ws.push("apple");
+ws.push("fig");
+ws.push("ap");
+ws.sort();
+for (str w in ws) {
+    print(w);                   // ap apple fig pear
+}
+
+// The sizes a bottom-up merge gets wrong if the runs are mismanaged: empty,
+// one, and an odd length that is not a power of two.
+List<int> none = List<int>();
+none.sort();
+print(none.len());              // 0
+
+List<int> one = List<int>();
+one.push(42);
+one.sort();
+print(one[0]);                  // 42
+
+List<int> odd = List<int>();
+odd.push(3);
+odd.push(1);
+odd.push(2);
+odd.push(5);
+odd.push(4);
+odd.push(7);
+odd.push(6);
+odd.sort();
+int bad = 0;
+int prev = 0;
+for (int v in odd) {
+    if (v < prev) {
+        bad = bad + 1;
+    }
+    prev = v;
+}
+print(bad);                     // 0
+print(odd[0]);                  // 1
+print(odd[6]);                  // 7
+
+// Sorting is in place and leaves the collection usable.
+odd.push(0);
+odd.sort();
+print(odd[0]);                  // 0
+print(odd.len());               // 8

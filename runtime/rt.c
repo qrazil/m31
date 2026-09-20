@@ -325,6 +325,77 @@ void rt_seq_reverse(Obj *o) {
     }
 }
 
+/* Sorting is a STABLE merge sort: O(n log n) always, one scratch buffer, and
+ * equal elements keep their order. Stability is worth promising -- sorting by
+ * one key and then another is the ordinary way to get a compound order, and
+ * it only works if the second sort leaves ties alone.
+ *
+ * Heapsort would need no buffer, but it is not stable, and an unstable sort
+ * is the kind of thing that cannot be fixed after a freeze.
+ *
+ * The comparison is passed in rather than switched on inside, so the element
+ * kinds stay in one place: the caller. */
+typedef int64_t (*SortCmp)(int64_t, int64_t);
+
+int64_t rt_cmp_int(int64_t a, int64_t b) {
+    if (a < b) return -1;
+    return a > b ? 1 : 0;
+}
+
+int64_t rt_cmp_str(int64_t a, int64_t b) {
+    const Str *x = (const Str *)(intptr_t)a;
+    const Str *y = (const Str *)(intptr_t)b;
+    int64_t n = x->len < y->len ? x->len : y->len;
+    int c = n == 0 ? 0 : memcmp(x->data, y->data, (size_t)n);
+    if (c != 0) return c < 0 ? -1 : 1;
+    /* A prefix sorts before what extends it. */
+    if (x->len == y->len) return 0;
+    return x->len < y->len ? -1 : 1;
+}
+
+static void merge_run(int64_t *d, int64_t *tmp, int64_t lo, int64_t mid,
+                      int64_t hi, SortCmp cmp) {
+    int64_t i = lo, j = mid, k = lo;
+    while (i < mid && j < hi) {
+        /* `<= 0` takes from the left on a tie, which is what makes it
+         * stable. */
+        tmp[k++] = cmp(d[i], d[j]) <= 0 ? d[i++] : d[j++];
+    }
+    while (i < mid) tmp[k++] = d[i++];
+    while (j < hi) tmp[k++] = d[j++];
+    for (int64_t x = lo; x < hi; x++) d[x] = tmp[x];
+}
+
+static void rt_sort_with(Obj *o, SortCmp cmp) {
+    int64_t n = rt_len_of(o);
+    if (n < 2) return;
+    int64_t *d = slots(o);
+
+    int64_t *tmp = malloc(slot_bytes(0, n));
+    if (tmp == NULL) rt_trap("out of memory");
+
+    /* Bottom-up, so there is no recursion and no stack depth to worry about
+     * on a large list. */
+    for (int64_t width = 1; width < n; width *= 2) {
+        for (int64_t lo = 0; lo < n; lo += 2 * width) {
+            int64_t mid = lo + width;
+            int64_t hi = lo + 2 * width;
+            if (mid >= n) break;
+            if (hi > n) hi = n;
+            merge_run(d, tmp, lo, mid, hi, cmp);
+        }
+    }
+    free(tmp);
+}
+
+void rt_sort_int(Obj *o) {
+    rt_sort_with(o, rt_cmp_int);
+}
+
+void rt_sort_str(Obj *o) {
+    rt_sort_with(o, rt_cmp_str);
+}
+
 /* Membership by value for a str, by identity for anything else -- the same
  * rule `==` follows, so `contains` and `==` cannot disagree. */
 bool rt_seq_contains(Obj *o, int64_t v, bool elems_are_refs, bool elems_are_str) {

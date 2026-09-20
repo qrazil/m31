@@ -243,6 +243,7 @@ Methods:
 | `Array`, `List` | `len()` | element count |
 | `Array`, `List` | `contains(v)` | `int`, `bool` and `str` elements only |
 | `Array`, `List` | `reverse()` | in place |
+| `Array`, `List` | `sort()` | in place, ascending; `int` and `str` only |
 | `List` | `push(v)` | append |
 | `List` | `pop()` | remove and return the last element; traps if empty |
 | `List` | `insert(i, v)` | at `i`; `i == len` appends, beyond that traps |
@@ -262,6 +263,14 @@ directly — and refuses a user type, which would need its own comparison.
 There is no `index_of` yet: with no null there is nothing honest for it to
 return when the element is absent, and a `-1` sentinel is not something to
 lock into a language that intends to freeze. It waits for optionals.
+
+`sort` is a **stable** merge sort — equal elements keep their order — because
+sorting by one key and then another is the ordinary way to get a compound
+order, and that only works if the second sort leaves ties alone. Strings
+order lexicographically, and a prefix sorts before what extends it. It
+handles `int` and `str`; a user type already spells its order as `cmp`, but
+calling back into generated code needs a function reference in the IR, which
+does not exist yet and is the same thing closures will need.
 
 `remove_at` is spelled that way because Java has both `remove(int)` and
 `remove(Object)` and the overload is a standing trap. One name, and it says

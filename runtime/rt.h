@@ -167,6 +167,8 @@ void    rt_list_insert(Obj *o, int64_t i, int64_t v);
 int64_t rt_list_remove_at(Obj *o, int64_t i);
 void    rt_list_clear(Obj *o, bool elems_are_refs);
 void    rt_seq_reverse(Obj *o);
+void    rt_sort_int(Obj *o);
+void    rt_sort_str(Obj *o);
 bool    rt_seq_contains(Obj *o, int64_t v, bool elems_are_refs, bool elems_are_str);
 
 /* ---- concurrency -------------------------------------------------------

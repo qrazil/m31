@@ -313,6 +313,38 @@ impl Lowerer {
                 });
                 Ok(Val::void())
             }
+            "sort" => {
+                if !args.pos.is_empty() {
+                    return Err(Diag::new(span, "`sort` takes no arguments"));
+                }
+                // Ordering `int` and `str` needs nothing from the program. A
+                // user type already spells its order as `cmp`, for the
+                // comparison operators -- but calling back into generated
+                // code means a function REFERENCE in the IR, which does not
+                // exist yet and is the same thing closures will need. Better
+                // one mechanism later than a second one bolted on here.
+                let f = match self.underlying(elem) {
+                    Ty::Int => "rt_sort_int",
+                    Ty::Str => "rt_sort_str",
+                    _ => {
+                        return Err(Diag::new(
+                            span,
+                            format!(
+                                "`sort` orders `int` and `str`; {} would need \
+                                 the compiler to call its own `cmp`, which is \
+                                 not possible yet",
+                                self.tyname(elem)
+                            ),
+                        ))
+                    }
+                };
+                self.push(Inst::Call {
+                    dst: None,
+                    func: f.to_string(),
+                    args: vec![o.val()],
+                });
+                Ok(Val::void())
+            }
             "reverse" => {
                 if !args.pos.is_empty() {
                     return Err(Diag::new(span, "`reverse` takes no arguments"));

@@ -1,0 +1,9 @@
+// A user type already spells its order as `cmp`, for the comparison
+// operators -- but calling back into generated code needs a function
+// reference in the IR, which does not exist yet.
+type P { int x; }
+int P.cmp(P o) { return x - o.x; }
+
+List<P> ps = List<P>();
+ps.push(P(1));
+ps.sort();
