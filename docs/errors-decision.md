@@ -79,7 +79,7 @@ making it now rather than after the standard library is written.
 ### 1. Does `Map.get` keep trapping? — DECIDED: no
 
 Implemented. `get` returns `Option<V>`, and `index_of` exists at last.
-`Option` grew exactly two methods (`is_some` and `or`) so that a
+`Option` grew exactly three methods (`is_some`, `is_none`, `or`) so that a
 lookup is one line rather than a four-line `match`; without them the change
 would have been a downgrade. No `unwrap`, deliberately.
 

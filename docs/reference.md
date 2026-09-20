@@ -285,12 +285,13 @@ and no more:
 
 | | |
 |---|---|
-| `o.is_some()` | the question, without a `match` |
+| `o.is_some()`, `o.is_none()` | the question, without a `match` |
 | `o.or(v)` | the value, or `v` if there is none |
 
-There is no `is_none`: it is exactly `!o.is_some()`, and this is the same
-reason all four orderings go through a single `cmp` rather than four methods
-— one implementation cannot disagree with itself.
+`is_none` is kept even though it is `!o.is_some()`. The single-`cmp` rule
+looks like it forbids this, but it is about something else: four comparison
+methods could disagree, because each is an implementation the author writes.
+`is_none` is generated from `is_some` by the compiler and cannot drift.
 
 There is no `unwrap`. Trapping on `None` is what `Map.get` used to do, and
 putting it back behind a shorter name would undo the reason for the change.

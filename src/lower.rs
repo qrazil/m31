@@ -741,17 +741,21 @@ impl Lowerer {
         self.ty_named(&name)
     }
 
-    /// `o.is_some()` and `o.or(default)`. Two, and no more.
+    /// `o.is_some()`, `o.is_none()`, `o.or(default)`. Three, and no more.
     ///
     /// An Option that can only be opened with `match` turns every map read
     /// into four lines, which would make returning one a downgrade. An
     /// Option with a library of combinators is a second language to learn.
-    /// These two carry their weight; `match` remains the only way to get at
-    /// the payload and keep it.
+    /// These three carry their weight; `match` remains the only way to get
+    /// at the payload and keep it.
     ///
-    /// No `is_none`, because it is exactly `!o.is_some()` -- the same reason
-    /// all four orderings go through a single `cmp` rather than four
-    /// methods. One implementation cannot disagree with itself.
+    /// `is_none` is kept even though it is `!o.is_some()`. The single-`cmp`
+    /// rule it appears to violate is about something else: four comparison
+    /// methods could disagree with each other, because each is a separate
+    /// implementation the author writes. `is_none` is generated from
+    /// `is_some` by the compiler and cannot drift from it. What is left is
+    /// only whether `if (!o.is_some())` reads as well as `if (o.is_none())`,
+    /// and it does not.
     ///
     /// No `unwrap`. Trapping on None is what `get` used to do, and putting
     /// it back behind a shorter name would undo the point.
@@ -799,17 +803,19 @@ impl Lowerer {
         };
 
         match m {
-            "is_some" => {
+            "is_some" | "is_none" => {
                 if !args.pos.is_empty() {
-                    return Err(Diag::new(span, "`is_some` takes no arguments"));
+                    return Err(Diag::new(span, format!("`{m}` takes no arguments")));
                 }
                 let c = is_some(self);
-                Ok(Val::new(c, Ty::Bool, false))
+                if m == "is_some" {
+                    return Ok(Val::new(c, Ty::Bool, false));
+                }
+                // Generated from is_some, so the two cannot drift apart.
+                let d = self.new_val(IrTy::I1);
+                self.push(Inst::Not { dst: d, src: c });
+                Ok(Val::new(d, Ty::Bool, false))
             }
-            "is_none" => Err(Diag::new(
-                span,
-                "an Option has no `is_none`; write `!o.is_some()`",
-            )),
             "or" => {
                 if args.pos.len() != 1 {
                     return Err(Diag::new(span, "`or` takes one argument"));
@@ -875,8 +881,8 @@ impl Lowerer {
             other => Err(Diag::new(
                 span,
                 format!(
-                    "an Option has `is_some` and `or`; `{other}` is not one of \
-                     them -- use `match` to take the value out"
+                    "an Option has `is_some`, `is_none` and `or`; `{other}` is \
+                     not one of them -- use `match` to take the value out"
                 ),
             )),
         }

@@ -38,7 +38,7 @@ print(or_else(Option<int>.None, -1));           // -1
 print(Option<int>.Some(3).or(0));               // 3
 print(Option<int>.None.or(0));                  // 0
 print(Option<int>.Some(3).is_some());           // true
-print(!Option<int>.None.is_some());             // true
+print(Option<int>.None.is_none());              // true
 
 // Where they come from in practice: a lookup that might find nothing.
 Map<str, int> ages = Map<str, int>();
