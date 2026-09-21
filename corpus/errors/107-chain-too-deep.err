@@ -1,0 +1,4 @@
+corpus/errors/107-chain-too-deep.src:30:17: expression nested too deeply (limit 256)
+   |
+30 | + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1
+   |                 ^

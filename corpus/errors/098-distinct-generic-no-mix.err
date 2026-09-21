@@ -1,4 +1,0 @@
-corpus/errors/098-distinct-generic-no-mix.src:10:3: type mismatch: expected Bag, found List$int
-   |
-10 | f(l);
-   |   ^

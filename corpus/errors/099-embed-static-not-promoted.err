@@ -1,4 +1,0 @@
-corpus/errors/099-embed-static-not-promoted.src:7:11: `Outer` has no static method `make`, and is not an enum
-  |
-7 | Outer o = Outer.make();
-  |           ^
