@@ -594,6 +594,7 @@ impl Parser {
             funcs,
             toplevel,
             ty_exprs: std::mem::take(&mut self.ty_exprs),
+            shown: std::collections::HashMap::new(),
         })
     }
 

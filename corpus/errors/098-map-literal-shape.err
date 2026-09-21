@@ -1,0 +1,4 @@
+corpus/errors/098-map-literal-shape.src:3:19: Map<str, int> is a map; write its entries as {k: v}
+  |
+3 | Map<str, int> m = [1, 2];
+  |                   ^

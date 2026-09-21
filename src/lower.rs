@@ -125,6 +125,8 @@ pub struct Lowerer {
     statics: std::collections::HashSet<String>,
     /// The monomorphised program's interned type expressions.
     ty_exprs: Vec<TyExpr>,
+    /// Source spellings of instantiations, for diagnostics (`Program::shown`).
+    shown: HashMap<String, (String, Vec<Ty>)>,
     /// Required methods per interface, parallel to `typedefs`; empty for a
     /// struct.
     iface_methods: Vec<Vec<Func>>,
@@ -186,6 +188,7 @@ impl Lowerer {
             building_literal: false,
             statics: std::collections::HashSet::new(),
             ty_exprs: Vec::new(),
+            shown: HashMap::new(),
             iface_methods: Vec::new(),
             iface_slots: Vec::new(),
             strings: Vec::new(),
@@ -1570,10 +1573,10 @@ impl Lowerer {
                             format!(
                                 "`{}` gets `{mname}` from both `{}` and `{}`; \
                                  give `{}` its own `{mname}` to say which one it means",
-                                crate::ast::bare(&t.name),
-                                crate::ast::bare(other),
-                                crate::ast::bare(&f.name),
-                                crate::ast::bare(&t.name)
+                                self.bare_name(&t.name),
+                                self.bare_name(other),
+                                self.bare_name(&f.name),
+                                self.bare_name(&t.name)
                             ),
                         ));
                     }
@@ -1653,7 +1656,7 @@ impl Lowerer {
             let Some(i) = params.iter().position(|p| p.name == *n) else {
                 return Err(Diag::new(
                     e.span(),
-                    format!("`{}` has no parameter `{n}`", crate::ast::bare(what)),
+                    format!("`{}` has no parameter `{n}`", self.bare_name(what)),
                 ));
             };
             if !params[i].is_optional() {
@@ -1673,7 +1676,7 @@ impl Lowerer {
                 span,
                 format!(
                     "`{}` takes {} positional argument(s), found {}",
-                    crate::ast::bare(what),
+                    self.bare_name(what),
                     mandatory.len(),
                     args.pos.len()
                 ),
@@ -1718,6 +1721,7 @@ impl Lowerer {
         // After monomorphisation every Ty::User names a concrete declaration
         // with no arguments, so resolution is a name lookup.
         self.ty_exprs = p.ty_exprs.clone();
+        self.shown = p.shown.clone();
 
         // Type table first: signatures and field types may refer to any type,
         // including one declared later in the file.
@@ -1725,7 +1729,7 @@ impl Lowerer {
             if self.typedefs.iter().any(|d| d.name == t.name) {
                 return Err(Diag::new(
                     t.span,
-                    format!("type `{}` is already defined", t.name),
+                    format!("type `{}` is already defined", self.show_name(&t.name)),
                 ));
             }
             let mut fields = Vec::new();
@@ -1733,7 +1737,11 @@ impl Lowerer {
                 if fields.iter().any(|(n, _): &(String, IrTy)| *n == f.name) {
                     return Err(Diag::new(
                         f.span,
-                        format!("duplicate field `{}` in type `{}`", f.name, t.name),
+                        format!(
+                            "duplicate field `{}` in type `{}`",
+                            f.name,
+                            self.show_name(&t.name)
+                        ),
                     ));
                 }
                 fields.push((f.name.clone(), self.irty(f.ty)));
@@ -1807,9 +1815,9 @@ impl Lowerer {
                                 format!(
                                     "`{}` already has a variant `{}`, and \
                                      `{}.{}` would be both",
-                                    crate::ast::bare(r),
+                                    self.bare_name(r),
                                     f.name,
-                                    crate::ast::bare(r),
+                                    self.bare_name(r),
                                     f.name
                                 ),
                             ));
@@ -1846,7 +1854,7 @@ impl Lowerer {
                             format!(
                                 "`{}` is declared in `{}`; a method may only be \
                                  added to a type its own module declared",
-                                crate::ast::bare(r),
+                                self.bare_name(r),
                                 self.type_module[i]
                             ),
                         ));
@@ -2091,6 +2099,7 @@ impl Lowerer {
     /// modules may each declare a `Point`. Nobody should ever see that
     /// spelling: inside its own module it is `Point`, and from outside it is
     /// `lib.Point`, which is how it would be written.
+    /// A type as the source spells it: `List<int>`, `Map<str, lib.Point>`.
     fn tyname(&self, t: Ty) -> String {
         match t {
             Ty::User(i) => self.show_name(&self.ty_exprs[i as usize].name),
@@ -2098,11 +2107,40 @@ impl Lowerer {
         }
     }
 
+    /// A type's name for a diagnostic: module-qualified unless it is this
+    /// module's own, and an instantiation spelled with its type arguments
+    /// rather than its mangled C name. Every diagnostic that names a type
+    /// goes through here or `tyname`, so none of them leaks a `$`.
     fn show_name(&self, raw: &str) -> String {
+        if let Some((base, args)) = self.shown.get(raw) {
+            let args: Vec<String> = args.iter().map(|a| self.tyname(*a)).collect();
+            return format!("{}<{}>", self.show_name(base), args.join(", "));
+        }
         match raw.split_once('#') {
             Some((m, n)) if m == self.cur_module => n.to_string(),
             Some((m, n)) => format!("{m}.{n}"),
             None => raw.to_string(),
+        }
+    }
+
+    /// A type or function name without its module, for a diagnostic that
+    /// names something by its bare name: `Pair<int>` for `lib#Pair$int`,
+    /// and `Pair<int>.get` for the method key `lib#Pair$int.get`.
+    fn bare_name(&self, raw: &str) -> String {
+        let (head, rest) = match raw.split_once('.') {
+            Some((h, r)) => (h, Some(r)),
+            None => (raw, None),
+        };
+        let head = match self.shown.get(head) {
+            Some((base, args)) => {
+                let args: Vec<String> = args.iter().map(|a| self.tyname(*a)).collect();
+                format!("{}<{}>", crate::ast::bare(base), args.join(", "))
+            }
+            None => crate::ast::bare(head).to_string(),
+        };
+        match rest {
+            Some(m) => format!("{head}.{m}"),
+            None => head,
         }
     }
 
@@ -2222,7 +2260,7 @@ impl Lowerer {
     fn not_visible(&self, tid: u32, what: &str) -> String {
         format!(
             "`{}` is private to `{}`; {what}",
-            crate::ast::bare(&self.typedefs[tid as usize].name),
+            self.bare_name(&self.typedefs[tid as usize].name),
             self.type_module[tid as usize]
         )
     }
@@ -2475,8 +2513,8 @@ impl Lowerer {
                     f.span,
                     format!(
                         "function `{}` must return a value of type {}",
-                        f.name,
-                        f.ret.name()
+                        self.bare_name(&f.name),
+                        self.tyname(f.ret)
                     ),
                 ));
             }
@@ -2748,7 +2786,7 @@ impl Lowerer {
                     (None, t) => {
                         return Err(Diag::new(
                             *span,
-                            format!("expected a return value of type {}", t.name()),
+                            format!("expected a return value of type {}", self.tyname(t)),
                         ))
                     }
                     (Some(e), Ty::Void) => {
@@ -3822,7 +3860,10 @@ impl Lowerer {
         if !is_result && !vname.starts_with("Option$") {
             return Err(Diag::new(
                 span,
-                format!("`?` needs an Option or a Result; {vname} is neither"),
+                format!(
+                    "`?` needs an Option or a Result; {} is neither",
+                    self.show_name(&vname)
+                ),
             ));
         }
 
@@ -3845,7 +3886,11 @@ impl Lowerer {
         if is_result != rname.starts_with("Result$") {
             return Err(Diag::new(
                 span,
-                format!("`?` on a {vname} needs a function returning a Result, not {rname}"),
+                format!(
+                    "`?` on {} needs a function returning a Result, not {}",
+                    a_or_an(&self.show_name(&vname)),
+                    self.show_name(&rname)
+                ),
             ));
         }
 
@@ -4921,7 +4966,7 @@ impl Lowerer {
                 span,
                 format!(
                     "`{}` must take one {} parameter to support `{}`",
-                    crate::ast::bare(&key),
+                    self.bare_name(&key),
                     self.tyname(a.ty),
                     op.spelling()
                 ),
@@ -4938,7 +4983,7 @@ impl Lowerer {
                 span,
                 format!(
                     "`{}` must return {} to support `{}`",
-                    crate::ast::bare(&key),
+                    self.bare_name(&key),
                     self.tyname(want_ret),
                     op.spelling()
                 ),
@@ -5263,7 +5308,7 @@ impl Lowerer {
                     span,
                     format!(
                         "`{}` converts one value; it is a distinct type, not a struct",
-                        self.typedefs[tid as usize].name
+                        self.show_name(&self.typedefs[tid as usize].name)
                     ),
                 ));
             }
@@ -5286,8 +5331,8 @@ impl Lowerer {
                 return Err(Diag::new(
                     span,
                     format!(
-                        "write a {} as a literal: `{{k: v}}` or `{{}}`",
-                        self.tyname(ty)
+                        "write {} as a literal: `{{k: v}}` or `{{}}`",
+                        a_or_an(&self.tyname(ty))
                     ),
                 ));
             }
@@ -5331,8 +5376,8 @@ impl Lowerer {
             return Err(Diag::new(
                 span,
                 format!(
-                    "write a {} as a literal: `[a, b]`, `[x; n]`, or `[]`",
-                    self.tyname(ty)
+                    "write {} as a literal: `[a, b]`, `[x; n]`, or `[]`",
+                    a_or_an(&self.tyname(ty))
                 ),
             ));
         }
@@ -5739,6 +5784,17 @@ impl Lowerer {
             Ok(Val::new(d, ret, owned))
         }
     }
+}
+
+/// A name with its indefinite article, for a diagnostic: `an Array<int>`,
+/// `a List<int>`. By the first letter, which is right for every type name
+/// the language has.
+fn a_or_an(name: &str) -> String {
+    let vowel = name
+        .chars()
+        .next()
+        .is_some_and(|c| "aeiouAEIOU".contains(c));
+    format!("{} {name}", if vowel { "an" } else { "a" })
 }
 
 fn stmt_span(s: &Stmt) -> Span {

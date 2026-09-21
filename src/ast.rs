@@ -410,4 +410,9 @@ pub struct Program {
     pub toplevel: Vec<Stmt>,
     /// Interned type expressions; `Ty::User` indexes this.
     pub ty_exprs: Vec<TyExpr>,
+    /// What each instantiation -- of a type or a function -- was written as,
+    /// by mangled name: `List$int` was `("List", [Int])`. Monomorphisation fills it in; a diagnostic
+    /// reads it back, because the mangled name is for C and the person
+    /// reading the error wrote `List<int>`. Empty before monomorphisation.
+    pub shown: std::collections::HashMap<String, (String, Vec<Ty>)>,
 }
