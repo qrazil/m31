@@ -1,0 +1,4 @@
+type Plain { int n; }
+
+// A refusal that names the method beats printing an address.
+print(Plain(1));

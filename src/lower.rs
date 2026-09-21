@@ -3669,6 +3669,72 @@ impl Lowerer {
         Ok(Val::new(got, payload, owned))
     }
 
+    /// `v.to_str()`, for `print` and for `str(v)`.
+    ///
+    /// Found BY NAME, the way `add`, `eq` and `cmp` already are. There is no
+    /// blessed `ToStr` type, because none is needed: interfaces here are
+    /// structural, so a program that wants to pass "anything printable"
+    /// around declares `interface ToStr { str to_str(); }` itself and every
+    /// type with the method satisfies it with no further ceremony. Blessing
+    /// one would buy nothing and freeze a name.
+    ///
+    /// Returns None when the type has no such method, so the caller can give
+    /// a diagnostic that fits what it was doing.
+    fn call_to_str(&mut self, v: &Val, span: Span) -> Result<Option<Val>, Diag> {
+        let Some(tid) = self.tdef_of(v.ty) else {
+            return Ok(None);
+        };
+        let tname = self.typedefs[tid as usize].name.clone();
+
+        // On an interface value the implementation is not known statically.
+        if self.typedefs[tid as usize].is_interface {
+            let Some(decl) = self.iface_methods[tid as usize]
+                .iter()
+                .find(|x| x.name == "to_str")
+                .cloned()
+            else {
+                return Ok(None);
+            };
+            if decl.ret != Ty::Str || !decl.params.is_empty() {
+                return Ok(None);
+            }
+            let slot = self
+                .iface_slots
+                .iter()
+                .position(|x| x == "to_str")
+                .expect("every interface method has a slot") as u32;
+            let d = self.new_val(IrTy::Ref);
+            self.push(Inst::CallIface {
+                dst: Some(d),
+                slot,
+                name: "to_str".to_string(),
+                args: vec![v.val()],
+                ret: Some(IrTy::Ref),
+            });
+            self.stmt_temps.push(d);
+            return Ok(Some(Val::new(d, Ty::Str, true)));
+        }
+
+        let key = format!("{tname}.to_str");
+        let Some(sig) = self.sigs.get(&key) else {
+            return Ok(None);
+        };
+        if sig.ret != Ty::Str || !sig.params.is_empty() {
+            return Err(Diag::new(
+                span,
+                format!("`{key}` must take no arguments and return str to be used here"),
+            ));
+        }
+        let d = self.new_val(IrTy::Ref);
+        self.push(Inst::Call {
+            dst: Some(d),
+            func: key,
+            args: vec![v.val()],
+        });
+        self.stmt_temps.push(d);
+        Ok(Some(Val::new(d, Ty::Str, true)))
+    }
+
     fn lower_if(
         &mut self,
         cond: &Expr,
@@ -4709,14 +4775,28 @@ impl Lowerer {
                 Ty::Bool => "rt_print_bool",
                 Ty::Str => "rt_print_str",
                 Ty::Void => return Err(Diag::new(args.pos[0].span(), "cannot print a void value")),
-                // No printing of user types until there is a way for a type
-                // to say how it prints. Better a clear refusal than an
+                // A user type says how it prints by having a `to_str`
+                // method -- found by name, like `add` and `cmp`. Without
+                // one, a refusal naming the method beats printing an
                 // address.
                 Ty::User(_) => {
-                    return Err(Diag::new(
-                        args.pos[0].span(),
-                        format!("cannot print a value of type `{}`", self.tyname(a.ty)),
-                    ))
+                    let Some(text) = self.call_to_str(&a, args.pos[0].span())? else {
+                        return Err(Diag::new(
+                            args.pos[0].span(),
+                            format!(
+                                "cannot print a value of type `{}`; give it a \
+                                 method `str {}.to_str()`",
+                                self.tyname(a.ty),
+                                self.tyname(a.ty)
+                            ),
+                        ));
+                    };
+                    self.push(Inst::Call {
+                        dst: None,
+                        func: "rt_print_str".to_string(),
+                        args: vec![text.val()],
+                    });
+                    return Ok(Val::void());
                 }
             };
             self.push(Inst::Call {
@@ -4764,6 +4844,13 @@ impl Lowerer {
                     args: vec![v.val()],
                 });
                 return Ok(Val::new(d, Ty::Float, false));
+            }
+            // `str(v)` on a user type is its `to_str`, so the conversion
+            // family reads the same whatever it is applied to.
+            if base == Ty::Str {
+                if let Some(text) = self.call_to_str(&v, args.pos[0].span())? {
+                    return Ok(text);
+                }
             }
             if base == Ty::Int && from == Ty::Float {
                 // The C cast is UNDEFINED for a NaN or for a value outside

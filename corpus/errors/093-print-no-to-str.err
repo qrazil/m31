@@ -1,0 +1,4 @@
+corpus/errors/093-print-no-to-str.src:4:7: cannot print a value of type `Plain`; give it a method `str Plain.to_str()`
+  |
+4 | print(Plain(1));
+  |       ^

@@ -17,7 +17,7 @@ Anything marked done there is tested; the corpus is the proof.
 
 | | |
 |---|---|
-| Corpus | 158 programs — 46 behaviour, 90 diagnostics, 15 traps, 7 Go twins |
+| Corpus | 160 programs — 47 behaviour, 91 diagnostics, 15 traps, 7 Go twins |
 | Oracle | gcc and clang, each at -O0 and -O2, all four must agree |
 | Leaks | every behaviour program asserts `__rc_live=0` at exit |
 | Warnings | emitted C must be clean under `-Wall -Wextra` |
@@ -66,6 +66,10 @@ exact error-type matching, and a discarded `Result` as a compile error. The
 one thing left is what `E` should be in a standard library, which
 `docs/errors-decision.md` says to settle last -- once there is a library to
 say what actually fails.
+
+**Conversions.** `print(v)` and `str(v)` on a user type go through its
+`to_str`; `to_X` generally is an ordinary method plus a structural
+interface, with no compiler support needed.
 
 **Static methods.** `static Point Point.origin()` -- a method on the type
 rather than on a value, which is what a conversion dispatching on its
@@ -132,52 +136,25 @@ around them:
     index out of range should probably stay a trap; a file that is not there
     should not be one.
 
-### 2. Conversions: every `to_X` is an interface
+### 2. Conversions — done
 
-The rule is one rule, and it turns on which side of the conversion varies.
+`print(v)` and `str(v)` on a user type call its `to_str`, found by name the
+way `add`, `eq` and `cmp` are. That closes the hole where a user type was
+refused with "there is no way for a type to say how it prints".
 
-**Conversion dispatches on the SOURCE, so it is an interface.** All of them,
-uniformly:
+**No blessed `ToStr`.** It turned out none was needed: interfaces are
+structural, so a program declares `interface ToStr { str to_str(); }` itself
+and every type with the method satisfies it. Blessing one would buy nothing
+and freeze a name -- and `Option`/`Result` had a hard reason that this does
+not, namely that a built-in method cannot return a user-defined type.
 
-```c
-interface ToStr   { str to_str(); }
-interface ToInt   { int to_int(); }
-interface ToFloat { float to_float(); }
-```
+`to_int`, `to_float` and `to_bool` follow the same shape and need no compiler
+support at all: declare the interface, write the method.
 
-A type implements whichever make sense -- `Price` has `to_int` and `to_str`,
-`Point` has only `to_str`. Two things make this cheap: interfaces are
-structural, so a type with a `to_str` method satisfies `ToStr` with no
-`implements` clause, which lets `print` find the method by name AND lets a
-user write `void show(ToStr x)` from the same declaration. And it matches the
-precedent operator methods already set -- `eq`, `cmp` and `add` are found by
-name too.
-
-It also closes a hole that exists today: `print` refuses a user type with the
-diagnostic "there is no way for a type to say how it prints". This is that
-way.
-
-**Static methods now exist**, which is the mechanism parsing needs: it
-dispatches on its TARGET, so it is a method on the type -- `int.parse(s)`,
-`Price.parse(s)`. An interface over them only becomes meaningful with
-constraints on type parameters, which is on the open list; until then a
-`Parse` interface would be documentation with syntax, which is the reason
-type aliases were rejected.
-
-**Parsing is a different operation and gets a different name.** `"42"` to an
-int reads text and can fail; the source is always `str` and it is the TARGET
-that varies, which single dispatch cannot express. So `str.parse_int()`
-returning a `Result`, not `to_int`. Calling both `to_int` is what made them
-look like one inconsistent family; they are two consistent ones.
-
-Parsing therefore waits for errors. Conversion does not.
-
-**Numeric conversion between built-in types stays built in.** `int` to
-`float` and back has no user extension point and no failure worth a
-`Result`, so `float(x)` and `int(f)` fit the syntax `distinct` already uses.
-`int(f)` truncates, and traps on NaN or a value outside the range -- the C
-cast is undefined there, which is exactly the kind of thing the gcc/clang
-differential would catch later rather than sooner.
+**Parsing is the other half and is still open.** It dispatches on its TARGET,
+so it is a static method -- `int.parse(s)` -- and static methods now exist.
+What it waits on is what `E` should be, the last open question in
+`docs/errors-decision.md`.
 
 ### 3. Modules
 
@@ -286,13 +263,30 @@ From `docs/reference.md` §9, with the reasons:
 
 ---
 
+## Settled, and worth saying out loud
+
+Decisions that would otherwise look like accidents.
+
+**`spawn` is fire-and-forget.** A spawning scope does not wait for its
+children; the program waits for all of them before exiting, and that is the
+only synchronisation there is. Structured concurrency -- a scope that joins
+its children -- is the Loom-shaped alternative and it was considered and not
+taken. It is a surface decision, so it is made now rather than discovered
+later: a channel is how a spawned thread reports back, and adding a joining
+scope on top later is additive in a way that removing one would not be.
+
+**`str.size()` counts BYTES, not characters.** `"héllo".size()` is 6, and
+`substr` takes byte offsets. Go makes the same choice. A `str` carries bytes
+and the language has no other opinion about encoding; counting characters
+would mean carrying a Unicode table and still being wrong about grapheme
+clusters. Chosen, not defaulted into.
+
+---
+
 ## Open questions
 
 Written down because they are unresolved, not because they are unimportant.
 
-  - Does a spawning scope wait for its children? Structured concurrency is a
-    real improvement on Go's fire-and-forget, and it is a surface decision,
-    so it has to be settled before the freeze.
   - Cancellation. libdill's model — killing a thread makes every blocking
     call in it return an error — fits errors-as-values and needs no unwinder.
   - Does `spawn` keep taking a function plus arguments, or a closure?
@@ -302,9 +296,6 @@ Written down because they are unresolved, not because they are unimportant.
     choose per target. Whether sized types ever become spellable is open.
   - Whether `float` ever gets a `%`-shaped remainder (`fmod`), and under
     what name. It is left out today because `%` means integer remainder.
-  - **`str.size()` counts bytes, not characters.** `"héllo".size()` is 6.
-    Go does the same and it is defensible, but it has to be decided and
-    written down before the freeze rather than discovered after it.
 
 ---
 

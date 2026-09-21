@@ -729,8 +729,30 @@ A `str` is immutable, so every one of these returns a new string.
 | `send(ch, v)`, `recv(ch)`, `close(ch)` | channels (§8) |
 
 `print` selects its runtime helper from the static argument type. That is not
-user-visible function overloading, which does not exist. It refuses a user
-type: until a type can say how it prints, an address is worse than a refusal.
+user-visible function overloading, which does not exist.
+
+A **user type says how it prints by having a `to_str` method** — found by
+name, the way `add`, `eq` and `cmp` already are. `str(v)` is the same call,
+so the conversion family reads alike whatever it is applied to. Without one,
+`print` refuses and names the method it wanted.
+
+There is deliberately no built-in `ToStr` type. None is needed: interfaces
+are structural, so a program that wants to pass "anything printable" around
+declares
+
+```c
+interface ToStr { str to_str(); }
+```
+
+itself, and every type with the method satisfies it with no further
+ceremony. Through such a value the call goes via the vtable rather than
+directly. The same shape gives `to_int`, `to_float` and `to_bool` — all of
+them dispatch on the SOURCE, which is what an interface does.
+
+**Parsing is not this.** `"42"` to an int reads text and can fail; the source
+is always `str` and it is the *target* that varies, which single dispatch
+cannot express. That is a **static method** — `int.parse(s)`, `Price.parse(s)`
+— and it waits on what an error's type should be.
 
 `clone` is shallow — the copy holds the same references, each retained once
 more. Deep copying would have to decide what copying each field means, which
@@ -795,9 +817,15 @@ Trapping conditions:
 
 ### 8.1 Threads
 
-`spawn f(..)` runs `f` on a new OS thread. The program waits for all of them
-before exiting. There is no handle, no join, no cancellation, and no thread
-identity.
+`spawn f(..)` runs `f` on a new OS thread. It is **fire-and-forget**: the
+spawning scope does not wait, there is no handle, no join, no cancellation
+and no thread identity. The program waits for every spawned thread before
+exiting, and that is the only synchronisation there is — a channel is how a
+spawned thread reports back.
+
+This is a decision rather than an omission. A scope that joins its own
+children (Loom's shape) was considered and not taken; adding one later is
+additive, where removing one would not be.
 
 These are OS threads today. Green threads are stage 3 of
 `docs/concurrency-decision.md`; the surface here does not change when they

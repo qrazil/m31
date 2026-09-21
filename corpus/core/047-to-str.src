@@ -1,0 +1,59 @@
+// A type says how it prints by having a `to_str` method. Found BY NAME, the
+// way `add`, `eq` and `cmp` already are.
+//
+// There is deliberately no blessed `ToStr` type. None is needed: interfaces
+// are structural, so a program that wants to pass "anything printable"
+// around declares the interface itself and every type with the method
+// satisfies it with no further ceremony. Blessing one would buy nothing and
+// freeze a name.
+
+interface ToStr {
+    str to_str();
+}
+
+type Point { int x; int y; }
+str Point.to_str() {
+    return concat("Point/", "xy");
+}
+
+type Tag { str name; }
+str Tag.to_str() {
+    return name;
+}
+
+// `print` uses it, which closes the hole where a user type was refused with
+// "there is no way for a type to say how it prints".
+Point p = Point(1, 2);
+print(p);                       // Point/xy
+print(Tag(concat("he", "llo")));    // hello
+
+// `str(v)` is the same call, so the conversion family reads the same
+// whatever it is applied to.
+print(str(p).size());           // 8
+print(concat("<", str(p)));     // <Point/xy
+
+// Through an interface the implementation is not known statically, so this
+// goes through the vtable rather than a direct call.
+void show(ToStr v) {
+    print(v);
+}
+show(p);                        // Point/xy
+show(Tag("tagged"));            // tagged
+
+// Interface values in a collection, printed by iterating.
+List<ToStr> all = List<ToStr>();
+all.push(p);
+all.push(Tag("second"));
+for (ToStr v in all) {
+    print(v);                   // Point/xy, second
+}
+
+// The returned string is owned by the caller and released like any other --
+// the corpus asserts __rc_live=0, so a leak here would fail.
+int total = 0;
+int i = 0;
+while (i < 3) {
+    total = total + str(p).size();
+    i = i + 1;
+}
+print(total);                   // 24
