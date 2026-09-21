@@ -57,9 +57,9 @@ feedback a standard library is for.
 A primitive is a function with a written signature and **no body**:
 
 ```c
-prim Result<str, int> __file_read(str path);
-prim Option<str>      __stdin_line();
-prim float            __sqrt(float x);
+prim int  __file_read(str path, List<str> out);   // 0, or an errno
+prim int  __stdin_line(List<str> out);            // 1 read a line, 0 at the end
+prim void __stderr_write(str s);
 ```
 
 `prim` is a declaration, not an expression form and not an attribute. Two
@@ -67,12 +67,12 @@ properties fall out of that and both are the point:
 
 **It goes through the whole front end.** A `prim` is parsed, its written
 types are resolved and checked for visibility like anybody else's, and
-monomorphisation sees it — so `Result<str, int>` gets instantiated because
+monomorphisation sees it — so a `List<str>` parameter gets instantiated because
 the declaration *mentions* it, not because the compiler was taught to build
 that type from the inside. The alternative, registering a built-in signature
 in the lowerer, cannot name a generic instantiation at all: generics are
 erased before lowering (§`docs/ir-v0.md`), so by the time the lowerer runs
-there is no machinery left to ask for `Result<str, int>`. Declaring the
+there is no machinery left to ask for `List<str>`. Declaring the
 primitive in source puts it on the right side of that erasure.
 
 **It has one lowering rule.** `__file_read` calls `rt_file_read`: strip the
@@ -92,10 +92,12 @@ it. Three restrictions keep that containable, and all three are checked:
   - **No `prim` method, and no `prim` on a user type's field.** The seam is
     free functions only, so the set of C symbols a program can reach is
     exactly the set of `prim` declarations, listed in one place per module.
-  - **Every `prim` returns a type the runtime can build**: a scalar, `str`,
-    or an enum the prelude defines (`Option`, `Result`). Not a user type —
-    the runtime would have to know its layout and its `TypeInfo`, which is
-    the compiler's business and would freeze the object header.
+  - **Every `prim` deals only in what the runtime can build**: a scalar, a
+    `str`, or an element pushed onto a collection the caller passed in. Not
+    `Option` or `Result` — an earlier draft of this document said those were
+    fine, and they are not: they are enums the compiler lays out and gives a
+    `TypeInfo`, exactly like a user type. A failure therefore comes back as a
+    raw errno, and the library builds its own `Result` in source.
 
 ---
 
