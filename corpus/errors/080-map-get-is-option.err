@@ -1,4 +1,4 @@
-corpus/errors/080-map-get-is-option.src:3:10: type mismatch: expected int, found Option$int
+corpus/errors/080-map-get-is-option.src:3:10: type mismatch: expected int, found Option<int>
   |
 3 | int n = m.get("a");
   |          ^

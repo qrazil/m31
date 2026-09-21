@@ -125,6 +125,8 @@ pub struct Lowerer {
     statics: std::collections::HashSet<String>,
     /// The monomorphised program's interned type expressions.
     ty_exprs: Vec<TyExpr>,
+    /// Source spellings of instantiations, for diagnostics (`Program::shown`).
+    shown: HashMap<String, (String, Vec<Ty>)>,
     /// Required methods per interface, parallel to `typedefs`; empty for a
     /// struct.
     iface_methods: Vec<Vec<Func>>,
@@ -186,6 +188,7 @@ impl Lowerer {
             building_literal: false,
             statics: std::collections::HashSet::new(),
             ty_exprs: Vec::new(),
+            shown: HashMap::new(),
             iface_methods: Vec::new(),
             iface_slots: Vec::new(),
             strings: Vec::new(),
@@ -448,7 +451,7 @@ impl Lowerer {
                 if args.pos.len() != 1 {
                     return Err(Diag::new(span, "`push` takes one argument"));
                 }
-                let v = self.lower_expr(&args.pos[0])?;
+                let v = self.lower_expr_as(&args.pos[0], elem)?;
                 if !self.assignable(v.ty, elem) {
                     return Err(Diag::new(args.pos[0].span(), self.mismatch(elem, v.ty)));
                 }
@@ -492,7 +495,7 @@ impl Lowerer {
                 if self.underlying(i.ty) != Ty::Int {
                     return Err(Diag::new(args.pos[0].span(), self.mismatch(Ty::Int, i.ty)));
                 }
-                let v = self.lower_expr(&args.pos[1])?;
+                let v = self.lower_expr_as(&args.pos[1], elem)?;
                 if !self.assignable(v.ty, elem) {
                     return Err(Diag::new(args.pos[1].span(), self.mismatch(elem, v.ty)));
                 }
@@ -943,7 +946,7 @@ impl Lowerer {
                 // or freed a stale one twice on a later pass. Exactly the
                 // hazard `&&` and `||` already have `flush_temps_since` for.
                 let mark = self.stmt_temps.len();
-                let d = self.lower_expr(&args.pos[0])?;
+                let d = self.lower_expr_as(&args.pos[0], inner)?;
                 if !self.assignable(d.ty, inner) {
                     return Err(Diag::new(args.pos[0].span(), self.mismatch(inner, d.ty)));
                 }
@@ -1171,7 +1174,7 @@ impl Lowerer {
         }
         match m {
             "set" => {
-                let val = self.lower_expr(&args.pos[1])?;
+                let val = self.lower_expr_as(&args.pos[1], v)?;
                 if !self.assignable(val.ty, v) {
                     return Err(Diag::new(args.pos[1].span(), self.mismatch(v, val.ty)));
                 }
@@ -1312,7 +1315,7 @@ impl Lowerer {
                 Ok(Val::void())
             }
             "send" => {
-                let v = self.lower_expr(&args.pos[1])?;
+                let v = self.lower_expr_as(&args.pos[1], elem)?;
                 if !self.assignable(v.ty, elem) {
                     return Err(Diag::new(args.pos[1].span(), self.mismatch(elem, v.ty)));
                 }
@@ -1570,10 +1573,10 @@ impl Lowerer {
                             format!(
                                 "`{}` gets `{mname}` from both `{}` and `{}`; \
                                  give `{}` its own `{mname}` to say which one it means",
-                                crate::ast::bare(&t.name),
-                                crate::ast::bare(other),
-                                crate::ast::bare(&f.name),
-                                crate::ast::bare(&t.name)
+                                self.bare_name(&t.name),
+                                self.bare_name(other),
+                                self.bare_name(&f.name),
+                                self.bare_name(&t.name)
                             ),
                         ));
                     }
@@ -1653,7 +1656,7 @@ impl Lowerer {
             let Some(i) = params.iter().position(|p| p.name == *n) else {
                 return Err(Diag::new(
                     e.span(),
-                    format!("`{}` has no parameter `{n}`", crate::ast::bare(what)),
+                    format!("`{}` has no parameter `{n}`", self.bare_name(what)),
                 ));
             };
             if !params[i].is_optional() {
@@ -1673,7 +1676,7 @@ impl Lowerer {
                 span,
                 format!(
                     "`{}` takes {} positional argument(s), found {}",
-                    crate::ast::bare(what),
+                    self.bare_name(what),
                     mandatory.len(),
                     args.pos.len()
                 ),
@@ -1718,6 +1721,7 @@ impl Lowerer {
         // After monomorphisation every Ty::User names a concrete declaration
         // with no arguments, so resolution is a name lookup.
         self.ty_exprs = p.ty_exprs.clone();
+        self.shown = p.shown.clone();
 
         // Type table first: signatures and field types may refer to any type,
         // including one declared later in the file.
@@ -1725,7 +1729,7 @@ impl Lowerer {
             if self.typedefs.iter().any(|d| d.name == t.name) {
                 return Err(Diag::new(
                     t.span,
-                    format!("type `{}` is already defined", t.name),
+                    format!("type `{}` is already defined", self.show_name(&t.name)),
                 ));
             }
             let mut fields = Vec::new();
@@ -1733,7 +1737,11 @@ impl Lowerer {
                 if fields.iter().any(|(n, _): &(String, IrTy)| *n == f.name) {
                     return Err(Diag::new(
                         f.span,
-                        format!("duplicate field `{}` in type `{}`", f.name, t.name),
+                        format!(
+                            "duplicate field `{}` in type `{}`",
+                            f.name,
+                            self.show_name(&t.name)
+                        ),
                     ));
                 }
                 fields.push((f.name.clone(), self.irty(f.ty)));
@@ -1807,9 +1815,9 @@ impl Lowerer {
                                 format!(
                                     "`{}` already has a variant `{}`, and \
                                      `{}.{}` would be both",
-                                    crate::ast::bare(r),
+                                    self.bare_name(r),
                                     f.name,
-                                    crate::ast::bare(r),
+                                    self.bare_name(r),
                                     f.name
                                 ),
                             ));
@@ -1846,7 +1854,7 @@ impl Lowerer {
                             format!(
                                 "`{}` is declared in `{}`; a method may only be \
                                  added to a type its own module declared",
-                                crate::ast::bare(r),
+                                self.bare_name(r),
                                 self.type_module[i]
                             ),
                         ));
@@ -2091,6 +2099,7 @@ impl Lowerer {
     /// modules may each declare a `Point`. Nobody should ever see that
     /// spelling: inside its own module it is `Point`, and from outside it is
     /// `lib.Point`, which is how it would be written.
+    /// A type as the source spells it: `List<int>`, `Map<str, lib.Point>`.
     fn tyname(&self, t: Ty) -> String {
         match t {
             Ty::User(i) => self.show_name(&self.ty_exprs[i as usize].name),
@@ -2098,11 +2107,40 @@ impl Lowerer {
         }
     }
 
+    /// A type's name for a diagnostic: module-qualified unless it is this
+    /// module's own, and an instantiation spelled with its type arguments
+    /// rather than its mangled C name. Every diagnostic that names a type
+    /// goes through here or `tyname`, so none of them leaks a `$`.
     fn show_name(&self, raw: &str) -> String {
+        if let Some((base, args)) = self.shown.get(raw) {
+            let args: Vec<String> = args.iter().map(|a| self.tyname(*a)).collect();
+            return format!("{}<{}>", self.show_name(base), args.join(", "));
+        }
         match raw.split_once('#') {
             Some((m, n)) if m == self.cur_module => n.to_string(),
             Some((m, n)) => format!("{m}.{n}"),
             None => raw.to_string(),
+        }
+    }
+
+    /// A type or function name without its module, for a diagnostic that
+    /// names something by its bare name: `Pair<int>` for `lib#Pair$int`,
+    /// and `Pair<int>.get` for the method key `lib#Pair$int.get`.
+    fn bare_name(&self, raw: &str) -> String {
+        let (head, rest) = match raw.split_once('.') {
+            Some((h, r)) => (h, Some(r)),
+            None => (raw, None),
+        };
+        let head = match self.shown.get(head) {
+            Some((base, args)) => {
+                let args: Vec<String> = args.iter().map(|a| self.tyname(*a)).collect();
+                format!("{}<{}>", crate::ast::bare(base), args.join(", "))
+            }
+            None => crate::ast::bare(head).to_string(),
+        };
+        match rest {
+            Some(m) => format!("{head}.{m}"),
+            None => head,
         }
     }
 
@@ -2222,7 +2260,7 @@ impl Lowerer {
     fn not_visible(&self, tid: u32, what: &str) -> String {
         format!(
             "`{}` is private to `{}`; {what}",
-            crate::ast::bare(&self.typedefs[tid as usize].name),
+            self.bare_name(&self.typedefs[tid as usize].name),
             self.type_module[tid as usize]
         )
     }
@@ -2475,8 +2513,8 @@ impl Lowerer {
                     f.span,
                     format!(
                         "function `{}` must return a value of type {}",
-                        f.name,
-                        f.ret.name()
+                        self.bare_name(&f.name),
+                        self.tyname(f.ret)
                     ),
                 ));
             }
@@ -2651,8 +2689,8 @@ impl Lowerer {
                         let tid = owner_tid;
                         let obj = owner;
                         let (_, fty) = self.typedefs[tid as usize].fields[idx as usize].clone();
-                        let v = self.lower_expr(value)?;
                         let want = self.field_ty(tid, idx);
+                        let v = self.lower_expr_as(value, want)?;
                         if !self.assignable(v.ty, want) {
                             return Err(Diag::new(
                                 value.span(),
@@ -2701,7 +2739,7 @@ impl Lowerer {
                 if is_const {
                     return Err(Diag::new(*span, format!("cannot assign to const `{name}`")));
                 }
-                let val = self.lower_expr(value)?;
+                let val = self.lower_expr_as(value, ty)?;
                 if !self.assignable(val.ty, ty) {
                     return Err(Diag::new(
                         value.span(),
@@ -2748,7 +2786,7 @@ impl Lowerer {
                     (None, t) => {
                         return Err(Diag::new(
                             *span,
-                            format!("expected a return value of type {}", t.name()),
+                            format!("expected a return value of type {}", self.tyname(t)),
                         ))
                     }
                     (Some(e), Ty::Void) => {
@@ -2851,7 +2889,7 @@ impl Lowerer {
                 if self.underlying(i.ty) != Ty::Int {
                     return Err(Diag::new(index.span(), self.mismatch(Ty::Int, i.ty)));
                 }
-                let v = self.lower_expr(value)?;
+                let v = self.lower_expr_as(value, elem)?;
                 if !self.assignable(v.ty, elem) {
                     return Err(Diag::new(value.span(), self.mismatch(elem, v.ty)));
                 }
@@ -2901,7 +2939,7 @@ impl Lowerer {
                 let slots = self.bind_args(name, &params, args, *span)?;
                 let mut vals = Vec::new();
                 for (a, p) in slots.iter().zip(params.iter()) {
-                    let v = self.lower_expr(a)?;
+                    let v = self.lower_expr_as(a, p.ty)?;
                     if !self.assignable(v.ty, p.ty) {
                         return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
                     }
@@ -2938,7 +2976,7 @@ impl Lowerer {
                         format!("type `{}` has no field `{field}`", self.tyname(o.ty)),
                     ));
                 };
-                let v = self.lower_expr(value)?;
+                let v = self.lower_expr_as(value, self.field_ty(tid, idx))?;
                 if !self.assignable(v.ty, self.field_ty(tid, idx)) {
                     return Err(Diag::new(
                         value.span(),
@@ -3393,7 +3431,7 @@ impl Lowerer {
         let slots: Vec<Expr> = slots.into_iter().cloned().collect();
         let mut vals = Vec::new();
         for (a, p) in slots.iter().zip(params.iter()) {
-            let v = self.lower_expr(a)?;
+            let v = self.lower_expr_as(a, p.ty)?;
             if !self.assignable(v.ty, p.ty) {
                 return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
             }
@@ -3501,7 +3539,7 @@ impl Lowerer {
 
         let mut vals = Vec::new();
         for (a, w) in args.pos.iter().zip(want.iter()) {
-            let v = self.lower_expr(a)?;
+            let v = self.lower_expr_as(a, *w)?;
             if !self.assignable(v.ty, *w) {
                 return Err(Diag::new(a.span(), self.mismatch(*w, v.ty)));
             }
@@ -3822,7 +3860,10 @@ impl Lowerer {
         if !is_result && !vname.starts_with("Option$") {
             return Err(Diag::new(
                 span,
-                format!("`?` needs an Option or a Result; {vname} is neither"),
+                format!(
+                    "`?` needs an Option or a Result; {} is neither",
+                    self.show_name(&vname)
+                ),
             ));
         }
 
@@ -3845,7 +3886,11 @@ impl Lowerer {
         if is_result != rname.starts_with("Result$") {
             return Err(Diag::new(
                 span,
-                format!("`?` on a {vname} needs a function returning a Result, not {rname}"),
+                format!(
+                    "`?` on {} needs a function returning a Result, not {}",
+                    a_or_an(&self.show_name(&vname)),
+                    self.show_name(&rname)
+                ),
             ));
         }
 
@@ -4098,8 +4143,9 @@ impl Lowerer {
     ///
     /// Collection literals have no type of their own -- `[]` says nothing --
     /// so they are legal only where something says what they should be: a
-    /// declaration, an argument, a return. Everywhere else the literal forms
-    /// are refused with a message saying so, rather than guessing.
+    /// declaration, an assignment, a field, an argument, an enum payload, a
+    /// return. Everywhere else the literal forms are refused with a message
+    /// saying so, rather than guessing.
     fn lower_expr_as(&mut self, e: &Expr, want: Ty) -> Result<Val, Diag> {
         match e {
             Expr::SeqLit(..) | Expr::RepeatLit(..) | Expr::MapLit(..) => {
@@ -4167,8 +4213,11 @@ impl Lowerer {
         }
         let is_list = self.is_list(want);
 
-        // `[x; n]` -- n copies. An Array is built at that length directly;
-        // a List is filled by pushing, since it has no length to give.
+        // `[x; n]` -- n copies, built at that length by the runtime for
+        // either kind. A List used to be filled by pushing in a loop, which
+        // made a negative `n` an empty list and a huge one a process that
+        // pushed until it was killed; one call checks `n` the way an Array
+        // does, and sizes the buffer once.
         if let Expr::RepeatLit(ve, ne, _) = e {
             let v = self.lower_expr_as(ve, elem)?;
             if !self.assignable(v.ty, elem) {
@@ -4178,15 +4227,7 @@ impl Lowerer {
             if self.underlying(n.ty) != Ty::Int {
                 return Err(Diag::new(ne.span(), self.mismatch(Ty::Int, n.ty)));
             }
-            if !is_list {
-                return self.build_array(want, elem, v, n.val(), span);
-            }
-            self.building_literal = true;
-            let l = self.lower_new(want, &Args::default(), span);
-            self.building_literal = false;
-            let l = l?;
-            self.push_repeat(&l, elem, &v, n.val());
-            return Ok(l);
+            return Ok(self.build_repeat(want, elem, v, n.val(), is_list));
         }
 
         let Expr::SeqLit(items, _) = e else {
@@ -4203,16 +4244,9 @@ impl Lowerer {
         self.build_seq(want, elem, vals, is_list, span)
     }
 
-    /// An `Array<T>` of `n` copies of `fill`, straight from the runtime.
-    fn build_array(
-        &mut self,
-        ty: Ty,
-        elem: Ty,
-        fill: Val,
-        n: Value,
-        span: Span,
-    ) -> Result<Val, Diag> {
-        let _ = span;
+    /// A List or an Array of `n` copies of `fill`, straight from the
+    /// runtime, which retains a reference fill once per slot.
+    fn build_repeat(&mut self, ty: Ty, elem: Ty, fill: Val, n: Value, is_list: bool) -> Val {
         let flag = self.new_val(IrTy::I1);
         let refs = self.is_ref(elem);
         self.push(Inst::BConst {
@@ -4222,68 +4256,16 @@ impl Lowerer {
         let d = self.new_val(IrTy::Ref);
         self.push(Inst::Call {
             dst: Some(d),
-            func: "rt_array_new".to_string(),
+            func: if is_list {
+                "rt_list_repeat"
+            } else {
+                "rt_array_new"
+            }
+            .to_string(),
             args: vec![n, fill.val(), flag],
         });
         self.stmt_temps.push(d);
-        Ok(Val::new(d, ty, true))
-    }
-
-    /// Push `n` copies of `v` onto an already-built list.
-    fn push_repeat(&mut self, l: &Val, elem: Ty, v: &Val, n: Value) {
-        let i = self.new_val(IrTy::I64);
-        self.push(Inst::IConst { dst: i, val: 0 });
-        let header = self.new_block();
-        let body = self.new_block();
-        let exit = self.new_block();
-        self.terminate(Term::Jump {
-            to: header,
-            args: vec![i],
-        });
-
-        let hp = self.new_val(IrTy::I64);
-        let hi = self.blocks.iter().position(|b| b.id == header).unwrap();
-        self.blocks[hi].params = vec![hp];
-        self.switch_to(header);
-        let c = self.new_val(IrTy::I1);
-        self.push(Inst::ICmp {
-            dst: c,
-            cmp: Cmp::Lt,
-            lhs: hp,
-            rhs: n,
-        });
-        self.terminate(Term::Brif {
-            cond: c,
-            then: body,
-            then_args: Vec::new(),
-            els: exit,
-            els_args: Vec::new(),
-        });
-
-        self.switch_to(body);
-        // The list takes a reference per copy, exactly as `push` does.
-        if self.is_ref(elem) {
-            self.push(Inst::RcInc { val: v.val() });
-        }
-        self.push(Inst::Call {
-            dst: None,
-            func: "rt_list_push".to_string(),
-            args: vec![l.val(), v.val()],
-        });
-        let one = self.new_val(IrTy::I64);
-        self.push(Inst::IConst { dst: one, val: 1 });
-        let next = self.new_val(IrTy::I64);
-        self.push(Inst::Arith {
-            dst: next,
-            op: ArithOp::Add,
-            lhs: hp,
-            rhs: one,
-        });
-        self.terminate(Term::Jump {
-            to: header,
-            args: vec![next],
-        });
-        self.switch_to(exit);
+        Val::new(d, ty, true)
     }
 
     /// `[a, b, c]` for a List or an Array. An Array is sized by its elements.
@@ -4815,7 +4797,7 @@ impl Lowerer {
                         self.bind_args(&format!("{iname}.{m}"), &decl.params, args, *span)?;
                     let mut vals = vec![o.val()];
                     for (a, p) in slots.iter().zip(decl.params.iter()) {
-                        let v = self.lower_expr(a)?;
+                        let v = self.lower_expr_as(a, p.ty)?;
                         if !self.assignable(v.ty, p.ty) {
                             return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
                         }
@@ -4865,7 +4847,7 @@ impl Lowerer {
                 // like every other argument (docs/ir-v0.md §5.1).
                 let mut vals = vec![o.val()];
                 for (a, p) in slots.iter().zip(params.iter()) {
-                    let v = self.lower_expr(a)?;
+                    let v = self.lower_expr_as(a, p.ty)?;
                     if !self.assignable(v.ty, p.ty) {
                         return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
                     }
@@ -4984,7 +4966,7 @@ impl Lowerer {
                 span,
                 format!(
                     "`{}` must take one {} parameter to support `{}`",
-                    crate::ast::bare(&key),
+                    self.bare_name(&key),
                     self.tyname(a.ty),
                     op.spelling()
                 ),
@@ -5001,7 +4983,7 @@ impl Lowerer {
                 span,
                 format!(
                     "`{}` must return {} to support `{}`",
-                    crate::ast::bare(&key),
+                    self.bare_name(&key),
                     self.tyname(want_ret),
                     op.spelling()
                 ),
@@ -5326,7 +5308,7 @@ impl Lowerer {
                     span,
                     format!(
                         "`{}` converts one value; it is a distinct type, not a struct",
-                        self.typedefs[tid as usize].name
+                        self.show_name(&self.typedefs[tid as usize].name)
                     ),
                 ));
             }
@@ -5349,8 +5331,8 @@ impl Lowerer {
                 return Err(Diag::new(
                     span,
                     format!(
-                        "write a {} as a literal: `{{k: v}}` or `{{}}`",
-                        self.tyname(ty)
+                        "write {} as a literal: `{{k: v}}` or `{{}}`",
+                        a_or_an(&self.tyname(ty))
                     ),
                 ));
             }
@@ -5394,8 +5376,8 @@ impl Lowerer {
             return Err(Diag::new(
                 span,
                 format!(
-                    "write a {} as a literal: `[a, b]`, `[x; n]`, or `[]`",
-                    self.tyname(ty)
+                    "write {} as a literal: `[a, b]`, `[x; n]`, or `[]`",
+                    a_or_an(&self.tyname(ty))
                 ),
             ));
         }
@@ -5483,7 +5465,11 @@ impl Lowerer {
 
         let mut given: Vec<Option<Val>> = Vec::new();
         for (e, f) in slots.iter().zip(fields.iter()) {
-            let v = self.lower_expr(e)?;
+            // The field's type is what a literal argument takes. A default
+            // is an expression lowered here, at each construction, so a
+            // literal default builds a fresh collection for every object
+            // rather than one shared by all of them.
+            let v = self.lower_expr_as(e, f.ty)?;
             if !self.assignable(v.ty, f.ty) {
                 return Err(Diag::new(
                     e.span(),
@@ -5798,6 +5784,17 @@ impl Lowerer {
             Ok(Val::new(d, ret, owned))
         }
     }
+}
+
+/// A name with its indefinite article, for a diagnostic: `an Array<int>`,
+/// `a List<int>`. By the first letter, which is right for every type name
+/// the language has.
+fn a_or_an(name: &str) -> String {
+    let vowel = name
+        .chars()
+        .next()
+        .is_some_and(|c| "aeiouAEIOU".contains(c));
+    format!("{} {name}", if vowel { "an" } else { "a" })
 }
 
 fn stmt_span(s: &Stmt) -> Span {

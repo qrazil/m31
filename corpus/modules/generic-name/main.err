@@ -1,0 +1,4 @@
+corpus/modules/generic-name/main.src:4:12: type mismatch: expected int, found lib.Pair<lib.Point>
+  |
+4 | int n = lib.origin();
+  |            ^

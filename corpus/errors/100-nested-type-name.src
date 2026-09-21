@@ -1,0 +1,3 @@
+// A type argument that is itself generic is spelled out too.
+Option<List<int>> o = Option<List<int>>.Some([1]);
+int n = o;

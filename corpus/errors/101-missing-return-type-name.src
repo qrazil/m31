@@ -1,0 +1,6 @@
+// The missing-return diagnostic names a user or collection type in full; it
+// used to print a placeholder for anything that was not a primitive.
+List<int> f() {
+    print(1);
+}
+print(f().size());

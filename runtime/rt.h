@@ -179,6 +179,7 @@ typedef struct {
  * element. */
 Obj *rt_array_new(int64_t len, int64_t fill, bool elems_are_refs);
 Obj *rt_list_new(bool elems_are_refs);
+Obj *rt_list_repeat(int64_t n, int64_t fill, bool elems_are_refs);
 Obj *rt_array_blank(int64_t len, bool elems_are_refs);
 void rt_array_put(Obj *o, int64_t i, int64_t v);
 

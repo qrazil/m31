@@ -1,4 +1,4 @@
-corpus/errors/058-list-remove.src:5:3: `List$int` has no method `remove`; use `remove_at(i)` to drop the element at an index
+corpus/errors/058-list-remove.src:5:3: `List<int>` has no method `remove`; use `remove_at(i)` to drop the element at an index
   |
 5 | xs.remove(0);
   |   ^

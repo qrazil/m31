@@ -1,0 +1,4 @@
+corpus/errors/100-nested-type-name.src:3:9: type mismatch: expected int, found Option<List<int>>
+  |
+3 | int n = o;
+  |         ^

@@ -1,0 +1,3 @@
+// Both sides of a mismatch are spelled as written.
+Array<int> a = [1];
+List<int> xs = a;

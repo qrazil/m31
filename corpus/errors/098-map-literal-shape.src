@@ -1,0 +1,3 @@
+// A diagnostic names a type the way the source wrote it, not by the mangled
+// name the C backend uses: `Map<str, int>`, never `Map$str$int`.
+Map<str, int> m = [1, 2];

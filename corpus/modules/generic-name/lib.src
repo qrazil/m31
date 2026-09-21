@@ -1,0 +1,6 @@
+pub type Point { int x; }
+pub type Pair<T> { T a; T b; }
+
+pub Pair<Point> origin() {
+    return Pair<Point>(Point(0), Point(0));
+}

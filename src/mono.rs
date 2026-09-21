@@ -29,6 +29,8 @@ pub struct Mono {
     out_exprs: Vec<TyExpr>,
     /// Instantiations already emitted, by mangled name.
     done: HashSet<String>,
+    /// Each instantiation's source spelling, by mangled name (`Program::shown`).
+    shown: HashMap<String, (String, Vec<Ty>)>,
     out_types: Vec<TypeDecl>,
     out_funcs: Vec<Func>,
     /// Pending function instantiations: (generic name, type arguments).
@@ -52,6 +54,7 @@ impl Mono {
             src_exprs: p.ty_exprs.clone(),
             out_exprs: Vec::new(),
             done: HashSet::new(),
+            shown: HashMap::new(),
             out_types: Vec::new(),
             out_funcs: Vec::new(),
             queue: Vec::new(),
@@ -126,6 +129,7 @@ impl Mono {
             funcs: m.out_funcs,
             toplevel,
             ty_exprs: m.out_exprs,
+            shown: m.shown,
         })
     }
 
@@ -252,6 +256,8 @@ impl Mono {
         args: &[Ty],
         span: Span,
     ) -> Result<(), Diag> {
+        self.shown
+            .insert(mangled.to_string(), (decl.name.clone(), args.to_vec()));
         if !self.done.insert(mangled.to_string()) {
             return Ok(());
         }
@@ -307,6 +313,8 @@ impl Mono {
 
     fn instantiate_func(&mut self, name: &str, args: &[Ty], span: Span) -> Result<(), Diag> {
         let mangled = self.mangle(name, args);
+        self.shown
+            .insert(mangled.clone(), (name.to_string(), args.to_vec()));
         if !self.done.insert(mangled.clone()) {
             return Ok(());
         }
@@ -354,6 +362,8 @@ impl Mono {
     /// to carry the type arguments for the rest of the compiler to read.
     fn builtin_decl(&mut self, name: &str, args: &[Ty], span: Span) -> String {
         let mangled = self.mangle(name, args);
+        self.shown
+            .insert(mangled.clone(), (name.to_string(), args.to_vec()));
         if self.done.insert(mangled.clone()) {
             self.out_types.push(TypeDecl {
                 name: mangled.clone(),

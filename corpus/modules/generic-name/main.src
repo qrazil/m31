@@ -1,0 +1,4 @@
+// A generic type from another module, carrying another module's type, is
+// qualified at both levels in a diagnostic.
+import lib;
+int n = lib.origin();
