@@ -32,9 +32,9 @@ A letter or `_`, then letters, digits or `_`. Case-sensitive.
 ### 1.4 Keywords
 
     bool     break     case      const     continue  distinct  else
-    enum     false     float     for       if        in        int
-    interface          match     return    spawn     str       true
-    type     void      while
+    enum     false     float     for       if        import    in
+    int      interface match     pub       return    spawn     static
+    str      true      type      void      while
 
 Keywords are reserved: none may be used as an identifier. `Array`, `Chan`,
 `List` and `Map` are not keywords — they are predeclared type names, and are
@@ -939,26 +939,26 @@ graph, paid once per crossing.
 
 Stated so the absence is a decision and not an oversight:
 
-  - modules, imports, visibility — one file is the program
   - exceptions and unwinding; a fault traps, and a recoverable failure is a
-    `Result`-shaped enum the program declares itself
-  - multiple returns
+    `Result` (§3.7a)
+  - multiple returns — a `Result` or an enum carries what a second return
+    value would have
   - closures, function values, lambdas
   - inheritance, method overriding, abstract types
   - defining an operator outside the fixed set of §6.2, or changing one on a
     built-in type
-  - user-defined conversions
+  - function overloading — one name, one function
   - shadowing — see §4.1
-  - null, optionals, zero values — every declaration initialises
+  - **null** — every declaration initialises, and absence is `Option<T>`
   - type aliases — see §3.6
-  - unsigned and sized integer types, bitwise operators, floats
-  - a string library — see §6.4
+  - unsigned and sized integer types, and bitwise operators
   - `switch`, ternary `?:`, three-clause `for`, labelled break
   - variadic functions
   - constraints on type parameters
   - reflection, runtime type queries, downcasting from an interface
+  - wildcard imports, import aliases, and import cycles — see §2.1
   - unsafe, raw pointers, manual allocation
-  - a garbage collector, and therefore cycle collection
+  - a garbage collector, and therefore cycle collection: **a cycle leaks**
 
 ---
 
