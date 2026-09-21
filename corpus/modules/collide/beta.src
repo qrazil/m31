@@ -1,0 +1,6 @@
+// The same two names, a different shape, a different answer.
+type Point { int x; int y; }
+
+int helper() { return 2; }
+
+pub int value() { return helper() + Point(20, 5).y; }

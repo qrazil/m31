@@ -1,0 +1,9 @@
+// Every module gets its own namespace. Before qualification, two modules
+// could not each have a private `helper`, and could not each declare a
+// `Point` -- which is exactly what "visible only inside its module" is
+// supposed to mean.
+type Point { int x; }
+
+int helper() { return 1; }
+
+pub int value() { return helper() + Point(10).x; }

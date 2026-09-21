@@ -360,7 +360,15 @@ impl fmt::Display for Module {
                 .iter()
                 .map(|(n, ty)| format!("{n}: {ty:?}"))
                 .collect();
-            writeln!(f, "type {} {{ {} }}", t.name, fs.join(", "))?;
+            // Module-qualified names are interned with `#`, which cannot
+            // appear in source. The dump shows the spelling a reader would
+            // write instead.
+            writeln!(
+                f,
+                "type {} {{ {} }}",
+                t.name.replace('#', "."),
+                fs.join(", ")
+            )?;
         }
         if !self.types.is_empty() {
             writeln!(f)?;
@@ -389,7 +397,13 @@ impl fmt::Display for Func {
             Some(t) => format!(" -> {t:?}"),
             None => String::new(),
         };
-        writeln!(f, "func {}({}){} {{", self.name, params.join(", "), ret)?;
+        writeln!(
+            f,
+            "func {}({}){} {{",
+            self.name.replace('#', "."),
+            params.join(", "),
+            ret
+        )?;
         for b in &self.blocks {
             let bp: Vec<String> = b
                 .params

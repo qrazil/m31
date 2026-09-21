@@ -351,7 +351,9 @@ fn c_name(name: &str) -> String {
 /// refuse under `-fno-dollars-in-identifiers` or `-pedantic`. Function names
 /// were already escaped here; field names were being written raw.
 pub fn c_ident(name: &str) -> String {
-    name.replace('$', "__").replace('.', "___")
+    name.replace('$', "__")
+        .replace('.', "___")
+        .replace('#', "____")
 }
 
 fn signature(f: &crate::ir::Func) -> String {

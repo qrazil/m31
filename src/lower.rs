@@ -1473,8 +1473,10 @@ impl Lowerer {
                     return Err(Diag::new(
                         f.span,
                         format!(
-                            "`{key}` and `{other}` would both be emitted as the same \
-                             C function; rename one"
+                            "`{}` and `{}` would both be emitted as the same \
+                             C function; rename one",
+                            crate::ast::bare(&key),
+                            crate::ast::bare(&other)
                         ),
                     ));
                 }
@@ -1555,9 +1557,12 @@ impl Lowerer {
                         return Err(Diag::new(
                             f.span,
                             format!(
-                                "`{}` gets `{mname}` from both `{other}` and `{}`; \
+                                "`{}` gets `{mname}` from both `{}` and `{}`; \
                                  give `{}` its own `{mname}` to say which one it means",
-                                t.name, f.name, t.name
+                                crate::ast::bare(&t.name),
+                                crate::ast::bare(other),
+                                crate::ast::bare(&f.name),
+                                crate::ast::bare(&t.name)
                             ),
                         ));
                     }
@@ -1636,7 +1641,7 @@ impl Lowerer {
             let Some(i) = params.iter().position(|p| p.name == *n) else {
                 return Err(Diag::new(
                     e.span(),
-                    format!("`{what}` has no parameter `{n}`"),
+                    format!("`{}` has no parameter `{n}`", crate::ast::bare(what)),
                 ));
             };
             if !params[i].is_optional() {
@@ -1655,7 +1660,8 @@ impl Lowerer {
             return Err(Diag::new(
                 span,
                 format!(
-                    "`{what}` takes {} positional argument(s), found {}",
+                    "`{}` takes {} positional argument(s), found {}",
+                    crate::ast::bare(what),
                     mandatory.len(),
                     args.pos.len()
                 ),
@@ -1787,9 +1793,12 @@ impl Lowerer {
                             return Err(Diag::new(
                                 f.span,
                                 format!(
-                                    "`{r}` already has a variant `{}`, and \
-                                     `{r}.{}` would be both",
-                                    f.name, f.name
+                                    "`{}` already has a variant `{}`, and \
+                                     `{}.{}` would be both",
+                                    crate::ast::bare(r),
+                                    f.name,
+                                    crate::ast::bare(r),
+                                    f.name
                                 ),
                             ));
                         }
@@ -1815,6 +1824,21 @@ impl Lowerer {
                     }
                 }
                 if !self.typedefs.iter().any(|d| d.name == *r) {
+                    // A bare receiver that another module declares is the
+                    // common mistake here, and "unknown type" does not say
+                    // what to do about it.
+                    let suffix = format!("#{r}");
+                    if let Some(i) = self.typedefs.iter().position(|d| d.name.ends_with(&suffix)) {
+                        return Err(Diag::new(
+                            f.span,
+                            format!(
+                                "`{}` is declared in `{}`; a method may only be \
+                                 added to a type its own module declared",
+                                crate::ast::bare(r),
+                                self.type_module[i]
+                            ),
+                        ));
+                    }
                     return Err(Diag::new(f.span, format!("unknown type `{r}`")));
                 }
             }
@@ -1823,7 +1847,10 @@ impl Lowerer {
             // -- nothing requires a type to be capitalised -- which makes the
             // collision easy to hit by accident.
             if self.typedefs.iter().any(|d| d.name == f.name) {
-                return Err(Diag::new(f.span, format!("`{}` is already a type", f.name)));
+                return Err(Diag::new(
+                    f.span,
+                    format!("`{}` is already a type", crate::ast::bare(&f.name)),
+                ));
             }
             self.sigs.insert(
                 f.key(),
@@ -1989,7 +2016,10 @@ impl Lowerer {
                 format!("`{name}` is already in scope; shadowing is not allowed, rename one"),
             ));
         }
-        if self.sigs.contains_key(name) {
+        // Against this module's own function, not the bare name: functions
+        // are interned module-qualified, so `sigs` no longer holds the name
+        // as it was written.
+        if self.sigs.contains_key(&self.resolve_fn(name)) {
             return Err(Diag::new(
                 span,
                 format!("`{name}` is already a function; shadowing is not allowed, rename one"),
@@ -2007,7 +2037,7 @@ impl Lowerer {
                     span,
                     format!(
                         "`{name}` is already a field of `{}`; shadowing is not allowed, rename one",
-                        self.typedefs[tid as usize].name
+                        self.show_name(&self.typedefs[tid as usize].name)
                     ),
                 ));
             }
@@ -2034,10 +2064,24 @@ impl Lowerer {
 
     /// A type's name, for diagnostics. `Ty::name()` cannot do this because it
     /// has no access to the interning arena.
+    /// A type's name as a reader wrote it.
+    ///
+    /// Declared types are interned module-qualified (`lib#Point`) so that two
+    /// modules may each declare a `Point`. Nobody should ever see that
+    /// spelling: inside its own module it is `Point`, and from outside it is
+    /// `lib.Point`, which is how it would be written.
     fn tyname(&self, t: Ty) -> String {
         match t {
-            Ty::User(i) => self.ty_exprs[i as usize].name.clone(),
+            Ty::User(i) => self.show_name(&self.ty_exprs[i as usize].name),
             other => other.name().to_string(),
+        }
+    }
+
+    fn show_name(&self, raw: &str) -> String {
+        match raw.split_once('#') {
+            Some((m, n)) if m == self.cur_module => n.to_string(),
+            Some((m, n)) => format!("{m}.{n}"),
+            None => raw.to_string(),
         }
     }
 
@@ -2131,7 +2175,8 @@ impl Lowerer {
     fn not_visible(&self, tid: u32, what: &str) -> String {
         format!(
             "`{}` is private to `{}`; {what}",
-            self.typedefs[tid as usize].name, self.type_module[tid as usize]
+            crate::ast::bare(&self.typedefs[tid as usize].name),
+            self.type_module[tid as usize]
         )
     }
 
@@ -2199,7 +2244,7 @@ impl Lowerer {
 
     /// The first required method `ft` does not satisfy, for diagnostics.
     fn missing_method(&self, ft: u32, tt: u32) -> Option<String> {
-        let fname = &self.typedefs[ft as usize].name;
+        let fname = &self.typedefs[ft as usize].name.clone();
         for m in &self.iface_methods[tt as usize] {
             let key = format!("{fname}.{}", m.name);
             // A static has no receiver, so its C signature is one argument
@@ -2794,7 +2839,8 @@ impl Lowerer {
             }
 
             Stmt::Spawn { name, args, span } => {
-                let Some(sig) = self.sigs.get(name) else {
+                let key = self.resolve_fn(name);
+                let Some(sig) = self.sigs.get(&key) else {
                     return Err(Diag::new(*span, format!("unknown function `{name}`")));
                 };
                 let params = sig.params.clone();
@@ -2818,7 +2864,7 @@ impl Lowerer {
                     vals.push(v.val());
                 }
                 self.push(Inst::Spawn {
-                    func: name.clone(),
+                    func: key.clone(),
                     args: vals,
                 });
                 self.flush_temps();
@@ -3957,6 +4003,19 @@ impl Lowerer {
         Ok(Some(Val::new(d, Ty::Str, true)))
     }
 
+    /// The key a bare name has in `sigs`: this module's own declaration if
+    /// there is one, otherwise the name as written -- which is how builtins
+    /// and the prelude stay reachable from everywhere.
+    fn resolve_fn(&self, name: &str) -> String {
+        if !self.cur_module.is_empty() {
+            let qualified = format!("{}#{name}", self.cur_module);
+            if self.sigs.contains_key(&qualified) {
+                return qualified;
+            }
+        }
+        name.to_string()
+    }
+
     /// `mod.name(args)` -- a call into another module.
     fn lower_qualified(
         &mut self,
@@ -3965,7 +4024,8 @@ impl Lowerer {
         args: &Args,
         span: Span,
     ) -> Result<Val, Diag> {
-        let Some(sig) = self.sigs.get(name) else {
+        let key = format!("{modname}#{name}");
+        let Some(sig) = self.sigs.get(&key) else {
             return Err(Diag::new(
                 span,
                 format!("`{modname}` has no function `{name}`"),
@@ -3983,7 +4043,7 @@ impl Lowerer {
                 format!("`{name}` is private to `{modname}`; mark it `pub` to export it"),
             ));
         }
-        self.lower_call(name, args, span)
+        self.lower_call(&key, args, span)
     }
 
     fn lower_if(
@@ -4245,14 +4305,36 @@ impl Lowerer {
             }
             Expr::Bin(op, l, r, span) => self.lower_bin(*op, l, r, *span),
             Expr::Call(name, args, span) => {
-                // A name from another module is only reachable when it is
-                // exported, and only through that module's name. Unqualified,
-                // it is not in scope at all -- which is what makes `pub` mean
-                // something once every file has been merged into one program.
-                // The check lives here rather than in `lower_call`, because
-                // the qualified form goes through the same function and has
-                // already earned its access.
-                if let Some(sig) = self.sigs.get(name) {
+                // A bare name means this module's declaration, then a
+                // builtin. Another module's name is not in scope at all --
+                // which is what makes `pub` mean something once every file
+                // has been merged into one program. The check lives here
+                // rather than in `lower_call`, because the qualified form
+                // goes through the same function and has already earned its
+                // access.
+                let key = self.resolve_fn(name);
+                // Not ours: if some other module declares it, say which and
+                // how to reach it rather than "unknown function".
+                if !self.sigs.contains_key(&key) {
+                    let suffix = format!("#{name}");
+                    if let Some((k, sig)) = self
+                        .sigs
+                        .iter()
+                        .find(|(k, _)| k.ends_with(&suffix) && !k.contains('.'))
+                    {
+                        let owner = sig.module.clone();
+                        let _ = k;
+                        return Err(Diag::new(
+                            *span,
+                            if sig.is_pub {
+                                format!("`{name}` is declared in `{owner}`; write `{owner}.{name}`")
+                            } else {
+                                format!("`{name}` is private to `{owner}`")
+                            },
+                        ));
+                    }
+                }
+                if let Some(sig) = self.sigs.get(&key) {
                     if !sig.module.is_empty() && sig.module != self.cur_module {
                         return Err(Diag::new(
                             *span,
@@ -4267,7 +4349,7 @@ impl Lowerer {
                         ));
                     }
                 }
-                self.lower_call(name, args, *span)
+                self.lower_call(&key, args, *span)
             }
 
             Expr::Field(obj, field, span) => {
@@ -4385,7 +4467,7 @@ impl Lowerer {
                         format!(
                             "`{m}` is a static method; call it on the type, as \
                              `{}.{m}(..)`",
-                            self.typedefs[tid as usize].name
+                            self.show_name(&self.typedefs[tid as usize].name)
                         ),
                     ));
                 }
@@ -4393,7 +4475,7 @@ impl Lowerer {
                 // On an interface value the implementation is not known
                 // statically: dispatch through the receiver's type header.
                 if self.typedefs[tid as usize].is_interface {
-                    let iname = self.typedefs[tid as usize].name.clone();
+                    let iname = self.show_name(&self.typedefs[tid as usize].name);
                     let Some(decl) = self.iface_methods[tid as usize]
                         .iter()
                         .find(|x| x.name == *m)
@@ -4454,7 +4536,7 @@ impl Lowerer {
                         *span,
                         format!(
                             "type `{}` has no method `{m}`",
-                            self.typedefs[tid as usize].name
+                            self.show_name(&self.typedefs[tid as usize].name)
                         ),
                     ));
                 };
@@ -4557,20 +4639,21 @@ impl Lowerer {
         };
         let tid = self.tdef_of(a.ty).expect("checked by caller");
         let tname = self.typedefs[tid as usize].name.clone();
+        let shown = self.show_name(&tname);
         let key = format!("{tname}.{mname}");
 
         let Some(sig) = self.sigs.get(&key) else {
             return Err(Diag::new(
                 span,
                 format!(
-                    "`{}` on `{tname}` needs a method `{} {tname}.{mname}(..)`",
+                    "`{}` on `{shown}` needs a method `{} {shown}.{mname}(..)`",
                     op.spelling(),
                     if mname == "cmp" {
                         "int"
                     } else if mname == "eq" {
                         "bool"
                     } else {
-                        &tname
+                        &shown
                     }
                 ),
             ));
@@ -4580,7 +4663,8 @@ impl Lowerer {
             return Err(Diag::new(
                 span,
                 format!(
-                    "`{key}` must take one {} parameter to support `{}`",
+                    "`{}` must take one {} parameter to support `{}`",
+                    crate::ast::bare(&key),
                     self.tyname(a.ty),
                     op.spelling()
                 ),
@@ -4596,7 +4680,8 @@ impl Lowerer {
             return Err(Diag::new(
                 span,
                 format!(
-                    "`{key}` must return {} to support `{}`",
+                    "`{}` must return {} to support `{}`",
+                    crate::ast::bare(&key),
                     self.tyname(want_ret),
                     op.spelling()
                 ),
@@ -4909,7 +4994,7 @@ impl Lowerer {
                 span,
                 format!(
                     "`{}` is an interface; construct a type that satisfies it",
-                    self.typedefs[tid as usize].name
+                    self.show_name(&self.typedefs[tid as usize].name)
                 ),
             ));
         }

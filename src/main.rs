@@ -172,9 +172,15 @@ fn finish(prog: ast::Program, mode: &str) -> Result<String, diag::Diag> {
 }
 
 /// Compile one source string as a single-module program.
+///
+/// The module name is empty, which turns module qualification off: with one
+/// module there is nothing to collide with, and the tests then assert on the
+/// names someone actually wrote. Real programs always go through the loader
+/// and are always qualified, so the qualified path is what the corpus
+/// exercises.
 #[cfg(test)]
 fn compile_str(src: &str, mode: &str) -> Result<String, diag::Diag> {
     let toks = lexer::Lexer::new(src).tokenize()?;
-    let prog = parser::Parser::new(toks).parse_program("main")?;
+    let prog = parser::Parser::new(toks).parse_program("")?;
     finish(prog, mode)
 }

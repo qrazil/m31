@@ -17,6 +17,11 @@ pub struct Parser {
     /// Names declared by `type`, from a pre-pass, so a type can be used
     /// before it is declared and `IDENT IDENT` is decidable with two tokens.
     type_names: Vec<String>,
+    /// Type names DECLARED IN THIS FILE, as opposed to builtin ones. A name
+    /// in here is interned module-qualified, so two files may each declare a
+    /// `Point` without becoming the same type in the shared arena.
+    own: Vec<String>,
+    builtin: Vec<String>,
     /// Type parameter names in scope while parsing a generic declaration.
     /// `T` inside `type Box<T>` must parse as a type even though no `type T`
     /// exists.
@@ -71,21 +76,23 @@ impl Parser {
         // The builtin collections and channels: the runtime owns their
         // representation, so there is no `type Chan<T>` in the source to
         // find, but they must parse as type names like any other.
-        let mut type_names = vec![
-            "Chan".to_string(),
-            "Array".to_string(),
-            "List".to_string(),
-            "Map".to_string(),
+        let builtin: Vec<String> = [
+            "Chan", "Array", "List", "Map",
             // Declared by the compiler rather than by the program -- see
             // `prelude_types`. Named here so a source file can write
             // `Option<int>` without having declared it.
-            "Option".to_string(),
-            "Result".to_string(),
-        ];
+            "Option", "Result",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let mut own: Vec<String> = Vec::new();
+        let mut type_names = builtin.clone();
         for w in toks.windows(2) {
             if w[0].tok == Tok::KwType || w[0].tok == Tok::KwInterface || w[0].tok == Tok::KwEnum {
                 if let Tok::Ident(n) = &w[1].tok {
                     type_names.push(n.clone());
+                    own.push(n.clone());
                 }
             }
         }
@@ -95,6 +102,7 @@ impl Parser {
             if w[0].tok == Tok::KwDistinct {
                 if let Tok::Ident(n) = &w[2].tok {
                     type_names.push(n.clone());
+                    own.push(n.clone());
                 }
             }
         }
@@ -102,6 +110,8 @@ impl Parser {
             toks,
             pos: 0,
             type_names,
+            own,
+            builtin,
             tparams: Vec::new(),
             ty_exprs: Vec::new(),
             module: String::new(),
@@ -112,6 +122,26 @@ impl Parser {
     /// parameter currently in scope?
     fn is_ty_name(&self, name: &str) -> bool {
         self.type_names.iter().any(|n| n == name) || self.tparams.iter().any(|n| n == name)
+    }
+
+    /// The interned spelling of a type name written in this file.
+    ///
+    /// A name this file declares becomes `module#Name`. The arena is shared
+    /// across every file, so without this two modules each declaring `Point`
+    /// would dedupe to one entry and become the same type. Builtins and type
+    /// parameters stay bare: they mean the same thing in every file.
+    ///
+    /// `#` cannot appear in a source identifier, so a qualified name can
+    /// never collide with one someone wrote.
+    fn qualify(&self, name: &str) -> String {
+        if self.module.is_empty()
+            || self.builtin.iter().any(|b| b == name)
+            || self.tparams.iter().any(|t| t == name)
+            || !self.own.iter().any(|o| o == name)
+        {
+            return name.to_string();
+        }
+        format!("{}#{name}", self.module)
     }
 
     fn intern(&mut self, name: String, args: Vec<Ty>) -> Ty {
@@ -238,6 +268,7 @@ impl Parser {
                     }
                     self.expect(Tok::Gt)?;
                 }
+                let name = self.qualify(&name);
                 return Ok(self.intern(name, args));
             }
         }
@@ -560,6 +591,7 @@ impl Parser {
         }
         let (name, _) = self.expect_ident()?;
         self.expect(Tok::Semi)?;
+        let name = self.qualify(&name);
         Ok(TypeDecl {
             name,
             module: self.module.clone(),
@@ -583,6 +615,7 @@ impl Parser {
         let is_interface = self.peek() == &Tok::KwInterface;
         self.bump();
         let (name, _) = self.expect_ident()?;
+        let name = self.qualify(&name);
         let tparams = self.parse_tparams()?;
         self.tparams = tparams.clone();
         self.expect(Tok::LBrace)?;
@@ -675,6 +708,7 @@ impl Parser {
         let span = self.span();
         self.expect(Tok::KwEnum)?;
         let (name, _) = self.expect_ident()?;
+        let name = self.qualify(&name);
         let tparams = self.parse_tparams()?;
         self.tparams = tparams.clone();
         self.expect(Tok::LBrace)?;
@@ -729,7 +763,10 @@ impl Parser {
         if variants.is_empty() {
             return Err(Diag::new(
                 span,
-                format!("enum `{name}` has no variants, so no value of it can exist"),
+                format!(
+                    "enum `{}` has no variants, so no value of it can exist",
+                    crate::ast::bare(&name)
+                ),
             ));
         }
         Ok(TypeDecl {
@@ -780,7 +817,9 @@ impl Parser {
         let (first, _) = self.expect_ident()?;
         let (recv, name) = if self.eat(&Tok::Dot) {
             let (m, _) = self.expect_ident()?;
-            (Some(first), m)
+            // The receiver names a type, so it is qualified the same way the
+            // type's own declaration was.
+            (Some(self.qualify(&first)), m)
         } else {
             (None, first)
         };
@@ -791,6 +830,15 @@ impl Parser {
                  `static T Type.name(..)`",
             ));
         }
+        // A free function is qualified by its module the same way a type is,
+        // so two modules may each have a private `helper`. A METHOD is not:
+        // its receiver is already qualified, and `lib#Rect.area` is unique
+        // without touching the method name.
+        let name = if recv.is_none() && !self.module.is_empty() {
+            format!("{}#{name}", self.module)
+        } else {
+            name
+        };
         let after = self.parse_tparams()?;
         debug_assert_eq!(after, tparams);
         self.expect(Tok::LParen)?;
@@ -1207,7 +1255,7 @@ impl Parser {
                 if self.peek() == &Tok::Dot {
                     self.bump();
                     let (variant, _) = self.expect_ident()?;
-                    let ty = self.intern(name, targs);
+                    let ty = self.intern(self.qualify(&name), targs);
                     let args = if self.peek() == &Tok::LParen {
                         self.parse_args()?
                     } else {
@@ -1221,7 +1269,7 @@ impl Parser {
                     // `(` the writer did not mean to type.
                     return Err(Diag::new(span, format!("`{name}` is a type, not a value")));
                 }
-                let ty = self.intern(name, targs);
+                let ty = self.intern(self.qualify(&name), targs);
                 let args = self.parse_args()?;
                 Ok(Expr::New(ty, args, span))
             }

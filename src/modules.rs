@@ -25,10 +25,25 @@ pub struct Located {
 
 /// The module name a path denotes: its basename without the extension.
 pub fn module_name(path: &str) -> String {
-    Path::new(path)
+    let raw = Path::new(path)
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // Only an IMPORTED module's name has to be an identifier; the entry file
+    // is named on the command line and may be called anything. But the name
+    // is also the qualifier on every declaration, and that reaches the
+    // emitted C -- `022-embedding#Animal` is not a C identifier. Anything
+    // that is not one becomes `_`, and a collision with a real module name
+    // is caught by the case-fold check like any other.
+    raw.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// Is this usable as a module name?

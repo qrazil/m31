@@ -1,0 +1,12 @@
+import alpha;
+import beta;
+
+// And a third of each, here.
+type Point { str name; }
+
+int helper() { return 3; }
+
+print(alpha.value());       // 1 + 10 = 11
+print(beta.value());        // 2 + 5  = 7
+print(helper());            // 3
+print(Point("here").name);  // here

@@ -85,6 +85,18 @@ pub enum UnOp {
     Not,
 }
 
+/// The part of a declaration's name a reader wrote.
+///
+/// Declarations are interned module-qualified (`lib#Point`) so two modules
+/// may each declare a `Point`. Diagnostics carry a file and a line, so the
+/// bare name is unambiguous in context and is what the reader typed.
+pub fn bare(name: &str) -> &str {
+    match name.split_once('#') {
+        Some((_, n)) => n,
+        None => name,
+    }
+}
+
 /// One interned type expression: a name plus type arguments.
 /// `Point` is `("Point", [])`; `Box<int>` is `("Box", [Int])`; the `T` inside
 /// a generic declaration is `("T", [])` and is resolved by substitution.

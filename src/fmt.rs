@@ -198,7 +198,7 @@ impl Fmt {
     fn type_decl(&mut self, t: &TypeDecl) {
         let vis = if t.is_pub { "pub " } else { "" };
         if let Some(b) = t.distinct_base {
-            self.line(&format!("{vis}distinct {} {};", self.ty(b), t.name));
+            self.line(&format!("{vis}distinct {} {};", self.ty(b), shown(&t.name)));
             return;
         }
         let kw = if t.is_interface {
@@ -213,7 +213,7 @@ impl Fmt {
         } else {
             format!("<{}>", t.tparams.join(", "))
         };
-        self.line(&format!("{vis}{kw} {}{tp} {{", t.name));
+        self.line(&format!("{vis}{kw} {}{tp} {{", shown(&t.name)));
         self.depth += 1;
         for v in &t.variants {
             self.comments_before(v.span.line);
@@ -256,8 +256,8 @@ impl Fmt {
             format!("<{}>", f.tparams.join(", "))
         };
         let name = match &f.recv {
-            Some(r) => format!("{r}.{}", f.name),
-            None => f.name.clone(),
+            Some(r) => format!("{}.{}", shown(r), f.name),
+            None => shown(&f.name).to_string(),
         };
         let vis = if f.is_pub { "pub " } else { "" };
         let kw = if f.is_static { "static " } else { "" };
@@ -536,6 +536,12 @@ pub fn set_type_names(p: &Program) {
     TYPE_NAMES.with(|n| *n.borrow_mut() = rendered);
 }
 
+/// Names are interned module-qualified; source has to come back out the way
+/// it went in.
+fn shown(name: &str) -> &str {
+    crate::ast::bare(name)
+}
+
 fn render_ty(exprs: &[TyExpr], t: &Ty) -> String {
     match t {
         Ty::Int => "int".into(),
@@ -545,10 +551,10 @@ fn render_ty(exprs: &[TyExpr], t: &Ty) -> String {
         Ty::Void => "void".into(),
         Ty::User(i) => match exprs.get(*i as usize) {
             None => format!("T{i}"),
-            Some(e) if e.args.is_empty() => e.name.clone(),
+            Some(e) if e.args.is_empty() => shown(&e.name).to_string(),
             Some(e) => {
                 let args: Vec<String> = e.args.iter().map(|a| render_ty(exprs, a)).collect();
-                format!("{}<{}>", e.name, args.join(", "))
+                format!("{}<{}>", shown(&e.name), args.join(", "))
             }
         },
     }

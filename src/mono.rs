@@ -36,6 +36,9 @@ pub struct Mono {
     /// Declared types of locals, as WRITTEN (unsubstituted), so inference can
     /// unify structurally against them. Cleared per function.
     env: Vec<HashMap<String, Ty>>,
+    /// The module whose function is being substituted, for resolving a bare
+    /// call name to this module's own declaration.
+    cur_module: String,
 }
 
 /// A substitution from type parameter name to concrete type.
@@ -53,6 +56,7 @@ impl Mono {
             out_funcs: Vec::new(),
             queue: Vec::new(),
             env: Vec::new(),
+            cur_module: String::new(),
         };
 
         let mut concrete_types = Vec::new();
@@ -102,6 +106,9 @@ impl Mono {
         // The top level is a function body in all but name.
         m.env.clear();
         m.env.push(HashMap::new());
+        // Top-level statements belong to the entry module, so a bare call in
+        // them resolves against it -- the same rule as inside a function.
+        m.cur_module = p.module.clone();
         let toplevel = m.subst_block(&p.toplevel, &empty)?;
         m.env.clear();
 
@@ -218,7 +225,7 @@ impl Mono {
                     span,
                     format!(
                         "type `{}` takes {} type argument(s), found {}",
-                        e.name,
+                        crate::ast::bare(&e.name),
                         decl.tparams.len(),
                         args.len()
                     ),
@@ -230,7 +237,10 @@ impl Mono {
         }
 
         if !args.is_empty() {
-            return Err(Diag::new(span, format!("type `{}` is not generic", e.name)));
+            return Err(Diag::new(
+                span,
+                format!("type `{}` is not generic", crate::ast::bare(&e.name)),
+            ));
         }
         Ok(self.intern(e.name, Vec::new()))
     }
@@ -309,7 +319,8 @@ impl Mono {
             return Err(Diag::new(
                 span,
                 format!(
-                    "function `{name}` takes {} type argument(s), found {}",
+                    "function `{}` takes {} type argument(s), found {}",
+                    crate::ast::bare(name),
                     decl.tparams.len(),
                     args.len()
                 ),
@@ -369,6 +380,19 @@ impl Mono {
             });
         }
         mangled
+    }
+
+    /// A bare call name, resolved against the module being substituted: a
+    /// generic function is declared `mod#id` but called `id` from inside its
+    /// own module, exactly as in the lowering.
+    fn resolve_fn(&self, name: &str) -> String {
+        if !self.cur_module.is_empty() {
+            let q = format!("{}#{name}", self.cur_module);
+            if self.generic_funcs.contains_key(&q) {
+                return q;
+            }
+        }
+        name.to_string()
     }
 
     /// An interface's method SIGNATURES substitute like anything else.
@@ -451,6 +475,7 @@ impl Mono {
     }
 
     fn subst_func(&mut self, f: &Func, sub: &Subst) -> Result<Func, Diag> {
+        self.cur_module = f.module.clone();
         let ret = self.subst_ty(f.ret, sub, f.span)?;
         let mut params = Vec::new();
         let mut scope = HashMap::new();
@@ -643,6 +668,7 @@ impl Mono {
             },
             Stmt::Spawn { name, args, span } => {
                 let out = self.subst_args(args, sub)?;
+                let name = &self.resolve_fn(name);
                 if let Some(decl) = self.generic_funcs.get(name).cloned() {
                     let targs = self.infer(&decl, &out.pos, sub, *span)?;
                     let mangled = self.mangle(name, &targs);
@@ -703,6 +729,7 @@ impl Mono {
                 // inferred from the argument types, then the instantiation
                 // queued and the name rewritten to the mangled one. Inference
                 // is deliberately shallow -- see `infer`.
+                let name = &self.resolve_fn(name);
                 if let Some(decl) = self.generic_funcs.get(name).cloned() {
                     // Infer from the arguments AS WRITTEN, not from `out`.
                     // There are two type arenas -- `src_exprs` for the input
