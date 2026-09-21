@@ -1,0 +1,1 @@
+pub int f() { return 1; }

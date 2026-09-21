@@ -589,6 +589,7 @@ impl Parser {
         Ok(Program {
             module: module.to_string(),
             imports,
+            imports_by_module: std::collections::HashMap::new(),
             types,
             prelude,
             funcs,

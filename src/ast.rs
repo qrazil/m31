@@ -398,6 +398,12 @@ pub struct Program {
     /// entry file's is unused; every other module's qualifies its exports.
     pub module: String,
     pub imports: Vec<Import>,
+    /// What every module in the merged program imports, by module name.
+    /// `imports` is one file's list and does not survive the merge, but
+    /// shadowing is checked per file: a local may not take the name of a
+    /// module its own file imports, and nothing another file imports is
+    /// that file's business.
+    pub imports_by_module: std::collections::HashMap<String, Vec<String>>,
     pub types: Vec<TypeDecl>,
     /// Declarations the compiler supplies rather than the program: `Option`
     /// and `Result`. Kept apart from `types` because they are not part of

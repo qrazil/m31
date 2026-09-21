@@ -100,7 +100,10 @@ print(greet.shout("world"));
     unless marked `pub`. Reaching a name from another module means writing
     `mod.name`; unqualified, it is not in scope at all. That holds for
     everything a module declares — functions, types, methods and an enum's
-    variants — not only functions.
+    variants — not only functions. A method that could not be called from
+    here does not satisfy an interface here either, and neither does one
+    that `print` or an operator would find by name: an interface or an
+    operator is another way of calling the method, not a way around `pub`.
   - **A type from another module is `mod.Type`**, anywhere a type may be
     written: a declaration, a parameter, a type argument, a static method
     (`shapes.Point.origin()`) or an enum variant (`shapes.Colour.Red`).
@@ -493,7 +496,8 @@ because there is no zero value to give one.
 
 **Shadowing is not allowed.** A declaration whose name is already in scope is
 an error telling you to rename one. A name means one thing for the whole
-region a reader can see it in. Nothing shadows a type name either.
+region a reader can see it in. Nothing shadows a type name either, nor a
+builtin function (§6.6) in any module, nor a module the file imports.
 
 ### 4.2 Functions
 

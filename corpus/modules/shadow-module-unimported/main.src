@@ -1,0 +1,5 @@
+import lib;
+// `util` is a module of this program, but this file does not import it, so
+// the name is free here. What another file imports is not in scope.
+int util = 4;
+print(util + lib.f());

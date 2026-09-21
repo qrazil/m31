@@ -1,0 +1,4 @@
+corpus/modules/privacy-interface-type/main.src:3:14: type mismatch: expected Peek, found lib2.Secret: `Secret` is private to `lib2`, so its method `reveal` cannot satisfy `Peek` here
+  |
+3 | Peek p = lib2.leak();
+  |              ^

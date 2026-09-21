@@ -114,6 +114,9 @@ pub struct Lowerer {
     /// Every module in the program, so `greet.hello(..)` can be told from a
     /// field access on a variable called `greet`.
     modules: std::collections::HashSet<String>,
+    /// What each module imports, so a local can be refused the name of a
+    /// module its own file imports. See `Program::imports_by_module`.
+    imports_by_module: HashMap<String, Vec<String>>,
     /// The module whose function is being lowered, for privacy checks.
     cur_module: String,
     /// Set while a collection literal is being built. The old constructor
@@ -157,6 +160,17 @@ pub struct Lowerer {
     ret_ty: Ty,
 }
 
+/// Every builtin function, whether it lives in `sigs` (`concat`) or is
+/// special-cased in the call path because its type depends on its argument
+/// (`print`, `clone`, the channel operations).
+///
+/// A bare call to one of these always means the builtin, in every module.
+/// Nothing may take the name, because that would be shadowing (§4.1): a
+/// module-level `print` used to replace the builtin silently in its own
+/// module, and to turn every `print` in an importing file into a privacy
+/// error about a function that file never asked for.
+const BUILTIN_FNS: &[&str] = &["print", "concat", "clone", "send", "recv", "close"];
+
 /// The representation of a surface type, WITHOUT resolving distinct types.
 /// Use `Lowerer::irty` instead wherever a distinct type can appear.
 fn ir_ty(t: Ty) -> IrTy {
@@ -182,6 +196,7 @@ impl Lowerer {
             type_pub: Vec::new(),
             variant_surface: Vec::new(),
             modules: std::collections::HashSet::new(),
+            imports_by_module: HashMap::new(),
             cur_module: String::new(),
             building_literal: false,
             statics: std::collections::HashSet::new(),
@@ -1704,6 +1719,7 @@ impl Lowerer {
         // that is not user-visible overloading, which does not exist.
         self.builtin("concat", vec![Ty::Str, Ty::Str], Ty::Str);
 
+        self.imports_by_module = p.imports_by_module.clone();
         for f in &p.funcs {
             if !f.module.is_empty() {
                 self.modules.insert(f.module.clone());
@@ -1722,6 +1738,8 @@ impl Lowerer {
         // Type table first: signatures and field types may refer to any type,
         // including one declared later in the file.
         for t in &p.types {
+            self.check_not_import(&t.module, crate::ast::bare(&t.name), t.span)
+                .map_err(|d| d.in_module(&t.module))?;
             if self.typedefs.iter().any(|d| d.name == t.name) {
                 return Err(Diag::new(
                     t.span,
@@ -1783,11 +1801,31 @@ impl Lowerer {
             // Habit from C, Java and Go. Without this it declares an ordinary
             // function nothing calls, and the program silently does nothing --
             // the worst failure mode for someone who has written C before.
-            if f.recv.is_none() && f.name == "main" {
+            // Names are interned module-qualified by now, so compare the bare
+            // one; comparing `f.name` itself had quietly stopped matching.
+            if f.recv.is_none() && crate::ast::bare(&f.name) == "main" {
                 return Err(Diag::new(
                     f.span,
                     "there is no `main`: statements at the top level are the program",
-                ));
+                )
+                .in_module(&f.module));
+            }
+            // In every module, not only the entry file. Allowing it in an
+            // imported module would give `lib.print(..)` and bare `print(..)`
+            // two meanings a reader has to keep apart, for no gain.
+            if f.recv.is_none() && BUILTIN_FNS.contains(&crate::ast::bare(&f.name)) {
+                return Err(Diag::new(
+                    f.span,
+                    format!(
+                        "`{}` is a builtin function; shadowing is not allowed, rename this one",
+                        crate::ast::bare(&f.name)
+                    ),
+                )
+                .in_module(&f.module));
+            }
+            if f.recv.is_none() {
+                self.check_not_import(&f.module, crate::ast::bare(&f.name), f.span)
+                    .map_err(|d| d.in_module(&f.module))?;
             }
             if self.sigs.contains_key(&f.key()) {
                 return Err(Diag::new(
@@ -2031,6 +2069,7 @@ impl Lowerer {
     ///
     /// The cost is real and deliberate: the programmer renames.
     fn check_shadow(&self, name: &str, span: Span) -> Result<(), Diag> {
+        self.check_not_import(&self.cur_module, name, span)?;
         if self.binding(name).is_some() {
             return Err(Diag::new(
                 span,
@@ -2040,7 +2079,7 @@ impl Lowerer {
         // Against this module's own function, not the bare name: functions
         // are interned module-qualified, so `sigs` no longer holds the name
         // as it was written.
-        if self.sigs.contains_key(&self.resolve_fn(name)) {
+        if self.sigs.contains_key(&self.resolve_fn(name)) || BUILTIN_FNS.contains(&name) {
             return Err(Diag::new(
                 span,
                 format!("`{name}` is already a function; shadowing is not allowed, rename one"),
@@ -2062,6 +2101,29 @@ impl Lowerer {
                     ),
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// Refuse a declaration in `module` that takes the name of a module
+    /// that file imports -- a local, a parameter, a function or a type.
+    ///
+    /// `lib.f()` with a local `lib` in scope used to call a method on the
+    /// local, so the import was silently shadowed for the rest of the
+    /// function and a reader could not tell which `lib` was meant. Only this
+    /// file's imports count: a module some other file imports is not in
+    /// scope here, and adding an import deep in a library must not break a
+    /// name in a file that never mentions it.
+    fn check_not_import(&self, module: &str, name: &str, span: Span) -> Result<(), Diag> {
+        let imported = self
+            .imports_by_module
+            .get(module)
+            .is_some_and(|v| v.iter().any(|m| m == name));
+        if imported {
+            return Err(Diag::new(
+                span,
+                format!("`{name}` is an imported module; shadowing is not allowed, rename one"),
+            ));
         }
         Ok(())
     }
@@ -2218,6 +2280,38 @@ impl Lowerer {
         m.is_empty() || *m == self.cur_module || self.type_pub[tid as usize]
     }
 
+    /// May the module being lowered call this function or method? The
+    /// same rule as for a type: a builtin everywhere, anything else in its
+    /// own module, and outside it only if it is `pub`.
+    fn sig_visible(&self, sig: &Sig) -> bool {
+        sig.module.is_empty() || sig.module == self.cur_module || sig.is_pub
+    }
+
+    /// Refuse a method call the module being lowered may not make: the type
+    /// has to be visible here, and the method callable from here. A method
+    /// found BY NAME -- `to_str` for `print` and `str(..)`, `add`, `eq` and
+    /// `cmp` for an operator -- goes through this too. The spelling hides the
+    /// call, not the rule: `print(v)` is `v.to_str()`, so it gets exactly
+    /// `v.to_str()`'s checks and diagnostics.
+    fn check_method_access(&self, tid: u32, m: &str, span: Span) -> Result<(), Diag> {
+        if !self.type_visible(tid) {
+            return Err(Diag::new(
+                span,
+                self.not_visible(tid, "its methods cannot be called from here"),
+            ));
+        }
+        let key = format!("{}.{m}", self.typedefs[tid as usize].name);
+        if let Some(sig) = self.sigs.get(&key) {
+            if !self.sig_visible(sig) {
+                return Err(Diag::new(
+                    span,
+                    format!("`{m}` is private to `{}`", sig.module),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// The diagnostic for reaching into a type that is not visible here.
     fn not_visible(&self, tid: u32, what: &str) -> String {
         format!(
@@ -2280,17 +2374,30 @@ impl Lowerer {
             );
         }
         match self.missing_method(ft, tt) {
-            Some(m) => format!(
-                "{base}: `{}` needs a method `{m}` to satisfy `{}`",
-                self.tyname(got),
-                self.tyname(want)
-            ),
+            Some(why) => format!("{base}: {why}"),
             None => base,
         }
     }
 
-    /// The first required method `ft` does not satisfy, for diagnostics.
+    /// Why `ft` does not satisfy the interface `tt`, as a sentence naming
+    /// the first required method it fails on; `None` when it does satisfy it.
+    ///
+    /// Satisfaction is judged from the module being lowered, which is where
+    /// the conversion to the interface happens, and only methods callable
+    /// from there count. An interface is just a way of calling methods
+    /// later, so a method the module could not call directly must not
+    /// become callable by passing the value through an interface it
+    /// declared for the purpose. The owning module converting its own value
+    /// and handing out the interface is fine: it can see its own methods,
+    /// and exporting behaviour that way is its decision to make.
     fn missing_method(&self, ft: u32, tt: u32) -> Option<String> {
+        let needs = |what: String| {
+            format!(
+                "`{}` needs a method `{what}` to satisfy `{}`",
+                self.show_name(&self.typedefs[ft as usize].name),
+                self.show_name(&self.typedefs[tt as usize].name)
+            )
+        };
         let fname = &self.typedefs[ft as usize].name.clone();
         for m in &self.iface_methods[tt as usize] {
             let key = format!("{fname}.{}", m.name);
@@ -2299,16 +2406,38 @@ impl Lowerer {
             // receiver pointer into the first declared parameter and dropped
             // the real argument.
             if self.statics.contains(&key) {
-                return Some(format!(
+                return Some(needs(format!(
                     "{} {}(..) that is not static -- a static method has no \
                      receiver to dispatch on",
                     self.tyname(m.ret),
                     m.name
-                ));
+                )));
             }
             let Some(sig) = self.sigs.get(&key) else {
-                return Some(format!("{} {}(..)", self.tyname(m.ret), m.name));
+                return Some(needs(format!("{} {}(..)", self.tyname(m.ret), m.name)));
             };
+            // The same two checks a direct call makes, in the same order,
+            // so the reason given matches what `v.m()` would have said.
+            if !self.type_visible(ft) {
+                return Some(format!(
+                    "`{}` is private to `{}`, so its method `{}` cannot \
+                     satisfy `{}` here",
+                    crate::ast::bare(fname),
+                    self.type_module[ft as usize],
+                    m.name,
+                    self.show_name(&self.typedefs[tt as usize].name)
+                ));
+            }
+            if !self.sig_visible(sig) {
+                return Some(format!(
+                    "`{}` has a method `{}`, but it is private to `{}`, so it \
+                     cannot satisfy `{}` here",
+                    self.show_name(fname),
+                    m.name,
+                    sig.module,
+                    self.show_name(&self.typedefs[tt as usize].name)
+                ));
+            }
             let same = sig.ret == m.ret
                 && sig.params.len() == m.params.len()
                 && sig
@@ -2317,11 +2446,11 @@ impl Lowerer {
                     .zip(m.params.iter())
                     .all(|(a, b)| a.ty == b.ty);
             if !same {
-                return Some(format!(
+                return Some(needs(format!(
                     "{} {}(..) with a matching signature",
                     self.tyname(m.ret),
                     m.name
-                ));
+                )));
             }
         }
         None
@@ -2451,6 +2580,7 @@ impl Lowerer {
         }
 
         for p in &f.params {
+            self.check_not_import(&self.cur_module, &p.name, p.span)?;
             let v = self.new_val(self.irty(p.ty));
             params.push(v);
             if scope.insert(p.name.clone(), (p.ty, v, false)).is_some() {
@@ -2607,14 +2737,7 @@ impl Lowerer {
                 self.check_named_ty(*ty, *span)?;
                 let val = self.lower_expr_as(init, *ty)?;
                 if !self.assignable(val.ty, *ty) {
-                    return Err(Diag::new(
-                        init.span(),
-                        format!(
-                            "type mismatch: expected {}, found {}",
-                            self.tyname(*ty),
-                            self.tyname(val.ty)
-                        ),
-                    ));
+                    return Err(Diag::new(init.span(), self.mismatch(*ty, val.ty)));
                 }
                 self.check_shadow(name, *span)?;
                 // The local must hold a +1. A borrowed source needs one added;
@@ -2703,14 +2826,7 @@ impl Lowerer {
                 }
                 let val = self.lower_expr(value)?;
                 if !self.assignable(val.ty, ty) {
-                    return Err(Diag::new(
-                        value.span(),
-                        format!(
-                            "type mismatch: expected {}, found {}",
-                            self.tyname(ty),
-                            self.tyname(val.ty)
-                        ),
-                    ));
+                    return Err(Diag::new(value.span(), self.mismatch(ty, val.ty)));
                 }
                 if self.is_ref(ty) {
                     if val.owned {
@@ -2761,14 +2877,7 @@ impl Lowerer {
                     (Some(e), want) => {
                         let val = self.lower_expr_as(e, want)?;
                         if !self.assignable(val.ty, want) {
-                            return Err(Diag::new(
-                                e.span(),
-                                format!(
-                                    "type mismatch: expected {}, found {}",
-                                    self.tyname(want),
-                                    self.tyname(val.ty)
-                                ),
-                            ));
+                            return Err(Diag::new(e.span(), self.mismatch(want, val.ty)));
                         }
                         // Returns are owned (+1). Retain a borrowed value
                         // before releasing locals, or returning a local would
@@ -4032,9 +4141,11 @@ impl Lowerer {
         }
 
         let key = format!("{tname}.to_str");
-        let Some(sig) = self.sigs.get(&key) else {
+        if !self.sigs.contains_key(&key) {
             return Ok(None);
-        };
+        }
+        self.check_method_access(tid, "to_str", span)?;
+        let sig = &self.sigs[&key];
         if sig.ret != Ty::Str || !sig.params.is_empty() {
             return Err(Diag::new(
                 span,
@@ -4631,8 +4742,11 @@ impl Lowerer {
                 // access.
                 let key = self.resolve_fn(name);
                 // Not ours: if some other module declares it, say which and
-                // how to reach it rather than "unknown function".
-                if !self.sigs.contains_key(&key) {
+                // how to reach it rather than "unknown function". Never for
+                // a builtin, which is in scope everywhere whatever other
+                // modules declare -- only some builtins are in `sigs`, so
+                // the lookup alone cannot tell.
+                if !self.sigs.contains_key(&key) && !BUILTIN_FNS.contains(&name.as_str()) {
                     let suffix = format!("#{name}");
                     if let Some((k, sig)) = self
                         .sigs
@@ -4758,23 +4872,7 @@ impl Lowerer {
                 {
                     return self.lower_option_method(&o, tid, m, args, *span);
                 }
-                if !self.type_visible(tid) {
-                    return Err(Diag::new(
-                        *span,
-                        self.not_visible(tid, "its methods cannot be called from here"),
-                    ));
-                }
-                {
-                    let key = format!("{}.{m}", self.typedefs[tid as usize].name);
-                    if let Some(sig) = self.sigs.get(&key) {
-                        if !sig.module.is_empty() && sig.module != self.cur_module && !sig.is_pub {
-                            return Err(Diag::new(
-                                *span,
-                                format!("`{m}` is private to `{}`", sig.module),
-                            ));
-                        }
-                    }
-                }
+                self.check_method_access(tid, m, *span)?;
                 // A static method has no receiver, so it cannot be reached
                 // through a value even though the spelling looks the same.
                 let skey = format!("{}.{m}", self.typedefs[tid as usize].name);
@@ -4962,6 +5060,9 @@ impl Lowerer {
         let shown = self.show_name(&tname);
         let key = format!("{tname}.{mname}");
 
+        if self.sigs.contains_key(&key) {
+            self.check_method_access(tid, mname, span)?;
+        }
         let Some(sig) = self.sigs.get(&key) else {
             return Err(Diag::new(
                 span,

@@ -1,0 +1,4 @@
+import lib;
+interface Peek { int hidden(); }
+Peek p = lib.make();
+print(p.hidden());

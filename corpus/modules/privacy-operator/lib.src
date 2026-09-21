@@ -1,0 +1,6 @@
+pub type Open { int v; }
+pub Open make() { return Open(1); }
+
+// Not exported. An operator finds its method by name, the way `print`
+// finds `to_str`, and used to reach this from anywhere.
+int Open.cmp(Open o) { return v - o.v; }

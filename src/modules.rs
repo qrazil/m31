@@ -148,8 +148,13 @@ pub fn load(entry: &str) -> Result<Loaded, Located> {
     // it imports. Declarations are order-independent downstream, but the
     // order makes an emitted C file readable.
     let mut out: Option<Program> = None;
+    let mut imports_by_module = HashMap::new();
     for name in order {
         let p = l.done.remove(&name).expect("visited");
+        imports_by_module.insert(
+            name.clone(),
+            p.imports.iter().map(|i| i.name.clone()).collect::<Vec<_>>(),
+        );
         match &mut out {
             None => {
                 let mut p = p;
@@ -173,6 +178,7 @@ pub fn load(entry: &str) -> Result<Loaded, Located> {
     }
     let mut out = out.expect("the entry module was visited");
     out.module = entry_module;
+    out.imports_by_module = imports_by_module;
     out.ty_exprs = l.arena;
     Ok(Loaded {
         program: out,

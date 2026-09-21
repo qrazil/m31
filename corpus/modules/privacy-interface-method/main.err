@@ -1,0 +1,4 @@
+corpus/modules/privacy-interface-method/main.src:3:13: type mismatch: expected Peek, found lib.Open: `lib.Open` has a method `hidden`, but it is private to `lib`, so it cannot satisfy `Peek` here
+  |
+3 | Peek p = lib.make();
+  |             ^

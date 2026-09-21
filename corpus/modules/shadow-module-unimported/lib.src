@@ -1,0 +1,2 @@
+import util;
+pub int f() { return util.two() + 1; }

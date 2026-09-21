@@ -1,0 +1,4 @@
+import lib2;
+interface Peek { int reveal(); }
+Peek p = lib2.leak();
+print(p.reveal());

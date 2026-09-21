@@ -1,0 +1,3 @@
+import lib;
+lib.Peek p = lib.make();
+print(p.hidden());

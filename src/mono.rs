@@ -119,6 +119,7 @@ impl Mono {
         Ok(Program {
             module: p.module.clone(),
             imports: Vec::new(),
+            imports_by_module: p.imports_by_module.clone(),
             types: m.out_types,
             // Monomorphisation emits concrete instantiations into `types`;
             // past this point there is no generic Option left to keep apart.
