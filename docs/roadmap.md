@@ -333,6 +333,24 @@ taken. It is a surface decision, so it is made now rather than discovered
 later: a channel is how a spawned thread reports back, and adding a joining
 scope on top later is additive in a way that removing one would not be.
 
+**`List<int> xs = List<int>();` stays.** The repetition is real and was
+looked at: a bare `List<int> xs;` auto-initialising, a context-typed `= []`,
+and Java's diamond `List()` were all considered.
+
+Bare declaration was the one to reject outright. It reintroduces a zero
+value, which is what makes null impossible here, and it only has an answer
+for two types: `Array` needs a length and a fill, a struct has no empty, and
+an enum has no default variant. `Array` and `List` sitting next to each other
+with different rules is the worst version of that.
+
+The redundancy is also narrower than it looks. `T x = T()` is the
+empty-collection shape specifically; most declarations initialise from a
+call, where the type is doing real work. Four characters on one shape did not
+justify new surface that has to be frozen.
+
+`= []` remains the option worth revisiting, and only alongside real
+collection literals -- `[1, 2, 3]` is the part that would earn it.
+
 **`str.size()` counts BYTES, not characters.** `"héllo".size()` is 6, and
 `substr` takes byte offsets. Go makes the same choice. A `str` carries bytes
 and the language has no other opinion about encoding; counting characters
