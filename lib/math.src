@@ -5,6 +5,7 @@
 // `min` and `max` are three lines of this language and are written in it,
 // while `sqrt` is a hardware instruction and `pow` is a page of careful
 // numerics, so those cross the seam.
+
 prim float __sqrt(float x);
 prim float __pow(float x, float y);
 prim float __floor(float x);

@@ -1367,3 +1367,101 @@ double rt_pow(double x, double y) { return pow(x, y); }
 double rt_floor(double x) { return floor(x); }
 double rt_ceil(double x)  { return ceil(x); }
 double rt_round(double x) { return round(x); }
+
+/* ---- io primitives ---------------------------------------------------- */
+/* Every path is a str, which is NUL-terminated by construction (str_new), so
+ * it can go to fopen directly. A path with an embedded NUL would be silently
+ * truncated by the C library, which would open a different file than the one
+ * named -- that is refused as EINVAL instead. */
+
+static bool path_ok(Obj *path) {
+    Str *p = (Str *)path;
+    return p->len > 0 && memchr(p->data, '\0', (size_t)p->len) == NULL;
+}
+
+int64_t rt_file_read(Obj *path, Obj *out) {
+    if (!path_ok(path)) return EINVAL;
+    FILE *f = fopen(((Str *)path)->data, "rb");
+    if (f == NULL) return errno;
+    /* Read in chunks rather than trusting a size from fseek: that answer is
+     * wrong for pipes, /proc files and anything still being written. */
+    size_t cap = 4096, len = 0;
+    char *buf = malloc(cap);
+    if (buf == NULL) rt_trap("out of memory");
+    for (;;) {
+        if (len == cap) {
+            cap *= 2;
+            char *nb = realloc(buf, cap);
+            if (nb == NULL) rt_trap("out of memory");
+            buf = nb;
+        }
+        size_t n = fread(buf + len, 1, cap - len, f);
+        len += n;
+        if (n == 0) break;
+    }
+    /* fopen succeeding on a directory and fread then failing is the Linux
+     * behaviour; ferror is how that EISDIR surfaces. */
+    int err = ferror(f) ? (errno ? errno : EIO) : 0;
+    fclose(f);
+    if (err) {
+        free(buf);
+        return err;
+    }
+    rt_list_push(out, (int64_t)(intptr_t)str_new(buf, (int64_t)len));
+    free(buf);
+    return 0;
+}
+
+static int64_t write_mode(Obj *path, Obj *data, const char *mode) {
+    if (!path_ok(path)) return EINVAL;
+    FILE *f = fopen(((Str *)path)->data, mode);
+    if (f == NULL) return errno;
+    Str *d = (Str *)data;
+    size_t n = d->len > 0 ? fwrite(d->data, 1, (size_t)d->len, f) : 0;
+    int err = (n != (size_t)d->len) ? (errno ? errno : EIO) : 0;
+    /* fclose flushes, and a full disk is often only reported here. */
+    if (fclose(f) != 0 && err == 0) err = errno ? errno : EIO;
+    return err;
+}
+
+int64_t rt_file_write(Obj *path, Obj *data)  { return write_mode(path, data, "wb"); }
+int64_t rt_file_append(Obj *path, Obj *data) { return write_mode(path, data, "ab"); }
+
+/* One line without its terminator. A final line with no newline is still a
+ * line; `\r\n` loses the `\r` too, so a file written on Windows reads the
+ * same. A read error is reported as the end of input: stdin failing
+ * mid-stream is rare enough that a primitive returning Option is the right
+ * trade, the same one `parse_int` makes. */
+int64_t rt_stdin_line(Obj *out) {
+    /* getc rather than POSIX getline: the runtime has to build for targets
+     * without it, and cross-compilation is a goal from day one. */
+    size_t cap = 128, n = 0;
+    char *line = malloc(cap);
+    if (line == NULL) rt_trap("out of memory");
+    int c;
+    while ((c = getc(stdin)) != EOF && c != '\n') {
+        if (n == cap) {
+            cap *= 2;
+            char *nl = realloc(line, cap);
+            if (nl == NULL) rt_trap("out of memory");
+            line = nl;
+        }
+        line[n++] = (char)c;
+    }
+    if (c == EOF && n == 0) {
+        free(line);
+        return 0;
+    }
+    if (n > 0 && line[n - 1] == '\r') n--;
+    rt_list_push(out, (int64_t)(intptr_t)str_new(line, (int64_t)n));
+    free(line);
+    return 1;
+}
+
+void rt_stderr_write(Obj *s) {
+    Str *p = (Str *)s;
+    /* stdout is flushed first so interleaved output lands in the order the
+     * program wrote it when both go to one terminal. */
+    fflush(stdout);
+    if (p->len > 0) fwrite(p->data, 1, (size_t)p->len, stderr);
+}

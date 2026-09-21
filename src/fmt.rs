@@ -31,6 +31,12 @@ pub struct Fmt {
     /// because the printer reorders items -- a comment written above a free
     /// function must travel with it, not stay where the line numbers put it.
     owned: std::collections::BTreeMap<u32, Vec<Comment>>,
+    /// The file's header: the comment lines at the very top, when a blank
+    /// line separates them from what follows. They describe the file rather
+    /// than the first declaration, so they stay first when the printer
+    /// reorders -- without this, a header rode along with whichever item
+    /// happened to be declared first and ended up in the middle of the file.
+    header: Vec<Comment>,
 }
 
 const INDENT: &str = "    ";
@@ -42,6 +48,7 @@ pub fn format(p: &Program, comments: Vec<Comment>) -> String {
         comments,
         next: 0,
         owned: std::collections::BTreeMap::new(),
+        header: Vec::new(),
     };
     f.claim_item_comments(p);
     f.program(p);
@@ -73,6 +80,40 @@ impl Fmt {
     /// items: a comment above a free function must travel with that function
     /// rather than stay where its line number happens to fall.
     fn claim_item_comments(&mut self, p: &Program) {
+        // The header is a run of own-line comments on consecutive lines,
+        // starting before anything else in the file, and followed by a gap.
+        // A comment block touching the declaration below it documents that
+        // declaration instead, and stays with it.
+        let first_item = p
+            .imports
+            .iter()
+            .map(|i| i.span.line)
+            .chain(p.types.iter().map(|t| t.span.line))
+            .chain(p.funcs.iter().map(|f| f.span.line))
+            .chain(p.toplevel.iter().map(stmt_line))
+            .min()
+            .unwrap_or(u32::MAX);
+        let mut end = 0usize;
+        while end < self.comments.len()
+            && self.comments[end].own_line
+            && self.comments[end].line < first_item
+            && (end == 0 || self.comments[end].line == self.comments[end - 1].line + 1)
+        {
+            end += 1;
+        }
+        let gap_after = end > 0 && {
+            let last = self.comments[end - 1].line;
+            let next = self
+                .comments
+                .get(end)
+                .map_or(first_item, |c| c.line.min(first_item));
+            next > last + 1
+        };
+        if gap_after {
+            self.header = self.comments[..end].to_vec();
+            self.next = end;
+        }
+
         let mut lines: Vec<u32> = Vec::new();
         for t in &p.types {
             lines.push(t.span.line);
@@ -82,7 +123,7 @@ impl Fmt {
         }
         lines.sort_unstable();
 
-        let mut i = 0usize;
+        let mut i = self.next;
         for &l in &lines {
             let mut mine = Vec::new();
             while i < self.comments.len() && self.comments[i].line < l {
@@ -142,6 +183,12 @@ impl Fmt {
     // ---- items --------------------------------------------------------
 
     fn program(&mut self, p: &Program) {
+        if !self.header.is_empty() {
+            for c in std::mem::take(&mut self.header) {
+                self.line(c.text.trim());
+            }
+            self.blank();
+        }
         // Imports first and in source order, which is where the parser
         // demands them: a reader learns a file's dependencies without
         // reading the file.
@@ -152,6 +199,21 @@ impl Fmt {
             }
             self.blank();
         }
+        // `prim` declarations come right after the imports and stay
+        // together. A run of them is a list -- the module's whole seam to C,
+        // readable in one glance -- and spacing them apart like definitions
+        // would hide that they are one thing. The same reason `import` lines
+        // are not separated.
+        let mut any_prim = false;
+        for f in p.funcs.iter().filter(|f| f.recv.is_none() && f.is_prim) {
+            self.item_comments(f.span.line);
+            self.func(f);
+            any_prim = true;
+        }
+        if any_prim {
+            self.blank();
+        }
+
         // Types first, each followed by its own methods. Declarations are
         // order-independent, so this cannot change what the program means.
         for t in &p.types {
@@ -166,20 +228,6 @@ impl Fmt {
                 self.item_comments(f.span.line);
                 self.func(f);
             }
-            self.blank();
-        }
-
-        // `prim` declarations come first and stay together. A run of them is
-        // a list -- the module's whole seam to C, readable in one glance --
-        // and spacing them apart like definitions would hide that they are
-        // one thing. The same reason `import` lines are not separated.
-        let mut any_prim = false;
-        for f in p.funcs.iter().filter(|f| f.recv.is_none() && f.is_prim) {
-            self.item_comments(f.span.line);
-            self.func(f);
-            any_prim = true;
-        }
-        if any_prim {
             self.blank();
         }
 

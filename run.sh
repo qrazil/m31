@@ -77,7 +77,12 @@ run_one() {
       return
     fi
 
-    got=$("$bin" 2>&1)
+    # Standard input is the test's `.in` file if it has one, and empty
+    # otherwise -- never the terminal, where a program reading a line would
+    # hang the whole run.
+    stdin="${src%.$LANG_EXT}.in"
+    [ -e "$stdin" ] || stdin=/dev/null
+    got=$("$bin" 2>&1 <"$stdin")
     rc=$?
 
     # Layer 4: refcount invariant. The runtime prints this under -DRC_DEBUG.
@@ -160,7 +165,7 @@ for src in corpus/traps/*."$LANG_EXT"; do
       head -4 "$WORK/$base.tcc" | sed 's/^/      /'
       trap_ok=0; break
     fi
-    got=$("$bin" 2>&1 >/dev/null); rc=$?
+    got=$("$bin" 2>&1 >/dev/null </dev/null); rc=$?
     if [ $rc -ne 134 ]; then
       fail_test "$label [$cc $opt]" "expected abort (134), got exit $rc"
       trap_ok=0; break

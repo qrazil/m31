@@ -122,9 +122,11 @@ run "formatter preserves meaning" bash -c '
             if [ -e "$exp" ]; then
                 if gcc -O0 -I runtime "$w/b.c" runtime/rt.c -lpthread -lm \
                        -o "$w/b" 2>/dev/null; then
-                    if ! diff -q <("$w/b" 2>&1) "$exp" >/dev/null 2>&1; then
+                    in="${f%.'"$LANG_EXT"'}.in"
+                    [ -e "$in" ] || in=/dev/null
+                    if ! diff -q <("$w/b" 2>&1 <"$in") "$exp" >/dev/null 2>&1; then
                         echo "formatted program prints something else: $f"
-                        diff <("$w/b" 2>&1) "$exp" | head -6
+                        diff <("$w/b" 2>&1 <"$in") "$exp" | head -6
                         bad=1
                     fi
                 else

@@ -111,6 +111,18 @@ double rt_pow(double x, double y);
 double rt_floor(double x);
 double rt_ceil(double x);
 double rt_round(double x);
+
+/* The seam for `lib/io.src`. A primitive returns only what the runtime can
+ * build without the compiler's help: a scalar, a str, or an element pushed
+ * onto a collection the caller passed in. It never builds an `Option` or a
+ * `Result` -- their layout and TypeInfo belong to the compiler -- so a
+ * failure comes back as a raw errno and the library turns it into its own
+ * error type, in source where the mapping can be read. */
+int64_t rt_file_read(Obj *path, Obj *out);          /* 0, or errno */
+int64_t rt_file_write(Obj *path, Obj *data);        /* 0, or errno */
+int64_t rt_file_append(Obj *path, Obj *data);       /* 0, or errno */
+int64_t rt_stdin_line(Obj *out);                    /* 1 pushed a line, 0 at end */
+void    rt_stderr_write(Obj *s);
 void rt_format_float(char *buf, size_t cap, double x);
 
 /* Text primitives a library cannot write from inside the language. */

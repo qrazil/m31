@@ -1,0 +1,110 @@
+// Files, standard input and standard error.
+//
+// Every function that can fail returns a Result whose error is `Error`,
+// below. The runtime hands back a raw errno and nothing else; what an errno
+// MEANS is decided here, in source, where it can be read and tested. See
+// docs/stdlib-seam.md.
+
+prim int __file_read(str path, List<str> out);
+prim int __file_write(str path, str data);
+prim int __file_append(str path, str data);
+prim int __stdin_line(List<str> out);
+prim void __stderr_write(str s);
+
+/// Why an operation on a file failed.
+///
+/// `Other` is what keeps this enum from ever needing a new variant. `match`
+/// is exhaustive and has no default, so adding a variant would break every
+/// program that handles the error; instead, a failure nobody named arrives
+/// as `Other(errno)`. The named ones are the failures a caller plausibly
+/// branches on -- the same three Go gives sentinels to.
+pub enum Error {
+    NotFound;
+    PermissionDenied;
+    IsDirectory;
+    Other(int);
+}
+
+/// A sentence saying what went wrong, for printing.
+///
+/// This wants to be `Error.to_str()`, so that `print(e)` would find it. It
+/// cannot be yet: a method cannot name its receiver, so a method on an enum
+/// has no way to `match` on itself. See docs/roadmap.md.
+pub str message(Error e) {
+    match (e) {
+        case NotFound: {
+            return "no such file";
+        }
+        case PermissionDenied: {
+            return "permission denied";
+        }
+        case IsDirectory: {
+            return "is a directory";
+        }
+        case Other(int code): {
+            return "system error " + code.to_str();
+        }
+    }
+}
+
+/// The errno values worth naming. These three numbers are the same on
+/// Linux, the BSDs, macOS and the Windows C runtime, which is why they can be
+/// written here as numbers rather than asked of the platform.
+Error from_errno(int e) {
+    if (e == 2) {
+        return Error.NotFound;
+    }
+    if (e == 13) {
+        return Error.PermissionDenied;
+    }
+    if (e == 21) {
+        return Error.IsDirectory;
+    }
+    return Error.Other(e);
+}
+
+/// The whole file, as bytes in a str.
+pub Result<str, Error> read(str path) {
+    List<str> got = [];
+    int e = __file_read(path, got);
+    if (e != 0) {
+        return Result<str, Error>.Err(from_errno(e));
+    }
+    return Result<str, Error>.Ok(got[0]);
+}
+
+/// Replace the file's contents with `data`, creating it if it is missing.
+/// Returns the number of bytes written.
+pub Result<int, Error> write(str path, str data) {
+    int e = __file_write(path, data);
+    if (e != 0) {
+        return Result<int, Error>.Err(from_errno(e));
+    }
+    return Result<int, Error>.Ok(data.size());
+}
+
+/// Add `data` to the end of the file, creating it if it is missing.
+pub Result<int, Error> append(str path, str data) {
+    int e = __file_append(path, data);
+    if (e != 0) {
+        return Result<int, Error>.Err(from_errno(e));
+    }
+    return Result<int, Error>.Ok(data.size());
+}
+
+/// The next line of standard input without its line ending, or None at the
+/// end of input. A `\r\n` ending is removed whole, so input from Windows
+/// reads the same.
+pub Option<str> read_line() {
+    List<str> got = [];
+    if (__stdin_line(got) == 0) {
+        return Option<str>.None;
+    }
+    return Option<str>.Some(got[0]);
+}
+
+/// Write to standard error. Standard output is flushed first, so the two
+/// interleave in the order the program wrote them.
+pub void eprint(str s) {
+    __stderr_write(s + "\n");
+}
