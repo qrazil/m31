@@ -1,4 +1,4 @@
-corpus/errors/043-array-no-fill.src:1:16: an array takes two arguments: its length and the value every element starts at
+corpus/errors/043-array-no-fill.src:3:16: write a Array$int as a literal: `[a, b]`, `[x; n]`, or `[]`
   |
-1 | Array<int> a = Array<int>(4);
+3 | Array<int> a = Array<int>(4, 0);
   |                ^

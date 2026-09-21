@@ -3,7 +3,7 @@
 // bottom would be skipped. The length is read once, so pushing while
 // iterating does not extend the iteration.
 
-List<int> xs = List<int>();
+List<int> xs = [];
 xs.push(1);
 xs.push(2);
 xs.push(3);
@@ -33,7 +33,7 @@ for (int x in xs) {
 }
 print(first);
 
-Array<str> names = Array<str>(2, "");
+Array<str> names = [""; 2];
 names[0] = "ana";
 names[1] = "bob";
 str joined = "";

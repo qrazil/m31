@@ -113,6 +113,10 @@ pub struct Lowerer {
     modules: std::collections::HashSet<String>,
     /// The module whose function is being lowered, for privacy checks.
     cur_module: String,
+    /// Set while a collection literal is being built. The old constructor
+    /// spelling is refused, and the literal lowering reaches the same
+    /// allocation path through it.
+    building_literal: bool,
     /// Keys of methods declared `static`. They are called on the type and
     /// take no receiver, so a call site has to know which kind it has.
     statics: std::collections::HashSet<String>,
@@ -176,6 +180,7 @@ impl Lowerer {
             variant_surface: Vec::new(),
             modules: std::collections::HashSet::new(),
             cur_module: String::new(),
+            building_literal: false,
             statics: std::collections::HashSet::new(),
             ty_exprs: Vec::new(),
             iface_methods: Vec::new(),
@@ -2584,7 +2589,7 @@ impl Lowerer {
                 span,
             } => {
                 self.check_named_ty(*ty, *span)?;
-                let val = self.lower_expr(init)?;
+                let val = self.lower_expr_as(init, *ty)?;
                 if !self.assignable(val.ty, *ty) {
                     return Err(Diag::new(
                         init.span(),
@@ -2738,7 +2743,7 @@ impl Lowerer {
                         ));
                     }
                     (Some(e), want) => {
-                        let val = self.lower_expr(e)?;
+                        let val = self.lower_expr_as(e, want)?;
                         if !self.assignable(val.ty, want) {
                             return Err(Diag::new(
                                 e.span(),
@@ -4073,6 +4078,275 @@ impl Lowerer {
         self.lower_call(&key, args, span)
     }
 
+    /// Lower an expression where the wanted type is known.
+    ///
+    /// Collection literals have no type of their own -- `[]` says nothing --
+    /// so they are legal only where something says what they should be: a
+    /// declaration, an argument, a return. Everywhere else the literal forms
+    /// are refused with a message saying so, rather than guessing.
+    fn lower_expr_as(&mut self, e: &Expr, want: Ty) -> Result<Val, Diag> {
+        match e {
+            Expr::SeqLit(..) | Expr::RepeatLit(..) | Expr::MapLit(..) => {
+                self.lower_literal(e, Some(want))
+            }
+            _ => self.lower_expr(e),
+        }
+    }
+
+    /// `[]`, `[a, b, c]`, `[x; n]`, `{}`, `{k: v}`.
+    fn lower_literal(&mut self, e: &Expr, want: Option<Ty>) -> Result<Val, Diag> {
+        let span = e.span();
+        let Some(want) = want else {
+            return Err(Diag::new(
+                span,
+                "there is nothing here to say what this should be; a collection \
+                 literal takes its type from where it is written",
+            ));
+        };
+
+        // A Map wants `{..}`; an Array or List wants `[..]`.
+        if let Some((k, v)) = self.map_kv(want) {
+            let Expr::MapLit(items, _) = e else {
+                return Err(Diag::new(
+                    span,
+                    format!(
+                        "{} is a map; write its entries as {{k: v}}",
+                        self.tyname(want)
+                    ),
+                ));
+            };
+            self.building_literal = true;
+            let m = self.lower_new(want, &Args::default(), span);
+            self.building_literal = false;
+            let m = m?;
+            for (ke, ve) in items {
+                let kv = self.lower_expr_as(ke, k)?;
+                if !self.assignable(kv.ty, k) {
+                    return Err(Diag::new(ke.span(), self.mismatch(k, kv.ty)));
+                }
+                let vv = self.lower_expr_as(ve, v)?;
+                if !self.assignable(vv.ty, v) {
+                    return Err(Diag::new(ve.span(), self.mismatch(v, vv.ty)));
+                }
+                self.push(Inst::Call {
+                    dst: None,
+                    func: "rt_map_set".to_string(),
+                    args: vec![m.val(), kv.val(), vv.val()],
+                });
+            }
+            return Ok(m);
+        }
+
+        let Some(elem) = self.seq_elem(want) else {
+            return Err(Diag::new(
+                span,
+                format!("{} is not a collection", self.tyname(want)),
+            ));
+        };
+        if matches!(e, Expr::MapLit(..)) {
+            return Err(Diag::new(
+                span,
+                format!("{} holds elements; write them as [a, b]", self.tyname(want)),
+            ));
+        }
+        let is_list = self.is_list(want);
+
+        // `[x; n]` -- n copies. An Array is built at that length directly;
+        // a List is filled by pushing, since it has no length to give.
+        if let Expr::RepeatLit(ve, ne, _) = e {
+            let v = self.lower_expr_as(ve, elem)?;
+            if !self.assignable(v.ty, elem) {
+                return Err(Diag::new(ve.span(), self.mismatch(elem, v.ty)));
+            }
+            let n = self.lower_expr(ne)?;
+            if self.underlying(n.ty) != Ty::Int {
+                return Err(Diag::new(ne.span(), self.mismatch(Ty::Int, n.ty)));
+            }
+            if !is_list {
+                return self.build_array(want, elem, v, n.val(), span);
+            }
+            self.building_literal = true;
+            let l = self.lower_new(want, &Args::default(), span);
+            self.building_literal = false;
+            let l = l?;
+            self.push_repeat(&l, elem, &v, n.val());
+            return Ok(l);
+        }
+
+        let Expr::SeqLit(items, _) = e else {
+            unreachable!("only the three literal forms reach here")
+        };
+        let mut vals = Vec::new();
+        for it in items {
+            let v = self.lower_expr_as(it, elem)?;
+            if !self.assignable(v.ty, elem) {
+                return Err(Diag::new(it.span(), self.mismatch(elem, v.ty)));
+            }
+            vals.push(v);
+        }
+        self.build_seq(want, elem, vals, is_list, span)
+    }
+
+    /// An `Array<T>` of `n` copies of `fill`, straight from the runtime.
+    fn build_array(
+        &mut self,
+        ty: Ty,
+        elem: Ty,
+        fill: Val,
+        n: Value,
+        span: Span,
+    ) -> Result<Val, Diag> {
+        let _ = span;
+        let flag = self.new_val(IrTy::I1);
+        let refs = self.is_ref(elem);
+        self.push(Inst::BConst {
+            dst: flag,
+            val: refs,
+        });
+        let d = self.new_val(IrTy::Ref);
+        self.push(Inst::Call {
+            dst: Some(d),
+            func: "rt_array_new".to_string(),
+            args: vec![n, fill.val(), flag],
+        });
+        self.stmt_temps.push(d);
+        Ok(Val::new(d, ty, true))
+    }
+
+    /// Push `n` copies of `v` onto an already-built list.
+    fn push_repeat(&mut self, l: &Val, elem: Ty, v: &Val, n: Value) {
+        let i = self.new_val(IrTy::I64);
+        self.push(Inst::IConst { dst: i, val: 0 });
+        let header = self.new_block();
+        let body = self.new_block();
+        let exit = self.new_block();
+        self.terminate(Term::Jump {
+            to: header,
+            args: vec![i],
+        });
+
+        let hp = self.new_val(IrTy::I64);
+        let hi = self.blocks.iter().position(|b| b.id == header).unwrap();
+        self.blocks[hi].params = vec![hp];
+        self.switch_to(header);
+        let c = self.new_val(IrTy::I1);
+        self.push(Inst::ICmp {
+            dst: c,
+            cmp: Cmp::Lt,
+            lhs: hp,
+            rhs: n,
+        });
+        self.terminate(Term::Brif {
+            cond: c,
+            then: body,
+            then_args: Vec::new(),
+            els: exit,
+            els_args: Vec::new(),
+        });
+
+        self.switch_to(body);
+        // The list takes a reference per copy, exactly as `push` does.
+        if self.is_ref(elem) {
+            self.push(Inst::RcInc { val: v.val() });
+        }
+        self.push(Inst::Call {
+            dst: None,
+            func: "rt_list_push".to_string(),
+            args: vec![l.val(), v.val()],
+        });
+        let one = self.new_val(IrTy::I64);
+        self.push(Inst::IConst { dst: one, val: 1 });
+        let next = self.new_val(IrTy::I64);
+        self.push(Inst::Arith {
+            dst: next,
+            op: ArithOp::Add,
+            lhs: hp,
+            rhs: one,
+        });
+        self.terminate(Term::Jump {
+            to: header,
+            args: vec![next],
+        });
+        self.switch_to(exit);
+    }
+
+    /// `[a, b, c]` for a List or an Array. An Array is sized by its elements.
+    fn build_seq(
+        &mut self,
+        ty: Ty,
+        elem: Ty,
+        vals: Vec<Val>,
+        is_list: bool,
+        span: Span,
+    ) -> Result<Val, Diag> {
+        let refs = self.is_ref(elem);
+        let d = self.new_val(IrTy::Ref);
+        if is_list {
+            let flag = self.new_val(IrTy::I1);
+            self.push(Inst::BConst {
+                dst: flag,
+                val: refs,
+            });
+            self.push(Inst::Call {
+                dst: Some(d),
+                func: "rt_list_new".to_string(),
+                args: vec![flag],
+            });
+        } else {
+            // An array is allocated at its length with no fill to retain,
+            // then each slot is written.
+            let n = self.new_val(IrTy::I64);
+            self.push(Inst::IConst {
+                dst: n,
+                val: vals.len() as i64,
+            });
+            let flag = self.new_val(IrTy::I1);
+            self.push(Inst::BConst {
+                dst: flag,
+                val: refs,
+            });
+            self.push(Inst::Call {
+                dst: Some(d),
+                func: "rt_array_blank".to_string(),
+                args: vec![n, flag],
+            });
+        }
+        self.stmt_temps.push(d);
+        let out = Val::new(d, ty, true);
+
+        for (i, v) in vals.iter().enumerate() {
+            // The collection takes a reference, exactly as push or an index
+            // assignment would.
+            if refs {
+                if v.owned {
+                    self.stmt_temps.retain(|t| *t != v.val());
+                } else {
+                    self.push(Inst::RcInc { val: v.val() });
+                }
+            }
+            if is_list {
+                self.push(Inst::Call {
+                    dst: None,
+                    func: "rt_list_push".to_string(),
+                    args: vec![d, v.val()],
+                });
+            } else {
+                let idx = self.new_val(IrTy::I64);
+                self.push(Inst::IConst {
+                    dst: idx,
+                    val: i as i64,
+                });
+                self.push(Inst::Call {
+                    dst: None,
+                    func: "rt_array_put".to_string(),
+                    args: vec![d, idx, v.val()],
+                });
+            }
+        }
+        let _ = span;
+        Ok(out)
+    }
+
     fn lower_if(
         &mut self,
         cond: &Expr,
@@ -4632,6 +4906,9 @@ impl Lowerer {
                 self.lower_enum_new(*ty, variant, args, *span)
             }
             Expr::Try(inner, span) => self.lower_try(inner, *span),
+            Expr::SeqLit(..) | Expr::RepeatLit(..) | Expr::MapLit(..) => {
+                self.lower_literal(e, None)
+            }
         }
     }
 
@@ -5047,6 +5324,21 @@ impl Lowerer {
             return Ok(Val::new(v.val(), ty, v.owned));
         }
         let tname = self.typedefs[tid as usize].name.clone();
+        if tname.starts_with("Map$") && !self.building_literal {
+            // The key type is still checked, because `{}` reaches this path
+            // with the flag set and a bad key type must be caught either way.
+            let (k, _) = self.map_kv(ty).expect("a map has a key and a value");
+            let ku = self.underlying(k);
+            if ku == Ty::Int || ku == Ty::Str {
+                return Err(Diag::new(
+                    span,
+                    format!(
+                        "write a {} as a literal: `{{k: v}}` or `{{}}`",
+                        self.tyname(ty)
+                    ),
+                ));
+            }
+        }
         if tname.starts_with("Map$") {
             let (k, v) = self.map_kv(ty).expect("a map has a key and a value");
             let ku = self.underlying(k);
@@ -5077,6 +5369,19 @@ impl Lowerer {
             });
             self.stmt_temps.push(d);
             return Ok(Val::new(d, ty, true));
+        }
+        // `List<int>()` and friends are gone: a collection is written as a
+        // literal, and having both spellings would be two ways to say one
+        // thing. `lower_literal` builds them now; this path is only reached
+        // when someone writes the old form.
+        if (tname.starts_with("Array$") || tname.starts_with("List$")) && !self.building_literal {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "write a {} as a literal: `[a, b]`, `[x; n]`, or `[]`",
+                    self.tyname(ty)
+                ),
+            ));
         }
         if tname.starts_with("Array$") || tname.starts_with("List$") {
             let elem = self.seq_elem(ty).expect("collection has an element type");
@@ -5430,7 +5735,7 @@ impl Lowerer {
 
         let mut vals = Vec::new();
         for (a, p) in slots.iter().zip(params.iter()) {
-            let v = self.lower_expr(a)?;
+            let v = self.lower_expr_as(a, p.ty)?;
             if !self.assignable(v.ty, p.ty) {
                 return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
             }

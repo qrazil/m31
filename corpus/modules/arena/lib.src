@@ -25,7 +25,7 @@ pub distinct int Price;
 pub Price price() { return Price(5); }
 
 pub int mapped() {
-    Map<str, int> m = Map<str, int>();
+    Map<str, int> m = {};
     m.set("a", 7);
     return m.get("a").or(0);
 }

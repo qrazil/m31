@@ -44,17 +44,17 @@ type P { float x; float y; }
 P p = P(1.5, 2.5);
 print(p.x + p.y);               // 4
 
-Array<float> a = Array<float>(3, 0.5);
+Array<float> a = [0.5; 3];
 a[0] = 1.25;
 print(a[0]);                    // 1.25
 print(a[2]);                    // 0.5
 
-List<float> l = List<float>();
+List<float> l = [];
 l.push(3.5);
 l.push(1.5);
 print(l[0] + l[1]);             // 5
 
-Map<str, float> m = Map<str, float>();
+Map<str, float> m = {};
 m.set("k", 2.25);
 print(m.get("k").or(0.0));      // 2.25
 
@@ -67,7 +67,7 @@ match (Maybe.Val(9.75)) {
 // Sorting floats needs a TOTAL order: `<` is not one, because every
 // comparison with a NaN is false and the result would depend on the order
 // the elements happened to be in. NaNs sort to the end.
-List<float> xs = List<float>();
+List<float> xs = [];
 xs.push(2.5);
 xs.push(0.0 / 0.0);
 xs.push(-1.5);

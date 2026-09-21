@@ -24,7 +24,7 @@ print(n.tag);
 print(m.tag);
 print(m.at.x);
 
-List<int> xs = List<int>();
+List<int> xs = [];
 xs.push(1);
 List<int> ys = clone(xs);
 ys.push(2);

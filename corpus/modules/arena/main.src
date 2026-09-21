@@ -30,7 +30,7 @@ print(h.v);                     // 9
 print(int(lib.price()));        // 5
 
 // A Map in the library and a List here.
-List<int> xs = List<int>();
+List<int> xs = [];
 xs.push(10);
 print(xs[0]);                   // 10
 print(lib.mapped());            // 7

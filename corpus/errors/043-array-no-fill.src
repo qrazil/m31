@@ -1,2 +1,4 @@
-Array<int> a = Array<int>(4);
-print(a[0]);
+// A collection is written as a literal now. Having the constructor as well
+// would be two ways to say one thing.
+Array<int> a = Array<int>(4, 0);
+print(a.size());

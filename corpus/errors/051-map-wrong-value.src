@@ -1,2 +1,2 @@
-Map<str, int> m = Map<str, int>();
+Map<str, int> m = {};
 m.set("a", "b");

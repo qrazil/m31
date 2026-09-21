@@ -3,7 +3,7 @@
 
 // 1. rt_map_set released the old value BEFORE retaining the new one, so
 //    m.set(k, m.get(k)) freed the value and then resurrected the block.
-Map<str, str> mv = Map<str, str>();
+Map<str, str> mv = {};
 mv.set("k", concat("ab", "cd"));
 match (mv.get("k")) {
     case Some(str cur): { mv.set("k", cur); }
@@ -31,8 +31,8 @@ print(self >= self);        // true
 
 // 3. Monomorphised containers mangle with `$`, which is not an identifier
 //    character in standard C. Nested generics exercise the field path.
-List<Map<str, int>> nested = List<Map<str, int>>();
-Map<str, int> inner = Map<str, int>();
+List<Map<str, int>> nested = [];
+Map<str, int> inner = {};
 inner.set("a", 1);
 nested.push(inner);
 print(nested.size());        // 1
@@ -40,7 +40,7 @@ print(nested[0].get("a").or(0)); // 1
 
 // 8. Tombstones are swept by a same-capacity rehash, so a map that is
 //    filled and emptied does not grow without bound.
-Map<int, int> churn = Map<int, int>();
+Map<int, int> churn = {};
 int i = 0;
 while (i < 20000) {
     churn.set(i, i);

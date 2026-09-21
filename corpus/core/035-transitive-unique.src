@@ -39,7 +39,7 @@ void total(List<str> xs, Chan<int> ch) {
     send(ch, n);
 }
 
-List<str> xs = List<str>();
+List<str> xs = [];
 xs.push(concat("a", "bc"));
 xs.push(concat("de", "f"));
 spawn total(xs, out);

@@ -518,6 +518,36 @@ Obj *rt_array_new(int64_t len, int64_t fill, bool elems_are_refs) {
     return (Obj *)a;
 }
 
+/* An array of `len` slots with nothing in them yet.
+ *
+ * `rt_array_new` needs a fill because there is no zero value, and it retains
+ * that fill once per element. A literal has a real value for every slot and
+ * is about to write them all, so a fill would be allocated and released for
+ * nothing. Every slot IS written before anything can read one -- the literal
+ * lowering emits one store per element -- so the gap is not observable.
+ *
+ * Zeroed rather than left as malloc found it: a reference slot that is
+ * briefly NULL is a value the drop function can survive, and uninitialised
+ * memory is not. */
+Obj *rt_array_blank(int64_t len, bool elems_are_refs) {
+    if (len < 0) rt_trap("array length cannot be negative");
+    Arr *a = (Arr *)rt_alloc(slot_bytes(sizeof(Arr), len),
+                             elems_are_refs ? &rt_arr_ref_type : &rt_arr_val_type);
+    a->len = len;
+    for (int64_t i = 0; i < len; i++) {
+        a->data[i] = 0;
+    }
+    return (Obj *)a;
+}
+
+/* Write one slot of a freshly blank array, without releasing what was there:
+ * nothing was. `rt_index_set` is for an array that already holds values. */
+void rt_array_put(Obj *o, int64_t i, int64_t v) {
+    Arr *a = (Arr *)o;
+    if (i < 0 || i >= a->len) rt_trap("index out of range");
+    a->data[i] = v;
+}
+
 Obj *rt_list_new(bool elems_are_refs) {
     Lst *l = (Lst *)rt_alloc(sizeof(Lst),
                              elems_are_refs ? &rt_lst_ref_type : &rt_lst_val_type);

@@ -6,7 +6,7 @@
 // because with no way to express absence the only choices were to trap or to
 // make every read go through a separate check. An Option cannot be
 // forgotten the way a preceding `contains` can, and it hashes the key once.
-Map<str, int> ages = Map<str, int>();
+Map<str, int> ages = {};
 ages.set("ada", 36);
 
 print(ages.get("ada").or(-1));          // 36
@@ -25,7 +25,7 @@ match (ages.get("nobody")) {
 
 // A reference payload: the Option holds its own reference, so it stays valid
 // after the map lets go.
-Map<str, str> who = Map<str, str>();
+Map<str, str> who = {};
 who.set("k", concat("va", "l"));
 Option<str> held = who.get("k");
 who.clear();
@@ -35,18 +35,18 @@ print(who.get("k").or("gone"));         // gone
 // index_of. The runtime finds -1 for absent and the lowering turns that into
 // a None before anyone can see it -- which is why index_of waited for Option
 // rather than shipping a sentinel into a language meant to be frozen.
-List<str> names = List<str>();
+List<str> names = [];
 names.push("ada");
 names.push("grace");
 print(names.index_of("grace").or(-1));  // 1
 print(names.index_of("nobody").or(-1)); // -1
 
-Array<int> nums = Array<int>(3, 0);
+Array<int> nums = [0; 3];
 nums[1] = 7;
 print(nums.index_of(7).or(-1));         // 1
 print(nums.index_of(99).or(-1));        // -1
 
-Array<float> fs = Array<float>(2, 0.5);
+Array<float> fs = [0.5; 2];
 fs[1] = 2.5;
 print(fs.index_of(2.5).or(-1));         // 1
 

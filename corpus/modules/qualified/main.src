@@ -19,7 +19,7 @@ shapes.Point o = shapes.Point.origin();
 print(o.sum());                 // 0
 
 // A qualified type as a type argument, and in a collection.
-List<shapes.Point> pts = List<shapes.Point>();
+List<shapes.Point> pts = [];
 pts.push(p);
 pts.push(o);
 print(pts.size());              // 2

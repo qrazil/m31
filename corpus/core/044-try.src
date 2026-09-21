@@ -68,7 +68,7 @@ Option<int> length_of(Map<str, str> m, str k) {
     str v = m.get(k)?;
     return Option<int>.Some(v.size());
 }
-Map<str, str> m = Map<str, str>();
+Map<str, str> m = {};
 m.set("a", concat("hel", "lo"));
 print(length_of(m, "a").or(-1));        // 5
 print(length_of(m, "zz").or(-1));       // -1
@@ -89,14 +89,14 @@ Result<int, str> sum_halves(Array<int> xs) {
     }
     return Result<int, str>.Ok(total);
 }
-Array<int> evens = Array<int>(3, 2);
+Array<int> evens = [2; 3];
 evens[1] = 4;
 evens[2] = 6;
 match (sum_halves(evens)) {
     case Ok(int v): { print(v); }       // 1 + 2 + 3 = 6
     case Err(str e): { print(e); }
 }
-Array<int> hasodd = Array<int>(2, 2);
+Array<int> hasodd = [2; 2];
 hasodd[1] = 5;
 match (sum_halves(hasodd)) {
     case Ok(int v): { print(v); }

@@ -41,12 +41,12 @@ print(Option<int>.Some(3).is_some());           // true
 print(Option<int>.None.is_none());              // true
 
 // Where they come from in practice: a lookup that might find nothing.
-Map<str, int> ages = Map<str, int>();
+Map<str, int> ages = {};
 ages.set("ada", 36);
 print(ages.get("ada").or(-1));                  // 36
 print(ages.get("nobody").or(-1));               // -1
 
-List<str> names = List<str>();
+List<str> names = [];
 names.push("ada");
 names.push("grace");
 print(names.index_of("grace").or(-1));          // 1
@@ -105,7 +105,7 @@ int area(Shape s) {
     }
 }
 
-Array<Shape> shapes = Array<Shape>(3, Shape.Empty);
+Array<Shape> shapes = [Shape.Empty; 3];
 shapes[0] = Shape.Circle(2);
 shapes[1] = Shape.Rect(3, 4);
 shapes[2] = Shape.Empty;
@@ -156,7 +156,7 @@ str describe(Json j) {
     }
 }
 
-List<Json> doc = List<Json>();
+List<Json> doc = [];
 doc.push(Json.Null);
 doc.push(Json.Bool(true));
 doc.push(Json.Number(42));

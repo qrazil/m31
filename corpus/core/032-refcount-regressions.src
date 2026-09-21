@@ -29,9 +29,9 @@ reassign(t);
 print(t);
 print(t.size());
 
-List<str> p = List<str>();
+List<str> p = [];
 p.push("a");
-List<str> q = List<str>();
+List<str> q = [];
 q.push("b");
 print(firstpair(p, q));
 print(p.size());

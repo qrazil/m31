@@ -41,7 +41,7 @@ show(p);                        // Point/xy
 show(Tag("tagged"));            // tagged
 
 // Interface values in a collection, printed by iterating.
-List<ToStr> all = List<ToStr>();
+List<ToStr> all = [];
 all.push(p);
 all.push(Tag("second"));
 for (ToStr v in all) {

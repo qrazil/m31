@@ -53,7 +53,7 @@ show_str(StrBox(concat("a", "b")));     // ab
 
 // Two instantiations of one generic interface have different shapes and so
 // take different slots, which is exactly the case the keying exists for.
-List<Getter<int>> boxes = List<Getter<int>>();
+List<Getter<int>> boxes = [];
 boxes.push(IntBox(10));
 boxes.push(IntBox(20));
 int total = 0;

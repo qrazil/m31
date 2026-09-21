@@ -373,15 +373,37 @@ checked, naming the instantiation.
 
 ### 3.9 Collections
 
-| | |
-|---|---|
-| `Array<T>(n, v)` | fixed length `n`, every slot initialised to `v` |
-| `List<T>()` | growable, starts empty |
-| `Map<K, V>()` | `K` is `int` or `str` |
-| `Chan<T>(cap)` | bounded channel, capacity `cap` |
+A collection is written as a **literal**, and the type it is being written
+into says which collection it is. There is no constructor form; `List<int>()`
+is refused, because two spellings of one thing is one too many.
 
-`Array` requires a fill value. There is no null, so there is no such thing as
-an uninitialised slot to read.
+| Literal | Type it makes |
+|---|---|
+| `[]` | an empty `List<T>` or `Array<T>` or, in `Array` position, length 0 |
+| `[a, b, c]` | a `List<T>` or an `Array<T>` of length 3 |
+| `[v; n]` | `n` slots, every one of them `v` |
+| `{}` | an empty `Map<K, V>` |
+| `{k: v, ...}` | a `Map<K, V>` with those entries |
+| `Chan<T>(cap)` | a bounded channel — not a literal, because a capacity is not contents |
+
+```c
+List<int> xs = [];              Array<int> a = [10, 20, 30];
+List<int> ys = [1, 2, 3];       Array<int> z = [0; 5];
+Map<str, int> m = {};           Map<str, int> n = {"a": 1, "b": 2};
+```
+
+`[v; n]` evaluates `v` **once** and puts the same value in every slot. For a
+reference type that means `n` slots pointing at one object, which is what
+sharing already means everywhere else in the language.
+
+A literal has no type of its own — it takes one from where it is written.
+That is the only place in the language where type information flows inwards,
+and it flows exactly one level: a literal needs a declared type, a field, a
+parameter or a return type above it. `[].size()` is an error, because there
+is nothing above it to ask.
+
+`Array` has no uninitialised slot: there is no null, so a length and a fill
+value arrive together or the length is the number of elements written.
 
 `Map` keys are `int` or `str`. Hashing a user type would need a `Hashable`
 interface, which does not exist.
@@ -741,9 +763,9 @@ function can fail.
 ```c
 Point(1, 2)             // mandatory fields, positional
 Point(1, 2, label: "a") // a defaulted field, named
-Array<int>(4, 0)
-List<str>()
-Map<str, int>()
+Array<int> a = [0; 4]
+List<str> l = []
+Map<str, int> m = {}
 Chan<int>(8)
 ```
 

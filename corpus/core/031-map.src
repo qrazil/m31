@@ -9,7 +9,7 @@
 // Keys are int or str. Hashing a user type would need a Hashable interface,
 // which does not exist yet.
 
-Map<str, int> counts = Map<str, int>();
+Map<str, int> counts = {};
 counts.set("a", 1);
 counts.set("b", 2);
 counts.set("a", 10);        // replaces, does not grow
@@ -25,13 +25,13 @@ print(counts.contains("b"));
 str built = "a" + "";
 print(counts.contains(built));
 
-Map<int, str> names = Map<int, str>();
+Map<int, str> names = {};
 names.set(1, "one");
 names.set(2, "tw" + "o");
 print(names.get(2).or("?"));
 
 // Enough entries to force several growths and exercise probing.
-Map<int, int> big = Map<int, int>();
+Map<int, int> big = {};
 int i = 0;
 while (i < 200) {
     big.set(i, i * i);

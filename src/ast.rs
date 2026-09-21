@@ -166,6 +166,17 @@ pub enum Expr {
     Field(Box<Expr>, String, Span),
     /// `expr[index]`
     Index(Box<Expr>, Box<Expr>, Span),
+    /// `[]`, `[a, b, c]` -- the elements of a List or an Array.
+    ///
+    /// Typed by its context, so it is only legal where the expected type is
+    /// known: a declaration, an argument, a return. There is nothing to
+    /// infer from `[]` on its own.
+    SeqLit(Vec<Expr>, Span),
+    /// `[x; n]` -- n copies of x. Rust's spelling. This replaces the old
+    /// `Array<int>(n, fill)` rather than joining it: one way to say a thing.
+    RepeatLit(Box<Expr>, Box<Expr>, Span),
+    /// `{}`, `{k: v, ..}` -- the entries of a Map.
+    MapLit(Vec<(Expr, Expr)>, Span),
     /// `f()?` -- give me the value, or return the failure from here.
     ///
     /// Sugar for a `match` that returns the `Err` or `None` arm unchanged.
@@ -201,7 +212,10 @@ impl Expr {
             | Expr::Index(_, _, s)
             | Expr::New(_, _, s)
             | Expr::EnumNew(_, _, _, s)
-            | Expr::Try(_, s) => *s,
+            | Expr::Try(_, s)
+            | Expr::SeqLit(_, s)
+            | Expr::RepeatLit(_, _, s)
+            | Expr::MapLit(_, s) => *s,
         }
     }
 }

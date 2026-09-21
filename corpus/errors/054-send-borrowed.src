@@ -1,4 +1,4 @@
 Chan<str> c = Chan<str>(2);
-List<str> xs = List<str>();
+List<str> xs = [];
 xs.push("ab");
 send(c, xs[0]);

@@ -2,5 +2,5 @@ type P {
     int x;
 }
 
-Map<P, int> m = Map<P, int>();
+Map<P, int> m = {};
 print(m.size());

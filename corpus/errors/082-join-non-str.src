@@ -1,2 +1,2 @@
-List<int> xs = List<int>();
+List<int> xs = [];
 print(xs.join(","));

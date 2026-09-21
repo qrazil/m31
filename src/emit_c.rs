@@ -625,6 +625,7 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
                     | ("rt_seq_contains", 1)
                     | ("rt_seq_index_of", 1)
                     | ("rt_array_new", 1)
+                    | ("rt_array_put", 2)
                     | ("rt_map_set", 1)
                     | ("rt_map_set", 2)
                     | ("rt_map_get", 1)
@@ -656,6 +657,7 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
                         func.as_str(),
                         "rt_chan_new"
                             | "rt_array_new"
+                            | "rt_array_blank"
                             | "rt_list_new"
                             | "rt_map_keys"
                             | "rt_map_values"

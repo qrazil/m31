@@ -2,6 +2,6 @@
 // comparison. Better to refuse than to compare addresses silently.
 type P { int x; }
 
-List<P> ps = List<P>();
+List<P> ps = [];
 ps.push(P(1));
 print(ps.contains(P(1)));

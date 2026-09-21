@@ -475,6 +475,18 @@ impl Fmt {
                 }
             }
             Expr::Try(e, _) => format!("{}?", self.expr(e)),
+            Expr::SeqLit(items, _) => {
+                let xs: Vec<String> = items.iter().map(|e| self.expr(e)).collect();
+                format!("[{}]", xs.join(", "))
+            }
+            Expr::RepeatLit(v, n, _) => format!("[{}; {}]", self.expr(v), self.expr(n)),
+            Expr::MapLit(items, _) => {
+                let xs: Vec<String> = items
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", self.expr(k), self.expr(v)))
+                    .collect();
+                format!("{{{}}}", xs.join(", "))
+            }
             Expr::Int(n, _) => n.to_string(),
             Expr::Float(x, _) => fmt_float(*x),
             Expr::Bool(b, _) => b.to_string(),

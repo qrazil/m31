@@ -20,7 +20,7 @@ print(present.or(concat("c", "d").size()));     // 1, and no crash
 Option<str> text = Option<str>.Some(concat("z", "z"));
 print(text.or(concat("a", "b").to_upper()));    // zz
 
-Map<str, int> m = Map<str, int>();
+Map<str, int> m = {};
 m.set("k", 3);
 print(m.get("k").or("a,b".split(",").size()));  // 3
 
@@ -72,7 +72,7 @@ Option<int> in_push(List<int> acc) {
     acc.push(concat("a", "b").size() + some()?);
     return Option<int>.Some(acc.size());
 }
-List<int> acc = List<int>();
+List<int> acc = [];
 print(in_push(acc).or(-1));                     // 1
 
 Option<int> in_cond() {

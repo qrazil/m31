@@ -4,6 +4,6 @@
 type P { int x; }
 int P.cmp(P o) { return x - o.x; }
 
-List<P> ps = List<P>();
+List<P> ps = [];
 ps.push(P(1));
 ps.sort();

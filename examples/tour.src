@@ -137,7 +137,7 @@ print(shape.area());
 // one pointer chase. List is growable, with a separate buffer. An array
 // needs a fill value because there is no null.
 
-Array<int> squares = Array<int>(5, 0);
+Array<int> squares = [0; 5];
 int k = 0;
 while (k < 5) {
     squares[k] = k * k;
@@ -150,7 +150,7 @@ for (int s in squares) {
 }
 print(sq_total);
 
-List<str> words = List<str>();
+List<str> words = [];
 words.push("the");
 words.push("quick");
 words.push("fox");

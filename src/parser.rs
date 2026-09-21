@@ -1278,6 +1278,50 @@ impl Parser {
                 self.expect(Tok::RParen)?;
                 Ok(e)
             }
+            // `[]`, `[a, b, c]`, `[x; n]`
+            Tok::LBracket => {
+                self.bump();
+                if self.eat(&Tok::RBracket) {
+                    return Ok(Expr::SeqLit(Vec::new(), span));
+                }
+                let first = self.parse_expr(0)?;
+                if self.eat(&Tok::Semi) {
+                    let n = self.parse_expr(0)?;
+                    self.expect(Tok::RBracket)?;
+                    return Ok(Expr::RepeatLit(Box::new(first), Box::new(n), span));
+                }
+                let mut items = vec![first];
+                while self.eat(&Tok::Comma) {
+                    if self.peek() == &Tok::RBracket {
+                        break;
+                    }
+                    items.push(self.parse_expr(0)?);
+                }
+                self.expect(Tok::RBracket)?;
+                Ok(Expr::SeqLit(items, span))
+            }
+            // `{}`, `{k: v, ..}`. Unambiguous against a block, which only
+            // ever appears where a statement may.
+            Tok::LBrace => {
+                self.bump();
+                let mut items = Vec::new();
+                if self.peek() != &Tok::RBrace {
+                    loop {
+                        let k = self.parse_expr(0)?;
+                        self.expect(Tok::Colon)?;
+                        let v = self.parse_expr(0)?;
+                        items.push((k, v));
+                        if !self.eat(&Tok::Comma) {
+                            break;
+                        }
+                        if self.peek() == &Tok::RBrace {
+                            break;
+                        }
+                    }
+                }
+                self.expect(Tok::RBrace)?;
+                Ok(Expr::MapLit(items, span))
+            }
             // `int(x)` -- a conversion back to a base type. A type keyword
             // is not otherwise an expression, so this is unambiguous.
             t if Self::ty_of(&t).is_some() && self.peek_at(1) == &Tok::LParen => {

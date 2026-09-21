@@ -10,7 +10,7 @@
 // The order is the table's, not insertion order, so nothing here depends on
 // which order the elements come back in.
 
-Map<str, int> m = Map<str, int>();
+Map<str, int> m = {};
 m.set("a", 1);
 m.set("b", 2);
 m.set("c", 3);
@@ -33,7 +33,7 @@ print(m.values().size());        // 2
 
 // Reference keys and reference values: the list retains each element, so it
 // stays valid after the map lets go of them.
-Map<str, str> refs = Map<str, str>();
+Map<str, str> refs = {};
 refs.set(concat("k", "1"), concat("v", "1"));
 refs.set(concat("k", "2"), concat("v", "2"));
 

@@ -713,6 +713,25 @@ impl Mono {
                 Expr::New(ty, self.subst_args(args, sub)?, *s)
             }
             Expr::Try(e, s) => Expr::Try(Box::new(self.subst_expr(e, sub)?), *s),
+            Expr::SeqLit(items, s) => {
+                let mut out = Vec::new();
+                for e in items {
+                    out.push(self.subst_expr(e, sub)?);
+                }
+                Expr::SeqLit(out, *s)
+            }
+            Expr::RepeatLit(v, n, s) => Expr::RepeatLit(
+                Box::new(self.subst_expr(v, sub)?),
+                Box::new(self.subst_expr(n, sub)?),
+                *s,
+            ),
+            Expr::MapLit(items, s) => {
+                let mut out = Vec::new();
+                for (k, v) in items {
+                    out.push((self.subst_expr(k, sub)?, self.subst_expr(v, sub)?));
+                }
+                Expr::MapLit(out, *s)
+            }
             Expr::EnumNew(ty, variant, args, s) => {
                 let ty = self.subst_ty(*ty, sub, *s)?;
                 Expr::EnumNew(ty, variant.clone(), self.subst_args(args, sub)?, *s)

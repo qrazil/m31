@@ -167,6 +167,8 @@ typedef struct {
  * element. */
 Obj *rt_array_new(int64_t len, int64_t fill, bool elems_are_refs);
 Obj *rt_list_new(bool elems_are_refs);
+Obj *rt_array_blank(int64_t len, bool elems_are_refs);
+void rt_array_put(Obj *o, int64_t i, int64_t v);
 
 int64_t rt_len_of(Obj *o);            /* works for both */
 int64_t rt_index_get(Obj *o, int64_t i);

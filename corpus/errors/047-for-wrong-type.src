@@ -1,4 +1,4 @@
-List<int> xs = List<int>();
+List<int> xs = [];
 xs.push(1);
 
 for (str s in xs) {

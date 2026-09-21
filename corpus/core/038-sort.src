@@ -4,7 +4,7 @@
 // only works if the second sort leaves ties alone -- and an unstable sort is
 // not something that can be fixed after a freeze.
 
-List<int> xs = List<int>();
+List<int> xs = [];
 xs.push(5);
 xs.push(1);
 xs.push(4);
@@ -16,7 +16,7 @@ for (int v in xs) {
 }
 
 // Negative values, and an even length.
-Array<int> a = Array<int>(4, 0);
+Array<int> a = [0; 4];
 a[0] = 9;
 a[1] = -2;
 a[2] = 7;
@@ -28,7 +28,7 @@ print(a[2]);                    // 7
 print(a[3]);                    // 9
 
 // Strings order lexicographically, and a prefix sorts before what extends it.
-List<str> ws = List<str>();
+List<str> ws = [];
 ws.push("pear");
 ws.push("apple");
 ws.push("fig");
@@ -40,16 +40,16 @@ for (str w in ws) {
 
 // The sizes a bottom-up merge gets wrong if the runs are mismanaged: empty,
 // one, and an odd length that is not a power of two.
-List<int> none = List<int>();
+List<int> none = [];
 none.sort();
 print(none.size());              // 0
 
-List<int> one = List<int>();
+List<int> one = [];
 one.push(42);
 one.sort();
 print(one[0]);                  // 42
 
-List<int> odd = List<int>();
+List<int> odd = [];
 odd.push(3);
 odd.push(1);
 odd.push(2);

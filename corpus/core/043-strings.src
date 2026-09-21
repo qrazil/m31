@@ -49,10 +49,11 @@ print(parts.join(""));                  // abc
 print(",x,".split(",").size());         // 3 -- leading and trailing kept
 print("nosep".split(",").size());       // 1
 
-List<str> one = List<str>();
+List<str> one = [];
 one.push("solo");
 print(one.join("-"));                   // solo -- no separator on its own
-print(List<str>().join("-").size());    // 0 -- nothing joins to nothing
+List<str> none = [];
+print(none.join("-").size());           // 0 -- nothing joins to nothing
 
 // The results are ordinary owned strings, so they compose.
 print("a,b".split(",").join("+").to_upper());   // A+B

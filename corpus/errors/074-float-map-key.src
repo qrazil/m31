@@ -1,1 +1,1 @@
-Map<float, int> m = Map<float, int>();
+Map<float, int> m = {};

@@ -1,2 +1,2 @@
-Array<int> a = Array<int>(2, 0);
+Array<int> a = [0; 2];
 a.push(1);

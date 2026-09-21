@@ -66,20 +66,20 @@ T inner<T>(Box<Box<T>> b) { return b.item.item; }
 print(inner(Box<Box<int>>(Box<int>(5))));   // 5
 
 // --- 3.8 collections ----------------------------------------------------
-Array<int> arr = Array<int>(3, 0);
+Array<int> arr = [0; 3];
 arr[0] = 10;
 arr[2] = 30;
 print(arr[0] + arr[2]);     // 40
 print(arr.size());           // 3
 
-List<str> xs = List<str>();
+List<str> xs = [];
 xs.push("first");
 xs.push("second");
 print(xs.size());            // 2
 print(xs.pop());            // second
 print(xs.size());            // 1
 
-Map<str, int> m = Map<str, int>();
+Map<str, int> m = {};
 m.set("one", 1);
 m.set("two", 2);
 print(m.size());             // 2
@@ -94,7 +94,7 @@ print(scale(10));           // 20
 print(scale(10, by: 3));    // 30
 
 // --- 5.5 for-in borrows each element ------------------------------------
-Array<int> nums = Array<int>(4, 1);
+Array<int> nums = [1; 4];
 nums[1] = 2;
 nums[2] = 3;
 nums[3] = 4;

@@ -8,20 +8,20 @@
 // An array takes a fill value because there is no null: a reference element
 // has to start as *something*, and the caller is the only one who can say.
 
-Array<int> a = Array<int>(4, 0);
+Array<int> a = [0; 4];
 a[0] = 10;
 a[1] = 20;
 a[3] = a[0] + a[1];
 print(a.size());
 print(a[3]);
 
-Array<str> names = Array<str>(2, "?");
+Array<str> names = ["?"; 2];
 print(names[0]);
 names[0] = "ana";
 names[1] = "bob";
 print(names[0]);
 
-List<str> words = List<str>();
+List<str> words = [];
 words.push("one");
 words.push("tw" + "o");
 print(words.size());

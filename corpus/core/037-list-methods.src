@@ -1,6 +1,6 @@
 // The List and Array method surface beyond push/pop/len.
 
-List<int> xs = List<int>();
+List<int> xs = [];
 xs.push(1);
 xs.push(2);
 xs.push(4);
@@ -29,7 +29,7 @@ print(xs[0]);               // 7
 
 // Reference elements: the list retains what it is given and hands the
 // reference back when it gives one up.
-List<str> ws = List<str>();
+List<str> ws = [];
 ws.push(concat("a", "b"));
 ws.insert(0, concat("c", "d"));
 print(ws[0]);               // cd
@@ -43,13 +43,13 @@ ws.clear();
 print(ws.size());            // 0
 
 // Insert at the very end is allowed; one past that is not.
-List<int> tail = List<int>();
+List<int> tail = [];
 tail.push(1);
 tail.insert(1, 2);
 print(tail[1]);             // 2
 
 // Arrays are fixed length, so only the non-resizing operations apply.
-Array<int> a = Array<int>(3, 0);
+Array<int> a = [0; 3];
 a[0] = 1;
 a[1] = 2;
 a[2] = 3;
@@ -59,7 +59,7 @@ print(a[2]);                // 1
 print(a.contains(2));       // true
 print(a.contains(9));       // false
 
-Array<str> sa = Array<str>(2, "x");
+Array<str> sa = ["x"; 2];
 sa[0] = concat("y", "z");
 print(sa.contains("yz"));   // true
 sa.reverse();
