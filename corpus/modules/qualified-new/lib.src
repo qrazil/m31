@@ -1,0 +1,14 @@
+// Types another module constructs by their qualified names.
+pub type Point { int x; int y; }
+pub int Point.sum() { return x + y; }
+
+// Optional fields are named at the construction site, qualified or not.
+pub type Opts { int size; str name = "anon"; bool loud = false; }
+
+pub type Box<T> { T item; }
+
+pub enum Colour { Red; Green; }
+pub enum Shape { Circle(int); Square(int, int); }
+pub enum Res<T> { Ok(T); Fail(str); }
+
+pub distinct List<int> Bag;

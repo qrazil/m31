@@ -4079,6 +4079,16 @@ impl Lowerer {
         span: Span,
     ) -> Result<Val, Diag> {
         let key = format!("{modname}#{name}");
+        // `lib.Point(3, 4)` -- a construction, not a call. The parser cannot
+        // tell the two apart, because it never sees another module's
+        // declarations, so it is settled here where both tables are known.
+        // A type of that name exists only if `lib` declared one: the name is
+        // module-qualified, so nothing here can find a type from elsewhere.
+        if !self.sigs.contains_key(&key) {
+            if let Some(ty) = self.ty_named(&key) {
+                return self.lower_new(ty, args, span);
+            }
+        }
         let Some(sig) = self.sigs.get(&key) else {
             return Err(Diag::new(
                 span,
@@ -5331,6 +5341,14 @@ impl Lowerer {
                 format!("unknown type `{}`", self.tyname(ty)),
             ));
         };
+        // Only a qualified construction, `lib.Secret(..)`, can name a type
+        // from another module here, so this is where its privacy is kept.
+        if !self.type_visible(tid) {
+            return Err(Diag::new(
+                span,
+                self.not_visible(tid, "it cannot be constructed from here"),
+            ));
+        }
         if self.typedefs[tid as usize].is_interface {
             return Err(Diag::new(
                 span,

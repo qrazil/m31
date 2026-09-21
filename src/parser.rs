@@ -274,6 +274,35 @@ impl Parser {
         matches!(self.peek_at(i), Tok::Ident(_))
     }
 
+    /// At `lib . Name < ... >`, the offset just past the `>` -- provided
+    /// everything between the angle brackets could be a type argument list
+    /// and a `(` or `.` follows it, which is what makes it a construction or
+    /// a member of a generic type rather than anything else.
+    fn qualified_targs_end(&self) -> Option<usize> {
+        if self.peek_at(3) != &Tok::Lt {
+            return None;
+        }
+        let mut i = 3;
+        let mut depth = 0usize;
+        loop {
+            match self.peek_at(i) {
+                Tok::Lt => depth += 1,
+                Tok::Gt => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                Tok::Ident(_) | Tok::Comma | Tok::Dot => {}
+                t if Self::ty_of(t).is_some() => {}
+                _ => return None,
+            }
+            i += 1;
+        }
+        i += 1;
+        matches!(self.peek_at(i), Tok::LParen | Tok::Dot).then_some(i)
+    }
+
     fn peek(&self) -> &Tok {
         &self.toks[self.pos].tok
     }
@@ -1444,18 +1473,41 @@ impl Parser {
             // an enum variant on another module's type. Told apart from
             // `lib.f(..)` by the SECOND dot: a module function call has only
             // one.
+            //
+            // With type arguments the same two, plus a construction:
+            // `lib.Box<int>(..)`, `lib.Res<int>.Ok(1)`. The parser cannot
+            // know that `Box` is a type in `lib`, but `lib.x < ...` can never
+            // be a comparison worth reading this way: a module exports
+            // functions and types, not values, so `lib.x` alone is not an
+            // operand. Plain `lib.Point(..)` has no such marker and stays a
+            // qualified call; the lowerer builds the type when `lib` has one
+            // by that name.
             Tok::Ident(m)
                 if self.imports.contains(&m)
                     && self.peek_at(1) == &Tok::Dot
                     && matches!(self.peek_at(2), Tok::Ident(_))
-                    && self.peek_at(3) == &Tok::Dot =>
+                    && (self.peek_at(3) == &Tok::Dot || self.qualified_targs_end().is_some()) =>
             {
                 self.bump();
                 self.bump();
                 let (tname, _) = self.expect_ident()?;
+                let mut targs = Vec::new();
+                if self.eat(&Tok::Lt) {
+                    loop {
+                        targs.push(self.expect_ty()?);
+                        if !self.eat(&Tok::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(Tok::Gt)?;
+                }
+                let ty = self.intern(format!("{m}#{tname}"), targs);
+                if self.peek() == &Tok::LParen {
+                    let args = self.parse_args()?;
+                    return Ok(Expr::New(ty, args, span));
+                }
                 self.expect(Tok::Dot)?;
                 let (member, _) = self.expect_ident()?;
-                let ty = self.intern(format!("{m}#{tname}"), Vec::new());
                 let args = if self.peek() == &Tok::LParen {
                     self.parse_args()?
                 } else {

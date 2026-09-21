@@ -1,0 +1,4 @@
+// A private type stays private when it is constructed by its qualified
+// name, which is the one way another module can spell it in a construction.
+type Secret { int code; }
+pub int unused() { return Secret(1).code; }
