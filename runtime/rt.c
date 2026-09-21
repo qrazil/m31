@@ -597,6 +597,27 @@ void rt_list_push(Obj *o, int64_t v) {
     l->data[l->len++] = v;
 }
 
+/* A list of `n` copies of `fill`: the `[v; n]` literal in List position.
+ *
+ * The buffer is sized once, up front, so a negative or absurd `n` traps here
+ * with the same message `rt_array_new` gives instead of pushing one element
+ * at a time until the process is killed. Like `rt_array_new`, a reference
+ * fill is retained once per slot. */
+Obj *rt_list_repeat(int64_t n, int64_t fill, bool elems_are_refs) {
+    if (n < 0) rt_trap("array length cannot be negative");
+    Lst *l = (Lst *)rt_list_new(elems_are_refs);
+    if (n == 0) return (Obj *)l;
+    l->data = malloc(slot_bytes(0, n));
+    if (l->data == NULL) rt_trap("out of memory");
+    l->cap = n;
+    l->len = n;
+    for (int64_t i = 0; i < n; i++) {
+        l->data[i] = fill;
+        if (elems_are_refs) rc_inc((Obj *)(intptr_t)fill);
+    }
+    return (Obj *)l;
+}
+
 /* Shallow: the new collection holds the same elements, each retained once
  * more. Deep copying would have to know what an element's own copy means,
  * which is a question only the program can answer. */

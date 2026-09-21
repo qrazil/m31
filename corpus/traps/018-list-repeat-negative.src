@@ -1,0 +1,5 @@
+// A List repetition checks its count the way an Array one does. It used to
+// push in a loop that simply never ran, so a negative count was an empty list.
+int m = -1;
+List<int> c = [5; m];
+print(c.size());

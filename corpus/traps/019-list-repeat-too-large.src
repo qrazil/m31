@@ -1,0 +1,4 @@
+// The buffer is sized once, up front, so an absurd count traps before
+// anything is written instead of pushing until the process is killed.
+List<int> c = [5; 4611686018427387904];
+print(c.size());

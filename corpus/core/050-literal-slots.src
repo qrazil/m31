@@ -1,0 +1,104 @@
+// A collection literal takes its type from the slot it is written into, and
+// every slot with a declared type is one: a field, a named optional, a field
+// default, a variant payload, a builtin's argument, a spawn or a send, and
+// the left of an assignment. These used to be refused as having nothing to
+// say what the literal should be.
+
+type Box { List<int> xs; }
+type Pair<T> { T a; }
+type Opt { int k; List<int> xs = [1, 2]; Map<str, int> m = {"d": 4}; }
+enum Shape { Dot; Bag(List<int>); }
+
+// A bare field name inside a method, and a method's own parameter.
+void Box.reset() {
+    xs = [0, 1];
+}
+void Box.take(List<int> ys) {
+    xs = ys;
+}
+static Box Box.of(List<int> ys) {
+    return Box(ys);
+}
+
+int sum(List<int> xs) {
+    int t = 0;
+    for (int x in xs) {
+        t = t + x;
+    }
+    return t;
+}
+
+// Constructor arguments, plain and generic.
+Box b = Box([1, 2]);
+print(sum(b.xs));                                   // 3
+Pair<List<int>> p = Pair<List<int>>([4, 5, 6]);
+print(sum(p.a));                                    // 15
+
+// A named optional field, and the defaults when it is left out.
+Opt o1 = Opt(1, xs: [3, 4, 5]);
+print(sum(o1.xs));                                  // 12
+Opt o2 = Opt(2);
+Opt o3 = Opt(3);
+print(sum(o2.xs));                                  // 3
+
+// A default is built fresh for every object: changing one object's list
+// or map must leave another's alone.
+o2.xs.push(10);
+o2.m.set("e", 5);
+print(sum(o2.xs));                                  // 13
+print(sum(o3.xs));                                  // 3
+print(o3.m.size());                                 // 1
+
+// Variant payloads, on a user enum and on the built-in ones.
+Shape s = Shape.Bag([7, 8]);
+match (s) {
+    case Dot: { print(0); }
+    case Bag(List<int> xs): { print(sum(xs)); }     // 15
+}
+Option<List<int>> so = Option<List<int>>.Some([1]);
+print(sum(so.or([])));                              // 1
+Result<List<int>, str> r = Result<List<int>, str>.Ok([2, 3]);
+match (r) {
+    case Ok(List<int> xs): { print(sum(xs)); }      // 5
+    case Err(str e): { print(e); }
+}
+
+// Builtin methods whose parameter type is known.
+Map<str, List<int>> m = {};
+print(m.get("x").or([]).size());                    // 0
+m.set("k", [9, 9]);
+print(sum(m.get("k").or([1])));                     // 18
+List<List<int>> ll = [];
+ll.push([1]);
+ll.insert(0, [2, 2]);
+print(ll.size());                                   // 2
+print(sum(ll[0]));                                  // 4
+
+// Assignment to a typed place.
+List<int> xs = [0];
+xs = [1, 2];
+print(sum(xs));                                     // 3
+ll[1] = [1, 2, 3];
+print(sum(ll[1]));                                  // 6
+b.xs = [5, 5];
+print(sum(b.xs));                                   // 10
+b.reset();
+print(sum(b.xs));                                   // 1
+b.take([2, 2, 2]);
+print(sum(b.xs));                                   // 6
+print(sum(Box.of([3, 3]).xs));                      // 6
+Map<str, Map<str, int>> mm = {};
+mm.set("k", {});
+mm.set("j", {"a": 1});
+print(mm.size());                                   // 2
+
+// Across a thread boundary, where the literal is moved.
+void eat(List<int> xs, Chan<int> out) {
+    send(out, sum(xs));
+}
+Chan<int> out = Chan<int>(1);
+spawn eat([1, 2, 3], out);
+print(recv(out));                                   // 6
+Chan<List<int>> lists = Chan<List<int>>(1);
+send(lists, [4, 4]);
+print(sum(recv(lists)));                            // 8
