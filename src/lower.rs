@@ -1527,11 +1527,17 @@ impl Lowerer {
                     continue;
                 };
                 let iname = self.typedefs[inner as usize].name.clone();
-                // Every method of the embedded type, by name.
+                // Every instance method of the embedded type, by name. A
+                // static method is not promoted: it has no receiver, so a
+                // forwarder would have nothing to forward to, and `Outer`
+                // does not gain a `make()` by holding a `Base`. Forwarding
+                // one used to call it through a value and fail the whole
+                // declaration of the embedding type.
                 let prefix = format!("{iname}.");
                 let mut promoted: Vec<(String, Sig)> = self
                     .sigs
                     .iter()
+                    .filter(|(k, _)| !self.statics.contains(k.as_str()))
                     .filter_map(|(k, sig)| {
                         let m = k.strip_prefix(&prefix)?;
                         Some((
@@ -2252,8 +2258,14 @@ impl Lowerer {
     }
 
     /// The key and value types of a `Map<K, V>`, if it is one.
+    ///
+    /// Both this and `builtin_elem` look through a distinct type, because
+    /// `distinct List<int> Bag` IS a list: indexing it, iterating it and its
+    /// built-in methods all work exactly as on the base. Identity is kept
+    /// where it matters -- `assignable` still refuses a `Bag` for a
+    /// `List<int>` -- and that check never asks this question.
     fn map_kv(&self, t: Ty) -> Option<(Ty, Ty)> {
-        let tid = self.tdef_of(t)?;
+        let tid = self.tdef_of(self.underlying(t))?;
         if !self.typedefs[tid as usize].name.starts_with("Map$") {
             return None;
         }
@@ -2264,7 +2276,7 @@ impl Lowerer {
     /// A builtin generic stores its element type as its only "field", which
     /// is never laid out -- the runtime owns the representation.
     fn builtin_elem(&self, t: Ty, prefix: &str) -> Option<Ty> {
-        let tid = self.tdef_of(t)?;
+        let tid = self.tdef_of(self.underlying(t))?;
         if !self.typedefs[tid as usize].name.starts_with(prefix) {
             return None;
         }
@@ -4229,6 +4241,16 @@ impl Lowerer {
         span: Span,
     ) -> Result<Val, Diag> {
         let key = format!("{modname}#{name}");
+        // `lib.Point(3, 4)` -- a construction, not a call. The parser cannot
+        // tell the two apart, because it never sees another module's
+        // declarations, so it is settled here where both tables are known.
+        // A type of that name exists only if `lib` declared one: the name is
+        // module-qualified, so nothing here can find a type from elsewhere.
+        if !self.sigs.contains_key(&key) {
+            if let Some(ty) = self.ty_named(&key) {
+                return self.lower_new(ty, args, span);
+            }
+        }
         let Some(sig) = self.sigs.get(&key) else {
             return Err(Diag::new(
                 span,
@@ -4276,6 +4298,16 @@ impl Lowerer {
                  literal takes its type from where it is written",
             ));
         };
+
+        // A literal written where a distinct collection is wanted builds the
+        // base and takes the distinct identity. That is not the implicit
+        // conversion `Price p = 5` is refused for: `5` already has a type,
+        // `int`, and would have to change it, while a collection literal has
+        // no type at all until the place it is written gives it one.
+        if let Some(base) = self.base_of(want) {
+            let v = self.lower_literal(e, Some(base))?;
+            return Ok(Val::new(v.val(), want, v.owned));
+        }
 
         // A Map wants `{..}`; an Array or List wants `[..]`.
         if let Some((k, v)) = self.map_kv(want) {
@@ -4842,12 +4874,18 @@ impl Lowerer {
                     ));
                 };
                 // Collections have built-in methods, typed against their
-                // element type rather than declared anywhere.
-                if let Some(elem) = self.seq_elem(o.ty) {
-                    return self.lower_seq_method(&o, elem, m, args, *span);
-                }
-                if let Some((k, v)) = self.map_kv(o.ty) {
-                    return self.lower_map_method(&o, k, v, m, args, *span);
+                // element type rather than declared anywhere. A distinct
+                // collection has them too, but a method it declares itself
+                // comes first -- the same rule as a real method shadowing an
+                // embedded one.
+                let own = format!("{}.{m}", self.typedefs[tid as usize].name);
+                if !self.sigs.contains_key(&own) {
+                    if let Some(elem) = self.seq_elem(o.ty) {
+                        return self.lower_seq_method(&o, elem, m, args, *span);
+                    }
+                    if let Some((k, v)) = self.map_kv(o.ty) {
+                        return self.lower_map_method(&o, k, v, m, args, *span);
+                    }
                 }
                 if self.typedefs[tid as usize].is_enum
                     && self.typedefs[tid as usize].name.starts_with("Option$")
@@ -5392,6 +5430,14 @@ impl Lowerer {
                 format!("unknown type `{}`", self.tyname(ty)),
             ));
         };
+        // Only a qualified construction, `lib.Secret(..)`, can name a type
+        // from another module here, so this is where its privacy is kept.
+        if !self.type_visible(tid) {
+            return Err(Diag::new(
+                span,
+                self.not_visible(tid, "it cannot be constructed from here"),
+            ));
+        }
         if self.typedefs[tid as usize].is_interface {
             return Err(Diag::new(
                 span,
@@ -5413,7 +5459,10 @@ impl Lowerer {
                     ),
                 ));
             }
-            let v = self.lower_expr(&args.pos[0])?;
+            // The base says what a literal argument should be, so
+            // `Bag([1, 2])` reads the same as `Bag b = [1, 2]`.
+            let base = self.base_of(ty).expect("a distinct type has a base");
+            let v = self.lower_expr_as(&args.pos[0], base)?;
             if self.underlying(v.ty) != self.underlying(ty) {
                 return Err(Diag::new(
                     args.pos[0].span(),
@@ -5423,6 +5472,26 @@ impl Lowerer {
             return Ok(Val::new(v.val(), ty, v.owned));
         }
         let tname = self.typedefs[tid as usize].name.clone();
+        // `List<int>(bag)` -- converting a distinct collection back to its
+        // base, spelled as the base type the way `int(price)` is. A
+        // collection is otherwise never constructed by name, so one argument
+        // of a distinct type over exactly this collection is unambiguous.
+        if ["Array$", "List$", "Map$"]
+            .iter()
+            .any(|p| tname.starts_with(p))
+            && !self.building_literal
+            && args.pos.len() == 1
+            && args.named.is_empty()
+        {
+            let v = self.lower_expr_as(&args.pos[0], ty)?;
+            if self.base_of(v.ty).is_some() && self.underlying(v.ty) == ty {
+                return Ok(Val::new(v.val(), ty, v.owned));
+            }
+            // Anything else falls through to the paths below, every one of
+            // which refuses a single positional argument with the message it
+            // always gave -- before lowering any argument, so nothing is
+            // evaluated twice.
+        }
         if tname.starts_with("Map$") && !self.building_literal {
             // The key type is still checked, because `{}` reaches this path
             // with the flag set and a bad key type must be caught either way.

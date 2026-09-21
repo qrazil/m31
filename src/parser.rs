@@ -37,6 +37,70 @@ pub struct Parser {
     /// docs/stdlib-seam.md -- the restriction is the only thing keeping the
     /// seam from being a foreign function interface.
     stdlib: bool,
+    /// How deeply the parser is nested right now: one per statement,
+    /// expression and type it is inside. See `MAX_DEPTH`.
+    depth: usize,
+}
+
+/// The deepest a program may nest, counting statements, expressions and
+/// types together.
+///
+/// Every pass after the parser -- monomorphisation, lowering, the formatter
+/// -- walks the tree recursively, and so does the parser itself. A program
+/// nested a thousand deep overflowed the stack and killed the compiler with
+/// a Rust abort instead of a diagnostic. The limit is here, once, because
+/// the parser is the one pass that sees the nesting before the tree exists;
+/// making every later pass iterative would be a rewrite of all of them for a
+/// shape no one writes by hand.
+///
+/// The number is measured, not guessed. With no limit, in a debug build on
+/// the default 8MB main-thread stack, the most expensive shape per level is
+/// a nested block -- `if`, `while`, `for` and `match` alike, about 25KB a
+/// level -- and 328 of them was the most that survived. Parentheses, which
+/// only the parser recurses on, got to 488; generic types to 420. 256 keeps
+/// more than a fifth of the stack spare in the worst case, and every shape
+/// at exactly this depth -- blocks inside and outside functions, `else if`
+/// chains, parentheses, calls, method chains, literals, nested generic types
+/// -- compiles, runs and formats. It is also far past anything a person
+/// writes: C requires a compiler to accept only 63 levels of parentheses.
+///
+/// If a pass grows a much larger stack frame, this is the number to revisit;
+/// the corpus has a program at the limit so that it fails first.
+///
+/// What counts is the depth of the TREE, not of the parser's recursion. A
+/// flat `a + b + c + ...` is parsed by a loop but builds a left-leaning tree
+/// as deep as the chain is long, and every later pass recurses down it, so a
+/// chain of 5000 terms is refused as surely as 5000 parentheses.
+const MAX_DEPTH: usize = 256;
+
+/// The height of an expression tree. Recursive, which is safe: it is only
+/// ever asked about a tree the parser has already held to `MAX_DEPTH`.
+fn height(e: &Expr) -> usize {
+    1 + match e {
+        Expr::Int(..) | Expr::Float(..) | Expr::Bool(..) | Expr::Str(..) | Expr::Var(..) => 0,
+        Expr::Un(_, x, _) | Expr::Field(x, _, _) | Expr::Try(x, _) => height(x),
+        Expr::Bin(_, a, b, _) | Expr::Index(a, b, _) | Expr::RepeatLit(a, b, _) => {
+            height(a).max(height(b))
+        }
+        Expr::MethodCall(x, _, a, _) => height(x).max(args_height(a)),
+        Expr::Call(_, a, _) | Expr::New(_, a, _) | Expr::EnumNew(_, _, a, _) => args_height(a),
+        Expr::SeqLit(xs, _) => xs.iter().map(height).max().unwrap_or(0),
+        Expr::MapLit(kvs, _) => kvs
+            .iter()
+            .map(|(k, v)| height(k).max(height(v)))
+            .max()
+            .unwrap_or(0),
+    }
+}
+
+/// The height of the tallest argument, or 0 for none.
+fn args_height(a: &Args) -> usize {
+    a.pos
+        .iter()
+        .chain(a.named.iter().map(|(_, e)| e))
+        .map(height)
+        .max()
+        .unwrap_or(0)
 }
 
 /// Binding powers. Higher binds tighter. Mirrors C's precedence for the
@@ -111,14 +175,44 @@ impl Parser {
                 }
             }
         }
-        // `distinct <type> Name;` -- the name is the third token, and the
-        // type in the middle may itself be a name.
-        for w in toks.windows(3) {
-            if w[0].tok == Tok::KwDistinct {
-                if let Tok::Ident(n) = &w[2].tok {
-                    type_names.push(n.clone());
-                    own.push(n.clone());
+        // `distinct <type> Name;` -- the name follows the base type, which
+        // is not always one token: `distinct List<int> Bag;` and
+        // `distinct lib.Point Here;` both have more in the middle. Walk past
+        // the base the way `expect_ty` would read it -- an optional `mod.`,
+        // the name, then a balanced `<...>` -- and take the identifier after.
+        // Assuming a fixed position registered `int` or `<` as the name and
+        // left the real one unusable as a type.
+        for (i, t) in toks.iter().enumerate() {
+            if t.tok != Tok::KwDistinct {
+                continue;
+            }
+            let at = |j: usize| toks.get(j).map(|t| &t.tok);
+            let mut j = i + 1;
+            if matches!(at(j), Some(Tok::Ident(_))) && at(j + 1) == Some(&Tok::Dot) {
+                j += 2;
+            }
+            j += 1;
+            if at(j) == Some(&Tok::Lt) {
+                let mut depth = 0usize;
+                while let Some(t) = at(j) {
+                    match t {
+                        Tok::Lt => depth += 1,
+                        Tok::Gt => {
+                            depth -= 1;
+                            if depth == 0 {
+                                j += 1;
+                                break;
+                            }
+                        }
+                        Tok::Semi | Tok::Eof => break,
+                        _ => {}
+                    }
+                    j += 1;
                 }
+            }
+            if let Some(Tok::Ident(n)) = at(j) {
+                type_names.push(n.clone());
+                own.push(n.clone());
             }
         }
         Parser {
@@ -132,6 +226,7 @@ impl Parser {
             ty_exprs: Vec::new(),
             module: String::new(),
             stdlib: false,
+            depth: 0,
         }
     }
 
@@ -244,6 +339,80 @@ impl Parser {
         matches!(self.peek_at(i), Tok::Ident(_))
     }
 
+    /// At `lib . Name < ... >`, the offset just past the `>` -- provided
+    /// everything between the angle brackets could be a type argument list
+    /// and a `(` or `.` follows it, which is what makes it a construction or
+    /// a member of a generic type rather than anything else.
+    fn qualified_targs_end(&self) -> Option<usize> {
+        if self.peek_at(3) != &Tok::Lt {
+            return None;
+        }
+        let mut i = 3;
+        let mut depth = 0usize;
+        loop {
+            match self.peek_at(i) {
+                Tok::Lt => depth += 1,
+                Tok::Gt => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                Tok::Ident(_) | Tok::Comma | Tok::Dot => {}
+                t if Self::ty_of(t).is_some() => {}
+                _ => return None,
+            }
+            i += 1;
+        }
+        i += 1;
+        matches!(self.peek_at(i), Tok::LParen | Tok::Dot).then_some(i)
+    }
+
+    /// Run one nested parse, refusing it past `MAX_DEPTH`. `what` names the
+    /// kind of thing that nested too far, for the diagnostic.
+    fn nested<T>(
+        &mut self,
+        what: &str,
+        f: impl FnOnce(&mut Self) -> Result<T, Diag>,
+    ) -> Result<T, Diag> {
+        if self.depth >= MAX_DEPTH {
+            return Err(self.too_deep(what, self.span()));
+        }
+        self.depth += 1;
+        let r = f(self);
+        self.depth -= 1;
+        r
+    }
+
+    fn too_deep(&self, what: &str, span: Span) -> Diag {
+        Diag::new(
+            span,
+            format!("{what} nested too deeply (limit {MAX_DEPTH})"),
+        )
+    }
+
+    /// A loop just made the tree under `e` one level taller without
+    /// recursing -- a binary operator or a postfix link. `h` is the height
+    /// of `e`, kept by the loop so the chain is not re-measured each time.
+    fn check_height(&self, h: usize, e: &Expr) -> Result<(), Diag> {
+        if self.depth + h > MAX_DEPTH {
+            return Err(self.too_deep("expression", e.span()));
+        }
+        Ok(())
+    }
+
+    fn expect_ty(&mut self) -> Result<Ty, Diag> {
+        self.nested("type", Self::expect_ty_inner)
+    }
+
+    fn parse_stmt(&mut self) -> Result<Stmt, Diag> {
+        self.nested("statement", Self::parse_stmt_inner)
+    }
+
+    fn parse_expr(&mut self, min_bp: u8) -> Result<Expr, Diag> {
+        self.nested("expression", |p| p.parse_expr_inner(min_bp))
+    }
+
     fn peek(&self) -> &Tok {
         &self.toks[self.pos].tok
     }
@@ -300,7 +469,7 @@ impl Parser {
         })
     }
 
-    fn expect_ty(&mut self) -> Result<Ty, Diag> {
+    fn expect_ty_inner(&mut self) -> Result<Ty, Diag> {
         // `lib.P` -- a type from another module. It interns to the same
         // `lib#P` the declaring file produced, which is what makes the two
         // spellings name one type.
@@ -1070,7 +1239,7 @@ impl Parser {
 
     // ---- statements --------------------------------------------------
 
-    fn parse_stmt(&mut self) -> Result<Stmt, Diag> {
+    fn parse_stmt_inner(&mut self) -> Result<Stmt, Diag> {
         let span = self.span();
 
         // Declaration. Three spellings, all decidable with two tokens:
@@ -1265,18 +1434,24 @@ impl Parser {
 
     // ---- expressions (Pratt) -----------------------------------------
 
-    fn parse_expr(&mut self, min_bp: u8) -> Result<Expr, Diag> {
+    fn parse_expr_inner(&mut self, min_bp: u8) -> Result<Expr, Diag> {
         let mut lhs = self.parse_prefix()?;
+        // The height of `lhs`, measured once the chain first grows.
+        let mut h: Option<usize> = None;
         while let Some((op, bp)) = infix_bp(self.peek()) {
             if bp < min_bp {
                 break;
             }
             let span = self.span();
             self.bump();
+            let hl = h.unwrap_or_else(|| height(&lhs));
             // All binary operators here are left-associative, so the right
             // side binds at bp + 1.
             let rhs = self.parse_expr(bp + 1)?;
+            let hn = hl.max(height(&rhs)) + 1;
             lhs = Expr::Bin(op, Box::new(lhs), Box::new(rhs), span);
+            self.check_height(hn, &lhs)?;
+            h = Some(hn);
         }
         Ok(lhs)
     }
@@ -1288,31 +1463,46 @@ impl Parser {
     /// `src.get(k)?.size()`: the `?` ended the chain and the `.size()` after
     /// it had nowhere to attach.
     fn parse_postfix(&mut self, mut e: Expr) -> Result<Expr, Diag> {
+        // The height of `e`, measured once the chain first grows -- a long
+        // chain builds a tree as deep as a long nest of parentheses.
+        let mut h: Option<usize> = None;
         loop {
             let span = self.span();
-            match self.peek() {
+            if !matches!(self.peek(), Tok::Dot | Tok::LBracket | Tok::Question) {
+                return Ok(e);
+            }
+            let he = h.unwrap_or_else(|| height(&e));
+            let child = match self.peek() {
                 Tok::Dot => {
                     self.bump();
                     let (name, _) = self.expect_ident()?;
-                    e = if self.peek() == &Tok::LParen {
+                    if self.peek() == &Tok::LParen {
                         let args = self.parse_args()?;
-                        Expr::MethodCall(Box::new(e), name, args, span)
+                        let ha = args_height(&args);
+                        e = Expr::MethodCall(Box::new(e), name, args, span);
+                        ha
                     } else {
-                        Expr::Field(Box::new(e), name, span)
-                    };
+                        e = Expr::Field(Box::new(e), name, span);
+                        0
+                    }
                 }
                 Tok::LBracket => {
                     self.bump();
                     let i = self.parse_expr(0)?;
                     self.expect(Tok::RBracket)?;
+                    let hi = height(&i);
                     e = Expr::Index(Box::new(e), Box::new(i), span);
+                    hi
                 }
-                Tok::Question => {
+                _ => {
                     self.bump();
                     e = Expr::Try(Box::new(e), span);
+                    0
                 }
-                _ => return Ok(e),
-            }
+            };
+            let hn = he.max(child) + 1;
+            self.check_height(hn, &e)?;
+            h = Some(hn);
         }
     }
 
@@ -1416,18 +1606,41 @@ impl Parser {
             // an enum variant on another module's type. Told apart from
             // `lib.f(..)` by the SECOND dot: a module function call has only
             // one.
+            //
+            // With type arguments the same two, plus a construction:
+            // `lib.Box<int>(..)`, `lib.Res<int>.Ok(1)`. The parser cannot
+            // know that `Box` is a type in `lib`, but `lib.x < ...` can never
+            // be a comparison worth reading this way: a module exports
+            // functions and types, not values, so `lib.x` alone is not an
+            // operand. Plain `lib.Point(..)` has no such marker and stays a
+            // qualified call; the lowerer builds the type when `lib` has one
+            // by that name.
             Tok::Ident(m)
                 if self.imports.contains(&m)
                     && self.peek_at(1) == &Tok::Dot
                     && matches!(self.peek_at(2), Tok::Ident(_))
-                    && self.peek_at(3) == &Tok::Dot =>
+                    && (self.peek_at(3) == &Tok::Dot || self.qualified_targs_end().is_some()) =>
             {
                 self.bump();
                 self.bump();
                 let (tname, _) = self.expect_ident()?;
+                let mut targs = Vec::new();
+                if self.eat(&Tok::Lt) {
+                    loop {
+                        targs.push(self.expect_ty()?);
+                        if !self.eat(&Tok::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(Tok::Gt)?;
+                }
+                let ty = self.intern(format!("{m}#{tname}"), targs);
+                if self.peek() == &Tok::LParen {
+                    let args = self.parse_args()?;
+                    return Ok(Expr::New(ty, args, span));
+                }
                 self.expect(Tok::Dot)?;
                 let (member, _) = self.expect_ident()?;
-                let ty = self.intern(format!("{m}#{tname}"), Vec::new());
                 let args = if self.peek() == &Tok::LParen {
                     self.parse_args()?
                 } else {

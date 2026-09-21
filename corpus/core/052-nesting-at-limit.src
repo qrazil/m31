@@ -1,0 +1,510 @@
+// Nested blocks at the nesting limit, the most expensive shape per level
+// for the passes after the parser. It must compile, run and format; if a
+// pass grows its stack frames, this is the program that fails first --
+// see MAX_DEPTH in src/parser.rs. One level deeper is refused.
+int depth = 0;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+if (true) { depth = depth + 1;
+print(depth);
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}
+}

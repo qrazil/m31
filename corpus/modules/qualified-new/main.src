@@ -1,0 +1,46 @@
+import lib;
+
+// `lib.Point(..)` used to be read as a call to a function `Point` in `lib`,
+// and refused: "`lib` has no function `Point`". A type could be named from
+// another module and reached through its statics, but not built.
+lib.Point p = lib.Point(3, 4);
+print(p.sum());                 // 7
+print(lib.Point(1, 1).x);       // 1
+
+lib.Opts o = lib.Opts(2, loud: true);
+print(o.name);                  // anon
+print(o.loud);                  // true
+
+// Generic: the type arguments mark it as a type, so this one is settled by
+// the parser rather than the lowerer.
+lib.Box<int> b = lib.Box<int>(41);
+print(b.item + 1);              // 42
+List<lib.Box<str>> boxes = [lib.Box<str>("hi")];
+print(boxes[0].item);           // hi
+
+// Enum variants through the module, with and without a payload, and on a
+// generic enum.
+lib.Colour c = lib.Colour.Green;
+match (c) {
+    case Red: { print("red"); }
+    case Green: { print("green"); }     // green
+}
+match (lib.Shape.Circle(5)) {
+    case Circle(int r): { print(r); }   // 5
+    case Square(int w, int h): { print(w * h); }
+}
+lib.Res<int> r = lib.Res<int>.Ok(7);
+match (r) {
+    case Ok(int v): { print(v); }       // 7
+    case Fail(str m): { print(m); }
+}
+
+// A distinct type from another module, and one declared here over a
+// qualified base.
+lib.Bag bag = [1, 2, 3];
+print(bag.size());              // 3
+distinct lib.Point Here;
+Here h = Here(p);
+
+// A comparison next to a module name is still a comparison.
+print(p.x < p.y);               // true
