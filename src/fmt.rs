@@ -24,8 +24,18 @@ pub struct Fmt {
     out: String,
     depth: usize,
     comments: Vec<Comment>,
-    /// Index of the next comment not yet emitted.
-    next: usize,
+    /// Which comments have been printed. A flag per comment rather than a
+    /// cursor, because items are printed out of source order: a cursor
+    /// advanced past one item's body swallowed the comments of every item
+    /// before it.
+    done: Vec<bool>,
+    /// Each top-level item's first line mapped to its last -- the closing
+    /// brace, or the `;` of a bodiless declaration. A comment between the two
+    /// is in the item's body and stays there.
+    ends: std::collections::HashMap<u32, u32>,
+    /// The first line of the item being printed. Body comments are only
+    /// taken from its own range, never from an item printed later.
+    lo: u32,
     /// Comments claimed by a top-level item, keyed by the item's source
     /// line. Assignment happens in SOURCE order before anything is printed,
     /// because the printer reorders items -- a comment written above a free
@@ -41,12 +51,19 @@ pub struct Fmt {
 
 const INDENT: &str = "    ";
 
-pub fn format(p: &Program, comments: Vec<Comment>) -> String {
+pub fn format(
+    p: &Program,
+    comments: Vec<Comment>,
+    ends: std::collections::HashMap<u32, u32>,
+) -> String {
+    let n = comments.len();
     let mut f = Fmt {
         out: String::new(),
         depth: 0,
         comments,
-        next: 0,
+        done: vec![false; n],
+        ends,
+        lo: 0,
         owned: std::collections::BTreeMap::new(),
         header: Vec::new(),
     };
@@ -111,34 +128,50 @@ impl Fmt {
         };
         if gap_after {
             self.header = self.comments[..end].to_vec();
-            self.next = end;
+            for d in &mut self.done[..end] {
+                *d = true;
+            }
         }
 
-        let mut lines: Vec<u32> = Vec::new();
+        // Every place a comment can attach, in source order: items, which
+        // are reordered and so take their comments with them, and top-level
+        // statements, which are not. A comment belongs to an item only when
+        // the item is the very next anchor below it and the comment is not
+        // inside some earlier item's body.
+        let mut anchors: Vec<(u32, bool)> = Vec::new();
         for t in &p.types {
-            lines.push(t.span.line);
+            anchors.push((t.span.line, true));
         }
         for f in &p.funcs {
-            lines.push(f.span.line);
+            anchors.push((f.span.line, true));
         }
-        lines.sort_unstable();
+        for st in &p.toplevel {
+            anchors.push((stmt_line(st), false));
+        }
+        anchors.sort_unstable();
 
-        let mut i = self.next;
-        for &l in &lines {
-            let mut mine = Vec::new();
-            while i < self.comments.len() && self.comments[i].line < l {
-                // Only a comment on its own line belongs to the item below;
-                // one trailing code stays with the line it was written on.
-                if self.comments[i].own_line {
-                    mine.push(self.comments[i].clone());
-                }
-                i += 1;
+        for i in 0..self.comments.len() {
+            if self.done[i] || !self.comments[i].own_line {
+                continue;
             }
-            if !mine.is_empty() {
-                self.owned.entry(l).or_default().extend(mine);
+            let line = self.comments[i].line;
+            let inside = self
+                .ends
+                .iter()
+                .any(|(&from, &to)| from <= line && line <= to);
+            if inside {
+                continue;
+            }
+            if let Some(&(at, is_item)) = anchors.iter().find(|(a, _)| *a > line) {
+                if is_item {
+                    self.owned
+                        .entry(at)
+                        .or_default()
+                        .push(self.comments[i].clone());
+                    self.done[i] = true;
+                }
             }
         }
-        self.next = i;
     }
 
     /// Emit the comments claimed by the item declared at `line`.
@@ -152,12 +185,16 @@ impl Fmt {
         }
     }
 
-    /// Emit every not-yet-claimed comment that appeared before `line`.
-    /// Used inside bodies, where nothing is reordered.
+    /// Emit every not-yet-printed comment in the current item's range that
+    /// appeared before `line`.
     fn comments_before(&mut self, line: u32) {
-        while self.next < self.comments.len() && self.comments[self.next].line < line {
-            let c = self.comments[self.next].clone();
-            self.next += 1;
+        for i in 0..self.comments.len() {
+            let c = &self.comments[i];
+            if self.done[i] || c.line < self.lo || c.line >= line {
+                continue;
+            }
+            self.done[i] = true;
+            let c = c.clone();
             if c.own_line {
                 for part in c.text.lines() {
                     self.line(part.trim());
@@ -170,10 +207,23 @@ impl Fmt {
         }
     }
 
+    /// Before an item's closing brace: a comment after its last statement
+    /// is still inside it.
+    fn end_item(&mut self, line: u32) {
+        if let Some(&end) = self.ends.get(&line) {
+            self.comments_before(end);
+        }
+        self.lo = 0;
+    }
+
     fn trailing(&mut self) {
-        while self.next < self.comments.len() {
-            let c = self.comments[self.next].clone();
-            self.next += 1;
+        self.lo = 0;
+        for i in 0..self.comments.len() {
+            if self.done[i] {
+                continue;
+            }
+            self.done[i] = true;
+            let c = self.comments[i].clone();
             for part in c.text.lines() {
                 self.line(part.trim());
             }
@@ -276,6 +326,7 @@ impl Fmt {
             format!("<{}>", t.tparams.join(", "))
         };
         self.line(&format!("{vis}{kw} {}{tp} {{", shown(&t.name)));
+        self.lo = t.span.line;
         self.depth += 1;
         for v in &t.variants {
             self.comments_before(v.span.line);
@@ -307,6 +358,7 @@ impl Fmt {
                 self.params(&m.params)
             ));
         }
+        self.end_item(t.span.line);
         self.depth -= 1;
         self.line("}");
     }
@@ -337,8 +389,10 @@ impl Fmt {
             self.ty(f.ret),
             self.params(&f.params)
         ));
+        self.lo = f.span.line;
         self.depth += 1;
         self.block(&f.body);
+        self.end_item(f.span.line);
         self.depth -= 1;
         self.line("}");
     }
@@ -564,11 +618,12 @@ impl Fmt {
             Expr::Str(s, _) => format!("{s:?}"),
             Expr::Var(n, _) => n.clone(),
             Expr::Bin(op, l, r, _) => {
+                let p = prec(*op);
                 format!(
                     "{} {} {}",
-                    self.operand(l, true),
+                    self.operand(l, true, p),
                     op.spelling(),
-                    self.operand(r, false)
+                    self.operand(r, false, p)
                 )
             }
             Expr::Un(op, x, _) => {
@@ -576,30 +631,67 @@ impl Fmt {
                     UnOp::Neg => "-",
                     UnOp::Not => "!",
                 };
-                format!("{o}{}", self.operand(x, false))
+                format!("{o}{}", self.operand(x, true, UNARY))
             }
             Expr::Call(n, a, _) => format!("{n}({})", self.args(a)),
             Expr::MethodCall(o, m, a, _) => {
-                format!("{}.{m}({})", self.operand(o, false), self.args(a))
+                format!("{}.{m}({})", self.operand(o, true, POSTFIX), self.args(a))
             }
-            Expr::Field(o, f, _) => format!("{}.{f}", self.operand(o, false)),
-            Expr::Index(o, i, _) => format!("{}[{}]", self.operand(o, false), self.expr(i)),
+            Expr::Field(o, f, _) => format!("{}.{f}", self.operand(o, true, POSTFIX)),
+            Expr::Index(o, i, _) => format!("{}[{}]", self.operand(o, true, POSTFIX), self.expr(i)),
             Expr::New(t, a, _) => format!("{}({})", self.ty(*t), self.args(a)),
         }
     }
 
-    /// Parenthesise a subexpression when dropping the parentheses would
-    /// change how it reparses. Conservative: any nested binary or unary
-    /// expression keeps its parentheses rather than reasoning about
-    /// precedence, because a formatter that changes meaning is worse than one
-    /// that is slightly verbose.
-    fn operand(&self, e: &Expr, _left: bool) -> String {
+    /// Parenthesise a subexpression exactly when dropping the parentheses
+    /// would change how it reparses, the way gofmt does: a looser operator
+    /// under a tighter one, or an equal one on the right, since every binary
+    /// operator associates to the left. Anything more is noise -- the old
+    /// rule of parenthesising every nested operator turned `a * b + c` into
+    /// `(a * b) + c` in every file it touched.
+    ///
+    /// The "formatter preserves meaning" gate reformats the whole corpus and
+    /// compares the emitted C, so a mistake here, or drift from the parser's
+    /// table, is caught there rather than trusted.
+    fn operand(&self, e: &Expr, left: bool, parent: u8) -> String {
         match e {
-            Expr::Bin(..) | Expr::Un(..) => format!("({})", self.expr(e)),
+            Expr::Bin(op, ..) => {
+                let p = prec(*op);
+                if p < parent || (p == parent && !left) {
+                    format!("({})", self.expr(e))
+                } else {
+                    self.expr(e)
+                }
+            }
+            // A unary operator binds tighter than any binary one, so it
+            // never needs parentheses as an operand of one. Under another
+            // unary it keeps them: `-(-x)`, never `--x`.
+            Expr::Un(..) if parent < UNARY => self.expr(e),
+            Expr::Un(..) => format!("({})", self.expr(e)),
             _ => self.expr(e),
         }
     }
 }
+
+/// Binding power of a binary operator: higher binds tighter. The same
+/// numbers as the parser's `infix_bp`, which is what makes printing without
+/// parentheses reparse to the same tree.
+fn prec(op: BinOp) -> u8 {
+    match op {
+        BinOp::Or => 1,
+        BinOp::And => 2,
+        BinOp::Eq | BinOp::Ne => 3,
+        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => 4,
+        BinOp::Add | BinOp::Sub => 5,
+        BinOp::Mul | BinOp::Div | BinOp::Rem => 6,
+    }
+}
+
+/// Binding power of a unary operator -- the parser's `UNARY_BP`.
+const UNARY: u8 = 7;
+/// What a postfix operand (`.f`, `[i]`, `.m()`) binds with: tighter than
+/// anything, so any operator expression under it needs parentheses.
+const POSTFIX: u8 = 8;
 
 thread_local! {
     /// Source spellings for `Ty::User`, set by the driver before formatting.

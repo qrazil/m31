@@ -20,6 +20,12 @@ trap 'rm -rf "$WORK"' EXIT
 pass=0
 fail=0
 
+# -ffp-contract=off on every build: without it a C compiler may fuse
+# `a * b + c` into one fused multiply-add, which rounds once instead of twice.
+# That changes float results between targets that have FMA and targets that
+# do not, and breaks the exact-arithmetic tricks lib/math.src relies on. x86-64
+# without -march has no FMA, so the flag changes nothing here today; it is
+# here so an ARM build cannot quietly disagree.
 # --- compiler matrix: whatever is installed ---------------------------------
 CCS=()
 command -v gcc   >/dev/null && CCS+=("gcc:-O0" "gcc:-O2")
@@ -62,8 +68,8 @@ run_one() {
 
     # The runtime is a separate translation unit on purpose, and -flto is
     # deliberately absent — see docs/ir-v0.md §7.1 and runtime/rt.c.
-    if ! "$cc" "$opt" -Wall -Wextra -DRC_DEBUG -I runtime \
-         -pthread -o "$bin" "$WORK/$base.c" runtime/rt.c -lm 2>"$WORK/$base.cc"; then
+    if ! "$cc" "$opt" -ffp-contract=off -Wall -Wextra -DRC_DEBUG -I runtime \
+         -pthread -o "$bin" "$WORK/$base.c" runtime/rt.c 2>"$WORK/$base.cc"; then
       fail_test "$label [$cc $opt]" "C compiler rejected emitted code: $(head -1 "$WORK/$base.cc")"
       return
     fi
@@ -155,8 +161,8 @@ for src in corpus/traps/*."$LANG_EXT"; do
     cc=${entry%%:*}
     opt=${entry##*:}
     bin="$WORK/$base.t.$cc$opt"
-    if ! "$cc" "$opt" -Wall -Wextra -DRC_DEBUG -I runtime \
-         -pthread -o "$bin" "$WORK/$base.c" runtime/rt.c -lm 2>"$WORK/$base.tcc"; then
+    if ! "$cc" "$opt" -ffp-contract=off -Wall -Wextra -DRC_DEBUG -I runtime \
+         -pthread -o "$bin" "$WORK/$base.c" runtime/rt.c 2>"$WORK/$base.tcc"; then
       fail_test "$label [$cc $opt]" "C compiler rejected emitted code"
       trap_ok=0; break
     fi

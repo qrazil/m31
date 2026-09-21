@@ -283,6 +283,34 @@ bool rt_str_parse_int(Obj *o, int64_t *out) {
     return true;
 }
 
+/* The text parse_float accepts, checked before strtod sees it: a sign, then
+ * decimal digits with an optional fraction and exponent, or one of the words
+ * to_str produces for the values that have no digits. strtod alone also takes
+ * leading whitespace, hex floats and "infinity" -- none of which parse_int
+ * accepts, so the two disagreed about what a number looks like. strtod is
+ * still what converts, because correct rounding is not something to redo. */
+static bool float_text_ok(const char *p, int64_t n) {
+    int64_t i = 0;
+    if (i < n && (p[i] == '+' || p[i] == '-')) i++;
+    if (n - i == 3 && (memcmp(p + i, "inf", 3) == 0 || memcmp(p + i, "nan", 3) == 0))
+        return true;
+    int64_t digits = 0;
+    while (i < n && p[i] >= '0' && p[i] <= '9') { i++; digits++; }
+    if (i < n && p[i] == '.') {
+        i++;
+        while (i < n && p[i] >= '0' && p[i] <= '9') { i++; digits++; }
+    }
+    if (digits == 0) return false;
+    if (i < n && (p[i] == 'e' || p[i] == 'E')) {
+        i++;
+        if (i < n && (p[i] == '+' || p[i] == '-')) i++;
+        int64_t exp_digits = 0;
+        while (i < n && p[i] >= '0' && p[i] <= '9') { i++; exp_digits++; }
+        if (exp_digits == 0) return false;
+    }
+    return i == n;
+}
+
 bool rt_str_parse_float(Obj *o, double *out) {
     const Str *s = (const Str *)o;
     if (s->len == 0) return false;
@@ -291,11 +319,18 @@ bool rt_str_parse_float(Obj *o, double *out) {
     for (int64_t i = 0; i < s->len; i++) {
         if (s->data[i] == '\0') return false;
     }
+    if (!float_text_ok(s->data, s->len)) return false;
     char *end = NULL;
     errno = 0;
     double v = strtod(s->data, &end);
     if (end != s->data + s->len) return false;
-    if (errno == ERANGE) return false;
+    /* ERANGE means two different things. On overflow the result is
+     * +-HUGE_VAL and the text named a number no float can hold: refuse it.
+     * On underflow the result is the correctly rounded subnormal (or zero),
+     * which IS the answer -- glibc sets ERANGE for "5e-324", the smallest
+     * float there is, and treating that as failure made every subnormal
+     * unparseable. */
+    if (errno == ERANGE && (v == HUGE_VAL || v == -HUGE_VAL)) return false;
     *out = v;
     return true;
 }
@@ -1357,16 +1392,6 @@ _Noreturn void rt_trap(const char *msg) {
     abort();
 }
 
-/* ---- math primitives -------------------------------------------------- */
-/* Deliberately thin. A wrapper that second-guessed libm would be a place for
- * this language's float behaviour to quietly differ from C's, and the oracle
- * (docs/roadmap.md) depends on it not doing that. */
-
-double rt_sqrt(double x)  { return sqrt(x); }
-double rt_pow(double x, double y) { return pow(x, y); }
-double rt_floor(double x) { return floor(x); }
-double rt_ceil(double x)  { return ceil(x); }
-double rt_round(double x) { return round(x); }
 
 /* ---- io primitives ---------------------------------------------------- */
 /* Every path is a str, which is NUL-terminated by construction (str_new), so

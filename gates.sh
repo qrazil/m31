@@ -120,7 +120,7 @@ run "formatter preserves meaning" bash -c '
             # Behaviour, not just text -- but only where an expectation exists.
             exp="${f%.'"$LANG_EXT"'}.out"
             if [ -e "$exp" ]; then
-                if gcc -O0 -I runtime "$w/b.c" runtime/rt.c -lpthread -lm \
+                if gcc -O0 -I runtime "$w/b.c" runtime/rt.c -lpthread \
                        -o "$w/b" 2>/dev/null; then
                     in="${f%.'"$LANG_EXT"'}.in"
                     [ -e "$in" ] || in=/dev/null
