@@ -23,6 +23,8 @@ pub struct Parser {
     tparams: Vec<String>,
     /// Interned type expressions; `Ty::User` indexes this.
     ty_exprs: Vec<TyExpr>,
+    /// The module currently being parsed; every declaration records it.
+    module: String,
 }
 
 /// Binding powers. Higher binds tighter. Mirrors C's precedence for the
@@ -90,6 +92,7 @@ impl Parser {
             type_names,
             tparams: Vec::new(),
             ty_exprs: Vec::new(),
+            module: String::new(),
         }
     }
 
@@ -372,6 +375,8 @@ impl Parser {
                 .collect();
             out.push(TypeDecl {
                 name: name.to_string(),
+                module: String::new(),
+                is_pub: true,
                 tparams: tparams.into_iter().map(str::to_string).collect(),
                 fields: Vec::new(),
                 methods: Vec::new(),
@@ -385,19 +390,53 @@ impl Parser {
         out
     }
 
-    pub fn parse_program(&mut self) -> Result<Program, Diag> {
+    pub fn parse_program(&mut self, module: &str) -> Result<Program, Diag> {
+        self.module = module.to_string();
         let mut funcs = Vec::new();
         let mut types = Vec::new();
         let mut toplevel = Vec::new();
+        let mut imports: Vec<Import> = Vec::new();
+
+        // Imports come first, so a reader knows a file's dependencies without
+        // reading the file.
+        while self.peek() == &Tok::KwImport {
+            let span = self.span();
+            self.bump();
+            let (name, _) = self.expect_ident()?;
+            self.expect(Tok::Semi)?;
+            if name == module {
+                return Err(Diag::new(span, format!("`{name}` imports itself")));
+            }
+            if imports.iter().any(|i| i.name == name) {
+                return Err(Diag::new(span, format!("`{name}` is imported twice")));
+            }
+            imports.push(Import { name, span });
+        }
+
         while self.peek() != &Tok::Eof {
+            if self.peek() == &Tok::KwImport {
+                return Err(Diag::new(
+                    self.span(),
+                    "every `import` must come before the first declaration",
+                ));
+            }
+            // Private is the default: forgetting to mark something private
+            // would export it permanently, and forgetting to mark something
+            // public is a one-word fix.
+            let is_pub = self.eat(&Tok::KwPub);
             if self.peek() == &Tok::KwDistinct {
-                types.push(self.parse_distinct()?);
+                types.push(self.parse_distinct(is_pub)?);
             } else if self.peek() == &Tok::KwEnum {
-                types.push(self.parse_enum_decl()?);
+                types.push(self.parse_enum_decl(is_pub)?);
             } else if self.peek() == &Tok::KwType || self.peek() == &Tok::KwInterface {
-                types.push(self.parse_type_decl()?);
+                types.push(self.parse_type_decl(is_pub)?);
             } else if self.starts_func() {
-                funcs.push(self.parse_func()?);
+                funcs.push(self.parse_func(is_pub)?);
+            } else if is_pub {
+                return Err(Diag::new(
+                    self.span(),
+                    "`pub` marks a declaration; a statement has nothing to export",
+                ));
             } else {
                 // Anything else at the top level is a statement, and runs.
                 toplevel.push(self.parse_stmt()?);
@@ -418,6 +457,8 @@ impl Parser {
             }
         }
         Ok(Program {
+            module: module.to_string(),
+            imports,
             types,
             prelude,
             funcs,
@@ -498,7 +539,7 @@ impl Parser {
     }
 
     /// `distinct int Price;`
-    fn parse_distinct(&mut self) -> Result<TypeDecl, Diag> {
+    fn parse_distinct(&mut self, is_pub: bool) -> Result<TypeDecl, Diag> {
         let span = self.span();
         self.expect(Tok::KwDistinct)?;
         let base = self.expect_ty()?;
@@ -509,6 +550,8 @@ impl Parser {
         self.expect(Tok::Semi)?;
         Ok(TypeDecl {
             name,
+            module: self.module.clone(),
+            is_pub,
             tparams: Vec::new(),
             fields: Vec::new(),
             methods: Vec::new(),
@@ -520,7 +563,7 @@ impl Parser {
         })
     }
 
-    fn parse_type_decl(&mut self) -> Result<TypeDecl, Diag> {
+    fn parse_type_decl(&mut self, is_pub: bool) -> Result<TypeDecl, Diag> {
         let span = self.span();
         // Keyword first, so the kind is known before the name:
         //   type Point { .. }        a struct
@@ -555,6 +598,8 @@ impl Parser {
                 self.expect(Tok::RParen)?;
                 self.expect(Tok::Semi)?;
                 methods.push(Func {
+                    module: self.module.clone(),
+                    is_pub: true,
                     ret,
                     // An interface lists instance methods: a static one has
                     // no receiver, so there is nothing to dispatch on.
@@ -571,6 +616,8 @@ impl Parser {
             self.tparams.clear();
             return Ok(TypeDecl {
                 name,
+                module: self.module.clone(),
+                is_pub,
                 tparams,
                 fields: Vec::new(),
                 methods,
@@ -593,6 +640,8 @@ impl Parser {
         self.tparams.clear();
         Ok(TypeDecl {
             name,
+            module: self.module.clone(),
+            is_pub,
             tparams,
             fields,
             methods: Vec::new(),
@@ -610,7 +659,7 @@ impl Parser {
     /// the same shape whichever kind it is. A payload is a positional list of
     /// types with no names: a variant is not a struct, and if there is enough
     /// in it to want field names then the payload should BE a struct.
-    fn parse_enum_decl(&mut self) -> Result<TypeDecl, Diag> {
+    fn parse_enum_decl(&mut self, is_pub: bool) -> Result<TypeDecl, Diag> {
         let span = self.span();
         self.expect(Tok::KwEnum)?;
         let (name, _) = self.expect_ident()?;
@@ -673,6 +722,8 @@ impl Parser {
         }
         Ok(TypeDecl {
             name,
+            module: self.module.clone(),
+            is_pub,
             tparams,
             fields: Vec::new(),
             methods: Vec::new(),
@@ -703,7 +754,7 @@ impl Parser {
         Ok(out)
     }
 
-    fn parse_func(&mut self) -> Result<Func, Diag> {
+    fn parse_func(&mut self, is_pub: bool) -> Result<Func, Diag> {
         let span = self.span();
         // A generic function's return type may mention its own parameters, so
         // `static Point Point.origin()` -- a method on the TYPE. Read first,
@@ -745,6 +796,8 @@ impl Parser {
         let body = self.parse_block()?;
         self.tparams.clear();
         Ok(Func {
+            module: self.module.clone(),
+            is_pub,
             ret,
             is_static,
             recv,

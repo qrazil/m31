@@ -1,0 +1,4 @@
+corpus/modules/unqualified/main.src:2:7: `answer` is declared in `lib`; write `lib.answer`
+  |
+2 | print(answer());
+  |       ^

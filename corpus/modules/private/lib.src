@@ -1,0 +1,2 @@
+pub int open() { return 1; }
+int closed() { return 2; }

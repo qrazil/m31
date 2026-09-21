@@ -188,5 +188,40 @@ for src in corpus/errors/*."$LANG_EXT"; do
   fi
 done
 
+# --- modules: a program spread over several files ---------------------------
+#
+# One directory per case, entry point `main.$LANG_EXT`, and beside it either
+# `main.out` for a program that runs or `main.err` for one that must be
+# refused. Nested a level deeper than the flat categories so that the other
+# globs do not pick a library file up and run it on its own.
+for dir in corpus/modules/*/; do
+  [ -d "$dir" ] || continue
+  case_name=$(basename "$dir")
+  dir=${dir%/}              # the glob leaves a trailing slash
+  src="$dir/main.$LANG_EXT"
+  if [ ! -e "$src" ]; then
+    fail_test "modules/$case_name" "no main.$LANG_EXT"
+    continue
+  fi
+  if [ -e "$dir/main.err" ]; then
+    label="modules/$case_name"
+    if "$LANGC" --emit-c "$src" -o /dev/null 2>"$WORK/m.diag"; then
+      fail_test "$label" "compiled, but must be rejected"
+    else
+      # Diagnostics name the file they came from, and that path depends on
+      # where the corpus sits. Compare from the corpus root down.
+      sed -E "s#^.*/(corpus/)#\\1#" "$WORK/m.diag" > "$WORK/m.norm"
+      if ! diff -q "$dir/main.err" "$WORK/m.norm" >/dev/null 2>&1; then
+        fail_test "$label" "wrong diagnostic"
+        diff "$dir/main.err" "$WORK/m.norm" 2>/dev/null | head -5 | sed 's/^/      /'
+      else
+        pass=$((pass + 1))
+      fi
+    fi
+  else
+    run_one "$src" "$(cat "$dir/main.out")" "modules/$case_name"
+  fi
+done
+
 echo "── $pass passed, $fail failed"
 [ $fail -eq 0 ]

@@ -80,7 +80,44 @@ not: a file that is all declarations is a program that does nothing.
 Forward references are fine. Types and functions are collected before any
 body is checked, so an item may name one declared later in the file.
 
-There are no modules. One file is the whole program.
+## 2.1 Modules
+
+**A file is a module**, and its name is the file's basename: `strings.src` is
+the module `strings`. There is no `mod` declaration and no module tree to
+keep in agreement with the filesystem.
+
+```c
+import greet;
+import count;
+
+print(greet.shout("world"));
+```
+
+  - **`import` comes first**, before any declaration, so a reader learns a
+    file's dependencies without reading the file. Importing twice, or
+    importing yourself, is an error.
+  - **Private by default.** A declaration is visible only inside its module
+    unless marked `pub`. Reaching a name from another module means writing
+    `mod.name`; unqualified, it is not in scope at all.
+  - **No wildcard import and no aliasing.** A reader can always tell which
+    module a name came from — which matters more here than elsewhere,
+    because §4.1 already bans shadowing. Module names are unique, so two
+    imports cannot collide and an alias would have nothing to resolve.
+  - **Import cycles are refused**, and the diagnostic prints the whole chain.
+    Self-import is the same rule, not a special case.
+  - **One entry file.** The file named on the command line is the program;
+    statements at the top level of any *imported* file are an error.
+
+A module's name has to be usable as an identifier, because it is written in
+source. The entry file is exempt — it is named on the command line and never
+in source, so `011-types.src` is a fine program and a hopeless import.
+
+**Two files whose names differ only in case are an error on every platform**,
+not only where the filesystem would confuse them.
+
+Module names are therefore unique across a program: two files called
+`util.src` in different directories are a collision rather than two modules.
+That is the cost of naming by basename, and it is the same cost OCaml pays.
 
 ---
 

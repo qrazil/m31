@@ -1,0 +1,6 @@
+// A module that imports another. Dependency order puts `greet` first.
+import greet;
+
+pub int loudness(str who) {
+    return greet.shout(who).size();
+}

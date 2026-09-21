@@ -1,0 +1,2 @@
+import b;
+pub int f() { return b.g(); }

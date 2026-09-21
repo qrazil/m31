@@ -11,14 +11,14 @@
 //! a block that is never reached, an extra temporary -- is invisible at the
 //! C level and obvious here.
 
-use crate::{compile, lexer::Lexer, lexer::Tok};
+use crate::{compile_str, lexer::Lexer, lexer::Tok};
 
 fn ir(src: &str) -> String {
-    compile(src, "ir").expect("expected this program to compile")
+    compile_str(src, "ir").expect("expected this program to compile")
 }
 
 fn err(src: &str) -> String {
-    match compile(src, "c") {
+    match compile_str(src, "c") {
         Ok(_) => panic!("expected this program to be rejected"),
         Err(d) => d.to_string(),
     }

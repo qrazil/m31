@@ -1,0 +1,2 @@
+print(99);
+pub int z() { return 1; }

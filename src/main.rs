@@ -14,6 +14,7 @@ mod fmt;
 mod ir;
 mod lexer;
 mod lower;
+mod modules;
 mod mono;
 mod parser;
 
@@ -83,7 +84,7 @@ fn main() -> ExitCode {
     };
 
     if mode == "fmt" {
-        let formatted = match reformat(&src) {
+        let formatted = match reformat(&src, &modules::module_name(&path)) {
             Ok(s) => s,
             Err(d) => {
                 eprintln!("{}", d.render_with_source(&path, &src));
@@ -104,10 +105,13 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let out = match compile(&src, mode) {
+    let out = match compile(&path, mode) {
         Ok(s) => s,
-        Err(d) => {
-            eprintln!("{}", d.render_with_source(&path, &src));
+        Err(modules::Located { path: p, diag }) => {
+            // The diagnostic has to name the file it came from: with several
+            // modules, a bare line:col is not enough to find anything.
+            let text = std::fs::read_to_string(&p).unwrap_or_default();
+            eprintln!("{}", diag.render_with_source(&p, &text));
             return ExitCode::FAILURE;
         }
     };
@@ -126,16 +130,27 @@ fn main() -> ExitCode {
 
 /// Format a source file. Parses only -- it must work on a program that does
 /// not typecheck, because that is exactly when you reach for the formatter.
-fn reformat(src: &str) -> Result<String, diag::Diag> {
+fn reformat(src: &str, module: &str) -> Result<String, diag::Diag> {
     let (toks, comments) = lexer::Lexer::tokenize_with_comments(src)?;
-    let prog = parser::Parser::new(toks).parse_program()?;
+    let prog = parser::Parser::new(toks).parse_program(module)?;
     fmt::set_type_names(&prog);
     Ok(fmt::format(&prog, comments))
 }
 
-fn compile(src: &str, mode: &str) -> Result<String, diag::Diag> {
-    let toks = lexer::Lexer::new(src).tokenize()?;
-    let prog = parser::Parser::new(toks).parse_program()?;
+fn compile(entry: &str, mode: &str) -> Result<String, modules::Located> {
+    // One program, assembled from however many files it imports. Cycles are
+    // refused here -- see docs/modules-decision.md.
+    let prog = modules::load(entry)?;
+    finish(prog, mode).map_err(|d| modules::Located {
+        path: entry.to_string(),
+        diag: d,
+    })
+}
+
+/// Everything after the source has been assembled into one program. Split out
+/// so the unit tests can drive it from a string without touching the
+/// filesystem -- they test the compiler, not the loader.
+fn finish(prog: ast::Program, mode: &str) -> Result<String, diag::Diag> {
     // Generics are erased before lowering, which is why the IR has never
     // needed to know about them. See src/mono.rs.
     let prog = mono::Mono::run(prog)?;
@@ -144,4 +159,12 @@ fn compile(src: &str, mode: &str) -> Result<String, diag::Diag> {
         "ir" => module.to_string(),
         _ => emit_c::emit(&module),
     })
+}
+
+/// Compile one source string as a single-module program.
+#[cfg(test)]
+fn compile_str(src: &str, mode: &str) -> Result<String, diag::Diag> {
+    let toks = lexer::Lexer::new(src).tokenize()?;
+    let prog = parser::Parser::new(toks).parse_program("main")?;
+    finish(prog, mode)
 }

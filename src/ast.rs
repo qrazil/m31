@@ -112,6 +112,14 @@ pub struct EnumVariant {
 #[derive(Debug, Clone)]
 pub struct TypeDecl {
     pub name: String,
+    /// The module that declared this. Set by the loader, so a merged program
+    /// can still tell whose declaration is whose -- which is what makes
+    /// privacy enforceable once every file is in one `Program`.
+    pub module: String,
+    /// Exported from its module. Private is the default: forgetting to mark
+    /// something private would export it permanently, while forgetting to
+    /// mark something public is a one-word fix.
+    pub is_pub: bool,
     /// Type parameter names, empty for a non-generic type.
     pub tparams: Vec<String>,
     pub fields: Vec<Param>,
@@ -308,6 +316,10 @@ pub struct Args {
 
 #[derive(Debug, Clone)]
 pub struct Func {
+    /// The module that declared this -- see `TypeDecl::module`.
+    pub module: String,
+    /// Exported from its module -- see `TypeDecl::is_pub`.
+    pub is_pub: bool,
     pub ret: Ty,
     /// A method on the TYPE rather than on a value: `static Point
     /// Point.origin()`. It has no receiver, so a bare field name means
@@ -342,8 +354,19 @@ impl Func {
     }
 }
 
+/// One `import name;` -- the module this file depends on.
+#[derive(Debug, Clone)]
+pub struct Import {
+    pub name: String,
+    pub span: Span,
+}
+
 #[derive(Debug, Clone)]
 pub struct Program {
+    /// The module this program came from: the source file's basename. The
+    /// entry file's is unused; every other module's qualifies its exports.
+    pub module: String,
+    pub imports: Vec<Import>,
     pub types: Vec<TypeDecl>,
     /// Declarations the compiler supplies rather than the program: `Option`
     /// and `Result`. Kept apart from `types` because they are not part of

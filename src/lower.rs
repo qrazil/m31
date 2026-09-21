@@ -60,6 +60,10 @@ impl Val {
 struct Sig {
     params: Vec<Param>,
     ret: Ty,
+    /// Which module declared this, and whether it left the module. Builtins
+    /// carry an empty module and are visible everywhere.
+    module: String,
+    is_pub: bool,
 }
 
 /// One entry per enclosing `while`, so `break` and `continue` know where to
@@ -99,6 +103,11 @@ pub struct Lowerer {
     /// records only `Ref`, which cannot tell `str` from a user type, and a
     /// match arm has to bind the payload at its real type.
     variant_surface: Vec<Vec<Vec<Ty>>>,
+    /// Every module in the program, so `greet.hello(..)` can be told from a
+    /// field access on a variable called `greet`.
+    modules: std::collections::HashSet<String>,
+    /// The module whose function is being lowered, for privacy checks.
+    cur_module: String,
     /// Keys of methods declared `static`. They are called on the type and
     /// take no receiver, so a call site has to know which kind it has.
     statics: std::collections::HashSet<String>,
@@ -158,6 +167,8 @@ impl Lowerer {
             field_params: Vec::new(),
             distinct_base: Vec::new(),
             variant_surface: Vec::new(),
+            modules: std::collections::HashSet::new(),
+            cur_module: String::new(),
             statics: std::collections::HashSet::new(),
             ty_exprs: Vec::new(),
             iface_methods: Vec::new(),
@@ -189,7 +200,15 @@ impl Lowerer {
                 span: Span::new(0, 0),
             })
             .collect();
-        self.sigs.insert(name.to_string(), Sig { params, ret });
+        self.sigs.insert(
+            name.to_string(),
+            Sig {
+                params,
+                ret,
+                module: String::new(),
+                is_pub: true,
+            },
+        );
     }
 
     /// `s.size()`. The only method a `str` has for now; the string library
@@ -1428,6 +1447,8 @@ impl Lowerer {
                             Sig {
                                 params: sig.params.clone(),
                                 ret: sig.ret,
+                                module: sig.module.clone(),
+                                is_pub: sig.is_pub,
                             },
                         ))
                     })
@@ -1441,6 +1462,8 @@ impl Lowerer {
                             Sig {
                                 params: g.params.clone(),
                                 ret: g.ret,
+                                module: g.module.clone(),
+                                is_pub: g.is_pub,
                             },
                         ));
                     }
@@ -1508,6 +1531,8 @@ impl Lowerer {
                         }]
                     };
                     out.push(Func {
+                        module: t.module.clone(),
+                        is_pub: true,
                         ret: sig.ret,
                         is_static: false,
                         recv: Some(t.name.clone()),
@@ -1597,6 +1622,17 @@ impl Lowerer {
         // accepts int, bool or str and picks the runtime helper statically;
         // that is not user-visible overloading, which does not exist.
         self.builtin("concat", vec![Ty::Str, Ty::Str], Ty::Str);
+
+        for f in &p.funcs {
+            if !f.module.is_empty() {
+                self.modules.insert(f.module.clone());
+            }
+        }
+        for t in &p.types {
+            if !t.module.is_empty() {
+                self.modules.insert(t.module.clone());
+            }
+        }
 
         // After monomorphisation every Ty::User names a concrete declaration
         // with no arguments, so resolution is a name lookup.
@@ -1712,6 +1748,8 @@ impl Lowerer {
                 Sig {
                     params: f.params.clone(),
                     ret: f.ret,
+                    module: f.module.clone(),
+                    is_pub: f.is_pub,
                 },
             );
         }
@@ -1730,6 +1768,8 @@ impl Lowerer {
                 Sig {
                     params: f.params.clone(),
                     ret: f.ret,
+                    module: f.module.clone(),
+                    is_pub: f.is_pub,
                 },
             );
         }
@@ -1739,6 +1779,8 @@ impl Lowerer {
         // one synthesised function. Declarations are order-independent, so a
         // function may be called above its own definition.
         let entry = Func {
+            module: p.module.clone(),
+            is_pub: false,
             ret: Ty::Void,
             is_static: false,
             recv: None,
@@ -2175,6 +2217,7 @@ impl Lowerer {
     }
 
     fn lower_func(&mut self, f: &Func) -> Result<ir::Func, Diag> {
+        self.cur_module = f.module.clone();
         self.types.clear();
         self.blocks.clear();
         self.scopes.clear();
@@ -3797,6 +3840,35 @@ impl Lowerer {
         Ok(Some(Val::new(d, Ty::Str, true)))
     }
 
+    /// `mod.name(args)` -- a call into another module.
+    fn lower_qualified(
+        &mut self,
+        modname: &str,
+        name: &str,
+        args: &Args,
+        span: Span,
+    ) -> Result<Val, Diag> {
+        let Some(sig) = self.sigs.get(name) else {
+            return Err(Diag::new(
+                span,
+                format!("`{modname}` has no function `{name}`"),
+            ));
+        };
+        if sig.module != modname {
+            return Err(Diag::new(
+                span,
+                format!("`{name}` is not declared in `{modname}`"),
+            ));
+        }
+        if !sig.is_pub {
+            return Err(Diag::new(
+                span,
+                format!("`{name}` is private to `{modname}`; mark it `pub` to export it"),
+            ));
+        }
+        self.lower_call(name, args, span)
+    }
+
     fn lower_if(
         &mut self,
         cond: &Expr,
@@ -4055,7 +4127,31 @@ impl Lowerer {
                 }
             }
             Expr::Bin(op, l, r, span) => self.lower_bin(*op, l, r, *span),
-            Expr::Call(name, args, span) => self.lower_call(name, args, *span),
+            Expr::Call(name, args, span) => {
+                // A name from another module is only reachable when it is
+                // exported, and only through that module's name. Unqualified,
+                // it is not in scope at all -- which is what makes `pub` mean
+                // something once every file has been merged into one program.
+                // The check lives here rather than in `lower_call`, because
+                // the qualified form goes through the same function and has
+                // already earned its access.
+                if let Some(sig) = self.sigs.get(name) {
+                    if !sig.module.is_empty() && sig.module != self.cur_module {
+                        return Err(Diag::new(
+                            *span,
+                            if sig.is_pub {
+                                format!(
+                                    "`{name}` is declared in `{}`; write `{}.{name}`",
+                                    sig.module, sig.module
+                                )
+                            } else {
+                                format!("`{name}` is private to `{}`", sig.module)
+                            },
+                        ));
+                    }
+                }
+                self.lower_call(name, args, *span)
+            }
 
             Expr::Field(obj, field, span) => {
                 let o = self.lower_expr(obj)?;
@@ -4078,6 +4174,14 @@ impl Lowerer {
             }
 
             Expr::MethodCall(obj, m, args, span) => {
+                // `greet.hello(..)` -- a module qualifier, not a receiver.
+                // Checked before lowering the "receiver", because there is
+                // no value to lower.
+                if let Expr::Var(modname, _) = &**obj {
+                    if self.modules.contains(modname) && self.lookup(modname).is_none() {
+                        return self.lower_qualified(modname, m, args, *span);
+                    }
+                }
                 let o = self.lower_expr(obj)?;
                 // `str` is not a declared type, so it has no entry in the
                 // type table -- but it still answers `size()`, because one

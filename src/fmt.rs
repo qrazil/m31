@@ -142,6 +142,16 @@ impl Fmt {
     // ---- items --------------------------------------------------------
 
     fn program(&mut self, p: &Program) {
+        // Imports first and in source order, which is where the parser
+        // demands them: a reader learns a file's dependencies without
+        // reading the file.
+        if !p.imports.is_empty() {
+            for i in &p.imports {
+                self.item_comments(i.span.line);
+                self.line(&format!("import {};", i.name));
+            }
+            self.blank();
+        }
         // Types first, each followed by its own methods. Declarations are
         // order-independent, so this cannot change what the program means.
         for t in &p.types {
@@ -186,8 +196,9 @@ impl Fmt {
     }
 
     fn type_decl(&mut self, t: &TypeDecl) {
+        let vis = if t.is_pub { "pub " } else { "" };
         if let Some(b) = t.distinct_base {
-            self.line(&format!("distinct {} {};", self.ty(b), t.name));
+            self.line(&format!("{vis}distinct {} {};", self.ty(b), t.name));
             return;
         }
         let kw = if t.is_interface {
@@ -202,7 +213,7 @@ impl Fmt {
         } else {
             format!("<{}>", t.tparams.join(", "))
         };
-        self.line(&format!("{kw} {}{tp} {{", t.name));
+        self.line(&format!("{vis}{kw} {}{tp} {{", t.name));
         self.depth += 1;
         for v in &t.variants {
             self.comments_before(v.span.line);
@@ -248,9 +259,10 @@ impl Fmt {
             Some(r) => format!("{r}.{}", f.name),
             None => f.name.clone(),
         };
+        let vis = if f.is_pub { "pub " } else { "" };
         let kw = if f.is_static { "static " } else { "" };
         self.line(&format!(
-            "{kw}{} {name}{tp}({}) {{",
+            "{vis}{kw}{} {name}{tp}({}) {{",
             self.ty(f.ret),
             self.params(&f.params)
         ));

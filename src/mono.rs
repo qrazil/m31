@@ -107,6 +107,8 @@ impl Mono {
         }
 
         Ok(Program {
+            module: p.module.clone(),
+            imports: Vec::new(),
             types: m.out_types,
             // Monomorphisation emits concrete instantiations into `types`;
             // past this point there is no generic Option left to keep apart.
@@ -276,6 +278,8 @@ impl Mono {
         let methods = self.subst_iface_methods(&decl.methods, &sub)?;
         self.out_types.push(TypeDecl {
             name: mangled.to_string(),
+            module: decl.module.clone(),
+            is_pub: decl.is_pub,
             tparams: Vec::new(),
             fields,
             methods,
@@ -339,6 +343,8 @@ impl Mono {
         if self.done.insert(mangled.clone()) {
             self.out_types.push(TypeDecl {
                 name: mangled.clone(),
+                module: String::new(),
+                is_pub: true,
                 tparams: Vec::new(),
                 fields: args
                     .iter()
@@ -382,6 +388,8 @@ impl Mono {
                 });
             }
             out.push(Func {
+                module: m.module.clone(),
+                is_pub: m.is_pub,
                 ret: self.subst_ty(m.ret, sub, m.span)?,
                 is_static: m.is_static,
                 recv: m.recv.clone(),
@@ -423,6 +431,8 @@ impl Mono {
         }
         Ok(TypeDecl {
             name: t.name.clone(),
+            module: t.module.clone(),
+            is_pub: t.is_pub,
             tparams: Vec::new(),
             fields,
             methods: self.subst_iface_methods(&t.methods, sub)?,
@@ -459,6 +469,8 @@ impl Mono {
         let body = self.subst_block(&f.body, sub)?;
         self.env.clear();
         Ok(Func {
+            module: f.module.clone(),
+            is_pub: f.is_pub,
             ret,
             is_static: f.is_static,
             recv: f.recv.clone(),

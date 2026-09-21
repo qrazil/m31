@@ -1,0 +1,4 @@
+corpus/modules/private/main.src:2:10: `closed` is private to `lib`; mark it `pub` to export it
+  |
+2 | print(lib.closed());
+  |          ^

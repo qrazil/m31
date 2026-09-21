@@ -1,0 +1,7 @@
+// The entry file: the only one allowed statements, named on the command line.
+import greet;
+import count;
+
+print(greet.shout("world"));
+print(greet.both("ada"));
+print(count.loudness("hi"));

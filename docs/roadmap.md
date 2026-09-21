@@ -17,7 +17,7 @@ Anything marked done there is tested; the corpus is the proof.
 
 | | |
 |---|---|
-| Corpus | 163 programs — 48 behaviour, 93 diagnostics, 15 traps, 7 Go twins |
+| Corpus | 168 programs — 48 behaviour, 93 diagnostics, 15 traps, 7 Go twins, 5 multi-module |
 | Oracle | gcc and clang, each at -O0 and -O2, all four must agree |
 | Leaks | every behaviour program asserts `__rc_live=0` at exit |
 | Warnings | emitted C must be clean under `-Wall -Wextra` |
@@ -66,6 +66,9 @@ exact error-type matching, and a discarded `Result` as a compile error. The
 one thing left is what `E` should be in a standard library, which
 `docs/errors-decision.md` says to settle last -- once there is a library to
 say what actually fails.
+
+**Modules.** A file is a module; `pub` to export, private by default;
+acyclic imports enforced with a chain-printing diagnostic.
 
 **Conversions.** `print(v)` and `str(v)` on a user type go through its
 `to_str`; `to_X` generally is an ordinary method plus a structural
@@ -156,16 +159,21 @@ so it is a static method -- `int.parse(s)` -- and static methods now exist.
 What it waits on is what `E` should be, the last open question in
 `docs/errors-decision.md`.
 
-### 3. Modules
+### 3. Modules — done
 
-**Designed: `docs/modules-decision.md`.** A file is a module and its name is
-the basename; private by default with `pub` to export; import cycles
-forbidden and reported as the whole chain; imports qualified with no wildcards
-and no aliases; one entry file, declared rather than discovered.
+`docs/modules-decision.md`, built. A file is a module named by its basename,
+private by default with `pub`, qualified imports with no wildcards or
+aliases, cycles refused with the whole chain printed, one entry file declared
+on the command line.
 
-One file is still the whole program. Kept behind errors because a module
-system revised once errors land is a module system written twice -- and
-errors landed, so this is next.
+Two things the implementation settled that the record left implicit:
+
+  - Only an IMPORTED module needs a name that is an identifier. The entry
+    file is named on the command line and never in source, so the corpus's
+    `011-types.src` keeps working.
+  - Every declaration records which module declared it, because privacy has
+    to survive the point where all the files are concatenated into one
+    program.
 
 ### 4. Standard library
 

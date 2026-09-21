@@ -94,13 +94,17 @@ run "runtime compiles clean" bash -c '
 # byte-compare was standing in for, checked directly.
 run "formatter preserves meaning" bash -c '
     bad=0
-    for f in corpus/*/*.'"$LANG_EXT"' examples/tour.'"$LANG_EXT"'; do
+    for f in corpus/*/*.'"$LANG_EXT"' corpus/modules/*/*.'"$LANG_EXT"' examples/*.'"$LANG_EXT"'; do
         [ -e "$f" ] || continue
         w=$(mktemp -d)
-        cp "$f" "$w/t.'"$LANG_EXT"'"
+        # The whole directory, not just this file: a module that imports
+        # another cannot be compiled without its siblings, and the module
+        # name comes from the basename so it has to keep its own.
+        cp "$(dirname "$f")"/*.'"$LANG_EXT"' "$w/" 2>/dev/null
+        b=$(basename "$f")
         if ./target/debug/'"$LANG_BIN"' --emit-c "$f" -o "$w/a.c" 2>/dev/null; then
-            ./target/debug/'"$LANG_BIN"' fmt "$w/t.'"$LANG_EXT"'" 2>/dev/null
-            ./target/debug/'"$LANG_BIN"' --emit-c "$w/t.'"$LANG_EXT"'" -o "$w/b.c" 2>/dev/null
+            ./target/debug/'"$LANG_BIN"' fmt "$w/$b" 2>/dev/null
+            ./target/debug/'"$LANG_BIN"' --emit-c "$w/$b" -o "$w/b.c" 2>/dev/null
             # String literals are numbered in the order they are first met,
             # and the formatter reorders top-level items -- so the same
             # program can emit the same literals under different numbers.
@@ -135,7 +139,7 @@ run "formatter preserves meaning" bash -c '
 
 run "formatter is idempotent" bash -c '
     bad=0
-    for f in corpus/*/*.'"$LANG_EXT"'; do
+    for f in corpus/*/*.'"$LANG_EXT"' corpus/modules/*/*.'"$LANG_EXT"'; do
         [ -e "$f" ] || continue
         w=$(mktemp -d)
         cp "$f" "$w/t.'"$LANG_EXT"'"
@@ -161,7 +165,7 @@ run "formatter is idempotent" bash -c '
 # cannot be cached, bisected, or reproduced from a hash.
 run "emission is reproducible" bash -c '
     bad=0
-    for f in corpus/*/*.'"$LANG_EXT"' examples/tour.'"$LANG_EXT"'; do
+    for f in corpus/*/*.'"$LANG_EXT"' corpus/modules/*/*.'"$LANG_EXT"' examples/*.'"$LANG_EXT"'; do
         [ -e "$f" ] || continue
         w=$(mktemp -d)
         ./target/debug/'"$LANG_BIN"' --emit-c "$f" -o "$w/1.c" 2>/dev/null || { rm -rf "$w"; continue; }

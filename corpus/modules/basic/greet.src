@@ -1,0 +1,13 @@
+// A library module. Private by default: `shout` is exported, `polite` is not.
+pub str shout(str who) {
+    return concat(who, "!").to_upper();
+}
+
+str polite(str who) {
+    return concat("dear ", who);
+}
+
+pub str both(str who) {
+    // Its own private names are in scope unqualified, inside this module.
+    return concat(polite(who), concat(" -- ", shout(who)));
+}

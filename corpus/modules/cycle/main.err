@@ -1,0 +1,6 @@
+corpus/modules/cycle/b.src:1:1: import cycle: a
+    imports b
+    imports a
+  |
+1 | import a;
+  | ^
