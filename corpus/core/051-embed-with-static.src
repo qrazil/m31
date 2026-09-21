@@ -1,0 +1,25 @@
+// A type with a static method can be embedded. Promotion used to forward
+// EVERY method of the embedded type, statics included, and a forwarder for
+// a static has no receiver to call it on -- so merely declaring `Outer`
+// failed with "`make` is a static method; call it on the type".
+//
+// Statics are not promoted: `Outer.make()` does not exist. The instance
+// methods and fields still are, through any depth of embedding.
+
+type Base { int v; }
+static Base Base.make() { return Base(1); }
+int Base.get() { return v; }
+
+type Outer { Base; int w; }
+static Outer Outer.build() { return Outer(Base.make(), 2); }
+
+type Outermost { Outer; }
+
+Outer o = Outer(Base.make(), 2);
+print(o.get());                 // 1, promoted
+print(o.v);                     // 1
+print(o.w);                     // 2
+
+Outermost m = Outermost(Outer.build());
+print(m.get());                 // 1, promoted twice
+print(m.w);                     // 2

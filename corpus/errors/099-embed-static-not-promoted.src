@@ -1,0 +1,7 @@
+// A static method is not promoted through embedding: it has no receiver,
+// so there is nothing for a forwarder to forward to.
+type Base { int v; }
+static Base Base.make() { return Base(1); }
+type Outer { Base; int w; }
+
+Outer o = Outer.make();

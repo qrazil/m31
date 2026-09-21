@@ -1509,11 +1509,17 @@ impl Lowerer {
                     continue;
                 };
                 let iname = self.typedefs[inner as usize].name.clone();
-                // Every method of the embedded type, by name.
+                // Every instance method of the embedded type, by name. A
+                // static method is not promoted: it has no receiver, so a
+                // forwarder would have nothing to forward to, and `Outer`
+                // does not gain a `make()` by holding a `Base`. Forwarding
+                // one used to call it through a value and fail the whole
+                // declaration of the embedding type.
                 let prefix = format!("{iname}.");
                 let mut promoted: Vec<(String, Sig)> = self
                     .sigs
                     .iter()
+                    .filter(|(k, _)| !self.statics.contains(k.as_str()))
                     .filter_map(|(k, sig)| {
                         let m = k.strip_prefix(&prefix)?;
                         Some((
