@@ -87,7 +87,16 @@ options, single-line diagnostics with the source line echoed, and `gates.sh`.
 These are the things whose absence would make a frozen language not worth
 freezing. Roughly in order.
 
-### 1. Errors
+### 1. Errors — all but one question, done
+
+**`docs/errors-decision.md`.** Built: `Option<T>` and `Result<T, E>`, `?`
+with exact error-type matching, and a discarded `Result` as a compile error.
+Remaining: **what `E` should be in a standard library**, which the record
+says to settle last, once there is a library to say what actually fails.
+`int.parse` and `float.parse` wait on it and nothing else -- static methods,
+the mechanism they need, already exist.
+
+The original framing:
 
 **Designed: `docs/errors-decision.md`.** Settled there: errors are values
 and not exceptions; `Option<T>` and `Result<T, E>` are built in, because a
@@ -148,6 +157,13 @@ It also closes a hole that exists today: `print` refuses a user type with the
 diagnostic "there is no way for a type to say how it prints". This is that
 way.
 
+**Static methods now exist**, which is the mechanism parsing needs: it
+dispatches on its TARGET, so it is a method on the type -- `int.parse(s)`,
+`Price.parse(s)`. An interface over them only becomes meaningful with
+constraints on type parameters, which is on the open list; until then a
+`Parse` interface would be documentation with syntax, which is the reason
+type aliases were rejected.
+
 **Parsing is a different operation and gets a different name.** `"42"` to an
 int reads text and can fail; the source is always `str` and it is the TARGET
 that varies, which single dispatch cannot express. So `str.parse_int()`
@@ -198,6 +214,42 @@ will keep — that was the reason to ship threads before scheduling them.
 
 **Atomic refcounts**, if the move rule ever proves too strict. Two runtime
 functions, not an IR change.
+
+**Self-hosting: rewrite the compiler in this language.**
+
+Not a rewrite in C -- a rewrite in the language itself, which is the path Go
+took from C and Rust took from OCaml.
+
+How it works, since it is easy to picture wrongly. The compiler emits C, so
+a C compiler never leaves the chain:
+
+    stage 0:  src/*.rs      --rustc-->            langc0
+    stage 1:  compiler.src  --langc0--> .c --cc--> langc1
+    stage 2:  compiler.src  --langc1--> .c --cc--> langc2
+    stage 3:  compiler.src  --langc2--> .c --cc--> langc3
+
+`langc2` and `langc3` must be BYTE-IDENTICAL. Not 1 and 2: stage 1 was built
+by a different compiler and may legitimately generate different code. Stages
+2 and 3 are both built from this language's own source, so identical input
+must give identical output -- and that check only means anything because
+emission is already reproducible, which the gate added after the
+HashMap-iteration bug guarantees.
+
+Prerequisites, all of which are on the pre-freeze list anyway:
+
+  - **modules** -- 10,900 lines is not going in one file;
+  - **file I/O** -- it has to read a `.src` and write a `.c`, and there is no
+    I/O of any kind today;
+  - **command-line arguments** -- it has to know which file.
+
+So this is not a separate project; it is what falls out of modules plus a
+standard library with I/O. That is also why it is worth doing: it is the
+thing that PROVES the standard library is good enough, rather than a claim
+that it is.
+
+After the freeze, not before. Self-hosting welds the compiler to the
+language, so every later language change becomes a bootstrap problem. Freeze
+the surface, then self-host against something that is not moving.
 
 **A second backend.** The C emitter is deliberately replaceable; Cranelift is
 the placeholder for a direct one. Cross-compilation is a requirement, and the
