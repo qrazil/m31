@@ -1,0 +1,10 @@
+// A distinct collection keeps its identity: a `Bag` is not a `List<int>`
+// without a conversion, however alike the two are underneath.
+distinct List<int> Bag;
+
+void f(Bag b) {
+    print(b.size());
+}
+
+List<int> l = [1];
+f(l);

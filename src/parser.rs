@@ -111,14 +111,44 @@ impl Parser {
                 }
             }
         }
-        // `distinct <type> Name;` -- the name is the third token, and the
-        // type in the middle may itself be a name.
-        for w in toks.windows(3) {
-            if w[0].tok == Tok::KwDistinct {
-                if let Tok::Ident(n) = &w[2].tok {
-                    type_names.push(n.clone());
-                    own.push(n.clone());
+        // `distinct <type> Name;` -- the name follows the base type, which
+        // is not always one token: `distinct List<int> Bag;` and
+        // `distinct lib.Point Here;` both have more in the middle. Walk past
+        // the base the way `expect_ty` would read it -- an optional `mod.`,
+        // the name, then a balanced `<...>` -- and take the identifier after.
+        // Assuming a fixed position registered `int` or `<` as the name and
+        // left the real one unusable as a type.
+        for (i, t) in toks.iter().enumerate() {
+            if t.tok != Tok::KwDistinct {
+                continue;
+            }
+            let at = |j: usize| toks.get(j).map(|t| &t.tok);
+            let mut j = i + 1;
+            if matches!(at(j), Some(Tok::Ident(_))) && at(j + 1) == Some(&Tok::Dot) {
+                j += 2;
+            }
+            j += 1;
+            if at(j) == Some(&Tok::Lt) {
+                let mut depth = 0usize;
+                while let Some(t) = at(j) {
+                    match t {
+                        Tok::Lt => depth += 1,
+                        Tok::Gt => {
+                            depth -= 1;
+                            if depth == 0 {
+                                j += 1;
+                                break;
+                            }
+                        }
+                        Tok::Semi | Tok::Eof => break,
+                        _ => {}
+                    }
+                    j += 1;
                 }
+            }
+            if let Some(Tok::Ident(n)) = at(j) {
+                type_names.push(n.clone());
+                own.push(n.clone());
             }
         }
         Parser {

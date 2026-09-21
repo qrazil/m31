@@ -1,0 +1,68 @@
+// A distinct type over a generic base. The declaration used to be
+// unusable: the parser's pre-pass took the third token after `distinct` as
+// the new name, so `distinct List<int> Bag;` registered `int` and `Bag`
+// never parsed as a type anywhere.
+//
+// A distinct collection IS its base -- it indexes, iterates and answers the
+// base's built-in methods -- and a collection literal written where one is
+// wanted builds the base and takes the distinct identity.
+
+distinct List<int> Bag;
+distinct Map<str, int> Tally;
+distinct Array<str> Names;
+type Box<T> { T item; }
+distinct Box<int> Sealed;
+
+int total(Bag b) {
+    int t = 0;
+    for (int x in b) {
+        t = t + x;
+    }
+    return t;
+}
+
+Bag doubled(Bag b) {
+    Bag out = [];
+    for (int x in b) {
+        out.push(x * 2);
+    }
+    return out;
+}
+
+// A method the distinct type declares for itself.
+str Bag.label() {
+    return "bag";
+}
+
+Bag b = [1, 2, 3];
+b.push(4);
+print(b.size());                // 4
+print(total(b));                // 10
+print(doubled(b)[3]);           // 8
+print(b.label());               // bag
+
+// Conversion both ways is explicit, spelled as the target type.
+List<int> plain = List<int>(b);
+print(plain.size());            // 4
+Bag again = Bag(plain);
+print(total(again));            // 10
+Bag lit = Bag([5, 6]);
+print(total(lit));              // 11
+
+Bag rep = [7; 3];
+print(total(rep));              // 21
+
+// As a type argument.
+List<Bag> bags = [[1], [2, 3]];
+print(total(bags[1]));          // 5
+
+Tally t = {"a": 1};
+t.set("b", 2);
+print(t.get("b").or(0));        // 2
+
+Names ns = ["x", "y"];
+print(ns[1]);                   // y
+
+Sealed s = Sealed(Box<int>(9));
+Box<int> unsealed = Box<int>(0);
+print(unsealed.item);           // 0
