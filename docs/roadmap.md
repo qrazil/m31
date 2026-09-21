@@ -158,10 +158,14 @@ What it waits on is what `E` should be, the last open question in
 
 ### 3. Modules
 
-One file is the whole program today. That is tolerable for a corpus and not
-for anything else. Needs: a unit of compilation, a visibility rule, and a
-name resolution order. Kept behind errors because a module system that has to
-be revised once errors land is a module system written twice.
+**Designed: `docs/modules-decision.md`.** A file is a module and its name is
+the basename; private by default with `pub` to export; import cycles
+forbidden and reported as the whole chain; imports qualified with no wildcards
+and no aliases; one entry file, declared rather than discovered.
+
+One file is still the whole program. Kept behind errors because a module
+system revised once errors land is a module system written twice -- and
+errors landed, so this is next.
 
 ### 4. Standard library
 

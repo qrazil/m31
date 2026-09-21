@@ -361,6 +361,7 @@ docs/
   reference.md             the language, stated normatively -- start here
   roadmap.md               what exists, what the freeze needs, what is out
   errors-decision.md       errors as values; what is settled, what is open
+  modules-decision.md      file = module, private by default, no cycles
   ir-v0.md                 the IR specification
   concurrency-decision.md  the concurrency decision
   concurrency.md           the evidence behind it, and what was rejected
