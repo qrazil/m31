@@ -273,11 +273,12 @@ impl Mono {
             });
         }
         let _ = span;
+        let methods = self.subst_iface_methods(&decl.methods, &sub)?;
         self.out_types.push(TypeDecl {
             name: mangled.to_string(),
             tparams: Vec::new(),
             fields,
-            methods: decl.methods.clone(),
+            methods,
             is_interface: decl.is_interface,
             variants,
             is_enum: decl.is_enum,
@@ -361,6 +362,39 @@ impl Mono {
         mangled
     }
 
+    /// An interface's method SIGNATURES substitute like anything else.
+    ///
+    /// They used to be cloned unchanged, so `interface Getter<T> { T get(); }`
+    /// at `Getter<int>` still required a method returning `T` -- which after
+    /// interning resolved to the instantiated interface itself. No concrete
+    /// type could satisfy a generic interface at all.
+    fn subst_iface_methods(&mut self, ms: &[Func], sub: &Subst) -> Result<Vec<Func>, Diag> {
+        let mut out = Vec::new();
+        for m in ms {
+            let mut params = Vec::new();
+            for p in &m.params {
+                params.push(Param {
+                    ty: self.subst_ty(p.ty, sub, p.span)?,
+                    name: p.name.clone(),
+                    default: None,
+                    embedded: false,
+                    span: p.span,
+                });
+            }
+            out.push(Func {
+                ret: self.subst_ty(m.ret, sub, m.span)?,
+                is_static: m.is_static,
+                recv: m.recv.clone(),
+                name: m.name.clone(),
+                tparams: Vec::new(),
+                params,
+                body: Vec::new(),
+                span: m.span,
+            });
+        }
+        Ok(out)
+    }
+
     fn subst_type_decl(&mut self, t: &TypeDecl, sub: &Subst) -> Result<TypeDecl, Diag> {
         let mut fields = Vec::new();
         for f in &t.fields {
@@ -391,7 +425,7 @@ impl Mono {
             name: t.name.clone(),
             tparams: Vec::new(),
             fields,
-            methods: t.methods.clone(),
+            methods: self.subst_iface_methods(&t.methods, sub)?,
             is_interface: t.is_interface,
             variants,
             is_enum: t.is_enum,

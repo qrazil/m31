@@ -17,7 +17,7 @@ Anything marked done there is tested; the corpus is the proof.
 
 | | |
 |---|---|
-| Corpus | 160 programs — 47 behaviour, 91 diagnostics, 15 traps, 7 Go twins |
+| Corpus | 163 programs — 48 behaviour, 93 diagnostics, 15 traps, 7 Go twins |
 | Oracle | gcc and clang, each at -O0 and -O2, all four must agree |
 | Leaks | every behaviour program asserts `__rc_live=0` at exit |
 | Warnings | emitted C must be clean under `-Wall -Wextra` |
@@ -301,9 +301,10 @@ Written down because they are unresolved, not because they are unimportant.
 
 ## Known bugs
 
-  - Vtable slots are assigned per method *name*, while each call site casts
-    the slot to the signature it computed. Two interfaces declaring the same
-    method name with different signatures share a slot. Not reachable today —
-    assignment demands an exact per-method signature match and refuses
-    interface-to-interface assignment — but it becomes type confusion through
-    a function-pointer cast the day interface embedding arrives.
+None recorded.
+
+The vtable-slot bug that sat here is fixed. It was accurately described as
+unreachable — an agent tried twenty-two delivery paths and assignability
+blocked every one — but looking for a way in found **three other routes to
+the same bad cast**, all reachable, and one of them silent. See
+`docs/reference.md` §3.4 and `corpus/core/048`.

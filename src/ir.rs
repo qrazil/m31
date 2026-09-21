@@ -111,6 +111,14 @@ impl ArithOp {
     }
 }
 
+/// A vtable slot: an interface method's name and its IR-level shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Slot {
+    pub name: String,
+    pub params: Vec<IrTy>,
+    pub ret: Option<IrTy>,
+}
+
 /// One variant of an enum: its name and the IR types of its payload slots.
 /// Its index in `TypeDef::variants` is the runtime tag.
 #[derive(Debug, Clone)]
@@ -320,7 +328,15 @@ pub struct Module {
     pub types: Vec<TypeDef>,
     /// Interface method names, one per dispatch slot. Assigned once for the
     /// whole program, so a vtable index is a constant at every call site.
-    pub iface_slots: Vec<String>,
+    /// One dispatch slot per distinct interface method NAME AND SHAPE.
+    ///
+    /// Keyed by the shape as well as the name because the call site casts
+    /// the stored pointer to the signature it computed: two interfaces
+    /// declaring `m` with different parameters must not share a slot, or one
+    /// call would invoke the other's function through the wrong type. The
+    /// shape is IR-level, so `int area()` and `Price area()` still share --
+    /// the cast is identical and a distinct type is erased.
+    pub iface_slots: Vec<Slot>,
 }
 
 // ---- textual form, for --emit-ir and for debugging -----------------------

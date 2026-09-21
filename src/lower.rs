@@ -109,7 +109,7 @@ pub struct Lowerer {
     iface_methods: Vec<Vec<Func>>,
     /// Interface method names, one per dispatch slot, assigned once for the
     /// whole program so a vtable index is a constant at every call site.
-    iface_slots: Vec<String>,
+    iface_slots: Vec<ir::Slot>,
     strings: Vec<String>,
     // per-function state
     types: Vec<IrTy>,
@@ -1649,8 +1649,9 @@ impl Lowerer {
             // One dispatch slot per distinct interface method name, for the
             // whole program.
             for m in &t.methods {
-                if !self.iface_slots.contains(&m.name) {
-                    self.iface_slots.push(m.name.clone());
+                let slot = self.slot_of(m);
+                if !self.iface_slots.contains(&slot) {
+                    self.iface_slots.push(slot);
                 }
             }
             self.field_surface
@@ -1766,11 +1767,26 @@ impl Lowerer {
                 continue;
             }
             let tname = self.typedefs[i].name.clone();
+            // The fill CHECKS rather than trusts. A bare name lookup put a
+            // static -- whose signature is one argument short -- into a slot
+            // that the call site then cast to the interface's shape.
             let vt: Vec<Option<String>> = slots
                 .iter()
-                .map(|m| {
-                    let key = format!("{tname}.{m}");
-                    self.sigs.contains_key(&key).then_some(key)
+                .map(|slot| {
+                    let key = format!("{tname}.{}", slot.name);
+                    if self.statics.contains(&key) {
+                        return None;
+                    }
+                    // The SHAPE has to match too. A name lookup alone would
+                    // put a method into a slot the call site casts to some
+                    // other signature.
+                    let sig = self.sigs.get(&key)?;
+                    let shape = ir::Slot {
+                        name: slot.name.clone(),
+                        params: sig.params.iter().map(|p| self.irty(p.ty)).collect(),
+                        ret: (sig.ret != Ty::Void).then(|| self.irty(sig.ret)),
+                    };
+                    (shape == *slot).then_some(key)
                 })
                 .collect();
             self.typedefs[i].vtable = vt;
@@ -1966,6 +1982,18 @@ impl Lowerer {
         Some(self.field_surface[tid as usize][0])
     }
 
+    /// The dispatch slot an interface method occupies: its name and its
+    /// IR-level shape. IR-level rather than surface, because the call site's
+    /// cast is built from IR types -- so `int area()` and `Price area()`
+    /// share a slot, which is right, and `int m()` and `str m(str)` do not.
+    fn slot_of(&self, m: &Func) -> ir::Slot {
+        ir::Slot {
+            name: m.name.clone(),
+            params: m.params.iter().map(|p| self.irty(p.ty)).collect(),
+            ret: (m.ret != Ty::Void).then(|| self.irty(m.ret)),
+        }
+    }
+
     /// Is `from` usable where `to` is expected?
     ///
     /// Identical types always. Beyond that, a concrete type is assignable to
@@ -1980,6 +2008,17 @@ impl Lowerer {
             return false;
         };
         if !self.typedefs[tt as usize].is_interface || self.typedefs[ft as usize].is_interface {
+            return false;
+        }
+        // A distinct type is ERASED before the IR, so it has no object header
+        // of its own and therefore cannot carry its own vtable. Dispatch
+        // through one would always find the BASE's method: `distinct Base
+        // Wrap` with its own `tag` printed the base's answer, exit 0, no
+        // warning and nothing for a sanitiser to see. Over a non-reference
+        // base it was worse -- the emitted C did not even compile.
+        //
+        // This is forced by the representation, not a policy choice.
+        if self.typedefs[ft as usize].is_distinct {
             return false;
         }
         self.missing_method(ft, tt).is_none()
@@ -2000,6 +2039,13 @@ impl Lowerer {
         if !self.typedefs[tt as usize].is_interface || self.typedefs[ft as usize].is_interface {
             return base;
         }
+        if self.typedefs[ft as usize].is_distinct {
+            return format!(
+                "{base}: a distinct type is erased before it reaches the runtime, \
+                 so it has no place to carry its own methods and cannot satisfy \
+                 an interface. Use its base type, or make it a `type` of its own."
+            );
+        }
         match self.missing_method(ft, tt) {
             Some(m) => format!(
                 "{base}: `{}` needs a method `{m}` to satisfy `{}`",
@@ -2015,6 +2061,18 @@ impl Lowerer {
         let fname = &self.typedefs[ft as usize].name;
         for m in &self.iface_methods[tt as usize] {
             let key = format!("{fname}.{}", m.name);
+            // A static has no receiver, so its C signature is one argument
+            // short of what the vtable slot is cast to. Accepting one put the
+            // receiver pointer into the first declared parameter and dropped
+            // the real argument.
+            if self.statics.contains(&key) {
+                return Some(format!(
+                    "{} {}(..) that is not static -- a static method has no \
+                     receiver to dispatch on",
+                    self.tyname(m.ret),
+                    m.name
+                ));
+            }
             let Some(sig) = self.sigs.get(&key) else {
                 return Some(format!("{} {}(..)", self.tyname(m.ret), m.name));
             };
@@ -3698,10 +3756,14 @@ impl Lowerer {
             if decl.ret != Ty::Str || !decl.params.is_empty() {
                 return Ok(None);
             }
+            // By name AND shape: the slot has to be the one this
+            // interface's declaration occupies, not merely one that shares
+            // the name.
+            let want = self.slot_of(&decl);
             let slot = self
                 .iface_slots
                 .iter()
-                .position(|x| x == "to_str")
+                .position(|x| *x == want)
                 .expect("every interface method has a slot") as u32;
             let d = self.new_val(IrTy::Ref);
             self.push(Inst::CallIface {
@@ -4071,10 +4133,11 @@ impl Lowerer {
                             format!("interface `{iname}` has no method `{m}`"),
                         ));
                     };
+                    let want = self.slot_of(&decl);
                     let slot = self
                         .iface_slots
                         .iter()
-                        .position(|x| *x == *m)
+                        .position(|x| *x == want)
                         .expect("every interface method has a slot")
                         as u32;
 

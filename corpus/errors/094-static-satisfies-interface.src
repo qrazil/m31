@@ -1,0 +1,10 @@
+interface Tagged { str tag(int n); }
+type Foo { int v; }
+
+// A static has no receiver, so its C signature is one argument short of what
+// the slot is cast to: the receiver landed in `n` and the real argument was
+// dropped, silently.
+static str Foo.tag(int n) { return "static"; }
+
+void show(Tagged t) { print(t.tag(7)); }
+show(Foo(5));

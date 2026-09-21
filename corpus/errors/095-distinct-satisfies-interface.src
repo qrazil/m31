@@ -1,0 +1,12 @@
+type Base { int v; }
+str Base.tag() { return "BASE"; }
+
+distinct Base Wrap;
+str Wrap.tag() { return "WRAP"; }
+
+// A distinct type is erased before the IR, so it has no header of its own to
+// carry a vtable: dispatch found the BASE method and printed BASE, exit 0,
+// no warning and nothing for a sanitiser to see.
+interface Tagged { str tag(); }
+void show(Tagged t) { print(t.tag()); }
+show(Wrap(Base(5)));

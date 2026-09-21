@@ -1,0 +1,4 @@
+corpus/errors/094-static-satisfies-interface.src:10:6: type mismatch: expected Tagged, found Foo: `Foo` needs a method `str tag(..) that is not static -- a static method has no receiver to dispatch on` to satisfy `Tagged`
+   |
+10 | show(Foo(5));
+   |      ^

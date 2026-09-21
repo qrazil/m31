@@ -171,6 +171,18 @@ that does not is a compile error naming the missing method.
 
 Dispatch goes through a vtable in the object header. An interface value is a
 single pointer, not a pair — the Java model, not Go's (`docs/types.md` §4).
+A slot is keyed by a method's **name and its shape**, so two interfaces
+declaring `m` with different signatures take different slots rather than
+sharing one that each call site would cast its own way.
+
+Two kinds of method cannot satisfy an interface, both because of how
+dispatch works rather than by policy:
+
+  - a **static** method, which has no receiver to dispatch on — its
+    signature is one argument short of what the slot is cast to;
+  - a method on a **distinct** type, which is erased before the IR and so has
+    no object header of its own to carry a vtable. Dispatch would always find
+    the base type's method.
 
 ### 3.5 Embedding
 

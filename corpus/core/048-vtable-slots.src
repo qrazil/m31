@@ -1,0 +1,63 @@
+// A vtable slot is keyed by an interface method's NAME AND SHAPE, not its
+// name alone.
+//
+// The call site casts the stored pointer to the signature it computed, so
+// two interfaces declaring `m` with different shapes must not share a slot
+// -- one call would otherwise invoke the other's function through the wrong
+// type. Nothing could deliver a P to B's call site today, but the guarantee
+// is now structural rather than resting on assignability being exhaustive,
+// which matters because interface embedding would reopen it.
+
+interface A { int m(); }
+interface B { str m(str x); }
+
+type P { int v; }
+int P.m() { return 7; }
+
+type Q { int v; }
+str Q.m(str x) { return concat(x, "!"); }
+
+void use_a(A a) { print(a.m()); }
+void use_b(B b) { print(b.m("hi")); }
+
+use_a(P(1));                    // 7
+use_b(Q(2));                    // hi!
+
+// The shape is IR-level, so a distinct return type still SHARES a slot --
+// the cast is identical and distinctness is erased before the IR.
+distinct int Meters;
+interface Measured { Meters len(); }
+type Road { int km; }
+Meters Road.len() { return Meters(42); }
+void measure(Measured x) { print(int(x.len())); }
+measure(Road(1));               // 42
+
+// Generic interfaces: an interface's method signatures substitute like
+// anything else. They used to be cloned unchanged, so `Getter<int>` still
+// demanded a method returning `T` -- which resolved to the instantiated
+// interface itself, and no concrete type could satisfy a generic interface
+// at all.
+interface Getter<T> { T get(); }
+
+type IntBox { int v; }
+int IntBox.get() { return v; }
+
+type StrBox { str s; }
+str StrBox.get() { return s; }
+
+void show_int(Getter<int> g) { print(g.get()); }
+void show_str(Getter<str> g) { print(g.get()); }
+
+show_int(IntBox(3));            // 3
+show_str(StrBox(concat("a", "b")));     // ab
+
+// Two instantiations of one generic interface have different shapes and so
+// take different slots, which is exactly the case the keying exists for.
+List<Getter<int>> boxes = List<Getter<int>>();
+boxes.push(IntBox(10));
+boxes.push(IntBox(20));
+int total = 0;
+for (Getter<int> g in boxes) {
+    total = total + g.get();
+}
+print(total);                   // 30
