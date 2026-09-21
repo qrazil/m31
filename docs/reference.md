@@ -80,6 +80,13 @@ not: a file that is all declarations is a program that does nothing.
 Forward references are fine. Types and functions are collected before any
 body is checked, so an item may name one declared later in the file.
 
+**Nesting is limited to 256 levels**, counting statements, expressions and
+types together: a block inside a block, an argument inside a call, a type
+argument inside a type. It is the depth of the tree that counts, so a flat
+`a + b + c + ...` of more than 256 terms is refused too — it is as deep as it
+is long. Past the limit the compiler says so, rather than overflowing its
+own stack.
+
 ## 2.1 Modules
 
 **A file is a module**, and its name is the file's basename: `strings.src` is

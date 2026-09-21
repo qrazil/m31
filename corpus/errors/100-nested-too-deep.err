@@ -1,0 +1,4 @@
+corpus/errors/100-nested-too-deep.src:16:16: expression nested too deeply (limit 256)
+   |
+16 | ((((((((((((((((((((
+   |                ^
