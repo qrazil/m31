@@ -109,7 +109,8 @@ print(greet.shout("world"));
     everything a module declares — functions, types, methods and an enum's
     variants — not only functions.
   - **A type from another module is `mod.Type`**, anywhere a type may be
-    written: a declaration, a parameter, a type argument, a static method
+    written: a declaration, a parameter, a type argument, a construction
+    (`shapes.Point(3, 4)`, `shapes.Box<int>(1)`), a static method
     (`shapes.Point.origin()`) or an enum variant (`shapes.Colour.Red`).
   - **A method may only be added to a type its own module declared.** Go and
     Rust both draw this line, and without it a module could reach into
@@ -254,6 +255,10 @@ embedding an embedder works. A real method on the outer type **shadows** a
 forwarder of the same name; two embedded types offering the same name with no
 outer method to break the tie is an error at the use site.
 
+**Static methods are not promoted.** A static has no receiver, so there is
+nothing for a forwarder to forward to: `Dog` does not gain `Animal`'s
+statics by embedding one.
+
 Embedding is composition. There is no inheritance and no method overriding
 (`docs/types.md` §5).
 
@@ -282,6 +287,20 @@ Arithmetic on a distinct type stays in that type: `p + p` is a `Price`. That
 is the point — a `Price` that decayed to `int` on the first addition would
 protect nothing. Mixing `Price` and `Quantity`, or `Price` and `int`, is an
 error; convert first.
+
+The base may be any type, generic ones included. A distinct **collection**
+is still a collection — it indexes, iterates and answers its base's
+methods — and a collection literal written where one is expected builds it
+directly, because a literal has no type of its own until its place gives it
+one. Converting back is spelled as the base type, like `int(p)`:
+
+```c
+distinct List<int> Bag;
+
+Bag b = [1, 2, 3];
+b.push(4);
+List<int> plain = List<int>(b);
+```
 
 There are no type aliases. An alias that is not distinct documents and does
 not enforce, which is a comment with syntax.
