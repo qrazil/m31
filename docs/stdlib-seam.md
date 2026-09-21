@@ -8,6 +8,14 @@ the language reaches C, without that becoming a general FFI.
 It is four decisions: where stdlib source lives, how it calls out, who is
 allowed to, and what `io`'s error type looks like so it survives the freeze.
 
+> **Revised 2026-09-21: the standard library is standalone.** Everything in
+> `lib/` is written in the language, and `prim` exists only where a language
+> genuinely cannot reach: the operating system. `math` has no `prim` at all
+> (see §5). `io` still crosses at the C library's file functions and is
+> scheduled to move down to raw system calls once the language has the
+> features §5 lists. The mechanism below is unchanged; what moved is where
+> the line is drawn.
+
 ---
 
 ## 1. Stdlib source is embedded in the compiler
@@ -175,9 +183,67 @@ that knows what `2` means is readable, testable, and not in C.
    colliding with a same-named local file.
 3. `lib/io.src` — `read`, `write`, `append`, `stdin_line`, `stderr`, and
    `Error` with `from_errno`.
-4. `lib/math.src`, which needs only step 1 and is a good second test that
-   `prim` is general rather than shaped around `io`.
+4. ~~`lib/math.src` over `prim`~~ -- superseded: `math` is written
+   entirely in the language (§5).
 
 Steps 1 and 2 are independent of each other and both are small. Step 3 is
 the first time this language is asked to be a library, and the interesting
 output of it is the list of things that turn out to be awkward.
+
+---
+
+## 5. Standalone: the line is the operating system, and nothing above it
+
+The first version of `math` crossed the seam for `sqrt`, `pow`, `floor`,
+`ceil` and `round`. That was a shortcut, not a necessity: the whole of it is
+now language source built from `+ - * /`, comparison and `int(x)`, correctly
+rounded where libm is, within an ulp or three where libm is within one, and
+the same bits on every target because nothing asks the platform. It links
+without `-lm`.
+
+That is the rule from here, and it is Go's. Go's standard library is Go down
+to `syscall.Syscall`, which is a few lines of assembly per architecture;
+`math.Sqrt` has an assembly fast path *and* a pure-Go fallback, and
+`os.ReadFile` is Go all the way to the trap instruction. The only code that
+is not Go is the code no language can be: entering the kernel, switching
+stacks, atomic instructions. Our equivalent of Go's assembly is a small C
+file, and `prim` is how the language names it.
+
+### What `io` needs before it can move down
+
+`io` currently crosses at `fopen`/`fread`, which puts buffering, line
+splitting and errno policy in C. Moving the seam down to `open`/`read`/
+`write`/`close` puts all of that in the language, and needs three things the
+language does not have yet. Each is a core feature, not a library one, so
+each is a freeze decision:
+
+  - **A mutable byte buffer.** `str` is immutable, so a `read(fd, buf, n)`
+    has nothing to read into. Every codec (base64, UTF-8, hashing) needs the
+    same thing.
+  - **Bitwise operators** `& | ^ ~ << >>` on `int`. Hashing, codecs, UTF-8
+    decoding and float formatting are all bit manipulation; today they
+    cannot be written at all.
+  - **A name for the receiver.** A method cannot name its receiver, so an
+    enum method cannot `match` on itself and no method can pass itself to a
+    function. `io.Error.to_str()` cannot be written because of it; so cannot
+    any `describe()` on any enum.
+
+Float formatting and parsing (`print` of a float, `parse_float`) are the
+other C that remains above the OS. Both are pure computation -- shortest
+round-trip printing is the Ryu algorithm, correct parsing is Eisel-Lemire
+with a big-integer fallback -- and both move into the language once bitwise
+operators exist.
+
+### Why this is what self-hosting needs anyway
+
+A compiler written in the language needs exactly this library: read files,
+build strings, hash maps, spawn the C compiler. Each missing feature above
+blocks the compiler as surely as it blocks `io`. The path is Go's:
+
+1. The standard library standalone above a syscall-sized C file.
+2. The compiler rewritten in the language, compiled by the Rust compiler to
+   C, then compiling itself; the build is right when stage 2 and stage 3
+   emit identical C.
+3. The Rust compiler kept only as the bootstrap, the way Go 1.5 required Go
+   1.4 to build -- and eventually a native backend so the C compiler is no
+   longer needed either, which is where Go's own toolchain ended up.
