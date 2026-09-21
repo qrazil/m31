@@ -15,6 +15,7 @@
 #include "rc_debug.h"
 
 #include <errno.h>
+#include <math.h>
 #include <inttypes.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -1355,3 +1356,14 @@ _Noreturn void rt_trap(const char *msg) {
     fprintf(stderr, "trap: %s\n", msg);
     abort();
 }
+
+/* ---- math primitives -------------------------------------------------- */
+/* Deliberately thin. A wrapper that second-guessed libm would be a place for
+ * this language's float behaviour to quietly differ from C's, and the oracle
+ * (docs/roadmap.md) depends on it not doing that. */
+
+double rt_sqrt(double x)  { return sqrt(x); }
+double rt_pow(double x, double y) { return pow(x, y); }
+double rt_floor(double x) { return floor(x); }
+double rt_ceil(double x)  { return ceil(x); }
+double rt_round(double x) { return round(x); }

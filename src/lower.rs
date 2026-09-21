@@ -64,6 +64,9 @@ struct Sig {
     /// carry an empty module and are visible everywhere.
     module: String,
     is_pub: bool,
+    /// The seam to C: no body to lower, and the call goes to a runtime
+    /// symbol found by one name transform. See docs/stdlib-seam.md.
+    is_prim: bool,
 }
 
 /// One entry per enclosing `while`, so `break` and `continue` know where to
@@ -219,6 +222,7 @@ impl Lowerer {
                 ret,
                 module: String::new(),
                 is_pub: true,
+                is_prim: false,
             },
         );
     }
@@ -1519,6 +1523,7 @@ impl Lowerer {
                                 ret: sig.ret,
                                 module: sig.module.clone(),
                                 is_pub: sig.is_pub,
+                                is_prim: sig.is_prim,
                             },
                         ))
                     })
@@ -1534,6 +1539,7 @@ impl Lowerer {
                                 ret: g.ret,
                                 module: g.module.clone(),
                                 is_pub: g.is_pub,
+                                is_prim: g.is_prim,
                             },
                         ));
                     }
@@ -1608,6 +1614,7 @@ impl Lowerer {
                         is_pub: true,
                         ret: sig.ret,
                         is_static: false,
+                        is_prim: false,
                         recv: Some(t.name.clone()),
                         name: mname,
                         tparams: Vec::new(),
@@ -1864,6 +1871,7 @@ impl Lowerer {
                     ret: f.ret,
                     module: f.module.clone(),
                     is_pub: f.is_pub,
+                    is_prim: f.is_prim,
                 },
             );
         }
@@ -1884,6 +1892,7 @@ impl Lowerer {
                     ret: f.ret,
                     module: f.module.clone(),
                     is_pub: f.is_pub,
+                    is_prim: f.is_prim,
                 },
             );
         }
@@ -1897,6 +1906,7 @@ impl Lowerer {
             is_pub: false,
             ret: Ty::Void,
             is_static: false,
+            is_prim: false,
             recv: None,
             name: "$main".to_string(),
             tparams: Vec::new(),
@@ -1907,6 +1917,12 @@ impl Lowerer {
 
         let mut funcs = Vec::new();
         for f in &p.funcs {
+            // A primitive has no body to lower: its implementation is the
+            // runtime function the call site names. Emitting a definition
+            // here would collide with the real one at link time.
+            if f.is_prim {
+                continue;
+            }
             funcs.push(self.lower_func(f)?);
         }
         for f in &forwarders {
@@ -5730,6 +5746,7 @@ impl Lowerer {
         };
         let params = sig.params.clone();
         let ret = sig.ret;
+        let sig_is_prim = sig.is_prim;
 
         let slots = self.bind_args(name, &params, args, span)?;
 
@@ -5745,10 +5762,18 @@ impl Lowerer {
             vals.push(v.val());
         }
 
-        let rt_name = match name {
-            "concat" => "rt_concat".to_string(),
-            // The emitter escapes and prefixes; give it the raw name.
-            other => other.to_string(),
+        let rt_name = if sig_is_prim {
+            // The seam's whole lowering rule: strip the module qualifier,
+            // strip the reserved `__`, prefix `rt_`. No table of special
+            // cases, and a runtime function nobody wrote is a link error
+            // naming the exact symbol. See docs/stdlib-seam.md.
+            format!("rt_{}", crate::ast::bare(name).trim_start_matches('_'))
+        } else {
+            match name {
+                "concat" => "rt_concat".to_string(),
+                // The emitter escapes and prefixes; give it the raw name.
+                other => other.to_string(),
+            }
         };
 
         if ret == Ty::Void {

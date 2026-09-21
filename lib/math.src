@@ -1,0 +1,87 @@
+// Arithmetic that a program cannot write for itself.
+//
+// Everything here is either a `prim` -- one C symbol, see docs/stdlib-seam.md
+// -- or ordinary source built on one. The split is not arbitrary: `abs`,
+// `min` and `max` are three lines of this language and are written in it,
+// while `sqrt` is a hardware instruction and `pow` is a page of careful
+// numerics, so those cross the seam.
+prim float __sqrt(float x);
+prim float __pow(float x, float y);
+prim float __floor(float x);
+prim float __ceil(float x);
+prim float __round(float x);
+
+/// The square root of `x`. Negative `x` gives a NaN, the same answer C gives,
+/// because there is nothing better to return and no errno worth inventing.
+pub float sqrt(float x) {
+    return __sqrt(x);
+}
+
+/// `x` raised to `y`.
+pub float pow(float x, float y) {
+    return __pow(x, y);
+}
+
+/// The largest whole number no greater than `x`, as a float. It stays a
+/// float: `floor` of 1e300 has no int to become, and a conversion that traps
+/// on some inputs is a worse answer than one that never does.
+pub float floor(float x) {
+    return __floor(x);
+}
+
+/// The smallest whole number no less than `x`, as a float.
+pub float ceil(float x) {
+    return __ceil(x);
+}
+
+/// `x` to the nearest whole number, halves away from zero -- C's `round`,
+/// not the banker's rounding a formatter would want.
+pub float round(float x) {
+    return __round(x);
+}
+
+pub int abs(int x) {
+    if (x < 0) {
+        return 0 - x;
+    }
+    return x;
+}
+
+/// The absolute value of a float. Written rather than crossing the seam
+/// because `-0.0` and NaN both come out right without help: `0.0 - x` is
+/// wrong for `-0.0` and a comparison is wrong for NaN, so the test is on the
+/// sign only.
+pub float fabs(float x) {
+    if (x < 0.0) {
+        return 0.0 - x;
+    }
+    return x;
+}
+
+pub int min(int a, int b) {
+    if (a < b) {
+        return a;
+    }
+    return b;
+}
+
+pub int max(int a, int b) {
+    if (a > b) {
+        return a;
+    }
+    return b;
+}
+
+pub float fmin(float a, float b) {
+    if (a < b) {
+        return a;
+    }
+    return b;
+}
+
+pub float fmax(float a, float b) {
+    if (a > b) {
+        return a;
+    }
+    return b;
+}

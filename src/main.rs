@@ -17,6 +17,7 @@ mod lower;
 mod modules;
 mod mono;
 mod parser;
+mod stdlib;
 
 #[cfg(test)]
 mod tests;
@@ -110,7 +111,7 @@ fn main() -> ExitCode {
         Err(modules::Located { path: p, diag }) => {
             // The diagnostic has to name the file it came from: with several
             // modules, a bare line:col is not enough to find anything.
-            let text = std::fs::read_to_string(&p).unwrap_or_default();
+            let text = modules::read_source(&p);
             eprintln!("{}", diag.render_with_source(&p, &text));
             return ExitCode::FAILURE;
         }
@@ -132,7 +133,16 @@ fn main() -> ExitCode {
 /// not typecheck, because that is exactly when you reach for the formatter.
 fn reformat(src: &str, module: &str) -> Result<String, diag::Diag> {
     let (toks, comments) = lexer::Lexer::tokenize_with_comments(src)?;
-    let prog = parser::Parser::new(toks).parse_program(module)?;
+    let mut p = parser::Parser::new(toks);
+    // The formatter must be able to read the standard library's own source,
+    // which is the only source that may write `prim`. Deciding that by module
+    // name is right here and nowhere else: this reads a file to print it back,
+    // it never compiles it, so a program called `math.src` gets a formatter
+    // that is one keyword too permissive and no more.
+    if stdlib::source(module).is_some() {
+        p = p.stdlib();
+    }
+    let prog = p.parse_program(module)?;
     fmt::set_type_names(&prog);
     Ok(fmt::format(&prog, comments))
 }

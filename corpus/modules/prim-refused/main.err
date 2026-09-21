@@ -1,0 +1,4 @@
+corpus/modules/prim-refused/main.src:3:1: `prim` is the standard library's seam to C and is only available to source the compiler ships; there is no foreign function interface yet
+  |
+3 | prim int __getpid();
+  | ^

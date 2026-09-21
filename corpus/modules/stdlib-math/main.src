@@ -1,0 +1,35 @@
+// The standard library is carried inside the compiler: there is no `math.src`
+// beside this file, and `import math` finds it anyway.
+import math;
+
+print(math.sqrt(9.0));                  // 3
+print(math.sqrt(2.0));                  // 1.4142135623730951
+print(math.pow(2.0, 10.0));             // 1024
+print(math.floor(2.7));                 // 2
+print(math.floor(0.0 - 2.7));           // -3 -- towards negative infinity
+print(math.ceil(2.1));                  // 3
+print(math.ceil(0.0 - 2.1));            // -2
+print(math.round(2.5));                 // 3 -- halves away from zero
+print(math.round(0.0 - 2.5));           // -3
+
+print(math.abs(0 - 7));                 // 7
+print(math.abs(7));                     // 7
+print(math.min(3, 4));                  // 3
+print(math.max(3, 4));                  // 4
+print(math.fabs(0.0 - 1.5));            // 1.5
+print(math.fmin(3.5, 4.5));             // 3.5
+print(math.fmax(3.5, 4.5));             // 4.5
+
+// A library function is an ordinary function: it composes, and it can be
+// passed the result of another one.
+print(math.sqrt(math.pow(3.0, 2.0)));   // 3
+
+// A `prim` is not reachable from here. `math.__sqrt(9.0)` is two errors at
+// once -- the name is reserved, and it is not `pub`.
+float acc = 0.0;
+int i = 1;
+while (i <= 4) {
+    acc = acc + math.sqrt(float(i) * float(i));
+    i = i + 1;
+}
+print(acc);                             // 10

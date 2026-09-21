@@ -1,0 +1,4 @@
+// `prim` is the standard library's seam to C, not a foreign function
+// interface. A program may not open it.
+prim int __getpid();
+print(__getpid());

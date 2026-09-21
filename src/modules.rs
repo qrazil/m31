@@ -46,6 +46,25 @@ pub fn module_name(path: &str) -> String {
         .collect()
 }
 
+/// What a diagnostic calls an embedded module. It is not a path on disk --
+/// the source is inside the compiler -- so it is spelt to look like one
+/// without pretending to be one.
+pub fn display_path(name: &str) -> String {
+    format!("<{name}>")
+}
+
+/// The text behind a path a diagnostic named, embedded or on disk. One place
+/// so that rendering an error in standard library source quotes the right
+/// line instead of an empty file.
+pub fn read_source(path: &str) -> String {
+    if let Some(name) = path.strip_prefix('<').and_then(|p| p.strip_suffix('>')) {
+        if let Some(text) = crate::stdlib::source(name) {
+            return text.to_string();
+        }
+    }
+    std::fs::read_to_string(path).unwrap_or_default()
+}
+
 /// Is this usable as a module name?
 ///
 /// An imported file's name becomes a name in the language, so the filename
@@ -97,6 +116,22 @@ pub fn load(entry: &str) -> Result<Loaded, Located> {
         .unwrap_or_else(|| "src".to_string());
 
     let name = module_name(entry);
+    // The entry file is named on the command line and is never imported, so
+    // it escapes the collision check below. It still takes a module name, and
+    // `math.src` as the program would give two different modules called
+    // `math` the moment anything imported the real one.
+    if crate::stdlib::source(&name).is_some() {
+        return Err(Located {
+            path: entry.to_string(),
+            diag: Diag::new(
+                Span::new(1, 1),
+                format!(
+                    "`{name}` is a standard library module, so a program cannot \
+                     be called `{name}.{ext}`: module names are globally unique"
+                ),
+            ),
+        });
+    }
     let mut l = Loader {
         dir,
         ext,
@@ -184,6 +219,29 @@ impl Loader {
             return Ok(Vec::new());
         }
 
+        // The standard library is carried inside the compiler, so an
+        // embedded module is found before the filesystem is consulted. A
+        // file of the same name beside the program is a COLLISION rather
+        // than an override -- module names are globally unique, and `math`
+        // is taken.
+        if let Some(text) = crate::stdlib::source(name) {
+            if std::path::Path::new(path).exists() {
+                let (importer, span) = from.expect("an embedded module is always imported");
+                return Err(Located {
+                    path: self.paths[importer].clone(),
+                    diag: Diag::new(
+                        span,
+                        format!(
+                            "`{name}` is a standard library module, so {path} \
+                             collides with it: module names are globally unique \
+                             and there is no way to override one"
+                        ),
+                    ),
+                });
+            }
+            return self.parse(name, &display_path(name), text, from, true);
+        }
+
         let src = std::fs::read_to_string(path).map_err(|e| {
             let (p, span) = match from {
                 Some((importer, span)) => (self.paths[importer].clone(), span),
@@ -204,6 +262,21 @@ impl Loader {
             }
         })?;
 
+        self.parse(name, path, &src, from, false)
+    }
+
+    /// Everything that happens once a module's text is in hand, whichever
+    /// side of the filesystem it came from. `stdlib` is true only for source
+    /// the compiler carries, and is what unlocks `prim` -- see
+    /// docs/stdlib-seam.md.
+    fn parse(
+        &mut self,
+        name: &str,
+        path: &str,
+        src: &str,
+        from: Option<(&str, Span)>,
+        stdlib: bool,
+    ) -> Result<Vec<String>, Located> {
         let here = |d: Diag| Located {
             path: path.to_string(),
             diag: d,
@@ -243,8 +316,11 @@ impl Loader {
         self.folded.insert(fold, name.to_string());
         self.paths.insert(name.to_string(), path.to_string());
 
-        let toks = Lexer::new(&src).tokenize().map_err(here)?;
+        let toks = Lexer::new(src).tokenize().map_err(here)?;
         let mut parser = Parser::with_arena(toks, std::mem::take(&mut self.arena));
+        if stdlib {
+            parser = parser.stdlib();
+        }
         let mut prog = parser.parse_program(name).map_err(here)?;
         // `parse_program` hands the arena out with the program, so take it
         // back from there and pass it to the next file. The program's own

@@ -32,6 +32,11 @@ pub struct Parser {
     ty_exprs: Vec<TyExpr>,
     /// The module currently being parsed; every declaration records it.
     module: String,
+    /// This file came out of `lib/` and is compiled into the compiler, so it
+    /// may write `prim` and name `__`-prefixed functions. See
+    /// docs/stdlib-seam.md -- the restriction is the only thing keeping the
+    /// seam from being a foreign function interface.
+    stdlib: bool,
 }
 
 /// Binding powers. Higher binds tighter. Mirrors C's precedence for the
@@ -68,6 +73,14 @@ impl Parser {
         let mut p = Self::new(toks);
         p.ty_exprs = ty_exprs;
         p
+    }
+
+    /// Mark this file as standard library source. Set by the module loader
+    /// for an embedded module and by nothing else, so a file on disk can
+    /// never claim it.
+    pub fn stdlib(mut self) -> Self {
+        self.stdlib = true;
+        self
     }
 
     pub fn new(toks: Vec<Token>) -> Self {
@@ -118,6 +131,7 @@ impl Parser {
             tparams: Vec::new(),
             ty_exprs: Vec::new(),
             module: String::new(),
+            stdlib: false,
         }
     }
 
@@ -346,6 +360,20 @@ impl Parser {
         let span = self.span();
         match self.peek().clone() {
             Tok::Ident(n) => {
+                // `__` is reserved, and this is the one funnel every name in
+                // the language goes through -- declarations, uses, fields,
+                // methods and arguments alike. Reserving it outright is what
+                // lets the standard library's seam to C be invisible: a
+                // program cannot call a primitive, and cannot declare
+                // something a primitive's name would collide with. C reserves
+                // the same prefix for the same reason.
+                if n.starts_with("__") && !self.stdlib {
+                    self.bump();
+                    return Err(Diag::new(
+                        span,
+                        format!("`{n}` is reserved: a name may not begin with `__`"),
+                    ));
+                }
                 self.bump();
                 Ok((n, span))
             }
@@ -575,9 +603,9 @@ impl Parser {
     /// does not. The difference is a `(` after the name -- and after any
     /// generic parameter list. Three tokens of lookahead, no backtracking.
     fn starts_func(&self) -> bool {
-        // `static` can only begin a function declaration, so it settles the
-        // question by itself.
-        if self.peek() == &Tok::KwStatic {
+        // `static` and `prim` can only begin a function declaration, so
+        // either settles the question by itself.
+        if self.peek() == &Tok::KwStatic || self.peek() == &Tok::KwPrim {
             return true;
         }
         // The return type may be a type parameter the parser has not met yet
@@ -708,6 +736,7 @@ impl Parser {
                     // An interface lists instance methods: a static one has
                     // no receiver, so there is nothing to dispatch on.
                     is_static: false,
+                    is_prim: false,
                     recv: Some(name.clone()),
                     name: mname,
                     tparams: Vec::new(),
@@ -867,6 +896,18 @@ impl Parser {
         // A generic function's return type may mention its own parameters, so
         // `static Point Point.origin()` -- a method on the TYPE. Read first,
         // so everything after it parses exactly like an ordinary method.
+        // The seam to C (docs/stdlib-seam.md). Read before `static` so the
+        // two cannot be written in either order -- a primitive is a free
+        // function, and `prim static` would have to be rejected anyway.
+        let is_prim = self.eat(&Tok::KwPrim);
+        if is_prim && !self.stdlib {
+            return Err(Diag::new(
+                span,
+                "`prim` is the standard library's seam to C and is only \
+                 available to source the compiler ships; there is no foreign \
+                 function interface yet",
+            ));
+        }
         let is_static = self.eat(&Tok::KwStatic);
         // the `<T>` list has to be read before the return type. It sits after
         // the name in the source, so scan ahead for it first.
@@ -912,13 +953,23 @@ impl Parser {
             }
         }
         self.expect(Tok::RParen)?;
-        let body = self.parse_block()?;
+        // A primitive's body is C's, so there is none to read. Everything
+        // above this point parsed exactly like an ordinary function, which
+        // is the point: its types are checked and monomorphised like
+        // anybody else's.
+        let body = if is_prim {
+            self.prim_signature_only(span, &recv, &tparams)?;
+            Vec::new()
+        } else {
+            self.parse_block()?
+        };
         self.tparams.clear();
         Ok(Func {
             module: self.module.clone(),
             is_pub,
             ret,
             is_static,
+            is_prim,
             recv,
             name,
             tparams,
@@ -926,6 +977,35 @@ impl Parser {
             body,
             span,
         })
+    }
+
+    /// What a `prim` may not be. The checks are here rather than in the
+    /// lowerer because they are all about the written declaration, and
+    /// because refusing them at the source keeps the set of C symbols a
+    /// program can reach equal to the list of `prim` lines in one file.
+    fn prim_signature_only(
+        &mut self,
+        span: Span,
+        recv: &Option<String>,
+        tparams: &[String],
+    ) -> Result<(), Diag> {
+        if recv.is_some() {
+            return Err(Diag::new(
+                span,
+                "a `prim` is a free function: the seam is one C symbol per \
+                 declaration, and a method would put it behind a receiver",
+            ));
+        }
+        if !tparams.is_empty() {
+            return Err(Diag::new(
+                span,
+                "a `prim` may not be generic: one declaration is one C \
+                 symbol, and a generic one would need a runtime function per \
+                 instantiation",
+            ));
+        }
+        self.expect(Tok::Semi)?;
+        Ok(())
     }
 
     /// Look ahead past `<ret> <name>` for a `<T, ..>` list, without consuming

@@ -169,7 +169,21 @@ impl Fmt {
             self.blank();
         }
 
-        for f in p.funcs.iter().filter(|f| f.recv.is_none()) {
+        // `prim` declarations come first and stay together. A run of them is
+        // a list -- the module's whole seam to C, readable in one glance --
+        // and spacing them apart like definitions would hide that they are
+        // one thing. The same reason `import` lines are not separated.
+        let mut any_prim = false;
+        for f in p.funcs.iter().filter(|f| f.recv.is_none() && f.is_prim) {
+            self.item_comments(f.span.line);
+            self.func(f);
+            any_prim = true;
+        }
+        if any_prim {
+            self.blank();
+        }
+
+        for f in p.funcs.iter().filter(|f| f.recv.is_none() && !f.is_prim) {
             self.item_comments(f.span.line);
             self.func(f);
             self.blank();
@@ -261,6 +275,15 @@ impl Fmt {
         };
         let vis = if f.is_pub { "pub " } else { "" };
         let kw = if f.is_static { "static " } else { "" };
+        // A `prim` has no body: signature, semicolon, done.
+        if f.is_prim {
+            self.line(&format!(
+                "prim {} {name}({});",
+                self.ty(f.ret),
+                self.params(&f.params)
+            ));
+            return;
+        }
         self.line(&format!(
             "{vis}{kw}{} {name}{tp}({}) {{",
             self.ty(f.ret),

@@ -120,7 +120,7 @@ run "formatter preserves meaning" bash -c '
             # Behaviour, not just text -- but only where an expectation exists.
             exp="${f%.'"$LANG_EXT"'}.out"
             if [ -e "$exp" ]; then
-                if gcc -O0 -I runtime "$w/b.c" runtime/rt.c -lpthread \
+                if gcc -O0 -I runtime "$w/b.c" runtime/rt.c -lpthread -lm \
                        -o "$w/b" 2>/dev/null; then
                     if ! diff -q <("$w/b" 2>&1) "$exp" >/dev/null 2>&1; then
                         echo "formatted program prints something else: $f"
@@ -134,6 +134,20 @@ run "formatter preserves meaning" bash -c '
             fi
         fi
         rm -rf "$w"
+    done
+    exit $bad'
+
+# The standard library is source like any other, and it is the source most
+# likely to be forgotten: it is not in the corpus, it is not compiled on its
+# own -- `math.src` cannot be a program -- and it reaches a build through
+# include_str!. Checking it is formatted is also a round-trip test, because
+# the checked-in file IS the canonical output: anything the formatter drops
+# or reorders in it shows up here as a diff.
+run "stdlib source is formatted" bash -c '
+    bad=0
+    for f in lib/*.'"$LANG_EXT"'; do
+        [ -e "$f" ] || continue
+        ./target/debug/'"$LANG_BIN"' fmt --check "$f" || bad=1
     done
     exit $bad'
 

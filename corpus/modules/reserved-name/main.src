@@ -1,0 +1,3 @@
+// `__` is reserved outright, which is what keeps the seam invisible.
+int __count = 1;
+print(__count);

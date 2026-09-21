@@ -1,0 +1,4 @@
+corpus/modules/stdlib-collision/main.src:1:1: `math` is a standard library module, so corpus/modules/stdlib-collision/math.src collides with it: module names are globally unique and there is no way to override one
+  |
+1 | import math;
+  | ^

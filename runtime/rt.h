@@ -100,6 +100,17 @@ void rt_print(int64_t v);
 void rt_print_bool(bool v);
 void rt_print_str(Obj *o);
 void rt_print_float(double x);
+
+/* The seam to C for `lib/math.src` (docs/stdlib-seam.md). One symbol per
+ * `prim` declaration, found by stripping `__` and prefixing `rt_`. These are
+ * libm with a rename and nothing else -- anything with a policy in it, like
+ * which way a half rounds, is decided in the library source where it can be
+ * read. */
+double rt_sqrt(double x);
+double rt_pow(double x, double y);
+double rt_floor(double x);
+double rt_ceil(double x);
+double rt_round(double x);
 void rt_format_float(char *buf, size_t cap, double x);
 
 /* Text primitives a library cannot write from inside the language. */
