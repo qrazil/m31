@@ -1,4 +1,0 @@
-corpus/errors/099-main-declared.src:3:1: there is no `main`: statements at the top level are the program
-  |
-3 | int main() { return 0; }
-  | ^
