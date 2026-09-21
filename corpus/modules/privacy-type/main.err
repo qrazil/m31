@@ -1,0 +1,4 @@
+corpus/modules/privacy-type/main.src:2:17: `Secret` is private to `lib`; its fields cannot be read from here
+  |
+2 | print(lib.leak().code);
+  |                 ^

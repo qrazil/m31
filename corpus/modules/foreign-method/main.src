@@ -1,0 +1,8 @@
+import lib;
+
+// Declaring a method on another module's type reached into its private type
+// from outside -- and a method written far from its type is hard to find
+// even where it is allowed.
+int Secret.doubled() { return code * 3; }
+
+print(lib.leak().doubled());

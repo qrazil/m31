@@ -1,0 +1,2 @@
+type Secret { int code; }
+pub Secret leak() { return Secret(21); }

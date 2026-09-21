@@ -1,0 +1,4 @@
+corpus/modules/wrong-file/lib.src:5:12: type mismatch: expected int, found str
+  |
+5 |     return s;
+  |            ^

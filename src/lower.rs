@@ -99,6 +99,11 @@ pub struct Lowerer {
     field_params: Vec<Vec<Param>>,
     /// Base type of each distinct type, parallel to `typedefs`.
     distinct_base: Vec<Option<Ty>>,
+    /// Module and export flag per type, parallel to `typedefs`. Privacy has
+    /// to survive the merge into one program, so it travels with the
+    /// declaration rather than with the file.
+    type_module: Vec<String>,
+    type_pub: Vec<bool>,
     /// Surface payload types per variant, parallel to `typedefs`. The IR
     /// records only `Ref`, which cannot tell `str` from a user type, and a
     /// match arm has to bind the payload at its real type.
@@ -166,6 +171,8 @@ impl Lowerer {
             field_surface: Vec::new(),
             field_params: Vec::new(),
             distinct_base: Vec::new(),
+            type_module: Vec::new(),
+            type_pub: Vec::new(),
             variant_surface: Vec::new(),
             modules: std::collections::HashSet::new(),
             cur_module: String::new(),
@@ -1723,6 +1730,8 @@ impl Lowerer {
                 vsurface.push(v.payload.clone());
             }
             self.variant_surface.push(vsurface);
+            self.type_module.push(t.module.clone());
+            self.type_pub.push(t.is_pub);
             self.typedefs.push(TypeDef {
                 name: t.name.clone(),
                 fields,
@@ -1752,6 +1761,7 @@ impl Lowerer {
         }
 
         for f in &p.funcs {
+            let _tag = f.module.clone();
             // Habit from C, Java and Go. Without this it declares an ordinary
             // function nothing calls, and the program silently does nothing --
             // the worst failure mode for someone who has written C before.
@@ -1788,6 +1798,22 @@ impl Lowerer {
                 self.statics.insert(f.key());
             }
             if let Some(r) = &f.recv {
+                // A module may only add methods to types it declared itself.
+                // Otherwise one module could reach into another's private
+                // type by declaring a method on it -- and a method written
+                // far from its type is hard to find even when it is allowed.
+                if let Some(i) = self.typedefs.iter().position(|d| d.name == *r) {
+                    let owner = self.type_module[i].clone();
+                    if !owner.is_empty() && owner != f.module {
+                        return Err(Diag::new(
+                            f.span,
+                            format!(
+                                "`{r}` is declared in `{owner}`; a method may only \
+                                 be added to a type its own module declared"
+                            ),
+                        ));
+                    }
+                }
                 if !self.typedefs.iter().any(|d| d.name == *r) {
                     return Err(Diag::new(f.span, format!("unknown type `{r}`")));
                 }
@@ -2092,6 +2118,23 @@ impl Lowerer {
         }
     }
 
+    /// May the module being lowered name or reach into this type?
+    ///
+    /// A builtin carries no module and is visible everywhere. Anything else
+    /// is visible inside its own module, and outside only if it is `pub`.
+    fn type_visible(&self, tid: u32) -> bool {
+        let m = &self.type_module[tid as usize];
+        m.is_empty() || *m == self.cur_module || self.type_pub[tid as usize]
+    }
+
+    /// The diagnostic for reaching into a type that is not visible here.
+    fn not_visible(&self, tid: u32, what: &str) -> String {
+        format!(
+            "`{}` is private to `{}`; {what}",
+            self.typedefs[tid as usize].name, self.type_module[tid as usize]
+        )
+    }
+
     /// Is `from` usable where `to` is expected?
     ///
     /// Identical types always. Beyond that, a concrete type is assignable to
@@ -2273,6 +2316,10 @@ impl Lowerer {
     }
 
     fn lower_func(&mut self, f: &Func) -> Result<ir::Func, Diag> {
+        self.lower_func_inner(f).map_err(|d| d.in_module(&f.module))
+    }
+
+    fn lower_func_inner(&mut self, f: &Func) -> Result<ir::Func, Diag> {
         self.cur_module = f.module.clone();
         self.types.clear();
         self.blocks.clear();
@@ -3314,6 +3361,12 @@ impl Lowerer {
                 ),
             ));
         }
+        if !self.type_visible(tid) {
+            return Err(Diag::new(
+                span,
+                self.not_visible(tid, "its variants cannot be named from here"),
+            ));
+        }
         if !args.named.is_empty() {
             return Err(Diag::new(
                 span,
@@ -3426,6 +3479,14 @@ impl Lowerer {
             .insert(hold.clone(), (sc.ty, sc.val(), true));
         self.owned.last_mut().unwrap().push(hold.clone());
 
+        if !self.type_visible(tid) {
+            self.scopes.pop();
+            self.owned.pop();
+            return Err(Diag::new(
+                scrutinee.span(),
+                self.not_visible(tid, "its variants cannot be matched from here"),
+            ));
+        }
         let names: Vec<String> = self.typedefs[tid as usize]
             .variants
             .iter()
@@ -4217,6 +4278,12 @@ impl Lowerer {
                         format!("type {} has no fields", self.tyname(o.ty)),
                     ));
                 };
+                if !self.type_visible(tid) {
+                    return Err(Diag::new(
+                        *span,
+                        self.not_visible(tid, "its fields cannot be read from here"),
+                    ));
+                }
                 let Some(path) = self.field_path(tid, field) else {
                     return Err(Diag::new(
                         *span,
@@ -4291,6 +4358,23 @@ impl Lowerer {
                     && self.typedefs[tid as usize].name.starts_with("Option$")
                 {
                     return self.lower_option_method(&o, tid, m, args, *span);
+                }
+                if !self.type_visible(tid) {
+                    return Err(Diag::new(
+                        *span,
+                        self.not_visible(tid, "its methods cannot be called from here"),
+                    ));
+                }
+                {
+                    let key = format!("{}.{m}", self.typedefs[tid as usize].name);
+                    if let Some(sig) = self.sigs.get(&key) {
+                        if !sig.module.is_empty() && sig.module != self.cur_module && !sig.is_pub {
+                            return Err(Diag::new(
+                                *span,
+                                format!("`{m}` is private to `{}`", sig.module),
+                            ));
+                        }
+                    }
                 }
                 // A static method has no receiver, so it cannot be reached
                 // through a value even though the spelling looks the same.

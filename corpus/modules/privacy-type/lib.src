@@ -1,0 +1,6 @@
+// A private type, leaked entirely through a public function: its field and
+// its private method were both reachable from outside.
+type Secret { int code; }
+int Secret.reveal() { return code * 2; }
+
+pub Secret leak() { return Secret(21); }

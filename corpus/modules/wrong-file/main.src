@@ -1,0 +1,4 @@
+import lib;
+
+// an innocent line
+print(lib.broken());

@@ -1,0 +1,5 @@
+import lib;
+match (lib.pick()) {
+    case Red: { print(1); }
+    case Green: { print(2); }
+}

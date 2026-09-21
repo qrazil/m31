@@ -22,6 +22,10 @@ impl Span {
 pub struct Diag {
     pub span: Span,
     pub msg: String,
+    /// Which module the error is IN, when that is not the file the compiler
+    /// was pointed at. A span alone is a line number with no file, and with
+    /// several modules that names the wrong source line rather than none.
+    pub module: Option<String>,
 }
 
 impl Diag {
@@ -29,7 +33,18 @@ impl Diag {
         Diag {
             span,
             msg: msg.into(),
+            module: None,
         }
+    }
+
+    /// Attribute this to a module, unless it already names one. The innermost
+    /// attribution wins: an error raised while lowering a function knows
+    /// better than the loop that called it.
+    pub fn in_module(mut self, m: &str) -> Self {
+        if self.module.is_none() && !m.is_empty() {
+            self.module = Some(m.to_string());
+        }
+        self
     }
 
     /// Render with the path exactly as it was given on the command line, so

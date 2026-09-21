@@ -17,7 +17,7 @@ Anything marked done there is tested; the corpus is the proof.
 
 | | |
 |---|---|
-| Corpus | 172 programs — 49 behaviour, 95 diagnostics, 16 traps, 7 Go twins, 5 multi-module |
+| Corpus | 178 programs — 49 behaviour, 95 diagnostics, 16 traps, 7 Go twins, 11 multi-module |
 | Oracle | gcc and clang, each at -O0 and -O2, all four must agree |
 | Leaks | every behaviour program asserts `__rc_live=0` at exit |
 | Warnings | emitted C must be clean under `-Wall -Wextra` |
@@ -163,12 +163,38 @@ so it is a static method -- `int.parse(s)` -- and static methods now exist.
 What it waits on is what `E` should be, the last open question in
 `docs/errors-decision.md`.
 
-### 3. Modules — done
+### 3. Modules — built, and then substantially repaired
 
 `docs/modules-decision.md`, built. A file is a module named by its basename,
 private by default with `pub`, qualified imports with no wildcards or
 aliases, cycles refused with the whole chain printed, one entry file declared
 on the command line.
+
+A fourth adversarial review found the first cut badly broken, and the
+headline bug was one this roadmap had already guessed at and shipped anyway:
+**each file interned its own type arena and the loader concatenated them
+without rebasing the indices.** `Ty::User` is an index, so every module but
+the first silently took the first one's types. A program calling its own
+method got the library's, compiled clean under all four builds, and printed
+the wrong answer. Fixed by parsing every file into ONE arena.
+
+It also found that **privacy was enforced for functions only** — a private
+type, its fields, its methods and a private enum's variants were all
+reachable from another module, and a module could declare methods on another
+module's private type. And that every post-parse diagnostic was blamed on the
+entry file, quoting an innocent line at the same number.
+
+Still open from that review, recorded rather than fixed:
+
+  - Two modules cannot each have a private declaration of the same name;
+    names collide globally. This is the one that breaks the promise in
+    `docs/modules-decision.md` §2 most directly.
+  - A `pub type` cannot be named from another module at all — there is no
+    `lib.P` in type position — so it can only be passed through in a single
+    expression.
+  - A type with a static method cannot be embedded.
+  - A local may shadow an imported module name, though shadowing a type is a
+    hard error.
 
 Two things the implementation settled that the record left implicit:
 

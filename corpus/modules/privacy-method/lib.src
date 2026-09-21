@@ -1,0 +1,6 @@
+pub type Open { int v; }
+pub Open make() { return Open(1); }
+
+// Not exported. Privacy was enforced for functions only, so this was
+// callable from anywhere.
+int Open.hidden() { return 77; }

@@ -1,0 +1,31 @@
+// Every file interns into ONE type arena. Per-file arenas concatenated
+// afterwards left every index but the first file's pointing at whatever the
+// first file happened to put there -- so `Label` in the entry became `Tag`
+// here, and `l.describe()` called this one. It compiled clean under all four
+// builds and printed the wrong answer.
+pub type Tag { int v; }
+pub Tag make(int v) { return Tag(v); }
+pub int Tag.describe() { return 111; }
+
+pub type Box<T> { T v; }
+pub int boxed() {
+    Box<int> b = Box<int>(4);
+    return b.v;
+}
+
+pub enum Msg { Ping; Text(str); }
+pub int msg_kind() {
+    match (Msg.Ping) {
+        case Ping: { return 1; }
+        case Text(str s): { return s.size(); }
+    }
+}
+
+pub distinct int Price;
+pub Price price() { return Price(5); }
+
+pub int mapped() {
+    Map<str, int> m = Map<str, int>();
+    m.set("a", 7);
+    return m.get("a").or(0);
+}

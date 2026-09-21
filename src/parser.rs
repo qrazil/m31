@@ -51,6 +51,18 @@ fn infix_bp(t: &Tok) -> Option<(BinOp, u8)> {
 const UNARY_BP: u8 = 7;
 
 impl Parser {
+    /// A parser that continues an existing type arena.
+    ///
+    /// Every file must intern into ONE arena. `Ty::User` is an index into it,
+    /// so per-file arenas concatenated afterwards leave every index but the
+    /// first file's pointing at whatever the first file happened to put
+    /// there -- which compiled cleanly and called the wrong method.
+    pub fn with_arena(toks: Vec<Token>, ty_exprs: Vec<TyExpr>) -> Self {
+        let mut p = Self::new(toks);
+        p.ty_exprs = ty_exprs;
+        p
+    }
+
     pub fn new(toks: Vec<Token>) -> Self {
         // Pre-pass: every `type IDENT` in the stream. This is what makes a
         // type-first grammar decidable without C's lexer hack -- the parser

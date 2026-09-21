@@ -1,0 +1,36 @@
+import lib;
+
+// A type declared here, with a method whose name the library also uses.
+type Label { int v; }
+int Label.describe() { return 222; }
+
+Label l = Label(7);
+print(l.describe());            // 222 -- this one, not the library's 111
+print(l.v);                     // 7
+print(lib.make(3).describe());  // 111 -- and the library's, when asked for it
+
+// A generic instantiated in both modules, with different arity.
+type Pair<A> { A a; A b; }
+Pair<int> p = Pair<int>(1, 2);
+print(p.a + p.b);               // 3
+print(lib.boxed());             // 4
+
+// An enum here and an enum there.
+enum Local { A(int); B; }
+match (Local.A(3)) {
+    case A(int n): { print(n); }        // 3
+    case B: { print(0); }
+}
+print(lib.msg_kind());          // 1
+
+// A distinct type in the library and a struct here.
+type Holder { int v; }
+Holder h = Holder(9);
+print(h.v);                     // 9
+print(int(lib.price()));        // 5
+
+// A Map in the library and a List here.
+List<int> xs = List<int>();
+xs.push(10);
+print(xs[0]);                   // 10
+print(lib.mapped());            // 7

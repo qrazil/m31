@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::ast::Program;
+use crate::ast::{Program, TyExpr};
 use crate::diag::{Diag, Span};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
@@ -59,10 +59,21 @@ struct Loader {
     paths: HashMap<String, String>,
     /// The DFS stack: reaching a name already on it is the cycle.
     stack: Vec<String>,
+    /// ONE interned type arena for the whole program. `Ty::User` indexes it,
+    /// so every file has to intern into the same one -- see
+    /// `Parser::with_arena`.
+    arena: Vec<TyExpr>,
+}
+
+/// A loaded program, and where each module was read from, so a diagnostic
+/// raised after the merge can still name the right file.
+pub struct Loaded {
+    pub program: Program,
+    pub paths: HashMap<String, String>,
 }
 
 /// Load the entry file and everything it imports, in dependency order.
-pub fn load(entry: &str) -> Result<Program, Located> {
+pub fn load(entry: &str) -> Result<Loaded, Located> {
     let entry_path = Path::new(entry);
     let dir = entry_path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let ext = entry_path
@@ -78,6 +89,7 @@ pub fn load(entry: &str) -> Result<Program, Located> {
         folded: HashMap::new(),
         paths: HashMap::new(),
         stack: Vec::new(),
+        arena: Vec::new(),
     };
     let order = l.visit(&name, entry, None)?;
     let entry_module = name.clone();
@@ -104,17 +116,18 @@ pub fn load(entry: &str) -> Result<Program, Located> {
                 acc.types.extend(p.types);
                 acc.funcs.extend(p.funcs);
                 acc.toplevel.extend(p.toplevel);
-                // Each file interned its own type expressions from zero, so
-                // merging arenas would renumber every `Ty::User`. Parsing
-                // them into one arena is the next step; until then a program
-                // is one file and this is unreachable.
-                acc.ty_exprs.extend(p.ty_exprs);
+                // Nothing to merge: every file interned into the loader's
+                // single arena, which is put back on the result below.
             }
         }
     }
     let mut out = out.expect("the entry module was visited");
     out.module = entry_module;
-    Ok(out)
+    out.ty_exprs = l.arena;
+    Ok(Loaded {
+        program: out,
+        paths: l.paths,
+    })
 }
 
 impl Loader {
@@ -216,7 +229,12 @@ impl Loader {
         self.paths.insert(name.to_string(), path.to_string());
 
         let toks = Lexer::new(&src).tokenize().map_err(here)?;
-        let prog = Parser::new(toks).parse_program(name).map_err(here)?;
+        let mut parser = Parser::with_arena(toks, std::mem::take(&mut self.arena));
+        let mut prog = parser.parse_program(name).map_err(here)?;
+        // `parse_program` hands the arena out with the program, so take it
+        // back from there and pass it to the next file. The program's own
+        // copy is replaced with the finished arena when the merge is done.
+        self.arena = std::mem::take(&mut prog.ty_exprs);
 
         // Only the entry file runs. Declared rather than discovered: a stray
         // statement in a library would otherwise move the program silently.

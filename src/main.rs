@@ -140,10 +140,20 @@ fn reformat(src: &str, module: &str) -> Result<String, diag::Diag> {
 fn compile(entry: &str, mode: &str) -> Result<String, modules::Located> {
     // One program, assembled from however many files it imports. Cycles are
     // refused here -- see docs/modules-decision.md.
-    let prog = modules::load(entry)?;
-    finish(prog, mode).map_err(|d| modules::Located {
-        path: entry.to_string(),
-        diag: d,
+    let loaded = modules::load(entry)?;
+    let paths = loaded.paths;
+    finish(loaded.program, mode).map_err(|d| {
+        // A diagnostic raised after the merge knows which MODULE it is in,
+        // not which file -- so resolve it here. Without this every type,
+        // name and privacy error was blamed on the entry file, quoting an
+        // innocent line at the same number.
+        let path = d
+            .module
+            .as_ref()
+            .and_then(|m| paths.get(m))
+            .cloned()
+            .unwrap_or_else(|| entry.to_string());
+        modules::Located { path, diag: d }
     })
 }
 

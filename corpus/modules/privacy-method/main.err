@@ -1,0 +1,4 @@
+corpus/modules/privacy-method/main.src:2:17: `hidden` is private to `lib`
+  |
+2 | print(lib.make().hidden());
+  |                 ^
