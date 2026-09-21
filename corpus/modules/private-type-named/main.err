@@ -1,0 +1,4 @@
+corpus/modules/private-type-named/main.src:4:1: `Hidden` is private to `lib`; it cannot be named from here
+  |
+4 | lib.Hidden h = lib.secret();
+  | ^

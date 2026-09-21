@@ -2162,6 +2162,32 @@ impl Lowerer {
         }
     }
 
+    /// A type WRITTEN in this module has to exist and be reachable.
+    ///
+    /// `lib.Nope` interns like any other name, so without this it failed
+    /// later as a mismatch against whatever it was compared to -- "expected
+    /// lib.Nope, found lib.P", which says nothing about the real mistake.
+    fn check_named_ty(&self, t: Ty, span: Span) -> Result<(), Diag> {
+        let Ty::User(i) = t else { return Ok(()) };
+        let raw = self.ty_exprs[i as usize].name.clone();
+        let Some(tid) = self.tdef_of(t) else {
+            return Err(Diag::new(
+                span,
+                match raw.split_once('#') {
+                    Some((m, n)) => format!("`{m}` has no type `{n}`"),
+                    None => format!("unknown type `{raw}`"),
+                },
+            ));
+        };
+        if !self.type_visible(tid) {
+            return Err(Diag::new(
+                span,
+                self.not_visible(tid, "it cannot be named from here"),
+            ));
+        }
+        Ok(())
+    }
+
     /// May the module being lowered name or reach into this type?
     ///
     /// A builtin carries no module and is visible everywhere. Anything else
@@ -2557,6 +2583,7 @@ impl Lowerer {
                 is_const,
                 span,
             } => {
+                self.check_named_ty(*ty, *span)?;
                 let val = self.lower_expr(init)?;
                 if !self.assignable(val.ty, *ty) {
                     return Err(Diag::new(

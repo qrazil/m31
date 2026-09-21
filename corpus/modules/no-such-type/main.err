@@ -1,0 +1,4 @@
+corpus/modules/no-such-type/main.src:5:1: `lib` has no type `Nope`
+  |
+5 | lib.Nope n = lib.make();
+  | ^

@@ -1,0 +1,2 @@
+type Hidden { int y; }
+pub Hidden secret() { return Hidden(1); }

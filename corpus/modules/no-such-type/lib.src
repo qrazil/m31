@@ -1,0 +1,2 @@
+pub type P { int x; }
+pub P make() { return P(1); }

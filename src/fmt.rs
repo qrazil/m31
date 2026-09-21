@@ -257,7 +257,7 @@ impl Fmt {
         };
         let name = match &f.recv {
             Some(r) => format!("{}.{}", shown(r), f.name),
-            None => shown(&f.name).to_string(),
+            None => shown(&f.name),
         };
         let vis = if f.is_pub { "pub " } else { "" };
         let kw = if f.is_static { "static " } else { "" };
@@ -522,6 +522,11 @@ thread_local! {
     /// Source spellings for `Ty::User`, set by the driver before formatting.
     static TYPE_NAMES: std::cell::RefCell<Vec<String>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// The module being formatted. A type declared HERE is written bare; one
+    /// from elsewhere keeps its `mod.` qualifier, or the formatted file no
+    /// longer compiles.
+    static THIS_MODULE: std::cell::RefCell<String> =
+        const { std::cell::RefCell::new(String::new()) };
 }
 
 /// Record how each interned type was spelled, so the formatter can print it.
@@ -530,6 +535,7 @@ thread_local! {
 /// built -- the first version did the latter and printed `Pair<T0, T1>`,
 /// because every argument was looked up in a table that was still empty.
 pub fn set_type_names(p: &Program) {
+    THIS_MODULE.with(|m| *m.borrow_mut() = p.module.clone());
     let rendered: Vec<String> = (0..p.ty_exprs.len())
         .map(|i| render_ty(&p.ty_exprs, &Ty::User(i as u32)))
         .collect();
@@ -537,9 +543,20 @@ pub fn set_type_names(p: &Program) {
 }
 
 /// Names are interned module-qualified; source has to come back out the way
-/// it went in.
-fn shown(name: &str) -> &str {
-    crate::ast::bare(name)
+/// it went in -- bare for this module's own types, qualified for anyone
+/// else's.
+fn shown(name: &str) -> String {
+    match name.split_once('#') {
+        None => name.to_string(),
+        Some((m, n)) => {
+            let here = THIS_MODULE.with(|t| t.borrow().clone());
+            if m == here {
+                n.to_string()
+            } else {
+                format!("{m}.{n}")
+            }
+        }
+    }
 }
 
 fn render_ty(exprs: &[TyExpr], t: &Ty) -> String {
@@ -551,7 +568,7 @@ fn render_ty(exprs: &[TyExpr], t: &Ty) -> String {
         Ty::Void => "void".into(),
         Ty::User(i) => match exprs.get(*i as usize) {
             None => format!("T{i}"),
-            Some(e) if e.args.is_empty() => shown(&e.name).to_string(),
+            Some(e) if e.args.is_empty() => shown(&e.name),
             Some(e) => {
                 let args: Vec<String> = e.args.iter().map(|a| render_ty(exprs, a)).collect();
                 format!("{}<{}>", shown(&e.name), args.join(", "))

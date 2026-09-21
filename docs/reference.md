@@ -98,7 +98,15 @@ print(greet.shout("world"));
     importing yourself, is an error.
   - **Private by default.** A declaration is visible only inside its module
     unless marked `pub`. Reaching a name from another module means writing
-    `mod.name`; unqualified, it is not in scope at all.
+    `mod.name`; unqualified, it is not in scope at all. That holds for
+    everything a module declares — functions, types, methods and an enum's
+    variants — not only functions.
+  - **A type from another module is `mod.Type`**, anywhere a type may be
+    written: a declaration, a parameter, a type argument, a static method
+    (`shapes.Point.origin()`) or an enum variant (`shapes.Colour.Red`).
+  - **A method may only be added to a type its own module declared.** Go and
+    Rust both draw this line, and without it a module could reach into
+    another's private type by declaring a method on it.
   - **No wildcard import and no aliasing.** A reader can always tell which
     module a name came from — which matters more here than elsewhere,
     because §4.1 already bans shadowing. Module names are unique, so two

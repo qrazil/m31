@@ -17,7 +17,7 @@ Anything marked done there is tested; the corpus is the proof.
 
 | | |
 |---|---|
-| Corpus | 178 programs — 49 behaviour, 95 diagnostics, 16 traps, 7 Go twins, 11 multi-module |
+| Corpus | 182 programs — 49 behaviour, 95 diagnostics, 16 traps, 7 Go twins, 15 multi-module |
 | Oracle | gcc and clang, each at -O0 and -O2, all four must agree |
 | Leaks | every behaviour program asserts `__rc_live=0` at exit |
 | Warnings | emitted C must be clean under `-Wall -Wextra` |
@@ -184,15 +184,14 @@ reachable from another module, and a module could declare methods on another
 module's private type. And that every post-parse diagnostic was blamed on the
 entry file, quoting an innocent line at the same number.
 
-Still open from that review, recorded rather than fixed:
+Since repaired: declarations are interned module-qualified, so two modules
+may each have a private `helper` and their own `Point`; and `lib.P` works
+anywhere a type may be written.
 
-  - Two modules cannot each have a private declaration of the same name;
-    names collide globally. This is the one that breaks the promise in
-    `docs/modules-decision.md` §2 most directly.
-  - A `pub type` cannot be named from another module at all — there is no
-    `lib.P` in type position — so it can only be passed through in a single
-    expression.
-  - A type with a static method cannot be embedded.
+Still open from that review:
+
+  - A type with a static method cannot be embedded — embedding harvests
+    promoted methods out of the signature table, which holds statics too.
   - A local may shadow an imported module name, though shadowing a type is a
     hard error.
 

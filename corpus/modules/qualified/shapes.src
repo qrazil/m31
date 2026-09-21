@@ -1,0 +1,17 @@
+// A library that exports a type, a method on it, a static, and an enum.
+// Before qualified types existed, a `pub type` could only be passed through
+// in a single expression -- it could not be named, so it could not be bound
+// to a variable or held in a collection.
+pub type Point { int x; int y; }
+
+pub int Point.sum() { return x + y; }
+pub static Point Point.origin() { return Point(0, 0); }
+
+pub enum Colour { Red; Green(int); }
+
+pub Point make(int x, int y) { return Point(x, y); }
+pub Colour tint() { return Colour.Green(7); }
+
+// Not exported: nameable here, nowhere else.
+type Internal { int n; }
+pub int hidden_sum() { return Internal(4).n; }

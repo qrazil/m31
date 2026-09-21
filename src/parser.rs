@@ -17,6 +17,8 @@ pub struct Parser {
     /// Names declared by `type`, from a pre-pass, so a type can be used
     /// before it is declared and `IDENT IDENT` is decidable with two tokens.
     type_names: Vec<String>,
+    /// Modules this file imports, so `lib.Point` reads as a type.
+    imports: Vec<String>,
     /// Type names DECLARED IN THIS FILE, as opposed to builtin ones. A name
     /// in here is interned module-qualified, so two files may each declare a
     /// `Point` without becoming the same type in the shared arena.
@@ -112,6 +114,7 @@ impl Parser {
             type_names,
             own,
             builtin,
+            imports: Vec::new(),
             tparams: Vec::new(),
             ty_exprs: Vec::new(),
             module: String::new(),
@@ -170,6 +173,37 @@ impl Parser {
     fn decl_starts_here(&self) -> bool {
         if Self::ty_of(self.peek()).is_some() {
             return true;
+        }
+        // `lib.P v = ..` is a declaration; `lib.f(..)` is a call. Both begin
+        // with a module name and a dot, so the difference is what follows
+        // the name after it -- an identifier, or a `(`.
+        if let Tok::Ident(m) = self.peek() {
+            if self.imports.iter().any(|x| x == m) && self.peek_at(1) == &Tok::Dot {
+                let mut i = 2;
+                if !matches!(self.peek_at(i), Tok::Ident(_)) {
+                    return false;
+                }
+                i += 1;
+                if self.peek_at(i) == &Tok::Lt {
+                    let mut depth = 0;
+                    loop {
+                        match self.peek_at(i) {
+                            Tok::Lt => depth += 1,
+                            Tok::Gt => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    i += 1;
+                                    break;
+                                }
+                            }
+                            Tok::Eof => return false,
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                }
+                return matches!(self.peek_at(i), Tok::Ident(_));
+            }
         }
         if !self.is_ty_at(0) {
             return false;
@@ -253,6 +287,30 @@ impl Parser {
     }
 
     fn expect_ty(&mut self) -> Result<Ty, Diag> {
+        // `lib.P` -- a type from another module. It interns to the same
+        // `lib#P` the declaring file produced, which is what makes the two
+        // spellings name one type.
+        if let Tok::Ident(m) = self.peek().clone() {
+            if self.imports.contains(&m) && self.peek_at(1) == &Tok::Dot {
+                let span = self.span();
+                self.bump();
+                self.bump();
+                let (n, _) = self.expect_ident()?;
+                let mut args = Vec::new();
+                if self.peek() == &Tok::Lt {
+                    self.bump();
+                    loop {
+                        args.push(self.expect_ty()?);
+                        if !self.eat(&Tok::Comma) {
+                            break;
+                        }
+                    }
+                    self.expect(Tok::Gt)?;
+                }
+                let _ = span;
+                return Ok(self.intern(format!("{m}#{n}"), args));
+            }
+        }
         if let Tok::Ident(name) = self.peek().clone() {
             if self.is_ty_name(&name) {
                 self.bump();
@@ -453,6 +511,7 @@ impl Parser {
             if imports.iter().any(|i| i.name == name) {
                 return Err(Diag::new(span, format!("`{name}` is imported twice")));
             }
+            self.imports.push(name.clone());
             imports.push(Import { name, span });
         }
 
@@ -1226,6 +1285,29 @@ impl Parser {
                 self.bump();
                 let args = self.parse_args()?;
                 Ok(Expr::Call(name, args, span))
+            }
+            // `lib.P.origin(..)` and `lib.Colour.Red` -- a static method or
+            // an enum variant on another module's type. Told apart from
+            // `lib.f(..)` by the SECOND dot: a module function call has only
+            // one.
+            Tok::Ident(m)
+                if self.imports.contains(&m)
+                    && self.peek_at(1) == &Tok::Dot
+                    && matches!(self.peek_at(2), Tok::Ident(_))
+                    && self.peek_at(3) == &Tok::Dot =>
+            {
+                self.bump();
+                self.bump();
+                let (tname, _) = self.expect_ident()?;
+                self.expect(Tok::Dot)?;
+                let (member, _) = self.expect_ident()?;
+                let ty = self.intern(format!("{m}#{tname}"), Vec::new());
+                let args = if self.peek() == &Tok::LParen {
+                    self.parse_args()?
+                } else {
+                    Args::default()
+                };
+                Ok(Expr::EnumNew(ty, member, args, span))
             }
             Tok::Ident(name) if self.is_ty_name(&name) => {
                 // Construction takes the same argument shape as a call: a

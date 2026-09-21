@@ -1,0 +1,39 @@
+import shapes;
+
+// A type from another module, named and bound.
+shapes.Point p = shapes.make(3, 4);
+print(p.x);                     // 3
+print(p.sum());                 // 7
+
+// Assigned, and passed as a parameter.
+shapes.Point q = p;
+print(q.sum());                 // 7
+
+int total(shapes.Point a, shapes.Point b) {
+    return a.sum() + b.sum();
+}
+print(total(p, q));             // 14
+
+// A static method on a qualified type.
+shapes.Point o = shapes.Point.origin();
+print(o.sum());                 // 0
+
+// A qualified type as a type argument, and in a collection.
+List<shapes.Point> pts = List<shapes.Point>();
+pts.push(p);
+pts.push(o);
+print(pts.size());              // 2
+print(pts[0].sum());            // 7
+
+// An enum variant from another module, constructed and matched.
+match (shapes.Colour.Green(5)) {
+    case Red: { print(0); }
+    case Green(int n): { print(n); }    // 5
+}
+match (shapes.tint()) {
+    case Red: { print(0); }
+    case Green(int n): { print(n); }    // 7
+}
+
+// And the module's own private type is still reachable from inside it.
+print(shapes.hidden_sum());     // 4

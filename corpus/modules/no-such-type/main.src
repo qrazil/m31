@@ -1,0 +1,6 @@
+import lib;
+
+// Naming something the module does not have used to fail later, as a
+// mismatch against whatever it met -- which said nothing about the mistake.
+lib.Nope n = lib.make();
+print(n.x);
