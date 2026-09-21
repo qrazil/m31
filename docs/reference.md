@@ -1004,11 +1004,17 @@ Stated so the absence is a decision and not an oversight:
 
 ## 10. Grammar
 
-EBNF. `{ x }` is zero or more, `[ x ]` optional.
+EBNF. `{ x }` is zero or more, `[ x ]` optional. This is normative: a program
+the grammar does not derive is not in the language, whatever the compiler
+happens to accept, and a compiler that refuses a derivable program is wrong
+unless a later section of this document forbids it on non-grammatical
+grounds (types, privacy, shadowing).
 
 ```ebnf
-program     = { item } ;
-item        = typedecl | interface | enumdecl | distinct | func | stmt ;
+program     = { import } { item } ;
+import      = "import" IDENT ";" ;                    (* before any item *)
+item        = [ "pub" ] decl_item | stmt ;            (* stmt: entry file only *)
+decl_item   = typedecl | interface | enumdecl | distinct | func | prim ;
 
 typedecl    = "type" IDENT [ tparams ] "{" { field ";" } "}" ;
 interface   = "interface" IDENT [ tparams ] "{" { sig ";" } "}" ;
@@ -1018,13 +1024,15 @@ distinct    = "distinct" type IDENT ";" ;
 field       = type IDENT [ "=" expr ] | type ;        (* bare type = embedded *)
 sig         = type IDENT "(" [ params ] ")" ;
 
-func        = type [ IDENT "." ] IDENT [ tparams ] "(" [ params ] ")" block ;
+func        = [ "static" ] type [ IDENT "." ] IDENT [ tparams ]
+              "(" [ params ] ")" block ;              (* static needs a receiver *)
+prim        = "prim" type IDENT "(" [ params ] ")" ";" ;  (* stdlib source only, §10.1 *)
 tparams     = "<" IDENT { "," IDENT } ">" ;
 params      = param { "," param } ;
 param       = type IDENT [ "=" expr ] ;
 
-type        = "int" | "bool" | "str" | "void"
-            | IDENT [ "<" type { "," type } ">" ] ;
+type        = "int" | "float" | "bool" | "str" | "void"
+            | [ IDENT "." ] IDENT [ "<" type { "," type } ">" ] ;
 
 block       = "{" { stmt } "}" ;
 stmt        = decl | assign | eval | if | while | forin | match
@@ -1034,7 +1042,7 @@ match       = "match" "(" expr ")" "{" { case } "}" ;
 case        = "case" IDENT [ "(" bind { "," bind } ")" ] ":" block ;
 bind        = type IDENT ;
 
-decl        = [ "const" ] type IDENT "=" expr ";" ;
+decl        = [ "const" ] type IDENT "=" expr ";" ;   (* always initialised *)
 assign      = lvalue "=" expr ";" ;
 lvalue      = IDENT | expr "." IDENT | expr "[" expr "]" ;
 eval        = expr ";" ;
@@ -1044,13 +1052,35 @@ forin       = "for" "(" type IDENT "in" expr ")" block ;
 
 expr        = unary { binop unary } ;                 (* precedence per 6.1 *)
 unary       = [ "-" | "!" ] postfix ;
-postfix     = atom { "." IDENT [ args ] | "[" expr "]" } ;
-atom        = INT | STR | "true" | "false"
+postfix     = atom { "." IDENT [ args ] | "[" expr "]" | "?" } ;
+atom        = INT | FLOAT | STR | "true" | "false"
             | IDENT [ args ]
             | type args                               (* construction *)
-            | type "." IDENT [ args ]                 (* enum variant *)
+            | type "." IDENT [ args ]                 (* enum variant, static method *)
+            | seqlit | maplit
             | "(" expr ")" ;
+
+seqlit      = "[" [ expr { "," expr } ] "]"           (* List or Array, §3.9 *)
+            | "[" expr ";" expr "]" ;                 (* value; count *)
+maplit      = "{" [ expr ":" expr { "," expr ":" expr } ] "}" ;
 
 args        = "(" [ arg { "," arg } ] ")" ;
 arg         = expr | IDENT ":" expr ;                 (* positional before named *)
 ```
+
+Lexical: `INT` is decimal digits. `FLOAT` has a dot with digits on **both**
+sides — `1.0`, never `1.` or `.5` — and no exponent, so whether a literal is
+a float is decided by one character. `IDENT` is a letter or `_` followed by
+letters, digits or `_`, and **may not begin with `__`**, which is reserved
+(§10.1).
+
+**No trailing commas**, anywhere a list is closed by a bracket. The compiler
+currently accepts `[1, 2,]` and `{"a": 1,}`; that is a bug, and it is
+refused rather than extended to arguments and parameters because allowing
+trailing commas later is additive and forbidding them later is not.
+
+### 10.1 The standard library's seam
+
+`prim` and `__`-prefixed names are available only to modules the compiler
+ships in `lib/`. To any other program they do not exist: `prim` is refused
+and a `__` name is a reserved-name error. See `docs/stdlib-seam.md`.
