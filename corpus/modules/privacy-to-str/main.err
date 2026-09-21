@@ -1,0 +1,4 @@
+corpus/modules/privacy-to-str/main.src:2:10: `to_str` is private to `lib`
+  |
+2 | print(lib.make());
+  |          ^

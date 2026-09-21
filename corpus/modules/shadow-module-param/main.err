@@ -1,0 +1,4 @@
+corpus/modules/shadow-module-param/main.src:2:7: `lib` is an imported module; shadowing is not allowed, rename one
+  |
+2 | int g(int lib) { return lib; }
+  |       ^

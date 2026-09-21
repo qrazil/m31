@@ -1,0 +1,7 @@
+pub type Open { int v; }
+pub Open make() { return Open(1); }
+
+// Not exported. Calling it directly from outside was refused, but an
+// interface declared by the caller was satisfied by it, and the call went
+// through the vtable.
+int Open.hidden() { return 77; }

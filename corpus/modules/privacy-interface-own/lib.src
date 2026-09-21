@@ -1,0 +1,8 @@
+pub type Open { int v; }
+
+// The interface, the conversion and the private method are all in this
+// module, which can see its own methods. Handing out the interface is how
+// it chooses to export the behaviour, so a caller may use it.
+pub interface Peek { int hidden(); }
+pub Peek make() { return Open(1); }
+int Open.hidden() { return 77; }

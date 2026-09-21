@@ -1,0 +1,4 @@
+// This declaration used to replace the builtin silently, so the statement
+// below called it, discarded 6 and printed nothing.
+int print(int x) { return x + 1; }
+print(5);

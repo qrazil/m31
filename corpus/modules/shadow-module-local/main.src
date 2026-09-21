@@ -1,0 +1,4 @@
+import lib;
+// Accepted before, after which `lib.f()` would have meant a method on this.
+int lib = 3;
+print(lib);

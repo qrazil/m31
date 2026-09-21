@@ -1,0 +1,6 @@
+// A private type leaked through a public function. Its methods cannot be
+// called from outside, so they must not satisfy an interface out there
+// either -- not even a `pub` one would, since the type itself is private.
+type Secret { int code; }
+int Secret.reveal() { return code * 2; }
+pub Secret leak() { return Secret(21); }

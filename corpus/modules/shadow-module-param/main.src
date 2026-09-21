@@ -1,0 +1,3 @@
+import lib;
+int g(int lib) { return lib; }
+print(g(2));

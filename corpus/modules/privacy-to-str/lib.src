@@ -1,0 +1,6 @@
+pub type Open { int v; }
+pub Open make() { return Open(1); }
+
+// Not exported, but `print` finds `to_str` by name and used to call it
+// from anywhere. `print(v)` is `v.to_str()` and gets the same refusal.
+str Open.to_str() { return "secret"; }

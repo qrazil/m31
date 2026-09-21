@@ -1,0 +1,4 @@
+// Refused once; names became module-qualified and the check stopped
+// matching, so this was an ordinary function nothing called.
+int main() { return 0; }
+print(1);

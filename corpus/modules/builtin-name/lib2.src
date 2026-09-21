@@ -1,0 +1,5 @@
+// Nothing may take a builtin's name, in any module. This used to be
+// accepted, and every bare `print` in an importing file then failed with
+// "`print` is private to `lib2`".
+int print(int x) { return x + 1; }
+pub int f() { return 1; }
