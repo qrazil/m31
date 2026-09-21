@@ -438,6 +438,9 @@ fn emit_func(o: &mut String, f: &crate::ir::Func, types: &[TypeDef]) {
                     read.insert(*obj);
                 }
                 Inst::FConst { .. } => {}
+                Inst::ParseInto { src, .. } => {
+                    read.insert(*src);
+                }
                 Inst::EnumPack { args, .. } => read.extend(args.iter().copied()),
                 Inst::EnumTag { obj, .. } | Inst::EnumPayload { obj, .. } => {
                     read.insert(*obj);
@@ -677,6 +680,9 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
                 let v = to_slot(&a.to_string(), f.ty_of(*a));
                 writeln!(o, "    ((T{tid} *){dst})->p{k} = {v};").unwrap();
             }
+        }
+        Inst::ParseInto { ok, dst, func, src } => {
+            writeln!(o, "    {ok} = {func}({src}, &{dst});").unwrap();
         }
         Inst::EnumTag { dst, obj, tid } => {
             writeln!(o, "    {dst} = ((T{tid} *){obj})->tag;").unwrap();

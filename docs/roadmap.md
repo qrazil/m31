@@ -17,7 +17,7 @@ Anything marked done there is tested; the corpus is the proof.
 
 | | |
 |---|---|
-| Corpus | 168 programs — 48 behaviour, 93 diagnostics, 15 traps, 7 Go twins, 5 multi-module |
+| Corpus | 172 programs — 49 behaviour, 95 diagnostics, 16 traps, 7 Go twins, 5 multi-module |
 | Oracle | gcc and clang, each at -O0 and -O2, all four must agree |
 | Leaks | every behaviour program asserts `__rc_live=0` at exit |
 | Warnings | emitted C must be clean under `-Wall -Wextra` |
@@ -66,6 +66,10 @@ exact error-type matching, and a discarded `Result` as a compile error. The
 one thing left is what `E` should be in a standard library, which
 `docs/errors-decision.md` says to settle last -- once there is a library to
 say what actually fails.
+
+**Conversions and parsing.** `to_str` on every built-in type, `parse_int`
+and `parse_float` returning `Option`, and `byte_at` so a library can do its
+own textual work.
 
 **Modules.** A file is a module; `pub` to export, private by default;
 acyclic imports enforced with a chain-printing diagnostic.
@@ -176,6 +180,23 @@ Two things the implementation settled that the record left implicit:
     program.
 
 ### 4. Standard library
+
+**Designed: `docs/stdlib-decision.md`**, which answers the last open question
+from the errors record: **`E` is whatever the library says it is.** No blessed
+error type, because `match` is exhaustive with no `default`, so a single
+global error enum could never gain a variant without breaking every program
+that handles errors. An `Error` interface is worse still — with no
+downcasting it is write-only.
+
+Done: the three primitives a library cannot write from inside —
+`str.byte_at`, `str.parse_int`/`parse_float` returning `Option`, and `to_str`
+on `int`, `float` and `bool`.
+
+Next: `io`, then `math`, then `text`. `sort`-by-comparison, a `Hashable` for
+user-type Map keys, and `spawn` taking a closure are three features waiting on
+one mechanism -- a function reference in the IR -- which is worth knowing
+before calling it a post-freeze concern.
+
 
 The stated goal is Oro's and Go's: a standard library good enough that most
 programs need nothing else. Needs modules to live in and errors to report

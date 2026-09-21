@@ -1,0 +1,4 @@
+int n = 1;
+
+// int, float and bool answer `to_str` and nothing else.
+print(n.abs());

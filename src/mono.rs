@@ -74,6 +74,9 @@ impl Mono {
         let span = Span::new(1, 1);
         m.builtin_decl("List", &[Ty::Str], span);
         m.enum_decl("Option", &[Ty::Int], span)?;
+        // `parse_float` gives one of these, and nothing in the source need
+        // ever spell it. Same fact-not-guess reasoning as List<str> above.
+        m.enum_decl("Option", &[Ty::Float], span)?;
 
         let mut concrete_funcs = Vec::new();
         for f in p.funcs.clone() {

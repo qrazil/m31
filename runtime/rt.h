@@ -100,6 +100,15 @@ void rt_print(int64_t v);
 void rt_print_bool(bool v);
 void rt_print_str(Obj *o);
 void rt_print_float(double x);
+void rt_format_float(char *buf, size_t cap, double x);
+
+/* Text primitives a library cannot write from inside the language. */
+int64_t rt_str_byte_at(Obj *o, int64_t i);
+bool    rt_str_parse_int(Obj *o, int64_t *out);
+bool    rt_str_parse_float(Obj *o, double *out);
+Obj    *rt_int_to_str(int64_t n);
+Obj    *rt_bool_to_str(bool b);
+Obj    *rt_float_to_str(double x);
 
 /* int <-> float, both explicit in the source. */
 double  rt_i2f_val(int64_t n);

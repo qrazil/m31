@@ -758,6 +758,10 @@ has no other opinion about. `"é".size()` is 2.
 | `s.trim()` | ASCII whitespace from both ends |
 | `s.to_upper()`, `s.to_lower()` | ASCII only |
 | `s.repeat(n)` | |
+| `s.byte_at(i)` | one byte as an `int`; **traps** out of range |
+| `s.parse_int()` | `Option<int>` — the whole string, decimal, no surrounding space |
+| `s.parse_float()` | `Option<float>` |
+| `s.to_str()` | itself |
 
 And on a collection of `str`:
 
@@ -809,10 +813,16 @@ is a question only the program can answer. `clone` works on a `str`, an
 `Array`, a `List` and a struct; a channel and an interface value cannot be
 cloned.
 
-There is still no way to turn an `int` into a `str` or back. Parsing can
-fail, so it waits on what an error's type is; rendering a value as text waits
-for a `to_str`-shaped interface, which is also what would let `print` accept
-a user type.
+**`int`, `float` and `bool` answer `to_str`**, and nothing else — so
+`v.to_str()` means the same thing whatever `v` is, and `str(v)` is that same
+call. A number finally composes into a message.
+
+**Parsing returns an `Option`, not a `Result`.** The question a built-in parse
+answers is "did it parse", which is Option-shaped; it is lossy on purpose,
+since "not a number" and "out of range" are both `None`. A built-in cannot
+return a library's own error type — the same constraint that made `Option`
+and `Result` built in — and a library that needs the distinction builds one
+on `byte_at` and declares its own error. See `docs/stdlib-decision.md`.
 
 ---
 

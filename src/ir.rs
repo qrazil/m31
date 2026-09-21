@@ -231,6 +231,17 @@ pub enum Inst {
         tag: u32,
         args: Vec<Value>,
     },
+    /// `ok, v = parse f(src)` -- a runtime call that reports success
+    /// separately from the value it produces, writing the value through an
+    /// out-parameter. Parsing needs it: "did it work" and "what is it" are
+    /// two answers, and a sentinel would have to be a value the input could
+    /// not produce, which for a float does not exist.
+    ParseInto {
+        ok: Value,
+        dst: Value,
+        func: String,
+        src: Value,
+    },
     /// `v = tag obj` -- which variant this is, as its declaration index.
     EnumTag { dst: Value, obj: Value, tid: u32 },
     /// `v = payload obj.<idx>` -- one payload slot. The slot is a machine
@@ -433,6 +444,9 @@ fn show_inst(i: &Inst) -> String {
         } => {
             let a: Vec<String> = args.iter().map(|v| v.to_string()).collect();
             format!("{dst} = enum T{tid}.{tag}({})", a.join(", "))
+        }
+        Inst::ParseInto { ok, dst, func, src } => {
+            format!("{ok}, {dst} = parse {func}({src})")
         }
         Inst::EnumTag { dst, obj, tid } => format!("{dst} = tag T{tid} {obj}"),
         Inst::EnumPayload { dst, obj, tid, idx } => format!("{dst} = payload T{tid} {obj}.{idx}"),

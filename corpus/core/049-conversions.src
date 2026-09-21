@@ -1,0 +1,84 @@
+// Text in, numbers out, and back. The three primitives a library cannot
+// write from inside the language.
+
+// ---- to_str: every type answers the same call ------------------------------
+// `int`, `float` and `bool` answer `to_str`; a user type answers it by having
+// the method; a `str` answers with itself. One rule, not four cases.
+int n = 42;
+print(n.to_str());              // 42
+print((0 - 7).to_str());        // -7
+print(true.to_str());           // true
+print(false.to_str());          // false
+print("abc".to_str());          // abc
+
+// `str(v)` is the same call, so a number finally composes into a message.
+print(concat("n=", str(n)));    // n=42
+print(str(1.0 / 3.0));          // 0.3333333333333333
+print(str(2500.0));             // 2500 -- the plain form, as print gives
+
+// print and to_str cannot disagree: they are the same formatter.
+float x = 0.1 + 0.2;
+print(x);                       // 0.30000000000000004
+print(x.to_str());              // 0.30000000000000004
+
+// ---- parse: Option, because the question is "did it parse" -----------------
+// Lossy on purpose. "not a number" and "out of range" are both None: a
+// built-in cannot return a library's own error type, and the question it
+// answers does not need one.
+print("12".parse_int().or(-1));         // 12
+print("-12".parse_int().or(-1));        // -12
+print("+5".parse_int().or(-1));         // 5
+print("007".parse_int().or(-1));        // 7
+
+// The WHOLE string, and not an empty one.
+print("abc".parse_int().is_some());     // false
+print("".parse_int().is_some());        // false
+print("12x".parse_int().is_some());     // false
+print(" 5".parse_int().is_some());      // false -- trim first if you meant to
+print("5 ".parse_int().is_some());      // false
+print("-".parse_int().is_some());       // false
+print("0x10".parse_int().is_some());    // false -- decimal only
+
+// The boundaries are reachable, and one past them is not.
+print("9223372036854775807".parse_int().or(0));     // 9223372036854775807
+print("-9223372036854775808".parse_int().or(0));    // -9223372036854775808
+print("9223372036854775808".parse_int().is_some()); // false
+print("-9223372036854775809".parse_int().is_some());// false
+
+print("2.5".parse_float().or(0.0));     // 2.5
+print("1e3".parse_float().or(0.0));     // 1000
+print("abc".parse_float().is_some());   // false
+print("1.0e400".parse_float().is_some());   // false -- out of range
+
+// Round trips, which is the property that matters.
+print("12".parse_int().or(0).to_str());             // 12
+print(str(7).parse_int().or(0));                    // 7
+print(str(2.5).parse_float().or(0.0));              // 2.5
+
+// ---- byte_at: the foundation for anything textual --------------------------
+print("abc".byte_at(0));        // 97
+print("abc".byte_at(2));        // 99
+
+// A digit check, written in the language rather than built in -- which is the
+// point of having the primitive at all.
+bool all_digits(str s) {
+    if (s.size() == 0) {
+        return false;
+    }
+    int i = 0;
+    while (i < s.size()) {
+        int b = s.byte_at(i);
+        if (b < 48 || b > 57) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+print(all_digits("12345"));     // true
+print(all_digits("12a45"));     // false
+print(all_digits(""));          // false
+
+// Bytes, not characters: two bytes for the one accented character.
+print("é".size());              // 2
+print("é".byte_at(0));          // 195

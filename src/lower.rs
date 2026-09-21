@@ -219,7 +219,8 @@ impl Lowerer {
         }
         // How many positional arguments each takes, and of what.
         let want: &[Ty] = match m {
-            "size" | "trim" | "to_upper" | "to_lower" => &[],
+            "size" | "trim" | "to_upper" | "to_lower" | "parse_int" | "parse_float" => &[],
+            "byte_at" => &[Ty::Int],
             "substr" => &[Ty::Int, Ty::Int],
             "repeat" => &[Ty::Int],
             "contains" | "starts_with" | "ends_with" | "index_of" | "split" => &[Ty::Str],
@@ -255,6 +256,42 @@ impl Lowerer {
                     args: vec![o.val()],
                 });
                 Ok(Val::new(d, Ty::Int, false))
+            }
+            "byte_at" => {
+                let d = self.new_val(IrTy::I64);
+                self.push(Inst::Call {
+                    dst: Some(d),
+                    func: "rt_str_byte_at".to_string(),
+                    args: vec![o.val(), av[0]],
+                });
+                Ok(Val::new(d, Ty::Int, false))
+            }
+            // Parsing answers "did it parse", which is Option-shaped. It is
+            // lossy on purpose -- "not a number" and "out of range" are both
+            // None -- because a built-in cannot return a library's own error
+            // type, and the question it answers does not need one.
+            "parse_int" | "parse_float" => {
+                let inner = if m == "parse_int" { Ty::Int } else { Ty::Float };
+                let Some((oty, otid, none_tag, some_tag)) = self.option_of(inner) else {
+                    return Err(Diag::new(
+                        span,
+                        format!("`{m}` has no Option type to return; this is a compiler bug"),
+                    ));
+                };
+                let raw = self.new_val(self.irty(inner));
+                let ok = self.new_val(IrTy::I1);
+                self.push(Inst::ParseInto {
+                    ok,
+                    dst: raw,
+                    func: if m == "parse_int" {
+                        "rt_str_parse_int".to_string()
+                    } else {
+                        "rt_str_parse_float".to_string()
+                    },
+                    src: o.val(),
+                });
+                let d = self.select_option(ok, raw, otid, some_tag, none_tag);
+                Ok(Val::new(d, oty, true))
             }
             // Every one of these builds a NEW string, so the caller owns it.
             "substr" | "trim" | "to_upper" | "to_lower" | "repeat" => {
@@ -346,6 +383,12 @@ impl Lowerer {
                 });
                 self.stmt_temps.push(d);
                 Ok(Val::new(d, lty, true))
+            }
+            "to_str" => {
+                // A `str` already is one. Returning it unchanged keeps
+                // `v.to_str()` writable whatever `v` is, which is what makes
+                // to_str a rule rather than a special case.
+                Ok(Val::new(o.val(), Ty::Str, false))
             }
             "len" => Err(Diag::new(span, "`str` has no method `len`; it is `size()`")),
             other => Err(Diag::new(
@@ -950,27 +993,21 @@ impl Lowerer {
         Some((ty, tid, none, some))
     }
 
-    /// Wrap a runtime index into an `Option<int>`: negative is `None`.
-    ///
-    /// The sentinel never reaches the language -- it is turned into a None
-    /// here, which is the whole reason `index_of` waited for Option instead
-    /// of shipping a -1 into something meant to be frozen.
-    fn wrap_option(&mut self, raw: Value, tid: u32, some_tag: u32, none_tag: u32) -> Value {
-        let zero = self.new_val(IrTy::I64);
-        self.push(Inst::IConst { dst: zero, val: 0 });
-        let found = self.new_val(IrTy::I1);
-        self.push(Inst::ICmp {
-            dst: found,
-            cmp: Cmp::Ge,
-            lhs: raw,
-            rhs: zero,
-        });
-
+    /// `Some(v)` when `cond`, `None` otherwise -- as one value, through a
+    /// join block.
+    fn select_option(
+        &mut self,
+        cond: Value,
+        v: Value,
+        tid: u32,
+        some_tag: u32,
+        none_tag: u32,
+    ) -> Value {
         let some_bb = self.new_block();
         let none_bb = self.new_block();
         let join_bb = self.new_block();
         self.terminate(Term::Brif {
-            cond: found,
+            cond,
             then: some_bb,
             then_args: Vec::new(),
             els: none_bb,
@@ -978,7 +1015,7 @@ impl Lowerer {
         });
 
         self.switch_to(some_bb);
-        let some = self.make_option(tid, some_tag, Some(raw));
+        let some = self.make_option(tid, some_tag, Some(v));
         self.stmt_temps.retain(|t| *t != some);
         self.terminate(Term::Jump {
             to: join_bb,
@@ -999,6 +1036,25 @@ impl Lowerer {
         self.blocks[ji].params = vec![d];
         self.stmt_temps.push(d);
         d
+    }
+
+    /// Wrap a runtime index into an `Option<int>`: negative is `None`.
+    ///
+    /// The sentinel never reaches the language -- it is turned into a None
+    /// here, which is the whole reason `index_of` waited for Option instead
+    /// of shipping a -1 into something meant to be frozen.
+    fn wrap_option(&mut self, raw: Value, tid: u32, some_tag: u32, none_tag: u32) -> Value {
+        let zero = self.new_val(IrTy::I64);
+        self.push(Inst::IConst { dst: zero, val: 0 });
+        let found = self.new_val(IrTy::I1);
+        self.push(Inst::ICmp {
+            dst: found,
+            cmp: Cmp::Ge,
+            lhs: raw,
+            rhs: zero,
+        });
+
+        self.select_option(found, raw, tid, some_tag, none_tag)
     }
 
     /// Build `Some(v)` or `None` of the given Option type.
@@ -4190,6 +4246,33 @@ impl Lowerer {
                 if self.underlying(o.ty) == Ty::Str {
                     return self.lower_str_method(&o, m, args, *span);
                 }
+                // `int`, `float` and `bool` answer `to_str` and nothing
+                // else, so that `v.to_str()` means the same thing whatever
+                // `v` is -- a rule rather than a special case for user types.
+                if matches!(self.underlying(o.ty), Ty::Int | Ty::Float | Ty::Bool) {
+                    if m != "to_str" {
+                        return Err(Diag::new(
+                            *span,
+                            format!("`{}` has no method `{m}`", self.tyname(o.ty)),
+                        ));
+                    }
+                    if !args.pos.is_empty() || !args.named.is_empty() {
+                        return Err(Diag::new(*span, "`to_str` takes no arguments"));
+                    }
+                    let func = match self.underlying(o.ty) {
+                        Ty::Int => "rt_int_to_str",
+                        Ty::Float => "rt_float_to_str",
+                        _ => "rt_bool_to_str",
+                    };
+                    let d = self.new_val(IrTy::Ref);
+                    self.push(Inst::Call {
+                        dst: Some(d),
+                        func: func.to_string(),
+                        args: vec![o.val()],
+                    });
+                    self.stmt_temps.push(d);
+                    return Ok(Val::new(d, Ty::Str, true));
+                }
                 let Some(tid) = self.tdef_of(o.ty) else {
                     return Err(Diag::new(
                         *span,
@@ -5012,9 +5095,25 @@ impl Lowerer {
                 });
                 return Ok(Val::new(d, Ty::Float, false));
             }
-            // `str(v)` on a user type is its `to_str`, so the conversion
-            // family reads the same whatever it is applied to.
+            // `str(v)` is `v.to_str()`, so the conversion family reads the
+            // same whatever it is applied to -- a number, a bool, or a user
+            // type that wrote the method itself.
             if base == Ty::Str {
+                if matches!(from, Ty::Int | Ty::Float | Ty::Bool) {
+                    let func = match from {
+                        Ty::Int => "rt_int_to_str",
+                        Ty::Float => "rt_float_to_str",
+                        _ => "rt_bool_to_str",
+                    };
+                    let d = self.new_val(IrTy::Ref);
+                    self.push(Inst::Call {
+                        dst: Some(d),
+                        func: func.to_string(),
+                        args: vec![v.val()],
+                    });
+                    self.stmt_temps.push(d);
+                    return Ok(Val::new(d, Ty::Str, true));
+                }
                 if let Some(text) = self.call_to_str(&v, args.pos[0].span())? {
                     return Ok(text);
                 }
