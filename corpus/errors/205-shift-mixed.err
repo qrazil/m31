@@ -1,0 +1,4 @@
+corpus/errors/205-shift-mixed.src:2:9: cannot apply `<<` to int and float; convert one of them
+  |
+2 | print(1 << 2.0);
+  |         ^

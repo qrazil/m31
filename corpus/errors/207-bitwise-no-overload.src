@@ -1,0 +1,5 @@
+// The bit operators are not in the overloadable set of §6.2.
+type Flags { int v; }
+Flags Flags.and(Flags o) { return Flags(v & o.v); }
+Flags a = Flags(1);
+print((a & a).v);

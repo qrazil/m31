@@ -82,6 +82,19 @@ pub enum ArithOp {
     Mul,
     Div,
     Rem,
+    /// The bit operations. `&` `|` `^` cannot overflow; the shifts trap on a
+    /// count outside 0..63, where C would be undefined. None of them has a
+    /// float form -- the lowerer refuses a float operand.
+    And,
+    Or,
+    Xor,
+    Shl,
+    Shr,
+    /// Two's-complement wrapping `+` `-` `*`, for hashes and PRNGs, which
+    /// are defined modulo 2^64 and would trap under the checked ops.
+    WrapAdd,
+    WrapSub,
+    WrapMul,
 }
 
 impl ArithOp {
@@ -97,6 +110,12 @@ impl ArithOp {
             ArithOp::Mul => "*",
             ArithOp::Div => "/",
             ArithOp::Rem => "%",
+            ArithOp::And | ArithOp::Or | ArithOp::Xor | ArithOp::Shl | ArithOp::Shr => {
+                unreachable!("bit operations have no float form")
+            }
+            ArithOp::WrapAdd | ArithOp::WrapSub | ArithOp::WrapMul => {
+                unreachable!("wrapping operations have no float form")
+            }
         }
     }
 
@@ -107,6 +126,14 @@ impl ArithOp {
             ArithOp::Mul => "rt_imul",
             ArithOp::Div => "rt_idiv",
             ArithOp::Rem => "rt_irem",
+            ArithOp::And => "rt_iand",
+            ArithOp::Or => "rt_ior",
+            ArithOp::Xor => "rt_ixor",
+            ArithOp::Shl => "rt_ishl",
+            ArithOp::Shr => "rt_ishr",
+            ArithOp::WrapAdd => "rt_wrapping_add",
+            ArithOp::WrapSub => "rt_wrapping_sub",
+            ArithOp::WrapMul => "rt_wrapping_mul",
         }
     }
 }
@@ -187,7 +214,8 @@ pub enum Inst {
     BConst { dst: Value, val: bool },
     /// `v = <string literal>`; immortal, see docs/ir-v0.md §5.4
     SConst { dst: Value, idx: u32 },
-    /// `v = <op> a, b`  -- traps rather than wrapping
+    /// `v = <op> a, b`  -- traps rather than wrapping, except for the
+    /// explicitly wrapping ops
     Arith {
         dst: Value,
         op: ArithOp,
@@ -444,6 +472,14 @@ fn show_inst(i: &Inst) -> String {
                 ArithOp::Mul => "imul",
                 ArithOp::Div => "idiv",
                 ArithOp::Rem => "irem",
+                ArithOp::And => "iand",
+                ArithOp::Or => "ior",
+                ArithOp::Xor => "ixor",
+                ArithOp::Shl => "ishl",
+                ArithOp::Shr => "ishr",
+                ArithOp::WrapAdd => "wadd",
+                ArithOp::WrapSub => "wsub",
+                ArithOp::WrapMul => "wmul",
             };
             format!("{dst} = {name} {lhs}, {rhs}")
         }

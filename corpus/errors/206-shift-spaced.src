@@ -1,0 +1,4 @@
+// `>>` is two `>` with nothing between them. With a space it is not a
+// shift, and `>` cannot start an expression.
+int x = 8;
+print(x > > 1);

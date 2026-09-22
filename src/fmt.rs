@@ -630,6 +630,7 @@ impl Fmt {
                 let o = match op {
                     UnOp::Neg => "-",
                     UnOp::Not => "!",
+                    UnOp::BitNot => "~",
                 };
                 format!("{o}{}", self.operand(x, true, UNARY))
             }
@@ -682,16 +683,20 @@ fn prec(op: BinOp) -> u8 {
         BinOp::And => 2,
         BinOp::Eq | BinOp::Ne => 3,
         BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => 4,
-        BinOp::Add | BinOp::Sub => 5,
-        BinOp::Mul | BinOp::Div | BinOp::Rem => 6,
+        BinOp::BitOr => 5,
+        BinOp::BitXor => 6,
+        BinOp::BitAnd => 7,
+        BinOp::Shl | BinOp::Shr => 8,
+        BinOp::Add | BinOp::Sub => 9,
+        BinOp::Mul | BinOp::Div | BinOp::Rem => 10,
     }
 }
 
 /// Binding power of a unary operator -- the parser's `UNARY_BP`.
-const UNARY: u8 = 7;
+const UNARY: u8 = 11;
 /// What a postfix operand (`.f`, `[i]`, `.m()`) binds with: tighter than
 /// anything, so any operator expression under it needs parentheses.
-const POSTFIX: u8 = 8;
+const POSTFIX: u8 = 12;
 
 thread_local! {
     /// Source spellings for `Ty::User`, set by the driver before formatting.
@@ -781,5 +786,12 @@ fn fmt_float(x: f64) -> String {
             return s;
         }
     }
-    format!("{x:?}")
+    // Too small for 17 places: Rust's shortest form, which has an exponent.
+    // It writes `1e-300`, which is not a literal here -- the dot is
+    // mandatory before an exponent (§1.5) -- so put the `.0` back.
+    let s = format!("{x:e}");
+    match s.split_once('e') {
+        Some((m, e)) if !m.contains('.') => format!("{m}.0e{e}"),
+        _ => s,
+    }
 }

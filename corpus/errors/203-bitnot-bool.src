@@ -1,0 +1,2 @@
+// `~` flips the bits of an int; `!` negates a bool. Neither does the other.
+print(~true);

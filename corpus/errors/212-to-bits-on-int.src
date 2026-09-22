@@ -1,0 +1,2 @@
+// An int already is its bits.
+print(5.to_bits());

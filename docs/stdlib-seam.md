@@ -224,7 +224,8 @@ each is a freeze decision:
     same thing.
   - **Bitwise operators** `& | ^ ~ << >>` on `int`. Hashing, codecs, UTF-8
     decoding and float formatting are all bit manipulation; today they
-    cannot be written at all.
+    cannot be written at all. **Done**: reference §6.1, with the wrapping
+    arithmetic and a float's bits (`to_bits`, `float.from_bits`) in §6.5a.
   - **A name for the receiver.** A method cannot name its receiver, so an
     enum method cannot `match` on itself and no method can pass itself to a
     function. `io.Error.to_str()` cannot be written because of it; so cannot

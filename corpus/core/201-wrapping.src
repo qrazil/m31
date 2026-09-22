@@ -1,0 +1,69 @@
+// Wrapping arithmetic, reference §6.1. The operators trap on overflow; a
+// hash or a PRNG is defined modulo 2^64, so it says `wrapping_` out loud.
+
+const int max = 9223372036854775807;
+const int min = -9223372036854775807 - 1;
+
+print(max.wrapping_add(1));
+print(min.wrapping_sub(1));
+print(max.wrapping_mul(2));
+print(min.wrapping_mul(-1));
+print(3.wrapping_add(4));
+print(3.wrapping_sub(10));
+print((-6).wrapping_mul(7));
+print(4294967296.wrapping_mul(4294967296));
+
+// FNV-1a, 64-bit. The offset basis 14695981039346656037 does not fit an int,
+// so it is written as the int with the same bits.
+int fnv1a(str s) {
+    int h = -3750763034362895579;
+    int i = 0;
+    while (i < s.size()) {
+        h = (h ^ s.byte_at(i)).wrapping_mul(1099511628211);
+        i = i + 1;
+    }
+    return h;
+}
+
+print(fnv1a(""));
+print(fnv1a("hello"));
+
+// xorshift64 (Marsaglia), from his published seed. `>>` here is arithmetic,
+// where the algorithm wants a logical shift; masking off the copied sign
+// bits gives the logical one.
+int lsr(int x, int n) {
+    if (n == 0) {
+        return x;
+    }
+    return (x >> n) & ~(-1 << (64 - n));
+}
+
+int state = 88172645463325252;
+int k = 0;
+while (k < 3) {
+    state = state ^ (state << 13);
+    state = state ^ lsr(state, 7);
+    state = state ^ (state << 17);
+    print(state);
+    k = k + 1;
+}
+
+// splitmix64, from zero.
+int sm = 0;
+int j = 0;
+while (j < 3) {
+    sm = sm.wrapping_add(-7046029254386353131);
+    int z = sm;
+    z = (z ^ lsr(z, 30)).wrapping_mul(-4658895280553007687);
+    z = (z ^ lsr(z, 27)).wrapping_mul(-7723592293110705685);
+    z = z ^ lsr(z, 31);
+    print(z);
+    j = j + 1;
+}
+
+// A distinct int keeps its type through the wrapping forms, as it does
+// through `+`.
+distinct int Hash;
+Hash a = Hash(max);
+Hash b = a.wrapping_add(Hash(1));
+print(int(b));

@@ -1,0 +1,4 @@
+corpus/errors/201-bitwise-bool-and.src:3:9: cannot apply `&` to bool and bool; for bool use `&&`
+  |
+3 | print(a & false);
+  |         ^

@@ -1,0 +1,4 @@
+// A negative shift count traps too: it is not a shift the other way.
+
+print(8 >> 0);
+print(8 >> -1);

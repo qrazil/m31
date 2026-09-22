@@ -1,0 +1,2 @@
+// No implicit conversion, so a shift count is an int, not a float.
+print(1 << 2.0);

@@ -1,0 +1,4 @@
+// A huge count is out of range, not taken modulo 64 the way the hardware
+// would take it: `1 >> 9223372036854775807` is not `1 >> 63`.
+
+print(1 >> 9223372036854775807);

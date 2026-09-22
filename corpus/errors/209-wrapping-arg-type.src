@@ -1,0 +1,3 @@
+distinct int Hash;
+Hash h = Hash(1);
+print(int(h.wrapping_mul(3)));

@@ -1,0 +1,3 @@
+// A bool is not an integer, so `&` does not apply to it; `&&` does.
+bool a = true;
+print(a & false);

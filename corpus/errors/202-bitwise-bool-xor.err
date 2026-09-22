@@ -1,0 +1,4 @@
+corpus/errors/202-bitwise-bool-xor.src:3:9: cannot apply `^` to bool and bool; for bool use `!=`
+  |
+3 | print(a ^ false);
+  |         ^

@@ -1,0 +1,4 @@
+corpus/errors/210-from-bits-float-arg.src:2:27: type mismatch: expected int, found float
+  |
+2 | float f = float.from_bits(1.0);
+  |                           ^

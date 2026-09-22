@@ -56,6 +56,30 @@ fn lexes_two_character_operators_greedily() {
 }
 
 #[test]
+fn bit_operators_lex_and_right_shift_stays_two_tokens() {
+    // `>>` is never one token: the same two characters close
+    // `List<List<int>>`, so the parser joins them, and only in operator
+    // position.
+    assert_eq!(
+        toks("& && | || ^ ~ << <= >> >="),
+        vec![
+            Tok::Amp,
+            Tok::AmpAmp,
+            Tok::Pipe,
+            Tok::PipePipe,
+            Tok::Caret,
+            Tok::Tilde,
+            Tok::Shl,
+            Tok::LtEq,
+            Tok::Gt,
+            Tok::Gt,
+            Tok::GtEq,
+            Tok::Eof,
+        ]
+    );
+}
+
+#[test]
 fn underscores_in_int_literals_are_separators() {
     assert_eq!(toks("1_000_000"), vec![Tok::Int(1_000_000), Tok::Eof]);
 }
@@ -90,7 +114,6 @@ fn lexer_rejects_bad_input() {
         bad("9223372036854775808"),
         "integer literal too large for int"
     );
-    assert!(bad("a & b"), "single ampersand");
     assert!(bad("a @ b"), "unexpected character");
 }
 
@@ -120,6 +143,28 @@ fn comparison_binds_looser_than_arithmetic() {
     let add = out.find("iadd").expect("expected an add");
     let cmp = out.find("icmp").expect("expected a compare");
     assert!(add < cmp, "add must be emitted before compare:\n{out}");
+}
+
+#[test]
+fn bit_operators_bind_tighter_than_comparison() {
+    // Python's order, not C's: `x & 1 == 0` is `(x & 1) == 0`.
+    let out = ir("int x = 6; print(x & 1 == 0);");
+    let and = out.find("iand").expect("expected a bitwise and");
+    let cmp = out.find("icmp").expect("expected a compare");
+    assert!(and < cmp, "and must be emitted before compare:\n{out}");
+}
+
+#[test]
+fn shifts_bind_looser_than_addition() {
+    let out = ir("int x = 1; print(x << x + 1);");
+    let add = out.find("iadd").expect("expected an add");
+    let shl = out.find("ishl").expect("expected a shift");
+    assert!(add < shl, "add must be emitted before shift:\n{out}");
+}
+
+#[test]
+fn right_shift_needs_adjacent_angle_brackets() {
+    assert!(err("int x = 8; print(x > > 1);").contains("expected an expression"));
 }
 
 // ---- lowering: refcounting -------------------------------------------

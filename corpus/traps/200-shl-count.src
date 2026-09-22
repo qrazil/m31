@@ -1,0 +1,6 @@
+// A shift count outside 0..63 traps. In C it is undefined, and x86 masks
+// the count to six bits, so `1 << 64` would quietly come out as 1.
+
+print(1 << 63);
+int n = 64;
+print(1 << n);
