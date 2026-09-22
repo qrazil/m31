@@ -23,6 +23,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Every operating-system call the runtime makes goes through the sys layer
+ * (runtime/sys.h, docs/sys-layer.md). Its implementation is #included here
+ * rather than built as a file of its own, so the runtime stays one
+ * translation unit and every build line keeps naming rt.c alone -- the
+ * backend is a -D flag, not a different set of files to remember. */
+#include "sys.h"
+#ifdef RT_SYS_RAW
+#include "sys_linux.c"
+#else
+#include "sys_libc.c"
+#endif
+
 void rc_inc(Obj *o) {
     if (o->rc == RC_IMMORTAL) return;
     o->rc++;
@@ -385,8 +397,103 @@ Obj *rt_str_join(Obj *parts, Obj *sep) {
     return (Obj *)out;
 }
 
+/* ---- standard output -------------------------------------------------- */
+
+/* print goes to fd 1 through the sys layer, buffered here rather than by C
+ * stdio, so that the raw backend really does print without the C library
+ * and both backends buffer identically.
+ *
+ * The rules are stdio's, because they are the ones a program's output
+ * ordering has always depended on:
+ *
+ *   - fully buffered when stdout is a pipe or a file, flushed when the
+ *     buffer fills and at exit;
+ *   - flushed after every line when stdout is a terminal, so an
+ *     interactive program's output appears when it is printed;
+ *   - flushed before anything is written to stderr and before a trap
+ *     aborts, so the two streams interleave in program order.
+ *
+ * One print is one line, and it is appended under the lock as a whole, so
+ * spawned threads printing at once interleave by line, never mid-line --
+ * the guarantee glibc's locked stdio gave. 64 KiB is the default capacity
+ * of a Linux pipe: a full buffer is one write that does not block on a
+ * reader that is keeping up. */
+#define OUT_CAP 65536
+static char out_buf[OUT_CAP];
+static size_t out_len;
+static bool out_line_mode;
+static pthread_mutex_t out_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* All of it, across short writes and signals. Any other failure -- a closed
+ * pipe, a full disk -- has nobody to report to: print returns nothing, and
+ * stdio discarded the output the same way. */
+static void write_all(int64_t fd, const char *p, size_t n) {
+    while (n > 0) {
+        int64_t r = sys_write(fd, p, (int64_t)n);
+        if (r == -SYS_EINTR) continue;
+        if (r <= 0) return;
+        p += r;
+        n -= (size_t)r;
+    }
+}
+
+static void out_flush_locked(void) {
+    write_all(1, out_buf, out_len);
+    out_len = 0;
+}
+
+static void out_put_locked(const char *p, size_t n) {
+    if (out_len + n > OUT_CAP) {
+        out_flush_locked();
+        /* Larger than the whole buffer: copying it through in pieces would
+         * only add writes. */
+        if (n > OUT_CAP) {
+            write_all(1, p, n);
+            return;
+        }
+    }
+    memcpy(out_buf + out_len, p, n);
+    out_len += n;
+}
+
+void rt_out_flush(void) {
+    pthread_mutex_lock(&out_lock);
+    out_flush_locked();
+    pthread_mutex_unlock(&out_lock);
+}
+
+/* `p[0..n]` and a newline, as one line. */
+void rt_out_line(const char *p, size_t n) {
+    pthread_mutex_lock(&out_lock);
+    out_put_locked(p, n);
+    out_put_locked("\n", 1);
+    if (out_line_mode) out_flush_locked();
+    pthread_mutex_unlock(&out_lock);
+}
+
+/* Whether stdout is a terminal is asked once: stdio decides its buffering
+ * mode at the first write and never again, and so does this. The exit
+ * flush is registered here too. rc_debug.h's leak report is another atexit
+ * handler, and handlers run in reverse order of registration, which is not
+ * fixed between two constructors -- so that report flushes for itself
+ * rather than relying on running before this one. */
+__attribute__((constructor)) static void out_init(void) {
+    out_line_mode = sys_isatty(1) == 1;
+    atexit(rt_out_flush);
+}
+
 void rt_print(int64_t v) {
-    printf("%" PRId64 "\n", v);
+    /* Digits by hand rather than snprintf: this is the hottest output path
+     * there is, and the unsigned magnitude is what makes INT64_MIN safe. */
+    char buf[24];
+    char *end = buf + sizeof buf, *p = end;
+    uint64_t m = v < 0 ? (uint64_t)0 - (uint64_t)v : (uint64_t)v;
+    do {
+        *--p = (char)('0' + m % 10);
+        m /= 10;
+    } while (m != 0);
+    if (v < 0) *--p = '-';
+    rt_out_line(p, (size_t)(end - p));
 }
 
 /* Printed so it reads back as the same double and still looks like what was
@@ -449,7 +556,7 @@ void rt_format_float(char *buf, size_t cap, double x) {
 void rt_print_float(double x) {
     char buf[64];
     rt_format_float(buf, sizeof buf, x);
-    puts(buf);
+    rt_out_line(buf, strlen(buf));
 }
 
 double rt_i2f_val(int64_t n) {
@@ -470,15 +577,18 @@ int64_t rt_f2i_checked(double x) {
 }
 
 void rt_print_bool(bool v) {
-    puts(v ? "true" : "false");
+    if (v) {
+        rt_out_line("true", 4);
+    } else {
+        rt_out_line("false", 5);
+    }
 }
 
 void rt_print_str(Obj *o) {
     const Str *s = (const Str *)o;
-    /* fwrite rather than puts: the string may contain NUL bytes, and len is
+    /* By length, not by NUL: the string may contain NUL bytes, and len is
      * authoritative. */
-    fwrite(s->data, 1, (size_t)s->len, stdout);
-    putchar('\n');
+    rt_out_line(s->data, (size_t)s->len);
 }
 
 /* ---- collections ------------------------------------------------------ */
@@ -1408,16 +1518,31 @@ void rt_check_unique(Obj *o) {
 }
 
 _Noreturn void rt_trap(const char *msg) {
-    fflush(stdout);
-    fprintf(stderr, "trap: %s\n", msg);
+    rt_out_flush();
+    /* One write, assembled here, so the message cannot be split by another
+     * thread's output; every trap message is a short literal, and one too
+     * long for the buffer is cut rather than lost. */
+    char buf[512];
+    size_t n = strlen(msg), at = 6;
+    memcpy(buf, "trap: ", 6);
+    if (n > sizeof buf - at - 1) n = sizeof buf - at - 1;
+    memcpy(buf + at, msg, n);
+    at += n;
+    buf[at++] = '\n';
+    write_all(2, buf, at);
     abort();
 }
 
 
 /* ---- io primitives ---------------------------------------------------- */
-/* Every path is a str, which is NUL-terminated by construction (str_new), so
- * it can go to fopen directly. A path with an embedded NUL would be silently
- * truncated by the C library, which would open a different file than the one
+/* Every one of these is a loop over the sys layer: no FILE, no stdio
+ * buffer, no global errno. The sys layer returns -errno; these primitives
+ * return the positive errno lib/io.src expects, so the sign flip happens
+ * here and nowhere else.
+ *
+ * Every path is a str, which is NUL-terminated by construction (str_new), so
+ * it can go to the kernel directly. A path with an embedded NUL would be
+ * silently truncated there, which would open a different file than the one
  * named -- that is refused as EINVAL instead. */
 
 static bool path_ok(Obj *path) {
@@ -1426,14 +1551,23 @@ static bool path_ok(Obj *path) {
 }
 
 int64_t rt_file_read(Obj *path, Obj *out) {
-    if (!path_ok(path)) return EINVAL;
-    FILE *f = fopen(((Str *)path)->data, "rb");
-    if (f == NULL) return errno;
-    /* Read in chunks rather than trusting a size from fseek: that answer is
-     * wrong for pipes, /proc files and anything still being written. */
+    if (!path_ok(path)) return SYS_EINVAL;
+    int64_t fd = sys_open(((Str *)path)->data, SYS_O_RDONLY, 0);
+    if (fd < 0) return -fd;
+    /* The size fstat reports is a hint for the first allocation, never a
+     * limit: it is wrong for pipes, /proc files and anything still being
+     * written, so the loop reads until the end regardless. One byte over
+     * the hint means a file of exactly that size ends on a read of 0
+     * without a pointless doubling first. */
     size_t cap = 4096, len = 0;
+    SysStat st;
+    if (sys_fstat(fd, &st) == 0 && (st.mode & SYS_S_IFMT) == SYS_S_IFREG && st.size > 0 &&
+        (uint64_t)st.size < SIZE_MAX / 2) {
+        cap = (size_t)st.size + 1;
+    }
     char *buf = malloc(cap);
     if (buf == NULL) rt_trap("out of memory");
+    int64_t err = 0;
     for (;;) {
         if (len == cap) {
             cap *= 2;
@@ -1441,14 +1575,17 @@ int64_t rt_file_read(Obj *path, Obj *out) {
             if (nb == NULL) rt_trap("out of memory");
             buf = nb;
         }
-        size_t n = fread(buf + len, 1, cap - len, f);
-        len += n;
+        int64_t n = sys_read(fd, buf + len, (int64_t)(cap - len));
+        if (n == -SYS_EINTR) continue;
+        if (n < 0) {
+            /* A directory opens fine on Linux and fails here, with EISDIR. */
+            err = -n;
+            break;
+        }
         if (n == 0) break;
+        len += (size_t)n;
     }
-    /* fopen succeeding on a directory and fread then failing is the Linux
-     * behaviour; ferror is how that EISDIR surfaces. */
-    int err = ferror(f) ? (errno ? errno : EIO) : 0;
-    fclose(f);
+    sys_close(fd);
     if (err) {
         free(buf);
         return err;
@@ -1458,20 +1595,69 @@ int64_t rt_file_read(Obj *path, Obj *out) {
     return 0;
 }
 
-static int64_t write_mode(Obj *path, Obj *data, const char *mode) {
-    if (!path_ok(path)) return EINVAL;
-    FILE *f = fopen(((Str *)path)->data, mode);
-    if (f == NULL) return errno;
+static int64_t write_mode(Obj *path, Obj *data, int64_t how) {
+    if (!path_ok(path)) return SYS_EINVAL;
+    int64_t fd = sys_open(((Str *)path)->data, SYS_O_WRONLY | SYS_O_CREAT | how, 0666);
+    if (fd < 0) return -fd;
     Str *d = (Str *)data;
-    size_t n = d->len > 0 ? fwrite(d->data, 1, (size_t)d->len, f) : 0;
-    int err = (n != (size_t)d->len) ? (errno ? errno : EIO) : 0;
-    /* fclose flushes, and a full disk is often only reported here. */
-    if (fclose(f) != 0 && err == 0) err = errno ? errno : EIO;
+    const char *p = d->data;
+    int64_t left = d->len, err = 0;
+    while (left > 0) {
+        int64_t n = sys_write(fd, p, left);
+        if (n == -SYS_EINTR) continue;
+        if (n < 0) {
+            err = -n;
+            break;
+        }
+        /* A write of 0 bytes to a regular file makes no progress and never
+         * will; calling it an I/O error beats looping forever. */
+        if (n == 0) {
+            err = SYS_EIO;
+            break;
+        }
+        p += n;
+        left -= n;
+    }
+    /* A full disk on a network file system is often only reported at close,
+     * so its result counts -- but never retried on EINTR: on Linux the
+     * descriptor is already gone by then, and a retry could close a
+     * descriptor another thread has just been given. */
+    int64_t c = sys_close(fd);
+    if (err == 0 && c < 0 && c != -SYS_EINTR) err = -c;
     return err;
 }
 
-int64_t rt_file_write(Obj *path, Obj *data)  { return write_mode(path, data, "wb"); }
-int64_t rt_file_append(Obj *path, Obj *data) { return write_mode(path, data, "ab"); }
+int64_t rt_file_write(Obj *path, Obj *data)  { return write_mode(path, data, SYS_O_TRUNC); }
+int64_t rt_file_append(Obj *path, Obj *data) { return write_mode(path, data, SYS_O_APPEND); }
+
+/* Standard input, buffered here for the same reason standard output is:
+ * one read per buffer rather than one per byte, without stdio. The lock
+ * makes a line read by one thread a whole line, as getc's lock did. */
+#define IN_CAP 65536
+static char in_buf[IN_CAP];
+static size_t in_at, in_len;
+static bool in_eof;
+static pthread_mutex_t in_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* The next byte, or -1 at the end. A read error is treated as the end: see
+ * rt_stdin_line. */
+static int in_byte_locked(void) {
+    while (in_at == in_len) {
+        if (in_eof) return -1;
+        int64_t n = sys_read(0, in_buf, IN_CAP);
+        if (n == -SYS_EINTR) continue;
+        if (n <= 0) {
+            /* Sticky, as stdio's EOF flag is: a terminal returns 0 once per
+             * Ctrl-D, and a program that saw the end should not read on
+             * past it. */
+            in_eof = true;
+            return -1;
+        }
+        in_at = 0;
+        in_len = (size_t)n;
+    }
+    return (unsigned char)in_buf[in_at++];
+}
 
 /* One line without its terminator. A final line with no newline is still a
  * line; `\r\n` loses the `\r` too, so a file written on Windows reads the
@@ -1479,13 +1665,12 @@ int64_t rt_file_append(Obj *path, Obj *data) { return write_mode(path, data, "ab
  * mid-stream is rare enough that a primitive returning Option is the right
  * trade, the same one `parse_int` makes. */
 int64_t rt_stdin_line(Obj *out) {
-    /* getc rather than POSIX getline: the runtime has to build for targets
-     * without it, and cross-compilation is a goal from day one. */
     size_t cap = 128, n = 0;
     char *line = malloc(cap);
     if (line == NULL) rt_trap("out of memory");
     int c;
-    while ((c = getc(stdin)) != EOF && c != '\n') {
+    pthread_mutex_lock(&in_lock);
+    while ((c = in_byte_locked()) != -1 && c != '\n') {
         if (n == cap) {
             cap *= 2;
             char *nl = realloc(line, cap);
@@ -1494,7 +1679,8 @@ int64_t rt_stdin_line(Obj *out) {
         }
         line[n++] = (char)c;
     }
-    if (c == EOF && n == 0) {
+    pthread_mutex_unlock(&in_lock);
+    if (c == -1 && n == 0) {
         free(line);
         return 0;
     }
@@ -1507,7 +1693,8 @@ int64_t rt_stdin_line(Obj *out) {
 void rt_stderr_write(Obj *s) {
     Str *p = (Str *)s;
     /* stdout is flushed first so interleaved output lands in the order the
-     * program wrote it when both go to one terminal. */
-    fflush(stdout);
-    if (p->len > 0) fwrite(p->data, 1, (size_t)p->len, stderr);
+     * program wrote it when both go to one terminal. stderr itself is
+     * unbuffered, as it is in C. */
+    rt_out_flush();
+    write_all(2, p->data, (size_t)p->len);
 }

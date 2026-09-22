@@ -39,6 +39,13 @@ if [ ${#CCS[@]} -lt 4 ]; then
 fi
 echo "matrix: ${CCS[*]}"
 
+# Extra flags for compiling the runtime, and the way to pick its sys-layer
+# backend: `RT_CFLAGS=-DRT_SYS_RAW bash run.sh` runs the whole corpus on raw
+# Linux system calls instead of the C library (docs/sys-layer.md). Left
+# unquoted where it is used, on purpose, so it can carry several flags.
+RT_CFLAGS=${RT_CFLAGS:-}
+[ -n "$RT_CFLAGS" ] && echo "runtime flags: $RT_CFLAGS"
+
 if [ ! -x "$LANGC" ]; then
   echo "compiler not built: $LANGC" >&2
   echo "(expected until the walking skeleton lands)" >&2
@@ -68,7 +75,7 @@ run_one() {
 
     # The runtime is a separate translation unit on purpose, and -flto is
     # deliberately absent — see docs/ir-v0.md §7.1 and runtime/rt.c.
-    if ! "$cc" "$opt" -ffp-contract=off -Wall -Wextra -DRC_DEBUG -I runtime \
+    if ! "$cc" "$opt" -ffp-contract=off -Wall -Wextra -DRC_DEBUG $RT_CFLAGS -I runtime \
          -pthread -o "$bin" "$WORK/$base.c" runtime/rt.c 2>"$WORK/$base.cc"; then
       fail_test "$label [$cc $opt]" "C compiler rejected emitted code: $(head -1 "$WORK/$base.cc")"
       return
@@ -161,7 +168,7 @@ for src in corpus/traps/*."$LANG_EXT"; do
     cc=${entry%%:*}
     opt=${entry##*:}
     bin="$WORK/$base.t.$cc$opt"
-    if ! "$cc" "$opt" -ffp-contract=off -Wall -Wextra -DRC_DEBUG -I runtime \
+    if ! "$cc" "$opt" -ffp-contract=off -Wall -Wextra -DRC_DEBUG $RT_CFLAGS -I runtime \
          -pthread -o "$bin" "$WORK/$base.c" runtime/rt.c 2>"$WORK/$base.tcc"; then
       fail_test "$label [$cc $opt]" "C compiler rejected emitted code"
       trap_ok=0; break

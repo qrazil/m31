@@ -28,9 +28,18 @@
  * and it is only read after every thread has been joined. */
 static long __rc_live = 0;
 
+/* Standard output belongs to the runtime's own buffer (rt.c), not to C
+ * stdio, so the report goes through it. It flushes for itself: it runs from
+ * atexit, possibly after the runtime's own exit flush has already run. */
+void rt_out_line(const char *p, size_t n);
+void rt_out_flush(void);
+
 static void __rc_report(void) {
     long n = __atomic_load_n(&__rc_live, __ATOMIC_RELAXED);
-    printf("__rc_live=%ld\n", n);
+    char buf[48];
+    int k = snprintf(buf, sizeof buf, "__rc_live=%ld", n);
+    rt_out_line(buf, (size_t)k);
+    rt_out_flush();
 }
 
 static void __rc_init(void) __attribute__((constructor));
@@ -44,7 +53,7 @@ static void __rc_init(void) {
 #define RC_ASSERT(cond, msg)                                    \
     do {                                                        \
         if (!(cond)) {                                          \
-            fflush(stdout);                                     \
+            rt_out_flush();                                     \
             fprintf(stderr, "rc violation: %s at %s:%d\n",      \
                     (msg), __FILE__, __LINE__);                 \
             abort();                                            \
