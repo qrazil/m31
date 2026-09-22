@@ -138,14 +138,23 @@ run "formatter preserves meaning" bash -c '
             if [ -e "$exp" ]; then
                 if gcc -O0 -I runtime "$w/b.c" runtime/rt.c -lpthread \
                        -o "$w/b" 2>/dev/null; then
-                    in="${f%.'"$LANG_EXT"'}.in"
+                    in="$PWD/${f%.'"$LANG_EXT"'}.in"
                     [ -e "$in" ] || in=/dev/null
                     # The same command line run.sh gives it, from `.args`.
                     argv=()
                     [ -e "${f%.'"$LANG_EXT"'}.args" ] && mapfile -t argv <"${f%.'"$LANG_EXT"'}.args"
-                    if ! diff -q <("$w/b" "${argv[@]}" 2>&1 <"$in") "$exp" >/dev/null 2>&1; then
+                    # And the same fixture, from `.setup`, built in a fresh
+                    # directory the program then runs in -- see run.sh.
+                    rd=$PWD
+                    setup="${f%.'"$LANG_EXT"'}.setup"
+                    if [ -e "$setup" ]; then
+                        rd="$w/run"
+                        mkdir "$rd"
+                        (cd "$rd" && bash "$OLDPWD/$setup") >/dev/null 2>&1
+                    fi
+                    if ! diff -q <(cd "$rd" && "$w/b" "${argv[@]}" 2>&1 <"$in") "$exp" >/dev/null 2>&1; then
                         echo "formatted program prints something else: $f"
-                        diff <("$w/b" "${argv[@]}" 2>&1 <"$in") "$exp" | head -6
+                        diff <(cd "$rd" && "$w/b" "${argv[@]}" 2>&1 <"$in") "$exp" | head -6
                         bad=1
                     fi
                 else

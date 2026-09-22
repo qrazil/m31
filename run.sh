@@ -93,13 +93,27 @@ run_one() {
     # Standard input is the test's `.in` file if it has one, and empty
     # otherwise -- never the terminal, where a program reading a line would
     # hang the whole run.
-    stdin="${src%.$LANG_EXT}.in"
+    stdin="$PWD/${src%.$LANG_EXT}.in"
     [ -e "$stdin" ] || stdin=/dev/null
     # Command-line arguments are the test's `.args` file, one per line, and
     # none otherwise -- the same shape as `.in`, for `os.args()`.
     argv=()
     [ -e "${src%.$LANG_EXT}.args" ] && mapfile -t argv <"${src%.$LANG_EXT}.args"
-    got=$("$bin" "${argv[@]}" 2>&1 <"$stdin")
+    # A test's `.setup` script, if it has one, builds a fixture the program
+    # cannot build for itself -- a file whose name is not valid UTF-8, which
+    # no `str` path can spell -- in a fresh directory, and the program runs
+    # there. Fresh for every build, so one run cannot see another's leftovers.
+    rundir=$PWD
+    if [ -e "${src%.$LANG_EXT}.setup" ]; then
+      rundir="$WORK/$base.run"
+      rm -rf "$rundir"
+      mkdir -p "$rundir"
+      if ! (cd "$rundir" && bash "$OLDPWD/${src%.$LANG_EXT}.setup") >"$WORK/$base.setup" 2>&1; then
+        fail_test "$label [$cc $opt]" "setup failed: $(head -1 "$WORK/$base.setup")"
+        return
+      fi
+    fi
+    got=$(cd "$rundir" && "$bin" "${argv[@]}" 2>&1 <"$stdin")
     rc=$?
 
     # Layer 4: refcount invariant. The runtime prints this under -DRC_DEBUG.
