@@ -408,6 +408,29 @@ Generics are **monomorphised**: each instantiation becomes a separate
 concrete type or function before the IR, so there is no boxing and no runtime
 type argument. Unused instantiations are not emitted.
 
+A **method on a generic type names the type's parameters on its receiver**,
+and a method may have type parameters of its own, on any type:
+
+```c
+T Box<T>.get() { return item; }
+Box<U> Box<T>.swap<U>(U v) { return Box<U>(v); }
+T Picker.pick<T>(List<T> xs) { return xs[at]; }
+```
+
+The names on the receiver are the method's; they need not match the type
+declaration's, and there must be as many. `T Box.get()` for a generic `Box`
+is refused: the signature should say what `T` is without sending the reader
+to the type. A method on a generic type is instantiated with each
+instantiation of the type, and is checked only then, like the rest of a
+generic declaration.
+
+A generic method's own type arguments are inferred like a function's, and
+that needs the receiver's type written down too: the receiver must be a
+local, a parameter, a construction, or — inside a method — a receiver
+field (on a generic type, when the method names the type's parameters as
+its declaration does). `make().pick(xs)` is refused, with that said; bind `make()` to a
+local first.
+
 A generic function's type arguments are **inferred from its arguments**;
 there is no `f<int>(x)`, because after a name that is not a type `<` would be
 a comparison. Each type parameter must be reached by a mandatory parameter
@@ -1264,8 +1287,9 @@ distinct    = "distinct" type IDENT ";" ;
 field       = type IDENT [ "=" expr ] | type ;        (* bare type = embedded *)
 sig         = type IDENT "(" [ params ] ")" ;
 
-func        = [ "static" ] type [ IDENT "." ] IDENT [ tparams ]
-              "(" [ params ] ")" block ;              (* static needs a receiver *)
+func        = [ "static" ] type [ IDENT [ tparams ] "." ] IDENT [ tparams ]
+              "(" [ params ] ")" block ;              (* static needs a receiver;
+                                                         receiver tparams: §3.8 *)
 prim        = "prim" type IDENT "(" [ params ] ")" ";" ;  (* stdlib source only, §10.1 *)
 tparams     = "<" IDENT { "," IDENT } ">" ;
 params      = param { "," param } ;

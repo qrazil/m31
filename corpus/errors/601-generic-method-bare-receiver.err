@@ -1,0 +1,4 @@
+corpus/errors/601-generic-method-bare-receiver.src:6:3: `Box` is generic; a method on it names its type parameters on the receiver, as `Box<T>.name(..)`
+  |
+6 | T Box.get() {
+  |   ^

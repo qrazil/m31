@@ -1,0 +1,8 @@
+// A method on a generic type names the type parameters on its receiver.
+type Box<T> {
+    T item;
+}
+
+T Box.get() {
+    return item;
+}

@@ -44,3 +44,27 @@ T echo<T>(T v) {
 pub List<T> twice<T>(T v) {
     return [echo(v), echo(v)];
 }
+
+pub type Stack<T> {
+    List<T> items;
+}
+
+pub void Stack<T>.push(T v) {
+    items.push(v);
+}
+
+pub T Stack<T>.top() {
+    return items[items.size() - 1];
+}
+
+pub static Stack<T> Stack<T>.empty() {
+    return Stack<T>([]);
+}
+
+pub List<U> Stack<T>.tag<U>(U label) {
+    List<U> out = [];
+    for (T v in items) {
+        out.push(label);
+    }
+    return out;
+}

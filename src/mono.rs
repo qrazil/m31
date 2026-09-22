@@ -23,6 +23,22 @@ pub struct Mono {
     /// Generic declarations, by name.
     generic_types: HashMap<String, TypeDecl>,
     generic_funcs: HashMap<String, Func>,
+    /// Methods on generic types (`T Box<T>.get()`), instantiated alongside
+    /// each instantiation of their type.
+    generic_methods: Vec<Func>,
+    /// Methods with type parameters of their own, by concrete receiver and
+    /// method name, with the receiver's substitution already bound:
+    /// `Box$int` -> `first` -> (decl, {T: int}).
+    own_generic: HashMap<String, HashMap<String, (Func, Subst)>>,
+    /// Pending method instantiations: (decl, substitution, receiver's output
+    /// name, method's output name). A queue rather than done on the spot
+    /// because a type is instantiated in the middle of substituting some
+    /// other function, and a method body would clobber that one's `env`.
+    method_queue: Vec<(Func, Subst, String, String)>,
+    /// Every type declaration of the input, generic or not, by name: for a
+    /// method's receiver fields and for telling an enum variant from a
+    /// static method.
+    decls: HashMap<String, TypeDecl>,
     /// The interned type expressions of the input program.
     src_exprs: Vec<TyExpr>,
     /// The output program's arena, built as we go.
@@ -54,6 +70,10 @@ impl Mono {
         let mut m = Mono {
             generic_types: HashMap::new(),
             generic_funcs: HashMap::new(),
+            generic_methods: Vec::new(),
+            own_generic: HashMap::new(),
+            method_queue: Vec::new(),
+            decls: HashMap::new(),
             src_exprs: p.ty_exprs.clone(),
             out_exprs: Vec::new(),
             done: HashSet::new(),
@@ -68,6 +88,7 @@ impl Mono {
 
         let mut concrete_types = Vec::new();
         for t in p.types.iter().chain(p.prelude.iter()).cloned() {
+            m.decls.insert(t.name.clone(), t.clone());
             if t.tparams.is_empty() {
                 concrete_types.push(t);
             } else {
@@ -98,8 +119,19 @@ impl Mono {
 
         let mut concrete_funcs = Vec::new();
         for f in p.funcs.clone() {
-            if f.tparams.is_empty() {
+            if !f.recv_tparams.is_empty() {
+                m.check_generic_recv(&f)?;
+                m.generic_methods.push(f);
+            } else if f.tparams.is_empty() {
                 concrete_funcs.push(f);
+            } else if let Some(r) = f.recv.clone() {
+                // Keyed by receiver, never with the free functions: a
+                // generic method `first` and a generic function `first` are
+                // two different things.
+                m.own_generic
+                    .entry(r)
+                    .or_default()
+                    .insert(f.name.clone(), (f, Subst::new()));
             } else {
                 m.generic_funcs.insert(f.name.clone(), f);
             }
@@ -126,9 +158,20 @@ impl Mono {
         let toplevel = m.subst_block(&p.toplevel, &empty)?;
         m.env.clear();
 
-        while let Some((name, args, span)) = m.queue.pop() {
-            m.instantiate_func(&name, &args, span)?;
+        loop {
+            if let Some((name, args, span)) = m.queue.pop() {
+                m.instantiate_func(&name, &args, span)?;
+            } else if let Some((f, sub, recv, name)) = m.method_queue.pop() {
+                m.instantiate_method(&f, &sub, &recv, &name)?;
+            } else {
+                break;
+            }
         }
+        let generic_methods = m
+            .own_generic
+            .iter()
+            .flat_map(|(r, ms)| ms.keys().map(move |n| format!("{r}.{n}")))
+            .collect();
 
         Ok(Program {
             module: p.module.clone(),
@@ -142,6 +185,7 @@ impl Mono {
             toplevel,
             ty_exprs: m.out_exprs,
             shown: m.shown,
+            generic_methods,
         })
     }
 
@@ -307,6 +351,29 @@ impl Mono {
             });
         }
         let _ = span;
+        // The type's methods come with it, each at this instantiation. One
+        // with type parameters of its own waits for a call to say what they
+        // are; the rest are queued now.
+        for m in self.generic_methods.clone() {
+            if m.recv.as_deref() != Some(decl.name.as_str()) {
+                continue;
+            }
+            let msub: Subst = m
+                .recv_tparams
+                .iter()
+                .cloned()
+                .zip(args.iter().copied())
+                .collect();
+            if m.tparams.is_empty() {
+                let name = m.name.clone();
+                self.method_queue.push((m, msub, mangled.to_string(), name));
+            } else {
+                self.own_generic
+                    .entry(mangled.to_string())
+                    .or_default()
+                    .insert(m.name.clone(), (m, msub));
+            }
+        }
         let methods = self.subst_iface_methods(&decl.methods, &sub)?;
         self.out_types.push(TypeDecl {
             name: mangled.to_string(),
@@ -357,6 +424,69 @@ impl Mono {
         f.name = mangled;
         f.tparams = Vec::new();
         self.out_funcs.push(f);
+        Ok(())
+    }
+
+    /// Emit one method at one receiver: `Box<T>.get` at `Box$int`, or
+    /// `Box<T>.map<U>` at `Box$int` as `map$str`.
+    fn instantiate_method(
+        &mut self,
+        decl: &Func,
+        sub: &Subst,
+        recv: &str,
+        name: &str,
+    ) -> Result<(), Diag> {
+        if !self.done.insert(format!("{recv}.{name}")) {
+            return Ok(());
+        }
+        let mut f = self.subst_func(decl, sub)?;
+        f.recv = Some(recv.to_string());
+        f.name = name.to_string();
+        f.tparams = Vec::new();
+        f.recv_tparams = Vec::new();
+        self.out_funcs.push(f);
+        Ok(())
+    }
+
+    /// `T Box<T>.get()` must name a generic type of its own module, with as
+    /// many parameters as the type has. Checked at the declaration, because
+    /// a method on a type nothing instantiates is otherwise never looked at.
+    fn check_generic_recv(&self, f: &Func) -> Result<(), Diag> {
+        let r = f
+            .recv
+            .as_deref()
+            .expect("receiver type parameters need a receiver");
+        let shown = crate::ast::bare(r);
+        let Some(d) = self.decls.get(r) else {
+            let suffix = format!("#{r}");
+            if let Some(d) = self.decls.values().find(|d| d.name.ends_with(&suffix)) {
+                return Err(Diag::new(
+                    f.span,
+                    format!(
+                        "`{shown}` is declared in `{}`; a method may only be added \
+                         to a type its own module declared",
+                        d.module
+                    ),
+                ));
+            }
+            return Err(Diag::new(f.span, format!("unknown type `{shown}`")));
+        };
+        if d.tparams.is_empty() {
+            return Err(Diag::new(
+                f.span,
+                format!("type `{shown}` is not generic; write the receiver as `{shown}`"),
+            ));
+        }
+        if d.tparams.len() != f.recv_tparams.len() {
+            return Err(Diag::new(
+                f.span,
+                format!(
+                    "type `{shown}` takes {} type argument(s), found {}",
+                    d.tparams.len(),
+                    f.recv_tparams.len()
+                ),
+            ));
+        }
         Ok(())
     }
 
@@ -446,6 +576,7 @@ impl Mono {
                 recv: m.recv.clone(),
                 name: m.name.clone(),
                 tparams: Vec::new(),
+                recv_tparams: Vec::new(),
                 params,
                 body: Vec::new(),
                 span: m.span,
@@ -503,6 +634,17 @@ impl Mono {
         let ret = self.subst_ty(f.ret, sub, f.span)?;
         let mut params = Vec::new();
         let mut scope = HashMap::new();
+        // A method's receiver fields are in scope bare, so inference can
+        // read their written types like a local's. On a generic receiver
+        // they are written in the TYPE's parameter names, which mean what
+        // they say here only when the method named them the same way.
+        if let Some(d) = f.recv.as_ref().and_then(|r| self.decls.get(r)) {
+            if !f.is_static && d.tparams == f.recv_tparams {
+                for fld in &d.fields {
+                    scope.insert(fld.name.clone(), fld.ty);
+                }
+            }
+        }
         for p in &f.params {
             scope.insert(p.name.clone(), p.ty);
             params.push(Param {
@@ -529,6 +671,7 @@ impl Mono {
             recv: f.recv.clone(),
             name: f.name.clone(),
             tparams: Vec::new(),
+            recv_tparams: Vec::new(),
             params,
             body,
             span: f.span,
@@ -759,7 +902,23 @@ impl Mono {
             }
             Expr::EnumNew(ty, variant, args, s) => {
                 let ty = self.subst_ty(*ty, sub, *s)?;
-                Expr::EnumNew(ty, variant.clone(), self.subst_args(args, sub)?, *s)
+                // `Holder.make(1)` for `static T Holder.make<T>(T v)`: a
+                // static method with type parameters of its own, whose
+                // receiver is the type written in front.
+                let mut member = variant.clone();
+                if let Ty::User(i) = ty {
+                    let recv = self.out_exprs[i as usize].name.clone();
+                    let found = self
+                        .own_generic
+                        .get(&recv)
+                        .and_then(|ms| ms.get(variant))
+                        .cloned();
+                    if let Some((decl, rsub)) = found {
+                        member =
+                            self.generic_method_call(decl, rsub, recv, variant, args, sub, *s)?;
+                    }
+                }
+                Expr::EnumNew(ty, member, self.subst_args(args, sub)?, *s)
             }
             Expr::MethodCall(obj, m, args, s) => {
                 // `lib.first(xs)` is a call, not a method: the parser cannot
@@ -789,6 +948,27 @@ impl Mono {
                         ));
                     }
                 }
+                // A method with type parameters of its own is instantiated
+                // like a generic function, once the receiver's type is known.
+                // Only a receiver whose type is written down can say -- see
+                // `recv_name`; any other reaches the lowering as it is, and
+                // `Program::generic_methods` lets that explain itself.
+                if let Some(recv) = self.recv_name(obj, sub) {
+                    let found = self
+                        .own_generic
+                        .get(&recv)
+                        .and_then(|ms| ms.get(m))
+                        .cloned();
+                    if let Some((decl, rsub)) = found {
+                        let name = self.generic_method_call(decl, rsub, recv, m, args, sub, *s)?;
+                        return Ok(Expr::MethodCall(
+                            Box::new(self.subst_expr(obj, sub)?),
+                            name,
+                            self.subst_args(args, sub)?,
+                            *s,
+                        ));
+                    }
+                }
                 Expr::MethodCall(
                     Box::new(self.subst_expr(obj, sub)?),
                     m.clone(),
@@ -810,6 +990,30 @@ impl Mono {
                 Expr::Call(name.clone(), out, *s)
             }
         })
+    }
+
+    /// The same as `generic_call`, for a method with type parameters of its
+    /// own at a known receiver: infer, queue, and return the method's
+    /// instantiated name.
+    #[allow(clippy::too_many_arguments)]
+    fn generic_method_call(
+        &mut self,
+        decl: Func,
+        rsub: Subst,
+        recv: String,
+        m: &str,
+        args: &Args,
+        sub: &Subst,
+        span: Span,
+    ) -> Result<String, Diag> {
+        let targs = self.infer(&decl, &args.pos, sub, span)?;
+        let name = self.mangle(m, &targs);
+        self.shown
+            .insert(name.clone(), (m.to_string(), targs.clone()));
+        let mut full = rsub;
+        full.extend(decl.tparams.iter().cloned().zip(targs));
+        self.method_queue.push((decl, full, recv, name.clone()));
+        Ok(name)
     }
 
     /// Infer a generic function's type arguments at one call, queue that
@@ -924,6 +1128,17 @@ impl Mono {
         }
     }
 
+    /// The output name of a method call's receiver type, when the receiver
+    /// has a written type -- the same few shapes inference reads.
+    fn recv_name(&mut self, obj: &Expr, sub: &Subst) -> Option<String> {
+        let t = self.arg_ty(obj)?;
+        let span = obj.span();
+        match self.subst_ty(t, sub, span).ok()? {
+            Ty::User(i) => Some(self.out_exprs[i as usize].name.clone()),
+            _ => None,
+        }
+    }
+
     /// Match a parameter's written type against an argument expression.
     ///
     /// A collection literal has no type of its own -- the lowering types it
@@ -990,7 +1205,14 @@ impl Mono {
             Expr::Float(..) => Some(Ty::Float),
             Expr::Bool(..) => Some(Ty::Bool),
             Expr::Str(..) => Some(Ty::Str),
-            Expr::New(ty, ..) | Expr::EnumNew(ty, ..) => Some(*ty),
+            Expr::New(ty, ..) => Some(*ty),
+            // `Type.name(..)` is an enum variant or a static method, and
+            // only a variant is sure to be of the type written in front.
+            Expr::EnumNew(ty, name, ..) => {
+                let Ty::User(i) = ty else { return None };
+                let d = self.decls.get(&self.src_exprs[*i as usize].name)?;
+                d.variants.iter().any(|v| v.name == *name).then_some(*ty)
+            }
             Expr::Var(n, _) => self.env_ty(n),
             _ => None,
         }

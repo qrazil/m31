@@ -30,3 +30,12 @@ match (m) {
         print(v);
     }
 }
+
+// Methods of another module's generic type, instantiated at this module's
+// type arguments.
+lib.Stack<str> st = lib.Stack<str>.empty();
+st.push("a");
+st.push("b");
+print(st.top());
+List<int> tags = st.tag(0);
+print(tags.size());

@@ -1,0 +1,3 @@
+pub type Box<T> {
+    T item;
+}

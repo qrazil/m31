@@ -1,0 +1,15 @@
+// A generic method needs a receiver whose type is written down, to infer
+// its type arguments from; a call result is not one.
+type Picker {
+    int at;
+}
+
+T Picker.pick<T>(List<T> xs) {
+    return xs[at];
+}
+
+Picker make() {
+    return Picker(0);
+}
+
+print(make().pick([1, 2]));

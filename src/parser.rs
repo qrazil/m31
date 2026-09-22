@@ -24,6 +24,10 @@ pub struct Parser {
     /// `Point` without becoming the same type in the shared arena.
     own: Vec<String>,
     builtin: Vec<String>,
+    /// The generic types this file declares, so a method on one written
+    /// without its type parameters (`T Box.get()`) is refused with the
+    /// spelling it needs rather than an unknown `T`.
+    generic_own: Vec<String>,
     /// Type parameter names in scope while parsing a generic declaration.
     /// `T` inside `type Box<T>` must parse as a type even though no `type T`
     /// exists.
@@ -40,6 +44,14 @@ pub struct Parser {
     /// How deeply the parser is nested right now: one per statement,
     /// expression and type it is inside. See `MAX_DEPTH`.
     depth: usize,
+}
+
+/// What `scan_fn_tparams` finds ahead of a function's parameter list: the
+/// receiver, if it is a method, and the two lists of type parameters.
+struct FnHead {
+    recv_name: Option<(String, Span)>,
+    recv_tparams: Vec<String>,
+    tparams: Vec<String>,
 }
 
 /// The deepest a program may nest, counting statements, expressions and
@@ -183,7 +195,17 @@ impl Parser {
         .map(|s| s.to_string())
         .collect();
         let mut own: Vec<String> = Vec::new();
+        let mut generic_own: Vec<String> = Vec::new();
         let mut type_names = builtin.clone();
+        for w in toks.windows(3) {
+            if matches!(w[0].tok, Tok::KwType | Tok::KwInterface | Tok::KwEnum)
+                && w[2].tok == Tok::Lt
+            {
+                if let Tok::Ident(n) = &w[1].tok {
+                    generic_own.push(n.clone());
+                }
+            }
+        }
         for w in toks.windows(2) {
             if w[0].tok == Tok::KwType || w[0].tok == Tok::KwInterface || w[0].tok == Tok::KwEnum {
                 if let Tok::Ident(n) = &w[1].tok {
@@ -238,6 +260,7 @@ impl Parser {
             type_names,
             own,
             builtin,
+            generic_own,
             imports: Vec::new(),
             tparams: Vec::new(),
             ty_exprs: Vec::new(),
@@ -783,6 +806,7 @@ impl Parser {
             toplevel,
             ty_exprs: std::mem::take(&mut self.ty_exprs),
             shown: std::collections::HashMap::new(),
+            generic_methods: std::collections::HashSet::new(),
         })
     }
 
@@ -827,6 +851,30 @@ impl Parser {
             return false;
         }
         i += 1;
+        // The receiver's type parameters: `T Box<T>.get()`. Skipped here
+        // and told apart from the function's own below by the `.` after.
+        if self.peek_at(i) == &Tok::Lt {
+            let mut j = i;
+            let mut depth = 0;
+            loop {
+                match self.peek_at(j) {
+                    Tok::Lt => depth += 1,
+                    Tok::Gt => {
+                        depth -= 1;
+                        if depth == 0 {
+                            j += 1;
+                            break;
+                        }
+                    }
+                    Tok::Eof => return false,
+                    _ => {}
+                }
+                j += 1;
+            }
+            if self.peek_at(j) == &Tok::Dot {
+                i = j;
+            }
+        }
         // A qualified method name: `int Rect.area()`.
         if self.peek_at(i) == &Tok::Dot {
             i += 1;
@@ -929,6 +977,7 @@ impl Parser {
                     recv: Some(name.clone()),
                     name: mname,
                     tparams: Vec::new(),
+                    recv_tparams: Vec::new(),
                     params,
                     body: Vec::new(),
                     span: mspan,
@@ -1100,10 +1149,46 @@ impl Parser {
         let is_static = self.eat(&Tok::KwStatic);
         // the `<T>` list has to be read before the return type. It sits after
         // the name in the source, so scan ahead for it first.
-        let tparams = self.scan_fn_tparams()?;
-        self.tparams = tparams.clone();
+        let FnHead {
+            recv_name,
+            recv_tparams,
+            tparams,
+        } = self.scan_fn_tparams()?;
+        // A method on a generic type names that type's parameters, so the
+        // signature says what `T` is without sending the reader to the type
+        // declaration. Refused before the return type is read, which is
+        // where it used to fail, as an unknown type `T`.
+        if let Some((r, rspan)) = recv_name.filter(|_| recv_tparams.is_empty()) {
+            if self.generic_own.contains(&r) {
+                return Err(Diag::new(
+                    rspan,
+                    format!(
+                        "`{r}` is generic; a method on it names its type \
+                         parameters on the receiver, as `{r}<T>.name(..)`"
+                    ),
+                ));
+            }
+        }
+        if let Some(t) = tparams.iter().find(|t| recv_tparams.contains(t)) {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "type parameter `{t}` is already the receiver's; a method's \
+                     own type parameters need names of their own"
+                ),
+            ));
+        }
+        self.tparams = recv_tparams.iter().chain(tparams.iter()).cloned().collect();
         let ret = self.expect_ty()?;
         let (first, _) = self.expect_ident()?;
+        // `Box<T>.get` -- only a receiver takes type parameters before a
+        // `.`; after a plain name they are the function's own, read below.
+        let written_recv_tparams = if self.peek() == &Tok::Lt && !recv_tparams.is_empty() {
+            self.parse_tparams()?
+        } else {
+            Vec::new()
+        };
+        debug_assert_eq!(written_recv_tparams, recv_tparams);
         let (recv, name) = if self.eat(&Tok::Dot) {
             let (m, _) = self.expect_ident()?;
             // The receiver names a type, so it is qualified the same way the
@@ -1162,6 +1247,7 @@ impl Parser {
             recv,
             name,
             tparams,
+            recv_tparams,
             params,
             body,
             span,
@@ -1199,9 +1285,12 @@ impl Parser {
 
     /// Look ahead past `<ret> <name>` for a `<T, ..>` list, without consuming
     /// anything. Needed because a generic function's return type can mention
-    /// its own type parameters.
-    fn scan_fn_tparams(&mut self) -> Result<Vec<String>, Diag> {
+    /// its own type parameters. Returns the receiver's type parameters --
+    /// `Box<T>.get` -- and the function's own, either of which may be empty.
+    fn scan_fn_tparams(&mut self) -> Result<FnHead, Diag> {
         let save = self.pos;
+        let mut recv = Vec::new();
+        let mut recv_name = None;
         let mut out = Vec::new();
         // Skip the return type: a keyword, or a name with optional arguments.
         if matches!(self.peek(), Tok::Ident(_)) || Self::ty_of(self.peek()).is_some() {
@@ -1225,21 +1314,45 @@ impl Parser {
                 }
             }
         }
-        if matches!(self.peek(), Tok::Ident(_)) {
+        if let Tok::Ident(first) = self.peek().clone() {
+            let first_span = self.span();
             self.bump();
-            if self.peek() == &Tok::Lt {
-                self.bump();
-                while let Tok::Ident(n) = self.peek().clone() {
-                    out.push(n);
+            self.scan_names(&mut out);
+            // A `.` after the list means it was the receiver's.
+            if self.eat(&Tok::Dot) {
+                recv_name = Some((first, first_span));
+                recv = std::mem::take(&mut out);
+                if matches!(self.peek(), Tok::Ident(_)) {
                     self.bump();
-                    if !self.eat(&Tok::Comma) {
-                        break;
-                    }
+                    self.scan_names(&mut out);
                 }
             }
         }
         self.pos = save;
-        Ok(out)
+        Ok(FnHead {
+            recv_name,
+            recv_tparams: recv,
+            tparams: out,
+        })
+    }
+
+    /// `<A, B>` as a list of names, for `scan_fn_tparams`. Stops at the
+    /// first thing that is not one, leaving the real parse to report it.
+    fn scan_names(&mut self, out: &mut Vec<String>) {
+        if self.peek() != &Tok::Lt {
+            return;
+        }
+        self.bump();
+        while let Tok::Ident(n) = self.peek().clone() {
+            out.push(n);
+            self.bump();
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        if self.peek() == &Tok::Gt {
+            self.bump();
+        }
     }
 
     fn parse_block(&mut self) -> Result<Vec<Stmt>, Diag> {

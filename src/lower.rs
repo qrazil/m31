@@ -130,6 +130,8 @@ pub struct Lowerer {
     ty_exprs: Vec<TyExpr>,
     /// Source spellings of instantiations, for diagnostics (`Program::shown`).
     shown: HashMap<String, (String, Vec<Ty>)>,
+    /// Generic methods, by concrete receiver (`Program::generic_methods`).
+    generic_methods: std::collections::HashSet<String>,
     /// Required methods per interface, parallel to `typedefs`; empty for a
     /// struct.
     iface_methods: Vec<Vec<Func>>,
@@ -204,6 +206,7 @@ impl Lowerer {
             statics: std::collections::HashSet::new(),
             ty_exprs: Vec::new(),
             shown: HashMap::new(),
+            generic_methods: std::collections::HashSet::new(),
             iface_methods: Vec::new(),
             iface_slots: Vec::new(),
             strings: Vec::new(),
@@ -1881,6 +1884,7 @@ impl Lowerer {
                         recv: Some(t.name.clone()),
                         name: mname,
                         tparams: Vec::new(),
+                        recv_tparams: Vec::new(),
                         params: sig.params.clone(),
                         body,
                         span: f.span,
@@ -1968,6 +1972,7 @@ impl Lowerer {
         self.builtin("concat", vec![Ty::Str, Ty::Str], Ty::Str);
 
         self.imports_by_module = p.imports_by_module.clone();
+        self.generic_methods = p.generic_methods.clone();
         for f in &p.funcs {
             if !f.module.is_empty() {
                 self.modules.insert(f.module.clone());
@@ -2201,6 +2206,7 @@ impl Lowerer {
             recv: None,
             name: "$main".to_string(),
             tparams: Vec::new(),
+            recv_tparams: Vec::new(),
             params: Vec::new(),
             body: p.toplevel.clone(),
             span: Span::new(1, 1),
@@ -5290,6 +5296,17 @@ impl Lowerer {
                 }
 
                 let key = format!("{}.{m}", self.typedefs[tid as usize].name);
+                if self.generic_methods.contains(&key) {
+                    return Err(Diag::new(
+                        *span,
+                        format!(
+                            "`{m}` is a generic method, and its type arguments are \
+                             inferred where the receiver's type is written down; \
+                             call it on a local, a parameter, a field or a \
+                             construction"
+                        ),
+                    ));
+                }
                 let Some(sig) = self.sigs.get(&key) else {
                     return Err(Diag::new(
                         *span,

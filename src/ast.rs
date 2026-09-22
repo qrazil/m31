@@ -389,6 +389,13 @@ pub struct Func {
     pub name: String,
     /// Type parameter names, empty for a non-generic function.
     pub tparams: Vec<String>,
+    /// For a method on a generic type, the names its receiver's type
+    /// parameters take inside it: `T Box<T>.get()` has `["T"]`. Written at
+    /// the method rather than borrowed silently from the type declaration,
+    /// so a method's signature can be read without finding its type.
+    /// Monomorphisation instantiates the method once per instantiation of
+    /// the type, and empties this.
+    pub recv_tparams: Vec<String>,
     pub params: Vec<Param>,
     pub body: Vec<Stmt>,
     pub span: Span,
@@ -442,4 +449,10 @@ pub struct Program {
     /// reads it back, because the mangled name is for C and the person
     /// reading the error wrote `List<int>`. Empty before monomorphisation.
     pub shown: std::collections::HashMap<String, (String, Vec<Ty>)>,
+    /// Every generic method a concrete receiver has, as `Box$int.first`.
+    /// Monomorphisation instantiates one at each call whose receiver's type
+    /// it can see written down; a call it could not see through reaches the
+    /// lowering uninstantiated, and this lets that say why instead of
+    /// claiming the method does not exist.
+    pub generic_methods: std::collections::HashSet<String>,
 }

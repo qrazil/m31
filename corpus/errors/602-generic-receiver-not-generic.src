@@ -1,0 +1,8 @@
+// A receiver cannot take type parameters its type does not have.
+type Point {
+    int x;
+}
+
+int Point<T>.get() {
+    return x;
+}
