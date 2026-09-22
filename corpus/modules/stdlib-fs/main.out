@@ -1,0 +1,59 @@
+ok
+ok
+ok
+ok
+ok
+ok
+already exists
+.hidden dangling lib link main.src
+/outside
+/outside/keep.txt
+/src
+/src/.hidden
+/src/dangling
+/src/lib
+/src/lib/a.src
+/src/lib/b.txt
+/src/lib/deep
+/src/lib/deep/é.src
+/src/lib/out
+/src/link
+/src/main.src
+3
+true
+false
+true
+true
+false
+false
+true
+true
+/src/dangling /src/lib /src/link /src/main.src
+/src/.hidden
+/src/lib/a.src /src/lib/b.txt
+/src/lib/b.txt /src/lib/deep /src/lib/out
+/src/lib/a.src /src/lib/b.txt
+/src/lib/a.src /src/link/a.src
+/src/lib/deep/é.src
+/src/main.src
+/src/dangling
+0
+3
+bbb
+true
+ok
+false
+true
+ok
+no such file
+ok
+already exists
+ok
+system error 40
+system error 40
+not a directory
+ok
+false
+true
+ok
+false

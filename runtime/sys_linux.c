@@ -42,11 +42,13 @@
 #define NR_close         3
 #define NR_lseek         8
 #define NR_ioctl        16
+#define NR_getdents64  217
 #define NR_clock_gettime 228
 #define NR_exit_group   231
 #define NR_openat       257
 #define NR_mkdirat      258
 #define NR_unlinkat     263
+#define NR_symlinkat    266
 #define NR_renameat2    316
 #define NR_getrandom    318
 #define NR_statx        332
@@ -54,8 +56,10 @@
 #define NR_ioctl         29
 #define NR_mkdirat       34
 #define NR_unlinkat      35
+#define NR_symlinkat     36
 #define NR_openat        56
 #define NR_close         57
+#define NR_getdents64    61
 #define NR_lseek         62
 #define NR_read          63
 #define NR_write         64
@@ -134,6 +138,7 @@ static inline int64_t sc(int64_t n, int64_t a, int64_t b, int64_t c,
 #define AT_FDCWD       (-100)
 #define AT_REMOVEDIR   0x200
 #define AT_EMPTY_PATH  0x1000
+#define AT_SYMLINK_NOFOLLOW 0x100
 #define O_CLOEXEC_     02000000   /* the same on all three architectures */
 #define TCGETS         0x5401     /* likewise */
 
@@ -194,14 +199,22 @@ _Static_assert(__builtin_offsetof(Statx, mtime) == 112, "statx mtime offset");
 
 #define STATX_BASIC_STATS 0x7ff
 
-int64_t sys_fstat(int64_t fd, SysStat *st) {
+static int64_t statx_into(int64_t dirfd, const char *path, int64_t flags, SysStat *st) {
     Statx sx;
-    int64_t r = sc(NR_statx, fd, P(""), AT_EMPTY_PATH, STATX_BASIC_STATS, P(&sx), 0);
+    int64_t r = sc(NR_statx, dirfd, P(path), flags, STATX_BASIC_STATS, P(&sx), 0);
     if (r < 0) return r;
     st->size = (int64_t)sx.size;
     st->mode = sx.mode;
     st->mtime_ns = sx.mtime.tv_sec * 1000000000 + sx.mtime.tv_nsec;
     return 0;
+}
+
+int64_t sys_fstat(int64_t fd, SysStat *st) {
+    return statx_into(fd, "", AT_EMPTY_PATH, st);
+}
+
+int64_t sys_stat(const char *path, int64_t follow, SysStat *st) {
+    return statx_into(AT_FDCWD, path, follow ? 0 : AT_SYMLINK_NOFOLLOW, st);
 }
 
 /* isatty is "does the terminal ioctl succeed", which is also how every C
@@ -226,8 +239,55 @@ int64_t sys_rmdir(const char *path) {
     return sc(NR_unlinkat, AT_FDCWD, P(path), AT_REMOVEDIR, 0, 0, 0);
 }
 
+int64_t sys_symlink(const char *target, const char *path) {
+    return sc(NR_symlinkat, P(target), AT_FDCWD, P(path), 0, 0, 0);
+}
+
 int64_t sys_rename(const char *from, const char *to) {
     return sc(NR_renameat2, AT_FDCWD, P(from), AT_FDCWD, P(to), 0, 0);
+}
+
+/* struct linux_dirent64 (include/linux/dirent.h): an 8-byte inode, an
+ * 8-byte cookie, a 2-byte record length at offset 16, a type byte, and the
+ * NUL-terminated name from offset 19. Only the length and the name are
+ * read. The length is assembled from its bytes in the machine's order
+ * rather than read through a cast pointer, which would be an aliasing
+ * violation on a char buffer. */
+static int64_t reclen_at(const unsigned char *p) {
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    return (int64_t)p[16] | (int64_t)p[17] << 8;
+#else
+    return (int64_t)p[16] << 8 | (int64_t)p[17];
+#endif
+}
+
+int64_t sys_listdir(const char *path, char *buf, int64_t cap) {
+    int64_t fd = sys_open(path, SYS_O_RDONLY | SYS_O_DIRECTORY, 0);
+    if (fd < 0) return fd;
+    /* 4 KiB is what glibc's readdir asks for at a time. The largest record,
+     * a 255-byte name, is 280 bytes, so every call makes progress. */
+    unsigned char d[4096];
+    int64_t need = 0;
+    for (;;) {
+        int64_t n = sc(NR_getdents64, fd, P(d), (int64_t)sizeof d, 0, 0, 0);
+        if (n == -SYS_EINTR) continue;
+        if (n < 0) {
+            sys_close(fd);
+            return n;
+        }
+        if (n == 0) break;
+        for (int64_t at = 0; at < n; at += reclen_at(d + at)) {
+            const char *name = (const char *)d + at + 19;
+            if (name[0] == '.' && (name[1] == 0 || (name[1] == '.' && name[2] == 0))) continue;
+            for (int64_t i = 0;; i++) {
+                if (need < cap) buf[need] = name[i];
+                need++;
+                if (name[i] == 0) break;
+            }
+        }
+    }
+    sys_close(fd);
+    return need;
 }
 
 /* ---- time, randomness, exit -------------------------------------------- */

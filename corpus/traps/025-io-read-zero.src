@@ -1,0 +1,13 @@
+import io;
+
+// read(0) would return an empty bytes, and an empty result already means
+// the end of the file. One meaning per answer, so asking for nothing traps.
+io.File f = io.stdin();
+match (f.read(0)) {
+    case Ok(bytes b): {
+        print(b.size());
+    }
+    case Err(io.Error e): {
+        print(e.to_str());
+    }
+}

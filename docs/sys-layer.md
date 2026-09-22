@@ -100,6 +100,9 @@ them all.
 | `sys_unlink(path)` | 0 | `unlink` | `unlinkat` 263 | `unlinkat` 35 |
 | `sys_rmdir(path)` | 0 | `rmdir` | `unlinkat(AT_REMOVEDIR)` | same |
 | `sys_rename(from, to)` | 0 | `rename` | `renameat2` 316 | `renameat2` 276 |
+| `sys_symlink(target, path)` | 0 | `symlink` | `symlinkat` 266 | `symlinkat` 36 |
+| `sys_stat(path, follow, &SysStat)` | 0 | `stat` / `lstat` | `statx` 332 | `statx` 291 |
+| `sys_listdir(path, buf, cap)` | bytes needed | `open` + `fdopendir` + `readdir` | `openat` + `getdents64` 217 | `getdents64` 61 |
 | `sys_clock_ns(clock)` | nanoseconds | `clock_gettime` | `clock_gettime` 228 | `clock_gettime` 113 |
 | `sys_getrandom(buf, n)` | n (all of it) | `getentropy`, 256 at a time | `getrandom` 318 | `getrandom` 278 |
 | `sys_exit(code)` | — | `_exit` | `exit_group` 231 | `exit_group` 94 |
@@ -119,11 +122,29 @@ each.
 `sys_isatty` exists for the runtime's stdout buffer (§3), and `sys_rmdir`
 because the layer's own test cannot clean up after `sys_mkdir` without it.
 
+`sys_stat`, `sys_symlink` and `sys_listdir` arrived with `lib/fs.src`.
+`sys_stat` takes a path rather than opening the file and calling
+`sys_fstat`, because opening needs read permission the question does not,
+and opening a FIFO blocks; `follow` is zero for `lstat`, which is what lets
+`fs.walk` and `fs.rmtree` refuse to descend through a link. `sys_symlink`
+exists so that the tests of that refusal can make the links they refuse.
+
+`sys_listdir` is one stateless call per listing: every name except `.` and
+`..`, each followed by a NUL, written into the caller's buffer as far as
+`cap` allows, and the return value is the size the whole listing needs, so
+a caller whose buffer was too small asks again with a larger one. The
+alternative, an open/next/close triple, fails on the two backends keeping
+directory state in incompatible places -- the kernel's `getdents64` cursor
+in a descriptor, the C library's in a `DIR *` that owns one -- and would
+hand the language a handle to leak. The libc backend opens with
+`O_CLOEXEC` itself and hands the descriptor to `fdopendir`, so it is
+close-on-exec whatever the C library's `opendir` does. Order is the file
+system's; `fs.listdir` sorts.
+
 ### Listed, not implemented yet
 
 | operation | for | notes |
 |---|---|---|
-| `getdents64` (x86-64 217, generic 61) | directory listing | No portable libc spelling: POSIX offers `opendir`/`readdir`, which is not descriptor-shaped. The libc backend will need `fdopendir`; decide when `io.list_dir` is designed. |
 | argv, environment | `main`'s arguments | Not a system call: the kernel leaves them on the initial stack. Today the emitted `main(void)` drops them. Needs `main(int, char **)` to hand them to the runtime (libc) or `_start` to read them off the stack (no libc, §5). |
 | `mmap` 9/222, `munmap` 11/215 | a runtime allocator | For §5's malloc replacement. |
 | `clone` 56/220 (or `clone3` 435), `futex` 202/98 | carrier threads for green threads | `docs/concurrency-decision.md`. `clone` is the easy part; see §5. |
@@ -135,11 +156,11 @@ because the layer's own test cannot clean up after `sys_mkdir` without it.
 
 ## 3. What the runtime routes through it today
 
-`rt_file_read`, `rt_file_write`, `rt_file_append`, `rt_stdin_line` and
-`rt_stderr_write` — every primitive `lib/io.src` uses — are loops over the
-layer now, with no `FILE`, no `fopen`, no `getc`. Their signatures and
-their positive-errno results are unchanged, so `lib/io.src` did not change;
-the sign flip is in those five functions.
+`lib/io.src` and `lib/fs.src` reach it through one primitive per
+function (§8): `rt_open` is `sys_open`, `rt_read` is `sys_read`, and so on,
+with the -errno passed through. The loops, the buffers and the errno policy
+that used to be C here (`rt_file_read` and its four siblings) are language
+source now.
 
 `print` goes through it too. The runtime keeps its own 64 KiB stdout buffer
 over `sys_write(1, …)` with stdio's rules, because program output ordering
@@ -315,6 +336,17 @@ is not attempted until a Windows target is.
 ---
 
 ## 8. Where `lib/io.src` goes next
+
+> **Done 2026-09-21.** The list that was built, and why it differs from the
+> proposal below, is `docs/stdlib-seam.md` §7. In short: `__read`,
+> `__write`, `__write_str`, `__open`, `__close`, `__seek`, `__fstat`,
+> `__mkdir`, `__unlink`, `__rmdir` and `__rename` as proposed; `__stat`,
+> `__symlink` and `__listdir` added for `fs`; `__out_flush` added because
+> `print`'s buffer is the runtime's and must be emptied before `io` writes
+> to the same descriptor; `__isatty`, `__clock_ns`, `__random` and `__exit`
+> not added, because `io` does not use them and `date`, `random` and `os`
+> keep their own primitives until they move. The prim-rule amendment for
+> writing into a caller's `bytes` is stdlib-seam.md §2.
 
 When the mutable `bytes` type lands, `io` moves from whole-file primitives
 down to descriptors, and the reading loop, buffering and line splitting move

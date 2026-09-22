@@ -100,17 +100,32 @@ void rt_print(int64_t v);
 void rt_print_bool(bool v);
 void rt_print_str(Obj *o);
 
-/* The seam for `lib/io.src`. A primitive returns only what the runtime can
- * build without the compiler's help: a scalar, a str, or an element pushed
- * onto a collection the caller passed in. It never builds an `Option` or a
- * `Result` -- their layout and TypeInfo belong to the compiler -- so a
- * failure comes back as a raw errno and the library turns it into its own
- * error type, in source where the mapping can be read. */
-int64_t rt_file_read(Obj *path, Obj *out);          /* 0, or errno */
-int64_t rt_file_write(Obj *path, Obj *data);        /* 0, or errno */
-int64_t rt_file_append(Obj *path, Obj *data);       /* 0, or errno */
-int64_t rt_stdin_line(Obj *out);                    /* 1 pushed a line, 0 at end */
-void    rt_stderr_write(Obj *s);
+/* The seam for `lib/io.src` and `lib/fs.src`: one sys-layer call each
+ * (runtime/sys.h), returning its value or -errno unchanged. A primitive
+ * returns only what the runtime can build without the compiler's help: a
+ * scalar, a str, an element pushed onto a collection the caller passed in,
+ * or bytes written in place inside a range of a `bytes` the caller passed
+ * in, checked here. It never builds an `Option` or a `Result` -- their
+ * layout and TypeInfo belong to the compiler -- so the library builds its
+ * own error type from the errno, in source where the mapping can be read. */
+int64_t rt_open(Obj *path, int64_t flags, int64_t mode);         /* fd */
+int64_t rt_read(int64_t fd, Obj *buf, int64_t off, int64_t n);   /* bytes read, 0 at end */
+int64_t rt_write(int64_t fd, Obj *buf, int64_t off, int64_t n);  /* bytes written */
+int64_t rt_write_str(int64_t fd, Obj *s, int64_t off, int64_t n);
+int64_t rt_close(int64_t fd);
+int64_t rt_seek(int64_t fd, int64_t off, int64_t whence);        /* new offset */
+int64_t rt_fstat(int64_t fd, Obj *out);           /* pushes size, mode, mtime_ns */
+int64_t rt_stat(Obj *path, bool follow, Obj *out);/* the same, by name */
+int64_t rt_mkdir(Obj *path, int64_t mode);
+int64_t rt_unlink(Obj *path);
+int64_t rt_rmdir(Obj *path);
+int64_t rt_rename(Obj *from, Obj *to);
+int64_t rt_symlink(Obj *target, Obj *path);
+int64_t rt_listdir(Obj *path, Obj *buf);          /* bytes the listing needs */
+/* Writes out what `print` has buffered. lib/io.src calls it before writing
+ * to descriptor 1 or 2 itself, so the two paths to one stream land in the
+ * order the program wrote them. */
+void    rt_out_flush(void);
 
 /* ---- process primitives: lib/os.src, lib/date.src, lib/random.src ------ */
 /* Raw facts about the process and nothing more: the command line, one

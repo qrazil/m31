@@ -1,0 +1,22 @@
+import io;
+
+// Reading a File after closing it is a bug at the call site, not a state
+// of the world, so it traps -- rather than handing the stale descriptor
+// number to the kernel, where it may by now name some other file.
+io.File f = io.stdin();
+match (f.close()) {
+    case Ok(bool b): {
+        print("closed");
+    }
+    case Err(io.Error e): {
+        print(e.to_str());
+    }
+}
+match (f.read(1)) {
+    case Ok(bytes b): {
+        print(b.size());
+    }
+    case Err(io.Error e): {
+        print(e.to_str());
+    }
+}
