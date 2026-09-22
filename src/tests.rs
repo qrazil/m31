@@ -680,7 +680,10 @@ fn each_distinct_instantiation_is_emitted_once() {
         1,
         "Holder<int> must be instantiated exactly once:\n{out}"
     );
-    assert!(out.contains("type Holder$str"), "Holder<str> missing:\n{out}");
+    assert!(
+        out.contains("type Holder$str"),
+        "Holder<str> missing:\n{out}"
+    );
 }
 
 #[test]
@@ -707,10 +710,10 @@ fn generic_function_type_arguments_are_inferred() {
 
 #[test]
 fn generic_misuse_is_rejected() {
-    assert!(
-        err("type Holder<T> { T value; }\nHolder<int,str> b = Holder<int,str>(1); print(b.value);")
-            .contains("takes 1 type argument(s), found 2")
-    );
+    assert!(err(
+        "type Holder<T> { T value; }\nHolder<int,str> b = Holder<int,str>(1); print(b.value);"
+    )
+    .contains("takes 1 type argument(s), found 2"));
     assert!(err("type P { int x; }\nP<int> p = P<int>(1); print(p.x);").contains("is not generic"));
     // Inference cannot see through a nested call; the diagnostic says what to
     // do rather than guessing.
@@ -1407,8 +1410,8 @@ fn a_destructor_alone_earns_a_drop_function_but_no_walk() {
         .find(|l| l.contains(&format!("TypeInfo ti_T{i} ")))
         .unwrap_or_else(|| panic!("no TypeInfo for T{i}:\n{c}"));
     assert!(
-        ti.ends_with(&format!("{{ drop_T{i}, NULL, NULL }};")),
-        "drop set, walk NULL: {ti}"
+        ti.ends_with(&format!("{{ drop_T{i}, NULL, NULL, copy_T{i} }};")),
+        "drop set, walk NULL, copy for a const snapshot: {ti}"
     );
     assert!(
         c.contains("o->rc = 1;"),
