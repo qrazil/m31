@@ -85,6 +85,77 @@ fn underscores_in_int_literals_are_separators() {
 }
 
 #[test]
+fn prefixed_int_literals_lex_to_their_bits() {
+    let one = |src: &str| match toks(src).as_slice() {
+        [Tok::Int(n), Tok::Eof] => *n,
+        t => panic!("{src} lexed to {t:?}"),
+    };
+    assert_eq!(one("0x1F"), 31);
+    assert_eq!(one("0xff"), one("0xFF"));
+    assert_eq!(one("0o17"), 15);
+    assert_eq!(one("0b101"), 5);
+    assert_eq!(one("0b1_0__1_"), 5, "the decimal separator rule");
+    assert_eq!(one("0"), 0);
+    // A prefixed literal is 64 bits, the top one the sign.
+    assert_eq!(one("0x7FFF_FFFF_FFFF_FFFF"), i64::MAX);
+    assert_eq!(one("0x8000_0000_0000_0000"), i64::MIN);
+    assert_eq!(one("0xFFFF_FFFF_FFFF_FFFF"), -1);
+    assert_eq!(one(&format!("0b{}", "1".repeat(64))), -1);
+    // A method on a prefixed literal is still a method call.
+    assert_eq!(
+        toks("0x10.to_str"),
+        vec![
+            Tok::Int(16),
+            Tok::Dot,
+            Tok::Ident("to_str".into()),
+            Tok::Eof
+        ]
+    );
+}
+
+#[test]
+fn malformed_prefixed_int_literals_are_refused() {
+    let msg = |src: &str| match Lexer::new(src).tokenize() {
+        Ok(t) => panic!("{src} lexed to {t:?}"),
+        Err(d) => d.to_string(),
+    };
+    for (src, want) in [
+        ("017", "write `17`, or `0o17` for octal"),
+        ("0_17", "write `17`, or `0o17` for octal"),
+        ("00", "write `0`, or `0o0` for octal"),
+        ("09", "write `9`"),
+        ("0X1F", "write `0x`, not `0X`"),
+        ("0O17", "write `0o`, not `0O`"),
+        ("0B1", "write `0b`, not `0B`"),
+        ("0x", "`0x` must be followed by a hex digit"),
+        ("0x_1", "`0x` must be followed by a hex digit"),
+        ("0o8", "`8` is not an octal digit"),
+        ("0b102", "`2` is not a binary digit"),
+        ("0x1G", "`G` is not a hex digit"),
+        ("0x1.5", "a float literal is written in decimal"),
+        ("0x1_0000_0000_0000_0000", "does not fit in 64 bits"),
+        (&format!("0b1{}", "0".repeat(64)), "does not fit in 64 bits"),
+        // A decimal literal is a number, not bits: it still has to fit.
+        ("18446744073709551615", "does not fit in int"),
+    ] {
+        let got = msg(src);
+        assert!(got.contains(want), "{src}: {got}");
+    }
+    // `09` has no octal reading to offer.
+    assert!(!msg("09").contains("0o"));
+    // A leading zero is refused in an integer only: `0.5` is a float.
+    assert_eq!(toks("0.5"), vec![Tok::Float(0.5), Tok::Eof]);
+}
+
+#[test]
+fn formatting_keeps_every_int_spelling() {
+    let src =
+        "int a = 0x1F;\nint b = 0o755 | 0b1010_0101;\nint c = 1_000_000;\nint d = 0xdead_BEEF;\n";
+    let once = crate::reformat(src, "t").expect("formats");
+    assert_eq!(once, src);
+}
+
+#[test]
 fn string_literals_keep_multibyte_utf8_intact() {
     // Regression: accumulating `byte as char` decoded each UTF-8
     // continuation byte as its own Latin-1 codepoint and mangled the string.

@@ -293,8 +293,8 @@ List<int> permutation_from(Source s, int n) {
 // format: this string is the UUID.
 str uuid4_from(Source s) {
     bytes b = fill(s, 16);
-    b[6] = b[6] & 15 | 64;
-    b[8] = b[8] & 63 | 128;
+    b[6] = b[6] & 0x0f | 0x40;
+    b[8] = b[8] & 0b0011_1111 | 0b1000_0000;
     str h = b.hex();
     return h.substr(0, 8) + "-" + h.substr(8, 12) + "-" + h.substr(12, 16) + "-" + h.substr(16, 20) + "-" + h.substr(20, 32);
 }
@@ -324,11 +324,11 @@ int step(int state) {
 int next32(List<int> state) {
     int old = state[0];
     state[0] = step(old);
-    int xorshifted = shr(shr(old, 18) ^ old, 27) & 4294967295;
+    int xorshifted = shr(shr(old, 18) ^ old, 27) & 0xFFFF_FFFF;
     int rot = shr(old, 59);
     // Rotate right by rot within 32 bits. A shift by 32 is in range, so
     // rot == 0 needs no case of its own; the mask drops what it pushes up.
-    return (xorshifted >> rot | xorshifted << 32 - rot) & 4294967295;
+    return (xorshifted >> rot | xorshifted << 32 - rot) & 0xFFFF_FFFF;
 }
 
 // n octets: each 32-bit output gives four, most significant first, and what
@@ -354,7 +354,7 @@ int shr(int x, int n) {
 
 // --- small arithmetic -------------------------------------------------------
 int max_int() {
-    return 9223372036854775807;
+    return 0x7FFF_FFFF_FFFF_FFFF;
 }
 
 // How many bits it takes to write `n`, which is positive here.

@@ -39,13 +39,12 @@ prim void __out_flush();
 
 // The sys layer's own constants (runtime/sys.h), written as numbers because
 // they are the layer's and not the host's: the same on every target, which
-// is what makes a number here safe. There are no octal literals, so the
-// octal each one is usually spelled in is beside it.
+// is what makes a number here safe. The flags and modes are written in
+// octal, as the C headers spell them, so each can be checked against one.
 //
-//   open flags   WRONLY 1, CREAT 64 (0100), TRUNC 512 (01000),
-//                APPEND 1024 (02000)
+//   open flags   WRONLY 0o1, CREAT 0o100, TRUNC 0o1000, APPEND 0o2000
 //   seek         SET 0, CUR 1
-//   file type    mode & 61440 (0170000); a regular file is 32768 (0100000)
+//   file type    mode & 0o170000; a regular file is 0o100000
 //   errno        EINTR 4, EIO 5 -- the rest are named in from_errno
 /// Why an operation on a file failed.
 ///
@@ -185,7 +184,7 @@ pub Result<bytes, Error> File.read_all() {
     // offset, which is where the buffer stopped.
     int hint = 0;
     List<int> st = [];
-    if (__fstat(fd, st) == 0 && st[1] & 61440 == 32768) {
+    if (__fstat(fd, st) == 0 && st[1] & 0o170000 == 0o100000) {
         int here = __seek(fd, 0, 1);
         if (here >= 0 && st[0] > here) {
             hint = st[0] - here;
@@ -377,10 +376,10 @@ pub Error from_errno(int e) {
 /// at the end even with other writers.
 ///
 /// A file this creates gets `perm` -- the permission bits, less the
-/// process's umask. The default is 438 (octal 0666), what every C program
-/// and Go's `os.Create` use; 384 (0600) is a file only its owner can read.
+/// process's umask. The default is `0o666`, what every C program
+/// and Go's `os.Create` use; `0o600` is a file only its owner can read.
 /// The descriptor is close-on-exec, as every descriptor the runtime opens.
-pub Result<File, Error> open(str path, Mode mode = Mode.Read, int perm = 438) {
+pub Result<File, Error> open(str path, Mode mode = Mode.Read, int perm = 0o666) {
     int flags = 0;
     bool readable = true;
     match (mode) {
@@ -388,11 +387,11 @@ pub Result<File, Error> open(str path, Mode mode = Mode.Read, int perm = 438) {
             flags = 0;
         }
         case Write: {
-            flags = 1 | 64 | 512;
+            flags = 0o1 | 0o100 | 0o1000;
             readable = false;
         }
         case Append: {
-            flags = 1 | 64 | 1024;
+            flags = 0o1 | 0o100 | 0o2000;
             readable = false;
         }
     }
@@ -501,7 +500,7 @@ pub Result<str, Error> read(str path) {
 // Open for `flags`, write `data`, close; the close counts, because it is
 // where a delayed write failure surfaces.
 Result<int, Error> write_whole(str path, int flags, str data) {
-    int fd = __open(path, flags, 438);
+    int fd = __open(path, flags, 0o666);
     if (fd < 0) {
         return Result<int, Error>.Err(from_errno(-fd));
     }
@@ -523,12 +522,12 @@ Result<int, Error> write_whole(str path, int flags, str data) {
 /// Replace the file's contents with `data`, creating it if it is missing.
 /// Returns the number of bytes written.
 pub Result<int, Error> write(str path, str data) {
-    return write_whole(path, 1 | 64 | 512, data);
+    return write_whole(path, 0o1 | 0o100 | 0o1000, data);
 }
 
 /// Add `data` to the end of the file, creating it if it is missing.
 pub Result<int, Error> append(str path, str data) {
-    return write_whole(path, 1 | 64 | 1024, data);
+    return write_whole(path, 0o1 | 0o100 | 0o2000, data);
 }
 
 /// Replace the file's contents with the octets `data`.

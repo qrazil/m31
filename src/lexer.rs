@@ -205,12 +205,13 @@ pub struct Lexer<'a> {
     comments: Vec<Comment>,
     /// Whether anything but whitespace has been seen on the current line.
     code_on_line: bool,
-    /// Each string literal's source text, quotes included, by position.
+    /// Each string literal's source text, quotes included, and each integer
+    /// literal's, by position.
     spellings: Vec<(Span, String)>,
 }
 
 /// Everything the formatter needs from the lexer: the tokens, and what the
-/// tokens alone lose -- the comments, and how each string literal was spelled.
+/// tokens alone lose -- the comments, and how each literal was spelled.
 pub struct Lexed {
     pub toks: Vec<Token>,
     pub comments: Vec<Comment>,
@@ -420,6 +421,42 @@ impl<'a> Lexer<'a> {
     /// float is decided by one character, not by scanning to the end.
     fn lex_int(&mut self, span: Span) -> Result<Tok, Diag> {
         let start = self.pos;
+        let tok = self.lex_number(span)?;
+        // The formatter prints an integer the way it was written: `0o755`
+        // and `1_000_000` are spelled that way to be read, and the value
+        // alone would bring back `493` and `1000000`.
+        if matches!(tok, Tok::Int(_)) {
+            self.spellings.push((
+                span,
+                String::from_utf8_lossy(&self.src[start..self.pos]).into_owned(),
+            ));
+        }
+        Ok(tok)
+    }
+
+    fn lex_number(&mut self, span: Span) -> Result<Tok, Diag> {
+        let start = self.pos;
+        if self.peek() == b'0' {
+            match self.peek2() {
+                b'x' => return self.lex_radix(span, 16, "a hex"),
+                b'o' => return self.lex_radix(span, 8, "an octal"),
+                b'b' => return self.lex_radix(span, 2, "a binary"),
+                // One spelling per base. `0O17` is hard to tell from `0017`,
+                // and two files that chose differently would never agree
+                // under a formatter that keeps spellings.
+                c @ (b'X' | b'O' | b'B') => {
+                    let lower = (c as char).to_ascii_lowercase();
+                    return Err(Diag::new(
+                        span,
+                        format!(
+                            "the base prefix is lowercase: write `0{lower}`, not `0{}`",
+                            c as char
+                        ),
+                    ));
+                }
+                _ => {}
+            }
+        }
         while self.peek().is_ascii_digit() || self.peek() == b'_' {
             self.bump();
         }
@@ -474,18 +511,103 @@ impl<'a> Lexer<'a> {
         if self.peek() == b'_' || self.peek().is_ascii_alphabetic() {
             return Err(Diag::new(span, "invalid suffix on integer literal"));
         }
-        let text: String = std::str::from_utf8(&self.src[start..self.pos])
-            .unwrap()
-            .chars()
-            .filter(|c| *c != '_')
-            .collect();
+        let written = std::str::from_utf8(&self.src[start..self.pos]).unwrap();
+        let text: String = written.chars().filter(|c| *c != '_').collect();
+        // C, and JavaScript outside strict mode, read `017` as octal 15. A
+        // reader who does not know the rule sees seventeen; one who does
+        // cannot tell whether the author did. Refusing the leading zero
+        // outright gives the spelling no meaning to disagree about: octal
+        // is `0o17`, seventeen is `17`.
+        if text.len() > 1 && text.starts_with('0') {
+            let plain = text.trim_start_matches('0');
+            let plain = if plain.is_empty() { "0" } else { plain };
+            let octal = if text.bytes().all(|c| c < b'8') {
+                format!(", or `0o{plain}` for octal")
+            } else {
+                String::new()
+            };
+            return Err(Diag::new(
+                span,
+                format!(
+                    "integer literal `{written}` has a leading zero, which C \
+                     reads as octal; write `{plain}`{octal}"
+                ),
+            ));
+        }
         match text.parse::<i64>() {
             Ok(n) => Ok(Tok::Int(n)),
             // int is 64-bit everywhere (docs/ir-v0.md §2.1), so a literal that
             // does not fit is a compile error, not a wrap.
+            // A value that fits in 64 unsigned bits is most likely a
+            // constant copied from somewhere that has u64; the bits are
+            // writable, just not as a decimal number.
             Err(_) => Err(Diag::new(
                 span,
-                format!("integer literal `{text}` does not fit in int"),
+                match text.parse::<u64>() {
+                    Ok(bits) => format!(
+                        "integer literal `{text}` does not fit in int; to mean \
+                         these 64 bits, write them in hex: `0x{bits:X}`"
+                    ),
+                    Err(_) => format!("integer literal `{text}` does not fit in int"),
+                },
+            )),
+        }
+    }
+
+    /// `0x1F`, `0o17`, `0b101`: the prefix lowercase, hex digits in either
+    /// case, `_` anywhere after the first digit -- the rule decimal has.
+    ///
+    /// **A prefixed literal is 64 bits, not a signed number.** It may go up
+    /// to `0xFFFF_FFFF_FFFF_FFFF`, and the bits are the int's bits: that one
+    /// is -1. A base other than ten is chosen to write bits, and `int` is
+    /// the only integer type, so there is no unsigned one for a mask with
+    /// the top bit set to live in. Rust and Go refuse such a literal because
+    /// they have `u64` to send it to; Java, which has no unsigned `long`
+    /// either, allows it, for the same reason as here. Published constants
+    /// -- the FNV offset basis `0xcbf29ce484222325`, SplitMix's golden
+    /// gamma, a float's sign bit -- would otherwise have to be transcribed
+    /// into negative decimals nobody can check against the paper. A decimal
+    /// literal is still a number and must fit in int; more than 64 bits is
+    /// an error in any base.
+    fn lex_radix(&mut self, span: Span, radix: u32, a_digit: &str) -> Result<Tok, Diag> {
+        let start = self.pos;
+        self.bump();
+        self.bump();
+        while self.peek() == b'_' || self.peek().is_ascii_alphanumeric() {
+            self.bump();
+        }
+        let written = std::str::from_utf8(&self.src[start..self.pos]).unwrap();
+        let (prefix, body) = written.split_at(2);
+        if body.is_empty() || body.starts_with('_') {
+            return Err(Diag::new(
+                span,
+                format!("`{prefix}` must be followed by {a_digit} digit"),
+            ));
+        }
+        // A letter run on the end is a bad digit here, not a suffix: `0x1G`
+        // and `0b102` are both one mistyped literal.
+        if let Some((i, bad)) = body
+            .char_indices()
+            .find(|(_, c)| *c != '_' && !c.is_digit(radix))
+        {
+            let at = Span {
+                col: span.col + 2 + i as u32,
+                ..span
+            };
+            return Err(Diag::new(at, format!("`{bad}` is not {a_digit} digit")));
+        }
+        // `0x1.8p0` is a hex float in C. Not here: a float is written in
+        // decimal, and saying so beats a parse error about a stray `8`.
+        if self.peek() == b'.' && self.peek2().is_ascii_digit() {
+            return Err(Diag::new(span, "a float literal is written in decimal"));
+        }
+        let text: String = body.chars().filter(|c| *c != '_').collect();
+        match u64::from_str_radix(&text, radix) {
+            // Two's complement: the top bit is the sign (see above).
+            Ok(n) => Ok(Tok::Int(n as i64)),
+            Err(_) => Err(Diag::new(
+                span,
+                format!("integer literal `{written}` does not fit in 64 bits"),
             )),
         }
     }

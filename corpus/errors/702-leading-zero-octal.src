@@ -1,0 +1,4 @@
+// No C-style octal: C reads `017` as 15, and a reader cannot tell whether
+// the author knew. Octal is `0o17`.
+int mode = 017;
+print(mode);

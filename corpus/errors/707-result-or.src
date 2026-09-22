@@ -1,0 +1,10 @@
+// A Result has `is_ok` and `is_err`, and no `or`: falling back from an Err
+// would throw away the reason it carries.
+Result<int, str> half(int n) {
+    if (n % 2 != 0) {
+        return Result<int, str>.Err("odd");
+    }
+    return Result<int, str>.Ok(n / 2);
+}
+
+print(half(3).or(0));

@@ -1,0 +1,40 @@
+// Integer literals in hex, octal and binary, with `_` separators.
+//
+// A decimal literal is a number and must fit in int. A prefixed one is the
+// int's 64 bits, so a mask with the top bit set can be written as it is
+// published: 0xFFFF_FFFF_FFFF_FFFF is -1.
+
+print(0x1F);
+print(0xff == 0xFF);
+print(0xDead_Beef);
+print(0o17);
+print(0o777);
+print(0b101);
+print(0b1111_0000);
+print(1_000_000);
+print(0x0);
+print(0b0);
+
+// The edges of the 64 bits.
+print(0x7FFF_FFFF_FFFF_FFFF);
+print(0x8000_0000_0000_0000);
+print(0xFFFF_FFFF_FFFF_FFFF);
+print(0o1_777_777_777_777_777_777_777 == -1);
+print(0x8000_0000_0000_0000 == 1 << 63);
+
+// FNV-1a over "ab", with its constants as the specification writes them.
+int h = 0xcbf29ce484222325;
+str s = "ab";
+int i = 0;
+while (i < s.size()) {
+    h = (h ^ s.byte_at(i)).wrapping_mul(0x100000001b3);
+    i = i + 1;
+}
+print(h);
+
+// Literals are operands like any other.
+print(-0x10);
+print(0x1F & 0b1010);
+print(0x10.to_str());
+bytes b = [0x00, 0x7f, 0xFF];
+print(b[2]);

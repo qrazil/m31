@@ -1,0 +1,2 @@
+// A letter or digit outside the base is a mistyped digit, not a suffix.
+print(0b1021);

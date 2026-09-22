@@ -1,0 +1,4 @@
+corpus/errors/703-int-prefix-uppercase.src:2:7: the base prefix is lowercase: write `0x`, not `0X`
+  |
+2 | print(0XFF);
+  |       ^

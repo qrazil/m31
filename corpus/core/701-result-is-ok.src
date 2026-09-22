@@ -1,0 +1,60 @@
+// `r.is_ok()` and `r.is_err()`: whether a Result failed, without a `match`
+// that binds a payload only to ignore it. `?` passes the failure on;
+// `is_ok` asks and takes nothing apart.
+
+Result<int, str> half(int n) {
+    if (n % 2 != 0) {
+        return Result<int, str>.Err("odd");
+    }
+    return Result<int, str>.Ok(n / 2);
+}
+
+Result<void, str> check(int x) {
+    if (x < 0) {
+        return Result<void, str>.Err("negative");
+    }
+    return Result<void, str>.Ok;
+}
+
+print(half(4).is_ok());
+print(half(4).is_err());
+print(half(3).is_ok());
+print(half(3).is_err());
+
+// On a void success too: there is no payload, and the question needs none.
+print(check(1).is_ok());
+print(check(-1).is_err());
+
+// Counting failures, the case the pair is for.
+int failed = 0;
+List<int> ns = [2, 3, 4, 5, 7];
+for (int n in ns) {
+    if (half(n).is_err()) {
+        failed = failed + 1;
+    }
+}
+print(failed);
+
+// A bound Result is still whole afterwards: asking consumed nothing.
+Result<str, str> r = Result<str, str>.Ok("kept");
+if (r.is_ok()) {
+    match (r) {
+        case Ok(str s): {
+            print(s);
+        }
+        case Err(str e): {
+            print(e);
+        }
+    }
+}
+
+// On a temporary with a heap payload: asked, then released with the statement.
+Result<str, str> spell(int n) {
+    if (n > 0) {
+        return Result<str, str>.Ok("x".repeat(n));
+    }
+    return Result<str, str>.Err("y".repeat(3));
+}
+
+print(spell(2).is_ok());
+print(spell(0).is_ok() || spell(1).is_err());

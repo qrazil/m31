@@ -1,0 +1,4 @@
+corpus/errors/702-leading-zero-octal.src:3:12: integer literal `017` has a leading zero, which C reads as octal; write `17`, or `0o17` for octal
+  |
+3 | int mode = 017;
+  |            ^

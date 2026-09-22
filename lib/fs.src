@@ -45,10 +45,9 @@ prim int __symlink(str target, str path);
 prim int __listdir(str path, bytes buf);
 
 // File type bits in a mode, the historical Unix values and the same on
-// every system (runtime/sys.h). Octal, as they are usually written:
-//   type mask 61440 (0170000), directory 16384 (0040000),
-//   regular file 32768 (0100000), symlink 40960 (0120000),
-//   permission bits 511 (0777).
+// every system (runtime/sys.h), in octal as they are usually written: type
+// mask 0o170000, directory 0o040000, regular file 0o100000, symlink
+// 0o120000, permission bits 0o777.
 /// What `stat` reports about a file.
 ///
 /// `mode` is the whole Unix mode: the type in its high bits, the
@@ -63,17 +62,17 @@ pub type Stat {
 
 /// Is it a directory?
 pub bool Stat.is_dir() {
-    return mode & 61440 == 16384;
+    return mode & 0o170000 == 0o040000;
 }
 
 /// Is it a regular file -- not a directory, a device, a FIFO or a socket?
 pub bool Stat.is_file() {
-    return mode & 61440 == 32768;
+    return mode & 0o170000 == 0o100000;
 }
 
-/// The permission bits alone, `mode & 0777`: what `chmod` takes.
+/// The permission bits alone, `mode & 0o777`: what `chmod` takes.
 pub int Stat.perm() {
-    return mode & 511;
+    return mode & 0o777;
 }
 
 Result<Stat, io.Error> stat_of(str path, bool follow) {
@@ -143,7 +142,7 @@ pub bool is_file(str path) {
 pub bool is_link(str path) {
     match (stat_of(path, false)) {
         case Ok(Stat s): {
-            return s.mode & 61440 == 40960;
+            return s.mode & 0o170000 == 0o120000;
         }
         case Err(io.Error e): {
             return false;
@@ -195,9 +194,9 @@ pub Result<List<str>, io.Error> listdir(str path) {
 }
 
 /// Create the directory `path`. Its parent must exist; `makedirs` makes
-/// them all. The permissions are 0777 less the umask, as `mkdir(1)` gives.
+/// them all. The permissions are `0o777` less the umask, as `mkdir(1)` gives.
 pub Result<bool, io.Error> mkdir(str path) {
-    return done(__mkdir(path, 511));
+    return done(__mkdir(path, 0o777));
 }
 
 /// Remove the file `path`. A symlink is removed itself, never its target.
@@ -276,7 +275,7 @@ pub Result<bool, io.Error> makedirs(str path) {
         if (is_dir(prefix)) {
             continue;
         }
-        int r = __mkdir(prefix, 511);
+        int r = __mkdir(prefix, 0o777);
         // Another process may have made it between the check and the
         // mkdir. That race is the ordinary case for a shared build
         // directory, and its outcome is what was wanted.
@@ -615,12 +614,12 @@ pub Result<bool, io.Error> rmtree(str path, str within) {
         }
         at = join(at, part);
         Stat s = stat_of(at, false)?;
-        if (s.mode & 61440 == 40960) {
+        if (s.mode & 0o170000 == 0o120000) {
             return Result<bool, io.Error>.Err(io.Error.Other(40));
         }
     }
     Stat top = stat_of(path, false)?;
-    if (top.mode & 61440 == 40960) {
+    if (top.mode & 0o170000 == 0o120000) {
         return Result<bool, io.Error>.Err(io.Error.Other(40));
     }
     if (!top.is_dir()) {

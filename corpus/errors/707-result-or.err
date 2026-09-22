@@ -1,0 +1,4 @@
+corpus/errors/707-result-or.src:10:14: a Result has `is_ok` and `is_err`; `or` is not one of them -- use `match` to take the value out, or `?` to pass the failure on
+   |
+10 | print(half(3).or(0));
+   |              ^

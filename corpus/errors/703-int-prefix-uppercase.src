@@ -1,0 +1,2 @@
+// One spelling per base: the prefix is lowercase. Hex digits may be either.
+print(0XFF);
