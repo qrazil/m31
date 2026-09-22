@@ -1,0 +1,100 @@
+{"a":[1,2.5,true,null]}
+{"a":{"y":{},"z":[]},"b":1,"c":"x"}
+[0,0,1.0,-1500.0,0.0,123456789012345678,0.1,10000000000000000.0,1e+17,2.5e-05,100.0,100.0]
+[9223372036854775807,-9223372036854775808,0.30000000000000004,5e-324]
+"a\"b\\c/d\n\r\t"
+"é日😀 A\u0000"
+"é日😀"
+[1,2]
+{"a":2}
+"x"
+42
+true
+false
+null
+[[[[]]],{},[{}],""]
+{"k":{"deep":[1,[2,[3,{"x":null}]]]}}
+"\u0000 \n \r \t \" \\ /"
+{
+  "a": {},
+  "b": [
+    1,
+    2,
+    {
+      "c": null
+    }
+  ],
+  "d": []
+}
+[
+    1,
+    [
+        2,
+        []
+    ],
+    {
+        "x": "y"
+    }
+]
+7
+[]
+stringify error: Infinity is not JSON serializable
+stringify error: Infinity is not JSON serializable
+error: expected a string key at position 1
+error: unexpected ']' at position 3
+error: unexpected '2' at position 3
+error: expected ':' at position 5
+error: expected a string key at position 7
+error: expected a string key at position 1
+error: unterminated array at position 2
+error: unterminated object at position 6
+error: unterminated string at position 4
+error: incomplete \u escape at position 4
+error: invalid \u escape '12G4' at position 3
+error: invalid escape '\x' at position 2
+error: unterminated escape at position 2
+error: unpaired UTF-16 surrogate in \u escape at position 7
+error: unpaired UTF-16 surrogate in \u escape at position 7
+error: invalid \u escape 'zzzz' at position 9
+error: unpaired UTF-16 surrogate in \u escape at position 7
+error: invalid control character in string at position 2
+error: invalid number: a leading zero cannot be followed by more digits at position 1
+error: invalid number at position 1
+error: invalid number at position 1
+error: invalid number: expected a digit after '.' at position 2
+error: invalid number: expected a digit after '.' at position 2
+error: invalid number: expected a digit in the exponent at position 2
+error: invalid number: expected a digit in the exponent at position 5
+error: unexpected '.' at position 0
+error: unexpected '+' at position 0
+error: unexpected 't' at position 0
+error: unexpected 'n' at position 0
+error: unexpected 'x' at position 4
+error: unexpected end of input at position 0
+error: unexpected end of input at position 3
+error: unexpected 'N' at position 0
+error: unexpected ''' at position 0
+error: unexpected 'é' at position 1
+error: integer out of range at position 0
+error: integer out of range at position 0
+error: unexpected '/' at position 7
+error: invalid UTF-8 in string at position 1
+error: invalid UTF-8 in string at position 8
+error: escape at position 1 spells U+0008, which a str cannot hold until the language can build any byte
+error: escape at position 3 spells U+000c, which a str cannot hold until the language can build any byte
+error: escape at position 1 spells U+0301, which a str cannot hold until the language can build any byte
+error: escape at position 1 spells U+0001, which a str cannot hold until the language can build any byte
+true
+error: maximum nesting depth (10000) exceeded at position 10000
+10001 with an empty innermost: ok
+error: maximum nesting depth (10000) exceeded at position 10001
+stringify error: nan is not JSON serializable
+stringify error: Infinity is not JSON serializable
+stringify error: Infinity is not JSON serializable
+stringify error: a string is not valid UTF-8 (byte 3 of it), and JSON text must be
+stringify error: a string is not valid UTF-8 (byte 0 of it), and JSON text must be
+3.0
+-0.0
+1e+300
+stringify error: maximum nesting depth (10000) exceeded while writing
+2
