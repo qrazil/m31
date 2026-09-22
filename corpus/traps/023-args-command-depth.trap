@@ -1,0 +1,1 @@
+trap: command(): 'tool -serve' is itself a command -- the grammar is two deep, so its arguments are options (--fast), not commands

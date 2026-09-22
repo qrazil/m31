@@ -1,0 +1,118 @@
+usage: mktag [options] <src> [<dir>] [<rest>...]
+usage: mktag [options] <src> [<dir>] [<rest>...]
+
+write a tag file
+
+arguments:
+  <src>               the file to read
+  [<dir>]             where to put it (default .)
+  [<rest>...]
+
+options:
+       --help         show this help
+  --q, --quiet        say nothing on success
+       --dry-run
+  --o, --out PATH     where to write
+       --host HOST    (default 127.0.0.1)
+       --tag TAG...   tags to add
+  --w, --width WIDTH  wrap at this column (default 80)
+       --scale SCALE  (default 7.5)
+       --count COUNT
+true
+false
+Some(-x)
+Some(127.0.0.1)
+false
+a,b,c
+-5
+7
+true
+-
+out
+x,y
+true
+true
+true
+.
+false
+0
+0
+80
+7.5
+None
+true
+80
+error: missing <src> -- usage: mktag [options] <src> [<dir>] [<rest>...]
+ok
+error: '--' has no meaning here -- data is data because it does not start with a dash, so nothing has to be marked off
+error: '-h' would be a command here, and there is none called 'h' -- help is an option, so write '--help'
+error: '-help' would be a command here, and there is none called 'help' -- help is an option, so write '--help'
+error: mktag takes no commands, and got '-serve'
+error: '--h' is not an option -- help has one spelling, and it is '--help'
+error: unknown option '--x'
+error: '--qw': short options do not cluster -- write '--q --w'
+error: unknown option '--wid' -- did you mean '--width'?
+error: unknown option '--dryrun' -- did you mean '--dry-run'?
+error: unknown option '--zzz'
+error: '--quiet' is a flag and takes no value -- you wrote '--quiet=yes'
+error: '--quiet' was given more than once
+error: '--tag' needs at least one value -- leaving it out is how an empty list is spelled
+error: '--tag' was given more than once -- it already takes every value up to the next dash, so write them together: '--tag a b c'
+error: '--out' needs a value and is the last argument
+error: '--out' needs a value, and '--q' starts with a dash -- write '--out=--q' if that is the value you meant
+error: '--o' was given more than once and takes a single value
+error: '--width' needs a whole number, and got 'wide'
+error: '--scale' needs a number, and got 'big'
+error: '--=x' is not an option -- a long option needs a name after the dashes
+usage: orogit [options] -<command> [...]
+
+a git server
+
+commands:
+  -a, -addrepo          create a bare repository
+      -grant            give a user access
+      -proxies          trusted proxies
+      -list             list repositories
+
+options:
+       --help           show this help
+       --config CONFIG  the config file
+Some(/etc/g.conf)
+addrepo site true
+grant site alice write
+proxies 1.2.3.4 10.0.0.1
+addrepo blog false
+list
+usage: orogit -grant <repo> <user> [<level>]
+
+give a user access
+
+arguments:
+  <repo>
+  <user>
+  [<level>]    (default read)
+
+options:
+       --help  show this help
+usage: orogit -addrepo [options] <name>
+
+create a bare repository
+
+arguments:
+  <name>
+
+options:
+       --help    show this help
+       --public  readable without a login
+error: orogit needs a command -- one of -addrepo, -grant, -proxies, -list
+error: orogit needs a command -- one of -addrepo, -grant, -proxies, -list
+error: 'addrepo' is a command, so it is written with a dash: '-addrepo'
+error: unknown command '-addrep' -- did you mean '-addrepo'?
+error: unknown command '-x' -- one of -addrepo, -grant, -proxies, -list
+error: unknown command '-repo' -- one of -addrepo, -grant, -proxies, -list
+error: 'help' is an option here, not a command -- write '--help' (or 'orogit -list -<command> --help' for one command's)
+error: orogit -list takes no arguments of its own, and got 'extra'
+error: missing <user> -- usage: orogit -grant <repo> <user> [<level>]
+error: unexpected argument 'd' -- usage: orogit -grant <repo> <user> [<level>]
+error: '--set' needs at least one value -- leaving it out is how an empty list is spelled
+error: unknown option '--config'

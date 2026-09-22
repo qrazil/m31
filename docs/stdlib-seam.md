@@ -249,3 +249,30 @@ blocks the compiler as surely as it blocks `io`. The path is Go's:
 3. The Rust compiler kept only as the bootstrap, the way Go 1.5 required Go
    1.4 to build -- and eventually a native backend so the C compiler is no
    longer needed either, which is where Go's own toolchain ended up.
+
+---
+
+## 6. The process primitives
+
+`os`, `date`, `random` and `args` added one marked section to the runtime,
+"process primitives", and it holds only facts the operating system owns:
+
+| prim | answers |
+|---|---|
+| `__args(List<str> out)` | pushes every `argv[i]`, `argv[0]` first (the emitted `main` hands argc/argv to `rt_args_init`) |
+| `__env(str name, List<str> out)` | 1 and pushes the value, or 0 if unset |
+| `__exit(int code)` | flushes stdout, then `exit` -- the 0..255 check is in `lib/os.src` |
+| `__clock(List<int> out)` | pushes seconds and nanoseconds from ONE `CLOCK_REALTIME` reading |
+| `__entropy(int n, List<int> out)` | pushes n octets from `getentropy`; 0, or an errno |
+| `__panic(str msg)` | traps with the library's own message |
+
+`__panic` is the one that is not an OS fact, and it is here because library
+source otherwise has no way to say "this is a bug in the caller": the
+language traps on an index out of range, and a library's own preconditions
+(`random.integer(3, 1)`, declaring `--help` on an `args.Parser`, a timestamp
+outside `date`'s years) deserve the same treatment rather than a `Result`
+that docs/errors-decision.md says a caller's bug must not get.
+
+Everything above them is source: argv[0]'s inclusion, what unset means, the
+calendar, rejection sampling, PCG on 16-bit limbs until bitwise operators
+land, and the whole of `args`.

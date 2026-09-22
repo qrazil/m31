@@ -1,0 +1,8 @@
+import args;
+
+// The grammar is two deep by construction: a command's parser cannot have
+// commands of its own. That is a mistake in the program, not on the command
+// line, so it traps at declaration rather than becoming a usage error.
+args.Parser p = args.Parser("tool");
+args.Parser serve = p.command("serve", "run the server");
+serve.command("fast", "a command inside a command");
