@@ -1,0 +1,29 @@
+// Through an interface the compiler cannot see what a value is, so it cannot
+// refuse `const Named c = n;` -- the runtime does. The snapshot would have
+// deep-copied the shared Res, and the copy's destructor would release the
+// resource a second time; rt_snapshot checks every object it would copy or
+// freeze first, and traps naming the type (docs/destructors-decision.md).
+
+interface Named {
+    str name();
+}
+
+type Res {
+    int id;
+}
+
+str Res.name() {
+    return "res";
+}
+
+void Res.drop() {
+    print("release " + id.to_str());
+}
+
+void run() {
+    Named n = Res(1);
+    const Named c = n;
+    print(c.name());
+}
+
+run();

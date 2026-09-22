@@ -57,7 +57,7 @@ void rc_dec(Obj *o) {
     }
 }
 
-const TypeInfo rt_str_type = { NULL, NULL, NULL, NULL };
+const TypeInfo rt_str_type = { NULL, NULL, NULL, NULL, NULL };
 
 Obj *rt_alloc_immortal(size_t size, const TypeInfo *ty) {
     Obj *o = malloc(size);
@@ -538,10 +538,10 @@ static void lst_walk_refs(Obj *o, VisitFn visit, void *ctx) {
     }
 }
 
-const TypeInfo rt_arr_val_type = { NULL, NULL, NULL, NULL };
-const TypeInfo rt_arr_ref_type = { arr_drop_refs, NULL, arr_walk_refs, NULL };
-const TypeInfo rt_lst_val_type = { lst_drop_vals, NULL, NULL, NULL };
-const TypeInfo rt_lst_ref_type = { lst_drop_refs, NULL, lst_walk_refs, NULL };
+const TypeInfo rt_arr_val_type = { NULL, NULL, NULL, NULL, NULL };
+const TypeInfo rt_arr_ref_type = { arr_drop_refs, NULL, arr_walk_refs, NULL, NULL };
+const TypeInfo rt_lst_val_type = { lst_drop_vals, NULL, NULL, NULL, NULL };
+const TypeInfo rt_lst_ref_type = { lst_drop_refs, NULL, lst_walk_refs, NULL, NULL };
 
 
 /* Bytes for `n` slots plus a `head` header, trapping rather than wrapping.
@@ -914,7 +914,7 @@ static void bytes_drop(Obj *o) {
 
 /* No walk: a byte is not a reference, so a bytes is a leaf at a thread
  * boundary and rt_check_unique answers it from the count alone. */
-const TypeInfo rt_bytes_type = { bytes_drop, NULL, NULL, NULL };
+const TypeInfo rt_bytes_type = { bytes_drop, NULL, NULL, NULL, NULL };
 
 /* A value going INTO a bytes. Truncating 256 to 0 would be a silent wrong
  * answer in exactly the code -- codecs, checksums -- least able to notice. */
@@ -1249,7 +1249,7 @@ static void map_walk(Obj *o, VisitFn visit, void *ctx) {
     }
 }
 
-const TypeInfo rt_map_type = { map_drop, NULL, map_walk, NULL };
+const TypeInfo rt_map_type = { map_drop, NULL, map_walk, NULL, NULL };
 
 static uint64_t hash_int(int64_t x) {
     /* splitmix64's finaliser: cheap and mixes the low bits, which matters
@@ -1501,7 +1501,7 @@ static void chan_drop(Obj *o) {
     free(c->buf);
 }
 
-static const TypeInfo rt_chan_type = { chan_drop, NULL, NULL, NULL };
+static const TypeInfo rt_chan_type = { chan_drop, NULL, NULL, NULL, NULL };
 
 Chan *rt_chan_new(int64_t capacity) {
     if (capacity < 1) rt_trap("channel capacity must be at least 1");
@@ -1928,9 +1928,39 @@ static Obj *copy_obj(CopyMap *m, Obj *o) {
     rt_trap("internal: a value of this type cannot be copied for a const");
 }
 
+/* A value that owns a resource -- its type declares a destructor -- can be
+ * neither frozen nor copied (docs/destructors-decision.md):
+ *
+ *   - a copy would own the same resource, and whichever of the two died
+ *     first would release it under the other: a File's copy closes the
+ *     descriptor, and the original's later writes land in whatever file
+ *     reuses the number;
+ *   - a frozen one would be half usable, in a way that depends on how its
+ *     type happens to be written (a File that stores its read position in a
+ *     field could be written but not read or closed), and its destructor
+ *     would be the one change a constant allows.
+ *
+ * So a const may not hold one at all, shared or fresh. The compiler refuses
+ * every binding whose static type can hold one; this is the backstop for a
+ * value it cannot see into -- an interface, or a collection of them. It
+ * runs over the whole unfrozen graph BEFORE anything is frozen or copied,
+ * so a refused binding changes nothing (it traps anyway). Frozen objects
+ * are skipped by the walk and need no check: nothing frozen owns a
+ * resource, by this very rule. */
+static void refuse_resource(const Obj *o) {
+    if (o->ty == NULL || o->ty->resource == NULL) return;
+    char msg[320];
+    snprintf(msg, sizeof msg,
+             "a const cannot hold a value of type `%s`: it owns a resource (it has a "
+             "destructor), which a constant can neither freeze nor copy; bind it without `const`",
+             o->ty->resource);
+    rt_trap(msg);
+}
+
 Obj *rt_snapshot(Obj *o) {
     if ((o->rc & RC_FROZEN) != 0 || o->ty == &rt_str_type) return o;
     if (o->ty == NULL || o->ty->walk == NULL) {
+        refuse_resource(o);
         if (o->rc == 1) {
             o->rc |= RC_FROZEN;
             return o;
@@ -1938,6 +1968,9 @@ Obj *rt_snapshot(Obj *o) {
     } else {
         Reach r = { NULL, NULL, NULL, 0, 0, 0, 0, true };
         bool private = reach_private(&r, o);
+        for (int64_t i = 0; i < r.cap; i++) {
+            if (r.keys[i] != NULL) refuse_resource(r.keys[i]);
+        }
         if (private) {
             for (int64_t i = 0; i < r.cap; i++) {
                 if (r.keys[i] != NULL) r.keys[i]->rc |= RC_FROZEN;

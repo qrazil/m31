@@ -313,6 +313,80 @@ impl Lowerer {
         self.is_ref(ty) && self.underlying(ty) != Ty::Str
     }
 
+    /// Refuse a `const` local of a type whose values can own a resource.
+    ///
+    /// A resource is what a destructor releases, and a value that owns one
+    /// can be neither copied nor frozen (docs/destructors-decision.md): a
+    /// snapshot's copy would release the resource a second time, under the
+    /// original, and a frozen one would be half usable and its destructor
+    /// would still change it. So a `const` may not hold one at all, even a
+    /// fresh one that would be frozen in place rather than copied -- one
+    /// rule, not one that depends on whether the value happens to be shared
+    /// at that line. Refused here wherever the type says so; through an
+    /// interface the compiler cannot see, and `rt_snapshot` traps instead.
+    pub(super) fn refuse_const_resource(&self, ty: Ty, span: Span) -> Result<(), Diag> {
+        let Some(owner) = self.resource_in(ty) else {
+            return Ok(());
+        };
+        let top = self.tyname(ty);
+        let owner = self.show_name(&self.typedefs[owner as usize].name);
+        let why = if owner == top {
+            "it owns a resource (it has a destructor)".to_string()
+        } else {
+            format!("it can hold `{owner}`, which owns a resource (it has a destructor)")
+        };
+        Err(Diag::new(
+            span,
+            format!(
+                "`const` cannot hold `{top}`: {why}; a constant can neither freeze a \
+                 resource nor copy one, so bind it without `const`"
+            ),
+        ))
+    }
+
+    /// Whether the type declares a destructor. Asked of the signatures
+    /// rather than `TypeDef::destructor`, which is only filled in after
+    /// every body is lowered, beside the vtables.
+    pub(super) fn has_destructor(&self, tid: u32) -> bool {
+        let name = &self.typedefs[tid as usize].name;
+        self.sigs
+            .contains_key(&format!("{name}.{}", super::DESTRUCTOR))
+    }
+
+    /// The first type with a destructor that a value of type `ty` can
+    /// reach through its fields, variant payloads and elements -- a type
+    /// "owns a resource" if it has a destructor or can hold one that does.
+    /// An interface answers no: what implements it is not known here, which
+    /// is why the runtime checks too. So does a channel: it is immortal, a
+    /// snapshot never walks into it.
+    pub(super) fn resource_in(&self, ty: Ty) -> Option<u32> {
+        let mut seen = vec![false; self.typedefs.len()];
+        self.resource_walk(ty, &mut seen)
+    }
+
+    fn resource_walk(&self, ty: Ty, seen: &mut [bool]) -> Option<u32> {
+        let tid = self.tdef_of(self.underlying(ty))?;
+        // Types are recursive (a list node holds a node), so each is looked
+        // at once.
+        if std::mem::replace(&mut seen[tid as usize], true) {
+            return None;
+        }
+        let td = &self.typedefs[tid as usize];
+        if td.is_interface || td.name.starts_with("Chan$") {
+            return None;
+        }
+        if self.has_destructor(tid) {
+            return Some(tid);
+        }
+        // A builtin collection's element (key, value) types are its
+        // "fields" here; a struct's fields include an embedded value.
+        let fields = self.field_surface[tid as usize].iter();
+        let payloads = self.variant_surface[tid as usize].iter().flatten();
+        fields
+            .chain(payloads)
+            .find_map(|t| self.resource_walk(*t, seen))
+    }
+
     fn intern_str(&mut self, s: &str) -> u32 {
         match self.strings.iter().position(|x| x == s) {
             Some(i) => i as u32,

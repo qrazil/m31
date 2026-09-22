@@ -2309,6 +2309,7 @@ impl Lowerer {
                 vtable: Vec::new(),
                 // Filled in once every method is known, beside the vtable.
                 destructor: None,
+                resource: None,
             });
             self.distinct_base.push(t.distinct_base);
             self.iface_methods.push(t.methods.clone());
@@ -2542,6 +2543,11 @@ impl Lowerer {
             let dkey = format!("{tname}.{DESTRUCTOR}");
             if self.sigs.contains_key(&dkey) {
                 self.typedefs[i].destructor = Some(dkey);
+                // Spelled as the entry file would spell it: bare for its
+                // own types, `io.File` for an imported one.
+                let saved = std::mem::replace(&mut self.cur_module, p.module.clone());
+                self.typedefs[i].resource = Some(self.show_name(&tname));
+                self.cur_module = saved;
             }
         }
 
@@ -3492,6 +3498,9 @@ impl Lowerer {
                 }
                 self.check_shadow(name, *span)?;
                 let snapshot = *is_const && self.const_snapshots(*ty);
+                if snapshot {
+                    self.refuse_const_resource(*ty, *span)?;
+                }
                 // The local must hold a +1. A borrowed source needs one added;
                 // an owned temp is handed straight over, so drop it from the
                 // pending list rather than releasing it.
@@ -7328,6 +7337,26 @@ impl Lowerer {
                 return Err(Diag::new(
                     args.pos[0].span(),
                     format!("`{}` cannot be cloned", self.tyname(v.ty)),
+                ));
+            }
+            // A value that owns a resource cannot be copied
+            // (docs/destructors-decision.md): the copy would hold the same
+            // descriptor, handle or slot, and whichever died first would
+            // release it under the other. Only the type's OWN destructor
+            // matters, not one it can reach: the clone is shallow, so a
+            // `Log` holding an `io.File` clones into a second `Log` sharing
+            // that one File, which is closed once, when the last goes.
+            // No run-time check is needed behind this one: an interface
+            // cannot be cloned at all, and a generic is concrete by here.
+            if self.has_destructor(tid) {
+                let t = self.tyname(v.ty);
+                return Err(Diag::new(
+                    args.pos[0].span(),
+                    format!(
+                        "`{t}` cannot be cloned: it owns a resource (it has a destructor), and \
+                         a copy would release it a second time; share the reference \
+                         instead (`=` aliases it), or give `{t}` a method that makes a real second resource"
+                    ),
                 ));
             }
 

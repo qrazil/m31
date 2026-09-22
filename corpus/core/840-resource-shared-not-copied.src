@@ -1,0 +1,62 @@
+import io;
+import fs;
+
+// A value that owns a resource is never copied: a const may not hold one and
+// `clone` refuses one (corpus/errors/840-848), so a second name for a File is
+// always the SAME File, and its descriptor is closed exactly once, when the
+// last name goes. Observed from outside, as in corpus/core/774: the entries
+// of /proc/self/fd, relative to where the program started.
+
+int open_fds() {
+    match (fs.listdir("/proc/self/fd")) {
+        case Ok(List<str> names): {
+            return names.size();
+        }
+        case Err(io.Error e): {
+            trap("cannot list /proc/self/fd: " + e.to_str());
+        }
+    }
+}
+
+int base = open_fds();
+
+// What `const io.File g = f;` used to do here was copy the File, and the
+// copy's destructor closed f's descriptor on the way out. A plain binding is
+// a second reference: nothing is closed when it goes.
+void look(io.File f) {
+    io.File g = f;
+}
+
+// A type that holds a File, without a destructor of its own, CAN be cloned:
+// the clone is shallow, so both Logs share the one File.
+type Log {
+    List<str> tags;
+    io.File out;
+}
+
+Result<int, io.Error> run(int base) {
+    io.File a = io.open("/dev/null", mode: io.Mode.Write)?;
+    look(a);
+    print(open_fds() - base);                   // 1: a is still open
+    io.File b = io.open("/dev/null", mode: io.Mode.Write)?;
+    print(open_fds() - base);                   // 2: b did not reuse a's number
+    print(a.write("to a\n".to_bytes())?);       // 5
+    print(b.write("to b\n".to_bytes())?);       // 5
+
+    Log one = Log(["x"], io.open("/dev/zero")?);
+    Log two = clone(one);
+    two.tags.push("y");                         // the tag list is shared too
+    print(one.tags.size());                     // 2
+    print(open_fds() - base);                   // 3: one File between them
+    return Result<int, io.Error>.Ok(0);
+}
+
+match (run(base)) {
+    case Ok(int z): {
+        print("ok");
+    }
+    case Err(io.Error e): {
+        print("failed: " + e.to_str());
+    }
+}
+print(open_fds() - base);                       // 0: each closed once

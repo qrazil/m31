@@ -31,6 +31,7 @@ error with `?` did not, and could not without giving up `?`.
 | **Resurrection** | Checked at run time: the count must be back to exactly 1 when it returns, else a trap |
 | **Trap inside** | Aborts, as every trap does |
 | **Cycles** | Never freed, so never destroyed -- the language's existing cycle limitation |
+| **Copies** | A value that owns a resource is never copied or frozen: `clone` of a type with a destructor is refused, and a `const` cannot hold one (see "A resource cannot be copied") |
 | **Exit** | No guarantee for an object still alive when the program ends; in practice the top level's locals are released at the end of the program and do run |
 
 ## Why destructors and not `defer`
@@ -142,6 +143,132 @@ emits exactly that `rc_inc`/`rc_dec` pair.
 
 The cost is two stores and a compare per destroyed object of a type that
 declares a destructor, and nothing for any other type.
+
+## A resource cannot be copied
+
+Decided **2026-09-22**, after an adversarial review found three bugs where
+destructors met `const` (docs/const-decision.md) and `clone`. Implemented in
+`src/lower/consts.rs` (`refuse_const_resource`, `resource_in`), the `clone`
+path in `src/lower.rs`, `rt_snapshot` in `runtime/rt.c`, and a `resource`
+name in every `TypeInfo`. Tests corpus/core/840-842, corpus/errors/840-848,
+corpus/traps/840-843.
+
+### What went wrong
+
+  1. **Double release.** A `const` snapshot of a shared value is a deep copy.
+     `void look(io.File f) { const io.File g = f; }` copied the File, the
+     copy died at the end of `look`, and its destructor closed the caller's
+     descriptor; the caller's next `open` got the same number back, and
+     writes meant for the first file landed in the second. The same with a
+     user destructor (`Res r = Res(8); const Res c = r;` printed "release 8"
+     twice), with a File inside a fresh value whose other parts were shared
+     (`const Log log = Log(tags, io.open(..)?);` -- the Log was copied, and
+     releasing the original closed the copy's descriptor: EBADF), and with
+     `clone(f)` on a File, a shallow copy of its fields that included the
+     descriptor number.
+  2. **Unbounded recursion.** `void log(R r) { const R seen = r; .. }` called
+     from `R.drop` as `log(this)`: inside a destructor the count is 1 plus the
+     argument's retain, so the const copied `this`; the copy died and ran its
+     destructor, which called `log` on the copy, and so on until the stack
+     overflowed. `describe(this)` is exactly what this record calls the
+     natural way to log a dying object.
+  3. **A frozen object's destructor.** The drop function sets the count to 1,
+     which also clears the frozen bit, so a destructor on a frozen object
+     could write its own fields -- but everything it reached was frozen with
+     it, so `void Lease.drop() { p.free.push(slot); }` on a `const Lease`
+     trapped at the end of the scope.
+
+All three are the same mistake: an object that owns a resource treated as
+plain data that can be duplicated or frozen.
+
+### The rule
+
+**A value that owns a resource can be neither copied nor frozen.** A type
+*owns a resource* if it has a destructor, or can hold a value whose type has
+one -- through a field (an embedded one included), a collection's element,
+key or value, or an enum variant's payload. Rust's parallel: a `Drop` type is
+never `Copy`, and is `Clone` only if it says how.
+
+  - **`clone(x)` of a type with a destructor is a compile-time error.** It
+    would duplicate the resource. The message says to share the reference
+    instead (`=` aliases) or give the type a method that makes a real second
+    resource (a `dup()` that opens the file again). Only the type's *own*
+    destructor matters here, not one it can reach: `clone` is shallow, so a
+    clone of a `Log` holding a `File` is a second `Log` sharing that one
+    `File`, closed once, when the last reference goes (corpus/core/840). No
+    run-time check backs this up, because none is needed: an interface
+    cannot be cloned at all, and a generic is concrete by the time it is
+    lowered.
+  - **A `const` cannot hold a value that owns a resource** -- shared *or
+    fresh*. At compile time, whenever the declared type (after
+    monomorphisation, so `const T c = v;` in a generic is checked per
+    instantiation) can hold one. At run time, as the backstop for what the
+    type cannot show -- an interface, or a collection of them --
+    `rt_snapshot` walks the whole unfrozen graph and traps, naming the type,
+    before it freezes or copies anything:
+
+        trap: a const cannot hold a value of type `Res`: it owns a resource (it has a destructor), which a constant can neither freeze nor copy; bind it without `const`
+
+    The runtime knows a type owns a resource from a new last field of
+    `TypeInfo`, `resource`: the type's name as the program spells it, or
+    NULL. One field serves as both the flag and the message. Only the
+    object's *own* type is checked; the walk reaches every object a
+    transitive owner could hold, so it finds the one with the destructor
+    wherever it is.
+
+### Why a fresh value is refused too
+
+The first draft of this rule refused a const at compile time only when the
+value was not provably fresh, and would have frozen a fresh one in place --
+the snapshot needs no copy then, so nothing is duplicated. Refused anyway,
+for three reasons:
+
+  - **A frozen resource is half usable, in a way that depends on how its
+    type happens to be written.** A frozen `io.File` can be written -- as it
+    happens, `File.write` stores no field -- but `read` traps (it moves the
+    buffer position, a field), and so does `close()` (it sets `live`). A
+    user of `const Log log = ..` would find `log.out.write(..)` working and
+    `log.out.close()` trapping, and the line between them is an
+    implementation detail of lib/io.src.
+  - **The destructor would be the one change a constant allows.** Releasing
+    a resource changes the object (a File marks itself closed) and the world
+    (the descriptor goes). Letting it run on a frozen object means either
+    un-freezing the object for the call (what the drop function did,
+    accidentally) or freezing its neighbours so that it traps (bug 3).
+    Neither is "the value never changes".
+  - **One rule is simpler than two.** Whether a value is fresh at a line is
+    a run-time fact the programmer does not see -- `const` exists precisely
+    so that they need not care (docs/const-decision.md). "A const of a
+    `File` works if nobody else holds it" would be exactly the kind of rule
+    that decision threw out.
+
+What a `const` of a resource would have bought -- "this name is never
+rebound" -- is not what `const` means in this language; it means the value
+never changes, deeply. The spelling for a resource is a plain binding.
+
+The alternative for bug 3 on its own -- let a frozen object's destructor
+write its own fields, keep its neighbours frozen, and document "do not
+`const` a Lease" -- was considered and is subsumed: under this rule a Lease
+cannot be `const`, so the documentation would describe a case that cannot
+arise.
+
+### What a destructor may do, restated
+
+A destructor never runs on a frozen object: nothing that has one can be
+frozen (a module constant is immortal and never destroyed, and cannot be a
+user type anyway). So it may change its own fields, as any method may, and
+change any object it reaches that is not itself a constant. A `Lease` gives
+its slot back to its pool (corpus/core/842); if the pool itself were a
+`const`, the push would trap, correctly -- a constant pool cannot take a
+slot back.
+
+### Bug 2, without `const`
+
+`void describe(R r) { R seen = r; print(..); }` called from `R.drop` as
+`describe(this)` works and does not recurse: a plain binding is a second
+reference to the same object, retained and released in a pair while the
+drop function holds the count at 1 (corpus/core/841). Only `const` copied,
+and `const` of an `R` is now refused (corpus/errors/844).
 
 ## Traps and threads
 

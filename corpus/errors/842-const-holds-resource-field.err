@@ -1,0 +1,4 @@
+corpus/errors/842-const-holds-resource-field.src:13:5: `const` cannot hold `Log`: it can hold `io.File`, which owns a resource (it has a destructor); a constant can neither freeze a resource nor copy one, so bind it without `const`
+   |
+13 |     const Log log = Log(tags, io.open("/dev/null", mode: io.Mode.Write)?);
+   |     ^

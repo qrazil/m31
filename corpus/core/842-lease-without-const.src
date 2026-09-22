@@ -1,0 +1,61 @@
+// What a destructor may do, and why no destructor runs on a frozen object.
+//
+// A Lease gives its slot back to its pool when it dies. As a `const` it would
+// have been frozen, and so would the pool it reaches, so that the destructor
+// trapped the moment it touched the pool. A const cannot hold a value that
+// owns a resource (corpus/errors/846), so every object with a destructor is
+// mutable, and the destructor may change its own fields and anything it
+// reaches that is not itself a constant. The spelling is a plain binding.
+//
+// Types that own no resource are untouched by the rule: the Pool can still
+// be snapshotted, and a const of an interface type is still fine when what
+// it holds has no destructor -- the run-time check (corpus/traps/840-842)
+// only refuses the ones that do.
+
+type Pool {
+    List<int> free;
+}
+
+type Lease {
+    Pool p;
+    int slot;
+}
+
+void Lease.drop() {
+    p.free.push(slot);
+    slot = -1;
+}
+
+interface Named {
+    str name();
+}
+
+type Plain {
+    str n;
+}
+
+str Plain.name() {
+    return n;
+}
+
+void run() {
+    Pool pool = Pool([]);
+    if (true) {
+        Lease l = Lease(pool, 3);
+        print(pool.free.size());    // 0: still leased
+    }
+    print(pool.free.size());        // 1: given back
+    print(pool.free[0]);            // 3
+
+    const Pool snap = pool;         // a copy: pool is still held by `pool`
+    Lease l2 = Lease(pool, 4);
+    l2 = Lease(pool, 5);            // the first lease dies here
+    print(pool.free.size());        // 2
+    print(snap.free.size());        // 1: the snapshot did not change
+
+    const Named c = Plain("plain");
+    print(c.name());
+}
+
+run();
+print("after");

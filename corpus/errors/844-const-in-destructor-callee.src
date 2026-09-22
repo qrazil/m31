@@ -1,0 +1,16 @@
+// The pattern that used to recurse without end: inside `drop` the count is
+// above 1, so the const copied `this`; the copy died and ran `drop`, which
+// copied again. A const of a type with a destructor is now refused, and the
+// same function without `const` works (corpus/core/841).
+type R {
+    int id;
+}
+
+void log(R r) {
+    const R seen = r;
+    print(seen.id);
+}
+
+void R.drop() {
+    log(this);
+}

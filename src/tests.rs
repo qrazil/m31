@@ -1410,8 +1410,9 @@ fn a_destructor_alone_earns_a_drop_function_but_no_walk() {
         .find(|l| l.contains(&format!("TypeInfo ti_T{i} ")))
         .unwrap_or_else(|| panic!("no TypeInfo for T{i}:\n{c}"));
     assert!(
-        ti.ends_with(&format!("{{ drop_T{i}, NULL, NULL, copy_T{i} }};")),
-        "drop set, walk NULL, copy for a const snapshot: {ti}"
+        ti.ends_with(&format!("{{ drop_T{i}, NULL, NULL, copy_T{i}, \"G\" }};")),
+        "drop set, walk NULL, copy for a const snapshot, and the name the \
+         runtime reports when a const meets a value owning a resource: {ti}"
     );
     assert!(
         c.contains("o->rc = 1;"),

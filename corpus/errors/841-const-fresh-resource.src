@@ -1,0 +1,17 @@
+// Refused even when the value is fresh and would be frozen in place rather
+// than copied: a frozen resource would be half usable and its destructor
+// would still change it, and one rule is simpler than one that depends on
+// whether the value happens to be shared at that line.
+type Res {
+    int id;
+}
+
+void Res.drop() {
+    print("release " + id.to_str());
+}
+
+void run() {
+    const Res c = Res(8);
+}
+
+run();

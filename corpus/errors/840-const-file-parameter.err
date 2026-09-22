@@ -1,0 +1,4 @@
+corpus/errors/840-const-file-parameter.src:9:5: `const` cannot hold `io.File`: it owns a resource (it has a destructor); a constant can neither freeze a resource nor copy one, so bind it without `const`
+  |
+9 |     const io.File g = f;
+  |     ^

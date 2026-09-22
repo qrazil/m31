@@ -1,0 +1,23 @@
+// A frozen object's destructor could write its own fields but trapped as
+// soon as it touched a neighbour, which the freeze had made constant too --
+// here, giving the slot back to its pool. A const cannot hold a value that
+// owns a resource at all, so no destructor ever runs on a frozen object.
+// The spelling that works is a plain binding (corpus/core/842).
+type Pool {
+    List<int> free;
+}
+
+type Lease {
+    Pool p;
+    int slot;
+}
+
+void Lease.drop() {
+    p.free.push(slot);
+}
+
+void run() {
+    const Lease l = Lease(Pool([]), 3);
+}
+
+run();

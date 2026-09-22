@@ -1,0 +1,28 @@
+// A fresh value is refused as well, not frozen: the same rule as at compile
+// time (corpus/errors/841), whether or not a copy would have been needed.
+
+interface Named {
+    str name();
+}
+
+type Res {
+    int id;
+}
+
+str Res.name() {
+    return "res";
+}
+
+void Res.drop() {
+}
+
+Named make() {
+    return Res(2);
+}
+
+void run() {
+    const Named c = make();
+    print(c.name());
+}
+
+run();

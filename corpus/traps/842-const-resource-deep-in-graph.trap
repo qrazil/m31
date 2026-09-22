@@ -1,0 +1,1 @@
+trap: a const cannot hold a value of type `io.File`: it owns a resource (it has a destructor), which a constant can neither freeze nor copy; bind it without `const`

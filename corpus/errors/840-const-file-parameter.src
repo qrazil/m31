@@ -1,0 +1,10 @@
+import io;
+
+// A `const` of a shared File would snapshot it -- a deep copy -- and the
+// copy's destructor would close the real descriptor when the copy died,
+// leaving the caller writing into whatever file reused the number. A value
+// that owns a resource cannot be copied, so the binding is refused
+// (docs/destructors-decision.md, "A resource cannot be copied").
+void look(io.File f) {
+    const io.File g = f;
+}

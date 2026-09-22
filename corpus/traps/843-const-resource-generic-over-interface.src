@@ -1,0 +1,25 @@
+// A generic is checked per instantiation (corpus/errors/845), but when the
+// type argument is an interface the instantiation says nothing about what
+// the value is: `keep<Named>` compiles, and the runtime refuses the Res.
+
+interface Named {
+    str name();
+}
+
+type Res {
+    int id;
+}
+
+str Res.name() {
+    return "res";
+}
+
+void Res.drop() {
+}
+
+void keep<T>(T v) {
+    const T c = v;
+}
+
+Named n = Res(3);
+keep(n);

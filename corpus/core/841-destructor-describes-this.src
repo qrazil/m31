@@ -1,0 +1,48 @@
+// A destructor may hand `this` to an ordinary function -- the natural way to
+// log a dying object (docs/destructors-decision.md) -- and that function may
+// bind it to a local of its own. A plain binding is a second reference to
+// the same object, retained and released in a pair while the count is held
+// at 1, so the object dies once. The same function with `const R seen = r;`
+// used to copy `this` on every call, and the copy's destructor did it
+// again, without end; it is now refused (corpus/errors/844).
+
+type R {
+    int id;
+}
+
+void describe(R r) {
+    R seen = r;
+    print("dropping " + seen.id.to_str());
+}
+
+void R.drop() {
+    describe(this);
+}
+
+type Res {
+    int id;
+}
+
+void Res.drop() {
+    print("release " + id.to_str());
+}
+
+type Box {
+    Res r;
+}
+
+void run() {
+    R r = R(1);
+    R alias = r;
+    print("made");
+
+    // A shared resource put in a second object is shared, not copied: one
+    // release, when both names are gone.
+    Res shared = Res(7);
+    Box b = Box(shared);
+    Res again = shared;
+    print("bound");
+}
+
+run();
+print("after");
