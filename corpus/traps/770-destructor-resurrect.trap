@@ -1,0 +1,1 @@
+trap: object resurrected in its destructor: `drop` stored `this` somewhere that outlives it

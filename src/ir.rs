@@ -178,6 +178,10 @@ pub struct TypeDef {
     /// depends on the tag -- so its drop and walk functions switch on it.
     pub variants: Vec<Variant>,
     pub is_enum: bool,
+    /// The IR name of the type's destructor (`File.drop`), if it declares
+    /// one. The drop function calls it before releasing any field, so the
+    /// destructor still sees a whole object (docs/destructors-decision.md).
+    pub destructor: Option<String>,
 }
 
 impl TypeDef {
@@ -188,6 +192,13 @@ impl TypeDef {
             return self.variants.iter().any(|v| v.payload.contains(&IrTy::Ref));
         }
         self.fields.iter().any(|(_, t)| *t == IrTy::Ref)
+    }
+
+    /// Whether the type needs a drop function at all: to release fields,
+    /// to run a destructor, or both. `needs_drop` alone decides the walk
+    /// function, which only cares about references.
+    pub fn has_drop_fn(&self) -> bool {
+        self.needs_drop() || self.destructor.is_some()
     }
 
     /// How many payload slots an enum's object needs: the widest variant.

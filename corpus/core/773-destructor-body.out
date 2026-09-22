@@ -1,0 +1,23 @@
+using alpha
+drop alpha (open)
+closing alpha
+after close alpha (closed)
+closing beta
+closed by hand
+drop beta (closed)
+after close beta (closed)
+journal j1 closing
+journal j1 closed
+  note gone: last entry of j1
+box emptied
+  note gone: boxed
+box emptied
+gamma delta
+drop delta (open)
+closing delta
+after close delta (closed)
+logged 7 dropping
+drop gamma (open)
+closing gamma
+after close gamma (closed)
+done

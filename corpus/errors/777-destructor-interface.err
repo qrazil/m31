@@ -1,0 +1,4 @@
+corpus/errors/777-destructor-interface.src:3:5: an interface cannot require `drop`: it is the name of a destructor, which is never called, so it cannot be dispatched to
+  |
+3 |     void drop();
+  |     ^

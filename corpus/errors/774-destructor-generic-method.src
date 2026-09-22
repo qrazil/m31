@@ -1,0 +1,8 @@
+// Nothing calls a destructor, so there is nowhere to infer a type
+// parameter of its own from. This one is refused although the type is never
+// used: the check runs on the program as written.
+type Res { str name; }
+
+void Res.drop<T>() {
+    print("dropped");
+}

@@ -1,0 +1,6 @@
+import res;
+
+// Refused as a destructor call, not as a call to a private method: the
+// reason it cannot be called has nothing to do with which module asks.
+res.Res r = res.Res("r");
+r.drop();

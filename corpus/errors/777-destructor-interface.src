@@ -1,0 +1,4 @@
+// An interface requiring `drop` would be a way to call a destructor.
+interface Closer {
+    void drop();
+}

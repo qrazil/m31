@@ -1,0 +1,7 @@
+// A destructor is never called by name, from anywhere, so `pub` would
+// export nothing.
+type Res { str name; }
+
+pub void Res.drop() {
+    print("dropped");
+}

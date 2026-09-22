@@ -122,9 +122,11 @@ pub enum Mode {
 /// forget -- Oro's rule. A write to standard output or standard error first
 /// flushes what `print` has buffered, so the two land in program order.
 ///
-/// **A `File` is not closed for you.** The language has no destructors, so
-/// a `File` dropped without `close()` keeps its descriptor until the
-/// program ends. Close on every path, including the error paths.
+/// **A `File` closes itself when its last reference goes** -- at the end of
+/// a scope, on a `return` or a `?` that leaves it, when it is reassigned --
+/// so no path leaks its descriptor. That close is silent: a writer that
+/// needs to know whether the close failed calls `close()` itself and looks
+/// at the result (docs/destructors-decision.md).
 ///
 /// Every field is private: a `File` is made by `open` or one of the standard
 /// stream functions, and its buffer is only ever moved by its own methods.
@@ -289,6 +291,15 @@ pub Result<int, Error> File.write(bytes b) {
 /// It is never retried on EINTR: on Linux the descriptor is already gone by
 /// then, and a retry could close one another thread has just been given.
 pub Result<bool, Error> File.close() {
+    return release();
+}
+
+// What `close()` and the destructor share, so the same rules hold for both:
+// a second close is a no-op, and the standard streams are marked closed
+// without their descriptors being released. A separate name because the
+// destructor cannot call `close()` bare -- that also names the channel
+// builtin, which the language refuses as ambiguous.
+Result<bool, Error> File.release() {
     if (!live) {
         return Result<bool, Error>.Ok(true);
     }
@@ -338,6 +349,13 @@ Result<int, Error> File.fill() {
         end = r;
         return Result<int, Error>.Ok(r);
     }
+}
+
+// The destructor: close whatever `close()` was not called on. Its error is
+// discarded because a destructor has nobody to hand one to; `close()` is how
+// a program sees it.
+void File.drop() {
+    Result<bool, Error> ignored = release();
 }
 
 /// The `Error` for a Linux errno number -- positive, as errno is written;

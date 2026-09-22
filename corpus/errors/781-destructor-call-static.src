@@ -1,0 +1,8 @@
+// Nor does the spelling of a static call.
+type Res { str name; }
+
+void Res.drop() {
+    print("dropped " + name);
+}
+
+Res.drop();

@@ -173,6 +173,7 @@ fn compile(entry: &str, mode: &str) -> Result<String, modules::Located> {
 fn finish(prog: ast::Program, mode: &str) -> Result<String, diag::Diag> {
     // Generics are erased before lowering, which is why the IR has never
     // needed to know about them. See src/mono.rs.
+    lower::check_destructor_decls(&prog)?;
     let prog = mono::Mono::run(prog)?;
     let module = lower::Lowerer::new().lower_program(&prog)?;
     Ok(match mode {

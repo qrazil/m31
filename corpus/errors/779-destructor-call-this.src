@@ -1,0 +1,12 @@
+// `this.drop()` is a call like any other, and refused like any other.
+type Res {
+    str name;
+}
+
+void Res.drop() {
+    print("dropped " + name);
+}
+
+void Res.reset() {
+    this.drop();
+}

@@ -54,13 +54,52 @@ pub fn emit(m: &Module) -> String {
         o.push('\n');
     }
 
-    // A drop function only exists for types that hold references; rc_dec
-    // checks for NULL, so types holding none pay a branch instead of a call.
+    // Function prototypes before the drop functions, which call a type's
+    // destructor, and before the TypeInfos, whose vtables name methods.
+    if !m.types.is_empty() {
+        for f in &m.funcs {
+            writeln!(o, "{};", signature(f)).unwrap();
+        }
+        o.push('\n');
+    }
+
+    // A drop function only exists for types that hold references or declare
+    // a destructor; rc_dec checks for NULL, so types with neither pay a
+    // branch instead of a call.
     for (i, t) in m.types.iter().enumerate() {
-        if t.is_interface || t.is_chan || t.is_distinct || !t.needs_drop() {
+        if t.is_interface || t.is_chan || t.is_distinct || !t.has_drop_fn() {
             continue;
         }
         writeln!(o, "static void drop_T{i}(Obj *o) {{").unwrap();
+        if let Some(d) = &t.destructor {
+            // The destructor runs FIRST, on a whole object: every field is
+            // still alive, so it can use them -- close a descriptor, flush a
+            // buffer -- and a field's own destructor runs only afterwards,
+            // when the field is released below.
+            //
+            // The count is 0 here. The destructor borrows `this` like any
+            // method, and its body may retain and release it (a local, an
+            // argument); at 0 that pair would reach zero a second time and
+            // free the object inside its own destructor. So it runs at 1 --
+            // the borrow it is given -- and must leave it at exactly 1. More
+            // means `this` was stored somewhere that outlives the call: a
+            // dead object brought back, whose memory is about to be freed
+            // under whoever holds it. That is a bug with no safe
+            // continuation, so it traps (docs/destructors-decision.md).
+            writeln!(o, "    o->rc = 1;").unwrap();
+            writeln!(o, "    {}(o);", c_name(d)).unwrap();
+            writeln!(
+                o,
+                "    if (o->rc != 1) rt_trap(\"object resurrected in its destructor: \
+                 `drop` stored `this` somewhere that outlives it\");"
+            )
+            .unwrap();
+            writeln!(o, "    o->rc = 0;").unwrap();
+        }
+        if !t.needs_drop() {
+            writeln!(o, "}}").unwrap();
+            continue;
+        }
         writeln!(o, "    T{i} *p = (T{i} *)o;").unwrap();
         if t.is_enum {
             emit_enum_slot_switch(&mut o, t, "rc_dec((Obj *)(intptr_t)p->p{k});");
@@ -73,7 +112,7 @@ pub fn emit(m: &Module) -> String {
         }
         writeln!(o, "}}").unwrap();
     }
-    if m.types.iter().any(TypeDef::needs_drop) {
+    if m.types.iter().any(TypeDef::has_drop_fn) {
         o.push('\n');
     }
 
@@ -110,20 +149,19 @@ pub fn emit(m: &Module) -> String {
     // One TypeInfo per concrete type: its drop function and its vtable. The
     // vtable has one slot per distinct interface method name in the program,
     // so a dispatch index is a compile-time constant.
-    if !m.types.is_empty() {
-        for f in &m.funcs {
-            writeln!(o, "{};", signature(f)).unwrap();
-        }
-        o.push('\n');
-    }
     for (i, t) in m.types.iter().enumerate() {
         if t.is_interface || t.is_chan || t.is_distinct {
             continue;
         }
-        let (drop, walk) = if t.needs_drop() {
-            (format!("drop_T{i}"), format!("walk_T{i}"))
+        let drop = if t.has_drop_fn() {
+            format!("drop_T{i}")
         } else {
-            ("NULL".to_string(), "NULL".to_string())
+            "NULL".to_string()
+        };
+        let walk = if t.needs_drop() {
+            format!("walk_T{i}")
+        } else {
+            "NULL".to_string()
         };
         if m.iface_slots.is_empty() {
             writeln!(

@@ -1,0 +1,10 @@
+// A destructor runs by itself, once. Calling it by hand would run it on a
+// live object, and again when that object dies.
+type Res { str name; }
+
+void Res.drop() {
+    print("dropped " + name);
+}
+
+Res r = Res("r");
+r.drop();

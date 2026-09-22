@@ -1,0 +1,7 @@
+// A destructor returns nothing, so it cannot return an error either. The
+// failure a program must see belongs in a `close()` that returns a Result.
+type Res { str name; }
+
+Result<bool, str> Res.drop() {
+    return Result<bool, str>.Ok(true);
+}

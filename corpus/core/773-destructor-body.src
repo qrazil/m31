@@ -1,0 +1,104 @@
+// What a destructor's body may do. `this` is borrowed, like any method's
+// receiver: it can be read, passed on, even bound to a local for the length
+// of the call -- the runtime gives it one reference for the duration, so a
+// retain and release pair inside cannot free it twice. It may call sibling
+// methods, write fields, and make objects that die inside it.
+
+type Conn {
+    str host;
+    bool open = true;
+}
+
+// The ordinary method a program calls to finish early; the destructor calls
+// it too, so it must be safe to call twice.
+void Conn.finish() {
+    if (open) {
+        open = false;
+        print("closing " + host);
+    }
+}
+
+str describe(Conn c) {
+    if (c.open) {
+        return c.host + " (open)";
+    }
+    return c.host + " (closed)";
+}
+
+void Conn.drop() {
+    print("drop " + describe(this));
+    Conn me = this;         // a retain now, a release when `me` goes
+    finish();
+    print("after close " + describe(me));
+}
+
+if (true) {
+    Conn a = Conn("alpha");
+    print("using " + a.host);
+}
+if (true) {
+    Conn b = Conn("beta");
+    b.finish();
+    print("closed by hand");
+}
+
+// A destructor making an object that dies inside it: the inner destructor
+// runs, completely, in the middle of the outer one.
+type Note {
+    str text;
+}
+
+void Note.drop() {
+    print("  note gone: " + text);
+}
+
+type Journal {
+    str title;
+}
+
+void Journal.drop() {
+    print("journal " + title + " closing");
+    Note last = Note("last entry of " + title);
+    print("journal " + title + " closed");
+}
+
+if (true) {
+    Journal j = Journal("j1");
+}
+
+// A generic type's destructor is instantiated with each instantiation.
+type Box<T> {
+    T value;
+}
+
+void Box<T>.drop() {
+    print("box emptied");
+}
+
+if (true) {
+    Box<int> bi = Box<int>(1);
+    Box<Note> bn = Box<Note>(Note("boxed"));
+}
+
+// Embedding does not promote a destructor: the embedded value is a field,
+// released with its owner, so its destructor runs once, after the outer
+// one's.
+type Logged {
+    Conn;
+    int id;
+}
+
+void Logged.drop() {
+    print("logged " + id.to_str() + " dropping");
+}
+
+type Plain {
+    Conn;
+}
+
+if (true) {
+    Logged l = Logged(Conn("gamma"), 7);
+    Plain p = Plain(Conn("delta"));
+    print(l.host + " " + p.host);
+}
+print("done");

@@ -670,9 +670,10 @@ pub Result<int, io.Error> copy(str src, str dst) {
         return Result<int, io.Error>.Err(io.Error.IsDirectory);
     }
     io.File r = io.open(src)?;
-    // No destructors and no `defer`: from here every path out closes what
-    // it opened by hand, which is why the copy loop is its own function --
-    // its `?` returns to here, where the closing happens.
+    // Both files would be closed by `io.File`'s destructor on any path out,
+    // but that close is silent, and the writer's close is where a delayed
+    // write failure shows. So the copy loop is its own function -- its `?`
+    // returns to here -- and the writer is closed by hand and checked.
     match (io.open(dst, mode: io.Mode.Write, perm: s.perm())) {
         case Ok(io.File w): {
             Result<int, io.Error> got = pump(r, w);

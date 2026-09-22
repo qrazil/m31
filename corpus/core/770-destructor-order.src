@@ -1,0 +1,48 @@
+// A destructor runs at the exact moment an object's count reaches zero, and
+// before its fields are released: the owner's destructor first, then each
+// field's as it is let go. Every line below says when it must appear.
+
+type Noisy {
+    str name;
+}
+
+void Noisy.drop() {
+    print("drop " + name);
+}
+
+type Pair {
+    Noisy left;
+    Noisy right;
+}
+
+// It still sees whole fields -- they are released only after it returns.
+void Pair.drop() {
+    print("drop pair of " + left.name + " and " + right.name);
+}
+
+// A block's locals die when the block ends, the last declared first.
+if (true) {
+    Noisy a = Noisy("a");
+    Noisy b = Noisy("b");
+    print("block ends");
+}
+print("after block");
+
+// Owner, then fields in declaration order.
+if (true) {
+    Pair p = Pair(Noisy("l"), Noisy("r"));
+    print("pair made");
+}
+print("after pair");
+
+// A second reference keeps the object alive; the last one lets it go.
+if (true) {
+    Noisy x = Noisy("shared");
+    Noisy y = x;
+    print("two names");
+}
+print("after shared");
+
+// A temporary nobody keeps dies at the end of its statement.
+print(Noisy("temp").name.size());
+print("after temp");

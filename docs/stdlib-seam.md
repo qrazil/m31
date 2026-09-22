@@ -465,8 +465,9 @@ and 2; the policy -- when to flush -- is in the library.
 The raw backend lists with `getdents64` on a descriptor; the C library
 lists with a `DIR *` that owns one, through `fdopendir` and `readdir`. An
 open/next/close triple would need the language to hold a handle whose
-meaning differs per backend and that leaks if not closed (there are no
-destructors). One call that writes every name into a caller's buffer, and
+meaning differs per backend and that leaked if not closed (there were no
+destructors then; docs/destructors-decision.md added them later, which
+removes the leak but not the per-backend handle). One call that writes every name into a caller's buffer, and
 says how big a buffer it needed if that one was too small, has no handle
 at all and returns byte-identical results from both backends, which
 `runtime/sys_test.c` checks.
