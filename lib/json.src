@@ -13,10 +13,11 @@
 //
 // Strings: every escape RFC 8259 defines, `\uXXXX` included, with a UTF-16
 // surrogate pair combined into the one character it spells and an unpaired
-// surrogate refused. A `\u` escape is encoded as UTF-8 into a `bytes`, which
-// holds any octet, so every code point an escape can spell is decoded. Raw
-// bytes in a string must be valid UTF-8, which the RFC requires; control
-// characters must be escaped.
+// surrogate refused; every code point an escape can spell is decoded. Control
+// characters must be escaped. RFC 8259 requires the text to be UTF-8, and
+// nothing here checks it: the text is a `str`, which is valid UTF-8 by
+// construction (reference §3). A document that arrives as octets is decoded
+// with `bytes.utf8()` -- or `io.read` -- before it gets here.
 //
 // `stringify` writes the compact form -- no incidental whitespace at all --
 // unless `indent` is positive, which gives one value per line, indented that
@@ -42,10 +43,10 @@
 //   keys SORTED (bytewise, which for UTF-8 is code point order) to make its
 //   output a function of the value. A repeated key in a document keeps the
 //   last value, as Oro and CPython do.
-// - Positions count bytes, not characters: `str` is bytes, and so is every
-//   other offset in the language.
-// - `stringify` returns a `Result`, because NaN, an infinity, a string that
-//   is not UTF-8 and a too-deep value have no JSON spelling. Oro raised.
+// - Positions count bytes, not characters: every offset in the language is a
+//   byte offset, and one always lands on a character boundary here.
+// - `stringify` returns a `Result`, because NaN, an infinity and a too-deep
+//   value have no JSON spelling. Oro raised.
 // - Integers past 64 bits are an error rather than a bignum (see above).
 
 /// A JSON value.
@@ -65,9 +66,6 @@ pub enum Error {
     Syntax(str, int);
     /// `stringify` met a NaN or an infinity, which JSON has no spelling for.
     NotFinite(float);
-    /// `stringify` met a string that is not valid UTF-8: the byte offset of
-    /// the first bad byte within that string.
-    NotUtf8(int);
     /// `stringify` went deeper than 10 000 levels -- a value that contains
     /// itself, or near enough.
     TooDeep;
@@ -85,9 +83,6 @@ pub str Error.to_str() {
                 return "nan is not JSON serializable";
             }
             return "Infinity is not JSON serializable";
-        }
-        case NotUtf8(int at): {
-            return "a string is not valid UTF-8 (byte " + at.to_str() + " of it), and JSON text must be";
         }
         case TooDeep: {
             return "maximum nesting depth (" + max_depth().to_str() + ") exceeded while writing";
@@ -275,18 +270,14 @@ Result<str, Error> string(Parser p) {
         int from = p.at;
         while (p.at < n) {
             int c = text.byte_at(p.at);
+            // Every byte that stops the run is ASCII, and UTF-8 never uses
+            // an ASCII byte inside a character, so the run ends on a
+            // character boundary and the substr below cannot cut one. The
+            // text needs no UTF-8 check: it is a `str`, so it is valid.
             if (c == 34 || c == 92 || c < 32) {
                 break;
             }
-            if (c < 128) {
-                p.at = p.at + 1;
-            } else {
-                int k = utf8_length(text, p.at);
-                if (k == 0) {
-                    return Result<str, Error>.Err(Error.Syntax("invalid UTF-8 in string", p.at));
-                }
-                p.at = p.at + k;
-            }
+            p.at = p.at + 1;
         }
         if (p.at > from) {
             parts.push(text.substr(from, p.at));
@@ -317,7 +308,10 @@ Result<str, Error> escape(Parser p) {
     int c = text.byte_at(p.at);
     if (c == 117) {
         int cp = unicode_escape(p)?;
-        return Result<str, Error>.Ok(utf8(cp));
+        // Never a surrogate and never past U+10FFFF -- `unicode_escape` has
+        // refused the one and cannot build the other -- so from_chars, which
+        // traps on both, never does here.
+        return Result<str, Error>.Ok(str.from_chars([cp]));
     }
     p.at = p.at + 1;
     if (c == 34) {
@@ -339,10 +333,10 @@ Result<str, Error> escape(Parser p) {
         return Result<str, Error>.Ok("\t");
     }
     if (c == 98) {
-        return Result<str, Error>.Ok(utf8(8));
+        return Result<str, Error>.Ok("\x08");
     }
     if (c == 102) {
-        return Result<str, Error>.Ok(utf8(12));
+        return Result<str, Error>.Ok("\x0c");
     }
     p.at = p.at - 1;
     return Result<str, Error>.Err(Error.Syntax("invalid escape '\\" + char_at(text, p.at) + "'", p.at));
@@ -402,32 +396,6 @@ Result<int, Error> hex4(Parser p) {
     }
     p.at = end;
     return Result<int, Error>.Ok(cp);
-}
-
-// Code point `cp` as UTF-8: 0xxxxxxx, 110xxxxx 10xxxxxx, 1110xxxx then two
-// 10xxxxxx, or 11110xxx then three.
-//
-// `cp` is never a surrogate and never past U+10FFFF -- `unicode_escape` has
-// refused the one and cannot build the other -- so the octets are always valid
-// UTF-8 and the `or` is never taken.
-str utf8(int cp) {
-    bytes out = [];
-    if (cp < 128) {
-        out.push(cp);
-    } else if (cp < 2048) {
-        out.push(192 | cp >> 6);
-        out.push(128 | cp & 63);
-    } else if (cp < 65536) {
-        out.push(224 | cp >> 12);
-        out.push(128 | cp >> 6 & 63);
-        out.push(128 | cp & 63);
-    } else {
-        out.push(240 | cp >> 18);
-        out.push(128 | cp >> 12 & 63);
-        out.push(128 | cp >> 6 & 63);
-        out.push(128 | cp & 63);
-    }
-    return out.utf8().or("");
 }
 
 // A number literal, with `p.at` on its first byte. The grammar is RFC 8259's
@@ -505,10 +473,21 @@ void skip_digits(Parser p) {
 }
 
 // Whether `w` is at `p.at`, stepping over it if so.
+//
+// Compared byte by byte rather than with substr: `end` is a byte count from
+// `p.at`, and in a document like `tru😀` it falls inside a character, where
+// substr traps. A mismatch there is a syntax error, not a bug.
 bool word(Parser p, str w) {
     int end = p.at + w.size();
-    if (end > p.text.size() || p.text.substr(p.at, end) != w) {
+    if (end > p.text.size()) {
         return false;
+    }
+    int i = 0;
+    while (i < w.size()) {
+        if (p.text.byte_at(p.at + i) != w.byte_at(i)) {
+            return false;
+        }
+        i = i + 1;
     }
     p.at = end;
     return true;
@@ -566,7 +545,7 @@ Result<int, Error> write(List<str> out, Value v, int indent) {
             Value item = Value.Null;
             if (job.object) {
                 str key = job.keys[job.at];
-                quote(out, key)?;
+                quote(out, key);
                 out.push(":");
                 if (indent > 0) {
                     out.push(" ");
@@ -610,7 +589,7 @@ Result<int, Error> write_one(List<str> out, List<Job> jobs, Value v, int level, 
             }
         }
         case Str(str s): {
-            quote(out, s)?;
+            quote(out, s);
         }
         case Array(List<Value> items): {
             if (items.size() == 0) {
@@ -644,21 +623,16 @@ void newline(List<str> out, int level, int indent) {
 }
 
 // `s` as a JSON string literal, quotes included.
-Result<int, Error> quote(List<str> out, str s) {
+void quote(List<str> out, str s) {
     out.push("\"");
     int n = s.size();
     int run = 0;
     int i = 0;
     while (i < n) {
         int c = s.byte_at(i);
-        if (c >= 128) {
-            int k = utf8_length(s, i);
-            if (k == 0) {
-                return Result<int, Error>.Err(Error.NotUtf8(i));
-            }
-            i = i + k;
-            continue;
-        }
+        // Non-ASCII is written through, a byte at a time: `s` is a `str`, so
+        // it is valid UTF-8 already, and the bytes that need escaping are
+        // all ASCII, so `run` and `i` only ever stop on a boundary.
         if (c >= 32 && c != 34 && c != 92) {
             i = i + 1;
             continue;
@@ -688,58 +662,9 @@ Result<int, Error> quote(List<str> out, str s) {
     }
     out.push(s.substr(run, n));
     out.push("\"");
-    return Result<int, Error>.Ok(0);
 }
 
 // --- bytes -------------------------------------------------------------------
-// The length of the valid UTF-8 sequence starting at `i`, or 0 if there is
-// none: no overlong forms, no surrogates, nothing past U+10FFFF.
-int utf8_length(str s, int i) {
-    int n = s.size();
-    int c = s.byte_at(i);
-    if (c < 128) {
-        return 1;
-    }
-    int k = 0;
-    int lo = 128;
-    int hi = 191;
-    if (c >= 194 && c <= 223) {
-        k = 2;
-    } else if (c >= 224 && c <= 239) {
-        k = 3;
-        if (c == 224) {
-            lo = 160;
-        } else if (c == 237) {
-            hi = 159;
-        }
-    } else if (c >= 240 && c <= 244) {
-        k = 4;
-        if (c == 240) {
-            lo = 144;
-        } else if (c == 244) {
-            hi = 143;
-        }
-    } else {
-        return 0;
-    }
-    if (i + k > n) {
-        return 0;
-    }
-    int b = s.byte_at(i + 1);
-    if (b < lo || b > hi) {
-        return 0;
-    }
-    int j = 2;
-    while (j < k) {
-        b = s.byte_at(i + j);
-        if (b < 128 || b > 191) {
-            return 0;
-        }
-        j = j + 1;
-    }
-    return k;
-}
-
 // How many bytes the character at `i` takes, by its lead byte alone, never
 // running past the end. For quoting text in a message, not for validating.
 int char_length(str s, int i) {

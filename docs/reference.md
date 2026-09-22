@@ -62,12 +62,10 @@ Anything else after a backslash is an error, including C's `\a` `\b` `\f`
 `"\x411"` is `A1`. `\u{}` refuses a surrogate and anything past `10FFFF`,
 which have no UTF-8 form.
 
-**A string literal is always valid UTF-8.** The source is, `\u{}` produces
-only scalar values, and `\x` stops at 7F — a lone byte from 80 up is not
-text. Whether a `str` may hold invalid UTF-8 is open (§3.10); until it is
-decided, a literal does not decide it. Allowing `\x80`–`\xFF` later is
-additive; forbidding it once programs rely on it would not be. Raw octets
-are a `bytes`, such as `[233]` (§3.10).
+**A string literal is always valid UTF-8**, as every `str` is (§3.2a). The
+source is, `\u{}` produces only scalar values, and `\x` stops at 7F — a lone
+byte from 80 up is not text. Raw octets are a `bytes`, such as `[233]`
+(§3.10).
 
 A `str` carries its length, so `\0` is an ordinary character:
 `"a\0b".size()` is 3. Strings are not NUL-terminated.
@@ -258,6 +256,40 @@ print(a.x);        // 99 -- one object, two names
 
 `str` is immutable, so its aliasing is not observable except through
 identity, which matters only at a thread boundary (§8.3).
+
+### 3.2a `str`
+
+Immutable text. **A `str` is always valid UTF-8**: every way to make one —
+a literal, `bytes.utf8()`, concatenation, `split`, `substr`,
+`str.from_chars` and the rest of §6.5, and every standard library function
+that returns one — yields valid UTF-8 or does not return a `str`. Arbitrary
+octets are a `bytes` (§3.10), and `b.utf8()` is the checked way from one to
+the other. Rust makes the same promise; `docs/text-decision.md` has the
+comparison with Go, Swift, Python and UTF-16, and why.
+
+Two units, each where it is cheap:
+
+  - **Sizes and offsets are in bytes.** `size()`, `substr`, `index_of` and
+    `byte_at` count bytes: O(1), and what files and sockets speak.
+    `"é".size()` is 2. An offset **inside** a character is refused —
+    `substr` traps on one — so a byte offset cannot produce broken text.
+    Every offset the language hands out (`index_of`, `size()`, the position
+    of an ASCII byte) is already on a boundary.
+  - **Text-level work is in code points**, and a code point is an `int`.
+    `s.chars()` is the list of a string's Unicode scalar values;
+    `str.from_chars(xs)` builds text from them and traps on a value that is
+    not a scalar value — a surrogate, a negative number, anything past
+    U+10FFFF. There is no `char` type, for the reason there is no byte type:
+    the language has one integer type.
+
+A code point is not always what a reader calls a character: `👍🏽` is two
+code points, a flag is two, `👨‍👩‍👧` is five, and `é` may be one (U+00E9)
+or two (`e` and U+0301). Grouping those — grapheme clusters — and
+comparing the two `é`s equal — normalisation — need Unicode's tables, and
+are for a `unicode` library module, not the language (`docs/text-decision.md`
+§8). `==` compares bytes, and `sort` orders strings by their bytes (§3.9),
+which for UTF-8 is code point order — deterministic, and not a
+dictionary's.
 
 ### 3.3 Structs
 
@@ -802,31 +834,28 @@ A `distinct bytes` is still a `bytes`, as a distinct collection is still a
 collection (§3.6), and converts back with `bytes(v)`. A `bytes` cannot be a
 `Map` key.
 
-**Open question: `str` holds arbitrary bytes.** Nothing checks that a `str`
-is valid UTF-8 — a file read can put anything in one, and `substr` can cut a
-character in half. Oro made `str` always valid and `bytes` the only home for
-raw octets; this language has not decided. Now that `bytes` exists the Oro
-rule is reachable (the file reader would return `bytes`, and `utf8()` would
-be the one way in), but it changes what `io.read` returns and what
-`substr` may do, so it waits for the `io` rewrite rather than riding in with
-the type. String literals already keep to the Oro rule — `\x` stops at 7F
-(§1.5) — so that neither answer is ruled out.
+**`str` is text and `bytes` is octets** — decided, and the question this
+section used to leave open (docs/text-decision.md). A `str` is always valid
+UTF-8 (§3.2a); `bytes` is the only home for anything else, and `utf8()` is
+the one door between them. Every source of text from outside goes through
+it and answers with an error value when it says no:
 
-Text built from byte values at run time goes through `bytes`: push the
-values, then decode once with `utf8()`. That is also how a `\uXXXX` from a
-wire format becomes text. There is no function from one `int` to a one-byte
-`str`: below 80 it would be a one-byte `bytes` decoded, spelled
-differently, and from 80 up the result is not text, which is the open
-question again.
+| | |
+|---|---|
+| `io.read` | `Err(io.Error.InvalidUtf8)`; `io.read_bytes` is the file exactly |
+| `io.read_line` | `None` |
+| `fs.listdir` | an error for a name that is not UTF-8 |
+| `os.args()` | `Err(os.Error.InvalidUtf8(i))`, naming the argument; `os.args_bytes()` is every argument exactly |
+| `os.env(name)` | `None`, as for an unset variable; `os.env_bytes(name)` tells the two apart |
 
-*Update: `io` is rewritten over `bytes`, and takes the Oro side at its own
-door.* `io.read_bytes` returns the file exactly; `io.read` returns a `str`
-only for valid UTF-8 and is `Err(io.Error.InvalidUtf8)` otherwise, and so
-are `read_line` (as `None`) and `fs.listdir` for a name that is not UTF-8.
-That was close to forced: `utf8()` is the only conversion from `bytes` to
-`str`, so a reader built on `bytes` cannot produce an unchecked `str` at
-all. What remains open is `substr` cutting a character, and the `str`
-arguments and environment the process is handed.
+None of these traps: a file or an argument that is not UTF-8 is the world,
+not a bug in the program (§6.6). Rust's `env::args()` panics here, and its
+`args_os()` is `args_bytes`.
+
+Text built from values at run time is built from code points with
+`str.from_chars(xs)` (§6.5), or from octets by pushing them into a `bytes`
+and decoding once with `utf8()`. A `\uXXXX` from a wire format is the first:
+one code point, `str.from_chars([cp])`.
 
 ---
 
@@ -1250,28 +1279,33 @@ Chan<int>(8)
 
 ### 6.5 Methods on `str`
 
-**Everything here works in BYTES, not characters.** `size()` is a byte count,
-`substr` takes byte offsets, and the case conversions touch only ASCII. Go
-makes the same choice, and it is the honest one for a type that carries
-bytes — the alternative is pretending to understand an encoding the language
-has no other opinion about. `"é".size()` is 2.
+A `str` is valid UTF-8 text (§3.2a). **Sizes and offsets are in bytes**;
+**code points are `int`s**, reached through `chars()` and `from_chars`.
+`"é".size()` is 2 and `"é".chars()` is `[233]`.
 
 | | |
 |---|---|
-| `s.size()` | length in bytes |
-| `s.substr(from, to)` | half-open byte range; **traps** if out of bounds |
+| `s.size()` | length in **bytes** |
+| `s.chars()` | `List<int>`, the Unicode scalar values in order; `s.chars().size()` is the code point count |
+| `s.substr(from, to)` | half-open byte range; **traps** if out of bounds, or if either offset is inside a character |
 | `s.contains(sub)` | substring search; an empty needle is found |
-| `s.index_of(sub)` | `Option<int>`, a byte offset |
+| `s.index_of(sub)` | `Option<int>`, a byte offset — always on a character boundary |
 | `s.starts_with(p)`, `s.ends_with(p)` | |
 | `s.split(sep)` | `List<str>`; keeps empty fields, **traps** on an empty separator |
 | `s.trim()` | ASCII whitespace from both ends |
-| `s.to_upper()`, `s.to_lower()` | ASCII only |
+| `s.to_upper()`, `s.to_lower()` | ASCII only; any other character is left alone |
 | `s.repeat(n)` | |
-| `s.byte_at(i)` | one byte as an `int`; **traps** out of range |
+| `s.byte_at(i)` | one byte as an `int`, anywhere, including inside a character; **traps** out of range |
 | `s.parse_int()` | `Option<int>` — the whole string, decimal, no surrounding space |
 | `s.parse_float()` | `Option<float>` |
 | `s.to_str()` | itself |
 | `s.to_bytes()` | a `bytes` copy of the same octets; cannot fail (§3.10) |
+
+And static, on the type:
+
+| | |
+|---|---|
+| `str.from_chars(xs)` | the text whose scalar values are the `List<int>` `xs`, as UTF-8; **traps** on a surrogate, a negative value or one past U+10FFFF |
 
 And on a collection of `str`:
 
@@ -1280,6 +1314,29 @@ And on a collection of `str`:
 | `xs.join(sep)` | the inverse of `split` — the parts always rejoin |
 
 A `str` is immutable, so every one of these returns a new string.
+
+**Offsets are bytes because that is what a UTF-8 string is**: O(1), and the
+unit of every file and socket. Code point offsets would make `substr` O(n)
+and a loop over `index_of` quadratic. An offset inside a character traps,
+as in Rust, rather than rounding or returning an `Option`: every offset the
+language gives out is on a boundary, so one that is not came from
+arithmetic on a guess — a bug, like an index out of range. The one honest
+computed offset, a byte budget, backs up over continuation bytes first
+(`b & 192 == 128`; `corpus/core/793-truncate-on-a-boundary.src`).
+
+**A code point is an `int`**, as a byte is (§3.10): one integer type. `chars`
+is a list rather than a loop form, so `for (int c in s.chars())` needs
+nothing new. There is no `char_count()` — the count is `chars().size()`,
+one spelling that shows it walks the string — and no `from_char(c)`, which
+is `from_chars([c])`. An invalid scalar value traps for the reason storing
+256 in a `bytes` does: it has no encoding, and it is the program's own
+value. Data from outside is checked before it is built into text, as `json`
+refuses an unpaired `\u` surrogate.
+
+`to_upper`, `to_lower` and `trim` stay ASCII until the Unicode tables exist:
+full case mapping, grapheme clusters and normalisation are a `unicode`
+module's (docs/text-decision.md §8). `chars` and `from_chars` are written in
+the language (`lib/__text.src`); the rest of this table is the runtime.
 
 ### 6.5a Methods on numbers
 
@@ -1427,6 +1484,8 @@ Trapping conditions:
   - a shift count outside `0 .. 63`
   - division or remainder by zero, and `INT_MIN / -1`
   - an index outside `0 .. len-1`
+  - a `substr` offset inside a character (§6.5)
+  - `str.from_chars` given a value that is not a Unicode scalar value (§6.5)
   - `pop` on an empty list or an empty `bytes`
   - storing a value outside 0..255 into a `bytes` (§3.10)
   - `recv` on a channel that is closed and drained
@@ -1595,7 +1654,7 @@ atom        = INT | FLOAT | STR | "true" | "false"
             | IDENT [ args ]
             | type args                               (* construction *)
             | type "." IDENT [ args ]                 (* enum variant, static method,
-                                                         float.from_bits *)
+                                                         float.from_bits, str.from_chars *)
             | "this"                                  (* instance methods only, §4.3 *)
             | seqlit | maplit
             | "(" expr ")" ;

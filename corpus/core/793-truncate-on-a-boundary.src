@@ -1,0 +1,27 @@
+// Fitting text into a byte budget -- a database column, a protocol field --
+// is the one place a program computes a byte offset that may land inside a
+// character. `substr` would trap there, so back up to the boundary first: a
+// continuation byte is 10xxxxxx, `b & 192 == 128`, and anything else starts
+// a character.
+//
+// Expected output from Python 3: s.encode()[:n] with any partial character
+// at the end dropped -- .decode("utf-8", "ignore") -- and its byte length.
+
+str truncate(str s, int n) {
+    if (s.size() <= n) {
+        return s;
+    }
+    int k = n;
+    while (k > 0 && s.byte_at(k) & 192 == 128) {
+        k = k - 1;
+    }
+    return s.substr(0, k);
+}
+
+str s = "a€😀é";  // 1 + 3 + 4 + 2 bytes
+int n = 0;
+while (n <= s.size()) {
+    str t = truncate(s, n);
+    print(n.to_str() + ": " + t.size().to_str() + " [" + t + "]");
+    n = n + 1;
+}

@@ -310,8 +310,8 @@ blocks the compiler as surely as it blocks `io`. The path is Go's:
 
 | prim | answers |
 |---|---|
-| `__args(List<str> out)` | pushes every `argv[i]`, `argv[0]` first (the emitted `main` hands argc/argv to `rt_args_init`) |
-| `__env(str name, List<str> out)` | 1 and pushes the value, or 0 if unset |
+| `__args(List<bytes> out)` | pushes every `argv[i]` as octets, `argv[0]` first (the emitted `main` hands argc/argv to `rt_args_init`); `os.args` decodes |
+| `__env(str name, List<bytes> out)` | 1 and pushes the value as octets, or 0 if unset; `os.env` decodes |
 | `__exit(int code)` | flushes stdout, then `exit` -- the 0..255 check is in `lib/os.src` |
 | `__clock(List<int> out)` | pushes seconds and nanoseconds from ONE `CLOCK_REALTIME` reading |
 | `__entropy(int n, List<int> out)` | pushes n octets from `getentropy`; 0, or an errno |
@@ -456,7 +456,9 @@ and 2; the policy -- when to flush -- is in the library.
     is forced as much as chosen: `bytes.utf8()` is the language's only way
     from octets to a `str`, so a reader over `bytes` cannot return an
     unchecked `str` without a new primitive, and adding one would reopen
-    reference §3.10's question in the wrong direction.
+    reference §3.10's question in the wrong direction. *Since decided:* a
+    `str` is always valid UTF-8 (docs/text-decision.md), and `__args` and
+    `__env` now hand over `bytes` for the same reason.
 
 ### Why `__listdir` is one stateless call
 

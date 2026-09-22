@@ -1,0 +1,4 @@
+// The start offset is checked too: 😀 is F0 9F 98 80, so offset 2 is inside
+// it. The end, 5, is on the boundary after the x -- the start is reported.
+str s = "😀x";
+print(s.substr(2, 5));

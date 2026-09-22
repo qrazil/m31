@@ -1,0 +1,58 @@
+// Offsets stay in bytes, and every offset the language hands out is on a
+// character boundary -- so a program that cuts where `index_of` or `size()`
+// points never meets the substr trap (corpus/traps/790-792).
+//
+// Expected output from Python 3, on s.encode(): bytes.find for index_of,
+// slices of the encoded bytes decoded back for substr.
+
+str s = "naïve café, 日本語 😀!";
+print(s.size());  // 29
+// index_of answers a byte offset. A needle is valid UTF-8, so a match can
+// only begin and end on boundaries, and cutting there is always allowed.
+match (s.index_of("café")) {
+    case Some(int at): {
+        print(at);  // 7
+        print(s.substr(at, at + "café".size()));  // café
+        print(s.substr(0, at));  // "naïve "
+    }
+    case None: {
+        print("not found");
+    }
+}
+match (s.index_of("😀")) {
+    case Some(int at): {
+        print(at);  // 24
+        print(s.substr(at, s.size()));  // 😀!
+    }
+    case None: {
+        print("not found");
+    }
+}
+print(s.index_of("本").or(-1));  // 17
+print(s.index_of("e\u{301}").is_none());  // true: no normalisation
+// Cutting at a boundary is fine anywhere, including between the two code
+// points of a flag -- it is a code point boundary, if not a grapheme one.
+str flag = "🇬🇧";
+print(flag.substr(0, 4).chars()[0]);  // 127468
+print(flag.substr(4, 8).chars()[0]);  // 127463
+print(s.substr(0, 0).size());  // 0
+print(s.substr(29, 29).size());  // 0
+// split on a separator outside ASCII, and join back.
+List<str> parts = "α·β·γ".split("·");
+print(parts.size());  // 3
+print(parts[1]);  // β
+print(parts.join("·") == "α·β·γ");  // true
+// trim removes ASCII whitespace only: a no-break space (U+00A0) and an
+// ideographic space (U+3000) are text.
+print("[" + "  é  ".trim() + "]");  // [é]
+print("\u{a0}x\u{3000}".trim().size());  // 6
+// Case conversion is ASCII only until the `unicode` module lands.
+print("Café Ωmega".to_upper());  // CAFé ΩMEGA
+print("ÉCOLE".to_lower());  // École -- É is left alone
+// byte_at reads one byte, anywhere, including inside a character.
+print("é".byte_at(0));  // 195
+print("é".byte_at(1));  // 169
+// starts_with, ends_with and contains are byte comparisons of valid text.
+print(s.starts_with("naï"));  // true
+print(s.ends_with("😀!"));  // true
+print(s.contains("日本"));  // true

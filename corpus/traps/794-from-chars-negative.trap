@@ -1,0 +1,1 @@
+trap: str.from_chars: -1 is not a Unicode scalar value

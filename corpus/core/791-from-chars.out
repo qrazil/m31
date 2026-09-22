@@ -1,0 +1,18 @@
+10
+0 -> 1 bytes, back 0, 00
+127 -> 1 bytes, back 127, 7f
+128 -> 2 bytes, back 128, c280
+2047 -> 2 bytes, back 2047, dfbf
+2048 -> 3 bytes, back 2048, e0a080
+55295 -> 3 bytes, back 55295, ed9fbf
+57344 -> 3 bytes, back 57344, ee8080
+65535 -> 3 bytes, back 65535, efbfbf
+65536 -> 4 bytes, back 65536, f0908080
+1114111 -> 4 bytes, back 1114111, f48fbfbf
+héllo
+👍🏽
+0
+10
+true
+語本日
+true

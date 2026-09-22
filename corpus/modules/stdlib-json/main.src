@@ -117,10 +117,13 @@ round("[é]");
 round("99999999999999999999");
 round("-9223372036854775809");
 round("[1, 2] // comment");
-// Raw bytes in a string must be UTF-8: a lone lead byte, and an encoded
-// surrogate (ED A0 80), are both refused.
-round("\"" + "é".substr(0, 1) + "\"");
-round("[\"ok\", \"" + "퀀".substr(0, 1) + "렀".substr(1, 3) + "\"]");
+// Raw bytes that are not UTF-8 cannot reach parse: it takes a `str`, and the
+// one way from octets to a `str` is utf8(), which refuses a lone lead byte
+// and an encoded surrogate (ED A0 80) before json sees them.
+bytes lone = [34, 195, 34];
+print(lone.utf8().is_none());  // true
+bytes surrogate = [34, 237, 160, 128, 34];
+print(surrogate.utf8().is_none());  // true
 // Escapes whose UTF-8 needs any octet at all: the control characters, which
 // are escaped again on the way out, U+0301 (CC 81), U+E000 (EE 80 80) and
 // U+50000 (F1 90 80 80), which are written through.
@@ -164,8 +167,10 @@ float zero = 0.0;
 written(json.Value.Float(zero / zero));
 written(json.Value.Float(1.0 / zero));
 written(json.Value.Array([json.Value.Float(-1.0 / zero)]));
-written(json.Value.Str("ok " + "é".substr(0, 1)));
-written(json.Value.Object({"é".substr(0, 1): json.Value.Null}));
+// Non-ASCII is written through as it is, in a key too: a `str` is valid
+// UTF-8, so there is nothing to check or escape.
+written(json.Value.Str("ok é 😀"));
+written(json.Value.Object({"é": json.Value.Null}));
 written(json.Value.Float(3.0));
 written(json.Value.Float(-0.0));
 written(json.Value.Float(1.0e300));

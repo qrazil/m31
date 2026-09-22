@@ -1,0 +1,2 @@
+// chars() takes nothing: it is every code point, in order.
+print("abc".chars(1).size());

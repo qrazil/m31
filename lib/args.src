@@ -395,14 +395,14 @@ void declare(Parser k, str name, str short, str help, str placeholder, str defau
     if (name == "help") {
         trap(kind + "(): --help is always there and cannot be declared");
     }
-    if (name.size() == 1) {
+    if (name.chars().size() == 1) {
         trap(kind + "(): '" + name + "' is a short spelling -- declare the long name and pass short: \"" + name + "\"");
     }
     if (find_opt(k, name).is_some()) {
         trap(kind + "(): --" + name + " is already an option of " + k.prog);
     }
     if (short != "") {
-        if (short.size() != 1 || short == "-") {
+        if (short.chars().size() != 1 || short == "-") {
             trap(kind + "(): short: must be one character, not '" + short + "'");
         }
         match (k.shorts.get(short)) {
@@ -465,7 +465,7 @@ Parser add_command(Parser k, str word, str about, str short) {
         trap("command(): " + k.prog + " already has positional arguments -- a dispatching program's operands belong to its commands");
     }
     if (short != "") {
-        if (short.size() != 1 || short == "-") {
+        if (short.chars().size() != 1 || short == "-") {
             trap("command(): short: must be one character, not '" + short + "'");
         }
         match (k.cmd_shorts.get(short)) {
@@ -893,8 +893,11 @@ str token_kind(str tok) {
     if (tok.starts_with("--")) {
         return "option";
     }
-    // A sign, not a command: `-5`, `-1.5`, `-.5`.
-    if ("0123456789.".contains(tok.substr(1, 2))) {
+    // A sign, not a command: `-5`, `-1.5`, `-.5`. Byte 1 is compared as a
+    // byte because the token is whatever was typed: in `-é` it is the first
+    // half of a character, where substr(1, 2) would trap.
+    int b = tok.byte_at(1);
+    if (b >= 48 && b <= 57 || b == 46) {
         return "data";
     }
     return "command";
@@ -902,26 +905,25 @@ str token_kind(str tok) {
 
 // Is `name` plainly a run-together cluster of declared short options? Only if
 // every letter is one, which is what makes the rewrite safe to suggest.
+// A letter is a character, not a byte, so `--éa` is read as two letters:
+// cutting it byte by byte would trap inside the é.
 bool is_cluster(str name, Map<str, str> shorts) {
-    if (name.size() < 2) {
+    List<int> letters = name.chars();
+    if (letters.size() < 2) {
         return false;
     }
-    int i = 0;
-    while (i < name.size()) {
-        if (!shorts.contains(name.substr(i, i + 1))) {
+    for (int c in letters) {
+        if (!shorts.contains(str.from_chars([c]))) {
             return false;
         }
-        i = i + 1;
     }
     return true;
 }
 
 str cluster_refusal(str tok, str name) {
     List<str> spread = [];
-    int i = 0;
-    while (i < name.size()) {
-        spread.push("--" + name.substr(i, i + 1));
-        i = i + 1;
+    for (int c in name.chars()) {
+        spread.push("--" + str.from_chars([c]));
     }
     return "'" + tok + "': short options do not cluster -- write '" + spread.join(" ") + "'";
 }
