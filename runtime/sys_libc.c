@@ -9,6 +9,7 @@
  */
 #include "sys.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>          /* rename is ISO C, so it lives here, not in unistd.h */
@@ -92,19 +93,69 @@ int64_t sys_lseek(int64_t fd, int64_t off, int64_t whence) {
     return ret((int64_t)lseek((int)fd, (off_t)off, w));
 }
 
-int64_t sys_fstat(int64_t fd, SysStat *st) {
-    struct stat s;
-    if (fstat((int)fd, &s) != 0) return neg_errno(errno);
-    st->size = (int64_t)s.st_size;
-    st->mode = (int64_t)s.st_mode;
+static void from_stat(const struct stat *s, SysStat *st) {
+    st->size = (int64_t)s->st_size;
+    st->mode = (int64_t)s->st_mode;
     /* Per-OS spot two of two: POSIX.1-2008 names the field st_mtim, and
      * macOS still calls it st_mtimespec. */
 #if defined(__APPLE__)
-    st->mtime_ns = (int64_t)s.st_mtimespec.tv_sec * 1000000000 + s.st_mtimespec.tv_nsec;
+    st->mtime_ns = (int64_t)s->st_mtimespec.tv_sec * 1000000000 + s->st_mtimespec.tv_nsec;
 #else
-    st->mtime_ns = (int64_t)s.st_mtim.tv_sec * 1000000000 + s.st_mtim.tv_nsec;
+    st->mtime_ns = (int64_t)s->st_mtim.tv_sec * 1000000000 + s->st_mtim.tv_nsec;
 #endif
+}
+
+int64_t sys_fstat(int64_t fd, SysStat *st) {
+    struct stat s;
+    if (fstat((int)fd, &s) != 0) return neg_errno(errno);
+    from_stat(&s, st);
     return 0;
+}
+
+int64_t sys_stat(const char *path, int64_t follow, SysStat *st) {
+    struct stat s;
+    if ((follow ? stat(path, &s) : lstat(path, &s)) != 0) return neg_errno(errno);
+    from_stat(&s, st);
+    return 0;
+}
+
+/* opendir is not asked to open the directory: open with O_CLOEXEC first and
+ * hand the descriptor to fdopendir, so this descriptor is close-on-exec like
+ * every other one the layer opens (sys.h) whatever the C library's opendir
+ * does. */
+int64_t sys_listdir(const char *path, char *buf, int64_t cap) {
+    int fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) return neg_errno(errno);
+    DIR *d = fdopendir(fd);
+    if (d == NULL) {
+        int64_t e = neg_errno(errno);
+        close(fd);
+        return e;
+    }
+    int64_t need = 0;
+    for (;;) {
+        /* readdir reports an error only through errno, and reports the end
+         * by returning NULL with errno untouched -- so it is cleared first. */
+        errno = 0;
+        struct dirent *e = readdir(d);
+        if (e == NULL) {
+            if (errno != 0) {
+                int64_t r = neg_errno(errno);
+                closedir(d);
+                return r;
+            }
+            break;
+        }
+        const char *n = e->d_name;
+        if (n[0] == '.' && (n[1] == 0 || (n[1] == '.' && n[2] == 0))) continue;
+        for (size_t i = 0;; i++) {
+            if (need < cap) buf[need] = n[i];
+            need++;
+            if (n[i] == 0) break;
+        }
+    }
+    closedir(d);  /* closes fd too */
+    return need;
 }
 
 int64_t sys_isatty(int64_t fd) {
@@ -125,6 +176,10 @@ int64_t sys_rmdir(const char *path) {
 
 int64_t sys_rename(const char *from, const char *to) {
     return ret(rename(from, to));
+}
+
+int64_t sys_symlink(const char *target, const char *path) {
+    return ret(symlink(target, path));
 }
 
 int64_t sys_clock_ns(int64_t clock) {

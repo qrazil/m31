@@ -121,6 +121,27 @@ int64_t sys_mkdir(const char *path, int64_t mode);                /* 0 */
 int64_t sys_unlink(const char *path);                             /* 0 */
 int64_t sys_rmdir(const char *path);                              /* 0 */
 int64_t sys_rename(const char *from, const char *to);             /* 0 */
+int64_t sys_symlink(const char *target, const char *path);        /* 0 */
+
+/* stat by name. `follow` nonzero follows a final symlink (stat); zero
+ * reports the link itself (lstat), which is what lets a tree walk refuse to
+ * descend through one. A path, not a descriptor, because opening a file to
+ * fstat it needs read permission the question does not, and opening a FIFO
+ * blocks. */
+int64_t sys_stat(const char *path, int64_t follow, SysStat *st);  /* 0 */
+
+/* The names in a directory, except "." and "..", in the file system's
+ * order, each followed by one NUL byte, written into buf as far as `cap`
+ * allows. Returns the number of bytes the whole listing needs: if that is
+ * more than `cap`, buf holds an incomplete listing and the caller asks
+ * again with a buffer at least that large (the directory may have grown in
+ * between, so it loops).
+ *
+ * One stateless call rather than an open/next/close triple, because the
+ * two backends keep directory state in incompatible places: the kernel's
+ * getdents64 cursor lives in a descriptor, the C library's in a DIR * that
+ * owns one. A whole listing per call has no handle for either to leak. */
+int64_t sys_listdir(const char *path, char *buf, int64_t cap);    /* bytes needed */
 
 /* Nanoseconds on SYS_CLOCK_REALTIME (since the epoch) or
  * SYS_CLOCK_MONOTONIC (since an arbitrary start). */

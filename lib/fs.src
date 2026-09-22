@@ -1,0 +1,708 @@
+// The file system: names, directories and trees. A port of Oro's `fs`, with
+// the path-level verbs Oro keeps in `os` brought in beside it.
+//
+// API
+// ---
+//   fs.stat(path)            -> Result<Stat, io.Error>        follows symlinks
+//   fs.exists(path)          -> bool                          (a dangling link is not there)
+//   fs.is_file(path), fs.is_dir(path)  -> bool                follow symlinks
+//   fs.is_link(path)         -> bool                          the name itself
+//   fs.listdir(path)         -> Result<List<str>, io.Error>   names, sorted
+//   fs.mkdir(path)           -> Result<bool, io.Error>        one directory
+//   fs.remove(path)          -> Result<bool, io.Error>        a file or a link
+//   fs.rmdir(path)           -> Result<bool, io.Error>        an empty directory
+//   fs.rename(from, to)      -> Result<bool, io.Error>
+//   fs.symlink(target, path) -> Result<bool, io.Error>        a link at path, to target
+//   fs.join(a, b)            -> str
+//   fs.makedirs(path)        -> Result<bool, io.Error>        every missing component
+//   fs.walk(root)            -> Result<List<str>, io.Error>   every entry below root
+//   fs.glob(pattern)         -> List<str>                     *, ?, [abc], [!abc], [a-z]
+//   fs.rmtree(path, within)  -> Result<bool, io.Error>        recursive delete, guarded
+//   fs.copy(src, dst)        -> Result<int, io.Error>         contents and permission bits
+//
+// Every failure is an `io.Error`, built by `io.from_errno`: one vocabulary
+// for everything that touches a file, so a program handling `NotFound`
+// handles it the same from `io.open` and from `fs.listdir`.
+//
+// As in Oro, the verbs that matter -- the recursive delete above all -- are
+// language source over a handful of one-call primitives. A recursive delete
+// you can read in forty lines of the language you are already writing is one
+// you can audit.
+//
+// Not here, for Oro's reasons: no `copytree` (walk + makedirs + copy, and
+// every real use wants a decision this cannot make), no `**` in glob (`walk`
+// is the recursive answer), and no `lstat` or `follow_symlinks=` -- `stat`
+// follows, `walk` and `rmtree` never do, and `is_link` asks about the name.
+
+import io;
+
+prim int __stat(str path, bool follow, List<int> out);
+prim int __mkdir(str path, int mode);
+prim int __unlink(str path);
+prim int __rmdir(str path);
+prim int __rename(str from, str to);
+prim int __symlink(str target, str path);
+prim int __listdir(str path, bytes buf);
+prim void __panic(str msg);
+
+// File type bits in a mode, the historical Unix values and the same on
+// every system (runtime/sys.h). Octal, as they are usually written:
+//   type mask 61440 (0170000), directory 16384 (0040000),
+//   regular file 32768 (0100000), symlink 40960 (0120000),
+//   permission bits 511 (0777).
+/// What `stat` reports about a file.
+///
+/// `mode` is the whole Unix mode: the type in its high bits, the
+/// permissions in the low nine. `mtime_ns` is the last modification, in
+/// nanoseconds since 1970 -- an int, so two stamps compare exactly, which a
+/// float of seconds cannot promise.
+pub type Stat {
+    int size;
+    int mode;
+    int mtime_ns;
+}
+
+/// Is it a directory?
+pub bool Stat.is_dir() {
+    return mode & 61440 == 16384;
+}
+
+/// Is it a regular file -- not a directory, a device, a FIFO or a socket?
+pub bool Stat.is_file() {
+    return mode & 61440 == 32768;
+}
+
+/// The permission bits alone, `mode & 0777`: what `chmod` takes.
+pub int Stat.perm() {
+    return mode & 511;
+}
+
+Result<Stat, io.Error> stat_of(str path, bool follow) {
+    List<int> got = [];
+    int r = __stat(path, follow, got);
+    if (r < 0) {
+        return Result<Stat, io.Error>.Err(io.from_errno(-r));
+    }
+    return Result<Stat, io.Error>.Ok(Stat(got[0], got[1], got[2]));
+}
+
+// A void result for a primitive that answers 0 or -errno.
+Result<bool, io.Error> done(int r) {
+    if (r < 0) {
+        return Result<bool, io.Error>.Err(io.from_errno(-r));
+    }
+    return Result<bool, io.Error>.Ok(true);
+}
+
+// --- one name at a time ------------------------------------------------------
+/// What the file at `path` is, following symlinks: a link reports its
+/// target, and a dangling link is `NotFound`.
+pub Result<Stat, io.Error> stat(str path) {
+    return stat_of(path, true);
+}
+
+/// Is there something at `path`? A symlink whose target is missing is not
+/// there, because every operation on it would fail as if it were not; ask
+/// `is_link` about the name itself.
+pub bool exists(str path) {
+    match (stat_of(path, true)) {
+        case Ok(Stat s): {
+            return true;
+        }
+        case Err(io.Error e): {
+            return false;
+        }
+    }
+}
+
+/// Is `path` a directory, or a symlink to one?
+pub bool is_dir(str path) {
+    match (stat_of(path, true)) {
+        case Ok(Stat s): {
+            return s.is_dir();
+        }
+        case Err(io.Error e): {
+            return false;
+        }
+    }
+}
+
+/// Is `path` a regular file, or a symlink to one?
+pub bool is_file(str path) {
+    match (stat_of(path, true)) {
+        case Ok(Stat s): {
+            return s.is_file();
+        }
+        case Err(io.Error e): {
+            return false;
+        }
+    }
+}
+
+/// Is the name `path` itself a symlink? The one question here that does
+/// not follow the link.
+pub bool is_link(str path) {
+    match (stat_of(path, false)) {
+        case Ok(Stat s): {
+            return s.mode & 61440 == 40960;
+        }
+        case Err(io.Error e): {
+            return false;
+        }
+    }
+}
+
+/// The names in the directory `path`, without `.` and `..`, **sorted**.
+///
+/// Oro's `os.listdir` answers in the file system's order, which is arbitrary
+/// and differs between two machines holding the same tree; sorting here
+/// means every caller gets one answer, and a test of it is stable. Sorted is
+/// by bytes, which for UTF-8 is by code point.
+///
+/// A name that is not valid UTF-8 cannot become a `str`, so a directory
+/// holding one is `Err(InvalidUtf8)` rather than a listing that silently
+/// leaves it out.
+pub Result<List<str>, io.Error> listdir(str path) {
+    bytes buf = [0; 4096];
+    int need = __listdir(path, buf);
+    // Too small: the answer is the size the listing needs, so ask again
+    // with that much. It loops because the directory may grow in between.
+    while (need > buf.size()) {
+        buf = [0; need + need / 4];
+        need = __listdir(path, buf);
+    }
+    if (need < 0) {
+        return Result<List<str>, io.Error>.Err(io.from_errno(-need));
+    }
+    List<str> out = [];
+    int start = 0;
+    int i = 0;
+    while (i < need) {
+        if (buf[i] == 0) {
+            match (buf.substr(start, i).utf8()) {
+                case Some(str name): {
+                    out.push(name);
+                }
+                case None: {
+                    return Result<List<str>, io.Error>.Err(io.Error.InvalidUtf8);
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    out.sort();
+    return Result<List<str>, io.Error>.Ok(out);
+}
+
+/// Create the directory `path`. Its parent must exist; `makedirs` makes
+/// them all. The permissions are 0777 less the umask, as `mkdir(1)` gives.
+pub Result<bool, io.Error> mkdir(str path) {
+    return done(__mkdir(path, 511));
+}
+
+/// Remove the file `path`. A symlink is removed itself, never its target.
+/// A directory is `IsDirectory` on Linux (`rmdir` removes an empty one,
+/// `rmtree` a full one).
+pub Result<bool, io.Error> remove(str path) {
+    return done(__unlink(path));
+}
+
+/// Remove the empty directory `path`; one with anything in it is
+/// `NotEmpty`.
+pub Result<bool, io.Error> rmdir(str path) {
+    return done(__rmdir(path));
+}
+
+/// Rename `from` to `to`, replacing a file already at `to`. Within one file
+/// system this is atomic, which is what makes write-then-rename the way to
+/// replace a file other programs read; across two it fails with
+/// `Other(18)` (EXDEV), and copying is the caller's decision.
+pub Result<bool, io.Error> rename(str from, str to) {
+    return done(__rename(from, to));
+}
+
+/// Make `path` a symbolic link to `target`. The target is stored as
+/// written and not checked -- a link may dangle, and a relative target
+/// is resolved from the link's own directory, not from here. A name
+/// already at `path` is `AlreadyExists`; links are never replaced.
+pub Result<bool, io.Error> symlink(str target, str path) {
+    return done(__symlink(target, path));
+}
+
+/// `b` below `a`: `join("src", "a.txt")` is `src/a.txt`.
+///
+/// Unlike Python's `os.path.join`, an absolute `b` does NOT replace `a`:
+/// `join(root, name)` with a name from outside stays inside `root`'s
+/// spelling, which is what the call looks like it means. An empty `a` is
+/// `b` unchanged, so a relative walk from "" stays relative.
+pub str join(str a, str b) {
+    if (a == "") {
+        return b;
+    }
+    if (a.ends_with("/")) {
+        if (b.starts_with("/")) {
+            return a + b.substr(1, b.size());
+        }
+        return a + b;
+    }
+    if (b.starts_with("/")) {
+        return a + b;
+    }
+    return a + "/" + b;
+}
+
+// --- trees ---------------------------------------------------------------------
+/// Create `path` and every missing directory above it.
+///
+/// **Not an error if it is already there** -- `makedirs` exists to make a
+/// path usable, and a caller who needs "it must not exist yet" has `mkdir`,
+/// which is exactly that. It IS an error if a component exists and is not a
+/// directory: `AlreadyExists` from `mkdir`, because a file where a directory
+/// should be is a real fault. A symlink to a directory counts as one.
+pub Result<bool, io.Error> makedirs(str path) {
+    if (path == "") {
+        return Result<bool, io.Error>.Err(io.from_errno(22));
+    }
+    str prefix = "";
+    if (path.starts_with("/")) {
+        prefix = "/";
+    }
+    for (str part in path.split("/")) {
+        // Empty parts come from a leading, doubled or trailing separator.
+        if (part == "") {
+            continue;
+        }
+        prefix = join(prefix, part);
+        if (is_dir(prefix)) {
+            continue;
+        }
+        int r = __mkdir(prefix, 511);
+        // Another process may have made it between the check and the
+        // mkdir. That race is the ordinary case for a shared build
+        // directory, and its outcome is what was wanted.
+        if (r < 0 && !is_dir(prefix)) {
+            return Result<bool, io.Error>.Err(io.from_errno(-r));
+        }
+    }
+    return Result<bool, io.Error>.Ok(true);
+}
+
+/// Every entry below `root`, files and directories both.
+///
+/// **Order is deterministic**: depth first, each directory's entries sorted
+/// by name, and a directory listed just before what is inside it.
+///
+/// **Symlinks are never followed.** A link appears as the entry it is,
+/// even one to a directory, and nothing below it is visited: following
+/// would mean cycles (`a/link -> a`) and escapes (`a/link -> /`).
+///
+/// Each path is `root` joined to the names, spelled as `root` was: a
+/// relative root gives relative paths. `root` itself is not in the list. A
+/// directory that cannot be listed is an error, not a gap -- a walk that
+/// skipped what it could not read would be lying about what it walked.
+pub Result<List<str>, io.Error> walk(str root) {
+    List<str> out = [];
+    walk_into(root, out)?;
+    return Result<List<str>, io.Error>.Ok(out);
+}
+
+Result<bool, io.Error> walk_into(str dir, List<str> out) {
+    for (str name in listdir(dir)?) {
+        str path = join(dir, name);
+        out.push(path);
+        // One stat that does not follow: a link is not a directory here,
+        // whatever it points at, and that is the whole symlink rule.
+        match (stat_of(path, false)) {
+            case Ok(Stat s): {
+                if (s.is_dir()) {
+                    walk_into(path, out)?;
+                }
+            }
+            case Err(io.Error e): {
+                return Result<bool, io.Error>.Err(e);
+            }
+        }
+    }
+    return Result<bool, io.Error>.Ok(true);
+}
+
+/// Every path matching `pattern`, sorted.
+///
+///     fs.glob("*.src")
+///     fs.glob("/etc/*.conf")
+///     fs.glob("src/[a-z]*/main.src")
+///
+/// `*` is any run of characters, `?` exactly one, `[abc]` one of a set,
+/// `[!abc]` one not in it, `[a-z]` one in a range. **None of them crosses a
+/// `/`**: the pattern is matched one component at a time. Characters, not
+/// bytes: `?` matches `é`, all two bytes of it.
+///
+/// **A wildcard does not match a leading dot**, the rule every shell has:
+/// `*` does not find `.git`, and `.*` does.
+///
+/// A pattern that matches nothing is an empty list, not an error: this asks
+/// a question. A directory that cannot be listed contributes nothing, which
+/// is what makes `glob("*/*.conf")` usable across a tree the caller does
+/// not wholly own. A symlink is an entry like any other, dangling or not.
+pub List<str> glob(str pattern) {
+    List<str> none = [];
+    if (pattern == "") {
+        return none;
+    }
+    str base = "";
+    if (pattern.starts_with("/")) {
+        base = "/";
+    }
+    List<str> parts = [];
+    for (str p in pattern.split("/")) {
+        if (p != "") {
+            parts.push(p);
+        }
+    }
+    if (parts.size() == 0) {
+        // The pattern was "/": the root directory itself.
+        List<str> root = [base];
+        return root;
+    }
+    List<str> out = [];
+    glob_step(base, parts, 0, out);
+    return out;
+}
+
+void glob_step(str base, List<str> parts, int i, List<str> out) {
+    if (i == parts.size()) {
+        out.push(base);
+        return;
+    }
+    str part = parts[i];
+    if (!has_magic(part)) {
+        // A literal component is not a search: join it and check it is
+        // there, a dangling link included.
+        str next = join(base, part);
+        if (exists(next) || is_link(next)) {
+            glob_step(next, parts, i + 1, out);
+        }
+        return;
+    }
+    str dir = base;
+    if (dir == "") {
+        dir = ".";
+    }
+    // A directory that cannot be listed matches nothing: unreadable and
+    // empty are the same answer to "what matches here". walk does not do
+    // this; see there.
+    match (listdir(dir)) {
+        case Ok(List<str> names): {
+            List<int> pat = chars(part);
+            for (str name in names) {
+                if (matches(chars(name), pat)) {
+                    glob_step(join(base, name), parts, i + 1, out);
+                }
+            }
+        }
+        case Err(io.Error e): {
+        }
+    }
+}
+
+bool has_magic(str part) {
+    return part.contains("*") || part.contains("?") || part.contains("[");
+}
+
+// The code points of a str, so that `?` and a class match a character
+// rather than a byte. The input came from utf8() or a literal, so it is
+// well formed; a truncated tail is taken as far as it goes.
+List<int> chars(str s) {
+    List<int> out = [];
+    int i = 0;
+    int n = s.size();
+    while (i < n) {
+        int b = s.byte_at(i);
+        int len = 1;
+        int cp = b;
+        if (b >= 240) {
+            len = 4;
+            cp = b & 7;
+        } else if (b >= 224) {
+            len = 3;
+            cp = b & 15;
+        } else if (b >= 192) {
+            len = 2;
+            cp = b & 31;
+        }
+        int j = 1;
+        while (j < len && i + j < n) {
+            cp = cp << 6 | s.byte_at(i + j) & 63;
+            j = j + 1;
+        }
+        out.push(cp);
+        i = i + len;
+    }
+    return out;
+}
+
+// Does the component `name` match the one-component pattern `pat`?
+//
+// Oro's matcher, and the classic one: the last `*` is remembered and
+// resumed from one character further on a mismatch, so a pattern full of
+// stars costs O(len(name) * len(pat)) instead of the exponential a naive
+// recursion takes on `*a*a*a*...`. Characters: `*` 42, `?` 63, `[` 91,
+// `.` 46.
+bool matches(List<int> name, List<int> pat) {
+    int n = name.size();
+    int m = pat.size();
+    // The leading-dot rule, where the shell applies it: to a wildcard, not
+    // to a pattern that asked for the dot by writing it.
+    if (n > 0 && name[0] == 46 && (m == 0 || pat[0] != 46)) {
+        return false;
+    }
+    int ni = 0;
+    int pi = 0;
+    int star = -1;
+    int star_ni = 0;
+    while (true) {
+        if (pi < m) {
+            int c = pat[pi];
+            if (c == 42) {
+                star = pi;
+                star_ni = ni;
+                pi = pi + 1;
+                continue;
+            }
+            if (ni < n) {
+                bool hit = false;
+                if (c == 91) {
+                    int shut = class_end(pat, pi);
+                    if (shut == -1) {
+                        // An unterminated `[` is a literal `[`, as fnmatch
+                        // has it.
+                        hit = name[ni] == 91;
+                        if (hit) {
+                            pi = pi + 1;
+                        }
+                    } else {
+                        hit = class_match(pat, pi + 1, shut, name[ni]);
+                        if (hit) {
+                            pi = shut + 1;
+                        }
+                    }
+                } else if (c == 63) {
+                    hit = true;
+                    pi = pi + 1;
+                } else {
+                    hit = c == name[ni];
+                    if (hit) {
+                        pi = pi + 1;
+                    }
+                }
+                if (hit) {
+                    ni = ni + 1;
+                    continue;
+                }
+            }
+        } else if (ni == n) {
+            return true;
+        }
+        // No match here: resume one character further into the last `*`,
+        // or fail if there was none.
+        if (star == -1) {
+            return false;
+        }
+        star_ni = star_ni + 1;
+        if (star_ni > n) {
+            return false;
+        }
+        ni = star_ni;
+        pi = star + 1;
+    }
+    // Unreachable: the loop leaves only by returning.
+    return false;
+}
+
+// The index of the `]` closing the class that opens at `open_at`, or -1.
+// A `]` straight after the `[`, or after a negating `!`, is a member and
+// not the end: fnmatch's rule, which makes `[]]` and `[!]]` mean what they
+// look like. `!` 33, `]` 93.
+int class_end(List<int> pat, int open_at) {
+    int j = open_at + 1;
+    if (j < pat.size() && pat[j] == 33) {
+        j = j + 1;
+    }
+    if (j < pat.size() && pat[j] == 93) {
+        j = j + 1;
+    }
+    while (j < pat.size()) {
+        if (pat[j] == 93) {
+            return j;
+        }
+        j = j + 1;
+    }
+    return -1;
+}
+
+// Is `ch` in the class whose body is pat[start .. close]? A `-` between
+// two characters is a range; one at either end is a literal hyphen. `-` 45.
+bool class_match(List<int> pat, int start, int close, int ch) {
+    int i = start;
+    bool negate = false;
+    if (i < close && pat[i] == 33) {
+        negate = true;
+        i = i + 1;
+    }
+    bool hit = false;
+    while (i < close) {
+        if (i + 2 < close && pat[i + 1] == 45) {
+            if (pat[i] <= ch && ch <= pat[i + 2]) {
+                hit = true;
+            }
+            i = i + 3;
+        } else {
+            if (pat[i] == ch) {
+                hit = true;
+            }
+            i = i + 1;
+        }
+    }
+    return hit != negate;
+}
+
+/// Remove the directory tree at `path`, which must be inside `within`.
+///
+///     fs.rmtree(dir, dir)                       // the tree I made is the tree I may delete
+///     fs.rmtree(fs.join(cache, key), cache)
+///
+/// **`within` is required.** This is the one verb that can destroy a
+/// machine from one wrong string, and the defence is that the caller must
+/// say, at the call site, which tree it may delete inside. Oro checks that
+/// by resolving both paths; this has no `realpath`, so it checks the
+/// spelling and then the file system, and refuses rather than guesses:
+///
+///   - `path` must be `within` or spelled below it, with no `.` or `..`
+///     component on the way down. Anything else **traps**: the two
+///     arguments disagree about which tree this is, and that is a bug at
+///     the call site, not a condition to handle.
+///   - no component from below `within` down to `path` may be a symlink,
+///     and `path` itself must not be one: `Err(Other(40))`, ELOOP, the
+///     errno the kernel itself answers when told not to follow a link. A
+///     link there would take the delete outside the tree it names.
+///   - `path` missing is `NotFound`; `path` a file is `NotADirectory` --
+///     remove a file with `remove`.
+///
+/// **A symlink inside the tree is unlinked, not followed**; its target
+/// survives. There is no `ignore_errors`: a failure part way leaves the tree
+/// partly deleted and says so, because that is what happened.
+pub Result<bool, io.Error> rmtree(str path, str within) {
+    str w = within;
+    while (w.size() > 1 && w.ends_with("/")) {
+        w = w.substr(0, w.size() - 1);
+    }
+    str rest = "";
+    if (path == w || path == w + "/") {
+        rest = "";
+    } else if (w == "/" && path.starts_with("/")) {
+        rest = path.substr(1, path.size());
+    } else if (path.starts_with(w + "/")) {
+        rest = path.substr(w.size() + 1, path.size());
+    } else {
+        __panic("rmtree refused: '" + path + "' is not inside '" + within + "'");
+    }
+    // Every component on the way down: spelled plainly, and not a link.
+    str at = w;
+    for (str part in rest.split("/")) {
+        if (part == "") {
+            continue;
+        }
+        if (part == "." || part == "..") {
+            __panic("rmtree refused: '" + path + "' climbs with '" + part + "'; name the directory plainly");
+        }
+        at = join(at, part);
+        Stat s = stat_of(at, false)?;
+        if (s.mode & 61440 == 40960) {
+            return Result<bool, io.Error>.Err(io.Error.Other(40));
+        }
+    }
+    Stat top = stat_of(path, false)?;
+    if (top.mode & 61440 == 40960) {
+        return Result<bool, io.Error>.Err(io.Error.Other(40));
+    }
+    if (!top.is_dir()) {
+        return Result<bool, io.Error>.Err(io.Error.NotADirectory);
+    }
+    return rm_into(path);
+}
+
+Result<bool, io.Error> rm_into(str dir) {
+    for (str name in listdir(dir)?) {
+        str path = join(dir, name);
+        // Not following: a link, to a directory or anywhere else, is
+        // removed as the name it is and costs its target nothing.
+        Stat s = stat_of(path, false)?;
+        if (s.is_dir()) {
+            rm_into(path)?;
+        } else {
+            done(__unlink(path))?;
+        }
+    }
+    return done(__rmdir(dir));
+}
+
+/// Copy the file `src` to `dst`: its contents and its permission bits.
+/// Returns the number of bytes copied.
+///
+/// **`dst` is the file to write, never a directory to write into.** An
+/// existing directory is `IsDirectory`; write `join(dst, name)` to say
+/// which file. That is the guess `cp` makes and this does not. So is a
+/// directory `src`: there is no `copytree`.
+///
+/// An existing `dst` file is overwritten in place and keeps its own
+/// permissions, as `cp` without `-p` does; a new one gets `src`'s
+/// permission bits less the umask, and never the setuid, setgid or sticky
+/// bits -- a copy that quietly became setuid would be a privilege
+/// escalation wearing a file operation's clothes. The mode is set when the
+/// file is created, before any content exists, so the data is never under
+/// a wider mode than the original had. For an atomic replacement, copy to
+/// a temporary name beside `dst` and `rename` it over.
+///
+/// It streams, 64 KiB at a time, so a file larger than memory is fine.
+pub Result<int, io.Error> copy(str src, str dst) {
+    if (is_dir(dst)) {
+        return Result<int, io.Error>.Err(io.Error.IsDirectory);
+    }
+    Stat s = stat_of(src, true)?;
+    if (s.is_dir()) {
+        return Result<int, io.Error>.Err(io.Error.IsDirectory);
+    }
+    io.File r = io.open(src)?;
+    // No destructors and no `defer`: from here every path out closes what
+    // it opened by hand, which is why the copy loop is its own function --
+    // its `?` returns to here, where the closing happens.
+    match (io.open(dst, mode: io.Mode.Write, perm: s.perm())) {
+        case Ok(io.File w): {
+            Result<int, io.Error> got = pump(r, w);
+            Result<bool, io.Error> rc = r.close();
+            Result<bool, io.Error> wc = w.close();
+            int n = got?;
+            // The writer's close counts: it is where a delayed write
+            // failure shows. The reader's cannot lose anything.
+            bool ok = wc?;
+            return Result<int, io.Error>.Ok(n);
+        }
+        case Err(io.Error e): {
+            Result<bool, io.Error> rc = r.close();
+            return Result<int, io.Error>.Err(e);
+        }
+    }
+}
+
+Result<int, io.Error> pump(io.File r, io.File w) {
+    int total = 0;
+    while (true) {
+        bytes chunk = r.read(65536)?;
+        if (chunk.size() == 0) {
+            return Result<int, io.Error>.Ok(total);
+        }
+        total = total + w.write(chunk)?;
+    }
+    return Result<int, io.Error>.Ok(total);
+}

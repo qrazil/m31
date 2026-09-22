@@ -377,8 +377,8 @@ pub struct Func {
     /// cannot express because there is no Price yet to dispatch on.
     pub is_static: bool,
     /// The seam to C: a declaration with no body, whose implementation is a
-    /// runtime function found by one name transform (`__file_read` ->
-    /// `rt_file_read`). Only source the compiler ships may declare one --
+    /// runtime function found by one name transform (`__open` ->
+    /// `rt_open`). Only source the compiler ships may declare one --
     /// see docs/stdlib-seam.md. `body` is empty and never read.
     pub is_prim: bool,
     /// For a method, the receiver type's name: `int Rect.area()` has

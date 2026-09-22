@@ -1,0 +1,66 @@
+import io;
+
+// Standard input, two ways, one after the other. main.in beside this file is
+// binary on purpose:
+//
+//   alpha\n  beta\r\n  \n  \xff\xfe\n  gamma\n  (300 z)\r\n  \0\xff\n  tail
+//
+// read_line never reads past the line it returns, so a File on descriptor 0
+// opened afterwards starts exactly where the lines stopped.
+str show(Option<str> l) {
+    match (l) {
+        case Some(str s): {
+            return "[" + s + "]";
+        }
+        case None: {
+            return "none";
+        }
+    }
+}
+
+print(show(io.read_line()));  // [alpha]
+print(show(io.read_line()));  // [beta] -- the \r goes with the \n
+print(show(io.read_line()));  // [] -- an empty line is a line, not the end
+// \xff\xfe is not UTF-8. An Option cannot say why, so the line reads as
+// None -- and the next call goes on after it, not stuck on it.
+print(show(io.read_line()));  // none
+print(show(io.read_line()));  // [gamma]
+// A line longer than the first piece read_line asks for, ending in \r\n.
+match (io.read_line()) {
+    case Some(str s): {
+        print(s.size());  // 300
+        print(s == "z".repeat(300));  // true
+    }
+    case None: {
+        print("none");
+    }
+}
+
+// The rest as bytes: a NUL and 0xff come through untouched.
+io.File input = io.stdin();
+bytes nl = "\n".to_bytes();
+match (input.read_until(nl, 100)) {
+    case Ok(bytes b): {
+        print(b.hex());  // 00ff0a
+    }
+    case Err(io.Error e): {
+        print(io.message(e));
+    }
+}
+match (input.read_all()) {
+    case Ok(bytes b): {
+        print(b.utf8().or("?"));  // tail -- the last line, with no newline
+    }
+    case Err(io.Error e): {
+        print(io.message(e));
+    }
+}
+match (input.read(1)) {
+    case Ok(bytes b): {
+        print(b.size());  // 0
+    }
+    case Err(io.Error e): {
+        print(io.message(e));
+    }
+}
+print(show(io.read_line()));  // none -- the end

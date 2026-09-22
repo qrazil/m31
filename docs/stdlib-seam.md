@@ -11,10 +11,10 @@ allowed to, and what `io`'s error type looks like so it survives the freeze.
 > **Revised 2026-09-21: the standard library is standalone.** Everything in
 > `lib/` is written in the language, and `prim` exists only where a language
 > genuinely cannot reach: the operating system. `math` has no `prim` at all
-> (see §5). `io` still crosses at the C library's file functions and is
-> scheduled to move down to raw system calls once the language has the
-> features §5 lists. The mechanism below is unchanged; what moved is where
-> the line is drawn.
+> (see §5). `io` and `fs` cross at descriptors and names -- one sys-layer
+> call per primitive (§7) -- with buffering, line splitting and errno
+> policy in the language. The mechanism below is unchanged; what moved is
+> where the line is drawn.
 
 ---
 
@@ -57,9 +57,9 @@ feedback a standard library is for.
 A primitive is a function with a written signature and **no body**:
 
 ```c
-prim int  __file_read(str path, List<str> out);   // 0, or an errno
-prim int  __stdin_line(List<str> out);            // 1 read a line, 0 at the end
-prim void __stderr_write(str s);
+prim int  __open(str path, int flags, int mode);      // fd, or -errno
+prim int  __read(int fd, bytes buf, int off, int n);  // bytes read, 0 at the end, or -errno
+prim int  __fstat(int fd, List<int> out);             // pushes size, mode, mtime; 0 or -errno
 ```
 
 `prim` is a declaration, not an expression form and not an attribute. Two
@@ -75,7 +75,7 @@ erased before lowering (§`docs/ir-v0.md`), so by the time the lowerer runs
 there is no machinery left to ask for `List<str>`. Declaring the
 primitive in source puts it on the right side of that erasure.
 
-**It has one lowering rule.** `__file_read` calls `rt_file_read`: strip the
+**It has one lowering rule.** `__open` calls `rt_open`: strip the
 leading underscores, prefix `rt_`. No table of special cases in the lowerer,
 no per-primitive code, and a missing runtime function is a link error naming
 the exact symbol. Arguments are borrowed and the return is owned, §5 of the
@@ -98,6 +98,26 @@ it. Three restrictions keep that containable, and all three are checked:
     fine, and they are not: they are enums the compiler lays out and gives a
     `TypeInfo`, exactly like a user type. A failure therefore comes back as a
     raw errno, and the library builds its own `Result` in source.
+  - **Amended 2026-09-21: a `prim` may write into a `bytes` it was handed**,
+    and that is the only in-place mutation across the seam. It exists
+    because `read(2)` fills a buffer the caller owns; the alternatives —
+    returning a fresh `bytes` per read, or pushing octets one at a time —
+    allocate or loop per call where a buffered reader wants neither. Three
+    conditions make it containable, all enforced in the runtime wrapper and
+    none trusted from the caller:
+      - the write stays inside a range `[off, off + n)` that the wrapper
+        checks against the buffer's **size** (not its capacity) before the
+        system call, and a range outside it **traps** — it is a bug in the
+        library, and the kernel would otherwise write past the allocation;
+      - the buffer's size never changes: the prim neither grows nor
+        shrinks it, so a `bytes` stays exactly what the language last made
+        it, with every byte either what it was or what the kernel wrote;
+      - the result says how many bytes were written, and bytes past that
+        are unspecified but still in 0..255, so no invariant of `bytes`
+        (reference §3.10) can be broken by a short read.
+    `__read(fd, buf, off, n)` and `__listdir(path, buf)` are the two that
+    use it (§7). A `str` is never written: it is immutable, and
+    `__write_str` only reads one.
 
 ---
 
@@ -170,10 +190,33 @@ is a real variant with the errno in it, which is strictly more useful than a
 
 ### The errno mapping lives in the library
 
-`from_errno` is ordinary language source in `lib/io.src`: a `match` on the
-handful of numbers worth naming, everything else to `Other`. The runtime
-returns the raw platform errno and does not interpret it, so the one place
+`from_errno` is ordinary language source in `lib/io.src`: a chain of
+comparisons on the handful of numbers worth naming, everything else to
+`Other`. The runtime returns the raw errno — in Linux numbering on every
+host, `docs/sys-layer.md` §1 — and does not interpret it, so the one place
 that knows what `2` means is readable, testable, and not in C.
+
+It is public, because `fs` builds the same errors from the same
+primitives: one vocabulary for everything that touches a file.
+
+### Revised 2026-09-21: which variants are named
+
+With `fs` using `io.Error` too, the set grew from three to seven, before
+the freeze rather than after it:
+
+| variant | errno | why a caller branches on it |
+|---|---|---|
+| `NotFound` | ENOENT 2 | the file may simply not be there yet |
+| `PermissionDenied` | EACCES 13, **EPERM 1** | which of the two the kernel says depends on the file system (Go's `ErrPermission` and Rust's `PermissionDenied` both take both) |
+| `IsDirectory` | EISDIR 21 | a path meant as a file |
+| `NotADirectory` | ENOTDIR 20 | a path through a file; `listdir` on a file |
+| `AlreadyExists` | EEXIST 17 | `mkdir` of something there; Go's `ErrExist` |
+| `NotEmpty` | ENOTEMPTY 39 | `rmdir` of a directory still in use |
+| `InvalidUtf8` | — | `io.read` of a file that is not text, a file name that cannot be a `str`: the one failure that is the library's own |
+| `Other(int)` | anything else | printed, never promised |
+
+Adding them broke every exhaustive `match` on `io.Error`, which is the
+argument above made concrete: it is affordable exactly once, now.
 
 ---
 
@@ -212,6 +255,8 @@ stacks, atomic instructions. Our equivalent of Go's assembly is a small C
 file, and `prim` is how the language names it.
 
 ### What `io` needs before it can move down
+
+*Done 2026-09-21 -- see §7. What follows is the reasoning as it stood.*
 
 `io` currently crosses at whole-file primitives (`rt_file_read` and
 friends), which puts buffering, line splitting and errno policy in C. Below
@@ -282,3 +327,79 @@ that docs/errors-decision.md says a caller's bug must not get.
 Everything above them is source: argv[0]'s inclusion, what unset means, the
 calendar, rejection sampling, PCG on 16-bit limbs until bitwise operators
 land, and the whole of `args`.
+
+---
+
+## 7. The file primitives: `io` and `fs` over descriptors
+
+Decided and built 2026-09-21. `io` crossed at whole-file primitives
+(`rt_file_read`, `rt_file_write`, `rt_file_append`, `rt_stdin_line`,
+`rt_stderr_write`), which put the read loop, the stdin buffer, line
+splitting, the `\r\n` rule and EINTR handling in C. They are gone. Each
+primitive now is **one** sys-layer call (`runtime/sys.h`) with its result
+passed through unchanged -- a value, or -errno -- and everything that
+decides anything is in `lib/io.src` and `lib/fs.src`:
+
+| prim | sys call | answers |
+|---|---|---|
+| `__open(str path, int flags, int mode)` | `sys_open` | fd |
+| `__read(int fd, bytes buf, int off, int n)` | `sys_read` | bytes read into `buf[off..]`, 0 at the end (§2, amended) |
+| `__write(int fd, bytes buf, int off, int n)` | `sys_write` | bytes written, possibly short |
+| `__write_str(int fd, str s, int off, int n)` | `sys_write` | the same from a `str`, so text is not copied into `bytes` to be written |
+| `__close(int fd)` | `sys_close` | 0 |
+| `__seek(int fd, int off, int whence)` | `sys_lseek` | the new offset |
+| `__fstat(int fd, List<int> out)` | `sys_fstat` | pushes size, mode, mtime_ns |
+| `__stat(str path, bool follow, List<int> out)` | `sys_stat` | the same, by name; `follow` false is lstat |
+| `__mkdir(str path, int mode)` | `sys_mkdir` | 0 |
+| `__unlink(str path)` | `sys_unlink` | 0 |
+| `__rmdir(str path)` | `sys_rmdir` | 0 |
+| `__rename(str from, str to)` | `sys_rename` | 0 |
+| `__symlink(str target, str path)` | `sys_symlink` | 0 |
+| `__listdir(str path, bytes buf)` | `sys_listdir` | the bytes the whole listing needs; names NUL-separated in `buf` as far as it holds |
+| `__out_flush()` | -- | writes out what `print` has buffered |
+
+The C that is left does only what the language cannot: turn a `str` into
+a C path (refusing an empty one or one holding a NUL, which the kernel
+would truncate into a different name), and check a buffer range before
+the kernel writes into it.
+
+`__out_flush` is the one that is not a system call. `print` keeps its own
+buffer in the runtime (`docs/sys-layer.md` §3), so a program writing to
+descriptor 1 or 2 through `io` has to empty that buffer first or the two
+paths to one stream reorder. `File.write` and `eprint` call it for fds 1
+and 2; the policy -- when to flush -- is in the library.
+
+### What moved into the language
+
+  - **The read buffer.** A `File` reads 64 KiB at a time into a `bytes`
+    it owns, allocated on the first read. Writes are unbuffered, so there
+    is no `flush` to forget (Oro's rule).
+  - **Whole-file reads.** `read_all` asks `__fstat` for a size hint and
+    allocates once for a regular file, then confirms the end with one more
+    read; a pipe takes the chunk loop.
+  - **EINTR.** Every read and write loop retries on `-4`. `close` never
+    does: on Linux the descriptor is gone by then.
+  - **`read_line` without state.** A module cannot hold a buffer between
+    calls, so `io.read_line()` does not read ahead at all: on a pipe or a
+    terminal it reads one byte per call to `read(2)`, as a shell's `read`
+    builtin does; on a seekable descriptor (`prog < file`) it reads a
+    growing chunk and seeks back to just past the newline. Either way the
+    rest of standard input is still there for `io.stdin()` or a child
+    process. Bulk line reading is `io.stdin()` + `read_until`, buffered.
+  - **Text vs octets.** `io.read` is `read_bytes` + strict `utf8()`,
+    failing with `InvalidUtf8`; `io.read_bytes` is the file exactly. That
+    is forced as much as chosen: `bytes.utf8()` is the language's only way
+    from octets to a `str`, so a reader over `bytes` cannot return an
+    unchecked `str` without a new primitive, and adding one would reopen
+    reference §3.10's question in the wrong direction.
+
+### Why `__listdir` is one stateless call
+
+The raw backend lists with `getdents64` on a descriptor; the C library
+lists with a `DIR *` that owns one, through `fdopendir` and `readdir`. An
+open/next/close triple would need the language to hold a handle whose
+meaning differs per backend and that leaks if not closed (there are no
+destructors). One call that writes every name into a caller's buffer, and
+says how big a buffer it needed if that one was too small, has no handle
+at all and returns byte-identical results from both backends, which
+`runtime/sys_test.c` checks.

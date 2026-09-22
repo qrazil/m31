@@ -1,4 +1,5 @@
 import io;
+import fs;
 
 // `io`, the first standard library module that has to fail. Every operation
 // that can returns a Result whose error is `io.Error`; the named variants are
@@ -46,6 +47,18 @@ match (io.read("/no/such/dir/file")) {
             case IsDirectory: {
                 print("directory");
             }
+            case NotADirectory: {
+                print("not a directory");
+            }
+            case AlreadyExists: {
+                print("exists");
+            }
+            case NotEmpty: {
+                print("not empty");
+            }
+            case InvalidUtf8: {
+                print("not text");
+            }
             case Other(int code): {
                 print(code);
             }
@@ -86,3 +99,11 @@ while (more) {
 }
 print(count);
 // 3
+// Leave nothing behind in /tmp.
+match (fs.remove(path)) {
+    case Ok(bool b): {
+    }
+    case Err(io.Error e): {
+        print(io.message(e));
+    }
+}

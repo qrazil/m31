@@ -1,0 +1,15 @@
+import io;
+import fs;
+
+// The recursive delete's guard: `path` must be spelled inside `within`.
+// Two arguments that disagree about which tree this is are a bug at the
+// call site, and it traps before anything is looked at, let alone removed
+// -- neither path here needs to exist.
+match (fs.rmtree("/tmp/lang-corpus-nowhere/../etc", "/tmp/lang-corpus-nowhere")) {
+    case Ok(bool b): {
+        print("removed?");
+    }
+    case Err(io.Error e): {
+        print(io.message(e));
+    }
+}

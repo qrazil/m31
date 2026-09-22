@@ -1,0 +1,1 @@
+trap: read(0): read at least one byte; read_all() reads everything

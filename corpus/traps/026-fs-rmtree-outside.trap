@@ -1,0 +1,1 @@
+trap: rmtree refused: '/tmp/lang-corpus-nowhere/../etc' climbs with '..'; name the directory plainly

@@ -608,6 +608,15 @@ be the one way in), but it changes what `io.read` returns and what
 `substr` may do, so it waits for the `io` rewrite rather than riding in with
 the type.
 
+*Update: `io` is rewritten over `bytes`, and takes the Oro side at its own
+door.* `io.read_bytes` returns the file exactly; `io.read` returns a `str`
+only for valid UTF-8 and is `Err(io.Error.InvalidUtf8)` otherwise, and so
+are `read_line` (as `None`) and `fs.listdir` for a name that is not UTF-8.
+That was close to forced: `utf8()` is the only conversion from `bytes` to
+`str`, so a reader built on `bytes` cannot produce an unchecked `str` at
+all. What remains open is `substr` cutting a character, and the `str`
+arguments and environment the process is handed.
+
 ---
 
 ## 4. Declarations

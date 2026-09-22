@@ -1,0 +1,170 @@
+import io;
+import fs;
+import random;
+
+// `fs` over a tree built for the purpose, under a directory named from the
+// random source so that two corpus runs at once cannot collide, printed
+// relative to that root so the output does not depend on the name, and
+// removed at the end by the verb under test.
+str root = "/tmp/lang-corpus-fs-" + random.hex(8);
+
+str rel(str root, str p) {
+    return p.substr(root.size(), p.size());
+}
+
+void show(str root, List<str> paths) {
+    List<str> out = [];
+    for (str p in paths) {
+        out.push(rel(root, p));
+    }
+    print(out.join(" "));
+}
+
+void check(Result<bool, io.Error> r) {
+    match (r) {
+        case Ok(bool b): {
+            print("ok");
+        }
+        case Err(io.Error e): {
+            print(io.message(e));
+        }
+    }
+}
+
+void put(str path, str text) {
+    match (io.write(path, text)) {
+        case Ok(int n): {
+        }
+        case Err(io.Error e): {
+            print(io.message(e));
+        }
+    }
+}
+
+str src = fs.join(root, "src");
+// Every missing component, and again: already there is not an error.
+check(fs.makedirs(fs.join(src, "lib/deep")));  // ok
+check(fs.makedirs(fs.join(src, "lib/deep")));  // ok
+check(fs.makedirs(root + "/outside"));  // ok
+put(src + "/main.src", "main");
+put(src + "/.hidden", "h");
+put(src + "/lib/a.src", "aa");
+put(src + "/lib/b.txt", "bbb");
+put(src + "/lib/deep/é.src", "e");
+put(root + "/outside/keep.txt", "keep");
+// A link to a directory inside the tree, one to a directory outside it, and
+// one to nothing.
+check(fs.symlink("lib", src + "/link"));  // ok
+check(fs.symlink(root + "/outside", src + "/lib/out"));  // ok
+check(fs.symlink("nowhere", src + "/dangling"));  // ok
+check(fs.symlink("lib", src + "/link"));  // already exists
+
+// listdir: sorted, and without . and ..
+match (fs.listdir(src)) {
+    case Ok(List<str> names): {
+        print(names.join(" "));  // .hidden dangling lib link main.src
+    }
+    case Err(io.Error e): {
+        print(io.message(e));
+    }
+}
+
+// walk: depth first, sorted, each directory before its contents, and no
+// link followed -- `link` and `out` appear, and nothing below them.
+match (fs.walk(root)) {
+    case Ok(List<str> all): {
+        for (str p in all) {
+            print(rel(root, p));
+        }
+    }
+    case Err(io.Error e): {
+        print(io.message(e));
+    }
+}
+
+// stat follows links; is_link asks about the name.
+match (fs.stat(src + "/lib/b.txt")) {
+    case Ok(fs.Stat s): {
+        print(s.size);  // 3
+        print(s.is_file());  // true
+        print(s.is_dir());  // false
+    }
+    case Err(io.Error e): {
+        print(io.message(e));
+    }
+}
+print(fs.is_dir(src + "/link"));  // true -- through the link
+print(fs.is_link(src + "/link"));  // true
+print(fs.is_link(src + "/lib"));  // false
+print(fs.exists(src + "/dangling"));  // false -- nothing at the end of it
+print(fs.is_link(src + "/dangling"));  // true -- but the name is there
+print(fs.is_file(src + "/main.src"));  // true
+
+// glob: one component at a time, sorted, no leading dots for a wildcard.
+show(root, fs.glob(src + "/*"));  // /src/dangling /src/lib /src/link /src/main.src
+show(root, fs.glob(src + "/.*"));  // /src/.hidden
+show(root, fs.glob(src + "/lib/?.*"));  // /src/lib/a.src /src/lib/b.txt
+show(root, fs.glob(src + "/lib/[!a]*"));  // /src/lib/b.txt /src/lib/deep /src/lib/out
+show(root, fs.glob(src + "/lib/[a-b].*"));  // /src/lib/a.src /src/lib/b.txt
+// Through a symlinked directory: glob is handed a path and follows it.
+show(root, fs.glob(src + "/*/*.src"));  // /src/lib/a.src /src/link/a.src
+// `?` is one character, and é is two bytes.
+show(root, fs.glob(src + "/lib/deep/?.src"));  // /src/lib/deep/é.src
+// A literal component, and a dangling link named literally, are there.
+show(root, fs.glob(src + "/main.src"));  // /src/main.src
+show(root, fs.glob(src + "/dangling"));  // /src/dangling
+print(fs.glob(root + "/nothing/*").size());  // 0
+
+// copy: the contents, and the permission bits.
+match (fs.copy(src + "/lib/b.txt", root + "/copy.txt")) {
+    case Ok(int n): {
+        print(n);  // 3
+    }
+    case Err(io.Error e): {
+        print(io.message(e));
+    }
+}
+match (io.read(root + "/copy.txt")) {
+    case Ok(str s): {
+        print(s);  // bbb
+    }
+    case Err(io.Error e): {
+        print(io.message(e));
+    }
+}
+match (fs.stat(src + "/lib/b.txt")) {
+    case Ok(fs.Stat a): {
+        match (fs.stat(root + "/copy.txt")) {
+            case Ok(fs.Stat b): {
+                print(a.perm() == b.perm());  // true
+            }
+            case Err(io.Error e): {
+                print(io.message(e));
+            }
+        }
+    }
+    case Err(io.Error e): {
+        print(io.message(e));
+    }
+}
+
+// rename, remove, mkdir, rmdir.
+check(fs.rename(root + "/copy.txt", root + "/moved.txt"));  // ok
+print(fs.exists(root + "/copy.txt"));  // false
+print(fs.exists(root + "/moved.txt"));  // true
+check(fs.remove(root + "/moved.txt"));  // ok
+check(fs.remove(root + "/moved.txt"));  // no such file
+check(fs.mkdir(root + "/empty"));  // ok
+check(fs.mkdir(root + "/empty"));  // already exists
+check(fs.rmdir(root + "/empty"));  // ok
+
+// rmtree refuses what is not a directory it may walk into.
+check(fs.rmtree(src + "/link", root));  // system error 40 -- a link, ELOOP
+check(fs.rmtree(src + "/link/deep", root));  // system error 40 -- through a link
+check(fs.rmtree(src + "/main.src", root));  // not a directory
+// A tree holding a link out of it: the link goes, its target stays.
+check(fs.rmtree(src, root));  // ok
+print(fs.exists(src));  // false
+print(fs.exists(root + "/outside/keep.txt"));  // true
+check(fs.rmtree(root, root));  // ok -- the tree I made is the tree I may delete
+print(fs.exists(root));  // false

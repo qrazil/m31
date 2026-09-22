@@ -1848,169 +1848,124 @@ _Noreturn void rt_trap(const char *msg) {
 }
 
 
-/* ---- io primitives ---------------------------------------------------- */
-/* Every one of these is a loop over the sys layer: no FILE, no stdio
- * buffer, no global errno. The sys layer returns -errno; these primitives
- * return the positive errno lib/io.src expects, so the sign flip happens
- * here and nowhere else.
+/* ---- io primitives: lib/io.src, lib/fs.src ----------------------------- */
+/* Each is ONE sys-layer call with the layer's convention passed straight
+ * through: a non-negative value, or -errno in Linux numbering. Nothing here
+ * loops, buffers, retries on EINTR, splits lines or decides what an errno
+ * means -- that is all language source in lib/io.src and lib/fs.src. What
+ * is left in C is only what C must do because the language cannot see it:
  *
- * Every path is a str, which is NUL-terminated by construction (str_new), so
- * it can go to the kernel directly. A path with an embedded NUL would be
- * silently truncated there, which would open a different file than the one
- * named -- that is refused as EINVAL instead. */
+ *   - a path becomes a C string. A str is NUL-terminated by construction
+ *     (str_new), so it goes to the kernel as it is -- but a path holding a
+ *     NUL would be silently truncated there and name a different file, so
+ *     it is refused as EINVAL instead. So is the empty path, which names no
+ *     file anybody meant.
+ *   - a buffer range is checked. A primitive that writes into a caller's
+ *     `bytes` (docs/stdlib-seam.md §2, amended) does so only inside
+ *     [off, off + n), and that range is checked against the buffer's size
+ *     HERE, never trusted from the caller: the kernel would happily write
+ *     past the end of the allocation. A range outside it is a bug in the
+ *     library, so it traps. The size of a `bytes` never changes here. */
 
 static bool path_ok(Obj *path) {
     Str *p = (Str *)path;
     return p->len > 0 && memchr(p->data, '\0', (size_t)p->len) == NULL;
 }
 
-int64_t rt_file_read(Obj *path, Obj *out) {
-    if (!path_ok(path)) return SYS_EINVAL;
-    int64_t fd = sys_open(((Str *)path)->data, SYS_O_RDONLY, 0);
-    if (fd < 0) return -fd;
-    /* The size fstat reports is a hint for the first allocation, never a
-     * limit: it is wrong for pipes, /proc files and anything still being
-     * written, so the loop reads until the end regardless. One byte over
-     * the hint means a file of exactly that size ends on a read of 0
-     * without a pointless doubling first. */
-    size_t cap = 4096, len = 0;
-    SysStat st;
-    if (sys_fstat(fd, &st) == 0 && (st.mode & SYS_S_IFMT) == SYS_S_IFREG && st.size > 0 &&
-        (uint64_t)st.size < SIZE_MAX / 2) {
-        cap = (size_t)st.size + 1;
-    }
-    char *buf = malloc(cap);
-    if (buf == NULL) rt_trap("out of memory");
-    int64_t err = 0;
-    for (;;) {
-        if (len == cap) {
-            cap *= 2;
-            char *nb = realloc(buf, cap);
-            if (nb == NULL) rt_trap("out of memory");
-            buf = nb;
-        }
-        int64_t n = sys_read(fd, buf + len, (int64_t)(cap - len));
-        if (n == -SYS_EINTR) continue;
-        if (n < 0) {
-            /* A directory opens fine on Linux and fails here, with EISDIR. */
-            err = -n;
-            break;
-        }
-        if (n == 0) break;
-        len += (size_t)n;
-    }
-    sys_close(fd);
-    if (err) {
-        free(buf);
-        return err;
-    }
-    rt_list_push(out, (int64_t)(intptr_t)str_new(buf, (int64_t)len));
-    free(buf);
-    return 0;
+static void range_ok(int64_t size, int64_t off, int64_t n, const char *who) {
+    if (off < 0 || n < 0 || off > size || n > size - off) rt_trap(who);
 }
 
-static int64_t write_mode(Obj *path, Obj *data, int64_t how) {
-    if (!path_ok(path)) return SYS_EINVAL;
-    int64_t fd = sys_open(((Str *)path)->data, SYS_O_WRONLY | SYS_O_CREAT | how, 0666);
-    if (fd < 0) return -fd;
-    Str *d = (Str *)data;
-    const char *p = d->data;
-    int64_t left = d->len, err = 0;
-    while (left > 0) {
-        int64_t n = sys_write(fd, p, left);
-        if (n == -SYS_EINTR) continue;
-        if (n < 0) {
-            err = -n;
-            break;
-        }
-        /* A write of 0 bytes to a regular file makes no progress and never
-         * will; calling it an I/O error beats looping forever. */
-        if (n == 0) {
-            err = SYS_EIO;
-            break;
-        }
-        p += n;
-        left -= n;
-    }
-    /* A full disk on a network file system is often only reported at close,
-     * so its result counts -- but never retried on EINTR: on Linux the
-     * descriptor is already gone by then, and a retry could close a
-     * descriptor another thread has just been given. */
-    int64_t c = sys_close(fd);
-    if (err == 0 && c < 0 && c != -SYS_EINTR) err = -c;
-    return err;
+int64_t rt_open(Obj *path, int64_t flags, int64_t mode) {
+    if (!path_ok(path)) return -SYS_EINVAL;
+    return sys_open(((Str *)path)->data, flags, mode);
 }
 
-int64_t rt_file_write(Obj *path, Obj *data)  { return write_mode(path, data, SYS_O_TRUNC); }
-int64_t rt_file_append(Obj *path, Obj *data) { return write_mode(path, data, SYS_O_APPEND); }
-
-/* Standard input, buffered here for the same reason standard output is:
- * one read per buffer rather than one per byte, without stdio. The lock
- * makes a line read by one thread a whole line, as getc's lock did. */
-#define IN_CAP 65536
-static char in_buf[IN_CAP];
-static size_t in_at, in_len;
-static bool in_eof;
-static pthread_mutex_t in_lock = PTHREAD_MUTEX_INITIALIZER;
-
-/* The next byte, or -1 at the end. A read error is treated as the end: see
- * rt_stdin_line. */
-static int in_byte_locked(void) {
-    while (in_at == in_len) {
-        if (in_eof) return -1;
-        int64_t n = sys_read(0, in_buf, IN_CAP);
-        if (n == -SYS_EINTR) continue;
-        if (n <= 0) {
-            /* Sticky, as stdio's EOF flag is: a terminal returns 0 once per
-             * Ctrl-D, and a program that saw the end should not read on
-             * past it. */
-            in_eof = true;
-            return -1;
-        }
-        in_at = 0;
-        in_len = (size_t)n;
-    }
-    return (unsigned char)in_buf[in_at++];
+int64_t rt_read(int64_t fd, Obj *buf, int64_t off, int64_t n) {
+    Bytes *b = (Bytes *)buf;
+    range_ok(b->len, off, n, "__read: range outside the buffer");
+    return sys_read(fd, b->data + off, n);
 }
 
-/* One line without its terminator. A final line with no newline is still a
- * line; `\r\n` loses the `\r` too, so a file written on Windows reads the
- * same. A read error is reported as the end of input: stdin failing
- * mid-stream is rare enough that a primitive returning Option is the right
- * trade, the same one `parse_int` makes. */
-int64_t rt_stdin_line(Obj *out) {
-    size_t cap = 128, n = 0;
-    char *line = malloc(cap);
-    if (line == NULL) rt_trap("out of memory");
-    int c;
-    pthread_mutex_lock(&in_lock);
-    while ((c = in_byte_locked()) != -1 && c != '\n') {
-        if (n == cap) {
-            cap *= 2;
-            char *nl = realloc(line, cap);
-            if (nl == NULL) rt_trap("out of memory");
-            line = nl;
-        }
-        line[n++] = (char)c;
-    }
-    pthread_mutex_unlock(&in_lock);
-    if (c == -1 && n == 0) {
-        free(line);
-        return 0;
-    }
-    if (n > 0 && line[n - 1] == '\r') n--;
-    rt_list_push(out, (int64_t)(intptr_t)str_new(line, (int64_t)n));
-    free(line);
-    return 1;
+int64_t rt_write(int64_t fd, Obj *buf, int64_t off, int64_t n) {
+    Bytes *b = (Bytes *)buf;
+    range_ok(b->len, off, n, "__write: range outside the buffer");
+    return sys_write(fd, b->data + off, n);
 }
 
-void rt_stderr_write(Obj *s) {
+/* The same as rt_write from an immutable str, so writing text never copies
+ * it into a `bytes` first. */
+int64_t rt_write_str(int64_t fd, Obj *s, int64_t off, int64_t n) {
     Str *p = (Str *)s;
-    /* stdout is flushed first so interleaved output lands in the order the
-     * program wrote it when both go to one terminal. stderr itself is
-     * unbuffered, as it is in C. */
-    rt_out_flush();
-    write_all(2, p->data, (size_t)p->len);
+    range_ok(p->len, off, n, "__write_str: range outside the string");
+    return sys_write(fd, p->data + off, n);
+}
+
+int64_t rt_close(int64_t fd) {
+    return sys_close(fd);
+}
+
+int64_t rt_seek(int64_t fd, int64_t off, int64_t whence) {
+    return sys_lseek(fd, off, whence);
+}
+
+/* A prim cannot return a struct, so SysStat's three fields are pushed in
+ * order -- size, mode, mtime_ns -- and the library builds its own type. */
+static void push_stat(Obj *out, const SysStat *st) {
+    rt_list_push(out, st->size);
+    rt_list_push(out, st->mode);
+    rt_list_push(out, st->mtime_ns);
+}
+
+int64_t rt_fstat(int64_t fd, Obj *out) {
+    SysStat st;
+    int64_t r = sys_fstat(fd, &st);
+    if (r == 0) push_stat(out, &st);
+    return r;
+}
+
+int64_t rt_stat(Obj *path, bool follow, Obj *out) {
+    if (!path_ok(path)) return -SYS_EINVAL;
+    SysStat st;
+    int64_t r = sys_stat(((Str *)path)->data, follow ? 1 : 0, &st);
+    if (r == 0) push_stat(out, &st);
+    return r;
+}
+
+int64_t rt_mkdir(Obj *path, int64_t mode) {
+    if (!path_ok(path)) return -SYS_EINVAL;
+    return sys_mkdir(((Str *)path)->data, mode);
+}
+
+int64_t rt_unlink(Obj *path) {
+    if (!path_ok(path)) return -SYS_EINVAL;
+    return sys_unlink(((Str *)path)->data);
+}
+
+int64_t rt_rmdir(Obj *path) {
+    if (!path_ok(path)) return -SYS_EINVAL;
+    return sys_rmdir(((Str *)path)->data);
+}
+
+int64_t rt_rename(Obj *from, Obj *to) {
+    if (!path_ok(from) || !path_ok(to)) return -SYS_EINVAL;
+    return sys_rename(((Str *)from)->data, ((Str *)to)->data);
+}
+
+/* The target is stored as written, not resolved, so it is any str without
+ * a NUL -- empty included, which the kernel then refuses itself. */
+int64_t rt_symlink(Obj *target, Obj *path) {
+    Str *t = (Str *)target;
+    if (memchr(t->data, '\0', (size_t)t->len) != NULL || !path_ok(path)) return -SYS_EINVAL;
+    return sys_symlink(t->data, ((Str *)path)->data);
+}
+
+/* Fills the whole of `buf` at most; the library grows it and asks again
+ * when the answer is larger than its size (sys.h, sys_listdir). */
+int64_t rt_listdir(Obj *path, Obj *buf) {
+    if (!path_ok(path)) return -SYS_EINVAL;
+    Bytes *b = (Bytes *)buf;
+    return sys_listdir(((Str *)path)->data, (char *)b->data, b->len);
 }
 
 

@@ -1,7 +1,7 @@
 /* Tests for the sys layer, run against each backend by runtime/sys_test.sh.
  *
- * The corpus exercises the layer only as far as the runtime uses it today:
- * open, read, write, close and fstat, through lib/io.src. This checks every
+ * The corpus exercises the layer through lib/io.src and lib/fs.src, but
+ * only on one backend per run and only as far as those ask. This checks every
  * function sys.h declares, including the error results, because the point
  * of the layer is that both backends return the SAME value for the same
  * situation -- a -ENOENT from one and a -1 from the other would pass every
@@ -171,6 +171,55 @@ int test_main(void) {
     expect("lseek before the start", sys_lseek(fd, -100, SYS_SEEK_SET), -SYS_EINVAL);
     sys_close(fd);
 
+    /* ---- stat by name ---- */
+    st.size = st.mode = 0;
+    expect("stat", sys_stat(a, 1, &st), 0);
+    expect("stat size", st.size, 11);
+    expect("stat type bits", st.mode & SYS_S_IFMT, SYS_S_IFREG);
+    st.size = st.mode = 0;
+    expect("lstat of a plain file", sys_stat(a, 0, &st), 0);
+    expect("lstat size", st.size, 11);
+    expect("stat a directory", sys_stat(dir, 1, &st), 0);
+    expect("stat directory type bits", st.mode & SYS_S_IFMT, SYS_S_IFDIR);
+    expect("stat missing", sys_stat("/no/such/path/at/all", 1, &st), -SYS_ENOENT);
+    char under[128];
+    join(under, a, "/x");
+    expect("stat through a file", sys_stat(under, 1, &st), -SYS_ENOTDIR);
+
+    /* ---- listing: each name and a NUL, in no promised order ---- */
+    char c[96];
+    join(c, dir, "/cc");
+    fd = sys_open(c, SYS_O_WRONLY | SYS_O_CREAT | SYS_O_EXCL, 0600);
+    expect_true("create a second file", fd >= 0);
+    sys_close(fd);
+    char names[64];
+    expect("listdir", sys_listdir(dir, names, sizeof names), 5);  /* "a\0cc\0" */
+    expect_true("listdir names, either order",
+                same(names, "a\0cc", 5) || same(names, "cc\0a", 5));
+    expect("listdir with no room says how much", sys_listdir(dir, names, 0), 5);
+    expect("listdir with some room", sys_listdir(dir, names, 3), 5);
+    expect("listdir a file", sys_listdir(a, names, sizeof names), -SYS_ENOTDIR);
+    expect("listdir missing", sys_listdir("/no/such/path/at/all", names, sizeof names),
+           -SYS_ENOENT);
+    expect("unlink the second file", sys_unlink(c), 0);
+
+    /* ---- a link made here, dangling and not ---- */
+    char ln[96];
+    join(ln, dir, "/ln");
+    expect("symlink", sys_symlink("a", ln), 0);
+    expect("symlink over an existing name", sys_symlink("a", ln), -SYS_EEXIST);
+    expect("lstat the new link", sys_stat(ln, 0, &st), 0);
+    expect("it is a link", st.mode & SYS_S_IFMT, SYS_S_IFLNK);
+    expect("stat through it", sys_stat(ln, 1, &st), 0);
+    expect("to the file", st.size, 11);
+    expect("listdir sees it", sys_listdir(dir, names, sizeof names), 5);  /* "a\0ln\0" */
+    expect("unlink removes the link", sys_unlink(ln), 0);
+    expect("and not the file", sys_stat(a, 1, &st), 0);
+    expect("dangling symlink", sys_symlink("nowhere", ln), 0);
+    expect("stat a dangling link", sys_stat(ln, 1, &st), -SYS_ENOENT);
+    expect("lstat a dangling link", sys_stat(ln, 0, &st), 0);
+    expect("unlink the dangling link", sys_unlink(ln), 0);
+
     /* ---- rename, unlink, rmdir ---- */
     expect("rename", sys_rename(a, b), 0);
     expect("old name is gone", sys_open(a, SYS_O_RDONLY, 0), -SYS_ENOENT);
@@ -179,6 +228,7 @@ int test_main(void) {
     expect("unlink a directory is refused", sys_unlink(dir) < 0, 1);
     expect("unlink", sys_unlink(b), 0);
     expect("unlink again", sys_unlink(b), -SYS_ENOENT);
+    expect("listdir an empty directory", sys_listdir(dir, names, sizeof names), 0);
     expect("rmdir", sys_rmdir(dir), 0);
     expect("rmdir again", sys_rmdir(dir), -SYS_ENOENT);
 

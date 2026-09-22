@@ -1,28 +1,184 @@
-// Files, standard input and standard error.
+// Files, standard input, standard output and standard error.
 //
-// Every function that can fail returns a Result whose error is `Error`,
-// below. The runtime hands back a raw errno and nothing else; what an errno
-// MEANS is decided here, in source, where it can be read and tested. See
-// docs/stdlib-seam.md.
+// API
+// ---
+//   io.read(path)              -> Result<str, Error>    the whole file, as UTF-8 text
+//   io.read_bytes(path)        -> Result<bytes, Error>  the whole file, exactly
+//   io.write(path, s)          -> Result<int, Error>    replace the contents with text
+//   io.write_bytes(path, b)    -> Result<int, Error>    replace the contents with octets
+//   io.append(path, s)         -> Result<int, Error>    add text at the end
+//   io.read_line()             -> Option<str>           the next line of standard input
+//   io.eprint(s)               -> void                  a line to standard error
+//
+//   io.open(path, mode:, perm:)  -> Result<File, Error>
+//   io.stdin(), io.stdout(), io.stderr()  -> File       descriptors 0, 1 and 2
+//   f.read(n)                  -> Result<bytes, Error>  1..n bytes; empty only at the end
+//   f.read_all()               -> Result<bytes, Error>  everything to the end
+//   f.read_until(delim, limit) -> Result<bytes, Error>  through `delim`, at most `limit`
+//   f.write(b)                 -> Result<int, Error>    all of `b`
+//   f.close()                  -> Result<bool, Error>
+//
+// Everything here is language source down to one system call per primitive
+// (runtime/sys.h, docs/sys-layer.md): the read loop, the buffer, the line
+// splitting, the `\r\n` rule, the retry on EINTR, and what every errno
+// means. A primitive answers a value or -errno and decides nothing.
+//
+// A `File` deals in `bytes`, both ways, as Oro's streams do. Text is a
+// decision the caller writes down -- `b.utf8()` in, `s.to_bytes()` out --
+// except in the whole-file helpers, which exist because reading a text file
+// is the common case and should be one call.
 
-prim int __file_read(str path, List<str> out);
-prim int __file_write(str path, str data);
-prim int __file_append(str path, str data);
-prim int __stdin_line(List<str> out);
-prim void __stderr_write(str s);
+prim int __open(str path, int flags, int mode);
+prim int __read(int fd, bytes buf, int off, int n);
+prim int __write(int fd, bytes buf, int off, int n);
+prim int __write_str(int fd, str s, int off, int n);
+prim int __close(int fd);
+prim int __seek(int fd, int off, int whence);
+prim int __fstat(int fd, List<int> out);
+prim void __out_flush();
+prim void __panic(str msg);
 
+// The sys layer's own constants (runtime/sys.h), written as numbers because
+// they are the layer's and not the host's: the same on every target, which
+// is what makes a number here safe. There are no octal literals, so the
+// octal each one is usually spelled in is beside it.
+//
+//   open flags   WRONLY 1, CREAT 64 (0100), TRUNC 512 (01000),
+//                APPEND 1024 (02000)
+//   seek         SET 0, CUR 1
+//   file type    mode & 61440 (0170000); a regular file is 32768 (0100000)
+//   errno        EINTR 4, EIO 5 -- the rest are named in from_errno
 /// Why an operation on a file failed.
 ///
 /// `Other` is what keeps this enum from ever needing a new variant. `match`
 /// is exhaustive and has no default, so adding a variant would break every
 /// program that handles the error; instead, a failure nobody named arrives
 /// as `Other(errno)`. The named ones are the failures a caller plausibly
-/// branches on -- the same three Go gives sentinels to.
+/// branches on: Go's `fs.ErrNotExist`, `ErrPermission` and `ErrExist`, the
+/// three `fs` needs to say why a directory operation failed, and the one
+/// failure that is this module's own rather than the kernel's.
+///
+/// The number in `Other` is a Linux errno on every host -- the sys layer
+/// translates (docs/sys-layer.md §1) -- so it means the same thing wherever
+/// the program runs.
 pub enum Error {
     NotFound;
     PermissionDenied;
     IsDirectory;
+    NotADirectory;
+    AlreadyExists;
+    NotEmpty;
+    InvalidUtf8;
     Other(int);
+}
+
+// --- files ---------------------------------------------------------------
+/// What `open` opens a file for.
+///
+/// An enum rather than Oro's `"r"`/`"w"`/`"a"` strings, so that a mode that
+/// does not exist is a compile error rather than a trap. There is no
+/// read-write mode, as there is none in Oro: a file read and written through
+/// one buffer has to decide what a write does to data already read ahead,
+/// and no answer to that is obvious enough to freeze.
+pub enum Mode {
+    Read;
+    Write;
+    Append;
+}
+
+// A stream's state. It is a private type held by the public `File`, rather
+// than `File`'s own fields, for two reasons the language forces: fields
+// cannot be private, and a method cannot call another method on its own
+// receiver -- so every operation is a function over a `Stream` that the
+// one-line methods below hand their field to.
+type Stream {
+    int fd;
+    bool readable;
+    bool writable;
+    bool live = true;
+    // The read buffer, allocated on the first read so that a writer, and
+    // each of the standard streams, costs nothing. buf[at .. end] is read
+    // from the kernel and not yet handed out.
+    bytes buf = [];
+    int at = 0;
+    int end = 0;
+}
+
+/// An open file, or one of the standard streams.
+///
+/// Reads are buffered, 64 KiB at a time. Writes are not: `write` has handed
+/// everything to the kernel when it returns, so there is no `flush` to
+/// forget -- Oro's rule. A write to standard output or standard error first
+/// flushes what `print` has buffered, so the two land in program order.
+///
+/// **A `File` is not closed for you.** The language has no destructors, so
+/// a `File` dropped without `close()` keeps its descriptor until the
+/// program ends. Close on every path, including the error paths.
+pub type File {
+    Stream s;
+}
+
+/// Between 1 and `n` bytes, or an empty `bytes` at the end of the file.
+///
+/// **It may return fewer than `n` without being at the end** -- `n` is a
+/// maximum, and the answer is what one read of the buffer had. Code that
+/// needs everything calls `read_all`. `n` below 1 traps, so that an empty
+/// result has exactly one meaning.
+pub Result<bytes, Error> File.read(int n) {
+    return stream_read(s, n);
+}
+
+/// Everything from here to the end of the file.
+///
+/// For a regular file the size is asked first and the result allocated
+/// once, so a large file is not held twice while a growing buffer doubles.
+/// The size is only a hint -- a file can grow while it is read, and a pipe
+/// has none -- so the read goes on to the real end regardless.
+pub Result<bytes, Error> File.read_all() {
+    return stream_read_all(s);
+}
+
+/// Bytes up to and including the first `delim`, reading no more than
+/// `limit` of them.
+///
+/// Three outcomes, told apart by the result alone: it ends with `delim`
+/// (found); it is `limit` long and does not (no delimiter within the limit
+/// -- call again for the rest); or it is shorter and does not (the file
+/// ended first; empty means it had already ended). The limit is what makes
+/// this safe on input nobody controls: without one, a line that never ends
+/// is a request for all of memory.
+///
+/// An empty `delim` or a `limit` below 1 traps.
+pub Result<bytes, Error> File.read_until(bytes delim, int limit) {
+    return stream_read_until(s, delim, limit);
+}
+
+/// Write all of `b`, returning its size.
+///
+/// "All" is the promise: the kernel may take a write in pieces, and the
+/// loop that hands it the rest is here so that no caller writes one.
+pub Result<int, Error> File.write(bytes b) {
+    if (!s.live) {
+        __panic("write on a closed file");
+    }
+    if (!s.writable) {
+        __panic("write on a file opened for reading");
+    }
+    if (s.fd == 1 || s.fd == 2) {
+        __out_flush();
+    }
+    return write_all(s.fd, b);
+}
+
+/// Release the descriptor. Closing twice is not an error; any other use of
+/// a closed `File` traps.
+///
+/// It returns a Result because closing is where some file systems report a
+/// write that failed -- NFS, a full disk -- and a writer should look.
+/// It is never retried on EINTR: on Linux the descriptor is already gone by
+/// then, and a retry could close one another thread has just been given.
+pub Result<bool, Error> File.close() {
+    return stream_close(s);
 }
 
 /// A sentence saying what went wrong, for printing.
@@ -41,70 +197,469 @@ pub str message(Error e) {
         case IsDirectory: {
             return "is a directory";
         }
+        case NotADirectory: {
+            return "not a directory";
+        }
+        case AlreadyExists: {
+            return "already exists";
+        }
+        case NotEmpty: {
+            return "directory not empty";
+        }
+        case InvalidUtf8: {
+            return "not valid UTF-8 text";
+        }
         case Other(int code): {
             return "system error " + code.to_str();
         }
     }
 }
 
-/// The errno values worth naming. These three numbers are the same on
-/// Linux, the BSDs, macOS and the Windows C runtime, which is why they can be
-/// written here as numbers rather than asked of the platform.
-Error from_errno(int e) {
+/// The `Error` for a Linux errno number -- positive, as errno is written;
+/// a primitive's result `r < 0` is `from_errno(-r)`.
+///
+/// Public because `fs` builds the same errors from the same primitives, and
+/// one mapping is the point: a program handling `io.Error` from `fs.mkdir`
+/// and from `io.open` should see one vocabulary. EPERM joins EACCES as
+/// PermissionDenied, as it does in Go and Rust: which of the two the kernel
+/// returns depends on the file system, not on anything a caller would
+/// branch on.
+pub Error from_errno(int e) {
     if (e == 2) {
         return Error.NotFound;
     }
-    if (e == 13) {
+    if (e == 1 || e == 13) {
         return Error.PermissionDenied;
     }
     if (e == 21) {
         return Error.IsDirectory;
     }
+    if (e == 20) {
+        return Error.NotADirectory;
+    }
+    if (e == 17) {
+        return Error.AlreadyExists;
+    }
+    if (e == 39) {
+        return Error.NotEmpty;
+    }
     return Error.Other(e);
 }
 
-/// The whole file, as bytes in a str.
-pub Result<str, Error> read(str path) {
-    List<str> got = [];
-    int e = __file_read(path, got);
-    if (e != 0) {
-        return Result<str, Error>.Err(from_errno(e));
+/// Open `path`. `Read` needs the file to exist; `Write` creates it or
+/// empties it; `Append` creates it or adds to its end, every write landing
+/// at the end even with other writers.
+///
+/// A file this creates gets `perm` -- the permission bits, less the
+/// process's umask. The default is 438 (octal 0666), what every C program
+/// and Go's `os.Create` use; 384 (0600) is a file only its owner can read.
+/// The descriptor is close-on-exec, as every descriptor the runtime opens.
+pub Result<File, Error> open(str path, Mode mode = Mode.Read, int perm = 438) {
+    int flags = 0;
+    bool readable = true;
+    match (mode) {
+        case Read: {
+            flags = 0;
+        }
+        case Write: {
+            flags = 1 | 64 | 512;
+            readable = false;
+        }
+        case Append: {
+            flags = 1 | 64 | 1024;
+            readable = false;
+        }
     }
-    return Result<str, Error>.Ok(got[0]);
+    int fd = __open(path, flags, perm);
+    if (fd < 0) {
+        return Result<File, Error>.Err(from_errno(-fd));
+    }
+    return Result<File, Error>.Ok(File(Stream(fd, readable, !readable)));
+}
+
+/// Standard input as a `File`.
+///
+/// Each call is a new `File` with its own buffer, so call it once and keep
+/// it: two of them would each read ahead, and each would hold input the
+/// other never sees. For the same reason, do not mix it with `read_line`,
+/// which reads no further than the line it returns. (A module cannot hold
+/// state, so there is nowhere to keep the one shared `File` this wants to
+/// be.)
+pub File stdin() {
+    return File(Stream(0, true, false));
+}
+
+/// Standard output as a `File`. `close()` on it marks this `File` closed
+/// and leaves the descriptor open, because `print` still writes to it.
+pub File stdout() {
+    return File(Stream(1, false, true));
+}
+
+/// Standard error as a `File`, closed the same way as `stdout()`.
+pub File stderr() {
+    return File(Stream(2, false, true));
+}
+
+// --- streams -------------------------------------------------------------
+// Refill an empty buffer. The number of bytes now buffered, 0 at the end.
+Result<int, Error> fill(Stream s) {
+    if (!s.live) {
+        __panic("read on a closed file");
+    }
+    if (!s.readable) {
+        __panic("read on a file opened for writing");
+    }
+    if (s.buf.size() == 0) {
+        s.buf = [0; 65536];
+    }
+    while (true) {
+        int r = __read(s.fd, s.buf, 0, s.buf.size());
+        // A signal arriving during a read interrupts it without having read
+        // anything. It is not a failure of the file, so it is not reported.
+        if (r == -4) {
+            continue;
+        }
+        if (r < 0) {
+            return Result<int, Error>.Err(from_errno(-r));
+        }
+        s.at = 0;
+        s.end = r;
+        return Result<int, Error>.Ok(r);
+    }
+    // Unreachable: the loop only leaves by returning. The language wants a
+    // return on every path and cannot see that `while (true)` has no exit.
+    return Result<int, Error>.Ok(0);
+}
+
+Result<bytes, Error> stream_read(Stream s, int n) {
+    if (n < 1) {
+        __panic("read(" + n.to_str() + "): read at least one byte; read_all() reads everything");
+    }
+    if (s.at == s.end) {
+        if (fill(s)? == 0) {
+            bytes none = [];
+            return Result<bytes, Error>.Ok(none);
+        }
+    }
+    int take = s.end - s.at;
+    if (take > n) {
+        take = n;
+    }
+    bytes out = s.buf.substr(s.at, s.at + take);
+    s.at = s.at + take;
+    return Result<bytes, Error>.Ok(out);
+}
+
+Result<bytes, Error> stream_read_all(Stream s) {
+    if (!s.live) {
+        __panic("read on a closed file");
+    }
+    if (!s.readable) {
+        __panic("read on a file opened for writing");
+    }
+    // What the buffer already holds comes first.
+    bytes out = [];
+    if (s.at < s.end) {
+        out = s.buf.substr(s.at, s.end);
+        s.at = s.end;
+    }
+    // The size hint: what is left of a regular file past the kernel's
+    // offset, which is where the buffer stopped.
+    int hint = 0;
+    List<int> st = [];
+    if (__fstat(s.fd, st) == 0 && st[1] & 61440 == 32768) {
+        int here = __seek(s.fd, 0, 1);
+        if (here >= 0 && st[0] > here) {
+            hint = st[0] - here;
+        }
+    }
+    if (hint > 0) {
+        bytes big = [0; hint];
+        int got = 0;
+        while (got < hint) {
+            int r = __read(s.fd, big, got, hint - got);
+            if (r == -4) {
+                continue;
+            }
+            if (r < 0) {
+                return Result<bytes, Error>.Err(from_errno(-r));
+            }
+            if (r == 0) {
+                break;
+            }
+            got = got + r;
+        }
+        // The common case -- nothing buffered, the file as big as it said --
+        // hands back the one allocation without copying it.
+        if (got == hint && out.size() == 0) {
+            out = big;
+        } else {
+            out.extend(big.substr(0, got));
+        }
+    }
+    // The rest, until the kernel says the end: all of it for a pipe, and
+    // for a regular file one empty read that confirms the hint was right.
+    while (fill(s)? > 0) {
+        if (s.end == s.buf.size()) {
+            out.extend(s.buf);
+        } else {
+            out.extend(s.buf.substr(0, s.end));
+        }
+        s.at = s.end;
+    }
+    return Result<bytes, Error>.Ok(out);
+}
+
+Result<bytes, Error> stream_read_until(Stream s, bytes delim, int limit) {
+    if (delim.size() == 0) {
+        __panic("read_until: the delimiter is empty");
+    }
+    if (limit < 1) {
+        __panic("read_until(" + limit.to_str() + "): the limit must be at least 1");
+    }
+    int last = delim[delim.size() - 1];
+    bytes out = [];
+    while (out.size() < limit) {
+        if (s.at == s.end) {
+            if (fill(s)? == 0) {
+                break;
+            }
+        }
+        int b = s.buf[s.at];
+        s.at = s.at + 1;
+        out.push(b);
+        // Only a byte that could end the delimiter is worth comparing on.
+        if (b == last && out.ends_with(delim)) {
+            break;
+        }
+    }
+    return Result<bytes, Error>.Ok(out);
+}
+
+Result<bool, Error> stream_close(Stream s) {
+    if (!s.live) {
+        return Result<bool, Error>.Ok(true);
+    }
+    s.live = false;
+    bytes none = [];
+    s.buf = none;
+    s.at = 0;
+    s.end = 0;
+    if (s.fd <= 2) {
+        return Result<bool, Error>.Ok(true);
+    }
+    int r = __close(s.fd);
+    if (r < 0 && r != -4) {
+        return Result<bool, Error>.Err(from_errno(-r));
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+// All of `b` to `fd`, across short writes and signals.
+Result<int, Error> write_all(int fd, bytes b) {
+    int off = 0;
+    while (off < b.size()) {
+        int r = __write(fd, b, off, b.size() - off);
+        if (r == -4) {
+            continue;
+        }
+        if (r < 0) {
+            return Result<int, Error>.Err(from_errno(-r));
+        }
+        // A write of nothing to a regular file makes no progress and never
+        // will; calling it an I/O error beats looping forever.
+        if (r == 0) {
+            return Result<int, Error>.Err(from_errno(5));
+        }
+        off = off + r;
+    }
+    return Result<int, Error>.Ok(off);
+}
+
+// The same, from a str: text is written without being copied into bytes.
+Result<int, Error> write_all_str(int fd, str b) {
+    int off = 0;
+    while (off < b.size()) {
+        int r = __write_str(fd, b, off, b.size() - off);
+        if (r == -4) {
+            continue;
+        }
+        if (r < 0) {
+            return Result<int, Error>.Err(from_errno(-r));
+        }
+        if (r == 0) {
+            return Result<int, Error>.Err(from_errno(5));
+        }
+        off = off + r;
+    }
+    return Result<int, Error>.Ok(off);
+}
+
+// --- whole files ---------------------------------------------------------
+/// The whole file, exactly: every byte, NULs and all, with no decoding.
+pub Result<bytes, Error> read_bytes(str path) {
+    File f = open(path)?;
+    Result<bytes, Error> got = f.read_all();
+    // Closing a descriptor that was only read cannot lose data, so its
+    // result is not allowed to replace the read's.
+    Result<bool, Error> closed = f.close();
+    return got;
+}
+
+/// The whole file, as text. A file that is not valid UTF-8 is
+/// `Err(InvalidUtf8)`; `read_bytes` reads it anyway.
+///
+/// Text or octets is decided here, at the door, because `bytes.utf8()` is
+/// the language's only way from octets to a `str` and it is strict. That
+/// makes `read` the lower-regret half of a choice the language has not
+/// frozen (reference §3.10): if `str` stays able to hold any bytes, `read`
+/// can later stop checking and no program breaks; if `str` becomes always
+/// valid, a `read` that had never checked would have to start failing.
+pub Result<str, Error> read(str path) {
+    bytes b = read_bytes(path)?;
+    match (b.utf8()) {
+        case Some(str s): {
+            return Result<str, Error>.Ok(s);
+        }
+        case None: {
+            return Result<str, Error>.Err(Error.InvalidUtf8);
+        }
+    }
+}
+
+// Open for `flags`, write `data`, close; the close counts, because it is
+// where a delayed write failure surfaces.
+Result<int, Error> write_whole(str path, int flags, str data) {
+    int fd = __open(path, flags, 438);
+    if (fd < 0) {
+        return Result<int, Error>.Err(from_errno(-fd));
+    }
+    Result<int, Error> wrote = write_all_str(fd, data);
+    int r = __close(fd);
+    match (wrote) {
+        case Ok(int n): {
+            if (r < 0 && r != -4) {
+                return Result<int, Error>.Err(from_errno(-r));
+            }
+            return Result<int, Error>.Ok(n);
+        }
+        case Err(Error e): {
+            return Result<int, Error>.Err(e);
+        }
+    }
 }
 
 /// Replace the file's contents with `data`, creating it if it is missing.
 /// Returns the number of bytes written.
 pub Result<int, Error> write(str path, str data) {
-    int e = __file_write(path, data);
-    if (e != 0) {
-        return Result<int, Error>.Err(from_errno(e));
-    }
-    return Result<int, Error>.Ok(data.size());
+    return write_whole(path, 1 | 64 | 512, data);
 }
 
 /// Add `data` to the end of the file, creating it if it is missing.
 pub Result<int, Error> append(str path, str data) {
-    int e = __file_append(path, data);
-    if (e != 0) {
-        return Result<int, Error>.Err(from_errno(e));
-    }
-    return Result<int, Error>.Ok(data.size());
+    return write_whole(path, 1 | 64 | 1024, data);
 }
 
+/// Replace the file's contents with the octets `data`.
+pub Result<int, Error> write_bytes(str path, bytes data) {
+    File f = open(path, mode: Mode.Write)?;
+    Result<int, Error> wrote = f.write(data);
+    Result<bool, Error> closed = f.close();
+    int n = wrote?;
+    bool ok = closed?;
+    return Result<int, Error>.Ok(n);
+}
+
+// --- the standard streams --------------------------------------------------
 /// The next line of standard input without its line ending, or None at the
 /// end of input. A `\r\n` ending is removed whole, so input from Windows
-/// reads the same.
+/// reads the same, and a last line with no newline is still a line.
+///
+/// **It never reads past the line it returns**, so whatever reads standard
+/// input next -- `io.stdin()`, or a program this one starts -- sees the
+/// rest. That costs a module with no state its buffer: on a pipe or a
+/// terminal it reads one byte at a time, the way a shell's `read` does and
+/// for the same reason. On a regular file (`prog < input.txt`) it reads
+/// ahead in a growing chunk and seeks back to just past the newline, which
+/// is two system calls a line whatever the line's length. For a large
+/// piped input, `io.stdin()` and `read_until` buffer properly.
+///
+/// A read error ends the input, and so does a line that is not valid
+/// UTF-8: an `Option` has no room to say why, which is the trade
+/// `parse_int` makes too. A program that must tell those apart reads
+/// `io.stdin()` and decodes for itself.
 pub Option<str> read_line() {
-    List<str> got = [];
-    if (__stdin_line(got) == 0) {
+    bytes line = [];
+    bool any = false;
+    int here = __seek(0, 0, 1);
+    if (here >= 0) {
+        bytes chunk = [0; 128];
+        int consumed = 0;
+        bool done = false;
+        while (!done) {
+            int r = __read(0, chunk, 0, chunk.size());
+            if (r == -4) {
+                continue;
+            }
+            if (r <= 0) {
+                break;
+            }
+            any = true;
+            int i = 0;
+            while (i < r && chunk[i] != 10) {
+                i = i + 1;
+            }
+            if (i < r) {
+                line.extend(chunk.substr(0, i));
+                // Hand back everything after the newline. A seekable
+                // descriptor that then refuses the seek has nothing better
+                // to offer; the rest of that chunk is lost either way.
+                int back = __seek(0, here + consumed + i + 1, 0);
+                done = true;
+            } else {
+                line.extend(chunk.substr(0, r));
+                consumed = consumed + r;
+                // A long line is read in fewer, larger pieces.
+                if (chunk.size() < 65536) {
+                    chunk = [0; chunk.size() * 2];
+                }
+            }
+        }
+    } else {
+        bytes one = [0];
+        while (true) {
+            int r = __read(0, one, 0, 1);
+            if (r == -4) {
+                continue;
+            }
+            if (r <= 0 || one[0] == 10) {
+                any = any || r > 0;
+                break;
+            }
+            any = true;
+            line.push(one[0]);
+        }
+    }
+    if (!any) {
         return Option<str>.None;
     }
-    return Option<str>.Some(got[0]);
+    if (line.size() > 0 && line[line.size() - 1] == 13) {
+        int cr = line.pop();
+    }
+    match (line.utf8()) {
+        case Some(str s): {
+            return Option<str>.Some(s);
+        }
+        case None: {
+            return Option<str>.None;
+        }
+    }
 }
 
-/// Write to standard error. Standard output is flushed first, so the two
-/// interleave in the order the program wrote them.
+/// Write a line to standard error. Standard output is flushed first, so the
+/// two interleave in the order the program wrote them. A failure to write
+/// to standard error has nobody left to report to, so it is not reported.
 pub void eprint(str s) {
-    __stderr_write(s + "\n");
+    __out_flush();
+    Result<int, Error> wrote = write_all_str(2, s + "\n");
 }
