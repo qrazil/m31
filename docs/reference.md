@@ -681,6 +681,13 @@ A parameter may have a default, which makes it optional:
 int scale(int v, int by = 2) { return v * by; }
 ```
 
+A default — of a parameter or of a field (§3.3) — is evaluated afresh at
+each call or construction that leaves it out, but it **belongs to the
+declaration**: it is checked with the declaring module's names and privacy,
+so a `pub` type may default a field to one of its module's private types,
+and it sees no local, parameter or receiver field of whoever is calling. It
+means what it meant where it was written.
+
 **Mandatory parameters are positional. Optional ones are named.** There is
 no choice about it, so one call is written exactly one way:
 

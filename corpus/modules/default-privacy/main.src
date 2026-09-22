@@ -1,0 +1,14 @@
+// A public type whose field defaults to a private one is constructible
+// from another module: the default is evaluated where it was written.
+import lib;
+
+// A `seed` of this module's own, which the defaults must not find.
+int seed() {
+    return 1;
+}
+
+lib.Outer o = lib.Outer(1);
+print(o.k());
+print(o.s);
+print(lib.bump(2));
+print(lib.bump(2, by: seed()));

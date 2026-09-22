@@ -3307,6 +3307,7 @@ impl Lowerer {
                     return Err(Diag::new(*span, format!("unknown function `{name}`")));
                 };
                 let params = sig.params.clone();
+                let module = sig.module.clone();
                 if sig.ret != Ty::Void {
                     return Err(Diag::new(
                         *span,
@@ -3316,7 +3317,7 @@ impl Lowerer {
                 let slots = self.bind_args(name, &params, args, *span)?;
                 let mut vals = Vec::new();
                 for (a, p) in slots.iter().zip(params.iter()) {
-                    let v = self.lower_expr_as(a, p.ty)?;
+                    let v = self.lower_slot(a, p, &module)?;
                     if !self.assignable(v.ty, p.ty) {
                         return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
                     }
@@ -3816,12 +3817,12 @@ impl Lowerer {
     fn lower_static_call(&mut self, key: &str, args: &Args, span: Span) -> Result<Val, Diag> {
         let sig = self.sigs.get(key).expect("checked by the caller");
         let params = sig.params.clone();
+        let module = sig.module.clone();
         let ret = sig.ret;
         let slots = self.bind_args(key, &params, args, span)?;
-        let slots: Vec<Expr> = slots.into_iter().cloned().collect();
         let mut vals = Vec::new();
         for (a, p) in slots.iter().zip(params.iter()) {
-            let v = self.lower_expr_as(a, p.ty)?;
+            let v = self.lower_slot(a, p, &module)?;
             if !self.assignable(v.ty, p.ty) {
                 return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
             }
@@ -4546,6 +4547,44 @@ impl Lowerer {
             ));
         }
         self.lower_call(&key, args, span)
+    }
+
+    /// Lower one argument of a call or a construction, as `bind_args` slotted
+    /// it.
+    ///
+    /// An argument the caller wrote is the caller's expression. A DEFAULT is
+    /// the declaration's, and means what it meant where it was written: it
+    /// is lowered with the declaring module's names and privacy, and sees no
+    /// local and no receiver field. It used to be lowered as if the caller
+    /// had written it -- so a public type whose field defaulted to a private
+    /// one could not be constructed outside its module, a bare call in a
+    /// default resolved against the caller's module, and a default naming
+    /// `y` read whatever the caller happened to call `y`.
+    fn lower_slot(&mut self, a: &Expr, p: &Param, module: &str) -> Result<Val, Diag> {
+        let is_default = p.default.as_ref().is_some_and(|d| std::ptr::eq(d, a));
+        if !is_default {
+            return self.lower_expr_as(a, p.ty);
+        }
+        let module = if module.is_empty() {
+            self.cur_module.clone()
+        } else {
+            module.to_string()
+        };
+        let saved_module = std::mem::replace(&mut self.cur_module, module.clone());
+        let saved_scopes = std::mem::replace(&mut self.scopes, vec![HashMap::new()]);
+        let saved_recv = self.recv.take();
+        let r = self.lower_expr_as(a, p.ty).and_then(|v| {
+            if self.assignable(v.ty, p.ty) {
+                Ok(v)
+            } else {
+                Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)))
+            }
+        });
+        self.cur_module = saved_module;
+        self.scopes = saved_scopes;
+        self.recv = saved_recv;
+        // Its span is a line of the declaring file, so the error is too.
+        r.map_err(|d| d.in_module(&module))
     }
 
     /// Lower an expression where the wanted type is known.
@@ -5317,6 +5356,7 @@ impl Lowerer {
                     ));
                 };
                 let params = sig.params.clone();
+                let module = sig.module.clone();
                 let ret = sig.ret;
                 let slots = self.bind_args(&key, &params, args, *span)?;
 
@@ -5324,7 +5364,7 @@ impl Lowerer {
                 // like every other argument (docs/ir-v0.md §5.1).
                 let mut vals = vec![o.val()];
                 for (a, p) in slots.iter().zip(params.iter()) {
-                    let v = self.lower_expr_as(a, p.ty)?;
+                    let v = self.lower_slot(a, p, &module)?;
                     if !self.assignable(v.ty, p.ty) {
                         return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
                     }
@@ -6164,6 +6204,7 @@ impl Lowerer {
         let name = self.typedefs[tid as usize].name.clone();
         let name = name.as_str();
         let fields = self.field_params[tid as usize].clone();
+        let module = self.type_module[tid as usize].clone();
         let slots = self.bind_args(name, &fields, args, span)?;
 
         let mut given: Vec<Option<Val>> = Vec::new();
@@ -6172,7 +6213,7 @@ impl Lowerer {
             // is an expression lowered here, at each construction, so a
             // literal default builds a fresh collection for every object
             // rather than one shared by all of them.
-            let v = self.lower_expr_as(e, f.ty)?;
+            let v = self.lower_slot(e, f, &module)?;
             if !self.assignable(v.ty, f.ty) {
                 return Err(Diag::new(
                     e.span(),
@@ -6459,6 +6500,7 @@ impl Lowerer {
             return Err(Diag::new(span, format!("unknown function `{name}`")));
         };
         let params = sig.params.clone();
+        let module = sig.module.clone();
         let ret = sig.ret;
         let sig_is_prim = sig.is_prim;
 
@@ -6466,7 +6508,7 @@ impl Lowerer {
 
         let mut vals = Vec::new();
         for (a, p) in slots.iter().zip(params.iter()) {
-            let v = self.lower_expr_as(a, p.ty)?;
+            let v = self.lower_slot(a, p, &module)?;
             if !self.assignable(v.ty, p.ty) {
                 return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
             }

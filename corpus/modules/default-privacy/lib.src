@@ -1,0 +1,23 @@
+// Defaults are the declaration's: they use this module's private type and
+// private function, and a bare call resolves here, not in the caller.
+type Inner {
+    int k = 5;
+}
+
+int seed() {
+    return 40;
+}
+
+pub type Outer {
+    int n;
+    Inner g = Inner();
+    int s = seed();
+}
+
+pub int Outer.k() {
+    return g.k;
+}
+
+pub int bump(int v, int by = seed()) {
+    return v + by;
+}

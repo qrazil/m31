@@ -1,0 +1,4 @@
+corpus/errors/605-default-sees-no-locals.src:3:15: unknown variable `y`
+  |
+3 | int f(int b = y) {
+  |               ^
