@@ -35,8 +35,10 @@ and no `default` -- which is what makes `Option<T>` and `Result<T, E>`
 ordinary library types rather than language primitives.
 Structural interfaces dispatched through a vtable in the object header.
 Embedding with forwarder methods synthesised to a fixpoint. `distinct` types,
-erased before the IR so they cost nothing. Monomorphised generics on types
-and functions.
+erased before the IR so they cost nothing. Monomorphised generics on types,
+functions and methods (`T Box<T>.get()`, `T Picker.pick<T>(..)`), with type
+arguments inferred from the arguments and from where the value goes, and
+usable across modules.
 
 **Collections.** `Array<T>` fixed-length, `List<T>` growable, `Map<K, V>`
 open-addressed with tombstones. One name per question across all of them and
@@ -62,7 +64,9 @@ and backed at run time by a transitive uniqueness check: the whole graph
 reachable from a moved value must be unreachable from anywhere else.
 
 **Errors.** Built-in `Option<T>` and `Result<T, E>`, the `?` operator with
-exact error-type matching, and a discarded `Result` as a compile error. The
+exact error-type matching, and a discarded `Result` as a compile error.
+`Result<void, E>` for a failure with nothing to return, and `trap(msg)` for
+a program to stop on its own bugs. The
 one thing left is what `E` should be in a standard library, which
 `docs/errors-decision.md` says to settle last -- once there is a library to
 say what actually fails.
@@ -350,6 +354,24 @@ justify new surface that has to be frozen.
 
 `= []` remains the option worth revisiting, and only alongside real
 collection literals -- `[1, 2, 3]` is the part that would earn it.
+
+**A local may not take a function's name, builtins included.** Asked for
+by the standard library's authors: a private helper `digits` blocked every
+local called `digits` in its module, and the builtin `close` blocked a local
+`close`. The case for allowing it is real -- today a function is only ever
+*called*, so `digits` and `digits(..)` cannot be confused by the compiler,
+and Java keeps methods and variables in separate namespaces for exactly that
+reason. It was declined anyway, on three grounds. The rule's own rationale
+covers it: "a name means one thing where a reader can see it" is about the
+reader, and a function listing `digits` and `digits(x)` side by side means
+two things by one name (docs/types.md §5b lists "not a function" among what
+nothing shadows, on purpose). Closures are on this roadmap (§5), and the day
+a function can be a value, `digits` alone becomes genuinely ambiguous --
+so allowing it now is a breaking change waiting to happen, where allowing it
+later, if closures never come, is additive. And the cost is a rename, which
+is the cost the no-shadowing rule always charges. The builtin names are the
+sharpest edge, so the builtin set stays deliberately small: `print`,
+`concat`, `clone`, `send`, `recv`, `close`, `trap`.
 
 **`str.size()` counts BYTES, not characters.** `"héllo".size()` is 6, and
 `substr` takes byte offsets. Go makes the same choice. A `str` carries bytes
