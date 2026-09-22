@@ -1,0 +1,73 @@
+// Inside a method, a sibling method is called by its bare name, resolved the
+// way a bare field name is: against the receiver's type. Nothing shadows
+// anything, so `total()` can only mean one method -- and a bare call that
+// could also be a function is refused rather than ranked.
+
+type Account {
+    str owner;
+    List<int> moves = [];
+}
+
+void Account.deposit(int amount) {
+    moves.push(amount);
+}
+
+// A sibling with a void result, and one with named optional arguments,
+// called by the ordinary argument rule.
+void Account.withdraw(int amount, bool fee = false) {
+    deposit(-amount);
+    if (fee) {
+        deposit(-1);
+    }
+}
+
+int Account.total() {
+    int t = 0;
+    for (int m in moves) {
+        t = t + m;
+    }
+    return t;
+}
+
+bool Account.overdrawn() {
+    return total() < 0;
+}
+
+// Recursion through a sibling: `count_from` calls itself bare.
+int Account.count_from(int i) {
+    if (i >= moves.size()) {
+        return 0;
+    }
+    return 1 + count_from(i + 1);
+}
+
+str Account.report() {
+    str state = "ok";
+    if (overdrawn()) {
+        state = "overdrawn";
+    }
+    return owner + ": " + str(total()) + " over " + str(count_from(0)) + " moves, " + state;
+}
+
+// A free function whose name no method of Account takes is still called
+// bare, as always.
+int clamp(int v) {
+    if (v < 0) {
+        return 0;
+    }
+    return v;
+}
+
+int Account.available() {
+    return clamp(total());
+}
+
+Account a = Account("ana");
+a.deposit(10);
+a.withdraw(3);
+a.withdraw(4, fee: true);
+print(a.total());
+print(a.report());
+a.withdraw(5);
+print(a.report());
+print(a.available());

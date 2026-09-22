@@ -1,0 +1,66 @@
+// In a method on a distinct type, `this` is the distinct value itself: an
+// int for `distinct int`, a list for `distinct List<int>`. A method the
+// distinct type declares is called before any built-in method of its base,
+// so `Price.show()` is reachable even though `int` has built-in methods.
+
+distinct int Price;
+distinct str Email;
+distinct List<int> Bag;
+
+str Price.show() {
+    return "$" + str(int(this));
+}
+
+// Arithmetic on `this` stays in the distinct type, as it does anywhere.
+Price Price.double() {
+    return this + this;
+}
+
+bool Price.dearer(Price o) {
+    return this > o;
+}
+
+str Email.domain() {
+    List<str> parts = str(this).split("@");
+    return parts[1];
+}
+
+// A distinct collection's built-in methods are reached through `this`: they
+// are not methods the type declares, so they are not called bare.
+Bag Bag.with(int x) {
+    this.push(x);
+    return this;
+}
+
+int Bag.total() {
+    int t = 0;
+    for (int x in this) {
+        t = t + x;
+    }
+    return t;
+}
+
+int Bag.count() {
+    return this.size();
+}
+
+// And a declared sibling is called bare, as on any type.
+str Bag.summary() {
+    return str(count()) + " items, total " + str(total());
+}
+
+Price p = Price(250);
+print(p.show());
+print(p.double().show());
+print(p.dearer(Price(100)));
+print(Price(1).dearer(p));
+
+Email e = Email("ana@example.org");
+print(e.domain());
+
+Bag b = [1, 2, 3];
+print(b.with(4).with(5).total());
+print(b.count());
+print(b.summary());
+Bag empty = [];
+print(empty.summary());

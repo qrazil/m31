@@ -13,12 +13,12 @@ void round(str text) {
                     print(s);
                 }
                 case Err(json.Error e): {
-                    print("stringify error: " + json.message(e));
+                    print("stringify error: " + e.to_str());
                 }
             }
         }
         case Err(json.Error e): {
-            print("error: " + json.message(e));
+            print("error: " + e.to_str());
         }
     }
 }
@@ -31,12 +31,12 @@ void pretty(str text, int indent) {
                     print(s);
                 }
                 case Err(json.Error e): {
-                    print("stringify error: " + json.message(e));
+                    print("stringify error: " + e.to_str());
                 }
             }
         }
         case Err(json.Error e): {
-            print("error: " + json.message(e));
+            print("error: " + e.to_str());
         }
     }
 }
@@ -47,7 +47,7 @@ void written(json.Value v) {
             print(s);
         }
         case Err(json.Error e): {
-            print("stringify error: " + json.message(e));
+            print("stringify error: " + e.to_str());
         }
     }
 }
@@ -137,12 +137,12 @@ match (json.parse(opens + closes)) {
                 print(s == opens + closes);
             }
             case Err(json.Error e): {
-                print(json.message(e));
+                print(e);
             }
         }
     }
     case Err(json.Error e): {
-        print(json.message(e));
+        print(e);
     }
 }
 round("[" + opens + "1" + closes + "]");
@@ -151,7 +151,7 @@ match (json.parse(opens + "[]" + closes)) {
         print("10001 with an empty innermost: ok");
     }
     case Err(json.Error e): {
-        print(json.message(e));
+        print(e);
     }
 }
 round("[ " + opens + "1" + closes + "]");
@@ -228,6 +228,6 @@ match (json.parse("{\"name\": \"lang\", \"tags\": [\"a\", \"b\"], \"n\": 3}")) {
         }
     }
     case Err(json.Error e): {
-        print(json.message(e));
+        print(e);
     }
 }

@@ -234,7 +234,9 @@ each is a freeze decision:
   - **A name for the receiver.** A method cannot name its receiver, so an
     enum method cannot `match` on itself and no method can pass itself to a
     function. `io.Error.to_str()` cannot be written because of it; so cannot
-    any `describe()` on any enum.
+    any `describe()` on any enum. *Done: `this`, reference §4.3. Every
+    stdlib error type now has a `to_str()`, so `print(e)` prints it, and the
+    free `message(e)` functions are gone.*
 
 Float formatting and parsing (`print` of a float, `parse_float`) are the
 other C that remains above the OS. Both are pure computation -- shortest

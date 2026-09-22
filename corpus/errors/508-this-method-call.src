@@ -1,0 +1,16 @@
+// A method of the receiver is called by its bare name, the way a field is
+// read, so `this.area()` is a second spelling and is refused.
+type Rect {
+    int w;
+    int h;
+}
+
+int Rect.area() {
+    return w * h;
+}
+
+int Rect.twice() {
+    return 2 * this.area();
+}
+
+print(Rect(2, 3).twice());

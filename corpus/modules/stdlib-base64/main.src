@@ -9,7 +9,7 @@ void show(Result<str, base64.Error> r) {
             print("ok " + s);
         }
         case Err(base64.Error e): {
-            print("error: " + base64.message(e));
+            print("error: " + e.to_str());
         }
     }
 }
@@ -43,7 +43,7 @@ match (base64.decode("AAAA")) {
         print(s == "\0\0\0");
     }
     case Err(base64.Error e): {
-        print(base64.message(e));
+        print(e);
     }
 }
 // CPython's one leniency: unused low bits need not be zero.
@@ -114,7 +114,7 @@ while (k <= mixed.size()) {
                 }
             }
             case Err(base64.Error e): {
-                print(base64.message(e));
+                print(e);
             }
         }
     }
@@ -171,6 +171,6 @@ match (base64.decode("77u/")) {
         print(s.size().to_str() + " " + s.byte_at(0).to_str() + " " + s.byte_at(1).to_str() + " " + s.byte_at(2).to_str());
     }
     case Err(base64.Error e): {
-        print(base64.message(e));
+        print(e);
     }
 }

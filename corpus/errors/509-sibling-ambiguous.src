@@ -1,0 +1,16 @@
+// Inside a method, a bare `size()` could be the sibling method or the free
+// function. Neither may win quietly: adding the method would otherwise
+// redirect every existing call to the function.
+type Stack {
+    List<int> items = [];
+}
+
+int size(List<int> xs) {
+    return xs.size();
+}
+
+int Stack.size() {
+    return size(items);
+}
+
+print(Stack().size());

@@ -46,6 +46,11 @@ pub enum Tok {
     KwIn,
     KwTrue,
     KwFalse,
+    /// `this`, the receiver of an instance method. A keyword rather than a
+    /// predeclared name so that nothing can declare it: a local called
+    /// `this` would make the one word that always means "the receiver"
+    /// mean something else in part of a method.
+    KwThis,
 
     // punctuation
     LParen,
@@ -137,6 +142,7 @@ impl Tok {
             Tok::Dot => ".",
             Tok::KwTrue => "true",
             Tok::KwFalse => "false",
+            Tok::KwThis => "this",
             Tok::LParen => "(",
             Tok::RParen => ")",
             Tok::LBrace => "{",
@@ -504,6 +510,7 @@ impl<'a> Lexer<'a> {
             "in" => Tok::KwIn,
             "true" => Tok::KwTrue,
             "false" => Tok::KwFalse,
+            "this" => Tok::KwThis,
             _ => Tok::Ident(w.to_string()),
         }
     }

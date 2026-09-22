@@ -1,0 +1,74 @@
+// `return this;` hands back the receiver, which the method only borrowed.
+// A return is owned (+1), so the lowering must retain it: every case below
+// is one where a missing retain frees an object still in use, or an extra
+// one leaks it -- and the refcount check at exit sees both.
+
+type Counter {
+    int n = 0;
+}
+
+Counter Counter.bump() {
+    n = n + 1;
+    return this;
+}
+
+// Returned from inside a loop and a branch, not only at the end.
+Counter Counter.bump_to(int limit) {
+    while (true) {
+        if (n >= limit) {
+            return this;
+        }
+        n = n + 1;
+    }
+    return this;
+}
+
+type Builder {
+    List<str> parts = [];
+}
+
+Builder Builder.add(str s) {
+    parts.push(s);
+    return this;
+}
+
+str Builder.build() {
+    return parts.join(" ");
+}
+
+// Chained on a local: every link is the same object.
+Counter c = Counter();
+c.bump().bump().bump();
+print(c.n);
+
+// Chained on a temporary: the only reference is the chain's own.
+print(Counter().bump().bump().n);
+
+// Kept: the local and the method's return are the same object.
+Counter d = c.bump();
+d.bump();
+print(c.n);
+print(d.n);
+
+// Discarded outright.
+Counter().bump();
+c.bump_to(10);
+print(c.n);
+print(Counter().bump_to(3).n);
+
+// Stored into a container, many times over.
+List<Counter> kept = [];
+int i = 0;
+while (i < 5) {
+    kept.push(c.bump());
+    i = i + 1;
+}
+print(kept.size());
+print(kept[0].n);
+print(c.n);
+
+print(Builder().add("one").add("two").add("three").build());
+Builder b = Builder();
+b.add("x");
+print(b.add("y").build());
+print(b.parts.size());

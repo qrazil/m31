@@ -1,0 +1,6 @@
+// A free function has no receiver.
+int helper() {
+    print(this);
+    return 1;
+}
+print(helper());

@@ -173,15 +173,18 @@ where the return type and the receiver fight for the front of the line).
 
 ### Fields are bare, because nothing shadows anything
 
-There is **no `this`**. Inside a method a field is reached by its bare name.
-That is only safe given the rule that pays for it:
+Inside a method a field is reached by its bare name, and so is a sibling
+method; `this.x` and `this.m()` are refused as second spellings. `this`
+itself names only the **whole** receiver -- what a method needs to match on
+an enum receiver, return itself, or pass itself on (reference §4.3). The bare
+forms are only safe given the rule that pays for them:
 
 > **Nothing shadows anything, anywhere.** Not an outer local, not a
 > parameter, not a function, not a type, not a field of the receiver.
 > Shadowing is a compile error; rename one of them.
 
 A bare name can therefore only ever mean one thing, so there is nothing for a
-`this` to disambiguate. The rule also deletes the whole class of bugs where a
+`this.` prefix to disambiguate. The rule also deletes the whole class of bugs where a
 reader and the compiler disagree about which `x` is meant — Java allows bare
 field access *and* shadowing, and pays for it with a culture of `this.`
 conventions and `m_` prefixes.

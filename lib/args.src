@@ -155,20 +155,20 @@ pub type Parser {
 // --- declaring ---------------------------------------------------------------
 /// A switch: absent is false, present is true.
 pub void Parser.flag(str name, str short = "", str help = "") {
-    declare(core_of(core, prog, summary), name, short, help, "", "", "flag");
+    declare(state(), name, short, help, "", "", "flag");
 }
 
 /// One value, as a str. `default` is what `r.value` answers when it is left
 /// out; without one, it answers None.
 pub void Parser.value(str name, str short = "", str help = "", str placeholder = "", str default = "") {
-    declare(core_of(core, prog, summary), name, short, help, placeholder, default, "value");
+    declare(state(), name, short, help, placeholder, default, "value");
 }
 
 /// Every operand up to the next dash, in the order given. Absent is an empty
 /// list; given with no operands is a usage error, because an empty list is
 /// what leaving it out already means.
 pub void Parser.values(str name, str short = "", str help = "", str placeholder = "") {
-    declare(core_of(core, prog, summary), name, short, help, placeholder, "", "values");
+    declare(state(), name, short, help, placeholder, "", "values");
 }
 
 /// One value, which must be a whole number. `default` is written as it would
@@ -177,7 +177,7 @@ pub void Parser.integer(str name, str short = "", str help = "", str placeholder
     if (default != "" && default.parse_int().is_none()) {
         __panic("integer(): --" + name + " default: '" + default + "' is not a whole number");
     }
-    declare(core_of(core, prog, summary), name, short, help, placeholder, default, "integer");
+    declare(state(), name, short, help, placeholder, default, "integer");
 }
 
 /// One value, which must be a number; a whole number is accepted and
@@ -186,24 +186,24 @@ pub void Parser.number(str name, str short = "", str help = "", str placeholder 
     if (default != "" && default.parse_float().is_none()) {
         __panic("number(): --" + name + " default: '" + default + "' is not a number");
     }
-    declare(core_of(core, prog, summary), name, short, help, placeholder, default, "number");
+    declare(state(), name, short, help, placeholder, default, "number");
 }
 
 /// A positional that must be given.
 pub void Parser.positional(str name, str help = "", str placeholder = "") {
-    declare_pos(core_of(core, prog, summary), name, help, placeholder, "", "positional");
+    declare_pos(state(), name, help, placeholder, "", "positional");
 }
 
 /// A positional that may be left out. The default is positional, not
 /// `default:`: for a positional the default IS the operand when it is absent,
 /// and a caller who leaves it out has not said what that means.
 pub void Parser.optional(str name, str fallback, str help = "", str placeholder = "") {
-    declare_pos(core_of(core, prog, summary), name, help, placeholder, fallback, "optional");
+    declare_pos(state(), name, help, placeholder, fallback, "optional");
 }
 
 /// Every remaining positional. Zero of them is an empty list, not an error.
 pub void Parser.tail(str name, str help = "", str placeholder = "") {
-    declare_pos(core_of(core, prog, summary), name, help, placeholder, "", "tail");
+    declare_pos(state(), name, help, placeholder, "", "tail");
 }
 
 /// One command: the word typed after a dash, one line about it, and the
@@ -213,28 +213,38 @@ pub void Parser.tail(str name, str help = "", str placeholder = "") {
 ///     args.Parser add = p.command("addrepo", "create a bare repository", short: "a");
 ///     add.positional("name");
 pub Parser Parser.command(str word, str about, str short = "") {
-    return command(core_of(core, prog, summary), word, about, short);
+    return add_command(state(), word, about, short);
 }
 
 // --- the generated text --------------------------------------------------------
 /// The one `usage:` line. `[options]` stands in for the table rather than
 /// spelling every option out.
 pub str Parser.usage() {
-    return usage_line(core_of(core, prog, summary));
+    return usage_line(state());
 }
 
 /// The whole help text: the usage line, the summary, then a table of the
 /// commands, the arguments and the options, in declaration order. No trailing
 /// newline.
 pub str Parser.help() {
-    return help_text(core_of(core, prog, summary));
+    return help_text(state());
 }
 
 // --- parsing -------------------------------------------------------------------
 /// Parse `argv` -- the arguments WITHOUT the program's name. The whole line is
 /// validated before anything is returned.
 pub Result<Parsed, UsageError> Parser.parse(List<str> argv) {
-    return parse_line(core_of(core, prog, summary), argv);
+    return parse_line(state(), argv);
+}
+
+// A parser's declarations, made on first use. Private to this module, and a
+// method rather than a free function, so each public method above reaches it
+// with a bare `state()`.
+Core Parser.state() {
+    if (core.size() == 0) {
+        core.push(Core(prog, summary));
+    }
+    return core[0];
 }
 
 /// What `parse` answers, and what each command on the line answers. Built
@@ -390,18 +400,6 @@ type Clause {
 }
 
 // --- the private half ----------------------------------------------------------
-// A parser's declarations, made on first use.
-Core core_of(List<Core> core, str prog, str summary) {
-    if (core.size() == 0) {
-        core.push(Core(prog, summary));
-    }
-    return core[0];
-}
-
-Core core_p(Parser p) {
-    return core_of(p.core, p.prog, p.summary);
-}
-
 // Record one option, checking everything that can only be wrong in the
 // program. These trap: nothing a user types can reach them.
 void declare(Core k, str name, str short, str help, str placeholder, str default, str kind) {
@@ -467,7 +465,7 @@ void declare_pos(Core k, str name, str help, str placeholder, str default, str k
     k.pos.push(Pos(name, help, shown, default, kind));
 }
 
-Parser command(Core k, str word, str about, str short) {
+Parser add_command(Core k, str word, str about, str short) {
     if (k.is_command) {
         __panic("command(): '" + k.prog + "' is itself a command -- the grammar is two deep, so its arguments are options (--" + word + "), not commands");
     }
@@ -493,7 +491,7 @@ Parser command(Core k, str word, str about, str short) {
         }
     }
     Parser sub = Parser(k.prog + " -" + word, summary: about);
-    core_p(sub).is_command = true;
+    sub.state().is_command = true;
     k.words.push(word);
     k.cmds.push(sub);
     if (short != "") {
@@ -689,7 +687,7 @@ Result<List<Clause>, UsageError> split_line(Core k, List<str> argv) {
         }
         str word = command_for(k, tok)?;
         int at = k.words.index_of(word).or(0);
-        clauses.push(Clause(core_p(k.cmds[at]), word, []));
+        clauses.push(Clause(k.cmds[at].state(), word, []));
     }
     return Result<List<Clause>, UsageError>.Ok(clauses);
 }

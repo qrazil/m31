@@ -1,0 +1,4 @@
+corpus/errors/506-this-field-read.src:8:16: write `n`, not `this.n`: a field of the receiver is reached by its bare name
+  |
+8 |     return this.n;
+  |                ^

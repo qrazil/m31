@@ -1091,3 +1091,38 @@ fn a_bytes_literal_builds_through_push() {
     assert!(out.contains("rt_bytes_new"), "{out}");
     assert_eq!(out.matches("rt_bytes_push").count(), 2, "{out}");
 }
+
+// ---- `this` ---------------------------------------------------------
+
+#[test]
+fn this_is_a_keyword() {
+    assert_eq!(toks("this"), vec![Tok::KwThis, Tok::Eof]);
+    // Only the whole word: a name that merely starts with it is a name.
+    assert_eq!(
+        toks("thisone"),
+        vec![Tok::Ident("thisone".to_string()), Tok::Eof]
+    );
+}
+
+#[test]
+fn reading_this_is_borrowed_and_returning_it_retains_once() {
+    // The receiver is borrowed like a parameter, so using it costs nothing;
+    // a return is owned, so `return this;` must add exactly one reference
+    // and release none.
+    let out = ir("type C { int n = 0; }\n\
+                  C C.me() { return this; }\n\
+                  print(C().me().n);");
+    let me = out
+        .split("func ")
+        .find(|f| f.starts_with("C.me"))
+        .expect("C.me is emitted");
+    assert_eq!(me.matches("rc_inc").count(), 1, "{me}");
+    assert_eq!(me.matches("rc_dec").count(), 0, "{me}");
+}
+
+#[test]
+fn the_formatter_prints_this() {
+    let src = "type C { int n = 0; }\nC C.me() {\n    return this;\n}\n";
+    let out = crate::reformat(src, "t").expect("formats");
+    assert!(out.contains("return this;"), "{out}");
+}

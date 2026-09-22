@@ -60,16 +60,10 @@ pub enum Error {
     Separator(str);
 }
 
-// Where the parser is. A struct, because a function returns one value and
-// reading a field has to answer both the field and how far it read.
-type Scan {
-    str text;
-    int at = 0;
-}
-
-/// A sentence saying what was wrong.
-pub str message(Error e) {
-    match (e) {
+/// A sentence saying what was wrong. A method named `to_str`, so `print(e)`
+/// prints it.
+pub str Error.to_str() {
+    match (this) {
         case Separator(str sep): {
             if (sep.size() != 1 || sep.byte_at(0) > 127) {
                 return "csv separator must be one ASCII character, not \"" + sep + "\"";
@@ -77,6 +71,13 @@ pub str message(Error e) {
             return "csv separator may not be a quote or a line break: the format already gives those a meaning";
         }
     }
+}
+
+// Where the parser is. A struct, because a function returns one value and
+// reading a field has to answer both the field and how far it read.
+type Scan {
+    str text;
+    int at = 0;
 }
 
 /// Every row of `text`, each a list of its fields.

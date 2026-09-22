@@ -159,6 +159,10 @@ pub struct Lowerer {
     /// reached by bare name, which is safe only because nothing shadows
     /// anything -- see `check_shadow`.
     recv: Option<(u32, Value)>,
+    /// Why the function being lowered has no receiver, for the diagnostic
+    /// when `this` is written in it anyway: top-level code, a free function
+    /// or a static method. Empty inside an instance method.
+    no_recv: String,
     ret_ty: Ty,
 }
 
@@ -217,6 +221,7 @@ impl Lowerer {
             synth: 0,
             moved: Vec::new(),
             recv: None,
+            no_recv: String::new(),
             ret_ty: Ty::Void,
         }
     }
@@ -1630,6 +1635,13 @@ impl Lowerer {
             self.stmt_temps.retain(|t| *t != v.val());
             return Ok(());
         }
+        if let Expr::This(s) = arg {
+            return Err(Diag::new(
+                *s,
+                "`this` is borrowed from the caller and cannot cross a thread \
+                 boundary; send clone(this) instead",
+            ));
+        }
         if let Expr::Var(n, s) = arg {
             if self.owns_local(n) {
                 return self.mark_moved(n, *s);
@@ -2389,6 +2401,56 @@ impl Lowerer {
         Some((tid, obj, path))
     }
 
+    /// `this`: the receiver of the instance method being lowered, BORROWED
+    /// exactly like a parameter -- the caller holds the +1, so reading it
+    /// costs nothing, and a `return this;` retains it the way returning a
+    /// parameter does.
+    fn this_val(&mut self, span: Span) -> Result<Val, Diag> {
+        let Some((tid, v)) = self.recv else {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`this` means nothing here: {}, so there is no receiver",
+                    self.no_recv
+                ),
+            ));
+        };
+        let name = self.typedefs[tid as usize].name.clone();
+        let ty = self
+            .ty_named(&name)
+            .expect("the receiver's type is declared");
+        Ok(Val::new(v, ty, false))
+    }
+
+    /// `this.f`, read or assigned. A field of the receiver already has one
+    /// spelling -- its bare name -- and a second would let the same read be
+    /// written two ways in one method. Not a field at all falls through to
+    /// the ordinary "no field" error.
+    fn refuse_this_field(&mut self, field: &str, this_span: Span, span: Span) -> Result<(), Diag> {
+        self.this_val(this_span)?;
+        let (tid, _) = self.recv.expect("this_val checked the receiver");
+        if self.field_path(tid, field).is_some() {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "write `{field}`, not `this.{field}`: a field of the receiver is \
+                     reached by its bare name"
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The receiver's own instance method called `name` -- declared, or
+    /// promoted from an embedded type -- as its key in `sigs`. These are
+    /// what a bare call inside a method may name, and what `this.name(..)`
+    /// is refused for.
+    fn sibling_method(&self, name: &str) -> Option<String> {
+        let (tid, _) = self.recv?;
+        let key = format!("{}.{name}", self.typedefs[tid as usize].name);
+        (self.sigs.contains_key(&key) && !self.statics.contains(&key)).then_some(key)
+    }
+
     fn binding(&self, name: &str) -> Option<Binding> {
         for s in self.scopes.iter().rev() {
             if let Some(x) = s.get(name) {
@@ -2852,9 +2914,22 @@ impl Lowerer {
         let mut scope = HashMap::new();
         let mut params = Vec::new();
 
-        // A method takes its receiver as a hidden first parameter. It is not
-        // nameable, because fields are reached bare.
+        // A method takes its receiver as a hidden first parameter. Its fields
+        // are reached bare; the receiver as a whole is `this`.
         self.recv = None;
+        self.no_recv = if f.name == "$main" {
+            "top-level code is not inside a method".to_string()
+        } else if f.is_static {
+            format!(
+                "`{}.{}` is a static method, called on the type rather than a value",
+                self.bare_name(f.recv.as_deref().unwrap_or_default()),
+                f.name
+            )
+        } else if f.recv.is_none() {
+            format!("`{}` is a function, not a method", self.bare_name(&f.name))
+        } else {
+            String::new()
+        };
         // A static method is qualified by a type but takes no receiver, so
         // no hidden first parameter and no bare field names inside it.
         if let Some(rname) = f.recv.as_ref().filter(|_| !f.is_static) {
@@ -2863,7 +2938,13 @@ impl Lowerer {
                 .iter()
                 .position(|d| d.name == *rname)
                 .expect("receiver type checked above") as u32;
-            let v = self.new_val(IrTy::Ref);
+            // Represented as its type is: a reference for a struct or an
+            // enum, but a plain int for a method on `distinct int Price`,
+            // because a distinct type is erased to its base.
+            let rty = self
+                .ty_named(rname)
+                .expect("the receiver's type is declared");
+            let v = self.new_val(self.irty(rty));
             params.push(v);
             self.recv = Some((tid, v));
         }
@@ -3334,6 +3415,9 @@ impl Lowerer {
                 value,
                 span,
             } => {
+                if let Expr::This(ts) = obj {
+                    self.refuse_this_field(field, *ts, *span)?;
+                }
                 let o = self.lower_expr(obj)?;
                 let Some(tid) = self.tdef_of(o.ty) else {
                     return Err(Diag::new(
@@ -4498,6 +4582,242 @@ impl Lowerer {
         name.to_string()
     }
 
+    /// A bare call `m(args)` inside an instance method whose receiver has an
+    /// instance method `m`: lowered as `this.m(args)`. `None` when the name
+    /// is not a sibling, so the ordinary function lookup runs.
+    ///
+    /// A sibling that is also the name of a function in scope -- this
+    /// module's, the entry file's or a builtin -- is refused rather than
+    /// ranked. Either ranking would make a call's meaning depend on a
+    /// declaration somewhere else in the module: adding a method would
+    /// silently redirect every bare call to a function of the same name.
+    /// Nothing shadows anything in this language (§4.1).
+    ///
+    /// `name` may already be an instantiation: monomorphisation rewrites a
+    /// call to a generic function to its mangled name before this runs, so
+    /// the name as written is recovered from `shown` first.
+    fn sibling_call(&mut self, name: &str, args: &Args, span: Span) -> Result<Option<Val>, Diag> {
+        if self.recv.is_none() {
+            return Ok(None);
+        }
+        let written = match self.shown.get(name) {
+            Some((generic, _)) => crate::ast::bare(generic).to_string(),
+            None => name.to_string(),
+        };
+        if self.sibling_method(&written).is_none() {
+            // A static sibling has no receiver to be called on, so it is not
+            // reachable bare -- say how it is reached instead of reporting an
+            // unknown function the reader can see declared.
+            let (tid, _) = self.recv.expect("checked above");
+            let tname = self.typedefs[tid as usize].name.clone();
+            let is_static = self.statics.contains(&format!("{tname}.{written}"));
+            if is_static && !self.sigs.contains_key(&self.resolve_fn(&written)) {
+                return Err(Diag::new(
+                    span,
+                    format!(
+                        "`{written}` is a static method; call it on the type, as `{}.{written}(..)`",
+                        self.show_name(&tname)
+                    ),
+                ));
+            }
+            return Ok(None);
+        }
+        let func_too = written != name
+            || self.sigs.contains_key(&self.resolve_fn(&written))
+            || BUILTIN_FNS.contains(&written.as_str());
+        if func_too {
+            let (tid, _) = self.recv.expect("checked above");
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`{written}` is both a method of `{}` and a function, so a bare \
+                     `{written}(..)` here could mean either; rename one",
+                    self.show_name(&self.typedefs[tid as usize].name)
+                ),
+            ));
+        }
+        let this = self.this_val(span)?;
+        self.lower_method_on(&this, &written, args, span).map(Some)
+    }
+
+    /// `o.m(args)` once the receiver is a value: a built-in method of a
+    /// `str`, a number, a collection or an `Option`, an interface dispatch,
+    /// or a declared method. Split out of the `MethodCall` lowering because
+    /// a bare sibling call inside a method, `m(args)`, is the same call with
+    /// `this` as the receiver.
+    fn lower_method_on(
+        &mut self,
+        o: &Val,
+        m: &String,
+        args: &Args,
+        span: Span,
+    ) -> Result<Val, Diag> {
+        // A distinct type over a primitive, `str` or `bytes` may declare
+        // methods of its own -- `str Price.show()` -- and one it declares
+        // comes before its base's built-in ones, the rule a distinct
+        // collection already follows below. Without this the call went
+        // to the base's built-in table and a declared method on
+        // `distinct int Price` could never be called.
+        let declared = self.tdef_of(o.ty).is_some_and(|t| {
+            self.sigs
+                .contains_key(&format!("{}.{m}", self.typedefs[t as usize].name))
+        });
+        // `str` is not a declared type, so it has no entry in the
+        // type table -- but it still answers `size()`, because one
+        // rule for asking how big a thing is beats a free function
+        // for strings and a method for everything else.
+        if declared {
+            // Falls through to the declared-method path below.
+        } else if self.underlying(o.ty) == Ty::Str {
+            return self.lower_str_method(o, m, args, span);
+        } else if self.underlying(o.ty) == Ty::Bytes {
+            return self.lower_bytes_method(o, m, args, span);
+        } else if matches!(self.underlying(o.ty), Ty::Int | Ty::Float | Ty::Bool) {
+            return self.lower_prim_method(o, m, args, span);
+        }
+        let Some(tid) = self.tdef_of(o.ty) else {
+            return Err(Diag::new(
+                span,
+                format!("type {} has no methods", self.tyname(o.ty)),
+            ));
+        };
+        // Collections have built-in methods, typed against their
+        // element type rather than declared anywhere. A distinct
+        // collection has them too, but a method it declares itself
+        // comes first -- the same rule as a real method shadowing an
+        // embedded one.
+        let own = format!("{}.{m}", self.typedefs[tid as usize].name);
+        if !self.sigs.contains_key(&own) {
+            if let Some(elem) = self.seq_elem(o.ty) {
+                return self.lower_seq_method(o, elem, m, args, span);
+            }
+            if let Some((k, v)) = self.map_kv(o.ty) {
+                return self.lower_map_method(o, k, v, m, args, span);
+            }
+        }
+        if self.typedefs[tid as usize].is_enum
+            && self.typedefs[tid as usize].name.starts_with("Option$")
+        {
+            return self.lower_option_method(o, tid, m, args, span);
+        }
+        self.check_method_access(tid, m, span)?;
+        // A static method has no receiver, so it cannot be reached
+        // through a value even though the spelling looks the same.
+        let skey = format!("{}.{m}", self.typedefs[tid as usize].name);
+        if self.statics.contains(&skey) {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`{m}` is a static method; call it on the type, as \
+                         `{}.{m}(..)`",
+                    self.show_name(&self.typedefs[tid as usize].name)
+                ),
+            ));
+        }
+
+        // On an interface value the implementation is not known
+        // statically: dispatch through the receiver's type header.
+        if self.typedefs[tid as usize].is_interface {
+            let iname = self.show_name(&self.typedefs[tid as usize].name);
+            let Some(decl) = self.iface_methods[tid as usize]
+                .iter()
+                .find(|x| x.name == *m)
+                .cloned()
+            else {
+                return Err(Diag::new(
+                    span,
+                    format!("interface `{iname}` has no method `{m}`"),
+                ));
+            };
+            let want = self.slot_of(&decl);
+            let slot = self
+                .iface_slots
+                .iter()
+                .position(|x| *x == want)
+                .expect("every interface method has a slot") as u32;
+
+            let slots = self.bind_args(&format!("{iname}.{m}"), &decl.params, args, span)?;
+            let mut vals = vec![o.val()];
+            for (a, p) in slots.iter().zip(decl.params.iter()) {
+                let v = self.lower_expr_as(a, p.ty)?;
+                if !self.assignable(v.ty, p.ty) {
+                    return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
+                }
+                vals.push(v.val());
+            }
+
+            if decl.ret == Ty::Void {
+                self.push(Inst::CallIface {
+                    dst: None,
+                    slot,
+                    name: m.clone(),
+                    args: vals,
+                    ret: None,
+                });
+                return Ok(Val::void());
+            }
+            let d = self.new_val(self.irty(decl.ret));
+            self.push(Inst::CallIface {
+                dst: Some(d),
+                slot,
+                name: m.clone(),
+                args: vals,
+                ret: Some(self.irty(decl.ret)),
+            });
+            let owned = self.is_ref(decl.ret);
+            if owned {
+                self.stmt_temps.push(d);
+            }
+            return Ok(Val::new(d, decl.ret, owned));
+        }
+
+        let key = format!("{}.{m}", self.typedefs[tid as usize].name);
+        let Some(sig) = self.sigs.get(&key) else {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "type `{}` has no method `{m}`",
+                    self.show_name(&self.typedefs[tid as usize].name)
+                ),
+            ));
+        };
+        let params = sig.params.clone();
+        let ret = sig.ret;
+        let slots = self.bind_args(&key, &params, args, span)?;
+
+        // The receiver is the hidden first argument, and is borrowed
+        // like every other argument (docs/ir-v0.md §5.1).
+        let mut vals = vec![o.val()];
+        for (a, p) in slots.iter().zip(params.iter()) {
+            let v = self.lower_expr_as(a, p.ty)?;
+            if !self.assignable(v.ty, p.ty) {
+                return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
+            }
+            vals.push(v.val());
+        }
+
+        if ret == Ty::Void {
+            self.push(Inst::Call {
+                dst: None,
+                func: key,
+                args: vals,
+            });
+            Ok(Val::void())
+        } else {
+            let d = self.new_val(self.irty(ret));
+            self.push(Inst::Call {
+                dst: Some(d),
+                func: key,
+                args: vals,
+            });
+            let owned = self.is_ref(ret);
+            if owned {
+                self.stmt_temps.push(d);
+            }
+            Ok(Val::new(d, ret, owned))
+        }
+    }
+
     /// `mod.name(args)` -- a call into another module.
     fn lower_qualified(
         &mut self,
@@ -4982,6 +5302,7 @@ impl Lowerer {
                 // Immortal: borrowed, never owned. docs/ir-v0.md §5.4
                 Ok(Val::new(v, Ty::Str, false))
             }
+            Expr::This(span) => self.this_val(*span),
             Expr::Var(name, span) => {
                 if self.moved.iter().any(|n| n == name) {
                     return Err(Diag::new(
@@ -5088,6 +5409,12 @@ impl Lowerer {
             }
             Expr::Bin(op, l, r, span) => self.lower_bin(*op, l, r, *span),
             Expr::Call(name, args, span) => {
+                // Inside an instance method, a bare call may name a method of
+                // the receiver -- its sibling -- exactly as a bare name may
+                // name one of its fields.
+                if let Some(v) = self.sibling_call(name, args, *span)? {
+                    return Ok(v);
+                }
                 // A bare name means this module's declaration, then a
                 // builtin. Another module's name is not in scope at all --
                 // which is what makes `pub` mean something once every file
@@ -5139,6 +5466,9 @@ impl Lowerer {
             }
 
             Expr::Field(obj, field, span) => {
+                if let Expr::This(ts) = &**obj {
+                    self.refuse_this_field(field, *ts, *span)?;
+                }
                 let o = self.lower_expr(obj)?;
                 let Some(tid) = self.tdef_of(o.ty) else {
                     return Err(Diag::new(
@@ -5173,163 +5503,20 @@ impl Lowerer {
                         return self.lower_qualified(modname, m, args, *span);
                     }
                 }
-                let o = self.lower_expr(obj)?;
-                // `str` is not a declared type, so it has no entry in the
-                // type table -- but it still answers `size()`, because one
-                // rule for asking how big a thing is beats a free function
-                // for strings and a method for everything else.
-                if self.underlying(o.ty) == Ty::Str {
-                    return self.lower_str_method(&o, m, args, *span);
-                }
-                if self.underlying(o.ty) == Ty::Bytes {
-                    return self.lower_bytes_method(&o, m, args, *span);
-                }
-                if matches!(self.underlying(o.ty), Ty::Int | Ty::Float | Ty::Bool) {
-                    return self.lower_prim_method(&o, m, args, *span);
-                }
-                let Some(tid) = self.tdef_of(o.ty) else {
-                    return Err(Diag::new(
-                        *span,
-                        format!("type {} has no methods", self.tyname(o.ty)),
-                    ));
-                };
-                // Collections have built-in methods, typed against their
-                // element type rather than declared anywhere. A distinct
-                // collection has them too, but a method it declares itself
-                // comes first -- the same rule as a real method shadowing an
-                // embedded one.
-                let own = format!("{}.{m}", self.typedefs[tid as usize].name);
-                if !self.sigs.contains_key(&own) {
-                    if let Some(elem) = self.seq_elem(o.ty) {
-                        return self.lower_seq_method(&o, elem, m, args, *span);
-                    }
-                    if let Some((k, v)) = self.map_kv(o.ty) {
-                        return self.lower_map_method(&o, k, v, m, args, *span);
-                    }
-                }
-                if self.typedefs[tid as usize].is_enum
-                    && self.typedefs[tid as usize].name.starts_with("Option$")
-                {
-                    return self.lower_option_method(&o, tid, m, args, *span);
-                }
-                self.check_method_access(tid, m, *span)?;
-                // A static method has no receiver, so it cannot be reached
-                // through a value even though the spelling looks the same.
-                let skey = format!("{}.{m}", self.typedefs[tid as usize].name);
-                if self.statics.contains(&skey) {
-                    return Err(Diag::new(
-                        *span,
-                        format!(
-                            "`{m}` is a static method; call it on the type, as \
-                             `{}.{m}(..)`",
-                            self.show_name(&self.typedefs[tid as usize].name)
-                        ),
-                    ));
-                }
-
-                // On an interface value the implementation is not known
-                // statically: dispatch through the receiver's type header.
-                if self.typedefs[tid as usize].is_interface {
-                    let iname = self.show_name(&self.typedefs[tid as usize].name);
-                    let Some(decl) = self.iface_methods[tid as usize]
-                        .iter()
-                        .find(|x| x.name == *m)
-                        .cloned()
-                    else {
+                if let Expr::This(ts) = &**obj {
+                    self.this_val(*ts)?;
+                    if self.sibling_method(m).is_some() {
                         return Err(Diag::new(
                             *span,
-                            format!("interface `{iname}` has no method `{m}`"),
+                            format!(
+                                "write `{m}(..)`, not `this.{m}(..)`: a method of the \
+                                 receiver is called by its bare name, as a field is read"
+                            ),
                         ));
-                    };
-                    let want = self.slot_of(&decl);
-                    let slot = self
-                        .iface_slots
-                        .iter()
-                        .position(|x| *x == want)
-                        .expect("every interface method has a slot")
-                        as u32;
-
-                    let slots =
-                        self.bind_args(&format!("{iname}.{m}"), &decl.params, args, *span)?;
-                    let mut vals = vec![o.val()];
-                    for (a, p) in slots.iter().zip(decl.params.iter()) {
-                        let v = self.lower_expr_as(a, p.ty)?;
-                        if !self.assignable(v.ty, p.ty) {
-                            return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
-                        }
-                        vals.push(v.val());
                     }
-
-                    if decl.ret == Ty::Void {
-                        self.push(Inst::CallIface {
-                            dst: None,
-                            slot,
-                            name: m.clone(),
-                            args: vals,
-                            ret: None,
-                        });
-                        return Ok(Val::void());
-                    }
-                    let d = self.new_val(self.irty(decl.ret));
-                    self.push(Inst::CallIface {
-                        dst: Some(d),
-                        slot,
-                        name: m.clone(),
-                        args: vals,
-                        ret: Some(self.irty(decl.ret)),
-                    });
-                    let owned = self.is_ref(decl.ret);
-                    if owned {
-                        self.stmt_temps.push(d);
-                    }
-                    return Ok(Val::new(d, decl.ret, owned));
                 }
-
-                let key = format!("{}.{m}", self.typedefs[tid as usize].name);
-                let Some(sig) = self.sigs.get(&key) else {
-                    return Err(Diag::new(
-                        *span,
-                        format!(
-                            "type `{}` has no method `{m}`",
-                            self.show_name(&self.typedefs[tid as usize].name)
-                        ),
-                    ));
-                };
-                let params = sig.params.clone();
-                let ret = sig.ret;
-                let slots = self.bind_args(&key, &params, args, *span)?;
-
-                // The receiver is the hidden first argument, and is borrowed
-                // like every other argument (docs/ir-v0.md §5.1).
-                let mut vals = vec![o.val()];
-                for (a, p) in slots.iter().zip(params.iter()) {
-                    let v = self.lower_expr_as(a, p.ty)?;
-                    if !self.assignable(v.ty, p.ty) {
-                        return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
-                    }
-                    vals.push(v.val());
-                }
-
-                if ret == Ty::Void {
-                    self.push(Inst::Call {
-                        dst: None,
-                        func: key,
-                        args: vals,
-                    });
-                    Ok(Val::void())
-                } else {
-                    let d = self.new_val(self.irty(ret));
-                    self.push(Inst::Call {
-                        dst: Some(d),
-                        func: key,
-                        args: vals,
-                    });
-                    let owned = self.is_ref(ret);
-                    if owned {
-                        self.stmt_temps.push(d);
-                    }
-                    Ok(Val::new(d, ret, owned))
-                }
+                let o = self.lower_expr(obj)?;
+                self.lower_method_on(&o, m, args, *span)
             }
 
             Expr::Index(obj, idx, span) => {

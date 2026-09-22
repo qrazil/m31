@@ -88,6 +88,31 @@ pub enum Error {
     TooDeep;
 }
 
+/// A sentence saying what went wrong, and where. A method named `to_str`, so
+/// `print(e)` prints it.
+pub str Error.to_str() {
+    match (this) {
+        case Syntax(str what, int at): {
+            return what + " at position " + at.to_str();
+        }
+        case NotRepresentable(int cp, int at): {
+            return "escape at position " + at.to_str() + " spells U+" + hex(cp, 4) + ", which a str cannot hold until the language can build any byte";
+        }
+        case NotFinite(float f): {
+            if (f != f) {
+                return "nan is not JSON serializable";
+            }
+            return "Infinity is not JSON serializable";
+        }
+        case NotUtf8(int at): {
+            return "a string is not valid UTF-8 (byte " + at.to_str() + " of it), and JSON text must be";
+        }
+        case TooDeep: {
+            return "maximum nesting depth (" + max_depth().to_str() + ") exceeded while writing";
+        }
+    }
+}
+
 // Where the parser is, and the one-byte strings a `\u` escape is built from
 // (filled on first use; see `octets`).
 type Parser {
@@ -117,30 +142,6 @@ type Job {
     List<Value> items = [];
     Map<str, Value> members = {};
     List<str> keys = [];
-}
-
-/// A sentence saying what went wrong, and where.
-pub str message(Error e) {
-    match (e) {
-        case Syntax(str what, int at): {
-            return what + " at position " + at.to_str();
-        }
-        case NotRepresentable(int cp, int at): {
-            return "escape at position " + at.to_str() + " spells U+" + hex(cp, 4) + ", which a str cannot hold until the language can build any byte";
-        }
-        case NotFinite(float f): {
-            if (f != f) {
-                return "nan is not JSON serializable";
-            }
-            return "Infinity is not JSON serializable";
-        }
-        case NotUtf8(int at): {
-            return "a string is not valid UTF-8 (byte " + at.to_str() + " of it), and JSON text must be";
-        }
-        case TooDeep: {
-            return "maximum nesting depth (" + max_depth().to_str() + ") exceeded while writing";
-        }
-    }
 }
 
 /// The value `text` spells.

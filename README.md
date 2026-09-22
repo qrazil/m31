@@ -72,7 +72,8 @@ for `NULL` so the common case is a branch rather than a call.
 
 **Methods are declared by qualified name**, outside the type body, so they
 can be added to any type and a type declaration stays a list of fields.
-**Fields are reached by bare name — there is no `this`.**
+**Fields and sibling methods are reached by bare name; the receiver as a
+whole is `this`.**
 
 ```c
 type Rect { int w; int h; }
@@ -252,10 +253,12 @@ defined inconsistently. `str` has `+` and `==` built in.
 
 **Nothing shadows anything, anywhere.** Not an outer local, not a parameter,
 not a function, not a type, not a field of the receiver. It is a compile
-error; rename one of them. This is what removes the need for `this` — a bare
-name can only ever mean one thing — and it deletes the class of bugs where a
-reader and the compiler disagree about which `x` is meant. Reusing a name in
-*sibling* scopes is fine, since neither is visible to the other.
+error; rename one of them. This is what lets fields and sibling methods go
+bare, with `this` only for the whole receiver — a bare name can only ever
+mean one thing, so `this.x` is refused as a second spelling — and it deletes
+the class of bugs where a reader and the compiler disagree about which `x` is
+meant. Reusing a name in *sibling* scopes is fine, since neither is visible to
+the other.
 
 **Arguments follow Oro's rule, for calls and construction alike: a parameter
 with no default is positional, one with a default is named.** Never both.

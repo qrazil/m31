@@ -1,0 +1,102 @@
+// `this` is a value like any other borrowed one: it can be passed to a
+// function or another type's method, given to a generic function (which
+// infers its type argument from it), compared with `==`, and converted to
+// an interface.
+
+type Point {
+    int x;
+    int y;
+}
+
+bool Point.eq(Point o) {
+    return x == o.x && y == o.y;
+}
+
+str Point.to_str() {
+    return "(" + str(x) + ", " + str(y) + ")";
+}
+
+bool Point.is_origin() {
+    return this == Point(0, 0);
+}
+
+bool Point.differs(Point o) {
+    return this != o;
+}
+
+type Path {
+    List<Point> points = [];
+}
+
+void Path.add(Point p) {
+    points.push(p);
+}
+
+// Passing the receiver to another type's method, which keeps it.
+void Point.join(Path p) {
+    p.add(this);
+}
+
+// And to a free function.
+int manhattan(Point p) {
+    return p.x + p.y;
+}
+
+int Point.norm() {
+    return manhattan(this);
+}
+
+// A generic function infers `T` from `this` as it would from a local.
+T same<T>(T v) {
+    return v;
+}
+
+Point Point.through_generic() {
+    return same(this);
+}
+
+List<T> twice<T>(T v) {
+    return [v, v];
+}
+
+int Point.pair_size() {
+    return twice(this).size();
+}
+
+// Converted to an interface.
+interface Shown {
+    str to_str();
+}
+
+Shown Point.shown() {
+    Shown s = this;
+    return s;
+}
+
+str show(Shown s) {
+    return "shown " + s.to_str();
+}
+
+str Point.show_self() {
+    return show(this);
+}
+
+Point a = Point(1, 2);
+print(a.is_origin());
+print(Point(0, 0).is_origin());
+print(a.differs(Point(1, 2)));
+print(a.differs(Point(2, 1)));
+
+Path path = Path();
+a.join(path);
+Point(3, 4).join(path);
+a.join(path);
+print(path.points.size());
+print(path.points[1]);
+print(path.points[0] == path.points[2]);
+
+print(a.norm());
+print(a.through_generic());
+print(a.pair_size());
+print(a.shown().to_str());
+print(Point(5, 6).show_self());
