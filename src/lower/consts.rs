@@ -509,6 +509,20 @@ impl Lowerer {
 
     /// Evaluate an expression that has a type of its own.
     fn eval_any(&mut self, e: &Expr) -> Result<(CVal, Ty), Diag> {
+        self.eval_in(e, true)
+    }
+
+    /// `eval_any`, where `live` says whether the value is actually used.
+    ///
+    /// It is not in the operand `&&` or `||` skips: at run time that operand
+    /// never runs, so `false && 1 / 0 == 1` is false and traps nothing, and a
+    /// constant follows the run-time rules (§4.5). A skipped operand is still
+    /// TYPE-checked -- it is still code, and `false && 1 + "a"` is as wrong
+    /// as a constant as it is in a function -- but what would only fail when
+    /// it ran (a division by zero, an overflow, a shift out of range, an
+    /// infinite float, an oversized string) is not a failure there. Such a
+    /// value is replaced by a placeholder of its type, which nothing reads.
+    fn eval_in(&mut self, e: &Expr, live: bool) -> Result<(CVal, Ty), Diag> {
         match e {
             Expr::Int(n, _) => Ok((CVal::Int(*n), Ty::Int)),
             Expr::Float(x, _) => Ok((CVal::Float(*x), Ty::Float)),
@@ -538,17 +552,17 @@ impl Lowerer {
                 None => Err(self.not_constant(e)),
             },
             Expr::Un(op, x, span) => {
-                let (v, t) = self.eval_any(x)?;
+                let (v, t) = self.eval_in(x, live)?;
                 match (op, v) {
-                    (UnOp::Neg, CVal::Int(n)) => {
-                        n.checked_neg().map(|r| (CVal::Int(r), t)).ok_or_else(|| {
-                            Diag::new(
-                                *span,
-                                "integer overflow in -: at run time this would trap, so as \
-                                 a constant it is refused",
-                            )
-                        })
-                    }
+                    (UnOp::Neg, CVal::Int(n)) => match n.checked_neg() {
+                        Some(r) => Ok((CVal::Int(r), t)),
+                        None if !live => Ok((CVal::Int(0), t)),
+                        None => Err(Diag::new(
+                            *span,
+                            "integer overflow in -: at run time this would trap, so as \
+                             a constant it is refused",
+                        )),
+                    },
                     // A sign flip, exactly as the run-time `-x` is: zero
                     // included, so `-0.0` is negative zero.
                     (UnOp::Neg, CVal::Float(x)) => Ok((CVal::Float(-x), t)),
@@ -568,8 +582,13 @@ impl Lowerer {
                 }
             }
             Expr::Bin(op, l, r, span) => {
-                let (a, at) = self.eval_any(l)?;
-                let (b, bt) = self.eval_any(r)?;
+                let (a, at) = self.eval_in(l, live)?;
+                // The left operand decides: the right one is not run.
+                let decided = matches!(
+                    (op, &a),
+                    (BinOp::And, CVal::Bool(false)) | (BinOp::Or, CVal::Bool(true))
+                );
+                let (b, bt) = self.eval_in(r, live && !decided)?;
                 if at != bt {
                     return Err(Diag::new(
                         *span,
@@ -581,7 +600,7 @@ impl Lowerer {
                         ),
                     ));
                 }
-                self.eval_bin(*op, a, b, at, *span)
+                self.eval_bin(*op, a, b, at, *span, live)
             }
             _ => Err(self.not_constant(e)),
         }
@@ -597,10 +616,28 @@ impl Lowerer {
     }
 
     /// One binary operator on two computed values of one type, by the same
-    /// rules the run time applies (docs/reference.md §6.1).
-    fn eval_bin(&self, op: BinOp, a: CVal, b: CVal, t: Ty, span: Span) -> Result<(CVal, Ty), Diag> {
+    /// rules the run time applies (docs/reference.md §6.1). `live` is
+    /// `eval_in`'s: in an operand that never runs, what would trap gives a
+    /// placeholder instead of an error.
+    fn eval_bin(
+        &self,
+        op: BinOp,
+        a: CVal,
+        b: CVal,
+        t: Ty,
+        span: Span,
+        live: bool,
+    ) -> Result<(CVal, Ty), Diag> {
         use BinOp::*;
         let err = |msg: String| Err(Diag::new(span, msg));
+        // A failure of the arithmetic itself, as opposed to of the types.
+        let fault = |msg: String, placeholder: CVal, t: Ty| {
+            if live {
+                Err(Diag::new(span, msg))
+            } else {
+                Ok((placeholder, t))
+            }
+        };
         let bad = || {
             Err(Diag::new(
                 span,
@@ -614,36 +651,30 @@ impl Lowerer {
         };
         match (a, b) {
             (CVal::Int(x), CVal::Int(y)) => {
-                let over = || {
-                    Diag::new(
-                        span,
-                        format!(
-                            "integer overflow in {}: at run time this would trap, so as a \
-                             constant it is refused",
-                            op.spelling()
-                        ),
-                    )
-                };
                 let v = match op {
-                    Add => x.checked_add(y).ok_or_else(over)?,
-                    Sub => x.checked_sub(y).ok_or_else(over)?,
-                    Mul => x.checked_mul(y).ok_or_else(over)?,
+                    Add => x.checked_add(y),
+                    Sub => x.checked_sub(y),
+                    Mul => x.checked_mul(y),
                     Div | Rem if y == 0 => {
                         let what = if op == Div { "division" } else { "remainder" };
-                        return err(format!("{what} by zero"));
+                        return fault(format!("{what} by zero"), CVal::Int(0), Ty::Int);
                     }
-                    Div => x.checked_div(y).ok_or_else(over)?,
-                    Rem => x.checked_rem(y).ok_or_else(over)?,
-                    BitAnd => x & y,
-                    BitOr => x | y,
-                    BitXor => x ^ y,
+                    Div => x.checked_div(y),
+                    Rem => x.checked_rem(y),
+                    BitAnd => Some(x & y),
+                    BitOr => Some(x | y),
+                    BitXor => Some(x ^ y),
                     // On the bit pattern, as rt_ishl and rt_ishr do: `<<`
                     // discards what it shifts out, `>>` copies the sign.
                     Shl | Shr if !(0..=63).contains(&y) => {
-                        return err(format!("shift count out of range in {}", op.spelling()));
+                        return fault(
+                            format!("shift count out of range in {}", op.spelling()),
+                            CVal::Int(0),
+                            Ty::Int,
+                        );
                     }
-                    Shl => ((x as u64) << y) as i64,
-                    Shr => x >> y,
+                    Shl => Some(((x as u64) << y) as i64),
+                    Shr => Some(x >> y),
                     Eq => return Ok((CVal::Bool(x == y), Ty::Bool)),
                     Ne => return Ok((CVal::Bool(x != y), Ty::Bool)),
                     Lt => return Ok((CVal::Bool(x < y), Ty::Bool)),
@@ -652,7 +683,18 @@ impl Lowerer {
                     Ge => return Ok((CVal::Bool(x >= y), Ty::Bool)),
                     And | Or => return bad(),
                 };
-                Ok((CVal::Int(v), Ty::Int))
+                match v {
+                    Some(v) => Ok((CVal::Int(v), Ty::Int)),
+                    None => fault(
+                        format!(
+                            "integer overflow in {}: at run time this would trap, so as a \
+                             constant it is refused",
+                            op.spelling()
+                        ),
+                        CVal::Int(0),
+                        Ty::Int,
+                    ),
+                }
             }
             (CVal::Float(x), CVal::Float(y)) => {
                 let v = match op {
@@ -677,11 +719,15 @@ impl Lowerer {
                 // is IEEE's answer; in a constant it is always a mistake.
                 if !v.is_finite() {
                     let what = if v.is_nan() { "nan" } else { "an infinity" };
-                    return err(format!(
-                        "this `{}` gives {what}; a float constant must be finite, as a \
-                         float literal must",
-                        op.spelling()
-                    ));
+                    return fault(
+                        format!(
+                            "this `{}` gives {what}; a float constant must be finite, as a \
+                             float literal must",
+                            op.spelling()
+                        ),
+                        CVal::Float(0.0),
+                        Ty::Float,
+                    );
                 }
                 Ok((CVal::Float(v), Ty::Float))
             }
@@ -693,12 +739,16 @@ impl Lowerer {
                 _ => bad(),
             },
             (CVal::Str(x), CVal::Str(y)) => match op {
-                Add if x.len() + y.len() > MAX_STR_BYTES => err(format!(
-                    "this `+` gives a string of {} bytes; a constant string may hold at \
-                     most {MAX_STR_BYTES} bytes: it is written out in full in the compiled \
-                     program",
-                    x.len() + y.len()
-                )),
+                Add if x.len() + y.len() > MAX_STR_BYTES => fault(
+                    format!(
+                        "this `+` gives a string of {} bytes; a constant string may hold at \
+                         most {MAX_STR_BYTES} bytes: it is written out in full in the \
+                         compiled program",
+                        x.len() + y.len()
+                    ),
+                    CVal::Str(String::new()),
+                    Ty::Str,
+                ),
                 Add => Ok((CVal::Str(x + &y), Ty::Str)),
                 Eq => Ok((CVal::Bool(x == y), Ty::Bool)),
                 Ne => Ok((CVal::Bool(x != y), Ty::Bool)),

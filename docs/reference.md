@@ -1134,7 +1134,10 @@ expression*:
     operators of §6.1 and `str` `+`, with the same types and the same rules
     as at run time — an overflow, a division by zero or a shift out of range,
     which would trap, is an error, and a float result must be finite (the
-    rule a float literal follows, §1.5);
+    rule a float literal follows, §1.5). `&&` and `||` short-circuit as they
+    do at run time: `false && 1 / 0 == 1` is `false`, because the operand
+    that would trap never runs — it must still be well typed. A string
+    computed with `+` may be at most 2^20 bytes;
   - a collection literal of those, written into an `Array`, a `List`, a
     `bytes` or a `Map` (§3.9): `[a, b]`, `[v; n]`, `{k: v}`.
 

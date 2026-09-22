@@ -1,0 +1,4 @@
+corpus/errors/871-const-short-circuit-runs-right.src:3:27: division by zero
+  |
+3 | const bool B = true && (1 / 0 == 1);
+  |                           ^
