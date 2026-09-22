@@ -1309,8 +1309,9 @@ loop costs nothing.
 
 ### 7.4 Traps
 
-A trap prints a message to stderr and aborts. It is not catchable — there are
-no exceptions and no error values yet.
+A trap prints a message to stderr and aborts. It is not catchable: there are
+no exceptions. A trap is for a bug; a failure the program should handle is an
+error value, `Result` or `Option` (docs/errors-decision.md).
 
 Trapping conditions:
 
@@ -1319,7 +1320,6 @@ Trapping conditions:
   - a shift count outside `0 .. 63`
   - division or remainder by zero, and `INT_MIN / -1`
   - an index outside `0 .. len-1`
-  - `Map.get` on a key that is not there
   - `pop` on an empty list or an empty `bytes`
   - storing a value outside 0..255 into a `bytes` (§3.10)
   - `recv` on a channel that is closed and drained
