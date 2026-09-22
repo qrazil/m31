@@ -1,10 +1,10 @@
-// A unique wrapper around a SHARED reference. Each Holder really is unique,
+// A unique wrapper around a SHARED reference. Each Wrap really is unique,
 // so a check that looked only at the moved object let this through -- and
-// every Holder pointed at one Str whose non-atomic refcount was then
+// every Wrap pointed at one Str whose non-atomic refcount was then
 // touched from several threads at once.
-type Holder { str s; }
+type Wrap { str s; }
 
-void eat(Holder h, int n) {
+void eat(Wrap h, int n) {
     int i = 0;
     int t = 0;
     while (i < n) {
@@ -17,7 +17,7 @@ void eat(Holder h, int n) {
 str shared = concat("ab", "cd");
 int k = 0;
 while (k < 8) {
-    spawn eat(Holder(shared), 200000);
+    spawn eat(Wrap(shared), 200000);
     k = k + 1;
 }
 print(shared.size());

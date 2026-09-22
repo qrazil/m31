@@ -1,6 +1,6 @@
-type Holder<T> {
+type Wrap<T> {
     T value;
 }
 
-Holder<int, str> b = Holder<int, str>(1);
+Wrap<int, str> b = Wrap<int, str>(1);
 print(b.value);

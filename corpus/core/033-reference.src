@@ -53,17 +53,17 @@ Price total = unit + unit;
 print(int(total));          // 500
 
 // --- 3.7 generics monomorphise -----------------------------------------
-type Holder<T> { T item; }
-T unwrap<T>(Holder<T> b) { return b.item; }
+type Wrap<T> { T item; }
+T unwrap<T>(Wrap<T> b) { return b.item; }
 
-print(unwrap(Holder<int>(41)) + 1);    // 42 -- inferred from the temporary
-print(unwrap(Holder<str>("boxed")));   // boxed
-Holder<int> bi = Holder<int>(7);
+print(unwrap(Wrap<int>(41)) + 1);    // 42 -- inferred from the temporary
+print(unwrap(Wrap<str>("boxed")));   // boxed
+Wrap<int> bi = Wrap<int>(7);
 print(unwrap(bi));                  // 7 -- and from a local
 
 // Nested, so inference has to recurse through the type arguments.
-T inner<T>(Holder<Holder<T>> b) { return b.item.item; }
-print(inner(Holder<Holder<int>>(Holder<int>(5))));   // 5
+T inner<T>(Wrap<Wrap<T>> b) { return b.item.item; }
+print(inner(Wrap<Wrap<int>>(Wrap<int>(5))));   // 5
 
 // --- 3.8 collections ----------------------------------------------------
 Array<int> arr = [0; 3];

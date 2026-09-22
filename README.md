@@ -61,8 +61,8 @@ C operator set with C precedence, short-circuiting `&&`/`||`, string literals
 with escapes and UTF-8. Builtins: `print` (int, bool or str) and `concat`; `size()` and `contains()` are methods on every collection and on `str`.
 
 **Generics are monomorphised** and erased before lowering, which is why the
-IR has never needed to know about them. `Holder<int>` becomes a plain type named
-`Holder$int`. Type arguments are explicit on types and inferred on function
+IR has never needed to know about them. `Wrap<int>` becomes a plain type named
+`Wrap$int`. Type arguments are explicit on types and inferred on function
 calls.
 
 **User types are reference types** — refcounted, heap allocated, aliased by

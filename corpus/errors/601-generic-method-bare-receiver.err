@@ -1,4 +1,4 @@
-corpus/errors/601-generic-method-bare-receiver.src:6:3: `Holder` is generic; a method on it names its type parameters on the receiver, as `Holder<T>.name(..)`
+corpus/errors/601-generic-method-bare-receiver.src:6:3: `Wrap` is generic; a method on it names its type parameters on the receiver, as `Wrap<T>.name(..)`
   |
-6 | T Holder.get() {
+6 | T Wrap.get() {
   |   ^

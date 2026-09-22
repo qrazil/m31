@@ -2,7 +2,7 @@
 // nested type arguments still close one bracket at a time. Every place a type
 // is written, with the shift operator used beside it.
 
-type Holder<T> { T item; }
+type Wrap<T> { T item; }
 
 type Table {
     Map<str, List<int>> cols;
@@ -100,10 +100,10 @@ match (nested.get("a")) {
 
 // Constructions whose type arguments end in `>>`, then a shift, then a
 // comparison against the result.
-Holder<Holder<int>> bb = Holder<Holder<int>>(Holder<int>(40));
+Wrap<Wrap<int>> bb = Wrap<Wrap<int>>(Wrap<int>(40));
 print(bb.item.item >> 2);
-print(Holder<Holder<int>>(Holder<int>(8)).item.item >> 1 > 3);
-print(Holder<List<int>>([1, 2, 3]).item.size() << 1);
+print(Wrap<Wrap<int>>(Wrap<int>(8)).item.item >> 1 > 3);
+print(Wrap<List<int>>([1, 2, 3]).item.size() << 1);
 
 Table t = Table({"x": [1 << 4]}, [[3], [5 >> 1]]);
 print(t.rows[1][0]);

@@ -7,9 +7,9 @@ pub type Tag { int v; }
 pub Tag make(int v) { return Tag(v); }
 pub int Tag.describe() { return 111; }
 
-pub type Holder<T> { T v; }
+pub type Wrap<T> { T v; }
 pub int boxed() {
-    Holder<int> b = Holder<int>(4);
+    Wrap<int> b = Wrap<int>(4);
     return b.v;
 }
 

@@ -25,11 +25,11 @@ pub struct Parser {
     own: Vec<String>,
     builtin: Vec<String>,
     /// The generic types this file declares, so a method on one written
-    /// without its type parameters (`T Holder.get()`) is refused with the
+    /// without its type parameters (`T Wrap.get()`) is refused with the
     /// spelling it needs rather than an unknown `T`.
     generic_own: Vec<String>,
     /// Type parameter names in scope while parsing a generic declaration.
-    /// `T` inside `type Holder<T>` must parse as a type even though no `type T`
+    /// `T` inside `type Wrap<T>` must parse as a type even though no `type T`
     /// exists.
     tparams: Vec<String>,
     /// Interned type expressions; `Ty::User` indexes this.
@@ -328,7 +328,7 @@ impl Parser {
 
     /// Does a declaration start here? A type keyword always does. A type
     /// NAME does when an identifier follows it, possibly past a `<...>`
-    /// argument list -- `Holder<int> b` is a declaration, `Holder<int>(..)` is a
+    /// argument list -- `Wrap<int> b` is a declaration, `Wrap<int>(..)` is a
     /// construction.
     fn decl_starts_here(&self) -> bool {
         if Self::ty_of(self.peek()).is_some() {
@@ -552,7 +552,7 @@ impl Parser {
         if let Tok::Ident(name) = self.peek().clone() {
             if self.is_ty_name(&name) {
                 self.bump();
-                // Type arguments: `Holder<int>`, `Pair<K, V>`.
+                // Type arguments: `Wrap<int>`, `Pair<K, V>`.
                 let mut args = Vec::new();
                 if self.peek() == &Tok::Lt {
                     self.bump();
@@ -865,13 +865,13 @@ impl Parser {
             return true;
         }
         // The return type may be a type parameter the parser has not met yet
-        // -- `T unwrap<T>(Holder<T> b)` -- so accept any identifier here and let
+        // -- `T unwrap<T>(Wrap<T> b)` -- so accept any identifier here and let
         // the shape decide. A statement can never be IDENT IDENT `(`.
         if !matches!(self.peek(), Tok::Ident(_)) && Self::ty_of(self.peek()).is_none() {
             return false;
         }
         let mut i = 1;
-        // Skip type arguments on the return type: `Holder<int> f(..)`.
+        // Skip type arguments on the return type: `Wrap<int> f(..)`.
         if self.peek_at(1) == &Tok::Lt {
             let mut depth = 0;
             loop {
@@ -894,7 +894,7 @@ impl Parser {
             return false;
         }
         i += 1;
-        // The receiver's type parameters: `T Holder<T>.get()`. Skipped here
+        // The receiver's type parameters: `T Wrap<T>.get()`. Skipped here
         // and told apart from the function's own below by the `.` after.
         if self.peek_at(i) == &Tok::Lt {
             let mut j = i;
@@ -1287,7 +1287,7 @@ impl Parser {
         self.tparams = recv_tparams.iter().chain(tparams.iter()).cloned().collect();
         let ret = self.expect_ty()?;
         let (first, _) = self.expect_ident()?;
-        // `Holder<T>.get` -- only a receiver takes type parameters before a
+        // `Wrap<T>.get` -- only a receiver takes type parameters before a
         // `.`; after a plain name they are the function's own, read below.
         let written_recv_tparams = if self.peek() == &Tok::Lt && !recv_tparams.is_empty() {
             self.parse_tparams()?
@@ -1392,7 +1392,7 @@ impl Parser {
     /// Look ahead past `<ret> <name>` for a `<T, ..>` list, without consuming
     /// anything. Needed because a generic function's return type can mention
     /// its own type parameters. Returns the receiver's type parameters --
-    /// `Holder<T>.get` -- and the function's own, either of which may be empty.
+    /// `Wrap<T>.get` -- and the function's own, either of which may be empty.
     fn scan_fn_tparams(&mut self) -> Result<FnHead, Diag> {
         let save = self.pos;
         let mut recv = Vec::new();
@@ -1905,8 +1905,8 @@ impl Parser {
             // one.
             //
             // With type arguments the same two, plus a construction:
-            // `lib.Holder<int>(..)`, `lib.Res<int>.Ok(1)`. The parser cannot
-            // know that `Holder` is a type in `lib`, but `lib.x < ...` is not a
+            // `lib.Wrap<int>(..)`, `lib.Res<int>.Ok(1)`. The parser cannot
+            // know that `Wrap` is a type in `lib`, but `lib.x < ...` is not a
             // comparison worth reading this way. `lib.x` alone can be an
             // operand now -- a module may export a constant -- but only a
             // shape like `lib.N < a > (b)` reaches here, which compares a

@@ -24,8 +24,8 @@ match (Local.A(3)) {
 print(lib.msg_kind());          // 1
 
 // A distinct type in the library and a struct here.
-type Holder { int v; }
-Holder h = Holder(9);
+type Wrap { int v; }
+Wrap h = Wrap(9);
 print(h.v);                     // 9
 print(int(lib.price()));        // 5
 

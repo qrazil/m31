@@ -1,16 +1,16 @@
 // The other side of corpus/traps/011: graphs that a thread may legitimately
 // take, which a conservative "every refcount is 1" test would refuse.
-type Holder { str s; }
+type Wrap { str s; }
 Chan<int> out = Chan<int>(8);
 
-void eat(Holder h, Chan<int> ch) {
+void eat(Wrap h, Chan<int> ch) {
     send(ch, h.s.size());
 }
 
 // A fresh graph each iteration: unique all the way down.
 int k = 0;
 while (k < 4) {
-    Holder h = Holder(concat("ab", "cd"));
+    Wrap h = Wrap(concat("ab", "cd"));
     spawn eat(h, out);
     k = k + 1;
 }

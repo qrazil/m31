@@ -1,6 +1,6 @@
 // A method may only be added to a type its own module declared, generic or not.
 import lib;
 
-T Holder<T>.get() {
+T Wrap<T>.get() {
     return item;
 }

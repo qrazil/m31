@@ -6,11 +6,11 @@
 // corpus until embedding added it, and the double rc_dec it caused corrupted
 // the heap rather than failing a comparison.
 
-type Holder {
+type Wrap {
     str s;
 }
 
-str Holder.get() {
+str Wrap.get() {
     return s;
 }
 
@@ -18,7 +18,7 @@ str shout(str x) {
     return x + "!";
 }
 
-Holder b = Holder("hi");
+Wrap b = Wrap("hi");
 print(b.get());
 print(shout(b.get()));
 print(shout(shout("a")));

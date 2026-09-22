@@ -4,20 +4,20 @@
 // the left of an assignment. These used to be refused as having nothing to
 // say what the literal should be.
 
-type Holder { List<int> xs; }
+type Wrap { List<int> xs; }
 type Pair<T> { T a; }
 type Opt { int k; List<int> xs = [1, 2]; Map<str, int> m = {"d": 4}; }
 enum Shape { Dot; Bag(List<int>); }
 
 // A bare field name inside a method, and a method's own parameter.
-void Holder.reset() {
+void Wrap.reset() {
     xs = [0, 1];
 }
-void Holder.take(List<int> ys) {
+void Wrap.take(List<int> ys) {
     xs = ys;
 }
-static Holder Holder.of(List<int> ys) {
-    return Holder(ys);
+static Wrap Wrap.of(List<int> ys) {
+    return Wrap(ys);
 }
 
 int sum(List<int> xs) {
@@ -29,7 +29,7 @@ int sum(List<int> xs) {
 }
 
 // Constructor arguments, plain and generic.
-Holder b = Holder([1, 2]);
+Wrap b = Wrap([1, 2]);
 print(sum(b.xs));                                   // 3
 Pair<List<int>> p = Pair<List<int>>([4, 5, 6]);
 print(sum(p.a));                                    // 15
@@ -86,7 +86,7 @@ b.reset();
 print(sum(b.xs));                                   // 1
 b.take([2, 2, 2]);
 print(sum(b.xs));                                   // 6
-print(sum(Holder.of([3, 3]).xs));                      // 6
+print(sum(Wrap.of([3, 3]).xs));                      // 6
 Map<str, Map<str, int>> mm = {};
 mm.set("k", {});
 mm.set("j", {"a": 1});

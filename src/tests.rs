@@ -776,9 +776,9 @@ fn type_errors_on_user_types_are_reported() {
 #[test]
 fn generics_are_erased_before_lowering() {
     // The IR must contain no type parameters at all -- only instantiations.
-    let out = ir("type Holder<T> { T value; }\nHolder<int> b = Holder<int>(1); print(b.value);");
+    let out = ir("type Wrap<T> { T value; }\nWrap<int> b = Wrap<int>(1); print(b.value);");
     assert!(
-        out.contains("type Holder$int"),
+        out.contains("type Wrap$int"),
         "expected an instantiation:\n{out}"
     );
     assert!(
@@ -790,17 +790,14 @@ fn generics_are_erased_before_lowering() {
 #[test]
 fn each_distinct_instantiation_is_emitted_once() {
     let out = ir(
-        "type Holder<T> { T value; }\nHolder<int> a = Holder<int>(1); Holder<int> b = Holder<int>(2); Holder<str> c = Holder<str>(\"s\"); print(a.value + b.value); print(c.value);",
+        "type Wrap<T> { T value; }\nWrap<int> a = Wrap<int>(1); Wrap<int> b = Wrap<int>(2); Wrap<str> c = Wrap<str>(\"s\"); print(a.value + b.value); print(c.value);",
     );
     assert_eq!(
-        out.matches("type Holder$int").count(),
+        out.matches("type Wrap$int").count(),
         1,
-        "Holder<int> must be instantiated exactly once:\n{out}"
+        "Wrap<int> must be instantiated exactly once:\n{out}"
     );
-    assert!(
-        out.contains("type Holder$str"),
-        "Holder<str> missing:\n{out}"
-    );
+    assert!(out.contains("type Wrap$str"), "Wrap<str> missing:\n{out}");
 }
 
 #[test]
@@ -817,7 +814,7 @@ fn an_unused_generic_is_never_instantiated() {
 #[test]
 fn generic_function_type_arguments_are_inferred() {
     let out = ir(
-        "type Holder<T> { T value; }\nT unwrap<T>(Holder<T> b) { return b.value; }\nHolder<int> b = Holder<int>(1); print(unwrap(b));",
+        "type Wrap<T> { T value; }\nT unwrap<T>(Wrap<T> b) { return b.value; }\nWrap<int> b = Wrap<int>(1); print(unwrap(b));",
     );
     assert!(
         out.contains("func unwrap$int"),
@@ -827,15 +824,15 @@ fn generic_function_type_arguments_are_inferred() {
 
 #[test]
 fn generic_misuse_is_rejected() {
-    assert!(err(
-        "type Holder<T> { T value; }\nHolder<int,str> b = Holder<int,str>(1); print(b.value);"
-    )
-    .contains("takes 1 type argument(s), found 2"));
+    assert!(
+        err("type Wrap<T> { T value; }\nWrap<int,str> b = Wrap<int,str>(1); print(b.value);")
+            .contains("takes 1 type argument(s), found 2")
+    );
     assert!(err("type P { int x; }\nP<int> p = P<int>(1); print(p.x);").contains("is not generic"));
     // Inference cannot see through a nested call; the diagnostic says what to
     // do rather than guessing.
     assert!(err(
-        "type Holder<T> { T value; }\nT unwrap<T>(Holder<T> b) { return b.value; }\nHolder<Holder<int>> n = Holder<Holder<int>>(Holder<int>(1)); print(unwrap(unwrap(n)));"
+        "type Wrap<T> { T value; }\nT unwrap<T>(Wrap<T> b) { return b.value; }\nWrap<Wrap<int>> n = Wrap<Wrap<int>>(Wrap<int>(1)); print(unwrap(unwrap(n)));"
     )
     .contains("bind an argument, or the result, to a local"));
 }
@@ -1563,6 +1560,6 @@ fn a_destructor_is_not_promoted_by_embedding() {
 
 #[test]
 fn a_destructor_on_an_unused_generic_type_is_still_checked() {
-    let e = err("type Holder<T> { T v; }\nint Holder<T>.drop() { return 1; }\nprint(1);");
+    let e = err("type Wrap<T> { T v; }\nint Wrap<T>.drop() { return 1; }\nprint(1);");
     assert!(e.contains("must return `void`"), "{e}");
 }

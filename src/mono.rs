@@ -6,7 +6,7 @@
 //! required no IR change at all.
 //!
 //! The pass rewrites the program into an equivalent one with no type
-//! parameters. `Holder<int>` becomes a plain type named `Holder$int`; `id<int>`
+//! parameters. `Wrap<int>` becomes a plain type named `Wrap$int`; `id<int>`
 //! becomes a function named `id$int`. Everything downstream — the type
 //! checker, the lowering, the backends — is unchanged and unaware.
 //!
@@ -23,12 +23,12 @@ pub struct Mono {
     /// Generic declarations, by name.
     generic_types: HashMap<String, TypeDecl>,
     generic_funcs: HashMap<String, Func>,
-    /// Methods on generic types (`T Holder<T>.get()`), instantiated alongside
+    /// Methods on generic types (`T Wrap<T>.get()`), instantiated alongside
     /// each instantiation of their type.
     generic_methods: Vec<Func>,
     /// Methods with type parameters of their own, by concrete receiver and
     /// method name, with the receiver's substitution already bound:
-    /// `Holder$int` -> `first` -> (decl, {T: int}).
+    /// `Wrap$int` -> `first` -> (decl, {T: int}).
     own_generic: HashMap<String, HashMap<String, (Func, Subst)>>,
     /// Pending method instantiations: (decl, substitution, receiver's output
     /// name, method's output name). A queue rather than done on the spot
@@ -62,12 +62,12 @@ pub struct Mono {
     /// contributes when it is passed to a generic function and the type
     /// argument has to be inferred from it.
     recv_ty: Option<Ty>,
-    /// The receiver's OUTPUT type name (`Picker`, `Holder$int`) while an
+    /// The receiver's OUTPUT type name (`Picker`, `Wrap$int`) while an
     /// instance method is being substituted; `None` anywhere else. Unlike
     /// `recv_ty` it is already concrete, so it can key `own_generic`: it is
     /// what lets a bare `pick(xs)` inside a method, or `this.pick(xs)`,
     /// instantiate the receiver's own generic method. Inside a method of a
-    /// generic type the written receiver is just `Holder`, which resolves
+    /// generic type the written receiver is just `Wrap`, which resolves
     /// to nothing, so only the instantiation being emitted can say it.
     cur_recv: Option<String>,
     /// Every module in the program, to tell `lib.f(..)` -- a call into a
@@ -258,7 +258,7 @@ impl Mono {
         }
     }
 
-    /// `Holder<int, str>` becomes `Holder$int$str`. `$` cannot appear in a source
+    /// `Wrap<int, str>` becomes `Wrap$int$str`. `$` cannot appear in a source
     /// identifier, so a mangled name can never collide with a declared one.
     fn mangle(&self, name: &str, args: &[Ty]) -> String {
         if args.is_empty() {
@@ -283,7 +283,7 @@ impl Mono {
     }
 
     /// An output type's name as the reader wrote it, for a diagnostic:
-    /// `Holder<int>` for `Holder$int`, `Point` for `lib#Point`. Only the
+    /// `Wrap<int>` for `Wrap$int`, `Point` for `lib#Point`. Only the
     /// names the reader's own module uses, which is all a receiver can be.
     fn show_out(&self, name: &str) -> String {
         let Some((base, args)) = self.shown.get(name) else {
@@ -524,8 +524,8 @@ impl Mono {
         Ok(())
     }
 
-    /// Emit one method at one receiver: `Holder<T>.get` at `Holder$int`, or
-    /// `Holder<T>.map<U>` at `Holder$int` as `map$str`.
+    /// Emit one method at one receiver: `Wrap<T>.get` at `Wrap$int`, or
+    /// `Wrap<T>.map<U>` at `Wrap$int` as `map$str`.
     fn instantiate_method(
         &mut self,
         decl: &Func,
@@ -546,7 +546,7 @@ impl Mono {
         Ok(())
     }
 
-    /// `T Holder<T>.get()` must name a generic type of its own module, with as
+    /// `T Wrap<T>.get()` must name a generic type of its own module, with as
     /// many parameters as the type has. Checked at the declaration, because
     /// a method on a type nothing instantiates is otherwise never looked at.
     fn check_generic_recv(&self, f: &Func) -> Result<(), Diag> {
@@ -1070,7 +1070,7 @@ impl Mono {
                     }
                 }
                 let ty = self.subst_ty(*ty, sub, *s)?;
-                // `Holder.make(1)` for `static T Holder.make<T>(T v)`: a
+                // `Wrap.make(1)` for `static T Wrap.make<T>(T v)`: a
                 // static method with type parameters of its own, whose
                 // receiver is the type written in front.
                 let mut member = variant.clone();
@@ -1359,8 +1359,8 @@ impl Mono {
     }
 
     /// Match a parameter's written type against an argument's written type,
-    /// binding any type parameter it reaches. Structural, so `Holder<T>` against
-    /// `Holder<int>` binds `T`, not only a bare `T`.
+    /// binding any type parameter it reaches. Structural, so `Wrap<T>` against
+    /// `Wrap<int>` binds `T`, not only a bare `T`.
     fn unify(
         &mut self,
         pty: Ty,
@@ -1394,7 +1394,7 @@ impl Mono {
     /// has a written type -- the same few shapes inference reads.
     fn recv_name(&mut self, obj: &Expr, sub: &Subst) -> Option<String> {
         // `this` is the method's own receiver, whose output name is known
-        // even on a generic type, where the written `Holder` resolves to
+        // even on a generic type, where the written `Wrap` resolves to
         // nothing.
         if let (Expr::This(_), Some(r)) = (obj, &self.cur_recv) {
             return Some(r.clone());

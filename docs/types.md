@@ -329,7 +329,7 @@ Oro's style for `sort`.
 ### What is implemented, and what is not
 
 Working: generic types and generic functions, any arity, nested
-instantiations (`Holder<Holder<int>>`), and a worklist so an unused generic is never
+instantiations (`Wrap<Wrap<int>>`), and a worklist so an unused generic is never
 instantiated — and therefore never type-checked against types it was not
 written for.
 
@@ -337,16 +337,16 @@ written for.
 `f<int>(x)` syntax, deliberately: after a name that is *not* known to be a
 type, `<` is ambiguous with comparison. That is the problem that pushed Go to
 `f[int](x)` and Rust to the turbofish, and it is worth not inheriting. On a
-type it is unambiguous — `Holder<int>` works — because the parser already knows
+type it is unambiguous — `Wrap<int>` works — because the parser already knows
 every type name from its pre-pass.
 
-Inference unifies structurally, so `Holder<T>` against `Holder<int>` binds `T`. Its
+Inference unifies structurally, so `Wrap<T>` against `Wrap<int>` binds `T`. Its
 limit is that it reads argument types syntactically — literals,
 constructions, and locals with a written type — so a *nested* call is opaque:
 
 ```c
 print(unwrap(unwrap(nested)));   // cannot infer
-Holder<int> inner = unwrap(nested); // write the type once
+Wrap<int> inner = unwrap(nested); // write the type once
 print(unwrap(inner));            // fine
 ```
 

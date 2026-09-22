@@ -10,8 +10,8 @@
 distinct List<int> Bag;
 distinct Map<str, int> Tally;
 distinct Array<str> Names;
-type Holder<T> { T item; }
-distinct Holder<int> Sealed;
+type Wrap<T> { T item; }
+distinct Wrap<int> Sealed;
 
 int total(Bag b) {
     int t = 0;
@@ -63,6 +63,6 @@ print(t.get("b").or(0));        // 2
 Names ns = ["x", "y"];
 print(ns[1]);                   // y
 
-Sealed s = Sealed(Holder<int>(9));
-Holder<int> unsealed = Holder<int>(0);
+Sealed s = Sealed(Wrap<int>(9));
+Wrap<int> unsealed = Wrap<int>(0);
 print(unsealed.item);           // 0

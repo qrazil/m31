@@ -67,17 +67,17 @@ if (true) {
 }
 
 // A generic type's destructor is instantiated with each instantiation.
-type Holder<T> {
+type Wrap<T> {
     T value;
 }
 
-void Holder<T>.drop() {
+void Wrap<T>.drop() {
     print("box emptied");
 }
 
 if (true) {
-    Holder<int> bi = Holder<int>(1);
-    Holder<Note> bn = Holder<Note>(Note("boxed"));
+    Wrap<int> bi = Wrap<int>(1);
+    Wrap<Note> bn = Wrap<Note>(Note("boxed"));
 }
 
 // Embedding does not promote a destructor: the embedded value is a field,

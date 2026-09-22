@@ -34,14 +34,14 @@ print(h.p.x);
 // `print(v)` and `str(v)` call `v.to_str()`, which is user code with the
 // value as its receiver -- and it can replace the place the value came
 // from.
-type T { int n; List<Holder> back = []; }
-type Holder { T t; }
+type T { int n; List<Wrap> back = []; }
+type Wrap { T t; }
 str T.to_str() {
     back[0].t = T(0);
     T junk = T(97);
     return "T" + n.to_str();
 }
-Holder hd = Holder(T(1));
+Wrap hd = Wrap(T(1));
 hd.t.back.push(hd);
 print(hd.t);
 hd.t.back.push(hd);

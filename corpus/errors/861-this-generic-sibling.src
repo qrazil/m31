@@ -1,15 +1,15 @@
 // `this.m(..)` is refused for a generic method exactly as for any other, and
 // the message names the method as written -- not its instantiation.
-type Holder<T> {
+type Wrap<T> {
     T v;
 }
 
-U Holder<T>.conv<U>(U u) {
+U Wrap<T>.conv<U>(U u) {
     return u;
 }
 
-int Holder<T>.x() {
+int Wrap<T>.x() {
     return this.conv(5);
 }
 
-print(Holder<str>("s").x());
+print(Wrap<str>("s").x());

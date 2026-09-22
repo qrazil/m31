@@ -21,35 +21,35 @@ str Picker.firsts() {
     return pick(xs);
 }
 
-type Holder<T> {
+type Wrap<T> {
     T v;
 }
 
-U Holder<T>.wrap<U>(U u) {
+U Wrap<T>.wrap<U>(U u) {
     return u;
 }
 
 // One generic sibling calling another, each at its own type argument.
-List<U> Holder<T>.twice<U>(U u) {
+List<U> Wrap<T>.twice<U>(U u) {
     return [wrap(u), wrap(u)];
 }
 
 // And itself: the recursive call is the same instantiation.
-int Holder<T>.count<U>(List<U> xs, int n) {
+int Wrap<T>.count<U>(List<U> xs, int n) {
     if (n == 0) {
         return 0;
     }
     return 1 + count(xs, n - 1);
 }
 
-void Holder<T>.show() {
+void Wrap<T>.show() {
     List<float> fs = twice(1.5);
     List<int> is = [1, 2, 3];
     print(fs.size());
     print(fs[1]);
     print(count(is, 4));
     // A field's written type is the receiver's parameter, bound per
-    // instantiation of Holder.
+    // instantiation of Wrap.
     print(wrap(v));
     print(wrap(5) + 1);
 }
@@ -57,5 +57,5 @@ void Holder<T>.show() {
 Picker p = Picker(1);
 print(p.first());
 print(p.firsts());
-Holder<str>("s").show();
-Holder<int>(7).show();
+Wrap<str>("s").show();
+Wrap<int>(7).show();
