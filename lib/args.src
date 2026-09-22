@@ -120,8 +120,10 @@
 //
 // `Parser` and `Parsed` have public fields, because the language has no
 // private ones; they are not part of the API. (`Parser` keeps its state in a
-// `core` it builds on first use, because a field's default is evaluated where
-// the object is constructed and so cannot build this module's private types.)
+// `core` it builds on first use. That dates from when a field's default was
+// evaluated where the object is constructed and so could not build this
+// module's private types; a default now belongs to its declaring module, so
+// `core` could become a plain defaulted field.)
 
 /// A bad command line, and only that. Print it, print `p.usage()`, and exit
 /// with whatever status your program uses for usage errors: that is the
