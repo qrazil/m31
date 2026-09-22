@@ -1,0 +1,20 @@
+// A generic method and a generic function of the same name make a bare call
+// inside a method ambiguous, the same as any other method and function.
+type Picker {
+    int at;
+}
+
+T Picker.pick<T>(List<T> xs) {
+    return xs[at];
+}
+
+T pick<T>(List<T> xs) {
+    return xs[0];
+}
+
+int Picker.first() {
+    List<int> xs = [4, 5];
+    return pick(xs);
+}
+
+print(Picker(1).first());

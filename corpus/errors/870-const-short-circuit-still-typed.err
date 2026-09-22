@@ -1,0 +1,4 @@
+corpus/errors/870-const-short-circuit-still-typed.src:3:28: cannot apply `+` to int and str; convert one of them
+  |
+3 | const bool B = false && (1 + "a" == 1);
+  |                            ^

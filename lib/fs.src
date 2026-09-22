@@ -161,6 +161,16 @@ pub bool is_link(str path) {
 /// holding one is `Err(InvalidUtf8)` rather than a listing that silently
 /// leaves it out.
 pub Result<List<str>, io.Error> listdir(str path) {
+    return list_names(path, true);
+}
+
+// The listing behind `listdir` and `glob`. `strict` says what a name that is
+// not valid UTF-8 does: fails the whole listing (`listdir`, whose caller
+// asked for every name and must not be told a partial answer is complete),
+// or is skipped (`glob`, which only ever asks "which names match this
+// pattern" -- and a name that is not text can match no `str` pattern, nor be
+// handed back as a `str` if it did).
+Result<List<str>, io.Error> list_names(str path, bool strict) {
     bytes buf = [0; 4096];
     int need = __listdir(path, buf);
     // Too small: the answer is the size the listing needs, so ask again
@@ -182,7 +192,9 @@ pub Result<List<str>, io.Error> listdir(str path) {
                     out.push(name);
                 }
                 case None: {
-                    return Result<List<str>, io.Error>.Err(io.Error.InvalidUtf8);
+                    if (strict) {
+                        return Result<List<str>, io.Error>.Err(io.Error.InvalidUtf8);
+                    }
                 }
             }
             start = i + 1;
@@ -343,6 +355,12 @@ Result<bool, io.Error> walk_into(str dir, List<str> out) {
 /// a question. A directory that cannot be listed contributes nothing, which
 /// is what makes `glob("*/*.conf")` usable across a tree the caller does
 /// not wholly own. A symlink is an entry like any other, dangling or not.
+///
+/// **A name that is not valid UTF-8 is skipped**, and the directory's other
+/// names still match. Such a name cannot match a `str` pattern and could not
+/// be returned as a `str` if it did; `listdir` is the call that refuses a
+/// directory holding one rather than leave it out, because it promises every
+/// name.
 pub List<str> glob(str pattern) {
     List<str> none = [];
     if (pattern == "") {
@@ -389,8 +407,9 @@ void glob_step(str base, List<str> parts, int i, List<str> out) {
     }
     // A directory that cannot be listed matches nothing: unreadable and
     // empty are the same answer to "what matches here". walk does not do
-    // this; see there.
-    match (listdir(dir)) {
+    // this; see there. Not `listdir`: one name that is not UTF-8 would make
+    // the whole directory unlistable, hiding every name that does match.
+    match (list_names(dir, false)) {
         case Ok(List<str> names): {
             List<int> pat = chars(part);
             for (str name in names) {

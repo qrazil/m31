@@ -301,9 +301,12 @@ pub float log(float x) {
 /// so `pow(2.0, 10.0)` is 1024 and not 1023.9999999999998. Otherwise the
 /// exponent is split into a whole part and a fraction, so `exp(y * log(x))`
 /// only ever sees a small argument and its error is not amplified by a large
-/// one. A negative base with a fractional exponent is NaN, as in C.
+/// one. A negative base with a fractional exponent is NaN, as in C. Every
+/// special case -- zeros, infinities, NaN -- gives what C99 Annex F says.
 pub float pow(float x, float y) {
-    if (y == 0.0) {
+    // 1 to any power and anything to the power 0 are 1, NaN included: the
+    // answer does not depend on the other operand at all (Annex F.9.4.4).
+    if (y == 0.0 || x == 1.0) {
         return 1.0;
     }
     if (is_nan(x) || is_nan(y)) {
@@ -312,9 +315,24 @@ pub float pow(float x, float y) {
     if (!is_finite(y)) {
         return pow_infinite(fabs(x), y);
     }
+    // Any whole exponent, however large. There used to be a `< 2^53` limit
+    // here, and a negative base past it fell through to the fractional case
+    // and came out NaN -- but every float from 2^53 up is an even integer, so
+    // pow(-1, 1e300) is 1. pow_whole handles such an exponent exactly: its
+    // parity test reads the bits correctly at any size, and the loop runs
+    // once per bit of the exponent, about a thousand times at the most.
     float whole = trunc(y);
-    if (whole == y && fabs(y) < 9007199254740992.0) {
+    if (whole == y) {
         return pow_whole(x, y);
+    }
+    // An infinite base to a fractional power: infinity or zero by the sign of
+    // the exponent. A fraction is never an odd integer, so the sign of -inf
+    // does not survive -- pow(-inf, 0.5) is +inf, not NaN.
+    if (!is_finite(x)) {
+        if (y > 0.0) {
+            return inf();
+        }
+        return 0.0;
     }
     if (x < 0.0) {
         return nan();

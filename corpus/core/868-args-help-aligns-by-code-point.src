@@ -1,0 +1,12 @@
+// The help table pads each left column to the widest, counting code points
+// rather than bytes: `--größe` is seven columns wide, not nine, and the
+// descriptions of every row still start in one column. (Wide characters --
+// CJK, emoji -- take two terminal columns each and are not accounted for;
+// see `columns` in lib/args.src.)
+import args;
+
+args.Parser p = args.Parser("prog");
+p.flag("größe", help: "big");
+p.flag("verbose", short: "v", help: "chatty");
+p.positional("ünïcode", help: "a name", placeholder: "ñame");
+print(p.help());

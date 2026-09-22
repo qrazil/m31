@@ -1,0 +1,4 @@
+# A directory holding three files, one of whose names is the bytes FF FE --
+# not UTF-8, so no `str` can name it and the program cannot create it.
+mkdir d
+touch d/good1 "d/goodé" "d/$(printf '\377\376')"

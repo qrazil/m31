@@ -1,0 +1,9 @@
+usage: prog [options] <ñame>
+
+arguments:
+  <ñame>          a name
+
+options:
+       --help     show this help
+       --größe    big
+  --v, --verbose  chatty

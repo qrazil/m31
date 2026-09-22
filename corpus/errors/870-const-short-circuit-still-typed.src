@@ -1,0 +1,4 @@
+// The operand `&&` skips is not run, but it is still code: a type error in
+// it is refused as anywhere else.
+const bool B = false && (1 + "a" == 1);
+print(B);

@@ -1,0 +1,4 @@
+// Short-circuiting skips only the operand the left one decides. Here it
+// does not decide, so the division runs, and would trap: refused.
+const bool B = true && (1 / 0 == 1);
+print(B);

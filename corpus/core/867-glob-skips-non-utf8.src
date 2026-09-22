@@ -1,0 +1,23 @@
+// `d` holds `good1`, `goodé`, and a file named by the bytes FF FE, which is
+// not UTF-8 (the `.setup` beside this makes them). glob skips the name that
+// is not text and still finds the others; listdir, which promises every
+// name, refuses the directory instead of leaving one out.
+import fs;
+import io;
+
+List<str> all = fs.glob("d/*");
+print(all.size());
+for (str s in all) {
+    print(s);
+}
+// `?` is one character: é is two bytes and still matches.
+print(fs.glob("d/good?").size());
+print(fs.glob("d/g*é")[0]);
+match (fs.listdir("d")) {
+    case Ok(List<str> names): {
+        print("unexpected: listed");
+    }
+    case Err(io.Error e): {
+        print(e);
+    }
+}

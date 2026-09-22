@@ -1,0 +1,31 @@
+// `&&` and `||` short-circuit in a constant exactly as at run time: the
+// operand the left one decides never runs, so what would trap in it -- a
+// division by zero, an overflow, a shift out of range, an infinite float --
+// is not an error. The same expressions at run time print the same values.
+const int MAX = 9223372036854775807;
+const int ZERO = 0;
+const bool A = false && (1 / 0 == 1);
+const bool B = true || (MAX + 1 > 0);
+const bool C = false && (1 << 64 == 0);
+const bool D = true || (1.0 / 0.0 > 0.0);
+const bool E = false && -(-MAX - 1) > 0;
+const bool F = false && (true || 5 % ZERO == 0);
+// Nested: the inner `||` is decided by its own left operand, and the outer
+// `&&` still runs its right side.
+const bool G = true && (true || 1 / ZERO == 0);
+const bool H = (1 > 2 && 1 / ZERO == 0) || MAX > 0;
+print(A);
+print(B);
+print(C);
+print(D);
+print(E);
+print(F);
+print(G);
+print(H);
+
+int zero = 0;
+int max = 9223372036854775807;
+print(false && (1 / zero == 1));
+print(true || (max + 1 > 0));
+print(true && (true || 1 / zero == 0));
+print((1 > 2 && 1 / zero == 0) || max > 0);

@@ -1,0 +1,61 @@
+// A method with type parameters of its own is called bare from a sibling,
+// like any other method of the receiver. Inside a method the receiver's type
+// is known -- it is the method's own -- so the type arguments are inferred
+// from the arguments as at any other call, on a plain type and on a generic
+// one, where the sibling is instantiated once per instantiation of the type.
+type Picker {
+    int at;
+}
+
+T Picker.pick<T>(List<T> xs) {
+    return xs[at];
+}
+
+int Picker.first() {
+    List<int> xs = [4, 5];
+    return pick(xs);
+}
+
+str Picker.firsts() {
+    List<str> xs = ["a", "b"];
+    return pick(xs);
+}
+
+type Holder<T> {
+    T v;
+}
+
+U Holder<T>.wrap<U>(U u) {
+    return u;
+}
+
+// One generic sibling calling another, each at its own type argument.
+List<U> Holder<T>.twice<U>(U u) {
+    return [wrap(u), wrap(u)];
+}
+
+// And itself: the recursive call is the same instantiation.
+int Holder<T>.count<U>(List<U> xs, int n) {
+    if (n == 0) {
+        return 0;
+    }
+    return 1 + count(xs, n - 1);
+}
+
+void Holder<T>.show() {
+    List<float> fs = twice(1.5);
+    List<int> is = [1, 2, 3];
+    print(fs.size());
+    print(fs[1]);
+    print(count(is, 4));
+    // A field's written type is the receiver's parameter, bound per
+    // instantiation of Holder.
+    print(wrap(v));
+    print(wrap(5) + 1);
+}
+
+Picker p = Picker(1);
+print(p.first());
+print(p.firsts());
+Holder<str>("s").show();
+Holder<int>(7).show();

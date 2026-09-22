@@ -1,0 +1,17 @@
+// A wrong argument count at a bare generic sibling call names the method as
+// the reader writes it, with its inferred type argument -- never the name
+// its instantiation is emitted under.
+type Picker {
+    int at;
+}
+
+T Picker.pick<T>(List<T> xs) {
+    return xs[at];
+}
+
+int Picker.first() {
+    List<int> xs = [4, 5];
+    return pick(xs, 3);
+}
+
+print(Picker(1).first());
