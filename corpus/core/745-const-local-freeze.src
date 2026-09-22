@@ -1,0 +1,70 @@
+// A `const` local freezes its value, deeply: the object is marked, so no
+// alias can change it either (docs/const-decision.md). Everything a frozen
+// value can still do is here: be read, be passed, be aliased by another
+// const, be cloned into something that can change, cross a thread boundary,
+// and be freed when its last reference goes -- the leak check would see a
+// frozen object that never was.
+
+type Point {
+    int x;
+    int y;
+}
+
+List<int> make() {
+    return [1, 2, 3];
+}
+
+int total(List<int> xs) {
+    int t = 0;
+    for (int v in xs) {
+        t = t + v;
+    }
+    return t;
+}
+
+void worker(List<Point> ps, Chan<int> out) {
+    send(out, ps[1].y);
+}
+
+void run() {
+    // A literal, and a call's fresh result.
+    const List<int> a = [4, 5, 6];
+    const List<int> b = make();
+    print(total(a));
+    print(b.size());
+    // Another const may alias a frozen value: it is frozen already, so
+    // binding it changes nothing for anyone.
+    const List<int> c = a;
+    print(c[2]);
+    // The mutable copy.
+    List<int> d = clone(a);
+    d.push(7);
+    d[0] = 40;
+    print(d.size());
+    print(d[0]);
+    print(a[0]);
+    // Deep: the Points inside are frozen with the list, but reading them is
+    // what a frozen value is for.
+    const List<Point> ps = [Point(1, 2), Point(3, 4)];
+    Point p = ps[1];
+    print(p.x + p.y);
+    // A const map and a const struct.
+    const Map<str, int> m = {"one": 1};
+    print(m.get("one").or(0));
+    const Point origin = Point(0, 0);
+    print(origin.x);
+    // Across a thread: a frozen value moves like any other.
+    Chan<int> ch = Chan<int>(1);
+    const List<Point> moved = [Point(5, 6), Point(7, 8)];
+    spawn worker(moved, ch);
+    print(recv(ch));
+}
+
+// Frozen values made and dropped in a loop are freed each time.
+int i = 0;
+while (i < 3) {
+    const List<Point> tmp = [Point(i, i)];
+    print(tmp[0].x);
+    i = i + 1;
+}
+run();

@@ -1,0 +1,17 @@
+// The freeze is deep. `p` is an ordinary local holding one of the Points
+// inside a frozen list, and the Point was frozen with the list -- so the
+// field store traps.
+
+type Point {
+    int x;
+    int y;
+}
+
+void run() {
+    const List<Point> ps = [Point(1, 2), Point(3, 4)];
+    Point p = ps[0];
+    p.x = 10;
+    print(p.x);
+}
+
+run();

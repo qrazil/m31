@@ -1,0 +1,4 @@
+corpus/errors/758-const-type-mismatch.src:3:20: type mismatch: expected float, found int
+  |
+3 | const float RATE = 3;
+  |                    ^

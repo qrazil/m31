@@ -1,0 +1,19 @@
+// A method that changes its receiver, called on a const. Nothing in a
+// method's signature says whether it changes `this`, so the call compiles;
+// the store inside the method finds the receiver frozen.
+
+type Counter {
+    int n;
+}
+
+void Counter.bump() {
+    n = n + 1;
+}
+
+void run() {
+    const Counter c = Counter(0);
+    c.bump();
+    print(c.n);
+}
+
+run();

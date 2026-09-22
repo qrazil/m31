@@ -1,0 +1,8 @@
+// A constant's value is computed by the compiler, so a call -- which would
+// need the program running -- is not a constant expression.
+int answer() {
+    return 42;
+}
+
+const int ANSWER = answer();
+print(ANSWER);

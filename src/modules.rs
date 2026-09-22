@@ -243,6 +243,10 @@ pub fn load(entry: &str) -> Result<Loaded, Located> {
                 // so this concatenation cannot reorder anything that runs.
                 acc.types.extend(p.types);
                 acc.funcs.extend(p.funcs);
+                // Constants are declarations, so any module may hold them;
+                // their values are computed by the compiler, so the order
+                // they are concatenated in cannot change anything either.
+                acc.consts.extend(p.consts);
                 acc.toplevel.extend(p.toplevel);
                 // Nothing to merge: every file interned into the loader's
                 // single arena, which is put back on the result below.

@@ -41,8 +41,11 @@ void rc_inc(Obj *o) {
 
 void rc_dec(Obj *o) {
     if (o->rc == RC_IMMORTAL) return;
-    RC_ASSERT(o->rc > 0, "decrement below zero");
-    if (--o->rc == 0) {
+    RC_ASSERT((o->rc & ~RC_FROZEN) > 0, "decrement below zero");
+    /* The frozen flag sits above the count (rt.h), so the count is what is
+     * below it: a frozen object is freed like any other when its last
+     * reference goes. */
+    if ((--o->rc & ~RC_FROZEN) == 0) {
         /* Release what this object holds before releasing the object. A type
          * with no reference-typed fields has no drop function at all, so the
          * common case is one predictable branch, not a call. */
@@ -54,7 +57,7 @@ void rc_dec(Obj *o) {
     }
 }
 
-const TypeInfo rt_str_type = { NULL, NULL, NULL };
+const TypeInfo rt_str_type = { NULL, NULL, NULL, NULL };
 
 Obj *rt_alloc_immortal(size_t size, const TypeInfo *ty) {
     Obj *o = malloc(size);
@@ -535,10 +538,10 @@ static void lst_walk_refs(Obj *o, VisitFn visit, void *ctx) {
     }
 }
 
-static const TypeInfo rt_arr_val_type = { NULL, NULL, NULL };
-static const TypeInfo rt_arr_ref_type = { arr_drop_refs, NULL, arr_walk_refs };
-static const TypeInfo rt_lst_val_type = { lst_drop_vals, NULL, NULL };
-static const TypeInfo rt_lst_ref_type = { lst_drop_refs, NULL, lst_walk_refs };
+const TypeInfo rt_arr_val_type = { NULL, NULL, NULL, NULL };
+const TypeInfo rt_arr_ref_type = { arr_drop_refs, NULL, arr_walk_refs, NULL };
+const TypeInfo rt_lst_val_type = { lst_drop_vals, NULL, NULL, NULL };
+const TypeInfo rt_lst_ref_type = { lst_drop_refs, NULL, lst_walk_refs, NULL };
 
 
 /* Bytes for `n` slots plus a `head` header, trapping rather than wrapping.
@@ -632,12 +635,14 @@ int64_t rt_index_get(Obj *o, int64_t i) {
 }
 
 void rt_index_set(Obj *o, int64_t i, int64_t v) {
+    rt_check_mutable(o);
     int64_t n = rt_len_of(o);
     if (i < 0 || i >= n) rt_trap("index out of range");
     slots(o)[i] = v;
 }
 
 void rt_list_push(Obj *o, int64_t v) {
+    rt_check_mutable(o);
     Lst *l = (Lst *)o;
     if (l->len == l->cap) {
         int64_t cap = l->cap == 0 ? 4 : l->cap * 2;
@@ -698,6 +703,7 @@ Obj *rt_seq_clone(Obj *o) {
 }
 
 int64_t rt_list_pop(Obj *o) {
+    rt_check_mutable(o);
     Lst *l = (Lst *)o;
     if (l->len == 0) rt_trap("pop from an empty list");
     return l->data[--l->len];
@@ -707,6 +713,7 @@ int64_t rt_list_pop(Obj *o) {
  * the caller hands a reference in, and gets one back out. Neither touches a
  * refcount here -- the lowering does it, so every container agrees. */
 void rt_list_insert(Obj *o, int64_t i, int64_t v) {
+    rt_check_mutable(o);
     Lst *l = (Lst *)o;
     if (i < 0 || i > l->len) rt_trap("insert index out of range");
     rt_list_push(o, 0);              /* grow by one; the value is overwritten */
@@ -717,6 +724,7 @@ void rt_list_insert(Obj *o, int64_t i, int64_t v) {
 }
 
 int64_t rt_list_remove_at(Obj *o, int64_t i) {
+    rt_check_mutable(o);
     Lst *l = (Lst *)o;
     if (i < 0 || i >= l->len) rt_trap("index out of range");
     int64_t gone = l->data[i];
@@ -730,6 +738,7 @@ int64_t rt_list_remove_at(Obj *o, int64_t i) {
 /* Releasing is the container's job here, because after this there is nothing
  * left to hand the references to. */
 void rt_list_clear(Obj *o, bool elems_are_refs) {
+    rt_check_mutable(o);
     Lst *l = (Lst *)o;
     if (elems_are_refs) {
         for (int64_t i = 0; i < l->len; i++) {
@@ -742,6 +751,7 @@ void rt_list_clear(Obj *o, bool elems_are_refs) {
 /* In place, so no ownership changes: the same references, different order.
  * Works for an Array too -- only the slots move. */
 void rt_seq_reverse(Obj *o) {
+    rt_check_mutable(o);
     int64_t n = rt_len_of(o);
     int64_t *d = slots(o);
     for (int64_t i = 0, j = n - 1; i < j; i++, j--) {
@@ -793,6 +803,7 @@ static void merge_run(int64_t *d, int64_t *tmp, int64_t lo, int64_t mid,
 }
 
 static void rt_sort_with(Obj *o, SortCmp cmp) {
+    rt_check_mutable(o);
     int64_t n = rt_len_of(o);
     if (n < 2) return;
     int64_t *d = slots(o);
@@ -903,7 +914,7 @@ static void bytes_drop(Obj *o) {
 
 /* No walk: a byte is not a reference, so a bytes is a leaf at a thread
  * boundary and rt_check_unique answers it from the count alone. */
-static const TypeInfo rt_bytes_type = { bytes_drop, NULL, NULL };
+const TypeInfo rt_bytes_type = { bytes_drop, NULL, NULL, NULL };
 
 /* A value going INTO a bytes. Truncating 256 to 0 would be a silent wrong
  * answer in exactly the code -- codecs, checksums -- least able to notice. */
@@ -973,12 +984,14 @@ int64_t rt_bytes_get(Obj *o, int64_t i) {
 /* The index is checked before the value, the order a reader sees them in
  * `b[i] = v`. */
 void rt_bytes_set(Obj *o, int64_t i, int64_t v) {
+    rt_check_mutable(o);
     Bytes *b = (Bytes *)o;
     if (i < 0 || i >= b->len) rt_trap("index out of range");
     b->data[i] = as_byte(v);
 }
 
 void rt_bytes_push(Obj *o, int64_t v) {
+    rt_check_mutable(o);
     Bytes *b = (Bytes *)o;
     uint8_t x = as_byte(v);
     bytes_reserve(b, b->len + 1);
@@ -986,6 +999,7 @@ void rt_bytes_push(Obj *o, int64_t v) {
 }
 
 int64_t rt_bytes_pop(Obj *o) {
+    rt_check_mutable(o);
     Bytes *b = (Bytes *)o;
     if (b->len == 0) rt_trap("pop from empty bytes");
     return b->data[--b->len];
@@ -994,6 +1008,7 @@ int64_t rt_bytes_pop(Obj *o) {
 /* Keeps the buffer: clearing is what a reused read buffer does between
  * reads, and giving the memory back only to ask for it again is waste. */
 void rt_bytes_clear(Obj *o) {
+    rt_check_mutable(o);
     ((Bytes *)o)->len = 0;
 }
 
@@ -1001,6 +1016,7 @@ void rt_bytes_clear(Obj *o) {
  * and the source pointer after, so a realloc that moves the buffer moves the
  * source with it. */
 void rt_bytes_extend(Obj *o, Obj *more) {
+    rt_check_mutable(o);
     Bytes *b = (Bytes *)o;
     int64_t n = ((Bytes *)more)->len;
     int64_t total;
@@ -1205,25 +1221,14 @@ bool rt_bytes_utf8(Obj *o, Obj **out) {
  * Open addressing with linear probing and a 70% load factor. One allocation
  * for the whole table, no per-entry node, and deletion leaves a tombstone so
  * a probe sequence is never broken.
+ *
+ * The layout (Map, MapSlot) is in rt.h, because a module constant's map is
+ * laid out by the compiler as static data. So is the hashing: the compiler
+ * places each key where map_probe below will look for it, which makes
+ * hash_int, hash_key and the probe order part of that contract. Change them
+ * together with src/lower/consts.rs (`map_hash`), or every constant map
+ * silently stops finding its keys -- corpus/core/742-const-map checks.
  */
-enum { SLOT_EMPTY = 0, SLOT_FULL = 1, SLOT_DEAD = 2 };
-
-typedef struct {
-    int64_t k;
-    int64_t v;
-    uint8_t state;
-} Slot;
-
-typedef struct {
-    Obj     hdr;
-    Slot   *slots;
-    int64_t cap;
-    int64_t len;      /* live entries */
-    int64_t used;     /* live + tombstones, for the load factor */
-    bool    key_is_str;
-    bool    key_is_ref;
-    bool    val_is_ref;
-} Map;
 
 static void map_drop(Obj *o) {
     Map *m = (Map *)o;
@@ -1244,7 +1249,7 @@ static void map_walk(Obj *o, VisitFn visit, void *ctx) {
     }
 }
 
-static const TypeInfo rt_map_type = { map_drop, NULL, map_walk };
+const TypeInfo rt_map_type = { map_drop, NULL, map_walk, NULL };
 
 static uint64_t hash_int(int64_t x) {
     /* splitmix64's finaliser: cheap and mixes the low bits, which matters
@@ -1315,10 +1320,10 @@ static int64_t map_probe(const Map *m, int64_t k, bool *found) {
  * So when the load is tombstones rather than entries, rehash at the SAME
  * capacity and sweep them instead of doubling. */
 static void map_rehash(Map *m, int64_t cap) {
-    Slot *old = m->slots;
+    MapSlot *old = m->slots;
     int64_t oldcap = m->cap;
 
-    Slot *fresh = calloc((size_t)cap, sizeof(Slot));
+    MapSlot *fresh = calloc((size_t)cap, sizeof(MapSlot));
     if (fresh == NULL) rt_trap("out of memory");
     m->slots = fresh;
     m->cap = cap;
@@ -1334,6 +1339,7 @@ static void map_rehash(Map *m, int64_t cap) {
 }
 
 void rt_map_set(Obj *o, int64_t k, int64_t v) {
+    rt_check_mutable(o);
     Map *m = (Map *)o;
     /* Rehash before probing, so a full table can never spin forever. Double
      * only when live entries are what fills it; when the load is mostly
@@ -1384,6 +1390,7 @@ bool rt_map_has(Obj *o, int64_t k) {
 }
 
 void rt_map_remove(Obj *o, int64_t k) {
+    rt_check_mutable(o);
     Map *m = (Map *)o;
     if (m->cap == 0) return;
     bool found;
@@ -1435,6 +1442,7 @@ Obj *rt_map_values(Obj *o) {
 }
 
 void rt_map_clear(Obj *o) {
+    rt_check_mutable(o);
     Map *m = (Map *)o;
     for (int64_t i = 0; i < m->cap; i++) {
         if (m->slots[i].state != SLOT_FULL) continue;
@@ -1446,6 +1454,29 @@ void rt_map_clear(Obj *o) {
     m->cap = 0;
     m->len = 0;
     m->used = 0;
+}
+
+/* `clone(m)`: a new map with the same entries, each key and value retained
+ * once more -- shallow, like rt_seq_clone. It exists so that a constant map
+ * has the same way out as a constant array: `clone(TABLE)` is the mutable
+ * copy. The table is copied as it stands, tombstones and all; the copy
+ * sweeps them on its first rehash the way the original would have. */
+Obj *rt_map_clone(Obj *o) {
+    const Map *m = (const Map *)o;
+    Map *c = (Map *)rt_map_new(m->key_is_str, m->key_is_ref, m->val_is_ref);
+    if (m->cap == 0) return (Obj *)c;
+    c->slots = malloc((size_t)m->cap * sizeof(MapSlot));
+    if (c->slots == NULL) rt_trap("out of memory");
+    memcpy(c->slots, m->slots, (size_t)m->cap * sizeof(MapSlot));
+    c->cap = m->cap;
+    c->len = m->len;
+    c->used = m->used;
+    for (int64_t i = 0; i < c->cap; i++) {
+        if (c->slots[i].state != SLOT_FULL) continue;
+        if (c->key_is_ref) rc_inc((Obj *)(intptr_t)c->slots[i].k);
+        if (c->val_is_ref) rc_inc((Obj *)(intptr_t)c->slots[i].v);
+    }
+    return (Obj *)c;
 }
 
 /* ---- concurrency ------------------------------------------------------ */
@@ -1470,7 +1501,7 @@ static void chan_drop(Obj *o) {
     free(c->buf);
 }
 
-static const TypeInfo rt_chan_type = { chan_drop, NULL, NULL };
+static const TypeInfo rt_chan_type = { chan_drop, NULL, NULL, NULL };
 
 Chan *rt_chan_new(int64_t capacity) {
     if (capacity < 1) rt_trap("channel capacity must be at least 1");
@@ -1634,6 +1665,12 @@ typedef struct {
     int64_t  todo_cap;
     int64_t  cap;    /* a power of two */
     int64_t  len;
+    /* Collecting for rt_freeze rather than a thread crossing: skip what is
+     * already frozen and every str as well as immortals. Those may be shared
+     * by a const, because nobody can change them; they may NOT be shared by
+     * a value crossing threads, because two threads would still race on
+     * their counts. */
+    bool     freezing;
 } Reach;
 
 static void reach_add(Reach *r, Obj *o);
@@ -1666,6 +1703,7 @@ static void reach_grow(Reach *r) {
 /* Record one reference into `o`, and queue it for walking the first time. */
 static void reach_add(Reach *r, Obj *o) {
     if (o == NULL || o->rc == RC_IMMORTAL) return;
+    if (r->freezing && ((o->rc & RC_FROZEN) != 0 || o->ty == &rt_str_type)) return;
     if (r->cap == 0 || (r->len + 1) * 10 >= r->cap * 7) reach_grow(r);
 
     int64_t mask = r->cap - 1;
@@ -1693,47 +1731,236 @@ static void reach_visit(void *ctx, Obj *child) {
     reach_add((Reach *)ctx, child);
 }
 
+/* Walk everything reachable from `o` (subject to r->freezing) and say
+ * whether all of it is private to `o`: no object in it is referenced from
+ * outside it. The count of references into each object from within the
+ * graph has to equal its refcount. `r` is left filled in, for rt_freeze to
+ * mark; the caller frees it. */
+static bool reach_private(Reach *r, Obj *o) {
+    /* Each object is walked exactly once, the first time it is seen, so a
+     * cycle terminates. */
+    reach_add(r, o);
+    while (r->todo_len > 0) {
+        Obj *cur = r->todo[--r->todo_len];
+        if (cur->ty != NULL && cur->ty->walk != NULL) {
+            cur->ty->walk(cur, reach_visit, r);
+        }
+    }
+    for (int64_t i = 0; i < r->cap; i++) {
+        if (r->keys[i] == NULL) continue;
+        if ((r->keys[i]->rc & ~RC_FROZEN) != r->cnt[i]) return false;
+    }
+    return true;
+}
+
+static void reach_free(Reach *r) {
+    free(r->keys);
+    free(r->cnt);
+    free(r->todo);
+}
+
 void rt_check_unique(Obj *o) {
     if (o->rc == RC_IMMORTAL) return;
 
     /* The common case by far: a leaf the mover alone holds. Answer it
-     * without allocating anything. */
+     * without allocating anything. The frozen flag is not part of the count
+     * (rt.h): a frozen value crosses under the same rule as any other,
+     * because its count is still not atomic. */
     if (o->ty == NULL || o->ty->walk == NULL) {
-        if (o->rc != 1) {
+        if ((o->rc & ~RC_FROZEN) != 1) {
             rt_trap("value crossing a thread boundary is still referenced "
                     "elsewhere; clone() it, or drop the other reference first");
         }
         return;
     }
 
-    Reach r = { NULL, NULL, NULL, 0, 0, 0, 0 };
-
-    /* Each object is walked exactly once, the first time it is seen, so a
-     * cycle terminates. */
-    reach_add(&r, o);
-    while (r.todo_len > 0) {
-        Obj *cur = r.todo[--r.todo_len];
-        if (cur->ty != NULL && cur->ty->walk != NULL) {
-            cur->ty->walk(cur, reach_visit, &r);
-        }
-    }
-
-    bool ok = true;
-    for (int64_t i = 0; i < r.cap; i++) {
-        if (r.keys[i] == NULL) continue;
-        if (r.keys[i]->rc != r.cnt[i]) {
-            ok = false;
-            break;
-        }
-    }
-    free(r.keys);
-    free(r.cnt);
-    free(r.todo);
-
+    Reach r = { NULL, NULL, NULL, 0, 0, 0, 0, false };
+    bool ok = reach_private(&r, o);
+    reach_free(&r);
     if (!ok) {
         rt_trap("value crossing a thread boundary is still referenced "
                 "elsewhere; clone() it, or drop the other reference first");
     }
+}
+
+/* A `const` binding takes a frozen snapshot of its value -- the author's
+ * rule, docs/const-decision.md.
+ *
+ * Constness has to belong to the object, not to the name: under reference
+ * counting `List<int> b = a;` makes a second name for the same list, and a
+ * rule about the name `a` would say nothing about `b`. So the object is
+ * marked, and every mutation path checks the mark.
+ *
+ * Marking a value somebody else still holds would change it under their
+ * feet, so the binding decides here, at run time, which of two things to do:
+ *
+ *   - the value's whole graph is reachable from it alone (the same count the
+ *     thread-boundary check makes): freeze it in place, no copy. This is the
+ *     literal, the fresh construction, the call result nobody else kept;
+ *   - anything in it is held from outside: deep-copy it and freeze the copy.
+ *     The original stays exactly as mutable as it was.
+ *
+ * Frozen and immortal objects and every str are left out of both the count
+ * and the copy: nobody can change them, so sharing them is harmless. */
+
+/* Old object -> its copy, open addressing on the old pointer. The new
+ * objects are the keys' values, which is also the list to freeze. */
+typedef struct {
+    Obj    **old;
+    Obj    **copy;
+    int64_t  cap;    /* a power of two */
+    int64_t  len;
+} CopyMap;
+
+static int64_t copymap_slot(const CopyMap *m, const Obj *o) {
+    int64_t mask = m->cap - 1;
+    int64_t i = (int64_t)((((uintptr_t)o) >> 4) & (uintptr_t)mask);
+    while (m->old[i] != NULL && m->old[i] != o) i = (i + 1) & mask;
+    return i;
+}
+
+void rt_copy_register(void *ctx, Obj *old, Obj *copy) {
+    CopyMap *m = (CopyMap *)ctx;
+    if (m->cap == 0 || (m->len + 1) * 10 >= m->cap * 7) {
+        int64_t cap = m->cap == 0 ? 64 : m->cap * 2;
+        CopyMap g = { calloc((size_t)cap, sizeof(Obj *)),
+                      calloc((size_t)cap, sizeof(Obj *)), cap, 0 };
+        if (g.old == NULL || g.copy == NULL) rt_trap("out of memory");
+        for (int64_t i = 0; i < m->cap; i++) {
+            if (m->old[i] == NULL) continue;
+            int64_t j = copymap_slot(&g, m->old[i]);
+            g.old[j] = m->old[i];
+            g.copy[j] = m->copy[i];
+            g.len++;
+        }
+        free(m->old);
+        free(m->copy);
+        *m = g;
+    }
+    int64_t i = copymap_slot(m, old);
+    m->old[i] = old;
+    m->copy[i] = copy;
+    m->len++;
+}
+
+static Obj *copy_obj(CopyMap *m, Obj *o);
+
+/* A child's copy, +1 for the field or slot that will hold it. Something
+ * already copied is shared, so a diamond in the original stays a diamond
+ * and a cycle closes onto the copy. */
+Obj *rt_copy_child(void *ctx, Obj *c) {
+    CopyMap *m = (CopyMap *)ctx;
+    if (c == NULL) return NULL;
+    if ((c->rc & RC_FROZEN) != 0 || c->ty == &rt_str_type) {
+        rc_inc(c);
+        return c;
+    }
+    if (m->cap > 0) {
+        int64_t i = copymap_slot(m, c);
+        if (m->old[i] == c) {
+            rc_inc(m->copy[i]);
+            return m->copy[i];
+        }
+    }
+    return copy_obj(m, c);
+}
+
+static void copy_slots(CopyMap *m, int64_t *dst, const int64_t *src, int64_t n, bool refs) {
+    for (int64_t i = 0; i < n; i++) {
+        dst[i] = refs ? (int64_t)(intptr_t)rt_copy_child(m, (Obj *)(intptr_t)src[i]) : src[i];
+    }
+}
+
+/* A new object, count 1, registered before its children are copied. The
+ * runtime's collections are copied here; a user type by its emitted CopyFn.
+ * Recursive, so a very deep chain of objects is bounded by the C stack. */
+static Obj *copy_obj(CopyMap *m, Obj *o) {
+    const TypeInfo *ty = o->ty;
+    if (ty == &rt_arr_val_type || ty == &rt_arr_ref_type) {
+        const Arr *a = (const Arr *)o;
+        Arr *n = (Arr *)rt_alloc(slot_bytes(sizeof(Arr), a->len), ty);
+        n->len = a->len;
+        for (int64_t i = 0; i < a->len; i++) n->data[i] = 0;
+        rt_copy_register(m, o, (Obj *)n);
+        copy_slots(m, n->data, a->data, a->len, ty == &rt_arr_ref_type);
+        return (Obj *)n;
+    }
+    if (ty == &rt_lst_val_type || ty == &rt_lst_ref_type) {
+        const Lst *l = (const Lst *)o;
+        Lst *n = (Lst *)rt_list_new(ty == &rt_lst_ref_type);
+        if (l->len > 0) {
+            n->data = calloc((size_t)l->len, sizeof(int64_t));
+            if (n->data == NULL) rt_trap("out of memory");
+            n->cap = l->len;
+        }
+        rt_copy_register(m, o, (Obj *)n);
+        copy_slots(m, n->data, l->data, l->len, ty == &rt_lst_ref_type);
+        n->len = l->len;
+        return (Obj *)n;
+    }
+    if (ty == &rt_bytes_type) {
+        Obj *n = rt_bytes_clone(o);
+        rt_copy_register(m, o, n);
+        return n;
+    }
+    if (ty == &rt_map_type) {
+        const Map *src = (const Map *)o;
+        Map *n = (Map *)rt_map_new(src->key_is_str, src->key_is_ref, src->val_is_ref);
+        rt_copy_register(m, o, (Obj *)n);
+        if (src->cap > 0) {
+            n->slots = calloc((size_t)src->cap, sizeof(MapSlot));
+            if (n->slots == NULL) rt_trap("out of memory");
+            n->cap = src->cap;
+            n->used = src->used;
+            for (int64_t i = 0; i < src->cap; i++) {
+                MapSlot s = src->slots[i];
+                if (s.state == SLOT_FULL) {
+                    if (src->key_is_ref) s.k = (int64_t)(intptr_t)rt_copy_child(m, (Obj *)(intptr_t)s.k);
+                    if (src->val_is_ref) s.v = (int64_t)(intptr_t)rt_copy_child(m, (Obj *)(intptr_t)s.v);
+                }
+                n->slots[i] = s;
+            }
+            n->len = src->len;
+        }
+        return (Obj *)n;
+    }
+    if (ty != NULL && ty->copy != NULL) return ty->copy(o, m);
+    rt_trap("internal: a value of this type cannot be copied for a const");
+}
+
+Obj *rt_snapshot(Obj *o) {
+    if ((o->rc & RC_FROZEN) != 0 || o->ty == &rt_str_type) return o;
+    if (o->ty == NULL || o->ty->walk == NULL) {
+        if (o->rc == 1) {
+            o->rc |= RC_FROZEN;
+            return o;
+        }
+    } else {
+        Reach r = { NULL, NULL, NULL, 0, 0, 0, 0, true };
+        bool private = reach_private(&r, o);
+        if (private) {
+            for (int64_t i = 0; i < r.cap; i++) {
+                if (r.keys[i] != NULL) r.keys[i]->rc |= RC_FROZEN;
+            }
+        }
+        reach_free(&r);
+        if (private) return o;
+    }
+    /* Shared: copy, then freeze exactly the objects the copy made -- they
+     * are the map's values, and nothing outside holds any of them yet. */
+    CopyMap m = { NULL, NULL, 0, 0 };
+    Obj *snap = copy_obj(&m, o);
+    for (int64_t i = 0; i < m.cap; i++) {
+        if (m.old[i] != NULL) m.copy[i]->rc |= RC_FROZEN;
+    }
+    free(m.old);
+    free(m.copy);
+    rc_dec(o);
+    return snap;
+}
+
+_Noreturn void rt_frozen_trap(void) {
+    rt_trap("cannot modify a constant; clone() it for a copy that can be changed");
 }
 
 _Noreturn void rt_trap(const char *msg) {
@@ -1787,6 +2014,7 @@ int64_t rt_open(Obj *path, int64_t flags, int64_t mode) {
 }
 
 int64_t rt_read(int64_t fd, Obj *buf, int64_t off, int64_t n) {
+    rt_check_mutable(buf);
     Bytes *b = (Bytes *)buf;
     range_ok(b->len, off, n, "__read: range outside the buffer");
     return sys_read(fd, b->data + off, n);
@@ -1868,6 +2096,7 @@ int64_t rt_symlink(Obj *target, Obj *path) {
 /* Fills the whole of `buf` at most; the library grows it and asks again
  * when the answer is larger than its size (sys.h, sys_listdir). */
 int64_t rt_listdir(Obj *path, Obj *buf) {
+    rt_check_mutable(buf);
     if (!path_ok(path)) return -SYS_EINVAL;
     Bytes *b = (Bytes *)buf;
     return sys_listdir(((Str *)path)->data, (char *)b->data, b->len);

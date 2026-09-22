@@ -1,0 +1,32 @@
+// Snapshotting a cycle: the copy must close onto itself rather than recurse
+// forever, and must not see later changes to the original.
+//
+// A trap test, not a core one, and that is itself the finding: a frozen
+// cycle can never be broken -- breaking it is a change -- so under
+// reference counting, which does not collect cycles (reference §7.1), the
+// snapshot leaks by construction and the leak check could never pass. The
+// result is reported through the trap's message instead.
+
+type Node {
+    int v;
+    List<Node> next;
+}
+
+void run() {
+    Node n1 = Node(1, []);
+    Node n2 = Node(2, []);
+    n1.next.push(n2);
+    n2.next.push(n1);
+    const Node c = n1;
+    n1.v = 100;
+    n2.v = 200;
+    // Break the original's cycle, so only the snapshot's is left.
+    n2.next.clear();
+    Node round = c.next[0].next[0];
+    trap(
+        "cycle copied: " + c.v.to_str() + " " + c.next[0].v.to_str() + " " + round.v.to_str()
+            + " " + round.next[0].v.to_str()
+    );
+}
+
+run();

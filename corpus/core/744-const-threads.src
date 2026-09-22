@@ -1,0 +1,55 @@
+// Module constants are shared by every thread, read directly or passed to
+// `spawn` -- which moves every other reference, but a constant is immortal
+// and immutable: neither thread ever writes its count or its contents, so
+// there is nothing to race on (reference §8.3). Eight threads read the same
+// tables at once; under the non-atomic counts this would corrupt the tables
+// if a read wrote anything.
+
+const Array<int> PRIMES = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29];
+const Map<str, int> WEIGHT = {"light": 1, "heavy": 10};
+const Array<str> KINDS = ["light", "heavy"];
+const str TAG = "done";
+
+// Reads the tables straight from the module.
+void reader(int id, Chan<int> out) {
+    int t = 0;
+    int round = 0;
+    while (round < 20000) {
+        for (int p in PRIMES) {
+            t = t + p;
+        }
+        Array<int> held = PRIMES;
+        t = t + held[id % 10];
+        t = t + WEIGHT.get(KINDS[round % 2]).or(0);
+        round = round + 1;
+    }
+    send(out, t);
+}
+
+// Is handed the table as an argument instead.
+void given(Array<int> table, str tag, Chan<str> out) {
+    int t = 0;
+    for (int p in table) {
+        t = t + p;
+    }
+    send(out, tag + " " + t.to_str());
+}
+
+Chan<int> results = Chan<int>(8);
+int id = 0;
+while (id < 8) {
+    spawn reader(id, results);
+    id = id + 1;
+}
+Chan<str> words = Chan<str>(1);
+spawn given(PRIMES, TAG, words);
+
+int total = 0;
+int got = 0;
+while (got < 8) {
+    total = total + recv(results);
+    got = got + 1;
+}
+print(total);
+print(recv(words));
+print(PRIMES[9]);

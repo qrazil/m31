@@ -1,0 +1,5 @@
+// A module of nothing but constants: legal, because a constant is a
+// declaration, not a statement.
+pub const int SECOND = 1000;
+pub const int MINUTE = 60 * SECOND;
+pub const Array<str> NAMES = ["ms", "s", "min"];

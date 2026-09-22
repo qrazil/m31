@@ -1,0 +1,6 @@
+// Constants may name each other in any order, but not in a circle: the
+// diagnostic prints the whole chain, as an import cycle's does.
+const int A = B + 1;
+const int B = C * 2;
+const int C = A - 3;
+print(A);

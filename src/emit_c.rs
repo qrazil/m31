@@ -146,6 +146,45 @@ pub fn emit(m: &Module) -> String {
         o.push('\n');
     }
 
+    // A copy function per concrete type, for a `const` binding that has to
+    // snapshot a shared value (runtime/rt.c, rt_snapshot). Every type gets
+    // one, reference fields or not: the runtime does not know a user type's
+    // size, so even a struct of ints is copied here. The body is a struct
+    // assignment -- the scalars -- then a fresh count, registration with the
+    // runtime BEFORE any child is copied (so a cycle closes onto this copy),
+    // and each reference replaced by its child's copy.
+    for (i, t) in m.types.iter().enumerate() {
+        if t.is_interface || t.is_chan || t.is_distinct {
+            continue;
+        }
+        writeln!(o, "static Obj *copy_T{i}(Obj *o, void *ctx) {{").unwrap();
+        writeln!(o, "    T{i} *p = (T{i} *)o;").unwrap();
+        writeln!(
+            o,
+            "    T{i} *n = (T{i} *)rt_alloc(sizeof(T{i}), p->hdr.ty);"
+        )
+        .unwrap();
+        writeln!(o, "    Obj hdr = n->hdr;").unwrap();
+        writeln!(o, "    *n = *p;").unwrap();
+        writeln!(o, "    n->hdr = hdr;").unwrap();
+        writeln!(o, "    rt_copy_register(ctx, o, (Obj *)n);").unwrap();
+        if t.is_enum {
+            emit_enum_slot_switch(
+                &mut o,
+                t,
+                "n->p{k} = (int64_t)(intptr_t)rt_copy_child(ctx, (Obj *)(intptr_t)p->p{k});",
+            );
+        }
+        for (fname, fty) in &t.fields {
+            if *fty == IrTy::Ref {
+                let fname = c_ident(fname);
+                writeln!(o, "    n->f_{fname} = rt_copy_child(ctx, p->f_{fname});").unwrap();
+            }
+        }
+        writeln!(o, "    return (Obj *)n;").unwrap();
+        writeln!(o, "}}").unwrap();
+    }
+
     // One TypeInfo per concrete type: its drop function and its vtable. The
     // vtable has one slot per distinct interface method name in the program,
     // so a dispatch index is a compile-time constant.
@@ -167,7 +206,7 @@ pub fn emit(m: &Module) -> String {
             writeln!(
                 o,
                 "static const TypeInfo ti_T{i} __attribute__((unused)) = \
-                 {{ {drop}, NULL, {walk} }};"
+                 {{ {drop}, NULL, {walk}, copy_T{i} }};"
             )
             .unwrap();
         } else {
@@ -188,7 +227,7 @@ pub fn emit(m: &Module) -> String {
             writeln!(
                 o,
                 "static const TypeInfo ti_T{i} __attribute__((unused)) = \
-                 {{ {drop}, vt_T{i}, {walk} }};"
+                 {{ {drop}, vt_T{i}, {walk}, copy_T{i} }};"
             )
             .unwrap();
         }
@@ -215,6 +254,8 @@ pub fn emit(m: &Module) -> String {
     if !m.strings.is_empty() {
         o.push('\n');
     }
+
+    emit_statics(&mut o, m);
 
     // Escaping `$` could collide two distinct IR names, and a collision here
     // is a silent miscompile. `lower` rejects it with a proper diagnostic
@@ -315,6 +356,163 @@ pub fn emit(m: &Module) -> String {
     )
     .unwrap();
     o
+}
+
+/// Module constants' collections, as static data -- docs/reference.md §4.4.
+///
+/// Each is laid out exactly as the runtime lays out the same collection
+/// built at run time, with a count of RC_IMMORTAL, so every read path is the
+/// ordinary one and no initialisation code runs: there is no order in which
+/// constants come into existence, because they all exist before `main`.
+///
+/// `static const`, so they land in read-only memory: a write the runtime's
+/// trap somehow missed faults instead of corrupting a table every thread
+/// reads. `__attribute__((unused))` because a constant nobody reads is still
+/// checked and still emitted, and gcc warns about an unused static const in
+/// C.
+///
+/// An array is its own anonymous struct with the element count spelled out,
+/// rather than the runtime's `Arr`: `Arr` ends in a flexible array member,
+/// and initialising one statically is a GNU extension. The layout is the
+/// same -- header, length, then the slots -- and the runtime only ever sees
+/// the object through an `Obj *` in its own translation unit.
+fn emit_statics(o: &mut String, m: &Module) {
+    use crate::ir::{StaticObj, StaticSlot};
+    let slot = |s: &StaticSlot| match s {
+        StaticSlot::Word(v) if *v == i64::MIN => "INT64_MIN".to_string(),
+        StaticSlot::Word(v) => format!("INT64_C({v})"),
+        StaticSlot::Str(i) => format!("(int64_t)(intptr_t)&str{i}"),
+        StaticSlot::Obj(i) => format!("(int64_t)(intptr_t)&k{i}"),
+    };
+    // Eight to a line: the float-formatting table has 684 entries, and one
+    // line of it would be unreadable in a debugger.
+    let rows = |items: Vec<String>| -> String {
+        items
+            .chunks(8)
+            .map(|c| format!("        {}", c.join(", ")))
+            .collect::<Vec<_>>()
+            .join(",\n")
+    };
+    for (i, k) in m.statics.iter().enumerate() {
+        match k {
+            StaticObj::Array { refs, slots } => {
+                let ti = if *refs {
+                    "rt_arr_ref_type"
+                } else {
+                    "rt_arr_val_type"
+                };
+                // A zero-length array member is not standard C either, so an
+                // empty constant carries one slot it never reads.
+                let cap = slots.len().max(1);
+                let body = if slots.is_empty() {
+                    "        0".to_string()
+                } else {
+                    rows(slots.iter().map(slot).collect())
+                };
+                writeln!(
+                    o,
+                    "static const struct {{ Obj hdr; int64_t len; int64_t data[{cap}]; }} \
+                     k{i} __attribute__((unused)) = {{\n    {{ RC_IMMORTAL, &{ti} }}, {},\n    {{\n{body}\n    }}\n}};",
+                    slots.len()
+                )
+                .unwrap();
+            }
+            // The slots in a buffer of their own, as `rt_list_new` keeps
+            // them, with `cap` equal to `len`: nothing will ever push.
+            StaticObj::List { refs, slots } => {
+                let ti = if *refs {
+                    "rt_lst_ref_type"
+                } else {
+                    "rt_lst_val_type"
+                };
+                let data = if slots.is_empty() {
+                    "NULL".to_string()
+                } else {
+                    writeln!(
+                        o,
+                        "static const int64_t k{i}_data[{}] = {{\n{}\n}};",
+                        slots.len(),
+                        rows(slots.iter().map(slot).collect())
+                    )
+                    .unwrap();
+                    format!("(int64_t *)k{i}_data")
+                };
+                writeln!(
+                    o,
+                    "static const Lst k{i} __attribute__((unused)) = \
+                     {{ {{ RC_IMMORTAL, &{ti} }}, {n}, {n}, {data} }};",
+                    n = slots.len()
+                )
+                .unwrap();
+            }
+            // `data` is never NULL for a bytes (rt.h), so an empty one still
+            // points at a byte it never reads.
+            StaticObj::Bytes(bs) => {
+                let body: Vec<String> = if bs.is_empty() {
+                    vec!["0".to_string()]
+                } else {
+                    bs.iter().map(|b| b.to_string()).collect()
+                };
+                writeln!(
+                    o,
+                    "static const uint8_t k{i}_data[{}] = {{\n{}\n}};",
+                    body.len(),
+                    rows(body)
+                )
+                .unwrap();
+                writeln!(
+                    o,
+                    "static const Bytes k{i} __attribute__((unused)) = \
+                     {{ {{ RC_IMMORTAL, &rt_bytes_type }}, {n}, {n}, (uint8_t *)k{i}_data }};",
+                    n = bs.len()
+                )
+                .unwrap();
+            }
+            StaticObj::Map {
+                key_is_str,
+                val_is_ref,
+                len,
+                table,
+            } => {
+                // An empty map has no table at all, which is also how
+                // `rt_map_new` leaves one until its first `set`.
+                let slots_ref = if table.is_empty() {
+                    "NULL".to_string()
+                } else {
+                    let entries: Vec<String> = table
+                        .iter()
+                        .map(|e| match e {
+                            Some((k, v)) => format!("{{ {}, {}, SLOT_FULL }}", slot(k), slot(v)),
+                            None => "{ 0, 0, SLOT_EMPTY }".to_string(),
+                        })
+                        .collect();
+                    writeln!(
+                        o,
+                        "static const MapSlot k{i}_slots[{}] = {{\n{}\n}};",
+                        table.len(),
+                        rows(entries)
+                    )
+                    .unwrap();
+                    format!("(MapSlot *)k{i}_slots")
+                };
+                // `used` is `len`: nothing was ever removed, so there are no
+                // tombstones. The key is a reference exactly when it is a str.
+                writeln!(
+                    o,
+                    "static const Map k{i} __attribute__((unused)) = \
+                     {{ {{ RC_IMMORTAL, &rt_map_type }}, {slots_ref}, {cap}, {len}, {len}, \
+                     {ks}, {ks}, {vr} }};",
+                    cap = table.len(),
+                    ks = key_is_str,
+                    vr = val_is_ref,
+                )
+                .unwrap();
+            }
+        }
+    }
+    if !m.statics.is_empty() {
+        o.push('\n');
+    }
 }
 
 /// Turn an IR function name into a C identifier.
@@ -499,6 +697,7 @@ fn emit_func(o: &mut String, f: &crate::ir::Func, types: &[TypeDef]) {
                 Inst::IConst { .. }
                 | Inst::BConst { .. }
                 | Inst::SConst { .. }
+                | Inst::KConst { .. }
                 | Inst::Alloc { .. } => {}
             }
         }
@@ -608,6 +807,15 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
         }
         Inst::SConst { dst, idx } => {
             writeln!(o, "    {dst} = (Obj *)&str{idx};").unwrap();
+        }
+        // The static is `const` -- it lives in read-only memory -- and an
+        // `Obj *` is not. Casting the qualifier away is defined as long as
+        // nothing writes through the pointer, and nothing does: the refcount
+        // operations return early on RC_IMMORTAL, and every runtime path that
+        // would change a collection traps on one first (runtime/rt.c,
+        // `rt_check_mutable`).
+        Inst::KConst { dst, idx } => {
+            writeln!(o, "    {dst} = (Obj *)&k{idx};").unwrap();
         }
         Inst::Arith { dst, op, lhs, rhs } => {
             if f.ty_of(*dst) == IrTy::F64 {

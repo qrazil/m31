@@ -1,0 +1,9 @@
+// A module constant is a scalar, a str or bytes, or a built-in collection of
+// those. A user type is not one yet (docs/module-state-decision.md).
+type Point {
+    int x;
+    int y;
+}
+
+const Point ORIGIN = Point(0, 0);
+print(ORIGIN.x);

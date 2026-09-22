@@ -1,0 +1,12 @@
+// A module constant reached through a parameter. `xs` is an ordinary
+// `Array<int>` -- there is no read-only parameter type -- so the compiler
+// cannot refuse the store, and the runtime traps on it instead.
+
+const Array<int> TABLE = [1, 2, 3];
+
+void zero(Array<int> xs) {
+    xs[0] = 0;
+}
+
+zero(TABLE);
+print(TABLE[0]);

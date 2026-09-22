@@ -1,0 +1,36 @@
+// A module constant may be a List or a bytes as well as an Array: `const`
+// means the same thing at module level as on a local (reference §4.4), and
+// a const List is legal on a local. Neither can grow -- a List constant is
+// for an API that takes a List.
+
+const List<str> WORDS = ["alpha", "beta", "gamma"];
+const List<int> NOTHING = [];
+const List<List<int>> NESTED = [[1, 2], [3]];
+const bytes MAGIC = [80, 75, 3, 4];
+const bytes BLANK = [0; 3];
+const bytes NO_BYTES = [];
+
+int count(List<str> xs) {
+    return xs.size();
+}
+
+print(WORDS.join(", "));
+print(count(WORDS));
+print(NOTHING.size());
+print(NESTED[0][1]);
+print(MAGIC.size());
+print(MAGIC[1]);
+print(MAGIC.hex());
+print(BLANK.size());
+print(NO_BYTES.size());
+bytes same = [80, 75, 3, 4];
+print(MAGIC == same);
+bytes pk = [80, 75];
+print(MAGIC.starts_with(pk));
+bytes mine = clone(MAGIC);
+mine.push(20);
+print(mine.size());
+List<str> more = clone(WORDS);
+more.push("delta");
+print(more.size());
+print(WORDS.size());

@@ -72,6 +72,11 @@ pub struct Mono {
     /// Every non-generic free function's parameters as written, so an
     /// argument can be inferred from the parameter it is passed to.
     func_params: HashMap<String, Vec<Param>>,
+    /// Every module constant's type as written, by qualified name
+    /// (`lib#MAX`). A constant passed to a generic function says what its
+    /// type argument is, the way a local's declared type does; and
+    /// `lib.TABLE.size()` has to be told from a member of a type `lib.TABLE`.
+    const_tys: HashMap<String, Ty>,
 }
 
 /// A substitution from type parameter name to concrete type.
@@ -99,6 +104,7 @@ impl Mono {
             modules: p.imports_by_module.keys().cloned().collect(),
             cur_ret: None,
             func_params: HashMap::new(),
+            const_tys: p.consts.iter().map(|c| (c.name.clone(), c.ty)).collect(),
         };
 
         let mut concrete_types = Vec::new();
@@ -177,6 +183,28 @@ impl Mono {
         let toplevel = m.subst_block(&p.toplevel, &empty)?;
         m.env.clear();
 
+        // A constant's type is resolved like any written type, which is what
+        // instantiates `Array$int` when nothing but a constant spells it.
+        // Its initialiser goes through the same substitution as any other
+        // expression so a `lib.T.size()` inside one is repaired too; there
+        // are no locals, so the environment is one empty scope.
+        let mut consts = Vec::new();
+        for c in &p.consts {
+            m.env.push(HashMap::new());
+            m.cur_module = c.module.clone();
+            let init = m
+                .subst_expr_as(&c.init, &empty, Some(c.ty))
+                .map_err(|d| d.in_module(&c.module))?;
+            m.env.clear();
+            consts.push(ConstDecl {
+                ty: m
+                    .subst_ty(c.ty, &empty, c.span)
+                    .map_err(|d| d.in_module(&c.module))?,
+                init,
+                ..c.clone()
+            });
+        }
+
         loop {
             if let Some((name, args, span)) = m.queue.pop() {
                 m.instantiate_func(&name, &args, span)?;
@@ -201,6 +229,7 @@ impl Mono {
             // past this point there is no generic Option left to keep apart.
             prelude: Vec::new(),
             funcs: m.out_funcs,
+            consts,
             toplevel,
             ty_exprs: m.out_exprs,
             shown: m.shown,
@@ -987,6 +1016,26 @@ impl Mono {
                 Expr::MapLit(out, *s)
             }
             Expr::EnumNew(ty, variant, args, s) => {
+                // `lib.TABLE.size()`: the parser read `lib.TABLE` as a type,
+                // because it cannot see another module's constants. This
+                // pass can, so the tree is put back the way it was meant --
+                // a method call on the constant `lib.TABLE` -- before
+                // anything tries to resolve `TABLE` as a type.
+                if let Ty::User(i) = ty {
+                    let e = &self.src_exprs[*i as usize];
+                    if e.args.is_empty() && self.const_tys.contains_key(&e.name) {
+                        if let Some((m, n)) = e.name.split_once('#') {
+                            let recv = Expr::Field(
+                                Box::new(Expr::Var(m.to_string(), *s)),
+                                n.to_string(),
+                                *s,
+                            );
+                            let call =
+                                Expr::MethodCall(Box::new(recv), variant.clone(), args.clone(), *s);
+                            return self.subst_expr_as(&call, sub, want);
+                        }
+                    }
+                }
                 let ty = self.subst_ty(*ty, sub, *s)?;
                 // `Holder.make(1)` for `static T Holder.make<T>(T v)`: a
                 // static method with type parameters of its own, whose
@@ -1357,7 +1406,23 @@ impl Mono {
                 let d = self.decls.get(&self.src_exprs[*i as usize].name)?;
                 d.variants.iter().any(|v| v.name == *name).then_some(*ty)
             }
-            Expr::Var(n, _) => self.env_ty(n),
+            // A local first -- nothing may shadow a constant, so the order
+            // only matters for speed -- then this module's constant.
+            Expr::Var(n, _) => self.env_ty(n).or_else(|| {
+                let key = if self.cur_module.is_empty() {
+                    n.clone()
+                } else {
+                    format!("{}#{n}", self.cur_module)
+                };
+                self.const_tys.get(&key).copied()
+            }),
+            // `lib.TABLE`, another module's constant.
+            Expr::Field(o, n, _) => match &**o {
+                Expr::Var(m, _) if self.modules.contains(m) && self.env_ty(m).is_none() => {
+                    self.const_tys.get(&format!("{m}#{n}")).copied()
+                }
+                _ => None,
+            },
             Expr::This(_) => self.recv_ty,
             _ => None,
         }

@@ -1,0 +1,11 @@
+// A constant map through a parameter: its table is static data in read-only
+// memory, and the runtime refuses the `set` before touching it.
+
+const Map<str, int> LIMITS = {"low": 1, "high": 9};
+
+void raise(Map<str, int> m) {
+    m.set("high", 10);
+}
+
+raise(LIMITS);
+print(LIMITS.get("high").or(0));

@@ -82,6 +82,8 @@ enum Kind {
     Prim,
     /// A type or a function with a body.
     Item,
+    /// A module constant: a run of them is a list, like imports.
+    Const,
     Stmt,
 }
 
@@ -100,6 +102,7 @@ enum What<'p> {
     Import(&'p Import),
     Type(&'p TypeDecl),
     Func(&'p Func),
+    Const(&'p ConstDecl),
     Stmt(&'p Stmt),
 }
 
@@ -300,12 +303,22 @@ impl Fmt {
             let k = if f.is_prim { Kind::Prim } else { Kind::Item };
             raw.push((What::Func(f), k, f.span));
         }
+        for c in &p.consts {
+            raw.push((What::Const(c), Kind::Const, c.span));
+        }
         for s in &p.toplevel {
             raw.push((What::Stmt(s), Kind::Stmt, stmt_span(s)));
         }
         raw.sort_by_key(|(_, _, s)| (s.line, s.col));
         for (what, kind, start) in raw {
             let end = self.extent_end(start);
+            // A constant written over several lines is a table, and stands
+            // apart like a definition; one-line constants are a list.
+            let kind = if kind == Kind::Const && end > start.line {
+                Kind::Item
+            } else {
+                kind
+            };
             entries.push(Entry {
                 what,
                 kind,
@@ -498,6 +511,7 @@ impl Fmt {
             What::Import(i) => self.line(&format!("import {};", i.name)),
             What::Type(t) => self.type_decl(t),
             What::Func(f) => self.func(f),
+            What::Const(c) => self.const_decl(c),
             What::Stmt(s) => self.stmt(s),
         }
         // Whatever is left in the entry's lines: a comment trailing its last
@@ -506,6 +520,63 @@ impl Fmt {
         self.lo = e.start.line;
         self.comments_before(e.end + 1);
         self.lo = 0;
+    }
+
+    /// `[pub] const T NAME = value;`
+    ///
+    /// A collection literal keeps the line breaks it was written with: the
+    /// elements go back on the lines they came from, one level in, with the
+    /// brackets on lines of their own. This is gofmt's rule for composite
+    /// literals, and it is not wrapping -- the formatter never chooses where
+    /// a line ends, it only keeps the author's choice. A table of a few
+    /// hundred entries is exactly what a module constant is for, and one
+    /// line of it is unreadable. Written on one line, it stays on one line.
+    fn const_decl(&mut self, c: &ConstDecl) {
+        let vis = if c.is_pub { "pub " } else { "" };
+        let head = format!("{vis}const {} {} = ", self.ty(c.ty), shown(&c.name));
+        // Each element's source line and its text, between the brackets.
+        type Elems = Vec<(u32, String)>;
+        let parts: Option<(char, char, Elems)> = match &c.init {
+            Expr::SeqLit(items, _) => Some((
+                '[',
+                ']',
+                items
+                    .iter()
+                    .map(|e| (e.span().line, self.expr(e)))
+                    .collect(),
+            )),
+            Expr::MapLit(items, _) => Some((
+                '{',
+                '}',
+                items
+                    .iter()
+                    .map(|(k, v)| (k.span().line, format!("{}: {}", self.expr(k), self.expr(v))))
+                    .collect(),
+            )),
+            _ => None,
+        };
+        let at = c.init.span().line;
+        let multiline = matches!(&parts, Some((_, _, xs)) if xs.iter().any(|x| x.0 != at));
+        let Some((open, close, items)) = parts.filter(|_| multiline) else {
+            self.line(&format!("{head}{};", self.expr(&c.init)));
+            return;
+        };
+        self.line(&format!("{head}{open}"));
+        let mut row: Vec<String> = Vec::new();
+        let mut row_line = items[0].0;
+        let n = items.len();
+        for (i, (line, text)) in items.into_iter().enumerate() {
+            if line != row_line && !row.is_empty() {
+                self.line(&format!("{INDENT}{},", row.join(", ")));
+                row.clear();
+            }
+            row_line = line;
+            row.push(text);
+            if i + 1 == n {
+                self.line(&format!("{INDENT}{}", row.join(", ")));
+            }
+        }
+        self.line(&format!("{close};"));
     }
 
     fn type_decl(&mut self, t: &TypeDecl) {

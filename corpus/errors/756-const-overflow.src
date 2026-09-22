@@ -1,0 +1,5 @@
+// Constant arithmetic follows the run-time rules: an overflow that would
+// trap when the program ran is refused when it is compiled.
+const int MAX = 9223372036854775807;
+const int OVER = MAX + 1;
+print(OVER);

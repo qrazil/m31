@@ -1,0 +1,52 @@
+// Constant arrays: static, immortal data the program reads like any other
+// array. Nothing is allocated for them, so the leak check sees nothing.
+
+const int N = 4;
+const Array<int> SQUARES = [0, 1, 4, 9, N * N];
+const Array<str> NAMES = ["zero", "one", "two"];
+const Array<float> WEIGHTS = [0.25, 0.5, -1.5];
+const Array<bool> FLAGS = [true, false, true];
+const Array<int> ZEROS = [0; N];
+const Array<int> EMPTY = [];
+// A table of tables. The first row IS the constant SQUARES -- one object,
+// not a copy.
+const Array<Array<int>> GRID = [SQUARES, [7; 3], EMPTY];
+const Array<int> ALIAS = SQUARES;
+
+int sum(Array<int> xs) {
+    int t = 0;
+    for (int x in xs) {
+        t = t + x;
+    }
+    return t;
+}
+
+print(sum(SQUARES));
+print(SQUARES.size());
+print(NAMES[2]);
+print(NAMES.contains("one"));
+print(NAMES.index_of("two").or(-1));
+print(WEIGHTS[2]);
+print(FLAGS[1]);
+print(sum(ZEROS));
+print(EMPTY.size());
+print(GRID[1][2]);
+print(GRID[0][4]);
+print(GRID[2].size());
+print(sum(ALIAS));
+
+// A module constant can be held, passed and returned like any value.
+Array<str> held = NAMES;
+print(held[0]);
+
+// clone is the copy that can be changed. It is shallow, like every clone:
+// the rows of a cloned GRID are still the constant rows.
+Array<int> mine = clone(SQUARES);
+mine[0] = 100;
+mine.reverse();
+print(mine[4]);
+print(SQUARES[0]);
+Array<Array<int>> grid = clone(GRID);
+grid[2] = [1, 2];
+print(grid[2].size());
+print(GRID[2].size());

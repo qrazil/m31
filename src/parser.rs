@@ -770,6 +770,7 @@ impl Parser {
         let mut funcs = Vec::new();
         let mut types = Vec::new();
         let mut toplevel = Vec::new();
+        let mut consts = Vec::new();
         let mut imports: Vec<Import> = Vec::new();
 
         // Imports come first, so a reader knows a file's dependencies without
@@ -806,6 +807,11 @@ impl Parser {
                 types.push(self.parse_enum_decl(is_pub)?);
             } else if self.peek() == &Tok::KwType || self.peek() == &Tok::KwInterface {
                 types.push(self.parse_type_decl(is_pub)?);
+            } else if self.peek() == &Tok::KwConst {
+                // At the top level `const` is always a module constant, in
+                // the entry file as much as in a library: one spelling, one
+                // meaning. A `const` local is written inside a block.
+                consts.push(self.parse_const_decl(is_pub)?);
             } else if self.starts_func() {
                 funcs.push(self.parse_func(is_pub)?);
             } else if is_pub {
@@ -839,6 +845,7 @@ impl Parser {
             types,
             prelude,
             funcs,
+            consts,
             toplevel,
             ty_exprs: std::mem::take(&mut self.ty_exprs),
             shown: std::collections::HashMap::new(),
@@ -942,6 +949,38 @@ impl Parser {
             }
         }
         self.peek_at(i) == &Tok::LParen
+    }
+
+    /// `[pub] const <type> NAME = <expr>;` at the top level. The type is
+    /// mandatory, as it is everywhere else: the language always writes the
+    /// type of a name down, and a constant is read far from where it is
+    /// declared, which is exactly where a written type pays for itself.
+    fn parse_const_decl(&mut self, is_pub: bool) -> Result<ConstDecl, Diag> {
+        let span = self.span();
+        self.expect(Tok::KwConst)?;
+        let ty = self.expect_ty()?;
+        if ty == Ty::Void {
+            return Err(Diag::new(span, "a constant cannot have type `void`"));
+        }
+        let (name, _) = self.expect_ident()?;
+        self.expect(Tok::Assign)?;
+        let init = self.parse_expr(0)?;
+        self.expect(Tok::Semi)?;
+        // Qualified like a free function, so two modules may each have a
+        // private `LIMIT`.
+        let name = if self.module.is_empty() {
+            name
+        } else {
+            format!("{}#{name}", self.module)
+        };
+        Ok(ConstDecl {
+            module: self.module.clone(),
+            is_pub,
+            ty,
+            name,
+            init,
+            span,
+        })
     }
 
     /// `distinct int Price;`
@@ -1867,12 +1906,19 @@ impl Parser {
             //
             // With type arguments the same two, plus a construction:
             // `lib.Box<int>(..)`, `lib.Res<int>.Ok(1)`. The parser cannot
-            // know that `Box` is a type in `lib`, but `lib.x < ...` can never
-            // be a comparison worth reading this way: a module exports
-            // functions and types, not values, so `lib.x` alone is not an
-            // operand. Plain `lib.Point(..)` has no such marker and stays a
-            // qualified call; the lowerer builds the type when `lib` has one
-            // by that name.
+            // know that `Box` is a type in `lib`, but `lib.x < ...` is not a
+            // comparison worth reading this way. `lib.x` alone can be an
+            // operand now -- a module may export a constant -- but only a
+            // shape like `lib.N < a > (b)` reaches here, which compares a
+            // `bool` with `>` and is refused whichever way it is read.
+            // Plain `lib.Point(..)` has no such marker and stays a qualified
+            // call; the lowerer builds the type when `lib` has one by that
+            // name.
+            //
+            // `lib.TABLE.size()` also lands here, as a "member" of a type
+            // `lib.TABLE` -- the parser cannot see that `TABLE` is a
+            // constant. Monomorphisation, which can, turns it back into a
+            // method call on the constant (`Mono::subst_expr_as`).
             Tok::Ident(m)
                 if self.imports.contains(&m)
                     && self.peek_at(1) == &Tok::Dot

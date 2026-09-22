@@ -18,6 +18,9 @@ use crate::ast::*;
 use crate::diag::{Diag, Span};
 use crate::ir::{self, ArithOp, Block, BlockId, Cmp, Inst, IrTy, Term, TypeDef, Value};
 
+mod consts;
+use consts::ConstInfo;
+
 /// A local binding: its type, its current SSA value, and whether it was
 /// declared `const`.
 type Binding = (Ty, Value, bool);
@@ -142,6 +145,17 @@ pub struct Lowerer {
     /// whole program so a vtable index is a constant at every call site.
     iface_slots: Vec<ir::Slot>,
     strings: Vec<String>,
+    /// Module constants by qualified name, with their computed values
+    /// (src/lower/consts.rs).
+    consts: HashMap<String, ConstInfo>,
+    /// The same keys in declaration order, so constants are checked -- and
+    /// their static objects numbered -- the same way on every run.
+    const_order: Vec<String>,
+    /// Constants being computed, innermost last: meeting one already here is
+    /// a cycle.
+    const_stack: Vec<String>,
+    /// The collections constants hold, as static data (`ir::Module::statics`).
+    static_objs: Vec<ir::StaticObj>,
     // per-function state
     types: Vec<IrTy>,
     blocks: Vec<BlockBuf>,
@@ -323,6 +337,10 @@ impl Lowerer {
             iface_methods: Vec::new(),
             iface_slots: Vec::new(),
             strings: Vec::new(),
+            consts: HashMap::new(),
+            const_order: Vec::new(),
+            const_stack: Vec::new(),
+            static_objs: Vec::new(),
             types: Vec::new(),
             blocks: Vec::new(),
             cur: 0,
@@ -1864,6 +1882,13 @@ impl Lowerer {
                  boundary; send clone(this) instead",
             ));
         }
+        // A module constant crosses as it is. It is immortal, so neither
+        // thread ever writes its count -- the retain and release are
+        // no-ops -- and it is immutable, so there is nothing to race on.
+        // rt_check_unique above passes it for the same reason.
+        if self.is_module_const(arg) {
+            return Ok(());
+        }
         if let Expr::Var(n, s) = arg {
             if self.owns_local(n) {
                 return self.mark_moved(n, *s);
@@ -2221,6 +2246,12 @@ impl Lowerer {
                 self.modules.insert(t.module.clone());
             }
         }
+        // A module may declare nothing but constants.
+        for c in &p.consts {
+            if !c.module.is_empty() {
+                self.modules.insert(c.module.clone());
+            }
+        }
 
         // After monomorphisation every Ty::User names a concrete declaration
         // with no arguments, so resolution is a name lookup.
@@ -2433,6 +2464,11 @@ impl Lowerer {
             );
         }
 
+        // Constants after every function and type is known, so a constant
+        // cannot take a name one of them has, and before any body is
+        // lowered, so every use finds its value already computed.
+        self.register_consts(p)?;
+
         // There is no `main`. The statements written at the top level are
         // the program, in source order, and they are lowered as the body of
         // one synthesised function. Declarations are order-independent, so a
@@ -2512,6 +2548,7 @@ impl Lowerer {
         Ok(ir::Module {
             funcs,
             strings: self.strings,
+            statics: self.static_objs,
             types: self.typedefs,
             iface_slots: self.iface_slots,
         })
@@ -2596,6 +2633,12 @@ impl Lowerer {
             return Err(Diag::new(
                 span,
                 format!("`{name}` is already a type; shadowing is not allowed, rename one"),
+            ));
+        }
+        if self.resolve_const(name).is_some() {
+            return Err(Diag::new(
+                span,
+                format!("`{name}` is already a constant; shadowing is not allowed, rename one"),
             ));
         }
         if let Some((tid, _)) = self.recv {
@@ -3277,6 +3320,18 @@ impl Lowerer {
 
         for p in &f.params {
             self.check_not_import(&self.cur_module, &p.name, p.span)?;
+            // A parameter would win over the constant in every lookup, so
+            // taking a constant's name would silently hide it for the whole
+            // body.
+            if self.resolve_const(&p.name).is_some() {
+                return Err(Diag::new(
+                    p.span,
+                    format!(
+                        "`{}` is already a constant; shadowing is not allowed, rename one",
+                        p.name
+                    ),
+                ));
+            }
             let v = self.new_val(self.irty(p.ty));
             params.push(v);
             if scope.insert(p.name.clone(), (p.ty, v, false)).is_some() {
@@ -3436,6 +3491,7 @@ impl Lowerer {
                     return Err(Diag::new(init.span(), self.mismatch(*ty, val.ty)));
                 }
                 self.check_shadow(name, *span)?;
+                let snapshot = *is_const && self.const_snapshots(*ty);
                 // The local must hold a +1. A borrowed source needs one added;
                 // an owned temp is handed straight over, so drop it from the
                 // pending list rather than releasing it.
@@ -3447,10 +3503,26 @@ impl Lowerer {
                     }
                     self.owned.last_mut().unwrap().push(name.clone());
                 }
+                // A `const` binds a frozen snapshot (docs/const-decision.md):
+                // after the hand-over, so the local's +1 is counted and a
+                // value nothing else holds is frozen in place, while a shared
+                // one is deep-copied. `rt_snapshot` takes the +1 and hands
+                // one back, on the same object or on the copy.
+                let bound = if snapshot {
+                    let d = self.new_val(IrTy::Ref);
+                    self.push(Inst::Call {
+                        dst: Some(d),
+                        func: "rt_snapshot".to_string(),
+                        args: vec![val.val()],
+                    });
+                    d
+                } else {
+                    val.val()
+                };
                 self.scopes
                     .last_mut()
                     .unwrap()
-                    .insert(name.clone(), (*ty, val.val(), *is_const));
+                    .insert(name.clone(), (*ty, bound, *is_const));
                 self.flush_temps();
                 Ok(())
             }
@@ -3483,6 +3555,10 @@ impl Lowerer {
                                 ),
                             ));
                         }
+                        // The receiver may be frozen: a method has no way to
+                        // say it changes `this`, so `c.bump()` on a const
+                        // `c` compiles, and is caught here.
+                        self.check_mutable(obj);
                         if fty == IrTy::Ref {
                             let old = self.new_val(IrTy::Ref);
                             self.push(Inst::LoadField {
@@ -3516,6 +3592,11 @@ impl Lowerer {
                     }
                 }
                 let Some((ty, old, is_const)) = self.binding(name) else {
+                    // The same words as for a `const` local: to the reader
+                    // they are one idea, a name that cannot be reassigned.
+                    if self.resolve_const(name).is_some() {
+                        return Err(Diag::new(*span, format!("cannot assign to const `{name}`")));
+                    }
                     return Err(Diag::new(*span, format!("unknown variable `{name}`")));
                 };
                 if is_const {
@@ -3651,6 +3732,7 @@ impl Lowerer {
                 value,
                 span,
             } => {
+                self.refuse_const_write(obj, *span)?;
                 let o = self.lower_expr(obj)?;
                 // No refcounts to move: a byte is a value. The runtime traps
                 // on an index out of range and on a value outside 0..255, and
@@ -3751,6 +3833,7 @@ impl Lowerer {
                 if let Expr::This(ts) = obj {
                     self.refuse_this_field(field, *ts, *span)?;
                 }
+                self.refuse_const_write(obj, *span)?;
                 let o = self.lower_expr(obj)?;
                 let Some(tid) = self.tdef_of(o.ty) else {
                     return Err(Diag::new(
@@ -3786,6 +3869,10 @@ impl Lowerer {
                         ),
                     ));
                 }
+                // Frozen objects reach here through anything the compiler
+                // cannot see through -- a parameter, an element, another
+                // local -- so every store to an existing object checks.
+                self.check_mutable(o.val());
                 // Retain the new value, then release the old -- in that order,
                 // so `p.f = p.f;` cannot free what it is assigning.
                 if fty == IrTy::Ref {
@@ -5764,6 +5851,15 @@ impl Lowerer {
                     // Borrowed from the receiver, which holds the +1.
                     return Ok(Val::new(d, fty, false));
                 }
+                // Last, a module constant. The order cannot matter -- no
+                // local, parameter or field may take a constant's name
+                // (`check_shadow`) -- so this is only the cheapest order.
+                if let Some(key) = self.resolve_const(name) {
+                    return Ok(self.lower_const_use(&key));
+                }
+                if let Some(d) = self.foreign_const_hint(name, *span) {
+                    return Err(d);
+                }
                 Err(Diag::new(*span, format!("unknown variable `{name}`")))
             }
             Expr::Un(op, inner, span) => {
@@ -5913,6 +6009,11 @@ impl Lowerer {
                 if let Expr::This(ts) = &**obj {
                     self.refuse_this_field(field, *ts, *span)?;
                 }
+                // `lib.MAX` -- another module's constant, not a field of a
+                // variable called `lib`.
+                if let Some(key) = self.qualified_const(obj, field, *span)? {
+                    return Ok(self.lower_const_use(&key));
+                }
                 let o = self.lower_expr(obj)?;
                 let Some(tid) = self.tdef_of(o.ty) else {
                     return Err(Diag::new(
@@ -5963,6 +6064,13 @@ impl Lowerer {
                     }
                 }
                 let o = self.lower_expr(obj)?;
+                // `TABLE.sort()`, `xs.push(1)` on a const local: a change the
+                // compiler can see, refused here. One it cannot see -- the
+                // same table reached through a parameter -- traps at run
+                // time instead (runtime/rt.c, `rt_check_mutable`).
+                if self.is_mutating_method(o.ty, m) {
+                    self.refuse_const_write(obj, *span)?;
+                }
                 self.lower_method_on(&o, m, args, *span)
             }
 
@@ -7179,6 +7287,12 @@ impl Lowerer {
                 });
                 self.stmt_temps.push(d);
                 return Ok(Val::new(d, v.ty, true));
+            }
+            // A map too, so that every constant collection has the same way
+            // out: `clone(TABLE)` is the copy that can be changed.
+            if self.map_kv(v.ty).is_some() {
+                let c = self.rt_value("rt_map_clone", vec![v.val()], v.ty);
+                return Ok(Val::new(c.val(), v.ty, true));
             }
             if self.underlying(v.ty) == Ty::Str {
                 // Immutable, so a copy is indistinguishable by value -- but

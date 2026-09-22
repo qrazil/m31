@@ -1,0 +1,4 @@
+corpus/modules/modconst-bare/main.src:5:7: `PRIMES` is declared in `lib`; write `lib.PRIMES`
+  |
+5 | print(PRIMES[0]);
+  |       ^

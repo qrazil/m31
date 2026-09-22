@@ -425,6 +425,26 @@ impl Func {
     }
 }
 
+/// `[pub] const <type> NAME = <constant expression>;` at the top level of a
+/// module -- docs/reference.md §4.4.
+///
+/// Its own item rather than a `Stmt::Decl` with a flag, because it is not a
+/// statement: it does not run, it has no place in the program's order, and
+/// an imported module may declare one. The compiler computes its value, and
+/// the emitted C holds that value as static, immortal data.
+#[derive(Debug, Clone)]
+pub struct ConstDecl {
+    /// The module that declared this -- see `TypeDecl::module`.
+    pub module: String,
+    /// Exported from its module -- see `TypeDecl::is_pub`.
+    pub is_pub: bool,
+    pub ty: Ty,
+    /// Interned module-qualified, as a free function's name is: `lib#MAX`.
+    pub name: String,
+    pub init: Expr,
+    pub span: Span,
+}
+
 /// One `import name;` -- the module this file depends on.
 #[derive(Debug, Clone)]
 pub struct Import {
@@ -451,6 +471,8 @@ pub struct Program {
     /// program that redeclares one is redeclaring, not shadowing.
     pub prelude: Vec<TypeDecl>,
     pub funcs: Vec<Func>,
+    /// Module-level constants, from every module, in source order.
+    pub consts: Vec<ConstDecl>,
     /// Statements written at the top level, in source order. They become the
     /// program's body -- there is no `main`.
     pub toplevel: Vec<Stmt>,
