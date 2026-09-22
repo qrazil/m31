@@ -1,0 +1,88 @@
+// Parsing floats, correctly rounded -- the bits are printed so that an
+// answer one ulp off cannot pass. Expected bits are Python's float(),
+// which is correctly rounded, not this compiler's.
+int bits(str s) {
+    match (s.parse_float()) {
+        case Some(float x): {
+            return x.to_bits();
+        }
+        case None: {
+            return 0 - 1;
+        }
+    }
+}
+
+print(bits("0.1"));
+print(bits("1"));
+print(bits("-1"));
+print(bits("+1.5"));
+print(bits("1e23"));
+print(bits("8.98846567431158e307"));
+// The smallest normal float, the largest subnormal, and between them.
+print(bits("2.2250738585072014e-308"));
+print(bits("2.2250738585072011e-308"));
+print(bits("2.2250738585072012e-308"));
+print(bits("2.2250738585072009e-308"));
+// Half the smallest subnormal ties to zero; a hair more rounds up to it.
+print(bits("2.4703282292062327e-324"));
+print(bits("2.4703282292062328e-324"));
+print(bits("4.9406564584124654e-324"));
+print(bits("1e-320"));
+print(bits("1e-400"));
+// The largest float, and a digit on that still rounds down to it.
+print(bits("1.7976931348623157e308"));
+print(bits("1.7976931348623158e308"));
+// Ties between two floats go to the even one; a hair past a tie does not,
+// however many digits it takes to see the hair.
+print(bits("9007199254740993"));
+print(bits("9007199254740993.0000000000000000001"));
+print(bits("9007199254740995"));
+print(bits("9007199254740992.9999999999999999999"));
+// More significant digits than 64 bits hold.
+print(bits("123456789012345678901234567890"));
+print(bits("10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e-400"));
+print(bits("0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001e300"));
+// Zeros, and the spellings the grammar allows.
+print(bits("-0"));
+print(bits("0e999999999999999999"));
+print(bits("000.000e0"));
+print(bits("1."));
+print(bits(".5"));
+print(bits("-.5e-3"));
+print(bits("inf"));
+print(bits("-inf"));
+print(bits("+inf"));
+// The exact halfway point between 0.1 and the float above it, and one in
+// the last of its 57 digits either side: only an exact comparison can tell
+// these apart.
+print(bits("0.100000000000000012490009027033011079765856266021728515624"));
+print(bits("0.100000000000000012490009027033011079765856266021728515625"));
+print(bits("0.100000000000000012490009027033011079765856266021728515626"));
+// Too large for a float, or not a number at all: None. (The bit pattern
+// -1 is a NaN's, which parse_float never returns.)
+print(bits("1.7976931348623159e308"));
+print(bits("1e309"));
+print(bits("1e999999999999999999999"));
+print(bits(""));
+print(bits("."));
+print(bits("+"));
+print(bits("e5"));
+print(bits("1e"));
+print(bits("1e+"));
+print(bits(" 1"));
+print(bits("1 "));
+print(bits("0x10"));
+print(bits("infinity"));
+print(bits("Inf"));
+print(bits("NaN"));
+print(bits("1.2.3"));
+print(bits("--1"));
+print(bits("1e5.5"));
+// `nan` is the quiet NaN, sign included.
+print(bits("nan"));
+print(bits("-nan"));
+// Format then parse is the identity.
+List<float> xs = [0.1, 1.0 / 3.0, 99999999999999991611392.0, 179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368.0, float.from_bits(1), float.from_bits(4503599627370495), float.from_bits(5381801554707742720), -0.0];
+for (float x in xs) {
+    print(bits(x.to_str()) == x.to_bits());
+}

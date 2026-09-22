@@ -11,7 +11,8 @@
 //! binary with no dependencies, and the standard library does not change
 //! that.
 
-/// The source of an embedded module, or `None` if the name is not one.
+/// The source of an embedded module a program may import, or `None` if the
+/// name is not one.
 ///
 /// A module named here is taken: a file of the same name beside the program
 /// is a collision, not an override, because module names are globally unique
@@ -30,4 +31,23 @@ pub fn source(name: &str) -> Option<&'static str> {
         "args" => include_str!("../lib/args.src"),
         _ => return None,
     })
+}
+
+/// The module that turns floats into text and back. The compiler lowers
+/// `print` of a float, `to_str`, `str()` and `parse_float` to calls into it,
+/// and the loader adds it to any program that could reach one of those.
+///
+/// No program can import it or collide with it: the name begins with `__`,
+/// which the parser refuses in every name a program writes, `import`
+/// included. See docs/stdlib-seam.md §6.
+pub const FLOATFMT: &str = "__floatfmt";
+
+/// The source of any embedded module, importable or not -- for the loader,
+/// which also brings in `FLOATFMT`, and for quoting a line of it in a
+/// diagnostic.
+pub fn embedded(name: &str) -> Option<&'static str> {
+    if name == FLOATFMT {
+        return Some(include_str!("../lib/__floatfmt.src"));
+    }
+    source(name)
 }

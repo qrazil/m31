@@ -99,8 +99,8 @@ modules:
 | | |
 |---|---|
 | `s.byte_at(i)` | one byte as an `int`; traps out of range. The foundation everything textual is built on. |
-| `s.parse_int()`, `s.parse_float()` | `Option<T>`. Correct float parsing is not something to reimplement. |
-| `n.to_str()` on `int`, `float`, `bool` | shortest round-tripping form for a float; a program cannot format a double from inside. |
+| `s.parse_int()`, `s.parse_float()` | `Option<T>`. Correct float parsing is not something to reimplement. (It was reimplemented once bit operators existed: `parse_float` is language source now, stdlib-seam §6.) |
+| `n.to_str()` on `int`, `float`, `bool` | shortest round-tripping form for a float; a program cannot format a double from inside. (It can now, with bit operators, and the float case is language source: stdlib-seam §6.) |
 
 `to_str` completes the conversion story: `print(v)` and `str(v)` already look
 for `to_str` by name on a user type, and now the built-in types answer the

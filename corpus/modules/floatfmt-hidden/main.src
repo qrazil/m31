@@ -1,0 +1,4 @@
+// The module that formats floats is the compiler's to call, not a program's
+// to import: its name begins with `__`, which no program may write.
+import __floatfmt;
+print(__floatfmt.format(1.5));

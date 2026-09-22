@@ -1091,3 +1091,35 @@ fn a_bytes_literal_builds_through_push() {
     assert!(out.contains("rt_bytes_new"), "{out}");
     assert_eq!(out.matches("rt_bytes_push").count(), 2, "{out}");
 }
+
+// ---- float text ---------------------------------------------------------
+
+/// The module that formats floats is language source the lowering calls into,
+/// so a float `to_str` or `print` inside it would be a call to itself.
+#[test]
+fn the_float_module_cannot_format_a_float_itself() {
+    let fm = crate::stdlib::FLOATFMT;
+    for body in [
+        "str f(float x) { return x.to_str(); }",
+        "void f(float x) { print(x); }",
+        "bool f(str s) { return s.parse_float().is_some(); }",
+    ] {
+        let toks = Lexer::new(body).tokenize().expect("lexes");
+        let prog = crate::parser::Parser::new(toks)
+            .stdlib()
+            .parse_program(fm)
+            .expect("parses");
+        let e = match crate::finish(prog, "c") {
+            Ok(_) => panic!("expected the float module to be refused: {body}"),
+            Err(d) => d.to_string(),
+        };
+        assert!(e.contains("cannot format or parse a float itself"), "{e}");
+    }
+}
+
+/// Without the module loaded, a float conversion names the missing function
+/// rather than emitting a call the C compiler would reject.
+#[test]
+fn a_float_conversion_without_the_module_is_a_named_compiler_bug() {
+    assert!(err("print(1.5);").contains("was not loaded for a float conversion"));
+}

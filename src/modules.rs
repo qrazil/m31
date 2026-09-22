@@ -58,7 +58,7 @@ pub fn display_path(name: &str) -> String {
 /// line instead of an empty file.
 pub fn read_source(path: &str) -> String {
     if let Some(name) = path.strip_prefix('<').and_then(|p| p.strip_suffix('>')) {
-        if let Some(text) = crate::stdlib::source(name) {
+        if let Some(text) = crate::stdlib::embedded(name) {
             return text.to_string();
         }
     }
@@ -81,6 +81,26 @@ fn valid_module_name(n: &str) -> bool {
         && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Could this file turn a float into text, or text into a float?
+///
+/// Every float a program holds was either written as a literal, or has the
+/// type `float` spelt somewhere -- a declaration, a parameter, a field, a
+/// binding in a `match`, a conversion, `float.from_bits` -- or came out of
+/// `parse_float`. There is no type inference that could produce one silently.
+/// So a program none of whose files contains one of those tokens has no float
+/// to print and no string to parse as one. A wrong answer here in the
+/// conservative direction costs compile time; in the other it would be a
+/// missing function, which the lowering reports as a compiler bug rather than
+/// leaving to the C compiler.
+fn mentions_float(toks: &[crate::lexer::Token]) -> bool {
+    use crate::lexer::Tok;
+    toks.iter().any(|t| match &t.tok {
+        Tok::KwFloat | Tok::Float(_) => true,
+        Tok::Ident(n) => n == "parse_float",
+        _ => false,
+    })
+}
+
 struct Loader {
     dir: PathBuf,
     ext: String,
@@ -97,6 +117,9 @@ struct Loader {
     /// so every file has to intern into the same one -- see
     /// `Parser::with_arena`.
     arena: Vec<TyExpr>,
+    /// Whether any file could turn a float into text or text into a float,
+    /// and so needs `stdlib::FLOATFMT` -- see `mentions_float`.
+    wants_floatfmt: bool,
 }
 
 /// A loaded program, and where each module was read from, so a diagnostic
@@ -120,7 +143,7 @@ pub fn load(entry: &str) -> Result<Loaded, Located> {
     // it escapes the collision check below. It still takes a module name, and
     // `math.src` as the program would give two different modules called
     // `math` the moment anything imported the real one.
-    if crate::stdlib::source(&name).is_some() {
+    if crate::stdlib::embedded(&name).is_some() {
         return Err(Located {
             path: entry.to_string(),
             diag: Diag::new(
@@ -140,9 +163,29 @@ pub fn load(entry: &str) -> Result<Loaded, Located> {
         paths: HashMap::new(),
         stack: Vec::new(),
         arena: Vec::new(),
+        wants_floatfmt: false,
     };
-    let order = l.visit(&name, entry, None)?;
+    let mut order = l.visit(&name, entry, None)?;
     let entry_module = name.clone();
+
+    // Float text is written in the language (lib/__floatfmt.src), and the
+    // lowering calls into it by name. It is loaded as though the entry file
+    // imported it, which it cannot spell, and only when some file could need
+    // it: a program with no float in it would otherwise carry, and compile,
+    // a few thousand lines it never calls. It goes first, as a dependency
+    // would.
+    if l.wants_floatfmt {
+        let fm = crate::stdlib::FLOATFMT;
+        let text = crate::stdlib::embedded(fm).expect("the float module is embedded");
+        let extra = l.parse(
+            fm,
+            &display_path(fm),
+            text,
+            Some((&name, Span::new(1, 1))),
+            true,
+        )?;
+        order.splice(0..0, extra);
+    }
 
     // Concatenate in dependency order: a module is appended after everything
     // it imports. Declarations are order-independent downstream, but the
@@ -323,6 +366,9 @@ impl Loader {
         self.paths.insert(name.to_string(), path.to_string());
 
         let toks = Lexer::new(src).tokenize().map_err(here)?;
+        if mentions_float(&toks) {
+            self.wants_floatfmt = true;
+        }
         let mut parser = Parser::with_arena(toks, std::mem::take(&mut self.arena));
         if stdlib {
             parser = parser.stdlib();
