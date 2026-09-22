@@ -395,6 +395,29 @@ There is no `unwrap`. Trapping on `None` is what `Map.get` used to do, and
 putting it back behind a shorter name would undo the reason for the change.
 Taking the value out and keeping it is what `match` is for.
 
+**A function that can fail but has nothing to return is
+`Result<void, E>`.** A `void` payload is no value, so it is dropped: at
+`Result<void, E>`, `Ok` is a variant that carries nothing, and it is written
+exactly like every other payload-less variant — no special case:
+
+```c
+Result<void, str> check(int x) {
+    if (x < 0) { return Result<void, str>.Err("negative"); }
+    return Result<void, str>.Ok;
+}
+
+check(a)?;                  // a statement: there is no value to give
+match (check(b)) {
+    case Ok: { ... }
+    case Err(str e): { ... }
+}
+```
+
+The same holds for any generic enum at `void` (`Option<void>` has a `Some`
+that carries nothing, and no `or`). A struct cannot be instantiated at
+`void`: a field is named at every construction and every read, so it cannot
+quietly vanish the way a payload does.
+
 ### 3.8 Generics
 
 Type parameters on a type or a function:

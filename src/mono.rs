@@ -326,8 +326,21 @@ impl Mono {
             .collect();
         let mut fields = Vec::new();
         for f in &decl.fields {
+            let ty = self.subst_ty(f.ty, &sub, f.span)?;
+            // A field has to hold something. Unlike a payload, it cannot
+            // simply vanish: a construction names it, and so does every read.
+            if ty == Ty::Void {
+                return Err(Diag::new(
+                    span,
+                    format!(
+                        "`{}` cannot be instantiated with `void`: its field `{}` would hold no value",
+                        crate::ast::bare(&decl.name),
+                        f.name
+                    ),
+                ));
+            }
             fields.push(Param {
-                ty: self.subst_ty(f.ty, &sub, f.span)?,
+                ty,
                 name: f.name.clone(),
                 default: match &f.default {
                     Some(e) => Some(self.subst_expr(e, &sub)?),
@@ -337,12 +350,20 @@ impl Mono {
                 span: f.span,
             });
         }
-        // A variant's payload types substitute like a field's.
+        // A variant's payload types substitute like a field's -- except that
+        // a `void` one is no value at all, so it is dropped: `Ok(T)` at
+        // `Result<void, E>` is a variant that carries nothing, constructed
+        // `Result<void, E>.Ok` and matched `case Ok:` exactly like any other
+        // payload-less variant. That is what lets a function that can fail
+        // but has nothing to return say so, rather than inventing an `int`.
         let mut variants = Vec::new();
         for v in &decl.variants {
             let mut payload = Vec::new();
             for t in &v.payload {
-                payload.push(self.subst_ty(*t, &sub, v.span)?);
+                let t = self.subst_ty(*t, &sub, v.span)?;
+                if t != Ty::Void {
+                    payload.push(t);
+                }
             }
             variants.push(EnumVariant {
                 name: v.name.clone(),

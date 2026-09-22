@@ -1,0 +1,13 @@
+// `Ok` at `Result<void, E>` carries nothing, so there is nothing to bind.
+Result<void, str> check() {
+    return Result<void, str>.Ok;
+}
+
+match (check()) {
+    case Ok(int v): {
+        print(v);
+    }
+    case Err(str e): {
+        print(e);
+    }
+}

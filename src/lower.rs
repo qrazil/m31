@@ -1115,10 +1115,20 @@ impl Lowerer {
         if !args.named.is_empty() {
             return Err(Diag::new(span, format!("`{m}` takes no named arguments")));
         }
+        // `Option<void>` has no payload at all (mono.rs drops a void one):
+        // it can answer `is_some`, and has nothing for `or` to hand back.
         let inner = self.variant_surface[tid as usize]
             .iter()
-            .find_map(|p| p.first().copied())
-            .expect("Option always carries one payload type");
+            .find_map(|p| p.first().copied());
+        let Some(inner) = inner.or(if m == "or" { None } else { Some(Ty::Void) }) else {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`or` gives back the value inside, and {} carries none",
+                    self.show_name(&self.typedefs[tid as usize].name)
+                ),
+            ));
+        };
         let some_tag = self.typedefs[tid as usize]
             .variants
             .iter()
@@ -4306,8 +4316,15 @@ impl Lowerer {
 
         // Exact error types, for a Result.
         if is_result {
-            let ve = self.variant_surface[vtid as usize][1][0];
-            let re = self.variant_surface[rtid as usize][1][0];
+            // A `void` payload has been dropped (mono.rs), so an empty one
+            // is `void`.
+            let err_of = |lw: &Self, t: u32| {
+                lw.variant_surface[t as usize][1]
+                    .first()
+                    .copied()
+                    .unwrap_or(Ty::Void)
+            };
+            let (ve, re) = (err_of(self, vtid), err_of(self, rtid));
             if ve != re {
                 return Err(Diag::new(
                     span,
@@ -4326,7 +4343,11 @@ impl Lowerer {
             .iter()
             .position(|x| x.name == "Ok" || x.name == "Some")
             .expect("Option and Result each have a success variant") as u32;
-        let payload = self.variant_surface[vtid as usize][ok_tag as usize][0];
+        // `None` for `Result<void, E>`: the success carries nothing, and `e?`
+        // is then a statement rather than a value.
+        let payload = self.variant_surface[vtid as usize][ok_tag as usize]
+            .first()
+            .copied();
 
         // The scrutinee has to outlive both paths and may be a temporary, so
         // it is held the way `match` holds one.
@@ -4383,8 +4404,9 @@ impl Lowerer {
             .iter()
             .position(|x| x.name == "Err" || x.name == "None")
             .expect("Option and Result each have a failure variant") as u32;
-        let carried = if is_result {
-            let e = self.new_val(self.irty(self.variant_surface[vtid as usize][1][0]));
+        let err_ty = self.variant_surface[vtid as usize][1].first().copied();
+        let carried = if let Some(err_ty) = err_ty.filter(|_| is_result) {
+            let e = self.new_val(self.irty(err_ty));
             self.push(Inst::EnumPayload {
                 dst: e,
                 obj: v.val(),
@@ -4393,7 +4415,7 @@ impl Lowerer {
             });
             // Borrowed from the value we are about to release, so the new
             // failure takes a reference of its own.
-            if self.is_ref(self.variant_surface[vtid as usize][1][0]) {
+            if self.is_ref(err_ty) {
                 self.push(Inst::RcInc { val: e });
             }
             Some(e)
@@ -4416,6 +4438,12 @@ impl Lowerer {
         // The succeeding path: the payload, retained because it is borrowed
         // from a value whose scope ends here.
         self.switch_to(ok_bb);
+        let Some(payload) = payload else {
+            self.release_scope();
+            self.scopes.pop();
+            self.owned.pop();
+            return Ok(Val::void());
+        };
         let got = self.new_val(self.irty(payload));
         self.push(Inst::EnumPayload {
             dst: got,

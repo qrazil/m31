@@ -1,0 +1,4 @@
+corpus/errors/610-result-void-binding.src:7:5: `Ok` carries 0 value(s), and this case binds 1
+  |
+7 |     case Ok(int v): {
+  |     ^

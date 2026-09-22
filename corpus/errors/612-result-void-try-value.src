@@ -1,0 +1,18 @@
+// `e?` on a `Result<void, E>` has no value to give.
+Result<void, str> check() {
+    return Result<void, str>.Ok;
+}
+
+Result<int, str> f() {
+    int x = check()?;
+    return Result<int, str>.Ok(x);
+}
+
+match (f()) {
+    case Ok(int v): {
+        print(v);
+    }
+    case Err(str e): {
+        print(e);
+    }
+}
