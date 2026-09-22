@@ -1,0 +1,23 @@
+// A computed string constant may be up to 2^20 bytes -- the same cap as a
+// constant collection's element count, since a `bytes` constant is at most
+// that many bytes and a string is written out the same way. Sixteen bytes
+// doubled sixteen times is exactly the cap, and is accepted.
+const str S0 = "0123456789abcdef";
+const str S1 = S0 + S0;
+const str S2 = S1 + S1;
+const str S3 = S2 + S2;
+const str S4 = S3 + S3;
+const str S5 = S4 + S4;
+const str S6 = S5 + S5;
+const str S7 = S6 + S6;
+const str S8 = S7 + S7;
+const str S9 = S8 + S8;
+const str S10 = S9 + S9;
+const str S11 = S10 + S10;
+const str S12 = S11 + S11;
+const str S13 = S12 + S12;
+const str S14 = S13 + S13;
+const str S15 = S14 + S14;
+const str S16 = S15 + S15;
+print(S16.size());
+print(S16.substr(1048560, 1048576));

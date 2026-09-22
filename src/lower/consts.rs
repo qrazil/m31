@@ -26,6 +26,15 @@ use crate::ir::{Inst, IrTy, StaticObj, StaticSlot};
 /// Big enough for any table written by hand or generated into a file.
 const MAX_SLOTS: i64 = 1 << 20;
 
+/// The most bytes one computed `str` constant may have, for the same reason
+/// and at the same size: a `bytes` constant is at most `MAX_SLOTS` bytes, and
+/// a `str` is a byte sequence written out in the C the same way, so the two
+/// get one limit. Only `+` can make a constant longer than the source that
+/// spells it -- doubling from a one-byte string reaches a gigabyte in thirty
+/// steps -- so that is where it is checked, before the result is allocated.
+/// A literal is as long as its source already is, and is not limited here.
+const MAX_STR_BYTES: usize = MAX_SLOTS as usize;
+
 /// A constant's value, computed. A collection is already a static object --
 /// `Obj` is its index in `Lowerer::static_objs` -- so two constants naming one
 /// table share it, and a table inside a table is the same object as the
@@ -684,6 +693,12 @@ impl Lowerer {
                 _ => bad(),
             },
             (CVal::Str(x), CVal::Str(y)) => match op {
+                Add if x.len() + y.len() > MAX_STR_BYTES => err(format!(
+                    "this `+` gives a string of {} bytes; a constant string may hold at \
+                     most {MAX_STR_BYTES} bytes: it is written out in full in the compiled \
+                     program",
+                    x.len() + y.len()
+                )),
                 Add => Ok((CVal::Str(x + &y), Ty::Str)),
                 Eq => Ok((CVal::Bool(x == y), Ty::Bool)),
                 Ne => Ok((CVal::Bool(x != y), Ty::Bool)),
