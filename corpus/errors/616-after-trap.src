@@ -1,0 +1,7 @@
+// Nothing after a `trap` runs, the same as after a `return`.
+void f() {
+    trap("stop");
+    print(1);
+}
+
+f();

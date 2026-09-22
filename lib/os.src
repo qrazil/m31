@@ -14,7 +14,6 @@
 prim void __args(List<str> out);
 prim int __env(str name, List<str> out);
 prim void __exit(int code);
-prim void __panic(str msg);
 
 /// Every argument the program was started with, `argv[0]` -- the name it was
 /// invoked as -- first.
@@ -60,7 +59,7 @@ pub Option<str> env(str name) {
 /// between this and reaching the end of the program.
 pub void exit(int code) {
     if (code < 0 || code > 255) {
-        __panic("os.exit(" + code.to_str() + "): an exit status is 0 through 255");
+        trap("os.exit(" + code.to_str() + "): an exit status is 0 through 255");
     }
     __exit(code);
 }

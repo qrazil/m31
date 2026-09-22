@@ -123,8 +123,6 @@
 // `core` it builds on first use, because a field's default is evaluated where
 // the object is constructed and so cannot build this module's private types.)
 
-prim void __panic(str msg);
-
 /// A bad command line, and only that. Print it, print `p.usage()`, and exit
 /// with whatever status your program uses for usage errors: that is the
 /// caller's decision, not this module's.
@@ -175,7 +173,7 @@ pub void Parser.values(str name, str short = "", str help = "", str placeholder 
 /// be typed: `default: "80"`.
 pub void Parser.integer(str name, str short = "", str help = "", str placeholder = "", str default = "") {
     if (default != "" && default.parse_int().is_none()) {
-        __panic("integer(): --" + name + " default: '" + default + "' is not a whole number");
+        trap("integer(): --" + name + " default: '" + default + "' is not a whole number");
     }
     declare(core_of(core, prog, summary), name, short, help, placeholder, default, "integer");
 }
@@ -184,7 +182,7 @@ pub void Parser.integer(str name, str short = "", str help = "", str placeholder
 /// widened, because a reader who types `--cfg 7` has not made a mistake.
 pub void Parser.number(str name, str short = "", str help = "", str placeholder = "", str default = "") {
     if (default != "" && default.parse_float().is_none()) {
-        __panic("number(): --" + name + " default: '" + default + "' is not a number");
+        trap("number(): --" + name + " default: '" + default + "' is not a number");
     }
     declare(core_of(core, prog, summary), name, short, help, placeholder, default, "number");
 }
@@ -317,7 +315,7 @@ pub List<str> Parsed.tail(str name) {
 /// option from one given its own default value.
 pub bool Parsed.given(str name) {
     if (find_opt(parser, name).is_none() && find_pos(parser, name).is_none()) {
-        __panic("given(): '" + name + "' is not a declared argument of " + parser.prog);
+        trap("given(): '" + name + "' is not a declared argument of " + parser.prog);
     }
     return marks.contains(name);
 }
@@ -336,7 +334,7 @@ pub Option<str> Parsed.help() {
 /// list that could be mistaken for "none given".
 pub List<Parsed> Parsed.commands() {
     if (parser.words.size() == 0) {
-        __panic("commands(): " + parser.prog + " has no commands -- declare them with p.command(word, summary)");
+        trap("commands(): " + parser.prog + " has no commands -- declare them with p.command(word, summary)");
     }
     return cmds;
 }
@@ -406,24 +404,24 @@ Core core_p(Parser p) {
 // program. These trap: nothing a user types can reach them.
 void declare(Core k, str name, str short, str help, str placeholder, str default, str kind) {
     if (name == "" || name.starts_with("-") || name.contains(" ") || name.contains("=")) {
-        __panic(kind + "(): '" + name + "' is not a usable option name -- write it as you would type it after the dashes, e.g. 'skip-missing' for --skip-missing");
+        trap(kind + "(): '" + name + "' is not a usable option name -- write it as you would type it after the dashes, e.g. 'skip-missing' for --skip-missing");
     }
     if (name == "help") {
-        __panic(kind + "(): --help is always there and cannot be declared");
+        trap(kind + "(): --help is always there and cannot be declared");
     }
     if (name.size() == 1) {
-        __panic(kind + "(): '" + name + "' is a short spelling -- declare the long name and pass short: \"" + name + "\"");
+        trap(kind + "(): '" + name + "' is a short spelling -- declare the long name and pass short: \"" + name + "\"");
     }
     if (find_opt(k, name).is_some()) {
-        __panic(kind + "(): --" + name + " is already an option of " + k.prog);
+        trap(kind + "(): --" + name + " is already an option of " + k.prog);
     }
     if (short != "") {
         if (short.size() != 1 || short == "-") {
-            __panic(kind + "(): short: must be one character, not '" + short + "'");
+            trap(kind + "(): short: must be one character, not '" + short + "'");
         }
         match (k.shorts.get(short)) {
             case Some(str taken): {
-                __panic(kind + "(): --" + short + " is already --" + taken + " of " + k.prog);
+                trap(kind + "(): --" + short + " is already --" + taken + " of " + k.prog);
             }
             case None: {
             }
@@ -444,20 +442,20 @@ void declare(Core k, str name, str short, str help, str placeholder, str default
 // unparseable, so each is refused where it is written.
 void declare_pos(Core k, str name, str help, str placeholder, str default, str kind) {
     if (name == "") {
-        __panic(kind + "(): a positional needs a name");
+        trap(kind + "(): a positional needs a name");
     }
     if (k.words.size() > 0) {
-        __panic(kind + "(): " + k.prog + " dispatches to commands -- '" + name + "' belongs to one of them");
+        trap(kind + "(): " + k.prog + " dispatches to commands -- '" + name + "' belongs to one of them");
     }
     for (Pos p in k.pos) {
         if (p.name == name) {
-            __panic(kind + "(): '" + name + "' is already an argument of " + k.prog);
+            trap(kind + "(): '" + name + "' is already an argument of " + k.prog);
         }
         if (p.kind == "tail") {
-            __panic(kind + "(): '" + p.name + "' already takes every remaining argument, so '" + name + "' could never be given one");
+            trap(kind + "(): '" + p.name + "' already takes every remaining argument, so '" + name + "' could never be given one");
         }
         if (p.kind == "optional" && kind == "positional") {
-            __panic(kind + "(): '" + name + "' must be given but follows the optional '" + p.name + "' -- a command line cannot leave out the middle one");
+            trap(kind + "(): '" + name + "' must be given but follows the optional '" + p.name + "' -- a command line cannot leave out the middle one");
         }
     }
     str shown = placeholder;
@@ -469,24 +467,24 @@ void declare_pos(Core k, str name, str help, str placeholder, str default, str k
 
 Parser command(Core k, str word, str about, str short) {
     if (k.is_command) {
-        __panic("command(): '" + k.prog + "' is itself a command -- the grammar is two deep, so its arguments are options (--" + word + "), not commands");
+        trap("command(): '" + k.prog + "' is itself a command -- the grammar is two deep, so its arguments are options (--" + word + "), not commands");
     }
     if (word == "" || word.starts_with("-") || word.contains(" ") || word.contains("=")) {
-        __panic("command(): '" + word + "' is not a usable command name -- write it as you would type it after the dash, e.g. 'addrepo' for -addrepo");
+        trap("command(): '" + word + "' is not a usable command name -- write it as you would type it after the dash, e.g. 'addrepo' for -addrepo");
     }
     if (k.words.contains(word)) {
-        __panic("command(): -" + word + " is already a command of " + k.prog);
+        trap("command(): -" + word + " is already a command of " + k.prog);
     }
     if (k.pos.size() > 0) {
-        __panic("command(): " + k.prog + " already has positional arguments -- a dispatching program's operands belong to its commands");
+        trap("command(): " + k.prog + " already has positional arguments -- a dispatching program's operands belong to its commands");
     }
     if (short != "") {
         if (short.size() != 1 || short == "-") {
-            __panic("command(): short: must be one character, not '" + short + "'");
+            trap("command(): short: must be one character, not '" + short + "'");
         }
         match (k.cmd_shorts.get(short)) {
             case Some(str taken): {
-                __panic("command(): -" + short + " is already -" + taken + " of " + k.prog);
+                trap("command(): -" + short + " is already -" + taken + " of " + k.prog);
             }
             case None: {
             }
@@ -1012,30 +1010,28 @@ Opt want_opt(Core k, str name, str kind) {
     match (find_opt(k, name)) {
         case Some(Opt o): {
             if (kind != "" && o.kind != kind) {
-                __panic(kind + "(): --" + name + " was declared with " + o.kind + "(), so read it with r." + o.kind + "(\"" + name + "\")");
+                trap(kind + "(): --" + name + " was declared with " + o.kind + "(), so read it with r." + o.kind + "(\"" + name + "\")");
             }
             return o;
         }
         case None: {
-            __panic(kind + "(): '" + name + "' is not a declared option of " + k.prog);
+            trap(kind + "(): '" + name + "' is not a declared option of " + k.prog);
         }
     }
-    return Opt("", "", "", "", "", "");
 }
 
 Pos want_pos(Core k, str name, str kind) {
     match (find_pos(k, name)) {
         case Some(Pos p): {
             if (p.kind != kind) {
-                __panic(kind + "(): '" + name + "' was declared with " + p.kind + "(), so read it with r." + p.kind + "(\"" + name + "\")");
+                trap(kind + "(): '" + name + "' was declared with " + p.kind + "(), so read it with r." + p.kind + "(\"" + name + "\")");
             }
             return p;
         }
         case None: {
-            __panic(kind + "(): '" + name + "' is not a declared argument of " + k.prog);
+            trap(kind + "(): '" + name + "' is not a declared argument of " + k.prog);
         }
     }
-    return Pos("", "", "", "", "");
 }
 
 Option<str> text_or_default(Map<str, str> texts, str name, str default) {

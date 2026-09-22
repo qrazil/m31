@@ -1,0 +1,12 @@
+// `trap(msg)` stops the program with its own message, as the language's
+// own traps do. A function ending in one needs no return after it.
+
+int percent(int n) {
+    if (n >= 0 && n <= 100) {
+        return n;
+    }
+    trap("percent(" + n.to_str() + "): outside 0..100");
+}
+
+print(percent(40));
+print(percent(140));

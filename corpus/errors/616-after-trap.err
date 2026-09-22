@@ -1,0 +1,4 @@
+corpus/errors/616-after-trap.src:4:5: unreachable statement
+  |
+4 |     print(1);
+  |     ^

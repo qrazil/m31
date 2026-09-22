@@ -1,0 +1,6 @@
+// `trap` never returns, so it has no value; it is only a statement.
+int f() {
+    return trap("no");
+}
+
+print(f());

@@ -2057,15 +2057,29 @@ _Noreturn void rt_exit(int64_t code) {
     exit((int)code);
 }
 
-/* A library's way to say "this is a bug in the caller" -- the same trap the
- * language itself uses for an index out of range, with the library's own
- * message. The message is copied to a C string only here, on the way out. */
+/* `trap(msg)`: a program's way to say "this is a bug" -- the same trap the
+ * language itself uses for an index out of range, with the program's own
+ * message. Shaped like rt_trap: flush what `print` has buffered (it used
+ * fflush(stdout), which is not where print's output waits, so a program's
+ * last lines were lost whenever stdout was not a terminal), then one write
+ * where the message fits, so another thread's output cannot split it. A
+ * message too long for that is written in pieces rather than cut: unlike
+ * rt_trap's literals, it is the program's text and may be long. */
 _Noreturn void rt_panic(Obj *msg) {
     Str *m = (Str *)msg;
-    fflush(stdout);
-    fputs("trap: ", stderr);
-    if (m->len > 0) fwrite(m->data, 1, (size_t)m->len, stderr);
-    fputc('\n', stderr);
+    size_t n = m->len > 0 ? (size_t)m->len : 0;
+    rt_out_flush();
+    char buf[4096];
+    if (n + 7 <= sizeof buf) {
+        memcpy(buf, "trap: ", 6);
+        memcpy(buf + 6, m->data, n);
+        buf[6 + n] = '\n';
+        write_all(2, buf, n + 7);
+    } else {
+        write_all(2, "trap: ", 6);
+        write_all(2, (const char *)m->data, n);
+        write_all(2, "\n", 1);
+    }
     abort();
 }
 

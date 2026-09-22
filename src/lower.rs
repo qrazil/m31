@@ -176,7 +176,7 @@ pub struct Lowerer {
 /// module-level `print` used to replace the builtin silently in its own
 /// module, and to turn every `print` in an importing file into a privacy
 /// error about a function that file never asked for.
-const BUILTIN_FNS: &[&str] = &["print", "concat", "clone", "send", "recv", "close"];
+const BUILTIN_FNS: &[&str] = &["print", "concat", "clone", "send", "recv", "close", "trap"];
 
 /// The representation of a surface type, WITHOUT resolving distinct types.
 /// Use `Lowerer::irty` instead wherever a distinct type can appear.
@@ -3207,6 +3207,11 @@ impl Lowerer {
             }
 
             Stmt::Eval { expr, span } => {
+                if let Expr::Call(name, args, cspan) = expr {
+                    if name == "trap" {
+                        return self.lower_trap(args, *cspan);
+                    }
+                }
                 let val = self.lower_expr(expr)?;
                 // A Result thrown away is the classic quiet bug -- C's
                 // fclose problem. It is an ERROR rather than a warning
@@ -6296,7 +6301,52 @@ impl Lowerer {
         Ok(Val::new(obj, ty, true))
     }
 
+    /// `trap(msg);` -- stop the program, because it has a bug.
+    ///
+    /// The runtime's own traps cover the mistakes the language can see: an
+    /// index out of range, an overflow. `trap` is the same thing for the
+    /// ones only the program can see -- an argument outside what a function
+    /// accepts, an invariant that does not hold. It is for a bug and not for
+    /// the world (docs/errors-decision.md): a failure the caller should
+    /// handle is a `Result`, and nothing can catch a trap.
+    ///
+    /// It never returns, so the block ends here: a function whose last
+    /// statement is a `trap` needs no return after it, and a statement after
+    /// one is unreachable, as after `return`. That is also why it is a
+    /// statement and never a value -- there is no value it could give.
+    fn lower_trap(&mut self, args: &Args, span: Span) -> Result<(), Diag> {
+        if args.pos.len() != 1 || !args.named.is_empty() {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`trap` takes 1 argument, its message, found {}",
+                    args.pos.len() + args.named.len()
+                ),
+            ));
+        }
+        let m = self.lower_expr(&args.pos[0])?;
+        if self.underlying(m.ty) != Ty::Str {
+            return Err(Diag::new(args.pos[0].span(), self.mismatch(Ty::Str, m.ty)));
+        }
+        self.push(Inst::Call {
+            dst: None,
+            func: "rt_panic".to_string(),
+            args: vec![m.val()],
+        });
+        // Nothing after the call runs, so nothing pending is released: the
+        // statement's temporaries die with the process.
+        self.stmt_temps.clear();
+        self.terminate(Term::Ret { val: None });
+        Ok(())
+    }
+
     fn lower_call(&mut self, name: &str, args: &Args, span: Span) -> Result<Val, Diag> {
+        if name == "trap" {
+            return Err(Diag::new(
+                span,
+                "`trap` is a statement: it never returns, so it has no value to give",
+            ));
+        }
         // `print` accepts int, bool or str and selects the runtime helper from
         // the static argument type. Not user-visible overloading.
         if name == "print" {

@@ -1105,6 +1105,20 @@ and `from_` make them a visible pair, the one Rust uses.
 | `clone(x)` | a **shallow** copy |
 | `int(x)`, `bool(x)`, `str(x)`, `bytes(x)` | convert a distinct value to its base |
 | `send(ch, v)`, `recv(ch)`, `close(ch)` | channels (§8) |
+| `trap(msg)` | stop the program with a `str` message (§7.4); a statement, never a value |
+
+**`trap(msg)` is for a bug, never for the world.** The language traps on
+the mistakes it can see — an index out of range, an overflow — and `trap`
+is the same thing for the ones only the program can see: an argument
+outside what a function accepts, an invariant that does not hold. A failure
+a caller should handle is a `Result` (docs/errors-decision.md); nothing
+catches a trap. It never returns, so it ends its block like `return` does:
+a function may end in one with no return after it, and a statement after one
+is unreachable. For the same reason it has no value and may only be written
+as a statement.
+
+There is no `assert(cond, msg)`: it would be a second spelling of
+`if (!cond) { trap(msg); }`, and one way to write a thing beats two.
 
 `print` selects its runtime helper from the static argument type. That is not
 user-visible function overloading, which does not exist.
@@ -1197,6 +1211,7 @@ Trapping conditions:
   - `recv` on a channel that is closed and drained
   - a length or capacity too large to allocate
   - a uniqueness violation at a thread boundary (§8.3)
+  - `trap(msg)`, with the program's own message (§6.6)
 
 ---
 

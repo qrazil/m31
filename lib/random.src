@@ -76,7 +76,6 @@
 // the error.
 
 prim int __entropy(int n, List<int> out);
-prim void __panic(str msg);
 
 /// A reproducible generator: the same seed gives the same sequence, on every
 /// platform and every release, because every step of it is integer
@@ -206,7 +205,7 @@ List<int> fill(Source s, int n) {
     List<int> out = [];
     int e = __entropy(n, out);
     if (e != 0) {
-        __panic("random: the operating system supplied no randomness (errno " + e.to_str() + ")");
+        trap("random: the operating system supplied no randomness (errno " + e.to_str() + ")");
     }
     return out;
 }
@@ -239,7 +238,7 @@ str hex_from(Source s, int n) {
 // a seeded generator answers the same integers in both.
 int integer_from(Source s, int low, int high) {
     if (high < low) {
-        __panic("random.integer(" + low.to_str() + ", " + high.to_str() + "): the range is empty -- high is below low, and both ends are included");
+        trap("random.integer(" + low.to_str() + ", " + high.to_str() + "): the range is empty -- high is below low, and both ends are included");
     }
     if (low == high) {
         return low;
@@ -512,6 +511,6 @@ int floor_mod(int a, int b) {
 
 void check_count(int n, str who) {
     if (n < 0) {
-        __panic("random." + who + "(" + n.to_str() + "): a count cannot be negative");
+        trap("random." + who + "(" + n.to_str() + "): a count cannot be negative");
     }
 }

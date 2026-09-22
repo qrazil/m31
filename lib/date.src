@@ -57,7 +57,6 @@
 // silently becoming the next minute.
 
 prim void __clock(List<int> out);
-prim void __panic(str msg);
 
 /// Why `epoch` or `parse` refused. The message says which rule was broken
 /// and what to write instead; there is nothing in it worth branching on,
@@ -314,7 +313,7 @@ Result<int, Error> to_epoch(int year, int month, int day, int hour, int minute, 
 // wrote and the bound it crossed.
 int checked(int t, str who) {
     if (t < min_epoch() || t > max_epoch()) {
-        __panic("date." + who + "(): epoch second " + t.to_str() + " is out of range " + min_epoch().to_str() + ".." + max_epoch().to_str() + " -- date covers years 1 through 9999");
+        trap("date." + who + "(): epoch second " + t.to_str() + " is out of range " + min_epoch().to_str() + ".." + max_epoch().to_str() + " -- date covers years 1 through 9999");
     }
     return t;
 }

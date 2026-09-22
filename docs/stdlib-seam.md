@@ -270,14 +270,15 @@ blocks the compiler as surely as it blocks `io`. The path is Go's:
 | `__exit(int code)` | flushes stdout, then `exit` -- the 0..255 check is in `lib/os.src` |
 | `__clock(List<int> out)` | pushes seconds and nanoseconds from ONE `CLOCK_REALTIME` reading |
 | `__entropy(int n, List<int> out)` | pushes n octets from `getentropy`; 0, or an errno |
-| `__panic(str msg)` | traps with the library's own message |
 
-`__panic` is the one that is not an OS fact, and it is here because library
-source otherwise has no way to say "this is a bug in the caller": the
-language traps on an index out of range, and a library's own preconditions
-(`random.integer(3, 1)`, declaring `--help` on an `args.Parser`, a timestamp
-outside `date`'s years) deserve the same treatment rather than a `Result`
-that docs/errors-decision.md says a caller's bug must not get.
+There was a sixth, `__panic(str msg)`, the one that was not an OS fact: library
+source had no other way to say "this is a bug in the caller", and a library's
+own preconditions (`random.integer(3, 1)`, declaring `--help` on an
+`args.Parser`, a timestamp outside `date`'s years) deserve a trap rather than
+a `Result` that docs/errors-decision.md says a caller's bug must not get. It
+is gone: that need was never the standard library's alone, and every program
+now has it as the builtin statement `trap(msg)` (reference §6.6), which the
+library uses like any other program. Its runtime half, `rt_panic`, stayed.
 
 Everything above them is source: argv[0]'s inclusion, what unset means, the
 calendar, rejection sampling, PCG on 16-bit limbs until bitwise operators

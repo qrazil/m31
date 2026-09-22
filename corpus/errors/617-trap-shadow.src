@@ -1,0 +1,3 @@
+// `trap` is a builtin, and nothing shadows a builtin.
+int trap = 1;
+print(trap);
