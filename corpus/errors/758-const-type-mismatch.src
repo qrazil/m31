@@ -1,0 +1,4 @@
+// A constant's value has the type written for it, with no conversion: an
+// int is not a float here any more than anywhere else.
+const float RATE = 3;
+print(RATE);

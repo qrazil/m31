@@ -97,18 +97,20 @@ no valid program has two `<` in a row — and is one token.
 
 ## 2. Program structure
 
-A file is a sequence of four kinds of item, in any order:
+A file is a sequence of five kinds of item, in any order:
 
   - a **type declaration** — `type`, `interface`, or `distinct`
   - a **function declaration**
   - a **method declaration**
+  - a **constant declaration** — `const` at the top level (§4.4)
   - a **top-level statement**
 
 Top-level statements run, in source order, as the program. Declarations do
 not: a file that is all declarations is a program that does nothing.
 
-Forward references are fine. Types and functions are collected before any
-body is checked, so an item may name one declared later in the file.
+Forward references are fine. Types, functions and constants are collected
+before any body is checked, so an item may name one declared later in the
+file.
 
 **Nesting is limited to 256 levels**, counting statements, expressions and
 types together: a block inside a block, an argument inside a call, a type
@@ -136,7 +138,8 @@ print(greet.shout("world"));
   - **Private by default.** A declaration is visible only inside its module
     unless marked `pub`. Reaching a name from another module means writing
     `mod.name`; unqualified, it is not in scope at all. That holds for
-    everything a module declares — functions, types, methods and an enum's
+    everything a module declares — functions, types, methods, constants
+    (`lib.MAX`, `lib.TABLE[0]`, `lib.TABLE.size()`) and an enum's
     variants — not only functions. A method that could not be called from
     here does not satisfy an interface here either, and neither does one
     that `print` or an operator would find by name: an interface or an
@@ -155,7 +158,9 @@ print(greet.shout("world"));
   - **Import cycles are refused**, and the diagnostic prints the whole chain.
     Self-import is the same rule, not a special case.
   - **One entry file.** The file named on the command line is the program;
-    statements at the top level of any *imported* file are an error.
+    statements at the top level of any *imported* file are an error. A
+    constant is a declaration, not a statement, so any module may declare
+    one — a module may consist of nothing else.
 
 A module's name has to be usable as an identifier, because it is written in
 source. The entry file is exempt — it is named on the command line and never
@@ -742,13 +747,65 @@ Point p = Point(1, 2);
 The initialiser is **mandatory**. There is no declaration without a value,
 because there is no zero value to give one.
 
-`const` forbids assignment to the name. It says nothing about the object: a
-`const List<int>` may not be reassigned, and may still be pushed to.
+**`const` means the value never changes, deeply** — on a local exactly as on
+a module constant (§4.4). The name may not be reassigned, and the object it
+holds, and everything reachable from it, may not be changed by anyone:
+
+```c
+const List<Point> ps = [Point(1, 2), Point(3, 4)];
+ps.push(Point(5, 6));   // error: `ps` is const and cannot be changed
+ps[0].x = 9;            // error: the same, through an index and a field
+Point p = ps[0];
+p.x = 9;                // traps: the Point was frozen with the list
+```
+
+Constness belongs to the **object**, not the name, because `=` aliases:
+`List<int> b = a;` is a second name for the same list, and a rule about the
+name `a` would say nothing about `b`. So a frozen object is marked, and every
+way of changing an object checks the mark (§7.3).
+
+**A `const` binds a constant snapshot of its value.** Which of two things
+happens is decided at the binding, when it runs:
+
+  - **Nothing else holds the value** — a literal, a fresh construction, a
+    call's result nobody kept: it is **frozen in place**, with no copy.
+  - **Something else holds any part of it** — `const List<int> a = b;`, or
+    `[p]` while `p` still names the Point: it is **deep-copied and the copy
+    frozen**. `b` stays as mutable as it was, and later changes to `b` do
+    not reach `a`.
+
+Nothing is refused, and no `clone` is needed. **The cost is stated at the
+line: binding a `const` from a shared value costs a deep copy of it** —
+time and memory proportional to the part of the graph that is not already
+frozen. The copy keeps the shape: two references to one object stay two
+references to one copy, and a cycle is copied as a cycle. Frozen and
+immortal parts (another `const`, a module constant) and every `str` are
+shared, not copied — so binding a `const` from another `const` costs
+nothing. A copied cycle can never be broken — breaking it is a change — so,
+as cycles are not collected (§7.1), it lives until the program ends.
+  - **A change the compiler can see is an error**: assigning to the name,
+    `a[i] = ..`, `a.f = ..`, or a method that changes a built-in collection
+    (`push`, `pop`, `insert`, `remove_at`, `clear`, `set`, `remove`,
+    `reverse`, `sort`, `extend`), through any chain of fields and indexes
+    starting at the name.
+  - **A change it cannot see traps**: the value passed to a parameter — there
+    is no read-only parameter type — or held by another name, or a method
+    that assigns a field of its frozen receiver. The trap is `cannot modify
+    a constant`.
+  - **`clone(x)` is the copy that can be changed.** It is shallow, like
+    every clone: a clone of a frozen `List<Point>` is a new list holding the
+    same, still frozen, Points.
+  - A frozen value is otherwise ordinary: it is read, passed, returned and
+    stored like any other, is freed when its last reference goes, and moves
+    across a thread boundary under the same rule as anything else (§8.3).
+  - `int`, `float`, `bool` and `str` are immutable already, so `const` on
+    them only forbids reassignment.
 
 **Shadowing is not allowed.** A declaration whose name is already in scope is
 an error telling you to rename one. A name means one thing for the whole
 region a reader can see it in. Nothing shadows a type name either, nor a
-builtin function (§6.6) in any module, nor a module the file imports.
+builtin function (§6.6) in any module, nor a module the file imports, nor a
+constant of the module (§4.4) — a parameter included.
 
 ### 4.2 Functions
 
@@ -871,6 +928,61 @@ some other method's receiver or none at all. As a keyword it can never be
 declared as a name.
 
 A method may be declared anywhere in the file, including before its type.
+
+### 4.4 Module constants
+
+```c
+pub const int MINUTE = 60 * SECOND;
+const int SECOND = 1000;
+const Array<str> NAMES = ["ms", "s", "min"];
+const Map<str, int> KEYWORDS = {"if": 1, "else": 2};
+```
+
+`const` at the top level of a file declares a **module constant**, in any
+module, the entry file included. At the top level `const` always means this;
+a `const` local is written inside a block. The type is mandatory, as it is
+on every other name.
+
+**The value is computed by the compiler.** The initialiser is a *constant
+expression*:
+
+  - a literal — `int`, `float`, `bool`, `str`;
+  - another module constant, of this module (`SECOND`) or another
+    (`units.SECOND`, which must be `pub`), declared anywhere;
+  - an operator applied to those: the arithmetic, bit, comparison and logical
+    operators of §6.1 and `str` `+`, with the same types and the same rules
+    as at run time — an overflow, a division by zero or a shift out of range,
+    which would trap, is an error, and a float result must be finite (the
+    rule a float literal follows, §1.5);
+  - a collection literal of those, written into an `Array`, a `List`, a
+    `bytes` or a `Map` (§3.9): `[a, b]`, `[v; n]`, `{k: v}`.
+
+No call, field, index, method or construction: a constant is never computed
+by running the program. Constants may refer to each other in any order but
+not in a circle; a cycle is an error that prints the whole chain.
+
+**A constant's type** is `int`, `float`, `bool`, `str` or `bytes`, or an
+`Array`, `List` or `Map` of those, nested to any depth. A map key is `int` or
+`str`, and a constant map may not repeat a key. A collection holds at most
+2^20 elements. A user type is not allowed yet.
+
+**The value is static data.** A collection constant is laid out by the
+compiler in the emitted program as an immortal object (§7.3), so there is no
+initialisation order and no cost at run time — reading `TABLE[i]` is an
+ordinary bounds-checked load. A scalar is folded into every use.
+
+**It never changes**, by the rule every `const` follows (§4.1): assigning to
+it, `TABLE[0] = 1` and `TABLE.sort()` are errors, and a change the compiler
+cannot see — the table passed to a parameter — traps. `clone(TABLE)` is a
+copy that can be changed (shallow: a cloned `Array<Array<int>>` holds the
+same constant rows).
+
+**Names.** A constant is private to its module unless `pub`, is reached from
+another module as `mod.NAME`, and takes a name in the module's one namespace:
+no function, type or other constant of the module may share it, and no local
+or parameter anywhere in the module may take it (§4.1). There is no rule
+about case; the standard library spells constants in `UPPER_SNAKE_CASE`,
+which keeps them out of the way of locals.
 
 ---
 
@@ -1301,11 +1413,25 @@ Refcount operations are non-atomic (§8.3).
 The compiler inserts every retain and release. There is no manual
 `retain`/`release`, and no way to write one.
 
-### 7.3 Immortal values
+### 7.3 Immortal and frozen values
 
 A string literal is allocated once, statically, with a count that never
 reaches zero. Retaining and releasing one is a no-op, so a literal in a hot
-loop costs nothing.
+loop costs nothing. A module constant's collection is the same (§4.4):
+static, immortal, never freed, not counted as a leak, and in read-only
+memory.
+
+A **frozen** value is one bound to a `const` (§4.1). It is counted and freed
+like any other object — freezing marks it, it does not pin it — but every
+operation that would change it traps instead: a field store, an index store,
+and every changing method of a collection or a `bytes`, whichever name or
+parameter the change arrives through. An immortal value is frozen too.
+
+Freezing is transitive, over everything the value reaches, except what is
+immutable anyway (`str`) and what is already frozen. It happens in place
+only when that whole graph is reachable from the value alone; otherwise the
+binding freezes a deep copy (§4.1). Either way it costs time proportional
+to the graph, once, at the binding.
 
 ### 7.4 Traps
 
@@ -1325,6 +1451,7 @@ Trapping conditions:
   - `recv` on a channel that is closed and drained
   - a length or capacity too large to allocate
   - a uniqueness violation at a thread boundary (§8.3)
+  - changing a frozen or constant value (§7.3)
   - `trap(msg)`, with the program's own message (§6.6)
 
 ---
@@ -1400,6 +1527,18 @@ nothing here.
 It traps rather than corrupting the heap, and costs time proportional to the
 graph, paid once per crossing.
 
+**Module constants are shared, not moved.** Every thread may read one — by
+name, or passed to `spawn` or `send` — because it is immortal and immutable:
+no thread ever writes its count, which a retain or release leaves alone, or
+its contents, which nothing may change. There is nothing to race on.
+
+A **frozen** value is not a constant. It is immutable, but its count is an
+ordinary non-atomic count, so it crosses a thread boundary under the rule
+above — moved, and unique — exactly like any other value.
+
+Mutable state at module level does not exist; see
+`docs/module-state-decision.md` for why, and for what might replace it.
+
 ---
 
 ## 9. Not in the language
@@ -1440,8 +1579,11 @@ grounds (types, privacy, shadowing).
 ```ebnf
 program     = { import } { item } ;
 import      = "import" IDENT ";" ;                    (* before any item *)
-item        = [ "pub" ] decl_item | stmt ;            (* stmt: entry file only *)
-decl_item   = typedecl | interface | enumdecl | distinct | func | prim ;
+item        = [ "pub" ] decl_item | stmt ;            (* stmt: entry file only;
+                                                         never a `const` decl, §4.4 *)
+decl_item   = typedecl | interface | enumdecl | distinct | func | prim
+            | constdecl ;
+constdecl   = "const" type IDENT "=" expr ";" ;       (* a constant expression, §4.4 *)
 
 typedecl    = "type" IDENT [ tparams ] "{" { field ";" } "}" ;
 interface   = "interface" IDENT [ tparams ] "{" { sig ";" } "}" ;
@@ -1470,7 +1612,8 @@ match       = "match" "(" expr ")" "{" { case } "}" ;
 case        = "case" IDENT [ "(" bind { "," bind } ")" ] ":" block ;
 bind        = type IDENT ;
 
-decl        = [ "const" ] type IDENT "=" expr ";" ;   (* always initialised *)
+decl        = [ "const" ] type IDENT "=" expr ";" ;   (* always initialised; const
+                                                         binds a snapshot, §4.1 *)
 assign      = lvalue "=" expr ";" ;
 lvalue      = IDENT | expr "." IDENT | expr "[" expr "]" ;
 eval        = expr ";" ;

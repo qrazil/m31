@@ -1,0 +1,2 @@
+pub const int PUBLIC = 1;
+const int HIDDEN = 2;

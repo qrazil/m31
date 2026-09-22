@@ -1,0 +1,15 @@
+// A frozen local reached through a parameter: the push is legal to the
+// compiler, because `xs` is an ordinary List, and traps at run time because
+// the list it holds was frozen when `a` was bound.
+
+void grow(List<int> xs) {
+    xs.push(1);
+}
+
+void run() {
+    const List<int> a = [4, 5, 6];
+    grow(a);
+    print(a.size());
+}
+
+run();

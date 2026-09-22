@@ -13,11 +13,24 @@
 #ifndef RT_H
 #define RT_H
 
+#include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #define RC_IMMORTAL (-1)
+
+/* A frozen object: bound to a `const`, so nothing may change it again
+ * (docs/const-decision.md). The flag is the highest bit of the count below
+ * the sign, rather than a field of its own, so the header stays two words:
+ * the count uses the bits below it, a retain or release carries on counting
+ * underneath, and only the zero test in rc_dec has to look past it.
+ *
+ * RC_IMMORTAL is -1, every bit set, so an immortal object reads as frozen
+ * too -- which is right for a module constant's static data, and harmless
+ * for the other immortals, string literals (immutable anyway) and channels
+ * (never passed to a mutation path). */
+#define RC_FROZEN (LONG_MAX / 2 + 1)
 
 typedef struct Obj Obj;
 
@@ -48,10 +61,19 @@ typedef void (*AnyFn)(void);
  * numbers are assigned by the compiler: one per distinct interface method
  * name in the program, NULL where a type does not have it.
  */
+/* Deep-copy one object for a `const` snapshot (rt_snapshot): allocate the
+ * copy, register it with rt_copy_register BEFORE copying any child -- which
+ * is what lets a cycle close back onto the copy instead of recursing
+ * forever -- then fill each reference field with rt_copy_child. Emitted
+ * code generates one per user type; the runtime copies its own collections
+ * itself, so theirs is NULL. `ctx` is the runtime's, opaque here. */
+typedef Obj *(*CopyFn)(Obj *o, void *ctx);
+
 typedef struct TypeInfo {
     DropFn       drop;
     const AnyFn *vtable;
     WalkFn       walk;
+    CopyFn       copy;
 } TypeInfo;
 
 /* Every heap object starts with this. Two words: the count, and a pointer to
@@ -82,6 +104,41 @@ typedef struct {
 
 void rc_inc(Obj *o);
 void rc_dec(Obj *o);
+
+/* A `const` binding takes a frozen snapshot of its value
+ * (docs/const-decision.md). Takes the caller's +1 on `o` and returns a +1 on
+ * a frozen value equal to it:
+ *   - already frozen (or immortal, or a str): `o` itself;
+ *   - reachable from nothing but `o` -- a literal, a fresh construction, a
+ *     call's result nobody else holds: `o`, frozen in place, no copy;
+ *   - otherwise: a deep copy of `o`, frozen, and `o` released. The original
+ *     stays mutable and later changes to it do not reach the snapshot.
+ * Frozen and immortal parts, and every str, are shared rather than copied:
+ * they cannot change. */
+Obj *rt_snapshot(Obj *o);
+
+/* For emitted CopyFns only -- see CopyFn above. rt_copy_child returns a +1
+ * on the child's copy (or on the child itself, where it is shared). */
+void rt_copy_register(void *ctx, Obj *old, Obj *copy);
+Obj *rt_copy_child(void *ctx, Obj *child);
+
+/* Cold as well as _Noreturn: without it gcc counted the call against the
+ * size of every function that stores a field, and stopped inlining small
+ * methods -- a 70% slowdown on a store-heavy loop, measured, that was the
+ * lost inlining and not the check. */
+__attribute__((cold)) _Noreturn void rt_frozen_trap(void);
+
+/* Every path that changes an object checks this first: the runtime's own
+ * collection and bytes mutators, and the compiler before every field store
+ * that is not initialising a new object. It is what catches a change the
+ * compiler cannot see -- a frozen value reached through a parameter, since
+ * there is no read-only parameter type.
+ *
+ * Inline, because a field store is one instruction and a call per store
+ * would dominate it; the trap itself is out of line and cold. */
+static inline void rt_check_mutable(Obj *o) {
+    if (__builtin_expect((o->rc & RC_FROZEN) != 0, 0)) rt_frozen_trap();
+}
 
 /* Allocate `size` bytes of object, refcount 1, with the given drop function
  * (NULL if the type holds no references). The header is initialised; the
@@ -199,6 +256,16 @@ typedef struct {
     int64_t *data;    /* separate buffer, so it can grow */
 } Lst;
 
+/* An Array's and a List's two TypeInfos each -- elements that are values,
+ * elements that are references. Exported only because a module constant is emitted as
+ * static data and has to carry the same TypeInfo the runtime would have
+ * given it: the runtime tells a list from an array, and a reference from a
+ * value, by which of these the header points at. */
+extern const TypeInfo rt_arr_val_type;
+extern const TypeInfo rt_arr_ref_type;
+extern const TypeInfo rt_lst_val_type;
+extern const TypeInfo rt_lst_ref_type;
+
 /* `fill` is the initial value of every element. There is no null in the
  * language, so an array cannot start with empty slots: the caller must say
  * what an unset element is. For references the fill is retained once per
@@ -245,6 +312,9 @@ typedef struct {
     uint8_t *data;    /* separate buffer, so it can grow; never NULL */
 } Bytes;
 
+/* Exported for a module constant's bytes, as rt_arr_val_type is. */
+extern const TypeInfo rt_bytes_type;
+
 Obj    *rt_bytes_new(int64_t cap);              /* empty, room for `cap` */
 Obj    *rt_bytes_fill(int64_t n, int64_t v);    /* `[v; n]` */
 int64_t rt_bytes_len(Obj *o);
@@ -277,7 +347,32 @@ Obj    *rt_str_to_bytes(Obj *s);
  * `get` on a missing key TRAPS, the same as an out-of-range index: there is
  * no null to return, so the honest options are trap or force every read
  * through a check. `has` is there for the check. */
+enum { SLOT_EMPTY = 0, SLOT_FULL = 1, SLOT_DEAD = 2 };
+
+typedef struct {
+    int64_t k;
+    int64_t v;
+    uint8_t state;
+} MapSlot;
+
+/* Public for the same reason as rt_arr_val_type: a module constant's map is
+ * a static Map whose table the compiler has already hashed. Everything else
+ * reaches a map through the functions below. */
+typedef struct {
+    Obj      hdr;
+    MapSlot *slots;
+    int64_t  cap;
+    int64_t  len;      /* live entries */
+    int64_t  used;     /* live + tombstones, for the load factor */
+    bool     key_is_str;
+    bool     key_is_ref;
+    bool     val_is_ref;
+} Map;
+
+extern const TypeInfo rt_map_type;
+
 Obj    *rt_map_new(bool key_is_str, bool key_is_ref, bool val_is_ref);
+Obj    *rt_map_clone(Obj *o);         /* shallow, like rt_seq_clone */
 void    rt_map_set(Obj *o, int64_t k, int64_t v);
 int64_t rt_map_get(Obj *o, int64_t k);
 bool    rt_map_has(Obj *o, int64_t k);

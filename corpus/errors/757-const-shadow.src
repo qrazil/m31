@@ -1,0 +1,10 @@
+// Nothing shadows anything (reference §4.1), and a constant is a name like
+// any other: a local may not take it.
+const int LIMIT = 10;
+
+int f() {
+    int LIMIT = 3;
+    return LIMIT;
+}
+
+print(f());

@@ -1,0 +1,13 @@
+// A field of a const struct is part of its value.
+type Point {
+    int x;
+    int y;
+}
+
+void run() {
+    const Point p = Point(1, 2);
+    p.x = 5;
+    print(p.x);
+}
+
+run();

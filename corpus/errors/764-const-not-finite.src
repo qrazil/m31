@@ -1,0 +1,5 @@
+// A float literal too large to represent is an error (reference §1.5), and
+// a constant follows the same rule: at run time 1.0 / 0.0 is an infinity,
+// but a constant that is one was never meant.
+const float HUGE = 1.0 / 0.0;
+print(HUGE);

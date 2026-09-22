@@ -1,0 +1,5 @@
+import lib;
+
+// Unqualified, another module's constant is not in scope at all; the
+// diagnostic says how to reach it.
+print(PRIMES[0]);

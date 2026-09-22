@@ -1,0 +1,17 @@
+import table;
+import units;
+
+// Another module's constant is written `mod.NAME`, like its functions.
+const int DAY = 24 * table.HOUR;
+
+print(units.MINUTE);
+print(table.HOUR);
+print(DAY);
+print(table.STEPS[1]);
+// A method on another module's constant: the parser reads `table.STEPS` as
+// a type here, and the compiler puts it back.
+print(table.STEPS.size());
+print(units.NAMES.contains("min"));
+print(table.BY_NAME.get("h").or(0));
+print(table.secret_times(6));
+print(table.biggest());

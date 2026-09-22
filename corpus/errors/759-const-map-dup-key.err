@@ -1,0 +1,4 @@
+corpus/errors/759-const-map-dup-key.src:3:57: this key is already in the map; a constant map may not repeat one
+  |
+3 | const Map<str, int> CODES = {"ok": 200, "missing": 404, "ok": 201};
+  |                                                         ^

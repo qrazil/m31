@@ -214,6 +214,10 @@ pub enum Inst {
     BConst { dst: Value, val: bool },
     /// `v = <string literal>`; immortal, see docs/ir-v0.md §5.4
     SConst { dst: Value, idx: u32 },
+    /// `v = <static object>` -- a module constant's collection, built by the
+    /// compiler and emitted as static data. Immortal and borrowed, exactly
+    /// like a string literal; `idx` indexes `Module::statics`.
+    KConst { dst: Value, idx: u32 },
     /// `v = <op> a, b`  -- traps rather than wrapping, except for the
     /// explicitly wrapping ops
     Arith {
@@ -308,6 +312,43 @@ pub enum Inst {
     RcDec { val: Value },
 }
 
+/// One machine-word slot of a static collection, as the compiler computed
+/// it. A float is already its bit pattern and a bool is 0 or 1 -- the same
+/// word the runtime would have stored -- so the emitter writes numbers and
+/// addresses and never has to know what they meant.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StaticSlot {
+    Word(i64),
+    /// A string literal, by its index in `Module::strings`.
+    Str(u32),
+    /// Another static collection, by its index in `Module::statics`.
+    Obj(u32),
+}
+
+/// A module constant's collection, laid out exactly as the runtime lays out
+/// the same collection built at run time (runtime/rt.h), with a count of
+/// RC_IMMORTAL. The runtime cannot tell one from the other except by that
+/// count, which is the point: every read path is the ordinary one.
+#[derive(Debug, Clone)]
+pub enum StaticObj {
+    /// An `Arr`. `refs` picks the TypeInfo, as `rt_array_new` would.
+    Array { refs: bool, slots: Vec<StaticSlot> },
+    /// A `Lst`, whose slots live in a buffer of their own -- a static array
+    /// here, never reallocated, because nothing may push to it.
+    List { refs: bool, slots: Vec<StaticSlot> },
+    /// A `Bytes`: one octet per element, not a slot.
+    Bytes(Vec<u8>),
+    /// A `Map`'s open-addressed table, already hashed: `table.len()` is the
+    /// capacity, a power of two, and `None` is an empty slot. There are no
+    /// tombstones, because nothing was ever removed.
+    Map {
+        key_is_str: bool,
+        val_is_ref: bool,
+        len: usize,
+        table: Vec<Option<(StaticSlot, StaticSlot)>>,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub enum Term {
     Jump {
@@ -363,6 +404,10 @@ pub struct Module {
     pub funcs: Vec<Func>,
     /// Interned string literals; `SConst.idx` indexes this.
     pub strings: Vec<String>,
+    /// The collections module constants hold, already built; `KConst.idx`
+    /// indexes this. An entry only ever refers to entries before it, so
+    /// emitting them in order defines everything before it is named.
+    pub statics: Vec<StaticObj>,
     /// User-defined types; `Alloc.tid` and the field instructions index this.
     pub types: Vec<TypeDef>,
     /// Interface method names, one per dispatch slot. Assigned once for the
@@ -405,6 +450,12 @@ impl fmt::Display for Module {
             writeln!(f, "str{i} = {s:?}")?;
         }
         if !self.strings.is_empty() {
+            writeln!(f)?;
+        }
+        for (i, k) in self.statics.iter().enumerate() {
+            writeln!(f, "k{i} = {k:?}")?;
+        }
+        if !self.statics.is_empty() {
             writeln!(f)?;
         }
         for func in &self.funcs {
@@ -465,6 +516,7 @@ fn show_inst(i: &Inst) -> String {
         Inst::FConst { dst, val } => format!("{dst} = fconst {val:?}"),
         Inst::BConst { dst, val } => format!("{dst} = bconst {val}"),
         Inst::SConst { dst, idx } => format!("{dst} = sconst str{idx}"),
+        Inst::KConst { dst, idx } => format!("{dst} = kconst k{idx}"),
         Inst::Arith { dst, op, lhs, rhs } => {
             let name = match op {
                 ArithOp::Add => "iadd",

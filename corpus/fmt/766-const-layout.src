@@ -1,0 +1,11 @@
+const int A=1;
+pub const   int B = A+1;
+const Array<int> ROW = [1,2,  3];
+const Array<int> TABLE = [1, 2,
+  3, 4,
+      5];
+const Map<str,int> KEYS = {
+"if": 1, "else": 2,
+    "while": 3
+};
+print(B);

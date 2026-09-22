@@ -1,0 +1,4 @@
+corpus/errors/753-const-not-constant.src:7:20: not a constant expression: a constant's value is computed by the compiler, so it may use literals, operators and other constants, but not calls, fields or indexing
+  |
+7 | const int ANSWER = answer();
+  |                    ^

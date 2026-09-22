@@ -1,0 +1,23 @@
+import units;
+
+// Exported constants, one of them computed from another module's.
+pub const int HOUR = 60 * units.MINUTE;
+pub const Array<int> STEPS = [units.SECOND, units.MINUTE, HOUR];
+pub const Map<str, int> BY_NAME = {"s": units.SECOND, "min": units.MINUTE, "h": HOUR};
+
+// Private: usable here, invisible elsewhere.
+const int SECRET = 7;
+
+pub int secret_times(int n) {
+    return n * SECRET;
+}
+
+pub int biggest() {
+    int best = 0;
+    for (int s in STEPS) {
+        if (s > best) {
+            best = s;
+        }
+    }
+    return best;
+}

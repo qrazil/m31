@@ -1,0 +1,6 @@
+import lib;
+
+// A constant is private to its module unless marked `pub`, like everything
+// else a module declares.
+print(lib.PUBLIC);
+print(lib.HIDDEN);

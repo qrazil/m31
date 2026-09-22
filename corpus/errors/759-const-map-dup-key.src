@@ -1,0 +1,4 @@
+// A key written twice in a constant map is a mistake nothing at run time
+// would ever show, so it is refused.
+const Map<str, int> CODES = {"ok": 200, "missing": 404, "ok": 201};
+print(CODES.size());

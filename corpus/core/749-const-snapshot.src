@@ -1,0 +1,83 @@
+// A `const` binding takes a frozen snapshot of its value
+// (docs/const-decision.md). A value nothing else holds is frozen in place;
+// a shared one is deep-copied and the copy frozen, so the original stays
+// mutable and later changes to it do not reach the constant. Nothing is
+// refused -- `const T a = b;` always compiles.
+
+type Point {
+    int x;
+    int y;
+}
+
+type Box {
+    List<int> items;
+}
+
+// Two fields naming ONE Box: a diamond. The snapshot must keep it one Box,
+// not two -- a copy that duplicated it would still read the same, so what
+// checks it here is the leak check: a duplicated or double-released Box
+// would leave __rc_live off zero or trip the decrement-below-zero assert.
+type Pair {
+    Box left;
+    Box right;
+}
+
+void run() {
+    // Independence: b stays mutable, a does not see its changes.
+    List<int> b = [1, 2];
+    const List<int> a = b;
+    b.push(3);
+    b[0] = 100;
+    print(a.size());
+    print(a[0]);
+    print(b.size());
+
+    // Deep: the Points are copied too, so changing one through the original
+    // list leaves the snapshot alone.
+    List<Point> pts = [Point(1, 2), Point(3, 4)];
+    const List<Point> frozen = pts;
+    pts[0].x = 50;
+    Point q = pts[1];
+    q.y = 40;
+    print(frozen[0].x);
+    print(frozen[1].y);
+    print(pts[0].x);
+
+    // A fresh literal around a Point someone else still holds: the list is
+    // new but the Point is shared, so the whole value is copied.
+    Point shared = Point(9, 9);
+    const List<Point> around = [shared];
+    shared.x = 1;
+    print(around[0].x);
+
+    // In place: a literal nothing else holds is frozen without a copy. Not
+    // observable from the language except by what it does not cost; the
+    // leak check confirms nothing was copied and left behind.
+    const List<int> fresh = [7, 8, 9];
+    print(fresh[2]);
+
+    // The diamond.
+    Box shared_box = Box([5]);
+    Pair pair = Pair(shared_box, shared_box);
+    const Pair snap = pair;
+    shared_box.items.push(6);
+    print(snap.left.items.size());
+    print(snap.right.items.size());
+    print(pair.right.items.size());
+
+    // A map of lists.
+    List<int> row = [1];
+    Map<str, List<int>> m = {"r": row};
+    const Map<str, List<int>> fm = m;
+    row.push(2);
+    m.set("s", [3]);
+    print(fm.size());
+    print(fm.get("r").or([]).size());
+
+    // Snapshotting a const, or a module constant, copies nothing: it is
+    // frozen already.
+    const List<int> again = a;
+    print(again[1]);
+}
+
+run();

@@ -1,0 +1,5 @@
+// A constant cannot be changed through its own name. `clone` is the way to
+// get a copy that can.
+const Array<int> TABLE = [1, 2, 3];
+TABLE[0] = 5;
+print(TABLE[0]);

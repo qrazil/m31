@@ -1,0 +1,9 @@
+// A parameter would win over the constant in every lookup inside the body,
+// hiding it silently, so it may not take the constant's name.
+const int SIZE = 4;
+
+int area(int SIZE) {
+    return SIZE * SIZE;
+}
+
+print(area(3));

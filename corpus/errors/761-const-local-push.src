@@ -1,0 +1,10 @@
+// `const` on a local means what it means everywhere: the value never
+// changes. Reassignment was always refused; changing the list is refused
+// now too.
+void run() {
+    const List<int> a = [1, 2];
+    a.push(3);
+    print(a.size());
+}
+
+run();

@@ -1,0 +1,54 @@
+// Constant maps. The compiler lays the hash table out itself, with the
+// runtime's hash and probe (runtime/rt.c), so every key has to be found
+// where the runtime looks for it: this program looks up every key of every
+// map, and some that are absent.
+
+const Map<str, int> KEYWORDS = {"if": 1, "else": 2, "while": 3, "for": 4, "return": 5};
+const Map<int, str> BACK = {1: "if", 2: "else", 3: "while", 4: "for", 5: "return"};
+const Map<str, int> NONE = {};
+// Enough keys that the table is far past its first size.
+const Map<int, int> CUBES = {
+    0: 0, 1: 1, 2: 8, 3: 27, 4: 64, 5: 125, 6: 216, 7: 343,
+    8: 512, 9: 729, 10: 1000, 11: 1331, 12: 1728, 13: 2197, 14: 2744,
+    15: 3375, 16: 4096, 17: 4913, 18: 5832, 19: 6859, 20: 8000,
+    -1: -1, -2: -8, -3: -27, 1000000: 1000000000000000000
+};
+const Map<str, Array<int>> ROWS = {"a": [1, 2], "b": [3]};
+
+int found = 0;
+for (str k in KEYWORDS.keys()) {
+    str back = BACK.get(KEYWORDS.get(k).or(0)).or("?");
+    if (back == k) {
+        found = found + 1;
+    }
+}
+print(found);
+print(KEYWORDS.size());
+print(KEYWORDS.contains("until"));
+print(KEYWORDS.get("until").or(-1));
+print(BACK.contains(6));
+print(NONE.size());
+print(NONE.contains("if"));
+
+int ok = 0;
+int k = -3;
+while (k <= 20) {
+    if (CUBES.get(k).or(-99) == k * k * k) {
+        ok = ok + 1;
+    }
+    k = k + 1;
+}
+print(ok);
+print(CUBES.get(1000000).or(0));
+print(CUBES.contains(21));
+print(CUBES.size());
+print(ROWS.get("a").or([]).size());
+
+// clone: a map that can be changed, leaving the constant alone.
+Map<str, int> mine = clone(KEYWORDS);
+mine.set("until", 6);
+mine.remove("if");
+print(mine.size());
+print(mine.get("until").or(0));
+print(KEYWORDS.size());
+print(KEYWORDS.contains("if"));

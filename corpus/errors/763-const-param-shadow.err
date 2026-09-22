@@ -1,0 +1,4 @@
+corpus/errors/763-const-param-shadow.src:5:10: `SIZE` is already a constant; shadowing is not allowed, rename one
+  |
+5 | int area(int SIZE) {
+  |          ^
