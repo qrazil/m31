@@ -1,0 +1,20 @@
+// A `str` is a reference like any other: a string field passed to a callee
+// that overwrites the field is held by the caller. A literal is immortal and
+// needs nothing, which is why the string here is built at run time.
+
+type H { str s; }
+
+void f(str s, H h) {
+    h.s = "other";
+    str junk = concat("xxxx", "xxx");
+    print(s);
+}
+
+H h = H(concat("dyn", "amic"));
+f(h.s, h);
+print(h.s);
+
+// A primitive runs no user code, so a field passed to one alone is not held
+// -- and is not at risk.
+print(h.s.size());
+print(concat(h.s, "!"));

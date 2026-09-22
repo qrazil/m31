@@ -1,0 +1,43 @@
+// The remaining ways to call. A static method's arguments are held like any
+// call's. `or` and `?` read a payload out of an Option held in a field, and
+// each already hands back a reference of its own, so passing what they give
+// on to a call that empties the field is safe without a hold -- locked in
+// here so it stays that way.
+
+type P { int x; }
+type H { P p; Option<P> o; }
+
+static int P.show(P p, H h) {
+    h.p = P(6);
+    P junk = P(99);
+    return p.x;
+}
+
+H h = H(P(7), Option<P>.Some(P(3)));
+print(P.show(h.p, h));
+
+// `or` on a field: the Option is held while the fallback runs. What comes
+// out is already the caller's own reference -- `or` retains it -- so it
+// needs no hold of its own.
+int take(P p, H h) {
+    h.o = Option<P>.None;
+    P junk = P(98);
+    return p.x;
+}
+print(take(h.o.or(P(0)), h));
+print(h.o.is_some());
+
+// `e?` on a field.
+Option<int> first(H h) {
+    h.o = Option<P>.Some(P(4));
+    return Option<int>.Some(read(h.o?, h));
+}
+int read(P p, H h) {
+    h.o = Option<P>.None;
+    P junk = P(97);
+    return p.x;
+}
+match (first(h)) {
+    case Some(int n): { print(n); }
+    case None: { print("none"); }
+}

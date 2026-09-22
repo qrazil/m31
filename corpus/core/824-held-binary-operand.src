@@ -1,0 +1,40 @@
+// The left operand of a binary operator is read before the right one runs.
+// When the right one can run code, a left operand read out of a place is
+// held until the operator is done with it.
+
+type H { str s; }
+
+str f(H h) {
+    h.s = "z";
+    str junk = concat("xx", "xx");
+    return "tail";
+}
+
+H h = H(concat("he", "ad"));
+str r = h.s + f(h);
+print(r);
+print(h.s);
+
+// Comparison, the same way round.
+H e = H(concat("sa", "me"));
+str same(H h) {
+    h.s = "gone";
+    str junk = concat("ju", "nk");
+    return "same";
+}
+print(e.s == same(e));
+
+// An operator method is user code, with the left operand as its receiver
+// and the right as its argument: both are held. `add` here reaches the
+// holder through a field of its receiver and replaces the right operand.
+type N { int n; List<Pair> back = []; }
+type Pair { N v; }
+N N.add(N o) {
+    back[0].v = N(100);
+    N junk = N(55);
+    return N(n + o.n);
+}
+Pair p = Pair(N(5));
+N w = N(1, back: [p]);
+print((w + p.v).n);
+print(p.v.n);

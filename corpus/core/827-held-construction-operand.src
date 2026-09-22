@@ -1,0 +1,42 @@
+// A construction and a collection literal lower every operand before they
+// store any. An operand read out of a place, followed by one that replaces
+// that place, is held until it is stored.
+
+type P { int x; }
+type H { P p; str s; }
+type Pair { P a; P b; }
+
+P f(H h) {
+    h.p = P(6);
+    P junk = P(99);
+    return P(8);
+}
+
+H h = H(P(7), concat("ke", "y"));
+Pair pr = Pair(h.p, f(h));
+print(pr.a.x);
+print(pr.b.x);
+
+h.p = P(7);
+List<P> xs = [h.p, f(h)];
+print(xs[0].x);
+print(xs[1].x);
+
+h.p = P(7);
+int three(H h) {
+    h.p = P(0);
+    P junk = P(98);
+    return 3;
+}
+List<P> ys = [h.p; three(h)];
+print(ys.size());
+print(ys[2].x);
+
+int g(H h) {
+    h.s = "gone";
+    str junk = concat("ju", "nk");
+    return 1;
+}
+Map<str, int> m = {h.s: g(h)};
+print(m.contains("key"));
+print(h.s);

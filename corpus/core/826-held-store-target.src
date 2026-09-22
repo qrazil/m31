@@ -1,0 +1,41 @@
+// A store evaluates the object it writes into before the value. When the
+// value can run code that replaces that object, the object is held: the
+// write lands in the object that was read first -- alive -- instead of in
+// freed memory.
+
+type P { int x; }
+type H { P p; List<P> ps; }
+
+int f(H h) {
+    h.p = P(6);
+    P junk = P(99);
+    return 5;
+}
+
+H h = H(P(7), [P(1)]);
+P old = h.p;
+h.p.x = f(h);
+print(old.x);
+print(h.p.x);
+
+// The same with nothing else holding the old object: only the hold keeps
+// it alive until the store is done.
+h.p.x = f(h);
+print(h.p.x);
+
+// An element store, where the value replaces the list.
+P g(H h) {
+    h.ps = [P(2)];
+    List<P> junk = [P(98)];
+    return P(3);
+}
+h.ps[0] = g(h);
+print(h.ps[0].x);
+
+// Inside a method, a bare field name is a read of the receiver's field --
+// a place, like `h.p`.
+void H.set_x() {
+    p.x = f(this);
+}
+h.set_x();
+print(h.p.x);
