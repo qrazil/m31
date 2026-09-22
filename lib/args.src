@@ -505,7 +505,7 @@ str usage_line(Parser k) {
 // One column width for every row in the document, so the three sections
 // line up with each other and not just with themselves.
 str help_text(Parser k) {
-    int width = help_column().size();
+    int width = columns(help_column());
     for (str word in k.words) {
         width = wider(width, cmd_column(word, k.cmd_shorts));
     }
@@ -552,10 +552,21 @@ str help_text(Parser k) {
 }
 
 int wider(int width, str column) {
-    if (column.size() > width) {
-        return column.size();
+    if (columns(column) > width) {
+        return columns(column);
     }
     return width;
+}
+
+// How wide `s` is in the help table: its code points, not its bytes. By
+// bytes, `--größe` counted two columns more than it takes and every row
+// beside it was padded short. One code point is still not always one column
+// on a terminal -- a CJK character or most emoji take two, a combining
+// accent none -- and getting that right needs the Unicode width tables,
+// which this module does not carry. Such a name misaligns its rows by that
+// difference; everything else lines up.
+int columns(str s) {
+    return s.chars().size();
 }
 
 // The left column of the always-there help row, so nothing may disagree
@@ -607,7 +618,7 @@ str row(str left, int width, str description) {
     if (description == "") {
         return "  " + left;
     }
-    return "  " + left + " ".repeat(width - left.size()) + "  " + description;
+    return "  " + left + " ".repeat(width - columns(left)) + "  " + description;
 }
 
 // A description with its generated tail, `(default 80)`. The default is
