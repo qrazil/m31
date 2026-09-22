@@ -45,12 +45,16 @@ error: base64 padding at position 2 is followed by data at position 4
 error: base64 text length 1 is not a multiple of 4
 error: invalid base64 character '!' at position 2
 error: base64 text length 3 is not a multiple of 4
-error: base64 text at position 0 decodes to byte 0x01, which a str cannot hold until the language has bytes
-error: base64 text at position 4 decodes to byte 0xff, which a str cannot hold until the language has bytes
+ok 01
+ok 414243ff
+ok fbff
 length was 3
 140
 VGhlIHF1aWNrIGJyb3duIGZveCDDgMOBw4LDgyDDv8O+IOaXpeacrOiqniDwn5iAIH4hQCMkJV4mKigpXyt7fXw6PD4/
 VGhlIHF1aWNrIGJyb3duIGZveCDDgMOBw4LDgyDDv8O-IOaXpeacrOiqniDwn5iAIH4hQCMkJV4mKigpXyt7fXw6PD4_
-208
-48
+256
+AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+P0BBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5fYGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn+AgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq+wsbKztLW2t7i5uru8vb6/wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t/g4eLj5OXm5+jp6uvs7e7v8PHy8/T19vf4+fr7/P3+/w==
+true
+AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-P0BBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWltcXV5fYGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn-AgYKDhIWGh4iJiouMjY6PkJGSk5SVlpeYmZqbnJ2en6ChoqOkpaanqKmqq6ytrq-wsbKztLW2t7i5uru8vb6_wMHCw8TFxsfIycrLzM3Oz9DR0tPU1dbX2Nna29zd3t_g4eLj5OXm5-jp6uvs7e7v8PHy8_T19vf4-fr7_P3-_w==
+true
 3 239 187 191
