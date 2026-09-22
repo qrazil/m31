@@ -1,0 +1,6 @@
+// A destructor acts on the dying object; a static method has none.
+type Res { str name; }
+
+static void Res.drop() {
+    print("no object");
+}

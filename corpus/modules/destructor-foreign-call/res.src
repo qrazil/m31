@@ -1,0 +1,7 @@
+pub type Res {
+    str name;
+}
+
+void Res.drop() {
+    print("release " + name);
+}

@@ -1,0 +1,12 @@
+// The bare spelling of a sibling call does not reach a destructor either.
+type Res {
+    str name;
+}
+
+void Res.drop() {
+    print("dropped " + name);
+}
+
+void Res.reset() {
+    drop();
+}

@@ -68,7 +68,10 @@ calls.
 **User types are reference types** — refcounted, heap allocated, aliased by
 assignment, constructed by the argument rule below. A type holding no references gets no
 drop function at all; one that does gets a generated one, and `rc_dec` checks
-for `NULL` so the common case is a branch rather than a call.
+for `NULL` so the common case is a branch rather than a call. **A type may
+declare a destructor**, `void T.drop()`, which runs at the exact moment the
+count reaches zero, before the fields are released — so an `io.File` closes
+itself on every path out of a scope, `?` included.
 
 **Methods are declared by qualified name**, outside the type body, so they
 can be added to any type and a type declaration stays a list of fields.

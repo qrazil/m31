@@ -1,0 +1,22 @@
+// A trap inside a destructor is a trap like any other: the program stops
+// there, with the destructor's message. There is no unwinding to run other
+// destructors on the way out -- a trap is a bug, and it aborts.
+
+type Guard {
+    int n;
+}
+
+void Guard.drop() {
+    if (n < 0) {
+        trap("guard dropped with a negative count");
+    }
+    print("guard ok");
+}
+
+if (true) {
+    Guard g = Guard(1);
+}
+if (true) {
+    Guard bad = Guard(-1);
+}
+print("not reached");

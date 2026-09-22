@@ -1,0 +1,4 @@
+corpus/errors/772-destructor-static.src:4:1: `Res.drop` is a destructor, which acts on the dying object, so it cannot be static
+  |
+4 | static void Res.drop() {
+  | ^

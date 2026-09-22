@@ -1,0 +1,7 @@
+// A destructor takes no arguments: it runs when the object dies, and
+// nobody calls it to pass any.
+type Res { str name; }
+
+void Res.drop(int code) {
+    print(code);
+}

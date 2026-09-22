@@ -1,0 +1,25 @@
+// A destructor that stores `this` somewhere reachable brings a dead object
+// back: the runtime is about to release its fields and free it, and the
+// registry would be left holding freed memory. The count on the way out of
+// the destructor must be exactly what it was on the way in; here it is one
+// more, so the program stops rather than continue with a dangling reference.
+
+type Registry {
+    List<Res> kept;
+}
+
+type Res {
+    str name;
+    Registry reg;
+}
+
+void Res.drop() {
+    print("dropping " + name);
+    reg.kept.push(this);
+}
+
+Registry r = Registry([]);
+if (true) {
+    Res a = Res("a", r);
+}
+print("not reached");

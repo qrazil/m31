@@ -872,6 +872,55 @@ declared as a name.
 
 A method may be declared anywhere in the file, including before its type.
 
+### 4.4 Destructors
+
+A method named **`drop`** is the type's destructor. It runs when the
+object's count reaches zero (§7.1) — at the end of the scope that held the
+last reference, on a `return`, `?` or `break` that leaves it, when a variable
+or element holding it is overwritten or removed — and never at any other
+time:
+
+```c
+type Conn { int fd; bool open = true; }
+
+Result<bool, Error> Conn.close() { ... }   // the early, checked way
+
+void Conn.drop() {
+    if (open) {
+        ... release fd, ignoring failure ...
+    }
+}
+```
+
+  - It is declared `void T.drop()`: **no parameters, `void`**, not `static`,
+    not `pub`, and with no type parameters of its own. Anything else named
+    `drop` on a type is an error. A generic type may have one; it is
+    instantiated with the type.
+  - Only a **struct** may have one — not an enum, a distinct type or an
+    interface — and an interface may not declare a method named `drop`.
+  - **It cannot be called.** `x.drop()`, `this.drop()`, a bare `drop()`
+    inside a method and `T.drop()` are all errors. Work a program may want
+    to do early goes in an ordinary method, which the destructor calls too.
+  - **It cannot fail.** It returns nothing, so it has no error to report; a
+    failure the program must see is a `Result` from that ordinary method.
+  - **It runs first, on a whole object**: every field is still alive. Then
+    the fields are released, so a field's destructor runs after its
+    owner's. Locals are released in reverse order of declaration.
+  - `this` is borrowed, as in any method (§4.3). Storing it anywhere that
+    outlives the call **resurrects** a dead object, and traps (§7.4).
+  - It is **not promoted** by embedding (§3.5): the embedded value is a
+    field, and its own destructor runs when it is released.
+  - It runs on the thread that releases the last reference — for a value
+    moved to another thread (§8.3), that thread.
+
+Not guaranteed: members of a cycle are never destroyed, so their destructors
+never run (§7.1); nor do those of objects still alive when the program ends
+— held by a running thread, or abandoned by `os.exit` or a trap. The top
+level's own locals are released when it ends, so theirs do run.
+
+`io.File` has one: a `File` let go without `close()` is closed then, silently
+(docs/destructors-decision.md).
+
 ---
 
 ## 5. Statements
@@ -1287,6 +1336,10 @@ Every reference-typed object carries a count. There is no garbage collector
 and no cycle detector: **a cycle leaks**. That is the trade — predictable,
 immediate destruction at the cost of a shape the program has to avoid.
 
+When a count reaches zero the type's destructor runs, if it declares one
+(§4.4), and then the object's fields are released, each of which may reach
+zero in turn. A cycle never reaches zero, so its destructors never run.
+
 Refcount operations are non-atomic (§8.3).
 
 ### 7.2 Ownership protocol
@@ -1325,7 +1378,11 @@ Trapping conditions:
   - `recv` on a channel that is closed and drained
   - a length or capacity too large to allocate
   - a uniqueness violation at a thread boundary (§8.3)
+  - a destructor that leaves `this` referenced from anywhere when it
+    returns — a resurrected object (§4.4)
   - `trap(msg)`, with the program's own message (§6.6)
+
+A trap inside a destructor is a trap like any other.
 
 ---
 
@@ -1408,6 +1465,8 @@ Stated so the absence is a decision and not an oversight:
 
   - exceptions and unwinding; a fault traps, and a recoverable failure is a
     `Result` (§3.7a)
+  - `defer`, `finally`, finalizers — a destructor (§4.4) runs at the exact
+    moment an object dies, on every path out of a scope
   - multiple returns — a `Result` or an enum carries what a second return
     value would have
   - closures, function values, lambdas

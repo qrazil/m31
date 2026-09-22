@@ -1,0 +1,9 @@
+// Destructors belong to structs, whose fields hold what they release.
+enum Shape {
+    Circle(int);
+    Square(int);
+}
+
+void Shape.drop() {
+    print("gone");
+}

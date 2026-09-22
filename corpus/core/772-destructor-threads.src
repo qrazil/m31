@@ -1,0 +1,35 @@
+// An object moved to another thread dies there, and its destructor runs
+// there: a move hands over the only reference, so whichever thread lets go
+// of it last is the thread that holds it. The `done` channel orders the
+// output -- the worker reports only after its object is gone.
+
+type Res {
+    str name;
+}
+
+void Res.drop() {
+    print("release " + name);
+}
+
+void worker(Chan<Res> inbox, Chan<int> done) {
+    if (true) {
+        Res r = recv(inbox);
+        print("worker has " + r.name);
+    }
+    send(done, 1);
+}
+
+Chan<Res> inbox = Chan<Res>(1);
+Chan<int> done = Chan<int>(1);
+spawn worker(inbox, done);
+send(inbox, Res("parcel"));
+print(recv(done));
+
+// A spawned function's arguments are released on its own thread, when it
+// returns -- after its last line, so after anything it prints. Nothing on
+// the main thread prints from here on, so the order below is fixed.
+void consume(Res r) {
+    print("consuming " + r.name);
+}
+
+spawn consume(Res("detached"));

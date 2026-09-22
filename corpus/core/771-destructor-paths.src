@@ -1,0 +1,86 @@
+// A destructor cannot be forgotten at a use site: every way out of a scope
+// releases what the scope owns, so the destructor runs on an early return,
+// on `?` propagating a failure, on `break`, when a variable is reassigned,
+// and when a collection lets go of an element.
+
+type Res {
+    str name;
+}
+
+void Res.drop() {
+    print("release " + name);
+}
+
+// An early return still releases the local.
+int early(bool leave) {
+    Res r = Res("early");
+    if (leave) {
+        print("leaving early");
+        return 1;
+    }
+    print("running to the end");
+    return 2;
+}
+
+print(early(true));
+print(early(false));
+
+// `?` returns the failure -- and releases what was open on the way out.
+Result<int, str> check(int n) {
+    if (n < 0) {
+        return Result<int, str>.Err("negative");
+    }
+    return Result<int, str>.Ok(n);
+}
+
+Result<int, str> use(int n) {
+    Res r = Res("try " + n.to_str());
+    int v = check(n)?;
+    print("checked " + v.to_str());
+    return Result<int, str>.Ok(v * 2);
+}
+
+match (use(5)) {
+    case Ok(int v): {
+        print(v);
+    }
+    case Err(str e): {
+        print("err " + e);
+    }
+}
+match (use(-1)) {
+    case Ok(int v): {
+        print(v);
+    }
+    case Err(str e): {
+        print("err " + e);
+    }
+}
+
+// `break` leaves the loop body's scope, and releases it.
+int i = 0;
+while (true) {
+    Res step = Res("step " + i.to_str());
+    if (i == 1) {
+        break;
+    }
+    i = i + 1;
+}
+print("after loop");
+
+// Reassignment releases the old object at the assignment.
+Res slot = Res("first");
+slot = Res("second");
+print("reassigned");
+
+// A collection holds a reference per element.
+List<Res> xs = [Res("x0"), Res("x1"), Res("x2")];
+print("list built");
+Res gone = xs.remove_at(1);
+print("removed, still held");
+gone = Res("replacement");
+print("popping");
+xs.pop();
+print("clearing");
+xs.clear();
+print("end of program");

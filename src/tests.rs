@@ -1268,3 +1268,66 @@ fn the_formatter_prints_this() {
     let out = crate::reformat(src, "t").expect("formats");
     assert!(out.contains("return this;"), "{out}");
 }
+
+// ---- destructors ----------------------------------------------------
+
+#[test]
+fn a_destructor_alone_earns_a_drop_function_but_no_walk() {
+    // A type with only an int field needs no release and no walk -- but a
+    // destructor still has to be called from somewhere, so it gets a drop
+    // function. The walk function only reports references, and there are
+    // none, so it stays NULL.
+    let c = compile_str(
+        "type G { int n; }\nvoid G.drop() { print(n); }\nG g = G(1);",
+        "c",
+    )
+    .expect("compiles");
+    // Which T<i> is G: the drop function that calls G's destructor.
+    let i = c
+        .split("static void drop_T")
+        .find(|b| b.contains("G___drop(o)"))
+        .and_then(|b| b.split('(').next())
+        .unwrap_or_else(|| panic!("no drop function calls G.drop:\n{c}"));
+    let ti = c
+        .lines()
+        .find(|l| l.contains(&format!("TypeInfo ti_T{i} ")))
+        .unwrap_or_else(|| panic!("no TypeInfo for T{i}:\n{c}"));
+    assert!(
+        ti.ends_with(&format!("{{ drop_T{i}, NULL, NULL }};")),
+        "drop set, walk NULL: {ti}"
+    );
+    assert!(
+        c.contains("o->rc = 1;"),
+        "destructor must run at count 1:\n{c}"
+    );
+}
+
+#[test]
+fn a_destructor_runs_before_the_fields_are_released() {
+    let c = compile_str(
+        "type N { str s; }\nvoid N.drop() { print(s); }\nN x = N(\"a\" + \"b\");",
+        "c",
+    )
+    .expect("compiles");
+    let body = c
+        .split("static void drop_T")
+        .find(|b| b.contains("N___drop(o)"))
+        .unwrap_or_else(|| panic!("no drop function calls N.drop:\n{c}"));
+    let call = body.find("N___drop(o)").unwrap();
+    let release = body.find("rc_dec(p->f_s)").expect("the field is released");
+    assert!(call < release, "destructor must come first:\n{body}");
+}
+
+#[test]
+fn a_destructor_is_not_promoted_by_embedding() {
+    let out = ir("type A { int n; }\nvoid A.drop() { print(n); }\n\
+                  type B { A; }\nB b = B(A(1));");
+    assert!(out.contains("func A.drop"), "{out}");
+    assert!(!out.contains("func B.drop"), "{out}");
+}
+
+#[test]
+fn a_destructor_on_an_unused_generic_type_is_still_checked() {
+    let e = err("type Box<T> { T v; }\nint Box<T>.drop() { return 1; }\nprint(1);");
+    assert!(e.contains("must return `void`"), "{e}");
+}

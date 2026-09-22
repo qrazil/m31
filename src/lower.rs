@@ -182,6 +182,112 @@ pub struct Lowerer {
 /// error about a function that file never asked for.
 const BUILTIN_FNS: &[&str] = &["print", "concat", "clone", "send", "recv", "close", "trap"];
 
+/// The reserved method name of a destructor: `void File.drop() { .. }` runs
+/// when a `File`'s count reaches zero, before its fields are released
+/// (docs/destructors-decision.md). Rust's name, because it is the operation
+/// the refcount already performs; Swift's `deinit` would be a new keyword for
+/// the same thing.
+pub const DESTRUCTOR: &str = "drop";
+
+/// The one shape a destructor may have, checked on the program as written --
+/// BEFORE monomorphisation, because a method of a generic type that is never
+/// instantiated, or a method with type parameters of its own that is never
+/// called, never reaches the lowering at all, and a malformed destructor
+/// should not be accepted just because nothing uses its type yet.
+///
+/// Each refusal is a rule with a reason, not a missing feature:
+///   - no parameters and a `void` result: nobody calls it, so there is no one
+///     to pass an argument to or to hand a value or an error back to. Rust's
+///     `Drop::drop` cannot fail either; a failure the program must see is a
+///     `close()` that returns a `Result` and that the destructor also calls.
+///   - not `static`: it exists to act on the dying object.
+///   - no type parameters of its own: there is no call site to infer them
+///     from. (A destructor of a generic TYPE is fine: it is instantiated with
+///     each instantiation of the type, like every other method of it.)
+///   - not `pub`: it is never called by name, from anywhere, so exporting it
+///     would mean nothing -- and one spelling beats two that do the same.
+///   - only on a struct: a distinct type is erased and has no object of its
+///     own to die; an interface has no objects at all; an enum is refused for
+///     now because nothing needs it, and allowing it later breaks nothing
+///     where taking it away would.
+///   - an interface may not require one: that would be a way to call it.
+pub fn check_destructor_decls(p: &Program) -> Result<(), Diag> {
+    for t in p.types.iter().filter(|t| t.is_interface) {
+        if let Some(m) = t.methods.iter().find(|m| m.name == DESTRUCTOR) {
+            return Err(Diag::new(
+                m.span,
+                format!(
+                    "an interface cannot require `{DESTRUCTOR}`: it is the name of a \
+                     destructor, which is never called, so it cannot be dispatched to"
+                ),
+            )
+            .in_module(&t.module));
+        }
+    }
+    for f in &p.funcs {
+        let Some(recv) = &f.recv else { continue };
+        if f.name != DESTRUCTOR {
+            continue;
+        }
+        let tname = bare(recv);
+        let refuse = |msg: String| Err(Diag::new(f.span, msg).in_module(&f.module));
+        if f.is_static {
+            return refuse(format!(
+                "`{tname}.{DESTRUCTOR}` is a destructor, which acts on the dying object, \
+                 so it cannot be static"
+            ));
+        }
+        if !f.tparams.is_empty() {
+            return refuse(format!(
+                "`{tname}.{DESTRUCTOR}` is a destructor and cannot have type parameters: \
+                 it is never called, so there is nothing to infer them from"
+            ));
+        }
+        if !f.params.is_empty() {
+            return refuse(format!(
+                "`{tname}.{DESTRUCTOR}` is a destructor and takes no arguments: it runs \
+                 when the object dies, and nobody calls it to pass any"
+            ));
+        }
+        if f.ret != Ty::Void {
+            return refuse(format!(
+                "`{tname}.{DESTRUCTOR}` is a destructor and must return `void`: nobody \
+                 receives its result, so it cannot report an error either -- give the \
+                 type an ordinary method that returns a Result, and call that from \
+                 `{DESTRUCTOR}` too"
+            ));
+        }
+        if f.is_pub {
+            return refuse(format!(
+                "`{tname}.{DESTRUCTOR}` is a destructor, which is never called by name, \
+                 so it cannot be `pub`; remove the `pub`"
+            ));
+        }
+        let decl = p
+            .types
+            .iter()
+            .chain(p.prelude.iter())
+            .find(|t| t.name == *recv);
+        if let Some(t) = decl {
+            let what = if t.distinct_base.is_some() {
+                Some("a distinct type, which is erased and has no object of its own to destroy")
+            } else if t.is_interface {
+                Some("an interface, which has no objects of its own")
+            } else if t.is_enum {
+                Some(
+                    "an enum; a destructor belongs to a struct, whose fields hold what it releases",
+                )
+            } else {
+                None
+            };
+            if let Some(what) = what {
+                return refuse(format!("`{tname}` cannot have a destructor: it is {what}"));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The representation of a surface type, WITHOUT resolving distinct types.
 /// Use `Lowerer::irty` instead wherever a distinct type can appear.
 fn ir_ty(t: Ty) -> IrTy {
@@ -1814,6 +1920,13 @@ impl Lowerer {
                     .filter(|(k, _)| !self.statics.contains(k.as_str()))
                     .filter_map(|(k, sig)| {
                         let m = k.strip_prefix(&prefix)?;
+                        // Nor is a destructor. The embedded value is a field,
+                        // so it is released -- and its own destructor runs --
+                        // when the outer object dies; a forwarder would run
+                        // it a second time, on an object still alive.
+                        if m == DESTRUCTOR {
+                            return None;
+                        }
                         Some((
                             m.to_string(),
                             Sig {
@@ -2070,6 +2183,8 @@ impl Lowerer {
                     || t.name.starts_with("Map$"),
                 is_distinct: t.distinct_base.is_some(),
                 vtable: Vec::new(),
+                // Filled in once every method is known, beside the vtable.
+                destructor: None,
             });
             self.distinct_base.push(t.distinct_base);
             self.iface_methods.push(t.methods.clone());
@@ -2291,6 +2406,14 @@ impl Lowerer {
                 })
                 .collect();
             self.typedefs[i].vtable = vt;
+            // `check_destructor_decls` has already refused every other shape
+            // and every other kind of type, and forwarders never carry the
+            // name, so a method of this name here is the type's own
+            // destructor.
+            let dkey = format!("{tname}.{DESTRUCTOR}");
+            if self.sigs.contains_key(&dkey) {
+                self.typedefs[i].destructor = Some(dkey);
+            }
         }
 
         Ok(ir::Module {
@@ -2475,6 +2598,29 @@ impl Lowerer {
         let (tid, _) = self.recv?;
         let key = format!("{}.{name}", self.typedefs[tid as usize].name);
         (self.sigs.contains_key(&key) && !self.statics.contains(&key)).then_some(key)
+    }
+
+    /// A destructor is run by the runtime, exactly once, when the count
+    /// reaches zero -- never by the program. Calling it by hand would run it
+    /// on a live object and then again when that object dies, so every
+    /// spelling of a call is refused: `f.drop()`, `this.drop()`, a bare
+    /// `drop()` inside a method, and `File.drop()`. The work a program wants
+    /// to do early belongs in an ordinary method (`close()`) that the
+    /// destructor calls too.
+    fn refuse_destructor_call(&self, tid: u32, m: &str, span: Span) -> Result<(), Diag> {
+        let tname = &self.typedefs[tid as usize].name;
+        if m == DESTRUCTOR && self.sigs.contains_key(&format!("{tname}.{m}")) {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`{}.{DESTRUCTOR}` is a destructor and cannot be called: it runs by \
+                     itself when the last reference goes. Put what you want to do early \
+                     in an ordinary method, and call that from `{DESTRUCTOR}` too",
+                    self.show_name(tname)
+                ),
+            ));
+        }
+        Ok(())
     }
 
     fn binding(&self, name: &str) -> Option<Binding> {
@@ -3992,6 +4138,7 @@ impl Lowerer {
         // there is one, because a type cannot have a variant and a static
         // method of the same name -- that is refused where methods are
         // registered.
+        self.refuse_destructor_call(tid, variant, span)?;
         let key = format!("{}.{variant}", self.typedefs[tid as usize].name);
         let is_variant = self.typedefs[tid as usize]
             .variants
@@ -4667,6 +4814,8 @@ impl Lowerer {
             Some((generic, _)) => crate::ast::bare(generic).to_string(),
             None => name.to_string(),
         };
+        let (rtid, _) = self.recv.expect("checked above");
+        self.refuse_destructor_call(rtid, &written, span)?;
         if self.sibling_method(&written).is_none() {
             // A static sibling has no receiver to be called on, so it is not
             // reachable bare -- say how it is reached instead of reporting an
@@ -4721,6 +4870,9 @@ impl Lowerer {
         // collection already follows below. Without this the call went
         // to the base's built-in table and a declared method on
         // `distinct int Price` could never be called.
+        if let Some(t) = self.tdef_of(o.ty) {
+            self.refuse_destructor_call(t, m, span)?;
+        }
         let declared = self.tdef_of(o.ty).is_some_and(|t| {
             self.sigs
                 .contains_key(&format!("{}.{m}", self.typedefs[t as usize].name))
@@ -5623,6 +5775,8 @@ impl Lowerer {
                 }
                 if let Expr::This(ts) = &**obj {
                     self.this_val(*ts)?;
+                    let (rtid, _) = self.recv.expect("this_val checked the receiver");
+                    self.refuse_destructor_call(rtid, m, *span)?;
                     if self.sibling_method(m).is_some() {
                         return Err(Diag::new(
                             *span,

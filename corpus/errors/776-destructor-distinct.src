@@ -1,0 +1,7 @@
+// A distinct type is erased to its base: there is no object of its own to
+// die, so nothing could run its destructor.
+distinct str Email;
+
+void Email.drop() {
+    print("gone");
+}

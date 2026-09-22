@@ -1,0 +1,4 @@
+corpus/errors/774-destructor-generic-method.src:6:1: `Res.drop` is a destructor and cannot have type parameters: it is never called, so there is nothing to infer them from
+  |
+6 | void Res.drop<T>() {
+  | ^

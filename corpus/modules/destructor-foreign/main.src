@@ -1,0 +1,9 @@
+import res;
+
+// Another module's object dies in this one, and its destructor runs here.
+if (true) {
+    res.Res a = res.make("made");
+    res.Res b = res.Res("built");
+    print("both alive");
+}
+print("both gone");

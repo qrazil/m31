@@ -1,0 +1,13 @@
+// A public type whose destructor is private, as every destructor is: no
+// module calls it, and it still runs wherever the last reference goes.
+pub type Res {
+    str name;
+}
+
+void Res.drop() {
+    print("release " + name);
+}
+
+pub Res make(str name) {
+    return Res(name);
+}
