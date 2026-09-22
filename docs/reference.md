@@ -906,7 +906,8 @@ happens is decided at the binding, when it runs:
     frozen**. `b` stays as mutable as it was, and later changes to `b` do
     not reach `a`.
 
-Nothing is refused, and no `clone` is needed. **The cost is stated at the
+No `clone` is needed, and only one thing is refused (below): a value that
+owns a resource. **The cost is stated at the
 line: binding a `const` from a shared value costs a deep copy of it** —
 time and memory proportional to the part of the graph that is not already
 frozen. The copy keeps the shape: two references to one object stay two
@@ -932,6 +933,23 @@ as cycles are not collected (§7.1), it lives until the program ends.
     across a thread boundary under the same rule as anything else (§8.3).
   - `int`, `float`, `bool` and `str` are immutable already, so `const` on
     them only forbids reassignment.
+  - **A `const` cannot hold a value that owns a resource** (§4.4): an
+    object whose type has a destructor, or anything that can hold one — an
+    `io.File`, a struct with a `File` field, a `List<File>`. Copying one
+    would release its resource twice; freezing one would leave it half
+    usable, and its destructor would still change it. It is refused whether
+    the value is shared or fresh:
+
+    ```c
+    const io.File g = f;                        // error: `io.File` owns a resource
+    const Log log = Log(tags, io.open(p)?);     // error: `Log` can hold `io.File`
+    ```
+
+    The compiler refuses every binding whose type (after generics are
+    instantiated) can hold one. Through an interface it cannot see the
+    value, so the binding **traps** instead, before anything is frozen or
+    copied: `a const cannot hold a value of type `T``. Bind such a value
+    without `const`.
 
 **Shadowing is not allowed.** A declaration whose name is already in scope is
 an error telling you to rename one. A name means one thing for the whole
@@ -1101,6 +1119,17 @@ void Conn.drop() {
     field, and its own destructor runs when it is released.
   - It runs on the thread that releases the last reference — for a value
     moved to another thread (§8.3), that thread.
+  - **A value that owns a resource is never copied.** A type *owns a
+    resource* if it has a destructor or can hold a value that does, through
+    a field, an element or a variant's payload. `clone(x)` of a type with a
+    destructor is an error — the copy would release the same resource
+    again; `=` shares it instead. (A type that merely holds one, like a
+    struct with a `File` field, may be cloned: the clone is shallow, so the
+    File is shared.) And a `const` cannot hold one at all (§4.1).
+  - Consequently **a destructor never runs on a frozen object**: nothing it
+    could be called on is frozen. It may change its own fields, and any
+    object it reaches that is not itself a constant — a `Lease` giving its
+    slot back to its pool.
 
 Not guaranteed: members of a cycle are never destroyed, so their destructors
 never run (§7.1); nor do those of objects still alive when the program ends
@@ -1541,7 +1570,7 @@ and `from_` make them a visible pair, the one Rust uses.
 |---|---|
 | `print(x)` | `int`, `float`, `bool`, `str`, or anything with `to_str`; one argument, newline-terminated. Not `bytes` (§3.10) |
 | `concat(a, b)` | joins two `str` |
-| `clone(x)` | a **shallow** copy |
+| `clone(x)` | a **shallow** copy; not of a type with a destructor (§4.4) |
 | `int(x)`, `bool(x)`, `str(x)`, `bytes(x)` | convert a distinct value to its base |
 | `send(ch, v)`, `recv(ch)`, `close(ch)` | channels (§8) |
 | `trap(msg)` | stop the program with a `str` message (§7.4); a statement, never a value |
@@ -1648,7 +1677,9 @@ Freezing is transitive, over everything the value reaches, except what is
 immutable anyway (`str`) and what is already frozen. It happens in place
 only when that whole graph is reachable from the value alone; otherwise the
 binding freezes a deep copy (§4.1). Either way it costs time proportional
-to the graph, once, at the binding.
+to the graph, once, at the binding. A graph containing an object that owns
+a resource is neither frozen nor copied: the binding is refused, or traps
+(§4.1), so no frozen object ever has a destructor.
 
 ### 7.4 Traps
 
@@ -1673,6 +1704,8 @@ Trapping conditions:
   - a destructor that leaves `this` referenced from anywhere when it
     returns — a resurrected object (§4.4)
   - changing a frozen or constant value (§7.3)
+  - binding a `const`, through an interface, to a value that owns a
+    resource (§4.1)
   - `trap(msg)`, with the program's own message (§6.6)
 
 A trap inside a destructor is a trap like any other.

@@ -86,6 +86,11 @@ pub fn emit(m: &Module) -> String {
             // dead object brought back, whose memory is about to be freed
             // under whoever holds it. That is a bug with no safe
             // continuation, so it traps (docs/destructors-decision.md).
+            //
+            // The plain store would also clear the frozen bit, but it never
+            // has one to clear: a value that owns a resource can never be
+            // frozen -- the compiler refuses the `const` and rt_snapshot
+            // traps on what it cannot see -- so no frozen object reaches here.
             writeln!(o, "    o->rc = 1;").unwrap();
             writeln!(o, "    {}(o);", c_name(d)).unwrap();
             writeln!(
@@ -202,11 +207,17 @@ pub fn emit(m: &Module) -> String {
         } else {
             "NULL".to_string()
         };
+        // A name made of identifiers, dots, `<`, `>`, `,` and spaces, so it
+        // needs no escaping as a C string.
+        let resource = match &t.resource {
+            Some(n) => format!("\"{n}\""),
+            None => "NULL".to_string(),
+        };
         if m.iface_slots.is_empty() {
             writeln!(
                 o,
                 "static const TypeInfo ti_T{i} __attribute__((unused)) = \
-                 {{ {drop}, NULL, {walk}, copy_T{i} }};"
+                 {{ {drop}, NULL, {walk}, copy_T{i}, {resource} }};"
             )
             .unwrap();
         } else {
@@ -227,7 +238,7 @@ pub fn emit(m: &Module) -> String {
             writeln!(
                 o,
                 "static const TypeInfo ti_T{i} __attribute__((unused)) = \
-                 {{ {drop}, vt_T{i}, {walk}, copy_T{i} }};"
+                 {{ {drop}, vt_T{i}, {walk}, copy_T{i}, {resource} }};"
             )
             .unwrap();
         }

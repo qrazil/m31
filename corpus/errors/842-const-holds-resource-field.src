@@ -1,0 +1,15 @@
+import io;
+
+// A type that can HOLD a resource owns one too: snapshotting a Log whose tag
+// list is shared would copy the Log and its File, and releasing the original
+// would close the descriptor the copy still uses.
+type Log {
+    List<str> tags;
+    io.File out;
+}
+
+Result<int, io.Error> run() {
+    List<str> tags = ["a"];
+    const Log log = Log(tags, io.open("/dev/null", mode: io.Mode.Write)?);
+    return Result<int, io.Error>.Ok(0);
+}

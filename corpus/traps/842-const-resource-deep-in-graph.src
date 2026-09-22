@@ -1,0 +1,41 @@
+import io;
+
+// The resource can be anywhere in the value: here an io.File two levels
+// down, inside a list of interface values whose other element owns nothing.
+// The whole graph is checked before anything is frozen.
+
+interface Named {
+    str name();
+}
+
+type Plain {
+    str n;
+}
+
+str Plain.name() {
+    return n;
+}
+
+type Sink {
+    List<int> seen;
+    io.File out;
+}
+
+str Sink.name() {
+    return "sink";
+}
+
+Result<int, io.Error> run() {
+    const List<Named> xs = [Plain("a"), Sink([], io.open("/dev/null", mode: io.Mode.Write)?)];
+    print(xs.size());
+    return Result<int, io.Error>.Ok(0);
+}
+
+match (run()) {
+    case Ok(int z): {
+        print("ok");
+    }
+    case Err(io.Error e): {
+        print("failed: " + e.to_str());
+    }
+}

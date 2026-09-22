@@ -1,0 +1,4 @@
+corpus/errors/843-clone-file.src:6:23: `io.File` cannot be cloned: it owns a resource (it has a destructor), and a copy would release it a second time; share the reference instead (`=` aliases it), or give `io.File` a method that makes a real second resource
+  |
+6 |     io.File g = clone(f);
+  |                       ^

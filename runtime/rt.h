@@ -74,6 +74,13 @@ typedef struct TypeInfo {
     const AnyFn *vtable;
     WalkFn       walk;
     CopyFn       copy;
+    /* The type's name as the program spells it, if the type declares a
+     * destructor -- it owns a resource -- and NULL otherwise. A value that
+     * owns a resource can be neither frozen nor copied, so rt_snapshot traps
+     * on one, naming it; the compiler refuses the cases it can see
+     * (docs/destructors-decision.md, "A resource cannot be copied"). The
+     * runtime's own types never own one. */
+    const char  *resource;
 } TypeInfo;
 
 /* Every heap object starts with this. Two words: the count, and a pointer to

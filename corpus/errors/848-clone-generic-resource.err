@@ -1,0 +1,4 @@
+corpus/errors/848-clone-generic-resource.src:10:18: `Res` cannot be cloned: it owns a resource (it has a destructor), and a copy would release it a second time; share the reference instead (`=` aliases it), or give `Res` a method that makes a real second resource
+   |
+10 |     return clone(v);
+   |                  ^

@@ -182,6 +182,12 @@ pub struct TypeDef {
     /// one. The drop function calls it before releasing any field, so the
     /// destructor still sees a whole object (docs/destructors-decision.md).
     pub destructor: Option<String>,
+    /// Beside `destructor`: the type's name as the program spells it
+    /// (`io.File`, `Holder<Res>`). It goes into the TypeInfo so that the
+    /// runtime can name the type when a `const` meets a value that owns a
+    /// resource -- which only happens through an interface, where the
+    /// compiler could not see the type (docs/destructors-decision.md).
+    pub resource: Option<String>,
 }
 
 impl TypeDef {

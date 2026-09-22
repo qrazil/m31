@@ -2,7 +2,8 @@
 
 Decided **2026-09-21/22**, on the author's two directions: **`const` means
 one thing everywhere — the value never changes, deeply** — and **a `const`
-binding takes a frozen snapshot of its value, and is never refused.** No
+binding takes a frozen snapshot of its value, and is never refused** -- with
+one exception added the next day: a value that owns a resource (below). No
 second keyword (no `imm`). This record is how that is implemented, why this
 way, and what it costs. The normative rules are `docs/reference.md` §4.1, §4.4 and §7.3.
 
@@ -70,7 +71,7 @@ the graph must equal its refcount — walking with the per-type `WalkFn`. A
 `str` and anything already frozen are left out of the count and out of the
 copy: nobody can change them, so sharing them changes nothing.
 
-**Nothing is refused.** The first version refused `const T a = b;` at
+**Nothing is refused** -- except a value that owns a resource, below. The first version refused `const T a = b;` at
 compile time ("bind `clone(b)`") and trapped on a fresh value with a shared
 part. The author replaced both: a `const` names a value that will not
 change, and whether that needs a copy is the runtime's business, not the
@@ -122,6 +123,44 @@ branch): `rt_index_set`, the List mutators (`push`, `pop`, `insert`,
 object that already exists (a `p.f = v` statement, and a method assigning a
 field of its receiver). Stores that initialise a new object (construction,
 `clone`) are not checked; the object cannot be frozen yet.
+
+## A value that owns a resource: refused
+
+Added **2026-09-22**, after an adversarial review. The rule and its
+reasons are in docs/destructors-decision.md, "A resource cannot be copied";
+in short: **a `const` cannot hold a value that owns a resource** -- an
+object whose type has a destructor, or anything that can hold one.
+
+The snapshot above was designed for data, and a resource is not data. Its
+deep copy duplicated an `io.File`, and the copy's destructor closed the
+caller's descriptor (`const io.File g = f;` in a function taking `f`); a
+destructor that logged `this` through a function binding a `const` copied
+`this` on every call, forever; and freezing a fresh `Lease` froze the pool
+its destructor gives its slot back to. Freezing a fresh resource in place
+would avoid the copy but leave it half usable -- a frozen File can be
+written but not read or closed, by accident of which of its methods store a
+field -- and would make its destructor the one change a constant allows.
+
+So the binding is refused, fresh or shared:
+
+  - **at compile time** whenever the declared type, after monomorphisation,
+    can hold a type with a destructor (`Lowerer::refuse_const_resource`,
+    `resource_in` in src/lower/consts.rs: a walk over fields, variant
+    payloads and collection element types, stopping at interfaces and
+    channels);
+  - **at run time** through an interface, where the type cannot show it:
+    `rt_snapshot` checks every object of the unfrozen graph -- the same walk
+    it already made for the uniqueness count -- against a new `TypeInfo`
+    field, `resource` (the type's name, or NULL), and traps before freezing
+    or copying anything. The cost is one load and test per object walked,
+    on a path that already visits each one.
+
+This is the one place the author's "never refused" gives way, and it gives
+way to the destructor's own guarantee -- a resource is released exactly
+once -- which a snapshot cannot keep. `clone` is refused for a type with a
+destructor for the same reason. A consequence worth stating: **no frozen
+object ever has a destructor**, so the drop function's count-to-1 dance,
+which also clears the frozen bit, never runs on a frozen object.
 
 ## What a frozen value can still do
 

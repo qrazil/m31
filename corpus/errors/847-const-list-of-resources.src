@@ -1,0 +1,13 @@
+// Through a collection's element type as well.
+type Res {
+    int id;
+}
+
+void Res.drop() {
+}
+
+void run() {
+    const List<Res> rs = [Res(1)];
+}
+
+run();

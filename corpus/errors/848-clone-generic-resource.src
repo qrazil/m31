@@ -1,0 +1,15 @@
+// `clone` inside a generic is checked per instantiation, like `const`.
+type Res {
+    int id;
+}
+
+void Res.drop() {
+}
+
+T dup<T>(T v) {
+    return clone(v);
+}
+
+List<int> xs = [1];
+List<int> ys = dup(xs);
+Res r = dup(Res(1));

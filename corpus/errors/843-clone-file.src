@@ -1,0 +1,7 @@
+import io;
+
+// `clone` of a File would be a second File on the same descriptor, and
+// whichever died first would close it under the other.
+void look(io.File f) {
+    io.File g = clone(f);
+}

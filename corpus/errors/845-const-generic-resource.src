@@ -1,0 +1,16 @@
+// A generic function is checked per instantiation, so the type argument is
+// known: `keep` of a List is fine, `keep` of a Res is refused.
+type Res {
+    int id;
+}
+
+void Res.drop() {
+}
+
+void keep<T>(T v) {
+    const T c = v;
+}
+
+List<int> xs = [1];
+keep(xs);
+keep(Res(1));
