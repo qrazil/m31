@@ -4,17 +4,9 @@ import os;
 // path the binary was run as, which differs between run.sh and the gates, so
 // only its presence is printed.
 //
-// os.args() is a Result: an argument need not be UTF-8 on Unix, and a `str`
-// must be. Every argument here is, so it is Ok.
-List<str> argv = [];
-match (os.args()) {
-    case Ok(List<str> all): {
-        argv = all;
-    }
-    case Err(os.Error e): {
-        print(e);
-    }
-}
+// os.args() is a plain list: an argument that is not UTF-8 traps and names
+// args_bytes, which is Rust's trade. Every argument here is text.
+List<str> argv = os.args();
 print(argv.size());  // 5: the program, then four arguments
 print(argv[0].size() > 0);  // true
 print(argv[1]);  // -serve
@@ -31,6 +23,11 @@ print(os.env("LANG_CORPUS_SURELY_NOT_SET").is_none());  // true
 print(os.env("").is_none());  // true
 print(os.env("A=B").is_none());  // true
 print(os.env_bytes("LANG_CORPUS_SURELY_NOT_SET").is_none());  // true
+// Every variable that is text, as a map: PATH is in it, a name that could
+// never be a variable is not.
+print(os.env_map().contains("PATH"));  // true
+print(os.env_map().contains("LANG_CORPUS_SURELY_NOT_SET"));  // false
+print(os.env_map().get("PATH").is_some());  // true
 // PATH is set in any environment that can run this corpus.
 match (os.env("PATH")) {
     case Some(str p): {

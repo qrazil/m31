@@ -850,12 +850,16 @@ it and answers with an error value when it says no:
 | `io.read` | `Err(io.Error.InvalidUtf8)`; `io.read_bytes` is the file exactly |
 | `io.read_line` | `None` |
 | `fs.listdir` | an error for a name that is not UTF-8 |
-| `os.args()` | `Err(os.Error.InvalidUtf8(i))`, naming the argument; `os.args_bytes()` is every argument exactly |
+| `os.args()` | **traps**, naming the argument and `os.args_bytes()`, which is every argument exactly |
 | `os.env(name)` | `None`, as for an unset variable; `os.env_bytes(name)` tells the two apart |
+| `os.env_map()` | leaves the variable out; `os.env_bytes(name)` still finds it |
 
-None of these traps: a file or an argument that is not UTF-8 is the world,
-not a bug in the program (§6.6). Rust's `env::args()` panics here, and its
-`args_os()` is `args_bytes`.
+Only `os.args()` traps, and it is the exception on purpose: every other
+answer would put a `match` in every program that reads its command line, for
+input almost no program ever meets. Rust makes the same trade -- its
+`env::args()` panics and its `args_os()` is `args_bytes`. Everything else
+here reports a value, because a file or a variable that is not UTF-8 is the
+world, not a bug in the program (§6.6).
 
 Text built from values at run time is built from code points with
 `str.from_chars(xs)` (§6.5), or from octets by pushing them into a `bytes`

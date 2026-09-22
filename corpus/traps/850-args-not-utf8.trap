@@ -1,0 +1,1 @@
+trap: os.args(): argument 1 is not valid UTF-8; read os.args_bytes() instead

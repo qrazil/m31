@@ -1,0 +1,7 @@
+import os;
+
+// `main.args` holds one argument that is not UTF-8: `caf` then the byte E9,
+// which is "café" written in Latin-1. A `str` is always valid UTF-8, so
+// os.args() cannot hand it over as text and says so, naming args_bytes --
+// which reads it fine. Rust's env::args() panics on the same input.
+print(os.args().size());

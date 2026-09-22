@@ -2,11 +2,15 @@
 //
 // API
 // ---
-//   os.args()             -> Result<List<str>, os.Error>, every argument,
-//                            the program's own name first
+//   os.args()             -> List<str>, every argument, the program's own
+//                            name first
 //   os.args_bytes()       -> List<bytes>, the same, exactly as the OS passed them
 //   os.env(name)          -> Option<str>, one environment variable, as text
 //   os.env_bytes(name)    -> Option<bytes>, the same, exactly as the OS holds it
+//   os.env_map()          -> Map<str, str>, every variable that is text
+//
+// A name ends in the shape it answers with: `_bytes` gives octets, `_map`
+// gives a map, and a plain name gives text or a list of it.
 //   os.exit(code)         -> does not return; standard output is flushed first
 //
 // Three facts the operating system hands a process, and nothing built on
@@ -23,22 +27,8 @@
 
 prim void __args(List<bytes> out);
 prim int __env(str name, List<bytes> out);
+prim void __env_map(List<bytes> out);
 prim void __exit(int code);
-
-/// What can go wrong reading the process's own facts as text.
-pub enum Error {
-    /// Argument `i` (argv[0] is 0) is not valid UTF-8. `args_bytes` has it.
-    InvalidUtf8(int);
-}
-
-/// A sentence saying what went wrong, so `print(e)` prints it.
-pub str Error.to_str() {
-    match (this) {
-        case InvalidUtf8(int i): {
-            return "argument " + i.to_str() + " is not valid UTF-8";
-        }
-    }
-}
 
 /// Every argument the program was started with, `argv[0]` -- the name it was
 /// invoked as -- first.
@@ -50,14 +40,16 @@ pub str Error.to_str() {
 /// parser is handed the rest; see `args`.
 ///
 /// An argument that is not UTF-8 -- a file name from a Latin-1 disk, say --
-/// is `Err(InvalidUtf8(i))`, not a trap: it comes from the world, not from a
-/// bug in the program (reference §6.6), and a program that must take any
-/// argument reads `args_bytes` instead. It is neither dropped nor repaired:
-/// dropping one would move every later index, and a replacement character
-/// would hand the program a file name that names no file.
+/// **traps**, naming the argument and `args_bytes`. This is Rust's trade
+/// (`env::args()` panics, `args_os()` does not): nearly every program wants
+/// its arguments as text and would otherwise carry a `match` for a case it
+/// never meets, and the program that really does take any file name reads
+/// `args_bytes` instead. It is neither dropped nor repaired: dropping one
+/// would move every later index, and a replacement character would hand the
+/// program a file name that names no file.
 ///
 /// A fresh list per call: changing it changes nothing but the copy.
-pub Result<List<str>, Error> args() {
+pub List<str> args() {
     List<str> out = [];
     int i = 0;
     for (bytes a in args_bytes()) {
@@ -66,12 +58,12 @@ pub Result<List<str>, Error> args() {
                 out.push(s);
             }
             case None: {
-                return Result<List<str>, Error>.Err(Error.InvalidUtf8(i));
+                trap("os.args(): argument " + i.to_str() + " is not valid UTF-8; read os.args_bytes() instead");
             }
         }
         i = i + 1;
     }
-    return Result<List<str>, Error>.Ok(out);
+    return out;
 }
 
 /// Every argument, exactly the octets the operating system passed, whether
@@ -119,6 +111,36 @@ pub Option<bytes> env_bytes(str name) {
         return Option<bytes>.None;
     }
     return Option<bytes>.Some(got[0]);
+}
+
+/// Every environment variable whose name and value are both text.
+///
+/// One that is not -- a value from a Latin-1 disk, a name the shell smuggled
+/// through -- is left out rather than repaired, for the reason `env` answers
+/// None: there is no text by that name. `env_bytes` still finds it by name.
+/// A fresh map per call, so changing it changes nothing but the copy.
+pub Map<str, str> env_map() {
+    List<bytes> flat = [];
+    __env_map(flat);
+    Map<str, str> out = {};
+    int i = 0;
+    while (i + 1 < flat.size()) {
+        match (flat[i].utf8()) {
+            case Some(str name): {
+                match (flat[i + 1].utf8()) {
+                    case Some(str value): {
+                        out.set(name, value);
+                    }
+                    case None: {
+                    }
+                }
+            }
+            case None: {
+            }
+        }
+        i = i + 2;
+    }
+    return out;
 }
 
 /// End the program now with status `code`, after flushing standard output so

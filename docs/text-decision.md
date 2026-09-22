@@ -141,7 +141,7 @@ Here:
 
 | | |
 |---|---|
-| `os.args()` | `Result<List<str>, os.Error>` — `Err(InvalidUtf8(i))` names the first argument that is not UTF-8 |
+| `os.args()` | `List<str>` — an argument that is not UTF-8 **traps**, naming it and `args_bytes()`. Rust's trade (`env::args()` panics): a `Result` here would put a `match` in every program that reads its command line, for input almost none will meet. |
 | `os.args_bytes()` | `List<bytes>`, exactly what the OS passed: Rust's `args_os` |
 | `os.env(name)` | `Option<str>` — `None` if unset **or** not UTF-8 |
 | `os.env_bytes(name)` | `Option<bytes>`, exactly what the OS holds |

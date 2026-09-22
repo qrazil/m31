@@ -200,7 +200,11 @@ for src in corpus/traps/*."$LANG_EXT"; do
       head -4 "$WORK/$base.tcc" | sed 's/^/      /'
       trap_ok=0; break
     fi
-    got=$("$bin" 2>&1 >/dev/null </dev/null); rc=$?
+    # A trap test may have a `.args` file, the same shape as a program
+    # test's: the one way to reach a trap that only a command line can cause.
+    targv=()
+    [ -e "${src%.$LANG_EXT}.args" ] && mapfile -t targv <"${src%.$LANG_EXT}.args"
+    got=$("$bin" "${targv[@]}" 2>&1 >/dev/null </dev/null); rc=$?
     if [ $rc -ne 134 ]; then
       fail_test "$label [$cc $opt]" "expected abort (134), got exit $rc"
       trap_ok=0; break

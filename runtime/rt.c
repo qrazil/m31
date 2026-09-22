@@ -2176,6 +2176,24 @@ int64_t rt_env(Obj *name, Obj *out) {
     return 1;
 }
 
+/* Every variable, as alternating name and value octets. `environ` is the
+ * only way to enumerate them: getenv answers one name and the C standard
+ * offers nothing else. An entry with no `=` is not a variable and is
+ * skipped, as is one with an empty name, which matches what rt_env refuses
+ * to look up. */
+extern char **environ;
+
+void rt_env_map(Obj *out) {
+    for (char **e = environ; e != NULL && *e != NULL; e++) {
+        const char *eq = strchr(*e, '=');
+        if (eq == NULL || eq == *e) continue;
+        int64_t nlen = (int64_t)(eq - *e);
+        rt_list_push(out, (int64_t)(intptr_t)bytes_of((const uint8_t *)*e, nlen));
+        rt_list_push(
+            out, (int64_t)(intptr_t)bytes_of((const uint8_t *)(eq + 1), (int64_t)strlen(eq + 1)));
+    }
+}
+
 /* exit(), not _exit(): stdio is flushed and atexit handlers run, which is
  * how the -DRC_DEBUG report still appears. The range check (0..255) is in
  * lib/os.src, where the library can say what was wrong. */

@@ -47,17 +47,8 @@ p.tail("rest");
 print(p.usage());
 print(p.help());
 // The command line comes from `main.args`, through os.args() without the
-// program's own name -- the one list `args` never reads for itself. It is a
-// Result because an argument need not be UTF-8; these all are.
-List<str> argv = [];
-match (os.args()) {
-    case Ok(List<str> all): {
-        argv = all;
-    }
-    case Err(os.Error e): {
-        print(e);
-    }
-}
+// program's own name -- the one list `args` never reads for itself.
+List<str> argv = os.args();
 argv.remove_at(0);
 match (p.parse(argv)) {
     case Err(args.UsageError e): {

@@ -5,16 +5,8 @@ import os;
 // A file name from an old disk looks exactly like this.
 //
 // A `str` is always valid UTF-8, so os.args() cannot hand that argument
-// over as text. It says which one instead, as a value -- the world, not a
-// bug in the program -- and args_bytes has every argument as it came.
-match (os.args()) {
-    case Ok(List<str> all): {
-        print("unexpected: every argument decoded");
-    }
-    case Err(os.Error e): {
-        print(e);  // argument 2 is not valid UTF-8
-    }
-}
+// over as text: reading it traps and says to read args_bytes, which has
+// every argument exactly as it came. This program reads only args_bytes.
 List<bytes> raw = os.args_bytes();
 print(raw.size());  // 3
 print(raw[1].utf8().or("?"));  // plain
