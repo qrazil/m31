@@ -1,0 +1,56 @@
+
+Zg==
+Zm8=
+Zm9v
+Zm9vYg==
+Zm9vYmE=
+Zm9vYmFy
+dXNlcjpwYXNz
+w6k=
+5pel5pys6Kqe44Gu44OG44Kt44K544OI
+w7/Dvj8+
+w7_Dvj8-
+AAAA
+CgkN
+ok 
+ok f
+ok fo
+ok foo
+ok foob
+ok fooba
+ok foobar
+ok user:pass
+ok é
+ok 日本語のテキスト
+ok ÿþ?>
+ok ÿþ?>
+3
+true
+ok A
+ok A
+ok AB
+ok AB
+error: base64 text length 3 is not a multiple of 4
+error: base64 padding at position 2 is followed by data at position 3
+error: invalid base64 character '-' at position 3: that is the URL-safe alphabet, which is url: true
+error: invalid base64 character '_' at position 3: that is the URL-safe alphabet, which is url: true
+error: invalid base64 character '+' at position 3: that is the standard alphabet, and url: true is the URL-safe one
+error: invalid base64 character '/' at position 3: that is the standard alphabet, and url: true is the URL-safe one
+error: invalid base64 character ' ' at position 2
+error: invalid base64 byte 0x0a at position 4
+error: invalid base64 byte 0xc3 at position 4
+error: base64 text ends in 3 padding characters at position 1; at most 2 are allowed
+error: base64 text ends in 4 padding characters at position 0; at most 2 are allowed
+error: base64 padding at position 2 is followed by data at position 4
+error: base64 text length 1 is not a multiple of 4
+error: invalid base64 character '!' at position 2
+error: base64 text length 3 is not a multiple of 4
+error: base64 text at position 0 decodes to byte 0x01, which a str cannot hold until the language has bytes
+error: base64 text at position 4 decodes to byte 0xff, which a str cannot hold until the language has bytes
+length was 3
+140
+VGhlIHF1aWNrIGJyb3duIGZveCDDgMOBw4LDgyDDv8O+IOaXpeacrOiqniDwn5iAIH4hQCMkJV4mKigpXyt7fXw6PD4/
+VGhlIHF1aWNrIGJyb3duIGZveCDDgMOBw4LDgyDDv8O-IOaXpeacrOiqniDwn5iAIH4hQCMkJV4mKigpXyt7fXw6PD4_
+208
+48
+3 239 187 191

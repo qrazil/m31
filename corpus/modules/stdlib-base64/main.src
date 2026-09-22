@@ -1,0 +1,176 @@
+import base64;
+
+// RFC 4648 base64. The expected output is CPython's `base64` module over the
+// same inputs (b64encode / urlsafe_b64encode, and b64decode with
+// validate=True for the strict decoder).
+void show(Result<str, base64.Error> r) {
+    match (r) {
+        case Ok(str s): {
+            print("ok " + s);
+        }
+        case Err(base64.Error e): {
+            print("error: " + base64.message(e));
+        }
+    }
+}
+
+// Every length modulo 3, including the RFC 4648 §10 test vectors.
+List<str> vectors = ["", "f", "fo", "foo", "foob", "fooba", "foobar"];
+for (str v in vectors) {
+    print(base64.encode(v));
+}
+print(base64.encode("user:pass"));
+print(base64.encode("é"));
+print(base64.encode("日本語のテキスト"));
+// The two alphabets differ only in their last two digits.
+print(base64.encode("ÿþ?>"));
+print(base64.encode("ÿþ?>", url: true));
+print(base64.encode("\0\0\0"));
+print(base64.encode("\n\t\r"));
+// Decoding reverses it, in either alphabet.
+for (str v in vectors) {
+    show(base64.decode(base64.encode(v)));
+}
+show(base64.decode("dXNlcjpwYXNz"));
+show(base64.decode("w6k="));
+show(base64.decode("5pel5pys6Kqe44Gu44OG44Kt44K544OI"));
+show(base64.decode("w7/Dvj8+"));
+show(base64.decode("w7_Dvj8-", url: true));
+// A decoded NUL is an ordinary byte.
+match (base64.decode("AAAA")) {
+    case Ok(str s): {
+        print(s.size());
+        print(s == "\0\0\0");
+    }
+    case Err(base64.Error e): {
+        print(base64.message(e));
+    }
+}
+// CPython's one leniency: unused low bits need not be zero.
+show(base64.decode("QQ=="));
+show(base64.decode("QR=="));
+show(base64.decode("QUI="));
+show(base64.decode("QUJ="));
+// Every refusal, and where it points.
+show(base64.decode("QQ="));
+show(base64.decode("QQ=A"));
+show(base64.decode("QUJ-"));
+show(base64.decode("QUJ_"));
+show(base64.decode("QUJ+", url: true));
+show(base64.decode("QUJ/", url: true));
+show(base64.decode("QU I="));
+show(base64.decode("QUJD\n"));
+show(base64.decode("QUJDé"));
+show(base64.decode("Q==="));
+show(base64.decode("===="));
+show(base64.decode("QQ==QQ=="));
+show(base64.decode("A"));
+// A character error is reported before a length error, and a length error
+// before a padding one: the first thing wrong, in reading order.
+show(base64.decode("Q=!"));
+show(base64.decode("Q=="));
+// Bytes a str cannot hold yet are refused, not corrupted. "AQ==" is 0x01
+// and "/w==" is 0xFF.
+show(base64.decode("AQ=="));
+show(base64.decode("QUJD/w=="));
+// The error is a value a caller can branch on.
+match (base64.decode("QQ=")) {
+    case Ok(str s): {
+        print(s);
+    }
+    case Err(base64.Error e): {
+        match (e) {
+            case Length(int n): {
+                print("length was " + n.to_str());
+            }
+            case Character(int at, int c, bool url): {
+                print("character");
+            }
+            case PaddingThenData(int p, int d): {
+                print("padding then data");
+            }
+            case Padding(int count, int at): {
+                print("padding");
+            }
+            case NotRepresentable(int b, int at): {
+                print("not representable");
+            }
+        }
+    }
+}
+// Round trip over every prefix of a string holding ASCII, Latin-1 letters and
+// wider characters, in both alphabets: all 2 * 70 must come back unchanged.
+str mixed = "The quick brown fox ÀÁÂÃ ÿþ 日本語 😀 ~!@#$%^&*()_+{}|:<>?";
+int same = 0;
+int k = 0;
+while (k <= mixed.size()) {
+    str part = mixed.substr(0, k);
+    List<bool> flags = [false, true];
+    for (bool u in flags) {
+        match (base64.decode(base64.encode(part, url: u), url: u)) {
+            case Ok(str back): {
+                if (back == part) {
+                    same = same + 1;
+                }
+            }
+            case Err(base64.Error e): {
+                print(base64.message(e));
+            }
+        }
+    }
+    k = k + 1;
+}
+print(same);
+print(base64.encode(mixed));
+print(base64.encode(mixed, url: true));
+// Every single byte value, decoded from its own two-character spelling: the
+// 208 a str can hold come back as exactly that byte, and the 48 it cannot
+// yet are refused as NotRepresentable -- never a wrong byte.
+str std = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+int held = 0;
+int refused = 0;
+int b = 0;
+while (b < 256) {
+    // b >> 2, then (b & 3) << 4
+    str text = std.substr(b / 4, b / 4 + 1) + std.substr(b % 4 * 16, b % 4 * 16 + 1) + "==";
+    match (base64.decode(text)) {
+        case Ok(str s): {
+            if (s.size() == 1 && s.byte_at(0) == b) {
+                held = held + 1;
+            }
+        }
+        case Err(base64.Error e): {
+            match (e) {
+                case NotRepresentable(int got, int at): {
+                    if (got == b && at == 0) {
+                        refused = refused + 1;
+                    }
+                }
+                case Character(int at, int c, bool url): {
+                    print("character");
+                }
+                case Length(int n): {
+                    print("length");
+                }
+                case PaddingThenData(int p, int d): {
+                    print("padding then data");
+                }
+                case Padding(int count, int at): {
+                    print("padding");
+                }
+            }
+        }
+    }
+    b = b + 1;
+}
+print(held);
+print(refused);
+// A UTF-8 byte-order mark, EF BB BF.
+match (base64.decode("77u/")) {
+    case Ok(str s): {
+        print(s.size().to_str() + " " + s.byte_at(0).to_str() + " " + s.byte_at(1).to_str() + " " + s.byte_at(2).to_str());
+    }
+    case Err(base64.Error e): {
+        print(base64.message(e));
+    }
+}
