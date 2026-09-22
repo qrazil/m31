@@ -1,0 +1,51 @@
+// Escaping text for HTML.
+//
+// One function, and it is for GENERATING HTML: a value a program is about to
+// put into a page -- a file name, a commit message, a user's display name --
+// goes through `escape` on its way in, and then it is text and not markup.
+//
+// **All five characters, always.** `&`, `<` and `>` are what element content
+// needs; `"` and `'` are what an attribute value needs, and which quote the
+// attribute was written with is not something this function can see. So there
+// is no `quote` flag: the one spelling is the one that is safe in element
+// content AND inside either kind of quoted attribute. (It is not safe in an
+// unquoted attribute, in a `<script>` or `<style>` body, or in a URL attribute
+// that could hold `javascript:` -- those are different contexts, and no
+// escaping function makes them safe.)
+//
+// The output is CPython's `html.escape(s)`, byte for byte: `&amp;`, `&lt;`,
+// `&gt;`, `&quot;` and `&#x27;`.
+//
+// **There is no `unescape`**, and that is the design rather than a gap.
+// Reading HTML back means decoding every named character reference HTML5
+// defines -- over two thousand of them, some without a trailing semicolon --
+// and a decoder that knows only the five above is a codec with a hole in it:
+// it turns `&eacute;` into itself and `&amp;eacute;` into `&eacute;`,
+// silently. A program that has to parse HTML needs a parser.
+//
+// There is no `str.replace`, so each replacement is a split and a join, which
+// is the same thing: `split` keeps every empty field, so the parts always
+// rejoin to the original with the separator swapped. `&` goes first, so the
+// `&` in every reference the later ones insert is not escaped a second time.
+// Every byte replaced is ASCII, and UTF-8 never uses an ASCII byte inside a
+// multi-byte character, so working in bytes cannot split one.
+
+/// `s` made safe to use as HTML text or inside a quoted attribute value.
+///
+///     html.escape("<a href='x'>Tom & Jerry</a>")
+///         == "&lt;a href=&#x27;x&#x27;&gt;Tom &amp; Jerry&lt;/a&gt;"
+pub str escape(str s) {
+    str out = replace(s, "&", "&amp;");
+    out = replace(out, "<", "&lt;");
+    out = replace(out, ">", "&gt;");
+    out = replace(out, "\"", "&quot;");
+    return replace(out, "'", "&#x27;");
+}
+
+// Every occurrence of `from` in `s` swapped for `to`.
+str replace(str s, str from, str to) {
+    if (!s.contains(from)) {
+        return s;
+    }
+    return s.split(from).join(to);
+}

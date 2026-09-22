@@ -1,0 +1,230 @@
+// RFC 4180 CSV: parse a document into rows of fields, and format rows back.
+//
+// --- why a naive split is wrong ---------------------------------------------
+//
+// `line.split(",")` is right for CSV you generated and wrong for CSV anyone
+// else produced. Three things defeat it, and all three are in the standard:
+//
+//     a,"b,c",d          a quoted field containing the delimiter  -> 3 fields
+//     a,"b""c",d         "" is one literal quote                  -> a, b"c, d
+//     a,"b
+//     c",d               a quoted field containing a NEWLINE      -> one row
+//
+// The third is the one that decides the design. A parser that splits on
+// newlines first has already lost, because a field may contain one -- so this
+// module never splits on newlines. It scans, and a row ends where a row ends.
+//
+// Scanning is over BYTES, which is safe rather than lucky: every byte the
+// format gives meaning to is ASCII, and UTF-8 never encodes a non-ASCII
+// character using an ASCII byte, so a multi-byte character inside a field
+// cannot be mistaken for a delimiter.
+//
+// --- what it does with the cases the RFC leaves open ------------------------
+//
+// These are CPython's `csv` answers (and the `csv-core` crate's), and the
+// corpus test is checked against CPython for all of them:
+//
+//     a,,b                 an empty field is a field             -> a, "", b
+//     a,"",b               so is an empty quoted one             -> a, "", b
+//     a,b"c,d              a quote that does not OPEN a field is
+//                          an ordinary character                 -> a, b"c, d
+//     a,b\r\nc,d           CRLF, LF and a lone CR all end a row
+//     " a ", b             spaces are data; nothing is trimmed   -> " a ", " b "
+//     a,b                  the last row needs no terminator
+//     a,b\n                and a trailing one adds no empty row
+//     (empty input)        -> no rows
+//     a,b,c / d,e          ragged rows come back as they are
+//     a,"unterminated      a truncated quoted field is the field, to the end
+//                          of the document
+//     a,"b"c,d             text after a closing quote joins the field: `bc`
+//
+// **Malformed quoting is taken literally rather than refused.** Real CSV is
+// malformed, and a parser that refused it would be useless for the job of
+// cleaning it up. So `parse` never fails on its input: the only `Error` is a
+// separator that cannot be one.
+//
+// Two answers differ from CPython: a leading UTF-8 byte-order mark is
+// stripped (Excel writes them constantly, and a header key that begins with
+// one matches nothing a program will look up), and a blank line is skipped
+// rather than being a row of no fields.
+//
+// **No dict-per-row mode, no dialect object, no quoting policy.** `rows[0]`
+// is the header; one dialect, RFC 4180 with the delimiter you name. `format`
+// quotes exactly the fields that would not survive being written bare, which
+// is the only policy that round-trips: `parse(format(rows))` is `rows` for
+// every list of non-empty rows.
+
+/// A separator that cannot be one: it must be a single ASCII character, and
+/// not one the format already gives a meaning -- a quote, CR or LF.
+pub enum Error {
+    Separator(str);
+}
+
+// Where the parser is. A struct, because a function returns one value and
+// reading a field has to answer both the field and how far it read.
+type Scan {
+    str text;
+    int at = 0;
+}
+
+/// A sentence saying what was wrong.
+pub str message(Error e) {
+    match (e) {
+        case Separator(str sep): {
+            if (sep.size() != 1 || sep.byte_at(0) > 127) {
+                return "csv separator must be one ASCII character, not \"" + sep + "\"";
+            }
+            return "csv separator may not be a quote or a line break: the format already gives those a meaning";
+        }
+    }
+}
+
+/// Every row of `text`, each a list of its fields.
+///
+///     csv.parse("a,b\n1,2\n")         -> Ok([["a", "b"], ["1", "2"]])
+///     csv.parse("a;b\n", sep: ";")    -> Ok([["a", "b"]])
+pub Result<List<List<str>>, Error> parse(str text, str sep = ",") {
+    int s = separator(sep)?;
+    List<List<str>> rows = [];
+    Scan sc = Scan(text);
+    int n = text.size();
+    // A UTF-8 byte-order mark, EF BB BF, is not part of the first field.
+    if (n >= 3 && text.byte_at(0) == 239 && text.byte_at(1) == 187 && text.byte_at(2) == 191) {
+        sc.at = 3;
+    }
+    while (sc.at < n) {
+        int c = text.byte_at(sc.at);
+        // A line with nothing on it is not a row.
+        if (c == 13 || c == 10) {
+            sc.at = sc.at + 1;
+            continue;
+        }
+        List<str> row = [];
+        bool more = true;
+        while (more) {
+            row.push(field(sc, s));
+            if (sc.at < n && text.byte_at(sc.at) == s) {
+                sc.at = sc.at + 1;
+            } else {
+                more = false;
+            }
+        }
+        // The field stopped at a line break or the end. CRLF is one break.
+        if (sc.at < n && text.byte_at(sc.at) == 13) {
+            sc.at = sc.at + 1;
+        }
+        if (sc.at < n && text.byte_at(sc.at) == 10) {
+            sc.at = sc.at + 1;
+        }
+        rows.push(row);
+    }
+    return Result<List<List<str>>, Error>.Ok(rows);
+}
+
+/// `rows` as one CSV document.
+///
+///     csv.format([["a", "b"], ["1", "2"]])     -> Ok("a,b\r\n1,2\r\n")
+///
+/// CRLF, and a terminator after the last row too, because RFC 4180 says so,
+/// and the only reason to write CSV rather than JSON is that something else
+/// is going to read it -- as likely a Windows spreadsheet as a unix pipe.
+///
+/// A field is quoted when, and only when, writing it bare would change what
+/// it means: it holds the separator, a quote, or a line break -- or it is an
+/// empty field alone on its row, which bare would be an empty line.
+pub Result<str, Error> format(List<List<str>> rows, str sep = ",") {
+    int s = separator(sep)?;
+    List<str> lines = [];
+    for (List<str> row in rows) {
+        List<str> cells = [];
+        for (str cell in row) {
+            cells.push(quoted(cell, sep));
+        }
+        if (cells.size() == 1 && cells[0].size() == 0) {
+            cells[0] = "\"\"";
+        }
+        lines.push(cells.join(sep));
+    }
+    if (lines.size() == 0) {
+        return Result<str, Error>.Ok("");
+    }
+    return Result<str, Error>.Ok(lines.join("\r\n") + "\r\n");
+}
+
+// One field, from `sc.at` up to (not including) the separator, line break or
+// end that finishes it.
+str field(Scan sc, int sep) {
+    str text = sc.text;
+    int n = text.size();
+    if (sc.at >= n || text.byte_at(sc.at) != 34) {
+        return bare(sc, sep);
+    }
+    // Quoted: runs to the next quote that is not doubled. A doubled quote is
+    // one literal quote. No closing quote means the field is the rest of the
+    // document.
+    List<str> parts = [];
+    int from = sc.at + 1;
+    int i = from;
+    while (i < n) {
+        if (text.byte_at(i) == 34) {
+            parts.push(text.substr(from, i));
+            if (i + 1 < n && text.byte_at(i + 1) == 34) {
+                parts.push("\"");
+                i = i + 2;
+                from = i;
+                continue;
+            }
+            // The closing quote. Anything between it and the separator joins
+            // the field as it is.
+            sc.at = i + 1;
+            parts.push(bare(sc, sep));
+            return parts.join("");
+        }
+        i = i + 1;
+    }
+    parts.push(text.substr(from, n));
+    sc.at = n;
+    return parts.join("");
+}
+
+// Bytes up to the separator, a line break or the end. A quote here is an
+// ordinary character.
+str bare(Scan sc, int sep) {
+    str text = sc.text;
+    int n = text.size();
+    int from = sc.at;
+    int i = from;
+    while (i < n) {
+        int c = text.byte_at(i);
+        if (c == sep || c == 13 || c == 10) {
+            break;
+        }
+        i = i + 1;
+    }
+    sc.at = i;
+    return text.substr(from, i);
+}
+
+// One field as it must be written: bare when that is unambiguous, quoted with
+// its quotes doubled when it is not.
+str quoted(str cell, str sep) {
+    if (cell.contains(sep) || cell.contains("\"") || cell.contains("\n") || cell.contains("\r")) {
+        return "\"" + cell.split("\"").join("\"\"") + "\"";
+    }
+    return cell;
+}
+
+// `sep` as the byte the scanner compares against. One ASCII character, and
+// not one the format already spells: a multi-byte separator would break the
+// byte scanning above, and a quote or a line break as a separator is not a
+// document anything could read back.
+Result<int, Error> separator(str sep) {
+    if (sep.size() != 1) {
+        return Result<int, Error>.Err(Error.Separator(sep));
+    }
+    int c = sep.byte_at(0);
+    if (c > 127 || c == 34 || c == 13 || c == 10) {
+        return Result<int, Error>.Err(Error.Separator(sep));
+    }
+    return Result<int, Error>.Ok(c);
+}

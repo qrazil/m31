@@ -18,7 +18,11 @@
 /// (docs/modules-decision.md §1).
 pub fn source(name: &str) -> Option<&'static str> {
     Some(match name {
+        "base64" => include_str!("../lib/base64.src"),
+        "csv" => include_str!("../lib/csv.src"),
+        "html" => include_str!("../lib/html.src"),
         "io" => include_str!("../lib/io.src"),
+        "json" => include_str!("../lib/json.src"),
         "math" => include_str!("../lib/math.src"),
         _ => return None,
     })
