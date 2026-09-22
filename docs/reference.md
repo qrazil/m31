@@ -184,7 +184,7 @@ print(greet.shout("world"));
     operator is another way of calling the method, not a way around `pub`.
   - **A type from another module is `mod.Type`**, anywhere a type may be
     written: a declaration, a parameter, a type argument, a construction
-    (`shapes.Point(3, 4)`, `shapes.Box<int>(1)`), a static method
+    (`shapes.Point(3, 4)`, `shapes.Holder<int>(1)`), a static method
     (`shapes.Point.origin()`) or an enum variant (`shapes.Colour.Red`).
   - **A method may only be added to a type its own module declared.** Go and
     Rust both draw this line, and without it a module could reach into
@@ -588,8 +588,8 @@ quietly vanish the way a payload does.
 Type parameters on a type or a function:
 
 ```c
-type Box<T> { T item; }
-T unwrap<T>(Box<T> b) { return b.item; }
+type Holder<T> { T item; }
+T unwrap<T>(Holder<T> b) { return b.item; }
 ```
 
 Generics are **monomorphised**: each instantiation becomes a separate
@@ -600,13 +600,13 @@ A **method on a generic type names the type's parameters on its receiver**,
 and a method may have type parameters of its own, on any type:
 
 ```c
-T Box<T>.get() { return item; }
-Box<U> Box<T>.swap<U>(U v) { return Box<U>(v); }
+T Holder<T>.get() { return item; }
+Holder<U> Holder<T>.swap<U>(U v) { return Holder<U>(v); }
 T Picker.pick<T>(List<T> xs) { return xs[at]; }
 ```
 
 The names on the receiver are the method's; they need not match the type
-declaration's, and there must be as many. `T Box.get()` for a generic `Box`
+declaration's, and there must be as many. `T Holder.get()` for a generic `Holder`
 is refused: the signature should say what `T` is without sending the reader
 to the type. A method on a generic type is instantiated with each
 instantiation of the type, and is checked only then, like the rest of a

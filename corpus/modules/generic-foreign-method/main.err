@@ -1,4 +1,4 @@
-corpus/modules/generic-foreign-method/main.src:4:1: `Box` is declared in `lib`; a method may only be added to a type its own module declared
+corpus/modules/generic-foreign-method/main.src:4:1: `Holder` is declared in `lib`; a method may only be added to a type its own module declared
   |
-4 | T Box<T>.get() {
+4 | T Holder<T>.get() {
   | ^

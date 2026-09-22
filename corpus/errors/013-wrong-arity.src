@@ -1,6 +1,6 @@
-type Box<T> {
+type Holder<T> {
     T value;
 }
 
-Box<int, str> b = Box<int, str>(1);
+Holder<int, str> b = Holder<int, str>(1);
 print(b.value);

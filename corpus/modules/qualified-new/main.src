@@ -13,9 +13,9 @@ print(o.loud);                  // true
 
 // Generic: the type arguments mark it as a type, so this one is settled by
 // the parser rather than the lowerer.
-lib.Box<int> b = lib.Box<int>(41);
+lib.Holder<int> b = lib.Holder<int>(41);
 print(b.item + 1);              // 42
-List<lib.Box<str>> boxes = [lib.Box<str>("hi")];
+List<lib.Holder<str>> boxes = [lib.Holder<str>("hi")];
 print(boxes[0].item);           // hi
 
 // Enum variants through the module, with and without a payload, and on a

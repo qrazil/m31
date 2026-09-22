@@ -5,7 +5,7 @@ pub int Point.sum() { return x + y; }
 // Optional fields are named at the construction site, qualified or not.
 pub type Opts { pub int size; pub str name = "anon"; pub bool loud = false; }
 
-pub type Box<T> { pub T item; }
+pub type Holder<T> { pub T item; }
 
 pub enum Colour { Red; Green; }
 pub enum Shape { Circle(int); Square(int, int); }

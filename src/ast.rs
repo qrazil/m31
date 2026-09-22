@@ -21,7 +21,7 @@ pub enum Ty {
     /// indexed into the program's `ty_exprs` arena.
     ///
     /// Interning keeps `Ty` `Copy` and one word wide even though a type
-    /// expression like `Box<Pair<int, str>>` is a tree. Monomorphisation
+    /// expression like `Holder<Pair<int, str>>` is a tree. Monomorphisation
     /// resolves every one of these to a concrete declaration.
     User(u32),
 }
@@ -119,7 +119,7 @@ pub fn bare(name: &str) -> &str {
 }
 
 /// One interned type expression: a name plus type arguments.
-/// `Point` is `("Point", [])`; `Box<int>` is `("Box", [Int])`; the `T` inside
+/// `Point` is `("Point", [])`; `Holder<int>` is `("Holder", [Int])`; the `T` inside
 /// a generic declaration is `("T", [])` and is resolved by substitution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TyExpr {
@@ -215,7 +215,7 @@ pub enum Expr {
     /// with no payload has nothing to infer from, and one rule beats a rule
     /// with an exception.
     EnumNew(Ty, String, Args, Span),
-    /// `Point(x: 1, y: 2)` / `Box<int>(value: 5)` -- construction is always
+    /// `Point(x: 1, y: 2)` / `Holder<int>(value: 5)` -- construction is always
     /// by field name, so reordering fields in a declaration cannot silently
     /// transpose values. Carries the interned type, so type arguments survive
     /// to monomorphisation.
@@ -402,7 +402,7 @@ pub struct Func {
     /// Type parameter names, empty for a non-generic function.
     pub tparams: Vec<String>,
     /// For a method on a generic type, the names its receiver's type
-    /// parameters take inside it: `T Box<T>.get()` has `["T"]`. Written at
+    /// parameters take inside it: `T Holder<T>.get()` has `["T"]`. Written at
     /// the method rather than borrowed silently from the type declaration,
     /// so a method's signature can be read without finding its type.
     /// Monomorphisation instantiates the method once per instantiation of
@@ -483,7 +483,7 @@ pub struct Program {
     /// reads it back, because the mangled name is for C and the person
     /// reading the error wrote `List<int>`. Empty before monomorphisation.
     pub shown: std::collections::HashMap<String, (String, Vec<Ty>)>,
-    /// Every generic method a concrete receiver has, as `Box$int.first`.
+    /// Every generic method a concrete receiver has, as `Holder$int.first`.
     /// Monomorphisation instantiates one at each call whose receiver's type
     /// it can see written down; a call it could not see through reaches the
     /// lowering uninstantiated, and this lets that say why instead of

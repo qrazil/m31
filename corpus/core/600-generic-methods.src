@@ -1,33 +1,33 @@
 // Methods on a generic type, and methods with type parameters of their own.
 //
 // A method on a generic type names the type's parameters on its receiver,
-// `T Box<T>.get()`, so its signature says what `T` is without a trip to the
+// `T Holder<T>.get()`, so its signature says what `T` is without a trip to the
 // type declaration. It is instantiated with each instantiation of the type.
 
-type Box<T> {
+type Holder<T> {
     T item;
 }
 
-T Box<T>.get() {
+T Holder<T>.get() {
     return item;
 }
 
-void Box<T>.set(T v) {
+void Holder<T>.set(T v) {
     item = v;
 }
 
 // The receiver's parameters may take other names; they are the method's.
-bool Box<E>.same(E other) {
+bool Holder<E>.same(E other) {
     return item == other;
 }
 
-static Box<T> Box<T>.of(T v) {
-    return Box<T>(v);
+static Holder<T> Holder<T>.of(T v) {
+    return Holder<T>(v);
 }
 
 // A method with a type parameter of its own, on a generic type.
-Box<U> Box<T>.swap<U>(U v) {
-    return Box<U>(v);
+Holder<U> Holder<T>.swap<U>(U v) {
+    return Holder<U>(v);
 }
 
 type Pair<A, B> {
@@ -62,16 +62,16 @@ str Shelf.chosen() {
     return p.pick(names);
 }
 
-Box<int> b = Box<int>(1);
+Holder<int> b = Holder<int>(1);
 print(b.get());
 b.set(5);
 print(b.get());
 print(b.same(5));
 print(b.same(6));
 
-Box<str> s = Box<str>.of("text");
+Holder<str> s = Holder<str>.of("text");
 print(s.get());
-Box<str> t = b.swap("swapped");
+Holder<str> t = b.swap("swapped");
 print(t.get());
 print(b.swap(2.5).get());
 

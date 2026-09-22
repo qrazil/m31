@@ -6,7 +6,7 @@
 //! required no IR change at all.
 //!
 //! The pass rewrites the program into an equivalent one with no type
-//! parameters. `Box<int>` becomes a plain type named `Box$int`; `id<int>`
+//! parameters. `Holder<int>` becomes a plain type named `Holder$int`; `id<int>`
 //! becomes a function named `id$int`. Everything downstream — the type
 //! checker, the lowering, the backends — is unchanged and unaware.
 //!
@@ -23,12 +23,12 @@ pub struct Mono {
     /// Generic declarations, by name.
     generic_types: HashMap<String, TypeDecl>,
     generic_funcs: HashMap<String, Func>,
-    /// Methods on generic types (`T Box<T>.get()`), instantiated alongside
+    /// Methods on generic types (`T Holder<T>.get()`), instantiated alongside
     /// each instantiation of their type.
     generic_methods: Vec<Func>,
     /// Methods with type parameters of their own, by concrete receiver and
     /// method name, with the receiver's substitution already bound:
-    /// `Box$int` -> `first` -> (decl, {T: int}).
+    /// `Holder$int` -> `first` -> (decl, {T: int}).
     own_generic: HashMap<String, HashMap<String, (Func, Subst)>>,
     /// Pending method instantiations: (decl, substitution, receiver's output
     /// name, method's output name). A queue rather than done on the spot
@@ -248,7 +248,7 @@ impl Mono {
         }
     }
 
-    /// `Box<int, str>` becomes `Box$int$str`. `$` cannot appear in a source
+    /// `Holder<int, str>` becomes `Holder$int$str`. `$` cannot appear in a source
     /// identifier, so a mangled name can never collide with a declared one.
     fn mangle(&self, name: &str, args: &[Ty]) -> String {
         if args.is_empty() {
@@ -497,8 +497,8 @@ impl Mono {
         Ok(())
     }
 
-    /// Emit one method at one receiver: `Box<T>.get` at `Box$int`, or
-    /// `Box<T>.map<U>` at `Box$int` as `map$str`.
+    /// Emit one method at one receiver: `Holder<T>.get` at `Holder$int`, or
+    /// `Holder<T>.map<U>` at `Holder$int` as `map$str`.
     fn instantiate_method(
         &mut self,
         decl: &Func,
@@ -518,7 +518,7 @@ impl Mono {
         Ok(())
     }
 
-    /// `T Box<T>.get()` must name a generic type of its own module, with as
+    /// `T Holder<T>.get()` must name a generic type of its own module, with as
     /// many parameters as the type has. Checked at the declaration, because
     /// a method on a type nothing instantiates is otherwise never looked at.
     fn check_generic_recv(&self, f: &Func) -> Result<(), Diag> {
@@ -1290,8 +1290,8 @@ impl Mono {
     }
 
     /// Match a parameter's written type against an argument's written type,
-    /// binding any type parameter it reaches. Structural, so `Box<T>` against
-    /// `Box<int>` binds `T`, not only a bare `T`.
+    /// binding any type parameter it reaches. Structural, so `Holder<T>` against
+    /// `Holder<int>` binds `T`, not only a bare `T`.
     fn unify(
         &mut self,
         pty: Ty,

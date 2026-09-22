@@ -1,4 +1,4 @@
-corpus/errors/611-void-field.src:7:15: `Box` cannot be instantiated with `void`: its field `item` would hold no value
+corpus/errors/611-void-field.src:7:18: `Holder` cannot be instantiated with `void`: its field `item` would hold no value
   |
-7 | Box<void> b = Box<void>();
-  |               ^
+7 | Holder<void> b = Holder<void>();
+  |                  ^

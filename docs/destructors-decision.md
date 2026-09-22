@@ -77,8 +77,8 @@ and ignores errors; `sync_all` is how you find out.
 
 **Not `static`, no type parameters of its own.** It acts on the dying
 object, and there is no call site to infer a type argument from. A generic
-*type* may have one: `void Box<T>.drop()` is instantiated with each
-instantiation of `Box`, like its other methods.
+*type* may have one: `void Holder<T>.drop()` is instantiated with each
+instantiation of `Holder`, like its other methods.
 
 **Not `pub`.** It is never called by name from anywhere, so exporting it
 would mean nothing, and one spelling beats two that behave the same. It still

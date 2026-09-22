@@ -36,7 +36,7 @@ ordinary library types rather than language primitives.
 Structural interfaces dispatched through a vtable in the object header.
 Embedding with forwarder methods synthesised to a fixpoint. `distinct` types,
 erased before the IR so they cost nothing. Monomorphised generics on types,
-functions and methods (`T Box<T>.get()`, `T Picker.pick<T>(..)`), with type
+functions and methods (`T Holder<T>.get()`, `T Picker.pick<T>(..)`), with type
 arguments inferred from the arguments and from where the value goes, and
 usable across modules.
 

@@ -9,17 +9,17 @@ type Point {
     int y;
 }
 
-type Box {
+type Holder {
     List<int> items;
 }
 
-// Two fields naming ONE Box: a diamond. The snapshot must keep it one Box,
+// Two fields naming ONE Holder: a diamond. The snapshot must keep it one Holder,
 // not two -- a copy that duplicated it would still read the same, so what
-// checks it here is the leak check: a duplicated or double-released Box
+// checks it here is the leak check: a duplicated or double-released Holder
 // would leave __rc_live off zero or trip the decrement-below-zero assert.
 type Pair {
-    Box left;
-    Box right;
+    Holder left;
+    Holder right;
 }
 
 void run() {
@@ -57,7 +57,7 @@ void run() {
     print(fresh[2]);
 
     // The diamond.
-    Box shared_box = Box([5]);
+    Holder shared_box = Holder([5]);
     Pair pair = Pair(shared_box, shared_box);
     const Pair snap = pair;
     shared_box.items.push(6);

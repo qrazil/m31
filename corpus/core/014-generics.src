@@ -1,6 +1,6 @@
 // Generics are erased before lowering, so the IR never sees them. Each
-// instantiation becomes an ordinary type: Box$int, Box$str, Pair$int$str.
-type Box<T> {
+// instantiation becomes an ordinary type: Holder$int, Holder$str, Pair$int$str.
+type Holder<T> {
     T value;
 }
 
@@ -9,14 +9,14 @@ type Pair<A, B> {
     B second;
 }
 
-T unwrap<T>(Box<T> b) {
+T unwrap<T>(Holder<T> b) {
     return b.value;
 }
 
-Box<int> bi = Box<int>(21);
+Holder<int> bi = Holder<int>(21);
 print(unwrap(bi) * 2);
 
-Box<str> bs = Box<str>(concat("hel", "lo"));
+Holder<str> bs = Holder<str>(concat("hel", "lo"));
 print(unwrap(bs));
 
 Pair<int, str> p = Pair<int, str>(7, "seven");
@@ -24,6 +24,6 @@ print(p.first);
 print(p.second);
 
 // A generic instantiated at another instantiation of itself.
-Box<Box<int>> nested = Box<Box<int>>(bi);
-Box<int> inner = unwrap(nested);
+Holder<Holder<int>> nested = Holder<Holder<int>>(bi);
+Holder<int> inner = unwrap(nested);
 print(unwrap(inner));

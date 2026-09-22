@@ -1,7 +1,7 @@
 // A field has to hold something; unlike a variant's payload it cannot just
 // vanish, because a construction and every read name it.
-type Box<T> {
+type Holder<T> {
     T item;
 }
 
-Box<void> b = Box<void>();
+Holder<void> b = Holder<void>();
