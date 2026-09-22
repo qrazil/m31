@@ -19,6 +19,7 @@ use crate::diag::{Diag, Span};
 use crate::ir::{self, ArithOp, Block, BlockId, Cmp, Inst, IrTy, Term, TypeDef, Value};
 
 mod consts;
+mod hold;
 use consts::ConstInfo;
 
 /// A local binding: its type, its current SSA value, and whether it was
@@ -27,7 +28,9 @@ type Binding = (Ty, Value, bool);
 
 /// A lowered expression, plus whether we are holding a +1 on it that somebody
 /// must release. Literals are immortal and variables are borrowed from their
-/// local, so only a call result arrives owned.
+/// local, so only a call result arrives owned -- or a borrowed operand that
+/// had to be held across a call (src/lower/hold.rs).
+#[derive(Clone, Copy)]
 struct Val {
     /// `None` for a void expression. A void call has no value, and inventing
     /// a dummy one put a dead `bconst` in every emitted function.
@@ -183,6 +186,10 @@ pub struct Lowerer {
     /// or a static method. Empty inside an instance method.
     no_recv: String,
     ret_ty: Ty,
+    /// Whether any type declares a destructor. Without one, releasing a
+    /// reference runs only the runtime, which decides whether a built-in
+    /// method can run user code (src/lower/hold.rs, `releases`).
+    has_destructors: bool,
 }
 
 /// Every builtin function, whether it lives in `sigs` (`concat`) or is
@@ -353,6 +360,7 @@ impl Lowerer {
             recv: None,
             no_recv: String::new(),
             ret_ty: Ty::Void,
+            has_destructors: false,
         }
     }
 
@@ -1671,6 +1679,9 @@ impl Lowerer {
         if !self.assignable(key.ty, k) {
             return Err(Diag::new(args.pos[0].span(), self.mismatch(k, key.ty)));
         }
+        // `set` takes a value after the key; the key must outlive it.
+        let later = m == "set" && self.may_run_code(&args.pos[1], true);
+        let key = self.hold(&args.pos[0], key, later);
         match m {
             "set" => {
                 let val = self.lower_expr_as(&args.pos[1], v)?;
@@ -2489,6 +2500,7 @@ impl Lowerer {
             span: Span::new(1, 1),
         };
 
+        self.has_destructors = self.any_destructor();
         let mut funcs = Vec::new();
         for f in &p.funcs {
             // A primitive has no body to lower: its implementation is the
@@ -3553,6 +3565,11 @@ impl Lowerer {
                         let (owner, owner_tid) = if path.len() == 1 {
                             (robj, rtid)
                         } else {
+                            // Not held (src/lower/hold.rs), though read out
+                            // of the receiver before the value runs: an
+                            // embedded field has no name a program can
+                            // write, so it keeps the object it was built
+                            // with for as long as the receiver lives.
                             let (o, oty) = self.load_path(rtid, robj, &path[..path.len() - 1]);
                             (o, self.tdef_of(oty).expect("embedded field is a type"))
                         };
@@ -3751,6 +3768,10 @@ impl Lowerer {
             } => {
                 self.refuse_const_write(obj, *span)?;
                 let o = self.lower_expr(obj)?;
+                // `h.ps[i] = f(h)`: the index or the value can replace the
+                // collection before the store (src/lower/hold.rs).
+                let later = self.may_run_code(index, true) || self.may_run_code(value, true);
+                let o = self.hold(obj, o, later);
                 // No refcounts to move: a byte is a value. The runtime traps
                 // on an index out of range and on a value outside 0..255, and
                 // a constant outside it is refused here.
@@ -3852,6 +3873,10 @@ impl Lowerer {
                 }
                 self.refuse_const_write(obj, *span)?;
                 let o = self.lower_expr(obj)?;
+                // `h.p.x = f(h)`: the value can replace `h.p` before the
+                // store, which must then land in the object read first --
+                // alive, not freed (src/lower/hold.rs).
+                let o = self.hold(obj, o, self.may_run_code(value, true));
                 let Some(tid) = self.tdef_of(o.ty) else {
                     return Err(Diag::new(
                         obj.span(),
@@ -4364,6 +4389,8 @@ impl Lowerer {
             if !self.assignable(v.ty, p.ty) {
                 return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
             }
+            // The method itself is user code (src/lower/hold.rs).
+            let v = self.hold(a, v, true);
             vals.push(v.val());
         }
         if ret == Ty::Void {
@@ -5257,6 +5284,8 @@ impl Lowerer {
                 if !self.assignable(v.ty, p.ty) {
                     return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
                 }
+                // The dispatch itself is user code (src/lower/hold.rs).
+                let v = self.hold(a, v, true);
                 vals.push(v.val());
             }
 
@@ -5320,6 +5349,8 @@ impl Lowerer {
             if !self.assignable(v.ty, p.ty) {
                 return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
             }
+            // The method itself is user code (src/lower/hold.rs).
+            let v = self.hold(a, v, true);
             vals.push(v.val());
         }
 
@@ -5484,6 +5515,8 @@ impl Lowerer {
                 if !self.assignable(kv.ty, k) {
                     return Err(Diag::new(ke.span(), self.mismatch(k, kv.ty)));
                 }
+                // The map retains the key only once the value is lowered.
+                let kv = self.hold(ke, kv, self.may_run_code(ve, true));
                 let vv = self.lower_expr_as(ve, v)?;
                 if !self.assignable(vv.ty, v) {
                     return Err(Diag::new(ve.span(), self.mismatch(v, vv.ty)));
@@ -5525,6 +5558,8 @@ impl Lowerer {
             if !self.assignable(v.ty, elem) {
                 return Err(Diag::new(ve.span(), self.mismatch(elem, v.ty)));
             }
+            // The runtime retains the fill only once the length is lowered.
+            let v = self.hold(ve, v, self.may_run_code(ne, true));
             let n = self.lower_expr(ne)?;
             if self.underlying(n.ty) != Ty::Int {
                 return Err(Diag::new(ne.span(), self.mismatch(Ty::Int, n.ty)));
@@ -5535,13 +5570,15 @@ impl Lowerer {
         let Expr::SeqLit(items, _) = e else {
             unreachable!("only the three literal forms reach here")
         };
+        // Every element is lowered before any is stored.
+        let later = self.later_in(items);
         let mut vals = Vec::new();
-        for it in items {
+        for (it, later) in items.iter().zip(later) {
             let v = self.lower_expr_as(it, elem)?;
             if !self.assignable(v.ty, elem) {
                 return Err(Diag::new(it.span(), self.mismatch(elem, v.ty)));
             }
-            vals.push(v);
+            vals.push(self.hold(it, v, later));
         }
         self.build_seq(want, elem, vals, is_list, span)
     }
@@ -6118,11 +6155,22 @@ impl Lowerer {
                 if self.is_mutating_method(o.ty, m) {
                     self.refuse_const_write(obj, *span)?;
                 }
+                // The receiver is an argument like any other (§5.1): read
+                // out of a place, it is held across the arguments and the
+                // call when either may run user code -- `h.p.m(..)` whose
+                // body replaces `h.p`, or `h.ps.push(f(h))` where `f` does.
+                let later = self.method_runs_code(o.ty, m)
+                    || args.pos.iter().any(|a| self.may_run_code(a, true))
+                    || args.named.iter().any(|(_, a)| self.may_run_code(a, true));
+                let o = self.hold(obj, o, later);
                 self.lower_method_on(&o, m, args, *span)
             }
 
             Expr::Index(obj, idx, span) => {
                 let o = self.lower_expr(obj)?;
+                // `h.ps[f(h)]`: the index can replace the collection before
+                // it is read from.
+                let o = self.hold(obj, o, self.may_run_code(idx, true));
                 // A byte reads as an int, 0 to 255: the language has one
                 // integer type, and a byte is a value of it rather than a
                 // second kind of number.
@@ -6575,8 +6623,14 @@ impl Lowerer {
             return Ok(Val::new(p, Ty::Bool, false));
         }
 
+        // An operator method is user code, with `a` as its receiver and `b`
+        // as its argument; a built-in operator is the runtime, so then only
+        // what the right operand runs can disturb the left (`h.s + f(h)`).
         let a = self.lower_expr(l)?;
+        let user_op = self.has_operator_methods(a.ty);
+        let a = self.hold(l, a, user_op || self.may_run_code(r, true));
         let b = self.lower_expr(r)?;
+        let b = self.hold(r, b, user_op);
 
         // str has built-in `+` and `==`; they are the two everyone reaches
         // for, and making them methods on a builtin would need no less code.
@@ -7080,9 +7134,12 @@ impl Lowerer {
             }
         }
         let slots = self.bind_args(name, &fields, args, span)?;
+        // Allocating and storing run no user code, so only a later argument
+        // can disturb an earlier one before it is stored.
+        let later = self.later_flags(&slots, &fields, false);
 
         let mut given: Vec<Option<Val>> = Vec::new();
-        for (e, f) in slots.iter().zip(fields.iter()) {
+        for (i, (e, f)) in slots.iter().zip(fields.iter()).enumerate() {
             // The field's type is what a literal argument takes. A default
             // is an expression lowered here, at each construction, so a
             // literal default builds a fresh collection for every object
@@ -7099,6 +7156,7 @@ impl Lowerer {
                     ),
                 ));
             }
+            let v = self.hold(e, v, later[i]);
             given.push(Some(v));
         }
 
@@ -7215,6 +7273,8 @@ impl Lowerer {
                 // one, a refusal naming the method beats printing an
                 // address.
                 Ty::User(_) => {
+                    // `to_str` is user code, with the value as its receiver.
+                    let a = self.hold(&args.pos[0], a, true);
                     let Some(text) = self.call_to_str(&a, args.pos[0].span())? else {
                         return Err(Diag::new(
                             args.pos[0].span(),
@@ -7296,7 +7356,9 @@ impl Lowerer {
                          say which text you mean, `hex()` or `utf8()`",
                     ));
                 }
-                if let Some(text) = self.call_to_str(&v, args.pos[0].span())? {
+                // `to_str` is user code, with the value as its receiver.
+                let held = self.hold(&args.pos[0], v, true);
+                if let Some(text) = self.call_to_str(&held, args.pos[0].span())? {
                     return Ok(text);
                 }
             }
@@ -7448,16 +7510,22 @@ impl Lowerer {
         let sig_is_prim = sig.is_prim;
 
         let slots = self.bind_args(name, &params, args, span)?;
+        // A primitive or `concat` is the runtime and runs no user code; any
+        // other function is the program's.
+        let later = self.later_flags(&slots, &params, !(sig_is_prim || name == "concat"));
 
         let mut vals = Vec::new();
-        for (a, p) in slots.iter().zip(params.iter()) {
+        for (i, (a, p)) in slots.iter().zip(params.iter()).enumerate() {
             let v = self.lower_slot(a, p, &module)?;
             if !self.assignable(v.ty, p.ty) {
                 return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
             }
-            // Arguments are borrowed (§5.1): no retain at the call site. An
-            // owned temporary is already on the statement's pending list --
-            // the producer put it there -- so it must NOT be added again.
+            // Arguments are borrowed (§5.1): no retain at the call site for
+            // a local, a parameter or a temporary -- an owned temporary is
+            // already on the statement's pending list, so it must NOT be
+            // added again. Only a value read out of a place is held, and
+            // only when something after it may run user code.
+            let v = self.hold(a, v, later[i]);
             vals.push(v.val());
         }
 

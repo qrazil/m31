@@ -1,0 +1,38 @@
+// A built-in method runs no user code itself, but its arguments can. Here
+// the argument replaces the field the receiver was read from, so the
+// receiver is held until the method is done with it. Without that, `push`
+// WROTE into the freed list.
+//
+// Evaluation is left to right: the receiver is the list `h.ps` named when
+// the expression started, so the push lands in the old list, which is then
+// released -- and `h.ps` is the one `f` put there.
+
+type H { List<int> ps; }
+
+int f(H h) {
+    h.ps = [7];
+    List<int> junk = [0, 0, 0, 0];
+    return 1;
+}
+
+H h = H([1, 2]);
+h.ps.push(f(h));
+print(h.ps.size());
+print(h.ps[0]);
+
+// A map's key and value: the key is read first, and the value can replace
+// the field it came from before `set` retains it.
+type K { str k; Map<str, int> m; }
+int g(K k) {
+    k.k = "other";
+    str junk = concat("jun", "k");
+    return 5;
+}
+K k = K(concat("ke", "y"), {});
+k.m.set(k.k, g(k));
+print(k.m.contains("key"));
+print(k.m.contains("other"));
+
+// With nothing after it that runs code, the receiver is used as read.
+h.ps.push(3);
+print(h.ps.size());

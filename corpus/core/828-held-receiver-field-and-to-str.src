@@ -1,0 +1,50 @@
+// Inside a method a bare field name reads the receiver's field, and passing
+// it on -- to a sibling method, a function, an interface -- passes a value
+// the receiver's slot holds. The callee can replace the slot, so the value
+// is held across the call.
+
+type P { int x; }
+type H { P p; }
+
+int H.peek(P q) {
+    p = P(6);
+    P junk = P(99);
+    return q.x;
+}
+int H.run() {
+    return peek(p);
+}
+H h = H(P(7));
+print(h.run());
+print(h.p.x);
+
+interface Peeker {
+    int look(P q, H h);
+}
+type Eye { int unused = 0; }
+int Eye.look(P q, H h) {
+    h.p = P(5);
+    P junk = P(98);
+    return q.x;
+}
+Peeker e = Eye();
+print(e.look(h.p, h));
+print(h.p.x);
+
+// `print(v)` and `str(v)` call `v.to_str()`, which is user code with the
+// value as its receiver -- and it can replace the place the value came
+// from.
+type T { int n; List<Holder> back = []; }
+type Holder { T t; }
+str T.to_str() {
+    back[0].t = T(0);
+    T junk = T(97);
+    return "T" + n.to_str();
+}
+Holder hd = Holder(T(1));
+hd.t.back.push(hd);
+print(hd.t);
+hd.t.back.push(hd);
+hd.t.n = 2;
+print(str(hd.t));
+hd.t.back.clear();

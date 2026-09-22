@@ -176,6 +176,46 @@ The callee does **not** decrement it, and does **not** need to increment it
 just to use it. If the callee wants to keep the value past the call, it
 performs its own `rc_inc`.
 
+"Alive for the duration" means the caller holds a reference of its own that
+no code run during the call can take away. Where the argument came from
+decides whether it already has one:
+
+  - **A local or a parameter** (or `this`): held by a frame -- this one, or
+    a caller's, which is suspended for the whole call -- and no expression
+    can reassign a local. Nothing is emitted.
+  - **An owned temporary** (a call result, §5.2): held by the statement,
+    which releases it after the call. Nothing more is emitted.
+  - **A literal or a constant**: immortal (§5.4). Nothing is emitted.
+  - **A value read out of a place** -- a field load (`h.p`, or a field named
+    bare inside a method), an element load (`xs[i]`), or a value a built-in
+    method hands back borrowed from its receiver: its only reference may be
+    the place's, and the callee can reach the place (`f(h.p, h)` with `f`
+    assigning `h.p`) and drop it. So the caller **holds** it: `rc_inc`
+    immediately after the load, and `rc_dec` with the statement's other
+    temporaries, after the call.
+
+The retain goes immediately after the load, not just before the call,
+because arguments are evaluated left to right: in `f(h.p, g(h))`, `g` can
+replace `h.p` before `f` is entered.
+
+The same rule covers every operand consumed after something else has run:
+the receiver of a method (user, interface or built-in: `h.ps.push(g(h))`
+must not push into a list `g` freed), both operands of an operator method,
+the left operand of a built-in operator (`h.s + g(h)`), the operands of a
+construction or collection literal, the collection of an index whose index
+runs code, and the object of a field or element store whose value runs code.
+
+A hold is skipped when it is provably unnecessary: when nothing evaluated
+after the load -- no later operand, and not the operation itself -- can run
+the program's own code. The runtime alone runs in between then, and the
+runtime writes no field or element the program can see except by releasing
+a reference; a release can run a destructor, so the built-in methods that
+release (`clear` on a List; `clear`, `remove` and `set` on a Map) count as
+running code in a program that declares a destructor. The test for "can run
+code" is syntactic and conservative: any call, construction or `?` can; a
+field, element or local read, a literal and a built-in operator cannot. The
+rule and its reasoning live in `src/lower/hold.rs`.
+
 ### 5.2 Returns are **owned (+1)**
 
 The callee hands back a value the caller is responsible for eventually

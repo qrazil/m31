@@ -1,0 +1,27 @@
+// A built-in method that releases references -- `clear` here -- runs every
+// destructor it releases into, and a destructor is user code. This one
+// reaches the holder the list was read from and replaces the list while
+// `clear` is still walking it. The caller holds the receiver, so the list
+// stays alive until `clear` returns.
+//
+// Only a program that declares a destructor pays for this: without one, a
+// release runs nothing but the runtime.
+
+type D {
+    int n;
+    List<H> back = [];
+}
+type H { List<D> ds; }
+
+void D.drop() {
+    print("drop " + n.to_str());
+    if (back.size() > 0) {
+        back[0].ds = [];
+    }
+}
+
+H h = H([]);
+h.ds.push(D(1, back: [h]));
+h.ds.push(D(2));
+h.ds.clear();
+print(h.ds.size());

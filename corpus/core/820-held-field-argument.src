@@ -1,0 +1,52 @@
+// A field read passed as an argument is kept alive by the CALLER for the
+// whole call (docs/ir-v0.md §5.1), even when the callee can reach the object
+// the field lives in and overwrite it. `f(h.p, h)` used to pass `h.p`
+// borrowed from `h`, so `h.p = P(6)` inside `f` freed it and the next
+// allocation reused its memory: this printed 99.
+
+type P { int x; }
+type H { P p; }
+
+void f(P p, H h) {
+    h.p = P(6);
+    P junk = P(99);     // would land where the freed `p` was
+    print(p.x);
+}
+
+H h = H(P(7));
+f(h.p, h);
+print(h.p.x);
+
+// The same through a local: a local holds its own reference, so passing it
+// costs nothing and is safe anyway.
+P mine = h.p;
+f(mine, h);
+print(mine.x);
+
+// Inside a method a bare field name is a read of `this.p` -- a place too.
+void H.pass() {
+    f(p, this);
+}
+h.p = P(8);
+h.pass();
+
+// A field of a field: only the value passed is held, and the chain between
+// is read with nothing running in between.
+type G { H h; }
+G g = G(H(P(9)));
+f(g.h.p, g.h);
+print(g.h.p.x);
+
+// An argument read out of a place, followed by a later argument that
+// replaces it: evaluation is left to right, so the value must be held from
+// the moment it is read, not from the call.
+H k = H(P(10));
+int two(P p, int n) {
+    P junk = P(98);
+    return p.x + n;
+}
+int replace(H h) {
+    h.p = P(0);
+    return 1;
+}
+print(two(k.p, replace(k)));

@@ -1,0 +1,32 @@
+// An element read passed as an argument is a place too: the only reference
+// to `xs[0]` is the list's, and a callee that clears the list drops it. The
+// caller holds the element across the call.
+
+type P { int x; }
+
+void f(P p, List<P> xs) {
+    xs.clear();
+    P junk = P(99);
+    print(p.x);
+}
+
+List<P> xs = [P(7)];
+f(xs[0], xs);
+print(xs.size());
+
+// An index that runs code can replace the collection before it is read:
+// the collection is held across the index, and the read sees the list that
+// was there when the expression started.
+type H { List<P> ps; }
+int swap(H h) {
+    h.ps = [P(3)];
+    List<P> junk = [P(97), P(96)];
+    return 1;
+}
+H h = H([P(1), P(2)]);
+print(h.ps[swap(h)].x);
+print(h.ps[0].x);
+
+// A plain index does not run code, so `h.ps[0]` alone costs nothing extra.
+P q = h.ps[0];
+print(q.x);

@@ -1,0 +1,57 @@
+// The receiver of a method is its hidden first argument, borrowed like the
+// others -- so a receiver read out of a place is held by the caller. Here the
+// method, or one of its arguments, replaces the very field the receiver was
+// read from.
+
+type P { int x; }
+type H { P p; }
+
+// The method replaces its own receiver's slot through another alias.
+void P.m(H h) {
+    h.p = P(0);
+    P junk = P(99);
+    print(x);
+}
+
+H h = H(P(7));
+h.p.m(h);
+print(h.p.x);
+
+// An argument replaces the receiver's slot before the call is entered.
+int P.plus(int y) {
+    return x + y;
+}
+int f(H h) {
+    h.p = P(100);
+    P junk = P(55);
+    return 1;
+}
+h.p = P(7);
+print(h.p.plus(f(h)));
+print(h.p.x);
+
+// An element as the receiver, and an interface call on a field.
+interface Shows {
+    int show(Box b);
+}
+type Q { int n; }
+int Q.show(Box b) {
+    b.s = Q(1);
+    Q junk = Q(98);
+    return n;
+}
+type Box { Shows s; }
+Box b = Box(Q(42));
+print(b.s.show(b));
+print(b.s.show(b));
+
+List<P> ps = [P(5)];
+type L { List<P> ps; }
+void P.wipe(L l) {
+    l.ps.clear();
+    P junk = P(97);
+    print(x);
+}
+L l = L(ps);
+l.ps[0].wipe(l);
+print(l.ps.size());

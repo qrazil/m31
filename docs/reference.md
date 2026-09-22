@@ -1653,7 +1653,14 @@ Refcount operations are non-atomic (§8.3).
 ### 7.2 Ownership protocol
 
   - **Arguments are borrowed.** Passing a value you already hold to a
-    function costs no refcount traffic.
+    function costs no refcount traffic. The caller keeps every argument —
+    the receiver of a method, and the operands of an operator, included —
+    alive until the call returns, even when the callee overwrites the field
+    or element it was read from: `f(h.p, h)` is safe when `f` assigns
+    `h.p`. A local, a parameter or `this` costs nothing to pass; a value
+    read out of a field or an element costs one retain and one release,
+    and only when something evaluated after it could run the program's
+    own code (docs/ir-v0.md §5.1).
   - **Returns are owned (+1).** The caller receives a reference and is
     responsible for it.
   - A value stored into a field, an element or a map entry is **retained**
