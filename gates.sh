@@ -190,6 +190,31 @@ run "formatter is idempotent" bash -c '
     done
     exit $bad'
 
+# The layout itself. The gates above prove the formatter harmless -- same
+# meaning, a fixed point -- and neither notices a comment moved to the wrong
+# side of a brace or a section divider hoisted away from its section, which
+# is what it did. Each `corpus/fmt/*.src` must format to its `.want`, written
+# by hand, and the `.want` must already be formatted.
+run "formatter fixtures" bash -c '
+    bad=0
+    for f in corpus/fmt/*.'"$LANG_EXT"'; do
+        [ -e "$f" ] || continue
+        want="${f%.'"$LANG_EXT"'}.want"
+        w=$(mktemp -d)
+        cp "$f" "$w/t.'"$LANG_EXT"'"
+        cp "$want" "$w/w.'"$LANG_EXT"'"
+        if ! ./target/debug/'"$LANG_BIN"' fmt "$w/t.'"$LANG_EXT"'"; then
+            bad=1
+        elif ! diff -q "$want" "$w/t.'"$LANG_EXT"'" >/dev/null; then
+            echo "formatted layout differs from $want:"
+            diff "$want" "$w/t.'"$LANG_EXT"'" | head -10
+            bad=1
+        fi
+        ./target/debug/'"$LANG_BIN"' fmt --check "$w/w.'"$LANG_EXT"'" || bad=1
+        rm -rf "$w"
+    done
+    exit $bad'
+
 # The same input must always produce the same C.
 #
 # It did not: the promoted-method list for embedding was built by iterating a

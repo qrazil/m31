@@ -5,69 +5,140 @@
 //! "one correct layout and nobody argues about it" without putting whitespace
 //! in the grammar. This is the half of that bargain the language owes.
 //!
-//! **Methods are grouped under their type.** Declaring them by qualified name
-//! lets them scatter through a file, which was accepted deliberately on the
-//! grounds that a formatter would gather them. So it does: every declaration
-//! is emitted in source order, each type immediately followed by its own
-//! methods, then free functions, then the top-level statements. That is safe
-//! because declarations are order-independent and statements keep their
-//! relative order.
+//! **Declarations stay in the order they were written, except that a method
+//! joins its type.** Declaring methods by qualified name lets them scatter
+//! through a file, which was accepted deliberately on the grounds that a
+//! formatter would gather them (docs/types.md). So it does, and that is the
+//! only thing it moves: a method separated from its type by some other
+//! declaration or statement is moved to follow the type's last member, and a
+//! method written above its type moves to just below it. Safe, because
+//! declarations are order-independent and statements keep their order.
+//!
+//! It used to do more -- every type first, then the free functions, then the
+//! statements -- and that was worth less than it cost. Section-divider
+//! comments (`// --- decoding ---`) belong to the file's layout, not to the
+//! declaration under them, and there is no right place to put one when the
+//! things around it are shuffled into a different order: the formatter
+//! hoisted them along with whichever type they happened to sit above. Keeping
+//! the written order is what gofmt does, and it keeps every comment in the
+//! place its author chose.
 //!
 //! Comments are trivia to the parser and absent from the AST, so a formatter
 //! that only walked the AST would silently delete them. The lexer keeps them
-//! aside with their positions and they are re-emitted by line.
+//! aside with their positions and they are re-emitted by line. A comment
+//! block TOUCHING the declaration below it -- no blank line between -- is
+//! that declaration's and travels with it. One with a blank line after it is
+//! free: it stays exactly where it was among the declarations.
+//!
+//! **Lines are not wrapped.** gofmt does not wrap and rustfmt does; this
+//! follows gofmt. Wrapping needs a width, a layout search and a rule for
+//! every construct that can break, and it turns a one-token edit into a
+//! reflowed paragraph in the diff. A line too long to read is better fixed by
+//! its author with a name for a subexpression, which no formatter can invent.
 
 use crate::ast::*;
-use crate::lexer::Comment;
+use crate::diag::Span;
+use crate::lexer::{Comment, Tok, Token};
+use std::collections::HashMap;
 
 pub struct Fmt {
     out: String,
     depth: usize,
     comments: Vec<Comment>,
     /// Which comments have been printed. A flag per comment rather than a
-    /// cursor, because items are printed out of source order: a cursor
-    /// advanced past one item's body swallowed the comments of every item
-    /// before it.
+    /// cursor, because a method can be printed out of source order: a cursor
+    /// advanced past one item's body would swallow the comments of every
+    /// item before it.
     done: Vec<bool>,
-    /// Each top-level item's first line mapped to its last -- the closing
-    /// brace, or the `;` of a bodiless declaration. A comment between the two
-    /// is in the item's body and stays there.
-    ends: std::collections::HashMap<u32, u32>,
     /// The first line of the item being printed. Body comments are only
     /// taken from its own range, never from an item printed later.
     lo: u32,
-    /// Comments claimed by a top-level item, keyed by the item's source
-    /// line. Assignment happens in SOURCE order before anything is printed,
-    /// because the printer reorders items -- a comment written above a free
-    /// function must travel with it, not stay where the line numbers put it.
-    owned: std::collections::BTreeMap<u32, Vec<Comment>>,
-    /// The file's header: the comment lines at the very top, when a blank
-    /// line separates them from what follows. They describe the file rather
-    /// than the first declaration, so they stay first when the printer
-    /// reorders -- without this, a header rode along with whichever item
-    /// happened to be declared first and ended up in the middle of the file.
-    header: Vec<Comment>,
+    /// The token stream, for what the AST does not record: where each block
+    /// closes. A comment after a block's last statement is still inside the
+    /// block, and only the closing brace's line says so.
+    toks: Vec<Token>,
+    /// For each `{` token, the index of the `}` that closes it.
+    closer: HashMap<usize, usize>,
+    /// How each string literal was written, by position. The formatter keeps
+    /// the spelling: decoding is many-to-one, and `"\u{feff}"` is written that
+    /// way so that it can be seen.
+    spellings: HashMap<(u32, u32), String>,
 }
 
 const INDENT: &str = "    ";
 
-pub fn format(
-    p: &Program,
-    comments: Vec<Comment>,
-    ends: std::collections::HashMap<u32, u32>,
-) -> String {
-    let n = comments.len();
+/// One thing at the top level, in the order the printer emits them.
+#[derive(Clone, Copy, PartialEq)]
+enum Unit {
+    /// Entry `i` of the source-ordered entries, with its own comments.
+    Entry(usize),
+    /// A free comment block: run `i`.
+    Free(usize),
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Import,
+    Prim,
+    /// A type or a function with a body.
+    Item,
+    Stmt,
+}
+
+/// A top-level declaration or statement.
+struct Entry<'p> {
+    what: What<'p>,
+    kind: Kind,
+    start: Span,
+    /// The line of its last token: the closing brace, or the `;`.
+    end: u32,
+    /// The comment block touching it from above.
+    comments: Vec<usize>,
+}
+
+enum What<'p> {
+    Import(&'p Import),
+    Type(&'p TypeDecl),
+    Func(&'p Func),
+    Stmt(&'p Stmt),
+}
+
+/// A run of own-line comments on consecutive lines, as comment indices.
+struct Run {
+    comments: Vec<usize>,
+    first: u32,
+    last: u32,
+}
+
+pub fn format(p: &Program, lexed: crate::lexer::Lexed) -> String {
+    let n = lexed.comments.len();
+    let mut closer = HashMap::new();
+    let mut open: Vec<usize> = Vec::new();
+    for (i, t) in lexed.toks.iter().enumerate() {
+        match t.tok {
+            Tok::LBrace => open.push(i),
+            Tok::RBrace => {
+                if let Some(o) = open.pop() {
+                    closer.insert(o, i);
+                }
+            }
+            _ => {}
+        }
+    }
     let mut f = Fmt {
         out: String::new(),
         depth: 0,
-        comments,
+        comments: lexed.comments,
         done: vec![false; n],
-        ends,
         lo: 0,
-        owned: std::collections::BTreeMap::new(),
-        header: Vec::new(),
+        toks: lexed.toks,
+        closer,
+        spellings: lexed
+            .spellings
+            .into_iter()
+            .map(|(s, text)| ((s.line, s.col), text))
+            .collect(),
     };
-    f.claim_item_comments(p);
     f.program(p);
     f.trailing();
     // Exactly one trailing newline, no blank lines before it.
@@ -91,97 +162,86 @@ impl Fmt {
         }
     }
 
-    /// Assign each comment to the top-level item it was written above.
-    ///
-    /// Done in source order, before printing, because the printer reorders
-    /// items: a comment above a free function must travel with that function
-    /// rather than stay where its line number happens to fall.
-    fn claim_item_comments(&mut self, p: &Program) {
-        // The header is a run of own-line comments on consecutive lines,
-        // starting before anything else in the file, and followed by a gap.
-        // A comment block touching the declaration below it documents that
-        // declaration instead, and stays with it.
-        let first_item = p
-            .imports
-            .iter()
-            .map(|i| i.span.line)
-            .chain(p.types.iter().map(|t| t.span.line))
-            .chain(p.funcs.iter().map(|f| f.span.line))
-            .chain(p.toplevel.iter().map(stmt_line))
-            .min()
-            .unwrap_or(u32::MAX);
-        let mut end = 0usize;
-        while end < self.comments.len()
-            && self.comments[end].own_line
-            && self.comments[end].line < first_item
-            && (end == 0 || self.comments[end].line == self.comments[end - 1].line + 1)
-        {
-            end += 1;
-        }
-        let gap_after = end > 0 && {
-            let last = self.comments[end - 1].line;
-            let next = self
-                .comments
-                .get(end)
-                .map_or(first_item, |c| c.line.min(first_item));
-            next > last + 1
-        };
-        if gap_after {
-            self.header = self.comments[..end].to_vec();
-            for d in &mut self.done[..end] {
-                *d = true;
-            }
-        }
+    // ---- the token stream -------------------------------------------------
 
-        // Every place a comment can attach, in source order: items, which
-        // are reordered and so take their comments with them, and top-level
-        // statements, which are not. A comment belongs to an item only when
-        // the item is the very next anchor below it and the comment is not
-        // inside some earlier item's body.
-        let mut anchors: Vec<(u32, bool)> = Vec::new();
-        for t in &p.types {
-            anchors.push((t.span.line, true));
-        }
-        for f in &p.funcs {
-            anchors.push((f.span.line, true));
-        }
-        for st in &p.toplevel {
-            anchors.push((stmt_line(st), false));
-        }
-        anchors.sort_unstable();
-
-        for i in 0..self.comments.len() {
-            if self.done[i] || !self.comments[i].own_line {
-                continue;
-            }
-            let line = self.comments[i].line;
-            let inside = self
-                .ends
-                .iter()
-                .any(|(&from, &to)| from <= line && line <= to);
-            if inside {
-                continue;
-            }
-            if let Some(&(at, is_item)) = anchors.iter().find(|(a, _)| *a > line) {
-                if is_item {
-                    self.owned
-                        .entry(at)
-                        .or_default()
-                        .push(self.comments[i].clone());
-                    self.done[i] = true;
-                }
-            }
-        }
+    /// The first token at or after `s`.
+    fn tok_at(&self, s: Span) -> usize {
+        self.toks
+            .partition_point(|t| (t.span.line, t.span.col) < (s.line, s.col))
     }
 
-    /// Emit the comments claimed by the item declared at `line`.
-    fn item_comments(&mut self, line: u32) {
-        if let Some(cs) = self.owned.remove(&line) {
-            for c in cs {
-                for part in c.text.lines() {
-                    self.line(part.trim());
-                }
+    /// The first `{` from token `i` on that is not inside parentheses or
+    /// brackets -- the body of whatever construct starts at `i`. A map
+    /// literal in a condition or a default argument is inside `(...)`.
+    fn body_open(&self, mut i: usize) -> Option<usize> {
+        let mut depth = 0i32;
+        while let Some(t) = self.toks.get(i) {
+            match t.tok {
+                Tok::LParen | Tok::LBracket => depth += 1,
+                Tok::RParen | Tok::RBracket => depth -= 1,
+                Tok::LBrace if depth <= 0 => return Some(i),
+                // A bodiless declaration: `prim`, `distinct`.
+                Tok::Semi if depth <= 0 => return None,
+                Tok::Eof => return None,
+                _ => {}
             }
+            i += 1;
+        }
+        None
+    }
+
+    /// The line of the brace closing the block that opens at token `open`.
+    fn close_line(&self, open: Option<usize>) -> Option<u32> {
+        open.and_then(|o| self.closer.get(&o))
+            .map(|&c| self.toks[c].span.line)
+    }
+
+    /// The line of the brace closing the body of the construct at `s`.
+    fn body_close(&self, s: Span) -> Option<u32> {
+        self.close_line(self.body_open(self.tok_at(s)))
+    }
+
+    /// The last line of the top-level declaration or statement at `s`: its
+    /// `;`, or the brace that closes it with no `else` after.
+    fn extent_end(&self, s: Span) -> u32 {
+        let mut i = self.tok_at(s);
+        let mut depth = 0i32;
+        while let Some(t) = self.toks.get(i) {
+            match t.tok {
+                Tok::LParen | Tok::LBracket | Tok::LBrace => depth += 1,
+                Tok::RParen | Tok::RBracket => depth -= 1,
+                Tok::RBrace => {
+                    depth -= 1;
+                    let more = matches!(self.toks.get(i + 1).map(|t| &t.tok), Some(Tok::KwElse));
+                    if depth <= 0 && !more {
+                        // A declaration may still end in `;` on this line,
+                        // as `Map<str, int> m = {};` does; same line either
+                        // way.
+                        return t.span.line;
+                    }
+                }
+                Tok::Semi if depth <= 0 => return t.span.line,
+                Tok::Eof => return t.span.line,
+                _ => {}
+            }
+            i += 1;
+        }
+        s.line
+    }
+
+    // ---- comments ---------------------------------------------------------
+
+    /// The last line a comment occupies; a block comment can span several.
+    fn last_line(&self, i: usize) -> u32 {
+        let c = &self.comments[i];
+        c.line + c.text.lines().count().saturating_sub(1) as u32
+    }
+
+    fn print_comment(&mut self, i: usize) {
+        self.done[i] = true;
+        let text = self.comments[i].text.clone();
+        for part in text.lines() {
+            self.line(part.trim());
         }
     }
 
@@ -193,118 +253,259 @@ impl Fmt {
             if self.done[i] || c.line < self.lo || c.line >= line {
                 continue;
             }
-            self.done[i] = true;
-            let c = c.clone();
             if c.own_line {
-                for part in c.text.lines() {
-                    self.line(part.trim());
-                }
+                self.print_comment(i);
             } else {
                 // Trailing: put it back on the line it followed.
+                self.done[i] = true;
+                let text = c.text.trim().to_string();
                 let t = self.out.trim_end().to_string();
-                self.out = format!("{t}  {}\n", c.text.trim());
+                self.out = format!("{t}  {text}\n");
             }
         }
     }
 
-    /// Before an item's closing brace: a comment after its last statement
-    /// is still inside it.
-    fn end_item(&mut self, line: u32) {
-        if let Some(&end) = self.ends.get(&line) {
-            self.comments_before(end);
+    /// Before a block's closing brace: a comment after its last statement is
+    /// still inside it. Printing it before the `}` is the whole fix for the
+    /// formatter that moved `return 1;  // why` below the brace.
+    fn close_block(&mut self, close: Option<u32>) {
+        if let Some(c) = close {
+            self.comments_before(c);
         }
-        self.lo = 0;
     }
 
     fn trailing(&mut self) {
         self.lo = 0;
         for i in 0..self.comments.len() {
-            if self.done[i] {
-                continue;
-            }
-            self.done[i] = true;
-            let c = self.comments[i].clone();
-            for part in c.text.lines() {
-                self.line(part.trim());
+            if !self.done[i] {
+                self.print_comment(i);
             }
         }
     }
 
     // ---- items --------------------------------------------------------
 
+    /// The top level, in source order but for methods joining their types.
     fn program(&mut self, p: &Program) {
-        if !self.header.is_empty() {
-            for c in std::mem::take(&mut self.header) {
-                self.line(c.text.trim());
-            }
-            self.blank();
+        // Every declaration and statement, in source order.
+        let mut entries: Vec<Entry> = Vec::new();
+        let mut raw: Vec<(What, Kind, Span)> = Vec::new();
+        for i in &p.imports {
+            raw.push((What::Import(i), Kind::Import, i.span));
         }
-        // Imports first and in source order, which is where the parser
-        // demands them: a reader learns a file's dependencies without
-        // reading the file.
-        if !p.imports.is_empty() {
-            for i in &p.imports {
-                self.item_comments(i.span.line);
-                self.line(&format!("import {};", i.name));
-            }
-            self.blank();
-        }
-        // `prim` declarations come right after the imports and stay
-        // together. A run of them is a list -- the module's whole seam to C,
-        // readable in one glance -- and spacing them apart like definitions
-        // would hide that they are one thing. The same reason `import` lines
-        // are not separated.
-        let mut any_prim = false;
-        for f in p.funcs.iter().filter(|f| f.recv.is_none() && f.is_prim) {
-            self.item_comments(f.span.line);
-            self.func(f);
-            any_prim = true;
-        }
-        if any_prim {
-            self.blank();
-        }
-
-        // Types first, each followed by its own methods. Declarations are
-        // order-independent, so this cannot change what the program means.
         for t in &p.types {
-            self.item_comments(t.span.line);
-            self.type_decl(t);
-            for f in p
-                .funcs
-                .iter()
-                .filter(|f| f.recv.as_deref() == Some(&t.name))
-            {
-                self.blank();
-                self.item_comments(f.span.line);
-                self.func(f);
-            }
-            self.blank();
+            raw.push((What::Type(t), Kind::Item, t.span));
         }
-
-        for f in p.funcs.iter().filter(|f| f.recv.is_none() && !f.is_prim) {
-            self.item_comments(f.span.line);
-            self.func(f);
-            self.blank();
+        for f in &p.funcs {
+            let k = if f.is_prim { Kind::Prim } else { Kind::Item };
+            raw.push((What::Func(f), k, f.span));
         }
-
-        // A method on a builtin or on a type that is not declared here would
-        // otherwise be dropped. Nothing should hit this, but silently losing
-        // a declaration is the one thing a formatter must never do.
-        let declared: Vec<&str> = p.types.iter().map(|t| t.name.as_str()).collect();
-        for f in p
-            .funcs
-            .iter()
-            .filter(|f| f.recv.as_deref().is_some_and(|r| !declared.contains(&r)))
-        {
-            self.item_comments(f.span.line);
-            self.func(f);
-            self.blank();
-        }
-
         for s in &p.toplevel {
-            self.comments_before(stmt_line(s));
-            self.stmt(s);
+            raw.push((What::Stmt(s), Kind::Stmt, stmt_span(s)));
         }
+        raw.sort_by_key(|(_, _, s)| (s.line, s.col));
+        for (what, kind, start) in raw {
+            let end = self.extent_end(start);
+            entries.push(Entry {
+                what,
+                kind,
+                start,
+                end,
+                comments: Vec::new(),
+            });
+        }
+
+        // Own-line comments outside every entry, in runs of consecutive
+        // lines. A run touching the entry below it is that entry's; any other
+        // run is free and keeps its place. A comment opening an entry's own
+        // first line (`/* x */ int y = 1;`) is the entry's too.
+        let inside =
+            |line: u32, es: &[Entry]| es.iter().any(|e| e.start.line <= line && line <= e.end);
+        let mut runs: Vec<Run> = Vec::new();
+        for i in 0..self.comments.len() {
+            let c = &self.comments[i];
+            if !c.own_line {
+                continue;
+            }
+            if let Some(e) = entries.iter_mut().find(|e| e.start.line == c.line) {
+                e.comments.push(i);
+                continue;
+            }
+            if inside(c.line, &entries) {
+                continue;
+            }
+            let (first, last) = (c.line, self.last_line(i));
+            match runs.last_mut() {
+                Some(r) if r.last + 1 == first => {
+                    r.comments.push(i);
+                    r.last = last;
+                }
+                _ => runs.push(Run {
+                    comments: vec![i],
+                    first,
+                    last,
+                }),
+            }
+        }
+        let mut free: Vec<Run> = Vec::new();
+        for r in runs {
+            match entries.iter_mut().find(|e| e.start.line == r.last + 1) {
+                Some(e) => {
+                    // Above any comment on the entry's own first line.
+                    let mut cs = r.comments;
+                    cs.append(&mut e.comments);
+                    e.comments = cs;
+                }
+                None => free.push(r),
+            }
+        }
+
+        let order = self.order(&entries, &free);
+
+        let mut prev: Option<Unit> = None;
+        for u in order {
+            let blank = match (prev, u) {
+                (None, _) => false,
+                (Some(Unit::Free(_)), _) => true,
+                (Some(Unit::Entry(e)), Unit::Free(r)) => {
+                    // The source's own spacing, except that an item is always
+                    // set apart from what follows it.
+                    entries[e].kind == Kind::Item || self.gap_before(&free[r], &entries, &free)
+                }
+                (Some(Unit::Entry(a)), Unit::Entry(b)) => {
+                    let (a, b) = (entries[a].kind, entries[b].kind);
+                    // Runs of imports, of `prim`s and of statements are
+                    // lists and stay together; a definition stands apart.
+                    !(a == b && a != Kind::Item)
+                }
+            };
+            if blank {
+                self.blank();
+            }
+            match u {
+                Unit::Free(r) => {
+                    for &i in &free[r].comments {
+                        self.print_comment(i);
+                    }
+                }
+                Unit::Entry(e) => self.entry(&entries[e]),
+            }
+            prev = Some(u);
+        }
+    }
+
+    /// Whether the source had a blank line above free run `r`.
+    fn gap_before(&self, r: &Run, entries: &[Entry], free: &[Run]) -> bool {
+        let above = entries
+            .iter()
+            .map(|e| e.end)
+            .chain(free.iter().map(|f| f.last))
+            .filter(|&l| l < r.first)
+            .max();
+        above.is_none_or(|l| r.first > l + 1)
+    }
+
+    /// The order to print in: source order, except that a method of a type
+    /// declared here follows that type's group -- the type and the methods
+    /// already placed after it. A method already with its group, with at most
+    /// comments between, stays put, so a divider inside a type's run of
+    /// methods is not disturbed; one separated from its group by anything
+    /// else is moved to the end of the group, taking only the comments that
+    /// touch it.
+    fn order(&self, entries: &[Entry], free: &[Run]) -> Vec<Unit> {
+        let mut src: Vec<(u32, Unit)> = Vec::new();
+        for (i, e) in entries.iter().enumerate() {
+            src.push((e.start.line, Unit::Entry(i)));
+        }
+        for (i, r) in free.iter().enumerate() {
+            src.push((r.first, Unit::Free(i)));
+        }
+        src.sort_by_key(|(l, _)| *l);
+
+        let types: Vec<&str> = entries
+            .iter()
+            .filter_map(|e| match e.what {
+                What::Type(t) => Some(t.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        let recv_of = |u: Unit| match u {
+            Unit::Entry(i) => match entries[i].what {
+                What::Func(f) => f.recv.as_deref().filter(|r| types.contains(r)),
+                _ => None,
+            },
+            Unit::Free(_) => None,
+        };
+
+        let mut out: Vec<Unit> = Vec::new();
+        // Where each type's group currently ends in `out`.
+        let mut last: HashMap<&str, usize> = HashMap::new();
+        // Methods met before their type, waiting for it.
+        let mut waiting: HashMap<&str, Vec<Unit>> = HashMap::new();
+        for (_, u) in src {
+            if let Unit::Entry(i) = u {
+                if let What::Type(t) = entries[i].what {
+                    out.push(u);
+                    let mut at = out.len() - 1;
+                    for m in waiting.remove(t.name.as_str()).unwrap_or_default() {
+                        out.push(m);
+                        at = out.len() - 1;
+                    }
+                    last.insert(t.name.as_str(), at);
+                    continue;
+                }
+            }
+            let Some(r) = recv_of(u) else {
+                out.push(u);
+                continue;
+            };
+            let Some(&at) = last.get(r) else {
+                waiting.entry(r).or_default().push(u);
+                continue;
+            };
+            let settled = out[at + 1..].iter().all(|x| matches!(x, Unit::Free(_)));
+            if settled {
+                out.push(u);
+                last.insert(r, out.len() - 1);
+            } else {
+                out.insert(at + 1, u);
+                for v in last.values_mut() {
+                    if *v > at {
+                        *v += 1;
+                    }
+                }
+                last.insert(r, at + 1);
+            }
+        }
+        // A method whose type never came: not possible for a type declared
+        // here, but losing a declaration is the one thing a formatter must
+        // never do.
+        let mut rest: Vec<Unit> = waiting.into_values().flatten().collect();
+        rest.sort_by_key(|u| match u {
+            Unit::Entry(i) => (entries[*i].start.line, entries[*i].start.col),
+            Unit::Free(_) => (0, 0),
+        });
+        out.extend(rest);
+        out
+    }
+
+    fn entry(&mut self, e: &Entry) {
+        for &i in &e.comments {
+            self.print_comment(i);
+        }
+        self.lo = e.start.line;
+        match e.what {
+            What::Import(i) => self.line(&format!("import {};", i.name)),
+            What::Type(t) => self.type_decl(t),
+            What::Func(f) => self.func(f),
+            What::Stmt(s) => self.stmt(s),
+        }
+        // Whatever is left in the entry's lines: a comment trailing its last
+        // line (`}  // end`), or one inside an expression that spans lines.
+        // Printed here, it cannot end up attached to some later item.
+        self.lo = e.start.line;
+        self.comments_before(e.end + 1);
+        self.lo = 0;
     }
 
     fn type_decl(&mut self, t: &TypeDecl) {
@@ -326,7 +527,6 @@ impl Fmt {
             format!("<{}>", t.tparams.join(", "))
         };
         self.line(&format!("{vis}{kw} {}{tp} {{", shown(&t.name)));
-        self.lo = t.span.line;
         self.depth += 1;
         for v in &t.variants {
             self.comments_before(v.span.line);
@@ -358,7 +558,7 @@ impl Fmt {
                 self.params(&m.params)
             ));
         }
-        self.end_item(t.span.line);
+        self.close_block(self.body_close(t.span));
         self.depth -= 1;
         self.line("}");
     }
@@ -389,10 +589,8 @@ impl Fmt {
             self.ty(f.ret),
             self.params(&f.params)
         ));
-        self.lo = f.span.line;
         self.depth += 1;
-        self.block(&f.body);
-        self.end_item(f.span.line);
+        self.block(&f.body, self.body_close(f.span));
         self.depth -= 1;
         self.line("}");
     }
@@ -412,11 +610,14 @@ impl Fmt {
 
     // ---- statements ---------------------------------------------------
 
-    fn block(&mut self, stmts: &[Stmt]) {
+    /// A block's statements, then any comment before its closing brace,
+    /// which is on line `close`.
+    fn block(&mut self, stmts: &[Stmt], close: Option<u32>) {
         for s in stmts {
-            self.comments_before(stmt_line(s));
+            self.comments_before(stmt_span(s).line);
             self.stmt(s);
         }
+        self.close_block(close);
     }
 
     fn stmt(&mut self, s: &Stmt) {
@@ -470,10 +671,12 @@ impl Fmt {
             Stmt::Spawn { name, args, .. } => {
                 self.line(&format!("spawn {name}({});", self.args(args)));
             }
-            Stmt::While { cond, body, .. } => {
+            Stmt::While {
+                cond, body, span, ..
+            } => {
                 self.line(&format!("while ({}) {{", self.expr(cond)));
                 self.depth += 1;
-                self.block(body);
+                self.block(body, self.body_close(*span));
                 self.depth -= 1;
                 self.line("}");
             }
@@ -482,7 +685,7 @@ impl Fmt {
                 name,
                 iter,
                 body,
-                ..
+                span,
             } => {
                 self.line(&format!(
                     "for ({} {name} in {}) {{",
@@ -490,12 +693,14 @@ impl Fmt {
                     self.expr(iter)
                 ));
                 self.depth += 1;
-                self.block(body);
+                self.block(body, self.body_close(*span));
                 self.depth -= 1;
                 self.line("}");
             }
             Stmt::Match {
-                scrutinee, arms, ..
+                scrutinee,
+                arms,
+                span,
             } => {
                 self.line(&format!("match ({}) {{", self.expr(scrutinee)));
                 self.depth += 1;
@@ -513,19 +718,32 @@ impl Fmt {
                     };
                     self.line(&format!("case {head}: {{"));
                     self.depth += 1;
-                    self.block(&a.body);
+                    self.block(&a.body, self.body_close(a.span));
                     self.depth -= 1;
                     self.line("}");
                 }
+                // After the last arm, still inside the `match`.
+                self.close_block(self.body_close(*span));
                 self.depth -= 1;
                 self.line("}");
             }
             Stmt::If {
-                cond, then, els, ..
+                cond,
+                then,
+                els,
+                span,
             } => {
+                // The then-block's braces, and the else-block's: the `{`
+                // two tokens after the `}` that closes the then-block, past
+                // the `else`.
+                let open = self.body_open(self.tok_at(*span));
+                let else_open = open
+                    .and_then(|o| self.closer.get(&o))
+                    .map(|&c| c + 2)
+                    .filter(|&i| matches!(self.toks.get(i).map(|t| &t.tok), Some(Tok::LBrace)));
                 self.line(&format!("if ({}) {{", self.expr(cond)));
                 self.depth += 1;
-                self.block(then);
+                self.block(then, self.close_line(open));
                 self.depth -= 1;
                 match els {
                     // `else if` stays on one line rather than nesting.
@@ -542,7 +760,7 @@ impl Fmt {
                     Some(e) => {
                         self.line("} else {");
                         self.depth += 1;
-                        self.block(e);
+                        self.block(e, self.close_line(else_open));
                         self.depth -= 1;
                         self.line("}");
                     }
@@ -616,7 +834,10 @@ impl Fmt {
             Expr::Int(n, _) => n.to_string(),
             Expr::Float(x, _) => fmt_float(*x),
             Expr::Bool(b, _) => b.to_string(),
-            Expr::Str(s, _) => format!("{s:?}"),
+            Expr::Str(s, span) => match self.spellings.get(&(span.line, span.col)) {
+                Some(text) => text.clone(),
+                None => crate::lexer::quote(s),
+            },
             Expr::Var(n, _) => n.clone(),
             Expr::Bin(op, l, r, _) => {
                 let p = prec(*op);
@@ -759,7 +980,7 @@ fn render_ty(exprs: &[TyExpr], t: &Ty) -> String {
     }
 }
 
-fn stmt_line(s: &Stmt) -> u32 {
+fn stmt_span(s: &Stmt) -> Span {
     match s {
         Stmt::Decl { span, .. }
         | Stmt::Assign { span, .. }
@@ -773,7 +994,7 @@ fn stmt_line(s: &Stmt) -> u32 {
         | Stmt::Spawn { span, .. }
         | Stmt::While { span, .. }
         | Stmt::ForIn { span, .. }
-        | Stmt::If { span, .. } => span.line,
+        | Stmt::If { span, .. } => *span,
     }
 }
 

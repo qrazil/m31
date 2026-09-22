@@ -1,0 +1,29 @@
+// Every escape a string literal has (§1.5), checked byte by byte.
+//
+// `\xNN` is one byte and stops at 7f; `\u{N}` is one character, written as
+// its UTF-8 bytes. Everything else between the quotes is taken as it is,
+// control characters included.
+
+void bytes_of(str s) {
+    bytes b = s.to_bytes();
+    str line = str(b.size()) + ":";
+    for (int x in b) {
+        line = line + " " + str(x);
+    }
+    print(line);
+}
+
+bytes_of("\\\"\n\t\r\0");       // the short forms
+bytes_of("\x41\x7f\x00\x1b");   // \x, either case of digit
+bytes_of("\x4a\x4A");
+bytes_of("\x411");              // two digits, never three: A then 1
+bytes_of("\u{41}");             // ASCII through \u is one byte
+bytes_of("\u{e9}");             // é: two bytes
+bytes_of("\u{00E9}9");          // é then 9 -- the braces delimit
+bytes_of("\u{20ac}");           // €: three
+bytes_of("\u{1F600}");          // four
+bytes_of("\u{10ffff}");         // the last scalar value
+bytes_of("\u{feff}");           // a BOM, visible because it is escaped
+bytes_of("e\u{301}");           // e and a combining acute: two characters
+print("\u{e9}" == "é");         // one value, however it is spelled
+print("caf\u{e9}".size());

@@ -324,6 +324,9 @@ start."*
   refcount invariant is not checked here, because `abort()` skips `atexit`.
 - **`corpus/errors/`** — programs that must be rejected, with their expected
   diagnostic. Diagnostics rot silently without this.
+- **`corpus/fmt/`** — formatter layout: `name.src` must format to the
+  hand-written `name.want`. Checked by `gates.sh`, not `run.sh`; a `name.out`
+  lets the meaning gate run the program too.
 
 The unit tests in `src/tests.rs` cover what the corpus structurally cannot
 see. A redundant retain/release pair, an unreachable block or a stray
@@ -391,9 +394,13 @@ half of the braces decision: the case for braces over significant indentation
 was that a formatter gives you one correct layout without putting whitespace
 in the grammar, so the language owes you the formatter.
 
-It **groups methods under their type**. Declaring them by qualified name lets
-them scatter through a file, which was accepted on exactly this basis. Safe,
-because declarations are order-independent; statements keep their order.
+It **keeps declarations in the order written, except that a method joins its
+type**. Declaring methods by qualified name lets them scatter through a file,
+which was accepted on exactly this basis; nothing else moves, so a section
+divider stays in its section. A comment block touching the declaration below
+it travels with it; one with a blank line after it stays where it is. String
+literals are printed as they were spelled. **Lines are not wrapped** — gofmt's
+choice, not rustfmt's; see the header of `src/fmt.rs`.
 
 Two properties are gated rather than asserted, because a formatter that
 quietly alters a program is worse than no formatter:
@@ -401,6 +408,9 @@ quietly alters a program is worse than no formatter:
 - **it preserves meaning** — every corpus program emits byte-identical C
   before and after formatting
 - **it is idempotent** — formatting twice matches formatting once
+
+and the layout itself is pinned by hand-written fixtures in `corpus/fmt/`
+(`name.src` formats to `name.want`).
 
 ## Two rules that look like details and are not
 

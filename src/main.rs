@@ -132,9 +132,8 @@ fn main() -> ExitCode {
 /// Format a source file. Parses only -- it must work on a program that does
 /// not typecheck, because that is exactly when you reach for the formatter.
 fn reformat(src: &str, module: &str) -> Result<String, diag::Diag> {
-    let (toks, comments) = lexer::Lexer::tokenize_with_comments(src)?;
-    let toks_copy = toks.clone();
-    let mut p = parser::Parser::new(toks);
+    let lexed = lexer::Lexer::tokenize_for_fmt(src)?;
+    let mut p = parser::Parser::new(lexed.toks.clone());
     // The formatter must be able to read the standard library's own source,
     // which is the only source that may write `prim`. Deciding that by module
     // name is right here and nowhere else: this reads a file to print it back,
@@ -145,51 +144,7 @@ fn reformat(src: &str, module: &str) -> Result<String, diag::Diag> {
     }
     let prog = p.parse_program(module)?;
     fmt::set_type_names(&prog);
-    let ends = item_extents(&toks_copy, &prog);
-    Ok(fmt::format(&prog, comments, ends))
-}
-
-/// Where each top-level declaration ends, by line, keyed by where it starts.
-///
-/// The AST records where a declaration begins but not where it ends, and the
-/// formatter needs both: a comment between the two is inside the body and
-/// must stay there when declarations are reordered. The token stream has the
-/// answer -- the brace that closes the first one opened, or the `;` of a
-/// declaration with no body.
-fn item_extents(toks: &[lexer::Token], prog: &ast::Program) -> std::collections::HashMap<u32, u32> {
-    use lexer::Tok;
-    let mut starts: Vec<(u32, bool)> = Vec::new();
-    for t in &prog.types {
-        starts.push((t.span.line, t.distinct_base.is_some()));
-    }
-    for f in &prog.funcs {
-        starts.push((f.span.line, f.is_prim));
-    }
-    let mut out = std::collections::HashMap::new();
-    for (line, bodiless) in starts {
-        let Some(mut i) = toks.iter().position(|t| t.span.line >= line) else {
-            continue;
-        };
-        let mut depth = 0i32;
-        while i < toks.len() {
-            match toks[i].tok {
-                Tok::Semi if bodiless && depth == 0 => break,
-                Tok::LBrace => depth += 1,
-                Tok::RBrace => {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                }
-                _ => {}
-            }
-            i += 1;
-        }
-        if let Some(t) = toks.get(i) {
-            out.insert(line, t.span.line);
-        }
-    }
-    out
+    Ok(fmt::format(&prog, lexed))
 }
 
 fn compile(entry: &str, mode: &str) -> Result<String, modules::Located> {

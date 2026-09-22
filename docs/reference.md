@@ -47,7 +47,27 @@ reserved only in the sense that nothing may shadow a type name (§4.1).
 | Integer | `0`, `42`. Decimal only. No sign — `-1` is unary minus applied to `1`. |
 | Float | `1.0`, `3.14`, `2.5e3`. **Always a dot with digits on both sides** — not `1.` and not `.5`. An exponent only after the dot form: `1.0e9`, not `1e9`. A literal too large **or too small** to represent is an error: one that parses to exactly zero has lost its whole value. Arithmetic that underflows at run time is ordinary IEEE. |
 | Boolean | `true`, `false` |
-| String | `"..."`, with escapes `\\` `\"` `\n` `\t` `\0` |
+| String | `"..."`, with the escapes below. Any other character stands for itself, byte for byte — control characters, a BOM and combining marks included — except a raw newline, which is an error: a literal ends on its line. |
+
+| Escape | Bytes |
+|---|---|
+| `\\` `\"` | a backslash, a quote |
+| `\n` `\t` `\r` `\0` | 0A, 09, 0D, 00 |
+| `\xNN` | the one byte `NN`: exactly two hex digits, either case, **00 to 7F** |
+| `\u{N}` | the Unicode scalar value `N`, one to six hex digits, as its UTF-8 bytes |
+
+Anything else after a backslash is an error, including C's `\a` `\b` `\f`
+`\v` (write `\x07` and so on) and C's and Go's fixed-width `\u00e9` (write
+`\u{e9}`). `\x` takes exactly two digits, where C takes as many as follow:
+`"\x411"` is `A1`. `\u{}` refuses a surrogate and anything past `10FFFF`,
+which have no UTF-8 form.
+
+**A string literal is always valid UTF-8.** The source is, `\u{}` produces
+only scalar values, and `\x` stops at 7F — a lone byte from 80 up is not
+text. Whether a `str` may hold invalid UTF-8 is open (§3.10); until it is
+decided, a literal does not decide it. Allowing `\x80`–`\xFF` later is
+additive; forbidding it once programs rely on it would not be. Raw octets
+are a `bytes`, such as `[233]` (§3.10).
 
 A `str` carries its length, so `\0` is an ordinary character:
 `"a\0b".size()` is 3. Strings are not NUL-terminated.
@@ -606,7 +626,15 @@ raw octets; this language has not decided. Now that `bytes` exists the Oro
 rule is reachable (the file reader would return `bytes`, and `utf8()` would
 be the one way in), but it changes what `io.read` returns and what
 `substr` may do, so it waits for the `io` rewrite rather than riding in with
-the type.
+the type. String literals already keep to the Oro rule — `\x` stops at 7F
+(§1.5) — so that neither answer is ruled out.
+
+Text built from byte values at run time goes through `bytes`: push the
+values, then decode once with `utf8()`. That is also how a `\uXXXX` from a
+wire format becomes text. There is no function from one `int` to a one-byte
+`str`: below 80 it would be a one-byte `bytes` decoded, spelled
+differently, and from 80 up the result is not text, which is the open
+question again.
 
 ---
 
@@ -1302,10 +1330,13 @@ arg         = expr | IDENT ":" expr ;                 (* positional before named
 ```
 
 Lexical: `INT` is decimal digits. `FLOAT` has a dot with digits on **both**
-sides — `1.0`, never `1.` or `.5` — and no exponent, so whether a literal is
-a float is decided by one character. `IDENT` is a letter or `_` followed by
-letters, digits or `_`, and **may not begin with `__`**, which is reserved
-(§10.1).
+sides — `1.0`, never `1.` or `.5` — and an exponent only after that form
+(`1.0e9`), so whether a literal is a float is decided by one character.
+`STR` is `"`, then any bytes but `"`, `\` and a newline, or an escape —
+`\\` `\"` `\n` `\t` `\r` `\0` `\x` two hex digits up to `7F`, `\u{` one to six hex
+digits `}` naming a scalar value — then `"` (§1.5). `IDENT` is a letter or
+`_` followed by letters, digits or `_`, and **may not begin with `__`**,
+which is reserved (§10.1).
 
 **No trailing commas**, anywhere a list is closed by a bracket. The compiler
 currently accepts `[1, 2,]` and `{"a": 1,}`; that is a bug, and it is
