@@ -66,15 +66,31 @@ run "runtime stays separate TU" bash -c '
     fi'
 
 # Emitted C must compile warning-free under both compilers. run.sh enforces
-# this per-program; this checks the runtime itself.
+# this per-program; this checks the runtime itself -- with each sys-layer
+# backend (docs/sys-layer.md), since rt.c #includes exactly one of them and
+# the other would otherwise go uncompiled. The raw backend only exists for
+# Linux on the three architectures it has system call tables for.
 run "runtime compiles clean" bash -c '
+    backends=("")
+    if [ "$(uname -s)" = Linux ]; then
+        case $(uname -m) in x86_64|aarch64|riscv64) backends+=(-DRT_SYS_RAW) ;; esac
+    fi
     for cc in gcc clang; do
         command -v "$cc" >/dev/null || continue
         for opt in -O0 -O2; do
-            out=$("$cc" "$opt" -Wall -Wextra -DRC_DEBUG -I runtime -c runtime/rt.c -o /dev/null 2>&1)
-            if [ -n "$out" ]; then echo "$cc $opt:"; echo "$out"; exit 1; fi
+            for b in "${backends[@]}"; do
+                out=$("$cc" "$opt" $b -Wall -Wextra -DRC_DEBUG -I runtime -c runtime/rt.c -o /dev/null 2>&1)
+                if [ -n "$out" ]; then echo "$cc $opt $b:"; echo "$out"; exit 1; fi
+            done
         done
     done'
+
+# Every function in runtime/sys.h, against every backend this machine can
+# build: libc and raw natively, raw with no C library linked at all, and raw
+# for aarch64 and riscv64 under qemu-user when those tools are present. Both
+# backends must return the same value -- the same -errno included -- for the
+# same situation, which no corpus program asks directly.
+run "sys layer, every backend" bash runtime/sys_test.sh
 
 # The formatter must not change what a program means, and must reach a fixed
 # point. Both are checked against every corpus program rather than asserted:
@@ -200,6 +216,13 @@ run "emission is reproducible" bash -c '
 
 if [ $quick -eq 0 ]; then
     run "corpus" bash run.sh
+    # The whole corpus again with the runtime on raw system calls: same
+    # programs, same expected output, no C library underneath print or io.
+    # Checked here on x86-64 because that is what this runs on; the raw
+    # backend's other architectures are covered by the sys-layer gate above.
+    if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then
+        run "corpus (raw syscalls)" env RT_CFLAGS=-DRT_SYS_RAW bash run.sh
+    fi
 fi
 
 echo

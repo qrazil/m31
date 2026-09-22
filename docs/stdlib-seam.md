@@ -213,8 +213,11 @@ file, and `prim` is how the language names it.
 
 ### What `io` needs before it can move down
 
-`io` currently crosses at `fopen`/`fread`, which puts buffering, line
-splitting and errno policy in C. Moving the seam down to `open`/`read`/
+`io` currently crosses at whole-file primitives (`rt_file_read` and
+friends), which puts buffering, line splitting and errno policy in C. Below
+those, every system call already goes through one small layer with a libc
+and a raw-Linux implementation -- `docs/sys-layer.md`, which also lists the
+fd-based primitives `io` moves to. Moving the seam down to `open`/`read`/
 `write`/`close` puts all of that in the language, and needs three things the
 language does not have yet. Each is a core feature, not a library one, so
 each is a freeze decision:

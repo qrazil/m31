@@ -1,0 +1,360 @@
+# The sys layer — everything below the language, in one place
+
+`docs/stdlib-seam.md` §5 set the rule: the standard library is written in
+the language all the way down to the operating system, and `prim` exists
+only where no language can reach. This document is what sits on the other
+side of that line. It is Go's `syscall.Syscall` in our terms: one small,
+explicit C interface, `runtime/sys.h`, with two implementations chosen at
+build time.
+
+| | file | selected by | reaches the kernel through |
+|---|---|---|---|
+| **libc** | `runtime/sys_libc.c` | default | the C library's POSIX functions |
+| **raw** | `runtime/sys_linux.c` | `-DRT_SYS_RAW` | `syscall` / `svc #0` / `ecall`, inline assembly |
+
+Decided **2026-09-21**. The recommendation (§7) is libc everywhere by
+default and raw system calls as an opt-in Linux backend, both behind the
+same functions.
+
+---
+
+## 1. The shape
+
+### One convention: a value, or -errno
+
+Every function returns an `int64_t`: non-negative on success, **-errno** on
+failure — exactly what the Linux kernel returns from a system call. No
+global `errno` is read or written anywhere above the layer.
+
+Two reasons, and the second is the one that decides it:
+
+  - **It is what the raw backend gets for free.** The kernel already
+    returns -errno in a register; any other convention would be a
+    translation in the one file whose whole point is having none.
+  - **It is what a `prim` can carry.** A primitive returns a scalar, a
+    `str`, or pushes onto a collection it was handed — never an `Option` or
+    a `Result` (`stdlib-seam.md` §2). One `int` that is either the answer
+    or a negative errno is the whole result in one scalar; the library
+    builds its `Result` in source from the sign.
+
+The libc backend turns C's `-1`-and-`errno` into the same thing, in one
+helper (`ret`).
+
+### One numbering: Linux's, on every host
+
+The errno *values* are Linux's (`SYS_ENOENT` = 2, `SYS_EAGAIN` = 11, …) on
+every host, not whatever the host's C library uses. On Linux both backends
+agree by construction. On macOS and the BSDs the common values — the three
+`lib/io.src` names, `ENOENT` 2, `EACCES` 13, `EISDIR` 21 — happen to match,
+but others do not (`EAGAIN` is 35 on macOS, `ENOSYS` 78), so the libc
+backend translates through a `switch` on the host's symbolic names. On
+Linux every case of that switch is the identity; it is compiled and run by
+the corpus anyway, so the code a macOS build depends on is not dead code
+here. A host errno with no case passes through unchanged — still an error,
+just in the host's numbering.
+
+This is what lets `from_errno` in `lib/io.src` be written once, with
+numbers, for every target.
+
+### Flags and clocks are the layer's own constants
+
+`SYS_O_*`, `SYS_SEEK_*`, `SYS_CLOCK_*` and `SysStat` belong to the layer,
+not to the host. They have to: `O_DIRECTORY` is `0200000` on x86-64 and
+`040000` on arm64; `CLOCK_MONOTONIC` is 1 on Linux and 6 on macOS; `struct
+stat` has a different layout on every architecture. A number that crosses
+into the language through a `prim` must mean the same thing on every
+target, so each backend maps. The `SYS_O_*` values are x86-64 Linux's, which
+makes the raw mapping the identity there and a single bit on arm64.
+
+Close-on-exec is not a flag. Every descriptor the runtime opens has it,
+because a descriptor leaking into a child process is never what a program
+meant — Go makes the same choice in `os.OpenFile`.
+
+### Why the implementation is `#include`d by `rt.c`
+
+`run.sh`, `gates.sh` and anyone building by hand compile one runtime file,
+`runtime/rt.c`, and `docs/ir-v0.md` §7.1 requires it to stay a translation
+unit separate from the emitted program. Including the chosen backend from
+`rt.c` keeps both true: the runtime is still one TU, still separate, and
+the backend is a `-D` flag rather than a different list of files to
+remember on every build line. The functions are extern, not `static`, so
+the ones the runtime does not call yet do not warn, and a test can call
+them all.
+
+---
+
+## 2. The operations
+
+### Implemented now
+
+| function | returns | libc | raw x86-64 | raw aarch64 / riscv64 |
+|---|---|---|---|---|
+| `sys_open(path, flags, mode)` | fd | `open` | `openat` 257 | `openat` 56 |
+| `sys_read(fd, buf, n)` | bytes, 0 at end | `read` | `read` 0 | `read` 63 |
+| `sys_write(fd, buf, n)` | bytes (may be short) | `write` | `write` 1 | `write` 64 |
+| `sys_close(fd)` | 0 | `close` | `close` 3 | `close` 57 |
+| `sys_lseek(fd, off, whence)` | new offset | `lseek` | `lseek` 8 | `lseek` 62 |
+| `sys_fstat(fd, &SysStat)` | 0 | `fstat` | `statx` 332 | `statx` 291 |
+| `sys_isatty(fd)` | 1 or 0 | `isatty` | `ioctl(TCGETS)` 16 | `ioctl(TCGETS)` 29 |
+| `sys_mkdir(path, mode)` | 0 | `mkdir` | `mkdirat` 258 | `mkdirat` 34 |
+| `sys_unlink(path)` | 0 | `unlink` | `unlinkat` 263 | `unlinkat` 35 |
+| `sys_rmdir(path)` | 0 | `rmdir` | `unlinkat(AT_REMOVEDIR)` | same |
+| `sys_rename(from, to)` | 0 | `rename` | `renameat2` 316 | `renameat2` 276 |
+| `sys_clock_ns(clock)` | nanoseconds | `clock_gettime` | `clock_gettime` 228 | `clock_gettime` 113 |
+| `sys_getrandom(buf, n)` | n (all of it) | `getentropy`, 256 at a time | `getrandom` 318 | `getrandom` 278 |
+| `sys_exit(code)` | — | `_exit` | `exit_group` 231 | `exit_group` 94 |
+
+Numbers are from `/usr/include/asm/unistd_64.h` (x86-64) and
+`/usr/include/asm-generic/unistd.h` (the generic table arm64 and riscv64
+share), checked on this machine.
+
+The raw column uses only the `*at` forms and `statx`, on x86-64 too. The
+generic syscall table has no `open`, `mkdir`, `unlink` or `rename` — they were
+left out when it was designed, in favour of the `*at` calls — and riscv64
+does not even have `renameat`, only `renameat2`. Using the forms every
+architecture has means one code path instead of three. `statx` has one
+struct layout on every architecture; `struct stat` has a different one on
+each.
+
+`sys_isatty` exists for the runtime's stdout buffer (§3), and `sys_rmdir`
+because the layer's own test cannot clean up after `sys_mkdir` without it.
+
+### Listed, not implemented yet
+
+| operation | for | notes |
+|---|---|---|
+| `getdents64` (x86-64 217, generic 61) | directory listing | No portable libc spelling: POSIX offers `opendir`/`readdir`, which is not descriptor-shaped. The libc backend will need `fdopendir`; decide when `io.list_dir` is designed. |
+| argv, environment | `main`'s arguments | Not a system call: the kernel leaves them on the initial stack. Today the emitted `main(void)` drops them. Needs `main(int, char **)` to hand them to the runtime (libc) or `_start` to read them off the stack (no libc, §5). |
+| `mmap` 9/222, `munmap` 11/215 | a runtime allocator | For §5's malloc replacement. |
+| `clone` 56/220 (or `clone3` 435), `futex` 202/98 | carrier threads for green threads | `docs/concurrency-decision.md`. `clone` is the easy part; see §5. |
+| `rt_sigaction` 13/134, `sigaltstack` | stack-probe traps, SIGPIPE policy | When preemption lands. |
+| `getpid`, `kill`/`tgkill` | `abort` without libc | `rt_trap` still calls `abort()`. |
+| `pipe2`, `dup3`, `execve`, `wait4` | spawning the C compiler | Self-hosting needs it (`stdlib-seam.md` §5). |
+
+---
+
+## 3. What the runtime routes through it today
+
+`rt_file_read`, `rt_file_write`, `rt_file_append`, `rt_stdin_line` and
+`rt_stderr_write` — every primitive `lib/io.src` uses — are loops over the
+layer now, with no `FILE`, no `fopen`, no `getc`. Their signatures and
+their positive-errno results are unchanged, so `lib/io.src` did not change;
+the sign flip is in those five functions.
+
+`print` goes through it too. The runtime keeps its own 64 KiB stdout buffer
+over `sys_write(1, …)` with stdio's rules, because program output ordering
+has always depended on them:
+
+  - fully buffered to a pipe or a file, flushed when full and at exit;
+  - flushed after every line when stdout is a terminal (`sys_isatty`);
+  - flushed before any write to stderr (`eprint`) and before a trap aborts,
+    so the two streams interleave in program order;
+  - one `print` appended under a lock as one line, so spawned threads
+    interleave by line, the guarantee glibc's locked stdio gave.
+
+It is faster than what it replaced, not slower: 10 million `print`s (half
+integers, half strings) to a pipe took 0.51 s through `printf`/`puts` and
+0.19 s through the new buffer, with either backend — integers are
+formatted by hand, and there is no stdio lock-and-format per call. Output
+is byte-identical.
+
+`corpus/modules/sys-streams` checks the buffer: 14,000 lines (73 KB, more
+than one buffer) with an `eprint` in the middle that must land exactly
+between lines 6999 and 7000, and a file larger than the first read.
+
+---
+
+## 4. What is still not us
+
+Selecting `-DRT_SYS_RAW` means the *operating-system operations* make no C
+library call. The process still links the C library, for:
+
+| still libc | why | how it goes away |
+|---|---|---|
+| `malloc`/`realloc`/`free` | every allocation | our allocator over `mmap` (§5) |
+| `pthread_create`/`join`, mutexes | `spawn`, the stdout lock | green threads on `clone` + `futex` (§5) |
+| `snprintf`, `strtod` | float printing and parsing | moves into the language (`stdlib-seam.md` §5: Ryu, Eisel–Lemire) |
+| `abort`, `atexit`, constructors | traps, exit flush | `tgkill(SIGABRT)`; our own exit path once we own `_start` |
+| `memcpy`, `memcmp`, `strlen`, `memchr` | everywhere | a dozen lines each; compilers emit calls to `memcpy`/`memset` even with `-ffreestanding`, so they must exist regardless |
+| `_start`, `__libc_start_main` | process startup | §5 |
+
+`runtime/sys_test.sh` proves the layer itself is free of the C library by
+building it with `-nostdlib -static` — no C library linked at all — and
+running it natively and for aarch64 and riscv64 under qemu. A raw backend
+that quietly called libc would not link.
+
+---
+
+## 5. What stands between us and "no libc", honestly
+
+System call stubs are the easy tenth. The rest is what Go's runtime is
+made of, and each part is a project:
+
+**An allocator.** `malloc` becomes our own: size classes, free lists, and
+`mmap`/`munmap` for the arenas, as Go's `runtime/malloc.go` over
+`runtime/mem_linux.go`. With non-atomic refcounting and no sharing
+(`concurrency-decision.md`), a per-carrier-thread cache with no locking on
+the fast path is the natural design. Hardest part: returning memory to the
+OS without fragmenting (`madvise(MADV_DONTNEED)`).
+
+**Threads.** `pthread_create` does more than `clone`: it allocates the
+stack and guard, sets up thread-local storage, and arranges the join.
+Without libc, TLS is ours: on x86-64 an `arch_prctl(ARCH_SET_FS)` per
+thread pointing at our own thread block, on arm64 `tpidr_el0`. Go keeps its
+current-goroutine pointer in exactly such a register slot. Blocking and
+waking is `futex`. The green-thread scheduler needs all of this anyway, so
+this is less extra work than it looks — but every libc function that
+touches TLS (`errno`, the stack protector's canary at `%fs:0x28`) stops
+working the moment we set `%fs` ourselves, which is why this is all or
+nothing per process.
+
+**Process startup.** `_start` receives `argc`, `argv`, `envp` and the
+auxiliary vector on the initial stack, with the stack pointer 16-byte
+aligned and *no* return address pushed — so on x86-64 a C function entered
+directly is misaligned by 8, which is why `sys_test.c`'s `_start` carries
+`force_align_arg_pointer`. The auxiliary vector is where the vDSO lives
+(`AT_SYSINFO_EHDR`); without parsing it, `clock_gettime` traps into the
+kernel (~hundreds of ns) instead of reading the clock from user space
+(~20 ns) as glibc and Go (`runtime/vdso_linux_amd64.go`) do. The raw backend
+traps today, deliberately.
+
+**Standard I/O.** Done for what the runtime prints (§3). What remains is
+float formatting, which is scheduled to become language source anyway.
+
+**Signals.** Stack probes and preemption will want a signal handler;
+`rt_sigaction` needs a restorer trampoline (`SA_RESTORER`) that libc
+normally supplies — a few instructions of assembly per architecture.
+
+None of this is needed for the raw backend to be useful. All of it is
+needed before "no libc" is true, and it is the same list whether the goal
+is fully static binaries, the self-hosted compiler's own runtime, or a
+native backend without a C compiler.
+
+---
+
+## 6. Platforms: where raw system calls are allowed at all
+
+This is the part that decides the shape, and every claim here is checked
+against a source rather than remembered.
+
+**Linux: a stable system call ABI, promised to programs.** The kernel's own
+documentation: *"The kernel to userspace interface is the one that
+application programs use, the syscall interface. That interface is **very**
+stable over time, and will not break."*
+([stable-api-nonsense](https://www.kernel.org/doc/html/latest/process/stable-api-nonsense.html)).
+Go's standard library relies on it — `syscall` on Linux is assembly that
+executes `SYSCALL` directly
+([src/syscall/asm_linux_amd64.s](https://github.com/golang/go/blob/master/src/syscall/asm_linux_amd64.s)),
+which is what lets a pure-Go Linux binary be fully static.
+
+**macOS: no stable system call interface; libSystem is the ABI.** Apple:
+*"Apple does not support statically linked binaries on Mac OS X. A
+statically linked binary assumes binary compatibility at the kernel system
+call interface, and we do not make any guarantees on that front."*
+([Technical Q&A QA1118](https://developer.apple.com/library/archive/qa/qa1118/_index.html)).
+Go gave in, in two steps. [Go 1.11](https://go.dev/doc/go1.11): *"On macOS
+and iOS, the runtime now uses `libSystem.dylib` instead of calling the
+kernel directly … The syscall package still makes direct system calls;
+fixing this is planned for a future release."* [Go 1.12](https://go.dev/doc/go1.12):
+*"`libSystem` is now used when making syscalls on Darwin, ensuring
+forward-compatibility with future versions of macOS and iOS."*
+
+**Windows: no public system call interface at all.** The documented ABI is
+`kernel32.dll` and friends; `ntdll.dll`'s system call numbers are an
+implementation detail and change between releases. From j00ru's table of
+the actual numbers
+([windows-syscalls](https://github.com/j00ru/windows-syscalls), x64
+`nt-per-system.json`): `NtReadFile` is 3 on XP through 7, 5 on 8.1, 6 on 10
+and 11; `NtCreateUserProcess` is 170 on 7 SP1, 183 on 8.1, 187 on 10 1511,
+201 on 10 22H2, 206 on 11 21H2 and 209 on 11 24H2 — a different number in
+almost every feature release. Go's Windows runtime calls `kernel32.dll`
+functions (`//go:cgo_import_dynamic runtime._CloseHandle CloseHandle%1
+"kernel32.dll"`,
+[src/runtime/os_windows.go](https://github.com/golang/go/blob/master/src/runtime/os_windows.go)).
+
+**OpenBSD: system calls pinned to libc by the kernel.** [Go 1.16](https://go.dev/doc/go1.16):
+*"On the 64-bit x86 and 64-bit ARM architectures on OpenBSD … system calls
+are now made through `libc`, instead of directly using the `SYSCALL`/`SVC`
+instruction … OpenBSD 6.9 onwards will require system calls to be made
+through `libc` for non-static Go binaries."* OpenBSD then went further:
+[`pinsyscalls(2)`](https://man.openbsd.org/pinsyscalls.2), *"first appeared
+in OpenBSD 7.5"*, registers where libc's system call instructions are, and
+*"any attempt to invoke a mismatched system call entry instruction will
+result in a SIGABRT."* A raw `syscall` from our code would kill the process.
+
+So Linux is the only mainstream kernel where the raw backend is legitimate,
+and the only one where Go still does it.
+
+---
+
+## 7. The recommendation
+
+**libc everywhere by default; raw system calls as an opt-in Linux backend;
+both behind the same functions.** That is what is built.
+
+  - The default must be the one that works on every platform the language
+    will run on, and on three of the four above that is only the C
+    library. The libc backend is POSIX, so it covers Linux, macOS and the
+    BSDs as written.
+  - The raw backend earns its place on Linux, where it is guaranteed to
+    keep working: static binaries with no libc, the self-hosted runtime,
+    and eventually a native backend with no C toolchain in the loop. It is
+    tested on every commit, with the whole corpus on x86-64 and the layer's
+    own test on aarch64 and riscv64 under qemu.
+  - Both behind one header means nothing above the line knows which it
+    got. The corpus passes identically with either.
+
+**Windows** is the gap. MinGW provides `open`/`read`/`write` over the MSVC
+runtime, but not `getentropy`, and `isatty`/`O_CLOEXEC`/`mkdir(path, mode)`
+differ. A Windows port is a third implementation file behind the same
+header — `sys_win32.c` over `kernel32` (`CreateFileW`, `ReadFile`,
+`BCryptGenRandom`, `QueryPerformanceCounter`) — and it is where the errno
+translation earns its keep, since Windows reports `GetLastError` codes. It
+is not attempted until a Windows target is.
+
+---
+
+## 8. Where `lib/io.src` goes next
+
+When the mutable `bytes` type lands, `io` moves from whole-file primitives
+down to descriptors, and the reading loop, buffering and line splitting move
+into language source. The primitives it will declare — each a thin wrapper
+over one `sys_*` function, keeping the layer's convention of a value or
+**-errno**:
+
+```c
+prim int  __open(str path, int flags, int mode);           // fd, or -errno
+prim int  __read(int fd, bytes buf, int off, int n);        // bytes read, 0 at end, or -errno
+prim int  __write(int fd, bytes buf, int off, int n);       // bytes written (may be short), or -errno
+prim int  __write_str(int fd, str s, int off, int n);       // the same, from an immutable str
+prim int  __close(int fd);                                  // 0, or -errno
+prim int  __seek(int fd, int off, int whence);              // new offset, or -errno
+prim int  __fstat(int fd, List<int> out);                   // pushes size, mode, mtime_ns; 0 or -errno
+prim int  __isatty(int fd);                                 // 1 or 0
+prim int  __mkdir(str path, int mode);                      // 0, or -errno
+prim int  __unlink(str path);                               // 0, or -errno
+prim int  __rmdir(str path);                                // 0, or -errno
+prim int  __rename(str from, str to);                       // 0, or -errno
+prim int  __clock_ns(int clock);                            // nanoseconds, or -errno
+prim int  __random(bytes buf, int off, int n);              // n, or -errno
+prim void __exit(int code);
+```
+
+Points the `bytes` design has to settle for these to exist:
+
+  - **`__read` and `__random` write into a buffer the caller owns.** Today
+    a `prim` may only push onto a collection it was handed
+    (`stdlib-seam.md` §2); writing into `bytes` in place is a new kind of
+    mutation across the seam and needs that rule amended, with the bounds
+    check (`off + n <= buf.size()`) done in the runtime wrapper, never
+    trusted from the caller.
+  - **`__write_str` exists because writing never needs mutation.** `str`
+    is already an immutable byte sequence; converting it to `bytes` just to
+    write it would copy every string a program prints to a file.
+  - **`__fstat` pushes onto a `List<int>`** because a prim cannot return a
+    struct; `io` builds its own `Stat` type from the three values.
+  - **The flag and constant values** (`SYS_O_*`, `SYS_SEEK_*`,
+    `SYS_CLOCK_*`) are written in `lib/io.src` as numbers, which is safe
+    precisely because they are the layer's constants and not the host's.
+  - **`from_errno` takes `-r`.** The three named errnos stay 2, 13 and 21,
+    now guaranteed on every host by §1 rather than by coincidence.
