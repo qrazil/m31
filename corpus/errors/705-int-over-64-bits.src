@@ -1,0 +1,2 @@
+// A prefixed literal is 64 bits; a sixty-fifth is an error, not a wrap.
+print(0x1_0000_0000_0000_0000);

@@ -493,7 +493,9 @@ impl Lowerer {
         let n = match e {
             Expr::Int(n, _) => *n,
             Expr::Un(UnOp::Neg, inner, _) => match &**inner {
-                Expr::Int(n, _) if *n != 0 => -*n,
+                // Wrapping: `-0x8000_0000_0000_0000` is a legal literal
+                // negated, and must be refused as a byte, not panic here.
+                Expr::Int(n, _) if *n != 0 => n.wrapping_neg(),
                 _ => return Ok(()),
             },
             _ => return Ok(()),
@@ -1263,6 +1265,74 @@ impl Lowerer {
                 ),
             )),
         }
+    }
+
+    /// `r.is_ok()`, `r.is_err()`. Two, for symmetry with Option's pair: a
+    /// caller that only needs to know whether something failed -- counting
+    /// failures, an `if` that decides what to try next -- should not have to
+    /// write a four-line `match` that binds a payload only to ignore it.
+    /// `?` propagates the failure; `is_ok` asks without taking anything
+    /// apart. `is_err` is generated from `is_ok`, for the reason `is_none`
+    /// is generated from `is_some`.
+    ///
+    /// No `or`. An Option's None carries nothing, so falling back loses
+    /// nothing; a Result's Err carries the reason, and a one-call way to
+    /// throw it away would make discarding it easy, which the discarded-
+    /// Result error exists to prevent.
+    fn lower_result_method(
+        &mut self,
+        r: &Val,
+        tid: u32,
+        m: &str,
+        args: &Args,
+        span: Span,
+    ) -> Result<Val, Diag> {
+        if !matches!(m, "is_ok" | "is_err") {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "a Result has `is_ok` and `is_err`; `{m}` is not one of \
+                     them -- use `match` to take the value out, or `?` to \
+                     pass the failure on"
+                ),
+            ));
+        }
+        if !args.named.is_empty() {
+            return Err(Diag::new(span, format!("`{m}` takes no named arguments")));
+        }
+        if !args.pos.is_empty() {
+            return Err(Diag::new(span, format!("`{m}` takes no arguments")));
+        }
+        let ok_tag = self.typedefs[tid as usize]
+            .variants
+            .iter()
+            .position(|v| v.name == "Ok")
+            .expect("Result has Ok") as u32;
+        let tag = self.new_val(IrTy::I64);
+        self.push(Inst::EnumTag {
+            dst: tag,
+            obj: r.val(),
+            tid,
+        });
+        let k = self.new_val(IrTy::I64);
+        self.push(Inst::IConst {
+            dst: k,
+            val: ok_tag as i64,
+        });
+        let c = self.new_val(IrTy::I1);
+        self.push(Inst::ICmp {
+            dst: c,
+            cmp: Cmp::Eq,
+            lhs: tag,
+            rhs: k,
+        });
+        if m == "is_ok" {
+            return Ok(Val::new(c, Ty::Bool, false));
+        }
+        // Generated from is_ok, so the two cannot drift apart.
+        let d = self.new_val(IrTy::I1);
+        self.push(Inst::Not { dst: d, src: c });
+        Ok(Val::new(d, Ty::Bool, false))
     }
 
     /// The `Option<T>` type for a given payload type, and the tags of its
@@ -4762,6 +4832,11 @@ impl Lowerer {
             && self.typedefs[tid as usize].name.starts_with("Option$")
         {
             return self.lower_option_method(o, tid, m, args, span);
+        }
+        if self.typedefs[tid as usize].is_enum
+            && self.typedefs[tid as usize].name.starts_with("Result$")
+        {
+            return self.lower_result_method(o, tid, m, args, span);
         }
         self.check_method_access(tid, m, span)?;
         // A static method has no receiver, so it cannot be reached

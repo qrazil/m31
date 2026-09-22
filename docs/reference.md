@@ -44,7 +44,7 @@ reserved only in the sense that nothing may shadow a type name (§4.1).
 
 | | |
 |---|---|
-| Integer | `0`, `42`. Decimal only. No sign — `-1` is unary minus applied to `1`. |
+| Integer | `0`, `42`, `1_000_000`; hex `0x1F`, octal `0o17`, binary `0b101`. No sign — `-1` is unary minus applied to `1`. The rules are below. |
 | Float | `1.0`, `3.14`, `2.5e3`. **Always a dot with digits on both sides** — not `1.` and not `.5`. An exponent only after the dot form: `1.0e9`, not `1e9`. A literal too large **or too small** to represent is an error: one that parses to exactly zero has lost its whole value. Arithmetic that underflows at run time is ordinary IEEE. |
 | Boolean | `true`, `false` |
 | String | `"..."`, with the escapes below. Any other character stands for itself, byte for byte — control characters, a BOM and combining marks included — except a raw newline, which is an error: a literal ends on its line. |
@@ -77,6 +77,43 @@ are never freed (§7.3).
 
 There is no `bytes` literal. A `bytes` is written with the sequence literal,
 `[104, 105]`, or converted from text, `"hi".to_bytes()` (§3.10).
+
+**Integer literals.** Decimal, or a prefix and digits in its base: `0x`
+hex, `0o` octal, `0b` binary. `_` may stand anywhere after the first digit
+— of the number, or of the digits after a prefix — and means nothing:
+`1_000_000`, `0xFFFF_FFFF`, `0b1010_0101`. A digit outside the base, or a
+letter run on the end, is an error, not a suffix.
+
+  - **The prefix is lowercase; hex digits are either case.** `0X1F` is an
+    error. One spelling per base, because `0O17` is hard to tell from
+    `0017` and a formatter that keeps spellings (below) could never bring
+    two files that chose differently together. The digits are the other way
+    round because the constants people copy are published in both —
+    RFCs in upper case, C sources in lower — and forcing one would turn
+    copying a constant into transcribing it.
+  - **No leading zero on a decimal.** `017` is an error that suggests `17`
+    or `0o17`. C, and JavaScript outside strict mode, read it as octal 15;
+    a reader who does not know that sees seventeen, and one who does
+    cannot tell whether the author did. `0` alone is fine, and so is
+    `0.5`: the trap is octal integers only.
+  - **A decimal literal is a number; a prefixed literal is 64 bits.** A
+    decimal must fit in `int`. A prefixed literal may use all 64 bits,
+    which are the `int`'s bits, top bit the sign: `0x7FFF_FFFF_FFFF_FFFF` is
+    the largest `int`, `0x8000_0000_0000_0000` the smallest, and
+    `0xFFFF_FFFF_FFFF_FFFF` is `-1`. A base other than ten is chosen to
+    write bits, and `int` is the only integer type, so there is no unsigned
+    one for a mask with the top bit set to belong to. Rust and Go refuse
+    such a literal because they have `u64` to send it to; Java, which has
+    no unsigned `long` either, allows it, for the same reason as here.
+    Without it, published constants — FNV's offset basis
+    `0xcbf29ce484222325`, a float's sign bit — would have to be transcribed
+    into negative decimals nobody can check against the source. More than
+    64 bits is an error in any base, and a decimal too large for `int` but
+    within 64 bits is refused with the hex spelling of its bits.
+  - **There are no hex floats.** `0x1.8` is an error; a float is decimal.
+
+The formatter prints every integer literal as it was written: `0o755`
+stays `0o755` and `1_000` stays `1_000`, not `493` and `1000`.
 
 ### 1.6 Operators and punctuation
 
@@ -419,6 +456,23 @@ methods could disagree, because each is an implementation the author writes.
 There is no `unwrap`. Trapping on `None` is what `Map.get` used to do, and
 putting it back behind a shorter name would undo the reason for the change.
 Taking the value out and keeping it is what `match` is for.
+
+`Result` has two, and no more:
+
+| | |
+|---|---|
+| `r.is_ok()`, `r.is_err()` | whether it failed, without a `match` |
+
+They are there for symmetry: `Option` can be asked its question, so
+`Result` can be asked its own, and counting failures or choosing what to try
+next should not take a four-line `match` that binds a payload only to
+ignore it. **`?` propagates the failure; `is_ok` asks without taking
+anything apart** — the Result is unchanged and can still be matched.
+`is_err` is generated from `is_ok`, as `is_none` is from `is_some`.
+
+There is no `or` on a `Result`. `None` carries nothing, so falling back
+from it loses nothing; an `Err` carries the reason, and a one-call way to
+throw it away is what the discarded-Result rule exists to prevent.
 
 **A function that can fail but has nothing to return is
 `Result<void, E>`.** A `void` payload is no value, so it is dropped: at
@@ -1130,6 +1184,10 @@ It hides a return, which is a fair thing to dislike — but it hides *one*
 specific return, always in the same place, and the signature still says the
 function can fail.
 
+`?` propagates; `r.is_ok()` and `r.is_err()` (like `o.is_some()`) only ask,
+and take nothing apart (§3.7a). A caller that needs the value or the reason
+uses `?` or `match`; one that needs only to know whether it failed asks.
+
 ### 6.4 Construction
 
 ```c
@@ -1192,8 +1250,8 @@ type, so a distinct `int` stays distinct, the way it does under `+`. They
 exist for hashes and PRNGs:
 
 ```c
-int h = -3750763034362895579;               // FNV-1a's offset basis, as an int
-h = (h ^ s.byte_at(i)).wrapping_mul(1099511628211);
+int h = 0xcbf29ce484222325;                 // FNV-1a's offset basis (§1.5)
+h = (h ^ s.byte_at(i)).wrapping_mul(0x100000001b3);
 ```
 
 `to_bits` and `from_bits` are a reinterpretation, not a conversion:
@@ -1501,7 +1559,10 @@ args        = "(" [ arg { "," arg } ] ")" ;
 arg         = expr | IDENT ":" expr ;                 (* positional before named *)
 ```
 
-Lexical: `INT` is decimal digits. `FLOAT` has a dot with digits on **both**
+Lexical: `INT` is decimal digits with no leading zero, or `0x`, `0o` or `0b`
+(lowercase) and digits of that base, hex ones in either case; `_` may
+follow any digit. A decimal fits in `int`, a prefixed one in 64 bits
+(§1.5). `FLOAT` has a dot with digits on **both**
 sides — `1.0`, never `1.` or `.5` — and an exponent only after that form
 (`1.0e9`), so whether a literal is a float is decided by one character.
 `STR` is `"`, then any bytes but `"`, `\` and a newline, or an escape —

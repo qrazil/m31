@@ -1,0 +1,4 @@
+corpus/errors/705-int-over-64-bits.src:2:7: integer literal `0x1_0000_0000_0000_0000` does not fit in 64 bits
+  |
+2 | print(0x1_0000_0000_0000_0000);
+  |       ^

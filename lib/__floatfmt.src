@@ -116,7 +116,7 @@ pub Option<float> parse(str s) {
         }
         // The quiet NaN C's strtod gives, sign included.
         if (s.byte_at(i) == 110 && s.byte_at(i + 1) == 97 && s.byte_at(i + 2) == 110) {
-            return Option<float>.Some(float.from_bits(sign | 9221120237041090560));
+            return Option<float>.Some(float.from_bits(sign | 0x7FF8_0000_0000_0000));
         }
     }
     int start = i;
@@ -206,16 +206,16 @@ bool is_digit(int b) {
 // The bits of +infinity. Every positive float's bits are below it, and every
 // NaN's are above.
 int inf_bits() {
-    return 9218868437227405312;
+    return 0x7FF0_0000_0000_0000;
 }
 
 // 2^52: the implicit leading bit of a normal float's significand.
 int hidden_bit() {
-    return 4503599627370496;
+    return 0x0010_0000_0000_0000;
 }
 
 int mask32() {
-    return 4294967295;
+    return 0xFFFF_FFFF;
 }
 
 int digit_count(int v) {
@@ -425,7 +425,7 @@ Decimal printf_digits(int q, Decimal d) {
     int n = digit_count(d.digits);
     int kf = d.exp + n - 1 - 17;
     // 4 * 2^52: the significand of a power of two, times 4 as in Schubfach.
-    int cb = 18014398509481984;
+    int cb = 0x0040_0000_0000_0000;
     int h = q + floor_log2_pow10(-kf) + 1;
     int ghi = pow10_hi(-kf);
     int glo = pow10_lo(-kf).wrapping_add(1);

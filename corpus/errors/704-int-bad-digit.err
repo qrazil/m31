@@ -1,0 +1,4 @@
+corpus/errors/704-int-bad-digit.src:2:11: `2` is not a binary digit
+  |
+2 | print(0b1021);
+  |           ^

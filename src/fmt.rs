@@ -59,9 +59,9 @@ pub struct Fmt {
     toks: Vec<Token>,
     /// For each `{` token, the index of the `}` that closes it.
     closer: HashMap<usize, usize>,
-    /// How each string literal was written, by position. The formatter keeps
-    /// the spelling: decoding is many-to-one, and `"\u{feff}"` is written that
-    /// way so that it can be seen.
+    /// How each string and integer literal was written, by position. The
+    /// formatter keeps the spelling: decoding is many-to-one, and
+    /// `"\u{feff}"`, `0o755` and `1_000` are written that way to be read.
     spellings: HashMap<(u32, u32), String>,
 }
 
@@ -834,7 +834,13 @@ impl Fmt {
                     .collect();
                 format!("{{{}}}", xs.join(", "))
             }
-            Expr::Int(n, _) => n.to_string(),
+            // The first byte tells the two kinds of spelling apart, so a
+            // synthesised node that happened to share a string's position
+            // could not print as that string.
+            Expr::Int(n, span) => match self.spellings.get(&(span.line, span.col)) {
+                Some(text) if text.starts_with(|c: char| c.is_ascii_digit()) => text.clone(),
+                _ => n.to_string(),
+            },
             Expr::Float(x, _) => fmt_float(*x),
             Expr::Bool(b, _) => b.to_string(),
             Expr::Str(s, span) => match self.spellings.get(&(span.line, span.col)) {

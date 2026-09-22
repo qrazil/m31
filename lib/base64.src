@@ -94,21 +94,21 @@ pub str encode(bytes data, bool url = false) {
     while (i < whole) {
         int v = data[i] << 16 | data[i + 1] << 8 | data[i + 2];
         out.push(digits[v >> 18]);
-        out.push(digits[v >> 12 & 63]);
-        out.push(digits[v >> 6 & 63]);
-        out.push(digits[v & 63]);
+        out.push(digits[v >> 12 & 0x3F]);
+        out.push(digits[v >> 6 & 0x3F]);
+        out.push(digits[v & 0x3F]);
         i = i + 3;
     }
     if (n - whole == 1) {
         int v = data[whole] << 16;
         out.push(digits[v >> 18]);
-        out.push(digits[v >> 12 & 63]);
+        out.push(digits[v >> 12 & 0x3F]);
         out.push("==");
     } else if (n - whole == 2) {
         int v = data[whole] << 16 | data[whole + 1] << 8;
         out.push(digits[v >> 18]);
-        out.push(digits[v >> 12 & 63]);
-        out.push(digits[v >> 6 & 63]);
+        out.push(digits[v >> 12 & 0x3F]);
+        out.push(digits[v >> 6 & 0x3F]);
         out.push("=");
     }
     return out.join("");
@@ -163,8 +163,8 @@ pub Result<bytes, Error> decode(str text, bool url = false) {
     while (i < whole) {
         int v = quad(text, i, 4, url);
         out.push(v >> 16);
-        out.push(v >> 8 & 255);
-        out.push(v & 255);
+        out.push(v >> 8 & 0xFF);
+        out.push(v & 0xFF);
         i = i + 4;
     }
     if (pad == 2) {
@@ -173,7 +173,7 @@ pub Result<bytes, Error> decode(str text, bool url = false) {
     } else if (pad == 1) {
         int v = quad(text, whole, 3, url);
         out.push(v >> 16);
-        out.push(v >> 8 & 255);
+        out.push(v >> 8 & 0xFF);
     }
     return Result<bytes, Error>.Ok(out);
 }
