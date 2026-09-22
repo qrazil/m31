@@ -1,0 +1,46 @@
+2 rows: [a][b] / [1][2]
+1 rows: [a][b,c][d]
+1 rows: [a][b"c][d]
+2 rows: [a][b
+c][d] / [e][f]
+1 rows: [a][][b]
+1 rows: [a][][b]
+1 rows: [a][b"c][d]
+4 rows: [a][b] / [c][d] / [e][f] / [g][h]
+1 rows: [ a ][ b ]
+1 rows: [a][b]
+1 rows: [a][b]
+0 rows: 
+2 rows: [a][b][c] / [d][e]
+1 rows: [a][unterminated]
+1 rows: [a][unterminated
+still,going
+]
+1 rows: [a][bc][d]
+1 rows: [bc"d"][e]
+1 rows: [a][]
+1 rows: [][]
+1 rows: []
+1 rows: [a
+b]
+1 rows: [café][日本]
+2 rows: [a][b] / [c][d]
+2 rows: [name][age] / [x][1]
+1 rows: [a][b,c][d;e]
+1 rows: [a][b]
+error: csv separator must be one ASCII character, not ""
+error: csv separator must be one ASCII character, not ";;"
+error: csv separator may not be a quote or a line break: the format already gives those a meaning
+error: csv separator may not be a quote or a line break: the format already gives those a meaning
+error: csv separator must be one ASCII character, not "é"
+a,b<CRLF>1,2<CRLF>
+"x,y","he said ""hi"""<CRLF>
+"line
+break","crhere", spaced <CRLF>
+""<CRLF>
+,<CRLF>
+
+"a;b";c,d<CRLF>
+error: csv separator may not be a quote or a line break: the format already gives those a meaning
+6 rows: [id][note] / [1][a
+b] / [2][say "x"] / [] / [][] / [3][a,b]

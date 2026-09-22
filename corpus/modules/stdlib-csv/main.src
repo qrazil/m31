@@ -1,0 +1,92 @@
+import csv;
+
+// RFC 4180 CSV. Every parse below is checked against CPython's
+// `csv.reader(io.StringIO(text, newline=""))`, with the two documented
+// differences applied: a leading byte-order mark is stripped, and a blank
+// line is not a row. Each row prints as its fields in brackets, so an empty
+// field and a missing one look different.
+void show(Result<List<List<str>>, csv.Error> r) {
+    match (r) {
+        case Ok(List<List<str>> rows): {
+            List<str> out = [];
+            for (List<str> row in rows) {
+                List<str> cells = [];
+                for (str cell in row) {
+                    cells.push("[" + cell + "]");
+                }
+                out.push(cells.join(""));
+            }
+            print(rows.size().to_str() + " rows: " + out.join(" / "));
+        }
+        case Err(csv.Error e): {
+            print("error: " + csv.message(e));
+        }
+    }
+}
+
+void written(Result<str, csv.Error> r) {
+    match (r) {
+        case Ok(str s): {
+            print(s.split("\r\n").join("<CRLF>"));
+        }
+        case Err(csv.Error e): {
+            print("error: " + csv.message(e));
+        }
+    }
+}
+
+show(csv.parse("a,b\n1,2\n"));
+show(csv.parse("a,\"b,c\",d"));
+show(csv.parse("a,\"b\"\"c\",d"));
+show(csv.parse("a,\"b\nc\",d\ne,f"));
+show(csv.parse("a,,b"));
+show(csv.parse("a,\"\",b"));
+show(csv.parse("a,b\"c,d"));
+show(csv.parse("a,b\r\nc,d\re,f\ng,h"));
+show(csv.parse("\" a \", b "));
+show(csv.parse("a,b"));
+show(csv.parse("a,b\n"));
+show(csv.parse(""));
+show(csv.parse("a,b,c\nd,e"));
+show(csv.parse("a,\"unterminated"));
+show(csv.parse("a,\"unterminated\nstill,going\n"));
+show(csv.parse("a,\"b\"c,d"));
+show(csv.parse("\"b\"c\"d\",e"));
+show(csv.parse("a,"));
+show(csv.parse(","));
+show(csv.parse("\"\""));
+show(csv.parse("\"a\r\nb\"\r\n"));
+show(csv.parse("café,日本\n"));
+// The two answers that differ from CPython.
+show(csv.parse("\n\na,b\n\n\r\nc,d\n\n"));
+// A byte-order mark cannot be written in a literal, so it is cut from three.
+str bom = "ｱ".substr(0, 1) + "»".substr(1, 2) + "¿".substr(1, 2);
+show(csv.parse(bom + "name,age\nx,1"));
+// Another separator; the comma is then ordinary.
+show(csv.parse("a;b,c;\"d;e\"\n", sep: ";"));
+show(csv.parse("a\tb\n", sep: "\t"));
+// Separators that cannot be one.
+show(csv.parse("a", sep: ""));
+show(csv.parse("a", sep: ";;"));
+show(csv.parse("a", sep: "\""));
+show(csv.parse("a", sep: "\n"));
+show(csv.parse("a", sep: "é"));
+// format quotes exactly what needs it, and ends every row with CRLF.
+written(csv.format([["a", "b"], ["1", "2"]]));
+written(csv.format([["x,y", "he said \"hi\""]]));
+written(csv.format([["line\nbreak", "cr\rhere", " spaced "]]));
+written(csv.format([[""]]));
+written(csv.format([["", ""]]));
+written(csv.format([]));
+written(csv.format([["a;b", "c,d"]], sep: ";"));
+written(csv.format([["a"]], sep: "\r"));
+// And parse(format(rows)) is rows again.
+List<List<str>> rows = [["id", "note"], ["1", "a\nb"], ["2", "say \"x\""], [""], ["", ""], ["3", "a,b"]];
+match (csv.format(rows)) {
+    case Ok(str text): {
+        show(csv.parse(text));
+    }
+    case Err(csv.Error e): {
+        print(csv.message(e));
+    }
+}
