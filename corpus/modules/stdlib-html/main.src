@@ -1,0 +1,18 @@
+import html;
+
+// `html.escape`: the five characters CPython's `html.escape` replaces, with
+// the same references, and nothing else touched. The expected output is
+// CPython's, from `html.escape(s)` over the same strings.
+print(html.escape("<a href='x'>Tom & Jerry</a>"));
+print(html.escape("say \"hi\""));
+print(html.escape(""));
+print(html.escape("plain text"));
+// `&` is replaced first, so an existing reference is escaped once -- not
+// twice, and not left alone. Escaping is not idempotent, and must not be.
+print(html.escape("&amp;"));
+print(html.escape(html.escape("<")));
+// Non-ASCII passes through untouched: UTF-8 never uses an ASCII byte inside a
+// multi-byte character.
+print(html.escape("café <b>é</b> 日本"));
+print(html.escape("&&<<>>\"\"''"));
+print(html.escape("'").size());
