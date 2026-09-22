@@ -278,7 +278,6 @@ int integer_wide(Source s, int low, int high) {
             return base + rest;
         }
     }
-    return low;
 }
 
 // Seven octets, three bits dropped: 53 bits over 2^53, which is CPython's

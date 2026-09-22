@@ -80,6 +80,9 @@ struct LoopCtx {
     /// Scope depth at the top of the loop body. `break`/`continue` must
     /// release every scope inside this one before jumping.
     depth: usize,
+    /// Whether any `break` leaves this loop. A `while (true)` that nothing
+    /// breaks out of never finishes, so what follows it is unreachable.
+    broke: bool,
 }
 
 struct BlockBuf {
@@ -3404,6 +3407,7 @@ impl Lowerer {
                     return Err(Diag::new(*span, "`break` outside a loop"));
                 };
                 let (exit, carried, depth) = (l.exit, l.carried.clone(), l.depth);
+                self.loops.last_mut().expect("checked above").broke = true;
                 self.release_to_depth(depth);
                 let args: Vec<Value> = carried
                     .iter()
@@ -3653,6 +3657,7 @@ impl Lowerer {
             exit: exit_bb,
             carried: carried.iter().map(|(x, _, _)| x.clone()).collect(),
             depth: self.owned.len() - 1,
+            broke: false,
         });
         let lowered = self.lower_block(body);
         self.loops.pop();
@@ -3773,9 +3778,10 @@ impl Lowerer {
             // The body scope we just pushed is the boundary: break and
             // continue release everything inside it, and nothing outside.
             depth: self.owned.len() - 1,
+            broke: false,
         });
         let lowered = self.lower_block(body);
-        self.loops.pop();
+        let broke = self.loops.pop().is_some_and(|l| l.broke);
         lowered?;
         let body_live = !self.terminated();
         if body_live {
@@ -3801,6 +3807,16 @@ impl Lowerer {
         // merges the header's value with whatever any `break` supplied.
         for ((name, _, _), p) in carried.iter().zip(exit_params.iter()) {
             self.rebind(name, *p);
+        }
+        // `while (true)` with no `break` out of it does not fall through,
+        // so the code after it is unreachable and a function ending in one
+        // needs no return after it. Only the literal: there is no constant
+        // folding, and "the condition is the word `true`" is a rule a reader
+        // can check by eye. The exit block still has the header's edge in
+        // the CFG, so it is terminated here as the unreachable filler
+        // `lower_func` would give it.
+        if matches!(cond, Expr::Bool(true, _)) && !broke {
+            self.terminate(Term::Ret { val: None });
         }
         let _ = span;
         Ok(())

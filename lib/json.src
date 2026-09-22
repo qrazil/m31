@@ -280,9 +280,6 @@ Result<Value, Error> value(Parser p) {
             }
         }
     }
-    // Not reached: the loop is left only by returning, but the compiler does
-    // not count `while (true)` as never finishing.
-    return fail("unreachable", p.at);
 }
 
 // A string literal, with `p.at` on its opening quote.
@@ -327,8 +324,6 @@ Result<str, Error> string(Parser p) {
             return Result<str, Error>.Err(Error.Syntax("invalid control character in string", p.at));
         }
     }
-    // Not reached, as in `array`.
-    return Result<str, Error>.Err(Error.Syntax("unreachable", p.at));
 }
 
 // One escape sequence, with `p.at` on its backslash.

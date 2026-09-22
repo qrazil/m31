@@ -1,0 +1,12 @@
+// A `while (true)` that can `break` does finish, so the function can fall
+// off its end.
+int f(int x) {
+    while (true) {
+        if (x > 3) {
+            break;
+        }
+        x = x + 1;
+    }
+}
+
+print(f(1));

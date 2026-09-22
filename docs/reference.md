@@ -712,7 +712,12 @@ find which parameter a value lands in, and should never meet the same call
 spelled two ways.
 
 A function returning non-`void` must return on every path; falling off the
-end is a compile error. There are no multiple return values yet.
+end is a compile error. A `while (true)` with no `break` out of it is a path
+that never ends, so a function may finish with one and nothing after it —
+and, like a statement after a `return`, a statement after one is an
+unreachable-statement error. Only the literal `true` counts: there is no
+constant folding, and a rule a reader can check by eye beats one that needs
+the compiler's arithmetic. There are no multiple return values yet.
 
 ### 4.3 Methods
 
