@@ -21,8 +21,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/random.h>   /* getentropy: the process primitives */
-#include <time.h>         /* clock_gettime: the process primitives */
 
 /* Every operating-system call the runtime makes goes through the sys layer
  * (runtime/sys.h, docs/sys-layer.md). Its implementation is #included here
@@ -1931,7 +1929,7 @@ int64_t rt_env(Obj *name, Obj *out) {
  * how the -DRC_DEBUG report still appears. The range check (0..255) is in
  * lib/os.src, where the library can say what was wrong. */
 _Noreturn void rt_exit(int64_t code) {
-    fflush(stdout);
+    rt_out_flush();
     exit((int)code);
 }
 
@@ -1939,35 +1937,40 @@ _Noreturn void rt_exit(int64_t code) {
  * language itself uses for an index out of range, with the library's own
  * message. The message is copied to a C string only here, on the way out. */
 _Noreturn void rt_panic(Obj *msg) {
-    Str *m = (Str *)msg;
-    fflush(stdout);
-    fputs("trap: ", stderr);
-    if (m->len > 0) fwrite(m->data, 1, (size_t)m->len, stderr);
-    fputc('\n', stderr);
-    abort();
+    /* Through rt_trap, not stdio: `print` writes to the runtime's own
+     * buffer, so an fflush(stdout) here flushed nothing and a library trap
+     * silently lost every line the program had printed but not yet
+     * flushed. A str's data is NUL-terminated, so it is already the C
+     * string rt_trap wants; an embedded NUL cuts the message short, which
+     * is the most a trap message can suffer. */
+    rt_trap(((Str *)msg)->data);
 }
 
 /* CLOCK_REALTIME: wall-clock time since 1970-01-01T00:00:00Z. Seconds and
  * nanoseconds come from ONE reading, so they can never straddle a tick. */
 void rt_clock(Obj *out) {
-    struct timespec ts;
-    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) rt_trap("the wall clock is unavailable");
-    rt_list_push(out, (int64_t)ts.tv_sec);
-    rt_list_push(out, (int64_t)ts.tv_nsec);
+    /* Through the sys layer like every other OS fact, so the raw-syscall
+     * backend needs no libc for it. One reading, split here. */
+    int64_t ns = sys_clock_ns(SYS_CLOCK_REALTIME);
+    if (ns < 0) rt_trap("the wall clock is unavailable");
+    rt_list_push(out, ns / 1000000000);
+    rt_list_push(out, ns % 1000000000);
 }
 
-/* getentropy(3) is the kernel's randomness syscall (getrandom on Linux,
- * getentropy on the BSDs and macOS) and needs no file descriptor, so it
- * works in a chroot with no /dev. It answers at most 256 octets per call,
- * which is the only reason for the loop. Each octet is pushed as an int in
- * 0..255 until the language has a byte type. */
+/* The kernel's randomness, through sys_getrandom: getrandom(2) on Linux,
+ * getentropy(3) elsewhere -- no file descriptor, so it works in a chroot with
+ * no /dev. Chunks of 256 octets because getentropy answers no more per call.
+ * Each octet is pushed as an int in 0..255 until random moves onto bytes. */
 int64_t rt_entropy(int64_t n, Obj *out) {
     unsigned char buf[256];
     while (n > 0) {
-        size_t k = n > 256 ? 256 : (size_t)n;
-        if (getentropy(buf, k) != 0) return errno ? errno : EIO;
-        for (size_t i = 0; i < k; i++) rt_list_push(out, (int64_t)buf[i]);
-        n -= (int64_t)k;
+        int64_t k = n > 256 ? 256 : n;
+        int64_t got = sys_getrandom(buf, k);
+        /* The sys layer answers -errno in Linux numbering; the prim
+         * contract is a positive errno, as io's prims return. */
+        if (got < 0) return -got;
+        for (int64_t i = 0; i < k; i++) rt_list_push(out, (int64_t)buf[i]);
+        n -= k;
     }
     return 0;
 }
