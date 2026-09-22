@@ -260,6 +260,11 @@ if [ $quick -eq 0 ]; then
     if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then
         run "corpus (raw syscalls)" env RT_CFLAGS=-DRT_SYS_RAW bash run.sh
     fi
+    # Every program the corpus runs, once, under AddressSanitizer and
+    # UndefinedBehaviorSanitizer. The oracle compares builds with each other,
+    # so a bug that makes all four wrong the same way -- a use-after-free
+    # whose freed block is reused identically -- passes it. See sanitize.sh.
+    run "sanitizers (ASan, UBSan)" bash sanitize.sh
 fi
 
 echo
