@@ -1,0 +1,1 @@
+trap: os.exit(256): an exit status is 0 through 255

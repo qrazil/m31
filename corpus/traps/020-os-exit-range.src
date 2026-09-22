@@ -1,0 +1,5 @@
+import os;
+
+// The operating system keeps only the low eight bits of a status, so 256
+// would report success. It traps instead of meaning something else.
+os.exit(256);

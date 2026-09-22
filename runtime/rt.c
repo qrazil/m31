@@ -22,6 +22,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/random.h>   /* getentropy: the process primitives */
+#include <time.h>         /* clock_gettime: the process primitives */
 
 void rc_inc(Obj *o) {
     if (o->rc == RC_IMMORTAL) return;
@@ -1511,3 +1513,85 @@ void rt_stderr_write(Obj *s) {
     fflush(stdout);
     if (p->len > 0) fwrite(p->data, 1, (size_t)p->len, stderr);
 }
+
+
+/* ---- process primitives: lib/os.src, lib/date.src, lib/random.src ------ */
+/* Each is one OS fact, handed back as a scalar or pushed onto the caller's
+ * list. None of them decides anything: whether argv[0] is included, what an
+ * unset variable means, how a clock reading becomes a date, how octets
+ * become a die roll -- all of that is in the library, in source. */
+
+static int    rt_argc_saved = 0;
+static char **rt_argv_saved = NULL;
+
+void rt_args_init(int argc, char **argv) {
+    rt_argc_saved = argc;
+    rt_argv_saved = argv;
+}
+
+void rt_args(Obj *out) {
+    for (int i = 0; i < rt_argc_saved; i++) {
+        const char *a = rt_argv_saved[i];
+        rt_list_push(out, (int64_t)(intptr_t)str_new(a, (int64_t)strlen(a)));
+    }
+}
+
+/* A name holding a NUL or an `=` cannot be a variable, and the C library
+ * would look up a different one -- so it is simply not set. */
+int64_t rt_env(Obj *name, Obj *out) {
+    Str *n = (Str *)name;
+    if (n->len == 0 || memchr(n->data, '\0', (size_t)n->len) != NULL ||
+        memchr(n->data, '=', (size_t)n->len) != NULL) {
+        return 0;
+    }
+    const char *v = getenv(n->data);
+    if (v == NULL) return 0;
+    rt_list_push(out, (int64_t)(intptr_t)str_new(v, (int64_t)strlen(v)));
+    return 1;
+}
+
+/* exit(), not _exit(): stdio is flushed and atexit handlers run, which is
+ * how the -DRC_DEBUG report still appears. The range check (0..255) is in
+ * lib/os.src, where the library can say what was wrong. */
+_Noreturn void rt_exit(int64_t code) {
+    fflush(stdout);
+    exit((int)code);
+}
+
+/* A library's way to say "this is a bug in the caller" -- the same trap the
+ * language itself uses for an index out of range, with the library's own
+ * message. The message is copied to a C string only here, on the way out. */
+_Noreturn void rt_panic(Obj *msg) {
+    Str *m = (Str *)msg;
+    fflush(stdout);
+    fputs("trap: ", stderr);
+    if (m->len > 0) fwrite(m->data, 1, (size_t)m->len, stderr);
+    fputc('\n', stderr);
+    abort();
+}
+
+/* CLOCK_REALTIME: wall-clock time since 1970-01-01T00:00:00Z. Seconds and
+ * nanoseconds come from ONE reading, so they can never straddle a tick. */
+void rt_clock(Obj *out) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) rt_trap("the wall clock is unavailable");
+    rt_list_push(out, (int64_t)ts.tv_sec);
+    rt_list_push(out, (int64_t)ts.tv_nsec);
+}
+
+/* getentropy(3) is the kernel's randomness syscall (getrandom on Linux,
+ * getentropy on the BSDs and macOS) and needs no file descriptor, so it
+ * works in a chroot with no /dev. It answers at most 256 octets per call,
+ * which is the only reason for the loop. Each octet is pushed as an int in
+ * 0..255 until the language has a byte type. */
+int64_t rt_entropy(int64_t n, Obj *out) {
+    unsigned char buf[256];
+    while (n > 0) {
+        size_t k = n > 256 ? 256 : (size_t)n;
+        if (getentropy(buf, k) != 0) return errno ? errno : EIO;
+        for (size_t i = 0; i < k; i++) rt_list_push(out, (int64_t)buf[i]);
+        n -= (int64_t)k;
+    }
+    return 0;
+}
+/* ---- end process primitives ------------------------------------------- */

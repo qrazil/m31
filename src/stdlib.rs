@@ -20,6 +20,7 @@ pub fn source(name: &str) -> Option<&'static str> {
     Some(match name {
         "io" => include_str!("../lib/io.src"),
         "math" => include_str!("../lib/math.src"),
+        "os" => include_str!("../lib/os.src"),
         _ => return None,
     })
 }
