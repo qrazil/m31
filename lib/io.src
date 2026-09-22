@@ -141,9 +141,11 @@ type Stream {
 /// forget -- Oro's rule. A write to standard output or standard error first
 /// flushes what `print` has buffered, so the two land in program order.
 ///
-/// **A `File` is not closed for you.** The language has no destructors, so
-/// a `File` dropped without `close()` keeps its descriptor until the
-/// program ends. Close on every path, including the error paths.
+/// **A `File` closes itself when its last reference goes** -- at the end of
+/// a scope, on a `return` or a `?` that leaves it, when it is reassigned --
+/// so no path leaks its descriptor. That close is silent: a writer that
+/// needs to know whether the close failed calls `close()` itself and looks
+/// at the result (docs/destructors-decision.md).
 pub type File {
     Stream s;
 }
@@ -209,6 +211,17 @@ pub Result<int, Error> File.write(bytes b) {
 /// then, and a retry could close one another thread has just been given.
 pub Result<bool, Error> File.close() {
     return stream_close(s);
+}
+
+// The destructor: close whatever `close()` was not called on. The same
+// function `close()` uses, so the same rules hold -- a second close is a
+// no-op, and the standard streams are marked closed without their
+// descriptors being released. Its error is discarded because a destructor
+// has nobody to hand one to; `close()` is how a program sees it. It calls
+// `stream_close` rather than `close()` because a bare `close()` here would
+// also name the channel builtin, which the language refuses as ambiguous.
+void File.drop() {
+    Result<bool, Error> ignored = stream_close(s);
 }
 
 /// The `Error` for a Linux errno number -- positive, as errno is written;
