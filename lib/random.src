@@ -4,7 +4,7 @@
 //
 // API -- unpredictable, from the OS
 // ---------------------------------
-//   random.octets(n)           -> List<int>, n octets, each 0..255
+//   random.octets(n)           -> bytes, n of them
 //   random.hex(n)              -> str, n octets as 2n lowercase hex digits
 //   random.integer(low, high)  -> int in [low, high], both ends included
 //   random.fraction()          -> float in [0.0, 1.0)
@@ -40,9 +40,6 @@
 //
 // --- where this differs from Oro, and why ------------------------------------
 //
-// Octets are a `List<int>` of values 0..255: there is no byte type yet. When
-// there is, `octets` returns it.
-//
 // There is no `choice(xs)` or `shuffle(xs)` yet. Both are generic over the
 // element type, and a generic function cannot be called from another module
 // yet (`lib.first(xs)` is "`lib` has no function `first`"), nor can a method
@@ -63,12 +60,9 @@
 // no module-level state, so every draw is one getentropy call. That is
 // slower per call and holds no future output in memory.
 //
-// PCG needs 64-bit wrapping multiplication, shifts and xor, and this
-// language has none of them yet: `int` traps on overflow and there are no
-// bitwise operators. So the generator's 64-bit state is four 16-bit limbs
-// and the bit operations are written with `/` and `%`. Every intermediate
-// value stays below 2^36, far from overflow. It is slow and exact; when
-// wrapping arithmetic and bitwise operators land, the limbs go.
+// The kernel's octets arrive in a `List<int>`, because that is what the one
+// primitive fills; `fill` copies them into `bytes` at once, so nothing past
+// it sees the difference.
 //
 // Failures: a range with high below low and a negative count are bugs in the caller and trap, as an index out of range
 // does. So does the kernel refusing to supply randomness, which Go's
@@ -86,15 +80,16 @@ prim void __panic(str msg);
 /// not choose cannot be written. A negative seed is its 64-bit two's
 /// complement pattern, a seed like any other.
 ///
-/// `state` is the generator's own, filled on the first draw; leave it out.
-/// (It is a field only because this language has no private fields.)
+/// `state` is the generator's own: one element, the PCG state, filled on the
+/// first draw; leave it out. (It is a field only because this language has no
+/// private fields, and a list only so a draw can advance it in place.)
 pub type Seeded {
     int seed;
     List<int> state = [];
 }
 
 /// n octets.
-pub List<int> Seeded.octets(int n) {
+pub bytes Seeded.octets(int n) {
     return octets_from(seeded(seed, state), n);
 }
 
@@ -132,7 +127,7 @@ type Source {
 }
 
 /// n octets from the operating system.
-pub List<int> octets(int n) {
+pub bytes octets(int n) {
     return octets_from(system(), n);
 }
 
@@ -175,56 +170,37 @@ Source system() {
 // adjacent seeds do not open with correlated output.
 Source seeded(int seed, List<int> state) {
     if (state.size() == 0) {
-        // Limbs 0..3 are the state, 4..7 the increment, least significant
-        // first. The increment is Oro's stream constant, shifted left once
-        // with its low bit set: (1442695040888963407 << 1) | 1.
-        List<int> zero = limbs(0);
-        List<int> inc = limbs(2885390081777926815);
-        for (int v in zero) {
-            state.push(v);
-        }
-        for (int v in inc) {
-            state.push(v);
-        }
-        step(state);
-        List<int> sum = add64(state, limbs(seed));
-        int i = 0;
-        while (i < 4) {
-            state[i] = sum[i];
-            i = i + 1;
-        }
-        step(state);
+        state.push(step(step(0).wrapping_add(seed)));
     }
     return Source(true, state);
 }
 
 // n octets from the source.
-List<int> fill(Source s, int n) {
+bytes fill(Source s, int n) {
     if (s.is_seeded) {
         return pcg_fill(s.state, n);
     }
-    List<int> out = [];
-    int e = __entropy(n, out);
+    List<int> got = [];
+    int e = __entropy(n, got);
     if (e != 0) {
         __panic("random: the operating system supplied no randomness (errno " + e.to_str() + ")");
+    }
+    bytes out = [];
+    for (int b in got) {
+        out.push(b);
     }
     return out;
 }
 
 // --- the algorithms, once ---------------------------------------------------
-List<int> octets_from(Source s, int n) {
+bytes octets_from(Source s, int n) {
     check_count(n, "octets");
     return fill(s, n);
 }
 
 str hex_from(Source s, int n) {
     check_count(n, "hex");
-    str digits = "0123456789abcdef";
-    str out = "";
-    for (int b in fill(s, n)) {
-        out = out + digits.substr(b / 16, b / 16 + 1) + digits.substr(b % 16, b % 16 + 1);
-    }
-    return out;
+    return fill(s, n).hex();
 }
 
 // By rejection sampling, never `% span`. A byte modulo 3 maps 256 values
@@ -234,9 +210,9 @@ str hex_from(Source s, int n) {
 // pattern is equally likely, and redraw anything past the end. The redraw
 // costs at most one extra draw on average.
 //
-// Keeping the low `bits` bits is `% 2^bits`, which is exactly the mask Oro
-// applies; the octets are read most significant first, as Oro reads them, so
-// a seeded generator answers the same integers in both.
+// Keeping the low `bits` bits is exactly the mask Oro applies; the octets are
+// read most significant first, as Oro reads them, so a seeded generator
+// answers the same integers in both.
 int integer_from(Source s, int low, int high) {
     if (high < low) {
         __panic("random.integer(" + low.to_str() + ", " + high.to_str() + "): the range is empty -- high is below low, and both ends are included");
@@ -263,9 +239,8 @@ int integer_from(Source s, int low, int high) {
 // most high -- which accepts more than half of all draws.
 int integer_wide(Source s, int low, int high) {
     while (true) {
-        List<int> b = fill(s, 8);
-        int top = b[0] / 128;
-        b[0] = b[0] % 128;
+        bytes b = fill(s, 8);
+        int top = b[0] >> 7;
         int rest = low_bits(b, 63);
         if (top == 0) {
             // low < 0 and rest < 2^63, and high - low exceeds 2^63 - 1, so
@@ -284,7 +259,7 @@ int integer_wide(Source s, int low, int high) {
 // Seven octets, three bits dropped: 53 bits over 2^53, which is CPython's
 // construction and the only one that cannot round up to exactly 1.0.
 float fraction_from(Source s) {
-    int n = low_bits(fill(s, 7), 56) / 8;
+    int n = low_bits(fill(s, 7), 56) >> 3;
     return float(n) / 9007199254740992.0;
 }
 
@@ -312,165 +287,71 @@ List<int> permutation_from(Source s, int n) {
 
 // 122 random bits, with the version nibble (4) and the two-bit variant (10)
 // written over the draw where RFC 4122 puts them. The hyphens are part of the
-// format: this string is the UUID. `b % 16 + 64` is `b & 0x0F | 0x40`, and
-// `b % 64 + 128` is `b & 0x3F | 0x80`.
+// format: this string is the UUID.
 str uuid4_from(Source s) {
-    List<int> b = fill(s, 16);
-    b[6] = b[6] % 16 + 64;
-    b[8] = b[8] % 64 + 128;
-    str h = hex_of(b);
+    bytes b = fill(s, 16);
+    b[6] = b[6] & 15 | 64;
+    b[8] = b[8] & 63 | 128;
+    str h = b.hex();
     return h.substr(0, 8) + "-" + h.substr(8, 12) + "-" + h.substr(12, 16) + "-" + h.substr(16, 20) + "-" + h.substr(20, 32);
 }
 
-str hex_of(List<int> b) {
-    str digits = "0123456789abcdef";
-    str out = "";
-    for (int v in b) {
-        out = out + digits.substr(v / 16, v / 16 + 1) + digits.substr(v % 16, v % 16 + 1);
-    }
-    return out;
-}
-
-// --- PCG-XSH-RR 64/32, on 16-bit limbs --------------------------------------
+// --- PCG-XSH-RR 64/32 ---------------------------------------------------------
 //
-// The state advances as a 64-bit LCG, state * 6364136223846793005 + inc; the
-// output is the OLD state xor-shifted down to 32 bits and rotated by its own
-// top five bits. With the reference demo's arguments (seed 42, stream 54)
-// this produces PCG's published output, a15c02b7 7b47f409 ba1d3330 ...
-// state = state * multiplier + increment, mod 2^64.
-void step(List<int> state) {
-    List<int> mul = limbs(6364136223846793005);
-    List<int> product = mul64(state, mul);
-    List<int> inc = [state[4], state[5], state[6], state[7]];
-    List<int> next = add64(product, inc);
-    int i = 0;
-    while (i < 4) {
-        state[i] = next[i];
-        i = i + 1;
-    }
+// The state advances as a 64-bit LCG, state * 6364136223846793005 + inc,
+// modulo 2^64; the output is the OLD state xor-shifted down to 32 bits and
+// rotated by its own top five bits. With the reference demo's arguments (seed
+// 42, stream 54) this produces PCG's published output, a15c02b7 7b47f409
+// ba1d3330 ...
+//
+// The state is an `int` holding the 64-bit pattern, so the LCG is the two
+// wrapping methods and the output function is bit operators. `>>` copies the
+// sign bit in, and PCG means the unsigned shift, so every right shift of the
+// state goes through `shr`.
+//
+// step: state * multiplier + increment, mod 2^64. The increment is Oro's stream
+// constant, shifted left once with its low bit set:
+// (1442695040888963407 << 1) | 1.
+int step(int state) {
+    return state.wrapping_mul(6364136223846793005).wrapping_add(2885390081777926815);
 }
 
 // One 32-bit output: the previous state is what gets permuted, so the
 // multiply and the output function are independent of each other.
 int next32(List<int> state) {
-    // The old state as two 32-bit halves.
-    int hi = state[3] * 65536 + state[2];
-    int lo = state[1] * 65536 + state[0];
-    step(state);
-    // x = (old >> 18) ^ old
-    int shi = hi / pow2(18);
-    int slo = lo / pow2(18) + hi % pow2(18) * pow2(14);
-    int xhi = xor32(shi, hi);
-    int xlo = xor32(slo, lo);
-    // xorshifted = low 32 bits of x >> 27
-    int xorshifted = xlo / pow2(27) + xhi % pow2(27) * pow2(5);
-    // rot = old >> 59, the top five bits
-    int rot = hi / pow2(27);
-    // rotate right by rot, within 32 bits
-    return xorshifted / pow2(rot) + xorshifted % pow2(rot) * pow2(32 - rot);
+    int old = state[0];
+    state[0] = step(old);
+    int xorshifted = shr(shr(old, 18) ^ old, 27) & 4294967295;
+    int rot = shr(old, 59);
+    // Rotate right by rot within 32 bits. A shift by 32 is in range, so
+    // rot == 0 needs no case of its own; the mask drops what it pushes up.
+    return (xorshifted >> rot | xorshifted << 32 - rot) & 4294967295;
 }
 
 // n octets: each 32-bit output gives four, most significant first, and what
 // is left of the last one is dropped -- Oro's order, octet for octet.
-List<int> pcg_fill(List<int> state, int n) {
-    List<int> out = [];
+bytes pcg_fill(List<int> state, int n) {
+    bytes out = [];
     while (out.size() < n) {
         int v = next32(state);
-        out.push(v / 16777216);
-        if (out.size() < n) {
-            out.push(v / 65536 % 256);
-        }
-        if (out.size() < n) {
-            out.push(v / 256 % 256);
-        }
-        if (out.size() < n) {
-            out.push(v % 256);
+        int shift = 24;
+        while (shift >= 0 && out.size() < n) {
+            out.push(v >> shift & 255);
+            shift = shift - 8;
         }
     }
     return out;
 }
 
-// `v` mod 2^64 as four 16-bit limbs, least significant first. Rounding down
-// is what makes a negative `v` come out as its two's complement pattern.
-List<int> limbs(int v) {
-    List<int> out = [];
-    int rest = v;
-    int i = 0;
-    while (i < 4) {
-        out.push(floor_mod(rest, 65536));
-        rest = floor_div(rest, 65536);
-        i = i + 1;
-    }
-    return out;
-}
-
-// a * b mod 2^64, schoolbook on limbs. A limb product is below 2^32 and at
-// most four of them meet in one column, so no sum comes near overflow.
-List<int> mul64(List<int> a, List<int> b) {
-    List<int> out = [];
-    int carry = 0;
-    int k = 0;
-    while (k < 4) {
-        int sum = carry;
-        int i = 0;
-        while (i <= k) {
-            sum = sum + a[i] * b[k - i];
-            i = i + 1;
-        }
-        out.push(sum % 65536);
-        carry = sum / 65536;
-        k = k + 1;
-    }
-    return out;
-}
-
-// a + b mod 2^64.
-List<int> add64(List<int> a, List<int> b) {
-    List<int> out = [];
-    int carry = 0;
-    int k = 0;
-    while (k < 4) {
-        int sum = a[k] + b[k] + carry;
-        out.push(sum % 65536);
-        carry = sum / 65536;
-        k = k + 1;
-    }
-    return out;
-}
-
-// a ^ b for 0 <= a, b < 2^32, one bit at a time.
-int xor32(int a, int b) {
-    int out = 0;
-    int bit = 1;
-    int x = a;
-    int y = b;
-    int i = 0;
-    while (i < 32) {
-        if (x % 2 != y % 2) {
-            out = out + bit;
-        }
-        x = x / 2;
-        y = y / 2;
-        bit = bit * 2;
-        i = i + 1;
-    }
-    return out;
+// The logical right shift, `x >>> n` for 1 <= n <= 63: the arithmetic shift
+// with the copied-in sign bits masked off, as the reference spells it (§6.1).
+int shr(int x, int n) {
+    return x >> n & ~(-1 << 64 - n);
 }
 
 // --- small arithmetic -------------------------------------------------------
 int max_int() {
     return 9223372036854775807;
-}
-
-// 2^k for 0 <= k <= 62.
-int pow2(int k) {
-    int out = 1;
-    int i = 0;
-    while (i < k) {
-        out = out * 2;
-        i = i + 1;
-    }
-    return out;
 }
 
 // How many bits it takes to write `n`, which is positive here.
@@ -479,36 +360,24 @@ int bit_length(int n) {
     int rest = n;
     while (rest > 0) {
         bits = bits + 1;
-        rest = rest / 2;
+        rest = rest >> 1;
     }
     return bits;
 }
 
 // The octets as one number, most significant first, keeping only the low
-// `bits` bits (1..63). The top octet is reduced before anything is shifted
-// past it, so eight octets never overflow.
-int low_bits(List<int> b, int bits) {
+// `bits` bits (1..63). The top octet is masked before anything is shifted
+// past it, so eight octets never reach the sign bit.
+int low_bits(bytes b, int bits) {
     int n = b.size();
     int top = bits - 8 * (n - 1);
-    int out = b[0] % pow2(top);
+    int out = b[0] & (1 << top) - 1;
     int i = 1;
     while (i < n) {
-        out = out * 256 + b[i];
+        out = out << 8 | b[i];
         i = i + 1;
     }
     return out;
-}
-
-int floor_div(int a, int b) {
-    int q = a / b;
-    if (a % b < 0) {
-        return q - 1;
-    }
-    return q;
-}
-
-int floor_mod(int a, int b) {
-    return a - floor_div(a, b) * b;
 }
 
 void check_count(int n, str who) {
