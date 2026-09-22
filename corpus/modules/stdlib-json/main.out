@@ -80,10 +80,12 @@ error: integer out of range at position 0
 error: unexpected '/' at position 7
 error: invalid UTF-8 in string at position 1
 error: invalid UTF-8 in string at position 8
-error: escape at position 1 spells U+0008, which a str cannot hold until the language can build any byte
-error: escape at position 3 spells U+000c, which a str cannot hold until the language can build any byte
-error: escape at position 1 spells U+0301, which a str cannot hold until the language can build any byte
-error: escape at position 1 spells U+0001, which a str cannot hold until the language can build any byte
+"\b"
+"ab\f"
+"́"
+"\u0001"
+""
+"񐀀"
 true
 error: maximum nesting depth (10000) exceeded at position 10000
 10001 with an empty innermost: ok

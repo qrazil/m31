@@ -278,8 +278,8 @@ outside `date`'s years) deserve the same treatment rather than a `Result`
 that docs/errors-decision.md says a caller's bug must not get.
 
 Everything above them is source: argv[0]'s inclusion, what unset means, the
-calendar, rejection sampling, PCG on 16-bit limbs until bitwise operators
-land, and the whole of `args`.
+calendar, rejection sampling, PCG on the wrapping methods and bitwise
+operators, and the whole of `args`.
 
 ---
 

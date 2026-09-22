@@ -6,9 +6,8 @@
 // operation rather than a second pair of names, because it is one codec with
 // one table swapped, not a second codec.
 //
-// **The two halves compose**: `decode(encode(s))` is `s` again for every
-// string of bytes that `decode` can build (see the gap below), in either
-// alphabet.
+// **The two halves compose**: `decode(encode(b))` is `b` again for every
+// `bytes`, in either alphabet.
 //
 // **`decode` is strict, and there is no lenient mode.** A character outside
 // the chosen alphabet, a length that is not a multiple of four, and padding
@@ -23,26 +22,24 @@
 //
 // One leniency is kept, and it is CPython's: the unused low bits of the last
 // character before the padding are not required to be zero, so `"QR=="` and
-// `"QQ=="` both decode to `"A"`. RFC 4648 §3.5 lets a decoder go either way,
+// `"QQ=="` both decode to the one byte `A`. RFC 4648 §3.5 lets a decoder go either way,
 // and a caller who needs the canonical spelling can compare
 // `encode(decode(t)) == t`.
 //
-// --- written before `bytes` and before bitwise operators -------------------
+// --- the types ---------------------------------------------------------------
 //
-// Both halves work on `str`, which holds raw bytes: `byte_at` reads one as an
-// int. Shifts and masks are spelled as arithmetic -- `v * 65536` for
-// `v << 16`, `v / 4096 % 64` for `v >> 12 & 63` -- and every such line says
-// which shift it is, so moving to `& >>` is a line-by-line substitution.
-// Values are never negative, so `/` and `%` agree with `>>` and `&` exactly.
+// `encode` takes `bytes` and answers a `str`; `decode` takes a `str` and
+// answers `bytes`. What comes out of base64 is text by construction -- sixty-
+// five ASCII characters -- bound for a header, a URL or a JSON string, every
+// one of which is a `str`. What goes in is octets, and only the caller knows
+// whether they were UTF-8, so `decode` hands back octets and `utf8()` is the
+// decode, in the open. These are Oro's shapes.
 //
-// Going the other way, from an int back to a one-byte `str`, has no primitive
-// at all. `octets` below cuts one-byte strings out of a literal, and a literal
-// can only hold what a formatted source file can: 48 byte values -- most C0
-// controls, DEL, and 0xC0, 0xC1, 0xCC, 0xEE and 0xF1 to 0xFF -- cannot be
-// written in one. `decode` refuses to produce those with
-// `Error.NotRepresentable` rather than corrupting its output. When `bytes`
-// lands, `decode` returns it, `octets` and that variant go away, and nothing
-// else changes.
+// Oro's `encode` also accepts a `str` and takes its UTF-8. Here a parameter
+// has one static type, so text is passed as `s.to_bytes()`: one entry point,
+// and the crossing from text to octets written where it happens, as it is
+// everywhere else `str` meets `bytes` (reference §3.10), rather than a second
+// function that differs only in the conversion it hides.
 
 /// Why `decode` refused its input. Every variant carries the position, in
 /// bytes from the start of the text, of what was wrong.
@@ -56,9 +53,6 @@ pub enum Error {
     PaddingThenData(int, int);
     /// How many padding characters there are, and where they start.
     Padding(int, int);
-    /// A decoded byte this language cannot yet put in a `str`, and the
-    /// position of the four characters that spell it. Goes away with `bytes`.
-    NotRepresentable(int, int);
 }
 
 /// A sentence saying what was wrong, and where.
@@ -83,67 +77,62 @@ pub str message(Error e) {
         case Padding(int count, int at): {
             return "base64 text ends in " + count.to_str() + " padding characters at position " + at.to_str() + "; at most 2 are allowed";
         }
-        case NotRepresentable(int b, int at): {
-            return "base64 text at position " + at.to_str() + " decodes to byte " + hex(b) + ", which a str cannot hold until the language has bytes";
-        }
     }
 }
 
 /// `data`, as base64 text.
 ///
-///     base64.encode("user:pass")    == "dXNlcjpwYXNz"
-///     base64.encode("é")            == "w6k="
-pub str encode(str data, bool url = false) {
+///     base64.encode("user:pass".to_bytes())    == "dXNlcjpwYXNz"
+///     base64.encode("é".to_bytes())            == "w6k="
+pub str encode(bytes data, bool url = false) {
     List<str> digits = alphabet(url);
     int n = data.size();
     int whole = n - n % 3;
     List<str> out = [];
     int i = 0;
     while (i < whole) {
-        // v = b0 << 16 | b1 << 8 | b2
-        int v = data.byte_at(i) * 65536 + data.byte_at(i + 1) * 256 + data.byte_at(i + 2);
-        // v >> 18, v >> 12 & 63, v >> 6 & 63, v & 63
-        out.push(digits[v / 262144]);
-        out.push(digits[v / 4096 % 64]);
-        out.push(digits[v / 64 % 64]);
-        out.push(digits[v % 64]);
+        int v = data[i] << 16 | data[i + 1] << 8 | data[i + 2];
+        out.push(digits[v >> 18]);
+        out.push(digits[v >> 12 & 63]);
+        out.push(digits[v >> 6 & 63]);
+        out.push(digits[v & 63]);
         i = i + 3;
     }
     if (n - whole == 1) {
-        int v = data.byte_at(whole) * 65536;
-        out.push(digits[v / 262144]);
-        out.push(digits[v / 4096 % 64]);
+        int v = data[whole] << 16;
+        out.push(digits[v >> 18]);
+        out.push(digits[v >> 12 & 63]);
         out.push("==");
     } else if (n - whole == 2) {
-        int v = data.byte_at(whole) * 65536 + data.byte_at(whole + 1) * 256;
-        out.push(digits[v / 262144]);
-        out.push(digits[v / 4096 % 64]);
-        out.push(digits[v / 64 % 64]);
+        int v = data[whole] << 16 | data[whole + 1] << 8;
+        out.push(digits[v >> 18]);
+        out.push(digits[v >> 12 & 63]);
+        out.push(digits[v >> 6 & 63]);
         out.push("=");
     }
     return out.join("");
 }
 
-/// The bytes base64 `text` spells.
+/// The octets base64 `text` spells.
 ///
-///     base64.decode("dXNlcjpwYXNz")         -> Ok("user:pass")
-///     base64.decode("LV8=", url: true)      -> Ok("-_")
+///     base64.decode("dXNlcjpwYXNz")         -> Ok("user:pass".to_bytes())
+///     base64.decode("-_8=", url: true)      -> Ok([251, 255])
 ///
 /// The refusals are checked in reading order -- first a character that is not
 /// base64 at all, then the length, then the padding -- so the error names the
 /// first thing wrong with the input rather than whichever check ran first.
-pub Result<str, Error> decode(str text, bool url = false) {
+pub Result<bytes, Error> decode(str text, bool url = false) {
     int n = text.size();
     int i = 0;
     while (i < n) {
         int c = text.byte_at(i);
         if (c != 61 && value(c, url) < 0) {
-            return Result<str, Error>.Err(Error.Character(i, c, url));
+            return Result<bytes, Error>.Err(Error.Character(i, c, url));
         }
         i = i + 1;
     }
     if (n % 4 != 0) {
-        return Result<str, Error>.Err(Error.Length(n));
+        return Result<bytes, Error>.Err(Error.Length(n));
     }
     // Everything is now alphabet or `=`, so the first `=` is where the padding
     // starts, and the padding must run from there to the end.
@@ -157,10 +146,10 @@ pub Result<str, Error> decode(str text, bool url = false) {
             after = after + 1;
         }
         if (after < n) {
-            return Result<str, Error>.Err(Error.PaddingThenData(data, after));
+            return Result<bytes, Error>.Err(Error.PaddingThenData(data, after));
         }
         if (n - data > 2) {
-            return Result<str, Error>.Err(Error.Padding(n - data, data));
+            return Result<bytes, Error>.Err(Error.Padding(n - data, data));
         }
     }
     int pad = n - data;
@@ -168,27 +157,24 @@ pub Result<str, Error> decode(str text, bool url = false) {
     if (pad > 0) {
         whole = n - 4;
     }
-    List<str> table = octets();
-    List<str> out = [];
+    bytes out = [];
     i = 0;
     while (i < whole) {
-        // v = a << 18 | b << 12 | c << 6 | d
         int v = quad(text, i, 4, url);
-        // v >> 16, v >> 8 & 255, v & 255
-        push_octet(out, table, v / 65536, i)?;
-        push_octet(out, table, v / 256 % 256, i)?;
-        push_octet(out, table, v % 256, i)?;
+        out.push(v >> 16);
+        out.push(v >> 8 & 255);
+        out.push(v & 255);
         i = i + 4;
     }
     if (pad == 2) {
         int v = quad(text, whole, 2, url);
-        push_octet(out, table, v / 65536, whole)?;
+        out.push(v >> 16);
     } else if (pad == 1) {
         int v = quad(text, whole, 3, url);
-        push_octet(out, table, v / 65536, whole)?;
-        push_octet(out, table, v / 256 % 256, whole)?;
+        out.push(v >> 16);
+        out.push(v >> 8 & 255);
     }
-    return Result<str, Error>.Ok(out.join(""));
+    return Result<bytes, Error>.Ok(out);
 }
 
 // The first `count` characters of the group at `at`, packed six bits each
@@ -197,23 +183,13 @@ int quad(str text, int at, int count, bool url) {
     int v = 0;
     int k = 0;
     while (k < 4) {
-        // v << 6
-        v = v * 64;
+        v = v << 6;
         if (k < count) {
-            v = v + value(text.byte_at(at + k), url);
+            v = v | value(text.byte_at(at + k), url);
         }
         k = k + 1;
     }
     return v;
-}
-
-// Append byte `b` as a one-byte str, or refuse it if no str can hold it.
-Result<int, Error> push_octet(List<str> out, List<str> table, int b, int at) {
-    if (table[b].size() == 0) {
-        return Result<int, Error>.Err(Error.NotRepresentable(b, at));
-    }
-    out.push(table[b]);
-    return Result<int, Error>.Ok(b);
 }
 
 // The six-bit value of byte `c` in the chosen alphabet, or -1 if it is not
@@ -255,40 +231,14 @@ List<str> alphabet(bool url) {
     return out;
 }
 
-// A one-byte str for every byte value a str can be built from today, indexed
-// by the byte; "" for the 48 that cannot (see the top of the file).
-//
-// There is no way to turn an int into a str of that byte, so they are cut out
-// of a literal that contains each one: `\0 \t \n \r`, printable ASCII, the
-// Latin-1 letters (whose UTF-8 is 0xC3 followed by every continuation byte
-// 0x80-0xBF), and one character for each UTF-8 lead byte a formatted literal
-// can carry.
-List<str> octets() {
-    str src = "\0\t\n\r !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖ×ØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿ¡ĀŀƀǀȀɀʀˀͰ΄πЀрҀӀԀՀր׀؆ـڀۀ܀ݍހ߀ࠀက‐、䀀倀怀瀀耀退ꀀ뀀쀀퀀﨎😀";
-    List<str> table = [""; 256];
-    int i = 0;
-    while (i < src.size()) {
-        int b = src.byte_at(i);
-        if (table[b].size() == 0) {
-            table[b] = src.substr(i, i + 1);
-        }
-        i = i + 1;
-    }
-    return table;
-}
-
 // A byte as a message names it: the character, quoted, if it is printable
 // ASCII, and its value in hex if it is not -- a byte of a multi-byte UTF-8
-// character is not a character on its own.
+// character is not a character on its own. One printable ASCII byte is always
+// valid UTF-8, so the `or` is never taken.
 str shown(int c) {
+    bytes one = [c];
     if (c >= 32 && c <= 126) {
-        return "character '" + octets()[c] + "'";
+        return "character '" + one.utf8().or("?") + "'";
     }
-    return "byte " + hex(c);
-}
-
-// `0x` and two lowercase hex digits.
-str hex(int b) {
-    str digits = "0123456789abcdef";
-    return "0x" + digits.substr(b / 16, b / 16 + 1) + digits.substr(b % 16, b % 16 + 1);
+    return "byte 0x" + one.hex();
 }

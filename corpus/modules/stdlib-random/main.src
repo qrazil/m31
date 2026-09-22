@@ -15,7 +15,7 @@ print(g.integer(1, 6));  // 6
 print(g.integer(1, 6));  // 2
 print(g.fraction());  // 0.8698634359193748
 print(g.uuid4());  // 3f1d211b-a3fb-4987-97db-34c5eff4bf85
-List<int> five = g.octets(5);
+bytes five = g.octets(5);
 print(five.size());  // 5
 for (int b in five) {
     print(b);
@@ -51,7 +51,7 @@ print(random.Seeded(7).hex(4) != random.Seeded(8).hex(4));  // true
 //
 // The system generator's values cannot be written down, so what it must
 // satisfy is checked instead.
-List<int> octs = random.octets(1000);  // past getentropy's 256 per call
+bytes octs = random.octets(1000);  // past getentropy's 256 per call
 bool bytes_ok = octs.size() == 1000;
 for (int v in octs) {
     bytes_ok = bytes_ok && v >= 0 && v <= 255;

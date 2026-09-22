@@ -13,9 +13,10 @@
 //
 // Strings: every escape RFC 8259 defines, `\uXXXX` included, with a UTF-16
 // surrogate pair combined into the one character it spells and an unpaired
-// surrogate refused. The UTF-8 bytes of a `\u` escape are computed with
-// arithmetic. Raw bytes in a string must be valid UTF-8, which the RFC
-// requires; control characters must be escaped.
+// surrogate refused. A `\u` escape is encoded as UTF-8 into a `bytes`, which
+// holds any octet, so every code point an escape can spell is decoded. Raw
+// bytes in a string must be valid UTF-8, which the RFC requires; control
+// characters must be escaped.
 //
 // `stringify` writes the compact form -- no incidental whitespace at all --
 // unless `indent` is positive, which gives one value per line, indented that
@@ -46,18 +47,6 @@
 // - `stringify` returns a `Result`, because NaN, an infinity, a string that
 //   is not UTF-8 and a too-deep value have no JSON spelling. Oro raised.
 // - Integers past 64 bits are an error rather than a bignum (see above).
-//
-// --- a gap: bytes a str cannot be built from ---------------------------------
-//
-// There is no way to turn an int into a one-byte `str`. `octets` below cuts
-// them out of a literal, and a formatted literal cannot carry 48 byte values:
-// most C0 controls, DEL, 0xC0, 0xC1, 0xCC, 0xEE and 0xF1-0xFF. So a `\u`
-// escape whose UTF-8 needs one of them -- the escaped control characters
-// `\b`, `\f` and `\u0001`-style ones, U+0300-U+033F (0xCC), U+E000-U+EFFF
-// (0xEE) and U+40000 and up (0xF1-0xF4) -- is refused with
-// `Error.NotRepresentable` rather than decoded wrongly. Raw UTF-8 in a string
-// is copied, never rebuilt, so it is not affected. When the language can
-// build a byte, `octets` and that variant go away.
 
 /// A JSON value.
 pub enum Value {
@@ -74,10 +63,6 @@ pub enum Value {
 pub enum Error {
     /// The text is not JSON: what was wrong, and the byte position where.
     Syntax(str, int);
-    /// A `\u` escape (or `\b`, `\f`) spelling a character whose UTF-8 a str
-    /// cannot hold yet: the code point, and the position of the backslash.
-    /// Goes away when the language can build any byte.
-    NotRepresentable(int, int);
     /// `stringify` met a NaN or an infinity, which JSON has no spelling for.
     NotFinite(float);
     /// `stringify` met a string that is not valid UTF-8: the byte offset of
@@ -88,12 +73,10 @@ pub enum Error {
     TooDeep;
 }
 
-// Where the parser is, and the one-byte strings a `\u` escape is built from
-// (filled on first use; see `octets`).
+// Where the parser is.
 type Parser {
     str text;
     int at = 0;
-    List<str> table = [];
 }
 
 // A container the parser is in the middle of: its items or members so far,
@@ -124,9 +107,6 @@ pub str message(Error e) {
     match (e) {
         case Syntax(str what, int at): {
             return what + " at position " + at.to_str();
-        }
-        case NotRepresentable(int cp, int at): {
-            return "escape at position " + at.to_str() + " spells U+" + hex(cp, 4) + ", which a str cannot hold until the language can build any byte";
         }
         case NotFinite(float f): {
             if (f != f) {
@@ -334,7 +314,6 @@ Result<str, Error> string(Parser p) {
 // One escape sequence, with `p.at` on its backslash.
 Result<str, Error> escape(Parser p) {
     str text = p.text;
-    int slash = p.at;
     p.at = p.at + 1;
     if (p.at >= text.size()) {
         return Result<str, Error>.Err(Error.Syntax("unterminated escape", p.at));
@@ -342,7 +321,7 @@ Result<str, Error> escape(Parser p) {
     int c = text.byte_at(p.at);
     if (c == 117) {
         int cp = unicode_escape(p)?;
-        return utf8(p, cp, slash);
+        return Result<str, Error>.Ok(utf8(cp));
     }
     p.at = p.at + 1;
     if (c == 34) {
@@ -364,10 +343,10 @@ Result<str, Error> escape(Parser p) {
         return Result<str, Error>.Ok("\t");
     }
     if (c == 98) {
-        return utf8(p, 8, slash);
+        return Result<str, Error>.Ok(utf8(8));
     }
     if (c == 102) {
-        return utf8(p, 12, slash);
+        return Result<str, Error>.Ok(utf8(12));
     }
     p.at = p.at - 1;
     return Result<str, Error>.Err(Error.Syntax("invalid escape '\\" + char_at(text, p.at) + "'", p.at));
@@ -386,8 +365,8 @@ Result<int, Error> unicode_escape(Parser p) {
             p.at = p.at + 1;
             int low = hex4(p)?;
             if (low >= 56320 && low <= 57343) {
-                // 0x10000 + (hi - 0xD800) << 10 + (lo - 0xDC00)
-                return Result<int, Error>.Ok(65536 + (cp - 55296) * 1024 + (low - 56320));
+                // 0x10000 + ((hi - 0xD800) << 10 | lo - 0xDC00)
+                return Result<int, Error>.Ok(65536 + (cp - 55296 << 10 | low - 56320));
             }
             p.at = save;
         }
@@ -429,39 +408,30 @@ Result<int, Error> hex4(Parser p) {
     return Result<int, Error>.Ok(cp);
 }
 
-// Code point `cp` as UTF-8, or NotRepresentable if a str cannot hold one of
-// its bytes yet.
-Result<str, Error> utf8(Parser p, int cp, int slash) {
-    if (p.table.size() == 0) {
-        p.table = octets();
-    }
-    List<int> utf8_units = [];
+// Code point `cp` as UTF-8: 0xxxxxxx, 110xxxxx 10xxxxxx, 1110xxxx then two
+// 10xxxxxx, or 11110xxx then three.
+//
+// `cp` is never a surrogate and never past U+10FFFF -- `unicode_escape` has
+// refused the one and cannot build the other -- so the octets are always valid
+// UTF-8 and the `or` is never taken.
+str utf8(int cp) {
+    bytes out = [];
     if (cp < 128) {
-        utf8_units.push(cp);
+        out.push(cp);
     } else if (cp < 2048) {
-        // 110xxxxx 10xxxxxx: cp >> 6, cp & 63
-        utf8_units.push(192 + cp / 64);
-        utf8_units.push(128 + cp % 64);
+        out.push(192 | cp >> 6);
+        out.push(128 | cp & 63);
     } else if (cp < 65536) {
-        // 1110xxxx 10xxxxxx 10xxxxxx: cp >> 12, cp >> 6 & 63, cp & 63
-        utf8_units.push(224 + cp / 4096);
-        utf8_units.push(128 + cp / 64 % 64);
-        utf8_units.push(128 + cp % 64);
+        out.push(224 | cp >> 12);
+        out.push(128 | cp >> 6 & 63);
+        out.push(128 | cp & 63);
     } else {
-        // 11110xxx then three 10xxxxxx: cp >> 18, >> 12 & 63, >> 6 & 63, & 63
-        utf8_units.push(240 + cp / 262144);
-        utf8_units.push(128 + cp / 4096 % 64);
-        utf8_units.push(128 + cp / 64 % 64);
-        utf8_units.push(128 + cp % 64);
+        out.push(240 | cp >> 18);
+        out.push(128 | cp >> 12 & 63);
+        out.push(128 | cp >> 6 & 63);
+        out.push(128 | cp & 63);
     }
-    List<str> out = [];
-    for (int b in utf8_units) {
-        if (p.table[b].size() == 0) {
-            return Result<str, Error>.Err(Error.NotRepresentable(cp, slash));
-        }
-        out.push(p.table[b]);
-    }
-    return Result<str, Error>.Ok(out.join(""));
+    return out.utf8().or("");
 }
 
 // A number literal, with `p.at` on its first byte. The grammar is RFC 8259's
@@ -713,7 +683,9 @@ Result<int, Error> quote(List<str> out, str s) {
         } else if (c == 12) {
             out.push("\\f");
         } else {
-            out.push("\\u" + hex(c, 4));
+            // The other C0 controls: one byte below 0x20, as `\u00xx`.
+            bytes one = [c];
+            out.push("\\u00" + one.hex());
         }
         i = i + 1;
         run = i;
@@ -811,37 +783,4 @@ int hex_digit(int c) {
         return c - 55;
     }
     return -1;
-}
-
-// `v` in lowercase hex, at least `width` digits.
-str hex(int v, int width) {
-    str digits = "0123456789abcdef";
-    List<str> out = [];
-    int rest = v;
-    while (rest > 0 || out.size() < width) {
-        out.insert(0, digits.substr(rest % 16, rest % 16 + 1));
-        rest = rest / 16;
-    }
-    return out.join("");
-}
-
-// A one-byte str for every byte value a str can be built from today, indexed
-// by the byte; "" for the 48 that cannot (see the top of the file).
-//
-// They are cut out of a literal that contains each one: `\0 \t \n \r`,
-// printable ASCII, the Latin-1 letters (whose UTF-8 is 0xC3 followed by every
-// continuation byte 0x80-0xBF), and one character for each UTF-8 lead byte a
-// formatted literal can carry.
-List<str> octets() {
-    str src = "\0\t\n\r !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖ×ØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿ¡ĀŀƀǀȀɀʀˀͰ΄πЀрҀӀԀՀր׀؆ـڀۀ܀ݍހ߀ࠀက‐、䀀倀怀瀀耀退ꀀ뀀쀀퀀﨎😀";
-    List<str> table = [""; 256];
-    int i = 0;
-    while (i < src.size()) {
-        int b = src.byte_at(i);
-        if (table[b].size() == 0) {
-            table[b] = src.substr(i, i + 1);
-        }
-        i = i + 1;
-    }
-    return table;
 }
