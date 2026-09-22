@@ -231,11 +231,9 @@ each is a freeze decision:
     function. `io.Error.to_str()` cannot be written because of it; so cannot
     any `describe()` on any enum.
 
-Float formatting and parsing (`print` of a float, `parse_float`) are the
-other C that remains above the OS. Both are pure computation -- shortest
-round-trip printing is the Ryu algorithm, correct parsing is Eisel-Lemire
-with a big-integer fallback -- and both move into the language once bitwise
-operators exist.
+Float formatting and parsing (`print` of a float, `parse_float`) were the
+other C above the OS. Both are pure computation, and both are now language
+source -- see §6. The runtime has no `strtod` and no float `snprintf` left.
 
 ### Why this is what self-hosting needs anyway
 
@@ -250,3 +248,67 @@ blocks the compiler as surely as it blocks `io`. The path is Go's:
 3. The Rust compiler kept only as the bootstrap, the way Go 1.5 required Go
    1.4 to build -- and eventually a native backend so the C compiler is no
    longer needed either, which is where Go's own toolchain ended up.
+
+---
+
+## 6. Float text is a module the compiler calls
+
+`print` of a float, `f.to_str()`, `str(f)` and `s.parse_float()` are
+language source: `lib/__floatfmt.src`, whose `format(float) -> str` and
+`parse(str) -> Option<float>` the lowering calls by their qualified names
+where it used to call `rt_print_float`, `rt_float_to_str` and
+`rt_str_parse_float`. `print` formats and then prints the string.
+
+**Formatting is Schubfach** -- the shortest decimal that reads back, from
+three 128-bit products and no loop -- then laid out in the format the C
+runtime always printed, byte for byte: C's `%.{p}g` at the smallest `p` that
+reads back, with a whole number below 1e17 written out in full. That rule is
+not quite "shortest": at 46 powers of two the closest shortest-length decimal
+falls outside the narrow side of the lopsided rounding interval, and C then
+prints one digit more. The module reproduces that exactly rather than change
+what a program prints. **Parsing is Eisel-Lemire**, fast_float's
+`compute_float` line for line, which settles every input of up to 19
+significant digits; a longer one that it cannot settle is decided exactly by
+comparing it with the halfway point between two floats in big integers.
+
+It was checked differentially against the C it replaced: 1,433,824 floats
+(uniform random bit patterns, subnormals, every exponent at its edges, powers
+of ten and their neighbours, short decimals, whole numbers around 2^53 and
+1e17) format to the same bytes and read back to the same bits, and 1,500,073
+decimal strings (random digit counts up to 40 across the whole exponent
+range, exact halfway points and a hair either side of them, 800-digit
+inputs, and malformed text) parse to the same bits as glibc's `strtod` --
+under gcc and clang at -O0 and -O2, with no mismatch. It is faster than the C at
+-O2 (the old code called `snprintf` and `strtod` up to 17 times per float).
+
+### Four decisions
+
+  - **Loaded only when a program could need it.** The loader adds the module
+    when any file contains a float literal, the keyword `float`, or the name
+    `parse_float` -- every float a program holds was written as a literal,
+    has its type spelt somewhere, or came out of `parse_float`, because
+    there is no inference that could produce one silently. Always loading it
+    was the alternative, and it costs every program: measured on a one-line
+    program, loading it adds about 7,000 lines of C, 150 ms to a gcc -O0
+    build and 350 ms to a gcc -O2 one, and 40 KB to an -O2 binary. If the
+    check ever misjudges, the lowering reports a compiler bug by name rather
+    than leaving an undefined function to the C compiler.
+  - **Invisible.** The module is called `__floatfmt`. The parser refuses a
+    `__` name in anything a program writes, `import` included, so no program
+    can import it, name its functions, or collide with it, and the entry file
+    cannot be called `__floatfmt.src` either. It is not a module users need:
+    the conversions it provides are already spelt `print`, `to_str`, `str`
+    and `parse_float`.
+  - **It cannot recurse.** A `print` or `to_str` of a float inside the module
+    would call itself. The lowering refuses both there, so the module is
+    written without them -- it builds text from `int.to_str()`, which is C's
+    and stays C's: it formats an integer, which is not the computation this
+    moved.
+  - **Its table is text.** Schubfach and Eisel-Lemire share one table of
+    684 powers of ten to 128 bits. With no module-level constants in the
+    language, it is string literals of hex digits behind a binary search;
+    literals are immortal, so a lookup allocates nothing. The generator is a
+    few lines of Python, quoted in a comment above the table. A search tree
+    with a `return` per word was tried first and made the emitted C five
+    times larger. A constant array would be the natural home for it, and is
+    a language decision this does not take.

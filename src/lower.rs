@@ -304,24 +304,31 @@ impl Lowerer {
             // lossy on purpose -- "not a number" and "out of range" are both
             // None -- because a built-in cannot return a library's own error
             // type, and the question it answers does not need one.
-            "parse_int" | "parse_float" => {
-                let inner = if m == "parse_int" { Ty::Int } else { Ty::Float };
-                let Some((oty, otid, none_tag, some_tag)) = self.option_of(inner) else {
+            // Parsing a float is language source, lib/__floatfmt.src, which
+            // builds the Option itself.
+            "parse_float" => {
+                let Some((oty, ..)) = self.option_of(Ty::Float) else {
                     return Err(Diag::new(
                         span,
-                        format!("`{m}` has no Option type to return; this is a compiler bug"),
+                        "`parse_float` has no Option type to return; this is a compiler bug",
                     ));
                 };
-                let raw = self.new_val(self.irty(inner));
+                let d = self.float_text("parse", o.val(), span)?;
+                Ok(Val::new(d, oty, true))
+            }
+            "parse_int" => {
+                let Some((oty, otid, none_tag, some_tag)) = self.option_of(Ty::Int) else {
+                    return Err(Diag::new(
+                        span,
+                        "`parse_int` has no Option type to return; this is a compiler bug",
+                    ));
+                };
+                let raw = self.new_val(IrTy::I64);
                 let ok = self.new_val(IrTy::I1);
                 self.push(Inst::ParseInto {
                     ok,
                     dst: raw,
-                    func: if m == "parse_int" {
-                        "rt_str_parse_int".to_string()
-                    } else {
-                        "rt_str_parse_float".to_string()
-                    },
+                    func: "rt_str_parse_int".to_string(),
                     src: o.val(),
                 });
                 let d = self.select_option(ok, raw, otid, some_tag, none_tag);
@@ -5115,19 +5122,65 @@ impl Lowerer {
         if !args.pos.is_empty() || !args.named.is_empty() {
             return Err(Diag::new(span, "`to_str` takes no arguments"));
         }
-        let func = match prim {
-            Ty::Int => "rt_int_to_str",
-            Ty::Float => "rt_float_to_str",
-            _ => "rt_bool_to_str",
+        let d = self.prim_to_str(prim, o.val(), span)?;
+        Ok(Val::new(d, Ty::Str, true))
+    }
+
+    /// The text of an `int`, a `float` or a `bool`, owned by the statement.
+    /// `v.to_str()` and `str(v)` both come here, so they cannot disagree.
+    fn prim_to_str(&mut self, prim: Ty, v: Value, span: Span) -> Result<Value, Diag> {
+        if prim == Ty::Float {
+            return self.float_text("format", v, span);
+        }
+        let func = if prim == Ty::Int {
+            "rt_int_to_str"
+        } else {
+            "rt_bool_to_str"
         };
         let d = self.new_val(IrTy::Ref);
         self.push(Inst::Call {
             dst: Some(d),
             func: func.to_string(),
-            args: vec![o.val()],
+            args: vec![v],
         });
         self.stmt_temps.push(d);
-        Ok(Val::new(d, Ty::Str, true))
+        Ok(d)
+    }
+
+    /// A call to `format` or `parse` in lib/__floatfmt.src, which is how a
+    /// float becomes text and text a float: the conversion is language
+    /// source, not runtime C. Both take one borrowed argument and return an
+    /// owned reference -- a `str`, or an `Option<float>`.
+    ///
+    /// The loader includes the module whenever a program could get here (see
+    /// `modules::mentions_float`); if that ever misjudges, this says so
+    /// instead of leaving an undefined function to the C compiler.
+    fn float_text(&mut self, name: &str, arg: Value, span: Span) -> Result<Value, Diag> {
+        let fm = crate::stdlib::FLOATFMT;
+        // The module converting floats cannot convert one itself: the call
+        // would be to itself, and it would recurse until the stack ran out.
+        if self.cur_module == fm {
+            return Err(Diag::new(
+                span,
+                "the float formatter cannot format or parse a float itself: \
+                 that would call itself",
+            ));
+        }
+        let key = format!("{fm}#{name}");
+        if !self.sigs.contains_key(&key) {
+            return Err(Diag::new(
+                span,
+                format!("`{key}` was not loaded for a float conversion; this is a compiler bug"),
+            ));
+        }
+        let d = self.new_val(IrTy::Ref);
+        self.push(Inst::Call {
+            dst: Some(d),
+            func: key,
+            args: vec![arg],
+        });
+        self.stmt_temps.push(d);
+        Ok(d)
     }
 
     /// `T.name(..)` where `T` is a built-in type: a static method.
@@ -5868,7 +5921,16 @@ impl Lowerer {
             let a = self.lower_expr(&args.pos[0])?;
             let f = match self.underlying(a.ty) {
                 Ty::Int => "rt_print",
-                Ty::Float => "rt_print_float",
+                // Formatted in the language, then printed as the string.
+                Ty::Float => {
+                    let text = self.float_text("format", a.val(), args.pos[0].span())?;
+                    self.push(Inst::Call {
+                        dst: None,
+                        func: "rt_print_str".to_string(),
+                        args: vec![text],
+                    });
+                    return Ok(Val::void());
+                }
                 Ty::Bool => "rt_print_bool",
                 Ty::Str => "rt_print_str",
                 Ty::Void => return Err(Diag::new(args.pos[0].span(), "cannot print a void value")),
@@ -5947,18 +6009,7 @@ impl Lowerer {
             // type that wrote the method itself.
             if base == Ty::Str {
                 if matches!(from, Ty::Int | Ty::Float | Ty::Bool) {
-                    let func = match from {
-                        Ty::Int => "rt_int_to_str",
-                        Ty::Float => "rt_float_to_str",
-                        _ => "rt_bool_to_str",
-                    };
-                    let d = self.new_val(IrTy::Ref);
-                    self.push(Inst::Call {
-                        dst: Some(d),
-                        func: func.to_string(),
-                        args: vec![v.val()],
-                    });
-                    self.stmt_temps.push(d);
+                    let d = self.prim_to_str(from, v.val(), args.pos[0].span())?;
                     return Ok(Val::new(d, Ty::Str, true));
                 }
                 if let Some(text) = self.call_to_str(&v, args.pos[0].span())? {

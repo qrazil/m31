@@ -140,7 +140,7 @@ fn reformat(src: &str, module: &str) -> Result<String, diag::Diag> {
     // name is right here and nowhere else: this reads a file to print it back,
     // it never compiles it, so a program called `math.src` gets a formatter
     // that is one keyword too permissive and no more.
-    if stdlib::source(module).is_some() {
+    if stdlib::embedded(module).is_some() {
         p = p.stdlib();
     }
     let prog = p.parse_program(module)?;

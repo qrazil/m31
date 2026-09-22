@@ -1,0 +1,66 @@
+// Float formatting at its edges: the shortest decimal that reads back, in
+// the format C's `%.{p}g` gives at the smallest precision p that does,
+// with whole numbers below 1e17 written out in full. Expected output is
+// from Python's correctly rounded `'%.*g'`, not from this compiler.
+//
+// Where this differs from Python's repr it is on purpose: a whole number
+// has no `.0` (3, not 3.0), whole numbers stay written out up to 1e17
+// where repr switches at 1e16 (10000000000000000, not 1e+16), and the
+// three powers of two below print 17 digits where the shortest form has
+// 16 (repr gives 5.986310706507379e+51 for the first). That last is C's
+// rule at a lopsided rounding interval, and this format has always
+// followed it.
+print(3.0);
+print(-2.5);
+print(0.1);
+print(0.1 + 0.2);
+print(1.0 / 3.0);
+print(2.0 / 3.0);
+print(100.0);
+print(2500.0);
+print(123456.789);
+print(1000000000000000.0);
+print(10000000000000000.0);
+print(9007199254740992.0);
+print(99999999999999984.0);
+print(100000000000000000.0);
+print(12345678901234567168.0);
+print(1000000000000000000000.0);
+print(10000000000000000000000.0);
+print(99999999999999991611392.0);
+print(0.001);
+print(0.0001);
+print(0.00001);
+print(0.000123);
+print(0.000015);
+print(0.0000001);
+print(602214075999999987023872.0);
+print(179769313486231570814527423731704356798070567525844996598917476803157260780028538760589558632766878171540458953514382464234321326889464182768467546703537516986049910576551282076245490090389328944075868508455133942304583236903222948165808559332123348274797826204144723168738177180919299881250404026184124858368.0);
+print(float.from_bits(4503599627370496));
+print(float.from_bits(4503599627370495));
+print(float.from_bits(1));
+print(float.from_bits(2));
+print(-0.0);
+print(0.0);
+print(float.from_bits(9218868437227405312));
+print(float.from_bits(-4503599627370496));
+print(float.from_bits(9221120237041090560));
+print(float.from_bits(-2251799813685248));
+print(float.from_bits(5381801554707742720));
+print(float.from_bits(5426837550981447680));
+print(float.from_bits(9002695655113621504));
+print(float.from_bits(118622047889322840));
+print(float.from_bits(118622047889322842));
+print(float.from_bits(4532020583610935536));
+print(float.from_bits(4532020583610935538));
+print(float.from_bits(4607182418800017407));
+print(float.from_bits(4607182418800017409));
+print(float.from_bits(4681608360884174847));
+print(float.from_bits(4681608360884174849));
+print(float.from_bits(4846369599423283199));
+print(float.from_bits(4846369599423283201));
+print(float.from_bits(4861130398305394687));
+print(float.from_bits(4861130398305394689));
+print(float.from_bits(9094988921128908187));
+print(float.from_bits(9094988921128908189));
+print(0.1.to_str() + " " + str(0.00000000025));

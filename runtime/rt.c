@@ -15,7 +15,6 @@
 #include "rc_debug.h"
 
 #include <errno.h>
-#include <math.h>
 #include <inttypes.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -283,58 +282,6 @@ bool rt_str_parse_int(Obj *o, int64_t *out) {
     return true;
 }
 
-/* The text parse_float accepts, checked before strtod sees it: a sign, then
- * decimal digits with an optional fraction and exponent, or one of the words
- * to_str produces for the values that have no digits. strtod alone also takes
- * leading whitespace, hex floats and "infinity" -- none of which parse_int
- * accepts, so the two disagreed about what a number looks like. strtod is
- * still what converts, because correct rounding is not something to redo. */
-static bool float_text_ok(const char *p, int64_t n) {
-    int64_t i = 0;
-    if (i < n && (p[i] == '+' || p[i] == '-')) i++;
-    if (n - i == 3 && (memcmp(p + i, "inf", 3) == 0 || memcmp(p + i, "nan", 3) == 0))
-        return true;
-    int64_t digits = 0;
-    while (i < n && p[i] >= '0' && p[i] <= '9') { i++; digits++; }
-    if (i < n && p[i] == '.') {
-        i++;
-        while (i < n && p[i] >= '0' && p[i] <= '9') { i++; digits++; }
-    }
-    if (digits == 0) return false;
-    if (i < n && (p[i] == 'e' || p[i] == 'E')) {
-        i++;
-        if (i < n && (p[i] == '+' || p[i] == '-')) i++;
-        int64_t exp_digits = 0;
-        while (i < n && p[i] >= '0' && p[i] <= '9') { i++; exp_digits++; }
-        if (exp_digits == 0) return false;
-    }
-    return i == n;
-}
-
-bool rt_str_parse_float(Obj *o, double *out) {
-    const Str *s = (const Str *)o;
-    if (s->len == 0) return false;
-    /* `data` is NUL-terminated, so strtod is safe -- but an embedded NUL
-     * would let it stop early and report success on a prefix. */
-    for (int64_t i = 0; i < s->len; i++) {
-        if (s->data[i] == '\0') return false;
-    }
-    if (!float_text_ok(s->data, s->len)) return false;
-    char *end = NULL;
-    errno = 0;
-    double v = strtod(s->data, &end);
-    if (end != s->data + s->len) return false;
-    /* ERANGE means two different things. On overflow the result is
-     * +-HUGE_VAL and the text named a number no float can hold: refuse it.
-     * On underflow the result is the correctly rounded subnormal (or zero),
-     * which IS the answer -- glibc sets ERANGE for "5e-324", the smallest
-     * float there is, and treating that as failure made every subnormal
-     * unparseable. */
-    if (errno == ERANGE && (v == HUGE_VAL || v == -HUGE_VAL)) return false;
-    *out = v;
-    return true;
-}
-
 Obj *rt_int_to_str(int64_t n) {
     char buf[32];
     int k = snprintf(buf, sizeof buf, "%" PRId64, n);
@@ -343,12 +290,6 @@ Obj *rt_int_to_str(int64_t n) {
 
 Obj *rt_bool_to_str(bool b) {
     return b ? str_new("true", 4) : str_new("false", 5);
-}
-
-Obj *rt_float_to_str(double x) {
-    char buf[64];
-    rt_format_float(buf, sizeof buf, x);
-    return str_new(buf, (int64_t)strlen(buf));
 }
 
 Obj *rt_str_join(Obj *parts, Obj *sep) {
@@ -387,69 +328,6 @@ Obj *rt_str_join(Obj *parts, Obj *sep) {
 
 void rt_print(int64_t v) {
     printf("%" PRId64 "\n", v);
-}
-
-/* Printed so it reads back as the same double and still looks like what was
- * written: the shortest precision that round-trips, tried in order. `%.17g`
- * always round-trips but renders 0.1 as 0.10000000000000001.
- *
- * All four oracle builds share a libc, so this is deterministic across them.
- * A Go twin is not comparable here -- Go prints shortest-round-trip by a
- * different algorithm and spells infinities `+Inf` -- so float programs stay
- * out of corpus/twin. */
-/* The one place a double becomes text, so `print` and `to_str` cannot
- * disagree about what a number looks like.
- *
- * The shortest form that round-trips, tried in order: `%.17g` always round
- * trips but renders 0.1 as 0.10000000000000001.
- *
- * All four oracle builds share a libc, so this is deterministic across them.
- * A Go twin is not comparable -- Go uses a different shortest-round-trip
- * algorithm and spells infinities `+Inf` -- so float programs stay out of
- * corpus/twin. */
-void rt_format_float(char *buf, size_t cap, double x) {
-    if (x != x) {
-        snprintf(buf, cap, "nan");
-        return;
-    }
-    if (x > 1.7976931348623157e308) {
-        snprintf(buf, cap, "inf");
-        return;
-    }
-    if (x < -1.7976931348623157e308) {
-        snprintf(buf, cap, "-inf");
-        return;
-    }
-    for (int p = 1; p <= 17; p++) {
-        snprintf(buf, cap, "%.*g", p, x);
-        if (strtod(buf, NULL) == x) break;
-    }
-
-    /* %g reaches for an exponent as soon as the exponent exceeds the
-     * precision, so the shortest round-trip of 2500.0 is "2.5e+03". That is
-     * correct and surprising. For magnitudes a reader would write out in
-     * full, prefer the plain form -- which is what Go and Rust print too. */
-    if (strpbrk(buf, "eE") != NULL) {
-        double mag = x < 0 ? -x : x;
-        if (mag >= 1e-4 && mag < 1e17) {
-            char plain[64];
-            for (int p = 0; p <= 17; p++) {
-                snprintf(plain, sizeof plain, "%.*f", p, x);
-                if (strtod(plain, NULL) == x) {
-                    /* Only what was written -- copying the whole scratch
-                     * array would read bytes snprintf never touched. */
-                    memcpy(buf, plain, strlen(plain) + 1);
-                    break;
-                }
-            }
-        }
-    }
-}
-
-void rt_print_float(double x) {
-    char buf[64];
-    rt_format_float(buf, sizeof buf, x);
-    puts(buf);
 }
 
 double rt_i2f_val(int64_t n) {
