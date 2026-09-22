@@ -1,0 +1,4 @@
+corpus/errors/723-pub-field-twice.src:2:9: `pub` is written once
+  |
+2 |     pub pub int z;
+  |         ^

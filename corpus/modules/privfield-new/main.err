@@ -1,0 +1,4 @@
+corpus/modules/privfield-new/main.src:3:22: `acct.Account` cannot be constructed outside `acct`: its field `balance` is private and has no default. `acct` must provide a function that builds one
+  |
+3 | acct.Account a = acct.Account("ann", 1000000);
+  |                      ^

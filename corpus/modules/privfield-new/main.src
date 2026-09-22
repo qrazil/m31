@@ -1,0 +1,3 @@
+import acct;
+// balance is private with no default, so only acct can make an Account.
+acct.Account a = acct.Account("ann", 1000000);

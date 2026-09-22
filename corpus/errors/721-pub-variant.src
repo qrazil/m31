@@ -1,0 +1,5 @@
+// A variant is as visible as its enum.
+pub enum Shape {
+    pub Circle(int);
+    Square(int);
+}

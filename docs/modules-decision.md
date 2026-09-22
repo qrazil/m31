@@ -78,6 +78,26 @@ Methods are declared outside their type here, so a block could hold
 method. And moving a declaration in or out of a block changes its visibility
 while the diff reads as a move.
 
+### Fields follow the same rule
+
+A field is a declaration too, so it is private unless marked `pub`:
+`type P { pub int x; int secret; }`. For a while every field of a `pub` type
+was public, which is the asymmetric mistake above made for every type at
+once — and it cost the library real workarounds: `io` kept a `File`'s state
+in a private second type, `random.Seeded` carried a `state` field with a
+comment asking callers to leave it alone, and `date.Civil` documented as a
+"convention" what Oro enforces. Private fields are what make an invariant a
+module's to keep.
+
+Construction follows from it. Building a value writes every field, so from
+another module it is allowed only when every field it would write is one
+the caller could write anyway: a private field without a default refuses
+construction, and the module provides a function that builds one; a
+private field with a default blocks nothing unless it is named. Enum
+variants and interface methods are not fields in this sense — they are what
+the enum or the interface is — so they stay exactly as visible as it. Two
+levels still, as below: no read-only fields, no `pub(get)`.
+
 ### The evidence for default-public is bad
 
 C is the natural experiment: file scope is external by default and `static`

@@ -13,7 +13,7 @@
 //
 // API -- reproducible, from a seed
 // --------------------------------
-//   random.Seeded g = random.Seeded(42)
+//   random.Seeded g = random.seeded(42)
 //   g.octets(n) / g.hex(n) / g.integer(low, high) / g.fraction()
 //   g.permutation(n) / g.uuid4()
 //
@@ -23,7 +23,7 @@
 // different operations, so there are two generators and no `seed()`:
 //
 //   random.integer(1, 6)              unpredictable, always
-//   random.Seeded(42).integer(1, 6)   reproducible, always; you hold it
+//   random.seeded(42).integer(1, 6)   reproducible, always; you hold it
 //
 // A reader of a call site knows which they are looking at without reading
 // anything else, and nothing at a distance can turn one into the other the
@@ -35,7 +35,7 @@
 // cannot be written.
 //
 // `Seeded` is PCG-XSH-RR 64/32 (Melissa O'Neill's `pcg32`), seeded and
-// consumed exactly as Oro's is, so `random.Seeded(42)` gives the same
+// consumed exactly as Oro's is, so `random.seeded(42)` gives the same
 // octets, integers, fractions and UUIDs here as it does in Oro.
 //
 // --- where this differs from Oro, and why ------------------------------------
@@ -73,49 +73,64 @@ prim int __entropy(int n, List<int> out);
 
 /// A reproducible generator: the same seed gives the same sequence, on every
 /// platform and every release, because every step of it is integer
-/// arithmetic written here.
+/// arithmetic written here. Made by `random.seeded(seed)`.
 ///
-/// The seed is required, so a generator seeded from somewhere the caller did
-/// not choose cannot be written. A negative seed is its 64-bit two's
-/// complement pattern, a seed like any other.
-///
-/// `state` is the generator's own: one element, the PCG state, filled on the
-/// first draw; leave it out. (It is a field only because this language has no
-/// private fields, and a list only so a draw can advance it in place.)
+/// Its one field is private, so the only way to make one is `seeded`, and
+/// the only way to move it is a draw. (`state` is a list only so that a
+/// draw through a `Source` advances the generator it came from.)
 pub type Seeded {
-    int seed;
-    List<int> state = [];
+    List<int> state;
+}
+
+// This generator as a source for the algorithms, which advance `state`.
+Source Seeded.source() {
+    return Source(true, state);
 }
 
 /// n octets.
 pub bytes Seeded.octets(int n) {
-    return octets_from(seeded(seed, state), n);
+    return octets_from(source(), n);
 }
 
 /// n octets as 2n lowercase hex digits.
 pub str Seeded.hex(int n) {
-    return hex_from(seeded(seed, state), n);
+    return hex_from(source(), n);
 }
 
 /// A uniform integer in [low, high], both ends included.
 pub int Seeded.integer(int low, int high) {
-    return integer_from(seeded(seed, state), low, high);
+    return integer_from(source(), low, high);
 }
 
 /// A float in [0.0, 1.0).
 pub float Seeded.fraction() {
-    return fraction_from(seeded(seed, state));
+    return fraction_from(source());
 }
 
 /// 0..n-1 in a uniformly random order.
 pub List<int> Seeded.permutation(int n) {
-    return permutation_from(seeded(seed, state), n);
+    return permutation_from(source(), n);
 }
 
 /// A version 4 UUID by construction but not in spirit: anyone who knows the
 /// seed can predict it. It belongs in a test fixture, never in a database.
 pub str Seeded.uuid4() {
-    return uuid4_from(seeded(seed, state));
+    return uuid4_from(source());
+}
+
+/// A generator seeded with `seed`.
+///
+/// The seed is required, so a generator seeded from somewhere the caller did
+/// not choose cannot be written. A negative seed is its 64-bit two's
+/// complement pattern, a seed like any other. The start is the standard
+/// `pcg32_srandom_r` -- state zero, step, add the seed, step again -- so
+/// that adjacent seeds do not open with correlated output.
+///
+/// A function and not `random.Seeded(seed)`, which is what Oro writes: the
+/// generator's state is not the seed, and a construction can only store
+/// what it is given.
+pub Seeded seeded(int seed) {
+    return Seeded([step(step(0).wrapping_add(seed))]);
 }
 
 // Where octets come from: the one thing the two generators differ in. `state` is the seeded generator's own list, so a
@@ -162,16 +177,6 @@ pub str uuid4() {
 // --- the two sources -------------------------------------------------------
 Source system() {
     return Source(false, []);
-}
-
-// The seeded source, starting the generator on its first use: the standard
-// `pcg32_srandom_r` -- state zero, step, add the seed, step again -- so that
-// adjacent seeds do not open with correlated output.
-Source seeded(int seed, List<int> state) {
-    if (state.size() == 0) {
-        state.push(step(step(0).wrapping_add(seed)));
-    }
-    return Source(true, state);
 }
 
 // n octets from the source.

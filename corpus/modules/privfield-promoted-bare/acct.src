@@ -1,0 +1,30 @@
+// `balance` is private and has no default; `moves` is private with one;
+// `owner` is public.
+pub type Account {
+    pub str owner;
+    int balance;
+    int moves = 0;
+}
+
+pub Account open(str owner) {
+    return Account(owner, 0);
+}
+
+pub type Animal {
+    pub str name;
+    str tag = "internal";
+}
+
+pub Animal animal(str name) {
+    return Animal(name);
+}
+
+// `Animal` is embedded privately.
+pub type Kennel {
+    Animal;
+    pub int size;
+}
+
+pub Kennel kennel(str name, int size) {
+    return Kennel(Animal(name), size);
+}

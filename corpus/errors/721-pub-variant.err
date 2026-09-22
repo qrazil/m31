@@ -1,0 +1,4 @@
+corpus/errors/721-pub-variant.src:3:5: a variant is as visible as its enum; `pub` goes on the enum, not on a variant
+  |
+3 |     pub Circle(int);
+  |     ^

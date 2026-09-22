@@ -1,0 +1,9 @@
+// A private type handed out by a public function: its value can travel,
+// but no module outside can read or write its fields.
+type Secret {
+    pub int code;
+}
+
+pub Secret make() {
+    return Secret(1);
+}

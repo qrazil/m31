@@ -1,0 +1,4 @@
+// An interface method is as visible as its interface.
+pub interface HasArea {
+    pub int area();
+}

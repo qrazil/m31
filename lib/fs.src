@@ -56,9 +56,9 @@ prim int __listdir(str path, bytes buf);
 /// nanoseconds since 1970 -- an int, so two stamps compare exactly, which a
 /// float of seconds cannot promise.
 pub type Stat {
-    int size;
-    int mode;
-    int mtime_ns;
+    pub int size;
+    pub int mode;
+    pub int mtime_ns;
 }
 
 /// Is it a directory?

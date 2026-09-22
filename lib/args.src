@@ -118,12 +118,9 @@
 // `r.word()` is "" at the top level, where Oro answers null: dispatch is
 // `if (c.word() == "serve")`, and "" can never be a command's word.
 //
-// `Parser` and `Parsed` have public fields, because the language has no
-// private ones; they are not part of the API. (`Parser` keeps its state in a
-// `core` it builds on first use. That dates from when a field's default was
-// evaluated where the object is constructed and so could not build this
-// module's private types; a default now belongs to its declaring module, so
-// `core` could become a plain defaulted field.)
+// A `Parser`'s declarations and everything in a `Parsed` are private fields,
+// so the only way to change a parser is a declaring method that checks what
+// it is given, and the only way to make a `Parsed` is `parse`.
 
 /// A bad command line, and only that. Print it, print `p.usage()`, and exit
 /// with whatever status your program uses for usage errors: that is the
@@ -146,29 +143,42 @@ pub str UsageError.to_str() {
 /// `prog` is the name the usage line starts with and is required: the name a
 /// program is invoked as is rarely the name it should call itself in a
 /// message.
+///
+/// `prog` and `summary` are the two public fields: what construction takes,
+/// and what the usage line and help read, whenever they are asked. Every
+/// other field is the declarations, private so that only the declaring
+/// methods -- which check each one -- can add to them.
 pub type Parser {
-    str prog;
-    str summary = "";
-    List<Core> core = [];
+    pub str prog;
+    pub str summary = "";
+    bool is_command = false;
+    // `shorts` maps a letter to an option's long name; `cmd_shorts` maps a
+    // letter to a command word.
+    List<Opt> opts = [];
+    Map<str, str> shorts = {};
+    List<Pos> pos = [];
+    List<str> words = [];
+    List<Parser> cmds = [];
+    Map<str, str> cmd_shorts = {};
 }
 
 // --- declaring ---------------------------------------------------------------
 /// A switch: absent is false, present is true.
 pub void Parser.flag(str name, str short = "", str help = "") {
-    declare(state(), name, short, help, "", "", "flag");
+    declare(this, name, short, help, "", "", "flag");
 }
 
 /// One value, as a str. `default` is what `r.value` answers when it is left
 /// out; without one, it answers None.
 pub void Parser.value(str name, str short = "", str help = "", str placeholder = "", str default = "") {
-    declare(state(), name, short, help, placeholder, default, "value");
+    declare(this, name, short, help, placeholder, default, "value");
 }
 
 /// Every operand up to the next dash, in the order given. Absent is an empty
 /// list; given with no operands is a usage error, because an empty list is
 /// what leaving it out already means.
 pub void Parser.values(str name, str short = "", str help = "", str placeholder = "") {
-    declare(state(), name, short, help, placeholder, "", "values");
+    declare(this, name, short, help, placeholder, "", "values");
 }
 
 /// One value, which must be a whole number. `default` is written as it would
@@ -177,7 +187,7 @@ pub void Parser.integer(str name, str short = "", str help = "", str placeholder
     if (default != "" && default.parse_int().is_none()) {
         trap("integer(): --" + name + " default: '" + default + "' is not a whole number");
     }
-    declare(state(), name, short, help, placeholder, default, "integer");
+    declare(this, name, short, help, placeholder, default, "integer");
 }
 
 /// One value, which must be a number; a whole number is accepted and
@@ -186,24 +196,24 @@ pub void Parser.number(str name, str short = "", str help = "", str placeholder 
     if (default != "" && default.parse_float().is_none()) {
         trap("number(): --" + name + " default: '" + default + "' is not a number");
     }
-    declare(state(), name, short, help, placeholder, default, "number");
+    declare(this, name, short, help, placeholder, default, "number");
 }
 
 /// A positional that must be given.
 pub void Parser.positional(str name, str help = "", str placeholder = "") {
-    declare_pos(state(), name, help, placeholder, "", "positional");
+    declare_pos(this, name, help, placeholder, "", "positional");
 }
 
 /// A positional that may be left out. The default is positional, not
 /// `default:`: for a positional the default IS the operand when it is absent,
 /// and a caller who leaves it out has not said what that means.
 pub void Parser.optional(str name, str fallback, str help = "", str placeholder = "") {
-    declare_pos(state(), name, help, placeholder, fallback, "optional");
+    declare_pos(this, name, help, placeholder, fallback, "optional");
 }
 
 /// Every remaining positional. Zero of them is an empty list, not an error.
 pub void Parser.tail(str name, str help = "", str placeholder = "") {
-    declare_pos(state(), name, help, placeholder, "", "tail");
+    declare_pos(this, name, help, placeholder, "", "tail");
 }
 
 /// One command: the word typed after a dash, one line about it, and the
@@ -213,44 +223,34 @@ pub void Parser.tail(str name, str help = "", str placeholder = "") {
 ///     args.Parser add = p.command("addrepo", "create a bare repository", short: "a");
 ///     add.positional("name");
 pub Parser Parser.command(str word, str about, str short = "") {
-    return add_command(state(), word, about, short);
+    return add_command(this, word, about, short);
 }
 
 // --- the generated text --------------------------------------------------------
 /// The one `usage:` line. `[options]` stands in for the table rather than
 /// spelling every option out.
 pub str Parser.usage() {
-    return usage_line(state());
+    return usage_line(this);
 }
 
 /// The whole help text: the usage line, the summary, then a table of the
 /// commands, the arguments and the options, in declaration order. No trailing
 /// newline.
 pub str Parser.help() {
-    return help_text(state());
+    return help_text(this);
 }
 
 // --- parsing -------------------------------------------------------------------
 /// Parse `argv` -- the arguments WITHOUT the program's name. The whole line is
 /// validated before anything is returned.
 pub Result<Parsed, UsageError> Parser.parse(List<str> argv) {
-    return parse_line(state(), argv);
-}
-
-// A parser's declarations, made on first use. Private to this module, and a
-// method rather than a free function, so each public method above reaches it
-// with a bare `state()`.
-Core Parser.state() {
-    if (core.size() == 0) {
-        core.push(Core(prog, summary));
-    }
-    return core[0];
+    return parse_line(this, argv);
 }
 
 /// What `parse` answers, and what each command on the line answers. Built
 /// only by `parse`.
 pub type Parsed {
-    Core parser;
+    Parser parser;
     str cmd_word;
     Map<str, str> texts;
     Map<str, List<str>> lists;
@@ -377,24 +377,10 @@ type Pos {
     str kind;
 }
 
-// A parser's declarations. `cmd_shorts` maps a letter to a command word;
-// `shorts` maps a letter to an option's long name.
-type Core {
-    str prog;
-    str summary;
-    bool is_command = false;
-    List<Opt> opts = [];
-    Map<str, str> shorts = {};
-    List<Pos> pos = [];
-    List<str> words = [];
-    List<Parser> cmds = [];
-    Map<str, str> cmd_shorts = {};
-}
-
 // One stretch of the command line: the program's own tokens, or one
 // command's, with the parser that declared them. `word` is "" for the first.
 type Clause {
-    Core parser;
+    Parser parser;
     str word;
     List<str> toks;
 }
@@ -402,7 +388,7 @@ type Clause {
 // --- the private half ----------------------------------------------------------
 // Record one option, checking everything that can only be wrong in the
 // program. These trap: nothing a user types can reach them.
-void declare(Core k, str name, str short, str help, str placeholder, str default, str kind) {
+void declare(Parser k, str name, str short, str help, str placeholder, str default, str kind) {
     if (name == "" || name.starts_with("-") || name.contains(" ") || name.contains("=")) {
         trap(kind + "(): '" + name + "' is not a usable option name -- write it as you would type it after the dashes, e.g. 'skip-missing' for --skip-missing");
     }
@@ -440,7 +426,7 @@ void declare(Core k, str name, str short, str help, str placeholder, str default
 // Record one positional. The order they are declared in is the order they
 // are read in, and two of the three orders a reader could write are
 // unparseable, so each is refused where it is written.
-void declare_pos(Core k, str name, str help, str placeholder, str default, str kind) {
+void declare_pos(Parser k, str name, str help, str placeholder, str default, str kind) {
     if (name == "") {
         trap(kind + "(): a positional needs a name");
     }
@@ -465,7 +451,7 @@ void declare_pos(Core k, str name, str help, str placeholder, str default, str k
     k.pos.push(Pos(name, help, shown, default, kind));
 }
 
-Parser add_command(Core k, str word, str about, str short) {
+Parser add_command(Parser k, str word, str about, str short) {
     if (k.is_command) {
         trap("command(): '" + k.prog + "' is itself a command -- the grammar is two deep, so its arguments are options (--" + word + "), not commands");
     }
@@ -491,7 +477,7 @@ Parser add_command(Core k, str word, str about, str short) {
         }
     }
     Parser sub = Parser(k.prog + " -" + word, summary: about);
-    sub.state().is_command = true;
+    sub.is_command = true;
     k.words.push(word);
     k.cmds.push(sub);
     if (short != "") {
@@ -501,7 +487,7 @@ Parser add_command(Core k, str word, str about, str short) {
 }
 
 // --- the text ------------------------------------------------------------------
-str usage_line(Core k) {
+str usage_line(Parser k) {
     List<str> parts = ["usage: " + k.prog];
     if (k.opts.size() > 0) {
         parts.push("[options]");
@@ -518,7 +504,7 @@ str usage_line(Core k) {
 
 // One column width for every row in the document, so the three sections
 // line up with each other and not just with themselves.
-str help_text(Core k) {
+str help_text(Parser k) {
     int width = help_column().size();
     for (str word in k.words) {
         width = wider(width, cmd_column(word, k.cmd_shorts));
@@ -639,7 +625,7 @@ str described(str help, str default) {
 }
 
 // --- the parse -----------------------------------------------------------------
-Result<Parsed, UsageError> parse_line(Core k, List<str> argv) {
+Result<Parsed, UsageError> parse_line(Parser k, List<str> argv) {
     // Split the line at the commands first, so every clause is parsed by the
     // parser that declared it and nothing has to guess.
     List<Clause> clauses = split_line(k, argv)?;
@@ -667,7 +653,7 @@ Result<Parsed, UsageError> parse_line(Core k, List<str> argv) {
 // Cut `argv` into clauses at the `-command` tokens. The command words are
 // resolved here, so an unknown one is refused before any of its operands
 // are looked at.
-Result<List<Clause>, UsageError> split_line(Core k, List<str> argv) {
+Result<List<Clause>, UsageError> split_line(Parser k, List<str> argv) {
     List<Clause> clauses = [Clause(k, "", [])];
     for (str tok in argv) {
         str kind = token_kind(tok);
@@ -687,13 +673,13 @@ Result<List<Clause>, UsageError> split_line(Core k, List<str> argv) {
         }
         str word = command_for(k, tok)?;
         int at = k.words.index_of(word).or(0);
-        clauses.push(Clause(k.cmds[at].state(), word, []));
+        clauses.push(Clause(k.cmds[at], word, []));
     }
     return Result<List<Clause>, UsageError>.Ok(clauses);
 }
 
 // The command word a `-token` names, refusing an unknown one.
-Result<str, UsageError> command_for(Core k, str tok) {
+Result<str, UsageError> command_for(Parser k, str tok) {
     str body = tok.substr(1, tok.size());
     // `-h` and `-help` are the one wrong guess everyone makes once: under
     // this grammar they are commands, and help is an option.
@@ -726,7 +712,7 @@ Result<str, UsageError> command_for(Core k, str tok) {
     }
 }
 
-str command_list(Core k) {
+str command_list(Parser k) {
     List<str> spelled = [];
     for (str word in k.words) {
         spelled.push("-" + word);
@@ -736,7 +722,7 @@ str command_list(Core k) {
 
 // Parse one clause's tokens -- the options and operands of a single command,
 // or of the program itself. The `-command` tokens are already gone.
-Result<Parsed, UsageError> parse_clause(Core k, List<str> toks, str word) {
+Result<Parsed, UsageError> parse_clause(Parser k, List<str> toks, str word) {
     Parsed r = Parsed(k, word, {}, {}, {}, [], []);
     List<str> positionals = [];
     int i = 0;
@@ -849,7 +835,7 @@ Result<Parsed, UsageError> parse_clause(Core k, List<str> toks, str word) {
 }
 
 // Hand the collected positionals to the declared ones, in order.
-Result<bool, UsageError> bind(Core k, List<str> positionals, Parsed r) {
+Result<bool, UsageError> bind(Parser k, List<str> positionals, Parsed r) {
     int at = 0;
     for (Pos p in k.pos) {
         if (p.kind == "tail") {
@@ -942,7 +928,7 @@ str cluster_refusal(str tok, str name) {
 
 // The unknown-option message, with one guess when there is exactly one.
 // `help` is in the pool because it is an option like any other here.
-str unknown_option(str spelled, Core k) {
+str unknown_option(str spelled, Parser k) {
     List<str> names = ["help"];
     for (Opt o in k.opts) {
         names.push(o.name);
@@ -985,7 +971,7 @@ str flatten(str name) {
 }
 
 // --- lookups -------------------------------------------------------------------
-Option<Opt> find_opt(Core k, str name) {
+Option<Opt> find_opt(Parser k, str name) {
     for (Opt o in k.opts) {
         if (o.name == name) {
             return Option<Opt>.Some(o);
@@ -994,7 +980,7 @@ Option<Opt> find_opt(Core k, str name) {
     return Option<Opt>.None;
 }
 
-Option<Pos> find_pos(Core k, str name) {
+Option<Pos> find_pos(Parser k, str name) {
     for (Pos p in k.pos) {
         if (p.name == name) {
             return Option<Pos>.Some(p);
@@ -1006,7 +992,7 @@ Option<Pos> find_pos(Core k, str name) {
 // The option `name`, declared with `kind` ("" for any). Asking for a name
 // that was never declared, or with the wrong accessor, is a bug in the
 // program -- the command line cannot invent a name -- so it traps.
-Opt want_opt(Core k, str name, str kind) {
+Opt want_opt(Parser k, str name, str kind) {
     match (find_opt(k, name)) {
         case Some(Opt o): {
             if (kind != "" && o.kind != kind) {
@@ -1020,7 +1006,7 @@ Opt want_opt(Core k, str name, str kind) {
     }
 }
 
-Pos want_pos(Core k, str name, str kind) {
+Pos want_pos(Parser k, str name, str kind) {
     match (find_pos(k, name)) {
         case Some(Pos p): {
             if (p.kind != kind) {

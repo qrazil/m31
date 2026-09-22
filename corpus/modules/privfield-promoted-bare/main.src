@@ -1,0 +1,13 @@
+import acct;
+
+type Dog {
+    acct.Animal;
+    int legs;
+}
+
+// `tag` is promoted from acct.Animal, and private to acct.
+str Dog.show() {
+    return name + " " + tag;
+}
+
+print(Dog(acct.animal("Rex"), 4).show());

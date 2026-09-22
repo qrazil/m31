@@ -2,11 +2,11 @@ import random;
 
 // --- reproducible: exact values --------------------------------------------
 //
-// Seeded(42) is Oro's generator, octet for octet, so these are the values
+// seeded(42) is Oro's generator, octet for octet, so these are the values
 // Oro's random.Seeded(42) answers in the same order -- computed for this
 // test by an independent transcription of std/random.oro, which first checks
 // PCG's published demo vector (seed 42, stream 54: a15c02b7 7b47f409 ...).
-random.Seeded g = random.Seeded(42);
+random.Seeded g = random.seeded(42);
 print(g.hex(8));  // 1d5ddcb9726c11a4
 print(g.integer(1, 6));  // 5
 print(g.integer(1, 6));  // 1
@@ -35,10 +35,10 @@ print(g.integer(lowest, 9223372036854775807));  // 6371071024572866395
 print(g.integer(0 - 5, 9223372036854775807));  // 2766822482334260971
 print(g.integer(0 - 4611686018427387904, 4611686018427387904));  // -4199506306689199138
 // A negative seed is its 64-bit pattern, a seed like any other.
-print(random.Seeded(0 - 1).integer(0, 1000000));  // 919784
+print(random.seeded(0 - 1).integer(0, 1000000));  // 919784
 // Two generators with one seed are one sequence; the generator is its own.
-random.Seeded a = random.Seeded(7);
-random.Seeded b = random.Seeded(7);
+random.Seeded a = random.seeded(7);
+random.Seeded b = random.seeded(7);
 bool same = true;
 int i = 0;
 while (i < 50) {
@@ -46,7 +46,7 @@ while (i < 50) {
     i = i + 1;
 }
 print(same);  // true
-print(random.Seeded(7).hex(4) != random.Seeded(8).hex(4));  // true
+print(random.seeded(7).hex(4) != random.seeded(8).hex(4));  // true
 // --- unpredictable: properties -----------------------------------------------
 //
 // The system generator's values cannot be written down, so what it must

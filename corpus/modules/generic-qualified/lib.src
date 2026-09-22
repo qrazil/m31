@@ -4,8 +4,8 @@ pub enum Maybe<T> {
 }
 
 pub type Pair<A, B> {
-    A a;
-    B b;
+    pub A a;
+    pub B b;
 }
 
 pub Maybe<T> just<T>(T v) {

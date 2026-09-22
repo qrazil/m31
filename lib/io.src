@@ -116,12 +116,20 @@ pub enum Mode {
     Append;
 }
 
-// A stream's state. It is a private type held by the public `File`, rather
-// than `File`'s own fields, for two reasons the language forces: fields
-// cannot be private, and a method cannot call another method on its own
-// receiver -- so every operation is a function over a `Stream` that the
-// one-line methods below hand their field to.
-type Stream {
+/// An open file, or one of the standard streams.
+///
+/// Reads are buffered, 64 KiB at a time. Writes are not: `write` has handed
+/// everything to the kernel when it returns, so there is no `flush` to
+/// forget -- Oro's rule. A write to standard output or standard error first
+/// flushes what `print` has buffered, so the two land in program order.
+///
+/// **A `File` is not closed for you.** The language has no destructors, so
+/// a `File` dropped without `close()` keeps its descriptor until the
+/// program ends. Close on every path, including the error paths.
+///
+/// Every field is private: a `File` is made by `open` or one of the standard
+/// stream functions, and its buffer is only ever moved by its own methods.
+pub type File {
     int fd;
     bool readable;
     bool writable;
@@ -134,20 +142,6 @@ type Stream {
     int end = 0;
 }
 
-/// An open file, or one of the standard streams.
-///
-/// Reads are buffered, 64 KiB at a time. Writes are not: `write` has handed
-/// everything to the kernel when it returns, so there is no `flush` to
-/// forget -- Oro's rule. A write to standard output or standard error first
-/// flushes what `print` has buffered, so the two land in program order.
-///
-/// **A `File` is not closed for you.** The language has no destructors, so
-/// a `File` dropped without `close()` keeps its descriptor until the
-/// program ends. Close on every path, including the error paths.
-pub type File {
-    Stream s;
-}
-
 /// Between 1 and `n` bytes, or an empty `bytes` at the end of the file.
 ///
 /// **It may return fewer than `n` without being at the end** -- `n` is a
@@ -155,7 +149,22 @@ pub type File {
 /// needs everything calls `read_all`. `n` below 1 traps, so that an empty
 /// result has exactly one meaning.
 pub Result<bytes, Error> File.read(int n) {
-    return stream_read(s, n);
+    if (n < 1) {
+        trap("read(" + n.to_str() + "): read at least one byte; read_all() reads everything");
+    }
+    if (at == end) {
+        if (fill()? == 0) {
+            bytes none = [];
+            return Result<bytes, Error>.Ok(none);
+        }
+    }
+    int take = end - at;
+    if (take > n) {
+        take = n;
+    }
+    bytes out = buf.substr(at, at + take);
+    at = at + take;
+    return Result<bytes, Error>.Ok(out);
 }
 
 /// Everything from here to the end of the file.
@@ -165,7 +174,58 @@ pub Result<bytes, Error> File.read(int n) {
 /// The size is only a hint -- a file can grow while it is read, and a pipe
 /// has none -- so the read goes on to the real end regardless.
 pub Result<bytes, Error> File.read_all() {
-    return stream_read_all(s);
+    check_readable();
+    // What the buffer already holds comes first.
+    bytes out = [];
+    if (at < end) {
+        out = buf.substr(at, end);
+        at = end;
+    }
+    // The size hint: what is left of a regular file past the kernel's
+    // offset, which is where the buffer stopped.
+    int hint = 0;
+    List<int> st = [];
+    if (__fstat(fd, st) == 0 && st[1] & 61440 == 32768) {
+        int here = __seek(fd, 0, 1);
+        if (here >= 0 && st[0] > here) {
+            hint = st[0] - here;
+        }
+    }
+    if (hint > 0) {
+        bytes big = [0; hint];
+        int got = 0;
+        while (got < hint) {
+            int r = __read(fd, big, got, hint - got);
+            if (r == -4) {
+                continue;
+            }
+            if (r < 0) {
+                return Result<bytes, Error>.Err(from_errno(-r));
+            }
+            if (r == 0) {
+                break;
+            }
+            got = got + r;
+        }
+        // The common case -- nothing buffered, the file as big as it said --
+        // hands back the one allocation without copying it.
+        if (got == hint && out.size() == 0) {
+            out = big;
+        } else {
+            out.extend(big.substr(0, got));
+        }
+    }
+    // The rest, until the kernel says the end: all of it for a pipe, and
+    // for a regular file one empty read that confirms the hint was right.
+    while (fill()? > 0) {
+        if (end == buf.size()) {
+            out.extend(buf);
+        } else {
+            out.extend(buf.substr(0, end));
+        }
+        at = end;
+    }
+    return Result<bytes, Error>.Ok(out);
 }
 
 /// Bytes up to and including the first `delim`, reading no more than
@@ -180,7 +240,29 @@ pub Result<bytes, Error> File.read_all() {
 ///
 /// An empty `delim` or a `limit` below 1 traps.
 pub Result<bytes, Error> File.read_until(bytes delim, int limit) {
-    return stream_read_until(s, delim, limit);
+    if (delim.size() == 0) {
+        trap("read_until: the delimiter is empty");
+    }
+    if (limit < 1) {
+        trap("read_until(" + limit.to_str() + "): the limit must be at least 1");
+    }
+    int last = delim[delim.size() - 1];
+    bytes out = [];
+    while (out.size() < limit) {
+        if (at == end) {
+            if (fill()? == 0) {
+                break;
+            }
+        }
+        int b = buf[at];
+        at = at + 1;
+        out.push(b);
+        // Only a byte that could end the delimiter is worth comparing on.
+        if (b == last && out.ends_with(delim)) {
+            break;
+        }
+    }
+    return Result<bytes, Error>.Ok(out);
 }
 
 /// Write all of `b`, returning its size.
@@ -188,16 +270,16 @@ pub Result<bytes, Error> File.read_until(bytes delim, int limit) {
 /// "All" is the promise: the kernel may take a write in pieces, and the
 /// loop that hands it the rest is here so that no caller writes one.
 pub Result<int, Error> File.write(bytes b) {
-    if (!s.live) {
+    if (!live) {
         trap("write on a closed file");
     }
-    if (!s.writable) {
+    if (!writable) {
         trap("write on a file opened for reading");
     }
-    if (s.fd == 1 || s.fd == 2) {
+    if (fd == 1 || fd == 2) {
         __out_flush();
     }
-    return write_all(s.fd, b);
+    return write_all(fd, b);
 }
 
 /// Release the descriptor. Closing twice is not an error; any other use of
@@ -208,7 +290,55 @@ pub Result<int, Error> File.write(bytes b) {
 /// It is never retried on EINTR: on Linux the descriptor is already gone by
 /// then, and a retry could close one another thread has just been given.
 pub Result<bool, Error> File.close() {
-    return stream_close(s);
+    if (!live) {
+        return Result<bool, Error>.Ok(true);
+    }
+    live = false;
+    bytes none = [];
+    buf = none;
+    at = 0;
+    end = 0;
+    if (fd <= 2) {
+        return Result<bool, Error>.Ok(true);
+    }
+    int r = __close(fd);
+    if (r < 0 && r != -4) {
+        return Result<bool, Error>.Err(from_errno(-r));
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+// A read on a closed file, or on one opened for writing, is a bug in the
+// program, not a failure of the file.
+void File.check_readable() {
+    if (!live) {
+        trap("read on a closed file");
+    }
+    if (!readable) {
+        trap("read on a file opened for writing");
+    }
+}
+
+// Refill an empty buffer. The number of bytes now buffered, 0 at the end.
+Result<int, Error> File.fill() {
+    check_readable();
+    if (buf.size() == 0) {
+        buf = [0; 65536];
+    }
+    while (true) {
+        int r = __read(fd, buf, 0, buf.size());
+        // A signal arriving during a read interrupts it without having read
+        // anything. It is not a failure of the file, so it is not reported.
+        if (r == -4) {
+            continue;
+        }
+        if (r < 0) {
+            return Result<int, Error>.Err(from_errno(-r));
+        }
+        at = 0;
+        end = r;
+        return Result<int, Error>.Ok(r);
+    }
 }
 
 /// The `Error` for a Linux errno number -- positive, as errno is written;
@@ -270,7 +400,7 @@ pub Result<File, Error> open(str path, Mode mode = Mode.Read, int perm = 438) {
     if (fd < 0) {
         return Result<File, Error>.Err(from_errno(-fd));
     }
-    return Result<File, Error>.Ok(File(Stream(fd, readable, !readable)));
+    return Result<File, Error>.Ok(File(fd, readable, !readable));
 }
 
 /// Standard input as a `File`.
@@ -282,170 +412,18 @@ pub Result<File, Error> open(str path, Mode mode = Mode.Read, int perm = 438) {
 /// state, so there is nowhere to keep the one shared `File` this wants to
 /// be.)
 pub File stdin() {
-    return File(Stream(0, true, false));
+    return File(0, true, false);
 }
 
 /// Standard output as a `File`. `close()` on it marks this `File` closed
 /// and leaves the descriptor open, because `print` still writes to it.
 pub File stdout() {
-    return File(Stream(1, false, true));
+    return File(1, false, true);
 }
 
 /// Standard error as a `File`, closed the same way as `stdout()`.
 pub File stderr() {
-    return File(Stream(2, false, true));
-}
-
-// --- streams -------------------------------------------------------------
-// Refill an empty buffer. The number of bytes now buffered, 0 at the end.
-Result<int, Error> fill(Stream s) {
-    if (!s.live) {
-        trap("read on a closed file");
-    }
-    if (!s.readable) {
-        trap("read on a file opened for writing");
-    }
-    if (s.buf.size() == 0) {
-        s.buf = [0; 65536];
-    }
-    while (true) {
-        int r = __read(s.fd, s.buf, 0, s.buf.size());
-        // A signal arriving during a read interrupts it without having read
-        // anything. It is not a failure of the file, so it is not reported.
-        if (r == -4) {
-            continue;
-        }
-        if (r < 0) {
-            return Result<int, Error>.Err(from_errno(-r));
-        }
-        s.at = 0;
-        s.end = r;
-        return Result<int, Error>.Ok(r);
-    }
-}
-
-Result<bytes, Error> stream_read(Stream s, int n) {
-    if (n < 1) {
-        trap("read(" + n.to_str() + "): read at least one byte; read_all() reads everything");
-    }
-    if (s.at == s.end) {
-        if (fill(s)? == 0) {
-            bytes none = [];
-            return Result<bytes, Error>.Ok(none);
-        }
-    }
-    int take = s.end - s.at;
-    if (take > n) {
-        take = n;
-    }
-    bytes out = s.buf.substr(s.at, s.at + take);
-    s.at = s.at + take;
-    return Result<bytes, Error>.Ok(out);
-}
-
-Result<bytes, Error> stream_read_all(Stream s) {
-    if (!s.live) {
-        trap("read on a closed file");
-    }
-    if (!s.readable) {
-        trap("read on a file opened for writing");
-    }
-    // What the buffer already holds comes first.
-    bytes out = [];
-    if (s.at < s.end) {
-        out = s.buf.substr(s.at, s.end);
-        s.at = s.end;
-    }
-    // The size hint: what is left of a regular file past the kernel's
-    // offset, which is where the buffer stopped.
-    int hint = 0;
-    List<int> st = [];
-    if (__fstat(s.fd, st) == 0 && st[1] & 61440 == 32768) {
-        int here = __seek(s.fd, 0, 1);
-        if (here >= 0 && st[0] > here) {
-            hint = st[0] - here;
-        }
-    }
-    if (hint > 0) {
-        bytes big = [0; hint];
-        int got = 0;
-        while (got < hint) {
-            int r = __read(s.fd, big, got, hint - got);
-            if (r == -4) {
-                continue;
-            }
-            if (r < 0) {
-                return Result<bytes, Error>.Err(from_errno(-r));
-            }
-            if (r == 0) {
-                break;
-            }
-            got = got + r;
-        }
-        // The common case -- nothing buffered, the file as big as it said --
-        // hands back the one allocation without copying it.
-        if (got == hint && out.size() == 0) {
-            out = big;
-        } else {
-            out.extend(big.substr(0, got));
-        }
-    }
-    // The rest, until the kernel says the end: all of it for a pipe, and
-    // for a regular file one empty read that confirms the hint was right.
-    while (fill(s)? > 0) {
-        if (s.end == s.buf.size()) {
-            out.extend(s.buf);
-        } else {
-            out.extend(s.buf.substr(0, s.end));
-        }
-        s.at = s.end;
-    }
-    return Result<bytes, Error>.Ok(out);
-}
-
-Result<bytes, Error> stream_read_until(Stream s, bytes delim, int limit) {
-    if (delim.size() == 0) {
-        trap("read_until: the delimiter is empty");
-    }
-    if (limit < 1) {
-        trap("read_until(" + limit.to_str() + "): the limit must be at least 1");
-    }
-    int last = delim[delim.size() - 1];
-    bytes out = [];
-    while (out.size() < limit) {
-        if (s.at == s.end) {
-            if (fill(s)? == 0) {
-                break;
-            }
-        }
-        int b = s.buf[s.at];
-        s.at = s.at + 1;
-        out.push(b);
-        // Only a byte that could end the delimiter is worth comparing on.
-        if (b == last && out.ends_with(delim)) {
-            break;
-        }
-    }
-    return Result<bytes, Error>.Ok(out);
-}
-
-Result<bool, Error> stream_close(Stream s) {
-    if (!s.live) {
-        return Result<bool, Error>.Ok(true);
-    }
-    s.live = false;
-    bytes none = [];
-    s.buf = none;
-    s.at = 0;
-    s.end = 0;
-    if (s.fd <= 2) {
-        return Result<bool, Error>.Ok(true);
-    }
-    int r = __close(s.fd);
-    if (r < 0 && r != -4) {
-        return Result<bool, Error>.Err(from_errno(-r));
-    }
-    return Result<bool, Error>.Ok(true);
+    return File(2, false, true);
 }
 
 // All of `b` to `fd`, across short writes and signals.

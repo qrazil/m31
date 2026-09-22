@@ -1,11 +1,11 @@
 // Types another module constructs by their qualified names.
-pub type Point { int x; int y; }
+pub type Point { pub int x; pub int y; }
 pub int Point.sum() { return x + y; }
 
 // Optional fields are named at the construction site, qualified or not.
-pub type Opts { int size; str name = "anon"; bool loud = false; }
+pub type Opts { pub int size; pub str name = "anon"; pub bool loud = false; }
 
-pub type Box<T> { T item; }
+pub type Box<T> { pub T item; }
 
 pub enum Colour { Red; Green; }
 pub enum Shape { Circle(int); Square(int, int); }

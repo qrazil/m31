@@ -241,6 +241,7 @@ impl Lowerer {
                 name: format!("a{i}"),
                 default: None,
                 embedded: false,
+                is_pub: false,
                 span: Span::new(0, 0),
             })
             .collect();
@@ -2383,7 +2384,14 @@ impl Lowerer {
             ));
         }
         if let Some((tid, _)) = self.recv {
-            if self.field_path(tid, name).is_some() {
+            // A field this module cannot see does not claim the name: were
+            // it otherwise, adding a private field to a library type would
+            // break every module whose embedding type used that name for a
+            // local, and privacy would leak through the error message.
+            let visible = self
+                .field_path(tid, name)
+                .is_some_and(|p| self.check_field_access(tid, &p, name, span).is_ok());
+            if visible {
                 return Err(Diag::new(
                     span,
                     format!(
@@ -2455,7 +2463,12 @@ impl Lowerer {
     fn refuse_this_field(&mut self, field: &str, this_span: Span, span: Span) -> Result<(), Diag> {
         self.this_val(this_span)?;
         let (tid, _) = self.recv.expect("this_val checked the receiver");
-        if self.field_path(tid, field).is_some() {
+        // A private promoted field falls through too, to the privacy error:
+        // advising the bare spelling would only lead to the same refusal.
+        let visible = self
+            .field_path(tid, field)
+            .is_some_and(|p| self.check_field_access(tid, &p, field, span).is_ok());
+        if visible {
             return Err(Diag::new(
                 span,
                 format!(
@@ -2687,6 +2700,55 @@ impl Lowerer {
             }
         }
         Ok(())
+    }
+
+    /// May the module being lowered read, write or name field `idx` of
+    /// `tid`? The rule every other declaration follows: a builtin's fields
+    /// everywhere, anything else inside its own module, and outside it only
+    /// if the field is `pub`. It is judged on the type that DECLARES the
+    /// field, so a field promoted through embedding keeps its own
+    /// visibility wherever it surfaces.
+    fn field_visible(&self, tid: u32, idx: u32) -> bool {
+        let m = &self.type_module[tid as usize];
+        m.is_empty()
+            || *m == self.cur_module
+            || self.field_params[tid as usize][idx as usize].is_pub
+    }
+
+    /// The type that declares the last field on `path` from `tid`, and that
+    /// field's index in it: what `field_visible` is asked about.
+    fn path_owner(&self, tid: u32, path: &[u32]) -> (u32, u32) {
+        let mut cur = tid;
+        for idx in &path[..path.len() - 1] {
+            cur = self
+                .tdef_of(self.field_ty(cur, *idx))
+                .expect("an embedded field is a user type");
+        }
+        (cur, *path.last().expect("a field path is never empty"))
+    }
+
+    /// Refuse reaching field `name`, found at `path` from `tid`, when it is
+    /// private to another module.
+    fn check_field_access(
+        &self,
+        tid: u32,
+        path: &[u32],
+        name: &str,
+        span: Span,
+    ) -> Result<(), Diag> {
+        let (owner, idx) = self.path_owner(tid, path);
+        if self.field_visible(owner, idx) {
+            return Ok(());
+        }
+        Err(Diag::new(
+            span,
+            format!(
+                "field `{name}` of `{}` is private to `{}`; only a `pub` field can be \
+                 used from another module",
+                self.show_name(&self.typedefs[owner as usize].name),
+                self.type_module[owner as usize]
+            ),
+        ))
     }
 
     /// The diagnostic for reaching into a type that is not visible here.
@@ -3159,6 +3221,7 @@ impl Lowerer {
                 // A bare name inside a method may be a field of the receiver.
                 if self.binding(name).is_none() {
                     if let Some((rtid, robj, path)) = self.recv_field(name) {
+                        self.check_field_access(rtid, &path, name, *span)?;
                         // Walk to the object that actually owns the field.
                         let (owner, owner_tid) = if path.len() == 1 {
                             (robj, rtid)
@@ -3457,12 +3520,23 @@ impl Lowerer {
                         format!("type {} has no fields", self.tyname(o.ty)),
                     ));
                 };
+                // A write is held to the same two checks as a read. The type
+                // check was missing before fields could be private: a value
+                // of a private type handed out by a `pub` function could be
+                // written through, though not read.
+                if !self.type_visible(tid) {
+                    return Err(Diag::new(
+                        *span,
+                        self.not_visible(tid, "its fields cannot be written from here"),
+                    ));
+                }
                 let Some((idx, fty)) = self.field_of(tid, field) else {
                     return Err(Diag::new(
                         *span,
                         format!("type `{}` has no field `{field}`", self.tyname(o.ty)),
                     ));
                 };
+                self.check_field_access(tid, &[idx], field, *span)?;
                 let v = self.lower_expr_as(value, self.field_ty(tid, idx))?;
                 if !self.assignable(v.ty, self.field_ty(tid, idx)) {
                     return Err(Diag::new(
@@ -5434,6 +5508,9 @@ impl Lowerer {
                 // Inside a method, a bare name may be a field of the
                 // receiver. Unambiguous because nothing shadows anything.
                 if let Some((tid, obj, path)) = self.recv_field(name) {
+                    // A method is in its type's module, so only a field
+                    // promoted from another module's type can be private.
+                    self.check_field_access(tid, &path, name, *span)?;
                     let (d, fty) = self.load_path(tid, obj, &path);
                     // Borrowed from the receiver, which holds the +1.
                     return Ok(Val::new(d, fty, false));
@@ -5606,6 +5683,7 @@ impl Lowerer {
                         format!("type `{}` has no field `{field}`", self.tyname(o.ty)),
                     ));
                 };
+                self.check_field_access(tid, &path, field, *span)?;
                 let (d, fty) = self.load_path(tid, o.val(), &path);
                 // A field read is BORROWED from the object, exactly like a
                 // local: the object holds the +1, we do not.
@@ -6495,6 +6573,42 @@ impl Lowerer {
         let name = name.as_str();
         let fields = self.field_params[tid as usize].clone();
         let module = self.type_module[tid as usize].clone();
+        // Construction writes every field, so from outside the module it is
+        // allowed only when every field it would write is one the caller
+        // could write anyway. A private field with a default is written by
+        // its own module's default and blocks nothing unless it is named; a
+        // private field without one would have to be passed, which is
+        // exactly what privacy forbids. That is the point: a type with an
+        // invariant hides a field, and then its module's own function is
+        // the only way to make one. Checked before binding, so the refusal
+        // is about privacy and not about how many arguments there are.
+        for (i, f) in fields.iter().enumerate() {
+            if self.field_visible(tid, i as u32) {
+                continue;
+            }
+            let shown = self.show_name(name);
+            if f.default.is_none() {
+                return Err(Diag::new(
+                    span,
+                    format!(
+                        "`{shown}` cannot be constructed outside `{module}`: its field `{}` \
+                         is private and has no default. `{module}` must provide a function \
+                         that builds one",
+                        f.name
+                    ),
+                ));
+            }
+            if let Some((_, e)) = args.named.iter().find(|(n, _)| *n == f.name) {
+                return Err(Diag::new(
+                    e.span(),
+                    format!(
+                        "field `{}` of `{shown}` is private to `{module}`; only a `pub` \
+                         field can be set from another module",
+                        f.name
+                    ),
+                ));
+            }
+        }
         let slots = self.bind_args(name, &fields, args, span)?;
 
         let mut given: Vec<Option<Val>> = Vec::new();

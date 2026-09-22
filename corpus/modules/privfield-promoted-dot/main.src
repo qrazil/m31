@@ -1,0 +1,9 @@
+import acct;
+
+type Dog {
+    acct.Animal;
+    int legs;
+}
+
+Dog d = Dog(acct.animal("Rex"), 4);
+print(d.tag);
