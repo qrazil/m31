@@ -1,0 +1,77 @@
+// A type parameter that appears only in a generic function's return type is
+// inferred from where the value goes: a declaration, an assignment, a
+// return, or a parameter of the function it is passed to. These are the
+// places a collection literal takes its type from, for the same reason.
+
+Result<T, str> fail<T>(str why) {
+    return Result<T, str>.Err("failed: " + why);
+}
+
+Option<T> nothing<T>() {
+    return Option<T>.None;
+}
+
+List<T> empty<T>() {
+    List<T> out = [];
+    return out;
+}
+
+Result<int, str> half(int n) {
+    if (n % 2 != 0) {
+        return fail("odd");
+    }
+    return Result<int, str>.Ok(n / 2);
+}
+
+void show(Result<int, str> r) {
+    match (r) {
+        case Ok(int v): {
+            print(v);
+        }
+        case Err(str e): {
+            print(e);
+        }
+    }
+}
+
+show(half(8));
+show(half(7));
+
+// A declaration.
+Result<str, str> r = fail("declared");
+match (r) {
+    case Ok(str v): {
+        print(v);
+    }
+    case Err(str e): {
+        print(e);
+    }
+}
+
+// An assignment.
+Option<int> o = Option<int>.Some(3);
+print(o.is_some());
+o = nothing();
+print(o.is_some());
+
+// A parameter.
+show(fail("passed"));
+
+List<float> fs = empty();
+fs.push(1.5);
+print(fs.size());
+
+// The arguments speak first; the destination fills in what they leave.
+Result<A, B> pick<A, B>(B err) {
+    return Result<A, B>.Err(err);
+}
+
+Result<bool, int> p = pick(7);
+match (p) {
+    case Ok(bool b): {
+        print(b);
+    }
+    case Err(int e): {
+        print(e);
+    }
+}

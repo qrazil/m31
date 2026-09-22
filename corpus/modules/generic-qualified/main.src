@@ -39,3 +39,14 @@ st.push("b");
 print(st.top());
 List<int> tags = st.tag(0);
 print(tags.size());
+
+// Inferred from the declaration it initialises.
+Result<int, str> refused = lib.refuse("refused");
+match (refused) {
+    case Ok(int v): {
+        print(v);
+    }
+    case Err(str e): {
+        print(e);
+    }
+}

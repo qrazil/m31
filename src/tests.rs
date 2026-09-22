@@ -536,7 +536,7 @@ fn generic_misuse_is_rejected() {
     assert!(err(
         "type Box<T> { T value; }\nT unwrap<T>(Box<T> b) { return b.value; }\nBox<Box<int>> n = Box<Box<int>>(Box<int>(1)); print(unwrap(unwrap(n)));"
     )
-    .contains("bind the argument to a local"));
+    .contains("bind an argument, or the result, to a local"));
 }
 
 // ---- arguments --------------------------------------------------------

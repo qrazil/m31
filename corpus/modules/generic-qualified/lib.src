@@ -68,3 +68,7 @@ pub List<U> Stack<T>.tag<U>(U label) {
     }
     return out;
 }
+
+pub Result<T, str> refuse<T>(str why) {
+    return Result<T, str>.Err(why);
+}

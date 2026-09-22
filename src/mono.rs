@@ -60,6 +60,13 @@ pub struct Mono {
     /// Every module in the program, to tell `lib.f(..)` -- a call into a
     /// module -- from a method call on a value.
     modules: HashSet<String>,
+    /// The current function's return type as written, for inferring a
+    /// generic call's type arguments from `return f(..)`. None at the top
+    /// level, which returns nothing.
+    cur_ret: Option<Ty>,
+    /// Every non-generic free function's parameters as written, so an
+    /// argument can be inferred from the parameter it is passed to.
+    func_params: HashMap<String, Vec<Param>>,
 }
 
 /// A substitution from type parameter name to concrete type.
@@ -84,6 +91,8 @@ impl Mono {
             env: Vec::new(),
             cur_module: String::new(),
             modules: p.imports_by_module.keys().cloned().collect(),
+            cur_ret: None,
+            func_params: HashMap::new(),
         };
 
         let mut concrete_types = Vec::new();
@@ -123,6 +132,9 @@ impl Mono {
                 m.check_generic_recv(&f)?;
                 m.generic_methods.push(f);
             } else if f.tparams.is_empty() {
+                if f.recv.is_none() {
+                    m.func_params.insert(f.name.clone(), f.params.clone());
+                }
                 concrete_funcs.push(f);
             } else if let Some(r) = f.recv.clone() {
                 // Keyed by receiver, never with the free functions: a
@@ -155,6 +167,7 @@ impl Mono {
         // Top-level statements belong to the entry module, so a bare call in
         // them resolves against it -- the same rule as inside a function.
         m.cur_module = p.module.clone();
+        m.cur_ret = None;
         let toplevel = m.subst_block(&p.toplevel, &empty)?;
         m.env.clear();
 
@@ -652,6 +665,7 @@ impl Mono {
 
     fn subst_func(&mut self, f: &Func, sub: &Subst) -> Result<Func, Diag> {
         self.cur_module = f.module.clone();
+        self.cur_ret = Some(f.ret);
         let ret = self.subst_ty(f.ret, sub, f.span)?;
         let mut params = Vec::new();
         let mut scope = HashMap::new();
@@ -730,7 +744,7 @@ impl Mono {
             } => {
                 // Record the type AS WRITTEN, before substitution, so
                 // inference can unify against its structure.
-                let init = self.subst_expr(init, sub)?;
+                let init = self.subst_expr_as(init, sub, Some(*ty))?;
                 self.env
                     .last_mut()
                     .expect("no scope")
@@ -745,7 +759,7 @@ impl Mono {
             }
             Stmt::Assign { name, value, span } => Stmt::Assign {
                 name: name.clone(),
-                value: self.subst_expr(value, sub)?,
+                value: self.subst_expr_as(value, sub, self.env_ty(name))?,
                 span: *span,
             },
             Stmt::SetIndex {
@@ -772,7 +786,7 @@ impl Mono {
             },
             Stmt::Return { value, span } => Stmt::Return {
                 value: match value {
-                    Some(e) => Some(self.subst_expr(e, sub)?),
+                    Some(e) => Some(self.subst_expr_as(e, sub, self.cur_ret)?),
                     None => None,
                 },
                 span: *span,
@@ -859,7 +873,8 @@ impl Mono {
                 let out = self.subst_args(args, sub)?;
                 let name = &self.resolve_fn(name);
                 if let Some(decl) = self.generic_funcs.get(name).cloned() {
-                    let targs = self.infer(&decl, &out.pos, sub, *span)?;
+                    // From the arguments AS WRITTEN -- see `generic_call`.
+                    let targs = self.infer(&decl, &args.pos, sub, *span, None)?;
                     let mangled = self.mangle(name, &targs);
                     self.queue.push((name.clone(), targs, *span));
                     return Ok(Stmt::Spawn {
@@ -880,6 +895,18 @@ impl Mono {
     }
 
     fn subst_expr(&mut self, e: &Expr, sub: &Subst) -> Result<Expr, Diag> {
+        self.subst_expr_as(e, sub, None)
+    }
+
+    /// Substitute an expression whose value goes somewhere with a written
+    /// type -- a declaration, an assignment, a return, a parameter. That
+    /// type is `want`, and it is what lets a generic call whose type
+    /// parameter appears only in its return type be inferred:
+    /// `Result<int, str> r = fail("no");` for `Result<T, str> fail<T>(..)`.
+    /// The same places the lowering types a collection literal from
+    /// (`lower_expr_as`), for the same reason: the value has no type of its
+    /// own to offer, and its destination does.
+    fn subst_expr_as(&mut self, e: &Expr, sub: &Subst, want: Option<Ty>) -> Result<Expr, Diag> {
         Ok(match e {
             Expr::Int(..) | Expr::Float(..) | Expr::Bool(..) | Expr::Str(..) | Expr::Var(..) => {
                 e.clone()
@@ -935,8 +962,8 @@ impl Mono {
                         .and_then(|ms| ms.get(variant))
                         .cloned();
                     if let Some((decl, rsub)) = found {
-                        member =
-                            self.generic_method_call(decl, rsub, recv, variant, args, sub, *s)?;
+                        member = self
+                            .generic_method_call(decl, rsub, recv, variant, args, sub, *s, want)?;
                     }
                 }
                 Expr::EnumNew(ty, member, self.subst_args(args, sub)?, *s)
@@ -955,7 +982,7 @@ impl Mono {
                         && self.env_ty(modname).is_none()
                         && self.generic_funcs.contains_key(&key)
                     {
-                        let mangled = self.generic_call(&key, args, sub, *s)?;
+                        let mangled = self.generic_call(&key, args, sub, *s, want)?;
                         // Keep the qualified shape so the lowering still
                         // checks the call against `lib`'s privacy; it builds
                         // `lib#first$int` from it, which is the
@@ -967,6 +994,21 @@ impl Mono {
                             self.subst_args(args, sub)?,
                             *s,
                         ));
+                    }
+                }
+                // `lib.f(..)` to a non-generic function: its arguments have
+                // parameters to be inferred against, like a bare call's.
+                if let Expr::Var(modname, _) = &**obj {
+                    let key = format!("{modname}#{m}");
+                    if self.modules.contains(modname) && self.env_ty(modname).is_none() {
+                        if let Some(params) = self.func_params.get(&key).cloned() {
+                            return Ok(Expr::MethodCall(
+                                obj.clone(),
+                                m.clone(),
+                                self.subst_args_as(args, sub, &params)?,
+                                *s,
+                            ));
+                        }
                     }
                 }
                 // A method with type parameters of its own is instantiated
@@ -981,7 +1023,8 @@ impl Mono {
                         .and_then(|ms| ms.get(m))
                         .cloned();
                     if let Some((decl, rsub)) = found {
-                        let name = self.generic_method_call(decl, rsub, recv, m, args, sub, *s)?;
+                        let name =
+                            self.generic_method_call(decl, rsub, recv, m, args, sub, *s, want)?;
                         return Ok(Expr::MethodCall(
                             Box::new(self.subst_expr(obj, sub)?),
                             name,
@@ -997,18 +1040,27 @@ impl Mono {
                     *s,
                 )
             }
-            Expr::Call(name, args, s) => {
-                let out = self.subst_args(args, sub)?;
+            Expr::Call(written, args, s) => {
                 // A call to a generic function needs its type arguments
                 // inferred from the argument types, then the instantiation
                 // queued and the name rewritten to the mangled one. Inference
                 // is deliberately shallow -- see `infer`.
-                let name = &self.resolve_fn(name);
+                let name = &self.resolve_fn(written);
                 if self.generic_funcs.contains_key(name) {
-                    let mangled = self.generic_call(name, args, sub, *s)?;
+                    let out = self.subst_args(args, sub)?;
+                    let mangled = self.generic_call(name, args, sub, *s, want)?;
                     return Ok(Expr::Call(mangled, out, *s));
                 }
-                Expr::Call(name.clone(), out, *s)
+                // A plain function: its parameters are context for its
+                // arguments. The name stays as written; the lowering
+                // resolves it.
+                let own = format!("{}#{written}", self.cur_module);
+                let params = self.func_params.get(&own).cloned();
+                let out = match params {
+                    Some(params) => self.subst_args_as(args, sub, &params)?,
+                    None => self.subst_args(args, sub)?,
+                };
+                Expr::Call(written.clone(), out, *s)
             }
         })
     }
@@ -1026,8 +1078,9 @@ impl Mono {
         args: &Args,
         sub: &Subst,
         span: Span,
+        want: Option<Ty>,
     ) -> Result<String, Diag> {
-        let targs = self.infer(&decl, &args.pos, sub, span)?;
+        let targs = self.infer(&decl, &args.pos, sub, span, want)?;
         let name = self.mangle(m, &targs);
         self.shown
             .insert(name.clone(), (m.to_string(), targs.clone()));
@@ -1045,6 +1098,7 @@ impl Mono {
         args: &Args,
         sub: &Subst,
         span: Span,
+        want: Option<Ty>,
     ) -> Result<String, Diag> {
         let decl = self.generic_funcs.get(name).cloned().expect("generic");
         // Infer from the arguments AS WRITTEN, not from their substituted
@@ -1055,10 +1109,32 @@ impl Mono {
         // and inference failed for a constructed temporary while succeeding
         // for a local. `unify` substitutes what it binds, which is what
         // `sub` is threaded through for.
-        let targs = self.infer(&decl, &args.pos, sub, span)?;
+        let targs = self.infer(&decl, &args.pos, sub, span, want)?;
         let mangled = self.mangle(name, &targs);
         self.queue.push((name.to_string(), targs, span));
         Ok(mangled)
+    }
+
+    /// Arguments to a function whose parameters are known and concrete:
+    /// each is substituted with its parameter's written type as context.
+    /// Positional ones line up with the mandatory parameters, named ones
+    /// with the parameter of that name.
+    fn subst_args_as(&mut self, a: &Args, sub: &Subst, params: &[Param]) -> Result<Args, Diag> {
+        let mandatory: Vec<Ty> = params
+            .iter()
+            .filter(|p| !p.is_optional())
+            .map(|p| p.ty)
+            .collect();
+        let mut pos = Vec::new();
+        for (i, e) in a.pos.iter().enumerate() {
+            pos.push(self.subst_expr_as(e, sub, mandatory.get(i).copied())?);
+        }
+        let mut named = Vec::new();
+        for (n, e) in &a.named {
+            let want = params.iter().find(|p| p.name == *n).map(|p| p.ty);
+            named.push((n.clone(), self.subst_expr_as(e, sub, want)?));
+        }
+        Ok(Args { pos, named })
     }
 
     fn subst_args(&mut self, a: &Args, sub: &Subst) -> Result<Args, Diag> {
@@ -1089,6 +1165,7 @@ impl Mono {
         args: &[Expr],
         sub: &Subst,
         span: Span,
+        want: Option<Ty>,
     ) -> Result<Vec<Ty>, Diag> {
         // Only mandatory parameters are positional, so those are what the
         // positional arguments line up with. Arity itself is checked later,
@@ -1098,6 +1175,13 @@ impl Mono {
         for (p, a) in mandatory.iter().zip(args.iter()) {
             self.unify_arg(p.ty, a, &decl.tparams, sub, span, &mut found);
         }
+        // Then the type the value goes to, for whatever the arguments left
+        // open. Arguments first: they are the call's own, and when both
+        // speak and disagree the lowering reports the mismatch against the
+        // destination, which is the clearer message.
+        if let Some(w) = want {
+            self.unify(decl.ret, w, &decl.tparams, sub, span, &mut found);
+        }
         let mut out = Vec::new();
         for tp in &decl.tparams {
             match found.get(tp) {
@@ -1106,8 +1190,9 @@ impl Mono {
                     return Err(Diag::new(
                         span,
                         format!(
-                            "cannot infer type parameter `{tp}` of `{}` from these arguments; \
-                             bind the argument to a local with a written type first",
+                            "cannot infer type parameter `{tp}` of `{}` from its arguments or \
+                             from where its value goes; bind an argument, or the result, to a \
+                             local with a written type first",
                             crate::ast::bare(&decl.name)
                         ),
                     ))

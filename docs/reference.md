@@ -460,9 +460,27 @@ a comparison. Each type parameter must be reached by a mandatory parameter
 whose argument has a written type: a literal, a construction, an enum variant,
 or a local or parameter (whose declaration spells its type). A collection
 literal contributes its first element — `first([1, 2])` against `List<T>`
-binds `T` to `int` — and an empty one contributes nothing. When a parameter
-cannot be reached the compiler says so and asks for a local with a written
-type. A `pub` generic function is called from another module like any other,
+binds `T` to `int` — and an empty one contributes nothing.
+
+What the arguments leave open is inferred from **where the value goes**, if
+that has a written type: a declaration, an assignment, a `return`, or a
+parameter of a non-generic function it is passed to — the same places a
+collection literal takes its type from. So a helper whose type parameter is
+only in its return type can be called:
+
+```c
+Result<T, str> fail<T>(str why) { return Result<T, str>.Err(why); }
+
+Result<int, str> half(int n) {
+    if (n % 2 != 0) { return fail("odd"); }     // T is int, from the return type
+    ...
+}
+```
+
+The arguments speak first; the destination only fills in what they left.
+Anywhere else — `print(nothing().is_some())`, a receiver, an operand — there
+is nothing to infer from, and the compiler says so and asks for a local with
+a written type. A `pub` generic function is called from another module like any other,
 as `lib.first(xs)`.
 
 There are no constraints on type parameters yet. A generic body that does

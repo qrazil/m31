@@ -1,0 +1,7 @@
+// With no argument and no destination to say what `T` is, it cannot be
+// inferred: `print` takes anything.
+Option<T> nothing<T>() {
+    return Option<T>.None;
+}
+
+print(nothing().is_some());
