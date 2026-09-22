@@ -1,0 +1,55 @@
+// `str.from_chars(xs)` builds text from Unicode scalar values: the inverse
+// of `chars()`. A static method on `str`, like `float.from_bits`, because
+// it is the result type the name has to say.
+//
+// Expected output from Python 3: "".join(chr(c) for c in xs), and
+// len(s.encode()) for its size.
+
+List<str> samples = ["", "a", "café", "cafe\u{301}", "日本語", "😀", "👍🏽", "🇬🇧", "👨\u{200d}👩\u{200d}👧", "a\0b"];
+int same = 0;
+for (str s in samples) {
+    if (str.from_chars(s.chars()) == s) {
+        same = same + 1;
+    }
+}
+print(same);  // 10: every one round-trips
+
+// Each UTF-8 width at both of its edges, and the scalar values either side
+// of the surrogate gap: 1 byte to U+007F, 2 to U+07FF, 3 to U+FFFF, 4 to
+// U+10FFFF.
+List<int> edges = [0, 127, 128, 2047, 2048, 55295, 57344, 65535, 65536, 1114111];
+for (int c in edges) {
+    str one = str.from_chars([c]);
+    List<int> back = one.chars();
+    print(c.to_str() + " -> " + one.size().to_str() + " bytes, back " + back[0].to_str() + ", " + one.to_bytes().hex());
+}
+
+// Built from numbers: the list literal is typed by the parameter.
+print(str.from_chars([104, 233, 108, 108, 111]));  // héllo
+print(str.from_chars([128077, 127997]));  // 👍🏽
+print(str.from_chars([]).size());  // 0
+
+// Text transformed a code point at a time: every é becomes e + U+0301.
+List<int> out = [];
+for (int c in "résumé".chars()) {
+    if (c == 233) {
+        out.push(101);
+        out.push(769);
+    } else {
+        out.push(c);
+    }
+}
+str decomposed = str.from_chars(out);
+print(decomposed.size());  // 10
+print(decomposed == "re\u{301}sume\u{301}");  // true
+
+// Reversing by code points is right for "日本語" and wrong for a flag: the
+// two regional indicators swap, and 🇬🇧 becomes 🇧🇬. User-perceived
+// characters need grapheme segmentation (docs/text-decision.md).
+str rev(str s) {
+    List<int> cs = s.chars();
+    cs.reverse();
+    return str.from_chars(cs);
+}
+print(rev("日本語"));  // 語本日
+print(rev("🇬🇧") == "🇧🇬");  // true

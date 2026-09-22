@@ -155,27 +155,27 @@ pub Result<int, Error> parse(str s) {
     if (n < 11) {
         return not_iso(s);
     }
-    str sep = s.substr(10, 11);
-    if (sep == " ") {
+    // Byte 10 is compared as a byte: `s` is the caller's text and may hold
+    // any character there, where substr(10, 11) would trap inside one.
+    if (is_at(s, 10, " ")) {
         return fail("date.parse(): '" + s + "' separates the date and the time with a space -- write the ISO-8601 'T'");
     }
-    if (sep == "t") {
+    if (is_at(s, 10, "t")) {
         return fail("date.parse(): '" + s + "' has a lowercase 't' -- write the uppercase 'T'");
     }
-    if (sep != "T") {
+    if (!is_at(s, 10, "T")) {
         return not_iso(s);
     }
     if (n != 20) {
         return refuse_tail(s);
     }
-    str zone = s.substr(19, 20);
-    if (zone == "z") {
+    if (is_at(s, 19, "z")) {
         return fail("date.parse(): '" + s + "' has a lowercase 'z' -- write the uppercase 'Z'");
     }
-    if (zone != "Z") {
+    if (!is_at(s, 19, "Z")) {
         return refuse_tail(s);
     }
-    if (!date_shaped(s) || s.substr(13, 14) != ":" || s.substr(16, 17) != ":") {
+    if (!date_shaped(s) || !is_at(s, 13, ":") || !is_at(s, 16, ":")) {
         return not_iso(s);
     }
     if (!digits(s, 11, 13) || !digits(s, 14, 16) || !digits(s, 17, 19)) {
@@ -360,6 +360,14 @@ int field(str s, int from, int to) {
     return s.substr(from, to).parse_int().or(0);
 }
 
+// Is byte `i` of `s` the one ASCII character `c`? A byte comparison, not
+// `s.substr(i, i + 1) == c`: the substr traps when byte `i` is inside a
+// multi-byte character (reference §6.5), and `s` here is whatever text a
+// caller passed, so that would turn "not a timestamp" into a crash.
+bool is_at(str s, int i, str c) {
+    return s.byte_at(i) == c.byte_at(0);
+}
+
 // `YYYY-MM-DD` in the first ten bytes. Used both to recognise a date-only
 // string and to check the date half of a full timestamp, so the two readings
 // cannot drift apart.
@@ -367,7 +375,7 @@ bool date_shaped(str s) {
     if (s.size() < 10) {
         return false;
     }
-    if (s.substr(4, 5) != "-" || s.substr(7, 8) != "-") {
+    if (!is_at(s, 4, "-") || !is_at(s, 7, "-")) {
         return false;
     }
     return digits(s, 0, 4) && digits(s, 5, 7) && digits(s, 8, 10);
@@ -384,7 +392,9 @@ Result<int, Error> refuse_tail(str s) {
     if (n == 19) {
         return fail("date.parse(): '" + s + "' carries no offset -- a timestamp with no offset is not assumed to be UTC; append 'Z' if it is");
     }
-    if (n > 19) {
+    // Only a sign at byte 19 starts an offset, and checking for one first
+    // also makes 19 a character boundary for the substr.
+    if (n > 19 && (is_at(s, 19, "+") || is_at(s, 19, "-"))) {
         str tail = s.substr(19, n);
         if (tail.starts_with("+") || tail.starts_with("-")) {
             return fail("date.parse(): '" + s + "' carries the offset '" + tail + "' -- this module is UTC only, so only 'Z' is accepted; add the offset to the result yourself if that is what you mean");

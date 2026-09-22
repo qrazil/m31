@@ -1,0 +1,3 @@
+// One code point is a list of one: str.from_chars([c]). There is no second
+// spelling for the single case.
+print(str.from_char(233));

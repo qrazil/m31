@@ -1,0 +1,4 @@
+// A surrogate (U+D800..U+DFFF) is not a Unicode scalar value and has no
+// UTF-8 form, so there is no text to build: it traps, as storing 256 in a
+// bytes does. The message writes the value the way Unicode does.
+print(str.from_chars([104, 105, 55296]));

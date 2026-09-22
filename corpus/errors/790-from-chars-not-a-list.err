@@ -1,0 +1,4 @@
+corpus/errors/790-from-chars-not-a-list.src:3:22: type mismatch: expected List<int>, found str
+  |
+3 | print(str.from_chars("abc"));
+  |                      ^

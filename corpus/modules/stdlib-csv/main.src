@@ -59,8 +59,9 @@ show(csv.parse("\"a\r\nb\"\r\n"));
 show(csv.parse("café,日本\n"));
 // The two answers that differ from CPython.
 show(csv.parse("\n\na,b\n\n\r\nc,d\n\n"));
-// A byte-order mark cannot be written in a literal, so it is cut from three.
-str bom = "ｱ".substr(0, 1) + "»".substr(1, 2) + "¿".substr(1, 2);
+// A byte-order mark, U+FEFF. It used to be cut from three characters with
+// substr, which now traps: each cut landed inside a character.
+str bom = "\u{feff}";
 show(csv.parse(bom + "name,age\nx,1"));
 // Another separator; the comma is then ordinary.
 show(csv.parse("a;b,c;\"d;e\"\n", sep: ";"));

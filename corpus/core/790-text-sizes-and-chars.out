@@ -1,0 +1,13 @@
+ascii: 4 bytes, 4 code points [99, 97, 102, 101]
+precomposed: 5 bytes, 4 code points [99, 97, 102, 233]
+decomposed: 6 bytes, 5 code points [99, 97, 102, 101, 769]
+false
+cjk: 9 bytes, 3 code points [26085, 26412, 35486]
+emoji: 4 bytes, 1 code points [128512]
+skin tone: 8 bytes, 2 code points [128077, 127997]
+flag: 8 bytes, 2 code points [127468, 127463]
+zwj family: 18 bytes, 5 code points [128104, 8205, 128105, 8205, 128103]
+empty: 0 bytes, 0 code points []
+widths: 10 bytes, 4 code points [97, 233, 8364, 128512]
+nul: 3 bytes, 3 code points [97, 0, 98]
+4

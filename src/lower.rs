@@ -265,7 +265,7 @@ impl Lowerer {
         // How many positional arguments each takes, and of what.
         let want: &[Ty] = match m {
             "size" | "trim" | "to_upper" | "to_lower" | "parse_int" | "parse_float"
-            | "to_bytes" => &[],
+            | "to_bytes" | "chars" => &[],
             "byte_at" => &[Ty::Int],
             "substr" => &[Ty::Int, Ty::Int],
             "repeat" => &[Ty::Int],
@@ -441,6 +441,19 @@ impl Lowerer {
             // It cannot fail: a `str` is already a run of bytes, and this
             // only hands them over without interpreting them.
             "to_bytes" => Ok(self.rt_value("rt_str_to_bytes", vec![o.val()], Ty::Bytes)),
+            // The Unicode scalar values, decoded in language source
+            // (lib/__text.src). A list rather than a new loop form, so
+            // `for (int c in s.chars())` needs nothing the language lacks.
+            "chars" => {
+                let Some(lty) = self.list_of(Ty::Int) else {
+                    return Err(Diag::new(
+                        span,
+                        "`chars` has no List<int> type to return; this is a compiler bug",
+                    ));
+                };
+                let d = self.text_call("chars", o.val(), span)?;
+                Ok(Val::new(d, lty, true))
+            }
             "to_str" => {
                 // A `str` already is one. Returning it unchanged keeps
                 // `v.to_str()` writable whatever `v` is, which is what makes
@@ -448,12 +461,21 @@ impl Lowerer {
                 Ok(Val::new(o.val(), Ty::Str, false))
             }
             "len" => Err(Diag::new(span, "`str` has no method `len`; it is `size()`")),
+            // The name a reader will guess for "how many characters". There
+            // is one spelling, and it shows that the count walks the string.
+            "char_count" | "length" => Err(Diag::new(
+                span,
+                format!(
+                    "`str` has no method `{m}`; `size()` counts bytes, and \
+                     `chars().size()` counts code points"
+                ),
+            )),
             other => Err(Diag::new(
                 span,
                 format!(
                     "`str` has no method `{other}`; it has size, substr, contains, \
                      index_of, starts_with, ends_with, split, trim, to_upper, \
-                     to_lower, repeat and to_bytes"
+                     to_lower, repeat, byte_at, chars and to_bytes"
                 ),
             )),
         }
@@ -5803,12 +5825,48 @@ impl Lowerer {
         Ok(d)
     }
 
+    /// A call to `chars` or `from_chars` in lib/__text.src, which is how a
+    /// `str` becomes code points and code points a `str`: UTF-8 is bit
+    /// manipulation the language can write, so it is source, not runtime C.
+    /// One borrowed argument, an owned reference back -- the shape of
+    /// `float_text`, and guarded the same two ways.
+    fn text_call(&mut self, name: &str, arg: Value, span: Span) -> Result<Value, Diag> {
+        let tm = crate::stdlib::TEXT;
+        // The module cannot use what it defines through the method spelling:
+        // the call would be to itself.
+        if self.cur_module == tm {
+            return Err(Diag::new(
+                span,
+                "the text module cannot call `chars` or `from_chars` itself: \
+                 that would call itself",
+            ));
+        }
+        let key = format!("{tm}#{name}");
+        if !self.sigs.contains_key(&key) {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`{key}` was not loaded for a code point conversion; this is a compiler bug"
+                ),
+            ));
+        }
+        let d = self.new_val(IrTy::Ref);
+        self.push(Inst::Call {
+            dst: Some(d),
+            func: key,
+            args: vec![arg],
+        });
+        self.stmt_temps.push(d);
+        Ok(d)
+    }
+
     /// `T.name(..)` where `T` is a built-in type: a static method.
     ///
-    /// There is one, `float.from_bits(n)`. It is static rather than a method
-    /// on `int` for the reason §6.6 gives for parsing: the source is always
-    /// an `int` and it is the TARGET that the name has to say, which a method
-    /// dispatched on the source cannot.
+    /// There are two, `float.from_bits(n)` and `str.from_chars(xs)`. They are
+    /// static rather than methods on the source for the reason §6.6 gives for
+    /// parsing: the source is always an `int` (or a list of them) and it is
+    /// the TARGET that the name has to say, which a method dispatched on the
+    /// source cannot.
     fn lower_prim_static(
         &mut self,
         ty: Ty,
@@ -5816,6 +5874,34 @@ impl Lowerer {
         args: &Args,
         span: Span,
     ) -> Result<Val, Diag> {
+        if ty == Ty::Str && name == "from_chars" {
+            if args.pos.len() != 1 || !args.named.is_empty() {
+                return Err(Diag::new(span, "`from_chars` takes one argument"));
+            }
+            let Some(lty) = self.list_of(Ty::Int) else {
+                return Err(Diag::new(
+                    span,
+                    "`from_chars` has no List<int> type to take; this is a compiler bug",
+                ));
+            };
+            let xs = self.lower_expr_as(&args.pos[0], lty)?;
+            if !self.assignable(xs.ty, lty) {
+                return Err(Diag::new(args.pos[0].span(), self.mismatch(lty, xs.ty)));
+            }
+            let d = self.text_call("from_chars", xs.val(), span)?;
+            return Ok(Val::new(d, Ty::Str, true));
+        }
+        // Rust's `char::from_u32`, Python's `chr`: the spelling a reader will
+        // reach for. One code point is a list of one; one spelling, not two.
+        if ty == Ty::Str && (name == "from_char" || name == "chr") {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`str` has no static method `{name}`; one code point \
+                     is `str.from_chars([c])`"
+                ),
+            ));
+        }
         if ty != Ty::Float || name != "from_bits" {
             return Err(Diag::new(
                 span,

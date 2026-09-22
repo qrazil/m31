@@ -374,10 +374,12 @@ sharpest edge, so the builtin set stays deliberately small: `print`,
 `concat`, `clone`, `send`, `recv`, `close`, `trap`.
 
 **`str.size()` counts BYTES, not characters.** `"héllo".size()` is 6, and
-`substr` takes byte offsets. Go makes the same choice. A `str` carries bytes
-and the language has no other opinion about encoding; counting characters
-would mean carrying a Unicode table and still being wrong about grapheme
-clusters. Chosen, not defaulted into.
+`substr` takes byte offsets. Chosen, not defaulted into -- and since
+2026-09-21 a `str` is also always valid UTF-8, an offset inside a
+character traps, and code points are `int`s through `s.chars()` and
+`str.from_chars(xs)`: Rust's model rather than Go's. Grapheme clusters,
+case mapping and normalisation are a `unicode` module once constant arrays
+can hold its tables. See `docs/text-decision.md`.
 
 ---
 

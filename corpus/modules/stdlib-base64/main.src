@@ -114,12 +114,14 @@ str mixed = "The quick brown fox ÀÁÂÃ ÿþ 日本語 😀 ~!@#$%^&*()_+{}|:<
 int same = 0;
 int k = 0;
 while (k <= mixed.size()) {
-    str part = mixed.substr(0, k);
+    // A prefix of the octets, not of the text: most byte counts end inside
+    // a character, where a `str` cannot be cut but a `bytes` can.
+    bytes part = mixed.to_bytes().substr(0, k);
     List<bool> flags = [false, true];
     for (bool u in flags) {
-        match (base64.decode(base64.encode(part.to_bytes(), url: u), url: u)) {
+        match (base64.decode(base64.encode(part, url: u), url: u)) {
             case Ok(bytes back): {
-                if (back == part.to_bytes()) {
+                if (back == part) {
                     same = same + 1;
                 }
             }

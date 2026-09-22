@@ -1,0 +1,4 @@
+corpus/errors/792-no-char-count.src:3:12: `str` has no method `char_count`; `size()` counts bytes, and `chars().size()` counts code points
+  |
+3 | print("abc".char_count());
+  |            ^

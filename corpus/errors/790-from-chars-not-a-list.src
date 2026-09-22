@@ -1,0 +1,3 @@
+// from_chars takes code points, a List<int> -- not a str, which already is
+// text.
+print(str.from_chars("abc"));

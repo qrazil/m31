@@ -2,18 +2,43 @@
 //
 // API
 // ---
-//   os.args()      -> List<str>, every argument, the program's own name first
-//   os.env(name)   -> Option<str>, one environment variable
-//   os.exit(code)  -> does not return; standard output is flushed first
+//   os.args()             -> Result<List<str>, os.Error>, every argument,
+//                            the program's own name first
+//   os.args_bytes()       -> List<bytes>, the same, exactly as the OS passed them
+//   os.env(name)          -> Option<str>, one environment variable, as text
+//   os.env_bytes(name)    -> Option<bytes>, the same, exactly as the OS holds it
+//   os.exit(code)         -> does not return; standard output is flushed first
 //
 // Three facts the operating system hands a process, and nothing built on
 // them: parsing the command line is `args`, and it is handed these tokens
 // rather than reading them itself, which is what makes a parser testable
 // from a program that has no command line of its own.
+//
+// Text or octets is decided here, at the door, as `io.read` decides it for a
+// file. On Unix an argument or a variable is any run of non-NUL bytes, and a
+// `str` is always valid UTF-8 (reference §3), so the runtime hands over
+// `bytes` and `utf8()` -- the one conversion into `str` -- checks each.
+// docs/text-decision.md compares this with Rust, whose `env::args()` panics
+// here and whose `args_os()` is `args_bytes`.
 
-prim void __args(List<str> out);
-prim int __env(str name, List<str> out);
+prim void __args(List<bytes> out);
+prim int __env(str name, List<bytes> out);
 prim void __exit(int code);
+
+/// What can go wrong reading the process's own facts as text.
+pub enum Error {
+    /// Argument `i` (argv[0] is 0) is not valid UTF-8. `args_bytes` has it.
+    InvalidUtf8(int);
+}
+
+/// A sentence saying what went wrong, so `print(e)` prints it.
+pub str Error.to_str() {
+    match (this) {
+        case InvalidUtf8(int i): {
+            return "argument " + i.to_str() + " is not valid UTF-8";
+        }
+    }
+}
 
 /// Every argument the program was started with, `argv[0]` -- the name it was
 /// invoked as -- first.
@@ -24,29 +49,76 @@ prim void __exit(int code);
 /// quietly removed is a second convention to remember at every index. A
 /// parser is handed the rest; see `args`.
 ///
+/// An argument that is not UTF-8 -- a file name from a Latin-1 disk, say --
+/// is `Err(InvalidUtf8(i))`, not a trap: it comes from the world, not from a
+/// bug in the program (reference §6.6), and a program that must take any
+/// argument reads `args_bytes` instead. It is neither dropped nor repaired:
+/// dropping one would move every later index, and a replacement character
+/// would hand the program a file name that names no file.
+///
 /// A fresh list per call: changing it changes nothing but the copy.
-pub List<str> args() {
+pub Result<List<str>, Error> args() {
     List<str> out = [];
+    int i = 0;
+    for (bytes a in args_bytes()) {
+        match (a.utf8()) {
+            case Some(str s): {
+                out.push(s);
+            }
+            case None: {
+                return Result<List<str>, Error>.Err(Error.InvalidUtf8(i));
+            }
+        }
+        i = i + 1;
+    }
+    return Result<List<str>, Error>.Ok(out);
+}
+
+/// Every argument, exactly the octets the operating system passed, whether
+/// or not they are text: Rust's `args_os`. A fresh list per call.
+pub List<bytes> args_bytes() {
+    List<bytes> out = [];
     __args(out);
     return out;
 }
 
-/// The value of the environment variable `name`, or None if it is not set.
+/// The value of the environment variable `name` as text, or None if it is
+/// not set.
 ///
 /// Set-but-empty is `Some("")`, not None: the two are different facts and
 /// programs do branch on them. A name that could never be a variable -- empty,
 /// or holding an `=` or a NUL -- is simply not set.
+///
+/// A value that is not valid UTF-8 is None as well: there is no text by that
+/// name, which is the question asked, and a program that falls back to a
+/// default when `LANG` is unset does the right thing when it is not text.
+/// `env_bytes` tells the two apart; `io.read_line` makes the same trade for
+/// a line. `args` cannot, because a list cannot leave one element out
+/// without moving the rest.
 ///
 /// Oro spells this `os.env` too, having renamed Python's `os.environ`. There
 /// is no way to set or list variables: a program that needs to change the
 /// environment is starting another program, and that belongs with whatever
 /// starts it.
 pub Option<str> env(str name) {
-    List<str> got = [];
-    if (__env(name, got) == 0) {
-        return Option<str>.None;
+    match (env_bytes(name)) {
+        case Some(bytes v): {
+            return v.utf8();
+        }
+        case None: {
+            return Option<str>.None;
+        }
     }
-    return Option<str>.Some(got[0]);
+}
+
+/// The value of the environment variable `name`, exactly the octets the
+/// operating system holds, or None if it is not set.
+pub Option<bytes> env_bytes(str name) {
+    List<bytes> got = [];
+    if (__env(name, got) == 0) {
+        return Option<bytes>.None;
+    }
+    return Option<bytes>.Some(got[0]);
 }
 
 /// End the program now with status `code`, after flushing standard output so

@@ -1,0 +1,51 @@
+// A `str` is UTF-8 text. `size()` is its length in BYTES -- what a file or a
+// socket holds, and O(1) -- and `chars()` is its Unicode scalar values, one
+// `int` each. The two differ as soon as the text leaves ASCII.
+//
+// Expected output from Python 3: len(s.encode()), len(s), [ord(c) for c in s].
+
+// The code points, written the way Python prints a list of them.
+str show(List<int> cs) {
+    List<str> parts = [];
+    for (int c in cs) {
+        parts.push(c.to_str());
+    }
+    return "[" + parts.join(", ") + "]";
+}
+
+void report(str label, str s) {
+    List<int> cs = s.chars();
+    print(label + ": " + s.size().to_str() + " bytes, " + cs.size().to_str() + " code points " + show(cs));
+}
+
+report("ascii", "cafe");
+// é two ways: one precomposed code point (U+00E9), or e and a combining
+// acute accent (U+0301). They look the same and are different text --
+// comparing them equal needs normalisation, which is the `unicode` module's
+// job (docs/text-decision.md).
+report("precomposed", "café");
+report("decomposed", "cafe\u{301}");
+print("café" == "cafe\u{301}");  // false
+report("cjk", "日本語");
+report("emoji", "😀");
+// A thumbs-up with a skin-tone modifier is TWO code points that a reader
+// sees as one character.
+report("skin tone", "👍🏽");
+// A flag is two regional indicator letters: G and B.
+report("flag", "🇬🇧");
+// A family is three people joined by ZERO WIDTH JOINERs (U+200D): five code
+// points, one picture.
+report("zwj family", "👨\u{200d}👩\u{200d}👧");
+report("empty", "");
+// Every width of UTF-8 in one string: 1, 2, 3 and 4 bytes.
+report("widths", "aé€😀");
+// A NUL is an ordinary code point.
+report("nul", "a\0b");
+// for-in over the list: the loop form needs nothing new.
+int wide = 0;
+for (int c in "naïve 日本 😀".chars()) {
+    if (c > 127) {
+        wide = wide + 1;
+    }
+}
+print(wide);  // 4

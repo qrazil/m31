@@ -43,12 +43,22 @@ pub fn source(name: &str) -> Option<&'static str> {
 /// included. See docs/stdlib-seam.md §6.
 pub const FLOATFMT: &str = "__floatfmt";
 
+/// The module that decodes a `str` into code points and encodes them back.
+/// The compiler lowers `s.chars()` and `str.from_chars(xs)` to calls into
+/// it, and the loader adds it to any program that mentions either -- the
+/// same arrangement as `FLOATFMT`, for the same reason: UTF-8 is bit
+/// manipulation the language can write, so the runtime does not.
+pub const TEXT: &str = "__text";
+
 /// The source of any embedded module, importable or not -- for the loader,
-/// which also brings in `FLOATFMT`, and for quoting a line of it in a
-/// diagnostic.
+/// which also brings in `FLOATFMT` and `TEXT`, and for quoting a line of it
+/// in a diagnostic.
 pub fn embedded(name: &str) -> Option<&'static str> {
     if name == FLOATFMT {
         return Some(include_str!("../lib/__floatfmt.src"));
+    }
+    if name == TEXT {
+        return Some(include_str!("../lib/__text.src"));
     }
     source(name)
 }

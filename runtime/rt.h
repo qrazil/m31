@@ -133,8 +133,8 @@ void    rt_out_flush(void);
  * randomness. Everything built on them -- Option, Result, calendars,
  * rejection sampling -- is language source. */
 void    rt_args_init(int argc, char **argv);   /* called by the emitted main */
-void    rt_args(Obj *out);                      /* pushes every argv[i], argv[0] first */
-int64_t rt_env(Obj *name, Obj *out);            /* 1 pushed the value, 0 unset */
+void    rt_args(Obj *out);                      /* pushes every argv[i] as bytes, argv[0] first */
+int64_t rt_env(Obj *name, Obj *out);            /* 1 pushed the value as bytes, 0 unset */
 _Noreturn void rt_exit(int64_t code);           /* flushes stdout, then exit(code) */
 _Noreturn void rt_panic(Obj *msg);              /* rt_trap with a str message */
 void    rt_clock(Obj *out);                     /* pushes seconds, then nanoseconds */

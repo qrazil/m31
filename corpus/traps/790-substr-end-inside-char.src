@@ -1,0 +1,4 @@
+// A byte offset inside a character traps: "é" is C3 A9, and offset 1 is
+// between the two. Half a character is not text, and a str is always text.
+str s = "é";
+print(s.substr(0, 1));

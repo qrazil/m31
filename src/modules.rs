@@ -81,6 +81,18 @@ fn valid_module_name(n: &str) -> bool {
         && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Could this file decode a `str` into code points or build one from them?
+///
+/// Both are spelt with a name no other route reaches -- `s.chars()` and
+/// `str.from_chars(xs)` -- so the token is enough. A program that uses
+/// `chars` as a name of its own loads the module for nothing, which costs
+/// compile time and nothing else.
+fn mentions_text(toks: &[crate::lexer::Token]) -> bool {
+    use crate::lexer::Tok;
+    toks.iter()
+        .any(|t| matches!(&t.tok, Tok::Ident(n) if n == "chars" || n == "from_chars"))
+}
+
 /// Could this file turn a float into text, or text into a float?
 ///
 /// Every float a program holds was either written as a literal, or has the
@@ -120,6 +132,9 @@ struct Loader {
     /// Whether any file could turn a float into text or text into a float,
     /// and so needs `stdlib::FLOATFMT` -- see `mentions_float`.
     wants_floatfmt: bool,
+    /// Whether any file mentions `chars` or `from_chars`, and so needs
+    /// `stdlib::TEXT` -- see `mentions_text`.
+    wants_text: bool,
 }
 
 /// A loaded program, and where each module was read from, so a diagnostic
@@ -164,6 +179,7 @@ pub fn load(entry: &str) -> Result<Loaded, Located> {
         stack: Vec::new(),
         arena: Vec::new(),
         wants_floatfmt: false,
+        wants_text: false,
     };
     let mut order = l.visit(&name, entry, None)?;
     let entry_module = name.clone();
@@ -180,6 +196,20 @@ pub fn load(entry: &str) -> Result<Loaded, Located> {
         let extra = l.parse(
             fm,
             &display_path(fm),
+            text,
+            Some((&name, Span::new(1, 1))),
+            true,
+        )?;
+        order.splice(0..0, extra);
+    }
+    // Code points are language source too (lib/__text.src), loaded on the
+    // same terms: only when some file could reach it.
+    if l.wants_text {
+        let tm = crate::stdlib::TEXT;
+        let text = crate::stdlib::embedded(tm).expect("the text module is embedded");
+        let extra = l.parse(
+            tm,
+            &display_path(tm),
             text,
             Some((&name, Span::new(1, 1))),
             true,
@@ -368,6 +398,9 @@ impl Loader {
         let toks = Lexer::new(src).tokenize().map_err(here)?;
         if mentions_float(&toks) {
             self.wants_floatfmt = true;
+        }
+        if mentions_text(&toks) {
+            self.wants_text = true;
         }
         let mut parser = Parser::with_arena(toks, std::mem::take(&mut self.arena));
         if stdlib {

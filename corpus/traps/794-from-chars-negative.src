@@ -1,0 +1,4 @@
+// A negative number is not a code point either. It has no U+ spelling, so
+// the message gives it as written.
+List<int> cs = [97, -1];
+print(str.from_chars(cs));

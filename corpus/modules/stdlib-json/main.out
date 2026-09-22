@@ -78,8 +78,8 @@ error: unexpected 'é' at position 1
 error: integer out of range at position 0
 error: integer out of range at position 0
 error: unexpected '/' at position 7
-error: invalid UTF-8 in string at position 1
-error: invalid UTF-8 in string at position 8
+true
+true
 "\b"
 "ab\f"
 "́"
@@ -93,8 +93,8 @@ error: maximum nesting depth (10000) exceeded at position 10001
 stringify error: nan is not JSON serializable
 stringify error: Infinity is not JSON serializable
 stringify error: Infinity is not JSON serializable
-stringify error: a string is not valid UTF-8 (byte 3 of it), and JSON text must be
-stringify error: a string is not valid UTF-8 (byte 0 of it), and JSON text must be
+"ok é 😀"
+{"é":null}
 3.0
 -0.0
 1e+300

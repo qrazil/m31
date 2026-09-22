@@ -1,0 +1,22 @@
+import os;
+
+// `main.args` holds two arguments: `plain`, and `caf` followed by the one
+// byte E9 -- "café" in Latin-1, which is not UTF-8 (in UTF-8 é is C3 A9).
+// A file name from an old disk looks exactly like this.
+//
+// A `str` is always valid UTF-8, so os.args() cannot hand that argument
+// over as text. It says which one instead, as a value -- the world, not a
+// bug in the program -- and args_bytes has every argument as it came.
+match (os.args()) {
+    case Ok(List<str> all): {
+        print("unexpected: every argument decoded");
+    }
+    case Err(os.Error e): {
+        print(e);  // argument 2 is not valid UTF-8
+    }
+}
+List<bytes> raw = os.args_bytes();
+print(raw.size());  // 3
+print(raw[1].utf8().or("?"));  // plain
+print(raw[2].hex());  // 636166e9
+print(raw[2].utf8().is_none());  // true

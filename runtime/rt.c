@@ -122,12 +122,19 @@ Obj *rt_str_clone(Obj *o) {
 
 /* ---- strings ----------------------------------------------------------
  *
- * Everything here works in BYTES, not characters. `size()` is a byte count,
- * `substr` takes byte offsets, and `to_upper` touches only ASCII. That is
- * Go's choice too, and it is the honest one for a type that carries bytes --
- * the alternative is pretending to understand an encoding the language has
- * no other opinion about. It is written down in the reference so nobody has
- * to discover it.
+ * A str is always valid UTF-8 (reference §3, docs/text-decision.md), and
+ * every function here that makes one keeps it so. Sizes and offsets are in
+ * BYTES -- O(1), and what files and sockets speak -- so `size()` is a byte
+ * count and `substr` takes byte offsets, which must land on a character
+ * boundary. Code points are language source, lib/__text.src.
+ *
+ * Why the rest cannot break validity, so nobody has to re-derive it: concat,
+ * repeat and join put whole valid strings side by side; trim and the case
+ * conversions touch only ASCII bytes, and UTF-8 never uses an ASCII byte
+ * inside a multi-byte character; split and find match a valid needle, which
+ * begins with a non-continuation byte and ends a character, so a match can
+ * only start and end on boundaries. The doors from outside -- bytes.utf8(),
+ * and through it io, fs and os -- check.
  */
 
 /* Defined with the collections below; a string joins a List of them. */
@@ -145,12 +152,34 @@ static Obj *str_new(const char *src, int64_t n) {
     return (Obj *)s;
 }
 
+/* Is byte offset `i` of `s` the start of a character (or the end)? A str is
+ * valid UTF-8, so the only non-boundary is a continuation byte, 10xxxxxx. */
+static bool on_boundary(const Str *s, int64_t i) {
+    return i == s->len || ((unsigned char)s->data[i] & 0xC0) != 0x80;
+}
+
 /* Byte offsets, half-open, and an out-of-range one traps the way an
  * out-of-range index does: it is a bug at the call site, not a condition to
- * handle. */
+ * handle.
+ *
+ * An offset inside a character traps too -- Rust's rule for &s[a..b]. The
+ * alternatives were worse: a result holding half a character would break
+ * the one promise a str makes (it is valid UTF-8, reference §3), and
+ * rounding the offset to a boundary would hand back a string of a length the
+ * caller did not ask for. Offsets a program gets from the language --
+ * index_of, size(), a scan for an ASCII delimiter with byte_at -- are
+ * always on a boundary, so only arithmetic on a guess lands here. */
 Obj *rt_str_substr(Obj *o, int64_t from, int64_t to) {
     const Str *s = (const Str *)o;
     if (from < 0 || to < from || to > s->len) rt_trap("substring range out of bounds");
+    int64_t bad = !on_boundary(s, from) ? from : !on_boundary(s, to) ? to : -1;
+    if (bad >= 0) {
+        char msg[96];
+        snprintf(msg, sizeof msg,
+                 "substring offset %" PRId64 " is inside a character, not on a UTF-8 boundary",
+                 bad);
+        rt_trap(msg);
+    }
     return str_new(s->data + from, to - from);
 }
 
@@ -1859,10 +1888,14 @@ void rt_args_init(int argc, char **argv) {
     rt_argv_saved = argv;
 }
 
+/* Octets, not text: on Unix an argument is any run of non-NUL bytes, and a
+ * str must be valid UTF-8. Pushing a str here would be the one way into the
+ * type that nothing checked, so the library decodes with utf8() and decides
+ * what a non-UTF-8 argument means (lib/os.src). */
 void rt_args(Obj *out) {
     for (int i = 0; i < rt_argc_saved; i++) {
         const char *a = rt_argv_saved[i];
-        rt_list_push(out, (int64_t)(intptr_t)str_new(a, (int64_t)strlen(a)));
+        rt_list_push(out, (int64_t)(intptr_t)bytes_of((const uint8_t *)a, (int64_t)strlen(a)));
     }
 }
 
@@ -1876,7 +1909,8 @@ int64_t rt_env(Obj *name, Obj *out) {
     }
     const char *v = getenv(n->data);
     if (v == NULL) return 0;
-    rt_list_push(out, (int64_t)(intptr_t)str_new(v, (int64_t)strlen(v)));
+    /* Octets, for the reason rt_args gives: the value need not be UTF-8. */
+    rt_list_push(out, (int64_t)(intptr_t)bytes_of((const uint8_t *)v, (int64_t)strlen(v)));
     return 1;
 }
 

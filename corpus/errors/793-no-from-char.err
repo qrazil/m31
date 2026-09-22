@@ -1,0 +1,4 @@
+corpus/errors/793-no-from-char.src:3:7: `str` has no static method `from_char`; one code point is `str.from_chars([c])`
+  |
+3 | print(str.from_char(233));
+  |       ^
