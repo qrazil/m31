@@ -95,7 +95,11 @@ run_one() {
     # hang the whole run.
     stdin="${src%.$LANG_EXT}.in"
     [ -e "$stdin" ] || stdin=/dev/null
-    got=$("$bin" 2>&1 <"$stdin")
+    # Command-line arguments are the test's `.args` file, one per line, and
+    # none otherwise -- the same shape as `.in`, for `os.args()`.
+    argv=()
+    [ -e "${src%.$LANG_EXT}.args" ] && mapfile -t argv <"${src%.$LANG_EXT}.args"
+    got=$("$bin" "${argv[@]}" 2>&1 <"$stdin")
     rc=$?
 
     # Layer 4: refcount invariant. The runtime prints this under -DRC_DEBUG.
@@ -105,8 +109,12 @@ run_one() {
     fi
     got=$(grep -v '^__rc_live=' <<<"$got")
 
-    if [ $rc -ne 0 ]; then
-      fail_test "$label [$cc $opt]" "exited $rc"
+    # The exit status is 0 unless the test's `.status` file says otherwise,
+    # for `os.exit(code)`.
+    want_rc=0
+    [ -e "${src%.$LANG_EXT}.status" ] && want_rc=$(cat "${src%.$LANG_EXT}.status")
+    if [ $rc -ne "$want_rc" ]; then
+      fail_test "$label [$cc $opt]" "exited $rc, expected $want_rc"
       return
     fi
 

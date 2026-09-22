@@ -140,9 +140,12 @@ run "formatter preserves meaning" bash -c '
                        -o "$w/b" 2>/dev/null; then
                     in="${f%.'"$LANG_EXT"'}.in"
                     [ -e "$in" ] || in=/dev/null
-                    if ! diff -q <("$w/b" 2>&1 <"$in") "$exp" >/dev/null 2>&1; then
+                    # The same command line run.sh gives it, from `.args`.
+                    argv=()
+                    [ -e "${f%.'"$LANG_EXT"'}.args" ] && mapfile -t argv <"${f%.'"$LANG_EXT"'}.args"
+                    if ! diff -q <("$w/b" "${argv[@]}" 2>&1 <"$in") "$exp" >/dev/null 2>&1; then
                         echo "formatted program prints something else: $f"
-                        diff <("$w/b" 2>&1 <"$in") "$exp" | head -6
+                        diff <("$w/b" "${argv[@]}" 2>&1 <"$in") "$exp" | head -6
                         bad=1
                     fi
                 else

@@ -262,9 +262,13 @@ pub fn emit(m: &Module) -> String {
     // rt_wait_all joins every spawned thread. Without it a spawn can
     // outlive the program: its output is lost, and the refcount invariant
     // is reported by atexit while threads are still running.
+    //
+    // argc/argv are handed to the runtime and nothing else: the program has
+    // no parameters, and `os.args()` asks the runtime for them.
     writeln!(
         o,
-        "int main(void) {{
+        "int main(int argc, char **argv) {{
+    rt_args_init(argc, argv);
     {}();
     rt_wait_all();
     return 0;

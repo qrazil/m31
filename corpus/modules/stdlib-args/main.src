@@ -1,0 +1,198 @@
+import args;
+import os;
+
+// Print what a parse answered: the error, or the help, or "ok".
+void report(Result<args.Parsed, args.UsageError> r) {
+    match (r) {
+        case Err(args.UsageError e): {
+            print("error: " + e.to_str());
+        }
+        case Ok(args.Parsed p): {
+            match (p.help()) {
+                case Some(str h): {
+                    print(h);
+                }
+                case None: {
+                    print("ok");
+                }
+            }
+        }
+    }
+}
+
+str show(Option<str> v) {
+    match (v) {
+        case Some(str s): {
+            return "Some(" + s + ")";
+        }
+        case None: {
+            return "None";
+        }
+    }
+}
+
+// --- one program, no commands ------------------------------------------------
+args.Parser p = args.Parser("mktag", summary: "write a tag file");
+p.flag("quiet", short: "q", help: "say nothing on success");
+p.flag("dry-run");
+p.value("out", short: "o", placeholder: "PATH", help: "where to write");
+p.value("host", default: "127.0.0.1");
+p.values("tag", help: "tags to add");
+p.integer("width", short: "w", default: "80", help: "wrap at this column");
+p.number("scale", default: "7.5");
+p.integer("count");
+p.positional("src", help: "the file to read");
+p.optional("dir", ".", help: "where to put it");
+p.tail("rest");
+print(p.usage());
+print(p.help());
+// The command line comes from `main.args`, through os.args() without the
+// program's own name -- the one list `args` never reads for itself.
+List<str> argv = [];
+for (str a in os.args()) {
+    argv.push(a);
+}
+argv.remove_at(0);
+match (p.parse(argv)) {
+    case Err(args.UsageError e): {
+        print("error: " + e.to_str());
+    }
+    case Ok(args.Parsed r): {
+        print(r.flag("quiet"));  // true, from --q
+        print(r.flag("dry-run"));  // false
+        print(show(r.value("out")));  // Some(-x), carried by =
+        print(show(r.value("host")));  // Some(127.0.0.1), the default
+        print(r.given("host"));  // false
+        print(r.values("tag").join(","));  // a,b,c -- greedy to the next dash
+        print(r.integer("width").or(0));  // -5, a sign and not a command
+        print(r.number("scale").or(0.0));  // 7, a whole number widened
+        print(r.integer("count").is_none());  // true: no default, not given
+        print(r.positional("src"));  // -, which is stdin and so data
+        print(r.optional("dir"));  // out
+        print(r.tail("rest").join(","));  // x,y
+        print(r.given("rest"));  // true
+        print(r.given("width"));  // true
+        print(r.word() == "");  // true -- the top level is no command
+    }
+}
+// An optional left out answers its default; so does everything else.
+match (p.parse(["in.txt"])) {
+    case Err(args.UsageError e): {
+        print("error: " + e.to_str());
+    }
+    case Ok(args.Parsed r): {
+        print(r.optional("dir"));  // .
+        print(r.given("dir"));  // false
+        print(r.values("tag").size());  // 0
+        print(r.tail("rest").size());  // 0
+        print(r.integer("width").or(0));  // 80
+        print(r.number("scale").or(0.0));  // 7.5
+        print(show(r.value("out")));  // None
+    }
+}
+// --help wins before anything is validated -- here a required positional is
+// missing and an option is unknown, and the answer is still the help.
+match (p.parse(["--nope", "--help"])) {
+    case Err(args.UsageError e): {
+        print("error: " + e.to_str());
+    }
+    case Ok(args.Parsed r): {
+        print(r.help().is_some());  // true
+        print(r.integer("width").or(0));  // 80 -- defaults still answer
+    }
+}
+// Every refusal is a value, and says what to write instead.
+report(p.parse([]));
+report(p.parse(["a", "b", "c", "d"]));
+report(p.parse(["a", "--"]));
+report(p.parse(["a", "-h"]));
+report(p.parse(["a", "-help"]));
+report(p.parse(["a", "-serve"]));
+report(p.parse(["a", "--h"]));
+report(p.parse(["a", "--x"]));
+report(p.parse(["a", "--qw"]));
+report(p.parse(["a", "--wid", "3"]));
+report(p.parse(["a", "--dryrun"]));
+report(p.parse(["a", "--zzz"]));
+report(p.parse(["a", "--quiet=yes"]));
+report(p.parse(["a", "--q", "--quiet"]));
+report(p.parse(["a", "--tag"]));
+report(p.parse(["a", "--tag", "x", "--tag", "y"]));
+report(p.parse(["a", "--out"]));
+report(p.parse(["a", "--out", "--q"]));
+report(p.parse(["a", "--out", "x", "--o", "y"]));
+report(p.parse(["a", "--width", "wide"]));
+report(p.parse(["a", "--scale", "big"]));
+report(p.parse(["a", "--=x"]));
+// --- a program with commands -----------------------------------------------------
+args.Parser g = args.Parser("orogit", summary: "a git server");
+g.value("config", help: "the config file");
+args.Parser add = g.command("addrepo", "create a bare repository", short: "a");
+add.positional("name");
+add.flag("public", help: "readable without a login");
+args.Parser grant = g.command("grant", "give a user access");
+grant.positional("repo");
+grant.positional("user");
+grant.optional("level", "read");
+args.Parser proxies = g.command("proxies", "trusted proxies");
+proxies.values("set", placeholder: "IP");
+g.command("list", "list repositories");
+print(g.help());
+match (
+    g.parse(
+        [
+            "--config",
+            "/etc/g.conf",
+            "-addrepo",
+            "site",
+            "--public",
+            "-grant",
+            "site",
+            "alice",
+            "write",
+            "-proxies",
+            "--set",
+            "1.2.3.4",
+            "10.0.0.1",
+            "-a",
+            "blog",
+            "-list"
+        ]
+    )
+) {
+    case Err(args.UsageError e): {
+        print("error: " + e.to_str());
+    }
+    case Ok(args.Parsed r): {
+        print(show(r.value("config")));  // Some(/etc/g.conf)
+        for (args.Parsed c in r.commands()) {
+            if (c.word() == "addrepo") {
+                print("addrepo " + c.positional("name") + " " + c.flag("public").to_str());
+            }
+            if (c.word() == "grant") {
+                print("grant " + c.positional("repo") + " " + c.positional("user") + " " + c.optional("level"));
+            }
+            if (c.word() == "proxies") {
+                print("proxies " + c.values("set").join(" "));
+            }
+            if (c.word() == "list") {
+                print("list");
+            }
+        }
+    }
+}
+// A command's own help; the first --help on the line is the one answered.
+report(g.parse(["-grant", "--help"]));
+report(g.parse(["-list", "-addrepo", "x", "--help", "-grant", "--help"]));
+report(g.parse([]));
+report(g.parse(["--config", "x"]));
+report(g.parse(["addrepo", "site"]));
+report(g.parse(["-addrep", "site"]));
+report(g.parse(["-x"]));
+report(g.parse(["-repo"]));
+report(g.parse(["-list", "help"]));
+report(g.parse(["-list", "extra"]));
+report(g.parse(["-grant", "site"]));
+report(g.parse(["-addrepo", "a", "--public", "-grant", "a", "b", "c", "d"]));
+report(g.parse(["-proxies", "--set"]));
+report(g.parse(["-list", "--config", "x"]));

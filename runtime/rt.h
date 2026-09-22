@@ -112,6 +112,21 @@ int64_t rt_file_write(Obj *path, Obj *data);        /* 0, or errno */
 int64_t rt_file_append(Obj *path, Obj *data);       /* 0, or errno */
 int64_t rt_stdin_line(Obj *out);                    /* 1 pushed a line, 0 at end */
 void    rt_stderr_write(Obj *s);
+
+/* ---- process primitives: lib/os.src, lib/date.src, lib/random.src ------ */
+/* Raw facts about the process and nothing more: the command line, one
+ * environment variable, the exit status, the wall clock, the kernel's
+ * randomness. Everything built on them -- Option, Result, calendars,
+ * rejection sampling -- is language source. */
+void    rt_args_init(int argc, char **argv);   /* called by the emitted main */
+void    rt_args(Obj *out);                      /* pushes every argv[i], argv[0] first */
+int64_t rt_env(Obj *name, Obj *out);            /* 1 pushed the value, 0 unset */
+_Noreturn void rt_exit(int64_t code);           /* flushes stdout, then exit(code) */
+_Noreturn void rt_panic(Obj *msg);              /* rt_trap with a str message */
+void    rt_clock(Obj *out);                     /* pushes seconds, then nanoseconds */
+int64_t rt_entropy(int64_t n, Obj *out);        /* pushes n octets; 0, or errno */
+/* ---- end process primitives ------------------------------------------- */
+
 void rt_format_float(char *buf, size_t cap, double x);
 
 /* Text primitives a library cannot write from inside the language. */

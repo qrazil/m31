@@ -1,0 +1,14 @@
+--q
+--out=-x
+--tag
+a
+b
+c
+--w
+-5
+--scale
+7
+-
+out
+x
+y

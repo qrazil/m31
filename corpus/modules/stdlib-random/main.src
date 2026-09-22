@@ -1,0 +1,106 @@
+import random;
+
+// --- reproducible: exact values --------------------------------------------
+//
+// Seeded(42) is Oro's generator, octet for octet, so these are the values
+// Oro's random.Seeded(42) answers in the same order -- computed for this
+// test by an independent transcription of std/random.oro, which first checks
+// PCG's published demo vector (seed 42, stream 54: a15c02b7 7b47f409 ...).
+random.Seeded g = random.Seeded(42);
+print(g.hex(8));  // 1d5ddcb9726c11a4
+print(g.integer(1, 6));  // 5
+print(g.integer(1, 6));  // 1
+print(g.integer(1, 6));  // 1
+print(g.integer(1, 6));  // 6
+print(g.integer(1, 6));  // 2
+print(g.fraction());  // 0.8698634359193748
+print(g.uuid4());  // 3f1d211b-a3fb-4987-97db-34c5eff4bf85
+List<int> five = g.octets(5);
+print(five.size());  // 5
+for (int b in five) {
+    print(b);
+}  // 31 151 219 233 79
+// Oro's seeded choice, and its seeded shuffle of [1, 2, ..., 8] -- which is
+// [2, 4, 5, 7, 3, 6, 1, 8], so the permutation of indices is one less.
+List<str> letters = ["a", "b", "c", "d"];
+print(letters[g.integer(0, letters.size() - 1)]);  // d
+str shown = "";
+for (int v in g.permutation(8)) {
+    shown = shown + v.to_str();
+}
+print(shown);  // 13462507
+// The whole range of int, a range wider than 2^63, and a wide one that fits.
+int lowest = 0 - 9223372036854775807 - 1;
+print(g.integer(lowest, 9223372036854775807));  // 6371071024572866395
+print(g.integer(0 - 5, 9223372036854775807));  // 2766822482334260971
+print(g.integer(0 - 4611686018427387904, 4611686018427387904));  // -4199506306689199138
+// A negative seed is its 64-bit pattern, a seed like any other.
+print(random.Seeded(0 - 1).integer(0, 1000000));  // 919784
+// Two generators with one seed are one sequence; the generator is its own.
+random.Seeded a = random.Seeded(7);
+random.Seeded b = random.Seeded(7);
+bool same = true;
+int i = 0;
+while (i < 50) {
+    same = same && a.integer(0, 1000) == b.integer(0, 1000);
+    i = i + 1;
+}
+print(same);  // true
+print(random.Seeded(7).hex(4) != random.Seeded(8).hex(4));  // true
+// --- unpredictable: properties -----------------------------------------------
+//
+// The system generator's values cannot be written down, so what it must
+// satisfy is checked instead.
+List<int> octs = random.octets(1000);  // past getentropy's 256 per call
+bool bytes_ok = octs.size() == 1000;
+for (int v in octs) {
+    bytes_ok = bytes_ok && v >= 0 && v <= 255;
+}
+print(bytes_ok);  // true
+print(random.octets(0).size());  // 0
+str h = random.hex(16);
+bool hex_ok = h.size() == 32;
+int k = 0;
+while (k < h.size()) {
+    hex_ok = hex_ok && "0123456789abcdef".contains(h.substr(k, k + 1));
+    k = k + 1;
+}
+print(hex_ok);  // true
+// A die: always in range, and every face turns up in 600 rolls (the chance
+// that one does not is below 10^-40).
+List<int> seen = [0, 0, 0, 0, 0, 0];
+bool range_ok = true;
+int roll = 0;
+while (roll < 600) {
+    int d = random.integer(1, 6);
+    range_ok = range_ok && d >= 1 && d <= 6;
+    if (range_ok) {
+        seen[d - 1] = seen[d - 1] + 1;
+    }
+    roll = roll + 1;
+}
+print(range_ok);  // true
+print(!seen.contains(0));  // true
+print(random.integer(5, 5));  // 5
+int wide = random.integer(lowest, 9223372036854775807);
+print(wide >= lowest);  // true
+float f = random.fraction();
+print(f >= 0.0 && f < 1.0);  // true
+str u = random.uuid4();
+print(u.size());  // 36
+print(u.substr(14, 15));  // 4 -- the version
+print("89ab".contains(u.substr(19, 20)));  // true -- the variant
+print(u.substr(8, 9) + u.substr(13, 14) + u.substr(18, 19) + u.substr(23, 24));  // ----
+print(random.uuid4() != u);  // true
+// A permutation holds every index exactly once.
+List<int> p = random.permutation(20);
+p.sort();
+bool perm_ok = p.size() == 20;
+int at = 0;
+while (at < p.size()) {
+    perm_ok = perm_ok && p[at] == at;
+    at = at + 1;
+}
+print(perm_ok);  // true
+print(random.permutation(0).size());  // 0
+print(random.permutation(1)[0]);  // 0

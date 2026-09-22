@@ -1,0 +1,8 @@
+import os;
+
+// `os.exit` ends the program with the status given -- 3 here, which run.sh
+// checks against `main.status` -- and flushes what was already printed on
+// the way out. Nothing after it runs.
+print("before");
+os.exit(3);
+print("after");

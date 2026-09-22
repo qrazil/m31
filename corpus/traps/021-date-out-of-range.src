@@ -1,0 +1,5 @@
+import date;
+
+// One second past 9999-12-31T23:59:59Z has no four-digit year. A timestamp
+// is the caller's to keep in range, like an index, so it traps.
+print(date.iso(253402300800));
