@@ -1,0 +1,1 @@
+trap: date.iso(): epoch second 253402300800 is out of range -62135596800..253402300799 -- date covers years 1 through 9999

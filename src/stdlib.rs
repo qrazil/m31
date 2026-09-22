@@ -21,6 +21,7 @@ pub fn source(name: &str) -> Option<&'static str> {
         "io" => include_str!("../lib/io.src"),
         "math" => include_str!("../lib/math.src"),
         "os" => include_str!("../lib/os.src"),
+        "date" => include_str!("../lib/date.src"),
         _ => return None,
     })
 }

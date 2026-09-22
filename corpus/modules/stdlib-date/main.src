@@ -1,0 +1,95 @@
+import date;
+
+void show(Result<int, date.Error> r) {
+    match (r) {
+        case Ok(int t): {
+            print(t);
+        }
+        case Err(date.Error e): {
+            print(e);
+        }
+    }
+}
+
+// The epoch, both ends of the domain, and the second either side of zero.
+print(date.iso(0));  // 1970-01-01T00:00:00Z
+print(date.iso(0 - 1));  // 1969-12-31T23:59:59Z
+print(date.iso(0 - 62135596800));  // 0001-01-01T00:00:00Z
+print(date.iso(253402300799));  // 9999-12-31T23:59:59Z
+print(date.iso(1789000000));  // 2026-09-10T00:26:40Z
+// A leap day, and the day after it in a year that has none.
+print(date.iso(951782400));  // 2000-02-29T00:00:00Z
+print(date.iso(4107542400));  // 2100-03-01T00:00:00Z
+// civil: the fields, including the two a program would otherwise count for.
+date.Civil c = date.civil(1789000000);
+print(c.year);  // 2026
+print(c.month);  // 9
+print(c.day);  // 10
+print(c.hour);  // 0
+print(c.minute);  // 26
+print(c.second);  // 40
+print(c.weekday);  // 3 -- a Thursday
+print(c.yearday);  // 253
+print(c);  // 2026-09-10T00:26:40Z
+date.Civil d = date.civil(0 - 1);
+print(d.weekday);  // 2 -- 1969-12-31 was a Wednesday
+print(d.yearday);  // 365
+print(date.civil(951782400).yearday);  // 60 -- Feb 29th
+print(date.civil(978220800).yearday);  // 366 -- 2000-12-31
+// epoch: midnight by default, and the time of day by name.
+show(date.epoch(1970, 1, 1));  // 0
+show(date.epoch(2026, 9, 10, minute: 26, second: 40));  // 1789000000
+show(date.epoch(1969, 12, 31, hour: 23, minute: 59, second: 59));  // -1
+show(date.epoch(1, 1, 1));  // -62135596800
+show(date.epoch(9999, 12, 31, hour: 23, minute: 59, second: 59));  // 253402300799
+show(date.epoch(2000, 2, 29));  // 951782400
+// Every field is checked against the calendar.
+show(date.epoch(2025, 2, 29));
+show(date.epoch(2100, 2, 29));
+show(date.epoch(0, 1, 1));
+show(date.epoch(2026, 13, 1));
+show(date.epoch(2026, 9, 10, hour: 24));
+show(date.epoch(2026, 9, 10, minute: 60));
+show(date.epoch(2026, 9, 10, second: 60));
+// parse is iso's inverse, and round-trips across the whole domain.
+show(date.parse("1970-01-01T00:00:00Z"));  // 0
+show(date.parse("1969-12-31T23:59:59Z"));  // -1
+show(date.parse("2026-09-10T00:26:40Z"));  // 1789000000
+List<int> samples = [0 - 62135596800, 0 - 86401, 0 - 1, 0, 1, 68256000, 951782400, 1789000000, 253402300799];
+bool all = true;
+for (int t in samples) {
+    match (date.parse(date.iso(t))) {
+        case Ok(int back): {
+            all = all && back == t;
+        }
+        case Err(date.Error e): {
+            all = false;
+        }
+    }
+}
+print(all);  // true
+// Anything but exactly what iso writes is refused, by name.
+show(date.parse("2026-09-10"));
+show(date.parse("2026-09-10 00:26:40Z"));
+show(date.parse("2026-09-10t00:26:40Z"));
+show(date.parse("2026-09-10T00:26:40z"));
+show(date.parse("2026-09-10T00:26:40"));
+show(date.parse("2026-09-10T00:26:40.5Z"));
+show(date.parse("2026-09-10T00:26:40+05:30"));
+show(date.parse("2026-09-10T00:26Z"));
+show(date.parse("+002026-09-10T00:26:40Z"));
+show(date.parse("2026-02-30T00:00:00Z"));
+show(date.parse("2026-09-10T0a:26:40Z"));
+show(date.parse(""));
+// http_date: RFC 9110's own example, and the epoch.
+print(date.http_date(784111777));  // Sun, 06 Nov 1994 08:49:37 GMT
+print(date.http_date(0));  // Thu, 01 Jan 1970 00:00:00 GMT
+// The clock can only be tested by what it must satisfy: after this file was
+// written, before the domain ends, and the two readings agree.
+int now = date.now();
+int ns = date.now_ns();
+print(now > 1789000000);  // true
+print(now < 253402300799);  // true
+print(ns / 1000000000 >= now);  // true
+print(ns / 1000000000 - now < 5);  // true
+print(date.iso(now).size());  // 20

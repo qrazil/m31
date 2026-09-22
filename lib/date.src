@@ -1,0 +1,395 @@
+// Epoch seconds <-> civil time, written entirely in this language. UTC, and
+// only UTC. A port of Oro's `date`.
+//
+// API
+// ---
+//   date.now()                     -> int, epoch seconds, from the wall clock
+//   date.now_ns()                  -> int, epoch nanoseconds
+//   date.civil(t)                  -> Civil: .year .month .day .hour .minute
+//                                     .second .weekday .yearday
+//   date.epoch(year, month, day, hour: 0, minute: 0, second: 0)
+//                                  -> Result<int, date.Error>
+//   date.iso(t)                    -> "2026-09-16T00:39:04Z"
+//   date.parse(s)                  -> Result<int, date.Error>, iso's inverse
+//   date.http_date(t)              -> "Fri, 06 Nov 1994 08:49:37 GMT"
+//
+// `civil` and `epoch` are the two directions of one conversion, each named
+// for what it answers; `iso` and `parse` are the same pair for text.
+//
+// --- where this differs from Oro, and why ----------------------------------
+//
+// `now` and `now_ns` are here. Oro has no `date.now()` because `time.time()`
+// already asks the clock; this language has no `time` module, and a clock
+// reading with nowhere to live would be one no program could make. When a
+// `time` module exists they move there, and this module keeps only the
+// calendar.
+//
+// A timestamp is an `int`. Oro takes an int or a float and floors the float;
+// there is no "int or float" parameter here, and a float timestamp is
+// `int(math.floor(t))` at the call site, where the rounding is visible.
+//
+// Failure is split by who is at fault, which is the language's rule rather
+// than Oro's single ValueError. `epoch` and `parse` validate fields and text
+// that plausibly came from outside the program -- a February 30th typed by a
+// user -- so they answer a Result. `civil`, `iso` and `http_date` take a
+// timestamp, and one outside years 1 through 9999 is a bug in the caller,
+// like an index out of range, so it traps.
+//
+// --- UTC only, deliberately ------------------------------------------------
+//
+// There is no local time and no `tz:` argument. Local time is not a
+// formatting flag: it is the IANA timezone database, a table of political
+// decisions that changes several times a year and has to be shipped. A
+// fixed offset is arithmetic in the open -- `date.iso(t + 5 * 3600)` -- where
+// the `Z` on the end is a lie the program chose, not one this module told.
+//
+// --- the domain ------------------------------------------------------------
+//
+// Years 1 through 9999, exactly what a four-digit ISO year can round-trip:
+// epoch seconds -62135596800 through 253402300799 inclusive.
+//
+// Negative epochs work. `/` truncates towards zero here, so the calendar
+// below divides with `floor_div`, which rounds down; 1969-12-31T23:59:59Z is
+// -1, and it round-trips.
+//
+// Leap seconds are not representable: every day is 86400 seconds, which is
+// what POSIX epoch seconds count, so a `second` of 60 is refused rather than
+// silently becoming the next minute.
+
+prim void __clock(List<int> out);
+prim void __panic(str msg);
+
+/// Why `epoch` or `parse` refused. The message says which rule was broken
+/// and what to write instead; there is nothing in it worth branching on,
+/// which is why it is a message and not an enum of nineteen ISO mistakes.
+pub type Error {
+    str message;
+}
+
+pub str Error.to_str() {
+    return message;
+}
+
+/// The civil fields of one instant, in UTC.
+///
+/// `date.civil(t)` is the way to get one, so its fields always agree with
+/// each other -- `weekday` is the weekday of `year`-`month`-`day`. (Oro
+/// forbids constructing one by hand; this language has no private
+/// constructor, so that is a convention here rather than a rule.)
+pub type Civil {
+    int year;
+    int month;
+    int day;
+    int hour;
+    int minute;
+    int second;
+    // 0 is Monday, 6 is Sunday -- CPython's `weekday()`, and Oro's.
+    int weekday;
+    // 1 through 365, or 366 in a leap year.
+    int yearday;
+}
+
+/// `2026-09-16T00:39:04Z`, the same text `date.iso` writes.
+pub str Civil.to_str() {
+    return stamp(year, month, day, hour, minute, second);
+}
+
+/// Epoch seconds now, from the wall clock: whole seconds, rounded down.
+///
+/// The wall clock can be set backwards; this is a date, not a stopwatch.
+pub int now() {
+    List<int> got = [];
+    __clock(got);
+    return got[0];
+}
+
+/// Epoch nanoseconds now, from the same single clock reading as `now`. An
+/// int holds these until the year 2262.
+pub int now_ns() {
+    List<int> got = [];
+    __clock(got);
+    return got[0] * 1000000000 + got[1];
+}
+
+/// Epoch seconds -> the civil fields of that instant in UTC. Traps outside
+/// years 1 through 9999.
+pub Civil civil(int t) {
+    return to_civil(checked(t, "civil"));
+}
+
+/// Civil fields in UTC -> epoch seconds.
+///
+/// The date is required and the time of day is optional, because a date has
+/// no default and midnight is the only defensible one for a time that was
+/// not given: `date.epoch(2026, 9, 16)` is that day's midnight,
+/// `date.epoch(2026, 9, 16, hour: 12)` its noon.
+///
+/// Every field is range-checked against the calendar, `day` included, so
+/// 2025-02-29 is refused rather than quietly becoming 2025-03-01.
+pub Result<int, Error> epoch(int year, int month, int day, int hour = 0, int minute = 0, int second = 0) {
+    return to_epoch(year, month, day, hour, minute, second, "epoch");
+}
+
+/// Epoch seconds -> an ISO-8601 UTC timestamp, `2026-09-16T00:39:04Z`.
+///
+/// One format, always: four-digit year, `T`, seconds, `Z`. A program that
+/// wants another arrangement of the same six numbers has them on
+/// `date.civil(t)`.
+pub str iso(int t) {
+    Civil c = to_civil(checked(t, "iso"));
+    return c.to_str();
+}
+
+/// An ISO-8601 UTC timestamp -> epoch seconds: the inverse of `iso`, and it
+/// accepts exactly what `iso` writes -- `YYYY-MM-DDTHH:MM:SSZ`, twenty
+/// characters, uppercase `T` and `Z`.
+///
+/// Everything else is refused by name rather than guessed at, because every
+/// guess here is a silent hour-scale error in someone's data: a space for the
+/// `T`, a missing offset (not "assume UTC"), lowercase, fractional seconds,
+/// any offset but `Z`, a date with no time, no seconds, an expanded year.
+pub Result<int, Error> parse(str s) {
+    int n = s.size();
+    if (n == 10 && date_shaped(s)) {
+        return fail("date.parse(): '" + s + "' is a date with no time of day -- write date.epoch(" + field(s, 0, 4).to_str() + ", " + field(s, 5, 7).to_str() + ", " + field(s, 8, 10).to_str() + ") for its midnight");
+    }
+    if (n < 11) {
+        return not_iso(s);
+    }
+    str sep = s.substr(10, 11);
+    if (sep == " ") {
+        return fail("date.parse(): '" + s + "' separates the date and the time with a space -- write the ISO-8601 'T'");
+    }
+    if (sep == "t") {
+        return fail("date.parse(): '" + s + "' has a lowercase 't' -- write the uppercase 'T'");
+    }
+    if (sep != "T") {
+        return not_iso(s);
+    }
+    if (n != 20) {
+        return refuse_tail(s);
+    }
+    str zone = s.substr(19, 20);
+    if (zone == "z") {
+        return fail("date.parse(): '" + s + "' has a lowercase 'z' -- write the uppercase 'Z'");
+    }
+    if (zone != "Z") {
+        return refuse_tail(s);
+    }
+    if (!date_shaped(s) || s.substr(13, 14) != ":" || s.substr(16, 17) != ":") {
+        return not_iso(s);
+    }
+    if (!digits(s, 11, 13) || !digits(s, 14, 16) || !digits(s, 17, 19)) {
+        return not_iso(s);
+    }
+    return to_epoch(field(s, 0, 4), field(s, 5, 7), field(s, 8, 10), field(s, 11, 13), field(s, 14, 16), field(s, 17, 19), "parse");
+}
+
+/// Epoch seconds as an IMF-fixdate, `Sun, 06 Nov 1994 08:49:37 GMT`: the one
+/// format RFC 9110 requires a server to send. The day and month names are
+/// English by specification, not by locale.
+pub str http_date(int t) {
+    Civil c = to_civil(checked(t, "http_date"));
+    str dayname = "Mon Tue Wed Thu Fri Sat Sun".split(" ")[c.weekday];
+    str monthname = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(" ")[c.month - 1];
+    return dayname + ", " + pad(c.day, 2) + " " + monthname + " " + pad(c.year, 4) + " " + pad(c.hour, 2) + ":" + pad(c.minute, 2) + ":" + pad(c.second, 2) + " GMT";
+}
+
+// --- the calendar -----------------------------------------------------------
+// 0001-01-01T00:00:00Z and 9999-12-31T23:59:59Z.
+int min_epoch() {
+    return 0 - 62135596800;
+}
+
+int max_epoch() {
+    return 253402300799;
+}
+
+// Division rounding down, for a positive divisor. `/` truncates towards
+// zero, which splits -1 seconds into day 0 and second -1; the calendar needs
+// day -1 and second 86399.
+int floor_div(int a, int b) {
+    int q = a / b;
+    if (a % b < 0) {
+        return q - 1;
+    }
+    return q;
+}
+
+int floor_mod(int a, int b) {
+    return a - floor_div(a, b) * b;
+}
+
+// The conversion itself, on a timestamp that has already been checked.
+Civil to_civil(int secs) {
+    int days = floor_div(secs, 86400);
+    int rem = floor_mod(secs, 86400);
+    // Days since 1970-01-01 -> year, month, day, by Howard Hinnant's era
+    // algorithm: shift the epoch to 0000-03-01 so a leap day lands at the
+    // end of a year and the month lengths become a linear sequence.
+    int z = days + 719468;
+    int era = floor_div(z, 146097);
+    int doe = z - era * 146097;
+    int yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    int year = yoe + era * 400;
+    int doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    int mp = (5 * doy + 2) / 153;
+    int day = doy - (153 * mp + 2) / 5 + 1;
+    int month = mp + 3;
+    if (month > 12) {
+        month = month - 12;
+        year = year + 1;
+    }
+    int yearday = days - days_from_civil(year, 1, 1) + 1;
+    // The epoch itself, 1970-01-01, was a Thursday: 3 when Monday is 0.
+    int weekday = floor_mod(days + 3, 7);
+    return Civil(year, month, day, rem / 3600, rem % 3600 / 60, rem % 60, weekday, yearday);
+}
+
+// The exact inverse, the same era arithmetic read backwards. March is the
+// first month of the year, which is the trick the whole algorithm turns on:
+// February and its leap day end up at the end, so no month's length depends
+// on a year that has not been counted yet.
+int days_from_civil(int year, int month, int day) {
+    int y = year;
+    if (month <= 2) {
+        y = y - 1;
+    }
+    int era = floor_div(y, 400);
+    int yoe = y - era * 400;
+    int mp = (month + 9) % 12;
+    int doy = (153 * mp + 2) / 5 + day - 1;
+    int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+// The proleptic Gregorian rule, which is the one the era algorithm
+// implements and the one every ISO-8601 date is read under.
+bool is_leap(int year) {
+    if (year % 4 != 0) {
+        return false;
+    }
+    if (year % 100 != 0) {
+        return true;
+    }
+    return year % 400 == 0;
+}
+
+int days_in_month(int year, int month) {
+    if (month == 2 && is_leap(year)) {
+        return 29;
+    }
+    List<int> lengths = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    return lengths[month - 1];
+}
+
+// Fields -> epoch seconds, told which name to blame, so a February 30th
+// arriving through `parse` is refused under the name the caller wrote.
+Result<int, Error> to_epoch(int year, int month, int day, int hour, int minute, int second, str who) {
+    str at = "date." + who + "(): ";
+    if (year < 1 || year > 9999) {
+        return fail(at + "year " + year.to_str() + " is out of range -- date covers years 1 through 9999");
+    }
+    if (month < 1 || month > 12) {
+        return fail(at + "month " + month.to_str() + " is out of range 1..12");
+    }
+    int last = days_in_month(year, month);
+    if (day < 1 || day > last) {
+        return fail(at + "day " + day.to_str() + " is out of range 1.." + last.to_str() + " for " + pad(year, 4) + "-" + pad(month, 2));
+    }
+    if (hour < 0 || hour > 23) {
+        return fail(at + "hour " + hour.to_str() + " is out of range 0..23");
+    }
+    if (minute < 0 || minute > 59) {
+        return fail(at + "minute " + minute.to_str() + " is out of range 0..59");
+    }
+    if (second < 0 || second > 59) {
+        return fail(at + "second " + second.to_str() + " is out of range 0..59 -- a leap second is not representable in epoch seconds, which count every day as 86400");
+    }
+    int t = days_from_civil(year, month, day) * 86400 + hour * 3600 + minute * 60 + second;
+    return Result<int, Error>.Ok(t);
+}
+
+// A timestamp inside the domain, or a trap naming the function the caller
+// wrote and the bound it crossed.
+int checked(int t, str who) {
+    if (t < min_epoch() || t > max_epoch()) {
+        __panic("date." + who + "(): epoch second " + t.to_str() + " is out of range " + min_epoch().to_str() + ".." + max_epoch().to_str() + " -- date covers years 1 through 9999");
+    }
+    return t;
+}
+
+// --- text --------------------------------------------------------------------
+str stamp(int year, int month, int day, int hour, int minute, int second) {
+    return pad(year, 4) + "-" + pad(month, 2) + "-" + pad(day, 2) + "T" + pad(hour, 2) + ":" + pad(minute, 2) + ":" + pad(second, 2) + "Z";
+}
+
+// `n` in decimal, zero-padded on the left to `width` digits. Never called
+// with a negative `n`: every field here is at least 0 and years start at 1.
+str pad(int n, int width) {
+    str s = n.to_str();
+    if (s.size() >= width) {
+        return s;
+    }
+    return "0".repeat(width - s.size()) + s;
+}
+
+Result<int, Error> fail(str message) {
+    return Result<int, Error>.Err(Error(message));
+}
+
+Result<int, Error> not_iso(str s) {
+    return fail("date.parse(): '" + s + "' is not YYYY-MM-DDTHH:MM:SSZ");
+}
+
+// Is every byte of s[from..to) an ASCII digit?
+bool digits(str s, int from, int to) {
+    int i = from;
+    while (i < to) {
+        int b = s.byte_at(i);
+        if (b < 48 || b > 57) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// The digits s[from..to) as a number. Only called once `digits` has said
+// they are digits, so the parse cannot fail; 0 is never reached.
+int field(str s, int from, int to) {
+    return s.substr(from, to).parse_int().or(0);
+}
+
+// `YYYY-MM-DD` in the first ten bytes. Used both to recognise a date-only
+// string and to check the date half of a full timestamp, so the two readings
+// cannot drift apart.
+bool date_shaped(str s) {
+    if (s.size() < 10) {
+        return false;
+    }
+    if (s.substr(4, 5) != "-" || s.substr(7, 8) != "-") {
+        return false;
+    }
+    return digits(s, 0, 4) && digits(s, 5, 7) && digits(s, 8, 10);
+}
+
+// The tail after `YYYY-MM-DDT` is not `HH:MM:SSZ`. Say which of the usual
+// reasons it is, because "not ISO-8601" sends a reader to the specification
+// when the answer is one character.
+Result<int, Error> refuse_tail(str s) {
+    int n = s.size();
+    if (s.contains(".") || s.contains(",")) {
+        return fail("date.parse(): '" + s + "' carries fractional seconds -- date.parse() answers whole epoch seconds; cut the fraction before parsing");
+    }
+    if (n == 19) {
+        return fail("date.parse(): '" + s + "' carries no offset -- a timestamp with no offset is not assumed to be UTC; append 'Z' if it is");
+    }
+    if (n > 19) {
+        str tail = s.substr(19, n);
+        if (tail.starts_with("+") || tail.starts_with("-")) {
+            return fail("date.parse(): '" + s + "' carries the offset '" + tail + "' -- this module is UTC only, so only 'Z' is accepted; add the offset to the result yourself if that is what you mean");
+        }
+    }
+    return not_iso(s);
+}
