@@ -180,7 +180,7 @@ fn ir_ty(t: Ty) -> IrTy {
         Ty::Int => IrTy::I64,
         Ty::Float => IrTy::F64,
         Ty::Bool => IrTy::I1,
-        Ty::Str => IrTy::Ref,
+        Ty::Str | Ty::Bytes => IrTy::Ref,
         Ty::User(_) => IrTy::Ref,
         Ty::Void => unreachable!("void is not a value type"),
     }
@@ -253,7 +253,8 @@ impl Lowerer {
         }
         // How many positional arguments each takes, and of what.
         let want: &[Ty] = match m {
-            "size" | "trim" | "to_upper" | "to_lower" | "parse_int" | "parse_float" => &[],
+            "size" | "trim" | "to_upper" | "to_lower" | "parse_int" | "parse_float"
+            | "to_bytes" => &[],
             "byte_at" => &[Ty::Int],
             "substr" => &[Ty::Int, Ty::Int],
             "repeat" => &[Ty::Int],
@@ -418,6 +419,10 @@ impl Lowerer {
                 self.stmt_temps.push(d);
                 Ok(Val::new(d, lty, true))
             }
+            // A copy, because a `bytes` is mutable and the string is not.
+            // It cannot fail: a `str` is already a run of bytes, and this
+            // only hands them over without interpreting them.
+            "to_bytes" => Ok(self.rt_value("rt_str_to_bytes", vec![o.val()], Ty::Bytes)),
             "to_str" => {
                 // A `str` already is one. Returning it unchanged keeps
                 // `v.to_str()` writable whatever `v` is, which is what makes
@@ -430,10 +435,238 @@ impl Lowerer {
                 format!(
                     "`str` has no method `{other}`; it has size, substr, contains, \
                      index_of, starts_with, ends_with, split, trim, to_upper, \
-                     to_lower and repeat"
+                     to_lower, repeat and to_bytes"
                 ),
             )),
         }
+    }
+
+    /// A runtime call that produces a value. An owned reference result is
+    /// put on the statement's pending list, as every producer does, so the
+    /// caller only has to say what it made.
+    fn rt_value(&mut self, func: &str, args: Vec<Value>, ty: Ty) -> Val {
+        let d = self.new_val(self.irty(ty));
+        self.push(Inst::Call {
+            dst: Some(d),
+            func: func.to_string(),
+            args,
+        });
+        let owned = self.is_ref(ty);
+        if owned {
+            self.stmt_temps.push(d);
+        }
+        Val::new(d, ty, owned)
+    }
+
+    fn rt_void(&mut self, func: &str, args: Vec<Value>) -> Val {
+        self.push(Inst::Call {
+            dst: None,
+            func: func.to_string(),
+            args,
+        });
+        Val::void()
+    }
+
+    /// Refuse an integer literal that cannot be a byte, where one is written
+    /// straight into a `bytes`. Anything computed is checked by the runtime,
+    /// which traps; a constant can be refused before the program runs, and
+    /// `[1, 2, 256]` is always a typo rather than a condition to handle.
+    fn check_byte_literal(&self, e: &Expr) -> Result<(), Diag> {
+        let n = match e {
+            Expr::Int(n, _) => *n,
+            Expr::Un(UnOp::Neg, inner, _) => match &**inner {
+                Expr::Int(n, _) if *n != 0 => -*n,
+                _ => return Ok(()),
+            },
+            _ => return Ok(()),
+        };
+        if !(0..=255).contains(&n) {
+            return Err(Diag::new(
+                e.span(),
+                format!("{n} is not a byte; a byte is an int from 0 to 255"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// An index into a `bytes`, by the rule a List's follows: an `int`, or
+    /// a distinct type over one.
+    fn index_of_bytes(&mut self, idx: &Expr) -> Result<Value, Diag> {
+        let i = self.lower_expr(idx)?;
+        if self.underlying(i.ty) != Ty::Int {
+            return Err(Diag::new(idx.span(), self.mismatch(Ty::Int, i.ty)));
+        }
+        Ok(i.val())
+    }
+
+    /// Lower one argument that must be of type `want`.
+    fn arg_of(&mut self, e: &Expr, want: Ty) -> Result<Value, Diag> {
+        let v = self.lower_expr(e)?;
+        if !self.assignable(v.ty, want) {
+            return Err(Diag::new(e.span(), self.mismatch(want, v.ty)));
+        }
+        Ok(v.val())
+    }
+
+    /// The methods of `bytes`.
+    ///
+    /// The names are `str`'s wherever `str` has the question, with the same
+    /// meaning over octets -- `b.index_of(sub)` finds a run of bytes, as
+    /// `s.index_of(sub)` finds a run of text -- so learning one teaches the
+    /// other. On top of that, what a buffer needs and `str` cannot have
+    /// because it is immutable: `push`, `pop`, `clear` and `extend`, which
+    /// change `b` in place. Everything else returns a new `bytes`.
+    fn lower_bytes_method(
+        &mut self,
+        o: &Val,
+        m: &str,
+        args: &Args,
+        span: Span,
+    ) -> Result<Val, Diag> {
+        if !args.named.is_empty() {
+            return Err(Diag::new(span, format!("`{m}` takes no named arguments")));
+        }
+        let want: &[Ty] = match m {
+            "size" | "pop" | "clear" | "trim" | "to_upper" | "to_lower" | "hex" | "utf8" => &[],
+            "push" | "repeat" => &[Ty::Int],
+            "substr" => &[Ty::Int, Ty::Int],
+            "extend" | "contains" | "index_of" | "starts_with" | "ends_with" | "split" => {
+                &[Ty::Bytes]
+            }
+            // A text form would have to pick an encoding or an escaping and
+            // then pretend it was the only one. `hex()` and `utf8()` each
+            // say which they mean, and `print` and `str()` go through
+            // `to_str`, so leaving it out is what makes them refuse too.
+            "to_str" => {
+                return Err(Diag::new(
+                    span,
+                    "`bytes` has no `to_str`: say which text you mean, \
+                     `hex()` or `utf8()`",
+                ))
+            }
+            "byte_at" => {
+                return Err(Diag::new(
+                    span,
+                    "`bytes` has no `byte_at`; index it, as `b[i]`",
+                ))
+            }
+            "len" => {
+                return Err(Diag::new(
+                    span,
+                    "`bytes` has no method `len`; it is `size()`",
+                ))
+            }
+            other => {
+                return Err(Diag::new(
+                    span,
+                    format!(
+                        "`bytes` has no method `{other}`; it has size, push, pop, \
+                         clear, extend, substr, contains, index_of, starts_with, \
+                         ends_with, split, trim, to_upper, to_lower, repeat, hex \
+                         and utf8"
+                    ),
+                ))
+            }
+        };
+        if args.pos.len() != want.len() {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`{m}` takes {} argument(s), found {}",
+                    want.len(),
+                    args.pos.len()
+                ),
+            ));
+        }
+        if m == "push" {
+            self.check_byte_literal(&args.pos[0])?;
+        }
+        let mut av = vec![o.val()];
+        for (a, w) in args.pos.iter().zip(want.iter()) {
+            av.push(self.arg_of(a, *w)?);
+        }
+
+        Ok(match m {
+            "size" => self.rt_value("rt_bytes_len", av, Ty::Int),
+            "push" => self.rt_void("rt_bytes_push", av),
+            "pop" => self.rt_value("rt_bytes_pop", av, Ty::Int),
+            "clear" => self.rt_void("rt_bytes_clear", av),
+            "extend" => self.rt_void("rt_bytes_extend", av),
+            "substr" => self.rt_value("rt_bytes_substr", av, Ty::Bytes),
+            "trim" => self.rt_value("rt_bytes_trim", av, Ty::Bytes),
+            "repeat" => self.rt_value("rt_bytes_repeat", av, Ty::Bytes),
+            "to_upper" | "to_lower" => {
+                let up = self.new_val(IrTy::I1);
+                self.push(Inst::BConst {
+                    dst: up,
+                    val: m == "to_upper",
+                });
+                av.push(up);
+                self.rt_value("rt_bytes_case", av, Ty::Bytes)
+            }
+            "starts_with" => self.rt_value("rt_bytes_starts_with", av, Ty::Bool),
+            "ends_with" => self.rt_value("rt_bytes_ends_with", av, Ty::Bool),
+            "contains" => {
+                // The same question `str.contains` answers, through the same
+                // search `index_of` uses.
+                let at = self.rt_value("rt_bytes_find", av, Ty::Int);
+                let zero = self.new_val(IrTy::I64);
+                self.push(Inst::IConst { dst: zero, val: 0 });
+                let d = self.new_val(IrTy::I1);
+                self.push(Inst::ICmp {
+                    dst: d,
+                    cmp: Cmp::Ge,
+                    lhs: at.val(),
+                    rhs: zero,
+                });
+                Val::new(d, Ty::Bool, false)
+            }
+            "index_of" => {
+                let Some((oty, otid, none_tag, some_tag)) = self.option_of(Ty::Int) else {
+                    return Err(Diag::new(
+                        span,
+                        "`index_of` has no Option type to return; this is a compiler bug",
+                    ));
+                };
+                let raw = self.rt_value("rt_bytes_find", av, Ty::Int);
+                let d = self.wrap_option(raw.val(), otid, some_tag, none_tag);
+                Val::new(d, oty, true)
+            }
+            "split" => {
+                let Some(lty) = self.list_of(Ty::Bytes) else {
+                    return Err(Diag::new(
+                        span,
+                        "`split` has no List type to return; this is a compiler bug",
+                    ));
+                };
+                self.rt_value("rt_bytes_split", av, lty)
+            }
+            "hex" => self.rt_value("rt_bytes_hex", av, Ty::Str),
+            // Decoding can fail, so it answers with an Option, the way
+            // `parse_int` does: "is this UTF-8" is a yes-or-no question and a
+            // built-in cannot return a library's own error type. The string
+            // is only built when the answer is yes, and the Option takes
+            // ownership of it.
+            "utf8" => {
+                let Some((oty, otid, none_tag, some_tag)) = self.option_of(Ty::Str) else {
+                    return Err(Diag::new(
+                        span,
+                        "`utf8` has no Option type to return; this is a compiler bug",
+                    ));
+                };
+                let raw = self.new_val(IrTy::Ref);
+                let ok = self.new_val(IrTy::I1);
+                self.push(Inst::ParseInto {
+                    ok,
+                    dst: raw,
+                    func: "rt_bytes_utf8".to_string(),
+                    src: o.val(),
+                });
+                let d = self.select_option(ok, raw, otid, some_tag, none_tag);
+                Val::new(d, oty, true)
+            }
+            _ => unreachable!("every name was checked above"),
+        })
     }
 
     /// `xs.size()`, `xs.push(v)`, `xs.pop()`.
@@ -742,11 +975,17 @@ impl Lowerer {
                 if args.pos.len() != 1 {
                     return Err(Diag::new(span, "`join` takes one argument"));
                 }
+                // The inverse of `split` on either: parts of bytes rejoin
+                // into bytes, with a bytes separator.
+                if self.underlying(elem) == Ty::Bytes {
+                    let sep = self.arg_of(&args.pos[0], Ty::Bytes)?;
+                    return Ok(self.rt_value("rt_bytes_join", vec![o.val(), sep], Ty::Bytes));
+                }
                 if self.underlying(elem) != Ty::Str {
                     return Err(Diag::new(
                         span,
                         format!(
-                            "`join` needs a collection of `str`; this one holds {}",
+                            "`join` needs a collection of `str` or `bytes`; this one holds {}",
                             self.tyname(elem)
                         ),
                     ));
@@ -3000,6 +3239,17 @@ impl Lowerer {
                 span,
             } => {
                 let o = self.lower_expr(obj)?;
+                // No refcounts to move: a byte is a value. The runtime traps
+                // on an index out of range and on a value outside 0..255, and
+                // a constant outside it is refused here.
+                if self.underlying(o.ty) == Ty::Bytes {
+                    let i = self.index_of_bytes(index)?;
+                    self.check_byte_literal(value)?;
+                    let v = self.arg_of(value, Ty::Int)?;
+                    self.rt_void("rt_bytes_set", vec![o.val(), i, v]);
+                    self.flush_temps();
+                    return Ok(());
+                }
                 let Some(elem) = self.seq_elem(o.ty) else {
                     return Err(Diag::new(
                         *span,
@@ -3252,7 +3502,20 @@ impl Lowerer {
         self.owned.push(Vec::new());
 
         let coll = self.lower_expr(iter)?;
-        let Some(elem) = self.seq_elem(coll.ty) else {
+        // A `bytes` iterates like a List<int>: the same loop, with the
+        // runtime calls that read a byte rather than a slot.
+        let is_bytes = self.underlying(coll.ty) == Ty::Bytes;
+        let (len_fn, get_fn) = if is_bytes {
+            ("rt_bytes_len", "rt_bytes_get")
+        } else {
+            ("rt_len_of", "rt_index_get")
+        };
+        let elem = if is_bytes {
+            Some(Ty::Int)
+        } else {
+            self.seq_elem(coll.ty)
+        };
+        let Some(elem) = elem else {
             self.scopes.pop();
             self.owned.pop();
             return Err(Diag::new(
@@ -3279,7 +3542,7 @@ impl Lowerer {
         let n = self.new_val(IrTy::I64);
         self.push(Inst::Call {
             dst: Some(n),
-            func: "rt_len_of".to_string(),
+            func: len_fn.to_string(),
             args: vec![coll.val()],
         });
 
@@ -3364,7 +3627,7 @@ impl Lowerer {
         let e = self.new_val(self.irty(elem));
         self.push(Inst::Call {
             dst: Some(e),
-            func: "rt_index_get".to_string(),
+            func: get_fn.to_string(),
             args: vec![coll.val(), idx],
         });
         // The element is borrowed from the collection, so the loop variable
@@ -4345,6 +4608,10 @@ impl Lowerer {
             return Ok(m);
         }
 
+        if want == Ty::Bytes {
+            return self.bytes_literal(e);
+        }
+
         let Some(elem) = self.seq_elem(want) else {
             return Err(Diag::new(
                 span,
@@ -4388,6 +4655,51 @@ impl Lowerer {
             vals.push(v);
         }
         self.build_seq(want, elem, vals, is_list, span)
+    }
+
+    /// `[]`, `[104, 105]` and `[0; n]` where a `bytes` is wanted.
+    ///
+    /// The literal is the List literal, because a `bytes` is written the way
+    /// a sequence of ints is: there is no second spelling to learn, and every
+    /// place that gives a List literal its type gives this one its type too.
+    /// There is no `b"..."`. A literal of a MUTABLE type cannot be one shared
+    /// immortal object the way a string literal is, so it would allocate
+    /// every time it is evaluated while looking like a constant; text that
+    /// should become bytes says so, `"GET ".to_bytes()`, and the allocation
+    /// is visible where it happens.
+    fn bytes_literal(&mut self, e: &Expr) -> Result<Val, Diag> {
+        match e {
+            Expr::MapLit(_, span) => {
+                Err(Diag::new(*span, "bytes holds octets; write them as [a, b]"))
+            }
+            Expr::RepeatLit(ve, ne, _) => {
+                self.check_byte_literal(ve)?;
+                let v = self.arg_of(ve, Ty::Int)?;
+                let n = self.lower_expr(ne)?;
+                if self.underlying(n.ty) != Ty::Int {
+                    return Err(Diag::new(ne.span(), self.mismatch(Ty::Int, n.ty)));
+                }
+                Ok(self.rt_value("rt_bytes_fill", vec![n.val(), v], Ty::Bytes))
+            }
+            Expr::SeqLit(items, _) => {
+                // Sized once for what is written, then filled; each push
+                // checks its value, so a computed element out of range traps
+                // exactly as `b.push(v)` would.
+                let cap = self.new_val(IrTy::I64);
+                self.push(Inst::IConst {
+                    dst: cap,
+                    val: items.len() as i64,
+                });
+                let b = self.rt_value("rt_bytes_new", vec![cap], Ty::Bytes);
+                for it in items {
+                    self.check_byte_literal(it)?;
+                    let v = self.arg_of(it, Ty::Int)?;
+                    self.rt_void("rt_bytes_push", vec![b.val(), v]);
+                }
+                Ok(b)
+            }
+            _ => unreachable!("only the three literal forms reach here"),
+        }
     }
 
     /// A List or an Array of `n` copies of `fill`, straight from the
@@ -4869,6 +5181,9 @@ impl Lowerer {
                 if self.underlying(o.ty) == Ty::Str {
                     return self.lower_str_method(&o, m, args, *span);
                 }
+                if self.underlying(o.ty) == Ty::Bytes {
+                    return self.lower_bytes_method(&o, m, args, *span);
+                }
                 if matches!(self.underlying(o.ty), Ty::Int | Ty::Float | Ty::Bool) {
                     return self.lower_prim_method(&o, m, args, *span);
                 }
@@ -5019,6 +5334,13 @@ impl Lowerer {
 
             Expr::Index(obj, idx, span) => {
                 let o = self.lower_expr(obj)?;
+                // A byte reads as an int, 0 to 255: the language has one
+                // integer type, and a byte is a value of it rather than a
+                // second kind of number.
+                if self.underlying(o.ty) == Ty::Bytes {
+                    let i = self.index_of_bytes(idx)?;
+                    return Ok(self.rt_value("rt_bytes_get", vec![o.val(), i], Ty::Int));
+                }
                 let Some(elem) = self.seq_elem(o.ty) else {
                     return Err(Diag::new(
                         *span,
@@ -5384,6 +5706,22 @@ impl Lowerer {
                 }
                 return Ok(Val::new(d, Ty::Bool, false));
             }
+        }
+
+        // `bytes` compares by value, like `str`: two buffers holding the same
+        // octets are equal. It has no `+` -- appending is `extend`, in place,
+        // which is what a buffer is for -- and no ordering, as `str` has none.
+        if a.ty == Ty::Bytes && b.ty == Ty::Bytes && (op == Eq || op == Ne) {
+            let d = self.rt_value("rt_bytes_eq", vec![a.val(), b.val()], Ty::Bool);
+            if op == Ne {
+                let out = self.new_val(IrTy::I1);
+                self.push(Inst::Not {
+                    dst: out,
+                    src: d.val(),
+                });
+                return Ok(Val::new(out, Ty::Bool, false));
+            }
+            return Ok(d);
         }
 
         // A distinct type behaves exactly as its base -- it IS an int -- so
@@ -5872,6 +6210,16 @@ impl Lowerer {
                 Ty::Bool => "rt_print_bool",
                 Ty::Str => "rt_print_str",
                 Ty::Void => return Err(Diag::new(args.pos[0].span(), "cannot print a void value")),
+                // `print(v)` is `v.to_str()`, and `bytes` has none: which
+                // text a run of octets is -- hex, decoded UTF-8, escaped --
+                // is the program's choice, not print's.
+                Ty::Bytes => {
+                    return Err(Diag::new(
+                        args.pos[0].span(),
+                        "cannot print `bytes`; say which text you mean, \
+                         `hex()` or `utf8()`",
+                    ))
+                }
                 // A user type says how it prints by having a `to_str`
                 // method -- found by name, like `add` and `cmp`. Without
                 // one, a refusal naming the method beats printing an
@@ -5918,6 +6266,7 @@ impl Lowerer {
             "float" => Some(Ty::Float),
             "bool" => Some(Ty::Bool),
             "str" => Some(Ty::Str),
+            "bytes" => Some(Ty::Bytes),
             _ => None,
         } {
             if args.pos.len() != 1 || !args.named.is_empty() {
@@ -5960,6 +6309,13 @@ impl Lowerer {
                     });
                     self.stmt_temps.push(d);
                     return Ok(Val::new(d, Ty::Str, true));
+                }
+                if from == Ty::Bytes {
+                    return Err(Diag::new(
+                        args.pos[0].span(),
+                        "`str(..)` is `to_str`, which `bytes` does not have; \
+                         say which text you mean, `hex()` or `utf8()`",
+                    ));
                 }
                 if let Some(text) = self.call_to_str(&v, args.pos[0].span())? {
                     return Ok(text);
@@ -6012,6 +6368,13 @@ impl Lowerer {
                 });
                 self.stmt_temps.push(d);
                 return Ok(Val::new(d, v.ty, true));
+            }
+            // Mutable, so here the copy is observable by value too: writing
+            // one leaves the other alone. Its bytes are not references, so
+            // shallow and deep are the same copy.
+            if self.underlying(v.ty) == Ty::Bytes {
+                let c = self.rt_value("rt_bytes_clone", vec![v.val()], Ty::Bytes);
+                return Ok(Val::new(c.val(), v.ty, true));
             }
             let Some(tid) = self.tdef_of(v.ty) else {
                 return Err(Diag::new(

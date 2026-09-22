@@ -1,0 +1,3 @@
+// Arguments are bytes, never str: crossing over is written out.
+bytes b = "abc".to_bytes();
+print(b.contains("b"));

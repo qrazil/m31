@@ -1054,3 +1054,40 @@ fn collection_misuse_is_rejected() {
     assert!(err("List<int> xs = []; for (str s in xs) { print(s); }")
         .contains("expected str, found int"));
 }
+
+// ---- bytes -------------------------------------------------------------
+
+#[test]
+fn bytes_is_a_type_keyword() {
+    assert_eq!(
+        toks("bytes b"),
+        vec![Tok::KwBytes, Tok::Ident("b".into()), Tok::Eof]
+    );
+}
+
+#[test]
+fn a_byte_is_a_value_and_moves_no_refcount() {
+    // Reading, writing and iterating a bytes touch no count: a byte is an
+    // int, not a reference, so the only retain is the loop's hold on the
+    // collection itself.
+    let out = ir("bytes b = [1, 2]; b[0] = b[1]; for (int x in b) { print(x); }");
+    let main = out.split("func $main").nth(1).unwrap();
+    assert!(
+        main.contains("rt_bytes_get") && main.contains("rt_bytes_set"),
+        "{main}"
+    );
+    assert_eq!(
+        main.matches("rc_inc").count(),
+        1,
+        "only the loop's hold on the collection:\n{main}"
+    );
+}
+
+#[test]
+fn a_bytes_literal_builds_through_push() {
+    // Sized once for what is written, then filled: each push checks its
+    // value, so a computed element traps exactly as `b.push(v)` would.
+    let out = ir("int k = 3; bytes b = [1, k]; print(b.size());");
+    assert!(out.contains("rt_bytes_new"), "{out}");
+    assert_eq!(out.matches("rt_bytes_push").count(), 2, "{out}");
+}

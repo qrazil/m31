@@ -981,6 +981,318 @@ bool rt_seq_contains(Obj *o, int64_t v, int kind) {
     return false;
 }
 
+/* ---- bytes ------------------------------------------------------------
+ *
+ * One byte per element, in a buffer of its own so push can grow it. The
+ * methods mirror str's over octets and are written the same way; the
+ * differences are the ones mutability forces -- a result is always a fresh
+ * object, never a view, because a view of something that can change is not
+ * a value.
+ */
+
+static void bytes_drop(Obj *o) {
+    free(((Bytes *)o)->data);
+}
+
+/* No walk: a byte is not a reference, so a bytes is a leaf at a thread
+ * boundary and rt_check_unique answers it from the count alone. */
+static const TypeInfo rt_bytes_type = { bytes_drop, NULL, NULL };
+
+/* A value going INTO a bytes. Truncating 256 to 0 would be a silent wrong
+ * answer in exactly the code -- codecs, checksums -- least able to notice. */
+static uint8_t as_byte(int64_t v) {
+    if (v < 0 || v > 255) rt_trap("byte value out of range 0..255");
+    return (uint8_t)v;
+}
+
+/* Make room for `need` bytes in total. Doubling keeps push amortised O(1);
+ * the size is a byte count, so no slot multiplication can wrap, but the
+ * doubling itself is capped before it can overflow. */
+static void bytes_reserve(Bytes *b, int64_t need) {
+    if (need <= b->cap) return;
+    int64_t cap = b->cap < 8 ? 8 : b->cap;
+    while (cap < need) {
+        if (cap > INT64_MAX / 2) {
+            cap = need;
+            break;
+        }
+        cap *= 2;
+    }
+    uint8_t *buf = realloc(b->data, (size_t)cap);
+    if (buf == NULL) rt_trap("out of memory");
+    b->data = buf;
+    b->cap = cap;
+}
+
+Obj *rt_bytes_new(int64_t cap) {
+    if (cap < 0) rt_trap("bytes length cannot be negative");
+    Bytes *b = (Bytes *)rt_alloc(sizeof(Bytes), &rt_bytes_type);
+    b->len = 0;
+    b->cap = 0;
+    b->data = NULL;
+    /* Never a NULL buffer, even when empty: every method can then index
+     * and memcmp without a special case, and C's pointer arithmetic on NULL
+     * -- even `NULL + 0` -- is undefined. Eight bytes is the price. */
+    bytes_reserve(b, cap > 0 ? cap : 1);
+    return (Obj *)b;
+}
+
+/* A fresh bytes holding a copy of `n` octets. */
+static Obj *bytes_of(const uint8_t *src, int64_t n) {
+    Bytes *b = (Bytes *)rt_bytes_new(n);
+    if (n > 0) memcpy(b->data, src, (size_t)n);
+    b->len = n;
+    return (Obj *)b;
+}
+
+Obj *rt_bytes_fill(int64_t n, int64_t v) {
+    uint8_t x = as_byte(v);
+    Bytes *b = (Bytes *)rt_bytes_new(n);
+    if (n > 0) memset(b->data, x, (size_t)n);
+    b->len = n;
+    return (Obj *)b;
+}
+
+int64_t rt_bytes_len(Obj *o) {
+    return ((Bytes *)o)->len;
+}
+
+int64_t rt_bytes_get(Obj *o, int64_t i) {
+    Bytes *b = (Bytes *)o;
+    if (i < 0 || i >= b->len) rt_trap("index out of range");
+    return b->data[i];
+}
+
+/* The index is checked before the value, the order a reader sees them in
+ * `b[i] = v`. */
+void rt_bytes_set(Obj *o, int64_t i, int64_t v) {
+    Bytes *b = (Bytes *)o;
+    if (i < 0 || i >= b->len) rt_trap("index out of range");
+    b->data[i] = as_byte(v);
+}
+
+void rt_bytes_push(Obj *o, int64_t v) {
+    Bytes *b = (Bytes *)o;
+    uint8_t x = as_byte(v);
+    bytes_reserve(b, b->len + 1);
+    b->data[b->len++] = x;
+}
+
+int64_t rt_bytes_pop(Obj *o) {
+    Bytes *b = (Bytes *)o;
+    if (b->len == 0) rt_trap("pop from empty bytes");
+    return b->data[--b->len];
+}
+
+/* Keeps the buffer: clearing is what a reused read buffer does between
+ * reads, and giving the memory back only to ask for it again is waste. */
+void rt_bytes_clear(Obj *o) {
+    ((Bytes *)o)->len = 0;
+}
+
+/* `b.extend(b)` is legal and doubles `b`. The length is read before growing
+ * and the source pointer after, so a realloc that moves the buffer moves the
+ * source with it. */
+void rt_bytes_extend(Obj *o, Obj *more) {
+    Bytes *b = (Bytes *)o;
+    int64_t n = ((Bytes *)more)->len;
+    int64_t total;
+    if (__builtin_add_overflow(b->len, n, &total)) rt_trap("bytes too long");
+    bytes_reserve(b, total);
+    if (n > 0) memmove(b->data + b->len, ((Bytes *)more)->data, (size_t)n);
+    b->len = total;
+}
+
+bool rt_bytes_eq(Obj *a, Obj *b) {
+    const Bytes *x = (const Bytes *)a;
+    const Bytes *y = (const Bytes *)b;
+    if (x == y) return true;
+    if (x->len != y->len) return false;
+    return memcmp(x->data, y->data, (size_t)x->len) == 0;
+}
+
+Obj *rt_bytes_clone(Obj *o) {
+    const Bytes *b = (const Bytes *)o;
+    return bytes_of(b->data, b->len);
+}
+
+Obj *rt_str_to_bytes(Obj *s) {
+    const Str *x = (const Str *)s;
+    return bytes_of((const uint8_t *)x->data, x->len);
+}
+
+Obj *rt_bytes_substr(Obj *o, int64_t from, int64_t to) {
+    const Bytes *b = (const Bytes *)o;
+    if (from < 0 || to < from || to > b->len) rt_trap("substring range out of bounds");
+    return bytes_of(b->data + from, to - from);
+}
+
+/* -1 for absent, turned into a None by the lowering; an empty needle is
+ * found at 0 -- str's rules exactly. */
+int64_t rt_bytes_find(Obj *o, Obj *needle) {
+    const Bytes *h = (const Bytes *)o;
+    const Bytes *n = (const Bytes *)needle;
+    if (n->len == 0) return 0;
+    for (int64_t i = 0; i + n->len <= h->len; i++) {
+        if (memcmp(h->data + i, n->data, (size_t)n->len) == 0) return i;
+    }
+    return -1;
+}
+
+bool rt_bytes_starts_with(Obj *o, Obj *p) {
+    const Bytes *b = (const Bytes *)o;
+    const Bytes *q = (const Bytes *)p;
+    if (q->len > b->len) return false;
+    return memcmp(b->data, q->data, (size_t)q->len) == 0;
+}
+
+bool rt_bytes_ends_with(Obj *o, Obj *p) {
+    const Bytes *b = (const Bytes *)o;
+    const Bytes *q = (const Bytes *)p;
+    if (q->len > b->len) return false;
+    return memcmp(b->data + (b->len - q->len), q->data, (size_t)q->len) == 0;
+}
+
+Obj *rt_bytes_trim(Obj *o) {
+    const Bytes *b = (const Bytes *)o;
+    int64_t lo = 0;
+    int64_t hi = b->len;
+    while (lo < hi && is_space((char)b->data[lo])) lo++;
+    while (hi > lo && is_space((char)b->data[hi - 1])) hi--;
+    return bytes_of(b->data + lo, hi - lo);
+}
+
+/* ASCII only, as on str: a byte above 127 is not a letter of anything this
+ * runtime can know. */
+Obj *rt_bytes_case(Obj *o, bool upper) {
+    const Bytes *b = (const Bytes *)o;
+    Bytes *out = (Bytes *)bytes_of(b->data, b->len);
+    for (int64_t i = 0; i < out->len; i++) {
+        uint8_t c = out->data[i];
+        if (upper && c >= 'a' && c <= 'z') out->data[i] = (uint8_t)(c - 32);
+        if (!upper && c >= 'A' && c <= 'Z') out->data[i] = (uint8_t)(c + 32);
+    }
+    return (Obj *)out;
+}
+
+Obj *rt_bytes_repeat(Obj *o, int64_t n) {
+    const Bytes *b = (const Bytes *)o;
+    if (n < 0) rt_trap("cannot repeat bytes a negative number of times");
+    int64_t total;
+    if (__builtin_mul_overflow(b->len, n, &total)) rt_trap("bytes too long");
+    Bytes *out = (Bytes *)rt_bytes_new(total);
+    /* Empty repeated any number of times is empty, without n no-op copies. */
+    if (b->len > 0) {
+        for (int64_t i = 0; i < n; i++) {
+            memcpy(out->data + i * b->len, b->data, (size_t)b->len);
+        }
+    }
+    out->len = total;
+    return (Obj *)out;
+}
+
+/* An empty separator has no answer that is not arbitrary, so it traps, as
+ * on str. Each part is its own bytes, owned by the list. */
+Obj *rt_bytes_split(Obj *o, Obj *sep) {
+    const Bytes *b = (const Bytes *)o;
+    const Bytes *d = (const Bytes *)sep;
+    if (d->len == 0) rt_trap("cannot split on an empty separator");
+
+    Obj *out = rt_list_new(true);
+    int64_t start = 0;
+    for (int64_t i = 0; i + d->len <= b->len;) {
+        if (memcmp(b->data + i, d->data, (size_t)d->len) == 0) {
+            rt_list_push(out, (int64_t)(intptr_t)bytes_of(b->data + start, i - start));
+            i += d->len;
+            start = i;
+        } else {
+            i++;
+        }
+    }
+    rt_list_push(out, (int64_t)(intptr_t)bytes_of(b->data + start, b->len - start));
+    return out;
+}
+
+Obj *rt_bytes_join(Obj *parts, Obj *sep) {
+    const Bytes *d = (const Bytes *)sep;
+    int64_t n = rt_len_of(parts);
+    int64_t *el = slots(parts);
+    Bytes *out = (Bytes *)rt_bytes_new(0);
+    for (int64_t i = 0; i < n; i++) {
+        /* `sep` may be one of the parts, or the result of nothing at all;
+         * extend reads it fresh each time, so either is fine. */
+        if (i > 0) rt_bytes_extend((Obj *)out, (Obj *)d);
+        rt_bytes_extend((Obj *)out, (Obj *)(intptr_t)el[i]);
+    }
+    return (Obj *)out;
+}
+
+/* Lowercase, two digits a byte, no separator: the form every checksum tool
+ * prints, and one that reads back unambiguously. */
+Obj *rt_bytes_hex(Obj *o) {
+    static const char digits[] = "0123456789abcdef";
+    const Bytes *b = (const Bytes *)o;
+    int64_t n;
+    if (__builtin_mul_overflow(b->len, (int64_t)2, &n)) rt_trap("string too long");
+    Str *s = (Str *)rt_alloc(sizeof(Str) + (size_t)n + 1, &rt_str_type);
+    char *buf = (char *)(s + 1);
+    for (int64_t i = 0; i < b->len; i++) {
+        buf[2 * i] = digits[b->data[i] >> 4];
+        buf[2 * i + 1] = digits[b->data[i] & 15];
+    }
+    buf[n] = '\0';
+    s->len = n;
+    s->data = buf;
+    return (Obj *)s;
+}
+
+/* Strict UTF-8, RFC 3629: no overlong forms, no surrogates (U+D800..DFFF),
+ * nothing past U+10FFFF, no truncated sequence. Anything else is a refusal
+ * rather than a U+FFFD substitution -- a decoder that repairs is a decoder
+ * that hides the bug that produced the input. The second byte's range is
+ * what rules out the overlong and out-of-range forms, so each lead byte
+ * carries its own. */
+static bool utf8_valid(const uint8_t *p, int64_t n) {
+    int64_t i = 0;
+    while (i < n) {
+        uint8_t c = p[i];
+        if (c < 0x80) {
+            i++;
+            continue;
+        }
+        int64_t more;
+        uint8_t lo = 0x80, hi = 0xBF;
+        if (c >= 0xC2 && c <= 0xDF) {
+            more = 1;
+        } else if (c >= 0xE0 && c <= 0xEF) {
+            more = 2;
+            if (c == 0xE0) lo = 0xA0;         /* overlong below U+0800 */
+            if (c == 0xED) hi = 0x9F;         /* surrogates */
+        } else if (c >= 0xF0 && c <= 0xF4) {
+            more = 3;
+            if (c == 0xF0) lo = 0x90;         /* overlong below U+10000 */
+            if (c == 0xF4) hi = 0x8F;         /* past U+10FFFF */
+        } else {
+            return false;                     /* 80..C1 and F5..FF never lead */
+        }
+        if (i + more >= n) return false;      /* truncated at the end */
+        if (p[i + 1] < lo || p[i + 1] > hi) return false;
+        for (int64_t k = 2; k <= more; k++) {
+            if (p[i + k] < 0x80 || p[i + k] > 0xBF) return false;
+        }
+        i += more + 1;
+    }
+    return true;
+}
+
+bool rt_bytes_utf8(Obj *o, Obj **out) {
+    const Bytes *b = (const Bytes *)o;
+    *out = NULL;
+    if (!utf8_valid(b->data, b->len)) return false;
+    *out = str_new((const char *)b->data, b->len);
+    return true;
+}
+
 /* ---- map --------------------------------------------------------------
  *
  * Open addressing with linear probing and a 70% load factor. One allocation

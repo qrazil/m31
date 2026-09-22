@@ -1,0 +1,4 @@
+// Decoding can fail, so it is not spelled `to_str`: that name is the
+// infallible text form `print` and `str()` look for.
+bytes b = [104, 105];
+str s = b.to_str();

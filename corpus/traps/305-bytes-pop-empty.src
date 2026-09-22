@@ -1,0 +1,4 @@
+// pop on an empty bytes has nothing to give back.
+bytes b = [7];
+print(b.pop());
+print(b.pop());

@@ -31,10 +31,10 @@ A letter or `_`, then letters, digits or `_`. Case-sensitive.
 
 ### 1.4 Keywords
 
-    bool     break     case      const     continue  distinct  else
-    enum     false     float     for       if        import    in
-    int      interface match     pub       return    spawn     static
-    str      true      type      void      while
+    bool     break     bytes     case      const     continue  distinct
+    else     enum      false     float     for       if        import
+    in       int       interface match     pub       return    spawn
+    static   str       true      type      void      while
 
 Keywords are reserved: none may be used as an identifier. `Array`, `Chan`,
 `List` and `Map` are not keywords — they are predeclared type names, and are
@@ -54,6 +54,9 @@ A `str` carries its length, so `\0` is an ordinary character:
 
 String literals are **immortal**: their refcount never reaches zero, so they
 are never freed (§7.3).
+
+There is no `bytes` literal. A `bytes` is written with the sequence literal,
+`[104, 105]`, or converted from text, `"hi".to_bytes()` (§3.10).
 
 ### 1.6 Operators and punctuation
 
@@ -180,7 +183,7 @@ bits, though, so a target with a narrower `int` has to emulate them there.
 
 ### 3.2 Reference types
 
-`str`, the built-in collections, and every `type` are **references**.
+`str`, `bytes`, the built-in collections, and every `type` are **references**.
 Assignment aliases rather than copies:
 
 ```c
@@ -509,6 +512,102 @@ Building a list makes the allocation visible at the call site instead of
 hiding it in the loop. **The order is the table's, not insertion order**, and
 it changes when the table rehashes — do not depend on it.
 
+### 3.10 `bytes`
+
+A growable, **mutable** run of octets: the buffer a read fills and a codec
+works in. It is a builtin like `str` — lowercase, a type keyword, no type
+argument — and a reference type like a `List`.
+
+```c
+bytes empty = [];                   // the sequence literal, typed by its place
+bytes hi = [104, 105];
+bytes zero = [0; 4096];
+bytes text = "GET ".to_bytes();     // from text: a copy, and it cannot fail
+```
+
+**A byte is an `int` from 0 to 255.** `b[i]` reads one, `b[i] = v` writes
+one, and `for (int x in b)` iterates them. There is no byte type: the
+language has one integer type, and a byte is a value of it. Storing a value
+outside the range **traps** rather than truncating — 256 silently becoming
+0 is a wrong answer in exactly the code, checksums and codecs, least able to
+notice. A constant outside the range is a compile error. An index outside
+`0 .. size-1` traps, as on a `List`.
+
+The literal is the `List` literal, and the same rule gives it a type (§3.9):
+it needs a declaration, a parameter, a field or a return above it. That is
+the whole construction story. There is **no `b"..."`**: a literal of a
+mutable type cannot be one shared immortal object the way a string literal
+is (§7.3), so it would allocate on every evaluation while looking like a
+constant. Text that should become bytes says so with `to_bytes()`, and the
+allocation is visible where it happens.
+
+The representation is one byte per element — a length, a capacity and a
+`uint8_t` buffer that `push` doubles — so a 4096-byte buffer is 4096 bytes.
+
+Methods. The names are `str`'s wherever `str` asks the question, with the
+same meaning over octets and **`bytes` arguments, never `str`**; crossing
+between the two is always written out. On top of those, what a buffer needs
+and an immutable `str` cannot have:
+
+| | |
+|---|---|
+| `b.size()` | length in bytes |
+| `b.push(v)` | append one byte; **traps** outside 0..255 |
+| `b.pop()` | remove and return the last byte; **traps** if empty |
+| `b.clear()` | size 0, keeping the buffer for reuse |
+| `b.extend(other)` | append another `bytes` in place; `b.extend(b)` doubles `b` |
+| `b.substr(from, to)` | a new `bytes`, half-open; **traps** if out of bounds |
+| `b.contains(sub)` | run-of-bytes search; an empty needle is found |
+| `b.index_of(sub)` | `Option<int>` |
+| `b.starts_with(p)`, `b.ends_with(p)` | |
+| `b.split(sep)` | `List<bytes>`; keeps empty fields, **traps** on an empty separator |
+| `b.trim()` | ASCII whitespace from both ends |
+| `b.to_upper()`, `b.to_lower()` | ASCII only; a byte above 127 is left alone |
+| `b.repeat(n)` | |
+| `b.hex()` | a `str`: lowercase, two digits a byte, no separator |
+| `b.utf8()` | `Option<str>` — the text, if `b` is valid UTF-8 |
+| `xs.join(sep)` | on a collection of `bytes`, the inverse of `split` |
+
+`push`, `pop`, `clear`, `extend` and index assignment change `b`; every
+other method returns a new object and leaves `b` alone. `contains` and
+`index_of` take a `bytes` because that is what they take on `str` — they
+find a run, not an element.
+
+`==` and `!=` compare by value, as on `str`. There is no `+`: appending is
+`extend`, in place, which is what a buffer is for. There is no ordering,
+because `str` has none.
+
+**Decoding is `utf8()`, not `to_str()`.** `to_str` is the name `print` and
+`str(v)` find a type's text by (§6.6), so it has to be infallible; decoding
+can fail, so it answers with an `Option`, the way `parse_int` does. It is
+strict UTF-8: an overlong form, a surrogate, a code point past U+10FFFF or a
+truncated sequence is `None`, never a replacement character — a decoder that
+repairs hides the bug that produced its input. `hex()` is the other text a
+`bytes` has, and it cannot fail.
+
+So **`print(b)` and `str(b)` are refused**, naming `hex()` and `utf8()`. A
+run of octets has no one text form — hex, decoded UTF-8 and an escaped
+literal are all reasonable — and picking one for the program would freeze a
+guess.
+
+`clone(b)` is a copy that shares nothing: its bytes are not references, so
+shallow and deep are the same. Sending a `bytes` over a channel moves it,
+under the same rule and the same run-time uniqueness check as anything else
+(§8.3); it holds no references, so the check is its count alone.
+
+A `distinct bytes` is still a `bytes`, as a distinct collection is still a
+collection (§3.6), and converts back with `bytes(v)`. A `bytes` cannot be a
+`Map` key.
+
+**Open question: `str` holds arbitrary bytes.** Nothing checks that a `str`
+is valid UTF-8 — a file read can put anything in one, and `substr` can cut a
+character in half. Oro made `str` always valid and `bytes` the only home for
+raw octets; this language has not decided. Now that `bytes` exists the Oro
+rule is reachable (the file reader would return `bytes`, and `utf8()` would
+be the one way in), but it changes what `io.read` returns and what
+`substr` may do, so it waits for the `io` rewrite rather than riding in with
+the type.
+
 ---
 
 ## 4. Declarations
@@ -639,8 +738,9 @@ The only `for`. There is no three-clause form.
 for (int v in xs) { ... }
 ```
 
-Iterates an `Array` or a `List`. The loop variable is a fresh binding each
-iteration and is **borrowed** from the collection; it is not a copy.
+Iterates an `Array`, a `List` or a `bytes` — whose elements are `int`s
+(§3.10). The loop variable is a fresh binding each iteration and is
+**borrowed** from the collection; it is not a copy.
 
 Mutating the collection's length while iterating it is not defined and is not
 checked. Do not.
@@ -724,8 +824,8 @@ and `-`. So `x & 1 == 0` is `(x & 1) == 0` — in C it is `x & (1 == 0)`, a
 trap every C programmer has fallen into once — and `1 << n + 1` is
 `1 << (n + 1)`, as in both. `&&` and `||` short-circuit.
 
-On the built-in types, `==` works on `int`, `bool` and `str`; `str` compares
-**by value**. On a user type an operator is a method call (§6.2).
+On the built-in types, `==` works on `int`, `bool`, `str` and `bytes`; `str`
+and `bytes` compare **by value**. On a user type an operator is a method call (§6.2).
 
 Arithmetic on a distinct type yields **that same distinct type**, not the
 base — `Price + Price` is a `Price`. Mixing two distinct types, or a distinct
@@ -881,6 +981,7 @@ has no other opinion about. `"é".size()` is 2.
 | `s.parse_int()` | `Option<int>` — the whole string, decimal, no surrounding space |
 | `s.parse_float()` | `Option<float>` |
 | `s.to_str()` | itself |
+| `s.to_bytes()` | a `bytes` copy of the same octets; cannot fail (§3.10) |
 
 And on a collection of `str`:
 
@@ -930,10 +1031,10 @@ and `from_` make them a visible pair, the one Rust uses.
 
 | | |
 |---|---|
-| `print(x)` | `int`, `bool` or `str`, one argument, newline-terminated |
+| `print(x)` | `int`, `float`, `bool`, `str`, or anything with `to_str`; one argument, newline-terminated. Not `bytes` (§3.10) |
 | `concat(a, b)` | joins two `str` |
 | `clone(x)` | a **shallow** copy |
-| `int(x)`, `bool(x)`, `str(x)` | convert a distinct value to its base |
+| `int(x)`, `bool(x)`, `str(x)`, `bytes(x)` | convert a distinct value to its base |
 | `send(ch, v)`, `recv(ch)`, `close(ch)` | channels (§8) |
 
 `print` selects its runtime helper from the static argument type. That is not
@@ -964,9 +1065,9 @@ cannot express. That is a **static method** — `int.parse(s)`, `Price.parse(s)`
 
 `clone` is shallow — the copy holds the same references, each retained once
 more. Deep copying would have to decide what copying each field means, which
-is a question only the program can answer. `clone` works on a `str`, an
-`Array`, a `List` and a struct; a channel and an interface value cannot be
-cloned.
+is a question only the program can answer. `clone` works on a `str`, a
+`bytes`, an `Array`, a `List` and a struct; a channel and an interface value
+cannot be cloned.
 
 **`int`, `float` and `bool` answer `to_str`** — so `v.to_str()` means the
 same thing whatever `v` is, and `str(v)` is that same call. A number finally
@@ -1022,7 +1123,8 @@ Trapping conditions:
   - division or remainder by zero, and `INT_MIN / -1`
   - an index outside `0 .. len-1`
   - `Map.get` on a key that is not there
-  - `pop` on an empty list
+  - `pop` on an empty list or an empty `bytes`
+  - storing a value outside 0..255 into a `bytes` (§3.10)
   - `recv` on a channel that is closed and drained
   - a length or capacity too large to allocate
   - a uniqueness violation at a thread boundary (§8.3)
@@ -1158,7 +1260,7 @@ tparams     = "<" IDENT { "," IDENT } ">" ;
 params      = param { "," param } ;
 param       = type IDENT [ "=" expr ] ;
 
-type        = "int" | "float" | "bool" | "str" | "void"
+type        = "int" | "float" | "bool" | "str" | "bytes" | "void"
             | [ IDENT "." ] IDENT [ "<" type { "," type } ">" ] ;
 
 block       = "{" { stmt } "}" ;
@@ -1191,7 +1293,7 @@ atom        = INT | FLOAT | STR | "true" | "false"
             | seqlit | maplit
             | "(" expr ")" ;
 
-seqlit      = "[" [ expr { "," expr } ] "]"           (* List or Array, §3.9 *)
+seqlit      = "[" [ expr { "," expr } ] "]"           (* List, Array or bytes, §3.9 *)
             | "[" expr ";" expr "]" ;                 (* value; count *)
 maplit      = "{" [ expr ":" expr { "," expr ":" expr } ] "}" ;
 

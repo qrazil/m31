@@ -1,0 +1,3 @@
+// `str(v)` is `v.to_str()`, which bytes does not have.
+bytes b = [104, 105];
+print(str(b));

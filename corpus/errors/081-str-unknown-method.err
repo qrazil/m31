@@ -1,4 +1,4 @@
-corpus/errors/081-str-unknown-method.src:2:8: `str` has no method `reverse`; it has size, substr, contains, index_of, starts_with, ends_with, split, trim, to_upper, to_lower and repeat
+corpus/errors/081-str-unknown-method.src:2:8: `str` has no method `reverse`; it has size, substr, contains, index_of, starts_with, ends_with, split, trim, to_upper, to_lower, repeat and to_bytes
   |
 2 | print(s.reverse());
   |        ^

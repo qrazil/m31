@@ -1,0 +1,7 @@
+// A bytes that is still aliased cannot cross a thread boundary: the two
+// names would share one non-atomic count, and a mutable buffer besides.
+Chan<bytes> c = Chan<bytes>(1);
+bytes a = [1, 2, 3];
+bytes b = a;
+send(c, a);
+print(b.size());

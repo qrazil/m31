@@ -1,0 +1,2 @@
+// `bytes` is a type keyword, like `str`, so it cannot name a variable.
+int bytes = 3;

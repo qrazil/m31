@@ -1,0 +1,4 @@
+corpus/errors/304-bytes-str-conversion.src:3:11: `str(..)` is `to_str`, which `bytes` does not have; say which text you mean, `hex()` or `utf8()`
+  |
+3 | print(str(b));
+  |           ^

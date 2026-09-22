@@ -1,0 +1,24 @@
+// A distinct bytes is still a bytes -- it indexes, iterates and answers the
+// methods -- and a literal written where one is wanted builds it directly.
+// Converting back is spelled as the base type, `bytes(f)`, like `int(p)`.
+
+distinct bytes Frame;
+
+int checksum(bytes b) {
+    int s = 0;
+    for (int x in b) {
+        s = s + x;
+    }
+    return s;
+}
+
+Frame f = [1, 2, 3];
+f.push(4);
+f[0] = 10;
+print(f.size());                        // 4
+print(f[0]);                            // 10
+print(checksum(bytes(f)));              // 10 + 2 + 3 + 4 = 19
+print(f.hex());                         // 0a020304
+
+Frame g = [0; 2];
+print(g.size());                        // 2

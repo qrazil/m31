@@ -571,6 +571,7 @@ impl Fmt {
             Ty::Float => "float".into(),
             Ty::Bool => "bool".into(),
             Ty::Str => "str".into(),
+            Ty::Bytes => "bytes".into(),
             Ty::Void => "void".into(),
             Ty::User(i) => TYPE_NAMES.with(|n| {
                 n.borrow()
@@ -745,6 +746,7 @@ fn render_ty(exprs: &[TyExpr], t: &Ty) -> String {
         Ty::Float => "float".into(),
         Ty::Bool => "bool".into(),
         Ty::Str => "str".into(),
+        Ty::Bytes => "bytes".into(),
         Ty::Void => "void".into(),
         Ty::User(i) => match exprs.get(*i as usize) {
             None => format!("T{i}"),

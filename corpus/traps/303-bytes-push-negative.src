@@ -1,0 +1,4 @@
+// Negative is out of range too.
+bytes b = [];
+int v = 0 - 1;
+b.push(v);

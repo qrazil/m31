@@ -1,0 +1,4 @@
+corpus/errors/300-bytes-print.src:4:7: cannot print `bytes`; say which text you mean, `hex()` or `utf8()`
+  |
+4 | print(b);
+  |       ^

@@ -1,0 +1,2 @@
+// A bytes is written with the sequence literal, not the map one.
+bytes b = {};
