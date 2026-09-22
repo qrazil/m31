@@ -1,0 +1,90 @@
+// `bytes`: a growable, mutable run of octets. It is written with the List
+// literal, because a bytes is written the way a sequence of ints is, and a
+// byte reads back as an int from 0 to 255.
+
+bytes empty = [];
+bytes hi = [104, 105];
+bytes zeros = [0; 4];
+bytes text = "abc".to_bytes();
+
+print(empty.size());                    // 0
+print(hi.size());                       // 2
+print(zeros.size());                    // 4
+print(text.size());                     // 3
+print(hi[0]);                           // 104
+print(hi[1]);                           // 105
+print(zeros[3]);                        // 0
+print(text[2]);                         // 99 -- 'c'
+
+// Written in place: a bytes is mutable, unlike a str.
+hi[1] = 33;
+print(hi[1]);                           // 33
+zeros[0] = 255;
+print(zeros[0]);                        // 255 -- the top of the range
+
+// A computed element is fine as long as it is a byte when it lands.
+int k = 7;
+bytes computed = [k * 2, k + 1, 200 + 55];
+print(computed[0]);                     // 14
+print(computed[2]);                     // 255
+
+// [v; n] takes its length from a computed int too.
+bytes fill = [9; k - 2];
+print(fill.size());                     // 5
+print(fill[4]);                         // 9
+
+// Iteration yields ints.
+int total = 0;
+for (int b in text) {
+    total = total + b;
+}
+print(total);                           // 97 + 98 + 99 = 294
+
+// push grows the buffer well past any first capacity; every byte survives
+// every reallocation.
+bytes grown = [];
+int i = 0;
+while (i < 1000) {
+    grown.push(i % 256);
+    i = i + 1;
+}
+print(grown.size());                    // 1000
+int sum = 0;
+for (int b in grown) {
+    sum = sum + b;
+}
+print(sum);                             // 3 * 32640 + (0 + .. + 231) = 124716
+print(grown[999]);                      // 999 % 256 = 231
+
+// pop takes from the end and gives the byte back as an int.
+print(grown.pop());                     // 231
+print(grown.size());                    // 999
+
+// clear keeps the object, and it is still usable afterwards.
+grown.clear();
+print(grown.size());                    // 0
+grown.push(1);
+print(grown.size());                    // 1
+
+// extend appends another bytes in place -- including itself.
+bytes ab = "ab".to_bytes();
+ab.extend("cd".to_bytes());
+print(ab.size());                       // 4
+ab.extend(ab);
+print(ab.size());                       // 8
+print(ab.hex());                        // 6162636461626364
+
+// Equality is by value, as on str.
+// A literal has no type of its own, so the other side is named first.
+bytes same = [104, 33];
+bytes longer = [104, 33, 0];
+bytes none = [];
+print(hi == same);                      // true
+print(hi == longer);                    // false
+print(empty == none);                   // true
+print(text != "abd".to_bytes());        // true
+
+// A bytes aliases like every other reference type; clone is the copy.
+bytes alias = hi;
+alias[0] = 72;
+print(hi[0]);                           // 72 -- one object, two names

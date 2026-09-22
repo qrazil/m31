@@ -1,0 +1,4 @@
+corpus/errors/301-bytes-literal-range.src:2:18: 256 is not a byte; a byte is an int from 0 to 255
+  |
+2 | bytes b = [1, 2, 256];
+  |                  ^

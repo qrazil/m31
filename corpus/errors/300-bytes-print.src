@@ -1,0 +1,4 @@
+// `print` goes through `to_str`, and `bytes` has none: which text a run
+// of octets is -- hex, or decoded UTF-8 -- is the program's choice.
+bytes b = [104, 105];
+print(b);

@@ -1,0 +1,86 @@
+// Byte-level algorithms, to show a bytes is something code can be written
+// in: ROT13 in place, Adler-32 over a buffer, and a hex decoder that builds
+// one byte at a time and refuses what is not hex.
+
+// In place, so it returns nothing: the caller's buffer is the answer.
+void rot13(bytes b) {
+    int i = 0;
+    while (i < b.size()) {
+        int c = b[i];
+        if (c >= 97 && c <= 122) {
+            b[i] = (c - 97 + 13) % 26 + 97;
+        } else if (c >= 65 && c <= 90) {
+            b[i] = (c - 65 + 13) % 26 + 65;
+        }
+        i = i + 1;
+    }
+}
+
+// zlib's checksum. No bitwise operators yet, so the halves are combined by
+// multiplication -- the same number.
+int adler32(bytes data) {
+    int a = 1;
+    int b = 0;
+    for (int x in data) {
+        a = (a + x) % 65521;
+        b = (b + a) % 65521;
+    }
+    return b * 65536 + a;
+}
+
+Option<int> nibble(int c) {
+    if (c >= 48 && c <= 57) {
+        return Option<int>.Some(c - 48);
+    }
+    if (c >= 97 && c <= 102) {
+        return Option<int>.Some(c - 87);
+    }
+    return Option<int>.None;
+}
+
+// The inverse of `hex()`.
+Option<bytes> unhex(str s) {
+    bytes text = s.to_bytes();
+    if (text.size() % 2 != 0) {
+        return Option<bytes>.None;
+    }
+    bytes out = [];
+    int i = 0;
+    while (i < text.size()) {
+        int hi = nibble(text[i])?;
+        int lo = nibble(text[i + 1])?;
+        out.push(hi * 16 + lo);
+        i = i + 2;
+    }
+    return Option<bytes>.Some(out);
+}
+
+bytes msg = "Hello, World! 123".to_bytes();
+rot13(msg);
+print(msg.utf8().or("?"));              // Uryyb, Jbeyq! 123
+rot13(msg);
+print(msg.utf8().or("?"));              // Hello, World! 123 -- its own inverse
+
+print(adler32("Wikipedia".to_bytes())); // 300286872, zlib's own example
+bytes nothing = [];
+print(adler32(nothing));                // 1
+print(adler32([255; 5000]));            // a buffer long enough to wrap the sums
+
+bytes all = [];
+int v = 0;
+while (v < 256) {
+    all.push(v);
+    v = v + 1;
+}
+str h = all.hex();
+print(h.size());                        // 512
+match (unhex(h)) {
+    case Some(bytes back): {
+        print(back == all);             // true: hex round-trips every byte
+    }
+    case None: {
+        print("refused");
+    }
+}
+print(unhex("zz").is_none());           // true
+print(unhex("abc").is_none());          // true

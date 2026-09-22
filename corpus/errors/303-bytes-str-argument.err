@@ -1,0 +1,4 @@
+corpus/errors/303-bytes-str-argument.src:3:18: type mismatch: expected bytes, found str
+  |
+3 | print(b.contains("b"));
+  |                  ^

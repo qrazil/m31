@@ -1,0 +1,4 @@
+corpus/errors/307-bytes-keyword.src:2:5: expected a name, found `bytes`
+  |
+2 | int bytes = 3;
+  |     ^

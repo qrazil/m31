@@ -199,6 +199,50 @@ Obj    *rt_str_repeat(Obj *o, int64_t n);
 Obj    *rt_str_split(Obj *o, Obj *sep);
 Obj    *rt_str_join(Obj *parts, Obj *sep);
 
+/* ---- bytes -------------------------------------------------------------
+ *
+ * A mutable, growable run of octets: the buffer a read fills and a codec
+ * works in. Shaped like a List -- a separate buffer that push may grow --
+ * but each element is ONE byte, not a 64-bit slot, so a 4 KiB buffer is
+ * 4 KiB and hands straight to read(2) or memcpy.
+ *
+ * A byte crosses into the language as an int from 0 to 255. Storing one
+ * outside that range traps rather than truncating: 256 silently becoming 0
+ * is the kind of wrong answer a codec never recovers from.
+ *
+ * It holds no references, so its TypeInfo has a drop (the buffer) and no
+ * walk: at a thread boundary it is a leaf, unique when its count is 1. */
+typedef struct {
+    Obj      hdr;
+    int64_t  len;
+    int64_t  cap;
+    uint8_t *data;    /* separate buffer, so it can grow; never NULL */
+} Bytes;
+
+Obj    *rt_bytes_new(int64_t cap);              /* empty, room for `cap` */
+Obj    *rt_bytes_fill(int64_t n, int64_t v);    /* `[v; n]` */
+int64_t rt_bytes_len(Obj *o);
+int64_t rt_bytes_get(Obj *o, int64_t i);
+void    rt_bytes_set(Obj *o, int64_t i, int64_t v);
+void    rt_bytes_push(Obj *o, int64_t v);
+int64_t rt_bytes_pop(Obj *o);
+void    rt_bytes_clear(Obj *o);
+void    rt_bytes_extend(Obj *o, Obj *more);
+bool    rt_bytes_eq(Obj *a, Obj *b);
+Obj    *rt_bytes_clone(Obj *o);
+Obj    *rt_bytes_substr(Obj *o, int64_t from, int64_t to);
+int64_t rt_bytes_find(Obj *o, Obj *needle);
+bool    rt_bytes_starts_with(Obj *o, Obj *p);
+bool    rt_bytes_ends_with(Obj *o, Obj *p);
+Obj    *rt_bytes_trim(Obj *o);
+Obj    *rt_bytes_case(Obj *o, bool upper);
+Obj    *rt_bytes_repeat(Obj *o, int64_t n);
+Obj    *rt_bytes_split(Obj *o, Obj *sep);
+Obj    *rt_bytes_join(Obj *parts, Obj *sep);
+Obj    *rt_bytes_hex(Obj *o);                    /* a str */
+bool    rt_bytes_utf8(Obj *o, Obj **out);        /* a str, if valid UTF-8 */
+Obj    *rt_str_to_bytes(Obj *s);
+
 /* A hash map. Keys are `int` or `str`; the compiler restricts it, because
  * hashing a user type would need a Hashable interface that does not exist
  * yet. Open addressing with linear probing, which keeps the whole table in

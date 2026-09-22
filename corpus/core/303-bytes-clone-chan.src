@@ -1,0 +1,82 @@
+// A bytes is a reference type like a List: assignment aliases, `clone` is
+// the second object, and crossing a thread boundary moves it. A moved bytes
+// is a leaf -- it holds no references -- so the uniqueness check is its
+// count alone.
+
+type Packet {
+    int id;
+    bytes body;
+}
+
+// Each worker fills the buffer it was handed and sends back a copy. The
+// buffer moved into the thread, but inside the function it is a parameter,
+// and a parameter is borrowed -- so what crosses back is a clone.
+void fill(Chan<bytes> back, bytes buf, int v) {
+    int i = 0;
+    while (i < buf.size()) {
+        buf[i] = v;
+        i = i + 1;
+    }
+    send(back, clone(buf));
+}
+
+// clone is independent: writing the copy leaves the original alone, both
+// ways round.
+bytes a = [1, 2, 3];
+bytes b = clone(a);
+b[0] = 100;
+a.push(4);
+print(a[0]);                            // 1
+print(b[0]);                            // 100
+print(a.size());                        // 4
+print(b.size());                        // 3
+
+// Sent and received: the receiver gets the same bytes, now its own.
+Chan<bytes> ch = Chan<bytes>(4);
+bytes msg = "ping".to_bytes();
+send(ch, msg);
+bytes got = recv(ch);
+print(got.utf8().or("?"));              // ping
+
+// Through threads. Each buffer is fresh, so each is unique when it moves;
+// the answer is a sum, so it does not depend on which thread finishes first.
+Chan<bytes> back = Chan<bytes>(4);
+int k = 1;
+while (k <= 4) {
+    spawn fill(back, [0; 10], k);
+    k = k + 1;
+}
+int total = 0;
+int n = 0;
+while (n < 4) {
+    bytes r = recv(back);
+    for (int x in r) {
+        total = total + x;
+    }
+    n = n + 1;
+}
+print(total);                           // 10 * (1 + 2 + 3 + 4) = 100
+
+// Sending a copy of something you keep is what clone is for.
+bytes keep = "keep".to_bytes();
+send(ch, clone(keep));
+bytes copy = recv(ch);
+copy[0] = 75;
+print(keep.utf8().or("?"));             // keep
+print(copy.utf8().or("?"));             // Keep
+
+// A bytes in a struct and in a List is owned by its container, and a
+// struct holding one crosses a boundary by the same transitive check.
+Chan<Packet> pc = Chan<Packet>(1);
+send(pc, Packet(7, "body".to_bytes()));
+Packet p = recv(pc);
+p.body.push(33);
+print(p.id);                            // 7
+print(p.body.utf8().or("?"));           // body!
+
+List<bytes> many = [];
+many.push("x".to_bytes());
+many.push(keep);
+many[1][0] = 75;
+print(keep.utf8().or("?"));             // Keep: the list holds the same object
+print(many.size());                     // 2

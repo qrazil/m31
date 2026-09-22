@@ -1,0 +1,4 @@
+// Reading past the end traps, as on a List.
+bytes b = [1, 2];
+print(b[1]);
+print(b[2]);

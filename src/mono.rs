@@ -84,6 +84,13 @@ impl Mono {
         // `parse_float` gives one of these, and nothing in the source need
         // ever spell it. Same fact-not-guess reasoning as List<str> above.
         m.enum_decl("Option", &[Ty::Float], span)?;
+        // `bytes` has the same two: `split` gives a List<bytes> and `utf8`
+        // an Option<str>, and a program can reach either without spelling
+        // it -- `s.to_bytes().utf8()` never writes a type at all. Declared
+        // unconditionally for the same reason as List<str>; the Option
+        // costs one small drop and walk function a program may not call.
+        m.builtin_decl("List", &[Ty::Bytes], span);
+        m.enum_decl("Option", &[Ty::Str], span)?;
 
         let mut concrete_funcs = Vec::new();
         for f in p.funcs.clone() {
@@ -163,6 +170,7 @@ impl Mono {
             Ty::Float => "float".into(),
             Ty::Bool => "bool".into(),
             Ty::Str => "str".into(),
+            Ty::Bytes => "bytes".into(),
             Ty::Void => "void".into(),
             Ty::User(i) => self.out_exprs[i as usize].name.clone(),
         }

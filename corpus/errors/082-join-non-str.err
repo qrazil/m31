@@ -1,4 +1,4 @@
-corpus/errors/082-join-non-str.src:2:9: `join` needs a collection of `str`; this one holds int
+corpus/errors/082-join-non-str.src:2:9: `join` needs a collection of `str` or `bytes`; this one holds int
   |
 2 | print(xs.join(","));
   |         ^

@@ -1,0 +1,4 @@
+corpus/errors/306-bytes-map-literal.src:2:11: bytes holds octets; write them as [a, b]
+  |
+2 | bytes b = {};
+  |           ^

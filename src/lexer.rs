@@ -1,9 +1,9 @@
 //! Hand-written lexer. No table generation, no regex, no dependencies.
 //!
-//! Type names are keywords (`int`, `bool`, `str`, `void`), as in Oro. That is
-//! what lets the parser decide "declaration or expression?" with two tokens of
-//! lookahead and no symbol-table feedback -- the thing C needs its lexer hack
-//! for. See docs/ir-v0.md §7.3.
+//! Type names are keywords (`int`, `bool`, `str`, `bytes`, `void`), as in
+//! Oro. That is what lets the parser decide "declaration or expression?" with
+//! two tokens of lookahead and no symbol-table feedback -- the thing C needs
+//! its lexer hack for. See docs/ir-v0.md §7.3.
 
 use crate::diag::{Diag, Span};
 
@@ -19,6 +19,7 @@ pub enum Tok {
     KwInt,
     KwBool,
     KwStr,
+    KwBytes,
     KwVoid,
 
     // other keywords
@@ -99,6 +100,7 @@ impl Tok {
             Tok::KwInt => "int",
             Tok::KwBool => "bool",
             Tok::KwStr => "str",
+            Tok::KwBytes => "bytes",
             Tok::KwVoid => "void",
             Tok::KwReturn => "return",
             Tok::KwIf => "if",
@@ -459,6 +461,7 @@ impl<'a> Lexer<'a> {
             "int" => Tok::KwInt,
             "bool" => Tok::KwBool,
             "str" => Tok::KwStr,
+            "bytes" => Tok::KwBytes,
             "void" => Tok::KwVoid,
             "return" => Tok::KwReturn,
             "if" => Tok::KwIf,

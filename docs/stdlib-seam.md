@@ -221,7 +221,9 @@ each is a freeze decision:
 
   - **A mutable byte buffer.** `str` is immutable, so a `read(fd, buf, n)`
     has nothing to read into. Every codec (base64, UTF-8, hashing) needs the
-    same thing.
+    same thing. *Done: `bytes`, reference §3.10 -- one byte per element, a
+    capacity that `clear` keeps, and strict `utf8()` decoding back to text.
+    `lib/io.src` is not rewired onto it yet.*
   - **Bitwise operators** `& | ^ ~ << >>` on `int`. Hashing, codecs, UTF-8
     decoding and float formatting are all bit manipulation; today they
     cannot be written at all.

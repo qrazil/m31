@@ -1,0 +1,4 @@
+// The fill of [v; n] is checked once, before anything is built.
+int v = 300;
+bytes b = [v; 4];
+print(b.size());

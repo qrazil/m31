@@ -1,0 +1,4 @@
+corpus/errors/302-bytes-negative-literal.src:4:8: -1 is not a byte; a byte is an int from 0 to 255
+  |
+4 | b[0] = -1;
+  |        ^

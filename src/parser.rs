@@ -464,6 +464,7 @@ impl Parser {
             Tok::KwFloat => Ty::Float,
             Tok::KwBool => Ty::Bool,
             Tok::KwStr => Ty::Str,
+            Tok::KwBytes => Ty::Bytes,
             Tok::KwVoid => Ty::Void,
             _ => return None,
         })

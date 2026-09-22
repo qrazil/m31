@@ -11,6 +11,11 @@ pub enum Ty {
     Float,
     Bool,
     Str,
+    /// A mutable, growable sequence of octets. A builtin like `str` rather
+    /// than a predeclared generic like `List`, because it has no type
+    /// argument: its element is always a byte, stored as one, not as an
+    /// int64 slot. See docs/reference.md §3.10.
+    Bytes,
     Void,
     /// A named type -- user-defined, generic instance, or type parameter --
     /// indexed into the program's `ty_exprs` arena.
@@ -28,6 +33,7 @@ impl Ty {
             Ty::Float => "float",
             Ty::Bool => "bool",
             Ty::Str => "str",
+            Ty::Bytes => "bytes",
             Ty::Void => "void",
             // Named through the type table by the caller where a real name
             // is needed; this fallback only appears in internal messages.
@@ -35,10 +41,11 @@ impl Ty {
         }
     }
 
-    /// Whether values of this type are reference counted. Only `str` today;
-    /// this is the single predicate the refcount pass consults.
+    /// Whether values of this type are reference counted: `str`, `bytes`
+    /// and every named type. This is the single predicate the refcount pass
+    /// consults.
     pub fn is_ref(self) -> bool {
-        matches!(self, Ty::Str | Ty::User(_))
+        matches!(self, Ty::Str | Ty::Bytes | Ty::User(_))
     }
 }
 

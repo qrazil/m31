@@ -1,0 +1,5 @@
+// A computed value that is not a byte traps when it is stored, rather than
+// being truncated: 256 silently becoming 0 is a wrong answer nobody sees.
+bytes b = [0];
+int v = 200;
+b[0] = v + 56;

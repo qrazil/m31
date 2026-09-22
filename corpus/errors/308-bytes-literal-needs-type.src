@@ -1,0 +1,3 @@
+// A literal takes its type from where it is written; `==` gives it none.
+bytes b = [1];
+print(b == [1]);

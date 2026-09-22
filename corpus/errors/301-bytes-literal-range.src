@@ -1,0 +1,2 @@
+// A constant that is not a byte is refused before the program runs.
+bytes b = [1, 2, 256];

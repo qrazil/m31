@@ -1,0 +1,79 @@
+// Crossing between str and bytes, both ways, always written out.
+//
+// `s.to_bytes()` cannot fail: a str is already a run of bytes and this hands
+// them over. `b.utf8()` can, so it answers with an Option -- strict UTF-8,
+// with no repair: overlong forms, surrogates, code points past U+10FFFF and
+// truncated sequences are all None rather than a replacement character.
+
+bool valid(bytes b) {
+    return b.utf8().is_some();
+}
+
+str text = "naïve € 😀";
+bytes raw = text.to_bytes();
+print(raw.size());                      // 15: bytes, not characters
+print(raw.utf8().or("?") == text);      // true: the round trip is exact
+
+// Decoded text is ordinary text again.
+bytes greeting = [104, 105, 33];
+match (greeting.utf8()) {
+    case Some(str s): {
+        print(s);                       // hi!
+        print(s.size());                // 3
+    }
+    case None: {
+        print("not text");
+    }
+}
+
+// The edges of each length, all valid.
+bytes nul = [0];
+bytes ascii_top = [127];
+bytes two_min = [194, 128];             // U+0080
+bytes three_min = [224, 160, 128];      // U+0800
+bytes bmp_top = [239, 191, 191];        // U+FFFF
+bytes four_min = [240, 144, 128, 128];  // U+10000
+bytes top = [244, 143, 191, 191];       // U+10FFFF, the last code point
+bytes nothing = [];
+print(valid(nul));                      // true: NUL is a character
+print(valid(ascii_top));                // true
+print(valid(two_min));                  // true
+print(valid(three_min));                // true
+print(valid(bmp_top));                  // true
+print(valid(four_min));                 // true
+print(valid(top));                      // true
+print(valid(nothing));                  // true: no bytes is no characters
+
+// And every way to be wrong.
+bytes lone = [128];                     // a continuation byte leading
+bytes over2 = [192, 128];               // overlong NUL
+bytes over2b = [193, 191];              // overlong U+007F
+bytes over3 = [224, 128, 128];          // overlong in three bytes
+bytes surrogate = [237, 160, 128];      // U+D800
+bytes past = [244, 144, 128, 128];      // U+110000
+bytes f5 = [245, 128, 128, 128];        // a lead byte that never leads
+bytes cut = [226, 130];                 // the euro sign, truncated
+bytes broken = [226, 40, 161];          // a non-continuation in the middle
+bytes ff = [255];
+print(valid(lone));                     // false
+print(valid(over2));                    // false
+print(valid(over2b));                   // false
+print(valid(over3));                    // false
+print(valid(surrogate));                // false
+print(valid(past));                     // false
+print(valid(f5));                       // false
+print(valid(cut));                      // false
+print(valid(broken));                   // false
+print(valid(ff));                       // false
+
+// One bad byte anywhere spoils the whole decode.
+bytes tail = "fine so far".to_bytes();
+tail.push(255);
+print(tail.utf8().or("refused"));       // refused
+
+// to_bytes is a copy: writing the bytes does not touch the string.
+str word = "cat";
+bytes w = word.to_bytes();
+w[0] = 98;
+print(word);                            // cat
+print(w.utf8().or("?"));                // bat

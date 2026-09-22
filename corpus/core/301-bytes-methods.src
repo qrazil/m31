@@ -1,0 +1,59 @@
+// The methods `bytes` shares with `str`: the same names with the same
+// meaning, over octets. Arguments are bytes, never str -- crossing between
+// the two is always written out. Every one of these returns a new bytes and
+// leaves the receiver alone.
+
+bytes s = "Hello, World".to_bytes();
+bytes world = "World".to_bytes();
+bytes xyz = "xyz".to_bytes();
+bytes nothing = [];
+
+print(s.substr(0, 5).hex());            // 48656c6c6f -- "Hello"
+print(s.substr(5, 5).size());           // 0: a half-open range
+
+print(s.contains(world));               // true
+print(s.contains(xyz));                 // false
+print(s.contains(nothing));             // true -- an empty needle is found
+
+print(s.index_of("o".to_bytes()).or(-1));   // 4
+print(s.index_of(xyz).or(-1));              // -1: None, then the default
+print(s.index_of(nothing).or(-1));          // 0
+
+print(s.starts_with("Hello".to_bytes()));   // true
+print(s.starts_with(world));                // false
+print(s.ends_with(world));                  // true
+print(s.ends_with(s));                      // true: a thing ends with itself
+print(world.ends_with(s));                  // false: longer than it
+
+// split keeps empty fields and rejoins exactly, as on str.
+List<bytes> parts = "a,b,,c".to_bytes().split(",".to_bytes());
+print(parts.size());                    // 4
+print(parts[2].size());                 // 0
+print(parts[3].hex());                  // 63 -- "c"
+print(parts.join(",".to_bytes()) == "a,b,,c".to_bytes());   // true
+print(parts.join(nothing).hex());       // 616263 -- "abc"
+
+// A separator longer than one byte, and one that is not there.
+List<bytes> two = "k=>v".to_bytes().split("=>".to_bytes());
+print(two[0].hex());                    // 6b
+print(two[1].hex());                    // 76
+print(s.split(xyz).size());             // 1: the whole thing
+
+// trim removes ASCII whitespace from both ends only.
+bytes padded = " \t in the middle \n".to_bytes();
+print(padded.trim() == "in the middle".to_bytes());   // true
+
+// Case conversion is ASCII only; a byte above 127 is left as it is.
+bytes mixed = "aZ9é".to_bytes();
+print(mixed.to_upper().hex());          // 415a39c3a9
+print(mixed.to_lower().hex());          // 617a39c3a9
+print(mixed.hex());                     // 615a39c3a9: the receiver is unchanged
+
+print("ab".to_bytes().repeat(3).hex()); // 616261626162
+print("ab".to_bytes().repeat(0).size());    // 0
+print(nothing.repeat(1000000).size());      // 0
+
+// hex is lowercase, two digits a byte, no separator -- every value shown.
+bytes edge = [0, 1, 15, 16, 127, 128, 254, 255];
+print(edge.hex());                      // 00010f107f80feff
+print(nothing.hex().size());            // 0
