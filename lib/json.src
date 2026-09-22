@@ -435,27 +435,27 @@ Result<str, Error> utf8(Parser p, int cp, int slash) {
     if (p.table.size() == 0) {
         p.table = octets();
     }
-    List<int> bytes = [];
+    List<int> utf8_units = [];
     if (cp < 128) {
-        bytes.push(cp);
+        utf8_units.push(cp);
     } else if (cp < 2048) {
         // 110xxxxx 10xxxxxx: cp >> 6, cp & 63
-        bytes.push(192 + cp / 64);
-        bytes.push(128 + cp % 64);
+        utf8_units.push(192 + cp / 64);
+        utf8_units.push(128 + cp % 64);
     } else if (cp < 65536) {
         // 1110xxxx 10xxxxxx 10xxxxxx: cp >> 12, cp >> 6 & 63, cp & 63
-        bytes.push(224 + cp / 4096);
-        bytes.push(128 + cp / 64 % 64);
-        bytes.push(128 + cp % 64);
+        utf8_units.push(224 + cp / 4096);
+        utf8_units.push(128 + cp / 64 % 64);
+        utf8_units.push(128 + cp % 64);
     } else {
         // 11110xxx then three 10xxxxxx: cp >> 18, >> 12 & 63, >> 6 & 63, & 63
-        bytes.push(240 + cp / 262144);
-        bytes.push(128 + cp / 4096 % 64);
-        bytes.push(128 + cp / 64 % 64);
-        bytes.push(128 + cp % 64);
+        utf8_units.push(240 + cp / 262144);
+        utf8_units.push(128 + cp / 4096 % 64);
+        utf8_units.push(128 + cp / 64 % 64);
+        utf8_units.push(128 + cp % 64);
     }
     List<str> out = [];
-    for (int b in bytes) {
+    for (int b in utf8_units) {
         if (p.table[b].size() == 0) {
             return Result<str, Error>.Err(Error.NotRepresentable(cp, slash));
         }
