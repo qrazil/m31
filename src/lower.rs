@@ -80,6 +80,9 @@ struct LoopCtx {
     /// Scope depth at the top of the loop body. `break`/`continue` must
     /// release every scope inside this one before jumping.
     depth: usize,
+    /// Whether any `break` leaves this loop. A `while (true)` that nothing
+    /// breaks out of never finishes, so what follows it is unreachable.
+    broke: bool,
 }
 
 struct BlockBuf {
@@ -130,6 +133,8 @@ pub struct Lowerer {
     ty_exprs: Vec<TyExpr>,
     /// Source spellings of instantiations, for diagnostics (`Program::shown`).
     shown: HashMap<String, (String, Vec<Ty>)>,
+    /// Generic methods, by concrete receiver (`Program::generic_methods`).
+    generic_methods: std::collections::HashSet<String>,
     /// Required methods per interface, parallel to `typedefs`; empty for a
     /// struct.
     iface_methods: Vec<Vec<Func>>,
@@ -175,7 +180,7 @@ pub struct Lowerer {
 /// module-level `print` used to replace the builtin silently in its own
 /// module, and to turn every `print` in an importing file into a privacy
 /// error about a function that file never asked for.
-const BUILTIN_FNS: &[&str] = &["print", "concat", "clone", "send", "recv", "close"];
+const BUILTIN_FNS: &[&str] = &["print", "concat", "clone", "send", "recv", "close", "trap"];
 
 /// The representation of a surface type, WITHOUT resolving distinct types.
 /// Use `Lowerer::irty` instead wherever a distinct type can appear.
@@ -208,6 +213,7 @@ impl Lowerer {
             statics: std::collections::HashSet::new(),
             ty_exprs: Vec::new(),
             shown: HashMap::new(),
+            generic_methods: std::collections::HashSet::new(),
             iface_methods: Vec::new(),
             iface_slots: Vec::new(),
             strings: Vec::new(),
@@ -1121,10 +1127,20 @@ impl Lowerer {
         if !args.named.is_empty() {
             return Err(Diag::new(span, format!("`{m}` takes no named arguments")));
         }
+        // `Option<void>` has no payload at all (mono.rs drops a void one):
+        // it can answer `is_some`, and has nothing for `or` to hand back.
         let inner = self.variant_surface[tid as usize]
             .iter()
-            .find_map(|p| p.first().copied())
-            .expect("Option always carries one payload type");
+            .find_map(|p| p.first().copied());
+        let Some(inner) = inner.or(if m == "or" { None } else { Some(Ty::Void) }) else {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`or` gives back the value inside, and {} carries none",
+                    self.show_name(&self.typedefs[tid as usize].name)
+                ),
+            ));
+        };
         let some_tag = self.typedefs[tid as usize]
             .variants
             .iter()
@@ -1900,6 +1916,7 @@ impl Lowerer {
                         recv: Some(t.name.clone()),
                         name: mname,
                         tparams: Vec::new(),
+                        recv_tparams: Vec::new(),
                         params: sig.params.clone(),
                         body,
                         span: f.span,
@@ -1987,6 +2004,7 @@ impl Lowerer {
         self.builtin("concat", vec![Ty::Str, Ty::Str], Ty::Str);
 
         self.imports_by_module = p.imports_by_module.clone();
+        self.generic_methods = p.generic_methods.clone();
         for f in &p.funcs {
             if !f.module.is_empty() {
                 self.modules.insert(f.module.clone());
@@ -2220,6 +2238,7 @@ impl Lowerer {
             recv: None,
             name: "$main".to_string(),
             tparams: Vec::new(),
+            recv_tparams: Vec::new(),
             params: Vec::new(),
             body: p.toplevel.clone(),
             span: Span::new(1, 1),
@@ -3276,6 +3295,11 @@ impl Lowerer {
             }
 
             Stmt::Eval { expr, span } => {
+                if let Expr::Call(name, args, cspan) = expr {
+                    if name == "trap" {
+                        return self.lower_trap(args, *cspan);
+                    }
+                }
                 let val = self.lower_expr(expr)?;
                 // A Result thrown away is the classic quiet bug -- C's
                 // fclose problem. It is an ERROR rather than a warning
@@ -3389,6 +3413,7 @@ impl Lowerer {
                     return Err(Diag::new(*span, format!("unknown function `{name}`")));
                 };
                 let params = sig.params.clone();
+                let module = sig.module.clone();
                 if sig.ret != Ty::Void {
                     return Err(Diag::new(
                         *span,
@@ -3398,7 +3423,7 @@ impl Lowerer {
                 let slots = self.bind_args(name, &params, args, *span)?;
                 let mut vals = Vec::new();
                 for (a, p) in slots.iter().zip(params.iter()) {
-                    let v = self.lower_expr_as(a, p.ty)?;
+                    let v = self.lower_slot(a, p, &module)?;
                     if !self.assignable(v.ty, p.ty) {
                         return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
                     }
@@ -3488,6 +3513,7 @@ impl Lowerer {
                     return Err(Diag::new(*span, "`break` outside a loop"));
                 };
                 let (exit, carried, depth) = (l.exit, l.carried.clone(), l.depth);
+                self.loops.last_mut().expect("checked above").broke = true;
                 self.release_to_depth(depth);
                 let args: Vec<Value> = carried
                     .iter()
@@ -3737,6 +3763,7 @@ impl Lowerer {
             exit: exit_bb,
             carried: carried.iter().map(|(x, _, _)| x.clone()).collect(),
             depth: self.owned.len() - 1,
+            broke: false,
         });
         let lowered = self.lower_block(body);
         self.loops.pop();
@@ -3857,9 +3884,10 @@ impl Lowerer {
             // The body scope we just pushed is the boundary: break and
             // continue release everything inside it, and nothing outside.
             depth: self.owned.len() - 1,
+            broke: false,
         });
         let lowered = self.lower_block(body);
-        self.loops.pop();
+        let broke = self.loops.pop().is_some_and(|l| l.broke);
         lowered?;
         let body_live = !self.terminated();
         if body_live {
@@ -3886,6 +3914,16 @@ impl Lowerer {
         for ((name, _, _), p) in carried.iter().zip(exit_params.iter()) {
             self.rebind(name, *p);
         }
+        // `while (true)` with no `break` out of it does not fall through,
+        // so the code after it is unreachable and a function ending in one
+        // needs no return after it. Only the literal: there is no constant
+        // folding, and "the condition is the word `true`" is a rule a reader
+        // can check by eye. The exit block still has the header's edge in
+        // the CFG, so it is terminated here as the unreachable filler
+        // `lower_func` would give it.
+        if matches!(cond, Expr::Bool(true, _)) && !broke {
+            self.terminate(Term::Ret { val: None });
+        }
         let _ = span;
         Ok(())
     }
@@ -3901,12 +3939,12 @@ impl Lowerer {
     fn lower_static_call(&mut self, key: &str, args: &Args, span: Span) -> Result<Val, Diag> {
         let sig = self.sigs.get(key).expect("checked by the caller");
         let params = sig.params.clone();
+        let module = sig.module.clone();
         let ret = sig.ret;
         let slots = self.bind_args(key, &params, args, span)?;
-        let slots: Vec<Expr> = slots.into_iter().cloned().collect();
         let mut vals = Vec::new();
         for (a, p) in slots.iter().zip(params.iter()) {
-            let v = self.lower_expr_as(a, p.ty)?;
+            let v = self.lower_slot(a, p, &module)?;
             if !self.assignable(v.ty, p.ty) {
                 return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
             }
@@ -4374,8 +4412,15 @@ impl Lowerer {
 
         // Exact error types, for a Result.
         if is_result {
-            let ve = self.variant_surface[vtid as usize][1][0];
-            let re = self.variant_surface[rtid as usize][1][0];
+            // A `void` payload has been dropped (mono.rs), so an empty one
+            // is `void`.
+            let err_of = |lw: &Self, t: u32| {
+                lw.variant_surface[t as usize][1]
+                    .first()
+                    .copied()
+                    .unwrap_or(Ty::Void)
+            };
+            let (ve, re) = (err_of(self, vtid), err_of(self, rtid));
             if ve != re {
                 return Err(Diag::new(
                     span,
@@ -4394,7 +4439,11 @@ impl Lowerer {
             .iter()
             .position(|x| x.name == "Ok" || x.name == "Some")
             .expect("Option and Result each have a success variant") as u32;
-        let payload = self.variant_surface[vtid as usize][ok_tag as usize][0];
+        // `None` for `Result<void, E>`: the success carries nothing, and `e?`
+        // is then a statement rather than a value.
+        let payload = self.variant_surface[vtid as usize][ok_tag as usize]
+            .first()
+            .copied();
 
         // The scrutinee has to outlive both paths and may be a temporary, so
         // it is held the way `match` holds one.
@@ -4451,8 +4500,9 @@ impl Lowerer {
             .iter()
             .position(|x| x.name == "Err" || x.name == "None")
             .expect("Option and Result each have a failure variant") as u32;
-        let carried = if is_result {
-            let e = self.new_val(self.irty(self.variant_surface[vtid as usize][1][0]));
+        let err_ty = self.variant_surface[vtid as usize][1].first().copied();
+        let carried = if let Some(err_ty) = err_ty.filter(|_| is_result) {
+            let e = self.new_val(self.irty(err_ty));
             self.push(Inst::EnumPayload {
                 dst: e,
                 obj: v.val(),
@@ -4461,7 +4511,7 @@ impl Lowerer {
             });
             // Borrowed from the value we are about to release, so the new
             // failure takes a reference of its own.
-            if self.is_ref(self.variant_surface[vtid as usize][1][0]) {
+            if self.is_ref(err_ty) {
                 self.push(Inst::RcInc { val: e });
             }
             Some(e)
@@ -4484,6 +4534,12 @@ impl Lowerer {
         // The succeeding path: the payload, retained because it is borrowed
         // from a value whose scope ends here.
         self.switch_to(ok_bb);
+        let Some(payload) = payload else {
+            self.release_scope();
+            self.scopes.pop();
+            self.owned.pop();
+            return Ok(Val::void());
+        };
         let got = self.new_val(self.irty(payload));
         self.push(Inst::EnumPayload {
             dst: got,
@@ -4779,6 +4835,17 @@ impl Lowerer {
         }
 
         let key = format!("{}.{m}", self.typedefs[tid as usize].name);
+        if self.generic_methods.contains(&key) {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`{m}` is a generic method, and its type arguments are \
+                     inferred where the receiver's type is written down; \
+                     call it on a local, a parameter, a field or a \
+                     construction"
+                ),
+            ));
+        }
         let Some(sig) = self.sigs.get(&key) else {
             return Err(Diag::new(
                 span,
@@ -4789,14 +4856,16 @@ impl Lowerer {
             ));
         };
         let params = sig.params.clone();
+        let module = sig.module.clone();
         let ret = sig.ret;
         let slots = self.bind_args(&key, &params, args, span)?;
 
         // The receiver is the hidden first argument, and is borrowed
-        // like every other argument (docs/ir-v0.md §5.1).
+        // like every other argument (docs/ir-v0.md §5.1). A defaulted
+        // argument is lowered in the method's own module (`lower_slot`).
         let mut vals = vec![o.val()];
         for (a, p) in slots.iter().zip(params.iter()) {
-            let v = self.lower_expr_as(a, p.ty)?;
+            let v = self.lower_slot(a, p, &module)?;
             if !self.assignable(v.ty, p.ty) {
                 return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
             }
@@ -4834,6 +4903,10 @@ impl Lowerer {
         span: Span,
     ) -> Result<Val, Diag> {
         let key = format!("{modname}#{name}");
+        // A generic function arrives already instantiated, as `first$int`
+        // (see mono.rs); the reader wrote `first`, so that is what a
+        // diagnostic names. `$` never appears in a source identifier.
+        let name = name.split('$').next().unwrap_or(name);
         // `lib.Point(3, 4)` -- a construction, not a call. The parser cannot
         // tell the two apart, because it never sees another module's
         // declarations, so it is settled here where both tables are known.
@@ -4863,6 +4936,44 @@ impl Lowerer {
             ));
         }
         self.lower_call(&key, args, span)
+    }
+
+    /// Lower one argument of a call or a construction, as `bind_args` slotted
+    /// it.
+    ///
+    /// An argument the caller wrote is the caller's expression. A DEFAULT is
+    /// the declaration's, and means what it meant where it was written: it
+    /// is lowered with the declaring module's names and privacy, and sees no
+    /// local and no receiver field. It used to be lowered as if the caller
+    /// had written it -- so a public type whose field defaulted to a private
+    /// one could not be constructed outside its module, a bare call in a
+    /// default resolved against the caller's module, and a default naming
+    /// `y` read whatever the caller happened to call `y`.
+    fn lower_slot(&mut self, a: &Expr, p: &Param, module: &str) -> Result<Val, Diag> {
+        let is_default = p.default.as_ref().is_some_and(|d| std::ptr::eq(d, a));
+        if !is_default {
+            return self.lower_expr_as(a, p.ty);
+        }
+        let module = if module.is_empty() {
+            self.cur_module.clone()
+        } else {
+            module.to_string()
+        };
+        let saved_module = std::mem::replace(&mut self.cur_module, module.clone());
+        let saved_scopes = std::mem::replace(&mut self.scopes, vec![HashMap::new()]);
+        let saved_recv = self.recv.take();
+        let r = self.lower_expr_as(a, p.ty).and_then(|v| {
+            if self.assignable(v.ty, p.ty) {
+                Ok(v)
+            } else {
+                Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)))
+            }
+        });
+        self.cur_module = saved_module;
+        self.scopes = saved_scopes;
+        self.recv = saved_recv;
+        // Its span is a line of the declaring file, so the error is too.
+        r.map_err(|d| d.in_module(&module))
     }
 
     /// Lower an expression where the wanted type is known.
@@ -6383,6 +6494,7 @@ impl Lowerer {
         let name = self.typedefs[tid as usize].name.clone();
         let name = name.as_str();
         let fields = self.field_params[tid as usize].clone();
+        let module = self.type_module[tid as usize].clone();
         let slots = self.bind_args(name, &fields, args, span)?;
 
         let mut given: Vec<Option<Val>> = Vec::new();
@@ -6391,7 +6503,7 @@ impl Lowerer {
             // is an expression lowered here, at each construction, so a
             // literal default builds a fresh collection for every object
             // rather than one shared by all of them.
-            let v = self.lower_expr_as(e, f.ty)?;
+            let v = self.lower_slot(e, f, &module)?;
             if !self.assignable(v.ty, f.ty) {
                 return Err(Diag::new(
                     e.span(),
@@ -6430,7 +6542,52 @@ impl Lowerer {
         Ok(Val::new(obj, ty, true))
     }
 
+    /// `trap(msg);` -- stop the program, because it has a bug.
+    ///
+    /// The runtime's own traps cover the mistakes the language can see: an
+    /// index out of range, an overflow. `trap` is the same thing for the
+    /// ones only the program can see -- an argument outside what a function
+    /// accepts, an invariant that does not hold. It is for a bug and not for
+    /// the world (docs/errors-decision.md): a failure the caller should
+    /// handle is a `Result`, and nothing can catch a trap.
+    ///
+    /// It never returns, so the block ends here: a function whose last
+    /// statement is a `trap` needs no return after it, and a statement after
+    /// one is unreachable, as after `return`. That is also why it is a
+    /// statement and never a value -- there is no value it could give.
+    fn lower_trap(&mut self, args: &Args, span: Span) -> Result<(), Diag> {
+        if args.pos.len() != 1 || !args.named.is_empty() {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`trap` takes 1 argument, its message, found {}",
+                    args.pos.len() + args.named.len()
+                ),
+            ));
+        }
+        let m = self.lower_expr(&args.pos[0])?;
+        if self.underlying(m.ty) != Ty::Str {
+            return Err(Diag::new(args.pos[0].span(), self.mismatch(Ty::Str, m.ty)));
+        }
+        self.push(Inst::Call {
+            dst: None,
+            func: "rt_panic".to_string(),
+            args: vec![m.val()],
+        });
+        // Nothing after the call runs, so nothing pending is released: the
+        // statement's temporaries die with the process.
+        self.stmt_temps.clear();
+        self.terminate(Term::Ret { val: None });
+        Ok(())
+    }
+
     fn lower_call(&mut self, name: &str, args: &Args, span: Span) -> Result<Val, Diag> {
+        if name == "trap" {
+            return Err(Diag::new(
+                span,
+                "`trap` is a statement: it never returns, so it has no value to give",
+            ));
+        }
         // `print` accepts int, bool or str and selects the runtime helper from
         // the static argument type. Not user-visible overloading.
         if name == "print" {
@@ -6676,6 +6833,7 @@ impl Lowerer {
             return Err(Diag::new(span, format!("unknown function `{name}`")));
         };
         let params = sig.params.clone();
+        let module = sig.module.clone();
         let ret = sig.ret;
         let sig_is_prim = sig.is_prim;
 
@@ -6683,7 +6841,7 @@ impl Lowerer {
 
         let mut vals = Vec::new();
         for (a, p) in slots.iter().zip(params.iter()) {
-            let v = self.lower_expr_as(a, p.ty)?;
+            let v = self.lower_slot(a, p, &module)?;
             if !self.assignable(v.ty, p.ty) {
                 return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
             }

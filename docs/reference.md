@@ -420,6 +420,29 @@ There is no `unwrap`. Trapping on `None` is what `Map.get` used to do, and
 putting it back behind a shorter name would undo the reason for the change.
 Taking the value out and keeping it is what `match` is for.
 
+**A function that can fail but has nothing to return is
+`Result<void, E>`.** A `void` payload is no value, so it is dropped: at
+`Result<void, E>`, `Ok` is a variant that carries nothing, and it is written
+exactly like every other payload-less variant — no special case:
+
+```c
+Result<void, str> check(int x) {
+    if (x < 0) { return Result<void, str>.Err("negative"); }
+    return Result<void, str>.Ok;
+}
+
+check(a)?;                  // a statement: there is no value to give
+match (check(b)) {
+    case Ok: { ... }
+    case Err(str e): { ... }
+}
+```
+
+The same holds for any generic enum at `void` (`Option<void>` has a `Some`
+that carries nothing, and no `or`). A struct cannot be instantiated at
+`void`: a field is named at every construction and every read, so it cannot
+quietly vanish the way a payload does.
+
 ### 3.8 Generics
 
 Type parameters on a type or a function:
@@ -432,6 +455,58 @@ T unwrap<T>(Box<T> b) { return b.item; }
 Generics are **monomorphised**: each instantiation becomes a separate
 concrete type or function before the IR, so there is no boxing and no runtime
 type argument. Unused instantiations are not emitted.
+
+A **method on a generic type names the type's parameters on its receiver**,
+and a method may have type parameters of its own, on any type:
+
+```c
+T Box<T>.get() { return item; }
+Box<U> Box<T>.swap<U>(U v) { return Box<U>(v); }
+T Picker.pick<T>(List<T> xs) { return xs[at]; }
+```
+
+The names on the receiver are the method's; they need not match the type
+declaration's, and there must be as many. `T Box.get()` for a generic `Box`
+is refused: the signature should say what `T` is without sending the reader
+to the type. A method on a generic type is instantiated with each
+instantiation of the type, and is checked only then, like the rest of a
+generic declaration.
+
+A generic method's own type arguments are inferred like a function's, and
+that needs the receiver's type written down too: the receiver must be a
+local, a parameter, a construction, or — inside a method — a receiver
+field (on a generic type, when the method names the type's parameters as
+its declaration does). `make().pick(xs)` is refused, with that said; bind `make()` to a
+local first.
+
+A generic function's type arguments are **inferred from its arguments**;
+there is no `f<int>(x)`, because after a name that is not a type `<` would be
+a comparison. Each type parameter must be reached by a mandatory parameter
+whose argument has a written type: a literal, a construction, an enum variant,
+or a local or parameter (whose declaration spells its type). A collection
+literal contributes its first element — `first([1, 2])` against `List<T>`
+binds `T` to `int` — and an empty one contributes nothing.
+
+What the arguments leave open is inferred from **where the value goes**, if
+that has a written type: a declaration, an assignment, a `return`, or a
+parameter of a non-generic function it is passed to — the same places a
+collection literal takes its type from. So a helper whose type parameter is
+only in its return type can be called:
+
+```c
+Result<T, str> fail<T>(str why) { return Result<T, str>.Err(why); }
+
+Result<int, str> half(int n) {
+    if (n % 2 != 0) { return fail("odd"); }     // T is int, from the return type
+    ...
+}
+```
+
+The arguments speak first; the destination only fills in what they left.
+Anywhere else — `print(nothing().is_some())`, a receiver, an operand — there
+is nothing to infer from, and the compiler says so and asks for a local with
+a written type. A `pub` generic function is called from another module like any other,
+as `lib.first(xs)`.
 
 There are no constraints on type parameters yet. A generic body that does
 something a given argument cannot do fails when that instantiation is
@@ -689,6 +764,13 @@ A parameter may have a default, which makes it optional:
 int scale(int v, int by = 2) { return v * by; }
 ```
 
+A default — of a parameter or of a field (§3.3) — is evaluated afresh at
+each call or construction that leaves it out, but it **belongs to the
+declaration**: it is checked with the declaring module's names and privacy,
+so a `pub` type may default a field to one of its module's private types,
+and it sees no local, parameter or receiver field of whoever is calling. It
+means what it meant where it was written.
+
 **Mandatory parameters are positional. Optional ones are named.** There is
 no choice about it, so one call is written exactly one way:
 
@@ -713,7 +795,12 @@ find which parameter a value lands in, and should never meet the same call
 spelled two ways.
 
 A function returning non-`void` must return on every path; falling off the
-end is a compile error. There are no multiple return values yet.
+end is a compile error. A `while (true)` with no `break` out of it is a path
+that never ends, so a function may finish with one and nothing after it —
+and, like a statement after a `return`, a statement after one is an
+unreachable-statement error. Only the literal `true` counts: there is no
+constant folding, and a rule a reader can check by eye beats one that needs
+the compiler's arithmetic. There are no multiple return values yet.
 
 ### 4.3 Methods
 
@@ -1132,6 +1219,20 @@ and `from_` make them a visible pair, the one Rust uses.
 | `clone(x)` | a **shallow** copy |
 | `int(x)`, `bool(x)`, `str(x)`, `bytes(x)` | convert a distinct value to its base |
 | `send(ch, v)`, `recv(ch)`, `close(ch)` | channels (§8) |
+| `trap(msg)` | stop the program with a `str` message (§7.4); a statement, never a value |
+
+**`trap(msg)` is for a bug, never for the world.** The language traps on
+the mistakes it can see — an index out of range, an overflow — and `trap`
+is the same thing for the ones only the program can see: an argument
+outside what a function accepts, an invariant that does not hold. A failure
+a caller should handle is a `Result` (docs/errors-decision.md); nothing
+catches a trap. It never returns, so it ends its block like `return` does:
+a function may end in one with no return after it, and a statement after one
+is unreachable. For the same reason it has no value and may only be written
+as a statement.
+
+There is no `assert(cond, msg)`: it would be a second spelling of
+`if (!cond) { trap(msg); }`, and one way to write a thing beats two.
 
 `print` selects its runtime helper from the static argument type. That is not
 user-visible function overloading, which does not exist.
@@ -1224,6 +1325,7 @@ Trapping conditions:
   - `recv` on a channel that is closed and drained
   - a length or capacity too large to allocate
   - a uniqueness violation at a thread boundary (§8.3)
+  - `trap(msg)`, with the program's own message (§6.6)
 
 ---
 
@@ -1349,8 +1451,9 @@ distinct    = "distinct" type IDENT ";" ;
 field       = type IDENT [ "=" expr ] | type ;        (* bare type = embedded *)
 sig         = type IDENT "(" [ params ] ")" ;
 
-func        = [ "static" ] type [ IDENT "." ] IDENT [ tparams ]
-              "(" [ params ] ")" block ;              (* static needs a receiver *)
+func        = [ "static" ] type [ IDENT [ tparams ] "." ] IDENT [ tparams ]
+              "(" [ params ] ")" block ;              (* static needs a receiver;
+                                                         receiver tparams: §3.8 *)
 prim        = "prim" type IDENT "(" [ params ] ")" ";" ;  (* stdlib source only, §10.1 *)
 tparams     = "<" IDENT { "," IDENT } ">" ;
 params      = param { "," param } ;

@@ -1,0 +1,10 @@
+// Nothing after a `while (true)` with no `break` can run, the same as
+// after a `return`.
+int f(int x) {
+    while (true) {
+        return x;
+    }
+    return 0;
+}
+
+print(f(1));

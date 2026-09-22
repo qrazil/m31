@@ -570,6 +570,9 @@ impl Fmt {
             format!("<{}>", f.tparams.join(", "))
         };
         let name = match &f.recv {
+            Some(r) if !f.recv_tparams.is_empty() => {
+                format!("{}<{}>.{}", shown(r), f.recv_tparams.join(", "), f.name)
+            }
             Some(r) => format!("{}.{}", shown(r), f.name),
             None => shown(&f.name),
         };

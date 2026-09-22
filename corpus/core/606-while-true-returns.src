@@ -1,0 +1,45 @@
+// `while (true)` with no `break` out of it never finishes, so a function
+// that ends in one needs no return after it.
+
+int first_over(int x) {
+    while (true) {
+        if (x > 3) {
+            return x;
+        }
+        x = x + 1;
+    }
+}
+
+// A `break` in an INNER loop leaves that loop, not this one.
+int rows(int n) {
+    int count = 0;
+    while (true) {
+        int i = 0;
+        while (i < 10) {
+            if (i == 2) {
+                break;
+            }
+            i = i + 1;
+        }
+        count = count + i;
+        if (count >= n) {
+            return count;
+        }
+    }
+}
+
+str name(List<str> xs, int want) {
+    int i = 0;
+    while (true) {
+        str s = xs[i];
+        if (s.size() == want) {
+            return s;
+        }
+        i = i + 1;
+    }
+}
+
+print(first_over(1));
+print(first_over(9));
+print(rows(5));
+print(name(["a", "bb", "ccc"], 2));

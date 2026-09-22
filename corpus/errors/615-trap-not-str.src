@@ -1,0 +1,2 @@
+// A trap message is a `str`.
+trap(3);

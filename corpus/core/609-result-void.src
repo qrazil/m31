@@ -1,0 +1,77 @@
+// `Result<void, E>`: a function that can fail but has nothing to return.
+//
+// A `void` payload is no value, so `Ok` at `Result<void, E>` carries
+// nothing and reads like any payload-less variant: constructed
+// `Result<void, E>.Ok`, matched `case Ok:`, and `e?` is a statement.
+
+Result<void, str> check(int x) {
+    if (x < 0) {
+        return Result<void, str>.Err("negative");
+    }
+    return Result<void, str>.Ok;
+}
+
+Result<void, str> both(int a, int b) {
+    check(a)?;
+    check(b)?;
+    return Result<void, str>.Ok;
+}
+
+// `?` on a void success in a function whose own success is a value.
+Result<int, str> sum_checked(int a, int b) {
+    both(a, b)?;
+    return Result<int, str>.Ok(a + b);
+}
+
+void report(Result<void, str> r) {
+    match (r) {
+        case Ok: {
+            print("ok");
+        }
+        case Err(str e): {
+            print(e);
+        }
+    }
+}
+
+report(check(1));
+report(check(-1));
+report(both(1, 2));
+report(both(1, -2));
+
+match (sum_checked(3, 4)) {
+    case Ok(int v): {
+        print(v);
+    }
+    case Err(str e): {
+        print(e);
+    }
+}
+
+match (sum_checked(-3, 4)) {
+    case Ok(int v): {
+        print(v);
+    }
+    case Err(str e): {
+        print(e);
+    }
+}
+
+// Any generic enum loses a `void` payload the same way.
+enum Step<T> {
+    Done;
+    More(T);
+}
+
+Step<void> s = Step<void>.More;
+match (s) {
+    case Done: {
+        print("done");
+    }
+    case More: {
+        print("more");
+    }
+}
+
+Option<void> o = Option<void>.Some;
+print(o.is_some());

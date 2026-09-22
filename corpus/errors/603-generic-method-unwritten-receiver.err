@@ -1,0 +1,4 @@
+corpus/errors/603-generic-method-unwritten-receiver.src:15:13: `pick` is a generic method, and its type arguments are inferred where the receiver's type is written down; call it on a local, a parameter, a field or a construction
+   |
+15 | print(make().pick([1, 2]));
+   |             ^

@@ -173,6 +173,27 @@ bug — C's `fclose` problem. Rust warns via `#[must_use]`.
 The language has no warnings today and should not grow a category for this.
 `Option` is exempt: ignoring an `Option` is often reasonable.
 
+### 6. Can a program trap with its own message? — DECIDED: yes, `trap(msg)`
+
+Implemented, as a builtin statement.
+
+The standard library needed it first — `random.integer(3, 1)`, `os.exit(256)`
+and declaring `--help` twice are bugs in the caller, and "a trap is for a bug
+in the program" says they trap — and it met the need with a private prim.
+But the need is not the library's: any program has preconditions and
+invariants the language cannot see, and without a way to trap on them it has
+two bad choices — a `Result`, which tells the caller a bug is an event in the
+world to be handled, or a contrived index out of range. `trap` takes neither.
+It adds no way to *recover*, so it changes nothing settled above: a trap is
+still uncatchable, still for bugs, and a failure of the world is still a
+`Result`.
+
+Spelled `trap` because that is this language's word — the section of the
+reference, the runtime's `trap: ` prefix — rather than borrowing `panic`,
+which in Go comes with `recover`. It is a statement and never returns, so
+the missing-return check knows a function may end in one. There is no
+`assert`: it would be a second spelling of `if (!c) { trap(msg); }`.
+
 ---
 
 ## Order of work

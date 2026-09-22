@@ -1,0 +1,4 @@
+corpus/errors/607-while-true-with-break.src:3:1: function `f` must return a value of type int
+  |
+3 | int f(int x) {
+  | ^

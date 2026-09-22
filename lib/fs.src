@@ -43,7 +43,6 @@ prim int __rmdir(str path);
 prim int __rename(str from, str to);
 prim int __symlink(str target, str path);
 prim int __listdir(str path, bytes buf);
-prim void __panic(str msg);
 
 // File type bits in a mode, the historical Unix values and the same on
 // every system (runtime/sys.h). Octal, as they are usually written:
@@ -516,8 +515,6 @@ bool matches(List<int> name, List<int> pat) {
         ni = star_ni;
         pi = star + 1;
     }
-    // Unreachable: the loop leaves only by returning.
-    return false;
 }
 
 // The index of the `]` closing the class that opens at `open_at`, or -1.
@@ -605,7 +602,7 @@ pub Result<bool, io.Error> rmtree(str path, str within) {
     } else if (path.starts_with(w + "/")) {
         rest = path.substr(w.size() + 1, path.size());
     } else {
-        __panic("rmtree refused: '" + path + "' is not inside '" + within + "'");
+        trap("rmtree refused: '" + path + "' is not inside '" + within + "'");
     }
     // Every component on the way down: spelled plainly, and not a link.
     str at = w;
@@ -614,7 +611,7 @@ pub Result<bool, io.Error> rmtree(str path, str within) {
             continue;
         }
         if (part == "." || part == "..") {
-            __panic("rmtree refused: '" + path + "' climbs with '" + part + "'; name the directory plainly");
+            trap("rmtree refused: '" + path + "' climbs with '" + part + "'; name the directory plainly");
         }
         at = join(at, part);
         Stat s = stat_of(at, false)?;
@@ -704,5 +701,4 @@ Result<int, io.Error> pump(io.File r, io.File w) {
         }
         total = total + w.write(chunk)?;
     }
-    return Result<int, io.Error>.Ok(total);
 }

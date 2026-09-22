@@ -20,7 +20,6 @@ Counter Counter.bump_to(int limit) {
         }
         n = n + 1;
     }
-    return this;
 }
 
 type Builder {

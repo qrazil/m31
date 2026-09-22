@@ -1888,17 +1888,34 @@ _Noreturn void rt_exit(int64_t code) {
     exit((int)code);
 }
 
-/* A library's way to say "this is a bug in the caller" -- the same trap the
- * language itself uses for an index out of range, with the library's own
- * message. The message is copied to a C string only here, on the way out. */
+/* `trap(msg)`: a program's way to say "this is a bug" -- the same trap the
+ * language itself uses for an index out of range, with the program's own
+ * message. Shaped like rt_trap: flush what `print` has buffered (it used
+ * fflush(stdout), which is not where print's output waits, so a program's
+ * last lines were lost whenever stdout was not a terminal), then one write
+ * where the message fits, so another thread's output cannot split it. A
+ * message too long for that is written in pieces rather than cut: unlike
+ * rt_trap's literals, it is the program's text and may be long. */
 _Noreturn void rt_panic(Obj *msg) {
-    /* Through rt_trap, not stdio: `print` writes to the runtime's own
-     * buffer, so an fflush(stdout) here flushed nothing and a library trap
-     * silently lost every line the program had printed but not yet
-     * flushed. A str's data is NUL-terminated, so it is already the C
-     * string rt_trap wants; an embedded NUL cuts the message short, which
-     * is the most a trap message can suffer. */
-    rt_trap(((Str *)msg)->data);
+    /* Through the runtime's own buffer and one write, as rt_trap does:
+     * `print` does not use stdio, so an fflush(stdout) flushed nothing and a
+     * trap lost the program's last lines. The length is the str's own, so an
+     * embedded NUL does not cut the message short. */
+    Str *m = (Str *)msg;
+    size_t n = m->len > 0 ? (size_t)m->len : 0;
+    rt_out_flush();
+    char buf[4096];
+    if (n + 7 <= sizeof buf) {
+        memcpy(buf, "trap: ", 6);
+        memcpy(buf + 6, m->data, n);
+        buf[6 + n] = '\n';
+        write_all(2, buf, n + 7);
+    } else {
+        write_all(2, "trap: ", 6);
+        write_all(2, (const char *)m->data, n);
+        write_all(2, "\n", 1);
+    }
+    abort();
 }
 
 /* CLOCK_REALTIME: wall-clock time since 1970-01-01T00:00:00Z. Seconds and

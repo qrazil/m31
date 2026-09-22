@@ -36,7 +36,6 @@ prim int __close(int fd);
 prim int __seek(int fd, int off, int whence);
 prim int __fstat(int fd, List<int> out);
 prim void __out_flush();
-prim void __panic(str msg);
 
 // The sys layer's own constants (runtime/sys.h), written as numbers because
 // they are the layer's and not the host's: the same on every target, which
@@ -190,10 +189,10 @@ pub Result<bytes, Error> File.read_until(bytes delim, int limit) {
 /// loop that hands it the rest is here so that no caller writes one.
 pub Result<int, Error> File.write(bytes b) {
     if (!s.live) {
-        __panic("write on a closed file");
+        trap("write on a closed file");
     }
     if (!s.writable) {
-        __panic("write on a file opened for reading");
+        trap("write on a file opened for reading");
     }
     if (s.fd == 1 || s.fd == 2) {
         __out_flush();
@@ -301,10 +300,10 @@ pub File stderr() {
 // Refill an empty buffer. The number of bytes now buffered, 0 at the end.
 Result<int, Error> fill(Stream s) {
     if (!s.live) {
-        __panic("read on a closed file");
+        trap("read on a closed file");
     }
     if (!s.readable) {
-        __panic("read on a file opened for writing");
+        trap("read on a file opened for writing");
     }
     if (s.buf.size() == 0) {
         s.buf = [0; 65536];
@@ -323,14 +322,11 @@ Result<int, Error> fill(Stream s) {
         s.end = r;
         return Result<int, Error>.Ok(r);
     }
-    // Unreachable: the loop only leaves by returning. The language wants a
-    // return on every path and cannot see that `while (true)` has no exit.
-    return Result<int, Error>.Ok(0);
 }
 
 Result<bytes, Error> stream_read(Stream s, int n) {
     if (n < 1) {
-        __panic("read(" + n.to_str() + "): read at least one byte; read_all() reads everything");
+        trap("read(" + n.to_str() + "): read at least one byte; read_all() reads everything");
     }
     if (s.at == s.end) {
         if (fill(s)? == 0) {
@@ -349,10 +345,10 @@ Result<bytes, Error> stream_read(Stream s, int n) {
 
 Result<bytes, Error> stream_read_all(Stream s) {
     if (!s.live) {
-        __panic("read on a closed file");
+        trap("read on a closed file");
     }
     if (!s.readable) {
-        __panic("read on a file opened for writing");
+        trap("read on a file opened for writing");
     }
     // What the buffer already holds comes first.
     bytes out = [];
@@ -409,10 +405,10 @@ Result<bytes, Error> stream_read_all(Stream s) {
 
 Result<bytes, Error> stream_read_until(Stream s, bytes delim, int limit) {
     if (delim.size() == 0) {
-        __panic("read_until: the delimiter is empty");
+        trap("read_until: the delimiter is empty");
     }
     if (limit < 1) {
-        __panic("read_until(" + limit.to_str() + "): the limit must be at least 1");
+        trap("read_until(" + limit.to_str() + "): the limit must be at least 1");
     }
     int last = delim[delim.size() - 1];
     bytes out = [];

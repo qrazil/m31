@@ -1,0 +1,9 @@
+// Arity of the receiver type parameters must match the type.
+type Pair<A, B> {
+    A a;
+    B b;
+}
+
+A Pair<A>.first() {
+    return a;
+}

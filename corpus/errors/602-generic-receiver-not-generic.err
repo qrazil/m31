@@ -1,0 +1,4 @@
+corpus/errors/602-generic-receiver-not-generic.src:6:1: type `Point` is not generic; write the receiver as `Point`
+  |
+6 | int Point<T>.get() {
+  | ^

@@ -70,7 +70,6 @@
 // the error.
 
 prim int __entropy(int n, List<int> out);
-prim void __panic(str msg);
 
 /// A reproducible generator: the same seed gives the same sequence, on every
 /// platform and every release, because every step of it is integer
@@ -183,7 +182,7 @@ bytes fill(Source s, int n) {
     List<int> got = [];
     int e = __entropy(n, got);
     if (e != 0) {
-        __panic("random: the operating system supplied no randomness (errno " + e.to_str() + ")");
+        trap("random: the operating system supplied no randomness (errno " + e.to_str() + ")");
     }
     bytes out = [];
     for (int b in got) {
@@ -215,7 +214,7 @@ str hex_from(Source s, int n) {
 // answers the same integers in both.
 int integer_from(Source s, int low, int high) {
     if (high < low) {
-        __panic("random.integer(" + low.to_str() + ", " + high.to_str() + "): the range is empty -- high is below low, and both ends are included");
+        trap("random.integer(" + low.to_str() + ", " + high.to_str() + "): the range is empty -- high is below low, and both ends are included");
     }
     if (low == high) {
         return low;
@@ -253,7 +252,6 @@ int integer_wide(Source s, int low, int high) {
             return base + rest;
         }
     }
-    return low;
 }
 
 // Seven octets, three bits dropped: 53 bits over 2^53, which is CPython's
@@ -382,6 +380,6 @@ int low_bits(bytes b, int bits) {
 
 void check_count(int n, str who) {
     if (n < 0) {
-        __panic("random." + who + "(" + n.to_str() + "): a count cannot be negative");
+        trap("random." + who + "(" + n.to_str() + "): a count cannot be negative");
     }
 }

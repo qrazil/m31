@@ -1,0 +1,74 @@
+pub enum Maybe<T> {
+    Nothing;
+    Just(T);
+}
+
+pub type Pair<A, B> {
+    A a;
+    B b;
+}
+
+pub Maybe<T> just<T>(T v) {
+    return Maybe<T>.Just(v);
+}
+
+pub T or_else<T>(Maybe<T> m, T d) {
+    match (m) {
+        case Nothing: {
+            return d;
+        }
+        case Just(T v): {
+            return v;
+        }
+    }
+}
+
+pub Pair<A, B> pair<A, B>(A a, B b) {
+    return Pair<A, B>(a, b);
+}
+
+pub T first<T>(List<T> xs) {
+    return xs[0];
+}
+
+pub int count<K, V>(Map<K, V> m) {
+    return m.size();
+}
+
+// Reached only through `lib.twice`: a generic function calling a private
+// generic helper of its own module, instantiated from another module.
+T echo<T>(T v) {
+    return v;
+}
+
+pub List<T> twice<T>(T v) {
+    return [echo(v), echo(v)];
+}
+
+pub type Stack<T> {
+    List<T> items;
+}
+
+pub void Stack<T>.push(T v) {
+    items.push(v);
+}
+
+pub T Stack<T>.top() {
+    return items[items.size() - 1];
+}
+
+pub static Stack<T> Stack<T>.empty() {
+    return Stack<T>([]);
+}
+
+pub List<U> Stack<T>.tag<U>(U label) {
+    List<U> out = [];
+    for (T v in items) {
+        out.push(label);
+    }
+    return out;
+}
+
+pub Result<T, str> refuse<T>(str why) {
+    return Result<T, str>.Err(why);
+}
