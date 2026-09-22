@@ -62,6 +62,14 @@ pub struct Mono {
     /// contributes when it is passed to a generic function and the type
     /// argument has to be inferred from it.
     recv_ty: Option<Ty>,
+    /// The receiver's OUTPUT type name (`Picker`, `Holder$int`) while an
+    /// instance method is being substituted; `None` anywhere else. Unlike
+    /// `recv_ty` it is already concrete, so it can key `own_generic`: it is
+    /// what lets a bare `pick(xs)` inside a method, or `this.pick(xs)`,
+    /// instantiate the receiver's own generic method. Inside a method of a
+    /// generic type the written receiver is just `Holder`, which resolves
+    /// to nothing, so only the instantiation being emitted can say it.
+    cur_recv: Option<String>,
     /// Every module in the program, to tell `lib.f(..)` -- a call into a
     /// module -- from a method call on a value.
     modules: HashSet<String>,
@@ -101,6 +109,7 @@ impl Mono {
             env: Vec::new(),
             cur_module: String::new(),
             recv_ty: None,
+            cur_recv: None,
             modules: p.imports_by_module.keys().cloned().collect(),
             cur_ret: None,
             func_params: HashMap::new(),
@@ -169,7 +178,8 @@ impl Mono {
             m.out_types.push(t);
         }
         for f in concrete_funcs {
-            let f = m.subst_func(&f, &empty)?;
+            let recv = f.recv.clone().filter(|_| !f.is_static);
+            let f = m.subst_func(&f, &empty, recv)?;
             m.out_funcs.push(f);
         }
 
@@ -270,6 +280,23 @@ impl Mono {
             Ty::Void => "void".into(),
             Ty::User(i) => self.out_exprs[i as usize].name.clone(),
         }
+    }
+
+    /// An output type's name as the reader wrote it, for a diagnostic:
+    /// `Holder<int>` for `Holder$int`, `Point` for `lib#Point`. Only the
+    /// names the reader's own module uses, which is all a receiver can be.
+    fn show_out(&self, name: &str) -> String {
+        let Some((base, args)) = self.shown.get(name) else {
+            return crate::ast::bare(name).to_string();
+        };
+        let args: Vec<String> = args
+            .iter()
+            .map(|a| match a {
+                Ty::User(i) => self.show_out(&self.out_exprs[*i as usize].name),
+                t => self.ty_key(*t),
+            })
+            .collect();
+        format!("{}<{}>", crate::ast::bare(base), args.join(", "))
     }
 
     /// Resolve a type written inside a declaration into a concrete output
@@ -490,7 +517,7 @@ impl Mono {
             .cloned()
             .zip(args.iter().copied())
             .collect();
-        let mut f = self.subst_func(&decl, &sub)?;
+        let mut f = self.subst_func(&decl, &sub, None)?;
         f.name = mangled;
         f.tparams = Vec::new();
         self.out_funcs.push(f);
@@ -509,7 +536,8 @@ impl Mono {
         if !self.done.insert(format!("{recv}.{name}")) {
             return Ok(());
         }
-        let mut f = self.subst_func(decl, sub)?;
+        let this = (!decl.is_static).then(|| recv.to_string());
+        let mut f = self.subst_func(decl, sub, this)?;
         f.recv = Some(recv.to_string());
         f.name = name.to_string();
         f.tparams = Vec::new();
@@ -704,7 +732,10 @@ impl Mono {
         })
     }
 
-    fn subst_func(&mut self, f: &Func, sub: &Subst) -> Result<Func, Diag> {
+    /// `recv` is the receiver's output type name for an instance method
+    /// (`Program`-level name, already instantiated), `None` for a function
+    /// or a static method -- see `cur_recv`.
+    fn subst_func(&mut self, f: &Func, sub: &Subst, recv: Option<String>) -> Result<Func, Diag> {
         self.cur_module = f.module.clone();
         self.cur_ret = Some(f.ret);
         let ret = self.subst_ty(f.ret, sub, f.span)?;
@@ -741,8 +772,10 @@ impl Mono {
             Some(r) if !f.is_static => Some(self.src_ty_named(r)),
             _ => None,
         };
+        self.cur_recv = recv;
         let body = self.subst_block(&f.body, sub);
         self.recv_ty = None;
+        self.cur_recv = None;
         let body = body?;
         self.env.clear();
         Ok(Func {
@@ -1133,6 +1166,42 @@ impl Mono {
                 // queued and the name rewritten to the mangled one. Inference
                 // is deliberately shallow -- see `infer`.
                 let name = &self.resolve_fn(written);
+                // Inside an instance method a bare call may name a sibling
+                // method (the lowering's `sibling_call`), and one with type
+                // parameters of its own is instantiated here like any other
+                // generic method: the receiver is this method's own, so its
+                // type is known even though nothing spells it. The call keeps
+                // its bare shape, renamed to the instantiation; the lowering
+                // recognises `pick$int` as the receiver's method from there.
+                if let Some(recv) = self.cur_recv.clone() {
+                    let found = self
+                        .own_generic
+                        .get(&recv)
+                        .and_then(|ms| ms.get(written))
+                        .filter(|(decl, _)| !decl.is_static)
+                        .cloned();
+                    if let Some((decl, rsub)) = found {
+                        // A generic function of the same name would make the
+                        // bare call ambiguous. The lowering refuses that for
+                        // every other pairing, but once both are renamed to
+                        // their instantiations it can no longer see this one.
+                        if self.generic_funcs.contains_key(name) {
+                            return Err(Diag::new(
+                                *s,
+                                format!(
+                                    "`{written}` is both a method of `{}` and a function, \
+                                     so a bare `{written}(..)` here could mean either; \
+                                     rename one",
+                                    self.show_out(&recv)
+                                ),
+                            ));
+                        }
+                        let out = self.subst_args(args, sub)?;
+                        let inst = self
+                            .generic_method_call(decl, rsub, recv, written, args, sub, *s, want)?;
+                        return Ok(Expr::Call(inst, out, *s));
+                    }
+                }
                 if self.generic_funcs.contains_key(name) {
                     let out = self.subst_args(args, sub)?;
                     let mangled = self.generic_call(name, args, sub, *s, want)?;
@@ -1324,6 +1393,12 @@ impl Mono {
     /// The output name of a method call's receiver type, when the receiver
     /// has a written type -- the same few shapes inference reads.
     fn recv_name(&mut self, obj: &Expr, sub: &Subst) -> Option<String> {
+        // `this` is the method's own receiver, whose output name is known
+        // even on a generic type, where the written `Holder` resolves to
+        // nothing.
+        if let (Expr::This(_), Some(r)) = (obj, &self.cur_recv) {
+            return Some(r.clone());
+        }
         let t = self.arg_ty(obj)?;
         let span = obj.span();
         match self.subst_ty(t, sub, span).ok()? {

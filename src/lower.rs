@@ -2828,7 +2828,15 @@ impl Lowerer {
             None => crate::ast::bare(head).to_string(),
         };
         match rest {
-            Some(m) => format!("{head}.{m}"),
+            // The method may be an instantiation too: `Picker.pick<int>`
+            // for `Picker.pick$int`, never the mangled name.
+            Some(m) => match self.shown.get(m) {
+                Some((base, args)) => {
+                    let args: Vec<String> = args.iter().map(|a| self.tyname(*a)).collect();
+                    format!("{head}.{}<{}>", crate::ast::bare(base), args.join(", "))
+                }
+                None => format!("{head}.{m}"),
+            },
             None => head,
         }
     }
@@ -5069,6 +5077,30 @@ impl Lowerer {
         };
         let (rtid, _) = self.recv.expect("checked above");
         self.refuse_destructor_call(rtid, &written, span)?;
+        // A bare call to one of the receiver's GENERIC methods arrives
+        // already renamed to its instantiation, `pick(xs)` as `pick$int(xs)`:
+        // monomorphisation knows the receiver's type here and did the
+        // inference. It refuses a generic function of the same name itself,
+        // so a mangled name that is the receiver's method can only be this.
+        let generic_sibling = written != name && self.sibling_method(name).is_some();
+        if generic_sibling {
+            if self.sigs.contains_key(&self.resolve_fn(&written))
+                || BUILTIN_FNS.contains(&written.as_str())
+            {
+                return Err(Diag::new(
+                    span,
+                    format!(
+                        "`{written}` is both a method of `{}` and a function, so a bare \
+                         `{written}(..)` here could mean either; rename one",
+                        self.show_name(&self.typedefs[rtid as usize].name)
+                    ),
+                ));
+            }
+            let this = self.this_val(span)?;
+            return self
+                .lower_method_on(&this, &name.to_string(), args, span)
+                .map(Some);
+        }
         if self.sibling_method(&written).is_none() {
             // A static sibling has no receiver to be called on, so it is not
             // reachable bare -- say how it is reached instead of reporting an
@@ -6054,6 +6086,12 @@ impl Lowerer {
                     let (rtid, _) = self.recv.expect("this_val checked the receiver");
                     self.refuse_destructor_call(rtid, m, *span)?;
                     if self.sibling_method(m).is_some() {
+                        // `m` may be a generic method's instantiation, which
+                        // monomorphisation renamed; say it as it was written.
+                        let m = match self.shown.get(m) {
+                            Some((generic, _)) => crate::ast::bare(generic).to_string(),
+                            None => m.clone(),
+                        };
                         return Err(Diag::new(
                             *span,
                             format!(

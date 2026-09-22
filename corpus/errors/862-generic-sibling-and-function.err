@@ -1,0 +1,4 @@
+corpus/errors/862-generic-sibling-and-function.src:17:12: `pick` is both a method of `Picker` and a function, so a bare `pick(..)` here could mean either; rename one
+   |
+17 |     return pick(xs);
+   |            ^
