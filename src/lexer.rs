@@ -199,6 +199,16 @@ pub struct Lexer<'a> {
     comments: Vec<Comment>,
     /// Whether anything but whitespace has been seen on the current line.
     code_on_line: bool,
+    /// Each string literal's source text, quotes included, by position.
+    spellings: Vec<(Span, String)>,
+}
+
+/// Everything the formatter needs from the lexer: the tokens, and what the
+/// tokens alone lose -- the comments, and how each string literal was spelled.
+pub struct Lexed {
+    pub toks: Vec<Token>,
+    pub comments: Vec<Comment>,
+    pub spellings: Vec<(Span, String)>,
 }
 
 impl<'a> Lexer<'a> {
@@ -210,14 +220,19 @@ impl<'a> Lexer<'a> {
             col: 1,
             comments: Vec::new(),
             code_on_line: false,
+            spellings: Vec::new(),
         }
     }
 
-    /// Tokenize, and also return the comments, for the formatter.
-    pub fn tokenize_with_comments(src: &str) -> Result<(Vec<Token>, Vec<Comment>), Diag> {
+    /// Tokenize, and also keep the trivia, for the formatter.
+    pub fn tokenize_for_fmt(src: &str) -> Result<Lexed, Diag> {
         let mut lx = Lexer::new(src);
         let toks = lx.run()?;
-        Ok((toks, std::mem::take(&mut lx.comments)))
+        Ok(Lexed {
+            toks,
+            comments: std::mem::take(&mut lx.comments),
+            spellings: std::mem::take(&mut lx.spellings),
+        })
     }
 
     fn peek(&self) -> u8 {
@@ -508,43 +523,181 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// A string literal.
+    ///
+    /// The escapes are `\\ \" \n \t \r \0`, `\xNN` for one ASCII byte and
+    /// `\u{N}` for one Unicode scalar value, written as its UTF-8 bytes
+    /// (§1.5). Everything else between the quotes is taken byte for byte,
+    /// control characters included -- only a newline ends a literal early.
+    ///
+    /// A decoded literal is always valid UTF-8: the source is, `\u{}` refuses
+    /// surrogates, and `\x` stops at 7F. That last limit is what keeps the
+    /// open question of §3.10 open: allowing `\xFF` later is additive, and
+    /// forbidding it once programs rely on it is not.
     fn lex_str(&mut self, span: Span) -> Result<Tok, Diag> {
-        self.bump(); // opening quote
-                     // Accumulate BYTES, not chars. Pushing `byte as char` would decode
-                     // each UTF-8 continuation byte as its own Latin-1 codepoint and
-                     // silently mangle any non-ASCII literal.
+        let from = self.pos;
+        // Past the opening quote. Accumulate BYTES, not chars: pushing
+        // `byte as char` would decode each UTF-8 continuation byte as its
+        // own Latin-1 codepoint and silently mangle any non-ASCII literal.
+        self.bump();
         let mut bytes: Vec<u8> = Vec::new();
         loop {
             if self.pos >= self.src.len() {
                 return Err(Diag::new(span, "unterminated string literal"));
             }
+            let at = self.here();
             match self.bump() {
-                b'"' => {
-                    return match String::from_utf8(bytes) {
-                        Ok(s) => Ok(Tok::Str(s)),
-                        Err(_) => Err(Diag::new(span, "string literal is not valid UTF-8")),
-                    }
-                }
+                b'"' => break,
                 b'\n' => return Err(Diag::new(span, "unterminated string literal")),
                 b'\\' => {
-                    let e = self.bump();
-                    match e {
-                        b'n' => bytes.push(b'\n'),
-                        b't' => bytes.push(b'\t'),
-                        b'r' => bytes.push(b'\r'),
-                        b'0' => bytes.push(0),
-                        b'\\' => bytes.push(b'\\'),
-                        b'"' => bytes.push(b'"'),
-                        other => {
-                            return Err(Diag::new(
-                                span,
-                                format!("unknown escape `\\{}`", other as char),
-                            ))
-                        }
+                    // A backslash as the last thing on the line (or in the
+                    // file) leaves the literal open, not a strange escape.
+                    if self.pos >= self.src.len() || self.peek() == b'\n' {
+                        return Err(Diag::new(span, "unterminated string literal"));
                     }
+                    self.escape(at, &mut bytes)?;
                 }
                 c => bytes.push(c),
             }
         }
+        // The formatter prints a literal the way it was written. Decoding is
+        // many-to-one -- `"é"`, `"\u{e9}"` and `"\u{00E9}"` are one value --
+        // and the spelling is the author's: an escaped BOM or combining accent
+        // is written that way precisely so that it can be seen.
+        self.spellings.push((
+            span,
+            String::from_utf8_lossy(&self.src[from..self.pos]).into_owned(),
+        ));
+        match String::from_utf8(bytes) {
+            Ok(s) => Ok(Tok::Str(s)),
+            // Unreachable while the source is a Rust `str` and no escape
+            // makes a byte past 7F on its own, but a lexer must not panic on
+            // a promise another module keeps.
+            Err(_) => Err(Diag::new(span, "string literal is not valid UTF-8")),
+        }
     }
+
+    /// One escape, the backslash already consumed; `at` is where it began.
+    fn escape(&mut self, at: Span, out: &mut Vec<u8>) -> Result<(), Diag> {
+        match self.bump() {
+            b'n' => out.push(b'\n'),
+            b't' => out.push(b'\t'),
+            b'r' => out.push(b'\r'),
+            b'0' => out.push(0),
+            b'\\' => out.push(b'\\'),
+            b'"' => out.push(b'"'),
+            // Exactly two digits. C lets `\x` run on for as many hex digits
+            // as follow, so `"\x41BC"` there is one out-of-range character,
+            // not `ABC`; a fixed width has no such trap.
+            b'x' => {
+                let (Some(h), Some(l)) = (hex_digit(self.peek()), hex_digit(self.peek2())) else {
+                    return Err(Diag::new(at, "`\\x` needs exactly two hex digits"));
+                };
+                self.bump();
+                self.bump();
+                let v = h * 16 + l;
+                if v > 0x7f {
+                    return Err(Diag::new(
+                        at,
+                        format!(
+                            "`\\x` stops at 7f: a string literal is UTF-8, so write the \
+                             character as `\\u{{{v:x}}}`, or raw octets as a `bytes`"
+                        ),
+                    ));
+                }
+                out.push(v);
+            }
+            // Braces rather than C's and Go's fixed-width `\uNNNN` and
+            // `\UNNNNNNNN`: one spelling for every plane, and the digits are
+            // delimited, so `"\u{e9}9"` cannot be misread.
+            b'u' => {
+                if self.peek() != b'{' {
+                    return Err(Diag::new(at, "`\\u` is written `\\u{...}`, with braces"));
+                }
+                self.bump();
+                let mut v: u32 = 0;
+                let mut n = 0;
+                while let Some(d) = hex_digit(self.peek()) {
+                    if n == 6 {
+                        n += 1;
+                        break;
+                    }
+                    self.bump();
+                    v = v * 16 + d as u32;
+                    n += 1;
+                }
+                if n == 0 || n > 6 || self.peek() != b'}' {
+                    return Err(Diag::new(
+                        at,
+                        "`\\u{...}` needs one to six hex digits and a closing `}`",
+                    ));
+                }
+                self.bump();
+                // `char::from_u32` refuses exactly what UTF-8 cannot encode:
+                // the surrogates and anything past U+10FFFF.
+                let Some(c) = char::from_u32(v) else {
+                    return Err(Diag::new(
+                        at,
+                        format!("`\\u{{{v:x}}}` is not a Unicode scalar value"),
+                    ));
+                };
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            }
+            other => {
+                let shown = if other.is_ascii_graphic() {
+                    format!("`\\{}`", other as char)
+                } else {
+                    "after `\\`".to_string()
+                };
+                return Err(Diag::new(
+                    at,
+                    format!(
+                        "unknown escape {shown}; the escapes are \\\\ \\\" \\n \\t \\r \\0 \
+                         \\xNN and \\u{{N}}"
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn hex_digit(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Write `s` as a string literal that lexes back to exactly `s`.
+///
+/// For a literal with no source spelling; the formatter keeps the author's
+/// otherwise. It escapes what cannot or should not stand raw between quotes --
+/// the quote, the backslash and the ASCII controls, where a raw newline would
+/// end the literal and a raw CR or tab cannot be seen -- and writes every
+/// other character as itself. The formatter once used Rust's `{:?}`, which
+/// writes `\u{1}` and `\u{feff}` in Rust's syntax; the lexer refused them, so
+/// formatting a file broke it.
+pub fn quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '\0' => out.push_str("\\0"),
+            c if (c as u32) < 0x20 || c == '\x7f' => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }

@@ -1,0 +1,4 @@
+corpus/errors/552-escape-u-needs-braces.src:2:8: `\u` is written `\u{...}`, with braces
+  |
+2 | print("\u00e9");
+  |        ^

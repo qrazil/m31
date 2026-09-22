@@ -1,0 +1,4 @@
+// `\x` makes one byte, and a string literal is UTF-8: a byte past 7f on its
+// own is not text, so it is refused, naming the spelling that is.
+str s = "caf\xe9";
+print(s);

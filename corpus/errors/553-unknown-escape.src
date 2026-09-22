@@ -1,0 +1,3 @@
+// C's `\a`, `\b`, `\f` and `\v` are not escapes here: `\x07` spells any of
+// them, and one spelling is enough.
+print("bell\a");

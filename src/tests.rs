@@ -125,6 +125,116 @@ fn comments_are_trivia() {
     );
 }
 
+#[test]
+fn hex_and_unicode_escapes_decode_to_utf8_bytes() {
+    let one = |src: &str| match toks(src).as_slice() {
+        [Tok::Str(s), Tok::Eof] => s.clone(),
+        other => panic!("expected one string literal, got {other:?}"),
+    };
+    assert_eq!(one(r#""\x41\x7f\x00\x0A""#), "A\x7f\0\n");
+    assert_eq!(one(r#""\x4a\x4A""#), "JJ");
+    assert_eq!(one(r#""\r""#), "\r");
+    assert_eq!(one(r#""\u{e9}""#), "é");
+    assert_eq!(one(r#""\u{00E9}9""#), "é9");
+    assert_eq!(one(r#""\u{0}""#), "\0");
+    assert_eq!(one(r#""\u{1F600}""#), "\u{1F600}");
+    assert_eq!(one(r#""\u{10FFFF}""#), "\u{10FFFF}");
+    // Raw control characters and a raw BOM are bytes like any other.
+    assert_eq!(one("\"\x01\u{feff}\""), "\x01\u{feff}");
+}
+
+#[test]
+fn bad_escapes_are_refused() {
+    let bad = |src: &str| Lexer::new(src).tokenize().is_err();
+    assert!(bad(r#""\x80""#), "\\x past 7f: not UTF-8 on its own");
+    assert!(bad(r#""\xff""#), "\\x past 7f");
+    assert!(bad(r#""\x4""#), "\\x with one digit");
+    assert!(bad(r#""\xg1""#), "\\x with a non-hex digit");
+    assert!(bad(r#""\u41""#), "\\u without braces");
+    assert!(bad(r#""\u{}""#), "braces with no digits");
+    assert!(bad(r#""\u{1234567}""#), "seven digits");
+    assert!(bad(r#""\u{41""#), "no closing brace");
+    assert!(bad(r#""\u{d800}""#), "a surrogate");
+    assert!(bad(r#""\u{110000}""#), "past U+10FFFF");
+    assert!(bad(r#""\a""#), "C's \\a is not an escape here");
+    assert!(bad("\"\\"), "backslash at end of file");
+    assert!(bad("\"\\\n\""), "backslash at end of line");
+}
+
+/// Every character the round-trip tests put in a literal: all of U+0000 to
+/// U+00FF (each byte value, as the character a lone byte cannot be in UTF-8),
+/// and a spread of the kinds `{:?}` used to escape -- combining marks,
+/// format characters, bidi controls, private use, noncharacters, the plane
+/// edges.
+fn awkward_chars() -> Vec<char> {
+    let mut cs: Vec<char> = (0u32..=0xff).filter_map(char::from_u32).collect();
+    for c in [
+        0x300, 0x301, 0x36f, 0x85, 0x200b, 0x200d, 0x200e, 0x2028, 0x2029, 0x202e, 0x2066, 0xd7ff,
+        0xe000, 0xf8ff, 0xfdd0, 0xfeff, 0xfffd, 0xfffe, 0xffff, 0x10000, 0x1f600, 0xe0001, 0xf0000,
+        0x10fffd, 0x10ffff,
+    ] {
+        cs.push(char::from_u32(c).unwrap());
+    }
+    cs
+}
+
+#[test]
+fn quote_lexes_back_to_the_same_string() {
+    let cs = awkward_chars();
+    let mut all = String::new();
+    for &c in &cs {
+        all.push(c);
+        for s in [c.to_string(), format!("a{c}b"), format!("{c}{c}")] {
+            let q = crate::lexer::quote(&s);
+            assert_eq!(
+                toks(&q),
+                vec![Tok::Str(s.clone()), Tok::Eof],
+                "quote({s:?}) = {q}"
+            );
+        }
+    }
+    assert_eq!(
+        toks(&crate::lexer::quote(&all)),
+        vec![Tok::Str(all), Tok::Eof]
+    );
+}
+
+/// The string literals a source lexes to, in order.
+fn str_lits(src: &str) -> Vec<String> {
+    toks(src)
+        .into_iter()
+        .filter_map(|t| match t {
+            Tok::Str(s) => Some(s),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn formatting_keeps_every_literal_byte_for_byte() {
+    // Each character three ways: raw where a raw one can stand, as `\u{}`,
+    // and as `\x` where it is ASCII. `langc fmt` must hand back a file that
+    // lexes to the same strings -- it used to write `\u{1}`, Rust's escape,
+    // which this lexer refuses.
+    let mut src = String::new();
+    for c in awkward_chars() {
+        let n = c as u32;
+        if !matches!(c, '\n' | '"' | '\\') {
+            src.push_str(&format!("print(\"<{c}>\");\n"));
+        }
+        src.push_str(&format!("print(\"<\\u{{{n:x}}}>\");\n"));
+        if n < 0x80 {
+            src.push_str(&format!("print(\"<\\x{n:02x}>\");\n"));
+        }
+    }
+    let once = crate::reformat(&src, "t").expect("formats");
+    assert_eq!(str_lits(&once), str_lits(&src));
+    // And it keeps the spelling, so formatting is the identity here.
+    assert_eq!(once, src);
+    let q = crate::reformat(&once, "t").expect("formats again");
+    assert_eq!(q, once);
+}
+
 // ---- parser ---------------------------------------------------------
 
 #[test]

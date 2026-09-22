@@ -1,0 +1,2 @@
+// `\u` takes its digits in braces: `\u{e9}`, not C's and Go's `\u00e9`.
+print("\u00e9");

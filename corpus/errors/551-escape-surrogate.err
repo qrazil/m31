@@ -1,0 +1,4 @@
+corpus/errors/551-escape-surrogate.src:3:8: `\u{d83d}` is not a Unicode scalar value
+  |
+3 | print("\u{d83d}");
+  |        ^

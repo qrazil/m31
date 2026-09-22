@@ -1,0 +1,3 @@
+// `\u{}` names a Unicode scalar value. A surrogate is not one -- it has no
+// UTF-8 encoding -- so it is refused rather than written as three bytes.
+print("\u{d83d}");
