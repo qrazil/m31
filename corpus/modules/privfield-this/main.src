@@ -1,0 +1,13 @@
+import acct;
+
+type Dog {
+    acct.Animal;
+    int legs;
+}
+
+// Not "write `tag`": the bare name would be refused too.
+str Dog.show() {
+    return this.tag;
+}
+
+print(Dog(acct.animal("Rex"), 4).show());

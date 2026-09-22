@@ -1,0 +1,3 @@
+import acct;
+acct.Account a = acct.open("ann");
+print(a.balance);

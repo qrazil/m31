@@ -1,0 +1,2 @@
+import lib;
+lib.make().code = 5;

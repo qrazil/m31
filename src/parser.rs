@@ -655,6 +655,15 @@ impl Parser {
     /// A parameter or field: `int x` is mandatory, `int x = 0` is optional.
     fn parse_param(&mut self) -> Result<Param, Diag> {
         let span = self.span();
+        // Only a field has a visibility, and the type declaration eats its
+        // `pub` before getting here. Anywhere else the word would surface
+        // as a confusing "expected a type".
+        if self.peek() == &Tok::KwPub {
+            return Err(Diag::new(
+                span,
+                "`pub` exports a declaration or a field; a parameter has no visibility",
+            ));
+        }
         let ty = self.expect_ty()?;
         if ty == Ty::Void {
             return Err(Diag::new(span, "`void` is not a value type"));
@@ -672,6 +681,7 @@ impl Parser {
                 name: self.ty_exprs[i as usize].name.clone(),
                 default: None,
                 embedded: true,
+                is_pub: false,
                 span,
             });
         }
@@ -689,6 +699,7 @@ impl Parser {
             name,
             default,
             embedded: false,
+            is_pub: false,
             span,
         })
     }
@@ -980,6 +991,15 @@ impl Parser {
                     return Err(Diag::new(self.span(), "expected `}`, found end of file"));
                 }
                 let mspan = self.span();
+                // An interface's methods are what it IS; one it hid would be
+                // a requirement nobody outside could see to satisfy.
+                if self.peek() == &Tok::KwPub {
+                    return Err(Diag::new(
+                        mspan,
+                        "an interface's methods are as visible as the interface; \
+                         `pub` goes on the interface, not on a method",
+                    ));
+                }
                 let ret = self.expect_ty()?;
                 let (mname, _) = self.expect_ident()?;
                 self.expect(Tok::LParen)?;
@@ -1032,7 +1052,17 @@ impl Parser {
             if self.peek() == &Tok::Eof {
                 return Err(Diag::new(self.span(), "expected `}`, found end of file"));
             }
-            fields.push(self.parse_param()?);
+            // `pub` on a field, as on any declaration, exports it. The span
+            // starts at the keyword so a diagnostic points at the whole field.
+            let fspan = self.span();
+            let is_pub = self.eat(&Tok::KwPub);
+            if is_pub && self.peek() == &Tok::KwPub {
+                return Err(Diag::new(self.span(), "`pub` is written once"));
+            }
+            let mut f = self.parse_param()?;
+            f.is_pub = is_pub;
+            f.span = fspan;
+            fields.push(f);
             self.expect(Tok::Semi)?;
         }
         self.expect(Tok::RBrace)?;
@@ -1073,6 +1103,15 @@ impl Parser {
                 return Err(Diag::new(self.span(), "expected `}`, found end of file"));
             }
             let vspan = self.span();
+            // A variant is not a field: the enum is one value that is one of
+            // its variants, so hiding a variant would make `match` on it
+            // impossible to write exhaustively outside the module.
+            if self.peek() == &Tok::KwPub {
+                return Err(Diag::new(
+                    vspan,
+                    "a variant is as visible as its enum; `pub` goes on the enum, not on a variant",
+                ));
+            }
             let (vname, _) = self.expect_ident()?;
             if variants.iter().any(|v| v.name == vname) {
                 return Err(Diag::new(
@@ -1512,6 +1551,7 @@ impl Parser {
                             name,
                             default: None,
                             embedded: false,
+                            is_pub: false,
                             span: bspan,
                         });
                         if !self.eat(&Tok::Comma) {

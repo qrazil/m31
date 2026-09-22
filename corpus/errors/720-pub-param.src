@@ -1,0 +1,5 @@
+// Only a field has a visibility; a parameter belongs to its function.
+int twice(pub int x) {
+    return x * 2;
+}
+print(twice(2));

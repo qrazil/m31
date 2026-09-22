@@ -136,8 +136,11 @@ print(greet.shout("world"));
   - **Private by default.** A declaration is visible only inside its module
     unless marked `pub`. Reaching a name from another module means writing
     `mod.name`; unqualified, it is not in scope at all. That holds for
-    everything a module declares — functions, types, methods and an enum's
-    variants — not only functions. A method that could not be called from
+    everything a module declares — functions, types, methods and fields
+    (§3.3) — not only functions. An enum's variants and an interface's
+    methods are the exception that is not one: they are what the enum or
+    interface *is*, so they are exactly as visible as it, and `pub` on one
+    is an error. A method that could not be called from
     here does not satisfy an interface here either, and neither does one
     that `print` or an operator would find by name: an interface or an
     operator is another way of calling the method, not a way around `pub`.
@@ -242,6 +245,44 @@ means a reader never sees the same construction written two ways.
 
 Duplicate field names are an error.
 
+**A field is private to its module unless marked `pub`** — the rule every
+other declaration follows (§2.1), for the same reason: a field left public
+by mistake is exported for good, while a missing `pub` is a one-word fix
+(docs/modules-decision.md §2).
+
+```c
+pub type Account {
+    pub str owner;
+    int balance;        // only this module reads or writes it
+    int moves = 0;
+}
+
+pub Account open(str owner) { return Account(owner, 0); }
+```
+
+Inside the declaring module every field is reachable, as before. From
+another module a private field cannot be read, written, or named in a
+construction, and the diagnostic says whose it is:
+
+  - **Construction** from outside writes every field, so it is allowed only
+    when every field it would write is one the caller could write anyway. A
+    private field **without** a default refuses construction outright —
+    `acct.Account("ann", 5)` — and the module must provide a function (or a
+    static method) that builds one. That is the purpose: a type with an
+    invariant hides the field the invariant is about, and its module's own
+    functions become the only way in. A private field **with** a default
+    blocks nothing while it is left out; naming it is refused.
+  - **Operations the compiler provides are the type's own**, not a reach
+    into it: `clone(x)` copies every field, private ones included. `print`,
+    `==` and friends call the type's methods (§6.2), whose `pub` decides.
+  - A `pub` field on a private type is allowed and means nothing until the
+    type is exported; a value of a private type that escapes through a
+    `pub` function can be passed along, but its fields can be neither read
+    nor written outside.
+
+`pub` may be written on a field, never on a parameter, a variant or an
+interface method.
+
 ### 3.4 Interfaces
 
 An interface is a set of method signatures:
@@ -289,6 +330,14 @@ Promotion is by synthesised forwarder methods, run to a fixpoint, so
 embedding an embedder works. A real method on the outer type **shadows** a
 forwarder of the same name; two embedded types offering the same name with no
 outer method to break the tie is an error at the use site.
+
+**A promoted field keeps its own visibility** (§3.3), judged on the type
+that declares it: embedding another module's type promotes its `pub` fields
+and none of its private ones, and a `pub` field stays public when promoted
+through an embedded field that is itself private. A private field this
+module cannot see does not claim its name here either, so a method of the
+embedding type may give a local that name — otherwise adding a private
+field to a library type would break the modules that embed it.
 
 **Static methods are not promoted.** A static has no receiver, so there is
 nothing for a forwarder to forward to: `Dog` does not gain `Animal`'s
@@ -1448,7 +1497,7 @@ interface   = "interface" IDENT [ tparams ] "{" { sig ";" } "}" ;
 enumdecl    = "enum" IDENT [ tparams ] "{" { variant ";" } "}" ;
 variant     = IDENT [ "(" type { "," type } ")" ] ;
 distinct    = "distinct" type IDENT ";" ;
-field       = type IDENT [ "=" expr ] | type ;        (* bare type = embedded *)
+field       = [ "pub" ] ( type IDENT [ "=" expr ] | type ) ;  (* bare type = embedded *)
 sig         = type IDENT "(" [ params ] ")" ;
 
 func        = [ "static" ] type [ IDENT [ tparams ] "." ] IDENT [ tparams ]

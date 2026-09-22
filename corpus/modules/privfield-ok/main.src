@@ -1,0 +1,48 @@
+import acct;
+
+// A public field reads and writes from outside; the private one is reached
+// only through the module's methods.
+acct.Account a = acct.open("ann");
+a.deposit(30);
+a.deposit(12);
+print(a.owner);                 // ann
+print(a.balance_now());         // 42
+a.owner = "bea";
+print(a);                       // bea: 42
+
+// clone copies every field, private ones included: it is the type's own
+// operation, not a reach into it.
+acct.Account b = clone(a);
+b.deposit(1);
+print(a.balance_now());         // 42
+print(b.balance_now());         // 43
+print(b.moves_now());           // 3
+
+// Constructed from outside, because its only private field has a default.
+acct.Tally t = acct.Tally("hits");
+print(t.label);                 // hits
+t.bump();
+print(t.bump());                // 2
+
+// Embedding a foreign type: the public field is promoted and usable bare in
+// this module's methods; the private one does not claim its name here, so a
+// local may be called `tag`.
+type Dog {
+    acct.Animal;
+    int legs;
+}
+
+str Dog.describe() {
+    str tag = "dog";
+    return name + " the " + tag + " on " + legs.to_str() + " legs";
+}
+
+Dog d = Dog(acct.animal("Rex"), 4);
+print(d.name);                  // Rex
+print(d.describe());            // Rex the dog on 4 legs
+print(d.tag_now());             // internal
+
+// A promoted field keeps its own visibility, whatever the embedding field's.
+acct.Kennel k = acct.kennel("Fido", 3);
+print(k.name);                  // Fido
+print(k.size);                  // 3

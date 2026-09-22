@@ -2,7 +2,7 @@
 // Before qualified types existed, a `pub type` could only be passed through
 // in a single expression -- it could not be named, so it could not be bound
 // to a variable or held in a collection.
-pub type Point { int x; int y; }
+pub type Point { pub int x; pub int y; }
 
 pub int Point.sum() { return x + y; }
 pub static Point Point.origin() { return Point(0, 0); }

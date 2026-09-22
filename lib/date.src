@@ -61,6 +61,8 @@ prim void __clock(List<int> out);
 /// Why `epoch` or `parse` refused. The message says which rule was broken
 /// and what to write instead; there is nothing in it worth branching on,
 /// which is why it is a message and not an enum of nineteen ISO mistakes.
+/// The message is private: `to_str` (and so `print(e)`) is how it is read,
+/// and only this module makes one.
 pub type Error {
     str message;
 }
@@ -71,21 +73,25 @@ pub str Error.to_str() {
 
 /// The civil fields of one instant, in UTC.
 ///
-/// `date.civil(t)` is the way to get one, so its fields always agree with
-/// each other -- `weekday` is the weekday of `year`-`month`-`day`. (Oro
-/// forbids constructing one by hand; this language has no private
-/// constructor, so that is a convention here rather than a rule.)
+/// `date.civil(t)` is the way to get one, and its fields then agree with
+/// each other -- `weekday` is the weekday of `year`-`month`-`day`.
+///
+/// Every field is `pub`, so one can also be built or changed by hand, which
+/// Oro forbids. That is deliberate: a `Civil` is a record of answers, and
+/// nothing in this module takes one back and relies on it -- `epoch` takes
+/// the numbers and checks them. Hiding the fields would buy no invariant
+/// this module keeps, and would cost every reader `c.year()` for `c.year`.
 pub type Civil {
-    int year;
-    int month;
-    int day;
-    int hour;
-    int minute;
-    int second;
+    pub int year;
+    pub int month;
+    pub int day;
+    pub int hour;
+    pub int minute;
+    pub int second;
     // 0 is Monday, 6 is Sunday -- CPython's `weekday()`, and Oro's.
-    int weekday;
+    pub int weekday;
     // 1 through 365, or 366 in a leap year.
-    int yearday;
+    pub int yearday;
 }
 
 /// `2026-09-16T00:39:04Z`, the same text `date.iso` writes.

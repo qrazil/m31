@@ -1,0 +1,71 @@
+// A type whose invariant is its module's to keep: `balance` is private, so
+// it changes only through `deposit`, which refuses a negative amount.
+pub type Account {
+    pub str owner;
+    int balance;
+    int moves = 0;
+}
+
+// The only way another module can make an Account: `balance` is private
+// and has no default, so `acct.Account(..)` is refused out there.
+pub Account open(str owner) {
+    return Account(owner, 0);
+}
+
+pub void Account.deposit(int n) {
+    if (n < 0) {
+        trap("deposit: a negative amount");
+    }
+    balance = balance + n;
+    moves = moves + 1;
+}
+
+pub int Account.balance_now() {
+    return balance;
+}
+
+pub int Account.moves_now() {
+    return moves;
+}
+
+pub str Account.to_str() {
+    return owner + ": " + balance.to_str();
+}
+
+// A private field WITH a default blocks nothing: construction from outside
+// passes the public field and leaves the private one to its default.
+pub type Tally {
+    pub str label;
+    int count = 0;
+}
+
+pub int Tally.bump() {
+    count = count + 1;
+    return count;
+}
+
+// Embedded elsewhere: `name` is public, `tag` is not, and each keeps that
+// when promoted onto the embedding type.
+pub type Animal {
+    pub str name;
+    str tag = "internal";
+}
+
+pub Animal animal(str name) {
+    return Animal(name);
+}
+
+pub str Animal.tag_now() {
+    return tag;
+}
+
+// A privately embedded Animal: the field `Animal` is this module's, but
+// `name`, promoted through it, is still public.
+pub type Kennel {
+    Animal;
+    pub int size;
+}
+
+pub Kennel kennel(str name, int size) {
+    return Kennel(Animal(name), size);
+}

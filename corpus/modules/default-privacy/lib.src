@@ -9,9 +9,9 @@ int seed() {
 }
 
 pub type Outer {
-    int n;
+    pub int n;
     Inner g = Inner();
-    int s = seed();
+    pub int s = seed();
 }
 
 pub int Outer.k() {

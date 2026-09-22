@@ -1,0 +1,4 @@
+import acct;
+// A private field with a default does not block construction, but it
+// cannot be set by name from here.
+acct.Animal a = acct.Animal("Rex", tag: "forged");

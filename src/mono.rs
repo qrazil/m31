@@ -366,6 +366,7 @@ impl Mono {
                     None => None,
                 },
                 embedded: f.embedded,
+                is_pub: f.is_pub,
                 span: f.span,
             });
         }
@@ -561,6 +562,9 @@ impl Mono {
                         name: format!("$t{i}"),
                         default: None,
                         embedded: false,
+                        // A tuple is a builtin shape, not a module's type:
+                        // its slots are as public as the tuple.
+                        is_pub: true,
                         span,
                     })
                     .collect(),
@@ -604,6 +608,7 @@ impl Mono {
                     name: p.name.clone(),
                     default: None,
                     embedded: false,
+                    is_pub: false,
                     span: p.span,
                 });
             }
@@ -636,6 +641,7 @@ impl Mono {
                     None => None,
                 },
                 embedded: f.embedded,
+                is_pub: f.is_pub,
                 span: f.span,
             });
         }
@@ -696,6 +702,7 @@ impl Mono {
                     None => None,
                 },
                 embedded: p.embedded,
+                is_pub: false,
                 span: p.span,
             });
         }
@@ -839,6 +846,7 @@ impl Mono {
                             name: b.name.clone(),
                             default: None,
                             embedded: false,
+                            is_pub: false,
                             span: b.span,
                         });
                     }

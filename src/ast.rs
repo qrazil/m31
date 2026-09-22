@@ -350,6 +350,12 @@ pub struct Param {
     /// after its type. Its fields and methods are promoted onto the outer
     /// type -- composition in place of inheritance.
     pub embedded: bool,
+    /// A field marked `pub`: readable, writable and constructible from
+    /// other modules. Fields follow the rule every other declaration does --
+    /// private by default -- so a type's invariants are its module's to keep
+    /// (docs/modules-decision.md §2). Always false for a parameter or a
+    /// match binding, which have no visibility of their own.
+    pub is_pub: bool,
     pub span: Span,
 }
 

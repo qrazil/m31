@@ -539,14 +539,15 @@ impl Fmt {
         }
         for f in &t.fields {
             self.comments_before(f.span.line);
+            let vis = if f.is_pub { "pub " } else { "" };
             if f.embedded {
-                self.line(&format!("{};", self.ty(f.ty)));
+                self.line(&format!("{vis}{};", self.ty(f.ty)));
             } else {
                 let d = match &f.default {
                     Some(e) => format!(" = {}", self.expr(e)),
                     None => String::new(),
                 };
-                self.line(&format!("{} {}{d};", self.ty(f.ty), f.name));
+                self.line(&format!("{vis}{} {}{d};", self.ty(f.ty), f.name));
             }
         }
         for m in &t.methods {

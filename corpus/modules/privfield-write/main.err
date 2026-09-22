@@ -1,0 +1,4 @@
+corpus/modules/privfield-write/main.src:3:1: field `balance` of `acct.Account` is private to `acct`; only a `pub` field can be used from another module
+  |
+3 | a.balance = 1000000;
+  | ^
