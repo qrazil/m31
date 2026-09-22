@@ -41,6 +41,9 @@ pub struct Mono {
     /// The module whose function is being substituted, for resolving a bare
     /// call name to this module's own declaration.
     cur_module: String,
+    /// Every module in the program, to tell `lib.f(..)` -- a call into a
+    /// module -- from a method call on a value.
+    modules: HashSet<String>,
 }
 
 /// A substitution from type parameter name to concrete type.
@@ -60,6 +63,7 @@ impl Mono {
             queue: Vec::new(),
             env: Vec::new(),
             cur_module: String::new(),
+            modules: p.imports_by_module.keys().cloned().collect(),
         };
 
         let mut concrete_types = Vec::new();
@@ -757,12 +761,41 @@ impl Mono {
                 let ty = self.subst_ty(*ty, sub, *s)?;
                 Expr::EnumNew(ty, variant.clone(), self.subst_args(args, sub)?, *s)
             }
-            Expr::MethodCall(obj, m, args, s) => Expr::MethodCall(
-                Box::new(self.subst_expr(obj, sub)?),
-                m.clone(),
-                self.subst_args(args, sub)?,
-                *s,
-            ),
+            Expr::MethodCall(obj, m, args, s) => {
+                // `lib.first(xs)` is a call, not a method: the parser cannot
+                // tell a module qualifier from a receiver, so it reaches here
+                // as a method call on a variable named `lib`. The lowering
+                // settles it the same way -- a program's module, and no local
+                // of that name in scope -- and this has to agree, or a generic
+                // function reached through its module is never instantiated
+                // and the lowering finds nothing called `first`.
+                if let Expr::Var(modname, _) = &**obj {
+                    let key = format!("{modname}#{m}");
+                    if self.modules.contains(modname)
+                        && self.env_ty(modname).is_none()
+                        && self.generic_funcs.contains_key(&key)
+                    {
+                        let mangled = self.generic_call(&key, args, sub, *s)?;
+                        // Keep the qualified shape so the lowering still
+                        // checks the call against `lib`'s privacy; it builds
+                        // `lib#first$int` from it, which is the
+                        // instantiation's name.
+                        let bare = crate::ast::bare(&mangled).to_string();
+                        return Ok(Expr::MethodCall(
+                            obj.clone(),
+                            bare,
+                            self.subst_args(args, sub)?,
+                            *s,
+                        ));
+                    }
+                }
+                Expr::MethodCall(
+                    Box::new(self.subst_expr(obj, sub)?),
+                    m.clone(),
+                    self.subst_args(args, sub)?,
+                    *s,
+                )
+            }
             Expr::Call(name, args, s) => {
                 let out = self.subst_args(args, sub)?;
                 // A call to a generic function needs its type arguments
@@ -770,24 +803,37 @@ impl Mono {
                 // queued and the name rewritten to the mangled one. Inference
                 // is deliberately shallow -- see `infer`.
                 let name = &self.resolve_fn(name);
-                if let Some(decl) = self.generic_funcs.get(name).cloned() {
-                    // Infer from the arguments AS WRITTEN, not from `out`.
-                    // There are two type arenas -- `src_exprs` for the input
-                    // program and `out_exprs` for what substitution produces
-                    // -- and `unify` reads `src_exprs`. A substituted
-                    // `Expr::New` carries an `out_exprs` index, so unifying
-                    // against it indexed the wrong arena and inference
-                    // failed for a constructed temporary while succeeding
-                    // for a local. `unify` substitutes what it binds, which
-                    // is what `sub` is threaded through for.
-                    let targs = self.infer(&decl, &args.pos, sub, *s)?;
-                    let mangled = self.mangle(name, &targs);
-                    self.queue.push((name.clone(), targs, *s));
+                if self.generic_funcs.contains_key(name) {
+                    let mangled = self.generic_call(name, args, sub, *s)?;
                     return Ok(Expr::Call(mangled, out, *s));
                 }
                 Expr::Call(name.clone(), out, *s)
             }
         })
+    }
+
+    /// Infer a generic function's type arguments at one call, queue that
+    /// instantiation, and return its mangled name.
+    fn generic_call(
+        &mut self,
+        name: &str,
+        args: &Args,
+        sub: &Subst,
+        span: Span,
+    ) -> Result<String, Diag> {
+        let decl = self.generic_funcs.get(name).cloned().expect("generic");
+        // Infer from the arguments AS WRITTEN, not from their substituted
+        // form. There are two type arenas -- `src_exprs` for the input
+        // program and `out_exprs` for what substitution produces -- and
+        // `unify` reads `src_exprs`. A substituted `Expr::New` carries an
+        // `out_exprs` index, so unifying against it indexed the wrong arena
+        // and inference failed for a constructed temporary while succeeding
+        // for a local. `unify` substitutes what it binds, which is what
+        // `sub` is threaded through for.
+        let targs = self.infer(&decl, &args.pos, sub, span)?;
+        let mangled = self.mangle(name, &targs);
+        self.queue.push((name.to_string(), targs, span));
+        Ok(mangled)
     }
 
     fn subst_args(&mut self, a: &Args, sub: &Subst) -> Result<Args, Diag> {
@@ -807,10 +853,11 @@ impl Mono {
     /// There is no explicit `f<int>(x)` syntax, on purpose: after a name that
     /// is not known to be a type, `<` is ambiguous with comparison — the
     /// problem that pushed Go to `f[int](x)` and Rust to a turbofish. Every
-    /// type parameter must therefore be determined by a parameter position,
-    /// and this matches shallowly: a parameter written exactly as `T` binds
-    /// `T` to that argument's type. Nested matching (`List<T>` against
-    /// `List<int>`) is not attempted yet.
+    /// type parameter must therefore be determined by a parameter position.
+    /// Matching is structural over the WRITTEN types (`List<T>` against a
+    /// local declared `List<int>` binds `T`), but an argument only has a
+    /// written type if it is a literal, a construction or a local -- see
+    /// `arg_ty` and `unify_arg`.
     fn infer(
         &mut self,
         decl: &Func,
@@ -824,9 +871,7 @@ impl Mono {
         let mandatory: Vec<&Param> = decl.params.iter().filter(|p| !p.is_optional()).collect();
         let mut found: Subst = Subst::new();
         for (p, a) in mandatory.iter().zip(args.iter()) {
-            if let Some(aty) = self.arg_ty(a) {
-                self.unify(p.ty, aty, &decl.tparams, sub, span, &mut found);
-            }
+            self.unify_arg(p.ty, a, &decl.tparams, sub, span, &mut found);
         }
         let mut out = Vec::new();
         for tp in &decl.tparams {
@@ -838,7 +883,7 @@ impl Mono {
                         format!(
                             "cannot infer type parameter `{tp}` of `{}` from these arguments; \
                              bind the argument to a local with a written type first",
-                            decl.name
+                            crate::ast::bare(&decl.name)
                         ),
                     ))
                 }
@@ -879,6 +924,62 @@ impl Mono {
         }
     }
 
+    /// Match a parameter's written type against an argument expression.
+    ///
+    /// A collection literal has no type of its own -- the lowering types it
+    /// from its context -- but its ELEMENTS may: `first([1, 2])` against
+    /// `List<T>` binds `T` from the `1`. The literal is looked through to the
+    /// element the parameter's type argument lines up with, and only when the
+    /// parameter is itself written as the matching collection; against a bare
+    /// `T` there is nothing to say which collection `[1, 2]` is. An empty
+    /// literal says nothing, and leaves the parameter to another argument or
+    /// to the diagnostic.
+    fn unify_arg(
+        &mut self,
+        pty: Ty,
+        a: &Expr,
+        tparams: &[String],
+        sub: &Subst,
+        span: Span,
+        found: &mut Subst,
+    ) {
+        let written = match pty {
+            Ty::User(pi) => Some(self.src_exprs[pi as usize].clone()),
+            _ => None,
+        };
+        let seq_elem = written
+            .as_ref()
+            .filter(|e| matches!(e.name.as_str(), "List" | "Array") && e.args.len() == 1)
+            .map(|e| e.args[0]);
+        match a {
+            Expr::SeqLit(items, _) => {
+                if let (Some(elem), Some(first)) = (seq_elem, items.first()) {
+                    self.unify_arg(elem, first, tparams, sub, span, found);
+                }
+            }
+            Expr::RepeatLit(fill, _, _) => {
+                if let Some(elem) = seq_elem {
+                    self.unify_arg(elem, fill, tparams, sub, span, found);
+                }
+            }
+            Expr::MapLit(items, _) => {
+                let kv = written
+                    .as_ref()
+                    .filter(|e| e.name == "Map" && e.args.len() == 2)
+                    .map(|e| (e.args[0], e.args[1]));
+                if let (Some((k, v)), Some((ka, va))) = (kv, items.first()) {
+                    self.unify_arg(k, ka, tparams, sub, span, found);
+                    self.unify_arg(v, va, tparams, sub, span, found);
+                }
+            }
+            _ => {
+                if let Some(aty) = self.arg_ty(a) {
+                    self.unify(pty, aty, tparams, sub, span, found);
+                }
+            }
+        }
+    }
+
     /// The written type of an argument expression, for inference only.
     /// Literals, constructions and locals cover the container cases; anything
     /// else leaves the parameter uninferred and produces a diagnostic rather
@@ -886,9 +987,10 @@ impl Mono {
     fn arg_ty(&mut self, e: &Expr) -> Option<Ty> {
         match e {
             Expr::Int(..) => Some(Ty::Int),
+            Expr::Float(..) => Some(Ty::Float),
             Expr::Bool(..) => Some(Ty::Bool),
             Expr::Str(..) => Some(Ty::Str),
-            Expr::New(ty, ..) => Some(*ty),
+            Expr::New(ty, ..) | Expr::EnumNew(ty, ..) => Some(*ty),
             Expr::Var(n, _) => self.env_ty(n),
             _ => None,
         }

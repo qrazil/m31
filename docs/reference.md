@@ -408,6 +408,17 @@ Generics are **monomorphised**: each instantiation becomes a separate
 concrete type or function before the IR, so there is no boxing and no runtime
 type argument. Unused instantiations are not emitted.
 
+A generic function's type arguments are **inferred from its arguments**;
+there is no `f<int>(x)`, because after a name that is not a type `<` would be
+a comparison. Each type parameter must be reached by a mandatory parameter
+whose argument has a written type: a literal, a construction, an enum variant,
+or a local or parameter (whose declaration spells its type). A collection
+literal contributes its first element — `first([1, 2])` against `List<T>`
+binds `T` to `int` — and an empty one contributes nothing. When a parameter
+cannot be reached the compiler says so and asks for a local with a written
+type. A `pub` generic function is called from another module like any other,
+as `lib.first(xs)`.
+
 There are no constraints on type parameters yet. A generic body that does
 something a given argument cannot do fails when that instantiation is
 checked, naming the instantiation.

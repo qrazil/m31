@@ -1,0 +1,3 @@
+// The diagnostic names `first`, as written, not its instantiation.
+import lib;
+print(lib.first([1, 2]));

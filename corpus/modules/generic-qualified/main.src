@@ -1,0 +1,32 @@
+// A `pub` generic function called from another module, as `lib.f(..)`.
+// The parser reads that as a method call on `lib`; monomorphisation has to
+// see through it the way the lowering does, or nothing instantiates `f`.
+import lib;
+
+lib.Maybe<int> m = lib.just(4);
+print(lib.or_else(m, 0));
+lib.Maybe<str> n = lib.Maybe<str>.Nothing;
+print(lib.or_else(n, "none"));
+print(lib.or_else(lib.Maybe<float>.Just(2.5), 0.0));
+
+lib.Pair<int, str> p = lib.pair(1, "one");
+print(p.a);
+print(p.b);
+
+// Inferred from a literal's first element.
+print(lib.first([7, 8, 9]));
+print(lib.first(["x", "y"]));
+print(lib.count({"a": 1, "b": 2}));
+
+List<str> two = lib.twice("hi");
+print(two.size());
+print(two[1]);
+
+match (m) {
+    case Nothing: {
+        print("nothing");
+    }
+    case Just(int v): {
+        print(v);
+    }
+}

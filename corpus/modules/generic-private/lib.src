@@ -1,0 +1,4 @@
+// A private generic function stays private when reached through its module.
+T first<T>(List<T> xs) {
+    return xs[0];
+}

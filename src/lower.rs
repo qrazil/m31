@@ -4507,6 +4507,10 @@ impl Lowerer {
         span: Span,
     ) -> Result<Val, Diag> {
         let key = format!("{modname}#{name}");
+        // A generic function arrives already instantiated, as `first$int`
+        // (see mono.rs); the reader wrote `first`, so that is what a
+        // diagnostic names. `$` never appears in a source identifier.
+        let name = name.split('$').next().unwrap_or(name);
         // `lib.Point(3, 4)` -- a construction, not a call. The parser cannot
         // tell the two apart, because it never sees another module's
         // declarations, so it is settled here where both tables are known.
