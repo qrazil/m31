@@ -1,0 +1,75 @@
+// The bit operators, reference §6.1: `&` `|` `^` `~` `<<` `>>` on int only,
+// with Python's precedence rather than C's.
+
+// Truth tables, one bit at a time.
+List<int> bits = [0, 1];
+for (int a in bits) {
+    for (int b in bits) {
+        print(str(a & b) + str(a | b) + str(a ^ b));
+    }
+}
+
+// Many bits at once.
+print(12 & 10);
+print(12 | 10);
+print(12 ^ 10);
+print(255 & 15);
+print(0 | 0);
+
+// Precedence: `|` loosest, then `^`, then `&`, then the shifts, then `+ -`.
+print(1 | 2 & 3);           // 1 | (2 & 3) = 3
+print(6 ^ 3 & 5);           // 6 ^ (3 & 5) = 7
+print(1 | 6 ^ 3);           // 1 | (6 ^ 3) = 5
+print(1 << 2 + 1);          // 1 << 3 = 8
+print(64 >> 1 + 1);         // 64 >> 2 = 16
+print(1 << 4 & 31);         // (1 << 4) & 31 = 16
+print(3 * 2 << 1);          // (3 * 2) << 1 = 12
+print((1 | 2) & 3);
+print(~0 & 255);            // unary binds tightest: (~0) & 255
+print(-1 >> 60);            // (-1) >> 60, not -(1 >> 60)
+
+// All of them are tighter than a comparison, so this is (x & 1) == 0.
+int x = 6;
+print(x & 1 == 0);
+print(x & 1 != 0);
+print(x | 1 == 7);
+print(x >> 1 < 4);
+print(x & 4 == 4 && x & 1 == 0);
+
+// Complement: ~x is -x - 1, on every int.
+print(~0);
+print(~5);
+print(~-6);
+print(~9223372036854775807);
+print(~(-9223372036854775807 - 1));
+
+// Right shift is arithmetic: it copies the sign bit, as Python's does.
+print(-8 >> 1);
+print(-1 >> 63);
+print(-7 >> 1);             // rounds toward negative infinity, like -7 // 2
+print(9223372036854775807 >> 62);
+print((-9223372036854775807 - 1) >> 63);
+print(5 >> 0);
+
+// Left shift is a bit operation, not multiplication: what falls off the top
+// is gone, and it never traps on a value.
+print(1 << 62);
+print(1 << 63);             // the sign bit
+print(3 << 63);             // the 1 in bit 1 fell off
+print(-1 << 1);
+print(9223372036854775807 << 1);
+print(-9223372036854775807 << 4);
+print(5 << 0);
+
+// Negative operands to & | ^ are two's complement.
+print(-1 & 12345);
+print(-16 & 255);
+print(-1 ^ 12345);
+print(-2 | 1);
+
+// Masks and fields, the ordinary use.
+int packed = (7 << 16) | (200 << 8) | 42;
+print(packed);
+print(packed >> 16 & 255);
+print(packed >> 8 & 255);
+print(packed & 255);

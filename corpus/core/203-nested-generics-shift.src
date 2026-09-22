@@ -1,0 +1,128 @@
+// `>>` is two `>` tokens that the parser joins in operator position, so
+// nested type arguments still close one bracket at a time. Every place a type
+// is written, with the shift operator used beside it.
+
+type Box<T> { T item; }
+
+type Table {
+    Map<str, List<int>> cols;
+    List<List<int>> rows;
+}
+
+List<List<int>> grid(int n) {
+    List<List<int>> g = [];
+    int i = 0;
+    while (i < n) {
+        g.push([i << 1, i << 2]);
+        i = i + 1;
+    }
+    return g;
+}
+
+Map<str, List<int>> index(List<List<int>> g) {
+    Map<str, List<int>> m = {};
+    for (List<int> row in g) {
+        m.set(str(row[0] >> 1), row);
+    }
+    return m;
+}
+
+Option<List<int>> first(List<List<int>> g) {
+    if (g.size() == 0) {
+        return Option<List<int>>.None;
+    }
+    return Option<List<int>>.Some(g[0]);
+}
+
+Result<List<int>, str> checked(Map<str, List<int>> m, str k) {
+    match (m.get(k)) {
+        case Some(List<int> v): {
+            return Result<List<int>, str>.Ok(v);
+        }
+        case None: {
+            return Result<List<int>, str>.Err("missing " + k);
+        }
+    }
+}
+
+List<List<int>> g = grid(4);
+print(g[3][1] >> 2);
+print(g.size() << 3 >> 2);
+
+Map<str, List<int>> m = index(g);
+match (m.get("2")) {
+    case Some(List<int> row): {
+        print(row[1] >> 1);
+    }
+    case None: {
+        print(-1);
+    }
+}
+
+match (checked(m, "9")) {
+    case Ok(List<int> v): {
+        print(v.size());
+    }
+    case Err(str e): {
+        print(e);
+    }
+}
+
+match (first(g)) {
+    case Some(List<int> v): {
+        print(v.size() >> 1);
+    }
+    case None: {
+        print(0);
+    }
+}
+
+// Three deep: `>>>` closes three lists.
+List<List<List<int>>> cube = [[[64]]];
+print(cube[0][0][0] >> 3);
+
+Map<str, Map<str, int>> nested = {"a": {"b": 256}};
+match (nested.get("a")) {
+    case Some(Map<str, int> inner): {
+        match (inner.get("b")) {
+            case Some(int v): {
+                print(v >> 4);
+            }
+            case None: {
+                print(0);
+            }
+        }
+    }
+    case None: {
+        print(0);
+    }
+}
+
+// Constructions whose type arguments end in `>>`, then a shift, then a
+// comparison against the result.
+Box<Box<int>> bb = Box<Box<int>>(Box<int>(40));
+print(bb.item.item >> 2);
+print(Box<Box<int>>(Box<int>(8)).item.item >> 1 > 3);
+print(Box<List<int>>([1, 2, 3]).item.size() << 1);
+
+Table t = Table({"x": [1 << 4]}, [[3], [5 >> 1]]);
+print(t.rows[1][0]);
+match (t.cols.get("x")) {
+    case Some(List<int> v): {
+        print(v[0]);
+    }
+    case None: {
+        print(0);
+    }
+}
+
+// A comparison is still a comparison: `>` then `>=`, and `>` with a space.
+int a = 9;
+print(a >> 1 >= 4);
+print(a > 1);
+
+// A distinct type whose base ends in `>>`: the pre-pass that finds its name
+// walks the same single `>` tokens.
+distinct List<List<int>> Grid;
+Grid gr = [[1 << 5]];
+print(gr[0][0] >> 5);

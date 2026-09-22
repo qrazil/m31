@@ -1,0 +1,4 @@
+corpus/errors/212-to-bits-on-int.src:2:8: `int` has no method `to_bits`
+  |
+2 | print(5.to_bits());
+  |        ^

@@ -1,0 +1,3 @@
+// `^` on two bools is `!=`, and that is how it is spelled.
+bool a = true;
+print(a ^ false);

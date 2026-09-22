@@ -1,0 +1,2 @@
+// `from_bits` takes the bit pattern, which is an int.
+float f = float.from_bits(1.0);

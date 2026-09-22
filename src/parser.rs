@@ -103,8 +103,17 @@ fn args_height(a: &Args) -> usize {
         .unwrap_or(0)
 }
 
-/// Binding powers. Higher binds tighter. Mirrors C's precedence for the
-/// operators that exist, which is the whole point of picking C's surface.
+/// Binding powers. Higher binds tighter.
+///
+/// C's order for the operators C and Python agree on, and **Python's** for
+/// the bitwise ones: `|` loosest, then `^`, then `&`, then the shifts, all of
+/// them tighter than every comparison and the shifts looser than `+`. C puts
+/// `&` below `==`, so `x & 1 == 0` there means `x & (1 == 0)` -- a famous
+/// trap that the type checker here would reject anyway, but the reading a
+/// person gives it is the Python one, so the grammar gives it too.
+///
+/// `fmt::prec` holds the same numbers; the "formatter preserves meaning"
+/// gate catches the two drifting apart.
 fn infix_bp(t: &Tok) -> Option<(BinOp, u8)> {
     Some(match t {
         Tok::PipePipe => (BinOp::Or, 1),
@@ -115,16 +124,24 @@ fn infix_bp(t: &Tok) -> Option<(BinOp, u8)> {
         Tok::LtEq => (BinOp::Le, 4),
         Tok::Gt => (BinOp::Gt, 4),
         Tok::GtEq => (BinOp::Ge, 4),
-        Tok::Plus => (BinOp::Add, 5),
-        Tok::Minus => (BinOp::Sub, 5),
-        Tok::Star => (BinOp::Mul, 6),
-        Tok::Slash => (BinOp::Div, 6),
-        Tok::Percent => (BinOp::Rem, 6),
+        Tok::Pipe => (BinOp::BitOr, 5),
+        Tok::Caret => (BinOp::BitXor, 6),
+        Tok::Amp => (BinOp::BitAnd, 7),
+        Tok::Shl => (BinOp::Shl, SHIFT_BP),
+        Tok::Plus => (BinOp::Add, 9),
+        Tok::Minus => (BinOp::Sub, 9),
+        Tok::Star => (BinOp::Mul, 10),
+        Tok::Slash => (BinOp::Div, 10),
+        Tok::Percent => (BinOp::Rem, 10),
         _ => return None,
     })
 }
 
-const UNARY_BP: u8 = 7;
+/// The shifts' binding power, named because `>>` needs it outside the
+/// table: it is two tokens, not one (see `Tok::Shl`).
+const SHIFT_BP: u8 = 8;
+
+const UNARY_BP: u8 = 11;
 
 impl Parser {
     /// A parser that continues an existing type arena.
@@ -1438,12 +1455,14 @@ impl Parser {
         let mut lhs = self.parse_prefix()?;
         // The height of `lhs`, measured once the chain first grows.
         let mut h: Option<usize> = None;
-        while let Some((op, bp)) = infix_bp(self.peek()) {
+        while let Some((op, bp, width)) = self.infix_here() {
             if bp < min_bp {
                 break;
             }
             let span = self.span();
-            self.bump();
+            for _ in 0..width {
+                self.bump();
+            }
             let hl = h.unwrap_or_else(|| height(&lhs));
             // All binary operators here are left-associative, so the right
             // side binds at bp + 1.
@@ -1454,6 +1473,24 @@ impl Parser {
             h = Some(hn);
         }
         Ok(lhs)
+    }
+
+    /// The binary operator at the cursor, its binding power, and how many
+    /// tokens spell it.
+    ///
+    /// `>>` is the one two-token operator: two `>` with nothing between them,
+    /// not even a space. The lexer cannot join them, because the same two
+    /// characters close `List<List<int>>`; here, in operator position, no
+    /// type argument list can be open, so they can only be a shift.
+    /// `a > > b` is not a shift, and stays the parse error it always was.
+    fn infix_here(&self) -> Option<(BinOp, u8, usize)> {
+        if self.peek() == &Tok::Gt && self.peek_at(1) == &Tok::Gt {
+            let (a, b) = (self.toks[self.pos].span, self.toks[self.pos + 1].span);
+            if a.line == b.line && a.col + 1 == b.col {
+                return Some((BinOp::Shr, SHIFT_BP, 2));
+            }
+        }
+        infix_bp(self.peek()).map(|(op, bp)| (op, bp, 1))
     }
 
     /// Postfix chain: `.field`, `.method(..)`, `[i]` and `?`, in any order
@@ -1524,6 +1561,11 @@ impl Parser {
                 let e = self.parse_expr(UNARY_BP)?;
                 Ok(Expr::Un(UnOp::Not, Box::new(e), span))
             }
+            Tok::Tilde => {
+                self.bump();
+                let e = self.parse_expr(UNARY_BP)?;
+                Ok(Expr::Un(UnOp::BitNot, Box::new(e), span))
+            }
             Tok::Int(n) => {
                 self.bump();
                 Ok(Expr::Int(n, span))
@@ -1593,6 +1635,21 @@ impl Parser {
                 }
                 self.expect(Tok::RBrace)?;
                 Ok(Expr::MapLit(items, span))
+            }
+            // `float.from_bits(n)` -- a static method on a built-in type.
+            // The grammar's `type "." IDENT [ args ]` always derived it; the
+            // parser only ever took that path for a type NAME.
+            t if Self::ty_of(&t).is_some() && self.peek_at(1) == &Tok::Dot => {
+                let ty = Self::ty_of(&t).expect("checked by the guard");
+                self.bump();
+                self.bump();
+                let (member, _) = self.expect_ident()?;
+                let args = if self.peek() == &Tok::LParen {
+                    self.parse_args()?
+                } else {
+                    Args::default()
+                };
+                Ok(Expr::EnumNew(ty, member, args, span))
             }
             // `int(x)` -- a conversion back to a base type. A type keyword
             // is not otherwise an expression, so this is unambiguous.

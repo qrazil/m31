@@ -60,8 +60,15 @@ are never freed (§7.3).
     +   -   *   /   %
     ==  !=  <   <=  >   >=
     &&  ||  !
+    &   |   ^   ~   <<  >>
     =   .   ,   ;   :
     (   )   {   }   [   ]   <   >
+
+`>>` is not a token. The two characters close two type argument lists in
+`List<List<int>>`, so the lexer always produces single `>`s, and the parser
+reads two of them **with nothing between** as a right shift wherever a binary
+operator may stand. `a > > b` is not a shift. `<<` has no such double life —
+no valid program has two `<` in a row — and is one token.
 
 ---
 
@@ -167,7 +174,9 @@ a total order that `<` does not give, so `sort()` places NaNs last (§3.9).
 A `float` cannot be a `Map` key.
 
 `int` is deliberately unqualified. The IR may lower it to i32 or i128 for a
-target that wants that; the source spells one integer type.
+target that wants that; the source spells one integer type. The bit
+operators and the wrapping methods (§6.1, §6.5a) are defined on exactly 64
+bits, though, so a target with a narrower `int` has to emulate them there.
 
 ### 3.2 Reference types
 
@@ -696,15 +705,24 @@ spawned thread before exiting (§8.1).
 
 | Level | Operators | Associativity |
 |---|---|---|
-| 7 | `-x` `!x` | prefix |
-| 6 | `*` `/` `%` | left |
-| 5 | `+` `-` | left |
+| 11 | `-x` `!x` `~x` | prefix |
+| 10 | `*` `/` `%` | left |
+| 9 | `+` `-` | left |
+| 8 | `<<` `>>` | left |
+| 7 | `&` | left |
+| 6 | `^` | left |
+| 5 | `\|` | left |
 | 4 | `<` `<=` `>` `>=` | left |
 | 3 | `==` `!=` | left |
 | 2 | `&&` | left |
 | 1 | `\|\|` | left |
 
-C's precedence, for the operators that exist. `&&` and `||` short-circuit.
+C's precedence for the operators C and Python agree on, and **Python's for
+the bitwise ones**: `|` loosest, then `^`, then `&`, then the shifts, every
+one of them tighter than every comparison, and the shifts looser than `+`
+and `-`. So `x & 1 == 0` is `(x & 1) == 0` — in C it is `x & (1 == 0)`, a
+trap every C programmer has fallen into once — and `1 << n + 1` is
+`1 << (n + 1)`, as in both. `&&` and `||` short-circuit.
 
 On the built-in types, `==` works on `int`, `bool` and `str`; `str` compares
 **by value**. On a user type an operator is a method call (§6.2).
@@ -714,15 +732,54 @@ base — `Price + Price` is a `Price`. Mixing two distinct types, or a distinct
 type and its base, is an error; convert explicitly (§3.6).
 
 **Integer arithmetic traps on overflow** — `+`, `-`, `*`, `/`, `%` and
-unary `-`, on every target. There is no wrapping variant; one way to do each
-thing, and a `wrapping_add` can arrive the day something needs it. Division
-and remainder by zero trap too, as does `INT_MIN / -1`.
+unary `-`, on every target. Division and remainder by zero trap too, as does
+`INT_MIN / -1`. The operators never wrap. Hashes and PRNGs are defined modulo
+2^64 and need wrapping, so it exists — as the methods `wrapping_add`,
+`wrapping_sub` and `wrapping_mul` (§6.5a), whose names put every wrap in
+plain sight at the place it happens.
 
 Overflow trapping is why an overflowing program cannot have a Go twin in the
 corpus: Go wraps, so the twin would be confidently wrong. Those cases live in
 `corpus/traps/` instead.
 
-There is no unsigned type and no bitwise operator yet.
+#### Bit operators
+
+`&` `|` `^` `<<` `>>` and unary `~` apply to **`int` only**. A `bool` is not
+an integer — `&&`, `||` and `!=` are its operators, and the diagnostic says
+so. A `float` operand is an error rather than a truncation: a float's bits are
+reached through `to_bits()` (§6.5a), which says that a reinterpretation is
+what is meant. Both operands must have the same type; a distinct `int` stays
+distinct, as under `+`. None of them is overloadable (§6.2).
+
+They are operations on the 64-bit two's-complement pattern, not arithmetic
+on the number, so the overflow rule does not reach them:
+
+  - `&`, `|`, `^` and `~` **never trap**. `~x` is `-x - 1` for every `x`,
+    including `INT_MIN`, because nothing overflows.
+  - `>>` is an **arithmetic** shift: the sign bit is copied in, as in Python,
+    so `-7 >> 1` is `-4` (rounded toward negative infinity). A logical shift
+    is `(x >> n) & ~(-1 << (64 - n))`.
+  - `<<` **discards** the bits shifted out of the top and does not trap.
+    It is a bit operation, and a shift that trapped whenever a bit fell off
+    could not build a mask or rotate a hash. The cost is that **`x << n` is
+    not `x * 2^n`** once bits fall off — `3 << 63` is `INT_MIN` — which is
+    what `*` is for, and `*` traps.
+  - **A shift count outside `0..63` traps**, negative counts included. In C
+    it is undefined behaviour, and x86 masks the count to six bits, so
+    `1 << 64` would quietly be `1`. A negative count is not a shift the
+    other way.
+
+The emitted C relies on nothing C leaves open: `<<` is done on `uint64_t`
+(left-shifting a negative signed value is undefined), the result comes back by
+bit pattern, and the sign extension of `>>` is spelled out rather than left
+to the implementation.
+
+There is no `&=`, `<<=` or any other augmented assignment, because there is
+no `+=`; the bit operators do not get a spelling arithmetic lacks.
+
+There is no unsigned type. A `uint64` algorithm is written on `int` with the
+bit operators and the wrapping methods — equal bits, and the one difference,
+the logical right shift, is the mask above.
 
 ### 6.2 Operators on user types
 
@@ -753,7 +810,9 @@ rather than four methods, for the same reason: one implementation is a total
 order, and four can disagree.
 
 There is no way to define an operator that has no entry above, and no way to
-change an operator's meaning on a built-in type.
+change an operator's meaning on a built-in type. The bit operators are
+deliberately absent: they are defined on the bits of an `int`, and a user
+type that wants something like them should name it as a method.
 
 ### 6.3 Postfix
 
@@ -831,6 +890,42 @@ And on a collection of `str`:
 
 A `str` is immutable, so every one of these returns a new string.
 
+### 6.5a Methods on numbers
+
+| | |
+|---|---|
+| `v.to_str()` | on `int`, `float` and `bool` (§6.6) |
+| `a.wrapping_add(b)`, `a.wrapping_sub(b)`, `a.wrapping_mul(b)` | `int`: two's-complement, modulo 2^64; never trap |
+| `f.to_bits()` | `float` → `int`: the IEEE-754 bit pattern |
+| `float.from_bits(n)` | `int` → `float`: the inverse, every pattern accepted |
+
+These are here because the language cannot write them itself — the operators
+trap by design, and no arithmetic reaches a float's bits. Everything else a
+number might answer is a library's job.
+
+The wrapping methods take an argument of the receiver's type and return that
+type, so a distinct `int` stays distinct, the way it does under `+`. They
+exist for hashes and PRNGs:
+
+```c
+int h = -3750763034362895579;               // FNV-1a's offset basis, as an int
+h = (h ^ s.byte_at(i)).wrapping_mul(1099511628211);
+```
+
+`to_bits` and `from_bits` are a reinterpretation, not a conversion:
+`1.0.to_bits()` is `4607182418800017408` (`0x3FF0000000000000`), `-0.0`
+gives `INT_MIN` where `0.0` gives `0` — the one way to tell the two zeros
+apart — and a NaN's payload survives the round trip. They exist so float
+formatting and parsing can be written in the language.
+
+The spelling follows the rule §6.6 gives for conversions. `to_bits` is a
+method, like `to_str`, because the **source** is what varies and a method
+dispatches on its receiver. `from_bits` is a **static method on the target**,
+like the `int.parse(s)` that section anticipates, because its source is
+always an `int` and it is the result type the name has to state — an
+`n.to_float_bits()` on `int` would put the float's name on the int. `to_`
+and `from_` make them a visible pair, the one Rust uses.
+
 ### 6.6 Built-in functions
 
 | | |
@@ -873,9 +968,9 @@ is a question only the program can answer. `clone` works on a `str`, an
 `Array`, a `List` and a struct; a channel and an interface value cannot be
 cloned.
 
-**`int`, `float` and `bool` answer `to_str`**, and nothing else — so
-`v.to_str()` means the same thing whatever `v` is, and `str(v)` is that same
-call. A number finally composes into a message.
+**`int`, `float` and `bool` answer `to_str`** — so `v.to_str()` means the
+same thing whatever `v` is, and `str(v)` is that same call. A number finally
+composes into a message. Past `to_str`, only the few methods of §6.5a.
 
 **Parsing returns an `Option`, not a `Result`.** The question a built-in parse
 answers is "did it parse", which is Option-shaped; it is lossy on purpose,
@@ -921,7 +1016,9 @@ no exceptions and no error values yet.
 
 Trapping conditions:
 
-  - integer overflow, on any arithmetic operator including unary minus
+  - integer overflow, on any arithmetic operator including unary minus —
+    not on a bit operator, and not in a `wrapping_` method
+  - a shift count outside `0 .. 63`
   - division or remainder by zero, and `INT_MIN / -1`
   - an index outside `0 .. len-1`
   - `Map.get` on a key that is not there
@@ -1021,7 +1118,7 @@ Stated so the absence is a decision and not an oversight:
   - shadowing — see §4.1
   - **null** — every declaration initialises, and absence is `Option<T>`
   - type aliases — see §3.6
-  - unsigned and sized integer types, and bitwise operators
+  - unsigned and sized integer types
   - `switch`, ternary `?:`, three-clause `for`, labelled break
   - variadic functions
   - constraints on type parameters
@@ -1081,12 +1178,16 @@ while       = "while" "(" expr ")" block ;
 forin       = "for" "(" type IDENT "in" expr ")" block ;
 
 expr        = unary { binop unary } ;                 (* precedence per 6.1 *)
-unary       = [ "-" | "!" ] postfix ;
+binop       = "||" | "&&" | "==" | "!=" | "<" | "<=" | ">" | ">="
+            | "|" | "^" | "&" | "<<" | ">" ">"        (* ">" ">": adjacent, §1.6 *)
+            | "+" | "-" | "*" | "/" | "%" ;
+unary       = [ "-" | "!" | "~" ] postfix ;
 postfix     = atom { "." IDENT [ args ] | "[" expr "]" | "?" } ;
 atom        = INT | FLOAT | STR | "true" | "false"
             | IDENT [ args ]
             | type args                               (* construction *)
-            | type "." IDENT [ args ]                 (* enum variant, static method *)
+            | type "." IDENT [ args ]                 (* enum variant, static method,
+                                                         float.from_bits *)
             | seqlit | maplit
             | "(" expr ")" ;
 

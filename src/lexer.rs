@@ -77,6 +77,16 @@ pub enum Tok {
     AmpAmp,
     PipePipe,
     Bang,
+    Amp,
+    Pipe,
+    Caret,
+    Tilde,
+    /// `<<`. There is deliberately no `>>` token: `List<List<int>>` ends in
+    /// two `>` that close two type argument lists, so the lexer always emits
+    /// `>` singly and the parser reads two ADJACENT ones as a right shift in
+    /// operator position. `<<` has no such twin -- no valid program has two
+    /// `<` in a row -- so it can be one token.
+    Shl,
 
     Eof,
 }
@@ -149,6 +159,11 @@ impl Tok {
             Tok::AmpAmp => "&&",
             Tok::PipePipe => "||",
             Tok::Bang => "!",
+            Tok::Amp => "&",
+            Tok::Pipe => "|",
+            Tok::Caret => "^",
+            Tok::Tilde => "~",
+            Tok::Shl => "<<",
             _ => "token",
         }
     }
@@ -353,13 +368,16 @@ impl<'a> Lexer<'a> {
             b'!' if self.peek() == b'=' => two(self, Tok::BangEq),
             b'!' => Tok::Bang,
             b'<' if self.peek() == b'=' => two(self, Tok::LtEq),
+            b'<' if self.peek() == b'<' => two(self, Tok::Shl),
             b'<' => Tok::Lt,
             b'>' if self.peek() == b'=' => two(self, Tok::GtEq),
             b'>' => Tok::Gt,
             b'&' if self.peek() == b'&' => two(self, Tok::AmpAmp),
             b'|' if self.peek() == b'|' => two(self, Tok::PipePipe),
-            b'&' => return Err(Diag::new(span, "unexpected `&`; did you mean `&&`?")),
-            b'|' => return Err(Diag::new(span, "unexpected `|`; did you mean `||`?")),
+            b'&' => Tok::Amp,
+            b'|' => Tok::Pipe,
+            b'^' => Tok::Caret,
+            b'~' => Tok::Tilde,
             other => {
                 return Err(Diag::new(
                     span,

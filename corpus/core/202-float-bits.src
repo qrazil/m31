@@ -1,0 +1,53 @@
+// A float's IEEE-754 bit pattern, reference §6.5a: `f.to_bits()` and
+// `float.from_bits(n)`. Both are a reinterpretation, never a conversion.
+
+print(1.0.to_bits());               // 0x3FF0000000000000
+print(2.0.to_bits());
+print(0.5.to_bits());
+print(0.0.to_bits());
+print((-0.0).to_bits());            // only the sign bit
+print((-1.0).to_bits());
+print((1.0 / 0.0).to_bits());       // +inf, 0x7FF0000000000000
+print((-1.0 / 0.0).to_bits());      // -inf, 0xFFF0000000000000
+print(1.7976931348623157e308.to_bits());
+
+// The other way.
+print(float.from_bits(4607182418800017408) == 1.0);
+print(float.from_bits(0) == 0.0);
+print(float.from_bits(4611686018427387904) == 2.0);
+print(float.from_bits(9218868437227405312) == 1.0 / 0.0);
+
+// -0.0 equals 0.0 under `==`, so only the bits tell them apart -- which is
+// exactly why this exists.
+float nz = float.from_bits(-9223372036854775807 - 1);
+print(nz == 0.0);
+print(nz.to_bits() == 0.0.to_bits());
+print(1.0 / nz == -1.0 / 0.0);
+
+// A NaN's bits survive the round trip even though the NaN is not equal to
+// itself.
+float nan = float.from_bits(9221120237041090560);   // 0x7FF8000000000000
+print(nan == nan);
+print(nan.to_bits());
+
+// The smallest subnormal is one bit.
+float tiny = float.from_bits(1);
+print(tiny > 0.0);
+print(tiny.to_bits());
+
+// Round trips, both directions.
+List<float> fs = [1.0, -2.5, 3.141592653589793, 1.0e-300, -0.0, 6.02e23];
+for (float f in fs) {
+    print(float.from_bits(f.to_bits()).to_bits() == f.to_bits());
+}
+List<int> ns = [0, 1, -1, 4607182418800017408, -9223372036854775807 - 1, 9218868437227405311];
+for (int n in ns) {
+    print(float.from_bits(n).to_bits() == n);
+}
+
+// Pulling the fields apart is what a float formatter written in the
+// language will do.
+int b = (-6.25).to_bits();
+print(b < 0);                               // the sign
+print((b >> 52) & 2047);                    // the biased exponent
+print(b & 4503599627370495);                // the mantissa

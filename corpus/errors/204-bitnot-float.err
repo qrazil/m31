@@ -1,0 +1,4 @@
+corpus/errors/204-bitnot-float.src:1:7: cannot apply `~` to a value of type float
+  |
+1 | print(~1.0);
+  |       ^

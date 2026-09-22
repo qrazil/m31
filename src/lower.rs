@@ -3586,6 +3586,9 @@ impl Lowerer {
         args: &Args,
         span: Span,
     ) -> Result<Val, Diag> {
+        if matches!(ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Void) {
+            return self.lower_prim_static(ty, variant, args, span);
+        }
         let Some(tid) = self.tdef_of(ty) else {
             return Err(Diag::new(
                 span,
@@ -4726,6 +4729,32 @@ impl Lowerer {
                         });
                         Ok(Val::new(d, Ty::Int, false))
                     }
+                    UnOp::BitNot => {
+                        // Held to `int` alone, like unary minus: a `bool` is
+                        // not an integer, and a float has no bit operations.
+                        if a.ty != Ty::Int {
+                            return Err(Diag::new(
+                                *span,
+                                format!(
+                                    "cannot apply `~` to a value of type {}",
+                                    self.tyname(a.ty)
+                                ),
+                            ));
+                        }
+                        // `~x` is `x ^ -1`: one bit operation fewer to carry
+                        // through the IR and the runtime, and the identity is
+                        // exact in two's complement.
+                        let ones = self.new_val(IrTy::I64);
+                        self.push(Inst::IConst { dst: ones, val: -1 });
+                        let d = self.new_val(IrTy::I64);
+                        self.push(Inst::Arith {
+                            dst: d,
+                            op: ArithOp::Xor,
+                            lhs: a.val(),
+                            rhs: ones,
+                        });
+                        Ok(Val::new(d, Ty::Int, false))
+                    }
                     UnOp::Not => {
                         if a.ty != Ty::Bool {
                             return Err(Diag::new(
@@ -4840,32 +4869,8 @@ impl Lowerer {
                 if self.underlying(o.ty) == Ty::Str {
                     return self.lower_str_method(&o, m, args, *span);
                 }
-                // `int`, `float` and `bool` answer `to_str` and nothing
-                // else, so that `v.to_str()` means the same thing whatever
-                // `v` is -- a rule rather than a special case for user types.
                 if matches!(self.underlying(o.ty), Ty::Int | Ty::Float | Ty::Bool) {
-                    if m != "to_str" {
-                        return Err(Diag::new(
-                            *span,
-                            format!("`{}` has no method `{m}`", self.tyname(o.ty)),
-                        ));
-                    }
-                    if !args.pos.is_empty() || !args.named.is_empty() {
-                        return Err(Diag::new(*span, "`to_str` takes no arguments"));
-                    }
-                    let func = match self.underlying(o.ty) {
-                        Ty::Int => "rt_int_to_str",
-                        Ty::Float => "rt_float_to_str",
-                        _ => "rt_bool_to_str",
-                    };
-                    let d = self.new_val(IrTy::Ref);
-                    self.push(Inst::Call {
-                        dst: Some(d),
-                        func: func.to_string(),
-                        args: vec![o.val()],
-                    });
-                    self.stmt_temps.push(d);
-                    return Ok(Val::new(d, Ty::Str, true));
+                    return self.lower_prim_method(&o, m, args, *span);
                 }
                 let Some(tid) = self.tdef_of(o.ty) else {
                     return Err(Diag::new(
@@ -5046,6 +5051,120 @@ impl Lowerer {
         }
     }
 
+    /// A method on `int`, `float` or `bool`.
+    ///
+    /// `to_str` on all three, so that `v.to_str()` means the same thing
+    /// whatever `v` is. Beyond that only what cannot be written in the
+    /// language itself: wrapping arithmetic, which the checked operators
+    /// refuse by design, and a float's bit pattern, which no arithmetic
+    /// reaches. Everything else a number might answer belongs in a library.
+    fn lower_prim_method(
+        &mut self,
+        o: &Val,
+        m: &str,
+        args: &Args,
+        span: Span,
+    ) -> Result<Val, Diag> {
+        let prim = self.underlying(o.ty);
+        let wrap = match m {
+            "wrapping_add" => Some(ArithOp::WrapAdd),
+            "wrapping_sub" => Some(ArithOp::WrapSub),
+            "wrapping_mul" => Some(ArithOp::WrapMul),
+            _ => None,
+        };
+        if let (Ty::Int, Some(wop)) = (prim, wrap) {
+            // A distinct int keeps its type, as it does under `+`: the
+            // wrapping forms are the same arithmetic with a different answer
+            // at the edges, not a conversion.
+            if args.pos.len() != 1 || !args.named.is_empty() {
+                return Err(Diag::new(span, format!("`{m}` takes one argument")));
+            }
+            let b = self.lower_expr(&args.pos[0])?;
+            if b.ty != o.ty {
+                return Err(Diag::new(args.pos[0].span(), self.mismatch(o.ty, b.ty)));
+            }
+            let d = self.new_val(IrTy::I64);
+            self.push(Inst::Arith {
+                dst: d,
+                op: wop,
+                lhs: o.val(),
+                rhs: b.val(),
+            });
+            return Ok(Val::new(d, o.ty, false));
+        }
+        if prim == Ty::Float && m == "to_bits" {
+            if !args.pos.is_empty() || !args.named.is_empty() {
+                return Err(Diag::new(span, "`to_bits` takes no arguments"));
+            }
+            // The runtime already moves floats through int64 slots by bit
+            // pattern (rt_f2i, a memcpy); this is that move, made visible.
+            let d = self.new_val(IrTy::I64);
+            self.push(Inst::Call {
+                dst: Some(d),
+                func: "rt_f2i".to_string(),
+                args: vec![o.val()],
+            });
+            return Ok(Val::new(d, Ty::Int, false));
+        }
+        if m != "to_str" {
+            return Err(Diag::new(
+                span,
+                format!("`{}` has no method `{m}`", self.tyname(o.ty)),
+            ));
+        }
+        if !args.pos.is_empty() || !args.named.is_empty() {
+            return Err(Diag::new(span, "`to_str` takes no arguments"));
+        }
+        let func = match prim {
+            Ty::Int => "rt_int_to_str",
+            Ty::Float => "rt_float_to_str",
+            _ => "rt_bool_to_str",
+        };
+        let d = self.new_val(IrTy::Ref);
+        self.push(Inst::Call {
+            dst: Some(d),
+            func: func.to_string(),
+            args: vec![o.val()],
+        });
+        self.stmt_temps.push(d);
+        Ok(Val::new(d, Ty::Str, true))
+    }
+
+    /// `T.name(..)` where `T` is a built-in type: a static method.
+    ///
+    /// There is one, `float.from_bits(n)`. It is static rather than a method
+    /// on `int` for the reason §6.6 gives for parsing: the source is always
+    /// an `int` and it is the TARGET that the name has to say, which a method
+    /// dispatched on the source cannot.
+    fn lower_prim_static(
+        &mut self,
+        ty: Ty,
+        name: &str,
+        args: &Args,
+        span: Span,
+    ) -> Result<Val, Diag> {
+        if ty != Ty::Float || name != "from_bits" {
+            return Err(Diag::new(
+                span,
+                format!("`{}` has no static method `{name}`", self.tyname(ty)),
+            ));
+        }
+        if args.pos.len() != 1 || !args.named.is_empty() {
+            return Err(Diag::new(span, "`from_bits` takes one argument"));
+        }
+        let n = self.lower_expr(&args.pos[0])?;
+        if n.ty != Ty::Int {
+            return Err(Diag::new(args.pos[0].span(), self.mismatch(Ty::Int, n.ty)));
+        }
+        let d = self.new_val(IrTy::F64);
+        self.push(Inst::Call {
+            dst: Some(d),
+            func: "rt_i2f".to_string(),
+            args: vec![n.val()],
+        });
+        Ok(Val::new(d, Ty::Float, false))
+    }
+
     /// The method an operator desugars to, and whether the result is negated.
     ///
     /// Comparison goes through a single `cmp` returning an int, rather than
@@ -5062,7 +5181,10 @@ impl Lowerer {
             Eq => ("eq", false),
             Ne => ("eq", true),
             Lt | Le | Gt | Ge => ("cmp", false),
-            And | Or => return None,
+            // The bit operators are not in the overloadable set: they are
+            // defined on the bits of an `int`, and a user type has no bits
+            // to speak of until it says what they are, which is a method.
+            And | Or | BitAnd | BitOr | BitXor | Shl | Shr => return None,
         })
     }
 
@@ -5309,6 +5431,58 @@ impl Lowerer {
         span: Span,
     ) -> Result<Val, Diag> {
         use BinOp::*;
+        let bits = match op {
+            BitAnd => Some(ArithOp::And),
+            BitOr => Some(ArithOp::Or),
+            BitXor => Some(ArithOp::Xor),
+            Shl => Some(ArithOp::Shl),
+            Shr => Some(ArithOp::Shr),
+            _ => None,
+        };
+        if let Some(bop) = bits {
+            if a.ty != b.ty {
+                return Err(Diag::new(
+                    span,
+                    format!(
+                        "cannot apply `{}` to {} and {}; convert one of them",
+                        op.spelling(),
+                        self.tyname(a.ty),
+                        self.tyname(b.ty)
+                    ),
+                ));
+            }
+            // `int` only. A float has a bit pattern, but `&` on one would
+            // be a truncation or a reinterpretation, and neither should be
+            // spelled as an operator -- `to_bits()` says which it is. A
+            // `bool` is not an integer here, and the operator it wanted
+            // has its own spelling.
+            if ty != Ty::Int {
+                let hint = match (ty, op) {
+                    (Ty::Float, _) => "; bit operations apply only to int".to_string(),
+                    (Ty::Bool, BitAnd) => "; for bool use `&&`".to_string(),
+                    (Ty::Bool, BitOr) => "; for bool use `||`".to_string(),
+                    (Ty::Bool, BitXor) => "; for bool use `!=`".to_string(),
+                    _ => String::new(),
+                };
+                return Err(Diag::new(
+                    span,
+                    format!(
+                        "cannot apply `{}` to {} and {}{hint}",
+                        op.spelling(),
+                        self.tyname(a.ty),
+                        self.tyname(b.ty)
+                    ),
+                ));
+            }
+            let d = self.new_val(IrTy::I64);
+            self.push(Inst::Arith {
+                dst: d,
+                op: bop,
+                lhs: a.val(),
+                rhs: b.val(),
+            });
+            return Ok(Val::new(d, Ty::Int, false));
+        }
         let arith = match op {
             Add => Some(ArithOp::Add),
             Sub => Some(ArithOp::Sub),

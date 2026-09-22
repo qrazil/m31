@@ -1,0 +1,4 @@
+corpus/errors/200-bitwise-float.src:4:9: cannot apply `&` to float and float; bit operations apply only to int
+  |
+4 | print(x & 1.0);
+  |         ^

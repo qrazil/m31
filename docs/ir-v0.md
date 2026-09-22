@@ -97,11 +97,15 @@ Sixteen.
 | `iadd a, b` | `(i64, i64) -> i64`, **traps on overflow** |
 | `isub a, b` | `(i64, i64) -> i64`, **traps on overflow** |
 | `imul a, b` | `(i64, i64) -> i64`, **traps on overflow** |
+| `iand` `ior` `ixor a, b` | `(i64, i64) -> i64`, never trap |
+| `ishl` `ishr a, n` | `(i64, i64) -> i64`, **trap on `n` outside 0..63**; `ishr` sign-extends, `ishl` discards what falls off |
+| `wadd` `wsub` `wmul a, b` | `(i64, i64) -> i64`, wrap modulo 2^64 |
 | `icmp <cond> a, b` | `(i64, i64) -> i1`, `cond ∈ {eq ne lt le gt ge}` |
 
-**Overflow traps.** There is no wrapping variant — one way to do each thing.
-A `wrapping_add` can be added the day something needs it, and until then its
-absence is a feature.
+**Overflow traps.** The operators never wrap. Hashes and PRNGs are defined
+modulo 2^64, so the wrapping ops exist, but only behind a method whose name
+says so (`a.wrapping_mul(b)`, reference §6.1): a wrap is always visible in
+the source. They are emitted on `uint64_t`, where C defines the wrap.
 
 Lowered to `__builtin_add_overflow` and friends, which are gcc 5+ and
 clang 3.8+. The check is `static inline` in `rt.h` while `rt_trap` is

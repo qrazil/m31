@@ -1,0 +1,3 @@
+// Floats do not wrap -- IEEE gives an infinity -- so there is nothing for a
+// wrapping method to do.
+print(1.0.wrapping_add(2.0));

@@ -1,0 +1,4 @@
+corpus/errors/207-bitwise-no-overload.src:5:10: `&` cannot be overloaded
+  |
+5 | print((a & a).v);
+  |          ^

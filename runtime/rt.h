@@ -275,7 +275,8 @@ _Noreturn void rt_trap(const char *msg);
 void rt_check_unique(Obj *o);
 
 /* Checked arithmetic. int is 64-bit and overflow TRAPS -- docs/ir-v0.md §3.
- * There is no wrapping variant; one way to do each thing.
+ * The operators never wrap; wrapping is a separately named method
+ * (`a.wrapping_add(b)`, below), so a wrap is always visible in the source.
  *
  * __builtin_*_overflow is gcc 5+ and clang 3.8+. Verified 2026-09-18:
  * identical values and identical trap behaviour under gcc and clang at -O0
@@ -312,6 +313,53 @@ static inline int64_t rt_irem(int64_t a, int64_t b) {
     if (b == 0) rt_trap("remainder by zero");
     if (a == INT64_MIN && b == -1) rt_trap("integer overflow in %");
     return a % b;
+}
+
+/* Bit operations -- reference §6.1. They are operations on the 64-bit
+ * pattern, not on the number, so none of them traps on "overflow"; only a
+ * shift count outside 0..63 traps, because C leaves that undefined and the
+ * hardware disagrees about it (x86 masks the count to 6 bits, so `1 << 64`
+ * would quietly be 1).
+ *
+ * Nothing here relies on signed behaviour C leaves open. Shifting a negative
+ * value left is undefined, so the shift is done on uint64_t. Converting a
+ * uint64_t above INT64_MAX back to int64_t is implementation-defined, so it
+ * goes back by bit pattern, the way rt_i2f does. Shifting a negative value
+ * right is implementation-defined too, so the sign extension is spelled out:
+ * for a < 0, ~a is non-negative, and ~(~a >> n) is the arithmetic shift. */
+static inline int64_t rt_u2i(uint64_t u) {
+    int64_t n;
+    __builtin_memcpy(&n, &u, sizeof n);
+    return n;
+}
+
+static inline int64_t rt_iand(int64_t a, int64_t b) { return a & b; }
+static inline int64_t rt_ior(int64_t a, int64_t b)  { return a | b; }
+static inline int64_t rt_ixor(int64_t a, int64_t b) { return a ^ b; }
+
+static inline int64_t rt_ishl(int64_t a, int64_t n) {
+    if (n < 0 || n > 63) rt_trap("shift count out of range in <<");
+    return rt_u2i((uint64_t)a << n);
+}
+
+static inline int64_t rt_ishr(int64_t a, int64_t n) {
+    if (n < 0 || n > 63) rt_trap("shift count out of range in >>");
+    return a < 0 ? ~(~a >> n) : a >> n;
+}
+
+/* Wrapping arithmetic, for hashes and PRNGs, which are defined modulo 2^64.
+ * Unsigned arithmetic in C wraps by definition, so these are the checked
+ * helpers above with the check taken out and the sign taken off. */
+static inline int64_t rt_wrapping_add(int64_t a, int64_t b) {
+    return rt_u2i((uint64_t)a + (uint64_t)b);
+}
+
+static inline int64_t rt_wrapping_sub(int64_t a, int64_t b) {
+    return rt_u2i((uint64_t)a - (uint64_t)b);
+}
+
+static inline int64_t rt_wrapping_mul(int64_t a, int64_t b) {
+    return rt_u2i((uint64_t)a * (uint64_t)b);
 }
 
 #endif /* RT_H */
