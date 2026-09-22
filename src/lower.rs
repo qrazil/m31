@@ -1857,16 +1857,19 @@ impl Lowerer {
 
     /// Hand a reference across a thread boundary -- `send` or `spawn`.
     ///
-    /// Two cases, and conflating them was three separate bugs:
+    /// Only a value this scope OWNS may cross -- an owned temporary, or a
+    /// local this scope registered. It is a MOVE: transfer it, emit nothing,
+    /// and refuse any later use.
     ///
-    /// - We **own** the reference (an owned temporary, or a local this scope
-    ///   registered). Then it is a MOVE: transfer it, emit nothing, and
-    ///   refuse any later use.
-    /// - We only **borrow** it (an element, a field, a parameter). Then the
-    ///   +1 belongs to somebody else, so the receiver needs one of its own:
-    ///   retain. The value stays usable here, because nothing was given up.
+    /// A BORROWED one -- an element, a field, a parameter, `this` -- cannot
+    /// cross at all. An earlier draft retained it instead and handed the
+    /// receiver its own +1, which is exactly the race moved-not-shared
+    /// exists to prevent: two threads on one non-atomic count. `clone` is
+    /// how you send something you also want to keep.
     ///
-    /// The receiving side always releases, so both cases balance.
+    /// A module constant is the one exception, below: immortal, so neither
+    /// thread ever writes its count, and immutable, so there is nothing to
+    /// race on.
     fn transfer(&mut self, v: &Val, arg: &Expr, span: Span) -> Result<(), Diag> {
         if !self.is_ref(v.ty) || self.chan_elem(v.ty).is_some() {
             return Ok(());
