@@ -839,6 +839,7 @@ impl Fmt {
                 None => crate::lexer::quote(s),
             },
             Expr::Var(n, _) => n.clone(),
+            Expr::This(_) => "this".to_string(),
             Expr::Bin(op, l, r, _) => {
                 let p = prec(*op);
                 format!(

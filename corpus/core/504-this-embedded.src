@@ -1,0 +1,71 @@
+// A promoted method runs on the EMBEDDED value: the forwarder calls it on
+// the embedded field, so inside it `this` is that field's object, not the
+// outer one. Embedding is composition, and nothing here makes it
+// inheritance -- a promoted method's bare sibling call stays on its own
+// type even when the outer type declares a method of the same name.
+
+type Animal {
+    str name;
+}
+
+Animal Animal.itself() {
+    return this;
+}
+
+str Animal.kind() {
+    return "an animal";
+}
+
+str Animal.hello() {
+    return "I am " + name + ", " + kind();
+}
+
+type Dog {
+    Animal;
+    int legs;
+}
+
+// Dog's own `kind` shadows the promoted one for callers of Dog -- but not
+// inside Animal's methods, which know nothing of Dog.
+str Dog.kind() {
+    return "a dog";
+}
+
+bool Dog.owns(Animal a) {
+    return a.name == name;
+}
+
+// A promoted method is a sibling like a declared one: `itself()` here is
+// Animal's, reached through the forwarder, and answers the embedded Animal.
+bool Dog.check() {
+    return owns(itself());
+}
+
+str Dog.intro() {
+    return hello() + " with " + str(legs) + " legs";
+}
+
+// Two levels deep: the promoted method's `this` is the innermost value.
+type Kennel {
+    Dog;
+    str town;
+}
+
+Dog d = Dog(Animal("Rex"), 4);
+print(d.hello());
+print(d.kind());
+print(d.intro());
+print(d.check());
+
+// `itself()` returns the Animal inside the Dog: renaming through it renames
+// the Dog.
+Animal a = d.itself();
+a.name = "Max";
+print(d.name);
+
+Kennel k = Kennel(Dog(Animal("Bo"), 3), "Leeds");
+print(k.hello());
+Animal inner = k.itself();
+inner.name = "Bea";
+print(k.name);
+print(k.intro());

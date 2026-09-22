@@ -1233,3 +1233,38 @@ fn the_float_module_cannot_format_a_float_itself() {
 fn a_float_conversion_without_the_module_is_a_named_compiler_bug() {
     assert!(err("print(1.5);").contains("was not loaded for a float conversion"));
 }
+
+// ---- `this` ---------------------------------------------------------
+
+#[test]
+fn this_is_a_keyword() {
+    assert_eq!(toks("this"), vec![Tok::KwThis, Tok::Eof]);
+    // Only the whole word: a name that merely starts with it is a name.
+    assert_eq!(
+        toks("thisone"),
+        vec![Tok::Ident("thisone".to_string()), Tok::Eof]
+    );
+}
+
+#[test]
+fn reading_this_is_borrowed_and_returning_it_retains_once() {
+    // The receiver is borrowed like a parameter, so using it costs nothing;
+    // a return is owned, so `return this;` must add exactly one reference
+    // and release none.
+    let out = ir("type C { int n = 0; }\n\
+                  C C.me() { return this; }\n\
+                  print(C().me().n);");
+    let me = out
+        .split("func ")
+        .find(|f| f.starts_with("C.me"))
+        .expect("C.me is emitted");
+    assert_eq!(me.matches("rc_inc").count(), 1, "{me}");
+    assert_eq!(me.matches("rc_dec").count(), 0, "{me}");
+}
+
+#[test]
+fn the_formatter_prints_this() {
+    let src = "type C { int n = 0; }\nC C.me() {\n    return this;\n}\n";
+    let out = crate::reformat(src, "t").expect("formats");
+    assert!(out.contains("return this;"), "{out}");
+}

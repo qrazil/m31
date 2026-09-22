@@ -1,0 +1,11 @@
+// A default is evaluated where the call is written, so a `this` in one
+// would be the CALLER's receiver, or none at all.
+type Counter {
+    int n = 0;
+}
+
+bool Counter.same(Counter other = this) {
+    return n == other.n;
+}
+
+print(Counter().same());

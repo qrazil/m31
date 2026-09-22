@@ -41,6 +41,11 @@ pub struct Mono {
     /// The module whose function is being substituted, for resolving a bare
     /// call name to this module's own declaration.
     cur_module: String,
+    /// The receiver's type as written, in `src_exprs`, while an instance
+    /// method is being substituted; `None` anywhere else. It is what `this`
+    /// contributes when it is passed to a generic function and the type
+    /// argument has to be inferred from it.
+    recv_ty: Option<Ty>,
 }
 
 /// A substitution from type parameter name to concrete type.
@@ -60,6 +65,7 @@ impl Mono {
             queue: Vec::new(),
             env: Vec::new(),
             cur_module: String::new(),
+            recv_ty: None,
         };
 
         let mut concrete_types = Vec::new();
@@ -514,7 +520,13 @@ impl Mono {
         }
         self.env.clear();
         self.env.push(scope);
-        let body = self.subst_block(&f.body, sub)?;
+        self.recv_ty = match &f.recv {
+            Some(r) if !f.is_static => Some(self.src_ty_named(r)),
+            _ => None,
+        };
+        let body = self.subst_block(&f.body, sub);
+        self.recv_ty = None;
+        let body = body?;
         self.env.clear();
         Ok(Func {
             module: f.module.clone(),
@@ -529,6 +541,21 @@ impl Mono {
             body,
             span: f.span,
         })
+    }
+
+    /// A plain type name in the source arena, interned if the source never
+    /// spelled it as a type expression -- a type named only in its own
+    /// declaration and its methods' receivers has no entry of its own.
+    fn src_ty_named(&mut self, name: &str) -> Ty {
+        let e = TyExpr {
+            name: name.to_string(),
+            args: Vec::new(),
+        };
+        if let Some(i) = self.src_exprs.iter().position(|x| *x == e) {
+            return Ty::User(i as u32);
+        }
+        self.src_exprs.push(e);
+        Ty::User((self.src_exprs.len() - 1) as u32)
     }
 
     fn subst_block(&mut self, stmts: &[Stmt], sub: &Subst) -> Result<Vec<Stmt>, Diag> {
@@ -713,9 +740,12 @@ impl Mono {
 
     fn subst_expr(&mut self, e: &Expr, sub: &Subst) -> Result<Expr, Diag> {
         Ok(match e {
-            Expr::Int(..) | Expr::Float(..) | Expr::Bool(..) | Expr::Str(..) | Expr::Var(..) => {
-                e.clone()
-            }
+            Expr::Int(..)
+            | Expr::Float(..)
+            | Expr::Bool(..)
+            | Expr::Str(..)
+            | Expr::Var(..)
+            | Expr::This(..) => e.clone(),
             Expr::Bin(op, l, r, s) => Expr::Bin(
                 *op,
                 Box::new(self.subst_expr(l, sub)?),
@@ -890,6 +920,7 @@ impl Mono {
             Expr::Str(..) => Some(Ty::Str),
             Expr::New(ty, ..) => Some(*ty),
             Expr::Var(n, _) => self.env_ty(n),
+            Expr::This(_) => self.recv_ty,
             _ => None,
         }
     }

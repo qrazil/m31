@@ -1,0 +1,11 @@
+// A field of the receiver has one spelling, its bare name. `this.n` would
+// be a second way to write the same read.
+type Counter {
+    int n = 0;
+}
+
+int Counter.get() {
+    return this.n;
+}
+
+print(Counter().get());

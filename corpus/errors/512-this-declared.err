@@ -1,0 +1,4 @@
+corpus/errors/512-this-declared.src:7:7: `this` is a keyword -- it names a method's receiver -- and cannot be used as a name
+  |
+7 | Point this = Point(1);
+  |       ^

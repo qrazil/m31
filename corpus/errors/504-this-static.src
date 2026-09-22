@@ -1,0 +1,10 @@
+// A static method is called on the type, so it has no receiver either.
+type Point {
+    int x;
+}
+
+static Point Point.origin() {
+    return this;
+}
+
+print(Point.origin().x);

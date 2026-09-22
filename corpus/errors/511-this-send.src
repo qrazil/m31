@@ -1,0 +1,12 @@
+// The receiver is borrowed from the caller, so it cannot be moved across a
+// thread boundary; clone(this) sends a copy.
+type Job {
+    int id;
+}
+
+void Job.queue(Chan<Job> c) {
+    send(c, this);
+}
+
+Chan<Job> c = Chan<Job>(1);
+Job(1).queue(c);

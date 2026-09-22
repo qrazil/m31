@@ -55,9 +55,10 @@ pub enum Error {
     Padding(int, int);
 }
 
-/// A sentence saying what was wrong, and where.
-pub str message(Error e) {
-    match (e) {
+/// A sentence saying what was wrong, and where. A method named `to_str`, so
+/// `print(e)` prints it.
+pub str Error.to_str() {
+    match (this) {
         case Character(int at, int c, bool url): {
             str head = "invalid base64 " + shown(c) + " at position " + at.to_str();
             if (url && (c == 43 || c == 47)) {

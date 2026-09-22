@@ -1,0 +1,4 @@
+corpus/errors/509-sibling-ambiguous.src:13:12: `size` is both a method of `Stack` and a function, so a bare `size(..)` here could mean either; rename one
+   |
+13 |     return size(items);
+   |            ^

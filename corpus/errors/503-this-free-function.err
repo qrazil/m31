@@ -1,0 +1,4 @@
+corpus/errors/503-this-free-function.src:3:11: `this` means nothing here: `helper` is a function, not a method, so there is no receiver
+  |
+3 |     print(this);
+  |           ^

@@ -34,7 +34,7 @@ A letter or `_`, then letters, digits or `_`. Case-sensitive.
     bool     break     bytes     case      const     continue  distinct
     else     enum      false     float     for       if        import
     in       int       interface match     pub       return    spawn
-    static   str       true      type      void      while
+    static   str       this      true      type      void      while
 
 Keywords are reserved: none may be used as an identifier. `Array`, `Chan`,
 `List` and `Map` are not keywords — they are predeclared type names, and are
@@ -336,6 +336,11 @@ Bag b = [1, 2, 3];
 b.push(4);
 List<int> plain = List<int>(b);
 ```
+
+A distinct type may declare methods of its own, and one it declares comes
+before any built-in method of its base: `str Price.show()` is called as
+`p.show()` although `int` has built-in methods too. Inside one, `this` is the
+distinct value (§4.3).
 
 There are no type aliases. An alias that is not distinct documents and does
 not enforce, which is a comment with syntax.
@@ -711,9 +716,63 @@ int Rect.area() {
 }
 ```
 
-The receiver is **not named**. Its fields are in scope bare — `w`, not
-`self.w` — because the receiver type is already in the name. There is no
-`this` and no `self`.
+Inside an instance method there is **one way to reach each part of the
+receiver**:
+
+  - a **field** by its bare name — `w`, never `this.w`;
+  - a **sibling method** — an instance method of the receiver's type,
+    declared or promoted by embedding (§3.5) — by its bare name, `area()`,
+    never `this.area()`;
+  - the **whole receiver** as `this`.
+
+```c
+enum Shape { Circle(int); Square(int); }
+
+int Shape.area() {
+    match (this) {
+        case Circle(int r): { return 3 * r * r; }
+        case Square(int s): { return s * s; }
+    }
+}
+
+str Shape.to_str() { return "area " + str(area()); }
+
+Counter Counter.bump() { n = n + 1; return this; }
+```
+
+A bare name or a bare call is unambiguous because nothing shadows anything
+(§4.1). `this.w` is refused with a diagnostic naming `w`, and `this.area()`
+likewise, so the same read is never written two ways. A method the type does
+not declare — a built-in one of a distinct collection's base, such as
+`this.push(x)` on a `distinct List<int>` — is reached through `this`, because
+it has no bare form.
+
+A bare call inside a method that names both a sibling method and a function
+in scope — this module's, the entry file's, or a builtin — is an error asking
+for one to be renamed. Ranking one above the other would let a declaration
+elsewhere in the module silently change what an existing call means. A
+**static** method is not a sibling: it has no receiver, so it is always
+called on its type, `Point.origin()`, inside a method as anywhere else.
+
+`this` is an expression denoting the receiver. It is **borrowed**, exactly
+like a parameter (§7.2): it can be matched on, passed to a function or a
+method, given to a generic function (which infers its type argument from it),
+compared with `==` where the type defines `eq` (§6.2), and assigned to an
+interface-typed slot. Returning it is an ordinary owned return (+1). It is
+not a variable: `this = x` is an error, and like any borrowed value it
+cannot be moved across a thread boundary — send `clone(this)`.
+
+Its type is the receiver's type. In a method on a distinct type it is the
+distinct value (`int(this)` converts it to its base); in a method reached
+through embedding it is the **embedded** value the forwarder called, not the
+outer one.
+
+`this` exists only inside an instance method. In a static method, a free
+function or top-level code it is an error saying there is no receiver there.
+It may not appear in a parameter's or a field's default either: a default is
+evaluated where the call or construction is written, where `this` would be
+some other method's receiver or none at all. As a keyword it can never be
+declared as a name.
 
 A method may be declared anywhere in the file, including before its type.
 
@@ -1318,6 +1377,7 @@ atom        = INT | FLOAT | STR | "true" | "false"
             | type args                               (* construction *)
             | type "." IDENT [ args ]                 (* enum variant, static method,
                                                          float.from_bits *)
+            | "this"                                  (* instance methods only, §4.3 *)
             | seqlit | maplit
             | "(" expr ")" ;
 

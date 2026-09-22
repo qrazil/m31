@@ -1,0 +1,4 @@
+corpus/errors/508-this-method-call.src:13:20: write `area(..)`, not `this.area(..)`: a method of the receiver is called by its bare name, as a field is read
+   |
+13 |     return 2 * this.area();
+   |                    ^

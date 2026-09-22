@@ -1,0 +1,15 @@
+// Only instance methods are called bare inside a method: a static one has no
+// receiver to be called on, so it is always written on its type.
+type Point {
+    int x;
+}
+
+static Point Point.origin() {
+    return Point(0);
+}
+
+bool Point.is_origin() {
+    return x == origin().x;
+}
+
+print(Point(1).is_origin());

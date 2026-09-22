@@ -1,0 +1,4 @@
+corpus/errors/511-this-send.src:8:13: `this` is borrowed from the caller and cannot cross a thread boundary; send clone(this) instead
+  |
+8 |     send(c, this);
+  |             ^

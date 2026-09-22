@@ -1,0 +1,11 @@
+// The same one-spelling rule for a write: a field is assigned by its bare
+// name.
+type Counter {
+    int n = 0;
+}
+
+void Counter.set(int v) {
+    this.n = v;
+}
+
+Counter().set(1);

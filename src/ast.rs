@@ -178,6 +178,11 @@ pub enum Expr {
     Bool(bool, Span),
     Str(String, Span),
     Var(String, Span),
+    /// `this` -- the whole receiver of an instance method, borrowed like a
+    /// parameter. Its own node rather than `Var("this")` so no pass can
+    /// mistake it for a local: it cannot be declared, assigned or moved,
+    /// and what it denotes depends on the enclosing method, not on a scope.
+    This(Span),
     Bin(BinOp, Box<Expr>, Box<Expr>, Span),
     Un(UnOp, Box<Expr>, Span),
     Call(String, Args, Span),
@@ -225,6 +230,7 @@ impl Expr {
             | Expr::Bool(_, s)
             | Expr::Str(_, s)
             | Expr::Var(_, s)
+            | Expr::This(s)
             | Expr::Bin(_, _, _, s)
             | Expr::Un(_, _, s)
             | Expr::Call(_, _, s)

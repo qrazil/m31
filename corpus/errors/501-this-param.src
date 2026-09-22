@@ -1,0 +1,5 @@
+// A parameter cannot be called `this` either: inside a method it would
+// hide the receiver, and outside one it would read as if there were one.
+int twice(int this) {
+    return 2;
+}

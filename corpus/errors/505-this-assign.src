@@ -1,0 +1,11 @@
+// `this` is not a variable: the caller lent the receiver, and replacing it
+// from inside the call could mean nothing to the caller.
+type Counter {
+    int n = 0;
+}
+
+void Counter.reset() {
+    this = Counter();
+}
+
+Counter().reset();

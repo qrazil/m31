@@ -19,7 +19,7 @@ void show(Result<List<List<str>>, csv.Error> r) {
             print(rows.size().to_str() + " rows: " + out.join(" / "));
         }
         case Err(csv.Error e): {
-            print("error: " + csv.message(e));
+            print("error: " + e.to_str());
         }
     }
 }
@@ -30,7 +30,7 @@ void written(Result<str, csv.Error> r) {
             print(s.split("\r\n").join("<CRLF>"));
         }
         case Err(csv.Error e): {
-            print("error: " + csv.message(e));
+            print("error: " + e.to_str());
         }
     }
 }
@@ -87,6 +87,6 @@ match (csv.format(rows)) {
         show(csv.parse(text));
     }
     case Err(csv.Error e): {
-        print(csv.message(e));
+        print(e);
     }
 }

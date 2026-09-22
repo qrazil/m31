@@ -1,0 +1,8 @@
+// Nor may a method.
+type Rect {
+    int w;
+}
+
+int Rect.this() {
+    return w;
+}

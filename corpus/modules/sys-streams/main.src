@@ -27,7 +27,7 @@ match (io.write(path, s)) {
         print(n);
     }  // 163840
     case Err(io.Error e): {
-        print(io.message(e));
+        print(e);
     }
 }
 match (io.append(path, "end")) {
@@ -35,7 +35,7 @@ match (io.append(path, "end")) {
         print(n);
     }  // 3
     case Err(io.Error e): {
-        print(io.message(e));
+        print(e);
     }
 }
 match (io.read(path)) {
@@ -43,7 +43,7 @@ match (io.read(path)) {
         print(got.size());
     }  // 163843
     case Err(io.Error e): {
-        print(io.message(e));
+        print(e);
     }
 }
 io.eprint("last, after everything printed");

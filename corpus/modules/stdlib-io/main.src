@@ -10,7 +10,7 @@ match (io.write(path, "hello\n")) {
         print(n);
     }  // 6
     case Err(io.Error e): {
-        print(io.message(e));
+        print(e);
     }
 }
 match (io.append(path, "world\n")) {
@@ -18,7 +18,7 @@ match (io.append(path, "world\n")) {
         print(n);
     }  // 6
     case Err(io.Error e): {
-        print(io.message(e));
+        print(e);
     }
 }
 match (io.read(path)) {
@@ -27,7 +27,7 @@ match (io.read(path)) {
         print(s.split("\n").size());
     }  // 3 -- a trailing empty field
     case Err(io.Error e): {
-        print(io.message(e));
+        print(e);
     }
 }
 // A failure a caller branches on is a variant, not a string to parse.
@@ -57,7 +57,7 @@ match (io.read("/")) {
         print(s);
     }
     case Err(io.Error e): {
-        print(io.message(e));
+        print(e);
     }
 }  // is a directory
 // An empty path is not a file anybody meant: EINVAL, which has no name here.
@@ -66,7 +66,7 @@ match (io.write("", "x")) {
         print(n);
     }
     case Err(io.Error e): {
-        print(io.message(e));
+        print(e);
     }
 }  // system error 22
 // Lines from standard input -- main.in beside this file. The second line

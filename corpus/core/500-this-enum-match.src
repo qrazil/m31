@@ -1,0 +1,92 @@
+// `this` is the whole receiver, so a method on an enum can `match` on the
+// value it was called on -- the thing a receiver reached only through bare
+// field names could never do, since an enum has no fields.
+
+enum Shape {
+    Circle(int);
+    Square(int);
+    Empty;
+}
+
+str Shape.name() {
+    match (this) {
+        case Circle(int r): {
+            return "circle " + str(r);
+        }
+        case Square(int s): {
+            return "square " + str(s);
+        }
+        case Empty: {
+            return "empty";
+        }
+    }
+}
+
+int Shape.area() {
+    match (this) {
+        case Circle(int r): {
+            return 3 * r * r;
+        }
+        case Square(int s): {
+            return s * s;
+        }
+        case Empty: {
+            return 0;
+        }
+    }
+}
+
+// Sibling methods are called by their bare names, as fields are read.
+str Shape.describe() {
+    return name() + " has area " + str(area());
+}
+
+// `to_str` is what `print` looks for, so an enum can now print itself.
+str Shape.to_str() {
+    return "<" + describe() + ">";
+}
+
+// A match on `this` inside a loop, with a payload that is a reference: the
+// arm's binding is borrowed from the receiver like everything else.
+enum Tree {
+    Leaf(str);
+    Node(Tree, Tree);
+}
+
+int Tree.leaves() {
+    match (this) {
+        case Leaf(str s): {
+            return 1;
+        }
+        case Node(Tree l, Tree r): {
+            return l.leaves() + r.leaves();
+        }
+    }
+}
+
+str Tree.flat() {
+    match (this) {
+        case Leaf(str s): {
+            return s;
+        }
+        case Node(Tree l, Tree r): {
+            return "(" + l.flat() + " " + r.flat() + ")";
+        }
+    }
+}
+
+print(Shape.Circle(2).describe());
+print(Shape.Square(3).describe());
+print(Shape.Empty.describe());
+print(Shape.Square(4));
+
+List<Shape> shapes = [Shape.Empty, Shape.Circle(1), Shape.Square(2)];
+int total = 0;
+for (Shape s in shapes) {
+    total = total + s.area();
+}
+print(total);
+
+Tree t = Tree.Node(Tree.Leaf("a"), Tree.Node(Tree.Leaf("b"), Tree.Leaf("c")));
+print(t.leaves());
+print(t.flat());

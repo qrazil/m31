@@ -1,0 +1,4 @@
+corpus/errors/514-sibling-static.src:12:17: `origin` is a static method; call it on the type, as `Point.origin(..)`
+   |
+12 |     return x == origin().x;
+   |                 ^

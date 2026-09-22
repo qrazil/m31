@@ -1,0 +1,2 @@
+// Top-level code is not inside a method, so there is no receiver to name.
+print(this);

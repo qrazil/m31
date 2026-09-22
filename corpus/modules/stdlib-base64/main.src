@@ -9,7 +9,7 @@ void show(Result<bytes, base64.Error> r) {
             print("ok " + b.utf8().or("(not UTF-8) " + b.hex()));
         }
         case Err(base64.Error e): {
-            print("error: " + base64.message(e));
+            print("error: " + e.to_str());
         }
     }
 }
@@ -21,7 +21,7 @@ void show_hex(Result<bytes, base64.Error> r) {
             print("ok " + b.hex());
         }
         case Err(base64.Error e): {
-            print("error: " + base64.message(e));
+            print("error: " + e.to_str());
         }
     }
 }
@@ -55,7 +55,7 @@ match (base64.decode("AAAA")) {
         print(b == "\0\0\0".to_bytes());
     }
     case Err(base64.Error e): {
-        print(base64.message(e));
+        print(e);
     }
 }
 // CPython's one leniency: unused low bits need not be zero.
@@ -124,7 +124,7 @@ while (k <= mixed.size()) {
                 }
             }
             case Err(base64.Error e): {
-                print(base64.message(e));
+                print(e);
             }
         }
     }
@@ -147,7 +147,7 @@ while (b < 256) {
             }
         }
         case Err(base64.Error e): {
-            print(base64.message(e));
+            print(e.to_str());
         }
     }
     b = b + 1;
@@ -169,7 +169,7 @@ for (bool u in both) {
             print(back == all);
         }
         case Err(base64.Error e): {
-            print(base64.message(e));
+            print(e.to_str());
         }
     }
 }
@@ -179,6 +179,6 @@ match (base64.decode("77u/")) {
         print(s.size().to_str() + " " + s[0].to_str() + " " + s[1].to_str() + " " + s[2].to_str());
     }
     case Err(base64.Error e): {
-        print(base64.message(e));
+        print(e);
     }
 }

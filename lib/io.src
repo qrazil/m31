@@ -25,13 +25,10 @@ pub enum Error {
     Other(int);
 }
 
-/// A sentence saying what went wrong, for printing.
-///
-/// This wants to be `Error.to_str()`, so that `print(e)` would find it. It
-/// cannot be yet: a method cannot name its receiver, so a method on an enum
-/// has no way to `match` on itself. See docs/roadmap.md.
-pub str message(Error e) {
-    match (e) {
+/// A sentence saying what went wrong. A method named `to_str`, so
+/// `print(e)` prints it and `"x: " + e.to_str()` builds on it.
+pub str Error.to_str() {
+    match (this) {
         case NotFound: {
             return "no such file";
         }

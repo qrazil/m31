@@ -1,0 +1,7 @@
+// A declaration may not take the name either -- read as the declaration it
+// was meant to be, and refused by name.
+type Point {
+    int x;
+}
+
+Point this = Point(1);

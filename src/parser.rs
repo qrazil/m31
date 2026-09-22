@@ -40,6 +40,11 @@ pub struct Parser {
     /// How deeply the parser is nested right now: one per statement,
     /// expression and type it is inside. See `MAX_DEPTH`.
     depth: usize,
+    /// Set while a parameter's or a field's default is being read. A default
+    /// is evaluated where the call or the construction is written, not
+    /// inside the declaration it belongs to, so a `this` in one would be
+    /// whatever method happens to be calling -- refused where it is written.
+    in_default: bool,
 }
 
 /// The deepest a program may nest, counting statements, expressions and
@@ -77,7 +82,12 @@ const MAX_DEPTH: usize = 256;
 /// ever asked about a tree the parser has already held to `MAX_DEPTH`.
 fn height(e: &Expr) -> usize {
     1 + match e {
-        Expr::Int(..) | Expr::Float(..) | Expr::Bool(..) | Expr::Str(..) | Expr::Var(..) => 0,
+        Expr::Int(..)
+        | Expr::Float(..)
+        | Expr::Bool(..)
+        | Expr::Str(..)
+        | Expr::Var(..)
+        | Expr::This(..) => 0,
         Expr::Un(_, x, _) | Expr::Field(x, _, _) | Expr::Try(x, _) => height(x),
         Expr::Bin(_, a, b, _) | Expr::Index(a, b, _) | Expr::RepeatLit(a, b, _) => {
             height(a).max(height(b))
@@ -244,6 +254,7 @@ impl Parser {
             module: String::new(),
             stdlib: false,
             depth: 0,
+            in_default: false,
         }
     }
 
@@ -353,7 +364,10 @@ impl Parser {
                 i += 1;
             }
         }
-        matches!(self.peek_at(i), Tok::Ident(_))
+        // `this` counts as a name here only so that `Point this = ..` is read
+        // as the declaration it was meant to be and refused by name, rather
+        // than as an expression followed by a puzzling stray word.
+        matches!(self.peek_at(i), Tok::Ident(_) | Tok::KwThis)
     }
 
     /// At `lib . Name < ... >`, the offset just past the `>` -- provided
@@ -564,6 +578,14 @@ impl Parser {
                 self.bump();
                 Ok((n, span))
             }
+            // Said outright, because "expected a name" reads as if the
+            // parser lost its place when the program only chose a reserved
+            // word for a variable.
+            Tok::KwThis => Err(Diag::new(
+                span,
+                "`this` is a keyword -- it names a method's receiver -- and \
+                 cannot be used as a name",
+            )),
             other => Err(Diag::new(
                 span,
                 format!("expected a name, found {}", other.describe()),
@@ -632,7 +654,10 @@ impl Parser {
         }
         let (name, _) = self.expect_ident()?;
         let default = if self.eat(&Tok::Assign) {
-            Some(self.parse_expr(0)?)
+            self.in_default = true;
+            let e = self.parse_expr(0);
+            self.in_default = false;
+            Some(e?)
         } else {
             None
         };
@@ -830,7 +855,10 @@ impl Parser {
         // A qualified method name: `int Rect.area()`.
         if self.peek_at(i) == &Tok::Dot {
             i += 1;
-            if !matches!(self.peek_at(i), Tok::Ident(_)) {
+            // `this` is accepted as the method name only so that
+            // `int Rect.this()` reaches the declaration and is refused as a
+            // keyword there, instead of failing as a malformed statement.
+            if !matches!(self.peek_at(i), Tok::Ident(_) | Tok::KwThis) {
                 return false;
             }
             i += 1;
@@ -1443,6 +1471,13 @@ impl Parser {
                     value,
                     span,
                 }),
+                // Replacing the receiver would change which object the
+                // caller's reference points at from inside a call that only
+                // borrowed it; there is nothing it could sensibly mean.
+                Expr::This(s) => Err(Diag::new(
+                    s,
+                    "`this` cannot be assigned: it is the method's receiver, not a variable",
+                )),
                 other => Err(Diag::new(other.span(), "cannot assign to this expression")),
             };
         }
@@ -1582,6 +1617,18 @@ impl Parser {
             Tok::KwFalse => {
                 self.bump();
                 Ok(Expr::Bool(false, span))
+            }
+            Tok::KwThis => {
+                self.bump();
+                if self.in_default {
+                    return Err(Diag::new(
+                        span,
+                        "`this` cannot appear in a default: a default is evaluated \
+                         where the call or construction is written, where `this` is \
+                         not this declaration's receiver",
+                    ));
+                }
+                Ok(Expr::This(span))
             }
             Tok::Str(s) => {
                 self.bump();
