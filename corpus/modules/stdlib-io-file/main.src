@@ -6,7 +6,7 @@ import random;
 // over descriptors, with the buffering in lib/io.src. Everything is created
 // under a directory named from the random source, so two runs of the corpus
 // at once cannot touch each other's files, and it is removed at the end.
-str dir = "/tmp/lang-corpus-io-file-" + random.hex(8);
+str dir = "/tmp/lang-corpus-io-file-" + random.system().hex(8);
 match (fs.mkdir(dir)) {
     case Ok(bool b): {
         print("dir made");

@@ -2,4 +2,4 @@ import random;
 
 // Both ends are included, so high below low names no integer at all. That
 // is a bug at the call site, and it traps rather than picking something.
-print(random.integer(3, 1));
+print(random.system().integer(3, 1));

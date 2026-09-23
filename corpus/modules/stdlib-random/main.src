@@ -22,6 +22,11 @@ for (int b in five) {
 }  // 31 151 219 233 79
 // Oro's seeded choice, and its seeded shuffle of [1, 2, ..., 8] -- which is
 // [2, 4, 5, 7, 3, 6, 1, 8], so the permutation of indices is one less.
+//
+// A Seeded has no pool and must not get one: `pcg_fill` drops what is left
+// of the last 32-bit output, and keeping it would change every sequence
+// above. That the values here are unchanged by the system generator gaining
+// a pool is the check.
 List<str> letters = ["a", "b", "c", "d"];
 print(letters[g.integer(0, letters.size() - 1)]);  // d
 str shown = "";
@@ -50,15 +55,27 @@ print(random.seeded(7).hex(4) != random.seeded(8).hex(4));  // true
 // --- unpredictable: properties -----------------------------------------------
 //
 // The system generator's values cannot be written down, so what it must
-// satisfy is checked instead.
-bytes octs = random.octets(1000);  // past getentropy's 256 per call
+// satisfy is checked instead. One source, held and reused, which is the only
+// way there is: every draw below comes out of the same 256-octet pool, so
+// the whole section costs a handful of system calls rather than one per
+// draw.
+random.System r = random.system();
+bytes octs = r.octets(1000);  // past getentropy's 256 per call: straight to the kernel
 bool bytes_ok = octs.size() == 1000;
 for (int v in octs) {
     bytes_ok = bytes_ok && v >= 0 && v <= 255;
 }
 print(bytes_ok);  // true
-print(random.octets(0).size());  // 0
-str h = random.hex(16);
+print(r.octets(0).size());  // 0
+// The sizes either side of the 256-octet block, in an order that checks a
+// big draw leaves the pool alone: 255 refills and takes all but one octet of
+// the block; 256 and 257 are at or over the block and go straight to the
+// kernel, so that octet is still there; and the 1 that follows is it.
+print(r.octets(255).size());  // 255
+print(r.octets(256).size());  // 256
+print(r.octets(257).size());  // 257
+print(r.octets(1).size());  // 1
+str h = r.hex(16);
 bool hex_ok = h.size() == 32;
 int k = 0;
 while (k < h.size()) {
@@ -72,7 +89,7 @@ List<int> seen = [0, 0, 0, 0, 0, 0];
 bool range_ok = true;
 int roll = 0;
 while (roll < 600) {
-    int d = random.integer(1, 6);
+    int d = r.integer(1, 6);
     range_ok = range_ok && d >= 1 && d <= 6;
     if (range_ok) {
         seen[d - 1] = seen[d - 1] + 1;
@@ -81,19 +98,19 @@ while (roll < 600) {
 }
 print(range_ok);  // true
 print(!seen.contains(0));  // true
-print(random.integer(5, 5));  // 5
-int wide = random.integer(lowest, 9223372036854775807);
+print(r.integer(5, 5));  // 5
+int wide = r.integer(lowest, 9223372036854775807);
 print(wide >= lowest);  // true
-float f = random.fraction();
+float f = r.fraction();
 print(f >= 0.0 && f < 1.0);  // true
-str u = random.uuid4();
+str u = r.uuid4();
 print(u.size());  // 36
 print(u.substr(14, 15));  // 4 -- the version
 print("89ab".contains(u.substr(19, 20)));  // true -- the variant
 print(u.substr(8, 9) + u.substr(13, 14) + u.substr(18, 19) + u.substr(23, 24));  // ----
-print(random.uuid4() != u);  // true
+print(r.uuid4() != u);  // true
 // A permutation holds every index exactly once.
-List<int> p = random.permutation(20);
+List<int> p = r.permutation(20);
 p.sort();
 bool perm_ok = p.size() == 20;
 int at = 0;
@@ -102,5 +119,58 @@ while (at < p.size()) {
     at = at + 1;
 }
 print(perm_ok);  // true
-print(random.permutation(0).size());  // 0
-print(random.permutation(1)[0]);  // 0
+print(r.permutation(0).size());  // 0
+print(r.permutation(1)[0]);  // 0
+// --- the pool -----------------------------------------------------------------
+//
+// Ten thousand one-octet draws out of one source. Unbuffered that was ten
+// thousand getentropy calls; with the pool it is forty, and the point of the
+// loop here is that the octets stay uniform across every refill boundary --
+// a pool that handed back stale or repeated bytes would show up as a face
+// that turns up too often, or as a run that repeats.
+List<int> faces = [0, 0, 0, 0];
+int n = 0;
+int runs = 0;
+int prev = 0 - 1;
+while (n < 10000) {
+    int v = r.integer(0, 3);
+    faces[v] = faces[v] + 1;
+    if (v == prev) {
+        runs = runs + 1;
+    }
+    prev = v;
+    n = n + 1;
+}
+// Every face 2500 times on average, with a standard deviation of 43; each
+// end of 2000..3000 is eleven of those away, and all four counts must land
+// inside it.
+bool spread_ok = true;
+for (int c in faces) {
+    spread_ok = spread_ok && c > 2000 && c < 3000;
+}
+print(spread_ok);  // true
+// A repeat of the previous face happens a quarter of the time. A pool that
+// handed the same block out twice would push this to the extremes.
+print(runs > 2000 && runs < 3000);  // true
+// A draw that spans a refill is still one run of fresh octets: 200 draws of
+// 7 octets is 1400, so the pool is refilled five or six times underneath
+// them, and no two of the draws may come out the same. (Seven octets: the
+// chance of any collision among 200 of them is below 10^-11.)
+List<str> drawn = [];
+int t = 0;
+bool fresh_ok = true;
+while (t < 200) {
+    str d = r.hex(7);
+    fresh_ok = fresh_ok && !drawn.contains(d);
+    drawn.push(d);
+    t = t + 1;
+}
+print(fresh_ok);  // true
+// Two sources are two pools, filled separately.
+random.System other = random.system();
+print(other.hex(16) != r.hex(16));  // true
+// A `clone` of a source is a second handle on the SAME pool (clone is
+// shallow), so the two never hand out the same octet -- the in-language
+// version of the fork hazard, and the safe answer to it.
+random.System shared = clone(r);
+print(shared.hex(8) != r.hex(8));  // true

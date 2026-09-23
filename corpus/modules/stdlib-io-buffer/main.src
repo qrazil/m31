@@ -168,7 +168,7 @@ print(seen);  // 200000
 print(tide.size());  // 100000 -- one byte a cycle left behind
 print(show(got(tide.read(3))));  // cab -- 200,000 bytes into "abcabc..."
 // --- a Stream: a Buffer, a File and standard input, through one helper ---------
-str dir = "/tmp/lang-corpus-io-buffer-" + random.hex(8);
+str dir = "/tmp/lang-corpus-io-buffer-" + random.system().hex(8);
 match (fs.mkdir(dir)) {
     case Ok(bool made): {
         print("dir made");
