@@ -56,6 +56,8 @@
 // what POSIX epoch seconds count, so a `second` of 60 is refused rather than
 // silently becoming the next minute.
 
+import text;
+
 prim void __clock(List<int> out);
 
 /// Why `epoch` or `parse` refused. The message says which rule was broken
@@ -331,12 +333,14 @@ str stamp(int year, int month, int day, int hour, int minute, int second) {
 
 // `n` in decimal, zero-padded on the left to `width` digits. Never called
 // with a negative `n`: every field here is at least 0 and years start at 1.
+//
+// A wrapper over `text.pad_left` rather than a call at each of its dozen
+// sites, because the field is a number everywhere it is used and the
+// conversion belongs here. Decimal digits are ASCII, so `pad_left`'s count in
+// code points is the digit count; and it does not truncate, so a year past
+// 9999 keeps all of its digits, as it did before.
 str pad(int n, int width) {
-    str s = n.to_str();
-    if (s.size() >= width) {
-        return s;
-    }
-    return "0".repeat(width - s.size()) + s;
+    return text.pad_left(n.to_str(), width, fill: "0");
 }
 
 Result<int, Error> fail(str message) {

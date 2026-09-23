@@ -1,0 +1,111 @@
+a+b+c
+a+b-c
+a+b+c
+a+b+c
+a-b-c
+abc
+ab
+[]
+[abc]
+ba
+bb
+ba
+aa
+aaaaaa
+x&amp;y
+hello hello
+a — b
+日ほん語
+é©
+[]
+0 []
+1 [a]
+1 [a]
+2 [a|b]
+2 [a|b]
+1 []
+2 [|]
+3 [a||b]
+2 [a|]
+2 [a|b]
+3 [a||b]
+1 [a\x0db]
+1 [a\x0d]
+1 [a\x0bb\x0cc]
+1 [a\u{2028}b]
+2 [héllo|日本]
+0 []
+0 []
+1 [a]
+3 [a|b|c]
+2 [a|b]
+3 [café|日本|x]
+1 [a\x1cb]
+1 [a\u{00a0}b]
+space set agrees with trim
+[a  ]
+[  a]
+[]
+[]
+[]
+[]
+[a]
+[a]
+[    indented line]
+3
+3
+verbose
+verbose
+[]
+[-]
+[abc]
+[]
+notes
+notes.md
+[]
+[abc]
+[]
+[md]
+poque
+caf
+é
+[  7]
+[7  ]
+[007]
+[...]
+[...]
+[abc]
+[abcde]
+[abc]
+[abc]
+[café ]
+6
+[··日本]
+7
+ok 42
+ok -42
+ok 42
+ok 0
+ok 0
+ok 7
+ok 9223372036854775807
+ok -9223372036854775808
+err the number is above 9223372036854775807, an int's largest value
+err the number is below -9223372036854775808, an int's smallest value
+err the number is above 9223372036854775807, an int's largest value
+err no digits to parse
+err no digits to parse
+err no digits to parse
+err invalid digit ' ' at position 1: surrounding space is not accepted, so trim first
+err invalid digit ' ' at position 0: surrounding space is not accepted, so trim first
+err invalid digit ' ' at position 2: surrounding space is not accepted, so trim first
+err invalid digit 'a' at position 2
+err invalid digit 'a' at position 0
+err invalid digit '.' at position 1
+err invalid digit '-' at position 1
+err invalid digit '_' at position 1
+err invalid digit 'x' at position 1
+err invalid digit byte 0xef at position 0
+err invalid digit byte 0x09 at position 0: surrounding space is not accepted, so trim first
+err invalid digit byte 0x0a at position 1: surrounding space is not accepted, so trim first
+parse_int agrees with the built-in

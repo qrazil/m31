@@ -27,6 +27,7 @@ pub fn source(name: &str) -> Option<&'static str> {
         "json" => include_str!("../lib/json.src"),
         "math" => include_str!("../lib/math.src"),
         "os" => include_str!("../lib/os.src"),
+        "text" => include_str!("../lib/text.src"),
         "date" => include_str!("../lib/date.src"),
         "random" => include_str!("../lib/random.src"),
         "args" => include_str!("../lib/args.src"),

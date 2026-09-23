@@ -1,0 +1,6 @@
+import text;
+
+// A fill of two characters cannot reach every width, so there is no answer to
+// give: `pad_left("x", 4, fill: "ab")` would have to be "aba" + "x" or refuse.
+// The program's own value is wrong, like an index out of range.
+print(text.pad_left("x", 4, fill: "ab"));

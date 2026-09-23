@@ -1,0 +1,8 @@
+import text;
+
+// CPython replaces between every character -- `"ab".replace("", "-")` is
+// `"-a-b-"` -- which is a spelling nobody writes on purpose. A caller who
+// reaches it computed the needle from something that turned out to be empty,
+// so it is a bug at the call site. `str.split` already traps on an empty
+// separator and this is `split` with the pieces rejoined, so it is one rule.
+print(text.replace("ab", "", "-"));

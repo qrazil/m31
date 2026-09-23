@@ -23,29 +23,24 @@
 // it turns `&eacute;` into itself and `&amp;eacute;` into `&eacute;`,
 // silently. A program that has to parse HTML needs a parser.
 //
-// There is no `str.replace`, so each replacement is a split and a join, which
-// is the same thing: `split` keeps every empty field, so the parts always
-// rejoin to the original with the separator swapped. `&` goes first, so the
-// `&` in every reference the later ones insert is not escaped a second time.
-// Every byte replaced is ASCII, and UTF-8 never uses an ASCII byte inside a
-// multi-byte character, so working in bytes cannot split one.
+// **`&` goes first**, so the `&` in every reference the later four insert is
+// not escaped a second time. Every character replaced is ASCII, and UTF-8
+// never uses an ASCII byte inside a multi-byte character, so the search cannot
+// cut one in half.
+//
+// The five replacements used to be five splits and five joins, and a private
+// `replace` of this module's own, because `str` has none. They are
+// `text.replace` now: the same split and join, written once.
+import text;
 
 /// `s` made safe to use as HTML text or inside a quoted attribute value.
 ///
 ///     html.escape("<a href='x'>Tom & Jerry</a>")
 ///         == "&lt;a href=&#x27;x&#x27;&gt;Tom &amp; Jerry&lt;/a&gt;"
 pub str escape(str s) {
-    str out = replace(s, "&", "&amp;");
-    out = replace(out, "<", "&lt;");
-    out = replace(out, ">", "&gt;");
-    out = replace(out, "\"", "&quot;");
-    return replace(out, "'", "&#x27;");
-}
-
-// Every occurrence of `from` in `s` swapped for `to`.
-str replace(str s, str from, str to) {
-    if (!s.contains(from)) {
-        return s;
-    }
-    return s.split(from).join(to);
+    str out = text.replace(s, "&", "&amp;");
+    out = text.replace(out, "<", "&lt;");
+    out = text.replace(out, ">", "&gt;");
+    out = text.replace(out, "\"", "&quot;");
+    return text.replace(out, "'", "&#x27;");
 }
