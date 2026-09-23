@@ -1202,6 +1202,14 @@ not declare one with a different signature and mean something else by it.
 | `eq` | `bool T.eq(T other)` | `==`, `!=` (§6.2) and a `Map` key (§3.9) |
 | `hash` | `int T.hash()` | a `Map` key (§3.9) |
 
+**A `cmp` or an `eq` that takes TWO parameters is a different method**, and
+is allowed: `interface Less { int cmp(Point a, Point b); }` compares two
+values handed to it, where the reserved one compares the receiver with one
+other. Only the receiver-plus-one shape is installed in a type's method
+table, so `sort()` and a `Map` key never reach the two-parameter one, and
+which is which is visible in the declaration. This is the shape a comparison
+callback takes (docs/closures-decision.md).
+
 `cmp`, `eq` and `hash` are **checked where they are declared**, and a wrong
 one is refused there rather than at a use:
 

@@ -412,6 +412,18 @@ fn check_reserved_shape(p: &Program, f: &Func, recv: &str, module: &str) -> Resu
                 .to_string(),
         );
     }
+    // A comparison CALLBACK is a different method that happens to share the
+    // name: `interface Less { int cmp(Point a, Point b); }` compares two
+    // values given to it, where the reserved one compares the receiver with
+    // one other. Two parameters is the difference, and it is visible in the
+    // declaration -- the runtime only ever installs the receiver-plus-one
+    // shape in the type's TypeInfo (`reserved_method`), so the two cannot be
+    // confused for each other. Refusing this would ban the callback
+    // interface the standard library's `sort.by` is built on
+    // (docs/closures-decision.md).
+    if f.name != "hash" && f.params.len() == 2 {
+        return Ok(());
+    }
     if f.params.len() != usize::from(f.name != "hash") {
         return refuse(match f.params.len() {
             0 => "this one takes none".to_string(),
