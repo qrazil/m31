@@ -1,0 +1,45 @@
+// unicode.width: how many terminal columns text takes.
+//
+// The expected numbers here are hand-written, one case at a time, because
+// there is no oracle: EastAsianWidth.txt is a property and a terminal is a
+// program, and the two agree only by convention. What the module promises is
+// written in its header, and this is that promise, case by case. Each line
+// prints the width, the byte size and the cluster count, so a failure says
+// which of the three moved.
+//
+// `args` pads its help table by `size()` and so misaligns a column whose
+// option name is not ASCII; this is the function that fixes it, and changing
+// `args` is not this module's business.
+
+import unicode;
+
+str measure(str s) {
+    return unicode.width(s).to_str() + " (" + s.size().to_str() + " bytes, " + unicode.grapheme_count(s).to_str() + " clusters)";
+}
+
+print("nothing: " + measure(""));
+print("ASCII, one column each: " + measure("hello"));
+print("a precomposed accent is still one character: " + measure("h\u{e9}llo"));
+print("and so is a combining one: the mark is zero: " + measure("he\u{301}llo"));
+print("a combining mark on its own: " + measure("\u{301}"));
+print("CJK ideographs are wide: " + measure("\u{6f22}\u{5b57}"));
+print("kana are wide: " + measure("\u{3053}\u{3093}\u{306b}\u{3061}\u{306f}"));
+print("Hangul syllables are wide: " + measure("\u{d55c}\u{ae00}"));
+print("and so is one spelled out in jamo, once: " + measure("\u{1100}\u{1161}\u{11a8}"));
+print("fullwidth Latin: " + measure("\u{ff41}\u{ff42}\u{ff43}"));
+print("halfwidth katakana punctuation is narrow: " + measure("\u{ff61}\u{ff62}\u{ff63}"));
+print("an emoji: " + measure("\u{1f44d}"));
+print("with a skin tone: one cluster, still two: " + measure("\u{1f44d}\u{1f3fd}"));
+print("a flag is a pair of neutral letters, drawn wide: " + measure("\u{1f1ec}\u{1f1e7}"));
+print("two flags: " + measure("\u{1f1ec}\u{1f1e7}\u{1f1eb}\u{1f1f7}"));
+print("a family joined with ZWJ: " + measure("\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}"));
+print("a keycap: the emoji presentation selector makes it wide: " + measure("1\u{fe0f}\u{20e3}"));
+print("a trigram, Wide since Unicode 16: " + measure("\u{2630}"));
+print("a control character has no width of its own: " + measure("\u{9}"));
+print("a zero width space: " + measure("a\u{200b}b"));
+print("a soft hyphen prints: " + measure("\u{ad}"));
+print("a sentence: " + measure("na\u{ef}ve caf\u{e9}"));
+print("halfwidth katakana: " + measure("\u{ff71}"));
+print("Thai with a vowel sign above: " + measure("\u{e01}\u{e33}"));
+print("Cyrillic is narrow: " + measure("\u{440}\u{443}\u{441}\u{441}\u{43a}\u{438}\u{439}"));
+print("an ambiguous-width arrow counts as narrow: " + measure("\u{2192} \u{6f22} \u{2190}"));
