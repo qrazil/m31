@@ -372,6 +372,14 @@ matching signature satisfies the interface, with no declaration saying so.
 Assigning such a value to an interface-typed slot is allowed; assigning one
 that does not is a compile error naming the missing method.
 
+The standard library uses this rather than declaring the relationship:
+`io.Stream` is the five-method read/write protocol, and `io.File` satisfied
+it before it was written — the interface was added to `io` without touching
+`File` at all. `io.Buffer` satisfies it too, which is why `io.copy` and
+`io.read_line_of` work the same on a file, on standard input and on bytes in
+memory, and why a type declared in another program is a stream as soon as it
+has the methods.
+
 Dispatch goes through a vtable in the object header. An interface value is a
 single pointer, not a pair — the Java model, not Go's (`docs/types.md` §4).
 A slot is keyed by a method's **name and its shape**, so two interfaces
@@ -849,6 +857,7 @@ it and answers with an error value when it says no:
 |---|---|
 | `io.read` | `Err(io.Error.InvalidUtf8)`; `io.read_bytes` is the file exactly |
 | `io.read_line` | `None` |
+| `io.read_line_of` | `Err(io.Error.InvalidUtf8)` — a `Result` has room to say why, where `read_line`'s `Option` has not |
 | `fs.listdir` | an error for a name that is not UTF-8 |
 | `os.args()` | **traps**, naming the argument and `os.args_bytes()`, which is every argument exactly |
 | `os.env(name)` | `None`, as for an unset variable; `os.env_bytes(name)` tells the two apart |
