@@ -30,6 +30,7 @@ pub fn source(name: &str) -> Option<&'static str> {
         "date" => include_str!("../lib/date.src"),
         "random" => include_str!("../lib/random.src"),
         "args" => include_str!("../lib/args.src"),
+        "unicode" => include_str!("../lib/unicode.src"),
         _ => return None,
     })
 }

@@ -1,0 +1,219 @@
+16.0.0
+
+empty
+  in    
+  upper 
+  lower 
+  fold  
+  ascii  
+
+ascii
+  in    Hello, World! 42
+  upper HELLO, WORLD! 42
+  lower hello, world! 42
+  fold  hello, world! 42
+  ascii HELLO, WORLD! 42 hello, world! 42
+
+ascii upper
+  in    SHOUTING
+  upper SHOUTING
+  lower shouting
+  fold  shouting
+  ascii SHOUTING shouting
+
+latin-1
+  in    école
+  upper ÉCOLE
+  lower école
+  fold  école
+  ascii éCOLE école
+
+latin-1 upper
+  in    ÉCOLE
+  upper ÉCOLE
+  lower école
+  fold  école
+  ascii ÉCOLE École
+
+accents
+  in    Ærø Ångström naïve
+  upper ÆRØ ÅNGSTRÖM NAÏVE
+  lower ærø ångström naïve
+  fold  ærø ångström naïve
+  ascii ÆRø ÅNGSTRöM NAïVE Ærø Ångström naïve
+
+sharp s
+  in    straße
+  upper STRASSE
+  lower straße
+  fold  strasse
+  ascii STRAßE straße
+
+sharp s upper
+  in    STRASSE
+  upper STRASSE
+  lower strasse
+  fold  strasse
+  ascii STRASSE strasse
+
+capital sharp s
+  in    ẞ
+  upper ẞ
+  lower ß
+  fold  ss
+  ascii ẞ ẞ
+
+ligature
+  in    ﬁord
+  upper FIORD
+  lower ﬁord
+  fold  fiord
+  ascii ﬁORD ﬁord
+
+greek
+  in    ΟΔΟΣ
+  upper ΟΔΟΣ
+  lower οδος
+  fold  οδοσ
+  ascii ΟΔΟΣ ΟΔΟΣ
+
+greek word
+  in    Ὀδυσσεύς
+  upper ὈΔΥΣΣΕΎΣ
+  lower ὀδυσσεύς
+  fold  ὀδυσσεύσ
+  ascii Ὀδυσσεύς Ὀδυσσεύς
+
+greek two sigmas
+  in    ΣΣ
+  upper ΣΣ
+  lower σς
+  fold  σσ
+  ascii ΣΣ ΣΣ
+
+greek final sigma
+  in    ὈΔΥΣΣΕΎΣ
+  upper ὈΔΥΣΣΕΎΣ
+  lower ὀδυσσεύς
+  fold  ὀδυσσεύσ
+  ascii ὈΔΥΣΣΕΎΣ ὈΔΥΣΣΕΎΣ
+
+greek sigma then accent
+  in    Σ́
+  upper Σ́
+  lower σ́
+  fold  σ́
+  ascii Σ́ Σ́
+
+greek lower
+  in    σ ς
+  upper Σ Σ
+  lower σ ς
+  fold  σ σ
+  ascii σ ς σ ς
+
+turkish dotted I
+  in    İstanbul
+  upper İSTANBUL
+  lower i̇stanbul
+  fold  i̇stanbul
+  ascii İSTANBUL İstanbul
+
+turkish dotless i
+  in    ı
+  upper I
+  lower ı
+  fold  ı
+  ascii ı ı
+
+cyrillic
+  in    Привет
+  upper ПРИВЕТ
+  lower привет
+  fold  привет
+  ascii Привет Привет
+
+armenian ligature
+  in    և
+  upper ԵՒ
+  lower և
+  fold  եւ
+  ascii և և
+
+cherokee
+  in    Ꭰꭰ
+  upper ᎠᎠ
+  lower ꭰꭰ
+  fold  ᎠᎠ
+  ascii Ꭰꭰ Ꭰꭰ
+
+deseret
+  in    𐐀𐐨
+  upper 𐐀𐐀
+  lower 𐐨𐐨
+  fold  𐐨𐐨
+  ascii 𐐀𐐨 𐐀𐐨
+
+cjk
+  in    漢字テスト
+  upper 漢字テスト
+  lower 漢字テスト
+  fold  漢字テスト
+  ascii 漢字テスト 漢字テスト
+
+combining
+  in    é
+  upper É
+  lower é
+  fold  é
+  ascii É é
+
+combining upper
+  in    É
+  upper É
+  lower é
+  fold  é
+  ascii É é
+
+emoji
+  in    👍
+  upper 👍
+  lower 👍
+  fold  👍
+  ascii 👍 👍
+
+emoji skin tone
+  in    👍🏽
+  upper 👍🏽
+  lower 👍🏽
+  fold  👍🏽
+  ascii 👍🏽 👍🏽
+
+flag
+  in    🇬🇧
+  upper 🇬🇧
+  lower 🇬🇧
+  fold  🇬🇧
+  ascii 🇬🇧 🇬🇧
+
+zwj family
+  in    👨‍👩‍👧
+  upper 👨‍👩‍👧
+  lower 👨‍👩‍👧
+  fold  👨‍👩‍👧
+  ascii 👨‍👩‍👧 👨‍👩‍👧
+
+mixed
+  in    Straßé ΟΔΟΣ 漢 👍
+  upper STRASSÉ ΟΔΟΣ 漢 👍
+  lower straßé οδος 漢 👍
+  fold  strassé οδοσ 漢 👍
+  ascii STRAßÉ ΟΔΟΣ 漢 👍 straßé ΟΔΟΣ 漢 👍
+
+caseless pairs
+  true false
+  true false
+  true false
+  true false
+  false false
+  true false
