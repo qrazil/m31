@@ -1,0 +1,4 @@
+corpus/errors/912-sort-interface-elements.src:18:3: `sort` orders each element by its own type's `cmp`, and `Shape` is an interface: two elements can be different types, and one's `cmp` would be handed the other. Sort a list of the concrete type instead.
+   |
+18 | xs.sort();
+   |   ^

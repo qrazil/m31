@@ -57,7 +57,7 @@ void rc_dec(Obj *o) {
     }
 }
 
-const TypeInfo rt_str_type = { NULL, NULL, NULL, NULL, NULL };
+const TypeInfo rt_str_type = { NULL, NULL, NULL, NULL, NULL, NULL };
 
 Obj *rt_alloc_immortal(size_t size, const TypeInfo *ty) {
     Obj *o = malloc(size);
@@ -538,10 +538,10 @@ static void lst_walk_refs(Obj *o, VisitFn visit, void *ctx) {
     }
 }
 
-const TypeInfo rt_arr_val_type = { NULL, NULL, NULL, NULL, NULL };
-const TypeInfo rt_arr_ref_type = { arr_drop_refs, NULL, arr_walk_refs, NULL, NULL };
-const TypeInfo rt_lst_val_type = { lst_drop_vals, NULL, NULL, NULL, NULL };
-const TypeInfo rt_lst_ref_type = { lst_drop_refs, NULL, lst_walk_refs, NULL, NULL };
+const TypeInfo rt_arr_val_type = { NULL, NULL, NULL, NULL, NULL, NULL };
+const TypeInfo rt_arr_ref_type = { arr_drop_refs, NULL, arr_walk_refs, NULL, NULL, NULL };
+const TypeInfo rt_lst_val_type = { lst_drop_vals, NULL, NULL, NULL, NULL, NULL };
+const TypeInfo rt_lst_ref_type = { lst_drop_refs, NULL, lst_walk_refs, NULL, NULL, NULL };
 
 
 /* Bytes for `n` slots plus a `head` header, trapping rather than wrapping.
@@ -859,6 +859,29 @@ void rt_sort_float(Obj *o) {
     rt_sort_with(o, rt_cmp_float);
 }
 
+/* A list of a user type, ordered by the type's own `cmp` -- the same method
+ * `<` desugars to, so a sorted list and a comparison cannot disagree.
+ *
+ * The runtime already holds everything it needs: each element is an Obj *,
+ * whose header names its TypeInfo, which carries `cmp`. Nothing is passed in
+ * and no function reference exists in the IR.
+ *
+ * The receiver decides. Every element of a `List<P>` is a P, so `a->ty->cmp`
+ * and `b->ty->cmp` are the same function; the compiler refuses a list whose
+ * element type is an interface, exactly so that stays true. */
+static int64_t rt_cmp_obj(int64_t a, int64_t b) {
+    Obj *x = (Obj *)(intptr_t)a;
+    /* Unreachable unless the compiler and this file disagree: `sort` on a
+     * type with no `cmp` is refused where it is written. */
+    if (x->ty == NULL || x->ty->cmp == NULL)
+        rt_trap("internal: sorting a type that has no `cmp`");
+    return x->ty->cmp(x, (Obj *)(intptr_t)b);
+}
+
+void rt_sort_obj(Obj *o) {
+    rt_sort_with(o, rt_cmp_obj);
+}
+
 /* Membership, following exactly the rule `==` follows so the two cannot
  * disagree: a str by value, a float as a float, anything else by word.
  *
@@ -914,7 +937,7 @@ static void bytes_drop(Obj *o) {
 
 /* No walk: a byte is not a reference, so a bytes is a leaf at a thread
  * boundary and rt_check_unique answers it from the count alone. */
-const TypeInfo rt_bytes_type = { bytes_drop, NULL, NULL, NULL, NULL };
+const TypeInfo rt_bytes_type = { bytes_drop, NULL, NULL, NULL, NULL, NULL };
 
 /* A value going INTO a bytes. Truncating 256 to 0 would be a silent wrong
  * answer in exactly the code -- codecs, checksums -- least able to notice. */
@@ -1249,7 +1272,7 @@ static void map_walk(Obj *o, VisitFn visit, void *ctx) {
     }
 }
 
-const TypeInfo rt_map_type = { map_drop, NULL, map_walk, NULL, NULL };
+const TypeInfo rt_map_type = { map_drop, NULL, map_walk, NULL, NULL, NULL };
 
 static uint64_t hash_int(int64_t x) {
     /* splitmix64's finaliser: cheap and mixes the low bits, which matters
@@ -1501,7 +1524,7 @@ static void chan_drop(Obj *o) {
     free(c->buf);
 }
 
-static const TypeInfo rt_chan_type = { chan_drop, NULL, NULL, NULL, NULL };
+static const TypeInfo rt_chan_type = { chan_drop, NULL, NULL, NULL, NULL, NULL };
 
 Chan *rt_chan_new(int64_t capacity) {
     if (capacity < 1) rt_trap("channel capacity must be at least 1");

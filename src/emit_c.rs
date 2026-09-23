@@ -213,11 +213,20 @@ pub fn emit(m: &Module) -> String {
             Some(n) => format!("\"{n}\""),
             None => "NULL".to_string(),
         };
+        // The reserved `cmp` the runtime calls on this type (rt.h). No
+        // cast: the emitted definition of `int P.cmp(P other)` already has
+        // the prototype `int64_t (Obj *, Obj *)`, so a mismatch is a C
+        // compile error here rather than a wrong call at run time -- which
+        // is why this is a TypeInfo field and not a vtable slot.
+        let reserved = match &t.cmp {
+            Some(n) => c_name(n),
+            None => "NULL".to_string(),
+        };
         if m.iface_slots.is_empty() {
             writeln!(
                 o,
                 "static const TypeInfo ti_T{i} __attribute__((unused)) = \
-                 {{ {drop}, NULL, {walk}, copy_T{i}, {resource} }};"
+                 {{ {drop}, NULL, {walk}, copy_T{i}, {resource}, {reserved} }};"
             )
             .unwrap();
         } else {
@@ -238,7 +247,7 @@ pub fn emit(m: &Module) -> String {
             writeln!(
                 o,
                 "static const TypeInfo ti_T{i} __attribute__((unused)) = \
-                 {{ {drop}, vt_T{i}, {walk}, copy_T{i}, {resource} }};"
+                 {{ {drop}, vt_T{i}, {walk}, copy_T{i}, {resource}, {reserved} }};"
             )
             .unwrap();
         }

@@ -1,0 +1,14 @@
+pub type Row {
+    int n;
+}
+
+// Not exported. `corpus/modules/privacy-operator` checks the same refusal
+// for `<`; this one is `sort`, which looks the method up the same way and
+// must not be a way around it.
+int Row.cmp(Row o) {
+    return n - o.n;
+}
+
+pub Row make(int n) {
+    return Row(n);
+}

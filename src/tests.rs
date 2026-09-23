@@ -1025,9 +1025,12 @@ fn a_missing_or_wrong_operator_method_is_rejected() {
         err("type P { int x; }\nP a = P(1); P b = P(2); print((a + b).x);")
             .contains("needs a method")
     );
+    // `cmp` is a reserved method name, so a wrong one is refused where it is
+    // DECLARED rather than at the `<` below -- the runtime calls it too, for
+    // `sort`, and that call is written nowhere.
     assert!(
         err("type P { int x; }\nbool P.cmp(P o) { return true; }\nP a = P(1); P b = P(2); print(a < b);")
-            .contains("must return int")
+            .contains("must be declared `int P.cmp(P other)`")
     );
     assert!(
         err("type P { int x; }\nint P.add(P o) { return 1; }\nP a = P(1); P b = P(2); print((a + b).x);")
@@ -1524,9 +1527,11 @@ fn a_destructor_alone_earns_a_drop_function_but_no_walk() {
         .find(|l| l.contains(&format!("TypeInfo ti_T{i} ")))
         .unwrap_or_else(|| panic!("no TypeInfo for T{i}:\n{c}"));
     assert!(
-        ti.ends_with(&format!("{{ drop_T{i}, NULL, NULL, copy_T{i}, \"G\" }};")),
-        "drop set, walk NULL, copy for a const snapshot, and the name the \
-         runtime reports when a const meets a value owning a resource: {ti}"
+        ti.ends_with(&format!(
+            "{{ drop_T{i}, NULL, NULL, copy_T{i}, \"G\", NULL }};"
+        )),
+        "drop set, walk NULL, copy for a const snapshot, the name the runtime \
+         reports when a const meets a value owning a resource, and no `cmp`: {ti}"
     );
     assert!(
         c.contains("o->rc = 1;"),
@@ -1562,4 +1567,68 @@ fn a_destructor_is_not_promoted_by_embedding() {
 fn a_destructor_on_an_unused_generic_type_is_still_checked() {
     let e = err("type Wrap<T> { T v; }\nint Wrap<T>.drop() { return 1; }\nprint(1);");
     assert!(e.contains("must return `void`"), "{e}");
+}
+
+#[test]
+fn a_types_cmp_goes_into_its_typeinfo_uncast() {
+    // `cmp` is how the RUNTIME orders a user type, so it is a field of the
+    // TypeInfo beside the destructor rather than a vtable slot. No
+    // `(AnyFn)` on it: the emitted definition already has the prototype
+    // rt.h declares, so a mismatch is a C compile error rather than a wrong
+    // call at run time.
+    let c = compile_str(
+        "type K { int v; }\n\
+         int K.cmp(K o) { return v - o.v; }\n\
+         K k = K(1);",
+        "c",
+    )
+    .expect("compiles");
+    let ti = c
+        .lines()
+        .find(|l| l.contains("TypeInfo ti_T") && l.contains("K___cmp"))
+        .unwrap_or_else(|| panic!("no TypeInfo carries K.cmp:\n{c}"));
+    assert!(ti.ends_with("fn_K___cmp };"), "cmp, with no cast: {ti}");
+}
+
+#[test]
+fn a_type_without_one_leaves_the_typeinfo_slot_null() {
+    let c = compile_str("type K { int v; }\nK k = K(1);", "c").expect("compiles");
+    let ti = c
+        .lines()
+        .find(|l| l.contains("TypeInfo ti_T"))
+        .unwrap_or_else(|| panic!("no TypeInfo:\n{c}"));
+    assert!(ti.ends_with("NULL };"), "{ti}");
+}
+
+#[test]
+fn a_cmp_promoted_by_embedding_is_not_the_outer_types_cmp() {
+    // The forwarder is `int Outer.cmp(Inner)`, which the runtime would call
+    // with two Outers. Both have the IR shape `int64 (Obj *, Obj *)`, so
+    // only a check on the WRITTEN signature catches it.
+    let e = err("type Inner { int v; }\n\
+                 int Inner.cmp(Inner o) { return v - o.v; }\n\
+                 type Outer { Inner; }\n\
+                 List<Outer> xs = [Outer(Inner(1))];\n\
+                 xs.sort();");
+    assert!(
+        e.contains("inherits `cmp` from the embedded `Inner`"),
+        "{e}"
+    );
+}
+
+#[test]
+fn a_reserved_name_with_another_shape_is_refused_where_it_is_declared() {
+    // Not at a use: `sort` calls `cmp` from the runtime, so there is no call
+    // site in the program to hang the message on.
+    let e = err("type K { int v; }\nstr K.cmp(K o) { return \"\"; }\nprint(1);");
+    assert!(e.contains("must be declared `int K.cmp(K other)`"), "{e}");
+    let e = err("type K { int v; }\nbool K.eq() { return true; }\nprint(1);");
+    assert!(e.contains("this one takes none"), "{e}");
+    // An interface parameter is the one other honest reading of `cmp`, and
+    // is allowed -- it is just not a `cmp` `sort` will take.
+    let ok = ir("interface Ord { int cmp(Ord other); }\n\
+                 type C { int n; }\n\
+                 int C.cmp(Ord other) { return n; }\n\
+                 Ord o = C(1);\nprint(o.cmp(o));");
+    assert!(ok.contains("call_iface"), "{ok}");
 }

@@ -221,16 +221,20 @@ Done: the three primitives a library cannot write from inside —
 `str.byte_at`, `str.parse_int`/`parse_float` returning `Option`, and `to_str`
 on `int`, `float` and `bool`.
 
-Next: `io`, then `math`, then `text`. `sort`-by-comparison, a `Hashable` for
-user-type Map keys, and `spawn` taking a closure are three features waiting on
-one mechanism -- a function reference in the IR -- which is worth knowing
-before calling it a post-freeze concern.
+Next: `io`, then `math`, then `text`. One of the three features this line
+used to say were waiting on function references was not: `sort()` orders a
+list of a user type by the type's own `cmp`, a reserved method name the
+runtime reaches through the type's metadata (docs/reference.md 4.4a). A
+`Hashable` for user-type Map keys should go the same way. What still waits
+on a function reference is a `sort` that takes the comparison as an
+argument; `spawn` taking a closure should not happen at all
+(docs/closures-decision.md).
 
 
 The stated goal is Oro's and Go's: a standard library good enough that most
 programs need nothing else. Needs modules to live in and errors to report
-with. Minimum: strings, sorting, a file and stdin API, time, math, and a
-`Hashable` interface so `Map` takes a user type as a key.
+with. Minimum: strings, sorting, a file and stdin API, time, math, and a `Map`
+that takes a user type as a key.
 
 ### 5. Closures
 

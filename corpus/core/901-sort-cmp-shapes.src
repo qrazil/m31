@@ -1,0 +1,83 @@
+// The shapes a `cmp` can take, and the types a `sort` can reach.
+
+// 1. A distinct type sorts as its base: `distinct int Price` IS an i64 at
+//    runtime, so it goes through the int sort and needs no `cmp` at all.
+distinct int Price;
+
+List<Price> prices = [Price(30), Price(10), Price(20)];
+prices.sort();
+print(prices[0]);
+print(prices[2]);
+
+// 2. A `cmp` on a type that EMBEDS another. `Outer` inherits `Inner.cmp`
+//    by promotion, but a promoted method keeps the embedded type's
+//    parameter -- the forwarder is `int Outer.cmp(Inner)` -- so it is not a
+//    `cmp` for an `Outer` and `sort` refuses it (corpus/errors/911). The
+//    fix is one line: declare `int Outer.cmp(Outer)`, which wins over the
+//    promoted one, and order by the promoted FIELD, which is how the
+//    embedded ordering is forwarded.
+type Inner {
+    int v;
+}
+
+int Inner.cmp(Inner o) {
+    return v - o.v;
+}
+
+type Outer {
+    Inner;
+    str label;
+}
+
+int Outer.cmp(Outer o) {
+    return v - o.v;
+}
+
+str Outer.to_str() {
+    return concat(concat(str(v), ":"), label);
+}
+
+List<Outer> os = [Outer(Inner(2), "b"), Outer(Inner(1), "a"), Outer(Inner(2), "c")];
+os.sort();
+for (Outer o in os) {
+    print(o);
+}
+
+// 3. The embedded type still sorts on its own account.
+List<Inner> ins = [Inner(3), Inner(1), Inner(2)];
+ins.sort();
+print(ins[0].v);
+print(ins[2].v);
+
+// 4. The order is whatever `cmp` says and nothing the runtime guesses: this
+//    one subtracts the other way round, so the list comes out descending.
+type Word {
+    str text;
+    int n;
+}
+
+int Word.cmp(Word o) {
+    return o.n - n;
+}
+
+List<Word> ws = [Word("pear", 1), Word("apple", 3), Word("fig", 2)];
+ws.sort();
+print(ws[0].text);
+print(ws[1].text);
+print(ws[2].text);
+
+// 5. A generic type's instantiation is an ordinary type by the time `sort`
+//    sees it, so its `cmp` is found the same way.
+type Box<T> {
+    T item;
+    int key;
+}
+
+int Box<T>.cmp(Box<T> o) {
+    return key - o.key;
+}
+
+List<Box<str>> boxes = [Box<str>("x", 2), Box<str>("y", 1)];
+boxes.sort();
+print(boxes[0].item);
+print(boxes[1].item);

@@ -1,0 +1,4 @@
+import lib;
+
+List<lib.Row> rows = [lib.make(2), lib.make(1)];
+rows.sort();

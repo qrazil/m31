@@ -1,0 +1,15 @@
+// `eq` compares a value with another of its own type. Comparing it with
+// some other type is a different operation and needs a different name --
+// otherwise `a == b` would mean something the reader cannot predict from
+// the types in front of them.
+type Other {
+    int n;
+}
+
+type Row {
+    int n;
+}
+
+bool Row.eq(Other o) {
+    return n == o.n;
+}

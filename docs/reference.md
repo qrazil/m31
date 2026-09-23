@@ -700,7 +700,7 @@ Methods:
 | `Array`, `List` | `contains(v)` | `int`, `float`, `bool` and `str` elements only |
 | `Array`, `List` | `index_of(v)` | `Option<int>` — `None` if it is not there |
 | `Array`, `List` | `reverse()` | in place |
-| `Array`, `List` | `sort()` | in place, ascending; `int` and `str` only |
+| `Array`, `List` | `sort()` | in place, ascending; `int`, `float`, `str`, or a type with `cmp` |
 | `List` | `push(v)` | append |
 | `List` | `pop()` | remove and return the last element; traps if empty |
 | `List` | `insert(i, v)` | at `i`; `i == len` appends, beyond that traps |
@@ -731,10 +731,29 @@ never reaches the language.
 `sort` is a **stable** merge sort — equal elements keep their order — because
 sorting by one key and then another is the ordinary way to get a compound
 order, and that only works if the second sort leaves ties alone. Strings
-order lexicographically, and a prefix sorts before what extends it. It
-handles `int` and `str`; a user type already spells its order as `cmp`, but
-calling back into generated code needs a function reference in the IR, which
-does not exist yet and is the same thing closures will need.
+order lexicographically, and a prefix sorts before what extends it. Floats
+get a total order: `-inf < … < ±0.0 < … < +inf < NaN`.
+
+A **user type sorts by its own `cmp`** (§4.4a, §6.2) — the same method `<`
+uses, so a sorted list and a comparison can never disagree:
+
+```c
+type Item { int rank; str tag; }
+int Item.cmp(Item o) { return rank - o.rank; }
+
+List<Item> xs = [Item(3, "a"), Item(1, "b"), Item(3, "c")];
+xs.sort();                      // 1-b, 3-a, 3-c
+```
+
+Nothing is passed to `sort`: the runtime is holding the element, and the
+element carries its type. A type with no `cmp` is refused where the `sort`
+is written, naming the method to declare. Two cases are refused for the same
+reason: a `cmp` **inherited by embedding** (§3.5) takes the *embedded*
+type — the promoted method keeps its original parameter — so the embedding
+type must declare its own; and a list of an **interface** cannot be sorted,
+because two elements can be different types and one's `cmp` would be handed
+the other. Sorting a `List<T>` of a type whose `cmp` is private to another
+module is refused too (§2.1), like every other by-name lookup.
 
 `remove_at` is spelled that way because Java has both `remove(int)` and
 `remove(Object)` and the overload is a standing trap. One name, and it says
@@ -1143,6 +1162,67 @@ level's own locals are released when it ends, so theirs do run.
 `io.File` has one: a `File` let go without `close()` is closed then, silently
 (docs/destructors-decision.md).
 
+### 4.4a Reserved method names
+
+Five method names have a **meaning the language gives them**. A type may
+declare any of them, and gets the behaviour in the right-hand column; it may
+not declare one with a different signature and mean something else by it.
+
+| Name | Signature | What it is for |
+|---|---|---|
+| `drop` | `void T.drop()` | the destructor (§4.4) |
+| `to_str` | `str T.to_str()` | `print(v)` and `str(v)` (§6.6) |
+| `cmp` | `int T.cmp(T other)` | `<`, `<=`, `>`, `>=` (§6.2) and `sort()` (§3.9) |
+| `eq` | `bool T.eq(T other)` | `==`, `!=` (§6.2) |
+
+`cmp` and `eq` are **checked where they are declared**, and a wrong one is
+refused there rather than at a use:
+
+```
+`Row.cmp` is a reserved method and must be declared `int Row.cmp(Row
+other)`: this one returns `bool`. The language calls it itself -- `<`, `<=`,
+`>`, `>=` and `sort` -- so its signature is not the type's to choose; if
+this method means something else, give it another name.
+```
+
+The reason is that **nothing in the program writes some of those calls**.
+`print(v)` is visibly `v.to_str()`, so a wrong `to_str` can be refused at
+the `print` that wanted it. But `sort()` calls `cmp` from the *runtime*,
+through a pointer the compiler puts in the type's metadata, and there is no
+line to hang the message on. Checking the declaration means a type with a
+wrong `cmp` cannot compile at all, instead of compiling until the first
+module that sorts it.
+
+The shape rules, and what each refuses:
+
+  - **not `static`**: both act on a receiver.
+  - **no type parameters of their own**: the call is made through one
+    pointer, so nothing would infer them. (A generic *type* may declare
+    them; they are instantiated with it.)
+  - **exactly one parameter**, not optional, of the receiver's own type — or
+    of an **interface**, which is the other honest reading:
+    `interface Ord { int cmp(Ord other); }` is an ordinary one-method
+    interface (§3.4), and `int C.cmp(Ord)` satisfies it. That method means
+    "compare me with any `Ord`", which is a different promise from "compare
+    me with another `C`", so it is *not* what `sort` accepts. One name; the
+    signature says which of the two it is.
+  - **`cmp` returns `int`** (negative, zero, positive) and **`eq` returns
+    `bool`**.
+
+They are **found by name, so they obey privacy** (§2.1), exactly as `to_str`
+does: sorting another module's type needs its `cmp` to be `pub`, and the
+refusal names the method and the module it belongs to. (`drop` is the
+exception, and the opposite one: it may not be `pub`, because nothing may
+call it by name from anywhere.)
+
+A method **promoted by embedding** (§3.5) keeps the embedded type's
+parameter, so `Outer` embedding an `Inner` that has `cmp` does **not** get a
+`cmp` of its own: the forwarder is `int Outer.cmp(Inner)`. That is checked on
+the written signature and not on the machine-level one, which is identical
+either way — calling it with two `Outer`s would read an `Inner`'s fields out
+of an `Outer`. Declare `int Outer.cmp(Outer other)`, which wins over the
+promoted one, and order by the promoted *field*.
+
 ### 4.5 Module constants
 
 ```c
@@ -1425,6 +1505,13 @@ There is no way to define an operator that has no entry above, and no way to
 change an operator's meaning on a built-in type. The bit operators are
 deliberately absent: they are defined on the bits of an `int`, and a user
 type that wants something like them should name it as a method.
+
+`cmp` and `eq` are **reserved method names** (§4.4a): `sort()` calls `cmp`
+from the runtime, where no call site exists to refuse, so neither may be
+declared with another signature and both are checked where they are written.
+`add`, `sub`, `mul`, `div` and `rem` are not reserved: an operator call is
+written in the source, so a wrong one is refused at the operator that
+wanted it.
 
 ### 6.3 Postfix
 

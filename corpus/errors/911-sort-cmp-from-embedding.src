@@ -1,0 +1,22 @@
+// A `cmp` inherited by embedding is NOT a `cmp` for the embedding type.
+//
+// Promotion synthesises `int Outer.cmp(Inner)`, keeping the embedded type's
+// parameter, and the runtime would call it with two Outers -- reading an
+// Inner's fields out of an Outer. The two have the same IR shape,
+// `int64 (Obj *, Obj *)`, so only a check on the SURFACE signature catches
+// it. `<` refuses the same declaration for the same reason.
+type Inner {
+    int v;
+}
+
+int Inner.cmp(Inner o) {
+    return v - o.v;
+}
+
+type Outer {
+    Inner;
+    str label;
+}
+
+List<Outer> xs = [Outer(Inner(2), "b"), Outer(Inner(1), "a")];
+xs.sort();

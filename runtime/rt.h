@@ -69,6 +69,23 @@ typedef void (*AnyFn)(void);
  * itself, so theirs is NULL. `ctx` is the runtime's, opaque here. */
 typedef Obj *(*CopyFn)(Obj *o, void *ctx);
 
+/* A method the RUNTIME itself calls on a user type, found by reserved name
+ * the way `drop` above already is.
+ *
+ * `sort` needs an ordering, and the runtime is holding the object: it has
+ * the header, so it has the TypeInfo, so a pointer stored here is everything
+ * it is missing. It lives in the TypeInfo rather than at a fixed index at
+ * the head of the vtable (the shape docs/closures-decision.md sketched) for
+ * two reasons: a field has a real prototype, so the C compiler checks the
+ * signature at every call instead of a hard-coded slot number having to
+ * agree between src/lower.rs and this file; and a program with no interfaces
+ * at all keeps its empty vtable.
+ *
+ * NULL when the type declares no such method. The compiler refuses any
+ * program that would need one it has not got, so a NULL reaching a call here
+ * is a compiler bug -- the runtime traps rather than jumping through it. */
+typedef int64_t (*CmpFn)(Obj *a, Obj *b);  /* int T.cmp(T other) */
+
 typedef struct TypeInfo {
     DropFn       drop;
     const AnyFn *vtable;
@@ -81,6 +98,8 @@ typedef struct TypeInfo {
      * (docs/destructors-decision.md, "A resource cannot be copied"). The
      * runtime's own types never own one. */
     const char  *resource;
+    /* The reserved-name `cmp`, or NULL. See the typedef above. */
+    CmpFn        cmp;
 } TypeInfo;
 
 /* Every heap object starts with this. Two words: the count, and a pointer to
@@ -397,6 +416,8 @@ void    rt_seq_reverse(Obj *o);
 void    rt_sort_int(Obj *o);
 void    rt_sort_str(Obj *o);
 void    rt_sort_float(Obj *o);
+/* Order the elements by their own type's `cmp` (TypeInfo above). */
+void    rt_sort_obj(Obj *o);
 /* How a sequence's elements compare. A slot is one machine word whatever it
  * holds, so the caller has to say what is in it. */
 enum { SEQ_WORD = 0, SEQ_STR = 1, SEQ_FLOAT = 2 };

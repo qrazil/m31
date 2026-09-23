@@ -1,3 +1,13 @@
+// Returning a bool is the mistake C++ and Python invite -- a `<`-shaped
+// comparison -- and one `cmp` returning an int is what keeps a total order
+// from being defined inconsistently.
+//
+// The refusal lands on the DECLARATION, not on the `<` below. `cmp` is a
+// reserved method name: the runtime calls it too, for `sort` and for a map
+// key, and those calls are written nowhere in the program, so there is no
+// use site to hang the message on. Checking the shape where it is written
+// means a type with a wrong `cmp` cannot compile at all, rather than
+// compiling until the first module that sorts it.
 type P {
     int x;
 }

@@ -1,0 +1,4 @@
+corpus/modules/sort-private-cmp/main.src:4:5: `cmp` is private to `lib`
+  |
+4 | rows.sort();
+  |     ^

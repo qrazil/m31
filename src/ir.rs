@@ -182,6 +182,12 @@ pub struct TypeDef {
     /// one. The drop function calls it before releasing any field, so the
     /// destructor still sees a whole object (docs/destructors-decision.md).
     pub destructor: Option<String>,
+    /// The IR name of the RESERVED `cmp` the runtime calls on this type,
+    /// present only if the type declares `int T.cmp(T other)` exactly. It
+    /// goes into the TypeInfo beside the destructor, which is the same idea
+    /// -- a method of a known name that nothing in the program calls by name
+    /// -- and it is what `sort` on a list of this type reaches for.
+    pub cmp: Option<String>,
     /// Beside `destructor`: the type's name as the program spells it
     /// (`io.File`, `Wrap<Res>`). It goes into the TypeInfo so that the
     /// runtime can name the type when a `const` meets a value that owns a
