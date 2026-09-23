@@ -17,6 +17,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>    /* TCP_NODELAY */
 #include <poll.h>
+#include <signal.h>         /* sigaction, for sys_ignore_sigpipe alone */
 #include <stddef.h>         /* offsetof, for sockaddr_un's length */
 #include <stdio.h>          /* rename is ISO C, so it lives here, not in unistd.h */
 #include <string.h>         /* memcpy and memset, for the address conversions */
@@ -588,6 +589,23 @@ int64_t sys_resolve(const char *host, int64_t port, int64_t family,
     }
     freeaddrinfo(res);
     return found;
+}
+
+/* sigaction and not signal(): signal()'s semantics are the one corner of ISO
+ * C that POSIX and the BSDs still disagree about -- whether the disposition
+ * resets after a delivery, and whether an interrupted call restarts -- and
+ * although neither can be observed through SIG_IGN, the spelling that has
+ * one meaning everywhere costs three extra lines. sa_mask is zeroed rather
+ * than left as it came off the stack: it is read by the kernel even for
+ * SIG_IGN on some systems, and an uninitialised read is what the sanitized
+ * builds of runtime/sys_test.sh exist to catch. */
+int64_t sys_ignore_sigpipe(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = SIG_IGN;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    return ret(sigaction(SIGPIPE, &sa, NULL));
 }
 
 int64_t sys_clock_ns(int64_t clock) {

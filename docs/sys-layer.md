@@ -329,23 +329,39 @@ language's job, and it is the same job on both backends.
 | argv, environment | `main`'s arguments | Not a system call: the kernel leaves them on the initial stack. Today the emitted `main(void)` drops them. Needs `main(int, char **)` to hand them to the runtime (libc) or `_start` to read them off the stack (no libc, §5). |
 | `mmap` 9/222, `munmap` 11/215 | a runtime allocator | For §5's malloc replacement. |
 | `clone` 56/220 (or `clone3` 435), `futex` 202/98 | carrier threads for green threads | `docs/concurrency-decision.md`. `clone` is the easy part; see §5. |
-| `rt_sigaction` 13/134, `sigaltstack` | stack-probe traps, **SIGPIPE policy** | When preemption lands — but sockets need it sooner. See below. |
+| `rt_sigaction` 13/134 **with a handler**, `sigaltstack` | stack-probe traps, preemption | When preemption lands. The SIGPIPE half is done — see below — and it is the half that needs no trampoline. |
 | `getpid`, `kill`/`tgkill` | `abort` without libc | `rt_trap` still calls `abort()`. |
 | `pipe2`, `dup3`, `execve`, `wait4` | spawning the C compiler | Self-hosting needs it (`stdlib-seam.md` §5). |
 | `sendto` 44/206, `recvfrom` 45/207 | unconnected UDP | A datagram socket works today by `connect`ing it and using `sys_read`/`sys_write`, which is what a UDP client does. A UDP *server*, which must answer whoever wrote to it, needs the peer address per message. The DNS client above is the first caller that will. |
 | `epoll_create1`, `epoll_ctl`, `epoll_wait` | a scheduler's readiness set | Beside `sys_poll`, not instead of it — see above. |
 | `socketpair` 53/199 | a connected pair with no name | `sys_test.c` builds one over a filesystem path instead, which also tests `bind` and `connect`. Wanted once the runtime needs to wake itself. |
 
-**SIGPIPE is the one sharp edge sockets add, and it is not covered.** Writing
-to a connection whose peer has gone away kills the process by default. This
-layer installs no signal handlers, so a `net` module must set `SIGPIPE` to
-ignore at startup and read the `-SYS_EPIPE` instead — and it cannot, yet,
-because `rt_sigaction` is in the table above and not in the layer. Until it
-is, a program that writes to a dead peer dies. `sys_test.c` therefore checks
-the *readable* half of `shutdown` and says in a comment why it does not check
-the other: the test process would simply die, and a check that cannot exist is
-worth less than the sentence explaining it. This is the next thing the layer
-owes the `net` module.
+**SIGPIPE is the one sharp edge sockets add, and it is covered by exactly one
+call.** Writing to a connection whose peer has gone away kills the process by
+default. `sys_ignore_sigpipe()` sets that signal's disposition to ignore, so
+the write returns `-SYS_EPIPE` instead; `lib/net.src` calls it before its
+first write, and `sys_test.c` now checks the other half of `shutdown`'s
+contract instead of explaining why it cannot.
+
+*Done 2026-09-23, both backends.* It is **one disposition, not a general
+`sigaction`**, and that narrowing is the whole reason it was affordable now
+rather than with preemption. A general `sigaction` has to carry a function
+pointer into the kernel, which on x86-64 means the **restorer trampoline**:
+a few instructions whose only job is to invoke `rt_sigreturn` when a handler
+returns, which libc normally supplies and a raw backend must write per
+architecture. `SIG_IGN` is never *delivered* — the kernel drops the signal in
+`sig_task_ignored` before any signal frame is built — so no restorer can ever
+be reached, and `rt_sigaction` itself never checks `SA_RESTORER` (only
+delivery does, in `setup_rt_frame`). The raw backend is therefore a kernel
+`struct sigaction` laid out by hand (x86-64 has a `sa_restorer` field between
+the flags and the mask; aarch64 and riscv64 do not, and both layouts are
+`_Static_assert`ed) and one `sc()` call. It is checked on every backend the
+gate can build, the freestanding aarch64 and riscv64 ones under qemu
+included.
+
+What is still owed is the *handler* half — a real `sigaction` with a
+trampoline — and it is owed to preemption and stack-probe traps, not to
+sockets.
 
 ---
 
@@ -444,9 +460,10 @@ traps today, deliberately.
 **Standard I/O.** Done for what the runtime prints (§3). What remains is
 float formatting, which is scheduled to become language source anyway.
 
-**Signals.** Stack probes and preemption will want a signal handler;
-`rt_sigaction` needs a restorer trampoline (`SA_RESTORER`) that libc
-normally supplies — a few instructions of assembly per architecture.
+**Signals.** Stack probes and preemption will want a signal *handler*;
+`rt_sigaction` with one needs a restorer trampoline (`SA_RESTORER`) that libc
+normally supplies — a few instructions of assembly per architecture. Setting
+a *disposition* needs none of that and is done: `sys_ignore_sigpipe` (§2).
 
 None of this is needed for the raw backend to be useful. All of it is
 needed before "no libc" is true, and it is the same list whether the goal
@@ -676,7 +693,11 @@ Points the module has to settle, and the reasons they look like this:
     is safe for exactly the reason §8 gives for `SYS_O_*`: they are the
     layer's constants and not the host's, so 10 means IPv6 on every target.
 
-  - **`net` must ignore SIGPIPE before its first write**, and cannot yet (§2).
+  - **`net` must ignore SIGPIPE before its first write**, and now can (§2).
     That is a prerequisite, not a detail: without it a server dies the first
-    time a client hangs up mid-response. `rt_sigaction` is the next thing this
-    layer owes.
+    time a client hangs up mid-response. `sys_ignore_sigpipe()` is the one
+    signal call the layer offers, on both backends. `lib/net.src` makes it
+    every time it opens a socket rather than once at startup, because a
+    module cannot hold the "already done" flag
+    (docs/module-state-decision.md); it is one idempotent system call per
+    socket, which is nothing next to the connect or the accept beside it.

@@ -163,6 +163,15 @@ static void net_tests(void) {
     SysAddr a1, a2, a3;
     char rb[64];
 
+    /* ---- SIGPIPE first, or the rest of this function is a coin toss ----
+     * Every write below is to a socket, and a write to a socket whose peer
+     * has gone away raises SIGPIPE, whose default action kills the process.
+     * That is checked for real further down; here it is a precondition.
+     * Called twice on purpose: a disposition is idempotent, and `net` calls
+     * this from more than one place rather than trusting a flag. */
+    expect("ignore SIGPIPE", sys_ignore_sigpipe(), 0);
+    expect("and again, harmlessly", sys_ignore_sigpipe(), 0);
+
     /* ---- arguments both backends must refuse identically ---- */
     /* Each of these is caught by the layer's own validation, before any
      * system call, so that the two backends cannot drift: leaving it to the
@@ -368,13 +377,11 @@ static void net_tests(void) {
      * does at its end, which is why a reader written for files works here.
      *
      * The other half of shutdown's contract -- that writing to a peer which
-     * has gone away fails with -SYS_EPIPE -- is deliberately NOT tested, and
-     * cannot be from here: the kernel raises SIGPIPE first, this layer
-     * installs no signal handlers (sys.h, docs/sys-layer.md §2), and the
-     * freestanding build has no C library to have ignored it at startup. The
-     * test process would simply die. That is the same hole a `net` module
-     * has to close before its first write, and saying so here is more use
-     * than a check that cannot exist. */
+     * has gone away fails with -SYS_EPIPE rather than killing the process --
+     * is checked in the Unix-socket section below, where a closed peer makes
+     * the very next write fail rather than the one after it. It could not be
+     * checked at all until sys_ignore_sigpipe existed, which is why this
+     * comment used to say so. */
     expect("shut down the writing end", sys_shutdown(cl, SYS_SHUT_WR), 0);
     expect("the peer reads end of file", sys_read(sv, rb, sizeof rb), 0);
     expect("the answer still gets through", sys_write(sv, "pong", 4), 4);
@@ -497,7 +504,22 @@ static void net_tests(void) {
     expect("and back the other way", sys_write(usv, "xinu", 4), 4);
     expect("read that", sys_read(uc, rb, sizeof rb), 4);
     expect_true("what came back", same(rb, "xinu", 4));
+
+    /* ---- writing to a peer that has gone ----
+     * A Unix socket and not a TCP one, because the answer is deterministic
+     * here: the peer's descriptor is gone the moment it is closed, so the
+     * NEXT write fails. Over TCP the first write after a close is handed to
+     * the kernel and succeeds, the peer's stack answers with a reset, and
+     * only the write after THAT reports it -- true, and not something to
+     * hang a gate on.
+     *
+     * Without the sys_ignore_sigpipe at the top of this function, the write
+     * below does not return a value at all: the process dies on signal 13
+     * and the whole test reports nothing. That is exactly what a server did
+     * before the layer had this call. */
     sys_close(usv);
+    expect("a read after the peer closed is end of file", sys_read(uc, rb, sizeof rb), 0);
+    expect("and a write to it is EPIPE, not death", sys_write(uc, "gone", 4), -SYS_EPIPE);
     sys_close(uc);
     sys_close(us);
 
