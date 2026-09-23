@@ -1,0 +1,76 @@
+// A type with no fields allocates nothing: the compiler emits one immortal
+// static instance and every construction yields it
+// (docs/closures-decision.md, "A callback with no captures is a static,
+// immortal object"). Nothing a program can observe changes, and this is the
+// list of the things that could have.
+type Point { int x; int y; }
+
+type ByX {}
+int ByX.cmp(Point a, Point b) { return a.x - b.x; }
+// `==` on a user type is its `eq` method and never identity, so sharing one
+// object cannot be seen through it. Without this method `a == b` does not
+// compile at all -- which is the real reason the sharing is invisible.
+bool ByX.eq(ByX o) { return true; }
+str ByX.to_str() { return "ByX"; }
+
+type ByY {}
+int ByY.cmp(Point a, Point b) { return a.y - b.y; }
+
+interface Less { int cmp(Point a, Point b); }
+
+Point p = Point(1, 7);
+Point q = Point(4, 2);
+
+// Construction, over and over. Ten thousand of these used to be ten thousand
+// mallocs; now they are ten thousand copies of one address.
+int i = 0;
+int acc = 0;
+while (i < 10000) {
+  Less o = ByX();
+  acc = acc + o.cmp(p, q);
+  i = i + 1;
+}
+print(acc);
+
+// Two values of the type compare by the method, and the method says true.
+ByX a = ByX();
+ByX b = ByX();
+print(a == b);
+print(a != b);
+
+// A clone is a copy of nothing, so it is the same object and behaves the same.
+ByX c = clone(a);
+print(c == a);
+print(c.cmp(p, q));
+
+// A const local. rt_snapshot sees RC_IMMORTAL, which is all bits set and so
+// reads as already frozen, and hands the object straight back -- no copy.
+// (A MODULE constant of a user type is still refused, so this is a local:
+// docs/const-decision.md's remaining gap, which Stage 2 only opens the door
+// to.)
+void frozen(Point u, Point v) {
+  const ByX k = ByX();
+  print(k.cmp(u, v));
+}
+frozen(p, q);
+
+// Refcount traffic on an immortal is a compare and a return, so passing one
+// around costs nothing and can never free it.
+List<Less> os = [ByX(), ByY(), ByX()];
+print(os.size());
+print(os[0].cmp(p, q));
+print(os[1].cmp(p, q));
+
+// Across a thread boundary. rt_check_unique returns immediately for an
+// immortal, so a shared field-less value crosses freely -- it is shared with
+// every other construction of its type by definition, and there is nothing
+// in it for two threads to disagree about.
+Chan<Less> ch = Chan<Less>(2);
+send(ch, ByX());
+send(ch, ByY());
+print(recv(ch).cmp(p, q));
+print(recv(ch).cmp(p, q));
+close(ch);
+
+// Through `print`, which reaches `to_str` by name.
+print(a);

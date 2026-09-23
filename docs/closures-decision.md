@@ -1394,6 +1394,23 @@ and construct from it instead of calling `rt_alloc`. This also makes
 `ByX()` — the hand-written form, which allocates today — free, so it pays
 before any new syntax exists.
 
+*Done.* `TypeDef::is_immortal_singleton` (`src/ir.rs`) decides it and the
+emitter writes one `static T{i} imm_T{i} = { { RC_IMMORTAL, &ti_T{i} } };`
+per such type; `Inst::Alloc` on one becomes `&imm_T{i}.hdr`. Four kinds of
+type are excluded because they are not really field-less — an interface, a
+channel and a distinct type have no object at all, and an enum's empty
+`fields` hides a tag and payload slots — and one because sharing would be
+observable: **a field-less type that declares a DESTRUCTOR keeps
+allocating**, since an immortal is never released and its `drop` would
+silently never run. Refusing that combination was the alternative and was
+rejected: a field-less guard whose whole content is its effect is a
+legitimate shape, and a synthesised callback type never has a destructor,
+which is the case this exists for. Nothing else changes, because `==` on a
+user type is its `eq` method and never identity, `rt_snapshot` already
+returns an immortal unchanged (`RC_IMMORTAL` is all bits set, so it reads as
+frozen), and `rt_check_unique` already skips one. Measured on a loop of 10M
+constructions at `-O2`: **0.17 s → 0.04 s**.
+
 **Stage 3 — a function's name as a value. ~1 week.**
 Resolve a bare identifier that names a function, in the positions listed in
 *Where the target type is known*, against the expected one-method interface;

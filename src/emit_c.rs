@@ -251,6 +251,39 @@ pub fn emit(m: &Module) -> String {
         o.push('\n');
     }
 
+    // One static instance per field-less type, on the same terms as a string
+    // literal: static storage, RC_IMMORTAL, never freed, never counted by
+    // RC_TRACK_ALLOC. `Inst::Alloc` on such a type yields this object instead
+    // of calling rt_alloc -- see TypeDef::is_immortal_singleton for why every
+    // value of the type may share one, and which types are excluded.
+    //
+    // Deliberately NOT `const`: rc_inc and rc_dec take a non-const `Obj *`
+    // and read the count before they see RC_IMMORTAL and return. They never
+    // write to it, but a const object passed to them would be a const-cast,
+    // and a write the compiler thought impossible would be undefined rather
+    // than merely wrong. The TypeInfo it points at IS const; that is the part
+    // nothing ever writes through.
+    //
+    // It must come after the TypeInfos, because it names one.
+    let singletons: Vec<usize> = m
+        .types
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.is_immortal_singleton())
+        .map(|(i, _)| i)
+        .collect();
+    for i in &singletons {
+        writeln!(
+            o,
+            "static T{i} imm_T{i} __attribute__((unused)) = \
+             {{ {{ RC_IMMORTAL, &ti_T{i} }} }};"
+        )
+        .unwrap();
+    }
+    if !singletons.is_empty() {
+        o.push('\n');
+    }
+
     // String literals are immortal: static storage, RC_IMMORTAL, never freed.
     for (i, s) in m.strings.iter().enumerate() {
         let bytes = s.as_bytes();
@@ -933,7 +966,17 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
             }
         }
         Inst::Alloc { dst, tid } => {
-            writeln!(o, "    {dst} = rt_alloc(sizeof(T{tid}), &ti_T{tid});").unwrap();
+            // A field-less type is built once, statically, and every
+            // construction hands back that one immortal object -- no malloc,
+            // no refcount traffic, nothing to free. The lowering does not
+            // need to know: it still emits an Alloc and the rc_inc/rc_dec
+            // pairs around it, and both are a compare-and-return on an
+            // immortal. See TypeDef::is_immortal_singleton.
+            if types[*tid as usize].is_immortal_singleton() {
+                writeln!(o, "    {dst} = &imm_T{tid}.hdr;").unwrap();
+            } else {
+                writeln!(o, "    {dst} = rt_alloc(sizeof(T{tid}), &ti_T{tid});").unwrap();
+            }
         }
         Inst::EnumPack {
             dst,

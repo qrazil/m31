@@ -207,6 +207,43 @@ impl TypeDef {
         self.needs_drop() || self.destructor.is_some()
     }
 
+    /// Whether every value of this type can be one shared static object.
+    ///
+    /// A type with no fields has nothing to tell two of its values apart:
+    /// the object is a bare header, and the header is the same for every
+    /// instance. So the emitter writes ONE static instance with
+    /// `RC_IMMORTAL` and every construction yields it, instead of a
+    /// `rt_alloc` per construction (docs/closures-decision.md, "A callback
+    /// with no captures is a static, immortal object"). Nothing observable
+    /// changes: `==` on a user type is its `eq` method and never identity,
+    /// and an `eq` on a field-less type has nothing to read.
+    ///
+    /// Four kinds of type are excluded because they are not really
+    /// field-less:
+    ///
+    ///   - an interface, a channel and a distinct type have no object of
+    ///     their own at all -- no struct, no TypeInfo, nothing to point at;
+    ///   - an enum's `fields` is empty but its object carries a tag and
+    ///     payload slots, so its values differ.
+    ///
+    /// And one because sharing would change behaviour: a type that declares
+    /// a DESTRUCTOR keeps allocating. An immortal is never dropped, so its
+    /// `drop` would never run -- silently, at every site -- and a `const`
+    /// binding of one would stop trapping on the resource it owns. Refusing
+    /// the combination outright was the alternative, but a field-less type
+    /// with a destructor is a legitimate guard object whose whole content is
+    /// its effect, and this optimisation is not a reason to outlaw it. It
+    /// loses nothing that matters: a synthesised callback type never has a
+    /// destructor, which is the case this exists for.
+    pub fn is_immortal_singleton(&self) -> bool {
+        !self.is_interface
+            && !self.is_chan
+            && !self.is_distinct
+            && !self.is_enum
+            && self.destructor.is_none()
+            && self.fields.is_empty()
+    }
+
     /// How many payload slots an enum's object needs: the widest variant.
     /// Every variant shares the slots, so a slot's C type cannot depend on
     /// the variant -- they are all machine words, and a reference rides as
