@@ -6038,6 +6038,12 @@ impl Lowerer {
             vtable: Vec::new(),
             destructor: None,
             resource: None,
+            // A forwarder is not a value anyone compares, hashes or sorts:
+            // it has no fields, and the interface it satisfies is the only
+            // thing ever asked of it.
+            cmp: None,
+            hash: None,
+            eq: None,
         });
         self.field_surface.push(Vec::new());
         self.field_params.push(Vec::new());
