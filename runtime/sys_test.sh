@@ -4,6 +4,8 @@
 #
 #   libc   gcc and clang, -O0 and -O2          always
 #   raw    gcc and clang, -O0 and -O2          on x86-64, aarch64, riscv64 Linux
+#   both   clang, ASan and UBSan                when clang can link a sanitized
+#                                               binary; skipped, and said so
 #   raw, no libc at all, static                 same, natively
 #   raw, no libc, aarch64 and riscv64           when clang, an lld and qemu-user
 #                                               are all present; skipped, and
@@ -11,6 +13,11 @@
 #
 # The freestanding builds are the ones that matter most: with no C library
 # linked, a raw backend that quietly called one would not link.
+#
+# The sanitized builds are here and not only in sanitize.sh because that
+# script runs corpus PROGRAMS, which reach the layer through lib/io.src and
+# never touch the socket address conversions -- the one part of this layer
+# that writes through pointers into structs of another shape.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -62,6 +69,23 @@ for cc in gcc clang; do
             check "$l" "$WORK/t"
     done
 done
+
+# Under the sanitizers, with each backend. clang only: this host's gcc has no
+# sanitizer runtime installed, which is the same reason sanitize.sh gives.
+SAN=(-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
+if command -v clang >/dev/null &&
+   echo 'int main(void){return 0;}' >"$WORK/probe.c" &&
+   clang "${SAN[@]}" "$WORK/probe.c" -o "$WORK/probe" 2>/dev/null; then
+    for b in "" -DRT_SYS_RAW; do
+        [ -n "$b" ] && [ $raw_native -eq 0 ] && continue
+        l="libc clang ASan UBSan"
+        [ -n "$b" ] && l="raw  clang ASan UBSan"
+        build "$l" "$WORK/s" clang -O1 -g "${SAN[@]}" -Wall -Wextra $b \
+            -I runtime runtime/sys_test.c && check "$l" "$WORK/s"
+    done
+else
+    printf '%-44s skipped (clang cannot link a sanitized program)\n' "both clang ASan UBSan"
+fi
 
 # No C library at all. -fno-stack-protector because the protector's guard
 # lives in the C library's thread block, which does not exist here.

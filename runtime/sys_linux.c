@@ -35,13 +35,31 @@
  * those are used on x86-64 too, with AT_FDCWD, and every architecture runs
  * the same code. renameat2 rather than renameat because riscv64 has only
  * the former. fstat is statx for the same reason one step further: struct
- * stat's layout differs per architecture, struct statx does not. */
+ * stat's layout differs per architecture, struct statx does not.
+ *
+ * Sockets follow the same rule twice more. accept4 rather than accept,
+ * because the layer's descriptors are close-on-exec and accept4 is the only
+ * form that can say so without a second call. ppoll rather than poll,
+ * because the generic table has no poll at all -- it was left out with the
+ * other pre-*at calls -- so x86-64 uses ppoll too and there is one code
+ * path. ppoll's extra arguments are a NULL signal mask, which the kernel
+ * short-circuits before it looks at the mask size. */
 #if defined(__x86_64__)
 #define NR_read          0
 #define NR_write         1
 #define NR_close         3
 #define NR_lseek         8
 #define NR_ioctl        16
+#define NR_socket       41
+#define NR_connect      42
+#define NR_shutdown     48
+#define NR_bind         49
+#define NR_listen       50
+#define NR_getsockname  51
+#define NR_getpeername  52
+#define NR_setsockopt   54
+#define NR_getsockopt   55
+#define NR_fcntl        72
 #define NR_getdents64  217
 #define NR_clock_gettime 228
 #define NR_exit_group   231
@@ -49,10 +67,13 @@
 #define NR_mkdirat      258
 #define NR_unlinkat     263
 #define NR_symlinkat    266
+#define NR_ppoll        271
+#define NR_accept4      288
 #define NR_renameat2    316
 #define NR_getrandom    318
 #define NR_statx        332
 #elif defined(__aarch64__) || (defined(__riscv) && __riscv_xlen == 64)
+#define NR_fcntl         25
 #define NR_ioctl         29
 #define NR_mkdirat       34
 #define NR_unlinkat      35
@@ -63,8 +84,19 @@
 #define NR_lseek         62
 #define NR_read          63
 #define NR_write         64
+#define NR_ppoll         73
 #define NR_exit_group    94
 #define NR_clock_gettime 113
+#define NR_socket       198
+#define NR_bind         200
+#define NR_listen       201
+#define NR_connect      203
+#define NR_getsockname  204
+#define NR_getpeername  205
+#define NR_setsockopt   208
+#define NR_getsockopt   209
+#define NR_shutdown     210
+#define NR_accept4      242
 #define NR_renameat2    276
 #define NR_getrandom    278
 #define NR_statx        291
@@ -288,6 +320,361 @@ int64_t sys_listdir(const char *path, char *buf, int64_t cap) {
     }
     sys_close(fd);
     return need;
+}
+
+/* ---- sockets ------------------------------------------------------------
+ *
+ * The kernel's socket constants, spelled out. Every one of them is the value
+ * sys.h already chose for the layer, so all of this is the identity -- which
+ * is the point of having chosen Linux's numbers there. They are written out
+ * anyway rather than used implicitly, because the day a constant here stops
+ * matching sys.h is the day someone needs to see both of them. */
+#define K_SOCK_CLOEXEC  02000000  /* the same on all three architectures */
+#define K_SOL_SOCKET    1
+#define K_SO_REUSEADDR  2
+#define K_SO_ERROR      4
+#define K_SO_KEEPALIVE  9
+/* SO_RCVTIMEO_OLD / SO_SNDTIMEO_OLD, which is what SO_RCVTIMEO and
+ * SO_SNDTIMEO are defined to for 64-bit userspace in the kernel's
+ * asm-generic/socket.h -- shared by all three architectures here. The value
+ * they take is a struct __kernel_old_timeval: two 64-bit longs. */
+#define K_SO_RCVTIMEO  20
+#define K_SO_SNDTIMEO  21
+#define K_IPPROTO_TCP   6
+#define K_TCP_NODELAY   1
+/* For SYS_SO_NONBLOCK, which is a descriptor flag and not a socket option
+ * (sys.h). O_NONBLOCK is 04000 on all three architectures here. */
+#define K_F_GETFL       3
+#define K_F_SETFL       4
+#define K_O_NONBLOCK    04000
+
+/* The kernel's sockaddrs, one struct per family, laid out by hand.
+ *
+ * The port is TWO BYTES, not a uint16_t, so that writing the high byte first
+ * is the network order the wire wants on any host, with no htons to call --
+ * there is no C library here to call one from. The family is a native-order
+ * uint16_t, as the kernel reads it. */
+typedef struct {
+    uint16_t      family;
+    unsigned char port[2];
+    unsigned char addr[4];
+    unsigned char zero[8];
+} KAddrIn;
+
+typedef struct {
+    uint16_t      family;
+    unsigned char port[2];
+    uint32_t      flowinfo;
+    unsigned char addr[16];
+    uint32_t      scope_id;
+} KAddrIn6;
+
+typedef struct {
+    uint16_t family;
+    char     path[108];
+} KAddrUn;
+
+/* Checked against include/uapi/linux/{in,in6,un}.h. A wrong offset here
+ * would be a connection to the wrong port rather than a compile error, so
+ * the compiler is made to check. */
+_Static_assert(sizeof(KAddrIn) == 16, "struct sockaddr_in is 16 bytes");
+_Static_assert(sizeof(KAddrIn6) == 28, "struct sockaddr_in6 is 28 bytes");
+_Static_assert(sizeof(KAddrUn) == 110, "struct sockaddr_un is 110 bytes");
+_Static_assert(__builtin_offsetof(KAddrIn6, addr) == 8, "sin6_addr offset");
+_Static_assert(__builtin_offsetof(KAddrIn6, scope_id) == 24, "sin6_scope_id offset");
+_Static_assert(__builtin_offsetof(KAddrUn, path) == 2, "sun_path offset");
+
+/* All three begin with the same uint16_t family, so reading it back through
+ * any member is a union's common initial sequence and not a type pun. */
+typedef union {
+    KAddrIn  v4;
+    KAddrIn6 v6;
+    KAddrUn  un;
+} KAddr;
+
+/* No memcpy or memset by name: this file has no C library to take them from.
+ * The compiler may still synthesise a call for a struct assignment, which is
+ * why the freestanding test defines both (runtime/sys_test.c). */
+static void zero_bytes(unsigned char *p, int64_t n) {
+    for (int64_t i = 0; i < n; i++) p[i] = 0;
+}
+
+static void copy_bytes(unsigned char *d, const unsigned char *s, int64_t n) {
+    for (int64_t i = 0; i < n; i++) d[i] = s[i];
+}
+
+/* A SysAddr as the kernel's sockaddr, with the length to pass. The only
+ * place in this file that knows one family from another. */
+static int64_t to_kaddr(const SysAddr *a, KAddr *k, int64_t *len) {
+    zero_bytes((unsigned char *)k, (int64_t)sizeof *k);
+    if (a->family != SYS_AF_UNIX && (a->port < 0 || a->port > 65535)) return -SYS_EINVAL;
+    switch (a->family) {
+    case SYS_AF_INET:
+        k->v4.family = SYS_AF_INET;
+        k->v4.port[0] = (unsigned char)((a->port >> 8) & 0xff);
+        k->v4.port[1] = (unsigned char)(a->port & 0xff);
+        copy_bytes(k->v4.addr, a->addr, 4);
+        *len = (int64_t)sizeof k->v4;
+        return 0;
+    case SYS_AF_INET6:
+        k->v6.family = SYS_AF_INET6;
+        k->v6.port[0] = (unsigned char)((a->port >> 8) & 0xff);
+        k->v6.port[1] = (unsigned char)(a->port & 0xff);
+        copy_bytes(k->v6.addr, a->addr, 16);
+        *len = (int64_t)sizeof k->v6;
+        return 0;
+    case SYS_AF_UNIX: {
+        int64_t n = 0;
+        while (n < (int64_t)sizeof a->path && a->path[n] != 0) n++;
+        /* n == sizeof a->path means there was no NUL to find, so the path
+         * cannot be terminated inside sun_path either. */
+        if (n + 1 > (int64_t)sizeof k->un.path) return -SYS_ENAMETOOLONG;
+        k->un.family = SYS_AF_UNIX;
+        copy_bytes((unsigned char *)k->un.path, (const unsigned char *)a->path, n + 1);
+        /* Exactly the bytes that matter, so the kernel takes the path as
+         * ending where its NUL is rather than at the end of the struct. */
+        *len = (int64_t)__builtin_offsetof(KAddrUn, path) + n + 1;
+        return 0;
+    }
+    default:
+        return -SYS_EAFNOSUPPORT;
+    }
+}
+
+static int64_t from_kaddr(const KAddr *k, int64_t len, SysAddr *a) {
+    zero_bytes((unsigned char *)a, (int64_t)sizeof *a);
+    switch (k->v4.family) {
+    case SYS_AF_INET:
+        a->family = SYS_AF_INET;
+        a->port = ((int64_t)k->v4.port[0] << 8) | k->v4.port[1];
+        copy_bytes(a->addr, k->v4.addr, 4);
+        return 0;
+    case SYS_AF_INET6:
+        a->family = SYS_AF_INET6;
+        a->port = ((int64_t)k->v6.port[0] << 8) | k->v6.port[1];
+        copy_bytes(a->addr, k->v6.addr, 16);
+        return 0;
+    case SYS_AF_UNIX: {
+        /* An unbound socket comes back as the family alone: len stops before
+         * sun_path and the path is left "". See sys_libc.c for why the
+         * abstract namespace has no representation here. */
+        int64_t head = (int64_t)__builtin_offsetof(KAddrUn, path);
+        int64_t n = len > head ? len - head : 0;
+        if (n > (int64_t)sizeof a->path - 1) n = (int64_t)sizeof a->path - 1;
+        a->family = SYS_AF_UNIX;
+        copy_bytes((unsigned char *)a->path, (const unsigned char *)k->un.path, n);
+        a->path[n] = 0;
+        return 0;
+    }
+    default:
+        return -SYS_EAFNOSUPPORT;
+    }
+}
+
+/* One of the layer's option ids as the kernel's (level, name), and the shape
+ * of its value. Kept in the same order and the same shape as sys_libc.c's
+ * opt_lookup, because the two must accept and refuse exactly the same set. */
+static int opt_lookup(int64_t opt, int64_t *level, int64_t *name, int *is_ms) {
+    *is_ms = 0;
+    switch (opt) {
+    case SYS_SO_REUSEADDR: *level = K_SOL_SOCKET;  *name = K_SO_REUSEADDR; return 0;
+    case SYS_SO_KEEPALIVE: *level = K_SOL_SOCKET;  *name = K_SO_KEEPALIVE; return 0;
+    case SYS_SO_ERROR:     *level = K_SOL_SOCKET;  *name = K_SO_ERROR;     return 0;
+    case SYS_SO_RCVTIMEO:  *level = K_SOL_SOCKET;  *name = K_SO_RCVTIMEO;  *is_ms = 1; return 0;
+    case SYS_SO_SNDTIMEO:  *level = K_SOL_SOCKET;  *name = K_SO_SNDTIMEO;  *is_ms = 1; return 0;
+    case SYS_TCP_NODELAY:  *level = K_IPPROTO_TCP; *name = K_TCP_NODELAY;  return 0;
+    default: return -1;
+    }
+}
+
+int64_t sys_socket(int64_t domain, int64_t type, int64_t protocol) {
+    /* The same validation, in the same order, as the libc backend: the two
+     * must refuse the same arguments with the same errno, and leaving that
+     * to the kernel here and to a switch there would not guarantee it. */
+    if (domain != SYS_AF_UNIX && domain != SYS_AF_INET && domain != SYS_AF_INET6) {
+        return -SYS_EAFNOSUPPORT;
+    }
+    if (type & ~(int64_t)(SYS_SOCK_TYPEMASK | SYS_SOCK_NONBLOCK)) return -SYS_EINVAL;
+    int64_t t = type & SYS_SOCK_TYPEMASK;
+    if (t != SYS_SOCK_STREAM && t != SYS_SOCK_DGRAM) return -SYS_EINVAL;
+    /* SYS_SOCK_NONBLOCK is Linux's own SOCK_NONBLOCK bit (sys.h), so it is
+     * passed through where it already sits. */
+    t |= (type & SYS_SOCK_NONBLOCK) | K_SOCK_CLOEXEC;
+    return sc(NR_socket, domain, t, protocol, 0, 0, 0);
+}
+
+int64_t sys_bind(int64_t fd, const SysAddr *addr) {
+    KAddr k;
+    int64_t len;
+    int64_t r = to_kaddr(addr, &k, &len);
+    if (r < 0) return r;
+    return sc(NR_bind, fd, P(&k), len, 0, 0, 0);
+}
+
+int64_t sys_listen(int64_t fd, int64_t backlog) {
+    if (backlog < 0) return -SYS_EINVAL;
+    return sc(NR_listen, fd, backlog > 65535 ? 65535 : backlog, 0, 0, 0, 0);
+}
+
+/* accept4 with SOCK_CLOEXEC: the flag is set by the kernel as the descriptor
+ * is created, so unlike the libc backend's accept-then-fcntl there is no
+ * instant in which a concurrent exec could inherit the connection. */
+int64_t sys_accept(int64_t fd, SysAddr *peer) {
+    KAddr k;
+    /* socklen_t is 32 bits and the kernel writes exactly 32 bits back
+     * through this pointer; an int64_t here would leave four bytes of the
+     * stack untouched and read as garbage. */
+    uint32_t klen = (uint32_t)sizeof k;
+    zero_bytes((unsigned char *)&k, (int64_t)sizeof k);
+    int64_t c = sc(NR_accept4, fd, P(&k), P(&klen), K_SOCK_CLOEXEC, 0, 0);
+    if (c < 0) return c;
+    if (peer != 0) {  /* not NULL: that is stddef.h's, and this file has no headers */
+        int64_t r = from_kaddr(&k, (int64_t)klen, peer);
+        if (r < 0) {
+            sys_close(c);
+            return r;
+        }
+    }
+    return c;
+}
+
+int64_t sys_connect(int64_t fd, const SysAddr *addr) {
+    KAddr k;
+    int64_t len;
+    int64_t r = to_kaddr(addr, &k, &len);
+    if (r < 0) return r;
+    return sc(NR_connect, fd, P(&k), len, 0, 0, 0);
+}
+
+int64_t sys_shutdown(int64_t fd, int64_t how) {
+    if (how != SYS_SHUT_RD && how != SYS_SHUT_WR && how != SYS_SHUT_RDWR) return -SYS_EINVAL;
+    return sc(NR_shutdown, fd, how, 0, 0, 0, 0);
+}
+
+/* struct __kernel_old_timeval: two 64-bit longs, which is what SO_RCVTIMEO
+ * and SO_SNDTIMEO take for 64-bit userspace. */
+typedef struct { int64_t sec, usec; } KTimeval;
+
+int64_t sys_setsockopt(int64_t fd, int64_t opt, int64_t value) {
+    /* Answered before the option table, exactly as in sys_libc.c: read the
+     * flags and put one bit back, never assign the whole word. */
+    if (opt == SYS_SO_NONBLOCK) {
+        int64_t fl = sc(NR_fcntl, fd, K_F_GETFL, 0, 0, 0, 0);
+        if (fl < 0) return fl;
+        fl = value != 0 ? (fl | K_O_NONBLOCK) : (fl & ~(int64_t)K_O_NONBLOCK);
+        return sc(NR_fcntl, fd, K_F_SETFL, fl, 0, 0, 0);
+    }
+    int64_t level, name;
+    int is_ms;
+    if (opt_lookup(opt, &level, &name, &is_ms) != 0) return -SYS_EINVAL;
+    if (opt == SYS_SO_ERROR) return -SYS_EINVAL;  /* read-only, as in sys_libc.c */
+    if (is_ms) {
+        if (value < 0) return -SYS_EINVAL;
+        KTimeval tv;
+        tv.sec = value / 1000;
+        tv.usec = (value % 1000) * 1000;
+        return sc(NR_setsockopt, fd, level, name, P(&tv), (int64_t)sizeof tv, 0);
+    }
+    int32_t v = value != 0;
+    return sc(NR_setsockopt, fd, level, name, P(&v), (int64_t)sizeof v, 0);
+}
+
+int64_t sys_getsockopt(int64_t fd, int64_t opt) {
+    if (opt == SYS_SO_NONBLOCK) {
+        int64_t fl = sc(NR_fcntl, fd, K_F_GETFL, 0, 0, 0, 0);
+        if (fl < 0) return fl;
+        return (fl & K_O_NONBLOCK) != 0;
+    }
+    int64_t level, name;
+    int is_ms;
+    if (opt_lookup(opt, &level, &name, &is_ms) != 0) return -SYS_EINVAL;
+    if (is_ms) {
+        KTimeval tv = {0, 0};
+        uint32_t n = (uint32_t)sizeof tv;
+        int64_t r = sc(NR_getsockopt, fd, level, name, P(&tv), P(&n), 0);
+        if (r < 0) return r;
+        return tv.sec * 1000 + tv.usec / 1000;
+    }
+    int32_t v = 0;
+    uint32_t n = (uint32_t)sizeof v;
+    int64_t r = sc(NR_getsockopt, fd, level, name, P(&v), P(&n), 0);
+    if (r < 0) return r;
+    /* SO_ERROR is already a Linux errno, and already positive, which is what
+     * sys.h promises -- the libc backend has to translate to reach the same
+     * number. Everything else is normalised to 0 or 1 so the two backends
+     * compare equal. */
+    if (opt == SYS_SO_ERROR) return v;
+    return v != 0;
+}
+
+int64_t sys_getsockname(int64_t fd, SysAddr *addr) {
+    KAddr k;
+    uint32_t klen = (uint32_t)sizeof k;
+    zero_bytes((unsigned char *)&k, (int64_t)sizeof k);
+    int64_t r = sc(NR_getsockname, fd, P(&k), P(&klen), 0, 0, 0);
+    if (r < 0) return r;
+    return from_kaddr(&k, (int64_t)klen, addr);
+}
+
+int64_t sys_getpeername(int64_t fd, SysAddr *addr) {
+    KAddr k;
+    uint32_t klen = (uint32_t)sizeof k;
+    zero_bytes((unsigned char *)&k, (int64_t)sizeof k);
+    int64_t r = sc(NR_getpeername, fd, P(&k), P(&klen), 0, 0, 0);
+    if (r < 0) return r;
+    return from_kaddr(&k, (int64_t)klen, addr);
+}
+
+/* sys.h passes the caller's array to the kernel untouched, so its layout has
+ * to BE struct pollfd's: a 32-bit fd and two 16-bit masks. There is no libc
+ * header here to compare against, so the absolute layout is asserted. */
+_Static_assert(sizeof(SysPollFd) == 8, "SysPollFd is struct pollfd's 8 bytes");
+_Static_assert(__builtin_offsetof(SysPollFd, fd) == 0, "pollfd.fd offset");
+_Static_assert(__builtin_offsetof(SysPollFd, events) == 4, "pollfd.events offset");
+_Static_assert(__builtin_offsetof(SysPollFd, revents) == 6, "pollfd.revents offset");
+
+int64_t sys_poll(SysPollFd *fds, int64_t n, int64_t timeout_ms) {
+    if (n < 0) return -SYS_EINVAL;
+    for (;;) {
+        /* Rebuilt every time round, for two reasons. The kernel writes the
+         * REMAINING time back through this pointer -- glibc's ppoll copies
+         * the caller's timespec for exactly that reason -- and a restart
+         * after a signal must offer the full timeout again, which is what
+         * the libc backend's poll() does, so that the two behave alike. */
+        struct { int64_t sec, nsec; } ts;
+        int64_t tsp = 0;
+        if (timeout_ms >= 0) {
+            ts.sec = timeout_ms / 1000;
+            ts.nsec = (timeout_ms % 1000) * 1000000;
+            tsp = P(&ts);
+        }
+        /* A NULL signal mask, which the kernel checks before it looks at the
+         * mask size, so the 8 is only what glibc passes. */
+        int64_t r = sc(NR_ppoll, P(fds), n, tsp, 0, 8, 0);
+        if (r == -SYS_EINTR) continue;  /* sys.h: EINTR is hidden here */
+        return r;
+    }
+}
+
+/* Refused, and it always will be. Resolving a name is getaddrinfo, and
+ * getaddrinfo on glibc is the NSS machinery, which dlopens libnss_* at run
+ * time to obey /etc/nsswitch.conf. A static binary with no C library cannot
+ * dlopen anything, so there is nothing to port here -- see sys.h, and
+ * docs/sys-layer.md §9 for what takes its place: a DNS client in language
+ * source over these UDP sockets.
+ *
+ * -SYS_ENOSYS and not a crash, because a program can act on it: it is the
+ * errno the layer already means by "this operation does not exist here", so
+ * from_errno turns it into an ordinary error value and a `net` module can
+ * fall back to a literal address or its own resolver. */
+int64_t sys_resolve(const char *host, int64_t port, int64_t family,
+                    SysAddr *out, int64_t cap) {
+    (void)host;
+    (void)port;
+    (void)family;
+    (void)out;
+    (void)cap;
+    return -SYS_ENOSYS;
 }
 
 /* ---- time, randomness, exit -------------------------------------------- */
