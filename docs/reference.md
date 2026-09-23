@@ -1714,6 +1714,15 @@ When a count reaches zero the type's destructor runs, if it declares one
 (§4.4), and then the object's fields are released, each of which may reach
 zero in turn. A cycle never reaches zero, so its destructors never run.
 
+Releasing a graph does **not** recurse: the first count to reach zero owns
+the release and the rest are queued, so freeing a chain of any length costs
+one C stack frame, not one per link. What that fixes is a crash — a 100 000
+node list used to overflow the stack. What it costs is the order across
+objects: an owner is released, then everything it held, then everything
+those held — breadth-first, where the recursion was depth-first. **Within**
+an object nothing changed, and that is the part the rules name: the
+destructor runs first, then the fields in declaration order.
+
 Refcount operations are non-atomic (§8.3).
 
 ### 7.2 Ownership protocol

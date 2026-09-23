@@ -1,0 +1,28 @@
+// Releasing a long chain does not recurse on the C stack.
+//
+// It used to: an object's fields are released from inside its drop
+// function, so freeing a linked list cost one C frame per link. 100 000
+// nodes segfaulted at -O0 and 200 000 at -O2, on the default 8 MiB stack
+// (docs/destructors-decision.md). The depth is the data's, and the program
+// chooses the data, so no stack size was the answer -- `rc_dec` now keeps
+// the pending work on the heap and runs one frame deep whatever the shape.
+//
+// 200 000 nodes is two objects a link, the `Node` and the `Option` that
+// holds it: both counts above crashed before, and the number is kept small
+// enough that the corpus runs it four times under two sanitizers without
+// taking noticeably longer.
+type Node {
+    int v;
+    Option<Node> next;
+}
+
+Option<Node> chain = Option<Node>.None;
+int i = 0;
+while (i < 200000) {
+    chain = Option<Node>.Some(Node(i, chain));
+    i = i + 1;
+}
+print(i);
+// `chain` is released when the program body ends -- 400 000 objects, one
+// after another, and the refcount invariant at the bottom of the run proves
+// every one of them went.

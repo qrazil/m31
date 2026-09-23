@@ -301,14 +301,14 @@ the program waits for its threads. What does not run: anything still held by
 a thread that is running when the program exits, anything in a cycle, and
 everything after `os.exit` or a trap, which leave without releasing.
 
-## Recursion depth of release
+## Recursion depth of release -- fixed 2026-09-23
 
-Releasing an object releases its fields from inside its drop function, so
-freeing a long chain recurses once per link. That is not new -- corpus
-programs have always done it -- and a destructor does not deepen it: the
-destructor returns before any field is released, so it is never on the stack
-beneath the chain. Measured on this change, a singly linked list of `Node`s
-through an `enum Link` (two objects per link), default 8 MiB stack:
+Releasing an object released its fields from inside its drop function, so
+freeing a long chain recursed once per link. A destructor did not deepen it:
+the destructor returns before any field is released, so it was never on the
+stack beneath the chain. Measured when destructors landed, on a singly
+linked list of `Node`s through an `enum Link` (two objects per link),
+default 8 MiB stack:
 
 | nodes | -O0 | -O2 |
 |---|---|---|
@@ -318,10 +318,49 @@ through an `enum Link` (two objects per link), default 8 MiB stack:
 
 identical with and without a destructor on `Node`. lib/json.src met the same
 limit building values (a 10 000-deep value needed MBs of stack at -O0, and
-it went iterative). Recorded, not fixed: the fix -- an explicit work list in
-`rc_dec` -- is a runtime change of its own, and it interacts with the order
-guarantee above (a deferred release would run a field's destructor later
-than its owner's return, still after it, which is what the rule says).
+it went iterative).
+
+**Now fixed in `rc_dec` itself** (runtime/rt.c). The first decrement to reach
+zero owns the release and runs a loop; every decrement that reaches zero
+underneath it hands its object to a thread-local queue instead of calling
+back into `rc_dec`. One C frame, whatever the shape of the graph. The queue
+is a fixed 64-entry array that grows on the heap only for a graph wide
+enough to need it, and hands that buffer back when it drains, so nothing is
+held between releases and LeakSanitizer sees nothing at exit. Thread-local
+because the counts are: two threads never reach one object.
+
+Measured after, the same program:
+
+| nodes | -O0 | -O2 |
+|---|---|---|
+| 1 000 000 | ok | ok |
+| 10 000 000 | ok | ok |
+
+with `__rc_live=0` in every case. `corpus/core/979` keeps 200 000 of them in
+the gate -- both numbers that used to crash -- which is small enough to run
+four times under two sanitizers without being noticed.
+
+**What it cost.** The order across objects. The queue is FIFO, so an owner
+is released, then everything it held, then everything those held:
+breadth-first, where the recursion was depth-first. Within one object
+nothing changed, and that is the part the order guarantee above names -- the
+destructor runs before its own fields, and the fields go in declaration
+order. `corpus/core/770` did not move, because everything in it is also held
+by a local and dies one local at a time; `corpus/core/980` is the new case
+that shows the difference and pins the answer. Getting depth-first back
+would mean every drop function, generated and runtime alike, handing its
+children over in reverse so a LIFO stack unwound them in order -- a change
+to `src/emit_c.rs` and to every collection in the runtime, to restore an
+order nothing promised.
+
+**What it did not cost.** Two separate releases still run in their own
+order, because the first drains the queue before it returns: the top-level
+locals still die in reverse order of declaration. A destructor that itself
+drops values sees them queued rather than freed inside it, which is still
+before the outer release returns. Out of memory while growing the queue
+falls back to releasing that object in place, which recurses -- the old
+behaviour, which is correct, and better than trapping halfway through
+freeing a graph.
 
 ## Found on the way
 
