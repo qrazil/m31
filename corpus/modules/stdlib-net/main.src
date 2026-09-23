@@ -1,0 +1,176 @@
+import net;
+import io;
+
+// A TCP server and its client in one program: `spawn` runs the client, a
+// channel hands it the port the kernel chose, and a second channel carries
+// what it saw back, so that everything is printed from one thread and the
+// output cannot depend on which thread got there first.
+//
+// What this pins down, beyond "it connects":
+//
+//   - **A `net.Conn` is an `io.Stream`.** The server reads its request with
+//     `io.read_line_of` and drains the rest with `io.copy` into an
+//     `io.Buffer` -- two functions written against the interface, in another
+//     module, that have never heard of a socket. `stream_of` below assigns a
+//     `Conn` to an interface-typed slot, which is the compile-time half of
+//     the same claim.
+//   - **Octets, not text.** The body carries a NUL and the bytes 0xff 0xfe,
+//     which are not valid UTF-8 in any position, and comes back byte for
+//     byte.
+//   - **Half-close.** The client says "that is the whole request" with
+//     `shutdown_write` and then reads the answer on the same connection --
+//     which is the only reason the server's copy ever finishes.
+//   - **Port 0.** Nothing here names a port: the listener asks for any free
+//     one and `local()` says which, so two copies of the corpus running at
+//     once cannot collide.
+//
+// Every connection is taken apart by a `match` at the place it is made,
+// rather than by an unwrapping helper, because a function cannot yet be
+// declared with a qualified return type (`net.Conn f()` parses as the start
+// of a variable) -- a compiler gap, not a rule.
+
+// A test that cannot go on says so loudly: these unwrap what must have
+// worked, and trap with the reason when it did not.
+bytes bytes_or_die(Result<bytes, io.Error> r) {
+    match (r) {
+        case Ok(bytes b): {
+            return b;
+        }
+        case Err(io.Error e): {
+            trap("read: " + net.error_of(e).to_str());
+        }
+    }
+}
+
+int int_or_die(Result<int, io.Error> r) {
+    match (r) {
+        case Ok(int n): {
+            return n;
+        }
+        case Err(io.Error e): {
+            trap("write: " + net.error_of(e).to_str());
+        }
+    }
+}
+
+bool ok_or_die(Result<bool, net.Error> r) {
+    match (r) {
+        case Ok(bool b): {
+            return b;
+        }
+        case Err(net.Error e): {
+            trap("socket: " + e.to_str());
+        }
+    }
+}
+
+// The compile-time half of "a Conn is a Stream": a `net.Conn` handed to a
+// parameter of another module's interface type. If `Conn`'s five methods
+// ever stopped matching `io.Stream`'s, this line would not compile.
+int stream_of(io.Stream s) {
+    return 1;
+}
+
+// The body of the request: octets that are not text in any encoding.
+bytes body() {
+    bytes b = [0, 255, 254, 65, 0];
+    return b;
+}
+
+void talk(net.Conn c, Chan<str> log) {
+    // Small writes go out at once: this is a request waiting for an answer,
+    // so there is nothing to coalesce it with.
+    bool fast = ok_or_die(c.set_nodelay(true));
+    bytes req = "hello\n".to_bytes();
+    req.extend(body());
+    int wrote = int_or_die(c.write(req));
+    // "That is the whole request." Without it the server's copy below would
+    // wait for a byte that is never coming.
+    bool half = ok_or_die(c.shutdown_write());
+    bytes back = bytes_or_die(c.read_all());
+    send(log, "client wrote " + wrote.to_str());
+    send(log, "client read back " + back.hex());
+    // The peer's port is the listener's; its address is the one thing about
+    // it that is the same on every run.
+    send(log, "client peer ip " + c.peer().ip().to_str());
+    bool same = back == body();
+    send(log, "client got its body back: " + same.to_str());
+    Result<bool, io.Error> closed = c.close();
+}
+
+void client(Chan<int> ports, Chan<str> log) {
+    int port = recv(ports);
+    match (net.connect("127.0.0.1", port)) {
+        case Ok(net.Conn c): {
+            talk(c, log);
+        }
+        case Err(net.Error e): {
+            trap("connect: " + e.to_str());
+        }
+    }
+}
+
+void serve(net.Conn s) {
+    print("server peer ip " + s.peer().ip().to_str());
+    print("a Conn fits an io.Stream slot: " + stream_of(s).to_str());
+    // `io.read_line_of` is written against `io.Stream` and reads through the
+    // connection's own buffer, so the octets after the newline are still
+    // there for the copy below -- nothing is read twice and nothing is lost.
+    match (io.read_line_of(s, 100)) {
+        case Ok(Option<str> line): {
+            match (line) {
+                case Some(str t): {
+                    print("server line " + t);
+                }
+                case None: {
+                    print("server line: none");
+                }
+            }
+        }
+        case Err(io.Error e): {
+            trap("read_line_of: " + e.to_str());
+        }
+    }
+    // And `io.copy` drains the rest of the connection into memory: two
+    // module functions that know `io.Stream` and nothing about sockets.
+    io.Buffer held = io.buffer();
+    int moved = int_or_die(io.copy(s, held));
+    print("server copied " + moved.to_str() + " bytes: " + held.peek().hex());
+    // Echo the body back, then close: that end of file is what lets the
+    // client's read_all finish.
+    int echoed = int_or_die(s.write(held.peek()));
+    Result<bool, io.Error> closed = s.close();
+}
+
+void run(net.Listener ln) {
+    print("listening on " + ln.local().ip().to_str());
+    bool chosen = ln.local().port() > 0;
+    print("kernel chose a port: " + chosen.to_str());
+    Chan<int> ports = Chan<int>(1);
+    Chan<str> log = Chan<str>(8);
+    spawn client(ports, log);
+    send(ports, ln.local().port());
+    match (ln.accept()) {
+        case Ok(net.Conn s): {
+            serve(s);
+        }
+        case Err(net.Error e): {
+            trap("accept: " + e.to_str());
+        }
+    }
+    int got = 0;
+    while (got < 4) {
+        print(recv(log));
+        got = got + 1;
+    }
+    Result<bool, net.Error> closed = ln.close();
+}
+
+match (net.listen("127.0.0.1", 0)) {
+    case Ok(net.Listener ln): {
+        run(ln);
+    }
+    case Err(net.Error e): {
+        trap("listen: " + e.to_str());
+    }
+}

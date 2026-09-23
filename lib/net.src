@@ -1,0 +1,1237 @@
+// TCP: connections, listeners and the addresses they are made of.
+//
+// API
+// ---
+//   net.connect(host, port)          -> Result<Conn, Error>
+//   net.listen(host, port, backlog:) -> Result<Listener, Error>
+//
+//   c.read(n)                  -> Result<bytes, io.Error>  1..n bytes; empty at the end
+//   c.read_all()               -> Result<bytes, io.Error>  everything until the peer stops
+//   c.read_until(delim, limit) -> Result<bytes, io.Error>  through `delim`, at most `limit`
+//   c.write(b)                 -> Result<int, io.Error>    all of `b`
+//   c.close()                  -> Result<bool, io.Error>
+//   c.peer()                   -> Addr                     who is at the other end
+//   c.shutdown_write()         -> Result<bool, Error>      half-close: send an end of file
+//   c.set_read_timeout(ms), c.set_write_timeout(ms)        0 clears; expiry is TimedOut
+//   c.set_nodelay(on)          -> Result<bool, Error>      send small writes at once
+//   c.wait(timeout_ms)         -> Result<bool, Error>      false if nothing arrived in time
+//
+//   ln.accept()                -> Result<Conn, Error>
+//   ln.local()                 -> Addr                     the port a bind to 0 got
+//   ln.wait(timeout_ms)        -> Result<bool, Error>
+//   ln.close()                 -> Result<bool, Error>
+//
+//   net.parse_ip(text)         -> Option<Ip>    a literal address, v4 or v6
+//   ip.to_str(), ip.is_v6(), ip.octets()
+//   net.Addr: a.ip(), a.port(), a.to_str()
+//
+//   net.Error                  enum             why a connection could not be made
+//   net.from_errno(e), net.error_of(io_error)
+//
+// **A `Conn` is an `io.Stream`.** Its first five methods are exactly the five
+// `io.Stream` declares, with the same shapes, so `io.copy(conn, file)`,
+// `io.read_line_of(conn, 8192)` and anything else written against a stream
+// take a socket with no new code -- and an `io.Buffer` stands in for one in a
+// test. That is also why those five answer with `io.Error` and not with this
+// module's `Error`: see "Two error types" below.
+//
+// Everything here is language source down to one system call per primitive
+// (runtime/sys.h, docs/sys-layer.md §9): the address parser and printer, the
+// read buffer, the short-write loop, the retry on EINTR, SO_REUSEADDR's
+// default, and what every errno means. A primitive answers a value or -errno
+// and decides nothing.
+//
+// What is deliberately not here: UDP, Unix sockets, TLS, a connect timeout,
+// name resolution beyond "the first address the resolver gave", and any
+// non-blocking surface. Each is noted where it would have gone.
+
+import io;
+
+// A socket is a descriptor, so reading, writing and closing one are `io`'s
+// primitives and not new ones (docs/sys-layer.md §9). They are re-declared
+// here rather than reached through `io` because a `prim` is a declaration
+// like any other and `__` names are each module's own; both declarations
+// lower to the same `rt_read`, `rt_write` and `rt_close`.
+prim int __read(int fd, bytes buf, int off, int n);
+prim int __write(int fd, bytes buf, int off, int n);
+prim int __close(int fd);
+// `kind` and not `type`, which docs/sys-layer.md §9 writes and this language
+// reserves (§1.4). The C side is one symbol and one order of arguments, so
+// only the spelling of the name moves.
+prim int __socket(int domain, int kind, int protocol);
+prim int __listen(int fd, int backlog);
+prim int __shutdown(int fd, int how);
+prim int __bind(int fd, int family, int port, bytes addr);
+prim int __connect(int fd, int family, int port, bytes addr);
+prim int __accept(int fd, List<int> out, bytes addr);
+prim int __sockname(int fd, int peer, List<int> out, bytes addr);
+prim int __setsockopt(int fd, int opt, int value);
+prim int __getsockopt(int fd, int opt);
+prim int __poll(List<int> fds, List<int> events, List<int> revents, int timeout_ms);
+prim int __resolve(str host, int port, int family, List<int> out, bytes addrs);
+prim int __ignore_sigpipe();
+
+// The sys layer's own constants (runtime/sys.h), written here as numbers for
+// exactly the reason `io` writes the open flags as numbers: they are the
+// LAYER's constants and not the host's, so 10 means IPv6 on every target and
+// a number here cannot drift from a header somewhere else.
+const int AF_INET = 2;
+const int AF_INET6 = 10;
+const int SOCK_STREAM = 1;
+const int SO_REUSEADDR = 1;
+const int SO_ERROR = 3;
+const int SO_RCVTIMEO = 4;
+const int SO_SNDTIMEO = 5;
+const int TCP_NODELAY = 6;
+const int POLL_IN = 0x001;
+const int POLL_OUT = 0x004;
+const int SHUT_WR = 1;
+// How much of a connection is read from the kernel at once, and the size of
+// a `Conn`'s buffer: the same 64 KiB `io.File` reads a file in.
+const int CHUNK = 65536;
+// For the hex groups of an IPv6 address. A literal is immortal (§7.3), so
+// indexing into one allocates nothing.
+const str HEX = "0123456789abcdef";
+
+/// Why a connection could not be made, or could not go on.
+///
+/// The named variants are the failures a caller plausibly branches on --
+/// a server that is not running, a network that cannot be reached, a port
+/// already taken -- and `Other(int)` is what keeps the enum from ever having
+/// to grow: `match` is exhaustive and has no default, so a new variant would
+/// break every program that handles a network error. The number in `Other`
+/// is a Linux errno on every host, as `io.Error`'s is.
+///
+/// ### Two error types, and where the line is
+///
+/// **The five methods `io.Stream` declares answer with `io.Error`.
+/// Everything else `net` offers answers with this one.** That is not a
+/// hedge; it is forced, and it is the right force. An interface is its
+/// signatures (reference §3.4), so a `read` that answered with `net.Error`
+/// would not satisfy `io.Stream` -- `io.copy` and `io.read_line_of` could
+/// not take a socket at all, and the whole point of a connection being a
+/// stream would be gone. Reusing `io.Error` for the *rest* of the module was
+/// the other way out and is worse: `connect` would report a refused
+/// connection as `Other(111)`, and "connection refused" is the single most
+/// branched-on outcome in this module.
+///
+/// The seam between the two is exact rather than lossy, which is what makes
+/// it liveable. Every errno a socket produces -- ECONNRESET, EPIPE,
+/// ETIMEDOUT, EAGAIN -- is one `io.from_errno` does not name, so it arrives
+/// through a stream method as `io.Error.Other(n)` carrying the number, and
+/// `net.error_of(e)` turns it back into the variant here. Nothing is lost on
+/// the way.
+///
+/// The third option, adding these six variants to `io.Error`, is the one
+/// that would give a program a single vocabulary, and it is not this
+/// module's to take: it breaks every exhaustive `match` on `io.Error` in
+/// every program, which docs/stdlib-seam.md §4 says is affordable once and
+/// spent that once already.
+pub enum Error {
+    Refused;
+    TimedOut;
+    Unreachable;
+    Reset;
+    InUse;
+    NameNotFound;
+    Other(int);
+}
+
+/// A sentence saying what went wrong, so `print(e)` prints it.
+pub str Error.to_str() {
+    match (this) {
+        case Refused: {
+            return "connection refused";
+        }
+        case TimedOut: {
+            return "timed out";
+        }
+        case Unreachable: {
+            return "network unreachable";
+        }
+        case Reset: {
+            return "the connection was broken by the peer";
+        }
+        case InUse: {
+            return "the address is already in use";
+        }
+        case NameNotFound: {
+            return "no such host";
+        }
+        case Other(int code): {
+            // ENOSYS from this module means one thing and it is worth
+            // saying: the raw system call backend cannot resolve names --
+            // not "has not got round to it", cannot, because resolving is
+            // getaddrinfo and getaddrinfo dlopens the NSS modules
+            // (docs/sys-layer.md §9). A program that must run on both
+            // backends connects to a literal address, and this message is
+            // how it finds that out rather than by reading the runtime.
+            if (code == 38) {
+                return "this build cannot resolve host names; use a literal IP address";
+            }
+            return "system error " + code.to_str();
+        }
+    }
+}
+
+/// The `Error` for a Linux errno -- positive, as errno is written; a
+/// primitive's `r < 0` is `from_errno(-r)`.
+///
+/// Public because a program that holds a raw errno from somewhere else
+/// should reach the same vocabulary, and because `error_of` is written on
+/// top of it.
+pub Error from_errno(int e) {
+    if (e == 111) {
+        return Error.Refused;
+    }
+    // ETIMEDOUT is the kernel giving up on a connection; EAGAIN on a socket
+    // this module handed out is always a SO_RCVTIMEO or SO_SNDTIMEO expiry,
+    // because nothing here leaves a descriptor non-blocking. They are one
+    // outcome to a caller -- "it did not happen in time" -- so they are one
+    // variant.
+    if (e == 110 || e == 11) {
+        return Error.TimedOut;
+    }
+    if (e == 101 || e == 113) {
+        return Error.Unreachable;
+    }
+    // ECONNRESET and EPIPE are the same event seen from the two sides: the
+    // peer is gone. Which one the kernel picks depends on whether this end
+    // was reading or writing when it found out, which is not something to
+    // make a caller branch on.
+    if (e == 104 || e == 32) {
+        return Error.Reset;
+    }
+    if (e == 98) {
+        return Error.InUse;
+    }
+    // ENOENT is what the layer answers when a name has no address
+    // (runtime/sys_libc.c maps EAI_NONAME to it).
+    if (e == 2) {
+        return Error.NameNotFound;
+    }
+    return Error.Other(e);
+}
+
+/// The `net.Error` for an `io.Error` that came off a `Conn`.
+///
+/// Exact for everything a socket can produce: those errnos are all ones
+/// `io.from_errno` leaves in `Other`, so the number is still there to read.
+/// The named `io.Error` variants below it are file failures a socket does
+/// not have, and each is mapped to the errno it stands for so that nothing
+/// silently becomes a different error.
+pub Error error_of(io.Error e) {
+    match (e) {
+        case Other(int code): {
+            return from_errno(code);
+        }
+        case NotFound: {
+            return Error.NameNotFound;
+        }
+        case PermissionDenied: {
+            return Error.Other(13);
+        }
+        case IsDirectory: {
+            return Error.Other(21);
+        }
+        case NotADirectory: {
+            return Error.Other(20);
+        }
+        case AlreadyExists: {
+            return Error.Other(17);
+        }
+        case NotEmpty: {
+            return Error.Other(39);
+        }
+        case InvalidUtf8: {
+            // EILSEQ, which is what "these octets are not the text they were
+            // supposed to be" is called everywhere else.
+            return Error.Other(84);
+        }
+    }
+}
+
+// --- addresses -------------------------------------------------------------
+/// An IP address: four octets or sixteen, in wire order.
+///
+/// **The size is the family.** There is no separate tag, because a tag and a
+/// length are two facts that can disagree and this way there is only one:
+/// `is_v6()` asks the `bytes` how long it is. Wire order means 127.0.0.1 is
+/// the octets 127, 0, 0, 1 -- already what the kernel wants, and already
+/// what the text form is written in, so neither the parser, the printer nor
+/// the sys layer swaps anything (runtime/sys.h).
+///
+/// The field is private and no method changes it, so an `Ip` is effectively
+/// immutable; `octets()` hands back a copy so that holding the octets cannot
+/// reach back into the address they came from.
+///
+/// Made by `parse_ip`, or handed over by a `Conn` or a `Listener`.
+pub type Ip {
+    bytes raw;
+}
+
+/// Whether this is an IPv6 address.
+pub bool Ip.is_v6() {
+    return raw.size() == 16;
+}
+
+/// The address bytes, in wire order: four of them, or sixteen.
+pub bytes Ip.octets() {
+    return clone(raw);
+}
+
+/// Two addresses are the same when their octets are. An IPv4 address and the
+/// IPv4-mapped IPv6 address that carries it are **not** equal here, because
+/// they are not the same address: one names a host over IPv4 and the other
+/// names it over IPv6, and a program that treats them as one will bind the
+/// wrong socket. Python's `ipaddress` draws it the same way.
+pub bool Ip.eq(Ip other) {
+    return raw == other.raw;
+}
+
+/// The text form, which `parse_ip` reads back exactly.
+///
+/// IPv4 is the dotted quad. IPv6 is **RFC 5952**: lowercase, no leading
+/// zeros in a group, and the longest run of two or more zero groups replaced
+/// by `::` -- the leftmost when two runs tie. One zero group is never
+/// compressed, because `::` standing for a single group is longer to read
+/// and no shorter to write. That is the same canonical form Python's
+/// `ipaddress` prints, which is how the corpus checks this.
+///
+/// There is no IPv4-mapped spelling: `::ffff:1.2.3.4` prints as
+/// `::ffff:102:304`, again as Python does. A second text form for one
+/// address is a second thing a round trip has to be true of.
+pub str Ip.to_str() {
+    if (raw.size() == 4) {
+        return raw[0].to_str() + "." + raw[1].to_str() + "." + raw[2].to_str() + "." + raw[3].to_str();
+    }
+    List<int> g = [];
+    int i = 0;
+    while (i < 16) {
+        g.push(raw[i] * 256 + raw[i + 1]);
+        i = i + 2;
+    }
+    // The longest run of zero groups, leftmost on a tie -- `>` and not `>=`
+    // is what makes it leftmost.
+    int best = -1;
+    int best_len = 0;
+    int k = 0;
+    while (k < 8) {
+        if (g[k] != 0) {
+            k = k + 1;
+        } else {
+            int j = k;
+            while (j < 8 && g[j] == 0) {
+                j = j + 1;
+            }
+            if (j - k > best_len) {
+                best_len = j - k;
+                best = k;
+            }
+            k = j;
+        }
+    }
+    if (best_len < 2) {
+        best = -1;
+        best_len = 0;
+    }
+    str out = "";
+    k = 0;
+    while (k < 8) {
+        if (k == best) {
+            // The two colons of `::` are this run's own separators, so the
+            // group after it must not add a third -- which is what the
+            // `k != best + best_len` below says.
+            out = out + "::";
+            k = k + best_len;
+        } else {
+            if (k > 0 && k != best + best_len) {
+                out = out + ":";
+            }
+            out = out + hex16(g[k]);
+            k = k + 1;
+        }
+    }
+    return out;
+}
+
+// One group as lowercase hex with no leading zeros. Written out rather than
+// built from `bytes.hex()`, which pads each octet to two digits and would
+// print `2001:0db8` where RFC 5952 asks for `2001:db8`.
+str hex16(int v) {
+    if (v == 0) {
+        return "0";
+    }
+    str out = "";
+    int shift = 12;
+    while (shift >= 0) {
+        int d = v >> shift & 15;
+        if (d != 0 || out.size() > 0) {
+            out = out + HEX.substr(d, d + 1);
+        }
+        shift = shift - 4;
+    }
+    return out;
+}
+
+/// An IP address and a port: one end of a connection.
+///
+/// Made by this module, never by a caller: `Listener.local()` and
+/// `Conn.peer()` are where one comes from.
+pub type Addr {
+    Ip host;
+    int num;
+}
+
+/// The address half.
+pub Ip Addr.ip() {
+    return host;
+}
+
+/// The port, 0..65535.
+pub int Addr.port() {
+    return num;
+}
+
+/// Two ends are the same when both halves are.
+pub bool Addr.eq(Addr other) {
+    return host == other.host && num == other.num;
+}
+
+/// `1.2.3.4:80`, or `[::1]:80` for IPv6.
+///
+/// The brackets are not decoration: an IPv6 address is full of colons, so
+/// without them `::1:80` could be an address with a port or an address
+/// without one. Go, curl and the URL syntax itself all bracket it.
+pub str Addr.to_str() {
+    if (host.is_v6()) {
+        return "[" + host.to_str() + "]:" + num.to_str();
+    }
+    return host.to_str() + ":" + num.to_str();
+}
+
+/// A literal IPv4 or IPv6 address, or `None` if the text is not one.
+///
+/// **It is a literal address and never a host name**: nothing here touches
+/// the network or the resolver, so it answers the same on both sys-layer
+/// backends and in any sandbox. `connect` is what falls back to a name.
+///
+/// What is accepted is what Python's `ipaddress` accepts, which the corpus
+/// checks against it over a table of ninety-four forms:
+///
+///   - **IPv4** is exactly four decimal fields of one to three digits, each
+///     0..255. A **leading zero is refused** -- `010.1.1.1` is not an
+///     address -- because C's `inet_aton` reads a leading zero as octal and
+///     most other readers do not, and an address that means two things has
+///     been a security advisory more than once. Go and Python both refuse
+///     it; the BSD libc does not.
+///   - **IPv6** is eight groups of one to four hex digits, upper or lower
+///     case, with at most one `::` standing for one or more groups of zeros,
+///     and optionally a dotted quad in place of the last two groups
+///     (`::ffff:1.2.3.4`).
+///   - A **zone id** (`fe80::1%eth0`) is refused, and this is the one place
+///     this parser is stricter than Python. A zone is an interface index or
+///     name, which means it is only meaningful on the host that wrote it and
+///     the sys layer has nowhere to put it (`SysAddr` has no scope field).
+///     Accepting text this module would then have to throw away would be
+///     worse than refusing it.
+///
+/// Surrounding space is not trimmed, `[::1]` is not an address (that is a
+/// URL authority), and the empty string is not one either.
+pub Option<Ip> parse_ip(str text) {
+    if (text.contains(":")) {
+        return parse_v6(text);
+    }
+    return parse_v4(text);
+}
+
+// The dotted quad. Also used for the tail of an IPv6 address, where it is
+// handed the whole of what is left and must consume all of it.
+Option<Ip> parse_v4(str text) {
+    int n = text.size();
+    int i = 0;
+    int fields = 0;
+    bytes out = [];
+    while (fields < 4) {
+        int start = i;
+        int v = 0;
+        // At most three digits, so `v` cannot pass 999 and the 0..255 test
+        // below cannot be reached by overflow.
+        while (i < n && i - start < 3 && is_digit(text.byte_at(i))) {
+            v = v * 10 + text.byte_at(i) - 48;
+            i = i + 1;
+        }
+        int len = i - start;
+        if (len == 0 || v > 255) {
+            return Option<Ip>.None;
+        }
+        // `010` is ten here and eight to anything that reads it as octal.
+        if (len > 1 && text.byte_at(start) == 48) {
+            return Option<Ip>.None;
+        }
+        out.push(v);
+        fields = fields + 1;
+        if (fields < 4) {
+            if (i >= n || text.byte_at(i) != 46) {
+                return Option<Ip>.None;
+            }
+            i = i + 1;
+        }
+    }
+    // Four fields and nothing after them: a trailing dot, a fifth field or
+    // a space is not an address.
+    if (i != n) {
+        return Option<Ip>.None;
+    }
+    return Option<Ip>.Some(Ip(out));
+}
+
+// The hex-group form. Groups are collected as they are read and the `::` is
+// remembered as the index it stood at, so the zeros are filled in once at
+// the end where the total is known -- there is no other point at which how
+// many groups it stands for is knowable.
+Option<Ip> parse_v6(str text) {
+    int n = text.size();
+    List<int> g = [];
+    int ell = -1;
+    int i = 0;
+    // A leading colon is only ever the first colon of a leading `::`. Dealt
+    // with here so that the loop below can assume every group has a group
+    // before it or is the first.
+    if (text.byte_at(0) == 58) {
+        if (n < 2 || text.byte_at(1) != 58) {
+            return Option<Ip>.None;
+        }
+        i = 2;
+        ell = 0;
+    }
+    while (i < n) {
+        // Nine groups is not an address however the ninth is spelled, and
+        // stopping here keeps the list from growing on hostile input.
+        if (g.size() >= 8) {
+            return Option<Ip>.None;
+        }
+        int start = i;
+        int v = 0;
+        while (i < n && i - start < 4 && hex_val(text.byte_at(i)) >= 0) {
+            v = v * 16 + hex_val(text.byte_at(i));
+            i = i + 1;
+        }
+        if (i == start) {
+            return Option<Ip>.None;
+        }
+        if (i < n && text.byte_at(i) == 46) {
+            // A dot: the group just read was the first field of a dotted
+            // quad, so the whole tail from where it started is one, and it
+            // fills the last two groups. `g` may reach nine this way, which
+            // the count at the end refuses.
+            match (parse_v4(text.substr(start, n))) {
+                case Some(Ip four): {
+                    bytes o = four.raw;
+                    g.push(o[0] * 256 + o[1]);
+                    g.push(o[2] * 256 + o[3]);
+                    i = n;
+                }
+                case None: {
+                    return Option<Ip>.None;
+                }
+            }
+        } else {
+            g.push(v);
+            if (i < n) {
+                if (text.byte_at(i) != 58) {
+                    return Option<Ip>.None;
+                }
+                i = i + 1;
+                // A colon at the very end is a group that never came.
+                if (i >= n) {
+                    return Option<Ip>.None;
+                }
+                if (text.byte_at(i) == 58) {
+                    if (ell >= 0) {
+                        return Option<Ip>.None;
+                    }
+                    ell = g.size();
+                    i = i + 1;
+                }
+            }
+        }
+    }
+    int have = g.size();
+    if (ell < 0) {
+        if (have != 8) {
+            return Option<Ip>.None;
+        }
+    } else if (have >= 8) {
+        // `::` stands for AT LEAST one group of zeros, so eight groups plus
+        // an ellipsis is not an address -- `::1:2:3:4:5:6:7:8` is refused,
+        // while `1:2:3:4:5:6:7::` is the same address as `...:7:0`.
+        return Option<Ip>.None;
+    }
+    int fill = 8 - have;
+    bytes out = [];
+    int k = 0;
+    while (k < 8) {
+        int v = 0;
+        if (ell < 0 || k < ell) {
+            v = g[k];
+        } else if (k >= ell + fill) {
+            v = g[k - fill];
+        }
+        out.push(v >> 8);
+        out.push(v & 255);
+        k = k + 1;
+    }
+    return Option<Ip>.Some(Ip(out));
+}
+
+bool is_digit(int c) {
+    return c >= 48 && c <= 57;
+}
+
+// A hex digit's value, or -1 for anything else -- which is how the parsers
+// above tell "the group ended" from "the group had a digit".
+int hex_val(int c) {
+    if (c >= 48 && c <= 57) {
+        return c - 48;
+    }
+    if (c >= 97 && c <= 102) {
+        return c - 87;
+    }
+    if (c >= 65 && c <= 70) {
+        return c - 55;
+    }
+    return -1;
+}
+
+// --- connections -----------------------------------------------------------
+/// One end of a TCP connection.
+///
+/// **It is an `io.Stream`**: `read`, `read_all`, `read_until`, `write` and
+/// `close`, with a `File`'s signatures and a `File`'s meanings, so code
+/// written against the protocol cannot tell a socket from a file. Reads are
+/// buffered 64 KiB at a time, as a `File`'s are; writes are not, so there is
+/// no `flush` to forget.
+///
+/// **A `Conn` closes itself when its last reference goes** -- at the end of
+/// a scope, on a `return` or a `?` that leaves it -- so no path leaks a
+/// descriptor. That close is silent: a writer that needs to know whether the
+/// close failed calls `close()` and looks (docs/destructors-decision.md).
+///
+/// Every field is private: a `Conn` comes from `connect` or `accept`, and
+/// only its own methods move its buffer.
+pub type Conn {
+    int fd;
+    Addr remote;
+    bool live = true;
+    // Allocated on the first read, so a connection only ever written to
+    // costs nothing. buf[at .. end] has arrived and not been handed out.
+    bytes buf = [];
+    int at = 0;
+    int end = 0;
+}
+
+/// Between 1 and `n` bytes, or an empty `bytes` once the peer has stopped
+/// sending.
+///
+/// **It may return fewer than `n` without the connection being over** --
+/// more than on a file, in fact: `n` is a maximum and the answer is what has
+/// arrived. Code that needs everything calls `read_all`, and code that needs
+/// a specific amount loops. `n` below 1 traps, so an empty result has one
+/// meaning.
+pub Result<bytes, io.Error> Conn.read(int n) {
+    if (n < 1) {
+        trap("read(" + n.to_str() + "): read at least one byte; read_all() reads everything");
+    }
+    if (at == end) {
+        if (fill()? == 0) {
+            bytes none = [];
+            return Result<bytes, io.Error>.Ok(none);
+        }
+    }
+    int take = end - at;
+    if (take > n) {
+        take = n;
+    }
+    bytes out = buf.substr(at, at + take);
+    at = at + take;
+    return Result<bytes, io.Error>.Ok(out);
+}
+
+/// Everything until the peer shuts down its writing end.
+///
+/// There is no size hint to ask for, unlike `io.File.read_all`: a connection
+/// has no length, and the only way to learn it is over. A peer that never
+/// closes therefore never returns from here, which is why a server reads
+/// with `read_until` and a limit instead.
+pub Result<bytes, io.Error> Conn.read_all() {
+    check_live();
+    bytes out = [];
+    if (at < end) {
+        out = buf.substr(at, end);
+        at = end;
+    }
+    while (fill()? > 0) {
+        if (end == buf.size()) {
+            out.extend(buf);
+        } else {
+            out.extend(buf.substr(0, end));
+        }
+        at = end;
+    }
+    return Result<bytes, io.Error>.Ok(out);
+}
+
+/// Bytes up to and including the first `delim`, reading no more than
+/// `limit` of them.
+///
+/// The three outcomes are `io.File`'s and are told apart the same way: it
+/// ends with `delim`; it is `limit` long and does not (no delimiter within
+/// the limit -- call again for the rest); or it is shorter and does not (the
+/// peer stopped first; empty means it had already). The limit is what makes
+/// this safe on a connection nobody controls -- without one, a client that
+/// never sends a newline is a request for all of memory, which is a way to
+/// take a server down from the outside.
+///
+/// An empty `delim` or a `limit` below 1 traps.
+pub Result<bytes, io.Error> Conn.read_until(bytes delim, int limit) {
+    if (delim.size() == 0) {
+        trap("read_until: the delimiter is empty");
+    }
+    if (limit < 1) {
+        trap("read_until(" + limit.to_str() + "): the limit must be at least 1");
+    }
+    int last = delim[delim.size() - 1];
+    bytes out = [];
+    while (out.size() < limit) {
+        if (at == end) {
+            if (fill()? == 0) {
+                break;
+            }
+        }
+        int b = buf[at];
+        at = at + 1;
+        out.push(b);
+        if (b == last && out.ends_with(delim)) {
+            break;
+        }
+    }
+    return Result<bytes, io.Error>.Ok(out);
+}
+
+/// Write all of `b`, returning its size.
+///
+/// "All" is the promise, and on a socket it is the promise that earns its
+/// keep: a kernel takes a large write in pieces whenever the connection's
+/// send buffer is fuller than what is offered, so a short write is the
+/// normal case rather than the strange one. The loop that hands it the rest
+/// is here so that no caller writes one.
+///
+/// A write to a peer that has gone away is `Err` -- EPIPE, which
+/// `net.error_of` calls `Reset` -- and not a dead process, because the
+/// module ignores SIGPIPE when it makes a socket (docs/sys-layer.md §2).
+pub Result<int, io.Error> Conn.write(bytes b) {
+    if (!live) {
+        trap("write on a closed connection");
+    }
+    int off = 0;
+    while (off < b.size()) {
+        int r = __write(fd, b, off, b.size() - off);
+        // A signal that arrives before anything was written is not a
+        // failure of the connection, so it is not reported.
+        if (r == -4) {
+            continue;
+        }
+        if (r < 0) {
+            return Result<int, io.Error>.Err(io.from_errno(-r));
+        }
+        // A write of nothing makes no progress and never will; calling it
+        // an I/O error beats looping forever.
+        if (r == 0) {
+            return Result<int, io.Error>.Err(io.from_errno(5));
+        }
+        off = off + r;
+    }
+    return Result<int, io.Error>.Ok(off);
+}
+
+/// Close the connection. Closing twice is not an error; any other use of a
+/// closed `Conn` traps.
+///
+/// It returns a `Result` because a close is where a connection reports what
+/// it could not deliver, and because `io.Stream` says so. It is never
+/// retried on EINTR: on Linux the descriptor is already gone by then, and a
+/// retry could close one another thread has just been given.
+pub Result<bool, io.Error> Conn.close() {
+    return release();
+}
+
+// What `close()` and the destructor share, so the same rules hold for both.
+// A separate name because the destructor cannot call `close()` bare -- that
+// also names the channel builtin, which the language refuses as ambiguous.
+Result<bool, io.Error> Conn.release() {
+    if (!live) {
+        return Result<bool, io.Error>.Ok(true);
+    }
+    live = false;
+    bytes none = [];
+    buf = none;
+    at = 0;
+    end = 0;
+    int r = __close(fd);
+    if (r < 0 && r != -4) {
+        return Result<bool, io.Error>.Err(io.from_errno(-r));
+    }
+    return Result<bool, io.Error>.Ok(true);
+}
+
+// The destructor: close whatever `close()` was not called on. Its error is
+// discarded because a destructor has nobody to hand one to; `close()` is how
+// a program sees it.
+void Conn.drop() {
+    Result<bool, io.Error> ignored = release();
+}
+
+/// Who is at the other end.
+///
+/// Recorded when the connection was made -- `accept` is handed it and
+/// `connect` chose it -- so this is a field and not a system call, and it
+/// still answers after the peer has gone. There is deliberately no
+/// `local()` to go with it: the only local address anyone asks for is a
+/// listener's, and `Listener.local()` is that one.
+pub Addr Conn.peer() {
+    return remote;
+}
+
+/// Send the peer an end of file while this side goes on reading: the
+/// half-close a client uses to say "that is the whole request" without
+/// losing the answer to it.
+///
+/// After it, the peer's next `read` gives an empty `bytes`, and a `write` on
+/// this side fails with `EPIPE` -- an error value, not a trap and not a
+/// signal, because this module ignores SIGPIPE. The connection is not
+/// closed; this direction of it is over, and reading goes on.
+pub Result<bool, Error> Conn.shutdown_write() {
+    check_live();
+    int r = __shutdown(fd, SHUT_WR);
+    if (r < 0) {
+        return Result<bool, Error>.Err(from_errno(-r));
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+/// Give up on a read that has waited `ms` milliseconds; 0 waits forever,
+/// which is where a connection starts.
+///
+/// The expiry arrives as an ordinary failure of the read -- EAGAIN from the
+/// kernel, `io.Error.Other(11)` through a stream method, `TimedOut` through
+/// `net.error_of` -- and **the bytes that had already arrived are still in
+/// the buffer**: a timeout does not lose data, it only stops waiting for
+/// more. It is the socket option and not a deadline over a whole operation,
+/// so a `read_all` of a slow peer can take much longer than `ms` while never
+/// waiting that long for one packet.
+pub Result<bool, Error> Conn.set_read_timeout(int ms) {
+    return set_ms(SO_RCVTIMEO, ms);
+}
+
+/// The same for a write that cannot hand anything to the kernel because the
+/// peer is not reading.
+pub Result<bool, Error> Conn.set_write_timeout(int ms) {
+    return set_ms(SO_SNDTIMEO, ms);
+}
+
+Result<bool, Error> Conn.set_ms(int opt, int ms) {
+    check_live();
+    if (ms < 0) {
+        trap("a timeout is a count of milliseconds, 0 to wait forever");
+    }
+    int r = __setsockopt(fd, opt, ms);
+    if (r < 0) {
+        return Result<bool, Error>.Err(from_errno(-r));
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+/// Send a small write at once instead of waiting to fill a packet (turn
+/// Nagle's algorithm off).
+///
+/// Worth it for a request/response protocol, where the next thing to send
+/// does not exist until the answer to this one arrives, so waiting for more
+/// to say adds a round trip to every exchange. Not worth it for a stream of
+/// small writes that are going the same way anyway.
+pub Result<bool, Error> Conn.set_nodelay(bool on) {
+    check_live();
+    int v = 0;
+    if (on) {
+        v = 1;
+    }
+    int r = __setsockopt(fd, TCP_NODELAY, v);
+    if (r < 0) {
+        return Result<bool, Error>.Err(from_errno(-r));
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+/// Whether a `read` would find something, waiting up to `timeout_ms` for it;
+/// a negative timeout waits forever.
+///
+/// `true` means a read will not block, which includes the peer having
+/// closed -- that read answers empty rather than waiting, and both are
+/// "there is something to find out". `false` means the time ran out.
+///
+/// This is the poll-based half of the timeout story, and it is here because
+/// the socket option cannot answer "is anything there" without consuming
+/// it. **Bytes already in this `Conn`'s own buffer count**: asking the
+/// kernel while the answer is sitting in the buffer would say "no" to a
+/// caller that can in fact read at once.
+pub Result<bool, Error> Conn.wait(int timeout_ms) {
+    check_live();
+    if (at < end) {
+        return Result<bool, Error>.Ok(true);
+    }
+    return ready(fd, POLL_IN, timeout_ms);
+}
+
+// A read on a closed connection is a bug in the program, not a failure of
+// the connection -- the same call `io.File` makes.
+void Conn.check_live() {
+    if (!live) {
+        trap("read on a closed connection");
+    }
+}
+
+// Refill an empty buffer. The number of bytes now buffered, 0 at the end.
+Result<int, io.Error> Conn.fill() {
+    check_live();
+    if (buf.size() == 0) {
+        buf = [0; CHUNK];
+    }
+    while (true) {
+        int r = __read(fd, buf, 0, buf.size());
+        if (r == -4) {
+            continue;
+        }
+        if (r < 0) {
+            return Result<int, io.Error>.Err(io.from_errno(-r));
+        }
+        at = 0;
+        end = r;
+        return Result<int, io.Error>.Ok(r);
+    }
+}
+
+// --- listeners -------------------------------------------------------------
+/// A bound, listening socket: the server half.
+///
+/// **It is not a stream.** It has no bytes to read -- `accept` is the only
+/// thing it does -- so it deliberately has none of `io.Stream`'s methods
+/// rather than methods that trap.
+///
+/// Like a `Conn`, it closes itself when its last reference goes.
+pub type Listener {
+    int fd;
+    Addr bound;
+    bool live = true;
+}
+
+/// The next connection, waiting for one if none is ready.
+pub Result<Conn, Error> Listener.accept() {
+    if (!live) {
+        trap("accept on a closed listener");
+    }
+    List<int> out = [];
+    bytes a = [0; 16];
+    while (true) {
+        int c = __accept(fd, out, a);
+        // A signal during a wait for a connection has not accepted one, so
+        // the wait goes on. Nothing was pushed onto `out`.
+        if (c == -4) {
+            continue;
+        }
+        if (c < 0) {
+            return Result<Conn, Error>.Err(from_errno(-c));
+        }
+        return Result<Conn, Error>.Ok(Conn(c, Addr(ip_of(out[0], a), out[1])));
+    }
+}
+
+/// The address this listener is bound to.
+///
+/// **This is how a program learns the port it got** after binding to port 0:
+/// the kernel picks a free one, and this is where it says which. A test that
+/// hard-codes a port is a test that fails when something else is using it,
+/// so every test in this module's corpus binds 0 and reads it back from
+/// here.
+pub Addr Listener.local() {
+    return bound;
+}
+
+/// Whether `accept` would return at once, waiting up to `timeout_ms`;
+/// a negative timeout waits forever.
+pub Result<bool, Error> Listener.wait(int timeout_ms) {
+    if (!live) {
+        trap("wait on a closed listener");
+    }
+    return ready(fd, POLL_IN, timeout_ms);
+}
+
+/// Stop listening and release the port. Closing twice is not an error.
+pub Result<bool, Error> Listener.close() {
+    return shut();
+}
+
+Result<bool, Error> Listener.shut() {
+    if (!live) {
+        return Result<bool, Error>.Ok(true);
+    }
+    live = false;
+    int r = __close(fd);
+    if (r < 0 && r != -4) {
+        return Result<bool, Error>.Err(from_errno(-r));
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+void Listener.drop() {
+    Result<bool, Error> ignored = shut();
+}
+
+// --- making them -----------------------------------------------------------
+/// Listen on `host` and `port`, and answer the socket that does it.
+///
+/// `host` names an **address**, not an interface: `"127.0.0.1"` is loopback
+/// only, `"0.0.0.0"` is every IPv4 address this machine has, `"::"` every
+/// IPv6 one. A name is resolved like `connect`'s, which is a thing to avoid
+/// in a server -- there is no empty-string shorthand for "everywhere"
+/// precisely so that a program says which of the two it meant.
+///
+/// **Port 0 asks the kernel for a free one**, which `local()` then reports.
+///
+/// `backlog` is how many connections may wait to be accepted before the
+/// kernel starts refusing them; the kernel clamps it to its own
+/// `somaxconn` besides. 128 is the default because it is Rust's
+/// `TcpListener::bind`, and because a backlog is a buffer for bursts rather
+/// than a capacity: a server 128 connections behind is behind, and a larger
+/// number only moves the refusal later and makes the queueing delay longer.
+/// It is a named argument, so a server that knows better says so and a
+/// reader sees the number at the call.
+///
+/// ### SO_REUSEADDR is always on, and there is no switch
+///
+/// Without it, a server that stops cannot start again until every
+/// connection it had is out of TIME_WAIT -- up to a minute in which the
+/// port it has always used is refused with "address already in use". That is
+/// the ordinary case for a restart, not an unusual one, and a library whose
+/// defaults make a restart fail is a library every program works around the
+/// same way.
+///
+/// It is safe to have no switch because of what SO_REUSEADDR does **not** do
+/// on the systems this runs on: it does not let two live sockets listen on
+/// one port. That is SO_REUSEPORT, a different option this module does not
+/// offer, so turning this one on cannot silently split a program's
+/// connections between two processes. Go's `net.Listen` sets it
+/// unconditionally for the same reason.
+pub Result<Listener, Error> listen(str host, int port, int backlog = 128) {
+    check_port(port);
+    if (backlog < 1) {
+        trap("listen(backlog: " + backlog.to_str() + "): the backlog must be at least 1");
+    }
+    Ip a = host_ip(host)?;
+    int fd = socket_for(a)?;
+    int ru = __setsockopt(fd, SO_REUSEADDR, 1);
+    if (ru < 0) {
+        return Result<Listener, Error>.Err(close_and(fd, -ru));
+    }
+    int rb = __bind(fd, family_of(a), port, sixteen(a));
+    if (rb < 0) {
+        return Result<Listener, Error>.Err(close_and(fd, -rb));
+    }
+    int rl = __listen(fd, backlog);
+    if (rl < 0) {
+        return Result<Listener, Error>.Err(close_and(fd, -rl));
+    }
+    // Asked for rather than assumed: with port 0 the kernel chose one, and
+    // even with a port given, binding "0.0.0.0" leaves the address for the
+    // kernel to fill in.
+    List<int> out = [];
+    bytes got = [0; 16];
+    int rn = __sockname(fd, 0, out, got);
+    if (rn < 0) {
+        return Result<Listener, Error>.Err(close_and(fd, -rn));
+    }
+    return Result<Listener, Error>.Ok(Listener(fd, Addr(ip_of(out[0], got), out[1])));
+}
+
+/// Connect to `host` and `port`.
+///
+/// `host` is a **literal IPv4 or IPv6 address** if it parses as one
+/// (`parse_ip`), and a host name otherwise. A literal works identically on
+/// both sys-layer backends; a name does not, and that is not a bug that will
+/// be fixed:
+///
+/// **On the raw system-call backend a name cannot be resolved at all**, and
+/// the answer is `Err(Other(38))`, whose message says so in those words.
+/// Resolving is `getaddrinfo`, and `getaddrinfo` is the NSS machinery, which
+/// `dlopen`s `libnss_*` at run time to obey `nsswitch.conf`; a static binary
+/// with no C library cannot `dlopen` anything (docs/sys-layer.md §9). What
+/// replaces it is a DNS client written in this language over UDP sockets,
+/// which is the same road Go took and the reason a static Go binary resolves
+/// names at all. Until then: a program that must run on both backends
+/// connects to a literal address, and one that meets `Other(38)` is being
+/// told which build it is running on rather than crashing.
+///
+/// A name with several addresses uses **the first the resolver gave**, which
+/// on the C library backend is already sorted by RFC 6724. There is no
+/// Happy Eyeballs here -- trying the addresses in parallel and keeping the
+/// first to answer -- because it needs a connect this module cannot express
+/// yet (a non-blocking one, several at a time, with a timer).
+///
+/// There is also **no connect timeout**. It would need the same machinery,
+/// and the kernel's own is a couple of minutes; a program that cannot wait
+/// that long wants the whole operation on a deadline, which is a scheduler's
+/// job (docs/concurrency-decision.md) and not a socket option.
+pub Result<Conn, Error> connect(str host, int port) {
+    check_port(port);
+    Ip a = host_ip(host)?;
+    int fd = socket_for(a)?;
+    int r = __connect(fd, family_of(a), port, sixteen(a));
+    // POSIX: a connect interrupted by a signal goes on in the background,
+    // and calling connect again answers EALREADY rather than finishing it.
+    // So the wait is done the way a non-blocking connect's is -- wait for
+    // the socket to become writable, then ask it how it went.
+    if (r == -4) {
+        r = finish(fd);
+    }
+    if (r < 0) {
+        return Result<Conn, Error>.Err(close_and(fd, -r));
+    }
+    return Result<Conn, Error>.Ok(Conn(fd, Addr(a, port)));
+}
+
+// Wait for a connect that was interrupted, and report what it came to. The
+// pending error is positive (runtime/sys.h), so 0 is success and anything
+// else is the errno the connect would have returned.
+int finish(int fd) {
+    List<int> fds = [fd];
+    List<int> want = [POLL_OUT];
+    List<int> got = [];
+    int n = __poll(fds, want, got, -1);
+    if (n < 0) {
+        return n;
+    }
+    int e = __getsockopt(fd, SO_ERROR);
+    if (e <= 0) {
+        return e;
+    }
+    return -e;
+}
+
+// Whether `fd` is ready for `events` within `timeout_ms`. POLL_ERR, HUP and
+// NVAL come back whether or not they were asked for, and every one of them
+// means a read or a write will return at once rather than wait -- which is
+// what this answers -- so any non-zero mask is `true`.
+Result<bool, Error> ready(int fd, int events, int timeout_ms) {
+    List<int> fds = [fd];
+    List<int> want = [events];
+    List<int> got = [];
+    int n = __poll(fds, want, got, timeout_ms);
+    if (n < 0) {
+        return Result<bool, Error>.Err(from_errno(-n));
+    }
+    return Result<bool, Error>.Ok(got[0] != 0);
+}
+
+// A socket of the right family, with SIGPIPE already ignored.
+//
+// The ignore goes here rather than at startup because a module cannot hold
+// the flag that would say it had already been done
+// (docs/module-state-decision.md), and it does not need to: the disposition
+// is per process and setting it again is one idempotent system call, which
+// is nothing beside the connect or the bind that follows. Its failure is
+// reported rather than swallowed -- a program whose writes could still kill
+// it should not be handed a socket and told nothing.
+Result<int, Error> socket_for(Ip a) {
+    int ig = __ignore_sigpipe();
+    if (ig < 0) {
+        return Result<int, Error>.Err(from_errno(-ig));
+    }
+    int fd = __socket(family_of(a), SOCK_STREAM, 0);
+    if (fd < 0) {
+        return Result<int, Error>.Err(from_errno(-fd));
+    }
+    return Result<int, Error>.Ok(fd);
+}
+
+// Close a descriptor that is being abandoned because something after it
+// failed, and hand back the error that caused it. The close's own result is
+// dropped: there is nothing on a socket nobody ever used for it to report,
+// and replacing the real reason with it would hide why this happened.
+Error close_and(int fd, int errno) {
+    int ignored = __close(fd);
+    return from_errno(errno);
+}
+
+void check_port(int port) {
+    if (port < 0 || port > 65535) {
+        trap("port " + port.to_str() + ": a port is 0..65535");
+    }
+}
+
+// A literal address if `host` is one, and otherwise whatever the resolver
+// says -- which on the raw backend is always ENOSYS.
+Result<Ip, Error> host_ip(str host) {
+    match (parse_ip(host)) {
+        case Some(Ip literal): {
+            return Result<Ip, Error>.Ok(literal);
+        }
+        case None: {
+        }
+    }
+    return resolve_one(host);
+}
+
+// The first address a name has. Four are asked for because that is enough
+// for the answer to be the resolver's choice rather than this buffer's, and
+// only the first is used.
+Result<Ip, Error> resolve_one(str host) {
+    List<int> out = [];
+    bytes addrs = [0; 64];
+    int found = __resolve(host, 0, 0, out, addrs);
+    if (found < 0) {
+        return Result<Ip, Error>.Err(from_errno(-found));
+    }
+    // A name the resolver knows nothing about usually arrives as an errno
+    // above; zero addresses is the other way it can say the same thing.
+    if (found == 0) {
+        return Result<Ip, Error>.Err(Error.NameNotFound);
+    }
+    return Result<Ip, Error>.Ok(ip_of(out[0], addrs));
+}
+
+// The `Ip` in the first 4 or 16 bytes of `raw`, by the family beside it. The
+// primitives always write all sixteen; which of them mean anything is the
+// family's business, and this is the one place that knows.
+Ip ip_of(int family, bytes raw) {
+    if (family == AF_INET6) {
+        return Ip(raw.substr(0, 16));
+    }
+    return Ip(raw.substr(0, 4));
+}
+
+int family_of(Ip a) {
+    if (a.is_v6()) {
+        return AF_INET6;
+    }
+    return AF_INET;
+}
+
+// The sixteen bytes `__bind` and `__connect` read, whatever the family: the
+// runtime checks the size and never trusts it, so a four-octet IPv4 address
+// is padded here rather than at the seam.
+bytes sixteen(Ip a) {
+    bytes out = a.octets();
+    while (out.size() < 16) {
+        out.push(0);
+    }
+    return out;
+}
