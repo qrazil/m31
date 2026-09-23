@@ -468,9 +468,37 @@ impl Lowerer {
                 }
                 if let Some((k, v)) = self.map_kv(t) {
                     if k != Ty::Int && k != Ty::Str {
+                        // A user type CAN be a map key at run time -- it
+                        // declares `hash` and `eq` and the runtime calls
+                        // them. A constant map is the one place it cannot:
+                        // the table is static data, so the compiler has to
+                        // place every key itself (`map_hash` above, kept bit
+                        // for bit in step with runtime/rt.c), and the
+                        // program's own `hash` does not exist until the
+                        // program runs. Well bounded and additive to relax
+                        // if constant evaluation ever grows up.
+                        let has_hash = self
+                            .tdef_of(self.underlying(k))
+                            .is_some_and(|tid| self.reserved_method(tid, "hash").is_some());
+                        let why = if has_hash {
+                            format!(
+                                "`{}` hashes itself, with its own `hash` method, and that \
+                                 method does not exist until the program runs",
+                                self.tyname(k)
+                            )
+                        } else {
+                            format!("`{}` is neither", self.tyname(k))
+                        };
                         return Err(Diag::new(
                             span,
-                            format!("a map key must be int or str, found {}", self.tyname(k)),
+                            format!(
+                                "a module constant's map is laid out as static data, so \
+                                 the compiler hashes every key itself, and it can only \
+                                 hash an `int` or a `str`; {why}. Build the `{}` at run \
+                                 time instead -- a `const` LOCAL of that type is fine, \
+                                 because its table is copied rather than laid out.",
+                                self.tyname(t)
+                            ),
                         ));
                     }
                     return self.check_const_ty(v, span);

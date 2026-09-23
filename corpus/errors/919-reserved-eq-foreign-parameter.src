@@ -1,0 +1,15 @@
+// `eq` compares a value with another of its own type. Comparing it with
+// some other type is a different operation and needs a different name --
+// otherwise `a == b` and a `Map<Row, _>` would each mean something else by
+// the one method.
+type Other {
+    int n;
+}
+
+type Row {
+    int n;
+}
+
+bool Row.eq(Other o) {
+    return n == o.n;
+}

@@ -1,0 +1,115 @@
+// Keys that DELIBERATELY hash the same.
+//
+// The contract a key type signs is one-way: two keys that are equal must
+// hash equally. Two keys that hash equally need not be equal, and a `hash`
+// is allowed to be as bad as this one -- `Bad.hash` ignores the field
+// entirely, so every key in the map lands on the same slot and the table is
+// one long probe run. Everything still has to work: set, get, contains,
+// remove and the two iteration orders.
+//
+// This is the case that a `hash` returning a constant makes unavoidable, and
+// the case an open-addressed table with linear probing is worst at, so it is
+// the one worth writing down.
+
+type Bad {
+    int id;
+}
+
+bool Bad.eq(Bad o) {
+    return id == o.id;
+}
+
+int Bad.hash() {
+    return 7;
+}
+
+int Bad.cmp(Bad o) {
+    return id - o.id;
+}
+
+str Bad.to_str() {
+    return str(id);
+}
+
+Map<Bad, int> m = {};
+int i = 0;
+while (i < 40) {
+    m.set(Bad(i), i * 10);
+    i = i + 1;
+}
+print(m.size());
+
+// Every one of them is still findable, each through a probe run that walks
+// past all the others.
+int sum = 0;
+i = 0;
+while (i < 40) {
+    sum = sum + m.get(Bad(i)).or(-1);
+    i = i + 1;
+}
+print(sum);
+
+print(m.contains(Bad(0)));
+print(m.contains(Bad(39)));
+print(m.contains(Bad(40)));
+
+// Replacing in the middle of a probe run replaces, and does not grow.
+m.set(Bad(17), 999);
+print(m.size());
+print(m.get(Bad(17)).or(-1));
+
+// Removing from the middle of a probe run leaves a tombstone, so the keys
+// behind it must still be reachable.
+m.remove(Bad(0));
+m.remove(Bad(17));
+m.remove(Bad(39));
+print(m.size());
+print(m.contains(Bad(0)));
+print(m.contains(Bad(17)));
+print(m.contains(Bad(18)));
+print(m.get(Bad(18)).or(-1));
+
+// Removing and re-adding the same key, repeatedly: tombstones accumulate
+// and the table sweeps them at the same capacity rather than doubling.
+i = 0;
+while (i < 500) {
+    m.set(Bad(1000), i);
+    m.remove(Bad(1000));
+    i = i + 1;
+}
+print(m.size());
+print(m.contains(Bad(18)));
+
+// Iteration visits every live entry exactly once, tombstones and all. The
+// table's order is not insertion order, so sort before printing.
+List<Bad> ks = m.keys();
+ks.sort();
+print(ks.size());
+print(ks[0]);
+print(ks[ks.size() - 1]);
+
+int vs = 0;
+for (int v in m.values()) {
+    vs = vs + v;
+}
+print(vs);
+
+// Two DIFFERENT types, each with its own `hash`: the key type is fixed by
+// the map's type, so the two never meet.
+type Other {
+    int id;
+}
+
+bool Other.eq(Other o) {
+    return id == o.id;
+}
+
+int Other.hash() {
+    return 7;
+}
+
+Map<Other, str> o = {};
+o.set(Other(1), "one");
+print(o.size());
+print(o.get(Other(1)).or("?"));
+print(m.contains(Bad(1)));

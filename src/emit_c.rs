@@ -213,11 +213,21 @@ pub fn emit(m: &Module) -> String {
             Some(n) => format!("\"{n}\""),
             None => "NULL".to_string(),
         };
+        // The reserved methods the runtime calls on this type (rt.h). No
+        // cast: the emitted definition of `int P.cmp(P other)` already has
+        // the prototype `int64_t (Obj *, Obj *)`, so a mismatch is a C
+        // compile error here rather than a wrong call at run time -- which
+        // is why these are TypeInfo fields and not vtable slots.
+        let named = |f: &Option<String>| match f {
+            Some(n) => c_name(n),
+            None => "NULL".to_string(),
+        };
+        let reserved = format!("{}, {}, {}", named(&t.cmp), named(&t.hash), named(&t.eq));
         if m.iface_slots.is_empty() {
             writeln!(
                 o,
                 "static const TypeInfo ti_T{i} __attribute__((unused)) = \
-                 {{ {drop}, NULL, {walk}, copy_T{i}, {resource} }};"
+                 {{ {drop}, NULL, {walk}, copy_T{i}, {resource}, {reserved} }};"
             )
             .unwrap();
         } else {
@@ -238,7 +248,7 @@ pub fn emit(m: &Module) -> String {
             writeln!(
                 o,
                 "static const TypeInfo ti_T{i} __attribute__((unused)) = \
-                 {{ {drop}, vt_T{i}, {walk}, copy_T{i}, {resource} }};"
+                 {{ {drop}, vt_T{i}, {walk}, copy_T{i}, {resource}, {reserved} }};"
             )
             .unwrap();
         }
@@ -508,12 +518,16 @@ fn emit_statics(o: &mut String, m: &Module) {
                 };
                 // `used` is `len`: nothing was ever removed, so there are no
                 // tombstones. The key is a reference exactly when it is a str.
+                // A user-typed key (MK_OBJ) cannot appear: the compiler
+                // would have to run the program's own `hash` to lay the
+                // table out, so `check_const_ty` refuses it.
                 writeln!(
                     o,
                     "static const Map k{i} __attribute__((unused)) = \
                      {{ {{ RC_IMMORTAL, &rt_map_type }}, {slots_ref}, {cap}, {len}, {len}, \
-                     {ks}, {ks}, {vr} }};",
+                     {kind}, {ks}, {vr} }};",
                     cap = table.len(),
+                    kind = if *key_is_str { "MK_STR" } else { "MK_INT" },
                     ks = key_is_str,
                     vr = val_is_ref,
                 )

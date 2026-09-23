@@ -347,9 +347,16 @@ one they cannot now remove.
 
 We avoid it because our motivation is containers, and containers need nothing
 of their element type. `Chan<T>` only moves values. `List<T>` needs nothing.
-Only `Map<K,V>` needs anything of `K`, and that is an ordinary interface.
-Where an operation is genuinely needed, **pass a function** — which is already
-Oro's style for `sort`.
+Only `Map<K,V>` needs anything of `K`, and `List<T>.sort()` anything of `T`.
+
+Neither turned out to need an interface either. Both are answered by
+**reserved method names** (docs/reference.md §4.4a): a key type declares
+`int T.hash()` and `bool T.eq(T other)`, a sorted element type declares
+`int T.cmp(T other)`, and the compiler puts those methods in the type's
+runtime metadata so the runtime can call them. No `Hashable`, no `Ord`, no
+type set, and nothing to write at the use site. Where an operation is
+genuinely the *caller's* to choose rather than the type's — a sort by some
+other key — **pass a function**, which is Oro's style for `sort`.
 
 ### What is implemented, and what is not
 

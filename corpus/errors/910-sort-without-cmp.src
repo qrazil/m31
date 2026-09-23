@@ -1,0 +1,9 @@
+// `sort` on a list of a user type needs the type's own `cmp`. The
+// diagnostic names the method to declare, in full, with the signature it
+// must have -- the same one `<` wants.
+type Thing {
+    int n;
+}
+
+List<Thing> xs = [Thing(2), Thing(1)];
+xs.sort();

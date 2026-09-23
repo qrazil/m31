@@ -1,0 +1,4 @@
+corpus/errors/921-map-key-interface.src:16:21: a map hashes and compares each key through its own type, and `Keyed` is an interface: two keys can be different types, and one's `eq` would be handed the other. Key the map on the concrete type instead.
+   |
+16 | Map<Keyed, str> m = {};
+   |                     ^

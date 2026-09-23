@@ -1,0 +1,20 @@
+// A module constant's map is laid out as STATIC DATA: the compiler places
+// every key where the runtime's probe will look for it, so the compiler has
+// to hash every key itself. It can hash an int and a str. It cannot run the
+// program's own `hash` method, which does not exist until the program runs.
+//
+// So this one refusal survives, with a message of its own that says why --
+// and the same map built at run time is fine (corpus/core/902).
+type Key {
+    int v;
+}
+
+bool Key.eq(Key o) {
+    return v == o.v;
+}
+
+int Key.hash() {
+    return v;
+}
+
+const Map<Key, int> TABLE = {};

@@ -112,17 +112,27 @@ same call. One rule for all of them.
 |---|---|
 | `io` | read and write a whole file, read a line from stdin, write to stderr. Errors are `io.Error`, its own enum. |
 | `math` | `abs`, `min`, `max`, `pow`, `sqrt`, `floor`, `ceil`, `round`. Float-heavy, and mostly one-liners over C. |
-| `sort` | sorting a `List` by a comparison. Blocked on the same thing `sort()` on a user type is blocked on — see below. |
+| `sort` | sorting a `List` by a comparison the caller supplies. Still waiting on function references; sorting by the element type's OWN `cmp` is built in and needs none — see below. |
 | `text` | what `str`'s built-in methods leave out: padding, `replace`, `lines`, a richer parse that says *why* it failed. |
 
-**`sort` by a comparison needs a function reference in the IR**, which does
-not exist and is the same machinery closures need. Until then `sort()` handles
-`int`, `float` and `str`, and a program that needs more writes the loop.
+**`sort` by a comparison the CALLER supplies** needs a function reference in
+the IR, which does not exist and is the same machinery closures need.
 
-**A `Hashable` interface** so a `Map` can take a user type as a key is
-wanted, and is not free: `Map` is a runtime structure and hashing a user type
-means calling back into generated code, which is the function-reference
-problem again. Recorded here so the dependency is visible.
+**Sorting by the element type's own order needs none of that**, and now
+works: `sort()` handles `int`, `float`, `str`, and any type that declares
+`int T.cmp(T other)` — the method `<` already uses. The runtime is holding
+the element and the element carries its type, so the compiler stores `cmp`
+in the type's metadata and the runtime calls it there. Two paragraphs of this
+record used to say otherwise; see docs/closures-decision.md §"Two of the
+three blocked features are not blocked by this".
+
+**A `Hashable` interface** so a `Map` can take a user type as a key turned
+out not to be wanted at all. The same mechanism answers it, and the rule is
+the one §6.2 already uses for operators: a map key is an `int`, a `str`, or a
+type that declares `int T.hash()` and `bool T.eq(T other)`. `eq` already
+exists and already means what it must, so `hash` was the only new name. One
+refusal survives: a MODULE CONSTANT map keyed on a user type, whose table the
+compiler lays out as static data and therefore has to hash itself.
 
 ---
 
@@ -133,6 +143,9 @@ problem again. Recorded here so the dependency is visible.
 3. `math`, which is small and unblocks anything numeric.
 4. `text`, once `io` has shown what a library's error type wants to look like.
 
-`sort`-by-comparison and `Hashable` wait for function references. So does
-`spawn` taking a closure. That is three features waiting on one mechanism,
-which is worth knowing before deciding it is a post-freeze concern.
+Of the three features this record once said were waiting on one mechanism,
+only one was. `sort()` on a user type and a `Map` keyed on one both shipped
+without it, against a reserved-method-name convention; `spawn` should never
+take a closure (docs/closures-decision.md). What is left waiting on function
+references is a `sort` module that takes the comparison as an argument, which
+is a smaller claim than this section used to make.

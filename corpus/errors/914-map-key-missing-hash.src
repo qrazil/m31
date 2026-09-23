@@ -1,0 +1,12 @@
+// `eq` is there -- it is the method `==` already uses -- so only `hash` is
+// missing, and only `hash` is named.
+type Point {
+    int x;
+}
+
+bool Point.eq(Point o) {
+    return x == o.x;
+}
+
+Map<Point, str> m = {};
+m.set(Point(1), "a");

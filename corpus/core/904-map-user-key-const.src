@@ -1,0 +1,63 @@
+// A `const` map keyed on a user type.
+//
+// A `const` takes a frozen deep copy of its value, and a map's table is
+// copied SLOT FOR SLOT rather than rehashed -- so every key's copy has to
+// land where the original sat. That is the "equal keys hash equally"
+// contract doing its work: the copy is field-for-field equal to the
+// original, so `hash` answers the same and a later probe finds it.
+//
+// A `hash` built on anything but the key's value -- an address, a counter --
+// would break the contract, and this is where it would lose its entries.
+//
+// (A MODULE constant map keyed on a user type is a different thing and stays
+// refused: the compiler lays that table out itself. corpus/errors/915.)
+
+type Key {
+    int a;
+    str b;
+}
+
+bool Key.eq(Key o) {
+    return a == o.a && b == o.b;
+}
+
+int Key.hash() {
+    return a;
+}
+
+void check() {
+    Map<Key, int> built = {};
+    int i = 0;
+    while (i < 30) {
+        built.set(Key(i, concat("k", str(i))), i * 3);
+        i = i + 1;
+    }
+
+    const Map<Key, int> FROZEN = built;
+
+    // Every key is still findable through the frozen copy.
+    int sum = 0;
+    i = 0;
+    while (i < 30) {
+        sum = sum + FROZEN.get(Key(i, concat("k", str(i)))).or(-1000);
+        i = i + 1;
+    }
+    print(sum);
+    print(FROZEN.size());
+    print(FROZEN.contains(Key(7, "k7")));
+    print(FROZEN.contains(Key(7, "other")));
+
+    // The original is untouched and still mutable.
+    built.set(Key(99, "k99"), 1);
+    print(built.size());
+    print(FROZEN.size());
+
+    // `clone` of the frozen one is mutable again, and its keys still probe.
+    Map<Key, int> copy = clone(FROZEN);
+    copy.set(Key(0, "k0"), 7);
+    print(copy.get(Key(0, "k0")).or(-1));
+    print(FROZEN.get(Key(0, "k0")).or(-1));
+    print(copy.size());
+}
+
+check();

@@ -1,0 +1,18 @@
+// `sort` orders each element by ITS OWN type's `cmp`, so both elements
+// handed to one `cmp` have to be that type. A list of an interface breaks
+// that: a Circle and a Square are both Shapes, and `Circle.cmp` would be
+// given a Square.
+interface Shape {
+    int cmp(Shape other);
+}
+
+type Circle {
+    int r;
+}
+
+int Circle.cmp(Shape other) {
+    return r;
+}
+
+List<Shape> xs = [Circle(1), Circle(2)];
+xs.sort();

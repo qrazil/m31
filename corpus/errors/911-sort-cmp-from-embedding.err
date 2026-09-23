@@ -1,0 +1,4 @@
+corpus/errors/911-sort-cmp-from-embedding.src:22:3: `sort` orders `int`, `float` and `str`, and any type that declares `int Outer.cmp(Outer other)` -- the same method `<` uses; `Outer` inherits `cmp` from the embedded `Inner`, and that one takes an `Inner`, not an `Outer` -- a promoted method keeps the embedded type's parameter, so `Outer` has to declare its own
+   |
+22 | xs.sort();
+   |   ^

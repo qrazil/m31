@@ -1,0 +1,9 @@
+// A `hash` that takes an argument: the runtime has one object to hash and
+// nothing to pass.
+type Key {
+    int v;
+}
+
+int Key.hash(int salt) {
+    return v + salt;
+}

@@ -1,0 +1,35 @@
+// A type meant to be used as a map key from another module, and to be
+// sorted there. All three reserved methods are exported, because all three
+// are found BY NAME at the use site -- the same rule `to_str` follows.
+pub type Sku {
+    pub int part;
+    pub int rev;
+}
+
+pub bool Sku.eq(Sku o) {
+    return part == o.part && rev == o.rev;
+}
+
+pub int Sku.hash() {
+    return part * 1000 + rev;
+}
+
+pub int Sku.cmp(Sku o) {
+    if (part != o.part) {
+        return part - o.part;
+    }
+    return rev - o.rev;
+}
+
+pub str Sku.to_str() {
+    return concat(concat(str(part), "r"), str(rev));
+}
+
+// The module that owns the type can of course key on it too.
+pub int count_here() {
+    Map<Sku, int> m = {};
+    m.set(Sku(1, 1), 10);
+    m.set(Sku(1, 1), 20);
+    m.set(Sku(2, 1), 30);
+    return m.size();
+}

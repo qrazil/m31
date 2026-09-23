@@ -1,0 +1,12 @@
+// `hash` is a reserved method name: the language gives it a meaning, and a
+// type may not give it another. Nothing in the program calls it -- the
+// runtime does, through a pointer in the type's TypeInfo -- so there is no
+// use site to put the message on, and the shape is checked where it is
+// written.
+type Key {
+    int v;
+}
+
+str Key.hash() {
+    return str(v);
+}

@@ -1,4 +1,4 @@
-corpus/errors/028-wrong-cmp-return.src:11:9: `P.cmp` must return int to support `<`
+corpus/errors/028-wrong-cmp-return.src:15:1: `P.cmp` is a reserved method and must be declared `int P.cmp(P other)`: this one returns `bool`. The language calls it itself -- `<`, `<=`, `>`, `>=` and `sort` -- so its signature is not the type's to choose; if this method means something else, give it another name.
    |
-11 | print(a < b);
-   |         ^
+15 | bool P.cmp(P other) {
+   | ^

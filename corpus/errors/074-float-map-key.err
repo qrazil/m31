@@ -1,4 +1,4 @@
-corpus/errors/074-float-map-key.src:1:21: a map key must be int or str, found float; hashing a user type would need a Hashable interface, which does not exist yet
+corpus/errors/074-float-map-key.src:1:21: a map key is an `int`, a `str`, or a type that declares both `int T.hash()` and `bool T.eq(T other)`; `float` is none of those
   |
 1 | Map<float, int> m = {};
   |                     ^

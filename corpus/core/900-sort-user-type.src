@@ -1,0 +1,67 @@
+// `sort` on a List of a user type orders it by the type's own `cmp` -- the
+// same method `<` desugars to, so a sorted list and a comparison can never
+// disagree about the order.
+//
+// Nothing is passed to `sort` and no function reference exists in the IR.
+// The runtime is holding the element; the element's header names its
+// TypeInfo; the compiler put `cmp` in the TypeInfo beside the destructor.
+// See docs/closures-decision.md and `rt_sort_obj` in runtime/rt.c.
+
+type Item {
+    int rank;
+    str tag;
+}
+
+int Item.cmp(Item o) {
+    return rank - o.rank;
+}
+
+str Item.to_str() {
+    return concat(concat(str(rank), "-"), tag);
+}
+
+// The sort is STABLE, and that is promised, not incidental: equal elements
+// come out in the order they went in. `a` before `c` among the 3s, `b`
+// before `e` among the 1s -- source order in both cases, and the only way
+// this line could pass by luck is if the merge happened to be stable too.
+List<Item> xs = [Item(3, "a"), Item(1, "b"), Item(3, "c"), Item(2, "d"), Item(1, "e")];
+xs.sort();
+for (Item x in xs) {
+    print(x);
+}
+
+// Already sorted, reverse sorted, one element and none: the bottom-up merge
+// takes a different path through each.
+List<Item> sorted = [Item(1, "a"), Item(2, "b"), Item(3, "c")];
+sorted.sort();
+print(sorted[0]);
+print(sorted[2]);
+
+List<Item> back = [Item(3, "a"), Item(2, "b"), Item(1, "c")];
+back.sort();
+print(back[0]);
+print(back[2]);
+
+List<Item> one = [Item(7, "x")];
+one.sort();
+print(one[0]);
+
+List<Item> none = [];
+none.sort();
+print(none.size());
+
+// Enough elements to need several merge widths, with every element equal on
+// the key -- the worst case for stability.
+List<Item> many = [];
+int i = 0;
+while (i < 20) {
+    many.push(Item(0, str(i)));
+    i = i + 1;
+}
+many.sort();
+print(many[0]);
+print(many[19]);
+
+// `cmp` orders the list, and `<` asks the same method: the two agree.
+print(xs[0] < xs[4]);
+print(xs[4] < xs[0]);

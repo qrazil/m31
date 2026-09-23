@@ -309,6 +309,151 @@ pub fn check_destructor_decls(p: &Program) -> Result<(), Diag> {
     Ok(())
 }
 
+/// The reserved method names beside `drop`: the ones the language itself
+/// gives a meaning to, so a type may not use them for anything else.
+///
+/// Each is a method the program does not call BY NAME. `cmp` and `eq` are
+/// what the comparison operators desugar to (§6.2), and all three are what
+/// the runtime reaches for when it is holding an object and needs to order
+/// it, hash it or compare it: `sort` on a list of a user type, and a `Map`
+/// keyed on one. Because nothing at the use site writes the call, nothing at
+/// the use site can be told its signature is wrong -- so the signature is
+/// fixed here, and checked where the method is DECLARED.
+///
+/// `(name, the one signature, what the result means)`, with `T` standing for
+/// the receiver type.
+const RESERVED_METHODS: &[(&str, &str)] = &[
+    ("cmp", "int T.cmp(T other)"),
+    ("eq", "bool T.eq(T other)"),
+    ("hash", "int T.hash()"),
+];
+
+/// A reserved method may have exactly one shape, on the program as written
+/// -- before monomorphisation, for the reason `check_destructor_decls` gives.
+///
+/// Why refuse a wrongly-shaped `cmp` at its declaration rather than at the
+/// use that wanted it, which is how `to_str` works: `to_str` is called by
+/// name in the source that `print(v)` stands for, so the use site has
+/// somewhere to put the message. These three are called from the RUNTIME,
+/// through a pointer in the TypeInfo, and the program never writes the call
+/// at all. A `bool P.cmp(int)` that is only ever wrong when someone sorts a
+/// `List<P>` in another module, months later, is a worse error than one on
+/// the line that wrote it.
+///
+/// The shape rules, and why each:
+///   - not `static`: all three act on a receiver; a static one has none.
+///   - no type parameters of its own: the runtime calls it through one
+///     pointer, so there is no call site to infer them from.
+///   - `cmp` and `eq` take exactly one parameter, not optional, of the
+///     receiver's own type -- or of an interface, which is the other honest
+///     reading and is spelled out at the check itself.
+///   - `int` from `cmp` (negative, zero, positive), `bool` from `eq`, `int`
+///     from `hash`.
+///
+/// An interface may require them: `interface Ord { int cmp(Ord other); }` is
+/// an ordinary one-method interface, and the same shape rule applies with
+/// the interface standing in for `T`. Unlike `drop`, these are dispatched
+/// to, so there is no reason to refuse.
+pub fn check_reserved_decls(p: &Program) -> Result<(), Diag> {
+    // Interface requirements: the receiver is the interface itself.
+    for t in p.types.iter().chain(p.prelude.iter()) {
+        for m in &t.methods {
+            check_reserved_shape(p, m, &t.name, &t.module)?;
+        }
+    }
+    for f in &p.funcs {
+        let Some(recv) = &f.recv else { continue };
+        check_reserved_shape(p, f, recv, &f.module)?;
+    }
+    Ok(())
+}
+
+fn check_reserved_shape(p: &Program, f: &Func, recv: &str, module: &str) -> Result<(), Diag> {
+    let Some((_, want)) = RESERVED_METHODS.iter().find(|(n, _)| *n == f.name) else {
+        return Ok(());
+    };
+    let tname = bare(recv);
+    let want = want.replace('T', tname);
+    let refuse = |why: String| {
+        Err(Diag::new(
+            f.span,
+            format!(
+                "`{tname}.{}` is a reserved method and must be declared `{want}`: \
+                 {why}. The language calls it itself -- {} -- so its signature is \
+                 not the type's to choose; if this method means something else, \
+                 give it another name.",
+                f.name,
+                match f.name.as_str() {
+                    "cmp" => "`<`, `<=`, `>`, `>=` and `sort`",
+                    "eq" => "`==`, `!=` and a `Map` keyed on this type",
+                    _ => "a `Map` keyed on this type",
+                }
+            ),
+        )
+        .in_module(module))
+    };
+    if f.is_static {
+        return refuse("this one is static, and a reserved method acts on a receiver".to_string());
+    }
+    if !f.tparams.is_empty() {
+        return refuse(
+            "this one has type parameters, and nothing would infer them: the call \
+             is made by the runtime, through one pointer"
+                .to_string(),
+        );
+    }
+    if f.params.len() != usize::from(f.name != "hash") {
+        return refuse(match f.params.len() {
+            0 => "this one takes none".to_string(),
+            1 => "this one takes a parameter".to_string(),
+            n => format!("this one takes {n} parameters"),
+        });
+    }
+    if let Some(prm) = f.params.first() {
+        if prm.is_optional() {
+            return refuse("this one's parameter is optional".to_string());
+        }
+        // The receiver's own type, written as the declaration writes it:
+        // `Wrap<T>.cmp(Wrap<T> other)` interns its parameter under the base
+        // name, which is the one the receiver carries too.
+        //
+        // Or an INTERFACE, which is the one other thing it can honestly be:
+        // `interface Ord { int cmp(Ord other); }` is an ordinary one-method
+        // interface, and a type satisfies it by declaring `int C.cmp(Ord)`.
+        // That method means "compare me with any Ord", which is a different
+        // promise from "compare me with another C" -- so it is allowed here
+        // and it is NOT what `sort` or a map key accepts (`reserved_method`
+        // asks for the receiver's own type). One name, and the signature
+        // says which of the two it is.
+        let named = match prm.ty {
+            Ty::User(i) => p.ty_exprs[i as usize].name.clone(),
+            _ => String::new(),
+        };
+        let is_iface = p
+            .types
+            .iter()
+            .chain(p.prelude.iter())
+            .any(|t| t.name == named && t.is_interface);
+        if named != *recv && !is_iface {
+            return refuse(format!("this one takes {}", quoted(&ty_shown(p, prm.ty))));
+        }
+    }
+    let want_ret = if f.name == "eq" { Ty::Bool } else { Ty::Int };
+    if f.ret != want_ret {
+        return refuse(format!("this one returns `{}`", ty_shown(p, f.ret)));
+    }
+    Ok(())
+}
+
+/// A surface type's name for a diagnostic raised BEFORE the lowerer exists,
+/// so `Lowerer::tyname` is not available yet.
+fn ty_shown(p: &Program, t: Ty) -> String {
+    match t {
+        Ty::User(i) => bare(&p.ty_exprs[i as usize].name).to_string(),
+        other => other.name().to_string(),
+    }
+}
+
 /// The representation of a surface type, WITHOUT resolving distinct types.
 /// Use `Lowerer::irty` instead wherever a distinct type can appear.
 fn ir_ty(t: Ty) -> IrTy {
@@ -979,26 +1124,63 @@ impl Lowerer {
                 if !args.pos.is_empty() {
                     return Err(Diag::new(span, "`sort` takes no arguments"));
                 }
-                // Ordering `int` and `str` needs nothing from the program. A
-                // user type already spells its order as `cmp`, for the
-                // comparison operators -- but calling back into generated
-                // code means a function REFERENCE in the IR, which does not
-                // exist yet and is the same thing closures will need. Better
-                // one mechanism later than a second one bolted on here.
+                // Ordering `int`, `float` and `str` needs nothing from the
+                // program. A user type orders itself with `cmp`, the method
+                // the comparison operators already use, and the runtime
+                // reaches it without any function reference in the IR: it is
+                // holding the element, the element's header names its
+                // TypeInfo, and the compiler put `cmp` there
+                // (docs/closures-decision.md, runtime/rt.c `rt_sort_obj`).
                 let f = match self.underlying(elem) {
                     Ty::Int => "rt_sort_int",
                     Ty::Float => "rt_sort_float",
                     Ty::Str => "rt_sort_str",
-                    _ => {
-                        return Err(Diag::new(
-                            span,
-                            format!(
-                                "`sort` orders `int`, `float` and `str`; {} would \
-                                 need the compiler to call its own `cmp`, which \
-                                 is not possible yet",
-                                self.tyname(elem)
-                            ),
-                        ))
+                    base => {
+                        let shown = self.tyname(elem);
+                        let Some(tid) = self.tdef_of(base) else {
+                            return Err(Diag::new(
+                                span,
+                                format!(
+                                    "`sort` orders `int`, `float` and `str`, and any type \
+                                     that declares `int T.cmp(T other)`; `{shown}` is none \
+                                     of those"
+                                ),
+                            ));
+                        };
+                        // An interface would break the one assumption
+                        // `rt_sort_obj` makes: that both elements handed to
+                        // a `cmp` are of the type that declared it. Two
+                        // elements of a `List<Shape>` can be a Circle and a
+                        // Square, and `Circle.cmp` would be given a Square.
+                        if self.typedefs[tid as usize].is_interface {
+                            return Err(Diag::new(
+                                span,
+                                format!(
+                                    "`sort` orders each element by its own type's `cmp`, \
+                                     and `{shown}` is an interface: two elements can be \
+                                     different types, and one's `cmp` would be handed the \
+                                     other. Sort a list of the concrete type instead."
+                                ),
+                            ));
+                        }
+                        if self.reserved_method(tid, "cmp").is_none() {
+                            return Err(Diag::new(
+                                span,
+                                format!(
+                                    "`sort` orders `int`, `float` and `str`, and any type \
+                                     that declares `int {shown}.cmp({shown} other)` -- the \
+                                     same method `<` uses; {}",
+                                    self.reserved_missing(tid, &["cmp"])
+                                ),
+                            ));
+                        }
+                        // Found by name, so it obeys privacy like every
+                        // other by-name lookup: `print(v)` needs a visible
+                        // `to_str`, `a < b` a visible `cmp`, and so does
+                        // this, which is the same call written by the
+                        // runtime instead of by the program.
+                        self.check_method_access(tid, "cmp", span)?;
+                        "rt_sort_obj"
                     }
                 };
                 self.push(Inst::Call {
@@ -2323,6 +2505,9 @@ impl Lowerer {
                 vtable: Vec::new(),
                 // Filled in once every method is known, beside the vtable.
                 destructor: None,
+                cmp: None,
+                hash: None,
+                eq: None,
                 resource: None,
             });
             self.distinct_base.push(t.distinct_base);
@@ -2551,6 +2736,15 @@ impl Lowerer {
                 })
                 .collect();
             self.typedefs[i].vtable = vt;
+            // The reserved methods go beside the destructor, for the same
+            // reason: the RUNTIME calls them, so it needs the pointer in the
+            // TypeInfo. Recorded for every type that has one, whether or not
+            // this program sorts or keys on it -- one `(CmpFn)` in a static
+            // initialiser costs nothing, and making it conditional would
+            // mean the TypeInfo depended on the program's uses of the type.
+            self.typedefs[i].cmp = self.reserved_method(i as u32, "cmp");
+            self.typedefs[i].hash = self.reserved_method(i as u32, "hash");
+            self.typedefs[i].eq = self.reserved_method(i as u32, "eq");
             // `check_destructor_decls` has already refused every other shape
             // and every other kind of type, and forwarders never carry the
             // name, so a method of this name here is the type's own
@@ -3010,6 +3204,142 @@ impl Lowerer {
             }
         }
         Ok(())
+    }
+
+    /// The IR name of a reserved method (`cmp`, `eq`, `hash`) this type has
+    /// with the one signature it may have -- or None.
+    ///
+    /// The check is on the SURFACE signature, not the IR one, and that is
+    /// the whole point. `int P.cmp(P)` and `int Outer.cmp(Inner)` have the
+    /// same IR shape, `int64 (Obj *, Obj *)`, so the vtable's shape test
+    /// cannot tell them apart. The runtime calls `cmp` with two elements of
+    /// the list it is sorting; handed the second one, `Outer.cmp(Inner)`
+    /// would read an `Inner`'s fields out of an `Outer`. So the parameter
+    /// has to be the receiver's own type, checked here.
+    ///
+    /// `check_reserved_decls` has already refused every wrong shape a
+    /// program can WRITE, so the only thing this rejects is the forwarder
+    /// embedding synthesises, which keeps the embedded type's parameter.
+    fn reserved_method(&self, tid: u32, name: &str) -> Option<String> {
+        let key = format!("{}.{name}", self.typedefs[tid as usize].name);
+        if self.statics.contains(&key) {
+            return None;
+        }
+        let sig = self.sigs.get(&key)?;
+        if sig.params.len() != usize::from(name != "hash") {
+            return None;
+        }
+        if let Some(p) = sig.params.first() {
+            if p.is_optional() || self.tdef_of(p.ty) != Some(tid) {
+                return None;
+            }
+        }
+        let want = if name == "eq" { Ty::Bool } else { Ty::Int };
+        (sig.ret == want).then_some(key)
+    }
+
+    /// Which `MapKey` (runtime/rt.h) a key type is, refusing one that is
+    /// none of them.
+    ///
+    /// An `int` or a `str` the runtime hashes itself. Anything else has to
+    /// hash and compare ITSELF, through the two reserved methods the
+    /// compiler stores in its TypeInfo -- so the rule is the one §6.2
+    /// already uses for operators: declare the methods and the feature
+    /// works. `eq` is the method `==` already desugars to, which is what
+    /// keeps a map and the operator from disagreeing about which keys are
+    /// the same one; `hash` is the only new name.
+    fn map_key_kind(&mut self, k: Ty, span: Span) -> Result<i64, Diag> {
+        let base = self.underlying(k);
+        match base {
+            Ty::Int => return Ok(0),
+            Ty::Str => return Ok(1),
+            _ => {}
+        }
+        let shown = self.tyname(k);
+        let Some(tid) = self.tdef_of(base) else {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "a map key is an `int`, a `str`, or a type that declares both \
+                     `int T.hash()` and `bool T.eq(T other)`; `{shown}` is none of those"
+                ),
+            ));
+        };
+        // Same reason as `sort`: the runtime hands `eq` two keys, and an
+        // interface's two keys can be different types.
+        if self.typedefs[tid as usize].is_interface {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "a map hashes and compares each key through its own type, and \
+                     `{shown}` is an interface: two keys can be different types, and \
+                     one's `eq` would be handed the other. Key the map on the concrete \
+                     type instead."
+                ),
+            ));
+        }
+        let missing: Vec<&str> = ["hash", "eq"]
+            .into_iter()
+            .filter(|m| self.reserved_method(tid, m).is_none())
+            .collect();
+        if !missing.is_empty() {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "a map key is an `int`, a `str`, or a type that declares both \
+                     `int {shown}.hash()` and `bool {shown}.eq({shown} other)`, and that \
+                     hashes equal keys equally; {}",
+                    self.reserved_missing(tid, &missing)
+                ),
+            ));
+        }
+        // Both are found by name, so both obey privacy -- the same rule
+        // `to_str` and `cmp` follow. Using another module's type as a key
+        // therefore needs `pub` on both.
+        self.check_method_access(tid, "hash", span)?;
+        self.check_method_access(tid, "eq", span)?;
+        Ok(2)
+    }
+
+    /// Why `tid` cannot supply these reserved methods, as the tail of a
+    /// diagnostic. Every name passed in must actually be missing.
+    fn reserved_missing(&self, tid: u32, names: &[&str]) -> String {
+        let shown = self.show_name(&self.typedefs[tid as usize].name);
+        let mut absent: Vec<String> = Vec::new();
+        let mut clauses: Vec<String> = Vec::new();
+        for name in names {
+            let key = format!("{}.{name}", self.typedefs[tid as usize].name);
+            let Some(sig) = self.sigs.get(&key) else {
+                absent.push(format!("no `{name}`"));
+                continue;
+            };
+            // The one shape that survives `check_reserved_decls` and is
+            // still unusable: promoted from an embedded field, so it takes
+            // that field's type.
+            let via = sig.params.first().and_then(|p| {
+                let pt = self.tdef_of(p.ty)?;
+                self.field_params[tid as usize]
+                    .iter()
+                    .any(|f| f.embedded && self.tdef_of(f.ty) == Some(pt))
+                    .then_some(p.ty)
+            });
+            clauses.push(match via {
+                Some(t) => format!(
+                    "`{shown}` inherits `{name}` from the embedded `{inner}`, and \
+                     that one takes {an_inner}, not {an_outer} -- a promoted method \
+                     keeps the embedded type's parameter, so `{shown}` has to \
+                     declare its own",
+                    inner = self.tyname(t),
+                    an_inner = quoted(&self.tyname(t)),
+                    an_outer = quoted(&shown),
+                ),
+                None => format!("`{shown}.{name}` does not have that signature"),
+            });
+        }
+        if !absent.is_empty() {
+            clauses.insert(0, format!("`{shown}` declares {}", absent.join(" and ")));
+        }
+        clauses.join("; ")
     }
 
     /// May the module being lowered read, write or name field `idx` of
@@ -6960,12 +7290,13 @@ impl Lowerer {
             // always gave -- before lowering any argument, so nothing is
             // evaluated twice.
         }
-        if tname.starts_with("Map$") && !self.building_literal {
-            // The key type is still checked, because `{}` reaches this path
-            // with the flag set and a bad key type must be caught either way.
-            let (k, _) = self.map_kv(ty).expect("a map has a key and a value");
-            let ku = self.underlying(k);
-            if ku == Ty::Int || ku == Ty::Str {
+        if tname.starts_with("Map$") {
+            let (k, v) = self.map_kv(ty).expect("a map has a key and a value");
+            // The key type is checked BEFORE the spelling, and on the `{}`
+            // path too: a bad key type must be caught either way, and it is
+            // the more useful of the two things to be told.
+            let kind = self.map_key_kind(k, span)?;
+            if !self.building_literal {
                 return Err(Diag::new(
                     span,
                     format!(
@@ -6974,25 +7305,14 @@ impl Lowerer {
                     ),
                 ));
             }
-        }
-        if tname.starts_with("Map$") {
-            let (k, v) = self.map_kv(ty).expect("a map has a key and a value");
-            let ku = self.underlying(k);
-            if ku != Ty::Int && ku != Ty::Str {
-                return Err(Diag::new(
-                    span,
-                    format!(
-                        "a map key must be int or str, found {}; hashing a user \
-                         type would need a Hashable interface, which does not exist yet",
-                        self.tyname(k)
-                    ),
-                ));
-            }
             if !args.pos.is_empty() || !args.named.is_empty() {
                 return Err(Diag::new(span, "a map takes no arguments"));
             }
-            let mut flags = Vec::new();
-            for b in [ku == Ty::Str, self.is_ref(k), self.is_ref(v)] {
+            // `MapKey`, then the two refcount flags (runtime/rt.h).
+            let kv = self.new_val(IrTy::I64);
+            self.push(Inst::IConst { dst: kv, val: kind });
+            let mut flags = vec![kv];
+            for b in [self.is_ref(k), self.is_ref(v)] {
                 let f = self.new_val(IrTy::I1);
                 self.push(Inst::BConst { dst: f, val: b });
                 flags.push(f);
@@ -7573,6 +7893,16 @@ impl Lowerer {
 /// A name with its indefinite article, for a diagnostic: `an Array<int>`,
 /// `a List<int>`. By the first letter, which is right for every type name
 /// the language has.
+/// `a_or_an`, with the name in backticks: the article is chosen from the
+/// name, not from the quote in front of it.
+fn quoted(name: &str) -> String {
+    let vowel = name
+        .chars()
+        .next()
+        .is_some_and(|c| "aeiouAEIOU".contains(c));
+    format!("{} `{name}`", if vowel { "an" } else { "a" })
+}
+
 fn a_or_an(name: &str) -> String {
     let vowel = name
         .chars()

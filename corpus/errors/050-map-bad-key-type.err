@@ -1,4 +1,4 @@
-corpus/errors/050-map-bad-key-type.src:5:17: a map key must be int or str, found P; hashing a user type would need a Hashable interface, which does not exist yet
-  |
-5 | Map<P, int> m = {};
-  |                 ^
+corpus/errors/050-map-bad-key-type.src:10:17: a map key is an `int`, a `str`, or a type that declares both `int P.hash()` and `bool P.eq(P other)`, and that hashes equal keys equally; `P` declares no `hash` and no `eq`
+   |
+10 | Map<P, int> m = {};
+   |                 ^
