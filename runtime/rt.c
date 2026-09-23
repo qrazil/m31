@@ -57,7 +57,7 @@ void rc_dec(Obj *o) {
     }
 }
 
-const TypeInfo rt_str_type = { NULL, NULL, NULL, NULL, NULL, NULL };
+const TypeInfo rt_str_type = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
 
 Obj *rt_alloc_immortal(size_t size, const TypeInfo *ty) {
     Obj *o = malloc(size);
@@ -538,10 +538,13 @@ static void lst_walk_refs(Obj *o, VisitFn visit, void *ctx) {
     }
 }
 
-const TypeInfo rt_arr_val_type = { NULL, NULL, NULL, NULL, NULL, NULL };
-const TypeInfo rt_arr_ref_type = { arr_drop_refs, NULL, arr_walk_refs, NULL, NULL, NULL };
-const TypeInfo rt_lst_val_type = { lst_drop_vals, NULL, NULL, NULL, NULL, NULL };
-const TypeInfo rt_lst_ref_type = { lst_drop_refs, NULL, lst_walk_refs, NULL, NULL, NULL };
+const TypeInfo rt_arr_val_type = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
+const TypeInfo rt_arr_ref_type = { arr_drop_refs, NULL, arr_walk_refs, NULL, NULL,
+                                   NULL, NULL, NULL };
+const TypeInfo rt_lst_val_type = { lst_drop_vals, NULL, NULL, NULL, NULL,
+                                   NULL, NULL, NULL };
+const TypeInfo rt_lst_ref_type = { lst_drop_refs, NULL, lst_walk_refs, NULL, NULL,
+                                   NULL, NULL, NULL };
 
 
 /* Bytes for `n` slots plus a `head` header, trapping rather than wrapping.
@@ -937,7 +940,7 @@ static void bytes_drop(Obj *o) {
 
 /* No walk: a byte is not a reference, so a bytes is a leaf at a thread
  * boundary and rt_check_unique answers it from the count alone. */
-const TypeInfo rt_bytes_type = { bytes_drop, NULL, NULL, NULL, NULL, NULL };
+const TypeInfo rt_bytes_type = { bytes_drop, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
 
 /* A value going INTO a bytes. Truncating 256 to 0 would be a silent wrong
  * answer in exactly the code -- codecs, checksums -- least able to notice. */
@@ -1251,6 +1254,11 @@ bool rt_bytes_utf8(Obj *o, Obj **out) {
  * hash_int, hash_key and the probe order part of that contract. Change them
  * together with src/lower/consts.rs (`map_hash`), or every constant map
  * silently stops finding its keys -- corpus/core/742-const-map checks.
+ *
+ * A MK_OBJ key is the one kind the compiler CANNOT lay out: the hash is the
+ * program's own `hash` method, which does not exist until the program runs.
+ * So a module-constant map keyed on a user type is refused where it is
+ * written, and `map_hash` over there stays int-and-str only.
  */
 
 static void map_drop(Obj *o) {
@@ -1272,7 +1280,7 @@ static void map_walk(Obj *o, VisitFn visit, void *ctx) {
     }
 }
 
-const TypeInfo rt_map_type = { map_drop, NULL, map_walk, NULL, NULL, NULL };
+const TypeInfo rt_map_type = { map_drop, NULL, map_walk, NULL, NULL, NULL, NULL, NULL };
 
 static uint64_t hash_int(int64_t x) {
     /* splitmix64's finaliser: cheap and mixes the low bits, which matters
@@ -1284,7 +1292,21 @@ static uint64_t hash_int(int64_t x) {
 }
 
 static uint64_t hash_key(const Map *m, int64_t k) {
-    if (!m->key_is_str) return hash_int(k);
+    if (m->key == MK_OBJ) {
+        Obj *o = (Obj *)(intptr_t)k;
+        /* The compiler refuses a map whose key type has no `hash`, so this
+         * can only fail if the compiler and this file have gone out of step
+         * -- a trap, not a jump through NULL. */
+        if (o->ty == NULL || o->ty->hash == NULL)
+            rt_trap("internal: a map key whose type has no `hash`");
+        /* MIXED, not used raw. A hand-written `hash` is usually a field or a
+         * sum of fields, so its low bits cluster, and linear probing turns
+         * clustering into long probe runs. Mixing costs three multiplies and
+         * makes a lazy `hash` behave; it preserves collisions exactly, so two
+         * keys the program means to collide still do. */
+        return hash_int(o->ty->hash(o));
+    }
+    if (m->key != MK_STR) return hash_int(k);
     const Str *s = (const Str *)(intptr_t)k;
     uint64_t h = 1469598103934665603ULL;      /* FNV-1a */
     for (int64_t i = 0; i < s->len; i++) {
@@ -1295,17 +1317,25 @@ static uint64_t hash_key(const Map *m, int64_t k) {
 }
 
 static bool key_eq(const Map *m, int64_t a, int64_t b) {
-    if (!m->key_is_str) return a == b;
+    if (m->key == MK_OBJ) {
+        Obj *x = (Obj *)(intptr_t)a;
+        /* The same `eq` that `==` calls, so a map cannot disagree with the
+         * operator about which keys are the same one. */
+        if (x->ty == NULL || x->ty->eq == NULL)
+            rt_trap("internal: a map key whose type has no `eq`");
+        return x->ty->eq(x, (Obj *)(intptr_t)b);
+    }
+    if (m->key != MK_STR) return a == b;
     return rt_str_eq((Obj *)(intptr_t)a, (Obj *)(intptr_t)b);
 }
 
-Obj *rt_map_new(bool key_is_str, bool key_is_ref, bool val_is_ref) {
+Obj *rt_map_new(int64_t key, bool key_is_ref, bool val_is_ref) {
     Map *m = (Map *)rt_alloc(sizeof(Map), &rt_map_type);
     m->slots = NULL;
     m->cap = 0;
     m->len = 0;
     m->used = 0;
-    m->key_is_str = key_is_str;
+    m->key = (uint8_t)key;
     m->key_is_ref = key_is_ref;
     m->val_is_ref = val_is_ref;
     return (Obj *)m;
@@ -1486,7 +1516,7 @@ void rt_map_clear(Obj *o) {
  * sweeps them on its first rehash the way the original would have. */
 Obj *rt_map_clone(Obj *o) {
     const Map *m = (const Map *)o;
-    Map *c = (Map *)rt_map_new(m->key_is_str, m->key_is_ref, m->val_is_ref);
+    Map *c = (Map *)rt_map_new(m->key, m->key_is_ref, m->val_is_ref);
     if (m->cap == 0) return (Obj *)c;
     c->slots = malloc((size_t)m->cap * sizeof(MapSlot));
     if (c->slots == NULL) rt_trap("out of memory");
@@ -1524,7 +1554,8 @@ static void chan_drop(Obj *o) {
     free(c->buf);
 }
 
-static const TypeInfo rt_chan_type = { chan_drop, NULL, NULL, NULL, NULL, NULL };
+static const TypeInfo rt_chan_type = { chan_drop, NULL, NULL, NULL, NULL,
+                                       NULL, NULL, NULL };
 
 Chan *rt_chan_new(int64_t capacity) {
     if (capacity < 1) rt_trap("channel capacity must be at least 1");
@@ -1928,8 +1959,15 @@ static Obj *copy_obj(CopyMap *m, Obj *o) {
     }
     if (ty == &rt_map_type) {
         const Map *src = (const Map *)o;
-        Map *n = (Map *)rt_map_new(src->key_is_str, src->key_is_ref, src->val_is_ref);
+        Map *n = (Map *)rt_map_new(src->key, src->key_is_ref, src->val_is_ref);
         rt_copy_register(m, o, (Obj *)n);
+        /* The table is copied SLOT FOR SLOT, not rehashed, so every key
+         * copy has to land where the original sat. For a user-typed key
+         * that is the "equal keys hash equally" contract doing its work: the
+         * copy is field-for-field equal to the original, so its `hash`
+         * answers the same and a later probe finds it here. A `hash` built
+         * on anything but the key's value -- an address, a counter -- breaks
+         * that contract and would lose its entries here first. */
         if (src->cap > 0) {
             n->slots = calloc((size_t)src->cap, sizeof(MapSlot));
             if (n->slots == NULL) rt_trap("out of memory");

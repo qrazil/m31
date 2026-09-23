@@ -1,0 +1,17 @@
+// An interface as a map key, refused for the same reason as a sorted list
+// of one: the runtime hands `eq` two keys, and two keys of an interface
+// type can be different types.
+interface Keyed {
+    int hash();
+}
+
+type Circle {
+    int r;
+}
+
+int Circle.hash() {
+    return r;
+}
+
+Map<Keyed, str> m = {};
+m.set(Circle(1), "a");

@@ -6,8 +6,8 @@
 // is no null to return, so the honest choices are to trap or to force every
 // read through a check. `has` is the check.
 //
-// Keys are int or str. Hashing a user type would need a Hashable interface,
-// which does not exist yet.
+// Keys here are int and str, which the runtime hashes itself. A user type
+// can be a key too, by declaring `hash` and `eq` -- corpus/core/902.
 
 Map<str, int> counts = {};
 counts.set("a", 1);

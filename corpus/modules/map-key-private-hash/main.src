@@ -1,0 +1,4 @@
+import lib;
+
+Map<lib.Key, int> m = {};
+m.set(lib.make(1), 1);

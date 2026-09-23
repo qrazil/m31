@@ -1528,10 +1528,11 @@ fn a_destructor_alone_earns_a_drop_function_but_no_walk() {
         .unwrap_or_else(|| panic!("no TypeInfo for T{i}:\n{c}"));
     assert!(
         ti.ends_with(&format!(
-            "{{ drop_T{i}, NULL, NULL, copy_T{i}, \"G\", NULL }};"
+            "{{ drop_T{i}, NULL, NULL, copy_T{i}, \"G\", NULL, NULL, NULL }};"
         )),
         "drop set, walk NULL, copy for a const snapshot, the name the runtime \
-         reports when a const meets a value owning a resource, and no `cmp`: {ti}"
+         reports when a const meets a value owning a resource, and no `cmp`, \
+         `hash` or `eq`: {ti}"
     );
     assert!(
         c.contains("o->rc = 1;"),
@@ -1570,15 +1571,17 @@ fn a_destructor_on_an_unused_generic_type_is_still_checked() {
 }
 
 #[test]
-fn a_types_cmp_goes_into_its_typeinfo_uncast() {
-    // `cmp` is how the RUNTIME orders a user type, so it is a field of the
-    // TypeInfo beside the destructor rather than a vtable slot. No
-    // `(AnyFn)` on it: the emitted definition already has the prototype
-    // rt.h declares, so a mismatch is a C compile error rather than a wrong
-    // call at run time.
+fn the_reserved_methods_go_into_the_typeinfo_uncast() {
+    // `cmp`, `hash` and `eq` are how the RUNTIME orders and hashes a user
+    // type, so they are fields of the TypeInfo beside the destructor rather
+    // than vtable slots. No `(AnyFn)` on any of them: the emitted
+    // definitions already have the prototypes rt.h declares, so a mismatch
+    // is a C compile error rather than a wrong call at run time.
     let c = compile_str(
         "type K { int v; }\n\
          int K.cmp(K o) { return v - o.v; }\n\
+         bool K.eq(K o) { return v == o.v; }\n\
+         int K.hash() { return v; }\n\
          K k = K(1);",
         "c",
     )
@@ -1587,17 +1590,20 @@ fn a_types_cmp_goes_into_its_typeinfo_uncast() {
         .lines()
         .find(|l| l.contains("TypeInfo ti_T") && l.contains("K___cmp"))
         .unwrap_or_else(|| panic!("no TypeInfo carries K.cmp:\n{c}"));
-    assert!(ti.ends_with("fn_K___cmp };"), "cmp, with no cast: {ti}");
+    assert!(
+        ti.ends_with("fn_K___cmp, fn_K___hash, fn_K___eq };"),
+        "cmp, hash and eq, in that order and with no cast: {ti}"
+    );
 }
 
 #[test]
-fn a_type_without_one_leaves_the_typeinfo_slot_null() {
+fn a_type_without_them_leaves_the_typeinfo_slots_null() {
     let c = compile_str("type K { int v; }\nK k = K(1);", "c").expect("compiles");
     let ti = c
         .lines()
         .find(|l| l.contains("TypeInfo ti_T"))
         .unwrap_or_else(|| panic!("no TypeInfo:\n{c}"));
-    assert!(ti.ends_with("NULL };"), "{ti}");
+    assert!(ti.ends_with("NULL, NULL, NULL };"), "{ti}");
 }
 
 #[test]
@@ -1618,12 +1624,12 @@ fn a_cmp_promoted_by_embedding_is_not_the_outer_types_cmp() {
 
 #[test]
 fn a_reserved_name_with_another_shape_is_refused_where_it_is_declared() {
-    // Not at a use: `sort` calls `cmp` from the runtime, so there is no call
-    // site in the program to hang the message on.
-    let e = err("type K { int v; }\nstr K.cmp(K o) { return \"\"; }\nprint(1);");
-    assert!(e.contains("must be declared `int K.cmp(K other)`"), "{e}");
-    let e = err("type K { int v; }\nbool K.eq() { return true; }\nprint(1);");
-    assert!(e.contains("this one takes none"), "{e}");
+    // Not at a use: `sort` and a map's probe call these from the runtime, so
+    // there is no call site in the program to hang the message on.
+    let e = err("type K { int v; }\nstr K.hash() { return str(v); }\nprint(1);");
+    assert!(e.contains("must be declared `int K.hash()`"), "{e}");
+    let e = err("type K { int v; }\nint K.hash(int salt) { return v; }\nprint(1);");
+    assert!(e.contains("this one takes a parameter"), "{e}");
     // An interface parameter is the one other honest reading of `cmp`, and
     // is allowed -- it is just not a `cmp` `sort` will take.
     let ok = ir("interface Ord { int cmp(Ord other); }\n\

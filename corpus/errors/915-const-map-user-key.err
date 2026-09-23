@@ -1,0 +1,4 @@
+corpus/errors/915-const-map-user-key.src:20:1: a module constant's map is laid out as static data, so the compiler hashes every key itself, and it can only hash an `int` or a `str`; `Key` hashes itself, with its own `hash` method, and that method does not exist until the program runs. Build the `Map<Key, int>` at run time instead -- a `const` LOCAL of that type is fine, because its table is copied rather than laid out.
+   |
+20 | const Map<Key, int> TABLE = {};
+   | ^

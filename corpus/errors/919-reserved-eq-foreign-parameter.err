@@ -1,4 +1,4 @@
-corpus/errors/919-reserved-eq-foreign-parameter.src:13:1: `Row.eq` is a reserved method and must be declared `bool Row.eq(Row other)`: this one takes an `Other`. The language calls it itself -- `==` and `!=` -- so its signature is not the type's to choose; if this method means something else, give it another name.
+corpus/errors/919-reserved-eq-foreign-parameter.src:13:1: `Row.eq` is a reserved method and must be declared `bool Row.eq(Row other)`: this one takes an `Other`. The language calls it itself -- `==`, `!=` and a `Map` keyed on this type -- so its signature is not the type's to choose; if this method means something else, give it another name.
    |
 13 | bool Row.eq(Other o) {
    | ^

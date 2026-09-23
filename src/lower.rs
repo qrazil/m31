@@ -312,17 +312,21 @@ pub fn check_destructor_decls(p: &Program) -> Result<(), Diag> {
 /// The reserved method names beside `drop`: the ones the language itself
 /// gives a meaning to, so a type may not use them for anything else.
 ///
-/// Both are what the comparison operators desugar to (§6.2), and `cmp` is
-/// also what the runtime reaches for when it is holding an object and needs
-/// to order it -- `sort` on a list of a user type. Because nothing at that
-/// use site writes the call, nothing at that use site can be told its
-/// signature is wrong, so the signature is fixed here and checked where the
-/// method is DECLARED.
+/// Each is a method the program does not call BY NAME. `cmp` and `eq` are
+/// what the comparison operators desugar to (§6.2), and all three are what
+/// the runtime reaches for when it is holding an object and needs to order
+/// it, hash it or compare it: `sort` on a list of a user type, and a `Map`
+/// keyed on one. Because nothing at the use site writes the call, nothing at
+/// the use site can be told its signature is wrong -- so the signature is
+/// fixed here, and checked where the method is DECLARED.
 ///
-/// `(name, the one signature it may have)`, with `T` standing for the
-/// receiver type.
-const RESERVED_METHODS: &[(&str, &str)] =
-    &[("cmp", "int T.cmp(T other)"), ("eq", "bool T.eq(T other)")];
+/// `(name, the one signature, what the result means)`, with `T` standing for
+/// the receiver type.
+const RESERVED_METHODS: &[(&str, &str)] = &[
+    ("cmp", "int T.cmp(T other)"),
+    ("eq", "bool T.eq(T other)"),
+    ("hash", "int T.hash()"),
+];
 
 /// A reserved method may have exactly one shape, on the program as written
 /// -- before monomorphisation, for the reason `check_destructor_decls` gives.
@@ -337,13 +341,14 @@ const RESERVED_METHODS: &[(&str, &str)] =
 /// the line that wrote it.
 ///
 /// The shape rules, and why each:
-///   - not `static`: both act on a receiver; a static one has none.
-///   - no type parameters of its own: the runtime calls `cmp` through one
+///   - not `static`: all three act on a receiver; a static one has none.
+///   - no type parameters of its own: the runtime calls it through one
 ///     pointer, so there is no call site to infer them from.
-///   - exactly one parameter, not optional, of the receiver's own type -- or
-///     of an interface, which is the other honest reading and is spelled out
-///     at the check itself.
-///   - `int` from `cmp` (negative, zero, positive), `bool` from `eq`.
+///   - `cmp` and `eq` take exactly one parameter, not optional, of the
+///     receiver's own type -- or of an interface, which is the other honest
+///     reading and is spelled out at the check itself.
+///   - `int` from `cmp` (negative, zero, positive), `bool` from `eq`, `int`
+///     from `hash`.
 ///
 /// An interface may require them: `interface Ord { int cmp(Ord other); }` is
 /// an ordinary one-method interface, and the same shape rule applies with
@@ -378,10 +383,10 @@ fn check_reserved_shape(p: &Program, f: &Func, recv: &str, module: &str) -> Resu
                  not the type's to choose; if this method means something else, \
                  give it another name.",
                 f.name,
-                if f.name == "cmp" {
-                    "`<`, `<=`, `>`, `>=` and `sort`"
-                } else {
-                    "`==` and `!=`"
+                match f.name.as_str() {
+                    "cmp" => "`<`, `<=`, `>`, `>=` and `sort`",
+                    "eq" => "`==`, `!=` and a `Map` keyed on this type",
+                    _ => "a `Map` keyed on this type",
                 }
             ),
         )
@@ -397,9 +402,10 @@ fn check_reserved_shape(p: &Program, f: &Func, recv: &str, module: &str) -> Resu
                 .to_string(),
         );
     }
-    if f.params.len() != 1 {
+    if f.params.len() != usize::from(f.name != "hash") {
         return refuse(match f.params.len() {
             0 => "this one takes none".to_string(),
+            1 => "this one takes a parameter".to_string(),
             n => format!("this one takes {n} parameters"),
         });
     }
@@ -2500,6 +2506,8 @@ impl Lowerer {
                 // Filled in once every method is known, beside the vtable.
                 destructor: None,
                 cmp: None,
+                hash: None,
+                eq: None,
                 resource: None,
             });
             self.distinct_base.push(t.distinct_base);
@@ -2728,13 +2736,15 @@ impl Lowerer {
                 })
                 .collect();
             self.typedefs[i].vtable = vt;
-            // `cmp` goes beside the destructor, for the same reason: the
-            // RUNTIME calls it, so it needs the pointer in the TypeInfo.
-            // Recorded for every type that has one, whether or not this
-            // program sorts it -- one name in a static initialiser costs
-            // nothing, and making it conditional would mean the TypeInfo
-            // depended on the program's uses of the type.
+            // The reserved methods go beside the destructor, for the same
+            // reason: the RUNTIME calls them, so it needs the pointer in the
+            // TypeInfo. Recorded for every type that has one, whether or not
+            // this program sorts or keys on it -- one `(CmpFn)` in a static
+            // initialiser costs nothing, and making it conditional would
+            // mean the TypeInfo depended on the program's uses of the type.
             self.typedefs[i].cmp = self.reserved_method(i as u32, "cmp");
+            self.typedefs[i].hash = self.reserved_method(i as u32, "hash");
+            self.typedefs[i].eq = self.reserved_method(i as u32, "eq");
             // `check_destructor_decls` has already refused every other shape
             // and every other kind of type, and forwarders never carry the
             // name, so a method of this name here is the type's own
@@ -3196,8 +3206,8 @@ impl Lowerer {
         Ok(())
     }
 
-    /// The IR name of a reserved method (`cmp`, `eq`) this type has with the
-    /// one signature it may have -- or None.
+    /// The IR name of a reserved method (`cmp`, `eq`, `hash`) this type has
+    /// with the one signature it may have -- or None.
     ///
     /// The check is on the SURFACE signature, not the IR one, and that is
     /// the whole point. `int P.cmp(P)` and `int Outer.cmp(Inner)` have the
@@ -3216,15 +3226,79 @@ impl Lowerer {
             return None;
         }
         let sig = self.sigs.get(&key)?;
-        if sig.params.len() != 1 {
+        if sig.params.len() != usize::from(name != "hash") {
             return None;
         }
-        let p = &sig.params[0];
-        if p.is_optional() || self.tdef_of(p.ty) != Some(tid) {
-            return None;
+        if let Some(p) = sig.params.first() {
+            if p.is_optional() || self.tdef_of(p.ty) != Some(tid) {
+                return None;
+            }
         }
         let want = if name == "eq" { Ty::Bool } else { Ty::Int };
         (sig.ret == want).then_some(key)
+    }
+
+    /// Which `MapKey` (runtime/rt.h) a key type is, refusing one that is
+    /// none of them.
+    ///
+    /// An `int` or a `str` the runtime hashes itself. Anything else has to
+    /// hash and compare ITSELF, through the two reserved methods the
+    /// compiler stores in its TypeInfo -- so the rule is the one §6.2
+    /// already uses for operators: declare the methods and the feature
+    /// works. `eq` is the method `==` already desugars to, which is what
+    /// keeps a map and the operator from disagreeing about which keys are
+    /// the same one; `hash` is the only new name.
+    fn map_key_kind(&mut self, k: Ty, span: Span) -> Result<i64, Diag> {
+        let base = self.underlying(k);
+        match base {
+            Ty::Int => return Ok(0),
+            Ty::Str => return Ok(1),
+            _ => {}
+        }
+        let shown = self.tyname(k);
+        let Some(tid) = self.tdef_of(base) else {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "a map key is an `int`, a `str`, or a type that declares both \
+                     `int T.hash()` and `bool T.eq(T other)`; `{shown}` is none of those"
+                ),
+            ));
+        };
+        // Same reason as `sort`: the runtime hands `eq` two keys, and an
+        // interface's two keys can be different types.
+        if self.typedefs[tid as usize].is_interface {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "a map hashes and compares each key through its own type, and \
+                     `{shown}` is an interface: two keys can be different types, and \
+                     one's `eq` would be handed the other. Key the map on the concrete \
+                     type instead."
+                ),
+            ));
+        }
+        let missing: Vec<&str> = ["hash", "eq"]
+            .into_iter()
+            .filter(|m| self.reserved_method(tid, m).is_none())
+            .collect();
+        if !missing.is_empty() {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "a map key is an `int`, a `str`, or a type that declares both \
+                     `int {shown}.hash()` and `bool {shown}.eq({shown} other)`, and that \
+                     hashes equal keys equally; {}",
+                    self.reserved_missing(tid, &missing)
+                ),
+            ));
+        }
+        // Both are found by name, so both obey privacy -- the same rule
+        // `to_str` and `cmp` follow. Using another module's type as a key
+        // therefore needs `pub` on both.
+        self.check_method_access(tid, "hash", span)?;
+        self.check_method_access(tid, "eq", span)?;
+        Ok(2)
     }
 
     /// Why `tid` cannot supply these reserved methods, as the tail of a
@@ -7216,12 +7290,13 @@ impl Lowerer {
             // always gave -- before lowering any argument, so nothing is
             // evaluated twice.
         }
-        if tname.starts_with("Map$") && !self.building_literal {
-            // The key type is still checked, because `{}` reaches this path
-            // with the flag set and a bad key type must be caught either way.
-            let (k, _) = self.map_kv(ty).expect("a map has a key and a value");
-            let ku = self.underlying(k);
-            if ku == Ty::Int || ku == Ty::Str {
+        if tname.starts_with("Map$") {
+            let (k, v) = self.map_kv(ty).expect("a map has a key and a value");
+            // The key type is checked BEFORE the spelling, and on the `{}`
+            // path too: a bad key type must be caught either way, and it is
+            // the more useful of the two things to be told.
+            let kind = self.map_key_kind(k, span)?;
+            if !self.building_literal {
                 return Err(Diag::new(
                     span,
                     format!(
@@ -7230,25 +7305,14 @@ impl Lowerer {
                     ),
                 ));
             }
-        }
-        if tname.starts_with("Map$") {
-            let (k, v) = self.map_kv(ty).expect("a map has a key and a value");
-            let ku = self.underlying(k);
-            if ku != Ty::Int && ku != Ty::Str {
-                return Err(Diag::new(
-                    span,
-                    format!(
-                        "a map key must be int or str, found {}; hashing a user \
-                         type would need a Hashable interface, which does not exist yet",
-                        self.tyname(k)
-                    ),
-                ));
-            }
             if !args.pos.is_empty() || !args.named.is_empty() {
                 return Err(Diag::new(span, "a map takes no arguments"));
             }
-            let mut flags = Vec::new();
-            for b in [ku == Ty::Str, self.is_ref(k), self.is_ref(v)] {
+            // `MapKey`, then the two refcount flags (runtime/rt.h).
+            let kv = self.new_val(IrTy::I64);
+            self.push(Inst::IConst { dst: kv, val: kind });
+            let mut flags = vec![kv];
+            for b in [self.is_ref(k), self.is_ref(v)] {
                 let f = self.new_val(IrTy::I1);
                 self.push(Inst::BConst { dst: f, val: b });
                 flags.push(f);

@@ -69,22 +69,25 @@ typedef void (*AnyFn)(void);
  * itself, so theirs is NULL. `ctx` is the runtime's, opaque here. */
 typedef Obj *(*CopyFn)(Obj *o, void *ctx);
 
-/* A method the RUNTIME itself calls on a user type, found by reserved name
- * the way `drop` above already is.
+/* The three methods the RUNTIME itself calls on a user type, found by
+ * reserved name the way `drop` above already is.
  *
- * `sort` needs an ordering, and the runtime is holding the object: it has
- * the header, so it has the TypeInfo, so a pointer stored here is everything
- * it is missing. It lives in the TypeInfo rather than at a fixed index at
- * the head of the vtable (the shape docs/closures-decision.md sketched) for
- * two reasons: a field has a real prototype, so the C compiler checks the
- * signature at every call instead of a hard-coded slot number having to
- * agree between src/lower.rs and this file; and a program with no interfaces
- * at all keeps its empty vtable.
+ * `sort` needs an ordering and a Map keyed on a user type needs a hash and
+ * an equality, and in all three cases the runtime is holding the object: it
+ * has the header, so it has the TypeInfo, so a pointer stored here is
+ * everything it is missing. They live in the TypeInfo rather than at fixed
+ * indices at the head of the vtable (the shape docs/closures-decision.md
+ * sketched) for two reasons: a field has a real prototype, so the C compiler
+ * checks the signature at every call instead of a hard-coded slot number
+ * having to agree between src/lower.rs and this file; and a program with no
+ * interfaces at all keeps its empty vtable.
  *
  * NULL when the type declares no such method. The compiler refuses any
  * program that would need one it has not got, so a NULL reaching a call here
  * is a compiler bug -- the runtime traps rather than jumping through it. */
-typedef int64_t (*CmpFn)(Obj *a, Obj *b);  /* int T.cmp(T other) */
+typedef int64_t (*CmpFn)(Obj *a, Obj *b);  /* int  T.cmp(T other)  */
+typedef int64_t (*HashFn)(Obj *o);         /* int  T.hash()        */
+typedef bool (*EqFn)(Obj *a, Obj *b);      /* bool T.eq(T other)   */
 
 typedef struct TypeInfo {
     DropFn       drop;
@@ -98,8 +101,10 @@ typedef struct TypeInfo {
      * (docs/destructors-decision.md, "A resource cannot be copied"). The
      * runtime's own types never own one. */
     const char  *resource;
-    /* The reserved-name `cmp`, or NULL. See the typedef above. */
+    /* The reserved-name methods, or NULL. See the typedefs above. */
     CmpFn        cmp;
+    HashFn       hash;
+    EqFn         eq;
 } TypeInfo;
 
 /* Every heap object starts with this. Two words: the count, and a pointer to
@@ -382,6 +387,15 @@ typedef struct {
     uint8_t state;
 } MapSlot;
 
+/* What a key is, which decides how it is hashed and compared. Three cases
+ * rather than the `key_is_str` flag this used to be, because a user type is
+ * a third kind and two bools would have had a fourth, meaningless state. */
+typedef enum {
+    MK_INT = 0, /* an int, a bool, a float's bits: hashed as a word    */
+    MK_STR = 1, /* a str: hashed over its bytes, compared by value     */
+    MK_OBJ = 2, /* a user type: its own `hash` and `eq` (rt.h TypeInfo)*/
+} MapKey;
+
 /* Public for the same reason as rt_arr_val_type: a module constant's map is
  * a static Map whose table the compiler has already hashed. Everything else
  * reaches a map through the functions below. */
@@ -391,14 +405,14 @@ typedef struct {
     int64_t  cap;
     int64_t  len;      /* live entries */
     int64_t  used;     /* live + tombstones, for the load factor */
-    bool     key_is_str;
+    uint8_t  key;      /* a MapKey */
     bool     key_is_ref;
     bool     val_is_ref;
 } Map;
 
 extern const TypeInfo rt_map_type;
 
-Obj    *rt_map_new(bool key_is_str, bool key_is_ref, bool val_is_ref);
+Obj    *rt_map_new(int64_t key, bool key_is_ref, bool val_is_ref);
 Obj    *rt_map_clone(Obj *o);         /* shallow, like rt_seq_clone */
 void    rt_map_set(Obj *o, int64_t k, int64_t v);
 int64_t rt_map_get(Obj *o, int64_t k);

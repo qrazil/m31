@@ -1,0 +1,9 @@
+// A static `hash` has no receiver to hash, and `Key.hash(..)` called on the
+// type would be a second meaning for the one name.
+type Key {
+    int v;
+}
+
+static int Key.hash(Key k) {
+    return k.v;
+}

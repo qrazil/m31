@@ -1,3 +1,8 @@
+// A user type CAN be a map key -- corpus/core/902 -- but only one that
+// declares both `int T.hash()` and `bool T.eq(T other)`. This one declares
+// neither, and is told about both in one message: a first error naming only
+// `hash`, followed by a second naming `eq` once that one is written, is two
+// rounds for one mistake.
 type P {
     int x;
 }

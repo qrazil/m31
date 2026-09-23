@@ -1,0 +1,99 @@
+// A `Map` keyed on a user type. The rule is the one §6.2 already uses for
+// operators -- declare the method and the feature works -- and there is no
+// `Hashable` interface to implement:
+//
+//     a map key is an `int`, a `str`, or a type that declares both
+//     `int T.hash()` and `bool T.eq(T other)`, and that hashes equal keys
+//     equally.
+//
+// `eq` is the method `==` already desugars to, so a map and the operator
+// cannot disagree about which keys are the same one. `hash` is the only new
+// name. Both are called BY THE RUNTIME, through pointers the compiler put in
+// the type's TypeInfo (runtime/rt.h) -- nothing is passed to the map.
+
+type Point {
+    int x;
+    int y;
+}
+
+bool Point.eq(Point o) {
+    return x == o.x && y == o.y;
+}
+
+int Point.hash() {
+    return x * 31 + y;
+}
+
+// Only so the keys can be printed in a fixed order below. A map key needs
+// `hash` and `eq`; it does not need `cmp`.
+int Point.cmp(Point o) {
+    if (x != o.x) {
+        return x - o.x;
+    }
+    return y - o.y;
+}
+
+str Point.to_str() {
+    return concat(concat(str(x), ","), str(y));
+}
+
+Map<Point, str> names = {};
+names.set(Point(0, 0), "origin");
+names.set(Point(1, 0), "east");
+names.set(Point(0, 1), "north");
+print(names.size());
+print(names.get(Point(1, 0)).or("?"));
+
+// A key equal to one already there REPLACES it, and it is `eq` that decides
+// -- a fresh Point, a different object, the same key.
+names.set(Point(1, 0), "right");
+print(names.size());
+print(names.get(Point(1, 0)).or("?"));
+
+// `contains` and `remove` ask the same question.
+print(names.contains(Point(0, 1)));
+print(names.contains(Point(9, 9)));
+names.remove(Point(0, 1));
+print(names.size());
+print(names.contains(Point(0, 1)));
+
+// Removing a key that is not there changes nothing.
+names.remove(Point(9, 9));
+print(names.size());
+
+// The map and `==` agree, because they call the same `eq`.
+Point a = Point(1, 0);
+Point b = Point(1, 0);
+print(a == b);
+print(names.contains(b));
+
+// Enough entries to force several growths, each one rehashing every key
+// through its own `hash`.
+Map<Point, int> big = {};
+int i = 0;
+while (i < 200) {
+    big.set(Point(i, i + 1), i * i);
+    i = i + 1;
+}
+print(big.size());
+print(big.get(Point(150, 151)).or(-1));
+print(big.contains(Point(150, 152)));
+
+// keys() hands back the keys as a List of the key type -- which, being a
+// type with a `cmp`, can then be sorted into a printable order. The table's
+// own order is not insertion order and nothing here depends on it.
+Map<Point, int> few = {};
+few.set(Point(2, 0), 1);
+few.set(Point(0, 0), 2);
+few.set(Point(1, 0), 3);
+List<Point> ks = few.keys();
+ks.sort();
+for (Point k in ks) {
+    print(k);
+}
+
+int total = 0;
+for (int v in few.values()) {
+    total = total + v;
+}
+print(total);

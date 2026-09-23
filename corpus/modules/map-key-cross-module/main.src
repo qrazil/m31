@@ -1,0 +1,22 @@
+// Another module's type as a map key, and as the element of a sorted list.
+// Neither `hash`, `eq` nor `cmp` is written here -- the runtime makes those
+// calls -- but both are found by name from here, so both must be `pub`.
+import lib;
+
+print(lib.count_here());
+
+Map<lib.Sku, str> where = {};
+where.set(lib.Sku(1, 1), "shelf a");
+where.set(lib.Sku(2, 3), "shelf b");
+where.set(lib.Sku(1, 1), "shelf c");
+print(where.size());
+print(where.get(lib.Sku(1, 1)).or("?"));
+print(where.contains(lib.Sku(2, 3)));
+where.remove(lib.Sku(2, 3));
+print(where.size());
+
+List<lib.Sku> ks = [lib.Sku(2, 3), lib.Sku(1, 9), lib.Sku(1, 2)];
+ks.sort();
+for (lib.Sku k in ks) {
+    print(k);
+}

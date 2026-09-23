@@ -122,14 +122,17 @@ the IR, which does not exist and is the same machinery closures need.
 works: `sort()` handles `int`, `float`, `str`, and any type that declares
 `int T.cmp(T other)` — the method `<` already uses. The runtime is holding
 the element and the element carries its type, so the compiler stores `cmp`
-in the type's metadata and the runtime calls it there. A paragraph of this
+in the type's metadata and the runtime calls it there. Two paragraphs of this
 record used to say otherwise; see docs/closures-decision.md §"Two of the
 three blocked features are not blocked by this".
 
-**A `Hashable` interface** so a `Map` can take a user type as a key is
-wanted, and is not free: `Map` is a runtime structure and hashing a user type
-means calling back into generated code. The same mechanism should answer it
--- the record above argues it does -- and it has not been built yet.
+**A `Hashable` interface** so a `Map` can take a user type as a key turned
+out not to be wanted at all. The same mechanism answers it, and the rule is
+the one §6.2 already uses for operators: a map key is an `int`, a `str`, or a
+type that declares `int T.hash()` and `bool T.eq(T other)`. `eq` already
+exists and already means what it must, so `hash` was the only new name. One
+refusal survives: a MODULE CONSTANT map keyed on a user type, whose table the
+compiler lays out as static data and therefore has to hash itself.
 
 ---
 
@@ -141,8 +144,8 @@ means calling back into generated code. The same mechanism should answer it
 4. `text`, once `io` has shown what a library's error type wants to look like.
 
 Of the three features this record once said were waiting on one mechanism,
-`sort()` on a user type was not: it shipped without one, against a
-reserved-method-name convention, and a `Map` keyed on a user type should go
-the same way. `spawn` should never take a closure at all
-(docs/closures-decision.md). What genuinely waits on a function reference is
-a `sort` that takes the comparison as an argument.
+only one was. `sort()` on a user type and a `Map` keyed on one both shipped
+without it, against a reserved-method-name convention; `spawn` should never
+take a closure (docs/closures-decision.md). What is left waiting on function
+references is a `sort` module that takes the comparison as an argument, which
+is a smaller claim than this section used to make.

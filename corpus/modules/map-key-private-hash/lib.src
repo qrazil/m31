@@ -1,0 +1,18 @@
+pub type Key {
+    int v;
+}
+
+pub bool Key.eq(Key o) {
+    return v == o.v;
+}
+
+// Not exported. The runtime makes the call, but the compiler finds the
+// method BY NAME at the line that builds the map -- the same lookup `print`
+// makes for `to_str` and `<` makes for `cmp` -- so the same rule applies.
+int Key.hash() {
+    return v;
+}
+
+pub Key make(int v) {
+    return Key(v);
+}
