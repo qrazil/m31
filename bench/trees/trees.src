@@ -1,0 +1,37 @@
+// Binary trees: allocate a lot, free a lot, touch little. The classic shape
+// for comparing memory management, and the one where reference counting is
+// most exposed -- every node is counted up and down, and freed the moment
+// its last reference goes rather than whenever a collector next runs.
+//
+// There is no null, so a tree is an enum: a Leaf, or a Branch of two trees.
+enum Tree {
+    Leaf;
+    Branch(Tree, Tree);
+}
+
+Tree build(int depth) {
+    if (depth == 0) {
+        return Tree.Leaf;
+    }
+    return Tree.Branch(build(depth - 1), build(depth - 1));
+}
+
+int check(Tree t) {
+    match (t) {
+        case Leaf: {
+            return 1;
+        }
+        case Branch(Tree l, Tree r): {
+            return 1 + check(l) + check(r);
+        }
+    }
+}
+
+int depth = 18;
+int total = 0;
+int i = 0;
+while (i < 16) {
+    total = total + check(build(depth));
+    i = i + 1;
+}
+print(total);
