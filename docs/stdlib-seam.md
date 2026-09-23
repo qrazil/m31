@@ -315,11 +315,11 @@ blocks the compiler as surely as it blocks `io`. The path is Go's:
 | `__env(str name, List<bytes> out)` | 1 and pushes the value as octets, or 0 if unset; `os.env` decodes |
 | `__exit(int code)` | flushes stdout, then `exit` -- the 0..255 check is in `lib/os.src` |
 | `__clock(List<int> out)` | pushes seconds and nanoseconds from ONE `CLOCK_REALTIME` reading |
-| `__entropy(int n, List<int> out)` | pushes n octets from `getentropy`; 0, or an errno |
+| `__entropy(int n, List<int> out)` | pushes n octets from `getentropy`; 0, or an errno. `rt_entropy` cuts the request into 256-octet calls, because that is all `getentropy` answers at once -- which is why `random`'s pool is 256 and not larger |
 
 There was a sixth, `__panic(str msg)`, the one that was not an OS fact: library
 source had no other way to say "this is a bug in the caller", and a library's
-own preconditions (`random.integer(3, 1)`, declaring `--help` on an
+own preconditions (`random`'s `integer(3, 1)`, declaring `--help` on an
 `args.Parser`, a timestamp outside `date`'s years) deserve a trap rather than
 a `Result` that docs/errors-decision.md says a caller's bug must not get. It
 is gone: that need was never the standard library's alone, and every program
@@ -328,7 +328,8 @@ library uses like any other program. Its runtime half, `rt_panic`, stayed.
 
 Everything above them is source: argv[0]'s inclusion, what unset means, the
 calendar, rejection sampling, PCG on the wrapping methods and bitwise
-operators, and the whole of `args`.
+operators, the pool that keeps `__entropy` to one call per 256 octets
+(`random.System`, holding an `io.Buffer`), and the whole of `args`.
 
 ---
 
@@ -445,13 +446,17 @@ and 2; the policy -- when to flush -- is in the library.
     read; a pipe takes the chunk loop.
   - **EINTR.** Every read and write loop retries on `-4`. `close` never
     does: on Linux the descriptor is gone by then.
-  - **`read_line` without state.** A module cannot hold a buffer between
-    calls, so `io.read_line()` does not read ahead at all: on a pipe or a
-    terminal it reads one byte per call to `read(2)`, as a shell's `read`
-    builtin does; on a seekable descriptor (`prog < file`) it reads a
-    growing chunk and seeks back to just past the newline. Either way the
-    rest of standard input is still there for `io.stdin()` or a child
-    process. Bulk line reading is `io.stdin()` + `read_until`, buffered.
+  - **No `read_line` without state.** A module cannot hold a buffer between
+    calls, so `io.read_line()` could not read ahead at all: on a pipe or a
+    terminal it read one byte per call to `read(2)`, as a shell's `read`
+    builtin does; on a seekable descriptor (`prog < file`) it read a
+    growing chunk and seeked back to just past the newline. That bought the
+    guarantee that the rest of standard input was still there for
+    `io.stdin()` or a child process, and nothing could make it cheap — the
+    cost *was* the contract. It is **removed**: line reading is
+    `io.read_line_of(stream, limit)`, written against `io.Stream`, and the
+    program holds the stream (`io.stdin()`, called once). The buffer lives
+    in the object, which is the answer everywhere else here too.
   - **Text vs octets.** `io.read` is `read_bytes` + strict `utf8()`,
     failing with `InvalidUtf8`; `io.read_bytes` is the file exactly. That
     is forced as much as chosen: `bytes.utf8()` is the language's only way

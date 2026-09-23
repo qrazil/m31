@@ -5,7 +5,7 @@ import random;
 // Every `fs` failure is an io.Error, and the named ones are the ones worth
 // branching on. Each line below says which errno the kernel gave and which
 // variant it became.
-str root = "/tmp/lang-corpus-fs-errors-" + random.hex(8);
+str root = "/tmp/lang-corpus-fs-errors-" + random.system().hex(8);
 
 void check(Result<bool, io.Error> r) {
     match (r) {

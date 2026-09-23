@@ -7,7 +7,6 @@
 //   io.write(path, s)          -> Result<int, Error>    replace the contents with text
 //   io.write_bytes(path, b)    -> Result<int, Error>    replace the contents with octets
 //   io.append(path, s)         -> Result<int, Error>    add text at the end
-//   io.read_line()             -> Option<str>           the next line of standard input
 //   io.eprint(s)               -> void                  a line to standard error
 //
 //   io.open(path, mode:, perm:)  -> Result<File, Error>
@@ -469,10 +468,15 @@ pub Result<File, Error> open(str path, Mode mode = Mode.Read, int perm = 0o666) 
 ///
 /// Each call is a new `File` with its own buffer, so call it once and keep
 /// it: two of them would each read ahead, and each would hold input the
-/// other never sees. For the same reason, do not mix it with `read_line`,
-/// which reads no further than the line it returns. (A module cannot hold
-/// state, so there is nowhere to keep the one shared `File` this wants to
-/// be.)
+/// other never sees. (A module cannot hold state, so there is nowhere to
+/// keep the one shared `File` this wants to be.)
+///
+/// Lines come off it with `read_line_of(s, limit)`. There is no
+/// `io.read_line()` and there was: a module-level line reader has nowhere to
+/// keep a buffer, so to leave the rest of the input for whoever reads next
+/// it had to read one byte per `read(2)` on a pipe. That contract cannot be
+/// made cheap, so it is gone rather than slow; the buffer lives here, in the
+/// `File` the program holds.
 pub File stdin() {
     return File(0, true, false);
 }
@@ -848,91 +852,6 @@ pub Result<int, Error> write_bytes(str path, bytes data) {
 }
 
 // --- the standard streams --------------------------------------------------
-/// The next line of standard input without its line ending, or None at the
-/// end of input. A `\r\n` ending is removed whole, so input from Windows
-/// reads the same, and a last line with no newline is still a line.
-///
-/// **It never reads past the line it returns**, so whatever reads standard
-/// input next -- `io.stdin()`, or a program this one starts -- sees the
-/// rest. That costs a module with no state its buffer: on a pipe or a
-/// terminal it reads one byte at a time, the way a shell's `read` does and
-/// for the same reason. On a regular file (`prog < input.txt`) it reads
-/// ahead in a growing chunk and seeks back to just past the newline, which
-/// is two system calls a line whatever the line's length. For a large
-/// piped input, `io.stdin()` and `read_until` buffer properly.
-///
-/// A read error ends the input, and so does a line that is not valid
-/// UTF-8: an `Option` has no room to say why, which is the trade
-/// `parse_int` makes too. A program that must tell those apart reads
-/// `io.stdin()` and decodes for itself.
-pub Option<str> read_line() {
-    bytes line = [];
-    bool any = false;
-    int here = __seek(0, 0, 1);
-    if (here >= 0) {
-        bytes chunk = [0; 128];
-        int consumed = 0;
-        bool done = false;
-        while (!done) {
-            int r = __read(0, chunk, 0, chunk.size());
-            if (r == -4) {
-                continue;
-            }
-            if (r <= 0) {
-                break;
-            }
-            any = true;
-            int i = 0;
-            while (i < r && chunk[i] != 10) {
-                i = i + 1;
-            }
-            if (i < r) {
-                line.extend(chunk.substr(0, i));
-                // Hand back everything after the newline. A seekable
-                // descriptor that then refuses the seek has nothing better
-                // to offer; the rest of that chunk is lost either way.
-                int back = __seek(0, here + consumed + i + 1, 0);
-                done = true;
-            } else {
-                line.extend(chunk.substr(0, r));
-                consumed = consumed + r;
-                // A long line is read in fewer, larger pieces.
-                if (chunk.size() < 65536) {
-                    chunk = [0; chunk.size() * 2];
-                }
-            }
-        }
-    } else {
-        bytes one = [0];
-        while (true) {
-            int r = __read(0, one, 0, 1);
-            if (r == -4) {
-                continue;
-            }
-            if (r <= 0 || one[0] == 10) {
-                any = any || r > 0;
-                break;
-            }
-            any = true;
-            line.push(one[0]);
-        }
-    }
-    if (!any) {
-        return Option<str>.None;
-    }
-    if (line.size() > 0 && line[line.size() - 1] == 13) {
-        int cr = line.pop();
-    }
-    match (line.utf8()) {
-        case Some(str s): {
-            return Option<str>.Some(s);
-        }
-        case None: {
-            return Option<str>.None;
-        }
-    }
-}
-
 /// Write a line to standard error. Standard output is flushed first, so the
 /// two interleave in the order the program wrote them. A failure to write
 /// to standard error has nobody left to report to, so it is not reported.
@@ -967,12 +886,17 @@ pub Result<int, Error> copy(Stream src, Stream dst) {
 /// The next line of `s` without its line ending, or `None` at the end of
 /// the stream. Reads at most `limit` bytes.
 ///
-/// The `\r\n` rule is `read_line`'s: the ending comes off whole, and a last
-/// line with no newline is still a line. What differs is that this one has
-/// room to say why it stopped -- text that is not UTF-8 is
-/// `Err(InvalidUtf8)` rather than the end of the input -- and that it reads
-/// through the stream's own buffer, so the next reader of that stream sees
-/// what follows the line and nothing is read twice.
+/// A `\r\n` ending comes off whole, so input written on Windows reads the
+/// same, and a last line with no newline is still a line. Text that is not
+/// UTF-8 is `Err(InvalidUtf8)` and not the end of the input: a `Result` has
+/// room to say why it stopped.
+///
+/// **This is the only line reader.** It reads through the stream's own
+/// buffer, so the next reader of that stream sees what follows the line,
+/// nothing is read twice, and a pipe costs one `read(2)` per buffer rather
+/// than one per byte. The `io.read_line()` that read standard input with no
+/// stream to hold the buffer is gone; `io.stdin()`, called once and kept, is
+/// the stream.
 ///
 /// `limit` is mandatory, as it is on `read_until` and for the same reason:
 /// a line that never ends is otherwise a request for all of memory. A line

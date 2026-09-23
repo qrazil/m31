@@ -84,15 +84,25 @@ match (io.write("", "x")) {
 }  // system error 22
 // Lines from standard input -- main.in beside this file. The second line
 // ends in \r\n and the last has no newline at all; both read the same.
+// One `io.stdin()`, made once and kept, because the buffer lives in it.
+io.File input = io.stdin();
 int count = 0;
 bool more = true;
 while (more) {
-    match (io.read_line()) {
-        case Some(str line): {
-            count = count + 1;
-            print(concat("[", concat(line, "]")));
+    match (io.read_line_of(input, 4096)) {
+        case Ok(Option<str> line): {
+            match (line) {
+                case Some(str text): {
+                    count = count + 1;
+                    print(concat("[", concat(text, "]")));
+                }
+                case None: {
+                    more = false;
+                }
+            }
         }
-        case None: {
+        case Err(io.Error e): {
+            print(e.to_str());
             more = false;
         }
     }

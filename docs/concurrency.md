@@ -253,7 +253,7 @@ for you is wrong.
 
 Everything said earlier about function colouring stands, and one consequence
 deserves more weight than it got: **for a language whose stdlib is written in
-itself, colouring forks the stdlib permanently.** The moment `read_line` or
+itself, colouring forks the stdlib permanently.** The moment `read_line_of` or
 `Socket.recv` can suspend, they are coloured, and so is every function that
 transitively calls them — so there is no uncoloured `sort` that takes a
 comparator which might do IO. That is the "two ecosystems" complaint Nim users

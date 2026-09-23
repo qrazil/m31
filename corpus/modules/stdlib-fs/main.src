@@ -6,7 +6,7 @@ import random;
 // random source so that two corpus runs at once cannot collide, printed
 // relative to that root so the output does not depend on the name, and
 // removed at the end by the verb under test.
-str root = "/tmp/lang-corpus-fs-" + random.hex(8);
+str root = "/tmp/lang-corpus-fs-" + random.system().hex(8);
 
 str rel(str root, str p) {
     return p.substr(root.size(), p.size());

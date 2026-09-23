@@ -38,7 +38,7 @@ taste:
 
 > **Colouring forks the standard library permanently.**
 
-The moment `read_line` can suspend, it is coloured, and so is every function
+The moment `read_line_of` can suspend, it is coloured, and so is every function
 that transitively calls it. There is no uncoloured `sort` that takes a
 comparator which might do IO. The stdlib splits in two and never rejoins —
 which is the complaint Nim users have, structurally, and the reason JavaScript

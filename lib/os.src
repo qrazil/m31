@@ -84,9 +84,8 @@ pub List<bytes> args_bytes() {
 /// A value that is not valid UTF-8 is None as well: there is no text by that
 /// name, which is the question asked, and a program that falls back to a
 /// default when `LANG` is unset does the right thing when it is not text.
-/// `env_bytes` tells the two apart; `io.read_line` makes the same trade for
-/// a line. `args` cannot, because a list cannot leave one element out
-/// without moving the rest.
+/// `env_bytes` tells the two apart. `args` cannot, because a list cannot
+/// leave one element out without moving the rest.
 ///
 /// Oro spells this `os.env` too, having renamed Python's `os.environ`. There
 /// is no way to set or list variables: a program that needs to change the
