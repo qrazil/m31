@@ -1,0 +1,7 @@
+server read 4194304
+server got the same bytes: true
+server wrote 4194304
+client wrote 4194304
+client read 4194304
+client got the same bytes: true
+a stalled write: timed out

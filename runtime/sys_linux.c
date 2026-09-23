@@ -70,6 +70,7 @@
 #define NR_ppoll        271
 #define NR_accept4      288
 #define NR_renameat2    316
+#define NR_rt_sigaction  13
 #define NR_getrandom    318
 #define NR_statx        332
 #elif defined(__aarch64__) || (defined(__riscv) && __riscv_xlen == 64)
@@ -100,6 +101,7 @@
 #define NR_renameat2    276
 #define NR_getrandom    278
 #define NR_statx        291
+#define NR_rt_sigaction 134
 #else
 #error "RT_SYS_RAW supports x86-64, aarch64 and riscv64 Linux; use the default libc backend here"
 #endif
@@ -675,6 +677,60 @@ int64_t sys_resolve(const char *host, int64_t port, int64_t family,
     (void)out;
     (void)cap;
     return -SYS_ENOSYS;
+}
+
+/* ---- the one signal call ------------------------------------------------
+ *
+ * SIGPIPE is 13 on x86-64, aarch64 and riscv64 -- the generic numbering,
+ * which only alpha, mips and parisc depart from, and none of those is a
+ * target here. SIG_IGN is the constant 1 cast to a handler pointer, which is
+ * the kernel's own convention and not the C library's invention.
+ *
+ * The struct is the KERNEL's `struct sigaction`, which is not the C
+ * library's: sa_mask is a bare 8-byte word rather than glibc's 128-byte
+ * sigset_t, the fields are in a different order, and x86-64 has a
+ * sa_restorer between the flags and the mask that the generic architectures
+ * do not (the kernel spells this __ARCH_HAS_SA_RESTORER). Getting the layout
+ * wrong would not fail to compile, so each field is placed against the
+ * kernel header it comes from and the size is asserted below.
+ *
+ * sa_restorer is left NULL and SA_RESTORER is left out of the flags, which
+ * looks like the classic raw-syscall bug and is not one here. The restorer
+ * is the address the kernel makes a HANDLER return to, so that the handler's
+ * return runs rt_sigreturn; x86-64 refuses to deliver a signal without one
+ * (arch/x86/kernel/signal_64.c checks SA_RESTORER in setup_rt_frame). A
+ * SIG_IGN disposition is never delivered -- the kernel drops the signal in
+ * sig_task_ignored before any frame is built -- so no restorer can ever be
+ * reached. rt_sigaction itself does not check the flag: do_sigaction only
+ * validates the signal number. That is the whole reason this file can ignore
+ * SIGPIPE without a line of new assembly, and the reason the layer offers
+ * only this disposition rather than sigaction in general (sys.h).
+ *
+ * The fourth argument is sigsetsize, and the kernel refuses anything but the
+ * size of ITS sigset_t -- 8 bytes on all three architectures. */
+#define K_SIGPIPE 13
+#define K_SIG_IGN 1
+
+typedef struct {
+    int64_t  handler;
+    uint64_t flags;
+#if defined(__x86_64__)
+    int64_t  restorer;
+#endif
+    uint64_t mask;
+} KSigaction;
+
+#if defined(__x86_64__)
+_Static_assert(sizeof(KSigaction) == 32, "x86-64 kernel sigaction is 32 bytes");
+#else
+_Static_assert(sizeof(KSigaction) == 24, "generic kernel sigaction is 24 bytes");
+#endif
+
+int64_t sys_ignore_sigpipe(void) {
+    KSigaction act;
+    zero_bytes((unsigned char *)&act, (int64_t)sizeof act);
+    act.handler = K_SIG_IGN;
+    return sc(NR_rt_sigaction, K_SIGPIPE, P(&act), 0, (int64_t)sizeof act.mask, 0, 0);
 }
 
 /* ---- time, randomness, exit -------------------------------------------- */

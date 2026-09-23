@@ -1,0 +1,10 @@
+listening on 127.0.0.1
+kernel chose a port: true
+server peer ip 127.0.0.1
+a Conn fits an io.Stream slot: 1
+server line hello
+server copied 5 bytes: 00fffe4100
+client wrote 11
+client read back 00fffe4100
+client peer ip 127.0.0.1
+client got its body back: true

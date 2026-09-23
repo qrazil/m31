@@ -319,11 +319,35 @@ int64_t sys_listdir(const char *path, char *buf, int64_t cap);    /* bytes neede
  *
  * The one thing a socket does that a file does not is raise SIGPIPE: writing
  * to a connection whose peer has gone away kills the process by default.
- * This layer does not install signal handlers (docs/sys-layer.md §2 lists
- * rt_sigaction as not built yet), so a `net` module must set SIGPIPE to
- * ignore at startup and read the -SYS_EPIPE instead. Until it can, a program
- * that writes to a dead peer dies. This is written down rather than worked
- * around because there is no honest way to work around it from here. */
+ * sys_ignore_sigpipe below is how that is turned off, and `net` calls it
+ * before its first write. */
+
+/* Set SIGPIPE's disposition to "ignore", so that a write to a connection
+ * whose peer has gone away returns -SYS_EPIPE instead of killing the
+ * process. Idempotent, and safe to call from any thread: a disposition is
+ * per PROCESS, not per thread, so one call covers every socket a program
+ * will ever write to.
+ *
+ * This is the layer's ONLY signal call, and it is deliberately not a general
+ * sigaction. A general one would have to carry a function pointer into the
+ * kernel, which means the restorer trampoline -- a piece of per-architecture
+ * assembly whose only job is to make `rt_sigreturn` happen when a handler
+ * returns -- plus a decision about which of the program's threads runs the
+ * handler and what it is allowed to touch. None of that is needed to say
+ * "do not kill me": SIG_IGN is never DELIVERED, so no frame is ever built
+ * and no restorer is ever called. Narrowing the call to the one disposition
+ * that needs no handler is what lets both backends implement it in a dozen
+ * lines and be sure they agree.
+ *
+ * Ignoring rather than blocking, and process-wide rather than around each
+ * write, for the reason Go, Rust and libcurl all landed on the same answer:
+ * the alternative is MSG_NOSIGNAL on every send (Linux-only, and it does not
+ * cover a write(2) to a socket, which is what lib/io.src's __write does) or
+ * pthread_sigmask around every write (three system calls per write, and it
+ * still leaves the signal pending). A program that genuinely wants SIGPIPE
+ * to kill it -- a filter at the end of a shell pipeline -- is not a program
+ * that has imported `net`. */
+int64_t sys_ignore_sigpipe(void);                                    /* 0 */
 
 /* A new socket. `type` is SYS_SOCK_STREAM or SYS_SOCK_DGRAM, optionally
  * OR'd with SYS_SOCK_NONBLOCK; `protocol` is 0 for the type's usual one. */

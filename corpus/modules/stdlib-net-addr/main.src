@@ -1,0 +1,181 @@
+import net;
+
+// Every form of a literal IP address this parser is asked about, and what it
+// makes of it. **The expected values are Python's `ipaddress`**: each line is
+// `str(ipaddress.ip_address(text))`, or `-` where it raised. The generator is
+// in the commit that added this file; the table is checked in rather than
+// generated at build time, because a corpus expectation that is computed by
+// the thing it is meant to check is not an expectation.
+//
+// There is exactly one deliberate difference from the oracle, marked at the
+// end of the table: a **zone id** (`fe80::1%eth0`) is an address Python keeps
+// and `net.parse_ip` refuses, because a zone names an interface on one
+// machine and `SysAddr` (runtime/sys.h) has no field to carry it. Refusing
+// text the module would have to throw away beats accepting it.
+//
+// The second half of the file is the round trip, which is the property that
+// makes the printer worth having: for every address that parses, printing it
+// and parsing that must give the same sixteen (or four) octets back. A
+// canonical form that did not round-trip would be a second spelling of an
+// address rather than the spelling of it.
+
+str show(str text) {
+    match (net.parse_ip(text)) {
+        case Some(net.Ip a): {
+            return a.to_str();
+        }
+        case None: {
+            return "-";
+        }
+    }
+}
+
+// Parse, print, parse again, and compare the octets -- not the text, so that
+// a printer which lost a byte and a parser which invented the same one back
+// could not agree with each other.
+bool round_trips(str text) {
+    match (net.parse_ip(text)) {
+        case Some(net.Ip first): {
+            match (net.parse_ip(first.to_str())) {
+                case Some(net.Ip again): {
+                    return first == again && first.to_str() == again.to_str();
+                }
+                case None: {
+                    return false;
+                }
+            }
+        }
+        case None: {
+            // Nothing to round-trip; not a failure of the printer.
+            return true;
+        }
+    }
+}
+
+const Array<str> CASES = [
+    "0.0.0.0",
+    "127.0.0.1",
+    "255.255.255.255",
+    "1.2.3.4",
+    "192.168.0.1",
+    "10.0.0.255",
+    "8.8.8.8",
+    "0.0.0.1",
+    "9.8.7.6",
+    "",
+    " ",
+    "1.2.3",
+    "1.2.3.4.5",
+    "256.0.0.1",
+    "1.2.3.256",
+    "-1.2.3.4",
+    "1.2.3.-4",
+    "01.2.3.4",
+    "1.02.3.4",
+    "1.2.3.04",
+    "00.0.0.0",
+    "1.2.3.4 ",
+    " 1.2.3.4",
+    "1.2.3.a",
+    "1.2..4",
+    ".1.2.3",
+    "1.2.3.",
+    "1.2.3.4.",
+    "+1.2.3.4",
+    "1.2.3.+4",
+    "0x1.2.3.4",
+    "1_2.3.4.5",
+    "1.2.3.400",
+    "999.999.999.999",
+    "1.2.3.4x",
+    "::",
+    "::1",
+    "1::",
+    "1:2:3:4:5:6:7:8",
+    "2001:db8::1",
+    "2001:0db8:0000:0000:0000:0000:0000:0001",
+    "fe80::1",
+    "::ffff:1.2.3.4",
+    "::1.2.3.4",
+    "64:ff9b::1.2.3.4",
+    "1:2:3:4:5:6:7::",
+    "::2:3:4:5:6:7:8",
+    "1::8",
+    "1:2::8",
+    "2001:db8:0:0:1:0:0:1",
+    "0:0:0:0:0:0:0:0",
+    "0:0:0:0:0:0:0:1",
+    "ABCD:EF01:2345:6789:ABCD:EF01:2345:6789",
+    "abcd:ef01:2345:6789:abcd:ef01:2345:6789",
+    "2001:db8:aaaa:bbbb:cccc:dddd:0:1",
+    "1:0:0:2:0:0:0:3",
+    "1:0:0:2:0:0:3:0",
+    "0:1:0:0:2:0:0:0",
+    "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+    "::ffff:0:0",
+    "0:0:0:0:0:ffff:102:304",
+    "1:2:3:4:5:6:1.2.3.4",
+    "::ffff:255.255.255.255",
+    "0001:0002::0003",
+    ":",
+    ":::",
+    "1:::2",
+    "1::2::3",
+    "::1::",
+    "1:2:3:4:5:6:7:8:9",
+    ":1:2:3:4:5:6:7",
+    "1:2:3:4:5:6:7:",
+    "12345::",
+    "1::2::",
+    "1:2:3:4:5:6:7:8::",
+    "::1:2:3:4:5:6:7:8",
+    "1.2.3.4::",
+    "::1.2.3",
+    "::1.2.3.4.5",
+    "::ffff:1.2.3.256",
+    "::g",
+    "1::g",
+    "[::1]",
+    "::1 ",
+    " ::1",
+    "1:2:3:4:5:6:1.2.3.4.5",
+    "1:2:3:4:5:6:7:1.2.3.4",
+    "::00000",
+    "1:2:3:4:5:6:7:8:",
+    "0:0:0:0:0:0:0:0:0",
+    "::-1",
+    "1::2:3:4:5:6:7:8",
+    "1:2:3:4:5:6:7",
+    "fe80::1%eth0"
+];
+
+int bad = 0;
+for (str t in CASES) {
+    print("[" + t + "] -> " + show(t));
+    if (!round_trips(t)) {
+        bad = bad + 1;
+    }
+}
+print("round trips that failed: " + bad.to_str());
+// The family follows the text form, and an IPv4 address is four octets
+// while the IPv4-mapped IPv6 address carrying the same number is sixteen --
+// so the two are not equal, which is the rule `Ip.eq` documents.
+match (net.parse_ip("1.2.3.4")) {
+    case Some(net.Ip four): {
+        print("1.2.3.4 is v6: " + four.is_v6().to_str());
+        print("1.2.3.4 octets: " + four.octets().hex());
+        match (net.parse_ip("::ffff:1.2.3.4")) {
+            case Some(net.Ip mapped): {
+                print("::ffff:1.2.3.4 is v6: " + mapped.is_v6().to_str());
+                bool same = four == mapped;
+                print("and they are the same address: " + same.to_str());
+            }
+            case None: {
+                print("::ffff:1.2.3.4 did not parse");
+            }
+        }
+    }
+    case None: {
+        print("1.2.3.4 did not parse");
+    }
+}

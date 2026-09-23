@@ -1,0 +1,236 @@
+import net;
+import io;
+
+// The ways a connection goes wrong, each one as a value a program can
+// branch on rather than a signal or a crash.
+//
+//   - a connect to a port nothing is listening on   -> Refused
+//   - a bind to a port already listening            -> InUse
+//   - a read that waits longer than its timeout     -> TimedOut
+//   - a write to a peer that has closed             -> Reset, and NOT a dead
+//     process: the module ignores SIGPIPE when it makes a socket, so the
+//     kernel hands back EPIPE instead of killing this program
+//   - a host name, which the raw system-call backend cannot resolve at all
+//
+// The last one is the only place the two sys-layer backends differ, so it is
+// asked in a form whose answer is the same on both: "refused, or no resolver
+// in this build" is true either way. The wording a program actually sees for
+// the raw backend is checked separately, through `from_errno(38)`, which
+// needs no network at all.
+//
+// Nothing here names a port. Everything is a port 0 bind read back with
+// `local()`, so the corpus can run twice at once.
+
+str why(Result<bytes, io.Error> r) {
+    match (r) {
+        case Ok(bytes b): {
+            return "read " + b.size().to_str() + " bytes";
+        }
+        case Err(io.Error e): {
+            // Through a stream method a socket failure arrives as
+            // io.Error.Other(errno); error_of turns it back into this
+            // module's vocabulary with the number intact.
+            return net.error_of(e).to_str();
+        }
+    }
+}
+
+bool ok_or_die(Result<bool, net.Error> r) {
+    match (r) {
+        case Ok(bool b): {
+            return b;
+        }
+        case Err(net.Error e): {
+            trap("socket: " + e.to_str());
+        }
+    }
+}
+
+// A connect that must fail: the reason, or a note that it unexpectedly
+// worked. Used where the outcome is the point and the connection is not.
+str connect_fails(str host, int port) {
+    match (net.connect(host, port)) {
+        case Ok(net.Conn c): {
+            return "connected";
+        }
+        case Err(net.Error e): {
+            return e.to_str();
+        }
+    }
+}
+
+// The one question about a host name whose answer is the same on both
+// sys-layer backends: either the name resolved and nothing was listening,
+// or this build has no resolver. Anything else is a real failure.
+bool refused_or_unresolvable(str host, int port) {
+    match (net.connect(host, port)) {
+        case Ok(net.Conn c): {
+            return false;
+        }
+        case Err(net.Error e): {
+            match (e) {
+                case Refused: {
+                    return true;
+                }
+                case NameNotFound: {
+                    return true;
+                }
+                case Other(int code): {
+                    return code == 38;
+                }
+                case TimedOut: {
+                    return false;
+                }
+                case Unreachable: {
+                    return false;
+                }
+                case Reset: {
+                    return false;
+                }
+                case InUse: {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+// --- what every errno this module names comes out as ------------------------
+// No network involved: the mapping is language source and can be read
+// straight. The last line is the message a program meets on the raw backend
+// when it asks for a host name, which is the whole answer to "what does a
+// program see when __resolve is refused".
+print("111 -> " + net.from_errno(111).to_str());
+print("110 -> " + net.from_errno(110).to_str());
+print(" 11 -> " + net.from_errno(11).to_str());
+print("101 -> " + net.from_errno(101).to_str());
+print("104 -> " + net.from_errno(104).to_str());
+print(" 32 -> " + net.from_errno(32).to_str());
+print(" 98 -> " + net.from_errno(98).to_str());
+print("  2 -> " + net.from_errno(2).to_str());
+print("  5 -> " + net.from_errno(5).to_str());
+print(" 38 -> " + net.from_errno(38).to_str());
+
+void checks(net.Listener ln) {
+    int port = ln.local().port();
+    // --- a port already listening ---
+    // SO_REUSEADDR is on, and it still does not let two sockets listen on
+    // one port -- that is SO_REUSEPORT, which this module does not offer.
+    print("bind a port in use: " + listen_fails("127.0.0.1", port));
+    // --- a connect to a port with nothing on it ---
+    // A second listener is opened and closed to get a port that was free a
+    // moment ago; the kernel does not hand the same one out again while
+    // this runs.
+    print("connect to a closed port: " + connect_fails("127.0.0.1", free_port()));
+    // --- a read that gives up ---
+    match (net.connect("127.0.0.1", port)) {
+        case Ok(net.Conn c): {
+            match (ln.accept()) {
+                case Ok(net.Conn s): {
+                    timeout_and_death(c, s);
+                }
+                case Err(net.Error e): {
+                    trap("accept: " + e.to_str());
+                }
+            }
+        }
+        case Err(net.Error e): {
+            trap("connect: " + e.to_str());
+        }
+    }
+    // --- a host name ---
+    // `.invalid` is reserved by RFC 2606 and must never resolve, so the
+    // first of these is "no such host" on the C library backend; the second
+    // is a name that does resolve there. Both are "no resolver" on the raw
+    // backend, and the question is asked so that either answer is the same
+    // line of output.
+    print("a reserved name is unusable: " + refused_or_unresolvable("no-such-host.invalid", 80).to_str());
+    print("localhost is refused or unresolvable: " + refused_or_unresolvable("localhost", free_port()).to_str());
+}
+
+void timeout_and_death(net.Conn c, net.Conn s) {
+    // Nothing is coming: the read waits 150 ms and then says so, with the
+    // same errno a non-blocking socket would have given at once.
+    bool set = ok_or_die(c.set_read_timeout(150));
+    print("a read with nothing coming: " + why(c.read(16)));
+    // And `wait` answers the same question without consuming anything.
+    match (c.wait(50)) {
+        case Ok(bool ready): {
+            print("wait says something is there: " + ready.to_str());
+        }
+        case Err(net.Error e): {
+            trap("wait: " + e.to_str());
+        }
+    }
+    // --- writing to a peer that has gone ---
+    // One byte the server will never read, then the server closes: unread
+    // data on a closed socket makes the kernel answer the next packet with
+    // a reset rather than a polite end of file. After that, writing here is
+    // EPIPE -- a value -- and not signal 13.
+    match (c.write("x".to_bytes())) {
+        case Ok(int n): {
+        }
+        case Err(io.Error e): {
+            print("early write failed: " + net.error_of(e).to_str());
+        }
+    }
+    Result<bool, io.Error> shut = s.close();
+    print("writing to a dead peer: " + dead_write(c));
+    Result<bool, io.Error> done = c.close();
+}
+
+// Write until it fails, which it must. The first write after a peer has gone
+// is usually accepted -- the kernel has nowhere to learn the truth until the
+// reset comes back -- so this asks again rather than assuming. A bound, so a
+// bug here is a failed test and not a hung one.
+str dead_write(net.Conn c) {
+    int tries = 0;
+    while (tries < 200) {
+        match (c.write("ping".to_bytes())) {
+            case Ok(int n): {
+                Result<bool, net.Error> waited = c.wait(20);
+            }
+            case Err(io.Error e): {
+                return net.error_of(e).to_str();
+            }
+        }
+        tries = tries + 1;
+    }
+    return "the write never failed";
+}
+
+str listen_fails(str host, int port) {
+    match (net.listen(host, port)) {
+        case Ok(net.Listener l): {
+            Result<bool, net.Error> closed = l.close();
+            return "it was allowed";
+        }
+        case Err(net.Error e): {
+            return e.to_str();
+        }
+    }
+}
+
+// A port that was free a moment ago: bind 0, read the number, give it back.
+int free_port() {
+    match (net.listen("127.0.0.1", 0)) {
+        case Ok(net.Listener l): {
+            int p = l.local().port();
+            Result<bool, net.Error> closed = l.close();
+            return p;
+        }
+        case Err(net.Error e): {
+            trap("listen: " + e.to_str());
+        }
+    }
+}
+
+match (net.listen("127.0.0.1", 0)) {
+    case Ok(net.Listener ln): {
+        checks(ln);
+        Result<bool, net.Error> closed = ln.close();
+    }
+    case Err(net.Error e): {
+        trap("listen: " + e.to_str());
+    }
+}

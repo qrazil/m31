@@ -230,6 +230,37 @@ void    rt_clock(Obj *out);                     /* pushes seconds, then nanoseco
 int64_t rt_entropy(int64_t n, Obj *out);        /* pushes n octets; 0, or errno */
 /* ---- end process primitives ------------------------------------------- */
 
+/* ---- net primitives: lib/net.src --------------------------------------- */
+/* The socket seam, to the list docs/sys-layer.md §9 designed. One sys-layer
+ * call each, its value or -errno passed through, and nothing decided here:
+ * lib/net.src holds the address parser and printer, the retry loops,
+ * SO_REUSEADDR's default and the errno mapping.
+ *
+ * An IP address crosses as (family, port, 16 bytes) rather than as a struct,
+ * because a prim deals only in scalars, a str, and what it pushes onto or
+ * writes into a collection it was handed. The 16 bytes are in WIRE order --
+ * 127.0.0.1 is {127,0,0,1} -- and the port is a plain integer that the sys
+ * layer byte-swaps, so nothing above this line ever calls htons.
+ *
+ * Reading, writing and closing a socket are missing on purpose: a socket is
+ * a descriptor, so rt_read, rt_write and rt_close above already work on it. */
+int64_t rt_socket(int64_t domain, int64_t type, int64_t protocol);   /* fd */
+int64_t rt_listen(int64_t fd, int64_t backlog);
+int64_t rt_shutdown(int64_t fd, int64_t how);
+int64_t rt_bind(int64_t fd, int64_t family, int64_t port, Obj *addr);
+int64_t rt_connect(int64_t fd, int64_t family, int64_t port, Obj *addr);
+int64_t rt_bind_path(int64_t fd, Obj *path);      /* AF_UNIX, which takes a path */
+int64_t rt_connect_path(int64_t fd, Obj *path);
+int64_t rt_accept(int64_t fd, Obj *out, Obj *addr);  /* fd; pushes the peer */
+int64_t rt_sockname(int64_t fd, int64_t peer, Obj *out, Obj *addr);
+Obj    *rt_sockpath(int64_t fd, int64_t peer);    /* AF_UNIX path, "" if none */
+int64_t rt_setsockopt(int64_t fd, int64_t opt, int64_t value);
+int64_t rt_getsockopt(int64_t fd, int64_t opt);   /* the value, or -errno */
+int64_t rt_poll(Obj *fds, Obj *events, Obj *revents, int64_t timeout_ms);
+int64_t rt_resolve(Obj *host, int64_t port, int64_t family, Obj *out, Obj *addrs);
+int64_t rt_ignore_sigpipe(void);  /* so a write to a dead peer is EPIPE, not death */
+/* ---- end net primitives ------------------------------------------------ */
+
 
 /* Text primitives a library cannot write from inside the language. */
 int64_t rt_str_byte_at(Obj *o, int64_t i);

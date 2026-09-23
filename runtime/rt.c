@@ -2472,3 +2472,267 @@ int64_t rt_entropy(int64_t n, Obj *out) {
     return 0;
 }
 /* ---- end process primitives ------------------------------------------- */
+
+
+/* ---- net primitives: lib/net.src --------------------------------------- */
+/* The socket seam, designed in docs/sys-layer.md §9 and built to that list.
+ * Like the io primitives above, each one is ONE sys-layer call with the
+ * layer's convention passed straight through -- a value, or -errno in Linux
+ * numbering -- and none of them decides anything. The address parser and
+ * printer, the retry loops, SO_REUSEADDR's default, what an errno means and
+ * the whole of `Conn` and `Listener` are language source in lib/net.src.
+ *
+ * There are no primitives here for reading, writing or closing a socket: a
+ * socket is a descriptor, so io's `__read`, `__write` and `__close` (§8)
+ * already work on one. That is most of the reason sys.h hands back
+ * descriptors rather than a socket handle of its own.
+ *
+ * What is left in C, and why it has to be:
+ *
+ *   - **An address comes apart at the seam.** A prim returns a scalar or a
+ *     str, or pushes onto a collection it was handed (docs/stdlib-seam.md
+ *     §2), so a SysAddr cannot cross whole. Family and port are ints in and
+ *     pushed out; the 16 address bytes are written in place into a `bytes`
+ *     the caller owns, under §2's amendment. `addr.size() >= 16` is checked
+ *     HERE and never trusted from the caller, exactly as __read's range is:
+ *     a shorter buffer would be written past. It traps rather than failing,
+ *     because it is a bug in the library and not a condition in the world.
+ *   - **__poll builds the kernel's array.** A SysPollFd is a 32-bit fd and
+ *     two 16-bit masks, which the language cannot hold and the layer may not
+ *     allocate. So the array is built here from two parallel List<int>s and
+ *     freed here, and the language never sees a narrow integer.
+ *   - **A path becomes a C string**, refusing an empty one or one holding a
+ *     NUL, for the reason path_ok gives above.
+ *
+ * SYS_AF_UNIX is reachable through __bind_path, __connect_path and
+ * __sockpath although lib/net.src is TCP only. That trio is what keeps a
+ * path OUT of __bind's argument list, which is the design §9 settled on, and
+ * building the runtime half of the set now is what lets the module that
+ * wants Unix sockets be language source alone. */
+
+/* The 16 address bytes a caller gets back. Never trusted: the kernel writes
+ * all 16 of SysAddr.addr whatever the family. */
+static unsigned char *addr16(Obj *addr, const char *who) {
+    rt_check_mutable(addr);
+    Bytes *b = (Bytes *)addr;
+    if (b->len < 16) rt_trap(who);
+    return b->data;
+}
+
+/* The same, read-only: a caller only handing an address over may pass a
+ * frozen `bytes`, so this one does not ask for mutability. */
+static const unsigned char *addr16_in(Obj *addr, const char *who) {
+    Bytes *b = (Bytes *)addr;
+    if (b->len < 16) rt_trap(who);
+    return b->data;
+}
+
+/* An IP address as the layer's record. The port is a plain integer and the
+ * backends do the htons (sys.h), so nothing here byte-swaps. */
+static void to_sys_addr(SysAddr *a, int64_t family, int64_t port,
+                        const unsigned char *bytes16) {
+    memset(a, 0, sizeof *a);
+    a->family = family;
+    a->port = port;
+    memcpy(a->addr, bytes16, 16);
+}
+
+/* And back: family and port pushed, the 16 bytes written in place. Called
+ * only after a call that succeeded, so `out` grows by exactly two. */
+static void from_sys_addr(const SysAddr *a, Obj *out, unsigned char *bytes16) {
+    rt_list_push(out, a->family);
+    rt_list_push(out, a->port);
+    memcpy(bytes16, a->addr, 16);
+}
+
+/* A SysAddr naming a file system path, for the AF_UNIX pair. A path too long
+ * for the layer's own field is refused here rather than truncated, because a
+ * truncated path names a different socket; the backends check it against the
+ * HOST's sun_path too, which is shorter on macOS. */
+static int64_t to_unix_addr(SysAddr *a, Obj *path) {
+    if (!path_ok(path)) return -SYS_EINVAL;
+    Str *p = (Str *)path;
+    if ((size_t)p->len + 1 > sizeof a->path) return -SYS_ENAMETOOLONG;
+    memset(a, 0, sizeof *a);
+    a->family = SYS_AF_UNIX;
+    memcpy(a->path, p->data, (size_t)p->len + 1);
+    return 0;
+}
+
+int64_t rt_socket(int64_t domain, int64_t type, int64_t protocol) {
+    return sys_socket(domain, type, protocol);
+}
+
+int64_t rt_listen(int64_t fd, int64_t backlog) {
+    return sys_listen(fd, backlog);
+}
+
+int64_t rt_shutdown(int64_t fd, int64_t how) {
+    return sys_shutdown(fd, how);
+}
+
+int64_t rt_bind(int64_t fd, int64_t family, int64_t port, Obj *addr) {
+    SysAddr a;
+    to_sys_addr(&a, family, port, addr16_in(addr, "__bind: the address needs 16 bytes"));
+    return sys_bind(fd, &a);
+}
+
+int64_t rt_connect(int64_t fd, int64_t family, int64_t port, Obj *addr) {
+    SysAddr a;
+    to_sys_addr(&a, family, port, addr16_in(addr, "__connect: the address needs 16 bytes"));
+    return sys_connect(fd, &a);
+}
+
+int64_t rt_bind_path(int64_t fd, Obj *path) {
+    SysAddr a;
+    int64_t r = to_unix_addr(&a, path);
+    if (r < 0) return r;
+    return sys_bind(fd, &a);
+}
+
+int64_t rt_connect_path(int64_t fd, Obj *path) {
+    SysAddr a;
+    int64_t r = to_unix_addr(&a, path);
+    if (r < 0) return r;
+    return sys_connect(fd, &a);
+}
+
+/* The new descriptor, and the peer's address split across `out` and `addr`.
+ * Nothing is pushed when the accept fails, so the result alone tells the two
+ * apart and no caller ever reads a half-filled list. */
+int64_t rt_accept(int64_t fd, Obj *out, Obj *addr) {
+    unsigned char *p = addr16(addr, "__accept: the address needs 16 bytes");
+    SysAddr peer;
+    int64_t c = sys_accept(fd, &peer);
+    if (c < 0) return c;
+    from_sys_addr(&peer, out, p);
+    return c;
+}
+
+/* This end's address, or the far end's when `peer` is non-zero. One
+ * primitive and not two, because they differ by a single kernel call and a
+ * caller always knows statically which it wants -- the trade sys_stat makes
+ * with its `follow`. */
+int64_t rt_sockname(int64_t fd, int64_t peer, Obj *out, Obj *addr) {
+    unsigned char *p = addr16(addr, "__sockname: the address needs 16 bytes");
+    SysAddr a;
+    int64_t r = peer != 0 ? sys_getpeername(fd, &a) : sys_getsockname(fd, &a);
+    if (r < 0) return r;
+    from_sys_addr(&a, out, p);
+    return 0;
+}
+
+/* The AF_UNIX path, as a str, and "" for anything without one -- an unbound
+ * socket, an IP socket, or a failed call. A second call rather than a fifth
+ * thing __sockname could push, because a prim returns a scalar OR a str and
+ * cannot do both (docs/stdlib-seam.md §2), and because charging every TCP
+ * accept for a str it will not read would be the worse trade.
+ *
+ * It cannot report why it failed, which is the price of returning a str.
+ * That is affordable precisely because a caller has already made the
+ * __sockname call that would have said; this one only fetches text. */
+Obj *rt_sockpath(int64_t fd, int64_t peer) {
+    SysAddr a;
+    int64_t r = peer != 0 ? sys_getpeername(fd, &a) : sys_getsockname(fd, &a);
+    if (r < 0 || a.family != SYS_AF_UNIX) return str_new("", 0);
+    /* Not strlen: `path` is the last member of SysAddr, so a kernel that
+     * filled every byte would send strlen off the end of the struct. */
+    size_t n = 0;
+    while (n < sizeof a.path && a.path[n] != 0) n++;
+    return str_new(a.path, (int64_t)n);
+}
+
+int64_t rt_setsockopt(int64_t fd, int64_t opt, int64_t value) {
+    return sys_setsockopt(fd, opt, value);
+}
+
+int64_t rt_getsockopt(int64_t fd, int64_t opt) {
+    return sys_getsockopt(fd, opt);
+}
+
+/* Wait until one of several descriptors is ready.
+ *
+ * `fds` and `events` are read and must be the same length; `revents` is
+ * cleared and given one value per descriptor, because its length is the
+ * answer's and not the caller's. Different lengths trap: the three lists are
+ * one table written three ways, and a caller that got them out of step has a
+ * bug the kernel cannot see.
+ *
+ * The array is malloc'd rather than taken from a fixed buffer, so that
+ * nothing here puts a ceiling on how many descriptors a server may wait on.
+ * The layer itself may not allocate, which is exactly why this is the
+ * wrapper's job (sys.h, sys_poll). */
+int64_t rt_poll(Obj *fds, Obj *events, Obj *revents, int64_t timeout_ms) {
+    int64_t n = rt_len_of(fds);
+    if (rt_len_of(events) != n) rt_trap("__poll: fds and events are different lengths");
+    rt_list_clear(revents, false);
+    if (n == 0) return sys_poll(NULL, 0, timeout_ms);
+    if ((uint64_t)n > (uint64_t)SIZE_MAX / sizeof(SysPollFd)) return -SYS_EINVAL;
+    SysPollFd *pf = malloc((size_t)n * sizeof *pf);
+    if (pf == NULL) return -SYS_ENOMEM;
+    const int64_t *f = slots(fds);
+    const int64_t *e = slots(events);
+    for (int64_t i = 0; i < n; i++) {
+        /* A descriptor wider than the kernel's 32-bit field, or a mask wider
+         * than its 16-bit one, would be cut down to something that names a
+         * different descriptor or waits for a different event. Refused
+         * whole rather than truncated. */
+        if (f[i] < INT32_MIN || f[i] > INT32_MAX || e[i] < 0 || e[i] > INT16_MAX) {
+            free(pf);
+            return -SYS_EINVAL;
+        }
+        pf[i].fd = (int32_t)f[i];
+        pf[i].events = (int16_t)e[i];
+        pf[i].revents = 0;
+    }
+    int64_t r = sys_poll(pf, n, timeout_ms);
+    /* Every entry's mask comes back, the zeros included: sys_poll fills them
+     * all, and a caller reading the table needs each row to line up with the
+     * row it wrote. */
+    for (int64_t i = 0; i < n; i++) rt_list_push(revents, pf[i].revents);
+    free(pf);
+    return r;
+}
+
+/* Every address a name has, as far as `addrs` holds them.
+ *
+ * `addrs` is 16 bytes per address and its size says how many fit; the result
+ * is how many the name HAS, so a caller whose buffer was too small grows it
+ * and asks again, exactly as __listdir does. Family and port are pushed onto
+ * `out`, two per address written.
+ *
+ * This is the ONE primitive whose answer depends on the backend: the raw one
+ * returns -SYS_ENOSYS always, because resolving a name is getaddrinfo and
+ * getaddrinfo is glibc's NSS, which dlopens libnss_* at run time
+ * (runtime/sys_linux.c). lib/net.src treats that as an ordinary error on
+ * every path that uses a name, which is the right shape anyway. */
+int64_t rt_resolve(Obj *host, int64_t port, int64_t family, Obj *out, Obj *addrs) {
+    if (!path_ok(host)) return -SYS_EINVAL;
+    rt_check_mutable(addrs);
+    Bytes *b = (Bytes *)addrs;
+    int64_t cap = b->len / 16;
+    if (cap < 1) rt_trap("__resolve: the address buffer needs 16 bytes per address");
+    if ((uint64_t)cap > (uint64_t)SIZE_MAX / sizeof(SysAddr)) return -SYS_EINVAL;
+    SysAddr *got = malloc((size_t)cap * sizeof *got);
+    if (got == NULL) return -SYS_ENOMEM;
+    int64_t found = sys_resolve(((Str *)host)->data, port, family, got, cap);
+    if (found > 0) {
+        int64_t k = found < cap ? found : cap;
+        for (int64_t i = 0; i < k; i++) from_sys_addr(&got[i], out, b->data + i * 16);
+    }
+    free(got);
+    return found;
+}
+
+/* Set SIGPIPE to ignore, so that a write to a socket whose peer has gone
+ * away comes back as -EPIPE instead of killing the process (sys.h).
+ *
+ * lib/net.src calls it every time it opens a socket rather than once at
+ * startup: a module cannot hold the "already done" flag
+ * (docs/module-state-decision.md), the disposition is per process and
+ * idempotent, and one system call per socket is nothing beside the connect
+ * or the accept next to it. */
+int64_t rt_ignore_sigpipe(void) {
+    return sys_ignore_sigpipe();
+}
+/* ---- end net primitives ------------------------------------------------ */

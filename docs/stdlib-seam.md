@@ -477,3 +477,96 @@ removes the leak but not the per-backend handle). One call that writes every nam
 says how big a buffer it needed if that one was too small, has no handle
 at all and returns byte-identical results from both backends, which
 `runtime/sys_test.c` checks.
+
+---
+
+## 9. The socket primitives: `lib/net.src` over descriptors
+
+Decided in `docs/sys-layer.md` §9 and built 2026-09-23. `lib/net.src` is TCP
+— connections, listeners, addresses — and it is language source down to
+fifteen primitives, each **one** sys-layer call with its value or `-errno`
+passed through:
+
+| prim | sys call | answers |
+|---|---|---|
+| `__socket(int domain, int kind, int protocol)` | `sys_socket` | fd |
+| `__bind(int fd, int family, int port, bytes addr)` | `sys_bind` | 0 |
+| `__connect(int fd, int family, int port, bytes addr)` | `sys_connect` | 0 |
+| `__bind_path(int fd, str path)`, `__connect_path` | the same, AF_UNIX | 0 |
+| `__listen(int fd, int backlog)` | `sys_listen` | 0 |
+| `__accept(int fd, List<int> out, bytes addr)` | `sys_accept` | fd; pushes the peer's family and port, writes its 16 address bytes |
+| `__sockname(int fd, int peer, List<int> out, bytes addr)` | `sys_getsockname`/`getpeername` | 0, the same way |
+| `__sockpath(int fd, int peer)` | the same | the AF_UNIX path, `""` if none |
+| `__shutdown(int fd, int how)` | `sys_shutdown` | 0 |
+| `__setsockopt(int fd, int opt, int value)` | `sys_setsockopt` | 0 |
+| `__getsockopt(int fd, int opt)` | `sys_getsockopt` | the value |
+| `__poll(List<int> fds, List<int> events, List<int> revents, int timeout_ms)` | `sys_poll` | how many are ready; clears `revents` and pushes one per descriptor |
+| `__resolve(str host, int port, int family, List<int> out, bytes addrs)` | `sys_resolve` | how many addresses the name **has**; `-38` on the raw backend, always |
+| `__ignore_sigpipe()` | `sys_ignore_sigpipe` | 0 |
+
+`__read`, `__write` and `__close` are re-declared from §8 rather than added:
+a socket is a descriptor, so `rt_read`, `rt_write` and `rt_close` already
+work on one. A `prim` is a declaration like any other and `__` names belong
+to the module that writes them, so both declarations lower to the same C
+symbol by the same rule.
+
+The C that is left in the marked section of `runtime/rt.c` does only what C
+must: it takes a `SysAddr` apart into scalars plus sixteen bytes and puts it
+back (a prim returns a scalar or a `str`, or writes into a collection it was
+handed — §2), it builds the kernel's `struct pollfd` array, which the layer
+itself may not allocate, and it checks that an address buffer really is
+sixteen bytes before the kernel writes into it.
+
+### What moved into the language
+
+  - **The address parser and printer.** Dotted quad and the whole of IPv6
+    text, `::` compression and an embedded IPv4 tail included, plus the
+    RFC 5952 canonical printer that reads back. The sys layer deliberately
+    has no `inet_pton`: turning `"127.0.0.1"` into four bytes is not a system
+    call, it is the same work on both backends, and it is the kind of code
+    that is wrong at the edges — so it lives where it can be read and where
+    the corpus can check all ninety-four forms against Python's `ipaddress`.
+  - **SO_REUSEADDR's default**, the backlog's default, and `Conn`'s 64 KiB
+    read buffer.
+  - **The short-write loop and the EINTR retries**, as in `io`.
+  - **The errno vocabulary**, `net.from_errno`, in source beside `io`'s.
+
+### Two error enums, and why that is not a mistake
+
+`net.Conn`'s five stream methods answer with **`io.Error`** and everything
+else in `net` answers with **`net.Error`**. That split is forced by
+structural interfaces: an interface *is* its signatures (reference §3.4), so
+a `read` returning `Result<bytes, net.Error>` would not satisfy `io.Stream`
+and `io.copy` could not take a socket at all — which would throw away the
+main thing a connection being a stream buys. Going the other way and
+reusing `io.Error` for the whole module is worse: `connect` would report a
+refused connection as `Other(111)`, and that is the outcome programs branch
+on most.
+
+It is liveable because the seam is **exact, not lossy**. Every errno a
+socket produces — ECONNRESET 104, EPIPE 32, ETIMEDOUT 110, EAGAIN 11 — is
+one `io.from_errno` does not name, so it arrives through a stream method as
+`io.Error.Other(n)` with the number intact and `net.error_of(e)` converts it
+back with nothing lost.
+
+The third option, adding `Refused`, `TimedOut`, `Unreachable`, `Reset`,
+`InUse` and `NameNotFound` to `io.Error`, is the one that would give a
+program a single vocabulary. It is not `net`'s to take: §4's argument is
+that an exhaustive `match` with no default makes a new variant a compile
+error in every program that handles the error, and that this is affordable
+exactly once — which was spent when `fs` grew the set from three to seven.
+If it is ever paid again, `net.Error` folds into `io.Error` and `error_of`
+goes away; nothing here is shaped to prevent that.
+
+### `__resolve` is the one primitive with two answers
+
+On the C library backend it is `getaddrinfo`. On the raw backend it is
+`-ENOSYS`, permanently, because `getaddrinfo` is glibc's NSS machinery and a
+static binary with no C library cannot `dlopen` the modules it needs
+(`docs/sys-layer.md` §9). `net` treats that as an ordinary error on every
+path that uses a name — which is the right shape anyway, since DNS fails on
+real networks — and `net.Error.to_str()` gives errno 38 a message of its
+own: *"this build cannot resolve host names; use a literal IP address."* A
+program sees an `Err` that says what is wrong and what to do, not a crash,
+and the corpus asks the question in a form whose answer is the same on both
+backends.

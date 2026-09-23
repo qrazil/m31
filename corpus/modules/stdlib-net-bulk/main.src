@@ -1,0 +1,201 @@
+import net;
+import io;
+
+// A transfer far larger than any socket buffer, both ways at once, and a
+// write that gives up because nobody is reading.
+//
+// **What a big transfer actually exercises.** On Linux a *blocking* write to
+// a socket is short only when a signal or a timeout interrupts it: the
+// kernel's own loop copies the whole buffer, blocking when the connection is
+// full. A *read* is short all the time -- it answers with whatever has
+// arrived -- so 4 MiB through loopback is dozens of short reads, which is
+// `read_all`'s loop, and one write that the kernel takes in as many pieces
+// as it likes without saying so. Both halves of the promise "write() writes
+// all of it, read() gives you what is there" are what this checks, and it
+// checks them by comparing every byte rather than counting them.
+//
+// The second half then forces a genuinely short write, which is the only way
+// to see one: a send timeout on a connection whose peer never reads. The
+// kernel takes what fits, blocks, the timeout fires, and `Conn.write`'s loop
+// meets a write that moved fewer bytes than it was given -- and then a
+// second one that moves none at all, which is the `TimedOut` printed below.
+// Without the loop the first of those two would have silently lost the rest
+// of the payload.
+//
+// **Exactly one end writes at a time, and that is not a simplification.**
+// 4 MiB is more than any kernel will hold, so two ends that both wrote
+// before either read would fill their buffers and stop for good -- which is
+// a real deadlock a real protocol has to avoid, and the first version of
+// this test walked straight into it. The client writes and half-closes while
+// the server reads; then the server writes while the client reads. A
+// protocol that wants both directions live at once needs a thread per
+// direction, which is more than this is here to show.
+
+// 4 MiB of a pattern that is not a constant byte, so that a chunk delivered
+// twice, in the wrong order, or not at all cannot compare equal.
+bytes payload() {
+    bytes unit = [];
+    int i = 0;
+    while (i < 1024) {
+        unit.push(i * 7 + 11 & 255);
+        i = i + 1;
+    }
+    return unit.repeat(4096);
+}
+
+bool ok_or_die(Result<bool, net.Error> r) {
+    match (r) {
+        case Ok(bool b): {
+            return b;
+        }
+        case Err(net.Error e): {
+            trap("socket: " + e.to_str());
+        }
+    }
+}
+
+// The client: send the whole payload, half-close, then read what the server
+// sent the other way. The two directions overlap, which is what keeps this
+// from filling the connection and stopping.
+void sender(Chan<int> ports, Chan<str> log) {
+    int port = recv(ports);
+    match (net.connect("127.0.0.1", port)) {
+        case Ok(net.Conn c): {
+            push(c, log);
+        }
+        case Err(net.Error e): {
+            trap("connect: " + e.to_str());
+        }
+    }
+}
+
+void push(net.Conn c, Chan<str> log) {
+    bytes mine = payload();
+    match (c.write(mine)) {
+        case Ok(int n): {
+            send(log, "client wrote " + n.to_str());
+        }
+        case Err(io.Error e): {
+            trap("write: " + net.error_of(e).to_str());
+        }
+    }
+    bool half = ok_or_die(c.shutdown_write());
+    match (c.read_all()) {
+        case Ok(bytes back): {
+            bool same = back == mine;
+            send(log, "client read " + back.size().to_str());
+            send(log, "client got the same bytes: " + same.to_str());
+        }
+        case Err(io.Error e): {
+            trap("read: " + net.error_of(e).to_str());
+        }
+    }
+    Result<bool, io.Error> closed = c.close();
+}
+
+void echo(net.Conn s) {
+    bytes mine = payload();
+    // **Read first, then write.** The client is writing 4 MiB right now, and
+    // 4 MiB does not fit in any kernel's socket buffers -- so if this end
+    // also started by writing, both would block with their buffers full and
+    // nobody left to drain either. One end writing while the other reads is
+    // the only arrangement that finishes, and it is the reason the client
+    // half-closes before it reads: that end of file is what ends the loop
+    // below.
+    match (s.read_all()) {
+        case Ok(bytes got): {
+            bool same = got == mine;
+            print("server read " + got.size().to_str());
+            print("server got the same bytes: " + same.to_str());
+        }
+        case Err(io.Error e): {
+            trap("read: " + net.error_of(e).to_str());
+        }
+    }
+    match (s.write(mine)) {
+        case Ok(int n): {
+            print("server wrote " + n.to_str());
+        }
+        case Err(io.Error e): {
+            trap("write: " + net.error_of(e).to_str());
+        }
+    }
+    Result<bool, io.Error> closed = s.close();
+}
+
+// A write nobody is reading, with a deadline on it. The connection fills,
+// the timeout fires, and the failure is a value.
+void stalled(net.Conn c) {
+    bool set = ok_or_die(c.set_write_timeout(150));
+    bytes mine = payload();
+    // Written over and over rather than once, so the answer does not depend
+    // on how large this kernel's socket buffers happen to be: 4 MiB at a
+    // time into a connection nobody reads fills them within a round or two
+    // on any machine, and the bound means a kernel that somehow swallowed
+    // 256 MiB would report that rather than hang.
+    int tries = 0;
+    while (tries < 64) {
+        match (c.write(mine)) {
+            case Ok(int n): {
+            }
+            case Err(io.Error e): {
+                print("a stalled write: " + net.error_of(e).to_str());
+                Result<bool, io.Error> done = c.close();
+                return;
+            }
+        }
+        tries = tries + 1;
+    }
+    print("a stalled write: it never stalled");
+    Result<bool, io.Error> closed = c.close();
+}
+
+void run(net.Listener ln) {
+    Chan<int> ports = Chan<int>(1);
+    Chan<str> log = Chan<str>(8);
+    spawn sender(ports, log);
+    send(ports, ln.local().port());
+    match (ln.accept()) {
+        case Ok(net.Conn s): {
+            echo(s);
+        }
+        case Err(net.Error e): {
+            trap("accept: " + e.to_str());
+        }
+    }
+    int got = 0;
+    while (got < 3) {
+        print(recv(log));
+        got = got + 1;
+    }
+    // Now the stalled write: a connection whose server end is accepted and
+    // then simply never read from. The accepted `Conn` is held in the match
+    // so that it stays open -- a dropped one would close and turn this into
+    // the dead-peer test instead.
+    match (net.connect("127.0.0.1", ln.local().port())) {
+        case Ok(net.Conn c): {
+            match (ln.accept()) {
+                case Ok(net.Conn idle): {
+                    stalled(c);
+                    Result<bool, io.Error> closed = idle.close();
+                }
+                case Err(net.Error e): {
+                    trap("accept: " + e.to_str());
+                }
+            }
+        }
+        case Err(net.Error e): {
+            trap("connect: " + e.to_str());
+        }
+    }
+}
+
+match (net.listen("127.0.0.1", 0)) {
+    case Ok(net.Listener ln): {
+        run(ln);
+        Result<bool, net.Error> closed = ln.close();
+    }
+    case Err(net.Error e): {
+        trap("listen: " + e.to_str());
+    }
+}

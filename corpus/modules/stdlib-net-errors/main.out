@@ -1,0 +1,17 @@
+111 -> connection refused
+110 -> timed out
+ 11 -> timed out
+101 -> network unreachable
+104 -> the connection was broken by the peer
+ 32 -> the connection was broken by the peer
+ 98 -> the address is already in use
+  2 -> no such host
+  5 -> system error 5
+ 38 -> this build cannot resolve host names; use a literal IP address
+bind a port in use: the address is already in use
+connect to a closed port: connection refused
+a read with nothing coming: timed out
+wait says something is there: false
+writing to a dead peer: the connection was broken by the peer
+a reserved name is unusable: true
+localhost is refused or unresolvable: true
