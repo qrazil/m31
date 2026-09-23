@@ -1,0 +1,15 @@
+import io;
+
+// Writing to a closed Buffer would look like it worked -- the bytes would go
+// somewhere nobody can read them back from. A File refuses the same call, so
+// a Stream behaves the same whichever it is holding.
+io.Buffer b = io.buffer();
+Result<bool, io.Error> closed = b.close();
+match (b.write("late".to_bytes())) {
+    case Ok(int n): {
+        print(n);
+    }
+    case Err(io.Error e): {
+        print(e.to_str());
+    }
+}

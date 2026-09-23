@@ -1,0 +1,22 @@
+import io;
+
+// A Buffer holds no descriptor, so its close() only drops the bytes -- but
+// reading one afterwards is still a bug at the call site, and it says so the
+// same way a File does rather than quietly answering "the end".
+io.Buffer b = io.buffer_of("gone".to_bytes());
+match (b.close()) {
+    case Ok(bool ok): {
+        print("closed");
+    }
+    case Err(io.Error e): {
+        print(e.to_str());
+    }
+}
+match (b.read(1)) {
+    case Ok(bytes got): {
+        print(got.size());
+    }
+    case Err(io.Error e): {
+        print(e.to_str());
+    }
+}

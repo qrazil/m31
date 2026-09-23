@@ -18,6 +18,16 @@
 //   f.write(b)                 -> Result<int, Error>    all of `b`
 //   f.close()                  -> Result<bool, Error>
 //
+//   io.Stream                  interface                the five methods above
+//   io.copy(src, dst)          -> Result<int, Error>    everything from one to the other
+//   io.read_line_of(s, limit)  -> Result<Option<str>, Error>  a line of any stream
+//
+//   io.buffer()                -> Buffer                bytes in memory, empty
+//   io.buffer_of(b)            -> Buffer                the same, holding a copy of `b`
+//   b.read(n), b.read_all(), b.read_until(d, l), b.write(b), b.close()   as a File's
+//   b.size()                   -> int                   bytes written and not yet read
+//   b.peek()                   -> bytes                 those bytes, without consuming
+//
 // Everything here is language source down to one system call per primitive
 // (runtime/sys.h, docs/sys-layer.md): the read loop, the buffer, the line
 // splitting, the `\r\n` rule, the retry on EINTR, and what every errno
@@ -99,6 +109,41 @@ pub str Error.to_str() {
             return "system error " + code.to_str();
         }
     }
+}
+
+// --- the stream protocol ---------------------------------------------------
+/// What a `File` and a `Buffer` both are: five methods over octets.
+///
+/// Interfaces are structural (reference §3.4), so this declares nothing new
+/// about either type -- `File` had exactly these five before `Stream`
+/// existed, and anything else with them is a stream too, including a type
+/// written outside this module. That is the point: `copy` and
+/// `read_line_of` below are written once, against the protocol, and a
+/// program that wants to test
+/// code that reads a file hands it a `Buffer` instead.
+///
+/// **One interface, not `Reader` and `Writer`.** A `File` is a single type
+/// with both halves and only one of them working -- a write to a file
+/// opened for reading traps -- so splitting the protocol would not make an
+/// unusable method unreachable, it would only make every signature choose a
+/// half. Which half a given stream answers is its own business, and it says
+/// so the same way through the interface as directly: by trapping. Oro
+/// draws it the same way (its reference §5.13): one protocol, and a write to
+/// a reader is an error at the call, not a type that lacks the method.
+///
+/// `read_all` and `read_until` are in here rather than written once over
+/// `read` because each type has a better way: a `File` asks the file system
+/// for its size, and a `Buffer` already holds everything and answers with a
+/// slice. Through the vtable a caller gets the good one.
+///
+/// There is no `drop` here and there cannot be: an interface requiring a
+/// destructor would be a way to call one by hand (docs/destructors-decision.md).
+pub interface Stream {
+    Result<bytes, Error> read(int n);
+    Result<bytes, Error> read_all();
+    Result<bytes, Error> read_until(bytes delim, int limit);
+    Result<int, Error> write(bytes b);
+    Result<bool, Error> close();
 }
 
 // --- files ---------------------------------------------------------------
@@ -483,6 +528,250 @@ Result<int, Error> write_all_str(int fd, str b) {
     return Result<int, Error>.Ok(off);
 }
 
+// --- buffers ---------------------------------------------------------------
+/// Bytes in memory, read and written like a file.
+///
+/// `write` appends at the end; `read` takes from the front and moves the
+/// read position past what it took. It is a `Stream`, with the same five
+/// methods a `File` has and the same meanings, so code written against
+/// `Stream` cannot tell the two apart -- which is what a `Buffer` is for:
+/// assembling output before one `write`, and standing in for a file in a
+/// test with no file system in it.
+///
+/// **Its `Result`s are always `Ok`.** A `Buffer` has no kernel to say no
+/// to it: none of `Error`'s variants can come out of one, not even
+/// `Other`. The shape is a `File`'s anyway, because the two are meant to
+/// be interchangeable and a `Stream` has to declare one signature. A
+/// caller that knows it holds a `Buffer` may treat the error arm as dead;
+/// a caller holding a `Stream` cannot, and should not.
+///
+/// A mistake still traps, as it does on a `File`: `read(0)`, an empty
+/// delimiter, a limit below 1, and any use of a closed `Buffer` but a
+/// second `close()`.
+///
+/// **The end of a `Buffer` is wherever the writing has got to.** Running
+/// out of unread bytes is indistinguishable from the end of a file, so a
+/// `read_until` whose delimiter has not been written yet consumes what is
+/// there and reports no delimiter, exactly as it would at the end of a
+/// file. A reader that may be overtaken by a writer checks
+/// `ends_with(delim)` before believing it, which is the contract
+/// `File.read_until` already asks for.
+///
+/// Every field is private: a `Buffer` is made by `buffer` or `buffer_of`,
+/// and only its own methods move the read position.
+pub type Buffer {
+    // Written and not yet read is buf[at .. buf.size()); buf[0 .. at) is
+    // dead, waiting for a compaction to drop it. No default, so that the two
+    // constructors below pass it positionally rather than by name (§4.2).
+    bytes buf;
+    int at = 0;
+    bool live = true;
+}
+
+/// Between 1 and `n` bytes, or an empty `bytes` when everything written has
+/// been read.
+///
+/// As on a `File`, `n` is a maximum: what is left, if that is less. `n`
+/// below 1 traps, so that an empty result has exactly one meaning.
+pub Result<bytes, Error> Buffer.read(int n) {
+    if (n < 1) {
+        trap("read(" + n.to_str() + "): read at least one byte; read_all() reads everything");
+    }
+    check_live();
+    int take = buf.size() - at;
+    if (take > n) {
+        take = n;
+    }
+    bytes out = buf.substr(at, at + take);
+    at = at + take;
+    compact();
+    return Result<bytes, Error>.Ok(out);
+}
+
+/// Everything written and not yet read, leaving the `Buffer` empty.
+pub Result<bytes, Error> Buffer.read_all() {
+    check_live();
+    // Nothing has been read yet, so the whole buffer is the answer: hand it
+    // over and start again, the way `File.read_all` hands back its one
+    // allocation rather than copying it.
+    if (at == 0) {
+        bytes whole = buf;
+        bytes fresh = [];
+        buf = fresh;
+        return Result<bytes, Error>.Ok(whole);
+    }
+    bytes out = buf.substr(at, buf.size());
+    at = buf.size();
+    compact();
+    return Result<bytes, Error>.Ok(out);
+}
+
+/// Bytes up to and including the first `delim`, taking no more than `limit`
+/// of them.
+///
+/// The three outcomes are a `File`'s, told apart the same way: it ends with
+/// `delim`; it is `limit` long and does not; or it is shorter and does not,
+/// meaning the written bytes ran out first (empty: they had already).
+///
+/// An empty `delim` or a `limit` below 1 traps.
+pub Result<bytes, Error> Buffer.read_until(bytes delim, int limit) {
+    if (delim.size() == 0) {
+        trap("read_until: the delimiter is empty");
+    }
+    if (limit < 1) {
+        trap("read_until(" + limit.to_str() + "): the limit must be at least 1");
+    }
+    check_live();
+    // The end of the search, computed by subtracting rather than adding so
+    // that a limit near the largest int cannot overflow on the way.
+    int stop = buf.size();
+    if (stop - at > limit) {
+        stop = at + limit;
+    }
+    int m = delim.size();
+    int last = delim[m - 1];
+    int i = at;
+    while (i < stop) {
+        int b = buf[i];
+        i = i + 1;
+        // Only a byte that could end the delimiter is worth comparing on,
+        // and only once enough bytes have been taken to hold one.
+        if (b == last && i - m >= at && ends_at(buf, i, delim)) {
+            break;
+        }
+    }
+    bytes out = buf.substr(at, i);
+    at = i;
+    compact();
+    return Result<bytes, Error>.Ok(out);
+}
+
+/// Append all of `b`, returning its size. It cannot fail.
+pub Result<int, Error> Buffer.write(bytes b) {
+    if (!live) {
+        trap("write on a closed buffer");
+    }
+    buf.extend(b);
+    return Result<int, Error>.Ok(b.size());
+}
+
+/// How many bytes have been written and not yet read.
+pub int Buffer.size() {
+    check_live();
+    return buf.size() - at;
+}
+
+/// Those bytes, without consuming them: `read_all` without the reading.
+///
+/// A copy, so that holding it does not pin the `Buffer`'s own storage and
+/// changing it does not change the `Buffer`.
+///
+/// Oro spells this `bytes()` (its reference §5.13) and this language cannot:
+/// `bytes` is a type keyword (§3.10), so `b.bytes()` does not parse.
+pub bytes Buffer.peek() {
+    check_live();
+    return buf.substr(at, buf.size());
+}
+
+/// Drop what has not been read and mark the `Buffer` closed.
+///
+/// A `Buffer` holds no descriptor, so there is nothing a close has to
+/// release -- but `Stream` has `close()`, because a `File` and a socket do,
+/// and a stream whose close a caller must skip would not be interchangeable
+/// with one whose close it must not. So it does the one thing a close can
+/// still mean here: the storage goes now rather than when the last
+/// reference does. Closing twice is not an error; any other use of a closed
+/// `Buffer` traps, as on a `File`.
+pub Result<bool, Error> Buffer.close() {
+    if (!live) {
+        return Result<bool, Error>.Ok(true);
+    }
+    live = false;
+    bytes none = [];
+    buf = none;
+    at = 0;
+    return Result<bool, Error>.Ok(true);
+}
+
+// Using a closed `Buffer` is a bug in the program, not a failure of the
+// `Buffer` -- the same call `File` makes.
+void Buffer.check_live() {
+    if (!live) {
+        trap("read on a closed buffer");
+    }
+}
+
+// Drop the dead prefix once it is worth the copy.
+//
+// **The rule: compact when the dead prefix is at least half the buffer.**
+// Reading from the front therefore never copies the remainder -- it only
+// moves `at` -- until half of what is held is dead, and the copy that then
+// runs moves fewer live bytes than the number of bytes read since the last
+// compaction. Charging each moved byte to one of those reads makes reading
+// amortised O(1) a byte, so a loop of small reads over a large `Buffer` is
+// linear in the bytes, not quadratic.
+//
+// Everything read is the case worth its own branch, because it is the shape
+// of every write-then-drain loop: `clear()` keeps the allocation (§3.10),
+// so the next write refills the same storage and the loop copies nothing
+// and allocates nothing, forever.
+void Buffer.compact() {
+    int n = buf.size();
+    if (at == 0) {
+        return;
+    }
+    if (at == n) {
+        buf.clear();
+        at = 0;
+        return;
+    }
+    if (at * 2 >= n) {
+        buf = buf.substr(at, n);
+        at = 0;
+    }
+}
+
+/// An empty `Buffer`.
+pub Buffer buffer() {
+    bytes none = [];
+    return Buffer(none);
+}
+
+/// A `Buffer` holding a copy of `b`, positioned at its first byte: what a
+/// file containing those bytes would read like.
+///
+/// A copy, not `b` itself. A `bytes` is a reference (§3.10), so keeping the
+/// caller's would make two owners of one mutable run: a `push` on their side
+/// would appear in the middle of the `Buffer`, and a compaction on this side
+/// would silently stop it doing so. Which of those a program meets would
+/// depend on how much had been read, and that is not a rule anyone can hold
+/// in their head. `buffer()` then `write(b)` is the same copy written out.
+///
+/// **Two functions rather than one with a default.** An optional parameter
+/// is named at the call (§4.2), so a single `buffer` would be written
+/// `io.buffer(from: b)` -- ceremony around the one argument that is the
+/// whole point of the call. Two names keep both spellings short, and follow
+/// the module's house style of a lowercase function named for what it
+/// returns (`io.stdin`, `date.civil`, `random.seeded`).
+pub Buffer buffer_of(bytes b) {
+    return Buffer(clone(b));
+}
+
+// Whether `d` sits in `b` ending just before `i`. Written out rather than
+// `b.substr(i - d.size(), i) == d` because that allocates a copy of the
+// window for every byte scanned.
+bool ends_at(bytes b, int i, bytes d) {
+    int m = d.size();
+    int k = 0;
+    while (k < m) {
+        if (b[i - m + k] != d[k]) {
+            return false;
+        }
+        k = k + 1;
+    }
+    return true;
+}
+
 // --- whole files ---------------------------------------------------------
 /// The whole file, exactly: every byte, NULs and all, with no decoding.
 pub Result<bytes, Error> read_bytes(str path) {
@@ -650,4 +939,64 @@ pub Option<str> read_line() {
 pub void eprint(str s) {
     __out_flush();
     Result<int, Error> wrote = write_all_str(2, s + "\n");
+}
+
+// --- over any stream -------------------------------------------------------
+/// Everything left in `src`, written to `dst`; the number of bytes moved.
+///
+/// Neither stream is closed: `copy` did not open them and does not know
+/// whether the caller is finished with them. A read error leaves `src`
+/// wherever it stopped and a write error leaves `dst` holding what got
+/// through -- the count is lost with the error, as it is on `File.write`,
+/// because a `Result` carries one or the other.
+///
+/// 64 KiB a time, the size `File` reads the kernel in: large enough that
+/// the per-call cost disappears, small enough that copying a huge file
+/// does not need a huge allocation. A stream is free to hand back less.
+pub Result<int, Error> copy(Stream src, Stream dst) {
+    int total = 0;
+    while (true) {
+        bytes chunk = src.read(65536)?;
+        if (chunk.size() == 0) {
+            return Result<int, Error>.Ok(total);
+        }
+        total = total + dst.write(chunk)?;
+    }
+}
+
+/// The next line of `s` without its line ending, or `None` at the end of
+/// the stream. Reads at most `limit` bytes.
+///
+/// The `\r\n` rule is `read_line`'s: the ending comes off whole, and a last
+/// line with no newline is still a line. What differs is that this one has
+/// room to say why it stopped -- text that is not UTF-8 is
+/// `Err(InvalidUtf8)` rather than the end of the input -- and that it reads
+/// through the stream's own buffer, so the next reader of that stream sees
+/// what follows the line and nothing is read twice.
+///
+/// `limit` is mandatory, as it is on `read_until` and for the same reason:
+/// a line that never ends is otherwise a request for all of memory. A line
+/// longer than `limit` comes back in pieces of `limit` bytes, and the piece
+/// that is not the last has no line ending to take off -- so a caller that
+/// must tell a long line from a short one calls `read_until` and looks.
+pub Result<Option<str>, Error> read_line_of(Stream s, int limit) {
+    bytes nl = [10];
+    bytes got = s.read_until(nl, limit)?;
+    if (got.size() == 0) {
+        return Result<Option<str>, Error>.Ok(Option<str>.None);
+    }
+    if (got[got.size() - 1] == 10) {
+        int lf = got.pop();
+        if (got.size() > 0 && got[got.size() - 1] == 13) {
+            int cr = got.pop();
+        }
+    }
+    match (got.utf8()) {
+        case Some(str t): {
+            return Result<Option<str>, Error>.Ok(Option<str>.Some(t));
+        }
+        case None: {
+            return Result<Option<str>, Error>.Err(Error.InvalidUtf8);
+        }
+    }
 }
