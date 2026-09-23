@@ -331,6 +331,8 @@ void    rt_bytes_set(Obj *o, int64_t i, int64_t v);
 void    rt_bytes_push(Obj *o, int64_t v);
 int64_t rt_bytes_pop(Obj *o);
 void    rt_bytes_clear(Obj *o);
+void    rt_bytes_truncate(Obj *o, int64_t n);    /* keep the first `n` */
+void    rt_bytes_drop_front(Obj *o, int64_t n);  /* remove the first `n` */
 void    rt_bytes_extend(Obj *o, Obj *more);
 bool    rt_bytes_eq(Obj *a, Obj *b);
 Obj    *rt_bytes_clone(Obj *o);

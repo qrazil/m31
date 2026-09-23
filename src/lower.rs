@@ -751,7 +751,7 @@ impl Lowerer {
         }
         let want: &[Ty] = match m {
             "size" | "pop" | "clear" | "trim" | "to_upper" | "to_lower" | "hex" | "utf8" => &[],
-            "push" | "repeat" => &[Ty::Int],
+            "push" | "repeat" | "truncate" | "drop_front" => &[Ty::Int],
             "substr" => &[Ty::Int, Ty::Int],
             "extend" | "contains" | "index_of" | "starts_with" | "ends_with" | "split" => {
                 &[Ty::Bytes]
@@ -784,9 +784,9 @@ impl Lowerer {
                     span,
                     format!(
                         "`bytes` has no method `{other}`; it has size, push, pop, \
-                         clear, extend, substr, contains, index_of, starts_with, \
-                         ends_with, split, trim, to_upper, to_lower, repeat, hex \
-                         and utf8"
+                         clear, truncate, drop_front, extend, substr, contains, \
+                         index_of, starts_with, ends_with, split, trim, to_upper, \
+                         to_lower, repeat, hex and utf8"
                     ),
                 ))
             }
@@ -814,6 +814,10 @@ impl Lowerer {
             "push" => self.rt_void("rt_bytes_push", av),
             "pop" => self.rt_value("rt_bytes_pop", av, Ty::Int),
             "clear" => self.rt_void("rt_bytes_clear", av),
+            // The two ways a buffer shrinks short of empty, both in place
+            // and both keeping the allocation, as `clear` does.
+            "truncate" => self.rt_void("rt_bytes_truncate", av),
+            "drop_front" => self.rt_void("rt_bytes_drop_front", av),
             "extend" => self.rt_void("rt_bytes_extend", av),
             "substr" => self.rt_value("rt_bytes_substr", av, Ty::Bytes),
             "trim" => self.rt_value("rt_bytes_trim", av, Ty::Bytes),

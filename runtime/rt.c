@@ -1012,6 +1012,38 @@ void rt_bytes_clear(Obj *o) {
     ((Bytes *)o)->len = 0;
 }
 
+/* The two ways a buffer shrinks short of empty. Both keep the allocation,
+ * as clear does: a read loop that has consumed a prefix says drop_front,
+ * where before it had to build a copy with substr and throw the original
+ * away -- an allocation and a copy per read.
+ *
+ * They disagree about an argument past the end because the questions do.
+ * truncate(n) asks to be AT MOST n long, which a shorter buffer already is;
+ * drop_front(n) asks for n bytes to be REMOVED, which a shorter buffer
+ * cannot do, and whatever counted them has miscounted. */
+void rt_bytes_truncate(Obj *o, int64_t n) {
+    rt_check_mutable(o);
+    if (n < 0) rt_trap("truncate: a length cannot be negative");
+    Bytes *b = (Bytes *)o;
+    if (n < b->len) b->len = n;
+}
+
+void rt_bytes_drop_front(Obj *o, int64_t n) {
+    rt_check_mutable(o);
+    if (n < 0) rt_trap("drop_front: a count cannot be negative");
+    Bytes *b = (Bytes *)o;
+    if (n > b->len) {
+        char msg[80];
+        snprintf(msg, sizeof msg,
+                 "drop_front(%" PRId64 ") on %" PRId64 " bytes", n, b->len);
+        rt_trap(msg);
+    }
+    /* memmove and not memcpy: the source and destination overlap whenever
+     * more is kept than dropped, which is the ordinary case. */
+    if (n > 0) memmove(b->data, b->data + n, (size_t)(b->len - n));
+    b->len -= n;
+}
+
 /* `b.extend(b)` is legal and doubles `b`. The length is read before growing
  * and the source pointer after, so a realloc that moves the buffer moves the
  * source with it. */

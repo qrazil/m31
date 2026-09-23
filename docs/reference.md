@@ -831,6 +831,8 @@ and an immutable `str` cannot have:
 | `b.push(v)` | append one byte; **traps** outside 0..255 |
 | `b.pop()` | remove and return the last byte; **traps** if empty |
 | `b.clear()` | size 0, keeping the buffer for reuse |
+| `b.truncate(n)` | keep the first `n` bytes, keeping the buffer; already that short, nothing happens; **traps** below 0 |
+| `b.drop_front(n)` | remove the first `n` bytes, moving the rest down; **traps** below 0 or above `size()` |
 | `b.extend(other)` | append another `bytes` in place; `b.extend(b)` doubles `b` |
 | `b.substr(from, to)` | a new `bytes`, half-open; **traps** if out of bounds |
 | `b.contains(sub)` | run-of-bytes search; an empty needle is found |
@@ -844,10 +846,21 @@ and an immutable `str` cannot have:
 | `b.utf8()` | `Option<str>` — the text, if `b` is valid UTF-8 |
 | `xs.join(sep)` | on a collection of `bytes`, the inverse of `split` |
 
-`push`, `pop`, `clear`, `extend` and index assignment change `b`; every
+`push`, `pop`, `clear`, `truncate`, `drop_front`, `extend` and index
+assignment change `b`; every
 other method returns a new object and leaves `b` alone. `contains` and
 `index_of` take a `bytes` because that is what they take on `str` — they
 find a run, not an element.
+
+**A buffer shrinks in place, from either end.** `truncate` and `drop_front`
+both keep the allocation the way `clear` does, so a read loop that has
+consumed a prefix says `b.drop_front(n)` instead of building a copy with
+`substr` and throwing the original away — an allocation and a copy per read.
+They disagree about an argument past the end because the two questions do:
+`truncate(n)` asks to be **at most** `n` long, which a shorter buffer already
+is, and `drop_front(n)` asks for `n` bytes to be **removed**, which a shorter
+buffer cannot do and which means whatever counted them has miscounted.
+`substr` remains for the copy a caller means to keep.
 
 `==` and `!=` compare by value, as on `str`. There is no `+`: appending is
 `extend`, in place, which is what a buffer is for. There is no ordering,
