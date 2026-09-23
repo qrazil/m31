@@ -1,0 +1,1 @@
+trap: text.pad_left(): fill must be one character, not "ab"

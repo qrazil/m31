@@ -1,0 +1,1 @@
+trap: text.replace(): the text to replace may not be empty

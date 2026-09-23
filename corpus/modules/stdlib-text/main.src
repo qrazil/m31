@@ -1,0 +1,238 @@
+import text;
+
+// `text`: what `str`'s built-in methods leave out.
+//
+// The expected output is CPython's wherever CPython answers the same question
+// -- `str.replace`, `str.splitlines`, `str.split()`, `str.removeprefix`,
+// `str.removesuffix`, `str.rjust`, `str.ljust`, `int()` -- and the four places
+// it is NOT are marked `DIFFERS` below, with the reason. The generator is
+// corpus/modules/stdlib-text/oracle.py.
+
+// A `List<str>` as one line: the count, then the parts, so an empty list and a
+// list holding one empty string cannot print the same.
+str show(List<str> xs) {
+    List<str> parts = [];
+    for (str x in xs) {
+        parts.push(visible(x));
+    }
+    return xs.size().to_str() + " [" + parts.join("|") + "]";
+}
+
+// `s` with every character that would be invisible in this file written out
+// instead: the C0 controls, DEL, the no-break space, and the two Unicode line
+// separators CPython's `splitlines` breaks on and this module does not.
+// Everything else, `é` and `日` included, prints as itself.
+str visible(str s) {
+    List<str> out = [];
+    for (int c in s.chars()) {
+        if (c < 32 || c == 127) {
+            bytes one = [c];
+            out.push("\\x" + one.hex());
+        } else if (c == 0xA0 || c == 0x2028 || c == 0x2029) {
+            bytes two = [c >> 8, c & 0xFF];
+            out.push("\\u{" + two.hex() + "}");
+        } else {
+            out.push(str.from_chars([c]));
+        }
+    }
+    return out.join("");
+}
+
+// --- replace -------------------------------------------------------------------
+print(text.replace("a-b-c", "-", "+"));
+print(text.replace("a-b-c", "-", "+", count: 1));
+print(text.replace("a-b-c", "-", "+", count: 2));
+print(text.replace("a-b-c", "-", "+", count: 9));
+print(text.replace("a-b-c", "-", "+", count: 0));
+// No match, and a needle longer than the text.
+print(text.replace("abc", "z", "!"));
+print(text.replace("ab", "abcd", "!"));
+// The whole string, and deleting rather than replacing.
+print("[" + text.replace("abc", "abc", "") + "]");
+print("[" + text.replace("a-b-c", "-", "") + "]");
+// Overlapping needles: left to right, and what was matched is not rescanned.
+print(text.replace("aaa", "aa", "b"));
+print(text.replace("aaaa", "aa", "b"));
+print(text.replace("aaa", "aa", "b", count: 1));
+// The replacement holds the needle -- no rescan, so no loop.
+print(text.replace("a", "a", "aa"));
+print(text.replace("aaa", "a", "aa"));
+print(text.replace("x&y", "&", "&amp;"));
+// Multi-byte needle, multi-byte replacement, multi-byte text.
+print(text.replace("héllo héllo", "é", "e"));
+print(text.replace("a,b", ",", " — "));
+print(text.replace("日本語", "本", "ほん"));
+// An ASCII needle can never match inside a multi-byte character: the second
+// byte of `é` is 0xA9 and the second of `©` is also 0xA9, yet neither is `)`.
+print(text.replace("é©", ")", "!"));
+// The empty string.
+print("[" + text.replace("", "a", "b") + "]");
+// --- lines ---------------------------------------------------------------------
+print(show(text.lines("")));
+print(show(text.lines("a")));
+print(show(text.lines("a\n")));
+print(show(text.lines("a\nb")));
+print(show(text.lines("a\nb\n")));
+print(show(text.lines("\n")));
+print(show(text.lines("\n\n")));
+print(show(text.lines("a\n\nb")));
+print(show(text.lines("a\n\n")));
+print(show(text.lines("a\r\nb\r\n")));
+print(show(text.lines("a\r\n\r\nb")));
+// DIFFERS from CPython (1): a lone `\r` does not end a line. CPython's
+// `splitlines` gives ["a", "b"]; here `"a\rb"` is one line, because a `\r`
+// in the middle of a line is data by every reading and a byte cannot be data
+// in the middle and a terminator at the end.
+print(show(text.lines("a\rb")));
+// DIFFERS from CPython (2), same rule at the end of the text: `"a\r"` is one
+// line holding a carriage return. Rust's `str::lines` agrees; Go's
+// `bufio.Scanner` and CPython drop it.
+print(show(text.lines("a\r")));
+// DIFFERS from CPython (3): only `\n` ends a line. CPython also breaks on
+// `\v`, `\f`, `\x1c`, `\x1d`, `\x1e`, `\x85`, `U+2028` and `U+2029`.
+print(show(text.lines("a\u{b}b\u{c}c")));
+print(show(text.lines("a\u{2028}b")));
+print(show(text.lines("héllo\n日本\n")));
+// --- split_whitespace ------------------------------------------------------------
+print(show(text.split_whitespace("")));
+print(show(text.split_whitespace("   ")));
+print(show(text.split_whitespace("a")));
+print(show(text.split_whitespace("  a\tb  c ")));
+print(show(text.split_whitespace("\n\ta\u{b}b\u{c}\r")));
+print(show(text.split_whitespace("café 日本 x")));
+// DIFFERS from CPython (4): CPython's `str.split()` also breaks on `\x1c` to
+// `\x1f` and on Unicode spaces such as U+00A0. `str.trim` does not, and one
+// language does not get two definitions of space.
+print(show(text.split_whitespace("a\u{1c}b")));
+print(show(text.split_whitespace("a\u{a0}b")));
+// Whatever `split_whitespace` and `trim_start`/`trim_end` call space must be
+// exactly what `str.trim` calls space. Checked here rather than assumed: every
+// ASCII byte, a one-byte string, does or does not vanish under `trim`, and the
+// two answers must agree. Prints the disagreements, so silence is the pass.
+int b = 0;
+while (b < 128) {
+    str one = str.from_chars([b]);
+    bool by_trim = one.trim() == "";
+    bool by_module = text.split_whitespace(one).size() == 0;
+    bool by_ends = text.trim_start(one) == "" && text.trim_end(one) == "";
+    if (by_trim != by_module || by_trim != by_ends) {
+        print("space disagreement at byte " + b.to_str());
+    }
+    b = b + 1;
+}
+print("space set agrees with trim");
+// --- trim_start, trim_end --------------------------------------------------------
+print("[" + text.trim_start("  a  ") + "]");
+print("[" + text.trim_end("  a  ") + "]");
+print("[" + text.trim_start("") + "]");
+print("[" + text.trim_end("") + "]");
+print("[" + text.trim_start("   ") + "]");
+print("[" + text.trim_end("   ") + "]");
+print("[" + text.trim_start("a") + "]");
+print("[" + text.trim_end("a") + "]");
+print("[" + text.trim_end("    indented line   ") + "]");
+// U+00A0 is text, not space -- `str.trim` leaves it, so these do too.
+print(text.trim_start("\u{a0}x").size());
+print(text.trim_end("x\u{a0}").size());
+// --- strip_prefix, strip_suffix ---------------------------------------------------
+print(text.strip_prefix("--verbose", "--"));
+print(text.strip_prefix("verbose", "--"));
+print("[" + text.strip_prefix("--", "--") + "]");
+print("[" + text.strip_prefix("-", "--") + "]");
+print("[" + text.strip_prefix("abc", "") + "]");
+print("[" + text.strip_prefix("", "x") + "]");
+print(text.strip_suffix("notes.txt", ".txt"));
+print(text.strip_suffix("notes.md", ".txt"));
+print("[" + text.strip_suffix(".txt", ".txt") + "]");
+print("[" + text.strip_suffix("abc", "") + "]");
+// A multi-byte affix, and one that is a prefix of a character's bytes but not
+// of a character: `é` is C3 A9, and `strip_prefix` compares whole text.
+print(text.strip_prefix("époque", "é"));
+print(text.strip_suffix("café", "é"));
+print(text.strip_prefix("é", "e"));
+// --- pad_left, pad_right -----------------------------------------------------------
+print("[" + text.pad_left("7", 3) + "]");
+print("[" + text.pad_right("7", 3) + "]");
+print("[" + text.pad_left("7", 3, fill: "0") + "]");
+print("[" + text.pad_left("", 3, fill: ".") + "]");
+print("[" + text.pad_right("", 3, fill: ".") + "]");
+print("[" + text.pad_left("abc", 3) + "]");
+print("[" + text.pad_left("abcde", 3) + "]");
+print("[" + text.pad_left("abc", 0) + "]");
+print("[" + text.pad_left("abc", -5) + "]");
+// Code points, not bytes: `café` is five bytes and four characters, so it
+// takes one space to reach five. Padding by `size()` would give none at all.
+print("[" + text.pad_right("café", 5) + "]");
+print(text.pad_right("café", 5).size());
+print("[" + text.pad_left("日本", 4, fill: "·") + "]");
+// The fill may be multi-byte too, and the width is still in code points.
+print(text.pad_left("x", 4, fill: "·").size());
+// --- parse_int ---------------------------------------------------------------------
+print(parsed("42"));
+print(parsed("-42"));
+print(parsed("+42"));
+print(parsed("0"));
+print(parsed("-0"));
+print(parsed("007"));
+print(parsed("9223372036854775807"));
+print(parsed("-9223372036854775808"));
+print(parsed("9223372036854775808"));
+print(parsed("-9223372036854775809"));
+print(parsed("99999999999999999999999999"));
+print(parsed(""));
+print(parsed("+"));
+print(parsed("-"));
+print(parsed("4 2"));
+print(parsed(" 42"));
+print(parsed("42 "));
+print(parsed("42abc"));
+print(parsed("abc"));
+print(parsed("4.2"));
+print(parsed("4-2"));
+print(parsed("1_000"));
+print(parsed("0x10"));
+print(parsed("４２"));
+// Every reason is reachable and every one of them says something different.
+print(parsed("\t1"));
+print(parsed("1\n"));
+// The whole grammar agrees with the built-in: the same strings are accepted
+// and the same value comes out. Prints disagreements, so silence is the pass.
+List<str> probes = ["42", "-42", "+42", "0", "-0", "007", "", "+", "-", "4 2", " 42", "42 ", "42abc", "abc", "4.2", "4-2", "1_000", "0x10", "４２", "9223372036854775807", "-9223372036854775808", "9223372036854775808", "-9223372036854775809", "99999999999999999999999999", "\t1", "1\n"];
+for (str p in probes) {
+    match (text.parse_int(p)) {
+        case Ok(int v): {
+            match (p.parse_int()) {
+                case Some(int w): {
+                    if (v != w) {
+                        print("value disagreement on '" + p + "'");
+                    }
+                }
+                case None: {
+                    print("built-in refused '" + p + "', module accepted it");
+                }
+            }
+        }
+        case Err(text.ParseError e): {
+            match (p.parse_int()) {
+                case Some(int w): {
+                    print("built-in accepted '" + p + "' as " + w.to_str() + ", module refused it");
+                }
+                case None: {
+                }
+            }
+        }
+    }
+}
+print("parse_int agrees with the built-in");
+
+// `Ok(n)` or the reason, on one line.
+str parsed(str s) {
+    match (text.parse_int(s)) {
+        case Ok(int v): {
+            return "ok " + v.to_str();
+        }
+        case Err(text.ParseError e): {
+            return "err " + e.to_str();
+        }
+    }
+}
