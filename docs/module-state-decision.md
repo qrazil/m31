@@ -5,10 +5,12 @@ and functions.
 
   - **Immutable state — module constants.** Decided 2026-09-21 and
     implemented; §1 below. Normative text: `docs/reference.md` §4.4.
-  - **Mutable state — module variables.** **Not decided, and not
-    implemented.** §2 lays out the problem, the collision with the
-    concurrency model, the options with evidence, and a recommendation. The
-    author decides.
+  - **Mutable state — module variables.** **Decided: there is none, and
+    there will be none.** §2 lays out the problem, the collision with the
+    concurrency model, the options with evidence, and the recommendation
+    that was *not* taken. §2a records what was done instead, and it is the
+    rule to build on: state a library needs between calls lives in an object
+    the program holds.
 
 What `const` means (deep immutability, frozen objects) is its own record:
 `docs/const-decision.md`.
@@ -94,7 +96,10 @@ earlier run on a loaded machine gave the same shape (0.79 s → 0.675 s,
 
 ---
 
-## 2. Mutable module state — open
+## 2. Mutable module state — the case, as it stood
+
+Everything in §2 is the record of the argument, kept as it was written. The
+answer is in §2a; read that first if you only want the rule.
 
 ### The problem
 
@@ -270,3 +275,48 @@ the no-inheritance rule. It should wait for a program that needs it.
 corruption under plain counts), and a `Mutex`/`static mut`-style escape
 hatch (the language has no `unsafe`, and a lock type that moves its value
 in and out is a channel with a different name — channels already exist).
+
+---
+
+## 2a. Mutable module state — decided: there is none
+
+**The recommendation in §2 was not taken.** Moving the two singletons into
+the runtime would have bought convenience by putting library logic in C and
+giving the language two answers to "where does state live". The rule instead
+is the one the language already had, made explicit:
+
+> **There is no mutable module state and there will be none. State a library
+> needs between calls lives in an object the program holds.**
+
+Both customers in §2 were answered that way, and neither needed a language
+change:
+
+  - **io.** `io.Buffer` (`lib/io.src`) is "bytes I have fetched and not yet
+    handed out": a read position, compaction when the dead prefix is half the
+    buffer, so reading from the front is amortised O(1). `io.File` holds one
+    for its own read-ahead, and `io.Buffer` is a `Stream` in its own right.
+    `io.read_line()` was **removed** rather than made stateful: its contract
+    — never read past the line — was exactly what made it one system call per
+    byte on a pipe, and it cannot be kept and made fast. Line reading is
+    `io.read_line_of(stream, limit)` over `io.Stream`, and the program holds
+    the stream (`io.stdin()`, called once).
+  - **random.** `random.system()` answers a `System` holding an `io.Buffer`
+    pool, filled 256 octets at a time — the largest block `getentropy`
+    answers in one call, so a refill is one system call. The module-level
+    `random.integer(1, 6)`, `random.uuid4()` and the rest were **removed**
+    for the same reason `io.read_line` was: they could not hold the pool, and
+    a convenience that is quietly 256 times the work of the spelling beside
+    it is worse than no convenience. Measured on 10^6 one-octet draws:
+    1,000,000 `getentropy` calls and 0.87 s before, 3,907 calls and 0.14 s
+    after.
+
+**What this costs, honestly.** Two things get longer to write:
+`random.system().uuid4()` instead of `random.uuid4()`, and a held
+`io.stdin()` instead of `io.read_line()`. Both now say where the state is,
+which is the point — and both are what Go writes too (`bufio.NewReader(
+os.Stdin)`, an explicit object, beside an unbuffered `os.Stdin`).
+
+**What is still true from §2:** if user programs ever need module state, the
+next step is per-thread module state with lazy initialisation, for the
+reasons given above. Nothing here makes that easier or harder; it removes the
+two library customers that were the whole case for doing it now.

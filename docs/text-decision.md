@@ -56,7 +56,7 @@ Every way to make a `str` yields valid UTF-8:
 |---|---|
 | a literal | the source is UTF-8 (the lexer refuses anything else), `\u{}` refuses surrogates and values past U+10FFFF, and `\x` stops at 7F (reference §1.5) |
 | `b.utf8()` | strict decoder, RFC 3629: no overlong forms, no surrogates, nothing past U+10FFFF, no truncation; `None` otherwise — never U+FFFD |
-| `io.read`, `io.read_line`, `fs.listdir` | built on `utf8()`, and an error value when it says no |
+| `io.read`, `io.read_line_of`, `fs.listdir` | built on `utf8()`, and an error value when it says no |
 | `os.args`, `os.env` | built on `utf8()` — **changed**: the runtime used to push argv and environment values straight into a `str` (§4) |
 | `+`, `concat`, `repeat`, `join` | valid strings side by side are valid |
 | `trim`, `to_upper`, `to_lower` | touch only ASCII bytes, and UTF-8 never uses an ASCII byte inside a multi-byte character |
@@ -159,9 +159,11 @@ that names no file — the same reason `utf8()` refuses rather than repairs.
 **`env` is an `Option`, `args` a `Result`.** `env` already answers "is there
 a value of this name"; a value that is not text is "no text of that name",
 and a program falling back to a default when `LANG` is unset does the right
-thing when it is not UTF-8. `io.read_line` makes the same trade for a line.
-`args` cannot: a list cannot leave one element out without moving the rest,
-so it has to fail as a whole.
+thing when it is not UTF-8. (`io.read_line` made the same trade for a line
+and has since been removed; `io.read_line_of` answers a `Result` and says
+`InvalidUtf8` outright, which is the better shape where there is room for
+it.) `args` cannot: a list cannot leave one element out without moving the
+rest, so it has to fail as a whole.
 
 The runtime now pushes `bytes` for both (`rt_args`, `rt_env`), and
 `lib/os.src` decodes, so the runtime has no remaining way to make a `str`

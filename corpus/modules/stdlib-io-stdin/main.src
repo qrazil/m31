@@ -1,47 +1,66 @@
 import io;
 
-// Standard input, two ways, one after the other. main.in beside this file is
-// binary on purpose:
+// Standard input, lines and octets, through ONE `io.File`. main.in beside
+// this file is binary on purpose:
 //
 //   alpha\n  beta\r\n  \n  \xff\xfe\n  gamma\n  (300 z)\r\n  \0\xff\n  tail
 //
-// read_line never reads past the line it returns, so a File on descriptor 0
-// opened afterwards starts exactly where the lines stopped.
-str show(Option<str> l) {
+// There is one line reader, `io.read_line_of`, and it reads through the
+// stream's own buffer -- so the `File` has to be made once and kept. A
+// second `io.stdin()` would be a second buffer, holding input the first
+// never sees. That is also why the octet reads further down carry on exactly
+// where the lines stopped: it is the same buffer.
+str show(Result<Option<str>, io.Error> l) {
     match (l) {
-        case Some(str s): {
-            return "[" + s + "]";
+        case Ok(Option<str> o): {
+            match (o) {
+                case Some(str s): {
+                    return "[" + s + "]";
+                }
+                case None: {
+                    return "none";
+                }
+            }
         }
-        case None: {
-            return "none";
+        case Err(io.Error e): {
+            return "<" + e.to_str() + ">";
         }
     }
 }
 
-print(show(io.read_line()));  // [alpha]
-print(show(io.read_line()));  // [beta] -- the \r goes with the \n
-print(show(io.read_line()));  // [] -- an empty line is a line, not the end
-// \xff\xfe is not UTF-8. An Option cannot say why, so the line reads as
-// None -- and the next call goes on after it, not stuck on it.
-print(show(io.read_line()));  // none
-print(show(io.read_line()));  // [gamma]
-// A line longer than the first piece read_line asks for, ending in \r\n.
-match (io.read_line()) {
-    case Some(str s): {
-        print(s.size());  // 300
-        print(s == "z".repeat(300));  // true
-    }
-    case None: {
-        print("none");
-    }
-}
-
-// The rest as bytes: a NUL and 0xff come through untouched.
 io.File input = io.stdin();
+print(show(io.read_line_of(input, 4096)));  // [alpha]
+print(show(io.read_line_of(input, 4096)));  // [beta] -- the \r goes with the \n
+print(show(io.read_line_of(input, 4096)));  // [] -- an empty line is a line, not the end
+// \xff\xfe is not UTF-8. A Result says so, where the removed `io.read_line`
+// could only answer None -- and the next call goes on after it, not stuck on
+// it, because the line was consumed either way.
+print(show(io.read_line_of(input, 4096)));  // <not valid UTF-8 text>
+print(show(io.read_line_of(input, 4096)));  // [gamma]
+// A long line, well inside the limit, ending in \r\n: the ending still comes
+// off whole.
+match (io.read_line_of(input, 4096)) {
+    case Ok(Option<str> o): {
+        match (o) {
+            case Some(str s): {
+                print(s.size());  // 300
+                print(s == "z".repeat(300));  // true
+            }
+            case None: {
+                print("none");
+            }
+        }
+    }
+    case Err(io.Error e): {
+        print(e.to_str());
+    }
+}
+// The rest as octets, off the same buffered `File`: `read_until` picks up
+// exactly where the last line ended.
 bytes nl = "\n".to_bytes();
 match (input.read_until(nl, 100)) {
     case Ok(bytes b): {
-        print(b.hex());  // 00ff0a
+        print(b.hex());  // 00ff0a -- a NUL and 0xff come through untouched
     }
     case Err(io.Error e): {
         print(e.to_str());
@@ -63,4 +82,4 @@ match (input.read(1)) {
         print(e.to_str());
     }
 }
-print(show(io.read_line()));  // none -- the end
+print(show(io.read_line_of(input, 4096)));  // none -- the end

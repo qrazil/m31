@@ -233,7 +233,8 @@ print(one_line(text));  // [buffer line]
 print(one_line(text));  // [last, unterminated]
 print(one_line(text));  // <end>
 // Text that is not UTF-8 stops the line rather than ending the stream:
-// `io.read_line_of` has a Result to say why, where `io.read_line` has only None.
+// `io.read_line_of` has a Result to say why, where an Option would have to
+// call it the end of the input.
 bytes bad = [104, 105, 255, 254, 10, 111, 107, 10];
 io.Buffer rough = io.buffer_of(bad);
 print(one_line(rough));  // <not valid UTF-8 text>

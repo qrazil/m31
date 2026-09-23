@@ -446,13 +446,17 @@ and 2; the policy -- when to flush -- is in the library.
     read; a pipe takes the chunk loop.
   - **EINTR.** Every read and write loop retries on `-4`. `close` never
     does: on Linux the descriptor is gone by then.
-  - **`read_line` without state.** A module cannot hold a buffer between
-    calls, so `io.read_line()` does not read ahead at all: on a pipe or a
-    terminal it reads one byte per call to `read(2)`, as a shell's `read`
-    builtin does; on a seekable descriptor (`prog < file`) it reads a
-    growing chunk and seeks back to just past the newline. Either way the
-    rest of standard input is still there for `io.stdin()` or a child
-    process. Bulk line reading is `io.stdin()` + `read_until`, buffered.
+  - **No `read_line` without state.** A module cannot hold a buffer between
+    calls, so `io.read_line()` could not read ahead at all: on a pipe or a
+    terminal it read one byte per call to `read(2)`, as a shell's `read`
+    builtin does; on a seekable descriptor (`prog < file`) it read a
+    growing chunk and seeked back to just past the newline. That bought the
+    guarantee that the rest of standard input was still there for
+    `io.stdin()` or a child process, and nothing could make it cheap — the
+    cost *was* the contract. It is **removed**: line reading is
+    `io.read_line_of(stream, limit)`, written against `io.Stream`, and the
+    program holds the stream (`io.stdin()`, called once). The buffer lives
+    in the object, which is the answer everywhere else here too.
   - **Text vs octets.** `io.read` is `read_bytes` + strict `utf8()`,
     failing with `InvalidUtf8`; `io.read_bytes` is the file exactly. That
     is forced as much as chosen: `bytes.utf8()` is the language's only way

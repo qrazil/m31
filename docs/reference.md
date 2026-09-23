@@ -862,8 +862,7 @@ it and answers with an error value when it says no:
 | | |
 |---|---|
 | `io.read` | `Err(io.Error.InvalidUtf8)`; `io.read_bytes` is the file exactly |
-| `io.read_line` | `None` |
-| `io.read_line_of` | `Err(io.Error.InvalidUtf8)` — a `Result` has room to say why, where `read_line`'s `Option` has not |
+| `io.read_line_of` | `Err(io.Error.InvalidUtf8)` — a `Result` has room to say why, where an `Option` would have to call it the end of the input |
 | `fs.listdir` | an error for a name that is not UTF-8 |
 | `os.args()` | **traps**, naming the argument and `os.args_bytes()`, which is every argument exactly |
 | `os.env(name)` | `None`, as for an unset variable; `os.env_bytes(name)` tells the two apart |
