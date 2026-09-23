@@ -154,6 +154,17 @@ A file is a sequence of five kinds of item, in any order:
 Top-level statements run, in source order, as the program. Declarations do
 not: a file that is all declarations is a program that does nothing.
 
+**A variable declared at the top level is a local of the program, not a
+global.** The top-level statements are one body, so `str root = "x";` up
+there is a local of that body, and a function declared beside it cannot see
+it any more than it could see a local of another function. There is no
+mutable module state for it to be instead: whether to have any is an open
+question with a record of its own (docs/module-state-decision.md), and
+answering it means answering when such a variable is initialised and what a
+second thread sees of it. What a function needs is passed in as an argument,
+or declared `const` (§4.5), which is a value rather than a variable. The
+compiler says this, rather than calling the name unknown.
+
 Forward references are fine. Types, functions and constants are collected
 before any body is checked, so an item may name one declared later in the
 file.

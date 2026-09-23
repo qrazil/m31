@@ -1,0 +1,15 @@
+// The statements at the top level ARE the program's body, so `root` is a
+// local of that body and a function declared beside it cannot see it -- no
+// more than it could see a local of another function. There is no module
+// state for it to be instead (docs/module-state-decision.md).
+//
+// This used to say only "unknown variable `root`", about a name the reader
+// can see three lines above the function. It is the same refusal; it now
+// says which of the two things it is, and both ways out.
+str root = "x";
+
+str f() {
+    return root;
+}
+
+print(f());

@@ -1,0 +1,13 @@
+// Assigning to a top-level variable from a function is refused for the same
+// reason reading one is, and says the same thing: the name is a local of the
+// program body. A `const` would not help here -- a constant cannot be
+// assigned either -- but the message is about what the name IS, which is
+// what the reader has got wrong.
+int count = 0;
+
+void bump() {
+    count = count + 1;
+}
+
+bump();
+print(count);

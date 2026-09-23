@@ -190,6 +190,18 @@ pub struct Lowerer {
     /// reference runs only the runtime, which decides whether a built-in
     /// method can run user code (src/lower/hold.rs, `releases`).
     has_destructors: bool,
+    /// Names declared by the statements at the entry file's top level, which
+    /// are the program's body and so are locals of it -- NOT globals a
+    /// function can reach. Kept only to say that in the diagnostic, which is
+    /// otherwise a bare "unknown variable" for a name the reader can see two
+    /// lines above. Empty while the entry body itself is lowered, where the
+    /// name is in scope and the hint would be a lie.
+    entry_locals: std::collections::HashSet<String>,
+    /// The entry file's module, so the hint above is not offered to an
+    /// imported file, which cannot see those names under any reading.
+    entry_module: String,
+    /// Set while the entry body is the function being lowered.
+    in_entry: bool,
 }
 
 /// Every builtin function, whether it lives in `sigs` (`concat`) or is
@@ -202,6 +214,11 @@ pub struct Lowerer {
 /// module, and to turn every `print` in an importing file into a privacy
 /// error about a function that file never asked for.
 const BUILTIN_FNS: &[&str] = &["print", "concat", "clone", "send", "recv", "close", "trap"];
+
+/// The name of the synthesised function whose body is the program: the
+/// statements at the entry file's top level. It starts with `$`, which no
+/// identifier may, so no program can name it (src/emit_c.rs mangles it).
+const ENTRY: &str = "$main";
 
 /// The reserved method name of a destructor: `void File.drop() { .. }` runs
 /// when a `File`'s count reaches zero, before its fields are released
@@ -361,7 +378,38 @@ impl Lowerer {
             no_recv: String::new(),
             ret_ty: Ty::Void,
             has_destructors: false,
+            entry_locals: std::collections::HashSet::new(),
+            entry_module: String::new(),
+            in_entry: false,
         }
+    }
+
+    /// A name nothing in scope answers to.
+    ///
+    /// The one case worth more than "unknown": a function in the entry file
+    /// reaching for a variable declared at the top level. The name IS there,
+    /// two lines up, so "unknown variable" reads like a compiler bug. It is
+    /// not one -- the top-level statements are the program's body, so that
+    /// variable is a local of the body, and a function can no more see it
+    /// than it can see a local of another function. There is no module
+    /// state to make it anything else, deliberately
+    /// (docs/module-state-decision.md). So the diagnostic says which of the
+    /// two things it is, and names both ways out.
+    fn unknown_variable(&self, name: &str, span: Span) -> Diag {
+        if !self.in_entry
+            && self.cur_module == self.entry_module
+            && self.entry_locals.contains(name)
+        {
+            return Diag::new(
+                span,
+                format!(
+                    "`{name}` is a local of the program body: the statements at the \
+                     top level ARE the body, so a function cannot see them -- pass \
+                     it in as an argument, or declare it `const`"
+                ),
+            );
+        }
+        Diag::new(span, format!("unknown variable `{name}`"))
     }
 
     fn builtin(&mut self, name: &str, params: Vec<Ty>, ret: Ty) {
@@ -2495,7 +2543,7 @@ impl Lowerer {
             is_static: false,
             is_prim: false,
             recv: None,
-            name: "$main".to_string(),
+            name: ENTRY.to_string(),
             tparams: Vec::new(),
             recv_tparams: Vec::new(),
             params: Vec::new(),
@@ -2504,6 +2552,17 @@ impl Lowerer {
         };
 
         self.has_destructors = self.any_destructor();
+        // Only the entry file may hold statements (src/modules.rs), so these
+        // names belong to exactly one body: this one.
+        self.entry_module = p.module.clone();
+        self.entry_locals = entry
+            .body
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Decl { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
         let mut funcs = Vec::new();
         for f in &p.funcs {
             // A primitive has no body to lower: its implementation is the
@@ -3291,6 +3350,7 @@ impl Lowerer {
 
     fn lower_func_inner(&mut self, f: &Func) -> Result<ir::Func, Diag> {
         self.cur_module = f.module.clone();
+        self.in_entry = f.name == ENTRY;
         self.types.clear();
         self.blocks.clear();
         self.scopes.clear();
@@ -3634,7 +3694,7 @@ impl Lowerer {
                     if self.resolve_const(name).is_some() {
                         return Err(Diag::new(*span, format!("cannot assign to const `{name}`")));
                     }
-                    return Err(Diag::new(*span, format!("unknown variable `{name}`")));
+                    return Err(self.unknown_variable(name, *span));
                 };
                 if is_const {
                     return Err(Diag::new(*span, format!("cannot assign to const `{name}`")));
@@ -5941,7 +6001,7 @@ impl Lowerer {
                 if let Some(d) = self.foreign_const_hint(name, *span) {
                     return Err(d);
                 }
-                Err(Diag::new(*span, format!("unknown variable `{name}`")))
+                Err(self.unknown_variable(name, *span))
             }
             Expr::Un(op, inner, span) => {
                 let a = self.lower_expr(inner)?;
