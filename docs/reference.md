@@ -21,6 +21,17 @@ wish, so if you add one here, add one there.
 UTF-8. A source file is a sequence of items and statements; there is no
 enclosing declaration and no `main`.
 
+A diagnostic names a position as `line:col`. The line is 1-based. The column
+is 1-based and counts **code points**, not bytes and not display cells: `é`
+is one column, an emoji is one column, and so a caret printed under the
+echoed source line lands on the token it is pointing at. A tab is also one
+column — the compiler cannot know the reader's tab width, so the echoed line
+prints each tab as a single space and the two agree by construction. A
+double-width character therefore costs one column, which is the one case
+where the caret can look a cell short of the token in a terminal; every
+alternative makes the *number* wrong instead, which is worse, because that is
+what an editor is told to jump to.
+
 ### 1.2 Comments
 
 `// to end of line` and `/* ... */`. Block comments do not nest.
@@ -142,6 +153,17 @@ A file is a sequence of five kinds of item, in any order:
 
 Top-level statements run, in source order, as the program. Declarations do
 not: a file that is all declarations is a program that does nothing.
+
+**A variable declared at the top level is a local of the program, not a
+global.** The top-level statements are one body, so `str root = "x";` up
+there is a local of that body, and a function declared beside it cannot see
+it any more than it could see a local of another function. There is no
+mutable module state for it to be instead: whether to have any is an open
+question with a record of its own (docs/module-state-decision.md), and
+answering it means answering when such a variable is initialised and what a
+second thread sees of it. What a function needs is passed in as an argument,
+or declared `const` (§4.5), which is a value rather than a variable. The
+compiler says this, rather than calling the name unknown.
 
 Forward references are fine. Types, functions and constants are collected
 before any body is checked, so an item may name one declared later in the
@@ -725,6 +747,7 @@ Methods:
 | `Array`, `List`, `Map`, `str` | `size()` | element count |
 | `Array`, `List` | `contains(v)` | `int`, `float`, `bool` and `str` elements only |
 | `Array`, `List` | `index_of(v)` | `Option<int>` — `None` if it is not there |
+| `Array`, `List` | `slice(from, to)` | a fresh collection of the same kind holding `from .. to`, half-open; **traps** if out of bounds |
 | `Array`, `List` | `reverse()` | in place |
 | `Array`, `List` | `sort()` | in place, ascending; `int`, `float`, `str`, or a type with `cmp` |
 | `List` | `push(v)` | append |
@@ -747,6 +770,17 @@ method for everything else was two spellings of one idea.
 
 On a `Map`, `contains` asks about a **key** — the same thing `get` and
 `remove` take.
+
+`slice` is `substr`'s contract on a collection: half-open, so `slice(i, i)`
+is empty and `to - from` is the size, and a range outside `0 .. size()`
+**traps** instead of clamping — a range the program computed wrong is a bug,
+and a quietly shortened answer hides it in whatever computed the range. The
+name differs from `substr` because a list holds no text; the shape of the
+call is what has to match, and does. It answers with the kind it was called
+on — an `Array`'s slice is an `Array`, and a `distinct List<int>`'s is that
+distinct type, as `clone` does — and it shares the elements, retaining each,
+also as `clone` does. The command line without the program's own name is
+`argv.slice(1, argv.size())`; before it, taking any sub-range needed a loop.
 
 `contains` compares the way `==` does — `str` by value, `int` and `bool`
 directly — and refuses a user type, which would need its own comparison.
@@ -840,6 +874,8 @@ and an immutable `str` cannot have:
 | `b.push(v)` | append one byte; **traps** outside 0..255 |
 | `b.pop()` | remove and return the last byte; **traps** if empty |
 | `b.clear()` | size 0, keeping the buffer for reuse |
+| `b.truncate(n)` | keep the first `n` bytes, keeping the buffer; already that short, nothing happens; **traps** below 0 |
+| `b.drop_front(n)` | remove the first `n` bytes, moving the rest down; **traps** below 0 or above `size()` |
 | `b.extend(other)` | append another `bytes` in place; `b.extend(b)` doubles `b` |
 | `b.substr(from, to)` | a new `bytes`, half-open; **traps** if out of bounds |
 | `b.contains(sub)` | run-of-bytes search; an empty needle is found |
@@ -853,10 +889,21 @@ and an immutable `str` cannot have:
 | `b.utf8()` | `Option<str>` — the text, if `b` is valid UTF-8 |
 | `xs.join(sep)` | on a collection of `bytes`, the inverse of `split` |
 
-`push`, `pop`, `clear`, `extend` and index assignment change `b`; every
+`push`, `pop`, `clear`, `truncate`, `drop_front`, `extend` and index
+assignment change `b`; every
 other method returns a new object and leaves `b` alone. `contains` and
 `index_of` take a `bytes` because that is what they take on `str` — they
 find a run, not an element.
+
+**A buffer shrinks in place, from either end.** `truncate` and `drop_front`
+both keep the allocation the way `clear` does, so a read loop that has
+consumed a prefix says `b.drop_front(n)` instead of building a copy with
+`substr` and throwing the original away — an allocation and a copy per read.
+They disagree about an argument past the end because the two questions do:
+`truncate(n)` asks to be **at most** `n` long, which a shorter buffer already
+is, and `drop_front(n)` asks for `n` bytes to be **removed**, which a shorter
+buffer cannot do and which means whatever counted them has miscounted.
+`substr` remains for the copy a caller means to keep.
 
 `==` and `!=` compare by value, as on `str`. There is no `+`: appending is
 `extend`, in place, which is what a buffer is for. There is no ordering,
@@ -1774,6 +1821,15 @@ immediate destruction at the cost of a shape the program has to avoid.
 When a count reaches zero the type's destructor runs, if it declares one
 (§4.4), and then the object's fields are released, each of which may reach
 zero in turn. A cycle never reaches zero, so its destructors never run.
+
+Releasing a graph does **not** recurse: the first count to reach zero owns
+the release and the rest are queued, so freeing a chain of any length costs
+one C stack frame, not one per link. What that fixes is a crash — a 100 000
+node list used to overflow the stack. What it costs is the order across
+objects: an owner is released, then everything it held, then everything
+those held — breadth-first, where the recursion was depth-first. **Within**
+an object nothing changed, and that is the part the rules name: the
+destructor runs first, then the fields in declaration order.
 
 Refcount operations are non-atomic (§8.3).
 

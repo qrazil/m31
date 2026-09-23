@@ -257,7 +257,11 @@ pub Result<bytes, Error> File.read_all() {
         if (got == hint && out.size() == 0) {
             out = big;
         } else {
-            out.extend(big.substr(0, got));
+            // The file was shorter than it said, or something was buffered
+            // already: cut `big` down where it is rather than allocating a
+            // copy of the part that was filled.
+            big.truncate(got);
+            out.extend(big);
         }
     }
     // The rest, until the kernel says the end: all of it for a pipe, and
@@ -705,7 +709,7 @@ void Buffer.check_live() {
     }
 }
 
-// Drop the dead prefix once it is worth the copy.
+// Drop the dead prefix once it is worth the move.
 //
 // **The rule: compact when the dead prefix is at least half the buffer.**
 // Reading from the front therefore never copies the remainder -- it only
@@ -714,6 +718,11 @@ void Buffer.check_live() {
 // compaction. Charging each moved byte to one of those reads makes reading
 // amortised O(1) a byte, so a loop of small reads over a large `Buffer` is
 // linear in the bytes, not quadratic.
+//
+// The move is `drop_front`, in place: the storage is the one already here,
+// so a compaction costs the memmove and nothing else. It used to be
+// `substr`, which allocated a second buffer the size of what was left and
+// freed the first.
 //
 // Everything read is the case worth its own branch, because it is the shape
 // of every write-then-drain loop: `clear()` keeps the allocation (§3.10),
@@ -730,7 +739,7 @@ void Buffer.compact() {
         return;
     }
     if (at * 2 >= n) {
-        buf = buf.substr(at, n);
+        buf.drop_front(at);
         at = 0;
     }
 }

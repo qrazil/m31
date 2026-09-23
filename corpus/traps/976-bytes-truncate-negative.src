@@ -1,0 +1,7 @@
+// A negative length is not a length. Both shrinking methods refuse one the
+// way `[v; n]` and `repeat` already do, rather than reading it as a huge
+// unsigned count.
+bytes b = [1, 2, 3];
+int n = -1;
+b.truncate(n);
+print(b.size());

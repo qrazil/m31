@@ -258,13 +258,28 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Advance one BYTE, and the column by one CODE POINT.
+    ///
+    /// A column is a count of code points, not of bytes: on a line holding
+    /// `é` or an emoji a byte count puts `line:col` past the token and the
+    /// caret inside a character, which is what a reader sees first. rustc
+    /// counts characters; gcc counts them too unless told otherwise
+    /// (-fdiagnostics-column-unit=byte). The lexer still walks bytes, so the
+    /// column only advances on the bytes that START a character -- a UTF-8
+    /// continuation byte is `10xxxxxx`, and every other byte begins one.
+    ///
+    /// A tab counts as ONE column, not as a jump to the next tab stop: the
+    /// compiler cannot know the reader's tab width, and diag.rs echoes the
+    /// source line with each tab rendered as a single space so that the
+    /// caret it prints lands under the column the message names. Both halves
+    /// of that agreement are documented in docs/reference.md §1.1.
     fn bump(&mut self) -> u8 {
         let c = self.peek();
         self.pos += 1;
         if c == b'\n' {
             self.line += 1;
             self.col = 1;
-        } else {
+        } else if c & 0xC0 != 0x80 {
             self.col += 1;
         }
         c

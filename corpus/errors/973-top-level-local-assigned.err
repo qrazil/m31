@@ -1,0 +1,4 @@
+corpus/errors/973-top-level-local-assigned.src:9:5: `count` is a local of the program body: the statements at the top level ARE the body, so a function cannot see them -- pass it in as an argument, or declare it `const`
+  |
+9 |     count = count + 1;
+  |     ^

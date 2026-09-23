@@ -6,6 +6,10 @@
 
 use std::fmt;
 
+/// A position in a source file: a 1-based line, and a 1-based column counted
+/// in CODE POINTS. Not bytes -- see `Lexer::bump`, which is where the count
+/// is kept -- so `line:col` and the caret under the echoed line agree on a
+/// line holding non-ASCII text. A tab is one column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
     pub line: u32,
@@ -70,9 +74,14 @@ impl Diag {
         };
         let num = self.span.line.to_string();
         let pad = " ".repeat(num.len());
-        // A tab would put the caret in the wrong column, so the echoed line
-        // renders one as a single space too.
+        // A tab is one column (see `Lexer::bump`), so the echoed line renders
+        // one as a single space: any other width and the caret, which is
+        // padded by the column count, would not land under the token.
         let shown = text.replace('\t', " ");
+        // The column counts code points, so the caret is padded with that
+        // many spaces -- not bytes, which would overshoot on a line holding
+        // `é`, and not display cells, which no compiler can know: a
+        // double-width character still costs one column here.
         let caret = " ".repeat(self.span.col.saturating_sub(1) as usize);
         format!("{head}\n{pad} |\n{num} | {shown}\n{pad} | {caret}^")
     }

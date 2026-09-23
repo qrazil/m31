@@ -1,0 +1,37 @@
+// `bytes` can shrink in place, from either end.
+//
+// Before this it could only grow: `push`, `extend`, and `clear` back to
+// nothing. A read buffer that had consumed a prefix had to build a copy
+// with `substr` and throw the original away, which is an allocation and a
+// copy per read.
+//
+// The two disagree about an argument past the end, on purpose. `truncate(n)`
+// asks to be at most `n` long, which a shorter buffer already is; the trap
+// test beside this one shows `drop_front(n)` refusing to remove bytes that
+// are not there.
+bytes b = [1, 2, 3, 4, 5];
+b.truncate(3);
+print(b.hex());
+// Already that short: nothing happens, and nothing traps.
+b.truncate(3);
+b.truncate(9);
+print(b.size());
+b.drop_front(1);
+print(b.hex());
+// Down to empty from either end.
+b.drop_front(2);
+print(b.size());
+// The allocation survives both, as it does `clear`: the next push refills
+// the storage that is already there.
+b.push(255);
+print(b.hex());
+// An empty buffer takes either without complaint.
+bytes empty = [];
+empty.truncate(0);
+empty.drop_front(0);
+print(empty.size());
+// Shrinking is in place, so a second name for the same bytes sees it.
+bytes shared = [9, 8, 7];
+bytes alias = shared;
+shared.drop_front(1);
+print(alias.hex());

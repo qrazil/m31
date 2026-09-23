@@ -270,7 +270,10 @@ impl Lowerer {
     /// signature, so the compiler cannot say.
     pub(super) fn is_mutating_method(&self, t: Ty, m: &str) -> bool {
         if self.underlying(t) == Ty::Bytes {
-            return matches!(m, "push" | "pop" | "clear" | "extend");
+            return matches!(
+                m,
+                "push" | "pop" | "clear" | "truncate" | "drop_front" | "extend"
+            );
         }
         if self.seq_elem(t).is_some() {
             if self.is_list(t) {

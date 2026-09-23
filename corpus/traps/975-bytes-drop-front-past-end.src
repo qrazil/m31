@@ -1,0 +1,8 @@
+// `drop_front(n)` asks for `n` bytes to be removed. A buffer that does not
+// hold that many cannot do it, and the count came from something that has
+// miscounted -- so it traps rather than quietly emptying the buffer, which
+// is the reading that hides the bug. `truncate` saturates instead, because
+// "be at most n long" is a question a shorter buffer can already answer.
+bytes b = [1, 2, 3];
+b.drop_front(4);
+print(b.size());

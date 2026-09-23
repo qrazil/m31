@@ -1,0 +1,4 @@
+corpus/errors/971-caret-tab-is-one-column.src:7:8: unknown variable `nope`
+  |
+7 |  print(nope);
+  |        ^

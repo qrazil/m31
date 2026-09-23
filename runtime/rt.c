@@ -39,22 +39,107 @@ void rc_inc(Obj *o) {
     o->rc++;
 }
 
+/* --- releasing a graph, without recursing ------------------------------
+ *
+ * An object's drop function releases what the object holds, so releasing a
+ * chain used to cost one C stack frame per link: a 100 000-node linked list
+ * segfaulted at -O0 and 200 000 at -O2, on the default 8 MiB stack
+ * (docs/destructors-decision.md, "Recursion depth of release"). The depth is
+ * the data's and the program chooses the data, so no stack size is the
+ * answer; the pending work has to live on the heap.
+ *
+ * So the FIRST decrement to reach zero owns the release and runs a loop.
+ * Every decrement that reaches zero underneath it finds `rc_releasing` set
+ * and hands its object to the queue instead of calling back into rc_dec.
+ * One frame, whatever the shape of the graph.
+ *
+ * A QUEUE and not a stack: an object's fields go in in the order its drop
+ * function releases them, and a queue takes them out in that order. Across
+ * objects the walk is breadth-first where it used to be depth-first. Nothing
+ * promised depth-first; what reference §7.1 promises -- a destructor runs
+ * before its own object's fields are released -- is unchanged, and so is the
+ * order of two separate releases, because the first drains the queue before
+ * it returns.
+ *
+ * Thread-local, because the counts are (reference §8.3): two threads never
+ * reach one object, so they never share a queue either.
+ */
+#define RC_Q_SMALL 64
+static _Thread_local Obj  *rc_q_small[RC_Q_SMALL];
+static _Thread_local Obj **rc_q;      /* rc_q_small, or a heap buffer */
+static _Thread_local size_t rc_q_cap, rc_q_head, rc_q_tail;
+static _Thread_local bool rc_releasing;
+
+/* Run what this object holds, then free it. A type with no reference-typed
+ * fields has no drop function at all, so the common case is one predictable
+ * branch, not a call. */
+static void rc_release(Obj *o) {
+    if (o->ty != NULL && o->ty->drop != NULL) {
+        o->ty->drop(o);
+    }
+    RC_TRACK_FREE();
+    free(o);
+}
+
+/* Hand `o` to the loop that is already running. */
+static void rc_enqueue(Obj *o) {
+    if (rc_q == NULL) {
+        rc_q = rc_q_small;
+        rc_q_cap = RC_Q_SMALL;
+    }
+    if (rc_q_tail == rc_q_cap && rc_q_head > 0) {
+        /* Slide the live span down before growing. A chain enqueues and
+         * dequeues one object at a time forever, and without this the
+         * buffer would grow once per link. */
+        memmove(rc_q, rc_q + rc_q_head, (rc_q_tail - rc_q_head) * sizeof *rc_q);
+        rc_q_tail -= rc_q_head;
+        rc_q_head = 0;
+    }
+    if (rc_q_tail == rc_q_cap) {
+        size_t cap = rc_q_cap * 2;
+        Obj **bigger = rc_q == rc_q_small ? (Obj **)malloc(cap * sizeof *rc_q)
+                                          : (Obj **)realloc(rc_q, cap * sizeof *rc_q);
+        if (bigger == NULL) {
+            /* Out of memory in the middle of freeing memory. Release it here
+             * instead, which recurses -- the behaviour this replaced, and
+             * correct -- rather than trapping halfway through a graph. */
+            rc_release(o);
+            return;
+        }
+        if (rc_q == rc_q_small) memcpy(bigger, rc_q_small, sizeof rc_q_small);
+        rc_q = bigger;
+        rc_q_cap = cap;
+    }
+    rc_q[rc_q_tail++] = o;
+}
+
 void rc_dec(Obj *o) {
     if (o->rc == RC_IMMORTAL) return;
     RC_ASSERT((o->rc & ~RC_FROZEN) > 0, "decrement below zero");
     /* The frozen flag sits above the count (rt.h), so the count is what is
      * below it: a frozen object is freed like any other when its last
      * reference goes. */
-    if ((--o->rc & ~RC_FROZEN) == 0) {
-        /* Release what this object holds before releasing the object. A type
-         * with no reference-typed fields has no drop function at all, so the
-         * common case is one predictable branch, not a call. */
-        if (o->ty != NULL && o->ty->drop != NULL) {
-            o->ty->drop(o);
-        }
-        RC_TRACK_FREE();
-        free(o);
+    if ((--o->rc & ~RC_FROZEN) != 0) return;
+    if (rc_releasing) {
+        rc_enqueue(o);
+        return;
     }
+    rc_releasing = true;
+    rc_release(o);
+    while (rc_q_head < rc_q_tail) {
+        rc_release(rc_q[rc_q_head++]);
+    }
+    rc_q_head = 0;
+    rc_q_tail = 0;
+    /* Give back a buffer that one big graph needed, so a program is not left
+     * holding it and LeakSanitizer has nothing to report at exit. The small
+     * array covers every ordinary release, so this is rare. */
+    if (rc_q != NULL && rc_q != rc_q_small) {
+        free(rc_q);
+        rc_q = rc_q_small;
+        rc_q_cap = RC_Q_SMALL;
+    }
+    rc_releasing = false;
 }
 
 const TypeInfo rt_str_type = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
@@ -705,6 +790,39 @@ Obj *rt_seq_clone(Obj *o) {
     return (Obj *)a;
 }
 
+/* rt_seq_clone of a range: a fresh collection of the SAME kind holding
+ * [from, to), sharing the elements and retaining each, so an Array's slice
+ * is an Array and a List's is a List.
+ *
+ * Half-open and bounds-checked exactly as rt_str_substr is -- that is the
+ * contract this borrows, and a range the program computed wrong is a bug
+ * that clamping would hide in whatever computed it. */
+Obj *rt_seq_slice(Obj *o, int64_t from, int64_t to) {
+    int64_t n = rt_len_of(o);
+    if (from < 0 || to < from || to > n) rt_trap("slice range out of bounds");
+    bool refs = o->ty == &rt_arr_ref_type || o->ty == &rt_lst_ref_type;
+    int64_t *src = slots(o);
+    int64_t m = to - from;
+
+    if (is_list(o)) {
+        Lst *l = (Lst *)rt_list_new(refs);
+        for (int64_t i = 0; i < m; i++) {
+            rt_list_push((Obj *)l, src[from + i]);
+            if (refs) rc_inc((Obj *)(intptr_t)src[from + i]);
+        }
+        return (Obj *)l;
+    }
+
+    Arr *a = (Arr *)rt_alloc(slot_bytes(sizeof(Arr), m),
+                             refs ? &rt_arr_ref_type : &rt_arr_val_type);
+    a->len = m;
+    for (int64_t i = 0; i < m; i++) {
+        a->data[i] = src[from + i];
+        if (refs) rc_inc((Obj *)(intptr_t)src[from + i]);
+    }
+    return (Obj *)a;
+}
+
 int64_t rt_list_pop(Obj *o) {
     rt_check_mutable(o);
     Lst *l = (Lst *)o;
@@ -1036,6 +1154,38 @@ int64_t rt_bytes_pop(Obj *o) {
 void rt_bytes_clear(Obj *o) {
     rt_check_mutable(o);
     ((Bytes *)o)->len = 0;
+}
+
+/* The two ways a buffer shrinks short of empty. Both keep the allocation,
+ * as clear does: a read loop that has consumed a prefix says drop_front,
+ * where before it had to build a copy with substr and throw the original
+ * away -- an allocation and a copy per read.
+ *
+ * They disagree about an argument past the end because the questions do.
+ * truncate(n) asks to be AT MOST n long, which a shorter buffer already is;
+ * drop_front(n) asks for n bytes to be REMOVED, which a shorter buffer
+ * cannot do, and whatever counted them has miscounted. */
+void rt_bytes_truncate(Obj *o, int64_t n) {
+    rt_check_mutable(o);
+    if (n < 0) rt_trap("truncate: a length cannot be negative");
+    Bytes *b = (Bytes *)o;
+    if (n < b->len) b->len = n;
+}
+
+void rt_bytes_drop_front(Obj *o, int64_t n) {
+    rt_check_mutable(o);
+    if (n < 0) rt_trap("drop_front: a count cannot be negative");
+    Bytes *b = (Bytes *)o;
+    if (n > b->len) {
+        char msg[80];
+        snprintf(msg, sizeof msg,
+                 "drop_front(%" PRId64 ") on %" PRId64 " bytes", n, b->len);
+        rt_trap(msg);
+    }
+    /* memmove and not memcpy: the source and destination overlap whenever
+     * more is kept than dropped, which is the ordinary case. */
+    if (n > 0) memmove(b->data, b->data + n, (size_t)(b->len - n));
+    b->len -= n;
 }
 
 /* `b.extend(b)` is legal and doubles `b`. The length is read before growing

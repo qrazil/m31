@@ -1,0 +1,6 @@
+// A slice outside the collection traps, as `substr` does on a `str`: a
+// range the program computed wrong is a bug, and a quietly shortened answer
+// hides it in whatever computed the range.
+List<int> xs = [1, 2, 3];
+List<int> bad = xs.slice(1, 4);
+print(bad.size());

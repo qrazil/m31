@@ -1,0 +1,36 @@
+// The order destructors run in when a whole graph is let go at once.
+//
+// `rc_dec` releases iteratively (corpus/core/979), which means the objects
+// an owner holds are queued rather than followed. Within one object nothing
+// changed -- its destructor runs before any of its fields are released, and
+// the fields go in declaration order, which is what 770 pins. Across
+// objects the walk is breadth-first: an owner, then everything it holds,
+// then everything THEY hold. Depth-first was never promised, and getting it
+// back would mean every drop function handing its children over in reverse.
+//
+// Nothing here is reachable except through `root`, which is what makes the
+// difference visible: in 770 the parts were also held by locals, so they
+// died one local at a time and the two walks agreed.
+type N {
+    str name;
+    Option<N> a;
+    Option<N> b;
+}
+
+void N.drop() {
+    print("drop " + name);
+}
+
+N leaf(str s) {
+    return N(s, Option<N>.None, Option<N>.None);
+}
+
+N kid(str s, str x, str y) {
+    return N(s, Option<N>.Some(leaf(x)), Option<N>.Some(leaf(y)));
+}
+
+if (true) {
+    N root = N("root", Option<N>.Some(kid("c1", "g11", "g12")), Option<N>.Some(kid("c2", "g21", "g22")));
+    print("built");
+}
+print("done");

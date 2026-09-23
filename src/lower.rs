@@ -200,6 +200,18 @@ pub struct Lowerer {
     /// They are made while a body is being lowered, which is in the middle
     /// of the loop that lowers bodies, so they are lowered after it.
     synth_funcs: Vec<Func>,
+    /// Names declared by the statements at the entry file's top level, which
+    /// are the program's body and so are locals of it -- NOT globals a
+    /// function can reach. Kept only to say that in the diagnostic, which is
+    /// otherwise a bare "unknown variable" for a name the reader can see two
+    /// lines above. Empty while the entry body itself is lowered, where the
+    /// name is in scope and the hint would be a lie.
+    entry_locals: std::collections::HashSet<String>,
+    /// The entry file's module, so the hint above is not offered to an
+    /// imported file, which cannot see those names under any reading.
+    entry_module: String,
+    /// Set while the entry body is the function being lowered.
+    in_entry: bool,
 }
 
 /// Every builtin function, whether it lives in `sigs` (`concat`) or is
@@ -212,6 +224,11 @@ pub struct Lowerer {
 /// module, and to turn every `print` in an importing file into a privacy
 /// error about a function that file never asked for.
 const BUILTIN_FNS: &[&str] = &["print", "concat", "clone", "send", "recv", "close", "trap"];
+
+/// The name of the synthesised function whose body is the program: the
+/// statements at the entry file's top level. It starts with `$`, which no
+/// identifier may, so no program can name it (src/emit_c.rs mangles it).
+const ENTRY: &str = "$main";
 
 /// The reserved method name of a destructor: `void File.drop() { .. }` runs
 /// when a `File`'s count reaches zero, before its fields are released
@@ -530,7 +547,38 @@ impl Lowerer {
             has_destructors: false,
             fn_refs: HashMap::new(),
             synth_funcs: Vec::new(),
+            entry_locals: std::collections::HashSet::new(),
+            entry_module: String::new(),
+            in_entry: false,
         }
+    }
+
+    /// A name nothing in scope answers to.
+    ///
+    /// The one case worth more than "unknown": a function in the entry file
+    /// reaching for a variable declared at the top level. The name IS there,
+    /// two lines up, so "unknown variable" reads like a compiler bug. It is
+    /// not one -- the top-level statements are the program's body, so that
+    /// variable is a local of the body, and a function can no more see it
+    /// than it can see a local of another function. There is no module
+    /// state to make it anything else, deliberately
+    /// (docs/module-state-decision.md). So the diagnostic says which of the
+    /// two things it is, and names both ways out.
+    fn unknown_variable(&self, name: &str, span: Span) -> Diag {
+        if !self.in_entry
+            && self.cur_module == self.entry_module
+            && self.entry_locals.contains(name)
+        {
+            return Diag::new(
+                span,
+                format!(
+                    "`{name}` is a local of the program body: the statements at the \
+                     top level ARE the body, so a function cannot see them -- pass \
+                     it in as an argument, or declare it `const`"
+                ),
+            );
+        }
+        Diag::new(span, format!("unknown variable `{name}`"))
     }
 
     fn builtin(&mut self, name: &str, params: Vec<Ty>, ret: Ty) {
@@ -872,7 +920,7 @@ impl Lowerer {
         }
         let want: &[Ty] = match m {
             "size" | "pop" | "clear" | "trim" | "to_upper" | "to_lower" | "hex" | "utf8" => &[],
-            "push" | "repeat" => &[Ty::Int],
+            "push" | "repeat" | "truncate" | "drop_front" => &[Ty::Int],
             "substr" => &[Ty::Int, Ty::Int],
             "extend" | "contains" | "index_of" | "starts_with" | "ends_with" | "split" => {
                 &[Ty::Bytes]
@@ -905,9 +953,9 @@ impl Lowerer {
                     span,
                     format!(
                         "`bytes` has no method `{other}`; it has size, push, pop, \
-                         clear, extend, substr, contains, index_of, starts_with, \
-                         ends_with, split, trim, to_upper, to_lower, repeat, hex \
-                         and utf8"
+                         clear, truncate, drop_front, extend, substr, contains, \
+                         index_of, starts_with, ends_with, split, trim, to_upper, \
+                         to_lower, repeat, hex and utf8"
                     ),
                 ))
             }
@@ -935,6 +983,10 @@ impl Lowerer {
             "push" => self.rt_void("rt_bytes_push", av),
             "pop" => self.rt_value("rt_bytes_pop", av, Ty::Int),
             "clear" => self.rt_void("rt_bytes_clear", av),
+            // The two ways a buffer shrinks short of empty, both in place
+            // and both keeping the allocation, as `clear` does.
+            "truncate" => self.rt_void("rt_bytes_truncate", av),
+            "drop_front" => self.rt_void("rt_bytes_drop_front", av),
             "extend" => self.rt_void("rt_bytes_extend", av),
             "substr" => self.rt_value("rt_bytes_substr", av, Ty::Bytes),
             "trim" => self.rt_value("rt_bytes_trim", av, Ty::Bytes),
@@ -1213,6 +1265,47 @@ impl Lowerer {
                     args: vec![o.val()],
                 });
                 Ok(Val::void())
+            }
+            // A fresh collection of the same kind holding `from .. to`.
+            //
+            // `str` and `bytes` already answer this question, as `substr`,
+            // and the contract here is theirs: half-open, so `slice(i, i)`
+            // is empty and `to - from` is the size, and out of bounds
+            // **traps** rather than clamping -- a range the program computed
+            // wrong is a bug, and a quietly shortened answer hides it in
+            // whatever computed the range. The name differs because a list
+            // holds no text; the shape of the call is what has to match.
+            //
+            // On an `Array` as well as a `List`, because they already share
+            // `size`, `contains`, `index_of`, `reverse` and `sort` and "one
+            // name for each question" (reference §3.9) is the rule. Each
+            // answers with its own kind.
+            "slice" => {
+                if args.pos.len() != 2 {
+                    return Err(Diag::new(span, "`slice` takes a start and an end"));
+                }
+                let from = self.lower_expr(&args.pos[0])?;
+                if self.underlying(from.ty) != Ty::Int {
+                    return Err(Diag::new(
+                        args.pos[0].span(),
+                        self.mismatch(Ty::Int, from.ty),
+                    ));
+                }
+                let to = self.lower_expr(&args.pos[1])?;
+                if self.underlying(to.ty) != Ty::Int {
+                    return Err(Diag::new(args.pos[1].span(), self.mismatch(Ty::Int, to.ty)));
+                }
+                let d = self.new_val(IrTy::Ref);
+                self.push(Inst::Call {
+                    dst: Some(d),
+                    func: "rt_seq_slice".to_string(),
+                    args: vec![o.val(), from.val(), to.val()],
+                });
+                // A fresh object, so the caller holds the +1, and the
+                // receiver's own type -- a distinct one included, as `clone`
+                // does.
+                self.stmt_temps.push(d);
+                Ok(Val::new(d, o.ty, true))
             }
             "reverse" => {
                 if !args.pos.is_empty() {
@@ -2704,7 +2797,7 @@ impl Lowerer {
             is_static: false,
             is_prim: false,
             recv: None,
-            name: "$main".to_string(),
+            name: ENTRY.to_string(),
             tparams: Vec::new(),
             recv_tparams: Vec::new(),
             params: Vec::new(),
@@ -2713,6 +2806,17 @@ impl Lowerer {
         };
 
         self.has_destructors = self.any_destructor();
+        // Only the entry file may hold statements (src/modules.rs), so these
+        // names belong to exactly one body: this one.
+        self.entry_module = p.module.clone();
+        self.entry_locals = entry
+            .body
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Decl { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
         let mut funcs = Vec::new();
         for f in &p.funcs {
             // A primitive has no body to lower: its implementation is the
@@ -3653,6 +3757,7 @@ impl Lowerer {
 
     fn lower_func_inner(&mut self, f: &Func) -> Result<ir::Func, Diag> {
         self.cur_module = f.module.clone();
+        self.in_entry = f.name == ENTRY;
         self.types.clear();
         self.blocks.clear();
         self.scopes.clear();
@@ -3996,7 +4101,7 @@ impl Lowerer {
                     if self.resolve_const(name).is_some() {
                         return Err(Diag::new(*span, format!("cannot assign to const `{name}`")));
                     }
-                    return Err(Diag::new(*span, format!("unknown variable `{name}`")));
+                    return Err(self.unknown_variable(name, *span));
                 };
                 if is_const {
                     return Err(Diag::new(*span, format!("cannot assign to const `{name}`")));
@@ -6678,7 +6783,7 @@ impl Lowerer {
                 if let Some(d) = self.fn_ref_no_target(e) {
                     return Err(d);
                 }
-                Err(Diag::new(*span, format!("unknown variable `{name}`")))
+                Err(self.unknown_variable(name, *span))
             }
             Expr::Un(op, inner, span) => {
                 let a = self.lower_expr(inner)?;

@@ -313,6 +313,7 @@ int64_t rt_index_get(Obj *o, int64_t i);
 void    rt_index_set(Obj *o, int64_t i, int64_t v);
 void    rt_list_push(Obj *o, int64_t v);
 Obj    *rt_seq_clone(Obj *o);         /* shallow copy of an array or list */
+Obj    *rt_seq_slice(Obj *o, int64_t from, int64_t to);  /* the same, of a range */
 Obj    *rt_str_clone(Obj *o);         /* a str copy with its own refcount */
 Obj    *rt_str_substr(Obj *o, int64_t from, int64_t to);
 int64_t rt_str_find(Obj *o, Obj *needle);
@@ -355,6 +356,8 @@ void    rt_bytes_set(Obj *o, int64_t i, int64_t v);
 void    rt_bytes_push(Obj *o, int64_t v);
 int64_t rt_bytes_pop(Obj *o);
 void    rt_bytes_clear(Obj *o);
+void    rt_bytes_truncate(Obj *o, int64_t n);    /* keep the first `n` */
+void    rt_bytes_drop_front(Obj *o, int64_t n);  /* remove the first `n` */
 void    rt_bytes_extend(Obj *o, Obj *more);
 bool    rt_bytes_eq(Obj *a, Obj *b);
 Obj    *rt_bytes_clone(Obj *o);
