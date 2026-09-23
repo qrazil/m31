@@ -1,0 +1,5 @@
+// A column counts code points, not bytes, so `line:col` and the caret both
+// land on `nope` even though the same line holds an accent, an arrow and an
+// emoji before it. Counting bytes put this error at column 25 -- four past
+// the end of the name, with the caret inside `);`.
+print("héllo → 🎉" + nope);

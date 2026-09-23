@@ -21,6 +21,17 @@ wish, so if you add one here, add one there.
 UTF-8. A source file is a sequence of items and statements; there is no
 enclosing declaration and no `main`.
 
+A diagnostic names a position as `line:col`. The line is 1-based. The column
+is 1-based and counts **code points**, not bytes and not display cells: `é`
+is one column, an emoji is one column, and so a caret printed under the
+echoed source line lands on the token it is pointing at. A tab is also one
+column — the compiler cannot know the reader's tab width, so the echoed line
+prints each tab as a single space and the two agree by construction. A
+double-width character therefore costs one column, which is the one case
+where the caret can look a cell short of the token in a terminal; every
+alternative makes the *number* wrong instead, which is worse, because that is
+what an editor is told to jump to.
+
 ### 1.2 Comments
 
 `// to end of line` and `/* ... */`. Block comments do not nest.

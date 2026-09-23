@@ -1,0 +1,8 @@
+// A tab is ONE column, not a jump to the next tab stop: the compiler cannot
+// know the reader's tab width, so it picks the only width it can echo back.
+// diag.rs prints the source line with each tab as a single space, which is
+// what keeps the caret under the column the message names. The line below is
+// indented with one real tab character, so `nope` starts at column 8.
+if (true) {
+	print(nope);
+}
