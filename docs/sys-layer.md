@@ -123,6 +123,7 @@ Sockets, added **2026-09-23** as the foundation for a `net`/`http` module:
 | `sys_getpeername(fd, &SysAddr)` | 0 | `getpeername` | `getpeername` 52 | `getpeername` 205 |
 | `sys_poll(&SysPollFd, n, ms)` | how many ready | `poll` | `ppoll` 271 | `ppoll` 73 |
 | `sys_resolve(host, port, af, out, cap)` | how many exist | `getaddrinfo` | **refused**, `-ENOSYS` | same |
+| `sys_ignore_sigpipe()` | 0 | `sigaction(SIGPIPE, SIG_IGN)` | `rt_sigaction` 13 | `rt_sigaction` 134 |
 
 A socket is a descriptor, so `sys_read`, `sys_write` and `sys_close` are the
 rest of the interface; there is no `sys_send` or `sys_recv`. Reading a stream
@@ -613,6 +614,16 @@ Points the `bytes` design has to settle for these to exist:
 ---
 
 ## 9. Where a `net` module starts
+
+> **Built 2026-09-23.** `lib/net.src` exists and is TCP: `Conn` (which
+> satisfies `io.Stream`), `Listener`, `connect`, `listen`, an `Ip`/`Addr`
+> pair with a parser and an RFC 5952 printer written in language source, and
+> `net.Error`. The primitive list below is what it was built to, with two
+> changes noted in place: `__socket`'s second parameter is spelled `kind`
+> because `type` is a keyword, and `__ignore_sigpipe` joined the list once
+> §2 could offer it. `docs/stdlib-seam.md` §9 records what the module
+> settled and why; the rest of this section is the reasoning as it stood,
+> which the module followed.
 
 The layer side of sockets is done (§2). What is *not* written here, on
 purpose, is a line of the module above it: no `lib/net.src`, and no `prim`s
