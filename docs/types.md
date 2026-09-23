@@ -150,6 +150,31 @@ permanent source of confusion in C# and Swift.
 When a copy is genuinely wanted, it is **explicit: `clone(v)`.** That is one
 visible operation rather than an invisible rule that depends on the type.
 
+### Reconsidered 2026-09-23, and kept
+
+The opposite was put again once `const` had landed: make plain `a = b` a deep
+copy, delete `clone`, and spell aliasing with a keyword or not at all. It was
+rejected on four counts, and they are worth keeping written down because the
+question will be asked a third time.
+
+  - **Cost.** Every assignment and every argument would copy a whole graph.
+    Swift makes that bearable with copy-on-write, which is a uniqueness check
+    before *every mutation* -- a cost on writes, paid forever, to make reads
+    look cheap.
+  - **Shared structure stops existing.** A parent link, a graph, a cache, two
+    names watching one object: none of it is expressible when every copy is a
+    new object. Putting a reference type back is the two-concept world this
+    rejected in the first place.
+  - **A resource cannot be copied at all** (`docs/destructors-decision.md`),
+    so `File b = a;` would have to keep aliasing -- one rule for most types
+    and another for the ones holding a file, which is the worst of both.
+  - **Methods would stop working as read.** `p.move(1, 2)` mutates its
+    receiver; if passing `p` copied it, the caller would never see it.
+
+What the question was really after is already answered elsewhere: `const`
+binds a **snapshot** (`docs/const-decision.md`), so a value that must not
+change behind your back does not, without changing what `=` means.
+
 ## 5b. Methods, and no shadowing
 
 Methods are declared by **qualified name**, outside the type body:
