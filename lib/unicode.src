@@ -1,9 +1,19 @@
-// What a reader means by a character: case, and the tables that answer it.
+// What a reader means by a character, and the tables that answer it: case
+// mapping and grapheme clusters.
 //
 // **Unicode 16.0.0.** Every table below is generated from the Unicode
 // Character Database, and the command that generated it is quoted above it.
 // `unicode.VERSION` is the version those files were, so a program can print
 // what it was built against.
+//
+// | | |
+// |---|---|
+// | `upper`, `lower`, `fold` | full case mapping, and a key for caseless comparison |
+// | `graphemes`, `grapheme_count` | UAX #29: what a reader counts as one character |
+//
+// Three counts, each named for what it counts: `s.size()` is bytes,
+// `s.chars().size()` is code points, `unicode.grapheme_count(s)` is
+// characters as a reader means the word.
 //
 // --- why this is a module and not a method ---------------------------------
 //
@@ -240,6 +250,236 @@ bool final_sigma(List<int> cps, int i) {
     }
     return k >= n || !in_ranges(CASED, cps[k]);
 }
+
+// --- grapheme clusters ---------------------------------------------------------
+//
+// UAX #29's extended grapheme clusters: what a reader calls one character,
+// and what a text editor moves the cursor over. `size()` counts bytes,
+// `chars().size()` counts code points, `unicode.grapheme_count(s)` counts
+// these -- three counts, each named for what it counts.
+//
+// The rules are a small state machine over a class per code point, and the
+// class comes from GCB_RANGES. Everything with a name below is a rule of
+// UAX #29 §3.1.1, quoted where it is checked. The state the machine carries
+// is three counters, because three rules look further back than one
+// character: a run of regional indicators (a flag is two, so the third one
+// starts a new flag), an emoji joined by ZWJ, and an Indic consonant
+// conjunct.
+
+/// The grapheme clusters of `s`, in order: one element per character a
+/// reader would count. `unicode.graphemes("")` is empty, and joining the
+/// result with `""` gives `s` back.
+pub List<str> graphemes(str s) {
+    List<int> starts = cluster_starts(s);
+    List<str> out = [];
+    int i = 1;
+    while (i < starts.size()) {
+        out.push(s.substr(starts[i - 1], starts[i]));
+        i = i + 1;
+    }
+    return out;
+}
+
+/// How many grapheme clusters `s` has, without building them.
+///
+/// `"👍🏽".size()` is 8, `"👍🏽".chars().size()` is 2, and this is 1.
+pub int grapheme_count(str s) {
+    return cluster_starts(s).size() - 1;
+}
+
+/// The byte offset where each cluster begins, and `s.size()` last, so that
+/// consecutive offsets bracket a cluster. Empty text gives `[0]`, one
+/// offset and no clusters.
+///
+/// Offsets rather than strings because both callers want them: `graphemes`
+/// cuts the original bytes out with `substr` (which is why nothing is
+/// re-encoded, and why every offset is on a character boundary by
+/// construction), and a count needs no strings at all.
+List<int> cluster_starts(str s) {
+    List<int> cps = s.chars();
+    List<int> out = [0];
+    int n = cps.size();
+    int at = 0;
+    int prev = 0;
+    // The three pieces of history the rules need. `ri` is how many regional
+    // indicators run up to the character before the one being judged; `pic`
+    // is 1 after an emoji and any extending characters, 2 once a ZWJ has
+    // followed it; `cons` is 1 after an Indic consonant and any extenders,
+    // 2 once one of them was a linker.
+    int ri = 0;
+    int pic = 0;
+    int cons = 0;
+    int i = 0;
+    while (i < n) {
+        int cur = class_of(cps[i]);
+        if (i > 0) {
+            at = at + utf8_len(cps[i - 1]);
+            if (breaks(prev, cur, ri, pic, cons)) {
+                out.push(at);
+            }
+        }
+        int g = cur & 15;
+        if (g == GCB_REGIONAL_INDICATOR) {
+            ri = ri + 1;
+        } else {
+            ri = 0;
+        }
+        if (cur & 16 != 0) {
+            pic = 1;
+        } else if (pic == 1 && g == GCB_EXTEND) {
+            pic = 1;
+        } else if (pic == 1 && g == GCB_ZWJ) {
+            pic = 2;
+        } else {
+            pic = 0;
+        }
+        int b = cur >> 5 & 3;
+        if (b == INCB_CONSONANT) {
+            cons = 1;
+        } else if (cons > 0 && b == INCB_LINKER) {
+            cons = 2;
+        } else if (cons > 0 && b == INCB_EXTEND) {
+            cons = cons;
+        } else {
+            cons = 0;
+        }
+        prev = cur;
+        i = i + 1;
+    }
+    if (n > 0) {
+        out.push(s.size());
+    }
+    return out;
+}
+
+/// Is there a cluster boundary between `prev` and `cur`?
+///
+/// The rules of UAX #29 §3.1.1 in their order, which matters: the first one
+/// that matches decides. GB1, GB2 (start and end of text) are the caller's,
+/// and GB999 -- break anywhere else -- is the last line.
+bool breaks(int prev, int cur, int ri, int pic, int cons) {
+    int p = prev & 15;
+    int c = cur & 15;
+    // GB3: CR LF is one cluster, and GB4/GB5: everything else parts around
+    // a control character, in both directions.
+    if (p == GCB_CR && c == GCB_LF) {
+        return false;
+    }
+    if (p == GCB_CR || p == GCB_LF || p == GCB_CONTROL) {
+        return true;
+    }
+    if (c == GCB_CR || c == GCB_LF || c == GCB_CONTROL) {
+        return true;
+    }
+    // GB6, GB7, GB8: a Hangul syllable spelled out in jamo stays together.
+    if (p == GCB_L && (c == GCB_L || c == GCB_V || c == GCB_LV || c == GCB_LVT)) {
+        return false;
+    }
+    if ((p == GCB_LV || p == GCB_V) && (c == GCB_V || c == GCB_T)) {
+        return false;
+    }
+    if ((p == GCB_LVT || p == GCB_T) && c == GCB_T) {
+        return false;
+    }
+    // GB9, GB9a, GB9b: an accent, a spacing mark or a joiner belongs to what
+    // it is attached to, and a prepending character to what follows it.
+    if (c == GCB_EXTEND || c == GCB_ZWJ) {
+        return false;
+    }
+    if (c == GCB_SPACINGMARK) {
+        return false;
+    }
+    if (p == GCB_PREPEND) {
+        return false;
+    }
+    // GB9c: an Indic conjunct -- consonant, linker, consonant -- is one
+    // cluster, however many extending characters are in between.
+    if (cons == 2 && cur >> 5 & 3 == INCB_CONSONANT) {
+        return false;
+    }
+    // GB11: emoji ZWJ emoji, which is how a family is spelled.
+    if (pic == 2 && cur & 16 != 0) {
+        return false;
+    }
+    // GB12, GB13: regional indicators pair up into flags, so a break falls
+    // between pairs and not inside one.
+    if (p == GCB_REGIONAL_INDICATOR && c == GCB_REGIONAL_INDICATOR && ri % 2 == 1) {
+        return false;
+    }
+    return true;
+}
+
+/// The packed class of `c`: a Grapheme_Cluster_Break value in the low four
+/// bits, Extended_Pictographic in bit 4, and Indic_Conjunct_Break in bits
+/// 5 and 6.
+int class_of(int c) {
+    // The 11,172 Hangul syllables are arithmetic, not a table: they are laid
+    // out as (lead, vowel, trailing), and a syllable with no trailing jamo is
+    // LV, one with is LVT. That is 798 lines of GraphemeBreakProperty.txt
+    // this table does not carry.
+    if (c >= HANGUL_BASE && c < HANGUL_BASE + HANGUL_COUNT) {
+        if ((c - HANGUL_BASE) % HANGUL_TRAILING == 0) {
+            return GCB_LV;
+        }
+        return GCB_LVT;
+    }
+    int lo = 0;
+    int hi = GCB_RANGES.size() / 3 - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2;
+        int at = mid * 3;
+        if (c < GCB_RANGES[at]) {
+            hi = mid - 1;
+        } else if (c > GCB_RANGES[at + 1]) {
+            lo = mid + 1;
+        } else {
+            return GCB_RANGES[at + 2];
+        }
+    }
+    return GCB_OTHER;
+}
+
+/// How many bytes `c` takes in UTF-8. The four cases of §3.2a, in the same
+/// shape `__text.from_chars` encodes them.
+int utf8_len(int c) {
+    if (c < 128) {
+        return 1;
+    }
+    if (c < 2048) {
+        return 2;
+    }
+    if (c < 65536) {
+        return 3;
+    }
+    return 4;
+}
+
+// The Grapheme_Cluster_Break values, in the order GCB_RANGES was generated
+// with: the low four bits of a packed class.
+const int GCB_OTHER = 0;
+const int GCB_CR = 1;
+const int GCB_LF = 2;
+const int GCB_CONTROL = 3;
+const int GCB_EXTEND = 4;
+const int GCB_ZWJ = 5;
+const int GCB_REGIONAL_INDICATOR = 6;
+const int GCB_PREPEND = 7;
+const int GCB_SPACINGMARK = 8;
+const int GCB_L = 9;
+const int GCB_V = 10;
+const int GCB_T = 11;
+const int GCB_LV = 12;
+const int GCB_LVT = 13;
+// Indic_Conjunct_Break, in bits 5 and 6.
+const int INCB_NONE = 0;
+const int INCB_LINKER = 1;
+const int INCB_CONSONANT = 2;
+const int INCB_EXTEND = 3;
+/// U+AC00, the first Hangul syllable, and the shape of the block: 19 leads
+/// times 21 vowels times 28 trailings (the first of which is "none").
+const int HANGUL_BASE = 44032;
+const int HANGUL_TRAILING = 28;
+const int HANGUL_COUNT = 11172;
 
 // --- the tables ---------------------------------------------------------------
 //
@@ -716,4 +956,197 @@ const Array<int> CASE_IGNORABLE = [
     122918, 122922, 122928, 122989, 123023, 123023, 123184, 123197, 123566, 123566, 123628, 123631,
     124139, 124143, 124398, 124399, 125136, 125142, 125252, 125259, 127995, 127999, 917505, 917505,
     917536, 917631, 917760, 917999
+];
+
+// --- the tables ---------------------------------------------------------------
+//
+// Generated, not written. Every array below came out of
+//
+//     python3 gen.py graphemes
+//
+// reading the Unicode Character Database 16.0.0 as installed at
+// /usr/share/unicode/ucd. The script is not in the repository (it is a
+// build-time tool for a file that changes once a Unicode version); what it
+// does to each table is written above that table, and the counts are its
+// output, so a regeneration that disagrees with them is a change to report.
+// The class of every code point UAX #29 gives one, as 683 ranges of
+// (lo, hi, class): Grapheme_Cluster_Break from auxiliary/GraphemeBreakProperty.txt
+// in the low four bits, Extended_Pictographic from emoji/emoji-data.txt in bit
+// 4, and Indic_Conjunct_Break from DerivedCoreProperties.txt in bits 5 and 6 --
+// one search rather than three, since the rules need all three of them. Class
+// 0 (Other, not pictographic, no conjunct break) is the default and is not in
+// the table, and neither are the 11,172 Hangul syllables, whose LV and LVT are
+// computed.
+const Array<int> GCB_RANGES = [
+    0, 9, 3, 10, 10, 2, 11, 12, 3, 13, 13, 1,
+    14, 31, 3, 127, 159, 3, 169, 169, 16, 173, 173, 3,
+    174, 174, 16, 768, 879, 100, 1155, 1161, 100, 1425, 1469, 100,
+    1471, 1471, 100, 1473, 1474, 100, 1476, 1477, 100, 1479, 1479, 100,
+    1536, 1541, 7, 1552, 1562, 100, 1564, 1564, 3, 1611, 1631, 100,
+    1648, 1648, 100, 1750, 1756, 100, 1757, 1757, 7, 1759, 1764, 100,
+    1767, 1768, 100, 1770, 1773, 100, 1807, 1807, 7, 1809, 1809, 100,
+    1840, 1866, 100, 1958, 1968, 100, 2027, 2035, 100, 2045, 2045, 100,
+    2070, 2073, 100, 2075, 2083, 100, 2085, 2087, 100, 2089, 2093, 100,
+    2137, 2139, 100, 2192, 2193, 7, 2199, 2207, 100, 2250, 2273, 100,
+    2274, 2274, 7, 2275, 2306, 100, 2307, 2307, 8, 2325, 2361, 64,
+    2362, 2362, 100, 2363, 2363, 8, 2364, 2364, 100, 2366, 2368, 8,
+    2369, 2376, 100, 2377, 2380, 8, 2381, 2381, 36, 2382, 2383, 8,
+    2385, 2391, 100, 2392, 2399, 64, 2402, 2403, 100, 2424, 2431, 64,
+    2433, 2433, 100, 2434, 2435, 8, 2453, 2472, 64, 2474, 2480, 64,
+    2482, 2482, 64, 2486, 2489, 64, 2492, 2492, 100, 2494, 2494, 100,
+    2495, 2496, 8, 2497, 2500, 100, 2503, 2504, 8, 2507, 2508, 8,
+    2509, 2509, 36, 2519, 2519, 100, 2524, 2525, 64, 2527, 2527, 64,
+    2530, 2531, 100, 2544, 2545, 64, 2558, 2558, 100, 2561, 2562, 100,
+    2563, 2563, 8, 2620, 2620, 100, 2622, 2624, 8, 2625, 2626, 100,
+    2631, 2632, 100, 2635, 2637, 100, 2641, 2641, 100, 2672, 2673, 100,
+    2677, 2677, 100, 2689, 2690, 100, 2691, 2691, 8, 2709, 2728, 64,
+    2730, 2736, 64, 2738, 2739, 64, 2741, 2745, 64, 2748, 2748, 100,
+    2750, 2752, 8, 2753, 2757, 100, 2759, 2760, 100, 2761, 2761, 8,
+    2763, 2764, 8, 2765, 2765, 36, 2786, 2787, 100, 2809, 2809, 64,
+    2810, 2815, 100, 2817, 2817, 100, 2818, 2819, 8, 2837, 2856, 64,
+    2858, 2864, 64, 2866, 2867, 64, 2869, 2873, 64, 2876, 2876, 100,
+    2878, 2879, 100, 2880, 2880, 8, 2881, 2884, 100, 2887, 2888, 8,
+    2891, 2892, 8, 2893, 2893, 36, 2901, 2903, 100, 2908, 2909, 64,
+    2911, 2911, 64, 2914, 2915, 100, 2929, 2929, 64, 2946, 2946, 100,
+    3006, 3006, 100, 3007, 3007, 8, 3008, 3008, 100, 3009, 3010, 8,
+    3014, 3016, 8, 3018, 3020, 8, 3021, 3021, 100, 3031, 3031, 100,
+    3072, 3072, 100, 3073, 3075, 8, 3076, 3076, 100, 3093, 3112, 64,
+    3114, 3129, 64, 3132, 3132, 100, 3134, 3136, 100, 3137, 3140, 8,
+    3142, 3144, 100, 3146, 3148, 100, 3149, 3149, 36, 3157, 3158, 100,
+    3160, 3162, 64, 3170, 3171, 100, 3201, 3201, 100, 3202, 3203, 8,
+    3260, 3260, 100, 3262, 3262, 8, 3263, 3264, 100, 3265, 3265, 8,
+    3266, 3266, 100, 3267, 3268, 8, 3270, 3272, 100, 3274, 3277, 100,
+    3285, 3286, 100, 3298, 3299, 100, 3315, 3315, 8, 3328, 3329, 100,
+    3330, 3331, 8, 3349, 3386, 64, 3387, 3388, 100, 3390, 3390, 100,
+    3391, 3392, 8, 3393, 3396, 100, 3398, 3400, 8, 3402, 3404, 8,
+    3405, 3405, 36, 3406, 3406, 7, 3415, 3415, 100, 3426, 3427, 100,
+    3457, 3457, 100, 3458, 3459, 8, 3530, 3530, 100, 3535, 3535, 100,
+    3536, 3537, 8, 3538, 3540, 100, 3542, 3542, 100, 3544, 3550, 8,
+    3551, 3551, 100, 3570, 3571, 8, 3633, 3633, 100, 3635, 3635, 8,
+    3636, 3642, 100, 3655, 3662, 100, 3761, 3761, 100, 3763, 3763, 8,
+    3764, 3772, 100, 3784, 3790, 100, 3864, 3865, 100, 3893, 3893, 100,
+    3895, 3895, 100, 3897, 3897, 100, 3902, 3903, 8, 3953, 3966, 100,
+    3967, 3967, 8, 3968, 3972, 100, 3974, 3975, 100, 3981, 3991, 100,
+    3993, 4028, 100, 4038, 4038, 100, 4141, 4144, 100, 4145, 4145, 8,
+    4146, 4151, 100, 4153, 4154, 100, 4155, 4156, 8, 4157, 4158, 100,
+    4182, 4183, 8, 4184, 4185, 100, 4190, 4192, 100, 4209, 4212, 100,
+    4226, 4226, 100, 4228, 4228, 8, 4229, 4230, 100, 4237, 4237, 100,
+    4253, 4253, 100, 4352, 4447, 9, 4448, 4519, 10, 4520, 4607, 11,
+    4957, 4959, 100, 5906, 5909, 100, 5938, 5940, 100, 5970, 5971, 100,
+    6002, 6003, 100, 6068, 6069, 100, 6070, 6070, 8, 6071, 6077, 100,
+    6078, 6085, 8, 6086, 6086, 100, 6087, 6088, 8, 6089, 6099, 100,
+    6109, 6109, 100, 6155, 6157, 100, 6158, 6158, 3, 6159, 6159, 100,
+    6277, 6278, 100, 6313, 6313, 100, 6432, 6434, 100, 6435, 6438, 8,
+    6439, 6440, 100, 6441, 6443, 8, 6448, 6449, 8, 6450, 6450, 100,
+    6451, 6456, 8, 6457, 6459, 100, 6679, 6680, 100, 6681, 6682, 8,
+    6683, 6683, 100, 6741, 6741, 8, 6742, 6742, 100, 6743, 6743, 8,
+    6744, 6750, 100, 6752, 6752, 100, 6754, 6754, 100, 6757, 6764, 100,
+    6765, 6770, 8, 6771, 6780, 100, 6783, 6783, 100, 6832, 6862, 100,
+    6912, 6915, 100, 6916, 6916, 8, 6964, 6973, 100, 6974, 6977, 8,
+    6978, 6980, 100, 7019, 7027, 100, 7040, 7041, 100, 7042, 7042, 8,
+    7073, 7073, 8, 7074, 7077, 100, 7078, 7079, 8, 7080, 7085, 100,
+    7142, 7142, 100, 7143, 7143, 8, 7144, 7145, 100, 7146, 7148, 8,
+    7149, 7149, 100, 7150, 7150, 8, 7151, 7155, 100, 7204, 7211, 8,
+    7212, 7219, 100, 7220, 7221, 8, 7222, 7223, 100, 7376, 7378, 100,
+    7380, 7392, 100, 7393, 7393, 8, 7394, 7400, 100, 7405, 7405, 100,
+    7412, 7412, 100, 7415, 7415, 8, 7416, 7417, 100, 7616, 7679, 100,
+    8203, 8203, 3, 8204, 8204, 4, 8205, 8205, 101, 8206, 8207, 3,
+    8232, 8238, 3, 8252, 8252, 16, 8265, 8265, 16, 8288, 8303, 3,
+    8400, 8432, 100, 8482, 8482, 16, 8505, 8505, 16, 8596, 8601, 16,
+    8617, 8618, 16, 8986, 8987, 16, 9000, 9000, 16, 9096, 9096, 16,
+    9167, 9167, 16, 9193, 9203, 16, 9208, 9210, 16, 9410, 9410, 16,
+    9642, 9643, 16, 9654, 9654, 16, 9664, 9664, 16, 9723, 9726, 16,
+    9728, 9733, 16, 9735, 9746, 16, 9748, 9861, 16, 9872, 9989, 16,
+    9992, 10002, 16, 10004, 10004, 16, 10006, 10006, 16, 10013, 10013, 16,
+    10017, 10017, 16, 10024, 10024, 16, 10035, 10036, 16, 10052, 10052, 16,
+    10055, 10055, 16, 10060, 10060, 16, 10062, 10062, 16, 10067, 10069, 16,
+    10071, 10071, 16, 10083, 10087, 16, 10133, 10135, 16, 10145, 10145, 16,
+    10160, 10160, 16, 10175, 10175, 16, 10548, 10549, 16, 11013, 11015, 16,
+    11035, 11036, 16, 11088, 11088, 16, 11093, 11093, 16, 11503, 11505, 100,
+    11647, 11647, 100, 11744, 11775, 100, 12330, 12335, 100, 12336, 12336, 16,
+    12349, 12349, 16, 12441, 12442, 100, 12951, 12951, 16, 12953, 12953, 16,
+    42607, 42610, 100, 42612, 42621, 100, 42654, 42655, 100, 42736, 42737, 100,
+    43010, 43010, 100, 43014, 43014, 100, 43019, 43019, 100, 43043, 43044, 8,
+    43045, 43046, 100, 43047, 43047, 8, 43052, 43052, 100, 43136, 43137, 8,
+    43188, 43203, 8, 43204, 43205, 100, 43232, 43249, 100, 43263, 43263, 100,
+    43302, 43309, 100, 43335, 43345, 100, 43346, 43346, 8, 43347, 43347, 100,
+    43360, 43388, 9, 43392, 43394, 100, 43395, 43395, 8, 43443, 43443, 100,
+    43444, 43445, 8, 43446, 43449, 100, 43450, 43451, 8, 43452, 43453, 100,
+    43454, 43455, 8, 43456, 43456, 100, 43493, 43493, 100, 43561, 43566, 100,
+    43567, 43568, 8, 43569, 43570, 100, 43571, 43572, 8, 43573, 43574, 100,
+    43587, 43587, 100, 43596, 43596, 100, 43597, 43597, 8, 43644, 43644, 100,
+    43696, 43696, 100, 43698, 43700, 100, 43703, 43704, 100, 43710, 43711, 100,
+    43713, 43713, 100, 43755, 43755, 8, 43756, 43757, 100, 43758, 43759, 8,
+    43765, 43765, 8, 43766, 43766, 100, 44003, 44004, 8, 44005, 44005, 100,
+    44006, 44007, 8, 44008, 44008, 100, 44009, 44010, 8, 44012, 44012, 8,
+    44013, 44013, 100, 55216, 55238, 10, 55243, 55291, 11, 64286, 64286, 100,
+    65024, 65039, 100, 65056, 65071, 100, 65279, 65279, 3, 65438, 65439, 100,
+    65520, 65531, 3, 66045, 66045, 100, 66272, 66272, 100, 66422, 66426, 100,
+    68097, 68099, 100, 68101, 68102, 100, 68108, 68111, 100, 68152, 68154, 100,
+    68159, 68159, 100, 68325, 68326, 100, 68900, 68903, 100, 68969, 68973, 100,
+    69291, 69292, 100, 69372, 69375, 100, 69446, 69456, 100, 69506, 69509, 100,
+    69632, 69632, 8, 69633, 69633, 100, 69634, 69634, 8, 69688, 69702, 100,
+    69744, 69744, 100, 69747, 69748, 100, 69759, 69761, 100, 69762, 69762, 8,
+    69808, 69810, 8, 69811, 69814, 100, 69815, 69816, 8, 69817, 69818, 100,
+    69821, 69821, 7, 69826, 69826, 100, 69837, 69837, 7, 69888, 69890, 100,
+    69927, 69931, 100, 69932, 69932, 8, 69933, 69940, 100, 69957, 69958, 8,
+    70003, 70003, 100, 70016, 70017, 100, 70018, 70018, 8, 70067, 70069, 8,
+    70070, 70078, 100, 70079, 70079, 8, 70080, 70080, 100, 70082, 70083, 7,
+    70089, 70092, 100, 70094, 70094, 8, 70095, 70095, 100, 70188, 70190, 8,
+    70191, 70193, 100, 70194, 70195, 8, 70196, 70199, 100, 70206, 70206, 100,
+    70209, 70209, 100, 70367, 70367, 100, 70368, 70370, 8, 70371, 70378, 100,
+    70400, 70401, 100, 70402, 70403, 8, 70459, 70460, 100, 70462, 70462, 100,
+    70463, 70463, 8, 70464, 70464, 100, 70465, 70468, 8, 70471, 70472, 8,
+    70475, 70476, 8, 70477, 70477, 100, 70487, 70487, 100, 70498, 70499, 8,
+    70502, 70508, 100, 70512, 70516, 100, 70584, 70584, 100, 70585, 70586, 8,
+    70587, 70592, 100, 70594, 70594, 100, 70597, 70597, 100, 70599, 70601, 100,
+    70602, 70602, 8, 70604, 70605, 8, 70606, 70608, 100, 70609, 70609, 7,
+    70610, 70610, 100, 70625, 70626, 100, 70709, 70711, 8, 70712, 70719, 100,
+    70720, 70721, 8, 70722, 70724, 100, 70725, 70725, 8, 70726, 70726, 100,
+    70750, 70750, 100, 70832, 70832, 100, 70833, 70834, 8, 70835, 70840, 100,
+    70841, 70841, 8, 70842, 70842, 100, 70843, 70844, 8, 70845, 70845, 100,
+    70846, 70846, 8, 70847, 70848, 100, 70849, 70849, 8, 70850, 70851, 100,
+    71087, 71087, 100, 71088, 71089, 8, 71090, 71093, 100, 71096, 71099, 8,
+    71100, 71101, 100, 71102, 71102, 8, 71103, 71104, 100, 71132, 71133, 100,
+    71216, 71218, 8, 71219, 71226, 100, 71227, 71228, 8, 71229, 71229, 100,
+    71230, 71230, 8, 71231, 71232, 100, 71339, 71339, 100, 71340, 71340, 8,
+    71341, 71341, 100, 71342, 71343, 8, 71344, 71351, 100, 71453, 71453, 100,
+    71454, 71454, 8, 71455, 71455, 100, 71458, 71461, 100, 71462, 71462, 8,
+    71463, 71467, 100, 71724, 71726, 8, 71727, 71735, 100, 71736, 71736, 8,
+    71737, 71738, 100, 71984, 71984, 100, 71985, 71989, 8, 71991, 71992, 8,
+    71995, 71998, 100, 71999, 71999, 7, 72000, 72000, 8, 72001, 72001, 7,
+    72002, 72002, 8, 72003, 72003, 100, 72145, 72147, 8, 72148, 72151, 100,
+    72154, 72155, 100, 72156, 72159, 8, 72160, 72160, 100, 72164, 72164, 8,
+    72193, 72202, 100, 72243, 72248, 100, 72249, 72249, 8, 72250, 72250, 7,
+    72251, 72254, 100, 72263, 72263, 100, 72273, 72278, 100, 72279, 72280, 8,
+    72281, 72283, 100, 72324, 72329, 7, 72330, 72342, 100, 72343, 72343, 8,
+    72344, 72345, 100, 72751, 72751, 8, 72752, 72758, 100, 72760, 72765, 100,
+    72766, 72766, 8, 72767, 72767, 100, 72850, 72871, 100, 72873, 72873, 8,
+    72874, 72880, 100, 72881, 72881, 8, 72882, 72883, 100, 72884, 72884, 8,
+    72885, 72886, 100, 73009, 73014, 100, 73018, 73018, 100, 73020, 73021, 100,
+    73023, 73029, 100, 73030, 73030, 7, 73031, 73031, 100, 73098, 73102, 8,
+    73104, 73105, 100, 73107, 73108, 8, 73109, 73109, 100, 73110, 73110, 8,
+    73111, 73111, 100, 73459, 73460, 100, 73461, 73462, 8, 73472, 73473, 100,
+    73474, 73474, 7, 73475, 73475, 8, 73524, 73525, 8, 73526, 73530, 100,
+    73534, 73535, 8, 73536, 73538, 100, 73562, 73562, 100, 78896, 78911, 3,
+    78912, 78912, 100, 78919, 78933, 100, 90398, 90409, 100, 90410, 90412, 8,
+    90413, 90415, 100, 92912, 92916, 100, 92976, 92982, 100, 93539, 93539, 10,
+    93543, 93546, 10, 94031, 94031, 100, 94033, 94087, 8, 94095, 94098, 100,
+    94180, 94180, 100, 94192, 94193, 100, 113821, 113822, 100, 113824, 113827, 3,
+    118528, 118573, 100, 118576, 118598, 100, 119141, 119145, 100, 119149, 119154, 100,
+    119155, 119162, 3, 119163, 119170, 100, 119173, 119179, 100, 119210, 119213, 100,
+    119362, 119364, 100, 121344, 121398, 100, 121403, 121452, 100, 121461, 121461, 100,
+    121476, 121476, 100, 121499, 121503, 100, 121505, 121519, 100, 122880, 122886, 100,
+    122888, 122904, 100, 122907, 122913, 100, 122915, 122916, 100, 122918, 122922, 100,
+    123023, 123023, 100, 123184, 123190, 100, 123566, 123566, 100, 123628, 123631, 100,
+    124140, 124143, 100, 124398, 124399, 100, 125136, 125142, 100, 125252, 125258, 100,
+    126976, 127231, 16, 127245, 127247, 16, 127279, 127279, 16, 127340, 127345, 16,
+    127358, 127359, 16, 127374, 127374, 16, 127377, 127386, 16, 127405, 127461, 16,
+    127462, 127487, 6, 127489, 127503, 16, 127514, 127514, 16, 127535, 127535, 16,
+    127538, 127546, 16, 127548, 127551, 16, 127561, 127994, 16, 127995, 127999, 100,
+    128000, 128317, 16, 128326, 128591, 16, 128640, 128767, 16, 128884, 128895, 16,
+    128981, 129023, 16, 129036, 129039, 16, 129096, 129103, 16, 129114, 129119, 16,
+    129160, 129167, 16, 129198, 129279, 16, 129292, 129338, 16, 129340, 129349, 16,
+    129351, 129791, 16, 130048, 131069, 16, 917504, 917535, 3, 917536, 917631, 100,
+    917632, 917759, 3, 917760, 917999, 100, 918000, 921599, 3
 ];
