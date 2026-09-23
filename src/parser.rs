@@ -871,8 +871,17 @@ impl Parser {
             return false;
         }
         let mut i = 1;
+        // A return type may be another module's: `io.Buffer fresh()`. That is
+        // three tokens, not one, and reading only the first left the name
+        // where the type was expected -- so the whole declaration was read as
+        // `io.Buffer fresh` the variable, and the `(` was a syntax error. A
+        // qualified CALL (`io.buffer()`) is the same three tokens followed by
+        // `(` rather than a name, so the test below still tells them apart.
+        if self.peek_at(1) == &Tok::Dot && matches!(self.peek_at(2), Tok::Ident(_)) {
+            i = 3;
+        }
         // Skip type arguments on the return type: `Wrap<int> f(..)`.
-        if self.peek_at(1) == &Tok::Lt {
+        if self.peek_at(i) == &Tok::Lt {
             let mut depth = 0;
             loop {
                 match self.peek_at(i) {

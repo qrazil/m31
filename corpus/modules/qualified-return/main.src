@@ -1,0 +1,45 @@
+// A function may return another module's type. The parser used to read the
+// three tokens of `io.Buffer` as one, so the name landed where the type was
+// expected and the whole declaration was read as a variable: `io.Buffer
+// fresh` followed by an unexpected `(`.
+import io;
+import shapes;
+
+io.Buffer fresh() {
+    return io.buffer();
+}
+
+List<io.Buffer> many() {
+    List<io.Buffer> bs = [io.buffer(), io.buffer()];
+    return bs;
+}
+
+Option<shapes.Point> maybe(bool yes) {
+    if (yes) {
+        return Option<shapes.Point>.Some(shapes.make(2, 3));
+    }
+    return Option<shapes.Point>.None;
+}
+
+io.Buffer b = fresh();
+match (b.write("hi".to_bytes())) {
+    case Ok(int n): {
+        print(n);  // 2
+    }
+    case Err(io.Error e): {
+        print(e);
+    }
+}
+print(b.size());  // 2
+print(many().size());  // 2
+// The same three tokens followed by `(` are still a call, not a declaration.
+print(shapes.make(4, 5).x);  // 4
+match (maybe(true)) {
+    case Some(shapes.Point p): {
+        print(p.y);  // 3
+    }
+    case None: {
+        print("none");
+    }
+}
+print(maybe(false).is_none());  // true
