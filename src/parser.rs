@@ -1045,7 +1045,27 @@ impl Parser {
                 let mut params = Vec::new();
                 if self.peek() != &Tok::RParen {
                     loop {
-                        params.push(self.parse_param()?);
+                        let p = self.parse_param()?;
+                        // A default is a NAME the caller writes (§4.2:
+                        // `f(1, by: 3)`), and a call through an interface
+                        // has no name to write -- the slot takes positions.
+                        // Declared here, it compiled and then did neither
+                        // thing: `s.go(3)` said the argument was missing and
+                        // `s.go(3, by: 3)` said `by` was positional. Refused
+                        // where it is written instead, so the two ways to
+                        // reach a method cannot disagree.
+                        if p.default.is_some() {
+                            return Err(Diag::new(
+                                p.span,
+                                format!(
+                                    "`{mname}` is an interface method, so `{}` may not have a \
+                                     default: a call through an interface passes positions, not \
+                                     names, and the default could never be used",
+                                    p.name
+                                ),
+                            ));
+                        }
+                        params.push(p);
                         if !self.eat(&Tok::Comma) {
                             break;
                         }

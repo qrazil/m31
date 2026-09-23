@@ -367,6 +367,12 @@ interface HasArea {
 }
 ```
 
+A listed parameter may not have a **default**. A default is a name the
+caller writes (§4.2), and a call through an interface passes positions to a
+vtable slot, so the name never arrives; declaring one is an error where it is
+written. The type's own method may still have one, and a direct call on that
+type honours it.
+
 Satisfaction is **structural**: a type that has every listed method with a
 matching signature satisfies the interface, with no declaration saying so.
 Assigning such a value to an interface-typed slot is allowed; assigning one
@@ -1863,7 +1869,8 @@ enumdecl    = "enum" IDENT [ tparams ] "{" { variant ";" } "}" ;
 variant     = IDENT [ "(" type { "," type } ")" ] ;
 distinct    = "distinct" type IDENT ";" ;
 field       = [ "pub" ] ( type IDENT [ "=" expr ] | type ) ;  (* bare type = embedded *)
-sig         = type IDENT "(" [ params ] ")" ;
+sig         = type IDENT "(" [ sigparams ] ")" ;    (* no defaults, §3.4 *)
+sigparams   = type IDENT { "," type IDENT } ;
 
 func        = [ "static" ] type [ IDENT [ tparams ] "." ] IDENT [ tparams ]
               "(" [ params ] ")" block ;              (* static needs a receiver;

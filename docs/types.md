@@ -312,7 +312,7 @@ A type parameter may be constrained by an **interface** and nothing else.
 
 ```c
 T max<T: Ordered>(T a, T b)         // NO -- would need `<` on T
-T pick<T>(T a, T b, fn(T, T) bool)  // yes -- pass the comparison
+T pick<T>(T a, T b, Less<T> order)  // yes -- pass the comparison
 ```
 
 **No type sets.** Go had to invent `interface { ~int | ~float64 }` because a

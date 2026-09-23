@@ -1,0 +1,5 @@
+interface Scale { int go(int v, int by = 2); }
+type S {}
+int S.go(int v, int by = 2) { return v * by; }
+Scale s = S();
+print(s.go(3));
