@@ -1936,7 +1936,12 @@ Stated so the absence is a decision and not an oversight:
     moment an object dies, on every path out of a scope
   - multiple returns — a `Result` or an enum carries what a second return
     value would have
-  - closures, function values, lambdas
+  - a function *type* — no `fn` keyword, no `Fn<..>`. A callback's type is an
+    ordinary one-method interface, and a function's name is a value exactly
+    where such an interface is expected: `interface Less { int cmp(Point a,
+    Point b); }` and then `smallest(ps, by_x)`. Calling one is a method call,
+    `order.cmp(a, b)`, never `order(a, b)` (docs/closures-decision.md)
+  - closures and lambdas
   - inheritance, method overriding, abstract types
   - defining an operator outside the fixed set of §6.2, or changing one on a
     built-in type

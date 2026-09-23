@@ -1394,6 +1394,23 @@ and construct from it instead of calling `rt_alloc`. This also makes
 `ByX()` — the hand-written form, which allocates today — free, so it pays
 before any new syntax exists.
 
+*Done.* `TypeDef::is_immortal_singleton` (`src/ir.rs`) decides it and the
+emitter writes one `static T{i} imm_T{i} = { { RC_IMMORTAL, &ti_T{i} } };`
+per such type; `Inst::Alloc` on one becomes `&imm_T{i}.hdr`. Four kinds of
+type are excluded because they are not really field-less — an interface, a
+channel and a distinct type have no object at all, and an enum's empty
+`fields` hides a tag and payload slots — and one because sharing would be
+observable: **a field-less type that declares a DESTRUCTOR keeps
+allocating**, since an immortal is never released and its `drop` would
+silently never run. Refusing that combination was the alternative and was
+rejected: a field-less guard whose whole content is its effect is a
+legitimate shape, and a synthesised callback type never has a destructor,
+which is the case this exists for. Nothing else changes, because `==` on a
+user type is its `eq` method and never identity, `rt_snapshot` already
+returns an immortal unchanged (`RC_IMMORTAL` is all bits set, so it reads as
+frozen), and `rt_check_unique` already skips one. Measured on a loop of 10M
+constructions at `-O2`: **0.17 s → 0.04 s**.
+
 **Stage 3 — a function's name as a value. ~1 week.**
 Resolve a bare identifier that names a function, in the positions listed in
 *Where the target type is known*, against the expected one-method interface;
@@ -1404,6 +1421,32 @@ the receiver rule added. Diagnostics: the four above (target not
 known, receiver-only method, generic function, defaulted function). At the
 end of this stage `sort.by(xs, by_x)` works and `docs/stdlib-decision.md`'s
 `sort` module can be written.
+
+*Done*, with two corrections to the plan above.
+
+First, the synthesis happens **after** `mono.rs`, not before. It is the
+better place and not a compromise: by the time the lowering runs, a generic
+interface has already been instantiated, so `Less<Point>` is the ordinary
+concrete declaration `Less$Point` with concrete method signatures, and the
+wrapper is checked against that with no generic machinery at all. It also
+means one hook covers every position, because `lower_expr_as` — the
+lowering's own "here is the type that is wanted" entry point — is what every
+row of the table under *Where the target is known* already goes through.
+
+Second, **privacy is judged at the reference site and the wrapper belongs to
+the function's module.** The site is checked by the same rule, and with the
+same words, as a call of the same name: a bare name means this module's
+declaration, a qualified one needs `pub`. Having passed that, the wrapper is
+declared in the module that declared the function, so its forwarding call is
+an ordinary same-module call — which is what lets a module hand out an
+interface over its *own* private function, exactly as it may over its own
+private method, while nobody else can.
+
+The wrapper is `__ref$<function>$<interface>`, one per pair for the whole
+program, cached — so the same name written twice is one type, one method and
+one object. `spawn` is untouched. Measured: a loop of 10M `Less o = by_x;`
+runs in **0.04 s**, the same as the hand-written `ByX()` after Stage 2, and
+the emitted C contains no `rt_alloc` for either.
 
 **Stage 4 — lambdas. ~1–2 weeks.**
 Lambda parsing (`(` type IDENT … `)` `=>` expr, decided on two tokens by the

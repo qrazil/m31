@@ -1,0 +1,31 @@
+// The one field-less type that is NOT shared: one that declares a
+// destructor. An immortal object is never released, so its `drop` would
+// never run -- silently, at every construction -- and that IS observable.
+// So a field-less type with a destructor keeps allocating, one object per
+// construction, and its destructor runs once per object exactly as before.
+//
+// The alternative was to refuse the combination. It was rejected: a
+// field-less type with a destructor is a legitimate guard whose whole
+// content is its effect, and an allocation optimisation is not a reason to
+// take a working shape out of the language.
+type Tick {}
+void Tick.drop() { print("tick"); }
+
+void three() {
+  Tick a = Tick();
+  Tick b = Tick();
+  Tick c = Tick();
+  print("made 3");
+}
+
+three();
+
+// One at a time, so the print order shows each object dying on its own
+// rather than three at the end of a scope.
+int i = 0;
+while (i < 2) {
+  Tick t = Tick();
+  print("loop");
+  i = i + 1;
+}
+print("done");

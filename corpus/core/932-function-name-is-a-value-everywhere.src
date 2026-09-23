@@ -1,0 +1,86 @@
+// A function's name is a value wherever a one-method interface is expected,
+// and that is every position the language writes a type down: the table
+// under "Where the target *is* known" in docs/closures-decision.md. There is
+// no function type -- `Less` is an ordinary interface, and the compiler
+// synthesises a field-less type per (function, interface) pair whose single
+// method forwards. Being field-less, it is one static immortal object
+// (Stage 2), so none of this allocates.
+//
+// `by_x` and `by_y` alternate so that each line proves which function that
+// position picked, rather than all of them printing one number.
+type Point { int x; int y; }
+interface Less { int cmp(Point a, Point b); }
+interface Rank { int score(Point a, Point b); }
+
+int by_x(Point a, Point b) { return a.x - b.x; }
+int by_y(Point a, Point b) { return a.y - b.y; }
+
+type Holder { Less order; }
+
+// 1. an argument to a parameter of interface type
+int use(Less o, Point a, Point b) { return o.cmp(a, b); }
+
+// 4. a return
+Less pick_x() { return by_x; }
+Less pick_y() { return by_y; }
+
+// 8. a default for a parameter
+int scaled(int k, Point a, Point b, Less o = by_y) { return k * o.cmp(a, b); }
+
+// one function, two interfaces with differently-named methods
+int ranked(Rank r, Point a, Point b) { return r.score(a, b); }
+
+Point p = Point(3, 9);
+Point q = Point(1, 5);
+
+print(use(by_x, p, q));
+print(use(by_y, p, q));
+
+// 2. a local declaration
+Less l1 = by_x;
+Less l2 = by_y;
+print(l1.cmp(p, q));
+print(l2.cmp(p, q));
+
+// 3. an assignment to a local
+Less l3 = by_x;
+l3 = by_y;
+print(l3.cmp(p, q));
+
+print(pick_x().cmp(p, q));
+print(pick_y().cmp(p, q));
+
+// 5. an element of a collection literal
+List<Less> os = [by_x, by_y, by_x];
+print(os.size());
+print(os[0].cmp(p, q));
+print(os[1].cmp(p, q));
+
+// 6. a `send` payload. An immortal never trips the uniqueness check at a
+// thread boundary, so a bare function reference crosses at no cost.
+Chan<Less> ch = Chan<Less>(2);
+send(ch, by_y);
+send(ch, by_x);
+print(recv(ch).cmp(p, q));
+print(recv(ch).cmp(p, q));
+close(ch);
+
+// 7. a field of a construction, and an assignment to a field
+Holder h = Holder(by_x);
+print(h.order.cmp(p, q));
+h.order = by_y;
+print(h.order.cmp(p, q));
+
+print(scaled(10, p, q));
+print(scaled(10, p, q, o: by_x));
+
+// The method name comes from the target and the target is always a declared
+// type, so a function name never has to choose between two interfaces. This
+// one satisfies both, through a second synthesised wrapper.
+print(ranked(by_x, p, q));
+
+// The same function named twice is one wrapper type and one object, so
+// nothing is allocated the second time either.
+Less a = by_x;
+Less b = by_x;
+print(a.cmp(p, q) + b.cmp(p, q));

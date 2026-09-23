@@ -1,0 +1,7 @@
+// A builtin's parameter is not an interface, so nothing here says what
+// `by_x` should become. Information flows from the target interface to the
+// callback and never back, so with no target there is nothing to check it
+// against (docs/closures-decision.md, "Where the target is *not* known").
+type Point { int x; int y; }
+int by_x(Point a, Point b) { return a.x - b.x; }
+print(by_x);

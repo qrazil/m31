@@ -190,6 +190,16 @@ pub struct Lowerer {
     /// reference runs only the runtime, which decides whether a built-in
     /// method can run user code (src/lower/hold.rs, `releases`).
     has_destructors: bool,
+    /// The synthesised wrapper type for each (function, interface) pair a
+    /// function's name has been used as a value at, by (function key,
+    /// interface type name). One per pair for the whole program, so writing
+    /// the same name twice produces one type, one method and -- after the
+    /// field-less type's static instance -- one object.
+    fn_refs: HashMap<(String, String), u32>,
+    /// The forwarding methods those wrappers need, waiting to be lowered.
+    /// They are made while a body is being lowered, which is in the middle
+    /// of the loop that lowers bodies, so they are lowered after it.
+    synth_funcs: Vec<Func>,
 }
 
 /// Every builtin function, whether it lives in `sigs` (`concat`) or is
@@ -506,6 +516,8 @@ impl Lowerer {
             no_recv: String::new(),
             ret_ty: Ty::Void,
             has_destructors: false,
+            fn_refs: HashMap::new(),
+            synth_funcs: Vec::new(),
         }
     }
 
@@ -2703,6 +2715,14 @@ impl Lowerer {
             funcs.push(self.lower_func(f)?);
         }
         funcs.push(self.lower_func(&entry)?);
+        // A function's name used as a value synthesised a wrapper type and a
+        // forwarding method while the body above was being lowered
+        // (`fn_ref_wrapper`). Lower those now: a forwarder's body is one call
+        // whose arguments are its own parameters, so it cannot synthesise
+        // another -- the loop is for the invariant, not for a real cycle.
+        while let Some(f) = self.synth_funcs.pop() {
+            funcs.push(self.lower_func(&f)?);
+        }
         // Fill each concrete type's vtable now that every method is known.
         let slots = self.iface_slots.clone();
         for i in 0..self.typedefs.len() {
@@ -5798,13 +5818,372 @@ impl Lowerer {
     /// declaration, an assignment, a field, an argument, an enum payload, a
     /// return. Everywhere else the literal forms are refused with a message
     /// saying so, rather than guessing.
+    ///
+    /// A function's name is the other expression with no type of its own, and
+    /// it is a value in exactly the places this function is reached from --
+    /// which is the table under "Where the target *is* known" in
+    /// docs/closures-decision.md, one row per call site below.
     fn lower_expr_as(&mut self, e: &Expr, want: Ty) -> Result<Val, Diag> {
+        if let Some(v) = self.lower_fn_ref(e, want)? {
+            return Ok(v);
+        }
         match e {
             Expr::SeqLit(..) | Expr::RepeatLit(..) | Expr::MapLit(..) => {
                 self.lower_literal(e, Some(want))
             }
             _ => self.lower_expr(e),
         }
+    }
+
+    // ---- a function's name as a value (docs/closures-decision.md) -----
+    //
+    // There is no function type. A callback's type is an ordinary one-method
+    // interface, and a function's name is a value exactly where such an
+    // interface is expected. The compiler synthesises, per (function,
+    // interface) pair, a type with no fields whose single method forwards to
+    // the function -- which, being field-less, is one static immortal object,
+    // so the whole feature costs nothing at run time.
+
+    /// The function an expression names, when it names one: its key in
+    /// `sigs` and the spelling to put in a diagnostic.
+    ///
+    /// `None` means the expression is not a function's name at all, and the
+    /// ordinary lowering runs and gives its own message. Privacy is NOT
+    /// judged here -- a private function is still *found*, so that the
+    /// refusal can say so rather than "unknown variable".
+    fn fn_ref_name(&self, e: &Expr) -> Option<(String, String, Span)> {
+        match e {
+            Expr::Var(name, span) => {
+                // A local, a field of the receiver and a module constant all
+                // hold the name against a function -- and none of them can
+                // collide with one, because nothing shadows anything (§4.1).
+                // Checking them anyway keeps this from depending on that.
+                if self.lookup(name).is_some()
+                    || self.recv_field(name).is_some()
+                    || self.resolve_const(name).is_some()
+                {
+                    return None;
+                }
+                let key = self.resolve_fn(name);
+                if self.sigs.contains_key(&key) && !key.contains('.') {
+                    return Some((key, name.clone(), *span));
+                }
+                // Another module's, named bare. Found so that the refusal
+                // can name the module, exactly as a bare CALL of it does.
+                // `min` rather than `find`: two modules may declare the name,
+                // and a HashMap has no order, so `find` would name a
+                // different one on different runs.
+                let suffix = format!("#{name}");
+                let k = self
+                    .sigs
+                    .keys()
+                    .filter(|k| k.ends_with(&suffix) && !k.contains('.'))
+                    .min()?;
+                Some((k.clone(), name.clone(), *span))
+            }
+            // `mod.by_x`, the qualified form. `mod` is a module rather than a
+            // variable only when no local has taken the name.
+            Expr::Field(obj, field, span) => {
+                let Expr::Var(m, _) = &**obj else { return None };
+                if !self.modules.contains(m) || self.lookup(m).is_some() {
+                    return None;
+                }
+                let key = format!("{m}#{field}");
+                self.sigs
+                    .contains_key(&key)
+                    .then(|| (key, format!("{m}.{field}"), *span))
+            }
+            _ => None,
+        }
+    }
+
+    /// The refusal for a function's name written where nothing says what
+    /// type is wanted. `None` when the expression names no function, so the
+    /// caller's own diagnostic stands.
+    fn fn_ref_no_target(&self, e: &Expr) -> Option<Diag> {
+        let (key, shown, span) = self.fn_ref_name(e)?;
+        // Privacy first, so that a private function of another module is not
+        // described as merely being in the wrong position.
+        if let Err(d) = self.check_fn_ref_access(&key, &shown, span) {
+            return Some(d);
+        }
+        Some(Diag::new(
+            span,
+            format!(
+                "`{shown}` is a function; it becomes a value only where a one-method \
+                 interface is expected, and nothing here says one is -- bind it to a \
+                 local of the interface type first"
+            ),
+        ))
+    }
+
+    /// `by_x` where a one-method interface is expected. `Ok(None)` when the
+    /// expression does not name a function; otherwise it is the wrapper's
+    /// construction, or the reason there is none.
+    fn lower_fn_ref(&mut self, e: &Expr, want: Ty) -> Result<Option<Val>, Diag> {
+        let Some((key, shown, span)) = self.fn_ref_name(e) else {
+            return Ok(None);
+        };
+        self.check_fn_ref_access(&key, &shown, span)?;
+        let tid = self.fn_ref_wrapper(&key, &shown, want, span)?;
+        let ty = self
+            .ty_named(&self.typedefs[tid as usize].name.clone())
+            .expect("the wrapper type was just declared");
+        let d = self.new_val(IrTy::Ref);
+        self.push(Inst::Alloc { dst: d, tid });
+        self.stmt_temps.push(d);
+        Ok(Some(Val::new(d, ty, true)))
+    }
+
+    /// May the module being lowered name this function here?
+    ///
+    /// The same rule, and the same words, as calling it: a bare name means
+    /// this module's declaration, and another module's is reached by
+    /// qualifying it and only if it is `pub`. Taking a function's name as a
+    /// value must not be a way around either half -- an interface made of a
+    /// private function would export it to everyone holding the interface.
+    fn check_fn_ref_access(&self, key: &str, shown: &str, span: Span) -> Result<(), Diag> {
+        let sig = self.sigs.get(key).expect("fn_ref_name found it");
+        let owner = &sig.module;
+        let bare = crate::ast::bare(key);
+        let ours = owner.is_empty() || *owner == self.cur_module;
+        // `shown` carries the spelling, and the two spellings have different
+        // rules. A BARE name means this module's declaration and nothing
+        // else, whether or not the other module exported it -- that is what
+        // makes `pub` mean something. A QUALIFIED one has named the module
+        // and needs only the export.
+        let qualified = shown.contains('.');
+        if ours || (qualified && sig.is_pub) {
+            return Ok(());
+        }
+        // Word for word what a CALL of the same name says, so that a reader
+        // who has met one has met the other.
+        Err(Diag::new(
+            span,
+            match (sig.is_pub, qualified) {
+                (true, false) => {
+                    format!("`{shown}` is declared in `{owner}`; write `{owner}.{bare}`")
+                }
+                (false, true) => {
+                    format!("`{bare}` is private to `{owner}`; mark it `pub` to export it")
+                }
+                (false, false) => format!("`{shown}` is private to `{owner}`"),
+                (true, true) => unreachable!("a qualified pub function was accepted above"),
+            },
+        ))
+    }
+
+    /// The synthesised type for a (function, interface) pair, made once.
+    ///
+    /// Everything this refuses is refused here rather than by the ordinary
+    /// satisfaction check, because there is no type yet to report a mismatch
+    /// on: the expression's only type is the one it is being checked against.
+    fn fn_ref_wrapper(
+        &mut self,
+        key: &str,
+        shown: &str,
+        want: Ty,
+        span: Span,
+    ) -> Result<u32, Diag> {
+        let m = self.fn_ref_method(key, shown, want, span)?;
+        let iname = self.typedefs[self.tdef_of(want).expect("checked") as usize]
+            .name
+            .clone();
+        if let Some(tid) = self.fn_refs.get(&(key.to_string(), iname.clone())) {
+            return Ok(*tid);
+        }
+
+        let sig = self.sigs.get(key).expect("checked");
+        let module = sig.module.clone();
+        let ret = m.ret;
+        // Parameter names come from neither side. The interface's would have
+        // to pass the no-shadowing checks in the module the wrapper lands in,
+        // and a `$` cannot appear in a source identifier, so these can
+        // collide with nothing a program can write.
+        let params: Vec<Param> = m
+            .params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| Param {
+                ty: p.ty,
+                name: format!("$a{i}"),
+                default: None,
+                embedded: false,
+                is_pub: false,
+                span,
+            })
+            .collect();
+        let mname = m.name.clone();
+
+        // `__` is reserved in every identifier (§10.1), so no program can
+        // write this name or collide with it. The counter is for the pair
+        // that would otherwise spell the same name as another -- possible
+        // only through monomorphisation's own `$`, and cheap to rule out.
+        let mut tname = format!("__ref${key}${iname}");
+        let mut n = 2;
+        while self.typedefs.iter().any(|d| d.name == tname) {
+            tname = format!("__ref${key}${iname}${n}");
+            n += 1;
+        }
+
+        let tid = self.typedefs.len() as u32;
+        self.typedefs.push(TypeDef {
+            name: tname.clone(),
+            fields: Vec::new(),
+            variants: Vec::new(),
+            is_enum: false,
+            is_interface: false,
+            is_chan: false,
+            is_distinct: false,
+            vtable: Vec::new(),
+            destructor: None,
+            resource: None,
+        });
+        self.field_surface.push(Vec::new());
+        self.field_params.push(Vec::new());
+        self.distinct_base.push(None);
+        self.variant_surface.push(Vec::new());
+        self.iface_methods.push(Vec::new());
+        // The wrapper belongs to the module that declared the FUNCTION, so
+        // that its forwarding call is an ordinary same-module call and a
+        // private function stays callable from it. The reference site's own
+        // right to name that function was settled by `check_fn_ref_access`
+        // just above; the wrapper is `pub` because the interface value it
+        // becomes is handed to whoever asked for it.
+        self.type_module.push(module.clone());
+        self.type_pub.push(true);
+        self.fn_refs.insert((key.to_string(), iname), tid);
+
+        // `int __ref$by_x$Less.cmp(Point $a0, Point $a1) { return by_x($a0, $a1); }`
+        let call = Expr::Call(
+            key.to_string(),
+            Args {
+                pos: params
+                    .iter()
+                    .map(|p| Expr::Var(p.name.clone(), span))
+                    .collect(),
+                named: Vec::new(),
+            },
+            span,
+        );
+        let body = if ret == Ty::Void {
+            vec![Stmt::Eval { expr: call, span }]
+        } else {
+            vec![Stmt::Return {
+                value: Some(call),
+                span,
+            }]
+        };
+        let f = Func {
+            module: module.clone(),
+            is_pub: true,
+            ret,
+            is_static: false,
+            is_prim: false,
+            recv: Some(tname.clone()),
+            name: mname,
+            tparams: Vec::new(),
+            recv_tparams: Vec::new(),
+            params: params.clone(),
+            body,
+            span,
+        };
+        self.sigs.insert(
+            f.key(),
+            Sig {
+                params,
+                ret,
+                module,
+                is_pub: true,
+                is_prim: false,
+            },
+        );
+        self.synth_funcs.push(f);
+        Ok(tid)
+    }
+
+    /// The one method the target interface declares, once every reason a
+    /// function cannot stand in for it has been ruled out.
+    fn fn_ref_method(&self, key: &str, shown: &str, want: Ty, span: Span) -> Result<Func, Diag> {
+        let bad = |why: String| Diag::new(span, why);
+        let not_one = || {
+            format!(
+                "`{shown}` is a function; it becomes a value only where a one-method \
+                 interface is expected, and `{}` is not one -- bind it to a local of \
+                 the interface type first",
+                self.tyname(want)
+            )
+        };
+        let Some(tt) = self.tdef_of(want) else {
+            return Err(bad(not_one()));
+        };
+        if !self.typedefs[tt as usize].is_interface {
+            return Err(bad(not_one()));
+        }
+        let ms = &self.iface_methods[tt as usize];
+        if ms.len() != 1 {
+            // Not the same mistake as the one above: the reader wrote an
+            // interface, so say what is wrong with THIS interface. A function
+            // is one operation and can only ever be one method.
+            return Err(bad(format!(
+                "`{}` declares {} methods, so no function can satisfy it: a function \
+                 is one operation, and `{shown}` could only ever supply one of them \
+                 -- declare a type with all of them and pass one of those",
+                self.tyname(want),
+                ms.len()
+            )));
+        }
+        let m = ms[0].clone();
+        let sig = self.sigs.get(key).expect("fn_ref_name found it");
+
+        // The receiver is not a parameter. A method gets its value from
+        // `this`; the wrapper's `this` carries nothing, so a method that
+        // declares no parameters has no way to be given anything, and no
+        // function can satisfy it.
+        if m.params.is_empty() {
+            let n = sig.params.len();
+            return Err(bad(format!(
+                "`{shown}` takes {n} parameter{}; `{}.{}` takes none and gets its value \
+                 from the receiver, so no function can satisfy it -- give the type a \
+                 `{}` method instead",
+                if n == 1 { "" } else { "s" },
+                self.tyname(want),
+                m.name,
+                m.name
+            )));
+        }
+        // Exact, in both directions, and the same comparison a type's method
+        // goes through in `missing_method`: no variance, no defaulted
+        // parameter standing in for a missing one.
+        let same = sig.ret == m.ret
+            && sig.params.len() == m.params.len()
+            && sig
+                .params
+                .iter()
+                .zip(m.params.iter())
+                .all(|(a, b)| a.ty == b.ty);
+        if !same {
+            let sh = |ps: &[Param], ret: Ty| {
+                format!(
+                    "{} ({})",
+                    self.tyname(ret),
+                    ps.iter()
+                        .map(|p| self.tyname(p.ty))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            return Err(bad(format!(
+                "`{shown}` is `{}`, and `{}.{}` is `{}`; a function satisfies a \
+                 one-method interface only on an exact match -- same parameter types, \
+                 in order, and the same return type",
+                sh(&sig.params, sig.ret),
+                self.tyname(want),
+                m.name,
+                sh(&m.params, m.ret)
+            )));
+        }
+        Ok(m)
     }
 
     /// `[]`, `[a, b, c]`, `[x; n]`, `{}`, `{k: v}`.
@@ -6271,6 +6650,16 @@ impl Lowerer {
                 if let Some(d) = self.foreign_const_hint(name, *span) {
                     return Err(d);
                 }
+                // A function's name, somewhere nothing says what type is
+                // wanted: an argument to an unconstrained generic parameter,
+                // an argument to a builtin, an expression statement. It is
+                // checked against the interface it is given to and is never
+                // a source of inference, so with no target there is nothing
+                // to check it against (docs/closures-decision.md, "Where the
+                // target is *not* known").
+                if let Some(d) = self.fn_ref_no_target(e) {
+                    return Err(d);
+                }
                 Err(Diag::new(*span, format!("unknown variable `{name}`")))
             }
             Expr::Un(op, inner, span) => {
@@ -6424,6 +6813,12 @@ impl Lowerer {
                 // variable called `lib`.
                 if let Some(key) = self.qualified_const(obj, field, *span)? {
                     return Ok(self.lower_const_use(&key));
+                }
+                // `lib.by_x` -- another module's function, named as a value
+                // where nothing says an interface is wanted. Same refusal as
+                // the bare spelling, rather than "unknown variable `lib`".
+                if let Some(d) = self.fn_ref_no_target(e) {
+                    return Err(d);
                 }
                 let o = self.lower_expr(obj)?;
                 let Some(tid) = self.tdef_of(o.ty) else {

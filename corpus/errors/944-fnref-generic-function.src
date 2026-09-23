@@ -1,0 +1,8 @@
+// A generic function cannot be a callback: a vtable slot holds one code
+// address and a generic function has one per instantiation. That is the same
+// reason an interface cannot declare a generic method. The workaround is an
+// instantiating wrapper, which the message names.
+interface Count { int of(List<int> xs); }
+int firstof<T>(List<T> xs) { return xs.size(); }
+Count c = firstof;
+print(c.of([1, 2]));

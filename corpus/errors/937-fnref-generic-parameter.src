@@ -1,0 +1,8 @@
+// An unconstrained generic parameter. `T` could be any interface, or none,
+// and a function name is never a source of inference -- so there is nothing
+// to resolve `T` from. The refusal is monomorphisation's own, and it says
+// the same thing the callback rule would: bind it to a written type first.
+type Point { int x; int y; }
+int by_x(Point a, Point b) { return a.x - b.x; }
+void show<T>(T v) { print("x"); }
+show(by_x);

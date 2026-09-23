@@ -1,0 +1,5 @@
+// A bare function name as a statement of its own. Nothing says what it
+// should become, and it has no effect either way.
+type Point { int x; int y; }
+int by_x(Point a, Point b) { return a.x - b.x; }
+by_x;

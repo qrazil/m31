@@ -1,0 +1,7 @@
+// An interface with two or more methods cannot be satisfied by a function.
+// A function is one operation and can only ever supply one method.
+type Point { int x; int y; }
+interface Both { int cmp(Point a, Point b); int rank(Point a); }
+int by_x(Point a, Point b) { return a.x - b.x; }
+Both b = by_x;
+print(b.rank(Point(1, 2)));

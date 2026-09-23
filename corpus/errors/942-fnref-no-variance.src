@@ -1,0 +1,12 @@
+// Exact match only, in both directions. `Sq` satisfies `Shape`, but a
+// function taking a `Sq` does not satisfy a method taking a `Shape`: there
+// is no contravariance, for the same reason interface satisfaction has
+// none -- satisfaction is structural with no runtime coercion, and a
+// variance rule would need the conversion the design does not have.
+interface Shape { int sides(); }
+type Sq {}
+int Sq.sides() { return 4; }
+interface Take { void take(Shape s); }
+void take_sq(Sq s) { print(s.sides()); }
+Take t = take_sq;
+t.take(Sq());

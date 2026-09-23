@@ -1,0 +1,35 @@
+// The synthesised forwarder is an ordinary method, so the two shapes that
+// are easy to get wrong in a generated body are worth pinning: a `void`
+// return, which has no `return` statement to write, and a reference return,
+// where the value the wrapped function owns has to be handed on without
+// being released twice or leaked. `__rc_live=0` is the check that matters.
+interface Sink { void take(str line); }
+interface Pair { str join(str a, str b); }
+interface Grow { List<int> more(List<int> xs); }
+
+void shout(str line) { print(line); }
+str both(str a, str b) { return a + "-" + b; }
+List<int> add_one(List<int> xs) {
+  List<int> out = [];
+  int i = 0;
+  while (i < xs.size()) {
+    out.push(xs[i] + 1);
+    i = i + 1;
+  }
+  return out;
+}
+
+void run(Sink s) { s.take("hello"); }
+run(shout);
+
+Sink s = shout;
+s.take("again");
+
+Pair p = both;
+print(p.join("a", "b"));
+
+Grow g = add_one;
+List<int> ys = g.more([1, 2, 3]);
+print(ys.size());
+print(ys[0]);
+print(ys[2]);

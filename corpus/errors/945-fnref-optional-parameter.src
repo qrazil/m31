@@ -1,0 +1,9 @@
+// A function with an optional parameter cannot be a callback, and it falls
+// out of the arity rule rather than needing one of its own. It SHOULD be
+// refused (§4.2): an optional parameter is named at the call site, and a
+// dispatch site has no name to give, so accepting it would make `by`
+// positional here and named everywhere else.
+interface Scale { int go(int v); }
+int scale(int v, int by = 2) { return v * by; }
+Scale s = scale;
+print(s.go(3));

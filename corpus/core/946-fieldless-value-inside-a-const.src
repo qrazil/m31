@@ -1,0 +1,38 @@
+// A `const` over an object that HOLDS a field-less value -- a hand-written
+// one or a function reference, which is the same thing after Stage 3.
+//
+// The immortal is never frozen and never copied, and neither has to be
+// special-cased: `reach_add` returns immediately for an immortal and
+// `rt_copy_child` hands a frozen child straight back (runtime/rt.c), and
+// RC_IMMORTAL is all bits set, so it already reads as frozen. The object
+// around it is frozen or copied exactly as before.
+type Point { int x; int y; }
+interface Less { int cmp(Point a, Point b); }
+type ByX {}
+int ByX.cmp(Point a, Point b) { return a.x - b.x; }
+int by_y(Point a, Point b) { return a.y - b.y; }
+type Holder { Less order; int n; }
+
+void go(Point p, Point q) {
+  // Private: the const freezes it in place, and the immortal inside is
+  // skipped by the walk that decides what to freeze.
+  Holder h = Holder(ByX(), 1);
+  const Holder frozen = h;
+  print(frozen.order.cmp(p, q));
+  print(frozen.n);
+
+  Holder g = Holder(by_y, 2);
+  const Holder frozen2 = g;
+  print(frozen2.order.cmp(p, q));
+
+  // Shared: the const has to snapshot. The Holder is copied; the callback
+  // inside it is not, because there is nothing in it to copy and no way to
+  // tell the copy from the original.
+  Holder s = Holder(by_y, 3);
+  List<Holder> keep = [s];
+  const Holder snap = s;
+  print(snap.order.cmp(p, q));
+  print(keep[0].n);
+}
+
+go(Point(3, 9), Point(1, 5));

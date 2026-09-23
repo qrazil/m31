@@ -1,0 +1,4 @@
+corpus/errors/940-fnref-receiver-only-method.src:8:11: `show` takes 1 parameter; `ToStr.to_str` takes none and gets its value from the receiver, so no function can satisfy it -- give the type a `to_str` method instead
+  |
+8 | ToStr t = show;
+  |           ^

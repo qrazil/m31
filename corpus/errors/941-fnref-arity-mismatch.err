@@ -1,0 +1,4 @@
+corpus/errors/941-fnref-arity-mismatch.src:6:10: `just_x` is `int (Point)`, and `Less.cmp` is `int (Point, Point)`; a function satisfies a one-method interface only on an exact match -- same parameter types, in order, and the same return type
+  |
+6 | Less l = just_x;
+  |          ^

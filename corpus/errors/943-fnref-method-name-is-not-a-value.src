@@ -1,0 +1,10 @@
+// A METHOD's name is not a value. `p.area` is a field read, and making it
+// mean a bound method when the type has no such field would mean that adding
+// a field later silently changed what an existing expression denotes (§4.3).
+// So the message is the field one, unchanged by any of this.
+type Point { int x; int y; }
+int Point.area() { return x * y; }
+interface Area { int area(); }
+Point p = Point(2, 3);
+Area a = p.area;
+print(a.area());
