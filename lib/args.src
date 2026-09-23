@@ -121,6 +121,7 @@
 // A `Parser`'s declarations and everything in a `Parsed` are private fields,
 // so the only way to change a parser is a declaring method that checks what
 // it is given, and the only way to make a `Parsed` is `parse`.
+import text;
 
 /// A bad command line, and only that. Print it, print `p.usage()`, and exit
 /// with whatever status your program uses for usage errors: that is the
@@ -415,7 +416,7 @@ void declare(Parser k, str name, str short, str help, str placeholder, str defau
     }
     str shown = placeholder;
     if (shown == "") {
-        shown = name.to_upper().split("-").join("_");
+        shown = text.replace(name.to_upper(), "-", "_");
     }
     k.opts.push(Opt(name, short, help, shown, default, kind));
     if (short != "") {
@@ -565,6 +566,9 @@ int wider(int width, str column) {
 // accent none -- and getting that right needs the Unicode width tables,
 // which this module does not carry. Such a name misaligns its rows by that
 // difference; everything else lines up.
+//
+// `text.pad_right`, which fills the column, measures the same way, so the
+// width computed here and the padding that reaches it cannot disagree.
 int columns(str s) {
     return s.chars().size();
 }
@@ -618,7 +622,7 @@ str row(str left, int width, str description) {
     if (description == "") {
         return "  " + left;
     }
-    return "  " + left + " ".repeat(width - columns(left)) + "  " + description;
+    return "  " + text.pad_right(left, width) + "  " + description;
 }
 
 // A description with its generated tail, `(default 80)`. The default is
