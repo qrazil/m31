@@ -1060,6 +1060,47 @@ impl Lowerer {
                 });
                 Ok(Val::void())
             }
+            // A fresh collection of the same kind holding `from .. to`.
+            //
+            // `str` and `bytes` already answer this question, as `substr`,
+            // and the contract here is theirs: half-open, so `slice(i, i)`
+            // is empty and `to - from` is the size, and out of bounds
+            // **traps** rather than clamping -- a range the program computed
+            // wrong is a bug, and a quietly shortened answer hides it in
+            // whatever computed the range. The name differs because a list
+            // holds no text; the shape of the call is what has to match.
+            //
+            // On an `Array` as well as a `List`, because they already share
+            // `size`, `contains`, `index_of`, `reverse` and `sort` and "one
+            // name for each question" (reference §3.9) is the rule. Each
+            // answers with its own kind.
+            "slice" => {
+                if args.pos.len() != 2 {
+                    return Err(Diag::new(span, "`slice` takes a start and an end"));
+                }
+                let from = self.lower_expr(&args.pos[0])?;
+                if self.underlying(from.ty) != Ty::Int {
+                    return Err(Diag::new(
+                        args.pos[0].span(),
+                        self.mismatch(Ty::Int, from.ty),
+                    ));
+                }
+                let to = self.lower_expr(&args.pos[1])?;
+                if self.underlying(to.ty) != Ty::Int {
+                    return Err(Diag::new(args.pos[1].span(), self.mismatch(Ty::Int, to.ty)));
+                }
+                let d = self.new_val(IrTy::Ref);
+                self.push(Inst::Call {
+                    dst: Some(d),
+                    func: "rt_seq_slice".to_string(),
+                    args: vec![o.val(), from.val(), to.val()],
+                });
+                // A fresh object, so the caller holds the +1, and the
+                // receiver's own type -- a distinct one included, as `clone`
+                // does.
+                self.stmt_temps.push(d);
+                Ok(Val::new(d, o.ty, true))
+            }
             "reverse" => {
                 if !args.pos.is_empty() {
                     return Err(Diag::new(span, "`reverse` takes no arguments"));

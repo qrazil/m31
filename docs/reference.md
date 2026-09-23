@@ -735,6 +735,7 @@ Methods:
 | `Array`, `List`, `Map`, `str` | `size()` | element count |
 | `Array`, `List` | `contains(v)` | `int`, `float`, `bool` and `str` elements only |
 | `Array`, `List` | `index_of(v)` | `Option<int>` — `None` if it is not there |
+| `Array`, `List` | `slice(from, to)` | a fresh collection of the same kind holding `from .. to`, half-open; **traps** if out of bounds |
 | `Array`, `List` | `reverse()` | in place |
 | `Array`, `List` | `sort()` | in place, ascending; `int` and `str` only |
 | `List` | `push(v)` | append |
@@ -757,6 +758,17 @@ method for everything else was two spellings of one idea.
 
 On a `Map`, `contains` asks about a **key** — the same thing `get` and
 `remove` take.
+
+`slice` is `substr`'s contract on a collection: half-open, so `slice(i, i)`
+is empty and `to - from` is the size, and a range outside `0 .. size()`
+**traps** instead of clamping — a range the program computed wrong is a bug,
+and a quietly shortened answer hides it in whatever computed the range. The
+name differs from `substr` because a list holds no text; the shape of the
+call is what has to match, and does. It answers with the kind it was called
+on — an `Array`'s slice is an `Array`, and a `distinct List<int>`'s is that
+distinct type, as `clone` does — and it shares the elements, retaining each,
+also as `clone` does. The command line without the program's own name is
+`argv.slice(1, argv.size())`; before it, taking any sub-range needed a loop.
 
 `contains` compares the way `==` does — `str` by value, `int` and `bool`
 directly — and refuses a user type, which would need its own comparison.

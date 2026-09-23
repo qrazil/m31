@@ -1,0 +1,32 @@
+// `slice(from, to)` is `substr`'s contract on a collection: a fresh
+// collection of the same kind, half-open, and out of bounds traps.
+//
+// Before this, taking any sub-range of a `List` needed a loop -- or, for the
+// one case every program meets, `os.args()` without the program's own name,
+// a `remove_at(0)` that moves every element.
+List<int> xs = [10, 20, 30, 40, 50];
+List<int> mid = xs.slice(1, 4);
+print(mid.size());
+print(mid[0]);
+print(mid[2]);
+// Half-open, so an empty slice is legal and `to - from` is the size.
+print(xs.slice(2, 2).size());
+print(xs.slice(0, 5).size());
+// A fresh list: changing it leaves the original alone.
+mid.push(99);
+print(xs.size());
+print(mid.size());
+// The elements are shared, and a reference element is retained.
+List<str> ws = ["a", "b", "c"];
+List<str> tail = ws.slice(1, 3);
+print(tail.join("-"));
+ws.clear();
+print(tail.join("-"));
+// An Array answers with an Array, because that is the kind it is.
+Array<int> a = [1, 2, 3, 4];
+Array<int> part = a.slice(1, 3);
+print(part.size());
+print(part[1]);
+// The command line without the program's own name, in one call.
+List<str> argv = ["prog", "-v", "file"];
+print(argv.slice(1, argv.size()).join(" "));

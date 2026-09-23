@@ -702,6 +702,39 @@ Obj *rt_seq_clone(Obj *o) {
     return (Obj *)a;
 }
 
+/* rt_seq_clone of a range: a fresh collection of the SAME kind holding
+ * [from, to), sharing the elements and retaining each, so an Array's slice
+ * is an Array and a List's is a List.
+ *
+ * Half-open and bounds-checked exactly as rt_str_substr is -- that is the
+ * contract this borrows, and a range the program computed wrong is a bug
+ * that clamping would hide in whatever computed it. */
+Obj *rt_seq_slice(Obj *o, int64_t from, int64_t to) {
+    int64_t n = rt_len_of(o);
+    if (from < 0 || to < from || to > n) rt_trap("slice range out of bounds");
+    bool refs = o->ty == &rt_arr_ref_type || o->ty == &rt_lst_ref_type;
+    int64_t *src = slots(o);
+    int64_t m = to - from;
+
+    if (is_list(o)) {
+        Lst *l = (Lst *)rt_list_new(refs);
+        for (int64_t i = 0; i < m; i++) {
+            rt_list_push((Obj *)l, src[from + i]);
+            if (refs) rc_inc((Obj *)(intptr_t)src[from + i]);
+        }
+        return (Obj *)l;
+    }
+
+    Arr *a = (Arr *)rt_alloc(slot_bytes(sizeof(Arr), m),
+                             refs ? &rt_arr_ref_type : &rt_arr_val_type);
+    a->len = m;
+    for (int64_t i = 0; i < m; i++) {
+        a->data[i] = src[from + i];
+        if (refs) rc_inc((Obj *)(intptr_t)src[from + i]);
+    }
+    return (Obj *)a;
+}
+
 int64_t rt_list_pop(Obj *o) {
     rt_check_mutable(o);
     Lst *l = (Lst *)o;
