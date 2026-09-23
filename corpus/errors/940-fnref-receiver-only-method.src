@@ -1,0 +1,9 @@
+// The receiver is not a parameter. A method that declares none gets its
+// value from `this`, and the wrapper's `this` carries nothing -- so no
+// function can ever satisfy a zero-parameter method. `ToStr` is the case
+// that matters: it is a property of a TYPE, not an operation over arguments.
+type Point { int x; int y; }
+interface ToStr { str to_str(); }
+str show(Point p) { return "a point"; }
+ToStr t = show;
+print(t.to_str());

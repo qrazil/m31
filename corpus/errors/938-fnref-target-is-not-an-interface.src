@@ -1,0 +1,5 @@
+// The target type is known, and it is not an interface at all.
+type Point { int x; int y; }
+int by_x(Point a, Point b) { return a.x - b.x; }
+int n = by_x;
+print(n);

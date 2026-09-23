@@ -1,0 +1,4 @@
+corpus/errors/935-fnref-no-target-builtin.src:7:7: `by_x` is a function; it becomes a value only where a one-method interface is expected, and nothing here says one is -- bind it to a local of the interface type first
+  |
+7 | print(by_x);
+  |       ^

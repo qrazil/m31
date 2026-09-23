@@ -1,0 +1,4 @@
+pub type Point { pub int x; pub int y; }
+
+// Not exported.
+int by_y(Point a, Point b) { return a.y - b.y; }

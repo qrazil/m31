@@ -1,0 +1,21 @@
+// Another module's `pub` function, named as a value the way it is called:
+// qualified. The wrapper the compiler synthesises belongs to the module that
+// declared the function, so the forwarding call is an ordinary same-module
+// call -- and the right to name it here was settled at this line.
+import lib;
+
+lib.Point p = lib.Point(3, 9);
+lib.Point q = lib.Point(1, 5);
+
+lib.Less l = lib.by_x;
+print(l.cmp(p, q));
+
+// The library handing out an interface over its OWN private function. That
+// is its decision to make, exactly as with a private method.
+print(lib.own().cmp(p, q));
+
+// An interface this module declares, satisfied by the library's function.
+// Satisfaction is structural, so it does not have to be lib's interface.
+interface Mine { int cmp(lib.Point a, lib.Point b); }
+Mine m = lib.by_x;
+print(m.cmp(p, q));

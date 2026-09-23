@@ -1,0 +1,2 @@
+pub type Point { pub int x; pub int y; }
+pub int by_x(Point a, Point b) { return a.x - b.x; }

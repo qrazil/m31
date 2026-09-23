@@ -1,0 +1,13 @@
+pub type Point { pub int x; pub int y; }
+
+// Exported, so another module may name it as a value.
+pub int by_x(Point a, Point b) { return a.x - b.x; }
+
+// Not exported. Naming it from outside must be refused for exactly the
+// reason calling it is: an interface made out of it would hand the
+// function to everyone holding the interface.
+int by_y(Point a, Point b) { return a.y - b.y; }
+
+// The library's own use of its own private function is fine: it can see it.
+pub interface Less { int cmp(Point a, Point b); }
+pub Less own() { return by_y; }

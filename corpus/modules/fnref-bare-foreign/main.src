@@ -1,0 +1,6 @@
+// Another module's name is not in scope bare, whether it is called or named
+// as a value. Same message as the call, so the fix reads the same.
+import lib;
+interface Less { int cmp(lib.Point a, lib.Point b); }
+Less l = by_x;
+print(l.cmp(lib.Point(1, 2), lib.Point(3, 4)));

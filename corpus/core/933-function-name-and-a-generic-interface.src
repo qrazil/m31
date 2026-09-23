@@ -1,0 +1,33 @@
+// A generic interface works, because information flows one way: the
+// interface is resolved first -- from the argument, or from the written type
+// of the binding -- and the function name is then checked against the
+// INSTANTIATED interface. A function name is never a source of inference.
+interface Less<T> { int cmp(T a, T b); }
+
+int ints(int a, int b) { return a - b; }
+int strs(str a, str b) { if (a == b) { return 0; } return 1; }
+
+T smallest<T>(List<T> xs, Less<T> order) {
+  T best = xs[0];
+  int i = 1;
+  while (i < xs.size()) {
+    if (order.cmp(xs[i], best) < 0) { best = xs[i]; }
+    i = i + 1;
+  }
+  return best;
+}
+
+// `T` is `int` from the list, so the parameter is `Less<int>`, and `ints` is
+// checked against that.
+List<int> ns = [5, 2, 9];
+print(smallest(ns, ints));
+
+List<str> ws = ["pear", "fig"];
+print(smallest(ws, strs));
+
+// The same two instantiations written down instead of inferred.
+Less<int> li = ints;
+print(li.cmp(3, 10));
+Less<str> ls = strs;
+print(ls.cmp("a", "a"));
+print(ls.cmp("a", "b"));

@@ -1005,12 +1005,38 @@ impl Mono {
     /// own to offer, and its destination does.
     fn subst_expr_as(&mut self, e: &Expr, sub: &Subst, want: Option<Ty>) -> Result<Expr, Diag> {
         Ok(match e {
-            Expr::Int(..)
-            | Expr::Float(..)
-            | Expr::Bool(..)
-            | Expr::Str(..)
-            | Expr::Var(..)
-            | Expr::This(..) => e.clone(),
+            Expr::Int(..) | Expr::Float(..) | Expr::Bool(..) | Expr::Str(..) | Expr::This(..) => {
+                e.clone()
+            }
+            // A generic function's name, not being called. A function's name
+            // is a value where a one-method interface is expected
+            // (docs/closures-decision.md), but a generic one has no single
+            // code address to put in a vtable slot -- an interface cannot
+            // declare a generic method for the same reason -- and nothing
+            // here says which instantiation was meant. Said here because a
+            // generic declaration is instantiated away before the lowering
+            // sees it, which would otherwise report an unknown variable.
+            //
+            // A local or a parameter of the same name is that local, not the
+            // function: nothing in `sigs` holds an uninstantiated generic, so
+            // the no-shadowing check never refused the binding and a program
+            // that does this compiles today.
+            Expr::Var(n, s)
+                if self.env_ty(n).is_none()
+                    && self.generic_funcs.contains_key(&self.resolve_fn(n)) =>
+            {
+                return Err(Diag::new(
+                    *s,
+                    format!(
+                        "`{}` is a generic function, so it cannot be a callback: a vtable \
+                         slot holds one code address and a generic function has one per \
+                         instantiation. Wrap the instantiation you want in a function of \
+                         its own and pass that",
+                        crate::ast::bare(n)
+                    ),
+                ))
+            }
+            Expr::Var(..) => e.clone(),
             Expr::Bin(op, l, r, s) => Expr::Bin(
                 *op,
                 Box::new(self.subst_expr(l, sub)?),

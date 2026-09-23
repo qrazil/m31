@@ -1,0 +1,7 @@
+// An n-parameter function matches an n-parameter method, and the receiver
+// does not count towards either side.
+type Point { int x; int y; }
+interface Less { int cmp(Point a, Point b); }
+int just_x(Point a) { return a.x; }
+Less l = just_x;
+print(l.cmp(Point(1, 2), Point(3, 4)));

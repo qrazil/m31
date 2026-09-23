@@ -1,0 +1,35 @@
+// A bare function reference crosses a thread boundary at no cost and can
+// never trap the uniqueness check: the wrapper has no fields, so it is one
+// static immortal object, and rt_check_unique returns immediately for an
+// immortal (runtime/rt.c). There is nothing in it for two threads to
+// disagree about -- every construction of it was already the same object.
+//
+// `spawn` is unchanged by any of this: it still takes a function and its
+// arguments, never a callback (docs/closures-decision.md §6).
+type Point { int x; int y; }
+interface Less { int cmp(Point a, Point b); }
+
+int by_x(Point a, Point b) { return a.x - b.x; }
+int by_y(Point a, Point b) { return a.y - b.y; }
+
+void worker(Chan<Less> inbox, Chan<int> out) {
+  int n = 0;
+  while (n < 2) {
+    Less o = recv(inbox);
+    send(out, o.cmp(Point(9, 8), Point(4, 2)));
+    n = n + 1;
+  }
+}
+
+Chan<Less> inbox = Chan<Less>(2);
+Chan<int> out = Chan<int>(2);
+spawn worker(inbox, out);
+
+// The same reference sent twice. Under an ordinary type the second send
+// would be a second object; here both are the one static.
+send(inbox, by_x);
+send(inbox, by_y);
+print(recv(out));
+print(recv(out));
+close(inbox);
+close(out);

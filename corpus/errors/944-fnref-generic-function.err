@@ -1,0 +1,4 @@
+corpus/errors/944-fnref-generic-function.src:7:11: `firstof` is a generic function, so it cannot be a callback: a vtable slot holds one code address and a generic function has one per instantiation. Wrap the instantiation you want in a function of its own and pass that
+  |
+7 | Count c = firstof;
+  |           ^
