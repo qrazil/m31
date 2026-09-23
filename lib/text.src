@@ -289,10 +289,11 @@ pub str trim_end(str s) {
 ///     text.strip_prefix("--verbose", "--")   == "verbose"
 ///     text.strip_prefix("verbose", "--")     == "verbose"
 ///
-/// The pair `s.starts_with(p)` has always been half of: every caller of
-/// `starts_with` in this library follows it with `s.substr(p.size(), s.size())`
-/// and has to get the arithmetic right (`lib/fs.src`'s `rmtree`, `lib/args.src`'s
-/// token classifier).
+/// The half of `s.starts_with(p)` that has always been missing: the callers
+/// of `starts_with` that go on to remove the prefix write
+/// `s.substr(p.size(), s.size())` and have to get the arithmetic right --
+/// `lib/fs.src`'s `rmtree` does it twice, with a `+ 1` in one of them for the
+/// separator.
 ///
 /// **It answers a `str`, not an `Option<str>`.** Rust's `strip_prefix` gives an
 /// `Option` and is right to, because it is the only spelling it has; here

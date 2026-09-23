@@ -145,6 +145,8 @@ print(text.strip_suffix("notes.txt", ".txt"));
 print(text.strip_suffix("notes.md", ".txt"));
 print("[" + text.strip_suffix(".txt", ".txt") + "]");
 print("[" + text.strip_suffix("abc", "") + "]");
+print("[" + text.strip_suffix("", "x") + "]");
+print("[" + text.strip_suffix("md", ".txt") + "]");
 // A multi-byte affix, and one that is a prefix of a character's bytes but not
 // of a character: `é` is C3 A9, and `strip_prefix` compares whole text.
 print(text.strip_prefix("époque", "é"));
