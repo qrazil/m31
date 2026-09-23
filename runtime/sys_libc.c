@@ -4,20 +4,29 @@
  * Every function here is one POSIX call plus the two translations sys.h
  * promises: the layer's flag and clock constants into the host's, and the
  * host's errno into a negative Linux errno. That keeps this file portable to
- * Linux, macOS and the BSDs without a line of per-OS code beyond the two
+ * Linux, macOS and the BSDs without a line of per-OS code beyond the three
  * spots marked below. Windows is not POSIX here: see docs/sys-layer.md.
  */
 #include "sys.h"
 
+#include <arpa/inet.h>      /* htons and ntohs: POSIX declares them here */
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netdb.h>          /* getaddrinfo, for sys_resolve -- see the note there */
+#include <netinet/in.h>
+#include <netinet/tcp.h>    /* TCP_NODELAY */
+#include <poll.h>
+#include <stddef.h>         /* offsetof, for sockaddr_un's length */
 #include <stdio.h>          /* rename is ISO C, so it lives here, not in unistd.h */
+#include <string.h>         /* memcpy and memset, for the address conversions */
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 #if defined(__APPLE__)
-/* Per-OS spot one of two: getentropy is declared here on macOS and in
+/* Per-OS spot one of three: getentropy is declared here on macOS and in
  * unistd.h everywhere else. */
 #include <sys/random.h>
 #endif
@@ -52,6 +61,28 @@ static int64_t neg_errno(int e) {
     case ENOSYS:       return -SYS_ENOSYS;
     case ENOTEMPTY:    return -SYS_ENOTEMPTY;
     case ELOOP:        return -SYS_ELOOP;
+    /* The socket errnos. These are where the host numbers diverge most --
+     * ECONNREFUSED is 111 on Linux and 61 on macOS, EINPROGRESS 115 and 36 --
+     * so a `net` module written against the numbers needs every one mapped.
+     * EWOULDBLOCK and ENOTSUP have no case of their own: on Linux they are
+     * EAGAIN and EOPNOTSUPP, and a duplicate case label would not compile. */
+    case ENOTSOCK:        return -SYS_ENOTSOCK;
+    case EDESTADDRREQ:    return -SYS_EDESTADDRREQ;
+    case EMSGSIZE:        return -SYS_EMSGSIZE;
+    case EPROTONOSUPPORT: return -SYS_EPROTONOSUPPORT;
+    case EOPNOTSUPP:      return -SYS_EOPNOTSUPP;
+    case EAFNOSUPPORT:    return -SYS_EAFNOSUPPORT;
+    case EADDRINUSE:      return -SYS_EADDRINUSE;
+    case EADDRNOTAVAIL:   return -SYS_EADDRNOTAVAIL;
+    case ENETUNREACH:     return -SYS_ENETUNREACH;
+    case ECONNABORTED:    return -SYS_ECONNABORTED;
+    case ECONNRESET:      return -SYS_ECONNRESET;
+    case EISCONN:         return -SYS_EISCONN;
+    case ENOTCONN:        return -SYS_ENOTCONN;
+    case ETIMEDOUT:       return -SYS_ETIMEDOUT;
+    case ECONNREFUSED:    return -SYS_ECONNREFUSED;
+    case EHOSTUNREACH:    return -SYS_EHOSTUNREACH;
+    case EINPROGRESS:     return -SYS_EINPROGRESS;
     default:           return e > 0 ? -(int64_t)e : -SYS_EIO;
     }
 }
@@ -180,6 +211,383 @@ int64_t sys_rename(const char *from, const char *to) {
 
 int64_t sys_symlink(const char *target, const char *path) {
     return ret(symlink(target, path));
+}
+
+/* ---- sockets ------------------------------------------------------------ */
+
+/* The layer's address family as the host's, and back. AF_INET6 is 10 here
+ * and 30 on macOS; AF_INET and AF_UNIX happen to agree everywhere. */
+static int host_family(int64_t f) {
+    switch (f) {
+    case SYS_AF_UNIX:  return AF_UNIX;
+    case SYS_AF_INET:  return AF_INET;
+    case SYS_AF_INET6: return AF_INET6;
+    default:           return -1;
+    }
+}
+
+static int64_t layer_family(int f) {
+    switch (f) {
+    case AF_UNIX:  return SYS_AF_UNIX;
+    case AF_INET:  return SYS_AF_INET;
+    case AF_INET6: return SYS_AF_INET6;
+    default:       return -1;
+    }
+}
+
+/* A SysAddr as the kernel's sockaddr for its family, with the length to pass
+ * alongside it. Returns 0, or -errno.
+ *
+ * This and from_sockaddr are the only two places in this file that know
+ * sockaddr_in from sockaddr_in6, and the only two that byte-swap: sys.h
+ * promises that SysAddr.port is a plain host-order integer, so the htons
+ * happens here. The address bytes are already in wire order and are copied
+ * straight through. */
+static int64_t to_sockaddr(const SysAddr *a, struct sockaddr_storage *ss, socklen_t *len) {
+    memset(ss, 0, sizeof *ss);
+    switch (a->family) {
+    case SYS_AF_INET: {
+        struct sockaddr_in *v4 = (struct sockaddr_in *)ss;
+        if (a->port < 0 || a->port > 65535) return -SYS_EINVAL;
+        v4->sin_family = AF_INET;
+        v4->sin_port = htons((uint16_t)a->port);
+        memcpy(&v4->sin_addr, a->addr, 4);
+        *len = sizeof *v4;
+        return 0;
+    }
+    case SYS_AF_INET6: {
+        struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)ss;
+        if (a->port < 0 || a->port > 65535) return -SYS_EINVAL;
+        v6->sin6_family = AF_INET6;
+        v6->sin6_port = htons((uint16_t)a->port);
+        memcpy(&v6->sin6_addr, a->addr, 16);
+        *len = sizeof *v6;
+        return 0;
+    }
+    case SYS_AF_UNIX: {
+        struct sockaddr_un *un = (struct sockaddr_un *)ss;
+        /* Not strlen: `path` is the last member of SysAddr, so a caller who
+         * filled all 108 bytes without a NUL would send strlen off the end
+         * of the struct. The scan is bounded and the unterminated case then
+         * falls out as too long, which it is. */
+        size_t n = 0;
+        while (n < sizeof a->path && a->path[n] != 0) n++;
+        /* Against the HOST's sun_path, which is 104 on macOS and the BSDs
+         * and 108 on Linux -- refused, never truncated, because a truncated
+         * path names a different socket. */
+        if (n + 1 > sizeof un->sun_path) return -SYS_ENAMETOOLONG;
+        un->sun_family = AF_UNIX;
+        memcpy(un->sun_path, a->path, n + 1);
+        *len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + n + 1);
+        return 0;
+    }
+    default:
+        return -SYS_EAFNOSUPPORT;
+    }
+}
+
+/* The other direction, for accept, getsockname and getpeername. */
+static int64_t from_sockaddr(const struct sockaddr_storage *ss, socklen_t len, SysAddr *a) {
+    memset(a, 0, sizeof *a);
+    int64_t f = layer_family((int)ss->ss_family);
+    if (f < 0) return -SYS_EAFNOSUPPORT;
+    a->family = f;
+    switch (f) {
+    case SYS_AF_INET: {
+        const struct sockaddr_in *v4 = (const struct sockaddr_in *)ss;
+        a->port = ntohs(v4->sin_port);
+        memcpy(a->addr, &v4->sin_addr, 4);
+        return 0;
+    }
+    case SYS_AF_INET6: {
+        const struct sockaddr_in6 *v6 = (const struct sockaddr_in6 *)ss;
+        a->port = ntohs(v6->sin6_port);
+        memcpy(a->addr, &v6->sin6_addr, 16);
+        return 0;
+    }
+    default: {
+        /* AF_UNIX. An unbound socket comes back as the family alone, with
+         * `len` stopping before sun_path, and its path is left "". Linux's
+         * abstract namespace (a path whose first byte is NUL) has no
+         * representation here and also arrives as "": sys.h's path is a C
+         * string, and the layer does not offer what it cannot round-trip. */
+        const struct sockaddr_un *un = (const struct sockaddr_un *)ss;
+        size_t head = offsetof(struct sockaddr_un, sun_path);
+        size_t n = (size_t)len > head ? (size_t)len - head : 0;
+        /* Capped against BOTH ends: the layer's path, and the host's
+         * sun_path, which is 104 on macOS where the layer's is 108. */
+        if (n > sizeof un->sun_path) n = sizeof un->sun_path;
+        if (n > sizeof a->path - 1) n = sizeof a->path - 1;
+        memcpy(a->path, un->sun_path, n);
+        a->path[n] = 0;  /* n usually counts the kernel's own NUL; harmless if so */
+        return 0;
+    }
+    }
+}
+
+/* One of the layer's option ids as the host's (level, name) pair, plus the
+ * shape of its value -- which is what lets every option be one int64. */
+typedef enum { OPT_BOOL, OPT_MS, OPT_ERR } OptKind;
+
+static int opt_lookup(int64_t opt, int *level, int *name, OptKind *kind) {
+    switch (opt) {
+    case SYS_SO_REUSEADDR: *level = SOL_SOCKET;  *name = SO_REUSEADDR; *kind = OPT_BOOL; return 0;
+    case SYS_SO_KEEPALIVE: *level = SOL_SOCKET;  *name = SO_KEEPALIVE; *kind = OPT_BOOL; return 0;
+    case SYS_SO_ERROR:     *level = SOL_SOCKET;  *name = SO_ERROR;     *kind = OPT_ERR;  return 0;
+    case SYS_SO_RCVTIMEO:  *level = SOL_SOCKET;  *name = SO_RCVTIMEO;  *kind = OPT_MS;   return 0;
+    case SYS_SO_SNDTIMEO:  *level = SOL_SOCKET;  *name = SO_SNDTIMEO;  *kind = OPT_MS;   return 0;
+    case SYS_TCP_NODELAY:  *level = IPPROTO_TCP; *name = TCP_NODELAY;  *kind = OPT_BOOL; return 0;
+    default: return -1;
+    }
+}
+
+int64_t sys_socket(int64_t domain, int64_t type, int64_t protocol) {
+    int d = host_family(domain);
+    if (d < 0) return -SYS_EAFNOSUPPORT;
+    /* The type is validated here rather than left to the kernel, so that
+     * both backends refuse exactly the same arguments with exactly the same
+     * errno -- which is the property runtime/sys_test.c exists to check. */
+    if (type & ~(int64_t)(SYS_SOCK_TYPEMASK | SYS_SOCK_NONBLOCK)) return -SYS_EINVAL;
+    int t;
+    switch (type & SYS_SOCK_TYPEMASK) {
+    case SYS_SOCK_STREAM: t = SOCK_STREAM; break;
+    case SYS_SOCK_DGRAM:  t = SOCK_DGRAM;  break;
+    default: return -SYS_EINVAL;
+    }
+#if defined(SOCK_CLOEXEC) && defined(SOCK_NONBLOCK)
+    /* Per-OS spot two of three: Linux and the modern BSDs take both
+     * descriptor flags in socket()'s type argument, which needs no second
+     * call and cannot race a fork in another thread. */
+    t |= SOCK_CLOEXEC;
+    if (type & SYS_SOCK_NONBLOCK) t |= SOCK_NONBLOCK;
+    return ret(socket(d, t, (int)protocol));
+#else
+    /* macOS has neither flag, so the descriptor exists for a moment without
+     * them. The window is real and unavoidable through POSIX alone. */
+    int fd = socket(d, t, (int)protocol);
+    if (fd < 0) return neg_errno(errno);
+    if (fcntl(fd, F_SETFD, FD_CLOEXEC) != 0 ||
+        ((type & SYS_SOCK_NONBLOCK) && fcntl(fd, F_SETFL, O_NONBLOCK) != 0)) {
+        int64_t e = neg_errno(errno);
+        close(fd);
+        return e;
+    }
+    return fd;
+#endif
+}
+
+int64_t sys_bind(int64_t fd, const SysAddr *addr) {
+    struct sockaddr_storage ss;
+    socklen_t len;
+    int64_t r = to_sockaddr(addr, &ss, &len);
+    if (r < 0) return r;
+    return ret(bind((int)fd, (const struct sockaddr *)&ss, len));
+}
+
+int64_t sys_listen(int64_t fd, int64_t backlog) {
+    if (backlog < 0) return -SYS_EINVAL;
+    return ret(listen((int)fd, backlog > 65535 ? 65535 : (int)backlog));
+}
+
+/* Plain accept and a second call for close-on-exec, not accept4: glibc hides
+ * accept4 behind __USE_GNU, and rt.c #includes this file after its own
+ * headers, so _GNU_SOURCE could not be defined here in time. The raw backend
+ * uses accept4 and has no such window (sys_linux.c). */
+int64_t sys_accept(int64_t fd, SysAddr *peer) {
+    struct sockaddr_storage ss;
+    socklen_t len = sizeof ss;
+    memset(&ss, 0, sizeof ss);
+    int c = accept((int)fd, (struct sockaddr *)&ss, &len);
+    if (c < 0) return neg_errno(errno);
+    int64_t r = 0;
+    /* Per-OS spot three of three, in spirit: every POSIX host needs this
+     * fcntl, and Linux's raw backend does not. */
+    if (fcntl(c, F_SETFD, FD_CLOEXEC) != 0) r = neg_errno(errno);
+    if (r == 0 && peer != NULL) r = from_sockaddr(&ss, len, peer);
+    if (r < 0) {
+        close(c);
+        return r;
+    }
+    return c;
+}
+
+int64_t sys_connect(int64_t fd, const SysAddr *addr) {
+    struct sockaddr_storage ss;
+    socklen_t len;
+    int64_t r = to_sockaddr(addr, &ss, &len);
+    if (r < 0) return r;
+    return ret(connect((int)fd, (const struct sockaddr *)&ss, len));
+}
+
+int64_t sys_shutdown(int64_t fd, int64_t how) {
+    int h;
+    switch (how) {
+    case SYS_SHUT_RD:   h = SHUT_RD;   break;
+    case SYS_SHUT_WR:   h = SHUT_WR;   break;
+    case SYS_SHUT_RDWR: h = SHUT_RDWR; break;
+    default: return -SYS_EINVAL;
+    }
+    return ret(shutdown((int)fd, h));
+}
+
+/* SYS_SO_NONBLOCK is the descriptor's O_NONBLOCK and not a socket option at
+ * all (sys.h), so it is answered before the option table is consulted. Read
+ * and modify rather than assign: F_SETFL takes the whole word, and clobbering
+ * the access mode with it would be a different file. */
+int64_t sys_setsockopt(int64_t fd, int64_t opt, int64_t value) {
+    if (opt == SYS_SO_NONBLOCK) {
+        int fl = fcntl((int)fd, F_GETFL, 0);
+        if (fl < 0) return neg_errno(errno);
+        fl = value != 0 ? (fl | O_NONBLOCK) : (fl & ~O_NONBLOCK);
+        return ret(fcntl((int)fd, F_SETFL, fl));
+    }
+    int level, name;
+    OptKind kind;
+    if (opt_lookup(opt, &level, &name, &kind) != 0) return -SYS_EINVAL;
+    if (kind == OPT_ERR) return -SYS_EINVAL;  /* SYS_SO_ERROR is read-only */
+    if (kind == OPT_MS) {
+        if (value < 0) return -SYS_EINVAL;
+        struct timeval tv;
+        tv.tv_sec = (time_t)(value / 1000);
+        tv.tv_usec = (suseconds_t)((value % 1000) * 1000);
+        return ret(setsockopt((int)fd, level, name, &tv, (socklen_t)sizeof tv));
+    }
+    int v = value != 0;
+    return ret(setsockopt((int)fd, level, name, &v, (socklen_t)sizeof v));
+}
+
+int64_t sys_getsockopt(int64_t fd, int64_t opt) {
+    if (opt == SYS_SO_NONBLOCK) {
+        int fl = fcntl((int)fd, F_GETFL, 0);
+        if (fl < 0) return neg_errno(errno);
+        return (fl & O_NONBLOCK) != 0;
+    }
+    int level, name;
+    OptKind kind;
+    if (opt_lookup(opt, &level, &name, &kind) != 0) return -SYS_EINVAL;
+    if (kind == OPT_MS) {
+        struct timeval tv;
+        socklen_t n = sizeof tv;
+        if (getsockopt((int)fd, level, name, &tv, &n) != 0) return neg_errno(errno);
+        return (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+    }
+    int v = 0;
+    socklen_t n = sizeof v;
+    if (getsockopt((int)fd, level, name, &v, &n) != 0) return neg_errno(errno);
+    /* The pending error is a HOST errno; it goes through the same translation
+     * as every other, then back to positive, because it is a value and not a
+     * result (sys.h). */
+    if (kind == OPT_ERR) return v == 0 ? 0 : -neg_errno(v);
+    /* The kernel may report a "true" boolean as any non-zero number; the
+     * layer promises 0 or 1 so that the two backends compare equal. */
+    return v != 0;
+}
+
+int64_t sys_getsockname(int64_t fd, SysAddr *addr) {
+    struct sockaddr_storage ss;
+    socklen_t len = sizeof ss;
+    memset(&ss, 0, sizeof ss);
+    if (getsockname((int)fd, (struct sockaddr *)&ss, &len) != 0) return neg_errno(errno);
+    return from_sockaddr(&ss, len, addr);
+}
+
+int64_t sys_getpeername(int64_t fd, SysAddr *addr) {
+    struct sockaddr_storage ss;
+    socklen_t len = sizeof ss;
+    memset(&ss, 0, sizeof ss);
+    if (getpeername((int)fd, (struct sockaddr *)&ss, &len) != 0) return neg_errno(errno);
+    return from_sockaddr(&ss, len, addr);
+}
+
+/* SysPollFd is struct pollfd, and this is where that is checked rather than
+ * believed. If a host ever disagreed, this file would not compile -- which is
+ * the whole reason sys.h may pass the caller's array straight through instead
+ * of copying it into a buffer it has nowhere to allocate. */
+_Static_assert(sizeof(SysPollFd) == sizeof(struct pollfd), "SysPollFd is struct pollfd");
+_Static_assert(offsetof(SysPollFd, fd) == offsetof(struct pollfd, fd), "pollfd.fd");
+_Static_assert(offsetof(SysPollFd, events) == offsetof(struct pollfd, events), "pollfd.events");
+_Static_assert(offsetof(SysPollFd, revents) == offsetof(struct pollfd, revents), "pollfd.revents");
+_Static_assert(sizeof(((struct pollfd *)0)->events) == 2, "pollfd.events is 16 bits");
+
+int64_t sys_poll(SysPollFd *fds, int64_t n, int64_t timeout_ms) {
+    if (n < 0) return -SYS_EINVAL;
+    /* poll's timeout is an int of milliseconds; anything longer than about
+     * 24 days is clamped rather than wrapped into the past. */
+    int t = timeout_ms < 0 ? -1 : timeout_ms > 2147483647 ? 2147483647 : (int)timeout_ms;
+    void *p = fds;  /* through void *, so the cast is a reinterpretation the
+                     * compiler is told about rather than a type pun it may
+                     * assume cannot happen */
+    for (;;) {
+        int r = poll((struct pollfd *)p, (nfds_t)n, t);
+        if (r < 0 && errno == EINTR) continue;  /* sys.h: EINTR is hidden here */
+        return ret(r);
+    }
+}
+
+/* getaddrinfo's own error codes are not errnos, so they are mapped to the
+ * nearest errno a program can act on. "No such host" is -SYS_ENOENT, which is
+ * the same answer an unresolvable path gives.
+ *
+ * The default is ENOENT rather than EIO on purpose. glibc's other codes --
+ * EAI_NODATA ("the name exists but has no address of this family") and
+ * EAI_ADDRFAMILY -- sit behind __USE_GNU, which this file cannot turn on:
+ * rt.c #includes it after its own headers, so a _GNU_SOURCE here would come
+ * too late. They cannot be given cases of their own, and every one of them
+ * means the same thing to a caller: there is no address to connect to under
+ * that name. ENOENT says that. The codes that mean something else -- try
+ * again, out of memory, the arguments were wrong, the name server failed --
+ * are each matched above, so nothing informative falls through. */
+static int64_t gai_errno(int rc) {
+    switch (rc) {
+    case EAI_NONAME:   return -SYS_ENOENT;
+    case EAI_AGAIN:    return -SYS_EAGAIN;  /* the name server is busy; retrying may work */
+    case EAI_FAIL:     return -SYS_EIO;     /* the name server answered, with a failure */
+    case EAI_FAMILY:   return -SYS_EAFNOSUPPORT;
+    case EAI_SOCKTYPE: return -SYS_EINVAL;
+    case EAI_SERVICE:  return -SYS_EINVAL;
+    case EAI_BADFLAGS: return -SYS_EINVAL;
+    case EAI_MEMORY:   return -SYS_ENOMEM;
+    case EAI_SYSTEM:   return neg_errno(errno);
+    default:           return -SYS_ENOENT;
+    }
+}
+
+int64_t sys_resolve(const char *host, int64_t port, int64_t family,
+                    SysAddr *out, int64_t cap) {
+    if (port < 0 || port > 65535 || cap < 0) return -SYS_EINVAL;
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof hints);
+    switch (family) {
+    case 0:            hints.ai_family = AF_UNSPEC; break;
+    case SYS_AF_INET:  hints.ai_family = AF_INET;   break;
+    case SYS_AF_INET6: hints.ai_family = AF_INET6;  break;
+    default:           return -SYS_EAFNOSUPPORT;
+    }
+    /* One socket type, or the same address comes back once per type. The
+     * service is NULL and the port is filled in afterwards, because the port
+     * is already a number here and asking getaddrinfo to parse it back from
+     * text would only add a way to fail. */
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *res = NULL;
+    int rc = getaddrinfo(host, NULL, &hints, &res);
+    if (rc != 0) return gai_errno(rc);
+    int64_t found = 0;
+    for (struct addrinfo *p = res; p != NULL; p = p->ai_next) {
+        if (found < cap) {
+            /* Copied into a storage first: ai_addr points at exactly
+             * ai_addrlen bytes, and from_sockaddr reads a whole struct. */
+            struct sockaddr_storage ss;
+            size_t n = (size_t)p->ai_addrlen;
+            if (n > sizeof ss) n = sizeof ss;
+            memset(&ss, 0, sizeof ss);
+            memcpy(&ss, p->ai_addr, n);
+            if (from_sockaddr(&ss, (socklen_t)n, &out[found]) < 0) continue;
+            out[found].port = port;
+        }
+        found++;
+    }
+    freeaddrinfo(res);
+    return found;
 }
 
 int64_t sys_clock_ns(int64_t clock) {
