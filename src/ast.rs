@@ -215,6 +215,17 @@ pub enum Expr {
     /// with no payload has nothing to infer from, and one rule beats a rule
     /// with an exception.
     EnumNew(Ty, String, Args, Span),
+    /// `(Point a, Point b) => a.x - b.x` -- a lambda.
+    ///
+    /// The same thing as a function's name, unnamed: it is a value only
+    /// where a one-method interface is expected, and it takes that
+    /// interface's method name, arity, parameter types and return type from
+    /// the target. Parameter types are written -- every binding in this
+    /// language writes its type -- and the body is one expression, which is
+    /// what makes the return type a single expression's type rather than a
+    /// flow analysis, and what makes the capture rule a non-question:
+    /// there is no assignment inside a lambda. docs/closures-decision.md.
+    Lambda(Vec<Param>, Box<Expr>, Span),
     /// `Point(x: 1, y: 2)` / `Wrap<int>(value: 5)` -- construction is always
     /// by field name, so reordering fields in a declaration cannot silently
     /// transpose values. Carries the interned type, so type arguments survive
@@ -242,6 +253,7 @@ impl Expr {
             | Expr::Try(_, s)
             | Expr::SeqLit(_, s)
             | Expr::RepeatLit(_, _, s)
+            | Expr::Lambda(_, _, s)
             | Expr::MapLit(_, s) => *s,
         }
     }

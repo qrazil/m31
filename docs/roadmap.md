@@ -226,9 +226,10 @@ used to say were waiting on function references were not: `sort()` orders a
 list of a user type by the type's own `cmp`, and a `Map` keys on a user type
 that declares `int T.hash()` and `bool T.eq(T other)` -- both through
 reserved method names the runtime calls through the type's metadata, and
-neither needing a `Hashable` interface (docs/reference.md 4.4a). What still
-waits on a function reference is a `sort` that takes the comparison as an
-argument; `spawn` taking a closure should not happen at all
+neither needing a `Hashable` interface (docs/reference.md 4.4a). The `sort`
+that takes the comparison as an argument is now `lib/sort.src` --
+`Order<T>`, `by`, `max`, `min`, `search`, all written in the language over a
+one-method interface; `spawn` taking a closure should not happen at all
 (docs/closures-decision.md).
 
 
@@ -239,9 +240,20 @@ keyed on a user type is done and needed no interface.
 
 ### 5. Closures
 
-Also gates a nicer `spawn`. The reason they are late is that closures plus
-reference counting is the most common way to build a cycle, and a cycle leaks
-in a language with no collector. Worth doing only with an answer to that.
+*Done, and not as this entry expected.* There is no function type, no new IR
+op and no heap environment: a callback's type is an ordinary one-method
+interface, a function's name and a lambda are both values where one is
+expected, and each becomes a synthesised type whose fields are its captures
+(docs/reference.md §6.7, docs/closures-decision.md). A callback with no
+captures is one static immortal object, so the commonest case allocates
+nothing at all.
+
+It did not gate `spawn`, which keeps taking a function and its arguments:
+with a closure the ordinary case fails the uniqueness check, because a
+capture is reachable from the sender too. And the cycle worry was real and
+is unanswered on purpose: **a callback stored in a field of an object it
+captures leaks**, there are no weak references, and the rule written down is
+the shape to avoid rather than a mechanism.
 
 ---
 
@@ -394,7 +406,11 @@ Written down because they are unresolved, not because they are unimportant.
 
   - Cancellation. libdill's model — killing a thread makes every blocking
     call in it return an error — fits errors-as-values and needs no unwinder.
-  - Does `spawn` keep taking a function plus arguments, or a closure?
+  - ~~Does `spawn` keep taking a function plus arguments, or a closure?~~
+    **Settled: a function plus arguments.** A closure's captures alias, so
+    the uniqueness check refuses the ordinary case; `spawn f(x)` states the
+    captures as arguments and the move checker sees them by name
+    (docs/closures-decision.md §6, corpus/traps/1122).
   - Constraints on type parameters. Today a bad instantiation fails when it
     is checked, naming the instantiation, which is C++'s error experience.
   - Integer width. `int` is 64-bit and deliberately unqualified so the IR can

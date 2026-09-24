@@ -1,0 +1,6 @@
+// The arity comes from the interface method, and so does the diagnostic:
+// the lambda is being checked against it and cannot change it.
+type Point { int x; int y; }
+interface Less { int cmp(Point a, Point b); }
+Less l = (Point a) => a.x;
+print(l.cmp(Point(1, 2), Point(3, 4)));

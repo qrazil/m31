@@ -780,6 +780,30 @@ best-known bugs in the language. With one mode there is nothing to list. The
 cost is that a reader cannot see at a glance what a lambda holds — mitigated
 by the one-expression body, which puts every capture on the same line.
 
+**Inside a method, the receiver is one capture.** *(Added when Stage 4
+landed; the draft above left it undecided.)* A bare field name, a bare
+sibling call and `this` are the same thing — §4.3 says so in as many words,
+*"a method of the receiver is called by its bare name, as a field is
+read"*, and refuses `this.f` and `this.m()` because the bare form is the
+only spelling. They are all `this.`, unwritten. So a lambda that mentions
+any of them captures **the receiver**, once, as a reference — which is
+exactly what `=` does with `this`.
+
+```c
+type Counter { int base; List<int> seen; }
+int Counter.twice() { return base * 2; }
+Get Counter.both() { return () => base + twice(); }   // ONE capture: this
+```
+
+The consequence to state plainly, because it is the one place capture is not
+a snapshot of anything: a field read inside a lambda reads the **live**
+object, so reassigning the field is visible through the lambda. That is not
+an exception to "the binding cannot be changed, the object can" — it is that
+rule, with `this` as the binding. Capturing each mentioned field's value
+instead was the alternative, and it was rejected because a lambda that
+mentions a field and calls a method would then hold a stale copy of one and
+the live object for the other.
+
 ### The four claims, each checked
 
 **1. Refcounting applies unchanged.** A capture is a field store, so it takes
@@ -1296,7 +1320,10 @@ What must be decided **now**, because deciding it later would break programs:
      has to wait for it.
   5. **`=>` is reserved as a token.** It costs nothing — `x => 2` does not
      parse today *(checked)* — and it belongs in the frozen grammar even if
-     the lambda form itself lands later.
+     the lambda form itself lands later. *(Done with Stage 4: `Tok::FatArrow`,
+     lexed greedily beside `==`, and the only token in the grammar with one
+     use — which is what lets the parser decide a lambda by what follows the
+     closing parenthesis.)*
 
 **What is no longer on this list, and is the headline of the revision:
 `fn` is not reserved.** It is an ordinary identifier, available to every
@@ -1460,6 +1487,156 @@ lambda in a
 (refused under `const`, released by the destructor otherwise), a lambda
 crossing `spawn` inside a struct, and a deliberate cycle in `corpus/traps`.
 
+*Done*, with four corrections to the plan above and one rule the plan did
+not have. All of it is `src/`: the IR, the C emitter and the runtime are
+untouched, as *Representation* predicted.
+
+**First, the parse is decided by the `=>`, not by two tokens.** The
+statement parser's test would have had to read `(int(x))` — a parenthesised
+conversion — as a parameter list, because both begin `(` `int`. The token
+after the CLOSING parenthesis settles it instead, and settles it completely:
+`=>` has exactly one use in the grammar, so nothing else can be followed by
+one. Scanning to the matching `)` costs a pass over the parenthesised text
+and buys the good diagnostic for `(a) => a`, which is refused by naming the
+parameter's missing type rather than as a puzzling expression.
+
+**Second, the synthesis happens after `mono.rs`, for Stage 3's reason.** By
+the time `lower_expr_as` sees a lambda the target is the concrete
+`Less$Point`, and a lambda inside a generic function has already been
+duplicated per instantiation with its written parameter types substituted —
+so two instantiations are two ordinary concrete lambdas and no generic
+machinery reaches the synthesis. One hook covers every position, because
+every row of the table under *Where the target is known* goes through
+`lower_expr_as` already.
+
+**Third, the lambda IS a construction rather than being lowered like one.**
+`lower_lambda` declares the type, then hands the ordinary lowering an
+`Expr::New` of it whose arguments are the capture expressions. That is the
+whole of why the four claims under *Capture* needed no code: the retain, the
+release, `const`'s deep copy, the resource refusal and the destructor are
+not re-implemented for captures, they are reached by writing a construction.
+Every one is checked by a test rather than assumed (below).
+
+**Fourth, the rule the plan did not have: what a lambda in a METHOD
+captures.** The draft said "the names from the enclosing scope its body
+mentions", which leaves a bare field name and a bare sibling call
+undecided — and the language has already decided them, in §4.3's own words:
+*"a method of the receiver is called by its bare name, as a field is read"*,
+with `this.f` and `this.m()` both refused because the bare form is the only
+spelling. They are `this.`, unwritten. So:
+
+> **A lambda that mentions `this`, a field of the receiver or a method of
+> the receiver captures the receiver — once, and as a reference, which is
+> what `=` does with `this`.**
+
+The body is rewritten against that one capture: `this` becomes `$self`, a
+bare field read becomes `$self.f`, a bare sibling call becomes
+`$self.m(..)`. Three consequences, all of them the point:
+
+  - a lambda's body means inside the lambda what it means outside it, which
+    is the property that makes the rewrite invisible;
+  - a field read stays LIVE — reassigning the field is seen through the
+    lambda, because the lambda holds the object, not a copy of the slot
+    (`corpus/core/1102`);
+  - the alternative, capturing each mentioned field's value, was rejected
+    for making a lambda that mentions a field and calls a method hold a
+    stale copy of one and the live object for the other. One capture, one
+    rule.
+
+A lambda in a lambda needs nothing extra and was not special-cased: the
+inner one is lowered while the outer one's method is being lowered, so the
+outer's parameters are locals and its captures are fields of the receiver,
+and the same two rules apply. An inner `$self` is a field of the outer
+lambda, so this rewrite turns it into `$self.$self` and reaches the original
+receiver through the outer lambda it captured (`corpus/core/1103`).
+
+No shadowing is checked at the site the lambda is WRITTEN, for every lambda
+nested inside it as well as for its own parameters. Without that, an inner
+lambda's parameter could take the name of a local of the enclosing function,
+which is invisible by the time the inner one is lowered
+(`corpus/errors/1142`).
+
+**The diagnostics, as shipped.** Each is the drafted message or better, and
+each has a corpus test:
+
+| written | said |
+|---|---|
+| `(Point a) => a.x` for `int cmp(Point, Point)` | `` `Less.cmp` takes 2 parameters, this lambda takes 1 `` |
+| `(int a, int b) => a - b` for the same | `` `Less.cmp` takes (Point, Point), this lambda takes (int, int) `` |
+| `(int a, int b) => "smaller"` | `` `Less.cmp` returns int, this lambda's body is a str `` |
+| `(int x) => print(x)` for `str of(int)` | `` `Step.of` returns str, but this lambda's body has no value `` |
+| a two-method target | `` `Sink` declares 2 methods (`write`, `flush`); a lambda supplies one, so write a type with all of them and pass one of those `` |
+| `print((int x) => x)`, `(int a) => a;` | `` a lambda takes its method name from the interface it is passed to, and nothing here expects one; declare an interface and bind it to a local of that type `` |
+| `int y = (int a) => a;` | `` a lambda takes its method name from the one-method interface it is passed to, and `int` is not one; … `` |
+| `?` in the body | `` `?` returns from the enclosing function, and a lambda has no enclosing function a reader can act on; write a named function `` |
+| `(a) => a` | `` a lambda's parameters are written with their types, like every other binding in this language -- write `(int a) => ..` `` |
+| `(int a = 2) => a` | `` `a` cannot have a default: a lambda is called through an interface, which dispatches with no name to give an optional argument `` |
+| a parameter shadowing anything | the existing §4.1 message, unchanged |
+
+One drafted message is **not** what a lambda handed to an unconstrained type
+parameter gets. `show((int x) => x)` for `void show<T>(T v)` reports
+*"cannot infer type parameter `T` of `show` from its arguments or from where
+its value goes; bind an argument, or the result, to a local with a written
+type first"*, because monomorphisation runs first and that is where the
+failure is. Checked: **a function's name gets exactly the same message in
+exactly the same position** (`show(by_x)`), so the two forms agree, and the
+message names the fix. Diverging would have meant making a lambda an
+inference source, which is the thing the design refuses.
+
+**The interactions, each checked rather than argued.** The four claims under
+*Capture* are the load-bearing ones, and the tests are named so a later
+reader can see which program proves which:
+
+| claim | checked by |
+|---|---|
+| an `int` is copied, a reference is aliased and retained | `corpus/core/1101` |
+| a change through a captured reference is seen outside | `corpus/core/1101` |
+| a lambda made in a loop holds that turn's value | `corpus/core/1101` |
+| a lambda in a method holds the receiver, live | `corpus/core/1102` |
+| a lambda in a lambda, and one in a method | `corpus/core/1103` |
+| no captures: one immortal static, in a `const`, across a thread | `corpus/core/1104`, `src/tests.rs` |
+| `const` deep-copies a capture held outside | `corpus/core/1105` |
+| a captured destructor runs when the lambda dies, and not before | `corpus/core/1105` |
+| a frozen lambda's captured list cannot be changed | `corpus/traps/1121` |
+| a `const` holding a captured resource is refused | `corpus/traps/1120` |
+| a capturing lambda cannot cross a thread | `corpus/traps/1122` |
+| generic interfaces, and a lambda inside a generic function | `corpus/core/1109` |
+| a lambda across modules, over private names | `corpus/modules/lambda-across-modules`, `lambda-privacy` |
+
+Two of those want a word. **The resource-in-a-`const` refusal is the runtime
+one, never the compile-time one**, and that is not a gap: a lambda's static
+type is always an interface, and `resource_in` stops at an interface because
+it cannot see through one. So `const Get g = () => r.id_of();` with a `Res`
+captured is caught by `rt_snapshot`'s backstop, in the words the compiler
+would have used. The compile-time rule still fires for every hand-written
+type that holds one, unchanged.
+
+And the **`spawn` diagnostic is the existing one**: *"value crossing a
+thread boundary is still referenced elsewhere; clone() it, or drop the other
+reference first"*. It is accurate and actionable, and it does not say "the
+lambda's capture" because the check is a runtime reachability walk with no
+idea which field it came through. Saying more would mean the runtime naming
+a capture, which is a change to `runtime/rt.c` for a message; the shape of
+the mistake is in the record instead.
+
+**One thing the corpus cannot hold.** The plan asked for a deliberate cycle
+in `corpus/traps`, and there is none: a cycle does not trap, it leaks, and
+every corpus program must end `__rc_live=0` while a traps program must abort
+with a message. The leak is real and is the documented cost; the program
+that shows it is the one quoted under *Cycles* above, which the corpus
+harness has no category for.
+
+**Measured.** A captureless lambda emits `v = &imm_T{i}.hdr` and no
+`rt_alloc` — asserted on the emitted C in
+`src/tests.rs::a_lambda_with_no_captures_never_allocates`, since no program
+can observe the difference from inside the language. A capturing one is an
+ordinary construction, which the same test's twin asserts from the other
+side.
+
+**Found on the way, and fixed here:** `l(1, 2)` on an interface value said
+*"unknown function `l`"*, which *What is open* named as the mistake
+newcomers would now make. It says what to write instead.
+
 **Stage 5 — the standard library catches up. Days.**
 `lib/sort.src`: `Order<T>`, `by`, `max`, `min`, `search`. Whatever else has
 by then earned a callback.
@@ -1522,18 +1699,24 @@ from another one.
 
 ## What is open, and one thing that is wrong today
 
-  - **The interface-method default bug** (freeze item 3) is a live defect,
-    not a design question: `interface Scale { int go(int v, int by = 2); }`
-    compiles and then makes `by` mandatory *and* positional at the dispatch
-    site, contradicting §4.2 in both halves and disagreeing with a direct call
-    on the concrete type. It needs a decision and a fix before the freeze, and
-    the recommendation here is to refuse the declaration.
-  - **The diagnostic for calling an interface value** — `l(1, 2)` today says
-    *"unknown function `l`"*. Once callbacks exist that is the most likely
-    mistake a newcomer makes, and it should name the interface and its method.
+  - ~~**The interface-method default bug**~~ *(fixed.)* The declaration is
+    refused where it is written: *"`go` is an interface method, so `by` may
+    not have a default: a call through an interface passes positions, not
+    names, and the default could never be used"* *(checked)*. It is the rule
+    that makes "a function with an optional parameter cannot be a callback"
+    coherent rather than accidental, and a lambda parameter is refused a
+    default with the same reasoning in its own words.
+  - ~~**The diagnostic for calling an interface value**~~ *(fixed with
+    Stage 4, since that is when the mistake became likely.)* `l(1, 2)` now
+    says *"`l` is a `Less`, not a function: a callback is called through its
+    method, so write `l.cmp(..)`"* — and a value of a type that is not a
+    one-method interface gets the first half alone
+    (`corpus/errors/1144`).
   - **A user-type module constant**, which Stage 2 opens the door to but does
-    not finish.
+    not finish. Still open.
   - **Whether `sort.Order` should also cover `search` and a stable-sort
     guarantee.** A library question, not a language one.
   - **Devirtualisation.** Deferred, and the only performance lever that
-    matters.
+    matters. An interface call is two loads and an indirect call, and a
+    callback-driven sort of `int`s is several times slower than the built-in
+    one — now measurable, since both exist.

@@ -1,0 +1,101 @@
+// A lambda is a value in exactly the places a function's name is: the eight
+// positions in the table under "Where the target *is* known" in
+// docs/closures-decision.md, which are every position the language writes a
+// type down. The method name, the arity, the parameter types and the return
+// type all come from the target interface; the lambda is checked against it
+// and is never a source of inference.
+//
+// The same shape as 932, deliberately: whatever a function's name may do, a
+// lambda may do, in the same place and by the same rule.
+type Point { int x; int y; }
+interface Less { int cmp(Point a, Point b); }
+interface Rank { int score(Point a, Point b); }
+
+type Holder { Less order; }
+
+// 1. an argument to a parameter of interface type
+int use(Less o, Point a, Point b) { return o.cmp(a, b); }
+
+// 4. a return
+Less pick_x() { return (Point a, Point b) => a.x - b.x; }
+Less pick_y() { return (Point a, Point b) => a.y - b.y; }
+
+// 8. a default for a parameter
+int scaled(int k, Point a, Point b, Less o = (Point c, Point d) => c.y - d.y) {
+  return k * o.cmp(a, b);
+}
+
+// one lambda shape, two interfaces with differently-named methods: the
+// method name comes from the target, so neither lambda ever chooses.
+int ranked(Rank r, Point a, Point b) { return r.score(a, b); }
+
+Point p = Point(3, 9);
+Point q = Point(1, 5);
+
+print(use((Point a, Point b) => a.x - b.x, p, q));
+print(use((Point a, Point b) => a.y - b.y, p, q));
+
+// 2. a local declaration
+Less l1 = (Point a, Point b) => a.x - b.x;
+Less l2 = (Point a, Point b) => a.y - b.y;
+print(l1.cmp(p, q));
+print(l2.cmp(p, q));
+
+// 3. an assignment to a local
+Less l3 = (Point a, Point b) => a.x - b.x;
+l3 = (Point a, Point b) => a.y - b.y;
+print(l3.cmp(p, q));
+
+print(pick_x().cmp(p, q));
+print(pick_y().cmp(p, q));
+
+// 5. an element of a collection literal
+List<Less> os = [
+  (Point a, Point b) => a.x - b.x,
+  (Point a, Point b) => a.y - b.y,
+];
+print(os.size());
+print(os[0].cmp(p, q));
+print(os[1].cmp(p, q));
+
+// 6. a `send` payload. A lambda with no captures is field-less, so it is one
+// static immortal object and crosses a thread boundary at no cost.
+Chan<Less> ch = Chan<Less>(2);
+send(ch, (Point a, Point b) => a.y - b.y);
+send(ch, (Point a, Point b) => a.x - b.x);
+print(recv(ch).cmp(p, q));
+print(recv(ch).cmp(p, q));
+close(ch);
+
+// 7. a field of a construction, and an assignment to a field
+Holder h = Holder((Point a, Point b) => a.x - b.x);
+print(h.order.cmp(p, q));
+h.order = (Point a, Point b) => a.y - b.y;
+print(h.order.cmp(p, q));
+
+print(scaled(10, p, q));
+print(scaled(10, p, q, o: (Point a, Point b) => a.x - b.x));
+
+print(ranked((Point a, Point b) => a.x - b.x, p, q));
+
+// A lambda with no parameters at all, and one whose body is written for its
+// effect against a `void` method.
+interface Tick { void go(); }
+interface Get { int of(); }
+Get g = () => 7;
+print(g.of());
+Tick t = () => print("tick");
+t.go();
+
+// `spawn` is unchanged: it takes a function and its arguments. A lambda may
+// be one of those arguments, by the ordinary rule for an argument whose
+// parameter is an interface -- there is no `spawn` taking a callback, and
+// there is not going to be.
+void run(Tick t2, Chan<int> done) {
+  t2.go();
+  send(done, 1);
+}
+Chan<int> done = Chan<int>(1);
+spawn run(() => print("spawned"), done);
+print(recv(done));
+close(done);

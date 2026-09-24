@@ -1,0 +1,4 @@
+corpus/errors/1137-lambda-body-cannot-use-question.src:6:22: `?` returns from the enclosing function, and a lambda has no enclosing function a reader can act on; write a named function
+  |
+6 | Get g = () => half(4)?;
+  |                      ^

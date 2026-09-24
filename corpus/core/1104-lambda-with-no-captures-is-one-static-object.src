@@ -1,0 +1,62 @@
+// A lambda that mentions nothing from its scope has no captures, so its
+// synthesised type has no fields, so it is the field-less type Stage 2
+// already makes one immortal static instance of: no allocation, ever, and
+// `rc_inc`/`rc_dec` on it are a compare and a return.
+//
+// That it does not allocate is checked where it can be seen, in the emitted
+// C (`lambda_with_no_captures_never_allocates`, src/tests.rs). What is
+// checked here is everything that follows from it and IS observable: a hot
+// loop leaks nothing, an immortal reads as frozen so a `const` over one
+// needs no copy, and one crosses a thread boundary without tripping the
+// uniqueness check however many times it is sent.
+interface Get { int of(); }
+interface Less { int cmp(int a, int b); }
+type Holder { Get g; int n; }
+
+int use(Get g) { return g.of(); }
+
+// A hot loop. Ten thousand "constructions" of the same value, which is one
+// object made once, at compile time.
+int i = 0;
+int total = 0;
+while (i < 10000) {
+  total = total + use(() => 3);
+  i = i + 1;
+}
+print(total);
+
+// Inside a `const`, private and shared. RC_IMMORTAL is all bits set, so the
+// value already reads as frozen and the snapshot walk skips it.
+void frozen() {
+  Holder h = Holder(() => 5, 1);
+  const Holder a = h;
+  print(a.g.of());
+
+  Holder s = Holder(() => 6, 2);
+  List<Holder> keep = [s];
+  const Holder b = s;
+  print(b.g.of());
+  print(keep[0].n);
+}
+frozen();
+
+// Across a thread. An immortal is skipped by `rt_check_unique`, so a lambda
+// with no captures crosses at no cost -- while one that captures a live
+// local is refused by the same check (corpus/traps/1122).
+void worker(Chan<Less> inbox, Chan<int> out) {
+  int n = 0;
+  while (n < 2) {
+    Less o = recv(inbox);
+    send(out, o.cmp(9, 4));
+    n = n + 1;
+  }
+}
+Chan<Less> inbox = Chan<Less>(2);
+Chan<int> out = Chan<int>(2);
+spawn worker(inbox, out);
+send(inbox, (int a, int b) => a - b);
+send(inbox, (int a, int b) => b - a);
+print(recv(out));
+print(recv(out));
+close(inbox);
+close(out);

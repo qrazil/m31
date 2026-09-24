@@ -1,0 +1,4 @@
+corpus/errors/1130-lambda-arity-mismatch.src:5:10: `Less.cmp` takes 2 parameters, this lambda takes 1
+  |
+5 | Less l = (Point a) => a.x;
+  |          ^

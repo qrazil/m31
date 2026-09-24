@@ -1,0 +1,8 @@
+// A lambda's parameters are declarations, so §4.1 reaches them: nothing
+// shadows anything. This is the cost the design charges where it is most
+// annoying -- short parameter names in a function with short locals -- and
+// the fix is the rename the rule always asks for.
+interface Get { int of(int k); }
+int n = 3;
+Get g = (int n) => n;
+print(g.of(1));

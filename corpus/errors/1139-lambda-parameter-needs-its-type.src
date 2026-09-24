@@ -1,0 +1,10 @@
+// Every binding in this language writes its type: `int x = 5;`, `case
+// Circle(int r):`, `for (int x in xs)`, every parameter, every field. An
+// inferred lambda parameter would be the first name introduced without one,
+// and it would need the interface's types pushed INTO the body -- a second
+// direction of inference in a language that has only ever had the outward
+// one. Relaxing this later is additive, which is why the restrictive choice
+// is the reversible one.
+interface Get { int of(int a); }
+Get g = (a) => a;
+print(g.of(1));

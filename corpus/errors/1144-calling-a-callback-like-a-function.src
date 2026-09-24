@@ -1,0 +1,9 @@
+// There is one call syntax and it is never `value(args)`. A callback is an
+// interface value and is called through its method -- which is what makes
+// `f(x)`, `obj.handler(x)` and `xs[0](y)` need no disambiguation rules at
+// all. This is the line a reader coming from a language with function values
+// writes first, so the message says what to write instead of reporting an
+// unknown function whose name is plainly in scope.
+interface Less { int cmp(int a, int b); }
+Less l = (int a, int b) => a - b;
+print(l(1, 2));

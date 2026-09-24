@@ -100,7 +100,9 @@ fn height(e: &Expr) -> usize {
         | Expr::Str(..)
         | Expr::Var(..)
         | Expr::This(..) => 0,
-        Expr::Un(_, x, _) | Expr::Field(x, _, _) | Expr::Try(x, _) => height(x),
+        Expr::Un(_, x, _) | Expr::Field(x, _, _) | Expr::Try(x, _) | Expr::Lambda(_, x, _) => {
+            height(x)
+        }
         Expr::Bin(_, a, b, _) | Expr::Index(a, b, _) | Expr::RepeatLit(a, b, _) => {
             height(a).max(height(b))
         }
@@ -1805,6 +1807,95 @@ impl Parser {
         self.parse_postfix(e)
     }
 
+    /// Is a lambda written at the `(` the parser is sitting on?
+    ///
+    /// Only a parenthesised group whose closing `)` is followed by `=>` is
+    /// one, and **nothing else in the grammar may be followed by `=>`** --
+    /// it is a token with exactly one use. So the question is settled
+    /// without looking at what is between the parentheses, which is what
+    /// lets `(a) => a` be refused by naming the parameter's missing type
+    /// instead of by reporting a puzzling expression. The alternative, the
+    /// two-token test `decl_starts_here` makes at statement position, would
+    /// have had to read `(int(x))` as a parameter list.
+    fn lambda_here(&self) -> bool {
+        let mut depth = 0usize;
+        let mut i = 0;
+        loop {
+            match self.peek_at(i) {
+                Tok::LParen => depth += 1,
+                Tok::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                Tok::Eof => return false,
+                _ => {}
+            }
+            i += 1;
+        }
+        self.peek_at(i + 1) == &Tok::FatArrow
+    }
+
+    /// `(Point a, Point b) => a.x - b.x`.
+    ///
+    /// Parameter types are written, the body is one expression, and there is
+    /// no block form -- docs/closures-decision.md, "Why written parameter
+    /// types" and "Why one expression and no block body". Everything else
+    /// about a lambda (its method name, how many parameters it must have,
+    /// what they must be and what it must return) comes from the interface
+    /// it is passed to, and is checked in the lowering, which is the only
+    /// place that knows the target.
+    fn parse_lambda(&mut self) -> Result<Expr, Diag> {
+        let span = self.span();
+        self.expect(Tok::LParen)?;
+        let mut params: Vec<Param> = Vec::new();
+        if self.peek() != &Tok::RParen {
+            loop {
+                let at = self.span();
+                // `lib.Point p` -- another module's type. `is_ty_at` only
+                // knows the names this file declares, so the qualified form
+                // is recognised the way `decl_starts_here` recognises it.
+                let qualified = matches!(self.peek(), Tok::Ident(m) if self.imports.contains(m))
+                    && self.peek_at(1) == &Tok::Dot;
+                if !qualified && !self.is_ty_at(0) {
+                    return Err(Diag::new(
+                        at,
+                        format!(
+                            "a lambda's parameters are written with their types, \
+                             like every other binding in this language -- write \
+                             `(int {}) => ..`",
+                            match self.peek() {
+                                Tok::Ident(n) => n.clone(),
+                                _ => "x".to_string(),
+                            }
+                        ),
+                    ));
+                }
+                let p = self.parse_param()?;
+                if p.default.is_some() {
+                    return Err(Diag::new(
+                        p.span,
+                        format!(
+                            "`{}` cannot have a default: a lambda is called through an \
+                             interface, which dispatches with no name to give an \
+                             optional argument",
+                            p.name
+                        ),
+                    ));
+                }
+                params.push(p);
+                if !self.eat(&Tok::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(Tok::RParen)?;
+        self.expect(Tok::FatArrow)?;
+        let body = self.parse_expr(0)?;
+        Ok(Expr::Lambda(params, Box::new(body), span))
+    }
+
     fn parse_atom(&mut self) -> Result<Expr, Diag> {
         let span = self.span();
         match self.peek().clone() {
@@ -1855,6 +1946,7 @@ impl Parser {
                 self.bump();
                 Ok(Expr::Str(s, span))
             }
+            Tok::LParen if self.lambda_here() => self.nested("lambda", Self::parse_lambda),
             Tok::LParen => {
                 self.bump();
                 let e = self.parse_expr(0)?;

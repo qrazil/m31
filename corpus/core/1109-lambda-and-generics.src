@@ -1,0 +1,68 @@
+// Lambdas and generics need nothing from each other.
+//
+// A generic INTERFACE is monomorphised with everything else, so by the time
+// a lambda is checked against `Order<Point>` the interface is an ordinary
+// concrete declaration and no generic machinery is involved. A lambda
+// written INSIDE a generic function is instantiated with it: two
+// instantiations are two lambdas, each already concrete, each with its own
+// synthesised type.
+//
+// The one real constraint, and it is the rule the whole design rests on:
+// information flows from the target interface to the lambda, never back. A
+// lambda is checked against a type the compiler already knows and is never
+// a source of inference, so a type parameter must be reachable without it --
+// which for `pick<T>(List<T>, Less<T>)` is free, because `T` comes from the
+// list.
+interface Less<T> { int cmp(T a, T b); }
+interface Get { int of(); }
+
+type Point { int x; int y; }
+
+// the smallest element, by an order handed in
+T smallest<T>(List<T> xs, Less<T> order) {
+  int best = 0;
+  int i = 1;
+  while (i < xs.size()) {
+    if (order.cmp(xs[i], xs[best]) < 0) {
+      best = i;
+    }
+    i = i + 1;
+  }
+  return xs[best];
+}
+
+// a lambda written inside a generic function, capturing one of its
+// parameters: instantiated once per instantiation of the function
+Get counter<T>(List<T> xs, T extra) {
+  List<T> all = [];
+  for (T x in xs) {
+    all.push(x);
+  }
+  all.push(extra);
+  return () => all.size();
+}
+
+// a lambda inside a generic TYPE's method
+type Box<T> { List<T> items; }
+Get Box<T>.counter() { return () => items.size(); }
+
+List<Point> ps = [Point(3, 9), Point(1, 5), Point(2, 7)];
+print(smallest(ps, (Point a, Point b) => a.x - b.x).x);
+print(smallest(ps, (Point a, Point b) => b.y - a.y).y);
+
+// the same generic function at another instantiation, so `Less<int>` and
+// `Less<Point>` are two concrete interfaces with two slots
+List<int> ns = [5, 3, 9];
+print(smallest(ns, (int a, int b) => a - b));
+print(smallest(ns, (int a, int b) => b - a));
+
+List<str> ws = ["pear", "fig"];
+print(smallest(ws, (str a, str b) => a.size() - b.size()));
+
+print(counter(ns, 1).of());
+print(counter(ws, "kiwi").of());
+
+Box<int> bi = Box<int>([1, 2, 3]);
+Box<str> bs = Box<str>(["a"]);
+print(bi.counter().of());
+print(bs.counter().of());

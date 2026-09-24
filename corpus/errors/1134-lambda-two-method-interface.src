@@ -1,0 +1,6 @@
+// A lambda supplies one method, so a two-method interface is not a target
+// for one. Which of the two it was meant to be is the question the reader
+// has to answer, so the message names them.
+interface Sink { void write(int v); void flush(); }
+Sink s = (int v) => print(v);
+s.flush();

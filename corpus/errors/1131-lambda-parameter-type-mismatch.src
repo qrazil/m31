@@ -1,0 +1,7 @@
+// Matching is exact, in both directions and with no variance -- the same
+// rule a hand-written type's method is held to, and the same rule a
+// function's name is held to.
+type Point { int x; int y; }
+interface Less { int cmp(Point a, Point b); }
+Less l = (int a, int b) => a - b;
+print(l.cmp(Point(1, 2), Point(3, 4)));

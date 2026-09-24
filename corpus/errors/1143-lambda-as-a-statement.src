@@ -1,0 +1,5 @@
+// A lambda on its own is an expression with no effect and no target. It
+// gets the same refusal as one handed to a builtin: there is nothing here
+// that says what interface it should be.
+interface Get { int of(int a); }
+(int a) => a;

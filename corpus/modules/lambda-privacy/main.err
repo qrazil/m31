@@ -1,0 +1,4 @@
+corpus/modules/lambda-privacy/main.src:7:47: `by_y` is private to `lib`; mark it `pub` to export it
+  |
+7 | lib.Less l = (lib.Point a, lib.Point b) => lib.by_y(a, b);
+  |                                               ^

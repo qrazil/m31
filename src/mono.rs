@@ -1055,6 +1055,26 @@ impl Mono {
                 Expr::New(ty, self.subst_args(args, sub)?, *s)
             }
             Expr::Try(e, s) => Expr::Try(Box::new(self.subst_expr(e, sub)?), *s),
+            // A lambda written inside a generic function is instantiated
+            // with it: its written parameter types may name the function's
+            // type parameters, and its body is ordinary code. The lowering
+            // then synthesises one type per instantiation, because that is
+            // what this pass has made -- two separate lambdas, each already
+            // concrete. No generic machinery reaches the synthesis.
+            //
+            // The body is substituted with no `want`: what it must produce
+            // comes from the target interface, which only the lowering
+            // knows. Information flows target -> callback, never back.
+            Expr::Lambda(ps, body, s) => {
+                let mut out = Vec::new();
+                for p in ps {
+                    out.push(Param {
+                        ty: self.subst_ty(p.ty, sub, p.span)?,
+                        ..p.clone()
+                    });
+                }
+                Expr::Lambda(out, Box::new(self.subst_expr(body, sub)?), *s)
+            }
             Expr::SeqLit(items, s) => {
                 let mut out = Vec::new();
                 for e in items {

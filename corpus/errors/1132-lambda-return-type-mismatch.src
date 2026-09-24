@@ -1,0 +1,6 @@
+// The return type is the interface method's, and the body is checked
+// against it. There is no flow analysis to do: the body is one expression,
+// so it has one type.
+interface Less { int cmp(int a, int b); }
+Less l = (int a, int b) => "smaller";
+print(l.cmp(1, 2));

@@ -1,0 +1,6 @@
+// A body written for its effect, where the interface asks for a value. The
+// other direction is fine and is not an error: a `void` method with a body
+// that has a value discards it, exactly as an expression statement does.
+interface Step { str of(int x); }
+Step s = (int x) => print(x);
+print(s.of(1));
