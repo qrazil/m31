@@ -43,12 +43,17 @@
 //   http.serve_conn(conn, handler, max_requests:)
 //                                    -> Result<int, Error>   requests served
 //
+// API -- the client
+// -----------------
+//   http.get(url)                    -> Result<Response, Error>
+//   http.fetch(request, redirects:, timeout_ms:)  -> Result<Response, Error>
+//
 // **The seam takes an `io.Stream`, so every parser here is testable without a
 // socket.** `read_request`, `write_request`, `read_response` and
 // `write_response` never mention `net`: hand them an `io.Buffer` and they
 // parse a transcript, hand them a `net.Conn` and they are a server or a
-// client. Only `serve` and `serve_conn` know what a socket is, because only
-// they have to set a timeout or accept a connection. That is
+// client. Only `serve`, `serve_conn`, `get` and `fetch` know what a socket
+// is, because only they have to set a timeout or make a connection. That is
 // Oro's arrangement in `std/http.oro`, for Oro's reason: two parsers that
 // agree today drift tomorrow, so there is one of each and the corpus drives
 // it from memory.
@@ -2228,4 +2233,153 @@ Result<void, Error> deadline(net.Conn c, int timeout_ms) {
         }
     }
     return Result<void, Error>.Ok;
+}
+
+// --- the client ------------------------------------------------------------
+/// `GET url`, with the body read and the connection closed.
+///
+///     match (http.get("http://127.0.0.1:8080/health")) { ... }
+///
+/// There is no `post`, `put` or `delete` beside it: each would be `fetch`
+/// with a string spelled in, one more name frozen, and a set of verbs that
+/// is wrong the moment somebody needs `PROPFIND`. `get` earns its place
+/// because a GET of a URL with no body and no headers is most of what a
+/// client does; anything else is `http.request(method, url)` and `fetch`.
+pub Result<Response, Error> get(str url) {
+    return fetch(request("GET", url)?);
+}
+
+/// Make `req`, follow up to `redirects` redirects, and answer with the
+/// response, its body already read and its connection already closed.
+///
+/// This is the `send(request)` an HTTP library usually calls `send`. It
+/// cannot be called that: `send` is the channel builtin (§6.6) and the
+/// language refuses a module function that shadows one.
+///
+/// **One call is one connection.** It sends `Connection: close`, reads the
+/// answer and hangs up. There is no pool, so there is no idle connection to
+/// go stale, no half-closed socket to hand to the next caller, and no
+/// lifetime for a caller to get wrong. That costs a handshake per call and it
+/// is the honest price.
+///
+/// ### Redirects: five hops, and never off the origin
+///
+/// `redirects` is how many `Location` hops to follow; **0 hands back the 3xx
+/// itself**, which is what a caller who wants to decide for themselves
+/// passes. The default is `MAX_REDIRECTS`.
+///
+/// **A redirect to another scheme, host or port is refused**, with the
+/// target named in the error. Following one would forward whatever the
+/// caller set -- an `Authorization` field above all -- to a host they never
+/// wrote down, and this client has no credential model, no cookie jar and no
+/// header-stripping policy with which to make that safe. A caller who means
+/// to cross hosts reads `Location` off the 3xx and calls `fetch` again,
+/// which is the same number of lines and says what it is doing. Oro's client
+/// does not follow redirects at all and gives this reason for it; five
+/// same-origin hops is the smallest useful thing above that.
+///
+/// A `Location` that is an absolute path (`/other`) is resolved against the
+/// current URL. A relative reference (`other`, `../other`) is refused:
+/// resolving one is RFC 3986 §5's algorithm, with its dot-segment removal,
+/// and a client that gets that subtly wrong sends a request somewhere
+/// nobody asked for.
+///
+/// **301, 302 and 303 turn a non-GET into a GET with no body**, which is
+/// what every browser and every other client does and what 303 means
+/// outright. **307 and 308 keep the method and the body**, which is what
+/// they were added to the standard to promise.
+pub Result<Response, Error> fetch(Request req, int redirects = MAX_REDIRECTS, int timeout_ms = TIMEOUT_MS) {
+    Request cur = req;
+    int hops = 0;
+    while (true) {
+        Response resp = exchange(cur, timeout_ms)?;
+        if (hops >= redirects || !is_redirect(resp.code)) {
+            return Result<Response, Error>.Ok(resp);
+        }
+        cur = redirected(cur, resp)?;
+        hops = hops + 1;
+    }
+}
+
+bool is_redirect(int code) {
+    return code == 301 || code == 302 || code == 303 || code == 307 || code == 308;
+}
+
+// One connection, one request, one response.
+Result<Response, Error> exchange(Request req, int timeout_ms) {
+    match (net.connect(req.loc.host(), req.loc.port())) {
+        case Ok(net.Conn c): {
+            deadline(c, timeout_ms)?;
+            // A request is a message that waits for an answer, so there is
+            // nothing for the kernel to coalesce it with.
+            match (c.set_nodelay(true)) {
+                case Ok(bool on): {
+                }
+                case Err(net.Error e): {
+                    return Result<Response, Error>.Err(Error.Transport(e));
+                }
+            }
+            write_request(c, req)?;
+            return read_response(c, req.verb);
+        }
+        case Err(net.Error e): {
+            return Result<Response, Error>.Err(Error.Transport(e));
+        }
+    }
+}
+
+// The request the next hop makes, or why this redirect is not followed.
+Result<Request, Error> redirected(Request req, Response resp) {
+    str where = "";
+    match (resp.head.get("location")) {
+        case Some(str v): {
+            where = v.trim();
+        }
+        case None: {
+            return Result<Request, Error>.Err(Error.Syntax("a " + resp.code.to_str() + " with no Location header field"));
+        }
+    }
+    if (where == "") {
+        return Result<Request, Error>.Err(Error.Syntax("a " + resp.code.to_str() + " with an empty Location header field"));
+    }
+    Url next = resolve(req.loc, where)?;
+    if (next.scheme() != req.loc.scheme() || next.host() != req.loc.host() || next.port() != req.loc.port()) {
+        return Result<Request, Error>.Err(Error.BadUrl("this " + resp.code.to_str() + " redirects to " + next.to_str() + ", which is a different host; this client does not follow a redirect off the origin it was pointed at, because it would forward whatever headers you set to a host you did not name"));
+    }
+    str method = req.verb;
+    bytes body = req.payload;
+    if (resp.code == 301 || resp.code == 302 || resp.code == 303) {
+        if (method != "GET" && method != "HEAD") {
+            method = "GET";
+            bytes none = [];
+            body = none;
+        }
+    }
+    Headers h = req.head.copy();
+    h.remove("host");
+    if (body.size() == 0) {
+        h.remove("content-length");
+        h.remove("content-type");
+        h.remove("transfer-encoding");
+    }
+    Request out = Request(method, next, req.ver, h);
+    out.payload = body;
+    out.framed = req.framed && body.size() > 0;
+    return Result<Request, Error>.Ok(out);
+}
+
+// A `Location` against the URL it arrived at: an absolute `http://` URL, or
+// an absolute path. Anything else is refused -- see `fetch`.
+Result<Url, Error> resolve(Url base, str where) {
+    bytes w = where.to_bytes();
+    if (w.contains("://".to_bytes())) {
+        return parse_url(where);
+    }
+    if (w.size() > 0 && w[0] == 47) {
+        if (bad_target_at(w) >= 0) {
+            return Result<Url, Error>.Err(Error.BadUrl("the Location " + quoted(w) + " has a character that cannot be sent unescaped"));
+        }
+        return url_of(base.scheme(), base.host(), base.port(), w, "the Location " + quoted(w));
+    }
+    return Result<Url, Error>.Err(Error.BadUrl("the Location " + quoted(w) + " is a relative reference; this client follows an absolute URL or an absolute path, and resolving a relative one is RFC 3986 §5 and its dot-segment removal"));
 }
