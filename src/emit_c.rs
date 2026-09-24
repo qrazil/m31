@@ -107,7 +107,15 @@ pub fn emit(m: &Module) -> String {
         }
         writeln!(o, "    T{i} *p = (T{i} *)o;").unwrap();
         if t.is_enum {
-            emit_enum_slot_switch(&mut o, t, "rc_dec((Obj *)(intptr_t)p->p{k});");
+            // A slot may be null: a `case V(T x):` binding that crossed a
+            // thread boundary was TAKEN out of the enum (ir::Inst::EnumTake),
+            // which clears the slot so that this release does not run on a
+            // value the enum no longer owns.
+            emit_enum_slot_switch(
+                &mut o,
+                t,
+                "if (p->p{k} != 0) rc_dec((Obj *)(intptr_t)p->p{k});",
+            );
         }
         for (fname, fty) in &t.fields {
             if *fty == IrTy::Ref {
@@ -742,7 +750,9 @@ fn emit_func(o: &mut String, f: &crate::ir::Func, types: &[TypeDef]) {
                     read.insert(*src);
                 }
                 Inst::EnumPack { args, .. } => read.extend(args.iter().copied()),
-                Inst::EnumTag { obj, .. } | Inst::EnumPayload { obj, .. } => {
+                Inst::EnumTag { obj, .. }
+                | Inst::EnumPayload { obj, .. }
+                | Inst::EnumTake { obj, .. } => {
                     read.insert(*obj);
                 }
                 Inst::StoreField { obj, val, .. } => {
@@ -1017,6 +1027,12 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
             // where the tag is already known.
             let raw = format!("((T{tid} *){obj})->p{idx}");
             writeln!(o, "    {dst} = {};", from_slot(&raw, f.ty_of(*dst))).unwrap();
+        }
+        Inst::EnumTake { obj, tid, idx } => {
+            // The slot's +1 has gone to whoever read it; clearing it is what
+            // stops the enum releasing the value a second time. The drop
+            // function generated above skips a null slot.
+            writeln!(o, "    ((T{tid} *){obj})->p{idx} = 0;").unwrap();
         }
         Inst::LoadField { dst, obj, tid, idx } => {
             let name = c_ident(&types[*tid as usize].fields[*idx as usize].0);

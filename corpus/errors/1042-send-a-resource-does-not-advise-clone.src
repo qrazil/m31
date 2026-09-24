@@ -1,0 +1,16 @@
+// A borrowed value cannot cross a thread boundary, and for most types the
+// answer is `clone`. For a type that OWNS a resource it is not: `clone`
+// refuses that type outright, so advising it here would only send the reader
+// to a second error. The message names what actually works instead.
+
+type Conn {
+    int fd;
+}
+
+void Conn.drop() {
+    print("closing " + fd.to_str());
+}
+
+void hand_on(Conn c, Chan<Conn> out) {
+    send(out, c);
+}

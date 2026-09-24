@@ -1,0 +1,49 @@
+// `spawn` moves its arguments across the same boundary `send` does, so a
+// `case` binding may be spawned with too -- and a variant carrying two
+// references may have one of them taken and the other left where it is.
+
+enum Job {
+    Idle;
+    Work(List<int>, List<str>);
+}
+
+Job next(bool busy) {
+    if (busy) {
+        return Job.Work([1, 2, 3], ["a", "b"]);
+    }
+    return Job.Idle;
+}
+
+void consume(List<int> xs, Chan<str> done) {
+    int total = 0;
+    for (int x in xs) {
+        total = total + x;
+    }
+    send(done, "total " + total.to_str());
+}
+
+Chan<str> done = Chan<str>(1);
+
+match (next(true)) {
+    case Idle: {
+        print("idle");
+    }
+    case Work(List<int> xs, List<str> tags): {
+        // `xs` is taken out of the enum and handed to another thread; `tags`
+        // stays in it and is released with it when the match ends.
+        spawn consume(xs, done);
+        print("tags " + tags.size().to_str());
+    }
+}
+print(recv(done));
+
+// A sibling arm may bind the same name the moved arm used, and a second
+// `match` may bind it again: a move belongs to the arm, not to the function.
+match (next(false)) {
+    case Idle: {
+        print("idle");
+    }
+    case Work(List<int> xs, List<str> tags): {
+        print("unexpected " + xs.size().to_str() + tags.size().to_str());
+    }
+}

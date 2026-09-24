@@ -98,6 +98,30 @@ struct BlockBuf {
     term: Option<Term>,
 }
 
+/// One `case V(T x):` binding of a match arm that is still being lowered.
+///
+/// The enum is held for the whole match by a synthetic local (`hold`), so the
+/// payload can be taken out of it by name at any point inside the arm.
+struct PayloadBind {
+    /// The name the arm gave the payload.
+    name: String,
+    /// The synthetic local holding the scrutinee, so the enum is looked up by
+    /// name rather than by a cached SSA value that a nested `if` may have
+    /// rebound.
+    hold: String,
+    tid: u32,
+    idx: u32,
+    /// `self.scopes.len()` inside the arm's own body scope. A move may only
+    /// happen at exactly this depth, for the reason `mark_moved` gives: a
+    /// move inside a nested loop or branch would run a different number of
+    /// times than it was checked.
+    depth: usize,
+    /// Whether the `match` is the sole owner of the enum -- true when the
+    /// scrutinee was a temporary, so no name outside the match reaches it.
+    /// When it is false the payload cannot be taken out at all.
+    sole_owner: bool,
+}
+
 pub struct Lowerer {
     sigs: HashMap<String, Sig>,
     /// User-defined types, indexed by `Ty::User` id. Distinct from `types`
@@ -177,6 +201,12 @@ pub struct Lowerer {
     /// of the ownership discipline, and it applies only at the boundary
     /// where a value leaves the thread.
     moved: Vec<String>,
+    /// The `case V(T x):` bindings of the match arms currently being lowered,
+    /// innermost last. A payload binding is borrowed from the enum for
+    /// reading, but it is also the arm's OWN name for that payload, so it may
+    /// be taken out of the enum and moved across a thread boundary --
+    /// docs/concurrency-decision.md, "Taking a payload out of a match".
+    payload_binds: Vec<PayloadBind>,
     /// Inside a method: the receiver's type id and its SSA value. Fields are
     /// reached by bare name, which is safe only because nothing shadows
     /// anything -- see `check_shadow`.
@@ -236,6 +266,20 @@ const ENTRY: &str = "$main";
 /// the refcount already performs; Swift's `deinit` would be a new keyword for
 /// the same thing.
 pub const DESTRUCTOR: &str = "drop";
+
+/// Why a resource-owning type cannot be cloned, worded the same way `clone`
+/// itself words it -- a thread-boundary diagnostic that advised `clone` on a
+/// `net.Conn` would only send the reader to that second error.
+const NO_CLONE: &str = "it owns a resource (it has a destructor), and a copy would \
+                        release it a second time";
+
+/// What DOES work when the value cannot be cloned. A parameter, a field and
+/// `this` are all held by somebody else, and no local alias changes that --
+/// the alias is a second reference to the same resource, which is what the
+/// move rule refuses. So the only answer is to move it where it is made.
+const OWNER_MOVES: &str = "A resource can only be moved on by whoever made it: bind it \
+                           with `case` in a `match` on the call that produced it -- \
+                           that binding may cross -- and send it from there";
 
 /// The one shape a destructor may have, checked on the program as written --
 /// BEFORE monomorphisation, because a method of a generic type that is never
@@ -541,6 +585,7 @@ impl Lowerer {
             loops: Vec::new(),
             synth: 0,
             moved: Vec::new(),
+            payload_binds: Vec::new(),
             recv: None,
             no_recv: String::new(),
             ret_ty: Ty::Void,
@@ -2169,9 +2214,21 @@ impl Lowerer {
     /// A module constant is the one exception, below: immortal, so neither
     /// thread ever writes its count, and immutable, so there is nothing to
     /// race on.
+    ///
+    /// A `case V(T x):` binding is the other. It reads as borrowed, but it is
+    /// the arm's own name for a payload the `match` alone holds, so it can be
+    /// TAKEN out of the enum -- see `take_payload`.
     fn transfer(&mut self, v: &Val, arg: &Expr, span: Span) -> Result<(), Diag> {
         if !self.is_ref(v.ty) || self.chan_elem(v.ty).is_some() {
             return Ok(());
+        }
+        // A `case V(T x):` binding is moved by taking the payload out of the
+        // enum, which has its own uniqueness check -- on the enum, which
+        // covers the payload -- so it is decided before the one below.
+        if let Expr::Var(n, s) = arg {
+            if !v.owned && self.payload_bind(n).is_some() {
+                return self.take_payload(n, v, *s);
+            }
         }
         // The value must be UNIQUE when it crosses. Retaining a borrowed one
         // instead would leave two threads sharing a non-atomic refcount,
@@ -2189,11 +2246,16 @@ impl Lowerer {
             return Ok(());
         }
         if let Expr::This(s) = arg {
-            return Err(Diag::new(
-                *s,
-                "`this` is borrowed from the caller and cannot cross a thread \
-                 boundary; send clone(this) instead",
-            ));
+            let msg = match self.resource_of(v.ty) {
+                Some(t) => format!(
+                    "`this` is borrowed from the caller and cannot cross a thread \
+                     boundary, and `{t}` cannot be cloned -- {NO_CLONE}. {OWNER_MOVES}"
+                ),
+                None => "`this` is borrowed from the caller and cannot cross a thread \
+                         boundary; send clone(this) instead"
+                    .to_string(),
+            };
+            return Err(Diag::new(*s, msg));
         }
         // A module constant crosses as it is. It is immortal, so neither
         // thread ever writes its count -- the retain and release are
@@ -2211,17 +2273,134 @@ impl Lowerer {
                 format!(
                     "`{n}` is borrowed here and cannot cross a thread boundary; \
                      a reference two threads can reach would race on a non-atomic \
-                     refcount. Use clone({n}) to send a copy."
+                     refcount. {}",
+                    self.send_a_copy(n, v.ty)
                 ),
             ));
         }
         let _ = span;
         Err(Diag::new(
             arg.span(),
-            "this value is borrowed from something else and cannot cross a thread \
-             boundary; wrap it in clone(..) to send a copy"
-                .to_string(),
+            format!(
+                "this value is borrowed from something else and cannot cross a thread \
+                 boundary; {}",
+                match self.resource_of(v.ty) {
+                    Some(t) => format!("and `{t}` cannot be cloned -- {NO_CLONE}. {OWNER_MOVES}"),
+                    None => "wrap it in clone(..) to send a copy".to_string(),
+                }
+            ),
         ))
+    }
+
+    /// How to send something you also want to keep -- or, for a type that
+    /// owns a resource, the truth that you cannot.
+    ///
+    /// `clone` refuses a type with a destructor (docs/destructors-decision.md)
+    /// and `net.Conn`, `net.Listener` and `io.File` are exactly the types a
+    /// server hands to a worker, so advising `clone` there sends the reader
+    /// to a second error. Name the spelling that works instead.
+    fn send_a_copy(&self, n: &str, ty: Ty) -> String {
+        match self.resource_of(ty) {
+            Some(t) => format!("`{t}` cannot be cloned -- {NO_CLONE}. {OWNER_MOVES}"),
+            None => format!("Use clone({n}) to send a copy."),
+        }
+    }
+
+    /// The name of the type `ty` owns a resource as -- that is, the types
+    /// `clone` refuses because they have a destructor. `None` for everything
+    /// that can be copied.
+    fn resource_of(&self, ty: Ty) -> Option<String> {
+        let tid = self.tdef_of(ty)?;
+        let td = &self.typedefs[tid as usize];
+        if td.is_interface || td.is_chan || td.is_distinct {
+            return None;
+        }
+        self.has_destructor(tid).then(|| self.tyname(ty))
+    }
+
+    /// The `case V(T x):` binding `n` names, if it is one and it is still in
+    /// scope in the arm that bound it.
+    fn payload_bind(&self, n: &str) -> Option<&PayloadBind> {
+        self.payload_binds.iter().rev().find(|pb| pb.name == n)
+    }
+
+    /// Move a `case V(T x):` binding across a thread boundary by TAKING the
+    /// payload out of the enum.
+    ///
+    /// The binding is the arm's own name for that payload and nothing else
+    /// names it, so the only other reference is the enum's own -- and the
+    /// enum is a temporary the `match` alone holds. Clearing the slot hands
+    /// that +1 to the receiver, and the enum's release then skips the slot.
+    ///
+    /// Two conditions, and both are load-bearing:
+    ///
+    /// - **The match must be the sole owner of the enum.** `sole_owner` says
+    ///   the scrutinee was a temporary, so no name outside the match reaches
+    ///   it; `rt_check_unique` on the ENUM says no other reference does
+    ///   either, which a temporary alone does not prove (a method may return
+    ///   a retained reference to something it keeps). That check covers the
+    ///   payload too: the whole graph reachable from the enum has to be
+    ///   private, and the payload is in it.
+    /// - **The move must happen in the arm's own block**, for the reason
+    ///   `mark_moved` gives: the move set has no control-flow graph, so a
+    ///   move inside a nested loop or branch would run a different number of
+    ///   times than it was checked. The arm's block itself is fine however
+    ///   many times the whole `match` runs -- each time round it matches a
+    ///   fresh enum.
+    fn take_payload(&mut self, n: &str, v: &Val, span: Span) -> Result<(), Diag> {
+        if self.moved.iter().any(|m| m == n) {
+            return Err(Diag::new(span, format!("`{n}` was already moved")));
+        }
+        let pb = self.payload_bind(n).expect("checked by the caller");
+        let (hold, tid, idx, depth, sole_owner) =
+            (pb.hold.clone(), pb.tid, pb.idx, pb.depth, pb.sole_owner);
+        if !sole_owner {
+            // The tail only when a copy is possible at all: advising `clone`
+            // on a `net.Conn` would send the reader to a second error.
+            let tail = match self.resource_of(v.ty) {
+                Some(_) => String::new(),
+                None => format!(" Or use clone({n}) to send a copy."),
+            };
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`{n}` lives inside a value this `match` did not create, so it \
+                     cannot be taken out and moved -- whoever else holds that value \
+                     would be left with a hole. Match the call that produces it \
+                     directly, so the `match` is its only owner.{tail}"
+                ),
+            ));
+        }
+        if self.scopes.len() != depth {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`{n}` is bound by the enclosing `case` and cannot be moved from \
+                     inside a nested block; a move inside a loop or a branch would run \
+                     a different number of times than it was checked. Move it in the \
+                     `case` body itself."
+                ),
+            ));
+        }
+        let obj = self
+            .lookup(&hold)
+            .expect("the match holds the scrutinee for the whole arm")
+            .1;
+        // The ENUM must be unique, not just the payload: taking the payload
+        // out edits the enum, and an enum a second reference reaches would be
+        // left with a cleared slot under it. Its graph includes the payload,
+        // so this one check answers both questions.
+        self.push(Inst::Call {
+            dst: None,
+            func: "rt_check_unique".to_string(),
+            args: vec![obj],
+        });
+        self.push(Inst::EnumTake { obj, tid, idx });
+        // The value read out of the slot is now owned by the receiver, and it
+        // was never a statement temporary, so there is nothing to un-register.
+        let _ = v;
+        self.moved.push(n.to_string());
+        Ok(())
     }
 
     fn owns_local(&self, name: &str) -> bool {
@@ -3764,6 +3943,7 @@ impl Lowerer {
         self.owned.clear();
         self.loops.clear();
         self.moved.clear();
+        self.payload_binds.clear();
         // Every statement flushes its own temporaries, so this is empty in a
         // well-formed lowering. Clearing it anyway keeps a value from one
         // function's block list out of the next one's, where its number would
@@ -5173,6 +5353,13 @@ impl Lowerer {
 
             // Payload bindings are BORROWED from the enum, exactly like a
             // field read: the scrutinee holds the +1 for the whole match.
+            //
+            // Borrowed for READING, that is. A payload binding is also the
+            // arm's own name for that payload, and nothing else names it, so
+            // it may be TAKEN out of the enum to cross a thread boundary --
+            // `transfer` does that, and `payload_binds` is what tells it
+            // which names it may do it to.
+            let binds_from = self.payload_binds.len();
             for (idx, b) in a.binds.iter().enumerate() {
                 self.check_shadow(&b.name, b.span)?;
                 let d = self.new_val(self.irty(b.ty));
@@ -5186,6 +5373,16 @@ impl Lowerer {
                     .last_mut()
                     .unwrap()
                     .insert(b.name.clone(), (b.ty, d, false));
+                if self.is_ref(b.ty) {
+                    self.payload_binds.push(PayloadBind {
+                        name: b.name.clone(),
+                        hold: hold.clone(),
+                        tid,
+                        idx: idx as u32,
+                        depth: self.scopes.len(),
+                        sole_owner: sc.owned,
+                    });
+                }
             }
 
             self.lower_block(&a.body)?;
@@ -5195,6 +5392,15 @@ impl Lowerer {
             }
             self.scopes.pop();
             self.owned.pop();
+            // The arm's payload names leave with the arm. A sibling arm may
+            // bind the same name, and one arm having moved it must not make
+            // the other's unusable.
+            let gone: Vec<String> = self
+                .payload_binds
+                .drain(binds_from..)
+                .map(|pb| pb.name)
+                .collect();
+            self.moved.retain(|n| !gone.contains(n));
             if live {
                 ends.push((self.blocks[self.cur].id, self.snapshot()));
             }

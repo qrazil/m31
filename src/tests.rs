@@ -1638,3 +1638,38 @@ fn a_reserved_name_with_another_shape_is_refused_where_it_is_declared() {
                  Ord o = C(1);\nprint(o.cmp(o));");
     assert!(ok.contains("call_iface"), "{ok}");
 }
+
+// ---- moving a `case` binding ----------------------------------------
+
+#[test]
+fn a_case_binding_crosses_a_thread_by_being_taken_out_of_its_enum() {
+    // Not a retain: the payload slot is CLEARED, so the enum's release skips
+    // it and the receiver holds the only reference. The uniqueness check runs
+    // on the ENUM, whose graph contains the payload.
+    let out = ir(
+        "Result<List<int>, str> parse() { return Result<List<int>, str>.Ok([1]); }\n\
+                  void run(Chan<List<int>> ch) {\n\
+                  match (parse()) {\n\
+                  case Ok(List<int> xs): { send(ch, xs); }\n\
+                  case Err(str e): { print(e); }\n\
+                  }\n\
+                  }\n\
+                  print(1);",
+    );
+    assert!(out.contains("take T"), "{out}");
+}
+
+#[test]
+fn a_resource_that_cannot_be_cloned_is_not_told_to_clone_itself() {
+    let e = err("type Conn { int fd; }\n\
+                 void Conn.drop() { print(fd); }\n\
+                 void hand(Conn c, Chan<Conn> out) { send(out, c); }\n\
+                 print(1);");
+    assert!(e.contains("cannot be cloned"), "{e}");
+    assert!(!e.contains("clone(c)"), "{e}");
+    // A type without a destructor still gets the old, correct advice.
+    let e = err("type Box { int n; }\n\
+                 void hand(Box b, Chan<Box> out) { send(out, b); }\n\
+                 print(1);");
+    assert!(e.contains("Use clone(b) to send a copy."), "{e}");
+}

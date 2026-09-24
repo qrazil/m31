@@ -88,6 +88,62 @@ the type system, and is the reason the type system is the next piece of work.
 
 ---
 
+## Taking a payload out of a `match`
+
+Decided **2026-09-23**.
+
+A server accepting connections and handing them to workers is *the* motivating
+program for this design, and until this was settled it had no obvious
+spelling. The natural one,
+
+```
+match (ln.accept()) {
+    case Ok(net.Conn s): { send(conns, s); }
+    case Err(net.Error e): { trap("accept"); }
+}
+```
+
+was refused, because a `case` binding reads as **borrowed**: the `match` holds
+the enum for the whole arm and the payload's `+1` belongs to the enum. The
+diagnostic then advised `clone(s)` — which `net.Conn`, `net.Listener` and
+`io.File` all refuse outright, because a type that owns a resource cannot be
+copied (`docs/destructors-decision.md`). So the advice was always wrong for
+exactly the types a server moves. Writing an alias first (`net.Conn t = s;`)
+compiled and then *trapped*, because the binding still held a reference. The
+only spelling that worked was laundering the value through a list.
+
+**A `case V(T x):` binding may now cross a thread boundary.** The move is not
+a retain: it **takes the payload out of the enum**. The slot is cleared
+(`ir::Inst::EnumTake`), the `+1` the enum held goes to the receiver, and the
+enum's release skips the slot it no longer owns. The binding is the arm's own
+name for that payload and nothing else names it, so after the take the value
+is genuinely unaliased — which is the whole of the move rule.
+
+Two conditions, and both are load-bearing:
+
+1. **The `match` must be the enum's only owner.** Statically, the scrutinee
+   must be a *temporary* — the value of an expression, not a name — so no name
+   outside the match reaches it. That alone is not proof (a method may return
+   a retained reference to something it keeps), so `rt_check_unique` runs on
+   the **enum**, not the payload: the whole graph reachable from it has to be
+   private, and the payload is in that graph, so one check answers both
+   questions. Matching a named local instead is refused at compile time, and
+   the message says to match the call directly.
+2. **The move must happen in the arm's own block.** Same reason `mark_moved`
+   refuses a local declared outside the current block: the move set is one
+   flat set of names with no control-flow graph, so a move inside a nested
+   loop or branch would run a different number of times than it was checked,
+   and the second run would take a slot that is already empty. The arm's own
+   body is fine however many times the whole `match` runs — each time round it
+   matches a fresh enum, which is exactly the accept loop above.
+
+What is still refused, and honestly: a parameter, a field or `this` of a
+resource-owning type. Those are held by somebody else, and no local alias
+changes that — the alias is a second reference to the same resource. There is
+no spelling, and the diagnostic no longer pretends there is one: it says a
+resource can only be moved on by whoever made it, and names the `case`
+binding as the way to be that owner.
+
 ## Channels
 
 A channel is not a thread. A thread is a worker; a channel is the pipe workers

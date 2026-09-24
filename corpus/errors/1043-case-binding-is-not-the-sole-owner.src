@@ -1,0 +1,24 @@
+// A `case` binding may be taken out of its enum only when the `match` is the
+// enum's only owner -- that is, when the matched expression is a temporary.
+// Here `r` still names it, and clearing a slot under `r` would leave it with
+// a hole. The message says to match the call directly.
+
+type Conn {
+    int fd;
+}
+
+void Conn.drop() {
+    print("closing " + fd.to_str());
+}
+
+Result<Conn, str> open() {
+    return Result<Conn, str>.Ok(Conn(3));
+}
+
+void run(Chan<Conn> out) {
+    Result<Conn, str> r = open();
+    match (r) {
+        case Ok(Conn c): { send(out, c); }
+        case Err(str e): { print(e); }
+    }
+}

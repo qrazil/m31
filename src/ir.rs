@@ -348,6 +348,14 @@ pub enum Inst {
         tid: u32,
         idx: u32,
     },
+    /// `take obj.<idx>` -- clear one payload slot, without releasing what it
+    /// held. The +1 the enum was holding now belongs to whoever read the slot
+    /// (with `EnumPayload`) just before: ownership has moved OUT of the enum.
+    ///
+    /// Emitted only where the enum is known to be the sole owner, so that
+    /// nothing else can observe the hole. A cleared slot reads as null, and
+    /// the drop function generated for an enum skips a null slot.
+    EnumTake { obj: Value, tid: u32, idx: u32 },
     /// `v = load obj.<field>`
     LoadField {
         dst: Value,
@@ -615,6 +623,7 @@ fn show_inst(i: &Inst) -> String {
         }
         Inst::EnumTag { dst, obj, tid } => format!("{dst} = tag T{tid} {obj}"),
         Inst::EnumPayload { dst, obj, tid, idx } => format!("{dst} = payload T{tid} {obj}.{idx}"),
+        Inst::EnumTake { obj, tid, idx } => format!("take T{tid} {obj}.{idx}"),
         Inst::Not { dst, src } => format!("{dst} = not {src}"),
         Inst::Call { dst, func, args: a } => match dst {
             Some(d) => format!("{d} = call {func}({})", args(a)),
