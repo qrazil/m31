@@ -1,0 +1,77 @@
+empty-line [400] an empty request line
+two-fields [400] malformed request line 'GET /p': it is 'METHOD target HTTP/1.1'
+four-fields [400] malformed request line 'GET /p x HTTP/1.1': it is 'METHOD target HTTP/1.1'
+double-space [400] malformed request line 'GET  /p HTTP/1.1': it is 'METHOD target HTTP/1.1'
+bad-method [400] method 'G@T' is not a token
+nul-in-method [400] method 0x470054 is not a token
+bad-version [400] unsupported HTTP version '2.0': this module speaks 1.0 and 1.1
+no-version [400] the request line does not name an HTTP version: 'SPDY'
+relative-target [400] the request target 'p' is not an absolute path; this server takes '/path?query' and 'http://host/path'
+fragment [400] the request target '/p#frag' carries a fragment, which is never sent
+asterisk-not-options [400] the request target '*' is only for OPTIONS
+control-in-target [400] request target 0x2f700171 has the byte 0x01 in it
+bad-escape [400] the request target '/p%zz' has a percent escape that is not two hex digits: '%zz'
+short-escape [400] the request target '/p%4' ends in an incomplete percent escape
+escape-not-utf8 [400] the request target '/p%ff' has a path whose percent escapes spell bytes that are not UTF-8
+no-host [400] an HTTP/1.1 request with no Host header field
+two-hosts [400] two Host header fields: a request names one host
+folded [400] obsolete line folding is not supported: a header field continued on an indented line
+tab-folded [400] obsolete line folding is not supported: a header field continued on an indented line
+no-colon [400] header line 'X-Bad' has no colon
+no-name [400] a header line with no field name before its colon
+space-in-name [400] header name 'X Bad' has the byte 0x20 in it, which a field name may not
+nul-in-name [400] header name 0x582d00426164 has a NUL byte in it, which a field name may not
+nul-in-value [400] header 'x-bad' has a NUL byte in its value, which a field value may not
+del-in-value [400] header 'x-bad' has the byte 0x7f in its value, which a field value may not
+bare-lf [400] a line feed inside the header block; a line of an HTTP message ends with CRLF
+truncated-head [400] the connection ended in the middle of the header block
+long-line [431] a header line passed the limit of 8192
+many-fields [431] the header fields passed the limit of 100
+huge-head [431] the header block passed the limit of 65536
+both-framings [400] both Content-Length and Transfer-Encoding are present, so how long this message is depends on who is reading it
+two-lengths [400] two content-length header fields: the framing of this message is ambiguous
+two-encodings [400] two transfer-encoding header fields: the framing of this message is ambiguous
+gzip-te [400] unsupported Transfer-Encoding 'gzip, chunked': this module decodes 'chunked' and nothing else, and handing back coded bytes as if they were the body is not an option
+signed-length [400] malformed Content-Length '+5': it must be nothing but decimal digits
+hex-length [400] malformed Content-Length '0x5': it must be nothing but decimal digits
+empty-length [400] an empty Content-Length
+spaced-length [400] malformed Content-Length '5 5': it must be nothing but decimal digits
+huge-length [431] the body passed the limit of 33554432
+digits-overflow [400] a Content-Length of 23 digits; at most 18 are read
+short-body [400] the request body ended 35 bytes short of the 40 it declared
+bad-chunk-size [400] malformed chunk size 'zz'
+empty-chunk-size [400] a chunk size line with no size in it
+spaced-chunk-size [400] malformed chunk size ' 5'
+chunk-no-crlf [400] chunk data was not followed by CRLF but by 'XX'
+chunk-cut-short [400] a chunk ended 4 bytes short of the 9 it declared
+chunk-never-ends [400] the connection ended in the middle of a chunk size line
+long-chunk-line [431] a chunk size line passed the limit of 32
+chunk-size-too-wide [400] a chunk size of 17 hex digits; at most 15 are read
+chunk-size-16-digits [400] a chunk size of 16 hex digits; at most 15 are read
+length-19-digits [400] a Content-Length of 19 digits; at most 18 are read
+no-response [400] the connection closed before any response arrived
+not-a-status-line [400] the status line does not name an HTTP version: '200'
+two-digit-code [400] status code '20' is not three digits
+four-digit-code [400] status code '2000' is not three digits
+letters-for-code [400] status code '2O0' is not three digits
+resp-both-framings [400] both Content-Length and Transfer-Encoding are present, so how long this message is depends on who is reading it
+resp-short-body [400] the response body ended 35 bytes short of the 40 it declared
+resp-truncated-head [400] the connection ended in the middle of the header block
+connect-tunnel [400] a successful CONNECT turns the connection into a tunnel, which this module does not speak
+url https://example.com/secret [400] 'https://example.com/secret' is https, and this standard library has no TLS. There is nothing to turn on: it will not open a plaintext connection to a URL that asked for an encrypted one. Use http:// for a service you control, or put a TLS-terminating proxy in front of one you do not.
+url HTTPS://EXAMPLE.COM/ [400] 'HTTPS://EXAMPLE.COM/' is https, and this standard library has no TLS. There is nothing to turn on: it will not open a plaintext connection to a URL that asked for an encrypted one. Use http:// for a service you control, or put a TLS-terminating proxy in front of one you do not.
+url ftp://example.com/ [400] 'ftp://example.com/' has the scheme 'ftp', and this client speaks only http
+url /just/a/path [400] '/just/a/path' is not an absolute URL; it needs a scheme, as in 'http://host/path'
+url example.com/p [400] 'example.com/p' is not an absolute URL; it needs a scheme, as in 'http://host/path'
+url http:///p [400] 'http:///p' has no host
+url http://user:pw@example.com/ [400] 'http://user:pw@example.com/' carries userinfo before the host, which RFC 9110 deprecates and this client will not send
+url http://example.com:0/ [400] 'http://example.com:0/' has a port outside 1-65535
+url http://example.com:99999/ [400] 'http://example.com:99999/' has a port outside 1-65535
+url http://example.com:http/ [400] 'http://example.com:http/' has a port that is not a number
+url http://example.com/a b [400] 'http://example.com/a b' has a character in its path or query that cannot be sent unescaped
+split-value [400] response header 'x-note' has a carriage return in its value, which cannot be sent
+lf-value [400] response header 'x-note' has a line feed in its value, which cannot be sent
+nul-value [400] response header 'x-note' has a NUL byte in its value, which cannot be sent
+space-name [400] response header name 'x note' is not a token
+colon-name [400] response header name 'x:note' is not a token
+empty-name [400] response header name '' is not a token

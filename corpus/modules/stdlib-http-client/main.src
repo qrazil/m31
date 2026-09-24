@@ -1,0 +1,172 @@
+import http;
+import io;
+import net;
+
+// `http.get` and `http.fetch` against a real server, over a loopback socket.
+// `stdlib-http-server` is the other half and drives the same server through
+// the seam; this one is about the client's own policies, which are the things
+// the seam deliberately does not have:
+//
+//   - **One call is one connection.** Every line below opens a socket, sends
+//     `Connection: close`, reads the whole body and hangs up. The server's
+//     connection count at the end is the proof: twelve lines, and one
+//     connection each except the redirect, which takes two.
+//   - **Redirects.** A 302 to a path on the same origin is followed and the
+//     body of the final response comes back; a 303 after a POST becomes a
+//     GET with no body, which the server echoes; a 307 keeps both.
+//   - **A redirect off the origin is refused**, with the target in the
+//     message, before a second connection is made.
+//   - **`redirects: 0`** hands the 3xx back instead of following it.
+//   - **A 3xx with no `Location`** is a refusal and not a loop.
+//   - **`https://` never reaches a socket**, and neither does a relative
+//     `Location`.
+
+// One per call, and two for the three redirects that are followed.
+const int CONNECTIONS = 14;
+const int LINES = 12;
+
+type Router {
+}
+
+http.Response Router.handle(http.Request req) {
+    str path = req.path();
+    if (path == "/hello") {
+        return http.text_response("hello, " + req.method());
+    }
+    if (path == "/echo") {
+        return http.text_response(req.method() + "|" + req.body().size().to_str() + "|" + req.header("content-type").or("-"));
+    }
+    if (path == "/go") {
+        http.Response r = http.response(302);
+        r.set("location", "/final");
+        return r;
+    }
+    if (path == "/see") {
+        http.Response r = http.response(303);
+        r.set("location", "/echo");
+        return r;
+    }
+    if (path == "/keep") {
+        http.Response r = http.response(307);
+        r.set("location", "/echo");
+        return r;
+    }
+    if (path == "/cross") {
+        http.Response r = http.response(302);
+        r.set("location", "http://127.0.0.1:1/elsewhere");
+        return r;
+    }
+    if (path == "/relative") {
+        http.Response r = http.response(302);
+        r.set("location", "somewhere-else");
+        return r;
+    }
+    if (path == "/nowhere-to-go") {
+        return http.response(302);
+    }
+    if (path == "/final") {
+        return http.text_response("arrived at /final");
+    }
+    return http.text_response("no such path: " + path, status: 404);
+}
+
+void say(Chan<str> log, str line) {
+    send(log, clone(line));
+}
+
+void report(Chan<str> log, str what, Result<http.Response, http.Error> r) {
+    match (r) {
+        case Ok(http.Response resp): {
+            str body = "";
+            match (resp.text()) {
+                case Ok(str t): {
+                    body = t;
+                }
+                case Err(http.Error e): {
+                    body = "(not text)";
+                }
+            }
+            say(log, what + ": " + resp.status().to_str() + " " + resp.reason() + " location=" + resp.header("location").or("-") + " " + body);
+        }
+        case Err(http.Error e): {
+            say(log, what + ": " + e.to_str());
+        }
+    }
+}
+
+http.Request built(str method, str url) {
+    match (http.request(method, url)) {
+        case Ok(http.Request r): {
+            return r;
+        }
+        case Err(http.Error e): {
+            trap("request: " + e.to_str());
+        }
+    }
+}
+
+void client(Chan<int> ports, Chan<str> log) {
+    int port = recv(ports);
+    str base = "http://127.0.0.1:" + port.to_str();
+    report(log, "get", http.get(base + "/hello"));
+    report(log, "404", http.get(base + "/nope"));
+    http.Request head = built("HEAD", base + "/hello");
+    report(log, "head", http.fetch(head));
+    http.Request post = built("POST", base + "/echo");
+    post.set_text("{\"a\":1}");
+    post.set("content-type", "application/json");
+    report(log, "post", http.fetch(post));
+    // 302 to a path on the same origin: followed, and what comes back is the
+    // final response and not the redirect.
+    report(log, "redirect", http.get(base + "/go"));
+    // The same, with following turned off.
+    report(log, "no-follow", http.fetch(built("GET", base + "/go"), redirects: 0));
+    // 303 after a POST becomes a GET with no body and no content-type.
+    http.Request see = built("POST", base + "/see");
+    see.set_text("dropped on the way");
+    see.set("content-type", "text/plain");
+    report(log, "303-post", http.fetch(see));
+    // 307 keeps the method and the body.
+    http.Request keep = built("POST", base + "/keep");
+    keep.set_text("carried over");
+    keep.set("content-type", "text/plain");
+    report(log, "307-post", http.fetch(keep));
+    report(log, "cross-host", http.get(base + "/cross"));
+    report(log, "relative", http.get(base + "/relative"));
+    report(log, "no-location", http.get(base + "/nowhere-to-go"));
+    // No socket is opened for this one: the scheme is refused at the parse,
+    // which is why it can name a port this program never bound.
+    report(log, "https", http.get("https://127.0.0.1:443/hello"));
+}
+
+void run(net.Listener ln) {
+    Chan<int> ports = Chan<int>(1);
+    Chan<str> log = Chan<str>(64);
+    spawn client(ports, log);
+    send(ports, ln.local().port());
+    int served = 0;
+    match (http.serve(ln, Router(), connections: CONNECTIONS, timeout_ms: 10000)) {
+        case Ok(int n): {
+            served = n;
+        }
+        case Err(http.Error e): {
+            trap("serve: " + e.to_str());
+        }
+    }
+    int got = 0;
+    while (got < LINES) {
+        print(recv(log));
+        got = got + 1;
+    }
+    print("connections served: " + served.to_str());
+    Result<bool, net.Error> closed = ln.close();
+}
+
+match (net.listen("127.0.0.1", 0)) {
+    case Ok(net.Listener ln): {
+        run(ln);
+    }
+    case Err(net.Error e): {
+        trap("listen: " + e.to_str());
+    }
+}

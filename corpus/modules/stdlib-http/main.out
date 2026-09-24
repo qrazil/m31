@@ -1,0 +1,172 @@
+plain: GET / q= v=1.1
+  url http://example.com/
+  fields host=example.com
+  body 0 
+full: POST /a/b q=x=1&y=2 v=1.1
+  url http://example.com:8080/a/b?x=1&y=2
+  fields host=Example.com:8080 x-two=one, two content-length=5 content-type=text/plain
+  body 5 hello
+escaped: GET /café/a/b q=raw=%20 v=1.1
+  url http://h/caf%C3%A9/a%2Fb?raw=%20
+  fields host=h
+  body 0 
+absolute: GET /p q= v=1.1
+  url http://h/p
+  fields host=h
+  body 0 
+asterisk: OPTIONS * q= v=1.1
+  url http://h
+  fields host=h
+  body 0 
+http10: GET /p q= v=1.0
+  url /p
+  fields 
+  body 0 
+no-body: POST /p q= v=1.1
+  url http://h/p
+  fields host=h
+  body 0 
+chunked: POST /p q= v=1.1
+  url http://h/p
+  fields host=h transfer-encoding=chunked
+  body 11 hello world
+chunked-empty: POST /p q= v=1.1
+  url http://h/p
+  fields host=h transfer-encoding=chunked
+  body 0 
+blank-value: GET /p q= v=1.1
+  url http://h/p
+  fields host=h x-empty= x-padded=spaced
+  body 0 
+clean-eof: no request, the stream was at a clean end
+pipelined 0: GET /one body 'abc'
+pipelined 1: GET /two body ''
+pipelined 2: end
+sized: 1.1 200 'OK'
+  fields content-length=5 content-type=text/plain
+  body 5 hello
+head: 1.1 200 'OK'
+  fields content-length=12345
+  body 0 
+no-content: 1.1 204 'No Content'
+  fields 
+  body 0 
+not-modified: 1.1 304 'Not Modified'
+  fields content-length=4096
+  body 0 
+to-eof: 1.1 200 'OK'
+  fields content-type=text/plain
+  body 24 everything until the end
+chunked: 1.1 200 'OK'
+  fields transfer-encoding=chunked
+  body 10 wikipedia 
+interim: 1.1 200 'OK'
+  fields content-length=2
+  body 2 ok
+no-reason: 1.1 404 ''
+  fields content-length=0
+  body 0 
+bare-code: 1.1 500 ''
+  fields content-length=0
+  body 0 
+reason 200/418/599: OK / I'm a teapot / Server Error
+GET (84 bytes)
+| GET /a?b=c HTTP/1.1
+| host: example.com
+| user-agent: lang-http
+| connection: close
+| 
+| 
+POST (176 bytes)
+| POST /submit HTTP/1.1
+| content-type: application/x-www-form-urlencoded
+| connection: keep-alive
+| host: example.com:8080
+| user-agent: lang-http
+| content-length: 11
+| 
+| field=value
+chunked PUT (123 bytes)
+| PUT /big HTTP/1.1
+| host: h
+| user-agent: lang-http
+| connection: close
+| transfer-encoding: chunked
+| 
+| d
+| one two three
+| 0
+| 
+| 
+200 close (100 bytes)
+| HTTP/1.1 200 OK
+| content-type: text/plain; charset=utf-8
+| content-length: 2
+| connection: close
+| 
+| hi
+200 keep (81 bytes)
+| HTTP/1.1 200 OK
+| content-type: text/plain; charset=utf-8
+| content-length: 2
+| 
+| hi
+HEAD (98 bytes)
+| HTTP/1.1 200 OK
+| content-type: text/plain; charset=utf-8
+| content-length: 2
+| connection: close
+| 
+| 
+204 (46 bytes)
+| HTTP/1.1 204 No Content
+| connection: close
+| 
+| 
+chunked (125 bytes)
+| HTTP/1.1 200 OK
+| content-type: text/plain; charset=utf-8
+| transfer-encoding: chunked
+| connection: close
+| 
+| 8
+| chunk me
+| 0
+| 
+| 
+HEAD chunked (107 bytes)
+| HTTP/1.1 200 OK
+| content-type: text/plain; charset=utf-8
+| transfer-encoding: chunked
+| connection: close
+| 
+| 
+chunked to 1.0 (111 bytes)
+| HTTP/1.1 200 OK
+| content-type: text/plain; charset=utf-8
+| content-length: 8
+| connection: keep-alive
+| 
+| chunk me
+custom reason (89 bytes)
+| HTTP/1.1 418 I am a pot for tea
+| content-length: 15
+| connection: close
+| 
+| short and stout
+json (107 bytes)
+| HTTP/1.1 200 OK
+| content-type: application/json
+| content-length: 17
+| connection: close
+| 
+| {"n":7,"ok":true}
+json body: {"a":[1,2],"b":"text"}
+round trip: 200 round trip x-note=kept te=chunked
+keep-alive 1.1 default: true
+keep-alive 1.1 client close: false
+keep-alive 1.1 server close: false
+keep-alive 1.0 default: false
+keep-alive 1.0 asked: true
+keep-alive token list: false
+limits: head=65536 headers=100 line=8192 chunkline=32 body=33554432 redirects=5 interim=8 requests=1000 timeout=30000 chunk=16384

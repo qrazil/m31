@@ -1,0 +1,204 @@
+import http;
+import io;
+
+// Every refusal this module makes, and the sentence it makes it with.
+//
+// A parser is defined as much by what it will not read as by what it will,
+// and this module's whole claim is that anything two readers could read
+// differently is refused. So each line below is one way to be wrong, the
+// class of `http.Error` it comes back as, and the status a server would
+// answer it with.
+//
+// **Four of these are places this module is deliberately stricter than
+// Python's `http.client`**, which was run over the same transcripts:
+//
+//   - `both-framings`: Python accepts it and believes the `Content-Length`.
+//     That is the classic request-smuggling disagreement -- some proxy in
+//     front believes the other field -- so it is refused here.
+//   - `gzip-te`: Python hands the *coded* bytes back as if they were the
+//     body. Refusing is the only answer that cannot be silently wrong.
+//   - `folded`: Python accepts obsolete line folding and joins the lines.
+//     RFC 9112 deprecated it and it is a smuggling vector.
+//   - `interim`: Python's `HTTPResponse` hands a `103 Early Hints` back as
+//     the answer; this module steps over interim responses until a real one
+//     arrives (`stdlib-http` shows that), and refuses after eight.
+//
+// Python and this module agree on the rest: a bad chunk size, a short body
+// and a truncated head are failures in both, and the difference is only that
+// an `IncompleteRead` becomes an error value that says which byte count was
+// short of which.
+
+void refuse(str label, str text) {
+    io.Buffer b = io.buffer_of(text.to_bytes());
+    match (http.read_request(b)) {
+        case Ok(Option<http.Request> maybe): {
+            match (maybe) {
+                case Some(http.Request req): {
+                    print(label + ": ACCEPTED " + req.method() + " " + req.path());
+                }
+                case None: {
+                    print(label + ": ACCEPTED as a clean end");
+                }
+            }
+        }
+        case Err(http.Error e): {
+            print(label + " [" + e.status().to_str() + "] " + e.to_str());
+        }
+    }
+}
+
+void refuse_resp(str label, str method, str text) {
+    io.Buffer b = io.buffer_of(text.to_bytes());
+    match (http.read_response(b, method)) {
+        case Ok(http.Response resp): {
+            print(label + ": ACCEPTED " + resp.status().to_str() + " with " + resp.body().size().to_str() + " body bytes");
+        }
+        case Err(http.Error e): {
+            print(label + " [" + e.status().to_str() + "] " + e.to_str());
+        }
+    }
+}
+
+// A `str` of `n` copies of `part`, for the transcripts that have to be long
+// enough to pass a limit.
+str many(str part, int n) {
+    List<str> out = [];
+    int i = 0;
+    while (i < n) {
+        out.push(part);
+        i = i + 1;
+    }
+    return out.join("");
+}
+
+// --- the request line ------------------------------------------------------
+refuse("empty-line", "\r\n\r\n");
+refuse("two-fields", "GET /p\r\nHost: h\r\n\r\n");
+refuse("four-fields", "GET /p x HTTP/1.1\r\nHost: h\r\n\r\n");
+refuse("double-space", "GET  /p HTTP/1.1\r\nHost: h\r\n\r\n");
+refuse("bad-method", "G@T /p HTTP/1.1\r\nHost: h\r\n\r\n");
+refuse("nul-in-method", "G\0T /p HTTP/1.1\r\nHost: h\r\n\r\n");
+refuse("bad-version", "GET /p HTTP/2.0\r\nHost: h\r\n\r\n");
+refuse("no-version", "GET /p SPDY\r\nHost: h\r\n\r\n");
+refuse("relative-target", "GET p HTTP/1.1\r\nHost: h\r\n\r\n");
+refuse("fragment", "GET /p#frag HTTP/1.1\r\nHost: h\r\n\r\n");
+refuse("asterisk-not-options", "GET * HTTP/1.1\r\nHost: h\r\n\r\n");
+refuse("control-in-target", "GET /p\x01q HTTP/1.1\r\nHost: h\r\n\r\n");
+refuse("bad-escape", "GET /p%zz HTTP/1.1\r\nHost: h\r\n\r\n");
+refuse("short-escape", "GET /p%4 HTTP/1.1\r\nHost: h\r\n\r\n");
+refuse("escape-not-utf8", "GET /p%ff HTTP/1.1\r\nHost: h\r\n\r\n");
+// --- the header block ------------------------------------------------------
+refuse("no-host", "GET /p HTTP/1.1\r\n\r\n");
+refuse("two-hosts", "GET /p HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n");
+refuse("folded", "GET /p HTTP/1.1\r\nHost: h\r\nX-Fold: one\r\n  two\r\n\r\n");
+refuse("tab-folded", "GET /p HTTP/1.1\r\nHost: h\r\nX-Fold: one\r\n\ttwo\r\n\r\n");
+refuse("no-colon", "GET /p HTTP/1.1\r\nHost: h\r\nX-Bad\r\n\r\n");
+refuse("no-name", "GET /p HTTP/1.1\r\nHost: h\r\n: value\r\n\r\n");
+refuse("space-in-name", "GET /p HTTP/1.1\r\nHost: h\r\nX Bad: v\r\n\r\n");
+refuse("nul-in-name", "GET /p HTTP/1.1\r\nHost: h\r\nX-\0Bad: v\r\n\r\n");
+refuse("nul-in-value", "GET /p HTTP/1.1\r\nHost: h\r\nX-Bad: a\0b\r\n\r\n");
+refuse("del-in-value", "GET /p HTTP/1.1\r\nHost: h\r\nX-Bad: a\x7fb\r\n\r\n");
+refuse("bare-lf", "GET /p HTTP/1.1\nHost: h\r\n\r\n");
+refuse("truncated-head", "GET /p HTTP/1.1\r\nHost: h\r\n");
+// One field line longer than MAX_HEADER_LINE, inside a block still under
+// MAX_HEAD.
+refuse("long-line", "GET /p HTTP/1.1\r\nHost: h\r\nX-Long: " + many("a", 9000) + "\r\n\r\n");
+// More than MAX_HEADERS fields.
+refuse("many-fields", "GET /p HTTP/1.1\r\nHost: h\r\n" + many("X-A: 1\r\n", 120) + "\r\n");
+// A header block past MAX_HEAD, which the read gives up on before the parse
+// ever sees it.
+refuse("huge-head", "GET /p HTTP/1.1\r\nHost: h\r\nX-Long: " + many("abcdefgh", 9000) + "\r\n\r\n");
+// --- framing ---------------------------------------------------------------
+refuse("both-framings", "POST /p HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n");
+refuse("two-lengths", "POST /p HTTP/1.1\r\nHost: h\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\nhello");
+refuse("two-encodings", "POST /p HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n");
+refuse("gzip-te", "POST /p HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: gzip, chunked\r\n\r\nbytes");
+refuse("signed-length", "POST /p HTTP/1.1\r\nHost: h\r\nContent-Length: +5\r\n\r\nhello");
+refuse("hex-length", "POST /p HTTP/1.1\r\nHost: h\r\nContent-Length: 0x5\r\n\r\nhello");
+refuse("empty-length", "POST /p HTTP/1.1\r\nHost: h\r\nContent-Length:\r\n\r\nhello");
+refuse("spaced-length", "POST /p HTTP/1.1\r\nHost: h\r\nContent-Length: 5 5\r\n\r\nhello");
+refuse("huge-length", "POST /p HTTP/1.1\r\nHost: h\r\nContent-Length: 99999999999\r\n\r\nhello");
+refuse("digits-overflow", "POST /p HTTP/1.1\r\nHost: h\r\nContent-Length: 99999999999999999999999\r\n\r\nhello");
+refuse("short-body", "POST /p HTTP/1.1\r\nHost: h\r\nContent-Length: 40\r\n\r\nshort");
+// --- chunked ---------------------------------------------------------------
+refuse("bad-chunk-size", "POST /p HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nhello\r\n0\r\n\r\n");
+refuse("empty-chunk-size", "POST /p HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n;ext\r\nhello\r\n0\r\n\r\n");
+refuse("spaced-chunk-size", "POST /p HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n 5\r\nhello\r\n0\r\n\r\n");
+refuse("chunk-no-crlf", "POST /p HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhelloXX0\r\n\r\n");
+refuse("chunk-cut-short", "POST /p HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n9\r\nhello");
+refuse("chunk-never-ends", "POST /p HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n");
+refuse("long-chunk-line", "POST /p HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n5;" + many("x", 60) + "\r\nhello\r\n0\r\n\r\n");
+refuse("chunk-size-too-wide", "POST /p HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n11111111111111111\r\nhello\r\n0\r\n\r\n");
+// Sixteen hex digits is a number no `int` can hold, and the multiply that
+// reads it would trap rather than answer. Fifteen is the cap, so this is an
+// error value and not a dead process.
+refuse("chunk-size-16-digits", "POST /p HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\nFFFFFFFFFFFFFFFF\r\nhello\r\n0\r\n\r\n");
+// The same boundary on the other framing field: nineteen decimal digits can
+// spell a number `parse_int` cannot answer with.
+refuse("length-19-digits", "POST /p HTTP/1.1\r\nHost: h\r\nContent-Length: 9999999999999999999\r\n\r\nhello");
+// --- responses -------------------------------------------------------------
+refuse_resp("no-response", "GET", "");
+refuse_resp("not-a-status-line", "GET", "200 OK\r\n\r\n");
+refuse_resp("two-digit-code", "GET", "HTTP/1.1 20 OK\r\n\r\n");
+refuse_resp("four-digit-code", "GET", "HTTP/1.1 2000 OK\r\n\r\n");
+refuse_resp("letters-for-code", "GET", "HTTP/1.1 2O0 OK\r\n\r\n");
+refuse_resp("resp-both-framings", "GET", "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n");
+refuse_resp("resp-short-body", "GET", "HTTP/1.1 200 OK\r\nContent-Length: 40\r\n\r\nshort");
+refuse_resp("resp-truncated-head", "GET", "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n");
+refuse_resp("connect-tunnel", "CONNECT", "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+
+// --- URLs ------------------------------------------------------------------
+void bad_url(str url) {
+    match (http.parse_url(url)) {
+        case Ok(http.Url u): {
+            print("url " + url + ": ACCEPTED " + u.to_str());
+        }
+        case Err(http.Error e): {
+            print("url " + url + " [" + e.status().to_str() + "] " + e.to_str());
+        }
+    }
+}
+
+bad_url("https://example.com/secret");
+bad_url("HTTPS://EXAMPLE.COM/");
+bad_url("ftp://example.com/");
+bad_url("/just/a/path");
+bad_url("example.com/p");
+bad_url("http:///p");
+bad_url("http://user:pw@example.com/");
+bad_url("http://example.com:0/");
+bad_url("http://example.com:99999/");
+bad_url("http://example.com:http/");
+bad_url("http://example.com/a b");
+
+// --- writing ---------------------------------------------------------------
+// A field a handler built out of a request's own data must not be able to
+// end the header block early. This is the same check the parser makes, from
+// the other side.
+void bad_write(str label, str name, str value) {
+    io.Buffer w = io.buffer();
+    http.Response resp = http.text_response("x");
+    resp.set(name, value);
+    match (http.request("GET", "http://h/p")) {
+        case Ok(http.Request req): {
+            match (http.write_response(w, req, resp, false)) {
+                case Ok: {
+                    print(label + ": ACCEPTED, wrote " + w.peek().size().to_str() + " bytes");
+                }
+                case Err(http.Error e): {
+                    print(label + " [" + e.status().to_str() + "] " + e.to_str());
+                }
+            }
+        }
+        case Err(http.Error e): {
+            print(label + ": " + e.to_str());
+        }
+    }
+}
+
+bad_write("split-value", "x-note", "a\r\nX-Injected: yes");
+bad_write("lf-value", "x-note", "a\nb");
+bad_write("nul-value", "x-note", "a\0b");
+bad_write("space-name", "x note", "v");
+bad_write("colon-name", "x:note", "v");
+bad_write("empty-name", "", "v");

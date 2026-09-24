@@ -22,6 +22,7 @@ pub fn source(name: &str) -> Option<&'static str> {
         "base64" => include_str!("../lib/base64.src"),
         "csv" => include_str!("../lib/csv.src"),
         "html" => include_str!("../lib/html.src"),
+        "http" => include_str!("../lib/http.src"),
         "io" => include_str!("../lib/io.src"),
         "fs" => include_str!("../lib/fs.src"),
         "json" => include_str!("../lib/json.src"),

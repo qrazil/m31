@@ -1,0 +1,91 @@
+import http;
+
+// URLs and percent-encoding: `http.parse_url`, `http.quote`, `http.unquote`.
+//
+// The accepted forms are checked against Python's `urllib.parse.urlsplit`
+// and `urllib.parse.quote` / `unquote`, with the differences deliberate and
+// named here:
+//
+//   - **`unquote` refuses a malformed escape** where `urllib` passes a lone
+//     `%` through as a literal. Text with a `%` that is not an escape was
+//     built by something that did not encode it, and two readers will not
+//     agree about what it says.
+//   - **`quote` escapes everything outside the unreserved set and `safe`**,
+//     with uppercase hex digits, which is RFC 3986 §6.2.2.1's preference and
+//     `urllib`'s output too.
+//   - **`https` and a relative URL are refused** rather than parsed, because
+//     `parse_url` exists to produce something the client can dial. `urllib`
+//     is a syntax library and parses both.
+//   - **The host is lowercased** and the default port filled in, which
+//     `urlsplit` leaves to `.hostname` and `.port`.
+//
+// The refusals themselves are in `stdlib-http-errors`.
+
+void url(str text) {
+    match (http.parse_url(text)) {
+        case Ok(http.Url u): {
+            print(text);
+            print("  scheme=" + u.scheme() + " host=" + u.host() + " port=" + u.port().to_str());
+            print("  path=" + u.path() + " query=" + u.query() + " target=" + u.target());
+            print("  host_header=" + u.host_header() + " to_str=" + u.to_str());
+        }
+        case Err(http.Error e): {
+            print(text + ": " + e.to_str());
+        }
+    }
+}
+
+url("http://example.com");
+url("http://example.com/");
+url("http://EXAMPLE.COM/Path");
+url("http://example.com:8080/a/b?x=1&y=two");
+url("http://127.0.0.1:9/");
+url("http://[::1]:8080/p");
+url("http://[2001:db8::1]/p");
+url("http://example.com/a%2Fb/caf%C3%A9?q=%20+%2B#dropped");
+url("http://example.com?only=query");
+url("http://example.com:80/explicit-default");
+
+// --- percent-encoding ------------------------------------------------------
+void enc(str s, str safe) {
+    print("quote(" + s + ", safe: '" + safe + "') = " + http.quote(s, safe: safe));
+}
+
+enc("/a b/c", "/");
+enc("/a b/c", "");
+enc("a&b=c", "");
+enc("a&b=c", "&=");
+enc("café", "/");
+enc("~-._", "/");
+enc("100%", "");
+
+void dec(str s, bool plus) {
+    match (http.unquote(s, plus: plus)) {
+        case Ok(str t): {
+            print("unquote(" + s + ", plus: " + plus.to_str() + ") = " + t);
+        }
+        case Err(http.Error e): {
+            print("unquote(" + s + ", plus: " + plus.to_str() + ") = " + e.to_str());
+        }
+    }
+}
+
+dec("%2Fa%20b", false);
+dec("a+b", false);
+dec("a+b", true);
+dec("a%2Bb", true);
+dec("caf%C3%A9", false);
+dec("%ff", false);
+dec("%zz", false);
+dec("100%", false);
+// The round trip that has to hold: anything `quote` writes, `unquote` reads
+// back, for every character that is not an escape's worth of trouble.
+str sample = "a b/c?d&e=f+g~h.i_j-k%l café";
+match (http.unquote(http.quote(sample, safe: ""))) {
+    case Ok(str back): {
+        print("round trip: " + (back == sample).to_str() + " via " + http.quote(sample, safe: ""));
+    }
+    case Err(http.Error e): {
+        print("round trip: " + e.to_str());
+    }
+}
