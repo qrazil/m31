@@ -112,11 +112,17 @@ same call. One rule for all of them.
 |---|---|
 | `io` | read and write a whole file, read a line from stdin, write to stderr. Errors are `io.Error`, its own enum. |
 | `math` | `abs`, `min`, `max`, `pow`, `sqrt`, `floor`, `ceil`, `round`. Float-heavy, and mostly one-liners over C. |
-| `sort` | sorting a `List` by a comparison the caller supplies. Still waiting on function references; sorting by the element type's OWN `cmp` is built in and needs none — see below. |
+| `sort` | sorting a `List` by a comparison the caller supplies: `Order<T>`, `by`, `max`, `min`, `search`. Shipped; sorting by the element type's OWN `cmp` is built in and needs none — see below. |
 | `text` | what `str`'s built-in methods leave out: padding, `replace`, `lines`, a richer parse that says *why* it failed. |
 
-**`sort` by a comparison the CALLER supplies** needs a function reference in
-the IR, which does not exist and is the same machinery closures need.
+**`sort` by a comparison the CALLER supplies** was said here to need a
+function reference in the IR. It needed nothing of the kind: a callback's
+type is a one-method interface, which the language already had, so
+`lib/sort.src` is ordinary source with no runtime support at all —
+`pub interface Order<T> { int cmp(T a, T b); }` and a stable merge sort
+written over `size()`, `[i]` and `push`. `sort.by(xs, order)` takes a
+function's name, a lambda or an object, because all three produce an
+`Order<T>`. See docs/closures-decision.md, "Stage 5".
 
 **Sorting by the element type's own order needs none of that**, and now
 works: `sort()` handles `int`, `float`, `str`, and any type that declares
@@ -146,6 +152,7 @@ compiler lays out as static data and therefore has to hash itself.
 Of the three features this record once said were waiting on one mechanism,
 only one was. `sort()` on a user type and a `Map` keyed on one both shipped
 without it, against a reserved-method-name convention; `spawn` should never
-take a closure (docs/closures-decision.md). What is left waiting on function
-references is a `sort` module that takes the comparison as an argument, which
-is a smaller claim than this section used to make.
+take a closure (docs/closures-decision.md). The last one, a `sort` module
+taking the comparison as an argument, has landed too — and it also needed no
+new mechanism, only the one-method interface the language already had.
+**Nothing on that list ever needed a function reference in the IR.**

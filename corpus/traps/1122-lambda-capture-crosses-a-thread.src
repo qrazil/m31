@@ -1,0 +1,16 @@
+// A lambda that captures a live local cannot cross a thread boundary, and
+// the uniqueness check says so in the words it already had: the capture is a
+// field, the list is reachable from the sender's own local as well as from
+// the lambda, and that is exactly the shape `rt_check_unique` refuses.
+//
+// This is the whole of why `spawn` keeps taking a function and its
+// arguments rather than a closure (docs/closures-decision.md §6): with a
+// closure the ordinary case would be this trap, while `spawn f(x)` states
+// the captures as arguments and the move checker sees them by name.
+//
+// A lambda with NO captures is immortal and crosses freely -- corpus/core/1104.
+interface Get { int of(); }
+
+Chan<Get> inbox = Chan<Get>(2);
+List<int> xs = [1, 2, 3];
+send(inbox, () => xs.size());

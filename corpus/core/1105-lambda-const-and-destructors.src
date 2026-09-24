@@ -1,0 +1,67 @@
+// A lambda's captures are the synthesised type's FIELDS, so `const` and
+// destructors reach them with no new machinery -- which is the argument the
+// design rests on, checked here rather than asserted.
+//
+//   - a capture held outside the lambda is DEEP COPIED by the snapshot, so
+//     the frozen lambda sees the value as it was (docs/const-decision.md);
+//   - freezing is deep, so changing the captured object through the lambda
+//     traps (corpus/traps/1120);
+//   - a captured value with a destructor is released when the lambda's count
+//     reaches zero, at the moment the lambda dies and not before.
+interface Get { int of(); }
+interface Run { void go(int v); }
+
+type Res { int id; }
+void Res.drop() { print("closed " + str(id)); }
+int Res.id_of() { return id; }
+
+// The snapshot's deep copy, because `src` is reachable from outside the
+// value being frozen.
+void snapshot() {
+  List<int> src = [10, 20];
+  const Get frozen = () => src.size();
+  print(frozen.of());
+  src.push(99);
+  print(src.size());
+  print(frozen.of());
+}
+snapshot();
+
+// Private instead: nothing outside names the list, so it is frozen in place
+// rather than copied, and the lambda reads the one list.
+Get maker() {
+  List<int> own = [1, 2, 3];
+  return () => own.size();
+}
+
+void private_capture() {
+  // Nothing outside names the lambda or the list it holds -- `maker`'s local
+  // is gone -- so the snapshot freezes them in place instead of copying.
+  const Get frozen = maker();
+  print(frozen.of());
+}
+private_capture();
+
+// A destructor: the capture is a field, so the resource goes when the
+// lambda does -- here at the end of the function, after "still open".
+void holds() {
+  Res r = Res(7);
+  Get g = () => r.id_of();
+  print(g.of());
+  print("still open");
+}
+holds();
+print("gone");
+
+// And when the lambda outlives the local that made it, the resource
+// outlives it too: one reference, in the lambda, until the list drops it.
+void outlives() {
+  List<Get> keep = [];
+  Res r = Res(8);
+  keep.push(() => r.id_of());
+  print("made");
+  keep.clear();
+  print("cleared");
+}
+outlives();
+print("done");

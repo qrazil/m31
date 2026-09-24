@@ -1,0 +1,72 @@
+// `max`, `min` and `search`, and the identities that decide what each one
+// does with elements that compare equal.
+//
+//   max(xs, o)  is  by(xs, o) then the LAST element
+//   min(xs, o)  is  by(xs, o) then the FIRST
+//   search      is  index_of, for a list already sorted by `o`: the same
+//                   question, the same `Option<int>`, the same FIRST index
+//
+// Checked here against the sort itself and against `index_of`, on lists with
+// ties in them, because ties are the only place the answers could differ.
+import sort;
+
+type Row { int key; int seq; }
+str Row.to_str() { return str(key) + ":" + str(seq); }
+
+List<Row> rs = [Row(2, 0), Row(1, 1), Row(3, 2), Row(1, 3), Row(3, 4), Row(2, 5)];
+
+print(str(sort.max(rs, (Row a, Row b) => a.key - b.key)));
+print(str(sort.min(rs, (Row a, Row b) => a.key - b.key)));
+
+// the identity, spelled out: sort a copy and take the ends
+List<Row> sorted = [];
+for (Row r in rs) {
+  sorted.push(r);
+}
+sort.by(sorted, (Row a, Row b) => a.key - b.key);
+print(str(sorted[0]));
+print(str(sorted[sorted.size() - 1]));
+
+// one element: max and min are it
+List<Row> one = [Row(9, 9)];
+print(str(sort.max(one, (Row a, Row b) => a.key - b.key)));
+print(str(sort.min(one, (Row a, Row b) => a.key - b.key)));
+
+// --- search --------------------------------------------------------------
+List<int> ns = [1, 3, 3, 3, 5, 9];
+show(sort.search(ns, 1, (int a, int b) => a - b));
+show(sort.search(ns, 3, (int a, int b) => a - b));
+show(sort.search(ns, 9, (int a, int b) => a - b));
+show(sort.search(ns, 4, (int a, int b) => a - b));
+show(sort.search(ns, 0, (int a, int b) => a - b));
+show(sort.search(ns, 10, (int a, int b) => a - b));
+
+// the same answers as `index_of`, which is the whole reason it returns the
+// first index of a run rather than any match
+show(ns.index_of(3));
+show(ns.index_of(4));
+
+// an empty list has nothing to find, and does not trap: absence is an
+// answer here, unlike "the greatest of nothing"
+List<int> empty = [];
+show(sort.search(empty, 1, (int a, int b) => a - b));
+
+// a descending order: `search` uses the order it is given, not `<`
+List<int> down = [9, 5, 3, 1];
+show(sort.search(down, 5, (int a, int b) => b - a));
+show(sort.search(down, 4, (int a, int b) => b - a));
+
+// on a list of a user type, keyed by a field
+sort.by(rs, (Row a, Row b) => a.key - b.key);
+show(sort.search(rs, Row(3, 2), (Row a, Row b) => a.key - b.key));
+
+void show(Option<int> o) {
+  match (o) {
+    case Some(int i): {
+      print(i);
+    }
+    case None: {
+      print("absent");
+    }
+  }
+}

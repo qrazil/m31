@@ -894,6 +894,13 @@ impl Fmt {
                 }
             }
             Expr::Try(e, _) => format!("{}?", self.expr(e)),
+            // The body is one expression and is never parenthesised: a
+            // lambda only ever appears where an interface is wanted -- an
+            // argument, a declaration, a return -- so nothing binds tighter
+            // beside it that could swallow the body.
+            Expr::Lambda(ps, body, _) => {
+                format!("({}) => {}", self.params(ps), self.expr(body))
+            }
             Expr::SeqLit(items, _) => {
                 let xs: Vec<String> = items.iter().map(|e| self.expr(e)).collect();
                 format!("[{}]", xs.join(", "))

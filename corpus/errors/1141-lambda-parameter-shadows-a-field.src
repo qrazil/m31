@@ -1,0 +1,8 @@
+// Inside a method a field is reached by its bare name, so a lambda
+// parameter that takes a field's name is shadowing it -- and is refused
+// with the message the rule already has. The check runs where the lambda is
+// WRITTEN, which is the scope a reader is looking at.
+interface Get { int of(int base); }
+type Counter { int base; }
+Get Counter.reader() { return (int base) => base; }
+print(Counter(1).reader().of(2));

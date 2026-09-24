@@ -1,0 +1,18 @@
+// A constant may not hold a value that owns a resource: it can neither
+// freeze one (a half-usable File) nor copy one (two owners of one
+// descriptor). The compiler refuses every binding whose STATIC type can hold
+// one -- and a lambda's never can, because a lambda's static type is always
+// an interface, which the walk stops at. So this is the case the runtime
+// backstop exists for, and the captured `Res` is found by the walk over the
+// unfrozen graph before anything is frozen.
+interface Get { int of(); }
+type Res { int id; }
+void Res.drop() { print("closed"); }
+int Res.id_of() { return id; }
+
+void go() {
+  Res r = Res(7);
+  const Get g = () => r.id_of();
+  print(g.of());
+}
+go();

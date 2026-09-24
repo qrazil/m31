@@ -1,0 +1,4 @@
+corpus/errors/1141-lambda-parameter-shadows-a-field.src:7:32: `base` is already a field of `Counter`; shadowing is not allowed, rename one
+  |
+7 | Get Counter.reader() { return (int base) => base; }
+  |                                ^

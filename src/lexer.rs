@@ -67,6 +67,10 @@ pub enum Tok {
     Colon,
     Assign,
     Dot,
+    /// `=>`, between a lambda's parameters and its one-expression body.
+    /// Free as a token because there is no match-arm arrow and no other use
+    /// of `=` followed by `>`: `a = >b` is not an expression in any reading.
+    FatArrow,
 
     // operators
     Plus,
@@ -153,6 +157,7 @@ impl Tok {
             Tok::Semi => ";",
             Tok::Question => "?",
             Tok::Assign => "=",
+            Tok::FatArrow => "=>",
             Tok::Plus => "+",
             Tok::Minus => "-",
             Tok::Star => "*",
@@ -403,6 +408,7 @@ impl<'a> Lexer<'a> {
             b'/' => Tok::Slash,
             b'%' => Tok::Percent,
             b'=' if self.peek() == b'=' => two(self, Tok::EqEq),
+            b'=' if self.peek() == b'>' => two(self, Tok::FatArrow),
             b'=' => Tok::Assign,
             b'!' if self.peek() == b'=' => two(self, Tok::BangEq),
             b'!' => Tok::Bang,

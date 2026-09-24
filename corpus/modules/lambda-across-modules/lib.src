@@ -1,0 +1,31 @@
+// A library that takes a callback, and one that hands one out.
+pub type Point {
+  pub int x;
+  pub int y;
+}
+
+pub interface Less {
+  int cmp(Point a, Point b);
+}
+
+pub int use(Less o, Point a, Point b) {
+  return o.cmp(a, b);
+}
+
+// A lambda written HERE, over this module's own private function and its own
+// module constant. The synthesised type belongs to this module, so both are
+// reachable from it -- exactly as they are from a method of a type here.
+const int BIAS = 100;
+
+int hidden(Point p) {
+  return p.x * 10;
+}
+
+pub Less biased() {
+  return (Point a, Point b) => hidden(a) - hidden(b) + BIAS;
+}
+
+// A lambda that captures one of this module's locals and is handed out.
+pub Less shifted(int by) {
+  return (Point a, Point b) => a.x - b.x + by;
+}

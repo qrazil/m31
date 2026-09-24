@@ -1,0 +1,5 @@
+// A lambda has no type of its own. It takes its method name, its arity, its
+// parameter types and its return type from the interface it is given to, so
+// where nothing expects one there is nothing to check it against -- and not
+// even a name for the method it would have.
+print((int x) => x);

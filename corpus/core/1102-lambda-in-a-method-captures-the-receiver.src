@@ -1,0 +1,70 @@
+// A lambda written inside a method and mentioning anything of the receiver
+// captures the receiver -- once, as a reference, which is what `=` does with
+// `this`.
+//
+// The three spellings are one thing. The language already says so: "a method
+// of the receiver is called by its bare name, **as a field is read**", and
+// `this.f` and `this.m()` are both refused because the bare form is the only
+// spelling. So a bare field read, a bare sibling call and `this` itself are
+// all `this.`, unwritten, and a lambda that mentions any of them holds the
+// same one capture. Nothing is snapshotted: a field read inside the lambda
+// reads the object a reader is looking at, so even REASSIGNING the field is
+// visible through the lambda, exactly as it is through any other name for
+// that object.
+interface Get { int of(); }
+interface Run { void go(int v); }
+
+// The whole receiver, handed to something that takes one.
+int level(Counter c) { return c.base; }
+
+type Counter {
+  int base;
+  List<int> seen;
+}
+
+int Counter.twice() { return base * 2; }
+
+// a bare field name
+Get Counter.reader() { return () => base; }
+
+// a bare sibling call
+Get Counter.doubler() { return () => twice(); }
+
+// `this` itself, as a whole value
+Get Counter.levelled() { return () => level(this); }
+
+// a field and a method in one lambda: one capture, not two
+Get Counter.both() { return () => base + twice(); }
+
+// a lambda that CHANGES the receiver's list -- the object, not the binding
+Run Counter.recorder() { return (int v) => seen.push(v); }
+
+// no captures at all, inside a method: still field-less, still immortal
+Get Counter.seven() { return () => 7; }
+
+Counter c = Counter(10, []);
+
+Get r = c.reader();
+Get d = c.doubler();
+Get b = c.both();
+print(r.of());
+print(d.of());
+print(b.of());
+
+// The receiver is held, not copied: a later change to it is seen.
+c.base = 100;
+print(r.of());
+print(d.of());
+print(b.of());
+
+Run rec = c.recorder();
+rec.go(1);
+rec.go(2);
+print(c.seen.size());
+print(c.seen[1]);
+
+print(c.seven().of());
+
+// `this` is the receiver itself, held: the lambda hands the same object to
+// `level`, so it reads the 100 set above rather than the 10 it was made with.
+print(c.levelled().of());

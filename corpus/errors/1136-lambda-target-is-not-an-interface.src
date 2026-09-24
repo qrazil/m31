@@ -1,0 +1,5 @@
+// Something is expected here, and it is not a one-method interface. The
+// message names what was wanted rather than describing the lambda, which is
+// the rule every one of these follows.
+int y = (int a) => a;
+print(y);

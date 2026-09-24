@@ -1,0 +1,4 @@
+corpus/errors/1144-calling-a-callback-like-a-function.src:9:7: `l` is a `Less`, not a function: a callback is called through its method, so write `l.cmp(..)`
+  |
+9 | print(l(1, 2));
+  |       ^

@@ -1,0 +1,12 @@
+// Freezing is deep and the flag is on the object, so a `const` lambda's
+// captured list cannot be pushed to -- through the lambda or through
+// anything else. The capture is a field, and this is the ordinary rule for
+// a field of a frozen object; no lambda-shaped exception exists.
+interface Run { void go(int v); }
+
+void go() {
+  List<int> xs = [1, 2];
+  const Run r = (int v) => xs.push(v);
+  r.go(3);
+}
+go();

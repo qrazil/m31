@@ -1,0 +1,7 @@
+// An optional parameter is named at the call site (§4.2), and a dispatch
+// site has no name to give: the call goes through a vtable slot. So a
+// default cannot work through an interface, and it is refused where it is
+// written rather than misbehaving at the call.
+interface Get { int of(int a); }
+Get g = (int a = 2) => a;
+print(g.of(1));

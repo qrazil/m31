@@ -1,0 +1,8 @@
+// `sort.max` and `sort.min` have no element to return from an empty list and
+// no honest way to invent one, so they trap -- the same answer `xs[0]` gives
+// to the same question. An `Option` return would put a `match` at every call
+// site to handle a case most callers have already ruled out.
+import sort;
+
+List<int> empty = [];
+print(sort.max(empty, (int a, int b) => a - b));

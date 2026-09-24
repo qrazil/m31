@@ -1,0 +1,4 @@
+corpus/errors/1136-lambda-target-is-not-an-interface.src:4:9: a lambda takes its method name from the one-method interface it is passed to, and `int` is not one; declare an interface and bind it to a local of that type
+  |
+4 | int y = (int a) => a;
+  |         ^

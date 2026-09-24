@@ -1,0 +1,8 @@
+// A lambda's body is ordinary code, lowered in the module the lambda is
+// WRITTEN in -- so it may not reach another module's private function. If it
+// could, a lambda would be a way around `pub`: write one here, call the
+// private function from it, and hand the interface to anyone.
+import lib;
+
+lib.Less l = (lib.Point a, lib.Point b) => lib.by_y(a, b);
+print(l.cmp(lib.Point(3, 9), lib.Point(1, 5)));

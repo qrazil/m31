@@ -1,0 +1,11 @@
+// A lambda inside a lambda is checked for shadowing in the scope the OUTER
+// one is written in, not only in the one it is lowered in: by the time the
+// inner one is lowered the enclosing method is the outer lambda's, and the
+// names of this scope are no longer visible to be shadowed. Without that
+// check `v` here would mean the local on one line and a parameter on the
+// next.
+interface Get { int of(int a); }
+interface Make { Get build(int k); }
+int v = 1;
+Make m = (int k) => (int v) => v + k;
+print(m.build(2).of(3));

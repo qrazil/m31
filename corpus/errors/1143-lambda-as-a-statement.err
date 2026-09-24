@@ -1,0 +1,4 @@
+corpus/errors/1143-lambda-as-a-statement.src:5:1: a lambda takes its method name from the interface it is passed to, and nothing here expects one; declare an interface and bind it to a local of that type
+  |
+5 | (int a) => a;
+  | ^

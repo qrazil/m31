@@ -176,7 +176,9 @@ impl Lowerer {
             // A call, a construction (whose field defaults are expressions
             // of their own), and `?` (which may return, releasing every
             // local) are all taken to run code.
-            Expr::Call(..) | Expr::New(..) | Expr::Try(..) => true,
+            // A lambda is a construction too -- of the synthesised type
+            // whose fields are its captures -- so it is treated as one.
+            Expr::Call(..) | Expr::New(..) | Expr::Try(..) | Expr::Lambda(..) => true,
         }
     }
 
@@ -221,9 +223,10 @@ impl Lowerer {
     }
 
     /// The type of `e` where it can be read off without lowering anything.
-    /// Only what `may_run_code` needs to tell a built-in operator or method
-    /// from a user one; `None` means "do not know".
-    fn static_ty(&self, e: &Expr, scoped: bool) -> Option<Ty> {
+    /// What `may_run_code` needs to tell a built-in operator or method from
+    /// a user one, and what a diagnostic needs to say what a name already
+    /// is; `None` means "do not know".
+    pub(super) fn static_ty(&self, e: &Expr, scoped: bool) -> Option<Ty> {
         match e {
             Expr::Int(..) => Some(Ty::Int),
             Expr::Float(..) => Some(Ty::Float),

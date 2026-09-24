@@ -1856,6 +1856,81 @@ return a library's own error type — the same constraint that made `Option`
 and `Result` built in — and a library that needs the distinction builds one
 on `byte_at` and declares its own error. See `docs/stdlib-decision.md`.
 
+### 6.7 Callbacks: a function's name, and a lambda
+
+**A callback's type is an ordinary one-method interface.** There is no
+function type (§9). Three things may be written where one is expected, and
+the third is what the other two abbreviate:
+
+```c
+interface Less { int cmp(Point a, Point b); }
+int smallest(List<Point> ps, Less order) { .. }
+
+smallest(ps, by_x);                              // a function's name
+smallest(ps, (Point a, Point b) => a.x - b.x);   // a lambda
+smallest(ps, ByAxis(true));                      // an object with fields
+```
+
+A callback is called the way any interface value is: `order.cmp(a, b)`,
+never `order(a, b)`.
+
+**A lambda is `( params ) => expr`.** Its parameter types are written, like
+every other binding in the language, and its body is one expression. It has
+no type of its own: the method name, the number of parameters, their types
+and the return type all come from the interface it is given to, and it is
+*checked* against that. Matching is exact — same types in order, same return
+type, no variance — and the receiver is not a parameter, so a function of
+*n* parameters matches a method of *n*.
+
+`?` may not appear in a lambda's body: it returns from the enclosing
+function, and a lambda has none a reader can act on.
+
+**Where they may be written.** Anywhere a one-method interface is the
+written type: an argument, a local declaration, an assignment, a `return`, a
+field of a construction, an element of a collection literal, a channel
+payload, a parameter's default. Not where the type is inferred —
+information flows from the target to the callback, never back, so a callback
+handed to an unconstrained type parameter or to a builtin is refused.
+
+**Capture is inferred, and there is one mode: exactly what `=` means.** A
+lambda's captures are the names from the enclosing scope its body mentions.
+An `int`, `float` or `bool` is copied; a reference is aliased and retained.
+There is no capture list, because there is nothing to choose.
+
+```c
+int n = 5;
+List<int> xs = [];
+Get g = () => n;              // the int is copied
+Run r = (int v) => xs.push(v); // the list is the same list
+n = 9;
+print(g.of());                // 5
+```
+
+> **The binding cannot be changed. The object can.**
+
+Inside a method, a bare field name, a bare sibling call and `this` are all
+the receiver, reached without writing `this.` (§4.3). A lambda that mentions
+any of them captures **the receiver**, once — so a field read inside the
+lambda reads the live object, and changing that object is visible through
+the lambda, as it is through any other name for it.
+
+The captures are the fields of an unnameable type the compiler synthesises,
+which is the whole of the implementation and the reason nothing else has to
+be said: a capture is a field store, so **refcounting, destructors, `const`
+and its deep copy, the refusal of a resource in a constant, and the
+uniqueness check at a thread boundary all apply unchanged.** A lambda that
+captures nothing has no fields, so it is one static immortal object: no
+allocation, no refcount traffic, and free to cross a thread.
+
+A lambda that captures a live local cannot cross a thread boundary — the
+capture is reachable from two places, which is what the uniqueness check
+refuses. This is why `spawn` takes a function and its arguments (§8) rather
+than a callback.
+
+**A callback stored in a field of an object it captures is a cycle, and a
+cycle leaks** (§7.1). The rule is the shape, not a mechanism: there are no
+weak references.
+
 ---
 
 ## 7. Memory
@@ -2090,8 +2165,15 @@ Stated so the absence is a decision and not an oversight:
     ordinary one-method interface, and a function's name is a value exactly
     where such an interface is expected: `interface Less { int cmp(Point a,
     Point b); }` and then `smallest(ps, by_x)`. Calling one is a method call,
-    `order.cmp(a, b)`, never `order(a, b)` (docs/closures-decision.md)
-  - closures and lambdas
+    `order.cmp(a, b)`, never `order(a, b)` (§6.7, docs/closures-decision.md)
+  - a block-bodied lambda, and an inferred lambda parameter type. A lambda is
+    one expression with its parameter types written (§6.7); anything longer
+    is a named function, whose name is a value. Both are additive later
+  - a capture list, and capture by reference — there is one capture mode and
+    it is what `=` means (§6.7)
+  - a bound method value — `p.area` is not a value. A method is reached
+    through a receiver; a lambda `(Point p) => p.area()` is the way to write
+    one down
   - inheritance, method overriding, abstract types
   - defining an operator outside the fixed set of §6.2, or changing one on a
     built-in type
@@ -2176,8 +2258,11 @@ atom        = INT | FLOAT | STR | "true" | "false"
             | type "." IDENT [ args ]                 (* enum variant, static method,
                                                          float.from_bits, str.from_chars *)
             | "this"                                  (* instance methods only, §4.3 *)
-            | seqlit | maplit
+            | seqlit | maplit | lambda
             | "(" expr ")" ;
+
+lambda      = "(" [ sigparams ] ")" "=>" expr ;       (* §6.7; types written, one
+                                                         expression, no defaults *)
 
 seqlit      = "[" [ expr { "," expr } ] "]"           (* List, Array or bytes, §3.9 *)
             | "[" expr ";" expr "]" ;                 (* value; count *)

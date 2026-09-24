@@ -1,0 +1,7 @@
+// `?` returns from the enclosing function. A lambda's body is not inside
+// the function a reader can see it in -- it is the body of a synthesised
+// method on a synthesised type -- so there is no return for `?` to mean.
+interface Get { int of(); }
+Option<int> half(int n) { return Option<int>.Some(n / 2); }
+Get g = () => half(4)?;
+print(g.of());

@@ -1,0 +1,13 @@
+pub type Point {
+  pub int x;
+  pub int y;
+}
+
+pub interface Less {
+  int cmp(Point a, Point b);
+}
+
+// Not exported.
+int by_y(Point a, Point b) {
+  return a.y - b.y;
+}

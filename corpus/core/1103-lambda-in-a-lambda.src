@@ -1,0 +1,54 @@
+// A lambda inside a lambda. Nothing special is needed for it: the inner one
+// is lowered while the OUTER one's synthesised method is being lowered, so
+// the outer lambda's parameters are ordinary locals there and its captures
+// are ordinary fields of the receiver -- and the same two rules apply
+// unchanged. An inner lambda that mentions one of the outer's captures
+// therefore captures the outer lambda object and reaches the original
+// receiver through it.
+interface Get { int of(); }
+interface Make { Get build(int k); }
+interface Twice { Make outer(int a); }
+
+// captures nothing: both levels are field-less, so both are one static
+// immortal object and nothing is allocated at either level.
+Make plain = (int k) => () => 7;
+
+// the inner one captures the outer one's PARAMETER, which is an ordinary
+// local where the inner one is written.
+Make inner_param = (int k) => () => k * 2;
+
+// and a local from two levels out, plus the parameter.
+int base = 1000;
+Make both = (int k) => () => base + k;
+
+// three deep, each level adding one name.
+Twice deep = (int a) => (int b) => () => base + a * 100 + b;
+
+print(plain.build(1).of());
+print(inner_param.build(3).of());
+print(both.build(3).of());
+print(deep.outer(2).build(5).of());
+
+// the same, inside a method: `base` here is a field of the receiver, so the
+// outer lambda captures `this` and the inner one captures the outer lambda.
+type Counter { int start; }
+int Counter.bump() { return start + 1; }
+Make Counter.maker() { return (int k) => () => start + bump() + k; }
+
+Counter c = Counter(10);
+Make m = c.maker();
+print(m.build(3).of());
+c.start = 100;
+print(m.build(3).of());
+
+// a lambda made inside a loop body inside a lambda: each build gets its own
+// object, and each holds that call's argument.
+List<Get> gs = [];
+int i = 0;
+while (i < 3) {
+  gs.push(both.build(i));
+  i = i + 1;
+}
+print(gs[0].of());
+print(gs[1].of());
+print(gs[2].of());

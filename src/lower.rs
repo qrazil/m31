@@ -230,6 +230,18 @@ pub struct Lowerer {
     /// They are made while a body is being lowered, which is in the middle
     /// of the loop that lowers bodies, so they are lowered after it.
     synth_funcs: Vec<Func>,
+    /// How many lambda types have been synthesised, so each gets a name of
+    /// its own. A lambda is not cached the way a function's name is: two
+    /// lambdas that look alike are still two sites with two capture sets.
+    lambdas: u32,
+    /// For each synthesised lambda method, by function key, the target it
+    /// was checked against: the interface as a reader spells it and the
+    /// method's name. Kept only so that a body whose type is wrong can be
+    /// told about in the interface's words rather than the wrapper's.
+    lambda_targets: HashMap<String, (String, String)>,
+    /// Set while a lambda's synthesised method is the function being
+    /// lowered, to the entry `lambda_targets` holds for it.
+    cur_lambda: Option<(String, String)>,
     /// Names declared by the statements at the entry file's top level, which
     /// are the program's body and so are locals of it -- NOT globals a
     /// function can reach. Kept only to say that in the diagnostic, which is
@@ -592,6 +604,9 @@ impl Lowerer {
             has_destructors: false,
             fn_refs: HashMap::new(),
             synth_funcs: Vec::new(),
+            lambdas: 0,
+            lambda_targets: HashMap::new(),
+            cur_lambda: None,
             entry_locals: std::collections::HashSet::new(),
             entry_module: String::new(),
             in_entry: false,
@@ -3319,6 +3334,19 @@ impl Lowerer {
     /// spelling: inside its own module it is `Point`, and from outside it is
     /// `lib.Point`, which is how it would be written.
     /// A type as the source spells it: `List<int>`, `Map<str, lib.Point>`.
+    /// A type with its article, for a sentence that reads: "this lambda's
+    /// body is an int". Only the vowel matters, and only the spelling the
+    /// reader sees is looked at.
+    fn a_ty(&self, t: Ty) -> String {
+        let n = self.tyname(t);
+        let a = if n.starts_with(['a', 'e', 'i', 'o', 'u']) {
+            "an"
+        } else {
+            "a"
+        };
+        format!("{a} {n}")
+    }
+
     fn tyname(&self, t: Ty) -> String {
         match t {
             Ty::User(i) => self.show_name(&self.ty_exprs[i as usize].name),
@@ -3952,6 +3980,7 @@ impl Lowerer {
         self.synth = 0;
         self.cur = 0;
         self.ret_ty = f.ret;
+        self.cur_lambda = self.lambda_targets.get(&f.key()).cloned();
 
         let entry = self.new_block();
         self.switch_to(entry);
@@ -4339,6 +4368,27 @@ impl Lowerer {
                     (Some(e), want) => {
                         let val = self.lower_expr_as(e, want)?;
                         if !self.assignable(val.ty, want) {
+                            // A lambda's body is this `return`, and it was
+                            // never written as one: say what the interface
+                            // asked for, which is where the truth is.
+                            if let Some((iface, method)) = self.cur_lambda.clone() {
+                                let head =
+                                    format!("`{iface}.{method}` returns {}", self.tyname(want));
+                                return Err(Diag::new(
+                                    e.span(),
+                                    if val.ty == Ty::Void {
+                                        // The commonest shape of this
+                                        // mistake: a body written for its
+                                        // effect where a value is wanted.
+                                        format!("{head}, but this lambda's body has no value")
+                                    } else {
+                                        format!(
+                                            "{head}, this lambda's body is {}",
+                                            self.a_ty(val.ty)
+                                        )
+                                    },
+                                ));
+                            }
                             return Err(Diag::new(e.span(), self.mismatch(want, val.ty)));
                         }
                         // Returns are owned (+1). Retain a borrowed value
@@ -6150,6 +6200,11 @@ impl Lowerer {
         if let Some(v) = self.lower_fn_ref(e, want)? {
             return Ok(v);
         }
+        // A lambda is the same thing unnamed, and is a value in exactly the
+        // same places, for the same reason: the target is written down here.
+        if let Some(v) = self.lower_lambda(e, want)? {
+            return Ok(v);
+        }
         match e {
             Expr::SeqLit(..) | Expr::RepeatLit(..) | Expr::MapLit(..) => {
                 self.lower_literal(e, Some(want))
@@ -6513,6 +6568,508 @@ impl Lowerer {
             )));
         }
         Ok(m)
+    }
+
+    // ---- lambdas (docs/closures-decision.md) ----------------------------
+    //
+    // A lambda is the same thing as a function's name, unnamed: it is a
+    // value exactly where a one-method interface is expected, and it takes
+    // that interface's method name, arity, parameter types and return type
+    // from the target. So it is lowered the same way -- a synthesised type
+    // and a synthesised method -- with one addition: the names the body
+    // mentions from the enclosing scope become the type's FIELDS.
+    //
+    // That is the whole of capture. There is one mode and it is what `=`
+    // already means, because the lambda IS a construction (§6.4) of that
+    // type: an `int` is copied into a field, a reference is retained by it.
+    // Everything that applies to a field therefore applies to a capture with
+    // no new code -- refcounting, destructors, `const`'s deep copy, the
+    // refusal of a resource in a constant, and the uniqueness check at a
+    // thread boundary.
+
+    /// The field holding the receiver of the method a lambda was written in.
+    /// `$` cannot appear in a source identifier, so it collides with nothing.
+    const SELF: &'static str = "$self";
+
+    /// `(Point a, Point b) => a.x - b.x` where a one-method interface is
+    /// expected. `Ok(None)` when the expression is not a lambda.
+    fn lower_lambda(&mut self, e: &Expr, want: Ty) -> Result<Option<Val>, Diag> {
+        let Expr::Lambda(params, body, span) = e else {
+            return Ok(None);
+        };
+        let m = self.lambda_method(params, want, *span)?;
+        self.lambda_check(body)?;
+        for (i, p) in params.iter().enumerate() {
+            // A lambda's parameters are declarations like any other, so
+            // §4.1 applies to them: they may not shadow a local, a
+            // parameter, a field of the receiver, a function, a type, a
+            // constant or an import. The cost lands on short names in
+            // functions that have short locals, and the fix is a rename.
+            self.check_shadow(&p.name, p.span)?;
+            if params[..i].iter().any(|q| q.name == p.name) {
+                return Err(Diag::new(
+                    p.span,
+                    format!("duplicate parameter `{}`", p.name),
+                ));
+            }
+        }
+        // Every lambda inside this one is checked here too, in the scope the
+        // OUTER lambda is written in: by the time an inner one is lowered
+        // the enclosing method is the outer lambda's, whose receiver is the
+        // outer lambda object, and the names of this scope are no longer
+        // visible to be shadowed.
+        self.lambda_inner_shadow(body)?;
+        let body = self.lambda_rewrite(body);
+        let caps = self.lambda_captures(&body, *span)?;
+        let ctor = self.lambda_wrapper(params, &body, &m, want, &caps, *span)?;
+        self.lower_expr(&ctor).map(Some)
+    }
+
+    /// The refusal for `f(..)` where `f` is a value in scope rather than a
+    /// function. `None` when the name is not one, so the ordinary "unknown
+    /// function" stands.
+    ///
+    /// There is exactly one call syntax in this language and it is never
+    /// `value(args)`: an interface value is called through its method,
+    /// which is what makes `f(x)`, `obj.handler(x)` and `xs[0](y)` need no
+    /// disambiguation rules at all. This says so at the one place a reader
+    /// coming from a language with function values will write it.
+    fn call_of_a_value(&self, name: &str, span: Span) -> Option<Diag> {
+        let ty = self.static_ty(&Expr::Var(name.to_string(), span), true)?;
+        let what = self.tyname(ty);
+        // A one-method interface can say exactly what to write instead.
+        let one = self
+            .tdef_of(ty)
+            .filter(|t| self.typedefs[*t as usize].is_interface)
+            .map(|t| &self.iface_methods[t as usize])
+            .filter(|ms| ms.len() == 1)
+            .map(|ms| ms[0].name.clone());
+        Some(Diag::new(
+            span,
+            match one {
+                Some(m) => format!(
+                    "`{name}` is a `{what}`, not a function: a callback is called \
+                     through its method, so write `{name}.{m}(..)`"
+                ),
+                None => format!("`{name}` is a `{what}`, not a function"),
+            },
+        ))
+    }
+
+    /// The refusal for a lambda written where nothing says what type is
+    /// wanted: an argument to a builtin or to an unconstrained type
+    /// parameter, an expression statement.
+    fn lambda_no_target(span: Span) -> Diag {
+        Diag::new(
+            span,
+            "a lambda takes its method name from the interface it is passed to, \
+             and nothing here expects one; declare an interface and bind it to a \
+             local of that type",
+        )
+    }
+
+    /// The one method the target interface declares, once the lambda's shape
+    /// has been checked against it. Everything but the return type is known
+    /// here; the body's type is checked where the body is lowered.
+    fn lambda_method(&self, params: &[Param], want: Ty, span: Span) -> Result<Func, Diag> {
+        let not_one = || {
+            Diag::new(
+                span,
+                format!(
+                    "a lambda takes its method name from the one-method interface it \
+                     is passed to, and `{}` is not one; declare an interface and bind \
+                     it to a local of that type",
+                    self.tyname(want)
+                ),
+            )
+        };
+        let Some(tt) = self.tdef_of(want) else {
+            return Err(not_one());
+        };
+        if !self.typedefs[tt as usize].is_interface {
+            return Err(not_one());
+        }
+        let ms = &self.iface_methods[tt as usize];
+        if ms.len() != 1 {
+            // The reader wrote an interface, so say what is wrong with THIS
+            // interface, and name its methods: which one the lambda was
+            // meant to be is the question they have to answer.
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`{}` declares {} methods ({}); a lambda supplies one, so write a \
+                     type with all of them and pass one of those",
+                    self.tyname(want),
+                    ms.len(),
+                    ms.iter()
+                        .map(|m| format!("`{}`", m.name))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ));
+        }
+        let m = ms[0].clone();
+        // Arity and parameter types name the INTERFACE METHOD, not the
+        // lambda, because that is where the truth is: the lambda is being
+        // checked against it and cannot change it.
+        if m.params.len() != params.len() {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`{}.{}` takes {} parameter{}, this lambda takes {}",
+                    self.tyname(want),
+                    m.name,
+                    m.params.len(),
+                    if m.params.len() == 1 { "" } else { "s" },
+                    params.len()
+                ),
+            ));
+        }
+        if m.params.iter().zip(params).any(|(a, b)| a.ty != b.ty) {
+            let sh = |ps: &[Param]| {
+                ps.iter()
+                    .map(|p| self.tyname(p.ty))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            return Err(Diag::new(
+                span,
+                format!(
+                    "`{}.{}` takes ({}), this lambda takes ({})",
+                    self.tyname(want),
+                    m.name,
+                    sh(&m.params),
+                    sh(params)
+                ),
+            ));
+        }
+        Ok(m)
+    }
+
+    /// What a lambda's body may not contain, wherever it appears in it.
+    fn lambda_check(&self, e: &Expr) -> Result<(), Diag> {
+        if let Expr::Try(_, span) = e {
+            return Err(Diag::new(
+                *span,
+                "`?` returns from the enclosing function, and a lambda has no \
+                 enclosing function a reader can act on; write a named function",
+            ));
+        }
+        // A bare call that is both a method of the receiver and a function
+        // is ambiguous here for the same reason it is outside a lambda --
+        // and the rewrite below would silently pick the method, so the
+        // refusal has to be made before it.
+        if let Expr::Call(name, _, span) = e {
+            if self.sibling_method(name).is_some() {
+                let written = match self.shown.get(name) {
+                    Some((generic, _)) => crate::ast::bare(generic).to_string(),
+                    None => name.clone(),
+                };
+                if self.sigs.contains_key(&self.resolve_fn(&written))
+                    || BUILTIN_FNS.contains(&written.as_str())
+                {
+                    let (tid, _) = self.recv.expect("sibling_method checked the receiver");
+                    return Err(Diag::new(
+                        *span,
+                        format!(
+                            "`{written}` is both a method of `{}` and a function, so a \
+                             bare `{written}(..)` here could mean either; rename one",
+                            self.show_name(&self.typedefs[tid as usize].name)
+                        ),
+                    ));
+                }
+            }
+        }
+        Self::kids(e, &mut |k| self.lambda_check(k))
+    }
+
+    /// `check_shadow` for the parameters of every lambda nested inside this
+    /// one, in the scope this one is written in.
+    fn lambda_inner_shadow(&self, e: &Expr) -> Result<(), Diag> {
+        if let Expr::Lambda(ps, _, _) = e {
+            for p in ps {
+                self.check_shadow(&p.name, p.span)?;
+            }
+        }
+        Self::kids(e, &mut |k| self.lambda_inner_shadow(k))
+    }
+
+    /// Every immediate subexpression of `e`, for a walk that only reads.
+    fn kids(e: &Expr, f: &mut impl FnMut(&Expr) -> Result<(), Diag>) -> Result<(), Diag> {
+        let args = |a: &Args, f: &mut dyn FnMut(&Expr) -> Result<(), Diag>| {
+            for x in a.pos.iter().chain(a.named.iter().map(|(_, x)| x)) {
+                f(x)?;
+            }
+            Ok(())
+        };
+        match e {
+            Expr::Int(..)
+            | Expr::Float(..)
+            | Expr::Bool(..)
+            | Expr::Str(..)
+            | Expr::Var(..)
+            | Expr::This(..) => Ok(()),
+            Expr::Un(_, x, _) | Expr::Field(x, _, _) | Expr::Try(x, _) | Expr::Lambda(_, x, _) => {
+                f(x)
+            }
+            Expr::Bin(_, a, b, _) | Expr::Index(a, b, _) | Expr::RepeatLit(a, b, _) => {
+                f(a)?;
+                f(b)
+            }
+            Expr::MethodCall(x, _, a, _) => {
+                f(x)?;
+                args(a, f)
+            }
+            Expr::Call(_, a, _) | Expr::New(_, a, _) | Expr::EnumNew(_, _, a, _) => args(a, f),
+            Expr::SeqLit(xs, _) => xs.iter().try_for_each(f),
+            Expr::MapLit(kvs, _) => kvs.iter().try_for_each(|(k, v)| {
+                f(k)?;
+                f(v)
+            }),
+        }
+    }
+
+    /// A lambda's body, with everything it says about the enclosing
+    /// receiver said through `$self` instead.
+    ///
+    /// Inside the synthesised method the receiver is the LAMBDA, so `this`,
+    /// a bare field name and a bare sibling call would all mean the wrong
+    /// object -- or nothing at all. Each becomes the same thing written
+    /// against the captured receiver, and the capture walk below then sees
+    /// one name, `$self`, however many of the three the body used.
+    ///
+    /// The three are rewritten identically because the language already
+    /// treats them identically: "a method of the receiver is called by its
+    /// bare name, **as a field is read**". They are all `this.`, unwritten,
+    /// so a lambda that mentions any of them captures `this` -- which is
+    /// what `=` does with `this`: it retains the object. Field reads
+    /// therefore stay live, as they read the same object a reader is
+    /// looking at, and a field's REASSIGNMENT is visible through the lambda
+    /// exactly as it is through any other name for that object.
+    ///
+    /// Nested lambdas are rewritten too, and correctly: an inner body's
+    /// `$self` is a field of the outer lambda, so when the inner one is
+    /// lowered this same rewrite turns it into `$self.$self`, which reaches
+    /// the original receiver through the outer lambda it captured.
+    fn lambda_rewrite(&self, e: &Expr) -> Expr {
+        let go = |x: &Expr| Box::new(self.lambda_rewrite(x));
+        let args = |a: &Args| Args {
+            pos: a.pos.iter().map(|x| self.lambda_rewrite(x)).collect(),
+            named: a
+                .named
+                .iter()
+                .map(|(n, x)| (n.clone(), self.lambda_rewrite(x)))
+                .collect(),
+        };
+        let this = |s: Span| Box::new(Expr::Var(Self::SELF.to_string(), s));
+        match e {
+            Expr::This(s) => Expr::Var(Self::SELF.to_string(), *s),
+            Expr::Var(n, s) if self.lookup(n).is_none() && self.recv_field(n).is_some() => {
+                Expr::Field(this(*s), n.clone(), *s)
+            }
+            Expr::Call(n, a, s) if self.sibling_method(n).is_some() => {
+                Expr::MethodCall(this(*s), n.clone(), args(a), *s)
+            }
+            Expr::Int(..) | Expr::Float(..) | Expr::Bool(..) | Expr::Str(..) | Expr::Var(..) => {
+                e.clone()
+            }
+            Expr::Un(op, x, s) => Expr::Un(*op, go(x), *s),
+            Expr::Field(o, f, s) => Expr::Field(go(o), f.clone(), *s),
+            Expr::Try(x, s) => Expr::Try(go(x), *s),
+            Expr::Lambda(ps, x, s) => Expr::Lambda(ps.clone(), go(x), *s),
+            Expr::Bin(op, a, b, s) => Expr::Bin(*op, go(a), go(b), *s),
+            Expr::Index(a, b, s) => Expr::Index(go(a), go(b), *s),
+            Expr::RepeatLit(a, b, s) => Expr::RepeatLit(go(a), go(b), *s),
+            Expr::MethodCall(o, m, a, s) => Expr::MethodCall(go(o), m.clone(), args(a), *s),
+            Expr::Call(n, a, s) => Expr::Call(n.clone(), args(a), *s),
+            Expr::New(t, a, s) => Expr::New(*t, args(a), *s),
+            Expr::EnumNew(t, v, a, s) => Expr::EnumNew(*t, v.clone(), args(a), *s),
+            Expr::SeqLit(xs, s) => {
+                Expr::SeqLit(xs.iter().map(|x| self.lambda_rewrite(x)).collect(), *s)
+            }
+            Expr::MapLit(kvs, s) => Expr::MapLit(
+                kvs.iter()
+                    .map(|(k, v)| (self.lambda_rewrite(k), self.lambda_rewrite(v)))
+                    .collect(),
+                *s,
+            ),
+        }
+    }
+
+    /// What a lambda's body takes from the scope around it: for each, the
+    /// field it becomes, the expression that fills the field at the site,
+    /// and its type.
+    ///
+    /// **There is no capture list and there is nothing to infer.** A name
+    /// the body mentions that resolves to a local or a parameter here is a
+    /// capture; a function, a type, a module constant or an import is not,
+    /// because the synthesised method is declared in this module and reaches
+    /// them the same way this body does.
+    ///
+    /// A lambda's own parameters -- and a nested lambda's -- are never
+    /// mistaken for captures: nothing shadows anything, so a parameter's
+    /// name cannot also be a name in scope here.
+    fn lambda_captures(&mut self, body: &Expr, span: Span) -> Result<Vec<(Param, Expr)>, Diag> {
+        let mut names: Vec<String> = Vec::new();
+        Self::mentions(body, &mut names);
+        let mut out = Vec::new();
+        for name in names {
+            let (ty, init) = if name == Self::SELF {
+                // The enclosing receiver. `this_val` gives the diagnostic
+                // for a lambda that mentions one where there is none.
+                (self.this_val(span)?.ty, Expr::This(span))
+            } else if let Some((ty, _)) = self.lookup(&name) {
+                (ty, Expr::Var(name.clone(), span))
+            } else {
+                continue;
+            };
+            out.push((
+                Param {
+                    ty,
+                    name,
+                    default: None,
+                    embedded: false,
+                    is_pub: false,
+                    span,
+                },
+                init,
+            ));
+        }
+        Ok(out)
+    }
+
+    /// Every name the body mentions, in the order it first mentions them,
+    /// so the capture fields of one lambda are always laid out the same way.
+    fn mentions(e: &Expr, out: &mut Vec<String>) {
+        if let Expr::Var(n, _) = e {
+            if !out.iter().any(|x| x == n) {
+                out.push(n.clone());
+            }
+        }
+        let _ = Self::kids(e, &mut |k| {
+            Self::mentions(k, out);
+            Ok(())
+        });
+    }
+
+    /// The synthesised type and method for one lambda, and the construction
+    /// that makes one: `__lam$3$Less(n, xs)`.
+    fn lambda_wrapper(
+        &mut self,
+        params: &[Param],
+        body: &Expr,
+        m: &Func,
+        want: Ty,
+        caps: &[(Param, Expr)],
+        span: Span,
+    ) -> Result<Expr, Diag> {
+        let iname = self.typedefs[self.tdef_of(want).expect("checked") as usize]
+            .name
+            .clone();
+        // Not cached, and not named after the site: two lambdas at one
+        // source position are two types whenever monomorphisation made two
+        // of them, and each instantiation has its own concrete capture
+        // types. A counter is what makes the name unique AND the emission
+        // reproducible, since lowering order is fixed.
+        self.lambdas += 1;
+        let tname = format!("__lam${}${iname}", self.lambdas);
+        let tid = self.typedefs.len() as u32;
+        self.typedefs.push(TypeDef {
+            name: tname.clone(),
+            fields: caps
+                .iter()
+                .map(|(p, _)| (p.name.clone(), self.irty(p.ty)))
+                .collect(),
+            variants: Vec::new(),
+            is_enum: false,
+            is_interface: false,
+            is_chan: false,
+            is_distinct: false,
+            vtable: Vec::new(),
+            // A synthesised type cannot declare a destructor -- it is
+            // anonymous, there is nowhere to write one -- and it needs
+            // none: its fields are released like any other type's, so a
+            // captured `File` is closed when the lambda's count reaches
+            // zero. It is not a value anyone compares, hashes or sorts
+            // either; the interface it satisfies is all that is asked of it.
+            destructor: None,
+            resource: None,
+            cmp: None,
+            hash: None,
+            eq: None,
+        });
+        self.field_surface
+            .push(caps.iter().map(|(p, _)| p.ty).collect());
+        self.field_params
+            .push(caps.iter().map(|(p, _)| p.clone()).collect());
+        self.distinct_base.push(None);
+        self.variant_surface.push(Vec::new());
+        self.iface_methods.push(Vec::new());
+        self.type_module.push(self.cur_module.clone());
+        self.type_pub.push(true);
+
+        // The method IS the interface's method: same name, same signature.
+        // The parameter names are the lambda's own, because its body uses
+        // them; they passed `check_shadow` at the site, so they collide with
+        // nothing the synthesised method can see either.
+        let f = Func {
+            module: self.cur_module.clone(),
+            is_pub: true,
+            ret: m.ret,
+            is_static: false,
+            is_prim: false,
+            recv: Some(tname.clone()),
+            name: m.name.clone(),
+            tparams: Vec::new(),
+            recv_tparams: Vec::new(),
+            params: params.to_vec(),
+            // One expression, so: return it, or -- where the interface says
+            // the method returns nothing -- evaluate it and discard the
+            // value, which is what an expression statement does.
+            body: vec![if m.ret == Ty::Void {
+                Stmt::Eval {
+                    expr: body.clone(),
+                    span,
+                }
+            } else {
+                Stmt::Return {
+                    value: Some(body.clone()),
+                    span,
+                }
+            }],
+            span,
+        };
+        self.sigs.insert(
+            f.key(),
+            Sig {
+                params: params.to_vec(),
+                ret: m.ret,
+                module: self.cur_module.clone(),
+                is_pub: true,
+                is_prim: false,
+            },
+        );
+        self.lambda_targets
+            .insert(f.key(), (self.tyname(want), m.name.clone()));
+        self.synth_funcs.push(f);
+
+        // The captures are FIELDS, so the lambda is an ordinary
+        // construction and every rule about storing a value in a field
+        // applies to it without being restated: the +1, the deep copy a
+        // `const` takes, the resource a constant may not hold, the
+        // destructor that runs when the last reference goes.
+        let ty = self
+            .ty_named(&tname)
+            .expect("the lambda's type was just declared");
+        let _ = tid;
+        Ok(Expr::New(
+            ty,
+            Args {
+                pos: caps.iter().map(|(_, e)| e.clone()).collect(),
+                named: Vec::new(),
+            },
+            span,
+        ))
     }
 
     /// `[]`, `[a, b, c]`, `[x; n]`, `{}`, `{k: v}`.
@@ -6950,6 +7507,11 @@ impl Lowerer {
                 Ok(Val::new(v, Ty::Str, false))
             }
             Expr::This(span) => self.this_val(*span),
+            // A lambda somewhere nothing says what type is wanted. Like a
+            // function's name, it is checked against a target and is never
+            // a source of inference, so with no target there is nothing to
+            // check it against and not even a method name to give it.
+            Expr::Lambda(_, _, span) => Err(Self::lambda_no_target(*span)),
             Expr::Var(name, span) => {
                 if self.moved.iter().any(|n| n == name) {
                     return Err(Diag::new(
@@ -7083,6 +7645,14 @@ impl Lowerer {
                 // name one of its fields.
                 if let Some(v) = self.sibling_call(name, args, *span)? {
                     return Ok(v);
+                }
+                // `order(a, b)` where `order` is a value. Now that a callback
+                // can be written down this is the likeliest mistake a
+                // newcomer makes, and "unknown function `order`" is no help:
+                // the name IS in scope, and a callback is called the way
+                // every interface value is, through its method.
+                if let Some(d) = self.call_of_a_value(name, *span) {
+                    return Err(d);
                 }
                 // A bare name means this module's declaration, then a
                 // builtin. Another module's name is not in scope at all --

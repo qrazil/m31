@@ -1,0 +1,71 @@
+// Capture is inferred, there is one mode, and it is exactly what `=` means:
+// an int, float or bool is COPIED, a reference is ALIASED and retained. That
+// is not a rule the lambda adds -- the captures are the fields of the
+// synthesised type, and "a value stored into a field is retained by the
+// container" is already the protocol (§7.2). There is no capture list
+// because there is nothing to list.
+//
+// The consequence to read off: **the binding cannot be changed, the object
+// can.** A lambda holding an `int` cannot see a later assignment to the
+// local it copied; a lambda holding a `List` sees every change to that one
+// list, because a second name for a list is a second name for it everywhere.
+interface Get { int of(); }
+interface Run { void go(int v); }
+type Box { int n; }
+
+// --- an int: copied at the moment the lambda is made ---------------------
+int n = 5;
+Get g = () => n;
+print(g.of());
+n = 9;
+print(g.of());
+print(n);
+
+// --- a reference: one object, seen through two names ---------------------
+List<int> xs = [1];
+Run push = (int v) => xs.push(v);
+Get size = () => xs.size();
+push.go(2);
+push.go(3);
+print(size.of());
+print(xs.size());
+print(xs[2]);
+xs.push(4);
+print(size.of());
+
+// A user type is a reference too, so a field changed outside is seen
+// inside, and a field changed inside is seen outside.
+Box b = Box(1);
+Get read = () => b.n;
+Run write = (int v) => set(b, v);
+print(read.of());
+b.n = 7;
+print(read.of());
+write.go(11);
+print(b.n);
+
+// --- each lambda made in a loop holds that turn's value ------------------
+// Java's effectively-final semantics, by construction rather than by rule:
+// the capture is a copy taken when the construction runs, so the classic
+// JavaScript `var i` loop bug cannot be written here.
+List<Get> gs = [];
+int i = 0;
+while (i < 3) {
+  int here = i * 10;
+  gs.push(() => here);
+  i = i + 1;
+}
+print(gs[0].of());
+print(gs[1].of());
+print(gs[2].of());
+
+// --- two captures, of both kinds, in one lambda --------------------------
+int base = 100;
+List<int> more = [1, 2];
+Get both = () => base + more.size();
+print(both.of());
+more.push(3);
+base = 0;
+print(both.of());
+
+void set(Box t, int v) { t.n = v; }
