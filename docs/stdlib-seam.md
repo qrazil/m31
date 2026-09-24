@@ -591,3 +591,37 @@ own: *"this build cannot resolve host names; use a literal IP address."* A
 program sees an `Err` that says what is wrong and what to do, not a crash,
 and the corpus asks the question in a form whose answer is the same on both
 backends.
+
+## 10. `lib/http.src` needs no primitive at all
+
+Added 2026-09-23. It is the first module with **no `prim` line in it**, and
+that is the point rather than a happy accident: HTTP/1.1 is a wire format,
+and a wire format baked into a runtime that promises to freeze is a set of
+edge cases nobody can ever change. Oro says the same of its own
+`std/http.oro` in its first paragraph — *"there is no Rust `http` module and
+there should never be one"* — and the argument transfers exactly.
+
+What it is written over is `net` and `io` and nothing else. The header block
+is one `read_until(CRLFCRLF, MAX_HEAD)`; the lines are `bytes.split(CRLF)`;
+the colon is `bytes.index_of`; a sized body is a loop over `read`; a chunked
+body is a `read_until(CRLF, MAX_CHUNK_LINE)` for each size line and a `read`
+for each chunk. Every one of those is a method §8 and §9 already put in the
+language for reasons of their own, which is the test a primitive has to pass
+(§2): `http` asked for nothing new, so nothing new was added.
+
+Two consequences worth writing down.
+
+**The parsers take an `io.Stream` and never a socket.** `read_request`,
+`write_request`, `read_response` and `write_response` are declared against
+the interface, so the whole grammar is driven from an `io.Buffer` in
+`corpus/modules/stdlib-http*` with no listener, no port and no timing —
+which is what makes it possible to check ninety-odd refusals in one
+deterministic program, and to compare each one against Python's
+`http.client` and `email.parser`. Only `serve`, `serve_conn`, `get` and
+`fetch` mention `net`, because only they set a timeout or make a connection.
+
+**There is no TLS and no plan to add one below the language.** `parse_url`
+refuses `https://` before a socket exists. A TLS stack is not a system call
+and does not belong at this seam; when there is one it will be a module up
+here, over the same `net.Conn`, and `http` will take a `Stream` from it
+without changing a line — which is the other thing the interface buys.

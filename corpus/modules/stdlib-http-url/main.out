@@ -1,0 +1,56 @@
+http://example.com
+  scheme=http host=example.com port=80
+  path=/ query= target=/
+  host_header=example.com to_str=http://example.com/
+http://example.com/
+  scheme=http host=example.com port=80
+  path=/ query= target=/
+  host_header=example.com to_str=http://example.com/
+http://EXAMPLE.COM/Path
+  scheme=http host=example.com port=80
+  path=/Path query= target=/Path
+  host_header=example.com to_str=http://example.com/Path
+http://example.com:8080/a/b?x=1&y=two
+  scheme=http host=example.com port=8080
+  path=/a/b query=x=1&y=two target=/a/b?x=1&y=two
+  host_header=example.com:8080 to_str=http://example.com:8080/a/b?x=1&y=two
+http://127.0.0.1:9/
+  scheme=http host=127.0.0.1 port=9
+  path=/ query= target=/
+  host_header=127.0.0.1:9 to_str=http://127.0.0.1:9/
+http://[::1]:8080/p
+  scheme=http host=::1 port=8080
+  path=/p query= target=/p
+  host_header=[::1]:8080 to_str=http://[::1]:8080/p
+http://[2001:db8::1]/p
+  scheme=http host=2001:db8::1 port=80
+  path=/p query= target=/p
+  host_header=[2001:db8::1] to_str=http://[2001:db8::1]/p
+http://example.com/a%2Fb/caf%C3%A9?q=%20+%2B#dropped
+  scheme=http host=example.com port=80
+  path=/a/b/café query=q=%20+%2B target=/a%2Fb/caf%C3%A9?q=%20+%2B
+  host_header=example.com to_str=http://example.com/a%2Fb/caf%C3%A9?q=%20+%2B
+http://example.com?only=query
+  scheme=http host=example.com port=80
+  path=/ query=only=query target=/?only=query
+  host_header=example.com to_str=http://example.com/?only=query
+http://example.com:80/explicit-default
+  scheme=http host=example.com port=80
+  path=/explicit-default query= target=/explicit-default
+  host_header=example.com to_str=http://example.com/explicit-default
+quote(/a b/c, safe: '/') = /a%20b/c
+quote(/a b/c, safe: '') = %2Fa%20b%2Fc
+quote(a&b=c, safe: '') = a%26b%3Dc
+quote(a&b=c, safe: '&=') = a&b=c
+quote(café, safe: '/') = caf%C3%A9
+quote(~-._, safe: '/') = ~-._
+quote(100%, safe: '') = 100%25
+unquote(%2Fa%20b, plus: false) = /a b
+unquote(a+b, plus: false) = a+b
+unquote(a+b, plus: true) = a b
+unquote(a%2Bb, plus: true) = a+b
+unquote(caf%C3%A9, plus: false) = café
+unquote(%ff, plus: false) = percent-decoding '%ff' gave bytes that are not UTF-8
+unquote(%zz, plus: false) = the text has a percent escape that is not two hex digits: '%zz'
+unquote(100%, plus: false) = the text ends in an incomplete percent escape
+round trip: true via a%20b%2Fc%3Fd%26e%3Df%2Bg~h.i_j-k%25l%20caf%C3%A9
