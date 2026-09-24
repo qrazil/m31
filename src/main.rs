@@ -18,6 +18,7 @@ mod modules;
 mod mono;
 mod parser;
 mod stdlib;
+mod width;
 
 #[cfg(test)]
 mod tests;

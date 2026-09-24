@@ -1,0 +1,6 @@
+// The other direction. `e` followed by U+0301 COMBINING ACUTE ACCENT is two
+// code points and one cell, so a caret padded per code point lands too far
+// RIGHT -- one column per accent on the line. The three accents below are
+// spelled DECOMPOSED in the source on purpose: the precomposed `é` is one
+// code point and would not show the bug.
+print("résuméé" + nope);

@@ -1,0 +1,8 @@
+// Tabs and wide characters on one line, which is where the two rules have to
+// agree. A tab is ONE column (the compiler cannot know the reader's tab
+// width) and is echoed as a single space, so it contributes one cell as well
+// as one column; the ideographs after it contribute two cells each and one
+// column each. The line below is indented with one real tab.
+if (true) {
+	print("組" + nope);
+}

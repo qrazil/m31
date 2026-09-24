@@ -76,13 +76,20 @@ impl Diag {
         let pad = " ".repeat(num.len());
         // A tab is one column (see `Lexer::bump`), so the echoed line renders
         // one as a single space: any other width and the caret, which is
-        // padded by the column count, would not land under the token.
+        // padded to the text before it, would not land under the token.
         let shown = text.replace('\t', " ");
-        // The column counts code points, so the caret is padded with that
-        // many spaces -- not bytes, which would overshoot on a line holding
-        // `é`, and not display cells, which no compiler can know: a
-        // double-width character still costs one column here.
-        let caret = " ".repeat(self.span.col.saturating_sub(1) as usize);
+        // The COLUMN counts code points, because `line:col` is what an editor
+        // is handed and what it jumps to. The CARET is padded by display
+        // width, because the line above it is printed raw and a terminal
+        // draws it in cells: `漢` takes two of them and a combining mark
+        // takes none, so one space per code point lands the caret in the
+        // wrong place in both directions. Same rule as `unicode.width`, off
+        // the same tables -- see src/width.rs.
+        let before: String = shown
+            .chars()
+            .take(self.span.col.saturating_sub(1) as usize)
+            .collect();
+        let caret = " ".repeat(crate::width::display_width(&before));
         format!("{head}\n{pad} |\n{num} | {shown}\n{pad} | {caret}^")
     }
 }

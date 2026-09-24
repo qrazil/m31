@@ -1,0 +1,4 @@
+corpus/errors/1046-caret-under-wide-characters.src:7:15: unknown variable `nope`
+  |
+7 | print("表計算" + nope);
+  |                  ^

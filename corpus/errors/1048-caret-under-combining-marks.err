@@ -1,0 +1,4 @@
+corpus/errors/1048-caret-under-combining-marks.src:6:22: unknown variable `nope`
+  |
+6 | print("résuméé" + nope);
+  |                   ^

@@ -23,14 +23,27 @@ enclosing declaration and no `main`.
 
 A diagnostic names a position as `line:col`. The line is 1-based. The column
 is 1-based and counts **code points**, not bytes and not display cells: `é`
-is one column, an emoji is one column, and so a caret printed under the
-echoed source line lands on the token it is pointing at. A tab is also one
-column — the compiler cannot know the reader's tab width, so the echoed line
-prints each tab as a single space and the two agree by construction. A
-double-width character therefore costs one column, which is the one case
-where the caret can look a cell short of the token in a terminal; every
-alternative makes the *number* wrong instead, which is worse, because that is
-what an editor is told to jump to.
+is one column, `漢` is one column, an emoji is one column. That is what an
+editor is handed and what it jumps to, so it is the one number that may not
+become anything else. A tab is also one column — the compiler cannot know the
+reader's tab width, so it picks the only width it can echo back.
+
+The **caret** printed under the echoed source line is a separate question,
+because that line is echoed *raw* and a terminal draws it in cells rather
+than code points. So the caret is padded by **display width**, by the same
+rule `unicode.width` uses (`lib/unicode.src`): per grapheme cluster, East
+Asian Wide or Fullwidth is two cells, a combining mark is none, a cluster
+carrying U+FE0F or a pair of regional indicators is two, everything else is
+one. A tab is echoed as a single space and so contributes one cell as well as
+one column. `漢字` is two columns and four cells; `résumé` spelled with
+combining accents is eight columns and six cells; the caret lands under the
+token in both.
+
+The two rules are *not* in tension: the number counts code points, the
+padding counts cells, and the compiler does not have to choose. The compiler
+does not carry its own copy of the Unicode data either — `src/width.rs`
+parses the tables out of the embedded text of `lib/unicode.src`, so a
+regeneration for a new Unicode version moves both at once.
 
 ### 1.2 Comments
 

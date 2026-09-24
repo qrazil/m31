@@ -1,0 +1,7 @@
+// The COLUMN counts code points -- `line:col` is what an editor jumps to --
+// but the caret is padded by DISPLAY WIDTH, because the line above it is
+// echoed raw and a terminal draws it in cells. Each of these three ideographs
+// is East Asian Wide and takes two cells, so the caret is six columns further
+// right than the code-point count alone would put it. Counting code points
+// there landed it in the middle of `+ n`.
+print("表計算" + nope);
