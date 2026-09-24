@@ -1,0 +1,23 @@
+// Taking a payload out of an enum is a run-time edit, so it must happen
+// exactly as often as it was checked. The move set has no control-flow graph
+// -- the same reason `mark_moved` refuses a local declared outside the block
+// -- so a move from inside a loop or a branch within the arm is refused. The
+// arm's own body is fine however many times the whole `match` runs: each time
+// round it matches a fresh enum.
+
+Result<List<int>, str> parse() {
+    return Result<List<int>, str>.Ok([1]);
+}
+
+void run(Chan<List<int>> out) {
+    match (parse()) {
+        case Ok(List<int> xs): {
+            int i = 0;
+            while (i < 2) {
+                send(out, xs);
+                i = i + 1;
+            }
+        }
+        case Err(str e): { print(e); }
+    }
+}

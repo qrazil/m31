@@ -1,0 +1,4 @@
+corpus/errors/1049-caret-tab-then-wide.src:7:14: unknown variable `nope`
+  |
+7 |  print("組" + nope);
+  |               ^

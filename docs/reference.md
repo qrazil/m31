@@ -23,14 +23,27 @@ enclosing declaration and no `main`.
 
 A diagnostic names a position as `line:col`. The line is 1-based. The column
 is 1-based and counts **code points**, not bytes and not display cells: `é`
-is one column, an emoji is one column, and so a caret printed under the
-echoed source line lands on the token it is pointing at. A tab is also one
-column — the compiler cannot know the reader's tab width, so the echoed line
-prints each tab as a single space and the two agree by construction. A
-double-width character therefore costs one column, which is the one case
-where the caret can look a cell short of the token in a terminal; every
-alternative makes the *number* wrong instead, which is worse, because that is
-what an editor is told to jump to.
+is one column, `漢` is one column, an emoji is one column. That is what an
+editor is handed and what it jumps to, so it is the one number that may not
+become anything else. A tab is also one column — the compiler cannot know the
+reader's tab width, so it picks the only width it can echo back.
+
+The **caret** printed under the echoed source line is a separate question,
+because that line is echoed *raw* and a terminal draws it in cells rather
+than code points. So the caret is padded by **display width**, by the same
+rule `unicode.width` uses (`lib/unicode.src`): per grapheme cluster, East
+Asian Wide or Fullwidth is two cells, a combining mark is none, a cluster
+carrying U+FE0F or a pair of regional indicators is two, everything else is
+one. A tab is echoed as a single space and so contributes one cell as well as
+one column. `漢字` is two columns and four cells; `résumé` spelled with
+combining accents is eight columns and six cells; the caret lands under the
+token in both.
+
+The two rules are *not* in tension: the number counts code points, the
+padding counts cells, and the compiler does not have to choose. The compiler
+does not carry its own copy of the Unicode data either — `src/width.rs`
+parses the tables out of the embedded text of `lib/unicode.src`, so a
+regeneration for a new Unicode version moves both at once.
 
 ### 1.2 Comments
 
@@ -1159,7 +1172,9 @@ method, given to a generic function (which infers its type argument from it),
 compared with `==` where the type defines `eq` (§6.2), and assigned to an
 interface-typed slot. Returning it is an ordinary owned return (+1). It is
 not a variable: `this = x` is an error, and like any borrowed value it
-cannot be moved across a thread boundary — send `clone(this)`.
+cannot be moved across a thread boundary — send `clone(this)`, or, if the
+type owns a resource and so cannot be cloned, move it where it was made
+(§8.3).
 
 Its type is the receiver's type. In a method on a distinct type it is the
 distinct value (`int(this)` converts it to its base); in a method reached
@@ -1944,14 +1959,40 @@ a value at a time. So `send` and `spawn` **move** a reference: the sender
 gives it up, the receiver acquires it, with no retain or release between.
 Using a moved local afterwards is a compile error.
 
-Only a value the current block **owns** may be moved: an owned temporary, or
-a local declared in that block. Refused:
+Only a value the current block **owns** may be moved: an owned temporary, a
+local declared in that block, or a `case` binding (below). Refused:
 
   - a **parameter**, because it is borrowed and the caller still holds it;
   - a local declared in an **enclosing** block, because a loop body or one
     arm of an `if` would move the same reference twice.
 
-The fix for both is `clone(x)`, which hands over a copy.
+The fix for both is `clone(x)`, which hands over a copy — *unless* the type
+owns a resource (§7.1), which `clone` refuses outright. Then there is no
+copy to send and no alias that helps: only the value's owner can hand it on,
+so it must be moved where it is made. The diagnostic says so rather than
+advising a `clone` that cannot compile.
+
+**A `case V(T x):` binding may be moved.** It reads as borrowed — the `match`
+holds the enum for the arm — but it is the arm's own name for that payload
+and nothing else names it, so the move **takes the payload out of the enum**:
+the slot is cleared, its `+1` goes to the receiver, and the enum's release
+skips it. This is what lets a server hand a connection to a worker:
+
+```c
+match (ln.accept()) {
+    case Ok(net.Conn s): { send(conns, s); }
+    case Err(net.Error e): { trap("accept"); }
+}
+```
+
+Two conditions. The matched expression must be a **temporary**, so the
+`match` is the enum's only owner — matching a named local is refused, because
+clearing a slot under that name would leave it with a hole — and the run-time
+uniqueness check below is applied to the **enum**, whose graph contains the
+payload. And the move must be in the arm's **own block**, for the same reason
+an enclosing block's local may not be moved. The arm's body is fine however
+many times the whole `match` runs: each time round it matches a fresh enum.
+See `docs/concurrency-decision.md`.
 
 Retaining instead of moving is not an alternative. Two threads on one
 non-atomic counter is the defect; a retain before the handoff only makes the

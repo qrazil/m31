@@ -1,0 +1,6 @@
+// Width is per grapheme cluster, not per code point, and this line holds both
+// kinds of disagreement. `🙂` is one wide code point: two cells. `👍🏽` is TWO
+// code points -- a wide base and a skin-tone modifier -- and one two-cell
+// glyph, so summing per code point would say four and put the caret two
+// columns too far right. Same rule as `unicode.width`, off the same tables.
+print("🙂👍🏽" + nope);

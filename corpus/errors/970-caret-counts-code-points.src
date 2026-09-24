@@ -1,5 +1,7 @@
-// A column counts code points, not bytes, so `line:col` and the caret both
-// land on `nope` even though the same line holds an accent, an arrow and an
-// emoji before it. Counting bytes put this error at column 25 -- four past
-// the end of the name, with the caret inside `);`.
+// A column counts code points, not bytes, so `line:col` lands on `nope`
+// even though the same line holds an accent, an arrow and an emoji before
+// it. Counting bytes put this error at column 25 -- four past the end of the
+// name, with the caret inside `);`. The caret's own padding is display width
+// rather than the column count -- see 1046 to 1049 -- so the wide emoji
+// pushes it one cell further right than the column number alone would.
 print("héllo → 🎉" + nope);

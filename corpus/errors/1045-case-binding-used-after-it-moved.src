@@ -1,0 +1,17 @@
+// Once a `case` binding has been taken out of its enum it is gone, exactly
+// like a moved local: the slot is cleared and the value belongs to the thread
+// that received it.
+
+Result<List<int>, str> parse() {
+    return Result<List<int>, str>.Ok([1]);
+}
+
+void run(Chan<List<int>> out) {
+    match (parse()) {
+        case Ok(List<int> xs): {
+            send(out, xs);
+            print(xs.size());
+        }
+        case Err(str e): { print(e); }
+    }
+}

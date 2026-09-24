@@ -1,0 +1,59 @@
+// A `case Ok(T x):` binding may cross a thread boundary.
+//
+// It reads as borrowed -- the `match` holds the enum for the whole arm -- but
+// it is also the arm's own name for that payload, and nothing else names it.
+// So the move TAKES the payload out of the enum: the slot is cleared, the +1
+// it held goes to the receiver, and the enum's release skips the slot it no
+// longer owns. This is the shape a server has -- accept a connection, hand it
+// to a worker -- with the socket replaced by a type that owns a resource of
+// its own, so that a second release would print.
+
+type Conn {
+    str who;
+}
+
+void Conn.drop() {
+    print("closed " + who);
+}
+
+Result<Conn, str> open(str who) {
+    if (who == "") {
+        return Result<Conn, str>.Err("no name");
+    }
+    return Result<Conn, str>.Ok(Conn(who));
+}
+
+void worker(Chan<Conn> inbox, Chan<int> done) {
+    int i = 0;
+    while (i < 2) {
+        if (true) {
+            Conn c = recv(inbox);
+            print("serving " + c.who);
+        }
+        i = i + 1;
+    }
+    send(done, 1);
+}
+
+Chan<Conn> inbox = Chan<Conn>(1);
+Chan<int> done = Chan<int>(1);
+spawn worker(inbox, done);
+
+// The natural spelling, with no laundering through a collection and no
+// `clone` -- which a resource-owning type refuses anyway.
+int i = 0;
+while (i < 2) {
+    match (open("peer" + i.to_str())) {
+        case Ok(Conn c): { send(inbox, c); }
+        case Err(str e): { print("open: " + e); }
+    }
+    i = i + 1;
+}
+print(recv(done));
+
+// The arm that does NOT move still releases the payload the ordinary way,
+// and an arm may move only one of two payloads.
+match (open("")) {
+    case Ok(Conn c): { print("unexpected " + c.who); }
+    case Err(str e): { print("open: " + e); }
+}
