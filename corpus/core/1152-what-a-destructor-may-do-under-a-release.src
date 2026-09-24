@@ -1,0 +1,103 @@
+// What stays legal when the runtime releases an element, which is the half
+// of docs/reentrancy-decision.md ("The release paths") that must keep
+// working. A destructor is ordinary code (reference §4.4) and nothing here
+// traps -- unlike a `cmp` or a `hash`, which run while the runtime is still
+// holding a buffer or a slot index and are refused.
+//
+//   - changing a DIFFERENT collection: the release paths detach, they do
+//     not mark, so nothing else in the program is affected at all;
+//   - reading the collection being cleared: it reads EMPTY, because `clear`
+//     detaches before it releases and an empty list is what `clear`
+//     promises. It is never seen half-cleared;
+//   - dropping the last reference to the collection being cleared.
+
+type Log {
+    List<str> lines;
+    Map<int, int> counts;
+}
+
+type Owner {
+    List<Item> xs;
+    Log log;
+}
+
+type Item {
+    int id;
+    Owner o;
+}
+
+void Item.drop() {
+    // A different list and a different map: ordinary bookkeeping from a
+    // destructor, which has to stay ordinary.
+    o.log.lines.push("bye " + str(id));
+    o.log.counts.set(id, id * 2);
+    // And a read of the very list being cleared: empty, always.
+    if (o.xs.size() != 0) {
+        trap("the list being cleared was seen half-cleared");
+    }
+}
+
+Log g = Log([], {});
+Owner o = Owner([], g);
+o.xs.push(Item(1, o));
+o.xs.push(Item(2, o));
+o.xs.clear();
+print("lines " + str(g.lines.size()));
+print(g.lines[0]);
+print(g.lines[1]);
+print("counts " + str(g.counts.size()));
+print(g.counts.get(2).or(-1));
+
+// Dropping the last reference the program holds to the list being cleared,
+// from inside a destructor running under that very clear.
+type Cutter {
+    List<Blade> xs;
+}
+
+type Blade {
+    int id;
+    Cutter c;
+    bool cuts;
+}
+
+void Blade.drop() {
+    print("drop blade " + str(id));
+    if (cuts) {
+        print("  replacing the list");
+        c.xs = [];
+    }
+}
+
+Cutter c = Cutter([]);
+c.xs.push(Blade(1, c, true));
+c.xs.push(Blade(2, c, false));
+c.xs.push(Blade(3, c, false));
+c.xs.clear();
+print("cutter size " + str(c.xs.size()));
+
+// The same for a map value's destructor, under `remove`.
+type Keeper {
+    Map<int, Held> m;
+}
+
+type Held {
+    int id;
+    Keeper k;
+    bool cuts;
+}
+
+void Held.drop() {
+    print("drop held " + str(id));
+    if (cuts) {
+        print("  replacing the map");
+        k.m = {};
+    }
+}
+
+Keeper k = Keeper({});
+k.m.set(7, Held(7, k, true));
+k.m.set(8, Held(8, k, false));
+k.m.remove(7);
+print("map size " + str(k.m.size()));
+k.m.clear();
+print("done " + str(k.m.size()));

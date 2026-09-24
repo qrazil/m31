@@ -7,6 +7,11 @@ memory-unsafe programs. Implemented in `runtime/rt.h` (`RC_SORTING`,
 probes, `rt_map_clear`, `rc_dec`). Tests corpus/core/1000-1002,
 corpus/traps/1010-1015. The reference is §3.9, §4.4a and §7.4.
 
+Extended the same day with **the release paths** (below), the other way the
+runtime reaches the program: a destructor, rather than a `cmp` or a `hash`.
+`rt_list_clear` was unsafe; `rt_map_remove` and `rt_map_set` were tightened
+to match the rule. Tests corpus/core/1150-1154.
+
 ---
 
 ## The problem
@@ -156,4 +161,156 @@ fill again rather than the one being walked. `rt_map_remove` does the same:
 the slot is marked dead and `len` decremented before either release runs.
 `rt_list_clear` still releases in place, and a destructor that removed from
 the list being cleared could still be surprised — the same family of bug,
-through `drop` rather than through `cmp`, and not fixed here.
+through `drop` rather than through `cmp`. That is the next section.
+
+---
+
+# The release paths
+
+`cmp`, `hash` and `eq` are three of the four ways the runtime runs the
+program's own code in the middle of its own operation. The fourth is
+**`drop`**: every path that releases a reference may end an object's life,
+and a destructor can do anything, including reach back into the collection
+the release came out of.
+
+The mark is the wrong tool here, for a reason worth stating. `sort` and a
+map probe have an *answer to finish computing*: the merge is halfway through
+a permutation, the probe is holding a slot index, and a mutation makes the
+rest of the work meaningless — so the honest reply is a trap. A release has
+no answer to finish. `clear` is going to leave an empty collection whatever
+happens; `remove` has already decided which entry goes. The work can simply
+be done in an order that makes the mutation harmless, and then a destructor
+that pushes onto the list it was just cleared out of is not a bug at all —
+it is a pool handing its slot back, which §4.4 gives as the example of what
+a destructor is *for*.
+
+## The rule
+
+**Detach first; touch nothing afterwards.**
+
+Concretely, in two halves:
+
+  1. Before the first release, put the structure into the state the
+     operation will leave it in, and take what is being released out of the
+     program's reach — into a local. `clear` detaches the whole buffer or
+     table; `remove` marks the slot dead and decrements `len`; `set` puts
+     the new value in the slot. A destructor then sees a finished
+     collection, and whatever it does to it is an ordinary change to an
+     ordinary collection.
+  2. After the first release, read nothing out of the structure again — not
+     a length, not a pointer, not a flag. Everything the rest of the
+     operation needs is already in a local.
+
+The second half is what keeps the receiver's own lifetime out of the
+question. A destructor may drop the last reference to the collection it is
+being released from, and then the collection is freed halfway through the
+operation. The caller does retain the receiver across a call that can
+release (`src/lower/hold.rs`, `releases`), so this cannot happen as things
+stand — but that is a compiler invariant holding up a runtime file, and the
+runtime is cheaper to write so that it does not need it. `rt_map_remove`
+read `m->val_is_ref` *after* releasing the key, which is exactly the shape
+the rule forbids; both flags are read up front now.
+
+That retain stays where it is. `releases` is not only about the receiver: it
+is what makes `may_run_code` true for a `clear`, a `remove` or a `set`, and
+so what holds every *other* borrowed operand of the statement they appear in
+(`src/lower/hold.rs`). Only the receiver half of it is now belt-and-braces.
+Its comment still says the runtime goes on to the next element after a
+release, which `rt_list_clear` no longer does.
+
+**No new traps.** Nothing in §7.4 changes. A destructor that changes the
+collection it is being released from is legal, and there is a defined answer
+for what it sees.
+
+## Every path, and what it does
+
+| Path | Releases? | Mechanism |
+|---|---|---|
+| `rt_list_clear` | yes, every element | **detach** — the whole buffer, then release from the local |
+| `rt_list_pop`, `rt_list_remove_at` | no | the reference is handed OUT; the statement that discards it releases afterwards, with the list already short |
+| `rt_list_insert`, `rt_list_push`, growth/realloc | no | nothing is released, so no program code runs; `insert` re-reads `l->data` after the push that may have moved it |
+| index store (`rt_index_set`), Array element store | no, in the runtime | the lowering reads the old value, retains the new, stores, and releases the old LAST (`src/lower.rs`) — the runtime holds nothing across it |
+| a struct field store | no, in the runtime | same order, emitted by `src/lower.rs`: the field already holds the new value when the old one's destructor runs, so a destructor that writes the same field wins |
+| `rt_map_set` replacing | yes, the old value | the slot holds the new value and the flag is in hand before the release; the probing mark comes off first |
+| `rt_map_remove` | yes, key and value | the slot is DEAD and `len` decremented first; both flags read first |
+| `rt_map_clear` | yes, every entry | **detach** — the whole table. Complete: key and value both come out of the detached table, and only a local is touched afterwards |
+| `map_rehash` | no | runs under the caller's `RC_PROBING` mark |
+| `rt_map_keys`, `rt_map_values`, `rt_map_clone`, `rt_seq_clone`, `rt_seq_slice` | no | they only retain; no program code runs, so the cached source pointer is safe |
+| `rt_snapshot` / `copy_obj` / a type's `CopyFn` | the one `rc_dec` at the very end | a value that owns a resource cannot be in a snapshot at all (`refuse_resource` runs over the whole graph first), so no destructor exists to run |
+| `rt_check_unique`'s walk | no | a `WalkFn` reports references, it never releases one; and it runs no program code |
+| the channel paths | no | `send` and `recv` move a slot under a lock; ownership passes, nothing is released |
+| `bytes` — every path | no | `bytes` holds no references at all, so `clear`, `truncate`, `drop_front`, `set` and the reserve path cannot run anything. Confirmed, not assumed |
+| `lst_drop_refs`, `arr_drop_refs`, `map_drop`, emitted `drop_T` | yes, in place | see below |
+
+## Why the drop functions may release in place
+
+`lst_drop_refs` walks `l->data` releasing as it goes and then frees the
+buffer; `map_drop` and the emitted `drop_T` do the same with a table and
+with a struct's fields. That is the shape the rule forbids — and it is safe
+here for a reason that holds only here.
+
+A drop function runs when the count has reached **zero**. No reference to
+the object exists, so no destructor it runs can name it: to reach the list
+being dropped, an element's destructor would have to get there through some
+reference, and any such reference would have kept the count above zero. The
+one remaining way in is a field of an object that is *itself* dying, whose
+fields are still set while its own drop runs — and that object's count is
+zero too, so the same argument applies to it, one level up, all the way out.
+
+Two escape hatches, both already closed: a destructor that stores `this`
+somewhere that outlives the call is the **resurrection trap**
+(`src/emit_c.rs`, §4.4), and a **cycle** is never released at all (§7.1), so
+its members' destructors never run.
+
+## What a destructor sees, and what stays legal
+
+  - **Changing a different collection.** Nothing is marked on a release
+    path, so every other collection in the program is untouched by this
+    (corpus/core/1152).
+  - **Reading the collection being released from.** It reads *finished*: a
+    list being cleared is empty, a map is already one entry shorter. It is
+    never seen half-cleared — which is the observable difference from the
+    old code, where the first destructor under `clear` saw the full length
+    (corpus/core/1150, 1152, 1154).
+  - **Changing it.** Legal, and it sticks: a destructor that pushes onto the
+    list being cleared leaves those elements in it when `clear` returns
+    (corpus/core/1151). They are not released by the `clear` that is still
+    running — it owns a detached buffer and does not know about them.
+  - **Dropping the last reference to it.** Legal (corpus/core/1152). Unlike
+    the same act under a `sort`, which traps, because there is no answer
+    left to compute.
+  - **Removing the very element being destroyed.** This was the bug. A
+    `clear` that released in place left the element in the list while its
+    destructor ran, so `remove_at(0)` handed the *same* object out a second
+    time and the statement that discarded it released it again: `drop` ran
+    twice, then the resurrection trap under `-DRC_DEBUG` and a
+    heap-use-after-free under AddressSanitizer, on gcc and clang at -O0 and
+    -O2 (corpus/core/1150). With the buffer detached there is nothing to
+    remove.
+
+## The cost
+
+Detaching costs two stores. The one real price is that `clear` gives its
+buffer back instead of keeping it, so a list cleared and refilled in a loop
+allocates again each time round. Measured, gcc -O2, best of nine interleaved
+runs, against the same runtime immediately before the change:
+
+| | before | after | ratio |
+|---|---|---|---|
+| build and `clear` 1 000 000 `P`, ×8 | 0.42 s | 0.42 s | 1.00 |
+| refill and `clear` 1 000 000 immortals, ×40 — the buffer-reuse worst case | 0.23 s | 0.22 s | 0.96 |
+| 1 000 000 `pop`, ×8 (unchanged path) | 0.40 s | 0.40 s | 1.00 |
+| 1 050 000 `remove_at(0)` on a 4096-element list (unchanged path) | 1.00 s | 1.02 s | 1.02 |
+| 10 000 000 `set` that replace | 0.39 s | 0.39 s | 1.00 |
+
+Nothing moved outside the noise of this machine, in either direction. The
+second line is the one built to be unkind — a million *immortal* elements,
+so every release is a single compare and the reallocation is nearly all that
+is left — and it came out at or below the old time in all nine runs: giving
+an 8 MB buffer back and taking a fresh one costs less than keeping a cold
+one warm. A list of values does not pay at all: nothing is released there,
+so no program code can run, so there is nothing to detach from and the
+buffer is kept, the way `bytes.clear` keeps it.
+
+`rt_map_remove` and `rt_map_set` each moved a load earlier in the same
+straight line of code; nothing was added.

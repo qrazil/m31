@@ -1,0 +1,86 @@
+// The map's three release paths, each with a destructor that reaches the
+// map it is being released from (docs/reentrancy-decision.md, "The release
+// paths"):
+//
+//   - `remove` marks the slot dead and decrements `len` before it releases,
+//     and reads both `key_is_ref`/`val_is_ref` flags out of the map first,
+//     so nothing after the first release touches the map at all;
+//   - `set` over an existing key puts the new value in the slot, drops the
+//     probing mark, and only then releases the old one;
+//   - `clear` detaches the whole table first, so a destructor that refills
+//     the map refills an empty one and what it adds survives.
+//
+// The key type here has `hash`, `eq` AND `drop`, which is the shape that
+// makes `remove` release a reference-typed key: a `str` key never runs
+// program code, so only a user key gets here.
+
+type Table {
+    Map<Tag, Note> m;
+    List<str> seen;
+}
+
+type Tag {
+    int n;
+    Table t;
+}
+
+int Tag.hash() {
+    return n;
+}
+
+bool Tag.eq(Tag o) {
+    return n == o.n;
+}
+
+void Tag.drop() {
+    // A read of the map this key has just left: one entry shorter already.
+    t.seen.push("tag " + str(n) + " left a map of " + str(t.m.size()));
+}
+
+type Note {
+    int v;
+    Table t;
+    bool refills;
+}
+
+void Note.drop() {
+    t.seen.push("note " + str(v) + " left a map of " + str(t.m.size()));
+    if (refills) {
+        // `clear` detached the table, so this lands in a fresh one and is
+        // still there when `clear` returns.
+        t.m.set(Tag(50 + v, t), Note(50 + v, t, false));
+    }
+}
+
+Table t = Table({}, []);
+t.m.set(Tag(1, t), Note(10, t, false));
+t.m.set(Tag(2, t), Note(20, t, false));
+t.m.set(Tag(3, t), Note(30, t, false));
+print("size " + str(t.m.size()));
+
+// set over an existing key: the old value goes, the key stays.
+print("-- set");
+t.m.set(Tag(2, t), Note(21, t, false));
+print("size " + str(t.m.size()));
+print("still has 2 " + str(t.m.contains(Tag(2, t))));
+
+// remove: key and value both go.
+print("-- remove");
+t.m.remove(Tag(1, t));
+print("size " + str(t.m.size()));
+print("has 1 " + str(t.m.contains(Tag(1, t))));
+
+// clear, with a value that refills the map from its own destructor.
+print("-- clear");
+t.m.set(Tag(4, t), Note(40, t, true));
+t.m.clear();
+print("size after " + str(t.m.size()));
+print("refilled " + str(t.m.contains(Tag(90, t))));
+
+int i = 0;
+while (i < t.seen.size()) {
+    print(t.seen[i]);
+    i = i + 1;
+}
+t.m.clear();
+print("done " + str(t.m.size()));

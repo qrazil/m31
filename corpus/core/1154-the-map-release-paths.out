@@ -1,0 +1,25 @@
+size 3
+-- set
+size 3
+still has 2 true
+-- remove
+size 2
+has 1 false
+-- clear
+size after 1
+refilled true
+note 20 left a map of 3
+tag 2 left a map of 3
+tag 2 left a map of 3
+tag 1 left a map of 2
+note 10 left a map of 2
+tag 1 left a map of 2
+tag 1 left a map of 2
+tag 4 left a map of 0
+note 40 left a map of 0
+tag 3 left a map of 1
+note 30 left a map of 1
+tag 2 left a map of 1
+note 21 left a map of 1
+tag 90 left a map of 1
+done 0
