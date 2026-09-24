@@ -1,0 +1,317 @@
+import http;
+import io;
+import net;
+
+// `http.serve` over a loopback socket, driven by a client written against the
+// seam -- `net.connect`, `http.write_request`, `http.read_response` -- so that
+// the server is the thing under test and nothing in `http`'s own client layer
+// stands between them. `stdlib-http-client` is the other half.
+//
+// The shape is `stdlib-net`'s: `spawn` runs the client, a channel hands it the
+// port the kernel chose, and a second channel carries everything it saw back,
+// so every line is printed from one thread and the output cannot depend on
+// which thread got there first.
+//
+// What this pins down:
+//
+//   - **GET, POST with a body, HEAD and a 404** over a real socket.
+//   - **Chunked in both directions.** The client sends a chunked request body
+//     and the server reads it whole; the server answers with a chunked body
+//     and the client decodes it.
+//   - **Keep-alive.** Two requests on one connection: the first says
+//     `Connection: keep-alive` and the second says `close`, and `serve_conn`
+//     serves both and then hangs up.
+//   - **A body that crosses the buffer.** 200 000 bytes, which is more than
+//     `net`'s 64 KiB read and more than one `http.CHUNK`, in both directions.
+//   - **A refusal, answered.** Two `Host` fields, written straight onto the
+//     socket, come back as a real 400 with the reason in the body and
+//     `Connection: close`. The refusals themselves are `stdlib-http-errors`;
+//     this is the one that proves the server answers them.
+//   - **Odd casing.** The client sends `X-oDd-CaSe`, the server reads it as
+//     `x-odd-case`, and the field names come back lowercased and in order.
+//
+// The server serves a fixed number of connections and then returns, because
+// `spawn` is fire-and-forget and a program waits for every spawned thread
+// before exiting (§8.1) -- one that accepted forever would never let the
+// program end. `CONNECTIONS` is that count, and the server reports what it
+// actually served.
+
+// One per exchange below, and one for the pair that shares a connection.
+const int CONNECTIONS = 11;
+const int LINES = 12;
+
+// The body that has to cross every buffer: 200 000 bytes, built from a
+// repeating pattern so the check is a comparison and not a hash.
+bytes big() {
+    bytes out = [];
+    int i = 0;
+    while (i < 200000) {
+        out.push(65 + i % 26);
+        i = i + 1;
+    }
+    return out;
+}
+
+// --- the server ------------------------------------------------------------
+// A handler is a one-method interface, and this one is a type with no fields:
+// everything it answers is a function of the request. `hello` at the bottom is
+// a plain function satisfying the same interface, which is the other way to
+// write one.
+type Echo {
+}
+
+http.Response Echo.handle(http.Request req) {
+    str path = req.path();
+    if (path == "/hello") {
+        return http.text_response("hello, " + req.method());
+    }
+    if (path == "/odd") {
+        return http.text_response(req.header("x-odd-case").or("(absent)") + "|" + req.header_names().join(","));
+    }
+    if (path == "/echo") {
+        http.Response r = http.response(200);
+        r.set("content-type", "application/octet-stream");
+        r.set_body(req.body());
+        return r;
+    }
+    if (path == "/chunked") {
+        http.Response r = http.text_response("chunk me");
+        r.set_chunked(true);
+        return r;
+    }
+    if (path == "/bigchunk") {
+        http.Response r = http.response(200);
+        r.set_body(big());
+        r.set_chunked(true);
+        return r;
+    }
+    if (path == "/query") {
+        return http.text_response(req.query());
+    }
+    return http.text_response("no such path: " + path, status: 404);
+}
+
+// --- the client, written against the seam ----------------------------------
+// `line` is a parameter, so it is borrowed and cannot cross a thread boundary
+// (§8.3); `clone` hands the channel a copy only the reader will hold.
+void say(Chan<str> log, str line) {
+    send(log, clone(line));
+}
+
+str text_of(http.Response resp) {
+    match (resp.text()) {
+        case Ok(str t): {
+            return t;
+        }
+        case Err(http.Error e): {
+            return "(not text: " + e.to_str() + ")";
+        }
+    }
+}
+
+str framing_of(http.Response resp) {
+    match (resp.header("transfer-encoding")) {
+        case Some(str te): {
+            return "te=" + te;
+        }
+        case None: {
+        }
+    }
+    return "cl=" + resp.header("content-length").or("-");
+}
+
+http.Request built(str method, str url) {
+    match (http.request(method, url)) {
+        case Ok(http.Request r): {
+            return r;
+        }
+        case Err(http.Error e): {
+            trap("request: " + e.to_str());
+        }
+    }
+}
+
+// One request and its answer on the connection `c`, reported in one line.
+void one(Chan<str> log, net.Conn c, str what, http.Request req) {
+    match (http.write_request(c, req)) {
+        case Ok: {
+        }
+        case Err(http.Error e): {
+            say(log, what + ": " + e.to_str());
+            return;
+        }
+    }
+    match (http.read_response(c, req.method())) {
+        case Ok(http.Response resp): {
+            str body = text_of(resp);
+            if (body.size() > 80) {
+                body = body.size().to_str() + " bytes";
+            }
+            say(log, what + ": " + resp.status().to_str() + " " + resp.reason() + " [" + framing_of(resp) + "] " + body);
+        }
+        case Err(http.Error e): {
+            say(log, what + ": " + e.to_str());
+        }
+    }
+}
+
+// A fresh connection for one exchange.
+void once(Chan<str> log, int port, str what, http.Request req) {
+    match (net.connect("127.0.0.1", port)) {
+        case Ok(net.Conn c): {
+            one(log, c, what, req);
+            Result<bool, io.Error> closed = c.close();
+        }
+        case Err(net.Error e): {
+            say(log, what + " connect: " + e.to_str());
+        }
+    }
+}
+
+void client(Chan<int> ports, Chan<str> log) {
+    int port = recv(ports);
+    str base = "http://127.0.0.1:" + port.to_str();
+    once(log, port, "get", built("GET", base + "/hello"));
+    once(log, port, "head", built("HEAD", base + "/hello"));
+    http.Request post = built("POST", base + "/echo");
+    post.set_text("a body");
+    once(log, port, "post", post);
+    once(log, port, "404", built("GET", base + "/nowhere"));
+    http.Request odd = built("GET", base + "/odd");
+    odd.set("X-oDd-CaSe", "Mixed");
+    once(log, port, "odd", odd);
+    once(log, port, "query", built("GET", base + "/query?a=1&b=two"));
+    // A chunked request body: the server reads it whole and echoes it back
+    // with a Content-Length, so this line says both halves worked.
+    http.Request chunked = built("POST", base + "/echo");
+    chunked.set_text("sent in chunks");
+    chunked.set_chunked(true);
+    once(log, port, "chunked-out", chunked);
+    once(log, port, "chunked-in", built("GET", base + "/chunked"));
+    bulk(log, port, base);
+    keep_alive(log, port, base);
+    refused(log, port);
+}
+
+// 200 000 bytes up as one sized body, and back down as chunks.
+void bulk(Chan<str> log, int port, str base) {
+    http.Request req = built("POST", base + "/bigchunk");
+    req.set_body(big());
+    match (net.connect("127.0.0.1", port)) {
+        case Ok(net.Conn c): {
+            match (http.write_request(c, req)) {
+                case Ok: {
+                }
+                case Err(http.Error e): {
+                    say(log, "big: " + e.to_str());
+                    return;
+                }
+            }
+            match (http.read_response(c, "POST")) {
+                case Ok(http.Response resp): {
+                    say(log, "big: " + resp.status().to_str() + " [" + framing_of(resp) + "] " + resp.body().size().to_str() + " bytes back, same: " + (resp.body() == big()).to_str());
+                }
+                case Err(http.Error e): {
+                    say(log, "big: " + e.to_str());
+                }
+            }
+            Result<bool, io.Error> closed = c.close();
+        }
+        case Err(net.Error e): {
+            say(log, "big connect: " + e.to_str());
+        }
+    }
+}
+
+// Two requests on one connection.
+void keep_alive(Chan<str> log, int port, str base) {
+    match (net.connect("127.0.0.1", port)) {
+        case Ok(net.Conn c): {
+            http.Request first = built("GET", base + "/hello");
+            first.set("connection", "keep-alive");
+            one(log, c, "keep-alive 1", first);
+            http.Request second = built("GET", base + "/query?second=yes");
+            second.set("connection", "close");
+            one(log, c, "keep-alive 2", second);
+            Result<bool, io.Error> closed = c.close();
+        }
+        case Err(net.Error e): {
+            say(log, "keep-alive connect: " + e.to_str());
+        }
+    }
+}
+
+// A request the server will not read, written straight onto the socket: two
+// `Host` fields. The point is the answer -- a real 400 with the reason in its
+// body, on a connection the server then closes.
+void refused(Chan<str> log, int port) {
+    match (net.connect("127.0.0.1", port)) {
+        case Ok(net.Conn c): {
+            match (c.write("GET /p HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n".to_bytes())) {
+                case Ok(int n): {
+                }
+                case Err(io.Error e): {
+                    say(log, "refused write: " + net.error_of(e).to_str());
+                    return;
+                }
+            }
+            match (http.read_response(c, "GET")) {
+                case Ok(http.Response resp): {
+                    say(log, "refused: " + resp.status().to_str() + " " + resp.reason() + " connection=" + resp.header("connection").or("-") + " " + text_of(resp).trim());
+                }
+                case Err(http.Error e): {
+                    say(log, "refused: " + e.to_str());
+                }
+            }
+            Result<bool, io.Error> closed = c.close();
+        }
+        case Err(net.Error e): {
+            say(log, "refused connect: " + e.to_str());
+        }
+    }
+}
+
+// --- running them ----------------------------------------------------------
+// A plain function's name satisfies the one-method interface too. This one is
+// never reached -- `Echo` is what the listener is given -- but that it
+// compiles into an `http.Handler` slot is the claim.
+http.Response hello(http.Request req) {
+    return http.text_response("hi");
+}
+
+int accepts(http.Handler h) {
+    return 1;
+}
+
+void run(net.Listener ln) {
+    Chan<int> ports = Chan<int>(1);
+    Chan<str> log = Chan<str>(64);
+    spawn client(ports, log);
+    send(ports, ln.local().port());
+    int served = 0;
+    match (http.serve(ln, Echo(), connections: CONNECTIONS, timeout_ms: 10000)) {
+        case Ok(int n): {
+            served = n;
+        }
+        case Err(http.Error e): {
+            trap("serve: " + e.to_str());
+        }
+    }
+    int got = 0;
+    while (got < LINES) {
+        print(recv(log));
+        got = got + 1;
+    }
+    print("connections served: " + served.to_str());
+    print("a bare function is an http.Handler: " + accepts(hello).to_str());
+    Result<bool, net.Error> closed = ln.close();
+}
+
+match (net.listen("127.0.0.1", 0)) {
+    case Ok(net.Listener ln): {
+        run(ln);
+    }
+    case Err(net.Error e): {
+        trap("listen: " + e.to_str());
+    }
+}

@@ -1,0 +1,14 @@
+get: 200 OK [cl=10] hello, GET
+head: 200 OK [cl=11] 
+post: 200 OK [cl=6] a body
+404: 404 Not Found [cl=22] no such path: /nowhere
+odd: 200 OK [cl=43] Mixed|x-odd-case,host,user-agent,connection
+query: 200 OK [cl=9] a=1&b=two
+chunked-out: 200 OK [cl=14] sent in chunks
+chunked-in: 200 OK [te=chunked] chunk me
+big: 200 [te=chunked] 200000 bytes back, same: true
+keep-alive 1: 200 OK [cl=10] hello, GET
+keep-alive 2: 200 OK [cl=10] second=yes
+refused: 400 Bad Request connection=close two Host header fields: a request names one host
+connections served: 11
+a bare function is an http.Handler: 1

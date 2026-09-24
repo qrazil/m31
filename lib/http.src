@@ -35,13 +35,20 @@
 //   http.write_response(s, req, resp, keep_alive)  -> Result<void, Error>
 //   http.should_keep_alive(req, resp) -> bool
 //
+// API -- the server
+// -----------------
+//   http.Handler                     interface   `Response handle(Request req)`
+//   http.serve(listener, handler, connections:, timeout_ms:, max_requests:)
+//                                    -> Result<int, Error>   connections served
+//   http.serve_conn(conn, handler, max_requests:)
+//                                    -> Result<int, Error>   requests served
+//
 // **The seam takes an `io.Stream`, so every parser here is testable without a
 // socket.** `read_request`, `write_request`, `read_response` and
 // `write_response` never mention `net`: hand them an `io.Buffer` and they
 // parse a transcript, hand them a `net.Conn` and they are a server or a
-// client. The accept loop and the client that will sit on top of them are
-// the next two pieces, and they are the only ones that will know what a
-// socket is, because only they have to set a timeout or make a connection. That is
+// client. Only `serve` and `serve_conn` know what a socket is, because only
+// they have to set a timeout or accept a connection. That is
 // Oro's arrangement in `std/http.oro`, for Oro's reason: two parsers that
 // agree today drift tomorrow, so there is one of each and the corpus drives
 // it from memory.
@@ -2014,4 +2021,211 @@ Result<void, Error> write_all(io.Stream s, bytes out) {
             return Result<void, Error>.Err(transport(e));
         }
     }
+}
+
+// --- the server ------------------------------------------------------------
+/// What a server does with a request.
+///
+/// **A one-method interface is this language's callback** (§3.4,
+/// `docs/closures-decision.md`): a type with a `Response handle(Request)`
+/// method satisfies it structurally, with nothing declared, and so does a
+/// **plain function's name** --
+///
+///     Response hello(http.Request req) { return http.text_response("hi"); }
+///     http.serve(ln, hello, connections: 1);
+///
+/// -- which is the shape most handlers want and costs no type at all. A
+/// handler that needs state is a type with fields and the same method. A
+/// lambda will satisfy it too, when there are lambdas; nothing here changes
+/// when they arrive, which is the whole point of the interface being the
+/// callback type rather than a function type.
+///
+/// A handler may not fail: it returns a `Response`, and a handler that meets
+/// a problem answers `http.text_response("...", status: 500)`. An interface
+/// method returning a `Result` would make every server write the same two
+/// lines turning it into a 500, and would leave open what to do with an
+/// error nobody can answer.
+pub interface Handler {
+    Response handle(Request req);
+}
+
+/// Serve requests on one connection until the peer stops, either side says
+/// `close`, or `max_requests` have been served. The number served.
+///
+/// **A malformed request is not this server's failure.** It is answered --
+/// with `e.status()` and the sentence `e.to_str()` -- the connection is
+/// closed, and this returns `Ok` with the count of requests that completed.
+/// `Err` is for a failure that could not be answered on: a socket that is
+/// gone, a timeout on an idle connection, a response this module could not
+/// write.
+///
+/// A timeout, if `set_read_timeout` was called on `c`, ends the connection
+/// quietly: a kept-alive connection that goes idle is the ordinary way one
+/// ends, and there is nobody to tell.
+pub Result<int, Error> serve_conn(net.Conn c, Handler h, int max_requests = MAX_REQUESTS) {
+    int served = 0;
+    while (max_requests < 0 || served < max_requests) {
+        match (read_request(c)) {
+            case Ok(Option<Request> maybe): {
+                match (maybe) {
+                    case None: {
+                        return Result<int, Error>.Ok(served);
+                    }
+                    case Some(Request req): {
+                        Response resp = h.handle(req);
+                        bool again = should_keep_alive(req, resp) && (max_requests < 0 || served + 1 < max_requests);
+                        write_response(c, req, resp, again)?;
+                        served = served + 1;
+                        if (!again) {
+                            return Result<int, Error>.Ok(served);
+                        }
+                    }
+                }
+            }
+            case Err(Error e): {
+                return refuse(c, e, served);
+            }
+        }
+    }
+    return Result<int, Error>.Ok(served);
+}
+
+// Answer a refusal and stop. A transport failure is not answered: there is
+// nothing to answer it on.
+Result<int, Error> refuse(net.Conn c, Error e, int served) {
+    match (e) {
+        case Transport(net.Error t): {
+            return Result<int, Error>.Ok(served);
+        }
+        case Syntax(str what): {
+        }
+        case Framing(str what): {
+        }
+        case TooLarge(str what, int limit): {
+        }
+        case BadUrl(str what): {
+        }
+        case Closed(str where): {
+            return Result<int, Error>.Ok(served);
+        }
+        case Other(str what): {
+        }
+    }
+    // A refusal is answered on a connection whose framing this end no longer
+    // trusts, so it is the last thing written and the connection closes after
+    // it -- which `Connection: close` says and the `false` below arranges.
+    Response resp = text_response(e.to_str() + "\n", status: e.status());
+    Request bare = bare_request();
+    match (write_response(c, bare, resp, false)) {
+        case Ok: {
+            return Result<int, Error>.Ok(served);
+        }
+        case Err(Error w): {
+            return Result<int, Error>.Ok(served);
+        }
+    }
+}
+
+// The request a refusal is answered to when there is no parsed request to
+// answer: 1.1, no method, so nothing is suppressed and no keep-alive is
+// offered.
+Request bare_request() {
+    return Request("GET", Url("http", "", DEFAULT_PORT, "/", "", "/"), "1.1", headers());
+}
+
+/// Accept connections on `ln` and serve each one with `h`. The number of
+/// connections served.
+///
+/// `connections` is how many to accept before returning; **-1 serves
+/// forever**, and a number is what a test uses so that the loop ends.
+/// `timeout_ms` is set on each connection as both a read and a write timeout,
+/// so a peer that opens a connection and says nothing cannot hold this server
+/// -- which matters, because of the next paragraph. `max_requests` bounds one
+/// connection's turn for the same reason.
+///
+/// ### One connection at a time, and why
+///
+/// This loop serves one connection to its end before accepting the next.
+/// That is a real limit -- one slow client delays every other -- and it is
+/// what the language can express today, not a preference:
+///
+/// `spawn f(..)` **moves** its arguments, and only a value the current block
+/// owns may be moved (§8.3). The connection half works: a `case Ok(net.Conn
+/// c)` binding of a temporary may be moved, and the reference says so in as
+/// many words. The **handler** half does not. `h` is a parameter, which is
+/// borrowed and may not be moved; `clone(h)` would hand each connection a
+/// different handler object, which is not what one handler means, and is
+/// refused outright for a handler that owns a resource. There is no way to
+/// give the same handler to two threads, because non-atomic refcounts are
+/// sound only while one thread can reach a value (docs/concurrency-decision.md),
+/// and that is the point rather than a gap to work around.
+///
+/// What would change it is a handler that is a **module constant** -- those
+/// are immortal and shared, and every thread may read one (§8.3) -- or
+/// channels: an accept loop that `send`s each moved `Conn` to a fixed set of
+/// worker threads, each holding its own handler. Both are programs a caller
+/// can write today on top of `serve_conn`, which is why `serve_conn` is
+/// public and takes one connection. This module does not pick one for them.
+///
+/// `timeout_ms` and `max_requests` are the mitigation that is available, and
+/// they are the reason they are arguments rather than constants.
+pub Result<int, Error> serve(net.Listener ln, Handler h, int connections = -1, int timeout_ms = TIMEOUT_MS, int max_requests = MAX_REQUESTS) {
+    int done = 0;
+    while (connections < 0 || done < connections) {
+        match (ln.accept()) {
+            case Ok(net.Conn c): {
+                // One connection's failure is not the server's. A peer that
+                // hangs up in the middle of a response, or goes quiet until
+                // the read timeout, ends that connection and nothing else --
+                // a server that stopped accepting because one client did
+                // would be a server any client could stop. `serve_conn` is
+                // public for a caller who wants to see these.
+                one_connection(c, h, timeout_ms, max_requests);
+            }
+            case Err(net.Error e): {
+                return Result<int, Error>.Err(Error.Transport(e));
+            }
+        }
+        done = done + 1;
+    }
+    return Result<int, Error>.Ok(done);
+}
+
+// One accepted connection, to its end, with whatever went wrong on it kept
+// on it. The `Conn` closes itself when this returns (§7.1).
+void one_connection(net.Conn c, Handler h, int timeout_ms, int max_requests) {
+    match (deadline(c, timeout_ms)) {
+        case Ok: {
+        }
+        case Err(Error e): {
+            return;
+        }
+    }
+    match (serve_conn(c, h, max_requests: max_requests)) {
+        case Ok(int served): {
+        }
+        case Err(Error e): {
+        }
+    }
+}
+
+// Both timeouts, or the failure that stopped them being set. A connection
+// with no deadline is a connection an idle peer can hold forever, and this
+// server has one at a time.
+Result<void, Error> deadline(net.Conn c, int timeout_ms) {
+    match (c.set_read_timeout(timeout_ms)) {
+        case Ok(bool r): {
+        }
+        case Err(net.Error e): {
+            return Result<void, Error>.Err(Error.Transport(e));
+        }
+    }
+    match (c.set_write_timeout(timeout_ms)) {
+        case Ok(bool w): {
+        }
+        case Err(net.Error e): {
+            return Result<void, Error>.Err(Error.Transport(e));
+        }
+    }
+    return Result<void, Error>.Ok;
 }
