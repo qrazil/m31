@@ -1,0 +1,13 @@
+clearing
+drop 1
+  size during drop 0
+drop 2
+  size during drop 0
+drop 3
+  size during drop 0
+size after 0
+removed 0
+size refilled 1
+drop 4
+  size during drop 0
+done 0

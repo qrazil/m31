@@ -849,6 +849,30 @@ collection while it is being sorted or probed is a bug in the program, so it
 stops the program rather than producing a wrong answer — which is what it
 used to do, silently, when it did not crash.
 
+**Releasing an element is different, and is not a trap.** `clear`, `remove`
+and a `set` that replaces all end a value's life, and a destructor (§4.4) is
+program code that may reach the collection it is being released from. There
+is no half-finished answer to protect here — `clear` leaves an empty
+collection whichever way round the work is done — so instead of refusing the
+change, **the collection is put into its final state before anything is
+released**: `clear` detaches the whole buffer or table, `remove` takes the
+entry out, `set` stores the new value. A destructor therefore sees a
+*finished* collection, never a half-cleared one:
+
+```c
+void Entry.drop() { owner.items.remove_at(0); }   // legal
+r.items.clear();          // each drop sees items empty; the removes find nothing
+```
+
+It may read it (empty, or one entry shorter), change it — a `push` from a
+destructor under `clear` leaves that element in the list when `clear`
+returns — change any other collection, or drop the last reference to it.
+None of that traps. The order is the one the example shows: the release
+happens *after* the collection is already in its final shape, which is why a
+destructor that writes the same place wins. The same holds for an index
+store and a field store: the new value is in the slot before the old one's
+destructor runs (docs/reentrancy-decision.md, "The release paths").
+
 `remove_at` is spelled that way because Java has both `remove(int)` and
 `remove(Object)` and the overload is a standing trap. One name, and it says
 which it means.
@@ -1253,6 +1277,13 @@ void Conn.drop() {
     descriptor at a time, not one per iteration.
   - `this` is borrowed, as in any method (§4.3). Storing it anywhere that
     outlives the call **resurrects** a dead object, and traps (§7.4).
+  - **It may change the collection it is being released from.** A `clear`, a
+    `remove` or a replacing `set` puts the collection into its final state
+    before it releases anything, so the destructor finds a finished
+    collection — an empty list, a map already one entry shorter — and may
+    read it, add to it, or drop the last reference to it. None of that
+    traps, unlike the same act inside a `cmp` or a `hash` (§3.9). A pool
+    slot handing itself back from `drop` is the case this is for.
   - It is **not promoted** by embedding (§3.5): the embedded value is a
     field, and its own destructor runs when it is released.
   - It runs on the thread that releases the last reference — for a value
@@ -2036,7 +2067,10 @@ Trapping conditions:
     resource (§4.1)
   - `trap(msg)`, with the program's own message (§6.6)
 
-A trap inside a destructor is a trap like any other.
+A trap inside a destructor is a trap like any other. **Releasing** a value is
+not on the list above: a destructor may change, or let go of, the collection
+it is being released from, because the collection is already in its final
+state by the time it runs (§3.9, §4.4).
 
 ---
 

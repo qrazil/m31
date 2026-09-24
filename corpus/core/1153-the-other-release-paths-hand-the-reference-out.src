@@ -1,0 +1,83 @@
+// The rest of the class docs/reentrancy-decision.md sweeps: every other
+// path that can end an object's life while a structure the program can
+// reach is in play. None of them releases from inside the runtime -- `pop`
+// and `remove_at` hand the reference OUT, and the statement that discarded
+// it releases afterwards; `insert` and the growth path release nothing at
+// all; an index store and a field store release the value they replaced
+// only once the new one is in the slot. So all of them were already safe,
+// and this is what says so.
+//
+// The visible consequence is the ORDER: the structure is already in its
+// final shape when the destructor runs, and a destructor that writes the
+// same place wins, because it runs last.
+
+type Bag {
+    List<Item> xs;
+    int events;
+}
+
+type Slot {
+    Item cur;
+}
+
+type Item {
+    int id;
+    Bag b;
+    int mode;
+}
+
+void Item.drop() {
+    b.events = b.events + 1;
+    print("drop " + str(id) + ", list is " + str(b.xs.size()));
+    if (mode == 1) {
+        // Push onto the list this element has just left. The element is
+        // already gone from it, so this cannot disturb anything.
+        b.xs.push(Item(id * 10, b, 0));
+    }
+}
+
+Bag b = Bag([], 0);
+
+// pop: the list is one shorter before the destructor runs.
+b.xs.push(Item(1, b, 0));
+b.xs.push(Item(2, b, 1));
+print("-- pop");
+b.xs.pop();
+print("size " + str(b.xs.size()));
+b.xs.clear();
+
+// remove_at: the same, with the shift already done.
+b.xs.push(Item(3, b, 1));
+b.xs.push(Item(4, b, 0));
+print("-- remove_at");
+b.xs.remove_at(0);
+print("size " + str(b.xs.size()));
+print("first " + str(b.xs[0].id));
+b.xs.clear();
+
+// An index store: the new element is in the slot before the old one's
+// destructor runs, so the destructor reads the list at full length and a
+// push from it lands after the store.
+b.xs.push(Item(5, b, 1));
+print("-- index store");
+b.xs[0] = Item(6, b, 0);
+print("size " + str(b.xs.size()));
+print("first " + str(b.xs[0].id));
+b.xs.clear();
+
+// insert releases nothing; it only grows and shifts.
+b.xs.push(Item(7, b, 0));
+print("-- insert");
+b.xs.insert(0, Item(8, b, 0));
+print("first " + str(b.xs[0].id));
+print("last " + str(b.xs[1].id));
+b.xs.clear();
+
+// A field store: the field already holds the new value when the old one's
+// destructor runs.
+Slot s = Slot(Item(9, b, 0));
+print("-- field store");
+s.cur = Item(10, b, 0);
+print("field " + str(s.cur.id));
+
+print("events " + str(b.events));

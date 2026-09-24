@@ -1,0 +1,54 @@
+// `clear` releases every element, and an element's destructor is program
+// code that can reach the very list being cleared. Releasing in place --
+// walking `l->data` while `l->len` still counted the elements -- let the
+// destructor take a SECOND reference to the element being destroyed:
+//
+//     r.items.clear();          // releases items[0]
+//       Entry.drop()            //   ... runs, and calls
+//         owner.items.remove_at(0)   //   which hands items[0] out AGAIN
+//
+// `drop` then ran twice on the same object, the resurrection trap fired
+// under -DRC_DEBUG, and AddressSanitizer reported a heap-use-after-free in
+// the drop function. docs/reentrancy-decision.md, "The release paths".
+//
+// The buffer is detached before anything is released, so the destructor
+// finds the empty list `clear` promises. Everything it does lands on that
+// empty list: removing from it finds nothing, and pushing onto it refills
+// a list that stays filled when `clear` returns.
+
+type Registry {
+    List<Entry> items;
+    int removed;
+}
+
+type Entry {
+    int id;
+    Registry owner;
+}
+
+void Entry.drop() {
+    print("drop " + str(id));
+    // The list is already empty: `clear` promises an empty list, and that
+    // is what a destructor running under it sees.
+    print("  size during drop " + str(owner.items.size()));
+    if (owner.items.size() > 0) {
+        owner.items.remove_at(0);
+        owner.removed = owner.removed + 1;
+    }
+}
+
+Registry r = Registry([], 0);
+r.items.push(Entry(1, r));
+r.items.push(Entry(2, r));
+r.items.push(Entry(3, r));
+print("clearing");
+r.items.clear();
+print("size after " + str(r.items.size()));
+print("removed " + str(r.removed));
+
+// The same list is usable again straight away: the detached buffer is gone,
+// and a push allocates a new one.
+r.items.push(Entry(4, r));
+print("size refilled " + str(r.items.size()));
+r.items.clear();
+print("done " + str(r.items.size()));

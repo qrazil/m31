@@ -1,0 +1,44 @@
+// The other half of corpus/core/1150: a destructor that PUSHES onto the
+// list being cleared. With the buffer detached, the push lands in a fresh
+// one, so nothing the destructor adds is released by the `clear` that is
+// still running -- and nothing it adds is lost either.
+//
+// Releasing in place could not have got this right under any rule: a push
+// past the capacity reallocates the buffer the loop is walking.
+
+type Pool {
+    List<Slot> free;
+    int made;
+}
+
+type Slot {
+    int id;
+    Pool p;
+    bool recycle;
+}
+
+void Slot.drop() {
+    print("drop " + str(id));
+    if (recycle) {
+        // Enough pushes to grow the list well past the capacity it had when
+        // `clear` was called: the old code reallocated under its own loop.
+        int i = 0;
+        while (i < 5) {
+            p.made = p.made + 1;
+            p.free.push(Slot(100 + p.made, p, false));
+            i = i + 1;
+        }
+    }
+}
+
+Pool p = Pool([], 0);
+p.free.push(Slot(1, p, true));
+p.free.push(Slot(2, p, true));
+print("clearing");
+p.free.clear();
+// Two destructors, five pushes each: the list `clear` returns holds all ten.
+print("size after " + str(p.free.size()));
+print("first " + str(p.free[0].id));
+print("last " + str(p.free[9].id));
+p.free.clear();
+print("done " + str(p.free.size()));

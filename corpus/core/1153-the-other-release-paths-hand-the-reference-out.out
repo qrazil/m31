@@ -1,0 +1,27 @@
+-- pop
+drop 2, list is 1
+size 2
+drop 1, list is 0
+drop 20, list is 0
+-- remove_at
+drop 3, list is 1
+size 2
+first 4
+drop 4, list is 0
+drop 30, list is 0
+-- index store
+drop 5, list is 1
+size 2
+first 6
+drop 6, list is 0
+drop 50, list is 0
+-- insert
+first 8
+last 7
+drop 8, list is 0
+drop 7, list is 0
+-- field store
+drop 9, list is 0
+field 10
+events 12
+drop 10, list is 0

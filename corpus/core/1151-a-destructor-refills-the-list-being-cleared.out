@@ -1,0 +1,17 @@
+clearing
+drop 1
+drop 2
+size after 10
+first 101
+last 110
+drop 101
+drop 102
+drop 103
+drop 104
+drop 105
+drop 106
+drop 107
+drop 108
+drop 109
+drop 110
+done 0

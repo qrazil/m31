@@ -724,6 +724,20 @@ void rt_print_str(Obj *o) {
 
 /* ---- collections ------------------------------------------------------ */
 
+/* These three -- and the emitted `drop_T` that releases a struct's fields --
+ * release in place, walking a structure while its elements' destructors run.
+ * That is the shape docs/reentrancy-decision.md forbids everywhere else, and
+ * it is safe here for a reason that holds only here: a drop function runs
+ * when the count has reached ZERO, so no reference to this object exists for
+ * the program to reach it through. A destructor that could name it would be
+ * holding one, and the count would not be zero. The one way to acquire one
+ * during the walk -- storing `this` somewhere that outlives the call -- is
+ * the resurrection trap (src/emit_c.rs). A cycle would be the exception, and
+ * a cycle is never released at all (reference §7.1).
+ *
+ * So the elements' own destructors cannot see these containers, and nothing
+ * detaches. Every path that releases while the structure IS reachable --
+ * rt_list_clear, rt_map_clear, rt_map_remove, rt_map_set -- does. */
 static void arr_drop_refs(Obj *o) {
     Arr *a = (Arr *)o;
     for (int64_t i = 0; i < a->len; i++) {
@@ -993,16 +1007,46 @@ int64_t rt_list_remove_at(Obj *o, int64_t i) {
 }
 
 /* Releasing is the container's job here, because after this there is nothing
- * left to hand the references to. */
+ * left to hand the references to.
+ *
+ * The buffer is DETACHED before anything is released -- the rule for every
+ * release path, docs/reentrancy-decision.md "The release paths", and the
+ * same shape rt_map_clear already had. An element's destructor is program
+ * code; it may reach this very list, and it must find the empty list
+ * `clear` promises rather than the one being walked.
+ *
+ * Releasing in place did not: a destructor that removed from the list being
+ * cleared took a SECOND reference to the element already being destroyed
+ * and released it again -- `drop` ran twice on it, then the resurrection
+ * trap under -DRC_DEBUG, and a heap-use-after-free under AddressSanitizer
+ * (corpus/core/1150).
+ *
+ * Nothing below touches `l` after the first release, which is the other
+ * half of the rule. The caller does retain the receiver across a call that
+ * can release (src/lower/hold.rs, `releases`), so the list cannot actually
+ * go out from under this -- but the runtime does not have to know that, and
+ * a `clear` that only ever reads its own locals after the first `rc_dec`
+ * stays correct whichever side holds the reference.
+ *
+ * A list of values releases nothing, so no program code can run and there is
+ * nothing to detach from: it keeps its buffer, as `bytes.clear` does, and a
+ * scratch list cleared in a loop still allocates once. */
 void rt_list_clear(Obj *o, bool elems_are_refs) {
     rt_check_mutable(o);
     Lst *l = (Lst *)o;
-    if (elems_are_refs) {
-        for (int64_t i = 0; i < l->len; i++) {
-            rc_dec((Obj *)(intptr_t)l->data[i]);
-        }
+    if (!elems_are_refs) {
+        l->len = 0;
+        return;
     }
+    int64_t *data = l->data;
+    int64_t n = l->len;
+    l->data = NULL;
     l->len = 0;
+    l->cap = 0;
+    for (int64_t i = 0; i < n; i++) {
+        rc_dec((Obj *)(intptr_t)data[i]);
+    }
+    free(data);
 }
 
 /* In place, so no ownership changes: the same references, different order.
@@ -1556,6 +1600,8 @@ bool rt_bytes_utf8(Obj *o, Obj **out) {
  * written, and `map_hash` over there stays int-and-str only.
  */
 
+/* In place, like arr_drop_refs and lst_drop_refs and for the same reason:
+ * the count is zero, so nothing the program can run reaches this map. */
 static void map_drop(Obj *o) {
     Map *m = (Map *)o;
     for (int64_t i = 0; i < m->cap; i++) {
@@ -1716,13 +1762,17 @@ void rt_map_set(Obj *o, int64_t k, int64_t v) {
          * retain would then resurrect freed memory. Every other overwrite
          * path -- StoreField, rt_index_set -- orders it this way too. */
         Obj *old = (Obj *)(intptr_t)m->slots[i].v;
-        if (m->val_is_ref) rc_inc((Obj *)(intptr_t)v);
+        bool val_is_ref = m->val_is_ref;
+        if (val_is_ref) rc_inc((Obj *)(intptr_t)v);
         m->slots[i].v = v;
         rc_guard_drop(o, RC_PROBING, guard);
         /* The mark comes off before the release: the value being replaced
          * may be the last of its kind, and its destructor is program code
-         * that has every right to change this map. */
-        if (m->val_is_ref) rc_dec(old);
+         * that has every right to change this map. The slot already holds
+         * the new value and `val_is_ref` is already in hand, so nothing here
+         * reads `m` again after the release (docs/reentrancy-decision.md,
+         * "The release paths"). */
+        if (val_is_ref) rc_dec(old);
         return;
     }
     if (m->slots[i].state == SLOT_EMPTY) m->used++;
@@ -1770,6 +1820,15 @@ void rt_map_remove(Obj *o, int64_t k) {
     }
     Obj *dk = (Obj *)(intptr_t)m->slots[i].k;
     Obj *dv = (Obj *)(intptr_t)m->slots[i].v;
+    /* Both flags are read BEFORE the first release, so that nothing after it
+     * reads the map again: `m->val_is_ref` sat after `rc_dec(dk)`, and a key
+     * destructor that dropped the last reference to this map would have made
+     * that a read of freed memory. It cannot today -- the caller retains the
+     * receiver across a call that can release (src/lower/hold.rs,
+     * `releases`) -- and the runtime no longer relies on it either
+     * (docs/reentrancy-decision.md, "The release paths"; corpus/core/1154). */
+    bool key_is_ref = m->key_is_ref;
+    bool val_is_ref = m->val_is_ref;
     m->slots[i].state = SLOT_DEAD;   /* not EMPTY: a probe must not stop here */
     m->len--;
     /* The slot is gone from the table before either release runs: a
@@ -1777,8 +1836,8 @@ void rt_map_remove(Obj *o, int64_t k) {
      * already read as one entry shorter, and may change it, which the mark
      * must no longer refuse. */
     rc_guard_drop(o, RC_PROBING, guard);
-    if (m->key_is_ref) rc_dec(dk);
-    if (m->val_is_ref) rc_dec(dv);
+    if (key_is_ref) rc_dec(dk);
+    if (val_is_ref) rc_dec(dv);
 }
 
 int64_t rt_map_len(Obj *o) {
