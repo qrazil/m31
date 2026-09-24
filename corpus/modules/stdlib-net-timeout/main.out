@@ -1,0 +1,22 @@
+client sent 'par'
+read_until: timed out
+wait: true
+client sent 'tial' and a newline
+read_until: [partial] 8 bytes
+client sent 'hal'
+read_line_of: timed out
+client sent 'f-line' and a newline
+read_line_of: [half-line]
+client sent 100000 x and stopped
+read_all: timed out
+client sent 20000 y and half-closed
+read_all: 120000 bytes
+read_all: every byte, in order: true
+client closed
+Buffer read_until: [par] ends with the delimiter: false
+Buffer has nothing left: 0
+dir made
+wrote 200001 bytes
+File read_until: 150001 bytes, ends with the delimiter: true
+File read_all: 50000 bytes
+cleaned up

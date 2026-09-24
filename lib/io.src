@@ -15,6 +15,7 @@
 //   f.read_all()               -> Result<bytes, Error>  everything to the end
 //   f.read_until(delim, limit) -> Result<bytes, Error>  through `delim`, at most `limit`
 //   f.write(b)                 -> Result<int, Error>    all of `b`
+//   f.write_some(b)            -> Result<int, Error>    one attempt; what the kernel took
 //   f.close()                  -> Result<bool, Error>
 //
 //   io.Stream                  interface                the five methods above
@@ -24,8 +25,20 @@
 //   io.buffer()                -> Buffer                bytes in memory, empty
 //   io.buffer_of(b)            -> Buffer                the same, holding a copy of `b`
 //   b.read(n), b.read_all(), b.read_until(d, l), b.write(b), b.close()   as a File's
+//   b.write_some(b)            -> Result<int, Error>    as a File's
 //   b.size()                   -> int                   bytes written and not yet read
 //   b.peek()                   -> bytes                 those bytes, without consuming
+//
+// **A failed read loses nothing; a failed write loses where you were.**
+// Those are the two halves of one rule, and they are not symmetric because
+// the two directions are not. A read that fails part way -- a socket's
+// timeout is the case that matters -- puts every byte it had already taken
+// back in front of the stream, so the retry sees the whole thing and no
+// caller has to hold a partial result itself. A write that fails part way
+// cannot take its bytes back out of the kernel: `write` reports `Err` with
+// no count, an unknown prefix of `b` is gone, and the only correct next
+// move is `close()`. A caller that must resync writes with `write_some`,
+// which does one attempt and reports exactly what it managed.
 //
 // Everything here is language source down to one system call per primitive
 // (runtime/sys.h, docs/sys-layer.md): the read loop, the buffer, the line
@@ -55,6 +68,11 @@ prim void __out_flush();
 //   seek         SET 0, CUR 1
 //   file type    mode & 0o170000; a regular file is 0o100000
 //   errno        EINTR 4, EIO 5 -- the rest are named in from_errno
+
+// How much a `File` reads the kernel in, and the size its buffer goes back
+// to after `unread` has borrowed it for a push-back.
+const int CHUNK = 65536;
+
 /// Why an operation on a file failed.
 ///
 /// `Other` is what keeps this enum from ever needing a new variant. `match`
@@ -134,6 +152,33 @@ pub str Error.to_str() {
 /// `read` because each type has a better way: a `File` asks the file system
 /// for its size, and a `Buffer` already holds everything and answers with a
 /// slice. Through the vtable a caller gets the good one.
+///
+/// ### What a failure means, for every stream
+///
+/// **A read that returns `Err` has consumed nothing.** `read` is trivially
+/// that -- it hands out what one buffer holds and fails before taking any.
+/// `read_all` and `read_until` are not: they collect across as many reads
+/// as it takes, so each of them puts what it had collected back in front of
+/// the stream before handing the error out, and the next read sees those
+/// bytes first. A `read_until` that times out with
+/// half a line in hand therefore loses neither the half line nor its place:
+/// call it again and the whole line comes back. `io.read_line_of` inherits
+/// this, because it is one `read_until`. The one thing a failing read can
+/// still consume is `read_line_of`'s `Err(InvalidUtf8)`: the line was read,
+/// it is not text, and there is no way to say so and also un-read it.
+///
+/// **A write that returns `Err` has written an unknown amount.** There is
+/// no matching promise and there cannot be one: the bytes a `write` has
+/// already handed the kernel are gone, and a `Result` has room for a count
+/// or a cause and not both. So `write`'s `Err` means the stream's place in
+/// whatever protocol is running over it is lost, and the only correct next
+/// move is `close()` -- not a retry, which would duplicate or skip an
+/// unknown prefix. A caller that has to resync instead of closing uses
+/// `write_some`, which a `File`, a `Buffer` and a `net.Conn` all have: one
+/// attempt, an exact count of what the kernel took, and an `Err` that means
+/// nothing at all was written. It is deliberately not in this interface --
+/// `copy` and `read_line_of` do not need it, and a five-method protocol is
+/// the thing an outside type can satisfy by accident.
 ///
 /// There is no `drop` here and there cannot be: an interface requiring a
 /// destructor would be a way to call one by hand (docs/destructors-decision.md).
@@ -218,6 +263,12 @@ pub Result<bytes, Error> File.read(int n) {
 /// once, so a large file is not held twice while a growing buffer doubles.
 /// The size is only a hint -- a file can grow while it is read, and a pipe
 /// has none -- so the read goes on to the real end regardless.
+///
+/// **A failure does not throw away what had arrived**: everything read so
+/// far goes back in front of the stream and the next read starts with it,
+/// as `Stream` says. That matters most where this cannot finish at all --
+/// a socket with a read timeout, where "the peer has not stopped sending
+/// yet" is the ordinary answer.
 pub Result<bytes, Error> File.read_all() {
     check_readable();
     // What the buffer already holds comes first.
@@ -245,6 +296,11 @@ pub Result<bytes, Error> File.read_all() {
                 continue;
             }
             if (r < 0) {
+                // The kernel's offset has moved by `got`, so those bytes
+                // are only in `big`: they go back with the rest.
+                big.truncate(got);
+                out.extend(big);
+                unread(out);
                 return Result<bytes, Error>.Err(from_errno(-r));
             }
             if (r == 0) {
@@ -266,7 +322,7 @@ pub Result<bytes, Error> File.read_all() {
     }
     // The rest, until the kernel says the end: all of it for a pipe, and
     // for a regular file one empty read that confirms the hint was right.
-    while (fill()? > 0) {
+    while (fill_keeping(out)? > 0) {
         if (end == buf.size()) {
             out.extend(buf);
         } else {
@@ -287,6 +343,11 @@ pub Result<bytes, Error> File.read_all() {
 /// this safe on input nobody controls: without one, a line that never ends
 /// is a request for all of memory.
 ///
+/// **A failure does not throw away the part that had arrived.** The bytes
+/// taken so far go back in front of the stream, so a `read_until` that
+/// times out half way through a line and is called again reads the whole
+/// line, delimiter and all, exactly as if the wait had been longer.
+///
 /// An empty `delim` or a `limit` below 1 traps.
 pub Result<bytes, Error> File.read_until(bytes delim, int limit) {
     if (delim.size() == 0) {
@@ -299,7 +360,7 @@ pub Result<bytes, Error> File.read_until(bytes delim, int limit) {
     bytes out = [];
     while (out.size() < limit) {
         if (at == end) {
-            if (fill()? == 0) {
+            if (fill_keeping(out)? == 0) {
                 break;
             }
         }
@@ -318,6 +379,16 @@ pub Result<bytes, Error> File.read_until(bytes delim, int limit) {
 ///
 /// "All" is the promise: the kernel may take a write in pieces, and the
 /// loop that hands it the rest is here so that no caller writes one.
+///
+/// **`Err` means an unknown amount of `b` was written**, somewhere between
+/// none and all of it but the last byte, and the file's contents are
+/// therefore in a state no caller can name. This is not an oversight and it
+/// is not fixable in this signature: a `Result` carries a count or a cause,
+/// never both, and unlike a failed read there is nothing to put back --
+/// what the kernel took, it took. So an `Err` here means the file is done:
+/// `close()` it and report. Retrying `write` would duplicate or skip an
+/// unknown prefix, which is worse than failing. `write_some` is the way to
+/// go on writing and know where you are.
 pub Result<int, Error> File.write(bytes b) {
     if (!live) {
         trap("write on a closed file");
@@ -329,6 +400,43 @@ pub Result<int, Error> File.write(bytes b) {
         __out_flush();
     }
     return write_all(fd, b);
+}
+
+/// One attempt at writing `b`: the number of bytes the kernel took, at
+/// least 1 and at most `b.size()`. An empty `b` writes nothing and is 0.
+///
+/// This is `write` with the loop taken out, and the point of it is the
+/// error: **`Err` from here means nothing was written.** A short write is
+/// `Ok(n)` with `n` below `b.size()`, so the two answers never overlap and
+/// a caller always knows where it is. That is exactly what `write` cannot
+/// tell it, which is why a protocol that has to resync after a failure --
+/// a socket with a send timeout is the case that forces it -- writes with
+/// this and keeps its own offset:
+///
+///     int off = 0;
+///     while (off < b.size()) {
+///         off = off + f.write_some(b.substr(off, b.size()))?;
+///     }
+///
+/// The guarantee is the kernel's, not a loop's: `write(2)` that moved any
+/// bytes at all returns their count rather than an error, including when a
+/// socket's `SO_SNDTIMEO` expires part way (`man 7 socket`). A signal with
+/// nothing written is retried here, as everywhere in this module, so it is
+/// not one of the errors.
+pub Result<int, Error> File.write_some(bytes b) {
+    if (!live) {
+        trap("write on a closed file");
+    }
+    if (!writable) {
+        trap("write on a file opened for reading");
+    }
+    if (b.size() == 0) {
+        return Result<int, Error>.Ok(0);
+    }
+    if (fd == 1 || fd == 2) {
+        __out_flush();
+    }
+    return write_once(fd, b);
 }
 
 /// Release the descriptor. Closing twice is not an error; any other use of
@@ -378,10 +486,15 @@ void File.check_readable() {
 }
 
 // Refill an empty buffer. The number of bytes now buffered, 0 at the end.
+//
+// The buffer is always exactly one chunk when a read goes into it: it is
+// allocated on the first read, and it is reallocated after an `unread` has
+// replaced it with a push-back of some other size -- a three-byte one would
+// otherwise make every later read a three-byte read.
 Result<int, Error> File.fill() {
     check_readable();
-    if (buf.size() == 0) {
-        buf = [0; 65536];
+    if (buf.size() != CHUNK) {
+        buf = [0; CHUNK];
     }
     while (true) {
         int r = __read(fd, buf, 0, buf.size());
@@ -397,6 +510,39 @@ Result<int, Error> File.fill() {
         end = r;
         return Result<int, Error>.Ok(r);
     }
+}
+
+// `fill`, except that a failure first puts `held` back in front of the
+// stream. Every accumulating read calls this instead of `fill` and may then
+// propagate with `?`, because the bytes are safe before the error moves.
+Result<int, Error> File.fill_keeping(bytes held) {
+    match (fill()) {
+        case Ok(int n): {
+            return Result<int, Error>.Ok(n);
+        }
+        case Err(Error e): {
+            unread(held);
+            return Result<int, Error>.Err(e);
+        }
+    }
+}
+
+// Put `b` back in front of the stream: the next read hands those bytes out
+// before anything new arrives.
+//
+// It is only ever called from a failing read, and a failing read has always
+// drained the buffer before asking `fill` for more -- `at == end` at every
+// call site -- so there is nothing here to merge with and `b` simply
+// becomes the buffer. `b` may be much larger than a chunk (a `read_all`
+// that collected megabytes before the peer went quiet); that is why `fill`
+// checks the size rather than only whether there is a buffer at all.
+void File.unread(bytes b) {
+    if (b.size() == 0) {
+        return;
+    }
+    buf = b;
+    at = 0;
+    end = b.size();
 }
 
 // The destructor: close whatever `close()` was not called on. Its error is
@@ -515,6 +661,27 @@ Result<int, Error> write_all(int fd, bytes b) {
         off = off + r;
     }
     return Result<int, Error>.Ok(off);
+}
+
+// One `write(2)` of all of `b`, retried only on a signal that wrote
+// nothing: what the kernel took, which is at least one byte. `b` is not
+// empty -- the caller has already answered that with 0 and no system call.
+Result<int, Error> write_once(int fd, bytes b) {
+    while (true) {
+        int r = __write(fd, b, 0, b.size());
+        if (r == -4) {
+            continue;
+        }
+        if (r < 0) {
+            return Result<int, Error>.Err(from_errno(-r));
+        }
+        // Nothing written and no reason given: it will not get better, and
+        // an error beats a caller looping on a zero forever.
+        if (r == 0) {
+            return Result<int, Error>.Err(from_errno(5));
+        }
+        return Result<int, Error>.Ok(r);
+    }
 }
 
 // The same, from a str: text is written without being copied into bytes.
@@ -655,7 +822,31 @@ pub Result<bytes, Error> Buffer.read_until(bytes delim, int limit) {
 }
 
 /// Append all of `b`, returning its size. It cannot fail.
+///
+/// `Stream`'s warning about a failed `write` -- an unknown amount written,
+/// close it -- is therefore about a case that cannot arise here. That is a
+/// property of a `Buffer` and not of the contract: a caller holding a
+/// `Stream` still has to assume the worst.
 pub Result<int, Error> Buffer.write(bytes b) {
+    if (!live) {
+        trap("write on a closed buffer");
+    }
+    buf.extend(b);
+    return Result<int, Error>.Ok(b.size());
+}
+
+/// The same as `write`: memory always takes all of it, so the one attempt
+/// is the whole thing and the answer is `b.size()`.
+///
+/// It is here so that the resync loop in `File.write_some`'s docs is one
+/// piece of code, whichever of the three writable types it is handed --
+/// that loop over a `Buffer` runs exactly once and never fails, which is
+/// what standing in for a file in a test is supposed to look like.
+///
+/// Written out rather than calling `write`, because a bare `write(b)` here
+/// could mean this type's method or the module's `io.write(path, data)`,
+/// which the language refuses as ambiguous.
+pub Result<int, Error> Buffer.write_some(bytes b) {
     if (!live) {
         trap("write on a closed buffer");
     }
@@ -873,10 +1064,18 @@ pub void eprint(str s) {
 /// Everything left in `src`, written to `dst`; the number of bytes moved.
 ///
 /// Neither stream is closed: `copy` did not open them and does not know
-/// whether the caller is finished with them. A read error leaves `src`
-/// wherever it stopped and a write error leaves `dst` holding what got
-/// through -- the count is lost with the error, as it is on `File.write`,
-/// because a `Result` carries one or the other.
+/// whether the caller is finished with them.
+///
+/// **The two failures are not the same failure**, and `Stream` says why. A
+/// read error stops the copy with `src` unmoved -- whatever that read had
+/// taken is back in front of `src`, and everything before it is already in
+/// `dst` -- so a caller that wants to go on may call `copy` again and it
+/// resumes. A write error is the end: an unknown amount of the last chunk
+/// reached `dst`, `dst` is no longer at a place anyone can name, and the
+/// answer is to close it. Both lose the count, because a `Result` carries a
+/// count or a cause and not both; after a read error the count is at least
+/// recoverable (it is what `dst` grew by), and after a write error it is
+/// not, which is the same asymmetry one level down.
 ///
 /// 64 KiB a time, the size `File` reads the kernel in: large enough that
 /// the per-call cost disappears, small enough that copying a huge file
@@ -884,7 +1083,7 @@ pub void eprint(str s) {
 pub Result<int, Error> copy(Stream src, Stream dst) {
     int total = 0;
     while (true) {
-        bytes chunk = src.read(65536)?;
+        bytes chunk = src.read(CHUNK)?;
         if (chunk.size() == 0) {
             return Result<int, Error>.Ok(total);
         }
@@ -899,6 +1098,15 @@ pub Result<int, Error> copy(Stream src, Stream dst) {
 /// same, and a last line with no newline is still a line. Text that is not
 /// UTF-8 is `Err(InvalidUtf8)` and not the end of the input: a `Result` has
 /// room to say why it stopped.
+///
+/// **A stream failure part way through a line loses nothing**, because this
+/// is one `read_until` and that is what `read_until` promises: the half
+/// line is back in front of the stream, and calling this again once the
+/// rest has arrived returns the whole line. A line that times out is
+/// therefore a line that is not ready yet, not a line that is gone.
+/// `Err(InvalidUtf8)` is the exception, and the only one: those bytes were
+/// read, they are not text, and there is nowhere to put them back that
+/// would not hand them out again as the same error.
 ///
 /// **This is the only line reader.** It reads through the stream's own
 /// buffer, so the next reader of that stream sees what follows the line,
