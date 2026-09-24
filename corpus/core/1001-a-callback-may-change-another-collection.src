@@ -1,0 +1,76 @@
+// Only the collection the runtime is working on is marked, so a `cmp`,
+// `hash` or `eq` may change any OTHER one -- keep a tally, sort a scratch
+// list, fill a map. That has to stay legal: a comparison that memoises, or
+// counts how often it ran, is ordinary code.
+
+type Log {
+    List<int> calls;
+    Map<int, int> tally;
+    List<int> scratch;
+}
+
+type Item {
+    int rank;
+    Log g;
+}
+
+int Item.cmp(Item o) {
+    g.calls.push(rank);
+    g.tally.set(rank, g.tally.get(rank).or(0) + 1);
+    // A whole sort of a different list, from inside this one.
+    g.scratch.clear();
+    g.scratch.push(o.rank);
+    g.scratch.push(rank);
+    g.scratch.sort();
+    return rank - o.rank;
+}
+
+Log g = Log([], {}, []);
+List<Item> xs = [];
+int i = 0;
+while (i < 6) {
+    xs.push(Item(6 - i, g));
+    i = i + 1;
+}
+xs.sort();
+i = 0;
+while (i < xs.size()) {
+    print(xs[i].rank);
+    i = i + 1;
+}
+print(g.calls.size() > 0);
+print(g.tally.size());
+print(g.scratch.size());
+
+// A map keyed on a user type whose `hash` and `eq` touch a different map.
+type Side {
+    Map<int, int> hits;
+}
+
+type Key {
+    int k;
+    Side s;
+}
+
+int Key.hash() {
+    s.hits.set(k, s.hits.get(k).or(0) + 1);
+    return k;
+}
+
+bool Key.eq(Key o) {
+    s.hits.set(1000 + k, 1);
+    return k == o.k;
+}
+
+Side s = Side({});
+Map<Key, str> m = {};
+i = 0;
+while (i < 5) {
+    m.set(Key(i, s), "v" + str(i));
+    i = i + 1;
+}
+print(m.size());
+print(m.get(Key(3, s)).or("?"));
+print(m.contains(Key(9, s)));
+print(s.hits.size() > 0);
+m.clear();

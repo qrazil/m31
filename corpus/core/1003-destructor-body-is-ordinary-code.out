@@ -1,0 +1,16 @@
+scope end
+enter drop Outer A
+    made made-inside-A
+    drop Tmp made-inside-A
+    made second-A
+    drop Tmp second-A
+leave drop Outer A
+    drop Tmp last-A
+  drop Inner A.i
+---
+enter Deep 1
+  made Deep 2
+enter Deep 2
+leave Deep 2
+leave Deep 1
+done

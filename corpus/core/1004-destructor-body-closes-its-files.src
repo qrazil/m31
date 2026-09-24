@@ -1,0 +1,60 @@
+import io;
+import fs;
+
+// The visible cost of deferring a destructor's own releases: a descriptor.
+//
+// A loop that opens a file and lets it go closes each one as it goes, so it
+// never holds more than one at a time. Called from inside another
+// destructor it used to hold ALL of them -- every `File` was queued behind
+// the release that was running -- and the reviewer's version of this,
+// 3 000 iterations under `ulimit -n 1024`, died at iteration 1021 with
+// EMFILE. Counted here rather than exhausted, so the corpus needs no limit
+// of its own: /proc/self/fd, the way corpus/core/774 does it.
+
+int open_fds() {
+    match (fs.listdir("/proc/self/fd")) {
+        case Ok(List<str> names): {
+            return names.size();
+        }
+        case Err(io.Error e): {
+            trap("cannot list /proc/self/fd: " + e.to_str());
+        }
+    }
+}
+
+// The most descriptors open at once during the loop, over the baseline.
+int churn(int reps, int base) {
+    int peak = 0;
+    int i = 0;
+    while (i < reps) {
+        match (io.open("/dev/null")) {
+            case Ok(io.File f): {
+                int n = open_fds() - base;
+                if (n > peak) {
+                    peak = n;
+                }
+            }
+            case Err(io.Error e): {
+                trap("open failed: " + e.to_str());
+            }
+        }
+        i = i + 1;
+    }
+    return peak;
+}
+
+type Outer {
+    int base;
+}
+
+// The same loop, from inside a destructor.
+void Outer.drop() {
+    print(churn(64, base));
+}
+
+int base = open_fds();
+print(churn(64, base));  // 1: one file open at a time
+if (true) {
+    Outer o = Outer(base);  // 1 again, inside a destructor -- 64 before
+}
+print(open_fds() - base);  // 0

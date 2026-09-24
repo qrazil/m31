@@ -63,12 +63,45 @@ void rc_inc(Obj *o) {
  *
  * Thread-local, because the counts are (reference §8.3): two threads never
  * reach one object, so they never share a queue either.
+ *
+ * --- and a destructor's body is top-level code -------------------------
+ *
+ * The queue is the STRUCTURAL walk's, and only the structural walk's: the
+ * fields of an object being released, which is what could be a 10 000 000
+ * link chain. It is NOT for what a destructor's own body drops.
+ *
+ * It used to be, because `rc_releasing` covered the whole drain, and that
+ * made a destructor's body a different language from the same code at the
+ * top level (docs/destructors-decision.md, "A destructor's body is ordinary
+ * code"). Measured 2026-09-23, before this: a loop that opens and drops
+ * 3 000 files runs fine at the top level and dies at iteration 1021 with
+ * EMFILE inside a destructor, because every `File` was queued and none of
+ * them closed; 3 000 000 short-lived objects peak at 1.5 MB at the top level
+ * and at 212 MB inside a destructor; and an object made and dropped inside a
+ * destructor body ran its own `drop` after the enclosing one returned, which
+ * reference §4.4 says cannot happen.
+ *
+ * So `rt_drop_enter` / `rt_drop_leave` bracket the call to a user `drop`
+ * body -- emitted by src/emit_c.rs, the only place the runtime's release
+ * reaches the program -- and give the body a FRESH, empty queue: inside it
+ * the first decrement to reach zero owns a drain of its own and runs it
+ * before the body's next statement, exactly as at the top level. The outer
+ * walk's pending objects are set aside untouched and picked up again
+ * afterwards, so its order and its one-frame guarantee are unchanged.
+ *
+ * Draining the outer queue at that point instead would have been wrong twice
+ * over: it releases objects the walk has not reached yet, and it does it
+ * from inside the body, which is recursion once per link again.
  */
 #define RC_Q_SMALL 64
 static _Thread_local Obj  *rc_q_small[RC_Q_SMALL];
 static _Thread_local Obj **rc_q;      /* rc_q_small, or a heap buffer */
 static _Thread_local size_t rc_q_cap, rc_q_head, rc_q_tail;
 static _Thread_local bool rc_releasing;
+/* Whether an outer drain is holding rc_q_small. A nested drain -- one
+ * started inside a destructor's body -- takes a heap buffer instead, so the
+ * two never share the array. Only the nesting pays the malloc. */
+static _Thread_local bool rc_q_small_busy;
 
 /* Run what this object holds, then free it. A type with no reference-typed
  * fields has no drop function at all, so the common case is one predictable
@@ -84,7 +117,18 @@ static void rc_release(Obj *o) {
 /* Hand `o` to the loop that is already running. */
 static void rc_enqueue(Obj *o) {
     if (rc_q == NULL) {
-        rc_q = rc_q_small;
+        if (rc_q_small_busy) {
+            /* An outer walk has the array; this drain was started inside a
+             * destructor's body. Its own buffer, freed when it drains. */
+            rc_q = (Obj **)malloc(RC_Q_SMALL * sizeof *rc_q);
+            if (rc_q == NULL) {
+                rc_release(o);
+                return;
+            }
+        } else {
+            rc_q = rc_q_small;
+            rc_q_small_busy = true;
+        }
         rc_q_cap = RC_Q_SMALL;
     }
     if (rc_q_tail == rc_q_cap && rc_q_head > 0) {
@@ -106,20 +150,40 @@ static void rc_enqueue(Obj *o) {
             rc_release(o);
             return;
         }
-        if (rc_q == rc_q_small) memcpy(bigger, rc_q_small, sizeof rc_q_small);
+        if (rc_q == rc_q_small) {
+            memcpy(bigger, rc_q_small, sizeof rc_q_small);
+            /* Off the array and onto the heap: a nested drain may have it. */
+            rc_q_small_busy = false;
+        }
         rc_q = bigger;
         rc_q_cap = cap;
     }
     rc_q[rc_q_tail++] = o;
 }
 
+/* The last reference to a collection went while the runtime was using it.
+ * Cold and out of line, like rt_frozen_trap and for the same reason. */
+__attribute__((cold)) static _Noreturn void rt_busy_gone_trap(long rc) {
+    if ((rc & RC_SORTING) != 0) {
+        rt_trap("the last reference to the list went while it was being sorted: "
+                "`cmp` dropped the very list `sort` was called on");
+    }
+    rt_trap("the last reference to the map went while it was being searched: "
+            "`hash` or `eq` dropped the very map being looked in");
+}
+
 void rc_dec(Obj *o) {
     if (o->rc == RC_IMMORTAL) return;
-    RC_ASSERT((o->rc & ~RC_FROZEN) > 0, "decrement below zero");
-    /* The frozen flag sits above the count (rt.h), so the count is what is
-     * below it: a frozen object is freed like any other when its last
-     * reference goes. */
-    if ((--o->rc & ~RC_FROZEN) != 0) return;
+    RC_ASSERT((o->rc & ~RC_FLAGS) > 0, "decrement below zero");
+    /* The flags sit above the count (rt.h), so the count is what is below
+     * them: a frozen object is freed like any other when its last reference
+     * goes. */
+    if ((--o->rc & ~RC_FLAGS) != 0) return;
+    /* Letting go of the last reference to a collection the runtime is in the
+     * middle of sorting or probing would free the buffer under it. The
+     * callback that did it -- dropping the field the receiver was read from,
+     * say -- is the same bug as changing it, and gets the same answer. */
+    if (__builtin_expect((o->rc & RC_BUSY) != 0, 0)) rt_busy_gone_trap(o->rc);
     if (rc_releasing) {
         rc_enqueue(o);
         return;
@@ -131,15 +195,87 @@ void rc_dec(Obj *o) {
     }
     rc_q_head = 0;
     rc_q_tail = 0;
-    /* Give back a buffer that one big graph needed, so a program is not left
-     * holding it and LeakSanitizer has nothing to report at exit. The small
-     * array covers every ordinary release, so this is rare. */
-    if (rc_q != NULL && rc_q != rc_q_small) {
+    /* Give the buffer back, so a program is not left holding one a single big
+     * graph needed and LeakSanitizer has nothing to report at exit, and so
+     * the next drain -- or a drain nested inside a destructor's body -- finds
+     * the small array free. */
+    if (rc_q == rc_q_small) {
+        rc_q_small_busy = false;
+    } else if (rc_q != NULL) {
         free(rc_q);
-        rc_q = rc_q_small;
-        rc_q_cap = RC_Q_SMALL;
     }
+    rc_q = NULL;
+    rc_q_cap = 0;
     rc_releasing = false;
+}
+
+/* A user destructor's body runs with a queue of its own: see the note above.
+ * Nothing here can fail and nothing allocates -- the whole state is five
+ * words, saved in the drop function's own frame. */
+void rt_drop_enter(RcDrain *save) {
+    save->q = rc_q;
+    save->cap = rc_q_cap;
+    save->head = rc_q_head;
+    save->tail = rc_q_tail;
+    save->releasing = rc_releasing;
+    rc_q = NULL;
+    rc_q_cap = 0;
+    rc_q_head = 0;
+    rc_q_tail = 0;
+    rc_releasing = false;
+}
+
+void rt_drop_leave(RcDrain *save) {
+    /* The body drained whatever it started, exactly as the top level does,
+     * so there is nothing of its own left to carry. */
+    RC_ASSERT(!rc_releasing && rc_q_head == rc_q_tail, "destructor body left a release pending");
+    rc_q = save->q;
+    rc_q_cap = save->cap;
+    rc_q_head = save->head;
+    rc_q_tail = save->tail;
+    rc_releasing = save->releasing;
+}
+
+/* --- the runtime is using this collection ------------------------------
+ *
+ * docs/reentrancy-decision.md; reference §3.9, §4.4a, §7.4.
+ *
+ * Three of a type's methods are called BY the runtime, from inside its own
+ * operations: `cmp` while a list is being sorted, `hash` and `eq` while a
+ * map is being probed (rt.h, TypeInfo). While one of them runs, the runtime
+ * is holding state the program could invalidate under it -- the element
+ * buffer a `push` reallocates, a slot index a rehash makes meaningless -- so
+ * for the length of the operation the receiver is marked, and every path
+ * that changes an object refuses a marked one (rt.h, rt_check_mutable).
+ *
+ * The mark is a bit of the header word the frozen check already loads, so
+ * the common case -- no callback at all, or one that touches nothing -- pays
+ * two stores per whole operation and nothing per element: measured below 1%
+ * on a 1 000 000-element sort, at the noise floor.
+ *
+ * READING the receiver stays legal, and so does changing anything else: only
+ * the collection the runtime is working on is marked, so a callback may sort
+ * or fill a different list, and may read this one -- the list is a valid
+ * permutation of its elements throughout the merge, and the map is whole
+ * until the probe returns.
+ *
+ * `take` reports whether it was this call that marked the object, so a
+ * nested read of the same receiver -- `m.get(k)` inside that map's own `eq`
+ * -- does not clear the outer mark when it returns.
+ *
+ * An immortal object is never marked: the bits could not be cleared again
+ * (RC_IMMORTAL is every bit set), and it does not need them -- it reads as
+ * frozen, so sorting it already traps, and a module-constant map's keys can
+ * only be ints or strs, which run no program code.
+ */
+static bool rc_guard_take(Obj *o, long bit) {
+    if (o->rc == RC_IMMORTAL || (o->rc & bit) != 0) return false;
+    o->rc |= bit;
+    return true;
+}
+
+static void rc_guard_drop(Obj *o, long bit, bool took) {
+    if (took) o->rc &= ~bit;
 }
 
 const TypeInfo rt_str_type = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
@@ -927,6 +1063,14 @@ static void rt_sort_with(Obj *o, SortCmp cmp) {
     rt_check_mutable(o);
     int64_t n = rt_len_of(o);
     if (n < 2) return;
+
+    /* `d` and `n` are read once and used until the sort finishes, so the
+     * list may not change while it does. A user `cmp` runs in the middle of
+     * this (rt_cmp_obj); marking the list is what makes reaching back into
+     * it a trap instead of a reallocated buffer or a freed element. The
+     * mark is set for every sort, not only the ones that can call back:
+     * two stores, and one rule is easier to state than two. */
+    bool guard = rc_guard_take(o, RC_SORTING);
     int64_t *d = slots(o);
 
     int64_t *tmp = malloc(slot_bytes(0, n));
@@ -944,6 +1088,7 @@ static void rt_sort_with(Obj *o, SortCmp cmp) {
         }
     }
     free(tmp);
+    rc_guard_drop(o, RC_SORTING, guard);
 }
 
 void rt_sort_int(Obj *o) {
@@ -1541,8 +1686,18 @@ static void map_rehash(Map *m, int64_t cap) {
     free(old);
 }
 
+/* Every entry point below marks the map for the length of its own probe
+ * (rc_guard_take, above). `map_probe` runs the program's `hash` and `eq` and
+ * then hands back a slot INDEX, which the caller reads and writes after the
+ * callback has returned; a `set` or a `remove` from inside that callback
+ * rehashes the table and the index means nothing any more. `map_rehash`
+ * probes too, so a `set` is marked across the rehash as well as the probe.
+ *
+ * `get` and `has` change nothing but are marked all the same: they hold an
+ * index across program code exactly as `set` does. */
 void rt_map_set(Obj *o, int64_t k, int64_t v) {
     rt_check_mutable(o);
+    bool guard = rc_guard_take(o, RC_PROBING);
     Map *m = (Map *)o;
     /* Rehash before probing, so a full table can never spin forever. Double
      * only when live entries are what fills it; when the load is mostly
@@ -1563,6 +1718,10 @@ void rt_map_set(Obj *o, int64_t k, int64_t v) {
         Obj *old = (Obj *)(intptr_t)m->slots[i].v;
         if (m->val_is_ref) rc_inc((Obj *)(intptr_t)v);
         m->slots[i].v = v;
+        rc_guard_drop(o, RC_PROBING, guard);
+        /* The mark comes off before the release: the value being replaced
+         * may be the last of its kind, and its destructor is program code
+         * that has every right to change this map. */
         if (m->val_is_ref) rc_dec(old);
         return;
     }
@@ -1573,22 +1732,28 @@ void rt_map_set(Obj *o, int64_t k, int64_t v) {
     m->len++;
     if (m->key_is_ref) rc_inc((Obj *)(intptr_t)k);
     if (m->val_is_ref) rc_inc((Obj *)(intptr_t)v);
+    rc_guard_drop(o, RC_PROBING, guard);
 }
 
 int64_t rt_map_get(Obj *o, int64_t k) {
     Map *m = (Map *)o;
     if (m->cap == 0) rt_trap("key not in map");
+    bool guard = rc_guard_take(o, RC_PROBING);
     bool found;
     int64_t i = map_probe(m, k, &found);
     if (!found) rt_trap("key not in map");
-    return m->slots[i].v;
+    int64_t v = m->slots[i].v;
+    rc_guard_drop(o, RC_PROBING, guard);
+    return v;
 }
 
 bool rt_map_has(Obj *o, int64_t k) {
     Map *m = (Map *)o;
     if (m->cap == 0) return false;
+    bool guard = rc_guard_take(o, RC_PROBING);
     bool found;
     map_probe(m, k, &found);
+    rc_guard_drop(o, RC_PROBING, guard);
     return found;
 }
 
@@ -1596,13 +1761,24 @@ void rt_map_remove(Obj *o, int64_t k) {
     rt_check_mutable(o);
     Map *m = (Map *)o;
     if (m->cap == 0) return;
+    bool guard = rc_guard_take(o, RC_PROBING);
     bool found;
     int64_t i = map_probe(m, k, &found);
-    if (!found) return;
-    if (m->key_is_ref) rc_dec((Obj *)(intptr_t)m->slots[i].k);
-    if (m->val_is_ref) rc_dec((Obj *)(intptr_t)m->slots[i].v);
+    if (!found) {
+        rc_guard_drop(o, RC_PROBING, guard);
+        return;
+    }
+    Obj *dk = (Obj *)(intptr_t)m->slots[i].k;
+    Obj *dv = (Obj *)(intptr_t)m->slots[i].v;
     m->slots[i].state = SLOT_DEAD;   /* not EMPTY: a probe must not stop here */
     m->len--;
+    /* The slot is gone from the table before either release runs: a
+     * destructor is program code and may look at this map, which must
+     * already read as one entry shorter, and may change it, which the mark
+     * must no longer refuse. */
+    rc_guard_drop(o, RC_PROBING, guard);
+    if (m->key_is_ref) rc_dec(dk);
+    if (m->val_is_ref) rc_dec(dv);
 }
 
 int64_t rt_map_len(Obj *o) {
@@ -1647,16 +1823,23 @@ Obj *rt_map_values(Obj *o) {
 void rt_map_clear(Obj *o) {
     rt_check_mutable(o);
     Map *m = (Map *)o;
-    for (int64_t i = 0; i < m->cap; i++) {
-        if (m->slots[i].state != SLOT_FULL) continue;
-        if (m->key_is_ref) rc_dec((Obj *)(intptr_t)m->slots[i].k);
-        if (m->val_is_ref) rc_dec((Obj *)(intptr_t)m->slots[i].v);
-    }
-    free(m->slots);
+    /* The table is detached BEFORE anything is released. A value's
+     * destructor is program code, it may reach this map, and it must find an
+     * empty one it can fill again rather than the table being walked. */
+    MapSlot *old = m->slots;
+    int64_t oldcap = m->cap;
+    bool key_is_ref = m->key_is_ref;
+    bool val_is_ref = m->val_is_ref;
     m->slots = NULL;
     m->cap = 0;
     m->len = 0;
     m->used = 0;
+    for (int64_t i = 0; i < oldcap; i++) {
+        if (old[i].state != SLOT_FULL) continue;
+        if (key_is_ref) rc_dec((Obj *)(intptr_t)old[i].k);
+        if (val_is_ref) rc_dec((Obj *)(intptr_t)old[i].v);
+    }
+    free(old);
 }
 
 /* `clone(m)`: a new map with the same entries, each key and value retained
@@ -1952,7 +2135,7 @@ static bool reach_private(Reach *r, Obj *o) {
     }
     for (int64_t i = 0; i < r->cap; i++) {
         if (r->keys[i] == NULL) continue;
-        if ((r->keys[i]->rc & ~RC_FROZEN) != r->cnt[i]) return false;
+        if ((r->keys[i]->rc & ~RC_FLAGS) != r->cnt[i]) return false;
     }
     return true;
 }
@@ -1971,7 +2154,7 @@ void rt_check_unique(Obj *o) {
      * (rt.h): a frozen value crosses under the same rule as any other,
      * because its count is still not atomic. */
     if (o->ty == NULL || o->ty->walk == NULL) {
-        if ((o->rc & ~RC_FROZEN) != 1) {
+        if ((o->rc & ~RC_FLAGS) != 1) {
             rt_trap("value crossing a thread boundary is still referenced "
                     "elsewhere; clone() it, or drop the other reference first");
         }
@@ -2203,8 +2386,19 @@ Obj *rt_snapshot(Obj *o) {
     return snap;
 }
 
-_Noreturn void rt_frozen_trap(void) {
-    rt_trap("cannot modify a constant; clone() it for a copy that can be changed");
+/* One trap for every bit of the header that forbids a change (rt.h,
+ * RC_FLAGS). Frozen first, because an immortal object has every bit set and
+ * a constant is what it is. */
+_Noreturn void rt_frozen_trap(long rc) {
+    if ((rc & RC_FROZEN) != 0) {
+        rt_trap("cannot modify a constant; clone() it for a copy that can be changed");
+    }
+    if ((rc & RC_SORTING) != 0) {
+        rt_trap("the list changed while it was being sorted: `cmp` may read the "
+                "list being sorted, but not change it");
+    }
+    rt_trap("the map changed while it was being searched: `hash` and `eq` may "
+            "read the map being searched, but not change it");
 }
 
 _Noreturn void rt_trap(const char *msg) {

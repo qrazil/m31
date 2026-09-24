@@ -1,0 +1,58 @@
+// A `cmp` runs in the middle of `sort`, which is holding the element buffer
+// and a length. READING the list from inside it is legal and stays legal:
+// through the merge the list is always a permutation of the elements it
+// started with, so `size()`, an index and `contains` all answer something
+// true. Only changing it is refused (corpus/traps/1010-1011).
+//
+// The same for `keys()` and `values()` of a map from inside its own `eq`
+// (below): the table is whole until the probe returns.
+
+type Holder {
+    List<Item> xs;
+    int seen;
+}
+
+type Item {
+    int rank;
+    Holder h;
+}
+
+int Item.cmp(Item o) {
+    // Reads only. The size never changes; the element read back is one of
+    // the ones that went in.
+    h.seen = h.seen + h.xs.size();
+    int probe = h.xs[0].rank;
+    if (probe < 0) {
+        trap("an element vanished from the list being sorted");
+    }
+    return rank - o.rank;
+}
+
+Holder h = Holder([], 0);
+int i = 0;
+while (i < 8) {
+    h.xs.push(Item(8 - i, h));
+    i = i + 1;
+}
+h.xs.sort();
+print(h.xs.size());
+i = 0;
+while (i < h.xs.size()) {
+    print(h.xs[i].rank);
+    i = i + 1;
+}
+// Every comparison saw a list of eight.
+print(h.seen % 8);
+// Sorting ints, strs and floats reaches no program code at all, and the
+// guard is invisible to them.
+List<int> ns = [3, 1, 2];
+ns.sort();
+print(ns[0]);
+print(ns[2]);
+// Two sorts in a row: the mark comes off at the end of the first.
+h.xs.sort();
+print(h.xs[0].rank);
+// Each Item points back at the Holder whose list holds it, which is a cycle
+// and would never be released (reference §7.1). Breaking it by hand is what
+// lets the refcount invariant hold at the end of the run.
+h.xs.clear();

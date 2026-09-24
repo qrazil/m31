@@ -32,6 +32,28 @@
  * (never passed to a mutation path). */
 #define RC_FROZEN (LONG_MAX / 2 + 1)
 
+/* The runtime is in the middle of an operation on this collection that calls
+ * back into the PROGRAM -- a `cmp` while sorting it, a `hash` or an `eq`
+ * while probing it -- and is holding something the operation would
+ * invalidate: a pointer to the element buffer, or a slot index. Changing the
+ * collection from inside that callback is refused -- it is a bug in the
+ * program, so it traps (docs/reentrancy-decision.md, reference §3.9).
+ *
+ * Two bits and not one so the trap can name the operation without a
+ * thread-local to hold the reason, which nested operations would get wrong.
+ * They sit directly below RC_FROZEN, so the count still has 60 bits and
+ * every check that wants the count alone masks RC_FLAGS off.
+ *
+ * An immortal object is never marked: RC_IMMORTAL is every bit set, so the
+ * bits cannot be cleared again afterwards, and it does not need them -- it
+ * reads as frozen, so every mutation path already refuses it. */
+#define RC_SORTING (LONG_MAX / 4 + 1)
+#define RC_PROBING (LONG_MAX / 8 + 1)
+#define RC_BUSY    (RC_SORTING | RC_PROBING)
+
+/* Everything in the header word that is not the count. */
+#define RC_FLAGS (RC_FROZEN | RC_BUSY)
+
 typedef struct Obj Obj;
 
 /* Called when a refcount reaches zero, BEFORE the block is freed, to release
@@ -136,6 +158,25 @@ typedef struct {
 void rc_inc(Obj *o);
 void rc_dec(Obj *o);
 
+/* The queue `rc_dec` releases a graph with, saved across a destructor's body
+ * (runtime/rt.c, "a destructor's body is top-level code"). Emitted code
+ * declares one beside the destructor call and passes it to the two functions
+ * below; no field of it means anything outside rt.c. */
+typedef struct {
+    Obj  **q;
+    size_t cap;
+    size_t head;
+    size_t tail;
+    bool   releasing;
+} RcDrain;
+
+/* Around the call to a user `drop` body, and nothing else. Between them the
+ * program's own code runs, and it must behave exactly as it does at the top
+ * level: what it drops is released there and then, not queued until the walk
+ * that is releasing this object finishes. */
+void rt_drop_enter(RcDrain *save);
+void rt_drop_leave(RcDrain *save);
+
 /* A `const` binding takes a frozen snapshot of its value
  * (docs/const-decision.md). Takes the caller's +1 on `o` and returns a +1 on
  * a frozen value equal to it:
@@ -156,19 +197,25 @@ Obj *rt_copy_child(void *ctx, Obj *child);
 /* Cold as well as _Noreturn: without it gcc counted the call against the
  * size of every function that stores a field, and stopped inlining small
  * methods -- a 70% slowdown on a store-heavy loop, measured, that was the
- * lost inlining and not the check. */
-__attribute__((cold)) _Noreturn void rt_frozen_trap(void);
+ * lost inlining and not the check. Takes the header word and picks the
+ * message from it: frozen, being sorted, being probed. */
+__attribute__((cold)) _Noreturn void rt_frozen_trap(long rc);
 
 /* Every path that changes an object checks this first: the runtime's own
  * collection and bytes mutators, and the compiler before every field store
  * that is not initialising a new object. It is what catches a change the
  * compiler cannot see -- a frozen value reached through a parameter, since
- * there is no read-only parameter type.
+ * there is no read-only parameter type -- and a change made from inside a
+ * `cmp`, `hash` or `eq` the runtime is in the middle of calling (RC_BUSY).
+ *
+ * One test covers both, because both are bits of the same word: the guard
+ * costs the reentrancy check nothing over the frozen check that was already
+ * here.
  *
  * Inline, because a field store is one instruction and a call per store
  * would dominate it; the trap itself is out of line and cold. */
 static inline void rt_check_mutable(Obj *o) {
-    if (__builtin_expect((o->rc & RC_FROZEN) != 0, 0)) rt_frozen_trap();
+    if (__builtin_expect((o->rc & RC_FLAGS) != 0, 0)) rt_frozen_trap(o->rc);
 }
 
 /* Allocate `size` bytes of object, refcount 1, with the given drop function

@@ -1,0 +1,66 @@
+// `hash` and `eq` run in the middle of a probe, which is holding a slot
+// index. Reading the map from inside them is legal: the table is whole and
+// unchanged until the probe returns, so `size()`, `contains`, `get`,
+// `keys()` and `values()` all answer what is there. Changing it is refused
+// (corpus/traps/1012-1013).
+//
+// A read from inside a probe probes AGAIN, on the same map, which is the
+// case a single set-and-clear mark would get wrong: the inner read must not
+// take the mark off while the outer probe is still holding its index.
+
+type Box {
+    Map<Key, int> m;
+    int reads;
+    int armed;
+}
+
+type Key {
+    int k;
+    Box b;
+}
+
+int Key.hash() {
+    return k;
+}
+
+bool Key.eq(Key o) {
+    // A nested probe of the very map being probed, plus the two list-making
+    // reads. Disarmed for the length of it, because a read that always read
+    // again would recurse forever -- the program's own doing, not the
+    // guard's.
+    if (b.armed == 1) {
+        b.armed = 0;
+        b.reads = b.reads + b.m.size() + b.m.keys().size() + b.m.values().size();
+        if (b.m.contains(Key(0, b))) {
+            b.reads = b.reads + 1;
+        }
+        b.armed = 1;
+    }
+    return k == o.k;
+}
+
+Box b = Box({}, 0, 1);
+int i = 0;
+while (i < 6) {
+    b.m.set(Key(i, b), i * 10);
+    i = i + 1;
+}
+print(b.m.size());
+print(b.m.get(Key(4, b)).or(-1));
+print(b.m.contains(Key(4, b)));
+print(b.m.contains(Key(99, b)));
+b.m.remove(Key(4, b));
+print(b.m.size());
+print(b.m.contains(Key(4, b)));
+print(b.reads > 0);
+// keys() and values() outside any callback, to show the map is intact.
+List<int> vs = b.m.values();
+vs.sort();
+i = 0;
+while (i < vs.size()) {
+    print(vs[i]);
+    i = i + 1;
+}
+// Each Key points back at the Box holding the map that holds it: a cycle,
+// broken by hand so the refcount invariant holds (reference §7.1).
+b.m.clear();

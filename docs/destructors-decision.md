@@ -355,12 +355,91 @@ order nothing promised.
 
 **What it did not cost.** Two separate releases still run in their own
 order, because the first drains the queue before it returns: the top-level
-locals still die in reverse order of declaration. A destructor that itself
-drops values sees them queued rather than freed inside it, which is still
-before the outer release returns. Out of memory while growing the queue
-falls back to releasing that object in place, which recurses -- the old
-behaviour, which is correct, and better than trapping halfway through
-freeing a graph.
+locals still die in reverse order of declaration. Out of memory while
+growing the queue falls back to releasing that object in place, which
+recurses -- the old behaviour, which is correct, and better than trapping
+halfway through freeing a graph.
+
+**What it did cost, and should not have**: everything a destructor's body
+dropped went into the same queue. That is the next section.
+
+## A destructor's body is ordinary code -- fixed 2026-09-23
+
+Implemented in `runtime/rt.c` (`rt_drop_enter`, `rt_drop_leave`, and the
+note "a destructor's body is top-level code"), `runtime/rt.h` (`RcDrain`)
+and `src/emit_c.rs` (the two lines that bracket the call to the destructor).
+Tests corpus/core/1003-1006. The reference is §4.4 and §7.1.
+
+### What went wrong
+
+`rc_dec` set one thread-local flag, `rc_releasing`, for the whole drain, so
+**every** decrement that reached zero anywhere in code reached during that
+drain was queued rather than run -- including the decrements a destructor's
+own body made. The queue is drained by the outermost `rc_dec`, so a
+destructor's temporaries were not freed until the release that called it had
+finished walking the whole graph. Measured 2026-09-23:
+
+| | at the top level | inside a destructor |
+|---|---|---|
+| `churn(3000)`, open and drop a file each time, `ulimit -n 1024` | 3 000 files, fine | **EMFILE at iteration 1021** |
+| 3 000 000 short-lived four-field objects, peak RSS | 1.5 MB | **212 MB** |
+| a value made and dropped inside a destructor body | its `drop` runs there | **runs after the enclosing destructor returns** |
+
+The third is the one that is a language question rather than a resource
+leak. Reference §4.4 says a destructor runs when the count reaches zero
+"and never at any other time"; it ran at some other time. The first two are
+that same fact costing descriptors and memory.
+
+### The rule
+
+**The queue belongs to the structural walk, and to nothing else.** An
+object's *fields* are queued -- that is the 10 000 000-link chain the queue
+exists for. The code a destructor's *body* runs is not part of the walk, and
+behaves exactly as the same code does at the top level: the first decrement
+in it to reach zero owns a drain of its own and runs it before the body's
+next statement.
+
+`rt_drop_enter` and `rt_drop_leave` bracket the call to the destructor, and
+nothing else -- `src/emit_c.rs` emits them either side of it, which is the
+one place the runtime's release reaches the program. `enter` sets the queue
+state aside and hands the body a fresh, empty one; `leave` puts the outer
+walk's back, untouched. Five words, saved in the drop function's own frame,
+no allocation, nothing that can fail.
+
+Measured after, the same three cases: 3 000 files fine inside a destructor
+too; 1.5 MB inside a destructor against 1.5 MB at the top level; and `drop
+Tmp` printed inside the body that made it. The 200 000-link chain of
+corpus/core/979 still releases in one frame, and so does a 10 000 000-link
+one, with a destructor on every link (corpus/core/1006) or without. The
+bracket costs nothing measurable: 2 000 000 destructor calls in a chain
+release, 289.8 ms with it against 291.0 ms with it stubbed out, gcc -O2,
+best of seven interleaved runs.
+
+### Why not drain the outer queue instead
+
+The obvious alternative -- at the boundary, finish the pending queue before
+running the body -- is wrong twice. It releases objects the walk has not
+reached yet, so a destructor's body would see its siblings destroyed around
+it, in an order that depends on where in the graph it sits. And it does that
+draining *from inside the body*, one nested level per link, which is the
+recursion the queue was built to remove: a chain of objects with destructors
+would overflow the stack again.
+
+### What is guaranteed, exactly
+
+  - A destructor runs **when the count reaches zero**, on the thread that
+    let go, before that release does anything else with the object. There is
+    no other time, and nothing defers it.
+  - Inside a destructor's body, **releases behave as they do at the top
+    level**: a value made and let go there is destroyed there, before the
+    next statement, and before the destructor returns.
+  - **Across objects the walk is breadth-first** and costs one C frame
+    whatever the shape of the graph (corpus/core/980, 979, 1006).
+  - **Within one object**: the destructor first, on a whole object, then the
+    fields in declaration order (corpus/core/770).
+  - A destructor body that drops a value whose destructor drops another
+    nests as ordinary calls nest; the depth is the program's, as any
+    recursion's is.
 
 ## Found on the way
 

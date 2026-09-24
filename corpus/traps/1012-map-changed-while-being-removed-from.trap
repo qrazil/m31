@@ -1,0 +1,1 @@
+trap: the map changed while it was being searched: `hash` and `eq` may read the map being searched, but not change it

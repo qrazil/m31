@@ -1,0 +1,37 @@
+// `clear` is a change like any other, and the one that frees the table
+// outright rather than moving it. Called from inside the `hash` of a probe
+// of that same map, it leaves the probe walking a freed table.
+//
+// The same mark and the same message as corpus/traps/1012-1013: `hash` and
+// `eq` may read the map being searched, but not change it.
+
+type Box {
+    Map<Key, int> m;
+    int armed;
+}
+
+type Key {
+    int k;
+    Box b;
+}
+
+int Key.hash() {
+    if (b.armed == 1) {
+        b.armed = 0;
+        b.m.clear();
+    }
+    return k;
+}
+
+bool Key.eq(Key o) {
+    return k == o.k;
+}
+
+Box b = Box({}, 0);
+int i = 0;
+while (i < 8) {
+    b.m.set(Key(i, b), i);
+    i = i + 1;
+}
+b.armed = 1;
+print(b.m.contains(Key(3, b)));

@@ -1,0 +1,1 @@
+trap: the last reference to the list went while it was being sorted: `cmp` dropped the very list `sort` was called on
