@@ -1,0 +1,16 @@
+write: timed out, with no count
+the peer had received some of it: true
+and not all of it: true
+write_some: timed out
+every Ok was at least one byte: true
+it stopped short of the whole message: true
+having moved something first: true
+and its count is exactly what the peer received: true
+Buffer write_some: 200000
+Buffer write_some of nothing: 0
+Buffer holds: 200000
+dir made
+File write_some loop wrote: 200000
+File write_some of nothing: 0
+and the file holds exactly that: true
+cleaned up

@@ -1,0 +1,239 @@
+import net;
+import io;
+import fs;
+import random;
+
+// **A write that fails has written an unknown amount -- unless it is
+// `write_some`, which reports exactly what it managed.**
+//
+// The other half of the timeout contract, and the half that is not
+// symmetric: a failed read puts its bytes back, a failed write cannot,
+// because the kernel already has them. So `write`'s `Err` means the stream
+// is done and must be closed, and a caller that has to stay on the
+// connection writes with `write_some` and keeps its own offset.
+//
+// Both halves are measured here against the peer rather than asserted: a
+// server with a 150 ms send timeout writes 8 MiB at a client that is not
+// reading, the client afterwards counts every byte that actually arrived,
+// and the two numbers are compared.
+//
+//   - Through `write`: the peer got some of it and not all of it, and the
+//     `Err` says neither -- which is the whole reason the doc now tells a
+//     caller to close rather than retry.
+//   - Through `write_some`: the count it returned is exactly what the peer
+//     received. Nothing is lost and nothing is double-counted, so a
+//     protocol can resume at that offset.
+//
+// Counts are not printed, only compared: how much a kernel takes before a
+// send timeout depends on the socket buffer, so the number is a property of
+// the machine and the relation between the numbers is the property of this
+// module.
+
+const int SIZE = 8388608;
+
+bool ok_or_die(Result<bool, net.Error> r) {
+    match (r) {
+        case Ok(bool b): {
+            return b;
+        }
+        case Err(net.Error e): {
+            trap("socket: " + e.to_str());
+        }
+    }
+}
+
+int int_or_die(Result<int, io.Error> r) {
+    match (r) {
+        case Ok(int n): {
+            return n;
+        }
+        case Err(io.Error e): {
+            trap("write: " + net.error_of(e).to_str());
+        }
+    }
+}
+
+// The client: it reads nothing until the server has given up, which is what
+// makes the server's send buffer fill and its timeout fire, and then counts
+// every byte the connection still has for it.
+void drain(net.Conn c, Chan<int> go, Chan<int> back) {
+    recv(go);
+    int total = 0;
+    bool going = true;
+    while (going) {
+        match (c.read(65536)) {
+            case Ok(bytes b): {
+                if (b.size() == 0) {
+                    going = false;
+                }
+                total = total + b.size();
+            }
+            case Err(io.Error e): {
+                going = false;
+            }
+        }
+    }
+    send(back, total);
+    Result<bool, io.Error> closed = c.close();
+}
+
+void client(Chan<int> go, Chan<int> back) {
+    int port = recv(go);
+    match (net.connect("127.0.0.1", port)) {
+        case Ok(net.Conn c): {
+            drain(c, go, back);
+        }
+        case Err(net.Error e): {
+            trap("connect: " + e.to_str());
+        }
+    }
+}
+
+// One `write` of the lot: all of it, or an `Err` that cannot say how much.
+void by_write(net.Conn s, Chan<int> go, Chan<int> back) {
+    bool t = ok_or_die(s.set_write_timeout(150));
+    bytes big = [65; SIZE];
+    match (s.write(big)) {
+        case Ok(int n): {
+            print("BUG: write said Ok " + n.to_str());
+        }
+        case Err(io.Error e): {
+            print("write: " + net.error_of(e).to_str() + ", with no count");
+        }
+    }
+    // The contract for that error: the connection's place in whatever was
+    // being spoken over it is gone, so it is closed and not written again.
+    send(go, 1);
+    Result<bool, io.Error> closed = s.close();
+    int got = recv(back);
+    bool some = got > 0;
+    bool partial = got < SIZE;
+    // Neither of these two facts is anywhere in the `Err` above, and that
+    // is the point of the pair: the caller can only learn them by asking
+    // the peer, which a protocol in the middle of a record cannot do.
+    print("the peer had received some of it: " + some.to_str());
+    print("and not all of it: " + partial.to_str());
+}
+
+// The same write, one attempt at a time, keeping the offset.
+void by_write_some(net.Conn s, Chan<int> go, Chan<int> back) {
+    bool t = ok_or_die(s.set_write_timeout(150));
+    bytes big = [65; SIZE];
+    int sent = 0;
+    bool stopped = false;
+    bool every_ok_moved_bytes = true;
+    while (!stopped && sent < SIZE) {
+        match (s.write_some(big.substr(sent, SIZE))) {
+            case Ok(int n): {
+                if (n < 1) {
+                    every_ok_moved_bytes = false;
+                }
+                sent = sent + n;
+            }
+            case Err(io.Error e): {
+                stopped = true;
+                print("write_some: " + net.error_of(e).to_str());
+            }
+        }
+    }
+    bool short_of_it = sent < SIZE;
+    bool moved = sent > 0;
+    print("every Ok was at least one byte: " + every_ok_moved_bytes.to_str());
+    print("it stopped short of the whole message: " + short_of_it.to_str());
+    print("having moved something first: " + moved.to_str());
+    send(go, 1);
+    Result<bool, io.Error> closed = s.close();
+    int got = recv(back);
+    bool exact = got == sent;
+    print("and its count is exactly what the peer received: " + exact.to_str());
+}
+
+void run(net.Listener ln) {
+    Chan<int> go = Chan<int>(1);
+    Chan<int> back = Chan<int>(1);
+    spawn client(go, back);
+    send(go, ln.local().port());
+    match (ln.accept()) {
+        case Ok(net.Conn s): {
+            by_write(s, go, back);
+        }
+        case Err(net.Error e): {
+            trap("accept: " + e.to_str());
+        }
+    }
+    spawn client(go, back);
+    send(go, ln.local().port());
+    match (ln.accept()) {
+        case Ok(net.Conn s): {
+            by_write_some(s, go, back);
+        }
+        case Err(net.Error e): {
+            trap("accept: " + e.to_str());
+        }
+    }
+    Result<bool, net.Error> closed = ln.close();
+}
+
+match (net.listen("127.0.0.1", 0)) {
+    case Ok(net.Listener ln): {
+        run(ln);
+    }
+    case Err(net.Error e): {
+        trap("listen: " + e.to_str());
+    }
+}
+// --- the same method on the two types that are not a socket ------------------
+//
+// `write_some` is on all three writable types so that the resync loop above
+// is one piece of code whichever it is handed. On a `Buffer` it is `write`:
+// memory takes everything, the loop runs once, and the error arm is dead.
+bytes payload = [122; 200000];
+bytes nothing = [];
+io.Buffer held = io.buffer();
+print("Buffer write_some: " + int_or_die(held.write_some(payload)).to_str());
+print("Buffer write_some of nothing: " + int_or_die(held.write_some(nothing)).to_str());
+print("Buffer holds: " + held.size().to_str());
+// On a `File` the loop is the loop from the docs, written out, so that it
+// is right whether or not this kernel ever takes a regular-file write in
+// pieces.
+str dir = "/tmp/lang-corpus-net-write-" + random.system().hex(8);
+match (fs.mkdir(dir)) {
+    case Ok(bool made): {
+        print("dir made");
+    }
+    case Err(io.Error e): {
+        print(e.to_str());
+    }
+}
+str path = dir + "/out";
+match (io.open(path, mode: io.Mode.Write)) {
+    case Ok(io.File f): {
+        int off = 0;
+        while (off < payload.size()) {
+            off = off + int_or_die(f.write_some(payload.substr(off, payload.size())));
+        }
+        print("File write_some loop wrote: " + off.to_str());
+        print("File write_some of nothing: " + int_or_die(f.write_some(nothing)).to_str());
+        Result<bool, io.Error> closed = f.close();
+    }
+    case Err(io.Error e): {
+        print(e.to_str());
+    }
+}
+match (io.read_bytes(path)) {
+    case Ok(bytes b): {
+        bool same = b == payload;
+        print("and the file holds exactly that: " + same.to_str());
+    }
+    case Err(io.Error e): {
+        print(e.to_str());
+    }
+}
+match (fs.rmtree(dir, dir)) {
+    case Ok(bool gone): {
+        print("cleaned up");
+    }
+    case Err(io.Error e): {
+        print(e.to_str());
+    }
+}

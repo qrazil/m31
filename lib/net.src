@@ -9,6 +9,7 @@
 //   c.read_all()               -> Result<bytes, io.Error>  everything until the peer stops
 //   c.read_until(delim, limit) -> Result<bytes, io.Error>  through `delim`, at most `limit`
 //   c.write(b)                 -> Result<int, io.Error>    all of `b`
+//   c.write_some(b)            -> Result<int, io.Error>    one attempt; what was taken
 //   c.close()                  -> Result<bool, io.Error>
 //   c.peer()                   -> Addr                     who is at the other end
 //   c.shutdown_write()         -> Result<bool, Error>      half-close: send an end of file
@@ -34,6 +35,16 @@
 // take a socket with no new code -- and an `io.Buffer` stands in for one in a
 // test. That is also why those five answer with `io.Error` and not with this
 // module's `Error`: see "Two error types" below.
+//
+// **A timeout is where that promise is cashed.** `io.Stream` says a read
+// that fails has consumed nothing and a write that fails has written an
+// unknown amount, and a socket is the type those two rules were written
+// for: a read timeout is an ordinary, expected failure of a read that had
+// already collected half a message, and a send timeout is an ordinary,
+// expected failure of a write that had already put megabytes on the wire.
+// So `read`, `read_all` and `read_until` put back what they took -- the
+// retry gets the whole message, not the tail of it -- and `write` says so
+// loudly and offers `write_some` to anyone who has to keep count.
 //
 // Everything here is language source down to one system call per primitive
 // (runtime/sys.h, docs/sys-layer.md §9): the address parser and printer, the
@@ -611,7 +622,9 @@ int hex_val(int c) {
 /// `close`, with a `File`'s signatures and a `File`'s meanings, so code
 /// written against the protocol cannot tell a socket from a file. Reads are
 /// buffered 64 KiB at a time, as a `File`'s are; writes are not, so there is
-/// no `flush` to forget.
+/// no `flush` to forget. `write_some` is a sixth method and deliberately
+/// not in the interface, for the reason `io.Stream` gives; a `File` and an
+/// `io.Buffer` have it too, so code that needs it is still written once.
 ///
 /// **A `Conn` closes itself when its last reference goes** -- at the end of
 /// a scope, on a `return` or a `?` that leaves it -- so no path leaks a
@@ -664,6 +677,12 @@ pub Result<bytes, io.Error> Conn.read(int n) {
 /// has no length, and the only way to learn it is over. A peer that never
 /// closes therefore never returns from here, which is why a server reads
 /// with `read_until` and a limit instead.
+///
+/// **A failure keeps what had arrived.** With a read timeout set, that is
+/// the normal way out of this call -- the peer is slow, not finished -- and
+/// everything collected so far goes back into the connection's buffer
+/// before the error is handed out. Calling it again after more has arrived
+/// answers with the whole thing, from the first byte.
 pub Result<bytes, io.Error> Conn.read_all() {
     check_live();
     bytes out = [];
@@ -671,7 +690,7 @@ pub Result<bytes, io.Error> Conn.read_all() {
         out = buf.substr(at, end);
         at = end;
     }
-    while (fill()? > 0) {
+    while (fill_keeping(out)? > 0) {
         if (end == buf.size()) {
             out.extend(buf);
         } else {
@@ -693,6 +712,13 @@ pub Result<bytes, io.Error> Conn.read_all() {
 /// never sends a newline is a request for all of memory, which is a way to
 /// take a server down from the outside.
 ///
+/// **A failure keeps the part of the line that had arrived.** A read
+/// timeout with half a request in hand puts that half back in the
+/// connection's buffer, so the call that follows it reads the request
+/// whole. That is what makes "wait 200 ms, then do something else, then try
+/// again" a correct way to write a server rather than a way to lose the
+/// first half of every slow request.
+///
 /// An empty `delim` or a `limit` below 1 traps.
 pub Result<bytes, io.Error> Conn.read_until(bytes delim, int limit) {
     if (delim.size() == 0) {
@@ -705,7 +731,7 @@ pub Result<bytes, io.Error> Conn.read_until(bytes delim, int limit) {
     bytes out = [];
     while (out.size() < limit) {
         if (at == end) {
-            if (fill()? == 0) {
+            if (fill_keeping(out)? == 0) {
                 break;
             }
         }
@@ -730,6 +756,18 @@ pub Result<bytes, io.Error> Conn.read_until(bytes delim, int limit) {
 /// A write to a peer that has gone away is `Err` -- EPIPE, which
 /// `net.error_of` calls `Reset` -- and not a dead process, because the
 /// module ignores SIGPIPE when it makes a socket (docs/sys-layer.md §2).
+///
+/// **`Err` means an unknown number of bytes reached the peer**, and on a
+/// socket that is not a corner case: set a send timeout, write eight
+/// megabytes to a peer that is not reading, and the `TimedOut` that comes
+/// back can sit on top of megabytes the peer already has. The count cannot
+/// come with it -- a `Result` holds a count or a cause, and unlike a failed
+/// read there is nothing to put back, the bytes are the peer's now -- so
+/// this error means **the connection is finished**: `close()` it. Writing
+/// again would resume in the middle of a record the peer has half of, and
+/// a protocol that does that desynchronises without anyone noticing, which
+/// is the failure this doc exists to prevent. A caller that must stay on
+/// the connection uses `write_some` and keeps the offset itself.
 pub Result<int, io.Error> Conn.write(bytes b) {
     if (!live) {
         trap("write on a closed connection");
@@ -753,6 +791,50 @@ pub Result<int, io.Error> Conn.write(bytes b) {
         off = off + r;
     }
     return Result<int, io.Error>.Ok(off);
+}
+
+/// One attempt at sending `b`: how many bytes the kernel took, at least 1
+/// and at most `b.size()`. An empty `b` sends nothing and is 0.
+///
+/// `write` with the loop taken out, and the whole point is what the error
+/// now means: **`Err` from here is "nothing was sent"**, never "some of it
+/// was". A send that is cut short by `SO_SNDTIMEO` after moving any bytes
+/// at all returns their count, not an error (`man 7 socket`), so the two
+/// answers do not overlap and a sender always knows its offset:
+///
+///     int off = 0;
+///     while (off < b.size()) {
+///         off = off + c.write_some(b.substr(off, b.size()))?;
+///     }
+///
+/// which is `write`, except that the caller holding `off` can stop, wait,
+/// poll with `wait`, give up on this record and resume on the next one --
+/// anything but guess. That is the resync `write`'s `Err` cannot offer.
+///
+/// A signal that arrives before any byte was sent is retried here, as in
+/// `write`, so it is not one of the errors either.
+pub Result<int, io.Error> Conn.write_some(bytes b) {
+    if (!live) {
+        trap("write on a closed connection");
+    }
+    if (b.size() == 0) {
+        return Result<int, io.Error>.Ok(0);
+    }
+    while (true) {
+        int r = __write(fd, b, 0, b.size());
+        if (r == -4) {
+            continue;
+        }
+        if (r < 0) {
+            return Result<int, io.Error>.Err(io.from_errno(-r));
+        }
+        // A write of nothing makes no progress and never will; calling it
+        // an I/O error beats a caller looping on a zero forever.
+        if (r == 0) {
+            return Result<int, io.Error>.Err(io.from_errno(5));
+        }
+        return Result<int, io.Error>.Ok(r);
+    }
 }
 
 /// Close the connection. Closing twice is not an error; any other use of a
@@ -827,8 +909,17 @@ pub Result<bool, Error> Conn.shutdown_write() {
 /// kernel, `io.Error.Other(11)` through a stream method, `TimedOut` through
 /// `net.error_of` -- and **the bytes that had already arrived are still in
 /// the buffer**: a timeout does not lose data, it only stops waiting for
-/// more. It is the socket option and not a deadline over a whole operation,
-/// so a `read_all` of a slow peer can take much longer than `ms` while never
+/// more.
+///
+/// That holds for the reads that collect as they go, too, which is the
+/// whole of its value: a `read_until` or a `read_all` that times out having
+/// taken four bytes puts those four bytes back, so the next call reads the
+/// message from its first byte and not from its fifth, and `wait` answers
+/// `true` because they are there to be read. A timeout is therefore "not
+/// yet", never "you have lost the start of this".
+///
+/// It is the socket option and not a deadline over a whole operation, so a
+/// `read_all` of a slow peer can take much longer than `ms` while never
 /// waiting that long for one packet.
 pub Result<bool, Error> Conn.set_read_timeout(int ms) {
     return set_ms(SO_RCVTIMEO, ms);
@@ -836,6 +927,14 @@ pub Result<bool, Error> Conn.set_read_timeout(int ms) {
 
 /// The same for a write that cannot hand anything to the kernel because the
 /// peer is not reading.
+///
+/// **The read side's promise has no mirror here**, and it is worth knowing
+/// before setting this: a `write` stopped by this timeout has already given
+/// the peer some unknown prefix of what it was asked to send, and cannot
+/// take it back or say how much. So a `Conn` with a write timeout is a
+/// `Conn` whose failed `write` must be followed by `close()` -- or one that
+/// is written with `write_some`, which reports every byte it moved and
+/// fails only when it moved none.
 pub Result<bool, Error> Conn.set_write_timeout(int ms) {
     return set_ms(SO_SNDTIMEO, ms);
 }
@@ -901,9 +1000,14 @@ void Conn.check_live() {
 }
 
 // Refill an empty buffer. The number of bytes now buffered, 0 at the end.
+//
+// The buffer is one chunk whenever the kernel reads into it: allocated on
+// the first read, and allocated again after an `unread` replaced it with a
+// push-back of another size, which would otherwise fix every later read at
+// that size.
 Result<int, io.Error> Conn.fill() {
     check_live();
-    if (buf.size() == 0) {
+    if (buf.size() != CHUNK) {
         buf = [0; CHUNK];
     }
     while (true) {
@@ -918,6 +1022,38 @@ Result<int, io.Error> Conn.fill() {
         end = r;
         return Result<int, io.Error>.Ok(r);
     }
+}
+
+// `fill`, except that a failure first puts `held` back in front of the
+// connection. Every accumulating read calls this instead of `fill` and may
+// then propagate with `?`: the bytes are safe before the error moves.
+Result<int, io.Error> Conn.fill_keeping(bytes held) {
+    match (fill()) {
+        case Ok(int n): {
+            return Result<int, io.Error>.Ok(n);
+        }
+        case Err(io.Error e): {
+            unread(held);
+            return Result<int, io.Error>.Err(e);
+        }
+    }
+}
+
+// Put `b` back in front of the connection: the next read hands those bytes
+// out before anything new arrives, and `wait` counts them as ready.
+//
+// Only a failing read calls it, and a failing read has drained the buffer
+// before asking `fill` for more -- `at == end` everywhere this is reached
+// -- so `b` simply becomes the buffer, with nothing to merge. `b` can be
+// far larger than a chunk, which is why `fill` checks the buffer's size and
+// not just whether there is one.
+void Conn.unread(bytes b) {
+    if (b.size() == 0) {
+        return;
+    }
+    buf = b;
+    at = 0;
+    end = b.size();
 }
 
 // --- listeners -------------------------------------------------------------

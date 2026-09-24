@@ -680,6 +680,13 @@ Result<bool, io.Error> rm_into(str dir) {
 /// a temporary name beside `dst` and `rename` it over.
 ///
 /// It streams, 64 KiB at a time, so a file larger than memory is fine.
+///
+/// **A failure leaves `dst` holding however much got through**, and the
+/// `Err` does not say how much -- `io.File.write`'s rule, one level up: a
+/// `Result` carries a count or a cause. So an `Err` from here means `dst`
+/// is a truncated copy to be deleted or written over, never a copy to
+/// resume. The atomic recipe above is the answer when that matters: copy to
+/// a temporary name and `rename` only after this returns `Ok`.
 pub Result<int, io.Error> copy(str src, str dst) {
     if (is_dir(dst)) {
         return Result<int, io.Error>.Err(io.Error.IsDirectory);

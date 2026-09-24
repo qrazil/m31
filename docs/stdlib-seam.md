@@ -446,6 +446,19 @@ and 2; the policy -- when to flush -- is in the library.
     read; a pipe takes the chunk loop.
   - **EINTR.** Every read and write loop retries on `-4`. `close` never
     does: on Linux the descriptor is gone by then.
+  - **The push-back.** A read that fails part way — `read_all` and
+    `read_until` both collect as they go — puts what it had collected back
+    in front of the stream before it returns the error, so `Err` never means
+    "and those bytes are gone". What goes back can be larger than the 64 KiB
+    buffer it came out of, so it *becomes* the buffer and the next refill
+    allocates a chunk again. There is no matching promise for a write and
+    there cannot be: the kernel already has those bytes. `write`'s `Err`
+    therefore means an unknown prefix was written and the stream must be
+    closed, and `write_some` — one attempt, an exact count, `Err` only when
+    nothing moved — is the escape hatch for a caller that has to resync
+    instead. It is on `File`, `Buffer` and `net.Conn` and deliberately not
+    in `io.Stream`, which stays the five methods `copy` and `read_line_of`
+    are written against.
   - **No `read_line` without state.** A module cannot hold a buffer between
     calls, so `io.read_line()` could not read ahead at all: on a pipe or a
     terminal it read one byte per call to `read(2)`, as a shell's `read`
@@ -529,6 +542,14 @@ sixteen bytes before the kernel writes into it.
   - **SO_REUSEADDR's default**, the backlog's default, and `Conn`'s 64 KiB
     read buffer.
   - **The short-write loop and the EINTR retries**, as in `io`.
+  - **The timeout contract**, which is `io`'s and is cashed here. A read
+    timeout is the ordinary way a read fails with half a message in hand, so
+    `read_all` and `read_until` put that half back and the retry reads the
+    message whole — and `wait` then answers `true` from the buffer without
+    asking the kernel. A send timeout is the ordinary way a write fails with
+    megabytes already delivered, and nothing can take those back, so
+    `Conn.write`'s `Err` says the connection is finished and `Conn.write_some`
+    is what a sender that must keep its offset uses instead.
   - **The errno vocabulary**, `net.from_errno`, in source beside `io`'s.
 
 ### Two error enums, and why that is not a mistake
