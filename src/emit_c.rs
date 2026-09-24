@@ -91,8 +91,19 @@ pub fn emit(m: &Module) -> String {
             // has one to clear: a value that owns a resource can never be
             // frozen -- the compiler refuses the `const` and rt_snapshot
             // traps on what it cannot see -- so no frozen object reaches here.
+            //
+            // rt_drop_enter/rt_drop_leave bracket the call and nothing else.
+            // This is the ONE place the runtime's iterative release reaches
+            // the program, and inside it the program must behave exactly as
+            // it does at the top level: what the body drops is released
+            // there and then, not queued behind the walk that is releasing
+            // this object. See runtime/rt.c, "a destructor's body is
+            // top-level code", and docs/destructors-decision.md.
+            writeln!(o, "    RcDrain rcd;").unwrap();
             writeln!(o, "    o->rc = 1;").unwrap();
+            writeln!(o, "    rt_drop_enter(&rcd);").unwrap();
             writeln!(o, "    {}(o);", c_name(d)).unwrap();
+            writeln!(o, "    rt_drop_leave(&rcd);").unwrap();
             writeln!(
                 o,
                 "    if (o->rc != 1) rt_trap(\"object resurrected in its destructor: \

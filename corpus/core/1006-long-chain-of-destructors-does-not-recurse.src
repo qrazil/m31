@@ -1,0 +1,34 @@
+// corpus/core/979, with a destructor on every link.
+//
+// 979 proves the STRUCTURAL walk stays iterative: releasing a 200 000-node
+// chain costs one C frame, not one per link. Giving each node a destructor
+// puts a call to program code between every pair of links, and the bracket
+// that makes a destructor's body behave like top-level code
+// (rt_drop_enter/rt_drop_leave) runs once per Node, 200 000 times. None of
+// that may turn the walk back into recursion: the body gets a queue of its
+// own, it does not drain the walk's.
+//
+// A body that dropped something itself would be a third case; 1005 covers
+// that. Here the bodies do nothing but look at a field, so the only depth
+// on offer is the chain's.
+
+type Node {
+    int v;
+    Option<Node> next;
+}
+
+void Node.drop() {
+    if (v < 0) {
+        trap("a node arrived with a negative value");
+    }
+}
+
+Option<Node> chain = Option<Node>.None;
+int i = 0;
+while (i < 200000) {
+    chain = Option<Node>.Some(Node(i, chain));
+    i = i + 1;
+}
+print(i);
+// Released here, at the end of the program body: 200 000 destructors and
+// 400 000 objects, one frame deep, and `__rc_live=0` proves every one went.

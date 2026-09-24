@@ -1,0 +1,57 @@
+// The memory half of corpus/core/1004, counted instead of measured.
+//
+// A loop that makes and lets go of one short-lived value at a time holds
+// exactly one at a time. Inside a destructor it used to hold every one of
+// them until the enclosing release finished: the reviewer measured 3 000 000
+// such values peaking at 1.5 MB at the top level and 212 MB inside a
+// destructor. The peak live count is the same fact without a memory
+// measurement in the corpus.
+
+type Counter {
+    int live;
+    int peak;
+}
+
+type Tmp {
+    Counter c;
+}
+
+void Tmp.drop() {
+    c.live = c.live - 1;
+}
+
+Tmp make(Counter c) {
+    c.live = c.live + 1;
+    if (c.live > c.peak) {
+        c.peak = c.live;
+    }
+    return Tmp(c);
+}
+
+void churn(Counter c, int reps) {
+    int i = 0;
+    while (i < reps) {
+        Tmp t = make(c);
+        i = i + 1;
+    }
+}
+
+type Outer {
+    Counter c;
+    int reps;
+}
+
+void Outer.drop() {
+    churn(c, reps);
+}
+
+Counter top = Counter(0, 0);
+churn(top, 20000);
+print(top.live);
+print(top.peak);
+Counter inner = Counter(0, 0);
+if (true) {
+    Outer o = Outer(inner, 20000);
+}
+print(inner.live);
+print(inner.peak);

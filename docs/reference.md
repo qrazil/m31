@@ -828,6 +828,27 @@ because two elements can be different types and one's `cmp` would be handed
 the other. Sorting a `List<T>` of a type whose `cmp` is private to another
 module is refused too (§2.1), like every other by-name lookup.
 
+**A collection may not be changed while the runtime is using it.** `sort()`
+calls the element type's `cmp`, and a `Map` keyed on a user type calls that
+type's `hash` and `eq`; for the length of one such operation the collection
+it is running on is *in use*, and a change to that collection from inside
+the callback is a trap (§7.4):
+
+```
+trap: the list changed while it was being sorted: `cmp` may read the list
+being sorted, but not change it
+```
+
+Reading it is fine, and so is changing anything else — another list, another
+map, the elements' own fields. What is refused is `push`, an index store,
+`set`, `remove`, `clear`, `reverse`, a second `sort`, and letting go of the
+last reference to it. The reason is that the operation holds state the
+change would invalidate: the address of the element buffer, which a `push`
+reallocates, and a slot index, which a rehash makes meaningless. Mutating a
+collection while it is being sorted or probed is a bug in the program, so it
+stops the program rather than producing a wrong answer — which is what it
+used to do, silently, when it did not crash.
+
 `remove_at` is spelled that way because Java has both `remove(int)` and
 `remove(Object)` and the overload is a standing trap. One name, and it says
 which it means.
@@ -1224,6 +1245,12 @@ void Conn.drop() {
   - **It runs first, on a whole object**: every field is still alive. Then
     the fields are released, so a field's destructor runs after its
     owner's. Locals are released in reverse order of declaration.
+  - **Its body is ordinary code.** A value made and let go inside a
+    destructor is destroyed at the moment its count reaches zero, inside the
+    body, before the destructor returns — the same rule as everywhere else,
+    and the same as the same lines at the top level. A loop inside a
+    destructor that opens and closes a file each time round holds one
+    descriptor at a time, not one per iteration.
   - `this` is borrowed, as in any method (§4.3). Storing it anywhere that
     outlives the call **resurrects** a dead object, and traps (§7.4).
   - It is **not promoted** by embedding (§3.5): the embedded value is a
@@ -1305,6 +1332,12 @@ The shape rules, and what each refuses:
     key accepts. One name; the signature says which of the two it is.
   - **`hash` takes nothing**, and `cmp` and `hash` return `int`, `eq`
     returns `bool`.
+
+`cmp`, `eq` and `hash` are the three methods **the runtime calls in the
+middle of its own work**, so they carry a rule the others do not: while one
+of them is running, the collection it was called on may be read but not
+changed (§3.9). `to_str` and `drop` are called with nothing of the
+runtime's half-finished, and carry no such rule.
 
 They are **found by name, so they obey privacy** (§2.1), exactly as `to_str`
 does: sorting another module's type needs its `cmp` to be `pub`, and using
@@ -1846,6 +1879,15 @@ those held — breadth-first, where the recursion was depth-first. **Within**
 an object nothing changed, and that is the part the rules name: the
 destructor runs first, then the fields in declaration order.
 
+The queue is the **structural walk's alone**: the fields of the objects being
+released, and nothing else. Code a destructor's body runs is not part of the
+walk, and what it lets go of is released there and then (§4.4) — a
+destructor's body gets a queue of its own, so it behaves exactly as the same
+code does at the top level, and the walk outside it still costs one frame.
+Two consequences a program can see: a destructor body's own temporaries do
+not accumulate while the walk finishes, and a destructor it triggers runs
+before the enclosing one returns.
+
 Refcount operations are non-atomic (§8.3).
 
 ### 7.2 Ownership protocol
@@ -1912,6 +1954,9 @@ Trapping conditions:
   - a destructor that leaves `this` referenced from anywhere when it
     returns — a resurrected object (§4.4)
   - changing a frozen or constant value (§7.3)
+  - changing — or letting go of the last reference to — a collection while
+    the runtime is sorting or probing it, from inside the `cmp`, `hash` or
+    `eq` it called (§3.9)
   - binding a `const`, through an interface, to a value that owns a
     resource (§4.1)
   - `trap(msg)`, with the program's own message (§6.6)

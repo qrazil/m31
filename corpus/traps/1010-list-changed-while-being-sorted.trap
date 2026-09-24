@@ -1,0 +1,1 @@
+trap: the list changed while it was being sorted: `cmp` may read the list being sorted, but not change it

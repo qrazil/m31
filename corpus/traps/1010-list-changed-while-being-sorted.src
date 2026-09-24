@@ -1,0 +1,35 @@
+// `sort` reads the element buffer once and merges in place, and a user
+// `cmp` runs in the middle of that (rt.h, TypeInfo). A `push` from inside
+// the comparison reallocates the buffer under the merge: a segfault on gcc
+// and clang at -O0 and -O2 before this trap existed.
+//
+// Changing a collection while it is being sorted is a bug in the program,
+// so it stops the program (docs/reentrancy-decision.md). Reading it is fine --
+// corpus/core/1000.
+
+type Holder {
+    List<Item> xs;
+}
+
+type Item {
+    int rank;
+    Holder h;
+}
+
+int Item.cmp(Item o) {
+    h.xs.push(Item(99, h));  // mutate the very list being sorted
+    return rank - o.rank;
+}
+
+str Item.to_str() {
+    return str(rank);
+}
+
+Holder h = Holder([]);
+int i = 0;
+while (i < 16) {
+    h.xs.push(Item(16 - i, h));
+    i = i + 1;
+}
+h.xs.sort();
+print(h.xs.size());

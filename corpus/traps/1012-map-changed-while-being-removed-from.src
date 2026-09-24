@@ -1,0 +1,47 @@
+// `map_probe` returns a slot INDEX, and the caller reads and writes
+// `m->slots[i]` after the program's `eq` has run. An `eq` that inserts
+// enough entries to rehash the table makes that index point into a freed
+// table: `remove` then released whatever word was at the old offset in the
+// new one -- a NULL dereference in `rc_dec` here, before this trap.
+//
+// The map is marked for the length of the probe AND of the slot use that
+// follows it, so the insert is refused where it is written.
+
+type Box {
+    Map<Key, str> m;
+    int armed;
+}
+
+type Key {
+    int k;
+    Box b;
+}
+
+int Key.hash() {
+    return k;
+}
+
+bool Key.eq(Key o) {
+    if (b.armed == 1) {
+        b.armed = 0;
+        int j = 0;
+        while (j < 400) {
+            b.m.set(Key(j + 5000, b), "x");
+            j = j + 1;
+        }
+    }
+    return k == o.k;
+}
+
+Box b = Box({}, 0);
+int i = 0;
+while (i < 8) {
+    b.m.set(Key(i, b), "v" + str(i));
+    i = i + 1;
+}
+b.armed = 1;
+b.m.remove(Key(3, b));
+print(b.m.size());
+for (Key kk in b.m.keys()) {
+    print(b.m.get(kk).or("?"));
+}

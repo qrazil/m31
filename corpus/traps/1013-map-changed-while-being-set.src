@@ -1,0 +1,43 @@
+// The `set` half of corpus/traps/1012, and the one that said nothing at
+// all. The probe finds the existing key, the `eq` that found it rehashes
+// the table, and the write lands at the old index in the new table: the
+// program's own `set` was silently dropped, or it overwrote a live entry
+// without releasing what was there. It printed 408 and 3 -- neither the
+// size nor the value the program asked for -- and leaked 410 objects.
+
+type Box {
+    Map<Key, int> m;
+    int armed;
+}
+
+type Key {
+    int k;
+    Box b;
+}
+
+int Key.hash() {
+    return k;
+}
+
+bool Key.eq(Key o) {
+    if (b.armed == 1) {
+        b.armed = 0;
+        int j = 0;
+        while (j < 400) {
+            b.m.set(Key(j + 5000, b), j);
+            j = j + 1;
+        }
+    }
+    return k == o.k;
+}
+
+Box b = Box({}, 0);
+int i = 0;
+while (i < 8) {
+    b.m.set(Key(i, b), i);
+    i = i + 1;
+}
+b.armed = 1;
+b.m.set(Key(3, b), 999);  // probe hits existing key -> eq -> rehash -> stale slot
+print(b.m.size());
+print(b.m.get(Key(3, b)).or(-1));

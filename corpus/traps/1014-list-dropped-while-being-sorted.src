@@ -1,0 +1,30 @@
+// Not changing the list, but letting go of it: `cmp` overwrites the field
+// the list was read from, which is the only reference to it. The buffer the
+// merge is walking would be freed under it.
+//
+// So the mark is checked on the release path too: a count that reaches zero
+// on a collection the runtime is in the middle of using is the same bug as
+// changing it, and gets its own message (runtime/rt.c, rt_busy_gone_trap).
+
+type Holder {
+    List<Item> xs;
+}
+
+type Item {
+    int rank;
+    Holder h;
+}
+
+int Item.cmp(Item o) {
+    h.xs = [];  // the last reference to the list being sorted
+    return rank - o.rank;
+}
+
+Holder h = Holder([]);
+int i = 0;
+while (i < 8) {
+    h.xs.push(Item(8 - i, h));
+    i = i + 1;
+}
+h.xs.sort();
+print(h.xs.size());

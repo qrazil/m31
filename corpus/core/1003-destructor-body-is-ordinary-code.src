@@ -1,0 +1,74 @@
+// A destructor's body is ordinary code. A value made and let go inside it
+// is destroyed at the moment its count reaches zero -- inside the body,
+// before the enclosing destructor returns -- exactly as the same lines do
+// at the top level. Reference §4.4 says a destructor runs when the count
+// reaches zero "and never at any other time", and that is what this pins.
+//
+// It did not hold: `rc_dec` used to defer every release that happened
+// anywhere under a release, so `drop Tmp` printed after `leave drop Outer`.
+// The queue that made it iterative is now the structural walk's alone
+// (runtime/rt.c, docs/destructors-decision.md).
+
+type Tmp {
+    str n;
+}
+
+void Tmp.drop() {
+    print("    drop Tmp " + n);
+}
+
+type Inner {
+    str n;
+}
+
+void Inner.drop() {
+    print("  drop Inner " + n);
+}
+
+type Outer {
+    str n;
+    Inner i;
+}
+
+void Outer.drop() {
+    print("enter drop Outer " + n);
+    if (true) {
+        Tmp t = Tmp("made-inside-" + n);
+        print("    made " + t.n);
+    }
+    // A second one, and one that outlives the block: it goes at the end of
+    // the body, still before this returns.
+    Tmp last = Tmp("last-" + n);
+    if (true) {
+        Tmp t2 = Tmp("second-" + n);
+        print("    made " + t2.n);
+    }
+    print("leave drop Outer " + n);
+}
+
+if (true) {
+    Outer o = Outer("A", Inner("A.i"));
+    print("scope end");
+}
+print("---");
+
+// The same shape one level deeper: a destructor whose body drops a value
+// whose own destructor drops another. Each body finishes its own releases
+// before it returns.
+type Deep {
+    str n;
+}
+
+void Deep.drop() {
+    print("enter Deep " + n);
+    if (n == "1") {
+        Deep d = Deep("2");
+        print("  made Deep 2");
+    }
+    print("leave Deep " + n);
+}
+
+if (true) {
+    Deep d = Deep("1");
+}
+print("done");

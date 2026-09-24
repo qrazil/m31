@@ -1,0 +1,36 @@
+// The quiet half of corpus/traps/1010. A `cmp` that only REPLACES an
+// element changes no buffer address -- it releases the element that was
+// there, which the merge is still holding a pointer to. Before this trap,
+// the program printed a plausible answer on every build and only
+// AddressSanitizer saw it: heap-use-after-free in `cmp`, reading a field of
+// an element freed by the previous call.
+//
+// Same rule, same message: an index store is a change like any other.
+
+type Holder {
+    List<Item> xs;
+    int armed;
+}
+
+type Item {
+    int rank;
+    str pad;
+    Holder h;
+}
+
+int Item.cmp(Item o) {
+    if (h.armed > 0) {
+        h.armed = h.armed - 1;
+        h.xs[0] = Item(0, "new", h);  // frees the old element 0
+    }
+    return rank - o.rank;
+}
+
+Holder h = Holder([], 4);
+int i = 0;
+while (i < 8) {
+    h.xs.push(Item(8 - i, "pad" + i.to_str(), h));
+    i = i + 1;
+}
+h.xs.sort();
+print(h.xs.size());

@@ -1,7 +1,16 @@
-// A built-in method runs no user code itself, but its arguments can. Here
-// the argument replaces the field the receiver was read from, so the
-// receiver is held until the method is done with it. Without that, `push`
-// WROTE into the freed list.
+// A built-in method's ARGUMENTS can run user code. Here the argument
+// replaces the field the receiver was read from, so the receiver is held
+// until the method is done with it. Without that, `push` WROTE into the
+// freed list.
+//
+// This used to open "a built-in method runs no user code itself", and that
+// is no longer true: `sort` calls the element type's `cmp`, and a map keyed
+// on a user type calls its `hash` and `eq` (rt.h, TypeInfo). Nothing here
+// depends on the old reading -- `push` and `set` on an int-keyed map still
+// run none -- but the reentrancy those three opened is a separate rule, and
+// a separate answer: the receiver is marked for the length of the operation
+// and changing it from inside the callback traps (corpus/core/1000-1002,
+// corpus/traps/1010-1015).
 //
 // Evaluation is left to right: the receiver is the list `h.ps` named when
 // the expression started, so the push lands in the old list, which is then
