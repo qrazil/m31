@@ -1641,6 +1641,70 @@ newcomers would now make. It says what to write instead.
 `lib/sort.src`: `Order<T>`, `by`, `max`, `min`, `search`. Whatever else has
 by then earned a callback.
 
+*Done.* Ordinary source -- no `prim`, nothing added to the runtime, more
+comment than code: `pub interface Order<T> { int cmp(T a, T b); }` and four
+functions over `size()`, `[i]`, `[i] =` and `push`.
+
+**`by` is a stable bottom-up merge sort** — the same algorithm
+`rt_sort_with` runs for `xs.sort()`, written in the language instead of in
+C. Stability is promised by `xs.sort()` already and the two must not differ
+in a property a program builds on, so it is tested rather than asserted:
+`corpus/core/1107` checks that an all-ties sort is the identity at every
+length from 0 to 11, that ties keep their order in a list long enough to
+need several merge passes, and that sorting by a minor key and then a major
+one produces the compound order — which is the use stability exists for.
+
+**`search` returns `Option<int>`, and it is `index_of` for a sorted list.**
+The decision, and the reason, in one line: `xs.index_of(v)` already answers
+"where is this value" with `Option<int>` and the FIRST index holding it, so
+`search` answers the same question with the same type and the same index,
+in O(log n) instead of n. Two functions that disagree about the answer to
+one question are a defect, so `search` finds the first of a run of equal
+elements — a lower bound, one comparison more than stopping at any match —
+and `corpus/core/1108` checks the two against each other.
+
+It is deliberately **not** an insertion point. Java's `binarySearch` and
+C#'s return `-(insertion point) - 1` for an absent value: two answers in one
+integer, and a sign convention every caller has to remember. "Where would
+this go" is a different question from "where is this"; if a program needs
+it, it earns a name of its own rather than a second meaning for this result.
+
+**`max` and `min` are defined by an identity**, which is what settles the
+only question they have: `max(xs, o)` is the element `by(xs, o)` leaves
+last and `min` the one it leaves first. So `max` keeps the LAST of several
+equal elements and `min` the first — a "first wins" rule for both would make
+`max` and a sort disagree about which of two equal elements a program gets.
+An empty list **traps**, which is the answer `xs[0]` gives to the same
+question: there is no element to return, and an `Option` would put a `match`
+at every call site for a case most callers have already ruled out.
+
+**No runtime primitive, and one difference from `xs.sort()` that follows.**
+`rt_sort_with` marks the list `RC_SORTING` so that a `cmp` which changes the
+list being sorted traps. `sort.by` cannot: marking is a runtime operation,
+and adding a primitive to the seam (`docs/stdlib-seam.md`) to catch a
+caller's bug would be a poor trade. What happens instead is bounded and
+stated in the module: a `cmp` that shortens the list makes an ordinary index
+trap, one that lengthens it leaves the new elements unsorted, and memory is
+never at risk because every access is a checked `[i]`.
+
+**A `List`, not an `Array`.** Parameter types are written and there is no
+overloading, so covering arrays means a second name for each of the four --
+eight public names for four operations. `xs.sort()` already orders an array
+by the element type's own `cmp`; a chosen order over an array waits until
+something needs it badly enough to spend the names. Recorded because it is
+the first place the no-overloading rule costs the library something real.
+
+**One wart found, and worked around rather than papered over.** `T best =
+xs[0];` inside a generic function in `sort` is refused when `T` turns out to
+be a type the CALLING module keeps private: a local's type is checked for
+visibility after monomorphisation has substituted it, so the check asks
+whether `sort` can name the caller's private type, and it cannot. `max` and
+`min` therefore track the best INDEX, which needs no such local (and costs
+one retain less per improvement). The underlying rule — privacy judged on a
+substituted type rather than on what the source wrote — is not a callback
+question and is left where it was found, noted here because it will bite the
+next generic library function that wants a `T` local.
+
 **After the freeze, at any time.** Devirtualisation of a statically known
 callback; block bodies; inferred lambda parameter types; bound method values;
 `seq` as a module, judged on its merits; weak references if a real program
@@ -1714,9 +1778,17 @@ from another one.
     (`corpus/errors/1144`).
   - **A user-type module constant**, which Stage 2 opens the door to but does
     not finish. Still open.
-  - **Whether `sort.Order` should also cover `search` and a stable-sort
-    guarantee.** A library question, not a language one.
+  - ~~**Whether `sort.Order` should also cover `search` and a stable-sort
+    guarantee.**~~ Both, and Stage 5 says why: `search` is `index_of` for a
+    sorted list and returns the same `Option<int>` and the same first index;
+    stability is promised because `xs.sort()` promises it and the two must
+    not differ.
   - **Devirtualisation.** Deferred, and the only performance lever that
     matters. An interface call is two loads and an indirect call, and a
     callback-driven sort of `int`s is several times slower than the built-in
     one — now measurable, since both exist.
+  - **Privacy is judged on a substituted type.** Found writing `lib/sort.src`:
+    a generic function in one module cannot declare a local of type `T` when
+    the caller instantiated `T` with a type it keeps private. Not a callback
+    question, and worked around there by tracking an index instead of an
+    element, but it will bite the next generic library function.

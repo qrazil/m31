@@ -1,0 +1,70 @@
+// A lambda crosses a module boundary in both directions, and `sort.by`
+// works on this module's own types with all three callback shapes.
+//
+// The synthesised type belongs to the module the lambda is WRITTEN in, so a
+// lambda here reaches this module's functions and constants, and one written
+// in `lib` reaches lib's -- including the private ones, which is the same
+// rule a method of a type follows.
+import lib;
+import sort;
+
+type Tag {
+  int n;
+}
+str Tag.to_str() { return "t" + str(n); }
+
+int local_bias() {
+  return 1;
+}
+
+lib.Point p = lib.Point(3, 9);
+lib.Point q = lib.Point(1, 5);
+
+// a lambda passed to another module's parameter, over another module's type
+print(lib.use((lib.Point a, lib.Point b) => a.x - b.x, p, q));
+print(lib.use((lib.Point a, lib.Point b) => a.y - b.y + local_bias(), p, q));
+
+// a lambda the library made, over the library's own private function and
+// module constant
+print(lib.biased().cmp(p, q));
+print(lib.shifted(7).cmp(p, q));
+
+// an interface THIS module declares, satisfied by a lambda over the
+// library's type: satisfaction is structural, so it need not be lib's
+interface Mine {
+  int cmp(lib.Point a, lib.Point b);
+}
+Mine m = (lib.Point a, lib.Point b) => a.y - b.y;
+print(m.cmp(p, q));
+
+// sort.Order<T> instantiated with a type this module keeps PRIVATE, ordered
+// by a lambda, by a function's name and by an object
+List<Tag> ts = [Tag(3), Tag(1), Tag(2)];
+sort.by(ts, (Tag a, Tag b) => a.n - b.n);
+print(str(ts[0]) + str(ts[1]) + str(ts[2]));
+
+sort.by(ts, down);
+print(str(ts[0]) + str(ts[1]) + str(ts[2]));
+
+sort.by(ts, ByN(1));
+print(str(ts[0]) + str(ts[1]) + str(ts[2]));
+
+print(str(sort.max(ts, (Tag a, Tag b) => a.n - b.n)));
+print(str(sort.min(ts, down)));
+
+int down(Tag a, Tag b) {
+  return b.n - a.n;
+}
+
+type ByN {
+  int sign;
+}
+int ByN.cmp(Tag a, Tag b) {
+  return sign * (a.n - b.n);
+}
+
+// the library's list, sorted by an order written here
+List<lib.Point> ps = [lib.Point(3, 1), lib.Point(1, 9), lib.Point(2, 5)];
+sort.by(ps, (lib.Point a, lib.Point b) => a.x - b.x);
+print(ps[0].x);
+print(ps[2].x);

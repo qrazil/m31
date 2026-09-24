@@ -1,0 +1,229 @@
+// Ordering a list by an order the caller chooses.
+//
+// The division of labour is the whole design, and it needs no explaining:
+//
+//   xs.sort()              the element type's OWN order, built in, using the
+//                          `cmp` method the comparison operators already use
+//   sort.by(xs, order)     an order you hand it
+//
+// One is the natural order of a type, one is a chosen order, and there is
+// exactly one spelling of each. Nothing here duplicates `xs.sort()`; a
+// program that wants a type's own order writes that and this module is not
+// involved.
+//
+// An `order` is an `Order<T>`, which is an ordinary one-method interface --
+// there is no function type in this language (docs/closures-decision.md).
+// So all three of these are the same call, and the third is what the first
+// two abbreviate:
+//
+//   sort.by(ps, by_x);                              a function's name
+//   sort.by(ps, (Point a, Point b) => a.x - b.x);   a lambda
+//   sort.by(ps, ByAxis(true));                      an object with fields
+//
+// Everything below is written in this language, over `size()`, `[i]`,
+// `[i] =` and `push`. It asks the runtime for nothing: the comparison is an
+// ordinary interface call, and the merge is ordinary code.
+//
+// **A `List`, not an `Array`.** Every parameter type here is written, and
+// there is no overloading and no type that covers both, so covering arrays
+// would mean a second name for each of these four -- eight public names for
+// four operations. `xs.sort()` already orders an `Array` by the element
+// type's own `cmp`, which is the common case; a chosen order over an array
+// waits until a program needs one badly enough to justify the names.
+
+/// A total order over `T`: negative if `a` comes first, zero if neither
+/// does, positive if `b` comes first.
+///
+/// **`Order`, not `Less` or `Comparator`.** It is a total order, not a
+/// predicate, and `cmp` answers three ways. `Less` would invite a `bool`,
+/// which is the single most common mistake in every language with a
+/// comparison callback.
+///
+/// **The method is `cmp`, which §6.2 already means.** A type's natural order
+/// is `int T.cmp(T other)` -- a receiver and one parameter -- and an order
+/// imposed from outside is `int cmp(T a, T b)` -- two parameters, no
+/// receiver. Different shapes, so different dispatch slots and no collision;
+/// one name, one meaning, two receivers. Negative, zero or positive in both,
+/// so a hand-written order and the built-in one can never disagree about
+/// what a comparison returns.
+pub interface Order<T> {
+    int cmp(T a, T b);
+}
+
+/// Sort `xs` in place, by `order`. **Stable**: elements `order` calls equal
+/// keep the order they were in, so sorting by one key and then by another is
+/// the ordinary way to get a compound order, and `sort.by` is safe to use
+/// that way. `xs.sort()` promises the same thing, and the two must not
+/// differ in a property a program builds on.
+///
+/// A bottom-up merge sort: O(n log n) comparisons always, one scratch list,
+/// no recursion and so no stack depth to worry about on a long list. It is
+/// the same algorithm `rt_sort_with` runs for `xs.sort()`, written here
+/// instead of there, and it needs nothing new in the runtime: the scratch
+/// list is a `List<T>` and the comparison is an interface call.
+///
+/// **What `order.cmp` may do.** It may read `xs`. Changing `xs` from inside
+/// it is a mistake, and it is the one difference from `xs.sort()`, which
+/// marks the list and traps: this cannot mark anything, because marking is
+/// a runtime operation and there is no primitive for it -- deliberately, as
+/// adding one to the seam (docs/stdlib-seam.md) to catch a caller's bug
+/// would be a poor trade. What happens instead is bounded and safe: a
+/// shorter list makes an index trap, a longer one leaves the new elements
+/// unsorted. Memory is never at risk, because every access here is a checked
+/// `[i]`.
+pub void by<T>(List<T> xs, Order<T> order) {
+    int n = xs.size();
+    if (n < 2) {
+        return;
+    }
+    // The scratch half of the merge. Filled with the list's own elements so
+    // that it has `n` slots to write into; what is in them does not matter.
+    List<T> tmp = [];
+    for (T x in xs) {
+        tmp.push(x);
+    }
+    int width = 1;
+    while (width < n) {
+        int lo = 0;
+        while (lo < n) {
+            int mid = lo + width;
+            int hi = lo + 2 * width;
+            if (mid >= n) {
+                // The tail is a run of its own and is already sorted.
+                break;
+            }
+            if (hi > n) {
+                hi = n;
+            }
+            int i = lo;
+            int j = mid;
+            int k = lo;
+            while (i < mid && j < hi) {
+                // `<= 0` takes from the LEFT run on a tie, which is the
+                // whole of what makes this stable.
+                if (order.cmp(xs[i], xs[j]) <= 0) {
+                    tmp[k] = xs[i];
+                    i = i + 1;
+                } else {
+                    tmp[k] = xs[j];
+                    j = j + 1;
+                }
+                k = k + 1;
+            }
+            while (i < mid) {
+                tmp[k] = xs[i];
+                i = i + 1;
+                k = k + 1;
+            }
+            while (j < hi) {
+                tmp[k] = xs[j];
+                j = j + 1;
+                k = k + 1;
+            }
+            int back = lo;
+            while (back < hi) {
+                xs[back] = tmp[back];
+                back = back + 1;
+            }
+            lo = lo + 2 * width;
+        }
+        width = width * 2;
+    }
+}
+
+/// The greatest element of `xs` under `order`.
+///
+/// `max(xs, o)` is the element `by(xs, o)` would leave LAST, ties included,
+/// and `min` is the one it would leave first. That identity is the reason
+/// each keeps the element it does when several compare equal -- `max` the
+/// last of them, `min` the first -- and it is worth more than a "first wins"
+/// rule that would make `max` and a sort disagree about which of two equal
+/// elements a program gets.
+///
+/// One pass, n-1 comparisons, nothing allocated.
+///
+/// **An empty list traps.** There is no element to return and no honest way
+/// to invent one; returning an `Option` instead would put a `match` at every
+/// call site to handle a case most callers have already ruled out. It is the
+/// same answer `xs[0]` gives to the same question, with the same reasoning.
+pub T max<T>(List<T> xs, Order<T> order) {
+    int n = xs.size();
+    if (n == 0) {
+        trap("sort.max: the list is empty, so there is no greatest element");
+    }
+    // The best INDEX, not the best element. A `T best` local would be the
+    // ordinary way to write this, and it is refused when `T` turns out to be
+    // a type the calling module keeps private: a local's type is checked for
+    // visibility after monomorphisation has substituted it, and this module
+    // cannot name that type. An index needs no such local, and it costs a
+    // retain less per improvement besides.
+    int best = 0;
+    int i = 1;
+    while (i < n) {
+        // `>= 0`: a later element that ties replaces the earlier one, so
+        // this is the element a stable sort would leave last.
+        if (order.cmp(xs[i], xs[best]) >= 0) {
+            best = i;
+        }
+        i = i + 1;
+    }
+    return xs[best];
+}
+
+/// The least element of `xs` under `order`: the element `by(xs, order)`
+/// would leave FIRST. An empty list traps, as `max` does.
+pub T min<T>(List<T> xs, Order<T> order) {
+    int n = xs.size();
+    if (n == 0) {
+        trap("sort.min: the list is empty, so there is no least element");
+    }
+    int best = 0;
+    int i = 1;
+    while (i < n) {
+        // `< 0` only: a tie leaves the earlier element in place.
+        if (order.cmp(xs[i], xs[best]) < 0) {
+            best = i;
+        }
+        i = i + 1;
+    }
+    return xs[best];
+}
+
+/// Where `want` is in `xs`, which must already be sorted by `order`.
+///
+/// **`search` is `index_of` for a sorted list, and answers the same question
+/// with the same type.** `xs.index_of(v)` gives `Option<int>` -- the FIRST
+/// index holding it, or `None` -- and so does this, in O(log n) comparisons
+/// instead of n. Two functions that answer "where is this value" must not
+/// disagree, so this one finds the first of a run of equal elements too,
+/// which costs one comparison more than stopping at any match and is what
+/// makes `search` and `index_of` interchangeable on a sorted list.
+///
+/// **It is not an insertion point.** Java's `binarySearch` returns
+/// `-(insertion point) - 1` when the value is absent, which is two answers
+/// in one integer and a sign convention every caller has to remember;
+/// C#'s does the same. "Where would this go" is a different question from
+/// "where is this", and if a program ever needs it, it earns a name of its
+/// own rather than a second meaning for this one's result.
+///
+/// `order` must be the order `xs` is sorted by. If it is not, the answer is
+/// unhelpful but never unsafe: every access here is a checked `[i]`.
+pub Option<int> search<T>(List<T> xs, T want, Order<T> order) {
+    // Lower bound: the first index whose element does not come before
+    // `want`. The halving is `lo + (hi - lo) / 2`, not `(lo + hi) / 2`,
+    // which cannot overflow however long the list is.
+    int lo = 0;
+    int hi = xs.size();
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (order.cmp(xs[mid], want) < 0) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo < xs.size() && order.cmp(xs[lo], want) == 0) {
+        return Option<int>.Some(lo);
+    }
+    return Option<int>.None;
+}

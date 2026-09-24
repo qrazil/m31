@@ -1,0 +1,111 @@
+// `sort.by(xs, order)` takes an `Order<T>`, which is an ordinary one-method
+// interface -- so all three ways of producing one are the same call, and the
+// third is what the other two abbreviate:
+//
+//   a function's name      sort.by(ps, by_x)
+//   a lambda               sort.by(ps, (Point a, Point b) => a.x - b.x)
+//   an object with fields  sort.by(ps, ByAxis(false))
+//
+// The division of labour with the built-in sort is the point: `xs.sort()`
+// uses the element type's OWN `cmp`, `sort.by` uses the one you hand it.
+import sort;
+
+type Point { int x; int y; }
+str Point.to_str() { return str(x) + "," + str(y); }
+// The type's own order, for `xs.sort()`: by x, then by y.
+int Point.cmp(Point other) {
+  if (x != other.x) {
+    return x - other.x;
+  }
+  return y - other.y;
+}
+
+// 1. a function's name
+int by_y(Point a, Point b) { return a.y - b.y; }
+
+// 2. an object with fields: one type, two orders, chosen at run time
+type ByAxis { bool on_y; }
+int ByAxis.cmp(Point a, Point b) {
+  if (on_y) {
+    return a.y - b.y;
+  }
+  return a.x - b.x;
+}
+
+void show(List<Point> ps) {
+  str out = "";
+  for (Point p in ps) {
+    if (out.size() > 0) {
+      out = out + " ";
+    }
+    out = out + str(p);
+  }
+  print(out);
+}
+
+List<Point> ps = [Point(3, 1), Point(1, 9), Point(2, 5), Point(1, 2)];
+
+// the built-in sort, by the type's own cmp -- not this module at all
+ps.sort();
+show(ps);
+
+sort.by(ps, by_y);
+show(ps);
+
+sort.by(ps, (Point a, Point b) => b.x - a.x);
+show(ps);
+
+sort.by(ps, ByAxis(true));
+show(ps);
+
+sort.by(ps, ByAxis(false));
+show(ps);
+
+// a capturing lambda as the order: the key is held in a field of the
+// synthesised type, so it is an ordinary object like `ByAxis`.
+bool on_y = true;
+sort.by(ps, (Point a, Point b) => pick(a, on_y) - pick(b, on_y));
+show(ps);
+
+int pick(Point p, bool y) {
+  if (y) {
+    return p.y;
+  }
+  return p.x;
+}
+
+// other element types, including one the language has no order for until
+// the caller gives it one
+List<str> ws = ["pear", "fig", "banana", "kiwi"];
+sort.by(ws, (str a, str b) => a.size() - b.size());
+print(ws[0] + " " + ws[1] + " " + ws[2] + " " + ws[3]);
+
+List<float> fs = [2.5, 0.5, 1.5];
+sort.by(fs, (float a, float b) => sign(b - a));
+print(fs[0]);
+print(fs[2]);
+
+int sign(float d) {
+  if (d < 0.0) {
+    return -1;
+  }
+  if (d > 0.0) {
+    return 1;
+  }
+  return 0;
+}
+
+// a distinct type: its own identity, and an order written over it
+distinct int Price;
+List<Price> prices = [Price(30), Price(10), Price(20)];
+sort.by(prices, (Price a, Price b) => int(a) - int(b));
+print(int(prices[0]));
+print(int(prices[2]));
+
+// one element and none: the shapes a merge sort has to get right
+List<int> one = [7];
+sort.by(one, (int a, int b) => a - b);
+print(one.size());
+List<int> none = [];
+sort.by(none, (int a, int b) => a - b);
+print(none.size());

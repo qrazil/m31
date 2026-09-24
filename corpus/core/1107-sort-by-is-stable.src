@@ -1,0 +1,75 @@
+// `sort.by` is STABLE, and it is tested for rather than asserted: elements
+// the order calls equal keep the order they were in. `xs.sort()` already
+// promises this, and the two must not differ in a property a program builds
+// on -- sorting by one key and then another is the ordinary way to get a
+// compound order, and it only works if the second sort leaves ties alone.
+import sort;
+
+type Row { int key; int seq; }
+str Row.to_str() { return str(key) + ":" + str(seq); }
+
+void show(List<Row> rs) {
+  str out = "";
+  for (Row r in rs) {
+    if (out.size() > 0) {
+      out = out + " ";
+    }
+    out = out + str(r);
+  }
+  print(out);
+}
+
+// Every element ties with every other under this order, so a stable sort
+// must leave the list exactly as it was, at every length -- including the
+// lengths where the bottom-up merge's last run is a short tail.
+void all_equal(int n) {
+  List<Row> rs = [];
+  int i = 0;
+  while (i < n) {
+    rs.push(Row(0, i));
+    i = i + 1;
+  }
+  sort.by(rs, (Row a, Row b) => a.key - b.key);
+  int bad = 0;
+  int j = 0;
+  while (j < n) {
+    if (rs[j].seq != j) {
+      bad = bad + 1;
+    }
+    j = j + 1;
+  }
+  print(bad);
+}
+int n = 0;
+while (n < 12) {
+  all_equal(n);
+  n = n + 1;
+}
+
+// Ties among distinct keys, in a list long enough to need several merge
+// passes: within each key the original order survives.
+List<Row> rs = [];
+int i = 0;
+while (i < 9) {
+  rs.push(Row(i % 3, i));
+  i = i + 1;
+}
+sort.by(rs, (Row a, Row b) => a.key - b.key);
+show(rs);
+
+// Two passes make a compound order: sort by the minor key, then by the
+// major one. This is the use stability exists for, and it is only correct
+// if the second sort does not disturb the first.
+List<Row> two = [Row(2, 5), Row(1, 9), Row(2, 1), Row(1, 3), Row(2, 3)];
+sort.by(two, (Row a, Row b) => a.seq - b.seq);
+sort.by(two, (Row a, Row b) => a.key - b.key);
+show(two);
+
+// The same list through the built-in sort, by the type's own cmp on the
+// major key alone: the two sorts agree about ties.
+List<Row> same = [Row(2, 5), Row(1, 9), Row(2, 1), Row(1, 3), Row(2, 3)];
+sort.by(same, (Row a, Row b) => a.seq - b.seq);
+same.sort();
+show(same);
+
+int Row.cmp(Row other) { return key - other.key; }
