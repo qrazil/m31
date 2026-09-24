@@ -278,8 +278,10 @@ Naming a mandatory parameter is an error, as is passing an optional one
 positionally. The two halves never overlap, so there is no question of which
 form to use and no question of what order optional arguments come in.
 
-Not yet: closures, modules. Concurrency is OS threads for now;
-green threads are stage 3 of `docs/concurrency-decision.md`.
+A callback is an ordinary **one-method interface**, and a function's name or
+a lambda may be written wherever one is expected — there is no function type
+(`docs/closures-decision.md`). Concurrency is OS threads for now; green
+threads are stage 3 of `docs/concurrency-decision.md`.
 
 ## Decisions made
 
@@ -443,9 +445,13 @@ revisit it.
 2. **The type system** — `docs/types.md`. The move checker is the only part
    concurrency is waiting on, and it is the smallest part: one bit per local
    over the CFG we already build
-3. Closures and function values — one new IR op (`call_indirect`), a function
-   type, and a heap environment. Note that closures plus refcounting is the
-   most common source of reference cycles, which makes weak references a
-   near-term need rather than a deferred one
+3. ~~Closures and function values — one new IR op (`call_indirect`), a
+   function type, and a heap environment~~ — **done, and all three
+   predictions were wrong.** A callback is a one-method interface, which the
+   vtable in the object header already dispatches, so there is no function
+   type, no new IR op and no environment: a lambda is a construction of a
+   synthesised type whose fields are its captures, and one that captures
+   nothing is a single static immortal object. Cycles remain possible (a
+   capture is a field like any other) and weak references remain deferred
 4. User-defined types
 5. A C-emitter second look once there is enough language to benchmark

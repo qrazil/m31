@@ -208,10 +208,12 @@ impl Lowerer {
     /// and only in a program that declares a destructor, since without one a
     /// release runs nothing but the runtime's own drop functions.
     ///
-    /// The runtime touches the receiver after such a release (`rt_list_clear`
-    /// goes on to the next element), so a destructor that reaches the place
-    /// the receiver was read from and overwrites it would free the receiver
-    /// under the runtime's feet.
+    /// The runtime no longer touches a receiver after releasing from it --
+    /// the release paths detach first (docs/reentrancy-decision.md) -- so the
+    /// hold on the receiver itself is belt-and-braces. It stays because this
+    /// same answer is what makes `may_run_code` true for those methods, and
+    /// so what holds every OTHER borrowed operand of the statement they
+    /// appear in: a destructor reached from here can still free those.
     fn releases(&self, t: Ty, m: &str) -> bool {
         if !self.has_destructors {
             return false;
