@@ -160,10 +160,10 @@ int cat_file(str gd, args.Parsed c) {
                 case Blob: {
                     write(o.raw);
                 }
-                case Commit(object.Commit ignored): {
+                case Commit: {
                     write(o.raw);
                 }
-                case Tag(object.Tag ignored): {
+                case Tag: {
                     write(o.raw);
                 }
             }
@@ -317,11 +317,11 @@ int log(str gd, args.Parsed c) {
                         io.eprint("not a commit: " + id);
                         return 1;
                     }
-                    case Tree(List<object.Entry> ignored): {
+                    case Tree: {
                         io.eprint("not a commit: " + id);
                         return 1;
                     }
-                    case Tag(object.Tag ignored): {
+                    case Tag: {
                         io.eprint("not a commit: " + id);
                         return 1;
                     }
@@ -369,15 +369,15 @@ int commit_date(str gd, str id) {
                 case Blob: {
                     return 0;
                 }
-                case Tree(List<object.Entry> ignored): {
+                case Tree: {
                     return 0;
                 }
-                case Tag(object.Tag ignored): {
+                case Tag: {
                     return 0;
                 }
             }
         }
-        case Err(object.Error e): {
+        case Err: {
             return 0;
         }
     }
@@ -597,9 +597,9 @@ void write(bytes b) {
     // alone (`lib/io.src`, `File.release`).
     io.File out = io.stdout();
     match (out.write(b)) {
-        case Ok(int n): {
+        case Ok: {
         }
-        case Err(io.Error e): {
+        case Err: {
             // Standard output that will take no more is the end of the
             // program, not something to report through it -- a closed pipe is
             // the ordinary case, and git exits quietly on one too.

@@ -78,7 +78,7 @@ pub str common(str gitdir) {
             }
             return fs.join(gitdir, p);
         }
-        case Err(io.Error ignored): {
+        case Err: {
             return gitdir;
         }
     }
@@ -118,7 +118,7 @@ str gitfile(str tree, str path) {
             }
             return "";
         }
-        case Err(io.Error ignored): {
+        case Err: {
             return "";
         }
     }

@@ -8,6 +8,17 @@ missing, and what the language was genuinely good at.
 
 It is ordered by how much it cost, not by how interesting it is.
 
+> **Three of these have since been fixed**, and this file has not been
+> rewritten to hide that it asked for them — the source has been changed to
+> use them, so the diff against this log is the evidence. A `case Tag:` that
+> binds none of a variant's payload (§3 — *not* a `default`; exhaustiveness
+> is untouched), a range `for` that makes §8's non-terminating `indented`
+> impossible to write, and a formatter that keeps the parentheses the author
+> wrote, so `sha1.src`'s rounds are back in the shape FIPS 180-4 gives them
+> (§10). A character literal, which this report did not ask for and
+> `apps/markdown`'s did, is in too. Everything else below still stands.
+> `docs/reference.md` §1.5, §5.5, §5.6 and §6.1 have the rules.
+
 ---
 
 ## 1. Enums are heap objects, so `Result` cannot enter a hot loop

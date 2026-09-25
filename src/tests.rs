@@ -307,6 +307,31 @@ fn the_formatter_keeps_the_parentheses_the_author_wrote() {
 }
 
 #[test]
+fn a_case_binds_every_value_or_none() {
+    let decl = "enum E { A; B(int, str); }\n";
+    // None: the spelling a payload-less variant already uses.
+    let out = ir(&format!(
+        "{decl}int f(E e) {{\n    match (e) {{\n        case A: {{ return 0; }}\n        \
+         case B: {{ return 1; }}\n    }}\n}}\nprint(f(E.B(1, \"x\")));\n"
+    ));
+    // The arm reads the tag and nothing else: no payload is projected.
+    assert!(out.contains(" = tag "), "{out}");
+    assert!(!out.contains("payload"), "{out}");
+    // Some of them is still refused, and the message offers the other rule.
+    let got = err(&format!(
+        "{decl}int f(E e) {{\n    match (e) {{\n        case A: {{ return 0; }}\n        \
+         case B(int n): {{ return n; }}\n    }}\n}}\nprint(f(E.A));\n"
+    ));
+    assert!(got.contains("write `case B:` to bind none"), "{got}");
+    // And it is NOT a `default`: every variant still needs its own case.
+    let got = err(&format!(
+        "{decl}int f(E e) {{\n    match (e) {{\n        case A: {{ return 0; }}\n    }}\n}}\n\
+         print(f(E.A));\n"
+    ));
+    assert!(got.contains("missing B"), "{got}");
+}
+
+#[test]
 fn string_escapes_are_decoded() {
     assert_eq!(
         toks(r#""a\tb\nc\\d\"e""#),

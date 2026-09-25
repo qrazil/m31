@@ -1610,6 +1610,31 @@ Bindings are **type-first**, like every other binding in the language, and
 they bind the payload positionally. A binding is borrowed from the enum,
 which stays alive for the whole `match`.
 
+**A case binds every value its variant carries, or none of them.** None is
+`case Tag:` — the spelling a payload-less variant already uses — and it means
+what it looks like: this arm does not read the payload.
+
+```c
+match (e) {
+    case Ambiguous(str prefix, int n): { return n; }
+    case NotFound:                     { return 0; }
+    case Io:                           { return 0; }
+    ...
+}
+```
+
+There is no `_`, and no way to name some of a payload and not the rest: an
+arm that wants two of three values names all three. One rule, and nothing
+new to read.
+
+This is **not** a `default`. Every variant still needs its own case, so
+adding a variant is still a compile error at every `match` that has to learn
+about it, which is the entire point (below, and `docs/errors-decision.md`).
+What it removes is the requirement to spell out a type in order to throw its
+value away: `apps/git` had twenty bindings literally named `ignored`, each
+one a payload type written out only to be discarded, and `apps/tui`'s
+`Constraint` has four methods that are 28 such arms between them.
+
 **Exhaustive**: every variant must have a case. **No fallthrough** — one case
 runs. **No `default`**, so adding a variant to an enum is a compile error at
 every `match` that has to learn about it, which is the entire reason to have
@@ -2336,7 +2361,17 @@ Stated so the absence is a decision and not an oversight:
   - **null** — every declaration initialises, and absence is `Option<T>`
   - type aliases — see §3.6
   - unsigned and sized integer types
-  - `switch`, ternary `?:`, three-clause `for`, labelled break
+  - `switch`, ternary `?:`, three-clause `for`, labelled break. Counting is
+    `for (int i in 0 .. n)` (§5.5); `for (int i = 0; ..)` is diagnosed by
+    name rather than reported as a surprising `=`
+  - **augmented assignment** — no `+=`, `-=`, `*=`, `/=`, `%=`, and
+    therefore none of `&=` `|=` `^=` `<<=` `>>=` either (§6.1, which has the
+    reasoning and the numbers). Writing one is diagnosed by name
+  - a range as a **value**: `a .. b` is `for` syntax and nothing else, so
+    there is no range type, no iterator protocol and no step (§5.5)
+  - `_`, for a binding that is not used — a `match` arm that reads no part
+    of a payload names none of it (`case Tag:`, §5.6), and there is nothing
+    else in the language that binds a name you cannot choose not to write
   - variadic functions
   - constraints on type parameters
   - reflection, runtime type queries, downcasting from an interface
@@ -2389,6 +2424,8 @@ stmt        = decl | assign | eval | if | while | forin | forrange | match
             | "spawn" IDENT args ";" ;
 match       = "match" "(" expr ")" "{" { case } "}" ;
 case        = "case" IDENT [ "(" bind { "," bind } ")" ] ":" block ;
+                                                      (* all the payload's
+                                                         values, or none *)
 bind        = type IDENT ;
 
 decl        = [ "const" ] type IDENT "=" expr ";" ;   (* always initialised; const

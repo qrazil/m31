@@ -104,10 +104,10 @@ pub Result<Stat, io.Error> stat(str path) {
 /// `is_link` about the name itself.
 pub bool exists(str path) {
     match (stat_of(path, true)) {
-        case Ok(Stat s): {
+        case Ok: {
             return true;
         }
-        case Err(io.Error e): {
+        case Err: {
             return false;
         }
     }
@@ -119,7 +119,7 @@ pub bool is_dir(str path) {
         case Ok(Stat s): {
             return s.is_dir();
         }
-        case Err(io.Error e): {
+        case Err: {
             return false;
         }
     }
@@ -131,7 +131,7 @@ pub bool is_file(str path) {
         case Ok(Stat s): {
             return s.is_file();
         }
-        case Err(io.Error e): {
+        case Err: {
             return false;
         }
     }
@@ -144,7 +144,7 @@ pub bool is_link(str path) {
         case Ok(Stat s): {
             return s.mode & 0o170000 == 0o120000;
         }
-        case Err(io.Error e): {
+        case Err: {
             return false;
         }
     }
@@ -416,7 +416,7 @@ void glob_step(str base, List<str> parts, int i, List<str> out) {
                 }
             }
         }
-        case Err(io.Error e): {
+        case Err: {
         }
     }
 }

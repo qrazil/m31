@@ -224,13 +224,13 @@ pub str Object.kind() {
         case Blob: {
             return "blob";
         }
-        case Tree(List<Entry> ignored): {
+        case Tree: {
             return "tree";
         }
-        case Commit(Commit ignored): {
+        case Commit: {
             return "commit";
         }
-        case Tag(Tag ignored): {
+        case Tag: {
             return "tag";
         }
     }
@@ -329,7 +329,7 @@ pub List<str> matching(str gitdir, str prefix) {
                 }
             }
         }
-        case Err(io.Error ignored): {
+        case Err: {
         }
     }
     hits.sort();
@@ -378,7 +378,7 @@ pub Result<List<str>, Error> loose(str gitdir) {
                     }
                 }
             }
-            case Err(io.Error ignored): {
+            case Err: {
                 continue;
             }
         }

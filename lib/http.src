@@ -307,25 +307,25 @@ pub str Error.to_str() {
 /// refused. See the module note.
 pub int Error.status() {
     match (this) {
-        case Syntax(str what): {
+        case Syntax: {
             return 400;
         }
-        case Framing(str what): {
+        case Framing: {
             return 400;
         }
-        case TooLarge(str what, int limit): {
+        case TooLarge: {
             return 431;
         }
-        case BadUrl(str what): {
+        case BadUrl: {
             return 400;
         }
-        case Closed(str where): {
+        case Closed: {
             return 400;
         }
-        case Transport(net.Error e): {
+        case Transport: {
             return 500;
         }
-        case Other(str what): {
+        case Other: {
             return 500;
         }
     }
@@ -2005,7 +2005,7 @@ void chunk_into(bytes out, bytes body) {
 
 Result<void, Error> write_all(io.Stream s, bytes out) {
     match (s.write(out)) {
-        case Ok(int n): {
+        case Ok: {
             return Result<void, Error>.Ok;
         }
         case Err(io.Error e): {
@@ -2085,21 +2085,21 @@ pub Result<int, Error> serve_conn(net.Conn c, Handler h, int max_requests = MAX_
 // nothing to answer it on.
 Result<int, Error> refuse(net.Conn c, Error e, int served) {
     match (e) {
-        case Transport(net.Error t): {
+        case Transport: {
             return Result<int, Error>.Ok(served);
         }
-        case Syntax(str what): {
+        case Syntax: {
         }
-        case Framing(str what): {
+        case Framing: {
         }
-        case TooLarge(str what, int limit): {
+        case TooLarge: {
         }
-        case BadUrl(str what): {
+        case BadUrl: {
         }
-        case Closed(str where): {
+        case Closed: {
             return Result<int, Error>.Ok(served);
         }
-        case Other(str what): {
+        case Other: {
         }
     }
     // A refusal is answered on a connection whose framing this end no longer
@@ -2111,7 +2111,7 @@ Result<int, Error> refuse(net.Conn c, Error e, int served) {
         case Ok: {
             return Result<int, Error>.Ok(served);
         }
-        case Err(Error w): {
+        case Err: {
             return Result<int, Error>.Ok(served);
         }
     }
@@ -2188,14 +2188,14 @@ void one_connection(net.Conn c, Handler h, int timeout_ms, int max_requests) {
     match (deadline(c, timeout_ms)) {
         case Ok: {
         }
-        case Err(Error e): {
+        case Err: {
             return;
         }
     }
     match (serve_conn(c, h, max_requests: max_requests)) {
-        case Ok(int served): {
+        case Ok: {
         }
-        case Err(Error e): {
+        case Err: {
         }
     }
 }
@@ -2205,14 +2205,14 @@ void one_connection(net.Conn c, Handler h, int timeout_ms, int max_requests) {
 // server has one at a time.
 Result<void, Error> deadline(net.Conn c, int timeout_ms) {
     match (c.set_read_timeout(timeout_ms)) {
-        case Ok(bool r): {
+        case Ok: {
         }
         case Err(net.Error e): {
             return Result<void, Error>.Err(Error.Transport(e));
         }
     }
     match (c.set_write_timeout(timeout_ms)) {
-        case Ok(bool w): {
+        case Ok: {
         }
         case Err(net.Error e): {
             return Result<void, Error>.Err(Error.Transport(e));
@@ -2299,7 +2299,7 @@ Result<Response, Error> exchange(Request req, int timeout_ms) {
             // A request is a message that waits for an answer, so there is
             // nothing for the kernel to coalesce it with.
             match (c.set_nodelay(true)) {
-                case Ok(bool on): {
+                case Ok: {
                 }
                 case Err(net.Error e): {
                     return Result<Response, Error>.Err(Error.Transport(e));

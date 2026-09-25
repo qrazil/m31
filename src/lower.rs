@@ -5522,15 +5522,44 @@ impl Lowerer {
                 ));
             }
             let want = self.variant_surface[tid as usize][tag].clone();
-            if a.binds.len() != want.len() {
+            // A case binds every value the variant carries, or none of them.
+            //
+            // None is `case Tag:`, the spelling a payload-less variant
+            // already uses, and it means what it looks like: this arm does
+            // not use the payload. `apps/git` had twenty bindings literally
+            // named `ignored`, each spelling out a payload type -- `case
+            // Tree(List<object.Entry> ignored)` -- only to throw it away,
+            // and `apps/tui`'s `Constraint` has four methods that are 28
+            // such arms between them.
+            //
+            // **This is not a `default`.** Every variant still needs its own
+            // case, so adding one is still a compile error at every `match`
+            // that has to learn about it, which is the whole reason the
+            // check exists (§5.6, docs/errors-decision.md). What it drops is
+            // the requirement to name values the arm does not read.
+            //
+            // All or nothing, with no `_` for one of several: one rule, and
+            // an arm that wants two of three payloads can name all three.
+            if !a.binds.is_empty() && a.binds.len() != want.len() {
+                let head = format!(
+                    "`{}` carries {} value(s), and this case binds {}",
+                    a.variant,
+                    want.len(),
+                    a.binds.len()
+                );
+                // Offering "bind none" only makes sense when there is a
+                // payload to decline; a variant that carries nothing has
+                // `case Tag:` as its only spelling either way.
                 return Err(Diag::new(
                     a.span,
-                    format!(
-                        "`{}` carries {} value(s), and this case binds {}",
-                        a.variant,
-                        want.len(),
-                        a.binds.len()
-                    ),
+                    if want.is_empty() {
+                        head
+                    } else {
+                        format!(
+                            "{head}; bind every one of them, or write `case {}:` to bind none",
+                            a.variant
+                        )
+                    },
                 ));
             }
             for (b, w) in a.binds.iter().zip(want.iter()) {
