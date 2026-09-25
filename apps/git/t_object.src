@@ -110,10 +110,15 @@ bytes nl() {
     return "\n".to_bytes();
 }
 
-// A repository directory, or the git directory itself. `git rev-parse
-// --git-dir` also follows a `.git` FILE, which a worktree and a submodule
-// use; that is `gitdir: <path>` inside it, and it is not handled here
-// because nothing in stage 1 needs it -- see FRICTION.md.
+// A repository directory, or the git directory itself.
+//
+// Deliberately the naive version, and NOT `repo.find`: a `.git` file, a
+// linked worktree's `commondir` and the walk up to a parent are all
+// `repo.src`'s job, and this program is the one that has to notice if
+// `repo.src` gets them wrong. `test.sh` hands it the common git directory
+// that `git rev-parse --git-common-dir` printed, so the two sides of the
+// comparison agree about which store is being read without either of them
+// deciding it.
 str gitdir(str path) {
     str inner = fs.join(path, ".git");
     if (fs.is_dir(inner)) {
