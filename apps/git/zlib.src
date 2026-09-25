@@ -1,0 +1,622 @@
+// DEFLATE decompression (RFC 1951) and the zlib wrapper around it (RFC 1950),
+// written in the language.
+//
+// Git stores every loose object as one zlib stream, so nothing above this file
+// can read a repository without it. It is also the piece that leans hardest on
+// `bytes` and the bit operators, and the one place where a decoder that
+// accepts a stream nobody else accepts is a security bug rather than a
+// curiosity -- so it is strict, and every refusal has a name.
+//
+// API
+// ---
+//   zlib.decompress(src)            -> Result<bytes, Error>   RFC 1950, checked
+//   zlib.decompress(src, limit: n)  -> the same, refusing to emit more than n
+//   zlib.inflate(src)               -> Result<bytes, Error>   raw RFC 1951
+//   zlib.adler32(b)                 -> int, the RFC 1950 check value
+//
+// `decompress` verifies the two-octet header, refuses a preset dictionary,
+// and verifies the trailing Adler-32 against what it produced. A stream whose
+// check value does not match is an error and not a warning: the bytes came off
+// a disk, and the one thing the format offers to say they arrived intact is
+// worth the one pass it costs.
+//
+// --- the bit reader does not fail --------------------------------------------
+//
+// Every `Result` here is an enum, and an enum is a heap object (reference
+// §3.7). A `take(n)` that returned `Result<int, Error>` would therefore
+// allocate once per bit field read -- several times per symbol, millions of
+// times for a megabyte -- which is not a price a codec can pay.
+//
+// So the reader cannot fail. Past the end of the input it hands back zero bits
+// and sets `over`, and every loop that consumes symbols checks `over` once per
+// symbol and stops. The cost is that a truncated stream may decode one more
+// symbol than it should before it is noticed, and that symbol's output is
+// thrown away with the error; the gain is that the inner loop allocates
+// nothing. What this must never do is loop forever on a truncated stream, and
+// it cannot: zero bits decode to *some* symbol, `over` is already set, and the
+// check is at the top of the next iteration.
+//
+// --- decoding is puff's, not zlib's ------------------------------------------
+//
+// Symbols are decoded a bit at a time against the canonical code's per-length
+// counts, which is Mark Adler's `puff.c` and is the shape RFC 1951 §3.2.2
+// describes directly. zlib's own decoder builds a multi-level lookup table and
+// reads several bits at once; that is perhaps three times faster and perhaps
+// ten times more code, and it pays for its table in a fixed cost per block --
+// the wrong trade for git, whose objects are mostly a few hundred octets and
+// whose blocks are therefore mostly tiny. The throughput note in
+// `apps/git/FRICTION.md` says what this costs.
+
+/// Why a stream was refused. Every variant carries enough to say where.
+pub enum Error {
+    /// The input ran out mid-stream; how many octets there were.
+    Truncated(int);
+    /// Block type 3, which RFC 1951 reserves and no writer emits.
+    BlockType(int);
+    /// A stored block's LEN and its one's-complement NLEN disagree.
+    StoredLength(int, int);
+    /// A Huffman code table whose lengths claim more codes than exist, or
+    /// fewer; which table it was.
+    OverSubscribed(str);
+    /// A code table that leaves some bit patterns undefined, which would let
+    /// a stream decode differently in two decoders; which table it was.
+    Incomplete(str);
+    /// Bits that match no code in the table; which table it was.
+    BadCode(str);
+    /// A literal/length symbol of 286 or 287, which exist in the code space
+    /// and have no meaning.
+    BadLength(int);
+    /// A distance symbol of 30 or 31, likewise.
+    BadDistance(int);
+    /// A back-reference reaching before the start of the output: the distance
+    /// asked for, and the octets there were.
+    TooFar(int, int);
+    /// The output passed the limit the caller set.
+    TooBig(int);
+    /// A dynamic block's header counts are out of range: HLIT+257, HDIST+1.
+    BadCounts(int, int);
+    /// A code-length repeat of 16 as the very first code, with nothing to
+    /// repeat.
+    NothingToRepeat;
+    /// Code lengths that run past the end of the two tables they describe.
+    TooManyLengths(int, int);
+    /// A literal/length table with no code for end-of-block, which could
+    /// never terminate.
+    NoEndOfBlock;
+    /// The zlib header is not one: its CMF and FLG octets.
+    BadHeader(int, int);
+    /// The zlib header asks for a preset dictionary, which git never writes
+    /// and this does not implement.
+    PresetDictionary;
+    /// The trailing Adler-32 does not match what came out: wanted, got.
+    Checksum(int, int);
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case Truncated(int n): {
+            return "the deflate stream ends inside a block (" + n.to_str() + " octets in all)";
+        }
+        case BlockType(int at): {
+            return "reserved deflate block type 3 at octet " + at.to_str();
+        }
+        case StoredLength(int len, int nlen): {
+            return "stored block length " + len.to_str() + " does not match its complement " + nlen.to_str();
+        }
+        case OverSubscribed(str which): {
+            return "the " + which + " code lengths describe more codes than a Huffman code has room for";
+        }
+        case Incomplete(str which): {
+            return "the " + which + " code is incomplete: some bit patterns decode to nothing";
+        }
+        case BadCode(str which): {
+            return "bits that match no code in the " + which + " table";
+        }
+        case BadLength(int sym): {
+            return "literal/length symbol " + sym.to_str() + " has no meaning";
+        }
+        case BadDistance(int sym): {
+            return "distance symbol " + sym.to_str() + " has no meaning";
+        }
+        case TooFar(int dist, int have): {
+            return "a back-reference of " + dist.to_str() + " reaches before the start of the output, which is " + have.to_str() + " octets";
+        }
+        case TooBig(int limit): {
+            return "the stream expands past the " + limit.to_str() + " octets it was allowed";
+        }
+        case BadCounts(int nlen, int ndist): {
+            return "a dynamic block claims " + nlen.to_str() + " literal/length codes and " + ndist.to_str() + " distance codes; the limits are 286 and 30";
+        }
+        case NothingToRepeat: {
+            return "a code-length repeat came first, with no previous length to repeat";
+        }
+        case TooManyLengths(int want, int have): {
+            return "the code lengths run to " + want.to_str() + " entries, past the " + have.to_str() + " the header declared";
+        }
+        case NoEndOfBlock: {
+            return "the literal/length code has no end-of-block symbol";
+        }
+        case BadHeader(int cmf, int flg): {
+            return "not a zlib header: CMF 0x" + one(cmf) + ", FLG 0x" + one(flg);
+        }
+        case PresetDictionary: {
+            return "the zlib header asks for a preset dictionary";
+        }
+        case Checksum(int want, int got): {
+            return "Adler-32 mismatch: the stream says " + hex8(want) + ", the data is " + hex8(got);
+        }
+    }
+}
+
+// --- RFC 1951's three tables -------------------------------------------------
+//
+// Module constants, so they are static data with no initialisation and no
+// copy (reference §4.5). The values are quotations from RFC 1951 §3.2.5 and
+// §3.2.7 and should be read against it.
+
+/// Base length for literal/length symbols 257..285.
+const Array<int> LENGTH_BASE = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
+/// Extra bits that follow each of those.
+const Array<int> LENGTH_EXTRA = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
+/// Base distance for distance symbols 0..29.
+const Array<int> DIST_BASE = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
+/// Extra bits that follow each of those.
+const Array<int> DIST_EXTRA = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
+/// The order a dynamic block's code-length code lengths arrive in.
+const Array<int> CLEN_ORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+
+// --- the bit reader ----------------------------------------------------------
+
+/// A DEFLATE stream is read least-significant-bit first within each octet, and
+/// the octets themselves are in order. `val` holds `cnt` bits not yet handed
+/// out, low bits first.
+type Bits {
+    bytes src;
+    int at = 0;
+    int val = 0;
+    int cnt = 0;
+    /// Set the first time a read went past the end. See the module header:
+    /// the reader answers zero bits rather than failing, and the caller's loop
+    /// checks this once per symbol.
+    bool over = false;
+}
+
+/// The next `n` bits as an integer, low bit first. `n` is at most 16 here, so
+/// `val` never holds more than 23 bits and nothing can overflow.
+int Bits.take(int n) {
+    while (cnt < n) {
+        if (at >= src.size()) {
+            over = true;
+            cnt = cnt + 8;
+        } else {
+            val = val | src[at] << cnt;
+            at = at + 1;
+            cnt = cnt + 8;
+        }
+    }
+    int v = val & (1 << n) - 1;
+    val = val >> n;
+    cnt = cnt - n;
+    return v;
+}
+
+/// Drop to the next octet boundary and give back to the stream any whole
+/// octets the accumulator was holding, so `at` is again where reading should
+/// continue. A stored block starts here.
+void Bits.align() {
+    int back = cnt / 8;
+    if (back > at) {
+        back = at;
+    }
+    at = at - back;
+    val = 0;
+    cnt = 0;
+}
+
+/// One octet, read directly. Only valid straight after `align`.
+int Bits.byte() {
+    if (at >= src.size()) {
+        over = true;
+        return 0;
+    }
+    int v = src[at];
+    at = at + 1;
+    return v;
+}
+
+// --- canonical Huffman codes -------------------------------------------------
+
+/// A canonical Huffman code as RFC 1951 §3.2.2 describes it: how many codes
+/// there are of each length, and the symbols in canonical order. `left` is how
+/// much of the code space is unused -- zero for a complete code, negative for
+/// one that claims more than exists.
+type Huff {
+    Array<int> count = [0; 16];
+    Array<int> symbol = [0; 320];
+    int left = 0;
+}
+
+/// The next symbol, or -1 if the bits match no code. One bit at a time, the
+/// way §3.2.2 defines the code: `first` is the smallest code of this length,
+/// `index` where its symbols start.
+int Huff.decode(Bits b) {
+    int code = 0;
+    int first = 0;
+    int index = 0;
+    int len = 1;
+    while (len <= 15) {
+        code = code | b.take(1);
+        int here = count[len];
+        if (code - first < here) {
+            return symbol[index + code - first];
+        }
+        index = index + here;
+        first = first + here << 1;
+        code = code << 1;
+        len = len + 1;
+    }
+    return -1;
+}
+
+/// The code `lengths[off .. off+n]` describes.
+Huff build(Array<int> lengths, int off, int n) {
+    Huff h = Huff();
+    int sym = 0;
+    while (sym < n) {
+        int len = lengths[off + sym];
+        h.count[len] = h.count[len] + 1;
+        sym = sym + 1;
+    }
+    if (h.count[0] == n) {
+        return h;
+    }
+    int left = 1;
+    int len = 1;
+    while (len <= 15) {
+        left = left << 1;
+        left = left - h.count[len];
+        if (left < 0) {
+            h.left = left;
+            return h;
+        }
+        len = len + 1;
+    }
+    h.left = left;
+    Array<int> offs = [0; 17];
+    len = 1;
+    while (len < 15) {
+        offs[len + 1] = offs[len] + h.count[len];
+        len = len + 1;
+    }
+    sym = 0;
+    while (sym < n) {
+        int l = lengths[off + sym];
+        if (l != 0) {
+            h.symbol[offs[l]] = sym;
+            offs[l] = offs[l] + 1;
+        }
+        sym = sym + 1;
+    }
+    return h;
+}
+
+// --- the three block types ---------------------------------------------------
+
+Result<void, Error> stored(Bits b, bytes out, int limit) {
+    b.align();
+    int l0 = b.byte();
+    int l1 = b.byte();
+    int n0 = b.byte();
+    int n1 = b.byte();
+    if (b.over) {
+        return Result<void, Error>.Err(Error.Truncated(b.src.size()));
+    }
+    int len = l0 | l1 << 8;
+    int nlen = n0 | n1 << 8;
+    if (nlen != len ^ 0xFFFF) {
+        return Result<void, Error>.Err(Error.StoredLength(len, nlen));
+    }
+    if (b.at + len > b.src.size()) {
+        return Result<void, Error>.Err(Error.Truncated(b.src.size()));
+    }
+    if (limit >= 0 && out.size() + len > limit) {
+        return Result<void, Error>.Err(Error.TooBig(limit));
+    }
+    out.extend(b.src.substr(b.at, b.at + len));
+    b.at = b.at + len;
+    return Result<void, Error>.Ok;
+}
+
+/// The fixed code of RFC 1951 §3.2.6, built afresh per block. Both tables are
+/// complete -- 288 literal/length codes and 32 distance codes -- so the two
+/// symbols at each end that have no meaning are refused where they are used
+/// rather than left out of the table, which would make it incomplete.
+Huff fixed_literal() {
+    Array<int> lengths = [0; 320];
+    int i = 0;
+    while (i < 144) {
+        lengths[i] = 8;
+        i = i + 1;
+    }
+    while (i < 256) {
+        lengths[i] = 9;
+        i = i + 1;
+    }
+    while (i < 280) {
+        lengths[i] = 7;
+        i = i + 1;
+    }
+    while (i < 288) {
+        lengths[i] = 8;
+        i = i + 1;
+    }
+    return build(lengths, 0, 288);
+}
+
+Huff fixed_distance() {
+    Array<int> lengths = [5; 32];
+    return build(lengths, 0, 32);
+}
+
+/// The two code tables a dynamic block declares. A struct, rather than two
+/// returns, because the language has no second return value (reference §9).
+type Tables {
+    Huff lit;
+    Huff dist;
+}
+
+Result<Tables, Error> dynamic_tables(Bits b) {
+    int nlen = b.take(5) + 257;
+    int ndist = b.take(5) + 1;
+    int ncode = b.take(4) + 4;
+    if (b.over) {
+        return Result<Tables, Error>.Err(Error.Truncated(b.src.size()));
+    }
+    if (nlen > 286 || ndist > 30) {
+        return Result<Tables, Error>.Err(Error.BadCounts(nlen, ndist));
+    }
+    Array<int> clen = [0; 19];
+    int i = 0;
+    while (i < ncode) {
+        clen[CLEN_ORDER[i]] = b.take(3);
+        i = i + 1;
+    }
+    Huff cl = build(clen, 0, 19);
+    if (cl.left < 0) {
+        return Result<Tables, Error>.Err(Error.OverSubscribed("code length"));
+    }
+    if (cl.left > 0) {
+        return Result<Tables, Error>.Err(Error.Incomplete("code length"));
+    }
+    Array<int> lengths = [0; 320];
+    int idx = 0;
+    int want = nlen + ndist;
+    while (idx < want) {
+        int sym = cl.decode(b);
+        if (b.over) {
+            return Result<Tables, Error>.Err(Error.Truncated(b.src.size()));
+        }
+        if (sym < 0) {
+            return Result<Tables, Error>.Err(Error.BadCode("code length"));
+        }
+        if (sym < 16) {
+            lengths[idx] = sym;
+            idx = idx + 1;
+        } else {
+            int v = 0;
+            int rep = 0;
+            if (sym == 16) {
+                if (idx == 0) {
+                    return Result<Tables, Error>.Err(Error.NothingToRepeat);
+                }
+                v = lengths[idx - 1];
+                rep = 3 + b.take(2);
+            } else if (sym == 17) {
+                rep = 3 + b.take(3);
+            } else {
+                rep = 11 + b.take(7);
+            }
+            if (idx + rep > want) {
+                return Result<Tables, Error>.Err(Error.TooManyLengths(idx + rep, want));
+            }
+            while (rep > 0) {
+                lengths[idx] = v;
+                idx = idx + 1;
+                rep = rep - 1;
+            }
+        }
+    }
+    if (b.over) {
+        return Result<Tables, Error>.Err(Error.Truncated(b.src.size()));
+    }
+    if (lengths[256] == 0) {
+        return Result<Tables, Error>.Err(Error.NoEndOfBlock);
+    }
+    Huff lit = build(lengths, 0, nlen);
+    if (lit.left < 0) {
+        return Result<Tables, Error>.Err(Error.OverSubscribed("literal/length"));
+    }
+    if (lit.left > 0) {
+        return Result<Tables, Error>.Err(Error.Incomplete("literal/length"));
+    }
+    Huff dist = build(lengths, nlen, ndist);
+    // An incomplete DISTANCE code is legal in exactly one case: a block that
+    // uses a single distance, which cannot fill a one-bit code space. zlib
+    // and puff both allow it, and streams in the wild contain it.
+    if (dist.left < 0) {
+        return Result<Tables, Error>.Err(Error.OverSubscribed("distance"));
+    }
+    if (dist.left > 0 && ndist - dist.count[0] > 1) {
+        return Result<Tables, Error>.Err(Error.Incomplete("distance"));
+    }
+    return Result<Tables, Error>.Ok(Tables(lit, dist));
+}
+
+/// The symbols of one compressed block, literal by literal and match by
+/// match, until end-of-block.
+Result<void, Error> symbols(Bits b, Huff lit, Huff dist, bytes out, int limit) {
+    while (true) {
+        int sym = lit.decode(b);
+        if (b.over) {
+            return Result<void, Error>.Err(Error.Truncated(b.src.size()));
+        }
+        if (sym < 0) {
+            return Result<void, Error>.Err(Error.BadCode("literal/length"));
+        }
+        if (sym < 256) {
+            if (limit >= 0 && out.size() >= limit) {
+                return Result<void, Error>.Err(Error.TooBig(limit));
+            }
+            out.push(sym);
+        } else if (sym == 256) {
+            return Result<void, Error>.Ok;
+        } else {
+            int ls = sym - 257;
+            if (ls >= 29) {
+                return Result<void, Error>.Err(Error.BadLength(sym));
+            }
+            int len = LENGTH_BASE[ls] + b.take(LENGTH_EXTRA[ls]);
+            int ds = dist.decode(b);
+            if (b.over) {
+                return Result<void, Error>.Err(Error.Truncated(b.src.size()));
+            }
+            if (ds < 0) {
+                return Result<void, Error>.Err(Error.BadCode("distance"));
+            }
+            if (ds >= 30) {
+                return Result<void, Error>.Err(Error.BadDistance(ds));
+            }
+            int d = DIST_BASE[ds] + b.take(DIST_EXTRA[ds]);
+            if (b.over) {
+                return Result<void, Error>.Err(Error.Truncated(b.src.size()));
+            }
+            if (d > out.size()) {
+                return Result<void, Error>.Err(Error.TooFar(d, out.size()));
+            }
+            if (limit >= 0 && out.size() + len > limit) {
+                return Result<void, Error>.Err(Error.TooBig(limit));
+            }
+            int from = out.size() - d;
+            int k = 0;
+            // One octet at a time on purpose: the ranges overlap when the
+            // distance is shorter than the length, which is how DEFLATE
+            // spells a run, and a block copy would get that wrong.
+            while (k < len) {
+                out.push(out[from + k]);
+                k = k + 1;
+            }
+        }
+    }
+}
+
+// --- the stream --------------------------------------------------------------
+
+Result<void, Error> run(Bits b, bytes out, int limit) {
+    bool last = false;
+    while (!last) {
+        last = b.take(1) == 1;
+        int kind = b.take(2);
+        if (b.over) {
+            return Result<void, Error>.Err(Error.Truncated(b.src.size()));
+        }
+        if (kind == 0) {
+            stored(b, out, limit)?;
+        } else if (kind == 1) {
+            symbols(b, fixed_literal(), fixed_distance(), out, limit)?;
+        } else if (kind == 2) {
+            Tables t = dynamic_tables(b)?;
+            symbols(b, t.lit, t.dist, out, limit)?;
+        } else {
+            return Result<void, Error>.Err(Error.BlockType(b.at));
+        }
+    }
+    return Result<void, Error>.Ok;
+}
+
+/// A raw DEFLATE stream (RFC 1951), with no zlib header and no check value.
+/// `limit` is the most output that will be produced before the stream is
+/// refused; -1, the default, is no limit.
+pub Result<bytes, Error> inflate(bytes src, int limit = -1) {
+    bytes out = [];
+    Bits b = Bits(src);
+    run(b, out, limit)?;
+    return Result<bytes, Error>.Ok(out);
+}
+
+/// A zlib stream (RFC 1950): the two header octets, a DEFLATE stream, and a
+/// big-endian Adler-32 of the output, all checked. This is what git writes.
+///
+/// Anything after the check value is ignored, which is `zlib.decompress`'s
+/// behaviour in Python and C. A caller that wants the stream to be the whole
+/// file compares the object's declared size with what came out, which is what
+/// `object.src` does.
+pub Result<bytes, Error> decompress(bytes src, int limit = -1) {
+    if (src.size() < 2) {
+        return Result<bytes, Error>.Err(Error.Truncated(src.size()));
+    }
+    int cmf = src[0];
+    int flg = src[1];
+    if (cmf & 0x0F != 8 || cmf >> 4 > 7 || (cmf * 256 + flg) % 31 != 0) {
+        return Result<bytes, Error>.Err(Error.BadHeader(cmf, flg));
+    }
+    if (flg & 0x20 != 0) {
+        return Result<bytes, Error>.Err(Error.PresetDictionary);
+    }
+    bytes out = [];
+    Bits b = Bits(src, at: 2);
+    run(b, out, limit)?;
+    b.align();
+    int a0 = b.byte();
+    int a1 = b.byte();
+    int a2 = b.byte();
+    int a3 = b.byte();
+    if (b.over) {
+        return Result<bytes, Error>.Err(Error.Truncated(src.size()));
+    }
+    int want = a0 << 24 | a1 << 16 | a2 << 8 | a3;
+    int got = adler32(out);
+    if (want != got) {
+        return Result<bytes, Error>.Err(Error.Checksum(want, got));
+    }
+    return Result<bytes, Error>.Ok(out);
+}
+
+/// RFC 1950's check value: two sums modulo 65521, the second of the first.
+///
+/// The modulo is deferred for 5552 octets at a time, which is the most that
+/// can be accumulated before the larger sum could exceed what 32 bits hold.
+/// It is not 32 bits here -- `int` is 64 -- but the constant is kept because
+/// it is the one every other implementation uses and a reader checking this
+/// against zlib's `adler32.c` should find it.
+pub int adler32(bytes data) {
+    int a = 1;
+    int b = 0;
+    int i = 0;
+    int n = data.size();
+    while (i < n) {
+        int end = i + 5552;
+        if (end > n) {
+            end = n;
+        }
+        while (i < end) {
+            a = a + data[i];
+            b = b + a;
+            i = i + 1;
+        }
+        a = a % 65521;
+        b = b % 65521;
+    }
+    return b << 16 | a;
+}
+
+// One octet as two hex digits, for a message.
+str one(int v) {
+    bytes b = [v];
+    return b.hex();
+}
+
+// A 32-bit value as eight hex digits, for a message.
+str hex8(int v) {
+    bytes b = [v >> 24 & 0xFF, v >> 16 & 0xFF, v >> 8 & 0xFF, v & 0xFF];
+    return b.hex();
+}

@@ -1,0 +1,127 @@
+// Where a repository's files actually are.
+//
+// Three questions that every layer above has to agree about, and that are
+// easy to get wrong because in the ordinary case all three answers are the
+// same directory:
+//
+//   repo.find(path)        the git directory for a working tree, or "" --
+//                          `.git` here or in a parent, and `.git` may be a
+//                          FILE rather than a directory
+//   repo.common(gitdir)    the git directory that holds `objects` and the
+//                          shared refs, which is a DIFFERENT directory in a
+//                          linked worktree
+//   repo.per_worktree(ref) whether a ref name is one of the few that stay in
+//                          the worktree's own directory
+//
+// --- linked worktrees ---------------------------------------------------------
+//
+// `git worktree add` makes a second working tree whose `.git` is a file
+// reading `gitdir: <path>`, and that path is a directory under the main
+// repository's `.git/worktrees/`. It holds that worktree's own HEAD, its
+// index, and a `commondir` file naming the directory where everything
+// *shared* lives -- `objects`, `refs`, `packed-refs`. A reader that takes the
+// worktree's git directory and looks for `objects` inside it finds nothing,
+// and reports a repository with no history.
+//
+// This was found by running `apps/git/compare.sh` against the checkout this
+// program was written in, which is a linked worktree: every ref resolved to
+// "unknown revision" while `git` in the same directory answered fine. It is
+// fifteen lines to get right and a whole repository to get wrong.
+
+import io;
+import fs;
+import text;
+
+/// The git directory for `path`: `path/.git` if that is a directory, the
+/// directory a `path/.git` FILE points at, `path` itself if it looks like a
+/// bare repository, or the same questions asked of the parent. `""` if there
+/// is no repository up to the root.
+pub str find(str path) {
+    str at = path;
+    int up = 0;
+    while (up < 64) {
+        str inner = fs.join(at, ".git");
+        if (fs.is_dir(inner)) {
+            return inner;
+        }
+        if (fs.is_file(inner)) {
+            str pointed = gitfile(at, inner);
+            if (pointed != "") {
+                return pointed;
+            }
+        }
+        if (fs.is_dir(fs.join(at, "objects")) && fs.exists(fs.join(at, "HEAD"))) {
+            return at;
+        }
+        at = fs.join(at, "..");
+        up = up + 1;
+    }
+    return "";
+}
+
+/// The git directory that holds `objects`, `refs` and `packed-refs`.
+///
+/// It is `gitdir` itself unless there is a `commondir` file beside it, which
+/// only a linked worktree has; then it is what that file names, which may be
+/// relative to `gitdir` -- git writes `../..` there.
+pub str common(str gitdir) {
+    str marker = fs.join(gitdir, "commondir");
+    if (!fs.is_file(marker)) {
+        return gitdir;
+    }
+    match (io.read(marker)) {
+        case Ok(str s): {
+            str p = s.trim();
+            if (p == "") {
+                return gitdir;
+            }
+            if (p.starts_with("/")) {
+                return p;
+            }
+            return fs.join(gitdir, p);
+        }
+        case Err(io.Error ignored): {
+            return gitdir;
+        }
+    }
+}
+
+/// Does this ref belong to one worktree rather than to the repository?
+///
+/// git's list, from `refs.c`: HEAD and the pseudo-refs beside it, plus
+/// `refs/bisect/`, `refs/worktree/` and `refs/rewritten/`. Everything else --
+/// every branch, every tag, every remote -- is shared, and lives in the
+/// common directory.
+pub bool per_worktree(str name) {
+    if (name == "HEAD" || name == "ORIG_HEAD" || name == "FETCH_HEAD" || name == "MERGE_HEAD") {
+        return true;
+    }
+    if (name == "CHERRY_PICK_HEAD" || name == "REVERT_HEAD" || name == "REBASE_HEAD" || name == "BISECT_HEAD") {
+        return true;
+    }
+    return name.starts_with("refs/bisect/") || name.starts_with("refs/worktree/") || name.starts_with("refs/rewritten/");
+}
+
+// The directory a `.git` file names. Its one line is `gitdir: <path>`, and
+// the path may be relative to the working tree the file is in.
+str gitfile(str tree, str path) {
+    match (io.read(path)) {
+        case Ok(str s): {
+            str line = text.strip_prefix(s.trim(), "gitdir:").trim();
+            if (line == "") {
+                return "";
+            }
+            str full = line;
+            if (!line.starts_with("/")) {
+                full = fs.join(tree, line);
+            }
+            if (fs.is_dir(full)) {
+                return full;
+            }
+            return "";
+        }
+        case Err(io.Error ignored): {
+            return "";
+        }
+    }
+}
