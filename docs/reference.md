@@ -354,7 +354,8 @@ Two units, each where it is cheap:
     `str.from_chars(xs)` builds text from them and traps on a value that is
     not a scalar value — a surrogate, a negative number, anything past
     U+10FFFF. There is no `char` type, for the reason there is no byte type:
-    the language has one integer type.
+    the language has one integer type. There *is* a character **literal**,
+    `'é'`, and it is an `int` — a spelling, not a type (§1.5).
 
 A code point is not always what a reader calls a character: `👍🏽` is two
 code points, a flag is two, `👨‍👩‍👧` is five, and `é` may be one (U+00E9)
@@ -1668,6 +1669,21 @@ trap every C programmer has fallen into once — and `1 << n + 1` is
 
 On the built-in types, `==` works on `int`, `bool`, `str` and `bytes`; `str`
 and `bytes` compare **by value**. On a user type an operator is a method call (§6.2).
+
+**Parentheses are the author's, and the formatter keeps them.** `(a && b) ||
+(c && d)` is printed back with its parentheses, and so is `(a & B) != 0` and
+`d ^ (bb & (c ^ d))` — even though every one of them means the same without.
+The formatter still adds the parentheses precedence requires, and a group
+written around a group is one group, so `((a))` comes back as `(a)`.
+
+This is the same bargain as a literal's spelling (§1.5): the tokens carry
+something the tree does not, and the formatter is the half of "one canonical
+layout" that must not throw it away. Redundant parentheses round a mixed
+`&&`/`||`, or round the `&` in `(x & M) != 0`, are information — the whole
+argument for fixing C's `x & 1 == 0` above is that precedence a reader has to
+recall is a hazard, and a formatter that deleted the author's guard would be
+reintroducing it. `apps/git`'s SHA-1 rounds are written to be checked line by
+line against FIPS 180-4, and the parentheses were the checking.
 
 Arithmetic on a distinct type yields **that same distinct type**, not the
 base — `Price + Price` is a `Price`. Mixing two distinct types, or a distinct

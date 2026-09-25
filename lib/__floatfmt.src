@@ -363,7 +363,7 @@ int schubfach(int c, int q, bool lopsided, int k) {
     // even, because that is where round-half-to-even sends a tie.
     int lower = vbl;
     int upper = vbr;
-    if (c & 1 == 1) {
+    if ((c & 1) == 1) {
         lower = vbl + 1;
         upper = vbr - 1;
     }
@@ -388,7 +388,7 @@ int schubfach(int c, int q, bool lopsided, int k) {
         return s;
     }
     int mid = 4 * s + 2;
-    if (vb > mid || vb == mid && s & 1 == 1) {
+    if (vb > mid || vb == mid && (s & 1) == 1) {
         return s + 1;
     }
     return s;
@@ -449,7 +449,7 @@ Decimal printf_digits(int q, Decimal d) {
         // `rem` equal to half is a true tie only when vb is even, i.e.
         // exact; an odd vb carries the sticky bit and is never equal to an
         // even value. Ties go to even, as C's printf rounds them.
-        if (rem > m / 2 || rem == m / 2 && r & 1 == 1) {
+        if (rem > m / 2 || rem == m / 2 && (r & 1) == 1) {
             r = r + 1;
         }
         // The significand is even, so both ends of the interval belong to
@@ -532,7 +532,7 @@ int eisel_lemire(int w, int q) {
     // Only when the bits below the 55 that matter are all ones could the
     // rest of the product carry into them, and only then is the second
     // half of the table entry needed.
-    if (hi & 511 == 511) {
+    if ((hi & 511) == 511) {
         int lo2 = umulhi(ww, tlo);
         lo = lo.wrapping_add(lo2);
         if (ult(lo, lo2)) {
@@ -562,7 +562,7 @@ int eisel_lemire(int w, int q) {
         // An exact tie can only come from a small power of ten, and then the
         // low product is zero and the dropped bits are exactly one half:
         // round it to even instead of up.
-        if (ult(lo, 2) && q >= -4 && q <= 23 && mant & 3 == 1) {
+        if (ult(lo, 2) && q >= -4 && q <= 23 && (mant & 3) == 1) {
             if (mant << upper + 9 == hi) {
                 mant = mant & ~1;
             }
@@ -659,14 +659,14 @@ int exact_bits(str s, int first, int last, int nd, int e10, int guess) {
         moved = false;
         if (b < inf_bits()) {
             int up = compare_half(big, scale, b);
-            if (up > 0 || up == 0 && b & 1 == 1) {
+            if (up > 0 || up == 0 && (b & 1) == 1) {
                 b = b + 1;
                 moved = true;
             }
         }
         if (!moved && b > 0) {
             int down = compare_half(big, scale, b - 1);
-            if (down < 0 || down == 0 && b & 1 == 1) {
+            if (down < 0 || down == 0 && (b & 1) == 1) {
                 b = b - 1;
                 moved = true;
             }

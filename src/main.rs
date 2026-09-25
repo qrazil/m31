@@ -145,7 +145,7 @@ fn reformat(src: &str, module: &str) -> Result<String, diag::Diag> {
     }
     let prog = p.parse_program(module)?;
     fmt::set_type_names(&prog);
-    Ok(fmt::format(&prog, lexed))
+    Ok(fmt::format(&prog, lexed, &p.parens))
 }
 
 fn compile(entry: &str, mode: &str) -> Result<String, modules::Located> {

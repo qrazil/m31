@@ -129,7 +129,7 @@ pub type Block {
 }
 
 bool Block.drawn(int side) {
-    return borders.row() >= 0 && sides & side != 0;
+    return borders.row() >= 0 && (sides & side) != 0;
 }
 
 /// The rectangle left for content: `area` less the edges that are drawn,

@@ -283,6 +283,30 @@ fn the_absent_loop_and_assignment_forms_are_named() {
 }
 
 #[test]
+fn the_formatter_keeps_the_parentheses_the_author_wrote() {
+    // They do not survive into the AST, so the formatter is told where they
+    // were -- the same bargain as a literal's spelling.
+    let src = concat!(
+        "int a = 1;\nint b = 2;\nint c = 3;\nint d = 4;\n",
+        "print((a > 0 && b > 0) || (c > 0 && d > 0));\n",
+        "print(d ^ (b & (c ^ d)));\n",
+        "print((a & b) != 0);\n",
+        "print((a));\n",
+        "print(a + b * c);\n",
+    );
+    let once = crate::reformat(src, "t").expect("formats");
+    assert_eq!(once, src);
+    // And a group around a group is one group, so it is still a fixed point.
+    let twice = crate::reformat("print(((a)));\n", "t").expect("formats");
+    assert_eq!(twice, "print((a));\n");
+    assert_eq!(
+        crate::reformat(&twice, "t").expect("formats again"),
+        twice,
+        "collapsing `((a))` must reach a fixed point"
+    );
+}
+
+#[test]
 fn string_escapes_are_decoded() {
     assert_eq!(
         toks(r#""a\tb\nc\\d\"e""#),

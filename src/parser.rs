@@ -54,6 +54,28 @@ pub struct Parser {
     /// expression that stops at `..` is a range written where no range can
     /// go, and saying so beats reporting that `;` was expected.
     in_range: bool,
+    /// Where each parenthesised expression the source WROTE begins: the span
+    /// of the expression inside the parentheses, not of the `(`.
+    ///
+    /// Parentheses do not survive into the AST -- `(a && b) || c` and
+    /// `a && b || c` are one tree -- so a formatter printing from the AST
+    /// cannot know which of them a reader put there on purpose. It printed
+    /// the minimum precedence needs, which turned `apps/git`'s SHA-1 round
+    /// (`f = d ^ (bb & (c ^ d))`, checkable line by line against FIPS 180-4)
+    /// into `f = d ^ bb & (c ^ d)`, and `apps/tui`'s `(off & BOLD) != 0`
+    /// into `off & BOLD != 0`. The parentheses were the checking.
+    ///
+    /// This is the same trick the lexer plays for a literal's spelling
+    /// (`Lexer::spellings`): keep what the tokens lose, keyed by position.
+    /// A span is the position of the one token an expression starts at, so
+    /// it names the node uniquely; and if it ever did not, the cost is one
+    /// redundant pair of parentheses, which changes no meaning and still
+    /// reaches a fixed point.
+    ///
+    /// Only `parse_atom`'s grouping `(` is recorded. The parentheses of an
+    /// `if`, a `while`, a `for`, a `match`, a call and a lambda are syntax,
+    /// not grouping, and the formatter writes those itself.
+    pub parens: Vec<Span>,
 }
 
 /// What `scan_fn_tparams` finds ahead of a function's parameter list: the
@@ -286,6 +308,7 @@ impl Parser {
             depth: 0,
             in_default: false,
             in_range: false,
+            parens: Vec::new(),
         }
     }
 
@@ -2041,6 +2064,8 @@ impl Parser {
                 self.in_range = outer;
                 let e = e?;
                 self.expect(Tok::RParen)?;
+                // Remember that the author wrote these -- see `parens`.
+                self.parens.push(e.span());
                 Ok(e)
             }
             // `[]`, `[a, b, c]`, `[x; n]`

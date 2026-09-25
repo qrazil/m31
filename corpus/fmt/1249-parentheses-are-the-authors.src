@@ -1,0 +1,28 @@
+// A fixture for `langc fmt`: parentheses the author wrote are kept.
+//
+// They do not survive into the AST -- `(a && b) || c` and `a && b || c` are
+// one tree -- so the formatter is told where they were, the way it is told
+// how each literal was spelled. It used to print the minimum precedence
+// needed, which turned apps/git's SHA-1 rounds and apps/tui's `(x & M) != 0`
+// into lines a reader has to check against the precedence table.
+const int BOLD = 1;
+int a=1; int b=2; int c=3; int d=4; int bb=5; int off=3;
+// mixed && and ||: the grouping is the point
+print(  (a>0 && b>0) || (c>0&&d>0)  );
+// FIPS 180-4, round by round
+print(d^(bb&(c^d)));
+print((bb&c)|(d&(bb|c)));
+// a mask test
+print((off&BOLD)!=0);
+// redundant, and still the author's -- but a group around a group is one group
+print((a));
+print(((a)));
+print((a+b)+c);
+print(a+(b+c));
+// what precedence requires, the formatter still adds
+print((a+b)*c);
+print(-(a-b));
+print((a+b).to_str());
+// and where nothing was written, nothing appears
+print(a+b*c);
+print(a>0&&b>0||c>0);

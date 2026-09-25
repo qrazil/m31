@@ -286,16 +286,16 @@ pub bool Key.has(int m) {
 /// line of them can be read.
 pub str Key.to_str() {
     str s = "";
-    if (mods & CTRL != 0) {
+    if ((mods & CTRL) != 0) {
         s = s + "ctrl+";
     }
-    if (mods & ALT != 0) {
+    if ((mods & ALT) != 0) {
         s = s + "alt+";
     }
-    if (mods & SHIFT != 0) {
+    if ((mods & SHIFT) != 0) {
         s = s + "shift+";
     }
-    if (mods & META != 0) {
+    if ((mods & META) != 0) {
         s = s + "meta+";
     }
     return s + code.to_str();
@@ -362,13 +362,13 @@ pub type Mouse {
 /// `left-down 12,3`, `scroll-up 40,9`: a name for a mouse report.
 pub str Mouse.to_str() {
     str m = "";
-    if (mods & CTRL != 0) {
+    if ((mods & CTRL) != 0) {
         m = m + "ctrl+";
     }
-    if (mods & ALT != 0) {
+    if ((mods & ALT) != 0) {
         m = m + "alt+";
     }
-    if (mods & SHIFT != 0) {
+    if ((mods & SHIFT) != 0) {
         m = m + "shift+";
     }
     return m + kind.to_str() + " " + col.to_str() + "," + row.to_str();
@@ -968,18 +968,18 @@ Step mouse(List<int> ps, int fin, int used) {
     int col = param(ps, 1, 1);
     int row = param(ps, 2, 1);
     int mods = 0;
-    if (cb & 4 != 0) {
+    if ((cb & 4) != 0) {
         mods = mods | SHIFT;
     }
-    if (cb & 8 != 0) {
+    if ((cb & 8) != 0) {
         mods = mods | ALT;
     }
-    if (cb & 16 != 0) {
+    if ((cb & 16) != 0) {
         mods = mods | CTRL;
     }
     int btn = cb & 3;
     MouseKind k = MouseKind.Moved;
-    if (cb & 64 != 0) {
+    if ((cb & 64) != 0) {
         if (btn == 0) {
             k = MouseKind.ScrollUp;
         } else if (btn == 1) {
@@ -989,7 +989,7 @@ Step mouse(List<int> ps, int fin, int used) {
         } else {
             k = MouseKind.ScrollRight;
         }
-    } else if (cb & 32 != 0) {
+    } else if ((cb & 32) != 0) {
         if (btn != 3) {
             k = MouseKind.Drag(btn);
         }
