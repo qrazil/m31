@@ -1,0 +1,221 @@
+
+== buffer ======================================================
+ok   blank buffer area
+ok   blank row
+ok   set_str returns columns
+ok   text landed
+ok   get a cell
+ok   clipped at the edge
+ok   clipped text
+ok   writes outside are dropped
+ok   two wide characters
+ok   head width
+ok   continuation width
+ok   continuation symbol is empty
+ok   wide at the boundary returns 6
+ok   wide at the boundary
+ok   overwriting the head blanks the tail
+ok   overwriting the tail blanks the head
+ok   emoji is one cell
+ok   emoji is two columns
+ok   emoji row
+ok   combining mark joins its base
+ok   and does not take a cell
+ok   a leading mark is dropped
+ok   style round trip
+ok   packed style
+ok   restyle keeps the glyphs
+ok   restyle changes the style
+ok   empty buffer has no cells
+ok   empty buffer prints nothing
+ok   filling an empty buffer is a no-op
+
+a buffer as a picture:
++------+
+|漢字  |
+|abcde |
+|A  B  |
+|      |
++------+
+
+== layout ======================================================
+ok   length then fill
+ok   two halves
+ok   thirds of ten, the last absorbing
+ok   weighted fills
+ok   fills and a remainder
+ok   all fills weight zero share equally
+ok   a zero fill beside a weighted one gets nothing
+ok   mins share the surplus
+ok   lengths that do not fit shrink from the right
+ok   a fill gives way before a length
+ok   max shrinks
+ok   ratios
+ok   nothing to share out
+ok   one constraint takes everything
+ok   rows: first
+ok   rows: second
+ok   nested cols: first
+ok   nested cols: second
+ok   margins
+ok   spacing: first
+ok   spacing: second
+ok   an impossible gap stays inside the area
+
+== layout properties, 2000 random constraint sets ==============
+ok   sizes always sum to the total
+ok   no size is ever negative
+ok   the parts always tile the area
+ok   the parts are in order and never overlap
+
+== text ========================================================
+ok   greedy wrap
+ok   an unbreakable run is cut
+ok   blank lines survive
+ok   cjk breaks between characters
+ok   cjk and latin together
+ok   a cluster is never split
+ok   trailing spaces are dropped at a break
+ok   a wide character in one column overflows alone
+ok   empty text is one empty line
+ok   truncate
+ok   truncate keeps what fits
+ok   truncate on a wide boundary
+ok   no room for an ellipsis
+ok   truncate to nothing
+ok   pad left
+ok   pad right
+ok   pad centre
+ok   pad counts columns, not bytes
+ok   fit does both
+ok   offset centres
+
+== renderer ====================================================
+ok   an unchanged frame writes nothing
+ok   one cell
+ok   a short gap is walked
+ok   a long gap is jumped
+ok   attributes on, then one off
+ok   24-bit colour
+ok   256 colour
+ok   16 colour
+ok   a full frame
+ok   buffers of one size diff
+
+the bytes of a small frame, readably:
+  \e[0m\e[1;1Hhello\e[K\e[2;1H\e[K\e[3;1H\e[1mbye\e[22m\e[K
+
+== block =======================================================
++--------------------------------------------+
+|┌single───┐╔double═══╗╭──round──╮┏━━━━thick┓|
+|│         │║         ║│         │┃         ┃|
+|│         │║         ║│         │┃         ┃|
+|│         │║         ║│         │┃         ┃|
+|└─────────┘╚═════════╝╰─────────╯┗━━━━━━━━━┛|
++--------------------------------------------+
+ok   inner takes the border
+ok   inner takes the padding too
+ok   a title with no border still takes a row
+ok   no border and no title takes nothing
+ok   inner never goes negative
+ok   only some sides
+
+rectangles smaller than their border:
++----------------------+
+|┌a…┐ ┌ ┌┐   │         |
+|     │ └┘   │         |
+|     └      │         |
+|            └─────    |
++----------------------+
+
+== paragraph ===================================================
++----------------------------------------+
+|The quick brown fox    dog, and keeps on|
+|jumps over the lazy    going for quite a|
+|dog, and keeps on      while after that.|
+|going for quite a                       |
+|while after that.                       |
+|                                        |
++----------------------------------------+
+ok   line count at 20 columns
+ok   line count at 10 columns
+ok   unwrapped text is truncated
+ok   an empty rectangle draws nothing
+
+== list ========================================================
+ok   no scroll needed
+ok   the view follows the selection
+ok   an offset with no selection stays
++------------------------------------+
+|  alpha       delta     charlie     |
+|> bravo       echo      delta       |
+|  charlie     foxtrot   echo        |
+|  delta     > golf      foxtrot     |
++------------------------------------+
+ok   step from nothing selects the first
+ok   step stops at the top
+ok   step stops at the bottom
+ok   an empty list draws blanks
+
+== table =======================================================
++----------------------------------------+
+|  name                    size changed  |
+|  readme.md             1.2 kB today    |
+|▸ a-rather-long-file-n…   44 B yesterday|
+|  src                        - last week|
+|  Cargo.toml             310 B today    |
++----------------------------------------+
+
+the same table in 18 columns -- the constraints do not fit:
++------------------+
+|n size   changed  |
+|r 1.2 kB today    |
+|a 44 B   yesterday|
+|s -      last week|
+|C 310 B  today    |
+|n 8 kB   today    |
++------------------+
+ok   column count from the widths
+ok   column count from the rows
+ok   the table scrolls to the selection
+
+no header, equal columns, no constraints:
++------------------------------+
+|readme.md  1.2 kB    today    |
+|a-rather-… 44 B      yesterday|
+|src        -         last week|
++------------------------------+
+
+== a widget written outside the library ========================
++------------------------+
+|          70%           |
+|0·········1·········2···|
+|  a lambda is a widget  |
+|and so is every widget …|
++------------------------+
+ok   the struct widget drew
+ok   the function widget drew
+ok   the lambda widget drew
+
+== a whole screen, laid out ====================================
++--------------------------------------------------+
+|╔══════════ a terminal user interface ═══════════╗|
+|║     built on a buffer of grapheme clusters     ║|
+|╚════════════════════════════════════════════════╝|
+|╭files─────────────╮┌detail──────────────────────┐|
+|│  src/            ││ README.md is 1.2 kB and    │|
+|│  lib/            ││ was changed today. The     │|
+|│  docs/           ││ paragraph wraps to the     │|
+|│▸ README.md       ││ panel, and the panel came  │|
+|│  漢字.txt        ││ from a percentage          │|
+|│  Cargo.toml      ││ constraint.                │|
+|│  gates.sh        ││                            │|
+|│                  ││                            │|
+|╰──────────────────╯└────────────────────────────┘|
+| q quit   j/k move   ? help                       |
++--------------------------------------------------+
+full redraw: 1210 bytes
+ok   a full frame is not empty
+ok   a diff against a blank frame is smaller than a full redraw
+
+-- 110 passed, 0 failed

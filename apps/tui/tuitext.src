@@ -1,0 +1,310 @@
+// Text measured in terminal columns: wrapping, alignment, truncation.
+//
+// API
+// ---
+//   tuitext.Align                      Left | Center | Right
+//   tuitext.wrap(s, cols)              -> List<str>, greedy, width-aware
+//   tuitext.truncate(s, cols, ell:)    -> str, with an ellipsis
+//   tuitext.pad(s, cols, align)        -> str, to exactly `cols` if it is short
+//   tuitext.fit(s, cols, align)        -> str, truncated AND padded
+//
+// Everything here counts **terminal columns**, by `unicode.width`: a CJK
+// ideograph is two, a combining mark is none, and an emoji sequence is one
+// grapheme of two. `str.size()` counts bytes and `str.chars().size()` counts
+// code points, and both are the wrong number for a grid.
+//
+// Nothing here ever splits a grapheme cluster. A line break, a truncation
+// and a pad all land between two clusters, so `é` written as `e` + U+0301
+// cannot come apart and an emoji cannot lose its skin tone.
+//
+// --- how wrapping breaks ----------------------------------------------------
+//
+// Greedy, left to right, and a line is broken:
+//
+//   - at a run of spaces, which is dropped;
+//   - between two clusters when either is **two columns wide**, so Chinese,
+//     Japanese and Korean text wraps although it has no spaces in it -- this
+//     is the part a byte-counting wrapper gets wrong;
+//   - inside a word that is longer than the whole line, which is cut at the
+//     last cluster that fits. A URL is not made shorter by refusing to break
+//     it.
+//
+// A cluster wider than the line -- a two-column character in a one-column
+// space -- is put on a line of its own and overflows it, because there is no
+// answer that both fits and keeps the text.
+//
+// `\n` in the input starts a new line, and an empty line stays an empty
+// line: `wrap` answers one entry per output row, and a caller that joins the
+// answer with `\n` gets its paragraph back with the same number of blank
+// lines in it.
+
+import unicode;
+
+/// Where text sits in a space wider than it is.
+pub enum Align {
+    Left;
+    Center;
+    Right;
+}
+
+/// The default ellipsis: one column, and every terminal has it.
+pub const str ELLIPSIS = "\u{2026}";
+
+// --- measuring, with the fast path every UI needs ---------------------------
+//
+// `unicode.width` runs UAX #29 over the text: a state machine per code point
+// and a binary search per cluster. That is the right answer and it is not
+// cheap, and a terminal program asks it thousands of times a frame -- of
+// strings that are almost always printable ASCII, where the answer is the
+// byte count and every cluster is one byte.
+//
+// So both questions are asked here first as a byte scan, and only text with
+// a byte outside 0x20..0x7E goes to `unicode`. The two agree by
+// construction: in that range one byte is one code point, one code point is
+// one grapheme cluster (no combining mark, no joiner is ASCII), and every
+// cluster is one column wide.
+
+/// Is every byte of `s` printable ASCII?
+bool plain(str s) {
+    int n = s.size();
+    int i = 0;
+    while (i < n) {
+        int b = s.byte_at(i);
+        if (b < 32 || b > 126) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// How many columns `s` takes: `unicode.width`, with the ASCII fast path.
+pub int width(str s) {
+    if (plain(s)) {
+        return s.size();
+    }
+    return unicode.width(s);
+}
+
+/// The grapheme clusters of `s`: `unicode.graphemes`, with the same fast
+/// path.
+List<str> clusters(str s) {
+    if (!plain(s)) {
+        return unicode.graphemes(s);
+    }
+    List<str> out = [];
+    int n = s.size();
+    int i = 0;
+    while (i < n) {
+        out.push(s.substr(i, i + 1));
+        i = i + 1;
+    }
+    return out;
+}
+
+/// `s` broken into lines of at most `cols` columns. See the header for the
+/// rules. `cols` below 1 is treated as 1.
+pub List<str> wrap(str s, int cols) {
+    int room = cols;
+    if (room < 1) {
+        room = 1;
+    }
+    List<str> out = [];
+    for (str line in s.split("\n")) {
+        str l = line;
+        if (l.ends_with("\r")) {
+            l = l.substr(0, l.size() - 1);
+        }
+        wrap_line(out, l, room);
+    }
+    return out;
+}
+
+void wrap_line(List<str> out, str line, int cols) {
+    List<str> cur = [];
+    int cur_w = 0;
+    List<str> word = [];
+    int word_w = 0;
+    int gap = 0;
+    for (str g in clusters(line)) {
+        int gw = width(g);
+        if (g == " " || g == "\t") {
+            bool had = word.size() > 0;
+            cur_w = flush(out, cur, cur_w, word, word_w, gap, cols);
+            if (had) {
+                gap = 0;
+            }
+            word = [];
+            word_w = 0;
+            gap = gap + 1;
+            if (g == "\t") {
+                gap = gap + 3;
+            }
+            continue;
+        }
+        if (gw >= 2) {
+            // A wide cluster is a word of its own: CJK breaks anywhere.
+            bool had = word.size() > 0;
+            cur_w = flush(out, cur, cur_w, word, word_w, gap, cols);
+            if (had) {
+                gap = 0;
+            }
+            word = [];
+            word_w = 0;
+            List<str> one = [g];
+            cur_w = flush(out, cur, cur_w, one, gw, gap, cols);
+            gap = 0;
+            continue;
+        }
+        word.push(g);
+        word_w = word_w + gw;
+    }
+    cur_w = flush(out, cur, cur_w, word, word_w, gap, cols);
+    out.push(cur.join(""));
+}
+
+/// Put `word` on `cur`, breaking the line first if it does not fit and
+/// breaking the word itself if it is longer than a whole line. Answers the
+/// new width of `cur`, which it changes in place.
+int flush(List<str> out, List<str> cur, int cur_w, List<str> word, int word_w, int gap, int cols) {
+    if (word.size() == 0) {
+        return cur_w;
+    }
+    int w = cur_w;
+    int sp = gap;
+    if (w == 0) {
+        sp = 0;
+    }
+    if (w + sp + word_w <= cols) {
+        int i = 0;
+        while (i < sp) {
+            cur.push(" ");
+            i = i + 1;
+        }
+        for (str g in word) {
+            cur.push(g);
+        }
+        return w + sp + word_w;
+    }
+    // It does not fit after what is already there. Start a new line, unless
+    // the line is empty already -- then the word alone is too long.
+    if (w > 0) {
+        out.push(cur.join(""));
+        cur.clear();
+        w = 0;
+    }
+    if (word_w <= cols) {
+        for (str g in word) {
+            cur.push(g);
+        }
+        return word_w;
+    }
+    // An unbreakable run longer than the line: cut it where it stops fitting.
+    int line_w = 0;
+    for (str g in word) {
+        int gw = width(g);
+        if (line_w > 0 && line_w + gw > cols) {
+            out.push(cur.join(""));
+            cur.clear();
+            line_w = 0;
+        }
+        cur.push(g);
+        line_w = line_w + gw;
+    }
+    return line_w;
+}
+
+/// `s` cut to at most `cols` columns, with `ell` on the end to say it was.
+///
+/// Nothing is cut when it already fits. When even the ellipsis does not fit,
+/// the text is cut to `cols` with no ellipsis -- one column of `...` says
+/// nothing a bare cut does not.
+pub str truncate(str s, int cols, str ell = ELLIPSIS) {
+    if (cols <= 0) {
+        return "";
+    }
+    if (width(s) <= cols) {
+        return s;
+    }
+    int ew = width(ell);
+    if (ew >= cols) {
+        return cut(s, cols);
+    }
+    return cut(s, cols - ew) + ell;
+}
+
+/// The longest prefix of `s` that is at most `cols` columns, cut between
+/// grapheme clusters.
+pub str cut(str s, int cols) {
+    if (cols <= 0) {
+        return "";
+    }
+    // No encoding is narrower than one byte a column -- an East Asian wide
+    // character is three bytes or four -- so fewer bytes than columns is
+    // already the whole answer.
+    if (s.size() <= cols) {
+        return s;
+    }
+    if (plain(s)) {
+        return s.substr(0, cols);
+    }
+    List<str> out = [];
+    int w = 0;
+    for (str g in clusters(s)) {
+        int gw = width(g);
+        if (w + gw > cols) {
+            return out.join("");
+        }
+        out.push(g);
+        w = w + gw;
+    }
+    return out.join("");
+}
+
+/// `s` padded with spaces to `cols` columns. Text already that wide or wider
+/// is returned as it is -- padding never truncates, so that the two
+/// decisions stay separate.
+pub str pad(str s, int cols, Align align) {
+    int w = width(s);
+    if (w >= cols) {
+        return s;
+    }
+    int room = cols - w;
+    match (align) {
+        case Left: {
+            return s + " ".repeat(room);
+        }
+        case Right: {
+            return " ".repeat(room) + s;
+        }
+        case Center: {
+            int left = room / 2;
+            return " ".repeat(left) + s + " ".repeat(room - left);
+        }
+    }
+}
+
+/// `s` in exactly `cols` columns: truncated if it is too long, padded if it
+/// is too short. This is what a table cell wants.
+pub str fit(str s, int cols, Align align, str ell = ELLIPSIS) {
+    return pad(truncate(s, cols, ell: ell), cols, align);
+}
+
+/// Where `s` starts, in columns, when it is placed in `cols` columns.
+pub int offset(str s, int cols, Align align) {
+    int w = width(s);
+    if (w >= cols) {
+        return 0;
+    }
+    match (align) {
+        case Left: {
+            return 0;
+        }
+        case Right: {
+            return cols - w;
+        }
+        case Center: {
+            return (cols - w) / 2;
+        }
+    }
+}

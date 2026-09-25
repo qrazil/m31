@@ -1,0 +1,550 @@
+// The test corpus for the TUI library.
+//
+//   bash apps/tui/check.sh
+//
+// Everything here runs against an in-memory `Buffer` and a `bytes`, so
+// nothing needs a terminal. Two kinds of expectation:
+//
+//   - a `check` line, which prints `ok` or `FAIL` and is counted;
+//   - the rendered frames and byte strings printed below them, which are
+//     compared against `apps/tui/tests.out` by `check.sh`. A picture of a
+//     grid is much easier to read than the twenty assertions it would take
+//     to say the same thing, and `Buffer.frame` draws the picture.
+//
+// A failure shows up twice, as a `FAIL` line and as a diff, and `check.sh`
+// greps for the first and diffs the second.
+
+import os;
+import random;
+import tuibuf;
+import tuidiff;
+import tuigeom;
+import tuilists;
+import tuistyle;
+import tuitext;
+import tuiwidget;
+
+/// The score. There is no mutable module state (reference §2), so the count
+/// is an object every check is handed.
+type Tally {
+    int pass = 0;
+    int fail = 0;
+}
+
+void check(Tally t, str name, str got, str want) {
+    if (got == want) {
+        t.pass = t.pass + 1;
+        print("ok   " + name);
+        return;
+    }
+    t.fail = t.fail + 1;
+    print("FAIL " + name);
+    print("     got  [" + got + "]");
+    print("     want [" + want + "]");
+}
+
+void check_int(Tally t, str name, int got, int want) {
+    check(t, name, str(got), str(want));
+}
+
+void ok(Tally t, str name, bool cond) {
+    check(t, name, str(cond), "true");
+}
+
+void head(str s) {
+    print("");
+    print("== " + s + " " + "=".repeat(60 - s.size()));
+}
+
+// --- 1. cells and the buffer ------------------------------------------------
+
+void buffer_tests(Tally t) {
+    head("buffer");
+    tuibuf.Buffer b = tuibuf.Buffer.sized(10, 3);
+    check_int(t, "blank buffer area", b.area().cells(), 30);
+    check(t, "blank row", b.row_text(0), "          ");
+    check_int(t, "set_str returns columns", b.set_str(0, 0, "hello", tuistyle.Style()), 5);
+    check(t, "text landed", b.row_text(0), "hello     ");
+    check(t, "get a cell", b.get(1, 0).sym, "e");
+    // Clipping at the right edge.
+    check_int(t, "clipped at the edge", b.set_str(6, 0, "abcdefgh", tuistyle.Style()), 4);
+    check(t, "clipped text", b.row_text(0), "hello abcd");
+    // A cell outside the buffer is a no-op, not a trap.
+    b.set_str(20, 20, "nope", tuistyle.Style());
+    b.set(-3, 0, tuibuf.Cell.of("x", tuistyle.Style()));
+    check(t, "writes outside are dropped", b.row_text(0), "hello abcd");
+    // Wide characters.
+    tuibuf.Buffer w = tuibuf.Buffer.sized(6, 4);
+    w.set_str(0, 0, "\u{6F22}\u{5B57}", tuistyle.Style());
+    check(t, "two wide characters", w.row_text(0), "\u{6F22}\u{5B57}  ");
+    check_int(t, "head width", w.width_at(0, 0), 2);
+    check_int(t, "continuation width", w.width_at(1, 0), 0);
+    check(t, "continuation symbol is empty", w.sym_at(1, 0), "");
+    // A wide character with one column left is not written; a space is.
+    check_int(t, "wide at the boundary returns 6", w.set_str(0, 1, "abcde\u{6F22}", tuistyle.Style()), 6);
+    check(t, "wide at the boundary", w.row_text(1), "abcde ");
+    // Overwriting either half of a pair repairs the other.
+    w.set_str(0, 2, "\u{6F22}\u{5B57}", tuistyle.Style());
+    w.set_str(0, 2, "A", tuistyle.Style());
+    check(t, "overwriting the head blanks the tail", w.row_text(2), "A \u{5B57}  ");
+    w.set_str(3, 2, "B", tuistyle.Style());
+    check(t, "overwriting the tail blanks the head", w.row_text(2), "A  B  ");
+    // An emoji with a modifier is one cluster, two columns.
+    tuibuf.Buffer e = tuibuf.Buffer.sized(6, 1);
+    e.set_str(0, 0, "\u{1F44D}\u{1F3FD}!", tuistyle.Style());
+    check(t, "emoji is one cell", e.sym_at(0, 0), "\u{1F44D}\u{1F3FD}");
+    check_int(t, "emoji is two columns", e.width_at(0, 0), 2);
+    check(t, "emoji row", e.row_text(0), "\u{1F44D}\u{1F3FD}!   ");
+    // Zero-width marks join the cell before them; one with no cell before it
+    // is dropped.
+    tuibuf.Buffer z = tuibuf.Buffer.sized(4, 2);
+    z.set_str(0, 0, "e\u{301}x", tuistyle.Style());
+    check(t, "combining mark joins its base", z.sym_at(0, 0), "e\u{301}");
+    check(t, "and does not take a cell", z.sym_at(1, 0), "x");
+    z.set_str(0, 1, "\u{301}ab", tuistyle.Style());
+    check(t, "a leading mark is dropped", z.row_text(1), "ab  ");
+    // Styles.
+    tuistyle.Style bold = tuistyle.Style(fg: tuistyle.Colour.Indexed(2), attrs: tuistyle.BOLD);
+    tuibuf.Buffer s = tuibuf.Buffer.sized(4, 1);
+    s.set_str(0, 0, "ab", bold);
+    ok(t, "style round trip", s.get(0, 0).style.eq(bold));
+    check_int(t, "packed style", s.style_at(0, 0), bold.pack());
+    s.restyle(tuigeom.Rect(0, 0, 4, 1), tuistyle.Style());
+    check(t, "restyle keeps the glyphs", s.row_text(0), "ab  ");
+    check_int(t, "restyle changes the style", s.style_at(0, 0), 0);
+    // An empty rectangle.
+    tuibuf.Buffer q = tuibuf.Buffer.sized(0, 0);
+    check_int(t, "empty buffer has no cells", q.area().cells(), 0);
+    check(t, "empty buffer prints nothing", q.to_str(), "");
+    q.fill(tuigeom.Rect(0, 0, 5, 5), "#", tuistyle.Style());
+    check(t, "filling an empty buffer is a no-op", q.to_str(), "");
+    print("");
+    print("a buffer as a picture:");
+    print(w.frame());
+}
+
+// --- 2. layout --------------------------------------------------------------
+
+str sizes(int total, List<tuigeom.Constraint> cs) {
+    List<str> out = [];
+    for (int v in tuigeom.resolve(total, cs)) {
+        out.push(str(v));
+    }
+    return out.join(" ");
+}
+
+void layout_tests(Tally t) {
+    head("layout");
+    check(t, "length then fill", sizes(100, [tuigeom.Constraint.Length(10), tuigeom.Constraint.Fill(1)]), "10 90");
+    check(t, "two halves", sizes(100, [tuigeom.Constraint.Percentage(50), tuigeom.Constraint.Percentage(50)]), "50 50");
+    check(t, "thirds of ten, the last absorbing", sizes(10, [tuigeom.Constraint.Percentage(33), tuigeom.Constraint.Percentage(33), tuigeom.Constraint.Percentage(33)]), "3 3 4");
+    check(t, "weighted fills", sizes(100, [tuigeom.Constraint.Fill(1), tuigeom.Constraint.Fill(2), tuigeom.Constraint.Fill(1)]), "25 50 25");
+    check(t, "fills and a remainder", sizes(7, [tuigeom.Constraint.Fill(1), tuigeom.Constraint.Fill(1), tuigeom.Constraint.Fill(1)]), "3 2 2");
+    check(t, "all fills weight zero share equally", sizes(6, [tuigeom.Constraint.Fill(0), tuigeom.Constraint.Fill(0)]), "3 3");
+    check(t, "a zero fill beside a weighted one gets nothing", sizes(6, [tuigeom.Constraint.Fill(0), tuigeom.Constraint.Fill(1)]), "0 6");
+    check(t, "mins share the surplus", sizes(100, [tuigeom.Constraint.Min(10), tuigeom.Constraint.Min(30)]), "40 60");
+    check(t, "lengths that do not fit shrink from the right", sizes(20, [tuigeom.Constraint.Length(50), tuigeom.Constraint.Length(50), tuigeom.Constraint.Length(20)]), "6 7 7");
+    check(t, "a fill gives way before a length", sizes(10, [tuigeom.Constraint.Length(8), tuigeom.Constraint.Fill(1), tuigeom.Constraint.Length(8)]), "5 0 5");
+    check(t, "max shrinks", sizes(40, [tuigeom.Constraint.Max(30), tuigeom.Constraint.Max(30)]), "20 20");
+    check(t, "ratios", sizes(100, [tuigeom.Constraint.Ratio(1, 3), tuigeom.Constraint.Ratio(2, 3)]), "33 67");
+    check(t, "nothing to share out", sizes(0, [tuigeom.Constraint.Length(5), tuigeom.Constraint.Fill(1)]), "0 0");
+    check(t, "one constraint takes everything", sizes(13, [tuigeom.Constraint.Length(2)]), "13");
+    tuigeom.Rect a = tuigeom.Rect(2, 1, 20, 10);
+    List<tuigeom.Rect> r = tuigeom.rows(a, [tuigeom.Constraint.Length(3), tuigeom.Constraint.Fill(1)]);
+    check(t, "rows: first", r[0].to_str(), "2,1 20x3");
+    check(t, "rows: second", r[1].to_str(), "2,4 20x7");
+    List<tuigeom.Rect> c = tuigeom.cols(r[1], [tuigeom.Constraint.Percentage(25), tuigeom.Constraint.Fill(1)]);
+    check(t, "nested cols: first", c[0].to_str(), "2,4 5x7");
+    check(t, "nested cols: second", c[1].to_str(), "7,4 15x7");
+    List<tuigeom.Rect> m = tuigeom.Layout(tuigeom.Direction.Vertical, [tuigeom.Constraint.Fill(1)], margin_x: 2, margin_y: 1).split(a);
+    check(t, "margins", m[0].to_str(), "4,2 16x8");
+    List<tuigeom.Rect> g = tuigeom.Layout(tuigeom.Direction.Horizontal, [tuigeom.Constraint.Fill(1), tuigeom.Constraint.Fill(1)], spacing: 2).split(tuigeom.Rect(0, 0, 10, 1));
+    check(t, "spacing: first", g[0].to_str(), "0,0 4x1");
+    check(t, "spacing: second", g[1].to_str(), "6,0 4x1");
+    List<tuigeom.Rect> big = tuigeom.Layout(tuigeom.Direction.Horizontal, [tuigeom.Constraint.Fill(1), tuigeom.Constraint.Fill(1)], spacing: 99).split(tuigeom.Rect(0, 0, 10, 1));
+    ok(t, "an impossible gap stays inside the area", big[1].right() <= 10);
+}
+
+// --- 3. the layout property test --------------------------------------------
+
+tuigeom.Constraint a_constraint(random.Seeded r) {
+    int k = r.integer(0, 5);
+    if (k == 0) {
+        return tuigeom.Constraint.Length(r.integer(0, 30));
+    }
+    if (k == 1) {
+        return tuigeom.Constraint.Percentage(r.integer(0, 120));
+    }
+    if (k == 2) {
+        return tuigeom.Constraint.Ratio(r.integer(0, 5), r.integer(0, 5));
+    }
+    if (k == 3) {
+        return tuigeom.Constraint.Min(r.integer(0, 30));
+    }
+    if (k == 4) {
+        return tuigeom.Constraint.Max(r.integer(0, 30));
+    }
+    return tuigeom.Constraint.Fill(r.integer(0, 4));
+}
+
+void property_tests(Tally t) {
+    head("layout properties, 2000 random constraint sets");
+    random.Seeded r = random.seeded(20260924);
+    int bad_sum = 0;
+    int bad_sign = 0;
+    int bad_tile = 0;
+    int bad_order = 0;
+    str worst = "";
+    int trial = 0;
+    while (trial < 2000) {
+        int total = r.integer(0, 60);
+        int n = r.integer(1, 6);
+        List<tuigeom.Constraint> cs = [];
+        int i = 0;
+        while (i < n) {
+            cs.push(a_constraint(r));
+            i = i + 1;
+        }
+        List<int> got = tuigeom.resolve(total, cs);
+        int sum = 0;
+        bool neg = false;
+        for (int v in got) {
+            sum = sum + v;
+            if (v < 0) {
+                neg = true;
+            }
+        }
+        if (got.size() != n || sum != total) {
+            bad_sum = bad_sum + 1;
+            worst = describe(total, cs, got);
+        }
+        if (neg) {
+            bad_sign = bad_sign + 1;
+            worst = describe(total, cs, got);
+        }
+        // And the same through real rectangles, horizontally and vertically.
+        tuigeom.Rect area = tuigeom.Rect(r.integer(0, 5), r.integer(0, 5), total, r.integer(0, 8));
+        List<tuigeom.Rect> parts = tuigeom.cols(area, cs);
+        int at = area.x;
+        for (tuigeom.Rect p in parts) {
+            if (p.x != at || p.w < 0 || p.y != area.y || p.h != area.h) {
+                bad_order = bad_order + 1;
+                worst = describe(total, cs, got);
+            }
+            at = at + p.w;
+        }
+        if (at != area.right()) {
+            bad_tile = bad_tile + 1;
+            worst = describe(total, cs, got);
+        }
+        tuigeom.Rect varea = tuigeom.Rect(area.y, area.x, area.h, total);
+        List<tuigeom.Rect> vparts = tuigeom.rows(varea, cs);
+        int vat = varea.y;
+        for (tuigeom.Rect p in vparts) {
+            vat = vat + p.h;
+        }
+        if (vat != varea.bottom()) {
+            bad_tile = bad_tile + 1;
+            worst = describe(total, cs, got);
+        }
+        trial = trial + 1;
+    }
+    check_int(t, "sizes always sum to the total", bad_sum, 0);
+    check_int(t, "no size is ever negative", bad_sign, 0);
+    check_int(t, "the parts always tile the area", bad_tile, 0);
+    check_int(t, "the parts are in order and never overlap", bad_order, 0);
+    if (worst != "") {
+        print("     counterexample: " + worst);
+    }
+}
+
+str describe(int total, List<tuigeom.Constraint> cs, List<int> got) {
+    List<str> a = [];
+    for (tuigeom.Constraint c in cs) {
+        a.push(c.to_str());
+    }
+    List<str> b = [];
+    for (int v in got) {
+        b.push(str(v));
+    }
+    return str(total) + " [" + a.join(", ") + "] -> " + b.join(" ");
+}
+
+// --- 4. text ----------------------------------------------------------------
+
+str wrapped(str s, int cols) {
+    return tuitext.wrap(s, cols).join("/");
+}
+
+void text_tests(Tally t) {
+    head("text");
+    check(t, "greedy wrap", wrapped("the quick brown fox jumps over", 10), "the quick/brown fox/jumps over");
+    check(t, "an unbreakable run is cut", wrapped("supercalifragilistic", 8), "supercal/ifragili/stic");
+    check(t, "blank lines survive", wrapped("a\n\nb", 5), "a//b");
+    check(t, "cjk breaks between characters", wrapped("\u{6F22}\u{5B57}\u{6F22}\u{5B57}\u{6F22}", 5), "\u{6F22}\u{5B57}/\u{6F22}\u{5B57}/\u{6F22}");
+    check(t, "cjk and latin together", wrapped("mixed \u{6F22}\u{5B57} text", 8), "mixed \u{6F22}/\u{5B57} text");
+    // The break lands between clusters, so the accent stays on its letter.
+    check(t, "a cluster is never split", wrapped("abcde\u{301}fgh", 5), "abcde\u{301}/fgh");
+    check(t, "trailing spaces are dropped at a break", wrapped("aaa   bbb", 4), "aaa/bbb");
+    check(t, "a wide character in one column overflows alone", wrapped("\u{6F22}", 1), "\u{6F22}");
+    check(t, "empty text is one empty line", wrapped("", 5), "");
+    check(t, "truncate", tuitext.truncate("hello world", 8), "hello w\u{2026}");
+    check(t, "truncate keeps what fits", tuitext.truncate("hello", 8), "hello");
+    check(t, "truncate on a wide boundary", tuitext.truncate("\u{6F22}\u{5B57}\u{6F22}", 5), "\u{6F22}\u{5B57}\u{2026}");
+    check(t, "no room for an ellipsis", tuitext.truncate("hello", 1), "h");
+    check(t, "truncate to nothing", tuitext.truncate("hello", 0), "");
+    check(t, "pad left", "[" + tuitext.pad("hi", 6, tuitext.Align.Left) + "]", "[hi    ]");
+    check(t, "pad right", "[" + tuitext.pad("hi", 6, tuitext.Align.Right) + "]", "[    hi]");
+    check(t, "pad centre", "[" + tuitext.pad("hi", 7, tuitext.Align.Center) + "]", "[  hi   ]");
+    check(t, "pad counts columns, not bytes", "[" + tuitext.pad("\u{6F22}", 4, tuitext.Align.Left) + "]", "[\u{6F22}  ]");
+    check(t, "fit does both", "[" + tuitext.fit("hello world", 6, tuitext.Align.Left) + "]", "[hello\u{2026}]");
+    check_int(t, "offset centres", tuitext.offset("abc", 9, tuitext.Align.Center), 3);
+}
+
+// --- 5. the diffing renderer ------------------------------------------------
+
+void diff_tests(Tally t) {
+    head("renderer");
+    tuistyle.Depth d = tuistyle.Depth.Ansi16;
+    tuibuf.Buffer a = tuibuf.Buffer.sized(12, 2);
+    tuibuf.Buffer b = tuibuf.Buffer.sized(12, 2);
+    a.set_str(0, 0, "hello world", tuistyle.Style());
+    b.set_str(0, 0, "hello world", tuistyle.Style());
+    check(t, "an unchanged frame writes nothing", tuidiff.show(tuidiff.diff(a, b, d)), "");
+    b.set_str(6, 0, "W", tuistyle.Style());
+    check(t, "one cell", tuidiff.show(tuidiff.diff(a, b, d)), "\\e[1;7HW");
+    // Two changes with a short gap: walking is cheaper than jumping.
+    tuibuf.Buffer c = tuibuf.Buffer.sized(12, 1);
+    tuibuf.Buffer e = tuibuf.Buffer.sized(12, 1);
+    c.fill(tuigeom.Rect(0, 0, 12, 1), "#", tuistyle.Style());
+    e.fill(tuigeom.Rect(0, 0, 12, 1), "#", tuistyle.Style());
+    e.set_str(0, 0, "a", tuistyle.Style());
+    e.set_str(2, 0, "c", tuistyle.Style());
+    check(t, "a short gap is walked", tuidiff.show(tuidiff.diff(c, e, d)), "\\e[1;1Ha#c");
+    e.set_str(11, 0, "z", tuistyle.Style());
+    check(t, "a long gap is jumped", tuidiff.show(tuidiff.diff(c, e, d)), "\\e[1;1Ha#c\\e[8Cz");
+    // Style changes are written as differences.
+    tuibuf.Buffer s1 = tuibuf.Buffer.sized(6, 1);
+    tuibuf.Buffer s2 = tuibuf.Buffer.sized(6, 1);
+    s2.set_str(0, 0, "ab", tuistyle.Style(attrs: tuistyle.BOLD | tuistyle.UNDERLINE));
+    s2.set_str(2, 0, "cd", tuistyle.Style(attrs: tuistyle.UNDERLINE));
+    check(t, "attributes on, then one off", tuidiff.show(tuidiff.diff(s1, s2, d)), "\\e[1;1H\\e[1;4mab\\e[22mcd\\e[0m");
+    tuibuf.Buffer k1 = tuibuf.Buffer.sized(4, 1);
+    tuibuf.Buffer k2 = tuibuf.Buffer.sized(4, 1);
+    k2.set_str(0, 0, "x", tuistyle.Style(fg: tuistyle.Colour.Rgb(200, 30, 40), bg: tuistyle.Colour.Indexed(19)));
+    check(t, "24-bit colour", tuidiff.show(tuidiff.diff(k1, k2, tuistyle.Depth.TrueColour)), "\\e[1;1H\\e[38;2;200;30;40;48;5;19mx\\e[0m");
+    check(t, "256 colour", tuidiff.show(tuidiff.diff(k1, k2, tuistyle.Depth.Ansi256)), "\\e[1;1H\\e[38;5;160;48;5;19mx\\e[0m");
+    check(t, "16 colour", tuidiff.show(tuidiff.diff(k1, k2, tuistyle.Depth.Ansi16)), "\\e[1;1H\\e[91;44mx\\e[0m");
+    // A whole frame, and the erase-to-end-of-line shortcut.
+    tuibuf.Buffer f = tuibuf.Buffer.sized(16, 3);
+    f.set_str(0, 0, "hello", tuistyle.Style());
+    f.set_str(0, 2, "bye", tuistyle.Style(attrs: tuistyle.BOLD));
+    check(t, "a full frame", tuidiff.show(tuidiff.full(f, d)), "\\e[0m\\e[1;1Hhello\\e[K\\e[2;1H\\e[K\\e[3;1H\\e[1mbye\\e[22m\\e[K");
+    // A resize is not a diff.
+    ok(t, "buffers of one size diff", tuidiff.diff(a, b, d).size() >= 0);
+    print("");
+    print("the bytes of a small frame, readably:");
+    print("  " + tuidiff.show(tuidiff.full(f, tuistyle.Depth.TrueColour)));
+}
+
+// --- 6. widgets -------------------------------------------------------------
+
+void block_tests(Tally t) {
+    head("block");
+    tuibuf.Buffer b = tuibuf.Buffer.sized(44, 5);
+    tuiwidget.Block(title: "single").render(b, tuigeom.Rect(0, 0, 11, 5));
+    tuiwidget.Block(title: "double", borders: tuiwidget.Borders.Double).render(b, tuigeom.Rect(11, 0, 11, 5));
+    tuiwidget.Block(title: "round", borders: tuiwidget.Borders.Rounded, title_align: tuitext.Align.Center).render(b, tuigeom.Rect(22, 0, 11, 5));
+    tuiwidget.Block(title: "thick", borders: tuiwidget.Borders.Thick, title_align: tuitext.Align.Right).render(b, tuigeom.Rect(33, 0, 11, 5));
+    print(b.frame());
+    tuiwidget.Block plain = tuiwidget.Block();
+    check(t, "inner takes the border", plain.inner(tuigeom.Rect(0, 0, 10, 4)).to_str(), "1,1 8x2");
+    check(t, "inner takes the padding too", tuiwidget.Block(pad_x: 2, pad_y: 1).inner(tuigeom.Rect(0, 0, 10, 6)).to_str(), "3,2 4x2");
+    check(t, "a title with no border still takes a row", tuiwidget.Block(borders: tuiwidget.Borders.None, title: "t").inner(tuigeom.Rect(0, 0, 10, 4)).to_str(), "0,1 10x3");
+    check(t, "no border and no title takes nothing", tuiwidget.Block(borders: tuiwidget.Borders.None).inner(tuigeom.Rect(0, 0, 10, 4)).to_str(), "0,0 10x4");
+    check(t, "inner never goes negative", plain.inner(tuigeom.Rect(0, 0, 1, 1)).to_str(), "1,1 0x0");
+    check(t, "only some sides", tuiwidget.Block(sides: tuiwidget.LEFT | tuiwidget.BOTTOM).inner(tuigeom.Rect(0, 0, 10, 4)).to_str(), "1,0 9x3");
+    print("");
+    print("rectangles smaller than their border:");
+    tuibuf.Buffer s = tuibuf.Buffer.sized(22, 4);
+    tuiwidget.Block(title: "abc").render(s, tuigeom.Rect(0, 0, 4, 1));
+    tuiwidget.Block(title: "abc").render(s, tuigeom.Rect(5, 0, 1, 3));
+    tuiwidget.Block(title: "abc").render(s, tuigeom.Rect(7, 0, 2, 2));
+    tuiwidget.Block(title: "abc").render(s, tuigeom.Rect(10, 0, 0, 4));
+    tuiwidget.Block(sides: tuiwidget.LEFT | tuiwidget.BOTTOM, title: "").render(s, tuigeom.Rect(12, 0, 6, 4));
+    print(s.frame());
+}
+
+void paragraph_tests(Tally t) {
+    head("paragraph");
+    str body = "The quick brown fox jumps over the lazy dog, and keeps on going for quite a while after that.";
+    tuibuf.Buffer b = tuibuf.Buffer.sized(40, 6);
+    tuiwidget.Paragraph(body).render(b, tuigeom.Rect(0, 0, 20, 6));
+    tuiwidget.Paragraph(body, align: tuitext.Align.Right, scroll: 2).render(b, tuigeom.Rect(20, 0, 20, 6));
+    print(b.frame());
+    tuiwidget.Paragraph p = tuiwidget.Paragraph(body);
+    check_int(t, "line count at 20 columns", p.lines(20).size(), 5);
+    check_int(t, "line count at 10 columns", p.lines(10).size(), 11);
+    tuibuf.Buffer c = tuibuf.Buffer.sized(14, 3);
+    tuiwidget.Paragraph("a long single line that will not be wrapped", wrap: false).render(c, tuigeom.Rect(0, 0, 14, 3));
+    check(t, "unwrapped text is truncated", c.row_text(0), "a long single\u{2026}");
+    tuibuf.Buffer e = tuibuf.Buffer.sized(8, 2);
+    tuiwidget.Paragraph("x").render(e, tuigeom.Rect(0, 0, 0, 0));
+    check(t, "an empty rectangle draws nothing", e.row_text(0), "        ");
+}
+
+void list_tests(Tally t) {
+    head("list");
+    List<str> items = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf"];
+    tuibuf.Buffer b = tuibuf.Buffer.sized(36, 4);
+    tuilists.ListView top = tuilists.ListView(items, selected: 1, highlight_symbol: "> ");
+    top.render(b, tuigeom.Rect(0, 0, 12, 4));
+    check_int(t, "no scroll needed", top.offset, 0);
+    tuilists.ListView low = tuilists.ListView(items, selected: 6, highlight_symbol: "> ");
+    low.render(b, tuigeom.Rect(12, 0, 12, 4));
+    check_int(t, "the view follows the selection", low.offset, 3);
+    tuilists.ListView none = tuilists.ListView(items, offset: 2);
+    none.render(b, tuigeom.Rect(24, 0, 12, 4));
+    check_int(t, "an offset with no selection stays", none.offset, 2);
+    print(b.frame());
+    tuilists.ListView s = tuilists.ListView(items);
+    s.step(1);
+    check_int(t, "step from nothing selects the first", s.selected, 0);
+    s.step(-5);
+    check_int(t, "step stops at the top", s.selected, 0);
+    s.step(99);
+    check_int(t, "step stops at the bottom", s.selected, 6);
+    tuilists.ListView empty = tuilists.ListView([]);
+    tuibuf.Buffer q = tuibuf.Buffer.sized(6, 2);
+    empty.render(q, tuigeom.Rect(0, 0, 6, 2));
+    check(t, "an empty list draws blanks", q.row_text(0), "      ");
+}
+
+void table_tests(Tally t) {
+    head("table");
+    List<List<str>> rows = [["readme.md", "1.2 kB", "today"], ["a-rather-long-file-name.txt", "44 B", "yesterday"], ["src", "-", "last week"], ["Cargo.toml", "310 B", "today"], ["notes/\u{6F22}\u{5B57}.md", "8 kB", "today"]];
+    List<str> header = ["name", "size", "changed"];
+    List<tuigeom.Constraint> widths = [tuigeom.Constraint.Fill(1), tuigeom.Constraint.Length(6), tuigeom.Constraint.Length(9)];
+    tuibuf.Buffer b = tuibuf.Buffer.sized(40, 5);
+    tuilists.Table wide = tuilists.Table(header, rows, widths, selected: 1, highlight_symbol: "\u{25B8} ", aligns: [tuitext.Align.Left, tuitext.Align.Right, tuitext.Align.Left]);
+    wide.render(b, tuigeom.Rect(0, 0, 40, 5));
+    print(b.frame());
+    print("");
+    print("the same table in 18 columns -- the constraints do not fit:");
+    tuibuf.Buffer n = tuibuf.Buffer.sized(18, 6);
+    tuilists.Table tight = tuilists.Table(header, rows, widths, selected: 4);
+    tight.render(n, tuigeom.Rect(0, 0, 18, 6));
+    print(n.frame());
+    check_int(t, "column count from the widths", wide.columns(), 3);
+    check_int(t, "column count from the rows", tuilists.Table([], rows, []).columns(), 3);
+    tuilists.Table scrolled = tuilists.Table(header, rows, widths, selected: 4);
+    tuibuf.Buffer s = tuibuf.Buffer.sized(30, 3);
+    scrolled.render(s, tuigeom.Rect(0, 0, 30, 3));
+    check_int(t, "the table scrolls to the selection", scrolled.offset, 3);
+    print("");
+    print("no header, equal columns, no constraints:");
+    tuibuf.Buffer p = tuibuf.Buffer.sized(30, 3);
+    tuilists.Table([], rows, []).render(p, tuigeom.Rect(0, 0, 30, 3));
+    print(p.frame());
+}
+
+// --- 7. a widget written by a user of the library ---------------------------
+//
+// Three shapes, all satisfying `tuiwidget.Widget` with no declaration that
+// they do. This is the claim the library makes about the interface being
+// small; here it is, checked.
+
+/// A widget with state: a horizontal bar, `done` out of `total` filled.
+type Bar {
+    int done;
+    int total;
+    tuistyle.Style filled = tuistyle.Style(bg: tuistyle.Colour.Indexed(4));
+    tuistyle.Style rest = tuistyle.Style(bg: tuistyle.Colour.Indexed(8));
+}
+
+void Bar.render(tuibuf.Buffer b, tuigeom.Rect area) {
+    if (area.is_empty() || total <= 0) {
+        return;
+    }
+    int on = area.w * done / total;
+    b.fill(tuigeom.Rect(area.x, area.y, on, area.h), " ", filled);
+    b.fill(tuigeom.Rect(area.x + on, area.y, area.w - on, area.h), " ", rest);
+    str label = str(100 * done / total) + "%";
+    b.set_str(area.x + (area.w - label.size()) / 2, area.y + area.h / 2, label, tuistyle.Style());
+}
+
+/// A widget that is a plain function: no state at all.
+void ruler(tuibuf.Buffer b, tuigeom.Rect area) {
+    int i = 0;
+    while (i < area.w) {
+        str mark = "\u{00B7}";
+        if (i % 10 == 0) {
+            mark = str(i / 10 % 10);
+        }
+        b.set_str(area.x + i, area.y, mark, tuistyle.Style());
+        i = i + 1;
+    }
+}
+
+/// Anything can be drawn through the interface, which is the point.
+void draw(tuiwidget.Widget w, tuibuf.Buffer b, tuigeom.Rect area) {
+    w.render(b, area);
+}
+
+void user_widget_tests(Tally t) {
+    head("a widget written outside the library");
+    tuibuf.Buffer b = tuibuf.Buffer.sized(24, 4);
+    draw(Bar(7, 10), b, tuigeom.Rect(0, 0, 24, 1));
+    draw(ruler, b, tuigeom.Rect(0, 1, 24, 1));
+    draw((tuibuf.Buffer buf, tuigeom.Rect area) => buf.set_str(area.x, area.y, "a lambda is a widget", tuistyle.Style()), b, tuigeom.Rect(2, 2, 22, 1));
+    tuilists.ListView(["and so is every widget here"]).render(b, tuigeom.Rect(0, 3, 24, 1));
+    print(b.frame());
+    check(t, "the struct widget drew", b.row_text(0), "          70%           ");
+    check(t, "the function widget drew", b.row_text(1), "0\u{00B7}\u{00B7}\u{00B7}\u{00B7}\u{00B7}\u{00B7}\u{00B7}\u{00B7}\u{00B7}1\u{00B7}\u{00B7}\u{00B7}\u{00B7}\u{00B7}\u{00B7}\u{00B7}\u{00B7}\u{00B7}2\u{00B7}\u{00B7}\u{00B7}");
+    check(t, "the lambda widget drew", b.row_text(2), "  a lambda is a widget  ");
+}
+
+// --- 8. a whole screen ------------------------------------------------------
+
+void screen_test(Tally t) {
+    head("a whole screen, laid out");
+    tuibuf.Buffer b = tuibuf.Buffer.sized(50, 14);
+    List<tuigeom.Rect> band = tuigeom.rows(b.area(), [tuigeom.Constraint.Length(3), tuigeom.Constraint.Fill(1), tuigeom.Constraint.Length(1)]);
+    tuiwidget.Block header = tuiwidget.Block(title: " a terminal user interface ", borders: tuiwidget.Borders.Double, title_align: tuitext.Align.Center);
+    header.render(b, band[0]);
+    tuiwidget.Paragraph("built on a buffer of grapheme clusters", align: tuitext.Align.Center).render(b, header.inner(band[0]));
+    List<tuigeom.Rect> mid = tuigeom.cols(band[1], [tuigeom.Constraint.Percentage(40), tuigeom.Constraint.Fill(1)]);
+    tuiwidget.Block left = tuiwidget.Block(title: "files", borders: tuiwidget.Borders.Rounded);
+    left.render(b, mid[0]);
+    tuilists.ListView(["src/", "lib/", "docs/", "README.md", "\u{6F22}\u{5B57}.txt", "Cargo.toml", "gates.sh"], selected: 3, highlight_symbol: "\u{25B8} ").render(b, left.inner(mid[0]));
+    tuiwidget.Block right = tuiwidget.Block(title: "detail", borders: tuiwidget.Borders.Single, pad_x: 1);
+    right.render(b, mid[1]);
+    tuiwidget.Paragraph("README.md is 1.2 kB and was changed today. The paragraph wraps to the panel, and the panel came from a percentage constraint.").render(b, right.inner(mid[1]));
+    tuibuf.Buffer bar = b;
+    bar.fill(band[2], " ", tuistyle.Style(fg: tuistyle.Colour.Indexed(0), bg: tuistyle.Colour.Indexed(7)));
+    bar.set_str(band[2].x + 1, band[2].y, "q quit   j/k move   ? help", tuistyle.Style(fg: tuistyle.Colour.Indexed(0), bg: tuistyle.Colour.Indexed(7)));
+    print(b.frame());
+    bytes frame = tuidiff.full(b, tuistyle.Depth.Ansi256);
+    print("full redraw: " + str(frame.size()) + " bytes");
+    tuibuf.Buffer after = tuibuf.Buffer.sized(50, 14);
+    ok(t, "a full frame is not empty", frame.size() > 500);
+    ok(t, "a diff against a blank frame is smaller than a full redraw", tuidiff.diff(after, b, tuistyle.Depth.Ansi256).size() < frame.size() + 200);
+}
+
+Tally score = Tally();
+buffer_tests(score);
+layout_tests(score);
+property_tests(score);
+text_tests(score);
+diff_tests(score);
+block_tests(score);
+paragraph_tests(score);
+list_tests(score);
+table_tests(score);
+user_widget_tests(score);
+screen_test(score);
+print("");
+print("-- " + str(score.pass) + " passed, " + str(score.fail) + " failed");
+if (score.fail > 0) {
+    os.exit(1);
+}
