@@ -1,0 +1,205 @@
+// SHA-1 (FIPS 180-4), written in the language over `bytes` and the bit
+// operators.
+//
+// It is here because git's object names are SHA-1 digests: every object is
+// stored under the hash of its own contents, and reading one without
+// recomputing that hash is reading something you have not checked. It is
+// also the first serious arithmetic kernel written in this language, so its
+// throughput is a datapoint about the language and not only about git.
+//
+// API
+// ---
+//   sha1.Hasher h = sha1.Hasher();
+//   h.update(chunk);            // as many times as you like
+//   bytes d = h.digest();       // 20 octets; ends the hash
+//
+//   sha1.sum(data)              -> bytes, the 20 octets
+//   sha1.hex(data)              -> str, 40 lowercase hex digits
+//
+// --- 32-bit arithmetic on a 64-bit int ---------------------------------------
+//
+// SHA-1 is defined on 32-bit words, and this language has one integer type,
+// which is 64 bits and TRAPS on overflow (reference §6.1). Both facts help
+// here rather than getting in the way:
+//
+//   - every word is kept as a non-negative `int` below 2^32, so `>>` -- which
+//     is arithmetic, sign-extending -- behaves as a logical shift, and no
+//     masking is needed on the way out of one;
+//   - `+` on five such words cannot reach 2^63, so the additions are ordinary
+//     `+` and are still checked by the language. `wrapping_add` would have
+//     switched that check off for no gain: the sum is masked with
+//     `& 0xFFFF_FFFF` at the end, which is what "modulo 2^32" means;
+//   - `<<` discards the bits that fall off the top (reference §6.1) and does
+//     not trap, so the rotate is written directly.
+//
+// `~` never appears. The `Ch` function is spelled `d ^ (b & (c ^ d))` rather
+// than `(b & c) | (~b & d)`: the two agree on 32-bit words, and the second
+// would produce a negative `int` from `~b` that then has to be masked back.
+//
+// --- what is NOT here --------------------------------------------------------
+//
+// No SHA-256. Git's object names are SHA-1 today in every repository this
+// reads, and a second digest with no caller is a second thing to keep right.
+
+/// The offset basis of the five chaining words, as FIPS 180-4 §5.3.1 gives
+/// them. They are fields with defaults rather than module constants so that
+/// `Hasher()` is the whole of "start a hash".
+pub type Hasher {
+    int h0 = 0x6745_2301;
+    int h1 = 0xEFCD_AB89;
+    int h2 = 0x98BA_DCFE;
+    int h3 = 0x1032_5476;
+    int h4 = 0xC3D2_E1F0;
+    /// Octets seen so far, which the padding needs as a bit count.
+    int total = 0;
+    /// The partial block: always fewer than 64 octets between `update`s.
+    bytes tail = [];
+    /// The message schedule, held across blocks so that the 80-word array is
+    /// allocated once for a whole file rather than once per 64 octets. Read
+    /// into a local at the top of `block` -- see the note there.
+    Array<int> sched = [0; 80];
+}
+
+/// Feed `data` to the hash. Any number of calls, of any sizes, hash the same
+/// as one call with them joined.
+pub void Hasher.update(bytes data) {
+    int n = data.size();
+    total = total + n;
+    int i = 0;
+    // Finish the partial block first, if there is one, and only then run the
+    // whole blocks straight out of `data` -- no copy for the bulk of a file.
+    if (tail.size() > 0) {
+        while (i < n && tail.size() < 64) {
+            tail.push(data[i]);
+            i = i + 1;
+        }
+        if (tail.size() == 64) {
+            block(tail, 0);
+            tail.clear();
+        }
+    }
+    while (n - i >= 64) {
+        block(data, i);
+        i = i + 64;
+    }
+    while (i < n) {
+        tail.push(data[i]);
+        i = i + 1;
+    }
+}
+
+/// The 20-octet digest. **This ends the hash**: it appends the padding and
+/// consumes the buffered tail, so a second `digest()` on the same `Hasher`
+/// answers something that is not a SHA-1 of anything. Make another `Hasher`
+/// for another message.
+pub bytes Hasher.digest() {
+    int bits = total * 8;
+    tail.push(0x80);
+    while (tail.size() % 64 != 56) {
+        tail.push(0);
+    }
+    int s = 56;
+    while (s >= 0) {
+        tail.push(bits >> s & 0xFF);
+        s = s - 8;
+    }
+    int i = 0;
+    int n = tail.size();
+    while (i < n) {
+        block(tail, i);
+        i = i + 64;
+    }
+    tail.clear();
+    bytes out = [];
+    word(out, h0);
+    word(out, h1);
+    word(out, h2);
+    word(out, h3);
+    word(out, h4);
+    return out;
+}
+
+// One 64-octet block, read from `b` starting at `at`. The caller guarantees
+// that 64 octets are there.
+void Hasher.block(bytes b, int at) {
+    // `sched` read once into a local, and every `w[i]` below goes through the
+    // local. Reading it afresh each time -- writing `sched[i]` throughout --
+    // is the same program and is 18% slower: a value read out of a field is
+    // retained and released around what follows (reference §7.2), so an index
+    // store through a field name costs an `rc_inc`/`rc_dec` pair, and those
+    // are deliberately not inlinable (`gates.sh`, "runtime stays separate
+    // TU"). A local is borrowed and costs nothing. See apps/git/FRICTION.md.
+    Array<int> w = sched;
+    int i = 0;
+    while (i < 16) {
+        int j = at + i * 4;
+        w[i] = b[j] << 24 | b[j + 1] << 16 | b[j + 2] << 8 | b[j + 3];
+        i = i + 1;
+    }
+    while (i < 80) {
+        int x = w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16];
+        w[i] = (x << 1 | x >> 31) & 0xFFFF_FFFF;
+        i = i + 1;
+    }
+    int a = h0;
+    int bb = h1;
+    int c = h2;
+    int d = h3;
+    int e = h4;
+    i = 0;
+    // The four rounds are one loop with a branch rather than four loops,
+    // because four loops would repeat the eight lines of the step. The
+    // branch predicts perfectly -- it changes three times in eighty
+    // iterations.
+    while (i < 80) {
+        int f = 0;
+        int k = 0;
+        if (i < 20) {
+            f = d ^ bb & (c ^ d);
+            k = 0x5A82_7999;
+        } else if (i < 40) {
+            f = bb ^ c ^ d;
+            k = 0x6ED9_EBA1;
+        } else if (i < 60) {
+            f = bb & c | d & (bb | c);
+            k = 0x8F1B_BCDC;
+        } else {
+            f = bb ^ c ^ d;
+            k = 0xCA62_C1D6;
+        }
+        int t = ((a << 5 | a >> 27) & 0xFFFF_FFFF) + f + e + k + w[i] & 0xFFFF_FFFF;
+        e = d;
+        d = c;
+        c = (bb << 30 | bb >> 2) & 0xFFFF_FFFF;
+        bb = a;
+        a = t;
+        i = i + 1;
+    }
+    h0 = h0 + a & 0xFFFF_FFFF;
+    h1 = h1 + bb & 0xFFFF_FFFF;
+    h2 = h2 + c & 0xFFFF_FFFF;
+    h3 = h3 + d & 0xFFFF_FFFF;
+    h4 = h4 + e & 0xFFFF_FFFF;
+}
+
+/// The digest of `data`, in one call.
+pub bytes sum(bytes data) {
+    Hasher h = Hasher();
+    h.update(data);
+    return h.digest();
+}
+
+/// The digest of `data` as 40 lowercase hex digits -- the spelling git uses
+/// for an object name.
+pub str hex(bytes data) {
+    return sum(data).hex();
+}
+
+// A 32-bit word appended big-endian, which is the order every length and
+// every digit in this file is written in.
+void word(bytes out, int v) {
+    out.push(v >> 24 & 0xFF);
+    out.push(v >> 16 & 0xFF);
+    out.push(v >> 8 & 0xFF);
+    out.push(v & 0xFF);
+}
