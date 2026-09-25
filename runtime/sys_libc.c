@@ -21,9 +21,11 @@
 #include <stddef.h>         /* offsetof, for sockaddr_un's length */
 #include <stdio.h>          /* rename is ISO C, so it lives here, not in unistd.h */
 #include <string.h>         /* memcpy and memset, for the address conversions */
+#include <sys/ioctl.h>      /* TIOCGWINSZ: the window size is an ioctl everywhere */
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <termios.h>        /* tcgetattr and tcsetattr, for sys_tcget/sys_tcset */
 #include <time.h>
 #include <unistd.h>
 #if defined(__APPLE__)
@@ -192,6 +194,130 @@ int64_t sys_listdir(const char *path, char *buf, int64_t cap) {
 
 int64_t sys_isatty(int64_t fd) {
     return isatty((int)fd) ? 1 : 0;
+}
+
+/* ---- the terminal -------------------------------------------------------
+ *
+ * tcgetattr and tcsetattr, plus the one ioctl POSIX never standardised:
+ * TIOCGWINSZ. Every operating system that has a terminal has it under that
+ * name -- Linux, macOS, the BSDs, Solaris -- which is why the window size is
+ * an ioctl here and a flag translation everywhere else in this file.
+ *
+ * The flag words are translated bit by bit, through one table per word. On
+ * Linux every entry is the identity, and the assertions below say so rather
+ * than leaving it to be believed; the loop runs anyway, so the code a macOS
+ * or BSD build would depend on is the code the corpus exercises. */
+
+typedef struct {
+    int64_t  mine;
+    tcflag_t host;
+} FlagMap;
+
+static const FlagMap in_flags[] = {
+    {SYS_TC_IGNBRK, IGNBRK}, {SYS_TC_BRKINT, BRKINT}, {SYS_TC_PARMRK, PARMRK},
+    {SYS_TC_INPCK, INPCK},   {SYS_TC_ISTRIP, ISTRIP}, {SYS_TC_INLCR, INLCR},
+    {SYS_TC_IGNCR, IGNCR},   {SYS_TC_ICRNL, ICRNL},   {SYS_TC_IXON, IXON},
+};
+static const FlagMap out_flags[] = {
+    {SYS_TC_OPOST, OPOST}, {SYS_TC_ONLCR, ONLCR},
+};
+static const FlagMap local_flags[] = {
+    {SYS_TC_ISIG, ISIG},     {SYS_TC_ICANON, ICANON}, {SYS_TC_ECHO, ECHO},
+    {SYS_TC_ECHONL, ECHONL}, {SYS_TC_IEXTEN, IEXTEN},
+};
+
+/* Every named bit is exactly one bit, so a set is a test and an OR. A bit
+ * the table does not name is carried through unchanged -- exact on Linux,
+ * where the two numbering schemes are the same one, and the documented
+ * approximation anywhere else (sys.h, SysTermios). */
+static tcflag_t to_host(int64_t v, const FlagMap *m, size_t n) {
+    int64_t named = 0;
+    tcflag_t h = 0;
+    for (size_t i = 0; i < n; i++) {
+        named |= m[i].mine;
+        if (v & m[i].mine) h |= m[i].host;
+    }
+    return h | (tcflag_t)(v & ~named);
+}
+
+static int64_t from_host(tcflag_t h, const FlagMap *m, size_t n) {
+    tcflag_t named = 0;
+    int64_t v = 0;
+    for (size_t i = 0; i < n; i++) {
+        named |= m[i].host;
+        if (h & m[i].host) v |= m[i].mine;
+    }
+    return v | (int64_t)(h & ~named);
+}
+
+#define NELEMS(a) (sizeof(a) / sizeof(a)[0])
+
+#if defined(__linux__)
+/* On Linux the layer's numbers ARE the host's, for every named bit and for
+ * both control-character indices, so both directions above are provably the
+ * identity here. A host that disagreed would still work -- the tables are
+ * what make it work -- but a Linux one that disagreed would mean the numbers
+ * in sys.h were copied wrong, and that must not compile. */
+_Static_assert(SYS_TC_IGNBRK == IGNBRK, "IGNBRK");
+_Static_assert(SYS_TC_BRKINT == BRKINT, "BRKINT");
+_Static_assert(SYS_TC_PARMRK == PARMRK, "PARMRK");
+_Static_assert(SYS_TC_INPCK == INPCK, "INPCK");
+_Static_assert(SYS_TC_ISTRIP == ISTRIP, "ISTRIP");
+_Static_assert(SYS_TC_INLCR == INLCR, "INLCR");
+_Static_assert(SYS_TC_IGNCR == IGNCR, "IGNCR");
+_Static_assert(SYS_TC_ICRNL == ICRNL, "ICRNL");
+_Static_assert(SYS_TC_IXON == IXON, "IXON");
+_Static_assert(SYS_TC_OPOST == OPOST, "OPOST");
+_Static_assert(SYS_TC_ONLCR == ONLCR, "ONLCR");
+_Static_assert(SYS_TC_ISIG == ISIG, "ISIG");
+_Static_assert(SYS_TC_ICANON == ICANON, "ICANON");
+_Static_assert(SYS_TC_ECHO == ECHO, "ECHO");
+_Static_assert(SYS_TC_ECHONL == ECHONL, "ECHONL");
+_Static_assert(SYS_TC_IEXTEN == IEXTEN, "IEXTEN");
+_Static_assert(SYS_VMIN == VMIN, "VMIN index");
+_Static_assert(SYS_VTIME == VTIME, "VTIME index");
+#endif
+
+/* The host's c_cc is at least as long as ours on every system this builds
+ * on -- Linux's NCCS is 19 in the kernel and 32 in glibc, macOS's is 20 --
+ * and the copy below walks ours, so a shorter one would run off the end. */
+_Static_assert(NCCS >= SYS_NCCS, "the host's c_cc is shorter than the layer's");
+
+int64_t sys_tcget(int64_t fd, SysTermios *t) {
+    struct termios h;
+    memset(&h, 0, sizeof h);
+    if (tcgetattr((int)fd, &h) != 0) return neg_errno(errno);
+    t->iflag = from_host(h.c_iflag, in_flags, NELEMS(in_flags));
+    t->oflag = from_host(h.c_oflag, out_flags, NELEMS(out_flags));
+    t->lflag = from_host(h.c_lflag, local_flags, NELEMS(local_flags));
+    t->cflag = (int64_t)h.c_cflag;  /* opaque: the host's own bits (sys.h) */
+    for (int i = 0; i < SYS_NCCS; i++) t->cc[i] = (unsigned char)h.c_cc[i];
+    return 0;
+}
+
+int64_t sys_tcset(int64_t fd, const SysTermios *t) {
+    /* Read first, so the fields SysTermios does not model -- the line
+     * discipline, and c_ispeed/c_ospeed where the host keeps them apart from
+     * c_cflag -- keep what the terminal already has instead of becoming
+     * zero. A zero speed is B0, and B0 hangs the line up. */
+    struct termios h;
+    memset(&h, 0, sizeof h);
+    if (tcgetattr((int)fd, &h) != 0) return neg_errno(errno);
+    h.c_iflag = to_host(t->iflag, in_flags, NELEMS(in_flags));
+    h.c_oflag = to_host(t->oflag, out_flags, NELEMS(out_flags));
+    h.c_lflag = to_host(t->lflag, local_flags, NELEMS(local_flags));
+    h.c_cflag = (tcflag_t)t->cflag;
+    for (int i = 0; i < SYS_NCCS; i++) h.c_cc[i] = (cc_t)t->cc[i];
+    return ret(tcsetattr((int)fd, TCSANOW, &h));
+}
+
+int64_t sys_winsize(int64_t fd, int64_t *rows, int64_t *cols) {
+    struct winsize w;
+    memset(&w, 0, sizeof w);
+    if (ioctl((int)fd, TIOCGWINSZ, &w) != 0) return neg_errno(errno);
+    *rows = w.ws_row;
+    *cols = w.ws_col;
+    return 0;
 }
 
 int64_t sys_mkdir(const char *path, int64_t mode) {

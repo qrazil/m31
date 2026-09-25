@@ -176,6 +176,13 @@ static inline int64_t sc(int64_t n, int64_t a, int64_t b, int64_t c,
 #define O_CLOEXEC_     02000000   /* the same on all three architectures */
 #define TCGETS         0x5401     /* likewise */
 
+/* No memcpy or memset by name: this file has no C library to take them from.
+ * The compiler may still synthesise a call for a struct assignment, which is
+ * why the freestanding test defines both (runtime/sys_test.c). */
+static void zero_bytes(unsigned char *p, int64_t n) {
+    for (int64_t i = 0; i < n; i++) p[i] = 0;
+}
+
 /* ---- descriptors ------------------------------------------------------- */
 
 int64_t sys_open(const char *path, int64_t flags, int64_t mode) {
@@ -257,6 +264,93 @@ int64_t sys_stat(const char *path, int64_t follow, SysStat *st) {
 int64_t sys_isatty(int64_t fd) {
     unsigned char termios[64];
     return sc(NR_ioctl, fd, TCGETS, P(termios), 0, 0, 0) == 0 ? 1 : 0;
+}
+
+/* ---- the terminal -------------------------------------------------------
+ *
+ * Three ioctls. Their numbers are the same on all three architectures this
+ * backend supports, and that is not luck: TCGETS, TCSETS and TIOCGWINSZ are
+ * defined in include/uapi/asm-generic/ioctls.h, which x86-64, aarch64 and
+ * riscv64 all include unchanged (arch/x86, arch/arm64 and arch/riscv have no
+ * ioctls.h of their own). The architectures that DO renumber them -- mips,
+ * powerpc, alpha, sparc -- are the same ones whose termios BITS differ, and
+ * this backend supports none of them; the #error at the top of the file is
+ * what keeps that honest.
+ *
+ * TCSETS and not TCSETSW or TCSETSF: TCSANOW, for the reason sys.h gives. */
+#define TCSETS     0x5402
+#define TIOCGWINSZ 0x5413
+
+/* The kernel's struct termios (include/uapi/asm-generic/termbits.h), which
+ * is what TCGETS fills and TCSETS reads -- NOT the C library's, which on
+ * glibc is 60 bytes with the speeds appended and a 32-entry c_cc. The layout
+ * is asserted rather than assumed, because getting it wrong would compile
+ * and then scribble on a terminal. */
+typedef struct {
+    uint32_t      c_iflag, c_oflag, c_cflag, c_lflag;
+    unsigned char c_line;
+    unsigned char c_cc[SYS_NCCS];
+} KTermios;
+
+_Static_assert(sizeof(KTermios) == 36, "the kernel's struct termios is 36 bytes");
+_Static_assert(__builtin_offsetof(KTermios, c_oflag) == 4, "termios c_oflag");
+_Static_assert(__builtin_offsetof(KTermios, c_cflag) == 8, "termios c_cflag");
+_Static_assert(__builtin_offsetof(KTermios, c_lflag) == 12, "termios c_lflag");
+_Static_assert(__builtin_offsetof(KTermios, c_line) == 16, "termios c_line");
+_Static_assert(__builtin_offsetof(KTermios, c_cc) == 17, "termios c_cc");
+_Static_assert(SYS_NCCS == 19, "the kernel's NCCS is 19");
+
+/* The kernel's struct winsize (include/uapi/asm-generic/termios.h): four
+ * 16-bit fields, the same on every architecture. */
+typedef struct {
+    uint16_t ws_row, ws_col, ws_xpixel, ws_ypixel;
+} KWinsize;
+
+_Static_assert(sizeof(KWinsize) == 8, "struct winsize is 8 bytes");
+
+/* No translation in either direction: the SYS_TC_* values in sys.h ARE the
+ * kernel's, on every architecture this file builds for. The copy is still
+ * written field by field rather than as a cast, because SysTermios is
+ * 64-bit words and the kernel's is 32-bit ones. */
+int64_t sys_tcget(int64_t fd, SysTermios *t) {
+    KTermios k;
+    zero_bytes((unsigned char *)&k, (int64_t)sizeof k);
+    int64_t r = sc(NR_ioctl, fd, TCGETS, P(&k), 0, 0, 0);
+    if (r < 0) return r;
+    t->iflag = k.c_iflag;
+    t->oflag = k.c_oflag;
+    t->cflag = k.c_cflag;
+    t->lflag = k.c_lflag;
+    for (int i = 0; i < SYS_NCCS; i++) t->cc[i] = k.c_cc[i];
+    return 0;
+}
+
+int64_t sys_tcset(int64_t fd, const SysTermios *t) {
+    /* Read first, for the line discipline byte: it is the one field of the
+     * kernel's struct that SysTermios does not model, and writing a zero
+     * there would switch a terminal to N_TTY when it was something else.
+     * The speeds need no such care here -- on Linux they live in c_cflag,
+     * which this record carries through. */
+    KTermios k;
+    zero_bytes((unsigned char *)&k, (int64_t)sizeof k);
+    int64_t r = sc(NR_ioctl, fd, TCGETS, P(&k), 0, 0, 0);
+    if (r < 0) return r;
+    k.c_iflag = (uint32_t)t->iflag;
+    k.c_oflag = (uint32_t)t->oflag;
+    k.c_cflag = (uint32_t)t->cflag;
+    k.c_lflag = (uint32_t)t->lflag;
+    for (int i = 0; i < SYS_NCCS; i++) k.c_cc[i] = t->cc[i];
+    return sc(NR_ioctl, fd, TCSETS, P(&k), 0, 0, 0);
+}
+
+int64_t sys_winsize(int64_t fd, int64_t *rows, int64_t *cols) {
+    KWinsize w;
+    zero_bytes((unsigned char *)&w, (int64_t)sizeof w);
+    int64_t r = sc(NR_ioctl, fd, TIOCGWINSZ, P(&w), 0, 0, 0);
+    if (r < 0) return r;
+    *rows = w.ws_row;
+    *cols = w.ws_col;
+    return 0;
 }
 
 /* ---- the file system --------------------------------------------------- */
@@ -393,13 +487,6 @@ typedef union {
     KAddrIn6 v6;
     KAddrUn  un;
 } KAddr;
-
-/* No memcpy or memset by name: this file has no C library to take them from.
- * The compiler may still synthesise a call for a struct assignment, which is
- * why the freestanding test defines both (runtime/sys_test.c). */
-static void zero_bytes(unsigned char *p, int64_t n) {
-    for (int64_t i = 0; i < n; i++) p[i] = 0;
-}
 
 static void copy_bytes(unsigned char *d, const unsigned char *s, int64_t n) {
     for (int64_t i = 0; i < n; i++) d[i] = s[i];

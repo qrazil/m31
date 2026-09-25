@@ -125,6 +125,49 @@ Sockets, added **2026-09-23** as the foundation for a `net`/`http` module:
 | `sys_resolve(host, port, af, out, cap)` | how many exist | `getaddrinfo` | **refused**, `-ENOSYS` | same |
 | `sys_ignore_sigpipe()` | 0 | `sigaction(SIGPIPE, SIG_IGN)` | `rt_sigaction` 13 | `rt_sigaction` 134 |
 
+The terminal, added **2026-09-24** as the foundation for `lib/term.src` and
+the interactive programs above it:
+
+| function | returns | libc | raw, all three architectures |
+|---|---|---|---|
+| `sys_tcget(fd, &SysTermios)` | 0 | `tcgetattr` | `ioctl(TCGETS)` 0x5401 |
+| `sys_tcset(fd, &SysTermios)` | 0 | `tcsetattr(TCSANOW)` | `ioctl(TCSETS)` 0x5402 |
+| `sys_winsize(fd, &rows, &cols)` | 0 | `ioctl(TIOCGWINSZ)` | `ioctl(TIOCGWINSZ)` 0x5413 |
+
+A terminal is a descriptor too, so reading keys is `sys_read`, writing escape
+sequences is `sys_write`, waiting for a key with a timeout is `sys_poll`, and
+`sys_isatty` — which has been here since the beginning, for the runtime's own
+output buffering (§3) — is the question "is there a terminal at all".
+
+**The three ioctl numbers are the same on x86-64, aarch64 and riscv64, and so
+are the termios flag bits, and that is not luck.** All three architectures use
+`include/uapi/asm-generic/ioctls.h` and `include/uapi/asm-generic/termbits.h`
+unchanged; the architectures that renumber the ioctls — mips, powerpc, alpha,
+sparc — are the same ones that renumber the bits, and the raw backend refuses
+to build for any of them already. So the raw mapping is the identity, as it is
+for `SYS_O_*`, and the libc backend maps bit by bit and `_Static_assert`s on
+Linux that each of its named bits equals the host's. The kernel's `struct
+termios` layout is asserted field by field in the raw backend, and the two
+control-character indices in the libc one.
+
+`SysTermios` is the layer's own record and **not** the host's, unlike
+`SysPollFd`: the kernel's `struct termios` is 36 bytes of 32-bit words and
+glibc's is 60, with the speeds appended and a longer `c_cc`, so there is no
+one layout to share. Its `cflag` is deliberately **opaque** — the host's own
+control-mode bits rather than the layer's. Character size, parity and line
+speed belong to a serial line, nothing above the layer changes them, and a
+terminal emulator or a pty has them right already; the field exists so that a
+get followed by a set puts back what it found. `sys_tcset` is for that reason
+a read-modify-write: it fetches the current settings and overwrites the fields
+the record models, so the line discipline and the speeds — which it does not
+model — keep their values instead of becoming zero, and a zero speed is B0,
+which hangs the line up.
+
+`sys_winsize` answers **0 by 0** rather than failing when the terminal does not
+know its size, because a serial line has none and a fresh pty has none until
+something sets one. That is a value a caller must expect, and `lib/term.src`
+documents 80 by 24 as the conventional fallback.
+
 A socket is a descriptor, so `sys_read`, `sys_write` and `sys_close` are the
 rest of the interface; there is no `sys_send` or `sys_recv`. Reading a stream
 socket gives 0 exactly when the peer has half-closed, which is the same value
@@ -156,8 +199,10 @@ glibc's `ppoll` copies the caller's; the raw backend rebuilds its own on every
 retry, so that a signal restarts the wait with the full timeout in both
 backends rather than the remainder in one and the full value in the other.
 
-`sys_isatty` exists for the runtime's stdout buffer (§3), and `sys_rmdir`
-because the layer's own test cannot clean up after `sys_mkdir` without it.
+`sys_isatty` exists for the runtime's stdout buffer (§3) — and is now
+`lib/term.src`'s first question too, unchanged and with no second
+implementation beside it — and `sys_rmdir` because the layer's own test cannot
+clean up after `sys_mkdir` without it.
 
 `sys_stat`, `sys_symlink` and `sys_listdir` arrived with `lib/fs.src`.
 `sys_stat` takes a path rather than opening the file and calling
@@ -330,7 +375,7 @@ language's job, and it is the same job on both backends.
 | argv, environment | `main`'s arguments | Not a system call: the kernel leaves them on the initial stack. Today the emitted `main(void)` drops them. Needs `main(int, char **)` to hand them to the runtime (libc) or `_start` to read them off the stack (no libc, §5). |
 | `mmap` 9/222, `munmap` 11/215 | a runtime allocator | For §5's malloc replacement. |
 | `clone` 56/220 (or `clone3` 435), `futex` 202/98 | carrier threads for green threads | `docs/concurrency-decision.md`. `clone` is the easy part; see §5. |
-| `rt_sigaction` 13/134 **with a handler**, `sigaltstack` | stack-probe traps, preemption | When preemption lands. The SIGPIPE half is done — see below — and it is the half that needs no trampoline. |
+| `rt_sigaction` 13/134 **with a handler**, `sigaltstack` | stack-probe traps, preemption | When preemption lands. The SIGPIPE half is done — see below — and it is the half that needs no trampoline. SIGWINCH and SIGINT asked for this again in 2026-09 and did not get it; "Signals: what is here, and what a handler would cost" says what was decided instead. |
 | `getpid`, `kill`/`tgkill` | `abort` without libc | `rt_trap` still calls `abort()`. |
 | `pipe2`, `dup3`, `execve`, `wait4` | spawning the C compiler | Self-hosting needs it (`stdlib-seam.md` §5). |
 | `sendto` 44/206, `recvfrom` 45/207 | unconnected UDP | A datagram socket works today by `connect`ing it and using `sys_read`/`sys_write`, which is what a UDP client does. A UDP *server*, which must answer whoever wrote to it, needs the peer address per message. The DNS client above is the first caller that will. |
@@ -364,6 +409,71 @@ What is still owed is the *handler* half — a real `sigaction` with a
 trampoline — and it is owed to preemption and stack-probe traps, not to
 sockets.
 
+### Signals: what is here, and what a handler would cost
+
+**Decided 2026-09-24, when `lib/term.src` asked the question again and got
+the same answer. There is still no `sys_sigaction`. The layer offers one
+disposition — `sys_ignore_sigpipe` — and nothing else; a program that needs
+to know its window changed size asks `sys_winsize` again, and a program that
+needs Ctrl+C turns `ISIG` off and reads it as a key.** That is not a
+placeholder: it is what a terminal program wants anyway, and the alternative
+is a piece of machinery that cannot be tested here to the standard everything
+else in this file is tested to.
+
+The case for a handler looked strong, and it is worth writing down why it
+lost. A full-screen program wants two signals:
+
+  - **SIGWINCH**, to redraw when the window is resized. But the answer to it
+    is one `ioctl`, and a program that draws frames is already asking for the
+    size or could be. Polling costs a system call per frame and gets the
+    resize a frame late; a handler would cost a signal facility. `lib/term.src`
+    polls, and `examples/keys.src` shows the shape: a 250 ms read timeout, and
+    the size re-read every time round the loop.
+  - **SIGINT**, so ^C can put the terminal back before the process dies. But
+    **raw mode clears `ISIG`, so ^C is not a signal at all** — it arrives as
+    byte 3 and the program decides. The signal a terminal program actually
+    meets is the one it was *sent* from elsewhere, which is a different and
+    much rarer thing.
+
+What is left uncovered is therefore: a `kill` from another process, a SIGHUP
+when the terminal window is closed, and a fault. Two of the three paths that
+used to be uncovered are now closed without any signal machinery at all — the
+runtime keeps a snapshot of the terminal and restores it from `rt_trap`, from
+`rt_panic` and from an `atexit` handler, so a trap or an `os.exit` in raw mode
+leaves a usable terminal (`runtime/rt.c`, "putting the terminal back"; the
+primitives are `docs/stdlib-seam.md` §11). Those are ordinary function calls
+on the way out, with a thread that is allowed to take a lock and make a system
+call, which is exactly what a signal handler is not.
+
+**What a real `sys_sigaction` would cost**, since the next caller will ask:
+
+  - **The restorer trampoline, on x86-64 only.** `arch/x86/kernel/signal_64.c`
+    refuses to deliver a signal whose action has no `SA_RESTORER`
+    (`setup_rt_frame` returns `-EFAULT`), so the raw backend must supply a few
+    bytes of assembly whose whole job is `mov $15, %rax; syscall`. aarch64 and
+    riscv64 do **not** need one — their `setup_rt_frame` points the return
+    address at `__kernel_rt_sigreturn` in the vDSO the kernel maps into every
+    process, `SA_RESTORER` or not. So this is the smallest part, and the part
+    that is usually quoted as the reason.
+  - **What the handler may touch.** Async-signal-safety is the real cost. A
+    handler cannot allocate, cannot take the runtime's stdout lock, cannot
+    touch a refcount that another thread might be touching. The only safe
+    shape is a `volatile sig_atomic_t` flag, or a write to a self-pipe, and
+    then a decision about who reads it — which means the layer would owe a
+    self-pipe, a way to register one, and a rule for which of a program's
+    threads the kernel delivers to (`pthread_sigmask` per thread, and the raw
+    backend has no `pthread`).
+  - **Testing it.** Everything in this file is checked on both backends and,
+    for the raw one, on three architectures under `qemu-user`. qemu-user
+    *emulates* signal delivery — it catches the host signal, builds a guest
+    frame itself and runs the guest handler — so a green aarch64 run would not
+    prove the kernel's own frame layout is right. A signal handler that is
+    tested on one architecture and emulated on two is precisely the
+    "half-tested signal handler" this layer should not ship.
+
+When preemption or stack-probe traps land, all of that has to be paid anyway,
+and `sys_sigaction` belongs in that change rather than in this one.
+
 ---
 
 ## 3. What the runtime routes through it today
@@ -394,6 +504,16 @@ is byte-identical.
 `corpus/modules/sys-streams` checks the buffer: 14,000 lines (73 KB, more
 than one buffer) with an `eprint` in the middle that must land exactly
 between lines 6999 and 7000, and a file larger than the first read.
+
+The one other thing the runtime does with the layer on its own account is
+**put the terminal back**. `lib/term.src`'s `raw()` hands `rt_term_arm` a
+snapshot through `sys_tcget`, and `rt_trap`, `rt_panic` and an `atexit`
+handler replay it through `sys_tcset` on the way out. That covers the two
+paths a destructor cannot — a trap, which aborts and runs none, and
+`os.exit`, which abandons every live object — and it is why a trap message
+from a full-screen program comes out with its newlines intact instead of
+walking down the screen. It is a function call and not a signal handler; §2's
+"Signals" note says what that does and does not buy.
 
 ---
 
