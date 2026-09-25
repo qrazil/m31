@@ -82,6 +82,97 @@ if build t_inflate; then
     grep '^inflate:' "$WORK/z.time" | sed 's/^/     /'
 fi
 
+# --- the fixture repository ----------------------------------------------------
+#
+# Everything the format can do that this program has to get right, in one
+# history: an empty file, a hundred kilobytes of incompressible data, a
+# filename that is not UTF-8, a filename with a tab and one with a quote, an
+# executable, a symlink, a subdirectory, two commits in the same second, a
+# merge with two parents, an author whose name is not ASCII, zones east and
+# west and `-0000`, an annotated tag and a lightweight one, a symbolic ref, a
+# detached-looking branch, packed refs, a tab in a commit message, and a
+# message with blank lines at both ends.
+
+fixture="$WORK/fixture"
+mkdir -p "$fixture"
+(
+    set -e
+    cd "$fixture"
+    git init -q -b master .
+    git config user.email t@example.com
+    git config user.name 'A U Thor'
+    mkdir -p sub/deeper
+    printf 'hello\n' >a.txt
+    : >empty.txt
+    head -c 120000 /dev/urandom >sub/blob.bin
+    printf 'x\ty\n' >"$(printf 'sub/l\xe9gume.txt')"
+    printf 'q\n' >"$(printf 'sub/we\tird.txt')"
+    printf 'q\n' >'sub/quo"te.txt'
+    printf 'q\n' >'sub/back\slash.txt'
+    printf 'exe\n' >run.sh
+    chmod +x run.sh
+    ln -s a.txt link.txt
+    printf 'deep\n' >sub/deeper/d.txt
+    git add -A
+    printf 'first\n\na body, with a blank line above it\nand a tab:\there\n' >"$WORK/msg1"
+    GIT_AUTHOR_DATE='1700000000 +0530' GIT_COMMITTER_DATE='1700000001 -0800' \
+        git -c 'user.name=Ünïcødé Näme' -c user.email='u@exämple.test' \
+        commit -q -F "$WORK/msg1"
+    printf 'second\n' >>a.txt
+    git add -A
+    GIT_AUTHOR_DATE='1700000100 -0000' GIT_COMMITTER_DATE='1700000101 +0000' \
+        git commit -qm second
+    printf 'third\n' >>a.txt
+    git add -A
+    GIT_AUTHOR_DATE='1600000000 +0100' GIT_COMMITTER_DATE='1750000000 +0100' \
+        git commit -qm 'authored long before it was committed'
+    # Two commits whose committer timestamps are equal, so the walk's
+    # tie-breaking is exercised rather than assumed.
+    git checkout -q -b side HEAD~2
+    printf 'branchy\n' >b.txt
+    git add -A
+    GIT_AUTHOR_DATE='1700000200 +0200' GIT_COMMITTER_DATE='1700000300 +0000' \
+        git commit -qm 'on a side branch'
+    git checkout -q master
+    printf 'more\n' >c.txt
+    git add -A
+    GIT_AUTHOR_DATE='1700000200 +0200' GIT_COMMITTER_DATE='1700000300 +0000' \
+        git commit -qm 'the same second as the side branch'
+    GIT_AUTHOR_DATE='1700000400 +0000' GIT_COMMITTER_DATE='1700000400 +0000' \
+        git merge -q --no-ff side -m 'a merge, with two parents'
+    printf '\n\ntrailing blanks below\n\n\n' >"$WORK/msg2"
+    git commit -q --allow-empty --cleanup=verbatim -F "$WORK/msg2" \
+        --date='1700000500 +0000'
+    GIT_COMMITTER_DATE='1700000600 +0000' git tag -a v1 -m 'an annotated tag
+with a body'
+    git tag lightweight HEAD~2
+    git update-ref refs/heads/detachable HEAD~1
+    git symbolic-ref refs/heads/aliased refs/heads/side
+    git pack-refs --all
+    # A loose ref after packing, so the loose-wins-over-packed rule is live.
+    git update-ref refs/heads/loose-one HEAD~1
+) >"$WORK/fixture.log" 2>&1 || { bad "fixture repository" "$(tail -5 "$WORK/fixture.log")"; }
+[ -d "$fixture/.git" ] && note "fixture repository built"
+
+repos=("$fixture" "$@")
+
+# --- objects, against the Python reader ----------------------------------------
+
+if build t_object; then
+    for repo in "${repos[@]}"; do
+        common=$(cd "$repo" && git rev-parse --path-format=absolute --git-common-dir)
+        "$WORK/t_object" "$common" >"$WORK/obj.got" 2>"$WORK/obj.err"
+        python3 apps/git/oracle_object.py "$common" >"$WORK/obj.want" 2>"$WORK/obj.oracle"
+        if cmp -s "$WORK/obj.got" "$WORK/obj.want"; then
+            note "objects: $(wc -l <"$WORK/obj.got") lines match the Python reader on $repo"
+        else
+            bad "objects on $repo" "$(diff "$WORK/obj.got" "$WORK/obj.want" | head -12)" \
+                "$(head -3 "$WORK/obj.oracle")"
+        fi
+        sed 's/^/     /' "$WORK/obj.err"
+    done
+fi
+
 echo
 if [ $fail -eq 0 ]; then
     printf '\033[32mall %d apps/git checks passed\033[0m\n' "$pass"
