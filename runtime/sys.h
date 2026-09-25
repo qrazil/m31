@@ -269,6 +269,91 @@ typedef struct {
 #define SYS_POLL_HUP  0x010
 #define SYS_POLL_NVAL 0x020
 
+/* ---- the terminal -------------------------------------------------------
+ *
+ * What an interactive program needs and cannot get any other way: the line
+ * discipline's settings, so it can turn off echo and line buffering, and the
+ * window's size. Three calls, no more -- there is no sys_tcdrain, no
+ * sys_tcflush and no way to change the size, because a program that draws on
+ * a terminal wants none of them.
+ *
+ * The flag VALUES below are Linux's, so the raw backend's mapping is the
+ * identity on every architecture it supports (the termios bits live in
+ * include/uapi/asm-generic/termbits.h, which x86-64, aarch64 and riscv64 all
+ * use unchanged -- only mips, powerpc, alpha and sparc have their own). The
+ * libc backend maps each named bit to the host's, which is again the identity
+ * on Linux and is the code a macOS or BSD build would depend on.
+ *
+ * Which WORD a name belongs to is not in the name, because POSIX's names do
+ * not say either and renaming them would make every constant here something a
+ * reader has to translate. The three groups are labelled below instead.
+ *
+ * Several of them share a VALUE across groups -- SYS_TC_IGNBRK, SYS_TC_OPOST
+ * and SYS_TC_ISIG are all 1 -- which is how the kernel numbers them and is
+ * harmless, because a bit is only ever tested against the word it belongs to.
+ * It is also why the words are separate fields rather than one bit set. */
+
+/* Input flags, SysTermios.iflag. */
+#define SYS_TC_IGNBRK 0x001  /* ignore a break condition */
+#define SYS_TC_BRKINT 0x002  /* a break raises SIGINT */
+#define SYS_TC_PARMRK 0x008  /* mark parity and framing errors in the stream */
+#define SYS_TC_INPCK  0x010  /* check input parity */
+#define SYS_TC_ISTRIP 0x020  /* strip the eighth bit -- fatal to UTF-8 */
+#define SYS_TC_INLCR  0x040  /* translate NL to CR on input */
+#define SYS_TC_IGNCR  0x080  /* drop CR on input */
+#define SYS_TC_ICRNL  0x100  /* translate CR to NL on input: Enter reads as 10 */
+#define SYS_TC_IXON   0x400  /* ^S and ^Q stop and start output */
+
+/* Output flags, SysTermios.oflag. */
+#define SYS_TC_OPOST  0x001  /* post-process output at all */
+#define SYS_TC_ONLCR  0x004  /* translate NL to CR NL on output */
+
+/* Local flags, SysTermios.lflag. */
+#define SYS_TC_ISIG   0x0001  /* ^C, ^Z and ^\ raise signals */
+#define SYS_TC_ICANON 0x0002  /* line-at-a-time input, with line editing */
+#define SYS_TC_ECHO   0x0008  /* echo what is typed */
+#define SYS_TC_ECHONL 0x0040  /* echo a newline even with ECHO off */
+#define SYS_TC_IEXTEN 0x8000  /* implementation-defined input, ^V among it */
+
+/* Indices into SysTermios.cc. Only the two a non-canonical read is steered
+ * by are named; the rest of the array is carried through unread. */
+#define SYS_NCCS  19  /* the kernel's NCCS, so the raw copy is a plain loop */
+#define SYS_VTIME  5  /* tenths of a second a read waits, 0 for no limit */
+#define SYS_VMIN   6  /* bytes a read waits for, 0 with VTIME 0 for "poll" */
+
+/* A terminal's line-discipline settings, in the layer's own shape.
+ *
+ * The kernel's `struct termios` is 36 bytes of 32-bit words; a C library's is
+ * not the same struct (glibc's is 60, with the speeds appended and a larger
+ * c_cc), so unlike SysPollFd this one cannot be the host's and is converted
+ * at each boundary.
+ *
+ *   - `iflag`, `oflag` and `lflag` hold the SYS_TC_* bits above. A bit the
+ *     layer does not name is carried through unchanged, which is exact on
+ *     Linux -- where every bit already has the layer's value, as sys_libc.c
+ *     asserts -- and is the one place a port to another kernel must look.
+ *   - `cflag` is OPAQUE: the host's own control-mode bits, not the layer's.
+ *     Character size, parity and the line speed are properties of a serial
+ *     line, nothing above this layer changes them, and a terminal or a pty
+ *     comes configured correctly already. It is in the record only so that
+ *     a get followed by a set puts back what it found.
+ *   - `cc` is indexed by SYS_V* above. The other entries -- the interrupt,
+ *     quit, erase and kill characters -- are carried through so that a
+ *     program which turns ISIG back on finds ^C still meaning ^C.
+ *
+ * What the record does NOT model is the line discipline number and, on a C
+ * library whose struct carries them separately, the input and output speeds.
+ * sys_tcset therefore reads the current settings before writing, so those
+ * keep whatever the terminal already had rather than becoming zero -- which
+ * for a speed would mean B0, and B0 hangs the line up. */
+typedef struct {
+    int64_t       iflag;        /* SYS_TC_I* */
+    int64_t       oflag;        /* SYS_TC_O* */
+    int64_t       cflag;        /* opaque: the host's control-mode word */
+    int64_t       lflag;        /* SYS_TC_ISIG, ICANON, ECHO, ECHONL, IEXTEN */
+    unsigned char cc[SYS_NCCS]; /* control characters, indexed by SYS_V* */
+} SysTermios;
+
 /* ---- operations --------------------------------------------------------- */
 
 /* Descriptors. Each returns what its POSIX namesake returns on success. */
@@ -279,6 +364,44 @@ int64_t sys_close(int64_t fd);                                    /* 0 */
 int64_t sys_lseek(int64_t fd, int64_t off, int64_t whence);       /* new offset */
 int64_t sys_fstat(int64_t fd, SysStat *st);                       /* 0 */
 int64_t sys_isatty(int64_t fd);                                   /* 1 or 0, never fails */
+
+/* ---- the terminal -------------------------------------------------------
+ *
+ * All three fail with -SYS_ENOTTY on a descriptor that is not a terminal,
+ * which is the one error a caller acts on: it means "draw plainly, this is a
+ * pipe". sys_isatty above is the question asked without an answer to throw
+ * away, and it is what the runtime's own output buffering already uses. */
+
+/* The terminal's current settings. */
+int64_t sys_tcget(int64_t fd, SysTermios *t);                     /* 0 */
+
+/* Put settings back, at once -- the POSIX TCSANOW, never TCSADRAIN or
+ * TCSAFLUSH. Draining is for a change of line speed, which this layer does
+ * not offer, and flushing would throw away input the user has already typed,
+ * which is the last thing a program entering raw mode should do.
+ *
+ * This is a READ-MODIFY-WRITE: the current settings are fetched first and
+ * the fields SysTermios models are overwritten in them, so the line
+ * discipline and the speeds -- which it does not model -- keep the values
+ * the terminal already has. A caller that means "exactly what I read" gets
+ * it; a caller that built a SysTermios from nothing does not silently set
+ * the line speed to zero and hang the terminal up.
+ *
+ * POSIX lets tcsetattr succeed when only SOME of the settings were applied.
+ * A caller that must be sure reads them back; the layer does not do it, for
+ * the same reason it does not retry: it would be deciding for the caller. */
+int64_t sys_tcset(int64_t fd, const SysTermios *t);               /* 0 */
+
+/* How many character cells the window has. Both are written only on
+ * success. A terminal that does not know its size answers 0 by 0 rather
+ * than failing -- a serial line has no size to report -- so a caller that
+ * needs a number of its own checks for zero and picks 24 by 80.
+ *
+ * There is no way to be TOLD the size changed: that is SIGWINCH, and this
+ * layer has no signal handler (see sys_ignore_sigpipe, and docs/sys-layer.md
+ * §2 "Signals"). A program notices a resize by asking again, which is one
+ * ioctl and cheap enough to do once per frame. */
+int64_t sys_winsize(int64_t fd, int64_t *rows, int64_t *cols);    /* 0 */
 
 /* The file system, relative to the current directory. */
 int64_t sys_mkdir(const char *path, int64_t mode);                /* 0 */

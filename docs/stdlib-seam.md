@@ -625,3 +625,53 @@ refuses `https://` before a socket exists. A TLS stack is not a system call
 and does not belong at this seam; when there is one it will be a module up
 here, over the same `net.Conn`, and `http` will take a `Stream` from it
 without changing a line — which is the other thing the interface buys.
+
+---
+
+## 11. The terminal primitives: `lib/term.src` over the line discipline
+
+Added 2026-09-24, for the interactive programs a terminal git client is the
+first of. Six primitives, and the shape of the list is the argument:
+
+```c
+prim int  __isatty(int fd);                        // 1 or 0, never fails
+prim int  __tcget(int fd, List<int> out);          // pushes iflag, oflag, cflag, lflag, vmin, vtime
+prim int  __tcset(int fd, int iflag, int oflag, int cflag, int lflag, int vmin, int vtime);
+prim int  __winsize(int fd, List<int> out);        // pushes rows, then columns
+prim int  __term_arm(int fd);                      // remember the settings for the exit paths
+prim int  __term_disarm();
+```
+
+`__read`, `__write_str`, `__poll` and `__out_flush` are declared again in
+`term` and are `io`'s and `net`'s: **a terminal is a descriptor**, so reading
+keys, writing escape sequences and waiting with a timeout needed no new
+primitive at all. That is the same test `http` passed by asking for nothing
+(§10), one step down.
+
+**What did not cross the seam is the interesting part.** Raw mode is a set of
+flags to clear and two control characters to set, and every one of those
+decisions is in `lib/term.src`, in language source, over the layer's own
+constants written as numbers — exactly as `io` writes the open flags and
+`net` the address families. There is no `rt_raw_mode()` in the runtime: C
+knows how to read and write a `termios`, and nothing else about terminals.
+The escape-sequence decoder, which is most of the module, is pure language
+source over `bytes` and reaches nothing at all.
+
+**A `termios` comes apart at the seam, and the runtime puts it back
+together.** A prim deals in scalars and in what it pushes onto a collection
+it was handed, so only six of the record's fields cross: the four flag words
+and `VMIN`/`VTIME`. The other seventeen control characters — the interrupt,
+quit, erase and kill keys — never reach the language, so `rt_tcset` reads the
+current settings and patches those six into them. Without that,
+entering raw mode would quietly set ^C and ^Z to NUL for the program that
+turned `ISIG` back on later. `cflag` crosses as an opaque number for the same
+reason `__sockpath` is a second call: it has to round-trip, and nothing above
+the line ever looks at it.
+
+**`__term_arm` is not a primitive over a system call**, and it is the only one
+here that is not. It hands the runtime a snapshot of the terminal, which
+`rt_trap`, `rt_panic` and an `atexit` handler put back — so a program that
+traps or calls `os.exit` in raw mode does not leave a terminal with no echo.
+A destructor covers every path the language can see; this covers the two it
+cannot. It is deliberately **not** a signal facility, and what that leaves
+uncovered is written down in `docs/sys-layer.md` §2.

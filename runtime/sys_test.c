@@ -574,6 +574,268 @@ static void net_tests(void) {
 #endif
 }
 
+/* ---- the terminal -------------------------------------------------------
+ *
+ * A pty is the only honest way to test this: a real terminal is not there
+ * under a gate, and every other descriptor answers -ENOTTY to all three
+ * calls, which proves the error path and nothing else.
+ *
+ * So the test opens one, and it opens it TWICE OVER -- through POSIX where
+ * there is a C library, and through /dev/ptmx and two ioctls where there is
+ * not. That is not duplication for its own sake: the freestanding builds,
+ * natively and for aarch64 and riscv64 under qemu, have no posix_openpt to
+ * call, and they are the builds that matter most here, because they are the
+ * ones where a wrong ioctl number or a wrong struct offset has nothing to
+ * hide behind. Both paths reach the same kernel object and run the same
+ * checks below.
+ *
+ * Neither open makes the pty a controlling terminal: this process is not a
+ * session leader, so it cannot acquire one, and the POSIX path passes
+ * O_NOCTTY as well.
+ *
+ * What is NOT tested here, and cannot be: that the flags mean to a real
+ * terminal emulator what they mean to a pty's line discipline. They are the
+ * same line discipline -- a pty slave and a serial line both run n_tty -- so
+ * the kernel side is covered; what a particular terminal does with the
+ * BYTES that come out is lib/term.src's business and a human's. */
+
+#ifdef RT_SYS_RAW
+
+/* ptmx's own ioctls. _IOW('T', 0x31, int) and _IOR('T', 0x30, unsigned int),
+ * which encode to the same numbers on every architecture this backend
+ * supports, since the encoding is (dir, size, 'T', nr) and the size is 4. */
+#define T_TIOCGPTN   0x80045430
+#define T_TIOCSPTLCK 0x40045431
+#define T_TIOCSWINSZ 0x5414
+
+typedef struct {
+    uint16_t row, col, xpixel, ypixel;
+} TWinsize;
+
+static int64_t pty_open(int64_t *master, int64_t *slave) {
+    int64_t m = sys_open("/dev/ptmx", SYS_O_RDWR, 0);
+    if (m < 0) return m;
+    int unlock = 0;
+    if (sc(NR_ioctl, m, T_TIOCSPTLCK, P(&unlock), 0, 0, 0) < 0) {
+        sys_close(m);
+        return -SYS_EIO;
+    }
+    unsigned int n = 0;
+    if (sc(NR_ioctl, m, T_TIOCGPTN, P(&n), 0, 0, 0) < 0) {
+        sys_close(m);
+        return -SYS_EIO;
+    }
+    char path[32] = {'/', 'd', 'e', 'v', '/', 'p', 't', 's', '/', 0};
+    int at = 9, digits = 1;
+    for (unsigned int t = n; t >= 10; t /= 10) digits++;
+    for (int i = digits - 1; i >= 0; i--) {
+        unsigned int d = n;
+        for (int k = 0; k < i; k++) d /= 10;
+        path[at++] = (char)('0' + d % 10);
+    }
+    path[at] = 0;
+    int64_t s = sys_open(path, SYS_O_RDWR, 0);
+    if (s < 0) {
+        sys_close(m);
+        return s;
+    }
+    *master = m;
+    *slave = s;
+    return 0;
+}
+
+static int64_t pty_resize(int64_t fd, int rows, int cols) {
+    TWinsize w = {(uint16_t)rows, (uint16_t)cols, 0, 0};
+    return sc(NR_ioctl, fd, T_TIOCSWINSZ, P(&w), 0, 0, 0);
+}
+
+#else /* the C library is here, so POSIX's own four calls are */
+
+#include <sys/ioctl.h>  /* TIOCSWINSZ, to give the pty a size to report */
+
+/* POSIX's four pseudo-terminal calls, declared here rather than taken from
+ * <stdlib.h>, because glibc hides them behind __USE_XOPEN2KXSI -- which needs
+ * _XOPEN_SOURCE >= 700 defined before the FIRST header this file pulls in.
+ * Defining it would also change what sys_libc.c sees a few lines above (its
+ * getaddrinfo error codes move behind and out from behind feature macros),
+ * and this file exists to test that file as the runtime compiles it. The
+ * signatures are POSIX's own, identical on Linux, macOS and the BSDs, so a
+ * host that does declare them declares exactly this. */
+int posix_openpt(int oflag);
+int grantpt(int fd);
+int unlockpt(int fd);
+char *ptsname(int fd);
+
+static int64_t pty_open(int64_t *master, int64_t *slave) {
+    int m = posix_openpt(O_RDWR | O_NOCTTY);
+    if (m < 0) return neg_errno(errno);
+    if (grantpt(m) != 0 || unlockpt(m) != 0) {
+        int e = errno;
+        close(m);
+        return neg_errno(e);
+    }
+    const char *name = ptsname(m);
+    if (name == NULL) {
+        close(m);
+        return -SYS_EIO;
+    }
+    int s = open(name, O_RDWR | O_NOCTTY);
+    if (s < 0) {
+        int e = errno;
+        close(m);
+        return neg_errno(e);
+    }
+    *master = m;
+    *slave = s;
+    return 0;
+}
+
+static int64_t pty_resize(int64_t fd, int rows, int cols) {
+    struct winsize w;
+    zero(&w, (int64_t)sizeof w);
+    w.ws_row = (unsigned short)rows;
+    w.ws_col = (unsigned short)cols;
+    return ret(ioctl((int)fd, TIOCSWINSZ, &w));
+}
+
+#endif
+
+/* Every named flag, so a backend that mapped one of them to the wrong bit
+ * is caught by name rather than by a word comparison that says only "they
+ * differ". */
+static void expect_flag(const char *what, int64_t word, int64_t bit, int want) {
+    expect(what, (word & bit) != 0 ? 1 : 0, want);
+}
+
+static void term_tests(void) {
+    SysTermios t;
+    int64_t rows = -1, cols = -1;
+
+    /* Zeroed before it is passed anywhere, so a backend that read it on a
+     * path that should have failed first reads zeros rather than the stack,
+     * which is what the sanitized builds of runtime/sys_test.sh look for. */
+    zero(&t, (int64_t)sizeof t);
+
+    /* ---- not a terminal: the same answer from both backends ---- */
+    int64_t f = sys_open("/", SYS_O_RDONLY, 0);
+    expect_true("a descriptor that is not a terminal", f >= 0);
+    expect("isatty of a directory", sys_isatty(f), 0);
+    expect("tcget of a directory", sys_tcget(f, &t), -SYS_ENOTTY);
+    expect("tcset of a directory", sys_tcset(f, &t), -SYS_ENOTTY);
+    expect("winsize of a directory", sys_winsize(f, &rows, &cols), -SYS_ENOTTY);
+    sys_close(f);
+    expect("isatty of a bad fd", sys_isatty(-1), 0);
+    expect("tcget of a bad fd", sys_tcget(-1, &t), -SYS_EBADF);
+    expect("tcset of a bad fd", sys_tcset(-1, &t), -SYS_EBADF);
+    expect("winsize of a bad fd", sys_winsize(-1, &rows, &cols), -SYS_EBADF);
+
+    /* ---- and now a real one ---- */
+    int64_t m = -1, s = -1;
+    if (pty_open(&m, &s) != 0) {
+        /* A machine with no /dev/ptmx -- a container built without one -- is
+         * a real environment, not a failure. Say so, loudly enough to be
+         * read, rather than passing a gate that did not run. */
+        put("NOTE no pty here: the terminal calls were checked only on a "
+            "descriptor that is not one\n");
+        return;
+    }
+
+    expect("isatty of a pty master", sys_isatty(m), 1);
+    expect("isatty of a pty slave", sys_isatty(s), 1);
+
+    /* The size the master sets is the size the slave reports. A fresh pty
+     * has no size at all, which is 0 by 0 and not an error -- sys.h says a
+     * caller must expect that -- so it is checked before it is given one. */
+    expect("a fresh pty has no size", sys_winsize(s, &rows, &cols), 0);
+    expect("no rows", rows, 0);
+    expect("no columns", cols, 0);
+    expect("resize the pty", pty_resize(m, 40, 132), 0);
+    expect("winsize", sys_winsize(s, &rows, &cols), 0);
+    expect("rows", rows, 40);
+    expect("columns", cols, 132);
+
+    /* ---- what a terminal looks like before a program touches it ---- */
+    SysTermios saved;
+    zero(&saved, (int64_t)sizeof saved);
+    expect("tcget", sys_tcget(s, &saved), 0);
+    expect_flag("ECHO is on to start with", saved.lflag, SYS_TC_ECHO, 1);
+    expect_flag("ICANON is on to start with", saved.lflag, SYS_TC_ICANON, 1);
+    expect_flag("ISIG is on to start with", saved.lflag, SYS_TC_ISIG, 1);
+    expect_flag("ICRNL is on to start with", saved.iflag, SYS_TC_ICRNL, 1);
+    expect_flag("OPOST is on to start with", saved.oflag, SYS_TC_OPOST, 1);
+    /* The interrupt character is ^C on every Unix, and this is the value the
+     * round trip below has to bring back: it is in the part of the record
+     * that neither the layer nor a caller ever names. */
+    expect("VINTR is ^C", saved.cc[0], 3);
+
+    /* ---- raw mode, the way lib/term.src builds it ---- */
+    t = saved;
+    t.iflag = t.iflag & ~(int64_t)(SYS_TC_IGNBRK | SYS_TC_BRKINT | SYS_TC_PARMRK |
+                                   SYS_TC_ISTRIP | SYS_TC_INLCR | SYS_TC_IGNCR |
+                                   SYS_TC_ICRNL | SYS_TC_IXON);
+    t.oflag = t.oflag & ~(int64_t)SYS_TC_OPOST;
+    t.lflag = t.lflag & ~(int64_t)(SYS_TC_ECHO | SYS_TC_ECHONL | SYS_TC_ICANON |
+                                   SYS_TC_ISIG | SYS_TC_IEXTEN);
+    t.cc[SYS_VMIN] = 1;
+    t.cc[SYS_VTIME] = 0;
+    expect("tcset raw", sys_tcset(s, &t), 0);
+
+    SysTermios now;
+    zero(&now, (int64_t)sizeof now);
+    expect("tcget after tcset", sys_tcget(s, &now), 0);
+    expect_flag("ECHO is off", now.lflag, SYS_TC_ECHO, 0);
+    expect_flag("ICANON is off", now.lflag, SYS_TC_ICANON, 0);
+    expect_flag("ISIG is off", now.lflag, SYS_TC_ISIG, 0);
+    expect_flag("IEXTEN is off", now.lflag, SYS_TC_IEXTEN, 0);
+    expect_flag("ICRNL is off", now.iflag, SYS_TC_ICRNL, 0);
+    expect_flag("IXON is off", now.iflag, SYS_TC_IXON, 0);
+    expect_flag("ISTRIP is off", now.iflag, SYS_TC_ISTRIP, 0);
+    expect_flag("OPOST is off", now.oflag, SYS_TC_OPOST, 0);
+    expect("VMIN came back", now.cc[SYS_VMIN], 1);
+    expect("VTIME came back", now.cc[SYS_VTIME], 0);
+    /* The two fields nothing above the layer names, and the reason sys_tcset
+     * is a read-modify-write: a set that only knew about the flags it was
+     * asked to change would have zeroed both. */
+    expect("VINTR survived the round trip", now.cc[0], saved.cc[0]);
+    expect("the control word survived the round trip", now.cflag, saved.cflag);
+
+    /* ---- raw mode is not just bits: it changes what a read gives back ----
+     *
+     * With ICANON off a read hands over what has arrived rather than waiting
+     * for a line, and with ICRNL off a carriage return arrives as 13 instead
+     * of being turned into 10. Both are checked in one write, because with
+     * the flags still set the read would block on the missing newline and
+     * the CR would come back as an LF -- so a backend that failed to apply
+     * either one would hang the gate or fail this line, not pass it. */
+    char got[8];
+    expect("write two bytes and a CR to the master", sys_write(m, "ab\r", 3), 3);
+    expect("read them without waiting for a line", sys_read(s, got, sizeof got), 3);
+    expect_true("the bytes are what was written", same(got, "ab\r", 3));
+
+    /* And with OPOST off, a newline written by the program is the one byte
+     * it wrote: no CR is inserted on the way out. */
+    expect("write a line from the slave", sys_write(s, "x\n", 2), 2);
+    expect("read it on the master", sys_read(m, got, sizeof got), 2);
+    expect_true("no CR was added", same(got, "x\n", 2));
+
+    /* ---- and back, which is the whole point ---- */
+    expect("tcset the saved settings back", sys_tcset(s, &saved), 0);
+    zero(&now, (int64_t)sizeof now);
+    expect("tcget after restoring", sys_tcget(s, &now), 0);
+    expect("iflag restored", now.iflag, saved.iflag);
+    expect("oflag restored", now.oflag, saved.oflag);
+    expect("cflag restored", now.cflag, saved.cflag);
+    expect("lflag restored", now.lflag, saved.lflag);
+    int cc_same = 1;
+    for (int i = 0; i < SYS_NCCS; i++) {
+        if (now.cc[i] != saved.cc[i]) cc_same = 0;
+    }
+    expect_true("every control character restored", cc_same);
+
+    expect("close the slave", sys_close(s), 0);
+    expect("close the master", sys_close(m), 0);
+}
+
 int test_main(void);
 int test_main(void) {
     /* ---- errors every backend must spell the same way ---- */
@@ -728,6 +990,7 @@ int test_main(void) {
     /* The last 100 bytes all zero by chance is 2^-800. */
     expect_true("getrandom filled the tail", nonzero > 0);
 
+    term_tests();
     net_tests();
 
     put("sys layer: ");

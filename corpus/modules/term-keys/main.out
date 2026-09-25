@@ -1,0 +1,147 @@
+== plain
+a                         -> a
+A                         -> A
+space                     -> space
+tilde                     -> ~
+digits                    -> 0 1 2
+== control
+CR (enter)                -> enter
+LF (ctrl+j in raw mode)   -> ctrl+j
+tab                       -> tab
+DEL (backspace key)       -> backspace
+BS (ctrl+h)               -> backspace
+NUL (ctrl+space)          -> ctrl+space
+ctrl+a                    -> ctrl+a
+ctrl+c                    -> ctrl+c
+ctrl+z                    -> ctrl+z
+ctrl+backslash            -> ctrl+\
+ctrl+underscore           -> ctrl+_
+lone escape               -> escape
+escape escape             -> escape escape
+== alt
+alt+a                     -> alt+a
+alt+A                     -> alt+A
+alt+enter                 -> alt+enter
+alt+ctrl+a                -> ctrl+alt+a
+== arrows
+CSI up                    -> up
+CSI down                  -> down
+CSI right                 -> right
+CSI left                  -> left
+SS3 up (application)      -> up
+SS3 left (application)    -> left
+== navigation
+CSI H home                -> home
+CSI F end                 -> end
+SS3 H home                -> home
+SS3 F end                 -> end
+CSI 1~ home               -> home
+CSI 7~ home (rxvt)        -> home
+CSI 2~ insert             -> insert
+CSI 3~ delete             -> delete
+CSI 4~ end                -> end
+CSI 8~ end (rxvt)         -> end
+CSI 5~ page up            -> page-up
+CSI 6~ page down          -> page-down
+CSI Z back-tab            -> back-tab
+== function keys
+SS3 P f1                  -> f1
+SS3 S f4                  -> f4
+CSI 11~ f1 (linux)        -> f1
+CSI 15~ f5                -> f5
+CSI 17~ f6                -> f6
+CSI 21~ f10               -> f10
+CSI 23~ f11               -> f11
+CSI 24~ f12               -> f12
+CSI 34~ f20               -> f20
+linux console f1          -> f1
+linux console f5          -> f5
+== modifiers
+shift+up                  -> shift+up
+alt+up                    -> alt+up
+ctrl+up                   -> ctrl+up
+ctrl+shift+up             -> ctrl+shift+up
+ctrl+alt+up               -> ctrl+alt+up
+ctrl+alt+shift+up         -> ctrl+alt+shift+up
+meta+up                   -> meta+up
+ctrl+page-up              -> ctrl+page-up
+shift+delete              -> shift+delete
+alt+f1                    -> alt+f1
+no first parameter        -> ctrl+up
+== csi u
+ctrl+a                    -> ctrl+a
+ctrl+shift+a              -> ctrl+shift+a
+ctrl+enter                -> ctrl+enter
+plain e-acute             -> é
+a surrogate is refused    -> unknown[1b5b353533303075]
+== utf-8
+e-acute                   -> é
+CJK                       -> 漢
+emoji                     -> 😀
+alt+e-acute               -> alt+é
+a stray 0xff              -> unknown[ff]
+a truncated sequence      -> unknown[e6bc]
+text around it            -> a é b
+== mouse
+left down                 -> left-down 12,3
+left up                   -> left-up 12,3
+right down                -> right-down 1,1
+left drag                 -> left-drag 7,8
+move, no button           -> moved 7,8
+scroll up                 -> scroll-up 5,6
+scroll down               -> scroll-down 5,6
+ctrl+left down            -> ctrl+left-down 4,4
+a big column              -> left-down 300,2
+== paste
+hi                        -> paste[hi]
+with a newline            -> paste[a
+b]
+empty                     -> paste[]
+a key after it            -> paste[x] a
+unterminated              -> unknown[1b5b3230307e6162]
+== unknown
+cursor position report    -> unknown[1b5b31303b323052]
+device attributes         -> unknown[1b5b3f363263]
+an unknown final byte     -> unknown[1b5b393978]
+an unknown tilde number   -> unknown[1b5b39397e]
+SS3 with a stray byte     -> unknown[1b4f7a]
+a stray paste end         -> unknown[1b5b3230317e]
+== runs
+three arrows              -> up down right
+a key after an arrow      -> up z
+escape then an arrow      -> escape up
+everything at once        -> a up enter f1 é left-down 1,1
+== split across reads
+ctrl+up                   -> ctrl+up
+SS3 f1                    -> f1
+emoji                     -> 😀
+mouse                     -> left-down 12,3
+paste                     -> paste[hi]
+linux console f1          -> f1
+lone escape               -> escape
+escape escape             -> escape escape
+a truncated sequence      -> unknown[e6bc]
+everything at once        -> a up enter f1 é left-down 1,1
+== no terminal
+false
+false
+not a terminal
+not a terminal
+== sequences
+1b5b324a
+1b5b48
+1b5b3f32356c
+1b5b3f3130343968
+1b5b3f31303030681b5b3f31303032681b5b3f3130303668
+1b5b313b3148
+1b5b32343b383048
+1b5b33383b353b3139366d
+1b5b34383b353b306d
+1b5b33383b323b3235353b3132383b306d
+1b5b306d
+== writer
+7
+one-two
+7
+0
+0

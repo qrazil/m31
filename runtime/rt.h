@@ -308,6 +308,29 @@ int64_t rt_resolve(Obj *host, int64_t port, int64_t family, Obj *out, Obj *addrs
 int64_t rt_ignore_sigpipe(void);  /* so a write to a dead peer is EPIPE, not death */
 /* ---- end net primitives ------------------------------------------------ */
 
+/* ---- terminal primitives: lib/term.src --------------------------------- */
+/* One sys-layer call each, the layer's value or -errno passed through. The
+ * flag words are the layer's own constants (runtime/sys.h), so the numbers
+ * lib/term.src writes mean the same thing on every target.
+ *
+ * Reading keys and writing escape sequences need nothing here: a terminal is
+ * a descriptor, so rt_read, rt_write_str and rt_poll above already do it. */
+int64_t rt_isatty(int64_t fd);                   /* 1 or 0, never fails */
+int64_t rt_tcget(int64_t fd, Obj *out);          /* pushes iflag, oflag, cflag, lflag, vmin, vtime */
+int64_t rt_tcset(int64_t fd, int64_t iflag, int64_t oflag, int64_t cflag, int64_t lflag,
+                 int64_t vmin, int64_t vtime);
+int64_t rt_winsize(int64_t fd, Obj *out);        /* pushes rows, then columns */
+
+/* The safety net a destructor cannot be: the settings to put back if the
+ * process ends without running one. rt_term_arm takes a snapshot of the
+ * terminal as it is now; rt_term_disarm forgets it; rt_term_restore puts it
+ * back and is called from the trap path and from the exit handler, never by
+ * the program. See the section in rt.c for what this does and does not buy. */
+int64_t rt_term_arm(int64_t fd);
+int64_t rt_term_disarm(void);
+void    rt_term_restore(void);
+/* ---- end terminal primitives ------------------------------------------- */
+
 
 /* Text primitives a library cannot write from inside the language. */
 int64_t rt_str_byte_at(Obj *o, int64_t i);
