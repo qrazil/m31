@@ -143,7 +143,7 @@ impl Lowerer {
         let Expr::Var(m, _) = obj else {
             return Ok(None);
         };
-        if !self.modules.contains(m) || self.lookup(m).is_some() {
+        if !self.module_in_scope(m) || self.lookup(m).is_some() {
             return Ok(None);
         }
         let key = format!("{m}#{name}");

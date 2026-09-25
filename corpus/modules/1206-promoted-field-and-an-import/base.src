@@ -1,0 +1,3 @@
+pub type Base {
+    pub str text;
+}

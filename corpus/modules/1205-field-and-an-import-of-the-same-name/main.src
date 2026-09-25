@@ -1,0 +1,15 @@
+import text;
+
+// Both at once is the one genuinely ambiguous case, and it is refused
+// rather than ranked: inside a method `text.split(..)` would be a method
+// call on the field AND a call into the module.
+type Paragraph {
+    str text;
+}
+
+int Paragraph.lines() {
+    return text.split("\n").size();
+}
+
+print(str(Paragraph("a\nb").lines()));
+print(str(text.split_whitespace("a b").size()));

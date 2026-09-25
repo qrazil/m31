@@ -1,0 +1,3 @@
+pub int answer() {
+    return 42;
+}

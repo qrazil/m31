@@ -1,0 +1,15 @@
+// `text` is a standard library module and a perfectly ordinary field name.
+// This file does not import it, so the module's name is not in scope here
+// (reference 2.1) and the bare read is the field (4.3). Another file of this
+// program does import `text`; that must not reach in here.
+pub type Paragraph {
+    pub str text;
+}
+
+pub int Paragraph.lines() {
+    return text.split("\n").size();
+}
+
+pub str Paragraph.first() {
+    return text.split("\n")[0];
+}

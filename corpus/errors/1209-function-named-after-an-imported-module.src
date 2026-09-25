@@ -1,0 +1,10 @@
+import text;
+
+// A function's name is in scope over the whole file, exactly where the
+// import is, so `text(..)` and `text.trim_start(..)` would both be written
+// here and mean different things.
+str text() {
+    return "mine";
+}
+
+print(text());

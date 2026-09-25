@@ -104,6 +104,11 @@ property for `lib/` and only extend it outwards.
 
 ## 2. A module name shadows a field in a file that never imported it
 
+**Fixed.** A module's name is now in scope only in the file that imported it
+(reference §2.1), so `Paragraph.text` is the field again and the workaround
+below is gone from `tuiwidget.src`. A file that imports `text` *and* declares
+a field called `text` is refused at the field, naming both (§4.3).
+
 This is a bug, and it is the only thing here that produced a diagnostic I
 could not act on.
 

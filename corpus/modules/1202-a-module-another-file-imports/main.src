@@ -1,0 +1,5 @@
+import other;
+// `other` imports `text`, so `text` is in the program -- but not in scope
+// here, because this file did not import it.
+print(str(text.split_whitespace("a b").size()));
+print(str(other.words("a b c")));

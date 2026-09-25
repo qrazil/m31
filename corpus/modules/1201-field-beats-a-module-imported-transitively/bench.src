@@ -1,0 +1,6 @@
+// `date` imports `text`. That is the only reason `text` is in this program.
+import date;
+
+pub int epoch_year() {
+    return date.civil(0).year;
+}

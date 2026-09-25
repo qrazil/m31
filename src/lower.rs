@@ -638,6 +638,21 @@ impl Lowerer {
                 ),
             );
         }
+        // A module of this program, named in a file that did not import it.
+        // `lib.f()`, `lib.MAX` and `lib.Type` all arrive here once the
+        // qualifier has been refused, and "unknown variable `lib`" hides the
+        // one thing the reader needs: the module exists, this file just
+        // cannot see it (§2.1). After the check above, which is about a name
+        // that IS declared here.
+        if self.modules.contains(name) && !self.module_imports(&self.cur_module, name) {
+            return Diag::new(
+                span,
+                format!(
+                    "`{name}` is a module of this program, but this file does not \
+                     import it -- write `import {name};` at the top"
+                ),
+            );
+        }
         Diag::new(span, format!("unknown variable `{name}`"))
     }
 
@@ -2836,6 +2851,56 @@ impl Lowerer {
             self.field_params.push(t.fields.clone());
         }
 
+        // A FIELD may not take the name of a module its own file imports
+        // either. Inside a method a field is read by its bare name (§4.3),
+        // so `text.split(..)` is both a method call on the field and a call
+        // into the module `text`, and one of the two would silently win --
+        // the thing §4.1 exists to prevent. It is checked after the loop
+        // above rather than inside it because a field PROMOTED through
+        // embedding (§3.5) claims the name exactly as an own field does,
+        // and that cannot be asked until every type is registered.
+        for t in &p.types {
+            let Some(tid) = self.typedefs.iter().position(|d| d.name == t.name) else {
+                continue;
+            };
+            let tid = tid as u32;
+            let mut names = Vec::new();
+            self.reachable_field_names(tid, &mut names);
+            // Visibility is judged from the type's own module, which is the
+            // only one that may declare a method on it (§2.1).
+            let saved = std::mem::replace(&mut self.cur_module, t.module.clone());
+            let clash = names
+                .into_iter()
+                .find(|n| {
+                    *n != t.module
+                        && self.module_imports(&t.module, n)
+                        && self
+                            .field_path(tid, n)
+                            .is_some_and(|p| self.check_field_access(tid, &p, n, t.span).is_ok())
+                })
+                .map(|n| {
+                    let span = t
+                        .fields
+                        .iter()
+                        .find(|f| f.name == n)
+                        .map_or(t.span, |f| f.span);
+                    Diag::new(
+                        span,
+                        format!(
+                            "`{n}` is a field of `{}` and also the module `{n}` this file \
+                             imports; shadowing is not allowed, rename the field or drop \
+                             the import",
+                            self.show_name(&t.name)
+                        ),
+                    )
+                    .in_module(&t.module)
+                });
+            self.cur_module = saved;
+            if let Some(d) = clash {
+                return Err(d);
+            }
+        }
+
         for f in &p.funcs {
             let _tag = f.module.clone();
             // Habit from C, Java and Go. Without this it declares an ordinary
@@ -3207,8 +3272,40 @@ impl Lowerer {
         Ok(())
     }
 
+    /// Does `module` import a module called `name`?
+    fn module_imports(&self, module: &str, name: &str) -> bool {
+        module == name
+            || self
+                .imports_by_module
+                .get(module)
+                .is_some_and(|v| v.iter().any(|m| m == name))
+    }
+
+    /// The rest of the advice, when the module a diagnostic points at is one
+    /// this file has not imported: writing `mod.name` is not enough on its
+    /// own, because the qualifier is out of scope too (§2.1).
+    fn and_import(&self, module: &str) -> String {
+        if self.module_imports(&self.cur_module, module) {
+            return String::new();
+        }
+        format!(", and `import {module};` at the top")
+    }
+
+    /// Is `name` a module whose name is in scope in the file being lowered?
+    ///
+    /// A module's name is in scope only in the file that wrote `import name;`
+    /// (§2.1), which is already how the parser reads `mod.Type`. Being
+    /// somewhere in the program is not enough: a module another file imports
+    /// took the name of a field away from a method in a file that never
+    /// mentioned it, and the breakage arrived when an unrelated file added an
+    /// unrelated import.
+    fn module_in_scope(&self, name: &str) -> bool {
+        self.modules.contains(name) && self.module_imports(&self.cur_module, name)
+    }
+
     /// Refuse a declaration in `module` that takes the name of a module
-    /// that file imports -- a local, a parameter, a function or a type.
+    /// that file imports -- a local, a parameter, a function, a type or a
+    /// field of one.
     ///
     /// `lib.f()` with a local `lib` in scope used to call a method on the
     /// local, so the import was silently shadowed for the rest of the
@@ -3217,11 +3314,7 @@ impl Lowerer {
     /// scope here, and adding an import deep in a library must not break a
     /// name in a file that never mentions it.
     fn check_not_import(&self, module: &str, name: &str, span: Span) -> Result<(), Diag> {
-        let imported = self
-            .imports_by_module
-            .get(module)
-            .is_some_and(|v| v.iter().any(|m| m == name));
-        if imported {
+        if self.module_imports(module, name) && module != name {
             return Err(Diag::new(
                 span,
                 format!("`{name}` is an imported module; shadowing is not allowed, rename one"),
@@ -3924,6 +4017,26 @@ impl Lowerer {
             }
         }
         None
+    }
+
+    /// Every name a method of `tid` could reach as a bare field read: this
+    /// type's own fields, then whatever an embedded one promotes. Duplicates
+    /// are dropped, so each name is asked about once; which of two a name
+    /// actually reaches is `field_path`'s business.
+    fn reachable_field_names(&self, tid: u32, out: &mut Vec<String>) {
+        for (n, _) in &self.typedefs[tid as usize].fields {
+            if !out.iter().any(|x| x == n) {
+                out.push(n.clone());
+            }
+        }
+        for p in &self.field_params[tid as usize] {
+            if !p.embedded {
+                continue;
+            }
+            if let Some(inner) = self.tdef_of(p.ty) {
+                self.reachable_field_names(inner, out);
+            }
+        }
     }
 
     /// Walk a field path, emitting a load per step, and return the final
@@ -6263,7 +6376,7 @@ impl Lowerer {
             // variable only when no local has taken the name.
             Expr::Field(obj, field, span) => {
                 let Expr::Var(m, _) = &**obj else { return None };
-                if !self.modules.contains(m) || self.lookup(m).is_some() {
+                if !self.module_in_scope(m) || self.lookup(m).is_some() {
                     return None;
                 }
                 let key = format!("{m}#{field}");
@@ -7679,7 +7792,10 @@ impl Lowerer {
                         return Err(Diag::new(
                             *span,
                             if sig.is_pub {
-                                format!("`{name}` is declared in `{owner}`; write `{owner}.{name}`")
+                                format!(
+                                    "`{name}` is declared in `{owner}`; write `{owner}.{name}`{}",
+                                    self.and_import(&owner)
+                                )
                             } else {
                                 format!("`{name}` is private to `{owner}`")
                             },
@@ -7692,8 +7808,10 @@ impl Lowerer {
                             *span,
                             if sig.is_pub {
                                 format!(
-                                    "`{name}` is declared in `{}`; write `{}.{name}`",
-                                    sig.module, sig.module
+                                    "`{name}` is declared in `{}`; write `{}.{name}`{}",
+                                    sig.module,
+                                    sig.module,
+                                    self.and_import(&sig.module)
                                 )
                             } else {
                                 format!("`{name}` is private to `{}`", sig.module)
@@ -7750,7 +7868,7 @@ impl Lowerer {
                 // Checked before lowering the "receiver", because there is
                 // no value to lower.
                 if let Expr::Var(modname, _) = &**obj {
-                    if self.modules.contains(modname) && self.lookup(modname).is_none() {
+                    if self.module_in_scope(modname) && self.lookup(modname).is_none() {
                         return self.lower_qualified(modname, m, args, *span);
                     }
                 }

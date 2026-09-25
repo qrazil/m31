@@ -1,0 +1,4 @@
+corpus/errors/1211-case-binding-named-after-an-imported-module.src:10:15: `text` is an imported module; shadowing is not allowed, rename one
+   |
+10 |     case Leaf(str text): { print(text); }
+   |               ^

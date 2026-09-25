@@ -1,0 +1,5 @@
+import mid;
+// Naming the module is not enough advice when the file has no import for
+// it: the qualifier would be out of scope too.
+print(str(answer()));
+print(str(mid.relay()));

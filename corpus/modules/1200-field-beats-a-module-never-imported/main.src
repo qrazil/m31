@@ -1,0 +1,7 @@
+import widget;
+import other;
+
+widget.Paragraph p = widget.Paragraph("alpha\nbeta\ngamma");
+print(str(p.lines()));
+print(p.first());
+print(str(other.words("one two three")));

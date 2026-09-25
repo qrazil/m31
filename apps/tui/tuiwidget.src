@@ -250,13 +250,7 @@ pub List<str> Paragraph.lines(int room) {
         return tuitext.wrap(text, room);
     }
     List<str> out = [];
-    // `whole` is `text`, bound to a local first: a bare `text.split(..)`
-    // here is read as a call into the STANDARD LIBRARY's `text` module --
-    // not because this file imports it (it does not) but because some other
-    // file in the program did. See FRICTION.md.
-    str whole = text;
-    List<str> out2 = whole.split("\n");
-    for (str l in out2) {
+    for (str l in text.split("\n")) {
         if (l.ends_with("\r")) {
             out.push(l.substr(0, l.size() - 1));
         } else {

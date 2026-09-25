@@ -73,6 +73,11 @@ pub struct Mono {
     /// Every module in the program, to tell `lib.f(..)` -- a call into a
     /// module -- from a method call on a value.
     modules: HashSet<String>,
+    /// What each file imports. A module's name is in scope only in the file
+    /// that imported it (§2.1), so this and `modules` together decide
+    /// whether `lib.f(..)` is a qualifier -- and the lowering settles it the
+    /// same way, which the two have to agree on.
+    imports_by_module: HashMap<String, Vec<String>>,
     /// The current function's return type as written, for inferring a
     /// generic call's type arguments from `return f(..)`. None at the top
     /// level, which returns nothing.
@@ -111,6 +116,7 @@ impl Mono {
             recv_ty: None,
             cur_recv: None,
             modules: p.imports_by_module.keys().cloned().collect(),
+            imports_by_module: p.imports_by_module.clone(),
             cur_ret: None,
             func_params: HashMap::new(),
             const_tys: p.consts.iter().map(|c| (c.name.clone(), c.ty)).collect(),
@@ -636,6 +642,19 @@ impl Mono {
         mangled
     }
 
+    /// Is `name` a module whose name is in scope in the file being
+    /// substituted? The lowering's `module_in_scope`, and it has to stay
+    /// that: a qualifier the two disagree about is a generic function that
+    /// is never instantiated, or a name that resolves two ways.
+    fn module_in_scope(&self, name: &str) -> bool {
+        self.modules.contains(name)
+            && (self.cur_module == name
+                || self
+                    .imports_by_module
+                    .get(&self.cur_module)
+                    .is_some_and(|v| v.iter().any(|m| m == name)))
+    }
+
     /// A bare call name, resolved against the module being substituted: a
     /// generic function is declared `mod#id` but called `id` from inside its
     /// own module, exactly as in the lowering.
@@ -1144,7 +1163,7 @@ impl Mono {
                 // and the lowering finds nothing called `first`.
                 if let Expr::Var(modname, _) = &**obj {
                     let key = format!("{modname}#{m}");
-                    if self.modules.contains(modname)
+                    if self.module_in_scope(modname)
                         && self.env_ty(modname).is_none()
                         && self.generic_funcs.contains_key(&key)
                     {
@@ -1166,7 +1185,7 @@ impl Mono {
                 // parameters to be inferred against, like a bare call's.
                 if let Expr::Var(modname, _) = &**obj {
                     let key = format!("{modname}#{m}");
-                    if self.modules.contains(modname) && self.env_ty(modname).is_none() {
+                    if self.module_in_scope(modname) && self.env_ty(modname).is_none() {
                         if let Some(params) = self.func_params.get(&key).cloned() {
                             return Ok(Expr::MethodCall(
                                 obj.clone(),
@@ -1539,7 +1558,7 @@ impl Mono {
             }),
             // `lib.TABLE`, another module's constant.
             Expr::Field(o, n, _) => match &**o {
-                Expr::Var(m, _) if self.modules.contains(m) && self.env_ty(m).is_none() => {
+                Expr::Var(m, _) if self.module_in_scope(m) && self.env_ty(m).is_none() => {
                     self.const_tys.get(&format!("{m}#{n}")).copied()
                 }
                 _ => None,
