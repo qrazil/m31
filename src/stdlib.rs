@@ -30,6 +30,7 @@ pub fn source(name: &str) -> Option<&'static str> {
         "net" => include_str!("../lib/net.src"),
         "os" => include_str!("../lib/os.src"),
         "sort" => include_str!("../lib/sort.src"),
+        "term" => include_str!("../lib/term.src"),
         "text" => include_str!("../lib/text.src"),
         "date" => include_str!("../lib/date.src"),
         "random" => include_str!("../lib/random.src"),

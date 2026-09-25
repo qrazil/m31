@@ -1,0 +1,1483 @@
+/// Terminal control: raw mode, keys, the window size, and the sequences that
+/// draw.
+///
+/// This module is deliberately the LOW layer. It does not lay anything out,
+/// it keeps no screen buffer, and it has no event loop; a framework built on
+/// it will have all three. What it does is the part such a framework cannot
+/// usefully redo: it turns the line discipline off and on again without ever
+/// leaving a terminal broken, and it turns the bytes a terminal sends into
+/// keys, which is a table of other people's escape sequences that nobody
+/// should have to write twice.
+///
+/// ### The four things it offers
+///
+///   - **`raw()`**, which returns a `Session`. The session's destructor puts
+///     the terminal back, so every path out of the scope that holds it --
+///     a `return`, a `?`, a trap-free end -- restores the terminal with no
+///     `defer` and nothing to forget. What a destructor cannot cover, the
+///     runtime does: see "When the program does not end tidily" below.
+///   - **`Decoder`**, a byte-stream-to-`Event` machine. It is a pure
+///     function of the bytes fed to it -- no descriptor, no clock -- which
+///     is what lets the whole of the interesting logic be tested against a
+///     table of real sequences with no terminal anywhere near it.
+///   - **`Reader`**, the `Decoder` over a descriptor, with a timeout. An
+///     event loop that also has other work to do polls with `read(0)` or
+///     `read(16)` rather than blocking.
+///   - **`Writer`**, a buffer that goes to the terminal as ONE write. A
+///     redrawing program builds its whole frame and flushes it; a write per
+///     cell is what makes a terminal application flicker.
+///
+/// ### What is left out, and where it belongs
+///
+///   - **Colour beyond the escape sequence.** `fg(n)` and `fg_rgb(r, g, b)`
+///     write what they are told. Whether the terminal has 256 colours or
+///     true colour, and what to do when it has neither, is a capability
+///     question -- `$TERM`, terminfo -- and a framework's to answer.
+///   - **Cursor position reporting** (`ESC [ 6 n` and its reply). It is the
+///     one query whose answer comes back through the *input* stream, so
+///     using it means a read loop that can tell a reply from a keystroke.
+///     The decoder does report the reply -- it is an ordinary CSI, and it
+///     arrives as `Event.Unknown` -- but nothing here asks the question.
+///   - **Terminal capabilities, terminfo, `$TERM`.** Nothing here reads the
+///     environment. The sequences below are the ANSI/xterm ones that every
+///     terminal emulator written in the last thirty years understands.
+///   - **The X10 mouse encoding** (`ESC [ M` and three raw bytes). Only
+///     SGR (`ESC [ <`) is decoded, because X10 cannot express a column past
+///     223 and every terminal that has a mouse has had SGR for a decade.
+///     `MOUSE_ON` asks for SGR explicitly.
+///   - **A `Resize` event.** There is no SIGWINCH here, because the sys
+///     layer has no signal handler at all (docs/sys-layer.md §2). A program
+///     notices a resize by calling `size()` again, which is one system call
+///     and cheap enough to do once per frame.
+///
+/// ### When the program does not end tidily
+///
+/// A `Session`'s destructor covers every path the language can see. Three it
+/// cannot:
+///
+///   - **A trap** -- an index out of range, an overflow, `trap(msg)` --
+///     aborts and runs no destructor (reference §4.4). **This is covered
+///     anyway**: `raw()` hands the runtime a snapshot of the terminal, and
+///     the runtime puts it back from the trap path before it prints the
+///     message. That is not a signal handler; it is a function call on the
+///     way out (runtime/rt.c, "putting the terminal back").
+///   - **`os.exit(code)`**, which abandons every live object. Covered by the
+///     same snapshot, from the exit handler.
+///   - **A signal from outside** -- `kill`, a closed terminal window
+///     (SIGHUP), SIGSEGV, SIGKILL. **Not covered.** The terminal is left
+///     without echo and the way out is to type `reset` blind. Fixing it
+///     needs a real signal handler in the sys layer, which is a decision
+///     recorded and deliberately not taken: docs/sys-layer.md §2, "Signals:
+///     what is here, and what a handler would cost".
+///
+/// In raw mode `ISIG` is off, so ^C, ^Z and ^\ do not raise signals at all --
+/// they arrive as keys, and the program decides. That removes the signal a
+/// terminal program actually meets; what is left is the ones it was sent.
+import io;
+
+// Reading, writing and waiting need no primitives of their own: a terminal
+// is a descriptor. These are io's and net's, declared again here because a
+// prim is declared per module (docs/stdlib-seam.md).
+prim int __read(int fd, bytes buf, int off, int n);
+prim int __write_str(int fd, str s, int off, int n);
+prim int __poll(List<int> fds, List<int> events, List<int> revents, int timeout_ms);
+prim void __out_flush();
+// The terminal itself.
+prim int __isatty(int fd);
+prim int __tcget(int fd, List<int> out);
+prim int __tcset(int fd, int iflag, int oflag, int cflag, int lflag, int vmin, int vtime);
+prim int __winsize(int fd, List<int> out);
+// The runtime's safety net: a snapshot to put back if the process ends
+// without running a destructor. See the module note above.
+prim int __term_arm(int fd);
+prim int __term_disarm();
+
+// The sys layer's own termios bits (runtime/sys.h), written here as numbers
+// for the reason `io` writes the open flags as numbers and `net` the address
+// families: they are the LAYER's constants, not the host's, so 0x100 means
+// ICRNL on every target and a number here cannot drift from a header.
+const int I_IGNBRK = 0x001;
+const int I_BRKINT = 0x002;
+const int I_PARMRK = 0x008;
+const int I_ISTRIP = 0x020;
+const int I_INLCR = 0x040;
+const int I_IGNCR = 0x080;
+const int I_ICRNL = 0x100;
+const int I_IXON = 0x400;
+const int O_OPOST = 0x001;
+const int L_ISIG = 0x0001;
+const int L_ICANON = 0x0002;
+const int L_ECHO = 0x0008;
+const int L_ECHONL = 0x0040;
+const int L_IEXTEN = 0x8000;
+const int POLL_IN = 0x001;
+const int ENOTTY = 25;
+const int EINTR = 4;
+// One read of the terminal. A keystroke is a handful of bytes and a paste is
+// as long as the clipboard; this is what one read takes at most, and a paste
+// arrives across as many as it needs.
+const int CHUNK = 4096;
+// The end of a bracketed paste: ESC [ 2 0 1 ~
+const bytes PASTE_END = [27, 91, 50, 48, 49, 126];
+
+// --- errors ----------------------------------------------------------------
+/// Why a terminal operation did not work.
+///
+/// `NotATerminal` is the one a program branches on and the reason this is an
+/// enum rather than an errno: "standard input is a pipe" is not a failure, it
+/// is the ordinary case of a program whose output is being redirected, and
+/// the answer to it is to draw plainly rather than to give up. Everything
+/// else is `Other`, holding a Linux errno on every host, as `io.Error`'s does.
+pub enum Error {
+    NotATerminal;
+    Other(int);
+}
+
+/// A sentence saying what went wrong, so `print(e)` prints it.
+pub str Error.to_str() {
+    match (this) {
+        case NotATerminal: {
+            return "not a terminal";
+        }
+        case Other(int code): {
+            return "system error " + code.to_str();
+        }
+    }
+}
+
+/// The `Error` for a Linux errno -- positive, as errno is written; a
+/// primitive's `r < 0` is `from_errno(-r)`.
+pub Error from_errno(int e) {
+    if (e == ENOTTY) {
+        return Error.NotATerminal;
+    }
+    return Error.Other(e);
+}
+
+// --- keys ------------------------------------------------------------------
+/// Which key was pressed, without the modifiers.
+///
+/// `Char` carries a **Unicode scalar value**, not a byte: a terminal in raw
+/// mode sends UTF-8 and the decoder puts it back together, so a program sees
+/// one event for `é` and one for an emoji. It is the code point of the key as
+/// the terminal reported it, so a shifted `a` arrives as `Char(65)` -- an
+/// upper-case A -- and not as `Char(97)` with `SHIFT`, because that is what
+/// the terminal sends and inventing the other would be a guess.
+///
+/// `F(n)` is a function key, 1 through 20. Beyond 20 no two terminals agree.
+///
+/// There is deliberately no `Null`, no `Unknown` and no `Menu`: a sequence
+/// the decoder does not know becomes `Event.Unknown`, which carries the bytes
+/// so that a program can look at them.
+pub enum Code {
+    Char(int);
+    Enter;
+    Tab;
+    BackTab;
+    Backspace;
+    Escape;
+    Up;
+    Down;
+    Right;
+    Left;
+    Home;
+    End;
+    PageUp;
+    PageDown;
+    Insert;
+    Delete;
+    F(int);
+}
+
+/// The key's own name, without modifiers.
+pub str Code.to_str() {
+    match (this) {
+        case Char(int c): {
+            if (c == 32) {
+                return "space";
+            }
+            return str.from_chars([c]);
+        }
+        case Enter: {
+            return "enter";
+        }
+        case Tab: {
+            return "tab";
+        }
+        case BackTab: {
+            return "back-tab";
+        }
+        case Backspace: {
+            return "backspace";
+        }
+        case Escape: {
+            return "escape";
+        }
+        case Up: {
+            return "up";
+        }
+        case Down: {
+            return "down";
+        }
+        case Right: {
+            return "right";
+        }
+        case Left: {
+            return "left";
+        }
+        case Home: {
+            return "home";
+        }
+        case End: {
+            return "end";
+        }
+        case PageUp: {
+            return "page-up";
+        }
+        case PageDown: {
+            return "page-down";
+        }
+        case Insert: {
+            return "insert";
+        }
+        case Delete: {
+            return "delete";
+        }
+        case F(int n): {
+            return "f" + n.to_str();
+        }
+    }
+}
+
+/// The modifier bits in `Key.mods` and `Mouse.mods`.
+///
+/// These are xterm's own, one bit each, which is what the terminal sends: its
+/// modifier parameter is `1 + SHIFT | ALT | CTRL | META`, and the decoder
+/// subtracts the one. `META` is the fourth modifier some terminals put on the
+/// Super or Command key; most send nothing for it.
+pub const int SHIFT = 1;
+pub const int ALT = 2;
+pub const int CTRL = 4;
+pub const int META = 8;
+
+/// A key and the modifiers held with it.
+///
+/// **Not every combination can arrive.** A terminal is a byte stream, and
+/// most of them send Ctrl+letter as one control byte -- ^A is byte 1 -- which
+/// carries no room for Shift, so `Ctrl+Shift+A` is indistinguishable from
+/// `Ctrl+A` unless the terminal speaks the newer `CSI u` encoding, which this
+/// decoder does understand. Alt is usually an ESC prefix, so `Alt+a` arrives
+/// and is decoded. What a given terminal actually sends is the terminal's
+/// choice, not this module's.
+pub type Key {
+    pub Code code;
+    pub int mods;
+}
+
+/// Whether all of `m`'s bits are held -- `k.has(term.CTRL)`.
+pub bool Key.has(int m) {
+    return mods & m == m;
+}
+
+/// `ctrl+alt+c`, `f5`, `page-up`: a name for a key, for a log or a help line.
+///
+/// It is not a round trip and is not meant to be parsed. `Char` prints the
+/// character itself, except for the space, which prints as `space` so that a
+/// line of them can be read.
+pub str Key.to_str() {
+    str s = "";
+    if (mods & CTRL != 0) {
+        s = s + "ctrl+";
+    }
+    if (mods & ALT != 0) {
+        s = s + "alt+";
+    }
+    if (mods & SHIFT != 0) {
+        s = s + "shift+";
+    }
+    if (mods & META != 0) {
+        s = s + "meta+";
+    }
+    return s + code.to_str();
+}
+
+// --- the mouse -------------------------------------------------------------
+/// What the mouse did. A button is 0 for the left, 1 for the middle and 2 for
+/// the right; a terminal reports no more than three.
+pub enum MouseKind {
+    Down(int);
+    Up(int);
+    Drag(int);
+    Moved;
+    ScrollUp;
+    ScrollDown;
+    ScrollLeft;
+    ScrollRight;
+}
+
+/// The name of one mouse action.
+pub str MouseKind.to_str() {
+    match (this) {
+        case Down(int b): {
+            return button(b) + "-down";
+        }
+        case Up(int b): {
+            return button(b) + "-up";
+        }
+        case Drag(int b): {
+            return button(b) + "-drag";
+        }
+        case Moved: {
+            return "moved";
+        }
+        case ScrollUp: {
+            return "scroll-up";
+        }
+        case ScrollDown: {
+            return "scroll-down";
+        }
+        case ScrollLeft: {
+            return "scroll-left";
+        }
+        case ScrollRight: {
+            return "scroll-right";
+        }
+    }
+}
+
+/// A mouse report. `col` and `row` are 1-based, counting from the top left,
+/// the same numbering `move_to` takes.
+///
+/// Nothing arrives unless the program has asked for it by writing `MOUSE_ON`,
+/// and a terminal that reports a mouse at all reports it only while that is
+/// on. `MOUSE_OFF` gives the mouse back to the terminal, which is what lets
+/// the user select text with it again.
+pub type Mouse {
+    pub MouseKind kind;
+    pub int col;
+    pub int row;
+    pub int mods;
+}
+
+/// `left-down 12,3`, `scroll-up 40,9`: a name for a mouse report.
+pub str Mouse.to_str() {
+    str m = "";
+    if (mods & CTRL != 0) {
+        m = m + "ctrl+";
+    }
+    if (mods & ALT != 0) {
+        m = m + "alt+";
+    }
+    if (mods & SHIFT != 0) {
+        m = m + "shift+";
+    }
+    return m + kind.to_str() + " " + col.to_str() + "," + row.to_str();
+}
+
+str button(int b) {
+    if (b == 0) {
+        return "left";
+    }
+    if (b == 1) {
+        return "middle";
+    }
+    if (b == 2) {
+        return "right";
+    }
+    return "button" + b.to_str();
+}
+
+// --- events ----------------------------------------------------------------
+/// One thing the terminal said.
+///
+/// `Unknown` is not a failure and must not be treated as one: terminals send
+/// sequences nobody has a table for -- a cursor position report, a device
+/// attribute answer, a key from a keyboard protocol that postdates this
+/// module -- and the right thing to do with one is to ignore it. It carries
+/// the bytes so that a program which does know can look.
+pub enum Event {
+    Key(Key);
+    Mouse(Mouse);
+    Paste(str);
+    Unknown(bytes);
+}
+
+/// A name for the event, for a log or a test.
+pub str Event.to_str() {
+    match (this) {
+        case Key(Key k): {
+            return k.to_str();
+        }
+        case Mouse(Mouse m): {
+            return m.to_str();
+        }
+        case Paste(str t): {
+            return "paste[" + t + "]";
+        }
+        case Unknown(bytes b): {
+            return "unknown[" + b.hex() + "]";
+        }
+    }
+}
+
+// --- the decoder -----------------------------------------------------------
+// What one decoding attempt came to: how many bytes of the front of the
+// buffer the event used, and the event. `used == 0` means the buffer holds a
+// prefix that is not yet a whole sequence and `ev` is None -- the two always
+// agree, and nothing outside this file sees a Step.
+type Step {
+    int used;
+    Option<Event> ev;
+}
+
+Step more() {
+    return Step(0, Option<Event>.None);
+}
+
+Step one(int used, Code c, int mods) {
+    return Step(used, Option<Event>.Some(Event.Key(Key(c, mods))));
+}
+
+Step unknown(bytes b, int n) {
+    return Step(n, Option<Event>.Some(Event.Unknown(b.substr(0, n))));
+}
+
+/// Bytes in, events out, and **nothing else**: no descriptor, no clock, no
+/// state but the bytes it has been handed. That is what makes the hard part
+/// of this module testable -- `corpus/modules/term-keys` drives it over a
+/// table of real xterm, screen and Linux-console sequences with no terminal
+/// in sight.
+///
+/// **A sequence split across two reads is the case this exists for.** At 9600
+/// baud, over ssh, or through a pty under load, `ESC [ 1 ; 5 A` arrives as
+/// `ESC [ 1` and then `; 5 A`, and a decoder that looked at one read at a
+/// time would report an Escape, a `[` and a `1`. So `next()` answers `None`
+/// while the buffer holds a prefix that could still grow, and the bytes stay
+/// put until the rest of them turn up.
+///
+/// **`flush()` is how a prefix that will never grow is resolved.** A lone
+/// ESC is the classic: it is a whole key, and it is also the first byte of
+/// every other special key, and the only thing that tells them apart is that
+/// nothing followed it. Only the caller knows that nothing did -- `Reader`
+/// decides it with a timeout -- so the decoder does not guess.
+pub type Decoder {
+    bytes buf = [];
+}
+
+/// Add bytes, as they came off the descriptor.
+pub void Decoder.feed(bytes b) {
+    buf.extend(b);
+}
+
+/// How many bytes are held but not yet decoded. Zero means the decoder is
+/// empty; anything else after `next()` has answered `None` is an incomplete
+/// sequence waiting for the rest of itself.
+pub int Decoder.pending() {
+    return buf.size();
+}
+
+/// The next whole event, or `None` if what is held is a prefix of one.
+pub Option<Event> Decoder.next() {
+    return take(false);
+}
+
+/// The next event, treating what is held as all there will ever be: a lone
+/// ESC becomes Escape, and an unfinishable sequence becomes `Unknown`. Call
+/// it when a read has timed out with `pending()` above zero.
+pub Option<Event> Decoder.flush() {
+    return take(true);
+}
+
+Option<Event> Decoder.take(bool last) {
+    Step s = step(buf, last);
+    if (s.used == 0) {
+        return Option<Event>.None;
+    }
+    buf.drop_front(s.used);
+    return s.ev;
+}
+
+/// A decoder with nothing in it.
+pub Decoder decoder() {
+    return Decoder();
+}
+
+/// Every event in `b`, with `b` treated as a complete input.
+///
+/// The one-call form of feed-next-flush, for a program that has the bytes
+/// already -- a test, a recorded session, a script driving a pty.
+pub List<Event> decode(bytes b) {
+    Decoder d = decoder();
+    d.feed(b);
+    List<Event> evs = [];
+    while (true) {
+        match (d.next()) {
+            case Some(Event e): {
+                evs.push(e);
+            }
+            case None: {
+                break;
+            }
+        }
+    }
+    while (d.pending() > 0) {
+        match (d.flush()) {
+            case Some(Event e): {
+                evs.push(e);
+            }
+            case None: {
+                break;
+            }
+        }
+    }
+    return evs;
+}
+
+// One event off the front of `b`. `last` says that no more bytes are coming,
+// which is the only thing that can resolve a lone ESC or an unfinished
+// sequence.
+Step step(bytes b, bool last) {
+    if (b.size() == 0) {
+        return more();
+    }
+    int c0 = b[0];
+    if (c0 != 27) {
+        Step s = plain(b, 0, 0);
+        if (s.used == 0 && last) {
+            return unknown(b, b.size());
+        }
+        return s;
+    }
+    if (b.size() == 1) {
+        if (last) {
+            return one(1, Code.Escape, 0);
+        }
+        return more();
+    }
+    int c1 = b[1];
+    if (c1 == 27) {
+        // ESC ESC. The first is a key in its own right; whatever the second
+        // one begins is decoded on the next call.
+        return one(1, Code.Escape, 0);
+    }
+    if (c1 == 91) {
+        return csi(b, last);
+    }
+    if (c1 == 79) {
+        return ss3(b, last);
+    }
+    // Anything else after an ESC is how nearly every terminal spells Alt.
+    Step s = plain(b, 1, ALT);
+    if (s.used == 0) {
+        if (last) {
+            return unknown(b, b.size());
+        }
+        return more();
+    }
+    return Step(s.used + 1, s.ev);
+}
+
+// One key that is not an escape sequence: a control byte, or a character in
+// UTF-8. `mods` is what the caller has already worked out -- ALT, when this
+// is the tail of an ESC-prefixed key.
+Step plain(bytes b, int at, int mods) {
+    int c = b[at];
+    // Enter is 13 and ONLY 13. It sits inside the control range below and is
+    // taken out of it because it is a key with a name rather than Ctrl+M.
+    //
+    // 10 is deliberately NOT Enter here, and that is the one place this
+    // decoder assumes raw mode. A cooked terminal turns the 13 the keyboard
+    // sends into a 10 on the way in (ICRNL), and `raw()` turns that off --
+    // so in raw mode a 10 can only be Ctrl+J, and calling it Enter would make
+    // Ctrl+J unreachable in order to serve a mode this module exists to leave.
+    if (c == 13) {
+        return one(1, Code.Enter, mods);
+    }
+    if (c == 9) {
+        return one(1, Code.Tab, mods);
+    }
+    // 127 is what a terminal sends for the key marked Backspace; 8 is Ctrl+H,
+    // which the same key sends on a few of them. They cannot be told apart
+    // and the useful reading is the same.
+    if (c == 127 || c == 8) {
+        return one(1, Code.Backspace, mods);
+    }
+    if (c == 0) {
+        return one(1, Code.Char(32), mods | CTRL);
+    }
+    if (c >= 1 && c <= 26) {
+        // ^A is 1 and 'a' is 97.
+        return one(1, Code.Char(c + 96), mods | CTRL);
+    }
+    if (c >= 28 && c <= 31) {
+        // The four control codes that are not a letter. ASCII makes a control
+        // code by clearing the top three bits, so 28 is '\' and 31 is '_',
+        // and reporting the character those bits came from is the reading a
+        // user can check against the key they pressed.
+        return one(1, Code.Char(c + 64), mods | CTRL);
+    }
+    if (c == 27) {
+        return one(1, Code.Escape, mods);
+    }
+    if (c < 128) {
+        return one(1, Code.Char(c), mods);
+    }
+    // UTF-8. The length comes from the lead byte, and the bytes themselves
+    // are handed to the language's own decoder rather than to a second one
+    // written here: `utf8()` refuses an overlong form, a surrogate and a
+    // value past U+10FFFF, which is exactly the set a key may not carry.
+    int n = utf8_len(c);
+    if (n == 0) {
+        return unknown(b.substr(at, at + 1), 1);
+    }
+    if (at + n > b.size()) {
+        return more();
+    }
+    match (b.substr(at, at + n).utf8()) {
+        case Some(str s): {
+            return one(n, Code.Char(s.chars()[0]), mods);
+        }
+        case None: {
+            return unknown(b.substr(at, at + 1), 1);
+        }
+    }
+}
+
+// How many bytes a UTF-8 sequence beginning with `c` takes, or 0 if `c` is
+// not a lead byte.
+int utf8_len(int c) {
+    if (c < 0x80) {
+        return 1;
+    }
+    if (c & 0xE0 == 0xC0) {
+        return 2;
+    }
+    if (c & 0xF0 == 0xE0) {
+        return 3;
+    }
+    if (c & 0xF8 == 0xF0) {
+        return 4;
+    }
+    return 0;
+}
+
+// ESC O x -- the "application" spelling of the arrows, the home and end keys
+// and F1 to F4. A terminal chooses between this and ESC [ x depending on a
+// mode the program may never have set, so both have to be understood.
+Step ss3(bytes b, bool last) {
+    if (b.size() < 3) {
+        if (last) {
+            return unknown(b, b.size());
+        }
+        return more();
+    }
+    int c = b[2];
+    if (c == 65) {
+        return one(3, Code.Up, 0);
+    }
+    if (c == 66) {
+        return one(3, Code.Down, 0);
+    }
+    if (c == 67) {
+        return one(3, Code.Right, 0);
+    }
+    if (c == 68) {
+        return one(3, Code.Left, 0);
+    }
+    if (c == 72) {
+        return one(3, Code.Home, 0);
+    }
+    if (c == 70) {
+        return one(3, Code.End, 0);
+    }
+    if (c >= 80 && c <= 83) {
+        return one(3, Code.F(c - 79), 0);
+    }
+    return unknown(b, 3);
+}
+
+// A parsed CSI sequence: ESC [ , an optional private marker, numeric
+// parameters separated by semicolons, and a final byte.
+//
+// `state` is 0 while the sequence is incomplete, 1 when the final byte has
+// arrived, and 2 when a byte turned up that cannot appear in one at all.
+type Csi {
+    int state;
+    int end;
+    int marker;
+    List<int> params;
+    int final;
+}
+
+Csi scan_csi(bytes b, int from) {
+    List<int> ps = [];
+    int i = from;
+    int marker = 0;
+    if (i < b.size()) {
+        int c = b[i];
+        // '<' '=' '>' '?' -- a private-use introducer, and only in first
+        // position. SGR mouse reports use '<'.
+        if (c >= 60 && c <= 63) {
+            marker = c;
+            i = i + 1;
+        }
+    }
+    // -1 is "this parameter was left out", which is not the same as 0: the
+    // terminal writes ESC [ ; 5 A for a modified arrow with no first
+    // parameter, and the default for a missing one depends on the final byte.
+    int cur = -1;
+    while (i < b.size()) {
+        int c = b[i];
+        if (c >= 48 && c <= 57) {
+            if (cur < 0) {
+                cur = 0;
+            }
+            // Clamped rather than allowed to overflow: a parameter this
+            // large is a terminal misbehaving, and arithmetic traps.
+            if (cur < 1000000) {
+                cur = cur * 10 + (c - 48);
+            }
+            i = i + 1;
+        } else if (c == 59) {
+            ps.push(cur);
+            cur = -1;
+            i = i + 1;
+        } else if (c >= 0x20 && c <= 0x3F) {
+            // An intermediate byte, or a sub-parameter after a colon. Both
+            // are skipped: nothing decoded here depends on one.
+            i = i + 1;
+        } else if (c >= 0x40 && c <= 0x7E) {
+            ps.push(cur);
+            return Csi(1, i + 1, marker, ps, c);
+        } else {
+            return Csi(2, i, marker, ps, 0);
+        }
+    }
+    return Csi(0, 0, marker, ps, 0);
+}
+
+// Parameter `i`, or `dflt` if it was left out.
+int param(List<int> ps, int i, int dflt) {
+    if (i >= ps.size()) {
+        return dflt;
+    }
+    if (ps[i] < 0) {
+        return dflt;
+    }
+    return ps[i];
+}
+
+// xterm's modifier parameter is 1 + the bits, so 5 is Ctrl and 1 is nothing.
+int mods_of(int p) {
+    if (p < 1) {
+        return 0;
+    }
+    return p - 1 & 15;
+}
+
+Step csi(bytes b, bool last) {
+    // ESC [ [ A .. ESC [ [ E -- the Linux console's F1 to F5, which is the
+    // one sequence in common use that is not a well-formed CSI.
+    if (b.size() >= 3 && b[2] == 91) {
+        if (b.size() < 4) {
+            if (last) {
+                return unknown(b, b.size());
+            }
+            return more();
+        }
+        int c = b[3];
+        if (c >= 65 && c <= 69) {
+            return one(4, Code.F(c - 64), 0);
+        }
+        return unknown(b, 4);
+    }
+    Csi s = scan_csi(b, 2);
+    if (s.state == 0) {
+        if (last) {
+            return unknown(b, b.size());
+        }
+        return more();
+    }
+    if (s.state == 2) {
+        return unknown(b, s.end);
+    }
+    int fin = s.final;
+    int used = s.end;
+    if (s.marker == 60) {
+        if (fin == 77 || fin == 109) {
+            return mouse(s.params, fin, used);
+        }
+        return unknown(b, used);
+    }
+    if (s.marker != 0) {
+        // A private reply -- a device attribute answer, a mode report. Not a
+        // key, and not this module's to interpret.
+        return unknown(b, used);
+    }
+    int mods = mods_of(param(s.params, 1, 1));
+    if (fin >= 80 && fin <= 83) {
+        // ESC [ 1 ; 3 P and friends: F1 to F4 held with a modifier, which is
+        // how xterm spells them when the plain forms are ESC O P .. ESC O S.
+        //
+        // The first parameter must be 1 or absent, and that is not pedantry:
+        // ESC [ 10 ; 20 R with the same final byte is a CURSOR POSITION
+        // REPORT, the answer to a question some other part of a program may
+        // have asked. Reading it as F3 with a modifier would be a wrong key
+        // rather than an unknown one, which is the worse failure.
+        if (param(s.params, 0, 1) == 1) {
+            return one(used, Code.F(fin - 79), mods);
+        }
+        return unknown(b, used);
+    }
+    if (fin == 126) {
+        int p0 = param(s.params, 0, 0);
+        if (p0 == 200) {
+            return paste(b, used, last);
+        }
+        match (tilde(p0)) {
+            case Some(Code c): {
+                return one(used, c, mods);
+            }
+            case None: {
+                return unknown(b, used);
+            }
+        }
+    }
+    if (fin == 117) {
+        // CSI u: a code point and its modifiers, which is the only encoding
+        // that can say Ctrl+Shift+A. Kitty and recent xterms send it.
+        int cp = param(s.params, 0, -1);
+        match (csi_u(cp)) {
+            case Some(Code c): {
+                return one(used, c, mods);
+            }
+            case None: {
+                return unknown(b, used);
+            }
+        }
+    }
+    match (letter(fin)) {
+        case Some(Code c): {
+            return one(used, c, mods);
+        }
+        case None: {
+            return unknown(b, used);
+        }
+    }
+}
+
+// The final byte of a CSI that names a key directly.
+Option<Code> letter(int fin) {
+    if (fin == 65) {
+        return Option<Code>.Some(Code.Up);
+    }
+    if (fin == 66) {
+        return Option<Code>.Some(Code.Down);
+    }
+    if (fin == 67) {
+        return Option<Code>.Some(Code.Right);
+    }
+    if (fin == 68) {
+        return Option<Code>.Some(Code.Left);
+    }
+    if (fin == 70) {
+        return Option<Code>.Some(Code.End);
+    }
+    if (fin == 72) {
+        return Option<Code>.Some(Code.Home);
+    }
+    if (fin == 90) {
+        return Option<Code>.Some(Code.BackTab);
+    }
+    return Option<Code>.None;
+}
+
+// The number before the `~`, in the numbering every terminal since the VT220
+// has used. The gaps are real -- there is no 16, 22, 27 or 30 -- and the
+// duplicates are real too: 1 and 7 are both Home because different terminals
+// chose differently.
+Option<Code> tilde(int n) {
+    if (n == 1 || n == 7) {
+        return Option<Code>.Some(Code.Home);
+    }
+    if (n == 2) {
+        return Option<Code>.Some(Code.Insert);
+    }
+    if (n == 3) {
+        return Option<Code>.Some(Code.Delete);
+    }
+    if (n == 4 || n == 8) {
+        return Option<Code>.Some(Code.End);
+    }
+    if (n == 5) {
+        return Option<Code>.Some(Code.PageUp);
+    }
+    if (n == 6) {
+        return Option<Code>.Some(Code.PageDown);
+    }
+    if (n >= 11 && n <= 15) {
+        return Option<Code>.Some(Code.F(n - 10));
+    }
+    if (n >= 17 && n <= 21) {
+        return Option<Code>.Some(Code.F(n - 11));
+    }
+    if (n >= 23 && n <= 26) {
+        return Option<Code>.Some(Code.F(n - 12));
+    }
+    if (n >= 28 && n <= 29) {
+        return Option<Code>.Some(Code.F(n - 13));
+    }
+    if (n >= 31 && n <= 34) {
+        return Option<Code>.Some(Code.F(n - 14));
+    }
+    return Option<Code>.None;
+}
+
+// The code point a CSI u sequence names. The four that have keys of their own
+// are reported as those keys, so a program matching on Enter sees an Enter
+// whichever encoding the terminal used.
+Option<Code> csi_u(int cp) {
+    if (cp == 13) {
+        return Option<Code>.Some(Code.Enter);
+    }
+    if (cp == 9) {
+        return Option<Code>.Some(Code.Tab);
+    }
+    if (cp == 27) {
+        return Option<Code>.Some(Code.Escape);
+    }
+    if (cp == 127 || cp == 8) {
+        return Option<Code>.Some(Code.Backspace);
+    }
+    // A surrogate or a value past the last plane has no character, and
+    // `str.from_chars` would trap on one -- so it is refused here rather than
+    // carried into a Key that nothing could print.
+    if (cp < 1 || cp > 0x10FFFF) {
+        return Option<Code>.None;
+    }
+    if (cp >= 0xD800 && cp <= 0xDFFF) {
+        return Option<Code>.None;
+    }
+    return Option<Code>.Some(Code.Char(cp));
+}
+
+// ESC [ < b ; col ; row M or m -- the SGR mouse encoding, the only one this
+// module reads (see the note at the top).
+Step mouse(List<int> ps, int fin, int used) {
+    int cb = param(ps, 0, 0);
+    int col = param(ps, 1, 1);
+    int row = param(ps, 2, 1);
+    int mods = 0;
+    if (cb & 4 != 0) {
+        mods = mods | SHIFT;
+    }
+    if (cb & 8 != 0) {
+        mods = mods | ALT;
+    }
+    if (cb & 16 != 0) {
+        mods = mods | CTRL;
+    }
+    int btn = cb & 3;
+    MouseKind k = MouseKind.Moved;
+    if (cb & 64 != 0) {
+        if (btn == 0) {
+            k = MouseKind.ScrollUp;
+        } else if (btn == 1) {
+            k = MouseKind.ScrollDown;
+        } else if (btn == 2) {
+            k = MouseKind.ScrollLeft;
+        } else {
+            k = MouseKind.ScrollRight;
+        }
+    } else if (cb & 32 != 0) {
+        if (btn != 3) {
+            k = MouseKind.Drag(btn);
+        }
+    } else if (fin == 109) {
+        k = MouseKind.Up(btn);
+    } else if (btn != 3) {
+        k = MouseKind.Down(btn);
+    }
+    return Step(used, Option<Event>.Some(Event.Mouse(Mouse(k, col, row, mods))));
+}
+
+// A bracketed paste: everything between ESC [ 200 ~ and ESC [ 201 ~, which is
+// how a terminal says "the user pasted this, it is not typing". `body` starts
+// at `from`, which is just past the opening marker.
+//
+// The whole paste is held until its end arrives, which is what makes it worth
+// having: the point of bracketed paste is that a program can tell a pasted
+// newline from a pressed Enter, and it cannot do that one key at a time.
+Step paste(bytes b, int from, bool last) {
+    match (b.index_of(PASTE_END)) {
+        case Some(int at): {
+            bytes body = b.substr(from, at);
+            match (body.utf8()) {
+                case Some(str t): {
+                    return Step(at + PASTE_END.size(), Option<Event>.Some(Event.Paste(t)));
+                }
+                case None: {
+                    // A paste that is not text. There is nothing honest to
+                    // put in a `str`, so the bytes go out as they are.
+                    return unknown(b, at + PASTE_END.size());
+                }
+            }
+        }
+        case None: {
+            if (last) {
+                return unknown(b, b.size());
+            }
+            return more();
+        }
+    }
+}
+
+// --- reading ---------------------------------------------------------------
+/// What one call to `Reader.read` found.
+///
+/// Three outcomes and not an `Option<Event>`, because "nothing yet" and "the
+/// terminal is gone" are different answers and an event loop acts differently
+/// on each: it goes round again on a timeout and stops on an end.
+pub enum Input {
+    Got(Event);
+    Timeout;
+    End;
+}
+
+/// Keys off a descriptor, with a timeout.
+///
+/// One `Reader` per descriptor and no more: it buffers, so two of them on one
+/// terminal would each hold keys the other never sees -- the rule `io.stdin`
+/// already follows.
+pub type Reader {
+    int fd;
+    Decoder dec = decoder();
+    bytes buf = [0; CHUNK];
+}
+
+/// How many undecoded bytes are held. A loop that wants to drain what has
+/// already arrived before doing anything else reads with a timeout of 0 until
+/// this is zero and the answer is `Timeout`.
+pub int Reader.pending() {
+    return dec.pending();
+}
+
+/// The next event, waiting at most `timeout_ms` for one. Negative waits for
+/// ever; zero asks what has arrived already and returns at once.
+///
+/// The timeout has no default and is written at every call, because there is
+/// no answer that is right for both halves of what this is for: a loop that
+/// only reads keys passes -1, and a loop that also has work of its own passes
+/// the milliseconds it can spare. A default would make one of them silent.
+///
+/// **The timeout is what resolves a lone Escape.** An Escape is a whole key
+/// and also the first byte of every arrow and function key, and the only
+/// difference is that nothing follows it. So when a wait of more than zero
+/// runs out with an unfinished sequence in hand, that sequence is taken as
+/// final: a bare ESC becomes `Escape`. A program that wants the Escape key to
+/// feel immediate passes a small timeout -- 25 to 50 milliseconds is what
+/// terminal applications have always used -- and one that does not care
+/// passes -1 and gets the Escape when the next key arrives.
+///
+/// **A timeout of exactly 0 never resolves one.** It asks what has already
+/// arrived, and half a sequence has not arrived; a loop draining with 0
+/// between two reads is the most likely place of all to catch a sequence
+/// mid-flight, and turning it into an Escape there would be the bug this
+/// decoder is built to avoid. The bytes stay, `pending()` says so, and the
+/// next read with a real timeout finishes the job.
+///
+/// The end of the input always resolves one, whatever the timeout: nothing
+/// more is coming from a terminal that has closed.
+///
+/// **A partial sequence restarts the timeout**, rather than continuing with
+/// what was left of it. That is the rule `sys_poll` already follows for an
+/// interrupted wait (runtime/sys.h), and it is chosen for the same reason:
+/// two implementations that disagreed about the remainder would be worse than
+/// one that is generous. A deadline a program really cares about is one it
+/// should be checking against a clock of its own.
+///
+/// Interruption by a signal is hidden, as it is everywhere in `io`.
+pub Result<Input, Error> Reader.read(int timeout_ms) {
+    while (true) {
+        match (dec.next()) {
+            case Some(Event e): {
+                return Result<Input, Error>.Ok(Input.Got(e));
+            }
+            case None: {
+            }
+        }
+        List<int> fds = [fd];
+        List<int> want = [POLL_IN];
+        List<int> got = [];
+        int n = __poll(fds, want, got, timeout_ms);
+        if (n < 0) {
+            return Result<Input, Error>.Err(from_errno(-n));
+        }
+        if (n == 0) {
+            // A timeout of 0 asks what has ALREADY arrived, and half a
+            // sequence has not arrived. Resolving it here would turn a split
+            // ESC [ 1 ; 5 A into an Escape in any loop that drains with 0 --
+            // which is the loop most likely to see one split, since it runs
+            // between two reads rather than after a pause.
+            if (timeout_ms == 0) {
+                return Result<Input, Error>.Ok(Input.Timeout);
+            }
+            return Result<Input, Error>.Ok(finish(Input.Timeout));
+        }
+        int r = __read(fd, buf, 0, buf.size());
+        if (r == -EINTR) {
+            continue;
+        }
+        if (r < 0) {
+            return Result<Input, Error>.Err(from_errno(-r));
+        }
+        if (r == 0) {
+            return Result<Input, Error>.Ok(finish(Input.End));
+        }
+        dec.feed(buf.substr(0, r));
+    }
+}
+
+// Nothing more is coming -- the wait ran out, or the terminal closed -- so an
+// unfinished sequence is as finished as it will get. `otherwise` is what to
+// answer when there was nothing pending.
+Input Reader.finish(Input otherwise) {
+    if (dec.pending() > 0) {
+        match (dec.flush()) {
+            case Some(Event e): {
+                return Input.Got(e);
+            }
+            case None: {
+            }
+        }
+    }
+    return otherwise;
+}
+
+/// A reader on `fd`, standard input by default.
+pub Reader reader(int fd = 0) {
+    return Reader(fd);
+}
+
+// --- the terminal itself ---------------------------------------------------
+/// Whether `fd` is a terminal. Never fails: a closed descriptor, a pipe and
+/// a file are all simply not one.
+pub bool is_terminal(int fd) {
+    return __isatty(fd) == 1;
+}
+
+/// How many character cells the window has.
+pub type Size {
+    pub int rows;
+    pub int cols;
+}
+
+/// `80x24`, columns first, the way a terminal's own size is written.
+pub str Size.to_str() {
+    return cols.to_str() + "x" + rows.to_str();
+}
+
+/// The window's size, from the descriptor's terminal -- standard output by
+/// default, because that is the one being drawn on.
+///
+/// **A terminal that does not know its size answers `0x0`**, and that is not
+/// an error: a serial line has no size to report and a pty has none until
+/// something sets one. A caller that needs a number picks its own fallback,
+/// which is 80 by 24 by long tradition.
+///
+/// There is no way to be told the size changed. Call this again -- once a
+/// frame is nothing -- and see the module note on signals for why.
+pub Result<Size, Error> size(int fd = 1) {
+    List<int> out = [];
+    int r = __winsize(fd, out);
+    if (r < 0) {
+        return Result<Size, Error>.Err(from_errno(-r));
+    }
+    return Result<Size, Error>.Ok(Size(out[0], out[1]));
+}
+
+/// Raw mode, held for as long as this value is.
+///
+/// **Its destructor restores the terminal**, so the program cannot leave one
+/// broken by returning early, by propagating an error with `?`, or by
+/// forgetting. Hold it in the scope that draws:
+///
+///     match (term.raw()) {
+///         case Ok(term.Session s): {
+///             s.on_exit(term.SHOW_CURSOR + term.ALT_SCREEN_OFF);
+///             ... draw, read keys ...
+///         }                              // restored here, whatever happened
+///         case Err(term.Error e): { ... }
+///     }
+///
+/// It owns a resource, so it cannot be cloned and cannot be bound to a
+/// `const` (reference §4.4) -- there is one terminal and one session over it.
+pub type Session {
+    int in_fd;
+    int out_fd;
+    int iflag;
+    int oflag;
+    int cflag;
+    int lflag;
+    int vmin;
+    int vtime;
+    str leave = "";
+    bool live = true;
+}
+
+/// Sequences to write when the session ends, in the order given.
+///
+/// This is how leaving raw mode also undoes what was written to get INTO it:
+/// the alternate screen, a hidden cursor, mouse reporting, bracketed paste.
+/// Termios is only half of the state a full-screen program changes, and the
+/// other half is bytes -- so the destructor writes them too, and a program
+/// that says `s.on_exit(term.SHOW_CURSOR)` cannot leave the cursor hidden.
+///
+/// Best effort: the write is one call and its result is not reported, because
+/// a destructor has nobody to report to.
+pub void Session.on_exit(str s) {
+    leave = leave + s;
+}
+
+/// Put the terminal back now, and say whether it worked.
+///
+/// The destructor does exactly this and ignores the answer; call it yourself
+/// when the answer matters, or to leave raw mode before the session's scope
+/// ends. Calling it twice is not an error and the second time does nothing.
+pub Result<bool, Error> Session.restore() {
+    if (!live) {
+        return Result<bool, Error>.Ok(true);
+    }
+    live = false;
+    if (leave.size() > 0) {
+        // Through the runtime's own buffer first, so that anything `print`
+        // has waiting lands before these sequences rather than after them.
+        __out_flush();
+        int w = __write_str(out_fd, leave, 0, leave.size());
+    }
+    int d = __term_disarm();
+    int r = __tcset(in_fd, iflag, oflag, cflag, lflag, vmin, vtime);
+    if (r < 0) {
+        return Result<bool, Error>.Err(from_errno(-r));
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+// The destructor is `restore()` with the answer thrown away, and it calls it
+// by name rather than sharing a private helper with it -- unlike `io.File`,
+// which needs one because `close()` is also the channel builtin and a bare
+// call to it is ambiguous. There is no such clash here, so there is no reason
+// for two entry points to the same three system calls.
+void Session.drop() {
+    Result<bool, Error> ignored = restore();
+}
+
+/// Turn the line discipline off on `in_fd` and answer a `Session` that will
+/// turn it back on.
+///
+/// Raw mode here is the usual set, and each of them is off for a reason a
+/// drawing program has:
+///
+///   - `ECHO`, so a keystroke does not appear where the program did not put
+///     it, and `ECHONL` with it;
+///   - `ICANON`, so a read hands over keys as they are pressed instead of
+///     waiting for a line, with `VMIN` 1 and `VTIME` 0 so that a read waits
+///     for exactly one byte;
+///   - `ISIG`, so ^C, ^Z and ^\ arrive as keys rather than as signals. That
+///     is what makes a terminal program's Ctrl+C its own to handle -- and
+///     also what makes this module's job possible at all, since the sys
+///     layer has no signal handler to catch them with;
+///   - `IEXTEN`, so ^V does not swallow the key after it;
+///   - `IXON`, so ^S does not freeze the terminal and ^Q does not unfreeze
+///     it, both of which are keys a program may want;
+///   - `ICRNL`, `INLCR` and `IGNCR`, so Enter is the byte the terminal sent
+///     rather than a translation of it;
+///   - `ISTRIP`, so the eighth bit survives and UTF-8 with it, and `BRKINT`,
+///     `IGNBRK` and `PARMRK`, which are about a serial line's breaks and
+///     parity errors and only get in the way here;
+///   - `OPOST`, so a newline the program writes is one byte and the cursor
+///     goes exactly where the program put it. **This is the one that
+///     surprises people**: with `OPOST` off, printing a line leaves the
+///     cursor in the same column, so output that used to start at the left
+///     margin now walks down the screen in a staircase. Write `\r\n`, or
+///     move the cursor.
+///
+/// The control-mode word is left exactly as it was: character size, parity
+/// and line speed belong to a serial line, and a terminal emulator or a pty
+/// has them right already.
+pub Result<Session, Error> raw(int in_fd = 0, int out_fd = 1) {
+    if (__isatty(in_fd) != 1) {
+        return Result<Session, Error>.Err(Error.NotATerminal);
+    }
+    List<int> t = [];
+    int g = __tcget(in_fd, t);
+    if (g < 0) {
+        return Result<Session, Error>.Err(from_errno(-g));
+    }
+    int iflag = t[0];
+    int oflag = t[1];
+    int cflag = t[2];
+    int lflag = t[3];
+    int vmin = t[4];
+    int vtime = t[5];
+    // The runtime's snapshot, taken before anything is changed. It is what
+    // puts the terminal back if the process ends without running a
+    // destructor -- a trap, or os.exit. See the module note.
+    int a = __term_arm(in_fd);
+    if (a < 0) {
+        return Result<Session, Error>.Err(from_errno(-a));
+    }
+    int ni = iflag & ~(I_IGNBRK | I_BRKINT | I_PARMRK | I_ISTRIP | I_INLCR | I_IGNCR | I_ICRNL | I_IXON);
+    int no = oflag & ~O_OPOST;
+    int nl = lflag & ~(L_ECHO | L_ECHONL | L_ICANON | L_ISIG | L_IEXTEN);
+    int w = __tcset(in_fd, ni, no, cflag, nl, 1, 0);
+    if (w < 0) {
+        int d = __term_disarm();
+        return Result<Session, Error>.Err(from_errno(-w));
+    }
+    return Result<Session, Error>.Ok(Session(in_fd, out_fd, iflag, oflag, cflag, lflag, vmin, vtime));
+}
+
+// --- writing ---------------------------------------------------------------
+/// A buffer whose contents reach the terminal as ONE write.
+///
+/// This is the anti-flicker tool, and it is the reason this type exists at
+/// all rather than leaving a program to call `io.File.write`: a full-screen
+/// redraw is thousands of small pieces -- a cursor move, a colour, a run of
+/// text, per cell -- and writing each one costs a system call and lets the
+/// terminal draw a half-finished frame. Build the frame here and `flush()`
+/// it, and the terminal sees one complete update.
+///
+/// A trailing `flush()` is the program's to remember. A `Writer` let go with
+/// bytes still in it loses them, on purpose: a destructor that wrote to a
+/// terminal at a moment nobody chose would be worse than a lost frame.
+pub type Writer {
+    io.File f;
+    bytes buf = [];
+}
+
+/// Add text to the frame.
+pub void Writer.put(str s) {
+    buf.extend(s.to_bytes());
+}
+
+/// Add octets to the frame, for a caller that already has them.
+pub void Writer.put_bytes(bytes b) {
+    buf.extend(b);
+}
+
+/// How many bytes are waiting.
+pub int Writer.pending() {
+    return buf.size();
+}
+
+/// Write everything at once, and empty the buffer.
+///
+/// On an error the bytes are **left in the buffer**: a `write` that fails has
+/// written an unknown amount (`io`'s rule), so there is nothing useful to do
+/// with a half-written frame but throw the whole stream away -- and a caller
+/// that wants to look at what it was drawing still can.
+pub Result<int, io.Error> Writer.flush() {
+    if (buf.size() == 0) {
+        return Result<int, io.Error>.Ok(0);
+    }
+    int n = f.write(buf)?;
+    buf.clear();
+    return Result<int, io.Error>.Ok(n);
+}
+
+/// A `Writer` over a stream -- `term.writer(io.stdout())` for the usual case.
+pub Writer writer(io.File f) {
+    return Writer(f);
+}
+
+// --- sequences -------------------------------------------------------------
+// The fixed ones are constants, so a program that writes them in a loop
+// allocates nothing: a module constant's string is static, immortal data
+// (reference §4.5, §7.3).
+
+/// Erase the whole screen. The cursor does not move -- follow it with `HOME`,
+/// or with `move_to`.
+pub const str CLEAR = "\x1b[2J";
+/// Erase from the cursor to the end of the screen.
+pub const str CLEAR_BELOW = "\x1b[0J";
+/// Erase the line the cursor is on.
+pub const str CLEAR_LINE = "\x1b[2K";
+/// Erase from the cursor to the end of its line.
+pub const str CLEAR_RIGHT = "\x1b[0K";
+/// The top left cell -- the same as `move_to(1, 1)`, without the arithmetic.
+pub const str HOME = "\x1b[H";
+pub const str HIDE_CURSOR = "\x1b[?25l";
+pub const str SHOW_CURSOR = "\x1b[?25h";
+/// Remember and recall where the cursor is, in the terminal rather than in
+/// the program. Useful for writing over a line without losing the place.
+pub const str SAVE_CURSOR = "\x1b[s";
+pub const str RESTORE_CURSOR = "\x1b[u";
+/// The alternate screen: a second, scrollback-free buffer that a full-screen
+/// program draws on so that the user's shell is still there afterwards.
+/// Always pair these, and prefer `Session.on_exit` to remembering.
+pub const str ALT_SCREEN_ON = "\x1b[?1049h";
+pub const str ALT_SCREEN_OFF = "\x1b[?1049l";
+/// Bracketed paste: the terminal wraps pasted text in markers, which is what
+/// lets the decoder report `Event.Paste` instead of a flood of keys.
+pub const str PASTE_ON = "\x1b[?2004h";
+pub const str PASTE_OFF = "\x1b[?2004l";
+/// Mouse reporting: buttons, drags, and the SGR encoding the decoder reads.
+/// While this is on the terminal's own selection is disabled, which is why a
+/// program that turns it on should turn it off again.
+pub const str MOUSE_ON = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+pub const str MOUSE_OFF = "\x1b[?1006l\x1b[?1002l\x1b[?1000l";
+/// Back to no colour and no attribute.
+pub const str RESET = "\x1b[0m";
+pub const str BOLD = "\x1b[1m";
+pub const str DIM = "\x1b[2m";
+pub const str ITALIC = "\x1b[3m";
+pub const str UNDERLINE = "\x1b[4m";
+pub const str REVERSE = "\x1b[7m";
+
+/// Put the cursor at `row`, `col`, both **1-based** from the top left, which
+/// is the terminal's own numbering and `Mouse`'s.
+///
+/// Traps below 1: a zero row is a program that counted from the wrong end,
+/// and a terminal would silently treat it as 1 and draw the frame one line
+/// out of place.
+pub str move_to(int row, int col) {
+    if (row < 1 || col < 1) {
+        trap("term.move_to(" + row.to_str() + ", " + col.to_str() + "): rows and columns count from 1");
+    }
+    return "\x1b[" + row.to_str() + ";" + col.to_str() + "H";
+}
+
+/// One of the 256 palette colours, as the foreground. 0 to 7 are the original
+/// eight, 8 to 15 their bright forms, 16 to 231 a 6x6x6 cube and 232 to 255 a
+/// grey ramp.
+pub str fg(int c) {
+    return "\x1b[38;5;" + colour(c).to_str() + "m";
+}
+
+/// The same, as the background.
+pub str bg(int c) {
+    return "\x1b[48;5;" + colour(c).to_str() + "m";
+}
+
+/// A 24-bit foreground colour. Not every terminal has true colour; one that
+/// does not ignores this or picks the nearest palette entry, and neither is
+/// this module's to detect.
+pub str fg_rgb(int r, int g, int b) {
+    return "\x1b[38;2;" + colour(r).to_str() + ";" + colour(g).to_str() + ";" + colour(b).to_str() + "m";
+}
+
+/// A 24-bit background colour.
+pub str bg_rgb(int r, int g, int b) {
+    return "\x1b[48;2;" + colour(r).to_str() + ";" + colour(g).to_str() + ";" + colour(b).to_str() + "m";
+}
+
+// A colour component is one byte. Out of range is the program's own bug --
+// the same reading `bytes` takes of a value past 255 -- so it traps rather
+// than wrapping into a colour nobody asked for.
+int colour(int c) {
+    if (c < 0 || c > 255) {
+        trap("term: a colour component is 0 to 255, not " + c.to_str());
+    }
+    return c;
+}

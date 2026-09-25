@@ -674,6 +674,12 @@ void rt_out_line(const char *p, size_t n) {
 __attribute__((constructor)) static void out_init(void) {
     out_line_mode = sys_isatty(1) == 1;
     atexit(rt_out_flush);
+    /* Registered after the flush, so it runs BEFORE it: handlers run in
+     * reverse order, and the last thing a program prints should go out to a
+     * terminal that is already itself again. This is the exit path's half of
+     * what rt_trap does for the abort path -- it is what covers `os.exit`,
+     * which abandons every live object and so runs no destructor. */
+    atexit(rt_term_restore);
 }
 
 void rt_print(int64_t v) {
@@ -2461,6 +2467,11 @@ _Noreturn void rt_frozen_trap(long rc) {
 }
 
 _Noreturn void rt_trap(const char *msg) {
+    /* Before anything is printed: a trap message written to a terminal still
+     * in raw mode comes out as a staircase, with no carriage return between
+     * the lines. Putting the settings back first is also the only chance
+     * there is -- abort() runs no atexit handler and no destructor. */
+    rt_term_restore();
     rt_out_flush();
     /* One write, assembled here, so the message cannot be split by another
      * thread's output; every trap message is a short literal, and one too
@@ -2681,6 +2692,7 @@ _Noreturn void rt_panic(Obj *msg) {
      * embedded NUL does not cut the message short. */
     Str *m = (Str *)msg;
     size_t n = m->len > 0 ? (size_t)m->len : 0;
+    rt_term_restore();  /* as rt_trap does, and for the same reason */
     rt_out_flush();
     char buf[4096];
     if (n + 7 <= sizeof buf) {
@@ -2989,3 +3001,145 @@ int64_t rt_ignore_sigpipe(void) {
     return sys_ignore_sigpipe();
 }
 /* ---- end net primitives ------------------------------------------------ */
+
+
+/* ---- terminal primitives: lib/term.src ---------------------------------
+ *
+ * Each of the first four is one sys-layer call with its value or -errno
+ * passed straight through. What raw mode IS -- which flags to clear, what
+ * VMIN and VTIME should be, what to do when the terminal is not one -- is
+ * lib/term.src, in language source, over the layer's own flag constants.
+ *
+ * Only six of a SysTermios's fields cross the seam, because a prim deals in
+ * scalars and in what it pushes onto a collection it was handed: the four
+ * flag words, and the two control characters a non-canonical read is steered
+ * by. The other seventeen control characters -- the interrupt, quit, erase
+ * and kill keys -- never reach the language, so rt_tcset READS the current
+ * settings and patches those six into them. Without that, entering raw mode
+ * would quietly set ^C, ^Z and ^H to NUL for the program that turned ISIG
+ * back on later.
+ *
+ * sys_tcset reads first as well, for the one or two fields SysTermios itself
+ * does not model (sys.h). The two reads are not the same read and neither
+ * covers the other: that one keeps the line discipline and the speeds, this
+ * one keeps everything the SEAM drops. Two ioctls per change of mode, which
+ * happens twice in a program's life.
+ *
+ * `cflag` crosses as an opaque number. Nothing in lib/term.src looks at it;
+ * it is carried out and back so that a restore puts back the control-mode
+ * word it found, and so that a set does not have to invent one. */
+
+int64_t rt_isatty(int64_t fd) {
+    return sys_isatty(fd);
+}
+
+int64_t rt_tcget(int64_t fd, Obj *out) {
+    SysTermios t;
+    memset(&t, 0, sizeof t);
+    int64_t r = sys_tcget(fd, &t);
+    if (r < 0) return r;
+    rt_list_push(out, t.iflag);
+    rt_list_push(out, t.oflag);
+    rt_list_push(out, t.cflag);
+    rt_list_push(out, t.lflag);
+    rt_list_push(out, t.cc[SYS_VMIN]);
+    rt_list_push(out, t.cc[SYS_VTIME]);
+    return 0;
+}
+
+int64_t rt_tcset(int64_t fd, int64_t iflag, int64_t oflag, int64_t cflag, int64_t lflag,
+                 int64_t vmin, int64_t vtime) {
+    /* A control character is one octet. The library computes these, so a
+     * value outside the range is a bug in it, not in the world. */
+    if (vmin < 0 || vmin > 255 || vtime < 0 || vtime > 255) {
+        rt_trap("__tcset: VMIN and VTIME are single bytes");
+    }
+    SysTermios t;
+    memset(&t, 0, sizeof t);
+    int64_t r = sys_tcget(fd, &t);
+    if (r < 0) return r;
+    t.iflag = iflag;
+    t.oflag = oflag;
+    t.cflag = cflag;
+    t.lflag = lflag;
+    t.cc[SYS_VMIN] = (unsigned char)vmin;
+    t.cc[SYS_VTIME] = (unsigned char)vtime;
+    return sys_tcset(fd, &t);
+}
+
+int64_t rt_winsize(int64_t fd, Obj *out) {
+    int64_t rows = 0, cols = 0;
+    int64_t r = sys_winsize(fd, &rows, &cols);
+    if (r < 0) return r;
+    rt_list_push(out, rows);
+    rt_list_push(out, cols);
+    return 0;
+}
+
+/* ---- putting the terminal back when nothing else will ------------------
+ *
+ * `term.Session`'s destructor restores the terminal on every path the
+ * language can see: the end of a scope, a `return`, a `?`, an assignment
+ * over the last reference. Two paths it cannot see are the ones that matter
+ * most to somebody sitting at a keyboard:
+ *
+ *   - a TRAP -- an index out of range, an overflow, `trap(msg)` -- which
+ *     aborts and runs no destructor (reference §4.4);
+ *   - `os.exit(code)`, which abandons every live object by design.
+ *
+ * Both would leave a terminal with no echo and no line editing, and the only
+ * way out of that is to type `reset` blind. So the runtime keeps ONE
+ * snapshot, taken when the session is armed, and puts it back on both paths.
+ *
+ * This is deliberately not a signal facility and does not need one. It is a
+ * plain function called from rt_trap, rt_panic and an atexit handler -- code
+ * running normally on the thread that is ending the process, free to make a
+ * system call and to take a lock. A signal handler could cover more (a
+ * SIGTERM or a SIGHUP from outside, a SIGSEGV) and can have none of those
+ * freedoms; docs/sys-layer.md §2 says what it would take and why it is not
+ * here. What is covered is what the language itself can cause, which is the
+ * part a program should not be able to break.
+ *
+ * One snapshot, not a stack: a process has one terminal, and two sessions on
+ * one descriptor is a bug in the program rather than a case to support.
+ * Arming twice keeps the FIRST snapshot, which is the one that describes the
+ * terminal as the program found it. */
+
+static pthread_mutex_t term_lock = PTHREAD_MUTEX_INITIALIZER;
+static int64_t term_fd = -1;
+static SysTermios term_saved;
+
+int64_t rt_term_arm(int64_t fd) {
+    SysTermios t;
+    memset(&t, 0, sizeof t);
+    int64_t r = sys_tcget(fd, &t);
+    if (r < 0) return r;
+    pthread_mutex_lock(&term_lock);
+    if (term_fd < 0) {
+        term_fd = fd;
+        term_saved = t;
+    }
+    pthread_mutex_unlock(&term_lock);
+    return 0;
+}
+
+int64_t rt_term_disarm(void) {
+    pthread_mutex_lock(&term_lock);
+    term_fd = -1;
+    pthread_mutex_unlock(&term_lock);
+    return 0;
+}
+
+/* Idempotent, and silent about failure: every caller is already on its way
+ * out and has nowhere to report to. A descriptor closed since it was armed
+ * gives -EBADF, which is exactly the case where there is nothing to put
+ * back. */
+void rt_term_restore(void) {
+    pthread_mutex_lock(&term_lock);
+    int64_t fd = term_fd;
+    SysTermios t = term_saved;
+    term_fd = -1;
+    pthread_mutex_unlock(&term_lock);
+    if (fd >= 0) sys_tcset(fd, &t);
+}
+/* ---- end terminal primitives ------------------------------------------- */

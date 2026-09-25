@@ -1,0 +1,311 @@
+import io;
+import term;
+
+// The escape-sequence decoder, driven over a table of real byte sequences.
+//
+// **This test needs no terminal, and that is the point of `term.Decoder`.**
+// Nearly all of the module's logic is the map from bytes to keys, and a map
+// is a pure function; making it one -- a type that is fed octets and asked
+// for events, with no descriptor and no clock anywhere in it -- is what lets
+// the hard part be checked here, under the same four-way compiler oracle as
+// every other corpus program, instead of by a person pressing keys.
+//
+// **Where the table comes from.** Each sequence below is what a real terminal
+// sends, and the sources are the ones every terminal library reads:
+//
+//   - `infocmp xterm-256color`, `infocmp screen` and `infocmp linux`, whose
+//     `kcuu1`, `khome`, `kf1` ... entries are these bytes;
+//   - `ctlseqs.ms`, xterm's own control-sequence document, for the modifier
+//     parameter (1 + shift|alt|ctrl|meta), the `CSI ~` numbering and the SGR
+//     mouse encoding;
+//   - the kitty keyboard protocol's `CSI u`, which is the only encoding that
+//     can say Ctrl+Shift+A.
+//
+// The expectations are hand-written, not generated: a corpus expectation
+// computed by the thing it is meant to check is not an expectation.
+//
+// The last section is the one that catches the classic bug. A terminal does
+// not deliver a sequence atomically -- over ssh, at 9600 baud, or through a
+// pty under load, `ESC [ 1 ; 5 A` arrives in pieces -- so the decoder is also
+// fed one byte at a time and must produce exactly the same events.
+
+bytes of(List<int> xs) {
+    bytes b = [];
+    for (int x in xs) {
+        b.push(x);
+    }
+    return b;
+}
+
+// Every event the whole of `xs` decodes to, on one line.
+void row(str label, List<int> xs) {
+    str line = "";
+    for (term.Event e in term.decode(of(xs))) {
+        if (line.size() > 0) {
+            line = line + " ";
+        }
+        line = line + e.to_str();
+    }
+    print(pad(label) + line);
+}
+
+// The same bytes, fed to the decoder ONE AT A TIME, with `next()` asked after
+// every single one. A sequence that is not yet whole must produce nothing;
+// what comes out at the end must be exactly what `row` printed. Anything the
+// decoder is still holding when the bytes run out is then flushed, which is
+// what a reader does when its timeout expires.
+void split(str label, List<int> xs) {
+    term.Decoder d = term.decoder();
+    str line = "";
+    for (int x in xs) {
+        bytes one = [];
+        one.push(x);
+        d.feed(one);
+        while (true) {
+            match (d.next()) {
+                case Some(term.Event e): {
+                    if (line.size() > 0) {
+                        line = line + " ";
+                    }
+                    line = line + e.to_str();
+                }
+                case None: {
+                    break;
+                }
+            }
+        }
+    }
+    while (d.pending() > 0) {
+        match (d.flush()) {
+            case Some(term.Event e): {
+                if (line.size() > 0) {
+                    line = line + " ";
+                }
+                line = line + e.to_str();
+            }
+            case None: {
+                break;
+            }
+        }
+    }
+    print(pad(label) + line);
+}
+
+str pad(str s) {
+    str out = s;
+    while (out.size() < 26) {
+        out = out + " ";
+    }
+    return out + "-> ";
+}
+
+// --- ordinary characters ---------------------------------------------------
+print("== plain");
+row("a", [97]);
+row("A", [65]);
+row("space", [32]);
+row("tilde", [126]);
+row("digits", [48, 49, 50]);
+// --- control bytes ---------------------------------------------------------
+print("== control");
+row("CR (enter)", [13]);
+row("LF (ctrl+j in raw mode)", [10]);
+row("tab", [9]);
+row("DEL (backspace key)", [127]);
+row("BS (ctrl+h)", [8]);
+row("NUL (ctrl+space)", [0]);
+row("ctrl+a", [1]);
+row("ctrl+c", [3]);
+row("ctrl+z", [26]);
+row("ctrl+backslash", [28]);
+row("ctrl+underscore", [31]);
+row("lone escape", [27]);
+row("escape escape", [27, 27]);
+// --- alt, which is an ESC prefix -------------------------------------------
+print("== alt");
+row("alt+a", [27, 97]);
+row("alt+A", [27, 65]);
+row("alt+enter", [27, 13]);
+row("alt+ctrl+a", [27, 1]);
+// --- arrows ----------------------------------------------------------------
+print("== arrows");
+row("CSI up", [27, 91, 65]);
+row("CSI down", [27, 91, 66]);
+row("CSI right", [27, 91, 67]);
+row("CSI left", [27, 91, 68]);
+row("SS3 up (application)", [27, 79, 65]);
+row("SS3 left (application)", [27, 79, 68]);
+// --- navigation ------------------------------------------------------------
+print("== navigation");
+row("CSI H home", [27, 91, 72]);
+row("CSI F end", [27, 91, 70]);
+row("SS3 H home", [27, 79, 72]);
+row("SS3 F end", [27, 79, 70]);
+row("CSI 1~ home", [27, 91, 49, 126]);
+row("CSI 7~ home (rxvt)", [27, 91, 55, 126]);
+row("CSI 2~ insert", [27, 91, 50, 126]);
+row("CSI 3~ delete", [27, 91, 51, 126]);
+row("CSI 4~ end", [27, 91, 52, 126]);
+row("CSI 8~ end (rxvt)", [27, 91, 56, 126]);
+row("CSI 5~ page up", [27, 91, 53, 126]);
+row("CSI 6~ page down", [27, 91, 54, 126]);
+row("CSI Z back-tab", [27, 91, 90]);
+// --- function keys ---------------------------------------------------------
+print("== function keys");
+row("SS3 P f1", [27, 79, 80]);
+row("SS3 S f4", [27, 79, 83]);
+row("CSI 11~ f1 (linux)", [27, 91, 49, 49, 126]);
+row("CSI 15~ f5", [27, 91, 49, 53, 126]);
+row("CSI 17~ f6", [27, 91, 49, 55, 126]);
+row("CSI 21~ f10", [27, 91, 50, 49, 126]);
+row("CSI 23~ f11", [27, 91, 50, 51, 126]);
+row("CSI 24~ f12", [27, 91, 50, 52, 126]);
+row("CSI 34~ f20", [27, 91, 51, 52, 126]);
+row("linux console f1", [27, 91, 91, 65]);
+row("linux console f5", [27, 91, 91, 69]);
+// --- modifiers -------------------------------------------------------------
+print("== modifiers");
+row("shift+up", [27, 91, 49, 59, 50, 65]);
+row("alt+up", [27, 91, 49, 59, 51, 65]);
+row("ctrl+up", [27, 91, 49, 59, 53, 65]);
+row("ctrl+shift+up", [27, 91, 49, 59, 54, 65]);
+row("ctrl+alt+up", [27, 91, 49, 59, 55, 65]);
+row("ctrl+alt+shift+up", [27, 91, 49, 59, 56, 65]);
+row("meta+up", [27, 91, 49, 59, 57, 65]);
+row("ctrl+page-up", [27, 91, 53, 59, 53, 126]);
+row("shift+delete", [27, 91, 51, 59, 50, 126]);
+row("alt+f1", [27, 91, 49, 59, 51, 80]);
+row("no first parameter", [27, 91, 59, 53, 65]);
+// --- CSI u, the newer encoding ---------------------------------------------
+print("== csi u");
+row("ctrl+a", [27, 91, 57, 55, 59, 53, 117]);
+row("ctrl+shift+a", [27, 91, 57, 55, 59, 54, 117]);
+row("ctrl+enter", [27, 91, 49, 51, 59, 53, 117]);
+row("plain e-acute", [27, 91, 50, 51, 51, 117]);
+row("a surrogate is refused", [27, 91, 53, 53, 51, 48, 48, 117]);
+// --- UTF-8 -----------------------------------------------------------------
+print("== utf-8");
+row("e-acute", [0xc3, 0xa9]);
+row("CJK", [0xe6, 0xbc, 0xa2]);
+row("emoji", [0xf0, 0x9f, 0x98, 0x80]);
+row("alt+e-acute", [27, 0xc3, 0xa9]);
+row("a stray 0xff", [0xff]);
+row("a truncated sequence", [0xe6, 0xbc]);
+row("text around it", [97, 0xc3, 0xa9, 98]);
+// --- the mouse -------------------------------------------------------------
+print("== mouse");
+row("left down", [27, 91, 60, 48, 59, 49, 50, 59, 51, 77]);
+row("left up", [27, 91, 60, 48, 59, 49, 50, 59, 51, 109]);
+row("right down", [27, 91, 60, 50, 59, 49, 59, 49, 77]);
+row("left drag", [27, 91, 60, 51, 50, 59, 55, 59, 56, 77]);
+row("move, no button", [27, 91, 60, 51, 53, 59, 55, 59, 56, 77]);
+row("scroll up", [27, 91, 60, 54, 52, 59, 53, 59, 54, 77]);
+row("scroll down", [27, 91, 60, 54, 53, 59, 53, 59, 54, 77]);
+row("ctrl+left down", [27, 91, 60, 49, 54, 59, 52, 59, 52, 77]);
+row("a big column", [27, 91, 60, 48, 59, 51, 48, 48, 59, 50, 77]);
+// --- bracketed paste -------------------------------------------------------
+print("== paste");
+row("hi", [27, 91, 50, 48, 48, 126, 104, 105, 27, 91, 50, 48, 49, 126]);
+row("with a newline", [27, 91, 50, 48, 48, 126, 97, 10, 98, 27, 91, 50, 48, 49, 126]);
+row("empty", [27, 91, 50, 48, 48, 126, 27, 91, 50, 48, 49, 126]);
+row("a key after it", [27, 91, 50, 48, 48, 126, 120, 27, 91, 50, 48, 49, 126, 97]);
+row("unterminated", [27, 91, 50, 48, 48, 126, 97, 98]);
+// --- sequences with no meaning here ----------------------------------------
+print("== unknown");
+row("cursor position report", [27, 91, 49, 48, 59, 50, 48, 82]);
+row("device attributes", [27, 91, 63, 54, 50, 99]);
+row("an unknown final byte", [27, 91, 57, 57, 120]);
+row("an unknown tilde number", [27, 91, 57, 57, 126]);
+row("SS3 with a stray byte", [27, 79, 122]);
+row("a stray paste end", [27, 91, 50, 48, 49, 126]);
+// --- runs, so that one event's length is right -----------------------------
+print("== runs");
+row("three arrows", [27, 91, 65, 27, 91, 66, 27, 91, 67]);
+row("a key after an arrow", [27, 91, 65, 122]);
+row("escape then an arrow", [27, 27, 91, 65]);
+row("everything at once", [97, 27, 91, 65, 13, 27, 79, 80, 0xc3, 0xa9, 27, 91, 60, 48, 59, 49, 59, 49, 77]);
+// --- the same, one byte at a time ------------------------------------------
+//
+// A decoder that looked at one read at a time would report an Escape, a `[`
+// and a `1` for the first of these. Every line here must match its `row`
+// above, character for character.
+print("== split across reads");
+split("ctrl+up", [27, 91, 49, 59, 53, 65]);
+split("SS3 f1", [27, 79, 80]);
+split("emoji", [0xf0, 0x9f, 0x98, 0x80]);
+split("mouse", [27, 91, 60, 48, 59, 49, 50, 59, 51, 77]);
+split("paste", [27, 91, 50, 48, 48, 126, 104, 105, 27, 91, 50, 48, 49, 126]);
+split("linux console f1", [27, 91, 91, 65]);
+split("lone escape", [27]);
+split("escape escape", [27, 27]);
+split("a truncated sequence", [0xe6, 0xbc]);
+split("everything at once", [97, 27, 91, 65, 13, 27, 79, 80, 0xc3, 0xa9, 27, 91, 60, 48, 59, 49, 59, 49, 77]);
+// --- what a program sees when there is no terminal -------------------------
+//
+// This is the corpus, so standard input is a file and standard output is a
+// pipe: nothing here is a terminal, and every call must say so in the same
+// words rather than trapping or hanging.
+print("== no terminal");
+print(term.is_terminal(0));
+print(term.is_terminal(1));
+match (term.raw()) {
+    case Ok(term.Session s): {
+        print("raw mode on a pipe?");
+    }
+    case Err(term.Error e): {
+        print(e);
+    }
+}
+match (term.size()) {
+    case Ok(term.Size sz): {
+        print("a size from a pipe?");
+    }
+    case Err(term.Error e): {
+        print(e);
+    }
+}
+// --- the sequences ---------------------------------------------------------
+//
+// Printed as hex, because the bytes are the contract: a program somewhere
+// will be comparing them against what its terminal expects.
+print("== sequences");
+print(term.CLEAR.to_bytes.hex());
+print(term.HOME.to_bytes.hex());
+print(term.HIDE_CURSOR.to_bytes.hex());
+print(term.ALT_SCREEN_ON.to_bytes.hex());
+print(term.MOUSE_ON.to_bytes.hex());
+print(term.move_to(1, 1).to_bytes().hex());
+print(term.move_to(24, 80).to_bytes().hex());
+print(term.fg(196).to_bytes().hex());
+print(term.bg(0).to_bytes().hex());
+print(term.fg_rgb(255, 128, 0).to_bytes().hex());
+print(term.RESET.to_bytes.hex());
+// --- the writer ------------------------------------------------------------
+//
+// Everything put into it comes out in one write, in order, and the buffer is
+// empty afterwards. The frame below goes to standard output, so the corpus
+// compares the bytes themselves.
+print("== writer");
+term.Writer w = term.writer(io.stdout());
+w.put("one");
+w.put("-");
+w.put_bytes("two".to_bytes());
+print(w.pending());
+match (w.flush()) {
+    case Ok(int n): {
+        print("");
+        print(n);
+    }
+    case Err(io.Error e): {
+        print(e);
+    }
+}
+print(w.pending());
+match (w.flush()) {
+    case Ok(int n): {
+        print(n);
+    }
+    case Err(io.Error e): {
+        print(e);
+    }
+}
