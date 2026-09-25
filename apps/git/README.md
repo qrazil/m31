@@ -67,7 +67,7 @@ writing:
 | `workspace/lang` (this one) | 4 050 | **100%** | 0 |
 | `apps/orogit`, 25 of 31 repos | 276 | **100%** | 0 |
 | `apps/orogit`, the other 6 | — | **0%** | everything |
-| `git clone --no-local` of `oro` | 17 walked before it stopped | **0%** | everything |
+| `git clone --no-local` of `oro` | 0 of the 17 the walk asked for | **0%** | everything |
 | `git clone` of `oro` over the filesystem | 3 847 | **100%** | 0 (hardlinked) |
 
 So the answer is not "mostly unusable" and it is not "fine", it is a sharp
