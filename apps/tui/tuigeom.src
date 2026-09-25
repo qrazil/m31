@@ -1,0 +1,605 @@
+// Rectangles, and the constraint solver that cuts them up.
+//
+// API
+// ---
+//   tuigeom.Rect(x, y, w, h)        a rectangle in terminal cells
+//   r.right(), r.bottom()           one past the last column / row
+//   r.is_empty(), r.contains(x, y), r.intersect(o)
+//   r.inset(m), r.inset_xy(mx, my)  a margin taken off every side
+//   tuigeom.Constraint              Length | Percentage | Ratio | Min | Max | Fill
+//   tuigeom.rows(area, cs)          cut top to bottom
+//   tuigeom.cols(area, cs)          cut left to right
+//   tuigeom.Layout(dir, parts, ...) the same with margins and spacing
+//   tuigeom.resolve(total, cs)      the solver alone, on one dimension
+//
+// --- the resolution rules ---------------------------------------------------
+//
+// `resolve(total, cs)` answers one size per constraint. **The sizes always
+// sum to exactly `total`, and none is negative** -- that is the invariant the
+// property test checks, and it is what makes the parts tile the whole with no
+// overlap and no gap.
+//
+// Each constraint first states a **preferred** size, clamped into `0..total`:
+//
+//   | `Length(v)`     | `v`                | rigid     |
+//   | `Percentage(p)` | `total * p / 100`  | rigid     |
+//   | `Ratio(a, b)`   | `total * a / b`    | rigid     |
+//   | `Min(v)`        | `v`                | may grow  |
+//   | `Max(v)`        | `v`                | may shrink|
+//   | `Fill(w)`       | `0`                | grows, by weight `w` |
+//
+// Division truncates, as it does everywhere in this language: `Percentage(33)`
+// of 10 is 3, not 3.3 rounded.
+//
+// If the preferred sizes come to **less** than `total`, the surplus is shared
+// out in this order, and the first rule that applies takes all of it:
+//
+//   1. the `Fill` constraints, in proportion to their weights -- or equally
+//      if every one of them has weight zero, since a layout whose fills are
+//      all `Fill(0)` still means "the rest goes here";
+//   2. otherwise the `Min` constraints, equally;
+//   3. otherwise the **last** constraint.
+//
+// Rule 3 is what keeps the promise that the parts tile the whole. A layout
+// of nothing but `Length`s that does not add up has to put the difference
+// somewhere, and the end is the least surprising place. It is also the one
+// place a constraint is overrun rather than underrun: `[Max(30), Max(30)]`
+// in 100 cells gives 30 and 70, because there is no honest home for the
+// other 40. A program that cares says where with a `Fill`.
+//
+// If the preferred sizes come to **more** than `total`, the deficit is taken
+// back in five rounds, each stopping as soon as the books balance:
+//
+//   1. `Fill`, down to 0;
+//   2. `Max`, down to 0;
+//   3. `Percentage` and `Ratio`, down to 0;
+//   4. `Min`, down to 0;
+//   5. `Length`, down to 0.
+//
+// So the flexible ones give way first and `Length` is the last promise
+// broken. **Within a round the loss is shared in proportion to what each
+// segment has to give**, so two equal columns lose equally rather than the
+// rightmost losing everything.
+//
+// Both the sharing and the taking use the largest-remainder method: whole
+// cells, summing exactly, and where two segments have an equal claim on the
+// last cell the earlier one gets it. Nothing here is floating point -- a
+// terminal has no half columns, and a rule that rounds twice tiles wrongly.
+
+/// A rectangle of terminal cells: `w` columns and `h` rows, with its
+/// top-left corner at `x`, `y`. Coordinates are absolute in the buffer, so a
+/// widget handed a sub-rectangle writes at the coordinates it was given.
+///
+/// A negative `w` or `h` is meaningless; every function here treats one as
+/// zero rather than trapping, so a layout that runs out of room degrades
+/// into empty rectangles instead of stopping the program.
+pub type Rect {
+    pub int x;
+    pub int y;
+    pub int w;
+    pub int h;
+}
+
+/// The column one past the last: `x + w`.
+pub int Rect.right() {
+    return x + w;
+}
+
+/// The row one past the last: `y + h`.
+pub int Rect.bottom() {
+    return y + h;
+}
+
+/// No cells at all.
+pub bool Rect.is_empty() {
+    return w <= 0 || h <= 0;
+}
+
+/// How many cells the rectangle holds.
+pub int Rect.cells() {
+    if (is_empty()) {
+        return 0;
+    }
+    return w * h;
+}
+
+/// Is the cell at `px`, `py` inside?
+pub bool Rect.contains(int px, int py) {
+    return px >= x && px < right() && py >= y && py < bottom();
+}
+
+/// The rectangle both cover, which is empty when they do not overlap.
+pub Rect Rect.intersect(Rect o) {
+    int nx = x;
+    if (o.x > nx) {
+        nx = o.x;
+    }
+    int ny = y;
+    if (o.y > ny) {
+        ny = o.y;
+    }
+    int nr = right();
+    if (o.right() < nr) {
+        nr = o.right();
+    }
+    int nb = bottom();
+    if (o.bottom() < nb) {
+        nb = o.bottom();
+    }
+    if (nr < nx) {
+        nr = nx;
+    }
+    if (nb < ny) {
+        nb = ny;
+    }
+    return Rect(nx, ny, nr - nx, nb - ny);
+}
+
+/// The same rectangle with `m` cells taken off every side. A margin bigger
+/// than the rectangle leaves it empty, in the middle of where it was.
+pub Rect Rect.inset(int m) {
+    return inset_xy(m, m);
+}
+
+/// A margin off the left and right, and off the top and bottom.
+pub Rect Rect.inset_xy(int mx, int my) {
+    int cx = mx;
+    if (cx < 0) {
+        cx = 0;
+    }
+    if (cx > w / 2) {
+        cx = w / 2;
+    }
+    int cy = my;
+    if (cy < 0) {
+        cy = 0;
+    }
+    if (cy > h / 2) {
+        cy = h / 2;
+    }
+    int nw = w - 2 * cx;
+    int nh = h - 2 * cy;
+    if (nw < 0) {
+        nw = 0;
+    }
+    if (nh < 0) {
+        nh = 0;
+    }
+    return Rect(x + cx, y + cy, nw, nh);
+}
+
+pub bool Rect.eq(Rect o) {
+    return x == o.x && y == o.y && w == o.w && h == o.h;
+}
+
+pub str Rect.to_str() {
+    return str(x) + "," + str(y) + " " + str(w) + "x" + str(h);
+}
+
+/// Which way a layout cuts.
+pub enum Direction {
+    Horizontal;
+    Vertical;
+}
+
+/// How much of a dimension one part asks for. See the rules at the top of
+/// this file for what happens when the asks do not add up.
+pub enum Constraint {
+    /// Exactly this many cells.
+    Length(int);
+    /// This percentage of the whole, truncated.
+    Percentage(int);
+    /// This fraction of the whole: `Ratio(1, 3)` is a third, truncated.
+    Ratio(int, int);
+    /// At least this many, and more if there is room going spare.
+    Min(int);
+    /// At most this many, and fewer if there is not enough room.
+    Max(int);
+    /// Whatever is left, shared with the other `Fill`s in proportion to the
+    /// weights. `Fill(0)` asks for nothing.
+    Fill(int);
+}
+
+pub str Constraint.to_str() {
+    match (this) {
+        case Length(int v): {
+            return "Length(" + str(v) + ")";
+        }
+        case Percentage(int v): {
+            return "Percentage(" + str(v) + ")";
+        }
+        case Ratio(int a, int b): {
+            return "Ratio(" + str(a) + "," + str(b) + ")";
+        }
+        case Min(int v): {
+            return "Min(" + str(v) + ")";
+        }
+        case Max(int v): {
+            return "Max(" + str(v) + ")";
+        }
+        case Fill(int v): {
+            return "Fill(" + str(v) + ")";
+        }
+    }
+}
+
+int Constraint.kind() {
+    match (this) {
+        case Length(int v): {
+            return C_LENGTH;
+        }
+        case Percentage(int v): {
+            return C_PERCENT;
+        }
+        case Ratio(int a, int b): {
+            return C_RATIO;
+        }
+        case Min(int v): {
+            return C_MIN;
+        }
+        case Max(int v): {
+            return C_MAX;
+        }
+        case Fill(int v): {
+            return C_FILL;
+        }
+    }
+}
+
+/// The weight of a `Fill`, and zero for anything else.
+int Constraint.weight() {
+    match (this) {
+        case Length(int v): {
+            return 0;
+        }
+        case Percentage(int v): {
+            return 0;
+        }
+        case Ratio(int a, int b): {
+            return 0;
+        }
+        case Min(int v): {
+            return 0;
+        }
+        case Max(int v): {
+            return 0;
+        }
+        case Fill(int v): {
+            if (v < 0) {
+                return 0;
+            }
+            if (v > 1_000_000) {
+                return 1_000_000;
+            }
+            return v;
+        }
+    }
+}
+
+/// The size this constraint would like, out of `total`, clamped to it.
+int Constraint.preferred(int total) {
+    match (this) {
+        case Length(int v): {
+            return clamp(v, total);
+        }
+        case Percentage(int v): {
+            return clamp(scaled(total, v, 100), total);
+        }
+        case Ratio(int a, int b): {
+            if (b <= 0) {
+                return 0;
+            }
+            return clamp(scaled(total, a, b), total);
+        }
+        case Min(int v): {
+            return clamp(v, total);
+        }
+        case Max(int v): {
+            return clamp(v, total);
+        }
+        case Fill(int v): {
+            return 0;
+        }
+    }
+}
+
+const int C_FILL = 0;
+const int C_MAX = 1;
+const int C_PERCENT = 2;
+const int C_RATIO = 3;
+const int C_MIN = 4;
+const int C_LENGTH = 5;
+
+int clamp(int v, int hi) {
+    if (v < 0) {
+        return 0;
+    }
+    if (v > hi) {
+        return hi;
+    }
+    return v;
+}
+
+/// `total * a / b`, without overflowing on a large total.
+int scaled(int total, int a, int b) {
+    if (a <= 0 || b <= 0) {
+        return 0;
+    }
+    if (a > b) {
+        return total;
+    }
+    return total / b * a + total % b * a / b;
+}
+
+/// One size per constraint, summing to exactly `total`. See the rules at the
+/// top of this file.
+pub List<int> resolve(int total, List<Constraint> cs) {
+    List<int> size = [];
+    int n = cs.size();
+    if (n == 0) {
+        return size;
+    }
+    int room = total;
+    if (room < 0) {
+        room = 0;
+    }
+    int sum = 0;
+    int i = 0;
+    while (i < n) {
+        int p = cs[i].preferred(room);
+        size.push(p);
+        sum = sum + p;
+        i = i + 1;
+    }
+    if (sum < room) {
+        grow(size, cs, room - sum);
+    }
+    if (sum > room) {
+        shrink(size, cs, sum - room);
+    }
+    return size;
+}
+
+/// Hand out `extra` cells: to the weighted `Fill`s, else to the `Min`s, else
+/// to the last constraint.
+void grow(List<int> size, List<Constraint> cs, int extra) {
+    int n = cs.size();
+    List<int> idx = [];
+    List<int> wt = [];
+    int weighed = 0;
+    int i = 0;
+    while (i < n) {
+        if (cs[i].kind() == C_FILL) {
+            int w = cs[i].weight();
+            idx.push(i);
+            wt.push(w);
+            weighed = weighed + w;
+        }
+        i = i + 1;
+    }
+    // `Fill(0)` asks for no share of a contested surplus, but a layout whose
+    // fills are ALL zero still means "the rest goes here", so they share it
+    // equally rather than nobody taking it.
+    if (idx.size() > 0 && weighed == 0) {
+        i = 0;
+        while (i < wt.size()) {
+            wt[i] = 1;
+            i = i + 1;
+        }
+    }
+    if (idx.size() == 0) {
+        i = 0;
+        while (i < n) {
+            if (cs[i].kind() == C_MIN) {
+                idx.push(i);
+                wt.push(1);
+            }
+            i = i + 1;
+        }
+    }
+    if (idx.size() == 0) {
+        size[n - 1] = size[n - 1] + extra;
+        return;
+    }
+    List<int> share = apportion(extra, wt);
+    i = 0;
+    while (i < idx.size()) {
+        size[idx[i]] = size[idx[i]] + share[i];
+        i = i + 1;
+    }
+}
+
+/// Take `deficit` cells back, in the five rounds the header describes.
+void shrink(List<int> size, List<Constraint> cs, int deficit) {
+    int left = deficit;
+    left = take(size, cs, left, C_FILL);
+    left = take(size, cs, left, C_MAX);
+    left = take(size, cs, left, C_PERCENT);
+    left = take(size, cs, left, C_RATIO);
+    left = take(size, cs, left, C_MIN);
+    left = take(size, cs, left, C_LENGTH);
+}
+
+/// Take up to `need` cells from the segments of one kind, in proportion to
+/// what each has to give. Answers what is still owed.
+int take(List<int> size, List<Constraint> cs, int need, int kind) {
+    if (need <= 0) {
+        return 0;
+    }
+    List<int> idx = [];
+    List<int> cap = [];
+    int pool = 0;
+    int i = 0;
+    while (i < cs.size()) {
+        if (cs[i].kind() == kind && size[i] > 0) {
+            idx.push(i);
+            cap.push(size[i]);
+            pool = pool + size[i];
+        }
+        i = i + 1;
+    }
+    if (idx.size() == 0) {
+        return need;
+    }
+    if (pool <= need) {
+        i = 0;
+        while (i < idx.size()) {
+            size[idx[i]] = 0;
+            i = i + 1;
+        }
+        return need - pool;
+    }
+    List<int> share = apportion(need, cap);
+    i = 0;
+    while (i < idx.size()) {
+        size[idx[i]] = size[idx[i]] - share[i];
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// Split `amount` in proportion to `wt`, in whole cells, summing to exactly
+/// `amount`. Largest remainder; a tie goes to the earlier entry.
+///
+/// `amount` must not exceed the sum of `wt` when the weights are capacities,
+/// which is how `take` uses it; no share then exceeds its weight.
+pub List<int> apportion(int amount, List<int> wt) {
+    List<int> out = [];
+    int n = wt.size();
+    if (n == 0) {
+        return out;
+    }
+    int w_all = 0;
+    for (int w in wt) {
+        w_all = w_all + w;
+    }
+    if (w_all <= 0 || amount <= 0) {
+        int i = 0;
+        while (i < n) {
+            out.push(0);
+            i = i + 1;
+        }
+        return out;
+    }
+    List<int> rem = [];
+    int given = 0;
+    int i = 0;
+    while (i < n) {
+        int exact = amount * wt[i];
+        int base = exact / w_all;
+        out.push(base);
+        rem.push(exact - base * w_all);
+        given = given + base;
+        i = i + 1;
+    }
+    int leftover = amount - given;
+    while (leftover > 0) {
+        int best = -1;
+        int bestrem = 0;
+        i = 0;
+        while (i < n) {
+            if (rem[i] > bestrem) {
+                bestrem = rem[i];
+                best = i;
+            }
+            i = i + 1;
+        }
+        if (best < 0) {
+            best = 0;
+        }
+        out[best] = out[best] + 1;
+        rem[best] = 0;
+        leftover = leftover - 1;
+    }
+    return out;
+}
+
+/// A cut of a rectangle: which way, into what, with what margins and what
+/// gap between the parts.
+///
+/// `dir` and `parts` are mandatory and positional; the rest are named:
+///
+/// ```
+/// tuigeom.Layout(tuigeom.Direction.Vertical, [tuigeom.Constraint.Length(3),
+///     tuigeom.Constraint.Fill(1)], margin_y: 1)
+/// ```
+pub type Layout {
+    pub Direction dir;
+    pub List<Constraint> parts;
+    /// Cells taken off the left and the right before cutting.
+    pub int margin_x = 0;
+    /// Cells taken off the top and the bottom before cutting.
+    pub int margin_y = 0;
+    /// Cells left empty between one part and the next.
+    pub int spacing = 0;
+}
+
+/// The parts, in order, one per constraint. With `spacing` at zero they tile
+/// `area` exactly; with a gap they tile what is left of it. A part is never
+/// outside `area`, however large the margins or the gap.
+pub List<Rect> Layout.split(Rect area) {
+    Rect box = area.inset_xy(margin_x, margin_y);
+    List<Rect> out = [];
+    int n = parts.size();
+    if (n == 0) {
+        return out;
+    }
+    int gap = spacing;
+    if (gap < 0) {
+        gap = 0;
+    }
+    int along = box.w;
+    match (dir) {
+        case Horizontal: {
+        }
+        case Vertical: {
+            along = box.h;
+        }
+    }
+    int gaps = gap * (n - 1);
+    int room = along - gaps;
+    if (room < 0) {
+        room = 0;
+    }
+    List<int> sizes = resolve(room, parts);
+    int pos = box.x;
+    int edge = box.right();
+    match (dir) {
+        case Horizontal: {
+        }
+        case Vertical: {
+            pos = box.y;
+            edge = box.bottom();
+        }
+    }
+    int i = 0;
+    while (i < n) {
+        // A gap wide enough to push a part past the end of the area puts it
+        // at the end instead, empty: every part is inside `area`, always.
+        if (pos > edge) {
+            pos = edge;
+        }
+        Rect part = Rect(pos, box.y, sizes[i], box.h);
+        match (dir) {
+            case Horizontal: {
+            }
+            case Vertical: {
+                part = Rect(box.x, pos, box.w, sizes[i]);
+            }
+        }
+        out.push(part.intersect(box));
+        pos = pos + sizes[i] + gap;
+        i = i + 1;
+    }
+    return out;
+}
+
+/// Cut `area` top to bottom. The short spelling of a vertical `Layout`.
+pub List<Rect> rows(Rect area, List<Constraint> cs) {
+    return Layout(Direction.Vertical, cs).split(area);
+}
+
+/// Cut `area` left to right. The short spelling of a horizontal `Layout`.
+pub List<Rect> cols(Rect area, List<Constraint> cs) {
+    return Layout(Direction.Horizontal, cs).split(area);
+}

@@ -1,0 +1,325 @@
+// The diffing renderer: two buffers in, one byte string out.
+//
+// API
+// ---
+//   tuidiff.full(next, depth)          every cell, from a reset terminal
+//   tuidiff.diff(prev, next, depth)    only what changed
+//   tuidiff.show(bytes)                the bytes made readable, for tests
+//   tuidiff.move_to(out, x, y)         and the other small control helpers
+//
+// **One `bytes` per frame.** Nothing here touches a terminal; the caller
+// hands the result to one write. That is what makes this testable without a
+// terminal, and it is also the only way to draw a frame without tearing.
+//
+// --- what the diff decides --------------------------------------------------
+//
+// Walking a row left to right, a cell is written when its symbol, its style
+// or its width differs from the previous frame. Between two cells that need
+// writing there is a run of cells that do not, and there are two ways across
+// it:
+//
+//   - **jump**: `\x1b[nC` moves the cursor `n` columns right, 3 bytes plus
+//     the digits of `n` (and `\x1b[C` alone, 3 bytes, when `n` is 1);
+//   - **walk**: write the cells again, which costs their own bytes.
+//
+// The walk is taken when it is no more expensive and every cell in the run
+// is already in the pen's style -- otherwise crossing would cost an SGR
+// sequence as well, which is never cheaper. So a one-character gap between
+// two changed cells is redrawn and a twenty-character gap is jumped, which
+// is what a hand-written renderer does and what `n` in the escape is for.
+//
+// Moving to another row is always an absolute `\x1b[r;cH`. `\r\n` would be
+// two bytes rather than six, and would scroll the screen at the bottom
+// margin; a renderer that is sometimes right is worse than one that is
+// always six bytes.
+//
+// **Styles are written as differences too.** The pen -- the style the
+// terminal is holding -- starts each frame at `\x1b[0m` and changes only
+// when a cell wants something else, and then only by what changed:
+// `\x1b[24m` to stop underlining, not a reset and a repaint.
+//
+// **A run of blanks to the end of a row becomes `\x1b[K`.** Erase-to-end-of
+// line fills with the terminal's own background, so it is used only when the
+// pen can be put back to plain first, which is exactly when the remaining
+// cells are plain spaces.
+
+import tuibuf;
+import tuigeom;
+import tuistyle;
+
+/// How many plain trailing blanks make `\x1b[K` worth its bytes: the escape
+/// is three bytes and putting the pen back may cost four more.
+const int ERASE_WORTH = 8;
+
+/// Every cell of `next`, assuming a terminal that has just been reset and
+/// whose cursor position is unknown.
+///
+/// This is what the first frame of a program emits, and what a resize or a
+/// redraw-everything key emits after it.
+pub bytes full(tuibuf.Buffer next, tuistyle.Depth depth) {
+    bytes out = [];
+    tuistyle.push_reset(out);
+    tuigeom.Rect a = next.area();
+    int pen = tuistyle.RESET_STYLE;
+    int y = a.y;
+    while (y < a.bottom()) {
+        move_to(out, a.x, y);
+        int tail = tail_start(next, y);
+        int x = a.x;
+        while (x < a.right()) {
+            int w = next.width_at(x, y);
+            if (w == 0) {
+                x = x + 1;
+                continue;
+            }
+            if (x >= tail && a.right() - x >= ERASE_WORTH) {
+                pen = write_style(out, pen, tuistyle.RESET_STYLE, depth);
+                erase_line(out);
+                x = a.right();
+                continue;
+            }
+            pen = write_style(out, pen, next.style_at(x, y), depth);
+            next.append_sym(out, x, y);
+            x = x + w;
+        }
+        y = y + 1;
+    }
+    if (pen != tuistyle.RESET_STYLE) {
+        tuistyle.push_reset(out);
+    }
+    return out;
+}
+
+/// What has to be written to turn a terminal showing `prev` into one showing
+/// `next`. **Traps** when the two buffers do not cover the same rectangle --
+/// a resize is a `full` redraw, not a diff.
+///
+/// The pen is assumed to be plain at the start of the frame, which is what
+/// `full` leaves behind and what `\x1b[0m` guarantees; `diff` restores it at
+/// the end for the same reason.
+pub bytes diff(tuibuf.Buffer prev, tuibuf.Buffer next, tuistyle.Depth depth) {
+    tuigeom.Rect a = next.area();
+    if (!prev.area().eq(a)) {
+        trap("tuidiff.diff: the two frames cover different rectangles -- use tuidiff.full after a resize");
+    }
+    bytes out = [];
+    int pen = tuistyle.RESET_STYLE;
+    int cur_x = -1;
+    int cur_y = -1;
+    int y = a.y;
+    while (y < a.bottom()) {
+        int tail = tail_start(next, y);
+        int x = a.x;
+        while (x < a.right()) {
+            int w = next.width_at(x, y);
+            if (w == 0) {
+                x = x + 1;
+                continue;
+            }
+            if (!changed(prev, next, x, y)) {
+                x = x + w;
+                continue;
+            }
+            // Put the cursor on this cell, by whichever route is shorter.
+            if (cur_y != y || cur_x < 0 || cur_x > x) {
+                move_to(out, x, y);
+            } else if (cur_x < x) {
+                cross(out, next, cur_x, x, y, pen);
+            }
+            cur_y = y;
+            if (x >= tail && a.right() - x >= ERASE_WORTH) {
+                pen = write_style(out, pen, tuistyle.RESET_STYLE, depth);
+                erase_line(out);
+                cur_x = x;
+                x = a.right();
+                continue;
+            }
+            pen = write_style(out, pen, next.style_at(x, y), depth);
+            next.append_sym(out, x, y);
+            cur_x = x + w;
+            x = x + w;
+        }
+        y = y + 1;
+    }
+    if (out.size() > 0 && pen != tuistyle.RESET_STYLE) {
+        tuistyle.push_reset(out);
+    }
+    return out;
+}
+
+/// Does the cell at `x`, `y` have to be written again?
+bool changed(tuibuf.Buffer prev, tuibuf.Buffer next, int x, int y) {
+    return !prev.same_cell(next, x, y);
+}
+
+/// Get from column `from` to column `to` in row `y`: either by walking over
+/// the unchanged cells between them, or by jumping.
+void cross(bytes out, tuibuf.Buffer next, int from, int to, int y, int pen) {
+    int gap = to - from;
+    int jump = 3;
+    if (gap > 1) {
+        jump = 3 + digits(gap);
+    }
+    int walk = 0;
+    bool same_style = true;
+    int x = from;
+    while (x < to) {
+        int w = next.width_at(x, y);
+        if (w == 0) {
+            x = x + 1;
+            continue;
+        }
+        if (next.style_at(x, y) != pen) {
+            same_style = false;
+            x = to;
+            continue;
+        }
+        walk = walk + next.sym_at(x, y).size();
+        if (walk > jump) {
+            // Already dearer than the escape; the rest of the run cannot
+            // make it cheaper, and measuring it costs a reference each.
+            x = to;
+            continue;
+        }
+        x = x + w;
+    }
+    if (same_style && walk <= jump) {
+        x = from;
+        while (x < to) {
+            int w = next.width_at(x, y);
+            if (w == 0) {
+                x = x + 1;
+                continue;
+            }
+            next.append_sym(out, x, y);
+            x = x + w;
+        }
+        return;
+    }
+    tuistyle.push_csi(out);
+    if (gap > 1) {
+        tuistyle.push_int(out, gap);
+    }
+    out.push(67);
+}
+
+/// The first column of the run of plain spaces that ends row `y`, or the
+/// row's end when it does not end in one. Computed once per row: asking the
+/// question per cell would make a full redraw quadratic in the width.
+int tail_start(tuibuf.Buffer b, int y) {
+    tuigeom.Rect a = b.area();
+    int cx = a.right();
+    while (cx > a.x) {
+        int p = cx - 1;
+        if (b.style_at(p, y) != tuistyle.RESET_STYLE || b.sym_at(p, y) != " ") {
+            return cx;
+        }
+        cx = p;
+    }
+    return cx;
+}
+
+int write_style(bytes out, int pen, int want, tuistyle.Depth depth) {
+    tuistyle.sgr(out, pen, want, depth);
+    return want;
+}
+
+int digits(int v) {
+    int n = 1;
+    int r = v;
+    while (r >= 10) {
+        r = r / 10;
+        n = n + 1;
+    }
+    return n;
+}
+
+// --- the small control sequences --------------------------------------------
+//
+// Only what the renderer itself needs, plus the four a caller cannot draw a
+// frame without. Everything else about the terminal -- raw mode, the size,
+// reading keys -- belongs to the terminal layer, not here.
+
+/// `\x1b[y;xH`, in the terminal's 1-based coordinates.
+pub void move_to(bytes out, int x, int y) {
+    tuistyle.push_csi(out);
+    tuistyle.push_int(out, y + 1);
+    out.push(59);
+    tuistyle.push_int(out, x + 1);
+    out.push(72);
+}
+
+/// `\x1b[K`: blank the rest of the row, in the terminal's own background.
+pub void erase_line(bytes out) {
+    tuistyle.push_csi(out);
+    out.push(75);
+}
+
+/// `\x1b[2J`: blank the whole screen.
+pub void clear_screen(bytes out) {
+    tuistyle.push_csi(out);
+    out.push(50);
+    out.push(74);
+}
+
+/// `\x1b[?25l`.
+pub void hide_cursor(bytes out) {
+    tuistyle.push_csi(out);
+    out.push(63);
+    out.push(50);
+    out.push(53);
+    out.push(108);
+}
+
+/// `\x1b[?25h`.
+pub void show_cursor(bytes out) {
+    tuistyle.push_csi(out);
+    out.push(63);
+    out.push(50);
+    out.push(53);
+    out.push(104);
+}
+
+/// The bytes a terminal would obey, written so a person can read them:
+/// `\x1b` becomes `\e`, another control byte becomes `\xNN`, and the rest
+/// stands for itself. This is what a test asserts on.
+pub str show(bytes b) {
+    bytes out = [];
+    int i = 0;
+    while (i < b.size()) {
+        int v = b[i];
+        if (v == 27) {
+            out.push(92);
+            out.push(101);
+        } else if (v == 10) {
+            out.push(92);
+            out.push(110);
+        } else if (v == 13) {
+            out.push(92);
+            out.push(114);
+        } else if (v < 32 || v == 127) {
+            out.push(92);
+            out.push(120);
+            out.push(hex_digit(v / 16));
+            out.push(hex_digit(v % 16));
+        } else {
+            out.push(v);
+        }
+        i = i + 1;
+    }
+    match (out.utf8()) {
+        case Some(str s): {
+            return s;
+        }
+        case None: {
+            return out.hex();
+        }
+    }
+}
+
+int hex_digit(int v) {
+    if (v < 10) {
+        return 48 + v;
+    }
+    return 87 + v;
+}
