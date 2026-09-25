@@ -345,10 +345,10 @@ Error transport(io.Error e) {
 
 // tchar: what a method, a field name and a chunk extension name may contain.
 bool is_tchar(int c) {
-    if (c >= 48 && c <= 57 || c >= 97 && c <= 122 || c >= 65 && c <= 90) {
+    if (c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
         return true;
     }
-    return c == 33 || c == 35 || c == 36 || c == 37 || c == 38 || c == 39 || c == 42 || c == 43 || c == 45 || c == 46 || c == 94 || c == 95 || c == 96 || c == 124 || c == 126;
+    return c == '!' || c == '#' || c == '$' || c == '%' || c == '&' || c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' || c == '^' || c == '_' || c == '`' || c == '|' || c == '~';
 }
 
 // A non-empty run of tchars.
@@ -396,13 +396,13 @@ int bad_target_at(bytes b) {
 }
 
 int hex_val(int c) {
-    if (c >= 48 && c <= 57) {
+    if (c >= '0' && c <= '9') {
         return c - 48;
     }
-    if (c >= 97 && c <= 102) {
+    if (c >= 'a' && c <= 'f') {
         return c - 87;
     }
-    if (c >= 65 && c <= 70) {
+    if (c >= 'A' && c <= 'F') {
         return c - 55;
     }
     return -1;
@@ -437,7 +437,7 @@ str shown(int c) {
     if (c == LF) {
         return "a line feed";
     }
-    if (c >= 33 && c <= 126) {
+    if (c >= '!' && c <= '~') {
         bytes one = [c];
         return "'" + one.utf8().or("?") + "'";
     }
@@ -459,7 +459,7 @@ str quoted(bytes b) {
     int i = 0;
     while (i < head.size()) {
         int c = head[i];
-        if (c < 32 || c > 126) {
+        if (c < ' ' || c > '~') {
             return "0x" + head.hex() + tail;
         }
         i = i + 1;
@@ -598,7 +598,7 @@ Result<void, Error> Headers.render(bytes out, str kind) {
             return Result<void, Error>.Err(Error.Syntax(kind + " header '" + ns[i] + "' has " + shown(value[bad]) + " in its value, which cannot be sent"));
         }
         out.extend(name);
-        out.push(58);
+        out.push(':');
         out.push(SP);
         out.extend(value);
         out.extend(CRLF);
@@ -655,7 +655,7 @@ pub str quote(str s, str safe = "/") {
     for (int c in s.to_bytes()) {
         bytes one = [c];
         str ch = "";
-        if (c >= 32 && c <= 126) {
+        if (c >= ' ' && c <= '~') {
             ch = ascii(one);
         }
         if (ch != "" && (UNRESERVED.contains(ch) || safe.contains(ch))) {
@@ -888,7 +888,7 @@ Result<Url, Error> after_scheme(str url, bytes b, int sep) {
     if (cut >= 0) {
         authority = rest.substr(0, cut);
         target = rest.substr(cut, rest.size());
-        if (target[0] != 47) {
+        if (target[0] != '/') {
             bytes with_root = "/".to_bytes();
             with_root.extend(target);
             target = with_root;
@@ -944,15 +944,15 @@ Result<List<str>, Error> split_host_port(bytes authority, str what) {
         return Result<List<str>, Error>.Err(Error.BadUrl(what + " has no host"));
     }
     int colon = -1;
-    if (authority[authority.size() - 1] == 93) {
+    if (authority[authority.size() - 1] == ']') {
         colon = -1;
     } else {
         int i = authority.size() - 1;
         while (i >= 0) {
             int c = authority[i];
-            if (c == 93) {
+            if (c == ']') {
                 i = -1;
-            } else if (c == 58) {
+            } else if (c == ':') {
                 colon = i;
                 i = -1;
             } else {
@@ -969,7 +969,7 @@ Result<List<str>, Error> split_host_port(bytes authority, str what) {
             return Result<List<str>, Error>.Err(Error.BadUrl(what + " has a port that is not a number"));
         }
         for (int c in digits) {
-            if (c < 48 || c > 57) {
+            if (c < '0' || c > '9') {
                 return Result<List<str>, Error>.Err(Error.BadUrl(what + " has a port that is not a number"));
             }
         }
@@ -979,7 +979,7 @@ Result<List<str>, Error> split_host_port(bytes authority, str what) {
             return Result<List<str>, Error>.Err(Error.BadUrl(what + " has a port outside 1-65535"));
         }
     }
-    if (host.size() >= 2 && host[0] == 91 && host[host.size() - 1] == 93) {
+    if (host.size() >= 2 && host[0] == '[' && host[host.size() - 1] == ']') {
         host = host.substr(1, host.size() - 1);
     }
     if (host.size() == 0) {
@@ -1574,7 +1574,7 @@ Result<int, Error> content_length(str v) {
         return Result<int, Error>.Err(Error.Syntax("a Content-Length of " + digits.size().to_str() + " digits; at most 18 are read"));
     }
     for (int c in digits) {
-        if (c < 48 || c > 57) {
+        if (c < '0' || c > '9') {
             return Result<int, Error>.Err(Error.Syntax("malformed Content-Length " + quoted(digits) + ": it must be nothing but decimal digits"));
         }
     }
@@ -1752,7 +1752,7 @@ Result<Url, Error> target_url(str method, str target, str host) {
             }
         }
     }
-    if (t[0] != 47) {
+    if (t[0] != '/') {
         return Result<Url, Error>.Err(Error.Syntax(what + " is not an absolute path; this server takes '/path?query' and 'http://host/path'"));
     }
     return url_of("http", name, port, t, what);
@@ -1896,7 +1896,7 @@ Result<List<str>, Error> status_line(bytes line) {
         return Result<List<str>, Error>.Err(Error.Syntax("status code " + quoted(digits) + " is not three digits"));
     }
     for (int c in digits) {
-        if (c < 48 || c > 57) {
+        if (c < '0' || c > '9') {
             return Result<List<str>, Error>.Err(Error.Syntax("status code " + quoted(digits) + " is not three digits"));
         }
     }
@@ -2375,7 +2375,7 @@ Result<Url, Error> resolve(Url base, str where) {
     if (w.contains("://".to_bytes())) {
         return parse_url(where);
     }
-    if (w.size() > 0 && w[0] == 47) {
+    if (w.size() > 0 && w[0] == '/') {
         if (bad_target_at(w) >= 0) {
             return Result<Url, Error>.Err(Error.BadUrl("the Location " + quoted(w) + " has a character that cannot be sent unescaped"));
         }

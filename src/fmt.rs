@@ -913,11 +913,16 @@ impl Fmt {
                     .collect();
                 format!("{{{}}}", xs.join(", "))
             }
-            // The first byte tells the two kinds of spelling apart, so a
-            // synthesised node that happened to share a string's position
-            // could not print as that string.
+            // The first byte tells the three kinds of spelling apart -- a
+            // digit begins an integer, `'` a character and `"` a string --
+            // so a synthesised node that happened to share another
+            // literal's position could not print as that literal.
             Expr::Int(n, span) => match self.spellings.get(&(span.line, span.col)) {
-                Some(text) if text.starts_with(|c: char| c.is_ascii_digit()) => text.clone(),
+                Some(text)
+                    if text.starts_with(|c: char| c.is_ascii_digit()) || text.starts_with('\'') =>
+                {
+                    text.clone()
+                }
                 _ => n.to_string(),
             },
             Expr::Float(x, _) => fmt_float(*x),

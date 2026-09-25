@@ -356,7 +356,7 @@ bool digits(str s, int from, int to) {
     int i = from;
     while (i < to) {
         int b = s.byte_at(i);
-        if (b < 48 || b > 57) {
+        if (b < '0' || b > '9') {
             return false;
         }
         i = i + 1;

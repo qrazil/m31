@@ -72,10 +72,11 @@ reserved only in the sense that nothing may shadow a type name (§4.1).
 | Float | `1.0`, `3.14`, `2.5e3`. **Always a dot with digits on both sides** — not `1.` and not `.5`. An exponent only after the dot form: `1.0e9`, not `1e9`. A literal too large **or too small** to represent is an error: one that parses to exactly zero has lost its whole value. Arithmetic that underflows at run time is ordinary IEEE. |
 | Boolean | `true`, `false` |
 | String | `"..."`, with the escapes below. Any other character stands for itself, byte for byte — control characters, a BOM and combining marks included — except a raw newline, which is an error: a literal ends on its line. |
+| Character | `'*'`, `'\n'`, `'é'` — **one code point, as an `int`**. `'*'` is 42 and `'é'` is 233. Exactly one character, with the escapes below. |
 
 | Escape | Bytes |
 |---|---|
-| `\\` `\"` | a backslash, a quote |
+| `\\` `\"` `\'` | a backslash, a quote |
 | `\n` `\t` `\r` `\0` | 0A, 09, 0D, 00 |
 | `\xNN` | the one byte `NN`: exactly two hex digits, either case, **00 to 7F** |
 | `\u{N}` | the Unicode scalar value `N`, one to six hex digits, as its UTF-8 bytes |
@@ -85,6 +86,34 @@ Anything else after a backslash is an error, including C's `\a` `\b` `\f`
 `\u{e9}`). `\x` takes exactly two digits, where C takes as many as follow:
 `"\x411"` is `A1`. `\u{}` refuses a surrogate and anything past `10FFFF`,
 which have no UTF-8 form.
+
+**A literal escapes its own quote and no other.** `\"` is a string's and
+`\'` is a character's; `'"'` and `"it's"` already stand for themselves, so
+`'\"'` and `"\'"` are refused the way any other unknown escape is. One
+spelling per character, which is what lets the formatter keep the author's.
+
+**Character literals.** `'x'` is the `int` for one Unicode scalar value, and
+nothing more: there is no `char` type, for the reason there is no byte type
+\u2014 the language has one integer type (\u00a73.1), and a code point is already an
+`int` in `chars()` and `str.from_chars` (\u00a73.2a). Go draws the same line.
+So `'*'` is a *spelling* for 42, the way `0o755` is a spelling for 493, and
+it may be compared, added, indexed with, stored in a `bytes` and used in a
+`const` exactly as any other integer literal may.
+
+  - **Exactly one character.** `''` has no code point to be, and `'ab'` is
+    text \u2014 write the `str`. C reads `'ab'` as an int whose value depends on
+    the compiler.
+  - **Any code point, not just ASCII.** `'\u00e9'` is 233 and `'\u4e2d'` is 20013,
+    because the value is the scalar value and not a byte. A `str` holding
+    `'\u00e9'` is two bytes long; the literal is one number.
+  - `\x` stops at 7F here too. It is the same escape as a string's, and one
+    escape must not mean a byte in one literal and a code point in the
+    other; `\u{N}` reaches everything above it.
+
+Without this, a byte test is written `s.byte_at(i) == 42` with `// '*'`
+beside it \u2014 a magic number and a comment, which is the thing the rest of
+this language is arranged to prevent. The four programs in `apps/` had over
+a hundred of them.
 
 **A string literal is always valid UTF-8**, as every `str` is (§3.2a). The
 source is, `\u{}` produces only scalar values, and `\x` stops at 7F — a lone
@@ -135,7 +164,8 @@ letter run on the end, is an error, not a suffix.
   - **There are no hex floats.** `0x1.8` is an error; a float is decimal.
 
 The formatter prints every integer literal as it was written: `0o755`
-stays `0o755` and `1_000` stays `1_000`, not `493` and `1000`.
+stays `0o755`, `1_000` stays `1_000` and `'*'` stays `'*'`, not `493`,
+`1000` and `42`.
 
 ### 1.6 Operators and punctuation
 
@@ -2286,7 +2316,7 @@ binop       = "||" | "&&" | "==" | "!=" | "<" | "<=" | ">" | ">="
             | "+" | "-" | "*" | "/" | "%" ;
 unary       = [ "-" | "!" | "~" ] postfix ;
 postfix     = atom { "." IDENT [ args ] | "[" expr "]" | "?" } ;
-atom        = INT | FLOAT | STR | "true" | "false"
+atom        = INT | FLOAT | STR | CHAR | "true" | "false"
             | IDENT [ args ]
             | type args                               (* construction *)
             | type "." IDENT [ args ]                 (* enum variant, static method,
@@ -2314,7 +2344,11 @@ sides — `1.0`, never `1.` or `.5` — and an exponent only after that form
 (`1.0e9`), so whether a literal is a float is decided by one character.
 `STR` is `"`, then any bytes but `"`, `\` and a newline, or an escape —
 `\\` `\"` `\n` `\t` `\r` `\0` `\x` two hex digits up to `7F`, `\u{` one to six hex
-digits `}` naming a scalar value — then `"` (§1.5). `IDENT` is a letter or
+digits `}` naming a scalar value — then `"` (§1.5). `CHAR` is `'`, then
+**exactly one** character other than `'`, `\` and a newline, or the same
+escapes with `\'` in place of `\"`, then `'`; its value is that character's
+code point, and its type is `int`, so it is an `INT` to every later rule.
+`IDENT` is a letter or
 `_` followed by letters, digits or `_`, and **may not begin with `__`**,
 which is reserved (§10.1).
 

@@ -1,0 +1,4 @@
+// Two characters are text, and text is a `str`. C reads 'ab' as an int whose
+// value depends on the compiler; nobody has ever wanted that.
+int c = 'ab';
+print(c);

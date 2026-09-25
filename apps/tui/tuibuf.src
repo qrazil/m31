@@ -469,7 +469,7 @@ bool ascii_run(str s) {
     int n = s.size();
     while (i < n) {
         int b = s.byte_at(i);
-        if (b < 32 || b > 126) {
+        if (b < ' ' || b > '~') {
             return false;
         }
         i = i + 1;

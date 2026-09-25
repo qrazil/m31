@@ -70,7 +70,7 @@ bool plain(str s) {
     int i = 0;
     while (i < n) {
         int b = s.byte_at(i);
-        if (b < 32 || b > 126) {
+        if (b < ' ' || b > '~') {
             return false;
         }
         i = i + 1;

@@ -1,0 +1,4 @@
+corpus/errors/1233-char-escapes-its-own-quote.src:4:10: unknown escape `\"`; the escapes are \\ \' \n \t \r \0 \xNN and \u{N}
+  |
+4 | int c = '\"';
+  |          ^

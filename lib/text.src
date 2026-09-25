@@ -395,7 +395,7 @@ str filling(str s, int width, str fill, str who) {
 pub Result<int, ParseError> parse_int(str s) {
     int n = s.size();
     int i = 0;
-    if (n > 0 && (s.byte_at(0) == 43 || s.byte_at(0) == 45)) {
+    if (n > 0 && (s.byte_at(0) == '+' || s.byte_at(0) == '-')) {
         i = 1;
     }
     if (i >= n) {
@@ -403,7 +403,7 @@ pub Result<int, ParseError> parse_int(str s) {
     }
     while (i < n) {
         int c = s.byte_at(i);
-        if (c < 48 || c > 57) {
+        if (c < '0' || c > '9') {
             return Result<int, ParseError>.Err(ParseError.Digit(i, c));
         }
         i = i + 1;
@@ -413,7 +413,7 @@ pub Result<int, ParseError> parse_int(str s) {
             return Result<int, ParseError>.Ok(v);
         }
         case None: {
-            return Result<int, ParseError>.Err(ParseError.Range(s.byte_at(0) == 45));
+            return Result<int, ParseError>.Err(ParseError.Range(s.byte_at(0) == '-'));
         }
     }
 }
@@ -434,7 +434,7 @@ bool is_space(int b) {
 // valid UTF-8, so the `or` is never taken.
 str shown(int c) {
     bytes one = [c];
-    if (c >= 32 && c <= 126) {
+    if (c >= ' ' && c <= '~') {
         return "'" + one.utf8().or("?") + "'";
     }
     return "byte 0x" + one.hex();

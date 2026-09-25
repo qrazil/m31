@@ -53,7 +53,7 @@ bytes out = [];
 tuidiff.clear_screen(out);
 out.extend(tuidiff.full(screen, tuistyle.Depth.TrueColour));
 tuidiff.move_to(out, 0, HEIGHT);
-out.push(10);
+out.push('\n');
 match (io.stdout().write(out)) {
     case Ok(int n): {
     }

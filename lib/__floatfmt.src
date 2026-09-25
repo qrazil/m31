@@ -104,18 +104,18 @@ pub Option<float> parse(str s) {
     int n = s.size();
     int i = 0;
     int sign = 0;
-    if (n > 0 && (s.byte_at(0) == 43 || s.byte_at(0) == 45)) {
-        if (s.byte_at(0) == 45) {
+    if (n > 0 && (s.byte_at(0) == '+' || s.byte_at(0) == '-')) {
+        if (s.byte_at(0) == '-') {
             sign = 1 << 63;
         }
         i = 1;
     }
     if (n - i == 3) {
-        if (s.byte_at(i) == 105 && s.byte_at(i + 1) == 110 && s.byte_at(i + 2) == 102) {
+        if (s.byte_at(i) == 'i' && s.byte_at(i + 1) == 'n' && s.byte_at(i + 2) == 'f') {
             return Option<float>.Some(float.from_bits(sign | inf_bits()));
         }
         // The quiet NaN C's strtod gives, sign included.
-        if (s.byte_at(i) == 110 && s.byte_at(i + 1) == 97 && s.byte_at(i + 2) == 110) {
+        if (s.byte_at(i) == 'n' && s.byte_at(i + 1) == 'a' && s.byte_at(i + 2) == 'n') {
             return Option<float>.Some(float.from_bits(sign | 0x7FF8_0000_0000_0000));
         }
     }
@@ -127,7 +127,7 @@ pub Option<float> parse(str s) {
         i = i + 1;
         count = count + 1;
     }
-    if (i < n && s.byte_at(i) == 46) {
+    if (i < n && s.byte_at(i) == '.') {
         dot = i;
         i = i + 1;
         while (i < n && is_digit(s.byte_at(i))) {
@@ -141,11 +141,11 @@ pub Option<float> parse(str s) {
     }
     int end = i;
     int exp = 0;
-    if (i < n && (s.byte_at(i) == 101 || s.byte_at(i) == 69)) {
+    if (i < n && (s.byte_at(i) == 'e' || s.byte_at(i) == 'E')) {
         i = i + 1;
         bool negative = false;
-        if (i < n && (s.byte_at(i) == 43 || s.byte_at(i) == 45)) {
-            negative = s.byte_at(i) == 45;
+        if (i < n && (s.byte_at(i) == '+' || s.byte_at(i) == '-')) {
+            negative = s.byte_at(i) == '-';
             i = i + 1;
         }
         int written = 0;
@@ -174,14 +174,14 @@ pub Option<float> parse(str s) {
     // exponent up by one, so `digits * 10^e10` is the exact value with
     // `digits` free of zeros at either end.
     int first = start;
-    while (first < end && (s.byte_at(first) == 48 || s.byte_at(first) == 46)) {
+    while (first < end && (s.byte_at(first) == '0' || s.byte_at(first) == '.')) {
         first = first + 1;
     }
     if (first == end) {
         return Option<float>.Some(float.from_bits(sign));
     }
     int last = end - 1;
-    while (s.byte_at(last) == 48 || s.byte_at(last) == 46) {
+    while (s.byte_at(last) == '0' || s.byte_at(last) == '.') {
         last = last - 1;
     }
     int trailing = end - 1 - last;
@@ -200,7 +200,7 @@ pub Option<float> parse(str s) {
 }
 
 bool is_digit(int b) {
-    return b >= 48 && b <= 57;
+    return b >= '0' && b <= '9';
 }
 
 // The bits of +infinity. Every positive float's bits are below it, and every
@@ -478,7 +478,7 @@ int decimal_bits(str s, int first, int last, int nd, int e10) {
     int j = first;
     while (taken < 19 && taken < nd) {
         int b = s.byte_at(j);
-        if (b != 46) {
+        if (b != '.') {
             w = w.wrapping_mul(10).wrapping_add(b - 48);
             taken = taken + 1;
         }
@@ -635,7 +635,7 @@ int exact_bits(str s, int first, int last, int nd, int e10, int guess) {
     int j = first;
     while (j <= last && used < 800) {
         int ch = s.byte_at(j);
-        if (ch != 46) {
+        if (ch != '.') {
             chunk = chunk * 10 + ch - 48;
             held = held + 1;
             used = used + 1;

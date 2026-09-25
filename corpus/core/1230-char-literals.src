@@ -1,0 +1,54 @@
+// A character literal is an `int`: the code point, and nothing else. There
+// is no `char` type and there is not going to be one -- `"é".chars()` is
+// `[233]` and `str.from_chars` takes ints, so a code point is already an int
+// everywhere in the language. `'é'` is a spelling for 233, the way `0o755`
+// is a spelling for 493.
+
+// ASCII, the case that matters: a byte comparison that reads as what it is.
+print('*');
+print('0');
+print('A');
+print('a');
+
+// The escapes are the string ones, with `\'` in place of `\"`: a literal
+// escapes its own quote and no other, so `'"'` and `"it's"` need no escape
+// and neither has a second spelling.
+print('\n');
+print('\t');
+print('\r');
+print('\0');
+print('\\');
+print('\'');
+print('"');
+print('\x7f');
+
+// A code point, not a byte, so every character has a literal.
+print('é');
+print('\u{e9}');
+print('中');
+print('\u{1F600}');
+
+// An int is an int: it does arithmetic, indexes, and fills a `bytes`.
+print('z' - 'a');
+print('A' + 32);
+bytes hi = ['h', 'i', '!'];
+print(hi.utf8().or("?"));
+
+// The thing the literal is for. `apps/markdown` had 39 of these written as
+// `== 42 // '*'`.
+str line = "## heading";
+int n = 0;
+int i = 0;
+while (i < line.size()) {
+    if (line.byte_at(i) == '#') {
+        n = n + 1;
+    }
+    i = i + 1;
+}
+print(n);
+
+// It is a constant expression, so it may stand in a module constant.
+print(TAB);
+print(str.from_chars(['o', 'k']));
+
+const int TAB = '\t';

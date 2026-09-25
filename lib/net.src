@@ -477,13 +477,13 @@ Option<Ip> parse_v4(str text) {
             return Option<Ip>.None;
         }
         // `010` is ten here and eight to anything that reads it as octal.
-        if (len > 1 && text.byte_at(start) == 48) {
+        if (len > 1 && text.byte_at(start) == '0') {
             return Option<Ip>.None;
         }
         out.push(v);
         fields = fields + 1;
         if (fields < 4) {
-            if (i >= n || text.byte_at(i) != 46) {
+            if (i >= n || text.byte_at(i) != '.') {
                 return Option<Ip>.None;
             }
             i = i + 1;
@@ -509,8 +509,8 @@ Option<Ip> parse_v6(str text) {
     // A leading colon is only ever the first colon of a leading `::`. Dealt
     // with here so that the loop below can assume every group has a group
     // before it or is the first.
-    if (text.byte_at(0) == 58) {
-        if (n < 2 || text.byte_at(1) != 58) {
+    if (text.byte_at(0) == ':') {
+        if (n < 2 || text.byte_at(1) != ':') {
             return Option<Ip>.None;
         }
         i = 2;
@@ -531,7 +531,7 @@ Option<Ip> parse_v6(str text) {
         if (i == start) {
             return Option<Ip>.None;
         }
-        if (i < n && text.byte_at(i) == 46) {
+        if (i < n && text.byte_at(i) == '.') {
             // A dot: the group just read was the first field of a dotted
             // quad, so the whole tail from where it started is one, and it
             // fills the last two groups. `g` may reach nine this way, which
@@ -550,7 +550,7 @@ Option<Ip> parse_v6(str text) {
         } else {
             g.push(v);
             if (i < n) {
-                if (text.byte_at(i) != 58) {
+                if (text.byte_at(i) != ':') {
                     return Option<Ip>.None;
                 }
                 i = i + 1;
@@ -558,7 +558,7 @@ Option<Ip> parse_v6(str text) {
                 if (i >= n) {
                     return Option<Ip>.None;
                 }
-                if (text.byte_at(i) == 58) {
+                if (text.byte_at(i) == ':') {
                     if (ell >= 0) {
                         return Option<Ip>.None;
                     }

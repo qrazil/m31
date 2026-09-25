@@ -203,7 +203,7 @@ pub enum Depth {
 /// few thousand numbers. This writes into the frame's own buffer.
 pub void push_int(bytes out, int v) {
     if (v < 0) {
-        out.push(45);
+        out.push('-');
         push_int(out, -v);
         return;
     }
@@ -216,7 +216,7 @@ pub void push_int(bytes out, int v) {
 /// Append `\x1b[` to `out`.
 pub void push_csi(bytes out) {
     out.push(27);
-    out.push(91);
+    out.push('[');
 }
 
 /// The escape sequence that turns a terminal showing style `from` into one
@@ -294,19 +294,19 @@ pub void sgr(bytes out, int from, int to, Depth depth) {
     int i = 0;
     while (i < codes.size()) {
         if (i > 0) {
-            out.push(59);
+            out.push(';');
         }
         push_int(out, codes[i]);
         i = i + 1;
     }
-    out.push(109);
+    out.push('m');
 }
 
 /// `\x1b[0m`, the sequence that puts the terminal back to `RESET_STYLE`.
 pub void push_reset(bytes out) {
     push_csi(out);
-    out.push(48);
-    out.push(109);
+    out.push('0');
+    out.push('m');
 }
 
 /// The packed style a terminal is in after `\x1b[0m`: both colours its own,

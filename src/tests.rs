@@ -166,6 +166,51 @@ fn string_literals_keep_multibyte_utf8_intact() {
 }
 
 #[test]
+fn a_character_literal_is_the_code_point_as_an_int() {
+    // No new token and no new type: `'*'` lexes to the int 42, exactly as
+    // `42` does, and `'é'` to the scalar value rather than to a UTF-8 byte.
+    assert_eq!(toks("'*'"), vec![Tok::Int(42), Tok::Eof]);
+    assert_eq!(toks("'0'"), vec![Tok::Int(48), Tok::Eof]);
+    assert_eq!(toks("'é'"), vec![Tok::Int(233), Tok::Eof]);
+    assert_eq!(toks("'中'"), vec![Tok::Int(20013), Tok::Eof]);
+    assert_eq!(toks(r"'\n'"), vec![Tok::Int(10), Tok::Eof]);
+    assert_eq!(toks(r"'\0'"), vec![Tok::Int(0), Tok::Eof]);
+    assert_eq!(toks(r"'\\'"), vec![Tok::Int(92), Tok::Eof]);
+    assert_eq!(toks(r"'\''"), vec![Tok::Int(39), Tok::Eof]);
+    assert_eq!(toks(r"'\u{1F600}'"), vec![Tok::Int(0x1F600), Tok::Eof]);
+    // `"` needs no escape inside `'`, and `'` needs none inside `"`.
+    assert_eq!(toks("'\"'"), vec![Tok::Int(34), Tok::Eof]);
+    assert_eq!(toks("\"it's\""), vec![Tok::Str("it's".into()), Tok::Eof]);
+}
+
+#[test]
+fn a_character_literal_is_exactly_one_character() {
+    // Each literal escapes its own quote and no other, so there is one
+    // spelling for each -- which is what lets the formatter keep the
+    // author's.
+    for (src, want) in [
+        ("int c = '';", "empty character literal"),
+        ("int c = 'ab';", "exactly one character"),
+        ("int c = '\\\"';", "unknown escape"),
+        ("str s = \"\\'\";", "unknown escape"),
+        ("int c = '\\xff';", "`\\x` stops at 7f"),
+        ("int c = 'a;", "unterminated character literal"),
+    ] {
+        let got = err(src);
+        assert!(got.contains(want), "{src}: {got}");
+    }
+}
+
+#[test]
+fn formatting_keeps_every_char_spelling() {
+    // A character literal is an int, so printing the value would put back
+    // the magic number the literal exists to remove.
+    let src = "int a = '*';\nint b = '\\n';\nint c = 'é';\nint d = '\\u{e9}';\n";
+    let once = crate::reformat(src, "t").expect("formats");
+    assert_eq!(once, src);
+}
+
+#[test]
 fn string_escapes_are_decoded() {
     assert_eq!(
         toks(r#""a\tb\nc\\d\"e""#),

@@ -26,20 +26,20 @@ import text;
 // `»` are "other" here and whitespace/punctuation there. See README.
 
 bool space_byte(int c) {
-    return c == 32 || c == 9 || c == 10 || c == 13 || c == 11 || c == 12;
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 11 || c == 12;
 }
 
 bool punct_byte(int c) {
-    if (c >= 33 && c <= 47) {
+    if (c >= '!' && c <= '/') {
         return true;
     }
-    if (c >= 58 && c <= 64) {
+    if (c >= ':' && c <= '@') {
         return true;
     }
-    if (c >= 91 && c <= 96) {
+    if (c >= '[' && c <= '`') {
         return true;
     }
-    return c >= 123 && c <= 126;
+    return c >= '{' && c <= '~';
 }
 
 bool alpha_byte(int c) {
@@ -47,7 +47,7 @@ bool alpha_byte(int c) {
 }
 
 bool digit_byte(int c) {
-    return c >= 48 && c <= 57;
+    return c >= '0' && c <= '9';
 }
 
 bool alnum_byte(int c) {
@@ -78,9 +78,9 @@ str escape_href(str dest) {
     int i = 0;
     while (i < n) {
         int c = dest.byte_at(i);
-        if (c == 38) {
+        if (c == '&') {
             out.push("&amp;");
-        } else if (c == 39) {
+        } else if (c == '\'') {
             out.push("&#x27;");
         } else if (href_safe(c)) {
             out.push(dest.substr(i, i + 1));
@@ -128,7 +128,7 @@ Node delim_node(int c, int len, bool opens, bool closes) {
 }
 
 str mark_of(int c) {
-    if (c == 42) {
+    if (c == '*') {
         return "*";
     }
     return "_";
@@ -175,17 +175,17 @@ List<int> brackets(str s) {
     int i = 0;
     while (i < n) {
         int c = s.byte_at(i);
-        if (c == 92) {
+        if (c == '\\') {
             i = i + 2;
             continue;
         }
-        if (c == 96) {
+        if (c == '`') {
             i = skip_code(s, i);
             continue;
         }
-        if (c == 91) {
+        if (c == '[') {
             open.push(i);
-        } else if (c == 93 && open.size() > 0) {
+        } else if (c == ']' && open.size() > 0) {
             shut[open.pop()] = i;
         }
         i = i + 1;
@@ -200,9 +200,9 @@ List<Node> scan(str s, List<int> shut, int depth) {
     int from = 0;
     while (i < n) {
         int c = s.byte_at(i);
-        if (c == 92) {
+        if (c == '\\') {
             // A backslash escapes ASCII punctuation, and ends a line hard.
-            if (i + 1 < n && s.byte_at(i + 1) == 10) {
+            if (i + 1 < n && s.byte_at(i + 1) == '\n') {
                 flush(ns, s, from, i);
                 ns.push(html_node("<br />\n"));
                 i = i + 2;
@@ -220,7 +220,7 @@ List<Node> scan(str s, List<int> shut, int depth) {
             i = i + 1;
             continue;
         }
-        if (c == 96) {
+        if (c == '`') {
             int after = code_span(ns, s, i, from);
             if (after > i) {
                 i = after;
@@ -230,13 +230,13 @@ List<Node> scan(str s, List<int> shut, int depth) {
             // Not a span: the run is literal, and skipping it whole stops the
             // next backtick from opening one inside it.
             int j = i;
-            while (j < n && s.byte_at(j) == 96) {
+            while (j < n && s.byte_at(j) == '`') {
                 j = j + 1;
             }
             i = j;
             continue;
         }
-        if (c == 60) {
+        if (c == '<') {
             int after = autolink(ns, s, i, from);
             if (after > i) {
                 i = after;
@@ -246,7 +246,7 @@ List<Node> scan(str s, List<int> shut, int depth) {
             i = i + 1;
             continue;
         }
-        if (c == 91 || c == 33 && i + 1 < n && s.byte_at(i + 1) == 91) {
+        if (c == '[' || c == '!' && i + 1 < n && s.byte_at(i + 1) == '[') {
             int after = link(ns, s, shut, i, from, depth);
             if (after > i) {
                 i = after;
@@ -256,12 +256,12 @@ List<Node> scan(str s, List<int> shut, int depth) {
             i = i + 1;
             continue;
         }
-        if (c == 10) {
+        if (c == '\n') {
             // A line break. Two or more trailing spaces make it hard; the
             // trailing spaces go either way, and so does the next line's
             // indent.
             int back = i;
-            while (back > from && s.byte_at(back - 1) == 32) {
+            while (back > from && s.byte_at(back - 1) == ' ') {
                 back = back - 1;
             }
             flush(ns, s, from, back);
@@ -274,7 +274,7 @@ List<Node> scan(str s, List<int> shut, int depth) {
             from = i;
             continue;
         }
-        if (c == 42 || c == 95) {
+        if (c == '*' || c == '_') {
             int j = i;
             while (j < n && s.byte_at(j) == c) {
                 j = j + 1;
@@ -300,7 +300,7 @@ void flush(List<Node> ns, str s, int from, int to) {
 int skip_indent(str s, int at) {
     int n = s.size();
     int i = at;
-    while (i < n && (s.byte_at(i) == 32 || s.byte_at(i) == 9)) {
+    while (i < n && (s.byte_at(i) == ' ' || s.byte_at(i) == '\t')) {
         i = i + 1;
     }
     return i;
@@ -323,7 +323,7 @@ Node run_at(str s, int i, int j, int c) {
     bool ap = punct_byte(after);
     bool left = !aw && (!ap || bw || bp);
     bool right = !bw && (!bp || aw || ap);
-    if (c == 95) {
+    if (c == '_') {
         return delim_node(c, j - i, left && (!right || bp), right && (!left || ap));
     }
     return delim_node(c, j - i, left, right);
@@ -336,16 +336,16 @@ Node run_at(str s, int i, int j, int c) {
 int code_span(List<Node> ns, str s, int i, int from) {
     int n = s.size();
     int j = i;
-    while (j < n && s.byte_at(j) == 96) {
+    while (j < n && s.byte_at(j) == '`') {
         j = j + 1;
     }
     int want = j - i;
     int k = j;
     int found = -1;
     while (k < n && found < 0) {
-        if (s.byte_at(k) == 96) {
+        if (s.byte_at(k) == '`') {
             int m = k;
-            while (m < n && s.byte_at(m) == 96) {
+            while (m < n && s.byte_at(m) == '`') {
                 m = m + 1;
             }
             if (m - k == want) {
@@ -376,10 +376,10 @@ int autolink(List<Node> ns, str s, int i, int from) {
     int j = i + 1;
     while (j < n) {
         int c = s.byte_at(j);
-        if (c == 62) {
+        if (c == '>') {
             break;
         }
-        if (c == 60 || space_byte(c)) {
+        if (c == '<' || space_byte(c)) {
             return i;
         }
         j = j + 1;
@@ -412,10 +412,10 @@ bool is_uri(str body) {
     int i = 1;
     while (i < n) {
         int c = body.byte_at(i);
-        if (c == 58) {
+        if (c == ':') {
             return i >= 2 && i <= 32;
         }
-        if (!alnum_byte(c) && c != 43 && c != 45 && c != 46) {
+        if (!alnum_byte(c) && c != '+' && c != '-' && c != '.') {
             return false;
         }
         i = i + 1;
@@ -460,7 +460,7 @@ bool labels_ok(str host) {
         int i = 1;
         while (i < n - 1) {
             int c = label.byte_at(i);
-            if (!alnum_byte(c) && c != 45) {
+            if (!alnum_byte(c) && c != '-') {
                 return false;
             }
             i = i + 1;
@@ -481,7 +481,7 @@ type Target {
 
 int link(List<Node> ns, str s, List<int> shuts, int i, int from, int depth) {
     int bang = 0;
-    if (s.byte_at(i) == 33) {
+    if (s.byte_at(i) == '!') {
         bang = 1;
     }
     // A link may not hold another link, so inside one a `[` is literal. An
@@ -536,15 +536,15 @@ int link(List<Node> ns, str s, List<int> shuts, int i, int from, int depth) {
 int skip_code(str s, int i) {
     int n = s.size();
     int j = i;
-    while (j < n && s.byte_at(j) == 96) {
+    while (j < n && s.byte_at(j) == '`') {
         j = j + 1;
     }
     int want = j - i;
     int k = j;
     while (k < n) {
-        if (s.byte_at(k) == 96) {
+        if (s.byte_at(k) == '`') {
             int m = k;
-            while (m < n && s.byte_at(m) == 96) {
+            while (m < n && s.byte_at(m) == '`') {
                 m = m + 1;
             }
             if (m - k == want) {
@@ -563,15 +563,15 @@ Target target(str s, int at) {
     int n = s.size();
     int i = skip_ws(s, at);
     str href = "";
-    if (i < n && s.byte_at(i) == 60) {
+    if (i < n && s.byte_at(i) == '<') {
         int j = i + 1;
-        while (j < n && s.byte_at(j) != 62 && s.byte_at(j) != 10) {
-            if (s.byte_at(j) == 92) {
+        while (j < n && s.byte_at(j) != '>' && s.byte_at(j) != '\n') {
+            if (s.byte_at(j) == '\\') {
                 j = j + 1;
             }
             j = j + 1;
         }
-        if (j >= n || s.byte_at(j) != 62) {
+        if (j >= n || s.byte_at(j) != '>') {
             return Target(false, "", "", at);
         }
         href = unescape(s.substr(i + 1, j));
@@ -581,7 +581,7 @@ Target target(str s, int at) {
         int depth = 0;
         while (j < n) {
             int c = s.byte_at(j);
-            if (c == 92 && j + 1 < n) {
+            if (c == '\\' && j + 1 < n) {
                 j = j + 2;
                 continue;
             }
@@ -590,7 +590,7 @@ Target target(str s, int at) {
             }
             if (c == 40) {
                 depth = depth + 1;
-            } else if (c == 41) {
+            } else if (c == ')') {
                 if (depth == 0) {
                     break;
                 }
@@ -606,7 +606,7 @@ Target target(str s, int at) {
     if (k > i || k < n && s.byte_at(k) == 41) {
         if (k < n && (s.byte_at(k) == 34 || s.byte_at(k) == 39 || s.byte_at(k) == 40)) {
             int shut = 34;
-            if (s.byte_at(k) == 39) {
+            if (s.byte_at(k) == '\'') {
                 shut = 39;
             }
             if (s.byte_at(k) == 40) {
@@ -614,7 +614,7 @@ Target target(str s, int at) {
             }
             int j = k + 1;
             while (j < n && s.byte_at(j) != shut) {
-                if (s.byte_at(j) == 92) {
+                if (s.byte_at(j) == '\\') {
                     j = j + 1;
                 }
                 j = j + 1;
@@ -626,7 +626,7 @@ Target target(str s, int at) {
             k = skip_ws(s, j + 1);
         }
     }
-    if (k >= n || s.byte_at(k) != 41) {
+    if (k >= n || s.byte_at(k) != ')') {
         return Target(false, "", "", at);
     }
     return Target(true, href, title, k + 1);
@@ -652,7 +652,7 @@ str unescape(str s) {
     int i = 0;
     int from = 0;
     while (i < n) {
-        if (s.byte_at(i) == 92 && i + 1 < n && punct_byte(s.byte_at(i + 1))) {
+        if (s.byte_at(i) == '\\' && i + 1 < n && punct_byte(s.byte_at(i + 1))) {
             out.push(s.substr(from, i));
             i = i + 1;
             from = i;
@@ -672,9 +672,9 @@ str strip_tags(str s) {
     int i = 0;
     int from = 0;
     while (i < n) {
-        if (s.byte_at(i) == 60) {
+        if (s.byte_at(i) == '<') {
             out.push(s.substr(from, i));
-            while (i < n && s.byte_at(i) != 62) {
+            while (i < n && s.byte_at(i) != '>') {
                 i = i + 1;
             }
             if (i < n) {

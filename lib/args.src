@@ -912,7 +912,7 @@ str token_kind(str tok) {
     // byte because the token is whatever was typed: in `-é` it is the first
     // half of a character, where substr(1, 2) would trap.
     int b = tok.byte_at(1);
-    if (b >= 48 && b <= 57 || b == 46) {
+    if (b >= '0' && b <= '9' || b == '.') {
         return "data";
     }
     return "command";

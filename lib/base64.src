@@ -61,10 +61,10 @@ pub str Error.to_str() {
     match (this) {
         case Character(int at, int c, bool url): {
             str head = "invalid base64 " + shown(c) + " at position " + at.to_str();
-            if (url && (c == 43 || c == 47)) {
+            if (url && (c == '+' || c == '/')) {
                 return head + ": that is the standard alphabet, and url: true is the URL-safe one";
             }
-            if (!url && (c == 45 || c == 95)) {
+            if (!url && (c == '-' || c == '_')) {
                 return head + ": that is the URL-safe alphabet, which is url: true";
             }
             return head;
@@ -127,7 +127,7 @@ pub Result<bytes, Error> decode(str text, bool url = false) {
     int i = 0;
     while (i < n) {
         int c = text.byte_at(i);
-        if (c != 61 && value(c, url) < 0) {
+        if (c != '=' && value(c, url) < 0) {
             return Result<bytes, Error>.Err(Error.Character(i, c, url));
         }
         i = i + 1;
@@ -138,12 +138,12 @@ pub Result<bytes, Error> decode(str text, bool url = false) {
     // Everything is now alphabet or `=`, so the first `=` is where the padding
     // starts, and the padding must run from there to the end.
     int data = 0;
-    while (data < n && text.byte_at(data) != 61) {
+    while (data < n && text.byte_at(data) != '=') {
         data = data + 1;
     }
     if (data < n) {
         int after = data;
-        while (after < n && text.byte_at(after) == 61) {
+        while (after < n && text.byte_at(after) == '=') {
             after = after + 1;
         }
         if (after < n) {
@@ -197,19 +197,19 @@ int quad(str text, int at, int count, bool url) {
 // in it: A-Z are 0-25, a-z 26-51, 0-9 52-61, and the two alphabets differ
 // only in 62 and 63 -- `+ /` for the standard one, `- _` for the URL one.
 int value(int c, bool url) {
-    if (c >= 65 && c <= 90) {
+    if (c >= 'A' && c <= 'Z') {
         return c - 65;
     }
-    if (c >= 97 && c <= 122) {
+    if (c >= 'a' && c <= 'z') {
         return c - 71;
     }
-    if (c >= 48 && c <= 57) {
+    if (c >= '0' && c <= '9') {
         return c + 4;
     }
-    if (url && c == 45 || !url && c == 43) {
+    if (url && c == '-' || !url && c == '+') {
         return 62;
     }
-    if (url && c == 95 || !url && c == 47) {
+    if (url && c == '_' || !url && c == '/') {
         return 63;
     }
     return -1;
@@ -238,7 +238,7 @@ List<str> alphabet(bool url) {
 // valid UTF-8, so the `or` is never taken.
 str shown(int c) {
     bytes one = [c];
-    if (c >= 32 && c <= 126) {
+    if (c >= ' ' && c <= '~') {
         return "character '" + one.utf8().or("?") + "'";
     }
     return "byte 0x" + one.hex();
