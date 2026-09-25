@@ -173,6 +173,18 @@ if build t_object; then
     done
 fi
 
+# --- the commands, against the real git ----------------------------------------
+
+if build git; then
+    for repo in "${repos[@]}"; do
+        if out=$(bash apps/git/compare.sh "$WORK/git" "$repo" "$WORK/cmp" 2>&1); then
+            note "commands on $repo: ${out## }"
+        else
+            bad "commands on $repo" "$out"
+        fi
+    done
+fi
+
 echo
 if [ $fail -eq 0 ]; then
     printf '\033[32mall %d apps/git checks passed\033[0m\n' "$pass"
