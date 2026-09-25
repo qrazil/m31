@@ -173,8 +173,12 @@ stays `0o755`, `1_000` stays `1_000` and `'*'` stays `'*'`, not `493`,
     ==  !=  <   <=  >   >=
     &&  ||  !
     &   |   ^   ~   <<  >>
-    =   .   ,   ;   :
+    =   .   ,   ;   :   ..
     (   )   {   }   [   ]   <   >
+
+`..` has exactly one use: between the two bounds of a range in a `for`
+header (§5.5). It is not an operator — there is no range value — so it may
+not appear anywhere else, and the diagnostic says so.
 
 `>>` is not a token. The two characters close two type argument lists in
 `List<List<int>>`, so the lexer always produces single `>`s, and the parser
@@ -1516,18 +1520,72 @@ while (cond) { ... }
 
 ### 5.5 `for ... in`
 
-The only `for`. There is no three-clause form.
+The only `for`, in two shapes: over a collection, and over a range.
 
 ```c
-for (int v in xs) { ... }
+for (int v in xs)      { ... }      // every element
+for (int i in 0 .. n)  { ... }      // 0, 1, .. n-1
 ```
 
-Iterates an `Array`, a `List` or a `bytes` — whose elements are `int`s
-(§3.10). The loop variable is a fresh binding each iteration and is
-**borrowed** from the collection; it is not a copy.
+**Over a collection.** Iterates an `Array`, a `List` or a `bytes` — whose
+elements are `int`s (§3.10). The loop variable is a fresh binding each
+iteration and is **borrowed** from the collection; it is not a copy.
 
 Mutating the collection's length while iterating it is not defined and is not
 checked. Do not.
+
+**Over a range.** `a .. b` counts from `a` up to but **not including** `b`.
+Both bounds are `int` and both are evaluated **once**, left then right,
+before the loop — so `for (int i in 0 .. xs.size())` measures the list once,
+and pushing to it inside the body does not extend the iteration. A range
+where `a >= b` runs the body no times; `0 .. 0` is empty and so is `7 .. 2`.
+
+  - **A range is loop syntax, not a value.** It has no type, cannot be
+    stored in a variable, passed to a function or returned. `..` may be
+    written in a `for` header and nowhere else, and the diagnostic says so.
+    That keeps the feature to one line of grammar: nothing about the type
+    system, the collections or `for (T x in xs)` changes, and an iterator
+    protocol is not needed to explain it.
+  - **Half-open, because indices are.** `0 .. xs.size()` is every index of
+    `xs` and needs no `- 1`, two adjacent ranges `0 .. k` and `k .. n` cover
+    `0 .. n` exactly once, and the count of `a .. b` is `b - a`. This is
+    Python's `range`, Rust's `a..b` and Go's `for i := a; i < b; i++`.
+  - **No step, and no counting down.** `for (int i in 0 .. n)` is one shape
+    with one meaning; a step is a second rule that every reader then has to
+    check for, and a loop that needs one is a `while`. Walking backwards is
+    `for (int k in 0 .. n)` with `int i = n - 1 - k;`, or a `while`.
+  - **The counter belongs to the loop.** It cannot be assigned — the body
+    gets the same `const` binding a collection's loop variable gets — and
+    the loop advances it before the body runs, so `continue` cannot skip
+    past it.
+
+That last point is the reason this exists rather than a shorthand for the
+`while` it replaces. Written by hand the increment is the body's **last**
+statement, so every `continue` has to repeat it:
+
+```c
+int i = 0;
+while (i < n) {
+    if (skip(i)) {
+        i = i + 1;              // repeated by hand, or the program hangs
+        continue;
+    }
+    ...
+    i = i + 1;
+}
+```
+
+Forgetting that one line is not a wrong answer, it is a program that does not
+terminate, and nothing catches it. All three applications in `apps/` recorded
+writing exactly that loop by accident (`apps/tui` §4, `apps/git` §8,
+`apps/markdown` §1.2); `apps/markdown`'s inline scanner has eleven
+`continue`s, and every one of them has to advance the cursor by hand. A range
+`for` cannot express the bug, because there is no increment to lose.
+
+**There is still no three-clause `for`** (§9), and no `+=` (§6.1). Both are
+diagnosed by name: `for (int i = 0; ...)` and `n += 1` are the two things
+everyone arriving from C, Go, Rust or Python writes in their first hour, and
+the compiler says which construct is absent and what to write instead.
 
 ### 5.6 `match`
 
@@ -1659,7 +1717,23 @@ bit pattern, and the sign extension of `>>` is spelled out rather than left
 to the implementation.
 
 There is no `&=`, `<<=` or any other augmented assignment, because there is
-no `+=`; the bit operators do not get a spelling arithmetic lacks.
+no `+=`; the bit operators do not get a spelling arithmetic lacks. Writing
+one is diagnosed by name — "there is no `+=`" — rather than reported as a
+surprising `=`, because §9 exists so that an absence is a decision and a
+decision should reach the person who trips over it.
+
+The case for `+=` was reopened and refused once the first four programs were
+written, so the reasoning is worth having in one place. It would shorten
+about 515 statements across `apps/` and `lib/` and delete none of them, and
+the thing those programs actually got wrong — a `continue` that skipped a
+hand-written increment, three times, in three separate programs — it does not
+touch; the range `for` (§5.5) does, and removes about 120 of those statements
+outright. Against that, `x += 1` and `x = x + 1` would both be legal, and
+nothing here could choose between them: there are no warnings (§5.1), and
+the formatter lays code out rather than rewriting it. Oro ships the complete
+set and can afford to, because its linter flags the longhand and points at
+the short one; without that arbiter, one operation with two spellings is the
+thing this language is arranged not to have.
 
 There is no unsigned type. A `uint64` algorithm is written on `int` with the
 bit operators and the wrapping methods — equal bits, and the one difference,
@@ -2294,7 +2368,7 @@ type        = "int" | "float" | "bool" | "str" | "bytes" | "void"
             | [ IDENT "." ] IDENT [ "<" type { "," type } ">" ] ;
 
 block       = "{" { stmt } "}" ;
-stmt        = decl | assign | eval | if | while | forin | match
+stmt        = decl | assign | eval | if | while | forin | forrange | match
             | "return" [ expr ] ";" | "break" ";" | "continue" ";"
             | "spawn" IDENT args ";" ;
 match       = "match" "(" expr ")" "{" { case } "}" ;
@@ -2309,6 +2383,10 @@ eval        = expr ";" ;
 if          = "if" "(" expr ")" block [ "else" ( if | block ) ] ;
 while       = "while" "(" expr ")" block ;
 forin       = "for" "(" type IDENT "in" expr ")" block ;
+forrange    = "for" "(" "int" IDENT "in" expr ".." expr ")" block ;
+                                                      (* half-open, §5.5;
+                                                         `..` appears here
+                                                         and nowhere else *)
 
 expr        = unary { binop unary } ;                 (* precedence per 6.1 *)
 binop       = "||" | "&&" | "==" | "!=" | "<" | "<=" | ">" | ">="

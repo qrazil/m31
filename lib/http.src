@@ -369,13 +369,11 @@ bool is_token(bytes b) {
 // bytes above 127 are -- they are answered for by the UTF-8 decode that
 // turns a value into a `str`.
 int bad_value_at(bytes b) {
-    int i = 0;
-    while (i < b.size()) {
+    for (int i in 0 .. b.size()) {
         int c = b[i];
         if (c != HTAB && (c < SP || c == DEL)) {
             return i;
         }
-        i = i + 1;
     }
     return -1;
 }
@@ -384,13 +382,11 @@ int bad_value_at(bytes b) {
 // visible ASCII and above, so a control character or a space is refused and
 // raw UTF-8 in a path -- which clients do send -- is not.
 int bad_target_at(bytes b) {
-    int i = 0;
-    while (i < b.size()) {
+    for (int i in 0 .. b.size()) {
         int c = b[i];
         if (c <= SP || c == DEL) {
             return i;
         }
-        i = i + 1;
     }
     return -1;
 }
@@ -456,13 +452,11 @@ str quoted(bytes b) {
         head = b.substr(0, 48);
         tail = "...";
     }
-    int i = 0;
-    while (i < head.size()) {
+    for (int i in 0 .. head.size()) {
         int c = head[i];
         if (c < ' ' || c > '~') {
             return "0x" + head.hex() + tail;
         }
-        i = i + 1;
     }
     return "'" + head.utf8().or("") + tail + "'";
 }
@@ -586,8 +580,7 @@ Result<void, Error> Headers.merge(str name, str value) {
 // the message and nowhere else, because a client told that its *request*
 // field is an illegal *response* field looks in the wrong place.
 Result<void, Error> Headers.render(bytes out, str kind) {
-    int i = 0;
-    while (i < ns.size()) {
+    for (int i in 0 .. ns.size()) {
         bytes name = ns[i].to_bytes();
         bytes value = vs[i].to_bytes();
         if (!is_token(name)) {
@@ -602,7 +595,6 @@ Result<void, Error> Headers.render(bytes out, str kind) {
         out.push(SP);
         out.extend(value);
         out.extend(CRLF);
-        i = i + 1;
     }
     return Result<void, Error>.Ok;
 }
@@ -809,12 +801,10 @@ pub str Url.to_str() {
 // and not `index_of` twice, because the answer is the earlier of the two and
 // finding both to compare them walks the string again.
 int first_of(bytes b, int a, int c) {
-    int i = 0;
-    while (i < b.size()) {
+    for (int i in 0 .. b.size()) {
         if (b[i] == a || b[i] == c) {
             return i;
         }
-        i = i + 1;
     }
     return -1;
 }
@@ -1331,20 +1321,16 @@ Result<bytes, Error> read_head(io.Stream s) {
 // the whole of request smuggling.
 Result<List<bytes>, Error> head_lines(bytes raw) {
     List<bytes> lines = raw.substr(0, raw.size() - 4).split(CRLF);
-    int i = 0;
-    while (i < lines.size()) {
+    for (int i in 0 .. lines.size()) {
         bytes line = lines[i];
         if (line.size() > MAX_HEADER_LINE) {
             return Result<List<bytes>, Error>.Err(Error.TooLarge("a header line", MAX_HEADER_LINE));
         }
-        int k = 0;
-        while (k < line.size()) {
+        for (int k in 0 .. line.size()) {
             if (line[k] == CR || line[k] == LF) {
                 return Result<List<bytes>, Error>.Err(Error.Syntax(shown(line[k]) + " inside the header block; a line of an HTTP message ends with CRLF"));
             }
-            k = k + 1;
         }
-        i = i + 1;
     }
     return Result<List<bytes>, Error>.Ok(lines);
 }

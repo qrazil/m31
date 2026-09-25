@@ -376,23 +376,19 @@ Result<int, Error> hex4(Parser p) {
     int n = text.size();
     p.at = p.at + 1;
     int end = p.at;
-    int k = 0;
-    while (k < 4) {
+    for (int k in 0 .. 4) {
         if (end >= n) {
             return Result<int, Error>.Err(Error.Syntax("incomplete \\u escape", p.at));
         }
         end = end + char_length(text, end);
-        k = k + 1;
     }
     int cp = 0;
-    int i = p.at;
-    while (i < end) {
+    for (int i in p.at .. end) {
         int d = hex_digit(text.byte_at(i));
         if (d < 0) {
             return Result<int, Error>.Err(Error.Syntax("invalid \\u escape '" + text.substr(p.at, end) + "'", p.at));
         }
         cp = cp * 16 + d;
-        i = i + 1;
     }
     p.at = end;
     return Result<int, Error>.Ok(cp);
@@ -482,12 +478,10 @@ bool word(Parser p, str w) {
     if (end > p.text.size()) {
         return false;
     }
-    int i = 0;
-    while (i < w.size()) {
+    for (int i in 0 .. w.size()) {
         if (p.text.byte_at(p.at + i) != w.byte_at(i)) {
             return false;
         }
-        i = i + 1;
     }
     p.at = end;
     return true;

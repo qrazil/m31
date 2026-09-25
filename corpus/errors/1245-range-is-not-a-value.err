@@ -1,0 +1,4 @@
+corpus/errors/1245-range-is-not-a-value.src:3:11: `..` may only be written in a `for` header: a range is loop syntax, not a value
+  |
+3 | int a = 0 .. 3;
+  |           ^

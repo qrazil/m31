@@ -130,28 +130,24 @@ void Hasher.block(bytes b, int at) {
     // are deliberately not inlinable (`gates.sh`, "runtime stays separate
     // TU"). A local is borrowed and costs nothing. See apps/git/FRICTION.md.
     Array<int> w = sched;
-    int i = 0;
-    while (i < 16) {
+    for (int i in 0 .. 16) {
         int j = at + i * 4;
         w[i] = b[j] << 24 | b[j + 1] << 16 | b[j + 2] << 8 | b[j + 3];
-        i = i + 1;
     }
-    while (i < 80) {
+    for (int i in 16 .. 80) {
         int x = w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16];
         w[i] = (x << 1 | x >> 31) & 0xFFFF_FFFF;
-        i = i + 1;
     }
     int a = h0;
     int bb = h1;
     int c = h2;
     int d = h3;
     int e = h4;
-    i = 0;
     // The four rounds are one loop with a branch rather than four loops,
     // because four loops would repeat the eight lines of the step. The
     // branch predicts perfectly -- it changes three times in eighty
     // iterations.
-    while (i < 80) {
+    for (int i in 0 .. 80) {
         int f = 0;
         int k = 0;
         if (i < 20) {
@@ -173,7 +169,6 @@ void Hasher.block(bytes b, int at) {
         c = (bb << 30 | bb >> 2) & 0xFFFF_FFFF;
         bb = a;
         a = t;
-        i = i + 1;
     }
     h0 = h0 + a & 0xFFFF_FFFF;
     h1 = h1 + bb & 0xFFFF_FFFF;

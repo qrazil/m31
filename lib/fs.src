@@ -184,8 +184,7 @@ Result<List<str>, io.Error> list_names(str path, bool strict) {
     }
     List<str> out = [];
     int start = 0;
-    int i = 0;
-    while (i < need) {
+    for (int i in 0 .. need) {
         if (buf[i] == 0) {
             match (buf.substr(start, i).utf8()) {
                 case Some(str name): {
@@ -199,7 +198,6 @@ Result<List<str>, io.Error> list_names(str path, bool strict) {
             }
             start = i + 1;
         }
-        i = i + 1;
     }
     out.sort();
     return Result<List<str>, io.Error>.Ok(out);

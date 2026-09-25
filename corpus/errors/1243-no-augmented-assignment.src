@@ -1,0 +1,6 @@
+// The second one. `n += 1` reaches the parser as `n`, `+`, `=`: the `+` was
+// taken as an infix operator and the `=` is where its right operand should
+// be, so the token before the cursor says what was written.
+int n = 1;
+n += 1;
+print(n);

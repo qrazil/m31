@@ -230,10 +230,8 @@ int digit_count(int v) {
 
 int pow10_int(int n) {
     int p = 1;
-    int k = 0;
-    while (k < n) {
+    for (int k in 0 .. n) {
         p = p * 10;
-        k = k + 1;
     }
     return p;
 }
@@ -714,12 +712,10 @@ int compare_half(List<int> big, int e10, int b) {
 // stays below 2^63.
 void mul_add(List<int> a, int m, int add) {
     int carry = add;
-    int i = 0;
-    while (i < a.size()) {
+    for (int i in 0 .. a.size()) {
         int v = a[i] * m + carry;
         a[i] = v & mask32();
         carry = v >> 32;
-        i = i + 1;
     }
     while (carry != 0) {
         a.push(carry & mask32());
@@ -746,10 +742,8 @@ List<int> shift_left(List<int> a, int bits) {
     List<int> out = [];
     int words = bits / 32;
     int r = bits % 32;
-    int i = 0;
-    while (i < words) {
+    for (int i in 0 .. words) {
         out.push(0);
-        i = i + 1;
     }
     if (r == 0) {
         for (int v in a) {

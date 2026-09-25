@@ -755,6 +755,25 @@ impl Fmt {
                 self.depth -= 1;
                 self.line("}");
             }
+            Stmt::ForRange {
+                ty,
+                name,
+                from,
+                to,
+                body,
+                span,
+            } => {
+                self.line(&format!(
+                    "for ({} {name} in {} .. {}) {{",
+                    self.ty(*ty),
+                    self.expr(from),
+                    self.expr(to)
+                ));
+                self.depth += 1;
+                self.block(body, self.body_close(*span));
+                self.depth -= 1;
+                self.line("}");
+            }
             Stmt::ForIn {
                 ty,
                 name,
@@ -1088,6 +1107,7 @@ fn stmt_span(s: &Stmt) -> Span {
         | Stmt::Spawn { span, .. }
         | Stmt::While { span, .. }
         | Stmt::ForIn { span, .. }
+        | Stmt::ForRange { span, .. }
         | Stmt::If { span, .. } => *span,
     }
 }

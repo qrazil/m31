@@ -112,8 +112,7 @@ pub str lower(str s) {
     List<int> cps = s.chars();
     List<int> out = [];
     int n = cps.size();
-    int i = 0;
-    while (i < n) {
+    for (int i in 0 .. n) {
         int c = cps[i];
         if (c == CAPITAL_SIGMA && final_sigma(cps, i)) {
             out.push(FINAL_SIGMA);
@@ -125,7 +124,6 @@ pub str lower(str s) {
                 out.push(c + run_delta(LOWER_RUNS, c));
             }
         }
-        i = i + 1;
     }
     return str.from_chars(out);
 }
@@ -198,10 +196,8 @@ int key_index(Array<int> keys, int c) {
 
 /// Append `from[at .. end]` to `out`.
 void append_slice(List<int> out, Array<int> from, int at, int end) {
-    int i = at;
-    while (i < end) {
+    for (int i in at .. end) {
         out.push(from[i]);
-        i = i + 1;
     }
 }
 
@@ -274,10 +270,8 @@ bool final_sigma(List<int> cps, int i) {
 pub List<str> graphemes(str s) {
     List<int> starts = cluster_starts(s);
     List<str> out = [];
-    int i = 1;
-    while (i < starts.size()) {
+    for (int i in 1 .. starts.size()) {
         out.push(s.substr(starts[i - 1], starts[i]));
-        i = i + 1;
     }
     return out;
 }
@@ -311,8 +305,7 @@ List<int> cluster_starts(str s) {
     int ri = 0;
     int pic = 0;
     int cons = 0;
-    int i = 0;
-    while (i < n) {
+    for (int i in 0 .. n) {
         int cur = class_of(cps[i]);
         if (i > 0) {
             at = at + utf8_len(cps[i - 1]);
@@ -346,7 +339,6 @@ List<int> cluster_starts(str s) {
             cons = 0;
         }
         prev = cur;
-        i = i + 1;
     }
     if (n > 0) {
         out.push(s.size());
@@ -519,10 +511,8 @@ const int HANGUL_COUNT = 11172;
 pub int width(str s) {
     List<int> starts = cluster_starts(s);
     int total = 0;
-    int i = 1;
-    while (i < starts.size()) {
+    for (int i in 1 .. starts.size()) {
         total = total + cluster_width(s.substr(starts[i - 1], starts[i]));
-        i = i + 1;
     }
     return total;
 }
@@ -652,8 +642,7 @@ void decompose(List<int> out, int c) {
 /// in any real text.
 void reorder(List<int> cps) {
     int n = cps.size();
-    int i = 1;
-    while (i < n) {
+    for (int i in 1 .. n) {
         int cc = ccc(cps[i]);
         if (cc != 0) {
             int j = i;
@@ -664,7 +653,6 @@ void reorder(List<int> cps) {
                 j = j - 1;
             }
         }
-        i = i + 1;
     }
 }
 
@@ -683,15 +671,13 @@ List<int> composed(List<int> cps) {
     // next character follows the starter directly.
     int last = -1;
     int n = cps.size();
-    int i = 0;
-    while (i < n) {
+    for (int i in 0 .. n) {
         int c = cps[i];
         int cc = ccc(c);
         if (starter >= 0 && (last < 0 || last < cc)) {
             int p = composite(out[starter], c);
             if (p >= 0) {
                 out[starter] = p;
-                i = i + 1;
                 continue;
             }
         }
@@ -702,7 +688,6 @@ List<int> composed(List<int> cps) {
             last = cc;
         }
         out.push(c);
-        i = i + 1;
     }
     return out;
 }

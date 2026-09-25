@@ -1,0 +1,82 @@
+// `for (int i in a .. b)`: the counting loop. Half-open, both bounds read
+// once, no step, and the counter belongs to the loop.
+
+// The shape it exists for.
+for (int i in 0 .. 5) {
+    print(i);
+}
+
+// Half-open, so an empty range is not a special case.
+for (int i in 5 .. 5) {
+    print(900);
+}
+for (int i in 7 .. 2) {
+    print(901);
+}
+
+// The whole point: `continue` cannot skip an increment that is not there.
+// Written as a `while` the increment is the body's last statement and this
+// loop would not terminate unless every `continue` repeated it by hand.
+int odd = 0;
+for (int i in 0 .. 10) {
+    if (i % 2 == 0) {
+        continue;
+    }
+    odd = odd + i;
+}
+print(odd);
+
+// `break` leaves it, and the value written inside survives.
+int found = -1;
+List<int> xs = [3, 1, 4, 1, 5, 9];
+for (int i in 0 .. xs.size()) {
+    if (xs[i] == 4) {
+        found = i;
+        break;
+    }
+}
+print(found);
+
+// Both bounds are expressions, and they are read ONCE -- pushing inside the
+// body does not extend the iteration, exactly as a collection's length is
+// read once by `for (T x in xs)`.
+List<int> g = [1, 2];
+for (int i in 0 .. g.size()) {
+    g.push(9);
+}
+print(g.size());
+
+// Any int, negatives included, and the count is `b - a`.
+for (int i in -2 .. 1) {
+    print(i);
+}
+
+// Nested, each with its own counter.
+for (int y in 0 .. 3) {
+    for (int x in 0 .. 2) {
+        print(y * 10 + x);
+    }
+}
+
+// Reference values built inside the body are released at the right time.
+List<str> names = ["ada", "bob", "cy"];
+str joined = "";
+for (int i in 0 .. names.size()) {
+    if (i > 0) {
+        joined = joined + ",";
+    }
+    joined = joined + names[i];
+}
+print(joined);
+
+// A range over a function's result, inside a function, with an early return.
+print(first_gap([0, 1, 2, 4, 5]));
+
+int first_gap(List<int> ns) {
+    for (int i in 1 .. ns.size()) {
+        if (ns[i] != ns[i - 1] + 1) {
+            return i;
+        }
+    }
+    return -1;
+}

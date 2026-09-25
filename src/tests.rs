@@ -211,6 +211,78 @@ fn formatting_keeps_every_char_spelling() {
 }
 
 #[test]
+fn the_range_for_advances_before_the_body() {
+    // The increment must be at the TOP of the body, or `continue` would
+    // skip it and the loop would not terminate. That is the whole reason
+    // the construct exists, so it is checked in the IR and not only by a
+    // program that would hang if it were wrong.
+    let out = ir("for (int i in 0 .. 3) {\n    continue;\n}\n");
+    let body = out
+        .split("brif")
+        .nth(1)
+        .expect("expected a loop header with a conditional branch");
+    let add = body.find("iadd").expect("expected the increment");
+    let jump = body.find("jump").expect("expected the back edge");
+    assert!(
+        add < jump,
+        "the increment must precede the back edge:\n{out}"
+    );
+}
+
+#[test]
+fn a_range_is_loop_syntax_and_the_counter_is_the_loops() {
+    for (src, want) in [
+        ("int a = 0 .. 3;", "may only be written in a `for` header"),
+        ("print((0 .. 3));", "may only be written in a `for` header"),
+        (
+            "for (str s in 0 .. 3) { print(s); }",
+            "a range counts in `int`",
+        ),
+        (
+            "for (int i in \"a\" .. 3) { print(i); }",
+            "expected int, found str",
+        ),
+        (
+            "for (int i in 0 .. 3) { i = 9; }",
+            "is the loop's variable and cannot be assigned",
+        ),
+        (
+            "List<int> xs = [1]; for (int v in xs) { v = 9; }",
+            "is the loop's variable and cannot be assigned",
+        ),
+    ] {
+        let got = err(src);
+        assert!(got.contains(want), "{src}: {got}");
+    }
+}
+
+#[test]
+fn the_absent_loop_and_assignment_forms_are_named() {
+    // §9 exists so that an absence is a decision. A decision should reach
+    // the person who trips over it, and these are the two things everyone
+    // writes in their first hour here.
+    for (src, want) in [
+        (
+            "for (int i = 0; i < 3; i = i + 1) { print(i); }",
+            "there is no three-clause `for`",
+        ),
+        ("int n = 1;\nn += 1;", "there is no `+=`"),
+        ("int n = 1;\nn -= 1;", "there is no `-=`"),
+        ("int n = 1;\nn *= 2;", "there is no `*=`"),
+        ("int n = 1;\nn /= 2;", "there is no `/=`"),
+        ("int n = 1;\nn %= 2;", "there is no `%=`"),
+        ("int n = 1;\nn &= 2;", "there is no `&=`"),
+        ("int n = 1;\nn |= 2;", "there is no `|=`"),
+        ("int n = 1;\nn ^= 2;", "there is no `^=`"),
+        ("int n = 1;\nn <<= 2;", "there is no `<<=`"),
+        ("int n = 1;\nn >>= 2;", "there is no `>>=`"),
+    ] {
+        let got = err(src);
+        assert!(got.contains(want), "{src}: {got}");
+    }
+}
+
+#[test]
 fn string_escapes_are_decoded() {
     assert_eq!(
         toks(r#""a\tb\nc\\d\"e""#),

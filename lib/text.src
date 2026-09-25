@@ -199,14 +199,12 @@ pub List<str> lines(str s) {
     List<str> parts = s.split("\n");
     List<str> out = [];
     int last = parts.size() - 1;
-    int i = 0;
-    while (i < last) {
+    for (int i in 0 .. last) {
         str part = parts[i];
         if (part.ends_with("\r")) {
             part = part.substr(0, part.size() - 1);
         }
         out.push(part);
-        i = i + 1;
     }
     // What follows the final newline is a line only if there is something in
     // it. `split` always answers at least one piece, so `parts[last]` is safe.

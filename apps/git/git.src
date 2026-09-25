@@ -189,8 +189,7 @@ int ls_tree(str gd, str spec) {
     }
     // `git ls-tree` takes a tree-ish, so a commit means its tree. A tag is
     // peeled to a commit first, and then the same rule applies.
-    int hops = 0;
-    while (hops < 12) {
+    for (int hops in 0 .. 12) {
         match (object.read(gd, id)) {
             case Ok(object.Object o): {
                 match (o.body) {
@@ -215,7 +214,6 @@ int ls_tree(str gd, str spec) {
                 return 1;
             }
         }
-        hops = hops + 1;
     }
     io.eprint("not a tree object: " + spec);
     return 1;
@@ -550,12 +548,10 @@ bytes indented(bytes message) {
         }
         int end = e;
         bool empty = true;
-        int k = at;
-        while (k < e) {
+        for (int k in at .. e) {
             if (!blank_octet(message[k])) {
                 empty = false;
             }
-            k = k + 1;
         }
         if (empty) {
             end = at;
@@ -567,22 +563,18 @@ bytes indented(bytes message) {
         first = false;
         b.extend("    ".to_bytes());
         int col = 0;
-        int i = at;
-        while (i < end) {
+        for (int i in at .. end) {
             int c = message[i];
             if (c == '\t') {
                 int width = 8 - col % 8;
-                int s = 0;
-                while (s < width) {
+                for (int s in 0 .. width) {
                     b.push(' ');
-                    s = s + 1;
                 }
                 col = col + width;
             } else {
                 b.push(c);
                 col = col + 1;
             }
-            i = i + 1;
         }
         b.push('\n');
         at = e + 1;

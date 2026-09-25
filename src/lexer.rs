@@ -67,6 +67,10 @@ pub enum Tok {
     Colon,
     Assign,
     Dot,
+    /// `..`, between the two bounds of a range in a `for` header. It has
+    /// exactly one use and is not an operator: there is no range value, so
+    /// `..` outside a `for` header is a parse error (§5.5).
+    DotDot,
     /// `=>`, between a lambda's parameters and its one-expression body.
     /// Free as a token because there is no match-arm arrow and no other use
     /// of `=` followed by `>`: `a = >b` is not an expression in any reading.
@@ -144,6 +148,7 @@ impl Tok {
             Tok::KwIn => "in",
             Tok::Colon => ":",
             Tok::Dot => ".",
+            Tok::DotDot => "..",
             Tok::KwTrue => "true",
             Tok::KwFalse => "false",
             Tok::KwThis => "this",
@@ -404,6 +409,9 @@ impl<'a> Lexer<'a> {
             b';' => Tok::Semi,
             b'?' => Tok::Question,
             b':' => Tok::Colon,
+            // `..`, and only two: `x...y` is a mistake, not a token and a
+            // dot, and `1.5` never reaches here (the number lexer takes it).
+            b'.' if self.peek() == b'.' => two(self, Tok::DotDot),
             b'.' => Tok::Dot,
             b'+' => Tok::Plus,
             b'-' => Tok::Minus,

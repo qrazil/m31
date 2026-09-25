@@ -75,8 +75,7 @@ bool href_safe(int c) {
 str escape_href(str dest) {
     List<str> out = [];
     int n = dest.size();
-    int i = 0;
-    while (i < n) {
+    for (int i in 0 .. n) {
         int c = dest.byte_at(i);
         if (c == '&') {
             out.push("&amp;");
@@ -89,7 +88,6 @@ str escape_href(str dest) {
             out.push(HEX.substr(c / 16, c / 16 + 1));
             out.push(HEX.substr(c % 16, c % 16 + 1));
         }
-        i = i + 1;
     }
     return out.join("");
 }
@@ -409,8 +407,7 @@ bool is_uri(str body) {
     if (n == 0 || !alpha_byte(body.byte_at(0))) {
         return false;
     }
-    int i = 1;
-    while (i < n) {
+    for (int i in 1 .. n) {
         int c = body.byte_at(i);
         if (c == ':') {
             return i >= 2 && i <= 32;
@@ -418,7 +415,6 @@ bool is_uri(str body) {
         if (!alnum_byte(c) && c != '+' && c != '-' && c != '.') {
             return false;
         }
-        i = i + 1;
     }
     return false;
 }
@@ -433,13 +429,11 @@ bool is_email(str body) {
             if (k == 0 || k + 1 >= body.size()) {
                 return false;
             }
-            int i = 0;
-            while (i < k) {
+            for (int i in 0 .. k) {
                 int c = body.byte_at(i);
                 if (!alnum_byte(c) && MAIL_LOCAL.index_of(str.from_chars([c])).is_none()) {
                     return false;
                 }
-                i = i + 1;
             }
             return labels_ok(body.substr(k + 1, body.size()));
         }
@@ -708,12 +702,10 @@ str strip_tags(str s) {
 // and everything still on the stack between the pair comes off it.
 void emphasis(List<Node> ns) {
     List<int> ds = [];
-    int at = 0;
-    while (at < ns.size()) {
+    for (int at in 0 .. ns.size()) {
         if (ns[at].delim) {
             ds.push(at);
         }
-        at = at + 1;
     }
     // One bottom per delimiter character: -1 is the bottom of the stack.
     int bottom_star = -1;
@@ -778,10 +770,8 @@ void emphasis(List<Node> ns) {
             on.open_tags = "<em>" + on.open_tags;
             cn.close_tags = cn.close_tags + "</em>";
         }
-        int k = found + 1;
-        while (k < p) {
+        for (int k in found + 1 .. p) {
             ns[ds[k]].dead = true;
-            k = k + 1;
         }
         if (on.count == 0) {
             on.dead = true;

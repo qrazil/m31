@@ -120,10 +120,8 @@ pub void by<T>(List<T> xs, Order<T> order) {
                 j = j + 1;
                 k = k + 1;
             }
-            int back = lo;
-            while (back < hi) {
+            for (int back in lo .. hi) {
                 xs[back] = tmp[back];
-                back = back + 1;
             }
             lo = lo + 2 * width;
         }
@@ -158,14 +156,12 @@ pub T max<T>(List<T> xs, Order<T> order) {
     // cannot name that type. An index needs no such local, and it costs a
     // retain less per improvement besides.
     int best = 0;
-    int i = 1;
-    while (i < n) {
+    for (int i in 1 .. n) {
         // `>= 0`: a later element that ties replaces the earlier one, so
         // this is the element a stable sort would leave last.
         if (order.cmp(xs[i], xs[best]) >= 0) {
             best = i;
         }
-        i = i + 1;
     }
     return xs[best];
 }
@@ -178,13 +174,11 @@ pub T min<T>(List<T> xs, Order<T> order) {
         trap("sort.min: the list is empty, so there is no least element");
     }
     int best = 0;
-    int i = 1;
-    while (i < n) {
+    for (int i in 1 .. n) {
         // `< 0` only: a tie leaves the earlier element in place.
         if (order.cmp(xs[i], xs[best]) < 0) {
             best = i;
         }
-        i = i + 1;
     }
     return xs[best];
 }

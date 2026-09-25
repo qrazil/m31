@@ -51,7 +51,8 @@ parameters are positional, optional ones are named. Methods on any type, with
 the receiver's fields in scope bare. Operator methods — `add`, `sub`, `mul`,
 `div`, `rem`, `eq`, and a single `cmp` behind all four orderings.
 
-**Statements.** `if` / `else if` / `else`, `while`, `for ... in`, `break`,
+**Statements.** `if` / `else if` / `else`, `while`, `for ... in` — over a
+collection and over a half-open range, `for (int i in 0 .. n)` — `break`,
 `continue`, `return`, `const`. No shadowing.
 
 **Memory.** Non-atomic reference counting with every retain and release

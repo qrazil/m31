@@ -581,8 +581,7 @@ Option<Ip> parse_v6(str text) {
     }
     int fill = 8 - have;
     bytes out = [];
-    int k = 0;
-    while (k < 8) {
+    for (int k in 0 .. 8) {
         int v = 0;
         if (ell < 0 || k < ell) {
             v = g[k];
@@ -591,7 +590,6 @@ Option<Ip> parse_v6(str text) {
         }
         out.push(v >> 8);
         out.push(v & 255);
-        k = k + 1;
     }
     return Option<Ip>.Some(Ip(out));
 }

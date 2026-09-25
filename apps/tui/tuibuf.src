@@ -115,12 +115,10 @@ pub static Buffer Buffer.empty(tuigeom.Rect area) {
     List<str> sym = [];
     List<int> sty = [];
     List<int> wid = [];
-    int i = 0;
-    while (i < n) {
+    for (int i in 0 .. n) {
         sym.push(" ");
         sty.push(0);
         wid.push(1);
-        i = i + 1;
     }
     return Buffer(box, sym, sty, wid);
 }
@@ -193,10 +191,8 @@ pub void Buffer.append_sym(bytes out, int x, int y) {
     }
     str s = sym[at(x, y)];
     int n = s.size();
-    int i = 0;
-    while (i < n) {
+    for (int i in 0 .. n) {
         out.push(s.byte_at(i));
-        i = i + 1;
     }
 }
 
@@ -347,10 +343,8 @@ int Buffer.fast_ascii(int x, int y, str s, int p, int limit) {
     if (n > limit) {
         n = limit;
     }
-    int i = 0;
-    while (i < n) {
+    for (int i in 0 .. n) {
         put(x + i, y, ASCII[s.byte_at(i) - 32], p, 1);
-        i = i + 1;
     }
     return n;
 }
@@ -364,8 +358,7 @@ pub void Buffer.fill(tuigeom.Rect r, str s, tuistyle.Style st) {
     }
     tuigeom.Rect r2 = r.intersect(box);
     int p = st.pack();
-    int y = r2.y;
-    while (y < r2.bottom()) {
+    for (int y in r2.y .. r2.bottom()) {
         int cx = r2.x;
         // A one-column symbol -- a space, a border character -- is the case
         // that runs on every cell of every frame, so it writes cells
@@ -375,7 +368,6 @@ pub void Buffer.fill(tuigeom.Rect r, str s, tuistyle.Style st) {
                 put(cx, y, s, p, 1);
                 cx = cx + 1;
             }
-            y = y + 1;
             continue;
         }
         while (cx + gw <= r2.right()) {
@@ -386,7 +378,6 @@ pub void Buffer.fill(tuigeom.Rect r, str s, tuistyle.Style st) {
             put(cx, y, " ", p, 1);
             cx = cx + 1;
         }
-        y = y + 1;
     }
 }
 
@@ -395,26 +386,22 @@ pub void Buffer.fill(tuigeom.Rect r, str s, tuistyle.Style st) {
 pub void Buffer.restyle(tuigeom.Rect r, tuistyle.Style st) {
     tuigeom.Rect r2 = r.intersect(box);
     int p = st.pack();
-    int y = r2.y;
-    while (y < r2.bottom()) {
+    for (int y in r2.y .. r2.bottom()) {
         int cx = r2.x;
         while (cx < r2.right()) {
             sty[at(cx, y)] = p;
             cx = cx + 1;
         }
-        y = y + 1;
     }
 }
 
 /// Blank the whole buffer, in the plain style.
 pub void Buffer.clear() {
     int n = sym.size();
-    int i = 0;
-    while (i < n) {
+    for (int i in 0 .. n) {
         sym[i] = " ";
         sty[i] = 0;
         wid[i] = 1;
-        i = i + 1;
     }
 }
 
@@ -425,13 +412,11 @@ pub str Buffer.row_text(int y) {
         return "";
     }
     List<str> parts = [];
-    int cx = box.x;
-    while (cx < box.right()) {
+    for (int cx in box.x .. box.right()) {
         int i = at(cx, y);
         if (wid[i] != 0) {
             parts.push(sym[i]);
         }
-        cx = cx + 1;
     }
     return parts.join("");
 }
@@ -439,10 +424,8 @@ pub str Buffer.row_text(int y) {
 /// Every row, joined with newlines -- so `print(buffer)` shows the frame.
 pub str Buffer.to_str() {
     List<str> out = [];
-    int y = box.y;
-    while (y < box.bottom()) {
+    for (int y in box.y .. box.bottom()) {
         out.push(row_text(y));
-        y = y + 1;
     }
     return out.join("\n");
 }
@@ -453,10 +436,8 @@ pub str Buffer.frame() {
     str bar = "+" + "-".repeat(box.w) + "+";
     List<str> out = [];
     out.push(bar);
-    int y = box.y;
-    while (y < box.bottom()) {
+    for (int y in box.y .. box.bottom()) {
         out.push("|" + row_text(y) + "|");
-        y = y + 1;
     }
     out.push(bar);
     return out.join("\n");

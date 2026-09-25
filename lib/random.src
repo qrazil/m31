@@ -374,10 +374,8 @@ float fraction_from(Source s) {
 List<int> permutation_from(Source s, int n) {
     check_count(n, "permutation");
     List<int> out = [];
-    int k = 0;
-    while (k < n) {
+    for (int k in 0 .. n) {
         out.push(k);
-        k = k + 1;
     }
     int i = n - 1;
     while (i > 0) {
@@ -481,10 +479,8 @@ int low_bits(bytes b, int bits) {
     int n = b.size();
     int top = bits - 8 * (n - 1);
     int out = b[0] & (1 << top) - 1;
-    int i = 1;
-    while (i < n) {
+    for (int i in 1 .. n) {
         out = out << 8 | b[i];
-        i = i + 1;
     }
     return out;
 }

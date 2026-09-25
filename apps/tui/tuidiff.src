@@ -61,8 +61,7 @@ pub bytes full(tuibuf.Buffer next, tuistyle.Depth depth) {
     tuistyle.push_reset(out);
     tuigeom.Rect a = next.area();
     int pen = tuistyle.RESET_STYLE;
-    int y = a.y;
-    while (y < a.bottom()) {
+    for (int y in a.y .. a.bottom()) {
         move_to(out, a.x, y);
         int tail = tail_start(next, y);
         int x = a.x;
@@ -82,7 +81,6 @@ pub bytes full(tuibuf.Buffer next, tuistyle.Depth depth) {
             next.append_sym(out, x, y);
             x = x + w;
         }
-        y = y + 1;
     }
     if (pen != tuistyle.RESET_STYLE) {
         tuistyle.push_reset(out);
@@ -106,8 +104,7 @@ pub bytes diff(tuibuf.Buffer prev, tuibuf.Buffer next, tuistyle.Depth depth) {
     int pen = tuistyle.RESET_STYLE;
     int cur_x = -1;
     int cur_y = -1;
-    int y = a.y;
-    while (y < a.bottom()) {
+    for (int y in a.y .. a.bottom()) {
         int tail = tail_start(next, y);
         int x = a.x;
         while (x < a.right()) {
@@ -139,7 +136,6 @@ pub bytes diff(tuibuf.Buffer prev, tuibuf.Buffer next, tuistyle.Depth depth) {
             cur_x = x + w;
             x = x + w;
         }
-        y = y + 1;
     }
     if (out.size() > 0 && pen != tuistyle.RESET_STYLE) {
         tuistyle.push_reset(out);
@@ -285,8 +281,7 @@ pub void show_cursor(bytes out) {
 /// stands for itself. This is what a test asserts on.
 pub str show(bytes b) {
     bytes out = [];
-    int i = 0;
-    while (i < b.size()) {
+    for (int i in 0 .. b.size()) {
         int v = b[i];
         if (v == 27) {
             out.push('\\');
@@ -305,7 +300,6 @@ pub str show(bytes b) {
         } else {
             out.push(v);
         }
-        i = i + 1;
     }
     match (out.utf8()) {
         case Some(str s): {

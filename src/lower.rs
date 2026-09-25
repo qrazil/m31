@@ -193,6 +193,11 @@ pub struct Lowerer {
     /// Owned temporaries produced while lowering the current statement.
     stmt_temps: Vec<Value>,
     loops: Vec<LoopCtx>,
+    /// The loop variables of the `for` loops currently being lowered,
+    /// innermost last. They are bound `const`, like any other name that
+    /// cannot be reassigned -- this is only so the diagnostic can say WHY,
+    /// rather than reporting a `const` the reader never wrote.
+    loop_vars: Vec<String>,
     /// Counter for synthetic names, so nested loops do not collide.
     synth: u32,
     /// Locals that have been moved out of. Any later use is refused.
@@ -595,6 +600,7 @@ impl Lowerer {
             owned: Vec::new(),
             stmt_temps: Vec::new(),
             loops: Vec::new(),
+            loop_vars: Vec::new(),
             synth: 0,
             moved: Vec::new(),
             payload_binds: Vec::new(),
@@ -4313,6 +4319,19 @@ impl Lowerer {
                     return Err(self.unknown_variable(name, *span));
                 };
                 if is_const {
+                    // A loop variable is bound the same way, and saying only
+                    // "const" would report a decision without naming it.
+                    if self.loop_vars.iter().any(|v| v == name) {
+                        return Err(Diag::new(
+                            *span,
+                            format!(
+                                "`{name}` is the loop's variable and cannot be assigned: \
+                                 the loop binds it afresh each time round, and assigning \
+                                 it could not change where the loop goes -- use another \
+                                 local"
+                            ),
+                        ));
+                    }
                     return Err(Diag::new(*span, format!("cannot assign to const `{name}`")));
                 }
                 let val = self.lower_expr_as(value, ty)?;
@@ -4459,6 +4478,15 @@ impl Lowerer {
                 body,
                 span,
             } => self.lower_forin(*ty, name, iter, body, *span),
+
+            Stmt::ForRange {
+                ty,
+                name,
+                from,
+                to,
+                body,
+                span,
+            } => self.lower_forrange(*ty, name, from, to, body, *span),
 
             Stmt::SetIndex {
                 obj,
@@ -4709,7 +4737,9 @@ impl Lowerer {
                     }
                 }
                 Stmt::While { body, .. } => Self::assigned_names(body, out),
-                Stmt::ForIn { body, .. } => Self::assigned_names(body, out),
+                Stmt::ForIn { body, .. } | Stmt::ForRange { body, .. } => {
+                    Self::assigned_names(body, out)
+                }
                 Stmt::Decl { .. }
                 | Stmt::Return { .. }
                 | Stmt::Eval { .. }
@@ -4720,6 +4750,189 @@ impl Lowerer {
                 | Stmt::SetField { .. } => {}
             }
         }
+    }
+
+    /// `for (int i in a .. b) { .. }` -- the counting loop.
+    ///
+    /// The same shape as `lower_forin`, and for the same reason: the counter
+    /// advances at the TOP of the body, so `continue` cannot skip it. That
+    /// is the whole point of the construct. Written as a `while`, the
+    /// increment is the body's last statement and **every `continue` has to
+    /// repeat it by hand** -- forget one and the program does not terminate.
+    /// All three of the applications in `apps/` recorded writing exactly
+    /// that loop (`apps/tui` §4, `apps/git` §8, `apps/markdown` §1.2), and
+    /// it is not a mistake the compiler can catch after the fact.
+    ///
+    /// The counter is bound `const`, like any other loop variable, so the
+    /// body cannot assign it either.
+    ///
+    /// Both bounds are evaluated ONCE, left then right, before the loop --
+    /// so `for (int i in 0 .. xs.size())` measures once, and pushing inside
+    /// the body does not extend the iteration. The same choice `for ... in`
+    /// makes for a collection's length, and the predictable one.
+    ///
+    /// `idx + 1` cannot overflow: the increment runs only after `idx < end`
+    /// held, so the sum is at most `end`.
+    fn lower_forrange(
+        &mut self,
+        ty: Ty,
+        name: &str,
+        from: &Expr,
+        to: &Expr,
+        body: &[Stmt],
+        span: Span,
+    ) -> Result<(), Diag> {
+        self.check_shadow(name, span)?;
+        if ty != Ty::Int {
+            return Err(Diag::new(
+                span,
+                format!(
+                    "a range counts in `int`, and this counter is {}",
+                    self.a_ty(ty)
+                ),
+            ));
+        }
+
+        // Unique per loop, for the reason `lower_forin` gives.
+        self.synth += 1;
+        let idx_name = format!("$i{}", self.synth);
+
+        self.scopes.push(HashMap::new());
+        self.owned.push(Vec::new());
+
+        let lo = self.lower_expr(from)?;
+        if self.underlying(lo.ty) != Ty::Int {
+            self.scopes.pop();
+            self.owned.pop();
+            return Err(Diag::new(from.span(), self.mismatch(Ty::Int, lo.ty)));
+        }
+        let hi = self.lower_expr(to)?;
+        if self.underlying(hi.ty) != Ty::Int {
+            self.scopes.pop();
+            self.owned.pop();
+            return Err(Diag::new(to.span(), self.mismatch(Ty::Int, hi.ty)));
+        }
+        let (start, end) = (lo.val(), hi.val());
+        self.scopes
+            .last_mut()
+            .unwrap()
+            .insert(idx_name.clone(), (Ty::Int, start, false));
+        self.flush_temps();
+
+        let mut names = vec![idx_name.clone()];
+        Self::assigned_names(body, &mut names);
+        names.retain(|x| self.lookup(x).is_some());
+        names.sort();
+        let carried: Vec<(String, Ty, Value)> = names
+            .iter()
+            .map(|x| {
+                let (t, v) = self.lookup(x).unwrap();
+                (x.clone(), t, v)
+            })
+            .collect();
+
+        let header = self.new_block();
+        let body_bb = self.new_block();
+        let exit_bb = self.new_block();
+
+        let entry_args: Vec<Value> = carried.iter().map(|(_, _, v)| *v).collect();
+        self.terminate(Term::Jump {
+            to: header,
+            args: entry_args,
+        });
+
+        let mut hp = Vec::new();
+        let mut ep = Vec::new();
+        for (_, t, _) in &carried {
+            hp.push(self.new_val(self.irty(*t)));
+            ep.push(self.new_val(self.irty(*t)));
+        }
+        let hi_block = self.blocks.iter().position(|b| b.id == header).unwrap();
+        self.blocks[hi_block].params = hp.clone();
+        let ei = self.blocks.iter().position(|b| b.id == exit_bb).unwrap();
+        self.blocks[ei].params = ep.clone();
+
+        self.switch_to(header);
+        for ((x, _, _), p) in carried.iter().zip(hp.iter()) {
+            self.rebind(x, *p);
+        }
+        let idx = self.lookup(&idx_name).unwrap().1;
+        let cond = self.new_val(IrTy::I1);
+        self.push(Inst::ICmp {
+            dst: cond,
+            cmp: Cmp::Lt,
+            lhs: idx,
+            rhs: end,
+        });
+        self.terminate(Term::Brif {
+            cond,
+            then: body_bb,
+            then_args: Vec::new(),
+            els: exit_bb,
+            els_args: hp.clone(),
+        });
+
+        self.switch_to(body_bb);
+        // Advance FIRST, and hand the body the value from before it.
+        let one = self.new_val(IrTy::I64);
+        self.push(Inst::IConst { dst: one, val: 1 });
+        let next = self.new_val(IrTy::I64);
+        self.push(Inst::Arith {
+            dst: next,
+            op: ArithOp::Add,
+            lhs: idx,
+            rhs: one,
+        });
+        self.rebind(&idx_name, next);
+
+        self.scopes.push(HashMap::new());
+        self.owned.push(Vec::new());
+        // An `int`, so there is nothing to retain and nothing to release.
+        // `true` is `is_const`: the counter belongs to the loop.
+        self.scopes
+            .last_mut()
+            .unwrap()
+            .insert(name.to_string(), (Ty::Int, idx, true));
+        self.loop_vars.push(name.to_string());
+
+        self.loops.push(LoopCtx {
+            header,
+            exit: exit_bb,
+            carried: carried.iter().map(|(x, _, _)| x.clone()).collect(),
+            depth: self.owned.len() - 1,
+            broke: false,
+        });
+        let lowered = self.lower_block(body);
+        self.loops.pop();
+        self.loop_vars.pop();
+        lowered?;
+
+        let live = !self.terminated();
+        if live {
+            self.release_scope();
+        }
+        self.scopes.pop();
+        self.owned.pop();
+
+        if live {
+            let back: Vec<Value> = carried
+                .iter()
+                .map(|(x, _, _)| self.lookup(x).unwrap().1)
+                .collect();
+            self.terminate(Term::Jump {
+                to: header,
+                args: back,
+            });
+        }
+
+        self.switch_to(exit_bb);
+        for ((x, _, _), p) in carried.iter().zip(ep.iter()) {
+            self.rebind(x, *p);
+        }
+        self.release_scope();
+        self.scopes.pop();
+        self.owned.pop();
+        Ok(())
     }
 
     /// `for (T x in xs) { .. }`
@@ -4898,6 +5111,7 @@ impl Lowerer {
             .last_mut()
             .unwrap()
             .insert(name.to_string(), (ty, e, true));
+        self.loop_vars.push(name.to_string());
 
         self.loops.push(LoopCtx {
             header,
@@ -4908,6 +5122,7 @@ impl Lowerer {
         });
         let lowered = self.lower_block(body);
         self.loops.pop();
+        self.loop_vars.pop();
         lowered?;
 
         let live = !self.terminated();
@@ -9215,6 +9430,7 @@ fn stmt_span(s: &Stmt) -> Span {
         | Stmt::Break { span, .. }
         | Stmt::Continue { span, .. }
         | Stmt::ForIn { span, .. }
+        | Stmt::ForRange { span, .. }
         | Stmt::Spawn { span, .. }
         | Stmt::SetIndex { span, .. }
         | Stmt::SetField { span, .. }

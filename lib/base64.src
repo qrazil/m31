@@ -182,13 +182,11 @@ pub Result<bytes, Error> decode(str text, bool url = false) {
 // from the top: `a << 18 | b << 12 | c << 6 | d`, with the missing ones zero.
 int quad(str text, int at, int count, bool url) {
     int v = 0;
-    int k = 0;
-    while (k < 4) {
+    for (int k in 0 .. 4) {
         v = v << 6;
         if (k < count) {
             v = v | value(text.byte_at(at + k), url);
         }
-        k = k + 1;
     }
     return v;
 }
@@ -224,10 +222,8 @@ List<str> alphabet(bool url) {
         chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     }
     List<str> out = [];
-    int i = 0;
-    while (i < 64) {
+    for (int i in 0 .. 64) {
         out.push(chars.substr(i, i + 1));
-        i = i + 1;
     }
     return out;
 }

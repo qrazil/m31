@@ -696,13 +696,11 @@ pub bool is_name(str s) {
     if (s.size() == 0) {
         return false;
     }
-    int i = 0;
-    while (i < s.size()) {
+    for (int i in 0 .. s.size()) {
         int c = s.byte_at(i);
         if (!(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f')) {
             return false;
         }
-        i = i + 1;
     }
     return true;
 }

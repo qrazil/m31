@@ -145,13 +145,11 @@ void table(Out o, doc.Table t) {
     o.cr();
     o.put("<tr>");
     o.cr();
-    int i = 0;
-    while (i < t.heads.size()) {
+    for (int i in 0 .. t.heads.size()) {
         o.put("<th" + align_attr(t.align, i) + ">");
         o.put(inlines.render(t.heads[i]));
         o.put("</th>");
         o.cr();
-        i = i + 1;
     }
     o.put("</tr>");
     o.cr();
@@ -163,13 +161,11 @@ void table(Out o, doc.Table t) {
         for (List<str> row in t.rows) {
             o.put("<tr>");
             o.cr();
-            int k = 0;
-            while (k < row.size()) {
+            for (int k in 0 .. row.size()) {
                 o.put("<td" + align_attr(t.align, k) + ">");
                 o.put(inlines.render(row[k]));
                 o.put("</td>");
                 o.cr();
-                k = k + 1;
             }
             o.put("</tr>");
             o.cr();

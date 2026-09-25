@@ -291,13 +291,11 @@ pub void sgr(bytes out, int from, int to, Depth depth) {
         return;
     }
     push_csi(out);
-    int i = 0;
-    while (i < codes.size()) {
+    for (int i in 0 .. codes.size()) {
         if (i > 0) {
             out.push(';');
         }
         push_int(out, codes[i]);
-        i = i + 1;
     }
     out.push('m');
 }
@@ -429,14 +427,12 @@ pub int rgb_to_16(int v) {
     int b = v % 256;
     int best = 0;
     int bd = dist(ANSI16[0], r, g, b);
-    int i = 1;
-    while (i < 16) {
+    for (int i in 1 .. 16) {
         int d = dist(ANSI16[i], r, g, b);
         if (d < bd) {
             bd = d;
             best = i;
         }
-        i = i + 1;
     }
     return best;
 }

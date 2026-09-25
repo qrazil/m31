@@ -6,6 +6,17 @@ somebody who had not written a line of the language before, and forbidden to
 change the compiler or `lib/` to make it easier. The program is the excuse;
 this file is the point.
 
+> **Four of these have since been fixed**, and this file has not been
+> rewritten to hide that it asked for them — the source has been changed to
+> use them, so the diff against this log is the evidence. A character literal
+> (1.3, and this report's number one ask), a range `for` (1.2), a `match` arm
+> that may omit its bindings (1.5, 1.12), and a formatter that keeps the
+> parentheses the author wrote (1.11). The two diagnostics 3 asks for —
+> "there is no three-clause `for`" and "there is no `+=`" — exist too.
+> Everything else below still stands. `docs/reference.md` §1.5, §5.5, §5.6
+> and §6.1 have the rules and the reasoning, including why `+=` itself was
+> refused.
+
 The headline, first, because it frames everything below:
 
 > **The whole program compiled on the second attempt, with one error.** No

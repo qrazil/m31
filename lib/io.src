@@ -966,12 +966,10 @@ pub Buffer buffer_of(bytes b) {
 // window for every byte scanned.
 bool ends_at(bytes b, int i, bytes d) {
     int m = d.size();
-    int k = 0;
-    while (k < m) {
+    for (int k in 0 .. m) {
         if (b[i - m + k] != d[k]) {
             return false;
         }
-        k = k + 1;
     }
     return true;
 }

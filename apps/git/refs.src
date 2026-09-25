@@ -101,14 +101,12 @@ int before(str a, str b) {
     if (b.size() < n) {
         n = b.size();
     }
-    int i = 0;
-    while (i < n) {
+    for (int i in 0 .. n) {
         int x = a.byte_at(i);
         int y = b.byte_at(i);
         if (x != y) {
             return x - y;
         }
-        i = i + 1;
     }
     return a.size() - b.size();
 }
