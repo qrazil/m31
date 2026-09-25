@@ -1,0 +1,5 @@
+import lib;
+
+pub int relay() {
+    return lib.answer();
+}

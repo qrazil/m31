@@ -1,0 +1,5 @@
+import text;
+
+pub int words(str s) {
+    return text.split_whitespace(s).size();
+}

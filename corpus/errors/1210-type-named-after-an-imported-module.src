@@ -1,0 +1,7 @@
+import text;
+
+type text {
+    int n;
+}
+
+print(str(text(3).n));

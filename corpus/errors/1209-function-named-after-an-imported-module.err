@@ -1,0 +1,4 @@
+corpus/errors/1209-function-named-after-an-imported-module.src:6:1: `text` is an imported module; shadowing is not allowed, rename one
+  |
+6 | str text() {
+  | ^

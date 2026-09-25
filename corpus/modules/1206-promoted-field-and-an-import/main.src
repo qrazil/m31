@@ -1,0 +1,16 @@
+import base;
+import text;
+
+// `Doc` declares no field called `text`; it promotes one from the type it
+// embeds, and a promoted field claims the name exactly as an own one does.
+type Doc {
+    base.Base;
+    int n;
+}
+
+str Doc.show() {
+    return text;
+}
+
+print(Doc(base.Base("hi"), 1).show());
+print(str(text.split_whitespace("a b").size()));

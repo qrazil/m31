@@ -1,0 +1,4 @@
+import mid;
+// `mid` imports `lib`; this file does not, so `lib.MAX` names nothing here.
+print(str(lib.MAX));
+print(str(mid.doubled()));

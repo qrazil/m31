@@ -1,0 +1,12 @@
+import text;
+
+enum Node {
+    Leaf(str);
+    Nil;
+}
+
+Node n = Node.Leaf("hi");
+match (n) {
+    case Leaf(str text): { print(text); }
+    case Nil: { print("nil"); }
+}

@@ -1,0 +1,11 @@
+// The shape that found the bug: this file never mentions `text`, and the
+// program reaches `text` only because another file imports `date`, which
+// imports `text`. A module pulled in transitively by an unrelated file must
+// not take the name of a field away from a method here.
+pub type Paragraph {
+    pub str text;
+}
+
+pub int Paragraph.lines() {
+    return text.split("\n").size();
+}

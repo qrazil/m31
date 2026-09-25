@@ -1,0 +1,13 @@
+import base;
+import text;
+
+type Doc {
+    base.Base;
+}
+
+str Doc.show() {
+    return inner() + ":" + str(n);
+}
+
+print(Doc(base.make("hi", 2)).show());
+print(str(text.split_whitespace("a b c").size()));

@@ -1,0 +1,5 @@
+pub const int MAX = 7;
+
+pub int twice() {
+    return MAX * 2;
+}

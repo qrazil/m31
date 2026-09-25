@@ -1,0 +1,4 @@
+corpus/errors/1210-type-named-after-an-imported-module.src:3:1: `text` is an imported module; shadowing is not allowed, rename one
+  |
+3 | type text {
+  | ^

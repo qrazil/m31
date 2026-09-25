@@ -221,6 +221,15 @@ print(greet.shout("world"));
     written: a declaration, a parameter, a type argument, a construction
     (`shapes.Point(3, 4)`, `shapes.Wrap<int>(1)`), a static method
     (`shapes.Point.origin()`) or an enum variant (`shapes.Colour.Red`).
+  - **A module's name is in scope only in the file that imported it.**
+    `import greet;` binds `greet` in that file and nowhere else: `greet.x`
+    in a file without the import is an error naming the import to add, even
+    though another file of the same program has it. So a module some other
+    file pulled in — directly, or through one of *its* imports — can never
+    take a name away from a file that never mentions it, and adding an
+    import to one file cannot change what a name means in another. That
+    holds for every spelling of a qualified name at once: a call, a
+    constant, a type, a construction and a variant.
   - **A method may only be added to a type its own module declared.** Go and
     Rust both draw this line, and without it a module could reach into
     another's private type by declaring a method on it.
@@ -1109,7 +1118,10 @@ as cycles are not collected (§7.1), it lives until the program ends.
 an error telling you to rename one. A name means one thing for the whole
 region a reader can see it in. Nothing shadows a type name either, nor a
 builtin function (§6.6) in any module, nor a module the file imports, nor a
-constant of the module (§4.5) — a parameter included.
+constant of the module (§4.5) — a parameter included, and a **field** of a
+type the file declares (§4.3), promoted ones (§3.5) with it. A module the
+file does *not* import is not in scope there at all (§2.1), so it is not
+shadowed by anything and takes no name away.
 
 ### 4.2 Functions
 
@@ -1198,7 +1210,18 @@ Counter Counter.bump() { n = n + 1; return this; }
 ```
 
 A bare name or a bare call is unambiguous because nothing shadows anything
-(§4.1). `this.w` is refused with a diagnostic naming `w`, and `this.area()`
+(§4.1). That includes a module: **a field of the receiver is nearer than a
+module name, and a tie is refused rather than ranked.** `text.split(..)` in
+a method of a type with a field `text` reads that field and calls a method
+on it; it means the module `text` only in a file that imported it, and a
+file that declares a type with a field `text` may not also import a module
+called `text` — the field's declaration is refused, naming the field and
+the import, so the same spelling never means two things in one file. The
+standard library's module names are exactly the ones a struct wants
+(`text`, `args`, `date`, `json`, `math`, `sort`, …), and a file that does
+not import one of them may use it for a field freely.
+
+`this.w` is refused with a diagnostic naming `w`, and `this.area()`
 likewise, so the same read is never written two ways. A method the type does
 not declare — a built-in one of a distinct collection's base, such as
 `this.push(x)` on a `distinct List<int>` — is reached through `this`, because

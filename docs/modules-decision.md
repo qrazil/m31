@@ -192,6 +192,15 @@ An imported name is always written with its module. Go forces this on
 purpose — "one writes `io.Reader` not `Reader`" — and the payoff is that a
 package's contents need not repeat the package name.
 
+**And only the importing file may write it.** The qualifier `strings` is
+bound by the `import` line, not by the program containing a module of that
+name, so a file with no `import strings;` cannot write `strings.trim(s)` at
+all. Anything else makes an import a *program*-wide binding wearing a
+file-wide syntax: the compiler once let a module's name outrank a field in a
+file that never imported it, and the breakage arrived when a different file
+added an unrelated import that happened to reach that module transitively.
+A name in a file may only be changed by editing that file.
+
 **No wildcard import.** The stated harm across three communities is the same:
 a reader cannot tell where a name came from, and it compounds when an
 upstream release adds a name. PEP 8 says `import *` makes it "unclear which

@@ -205,8 +205,15 @@ an enum receiver, return itself, or pass itself on (reference §4.3). The bare
 forms are only safe given the rule that pays for them:
 
 > **Nothing shadows anything, anywhere.** Not an outer local, not a
-> parameter, not a function, not a type, not a field of the receiver.
-> Shadowing is a compile error; rename one of them.
+> parameter, not a function, not a type, not a field of the receiver, not a
+> module *this file* imports. Shadowing is a compile error; rename one of
+> them.
+
+The last clause is the whole of it: a module's name is in scope only in the
+file that imported it (reference §2.1). A module another file imports is not
+in scope here, so it shadows nothing here — otherwise a field called `text`
+would stop meaning the field the day some unrelated file added
+`import date;`, and `date` happens to import `text`.
 
 A bare name can therefore only ever mean one thing, so there is nothing for a
 `this.` prefix to disambiguate. The rule also deletes the whole class of bugs where a

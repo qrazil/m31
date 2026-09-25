@@ -1,0 +1,15 @@
+// `text` is PRIVATE, so no other module can read it by any spelling. It
+// therefore claims the name nowhere else either -- otherwise adding a
+// private field to a library type would break the modules that embed it.
+pub type Base {
+    str text;
+    pub int n;
+}
+
+pub str Base.inner() {
+    return text;
+}
+
+pub Base make(str s, int n) {
+    return Base(s, n);
+}

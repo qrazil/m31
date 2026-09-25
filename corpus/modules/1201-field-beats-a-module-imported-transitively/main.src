@@ -1,0 +1,5 @@
+import widget;
+import bench;
+
+print(str(widget.Paragraph("a\nb\nc\nd").lines()));
+print(str(bench.epoch_year()));
