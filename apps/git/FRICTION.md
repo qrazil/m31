@@ -43,7 +43,7 @@ and every loop that consumes symbols checks `b.over` once per symbol. It
 works, it is fast, and it is strictly worse code: the failure is now a
 condition the caller must remember to test rather than one the type system
 enforces, and a truncated stream decodes one junk symbol before anyone
-notices. Four places in `zlib.src` check `over`, and a fifth that forgot to
+notices. Nine places in `zlib.src` check `over`, and a tenth that forgot to
 would silently accept a truncated stream.
 
 **What would fix it:** a `Result` (or any enum) whose payloads are all scalars
@@ -259,8 +259,8 @@ and that this is a build-configuration decision (no LTO, forced out-of-line
 refcounting) rather than anything about the source language. If `rt_index_get`
 were `static inline` in `rt.h` for the non-debug build, most of this would go.
 
-Measured throughput, `cc -O2`, x86-64. **The machine had five other build
-agents on it throughout**, so these are the best of several runs rather than a
+Measured throughput, `cc -O2`, x86-64. **The machine had several other agents'
+builds running on it throughout**, so these are the best of several runs rather than a
 mean, and the same binaries at a quieter moment gave 45 and 102. Treat them as
 a floor, and the ratios between them as the datapoint rather than the
 absolutes:
@@ -273,7 +273,8 @@ absolutes:
 
 The inflate figure is the surprising one: it is *faster* than SHA-1 despite
 decoding one bit at a time, because its inner loop is mostly `bytes` pushes
-and local arithmetic while SHA-1's is 320 array accesses per 64 octets. It is
+and local arithmetic while SHA-1's is 480 bounds-checked element accesses
+per 64 octets hashed -- seven and a half per octet, each an out-of-line call. It is
 also the number that most flatters the language, so it is worth saying that
 zlib's own inflate is several times faster again, and that the `puff`-style
 decoder here was chosen for clarity.
@@ -314,8 +315,8 @@ void write(bytes b) { out.write(b) ... }        // no: `out` is not in scope
     time either.
   - Passing it in works for the parser, and `dispatch` now takes
     `args.Parser parser` purely so it can print `usage()`.
-  - For the output stream, threading a `File` through all nine functions that
-    can print was worse than the alternative, so `write()` calls
+  - For the output stream, threading a `File` through the seven functions that
+    print was worse than the alternative, so `write()` calls
     `io.stdout()` afresh every time. That is safe (closing a standard
     stream's `File` leaves the descriptor alone) and it allocates a `File`
     per write.
@@ -368,23 +369,39 @@ while (i < n) {
 ```
 
 `for (int v in xs)` covers the cases where the index is not needed, and it is
-used wherever it fits. But a parser walks a buffer by offset, and a codec
-walks an array by index, so most of these loops genuinely need the counter.
-The cost is not expressiveness, it is that the increment is a separate
-statement a `continue` can skip past — a bug the three-clause form cannot
-have. I did not write that bug here, but only because none of the 52 loops
-that needed a counter also needed a `continue`; `object.loose` and
-`refs.packed_all` both use `continue`, and both are `for … in` loops for
-exactly that reason.
+used wherever it fits — all but one of the places that `continue` is a
+`for … in` for exactly that reason. But a parser walks a buffer by offset and
+a codec walks an array by index, so most of these loops genuinely need the
+counter, and then the increment is a statement a `continue` skips past. The
+one counted `while` here that also needed a `continue` shows what that costs
+(`git.src`, `indented`, skipping a leading blank line):
 
-This is the friction I would least want fixed if fixing it meant a second way
-to spell a loop. Recording it because it is the thing I noticed most often.
+```c
+while (at < n) {
+    ...
+    if (empty && first) {
+        at = e + 1;         // the advance, repeated by hand
+        continue;           // because `continue` jumps over the one below
+    }
+    ...
+    at = e + 1;
+}
+```
+
+Forgetting that first `at = e + 1` is not a wrong answer, it is a program that
+never terminates, on the entirely ordinary input of a commit message
+beginning with a blank line. A three-clause `for` cannot express the bug.
+
+This is still the friction I would least want fixed if fixing it meant a
+second way to spell a loop — but the trade is a real one and not only a
+matter of keystrokes.
 
 ---
 
 ## 9. No second return value
 
-Three types in this program exist only because a function returns one thing:
+Two types in this program exist only because a function returns one thing,
+and a third type carries a field for the same reason:
 
 ```c
 type Tables  { Huff lit; Huff dist; }        // zlib.src: a dynamic block's two codes
@@ -398,7 +415,8 @@ all — it is how much of the code space the lengths left unused, which
 `Result` and an enum genuinely cover the cases §9 says they cover (a failure,
 a sum). They do not cover "two things that are both fine", and a struct per
 call site is the workaround. It is a small cost and it is honest about the
-allocation; it is also three type declarations a reader has to hold.
+allocation; it is also two type declarations and one odd field that a reader
+has to hold.
 
 ---
 
