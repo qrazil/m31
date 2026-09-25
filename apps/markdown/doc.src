@@ -1,0 +1,74 @@
+// The document tree.
+//
+// One module for the shape alone, so that `blocks` (which builds it) and
+// `render` (which walks it) can both name it without importing each other.
+//
+// A block's inline content is kept as the RAW markdown source of that block,
+// not as a parsed inline tree: the inline parser runs at render time, over a
+// `str`. That is a deliberate simplification -- CommonMark needs a block pass
+// to finish before inlines are parsed (a link reference definition can be
+// declared after its use), and keeping the raw text is how that ordering is
+// expressed without a second tree.
+
+/// `# text` and `text\n====`. `level` is 1 to 6.
+pub type Heading {
+    pub int level;
+    pub str text;
+}
+
+/// A fenced or indented code block. `info` is the fence's info string, ""
+/// for an indented block or a bare fence. `body` ends with a newline unless
+/// it is empty.
+pub type Code {
+    pub str info;
+    pub str body;
+}
+
+/// A block quote: the blocks found inside it.
+pub type Quote {
+    pub List<Block> kids;
+}
+
+/// One list item: the blocks found inside it.
+pub type Item {
+    pub List<Block> kids;
+}
+
+/// A bullet or ordered list. `start` is the first number of an ordered list
+/// and is ignored for a bullet one. A `tight` list renders its items'
+/// paragraphs without `<p>`.
+pub type Listing {
+    pub bool ordered;
+    pub int start;
+    pub bool tight;
+    pub List<Item> items;
+}
+
+/// A GFM pipe table. `align` holds one of `ALIGN_NONE`, `ALIGN_LEFT`,
+/// `ALIGN_CENTER`, `ALIGN_RIGHT` per column; every row is padded or cut to
+/// the header's width, which is what GFM says to do.
+pub type Table {
+    pub List<str> heads;
+    pub List<int> align;
+    pub List<List<str>> rows;
+}
+
+pub const int ALIGN_NONE = 0;
+pub const int ALIGN_LEFT = 1;
+pub const int ALIGN_CENTER = 2;
+pub const int ALIGN_RIGHT = 3;
+
+/// Everything this subset can parse. There is no `Html` variant: raw HTML is
+/// not in the subset, and a `<div>` on its own line is an ordinary paragraph
+/// whose angle brackets are escaped (README, "What is left out").
+pub enum Block {
+    /// `***`, `---`, `___`
+    Rule;
+    /// Raw inline source, newlines and all.
+    Para(str);
+    Head(Heading);
+    Fence(Code);
+    Quoted(Quote);
+    Bullets(Listing);
+    Grid(Table);
+}
