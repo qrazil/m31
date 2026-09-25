@@ -69,6 +69,19 @@ if build t_sha1; then
     sed 's/^/     /' "$WORK/sha1.time"
 fi
 
+# --- inflate ------------------------------------------------------------------
+
+if build t_inflate; then
+    python3 apps/git/oracle_inflate.py "$WORK/z" >"$WORK/z.want"
+    "$WORK/t_inflate" "$WORK/z" >"$WORK/z.got" 2>"$WORK/z.time"
+    if cmp -s "$WORK/z.got" "$WORK/z.want"; then
+        note "inflate: $(wc -l <"$WORK/z.got") streams match zlib, refusals included"
+    else
+        bad "inflate" "$(diff "$WORK/z.got" "$WORK/z.want" | head -12)"
+    fi
+    grep '^inflate:' "$WORK/z.time" | sed 's/^/     /'
+fi
+
 echo
 if [ $fail -eq 0 ]; then
     printf '\033[32mall %d apps/git checks passed\033[0m\n' "$pass"
