@@ -12,16 +12,31 @@ pub enum IrTy {
     F64,
     I1,
     Ref,
+    /// A **value enum**: an enum whose every payload is a scalar or another
+    /// value enum, so it is a tag and a union passed and returned by copy.
+    /// `u32` is its index in `Module::types`.
+    ///
+    /// It is NOT managed: no header, no refcount, no allocation. `Ref` is
+    /// still the only managed shape, which is what keeps the refcount pass
+    /// mechanical (docs/ir-v0.md §2). See `docs/value-enums.md` for the rule
+    /// and for why nothing observable changes.
+    Val(u32),
 }
 
 impl IrTy {
-    pub fn c_name(self) -> &'static str {
+    pub fn c_name(self) -> String {
         match self {
-            IrTy::I64 => "int64_t",
-            IrTy::F64 => "double",
-            IrTy::I1 => "bool",
-            IrTy::Ref => "Obj *",
+            IrTy::I64 => "int64_t".to_string(),
+            IrTy::F64 => "double".to_string(),
+            IrTy::I1 => "bool".to_string(),
+            IrTy::Ref => "Obj *".to_string(),
+            IrTy::Val(i) => format!("T{i}v"),
         }
+    }
+
+    /// Whether this shape is refcounted. Only `Ref` is.
+    pub fn is_managed(self) -> bool {
+        self == IrTy::Ref
     }
 }
 
@@ -173,11 +188,21 @@ pub struct TypeDef {
     /// One entry per interface-method slot in the program: the IR name of
     /// this type's implementation, or `None` if it has none.
     pub vtable: Vec<Option<String>>,
-    /// Non-empty only for an enum. An enum is laid out as a tag followed by
-    /// `payload_slots()` generic slots, and which slots hold references
-    /// depends on the tag -- so its drop and walk functions switch on it.
+    /// Non-empty only for an enum. An enum is laid out as a tag and a union
+    /// of one struct per variant that carries a payload (src/emit_c.rs,
+    /// `emit_enum_body`), and which members hold references depends on the
+    /// tag -- so its drop and walk functions switch on it.
     pub variants: Vec<Variant>,
     pub is_enum: bool,
+    /// A **value enum**: laid out as a tag and a union, passed and returned
+    /// by copy, never allocated and never refcounted. Set only on an enum,
+    /// and only when every payload of every variant is a scalar or another
+    /// value enum -- see `docs/value-enums.md` for the rule, the proof that
+    /// nothing observable changes, and the cases that are excluded.
+    ///
+    /// A value enum has no object: no header, no TypeInfo, no drop, walk or
+    /// copy function, and no vtable. Its values are `IrTy::Val(tid)`.
+    pub is_value: bool,
     /// The IR name of the type's destructor (`File.drop`), if it declares
     /// one. The drop function calls it before releasing any field, so the
     /// destructor still sees a whole object (docs/destructors-decision.md).
@@ -200,9 +225,24 @@ pub struct TypeDef {
 }
 
 impl TypeDef {
+    /// Whether the emitter produces no object for this type at all: no C
+    /// struct with a header, no TypeInfo, no drop, walk or copy function.
+    ///
+    /// An interface has no layout of its own, a channel's and a collection's
+    /// layout belongs to the runtime, a distinct type is erased to its base,
+    /// and a value enum is a plain C struct passed by copy.
+    pub fn has_no_object(&self) -> bool {
+        self.is_interface || self.is_chan || self.is_distinct || self.is_value
+    }
+
     /// Whether this type holds references, and therefore needs a drop
     /// function. Types that hold none pay no call when freed.
     pub fn needs_drop(&self) -> bool {
+        if self.is_value {
+            // Every payload is a scalar or another value enum: there is
+            // nothing to release, and nothing holds this to release it.
+            return false;
+        }
         if self.is_enum {
             return self.variants.iter().any(|v| v.payload.contains(&IrTy::Ref));
         }
@@ -251,18 +291,6 @@ impl TypeDef {
             && !self.is_enum
             && self.destructor.is_none()
             && self.fields.is_empty()
-    }
-
-    /// How many payload slots an enum's object needs: the widest variant.
-    /// Every variant shares the slots, so a slot's C type cannot depend on
-    /// the variant -- they are all machine words, and a reference rides as
-    /// its pointer, the same way a collection's elements do.
-    pub fn payload_slots(&self) -> usize {
-        self.variants
-            .iter()
-            .map(|v| v.payload.len())
-            .max()
-            .unwrap_or(0)
     }
 }
 
@@ -339,15 +367,30 @@ pub enum Inst {
     },
     /// `v = tag obj` -- which variant this is, as its declaration index.
     EnumTag { dst: Value, obj: Value, tid: u32 },
-    /// `v = payload obj.<idx>` -- one payload slot. The slot is a machine
-    /// word; the destination's type says how to read it, and the lowering
-    /// only emits this where the tag is already known.
+    /// `v = payload obj.<tag>.<idx>` -- one payload slot. For a boxed enum
+    /// the slot is a machine word and the destination's type says how to read
+    /// it; for a value enum (`IrTy::Val`) the payload is a typed member of
+    /// the variant's union arm, which is why `tag` is carried here.
+    ///
+    /// The lowering only emits this where the tag is already known -- every
+    /// site is a `match` arm, a `?`, or `Option.or`, and each of those has
+    /// just tested the tag.
     EnumPayload {
         dst: Value,
         obj: Value,
         tid: u32,
+        tag: u32,
         idx: u32,
     },
+    /// `v = enum_clone obj` -- a second object with the same tag and the
+    /// same payload, each reference in it retained once more.
+    ///
+    /// An enum has no fields, so the field-by-field copy `clone` uses for a
+    /// struct would copy nothing at all; and which payload slots hold
+    /// references depends on the tag, so the retains have to switch on it.
+    /// Only ever emitted for a BOXED enum -- cloning a value enum is the
+    /// assignment that binds the result.
+    EnumClone { dst: Value, src: Value, tid: u32 },
     /// `take obj.<idx>` -- clear one payload slot, without releasing what it
     /// held. The +1 the enum was holding now belongs to whoever read the slot
     /// (with `EnumPayload`) just before: ownership has moved OUT of the enum.
@@ -355,7 +398,12 @@ pub enum Inst {
     /// Emitted only where the enum is known to be the sole owner, so that
     /// nothing else can observe the hole. A cleared slot reads as null, and
     /// the drop function generated for an enum skips a null slot.
-    EnumTake { obj: Value, tid: u32, idx: u32 },
+    EnumTake {
+        obj: Value,
+        tid: u32,
+        tag: u32,
+        idx: u32,
+    },
     /// `v = load obj.<field>`
     LoadField {
         dst: Value,
@@ -494,6 +542,91 @@ pub struct Module {
     pub iface_slots: Vec<Slot>,
 }
 
+impl Module {
+    /// Check that no `IrTy::Val` has reached a position that needs an object.
+    ///
+    /// A value enum is the one shape in the IR that is neither a machine word
+    /// nor an `Obj *` (docs/value-enums.md). Everywhere that *is* one of
+    /// those -- a refcount operation, a runtime slot, an interface receiver --
+    /// the lowering has to have demoted the type back to a boxed enum first.
+    /// It does, by re-lowering (`lower::lower_program`); this is the check
+    /// that says so, because a missed case here would be a silent miscompile
+    /// -- a struct handed to something that will read it as a pointer -- and
+    /// the C compiler would not catch all of them.
+    ///
+    /// It is a defect in the compiler if this ever fires, so it reports the
+    /// instruction and panics rather than raising a diagnostic.
+    pub fn verify(&self) {
+        let bad = |f: &Func, v: Value| matches!(f.ty_of(v), IrTy::Val(_));
+        let ret_of: std::collections::HashMap<&str, Option<IrTy>> = self
+            .funcs
+            .iter()
+            .map(|g| (g.name.as_str(), g.ret))
+            .collect();
+        for f in &self.funcs {
+            let ice = |what: &str, i: &Inst| -> ! {
+                panic!(
+                    "internal error: {what}, in `{}`: {}\n\
+                     (see docs/value-enums.md; lower::lower_program decides \
+                     which enums are values)",
+                    f.name.replace('#', "."),
+                    show_inst(i)
+                )
+            };
+            for b in &f.blocks {
+                for i in &b.insts {
+                    match i {
+                        // The refcount pass only ever touches `Ref`.
+                        Inst::RcInc { val } | Inst::RcDec { val } if bad(f, *val) => {
+                            ice("a value enum reached a refcount operation", i)
+                        }
+                        // The runtime's generic slot is one machine word, and
+                        // every collection and channel argument rides in one.
+                        Inst::Call { func, args, dst } if func.starts_with("rt_") => {
+                            if args.iter().any(|a| bad(f, *a)) {
+                                ice("a value enum reached a runtime call's argument", i);
+                            }
+                            if dst.is_some_and(|d| bad(f, d)) {
+                                ice("a value enum reached a runtime call's result", i);
+                            }
+                        }
+                        // Dispatch reads a vtable out of an object header.
+                        Inst::CallIface { args, .. }
+                            if args.first().is_some_and(|r| bad(f, *r)) =>
+                        {
+                            ice("a value enum reached an interface receiver", i)
+                        }
+                        // A field of `Ref` shape holds a pointer. (An enum's
+                        // payload is NOT in this list: a boxed enum has the
+                        // same tag-and-union layout as a value one, so it can
+                        // carry a value enum inline.)
+                        Inst::StoreField { tid, idx, val, .. }
+                            if self.types[*tid as usize].fields[*idx as usize].1 == IrTy::Ref
+                                && bad(f, *val) =>
+                        {
+                            ice("a value enum reached a reference-typed field", i)
+                        }
+                        // A call to one of the program's own functions has
+                        // to produce a value of that function's return shape.
+                        // Getting this wrong was impossible while every user
+                        // type was a `Ref` and every call site could assume
+                        // so; now it is a real question, and a wrong answer
+                        // is a C type error a long way from its cause.
+                        Inst::Call { dst, func, .. } => {
+                            if let Some(want) = ret_of.get(func.as_str()) {
+                                if dst.map(|d| f.ty_of(d)) != *want {
+                                    ice("a call's result has the wrong shape", i);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ---- textual form, for --emit-ir and for debugging -----------------------
 
 impl fmt::Display for Module {
@@ -507,12 +640,28 @@ impl fmt::Display for Module {
             // Module-qualified names are interned with `#`, which cannot
             // appear in source. The dump shows the spelling a reader would
             // write instead.
-            writeln!(
-                f,
-                "type {} {{ {} }}",
-                t.name.replace('#', "."),
+            // An enum's shape is not in its fields -- it has none -- and
+            // which representation it got is the one thing a reader of this
+            // dump cannot work out for themselves, so say it.
+            let variants: Vec<String> = t
+                .variants
+                .iter()
+                .map(|v| {
+                    if v.payload.is_empty() {
+                        v.name.clone()
+                    } else {
+                        let ps: Vec<String> = v.payload.iter().map(|p| format!("{p:?}")).collect();
+                        format!("{}({})", v.name, ps.join(", "))
+                    }
+                })
+                .collect();
+            let body = if t.is_enum {
+                variants.join("; ")
+            } else {
                 fs.join(", ")
-            )?;
+            };
+            let kind = if t.is_value { "value enum" } else { "type" };
+            writeln!(f, "{kind} {} {{ {body} }}", t.name.replace('#', "."))?;
         }
         if !self.types.is_empty() {
             writeln!(f)?;
@@ -622,8 +771,15 @@ fn show_inst(i: &Inst) -> String {
             format!("{ok}, {dst} = parse {func}({src})")
         }
         Inst::EnumTag { dst, obj, tid } => format!("{dst} = tag T{tid} {obj}"),
-        Inst::EnumPayload { dst, obj, tid, idx } => format!("{dst} = payload T{tid} {obj}.{idx}"),
-        Inst::EnumTake { obj, tid, idx } => format!("take T{tid} {obj}.{idx}"),
+        Inst::EnumPayload {
+            dst,
+            obj,
+            tid,
+            tag,
+            idx,
+        } => format!("{dst} = payload T{tid} {obj}.{tag}.{idx}"),
+        Inst::EnumTake { obj, tid, tag, idx } => format!("take T{tid} {obj}.{tag}.{idx}"),
+        Inst::EnumClone { dst, src, tid } => format!("{dst} = enum_clone T{tid} {src}"),
         Inst::Not { dst, src } => format!("{dst} = not {src}"),
         Inst::Call { dst, func, args: a } => match dst {
             Some(d) => format!("{d} = call {func}({})", args(a)),

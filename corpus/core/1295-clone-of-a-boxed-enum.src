@@ -1,0 +1,36 @@
+// A regression test for a bug this work found: `clone` on an enum copied the
+// type's FIELDS, and an enum has none -- so it allocated a fresh object,
+// copied neither the tag nor the payload, and handed back the zeroth variant.
+// `clone(Shape.Circle(7))` printed `Empty`.
+//
+// This enum is boxed (a `str` payload), which is the path that was wrong.
+
+enum Shape {
+    Empty;
+    Circle(int);
+    Named(str, int);
+}
+
+str Shape.to_str() {
+    match (this) {
+        case Empty: {
+            return "Empty";
+        }
+        case Circle(int r): {
+            return "Circle(" + str(r) + ")";
+        }
+        case Named(str n, int k): {
+            return "Named(" + n + "," + str(k) + ")";
+        }
+    }
+}
+
+Shape a = Shape.Circle(7);
+Shape b = clone(a);
+print(a);
+print(b);
+Shape c = Shape.Named("ring", 2);
+Shape d = clone(c);
+print(d);
+Shape e = clone(Shape.Empty);
+print(e);

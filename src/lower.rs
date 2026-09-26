@@ -12,7 +12,9 @@
 //! docs/ir-v0.md §4 says backends consume. The ownership protocol is §5:
 //! arguments are borrowed, returns are owned (+1).
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{BTreeSet, HashMap};
+use std::rc::Rc;
 
 use crate::ast::*;
 use crate::diag::{Diag, Span};
@@ -110,6 +112,9 @@ struct PayloadBind {
     /// rebound.
     hold: String,
     tid: u32,
+    /// The variant this arm matched, which names the union arm the payload
+    /// lives in (`ir::Inst::EnumTake`).
+    tag: u32,
     idx: u32,
     /// `self.scopes.len()` inside the arm's own body scope. A move may only
     /// happen at exactly this depth, for the reason `mark_moved` gives: a
@@ -144,6 +149,15 @@ pub struct Lowerer {
     /// records only `Ref`, which cannot tell `str` from a user type, and a
     /// match arm has to bind the payload at its real type.
     variant_surface: Vec<Vec<Vec<Ty>>>,
+    /// The enums this attempt is representing as values, by name, with their
+    /// index in `typedefs`. Computed once by `value_enums`.
+    value_enum: HashMap<String, u32>,
+    /// Enums a previous attempt found could not be values after all.
+    forced_boxed: BTreeSet<String>,
+    /// Enums THIS attempt has just found the same thing about. Non-empty
+    /// means the diagnostic it returned is a request to start again, not an
+    /// error -- see `lower_program`.
+    demote: Demotions,
     /// Every module in the program, so `greet.hello(..)` can be told from a
     /// field access on a variable called `greet`.
     modules: std::collections::HashSet<String>,
@@ -554,8 +568,9 @@ fn ty_shown(p: &Program, t: Ty) -> String {
     }
 }
 
-/// The representation of a surface type, WITHOUT resolving distinct types.
-/// Use `Lowerer::irty` instead wherever a distinct type can appear.
+/// The representation of a surface type, WITHOUT resolving distinct types
+/// and WITHOUT the value-enum rule. Use `Lowerer::irty` instead wherever
+/// either can appear, which is everywhere outside this file's own helpers.
 fn ir_ty(t: Ty) -> IrTy {
     match t {
         Ty::Int => IrTy::I64,
@@ -565,6 +580,189 @@ fn ir_ty(t: Ty) -> IrTy {
         Ty::User(_) => IrTy::Ref,
         Ty::Void => unreachable!("void is not a value type"),
     }
+}
+
+/// Lower a monomorphised program to IR, choosing the representation of each
+/// enum as it goes.
+///
+/// An enum whose payloads are all scalars can be a **value** -- a tag and a
+/// union, passed and returned by copy, never allocated and never refcounted.
+/// `value_enums` works out which enums those are from the type table alone.
+/// One thing it cannot see from there takes a type back to being a heap
+/// object: crossing a thread boundary (`Lowerer::transfer`), which needs an
+/// object to check for uniqueness. Rather than predict where that happens,
+/// this lowers the program, and lowers it again with that type boxed if it
+/// turns up. The boxed set only ever grows and is bounded by the number of
+/// types, so this terminates; in practice it runs once.
+///
+/// Whatever comes out is checked by `ir::Module::verify`, which is the reason
+/// a missed case here is a loud compiler bug and not a silent miscompile.
+pub fn lower_program(p: &Program) -> Result<ir::Module, Diag> {
+    let mut boxed: BTreeSet<String> = BTreeSet::new();
+    loop {
+        // Shared with the lowerer, which is consumed by the attempt, so the
+        // demotion it discovered outlives it.
+        let asked: Demotions = Rc::new(RefCell::new(BTreeSet::new()));
+        let mut lw = Lowerer::new();
+        lw.forced_boxed = boxed.clone();
+        lw.demote = Rc::clone(&asked);
+        match lw.lower_program(p) {
+            Ok(m) => {
+                m.verify();
+                return Ok(m);
+            }
+            Err(d) => {
+                let names = asked.borrow().clone();
+                if names.is_empty() {
+                    return Err(d); // a real diagnostic, for the person
+                }
+                let before = boxed.len();
+                boxed.extend(names);
+                assert!(
+                    boxed.len() > before,
+                    "internal error: lowering asked to box an enum that is already boxed"
+                );
+            }
+        }
+    }
+}
+
+/// Enums a lowering attempt found it could not keep as values, shared with
+/// the driver above because the attempt consumes the `Lowerer`.
+type Demotions = Rc<RefCell<BTreeSet<String>>>;
+
+/// Which enums may be values, by name, with their index in the type table.
+///
+/// **The rule.** An enum is a value when every payload of every variant is
+/// `int`, `float` or `bool` -- or a `distinct` type over one of those, which
+/// is erased to it -- or another value enum. Everything else is a heap
+/// object, exactly as before.
+///
+/// Excluded, and why (docs/value-enums.md has the full argument):
+///
+///   - a `str`, a `bytes`, a collection or any other reference payload: the
+///     enum would own a reference, and a copy of it would have to retain --
+///     which is refcount traffic in a value, the thing this removes;
+///   - an enum that reaches itself through a payload: it would have no
+///     finite size. The fixpoint below starts from nothing and only adds, so
+///     a recursive enum is never added;
+///   - a value enum used as a collection's element, a map's key or value, or
+///     a channel's element: those are one machine word each, and a tag plus
+///     a union is not. Seeded into `forced` below from the container
+///     declarations monomorphisation left in the type table;
+///   - an enum that satisfies an interface the program declares: dispatch
+///     reads a vtable out of an object header, and a value has none. Checked
+///     by name and arity, which over-approximates: an enum that merely looks
+///     like it satisfies an interface stays boxed, and is only slower.
+///
+/// `forced` is what a previous lowering attempt discovered (`lower_program`).
+fn value_enums(p: &Program, forced: &BTreeSet<String>) -> HashMap<String, u32> {
+    let by_name: HashMap<&str, usize> = p
+        .types
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.name.as_str(), i))
+        .collect();
+    let decl_of = |t: Ty| -> Option<usize> {
+        match t {
+            Ty::User(i) => by_name.get(p.ty_exprs[i as usize].name.as_str()).copied(),
+            _ => None,
+        }
+    };
+
+    // An enum that satisfies an interface can be assigned to an
+    // interface-typed slot, and dispatch needs an object header. Name and
+    // arity only: a near-miss would be refused by `assignable` anyway, so
+    // over-approximating here costs a boxed enum and never correctness.
+    let mut forced: BTreeSet<String> = forced.clone();
+    for iface in p.types.iter().filter(|t| t.is_interface) {
+        if iface.methods.is_empty() {
+            continue;
+        }
+        for e in p.types.iter().filter(|t| t.is_enum) {
+            let satisfies = iface.methods.iter().all(|m| {
+                p.funcs.iter().any(|f| {
+                    f.recv.as_deref() == Some(e.name.as_str())
+                        && bare(&f.name) == bare(&m.name)
+                        && f.params.len() == m.params.len()
+                })
+            });
+            if satisfies {
+                forced.insert(e.name.clone());
+            }
+        }
+    }
+
+    // A container's element, key or value type rides in one machine word.
+    // Monomorphisation planted the type arguments as the declaration's
+    // `$t0`/`$t1` fields (src/mono.rs, `builtin_decl`).
+    for t in &p.types {
+        let container = ["Array$", "List$", "Map$", "Chan$"]
+            .iter()
+            .any(|k| t.name.starts_with(k));
+        if container {
+            for f in &t.fields {
+                if let Some(j) = decl_of(f.ty) {
+                    forced.insert(p.types[j].name.clone());
+                }
+            }
+        }
+    }
+
+    // Least fixpoint: start with nothing and add an enum once every payload
+    // it carries is already known to be fine. Starting from nothing is what
+    // excludes a recursive enum -- it can never be the first one added, so it
+    // is never added at all, and nor is a mutually recursive group.
+    //
+    // Nothing takes an enum back OUT of this set. A boxed enum carrying a
+    // value enum needs no fixing up, because both have the same
+    // tag-and-union layout and the value one sits inline at its own size.
+    // That matters more than it sounds: `Result<bytes, Error>` is a heap
+    // object because of the `bytes`, and if its payload were a machine-word
+    // slot it would have dragged `Error` onto the heap with it -- and with
+    // `Error` every `Result<int, Error>` in the program, which is exactly the
+    // type `apps/git/zlib.src` wanted in its inner loop.
+    let mut ok = vec![false; p.types.len()];
+    loop {
+        let mut grew = false;
+        for (i, t) in p.types.iter().enumerate() {
+            if ok[i] || !t.is_enum || forced.contains(&t.name) {
+                continue;
+            }
+            let fine = t.variants.iter().all(|v| {
+                v.payload.iter().all(|pt| {
+                    // A distinct type is erased to its base, so follow the
+                    // chain before deciding.
+                    let mut pt = *pt;
+                    while let Some(j) = decl_of(pt) {
+                        match p.types[j].distinct_base {
+                            Some(b) => pt = b,
+                            None => break,
+                        }
+                    }
+                    match pt {
+                        Ty::Int | Ty::Float | Ty::Bool => true,
+                        Ty::User(_) => decl_of(pt).is_some_and(|j| ok[j]),
+                        _ => false,
+                    }
+                })
+            });
+            if fine {
+                ok[i] = true;
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+
+    p.types
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| ok[*i])
+        .map(|(i, t)| (t.name.clone(), i as u32))
+        .collect()
 }
 
 impl Lowerer {
@@ -578,6 +776,9 @@ impl Lowerer {
             type_module: Vec::new(),
             type_pub: Vec::new(),
             variant_surface: Vec::new(),
+            value_enum: HashMap::new(),
+            forced_boxed: BTreeSet::new(),
+            demote: Rc::new(RefCell::new(BTreeSet::new())),
             modules: std::collections::HashSet::new(),
             imports_by_module: HashMap::new(),
             cur_module: String::new(),
@@ -756,7 +957,7 @@ impl Lowerer {
                         "`parse_float` has no Option type to return; this is a compiler bug",
                     ));
                 };
-                let d = self.float_text("parse", o.val(), span)?;
+                let d = self.float_text("parse", oty, o.val(), span)?;
                 Ok(Val::new(d, oty, true))
             }
             "parse_int" => {
@@ -1185,7 +1386,7 @@ impl Lowerer {
                     if v.owned {
                         self.stmt_temps.retain(|t| *t != v.val());
                     } else {
-                        self.push(Inst::RcInc { val: v.val() });
+                        self.rc_inc(v.val());
                     }
                 }
                 self.push(Inst::Call {
@@ -1229,7 +1430,7 @@ impl Lowerer {
                     if v.owned {
                         self.stmt_temps.retain(|t| *t != v.val());
                     } else {
-                        self.push(Inst::RcInc { val: v.val() });
+                        self.rc_inc(v.val());
                     }
                 }
                 self.push(Inst::Call {
@@ -1480,7 +1681,7 @@ impl Lowerer {
                 });
 
                 self.switch_to(join_bb);
-                let d = self.new_val(IrTy::Ref);
+                let d = self.enum_val(otid);
                 let ji = self.blocks.iter().position(|b| b.id == join_bb).unwrap();
                 self.blocks[ji].params = vec![d];
                 self.stmt_temps.push(d);
@@ -1742,13 +1943,14 @@ impl Lowerer {
                     dst: got,
                     obj: o.val(),
                     tid,
+                    tag: some_tag,
                     idx: 0,
                 });
                 // Borrowed from the Option, like any payload -- so it is
                 // retained here and released by the statement, which is what
                 // makes both arms agree about who owns the result.
                 if self.is_ref(inner) {
-                    self.push(Inst::RcInc { val: got });
+                    self.rc_inc(got);
                 }
                 self.terminate(Term::Jump {
                     to: join_bb,
@@ -1773,7 +1975,7 @@ impl Lowerer {
                     if d.owned {
                         self.stmt_temps.retain(|t| *t != d.val());
                     } else {
-                        self.push(Inst::RcInc { val: d.val() });
+                        self.rc_inc(d.val());
                     }
                 }
                 self.flush_temps_since(mark);
@@ -1937,7 +2139,7 @@ impl Lowerer {
         });
 
         self.switch_to(join_bb);
-        let d = self.new_val(IrTy::Ref);
+        let d = self.enum_val(tid);
         let ji = self.blocks.iter().position(|b| b.id == join_bb).unwrap();
         self.blocks[ji].params = vec![d];
         self.stmt_temps.push(d);
@@ -1965,7 +2167,7 @@ impl Lowerer {
 
     /// Build `Some(v)` or `None` of the given Option type.
     fn make_option(&mut self, tid: u32, tag: u32, payload: Option<Value>) -> Value {
-        let d = self.new_val(IrTy::Ref);
+        let d = self.enum_val(tid);
         self.push(Inst::EnumPack {
             dst: d,
             tid,
@@ -2119,7 +2321,7 @@ impl Lowerer {
                 // The map keeps its reference; the Option takes one of its
                 // own, exactly as any container would.
                 if self.is_ref(v) {
-                    self.push(Inst::RcInc { val: raw });
+                    self.rc_inc(raw);
                 }
                 let some = self.make_option(otid, some_tag, Some(raw));
                 self.stmt_temps.retain(|t| *t != some);
@@ -2137,7 +2339,7 @@ impl Lowerer {
                 });
 
                 self.switch_to(join_bb);
-                let d = self.new_val(IrTy::Ref);
+                let d = self.enum_val(otid);
                 let ji = self.blocks.iter().position(|b| b.id == join_bb).unwrap();
                 self.blocks[ji].params = vec![d];
                 self.stmt_temps.push(d);
@@ -2257,6 +2459,17 @@ impl Lowerer {
     fn transfer(&mut self, v: &Val, arg: &Expr, span: Span) -> Result<(), Diag> {
         if !self.is_ref(v.ty) || self.chan_elem(v.ty).is_some() {
             return Ok(());
+        }
+        // A value enum crossing a thread boundary. `rt_check_unique` walks an
+        // object graph and there is no object here, and the move rules below
+        // are stated about reference types -- so rather than reason about
+        // what a copy means at a boundary, the type goes back to being a heap
+        // object and the whole program is lowered again. Then a `spawn` of an
+        // `Option<int>` behaves exactly as it did before this optimisation
+        // existed, diagnostic for diagnostic. A channel's element is already
+        // excluded by `value_enums`; this is `spawn`.
+        if self.is_value_enum(v.ty) {
+            return Err(self.box_it(v.ty, span, "cross a thread boundary"));
         }
         // A `case V(T x):` binding is moved by taking the payload out of the
         // enum, which has its own uniqueness check -- on the enum, which
@@ -2388,8 +2601,14 @@ impl Lowerer {
             return Err(Diag::new(span, format!("`{n}` was already moved")));
         }
         let pb = self.payload_bind(n).expect("checked by the caller");
-        let (hold, tid, idx, depth, sole_owner) =
-            (pb.hold.clone(), pb.tid, pb.idx, pb.depth, pb.sole_owner);
+        let (hold, tid, tag, idx, depth, sole_owner) = (
+            pb.hold.clone(),
+            pb.tid,
+            pb.tag,
+            pb.idx,
+            pb.depth,
+            pb.sole_owner,
+        );
         if !sole_owner {
             // The tail only when a copy is possible at all: advising `clone`
             // on a `net.Conn` would send the reader to a second error.
@@ -2431,7 +2650,7 @@ impl Lowerer {
             func: "rt_check_unique".to_string(),
             args: vec![obj],
         });
-        self.push(Inst::EnumTake { obj, tid, idx });
+        self.push(Inst::EnumTake { obj, tid, tag, idx });
         // The value read out of the slot is now owned by the receiver, and it
         // was never a statement temporary, so there is nothing to un-register.
         let _ = v;
@@ -2786,6 +3005,13 @@ impl Lowerer {
         self.ty_exprs = p.ty_exprs.clone();
         self.shown = p.shown.clone();
 
+        // Which enums are values rather than heap objects. Decided from the
+        // type table alone, before anything is lowered, because `irty` is
+        // asked the moment the first field type is resolved below -- and the
+        // answer has to be the same everywhere in the program or two spellings
+        // of one type would disagree about its shape.
+        self.value_enum = value_enums(p, &self.forced_boxed);
+
         // Type table first: signatures and field types may refer to any type,
         // including one declared later in the file.
         for t in &p.types {
@@ -2828,6 +3054,7 @@ impl Lowerer {
                 fields,
                 variants,
                 is_enum: t.is_enum,
+                is_value: self.value_enum.contains_key(&t.name),
                 is_interface: t.is_interface,
                 is_chan: t.name.starts_with("Chan$")
                     || t.name.starts_with("Array$")
@@ -3504,8 +3731,95 @@ impl Lowerer {
     fn irty(&self, t: Ty) -> IrTy {
         match self.base_of(t) {
             Some(b) => self.irty(b),
-            None => ir_ty(t),
+            None => match self.value_enum_tid(t) {
+                Some(tid) => IrTy::Val(tid),
+                None => ir_ty(t),
+            },
         }
+    }
+
+    /// This type's index in the type table if it is a value enum -- an enum
+    /// laid out as a tag and a union and passed by copy, rather than a heap
+    /// object (`value_enums`, and docs/value-enums.md).
+    ///
+    /// Distinctness is NOT resolved here: `irty` does that first, so that
+    /// `distinct Option<int> Maybe` is represented exactly as its base.
+    fn value_enum_tid(&self, t: Ty) -> Option<u32> {
+        match t {
+            Ty::User(i) => self
+                .value_enum
+                .get(&self.ty_exprs[i as usize].name)
+                .copied(),
+            _ => None,
+        }
+    }
+
+    /// Whether a value of this type is a value enum, distinctness resolved.
+    fn is_value_enum(&self, t: Ty) -> bool {
+        self.value_enum_tid(self.underlying(t)).is_some()
+    }
+
+    /// Whether values of this type are REFCOUNTED.
+    ///
+    /// The representational question, and the only one the refcount traffic
+    /// should ever ask. `is_ref` is the SURFACE question -- "is this a
+    /// reference type" in the sense of reference §3.7 -- and the two now
+    /// differ for exactly one kind of type: a value enum is a reference type
+    /// that is not managed. Every rule the language states about reference
+    /// types (a thread boundary moves, `clone` makes a second object, `==`
+    /// is the type's `eq`) keeps asking `is_ref`, which is why making an
+    /// enum a value changes nothing a program can see.
+    pub(crate) fn is_managed(&self, t: Ty) -> bool {
+        self.is_ref(t) && !self.is_value_enum(t)
+    }
+
+    /// `rc_inc`, but only on a value the IR says is managed.
+    ///
+    /// Every retain in the lowering goes through here rather than pushing the
+    /// instruction, so a value enum reaching a site that would have retained
+    /// it costs nothing and cannot emit `rc_inc` on a struct. The IR verifier
+    /// checks that no `rc_inc` escaped this.
+    fn rc_inc(&mut self, val: Value) {
+        if self.types[val.0 as usize].is_managed() {
+            self.push(Inst::RcInc { val });
+        }
+    }
+
+    fn rc_dec(&mut self, val: Value) {
+        if self.types[val.0 as usize].is_managed() {
+            self.push(Inst::RcDec { val });
+        }
+    }
+
+    /// A fresh IR value holding an enum of type `tid`, in whichever shape
+    /// that enum has: a `Ref` to a heap object, or the value enum's own
+    /// struct. Every place that produces or joins an enum goes through here,
+    /// so the choice is made once.
+    fn enum_val(&mut self, tid: u32) -> Value {
+        let t = if self.typedefs[tid as usize].is_value {
+            IrTy::Val(tid)
+        } else {
+            IrTy::Ref
+        };
+        self.new_val(t)
+    }
+
+    /// Give up on representing `t` as a value and ask for the whole program
+    /// to be lowered again with it boxed (`lower_program`).
+    ///
+    /// The `Diag` returned is never shown: the driver sees a non-empty
+    /// demotion list and starts over. It is worded anyway, because a bug that
+    /// let it escape should say what happened.
+    fn box_it(&mut self, t: Ty, span: Span, why: &str) -> Diag {
+        let name = match self.underlying(t) {
+            Ty::User(i) => self.ty_exprs[i as usize].name.clone(),
+            _ => unreachable!("only a user type can be a value enum"),
+        };
+        self.demote.borrow_mut().insert(name.clone());
+        Diag::new(
+            span,
+            format!("internal: `{name}` must be a heap object to {why}; lowering again"),
+        )
     }
 
     /// The base type of a distinct type, if it is one.
@@ -4227,7 +4541,7 @@ impl Lowerer {
         for name in names.iter().rev() {
             if let Some((ty, v)) = self.lookup(name) {
                 if self.is_ref(ty) {
-                    self.push(Inst::RcDec { val: v });
+                    self.rc_dec(v);
                 }
             }
         }
@@ -4241,7 +4555,7 @@ impl Lowerer {
             for name in names.iter().rev() {
                 if let Some((ty, v)) = self.lookup(name) {
                     if self.is_ref(ty) {
-                        self.push(Inst::RcDec { val: v });
+                        self.rc_dec(v);
                     }
                 }
             }
@@ -4257,7 +4571,7 @@ impl Lowerer {
             for name in names.iter().rev() {
                 if let Some((ty, v)) = self.lookup(name) {
                     if self.is_ref(ty) {
-                        self.push(Inst::RcDec { val: v });
+                        self.rc_dec(v);
                     }
                 }
             }
@@ -4275,14 +4589,14 @@ impl Lowerer {
     fn flush_temps_since(&mut self, mark: usize) {
         let temps: Vec<Value> = self.stmt_temps.split_off(mark);
         for v in temps {
-            self.push(Inst::RcDec { val: v });
+            self.rc_dec(v);
         }
     }
 
     fn flush_temps(&mut self) {
         let temps = std::mem::take(&mut self.stmt_temps);
         for v in temps {
-            self.push(Inst::RcDec { val: v });
+            self.rc_dec(v);
         }
     }
 
@@ -4326,7 +4640,7 @@ impl Lowerer {
                     if val.owned {
                         self.stmt_temps.retain(|t| *t != val.val());
                     } else {
-                        self.push(Inst::RcInc { val: val.val() });
+                        self.rc_inc(val.val());
                     }
                     self.owned.last_mut().unwrap().push(name.clone());
                 }
@@ -4402,7 +4716,7 @@ impl Lowerer {
                             if v.owned {
                                 self.stmt_temps.retain(|t| *t != v.val());
                             } else {
-                                self.push(Inst::RcInc { val: v.val() });
+                                self.rc_inc(v.val());
                             }
                             self.push(Inst::StoreField {
                                 obj,
@@ -4410,7 +4724,7 @@ impl Lowerer {
                                 idx,
                                 val: v.val(),
                             });
-                            self.push(Inst::RcDec { val: old });
+                            self.rc_dec(old);
                         } else {
                             self.push(Inst::StoreField {
                                 obj,
@@ -4455,7 +4769,7 @@ impl Lowerer {
                     if val.owned {
                         self.stmt_temps.retain(|t| *t != val.val());
                     } else {
-                        self.push(Inst::RcInc { val: val.val() });
+                        self.rc_inc(val.val());
                     }
                     // Release the previous value only if we held it. A
                     // PARAMETER is borrowed (docs/ir-v0.md §5.1) and is
@@ -4468,7 +4782,7 @@ impl Lowerer {
                         .iter()
                         .any(|names| names.iter().any(|n| n == name));
                     if held {
-                        self.push(Inst::RcDec { val: old });
+                        self.rc_dec(old);
                     } else {
                         self.owned.last_mut().unwrap().push(name.clone());
                     }
@@ -4527,7 +4841,7 @@ impl Lowerer {
                         // before releasing locals, or returning a local would
                         // hand back a freed object.
                         if self.is_ref(want) && !val.owned {
-                            self.push(Inst::RcInc { val: val.val() });
+                            self.rc_inc(val.val());
                         }
                         if val.owned {
                             self.stmt_temps.retain(|t| *t != val.val());
@@ -4650,14 +4964,14 @@ impl Lowerer {
                     if v.owned {
                         self.stmt_temps.retain(|t| *t != v.val());
                     } else {
-                        self.push(Inst::RcInc { val: v.val() });
+                        self.rc_inc(v.val());
                     }
                     self.push(Inst::Call {
                         dst: None,
                         func: "rt_index_set".to_string(),
                         args: vec![o.val(), i.val(), v.val()],
                     });
-                    self.push(Inst::RcDec { val: old });
+                    self.rc_dec(old);
                 } else {
                     self.push(Inst::Call {
                         dst: None,
@@ -4769,7 +5083,7 @@ impl Lowerer {
                     if v.owned {
                         self.stmt_temps.retain(|t| *t != v.val());
                     } else {
-                        self.push(Inst::RcInc { val: v.val() });
+                        self.rc_inc(v.val());
                     }
                     self.push(Inst::StoreField {
                         obj: o.val(),
@@ -4777,7 +5091,7 @@ impl Lowerer {
                         idx,
                         val: v.val(),
                     });
-                    self.push(Inst::RcDec { val: old });
+                    self.rc_dec(old);
                 } else {
                     self.push(Inst::StoreField {
                         obj: o.val(),
@@ -5115,7 +5429,7 @@ impl Lowerer {
         if coll.owned {
             self.stmt_temps.retain(|t| *t != coll.val());
         } else {
-            self.push(Inst::RcInc { val: coll.val() });
+            self.rc_inc(coll.val());
         }
         self.scopes
             .last_mut()
@@ -5217,7 +5531,7 @@ impl Lowerer {
         // The element is borrowed from the collection, so the loop variable
         // retains it for the duration of the body, exactly like a binding.
         if self.is_ref(elem) {
-            self.push(Inst::RcInc { val: e });
+            self.rc_inc(e);
             self.owned.last_mut().unwrap().push(name.to_string());
         }
         self.scopes
@@ -5537,13 +5851,13 @@ impl Lowerer {
                 if v.owned {
                     self.stmt_temps.retain(|t| *t != v.val());
                 } else {
-                    self.push(Inst::RcInc { val: v.val() });
+                    self.rc_inc(v.val());
                 }
             }
             vals.push(v.val());
         }
 
-        let d = self.new_val(IrTy::Ref);
+        let d = self.enum_val(tid);
         self.push(Inst::EnumPack {
             dst: d,
             tid,
@@ -5591,7 +5905,7 @@ impl Lowerer {
         if sc.owned {
             self.stmt_temps.retain(|t| *t != sc.val());
         } else {
-            self.push(Inst::RcInc { val: sc.val() });
+            self.rc_inc(sc.val());
         }
         self.scopes
             .last_mut()
@@ -5774,6 +6088,7 @@ impl Lowerer {
                     dst: d,
                     obj: sc.val(),
                     tid,
+                    tag: tag as u32,
                     idx: idx as u32,
                 });
                 self.scopes
@@ -5785,6 +6100,7 @@ impl Lowerer {
                         name: b.name.clone(),
                         hold: hold.clone(),
                         tid,
+                        tag: tag as u32,
                         idx: idx as u32,
                         depth: self.scopes.len(),
                         sole_owner: sc.owned,
@@ -5981,7 +6297,7 @@ impl Lowerer {
         if v.owned {
             self.stmt_temps.retain(|t| *t != v.val());
         } else {
-            self.push(Inst::RcInc { val: v.val() });
+            self.rc_inc(v.val());
         }
         self.scopes
             .last_mut()
@@ -6030,16 +6346,24 @@ impl Lowerer {
         let err_ty = self.variant_surface[vtid as usize][1].first().copied();
         let carried = if let Some(err_ty) = err_ty.filter(|_| is_result) {
             let e = self.new_val(self.irty(err_ty));
+            // The tag is the scrutinee's OWN failure variant, not the
+            // enclosing function's: this reads the value that arrived.
+            let carried_tag = self.typedefs[vtid as usize]
+                .variants
+                .iter()
+                .position(|x| x.name == "Err")
+                .expect("a Result has an Err") as u32;
             self.push(Inst::EnumPayload {
                 dst: e,
                 obj: v.val(),
                 tid: vtid,
+                tag: carried_tag,
                 idx: 0,
             });
             // Borrowed from the value we are about to release, so the new
             // failure takes a reference of its own.
             if self.is_ref(err_ty) {
-                self.push(Inst::RcInc { val: e });
+                self.rc_inc(e);
             }
             Some(e)
         } else {
@@ -6072,11 +6396,12 @@ impl Lowerer {
             dst: got,
             obj: v.val(),
             tid: vtid,
+            tag: ok_tag,
             idx: 0,
         });
         let owned = self.is_ref(payload);
         if owned {
-            self.push(Inst::RcInc { val: got });
+            self.rc_inc(got);
         }
         self.release_scope();
         self.scopes.pop();
@@ -6767,6 +7092,7 @@ impl Lowerer {
             fields: Vec::new(),
             variants: Vec::new(),
             is_enum: false,
+            is_value: false,
             is_interface: false,
             is_chan: false,
             is_distinct: false,
@@ -7339,6 +7665,7 @@ impl Lowerer {
                 .collect(),
             variants: Vec::new(),
             is_enum: false,
+            is_value: false,
             is_interface: false,
             is_chan: false,
             is_distinct: false,
@@ -7658,7 +7985,7 @@ impl Lowerer {
                 if v.owned {
                     self.stmt_temps.retain(|t| *t != v.val());
                 } else {
-                    self.push(Inst::RcInc { val: v.val() });
+                    self.rc_inc(v.val());
                 }
             }
             if is_list {
@@ -8271,7 +8598,7 @@ impl Lowerer {
     /// `v.to_str()` and `str(v)` both come here, so they cannot disagree.
     fn prim_to_str(&mut self, prim: Ty, v: Value, span: Span) -> Result<Value, Diag> {
         if prim == Ty::Float {
-            return self.float_text("format", v, span);
+            return self.float_text("format", Ty::Str, v, span);
         }
         let func = if prim == Ty::Int {
             "rt_int_to_str"
@@ -8290,13 +8617,16 @@ impl Lowerer {
 
     /// A call to `format` or `parse` in lib/__floatfmt.src, which is how a
     /// float becomes text and text a float: the conversion is language
-    /// source, not runtime C. Both take one borrowed argument and return an
-    /// owned reference -- a `str`, or an `Option<float>`.
+    /// source, not runtime C. Both take one borrowed argument and return
+    /// what `ret` says -- a `str` for `format`, an `Option<float>` for
+    /// `parse`. The second of those is a value enum, so the destination's
+    /// shape has to come from the type rather than be assumed to be a
+    /// reference.
     ///
     /// The loader includes the module whenever a program could get here (see
     /// `modules::mentions_float`); if that ever misjudges, this says so
     /// instead of leaving an undefined function to the C compiler.
-    fn float_text(&mut self, name: &str, arg: Value, span: Span) -> Result<Value, Diag> {
+    fn float_text(&mut self, name: &str, ret: Ty, arg: Value, span: Span) -> Result<Value, Diag> {
         let fm = crate::stdlib::FLOATFMT;
         // The module converting floats cannot convert one itself: the call
         // would be to itself, and it would recurse until the stack ran out.
@@ -8314,13 +8644,15 @@ impl Lowerer {
                 format!("`{key}` was not loaded for a float conversion; this is a compiler bug"),
             ));
         }
-        let d = self.new_val(IrTy::Ref);
+        let d = self.new_val(self.irty(ret));
         self.push(Inst::Call {
             dst: Some(d),
             func: key,
             args: vec![arg],
         });
-        self.stmt_temps.push(d);
+        if self.types[d.0 as usize].is_managed() {
+            self.stmt_temps.push(d);
+        }
         Ok(d)
     }
 
@@ -9149,7 +9481,7 @@ impl Lowerer {
                 if v.owned {
                     self.stmt_temps.retain(|t| *t != v.val());
                 } else {
-                    self.push(Inst::RcInc { val: v.val() });
+                    self.rc_inc(v.val());
                 }
             }
             self.push(Inst::StoreField {
@@ -9226,7 +9558,7 @@ impl Lowerer {
                 Ty::Int => "rt_print",
                 // Formatted in the language, then printed as the string.
                 Ty::Float => {
-                    let text = self.float_text("format", a.val(), args.pos[0].span())?;
+                    let text = self.float_text("format", Ty::Str, a.val(), args.pos[0].span())?;
                     self.push(Inst::Call {
                         dst: None,
                         func: "rt_print_str".to_string(),
@@ -9439,6 +9771,31 @@ impl Lowerer {
                 ));
             }
 
+            // An enum has no fields: what it carries is a tag and the
+            // payload of whichever variant that tag names. The field loop
+            // below would copy nothing and hand back a fresh object with tag
+            // 0 -- a `Circle(7)` cloning into an `Empty`, silently. So an
+            // enum is copied by an instruction of its own.
+            if self.typedefs[tid as usize].is_enum {
+                // A VALUE enum is copied by the assignment that binds the
+                // result: there is no object, so there is no second object to
+                // make and no identity to tell one from the other. `clone`
+                // still means what it says -- writing one cannot be seen
+                // through the other -- because an enum's payload cannot be
+                // written at all.
+                if self.typedefs[tid as usize].is_value {
+                    return Ok(Val::new(v.val(), v.ty, false));
+                }
+                let d = self.new_val(IrTy::Ref);
+                self.push(Inst::EnumClone {
+                    dst: d,
+                    src: v.val(),
+                    tid,
+                });
+                self.stmt_temps.push(d);
+                return Ok(Val::new(d, v.ty, true));
+            }
+
             // Field by field: the copy holds the same references, each
             // retained once more.
             let n = self.typedefs[tid as usize].fields.len();
@@ -9454,7 +9811,7 @@ impl Lowerer {
                     idx: i as u32,
                 });
                 if fty == IrTy::Ref {
-                    self.push(Inst::RcInc { val: cur });
+                    self.rc_inc(cur);
                 }
                 self.push(Inst::StoreField {
                     obj: d,

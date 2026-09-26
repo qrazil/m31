@@ -66,6 +66,29 @@ The same reasoning is why `Huff.decode` returns `-1` for "no code matched"
 instead of `Option<int>`. A sentinel, in a language whose whole point is that
 `index_of` hides the sentinel from you.
 
+**Update — the compiler now does exactly this, and it is not enough here.**
+An enum whose payloads are all scalars is passed and returned by copy, with no
+allocation and no refcount (`docs/value-enums.md`). Nothing in the source
+language changed, which is what this item asked for.
+
+The rewrite was done in full and measured: `take` and `byte` return
+`Result<int, Error>`, `Huff.decode` takes the table it is decoding for and
+answers `Err(BadCode(which))` rather than `-1`, every call site is `?`, and
+the `over` flag and all nine of its checks are gone. Thirteen lines shorter,
+29 `?` where there were 6, correct against all 29 `zlib` fixtures the first
+time it ran. The patch is `bench/valenum/zlib-result.diff`.
+
+It is **not checked in**, because it is 0.86x the throughput of the flag, on
+both gcc and clang. The reason is a hard edge in the C ABI rather than
+anything about enums: `Error` has six variants carrying two `int`s, so it is
+24 bytes, so `Result<int, Error>` is 32 -- and System V returns anything over
+16 bytes through a caller-allocated stack slot instead of two registers. A
+Huffman symbol pays up to fifteen of those round trips.
+
+What the optimisation did buy is the difference between "unaffordable" and
+"a judgement call": the same rewrite before it was 0.53x. The numbers, and the
+third arm that shows it, are in `bench/value-enums.md` §4.
+
 ---
 
 ## 2. `?` needs the error types to match exactly, so every layer boundary is a `match`

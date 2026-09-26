@@ -1,0 +1,56 @@
+// Methods on a value enum. `this` is the struct, borrowed exactly as any
+// receiver is, and returning it is an ordinary return by copy.
+
+enum Dir {
+    North;
+    East;
+    South;
+    West;
+}
+
+Dir Dir.turn() {
+    match (this) {
+        case North: {
+            return Dir.East;
+        }
+        case East: {
+            return Dir.South;
+        }
+        case South: {
+            return Dir.West;
+        }
+        case West: {
+            return Dir.North;
+        }
+    }
+}
+
+str Dir.to_str() {
+    match (this) {
+        case North: {
+            return "N";
+        }
+        case East: {
+            return "E";
+        }
+        case South: {
+            return "S";
+        }
+        case West: {
+            return "W";
+        }
+    }
+}
+
+bool Dir.eq(Dir other) {
+    return to_str() == other.to_str();
+}
+
+Dir d = Dir.North;
+print(d);
+print(d.turn());
+print(d.turn().turn());
+print(d.turn().turn().turn().turn());
+print(d == Dir.North);
+print(d == Dir.South);
+print(str(d.turn()));

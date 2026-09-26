@@ -1,0 +1,31 @@
+// The same exclusion for a map's value, an array's element and a map's key
+// position. Each is a machine-word slot.
+
+enum Code {
+    Ok_;
+    Bad(int);
+}
+
+int num(Code c) {
+    match (c) {
+        case Ok_: {
+            return 0;
+        }
+        case Bad(int n): {
+            return n;
+        }
+    }
+}
+
+Map<str, Code> m = {};
+m.set("a", Code.Ok_);
+m.set("b", Code.Bad(7));
+print(num(m.get("a").or(Code.Bad(-1))));
+print(num(m.get("b").or(Code.Bad(-1))));
+print(num(m.get("c").or(Code.Bad(-1))));
+Array<Code> arr = [Code.Ok_, Code.Bad(2), Code.Bad(3)];
+int total = 0;
+for (Code c in arr) {
+    total = total + num(c);
+}
+print(total);

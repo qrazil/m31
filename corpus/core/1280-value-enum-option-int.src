@@ -1,0 +1,31 @@
+// An `Option<int>` is a VALUE: a tag and a union, passed and returned by
+// copy, with no allocation and no refcount (docs/value-enums.md).
+//
+// Nothing here says so, which is the point -- this is the program anyone
+// would write, and `__rc_live=0` says the same thing it always said. What
+// changed is that it says it about a program that allocated nothing.
+
+Option<int> half(int n) {
+    if (n % 2 == 0) {
+        return Option<int>.Some(n / 2);
+    }
+    return Option<int>.None;
+}
+
+int total = 0;
+int i = 0;
+while (i < 6) {
+    match (half(i)) {
+        case Some(int h): {
+            total = total + h;
+        }
+        case None: {
+        }
+    }
+    i = i + 1;
+}
+print(total);
+print(half(10).is_some());
+print(half(7).is_some());
+print(half(10).or(-1));
+print(half(7).or(-1));

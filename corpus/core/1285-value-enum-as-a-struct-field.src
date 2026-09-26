@@ -1,0 +1,34 @@
+// A value enum inside an ordinary heap type is a member of its C struct, not
+// a pointer to another object: the Box below allocates once, not twice, and
+// its drop function has nothing to release.
+
+enum Slot {
+    Free;
+    Taken(int);
+}
+
+type Box {
+    Slot s;
+    int n;
+}
+
+int held(Box b) {
+    match (b.s) {
+        case Free: {
+            return -1;
+        }
+        case Taken(int v): {
+            return v;
+        }
+    }
+}
+
+Box a = Box(Slot.Taken(4), 1);
+Box b = Box(Slot.Free, 2);
+print(held(a));
+print(held(b));
+// Overwriting the field replaces a value, with nothing to free.
+a.s = Slot.Taken(9);
+print(held(a));
+a.s = Slot.Free;
+print(held(a));

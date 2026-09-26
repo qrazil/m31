@@ -1,0 +1,32 @@
+// A channel's element is one machine word, so an enum sent down one keeps
+// its header. Same exclusion as a collection's element, same reason.
+
+enum Msg {
+    Done;
+    Value(int);
+}
+
+void produce(Chan<Msg> ch) {
+    int i = 1;
+    while (i <= 3) {
+        send(ch, Msg.Value(i));
+        i = i + 1;
+    }
+    send(ch, Msg.Done);
+}
+
+Chan<Msg> ch = Chan<Msg>(4);
+spawn produce(ch);
+int total = 0;
+bool going = true;
+while (going) {
+    match (recv(ch)) {
+        case Value(int v): {
+            total = total + v;
+        }
+        case Done: {
+            going = false;
+        }
+    }
+}
+print(total);

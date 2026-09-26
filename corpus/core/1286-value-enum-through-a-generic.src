@@ -1,0 +1,40 @@
+// Monomorphisation runs before lowering, so a generic instantiated at a
+// value enum is an ordinary function taking the struct by value. The IR
+// never sees the generic and the value enum needs no special case.
+
+enum Step {
+    Stop;
+    Go(int);
+}
+
+type Wrap<T> {
+    T item;
+}
+
+T first<T>(Wrap<T> w) {
+    return w.item;
+}
+
+T pick<T>(T a, T b, bool left) {
+    if (left) {
+        return a;
+    }
+    return b;
+}
+
+int steps(Step s) {
+    match (s) {
+        case Stop: {
+            return 0;
+        }
+        case Go(int n): {
+            return n;
+        }
+    }
+}
+
+Wrap<Step> w = Wrap<Step>(Step.Go(5));
+print(steps(first(w)));
+print(steps(pick(Step.Go(1), Step.Stop, true)));
+print(steps(pick(Step.Go(1), Step.Stop, false)));
+print(steps(pick(Step.Go(2), Step.Go(3), false)));

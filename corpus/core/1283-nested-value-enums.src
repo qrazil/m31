@@ -1,0 +1,56 @@
+// A value enum whose payload is another value enum, three deep. Each one is
+// a union member of the one above, at its own size, and none of them
+// allocates.
+
+enum Leaf {
+    Zero;
+    One(int);
+}
+
+enum Mid {
+    Empty;
+    Wrap(Leaf);
+    Pair(Leaf, bool);
+}
+
+enum Top {
+    Nothing;
+    Holds(Mid, float);
+}
+
+int leaf_of(Leaf l) {
+    match (l) {
+        case Zero: {
+            return 0;
+        }
+        case One(int n): {
+            return n;
+        }
+    }
+}
+
+str show(Top t) {
+    match (t) {
+        case Nothing: {
+            return "nothing";
+        }
+        case Holds(Mid m, float f): {
+            match (m) {
+                case Empty: {
+                    return "empty " + str(f);
+                }
+                case Wrap(Leaf l): {
+                    return "wrap " + str(leaf_of(l)) + " " + str(f);
+                }
+                case Pair(Leaf l, bool b): {
+                    return "pair " + str(leaf_of(l)) + " " + str(b) + " " + str(f);
+                }
+            }
+        }
+    }
+}
+
+print(show(Top.Nothing));
+print(show(Top.Holds(Mid.Empty, 1.5)));
+print(show(Top.Holds(Mid.Wrap(Leaf.One(7)), 2.25)));
+print(show(Top.Holds(Mid.Pair(Leaf.Zero, true), -0.5)));

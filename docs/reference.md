@@ -597,6 +597,16 @@ has nothing to infer it from, and one rule beats a rule with an exception.
 An enum is a reference type like a struct, and it owns its payload: a
 reference going in is retained, and released when the enum is freed.
 
+**A note on cost, which is not a rule.** An enum whose every payload is an
+`int`, a `float`, a `bool` or another such enum is compiled to a value passed
+by copy: no allocation, no refcount, nothing to free. So `Option<int>` and
+`Result<int, E>` for a scalar `E` are free to return from a function called
+several million times, and a codec's inner loop can report failure with the
+type that says so instead of a sentinel. Nothing above changes — an enum is
+still a reference type, `==` is still its `eq`, a payload still cannot be
+assigned — and nothing tells you which representation a type got, because
+nothing can see it. `docs/value-enums.md` has the rule and the measurements.
+
 There is no subtyping here. `Circle` is not a type and not a subclass of
 `Shape`; it is one of the shapes a `Shape` can be. The only way to get at a
 payload is `match`.

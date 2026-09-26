@@ -1,0 +1,26 @@
+// `clone` of a value enum is the assignment that binds the result: there is
+// no object, so there is no second object to make and no identity to tell
+// one from the other. It still means what `clone` means, because an enum's
+// payload cannot be written through either name.
+
+enum Point {
+    Origin;
+    At(int, int);
+}
+
+str Point.to_str() {
+    match (this) {
+        case Origin: {
+            return "origin";
+        }
+        case At(int x, int y): {
+            return str(x) + "," + str(y);
+        }
+    }
+}
+
+Point a = Point.At(3, 4);
+Point b = clone(a);
+print(a);
+print(b);
+print(clone(Point.Origin));

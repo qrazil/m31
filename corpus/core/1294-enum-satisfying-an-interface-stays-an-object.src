@@ -1,0 +1,38 @@
+// Dispatch reads a vtable out of an object header, so an enum that satisfies
+// an interface the program declares keeps its header. The check is by method
+// name and arity, which over-approximates on purpose: an enum that merely
+// looks like it satisfies one is boxed, which is slower and never wrong.
+
+interface Sized {
+    int size();
+}
+
+enum Shape {
+    Dot;
+    Line(int);
+    Box_(int, int);
+}
+
+int Shape.size() {
+    match (this) {
+        case Dot: {
+            return 0;
+        }
+        case Line(int n): {
+            return n;
+        }
+        case Box_(int w, int h): {
+            return w * h;
+        }
+    }
+}
+
+int total(Sized a, Sized b) {
+    return a.size() + b.size();
+}
+
+print(total(Shape.Line(3), Shape.Box_(2, 5)));
+Sized s = Shape.Dot;
+print(s.size());
+// And the direct call still works on the same type.
+print(Shape.Box_(3, 3).size());

@@ -1,0 +1,26 @@
+// A collection's element is one machine word, and a tag plus a union is not,
+// so an `Option<int>` inside a `List` goes back to being a heap object --
+// for the whole program, including the Options that are not in the list.
+// Nothing about the program changes except its speed.
+
+List<Option<int>> xs = [];
+xs.push(Option<int>.Some(1));
+xs.push(Option<int>.None);
+xs.push(Option<int>.Some(3));
+int total = 0;
+for (Option<int> o in xs) {
+    total = total + o.or(0);
+}
+print(total);
+print(xs.size());
+// The same type outside the list, boxed for the same reason and still right.
+Option<int> loose = Option<int>.Some(9);
+print(loose.or(0));
+match (xs[1]) {
+    case Some(int v): {
+        print(v);
+    }
+    case None: {
+        print(-1);
+    }
+}

@@ -43,15 +43,23 @@ thing as IR types, and keeping the two apart is deliberate.
 | Surface | IR (today) | C |
 |---|---|---|
 | `int` | `i64` | `int64_t` |
+| `float` | `f64` | `double` |
 | `bool` | `i1` | `bool` |
 | `str` | `ref` | `Obj *` |
-
-Three IR types, and no more until something forces a fourth.
+| a **value enum** | `val(T)` | `T{n}v`, a struct |
 
 **`ref` is the only managed type.** That is what makes the refcount pass
 mechanical rather than clever: it inserts `rc_inc`/`rc_dec` for `ref`-typed
 values and ignores everything else. No raw untyped pointer in v0 — you do not
 need one yet, and adding it later is additive.
+
+`val(T)` is the exception that keeps that sentence true rather than breaking
+it. An enum whose payloads are all scalars is laid out as a tag and a union
+and passed by copy: no header, no allocation, **no refcount**, so the pass
+still has exactly one managed shape to look for. Which enums qualify, why
+nothing a program can observe changes, and the four cases that are excluded
+are in `docs/value-enums.md`. It is an optimisation: the surface language does
+not know it happened.
 
 ### 2.1 What `int` promises, and what the IR may do with it
 
@@ -309,10 +317,21 @@ rather than moved, and is immortal in v0 (`rt_chan_new`).
 | `i64` | `int64_t` |
 | `i1` | `bool` |
 
-Aggregates passed or returned **by value do not exist in v0**. This is the
-one place backend independence genuinely leaks — C, Cranelift and LLVM each
-classify struct passing differently — so v0 sidesteps it entirely and the
-decision gets made once, deliberately, when it is actually needed.
+Aggregates passed or returned **by value** were deliberately absent from v0:
+backend independence genuinely leaks here, because C, Cranelift and LLVM each
+classify struct passing differently, so v0 sidestepped it until the decision
+was actually needed.
+
+It was needed, and it has been made. A **value enum** — an enum whose payloads
+are all scalars — is a struct passed and returned by value, so that `Result`
+and `Option` can enter a hot loop without an allocation per use. The decision
+is confined to the C backend: the IR says `val(T)`, and `IrTy::c_name` says
+that is `T{n}v`. A later backend classifies it however its target's ABI says
+to, which is the same question it already has to answer for `Obj *`.
+
+Measured on x86-64 System V with both compilers at `-O2`: a 16-byte value
+enum (`Option<int>`) is returned in `rax:rdx` with no memory traffic; 24 bytes
+and up goes through a hidden pointer. `docs/value-enums.md` §3 has the table.
 
 ---
 
@@ -462,10 +481,11 @@ the IR has been tested rather than assumed.
 Not oversights. Each is deferred because it does not change the shape of v0,
 and adding it later is additive:
 
-closures · aggregates by value · dynamic dispatch and vtables · generics
-(monomorphisation happens in the frontend, so the IR never sees them) ·
-concurrency and atomics · cycle collection and weak refs · float ·
-unsigned · arrays and indexing · modules · unwinding (errors are values)
+closures · ~~aggregates by value~~ (arrived as the value enum, §6) · dynamic
+dispatch and vtables · generics (monomorphisation happens in the frontend, so
+the IR never sees them) · concurrency and atomics · cycle collection and weak
+refs · ~~float~~ · unsigned · arrays and indexing · modules · unwinding
+(errors are values)
 
 ## 9. Open questions
 

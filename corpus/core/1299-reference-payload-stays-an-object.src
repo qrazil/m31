@@ -1,0 +1,42 @@
+// A payload that is a reference keeps the enum on the heap: a copy would
+// have to retain it, which is the refcount traffic the value representation
+// exists to remove. This is `Option<str>`, `Result<bytes, E>` and any enum
+// carrying a collection or a struct.
+
+type Item {
+    int n;
+}
+
+enum Holder {
+    Nothing;
+    Text(str);
+    Raw(bytes);
+    Many(List<int>);
+    One(Item);
+}
+
+str show(Holder h) {
+    match (h) {
+        case Nothing: {
+            return "nothing";
+        }
+        case Text(str s): {
+            return "text " + s;
+        }
+        case Raw(bytes b): {
+            return "raw " + b.hex();
+        }
+        case Many(List<int> xs): {
+            return "many " + str(xs.size());
+        }
+        case One(Item i): {
+            return "one " + str(i.n);
+        }
+    }
+}
+
+print(show(Holder.Nothing));
+print(show(Holder.Text("hi")));
+print(show(Holder.Raw([1, 255])));
+print(show(Holder.Many([1, 2, 3])));
+print(show(Holder.One(Item(8))));
