@@ -1,0 +1,42 @@
+// A `const` local of a value enum. There is nothing to freeze -- the binding
+// is already a copy nothing else can reach, and a payload cannot be assigned
+// in any case -- so the snapshot is skipped and the binding still cannot be
+// assigned to.
+//
+// (A MODULE constant of a user type is refused, §4.5, so this is the only
+// place the question comes up.)
+
+enum Limit {
+    None_;
+    Max(int);
+}
+
+int cap(Limit l, int v) {
+    match (l) {
+        case None_: {
+            return v;
+        }
+        case Max(int m): {
+            if (v > m) {
+                return m;
+            }
+            return v;
+        }
+    }
+}
+
+void go() {
+    Limit made = Limit.Max(10);
+    const Limit frozen = made;
+    print(cap(frozen, 3));
+    print(cap(frozen, 30));
+    const Limit open = Limit.None_;
+    print(cap(open, 30));
+    // The const is a copy of a value: changing the name it came from is not
+    // possible either, because an enum is never assigned into.
+    made = Limit.Max(1);
+    print(cap(frozen, 30));
+    print(cap(made, 30));
+}
+
+go();

@@ -1,0 +1,382 @@
+diff --git a/apps/git/zlib.src b/apps/git/zlib.src
+index a813257..8d7b7e1 100644
+--- a/apps/git/zlib.src
++++ b/apps/git/zlib.src
+@@ -20,21 +20,23 @@
+ // a disk, and the one thing the format offers to say they arrived intact is
+ // worth the one pass it costs.
+ //
+-// --- the bit reader does not fail --------------------------------------------
++// --- the bit reader fails, and says so ---------------------------------------
+ //
+-// Every `Result` here is an enum, and an enum is a heap object (reference
+-// §3.7). A `take(n)` that returned `Result<int, Error>` would therefore
+-// allocate once per bit field read -- several times per symbol, millions of
+-// times for a megabyte -- which is not a price a codec can pay.
++// `take(n)` returns `Result<int, Error>` and every caller writes `?`. That is
++// what `?` is for, and for a while it was unaffordable: an enum was a heap
++// object, so a Huffman symbol -- up to fifteen `take(1)` calls -- cost fifteen
++// allocations, and a megabyte of output several million.
+ //
+-// So the reader cannot fail. Past the end of the input it hands back zero bits
+-// and sets `over`, and every loop that consumes symbols checks `over` once per
+-// symbol and stops. The cost is that a truncated stream may decode one more
+-// symbol than it should before it is noticed, and that symbol's output is
+-// thrown away with the error; the gain is that the inner loop allocates
+-// nothing. What this must never do is loop forever on a truncated stream, and
+-// it cannot: zero bits decode to *some* symbol, `over` is already set, and the
+-// check is at the top of the next iteration.
++// It is affordable now. Every payload `Error` carries is a scalar or another
++// scalar enum, so `Error` and `Result<int, Error>` are values: a tag and a
++// union, passed in registers or a stack slot, never allocated and never
++// counted (docs/value-enums.md). The reader that could not fail is gone, and
++// with it the `over` flag that nine places in this file had to remember to
++// check -- and a tenth that forgot would have accepted a truncated stream.
++//
++// `Huff.decode` lost its `-1` for the same reason: it takes the table it is
++// decoding for and answers `Err(BadCode(which))`, so there is no sentinel to
++// forget either.
+ //
+ // --- decoding is puff's, not zlib's ------------------------------------------
+ //
+@@ -47,6 +49,33 @@
+ // whose blocks are therefore mostly tiny. The throughput note in
+ // `apps/git/FRICTION.md` says what this costs.
+ 
++/// Which of a block's three Huffman tables a complaint is about.
++///
++/// It was a `str` in each of the three variants below that name a table.
++/// Making it an enum is what lets `Error` -- and so `Result<int, Error>`, the
++/// bit reader's return type -- be a value rather than a heap object, and it
++/// is a better spelling in its own right: three names the compiler checks,
++/// not three strings a typo could disagree about.
++pub enum Table {
++    CodeLength;
++    LiteralLength;
++    Distance;
++}
++
++pub str Table.to_str() {
++    match (this) {
++        case CodeLength: {
++            return "code length";
++        }
++        case LiteralLength: {
++            return "literal/length";
++        }
++        case Distance: {
++            return "distance";
++        }
++    }
++}
++
+ /// Why a stream was refused. Every variant carries enough to say where.
+ pub enum Error {
+     /// The input ran out mid-stream; how many octets there were.
+@@ -57,12 +86,12 @@ pub enum Error {
+     StoredLength(int, int);
+     /// A Huffman code table whose lengths claim more codes than exist, or
+     /// fewer; which table it was.
+-    OverSubscribed(str);
++    OverSubscribed(Table);
+     /// A code table that leaves some bit patterns undefined, which would let
+     /// a stream decode differently in two decoders; which table it was.
+-    Incomplete(str);
++    Incomplete(Table);
+     /// Bits that match no code in the table; which table it was.
+-    BadCode(str);
++    BadCode(Table);
+     /// A literal/length symbol of 286 or 287, which exist in the code space
+     /// and have no meaning.
+     BadLength(int);
+@@ -103,14 +132,14 @@ pub str Error.to_str() {
+         case StoredLength(int len, int nlen): {
+             return "stored block length " + len.to_str() + " does not match its complement " + nlen.to_str();
+         }
+-        case OverSubscribed(str which): {
+-            return "the " + which + " code lengths describe more codes than a Huffman code has room for";
++        case OverSubscribed(Table which): {
++            return "the " + which.to_str() + " code lengths describe more codes than a Huffman code has room for";
+         }
+-        case Incomplete(str which): {
+-            return "the " + which + " code is incomplete: some bit patterns decode to nothing";
++        case Incomplete(Table which): {
++            return "the " + which.to_str() + " code is incomplete: some bit patterns decode to nothing";
+         }
+-        case BadCode(str which): {
+-            return "bits that match no code in the " + which + " table";
++        case BadCode(Table which): {
++            return "bits that match no code in the " + which.to_str() + " table";
+         }
+         case BadLength(int sym): {
+             return "literal/length symbol " + sym.to_str() + " has no meaning";
+@@ -175,29 +204,24 @@ type Bits {
+     int at = 0;
+     int val = 0;
+     int cnt = 0;
+-    /// Set the first time a read went past the end. See the module header:
+-    /// the reader answers zero bits rather than failing, and the caller's loop
+-    /// checks this once per symbol.
+-    bool over = false;
+ }
+ 
+-/// The next `n` bits as an integer, low bit first. `n` is at most 16 here, so
+-/// `val` never holds more than 23 bits and nothing can overflow.
+-int Bits.take(int n) {
++/// The next `n` bits as an integer, low bit first, or `Truncated` if the
++/// input ran out first. `n` is at most 16 here, so `val` never holds more
++/// than 23 bits and nothing can overflow.
++Result<int, Error> Bits.take(int n) {
+     while (cnt < n) {
+         if (at >= src.size()) {
+-            over = true;
+-            cnt = cnt + 8;
+-        } else {
+-            val = val | src[at] << cnt;
+-            at = at + 1;
+-            cnt = cnt + 8;
++            return Result<int, Error>.Err(Error.Truncated(src.size()));
+         }
++        val = val | src[at] << cnt;
++        at = at + 1;
++        cnt = cnt + 8;
+     }
+     int v = val & (1 << n) - 1;
+     val = val >> n;
+     cnt = cnt - n;
+-    return v;
++    return Result<int, Error>.Ok(v);
+ }
+ 
+ /// Drop to the next octet boundary and give back to the stream any whole
+@@ -214,14 +238,13 @@ void Bits.align() {
+ }
+ 
+ /// One octet, read directly. Only valid straight after `align`.
+-int Bits.byte() {
++Result<int, Error> Bits.byte() {
+     if (at >= src.size()) {
+-        over = true;
+-        return 0;
++        return Result<int, Error>.Err(Error.Truncated(src.size()));
+     }
+     int v = src[at];
+     at = at + 1;
+-    return v;
++    return Result<int, Error>.Ok(v);
+ }
+ 
+ // --- canonical Huffman codes -------------------------------------------------
+@@ -239,23 +262,23 @@ type Huff {
+ /// The next symbol, or -1 if the bits match no code. One bit at a time, the
+ /// way §3.2.2 defines the code: `first` is the smallest code of this length,
+ /// `index` where its symbols start.
+-int Huff.decode(Bits b) {
++Result<int, Error> Huff.decode(Bits b, Table which) {
+     int code = 0;
+     int first = 0;
+     int index = 0;
+     int len = 1;
+     while (len <= 15) {
+-        code = code | b.take(1);
++        code = code | b.take(1)?;
+         int here = count[len];
+         if (code - first < here) {
+-            return symbol[index + code - first];
++            return Result<int, Error>.Ok(symbol[index + code - first]);
+         }
+         index = index + here;
+         first = first + here << 1;
+         code = code << 1;
+         len = len + 1;
+     }
+-    return -1;
++    return Result<int, Error>.Err(Error.BadCode(which));
+ }
+ 
+ /// The code `lengths[off .. off+n]` describes.
+@@ -304,13 +327,10 @@ Huff build(Array<int> lengths, int off, int n) {
+ 
+ Result<void, Error> stored(Bits b, bytes out, int limit) {
+     b.align();
+-    int l0 = b.byte();
+-    int l1 = b.byte();
+-    int n0 = b.byte();
+-    int n1 = b.byte();
+-    if (b.over) {
+-        return Result<void, Error>.Err(Error.Truncated(b.src.size()));
+-    }
++    int l0 = b.byte()?;
++    int l1 = b.byte()?;
++    int n0 = b.byte()?;
++    int n1 = b.byte()?;
+     int len = l0 | l1 << 8;
+     int nlen = n0 | n1 << 8;
+     if (nlen != len ^ 0xFFFF) {
+@@ -366,39 +386,30 @@ type Tables {
+ }
+ 
+ Result<Tables, Error> dynamic_tables(Bits b) {
+-    int nlen = b.take(5) + 257;
+-    int ndist = b.take(5) + 1;
+-    int ncode = b.take(4) + 4;
+-    if (b.over) {
+-        return Result<Tables, Error>.Err(Error.Truncated(b.src.size()));
+-    }
++    int nlen = b.take(5)? + 257;
++    int ndist = b.take(5)? + 1;
++    int ncode = b.take(4)? + 4;
+     if (nlen > 286 || ndist > 30) {
+         return Result<Tables, Error>.Err(Error.BadCounts(nlen, ndist));
+     }
+     Array<int> clen = [0; 19];
+     int i = 0;
+     while (i < ncode) {
+-        clen[CLEN_ORDER[i]] = b.take(3);
++        clen[CLEN_ORDER[i]] = b.take(3)?;
+         i = i + 1;
+     }
+     Huff cl = build(clen, 0, 19);
+     if (cl.left < 0) {
+-        return Result<Tables, Error>.Err(Error.OverSubscribed("code length"));
++        return Result<Tables, Error>.Err(Error.OverSubscribed(Table.CodeLength));
+     }
+     if (cl.left > 0) {
+-        return Result<Tables, Error>.Err(Error.Incomplete("code length"));
++        return Result<Tables, Error>.Err(Error.Incomplete(Table.CodeLength));
+     }
+     Array<int> lengths = [0; 320];
+     int idx = 0;
+     int want = nlen + ndist;
+     while (idx < want) {
+-        int sym = cl.decode(b);
+-        if (b.over) {
+-            return Result<Tables, Error>.Err(Error.Truncated(b.src.size()));
+-        }
+-        if (sym < 0) {
+-            return Result<Tables, Error>.Err(Error.BadCode("code length"));
+-        }
++        int sym = cl.decode(b, Table.CodeLength)?;
+         if (sym < 16) {
+             lengths[idx] = sym;
+             idx = idx + 1;
+@@ -410,11 +421,11 @@ Result<Tables, Error> dynamic_tables(Bits b) {
+                     return Result<Tables, Error>.Err(Error.NothingToRepeat);
+                 }
+                 v = lengths[idx - 1];
+-                rep = 3 + b.take(2);
++                rep = 3 + b.take(2)?;
+             } else if (sym == 17) {
+-                rep = 3 + b.take(3);
++                rep = 3 + b.take(3)?;
+             } else {
+-                rep = 11 + b.take(7);
++                rep = 11 + b.take(7)?;
+             }
+             if (idx + rep > want) {
+                 return Result<Tables, Error>.Err(Error.TooManyLengths(idx + rep, want));
+@@ -426,28 +437,25 @@ Result<Tables, Error> dynamic_tables(Bits b) {
+             }
+         }
+     }
+-    if (b.over) {
+-        return Result<Tables, Error>.Err(Error.Truncated(b.src.size()));
+-    }
+     if (lengths[256] == 0) {
+         return Result<Tables, Error>.Err(Error.NoEndOfBlock);
+     }
+     Huff lit = build(lengths, 0, nlen);
+     if (lit.left < 0) {
+-        return Result<Tables, Error>.Err(Error.OverSubscribed("literal/length"));
++        return Result<Tables, Error>.Err(Error.OverSubscribed(Table.LiteralLength));
+     }
+     if (lit.left > 0) {
+-        return Result<Tables, Error>.Err(Error.Incomplete("literal/length"));
++        return Result<Tables, Error>.Err(Error.Incomplete(Table.LiteralLength));
+     }
+     Huff dist = build(lengths, nlen, ndist);
+     // An incomplete DISTANCE code is legal in exactly one case: a block that
+     // uses a single distance, which cannot fill a one-bit code space. zlib
+     // and puff both allow it, and streams in the wild contain it.
+     if (dist.left < 0) {
+-        return Result<Tables, Error>.Err(Error.OverSubscribed("distance"));
++        return Result<Tables, Error>.Err(Error.OverSubscribed(Table.Distance));
+     }
+     if (dist.left > 0 && ndist - dist.count[0] > 1) {
+-        return Result<Tables, Error>.Err(Error.Incomplete("distance"));
++        return Result<Tables, Error>.Err(Error.Incomplete(Table.Distance));
+     }
+     return Result<Tables, Error>.Ok(Tables(lit, dist));
+ }
+@@ -456,13 +464,7 @@ Result<Tables, Error> dynamic_tables(Bits b) {
+ /// match, until end-of-block.
+ Result<void, Error> symbols(Bits b, Huff lit, Huff dist, bytes out, int limit) {
+     while (true) {
+-        int sym = lit.decode(b);
+-        if (b.over) {
+-            return Result<void, Error>.Err(Error.Truncated(b.src.size()));
+-        }
+-        if (sym < 0) {
+-            return Result<void, Error>.Err(Error.BadCode("literal/length"));
+-        }
++        int sym = lit.decode(b, Table.LiteralLength)?;
+         if (sym < 256) {
+             if (limit >= 0 && out.size() >= limit) {
+                 return Result<void, Error>.Err(Error.TooBig(limit));
+@@ -475,21 +477,12 @@ Result<void, Error> symbols(Bits b, Huff lit, Huff dist, bytes out, int limit) {
+             if (ls >= 29) {
+                 return Result<void, Error>.Err(Error.BadLength(sym));
+             }
+-            int len = LENGTH_BASE[ls] + b.take(LENGTH_EXTRA[ls]);
+-            int ds = dist.decode(b);
+-            if (b.over) {
+-                return Result<void, Error>.Err(Error.Truncated(b.src.size()));
+-            }
+-            if (ds < 0) {
+-                return Result<void, Error>.Err(Error.BadCode("distance"));
+-            }
++            int len = LENGTH_BASE[ls] + b.take(LENGTH_EXTRA[ls])?;
++            int ds = dist.decode(b, Table.Distance)?;
+             if (ds >= 30) {
+                 return Result<void, Error>.Err(Error.BadDistance(ds));
+             }
+-            int d = DIST_BASE[ds] + b.take(DIST_EXTRA[ds]);
+-            if (b.over) {
+-                return Result<void, Error>.Err(Error.Truncated(b.src.size()));
+-            }
++            int d = DIST_BASE[ds] + b.take(DIST_EXTRA[ds])?;
+             if (d > out.size()) {
+                 return Result<void, Error>.Err(Error.TooFar(d, out.size()));
+             }
+@@ -514,11 +507,8 @@ Result<void, Error> symbols(Bits b, Huff lit, Huff dist, bytes out, int limit) {
+ Result<void, Error> run(Bits b, bytes out, int limit) {
+     bool last = false;
+     while (!last) {
+-        last = b.take(1) == 1;
+-        int kind = b.take(2);
+-        if (b.over) {
+-            return Result<void, Error>.Err(Error.Truncated(b.src.size()));
+-        }
++        last = b.take(1)? == 1;
++        int kind = b.take(2)?;
+         if (kind == 0) {
+             stored(b, out, limit)?;
+         } else if (kind == 1) {
+@@ -566,13 +556,10 @@ pub Result<bytes, Error> decompress(bytes src, int limit = -1) {
+     Bits b = Bits(src, at: 2);
+     run(b, out, limit)?;
+     b.align();
+-    int a0 = b.byte();
+-    int a1 = b.byte();
+-    int a2 = b.byte();
+-    int a3 = b.byte();
+-    if (b.over) {
+-        return Result<bytes, Error>.Err(Error.Truncated(src.size()));
+-    }
++    int a0 = b.byte()?;
++    int a1 = b.byte()?;
++    int a2 = b.byte()?;
++    int a3 = b.byte()?;
+     int want = a0 << 24 | a1 << 16 | a2 << 8 | a3;
+     int got = adler32(out);
+     if (want != got) {

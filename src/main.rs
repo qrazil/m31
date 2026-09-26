@@ -177,7 +177,7 @@ fn finish(prog: ast::Program, mode: &str) -> Result<String, diag::Diag> {
     lower::check_destructor_decls(&prog)?;
     lower::check_reserved_decls(&prog)?;
     let prog = mono::Mono::run(prog)?;
-    let module = lower::Lowerer::new().lower_program(&prog)?;
+    let module = lower::lower_program(&prog)?;
     Ok(match mode {
         "ir" => module.to_string(),
         _ => emit_c::emit(&module),

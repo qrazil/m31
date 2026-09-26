@@ -1,0 +1,53 @@
+// A boxed enum's payload is a machine-word slot too, so an enum that would
+// otherwise be a value is boxed when a boxed one carries it. The demotion
+// cascades: `Inner` goes back to being an object, and so does anything that
+// was only a value because `Inner` was.
+
+enum Inner {
+    Small(int);
+    None_;
+}
+
+enum Wrapper {
+    Named(str);
+    Holds(Inner);
+}
+
+enum Outer {
+    Around(Inner);
+    Nothing;
+}
+
+int inner(Inner i) {
+    match (i) {
+        case Small(int n): {
+            return n;
+        }
+        case None_: {
+            return -1;
+        }
+    }
+}
+
+str show(Wrapper w) {
+    match (w) {
+        case Named(str s): {
+            return "named " + s;
+        }
+        case Holds(Inner i): {
+            return "holds " + str(inner(i));
+        }
+    }
+}
+
+print(show(Wrapper.Named("x")));
+print(show(Wrapper.Holds(Inner.Small(4))));
+print(show(Wrapper.Holds(Inner.None_)));
+match (Outer.Around(Inner.Small(8))) {
+    case Around(Inner i): {
+        print(inner(i));
+    }
+    case Nothing: {
+        print(0);
+    }
+}

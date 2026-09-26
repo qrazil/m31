@@ -1,0 +1,58 @@
+// `?` on a value enum: the tag test, the payload read and the rebuilt
+// failure are all register work now. The four layers here are the shape
+// `apps/git/FRICTION.md` 2 describes, with no allocation anywhere in them.
+
+enum Fault {
+    Odd(int);
+    Zero;
+}
+
+Result<int, Fault> halve(int n) {
+    if (n == 0) {
+        return Result<int, Fault>.Err(Fault.Zero);
+    }
+    if (n % 2 != 0) {
+        return Result<int, Fault>.Err(Fault.Odd(n));
+    }
+    return Result<int, Fault>.Ok(n / 2);
+}
+
+Result<int, Fault> quarter(int n) {
+    return Result<int, Fault>.Ok(halve(halve(n)?)?);
+}
+
+Option<int> maybe(int n) {
+    if (n > 0) {
+        return Option<int>.Some(n);
+    }
+    return Option<int>.None;
+}
+
+Option<int> twice(int n) {
+    return Option<int>.Some(maybe(n)? * 2);
+}
+
+str show(Result<int, Fault> r) {
+    match (r) {
+        case Ok(int v): {
+            return "ok " + str(v);
+        }
+        case Err(Fault f): {
+            match (f) {
+                case Odd(int n): {
+                    return "odd " + str(n);
+                }
+                case Zero: {
+                    return "zero";
+                }
+            }
+        }
+    }
+}
+
+print(show(quarter(8)));
+print(show(quarter(6)));
+print(show(quarter(5)));
+print(show(quarter(0)));
+print(twice(4).or(-1));
+print(twice(-4).or(-1));

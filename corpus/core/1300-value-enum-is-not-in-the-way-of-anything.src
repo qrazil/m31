@@ -1,0 +1,70 @@
+// A program that mixes the two representations everywhere: a value enum in a
+// struct that also holds references, a boxed enum beside it, the same value
+// enum returned from several layers, and a builtin's `Option<int>` running
+// through all of it. Every object is still freed.
+
+enum Tag {
+    Plain;
+    Level(int);
+}
+
+enum Note {
+    Blank;
+    Said(str, Tag);
+}
+
+type Entry {
+    str name;
+    Tag tag;
+    List<int> marks;
+}
+
+int level(Tag t) {
+    match (t) {
+        case Plain: {
+            return 0;
+        }
+        case Level(int n): {
+            return n;
+        }
+    }
+}
+
+str show(Note n) {
+    match (n) {
+        case Blank: {
+            return "blank";
+        }
+        case Said(str s, Tag t): {
+            return s + "@" + str(level(t));
+        }
+    }
+}
+
+Tag bump(Tag t) {
+    match (t) {
+        case Plain: {
+            return Tag.Level(1);
+        }
+        case Level(int n): {
+            return Tag.Level(n + 1);
+        }
+    }
+}
+
+List<Entry> es = [];
+es.push(Entry("a", Tag.Plain, [1, 2]));
+es.push(Entry("b", Tag.Level(4), [3]));
+int total = 0;
+for (Entry e in es) {
+    total = total + level(e.tag) + e.marks.size();
+}
+print(total);
+es[0].tag = bump(bump(es[0].tag));
+print(level(es[0].tag));
+print(show(Note.Said("hey", es[1].tag)));
+print(show(Note.Blank));
+// A builtin that manufactures an Option<int>, in the same program.
+print("hello".index_of("ll").or(-1));
+print("hello".index_of("zz").or(-1));
+print("42".parse_int().or(0));

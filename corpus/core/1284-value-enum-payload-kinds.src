@@ -1,0 +1,46 @@
+// Every payload shape the rule admits, in one enum: an int, a float, a bool,
+// a distinct type over a scalar, and several at once.
+//
+// A float rides as a `double` member rather than a machine-word slot, so it
+// never goes through the bit-pattern conversion a boxed enum's payload needs.
+
+distinct int Price;
+
+enum Cell {
+    Blank;
+    Whole(int);
+    Real(float);
+    Flag(bool);
+    Tagged(Price);
+    Three(int, float, bool);
+}
+
+str show(Cell c) {
+    match (c) {
+        case Blank: {
+            return "blank";
+        }
+        case Whole(int n): {
+            return "whole " + str(n);
+        }
+        case Real(float f): {
+            return "real " + str(f);
+        }
+        case Flag(bool b): {
+            return "flag " + str(b);
+        }
+        case Tagged(Price p): {
+            return "price " + str(int(p));
+        }
+        case Three(int n, float f, bool b): {
+            return "three " + str(n) + " " + str(f) + " " + str(b);
+        }
+    }
+}
+
+print(show(Cell.Blank));
+print(show(Cell.Whole(-3)));
+print(show(Cell.Real(0.125)));
+print(show(Cell.Flag(false)));
+print(show(Cell.Tagged(Price(99))));
+print(show(Cell.Three(1, 2.5, true)));

@@ -1,0 +1,65 @@
+// An enum that reaches itself through a payload cannot be a value: the
+// struct would contain itself and have no size. The qualifying set is a
+// least fixpoint -- it starts empty and only adds an enum whose payloads
+// already qualify -- so a recursive one is never added, and a mutually
+// recursive pair is not either.
+
+enum Chain {
+    End;
+    Link(int, Chain);
+}
+
+enum Even {
+    NoneE;
+    SomeE(Odd);
+}
+
+enum Odd {
+    NoneO;
+    SomeO(Even);
+}
+
+int length(Chain c) {
+    match (c) {
+        case End: {
+            return 0;
+        }
+        case Link(int v, Chain rest): {
+            return 1 + length(rest);
+        }
+    }
+}
+
+int sum(Chain c) {
+    match (c) {
+        case End: {
+            return 0;
+        }
+        case Link(int v, Chain rest): {
+            return v + sum(rest);
+        }
+    }
+}
+
+int depth(Even e) {
+    match (e) {
+        case NoneE: {
+            return 0;
+        }
+        case SomeE(Odd o): {
+            match (o) {
+                case NoneO: {
+                    return 1;
+                }
+                case SomeO(Even inner): {
+                    return 2 + depth(inner);
+                }
+            }
+        }
+    }
+}
+
+Chain c = Chain.Link(1, Chain.Link(2, Chain.Link(3, Chain.End)));
+print(length(c));
+print(sum(c));
+print(depth(Even.SomeE(Odd.SomeO(Even.SomeE(Odd.NoneO)))));

@@ -50,7 +50,9 @@ impl Lowerer {
     /// and `later` says something evaluated after it may run user code. See
     /// the module comment for the rule.
     pub(super) fn hold(&mut self, e: &Expr, v: Val, later: bool) -> Val {
-        if !later || v.owned || v.v.is_none() || !self.is_ref(v.ty) || self.stable(e) {
+        // `is_managed`, not `is_ref`: a value enum is a copy, so there is no
+        // place for it to be borrowed FROM and nothing to hold.
+        if !later || v.owned || v.v.is_none() || !self.is_managed(v.ty) || self.stable(e) {
             return v;
         }
         let val = v.val();

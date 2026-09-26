@@ -1,0 +1,47 @@
+// A `Result<int, Error>` returned once per iteration of a loop that runs a
+// million times. Before value enums this allocated and freed a million
+// objects; now it allocates none, and the answer is the same.
+//
+// The error type is itself a value enum -- all its payloads are scalars --
+// so the Result nests one union inside another.
+
+enum Error {
+    TooBig(int);
+    Negative;
+}
+
+Result<int, Error> checked(int n) {
+    if (n < 0) {
+        return Result<int, Error>.Err(Error.Negative);
+    }
+    if (n > 900000) {
+        return Result<int, Error>.Err(Error.TooBig(n));
+    }
+    return Result<int, Error>.Ok(n * 2);
+}
+
+int sum = 0;
+int errs = 0;
+int big = 0;
+int i = -1;
+while (i < 1000000) {
+    match (checked(i)) {
+        case Ok(int v): {
+            sum = sum + v;
+        }
+        case Err(Error e): {
+            match (e) {
+                case TooBig(int n): {
+                    big = big + 1;
+                }
+                case Negative: {
+                    errs = errs + 1;
+                }
+            }
+        }
+    }
+    i = i + 1;
+}
+print(sum);
+print(errs);
+print(big);

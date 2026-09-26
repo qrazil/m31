@@ -1,0 +1,73 @@
+// An enum with no payload at all qualifies: it is a tag and nothing else,
+// eight bytes, and it never allocates. `apps/markdown/FRICTION.md` 1.5 is
+// exactly this type -- a three-variant tag the program wanted to compare --
+// and it is now free to pass around.
+
+enum Kind {
+    Text;
+    Raw;
+    Delim;
+}
+
+bool Kind.eq(Kind other) {
+    match (this) {
+        case Text: {
+            match (other) {
+                case Text: {
+                    return true;
+                }
+                case Raw: {
+                    return false;
+                }
+                case Delim: {
+                    return false;
+                }
+            }
+        }
+        case Raw: {
+            match (other) {
+                case Text: {
+                    return false;
+                }
+                case Raw: {
+                    return true;
+                }
+                case Delim: {
+                    return false;
+                }
+            }
+        }
+        case Delim: {
+            match (other) {
+                case Text: {
+                    return false;
+                }
+                case Raw: {
+                    return false;
+                }
+                case Delim: {
+                    return true;
+                }
+            }
+        }
+    }
+}
+
+int rank(Kind k) {
+    match (k) {
+        case Text: {
+            return 0;
+        }
+        case Raw: {
+            return 1;
+        }
+        case Delim: {
+            return 2;
+        }
+    }
+}
+
+print(rank(Kind.Text));
+print(rank(Kind.Delim));
+print(Kind.Raw == Kind.Raw);
+print(Kind.Raw == Kind.Text);

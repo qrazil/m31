@@ -34,10 +34,23 @@ static long __rc_live = 0;
 void rt_out_line(const char *p, size_t n);
 void rt_out_flush(void);
 
+/* Every allocation ever made, not just the ones still live -- the number a
+ * measurement wants when the question is "how much did this loop allocate".
+ * Reported only under -DRC_COUNT_ALLOCS, on a line of its own, so that the
+ * corpus's `__rc_live=0` output is byte-for-byte what it always was. Counted
+ * unconditionally under RC_DEBUG because the increment is already there. */
+static long __rc_allocs = 0;
+
 static void __rc_report(void) {
     long n = __atomic_load_n(&__rc_live, __ATOMIC_RELAXED);
     char buf[48];
-    int k = snprintf(buf, sizeof buf, "__rc_live=%ld", n);
+    int k;
+#ifdef RC_COUNT_ALLOCS
+    k = snprintf(buf, sizeof buf, "__rc_allocs=%ld",
+                 __atomic_load_n(&__rc_allocs, __ATOMIC_RELAXED));
+    rt_out_line(buf, (size_t)k);
+#endif
+    k = snprintf(buf, sizeof buf, "__rc_live=%ld", n);
     rt_out_line(buf, (size_t)k);
     rt_out_flush();
 }
@@ -47,7 +60,11 @@ static void __rc_init(void) {
     atexit(__rc_report);
 }
 
-#define RC_TRACK_ALLOC() __atomic_fetch_add(&__rc_live, 1, __ATOMIC_RELAXED)
+#define RC_TRACK_ALLOC()                                            \
+    do {                                                            \
+        __atomic_fetch_add(&__rc_live, 1, __ATOMIC_RELAXED);        \
+        __atomic_fetch_add(&__rc_allocs, 1, __ATOMIC_RELAXED);      \
+    } while (0)
 #define RC_TRACK_FREE()  __atomic_fetch_sub(&__rc_live, 1, __ATOMIC_RELAXED)
 
 #define RC_ASSERT(cond, msg)                                    \

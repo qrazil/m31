@@ -1,0 +1,27 @@
+// A value crossing a thread boundary is checked for uniqueness, which walks
+// an object graph -- so an enum handed to `spawn` goes back to being an
+// object and the move rules apply to it exactly as they did before. The
+// program below is the one that would have been written anyway.
+
+enum Job {
+    Idle;
+    Work(int);
+}
+
+void run(Job j, Chan<int> out) {
+    match (j) {
+        case Idle: {
+            send(out, 0);
+        }
+        case Work(int n): {
+            send(out, n * n);
+        }
+    }
+}
+
+Chan<int> out = Chan<int>(2);
+spawn run(Job.Work(6), out);
+spawn run(Job.Idle, out);
+int a = recv(out);
+int b = recv(out);
+print(a + b);

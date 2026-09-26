@@ -321,8 +321,16 @@ impl Lowerer {
     /// place when nothing else holds it and freezes a deep copy when
     /// something does. Nothing is refused: `const T a = b;` always compiles,
     /// and costs a copy exactly when `b` is shared.
+    ///
+    /// A **value enum** is in the same position as a `str` and for a stronger
+    /// reason: the binding is already a copy nothing else can reach, its
+    /// payloads are scalars so nothing under it is mutable either, and an
+    /// enum's payload cannot be assigned in any case -- you build another
+    /// enum. So there is nothing for `rt_snapshot` to freeze and nothing it
+    /// could find to trap on, and the freeze is skipped rather than demoting
+    /// the type. See docs/value-enums.md §4.
     pub(super) fn const_snapshots(&self, ty: Ty) -> bool {
-        self.is_ref(ty) && self.underlying(ty) != Ty::Str
+        self.is_managed(ty) && self.underlying(ty) != Ty::Str
     }
 
     /// Refuse a `const` local of a type whose values can own a resource.
