@@ -129,10 +129,8 @@ pub float sqrt(float x) {
         k = k - 1;
     }
     float y = 0.41731 + 0.59016 * m;
-    int i = 0;
-    while (i < 5) {
+    for (int i in 0 .. 5) {
         y = 0.5 * (y + m / y);
-        i = i + 1;
     }
     y = settle_sqrt(m, y);
     // Undo the scaling: sqrt(m * 4^k) = sqrt(m) * 2^k, exact because the
@@ -158,8 +156,7 @@ pub float sqrt(float x) {
 // root of a double never lands on a midpoint, so there is no tie to break.
 float settle_sqrt(float m, float y) {
     float u = 1.1102230246251565e-16;
-    int guard = 0;
-    while (guard < 4) {
+    for (int guard in 0 .. 4) {
         float r = residual(m, y);
         if (r > y * u) {
             y = y + u;
@@ -168,7 +165,6 @@ float settle_sqrt(float m, float y) {
         } else {
             return y;
         }
-        guard = guard + 1;
     }
     return y;
 }

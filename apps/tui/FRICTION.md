@@ -8,6 +8,17 @@ than the languages this is measured against.
 
 Ordered by how much it cost, not by how annoying it was.
 
+> **Three of the five changes §21 asks for have since been made**, and this
+> file has not been rewritten to hide that it asked for them — the source has
+> been changed to use them, so the diff against this log is the evidence.
+> The range `for` of §4 (§21.3), so `Buffer.fill` — the loop this report hung
+> in — no longer has an increment for a `continue` to lose; a `case` arm that
+> may omit its bindings (§6, §21.5), which takes `tuigeom.Constraint`'s four
+> methods down by a third; and a formatter that keeps the author's
+> parentheses, so §18's `(off & BOLD) != 0` stays as written. A character
+> literal is in as well. §1, §2 and the standard library asks of §21.4 are
+> untouched. `docs/reference.md` §1.5, §5.5, §5.6 and §6.1 have the rules.
+
 ---
 
 ## 1. There is no way to depend on a library

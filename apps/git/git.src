@@ -160,10 +160,10 @@ int cat_file(str gd, args.Parsed c) {
                 case Blob: {
                     write(o.raw);
                 }
-                case Commit(object.Commit ignored): {
+                case Commit: {
                     write(o.raw);
                 }
-                case Tag(object.Tag ignored): {
+                case Tag: {
                     write(o.raw);
                 }
             }
@@ -189,8 +189,7 @@ int ls_tree(str gd, str spec) {
     }
     // `git ls-tree` takes a tree-ish, so a commit means its tree. A tag is
     // peeled to a commit first, and then the same rule applies.
-    int hops = 0;
-    while (hops < 12) {
+    for (int hops in 0 .. 12) {
         match (object.read(gd, id)) {
             case Ok(object.Object o): {
                 match (o.body) {
@@ -215,7 +214,6 @@ int ls_tree(str gd, str spec) {
                 return 1;
             }
         }
-        hops = hops + 1;
     }
     io.eprint("not a tree object: " + spec);
     return 1;
@@ -319,11 +317,11 @@ int log(str gd, args.Parsed c) {
                         io.eprint("not a commit: " + id);
                         return 1;
                     }
-                    case Tree(List<object.Entry> ignored): {
+                    case Tree: {
                         io.eprint("not a commit: " + id);
                         return 1;
                     }
-                    case Tag(object.Tag ignored): {
+                    case Tag: {
                         io.eprint("not a commit: " + id);
                         return 1;
                     }
@@ -371,15 +369,15 @@ int commit_date(str gd, str id) {
                 case Blob: {
                     return 0;
                 }
-                case Tree(List<object.Entry> ignored): {
+                case Tree: {
                     return 0;
                 }
-                case Tag(object.Tag ignored): {
+                case Tag: {
                     return 0;
                 }
             }
         }
-        case Err(object.Error e): {
+        case Err: {
             return 0;
         }
     }
@@ -395,7 +393,7 @@ bytes tree_text(List<object.Entry> es) {
     for (object.Entry e in es) {
         b.extend((e.mode_text() + " " + e.type_word() + " " + e.id + "\t").to_bytes());
         b.extend(quoted(e.name));
-        b.push(10);
+        b.push('\n');
     }
     return b;
 }
@@ -412,7 +410,7 @@ bytes tree_text(List<object.Entry> es) {
 bytes quoted(bytes name) {
     bool need = false;
     for (int c in name) {
-        if (c < 32 || c == 34 || c == 92 || c >= 127) {
+        if (c < ' ' || c == '"' || c == '\\' || c >= 127) {
             need = true;
         }
     }
@@ -420,26 +418,26 @@ bytes quoted(bytes name) {
         return name;
     }
     bytes b = [];
-    b.push(34);
+    b.push('"');
     for (int c in name) {
         if (c == 7) {
             escape(b, 97);
         } else if (c == 8) {
             escape(b, 98);
-        } else if (c == 9) {
+        } else if (c == '\t') {
             escape(b, 116);
-        } else if (c == 10) {
+        } else if (c == '\n') {
             escape(b, 110);
         } else if (c == 11) {
             escape(b, 118);
         } else if (c == 12) {
             escape(b, 102);
-        } else if (c == 13) {
+        } else if (c == '\r') {
             escape(b, 114);
-        } else if (c == 34 || c == 92) {
+        } else if (c == '"' || c == '\\') {
             escape(b, c);
-        } else if (c < 32 || c >= 127) {
-            b.push(92);
+        } else if (c < ' ' || c >= 127) {
+            b.push('\\');
             b.push(48 + (c >> 6 & 7));
             b.push(48 + (c >> 3 & 7));
             b.push(48 + (c & 7));
@@ -447,12 +445,12 @@ bytes quoted(bytes name) {
             b.push(c);
         }
     }
-    b.push(34);
+    b.push('"');
     return b;
 }
 
 void escape(bytes b, int c) {
-    b.push(92);
+    b.push('\\');
     b.push(c);
 }
 
@@ -484,12 +482,12 @@ bytes commit_text(str id, object.Commit c) {
         n = n - 1;
     }
     b.truncate(n);
-    b.push(10);
+    b.push('\n');
     return b;
 }
 
 bool blank_octet(int c) {
-    return c == 32 || c == 9 || c == 10 || c == 13 || c == 11 || c == 12;
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == 11 || c == 12;
 }
 
 const Array<str> WEEKDAY = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -545,17 +543,15 @@ bytes indented(bytes message) {
     bool first = true;
     while (at < n) {
         int e = at;
-        while (e < n && message[e] != 10) {
+        while (e < n && message[e] != '\n') {
             e = e + 1;
         }
         int end = e;
         bool empty = true;
-        int k = at;
-        while (k < e) {
+        for (int k in at .. e) {
             if (!blank_octet(message[k])) {
                 empty = false;
             }
-            k = k + 1;
         }
         if (empty) {
             end = at;
@@ -567,24 +563,20 @@ bytes indented(bytes message) {
         first = false;
         b.extend("    ".to_bytes());
         int col = 0;
-        int i = at;
-        while (i < end) {
+        for (int i in at .. end) {
             int c = message[i];
-            if (c == 9) {
+            if (c == '\t') {
                 int width = 8 - col % 8;
-                int s = 0;
-                while (s < width) {
-                    b.push(32);
-                    s = s + 1;
+                for (int s in 0 .. width) {
+                    b.push(' ');
                 }
                 col = col + width;
             } else {
                 b.push(c);
                 col = col + 1;
             }
-            i = i + 1;
         }
-        b.push(10);
+        b.push('\n');
         at = e + 1;
     }
     return b;
@@ -605,9 +597,9 @@ void write(bytes b) {
     // alone (`lib/io.src`, `File.release`).
     io.File out = io.stdout();
     match (out.write(b)) {
-        case Ok(int n): {
+        case Ok: {
         }
-        case Err(io.Error e): {
+        case Err: {
             // Standard output that will take no more is the end of the
             // program, not something to report through it -- a closed pipe is
             // the ordinary case, and git exits quietly on one too.

@@ -166,6 +166,172 @@ fn string_literals_keep_multibyte_utf8_intact() {
 }
 
 #[test]
+fn a_character_literal_is_the_code_point_as_an_int() {
+    // No new token and no new type: `'*'` lexes to the int 42, exactly as
+    // `42` does, and `'é'` to the scalar value rather than to a UTF-8 byte.
+    assert_eq!(toks("'*'"), vec![Tok::Int(42), Tok::Eof]);
+    assert_eq!(toks("'0'"), vec![Tok::Int(48), Tok::Eof]);
+    assert_eq!(toks("'é'"), vec![Tok::Int(233), Tok::Eof]);
+    assert_eq!(toks("'中'"), vec![Tok::Int(20013), Tok::Eof]);
+    assert_eq!(toks(r"'\n'"), vec![Tok::Int(10), Tok::Eof]);
+    assert_eq!(toks(r"'\0'"), vec![Tok::Int(0), Tok::Eof]);
+    assert_eq!(toks(r"'\\'"), vec![Tok::Int(92), Tok::Eof]);
+    assert_eq!(toks(r"'\''"), vec![Tok::Int(39), Tok::Eof]);
+    assert_eq!(toks(r"'\u{1F600}'"), vec![Tok::Int(0x1F600), Tok::Eof]);
+    // `"` needs no escape inside `'`, and `'` needs none inside `"`.
+    assert_eq!(toks("'\"'"), vec![Tok::Int(34), Tok::Eof]);
+    assert_eq!(toks("\"it's\""), vec![Tok::Str("it's".into()), Tok::Eof]);
+}
+
+#[test]
+fn a_character_literal_is_exactly_one_character() {
+    // Each literal escapes its own quote and no other, so there is one
+    // spelling for each -- which is what lets the formatter keep the
+    // author's.
+    for (src, want) in [
+        ("int c = '';", "empty character literal"),
+        ("int c = 'ab';", "exactly one character"),
+        ("int c = '\\\"';", "unknown escape"),
+        ("str s = \"\\'\";", "unknown escape"),
+        ("int c = '\\xff';", "`\\x` stops at 7f"),
+        ("int c = 'a;", "unterminated character literal"),
+    ] {
+        let got = err(src);
+        assert!(got.contains(want), "{src}: {got}");
+    }
+}
+
+#[test]
+fn formatting_keeps_every_char_spelling() {
+    // A character literal is an int, so printing the value would put back
+    // the magic number the literal exists to remove.
+    let src = "int a = '*';\nint b = '\\n';\nint c = 'é';\nint d = '\\u{e9}';\n";
+    let once = crate::reformat(src, "t").expect("formats");
+    assert_eq!(once, src);
+}
+
+#[test]
+fn the_range_for_advances_before_the_body() {
+    // The increment must be at the TOP of the body, or `continue` would
+    // skip it and the loop would not terminate. That is the whole reason
+    // the construct exists, so it is checked in the IR and not only by a
+    // program that would hang if it were wrong.
+    let out = ir("for (int i in 0 .. 3) {\n    continue;\n}\n");
+    let body = out
+        .split("brif")
+        .nth(1)
+        .expect("expected a loop header with a conditional branch");
+    let add = body.find("iadd").expect("expected the increment");
+    let jump = body.find("jump").expect("expected the back edge");
+    assert!(
+        add < jump,
+        "the increment must precede the back edge:\n{out}"
+    );
+}
+
+#[test]
+fn a_range_is_loop_syntax_and_the_counter_is_the_loops() {
+    for (src, want) in [
+        ("int a = 0 .. 3;", "may only be written in a `for` header"),
+        ("print((0 .. 3));", "may only be written in a `for` header"),
+        (
+            "for (str s in 0 .. 3) { print(s); }",
+            "a range counts in `int`",
+        ),
+        (
+            "for (int i in \"a\" .. 3) { print(i); }",
+            "expected int, found str",
+        ),
+        (
+            "for (int i in 0 .. 3) { i = 9; }",
+            "is the loop's variable and cannot be assigned",
+        ),
+        (
+            "List<int> xs = [1]; for (int v in xs) { v = 9; }",
+            "is the loop's variable and cannot be assigned",
+        ),
+    ] {
+        let got = err(src);
+        assert!(got.contains(want), "{src}: {got}");
+    }
+}
+
+#[test]
+fn the_absent_loop_and_assignment_forms_are_named() {
+    // §9 exists so that an absence is a decision. A decision should reach
+    // the person who trips over it, and these are the two things everyone
+    // writes in their first hour here.
+    for (src, want) in [
+        (
+            "for (int i = 0; i < 3; i = i + 1) { print(i); }",
+            "there is no three-clause `for`",
+        ),
+        ("int n = 1;\nn += 1;", "there is no `+=`"),
+        ("int n = 1;\nn -= 1;", "there is no `-=`"),
+        ("int n = 1;\nn *= 2;", "there is no `*=`"),
+        ("int n = 1;\nn /= 2;", "there is no `/=`"),
+        ("int n = 1;\nn %= 2;", "there is no `%=`"),
+        ("int n = 1;\nn &= 2;", "there is no `&=`"),
+        ("int n = 1;\nn |= 2;", "there is no `|=`"),
+        ("int n = 1;\nn ^= 2;", "there is no `^=`"),
+        ("int n = 1;\nn <<= 2;", "there is no `<<=`"),
+        ("int n = 1;\nn >>= 2;", "there is no `>>=`"),
+    ] {
+        let got = err(src);
+        assert!(got.contains(want), "{src}: {got}");
+    }
+}
+
+#[test]
+fn the_formatter_keeps_the_parentheses_the_author_wrote() {
+    // They do not survive into the AST, so the formatter is told where they
+    // were -- the same bargain as a literal's spelling.
+    let src = concat!(
+        "int a = 1;\nint b = 2;\nint c = 3;\nint d = 4;\n",
+        "print((a > 0 && b > 0) || (c > 0 && d > 0));\n",
+        "print(d ^ (b & (c ^ d)));\n",
+        "print((a & b) != 0);\n",
+        "print((a));\n",
+        "print(a + b * c);\n",
+    );
+    let once = crate::reformat(src, "t").expect("formats");
+    assert_eq!(once, src);
+    // And a group around a group is one group, so it is still a fixed point.
+    let twice = crate::reformat("print(((a)));\n", "t").expect("formats");
+    assert_eq!(twice, "print((a));\n");
+    assert_eq!(
+        crate::reformat(&twice, "t").expect("formats again"),
+        twice,
+        "collapsing `((a))` must reach a fixed point"
+    );
+}
+
+#[test]
+fn a_case_binds_every_value_or_none() {
+    let decl = "enum E { A; B(int, str); }\n";
+    // None: the spelling a payload-less variant already uses.
+    let out = ir(&format!(
+        "{decl}int f(E e) {{\n    match (e) {{\n        case A: {{ return 0; }}\n        \
+         case B: {{ return 1; }}\n    }}\n}}\nprint(f(E.B(1, \"x\")));\n"
+    ));
+    // The arm reads the tag and nothing else: no payload is projected.
+    assert!(out.contains(" = tag "), "{out}");
+    assert!(!out.contains("payload"), "{out}");
+    // Some of them is still refused, and the message offers the other rule.
+    let got = err(&format!(
+        "{decl}int f(E e) {{\n    match (e) {{\n        case A: {{ return 0; }}\n        \
+         case B(int n): {{ return n; }}\n    }}\n}}\nprint(f(E.A));\n"
+    ));
+    assert!(got.contains("write `case B:` to bind none"), "{got}");
+    // And it is NOT a `default`: every variant still needs its own case.
+    let got = err(&format!(
+        "{decl}int f(E e) {{\n    match (e) {{\n        case A: {{ return 0; }}\n    }}\n}}\n\
+         print(f(E.A));\n"
+    ));
+    assert!(got.contains("missing B"), "{got}");
+}
+
+#[test]
 fn string_escapes_are_decoded() {
     assert_eq!(
         toks(r#""a\tb\nc\\d\"e""#),

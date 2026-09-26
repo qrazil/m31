@@ -244,10 +244,8 @@ pub void Table.render(tuibuf.Buffer buf, tuigeom.Rect area) {
     List<tuigeom.Constraint> cs = widths;
     if (cs.size() == 0) {
         cs = [];
-        int c = 0;
-        while (c < ncol) {
+        for (int c in 0 .. ncol) {
             cs.push(tuigeom.Constraint.Fill(1));
-            c = c + 1;
         }
     }
     List<tuigeom.Rect> cells = tuigeom.Layout(tuigeom.Direction.Horizontal, cs, spacing: col_spacing).split(tuigeom.Rect(grid.x, grid.y, grid.w, 1));
@@ -261,8 +259,7 @@ pub void Table.render(tuibuf.Buffer buf, tuigeom.Rect area) {
         return;
     }
     offset = scrolled(h);
-    int i = 0;
-    while (i < h) {
+    for (int i in 0 .. h) {
         int k = offset + i;
         if (k >= rows.size()) {
             return;
@@ -275,7 +272,6 @@ pub void Table.render(tuibuf.Buffer buf, tuigeom.Rect area) {
         }
         draw_row(buf, cells, rows[k], y, st);
         y = y + 1;
-        i = i + 1;
     }
 }
 

@@ -1,0 +1,87 @@
+// A case binds every value its variant carries, or none of them. `case Tag:`
+// -- the spelling a payload-less variant already uses -- means "this arm does
+// not read the payload".
+//
+// It is NOT a `default`: every variant still needs its own case, so adding
+// one is still a compile error at every `match` that has to learn about it.
+// What goes away is spelling out a type in order to throw its value away.
+
+enum Error {
+    NotFound(str);
+    Ambiguous(str, int);
+    Io(str, int);
+    Bad(List<str>);
+    Empty;
+}
+
+// The shape this is for: one question about one value, and nine tenths of the
+// arms have nothing to say. Before, each of these named a binding it did not
+// use -- and had to write out `List<str>` to discard it.
+int ambiguity(Error e) {
+    match (e) {
+        case NotFound: {
+            return 0;
+        }
+        case Ambiguous(str prefix, int n): {
+            return n;
+        }
+        case Io: {
+            return 0;
+        }
+        case Bad: {
+            return 0;
+        }
+        case Empty: {
+            return 0;
+        }
+    }
+}
+
+// A payload that is a reference type is still released: nothing here holds
+// it, and the corpus checks __rc_live.
+str kind(Error e) {
+    match (e) {
+        case NotFound: {
+            return "not found";
+        }
+        case Ambiguous: {
+            return "ambiguous";
+        }
+        case Io: {
+            return "io";
+        }
+        case Bad: {
+            return "bad";
+        }
+        case Empty: {
+            return "empty";
+        }
+    }
+}
+
+print(ambiguity(Error.Ambiguous("ab", 3)));
+print(ambiguity(Error.Io("f", 2)));
+print(ambiguity(Error.Bad(["x", "y"])));
+print(ambiguity(Error.Empty));
+print(kind(Error.NotFound("z")));
+print(kind(Error.Bad(["q"])));
+print(kind(Error.Empty));
+
+// It works on the prelude's enums too, and beside arms that do bind.
+Option<str> some = Option<str>.Some("here");
+match (some) {
+    case Some: {
+        print("present");
+    }
+    case None: {
+        print("absent");
+    }
+}
+match (Result<int, str>.Err("why")) {
+    case Ok: {
+        print("ok");
+    }
+    case Err(str why): {
+        print(why);
+    }
+}

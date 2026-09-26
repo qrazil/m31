@@ -1,0 +1,5 @@
+// `>>=` is the awkward one: `>>` is never a single token (§1.6), so the
+// lexer makes this `>` and `>=` and the message still has to say `>>=`.
+int n = 8;
+n >>= 2;
+print(n);

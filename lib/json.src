@@ -169,12 +169,12 @@ Result<Value, Error> value(Parser p) {
         if (want_key) {
             want_key = false;
             skip_ws(p);
-            if (p.at >= n || text.byte_at(p.at) != 34) {
+            if (p.at >= n || text.byte_at(p.at) != '"') {
                 return fail("expected a string key", p.at);
             }
             str key = string(p)?;
             skip_ws(p);
-            if (p.at >= n || text.byte_at(p.at) != 58) {
+            if (p.at >= n || text.byte_at(p.at) != ':') {
                 return fail("expected ':'", p.at);
             }
             p.at = p.at + 1;
@@ -186,14 +186,14 @@ Result<Value, Error> value(Parser p) {
         }
         int c = text.byte_at(p.at);
         Value v = Value.Null;
-        if (c == 123 || c == 91) {
+        if (c == '{' || c == '[') {
             int open = p.at;
             p.at = p.at + 1;
             skip_ws(p);
-            if (c == 123 && p.at < n && text.byte_at(p.at) == 125) {
+            if (c == '{' && p.at < n && text.byte_at(p.at) == '}') {
                 p.at = p.at + 1;
                 v = Value.Object({});
-            } else if (c == 91 && p.at < n && text.byte_at(p.at) == 93) {
+            } else if (c == '[' && p.at < n && text.byte_at(p.at) == ']') {
                 p.at = p.at + 1;
                 v = Value.Array([]);
             } else {
@@ -202,13 +202,13 @@ Result<Value, Error> value(Parser p) {
                 if (stack.size() >= max_depth()) {
                     return fail("maximum nesting depth (" + max_depth().to_str() + ") exceeded", open);
                 }
-                stack.push(Frame(c == 123));
-                want_key = c == 123;
+                stack.push(Frame(c == '{'));
+                want_key = c == '{';
                 continue;
             }
-        } else if (c == 34) {
+        } else if (c == '"') {
             v = Value.Str(string(p)?);
-        } else if (c == 45 || is_digit(c)) {
+        } else if (c == '-' || is_digit(c)) {
             v = number(p)?;
         } else if (word(p, "true")) {
             v = Value.Bool(true);
@@ -239,15 +239,15 @@ Result<Value, Error> value(Parser p) {
                 return fail("unterminated array", p.at);
             }
             int d = text.byte_at(p.at);
-            if (d == 44) {
+            if (d == ',') {
                 p.at = p.at + 1;
                 want_key = top.object;
                 closing = false;
-            } else if (top.object && d == 125) {
+            } else if (top.object && d == '}') {
                 p.at = p.at + 1;
                 stack.pop();
                 v = Value.Object(top.members);
-            } else if (!top.object && d == 93) {
+            } else if (!top.object && d == ']') {
                 p.at = p.at + 1;
                 stack.pop();
                 v = Value.Array(top.items);
@@ -274,7 +274,7 @@ Result<str, Error> string(Parser p) {
             // an ASCII byte inside a character, so the run ends on a
             // character boundary and the substr below cannot cut one. The
             // text needs no UTF-8 check: it is a `str`, so it is valid.
-            if (c == 34 || c == 92 || c < 32) {
+            if (c == '"' || c == '\\' || c < ' ') {
                 break;
             }
             p.at = p.at + 1;
@@ -286,11 +286,11 @@ Result<str, Error> string(Parser p) {
             return Result<str, Error>.Err(Error.Syntax("unterminated string", p.at));
         }
         int c = text.byte_at(p.at);
-        if (c == 34) {
+        if (c == '"') {
             p.at = p.at + 1;
             return Result<str, Error>.Ok(parts.join(""));
         }
-        if (c == 92) {
+        if (c == '\\') {
             parts.push(escape(p)?);
         } else {
             return Result<str, Error>.Err(Error.Syntax("invalid control character in string", p.at));
@@ -306,7 +306,7 @@ Result<str, Error> escape(Parser p) {
         return Result<str, Error>.Err(Error.Syntax("unterminated escape", p.at));
     }
     int c = text.byte_at(p.at);
-    if (c == 117) {
+    if (c == 'u') {
         int cp = unicode_escape(p)?;
         // Never a surrogate and never past U+10FFFF -- `unicode_escape` has
         // refused the one and cannot build the other -- so from_chars, which
@@ -314,28 +314,28 @@ Result<str, Error> escape(Parser p) {
         return Result<str, Error>.Ok(str.from_chars([cp]));
     }
     p.at = p.at + 1;
-    if (c == 34) {
+    if (c == '"') {
         return Result<str, Error>.Ok("\"");
     }
-    if (c == 92) {
+    if (c == '\\') {
         return Result<str, Error>.Ok("\\");
     }
-    if (c == 47) {
+    if (c == '/') {
         return Result<str, Error>.Ok("/");
     }
-    if (c == 110) {
+    if (c == 'n') {
         return Result<str, Error>.Ok("\n");
     }
-    if (c == 114) {
+    if (c == 'r') {
         return Result<str, Error>.Ok("\r");
     }
-    if (c == 116) {
+    if (c == 't') {
         return Result<str, Error>.Ok("\t");
     }
-    if (c == 98) {
+    if (c == 'b') {
         return Result<str, Error>.Ok("\x08");
     }
-    if (c == 102) {
+    if (c == 'f') {
         return Result<str, Error>.Ok("\x0c");
     }
     p.at = p.at - 1;
@@ -350,7 +350,7 @@ Result<int, Error> unicode_escape(Parser p) {
     if (cp >= 55296 && cp <= 56319) {
         // A high surrogate (D800-DBFF) must be followed by a low one.
         int n = text.size();
-        if (p.at + 1 < n && text.byte_at(p.at) == 92 && text.byte_at(p.at + 1) == 117) {
+        if (p.at + 1 < n && text.byte_at(p.at) == '\\' && text.byte_at(p.at + 1) == 'u') {
             int save = p.at;
             p.at = p.at + 1;
             int low = hex4(p)?;
@@ -376,23 +376,19 @@ Result<int, Error> hex4(Parser p) {
     int n = text.size();
     p.at = p.at + 1;
     int end = p.at;
-    int k = 0;
-    while (k < 4) {
+    for (int k in 0 .. 4) {
         if (end >= n) {
             return Result<int, Error>.Err(Error.Syntax("incomplete \\u escape", p.at));
         }
         end = end + char_length(text, end);
-        k = k + 1;
     }
     int cp = 0;
-    int i = p.at;
-    while (i < end) {
+    for (int i in p.at .. end) {
         int d = hex_digit(text.byte_at(i));
         if (d < 0) {
             return Result<int, Error>.Err(Error.Syntax("invalid \\u escape '" + text.substr(p.at, end) + "'", p.at));
         }
         cp = cp * 16 + d;
-        i = i + 1;
     }
     p.at = end;
     return Result<int, Error>.Ok(cp);
@@ -405,13 +401,13 @@ Result<Value, Error> number(Parser p) {
     str text = p.text;
     int n = text.size();
     int start = p.at;
-    if (text.byte_at(p.at) == 45) {
+    if (text.byte_at(p.at) == '-') {
         p.at = p.at + 1;
     }
     if (p.at >= n || !is_digit(text.byte_at(p.at))) {
         return fail("invalid number", p.at);
     }
-    if (text.byte_at(p.at) == 48) {
+    if (text.byte_at(p.at) == '0') {
         p.at = p.at + 1;
         if (p.at < n && is_digit(text.byte_at(p.at))) {
             return fail("invalid number: a leading zero cannot be followed by more digits", p.at);
@@ -420,7 +416,7 @@ Result<Value, Error> number(Parser p) {
         skip_digits(p);
     }
     bool is_float = false;
-    if (p.at < n && text.byte_at(p.at) == 46) {
+    if (p.at < n && text.byte_at(p.at) == '.') {
         is_float = true;
         p.at = p.at + 1;
         if (p.at >= n || !is_digit(text.byte_at(p.at))) {
@@ -428,10 +424,10 @@ Result<Value, Error> number(Parser p) {
         }
         skip_digits(p);
     }
-    if (p.at < n && (text.byte_at(p.at) == 101 || text.byte_at(p.at) == 69)) {
+    if (p.at < n && (text.byte_at(p.at) == 'e' || text.byte_at(p.at) == 'E')) {
         is_float = true;
         p.at = p.at + 1;
-        if (p.at < n && (text.byte_at(p.at) == 43 || text.byte_at(p.at) == 45)) {
+        if (p.at < n && (text.byte_at(p.at) == '+' || text.byte_at(p.at) == '-')) {
             p.at = p.at + 1;
         }
         if (p.at >= n || !is_digit(text.byte_at(p.at))) {
@@ -449,7 +445,7 @@ Result<Value, Error> number(Parser p) {
                 // The literal is valid, so the only way it fails to parse is
                 // being too large for a double: an infinity, as in CPython.
                 float zero = 0.0;
-                if (text.byte_at(start) == 45) {
+                if (text.byte_at(start) == '-') {
                     return Result<Value, Error>.Ok(Value.Float(-1.0 / zero));
                 }
                 return Result<Value, Error>.Ok(Value.Float(1.0 / zero));
@@ -482,12 +478,10 @@ bool word(Parser p, str w) {
     if (end > p.text.size()) {
         return false;
     }
-    int i = 0;
-    while (i < w.size()) {
+    for (int i in 0 .. w.size()) {
         if (p.text.byte_at(p.at + i) != w.byte_at(i)) {
             return false;
         }
-        i = i + 1;
     }
     p.at = end;
     return true;
@@ -499,7 +493,7 @@ void skip_ws(Parser p) {
     int n = text.size();
     while (p.at < n) {
         int c = text.byte_at(p.at);
-        if (c != 32 && c != 9 && c != 10 && c != 13) {
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
             return;
         }
         p.at = p.at + 1;
@@ -633,20 +627,20 @@ void quote(List<str> out, str s) {
         // Non-ASCII is written through, a byte at a time: `s` is a `str`, so
         // it is valid UTF-8 already, and the bytes that need escaping are
         // all ASCII, so `run` and `i` only ever stop on a boundary.
-        if (c >= 32 && c != 34 && c != 92) {
+        if (c >= ' ' && c != '"' && c != '\\') {
             i = i + 1;
             continue;
         }
         out.push(s.substr(run, i));
-        if (c == 34) {
+        if (c == '"') {
             out.push("\\\"");
-        } else if (c == 92) {
+        } else if (c == '\\') {
             out.push("\\\\");
-        } else if (c == 10) {
+        } else if (c == '\n') {
             out.push("\\n");
-        } else if (c == 13) {
+        } else if (c == '\r') {
             out.push("\\r");
-        } else if (c == 9) {
+        } else if (c == '\t') {
             out.push("\\t");
         } else if (c == 8) {
             out.push("\\b");
@@ -689,18 +683,18 @@ str char_at(str s, int i) {
 }
 
 bool is_digit(int c) {
-    return c >= 48 && c <= 57;
+    return c >= '0' && c <= '9';
 }
 
 // The value of one hex digit, either case, or -1.
 int hex_digit(int c) {
-    if (c >= 48 && c <= 57) {
+    if (c >= '0' && c <= '9') {
         return c - 48;
     }
-    if (c >= 97 && c <= 102) {
+    if (c >= 'a' && c <= 'f') {
         return c - 87;
     }
-    if (c >= 65 && c <= 70) {
+    if (c >= 'A' && c <= 'F') {
         return c - 55;
     }
     return -1;

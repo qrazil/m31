@@ -1,0 +1,5 @@
+// A literal escapes its own quote and no other: `'"'` is already the quote
+// character, so `'\"'` would be a second spelling for it. The string form of
+// the same rule refuses `"\'"`.
+int c = '\"';
+print(c);

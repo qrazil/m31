@@ -80,11 +80,9 @@ print("");
 // library's work per frame, not the program's own bookkeeping.
 List<str> names = [];
 List<List<str>> rows = [];
-int n = 0;
-while (n < 60) {
+for (int n in 0 .. 60) {
     names.push("item-" + str(n) + ".txt");
     rows.push([str(n), "row " + str(n) + " of the table", str(n * 37 % 1000) + " B", "today"]);
-    n = n + 1;
 }
 tuibuf.Buffer front = tuibuf.Buffer.sized(W, H);
 tuibuf.Buffer back = tuibuf.Buffer.sized(W, H);

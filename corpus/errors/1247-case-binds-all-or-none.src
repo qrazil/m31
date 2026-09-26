@@ -1,0 +1,20 @@
+// A case binds every value its variant carries, or none of them. There is no
+// `_` and no way to name some and not the rest: an arm that wants the second
+// of two names both.
+enum Pair {
+    None;
+    Both(int, str);
+}
+
+int first(Pair p) {
+    match (p) {
+        case None: {
+            return 0;
+        }
+        case Both(int a): {
+            return a;
+        }
+    }
+}
+
+print(first(Pair.Both(1, "x")));

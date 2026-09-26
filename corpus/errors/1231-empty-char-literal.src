@@ -1,0 +1,5 @@
+// `''` has no code point to be. C gives a multi-character constant an
+// implementation-defined value and an empty one is a syntax error; here both
+// are one rule -- a character literal is exactly one character.
+int c = '';
+print(c);

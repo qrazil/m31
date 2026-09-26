@@ -67,13 +67,11 @@ pub const str ELLIPSIS = "\u{2026}";
 /// Is every byte of `s` printable ASCII?
 bool plain(str s) {
     int n = s.size();
-    int i = 0;
-    while (i < n) {
+    for (int i in 0 .. n) {
         int b = s.byte_at(i);
-        if (b < 32 || b > 126) {
+        if (b < ' ' || b > '~') {
             return false;
         }
-        i = i + 1;
     }
     return true;
 }
@@ -94,10 +92,8 @@ List<str> clusters(str s) {
     }
     List<str> out = [];
     int n = s.size();
-    int i = 0;
-    while (i < n) {
+    for (int i in 0 .. n) {
         out.push(s.substr(i, i + 1));
-        i = i + 1;
     }
     return out;
 }
@@ -176,10 +172,8 @@ int flush(List<str> out, List<str> cur, int cur_w, List<str> word, int word_w, i
         sp = 0;
     }
     if (w + sp + word_w <= cols) {
-        int i = 0;
-        while (i < sp) {
+        for (int i in 0 .. sp) {
             cur.push(" ");
-            i = i + 1;
         }
         for (str g in word) {
             cur.push(g);

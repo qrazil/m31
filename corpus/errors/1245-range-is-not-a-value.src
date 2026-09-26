@@ -1,0 +1,4 @@
+// A range is `for` syntax and nothing else: it has no type, so it cannot be
+// bound, passed or returned. Parentheses do not make one a value either.
+int a = 0 .. 3;
+print(a);

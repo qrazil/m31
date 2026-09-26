@@ -1,0 +1,4 @@
+corpus/errors/1231-empty-char-literal.src:4:9: an empty character literal: `''` has no code point; a character literal is exactly one character
+  |
+4 | int c = '';
+  |         ^

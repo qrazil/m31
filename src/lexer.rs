@@ -67,6 +67,10 @@ pub enum Tok {
     Colon,
     Assign,
     Dot,
+    /// `..`, between the two bounds of a range in a `for` header. It has
+    /// exactly one use and is not an operator: there is no range value, so
+    /// `..` outside a `for` header is a parse error (§5.5).
+    DotDot,
     /// `=>`, between a lambda's parameters and its one-expression body.
     /// Free as a token because there is no match-arm arrow and no other use
     /// of `=` followed by `>`: `a = >b` is not an expression in any reading.
@@ -144,6 +148,7 @@ impl Tok {
             Tok::KwIn => "in",
             Tok::Colon => ":",
             Tok::Dot => ".",
+            Tok::DotDot => "..",
             Tok::KwTrue => "true",
             Tok::KwFalse => "false",
             Tok::KwThis => "this",
@@ -384,6 +389,9 @@ impl<'a> Lexer<'a> {
         if c == b'"' {
             return self.lex_str(span);
         }
+        if c == b'\'' {
+            return self.lex_char(span);
+        }
 
         self.bump();
         let two = |l: &mut Self, t: Tok| {
@@ -401,6 +409,9 @@ impl<'a> Lexer<'a> {
             b';' => Tok::Semi,
             b'?' => Tok::Question,
             b':' => Tok::Colon,
+            // `..`, and only two: `x...y` is a mistake, not a token and a
+            // dot, and `1.5` never reaches here (the number lexer takes it).
+            b'.' if self.peek() == b'.' => two(self, Tok::DotDot),
             b'.' => Tok::Dot,
             b'+' => Tok::Plus,
             b'-' => Tok::Minus,
@@ -705,7 +716,7 @@ impl<'a> Lexer<'a> {
                     if self.pos >= self.src.len() || self.peek() == b'\n' {
                         return Err(Diag::new(span, "unterminated string literal"));
                     }
-                    self.escape(at, &mut bytes)?;
+                    self.escape(at, b'"', &mut bytes)?;
                 }
                 c => bytes.push(c),
             }
@@ -727,15 +738,97 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// A character literal: `'*'`, `'\n'`, `'é'`.
+    ///
+    /// **It is an `int`, not a new type.** There is one integer type and one
+    /// text type (§3.2a), and a code point is an `int` everywhere else in the
+    /// language -- `"é".chars()` is `[233]`, `str.from_chars` takes ints. So
+    /// `'é'` is 233, `'*'` is 42, and a character literal is a *spelling* for
+    /// a number rather than anything the type checker has to learn about.
+    /// Go makes the same distinction: no `char` type, and `'*'` all the same.
+    ///
+    /// Without it a byte comparison is written `byte_at(i) == 42`, and the
+    /// four programs in `apps/` between them had over a hundred of those,
+    /// every one with `// '*'` beside it. A magic number with a comment
+    /// explaining it is the thing the rest of this language exists to avoid.
+    ///
+    /// The escapes are the string escapes, with `\'` in place of `\"`: a
+    /// literal escapes its own quote and no other (see `escape`). `\xNN`
+    /// stops at 7F there and stops at 7F here too, so that one escape does
+    /// not mean a byte in one literal and a code point in the other;
+    /// `\u{N}` reaches every other character.
+    ///
+    /// Exactly one character. `''` has no code point to be, and `'ab'` is
+    /// text -- C reads it as an implementation-defined int and nobody has
+    /// ever wanted that.
+    fn lex_char(&mut self, span: Span) -> Result<Tok, Diag> {
+        let from = self.pos;
+        self.bump();
+        let mut bytes: Vec<u8> = Vec::new();
+        loop {
+            if self.pos >= self.src.len() || self.peek() == b'\n' {
+                return Err(Diag::new(span, "unterminated character literal"));
+            }
+            let at = self.here();
+            match self.bump() {
+                b'\'' => break,
+                b'\\' => {
+                    if self.pos >= self.src.len() || self.peek() == b'\n' {
+                        return Err(Diag::new(span, "unterminated character literal"));
+                    }
+                    self.escape(at, b'\'', &mut bytes)?;
+                }
+                c => bytes.push(c),
+            }
+        }
+        let text = String::from_utf8(bytes).map_err(|_| {
+            // The source is UTF-8 and no escape produces a lone byte past
+            // 7F, so this cannot fire -- but a lexer must not panic on a
+            // promise another module keeps.
+            Diag::new(span, "character literal is not valid UTF-8")
+        })?;
+        let mut cs = text.chars();
+        let (Some(c), None) = (cs.next(), cs.next()) else {
+            return Err(Diag::new(
+                span,
+                if text.is_empty() {
+                    "an empty character literal: `''` has no code point; a character \
+                     literal is exactly one character"
+                        .to_string()
+                } else {
+                    format!(
+                        "a character literal is exactly one character; `{text}` is {}, \
+                         so write the str \"{text}\"",
+                        text.chars().count()
+                    )
+                },
+            ));
+        };
+        // The formatter prints a literal the way it was written: `'*'` is
+        // written that way so it can be read as an asterisk, and 42 is what
+        // the program said without saying it.
+        self.spellings.push((
+            span,
+            String::from_utf8_lossy(&self.src[from..self.pos]).into_owned(),
+        ));
+        Ok(Tok::Int(c as i64))
+    }
+
     /// One escape, the backslash already consumed; `at` is where it began.
-    fn escape(&mut self, at: Span, out: &mut Vec<u8>) -> Result<(), Diag> {
+    ///
+    /// `quote` is the delimiter of the literal being lexed, and is the ONE
+    /// escape that differs between the two forms: a literal escapes its own
+    /// quote and no other. `"it's"` and `'"'` need no escape, so there is no
+    /// second spelling for either of them, and `"\'"` and `'\"'` are refused
+    /// the way any other unknown escape is.
+    fn escape(&mut self, at: Span, quote: u8, out: &mut Vec<u8>) -> Result<(), Diag> {
         match self.bump() {
             b'n' => out.push(b'\n'),
             b't' => out.push(b'\t'),
             b'r' => out.push(b'\r'),
             b'0' => out.push(0),
             b'\\' => out.push(b'\\'),
-            b'"' => out.push(b'"'),
+            c if c == quote => out.push(quote),
             // Exactly two digits. C lets `\x` run on for as many hex digits
             // as follow, so `"\x41BC"` there is one out-of-range character,
             // not `ABC`; a fixed width has no such trap.
@@ -749,10 +842,19 @@ impl<'a> Lexer<'a> {
                 if v > 0x7f {
                     return Err(Diag::new(
                         at,
-                        format!(
-                            "`\\x` stops at 7f: a string literal is UTF-8, so write the \
-                             character as `\\u{{{v:x}}}`, or raw octets as a `bytes`"
-                        ),
+                        if quote == b'"' {
+                            format!(
+                                "`\\x` stops at 7f: a string literal is UTF-8, so write the \
+                                 character as `\\u{{{v:x}}}`, or raw octets as a `bytes`"
+                            )
+                        } else {
+                            // The same limit in both, so `\xNN` never means a
+                            // byte in one literal and a code point in the other.
+                            format!(
+                                "`\\x` stops at 7f, as it does in a string literal: write \
+                                 the character as `\\u{{{v:x}}}`"
+                            )
+                        },
                     ));
                 }
                 out.push(v);
@@ -803,8 +905,9 @@ impl<'a> Lexer<'a> {
                 return Err(Diag::new(
                     at,
                     format!(
-                        "unknown escape {shown}; the escapes are \\\\ \\\" \\n \\t \\r \\0 \
-                         \\xNN and \\u{{N}}"
+                        "unknown escape {shown}; the escapes are \\\\ \\{} \\n \\t \\r \\0 \
+                         \\xNN and \\u{{N}}",
+                        quote as char
                     ),
                 ));
             }

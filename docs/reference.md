@@ -72,10 +72,11 @@ reserved only in the sense that nothing may shadow a type name (§4.1).
 | Float | `1.0`, `3.14`, `2.5e3`. **Always a dot with digits on both sides** — not `1.` and not `.5`. An exponent only after the dot form: `1.0e9`, not `1e9`. A literal too large **or too small** to represent is an error: one that parses to exactly zero has lost its whole value. Arithmetic that underflows at run time is ordinary IEEE. |
 | Boolean | `true`, `false` |
 | String | `"..."`, with the escapes below. Any other character stands for itself, byte for byte — control characters, a BOM and combining marks included — except a raw newline, which is an error: a literal ends on its line. |
+| Character | `'*'`, `'\n'`, `'é'` — **one code point, as an `int`**. `'*'` is 42 and `'é'` is 233. Exactly one character, with the escapes below. |
 
 | Escape | Bytes |
 |---|---|
-| `\\` `\"` | a backslash, a quote |
+| `\\` `\"` `\'` | a backslash, a quote |
 | `\n` `\t` `\r` `\0` | 0A, 09, 0D, 00 |
 | `\xNN` | the one byte `NN`: exactly two hex digits, either case, **00 to 7F** |
 | `\u{N}` | the Unicode scalar value `N`, one to six hex digits, as its UTF-8 bytes |
@@ -85,6 +86,34 @@ Anything else after a backslash is an error, including C's `\a` `\b` `\f`
 `\u{e9}`). `\x` takes exactly two digits, where C takes as many as follow:
 `"\x411"` is `A1`. `\u{}` refuses a surrogate and anything past `10FFFF`,
 which have no UTF-8 form.
+
+**A literal escapes its own quote and no other.** `\"` is a string's and
+`\'` is a character's; `'"'` and `"it's"` already stand for themselves, so
+`'\"'` and `"\'"` are refused the way any other unknown escape is. One
+spelling per character, which is what lets the formatter keep the author's.
+
+**Character literals.** `'x'` is the `int` for one Unicode scalar value, and
+nothing more: there is no `char` type, for the reason there is no byte type
+\u2014 the language has one integer type (\u00a73.1), and a code point is already an
+`int` in `chars()` and `str.from_chars` (\u00a73.2a). Go draws the same line.
+So `'*'` is a *spelling* for 42, the way `0o755` is a spelling for 493, and
+it may be compared, added, indexed with, stored in a `bytes` and used in a
+`const` exactly as any other integer literal may.
+
+  - **Exactly one character.** `''` has no code point to be, and `'ab'` is
+    text \u2014 write the `str`. C reads `'ab'` as an int whose value depends on
+    the compiler.
+  - **Any code point, not just ASCII.** `'\u00e9'` is 233 and `'\u4e2d'` is 20013,
+    because the value is the scalar value and not a byte. A `str` holding
+    `'\u00e9'` is two bytes long; the literal is one number.
+  - `\x` stops at 7F here too. It is the same escape as a string's, and one
+    escape must not mean a byte in one literal and a code point in the
+    other; `\u{N}` reaches everything above it.
+
+Without this, a byte test is written `s.byte_at(i) == 42` with `// '*'`
+beside it \u2014 a magic number and a comment, which is the thing the rest of
+this language is arranged to prevent. The four programs in `apps/` had over
+a hundred of them.
 
 **A string literal is always valid UTF-8**, as every `str` is (§3.2a). The
 source is, `\u{}` produces only scalar values, and `\x` stops at 7F — a lone
@@ -135,7 +164,8 @@ letter run on the end, is an error, not a suffix.
   - **There are no hex floats.** `0x1.8` is an error; a float is decimal.
 
 The formatter prints every integer literal as it was written: `0o755`
-stays `0o755` and `1_000` stays `1_000`, not `493` and `1000`.
+stays `0o755`, `1_000` stays `1_000` and `'*'` stays `'*'`, not `493`,
+`1000` and `42`.
 
 ### 1.6 Operators and punctuation
 
@@ -143,8 +173,12 @@ stays `0o755` and `1_000` stays `1_000`, not `493` and `1000`.
     ==  !=  <   <=  >   >=
     &&  ||  !
     &   |   ^   ~   <<  >>
-    =   .   ,   ;   :
+    =   .   ,   ;   :   ..
     (   )   {   }   [   ]   <   >
+
+`..` has exactly one use: between the two bounds of a range in a `for`
+header (§5.5). It is not an operator — there is no range value — so it may
+not appear anywhere else, and the diagnostic says so.
 
 `>>` is not a token. The two characters close two type argument lists in
 `List<List<int>>`, so the lexer always produces single `>`s, and the parser
@@ -329,7 +363,8 @@ Two units, each where it is cheap:
     `str.from_chars(xs)` builds text from them and traps on a value that is
     not a scalar value — a surrogate, a negative number, anything past
     U+10FFFF. There is no `char` type, for the reason there is no byte type:
-    the language has one integer type.
+    the language has one integer type. There *is* a character **literal**,
+    `'é'`, and it is an `int` — a spelling, not a type (§1.5).
 
 A code point is not always what a reader calls a character: `👍🏽` is two
 code points, a flag is two, `👨‍👩‍👧` is five, and `é` may be one (U+00E9)
@@ -1509,18 +1544,72 @@ while (cond) { ... }
 
 ### 5.5 `for ... in`
 
-The only `for`. There is no three-clause form.
+The only `for`, in two shapes: over a collection, and over a range.
 
 ```c
-for (int v in xs) { ... }
+for (int v in xs)      { ... }      // every element
+for (int i in 0 .. n)  { ... }      // 0, 1, .. n-1
 ```
 
-Iterates an `Array`, a `List` or a `bytes` — whose elements are `int`s
-(§3.10). The loop variable is a fresh binding each iteration and is
-**borrowed** from the collection; it is not a copy.
+**Over a collection.** Iterates an `Array`, a `List` or a `bytes` — whose
+elements are `int`s (§3.10). The loop variable is a fresh binding each
+iteration and is **borrowed** from the collection; it is not a copy.
 
 Mutating the collection's length while iterating it is not defined and is not
 checked. Do not.
+
+**Over a range.** `a .. b` counts from `a` up to but **not including** `b`.
+Both bounds are `int` and both are evaluated **once**, left then right,
+before the loop — so `for (int i in 0 .. xs.size())` measures the list once,
+and pushing to it inside the body does not extend the iteration. A range
+where `a >= b` runs the body no times; `0 .. 0` is empty and so is `7 .. 2`.
+
+  - **A range is loop syntax, not a value.** It has no type, cannot be
+    stored in a variable, passed to a function or returned. `..` may be
+    written in a `for` header and nowhere else, and the diagnostic says so.
+    That keeps the feature to one line of grammar: nothing about the type
+    system, the collections or `for (T x in xs)` changes, and an iterator
+    protocol is not needed to explain it.
+  - **Half-open, because indices are.** `0 .. xs.size()` is every index of
+    `xs` and needs no `- 1`, two adjacent ranges `0 .. k` and `k .. n` cover
+    `0 .. n` exactly once, and the count of `a .. b` is `b - a`. This is
+    Python's `range`, Rust's `a..b` and Go's `for i := a; i < b; i++`.
+  - **No step, and no counting down.** `for (int i in 0 .. n)` is one shape
+    with one meaning; a step is a second rule that every reader then has to
+    check for, and a loop that needs one is a `while`. Walking backwards is
+    `for (int k in 0 .. n)` with `int i = n - 1 - k;`, or a `while`.
+  - **The counter belongs to the loop.** It cannot be assigned — the body
+    gets the same `const` binding a collection's loop variable gets — and
+    the loop advances it before the body runs, so `continue` cannot skip
+    past it.
+
+That last point is the reason this exists rather than a shorthand for the
+`while` it replaces. Written by hand the increment is the body's **last**
+statement, so every `continue` has to repeat it:
+
+```c
+int i = 0;
+while (i < n) {
+    if (skip(i)) {
+        i = i + 1;              // repeated by hand, or the program hangs
+        continue;
+    }
+    ...
+    i = i + 1;
+}
+```
+
+Forgetting that one line is not a wrong answer, it is a program that does not
+terminate, and nothing catches it. All three applications in `apps/` recorded
+writing exactly that loop by accident (`apps/tui` §4, `apps/git` §8,
+`apps/markdown` §1.2); `apps/markdown`'s inline scanner has eleven
+`continue`s, and every one of them has to advance the cursor by hand. A range
+`for` cannot express the bug, because there is no increment to lose.
+
+**There is still no three-clause `for`** (§9), and no `+=` (§6.1). Both are
+diagnosed by name: `for (int i = 0; ...)` and `n += 1` are the two things
+everyone arriving from C, Go, Rust or Python writes in their first hour, and
+the compiler says which construct is absent and what to write instead.
 
 ### 5.6 `match`
 
@@ -1543,6 +1632,31 @@ match (s) {
 Bindings are **type-first**, like every other binding in the language, and
 they bind the payload positionally. A binding is borrowed from the enum,
 which stays alive for the whole `match`.
+
+**A case binds every value its variant carries, or none of them.** None is
+`case Tag:` — the spelling a payload-less variant already uses — and it means
+what it looks like: this arm does not read the payload.
+
+```c
+match (e) {
+    case Ambiguous(str prefix, int n): { return n; }
+    case NotFound:                     { return 0; }
+    case Io:                           { return 0; }
+    ...
+}
+```
+
+There is no `_`, and no way to name some of a payload and not the rest: an
+arm that wants two of three values names all three. One rule, and nothing
+new to read.
+
+This is **not** a `default`. Every variant still needs its own case, so
+adding a variant is still a compile error at every `match` that has to learn
+about it, which is the entire point (below, and `docs/errors-decision.md`).
+What it removes is the requirement to spell out a type in order to throw its
+value away: `apps/git` had twenty bindings literally named `ignored`, each
+one a payload type written out only to be discarded, and `apps/tui`'s
+`Constraint` has four methods that are 28 such arms between them.
 
 **Exhaustive**: every variant must have a case. **No fallthrough** — one case
 runs. **No `default`**, so adding a variant to an enum is a compile error at
@@ -1604,6 +1718,21 @@ trap every C programmer has fallen into once — and `1 << n + 1` is
 On the built-in types, `==` works on `int`, `bool`, `str` and `bytes`; `str`
 and `bytes` compare **by value**. On a user type an operator is a method call (§6.2).
 
+**Parentheses are the author's, and the formatter keeps them.** `(a && b) ||
+(c && d)` is printed back with its parentheses, and so is `(a & B) != 0` and
+`d ^ (bb & (c ^ d))` — even though every one of them means the same without.
+The formatter still adds the parentheses precedence requires, and a group
+written around a group is one group, so `((a))` comes back as `(a)`.
+
+This is the same bargain as a literal's spelling (§1.5): the tokens carry
+something the tree does not, and the formatter is the half of "one canonical
+layout" that must not throw it away. Redundant parentheses round a mixed
+`&&`/`||`, or round the `&` in `(x & M) != 0`, are information — the whole
+argument for fixing C's `x & 1 == 0` above is that precedence a reader has to
+recall is a hazard, and a formatter that deleted the author's guard would be
+reintroducing it. `apps/git`'s SHA-1 rounds are written to be checked line by
+line against FIPS 180-4, and the parentheses were the checking.
+
 Arithmetic on a distinct type yields **that same distinct type**, not the
 base — `Price + Price` is a `Price`. Mixing two distinct types, or a distinct
 type and its base, is an error; convert explicitly (§3.6).
@@ -1652,7 +1781,23 @@ bit pattern, and the sign extension of `>>` is spelled out rather than left
 to the implementation.
 
 There is no `&=`, `<<=` or any other augmented assignment, because there is
-no `+=`; the bit operators do not get a spelling arithmetic lacks.
+no `+=`; the bit operators do not get a spelling arithmetic lacks. Writing
+one is diagnosed by name — "there is no `+=`" — rather than reported as a
+surprising `=`, because §9 exists so that an absence is a decision and a
+decision should reach the person who trips over it.
+
+The case for `+=` was reopened and refused once the first four programs were
+written, so the reasoning is worth having in one place. It would shorten
+about 515 statements across `apps/` and `lib/` and delete none of them, and
+the thing those programs actually got wrong — a `continue` that skipped a
+hand-written increment, three times, in three separate programs — it does not
+touch; the range `for` (§5.5) does, and removes about 120 of those statements
+outright. Against that, `x += 1` and `x = x + 1` would both be legal, and
+nothing here could choose between them: there are no warnings (§5.1), and
+the formatter lays code out rather than rewriting it. Oro ships the complete
+set and can afford to, because its linter flags the longhand and points at
+the short one; without that arbiter, one operation with two spellings is the
+thing this language is arranged not to have.
 
 There is no unsigned type. A `uint64` algorithm is written on `int` with the
 bit operators and the wrapping methods — equal bits, and the one difference,
@@ -2239,7 +2384,17 @@ Stated so the absence is a decision and not an oversight:
   - **null** — every declaration initialises, and absence is `Option<T>`
   - type aliases — see §3.6
   - unsigned and sized integer types
-  - `switch`, ternary `?:`, three-clause `for`, labelled break
+  - `switch`, ternary `?:`, three-clause `for`, labelled break. Counting is
+    `for (int i in 0 .. n)` (§5.5); `for (int i = 0; ..)` is diagnosed by
+    name rather than reported as a surprising `=`
+  - **augmented assignment** — no `+=`, `-=`, `*=`, `/=`, `%=`, and
+    therefore none of `&=` `|=` `^=` `<<=` `>>=` either (§6.1, which has the
+    reasoning and the numbers). Writing one is diagnosed by name
+  - a range as a **value**: `a .. b` is `for` syntax and nothing else, so
+    there is no range type, no iterator protocol and no step (§5.5)
+  - `_`, for a binding that is not used — a `match` arm that reads no part
+    of a payload names none of it (`case Tag:`, §5.6), and there is nothing
+    else in the language that binds a name you cannot choose not to write
   - variadic functions
   - constraints on type parameters
   - reflection, runtime type queries, downcasting from an interface
@@ -2287,11 +2442,13 @@ type        = "int" | "float" | "bool" | "str" | "bytes" | "void"
             | [ IDENT "." ] IDENT [ "<" type { "," type } ">" ] ;
 
 block       = "{" { stmt } "}" ;
-stmt        = decl | assign | eval | if | while | forin | match
+stmt        = decl | assign | eval | if | while | forin | forrange | match
             | "return" [ expr ] ";" | "break" ";" | "continue" ";"
             | "spawn" IDENT args ";" ;
 match       = "match" "(" expr ")" "{" { case } "}" ;
 case        = "case" IDENT [ "(" bind { "," bind } ")" ] ":" block ;
+                                                      (* all the payload's
+                                                         values, or none *)
 bind        = type IDENT ;
 
 decl        = [ "const" ] type IDENT "=" expr ";" ;   (* always initialised; const
@@ -2302,6 +2459,10 @@ eval        = expr ";" ;
 if          = "if" "(" expr ")" block [ "else" ( if | block ) ] ;
 while       = "while" "(" expr ")" block ;
 forin       = "for" "(" type IDENT "in" expr ")" block ;
+forrange    = "for" "(" "int" IDENT "in" expr ".." expr ")" block ;
+                                                      (* half-open, §5.5;
+                                                         `..` appears here
+                                                         and nowhere else *)
 
 expr        = unary { binop unary } ;                 (* precedence per 6.1 *)
 binop       = "||" | "&&" | "==" | "!=" | "<" | "<=" | ">" | ">="
@@ -2309,7 +2470,7 @@ binop       = "||" | "&&" | "==" | "!=" | "<" | "<=" | ">" | ">="
             | "+" | "-" | "*" | "/" | "%" ;
 unary       = [ "-" | "!" | "~" ] postfix ;
 postfix     = atom { "." IDENT [ args ] | "[" expr "]" | "?" } ;
-atom        = INT | FLOAT | STR | "true" | "false"
+atom        = INT | FLOAT | STR | CHAR | "true" | "false"
             | IDENT [ args ]
             | type args                               (* construction *)
             | type "." IDENT [ args ]                 (* enum variant, static method,
@@ -2337,7 +2498,11 @@ sides — `1.0`, never `1.` or `.5` — and an exponent only after that form
 (`1.0e9`), so whether a literal is a float is decided by one character.
 `STR` is `"`, then any bytes but `"`, `\` and a newline, or an escape —
 `\\` `\"` `\n` `\t` `\r` `\0` `\x` two hex digits up to `7F`, `\u{` one to six hex
-digits `}` naming a scalar value — then `"` (§1.5). `IDENT` is a letter or
+digits `}` naming a scalar value — then `"` (§1.5). `CHAR` is `'`, then
+**exactly one** character other than `'`, `\` and a newline, or the same
+escapes with `\'` in place of `\"`, then `'`; its value is that character's
+code point, and its type is `int`, so it is an `INT` to every later rule.
+`IDENT` is a letter or
 `_` followed by letters, digits or `_`, and **may not begin with `__`**,
 which is reserved (§10.1).
 

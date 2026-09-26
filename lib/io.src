@@ -966,12 +966,10 @@ pub Buffer buffer_of(bytes b) {
 // window for every byte scanned.
 bool ends_at(bytes b, int i, bytes d) {
     int m = d.size();
-    int k = 0;
-    while (k < m) {
+    for (int k in 0 .. m) {
         if (b[i - m + k] != d[k]) {
             return false;
         }
-        k = k + 1;
     }
     return true;
 }
@@ -1126,9 +1124,9 @@ pub Result<Option<str>, Error> read_line_of(Stream s, int limit) {
     if (got.size() == 0) {
         return Result<Option<str>, Error>.Ok(Option<str>.None);
     }
-    if (got[got.size() - 1] == 10) {
+    if (got[got.size() - 1] == '\n') {
         int lf = got.pop();
-        if (got.size() > 0 && got[got.size() - 1] == 13) {
+        if (got.size() > 0 && got[got.size() - 1] == '\r') {
             int cr = got.pop();
         }
     }

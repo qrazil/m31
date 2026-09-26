@@ -38,8 +38,7 @@ import text;
 /// is no repository up to the root.
 pub str find(str path) {
     str at = path;
-    int up = 0;
-    while (up < 64) {
+    for (int up in 0 .. 64) {
         str inner = fs.join(at, ".git");
         if (fs.is_dir(inner)) {
             return inner;
@@ -54,7 +53,6 @@ pub str find(str path) {
             return at;
         }
         at = fs.join(at, "..");
-        up = up + 1;
     }
     return "";
 }
@@ -80,7 +78,7 @@ pub str common(str gitdir) {
             }
             return fs.join(gitdir, p);
         }
-        case Err(io.Error ignored): {
+        case Err: {
             return gitdir;
         }
     }
@@ -120,7 +118,7 @@ str gitfile(str tree, str path) {
             }
             return "";
         }
-        case Err(io.Error ignored): {
+        case Err: {
             return "";
         }
     }

@@ -1,0 +1,7 @@
+// The counter belongs to the loop. It is bound the way a collection's loop
+// variable is bound -- as a constant -- so the body cannot assign it, and
+// the loop cannot be made to skip or repeat a step from inside.
+for (int i in 0 .. 3) {
+    i = 9;
+    print(i);
+}

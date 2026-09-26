@@ -195,15 +195,12 @@ void property_tests(Tally t) {
     int bad_tile = 0;
     int bad_order = 0;
     str worst = "";
-    int trial = 0;
-    while (trial < 2000) {
+    for (int trial in 0 .. 2000) {
         int total = r.integer(0, 60);
         int n = r.integer(1, 6);
         List<tuigeom.Constraint> cs = [];
-        int i = 0;
-        while (i < n) {
+        for (int i in 0 .. n) {
             cs.push(a_constraint(r));
-            i = i + 1;
         }
         List<int> got = tuigeom.resolve(total, cs);
         int sum = 0;
@@ -247,7 +244,6 @@ void property_tests(Tally t) {
             bad_tile = bad_tile + 1;
             worst = describe(total, cs, got);
         }
-        trial = trial + 1;
     }
     check_int(t, "sizes always sum to the total", bad_sum, 0);
     check_int(t, "no size is ever negative", bad_sign, 0);

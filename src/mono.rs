@@ -967,6 +967,21 @@ impl Mono {
                 },
                 span: *span,
             },
+            Stmt::ForRange {
+                ty,
+                name,
+                from,
+                to,
+                body,
+                span,
+            } => Stmt::ForRange {
+                ty: self.subst_ty(*ty, sub, *span)?,
+                name: name.clone(),
+                from: self.subst_expr(from, sub)?,
+                to: self.subst_expr(to, sub)?,
+                body: self.subst_block(body, sub)?,
+                span: *span,
+            },
             Stmt::ForIn {
                 ty,
                 name,

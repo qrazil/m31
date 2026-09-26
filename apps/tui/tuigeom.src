@@ -225,22 +225,22 @@ pub str Constraint.to_str() {
 
 int Constraint.kind() {
     match (this) {
-        case Length(int v): {
+        case Length: {
             return C_LENGTH;
         }
-        case Percentage(int v): {
+        case Percentage: {
             return C_PERCENT;
         }
-        case Ratio(int a, int b): {
+        case Ratio: {
             return C_RATIO;
         }
-        case Min(int v): {
+        case Min: {
             return C_MIN;
         }
-        case Max(int v): {
+        case Max: {
             return C_MAX;
         }
-        case Fill(int v): {
+        case Fill: {
             return C_FILL;
         }
     }
@@ -249,19 +249,19 @@ int Constraint.kind() {
 /// The weight of a `Fill`, and zero for anything else.
 int Constraint.weight() {
     match (this) {
-        case Length(int v): {
+        case Length: {
             return 0;
         }
-        case Percentage(int v): {
+        case Percentage: {
             return 0;
         }
-        case Ratio(int a, int b): {
+        case Ratio: {
             return 0;
         }
-        case Min(int v): {
+        case Min: {
             return 0;
         }
-        case Max(int v): {
+        case Max: {
             return 0;
         }
         case Fill(int v): {
@@ -297,7 +297,7 @@ int Constraint.preferred(int total) {
         case Max(int v): {
             return clamp(v, total);
         }
-        case Fill(int v): {
+        case Fill: {
             return 0;
         }
     }
@@ -344,12 +344,10 @@ pub List<int> resolve(int total, List<Constraint> cs) {
         room = 0;
     }
     int sum = 0;
-    int i = 0;
-    while (i < n) {
+    for (int i in 0 .. n) {
         int p = cs[i].preferred(room);
         size.push(p);
         sum = sum + p;
-        i = i + 1;
     }
     if (sum < room) {
         grow(size, cs, room - sum);
@@ -572,8 +570,7 @@ pub List<Rect> Layout.split(Rect area) {
             edge = box.bottom();
         }
     }
-    int i = 0;
-    while (i < n) {
+    for (int i in 0 .. n) {
         // A gap wide enough to push a part past the end of the area puts it
         // at the end instead, empty: every part is inside `area`, always.
         if (pos > edge) {
@@ -589,7 +586,6 @@ pub List<Rect> Layout.split(Rect area) {
         }
         out.push(part.intersect(box));
         pos = pos + sizes[i] + gap;
-        i = i + 1;
     }
     return out;
 }

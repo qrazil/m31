@@ -376,10 +376,8 @@ Result<Tables, Error> dynamic_tables(Bits b) {
         return Result<Tables, Error>.Err(Error.BadCounts(nlen, ndist));
     }
     Array<int> clen = [0; 19];
-    int i = 0;
-    while (i < ncode) {
+    for (int i in 0 .. ncode) {
         clen[CLEN_ORDER[i]] = b.take(3);
-        i = i + 1;
     }
     Huff cl = build(clen, 0, 19);
     if (cl.left < 0) {
@@ -556,10 +554,10 @@ pub Result<bytes, Error> decompress(bytes src, int limit = -1) {
     }
     int cmf = src[0];
     int flg = src[1];
-    if (cmf & 0x0F != 8 || cmf >> 4 > 7 || (cmf * 256 + flg) % 31 != 0) {
+    if ((cmf & 0x0F) != 8 || cmf >> 4 > 7 || (cmf * 256 + flg) % 31 != 0) {
         return Result<bytes, Error>.Err(Error.BadHeader(cmf, flg));
     }
-    if (flg & 0x20 != 0) {
+    if ((flg & 0x20) != 0) {
         return Result<bytes, Error>.Err(Error.PresetDictionary);
     }
     bytes out = [];

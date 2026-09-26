@@ -1,0 +1,4 @@
+corpus/errors/1243-no-augmented-assignment.src:5:4: there is no `+=`, and no augmented assignment at all: write `x = x + ..`, or count with `for (int i in 0 .. n)`
+  |
+5 | n += 1;
+  |    ^

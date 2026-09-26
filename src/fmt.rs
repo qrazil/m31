@@ -63,6 +63,20 @@ pub struct Fmt {
     /// formatter keeps the spelling: decoding is many-to-one, and
     /// `"\u{feff}"`, `0o755` and `1_000` are written that way to be read.
     spellings: HashMap<(u32, u32), String>,
+    /// Where the source wrote a parenthesised expression, by the position of
+    /// the expression inside it -- `Parser::parens`.
+    ///
+    /// **Every parenthesis the author wrote is kept.** The alternative --
+    /// keep them only where the precedence is not obvious -- needs the
+    /// formatter to hold an opinion about which operator pairings a reader
+    /// remembers, and to be right about it for every reader. This rule needs
+    /// no opinion: the author wrote it, so it stays. It costs a redundant
+    /// `(x)` where somebody typed one, which is a thing they can delete.
+    ///
+    /// The formatter still ADDS the parentheses precedence requires, and
+    /// still collapses `((a))` to `(a)`, because a group around a group is
+    /// one position and one entry here.
+    parens: std::collections::HashSet<(u32, u32)>,
 }
 
 const INDENT: &str = "    ";
@@ -113,7 +127,7 @@ struct Run {
     last: u32,
 }
 
-pub fn format(p: &Program, lexed: crate::lexer::Lexed) -> String {
+pub fn format(p: &Program, lexed: crate::lexer::Lexed, parens: &[Span]) -> String {
     let n = lexed.comments.len();
     let mut closer = HashMap::new();
     let mut open: Vec<usize> = Vec::new();
@@ -141,6 +155,7 @@ pub fn format(p: &Program, lexed: crate::lexer::Lexed) -> String {
             .into_iter()
             .map(|(s, text)| ((s.line, s.col), text))
             .collect(),
+        parens: parens.iter().map(|s| (s.line, s.col)).collect(),
     };
     f.program(p);
     f.trailing();
@@ -755,6 +770,25 @@ impl Fmt {
                 self.depth -= 1;
                 self.line("}");
             }
+            Stmt::ForRange {
+                ty,
+                name,
+                from,
+                to,
+                body,
+                span,
+            } => {
+                self.line(&format!(
+                    "for ({} {name} in {} .. {}) {{",
+                    self.ty(*ty),
+                    self.expr(from),
+                    self.expr(to)
+                ));
+                self.depth += 1;
+                self.block(body, self.body_close(*span));
+                self.depth -= 1;
+                self.line("}");
+            }
             Stmt::ForIn {
                 ty,
                 name,
@@ -883,7 +917,23 @@ impl Fmt {
         parts.join(", ")
     }
 
+    /// Whether the source wrote parentheses around this expression.
+    fn written_parens(&self, e: &Expr) -> bool {
+        let s = e.span();
+        self.parens.contains(&(s.line, s.col))
+    }
+
+    /// One expression, with the parentheses the author wrote around it.
     fn expr(&self, e: &Expr) -> String {
+        let s = self.bare(e);
+        if self.written_parens(e) {
+            format!("({s})")
+        } else {
+            s
+        }
+    }
+
+    fn bare(&self, e: &Expr) -> String {
         match e {
             Expr::EnumNew(ty, variant, args, _) => {
                 let a = self.args(args);
@@ -913,11 +963,16 @@ impl Fmt {
                     .collect();
                 format!("{{{}}}", xs.join(", "))
             }
-            // The first byte tells the two kinds of spelling apart, so a
-            // synthesised node that happened to share a string's position
-            // could not print as that string.
+            // The first byte tells the three kinds of spelling apart -- a
+            // digit begins an integer, `'` a character and `"` a string --
+            // so a synthesised node that happened to share another
+            // literal's position could not print as that literal.
             Expr::Int(n, span) => match self.spellings.get(&(span.line, span.col)) {
-                Some(text) if text.starts_with(|c: char| c.is_ascii_digit()) => text.clone(),
+                Some(text)
+                    if text.starts_with(|c: char| c.is_ascii_digit()) || text.starts_with('\'') =>
+                {
+                    text.clone()
+                }
                 _ => n.to_string(),
             },
             Expr::Float(x, _) => fmt_float(*x),
@@ -966,6 +1021,11 @@ impl Fmt {
     /// compares the emitted C, so a mistake here, or drift from the parser's
     /// table, is caught there rather than trusted.
     fn operand(&self, e: &Expr, left: bool, parent: u8) -> String {
+        // The author's own parentheses sit in exactly the place precedence
+        // would want a pair, so one pair does for both.
+        if self.written_parens(e) {
+            return self.expr(e);
+        }
         match e {
             Expr::Bin(op, ..) => {
                 let p = prec(*op);
@@ -1083,6 +1143,7 @@ fn stmt_span(s: &Stmt) -> Span {
         | Stmt::Spawn { span, .. }
         | Stmt::While { span, .. }
         | Stmt::ForIn { span, .. }
+        | Stmt::ForRange { span, .. }
         | Stmt::If { span, .. } => *span,
     }
 }

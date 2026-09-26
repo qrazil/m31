@@ -96,7 +96,7 @@ pub Result<List<List<str>>, Error> parse(str text, str sep = ",") {
     while (sc.at < n) {
         int c = text.byte_at(sc.at);
         // A line with nothing on it is not a row.
-        if (c == 13 || c == 10) {
+        if (c == '\r' || c == '\n') {
             sc.at = sc.at + 1;
             continue;
         }
@@ -111,10 +111,10 @@ pub Result<List<List<str>>, Error> parse(str text, str sep = ",") {
             }
         }
         // The field stopped at a line break or the end. CRLF is one break.
-        if (sc.at < n && text.byte_at(sc.at) == 13) {
+        if (sc.at < n && text.byte_at(sc.at) == '\r') {
             sc.at = sc.at + 1;
         }
-        if (sc.at < n && text.byte_at(sc.at) == 10) {
+        if (sc.at < n && text.byte_at(sc.at) == '\n') {
             sc.at = sc.at + 1;
         }
         rows.push(row);
@@ -157,7 +157,7 @@ pub Result<str, Error> format(List<List<str>> rows, str sep = ",") {
 str field(Scan sc, int sep) {
     str text = sc.text;
     int n = text.size();
-    if (sc.at >= n || text.byte_at(sc.at) != 34) {
+    if (sc.at >= n || text.byte_at(sc.at) != '"') {
         return bare(sc, sep);
     }
     // Quoted: runs to the next quote that is not doubled. A doubled quote is
@@ -167,9 +167,9 @@ str field(Scan sc, int sep) {
     int from = sc.at + 1;
     int i = from;
     while (i < n) {
-        if (text.byte_at(i) == 34) {
+        if (text.byte_at(i) == '"') {
             parts.push(text.substr(from, i));
-            if (i + 1 < n && text.byte_at(i + 1) == 34) {
+            if (i + 1 < n && text.byte_at(i + 1) == '"') {
                 parts.push("\"");
                 i = i + 2;
                 from = i;
@@ -197,7 +197,7 @@ str bare(Scan sc, int sep) {
     int i = from;
     while (i < n) {
         int c = text.byte_at(i);
-        if (c == sep || c == 13 || c == 10) {
+        if (c == sep || c == '\r' || c == '\n') {
             break;
         }
         i = i + 1;
@@ -224,7 +224,7 @@ Result<int, Error> separator(str sep) {
         return Result<int, Error>.Err(Error.Separator(sep));
     }
     int c = sep.byte_at(0);
-    if (c > 127 || c == 34 || c == 13 || c == 10) {
+    if (c > 127 || c == '"' || c == '\r' || c == '\n') {
         return Result<int, Error>.Err(Error.Separator(sep));
     }
     return Result<int, Error>.Ok(c);

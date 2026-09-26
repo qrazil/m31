@@ -49,6 +49,33 @@ pub struct Parser {
     /// inside the declaration it belongs to, so a `this` in one would be
     /// whatever method happens to be calling -- refused where it is written.
     in_default: bool,
+    /// Set while the lower bound of a `for` header's range is being read --
+    /// the one place `..` may follow an expression. Everywhere else an
+    /// expression that stops at `..` is a range written where no range can
+    /// go, and saying so beats reporting that `;` was expected.
+    in_range: bool,
+    /// Where each parenthesised expression the source WROTE begins: the span
+    /// of the expression inside the parentheses, not of the `(`.
+    ///
+    /// Parentheses do not survive into the AST -- `(a && b) || c` and
+    /// `a && b || c` are one tree -- so a formatter printing from the AST
+    /// cannot know which of them a reader put there on purpose. It printed
+    /// the minimum precedence needs, which turned `apps/git`'s SHA-1 round
+    /// (`f = d ^ (bb & (c ^ d))`, checkable line by line against FIPS 180-4)
+    /// into `f = d ^ bb & (c ^ d)`, and `apps/tui`'s `(off & BOLD) != 0`
+    /// into `off & BOLD != 0`. The parentheses were the checking.
+    ///
+    /// This is the same trick the lexer plays for a literal's spelling
+    /// (`Lexer::spellings`): keep what the tokens lose, keyed by position.
+    /// A span is the position of the one token an expression starts at, so
+    /// it names the node uniquely; and if it ever did not, the cost is one
+    /// redundant pair of parentheses, which changes no meaning and still
+    /// reaches a fixed point.
+    ///
+    /// Only `parse_atom`'s grouping `(` is recorded. The parentheses of an
+    /// `if`, a `while`, a `for`, a `match`, a call and a lambda are syntax,
+    /// not grouping, and the formatter writes those itself.
+    pub parens: Vec<Span>,
 }
 
 /// What `scan_fn_tparams` finds ahead of a function's parameter list: the
@@ -280,6 +307,8 @@ impl Parser {
             stdlib: false,
             depth: 0,
             in_default: false,
+            in_range: false,
+            parens: Vec::new(),
         }
     }
 
@@ -1571,8 +1600,36 @@ impl Parser {
                 return Err(Diag::new(span, "`void` is not a value type"));
             }
             let (name, _) = self.expect_ident()?;
+            // `for (int i = 0; ..)` is the first mistake every programmer
+            // arriving from C, Java, Go, Rust or Python makes, and the
+            // absence is a decision (§5.5, §9). Say so here rather than
+            // reporting that `=` surprised the parser.
+            if self.peek() == &Tok::Assign {
+                return Err(Diag::new(
+                    self.span(),
+                    "there is no three-clause `for`; write `for (int i in 0 .. n)` \
+                     to count, or `for (T x in xs)` over a collection",
+                ));
+            }
             self.expect(Tok::KwIn)?;
-            let iter = self.parse_expr(0)?;
+            let outer = std::mem::replace(&mut self.in_range, true);
+            let iter = self.parse_expr(0);
+            self.in_range = outer;
+            let iter = iter?;
+            // `0 .. n`: a range, and the only place one may be written.
+            if self.eat(&Tok::DotDot) {
+                let to = self.parse_expr(0)?;
+                self.expect(Tok::RParen)?;
+                let body = self.parse_block()?;
+                return Ok(Stmt::ForRange {
+                    ty,
+                    name,
+                    from: iter,
+                    to,
+                    body,
+                    span,
+                });
+            }
             self.expect(Tok::RParen)?;
             let body = self.parse_block()?;
             return Ok(Stmt::ForIn {
@@ -1730,6 +1787,17 @@ impl Parser {
             lhs = Expr::Bin(op, Box::new(lhs), Box::new(rhs), span);
             self.check_height(hn, &lhs)?;
             h = Some(hn);
+        }
+        // A range is loop syntax and has no value, so `..` can only follow an
+        // expression inside a `for` header. Anywhere else it is `a .. b`
+        // written where a value was wanted, and the reader is better served
+        // by that than by "expected `;`".
+        if self.peek() == &Tok::DotDot && !self.in_range {
+            return Err(Diag::new(
+                self.span(),
+                "`..` may only be written in a `for` header: a range is loop syntax, \
+                 not a value",
+            ));
         }
         Ok(lhs)
     }
@@ -1896,6 +1964,46 @@ impl Parser {
         Ok(Expr::Lambda(params, Box::new(body), span))
     }
 
+    /// Is the parser sitting on the `=` of an augmented assignment?
+    ///
+    /// `n += 1` reaches here as `n`, `+`, `=`: the `+` was taken as an infix
+    /// operator and the `=` is where its right operand should be. So the
+    /// token before the cursor, if it is adjacent and is an operator, says
+    /// what was written. `>>=` is the awkward one -- the lexer makes it `>`
+    /// and `>=`, because `>>` is never one token (§1.6).
+    ///
+    /// Augmented assignment is deliberately absent (§6.1, §9). §9 exists so
+    /// that an absence is a decision; a decision should reach the person who
+    /// trips over it, and this is the second mistake everyone makes in their
+    /// first hour here.
+    fn augmented_here(&self) -> Option<&'static str> {
+        if self.pos == 0 {
+            return None;
+        }
+        let prev = &self.toks[self.pos - 1];
+        let here = self.span();
+        let adjacent = |t: &Tok| {
+            prev.span.line == here.line
+                && prev.span.col + t.spelling().chars().count() as u32 == here.col
+        };
+        match (&prev.tok, self.peek()) {
+            (
+                t @ (Tok::Plus
+                | Tok::Minus
+                | Tok::Star
+                | Tok::Slash
+                | Tok::Percent
+                | Tok::Amp
+                | Tok::Pipe
+                | Tok::Caret
+                | Tok::Shl),
+                Tok::Assign,
+            ) if adjacent(t) => Some(t.spelling()),
+            (t @ Tok::Gt, Tok::GtEq) if adjacent(t) => Some(">>"),
+            _ => None,
+        }
+    }
+
     fn parse_atom(&mut self) -> Result<Expr, Diag> {
         let span = self.span();
         match self.peek().clone() {
@@ -1949,8 +2057,15 @@ impl Parser {
             Tok::LParen if self.lambda_here() => self.nested("lambda", Self::parse_lambda),
             Tok::LParen => {
                 self.bump();
-                let e = self.parse_expr(0)?;
+                // A range is loop syntax; parentheses do not make one a
+                // value, so `(0 .. 3)` is the same mistake as `0 .. 3`.
+                let outer = std::mem::replace(&mut self.in_range, false);
+                let e = self.parse_expr(0);
+                self.in_range = outer;
+                let e = e?;
                 self.expect(Tok::RParen)?;
+                // Remember that the author wrote these -- see `parens`.
+                self.parens.push(e.span());
                 Ok(e)
             }
             // `[]`, `[a, b, c]`, `[x; n]`
@@ -2128,6 +2243,30 @@ impl Parser {
                     Ok(Expr::Var(name, span))
                 }
             }
+            // `n += 1`, `mask |= bit`, `x <<= 2`. The parser has already
+            // taken the operator as an infix one and is now looking for its
+            // right operand, so the token before the `=` says what was
+            // meant. Augmented assignment is deliberately absent (§6.1,
+            // §9); a decision the reader trips over should reach them.
+            t @ (Tok::Assign | Tok::GtEq) if self.augmented_here().is_some() => {
+                let op = self.augmented_here().unwrap();
+                let _ = t;
+                Err(Diag::new(
+                    span,
+                    format!(
+                        "there is no `{op}=`, and no augmented assignment at all: \
+                         write `x = x {op} ..`, or count with `for (int i in 0 .. n)`"
+                    ),
+                ))
+            }
+            // A range is loop syntax, not a value: it has no type, cannot be
+            // stored and cannot be passed. Saying that beats reporting that
+            // `..` surprised the parser.
+            Tok::DotDot => Err(Diag::new(
+                span,
+                "`..` may only be written in a `for` header: a range is loop syntax, \
+                 not a value",
+            )),
             other => Err(Diag::new(
                 span,
                 format!("expected an expression, found {}", other.describe()),

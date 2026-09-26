@@ -104,18 +104,18 @@ pub Option<float> parse(str s) {
     int n = s.size();
     int i = 0;
     int sign = 0;
-    if (n > 0 && (s.byte_at(0) == 43 || s.byte_at(0) == 45)) {
-        if (s.byte_at(0) == 45) {
+    if (n > 0 && (s.byte_at(0) == '+' || s.byte_at(0) == '-')) {
+        if (s.byte_at(0) == '-') {
             sign = 1 << 63;
         }
         i = 1;
     }
     if (n - i == 3) {
-        if (s.byte_at(i) == 105 && s.byte_at(i + 1) == 110 && s.byte_at(i + 2) == 102) {
+        if (s.byte_at(i) == 'i' && s.byte_at(i + 1) == 'n' && s.byte_at(i + 2) == 'f') {
             return Option<float>.Some(float.from_bits(sign | inf_bits()));
         }
         // The quiet NaN C's strtod gives, sign included.
-        if (s.byte_at(i) == 110 && s.byte_at(i + 1) == 97 && s.byte_at(i + 2) == 110) {
+        if (s.byte_at(i) == 'n' && s.byte_at(i + 1) == 'a' && s.byte_at(i + 2) == 'n') {
             return Option<float>.Some(float.from_bits(sign | 0x7FF8_0000_0000_0000));
         }
     }
@@ -127,7 +127,7 @@ pub Option<float> parse(str s) {
         i = i + 1;
         count = count + 1;
     }
-    if (i < n && s.byte_at(i) == 46) {
+    if (i < n && s.byte_at(i) == '.') {
         dot = i;
         i = i + 1;
         while (i < n && is_digit(s.byte_at(i))) {
@@ -141,11 +141,11 @@ pub Option<float> parse(str s) {
     }
     int end = i;
     int exp = 0;
-    if (i < n && (s.byte_at(i) == 101 || s.byte_at(i) == 69)) {
+    if (i < n && (s.byte_at(i) == 'e' || s.byte_at(i) == 'E')) {
         i = i + 1;
         bool negative = false;
-        if (i < n && (s.byte_at(i) == 43 || s.byte_at(i) == 45)) {
-            negative = s.byte_at(i) == 45;
+        if (i < n && (s.byte_at(i) == '+' || s.byte_at(i) == '-')) {
+            negative = s.byte_at(i) == '-';
             i = i + 1;
         }
         int written = 0;
@@ -174,14 +174,14 @@ pub Option<float> parse(str s) {
     // exponent up by one, so `digits * 10^e10` is the exact value with
     // `digits` free of zeros at either end.
     int first = start;
-    while (first < end && (s.byte_at(first) == 48 || s.byte_at(first) == 46)) {
+    while (first < end && (s.byte_at(first) == '0' || s.byte_at(first) == '.')) {
         first = first + 1;
     }
     if (first == end) {
         return Option<float>.Some(float.from_bits(sign));
     }
     int last = end - 1;
-    while (s.byte_at(last) == 48 || s.byte_at(last) == 46) {
+    while (s.byte_at(last) == '0' || s.byte_at(last) == '.') {
         last = last - 1;
     }
     int trailing = end - 1 - last;
@@ -200,7 +200,7 @@ pub Option<float> parse(str s) {
 }
 
 bool is_digit(int b) {
-    return b >= 48 && b <= 57;
+    return b >= '0' && b <= '9';
 }
 
 // The bits of +infinity. Every positive float's bits are below it, and every
@@ -230,10 +230,8 @@ int digit_count(int v) {
 
 int pow10_int(int n) {
     int p = 1;
-    int k = 0;
-    while (k < n) {
+    for (int k in 0 .. n) {
         p = p * 10;
-        k = k + 1;
     }
     return p;
 }
@@ -365,7 +363,7 @@ int schubfach(int c, int q, bool lopsided, int k) {
     // even, because that is where round-half-to-even sends a tie.
     int lower = vbl;
     int upper = vbr;
-    if (c & 1 == 1) {
+    if ((c & 1) == 1) {
         lower = vbl + 1;
         upper = vbr - 1;
     }
@@ -390,7 +388,7 @@ int schubfach(int c, int q, bool lopsided, int k) {
         return s;
     }
     int mid = 4 * s + 2;
-    if (vb > mid || vb == mid && s & 1 == 1) {
+    if (vb > mid || vb == mid && (s & 1) == 1) {
         return s + 1;
     }
     return s;
@@ -451,7 +449,7 @@ Decimal printf_digits(int q, Decimal d) {
         // `rem` equal to half is a true tie only when vb is even, i.e.
         // exact; an odd vb carries the sticky bit and is never equal to an
         // even value. Ties go to even, as C's printf rounds them.
-        if (rem > m / 2 || rem == m / 2 && r & 1 == 1) {
+        if (rem > m / 2 || rem == m / 2 && (r & 1) == 1) {
             r = r + 1;
         }
         // The significand is even, so both ends of the interval belong to
@@ -478,7 +476,7 @@ int decimal_bits(str s, int first, int last, int nd, int e10) {
     int j = first;
     while (taken < 19 && taken < nd) {
         int b = s.byte_at(j);
-        if (b != 46) {
+        if (b != '.') {
             w = w.wrapping_mul(10).wrapping_add(b - 48);
             taken = taken + 1;
         }
@@ -534,7 +532,7 @@ int eisel_lemire(int w, int q) {
     // Only when the bits below the 55 that matter are all ones could the
     // rest of the product carry into them, and only then is the second
     // half of the table entry needed.
-    if (hi & 511 == 511) {
+    if ((hi & 511) == 511) {
         int lo2 = umulhi(ww, tlo);
         lo = lo.wrapping_add(lo2);
         if (ult(lo, lo2)) {
@@ -564,7 +562,7 @@ int eisel_lemire(int w, int q) {
         // An exact tie can only come from a small power of ten, and then the
         // low product is zero and the dropped bits are exactly one half:
         // round it to even instead of up.
-        if (ult(lo, 2) && q >= -4 && q <= 23 && mant & 3 == 1) {
+        if (ult(lo, 2) && q >= -4 && q <= 23 && (mant & 3) == 1) {
             if (mant << upper + 9 == hi) {
                 mant = mant & ~1;
             }
@@ -635,7 +633,7 @@ int exact_bits(str s, int first, int last, int nd, int e10, int guess) {
     int j = first;
     while (j <= last && used < 800) {
         int ch = s.byte_at(j);
-        if (ch != 46) {
+        if (ch != '.') {
             chunk = chunk * 10 + ch - 48;
             held = held + 1;
             used = used + 1;
@@ -661,14 +659,14 @@ int exact_bits(str s, int first, int last, int nd, int e10, int guess) {
         moved = false;
         if (b < inf_bits()) {
             int up = compare_half(big, scale, b);
-            if (up > 0 || up == 0 && b & 1 == 1) {
+            if (up > 0 || up == 0 && (b & 1) == 1) {
                 b = b + 1;
                 moved = true;
             }
         }
         if (!moved && b > 0) {
             int down = compare_half(big, scale, b - 1);
-            if (down < 0 || down == 0 && b & 1 == 1) {
+            if (down < 0 || down == 0 && (b & 1) == 1) {
                 b = b - 1;
                 moved = true;
             }
@@ -714,12 +712,10 @@ int compare_half(List<int> big, int e10, int b) {
 // stays below 2^63.
 void mul_add(List<int> a, int m, int add) {
     int carry = add;
-    int i = 0;
-    while (i < a.size()) {
+    for (int i in 0 .. a.size()) {
         int v = a[i] * m + carry;
         a[i] = v & mask32();
         carry = v >> 32;
-        i = i + 1;
     }
     while (carry != 0) {
         a.push(carry & mask32());
@@ -746,10 +742,8 @@ List<int> shift_left(List<int> a, int bits) {
     List<int> out = [];
     int words = bits / 32;
     int r = bits % 32;
-    int i = 0;
-    while (i < words) {
+    for (int i in 0 .. words) {
         out.push(0);
-        i = i + 1;
     }
     if (r == 0) {
         for (int v in a) {

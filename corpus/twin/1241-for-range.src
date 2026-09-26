@@ -1,0 +1,46 @@
+// A range `for` against Go's `for i := a; i < b; i++`, which is the same
+// loop: half-open, bound read once, and `continue` reaches the increment.
+int total = 0;
+for (int i in 0 .. 10) {
+    total = total + i;
+}
+print(total);
+
+int odd = 0;
+for (int i in 0 .. 10) {
+    if (i % 2 == 0) {
+        continue;
+    }
+    odd = odd + i;
+}
+print(odd);
+
+for (int i in 3 .. 3) {
+    print(-1);
+}
+for (int i in 4 .. 1) {
+    print(-2);
+}
+
+int tri = 0;
+for (int y in 0 .. 5) {
+    for (int x in 0 .. y) {
+        tri = tri + 1;
+    }
+}
+print(tri);
+
+int neg = 0;
+for (int i in -3 .. 3) {
+    neg = neg + i;
+}
+print(neg);
+
+int early = 0;
+for (int i in 0 .. 100) {
+    if (i == 7) {
+        break;
+    }
+    early = early + 1;
+}
+print(early);

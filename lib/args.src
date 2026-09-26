@@ -524,10 +524,8 @@ str help_text(Parser k) {
     if (k.words.size() > 0) {
         lines.push("");
         lines.push("commands:");
-        int i = 0;
-        while (i < k.words.size()) {
+        for (int i in 0 .. k.words.size()) {
             lines.push(row(cmd_column(k.words[i], k.cmd_shorts), width, k.cmds[i].summary));
-            i = i + 1;
         }
     }
     if (k.pos.size() > 0) {
@@ -654,10 +652,8 @@ Result<Parsed, UsageError> parse_line(Parser k, List<str> argv) {
     }
     List<Parsed> commands = [];
     Parsed top = parse_clause(clauses[0].parser, clauses[0].toks, "")?;
-    int i = 1;
-    while (i < clauses.size()) {
+    for (int i in 1 .. clauses.size()) {
         commands.push(parse_clause(clauses[i].parser, clauses[i].toks, clauses[i].word)?);
-        i = i + 1;
     }
     if (k.words.size() > 0 && commands.size() == 0) {
         return refuse(k.prog + " needs a command -- one of " + command_list(k));
@@ -912,7 +908,7 @@ str token_kind(str tok) {
     // byte because the token is whatever was typed: in `-é` it is the first
     // half of a character, where substr(1, 2) would trap.
     int b = tok.byte_at(1);
-    if (b >= 48 && b <= 57 || b == 46) {
+    if (b >= '0' && b <= '9' || b == '.') {
         return "data";
     }
     return "command";

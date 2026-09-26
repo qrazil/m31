@@ -58,10 +58,8 @@ void show(object.Object o) {
         }
         case Tree(List<object.Entry> es): {
             print(id + " tree " + o.raw.size().to_str() + " " + es.size().to_str());
-            int i = 0;
-            while (i < es.size()) {
+            for (int i in 0 .. es.size()) {
                 print(id + " tree-entry " + i.to_str() + " " + es[i].mode_text() + " " + es[i].id + " " + hx(es[i].name));
-                i = i + 1;
             }
         }
         case Commit(object.Commit c): {

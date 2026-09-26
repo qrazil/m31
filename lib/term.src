@@ -193,7 +193,7 @@ pub enum Code {
 pub str Code.to_str() {
     match (this) {
         case Char(int c): {
-            if (c == 32) {
+            if (c == ' ') {
                 return "space";
             }
             return str.from_chars([c]);
@@ -286,16 +286,16 @@ pub bool Key.has(int m) {
 /// line of them can be read.
 pub str Key.to_str() {
     str s = "";
-    if (mods & CTRL != 0) {
+    if ((mods & CTRL) != 0) {
         s = s + "ctrl+";
     }
-    if (mods & ALT != 0) {
+    if ((mods & ALT) != 0) {
         s = s + "alt+";
     }
-    if (mods & SHIFT != 0) {
+    if ((mods & SHIFT) != 0) {
         s = s + "shift+";
     }
-    if (mods & META != 0) {
+    if ((mods & META) != 0) {
         s = s + "meta+";
     }
     return s + code.to_str();
@@ -362,13 +362,13 @@ pub type Mouse {
 /// `left-down 12,3`, `scroll-up 40,9`: a name for a mouse report.
 pub str Mouse.to_str() {
     str m = "";
-    if (mods & CTRL != 0) {
+    if ((mods & CTRL) != 0) {
         m = m + "ctrl+";
     }
-    if (mods & ALT != 0) {
+    if ((mods & ALT) != 0) {
         m = m + "alt+";
     }
-    if (mods & SHIFT != 0) {
+    if ((mods & SHIFT) != 0) {
         m = m + "shift+";
     }
     return m + kind.to_str() + " " + col.to_str() + "," + row.to_str();
@@ -560,10 +560,10 @@ Step step(bytes b, bool last) {
         // one begins is decoded on the next call.
         return one(1, Code.Escape, 0);
     }
-    if (c1 == 91) {
+    if (c1 == '[') {
         return csi(b, last);
     }
-    if (c1 == 79) {
+    if (c1 == 'O') {
         return ss3(b, last);
     }
     // Anything else after an ESC is how nearly every terminal spells Alt.
@@ -590,10 +590,10 @@ Step plain(bytes b, int at, int mods) {
     // sends into a 10 on the way in (ICRNL), and `raw()` turns that off --
     // so in raw mode a 10 can only be Ctrl+J, and calling it Enter would make
     // Ctrl+J unreachable in order to serve a mode this module exists to leave.
-    if (c == 13) {
+    if (c == '\r') {
         return one(1, Code.Enter, mods);
     }
-    if (c == 9) {
+    if (c == '\t') {
         return one(1, Code.Tab, mods);
     }
     // 127 is what a terminal sends for the key marked Backspace; 8 is Ctrl+H,
@@ -672,25 +672,25 @@ Step ss3(bytes b, bool last) {
         return more();
     }
     int c = b[2];
-    if (c == 65) {
+    if (c == 'A') {
         return one(3, Code.Up, 0);
     }
-    if (c == 66) {
+    if (c == 'B') {
         return one(3, Code.Down, 0);
     }
-    if (c == 67) {
+    if (c == 'C') {
         return one(3, Code.Right, 0);
     }
-    if (c == 68) {
+    if (c == 'D') {
         return one(3, Code.Left, 0);
     }
-    if (c == 72) {
+    if (c == 'H') {
         return one(3, Code.Home, 0);
     }
-    if (c == 70) {
+    if (c == 'F') {
         return one(3, Code.End, 0);
     }
-    if (c >= 80 && c <= 83) {
+    if (c >= 'P' && c <= 'S') {
         return one(3, Code.F(c - 79), 0);
     }
     return unknown(b, 3);
@@ -717,7 +717,7 @@ Csi scan_csi(bytes b, int from) {
         int c = b[i];
         // '<' '=' '>' '?' -- a private-use introducer, and only in first
         // position. SGR mouse reports use '<'.
-        if (c >= 60 && c <= 63) {
+        if (c >= '<' && c <= '?') {
             marker = c;
             i = i + 1;
         }
@@ -728,7 +728,7 @@ Csi scan_csi(bytes b, int from) {
     int cur = -1;
     while (i < b.size()) {
         int c = b[i];
-        if (c >= 48 && c <= 57) {
+        if (c >= '0' && c <= '9') {
             if (cur < 0) {
                 cur = 0;
             }
@@ -738,7 +738,7 @@ Csi scan_csi(bytes b, int from) {
                 cur = cur * 10 + (c - 48);
             }
             i = i + 1;
-        } else if (c == 59) {
+        } else if (c == ';') {
             ps.push(cur);
             cur = -1;
             i = i + 1;
@@ -778,7 +778,7 @@ int mods_of(int p) {
 Step csi(bytes b, bool last) {
     // ESC [ [ A .. ESC [ [ E -- the Linux console's F1 to F5, which is the
     // one sequence in common use that is not a well-formed CSI.
-    if (b.size() >= 3 && b[2] == 91) {
+    if (b.size() >= 3 && b[2] == '[') {
         if (b.size() < 4) {
             if (last) {
                 return unknown(b, b.size());
@@ -786,7 +786,7 @@ Step csi(bytes b, bool last) {
             return more();
         }
         int c = b[3];
-        if (c >= 65 && c <= 69) {
+        if (c >= 'A' && c <= 'E') {
             return one(4, Code.F(c - 64), 0);
         }
         return unknown(b, 4);
@@ -968,18 +968,18 @@ Step mouse(List<int> ps, int fin, int used) {
     int col = param(ps, 1, 1);
     int row = param(ps, 2, 1);
     int mods = 0;
-    if (cb & 4 != 0) {
+    if ((cb & 4) != 0) {
         mods = mods | SHIFT;
     }
-    if (cb & 8 != 0) {
+    if ((cb & 8) != 0) {
         mods = mods | ALT;
     }
-    if (cb & 16 != 0) {
+    if ((cb & 16) != 0) {
         mods = mods | CTRL;
     }
     int btn = cb & 3;
     MouseKind k = MouseKind.Moved;
-    if (cb & 64 != 0) {
+    if ((cb & 64) != 0) {
         if (btn == 0) {
             k = MouseKind.ScrollUp;
         } else if (btn == 1) {
@@ -989,7 +989,7 @@ Step mouse(List<int> ps, int fin, int used) {
         } else {
             k = MouseKind.ScrollRight;
         }
-    } else if (cb & 32 != 0) {
+    } else if ((cb & 32) != 0) {
         if (btn != 3) {
             k = MouseKind.Drag(btn);
         }

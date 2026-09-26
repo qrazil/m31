@@ -61,8 +61,7 @@ pub bytes full(tuibuf.Buffer next, tuistyle.Depth depth) {
     tuistyle.push_reset(out);
     tuigeom.Rect a = next.area();
     int pen = tuistyle.RESET_STYLE;
-    int y = a.y;
-    while (y < a.bottom()) {
+    for (int y in a.y .. a.bottom()) {
         move_to(out, a.x, y);
         int tail = tail_start(next, y);
         int x = a.x;
@@ -82,7 +81,6 @@ pub bytes full(tuibuf.Buffer next, tuistyle.Depth depth) {
             next.append_sym(out, x, y);
             x = x + w;
         }
-        y = y + 1;
     }
     if (pen != tuistyle.RESET_STYLE) {
         tuistyle.push_reset(out);
@@ -106,8 +104,7 @@ pub bytes diff(tuibuf.Buffer prev, tuibuf.Buffer next, tuistyle.Depth depth) {
     int pen = tuistyle.RESET_STYLE;
     int cur_x = -1;
     int cur_y = -1;
-    int y = a.y;
-    while (y < a.bottom()) {
+    for (int y in a.y .. a.bottom()) {
         int tail = tail_start(next, y);
         int x = a.x;
         while (x < a.right()) {
@@ -139,7 +136,6 @@ pub bytes diff(tuibuf.Buffer prev, tuibuf.Buffer next, tuistyle.Depth depth) {
             cur_x = x + w;
             x = x + w;
         }
-        y = y + 1;
     }
     if (out.size() > 0 && pen != tuistyle.RESET_STYLE) {
         tuistyle.push_reset(out);
@@ -200,7 +196,7 @@ void cross(bytes out, tuibuf.Buffer next, int from, int to, int y, int pen) {
     if (gap > 1) {
         tuistyle.push_int(out, gap);
     }
-    out.push(67);
+    out.push('C');
 }
 
 /// The first column of the run of plain spaces that ends row `y`, or the
@@ -244,40 +240,40 @@ int digits(int v) {
 pub void move_to(bytes out, int x, int y) {
     tuistyle.push_csi(out);
     tuistyle.push_int(out, y + 1);
-    out.push(59);
+    out.push(';');
     tuistyle.push_int(out, x + 1);
-    out.push(72);
+    out.push('H');
 }
 
 /// `\x1b[K`: blank the rest of the row, in the terminal's own background.
 pub void erase_line(bytes out) {
     tuistyle.push_csi(out);
-    out.push(75);
+    out.push('K');
 }
 
 /// `\x1b[2J`: blank the whole screen.
 pub void clear_screen(bytes out) {
     tuistyle.push_csi(out);
-    out.push(50);
-    out.push(74);
+    out.push('2');
+    out.push('J');
 }
 
 /// `\x1b[?25l`.
 pub void hide_cursor(bytes out) {
     tuistyle.push_csi(out);
-    out.push(63);
-    out.push(50);
-    out.push(53);
-    out.push(108);
+    out.push('?');
+    out.push('2');
+    out.push('5');
+    out.push('l');
 }
 
 /// `\x1b[?25h`.
 pub void show_cursor(bytes out) {
     tuistyle.push_csi(out);
-    out.push(63);
-    out.push(50);
-    out.push(53);
-    out.push(104);
+    out.push('?');
+    out.push('2');
+    out.push('5');
+    out.push('h');
 }
 
 /// The bytes a terminal would obey, written so a person can read them:
@@ -285,27 +281,25 @@ pub void show_cursor(bytes out) {
 /// stands for itself. This is what a test asserts on.
 pub str show(bytes b) {
     bytes out = [];
-    int i = 0;
-    while (i < b.size()) {
+    for (int i in 0 .. b.size()) {
         int v = b[i];
         if (v == 27) {
-            out.push(92);
-            out.push(101);
-        } else if (v == 10) {
-            out.push(92);
-            out.push(110);
-        } else if (v == 13) {
-            out.push(92);
-            out.push(114);
-        } else if (v < 32 || v == 127) {
-            out.push(92);
-            out.push(120);
+            out.push('\\');
+            out.push('e');
+        } else if (v == '\n') {
+            out.push('\\');
+            out.push('n');
+        } else if (v == '\r') {
+            out.push('\\');
+            out.push('r');
+        } else if (v < ' ' || v == 127) {
+            out.push('\\');
+            out.push('x');
             out.push(hex_digit(v / 16));
             out.push(hex_digit(v % 16));
         } else {
             out.push(v);
         }
-        i = i + 1;
     }
     match (out.utf8()) {
         case Some(str s): {
@@ -319,7 +313,7 @@ pub str show(bytes b) {
 
 int hex_digit(int v) {
     if (v < 10) {
-        return 48 + v;
+        return '0' + v;
     }
-    return 87 + v;
+    return 'a' - 10 + v;
 }

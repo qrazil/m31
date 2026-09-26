@@ -303,6 +303,25 @@ pub enum Stmt {
     Break { span: Span },
     /// `continue;`
     Continue { span: Span },
+    /// `for (int i in 0 .. n) { .. }` -- the counting loop.
+    ///
+    /// **Half-open**, `from` up to but not including `to`, and empty when
+    /// `from >= to`. Both bounds are `int`, evaluated once in that order
+    /// before the loop, and there is no step.
+    ///
+    /// Its own statement rather than an iterable value: a range is loop
+    /// syntax and nothing else, so it has no type, cannot be stored, and
+    /// adds nothing to the type system. What it adds is that **the counter
+    /// belongs to the loop**: it cannot be assigned and `continue` cannot
+    /// skip past an increment that is not there. See docs/reference.md §5.5.
+    ForRange {
+        ty: Ty,
+        name: String,
+        from: Expr,
+        to: Expr,
+        body: Vec<Stmt>,
+        span: Span,
+    },
     /// `for (int x in xs) { .. }`
     ForIn {
         ty: Ty,

@@ -1,0 +1,19 @@
+// A fixture for `langc fmt`: the range `for` has one layout, with a space on
+// each side of `..` as every other binary-looking thing in the language has.
+int n = 4;
+for (int i in 0 .. n) {
+    print(i);
+}
+for (int i in 0 .. n) {
+    if (i % 2 == 0) {
+        continue;
+    }
+    print(i * 10);
+}
+List<int> xs = [5, 6, 7];
+for (int i in 1 .. xs.size()) {
+    print(xs[i]);
+}
+for (int i in n - 3 .. n - 1) {
+    print(i);
+}

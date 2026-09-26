@@ -101,14 +101,12 @@ int before(str a, str b) {
     if (b.size() < n) {
         n = b.size();
     }
-    int i = 0;
-    while (i < n) {
+    for (int i in 0 .. n) {
         int x = a.byte_at(i);
         int y = b.byte_at(i);
         if (x != y) {
             return x - y;
         }
-        i = i + 1;
     }
     return a.size() - b.size();
 }
@@ -149,7 +147,7 @@ pub Result<Head, Error> head(str gitdir) {
 /// Is there a ref of this name at all -- a loose file, or a packed line?
 pub bool exists(str gitdir, str name) {
     match (loose_ref(gitdir, name)) {
-        case Some(str ignored): {
+        case Some: {
             return true;
         }
         case None: {
@@ -221,12 +219,12 @@ pub Result<List<Ref>, Error> all(str gitdir) {
                         }
                         seen.set(name, id);
                     }
-                    case Err(Error ignored): {
+                    case Err: {
                     }
                 }
             }
         }
-        case Err(io.Error ignored): {
+        case Err: {
         }
     }
     for (Ref r in packed_all(gitdir)) {
@@ -274,7 +272,7 @@ pub Result<str, Error> rev_parse(str gitdir, str spec) {
             case Ok(str id): {
                 return Result<str, Error>.Ok(id);
             }
-            case Err(Error ignored): {
+            case Err: {
             }
         }
     }
@@ -294,18 +292,18 @@ pub Result<str, Error> peel(str gitdir, str spec, str id) {
                         at = t.object;
                         depth = depth + 1;
                     }
-                    case Commit(object.Commit c): {
+                    case Commit: {
                         return Result<str, Error>.Ok(at);
                     }
                     case Blob: {
                         return Result<str, Error>.Err(Error.NotACommit(spec, "blob"));
                     }
-                    case Tree(List<object.Entry> e): {
+                    case Tree: {
                         return Result<str, Error>.Err(Error.NotACommit(spec, "tree"));
                     }
                 }
             }
-            case Err(object.Error e): {
+            case Err: {
                 return Result<str, Error>.Err(Error.NotFound(at));
             }
         }
@@ -354,7 +352,7 @@ Option<str> loose_ref(str gitdir, str name) {
         case Ok(str s): {
             return Option<str>.Some(s.trim());
         }
-        case Err(io.Error ignored): {
+        case Err: {
             return Option<str>.None;
         }
     }
@@ -388,7 +386,7 @@ List<Ref> packed_all(str gitdir) {
         case Ok(str s): {
             body = s;
         }
-        case Err(io.Error ignored): {
+        case Err: {
             return out;
         }
     }

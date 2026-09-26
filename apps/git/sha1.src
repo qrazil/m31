@@ -130,50 +130,49 @@ void Hasher.block(bytes b, int at) {
     // are deliberately not inlinable (`gates.sh`, "runtime stays separate
     // TU"). A local is borrowed and costs nothing. See apps/git/FRICTION.md.
     Array<int> w = sched;
-    int i = 0;
-    while (i < 16) {
+    for (int i in 0 .. 16) {
         int j = at + i * 4;
-        w[i] = b[j] << 24 | b[j + 1] << 16 | b[j + 2] << 8 | b[j + 3];
-        i = i + 1;
+        w[i] = (b[j] << 24) | (b[j + 1] << 16) | (b[j + 2] << 8) | b[j + 3];
     }
-    while (i < 80) {
+    for (int i in 16 .. 80) {
         int x = w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16];
-        w[i] = (x << 1 | x >> 31) & 0xFFFF_FFFF;
-        i = i + 1;
+        w[i] = ((x << 1) | (x >> 31)) & 0xFFFF_FFFF;
     }
     int a = h0;
     int bb = h1;
     int c = h2;
     int d = h3;
     int e = h4;
-    i = 0;
     // The four rounds are one loop with a branch rather than four loops,
     // because four loops would repeat the eight lines of the step. The
     // branch predicts perfectly -- it changes three times in eighty
     // iterations.
-    while (i < 80) {
+    for (int i in 0 .. 80) {
         int f = 0;
         int k = 0;
+        // Every parenthesis below is written the way FIPS 180-4 writes it,
+        // so that the four `f`s and the step can be checked against the
+        // standard by eye rather than against the precedence table. The
+        // formatter keeps them (reference §6.1); it used to take them out.
         if (i < 20) {
-            f = d ^ bb & (c ^ d);
+            f = d ^ (bb & (c ^ d));
             k = 0x5A82_7999;
         } else if (i < 40) {
             f = bb ^ c ^ d;
             k = 0x6ED9_EBA1;
         } else if (i < 60) {
-            f = bb & c | d & (bb | c);
+            f = (bb & c) | (d & (bb | c));
             k = 0x8F1B_BCDC;
         } else {
             f = bb ^ c ^ d;
             k = 0xCA62_C1D6;
         }
-        int t = ((a << 5 | a >> 27) & 0xFFFF_FFFF) + f + e + k + w[i] & 0xFFFF_FFFF;
+        int t = (((a << 5) | (a >> 27)) & 0xFFFF_FFFF) + f + e + k + w[i] & 0xFFFF_FFFF;
         e = d;
         d = c;
-        c = (bb << 30 | bb >> 2) & 0xFFFF_FFFF;
+        c = ((bb << 30) | (bb >> 2)) & 0xFFFF_FFFF;
         bb = a;
         a = t;
-        i = i + 1;
     }
     h0 = h0 + a & 0xFFFF_FFFF;
     h1 = h1 + bb & 0xFFFF_FFFF;

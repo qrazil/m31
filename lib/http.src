@@ -307,25 +307,25 @@ pub str Error.to_str() {
 /// refused. See the module note.
 pub int Error.status() {
     match (this) {
-        case Syntax(str what): {
+        case Syntax: {
             return 400;
         }
-        case Framing(str what): {
+        case Framing: {
             return 400;
         }
-        case TooLarge(str what, int limit): {
+        case TooLarge: {
             return 431;
         }
-        case BadUrl(str what): {
+        case BadUrl: {
             return 400;
         }
-        case Closed(str where): {
+        case Closed: {
             return 400;
         }
-        case Transport(net.Error e): {
+        case Transport: {
             return 500;
         }
-        case Other(str what): {
+        case Other: {
             return 500;
         }
     }
@@ -345,10 +345,10 @@ Error transport(io.Error e) {
 
 // tchar: what a method, a field name and a chunk extension name may contain.
 bool is_tchar(int c) {
-    if (c >= 48 && c <= 57 || c >= 97 && c <= 122 || c >= 65 && c <= 90) {
+    if (c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
         return true;
     }
-    return c == 33 || c == 35 || c == 36 || c == 37 || c == 38 || c == 39 || c == 42 || c == 43 || c == 45 || c == 46 || c == 94 || c == 95 || c == 96 || c == 124 || c == 126;
+    return c == '!' || c == '#' || c == '$' || c == '%' || c == '&' || c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' || c == '^' || c == '_' || c == '`' || c == '|' || c == '~';
 }
 
 // A non-empty run of tchars.
@@ -369,13 +369,11 @@ bool is_token(bytes b) {
 // bytes above 127 are -- they are answered for by the UTF-8 decode that
 // turns a value into a `str`.
 int bad_value_at(bytes b) {
-    int i = 0;
-    while (i < b.size()) {
+    for (int i in 0 .. b.size()) {
         int c = b[i];
         if (c != HTAB && (c < SP || c == DEL)) {
             return i;
         }
-        i = i + 1;
     }
     return -1;
 }
@@ -384,25 +382,23 @@ int bad_value_at(bytes b) {
 // visible ASCII and above, so a control character or a space is refused and
 // raw UTF-8 in a path -- which clients do send -- is not.
 int bad_target_at(bytes b) {
-    int i = 0;
-    while (i < b.size()) {
+    for (int i in 0 .. b.size()) {
         int c = b[i];
         if (c <= SP || c == DEL) {
             return i;
         }
-        i = i + 1;
     }
     return -1;
 }
 
 int hex_val(int c) {
-    if (c >= 48 && c <= 57) {
+    if (c >= '0' && c <= '9') {
         return c - 48;
     }
-    if (c >= 97 && c <= 102) {
+    if (c >= 'a' && c <= 'f') {
         return c - 87;
     }
-    if (c >= 65 && c <= 70) {
+    if (c >= 'A' && c <= 'F') {
         return c - 55;
     }
     return -1;
@@ -437,7 +433,7 @@ str shown(int c) {
     if (c == LF) {
         return "a line feed";
     }
-    if (c >= 33 && c <= 126) {
+    if (c >= '!' && c <= '~') {
         bytes one = [c];
         return "'" + one.utf8().or("?") + "'";
     }
@@ -456,13 +452,11 @@ str quoted(bytes b) {
         head = b.substr(0, 48);
         tail = "...";
     }
-    int i = 0;
-    while (i < head.size()) {
+    for (int i in 0 .. head.size()) {
         int c = head[i];
-        if (c < 32 || c > 126) {
+        if (c < ' ' || c > '~') {
             return "0x" + head.hex() + tail;
         }
-        i = i + 1;
     }
     return "'" + head.utf8().or("") + tail + "'";
 }
@@ -586,8 +580,7 @@ Result<void, Error> Headers.merge(str name, str value) {
 // the message and nowhere else, because a client told that its *request*
 // field is an illegal *response* field looks in the wrong place.
 Result<void, Error> Headers.render(bytes out, str kind) {
-    int i = 0;
-    while (i < ns.size()) {
+    for (int i in 0 .. ns.size()) {
         bytes name = ns[i].to_bytes();
         bytes value = vs[i].to_bytes();
         if (!is_token(name)) {
@@ -598,11 +591,10 @@ Result<void, Error> Headers.render(bytes out, str kind) {
             return Result<void, Error>.Err(Error.Syntax(kind + " header '" + ns[i] + "' has " + shown(value[bad]) + " in its value, which cannot be sent"));
         }
         out.extend(name);
-        out.push(58);
+        out.push(':');
         out.push(SP);
         out.extend(value);
         out.extend(CRLF);
-        i = i + 1;
     }
     return Result<void, Error>.Ok;
 }
@@ -655,7 +647,7 @@ pub str quote(str s, str safe = "/") {
     for (int c in s.to_bytes()) {
         bytes one = [c];
         str ch = "";
-        if (c >= 32 && c <= 126) {
+        if (c >= ' ' && c <= '~') {
             ch = ascii(one);
         }
         if (ch != "" && (UNRESERVED.contains(ch) || safe.contains(ch))) {
@@ -809,12 +801,10 @@ pub str Url.to_str() {
 // and not `index_of` twice, because the answer is the earlier of the two and
 // finding both to compare them walks the string again.
 int first_of(bytes b, int a, int c) {
-    int i = 0;
-    while (i < b.size()) {
+    for (int i in 0 .. b.size()) {
         if (b[i] == a || b[i] == c) {
             return i;
         }
-        i = i + 1;
     }
     return -1;
 }
@@ -888,7 +878,7 @@ Result<Url, Error> after_scheme(str url, bytes b, int sep) {
     if (cut >= 0) {
         authority = rest.substr(0, cut);
         target = rest.substr(cut, rest.size());
-        if (target[0] != 47) {
+        if (target[0] != '/') {
             bytes with_root = "/".to_bytes();
             with_root.extend(target);
             target = with_root;
@@ -944,15 +934,15 @@ Result<List<str>, Error> split_host_port(bytes authority, str what) {
         return Result<List<str>, Error>.Err(Error.BadUrl(what + " has no host"));
     }
     int colon = -1;
-    if (authority[authority.size() - 1] == 93) {
+    if (authority[authority.size() - 1] == ']') {
         colon = -1;
     } else {
         int i = authority.size() - 1;
         while (i >= 0) {
             int c = authority[i];
-            if (c == 93) {
+            if (c == ']') {
                 i = -1;
-            } else if (c == 58) {
+            } else if (c == ':') {
                 colon = i;
                 i = -1;
             } else {
@@ -969,7 +959,7 @@ Result<List<str>, Error> split_host_port(bytes authority, str what) {
             return Result<List<str>, Error>.Err(Error.BadUrl(what + " has a port that is not a number"));
         }
         for (int c in digits) {
-            if (c < 48 || c > 57) {
+            if (c < '0' || c > '9') {
                 return Result<List<str>, Error>.Err(Error.BadUrl(what + " has a port that is not a number"));
             }
         }
@@ -979,7 +969,7 @@ Result<List<str>, Error> split_host_port(bytes authority, str what) {
             return Result<List<str>, Error>.Err(Error.BadUrl(what + " has a port outside 1-65535"));
         }
     }
-    if (host.size() >= 2 && host[0] == 91 && host[host.size() - 1] == 93) {
+    if (host.size() >= 2 && host[0] == '[' && host[host.size() - 1] == ']') {
         host = host.substr(1, host.size() - 1);
     }
     if (host.size() == 0) {
@@ -1331,20 +1321,16 @@ Result<bytes, Error> read_head(io.Stream s) {
 // the whole of request smuggling.
 Result<List<bytes>, Error> head_lines(bytes raw) {
     List<bytes> lines = raw.substr(0, raw.size() - 4).split(CRLF);
-    int i = 0;
-    while (i < lines.size()) {
+    for (int i in 0 .. lines.size()) {
         bytes line = lines[i];
         if (line.size() > MAX_HEADER_LINE) {
             return Result<List<bytes>, Error>.Err(Error.TooLarge("a header line", MAX_HEADER_LINE));
         }
-        int k = 0;
-        while (k < line.size()) {
+        for (int k in 0 .. line.size()) {
             if (line[k] == CR || line[k] == LF) {
                 return Result<List<bytes>, Error>.Err(Error.Syntax(shown(line[k]) + " inside the header block; a line of an HTTP message ends with CRLF"));
             }
-            k = k + 1;
         }
-        i = i + 1;
     }
     return Result<List<bytes>, Error>.Ok(lines);
 }
@@ -1574,7 +1560,7 @@ Result<int, Error> content_length(str v) {
         return Result<int, Error>.Err(Error.Syntax("a Content-Length of " + digits.size().to_str() + " digits; at most 18 are read"));
     }
     for (int c in digits) {
-        if (c < 48 || c > 57) {
+        if (c < '0' || c > '9') {
             return Result<int, Error>.Err(Error.Syntax("malformed Content-Length " + quoted(digits) + ": it must be nothing but decimal digits"));
         }
     }
@@ -1752,7 +1738,7 @@ Result<Url, Error> target_url(str method, str target, str host) {
             }
         }
     }
-    if (t[0] != 47) {
+    if (t[0] != '/') {
         return Result<Url, Error>.Err(Error.Syntax(what + " is not an absolute path; this server takes '/path?query' and 'http://host/path'"));
     }
     return url_of("http", name, port, t, what);
@@ -1896,7 +1882,7 @@ Result<List<str>, Error> status_line(bytes line) {
         return Result<List<str>, Error>.Err(Error.Syntax("status code " + quoted(digits) + " is not three digits"));
     }
     for (int c in digits) {
-        if (c < 48 || c > 57) {
+        if (c < '0' || c > '9') {
             return Result<List<str>, Error>.Err(Error.Syntax("status code " + quoted(digits) + " is not three digits"));
         }
     }
@@ -2019,7 +2005,7 @@ void chunk_into(bytes out, bytes body) {
 
 Result<void, Error> write_all(io.Stream s, bytes out) {
     match (s.write(out)) {
-        case Ok(int n): {
+        case Ok: {
             return Result<void, Error>.Ok;
         }
         case Err(io.Error e): {
@@ -2099,21 +2085,21 @@ pub Result<int, Error> serve_conn(net.Conn c, Handler h, int max_requests = MAX_
 // nothing to answer it on.
 Result<int, Error> refuse(net.Conn c, Error e, int served) {
     match (e) {
-        case Transport(net.Error t): {
+        case Transport: {
             return Result<int, Error>.Ok(served);
         }
-        case Syntax(str what): {
+        case Syntax: {
         }
-        case Framing(str what): {
+        case Framing: {
         }
-        case TooLarge(str what, int limit): {
+        case TooLarge: {
         }
-        case BadUrl(str what): {
+        case BadUrl: {
         }
-        case Closed(str where): {
+        case Closed: {
             return Result<int, Error>.Ok(served);
         }
-        case Other(str what): {
+        case Other: {
         }
     }
     // A refusal is answered on a connection whose framing this end no longer
@@ -2125,7 +2111,7 @@ Result<int, Error> refuse(net.Conn c, Error e, int served) {
         case Ok: {
             return Result<int, Error>.Ok(served);
         }
-        case Err(Error w): {
+        case Err: {
             return Result<int, Error>.Ok(served);
         }
     }
@@ -2202,14 +2188,14 @@ void one_connection(net.Conn c, Handler h, int timeout_ms, int max_requests) {
     match (deadline(c, timeout_ms)) {
         case Ok: {
         }
-        case Err(Error e): {
+        case Err: {
             return;
         }
     }
     match (serve_conn(c, h, max_requests: max_requests)) {
-        case Ok(int served): {
+        case Ok: {
         }
-        case Err(Error e): {
+        case Err: {
         }
     }
 }
@@ -2219,14 +2205,14 @@ void one_connection(net.Conn c, Handler h, int timeout_ms, int max_requests) {
 // server has one at a time.
 Result<void, Error> deadline(net.Conn c, int timeout_ms) {
     match (c.set_read_timeout(timeout_ms)) {
-        case Ok(bool r): {
+        case Ok: {
         }
         case Err(net.Error e): {
             return Result<void, Error>.Err(Error.Transport(e));
         }
     }
     match (c.set_write_timeout(timeout_ms)) {
-        case Ok(bool w): {
+        case Ok: {
         }
         case Err(net.Error e): {
             return Result<void, Error>.Err(Error.Transport(e));
@@ -2313,7 +2299,7 @@ Result<Response, Error> exchange(Request req, int timeout_ms) {
             // A request is a message that waits for an answer, so there is
             // nothing for the kernel to coalesce it with.
             match (c.set_nodelay(true)) {
-                case Ok(bool on): {
+                case Ok: {
                 }
                 case Err(net.Error e): {
                     return Result<Response, Error>.Err(Error.Transport(e));
@@ -2375,7 +2361,7 @@ Result<Url, Error> resolve(Url base, str where) {
     if (w.contains("://".to_bytes())) {
         return parse_url(where);
     }
-    if (w.size() > 0 && w[0] == 47) {
+    if (w.size() > 0 && w[0] == '/') {
         if (bad_target_at(w) >= 0) {
             return Result<Url, Error>.Err(Error.BadUrl("the Location " + quoted(w) + " has a character that cannot be sent unescaped"));
         }

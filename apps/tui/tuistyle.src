@@ -203,7 +203,7 @@ pub enum Depth {
 /// few thousand numbers. This writes into the frame's own buffer.
 pub void push_int(bytes out, int v) {
     if (v < 0) {
-        out.push(45);
+        out.push('-');
         push_int(out, -v);
         return;
     }
@@ -216,7 +216,7 @@ pub void push_int(bytes out, int v) {
 /// Append `\x1b[` to `out`.
 pub void push_csi(bytes out) {
     out.push(27);
-    out.push(91);
+    out.push('[');
 }
 
 /// The escape sequence that turns a terminal showing style `from` into one
@@ -237,44 +237,44 @@ pub void sgr(bytes out, int from, int to, Depth depth) {
     List<int> codes = [];
     // SGR 22 turns off bold AND dim together, so whichever of the two
     // survives has to be written again after it.
-    if (off & (BOLD | DIM) != 0) {
+    if ((off & (BOLD | DIM)) != 0) {
         codes.push(22);
-        if (na & BOLD != 0) {
+        if ((na & BOLD) != 0) {
             codes.push(1);
         }
-        if (na & DIM != 0) {
+        if ((na & DIM) != 0) {
             codes.push(2);
         }
         on = on & ~(BOLD | DIM);
     }
-    if (off & ITALIC != 0) {
+    if ((off & ITALIC) != 0) {
         codes.push(23);
     }
-    if (off & UNDERLINE != 0) {
+    if ((off & UNDERLINE) != 0) {
         codes.push(24);
     }
-    if (off & REVERSE != 0) {
+    if ((off & REVERSE) != 0) {
         codes.push(27);
     }
-    if (off & STRIKE != 0) {
+    if ((off & STRIKE) != 0) {
         codes.push(29);
     }
-    if (on & BOLD != 0) {
+    if ((on & BOLD) != 0) {
         codes.push(1);
     }
-    if (on & DIM != 0) {
+    if ((on & DIM) != 0) {
         codes.push(2);
     }
-    if (on & ITALIC != 0) {
+    if ((on & ITALIC) != 0) {
         codes.push(3);
     }
-    if (on & UNDERLINE != 0) {
+    if ((on & UNDERLINE) != 0) {
         codes.push(4);
     }
-    if (on & REVERSE != 0) {
+    if ((on & REVERSE) != 0) {
         codes.push(7);
     }
-    if (on & STRIKE != 0) {
+    if ((on & STRIKE) != 0) {
         codes.push(9);
     }
     int pf = from & COL_MASK;
@@ -291,22 +291,20 @@ pub void sgr(bytes out, int from, int to, Depth depth) {
         return;
     }
     push_csi(out);
-    int i = 0;
-    while (i < codes.size()) {
+    for (int i in 0 .. codes.size()) {
         if (i > 0) {
-            out.push(59);
+            out.push(';');
         }
         push_int(out, codes[i]);
-        i = i + 1;
     }
-    out.push(109);
+    out.push('m');
 }
 
 /// `\x1b[0m`, the sequence that puts the terminal back to `RESET_STYLE`.
 pub void push_reset(bytes out) {
     push_csi(out);
-    out.push(48);
-    out.push(109);
+    out.push('0');
+    out.push('m');
 }
 
 /// The packed style a terminal is in after `\x1b[0m`: both colours its own,
@@ -429,14 +427,12 @@ pub int rgb_to_16(int v) {
     int b = v % 256;
     int best = 0;
     int bd = dist(ANSI16[0], r, g, b);
-    int i = 1;
-    while (i < 16) {
+    for (int i in 1 .. 16) {
         int d = dist(ANSI16[i], r, g, b);
         if (d < bd) {
             bd = d;
             best = i;
         }
-        i = i + 1;
     }
     return best;
 }
