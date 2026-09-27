@@ -107,10 +107,17 @@ freezing. Roughly in order.
 
 **`docs/errors-decision.md`.** Built: `Option<T>` and `Result<T, E>`, `?`
 with exact error-type matching, and a discarded `Result` as a compile error.
-Remaining: **what `E` should be in a standard library**, which the record
-says to settle last, once there is a library to say what actually fails.
-`int.parse` and `float.parse` wait on it and nothing else -- static methods,
-the mechanism they need, already exist.
+
+The last question -- **what `E` should be in a standard library** -- was
+settled 2026-09-26, now that there is a library to say what actually fails:
+**an error is one 64-bit id and carries no payload**, with the OS errno as a
+reserved class and the message text in a static table. That is what keeps
+`Result<int, Error>` at 16 bytes and therefore in registers; see §4 of the
+record and `docs/perf-board.md` item 3. It is freeze-level, because adding a
+payload later changes the size of every `Result` in every signature.
+
+`int.parse` and `float.parse` waited on this and nothing else -- static
+methods, the mechanism they need, already exist.
 
 The original framing:
 
@@ -263,6 +270,13 @@ the shape to avoid rather than a mechanism.
 Implementation work that does not change the surface, so it can land at any
 time — including after the language is frozen. That is the point of freezing
 a *language* rather than a *compiler*.
+
+**Performance: `docs/perf-board.md`.** The agreed optimisation work, in
+order, with what each is worth and why. Most of it is implementation and
+belongs in this section; two items change the language and so must land
+before the freeze — required `const` and the `const` block
+(`docs/const-decision.md`, second decision), and errors as an id
+(`docs/errors-decision.md` §4).
 
 **Green threads.** Stage 3 onward of `docs/concurrency-decision.md`: context
 switch, slab stacks with probes, a work-stealing scheduler, an epoll reactor,

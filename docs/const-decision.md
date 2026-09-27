@@ -219,10 +219,181 @@ work in the loop dilutes it. If it matters later, in order of cost:
      parameter.
   3. Nothing cheaper exists that keeps the guarantee through aliases.
 
+---
+
+# The second decision: `const` is required, and `const` is also a block
+
+Decided **2026-09-26**, on the author's two directions: **if a value does
+not change, it must say `const`** — and **`const` gains a block form, so a
+value can be frozen for a while without being frozen forever.**
+
+Both come out of the same observation. Freezing is not only a safety
+property; it is the guarantee an optimiser needs. A frozen value's data
+pointer and length cannot move, so they can be hoisted into registers and
+held there **across calls the compiler cannot see into** — the one case
+ordinary analysis has to give up on. `const` is therefore a performance
+keyword as much as a safety one, and the two changes below are about making
+that guarantee available where it is actually wanted.
+
+## `const` is required where it is provable
+
+A local, parameter or field whose value is never mutated anywhere in the
+program must be declared `const`, or the program is refused.
+
+**Why this is decidable at all.** We compile whole programs. "Does any
+reachable path mutate this value?" is not a question about this file, and in
+a separately-compiled language it would be unanswerable — but the compiler
+has every path in front of it. So the rule can be a gate rather than a
+convention, in the same spirit as the formatter gate: the compiler knows the
+right answer, so it insists on it instead of leaving it to discipline.
+
+**Why require the word when the compiler could just infer it.** Because an
+inferred property is invisible when it disappears. Add one call that might
+mutate the value and the hoisting silently stops, the loop gets slower, and
+nothing in the diff says so. A written `const` is a contract checked at the
+boundary: the same change breaks the build and names the line. The keyword
+buys *stability of the optimisation*, not the optimisation itself.
+
+**Why "provable" and not "not mutated in this function".** Our `const` is
+not C's. C's `const` is a property of the name; ours freezes the object and
+everything reachable from it, for everyone, forever. "This function does not
+mutate it, so mark it `const`" would therefore be wrong: it says nothing
+about what a callee does, or what the caller does after the value is
+returned. Applying that rule mechanically would either freeze values that
+must change later, or silently trigger the snapshot's deep copy and make the
+program slower — the opposite of the point. The gate fires only where the
+compiler has proved no mutation exists on any path.
+
+The consequence worth stating plainly, because it will come up in review: a
+`const` parameter costs nothing. It is a promise, and nothing is copied. A
+`const` *local* initialised from a shared value pays for a deep copy. So
+"use `const` for speed" is right for parameters and wrong as a blanket rule
+for locals, and the gate's proof obligation is what keeps the two apart.
+
+## `const` as a block
+
+```c
+while (true) {
+    int n = f.read_into(b);
+    if (n == 0) { break; }
+    const b {
+        parse(b, n);          // b is frozen here, and only here
+    }
+}                             // b is mutable again, and refills
+```
+
+Several values at once, comma-separated, no parentheses — the `{` closes the
+list and there is nothing for brackets to disambiguate:
+
+```c
+const a, b, c { ... }
+```
+
+### Why it is needed
+
+There was no way to say this. A buffer that is filled, read, and refilled has
+two options today, and both are wrong:
+
+  - leave it mutable, and no optimisation applies, because any call in the
+    loop might reallocate it;
+  - make it `const`, and it can never be refilled — and pay a deep copy at
+    the binding if it is shared.
+
+The block is the missing third thing: **`const` without the copy, for a value
+that must change again later.** Inside the region the compiler has exactly
+the guarantee permanent `const` gives it, so every optimisation that depends
+on frozen data applies, including hoisting across opaque calls. Outside it,
+the value is an ordinary mutable buffer.
+
+### Why a block and not `lock` / `unlock`
+
+Two statements can be unbalanced. An early `return`, a `?` propagation, a
+trap, or a `break` leaves the value frozen for the rest of the program with
+no diagnostic and no obvious cause. A block cannot be unbalanced, exits
+correctly on every path, and hands the compiler an exact region instead of
+making it reconstruct one from control flow. It is the same argument
+destructors make against manual `free`, applied to freezing.
+
+### Why it reuses `const` and adds no keyword
+
+It is the same concept in a second position — "`b` is const in here" — so a
+second word would be a second name for one idea, which is the thing this
+language is trying not to do. `freeze`, `seal`, `hold`, `fix` and `pin` were
+all considered. `lock` was rejected outright for a reason beyond taste: real
+mutexes arrive with green threads, and a reader seeing `lock` will assume it
+blocks and costs something, when this blocks nothing and costs nothing.
+
+Parsing takes two tokens of lookahead: after `const`, an identifier followed
+by `,` or `{` is the block form; an identifier followed by another identifier
+is the declaration form `const TYPE NAME = ...`.
+
+### Enforcement: static where visible, trap where not
+
+The mechanism already exists twice and is not new work. `RC_FROZEN` is the
+bit permanent `const` sets, and `RC_SORTING` / `RC_PROBING` in
+`docs/reentrancy-decision.md` are already "temporarily marked, trap on
+reentrant mutation" for the duration of a sort or a map probe. A `const`
+block is that same pattern, exposed to the programmer:
+
+  - the compiler refuses mutation through any alias it can see inside the
+    region;
+  - the runtime traps on the rest, through the flag that is already checked
+    by every operation that changes an object.
+
+A frozen window can therefore turn a working program into a trapping one at
+run time. That is accepted, and it is the same bargain the rest of `const`
+already makes — the alternative, refusing to compile anything that *might*
+alias, is too strict to use.
+
+### The open hazard: escaping the region
+
+Inside the block, `b` is frozen, so it satisfies a `const` parameter and can
+be stored wherever a `const` value is accepted. When the block ends and `b`
+becomes mutable again, anything that kept a reference is holding a value it
+believes is frozen and is not.
+
+**Recommended mechanism: compare the reference count.** Record `b`'s count on
+entry to the region and check it again on exit; if it is higher, something
+kept a reference, and the unfreeze traps. This is exact in the direction that
+matters — a reference taken and dropped inside the region restores the count
+and is harmless, while one that outlives the region is precisely the case
+that is caught. It also matches how the reentrancy marks already work.
+
+This needs validating against the cases where a count can legitimately differ
+at the two points before it is built. It is the one part of this decision
+that is not settled.
+
+### Interaction with check hoisting — this invalidates an earlier claim
+
+"Cost, measured" above proposes hoisting the frozen-flag check to once per
+function, and justifies it with: *an object held by a live frame can never be
+frozen, because the frame's reference would be outside the graph and the
+freeze would trap.* That was true when the only way to freeze was a `const`
+binding, which copies rather than freezing a shared object in place.
+
+**A `const` block freezes in place, by design** — not copying is the entire
+point of it. So an object a live frame holds *can* now become frozen partway
+through that frame, and the justification no longer holds as written.
+
+The repair is small: **treat a `const` block as a barrier** and re-check
+after it. Nothing else changes. A callee that freezes a value passed to it
+also unfreezes before returning, so a hoisted check is still valid across an
+ordinary call; only the lexically visible region needs the barrier, and it is
+lexically visible by construction.
+
+Recorded here rather than fixed silently because the hoisting pass does not
+exist yet, and whoever writes it would otherwise find the old justification
+and believe it.
+
+---
+
 ## What is open
 
   - A user-type module constant (a static struct or enum).
-  - The hoisting above.
+  - The hoisting above, now with the `const`-block barrier it needs.
+  - Whether the reference-count comparison is the right unfreeze check.
+  - Whether the required-`const` gate is too noisy in practice on locals
+    that are provably unmutated but only incidentally so.
   - Whether `spawn f("literal")` should be accepted the way `spawn
     f(CONSTANT)` now is: a string literal is immortal for the same reason.
     Today it is refused as borrowed; unchanged here.

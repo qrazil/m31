@@ -159,6 +159,93 @@ branch, and the enum has to be right on the first try because it is frozen.
 can say what failures it actually has. Nothing about `?` or the built-in
 `Result` depends on it.
 
+#### DECIDED 2026-09-26: an error is an id, and carries no payload
+
+The library now exists, so the question can be answered from evidence rather
+than taste. **An error value is one 64-bit id. No variant carries a payload,
+nothing is allocated, and the text lives in a static table indexed by the
+id.**
+
+The word split:
+
+    class : 32 bits    which error set — 0 core, 1 OS, 2.. per module
+    code  : 32 bits    which error within that set
+
+##### Why: it is the only shape that fits in registers
+
+This is not a micro-optimisation, it is the difference between an error path
+that allocates and one that does not. The current shape, measured on zlib:
+
+    Error  = tag (8) + two ints (16)              = 24 bytes
+    Result = tag (8) + the larger of int / Error  = 32 bytes  -> returned through memory
+
+    proposed:
+    Error  = one id                               =  8 bytes
+    Result = tag (8) + 8                          = 16 bytes  -> returned in two registers
+
+16 bytes is the ABI cliff. `docs/value-enums.md` measured the same program
+three ways — `Result` over heap enums at 51 MB/s, over value enums at
+79 MB/s, and a hand-rolled error flag at 92 MB/s — and separately measured a
+payload-free error at **36× the boxed version, beating the hand-rolled
+flag**. The clean style is only free in the configuration this decision
+makes universal.
+
+##### Why an id and not a heap singleton
+
+The first sketch was a reserved heap address per error, so every mention of
+`NotFound` was the same object. An id is strictly better: there is no pointer
+to load, no reference count to touch, and no object to keep alive. The
+static table is at a link-time address, so reading the message is
+`base + id * stride` — one indexed load.
+
+Nothing may point into the *stack* for this. A stack address dies with its
+frame, and returning is exactly what an error does. The table is static
+data, which has no lifetime at all.
+
+##### The OS block, in place of `Other(int)`
+
+`io.Error.Other(int)` exists today to carry an errno, and it is the reason
+`io.Error` has a payload at all. Instead, **class 1 is the OS, and the code
+*is* the errno.** One reserved range replaces ~130 declarations and the
+payload with them, and it still round-trips the exact number the kernel
+returned.
+
+##### Per-module sets, one uniform width
+
+Each module keeps its own error type, so `match` over `io.Error` is still
+checked exhaustive and a reader can still see what `read` can fail with.
+Because every error type has the same one-word shape, any of them widens
+into a universal `Error` for `?` to propagate across module boundaries. That
+is Go's uniform `error` for propagation and Rust's per-module enums for
+handling, without paying for either.
+
+##### How many core errors
+
+**Twelve to twenty, not fifty.** Once the OS range is mechanical, the
+hand-written set is only the semantic ones. The evidence from neighbours is
+that small wins: Go's sentinel set is about fifteen; Rust's `io::ErrorKind`
+is about forty, is widely regarded as a mistake, and had to be marked
+non-exhaustive because most variants are never matched. The starting list:
+
+`NotFound`, `Denied`, `Exists`, `Invalid`, `Interrupted`, `WouldBlock`,
+`BrokenPipe`, `Timeout`, `Overflow`, `CorruptData`, `Unsupported`, `Closed`.
+
+##### The cost, stated plainly
+
+**An error cannot carry context.** `CorruptData` cannot say "at offset 4213",
+and a `NotFound` cannot name the file. This is a real loss and it is why
+Rust boxes `io::Error`.
+
+It is accepted because the caller has that context at the point it reports,
+and formatting it there costs nothing on the success path — whereas a payload
+costs an allocation on every error, in a language whose entire argument is
+that it has no garbage collector. A failure that genuinely needs structured
+detail returns a type of its own, which is what a `Result<T, E>` already
+allows.
+
+**This is a freeze-level commitment.** Payloads cannot be added later
+without changing the size of every `Result` in every signature.
+
 ### 5. Must a `Result` be used? — DECIDED: yes, and it is an error
 
 Implemented. `Option` stays exempt.
@@ -204,8 +291,10 @@ the missing-return check knows a function may end in one. There is no
    along with the three `Option` methods that keep a lookup to one line.
 3. ~~The `?` operator, with exact error-type matching.~~ **Done.**
 4. ~~Unused-`Result` is an error.~~ **Done.**
-5. `str.parse_int` and friends. Still blocked on question 4 — what `E` is —
-   which is now the only open one.
+5. ~~`str.parse_int` and friends, blocked on question 4 — what `E` is.~~
+   **Question 4 is decided**: an error is an id and carries no payload. The
+   parse methods are unblocked; reworking the existing error enums into that
+   shape is item 3 of `docs/perf-board.md`.
 
 Steps 1 and 2 landed on their own, as planned: they are useful immediately
 and they are what the string library was actually waiting for.
