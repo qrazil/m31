@@ -108,6 +108,70 @@ would let a non-escaping object live on the stack outright. Wanted, large,
 and deliberately after everything above — most of its benefit on our actual
 workloads is available more cheaply through `const`.
 
+---
+
+## The Monday run — 2026-09-28
+
+### Step 0, sequential, before anything else: split `src/lower.rs`
+
+Item 4 of `docs/readability-plan.md`, moved to the front for a practical
+reason rather than a readability one: **items 2, 3 and 5 all edit
+`lower.rs`, and it is 7,000 lines.** Three agents in it at once is how the
+last round produced merges that were textually clean and did not compile.
+
+The split is mechanical, the seams are already identified in that plan, and
+the 17 gates are exactly the safety net that makes it safe. `consts.rs` and
+`hold.rs` are already separate, so the pattern exists. Nothing else starts
+until this has landed on `master`.
+
+### Then three worktrees in parallel
+
+| | work | mostly touches |
+|---|---|---|
+| **A** | item 1 (accessor inlining + hoisting), then item 4 (`Array` inline storage) | `emit_c.rs`, `runtime/` |
+| **B** | item 3 (errors as an id), then item 5 (intern payload-free variants) | every `lib/*.src`, both `apps/`, enum lowering |
+| **C** | item 2 (required `const`, and the `const` block) | `lexer.rs`, `parser.rs`, `fmt.rs`, `lower/`, `reference.md`, corpus |
+
+A and B are ordered within themselves because the second item in each
+changes the same code path as the first.
+
+**Merge narrowest first: A, then C, then B.** B rewrites the error type of
+every standard library module and both applications, so it should rebase
+onto the others rather than the other way round.
+
+### What each agent owns before it is allowed to merge
+
+  - all 17 gates, including `sanitize.sh` — ASan is the only thing that
+    caught the borrowed-read use-after-free, and three of these items change
+    how values are borrowed;
+  - all three application suites (markdown 42 tests, git 6 checks, tui);
+  - for A and B, a *measurement* in the commit message, not an assertion:
+    SHA-1 against the C baseline for A, the zlib throughput table for B.
+
+### Known hazards, so they are not rediscovered
+
+  - **B breaks the build until it is finished.** Changing `Error` changes
+    every signature that returns one. The agent fixes `lib/` and `apps/` in
+    the same change; there is no intermediate state that compiles.
+  - **C must add the check-hoisting barrier** described in
+    `docs/const-decision.md`, even though the hoisting pass does not exist
+    yet, or the note will be lost.
+  - **A's hoisting is only legal where no opaque call intervenes.** The
+    version that hoists across calls needs C's `const` guarantee, so it is a
+    follow-up, not part of A.
+  - The standing agent rules apply: check the worktree is a `lang` worktree
+    before the first edit, `git add/commit/status/diff/log` only, never
+    `pkill` or `killall` — kill by PID — and scratch files in the scratchpad
+    only.
+
+### Not on Monday
+
+The slice decision and escape analysis both need a conversation first. The
+rest of the readability pass follows the `lower.rs` split once the three
+worktrees have merged, not alongside them.
+
+---
+
 ## Considered and not doing
 
 **Constant-size arrays as a stack-allocated language feature.** Escape
