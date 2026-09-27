@@ -345,23 +345,52 @@ run time. That is accepted, and it is the same bargain the rest of `const`
 already makes — the alternative, refusing to compile anything that *might*
 alias, is too strict to use.
 
-### The open hazard: escaping the region
+### Corrected 2026-09-27: freezing has nothing to do with the reference count
 
-Inside the block, `b` is frozen, so it satisfies a `const` parameter and can
-be stored wherever a `const` value is accepted. When the block ends and `b`
-becomes mutable again, anything that kept a reference is holding a value it
-believes is frozen and is not.
+The first draft of this record proposed detecting an escaped reference by
+comparing `b`'s refcount on entry to the region against its count on exit,
+on the theory that a higher count on exit meant something had kept a
+reference past the freeze. Wrong on the facts, and worth recording why,
+since the same instinct will come back.
 
-**Recommended mechanism: compare the reference count.** Record `b`'s count on
-entry to the region and check it again on exit; if it is higher, something
-kept a reference, and the unfreeze traps. This is exact in the direction that
-matters — a reference taken and dropped inside the region restores the count
-and is harmless, while one that outlives the region is precisely the case
-that is caught. It also matches how the reentrancy marks already work.
+**Reference count governs lifetime. `RC_FROZEN` governs mutability. They
+are different bits of the same word for storage reasons only, and nothing
+connects them.** A frozen object is collected exactly when its count reaches
+zero, freeze or not — freezing does not pin anything in memory, and losing
+every reference to a frozen value is ordinary collection, not an error.
+Coupling an escape check to the count would have meant treating a completely
+routine event — a temporary borrow inside the block that raises and then
+lowers the count as part of an ordinary call — as evidence of something it
+does not indicate, and it would have meant nothing at all about an escaped
+*raw pointer*, which never touches the count in the first place.
 
-This needs validating against the cases where a count can legitimately differ
-at the two points before it is built. It is the one part of this decision
-that is not settled.
+**The mechanism, corrected, is only ever the flag**, exactly as it is for
+permanent `const`: set `RC_FROZEN` on entry, restore whatever it was before
+on exit — restore rather than unconditionally clear, so freezing a value
+that arrived already-const (a module constant, say) is a no-op rather than
+a temporary hole in its guarantee. The compiler refuses the mutations it can
+see; the runtime traps on the rest. No count is read anywhere in this.
+
+**And on reflection, there is no separate hazard to detect.** The scenario
+the refcount check was reaching for — some code retains a reference to `b`
+during the block, `b` becomes mutable again, and that code is now surprised
+by a value it once observed as frozen — is not a new failure mode. It is
+ordinary mutable aliasing, which is the language's default everywhere
+outside `const`: `docs/const-decision.md` opens by noting that `=` aliases
+and a reference can always be surprised by a mutation made through another
+name. A `const` block does not promise a borrow-checker's guarantee that an
+observed-as-immutable value stays that way for as long as you hold a
+reference to it — nothing in this language promises that, block or no block
+— it promises only that *within the region*, no mutation happens. Once the
+region ends, `b` is back to being an ordinary mutable, aliased value, which
+is what it always was outside the block. Importing the borrow-checker
+assumption here was the actual mistake, not the missing mechanism.
+
+The one place this *does* still need a rule is inside the compiler, not the
+program: an optimisation must not compute something under the "`b` cannot
+change" assumption and then let that computation survive past the end of
+the region. That is exactly the barrier described next, and it is a scoping
+discipline for the optimiser, not a check on the running program.
 
 ### Interaction with check hoisting — this invalidates an earlier claim
 
@@ -391,7 +420,6 @@ and believe it.
 
   - A user-type module constant (a static struct or enum).
   - The hoisting above, now with the `const`-block barrier it needs.
-  - Whether the reference-count comparison is the right unfreeze check.
   - Whether the required-`const` gate is too noisy in practice on locals
     that are provably unmutated but only incidentally so.
   - Whether `spawn f("literal")` should be accepted the way `spawn
