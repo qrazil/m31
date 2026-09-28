@@ -307,6 +307,44 @@ pub fn emit(m: &Module) -> String {
         o.push('\n');
     }
 
+    // One static instance per payload-free variant of a boxed enum, on the
+    // same terms as the field-less singletons above -- see
+    // `TypeDef::is_immortal_variant` (docs/perf-board.md item 5). `Inst::
+    // EnumPack` yields this object instead of calling `rt_alloc` whenever it
+    // constructs one of these tags. The union member, when the type has one
+    // at all (another variant of the same enum may carry a payload even
+    // though this one does not), is zeroed explicitly rather than left for
+    // C's own elision: gcc's `-Wmissing-field-initializers` (on under
+    // `-Wextra`, which `run.sh` treats as a failure) warns on the elided
+    // form, and nothing ever reads this member anyway, because a
+    // payload-free tag has no union arm to read.
+    let immortal_variants: Vec<(usize, usize)> = m
+        .types
+        .iter()
+        .enumerate()
+        .flat_map(|(i, t)| {
+            (0..t.variants.len())
+                .filter(move |&tag| t.is_immortal_variant(tag))
+                .map(move |tag| (i, tag))
+        })
+        .collect();
+    for (i, tag) in &immortal_variants {
+        let has_union = m.types[*i].variants.iter().any(|v| !v.payload.is_empty());
+        // Two brace levels: one for the union, one for its first member,
+        // which is itself a per-variant struct -- gcc's `-Wmissing-braces`
+        // (also under `-Wextra`) wants the nesting spelled out explicitly.
+        let u = if has_union { ", { { 0 } }" } else { "" };
+        writeln!(
+            o,
+            "static T{i} imm_T{i}_v{tag} __attribute__((unused)) = \
+             {{ {{ RC_IMMORTAL, &ti_T{i} }}, {tag}{u} }};"
+        )
+        .unwrap();
+    }
+    if !immortal_variants.is_empty() {
+        o.push('\n');
+    }
+
     // String literals are immortal: static storage, RC_IMMORTAL, never freed.
     for (i, s) in m.strings.iter().enumerate() {
         let bytes = s.as_bytes();
@@ -1144,6 +1182,15 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
                 for (k, a) in args.iter().enumerate() {
                     writeln!(o, "    {dst}.u.v{tag}.p{k} = {a};").unwrap();
                 }
+                return;
+            }
+            // A payload-free tag of a boxed enum has nothing to distinguish
+            // one construction from another, so every one of them yields the
+            // same shared, immortal object instead of a fresh `rt_alloc` --
+            // see `TypeDef::is_immortal_variant` (docs/perf-board.md item 5).
+            // `Option.None` is the case this exists for.
+            if types[*tid as usize].is_immortal_variant(*tag as usize) {
+                writeln!(o, "    {dst} = &imm_T{tid}_v{tag}.hdr;").unwrap();
                 return;
             }
             writeln!(o, "    {dst} = rt_alloc(sizeof(T{tid}), &ti_T{tid});").unwrap();

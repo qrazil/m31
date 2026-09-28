@@ -248,52 +248,84 @@ const str HEX = "0123456789abcdef";
 /// Every variant carries a **sentence, not a code**. A refusal that a caller
 /// cannot act on differently is a refusal they have to read, and the whole
 /// point of being strict is being able to say exactly what was wrong.
+///
+/// Payload-free (docs/errors-decision.md §4): the sentence each variant used
+/// to carry is context the caller already has -- the message, the URL, the
+/// limit -- at the point it reports. The socket vocabulary that used to
+/// nest a whole `net.Error` inside `Transport` is instead six variants of
+/// this module's own, in `net`'s own names, built by `from_net` below --
+/// each module's error type stays its own (§4), so this widens by name
+/// rather than by nesting one enum inside another.
 pub enum Error {
-    /// The bytes are not a well-formed HTTP message: what was wrong.
-    Syntax(str);
+    /// The bytes are not a well-formed HTTP message.
+    Syntax;
     /// The message's framing is ambiguous or names a coding this module does
     /// not speak. Separate from `Syntax` because it is the one class of
     /// refusal that is a security decision rather than a grammar one, and a
     /// gateway may want to count it.
-    Framing(str);
-    /// A limit this module publishes was passed: what, and the limit.
-    TooLarge(str, int);
+    Framing;
+    /// A limit this module publishes was passed.
+    TooLarge;
     /// The URL cannot be requested at all -- no scheme, no host, `https`.
-    BadUrl(str);
-    /// The peer stopped in the middle of a message: where.
-    Closed(str);
-    /// The socket failed, with `net`'s own vocabulary -- `TimedOut`,
-    /// `Reset`, `Refused` -- so a caller branches on the cause and not on a
-    /// string.
-    Transport(net.Error);
-    /// Anything nobody named.
-    Other(str);
+    BadUrl;
+    /// The peer stopped in the middle of a message.
+    Closed;
+    /// The connection was refused.
+    Refused;
+    /// The connection timed out.
+    TimedOut;
+    /// The host or network is unreachable.
+    Unreachable;
+    /// The connection was reset.
+    Reset;
+    /// The local address or port is already in use.
+    InUse;
+    /// The host name did not resolve.
+    NameNotFound;
+    /// A socket failure with none of the names above, or a refusal nobody
+    /// named.
+    Other;
 }
 
 /// A sentence saying what went wrong. A method named `to_str`, so `print(e)`
 /// prints it.
 pub str Error.to_str() {
     match (this) {
-        case Syntax(str what): {
-            return what;
+        case Syntax: {
+            return "the message is not well-formed HTTP";
         }
-        case Framing(str what): {
-            return what;
+        case Framing: {
+            return "the message's framing is ambiguous or unsupported";
         }
-        case TooLarge(str what, int limit): {
-            return what + " passed the limit of " + limit.to_str();
+        case TooLarge: {
+            return "a limit this module publishes was passed";
         }
-        case BadUrl(str what): {
-            return what;
+        case BadUrl: {
+            return "that URL cannot be requested";
         }
-        case Closed(str where): {
-            return where;
+        case Closed: {
+            return "the peer stopped in the middle of a message";
         }
-        case Transport(net.Error e): {
-            return e.to_str();
+        case Refused: {
+            return "the connection was refused";
         }
-        case Other(str what): {
-            return what;
+        case TimedOut: {
+            return "the connection timed out";
+        }
+        case Unreachable: {
+            return "the host or network is unreachable";
+        }
+        case Reset: {
+            return "the connection was reset";
+        }
+        case InUse: {
+            return "the local address or port is already in use";
+        }
+        case NameNotFound: {
+            return "the host name did not resolve";
+        }
+        case Other: {
+            return "the request failed";
         }
     }
 }
@@ -322,7 +354,22 @@ pub int Error.status() {
         case Closed: {
             return 400;
         }
-        case Transport: {
+        case Refused: {
+            return 500;
+        }
+        case TimedOut: {
+            return 500;
+        }
+        case Unreachable: {
+            return 500;
+        }
+        case Reset: {
+            return 500;
+        }
+        case InUse: {
+            return 500;
+        }
+        case NameNotFound: {
             return 500;
         }
         case Other: {
@@ -333,9 +380,39 @@ pub int Error.status() {
 
 // An `io.Error` off a stream, in this module's vocabulary. It goes through
 // `net.error_of`, which is exact for everything a socket produces, so a
-// timeout arrives as `Transport(TimedOut)` and not as a number.
+// timeout arrives as `Error.TimedOut` and not as a number.
 Error transport(io.Error e) {
-    return Error.Transport(net.error_of(e));
+    return from_net(net.error_of(e));
+}
+
+// `net.Error`, in this module's own vocabulary -- each module's error type
+// stays its own (docs/errors-decision.md §4), so a socket failure widens by
+// matching on `net`'s names and returning this module's, rather than nesting
+// a whole `net.Error` inside this one.
+Error from_net(net.Error e) {
+    match (e) {
+        case Refused: {
+            return Error.Refused;
+        }
+        case TimedOut: {
+            return Error.TimedOut;
+        }
+        case Unreachable: {
+            return Error.Unreachable;
+        }
+        case Reset: {
+            return Error.Reset;
+        }
+        case InUse: {
+            return Error.InUse;
+        }
+        case NameNotFound: {
+            return Error.NameNotFound;
+        }
+        case Other(int code): {
+            return Error.Other;
+        }
+    }
 }
 
 // --- byte classes ----------------------------------------------------------
@@ -559,10 +636,10 @@ Result<void, Error> Headers.merge(str name, str value) {
     match (ns.index_of(name)) {
         case Some(int i): {
             if (name == "content-length" || name == "transfer-encoding") {
-                return Result<void, Error>.Err(Error.Framing("two " + name + " header fields: the framing of this message is ambiguous"));
+                return Result<void, Error>.Err(Error.Framing);
             }
             if (name == "host") {
-                return Result<void, Error>.Err(Error.Syntax("two Host header fields: a request names one host"));
+                return Result<void, Error>.Err(Error.Syntax);
             }
             vs[i] = vs[i] + ", " + value;
         }
@@ -584,11 +661,11 @@ Result<void, Error> Headers.render(bytes out, str kind) {
         bytes name = ns[i].to_bytes();
         bytes value = vs[i].to_bytes();
         if (!is_token(name)) {
-            return Result<void, Error>.Err(Error.Syntax(kind + " header name " + quoted(name) + " is not a token"));
+            return Result<void, Error>.Err(Error.Syntax);
         }
         int bad = bad_value_at(value);
         if (bad >= 0) {
-            return Result<void, Error>.Err(Error.Syntax(kind + " header '" + ns[i] + "' has " + shown(value[bad]) + " in its value, which cannot be sent"));
+            return Result<void, Error>.Err(Error.Syntax);
         }
         out.extend(name);
         out.push(':');
@@ -678,7 +755,7 @@ pub Result<str, Error> unquote(str s, bool plus = false) {
             return Result<str, Error>.Ok(t);
         }
         case None: {
-            return Result<str, Error>.Err(Error.Syntax("percent-decoding " + quoted(s.to_bytes()) + " gave bytes that are not UTF-8"));
+            return Result<str, Error>.Err(Error.Syntax);
         }
     }
 }
@@ -693,12 +770,12 @@ Result<bytes, Error> pct_decode(bytes b, bool plus, str where) {
         int c = b[i];
         if (c == PERCENT) {
             if (i + 2 >= n) {
-                return Result<bytes, Error>.Err(Error.Syntax(where + " ends in an incomplete percent escape"));
+                return Result<bytes, Error>.Err(Error.Syntax);
             }
             int hi = hex_val(b[i + 1]);
             int lo = hex_val(b[i + 2]);
             if (hi < 0 || lo < 0) {
-                return Result<bytes, Error>.Err(Error.Syntax(where + " has a percent escape that is not two hex digits: " + quoted(b.substr(i, i + 3))));
+                return Result<bytes, Error>.Err(Error.Syntax);
             }
             out.push(hi * 16 + lo);
             i = i + 3;
@@ -845,7 +922,7 @@ pub Result<Url, Error> parse_url(str url) {
             return after_scheme(url, b, sep);
         }
         case None: {
-            return Result<Url, Error>.Err(Error.BadUrl(quoted(b) + " is not an absolute URL; it needs a scheme, as in 'http://host/path'"));
+            return Result<Url, Error>.Err(Error.BadUrl);
         }
     }
 }
@@ -853,10 +930,10 @@ pub Result<Url, Error> parse_url(str url) {
 Result<Url, Error> after_scheme(str url, bytes b, int sep) {
     str scheme = ascii(b.substr(0, sep)).to_lower();
     if (scheme == "https") {
-        return Result<Url, Error>.Err(Error.BadUrl(quoted(b) + " is https, and this standard library has no TLS. There is nothing to turn on: it will not open a plaintext connection to a URL that asked for an encrypted one. Use http:// for a service you control, or put a TLS-terminating proxy in front of one you do not."));
+        return Result<Url, Error>.Err(Error.BadUrl);
     }
     if (scheme != "http") {
-        return Result<Url, Error>.Err(Error.BadUrl(quoted(b) + " has the scheme '" + scheme + "', and this client speaks only http"));
+        return Result<Url, Error>.Err(Error.BadUrl);
     }
     bytes rest = b.substr(sep + 3, b.size());
     // The fragment is cut before anything else looks at the bytes, so a `#`
@@ -885,10 +962,10 @@ Result<Url, Error> after_scheme(str url, bytes b, int sep) {
         }
     }
     if (authority.contains("@".to_bytes())) {
-        return Result<Url, Error>.Err(Error.BadUrl(quoted(b) + " carries userinfo before the host, which RFC 9110 deprecates and this client will not send"));
+        return Result<Url, Error>.Err(Error.BadUrl);
     }
     if (bad_target_at(target) >= 0) {
-        return Result<Url, Error>.Err(Error.BadUrl(quoted(b) + " has a character in its path or query that cannot be sent unescaped"));
+        return Result<Url, Error>.Err(Error.BadUrl);
     }
     List<str> hp = split_host_port(authority, quoted(b))?;
     return url_of("http", hp[0], hp[1].parse_int().or(DEFAULT_PORT), target, quoted(b));
@@ -917,7 +994,7 @@ Result<Url, Error> url_of(str scheme, str host, int port, bytes target, str what
                 path = t;
             }
             case None: {
-                return Result<Url, Error>.Err(Error.Syntax(what + " has a path whose percent escapes spell bytes that are not UTF-8"));
+                return Result<Url, Error>.Err(Error.Syntax);
             }
         }
     }
@@ -931,7 +1008,7 @@ Result<Url, Error> url_of(str scheme, str host, int port, bytes target, str what
 // separator. A list rather than two returns, which the language has not got.
 Result<List<str>, Error> split_host_port(bytes authority, str what) {
     if (authority.size() == 0) {
-        return Result<List<str>, Error>.Err(Error.BadUrl(what + " has no host"));
+        return Result<List<str>, Error>.Err(Error.BadUrl);
     }
     int colon = -1;
     if (authority[authority.size() - 1] == ']') {
@@ -956,24 +1033,24 @@ Result<List<str>, Error> split_host_port(bytes authority, str what) {
         host = authority.substr(0, colon);
         bytes digits = authority.substr(colon + 1, authority.size());
         if (digits.size() == 0 || digits.size() > 5) {
-            return Result<List<str>, Error>.Err(Error.BadUrl(what + " has a port that is not a number"));
+            return Result<List<str>, Error>.Err(Error.BadUrl);
         }
         for (int c in digits) {
             if (c < '0' || c > '9') {
-                return Result<List<str>, Error>.Err(Error.BadUrl(what + " has a port that is not a number"));
+                return Result<List<str>, Error>.Err(Error.BadUrl);
             }
         }
         port = ascii(digits);
         int n = port.parse_int().or(0);
         if (n < 1 || n > 65535) {
-            return Result<List<str>, Error>.Err(Error.BadUrl(what + " has a port outside 1-65535"));
+            return Result<List<str>, Error>.Err(Error.BadUrl);
         }
     }
     if (host.size() >= 2 && host[0] == '[' && host[host.size() - 1] == ']') {
         host = host.substr(1, host.size() - 1);
     }
     if (host.size() == 0) {
-        return Result<List<str>, Error>.Err(Error.BadUrl(what + " has no host"));
+        return Result<List<str>, Error>.Err(Error.BadUrl);
     }
     match (host.utf8()) {
         case Some(str h): {
@@ -981,7 +1058,7 @@ Result<List<str>, Error> split_host_port(bytes authority, str what) {
             return Result<List<str>, Error>.Ok(out);
         }
         case None: {
-            return Result<List<str>, Error>.Err(Error.BadUrl(what + " has a host that is not UTF-8"));
+            return Result<List<str>, Error>.Err(Error.BadUrl);
         }
     }
 }
@@ -1139,7 +1216,7 @@ pub void Request.set_version(str v) {
 /// rather than at the write, so a typo does not reach a socket.
 pub Result<Request, Error> request(str method, str url) {
     if (!is_token(method.to_bytes())) {
-        return Result<Request, Error>.Err(Error.Syntax("method " + quoted(method.to_bytes()) + " is not a token"));
+        return Result<Request, Error>.Err(Error.Syntax);
     }
     Url u = parse_url(url)?;
     return Result<Request, Error>.Ok(Request(method, u, "1.1", headers()));
@@ -1267,7 +1344,7 @@ pub Result<Response, Error> json_response(json.Value v, int status = 200) {
             return Result<Response, Error>.Ok(r);
         }
         case Err(json.Error e): {
-            return Result<Response, Error>.Err(Error.Other("this value has no JSON spelling: " + e.to_str()));
+            return Result<Response, Error>.Err(Error.Other);
         }
     }
 }
@@ -1278,7 +1355,7 @@ Result<str, Error> utf8_of(bytes b, str what) {
             return Result<str, Error>.Ok(t);
         }
         case None: {
-            return Result<str, Error>.Err(Error.Syntax(what + " is not UTF-8"));
+            return Result<str, Error>.Err(Error.Syntax);
         }
     }
 }
@@ -1290,7 +1367,7 @@ Result<json.Value, Error> json_of(bytes b, str what) {
             return Result<json.Value, Error>.Ok(v);
         }
         case Err(json.Error e): {
-            return Result<json.Value, Error>.Err(Error.Syntax(what + " is not JSON: " + e.to_str()));
+            return Result<json.Value, Error>.Err(Error.Syntax);
         }
     }
 }
@@ -1305,9 +1382,9 @@ Result<bytes, Error> read_head(io.Stream s) {
                 return Result<bytes, Error>.Ok(raw);
             }
             if (raw.size() >= MAX_HEAD) {
-                return Result<bytes, Error>.Err(Error.TooLarge("the header block", MAX_HEAD));
+                return Result<bytes, Error>.Err(Error.TooLarge);
             }
-            return Result<bytes, Error>.Err(Error.Closed("the connection ended in the middle of the header block"));
+            return Result<bytes, Error>.Err(Error.Closed);
         }
         case Err(io.Error e): {
             return Result<bytes, Error>.Err(transport(e));
@@ -1324,11 +1401,11 @@ Result<List<bytes>, Error> head_lines(bytes raw) {
     for (int i in 0 .. lines.size()) {
         bytes line = lines[i];
         if (line.size() > MAX_HEADER_LINE) {
-            return Result<List<bytes>, Error>.Err(Error.TooLarge("a header line", MAX_HEADER_LINE));
+            return Result<List<bytes>, Error>.Err(Error.TooLarge);
         }
         for (int k in 0 .. line.size()) {
             if (line[k] == CR || line[k] == LF) {
-                return Result<List<bytes>, Error>.Err(Error.Syntax(shown(line[k]) + " inside the header block; a line of an HTTP message ends with CRLF"));
+                return Result<List<bytes>, Error>.Err(Error.Syntax);
             }
         }
     }
@@ -1341,7 +1418,7 @@ Result<Headers, Error> parse_headers(List<bytes> lines, int from) {
     int i = from;
     while (i < lines.size()) {
         if (i - from >= MAX_HEADERS) {
-            return Result<Headers, Error>.Err(Error.TooLarge("the header fields", MAX_HEADERS));
+            return Result<Headers, Error>.Err(Error.TooLarge);
         }
         bytes line = lines[i];
         i = i + 1;
@@ -1349,10 +1426,10 @@ Result<Headers, Error> parse_headers(List<bytes> lines, int from) {
             // The block is split on CRLF, so an empty line inside it is a
             // message that ended and then went on -- which the read above
             // cannot produce, and which is refused rather than ignored.
-            return Result<Headers, Error>.Err(Error.Syntax("an empty line inside the header block"));
+            return Result<Headers, Error>.Err(Error.Syntax);
         }
         if (line[0] == SP || line[0] == HTAB) {
-            return Result<Headers, Error>.Err(Error.Syntax("obsolete line folding is not supported: a header field continued on an indented line"));
+            return Result<Headers, Error>.Err(Error.Syntax);
         }
         parse_header_line(h, line)?;
     }
@@ -1366,24 +1443,24 @@ Result<void, Error> parse_header_line(Headers h, bytes line) {
             colon = c;
         }
         case None: {
-            return Result<void, Error>.Err(Error.Syntax("header line " + quoted(line) + " has no colon"));
+            return Result<void, Error>.Err(Error.Syntax);
         }
     }
     bytes name = line.substr(0, colon);
     bytes value = line.substr(colon + 1, line.size());
     if (!is_token(name)) {
         if (name.size() == 0) {
-            return Result<void, Error>.Err(Error.Syntax("a header line with no field name before its colon"));
+            return Result<void, Error>.Err(Error.Syntax);
         }
         int bad = 0;
         while (bad < name.size() && is_tchar(name[bad])) {
             bad = bad + 1;
         }
-        return Result<void, Error>.Err(Error.Syntax("header name " + quoted(name) + " has " + shown(name[bad]) + " in it, which a field name may not"));
+        return Result<void, Error>.Err(Error.Syntax);
     }
     int badv = bad_value_at(value);
     if (badv >= 0) {
-        return Result<void, Error>.Err(Error.Syntax("header '" + ascii(name).to_lower() + "' has " + shown(value[badv]) + " in its value, which a field value may not"));
+        return Result<void, Error>.Err(Error.Syntax);
     }
     // Only SP and HTAB can be here now, so `trim` is exactly the optional
     // whitespace RFC 9110 puts either side of a field value.
@@ -1393,7 +1470,7 @@ Result<void, Error> parse_header_line(Headers h, bytes line) {
             return h.merge(ascii(name).to_lower(), v);
         }
         case None: {
-            return Result<void, Error>.Err(Error.Syntax("header '" + ascii(name).to_lower() + "' has a value that is not UTF-8"));
+            return Result<void, Error>.Err(Error.Syntax);
         }
     }
 }
@@ -1413,7 +1490,7 @@ Result<bytes, Error> read_exact(io.Stream s, int n, str what) {
         match (s.read(want)) {
             case Ok(bytes got): {
                 if (got.size() == 0) {
-                    return Result<bytes, Error>.Err(Error.Closed(what + " ended " + (n - out.size()).to_str() + " bytes short of the " + n.to_str() + " it declared"));
+                    return Result<bytes, Error>.Err(Error.Closed);
                 }
                 out.extend(got);
             }
@@ -1436,7 +1513,7 @@ Result<bytes, Error> read_to_end(io.Stream s, int limit, str what) {
                 }
                 out.extend(got);
                 if (out.size() > limit) {
-                    return Result<bytes, Error>.Err(Error.TooLarge(what, limit));
+                    return Result<bytes, Error>.Err(Error.TooLarge);
                 }
             }
             case Err(io.Error e): {
@@ -1454,9 +1531,9 @@ Result<bytes, Error> read_line(io.Stream s, int limit, str what) {
                 return Result<bytes, Error>.Ok(got.substr(0, got.size() - 2));
             }
             if (got.size() >= limit) {
-                return Result<bytes, Error>.Err(Error.TooLarge(what, limit));
+                return Result<bytes, Error>.Err(Error.TooLarge);
             }
-            return Result<bytes, Error>.Err(Error.Closed("the connection ended in the middle of " + what));
+            return Result<bytes, Error>.Err(Error.Closed);
         }
         case Err(io.Error e): {
             return Result<bytes, Error>.Err(transport(e));
@@ -1481,12 +1558,12 @@ Result<bytes, Error> read_chunked(io.Stream s, int limit) {
             return Result<bytes, Error>.Ok(out);
         }
         if (out.size() + size > limit) {
-            return Result<bytes, Error>.Err(Error.TooLarge("the chunked body", limit));
+            return Result<bytes, Error>.Err(Error.TooLarge);
         }
         out.extend(read_exact(s, size, "a chunk")?);
         bytes term = read_exact(s, 2, "a chunk terminator")?;
         if (term[0] != CR || term[1] != LF) {
-            return Result<bytes, Error>.Err(Error.Syntax("chunk data was not followed by CRLF but by " + quoted(term)));
+            return Result<bytes, Error>.Err(Error.Syntax);
         }
     }
 }
@@ -1504,7 +1581,7 @@ Result<int, Error> chunk_size(bytes line) {
         }
     }
     if (digits.size() == 0) {
-        return Result<int, Error>.Err(Error.Syntax("a chunk size line with no size in it"));
+        return Result<int, Error>.Err(Error.Syntax);
     }
     // Fifteen hex digits, and not sixteen, because the multiply below **traps
     // on overflow** (§6.1) and sixteen digits reach 2^64-1, which an `int`
@@ -1512,13 +1589,13 @@ Result<int, Error> chunk_size(bytes line) {
     // this module will assemble, so nothing legitimate is refused and a
     // hostile size is an error value rather than a dead process.
     if (digits.size() > 15) {
-        return Result<int, Error>.Err(Error.Syntax("a chunk size of " + digits.size().to_str() + " hex digits; at most 15 are read"));
+        return Result<int, Error>.Err(Error.Syntax);
     }
     int v = 0;
     for (int c in digits) {
         int d = hex_val(c);
         if (d < 0) {
-            return Result<int, Error>.Err(Error.Syntax("malformed chunk size " + quoted(digits)));
+            return Result<int, Error>.Err(Error.Syntax);
         }
         v = v * 16 + d;
     }
@@ -1539,7 +1616,7 @@ Result<void, Error> skip_trailer(io.Stream s) {
         }
         count = count + 1;
         if (count > MAX_HEADERS) {
-            return Result<void, Error>.Err(Error.TooLarge("the trailer fields", MAX_HEADERS));
+            return Result<void, Error>.Err(Error.TooLarge);
         }
     }
 }
@@ -1550,18 +1627,18 @@ Result<void, Error> skip_trailer(io.Stream s) {
 Result<int, Error> content_length(str v) {
     bytes digits = v.to_bytes();
     if (digits.size() == 0) {
-        return Result<int, Error>.Err(Error.Syntax("an empty Content-Length"));
+        return Result<int, Error>.Err(Error.Syntax);
     }
     // Eighteen digits and not nineteen: nineteen can spell a number an `int`
     // cannot hold, and `parse_int` would answer `None` -- which an `or(0)`
     // would turn into "no body", the one wrong answer available. Eighteen
     // digits is 10^18, thirty billion times `MAX_BODY`.
     if (digits.size() > 18) {
-        return Result<int, Error>.Err(Error.Syntax("a Content-Length of " + digits.size().to_str() + " digits; at most 18 are read"));
+        return Result<int, Error>.Err(Error.Syntax);
     }
     for (int c in digits) {
         if (c < '0' || c > '9') {
-            return Result<int, Error>.Err(Error.Syntax("malformed Content-Length " + quoted(digits) + ": it must be nothing but decimal digits"));
+            return Result<int, Error>.Err(Error.Syntax);
         }
     }
     match (v.parse_int()) {
@@ -1569,7 +1646,7 @@ Result<int, Error> content_length(str v) {
             return Result<int, Error>.Ok(n);
         }
         case None: {
-            return Result<int, Error>.Err(Error.Syntax("malformed Content-Length " + quoted(digits)));
+            return Result<int, Error>.Err(Error.Syntax);
         }
     }
 }
@@ -1585,10 +1662,10 @@ Result<int, Error> framing(Headers h) {
     match (h.get("transfer-encoding")) {
         case Some(str te): {
             if (h.has("content-length")) {
-                return Result<int, Error>.Err(Error.Framing("both Content-Length and Transfer-Encoding are present, so how long this message is depends on who is reading it"));
+                return Result<int, Error>.Err(Error.Framing);
             }
             if (te.to_lower() != "chunked") {
-                return Result<int, Error>.Err(Error.Framing("unsupported Transfer-Encoding '" + te + "': this module decodes 'chunked' and nothing else, and handing back coded bytes as if they were the body is not an option"));
+                return Result<int, Error>.Err(Error.Framing);
             }
             return Result<int, Error>.Ok(-2);
         }
@@ -1599,7 +1676,7 @@ Result<int, Error> framing(Headers h) {
         case Some(str n): {
             int len = content_length(n)?;
             if (len > MAX_BODY) {
-                return Result<int, Error>.Err(Error.TooLarge("the body", MAX_BODY));
+                return Result<int, Error>.Err(Error.TooLarge);
             }
             return Result<int, Error>.Ok(len);
         }
@@ -1638,7 +1715,7 @@ pub Result<Option<Request>, Error> read_request(io.Stream s) {
             // a virtual host that can be aimed. A 1.0 request may leave it
             // out, and then the URL has no host.
             if (version == "1.1") {
-                return Result<Option<Request>, Error>.Err(Error.Syntax("an HTTP/1.1 request with no Host header field"));
+                return Result<Option<Request>, Error>.Err(Error.Syntax);
             }
         }
     }
@@ -1656,23 +1733,23 @@ pub Result<Option<Request>, Error> read_request(io.Stream s) {
 // The method, the target and the version, as three strings.
 Result<List<str>, Error> request_line(bytes line) {
     if (line.size() == 0) {
-        return Result<List<str>, Error>.Err(Error.Syntax("an empty request line"));
+        return Result<List<str>, Error>.Err(Error.Syntax);
     }
     // Exactly one space either side of the target: tolerating runs of spaces
     // is how a request line becomes two different requests to two readers.
     List<bytes> parts = line.split(SP1);
     if (parts.size() != 3) {
-        return Result<List<str>, Error>.Err(Error.Syntax("malformed request line " + quoted(line) + ": it is 'METHOD target HTTP/1.1'"));
+        return Result<List<str>, Error>.Err(Error.Syntax);
     }
     if (!is_token(parts[0])) {
-        return Result<List<str>, Error>.Err(Error.Syntax("method " + quoted(parts[0]) + " is not a token"));
+        return Result<List<str>, Error>.Err(Error.Syntax);
     }
     int bad = bad_target_at(parts[1]);
     if (bad >= 0) {
-        return Result<List<str>, Error>.Err(Error.Syntax("request target " + quoted(parts[1]) + " has " + shown(parts[1][bad]) + " in it"));
+        return Result<List<str>, Error>.Err(Error.Syntax);
     }
     if (parts[1].size() == 0) {
-        return Result<List<str>, Error>.Err(Error.Syntax("an empty request target"));
+        return Result<List<str>, Error>.Err(Error.Syntax);
     }
     str version = version_of(parts[2], "request line")?;
     List<str> out = [ascii(parts[0]), ascii(parts[1]), version];
@@ -1681,7 +1758,7 @@ Result<List<str>, Error> request_line(bytes line) {
 
 Result<str, Error> version_of(bytes field, str where) {
     if (!field.starts_with("HTTP/".to_bytes())) {
-        return Result<str, Error>.Err(Error.Syntax("the " + where + " does not name an HTTP version: " + quoted(field)));
+        return Result<str, Error>.Err(Error.Syntax);
     }
     bytes rest = field.substr(5, field.size());
     str v = ascii(rest);
@@ -1689,7 +1766,7 @@ Result<str, Error> version_of(bytes field, str where) {
         // `quoted` and not `v`: a version field that is not UTF-8 decodes to
         // the empty string, and "unsupported HTTP version ''" says nothing
         // about what actually arrived.
-        return Result<str, Error>.Err(Error.Syntax("unsupported HTTP version " + quoted(rest) + ": this module speaks 1.0 and 1.1"));
+        return Result<str, Error>.Err(Error.Syntax);
     }
     return Result<str, Error>.Ok(v);
 }
@@ -1716,11 +1793,11 @@ Result<Url, Error> target_url(str method, str target, str host) {
         port = hp[1].parse_int().or(DEFAULT_PORT);
     }
     if (t.contains(HASH1)) {
-        return Result<Url, Error>.Err(Error.Syntax(what + " carries a fragment, which is never sent"));
+        return Result<Url, Error>.Err(Error.Syntax);
     }
     if (target == "*") {
         if (method != "OPTIONS") {
-            return Result<Url, Error>.Err(Error.Syntax("the request target '*' is only for OPTIONS"));
+            return Result<Url, Error>.Err(Error.Syntax);
         }
         return url_of("http", name, port, t, what);
     }
@@ -1739,7 +1816,7 @@ Result<Url, Error> target_url(str method, str target, str host) {
         }
     }
     if (t[0] != '/') {
-        return Result<Url, Error>.Err(Error.Syntax(what + " is not an absolute path; this server takes '/path?query' and 'http://host/path'"));
+        return Result<Url, Error>.Err(Error.Syntax);
     }
     return url_of("http", name, port, t, what);
 }
@@ -1820,7 +1897,7 @@ pub Result<Response, Error> read_response(io.Stream s, str method) {
         }
         interim = interim + 1;
         if (interim > MAX_INTERIM) {
-            return Result<Response, Error>.Err(Error.TooLarge("the run of interim responses", MAX_INTERIM));
+            return Result<Response, Error>.Err(Error.TooLarge);
         }
     }
 }
@@ -1828,7 +1905,7 @@ pub Result<Response, Error> read_response(io.Stream s, str method) {
 Result<Response, Error> read_one_response(io.Stream s, str method) {
     bytes raw = read_head(s)?;
     if (raw.size() == 0) {
-        return Result<Response, Error>.Err(Error.Closed("the connection closed before any response arrived"));
+        return Result<Response, Error>.Err(Error.Closed);
     }
     List<bytes> lines = head_lines(raw)?;
     List<str> start = status_line(lines[0])?;
@@ -1838,7 +1915,7 @@ Result<Response, Error> read_one_response(io.Stream s, str method) {
         return Result<Response, Error>.Ok(resp);
     }
     if (method == "CONNECT" && resp.code >= 200 && resp.code < 300) {
-        return Result<Response, Error>.Err(Error.Framing("a successful CONNECT turns the connection into a tunnel, which this module does not speak"));
+        return Result<Response, Error>.Err(Error.Framing);
     }
     int len = framing(h)?;
     if (len == -2) {
@@ -1863,7 +1940,7 @@ Result<List<str>, Error> status_line(bytes line) {
             first = i;
         }
         case None: {
-            return Result<List<str>, Error>.Err(Error.Syntax("malformed status line " + quoted(line) + ": it is 'HTTP/1.1 200 OK'"));
+            return Result<List<str>, Error>.Err(Error.Syntax);
         }
     }
     str version = version_of(line.substr(0, first), "status line")?;
@@ -1879,16 +1956,16 @@ Result<List<str>, Error> status_line(bytes line) {
         }
     }
     if (digits.size() != 3) {
-        return Result<List<str>, Error>.Err(Error.Syntax("status code " + quoted(digits) + " is not three digits"));
+        return Result<List<str>, Error>.Err(Error.Syntax);
     }
     for (int c in digits) {
         if (c < '0' || c > '9') {
-            return Result<List<str>, Error>.Err(Error.Syntax("status code " + quoted(digits) + " is not three digits"));
+            return Result<List<str>, Error>.Err(Error.Syntax);
         }
     }
     int bad = bad_value_at(phrase);
     if (bad >= 0) {
-        return Result<List<str>, Error>.Err(Error.Syntax("the reason phrase has " + shown(phrase[bad]) + " in it"));
+        return Result<List<str>, Error>.Err(Error.Syntax);
     }
     str said = "";
     match (phrase.utf8()) {
@@ -1896,7 +1973,7 @@ Result<List<str>, Error> status_line(bytes line) {
             said = t;
         }
         case None: {
-            return Result<List<str>, Error>.Err(Error.Syntax("the reason phrase is not UTF-8"));
+            return Result<List<str>, Error>.Err(Error.Syntax);
         }
     }
     List<str> out = [version, ascii(digits), said];
@@ -2085,7 +2162,22 @@ pub Result<int, Error> serve_conn(net.Conn c, Handler h, int max_requests = MAX_
 // nothing to answer it on.
 Result<int, Error> refuse(net.Conn c, Error e, int served) {
     match (e) {
-        case Transport: {
+        case Refused: {
+            return Result<int, Error>.Ok(served);
+        }
+        case TimedOut: {
+            return Result<int, Error>.Ok(served);
+        }
+        case Unreachable: {
+            return Result<int, Error>.Ok(served);
+        }
+        case Reset: {
+            return Result<int, Error>.Ok(served);
+        }
+        case InUse: {
+            return Result<int, Error>.Ok(served);
+        }
+        case NameNotFound: {
             return Result<int, Error>.Ok(served);
         }
         case Syntax: {
@@ -2174,7 +2266,7 @@ pub Result<int, Error> serve(net.Listener ln, Handler h, int connections = -1, i
                 one_connection(c, h, timeout_ms, max_requests);
             }
             case Err(net.Error e): {
-                return Result<int, Error>.Err(Error.Transport(e));
+                return Result<int, Error>.Err(from_net(e));
             }
         }
         done = done + 1;
@@ -2208,14 +2300,14 @@ Result<void, Error> deadline(net.Conn c, int timeout_ms) {
         case Ok: {
         }
         case Err(net.Error e): {
-            return Result<void, Error>.Err(Error.Transport(e));
+            return Result<void, Error>.Err(from_net(e));
         }
     }
     match (c.set_write_timeout(timeout_ms)) {
         case Ok: {
         }
         case Err(net.Error e): {
-            return Result<void, Error>.Err(Error.Transport(e));
+            return Result<void, Error>.Err(from_net(e));
         }
     }
     return Result<void, Error>.Ok;
@@ -2302,14 +2394,14 @@ Result<Response, Error> exchange(Request req, int timeout_ms) {
                 case Ok: {
                 }
                 case Err(net.Error e): {
-                    return Result<Response, Error>.Err(Error.Transport(e));
+                    return Result<Response, Error>.Err(from_net(e));
                 }
             }
             write_request(c, req)?;
             return read_response(c, req.verb);
         }
         case Err(net.Error e): {
-            return Result<Response, Error>.Err(Error.Transport(e));
+            return Result<Response, Error>.Err(from_net(e));
         }
     }
 }
@@ -2322,15 +2414,15 @@ Result<Request, Error> redirected(Request req, Response resp) {
             where = v.trim();
         }
         case None: {
-            return Result<Request, Error>.Err(Error.Syntax("a " + resp.code.to_str() + " with no Location header field"));
+            return Result<Request, Error>.Err(Error.Syntax);
         }
     }
     if (where == "") {
-        return Result<Request, Error>.Err(Error.Syntax("a " + resp.code.to_str() + " with an empty Location header field"));
+        return Result<Request, Error>.Err(Error.Syntax);
     }
     Url next = resolve(req.loc, where)?;
     if (next.scheme() != req.loc.scheme() || next.host() != req.loc.host() || next.port() != req.loc.port()) {
-        return Result<Request, Error>.Err(Error.BadUrl("this " + resp.code.to_str() + " redirects to " + next.to_str() + ", which is a different host; this client does not follow a redirect off the origin it was pointed at, because it would forward whatever headers you set to a host you did not name"));
+        return Result<Request, Error>.Err(Error.BadUrl);
     }
     str method = req.verb;
     bytes body = req.payload;
@@ -2363,9 +2455,9 @@ Result<Url, Error> resolve(Url base, str where) {
     }
     if (w.size() > 0 && w[0] == '/') {
         if (bad_target_at(w) >= 0) {
-            return Result<Url, Error>.Err(Error.BadUrl("the Location " + quoted(w) + " has a character that cannot be sent unescaped"));
+            return Result<Url, Error>.Err(Error.BadUrl);
         }
         return url_of(base.scheme(), base.host(), base.port(), w, "the Location " + quoted(w));
     }
-    return Result<Url, Error>.Err(Error.BadUrl("the Location " + quoted(w) + " is a relative reference; this client follows an absolute URL or an absolute path, and resolving a relative one is RFC 3986 §5 and its dot-segment removal"));
+    return Result<Url, Error>.Err(Error.BadUrl);
 }

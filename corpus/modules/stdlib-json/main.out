@@ -38,46 +38,46 @@ null
 ]
 7
 []
-stringify error: Infinity is not JSON serializable
-stringify error: Infinity is not JSON serializable
-error: expected a string key at position 1
-error: unexpected ']' at position 3
-error: unexpected '2' at position 3
-error: expected ':' at position 5
-error: expected a string key at position 7
-error: expected a string key at position 1
-error: unterminated array at position 2
-error: unterminated object at position 6
-error: unterminated string at position 4
-error: incomplete \u escape at position 4
-error: invalid \u escape '12G4' at position 3
-error: invalid escape '\x' at position 2
-error: unterminated escape at position 2
-error: unpaired UTF-16 surrogate in \u escape at position 7
-error: unpaired UTF-16 surrogate in \u escape at position 7
-error: invalid \u escape 'zzzz' at position 9
-error: unpaired UTF-16 surrogate in \u escape at position 7
-error: invalid control character in string at position 2
-error: invalid number: a leading zero cannot be followed by more digits at position 1
-error: invalid number at position 1
-error: invalid number at position 1
-error: invalid number: expected a digit after '.' at position 2
-error: invalid number: expected a digit after '.' at position 2
-error: invalid number: expected a digit in the exponent at position 2
-error: invalid number: expected a digit in the exponent at position 5
-error: unexpected '.' at position 0
-error: unexpected '+' at position 0
-error: unexpected 't' at position 0
-error: unexpected 'n' at position 0
-error: unexpected 'x' at position 4
-error: unexpected end of input at position 0
-error: unexpected end of input at position 3
-error: unexpected 'N' at position 0
-error: unexpected ''' at position 0
-error: unexpected 'é' at position 1
-error: integer out of range at position 0
-error: integer out of range at position 0
-error: unexpected '/' at position 7
+stringify error: nan and infinity are not JSON serializable
+stringify error: nan and infinity are not JSON serializable
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
+error: invalid JSON
 true
 true
 "\b"
@@ -87,16 +87,16 @@ true
 ""
 "񐀀"
 true
-error: maximum nesting depth (10000) exceeded at position 10000
+error: invalid JSON
 10001 with an empty innermost: ok
-error: maximum nesting depth (10000) exceeded at position 10001
-stringify error: nan is not JSON serializable
-stringify error: Infinity is not JSON serializable
-stringify error: Infinity is not JSON serializable
+error: invalid JSON
+stringify error: nan and infinity are not JSON serializable
+stringify error: nan and infinity are not JSON serializable
+stringify error: nan and infinity are not JSON serializable
 "ok é 😀"
 {"é":null}
 3.0
 -0.0
 1e+300
-stringify error: maximum nesting depth (10000) exceeded while writing
+stringify error: maximum nesting depth (10000) exceeded
 2

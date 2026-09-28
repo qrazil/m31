@@ -90,22 +90,22 @@ ok 0
 ok 7
 ok 9223372036854775807
 ok -9223372036854775808
-err the number is above 9223372036854775807, an int's largest value
-err the number is below -9223372036854775808, an int's smallest value
-err the number is above 9223372036854775807, an int's largest value
+err the number is outside an int's range
+err the number is outside an int's range
+err the number is outside an int's range
 err no digits to parse
 err no digits to parse
 err no digits to parse
-err invalid digit ' ' at position 1: surrounding space is not accepted, so trim first
-err invalid digit ' ' at position 0: surrounding space is not accepted, so trim first
-err invalid digit ' ' at position 2: surrounding space is not accepted, so trim first
-err invalid digit 'a' at position 2
-err invalid digit 'a' at position 0
-err invalid digit '.' at position 1
-err invalid digit '-' at position 1
-err invalid digit '_' at position 1
-err invalid digit 'x' at position 1
-err invalid digit byte 0xef at position 0
-err invalid digit byte 0x09 at position 0: surrounding space is not accepted, so trim first
-err invalid digit byte 0x0a at position 1: surrounding space is not accepted, so trim first
+err invalid digit
+err invalid digit
+err invalid digit
+err invalid digit
+err invalid digit
+err invalid digit
+err invalid digit
+err invalid digit
+err invalid digit
+err invalid digit
+err invalid digit
+err invalid digit
 parse_int agrees with the built-in

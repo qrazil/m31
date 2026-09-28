@@ -50,7 +50,7 @@ unquote(a+b, plus: false) = a+b
 unquote(a+b, plus: true) = a b
 unquote(a%2Bb, plus: true) = a+b
 unquote(caf%C3%A9, plus: false) = café
-unquote(%ff, plus: false) = percent-decoding '%ff' gave bytes that are not UTF-8
-unquote(%zz, plus: false) = the text has a percent escape that is not two hex digits: '%zz'
-unquote(100%, plus: false) = the text ends in an incomplete percent escape
+unquote(%ff, plus: false) = the message is not well-formed HTTP
+unquote(%zz, plus: false) = the message is not well-formed HTTP
+unquote(100%, plus: false) = the message is not well-formed HTTP
 round trip: true via a%20b%2Fc%3Fd%26e%3Df%2Bg~h.i_j-k%25l%20caf%C3%A9

@@ -292,6 +292,35 @@ impl TypeDef {
             && self.destructor.is_none()
             && self.fields.is_empty()
     }
+
+    /// Whether variant `tag` of this **boxed** enum has no payload, and can
+    /// therefore be one shared static instance rather than a fresh
+    /// allocation per construction (docs/perf-board.md item 5).
+    ///
+    /// A value enum already pays nothing to construct -- it is a plain
+    /// struct, not an object -- so this only matters for a boxed one, which
+    /// otherwise calls `rt_alloc` for every construction regardless of
+    /// whether the tag has anything to distinguish one value from another. A
+    /// payload-free variant has none, by the same argument
+    /// `is_immortal_singleton` makes for a field-less type: nothing about it
+    /// can differ between two constructions, so one shared object serves
+    /// every one of them. `Option.None` is the case this exists for -- it is
+    /// constructed constantly, and `Option<T>` is boxed whenever `T` is a
+    /// reference.
+    ///
+    /// Excluded exactly as `is_immortal_singleton` excludes a destructor:
+    /// an immortal is never dropped, so a guard variant's effect would never
+    /// run.
+    pub fn is_immortal_variant(&self, tag: usize) -> bool {
+        self.is_enum
+            && !self.is_value
+            && self.destructor.is_none()
+            && self
+                .variants
+                .get(tag)
+                .map(|v| v.payload.is_empty())
+                .unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -30,25 +30,25 @@ ok A
 ok A
 ok AB
 ok AB
-error: base64 text length 3 is not a multiple of 4
-error: base64 padding at position 2 is followed by data at position 3
-error: invalid base64 character '-' at position 3: that is the URL-safe alphabet, which is url: true
-error: invalid base64 character '_' at position 3: that is the URL-safe alphabet, which is url: true
-error: invalid base64 character '+' at position 3: that is the standard alphabet, and url: true is the URL-safe one
-error: invalid base64 character '/' at position 3: that is the standard alphabet, and url: true is the URL-safe one
-error: invalid base64 character ' ' at position 2
-error: invalid base64 byte 0x0a at position 4
-error: invalid base64 byte 0xc3 at position 4
-error: base64 text ends in 3 padding characters at position 1; at most 2 are allowed
-error: base64 text ends in 4 padding characters at position 0; at most 2 are allowed
-error: base64 padding at position 2 is followed by data at position 4
-error: base64 text length 1 is not a multiple of 4
-error: invalid base64 character '!' at position 2
-error: base64 text length 3 is not a multiple of 4
+error: base64 text length is not a multiple of 4
+error: base64 padding is followed by more data
+error: invalid base64 character
+error: invalid base64 character
+error: invalid base64 character
+error: invalid base64 character
+error: invalid base64 character
+error: invalid base64 character
+error: invalid base64 character
+error: base64 text ends in more than 2 padding characters
+error: base64 text ends in more than 2 padding characters
+error: base64 padding is followed by more data
+error: base64 text length is not a multiple of 4
+error: invalid base64 character
+error: base64 text length is not a multiple of 4
 ok 01
 ok 414243ff
 ok fbff
-length was 3
+length
 140
 VGhlIHF1aWNrIGJyb3duIGZveCDDgMOBw4LDgyDDv8O+IOaXpeacrOiqniDwn5iAIH4hQCMkJV4mKigpXyt7fXw6PD4/
 VGhlIHF1aWNrIGJyb3duIGZveCDDgMOBw4LDgyDDv8O-IOaXpeacrOiqniDwn5iAIH4hQCMkJV4mKigpXyt7fXw6PD4_

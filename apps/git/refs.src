@@ -30,48 +30,51 @@ import text;
 import object;
 import repo;
 
-/// Why a name did not resolve.
+/// Why a name did not resolve. Payload-free (docs/errors-decision.md §4):
+/// the ref name, the underlying `io.Error`, or which kind a tag chain ended
+/// at is context the caller already has -- it passed the name in -- when it
+/// reports.
 pub enum Error {
     /// The file or the line is not there.
-    NotFound(str);
+    NotFound;
     /// A ref file exists and could not be read.
-    Io(str, io.Error);
+    Io;
     /// A ref file holds neither an object name nor `ref: <name>`.
-    Malformed(str, str);
+    Malformed;
     /// Symbolic refs pointing at each other, or nested deeper than git's own
     /// limit of five.
-    TooDeep(str);
+    TooDeep;
     /// `rev_parse` found nothing of that name, under any of the prefixes it
     /// tries.
-    Unknown(str);
+    Unknown;
     /// A short object name matching more than one object.
-    Ambiguous(str, int);
+    Ambiguous;
     /// A tag chain that never reaches a commit.
-    NotACommit(str, str);
+    NotACommit;
 }
 
 pub str Error.to_str() {
     match (this) {
-        case NotFound(str name): {
-            return "no ref named " + name;
+        case NotFound: {
+            return "no ref of that name";
         }
-        case Io(str name, io.Error e): {
-            return "ref " + name + ": " + e.to_str();
+        case Io: {
+            return "the ref file could not be read";
         }
-        case Malformed(str name, str what): {
-            return "ref " + name + " holds `" + what + "`, which is neither an object name nor `ref: <name>`";
+        case Malformed: {
+            return "the ref holds neither an object name nor `ref: <name>`";
         }
-        case TooDeep(str name): {
-            return "symbolic refs from " + name + " go more than 5 deep, or round in a circle";
+        case TooDeep: {
+            return "symbolic refs go more than 5 deep, or round in a circle";
         }
-        case Unknown(str spec): {
-            return "unknown revision or object name: " + spec;
+        case Unknown: {
+            return "unknown revision or object name";
         }
-        case Ambiguous(str spec, int n): {
-            return "`" + spec + "` is ambiguous: " + n.to_str() + " loose objects begin with it";
+        case Ambiguous: {
+            return "that short name is ambiguous: more than one loose object begins with it";
         }
-        case NotACommit(str spec, str kind): {
-            return spec + " names a " + kind + ", not a commit";
+        case NotACommit: {
+            return "that name is not a commit";
         }
     }
 }
@@ -141,7 +144,7 @@ pub Result<Head, Error> head(str gitdir) {
     if (object.is_name(raw) && raw.size() == 40) {
         return Result<Head, Error>.Ok(Head.Detached(raw));
     }
-    return Result<Head, Error>.Err(Error.Malformed("HEAD", raw));
+    return Result<Head, Error>.Err(Error.Malformed);
 }
 
 /// Is there a ref of this name at all -- a loose file, or a packed line?
@@ -174,7 +177,7 @@ pub Result<str, Error> resolve(str gitdir, str name) {
                         return Result<str, Error>.Ok(v);
                     }
                     case None: {
-                        return Result<str, Error>.Err(Error.NotFound(at));
+                        return Result<str, Error>.Err(Error.NotFound);
                     }
                 }
             }
@@ -185,10 +188,10 @@ pub Result<str, Error> resolve(str gitdir, str name) {
         } else if (object.is_name(raw) && raw.size() == 40) {
             return Result<str, Error>.Ok(raw);
         } else {
-            return Result<str, Error>.Err(Error.Malformed(at, raw));
+            return Result<str, Error>.Err(Error.Malformed);
         }
     }
-    return Result<str, Error>.Err(Error.TooDeep(name));
+    return Result<str, Error>.Err(Error.TooDeep);
 }
 
 /// Every ref in the repository, loose and packed, sorted by name. A loose
@@ -261,7 +264,7 @@ pub Result<str, Error> rev_parse(str gitdir, str spec) {
         return Result<str, Error>.Ok(hits[0]);
     }
     if (hits.size() > 1) {
-        return Result<str, Error>.Err(Error.Ambiguous(spec, hits.size()));
+        return Result<str, Error>.Err(Error.Ambiguous);
     }
     List<str> tries = [spec, "refs/" + spec, "refs/tags/" + spec, "refs/heads/" + spec, "refs/remotes/" + spec, "refs/remotes/" + spec + "/HEAD"];
     for (str name in tries) {
@@ -276,7 +279,7 @@ pub Result<str, Error> rev_parse(str gitdir, str spec) {
             }
         }
     }
-    return Result<str, Error>.Err(Error.Unknown(spec));
+    return Result<str, Error>.Err(Error.Unknown);
 }
 
 /// Follow annotated tags until something that is not a tag, then insist it is
@@ -296,19 +299,19 @@ pub Result<str, Error> peel(str gitdir, str spec, str id) {
                         return Result<str, Error>.Ok(at);
                     }
                     case Blob: {
-                        return Result<str, Error>.Err(Error.NotACommit(spec, "blob"));
+                        return Result<str, Error>.Err(Error.NotACommit);
                     }
                     case Tree: {
-                        return Result<str, Error>.Err(Error.NotACommit(spec, "tree"));
+                        return Result<str, Error>.Err(Error.NotACommit);
                     }
                 }
             }
             case Err: {
-                return Result<str, Error>.Err(Error.NotFound(at));
+                return Result<str, Error>.Err(Error.NotFound);
             }
         }
     }
-    return Result<str, Error>.Err(Error.TooDeep(spec));
+    return Result<str, Error>.Err(Error.TooDeep);
 }
 
 // --- reading the files -------------------------------------------------------
@@ -323,9 +326,9 @@ Result<str, Error> contents(str gitdir, str name) {
         }
         case Err(io.Error e): {
             if (!fs.exists(path)) {
-                return Result<str, Error>.Err(Error.NotFound(name));
+                return Result<str, Error>.Err(Error.NotFound);
             }
-            return Result<str, Error>.Err(Error.Io(name, e));
+            return Result<str, Error>.Err(Error.Io);
         }
     }
 }

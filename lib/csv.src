@@ -56,19 +56,18 @@
 
 /// A separator that cannot be one: it must be a single ASCII character, and
 /// not one the format already gives a meaning -- a quote, CR or LF.
+/// Payload-free (docs/errors-decision.md §4): which string was offered is
+/// context the caller already has when it reports.
 pub enum Error {
-    Separator(str);
+    Separator;
 }
 
 /// A sentence saying what was wrong. A method named `to_str`, so `print(e)`
 /// prints it.
 pub str Error.to_str() {
     match (this) {
-        case Separator(str sep): {
-            if (sep.size() != 1 || sep.byte_at(0) > 127) {
-                return "csv separator must be one ASCII character, not \"" + sep + "\"";
-            }
-            return "csv separator may not be a quote or a line break: the format already gives those a meaning";
+        case Separator: {
+            return "csv separator must be one ASCII character, and not a quote or a line break";
         }
     }
 }
@@ -221,11 +220,11 @@ str quoted(str cell, str sep) {
 // document anything could read back.
 Result<int, Error> separator(str sep) {
     if (sep.size() != 1) {
-        return Result<int, Error>.Err(Error.Separator(sep));
+        return Result<int, Error>.Err(Error.Separator);
     }
     int c = sep.byte_at(0);
     if (c > 127 || c == '"' || c == '\r' || c == '\n') {
-        return Result<int, Error>.Err(Error.Separator(sep));
+        return Result<int, Error>.Err(Error.Separator);
     }
     return Result<int, Error>.Ok(c);
 }
