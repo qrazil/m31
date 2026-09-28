@@ -1809,6 +1809,29 @@ set and can afford to, because its linter flags the longhand and points at
 the short one; without that arbiter, one operation with two spellings is the
 thing this language is arranged not to have.
 
+**Pinned, not closed, 2026-09-28: this is conditional on there being no
+arbiter.** If a linter is ever built, it removes the actual objection —
+"nothing here could choose between them" stops being true — and `+=`
+becomes a question of whether the shortening is worth a linter rule, not
+whether two spellings can coexist safely. Revisit then, not before.
+
+**The same reasoning, and the same pin, applies to declaring more than one
+variable per statement** — `int a = 1, b = 2;` against two separate
+declarations. It is the identical shape: same result, same order, no
+capability the comma form has that two lines lack, and nothing to push a
+codebase toward one over the other. It is weaker than the case for `+=`,
+not equal to it — there is no 515-statement saving to weigh against the
+cost, only the cost. Two further reasons specific to this language, found
+2026-09-28: the required-`const` gate (`docs/const-decision.md`) wants to
+name one binding per diagnostic, and a comma list raises a question with no
+good answer — does `const` in front of it bind to every name or can they
+differ; and the `const` block already spends the shape `IDENT, IDENT, {`
+on a different meaning, so a reader would need to look past the comma to
+tell which construct they are in. Also pinned on a linter existing, for the
+same reason: an arbiter removes the "nothing chooses between them"
+objection, not the readability ones, so it is a smaller reopening than
+`+=`'s.
+
 There is no unsigned type. A `uint64` algorithm is written on `int` with the
 bit operators and the wrapping methods — equal bits, and the one difference,
 the logical right shift, is the mask above.
@@ -2399,7 +2422,11 @@ Stated so the absence is a decision and not an oversight:
     name rather than reported as a surprising `=`
   - **augmented assignment** — no `+=`, `-=`, `*=`, `/=`, `%=`, and
     therefore none of `&=` `|=` `^=` `<<=` `>>=` either (§6.1, which has the
-    reasoning and the numbers). Writing one is diagnosed by name
+    reasoning and the numbers). Writing one is diagnosed by name. **Pinned,
+    not closed** — the objection is the absence of an arbiter between two
+    legal spellings; if a linter is ever built, revisit
+  - **more than one variable declared per statement** — `int a = 1, b = 2;`
+    is refused for the same reason as `+=`, and the same pin (§6.1)
   - a range as a **value**: `a .. b` is `for` syntax and nothing else, so
     there is no range type, no iterator protocol and no step (§5.5)
   - `_`, for a binding that is not used — a `match` arm that reads no part
