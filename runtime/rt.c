@@ -881,22 +881,13 @@ static int64_t *slots(Obj *o) {
     return is_list(o) ? ((Lst *)o)->data : ((Arr *)o)->data;
 }
 
-int64_t rt_len_of(Obj *o) {
-    return is_list(o) ? ((Lst *)o)->len : ((Arr *)o)->len;
-}
-
-int64_t rt_index_get(Obj *o, int64_t i) {
-    int64_t n = rt_len_of(o);
-    if (i < 0 || i >= n) rt_trap("index out of range");
-    return slots(o)[i];
-}
-
-void rt_index_set(Obj *o, int64_t i, int64_t v) {
-    rt_check_mutable(o);
-    int64_t n = rt_len_of(o);
-    if (i < 0 || i >= n) rt_trap("index out of range");
-    slots(o)[i] = v;
-}
+/* rt_len_of, rt_index_get and rt_index_set moved to rt.h as `static inline`
+ * (docs/perf-board.md item 1): included by the emitted C, they are in the
+ * SAME translation unit as the caller there, so gcc/clang can inline the
+ * bounds check and the dereference instead of calling out to this one. They
+ * stay declared here too, in the sense that `is_list`/`slots` above exist for
+ * rt.c's OWN internal callers (rt_seq_clone and friends, below), which have
+ * no reason to duplicate the header's inline logic. */
 
 void rt_list_push(Obj *o, int64_t v) {
     rt_check_mutable(o);
@@ -1323,24 +1314,8 @@ Obj *rt_bytes_fill(int64_t n, int64_t v) {
     return (Obj *)b;
 }
 
-int64_t rt_bytes_len(Obj *o) {
-    return ((Bytes *)o)->len;
-}
-
-int64_t rt_bytes_get(Obj *o, int64_t i) {
-    Bytes *b = (Bytes *)o;
-    if (i < 0 || i >= b->len) rt_trap("index out of range");
-    return b->data[i];
-}
-
-/* The index is checked before the value, the order a reader sees them in
- * `b[i] = v`. */
-void rt_bytes_set(Obj *o, int64_t i, int64_t v) {
-    rt_check_mutable(o);
-    Bytes *b = (Bytes *)o;
-    if (i < 0 || i >= b->len) rt_trap("index out of range");
-    b->data[i] = as_byte(v);
-}
+/* rt_bytes_len, rt_bytes_get and rt_bytes_set moved to rt.h as `static
+ * inline`, for the same reason as rt_index_get/rt_index_set above. */
 
 void rt_bytes_push(Obj *o, int64_t v) {
     rt_check_mutable(o);

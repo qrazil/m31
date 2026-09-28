@@ -1104,6 +1104,10 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
                     // word whatever the element type is.
                     ("rt_chan_send", 1)
                     | ("rt_index_set", 2)
+                    // The hoisted-pointer accessor (src/hoist.rs,
+                    // "rt_index_set_at(o, ptr, len, i, v)"): same value,
+                    // shifted two slots by the extra `ptr`/`len` arguments.
+                    | ("rt_index_set_at", 4)
                     | ("rt_list_push", 1)
                     | ("rt_list_insert", 2)
                     | ("rt_seq_contains", 1)
@@ -1129,6 +1133,7 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
                         func.as_str(),
                         "rt_chan_recv"
                             | "rt_index_get"
+                            | "rt_index_get_at"
                             | "rt_list_pop"
                             | "rt_list_remove_at"
                             | "rt_map_get"

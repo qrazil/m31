@@ -429,9 +429,96 @@ Obj *rt_list_repeat(int64_t n, int64_t fill, bool elems_are_refs);
 Obj *rt_array_blank(int64_t len, bool elems_are_refs);
 void rt_array_put(Obj *o, int64_t i, int64_t v);
 
-int64_t rt_len_of(Obj *o);            /* works for both */
-int64_t rt_index_get(Obj *o, int64_t i);
-void    rt_index_set(Obj *o, int64_t i, int64_t v);
+/* Forward declaration: the full comment is with the checked arithmetic
+ * further down, which traps the same way. Needed here, attribute and all,
+ * because `a[i]` traps above that point in the file. */
+__attribute__((cold)) _Noreturn void rt_trap(const char *msg);
+
+/* `a[i]` read, write, and `.size()` -- docs/perf-board.md item 1, measured in
+ * apps/git/FRICTION.md §5: `static inline`, like the checked arithmetic
+ * further down and for the same reason. This header is included by the
+ * emitted C, so these are in the SAME translation unit as the caller, and
+ * gcc/clang can inline the bounds check and the pointer arithmetic away
+ * entirely -- calling out to rt.c instead, as this used to, is what the
+ * no-LTO gate (file comment, top) forbids inlining. Inlining the accessor is
+ * most of item 1's win by itself; hoisting the length and the pointer THEMSELVES
+ * across a loop turned out to need help beyond inlining -- gcc/clang do not
+ * do it on their own even then, measured (see rt_index_get's comment,
+ * below) -- so src/hoist.rs does it explicitly, in the IR, after lowering.
+ *
+ * The trap stays out of line and cold (rt_trap, below), so the path where
+ * nothing traps -- the only one that runs in a tight loop -- is a handful of
+ * straight-line instructions with no call in it.
+ *
+ * Array and List share a layout up to `len` (see the comment above), so one
+ * pair of accessors serves both; the compiler that emits the call already
+ * knows which it has, but the runtime does not need to -- it only needs to
+ * find the elements. */
+static inline int64_t rt_len_of(Obj *o) {
+    bool is_list = o->ty == &rt_lst_val_type || o->ty == &rt_lst_ref_type;
+    return is_list ? ((Lst *)o)->len : ((Arr *)o)->len;
+}
+
+static inline int64_t rt_index_get(Obj *o, int64_t i) {
+    bool is_list = o->ty == &rt_lst_val_type || o->ty == &rt_lst_ref_type;
+    int64_t n = is_list ? ((Lst *)o)->len : ((Arr *)o)->len;
+    if (i < 0 || i >= n) rt_trap("index out of range");
+    /* `restrict`: an element is never stored anywhere the header's own
+     * fields live, so a write through this pointer is never the write that
+     * changes `len` or `ty`. True, and worth saying, but NOT enough on its
+     * own to make gcc/clang hoist `n` and this pointer across a loop that
+     * also calls rt_index_set on the same object: measured present at both
+     * -O2 and -O3 (which adds loop unswitching), gcc and clang, with
+     * `restrict` in place, reduced to a header-plus-inline-array C
+     * repro with no runtime involved at all. `int64_t` is `int64_t`, and
+     * that is apparently enough doubt for the alias oracle even when the
+     * regions provably do not overlap. src/hoist.rs is what actually
+     * hoists these two across such a loop, in the IR, where the object's
+     * SSA identity makes the invariance exact rather than inferred -- see
+     * its file comment for the measurement (~13%, on top of inlining this
+     * accessor in the first place). */
+    int64_t *restrict data = is_list ? ((Lst *)o)->data : ((Arr *)o)->data;
+    return data[i];
+}
+
+static inline void rt_index_set(Obj *o, int64_t i, int64_t v) {
+    rt_check_mutable(o);
+    bool is_list = o->ty == &rt_lst_val_type || o->ty == &rt_lst_ref_type;
+    int64_t n = is_list ? ((Lst *)o)->len : ((Arr *)o)->len;
+    if (i < 0 || i >= n) rt_trap("index out of range");
+    int64_t *restrict data = is_list ? ((Lst *)o)->data : ((Arr *)o)->data;
+    data[i] = v;
+}
+
+/* The other half of "hoist the metadata" (src/hoist.rs): a fixed pointer and
+ * length, read ONCE outside a loop the pass proved safe, rather than
+ * re-derived by rt_index_get/rt_index_set on every element. `ptr` is really
+ * an `int64_t *`, carried as `int64_t` for the same reason a collection's own
+ * slots are (docs/ir-v0.md): the IR has three scalar shapes and a raw
+ * pointer is not one of them, and punning it through the shape it already
+ * has for a machine word costs nothing and adds no fourth one.
+ *
+ * `rt_index_set_at` still takes `o`: the frozen check is NOT part of what
+ * this pass hoists (a `const` block can freeze the object partway through
+ * the loop, docs/const-decision.md's check-hoisting barrier), so it stays a
+ * per-store check exactly as it is in rt_index_set. */
+static inline int64_t rt_seq_data_addr(Obj *o) {
+    bool is_list = o->ty == &rt_lst_val_type || o->ty == &rt_lst_ref_type;
+    int64_t *data = is_list ? ((Lst *)o)->data : ((Arr *)o)->data;
+    return (int64_t)(intptr_t)data;
+}
+
+static inline int64_t rt_index_get_at(int64_t ptr, int64_t len, int64_t i) {
+    if (i < 0 || i >= len) rt_trap("index out of range");
+    return ((int64_t *)(intptr_t)ptr)[i];
+}
+
+static inline void rt_index_set_at(Obj *o, int64_t ptr, int64_t len, int64_t i, int64_t v) {
+    rt_check_mutable(o);
+    if (i < 0 || i >= len) rt_trap("index out of range");
+    ((int64_t *)(intptr_t)ptr)[i] = v;
+}
+
 void    rt_list_push(Obj *o, int64_t v);
 Obj    *rt_seq_clone(Obj *o);         /* shallow copy of an array or list */
 Obj    *rt_seq_slice(Obj *o, int64_t from, int64_t to);  /* the same, of a range */
@@ -471,9 +558,58 @@ extern const TypeInfo rt_bytes_type;
 
 Obj    *rt_bytes_new(int64_t cap);              /* empty, room for `cap` */
 Obj    *rt_bytes_fill(int64_t n, int64_t v);    /* `[v; n]` */
-int64_t rt_bytes_len(Obj *o);
-int64_t rt_bytes_get(Obj *o, int64_t i);
-void    rt_bytes_set(Obj *o, int64_t i, int64_t v);
+
+/* Inline for the same reason as rt_index_get/rt_index_set above -- SHA-1's
+ * message schedule is exactly this accessor, 480 times per 64 octets
+ * hashed (apps/git/FRICTION.md §5). */
+static inline int64_t rt_bytes_len(Obj *o) {
+    return ((Bytes *)o)->len;
+}
+
+static inline int64_t rt_bytes_get(Obj *o, int64_t i) {
+    Bytes *b = (Bytes *)o;
+    int64_t n = b->len;
+    if (i < 0 || i >= n) rt_trap("index out of range");
+    /* `restrict`, for the reason given on rt_index_get above: `uint8_t` gets
+     * the "may alias anything" exception in the standard, which is the
+     * opposite of what hoisting needs -- without this, a write through
+     * ANOTHER bytes' data could look, to gcc, like it might be the write
+     * that changes THIS bytes' `len`. */
+    uint8_t *restrict data = b->data;
+    return data[i];
+}
+
+/* The index is checked before the value, the order a reader sees them in
+ * `b[i] = v`. */
+static inline void rt_bytes_set(Obj *o, int64_t i, int64_t v) {
+    rt_check_mutable(o);
+    Bytes *b = (Bytes *)o;
+    int64_t n = b->len;
+    if (i < 0 || i >= n) rt_trap("index out of range");
+    if (v < 0 || v > 255) rt_trap("byte value out of range 0..255");
+    uint8_t *restrict data = b->data;
+    data[i] = (uint8_t)v;
+}
+
+/* The `bytes` half of src/hoist.rs's "hoist the metadata" -- see
+ * rt_seq_data_addr/rt_index_get_at/rt_index_set_at above, same idea, one
+ * octet at a time instead of one word. */
+static inline int64_t rt_bytes_data_addr(Obj *o) {
+    return (int64_t)(intptr_t)((Bytes *)o)->data;
+}
+
+static inline int64_t rt_bytes_get_at(int64_t ptr, int64_t len, int64_t i) {
+    if (i < 0 || i >= len) rt_trap("index out of range");
+    return ((uint8_t *)(intptr_t)ptr)[i];
+}
+
+static inline void rt_bytes_set_at(Obj *o, int64_t ptr, int64_t len, int64_t i, int64_t v) {
+    rt_check_mutable(o);
+    if (i < 0 || i >= len) rt_trap("index out of range");
+    if (v < 0 || v > 255) rt_trap("byte value out of range 0..255");
+    ((uint8_t *)(intptr_t)ptr)[i] = (uint8_t)v;
+}
+
 void    rt_bytes_push(Obj *o, int64_t v);
 int64_t rt_bytes_pop(Obj *o);
 void    rt_bytes_clear(Obj *o);
@@ -593,9 +729,14 @@ void rt_spawn(void *(*entry)(void *), void *arg);
 void rt_wait_all(void);
 
 /* Aborts with "trap: <msg>" on stderr and exit status 134 (SIGABRT).
- * Out-of-line and _Noreturn so the checks below stay cheap: the compiler
- * treats the trap edge as cold and keeps the hot path straight. */
-_Noreturn void rt_trap(const char *msg);
+ * Out-of-line and _Noreturn so the checks below stay cheap. `cold` too, not
+ * just _Noreturn -- docs/const-decision.md, "Cost, measured": gcc counted an
+ * un-attributed trap call against the size of every function that reaches it
+ * and stopped inlining the caller, a 70% slowdown that `__attribute__((cold))`
+ * on rt_frozen_trap (above) fixed outright. `a[i]`'s bounds check (rt.h,
+ * rt_index_get/rt_index_set/rt_bytes_get/rt_bytes_set) reaches this one on
+ * every element access, so it gets the same attribute for the same reason. */
+__attribute__((cold)) _Noreturn void rt_trap(const char *msg);
 
 /* Traps unless `o` is the only reference to its object.
  *
