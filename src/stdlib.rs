@@ -21,6 +21,7 @@ pub fn source(name: &str) -> Option<&'static str> {
     Some(match name {
         "base64" => include_str!("../lib/base64.src"),
         "csv" => include_str!("../lib/csv.src"),
+        "diff" => include_str!("../lib/diff.src"),
         "html" => include_str!("../lib/html.src"),
         "http" => include_str!("../lib/http.src"),
         "io" => include_str!("../lib/io.src"),

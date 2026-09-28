@@ -193,6 +193,10 @@ fi
 
 source apps/git/test_write.sh
 
+# --- the line diff, against real diff -u and git diff --------------------------
+
+source apps/git/test_hunks.sh
+
 echo
 if [ $fail -eq 0 ]; then
     printf '\033[32mall %d apps/git checks passed\033[0m\n' "$pass"
