@@ -117,6 +117,45 @@ neither `oro` nor this repo needs it, since neither has ever been packed);
 stage-2 list (`Gauge`, `Sparkline`, `BarChart`, `Chart`) and mouse support,
 none of which a keyboard-driven, document-shaped client needs.
 
+## Starting the client, 2026-09-28
+
+Checked before starting: no line-diff algorithm exists anywhere in this
+codebase. `apps/tui`'s `DiffView` only renders a `Hunk`/`Line` sequence —
+nothing computes one from two texts. That's load-bearing for hunk-level
+staging, Magit's whole interaction model, so it's a foundational piece on
+its own rather than something the client builds inline.
+
+Split into two tracks:
+
+  - **The diff algorithm** — a line-based edit script (Myers or similar),
+    grouped into hunks with context, matching `tuidiffview`'s existing
+    `Hunk`/`Line` shape, plus git's own binary-file heuristic (a NUL byte
+    in the first several KB) so a binary diff reports as one rather than
+    garbling. Self-contained; the client doesn't need it to get started.
+  - **The client** — the document (outline sections for untracked,
+    unstaged, staged, recent commits, populated from `status.status()` and
+    the existing log/object read side), whole-file stage/unstage (already
+    buildable from `index.src`/`object.src`), commit via `$EDITOR` for the
+    message (matching real git's own fallback when `-m` isn't given, and
+    sidestepping a dependency on `TextInput`, which `apps/tui` deferred for
+    lack of a caller — this is that caller, later, not now), and the loop
+    wiring the outline, the jump list, the footer and the which-key overlay
+    together per the locked design above.
+
+**Hunk-level diff display and staging wait on the diff-algorithm track**
+and land as a follow-up once both exist — the client's first cut stages
+whole files only, which is also where Magit itself starts before hunk
+granularity.
+
+**Also out of scope for this wave, each a separate, real gap:** push/pull
+(no git network protocol — smart HTTP or SSH — exists in this codebase at
+all); branch switching or checkout (no "write the working tree from a
+tree" primitive exists); rebase or merge; packfiles (already tracked).
+
+**Safety, same as the write-path work:** every test runs against a
+disposable fixture built and destroyed by the test itself, with real `git`
+as the oracle — never a real repository, including this one.
+
 ## What this deliberately does not decide yet
 
   - Exact keybindings (mnemonic, one key per base verb, is the only
