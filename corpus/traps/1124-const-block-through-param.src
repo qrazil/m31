@@ -1,0 +1,18 @@
+// A `const` block freezes an object in place; a change through an alias the
+// compiler cannot see -- a parameter -- traps at run time exactly the way a
+// permanent `const` does (docs/const-decision.md, "`const` is also a
+// block").
+
+void grow(List<int> xs) {
+    xs.push(4);
+}
+
+void run() {
+    List<int> buf = [1, 2, 3];
+    const buf {
+        grow(buf);
+    }
+    print(buf.size());
+}
+
+run();

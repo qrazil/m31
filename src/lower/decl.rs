@@ -495,6 +495,7 @@ impl Lowerer {
         // function's block list out of the next one's, where its number would
         // name a different value entirely.
         self.stmt_temps.clear();
+        self.freezes.clear();
         self.synth = 0;
         self.cur = 0;
         self.ret_ty = f.ret;
@@ -585,6 +586,7 @@ impl Lowerer {
                 ));
             }
             self.release_all();
+            self.restore_freezes_to(0);
             self.terminate(Term::Ret { val: None });
         }
         self.scopes.pop();

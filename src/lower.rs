@@ -97,6 +97,10 @@ struct LoopCtx {
     /// Scope depth at the top of the loop body. `break`/`continue` must
     /// release every scope inside this one before jumping.
     depth: usize,
+    /// `freezes.len()` at the top of the loop body. `break`/`continue` must
+    /// restore any `const` block frozen since -- but not one that encloses
+    /// the whole loop -- for the same reason `depth` exists, one space over.
+    freeze_depth: usize,
     /// Whether any `break` leaves this loop. A `while (true)` that nothing
     /// breaks out of never finishes, so what follows it is unreachable.
     broke: bool,
@@ -215,6 +219,17 @@ pub struct Lowerer {
     owned: Vec<Vec<String>>,
     /// Owned temporaries produced while lowering the current statement.
     stmt_temps: Vec<Value>,
+    /// Objects currently frozen by an active `const` block, innermost last:
+    /// the object and the bool `rt_freeze_enter` returned for it, which
+    /// `rt_freeze_leave` needs to decide whether to actually clear the flag
+    /// again (docs/const-decision.md, "Corrected 2026-09-27" -- restore,
+    /// don't unconditionally clear). Popped back to its length on entry once
+    /// `lower_const_block` returns, so it never outlives the Rust call that
+    /// pushed it -- the same discipline `scopes` and `owned` already keep.
+    /// `return`, `break`, `continue` and `?` leave one or more `const`
+    /// blocks without unwinding this call stack, so each of those emits the
+    /// restoring calls itself (`restore_freezes_to`) before jumping.
+    freezes: Vec<(Value, Value)>,
     loops: Vec<LoopCtx>,
     /// The loop variables of the `for` loops currently being lowered,
     /// innermost last. They are bound `const`, like any other name that
@@ -809,6 +824,7 @@ impl Lowerer {
             scopes: Vec::new(),
             owned: Vec::new(),
             stmt_temps: Vec::new(),
+            freezes: Vec::new(),
             loops: Vec::new(),
             loop_vars: Vec::new(),
             synth: 0,
@@ -1381,6 +1397,7 @@ fn stmt_span(s: &Stmt) -> Span {
         | Stmt::SetIndex { span, .. }
         | Stmt::SetField { span, .. }
         | Stmt::Match { span, .. }
-        | Stmt::If { span, .. } => *span,
+        | Stmt::If { span, .. }
+        | Stmt::ConstBlock { span, .. } => *span,
     }
 }

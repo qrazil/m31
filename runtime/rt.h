@@ -218,6 +218,26 @@ static inline void rt_check_mutable(Obj *o) {
     if (__builtin_expect((o->rc & RC_FLAGS) != 0, 0)) rt_frozen_trap(o->rc);
 }
 
+/* A `const` BLOCK's runtime half (docs/const-decision.md, "`const` is also a
+ * block"): freeze `o` for a lexical region rather than for good. The
+ * mechanism is exactly the one docs/reentrancy-decision.md already uses for
+ * RC_SORTING/RC_PROBING -- mark, trap on reentrant mutation through
+ * rt_check_mutable and rt_frozen_trap above, restore -- applied to RC_FROZEN
+ * instead.
+ *
+ * rt_freeze_enter sets the flag and reports whether IT did: false when `o`
+ * arrived already frozen (a module constant, or an enclosing `const` block),
+ * including immortal. The compiler emits one call per named value on entry
+ * to the block and passes what it returned straight to rt_freeze_leave on
+ * every path out -- normal fall-through, `return`, `break`, `continue`, and
+ * `?` propagation -- which clears the flag only if this call was the one
+ * that set it. That is "restore, don't unconditionally clear": freezing a
+ * value that was already const is then a no-op rather than a temporary hole
+ * in its guarantee. Nothing calls this pair for a trap: nothing runs after
+ * one, so nothing depends on the flag. */
+bool rt_freeze_enter(Obj *o);
+void rt_freeze_leave(Obj *o, bool took);
+
 /* Allocate `size` bytes of object, refcount 1, with the given drop function
  * (NULL if the type holds no references). The header is initialised; the
  * caller fills in the rest. */

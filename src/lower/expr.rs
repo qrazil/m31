@@ -430,6 +430,7 @@ impl Lowerer {
         let pending = self.stmt_temps.clone();
         self.flush_temps();
         self.release_all();
+        self.restore_freezes_to(0);
         self.terminate(Term::Ret { val: Some(out) });
         self.stmt_temps = pending;
 

@@ -1,0 +1,18 @@
+// Several names at once, comma-separated, no parentheses -- the `{` closes
+// the list (docs/const-decision.md, "`const` is also a block").
+//
+// `x` and `y` are plain `int`s: there is no header to freeze, so this
+// exercises only the compile-time half -- reassigning either inside the
+// block is refused, and both are ordinary mutable locals again once it ends.
+void run() {
+    int x = 10;
+    int y = 20;
+    const x, y {
+        print(x + y);
+    }
+    x = 99;
+    y = 1;
+    print(x + y);
+}
+
+run();

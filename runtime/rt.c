@@ -278,6 +278,19 @@ static void rc_guard_drop(Obj *o, long bit, bool took) {
     if (took) o->rc &= ~bit;
 }
 
+/* A `const` block's runtime half (docs/const-decision.md, "`const` is also a
+ * block"; rt.h has the full comment). Thin wrappers over the guard above,
+ * applied to RC_FROZEN instead of RC_SORTING/RC_PROBING: the compiler is the
+ * caller here, one call per name on entry and on every exit, rather than the
+ * runtime bracketing its own callback. */
+bool rt_freeze_enter(Obj *o) {
+    return rc_guard_take(o, RC_FROZEN);
+}
+
+void rt_freeze_leave(Obj *o, bool took) {
+    rc_guard_drop(o, RC_FROZEN, took);
+}
+
 const TypeInfo rt_str_type = { NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
 
 Obj *rt_alloc_immortal(size_t size, const TypeInfo *ty) {

@@ -81,6 +81,24 @@ impl Lowerer {
         unreachable!("rebind of unknown name");
     }
 
+    /// Set `name`'s `is_const` bit in whichever scope binds it, returning
+    /// what it was. A `const` block flips this to `true` on entry and
+    /// restores the returned value on exit -- restore, not unconditionally
+    /// clear, so freezing a local that is already `const` (or already inside
+    /// an enclosing `const` block) is a no-op rather than a temporary hole
+    /// (docs/const-decision.md, "`const` is also a block"). This is the
+    /// entire reuse of the existing const-mutation check: `refuse_const_write`
+    /// and `Stmt::Assign` both read this same bit through `binding`, so
+    /// scoping it to a region needs no change to either.
+    pub(super) fn set_const_flag(&mut self, name: &str, is_const: bool) -> bool {
+        for s in self.scopes.iter_mut().rev() {
+            if let Some(slot) = s.get_mut(name) {
+                return std::mem::replace(&mut slot.2, is_const);
+            }
+        }
+        unreachable!("set_const_flag of unknown name")
+    }
+
     /// The path of field indices to reach `name` from `tid`, promoting
     /// through embedded fields. Empty prefix means a direct field.
     ///
