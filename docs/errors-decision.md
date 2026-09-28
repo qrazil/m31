@@ -254,29 +254,99 @@ new: the existing value-enum rule already lays out a payload-free enum as a
 bare `{ tag: int64 }`, 8 bytes, once every variant qualifies. No new 64-bit
 id type was needed for these.
 
-**`io.Error`, `net.Error` and `term.Error` are the exception, and they are
+**`io.Error`, `net.Error` and `term.Error` were the exception, and they are
 the ones that matter most in practice** — every file and socket operation
 returns one. Their `Other(int)` errno-passthrough variant was left with a
 real payload rather than folded into the class/code scheme this section
-describes, so these three stay 16-byte value enums and `Result<T, io.Error>`
-stays 24 bytes: still boxed, still returned through memory, the exact ABI
-cliff this decision exists to clear.
+describes, so these three stayed 16-byte value enums and `Result<T,
+io.Error>` stayed 24 bytes: still boxed, still returned through memory, the
+exact ABI cliff this decision exists to clear.
 
-The reason is mechanical, not a judgement call: today an enum variant's tag
-is always a compile-time constant equal to declaration order. The
-class/code scheme needs the OS variant's tag to be a *runtime-computed*
-value (`class << 32 | errno`), which needs new construction and
-match-destructuring support for that one variant shape — real, bounded, but
-it touches match-arm codegen, which is central and heavily exercised, and
-was correctly scoped out of the same change that swept the rest of the
-library rather than risked alongside it.
+The reason was mechanical, not a judgement call: an enum variant's tag is
+always a compile-time constant equal to declaration order. The class/code
+scheme needed the OS variant's tag to be a *runtime-computed* value, which
+needed new construction and match-destructuring support for that one
+variant shape — real, bounded, but touching match-arm codegen, which is
+central and heavily exercised, so it was correctly scoped out of the same
+change that swept the rest of the library rather than risked alongside it.
 
-**Open, and now the important remaining piece of this decision**: a
-tag-packing mechanism for a variant whose value is computed at run time
-instead of fixed at compile time, so `io`/`net`/`term`'s errno variant can
-join the rest at 8 bytes. Until it lands, this decision is only fully
-realized for errors that carry no runtime-varying data at all — which is
-most of the stdlib, but not the module everything else calls through.
+##### Done, 2026-09-28: the tag-packing mechanism
+
+**`Other`'s payload now lives inside the tag word, not beside it.** The tag
+is still the compile-time declaration index for every ordinary variant; for
+the one variant this applies to, it is `OS_ERRNO_TAG_BASE | errno` instead,
+with `OS_ERRNO_TAG_BASE = 1 << 32`. No ordinary enum has anywhere near
+four billion declared variants, so the reserved high bit can never collide
+with a real tag, and a plain `tag >= OS_ERRNO_TAG_BASE` test is exactly "is
+this `Other`" — no separate discriminant is needed. This is the shape this
+section originally proposed (`class << 32 | code`), narrowed to what was
+actually missing: a single reserved range on ONE variant of a handful of
+already-frozen enums, not a second error representation living alongside
+per-module enums.
+
+Three places needed to know about it, all gated on one new predicate,
+`TypeDef::os_errno_variant(tag)` (`src/ir.rs`):
+
+  - **Construction** (`Inst::EnumPack`, `src/emit_c.rs`): for this one
+    variant, the tag is computed (`base | (uint32_t)errno`) instead of
+    written as the constant every other variant's tag is.
+  - **Reading the payload back** (`Inst::EnumPayload`, `src/emit_c.rs`): a
+    mask (`tag & 0xFFFFFFFF`) instead of a union read.
+  - **`match` dispatch** (`lower::lower_match`, `src/lower/stmt.rs`): the
+    comparison this arm gets is `tag >= OS_ERRNO_TAG_BASE` instead of
+    `tag == <constant>`, wherever in the arm list it appears — `net.src`'s
+    `error_of` writes `Other` FIRST, `io.src`'s and `term.src`'s `to_str`
+    write it LAST, and both compile to correct dispatch, because the range
+    test and every ordinary equality test are mutually exclusive by
+    construction. `to_str`/message formatting needed no change at all: it
+    already just calls `code.to_str()` on the bound payload, and the
+    payload now arrives the same value through a different read.
+
+The layout change is one line: `emit_enum_body` (`src/emit_c.rs`) skips
+generating a union member for this one variant, exactly as it already skips
+one for every payload-free variant, so `io.Error` — whose ONLY
+payload-carrying variant this is — gets no union at all: `{ int64_t tag; }`,
+8 bytes, measured (§ below).
+
+**Named by exact type, not detected structurally.** The predicate checks
+`io#Error` / `net#Error` / `term#Error` by name, not "a value enum with one
+`int`-payload variant and the rest payload-free" — the corpus has over a
+dozen fixtures with exactly that shape for unrelated reasons
+(`corpus/core/1281`, `1283`, `1285`, `1287`, `1289`, `1291`, ... — each
+deliberately exercising the ordinary value-enum rule on an int payload), and
+a structural rule would have reached into all of them. It would also have
+been unsound in general: a general `int` payload can be negative or exceed
+32 bits, and this packing silently corrupts either. It is exact only because
+a Linux errno is always a small non-negative number, which is a property of
+what `Other` specifically holds, not of "a variant shaped like this."
+`is_immortal_variant` (the sibling mechanism this extends, for an ordinary
+payload-free variant's single shared static instance) is untouched by this
+and is never asked about `Other`: `os_errno_variant` requires `is_value`,
+and `is_immortal_variant` requires `!is_value`, so the two are disjoint by
+construction, matching that a computed-tag variant obviously cannot be
+interned — its value varies by construction.
+
+**Measured**, compiling a program against the real stdlib (`--emit-c`, then
+`sizeof` under gcc, `-O2`, x86-64 System V):
+
+    io.Error                 16 bytes -> 8 bytes
+    Result<int, io.Error>    24 bytes -> 16 bytes
+
+16 bytes is exactly the register-return line `docs/value-enums.md` §3
+measured: `Result<int, io.Error>` now returns in two registers (`rax:rdx`)
+instead of through a caller-allocated stack slot.
+
+**Verified functionally**, not just by size: a program exercising all three
+types' `from_errno`, a genuine kernel-triggered unnamed errno
+(`ENAMETOOLONG` via a 300-character path component, through `io.open`), and
+`match` on the computed variant in first, middle and last position produced
+byte-identical output before and after this change (`gcc -Wall -Wextra`
+clean both times). `./gates.sh` (all 17 gates) and the three application
+suites (`apps/markdown`, `apps/git`, `apps/tui`) pass unchanged.
+
+This decision is now fully realized: every error type in the stdlib,
+`Other`/`Other`-shaped variants included, is an 8-byte value enum, and no
+`Result` over one of them goes through memory on account of its error type.
 
 Implemented. `Option` stays exempt.
 

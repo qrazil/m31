@@ -531,12 +531,23 @@ fn emit_value_enums(o: &mut String, m: &Module) {
 /// the `rt_f2i` round trip a shared slot cost.
 fn emit_enum_body(o: &mut String, t: &TypeDef) {
     writeln!(o, "    int64_t tag;").unwrap();
-    if !t.variants.iter().any(|v| !v.payload.is_empty()) {
+    // The OS-errno variant (`TypeDef::os_errno_variant`) contributes no
+    // union member at all: its payload lives inside the tag word itself,
+    // packed there by `Inst::EnumPack` and read back by `Inst::EnumPayload`.
+    // For `io.Error`/`net.Error`/`term.Error` it is the type's only
+    // payload-carrying variant, so excluding it here is what takes the
+    // whole type from a tag-plus-union to a bare 8-byte tag.
+    let has_union = t
+        .variants
+        .iter()
+        .enumerate()
+        .any(|(tag, v)| !v.payload.is_empty() && !t.os_errno_variant(tag));
+    if !has_union {
         return; // a union with no members is not C
     }
     writeln!(o, "    union {{").unwrap();
     for (tag, v) in t.variants.iter().enumerate() {
-        if v.payload.is_empty() {
+        if v.payload.is_empty() || t.os_errno_variant(tag) {
             continue;
         }
         let members: Vec<String> = v
@@ -1183,6 +1194,20 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
             // slot packing -- each payload goes into its own typed member of
             // the variant's union arm (docs/value-enums.md §3).
             if types[*tid as usize].is_value {
+                // The OS-errno variant has no union member at all
+                // (`emit_enum_body`) -- its one `int` argument is the errno,
+                // and it goes straight into the tag's low 32 bits instead,
+                // behind the reserved high bit. See `TypeDef::os_errno_variant`.
+                if types[*tid as usize].os_errno_variant(*tag as usize) {
+                    writeln!(
+                        o,
+                        "    {dst}.tag = INT64_C({base}) | (int64_t)(uint32_t){arg};",
+                        base = crate::ir::OS_ERRNO_TAG_BASE,
+                        arg = args[0],
+                    )
+                    .unwrap();
+                    return;
+                }
                 writeln!(o, "    {dst}.tag = {tag};").unwrap();
                 for (k, a) in args.iter().enumerate() {
                     writeln!(o, "    {dst}.u.v{tag}.p{k} = {a};").unwrap();
@@ -1225,6 +1250,13 @@ fn emit_inst(o: &mut String, f: &crate::ir::Func, types: &[TypeDef], i: &Inst) {
             // is nothing to unpack: the tag the lowering had in hand picks the
             // union arm.
             if types[*tid as usize].is_value {
+                // The OS-errno variant's payload has no union member to read
+                // (`emit_enum_body`) -- it lives in the tag's low 32 bits,
+                // behind the reserved high bit `Inst::EnumPack` set.
+                if types[*tid as usize].os_errno_variant(*tag as usize) {
+                    writeln!(o, "    {dst} = {obj}.tag & INT64_C(0xFFFFFFFF);").unwrap();
+                    return;
+                }
                 writeln!(o, "    {dst} = {obj}.u.v{tag}.p{idx};").unwrap();
                 return;
             }
