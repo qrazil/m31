@@ -32,10 +32,15 @@ not a copy of either.
 
   - **One primary view**: the collapsible document, not fixed panels. This
     is the surface the client is actually driven from.
-  - **One optional side panel**, a directory-tree view, and it **toggles** —
-    shown or hidden by one key, never a fixed pane competing with the main
-    view for width. It is a way *in* to the main view (pick a path, jump the
-    document to it), not a second thing to keep in sync with it.
+  - **One optional side panel, a jump list — corrected 2026-09-28, this is
+    not a filesystem tree.** It is a flat, navigable index of whatever the
+    main document currently contains as entries: log commits, changed
+    files, branches, stashes — not paths on disk. It toggles, shown or
+    hidden by one key, never a fixed pane competing with the main view for
+    width. It works two ways: selecting an entry jumps the main document to
+    it, and scrolling the main document highlights the corresponding entry
+    here — so it is as much a "where am I" indicator as a way in. Closer to
+    a synced table of contents than a directory browser.
   - **Cursor-addressable staging**: line, hunk, file, or section, one key,
     uniform — whatever is under the cursor is what gets staged. No separate
     staging mode.
@@ -63,9 +68,12 @@ Flagging these because they are library primitives, not client-specific
 widgets, and belong in stage 2's scope rather than being built once inside
 the git client and stuck there:
 
-  - a **collapsible outline / tree widget** for the primary document (nested
-    sections, expand and collapse, one of which is the toggleable directory
-    panel);
+  - a **collapsible outline widget** for the primary document (nested
+    sections, expand and collapse);
+  - a **synced jump list**: a flat, selectable list bound to the outline
+    widget's own entries, where selecting a row scrolls the document to it
+    and scrolling the document highlights the corresponding row — two-way,
+    not just a static index;
   - a **which-key overlay**: a small popup keyed by "what does the next
     keypress do", built from a list of (key, label) pairs;
   - a **transient menu**: the which-key overlay's sibling — togglable
@@ -84,8 +92,10 @@ Revisit once `apps/tui` stage 2 lands and `lib/term.src` exists.
   - Exact keybindings (mnemonic, one key per base verb, is the only
     constraint fixed so far).
   - Colour/theme (waits on `apps/tui`'s styling layer).
-  - Whether the directory panel can also show status per file (a coloured
-    marker for modified/untracked) or is a plain tree — a real decision,
-    deferred rather than defaulted.
+  - Whether jump-list entries carry a status marker (modified, untracked,
+    ahead/behind) or are plain labels — a real decision, deferred rather
+    than defaulted.
+  - Whether the jump list is always one flat list or nests when the document
+    does (a file entry nested under the commit that touches it, say).
   - How undo/redo of staging works, if at all — Magit leans on Emacs' undo,
     which has no equivalent here.
