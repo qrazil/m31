@@ -1410,15 +1410,25 @@ impl Lowerer {
                 });
             } else {
                 let next_bb = self.new_block();
+                // The OS-errno variant's runtime tag is not the small
+                // declaration-order constant every other variant's is -- it
+                // is `OS_ERRNO_TAG_BASE | errno`, computed at construction
+                // (`Inst::EnumPack`, docs/errors-decision.md). Testing for it
+                // is therefore a range check against the reserved high bit
+                // rather than equality against a fixed value; no ordinary
+                // tag can ever reach that range, so the two tests can never
+                // both pass. See `TypeDef::os_errno_variant`.
+                let (cmp, k_val) = if self.typedefs[tid as usize].os_errno_variant(tag) {
+                    (Cmp::Ge, crate::ir::OS_ERRNO_TAG_BASE)
+                } else {
+                    (Cmp::Eq, tag as i64)
+                };
                 let k = self.new_val(IrTy::I64);
-                self.push(Inst::IConst {
-                    dst: k,
-                    val: tag as i64,
-                });
+                self.push(Inst::IConst { dst: k, val: k_val });
                 let c = self.new_val(IrTy::I1);
                 self.push(Inst::ICmp {
                     dst: c,
-                    cmp: Cmp::Eq,
+                    cmp,
                     lhs: tag_v,
                     rhs: k,
                 });

@@ -321,7 +321,58 @@ impl TypeDef {
                 .map(|v| v.payload.is_empty())
                 .unwrap_or(false)
     }
+
+    /// Whether variant `tag` is the OS-errno passthrough variant of one of
+    /// the three stdlib error enums the compiler special-cases by name --
+    /// `io#Error`, `net#Error`, `term#Error` -- each of which has exactly
+    /// one `Other(int)` variant carrying a raw Linux errno
+    /// (docs/errors-decision.md, "the OS-errno class needs a real
+    /// mechanism").
+    ///
+    /// Every OTHER variant of these three types is payload-free and already
+    /// gets the ordinary 8-byte `{ tag: int64 }` layout for free, same as
+    /// any other payload-free value enum. `Other` cannot join them the same
+    /// way, because its payload is not fixed at compile time -- but it CAN
+    /// still avoid a union member, by packing the errno directly into the
+    /// tag word instead of beside it: `OS_ERRNO_TAG_BASE | errno`. The
+    /// reserved high bit can never collide with a real enum's small number
+    /// of ordinary declaration-order tags (0, 1, 2, ...), so a plain
+    /// `tag >= OS_ERRNO_TAG_BASE` test is exactly "this is `Other`" --
+    /// `Inst::EnumPack` computes the tag this way instead of using the
+    /// constant every other variant uses, `Inst::EnumPayload` reads the
+    /// errno back out of it with a mask instead of a union read, and
+    /// `lower::lower_match` emits the range test instead of an equality
+    /// test when dispatching to this one arm. `emit_enum_body` skips a
+    /// union member for it entirely, which is what takes these three types
+    /// from 16 bytes to 8.
+    ///
+    /// Named explicitly rather than detected structurally -- "a value enum
+    /// with every variant payload-free except one carrying a single `int`"
+    /// -- because that shape says nothing about the RANGE of the int. A
+    /// general one can be negative or exceed 32 bits, and either would be
+    /// silently corrupted by this packing; it is sound only because a Linux
+    /// errno is always a small non-negative number. The corpus has over a
+    /// dozen fixtures with this exact structural shape for unrelated
+    /// reasons (`corpus/core/1281`, `1283`, `1285`, ... -- deliberately
+    /// exercising the ordinary value-enum rule on an int payload), and a
+    /// structural rule would have reached into every one of them.
+    pub fn os_errno_variant(&self, tag: usize) -> bool {
+        self.is_enum
+            && self.is_value
+            && matches!(self.name.as_str(), "io#Error" | "net#Error" | "term#Error")
+            && self
+                .variants
+                .get(tag)
+                .is_some_and(|v| v.name == "Other" && v.payload == [IrTy::I64])
+    }
 }
+
+/// The reserved high bit that marks a computed tag -- see
+/// `TypeDef::os_errno_variant`. `1 << 32` keeps the errno itself in the
+/// tag's low 32 bits untouched by the marker, so recovering it is a plain
+/// mask (`tag & 0xFFFFFFFF`) and no ordinary declaration-order tag (always
+/// a handful of small integers starting at 0) can ever reach it.
+pub const OS_ERRNO_TAG_BASE: i64 = 1i64 << 32;
 
 #[derive(Debug, Clone)]
 pub enum Inst {
