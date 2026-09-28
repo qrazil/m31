@@ -246,7 +246,37 @@ allows.
 **This is a freeze-level commitment.** Payloads cannot be added later
 without changing the size of every `Result` in every signature.
 
-### 5. Must a `Result` be used? — DECIDED: yes, and it is an error
+#### Implementation note, 2026-09-28: the OS-errno class needs a real mechanism, not just payload-freedom
+
+Implemented for `json`, `base64`, `csv`, `text`, `http` and `apps/git`'s
+`zlib`/`refs`/`object` — every variant payload-free, and it cost nothing
+new: the existing value-enum rule already lays out a payload-free enum as a
+bare `{ tag: int64 }`, 8 bytes, once every variant qualifies. No new 64-bit
+id type was needed for these.
+
+**`io.Error`, `net.Error` and `term.Error` are the exception, and they are
+the ones that matter most in practice** — every file and socket operation
+returns one. Their `Other(int)` errno-passthrough variant was left with a
+real payload rather than folded into the class/code scheme this section
+describes, so these three stay 16-byte value enums and `Result<T, io.Error>`
+stays 24 bytes: still boxed, still returned through memory, the exact ABI
+cliff this decision exists to clear.
+
+The reason is mechanical, not a judgement call: today an enum variant's tag
+is always a compile-time constant equal to declaration order. The
+class/code scheme needs the OS variant's tag to be a *runtime-computed*
+value (`class << 32 | errno`), which needs new construction and
+match-destructuring support for that one variant shape — real, bounded, but
+it touches match-arm codegen, which is central and heavily exercised, and
+was correctly scoped out of the same change that swept the rest of the
+library rather than risked alongside it.
+
+**Open, and now the important remaining piece of this decision**: a
+tag-packing mechanism for a variant whose value is computed at run time
+instead of fixed at compile time, so `io`/`net`/`term`'s errno variant can
+join the rest at 8 bytes. Until it lands, this decision is only fully
+realized for errors that carry no runtime-varying data at all — which is
+most of the stdlib, but not the module everything else calls through.
 
 Implemented. `Option` stays exempt.
 
