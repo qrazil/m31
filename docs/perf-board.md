@@ -172,6 +172,43 @@ worktrees have merged, not alongside them.
 
 ---
 
+## Phase 2, after A/B/C merge: use the mechanisms, not just have them
+
+Landing a mechanism and adopting it in real code are different jobs, and
+only one of the three does the second automatically. Worth separating so
+the difference isn't lost once all three show green:
+
+  - **A (accessors, `Array` storage) is transparent.** Every existing
+    program gets the win the moment it's merged — nothing to revisit.
+  - **B (errors as an id) forces adoption by construction.** Changing
+    `Error`'s shape breaks every signature that returns one, so the brief
+    already requires rewriting every `lib/*.src` error type and both
+    applications in the same change. Nothing left to do here afterward.
+  - **C (the `const` block, and `const` on parameters) does not.** The
+    language gaining the ability to write `const b { ... }` changes no
+    existing program. Two follow-up passes are real work, not automatic:
+
+    1. **Find the read-process-refill loops and wrap them.** `io.src`'s
+       read loop, `zlib.src`'s inflate loop, `sha1.src`'s block loop,
+       `base64.src`, anything in `apps/tui` that repeatedly reads into one
+       buffer — these are exactly the shape the block was built for, and
+       none of them use it until someone goes back and adds it.
+    2. **Mark read-only parameters `const` across `lib/` and `apps/`.**
+       This is free (a promise, not a copy, per `docs/const-decision.md`)
+       and it's what makes A's hoisting cross an opaque call instead of
+       stopping at one. If the required-`const` gate from item 2 lands,
+       it will force this; if it doesn't land (item 2 was scoped as a
+       stretch goal), this has to be a deliberate pass instead of a
+       compile error nagging someone into it.
+
+  - **Re-measure at the application level once both passes land**, not
+    just the isolated numbers A/B/C report from their own worktrees.
+    SHA-1 and zlib throughput in `apps/git`, and the `apps/tui` benchmark,
+    are the real scoreboard — a microbenchmark showing a mechanism works
+    is necessary and not sufficient.
+
+---
+
 ## Considered and not doing
 
 **Constant-size arrays as a stack-allocated language feature.** Escape
