@@ -10,6 +10,7 @@
 //                             `Buffer` stores and what the diff compares
 //   tuistyle.sgr(out, from, to, depth)   the escape that turns one packed
 //                             style into another, appended to `out`
+//   tuistyle.Theme            a named palette of `Style`s, by role
 //
 // **A style is one `int`.** A buffer of 200x50 holds ten thousand cells, and
 // a `Style` object per cell would be thirty thousand refcounted allocations
@@ -471,4 +472,60 @@ int dist(int v, int r, int g, int b) {
     int dg = v / 256 % 256 - g;
     int db = v % 256 - b;
     return dr * dr + dg * dg + db * db;
+}
+
+// --- the styling layer: a named palette --------------------------------------
+//
+// Stage 1 gave every widget its own `Style` fields, each with its own
+// hard-coded default -- `Block`'s border, `ListView`'s highlight. That is
+// fine for one screen; a program that wants to re-skin itself, or offer a
+// light and a dark theme, needs one place holding every role a widget might
+// draw in, so that changing the palette is changing one value rather than
+// every call site that constructed a `Style` by hand.
+//
+// `Theme` is that place: a plain struct of `Style` fields, one per role, each
+// with a sensible default so `Theme()` is a working plain theme exactly as
+// `Style()` is a working plain style. A widget that wants theming takes a
+// `Theme` (or a field of one) the same way it already takes a `Style` --
+// there is no registry and no lookup by name, because a struct field
+// reached at compile time is what this language's interfaces already give
+// for free, and a `Map<str, Style>` would only add a way to look up a role
+// that does not exist.
+
+/// A named palette of styles for a program's own UI: one role per field, so
+/// re-skinning the whole thing is replacing one `Theme` value rather than
+/// hunting down every `Style(...)` a widget was built with.
+///
+/// The roles are the ones `apps/git/design.md` names widgets needing --
+/// a title, a dimmed line, an accent, a selection, an error, and the two a
+/// diff colours its added and removed lines with -- plus `normal` and
+/// `border` for everything else. A program with roles of its own embeds this
+/// or writes a bigger struct; nothing here stops it.
+pub type Theme {
+    /// Plain text, on the terminal's own background.
+    pub Style normal = Style();
+    /// De-emphasised text -- a timestamp, a hint, a line the cursor is not on.
+    pub Style dim = Style(attrs: DIM);
+    /// A heading or a panel title.
+    pub Style title = Style(attrs: BOLD);
+    /// Drawn attention: the active tab, a highlighted match.
+    pub Style accent = Style(fg: Colour.Indexed(33));
+    /// What the cursor is on, when the row is not also `selected`.
+    pub Style highlight = Style(attrs: REVERSE);
+    /// The chosen row of a list, an outline, a jump list.
+    pub Style selected = Style(attrs: REVERSE | BOLD);
+    /// A problem: a failed command, a conflict.
+    pub Style error = Style(fg: Colour.Indexed(9));
+    /// A line a diff view added.
+    pub Style added = Style(fg: Colour.Indexed(2));
+    /// A line a diff view removed.
+    pub Style removed = Style(fg: Colour.Indexed(1));
+    /// A block's border and rule characters.
+    pub Style border = Style();
+}
+
+/// The plain theme: every role its own bare default, the same values a
+/// widget used before `Theme` existed.
+pub static Theme Theme.plain() {
+    return Theme();
 }

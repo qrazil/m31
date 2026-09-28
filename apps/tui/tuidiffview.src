@@ -1,0 +1,211 @@
+// A diff, rendered with a cursor addressable down to the hunk and the line.
+// See `apps/git/design.md`: "cursor-addressable staging... whatever is under
+// the cursor is what gets staged" -- which means a client needs to ask,
+// precisely, "what is under the cursor right now", and this is what answers
+// that question at the granularity staging actually needs.
+//
+// API
+// ---
+//   tuidiffview.Kind          Context | Add | Remove -- what one line is
+//   tuidiffview.Line(kind, text)     one line of a hunk's body
+//   tuidiffview.Hunk(header, lines)  one `@@ ... @@` block
+//   tuidiffview.DiffView(hunks)      the widget: cursor, scroll, render
+//   view.at()           -> Option<Row>   what the cursor is on, right now
+//   view.move(delta), view.render(buf, area)
+//
+// --- what a `Row` addresses ---------------------------------------------------
+//
+// The flattened view is a hunk's header, then its lines, then the next
+// hunk's header, and so on. `at()` answers which of those the cursor sits
+// on: `RowKind.Header` with the hunk's index, or `RowKind.Body` with the
+// hunk's index AND the line's index inside it -- hunk and line, exactly the
+// two numbers `apps/git/design.md` says staging depends on. A caller stages
+// the hunk when it is a `Header`, or exactly that one line when it is a
+// `Body`; deciding that is the caller's, not this widget's.
+
+import tuibuf;
+import tuigeom;
+import tuiscroll;
+import tuistyle;
+import tuitext;
+
+/// What one line of a hunk's body is.
+pub enum Kind {
+    Context;
+    Add;
+    Remove;
+}
+
+/// One line of a hunk's body, with the leading `+`/`-`/` ` already stripped --
+/// `kind` is that marker, structured.
+pub type Line {
+    pub Kind kind;
+    pub str text;
+}
+
+/// A line unchanged by the hunk.
+pub static Line Line.context(str text) {
+    return Line(Kind.Context, text);
+}
+
+/// A line the hunk adds.
+pub static Line Line.added(str text) {
+    return Line(Kind.Add, text);
+}
+
+/// A line the hunk removes.
+pub static Line Line.removed(str text) {
+    return Line(Kind.Remove, text);
+}
+
+/// One `@@ ... @@` block: its header text, as a diff prints it, and the
+/// lines under it.
+pub type Hunk {
+    pub str header;
+    pub List<Line> lines;
+}
+
+/// Which kind of row the flattened view holds: a hunk's own header line, or
+/// one line of its body.
+pub enum RowKind {
+    Header;
+    Body;
+}
+
+/// One row of the flattened view, and the addressing `at()` answers: `hunk`
+/// is always meaningful, `line` only when `kind` is `Body`.
+pub type Row {
+    pub RowKind kind;
+    pub int hunk;
+    pub int line;
+}
+
+/// The widget: a list of `Hunk`s, a cursor into the flattened rows (headers
+/// and lines together), and the scroll that follows it.
+pub type DiffView {
+    pub List<Hunk> hunks;
+    pub int cursor = 0;
+    pub tuiscroll.Viewport view = tuiscroll.Viewport();
+    pub tuistyle.Style header_style = tuistyle.Style(attrs: tuistyle.BOLD);
+    pub tuistyle.Style add_style = tuistyle.Style(fg: tuistyle.Colour.Indexed(2));
+    pub tuistyle.Style remove_style = tuistyle.Style(fg: tuistyle.Colour.Indexed(1));
+    pub tuistyle.Style context_style = tuistyle.Style();
+    pub tuistyle.Style highlight_style = tuistyle.Style(attrs: tuistyle.REVERSE);
+}
+
+/// The flattened rows: every hunk's header, followed by its lines, in order.
+pub List<Row> DiffView.rows() {
+    List<Row> out = [];
+    int h = 0;
+    while (h < hunks.size()) {
+        out.push(Row(RowKind.Header, h, -1));
+        int l = 0;
+        while (l < hunks[h].lines.size()) {
+            out.push(Row(RowKind.Body, h, l));
+            l = l + 1;
+        }
+        h = h + 1;
+    }
+    return out;
+}
+
+/// What is under the cursor right now -- a hunk header, or a particular
+/// line of a particular hunk -- or `None` when the diff is empty.
+pub Option<Row> DiffView.at() {
+    List<Row> rs = rows();
+    if (cursor < 0 || cursor >= rs.size()) {
+        return Option<Row>.None;
+    }
+    return Option<Row>.Some(rs[cursor]);
+}
+
+/// Move the cursor by `delta` rows of the flattened view, stopping at the
+/// ends.
+pub void DiffView.move(int delta) {
+    int n = rows().size();
+    if (n == 0) {
+        cursor = 0;
+        return;
+    }
+    int at = cursor + delta;
+    if (at < 0) {
+        at = 0;
+    }
+    if (at >= n) {
+        at = n - 1;
+    }
+    cursor = at;
+}
+
+tuistyle.Style DiffView.line_style(Line l) {
+    match (l.kind) {
+        case Context: {
+            return context_style;
+        }
+        case Add: {
+            return add_style;
+        }
+        case Remove: {
+            return remove_style;
+        }
+    }
+}
+
+str DiffView.marker(Line l) {
+    match (l.kind) {
+        case Context: {
+            return " ";
+        }
+        case Add: {
+            return "+";
+        }
+        case Remove: {
+            return "-";
+        }
+    }
+}
+
+pub void DiffView.render(tuibuf.Buffer buf, tuigeom.Rect area) {
+    if (area.is_empty()) {
+        return;
+    }
+    buf.fill(area, " ", context_style);
+    List<Row> rs = rows();
+    if (cursor >= rs.size()) {
+        cursor = rs.size() - 1;
+    }
+    if (cursor < 0) {
+        cursor = 0;
+    }
+    view.reveal(cursor, rs.size(), area.h);
+    view.offset = view.clamped(rs.size(), area.h);
+    int off = view.offset;
+    int i = 0;
+    while (i < area.h) {
+        int k = off + i;
+        if (k >= rs.size()) {
+            return;
+        }
+        Row row = rs[k];
+        int y = area.y + i;
+        str text = "";
+        tuistyle.Style st = context_style;
+        match (row.kind) {
+            case Header: {
+                text = hunks[row.hunk].header;
+                st = header_style;
+            }
+            case Body: {
+                Line l = hunks[row.hunk].lines[row.line];
+                text = marker(l) + l.text;
+                st = line_style(l);
+            }
+        }
+        if (k == cursor) {
+            st = st.merged(highlight_style);
+            buf.fill(tuigeom.Rect(area.x, y, area.w, 1), " ", st);
+        }
+        buf.set_str(area.x, y, tuitext.truncate(text, area.w), st, max: area.w);
+        i = i + 1;
+    }
+}

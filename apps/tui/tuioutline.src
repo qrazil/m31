@@ -1,0 +1,237 @@
+// A collapsible outline: nested sections that expand and collapse in place --
+// the primary-view primitive `apps/git/design.md` builds the whole
+// interactive client around, generalised past that one client. A log, a
+// status listing, a diff summary: anything that is "sections, and sections
+// inside them, some of which you want folded away" is this widget.
+//
+// API
+// ---
+//   tuioutline.Node.leaf(id, label)              a row with no children
+//   tuioutline.Node.section(id, label, children)  a row that can fold
+//   tuioutline.Outline(roots)                     the widget itself
+//   outline.rows()             -> List<Row>       the FLATTENED, visible rows
+//   outline.current()          -> Option<Row>     the row under the cursor
+//   outline.move(delta)                           step the cursor
+//   outline.toggle() / .expand() / .collapse()    fold the row under the cursor
+//   outline.select_id(id)      -> bool            move the cursor to a row by id
+//   outline.render(buf, area)
+//
+// --- what "visible" means ----------------------------------------------------
+//
+// A node's children are rows only when every ancestor down to it is
+// expanded. Collapsing a section removes its whole subtree from the
+// flattened list in one step, which is what makes folding a thousand-line
+// diff one keystroke rather than one per line -- and what makes `rows()`
+// recomputed on demand rather than cached: an outline in a terminal is at
+// most a few hundred rows, and the tree walk to flatten it costs nothing a
+// keypress would notice.
+//
+// --- why every node has an id ------------------------------------------------
+//
+// A jump list (`tuijump`) and a "put the cursor back where it was" both need
+// to name a row that SURVIVES a fold changing every row number below it --
+// position is not a stable address, and `id` is the caller's own one: a
+// commit hash, a file path, a hunk index, blank for a row nothing else needs
+// to address by name.
+
+import tuibuf;
+import tuigeom;
+import tuiscroll;
+import tuistyle;
+
+/// One entry in the outline, and the subtree rooted at it.
+pub type Node {
+    /// The caller's own key for this row. See the header on why it exists.
+    pub str id;
+    pub str label;
+    pub List<Node> children;
+    pub tuistyle.Style style = tuistyle.Style();
+    pub bool expanded = true;
+}
+
+/// A row with no children: nothing to fold, so `toggle` on it does nothing.
+pub static Node Node.leaf(str id, str label) {
+    return Node(id, label, []);
+}
+
+/// A row that can fold, expanded by default.
+pub static Node Node.section(str id, str label, List<Node> children, bool expanded = true) {
+    return Node(id, label, children, expanded: expanded);
+}
+
+pub bool Node.has_children() {
+    return children.size() > 0;
+}
+
+/// One row of the flattened, currently visible outline: the node it came
+/// from, and how deep it is -- what `render` indents by and what a caller
+/// asking "what is the cursor on" reads `node` off of.
+pub type Row {
+    pub Node node;
+    pub int depth;
+}
+
+/// The widget: a forest of `Node`s, a cursor into the flattened visible
+/// rows, and the scroll that follows it.
+///
+/// ```
+/// tuioutline.Outline([tuioutline.Node.section("wip", "Unstaged changes",
+///     [tuioutline.Node.leaf("a.txt", "modified: a.txt")])])
+/// ```
+pub type Outline {
+    pub List<Node> roots;
+    /// An index into `rows()`, not into `roots` -- see the header.
+    pub int cursor = 0;
+    pub tuiscroll.Viewport view = tuiscroll.Viewport();
+    pub tuistyle.Style style = tuistyle.Style();
+    pub tuistyle.Style highlight_style = tuistyle.Style(attrs: tuistyle.REVERSE);
+    /// Columns of indent per level of nesting.
+    pub int indent = 2;
+    pub str expanded_mark = "\u{25BE} ";
+    pub str collapsed_mark = "\u{25B8} ";
+    pub str leaf_mark = "  ";
+}
+
+/// The flattened list of rows the tree currently shows, in order, skipping
+/// the children of anything collapsed.
+pub List<Row> Outline.rows() {
+    List<Row> out = [];
+    for (Node n in roots) {
+        collect(out, n, 0);
+    }
+    return out;
+}
+
+void Outline.collect(List<Row> out, Node n, int depth) {
+    out.push(Row(n, depth));
+    if (n.expanded) {
+        for (Node c in n.children) {
+            collect(out, c, depth + 1);
+        }
+    }
+}
+
+/// The row the cursor is on, or `None` when the outline has none.
+pub Option<Row> Outline.current() {
+    List<Row> rs = rows();
+    if (cursor < 0 || cursor >= rs.size()) {
+        return Option<Row>.None;
+    }
+    return Option<Row>.Some(rs[cursor]);
+}
+
+/// Move the cursor by `delta` rows of the flattened, visible list, stopping
+/// at the ends -- `tuilists.ListView.step`'s own rule.
+pub void Outline.move(int delta) {
+    int n = rows().size();
+    if (n == 0) {
+        cursor = 0;
+        return;
+    }
+    int at = cursor + delta;
+    if (at < 0) {
+        at = 0;
+    }
+    if (at >= n) {
+        at = n - 1;
+    }
+    cursor = at;
+}
+
+/// Fold or unfold the row under the cursor. A leaf does nothing -- there is
+/// nothing under it to hide.
+pub void Outline.toggle() {
+    match (current()) {
+        case Some(Row r): {
+            if (r.node.has_children()) {
+                r.node.expanded = !r.node.expanded;
+            }
+        }
+        case None: {
+        }
+    }
+}
+
+/// Unfold the row under the cursor, if it has children.
+pub void Outline.expand() {
+    match (current()) {
+        case Some(Row r): {
+            r.node.expanded = true;
+        }
+        case None: {
+        }
+    }
+}
+
+/// Fold the row under the cursor, if it has children.
+pub void Outline.collapse() {
+    match (current()) {
+        case Some(Row r): {
+            r.node.expanded = false;
+        }
+        case None: {
+        }
+    }
+}
+
+/// Move the cursor to the visible row whose `id` is `id`. Answers whether one
+/// was found -- a row hidden inside a folded section is not, which is
+/// correct: there is nothing on screen yet to put the cursor on.
+pub bool Outline.select_id(str id) {
+    List<Row> rs = rows();
+    int i = 0;
+    while (i < rs.size()) {
+        if (rs[i].node.id == id) {
+            cursor = i;
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+pub void Outline.render(tuibuf.Buffer buf, tuigeom.Rect area) {
+    if (area.is_empty()) {
+        return;
+    }
+    buf.fill(area, " ", style);
+    List<Row> rs = rows();
+    if (cursor >= rs.size()) {
+        cursor = rs.size() - 1;
+    }
+    if (cursor < 0) {
+        cursor = 0;
+    }
+    view.reveal(cursor, rs.size(), area.h);
+    view.offset = view.clamped(rs.size(), area.h);
+    int off = view.offset;
+    int i = 0;
+    while (i < area.h) {
+        int k = off + i;
+        if (k >= rs.size()) {
+            return;
+        }
+        Row row = rs[k];
+        int y = area.y + i;
+        tuistyle.Style st = style.merged(row.node.style);
+        if (k == cursor) {
+            st = st.merged(highlight_style);
+            buf.fill(tuigeom.Rect(area.x, y, area.w, 1), " ", st);
+        }
+        str mark = leaf_mark;
+        if (row.node.has_children()) {
+            if (row.node.expanded) {
+                mark = expanded_mark;
+            } else {
+                mark = collapsed_mark;
+            }
+        }
+        int x = area.x + row.depth * indent;
+        int room = area.right() - x;
+        if (room > 0) {
+            int used = buf.set_str(x, y, mark, st, max: room);
+            buf.set_str(x + used, y, row.node.label, st, max: room - used);
+        }
+        i = i + 1;
+    }
+}
