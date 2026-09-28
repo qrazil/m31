@@ -1,0 +1,99 @@
+// Stages one new file -- writes its blob, builds an entry with
+// `index.from_stat`, appends it to the index, and writes the index back --
+// so `test_write.sh` can confirm real `git status`/`ls-files --stage` sees
+// exactly what was staged.
+//
+//   ./t_index_stage <gitdir> <worktree> <relative-path>
+
+import index;
+import object;
+import fs;
+import io;
+import os;
+
+List<str> argv = os.args();
+if (argv.size() < 4) {
+    io.eprint("usage: t_index_stage <gitdir> <worktree> <relative-path>");
+    os.exit(2);
+}
+str gd = argv[1];
+str wt = argv[2];
+str rel = argv[3];
+str full = fs.join(wt, rel);
+bytes content = [];
+match (io.read_bytes(full)) {
+    case Ok(bytes b): {
+        content = b;
+    }
+    case Err(io.Error e): {
+        io.eprint("read: " + e.to_str());
+        os.exit(1);
+    }
+}
+str blob_id = "";
+match (object.write_blob(gd, content)) {
+    case Ok(str id): {
+        blob_id = id;
+    }
+    case Err(object.Error e): {
+        io.eprint("write_blob: " + e.to_str());
+        os.exit(1);
+    }
+}
+fs.Stat st = fs.Stat(0, 0, 0);
+match (fs.stat(full)) {
+    case Ok(fs.Stat s): {
+        st = s;
+    }
+    case Err(io.Error e): {
+        io.eprint("stat: " + e.to_str());
+        os.exit(1);
+    }
+}
+index.Entry entry = index.from_stat(rel.to_bytes(), st, fs.is_link(full), blob_id);
+index.Index ix = index.Index([]);
+match (index.read(gd)) {
+    case Ok(index.Index v): {
+        ix = v;
+    }
+    case Err(index.Error e): {
+        match (e) {
+            case NotFound: {
+            }
+            case Io: {
+                io.eprint("read: " + e.to_str());
+                os.exit(1);
+            }
+            case BadSignature: {
+                io.eprint("read: " + e.to_str());
+                os.exit(1);
+            }
+            case BadVersion: {
+                io.eprint("read: " + e.to_str());
+                os.exit(1);
+            }
+            case Truncated: {
+                io.eprint("read: " + e.to_str());
+                os.exit(1);
+            }
+            case BadExtension: {
+                io.eprint("read: " + e.to_str());
+                os.exit(1);
+            }
+            case Checksum: {
+                io.eprint("read: " + e.to_str());
+                os.exit(1);
+            }
+        }
+    }
+}
+ix.entries.push(entry);
+match (index.write(gd, ix)) {
+    case Ok: {
+        print("staged " + blob_id);
+    }
+    case Err(index.Error e): {
+        io.eprint("write: " + e.to_str());
+        os.exit(1);
+    }
+}

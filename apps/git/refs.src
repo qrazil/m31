@@ -16,6 +16,9 @@
 //   refs.rev_parse(gitdir, spec) -> Result<str, Error>   git's DWIM, and
 //                                                        short object names
 //
+//   refs.update(gitdir, name, new_id, expect_old)  -> Result<bool, Error>
+//   refs.update_symbolic(gitdir, name, target)     -> Result<bool, Error>
+//
 // --- what is NOT here --------------------------------------------------------
 //
 // The revision *grammar* -- `HEAD~3`, `main^2`, `v1^{commit}`, `@{upstream}`,
@@ -23,12 +26,35 @@
 // name, or a full one, and nothing else. The one peeling that is here is
 // `peel`, which follows an annotated tag to what it tags, because `log v1`
 // is otherwise a question with no answer.
+//
+// --- writing -------------------------------------------------------------
+//
+// `update` writes a ref -- `refs/heads/<name>`, `HEAD` detached, or any other
+// full ref name -- to a 40-digit object name, and `update_symbolic` writes
+// `HEAD` (or any ref) as `ref: <target>`. Both write a temporary file beside
+// the real one and rename it over, exactly as `object.src`'s writers do:
+// never a direct in-place write, so a crash mid-write leaves the old ref
+// intact and a reader never sees a half-written one.
+//
+// `update`'s `expect_old` is a compare-and-swap: given, it is checked against
+// the ref's current value (what `resolve` would return; `""` for a ref that
+// does not exist yet) immediately before the write, and a mismatch fails the
+// whole call with nothing touched. **This is optimistic concurrency control,
+// not a lock.** The check and the write are two separate steps -- there is no
+// primitive here for an exclusive-create lockfile the way real git's
+// `.lock` files are -- so two writers racing in the gap between the check and
+// the `rename` can both pass it; what `rename` still guarantees is that the
+// file itself is never left half-written, whoever wins. A single process
+// serialising its own updates (which is the only caller this program has) is
+// safe; a true multi-writer guarantee would need an exclusive-create
+// primitive this standard library does not expose, so it is not claimed here.
 
 import io;
 import fs;
 import text;
 import object;
 import repo;
+import random;
 
 /// Why a name did not resolve. Payload-free (docs/errors-decision.md §4):
 /// the ref name, the underlying `io.Error`, or which kind a tag chain ended
@@ -51,6 +77,10 @@ pub enum Error {
     Ambiguous;
     /// A tag chain that never reaches a commit.
     NotACommit;
+    /// `update`'s `expect_old` did not match the ref's current value.
+    Mismatch;
+    /// A value handed to a write is not a well-formed 40-digit object name.
+    BadValue;
 }
 
 pub str Error.to_str() {
@@ -75,6 +105,12 @@ pub str Error.to_str() {
         }
         case NotACommit: {
             return "that name is not a commit";
+        }
+        case Mismatch: {
+            return "compare-and-swap failed: the ref's current value is not the one expected";
+        }
+        case BadValue: {
+            return "not a well-formed object name: 40 hex digits";
         }
     }
 }
@@ -424,4 +460,151 @@ bool safe_name(str name) {
         }
     }
     return true;
+}
+
+// --- writing ------------------------------------------------------------------
+
+/// Write `name` (a full ref path -- `refs/heads/main`, or `HEAD` for a
+/// detached checkout) to point directly at the object `new_id`.
+///
+/// If `expect_old` is `Some`, the write only happens when `resolve(gitdir,
+/// name)` currently answers that value -- `""` if `expect_old` is `Some("")`
+/// and the ref does not exist yet -- and a mismatch is `Error.Mismatch` with
+/// nothing written. See the module header for exactly what this does and does
+/// not guarantee against a second writer.
+pub Result<bool, Error> update(str gitdir, str name, str new_id, Option<str> expect_old) {
+    if (!safe_name(name)) {
+        return Result<bool, Error>.Err(Error.Malformed);
+    }
+    if (!object.is_name(new_id) || new_id.size() != 40) {
+        return Result<bool, Error>.Err(Error.BadValue);
+    }
+    match (expect_old) {
+        case Some(str want): {
+            str have = current_or_empty(gitdir, name)?;
+            if (have != want) {
+                return Result<bool, Error>.Err(Error.Mismatch);
+            }
+        }
+        case None: {
+        }
+    }
+    return write_atomic(where_for(gitdir, name), new_id + "\n");
+}
+
+/// Write `name` as a symbolic ref: `ref: <target>`. `target` is a ref name,
+/// not checked for existence -- `HEAD` pointing at `refs/heads/<branch>`
+/// before that branch has a first commit (an "unborn" branch, `Head.Unborn`)
+/// is exactly this and is not an error.
+pub Result<bool, Error> update_symbolic(str gitdir, str name, str target) {
+    if (!safe_name(name) || !safe_name(target)) {
+        return Result<bool, Error>.Err(Error.Malformed);
+    }
+    return write_atomic(where_for(gitdir, name), "ref: " + target + "\n");
+}
+
+// `resolve`'s answer, with "the ref is not there at all" folded into `""`
+// rather than an error -- what a compare-and-swap against a ref that may not
+// exist yet needs. Every other failure of `resolve` is passed on.
+//
+// Six arms that differ only in which `Error` they repeat is exactly the
+// pattern the module header on `head()` already names: telling `NotFound`
+// apart from the rest needs a full `match`, because there is no `default`
+// (reference §5.6). Written once, here, rather than at every call site.
+Result<str, Error> current_or_empty(str gitdir, str name) {
+    match (resolve(gitdir, name)) {
+        case Ok(str id): {
+            return Result<str, Error>.Ok(id);
+        }
+        case Err(Error e): {
+            match (e) {
+                case NotFound: {
+                    return Result<str, Error>.Ok("");
+                }
+                case Io: {
+                    return Result<str, Error>.Err(Error.Io);
+                }
+                case Malformed: {
+                    return Result<str, Error>.Err(Error.Malformed);
+                }
+                case TooDeep: {
+                    return Result<str, Error>.Err(Error.TooDeep);
+                }
+                case Unknown: {
+                    return Result<str, Error>.Err(Error.Unknown);
+                }
+                case Ambiguous: {
+                    return Result<str, Error>.Err(Error.Ambiguous);
+                }
+                case NotACommit: {
+                    return Result<str, Error>.Err(Error.NotACommit);
+                }
+                case Mismatch: {
+                    return Result<str, Error>.Err(Error.Mismatch);
+                }
+                case BadValue: {
+                    return Result<str, Error>.Err(Error.BadValue);
+                }
+            }
+        }
+    }
+}
+
+// The file a ref name is written to: HEAD and the other per-worktree
+// pseudo-refs live beside `gitdir` itself, everything else in the shared
+// directory a linked worktree keeps its branches and tags in (`repo.src`) --
+// the same split `loose_ref` reads by.
+str where_for(str gitdir, str name) {
+    str where = gitdir;
+    if (!repo.per_worktree(name)) {
+        where = repo.common(gitdir);
+    }
+    return fs.join(where, name);
+}
+
+// Write `content` to `path` without ever leaving a half-written file there: a
+// freshly named temporary file beside it, written whole, then renamed over
+// the target. `fs.rename` is atomic within one file system (its own docs),
+// which is what makes this safe against a crash between the two steps -- the
+// rename either lands or it does not, and either way `path` holds a complete
+// file, old or new.
+Result<bool, Error> write_atomic(str path, str content) {
+    match (fs.makedirs(dir_of(path))) {
+        case Ok: {
+        }
+        case Err(io.Error e): {
+            return Result<bool, Error>.Err(Error.Io);
+        }
+    }
+    random.System rnd = random.system();
+    str tmp = path + ".tmp" + rnd.hex(12);
+    match (io.write(tmp, content)) {
+        case Ok: {
+        }
+        case Err(io.Error e): {
+            return Result<bool, Error>.Err(Error.Io);
+        }
+    }
+    match (fs.rename(tmp, path)) {
+        case Ok: {
+            return Result<bool, Error>.Ok(true);
+        }
+        case Err(io.Error e): {
+            return Result<bool, Error>.Err(Error.Io);
+        }
+    }
+}
+
+// The directory `path` is in -- `fs` has `join` and nothing that goes the
+// other way, so the split is written out here: back from the end to the last
+// `/`, or `"."` if there is none.
+str dir_of(str path) {
+    int i = path.size() - 1;
+    while (i >= 0 && path.byte_at(i) != '/') {
+        i = i - 1;
+    }
+    if (i < 0) {
+        return ".";
+    }
+    return path.substr(0, i);
 }

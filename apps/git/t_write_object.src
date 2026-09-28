@@ -1,0 +1,67 @@
+// Writes one blob, one tree holding it, and one commit holding that tree,
+// into the repository named on the command line, and prints the three names,
+// one per line, for `test_write.sh` to check against real `git cat-file` and
+// `git ls-tree` on the same (disposable, test-built) fixture.
+//
+//   ./t_write_object <gitdir>
+
+import object;
+import io;
+import os;
+
+List<str> argv = os.args();
+if (argv.size() < 2) {
+    io.eprint("usage: t_write_object <gitdir>");
+    os.exit(2);
+}
+str gd = argv[1];
+str blob_id = "";
+match (object.write_blob(gd, "hello from the write path\n".to_bytes())) {
+    case Ok(str id): {
+        blob_id = id;
+    }
+    case Err(object.Error e): {
+        io.eprint("write_blob: " + e.to_str());
+        os.exit(1);
+    }
+}
+List<object.Entry> entries = [object.Entry(0o100644, "new.txt".to_bytes(), blob_id)];
+str tree_id = "";
+match (object.write_tree(gd, entries)) {
+    case Ok(str id): {
+        tree_id = id;
+    }
+    case Err(object.Error e): {
+        io.eprint("write_tree: " + e.to_str());
+        os.exit(1);
+    }
+}
+object.Ident who = object.Ident("Write Tester".to_bytes(), "w@example.com".to_bytes(), 1700000000, 0, "+0000");
+object.Commit c = object.Commit(tree_id, [], who, who, [], "write path test\n".to_bytes());
+str commit_id = "";
+match (object.write_commit(gd, c)) {
+    case Ok(str id): {
+        commit_id = id;
+    }
+    case Err(object.Error e): {
+        io.eprint("write_commit: " + e.to_str());
+        os.exit(1);
+    }
+}
+print(blob_id);
+print(tree_id);
+print(commit_id);
+// Write the blob a second time: this exercises the "already there" path
+// (`write_object`'s `fs.exists` check) and must answer the same name.
+match (object.write_blob(gd, "hello from the write path\n".to_bytes())) {
+    case Ok(str id): {
+        if (id != blob_id) {
+            io.eprint("write_blob is not idempotent: " + id + " != " + blob_id);
+            os.exit(1);
+        }
+    }
+    case Err(object.Error e): {
+        io.eprint("second write_blob: " + e.to_str());
+        os.exit(1);
+    }
+}

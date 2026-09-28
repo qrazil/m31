@@ -1,0 +1,99 @@
+// Runs `status.status` on the repository named on the command line and
+// prints it in `git status --short`'s own shape -- `XY path`, one combined,
+// path-sorted list, `??` for untracked -- so `test_write.sh` can diff this
+// program's output against that command's, unmodified.
+//
+//   ./t_status <gitdir> <worktree>
+
+import status;
+import io;
+import os;
+
+List<str> argv = os.args();
+if (argv.size() < 3) {
+    io.eprint("usage: t_status <gitdir> <worktree>");
+    os.exit(2);
+}
+str gd = argv[1];
+str wt = argv[2];
+match (status.status(gd, wt)) {
+    case Ok(status.Status st): {
+        show(st);
+    }
+    case Err(status.Error e): {
+        io.eprint(e.to_str());
+        os.exit(1);
+    }
+}
+
+void show(status.Status st) {
+    Map<str, int> sc = {};
+    Map<str, int> uc = {};
+    Map<str, bool> untr = {};
+    for (status.Delta d in st.staged) {
+        sc.set(d.path.utf8().or("<non-utf8>"), staged_char(d.kind));
+    }
+    for (status.Delta d in st.unstaged) {
+        uc.set(d.path.utf8().or("<non-utf8>"), unstaged_char(d.kind));
+    }
+    for (bytes b in st.untracked) {
+        untr.set(b.utf8().or("<non-utf8>"), true);
+    }
+    // `git status --short` prints two separate blocks, each sorted on its
+    // own -- every tracked change (staged, unstaged, or both), then every
+    // untracked path -- not one merge across both. Matching that grouping
+    // here is purely about matching that command's output for the test to
+    // diff against; `status.Status` itself keeps the three lists apart for
+    // exactly the reason its module header gives, and a caller with a
+    // different presentation in mind is free to merge them however it likes.
+    List<str> tracked = [];
+    for (str p in sc.keys()) {
+        tracked.push(p);
+    }
+    for (str p in uc.keys()) {
+        if (!sc.contains(p)) {
+            tracked.push(p);
+        }
+    }
+    tracked.sort();
+    for (str p in tracked) {
+        bytes code = [sc.get(p).or(32), uc.get(p).or(32)];
+        print(code.utf8().or("??") + " " + p);
+    }
+    List<str> untracked = [];
+    for (str p in untr.keys()) {
+        untracked.push(p);
+    }
+    untracked.sort();
+    for (str p in untracked) {
+        print("?? " + p);
+    }
+}
+
+int staged_char(status.Change k) {
+    match (k) {
+        case Added: {
+            return 'A';
+        }
+        case Modified: {
+            return 'M';
+        }
+        case Deleted: {
+            return 'D';
+        }
+    }
+}
+
+int unstaged_char(status.Change k) {
+    match (k) {
+        case Added: {
+            return 'A';
+        }
+        case Modified: {
+            return 'M';
+        }
+        case Deleted: {
+            return 'D';
+        }
+    }
+}

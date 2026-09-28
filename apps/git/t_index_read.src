@@ -1,0 +1,40 @@
+// Reads `.git/index` at the repository named on the command line and prints
+// it in exactly the shape `git ls-files --stage` uses --
+// `<mode> <sha1> <stage>\t<path>`, one line per entry -- so `test_write.sh`
+// can diff this program's output against that command's, unmodified.
+//
+//   ./t_index_read <gitdir>
+
+import index;
+import io;
+import os;
+
+List<str> argv = os.args();
+if (argv.size() < 2) {
+    io.eprint("usage: t_index_read <gitdir>");
+    os.exit(2);
+}
+str gd = argv[1];
+match (index.read(gd)) {
+    case Ok(index.Index ix): {
+        for (index.Entry e in ix.entries) {
+            str path = e.path.utf8().or("<non-utf8>");
+            print(mode6(e.mode) + " " + e.id + " " + e.stage.to_str() + "\t" + path);
+        }
+    }
+    case Err(index.Error e): {
+        io.eprint(e.to_str());
+        os.exit(1);
+    }
+}
+
+// The six-digit zero-padded octal `git ls-files --stage` prints.
+str mode6(int mode) {
+    str s = "";
+    int i = 5;
+    while (i >= 0) {
+        s = s + (mode >> i * 3 & 7).to_str();
+        i = i - 1;
+    }
+    return s;
+}

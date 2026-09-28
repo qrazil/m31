@@ -19,6 +19,30 @@
 //   object.resolve(gitdir, pfx)  -> Result<str, Error>      a unique short id
 //   o.kind()                     -> str, one of the four words
 //
+//   object.write_blob(gitdir, content)     -> Result<str, Error>
+//   object.write_tree(gitdir, entries)     -> Result<str, Error>
+//   object.write_commit(gitdir, commit)    -> Result<str, Error>
+//
+// --- writing -----------------------------------------------------------------
+//
+// The three writers take the same shapes `read` hands back -- `write_tree`
+// takes a `List<Entry>`, `write_commit` a `Commit` -- so a caller that just
+// read a tree or a commit can change one field and write the result straight
+// back. Each hashes `<type> <size>\0<content>` exactly as `parse` expects to
+// find it, deflates it (`zlib.compress`, stored blocks -- see that module's
+// own header for why there is no Huffman encoder here), and writes it to
+// `objects/xx/yyyy...`. Content-addressed means idempotent: if the name is
+// already there, the write is skipped rather than redone, the same object
+// under the same name either way. The write itself is a temporary file
+// beside the target, written whole, then renamed over it, so nothing ever
+// reads a half-written zlib stream -- the same discipline `refs.src` uses for
+// a ref file, for the same reason.
+//
+// `write_tree` sorts its entries into git's own tree order first, so a
+// caller does not have to reproduce `cmp_bytes`'s trailing-slash rule itself
+// (`Entry.cmp`, below) -- a tree written from an unsorted directory listing
+// comes out identical to the one git would have written for the same
+// entries.
 // --- names in a tree are octets, and so is a commit message ------------------
 //
 // A path in a tree entry is whatever octets the filesystem gave git, and an
@@ -45,6 +69,7 @@ import fs;
 import repo;
 import sha1;
 import zlib;
+import random;
 
 /// Why an object could not be read, or could not be believed. Payload-free
 /// (docs/errors-decision.md §4): the object name, the underlying `io.Error`
@@ -145,6 +170,28 @@ pub str Entry.type_word() {
         return "commit";
     }
     return "blob";
+}
+
+/// git's own tree order, for sorting entries before `write_tree` serialises
+/// them: plain byte comparison of the name, except that a subdirectory's name
+/// compares as though a `/` had been appended. That is why `sub.txt` (whose
+/// fifth byte is `.`, 0x2E) sorts before the directory `sub` (which compares
+/// as `sub/`, 0x2F) even though the bare names would tie at four bytes and
+/// `sub` would otherwise look like a prefix that sorts first. A tree `read`
+/// off disk is already in this order -- git never writes one that is not, and
+/// `tree_entries` does not check -- so this is needed only for writing.
+pub int Entry.cmp(Entry other) {
+    bytes a = name;
+    if (is_tree()) {
+        a = clone(name);
+        a.push('/');
+    }
+    bytes b = other.name;
+    if (other.is_tree()) {
+        b = clone(other.name);
+        b.push('/');
+    }
+    return cmp_bytes(a, b);
 }
 
 /// The six-digit octal git prints, zero-padded -- `040000`, not `40000`.
@@ -706,4 +753,194 @@ pub bool is_name(str s) {
         }
     }
     return true;
+}
+
+// --- writing ------------------------------------------------------------------
+
+/// A blob holding exactly `content`.
+pub Result<str, Error> write_blob(str gitdir, bytes content) {
+    return write_object(gitdir, "blob", content);
+}
+
+/// A tree of `entries`, sorted into git's own order first (`Entry.cmp`), so
+/// the caller need not have sorted them.
+pub Result<str, Error> write_tree(str gitdir, List<Entry> entries) {
+    List<Entry> sorted = clone(entries);
+    sorted.sort();
+    bytes content = [];
+    for (Entry e in sorted) {
+        content.extend(mode_octal(e.mode));
+        content.push(' ');
+        content.extend(e.name);
+        content.push(0);
+        content.extend(hex_decode(e.id));
+    }
+    return write_object(gitdir, "tree", content);
+}
+
+/// A commit exactly as `c` describes it: `tree`, then one `parent` line per
+/// entry of `c.parents` in order, then `author`, then `committer`, then every
+/// line of `c.extra` verbatim (folded back onto multiple physical lines if it
+/// holds one, the exact inverse of what `headers()` did to read it), a blank
+/// line, and `c.message`.
+pub Result<str, Error> write_commit(str gitdir, Commit c) {
+    bytes content = [];
+    content.extend("tree ".to_bytes());
+    content.extend(c.tree.to_bytes());
+    content.push('\n');
+    for (str p in c.parents) {
+        content.extend("parent ".to_bytes());
+        content.extend(p.to_bytes());
+        content.push('\n');
+    }
+    content.extend(ident_line("author", c.author));
+    content.extend(ident_line("committer", c.committer));
+    for (bytes line in c.extra) {
+        content.extend(fold_header(line));
+        content.push('\n');
+    }
+    content.push('\n');
+    content.extend(c.message);
+    return write_object(gitdir, "commit", content);
+}
+
+// `<key> <name> <<email>> <when> <zone>\n`.
+bytes ident_line(str key, Ident who) {
+    bytes out = [];
+    out.extend(key.to_bytes());
+    out.push(' ');
+    out.extend(who.name);
+    out.extend(" <".to_bytes());
+    out.extend(who.email);
+    out.extend("> ".to_bytes());
+    out.extend(who.when.to_str().to_bytes());
+    out.push(' ');
+    out.extend(who.zone.to_bytes());
+    out.push('\n');
+    return out;
+}
+
+// The inverse of `headers()`'s continuation handling: a line held in
+// `Commit.extra` or `Tag.extra` has each of its continuation newlines already
+// stripped of the leading space that told them apart from a new header, so
+// writing it back re-inserts exactly one space after every embedded `\n`.
+bytes fold_header(bytes line) {
+    bytes out = [];
+    for (int c in line) {
+        out.push(c);
+        if (c == '\n') {
+            out.push(' ');
+        }
+    }
+    return out;
+}
+
+// The header, the zlib stream, and the write itself: temporary file beside
+// the target, written whole, renamed over it -- never a direct write to the
+// object's own name, so a reader never opens a partial zlib stream. Content
+// addressed, so a name already on disk is left alone: the bytes it holds are
+// already this object's, by construction, or the store was corrupt before
+// this call and rewriting it here would not fix that.
+Result<str, Error> write_object(str gitdir, str kind, bytes content) {
+    bytes header = [];
+    header.extend(kind.to_bytes());
+    header.push(' ');
+    header.extend(content.size().to_str().to_bytes());
+    header.push(0);
+    header.extend(content);
+    str id = sha1.hex(header);
+    str dir = fs.join(fs.join(repo.common(gitdir), "objects"), id.substr(0, 2));
+    str path = fs.join(dir, id.substr(2, 40));
+    if (fs.exists(path)) {
+        return Result<str, Error>.Ok(id);
+    }
+    match (fs.makedirs(dir)) {
+        case Ok: {
+        }
+        case Err(io.Error e): {
+            return Result<str, Error>.Err(Error.Io);
+        }
+    }
+    bytes compressed = zlib.compress(header);
+    random.System rnd = random.system();
+    str tmp = fs.join(dir, "tmp" + rnd.hex(12));
+    match (io.write_bytes(tmp, compressed)) {
+        case Ok: {
+        }
+        case Err(io.Error e): {
+            return Result<str, Error>.Err(Error.Io);
+        }
+    }
+    match (fs.rename(tmp, path)) {
+        case Ok: {
+            return Result<str, Error>.Ok(id);
+        }
+        case Err(io.Error e): {
+            return Result<str, Error>.Err(Error.Io);
+        }
+    }
+}
+
+// `mode`'s octal digits, ASCII, with no leading zero -- `"40000"` for a tree
+// and `"100644"` for an ordinary file, which is the raw on-disk spelling and
+// not `mode_text()`'s fixed six digits for `ls-tree` to print.
+bytes mode_octal(int mode) {
+    if (mode == 0) {
+        return "0".to_bytes();
+    }
+    List<int> digits = [];
+    int m = mode;
+    while (m > 0) {
+        digits.push(m % 8);
+        m = m / 8;
+    }
+    bytes out = [];
+    int i = digits.size() - 1;
+    while (i >= 0) {
+        out.push('0' + digits[i]);
+        i = i - 1;
+    }
+    return out;
+}
+
+// 40 lowercase hex digits to the 20 octets they spell. Used only on strings
+// this module already trusts -- `sha1.hex`'s own output, or an `Entry.id`
+// that came from `tree_entries` parsing 20 raw octets in the first place --
+// so an invalid digit cannot arise and is not checked for.
+bytes hex_decode(str s) {
+    bytes out = [];
+    int i = 0;
+    while (i + 1 < s.size()) {
+        out.push(hex_val(s.byte_at(i)) << 4 | hex_val(s.byte_at(i + 1)));
+        i = i + 2;
+    }
+    return out;
+}
+
+int hex_val(int c) {
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return 0;
+}
+
+// Byte comparison of two runs, negative/zero/positive -- `refs.src`'s
+// `before`, over `bytes` rather than `str`, needed here for `Entry.cmp`.
+int cmp_bytes(bytes a, bytes b) {
+    int n = a.size();
+    if (b.size() < n) {
+        n = b.size();
+    }
+    for (int i in 0 .. n) {
+        if (a[i] != b[i]) {
+            return a[i] - b[i];
+        }
+    }
+    return a.size() - b.size();
 }

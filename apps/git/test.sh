@@ -185,6 +185,14 @@ if build git; then
     done
 fi
 
+# --- the write path: .git/index, loose objects, refs, status -------------------
+#
+# `test_write.sh` shares this script's shell, `$WORK`, `$LANGC`, `build`,
+# `note`/`bad` and the `pass`/`fail` counters, and builds its own disposable
+# fixtures under `$WORK` -- see its own header.
+
+source apps/git/test_write.sh
+
 echo
 if [ $fail -eq 0 ]; then
     printf '\033[32mall %d apps/git checks passed\033[0m\n' "$pass"
