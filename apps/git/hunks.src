@@ -1,0 +1,262 @@
+// Turning `diff.diff`'s edit script into what `apps/tui/tuidiffview.DiffView`
+// renders: `Hunk`s, grouped with a few lines of unchanged context on each
+// side, the way `git diff`/`diff -u` group theirs.
+//
+// API
+// ---
+//   hunks.Blob                  Binary | Hunks(List<tuidiffview.Hunk>)
+//   hunks.hunks(old, new, context:)  -> Blob
+//
+// --- the boundary this sits on -------------------------------------------------
+//
+// `lib/diff.src` computes the generic edit script -- keep, add or remove,
+// line by line -- and knows nothing about hunks, context, or
+// `tuidiffview.Hunk`/`Line`; it cannot, because `lib/` does not depend on
+// `apps/tui` (`apps/git/design.md`'s "Starting the client" section, and
+// `lib/diff.src`'s own header, say why at more length). Grouping that script
+// into hunks and turning each `diff.Op`'s `bytes` line into the `str`
+// `tuidiffview.Line.text` wants is presentation, not algorithm, so it lives
+// here instead -- `apps/git` is the one place today that needs both
+// `lib/diff` and `apps/tui`, and the client this is for (`design.md`) is
+// itself an `apps/git` program.
+//
+// --- grouping into hunks, with context -----------------------------------------
+//
+// Three unchanged lines of context on each side of a change, git's own
+// default (`-U3`) and `diff -u`'s: enough to place a change by eye without
+// reprinting the file. Two changes are merged into ONE hunk, with every
+// unchanged line between them kept as context, when that gap is `2 *
+// context` lines or fewer -- the point past which showing `context` lines
+// after the first change and `context` before the second would leave them
+// touching or overlapping anyway. This is the same rule GNU diff and git use
+// to decide where one `@@` block ends and the next begins.
+//
+// No context exists past either end of the file: a change on line 1 gets no
+// leading context and one on the last line gets no trailing context, because
+// there is no line there to show -- the same reason `tuidiffview.Hunk`'s
+// header is free text rather than something this always fills with three
+// lines regardless.
+
+import diff;
+import tuidiffview;
+
+/// Three lines of context, `git diff`'s and `diff -u`'s own default.
+const int DEFAULT_CONTEXT = 3;
+
+/// A file's diff, once binary content has been ruled out.
+pub enum Blob {
+    /// `diff.is_binary` said so about `old` or `new`; no line diff was
+    /// attempted, matching git's own refusal to diff binary content as text.
+    Binary;
+    /// Every hunk, in order, each with up to `context` lines of unchanged
+    /// text on either side.
+    Hunks(List<tuidiffview.Hunk>);
+}
+
+/// `old` and `new`, as hunks a `tuidiffview.DiffView` can render.
+pub Blob hunks(bytes old, bytes new, int context = DEFAULT_CONTEXT) {
+    match (diff.diff(old, new)) {
+        case Binary: {
+            return Blob.Binary;
+        }
+        case Lines(List<diff.Op> ops): {
+            return Blob.Hunks(group(ops, context));
+        }
+    }
+}
+
+// A maximal run of consecutive ops that are all `Keep` or all NOT `Keep`,
+// over `[start, end)`. `lib/diff.src`'s script alternates between the two --
+// a `Keep` never sits between two ops of a run it is not part of -- so
+// splitting it this way, once, is enough to find every hunk boundary without
+// re-scanning.
+type Run {
+    bool change;
+    int start;
+    int end;
+}
+
+List<Run> runs_of(List<diff.Op> ops) {
+    List<Run> runs = [];
+    int n = ops.size();
+    int i = 0;
+    while (i < n) {
+        bool change = is_change(ops[i]);
+        int j = i + 1;
+        while (j < n && is_change(ops[j]) == change) {
+            j = j + 1;
+        }
+        runs.push(Run(change, i, j));
+        i = j;
+    }
+    return runs;
+}
+
+bool is_change(diff.Op op) {
+    match (op.kind) {
+        case Keep: {
+            return false;
+        }
+        case Add: {
+            return true;
+        }
+        case Remove: {
+            return true;
+        }
+    }
+}
+
+// Group `ops` into hunks, merging adjacent changes whose gap is within
+// `2 * context` and trimming the unchanged run before the first change and
+// after the last to `context` lines.
+List<tuidiffview.Hunk> group(List<diff.Op> ops, int context) {
+    List<Run> runs = runs_of(ops);
+    List<int> old_no = prefix_counts(ops, true);
+    List<int> new_no = prefix_counts(ops, false);
+    List<tuidiffview.Hunk> out = [];
+    int rn = runs.size();
+    int idx = 0;
+    while (idx < rn) {
+        if (!runs[idx].change) {
+            idx = idx + 1;
+            continue;
+        }
+        int first_run = idx;
+        int last_run = idx;
+        int next = idx + 1;
+        while (next + 1 < rn && runs[next].end - runs[next].start <= 2 * context) {
+            last_run = next + 1;
+            next = next + 2;
+        }
+        int content_start = runs[first_run].start;
+        if (first_run > 0) {
+            Run lead = runs[first_run - 1];
+            int take = context;
+            int have = lead.end - lead.start;
+            if (take > have) {
+                take = have;
+            }
+            content_start = lead.end - take;
+        }
+        int content_end = runs[last_run].end;
+        if (last_run + 1 < rn) {
+            Run trail = runs[last_run + 1];
+            int take = context;
+            int have = trail.end - trail.start;
+            if (take > have) {
+                take = have;
+            }
+            content_end = trail.start + take;
+        }
+        out.push(build_hunk(ops, old_no, new_no, content_start, content_end));
+        idx = last_run + 1;
+    }
+    return out;
+}
+
+// `counts[i]` is the number of old lines (`old: true`, every `Keep` or
+// `Remove` before `i`) or new lines (`old: false`, every `Keep` or `Add`
+// before `i`) that come before `ops[i]` -- a 0-based count, so `counts[i] +
+// 1` is the 1-based line number of the next old or new line, when there is
+// one. Sized `ops.size() + 1` so a hunk that runs to the end of `ops` can
+// still ask for the count at its (one past the last) boundary.
+List<int> prefix_counts(List<diff.Op> ops, bool old) {
+    List<int> counts = [0; ops.size() + 1];
+    int i = 0;
+    int n = ops.size();
+    while (i < n) {
+        bool counts_here = false;
+        match (ops[i].kind) {
+            case Keep: {
+                counts_here = true;
+            }
+            case Remove: {
+                counts_here = old;
+            }
+            case Add: {
+                counts_here = !old;
+            }
+        }
+        if (counts_here) {
+            counts[i + 1] = counts[i] + 1;
+        } else {
+            counts[i + 1] = counts[i];
+        }
+        i = i + 1;
+    }
+    return counts;
+}
+
+tuidiffview.Hunk build_hunk(List<diff.Op> ops, List<int> old_no, List<int> new_no, int start, int end) {
+    List<tuidiffview.Line> lines = [];
+    int i = start;
+    while (i < end) {
+        diff.Op op = ops[i];
+        str text = line_text(op.line);
+        match (op.kind) {
+            case Keep: {
+                lines.push(tuidiffview.Line.context(text));
+            }
+            case Add: {
+                lines.push(tuidiffview.Line.added(text));
+            }
+            case Remove: {
+                lines.push(tuidiffview.Line.removed(text));
+            }
+        }
+        i = i + 1;
+    }
+    int old_count = old_no[end] - old_no[start];
+    int new_count = new_no[end] - new_no[start];
+    str header = "@@ -" + hunk_range(old_no[start], old_count) + " +" + hunk_range(new_no[start], new_count) + " @@";
+    return tuidiffview.Hunk(header, lines);
+}
+
+// The `start,count` half of a unified-diff hunk header. `before` is the
+// 0-based count of lines that came before this hunk on that side -- the same
+// thing `prefix_counts` hands back -- so a non-empty side's 1-based start is
+// `before + 1`, and an empty side (a hunk that only adds, or only removes,
+// on this side) reports `before`, unchanged: git's own convention for "insert
+// after line `before`", e.g. `@@ -5,0 +6,3 @@` for three lines added after
+// old line 5.
+str hunk_range(int before, int count) {
+    int start = before;
+    if (count > 0) {
+        start = before + 1;
+    }
+    return start.to_str() + "," + count.to_str();
+}
+
+// One line's text, its own terminator stripped, for `tuidiffview.Line`,
+// which is `str` (`Kind`-tagged text a widget prints, not octets a hunk
+// carries). `diff.Op.line` keeps a trailing `\n` (`\r\n` too, for a
+// CRLF-terminated line) as part of its bytes -- exactly what makes
+// `diff.reconstruct_old`/`reconstruct_new` exact rebuilds -- so this is the
+// one place that terminator is dropped, because a rendered row supplies its
+// own newline and would otherwise show a blank line under every one of them.
+//
+// `diff.is_binary` rules out NUL bytes, not encoding: a line that is not
+// valid UTF-8 despite passing that check (a non-UTF-8 text file, which this
+// program otherwise never produces or reads as such) cannot become the `str`
+// `Line.text` requires (`str` is always valid UTF-8, reference §3.2a).
+// Rather than trap and take the whole hunk down over one such line, or
+// silently drop bytes, it renders as its own hex -- visibly not the line's
+// text, so a reader is never shown something the file does not contain.
+str line_text(bytes line) {
+    int n = line.size();
+    if (n > 0 && line[n - 1] == 10) {
+        n = n - 1;
+    }
+    if (n > 0 && line[n - 1] == 13) {
+        n = n - 1;
+    }
+    bytes trimmed = line.substr(0, n);
+    match (trimmed.utf8()) {
+        case Some(str s): {
+            return s;
+        }
+        case None: {
+            return "<invalid utf-8: " + trimmed.hex() + ">";
+        }
+    }
+}

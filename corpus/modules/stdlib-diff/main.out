@@ -1,0 +1,63 @@
+== no change ==
+=a\n
+=b\n
+=c\n
+== pure addition ==
+=a\n
++x\n
++y\n
+=b\n
+== pure deletion ==
+=a\n
+-x\n
+-y\n
+=b\n
+== change in the middle ==
+=1\n
+=2\n
+-3\n
++X\n
+=4\n
+=5\n
+== change at the very start ==
+-a\n
++Z\n
+=b\n
+=c\n
+== change at the very end ==
+=a\n
+=b\n
+-c\n
++Z\n
+== both empty ==
+== empty old ==
++a\n
++b\n
+== empty new ==
+-a\n
+-b\n
+== no trailing newline, old ==
+=a\n
+-b
++b\n
++c\n
+== no trailing newline, new ==
+=a\n
+-b\n
++b
+== no trailing newline, both, changed ==
+=a\n
+-b
++c
+== no trailing newline, both, same ==
+=a\n
+=b
+known cases done
+true
+true
+false
+false
+false
+diff() reports Binary for a NUL-bearing buffer
+binary detection done
+200 round-trip trials, 0 failures

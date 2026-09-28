@@ -22,6 +22,7 @@ bash apps/git/test.sh <repo> [<repo>…]   # those, and each repository named
 | `refs.src` | HEAD, `refs/**`, `packed-refs`, symbolic refs, `rev-parse`'s DWIM |
 | `repo.src` | where the files are: `.git` as a file, and a linked worktree's `commondir` |
 | `git.src` | the CLI |
+| `hunks.src` | `lib/diff.src`'s edit script, grouped into `apps/tui/tuidiffview.Hunk`/`Line` with context |
 | `t_*.src` | test programs, each printing what a Python oracle prints |
 | `oracle_*.py` | the oracles: `hashlib`, `zlib`, and a from-scratch format reader |
 | `compare.sh` | every command beside the real `git`, compared octet for octet |
