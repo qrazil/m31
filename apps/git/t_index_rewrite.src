@@ -1,0 +1,36 @@
+// Reads `.git/index` at the repository named on the command line and writes
+// it straight back -- re-encoded by this module, every extension real git
+// may have added dropped -- so `test_write.sh` can confirm real `git`
+// (`status`, `ls-files --stage`) still agrees with the result.
+//
+//   ./t_index_rewrite <gitdir>
+
+import index;
+import io;
+import os;
+
+List<str> argv = os.args();
+if (argv.size() < 2) {
+    io.eprint("usage: t_index_rewrite <gitdir>");
+    os.exit(2);
+}
+str gd = argv[1];
+index.Index ix = index.Index([]);
+match (index.read(gd)) {
+    case Ok(index.Index v): {
+        ix = v;
+    }
+    case Err(index.Error e): {
+        io.eprint("read: " + e.to_str());
+        os.exit(1);
+    }
+}
+match (index.write(gd, ix)) {
+    case Ok: {
+    }
+    case Err(index.Error e): {
+        io.eprint("write: " + e.to_str());
+        os.exit(1);
+    }
+}
+print("rewritten " + ix.entries.size().to_str());

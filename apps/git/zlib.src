@@ -13,6 +13,8 @@
 //   zlib.decompress(src, limit: n)  -> the same, refusing to emit more than n
 //   zlib.inflate(src)               -> Result<bytes, Error>   raw RFC 1951
 //   zlib.adler32(b)                 -> int, the RFC 1950 check value
+//   zlib.deflate_stored(data)       -> bytes   RFC 1951, uncompressed stored blocks
+//   zlib.compress(data)             -> bytes   RFC 1950 wrapping the above
 //
 // `decompress` verifies the two-octet header, refuses a preset dictionary,
 // and verifies the trailing Adler-32 against what it produced. A stream whose
@@ -541,6 +543,73 @@ pub Result<bytes, Error> inflate(bytes src, int limit = -1) {
     Bits b = Bits(src);
     run(b, out, limit)?;
     return Result<bytes, Error>.Ok(out);
+}
+
+// --- writing: stored blocks only ---------------------------------------------
+//
+// There is no Huffman encoder here. RFC 1951 §3.2.4's stored block -- a
+// length, its one's-complement, and the octets verbatim -- is a completely
+// legal DEFLATE block on its own, and `run` above already reads one exactly
+// this way: `BFINAL`+`BTYPE` as one byte (the five unused bits are zero, so
+// the three real bits fill a whole byte), `b.align()` to the next octet
+// boundary, then `LEN`, `NLEN`, and `LEN` octets straight from the input. So
+// this writer produces bytes no real decoder can tell apart from a "properly"
+// compressed stream, git's own included -- it is only bigger, never wrong. A
+// Huffman encoder can replace this later without any caller noticing; nothing
+// above `deflate_stored` cares how the bytes it hands back were chosen.
+//
+// `LEN` is 16 bits, so a stream longer than 65 535 octets is several stored
+// blocks, all but the last with `BFINAL` clear.
+
+/// `data`, as one or more RFC 1951 stored blocks -- correct, uncompressed
+/// DEFLATE. See the note above: this is the whole of the compressor.
+pub bytes deflate_stored(bytes data) {
+    bytes out = [];
+    int at = 0;
+    int n = data.size();
+    while (true) {
+        int len = n - at;
+        if (len > 65535) {
+            len = 65535;
+        }
+        bool last = at + len == n;
+        int hdr = 0;
+        if (last) {
+            hdr = 1;
+        }
+        out.push(hdr);
+        int nlen = len ^ 0xFFFF;
+        out.push(len & 0xFF);
+        out.push(len >> 8 & 0xFF);
+        out.push(nlen & 0xFF);
+        out.push(nlen >> 8 & 0xFF);
+        out.extend(data.substr(at, at + len));
+        at = at + len;
+        if (last) {
+            return out;
+        }
+    }
+}
+
+/// A zlib stream (RFC 1950) that `zlib.decompress` above -- or real `git`,
+/// which uses the same format -- reads back to exactly `data`: the header
+/// octets `0x78 0x01` (method 8, a 32K window, the "fastest" `FLEVEL`, which
+/// is what this is), `deflate_stored(data)`, and the big-endian Adler-32
+/// `decompress` checks. `0x78 0x01` is a real header zlib itself writes at
+/// compression level 0 or 1, not a value invented for this: `(0x78 * 256 +
+/// 0x01) % 31 == 0`, as the format requires, and the preset-dictionary bit is
+/// clear.
+pub bytes compress(bytes data) {
+    bytes out = [];
+    out.push(0x78);
+    out.push(0x01);
+    out.extend(deflate_stored(data));
+    int sum = adler32(data);
+    out.push(sum >> 24 & 0xFF);
+    out.push(sum >> 16 & 0xFF);
+    out.push(sum >> 8 & 0xFF);
+    out.push(sum & 0xFF);
+    return out;
 }
 
 /// A zlib stream (RFC 1950): the two header octets, a DEFLATE stream, and a
