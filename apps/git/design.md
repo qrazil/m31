@@ -87,6 +87,36 @@ the git client and stuck there:
 None of this is scoped or estimated yet — this is the shape, not the plan.
 Revisit once `apps/tui` stage 2 lands and `lib/term.src` exists.
 
+## The dependency chain to an actual client, 2026-09-28
+
+Checked before starting: `lib/term.src` already exists (raw mode, key
+decoding, window size, one-write flush, read-with-timeout — everything
+`apps/tui`'s own README implies is still pending under "being written
+separately", which is now stale). What's actually missing splits into three
+independent pieces, plus one that depends on all of them:
+
+  - **The `io`/`net`/`term` errno gap** `docs/errors-decision.md` §4 records
+    B leaving open — orthogonal to everything else here, done in parallel.
+  - **`apps/git` has no write path at all.** No `.git/index` (read or
+    write), no object writing (blobs, trees, commits), no ref writing, no
+    working-tree diff. Status, staging and committing all need this, and
+    none of it is TUI work — it's plumbing this design has been silently
+    assuming exists.
+  - **`apps/tui` stage 2** (styling layer) plus the primitives this design
+    names (outline, jump list, which-key/transient, addressable diff
+    cursor, footer) plus stage 3's actual remaining piece — the application
+    loop joining the renderer to the *existing* `lib/term.src`, since
+    `term.src` itself is done.
+  - **The client itself** depends on both of the above and cannot start
+    before they land — a second wave, not this one.
+
+Deliberately not in this wave, each already a named, separate gap rather
+than a silent omission: packfiles (`apps/git/README.md`'s own stage 2 —
+neither `oro` nor this repo needs it, since neither has ever been packed);
+`.gitignore`; the dashboard-shaped widgets from `apps/tui`'s original
+stage-2 list (`Gauge`, `Sparkline`, `BarChart`, `Chart`) and mouse support,
+none of which a keyboard-driven, document-shaped client needs.
+
 ## What this deliberately does not decide yet
 
   - Exact keybindings (mnemonic, one key per base verb, is the only
