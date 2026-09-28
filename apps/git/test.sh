@@ -193,6 +193,13 @@ fi
 
 source apps/git/test_write.sh
 
+# --- the interactive client: unit, oracle and pty-driven end-to-end --------
+#
+# `test_gitui.sh` shares this script's shell the same way `test_write.sh`
+# does -- see its own header.
+
+source apps/git/test_gitui.sh
+
 echo
 if [ $fail -eq 0 ]; then
     printf '\033[32mall %d apps/git checks passed\033[0m\n' "$pass"

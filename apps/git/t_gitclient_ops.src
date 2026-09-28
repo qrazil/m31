@@ -1,0 +1,49 @@
+// Drives `gitclient.State`'s staging, unstaging and committing directly --
+// no terminal, no `tuiapp.Loop` -- against a real, disposable fixture, so
+// `test_gitui.sh` can check each action's on-disk effect against real git
+// the same way `t_index_stage.src` and `t_write_refs.src` already do for
+// the plumbing underneath this client.
+//
+//   ./t_gitclient_ops <gitdir> <worktree> stage <relative-path>
+//   ./t_gitclient_ops <gitdir> <worktree> unstage <relative-path>
+//   ./t_gitclient_ops <gitdir> <worktree> commit
+//
+// `commit` reads whatever is already at `<gitdir>/COMMIT_EDITMSG` -- the
+// caller writes it first, the same file a person editing it by hand would
+// have left there -- and prints `State.message` afterward either way, so the
+// shell test can tell a refusal (an empty message) from an actual commit.
+
+import gitclient;
+import io;
+import os;
+
+List<str> argv = os.args();
+if (argv.size() < 4) {
+    io.eprint("usage: t_gitclient_ops <gitdir> <worktree> stage|unstage <path>");
+    io.eprint("       t_gitclient_ops <gitdir> <worktree> commit");
+    os.exit(2);
+}
+str gd = argv[1];
+str wt = argv[2];
+str op = argv[3];
+gitclient.State state = gitclient.State.open(gd, wt);
+state.refresh();
+if (op == "stage") {
+    if (argv.size() < 5) {
+        io.eprint("usage: t_gitclient_ops <gitdir> <worktree> stage <path>");
+        os.exit(2);
+    }
+    state.stage_path(argv[4].to_bytes());
+} else if (op == "unstage") {
+    if (argv.size() < 5) {
+        io.eprint("usage: t_gitclient_ops <gitdir> <worktree> unstage <path>");
+        os.exit(2);
+    }
+    state.unstage_path(argv[4].to_bytes());
+} else if (op == "commit") {
+    state.finish_commit();
+} else {
+    io.eprint("unknown op: " + op);
+    os.exit(2);
+}
+print(state.message);

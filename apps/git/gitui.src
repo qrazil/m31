@@ -1,0 +1,65 @@
+// The interactive client -- `apps/git/design.md`'s locked design, built: one
+// scrollable, collapsible outline of untracked files, unstaged changes,
+// staged changes and recent commits; whole-file staging and unstaging; a
+// commit; a persistent footer of the base commands; a which-key overlay for
+// commit's follow-ups; and a synced jump list, toggled on demand.
+//
+//   ./build.sh apps/git/gitui.src -o ourgitui
+//   ./ourgitui [path]                      # default: "."
+//
+// `path` is where the repository is, exactly like `git status` run from
+// that directory -- it is not walked up through parents the way `ourgit`'s
+// own `--git-dir` discovery is (`repo.find` still walks up to *find*
+// `.git`, but the working tree this client reads and writes is `path`
+// itself). Run it from the repository's own top level.
+//
+// This file is deliberately thin: every piece a test needs to call directly
+// -- building the outline, staging or unstaging a path, stripping a commit
+// message -- lives in `gitclient.src`, which has no top-level statements and
+// can be imported. This is `apps/tui/browse.src`'s own shape, one file
+// further split because this program, unlike that demo, has a real test
+// obligation for its logic (`apps/git/design.md`'s "how you'll know you're
+// done").
+//
+// See `gitclient.src`'s own header for the one gap this ran into that
+// `apps/git/design.md` did not name: there is no way, anywhere in this
+// language's runtime, to launch another process, so the commit flow cannot
+// actually invoke `$EDITOR` the way real `git commit` does. It keeps the
+// same on-disk contract (a message file at a known path, edited by
+// something, read back and refused if empty) instead of pretending to shell
+// out.
+
+import fs;
+import io;
+import os;
+import repo;
+import term;
+import tuiapp;
+import tuibuf;
+import tuigeom;
+import gitclient;
+
+List<str> argv = os.args();
+str path = ".";
+if (argv.size() > 1) {
+    path = argv[1];
+}
+str gd = repo.find(path);
+if (gd == "") {
+    io.eprint("gitui: not a git repository (or any parent up to /): no .git directory");
+    return;
+}
+if (!term.is_terminal(0)) {
+    io.eprint("gitui: standard input is not a terminal");
+    return;
+}
+gitclient.State state = gitclient.State.open(gd, path);
+state.reload();
+tuiapp.Loop loop = tuiapp.Loop();
+match (loop.run((tuibuf.Buffer buf, tuigeom.Rect area) => state.draw(buf, area), (term.Event ev) => state.handle(ev))) {
+    case Ok(int n): {
+    }
+    case Err(term.Error e): {
+        io.eprint("gitui: " + e.to_str());
+    }
+}

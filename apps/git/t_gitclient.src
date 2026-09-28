@@ -1,0 +1,104 @@
+// Unit tests for `gitclient.src`'s pure logic -- the pieces that need no
+// repository at all: building the outline from a `status.Status` and a
+// commit walk, and stripping a commit message down to what git would
+// actually commit, empty-message refusal included.
+//
+//   ./t_gitclient
+//
+// Prints one `<case> ok` or `<case> FAIL ...` line per check; `test.sh`
+// greps for the `ok` lines and fails the suite if any `FAIL` line appears
+// (the same convention `t_write_refs.src` already uses). No repository, no
+// filesystem, no `gitdir` -- this is exactly what a pure function buys.
+
+import gitclient;
+import gitlog;
+import object;
+import status;
+import tuioutline;
+
+// A local of the top-level program body is invisible to a function
+// (`apps/git/FRICTION.md` §6, `git.src`'s own `dispatch` comment) -- so the
+// running totals live in a small struct, passed to `check` and mutated
+// through it, the way `index.Index.entries` is mutated through every
+// staging function above.
+type Counter {
+    int checks = 0;
+    int failed = 0;
+}
+
+void Counter.check(str name, bool ok, str detail) {
+    checks = checks + 1;
+    if (ok) {
+        print(name + " ok");
+    } else {
+        failed = failed + 1;
+        print(name + " FAIL " + detail);
+    }
+}
+
+Counter counter = Counter();
+
+// --- build_outline -----------------------------------------------------------
+
+status.Status st = status.Status([status.Delta("a.txt".to_bytes(), status.Change.Modified), status.Delta("newfile.txt".to_bytes(), status.Change.Added)], [status.Delta("b.txt".to_bytes(), status.Change.Modified)], ["c.txt".to_bytes()]);
+object.Ident who = object.Ident("A U Thor".to_bytes(), "a@example.com".to_bytes(), 1700000000, 0, "+0000");
+object.Commit c1 = object.Commit("0000000000000000000000000000000000000000", [], who, who, [], "first commit\n\nwith a body\n".to_bytes());
+List<gitlog.Entry> log = [gitlog.Entry("1111111111111111111111111111111111111111", c1)];
+Map<str, bool> collapsed = {};
+Map<str, bytes> paths = {};
+tuioutline.Outline o = gitclient.build_outline(st, log, collapsed, paths);
+List<tuioutline.Row> rows = o.rows();
+List<str> ids = [];
+for (tuioutline.Row r in rows) {
+    ids.push(r.node.id);
+}
+str joined = ids.join(",");
+counter.check("outline: four top-level sections plus their children, commits collapsed by default", joined == "untracked,untracked:c.txt,unstaged,unstaged:b.txt,staged,staged:a.txt,staged:newfile.txt,commits,commit:1111111111111111111111111111111111111111", joined);
+counter.check("outline: staged section counts both staged deltas", rows[4].node.label == "Staged changes (2)", rows[4].node.label);
+counter.check("outline: a staged, modified path is marked M", rows[5].node.label == "M  a.txt", rows[5].node.label);
+counter.check("outline: a staged, newly-added path is marked A", rows[6].node.label == "A  newfile.txt", rows[6].node.label);
+counter.check("outline: the commit row shows its short id and first message line", rows[8].node.label == "1111111  first commit", rows[8].node.label);
+match (paths.get("staged:a.txt")) {
+    case Some(bytes p): {
+        counter.check("outline: paths map recovers the real bytes for a staged row", p.utf8().or("") == "a.txt", p.utf8().or("<none>"));
+    }
+    case None: {
+        counter.check("outline: paths map recovers the real bytes for a staged row", false, "no entry for staged:a.txt");
+    }
+}
+match (paths.get("untracked:c.txt")) {
+    case Some(bytes p): {
+        counter.check("outline: paths map recovers the real bytes for an untracked row", p.utf8().or("") == "c.txt", p.utf8().or("<none>"));
+    }
+    case None: {
+        counter.check("outline: paths map recovers the real bytes for an untracked row", false, "no entry for untracked:c.txt");
+    }
+}
+// A commit section defaults collapsed, so its body rows (author/date/message)
+// must not appear in the flattened, visible list yet.
+bool saw_body = false;
+for (str id in ids) {
+    if (id.starts_with("commit:1111111111111111111111111111111111111111:")) {
+        saw_body = true;
+    }
+}
+counter.check("outline: a commit's body is hidden until expanded", !saw_body, "body row leaked into the collapsed view");
+// Recorded as expanded (via `collapsed`), the same build must show it.
+collapsed.set("commit:1111111111111111111111111111111111111111", false);
+tuioutline.Outline o2 = gitclient.build_outline(st, log, collapsed, paths);
+bool saw_body2 = false;
+for (tuioutline.Row r in o2.rows()) {
+    if (r.node.id == "commit:1111111111111111111111111111111111111111:author") {
+        saw_body2 = true;
+    }
+}
+counter.check("outline: an expanded commit shows its author/date/message rows", saw_body2, "author row missing after expanding");
+
+// --- strip_comment_lines -------------------------------------------------------
+
+counter.check("commit message: comments dropped, body kept", gitclient.strip_comment_lines("a summary\n\nbody line\n# comment 1\n#comment 2\nmore body\n") == "a summary\n\nbody line\nmore body", gitclient.strip_comment_lines("a summary\n\nbody line\n# comment 1\n#comment 2\nmore body\n"));
+counter.check("commit message: leading and trailing blank lines trimmed", gitclient.strip_comment_lines("\n\n  hello  \n\n") == "hello", gitclient.strip_comment_lines("\n\n  hello  \n\n"));
+counter.check("commit message: all-comment input strips to empty (refused by finish_commit)", gitclient.strip_comment_lines(gitclient.commit_template()) == "", gitclient.strip_comment_lines(gitclient.commit_template()));
+counter.check("commit message: whitespace-only input strips to empty", gitclient.strip_comment_lines("   \n\t\n   ") == "", gitclient.strip_comment_lines("   \n\t\n   "));
+print("");
+print(counter.checks.to_str() + " checks, " + counter.failed.to_str() + " failed");

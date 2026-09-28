@@ -1,9 +1,10 @@
-# `apps/git` — a terminal git client, stage 1
+# `apps/git` — a terminal git client
 
-Read-only git plumbing, written entirely in this language: SHA-1, zlib
-inflate, the loose-object format, refs, and five commands over `lib/args`.
-Nothing here is a binding to anything; the only C in the program is the
-runtime every program links.
+Git plumbing and an interactive client, written entirely in this language:
+SHA-1, zlib inflate, the loose-object format, refs, the index, working-tree
+status, and both a read-only CLI (`git.src`) and a `tuiapp.Loop`-driven
+interactive client (`gitui.src`) over `apps/tui`. Nothing here is a binding
+to anything; the only C in the program is the runtime every program links.
 
 ```
 cargo build
@@ -12,6 +13,9 @@ bash apps/git/test.sh <repo> [<repo>…]   # those, and each repository named
 
 ./build.sh apps/git/git.src -o ourgit
 ./ourgit -log --max 5
+
+./apps/git/build-gitui.sh -o ourgitui    # not build.sh -- see build-gitui.sh
+./ourgitui                               # run from a repository's own top level
 ```
 
 | file | what it is |
@@ -21,18 +25,41 @@ bash apps/git/test.sh <repo> [<repo>…]   # those, and each repository named
 | `object.src` | loose objects: the header, the SHA-1 check, trees, commits, tags |
 | `refs.src` | HEAD, `refs/**`, `packed-refs`, symbolic refs, `rev-parse`'s DWIM |
 | `repo.src` | where the files are: `.git` as a file, and a linked worktree's `commondir` |
-| `git.src` | the CLI |
-| `t_*.src` | test programs, each printing what a Python oracle prints |
+| `git.src` | the read-only CLI |
+| `index.src` | `.git/index`: read, write, a fresh entry from `fs.stat` |
+| `status.src` | working-tree status: staged, unstaged, untracked |
+| `gitlog.src` | the commit-history walk, shared by `git.src -log` and `gitui.src` |
+| `gitclient.src` | the interactive client's state and logic (no top-level statements, so it is importable and testable) |
+| `gitui.src` | the interactive client's thin driver: parses a path, runs `tuiapp.Loop` |
+| `build-gitui.sh` | builds `gitui.src`: this compiler resolves every `import` against the entry file's own directory (`src/modules.rs`'s `load`), not a search path, so `gitui.src`'s `apps/tui/` dependencies are staged into a temporary directory at build time rather than copied into this one -- see the script's own header |
+| `t_*.src` | test programs, each printing what a Python oracle prints, or asserting against its own expectations |
 | `oracle_*.py` | the oracles: `hashlib`, `zlib`, and a from-scratch format reader |
+| `pty_e2e.py` | drives `ourgitui` under a real pty against disposable fixtures, real `git` as the oracle |
 | `compare.sh` | every command beside the real `git`, compared octet for octet |
-| `test.sh` | all of the above |
+| `test.sh` | all of the above (sources `test_write.sh` and `test_gitui.sh`) |
 | `FRICTION.md` | **the other half of this**: what the language made hard, and what it made easy |
 
 ## What works
 
-`cat-file --type/--size/--pretty`, `ls-tree`, `log [--max N] [<rev>]`,
-`rev-parse` and `refs`, on a working tree, a bare repository or a linked
-worktree.
+Read-only: `cat-file --type/--size/--pretty`, `ls-tree`, `log [--max N]
+[<rev>]`, `rev-parse` and `refs`, on a working tree, a bare repository or a
+linked worktree.
+
+The write path: `.git/index` (read and write), loose object writing (blob,
+tree, commit), ref writing (`update`, `update_symbolic`, compare-and-swap),
+and working-tree status, all checked against real git in disposable
+fixtures (`test_write.sh`).
+
+The interactive client (`gitui.src`, `apps/git/design.md`'s locked design):
+a collapsible outline of untracked files, unstaged changes, staged changes
+and recent commits; whole-file staging and unstaging (`s`/`u`); a commit,
+via a message file at `COMMIT_EDITMSG` read back and refused if empty
+(`c` opens a which-key overlay: `e` writes the template, `f` finishes, `a`
+aborts -- see `gitclient.src`'s own header for why this cannot simply launch
+`$EDITOR`); a persistent footer of the base commands; and a synced jump list
+toggled with `J`. Hunk-level diff display and staging, push/pull, checkout
+and rebase are each a named, deliberate gap in `apps/git/design.md`, not an
+oversight here.
 
 Everything is checked against something that is not this program:
 

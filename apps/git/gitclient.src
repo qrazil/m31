@@ -1,0 +1,1218 @@
+// The interactive client's own state and logic, split out of `gitui.src` so
+// it is importable and unit-testable the way `t_status.src`/`t_index_stage.src`
+// test `status.src`/`index.src` directly -- a top-level statement anywhere in
+// an imported file is refused (`docs/reference.md` §2), so anything this
+// program needs a test harness to call has to live here rather than in the
+// `.src` that actually runs the terminal loop.
+//
+// `gitui.src` is the thin driver: parse a path off the command line, build a
+// `State`, and hand it to `tuiapp.Loop` exactly as `apps/tui/browse.src`
+// hands its own `State` to the same loop. Everything a test needs --
+// building the outline from a `status.Status`, staging or unstaging one
+// path, stripping a commit message down to what git would actually commit --
+// is a method or a free function here, callable with no terminal in sight.
+//
+// See `apps/git/design.md`'s "Starting the client" for the scope this
+// implements: whole-file staging, a commit via an externally edited message
+// file, and the outline/jump-list/which-key/footer wiring the locked design
+// names. Hunk-level diff staging, push/pull, checkout and rebase are each a
+// named, deliberate gap there, not an oversight here.
+//
+// --- the one gap this ran into that `apps/git/design.md` did not name ------
+//
+// Real `git commit` (no `-m`) launches `$EDITOR` as a child process. This
+// language has no way to do that: `lib/os.src`'s own header says plainly
+// that starting another program "belongs with whatever starts it", and
+// grepping every `prim` declaration in `lib/` (`os`, `fs`, `io`, `net`,
+// `term`, `date`, `random`) turns up sockets, files and a terminal's
+// `termios` -- never a `fork`/`exec`/`spawn` of any kind, in either the libc
+// or the raw-syscall half of `runtime/sys.h`. Adding one is not a small
+// primitive: `runtime/sys.h` speaks for two implementations (`sys_libc.c`,
+// and `sys_linux.c`'s inline assembly for three architectures under
+// `-DRT_SYS_RAW`), and every seam this codebase already crossed got its own
+// decision document first (`docs/errors-decision.md`, `docs/sys-layer.md`,
+// and the rest). That is a real, load-bearing gap discovered while building
+// this client -- the same shape of discovery `apps/git/design.md` itself
+// made about the missing diff algorithm -- and it is out of proportion to
+// this task to close unilaterally.
+//
+// So `finish_commit` keeps the exact on-disk contract real git's editor flow
+// uses -- a message file at a known path (`COMMIT_EDITMSG`, git's own name),
+// edited by *something*, read back and refused if empty after stripping
+// comments -- without pretending to launch an editor this runtime cannot
+// launch. The which-key overlay's `e` writes the template and tells the
+// operator the path to edit in another terminal; `f` reads it back and
+// commits; `a` discards it. A future `os.spawn` (or equivalent) primitive
+// is a one-line change here: replace the instruction in `edit_message`'s
+// result with an actual launch-and-wait, and everything downstream of it
+// -- the read-back, the stripping, the empty-message refusal, the commit
+// itself -- is already exactly what that primitive would need.
+
+import date;
+import fs;
+import gitlog;
+import index;
+import io;
+import object;
+import os;
+import refs;
+import status;
+import term;
+import text;
+import tuibuf;
+import tuifooter;
+import tuigeom;
+import tuijump;
+import tuimenu;
+import tuioutline;
+import tuiwidget;
+import tuistyle;
+import tuiapp;
+
+/// One row of a change list (`status.Status.staged`/`.unstaged`, or
+/// `.untracked`), ready to sort and to show: `path` is what a human reads,
+/// `raw` is the exact bytes staging/unstaging needs, and `mark` is the
+/// status letter (`'A'`, `'M'`, `'D'`) or `0` for an untracked path, which
+/// has none.
+type PathRow {
+    str path;
+    bytes raw;
+    int mark;
+}
+
+int PathRow.cmp(PathRow other) {
+    return str_cmp(path, other.path);
+}
+
+// `str` has no ordering operator (`refs.src`'s own `before`, the same
+// reason, written out again here because a type with a `str` field has to
+// supply its own `cmp` and there is nothing to call).
+int str_cmp(str a, str b) {
+    int n = a.size();
+    if (b.size() < n) {
+        n = b.size();
+    }
+    for (int i in 0 .. n) {
+        int x = a.byte_at(i);
+        int y = b.byte_at(i);
+        if (x != y) {
+            return x - y;
+        }
+    }
+    return a.size() - b.size();
+}
+
+int cmp_bytes(bytes a, bytes b) {
+    int n = a.size();
+    if (b.size() < n) {
+        n = b.size();
+    }
+    for (int i in 0 .. n) {
+        if (a[i] != b[i]) {
+            return a[i] - b[i];
+        }
+    }
+    return a.size() - b.size();
+}
+
+bool bytes_eq(bytes a, bytes b) {
+    return a.size() == b.size() && cmp_bytes(a, b) == 0;
+}
+
+int find_byte(bytes hay, int b, int from) {
+    int i = from;
+    int n = hay.size();
+    while (i < n) {
+        if (hay[i] == b) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+str mark_str(int m) {
+    if (m == 'A') {
+        return "A";
+    }
+    if (m == 'D') {
+        return "D";
+    }
+    return "M";
+}
+
+/// `deltas`, converted to sorted `PathRow`s -- one status letter per path,
+/// `status.Change`'s own three variants.
+pub List<PathRow> rows_from_deltas(List<status.Delta> deltas) {
+    List<PathRow> out = [];
+    for (status.Delta d in deltas) {
+        str p = d.path.utf8().or("<non-utf8 path>");
+        int m = 'M';
+        match (d.kind) {
+            case Added: {
+                m = 'A';
+            }
+            case Modified: {
+                m = 'M';
+            }
+            case Deleted: {
+                m = 'D';
+            }
+        }
+        out.push(PathRow(p, d.path, m));
+    }
+    out.sort();
+    return out;
+}
+
+/// `paths`, converted to sorted, markless `PathRow`s.
+pub List<PathRow> rows_from_untracked(List<bytes> paths) {
+    List<PathRow> out = [];
+    for (bytes b in paths) {
+        out.push(PathRow(b.utf8().or("<non-utf8 path>"), b, 0));
+    }
+    out.sort();
+    return out;
+}
+
+/// The first line of a commit message, decoded as far as it will go -- the
+/// one-line summary the outline's commit rows show.
+pub str first_line(bytes message) {
+    int nl = find_byte(message, '\n', 0);
+    bytes line = message;
+    if (nl >= 0) {
+        line = message.substr(0, nl);
+    }
+    return line.utf8().or("<non-utf8 message>");
+}
+
+/// Is `id` expanded, given what the caller has recorded about it and what it
+/// defaults to when nothing has been recorded yet? A toggled-closed section
+/// survives a rebuild of the outline this way -- see `State.toggle_current`.
+bool expanded_for(Map<str, bool> collapsed, str id, bool default_expanded) {
+    match (collapsed.get(id)) {
+        case Some(bool c): {
+            return !c;
+        }
+        case None: {
+            return default_expanded;
+        }
+    }
+}
+
+/// The outline's commit section: one collapsible node per commit, its short
+/// id and first message line as the label, and -- expanded -- its author,
+/// date and full message as leaf rows underneath. See `tuioutline.src`'s own
+/// header on why every row needs a stable `id`: folding must not renumber
+/// what the jump list or a saved cursor position names.
+List<tuioutline.Node> commit_node(gitlog.Entry en, Map<str, bool> collapsed) {
+    str id = "commit:" + en.id;
+    str label = en.id.substr(0, 7) + "  " + first_line(en.commit.message);
+    List<tuioutline.Node> body = [];
+    str author = en.commit.author.name.utf8().or("<non-utf8>") + " <" + en.commit.author.email.utf8().or("<non-utf8>") + ">";
+    body.push(tuioutline.Node.leaf(id + ":author", "Author: " + author));
+    body.push(tuioutline.Node.leaf(id + ":date", "Date:   " + date.iso(en.commit.author.when)));
+    str msg = en.commit.message.utf8().or("<non-utf8 message>");
+    int i = 0;
+    for (str line in text.lines(msg)) {
+        body.push(tuioutline.Node.leaf(id + ":m" + i.to_str(), "  " + line));
+        i = i + 1;
+    }
+    return [tuioutline.Node.section(id, label, body, expanded: expanded_for(collapsed, id, false))];
+}
+
+/// The primary document, from a `Status` and a commit walk alone -- no
+/// terminal, no `gitdir`, no I/O of any kind, which is what makes this the
+/// piece `t_gitclient.src` calls directly.
+///
+/// Every leaf row this builds is recorded in `out_paths` (row id -> the raw
+/// bytes to stage or unstage), which `State` keeps and `stage_current`/
+/// `unstage_current` read from -- there is no other way to get from "the
+/// cursor is on this row" back to a path, since `tuioutline.Row` only knows
+/// the label it was given.
+pub tuioutline.Outline build_outline(status.Status st, List<gitlog.Entry> log, Map<str, bool> collapsed, Map<str, bytes> out_paths) {
+    out_paths.clear();
+    List<tuioutline.Node> roots = [];
+    List<tuioutline.Node> untracked_children = [];
+    for (PathRow row in rows_from_untracked(st.untracked)) {
+        str id = "untracked:" + row.path;
+        out_paths.set(id, row.raw);
+        untracked_children.push(tuioutline.Node.leaf(id, row.path));
+    }
+    roots.push(tuioutline.Node.section("untracked", "Untracked files (" + untracked_children.size().to_str() + ")", untracked_children, expanded: expanded_for(collapsed, "untracked", true)));
+    List<tuioutline.Node> unstaged_children = [];
+    for (PathRow row in rows_from_deltas(st.unstaged)) {
+        str id = "unstaged:" + row.path;
+        out_paths.set(id, row.raw);
+        unstaged_children.push(tuioutline.Node.leaf(id, mark_str(row.mark) + "  " + row.path));
+    }
+    roots.push(tuioutline.Node.section("unstaged", "Unstaged changes (" + unstaged_children.size().to_str() + ")", unstaged_children, expanded: expanded_for(collapsed, "unstaged", true)));
+    List<tuioutline.Node> staged_children = [];
+    for (PathRow row in rows_from_deltas(st.staged)) {
+        str id = "staged:" + row.path;
+        out_paths.set(id, row.raw);
+        staged_children.push(tuioutline.Node.leaf(id, mark_str(row.mark) + "  " + row.path));
+    }
+    roots.push(tuioutline.Node.section("staged", "Staged changes (" + staged_children.size().to_str() + ")", staged_children, expanded: expanded_for(collapsed, "staged", true)));
+    List<tuioutline.Node> commit_children = [];
+    for (gitlog.Entry en in log) {
+        for (tuioutline.Node n in commit_node(en, collapsed)) {
+            commit_children.push(n);
+        }
+    }
+    roots.push(tuioutline.Node.section("commits", "Commits (" + commit_children.size().to_str() + ")", commit_children, expanded: expanded_for(collapsed, "commits", true)));
+    return tuioutline.Outline(roots);
+}
+
+// --- the commit message: writing the template, reading it back -------------
+
+/// git's own cleanup mode with no flags given: `--cleanup=strip`. Every line
+/// beginning with `#` is dropped, and the remainder is trimmed of leading and
+/// trailing blank lines and whitespace. An empty result is exactly the case
+/// `finish_commit` refuses, matching real `git commit`'s own "Aborting
+/// commit due to empty commit message."
+pub str strip_comment_lines(str raw) {
+    List<str> keep = [];
+    for (str line in text.lines(raw)) {
+        if (line.starts_with("#")) {
+            continue;
+        }
+        keep.push(line);
+    }
+    return keep.join("\n").trim();
+}
+
+/// The template written at `COMMIT_EDITMSG` for a person (or a script driving
+/// one) to edit -- git's own comment lines, minus the fuller status summary
+/// real git includes, which needs nothing this client cannot already show in
+/// the outline above it.
+pub str commit_template() {
+    return "\n# Please enter the commit message for your changes. Lines starting\n# with '#' will be ignored, and an empty message aborts the commit.\n";
+}
+
+// --- building a tree from the index's flat, sorted paths --------------------
+
+// One entry on its way into a tree, carrying only what `object.write_tree`
+// needs plus the bytes to group by -- not a full `index.Entry`, so the
+// recursion below never has to reconstruct one.
+type Leaf {
+    int mode;
+    str id;
+    bytes path;
+}
+
+/// The tree `entries` describes, written recursively: `object.write_tree`
+/// already sorts one directory level and hashes it, so this only has to
+/// group a flat list of paths into the directories git's tree format
+/// actually nests, bottom-up. Grouped by raw `bytes`, not `str`, because
+/// `index.Entry.path` need not be UTF-8 (`index.src`'s own module header)
+/// and dropping a non-UTF-8 path here -- the way `status.src` drops one from
+/// a *display* -- would silently leave a real, currently-staged file out of
+/// the commit, which is a correctness bug and not a display gap.
+pub Result<str, object.Error> build_tree(str gitdir, List<index.Entry> entries) {
+    List<Leaf> leaves = [];
+    for (index.Entry e in entries) {
+        leaves.push(Leaf(e.mode, e.id, e.path));
+    }
+    return build_tree_of(gitdir, leaves);
+}
+
+Result<str, object.Error> build_tree_of(str gitdir, List<Leaf> leaves) {
+    List<object.Entry> out = [];
+    List<bytes> dirnames = [];
+    List<List<Leaf>> groups = [];
+    for (Leaf l in leaves) {
+        int slash = find_byte(l.path, '/', 0);
+        if (slash < 0) {
+            out.push(object.Entry(l.mode, l.path, l.id));
+            continue;
+        }
+        bytes dir = l.path.substr(0, slash);
+        bytes rest = l.path.substr(slash + 1, l.path.size());
+        Leaf sub = Leaf(l.mode, l.id, rest);
+        int idx = find_dir(dirnames, dir);
+        if (idx < 0) {
+            dirnames.push(dir);
+            groups.push([sub]);
+        } else {
+            groups[idx].push(sub);
+        }
+    }
+    int i = 0;
+    while (i < dirnames.size()) {
+        str sub_id = build_tree_of(gitdir, groups[i])?;
+        out.push(object.Entry(0o40000, dirnames[i], sub_id));
+        i = i + 1;
+    }
+    return object.write_tree(gitdir, out);
+}
+
+int find_dir(List<bytes> dirnames, bytes dir) {
+    int i = 0;
+    while (i < dirnames.size()) {
+        if (bytes_eq(dirnames[i], dir)) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+// --- finding one path in HEAD's tree, for unstaging --------------------------
+
+/// HEAD's tree, or `None` for an unborn branch or a detached HEAD this
+/// cannot read -- `status.src`'s own `head_tree`, minus the `Status`-shaped
+/// error, since `unstage_path` only needs to know whether there is one.
+pub Option<str> head_tree_id(str gitdir) {
+    match (refs.head(gitdir)) {
+        case Ok(refs.Head h): {
+            match (h) {
+                case Unborn(str name): {
+                    return Option<str>.None;
+                }
+                case Born(str name, str id): {
+                    return commit_tree_id(gitdir, id);
+                }
+                case Detached(str id): {
+                    return commit_tree_id(gitdir, id);
+                }
+            }
+        }
+        case Err(refs.Error e): {
+            return Option<str>.None;
+        }
+    }
+}
+
+Option<str> commit_tree_id(str gitdir, str id) {
+    match (object.read(gitdir, id)) {
+        case Ok(object.Object o): {
+            match (o.body) {
+                case Commit(object.Commit c): {
+                    return Option<str>.Some(c.tree);
+                }
+                case Blob: {
+                    return Option<str>.None;
+                }
+                case Tree: {
+                    return Option<str>.None;
+                }
+                case Tag: {
+                    return Option<str>.None;
+                }
+            }
+        }
+        case Err: {
+            return Option<str>.None;
+        }
+    }
+}
+
+/// The tree entry at `path`, following one path segment per subtree read.
+/// `None` for a path this tree does not have, at all or at that type -- a
+/// directory where the caller asked for a blob is the same "not there" as a
+/// missing name, since either way there is no blob to restore.
+pub Option<object.Entry> find_in_tree(str gitdir, str tree_id, bytes path) {
+    int slash = find_byte(path, '/', 0);
+    bytes seg = path;
+    bytes rest = [];
+    bool has_rest = false;
+    if (slash >= 0) {
+        seg = path.substr(0, slash);
+        rest = path.substr(slash + 1, path.size());
+        has_rest = true;
+    }
+    match (object.read(gitdir, tree_id)) {
+        case Ok(object.Object o): {
+            match (o.body) {
+                case Tree(List<object.Entry> es): {
+                    for (object.Entry e in es) {
+                        if (bytes_eq(e.name, seg)) {
+                            if (has_rest) {
+                                if (e.is_tree()) {
+                                    return find_in_tree(gitdir, e.id, rest);
+                                }
+                                return Option<object.Entry>.None;
+                            }
+                            return Option<object.Entry>.Some(e);
+                        }
+                    }
+                    return Option<object.Entry>.None;
+                }
+                case Blob: {
+                    return Option<object.Entry>.None;
+                }
+                case Commit: {
+                    return Option<object.Entry>.None;
+                }
+                case Tag: {
+                    return Option<object.Entry>.None;
+                }
+            }
+        }
+        case Err: {
+            return Option<object.Entry>.None;
+        }
+    }
+}
+
+// --- the client's own state --------------------------------------------------
+
+/// Everything the interactive client is showing and doing right now. One
+/// value, held by `gitui.src`'s top-level driver and reached by the
+/// `draw`/`handle` lambdas the same way `apps/tui/browse.src`'s own `State`
+/// is -- there is no mutable module state to put it in instead (reference
+/// §2).
+pub type State {
+    pub str gitdir;
+    pub str worktree;
+    pub tuioutline.Outline outline = tuioutline.Outline([]);
+    pub tuijump.JumpList jump = tuijump.JumpList.empty;
+    pub bool show_jump = false;
+    pub bool jump_focused = false;
+    pub bool commit_open = false;
+    pub str commit_msg_path = "";
+    pub str branch_label = "";
+    pub str message = "";
+    Map<str, bool> collapsed = {};
+    Map<str, bytes> paths = {};
+    status.Status last_status = status.Status([], [], []);
+    List<gitlog.Entry> log = [];
+}
+
+/// A fresh client over the repository whose git directory is `gitdir` and
+/// whose working tree is `worktree`. Call `reload()` before drawing it --
+/// this constructor alone does no I/O, which is what makes it safe to build
+/// in a test that never touches a real repository.
+pub static State State.open(str gitdir, str worktree) {
+    State s = State(gitdir, worktree);
+    s.commit_msg_path = fs.join(gitdir, "COMMIT_EDITMSG");
+    return s;
+}
+
+/// Re-read the repository: `status.status` for the three change lists,
+/// `gitlog.walk` for the commit history, and HEAD for the branch label the
+/// status line shows. An unborn branch's `gitlog.walk` failure is not an
+/// error here -- it is exactly what "nothing committed yet" looks like --
+/// so it becomes an empty history rather than a message.
+pub void State.refresh() {
+    match (status.status(gitdir, worktree)) {
+        case Ok(status.Status st): {
+            last_status = st;
+        }
+        case Err(status.Error e): {
+            last_status = status.Status([], [], []);
+            message = "status: " + e.to_str();
+        }
+    }
+    match (gitlog.walk(gitdir, "HEAD", 200)) {
+        case Ok(List<gitlog.Entry> es): {
+            log = es;
+        }
+        case Err: {
+            log = [];
+        }
+    }
+    match (refs.head(gitdir)) {
+        case Ok(refs.Head h): {
+            match (h) {
+                case Born(str name, str id): {
+                    branch_label = "on " + branch_name(name) + " @ " + id.substr(0, 7);
+                }
+                case Unborn(str name): {
+                    branch_label = "on " + branch_name(name) + " (no commits yet)";
+                }
+                case Detached(str id): {
+                    branch_label = "detached @ " + id.substr(0, 7);
+                }
+            }
+        }
+        case Err(refs.Error e): {
+            branch_label = "?";
+        }
+    }
+}
+
+/// Refresh and rebuild the outline, keeping the cursor on the row it was on
+/// (by id, not by position -- `tuioutline.src`'s own reason) and the jump
+/// list in step with it. Called after every action that changes what the
+/// repository looks like: staging, unstaging, committing, and the manual
+/// refresh key.
+pub void State.reload() {
+    str keep_id = "";
+    match (outline.current()) {
+        case Some(tuioutline.Row r): {
+            keep_id = r.node.id;
+        }
+        case None: {
+        }
+    }
+    refresh();
+    outline = build_outline(last_status, log, collapsed, paths);
+    if (keep_id != "") {
+        outline.select_id(keep_id);
+    }
+    jump.sync_from(outline);
+    jump.follow(outline);
+}
+
+/// Fold or unfold the row under the cursor, remembering the choice so the
+/// next `reload()` (which rebuilds the outline from nothing) respects it.
+pub void State.toggle_current() {
+    outline.toggle();
+    match (outline.current()) {
+        case Some(tuioutline.Row r): {
+            collapsed.set(r.node.id, !r.node.expanded);
+        }
+        case None: {
+        }
+    }
+    jump.sync_from(outline);
+    jump.follow(outline);
+}
+
+pub void State.move_cursor(int delta) {
+    outline.move(delta);
+    jump.follow(outline);
+}
+
+/// Stage the file under the cursor, if it is an untracked or an unstaged row
+/// -- a no-op on anything else (a staged row, a section heading, a commit).
+/// This is `git add <path>` for exactly one path: read it, `write_blob`,
+/// build an entry with `index.from_stat`, and put it in the index, replacing
+/// whatever entry that path already had.
+pub void State.stage_current() {
+    match (outline.current()) {
+        case Some(tuioutline.Row r): {
+            if (r.node.id.starts_with("untracked:") || r.node.id.starts_with("unstaged:")) {
+                match (paths.get(r.node.id)) {
+                    case Some(bytes p): {
+                        stage_path(p);
+                    }
+                    case None: {
+                    }
+                }
+            }
+        }
+        case None: {
+        }
+    }
+}
+
+pub void State.stage_path(bytes rel) {
+    str full = fs.join(worktree, rel.utf8().or(""));
+    bytes content = [];
+    match (io.read_bytes(full)) {
+        case Ok(bytes b): {
+            content = b;
+        }
+        case Err(io.Error e): {
+            message = "cannot read " + rel.utf8().or("<non-utf8>") + ": " + e.to_str();
+            return;
+        }
+    }
+    str blob_id = "";
+    match (object.write_blob(gitdir, content)) {
+        case Ok(str id): {
+            blob_id = id;
+        }
+        case Err(object.Error e): {
+            message = "write_blob: " + e.to_str();
+            return;
+        }
+    }
+    fs.Stat st = fs.Stat(0, 0, 0);
+    match (fs.stat(full)) {
+        case Ok(fs.Stat s): {
+            st = s;
+        }
+        case Err(io.Error e): {
+            message = "stat: " + e.to_str();
+            return;
+        }
+    }
+    index.Entry entry = index.from_stat(rel, st, fs.is_link(full), blob_id);
+    index.Index ix = read_index(gitdir);
+    replace_entry(ix, entry);
+    match (index.write(gitdir, ix)) {
+        case Ok: {
+            message = "staged " + rel.utf8().or("<non-utf8>");
+        }
+        case Err(index.Error e): {
+            message = "index write: " + e.to_str();
+            return;
+        }
+    }
+    reload();
+}
+
+/// Unstage the file under the cursor, if it is a staged row -- a no-op on
+/// anything else. This is `git reset HEAD -- <path>`: if HEAD's tree already
+/// has this path, the index entry goes back to exactly what HEAD says (mode
+/// and blob), with its stat fields forced to never match a real file so the
+/// next `status` re-hashes it rather than trusting stale numbers
+/// (`index.src`'s own rule: a mismatch only ever costs a re-hash, never
+/// wrong). If HEAD has no such path -- the file was newly added -- there is
+/// nothing to go back to, so the entry is dropped from the index outright,
+/// which is what `git reset` does to a new file too (it becomes untracked
+/// again, not deleted from disk).
+pub void State.unstage_current() {
+    match (outline.current()) {
+        case Some(tuioutline.Row r): {
+            if (r.node.id.starts_with("staged:")) {
+                match (paths.get(r.node.id)) {
+                    case Some(bytes p): {
+                        unstage_path(p);
+                    }
+                    case None: {
+                    }
+                }
+            }
+        }
+        case None: {
+        }
+    }
+}
+
+pub void State.unstage_path(bytes rel) {
+    index.Index ix = read_index(gitdir);
+    Option<str> tree = head_tree_id(gitdir);
+    match (tree) {
+        case Some(str tid): {
+            match (find_in_tree(gitdir, tid, rel)) {
+                case Some(object.Entry e): {
+                    // size: -1 can never equal a real `fs.stat` size (always
+                    // >= 0), so `status.status`'s mtime/size shortcut always
+                    // re-hashes this entry instead of trusting a snapshot
+                    // that was never actually taken.
+                    index.Entry restored = index.Entry(0, 0, 0, 0, 0, 0, e.mode, 0, 0, -1, e.id, 0, false, rel);
+                    replace_entry(ix, restored);
+                }
+                case None: {
+                    remove_entry(ix, rel);
+                }
+            }
+        }
+        case None: {
+            remove_entry(ix, rel);
+        }
+    }
+    match (index.write(gitdir, ix)) {
+        case Ok: {
+            message = "unstaged " + rel.utf8().or("<non-utf8>");
+        }
+        case Err(index.Error e): {
+            message = "index write: " + e.to_str();
+            return;
+        }
+    }
+    reload();
+}
+
+/// "Diff", degraded to what a whole-file view can say (`apps/git/design.md`'s
+/// own instruction for this wave): the row's own label, plus how many lines
+/// the file holds on disk right now. Hunk-level diff waits on the sibling
+/// diff-algorithm task.
+pub void State.show_diff_current() {
+    match (outline.current()) {
+        case Some(tuioutline.Row r): {
+            match (paths.get(r.node.id)) {
+                case Some(bytes p): {
+                    str full = fs.join(worktree, p.utf8().or(""));
+                    int n = 0;
+                    match (io.read(full)) {
+                        case Ok(str s): {
+                            n = text.lines(s).size();
+                        }
+                        case Err: {
+                            n = 0;
+                        }
+                    }
+                    message = r.node.label + " -- " + n.to_str() + " line(s) on disk (whole-file status only; hunk diff is a follow-up, see apps/git/design.md)";
+                }
+                case None: {
+                    message = "diff: nothing to show here";
+                }
+            }
+        }
+        case None: {
+        }
+    }
+}
+
+/// Write the commit-message template at `commit_msg_path`, unless something
+/// -- a previous `e`, or a person's own `git commit` in another terminal --
+/// already left one there. See this module's own header on why this cannot
+/// simply launch `$EDITOR` on it.
+pub void State.edit_message() {
+    if (!fs.exists(commit_msg_path)) {
+        match (io.write(commit_msg_path, commit_template())) {
+            case Ok: {
+            }
+            case Err(io.Error e): {
+                message = "cannot write " + commit_msg_path + ": " + e.to_str();
+                return;
+            }
+        }
+    }
+    message = "edit " + commit_msg_path + " in another terminal, then press f to finish or a to abort";
+}
+
+/// Discard the commit-in-progress: drop the template (if a person never got
+/// around to editing it, there is nothing to keep) and close the overlay.
+pub void State.abort_commit() {
+    if (fs.exists(commit_msg_path)) {
+        match (fs.remove(commit_msg_path)) {
+            case Ok: {
+            }
+            case Err: {
+            }
+        }
+    }
+    commit_open = false;
+    message = "commit aborted";
+}
+
+/// Read `commit_msg_path` back, strip it the way git's default cleanup does,
+/// and either refuse (an empty result, git's own "Aborting commit due to
+/// empty commit message") or actually commit: `build_tree` over the current
+/// index, `object.write_commit` with HEAD as the sole parent (none for an
+/// unborn branch), and `refs.update` to move the branch -- or `HEAD` itself,
+/// detached -- forward by compare-and-swap against the value just read, so a
+/// second writer racing this one is refused rather than silently overwritten
+/// (`refs.src`'s own guarantee).
+pub void State.finish_commit() {
+    str raw = "";
+    match (io.read(commit_msg_path)) {
+        case Ok(str s): {
+            raw = s;
+        }
+        case Err(io.Error e): {
+            message = "cannot read " + commit_msg_path + ": " + e.to_str();
+            return;
+        }
+    }
+    str msg = strip_comment_lines(raw);
+    if (msg == "") {
+        message = "aborting commit due to empty commit message";
+        commit_open = false;
+        return;
+    }
+    index.Index ix = read_index(gitdir);
+    str tree_id = "";
+    match (build_tree(gitdir, ix.entries)) {
+        case Ok(str t): {
+            tree_id = t;
+        }
+        case Err(object.Error e): {
+            message = "write_tree: " + e.to_str();
+            return;
+        }
+    }
+    List<str> parents = [];
+    str ref_name = "HEAD";
+    str expect_old = "";
+    bool have_old = false;
+    match (refs.head(gitdir)) {
+        case Ok(refs.Head h): {
+            match (h) {
+                case Born(str name, str id): {
+                    parents.push(id);
+                    ref_name = name;
+                    expect_old = id;
+                    have_old = true;
+                }
+                case Unborn(str name): {
+                    ref_name = name;
+                    expect_old = "";
+                    have_old = true;
+                }
+                case Detached(str id): {
+                    parents.push(id);
+                    ref_name = "HEAD";
+                    expect_old = id;
+                    have_old = true;
+                }
+            }
+        }
+        case Err(refs.Error e): {
+            message = "refs.head: " + e.to_str();
+            return;
+        }
+    }
+    object.Commit c = object.Commit(tree_id, parents, author_ident(), committer_ident(), [], (msg + "\n").to_bytes());
+    str commit_id = "";
+    match (object.write_commit(gitdir, c)) {
+        case Ok(str id): {
+            commit_id = id;
+        }
+        case Err(object.Error e): {
+            message = "write_commit: " + e.to_str();
+            return;
+        }
+    }
+    Option<str> want = Option<str>.None;
+    if (have_old) {
+        want = Option<str>.Some(expect_old);
+    }
+    match (refs.update(gitdir, ref_name, commit_id, want)) {
+        case Ok: {
+        }
+        case Err(refs.Error e): {
+            message = "refs.update: " + e.to_str();
+            return;
+        }
+    }
+    if (fs.exists(commit_msg_path)) {
+        match (fs.remove(commit_msg_path)) {
+            case Ok: {
+            }
+            case Err: {
+            }
+        }
+    }
+    message = "committed " + commit_id.substr(0, 7);
+    commit_open = false;
+    reload();
+}
+
+str State.status_line() {
+    if (message != "") {
+        return message;
+    }
+    return branch_label;
+}
+
+List<tuiwidget.Span> State.footer_spans(tuistyle.Theme theme) {
+    List<tuiwidget.Span> out = [];
+    out.push(tuiwidget.Span(" j/k"));
+    out.push(tuiwidget.Span(" move  "));
+    out.push(tuiwidget.Span("enter", style: theme.accent));
+    out.push(tuiwidget.Span(" toggle  "));
+    out.push(tuiwidget.Span("s", style: theme.accent));
+    out.push(tuiwidget.Span(" stage  "));
+    out.push(tuiwidget.Span("u", style: theme.accent));
+    out.push(tuiwidget.Span(" unstage  "));
+    out.push(tuiwidget.Span("d", style: theme.accent));
+    out.push(tuiwidget.Span(" diff  "));
+    out.push(tuiwidget.Span("c", style: theme.accent));
+    out.push(tuiwidget.Span(" commit  "));
+    out.push(tuiwidget.Span("J", style: theme.accent));
+    out.push(tuiwidget.Span(" jump  "));
+    out.push(tuiwidget.Span("w", style: theme.accent));
+    out.push(tuiwidget.Span(" focus  "));
+    out.push(tuiwidget.Span("r", style: theme.accent));
+    out.push(tuiwidget.Span(" refresh  "));
+    out.push(tuiwidget.Span("q", style: theme.accent));
+    out.push(tuiwidget.Span(" quit"));
+    return out;
+}
+
+/// The frame: the outline (and, toggled on, the jump list beside it), then
+/// the two-row footer `tuifooter.split` reserves -- a status line and the
+/// fixed key legend -- and, on top of everything, the commit which-key
+/// overlay when it is open. See `apps/git/design.md`'s locked layout: one
+/// primary document, one optional jump-list panel, a persistent footer, and
+/// overlays drawn over all of it rather than replacing any of it.
+pub void State.draw(tuibuf.Buffer buf, tuigeom.Rect area) {
+    tuistyle.Theme theme = tuistyle.Theme.plain;
+    List<tuigeom.Rect> bands = tuifooter.split(area, 2);
+    tuigeom.Rect main = bands[0];
+    tuigeom.Rect footer_area = bands[1];
+    tuigeom.Rect outline_area = main;
+    if (show_jump) {
+        List<tuigeom.Rect> cols = tuigeom.cols(main, [tuigeom.Constraint.Fill(1), tuigeom.Constraint.Length(28)]);
+        outline_area = cols[0];
+        outline.render(buf, outline_area);
+        tuiwidget.Block jb = tuiwidget.Block(title: "jump", borders: tuiwidget.Borders.Single);
+        jb.render(buf, cols[1]);
+        jump.render(buf, jb.inner(cols[1]));
+    } else {
+        outline.render(buf, outline_area);
+    }
+    tuiwidget.Line status_row = tuiwidget.Line([tuiwidget.Span(" " + status_line(), style: theme.dim)]);
+    status_row.render(buf, tuigeom.Rect(footer_area.x, footer_area.y, footer_area.w, 1));
+    tuifooter.Footer(footer_spans(theme)).render(buf, tuigeom.Rect(footer_area.x, footer_area.y + 1, footer_area.w, 1));
+    if (commit_open) {
+        tuimenu.WhichKey wk = tuimenu.WhichKey("commit", [tuimenu.Item("e", "edit message (" + commit_msg_path + ")"), tuimenu.Item("f", "finish: write the commit"), tuimenu.Item("a", "abort")]);
+        wk.render(buf, area);
+    }
+}
+
+/// One decoded key, dispatched exactly as `apps/tui/browse.src`'s own
+/// `State.handle` is: every `term.Code` variant named, so a key this client
+/// does not use is `Continue` rather than missing from the match entirely
+/// (there is no `default`, reference §5.6).
+pub tuiapp.Action State.handle(term.Event ev) {
+    match (ev) {
+        case Key(term.Key k): {
+            return handle_key(k.code);
+        }
+        case Mouse(term.Mouse m): {
+            return tuiapp.Action.Continue;
+        }
+        case Paste(str p): {
+            return tuiapp.Action.Continue;
+        }
+        case Unknown(bytes u): {
+            return tuiapp.Action.Continue;
+        }
+    }
+}
+
+tuiapp.Action State.handle_key(term.Code code) {
+    if (commit_open) {
+        return handle_commit_key(code);
+    }
+    match (code) {
+        case Char(int c): {
+            return handle_char(c);
+        }
+        case Enter: {
+            handle_enter();
+            return tuiapp.Action.Redraw;
+        }
+        case Escape: {
+            return tuiapp.Action.Quit;
+        }
+        case Up: {
+            move_cursor(-1);
+            return tuiapp.Action.Redraw;
+        }
+        case Down: {
+            move_cursor(1);
+            return tuiapp.Action.Redraw;
+        }
+        case Backspace: {
+            return tuiapp.Action.Continue;
+        }
+        case Tab: {
+            return tuiapp.Action.Continue;
+        }
+        case BackTab: {
+            return tuiapp.Action.Continue;
+        }
+        case Right: {
+            return tuiapp.Action.Continue;
+        }
+        case Left: {
+            return tuiapp.Action.Continue;
+        }
+        case Home: {
+            return tuiapp.Action.Continue;
+        }
+        case End: {
+            return tuiapp.Action.Continue;
+        }
+        case PageUp: {
+            return tuiapp.Action.Continue;
+        }
+        case PageDown: {
+            return tuiapp.Action.Continue;
+        }
+        case Insert: {
+            return tuiapp.Action.Continue;
+        }
+        case Delete: {
+            return tuiapp.Action.Continue;
+        }
+        case F(int n): {
+            return tuiapp.Action.Continue;
+        }
+    }
+}
+
+tuiapp.Action State.handle_char(int c) {
+    if (c == 'q') {
+        return tuiapp.Action.Quit;
+    }
+    if (c == 'j') {
+        step_or_move(1);
+        return tuiapp.Action.Redraw;
+    }
+    if (c == 'k') {
+        step_or_move(-1);
+        return tuiapp.Action.Redraw;
+    }
+    if (c == 's') {
+        stage_current();
+        return tuiapp.Action.Redraw;
+    }
+    if (c == 'u') {
+        unstage_current();
+        return tuiapp.Action.Redraw;
+    }
+    if (c == 'd') {
+        show_diff_current();
+        return tuiapp.Action.Redraw;
+    }
+    if (c == 'c') {
+        commit_open = true;
+        return tuiapp.Action.Redraw;
+    }
+    if (c == 'r') {
+        reload();
+        return tuiapp.Action.Redraw;
+    }
+    if (c == 'J') {
+        show_jump = !show_jump;
+        return tuiapp.Action.Redraw;
+    }
+    if (c == 'w') {
+        jump_focused = !jump_focused;
+        return tuiapp.Action.Redraw;
+    }
+    return tuiapp.Action.Continue;
+}
+
+void State.step_or_move(int delta) {
+    if (jump_focused && show_jump) {
+        jump.step(delta);
+    } else {
+        move_cursor(delta);
+    }
+}
+
+void State.handle_enter() {
+    if (jump_focused && show_jump) {
+        jump.activate(outline);
+        jump_focused = false;
+        return;
+    }
+    toggle_current();
+}
+
+tuiapp.Action State.handle_commit_key(term.Code code) {
+    match (code) {
+        case Char(int c): {
+            if (c == 'e') {
+                edit_message();
+                return tuiapp.Action.Redraw;
+            }
+            if (c == 'f') {
+                finish_commit();
+                return tuiapp.Action.Redraw;
+            }
+            if (c == 'a') {
+                abort_commit();
+                return tuiapp.Action.Redraw;
+            }
+            return tuiapp.Action.Continue;
+        }
+        case Escape: {
+            abort_commit();
+            return tuiapp.Action.Redraw;
+        }
+        case Enter: {
+            return tuiapp.Action.Continue;
+        }
+        case Backspace: {
+            return tuiapp.Action.Continue;
+        }
+        case Tab: {
+            return tuiapp.Action.Continue;
+        }
+        case BackTab: {
+            return tuiapp.Action.Continue;
+        }
+        case Up: {
+            return tuiapp.Action.Continue;
+        }
+        case Down: {
+            return tuiapp.Action.Continue;
+        }
+        case Right: {
+            return tuiapp.Action.Continue;
+        }
+        case Left: {
+            return tuiapp.Action.Continue;
+        }
+        case Home: {
+            return tuiapp.Action.Continue;
+        }
+        case End: {
+            return tuiapp.Action.Continue;
+        }
+        case PageUp: {
+            return tuiapp.Action.Continue;
+        }
+        case PageDown: {
+            return tuiapp.Action.Continue;
+        }
+        case Insert: {
+            return tuiapp.Action.Continue;
+        }
+        case Delete: {
+            return tuiapp.Action.Continue;
+        }
+        case F(int n): {
+            return tuiapp.Action.Continue;
+        }
+    }
+}
+
+str branch_name(str full) {
+    str prefix = "refs/heads/";
+    if (full.starts_with(prefix)) {
+        return full.substr(prefix.size(), full.size());
+    }
+    return full;
+}
+
+// --- staging and unstaging: whole files only (apps/git/design.md's scope) --
+
+index.Index read_index(str gitdir) {
+    match (index.read(gitdir)) {
+        case Ok(index.Index ix): {
+            return ix;
+        }
+        case Err: {
+            return index.Index([]);
+        }
+    }
+}
+
+void replace_entry(index.Index ix, index.Entry e) {
+    int i = 0;
+    while (i < ix.entries.size()) {
+        if (bytes_eq(ix.entries[i].path, e.path)) {
+            ix.entries[i] = e;
+            return;
+        }
+        i = i + 1;
+    }
+    ix.entries.push(e);
+}
+
+void remove_entry(index.Index ix, bytes path) {
+    int i = 0;
+    while (i < ix.entries.size()) {
+        if (bytes_eq(ix.entries[i].path, path)) {
+            ix.entries.remove_at(i);
+            return;
+        }
+        i = i + 1;
+    }
+}
+
+// --- committing ---------------------------------------------------------------
+
+// No `.git/config` is read anywhere in this program (`object.src`'s own
+// README names this gap); `GIT_AUTHOR_*`/`GIT_COMMITTER_*` are the one
+// identity source this client has, the same environment variables real git
+// itself honours over its config. `date.now()` is UTC-only
+// (`lib/date.src`'s own header), so every commit this client writes is
+// timestamped `+0000`.
+object.Ident author_ident() {
+    str who = os.env("GIT_AUTHOR_NAME").or(os.env("USER").or("unknown"));
+    str mail = os.env("GIT_AUTHOR_EMAIL").or(who + "@localhost");
+    return object.Ident(who.to_bytes(), mail.to_bytes(), date.now(), 0, "+0000");
+}
+
+object.Ident committer_ident() {
+    str who = os.env("GIT_COMMITTER_NAME").or(os.env("USER").or("unknown"));
+    str mail = os.env("GIT_COMMITTER_EMAIL").or(who + "@localhost");
+    return object.Ident(who.to_bytes(), mail.to_bytes(), date.now(), 0, "+0000");
+}
+
+// --- drawing and input --------------------------------------------------------
