@@ -5,6 +5,8 @@
 //   interface tuiwidget.Widget { void render(Buffer b, Rect area); }
 //   tuiwidget.Block(...)      borders, a title and padding; `block.inner(r)`
 //   tuiwidget.Paragraph(text) wrapped, aligned, scrollable text
+//   tuiwidget.Span(text, style)   a run of text in one style
+//   tuiwidget.Line(spans)     spans drawn left to right on one row -- a Widget
 //
 // --- the protocol is one method ---------------------------------------------
 //
@@ -280,5 +282,108 @@ pub void Paragraph.render(tuibuf.Buffer buf, tuigeom.Rect area) {
         int x = area.x + tuitext.offset(line, area.w, align);
         buf.set_str(x, area.y + i, line, style, max: area.w - (x - area.x));
         i = i + 1;
+    }
+}
+
+// --- styled spans -------------------------------------------------------------
+//
+// A `Style` already carries everything a cell needs (tuistyle.src); what was
+// missing is a way to put more than one of them on the same row without a
+// caller hand-rolling the column arithmetic. `Span` and `Line` are that:
+// ratatui's `Span`/`Line` *concept*, through this library's own idiom rather
+// than its API -- `Line` is a `List<Span>` with a `render` method, so it is a
+// `Widget` exactly like `Block` and `Paragraph`, composes with `tuigeom` the
+// same way, and needs no separate "text buffer" type of its own.
+
+/// A run of text in one style -- the smallest styled unit a `Line` is built
+/// from. `"a" + Span("b") ` is not a thing; build a `Line` of both instead.
+pub type Span {
+    pub str text;
+    pub tuistyle.Style style = tuistyle.Style();
+}
+
+/// A plain, unstyled span. `Span.of("x")` and `Span("x")` mean the same
+/// thing; this spelling reads better in a list literal of otherwise-styled
+/// spans: `[Span.of("["), Span("staged", style: accent), Span.of("]")]`.
+pub static Span Span.of(str text) {
+    return Span(text);
+}
+
+/// How many columns this span takes, by `tuitext.width`.
+pub int Span.width() {
+    return tuitext.width(text);
+}
+
+/// A row of spans, drawn left to right: `apps/tui`'s answer to ratatui's
+/// `Line`. Like any other widget it does not know where it is drawn; unlike
+/// `Paragraph` it never wraps -- a `Line` is one row, by construction, and a
+/// caller that wants more builds more of them.
+///
+/// ```
+/// tuiwidget.Line([tuiwidget.Span("staged: ", style: dim),
+///     tuiwidget.Span("3 files", style: accent)])
+/// ```
+pub type Line {
+    pub List<Span> spans;
+    pub tuitext.Align align = tuitext.Align.Left;
+    /// Fills the rectangle first, so a span that does not reach the edge
+    /// still sits on a deliberate background rather than whatever was
+    /// already in the buffer -- the same reason `Paragraph.style` exists.
+    pub tuistyle.Style style = tuistyle.Style();
+}
+
+/// A `Line` of one span in one style -- the common case, and what a caller
+/// reaches for before building a `List<Span>` by hand.
+pub static Line Line.of(str text, tuistyle.Style style = tuistyle.Style()) {
+    return Line([Span(text, style: style)], style: style);
+}
+
+/// The line's total width: the sum of its spans', by `tuitext.width`.
+pub int Line.width() {
+    int w = 0;
+    for (Span s in spans) {
+        w = w + s.width();
+    }
+    return w;
+}
+
+/// The spans' text, concatenated with no separator -- what the line reads as
+/// with every style stripped off.
+pub str Line.plain() {
+    List<str> out = [];
+    for (Span s in spans) {
+        out.push(s.text);
+    }
+    return out.join("");
+}
+
+pub void Line.render(tuibuf.Buffer buf, tuigeom.Rect area) {
+    if (area.is_empty()) {
+        return;
+    }
+    buf.fill(area, " ", style);
+    int total = width();
+    int start = area.x;
+    if (total < area.w) {
+        match (align) {
+            case Left: {
+            }
+            case Right: {
+                start = area.x + area.w - total;
+            }
+            case Center: {
+                start = area.x + (area.w - total) / 2;
+            }
+        }
+    }
+    int x = start;
+    int budget = area.right() - start;
+    for (Span s in spans) {
+        if (budget <= 0) {
+            return;
+        }
+        int used = buf.set_str(x, area.y, s.text, s.style, max: budget);
+        x = x + used;
+        budget = budget - used;
     }
 }

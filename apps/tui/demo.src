@@ -7,8 +7,10 @@
 // looked at in one at least once, and this is the program that does it.
 //
 // It writes ONE byte string: clear the screen, the whole frame, put the
-// cursor back. There is no input loop and no raw mode, because the terminal
-// layer is stage 3; this draws the frame and returns to the shell.
+// cursor back. There is no input loop and no raw mode here on purpose --
+// this is the static half of the proof, and it draws one frame and returns
+// to the shell. `apps/tui/browse.src` is the other half: the same library,
+// run interactively through `tuiapp.Loop`.
 
 import io;
 import tuibuf;
@@ -47,7 +49,7 @@ tuiwidget.Paragraph("Every panel here came from one constraint layout, and the w
 tuistyle.Style bar = tuistyle.Style(fg: ink, bg: cream);
 screen.fill(band[2], " ", bar);
 screen.set_str(band[2].x + 1, band[2].y, "q quit   j/k move   ? help", bar);
-screen.set_str(band[2].right() - 13, band[2].y, "stage 1 of 3", bar);
+screen.set_str(band[2].right() - 13, band[2].y, "static frame", bar);
 // One write: clear, the frame, the cursor out of the way.
 bytes out = [];
 tuidiff.clear_screen(out);

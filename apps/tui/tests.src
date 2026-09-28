@@ -16,10 +16,18 @@
 
 import os;
 import random;
+import term;
+import tuiapp;
 import tuibuf;
 import tuidiff;
+import tuidiffview;
+import tuifooter;
 import tuigeom;
+import tuijump;
 import tuilists;
+import tuimenu;
+import tuioutline;
+import tuiscroll;
 import tuistyle;
 import tuitext;
 import tuiwidget;
@@ -444,6 +452,309 @@ void table_tests(Tally t) {
     print(p.frame());
 }
 
+// --- stage 2/3: the styling layer, and the primitives apps/git/design.md ----
+// names -- outline, jump list, which-key/transient, an addressable diff
+// view, the footer region and the application loop.
+
+void theme_and_span_tests(Tally t) {
+    head("theme, spans and a styled line");
+    tuistyle.Theme th = tuistyle.Theme();
+    ok(t, "normal has no attributes", th.normal.attrs == 0);
+    ok(t, "dim carries the dim attribute", th.dim.attrs & tuistyle.DIM != 0);
+    ok(t, "selected combines reverse and bold", th.selected.attrs == tuistyle.REVERSE | tuistyle.BOLD);
+    tuiwidget.Span s = tuiwidget.Span("hi", style: th.accent);
+    check_int(t, "a span's width", s.width(), 2);
+    tuiwidget.Line line = tuiwidget.Line([tuiwidget.Span("["), tuiwidget.Span("staged", style: th.accent), tuiwidget.Span("]")]);
+    check_int(t, "a line's width is the sum of its spans", line.width(), 8);
+    check(t, "a line reads as its spans concatenated", line.plain(), "[staged]");
+    tuibuf.Buffer b = tuibuf.Buffer.sized(12, 1);
+    line.render(b, tuigeom.Rect(0, 0, 12, 1));
+    check(t, "left-aligned, at the start", b.row_text(0), "[staged]    ");
+    tuibuf.Buffer c = tuibuf.Buffer.sized(12, 1);
+    tuiwidget.Line(line.spans, align: tuitext.Align.Right).render(c, tuigeom.Rect(0, 0, 12, 1));
+    check(t, "right-aligned, at the end", c.row_text(0), "    [staged]");
+    tuibuf.Buffer d = tuibuf.Buffer.sized(4, 1);
+    line.render(d, tuigeom.Rect(0, 0, 4, 1));
+    check(t, "clipped to the rectangle", d.row_text(0), "[sta");
+}
+
+void scroll_tests(Tally t) {
+    head("viewport and scrollbar");
+    tuiscroll.Viewport v = tuiscroll.Viewport();
+    v.reveal(0, 20, 5);
+    check_int(t, "revealing the top needs no scroll", v.offset, 0);
+    v.reveal(12, 20, 5);
+    check_int(t, "revealing a row below the window scrolls down to it", v.offset, 8);
+    v.reveal(2, 20, 5);
+    check_int(t, "revealing a row above the window scrolls up to it", v.offset, 2);
+    v.scroll(100, 20, 5);
+    check_int(t, "scrolling past the end clamps to the last page", v.offset, 15);
+    v.scroll(-100, 20, 5);
+    check_int(t, "scrolling past the start clamps to zero", v.offset, 0);
+    check_int(t, "clamped never exceeds the content", tuiscroll.Viewport(offset: 999).clamped(10, 4), 6);
+    tuibuf.Buffer buf = tuibuf.Buffer.sized(1, 10);
+    tuiscroll.Scrollbar(thumb_symbol: "#", track_symbol: ".").render(buf, tuigeom.Rect(0, 0, 1, 10), 100, 10, 0);
+    check(t, "a thumb at the top", buf.row_text(0), "#");
+    check(t, "the track below it", buf.row_text(9), ".");
+    tuibuf.Buffer buf2 = tuibuf.Buffer.sized(1, 10);
+    tuiscroll.Scrollbar(thumb_symbol: "#", track_symbol: ".").render(buf2, tuigeom.Rect(0, 0, 1, 10), 100, 10, 90);
+    check(t, "a thumb at the bottom", buf2.row_text(9), "#");
+    tuibuf.Buffer buf3 = tuibuf.Buffer.sized(1, 5);
+    tuiscroll.Scrollbar().render(buf3, tuigeom.Rect(0, 0, 1, 5), 5, 5, 0);
+    check(t, "content that all fits gets a full-length thumb", buf3.to_str(), "\u{2588}\n\u{2588}\n\u{2588}\n\u{2588}\n\u{2588}");
+}
+
+tuioutline.Outline sample_outline() {
+    return tuioutline.Outline([tuioutline.Node.section("wip", "Unstaged changes", [tuioutline.Node.leaf("a.txt", "modified: a.txt"), tuioutline.Node.leaf("b.txt", "modified: b.txt")]), tuioutline.Node.section("staged", "Staged changes", [tuioutline.Node.leaf("c.txt", "new file: c.txt")], expanded: false), tuioutline.Node.leaf("stash", "stash@{0}: on main: wip")]);
+}
+
+void outline_tests(Tally t) {
+    head("outline");
+    tuioutline.Outline o = sample_outline();
+    check_int(t, "flattened rows, one section collapsed", o.rows().size(), 5);
+    tuibuf.Buffer b = tuibuf.Buffer.sized(30, 5);
+    o.render(b, tuigeom.Rect(0, 0, 30, 5));
+    print(b.frame());
+    check_int(t, "cursor starts at the top", o.cursor, 0);
+    o.move(1);
+    match (o.current()) {
+        case Some(tuioutline.Row r): {
+            check(t, "move steps through the flattened rows", r.node.id, "a.txt");
+        }
+        case None: {
+            check(t, "move steps through the flattened rows", "none", "a.txt");
+        }
+    }
+    o.move(-1);
+    o.toggle();
+    check_int(t, "collapsing a section removes its children", o.rows().size(), 3);
+    o.toggle();
+    check_int(t, "expanding it again restores them", o.rows().size(), 5);
+    ok(t, "a row hidden by a fold cannot be selected", !o.select_id("c.txt"));
+    o.cursor = 3;
+    o.toggle();
+    check_int(t, "expanding the other section adds its child", o.rows().size(), 6);
+    ok(t, "select_id finds a row once it is visible", o.select_id("c.txt"));
+    match (o.current()) {
+        case Some(tuioutline.Row r): {
+            check(t, "select_id moved the cursor to it", r.node.id, "c.txt");
+        }
+        case None: {
+            check(t, "select_id moved the cursor to it", "none", "c.txt");
+        }
+    }
+}
+
+void jump_tests(Tally t) {
+    head("jump list, synced to an outline");
+    tuioutline.Outline o = sample_outline();
+    o.cursor = 3;
+    o.toggle();
+    tuijump.JumpList j = tuijump.JumpList.empty;
+    j.sync_from(o);
+    check_int(t, "one entry per visible outline row", j.entries.size(), 6);
+    o.cursor = 2;
+    j.follow(o);
+    match (o.current()) {
+        case Some(tuioutline.Row r): {
+            check(t, "following the outline highlights the matching entry", j.entries[j.selected].id, r.node.id);
+        }
+        case None: {
+        }
+    }
+    j.step(-1);
+    ok(t, "activate moves the outline's cursor to the selection", j.activate(o));
+    match (o.current()) {
+        case Some(tuioutline.Row r): {
+            check(t, "and it is the row the jump list had selected", r.node.id, j.entries[j.selected].id);
+        }
+        case None: {
+        }
+    }
+    o.cursor = 0;
+    o.toggle();
+    j.sync_from(o);
+    check_int(t, "collapsing a section shrinks the jump list too", j.entries.size(), 4);
+    tuibuf.Buffer b = tuibuf.Buffer.sized(20, 4);
+    j.render(b, tuigeom.Rect(0, 0, 20, 4));
+    print(b.frame());
+}
+
+void menu_tests(Tally t) {
+    head("which-key and transient menus, built on one base");
+    tuimenu.WhichKey wk = tuimenu.WhichKey("commit", [tuimenu.Item("c", "commit"), tuimenu.Item("a", "amend"), tuimenu.Item("f", "fixup")]);
+    tuibuf.Buffer b = tuibuf.Buffer.sized(30, 10);
+    wk.render(b, b.area());
+    print(b.frame());
+    tuimenu.Transient tr = tuimenu.Transient("commit", "commit", [tuimenu.Switch("a", "amend", "--amend"), tuimenu.Switch("n", "no verify", "--no-verify", on: true)]);
+    check(t, "the preview starts with the switches already on", tr.preview(), "commit --no-verify");
+    tr.toggle("a");
+    check(t, "toggling a switch adds its flag", tr.preview(), "commit --amend --no-verify");
+    tr.toggle("a");
+    check(t, "toggling it again removes it", tr.preview(), "commit --no-verify");
+    ok(t, "is_on reads a switch's state", tr.is_on("n"));
+    ok(t, "a key with no switch reports off", !tr.is_on("z"));
+    tuibuf.Buffer c = tuibuf.Buffer.sized(30, 10);
+    tr.render(c, c.area());
+    print(c.frame());
+}
+
+str row_desc(tuidiffview.Row r) {
+    match (r.kind) {
+        case Header: {
+            return "header " + str(r.hunk);
+        }
+        case Body: {
+            return "body " + str(r.hunk) + "/" + str(r.line);
+        }
+    }
+}
+
+str at_desc(tuidiffview.DiffView v) {
+    match (v.at()) {
+        case Some(tuidiffview.Row r): {
+            return row_desc(r);
+        }
+        case None: {
+            return "none";
+        }
+    }
+}
+
+void diffview_tests(Tally t) {
+    head("diff view, cursor addressable to the hunk and the line");
+    tuidiffview.Hunk h1 = tuidiffview.Hunk("@@ -1,2 +1,3 @@", [tuidiffview.Line.context("one"), tuidiffview.Line.removed("two"), tuidiffview.Line.added("two changed"), tuidiffview.Line.added("three")]);
+    tuidiffview.Hunk h2 = tuidiffview.Hunk("@@ -10,1 +11,1 @@", [tuidiffview.Line.context("ten")]);
+    tuidiffview.DiffView v = tuidiffview.DiffView([h1, h2]);
+    check_int(t, "flattened rows: headers and lines together", v.rows().size(), 7);
+    tuibuf.Buffer b = tuibuf.Buffer.sized(24, 7);
+    v.render(b, tuigeom.Rect(0, 0, 24, 7));
+    print(b.frame());
+    check(t, "the cursor starts on the first hunk's header", at_desc(v), "header 0");
+    v.move(2);
+    check(t, "moved onto a body line", at_desc(v), "body 0/1");
+    v.move(3);
+    check(t, "moved onto the second hunk's header", at_desc(v), "header 1");
+}
+
+void footer_tests(Tally t) {
+    head("the persistent footer region");
+    tuigeom.Rect area = tuigeom.Rect(0, 0, 40, 10);
+    List<tuigeom.Rect> cut = tuifooter.split(area, 1);
+    check(t, "the main band", cut[0].to_str(), "0,0 40x9");
+    check(t, "the footer's own reserved row", cut[1].to_str(), "0,9 40x1");
+    tuibuf.Buffer b = tuibuf.Buffer.sized(40, 10);
+    tuifooter.Footer.of("q quit   j/k move   ? help", style: tuistyle.Style(attrs: tuistyle.REVERSE)).render(b, cut[1]);
+    check(t, "the footer's text landed in its own band", b.row_text(9).substr(0, 6), "q quit");
+    check(t, "the main band above it is untouched", b.row_text(0), " ".repeat(40));
+}
+
+// A `Handler` written outside the library, the same proof `Widget` gets in
+// section 7 below: a struct with a method named `handle` satisfies
+// `tuiapp.Handler` with no declaration saying so.
+type CountKeys {
+    int seen = 0;
+}
+
+tuiapp.Action CountKeys.handle(term.Event ev) {
+    seen = seen + 1;
+    match (ev) {
+        case Key(term.Key k): {
+            match (k.code) {
+                case Char(int c): {
+                    if (c == 'q') {
+                        return tuiapp.Action.Quit;
+                    }
+                    return tuiapp.Action.Redraw;
+                }
+                case Enter: {
+                    return tuiapp.Action.Redraw;
+                }
+                case Tab: {
+                    return tuiapp.Action.Continue;
+                }
+                case BackTab: {
+                    return tuiapp.Action.Continue;
+                }
+                case Backspace: {
+                    return tuiapp.Action.Continue;
+                }
+                case Escape: {
+                    return tuiapp.Action.Quit;
+                }
+                case Up: {
+                    return tuiapp.Action.Redraw;
+                }
+                case Down: {
+                    return tuiapp.Action.Redraw;
+                }
+                case Right: {
+                    return tuiapp.Action.Continue;
+                }
+                case Left: {
+                    return tuiapp.Action.Continue;
+                }
+                case Home: {
+                    return tuiapp.Action.Continue;
+                }
+                case End: {
+                    return tuiapp.Action.Continue;
+                }
+                case PageUp: {
+                    return tuiapp.Action.Continue;
+                }
+                case PageDown: {
+                    return tuiapp.Action.Continue;
+                }
+                case Insert: {
+                    return tuiapp.Action.Continue;
+                }
+                case Delete: {
+                    return tuiapp.Action.Continue;
+                }
+                case F(int n): {
+                    return tuiapp.Action.Continue;
+                }
+            }
+        }
+        case Mouse(term.Mouse m): {
+            return tuiapp.Action.Continue;
+        }
+        case Paste(str p): {
+            return tuiapp.Action.Continue;
+        }
+        case Unknown(bytes u): {
+            return tuiapp.Action.Continue;
+        }
+    }
+}
+
+str action_desc(tuiapp.Action a) {
+    match (a) {
+        case Continue: {
+            return "Continue";
+        }
+        case Redraw: {
+            return "Redraw";
+        }
+        case Quit: {
+            return "Quit";
+        }
+    }
+}
+
+void app_tests(Tally t) {
+    head("the application loop's own pieces (no terminal touched here)");
+    ok(t, "the same size twice is not a resize", !tuiapp.resized(term.Size(24, 80), term.Size(24, 80)));
+    ok(t, "a different width is a resize", tuiapp.resized(term.Size(24, 80), term.Size(24, 100)));
+    ok(t, "a different height is a resize", tuiapp.resized(term.Size(24, 80), term.Size(30, 80)));
+    CountKeys h = CountKeys();
+    check(t, "a plain key redraws", action_desc(h.handle(term.Event.Key(term.Key(term.Code.Char('x'), 0)))), "Redraw");
+    check(t, "q quits", action_desc(h.handle(term.Event.Key(term.Key(term.Code.Char('q'), 0)))), "Quit");
+    check(t, "escape also quits", action_desc(h.handle(term.Event.Key(term.Key(term.Code.Escape, 0)))), "Quit");
+    check_int(t, "every event reached the handler", h.seen, 3);
+}
+
 // --- 7. a widget written by a user of the library ---------------------------
 //
 // Three shapes, all satisfying `tuiwidget.Widget` with no declaration that
@@ -537,6 +848,14 @@ block_tests(score);
 paragraph_tests(score);
 list_tests(score);
 table_tests(score);
+theme_and_span_tests(score);
+scroll_tests(score);
+outline_tests(score);
+jump_tests(score);
+menu_tests(score);
+diffview_tests(score);
+footer_tests(score);
+app_tests(score);
 user_widget_tests(score);
 screen_test(score);
 print("");

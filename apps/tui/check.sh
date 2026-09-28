@@ -8,8 +8,8 @@
 # FAILED, never for ok.
 #
 #   1. every file in apps/tui/ is formatted (`langc fmt --check`)
-#   2. apps/tui/tests.src compiles under gcc and clang, at -O0 and -O2, with
-#      no warning from the emitted C
+#   2. apps/tui/tests.src, bench.src, demo.src and browse.src all compile
+#      under gcc and clang, at -O0 and -O2, with no warning from the emitted C
 #   3. its output matches apps/tui/tests.out, and contains no `FAIL` line
 #   4. the refcount invariant holds: `__rc_live=0` at exit
 #
@@ -55,7 +55,7 @@ command -v gcc   >/dev/null && CCS+=("gcc:-O0" "gcc:-O2")
 command -v clang >/dev/null && CCS+=("clang:-O0" "clang:-O2")
 if [ ${#CCS[@]} -eq 0 ]; then echo "no C compiler" >&2; exit 1; fi
 
-for src in "$DIR"/tests."$LANG_EXT" "$DIR"/bench."$LANG_EXT" "$DIR"/demo."$LANG_EXT"; do
+for src in "$DIR"/tests."$LANG_EXT" "$DIR"/bench."$LANG_EXT" "$DIR"/demo."$LANG_EXT" "$DIR"/browse."$LANG_EXT"; do
     base=$(basename "$src" ".$LANG_EXT")
     note "compiles: $base"
     if ! "$LANGC" --emit-c "$src" -o "$WORK/$base.c" 2>"$WORK/$base.diag"; then
