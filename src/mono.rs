@@ -1022,6 +1022,11 @@ impl Mono {
             }
             Stmt::Break { span } => Stmt::Break { span: *span },
             Stmt::Continue { span } => Stmt::Continue { span: *span },
+            Stmt::ConstBlock { names, body, span } => Stmt::ConstBlock {
+                names: names.clone(),
+                body: self.subst_block(body, sub)?,
+                span: *span,
+            },
         })
     }
 

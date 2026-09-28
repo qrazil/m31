@@ -365,6 +365,29 @@ impl Lowerer {
         }
     }
 
+    /// Emit `rt_freeze_leave` for every `const` block frozen since `depth`
+    /// (a `freezes.len()` captured at some enclosing point -- 0 for "every
+    /// active `const` block"), innermost first.
+    ///
+    /// Called everywhere `release_all`/`release_to_depth` already is: a
+    /// `const` block's own normal exit restores what IT froze inline, but
+    /// `return`, `break`, `continue` and `?` propagation all leave one or
+    /// more `const` blocks without ever returning from the Rust call that is
+    /// lowering them, so each of those has to restore the flag itself before
+    /// jumping -- the same reason `release_to_depth` exists one space over
+    /// (docs/const-decision.md, "`const` is also a block"). A trap needs no
+    /// call here: nothing runs after it, so nothing depends on the flag.
+    pub(super) fn restore_freezes_to(&mut self, depth: usize) {
+        let all: Vec<(Value, Value)> = self.freezes.clone();
+        for &(obj, took) in all.iter().skip(depth).rev() {
+            self.push(Inst::Call {
+                dst: None,
+                func: "rt_freeze_leave".to_string(),
+                args: vec![obj, took],
+            });
+        }
+    }
+
     /// Release only the temporaries registered since `mark`.
     ///
     /// Needed by `&&` and `||`: the right-hand operand is lowered into its

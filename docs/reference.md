@@ -1168,6 +1168,59 @@ type the file declares (§4.3), promoted ones (§3.5) with it. A module the
 file does *not* import is not in scope there at all (§2.1), so it is not
 shadowed by anything and takes no name away.
 
+### 4.1a `const` blocks
+
+A local or a parameter can be frozen for a **region** instead of for good:
+
+```c
+while (true) {
+    int n = f.read_into(b);
+    if (n == 0) { break; }
+    const b {
+        parse(b, n);          // b is frozen here, and only here
+    }
+}                             // b is mutable again, and refills
+```
+
+Several names at once, comma-separated, no parentheses — the `{` closes the
+list and there is nothing for parentheses to disambiguate:
+
+```c
+const a, b, c { .. }
+```
+
+`const NAME { .. }` freezes the object each name currently refers to, the
+same freeze §4.1 describes, **in place** — never a snapshot, so there is no
+copy and nothing beyond the check itself costs anything. Leaving the block,
+by any path — falling off the end, `return`, `break`, `continue`, or `?` —
+restores whatever the flag was immediately before the block; it is not
+unconditionally cleared. Freezing a value that arrived already frozen (a
+module constant, an enclosing `const` block) is then a no-op, not a hole in
+its guarantee for the rest of the block's life.
+
+Inside the region the rules are exactly §4.1's, scoped to it: a change the
+compiler can see through the name is refused at compile time, and one it
+cannot see — through a parameter, say — traps at run time, with the same
+message. A block that freezes a value already frozen by an enclosing block
+does nothing extra, and does not end the outer freeze early:
+
+```c
+const buf {
+    const buf {
+        read(buf);
+    }              // still frozen: the outer block still holds it
+    grow(buf);     // traps
+}
+```
+
+Only a local or a parameter may be named. A module constant is already
+frozen for the life of the program, and naming one is refused: there is
+nothing a block could do to it that binding it did not already do.
+
+Parsing needs two tokens past `const`: an identifier followed by `,` or `{`
+is the block form above; followed by anything else (another identifier, or
+`<` for a generic type) it is the declaration (§4.1, §4.5).
+
 ### 4.2 Functions
 
 ```c
@@ -2480,8 +2533,15 @@ type        = "int" | "float" | "bool" | "str" | "bytes" | "void"
 
 block       = "{" { stmt } "}" ;
 stmt        = decl | assign | eval | if | while | forin | forrange | match
+            | constblock
             | "return" [ expr ] ";" | "break" ";" | "continue" ";"
             | "spawn" IDENT args ";" ;
+constblock  = "const" IDENT { "," IDENT } block ;    (* §4.1a: freezes the
+                                                         region, restores
+                                                         after; two tokens of
+                                                         lookahead past
+                                                         `const` tell it from
+                                                         `decl` below *)
 match       = "match" "(" expr ")" "{" { case } "}" ;
 case        = "case" IDENT [ "(" bind { "," bind } ")" ] ":" block ;
                                                       (* all the payload's

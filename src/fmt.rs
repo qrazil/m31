@@ -806,6 +806,14 @@ impl Fmt {
                 self.depth -= 1;
                 self.line("}");
             }
+            Stmt::ConstBlock { names, body, span } => {
+                let names: Vec<&str> = names.iter().map(|(n, _)| n.as_str()).collect();
+                self.line(&format!("const {} {{", names.join(", ")));
+                self.depth += 1;
+                self.block(body, self.body_close(*span));
+                self.depth -= 1;
+                self.line("}");
+            }
             Stmt::Match {
                 scrutinee,
                 arms,
@@ -1144,7 +1152,8 @@ fn stmt_span(s: &Stmt) -> Span {
         | Stmt::While { span, .. }
         | Stmt::ForIn { span, .. }
         | Stmt::ForRange { span, .. }
-        | Stmt::If { span, .. } => *span,
+        | Stmt::If { span, .. }
+        | Stmt::ConstBlock { span, .. } => *span,
     }
 }
 

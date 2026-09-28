@@ -1,0 +1,25 @@
+// `const` as a block (docs/const-decision.md, "`const` is also a block"):
+// freezes a buffer for a region and restores it afterward, so the same
+// buffer can be refilled next time round -- the shape a permanent `const`
+// cannot give, because it can never be mutated again.
+
+void run() {
+    bytes buf = [1, 2, 3];
+    int total = 0;
+    for (int round in 0 .. 3) {
+        const buf {
+            int i = 0;
+            while (i < buf.size()) {
+                total = total + buf[i];
+                i = i + 1;
+            }
+        }
+        // Mutable again here, outside the block: refill for next time round.
+        buf.push(round);
+    }
+    print(total);
+    print(buf.size());
+    print(buf.hex());
+}
+
+run();

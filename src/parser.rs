@@ -1521,6 +1521,21 @@ impl Parser {
         }
     }
 
+    /// `const a { .. }` / `const a, b, c { .. }`, having already peeked that
+    /// this is the block form and not the declaration.
+    fn parse_const_block(&mut self, span: Span) -> Result<Stmt, Diag> {
+        self.expect(Tok::KwConst)?;
+        let mut names = Vec::new();
+        loop {
+            names.push(self.expect_ident()?);
+            if !self.eat(&Tok::Comma) {
+                break;
+            }
+        }
+        let body = self.parse_block()?;
+        Ok(Stmt::ConstBlock { names, body, span })
+    }
+
     fn parse_block(&mut self) -> Result<Vec<Stmt>, Diag> {
         self.expect(Tok::LBrace)?;
         let mut stmts = Vec::new();
@@ -1538,6 +1553,20 @@ impl Parser {
 
     fn parse_stmt_inner(&mut self) -> Result<Stmt, Diag> {
         let span = self.span();
+
+        // `const a { .. }` / `const a, b, c { .. }` -- the block form
+        // (docs/const-decision.md, "`const` is also a block"). Two tokens of
+        // lookahead past `const` tell it apart from the declaration below: a
+        // plain identifier followed by `,` or `{` names an existing local for
+        // the block; followed by anything else (another identifier, `<`, for
+        // a generic type) it is `const TYPE NAME = ..`.
+        if self.peek() == &Tok::KwConst {
+            if let Tok::Ident(_) = self.peek_at(1) {
+                if matches!(self.peek_at(2), Tok::Comma | Tok::LBrace) {
+                    return self.parse_const_block(span);
+                }
+            }
+        }
 
         // Declaration. Three spellings, all decidable with two tokens:
         //   const <ty> x = ..    a type keyword or type name after `const`

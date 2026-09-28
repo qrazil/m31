@@ -202,6 +202,7 @@ impl Lowerer {
                 match (value, self.ret_ty) {
                     (None, Ty::Void) => {
                         self.release_all();
+                        self.restore_freezes_to(0);
                         self.terminate(Term::Ret { val: None });
                     }
                     (None, t) => {
@@ -254,6 +255,7 @@ impl Lowerer {
                         }
                         self.flush_temps();
                         self.release_all();
+                        self.restore_freezes_to(0);
                         self.terminate(Term::Ret {
                             val: Some(val.val()),
                         });
@@ -514,9 +516,11 @@ impl Lowerer {
                 let Some(l) = self.loops.last() else {
                     return Err(Diag::new(*span, "`break` outside a loop"));
                 };
-                let (exit, carried, depth) = (l.exit, l.carried.clone(), l.depth);
+                let (exit, carried, depth, freeze_depth) =
+                    (l.exit, l.carried.clone(), l.depth, l.freeze_depth);
                 self.loops.last_mut().expect("checked above").broke = true;
                 self.release_to_depth(depth);
+                self.restore_freezes_to(freeze_depth);
                 let args: Vec<Value> = carried
                     .iter()
                     .map(|n| self.lookup(n).map(|x| x.1).unwrap())
@@ -525,12 +529,16 @@ impl Lowerer {
                 Ok(())
             }
 
+            Stmt::ConstBlock { names, body, span } => self.lower_const_block(names, body, *span),
+
             Stmt::Continue { span } => {
                 let Some(l) = self.loops.last() else {
                     return Err(Diag::new(*span, "`continue` outside a loop"));
                 };
-                let (header, carried, depth) = (l.header, l.carried.clone(), l.depth);
+                let (header, carried, depth, freeze_depth) =
+                    (l.header, l.carried.clone(), l.depth, l.freeze_depth);
                 self.release_to_depth(depth);
+                self.restore_freezes_to(freeze_depth);
                 let args: Vec<Value> = carried
                     .iter()
                     .map(|n| self.lookup(n).map(|x| x.1).unwrap())
@@ -573,6 +581,7 @@ impl Lowerer {
                 Stmt::ForIn { body, .. } | Stmt::ForRange { body, .. } => {
                     Self::assigned_names(body, out)
                 }
+                Stmt::ConstBlock { body, .. } => Self::assigned_names(body, out),
                 Stmt::Decl { .. }
                 | Stmt::Return { .. }
                 | Stmt::Eval { .. }
@@ -733,6 +742,7 @@ impl Lowerer {
             exit: exit_bb,
             carried: carried.iter().map(|(x, _, _)| x.clone()).collect(),
             depth: self.owned.len() - 1,
+            freeze_depth: self.freezes.len(),
             broke: false,
         });
         let lowered = self.lower_block(body);
@@ -951,6 +961,7 @@ impl Lowerer {
             exit: exit_bb,
             carried: carried.iter().map(|(x, _, _)| x.clone()).collect(),
             depth: self.owned.len() - 1,
+            freeze_depth: self.freezes.len(),
             broke: false,
         });
         let lowered = self.lower_block(body);
@@ -1073,6 +1084,7 @@ impl Lowerer {
             // The body scope we just pushed is the boundary: break and
             // continue release everything inside it, and nothing outside.
             depth: self.owned.len() - 1,
+            freeze_depth: self.freezes.len(),
             broke: false,
         });
         let lowered = self.lower_block(body);
@@ -1115,6 +1127,112 @@ impl Lowerer {
         }
         let _ = span;
         Ok(())
+    }
+
+    /// `const a { .. }` / `const a, b, c { .. }` (docs/const-decision.md,
+    /// "`const` is also a block").
+    ///
+    /// Freezes the object each name currently refers to for the region, and
+    /// restores whatever it was before on every path out -- normal
+    /// fall-through here, and `return`/`break`/`continue`/`?` wherever those
+    /// are lowered (`restore_freezes_to`). A `trap` needs nothing: nothing
+    /// runs after it.
+    ///
+    /// The compile-time half reuses `refuse_const_write` and `Stmt::Assign`'s
+    /// own check almost unchanged: both read a binding's `is_const` bit
+    /// through `binding`, so flipping that bit for the region -- and putting
+    /// it back exactly as `set_const_flag` found it -- is the whole of the
+    /// static enforcement. The runtime half is the same pattern
+    /// docs/reentrancy-decision.md already uses for `RC_SORTING`/
+    /// `RC_PROBING`: mark, trap on reentrant mutation, restore.
+    fn lower_const_block(
+        &mut self,
+        names: &[(String, Span)],
+        body: &[Stmt],
+        span: Span,
+    ) -> Result<(), Diag> {
+        let _ = span;
+        // Resolve every name before changing anything, so a bad name refuses
+        // the whole statement rather than leaving some already flipped.
+        let mut resolved = Vec::with_capacity(names.len());
+        for (name, nspan) in names {
+            let Some((ty, val, was_const)) = self.binding(name) else {
+                if self.resolve_const(name).is_some() {
+                    return Err(Diag::new(
+                        *nspan,
+                        format!(
+                            "`{name}` is a module constant, already frozen for the life \
+                             of the program; a `const` block freezes a local or a \
+                             parameter for a region"
+                        ),
+                    ));
+                }
+                if self.recv_field(name).is_some() {
+                    return Err(Diag::new(
+                        *nspan,
+                        format!(
+                            "`{name}` is a field, reached bare; a `const` block names a \
+                             local or a parameter, not a field -- there is no name that \
+                             refers only to it from outside this method to restore"
+                        ),
+                    ));
+                }
+                return Err(self.unknown_variable(name, *nspan));
+            };
+            resolved.push((name.clone(), ty, val, was_const));
+        }
+
+        let freeze_start = self.freezes.len();
+        let mut saved_const = Vec::with_capacity(resolved.len());
+        for (name, ty, val, was_const) in &resolved {
+            saved_const.push((name.clone(), *was_const));
+            self.set_const_flag(name, true);
+            // A scalar or a value enum has no header to set RC_FROZEN on --
+            // reassigning the name itself is already refused by the flipped
+            // bit above, and there is no alias through which a scalar could
+            // be changed underneath that. Only a managed object gets the
+            // runtime half.
+            if self.is_managed(*ty) {
+                let took = self.new_val(IrTy::I1);
+                self.push(Inst::Call {
+                    dst: Some(took),
+                    func: "rt_freeze_enter".to_string(),
+                    args: vec![*val],
+                });
+                self.freezes.push((*val, took));
+            }
+        }
+
+        self.scopes.push(HashMap::new());
+        self.owned.push(Vec::new());
+        let lowered = self.lower_block(body);
+        let body_live = lowered.is_ok() && !self.terminated();
+        if body_live {
+            self.release_scope();
+        }
+        self.scopes.pop();
+        self.owned.pop();
+
+        // The normal-exit restore: every other way out already restored
+        // everything from `freeze_start` on, through `restore_freezes_to`,
+        // before it jumped -- doing it again here would double-clear an
+        // unrelated freeze that started at the same depth after the jump,
+        // which cannot happen, since nothing lowers after an unreachable
+        // block. Skipped when the block itself did not fall through.
+        if body_live {
+            self.restore_freezes_to(freeze_start);
+        }
+        self.freezes.truncate(freeze_start);
+
+        // The compile-time bit is pure Rust-level bookkeeping, not emitted
+        // code, so it is restored unconditionally: `return`/`break`/
+        // `continue` inside the block still ran through this same Rust call,
+        // they just emitted a jump instead of falling off the end of it.
+        for (name, was_const) in saved_const.into_iter().rev() {
+            self.set_const_flag(&name, was_const);
+        }
+
+        lowered
     }
 
     /// `match (e) { case V(int x): { .. } .. }`

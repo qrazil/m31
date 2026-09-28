@@ -1,0 +1,13 @@
+// A `const` block's compile-time half is the same check permanent `const`
+// already gets (`refuse_const_write`), scoped to the region
+// (docs/const-decision.md, "`const` is also a block"): a change the
+// compiler can see through the name itself is refused right here, not left
+// to the runtime.
+void run() {
+    List<int> buf = [1, 2, 3];
+    const buf {
+        buf.push(4);
+    }
+}
+
+run();

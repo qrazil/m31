@@ -353,6 +353,19 @@ pub enum Stmt {
         els: Option<Vec<Stmt>>,
         span: Span,
     },
+    /// `const a { .. }` / `const a, b, c { .. }`
+    ///
+    /// Freezes the object each named local or parameter currently refers to
+    /// for the region, and restores whatever it was before -- not
+    /// unconditionally clears it -- on every path out (docs/const-decision.md,
+    /// "`const` is also a block"). One name, or several comma-separated; the
+    /// `{` closes the list, so there is nothing for parentheses to
+    /// disambiguate.
+    ConstBlock {
+        names: Vec<(String, Span)>,
+        body: Vec<Stmt>,
+        span: Span,
+    },
 }
 
 /// One arm of a `match`: a variant name, the bindings for its payload, and
