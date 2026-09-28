@@ -9,6 +9,6 @@ chunked-in: 200 OK [te=chunked] chunk me
 big: 200 [te=chunked] 200000 bytes back, same: true
 keep-alive 1: 200 OK [cl=10] hello, GET
 keep-alive 2: 200 OK [cl=10] second=yes
-refused: 400 Bad Request connection=close two Host header fields: a request names one host
+refused: 400 Bad Request connection=close the message is not well-formed HTTP
 connections served: 11
 a bare function is an http.Handler: 1

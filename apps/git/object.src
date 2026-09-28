@@ -46,68 +46,71 @@ import repo;
 import sha1;
 import zlib;
 
-/// Why an object could not be read, or could not be believed.
+/// Why an object could not be read, or could not be believed. Payload-free
+/// (docs/errors-decision.md §4): the object name, the underlying `io.Error`
+/// or `zlib.Error`, and the detail behind a bad tree or a bad header are
+/// context the caller already has -- it passed the name or the bytes in --
+/// when it reports.
 pub enum Error {
     /// No loose object of that name. It may still be in a packfile, which
-    /// this cannot read; the message says so.
-    NotFound(str);
+    /// this cannot read.
+    NotFound;
     /// The file is there and could not be read.
-    Io(str, io.Error);
+    Io;
     /// The file is there and is not a zlib stream, or not an intact one.
-    Zlib(str, zlib.Error);
+    Zlib;
     /// The plaintext has no `<type> <size>\0` header.
-    NoHeader(str);
+    NoHeader;
     /// A type word that is none of the four.
-    UnknownType(str, str);
+    UnknownType;
     /// The header's size and the content's length disagree.
-    SizeMismatch(str, int, int);
-    /// The SHA-1 of the plaintext is not the name it was stored under. The
-    /// name asked for, and the name the content actually has.
-    HashMismatch(str, str);
-    /// A tree whose entries do not parse: the object, and what was wrong.
-    BadTree(str, str);
+    SizeMismatch;
+    /// The SHA-1 of the plaintext is not the name it was stored under.
+    HashMismatch;
+    /// A tree whose entries do not parse.
+    BadTree;
     /// A commit or tag whose headers do not parse.
-    BadHeaders(str, str);
+    BadHeaders;
     /// Not a hex object name at all, or too short to be one.
-    BadName(str);
-    /// A short name that several objects begin with: the prefix, and how many.
-    Ambiguous(str, int);
+    BadName;
+    /// A short name that several objects begin with.
+    Ambiguous;
 }
 
 pub str Error.to_str() {
     match (this) {
-        case NotFound(str id): {
-            return "object " + id + " not found among the loose objects (this reads no packfiles)";
+        case NotFound: {
+            return "not found among the loose objects (this reads no packfiles)";
         }
-        case Io(str id, io.Error e): {
-            return "object " + id + ": " + e.to_str();
+        case Io: {
+            return "the object file could not be read";
         }
-        case Zlib(str id, zlib.Error e): {
-            return "object " + id + ": " + e.to_str();
+        case Zlib: {
+            return "the object is not a zlib stream, or not an intact one";
         }
-        case NoHeader(str id): {
-            return "object " + id + " has no `<type> <size>\\0` header";
+        case NoHeader: {
+            return "the object has no `<type> <size>\\0` header";
         }
-        case UnknownType(str id, str word): {
-            return "object " + id + " claims type `" + word + "`, which is none of blob, tree, commit, tag";
+        case UnknownType: {
+            return "the object claims a type that is none of blob, tree, commit, tag";
         }
-        case SizeMismatch(str id, int said, int got): {
-            return "object " + id + " declares " + said.to_str() + " octets and holds " + got.to_str();
+        case SizeMismatch: {
+            return "the object's header size and its content's length disagree";
         }
-        case HashMismatch(str want, str got): {
-            return "object " + want + " hashes to " + got + ": the store is corrupt";
+        case HashMismatch: {
+            return "the object's SHA-1 is not the name it was stored under: the store is corrupt";
         }
-        case BadTree(str id, str why): {
-            return "tree " + id + ": " + why;
+        case BadTree: {
+            return "the tree's entries do not parse";
         }
-        case BadHeaders(str id, str why): {
-            return "object " + id + ": " + why;
+        case BadHeaders: {
+            return "the commit or tag's headers do not parse";
         }
-        case BadName(str id): {
-            return "`" + id + "` is not an object name: 4 to 40 hex digits";
+        case BadName: {
+            return "not an object name: 4 to 40 hex digits";
         }
-        case Ambiguous(str prefix, int n): {
-            return "`" + prefix + "` names " + n.to_str() + " loose objects; give more digits";
+        case Ambiguous: {
+            return "that short name is ambiguous: more than one loose object begins with it";
         }
     }
 }
@@ -239,7 +242,7 @@ pub str Object.kind() {
 /// The loose object `id` in the repository whose git directory is `gitdir`.
 pub Result<Object, Error> read(str gitdir, str id) {
     if (!is_name(id) || id.size() != 40) {
-        return Result<Object, Error>.Err(Error.BadName(id));
+        return Result<Object, Error>.Err(Error.BadName);
     }
     str root = fs.join(repo.common(gitdir), "objects");
     str path = fs.join(fs.join(root, id.substr(0, 2)), id.substr(2, 40));
@@ -250,9 +253,9 @@ pub Result<Object, Error> read(str gitdir, str id) {
         }
         case Err(io.Error e): {
             if (!fs.exists(path)) {
-                return Result<Object, Error>.Err(Error.NotFound(id));
+                return Result<Object, Error>.Err(Error.NotFound);
             }
-            return Result<Object, Error>.Err(Error.Io(id, e));
+            return Result<Object, Error>.Err(Error.Io);
         }
     }
     match (zlib.decompress(stream)) {
@@ -260,7 +263,7 @@ pub Result<Object, Error> read(str gitdir, str id) {
             return parse(id, plain);
         }
         case Err(zlib.Error e): {
-            return Result<Object, Error>.Err(Error.Zlib(id, e));
+            return Result<Object, Error>.Err(Error.Zlib);
         }
     }
 }
@@ -271,24 +274,24 @@ pub Result<Object, Error> read(str gitdir, str id) {
 pub Result<Object, Error> parse(str id, bytes plain) {
     str actual = sha1.hex(plain);
     if (actual != id) {
-        return Result<Object, Error>.Err(Error.HashMismatch(id, actual));
+        return Result<Object, Error>.Err(Error.HashMismatch);
     }
     int nul = find(plain, 0, 0);
     if (nul < 0) {
-        return Result<Object, Error>.Err(Error.NoHeader(id));
+        return Result<Object, Error>.Err(Error.NoHeader);
     }
     int sp = find(plain, 32, 0);
     if (sp < 0 || sp > nul) {
-        return Result<Object, Error>.Err(Error.NoHeader(id));
+        return Result<Object, Error>.Err(Error.NoHeader);
     }
     str word = ascii(plain.substr(0, sp));
     int said = decimal(plain.substr(sp + 1, nul));
     if (said < 0) {
-        return Result<Object, Error>.Err(Error.NoHeader(id));
+        return Result<Object, Error>.Err(Error.NoHeader);
     }
     bytes content = plain.substr(nul + 1, plain.size());
     if (content.size() != said) {
-        return Result<Object, Error>.Err(Error.SizeMismatch(id, said, content.size()));
+        return Result<Object, Error>.Err(Error.SizeMismatch);
     }
     if (word == "blob") {
         return Result<Object, Error>.Ok(Object(id, Body.Blob, content));
@@ -305,7 +308,7 @@ pub Result<Object, Error> parse(str id, bytes plain) {
         Tag t = tag_of(id, content)?;
         return Result<Object, Error>.Ok(Object(id, Body.Tag(t), content));
     }
-    return Result<Object, Error>.Err(Error.UnknownType(id, word));
+    return Result<Object, Error>.Err(Error.UnknownType);
 }
 
 /// Every loose object name beginning with `prefix`, sorted. Empty for a
@@ -339,14 +342,14 @@ pub List<str> matching(str gitdir, str prefix) {
 /// The one full name that begins with `prefix`, if there is exactly one.
 pub Result<str, Error> resolve(str gitdir, str prefix) {
     if (!is_name(prefix.to_lower()) || prefix.size() < 4 || prefix.size() > 40) {
-        return Result<str, Error>.Err(Error.BadName(prefix));
+        return Result<str, Error>.Err(Error.BadName);
     }
     List<str> hits = matching(gitdir, prefix);
     if (hits.size() == 0) {
-        return Result<str, Error>.Err(Error.NotFound(prefix));
+        return Result<str, Error>.Err(Error.NotFound);
     }
     if (hits.size() > 1) {
-        return Result<str, Error>.Err(Error.Ambiguous(prefix, hits.size()));
+        return Result<str, Error>.Err(Error.Ambiguous);
     }
     return Result<str, Error>.Ok(hits[0]);
 }
@@ -362,7 +365,7 @@ pub Result<List<str>, Error> loose(str gitdir) {
             fanout = names;
         }
         case Err(io.Error e): {
-            return Result<List<str>, Error>.Err(Error.Io(root, e));
+            return Result<List<str>, Error>.Err(Error.Io);
         }
     }
     fanout.sort();
@@ -401,18 +404,18 @@ Result<List<Entry>, Error> tree_entries(str id, bytes content) {
     while (at < n) {
         int sp = find(content, 32, at);
         if (sp < 0) {
-            return Result<List<Entry>, Error>.Err(Error.BadTree(id, "an entry with no space after its mode, at octet " + at.to_str()));
+            return Result<List<Entry>, Error>.Err(Error.BadTree);
         }
         int mode = octal(content.substr(at, sp));
         if (mode < 0) {
-            return Result<List<Entry>, Error>.Err(Error.BadTree(id, "a mode that is not octal, at octet " + at.to_str()));
+            return Result<List<Entry>, Error>.Err(Error.BadTree);
         }
         int nul = find(content, 0, sp + 1);
         if (nul < 0) {
-            return Result<List<Entry>, Error>.Err(Error.BadTree(id, "a name with no terminator, at octet " + (sp + 1).to_str()));
+            return Result<List<Entry>, Error>.Err(Error.BadTree);
         }
         if (nul + 21 > n) {
-            return Result<List<Entry>, Error>.Err(Error.BadTree(id, "an entry whose object name is cut off, at octet " + (nul + 1).to_str()));
+            return Result<List<Entry>, Error>.Err(Error.BadTree);
         }
         out.push(Entry(mode, content.substr(sp + 1, nul), content.substr(nul + 1, nul + 21).hex()));
         at = nul + 21;
@@ -450,11 +453,11 @@ Result<Commit, Error> commit_of(str id, bytes content) {
         }
     }
     if (tree.size() != 40 || !is_name(tree)) {
-        return Result<Commit, Error>.Err(Error.BadHeaders(id, "a commit with no usable `tree` header"));
+        return Result<Commit, Error>.Err(Error.BadHeaders);
     }
     for (str p in parents) {
         if (p.size() != 40 || !is_name(p)) {
-            return Result<Commit, Error>.Err(Error.BadHeaders(id, "a `parent` header that is not an object name: `" + p + "`"));
+            return Result<Commit, Error>.Err(Error.BadHeaders);
         }
     }
     match (author) {
@@ -464,12 +467,12 @@ Result<Commit, Error> commit_of(str id, bytes content) {
                     return Result<Commit, Error>.Ok(Commit(tree, parents, a, c, extra, h.message));
                 }
                 case None: {
-                    return Result<Commit, Error>.Err(Error.BadHeaders(id, "a commit with no `committer` header"));
+                    return Result<Commit, Error>.Err(Error.BadHeaders);
                 }
             }
         }
         case None: {
-            return Result<Commit, Error>.Err(Error.BadHeaders(id, "a commit with no `author` header"));
+            return Result<Commit, Error>.Err(Error.BadHeaders);
         }
     }
 }
@@ -504,7 +507,7 @@ Result<Tag, Error> tag_of(str id, bytes content) {
         }
     }
     if (object.size() != 40 || !is_name(object)) {
-        return Result<Tag, Error>.Err(Error.BadHeaders(id, "a tag with no usable `object` header"));
+        return Result<Tag, Error>.Err(Error.BadHeaders);
     }
     return Result<Tag, Error>.Ok(Tag(object, kind, name, extra, h.message, tagger));
 }

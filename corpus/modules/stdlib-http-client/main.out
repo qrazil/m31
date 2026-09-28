@@ -6,8 +6,8 @@ redirect: 200 OK location=- arrived at /final
 no-follow: 302 Found location=/final 
 303-post: 200 OK location=- GET|0|-
 307-post: 200 OK location=- POST|12|text/plain
-cross-host: this 302 redirects to http://127.0.0.1:1/elsewhere, which is a different host; this client does not follow a redirect off the origin it was pointed at, because it would forward whatever headers you set to a host you did not name
-relative: the Location 'somewhere-else' is a relative reference; this client follows an absolute URL or an absolute path, and resolving a relative one is RFC 3986 §5 and its dot-segment removal
-no-location: a 302 with no Location header field
-https: 'https://127.0.0.1:443/hello' is https, and this standard library has no TLS. There is nothing to turn on: it will not open a plaintext connection to a URL that asked for an encrypted one. Use http:// for a service you control, or put a TLS-terminating proxy in front of one you do not.
+cross-host: that URL cannot be requested
+relative: that URL cannot be requested
+no-location: the message is not well-formed HTTP
+https: that URL cannot be requested
 connections served: 14

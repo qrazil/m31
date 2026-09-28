@@ -47,103 +47,105 @@
 // whose blocks are therefore mostly tiny. The throughput note in
 // `apps/git/FRICTION.md` says what this costs.
 
-/// Why a stream was refused. Every variant carries enough to say where.
+/// Why a stream was refused. Payload-free (docs/errors-decision.md §4): the
+/// octet count, the table name, the symbol -- everything a variant used to
+/// carry -- is context the caller already has, from the same call that got
+/// this `Error` back, when it reports.
 pub enum Error {
-    /// The input ran out mid-stream; how many octets there were.
-    Truncated(int);
+    /// The input ran out mid-stream.
+    Truncated;
     /// Block type 3, which RFC 1951 reserves and no writer emits.
-    BlockType(int);
+    BlockType;
     /// A stored block's LEN and its one's-complement NLEN disagree.
-    StoredLength(int, int);
+    StoredLength;
     /// A Huffman code table whose lengths claim more codes than exist, or
-    /// fewer; which table it was.
-    OverSubscribed(str);
+    /// fewer.
+    OverSubscribed;
     /// A code table that leaves some bit patterns undefined, which would let
-    /// a stream decode differently in two decoders; which table it was.
-    Incomplete(str);
-    /// Bits that match no code in the table; which table it was.
-    BadCode(str);
+    /// a stream decode differently in two decoders.
+    Incomplete;
+    /// Bits that match no code in the table.
+    BadCode;
     /// A literal/length symbol of 286 or 287, which exist in the code space
     /// and have no meaning.
-    BadLength(int);
+    BadLength;
     /// A distance symbol of 30 or 31, likewise.
-    BadDistance(int);
-    /// A back-reference reaching before the start of the output: the distance
-    /// asked for, and the octets there were.
-    TooFar(int, int);
+    BadDistance;
+    /// A back-reference reaching before the start of the output.
+    TooFar;
     /// The output passed the limit the caller set.
-    TooBig(int);
+    TooBig;
     /// A dynamic block's header counts are out of range: HLIT+257, HDIST+1.
-    BadCounts(int, int);
+    BadCounts;
     /// A code-length repeat of 16 as the very first code, with nothing to
     /// repeat.
     NothingToRepeat;
     /// Code lengths that run past the end of the two tables they describe.
-    TooManyLengths(int, int);
+    TooManyLengths;
     /// A literal/length table with no code for end-of-block, which could
     /// never terminate.
     NoEndOfBlock;
-    /// The zlib header is not one: its CMF and FLG octets.
-    BadHeader(int, int);
+    /// The zlib header is not one.
+    BadHeader;
     /// The zlib header asks for a preset dictionary, which git never writes
     /// and this does not implement.
     PresetDictionary;
-    /// The trailing Adler-32 does not match what came out: wanted, got.
-    Checksum(int, int);
+    /// The trailing Adler-32 does not match what came out.
+    Checksum;
 }
 
 pub str Error.to_str() {
     match (this) {
-        case Truncated(int n): {
-            return "the deflate stream ends inside a block (" + n.to_str() + " octets in all)";
+        case Truncated: {
+            return "the deflate stream ends inside a block";
         }
-        case BlockType(int at): {
-            return "reserved deflate block type 3 at octet " + at.to_str();
+        case BlockType: {
+            return "reserved deflate block type 3";
         }
-        case StoredLength(int len, int nlen): {
-            return "stored block length " + len.to_str() + " does not match its complement " + nlen.to_str();
+        case StoredLength: {
+            return "stored block length does not match its complement";
         }
-        case OverSubscribed(str which): {
-            return "the " + which + " code lengths describe more codes than a Huffman code has room for";
+        case OverSubscribed: {
+            return "a code table's lengths describe more codes than a Huffman code has room for";
         }
-        case Incomplete(str which): {
-            return "the " + which + " code is incomplete: some bit patterns decode to nothing";
+        case Incomplete: {
+            return "a code table is incomplete: some bit patterns decode to nothing";
         }
-        case BadCode(str which): {
-            return "bits that match no code in the " + which + " table";
+        case BadCode: {
+            return "bits that match no code in the table";
         }
-        case BadLength(int sym): {
-            return "literal/length symbol " + sym.to_str() + " has no meaning";
+        case BadLength: {
+            return "a literal/length symbol has no meaning";
         }
-        case BadDistance(int sym): {
-            return "distance symbol " + sym.to_str() + " has no meaning";
+        case BadDistance: {
+            return "a distance symbol has no meaning";
         }
-        case TooFar(int dist, int have): {
-            return "a back-reference of " + dist.to_str() + " reaches before the start of the output, which is " + have.to_str() + " octets";
+        case TooFar: {
+            return "a back-reference reaches before the start of the output";
         }
-        case TooBig(int limit): {
-            return "the stream expands past the " + limit.to_str() + " octets it was allowed";
+        case TooBig: {
+            return "the stream expands past the limit it was allowed";
         }
-        case BadCounts(int nlen, int ndist): {
-            return "a dynamic block claims " + nlen.to_str() + " literal/length codes and " + ndist.to_str() + " distance codes; the limits are 286 and 30";
+        case BadCounts: {
+            return "a dynamic block's header counts are out of range: the limits are 286 and 30";
         }
         case NothingToRepeat: {
             return "a code-length repeat came first, with no previous length to repeat";
         }
-        case TooManyLengths(int want, int have): {
-            return "the code lengths run to " + want.to_str() + " entries, past the " + have.to_str() + " the header declared";
+        case TooManyLengths: {
+            return "the code lengths run past the end of a table the header declared";
         }
         case NoEndOfBlock: {
             return "the literal/length code has no end-of-block symbol";
         }
-        case BadHeader(int cmf, int flg): {
-            return "not a zlib header: CMF 0x" + one(cmf) + ", FLG 0x" + one(flg);
+        case BadHeader: {
+            return "not a zlib header";
         }
         case PresetDictionary: {
             return "the zlib header asks for a preset dictionary";
         }
-        case Checksum(int want, int got): {
-            return "Adler-32 mismatch: the stream says " + hex8(want) + ", the data is " + hex8(got);
+        case Checksum: {
+            return "Adler-32 mismatch";
         }
     }
 }
@@ -309,18 +311,18 @@ Result<void, Error> stored(Bits b, bytes out, int limit) {
     int n0 = b.byte();
     int n1 = b.byte();
     if (b.over) {
-        return Result<void, Error>.Err(Error.Truncated(b.src.size()));
+        return Result<void, Error>.Err(Error.Truncated);
     }
     int len = l0 | l1 << 8;
     int nlen = n0 | n1 << 8;
     if (nlen != len ^ 0xFFFF) {
-        return Result<void, Error>.Err(Error.StoredLength(len, nlen));
+        return Result<void, Error>.Err(Error.StoredLength);
     }
     if (b.at + len > b.src.size()) {
-        return Result<void, Error>.Err(Error.Truncated(b.src.size()));
+        return Result<void, Error>.Err(Error.Truncated);
     }
     if (limit >= 0 && out.size() + len > limit) {
-        return Result<void, Error>.Err(Error.TooBig(limit));
+        return Result<void, Error>.Err(Error.TooBig);
     }
     out.extend(b.src.substr(b.at, b.at + len));
     b.at = b.at + len;
@@ -370,10 +372,10 @@ Result<Tables, Error> dynamic_tables(Bits b) {
     int ndist = b.take(5) + 1;
     int ncode = b.take(4) + 4;
     if (b.over) {
-        return Result<Tables, Error>.Err(Error.Truncated(b.src.size()));
+        return Result<Tables, Error>.Err(Error.Truncated);
     }
     if (nlen > 286 || ndist > 30) {
-        return Result<Tables, Error>.Err(Error.BadCounts(nlen, ndist));
+        return Result<Tables, Error>.Err(Error.BadCounts);
     }
     Array<int> clen = [0; 19];
     for (int i in 0 .. ncode) {
@@ -381,10 +383,10 @@ Result<Tables, Error> dynamic_tables(Bits b) {
     }
     Huff cl = build(clen, 0, 19);
     if (cl.left < 0) {
-        return Result<Tables, Error>.Err(Error.OverSubscribed("code length"));
+        return Result<Tables, Error>.Err(Error.OverSubscribed);
     }
     if (cl.left > 0) {
-        return Result<Tables, Error>.Err(Error.Incomplete("code length"));
+        return Result<Tables, Error>.Err(Error.Incomplete);
     }
     Array<int> lengths = [0; 320];
     int idx = 0;
@@ -392,10 +394,10 @@ Result<Tables, Error> dynamic_tables(Bits b) {
     while (idx < want) {
         int sym = cl.decode(b);
         if (b.over) {
-            return Result<Tables, Error>.Err(Error.Truncated(b.src.size()));
+            return Result<Tables, Error>.Err(Error.Truncated);
         }
         if (sym < 0) {
-            return Result<Tables, Error>.Err(Error.BadCode("code length"));
+            return Result<Tables, Error>.Err(Error.BadCode);
         }
         if (sym < 16) {
             lengths[idx] = sym;
@@ -415,7 +417,7 @@ Result<Tables, Error> dynamic_tables(Bits b) {
                 rep = 11 + b.take(7);
             }
             if (idx + rep > want) {
-                return Result<Tables, Error>.Err(Error.TooManyLengths(idx + rep, want));
+                return Result<Tables, Error>.Err(Error.TooManyLengths);
             }
             while (rep > 0) {
                 lengths[idx] = v;
@@ -425,27 +427,27 @@ Result<Tables, Error> dynamic_tables(Bits b) {
         }
     }
     if (b.over) {
-        return Result<Tables, Error>.Err(Error.Truncated(b.src.size()));
+        return Result<Tables, Error>.Err(Error.Truncated);
     }
     if (lengths[256] == 0) {
         return Result<Tables, Error>.Err(Error.NoEndOfBlock);
     }
     Huff lit = build(lengths, 0, nlen);
     if (lit.left < 0) {
-        return Result<Tables, Error>.Err(Error.OverSubscribed("literal/length"));
+        return Result<Tables, Error>.Err(Error.OverSubscribed);
     }
     if (lit.left > 0) {
-        return Result<Tables, Error>.Err(Error.Incomplete("literal/length"));
+        return Result<Tables, Error>.Err(Error.Incomplete);
     }
     Huff dist = build(lengths, nlen, ndist);
     // An incomplete DISTANCE code is legal in exactly one case: a block that
     // uses a single distance, which cannot fill a one-bit code space. zlib
     // and puff both allow it, and streams in the wild contain it.
     if (dist.left < 0) {
-        return Result<Tables, Error>.Err(Error.OverSubscribed("distance"));
+        return Result<Tables, Error>.Err(Error.OverSubscribed);
     }
     if (dist.left > 0 && ndist - dist.count[0] > 1) {
-        return Result<Tables, Error>.Err(Error.Incomplete("distance"));
+        return Result<Tables, Error>.Err(Error.Incomplete);
     }
     return Result<Tables, Error>.Ok(Tables(lit, dist));
 }
@@ -456,14 +458,14 @@ Result<void, Error> symbols(Bits b, Huff lit, Huff dist, bytes out, int limit) {
     while (true) {
         int sym = lit.decode(b);
         if (b.over) {
-            return Result<void, Error>.Err(Error.Truncated(b.src.size()));
+            return Result<void, Error>.Err(Error.Truncated);
         }
         if (sym < 0) {
-            return Result<void, Error>.Err(Error.BadCode("literal/length"));
+            return Result<void, Error>.Err(Error.BadCode);
         }
         if (sym < 256) {
             if (limit >= 0 && out.size() >= limit) {
-                return Result<void, Error>.Err(Error.TooBig(limit));
+                return Result<void, Error>.Err(Error.TooBig);
             }
             out.push(sym);
         } else if (sym == 256) {
@@ -471,28 +473,28 @@ Result<void, Error> symbols(Bits b, Huff lit, Huff dist, bytes out, int limit) {
         } else {
             int ls = sym - 257;
             if (ls >= 29) {
-                return Result<void, Error>.Err(Error.BadLength(sym));
+                return Result<void, Error>.Err(Error.BadLength);
             }
             int len = LENGTH_BASE[ls] + b.take(LENGTH_EXTRA[ls]);
             int ds = dist.decode(b);
             if (b.over) {
-                return Result<void, Error>.Err(Error.Truncated(b.src.size()));
+                return Result<void, Error>.Err(Error.Truncated);
             }
             if (ds < 0) {
-                return Result<void, Error>.Err(Error.BadCode("distance"));
+                return Result<void, Error>.Err(Error.BadCode);
             }
             if (ds >= 30) {
-                return Result<void, Error>.Err(Error.BadDistance(ds));
+                return Result<void, Error>.Err(Error.BadDistance);
             }
             int d = DIST_BASE[ds] + b.take(DIST_EXTRA[ds]);
             if (b.over) {
-                return Result<void, Error>.Err(Error.Truncated(b.src.size()));
+                return Result<void, Error>.Err(Error.Truncated);
             }
             if (d > out.size()) {
-                return Result<void, Error>.Err(Error.TooFar(d, out.size()));
+                return Result<void, Error>.Err(Error.TooFar);
             }
             if (limit >= 0 && out.size() + len > limit) {
-                return Result<void, Error>.Err(Error.TooBig(limit));
+                return Result<void, Error>.Err(Error.TooBig);
             }
             int from = out.size() - d;
             int k = 0;
@@ -515,7 +517,7 @@ Result<void, Error> run(Bits b, bytes out, int limit) {
         last = b.take(1) == 1;
         int kind = b.take(2);
         if (b.over) {
-            return Result<void, Error>.Err(Error.Truncated(b.src.size()));
+            return Result<void, Error>.Err(Error.Truncated);
         }
         if (kind == 0) {
             stored(b, out, limit)?;
@@ -525,7 +527,7 @@ Result<void, Error> run(Bits b, bytes out, int limit) {
             Tables t = dynamic_tables(b)?;
             symbols(b, t.lit, t.dist, out, limit)?;
         } else {
-            return Result<void, Error>.Err(Error.BlockType(b.at));
+            return Result<void, Error>.Err(Error.BlockType);
         }
     }
     return Result<void, Error>.Ok;
@@ -550,12 +552,12 @@ pub Result<bytes, Error> inflate(bytes src, int limit = -1) {
 /// `object.src` does.
 pub Result<bytes, Error> decompress(bytes src, int limit = -1) {
     if (src.size() < 2) {
-        return Result<bytes, Error>.Err(Error.Truncated(src.size()));
+        return Result<bytes, Error>.Err(Error.Truncated);
     }
     int cmf = src[0];
     int flg = src[1];
     if ((cmf & 0x0F) != 8 || cmf >> 4 > 7 || (cmf * 256 + flg) % 31 != 0) {
-        return Result<bytes, Error>.Err(Error.BadHeader(cmf, flg));
+        return Result<bytes, Error>.Err(Error.BadHeader);
     }
     if ((flg & 0x20) != 0) {
         return Result<bytes, Error>.Err(Error.PresetDictionary);
@@ -569,12 +571,12 @@ pub Result<bytes, Error> decompress(bytes src, int limit = -1) {
     int a2 = b.byte();
     int a3 = b.byte();
     if (b.over) {
-        return Result<bytes, Error>.Err(Error.Truncated(src.size()));
+        return Result<bytes, Error>.Err(Error.Truncated);
     }
     int want = a0 << 24 | a1 << 16 | a2 << 8 | a3;
     int got = adler32(out);
     if (want != got) {
-        return Result<bytes, Error>.Err(Error.Checksum(want, got));
+        return Result<bytes, Error>.Err(Error.Checksum);
     }
     return Result<bytes, Error>.Ok(out);
 }
@@ -605,16 +607,4 @@ pub int adler32(bytes data) {
         b = b % 65521;
     }
     return b << 16 | a;
-}
-
-// One octet as two hex digits, for a message.
-str one(int v) {
-    bytes b = [v];
-    return b.hex();
-}
-
-// A 32-bit value as eight hex digits, for a message.
-str hex8(int v) {
-    bytes b = [v >> 24 & 0xFF, v >> 16 & 0xFF, v >> 8 & 0xFF, v & 0xFF];
-    return b.hex();
 }

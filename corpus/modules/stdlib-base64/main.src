@@ -93,16 +93,16 @@ match (base64.decode("QQ=")) {
     }
     case Err(base64.Error e): {
         match (e) {
-            case Length(int n): {
-                print("length was " + n.to_str());
+            case Length: {
+                print("length");
             }
-            case Character(int at, int c, bool url): {
+            case Character: {
                 print("character");
             }
-            case PaddingThenData(int p, int d): {
+            case PaddingThenData: {
                 print("padding then data");
             }
-            case Padding(int count, int at): {
+            case Padding: {
                 print("padding");
             }
         }

@@ -73,36 +73,31 @@
 /// `Option<int>` flattens into one `None`. That flattening is right for a
 /// built-in -- it answers "did it parse" -- and wrong for a program that has
 /// to tell a user what to type instead.
+///
+/// Payload-free (docs/errors-decision.md §4): which byte, where, or which end
+/// of the range was passed is context the caller already has -- it has `s`
+/// -- when it reports.
 pub enum ParseError {
     /// Nothing to parse: the text is empty, or it is a lone `+` or `-`.
     NoDigits;
-    /// The first byte that is not a decimal digit, and where it is, in bytes
-    /// from the start.
-    Digit(int, int);
+    /// A byte that is not a decimal digit.
+    Digit;
     /// Every character is a digit and the value is outside an `int`'s range.
-    /// The flag is whether it was negative, which says which end it passed.
-    Range(bool);
+    Range;
 }
 
-/// A sentence saying what was wrong, and where. A method named `to_str`, so
+/// A sentence saying what was wrong. A method named `to_str`, so
 /// `print(e)` prints it.
 pub str ParseError.to_str() {
     match (this) {
         case NoDigits: {
             return "no digits to parse";
         }
-        case Digit(int at, int c): {
-            str head = "invalid digit " + shown(c) + " at position " + at.to_str();
-            if (is_space(c)) {
-                return head + ": surrounding space is not accepted, so trim first";
-            }
-            return head;
+        case Digit: {
+            return "invalid digit";
         }
-        case Range(bool negative): {
-            if (negative) {
-                return "the number is below -9223372036854775808, an int's smallest value";
-            }
-            return "the number is above 9223372036854775807, an int's largest value";
+        case Range: {
+            return "the number is outside an int's range";
         }
     }
 }
@@ -402,7 +397,7 @@ pub Result<int, ParseError> parse_int(str s) {
     while (i < n) {
         int c = s.byte_at(i);
         if (c < '0' || c > '9') {
-            return Result<int, ParseError>.Err(ParseError.Digit(i, c));
+            return Result<int, ParseError>.Err(ParseError.Digit);
         }
         i = i + 1;
     }
@@ -411,7 +406,7 @@ pub Result<int, ParseError> parse_int(str s) {
             return Result<int, ParseError>.Ok(v);
         }
         case None: {
-            return Result<int, ParseError>.Err(ParseError.Range(s.byte_at(0) == '-'));
+            return Result<int, ParseError>.Err(ParseError.Range);
         }
     }
 }
@@ -424,16 +419,4 @@ pub Result<int, ParseError> parse_int(str s) {
 // other way about.
 bool is_space(int b) {
     return b == 32 || b == 9 || b == 10 || b == 13 || b == 12 || b == 11;
-}
-
-// A byte as a message names it: the character, quoted, if it is printable
-// ASCII, and its value in hex if it is not -- a byte of a multi-byte UTF-8
-// character is not a character on its own. One printable ASCII byte is always
-// valid UTF-8, so the `or` is never taken.
-str shown(int c) {
-    bytes one = [c];
-    if (c >= ' ' && c <= '~') {
-        return "'" + one.utf8().or("?") + "'";
-    }
-    return "byte 0x" + one.hex();
 }

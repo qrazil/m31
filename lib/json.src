@@ -2,8 +2,9 @@
 //
 // `parse` is strict. It accepts exactly the grammar of RFC 8259 -- no
 // comments, no trailing commas, no single quotes, no leading zeros, no `NaN`
-// -- and a document that is not JSON is an `Error` naming what was wrong and
-// the byte position where, e.g. `unexpected '}' at position 14`.
+// -- and a document that is not JSON is `Err(Error.Syntax)`. `Error` is
+// payload-free (docs/errors-decision.md §4), so it says only that parsing
+// failed; a caller that wants to say where reports it at the call site.
 //
 // Numbers: a literal containing `.`, `e` or `E` is a `Float`; anything else
 // is an `Int`. A float literal too large for a double is an infinity, as in
@@ -60,32 +61,32 @@ pub enum Value {
     Object(Map<str, Value>);
 }
 
-/// Why `parse` or `stringify` failed.
+/// Why `parse` or `stringify` failed. Payload-free by design
+/// (docs/errors-decision.md §4): the position or value that made `parse` or
+/// `stringify` fail is context the caller already has when it reports, not
+/// something this value carries.
 pub enum Error {
-    /// The text is not JSON: what was wrong, and the byte position where.
-    Syntax(str, int);
+    /// The text is not JSON.
+    Syntax;
     /// `stringify` met a NaN or an infinity, which JSON has no spelling for.
-    NotFinite(float);
+    NotFinite;
     /// `stringify` went deeper than 10 000 levels -- a value that contains
     /// itself, or near enough.
     TooDeep;
 }
 
-/// A sentence saying what went wrong, and where. A method named `to_str`, so
+/// A sentence saying what went wrong. A method named `to_str`, so
 /// `print(e)` prints it.
 pub str Error.to_str() {
     match (this) {
-        case Syntax(str what, int at): {
-            return what + " at position " + at.to_str();
+        case Syntax: {
+            return "invalid JSON";
         }
-        case NotFinite(float f): {
-            if (f != f) {
-                return "nan is not JSON serializable";
-            }
-            return "Infinity is not JSON serializable";
+        case NotFinite: {
+            return "nan and infinity are not JSON serializable";
         }
         case TooDeep: {
-            return "maximum nesting depth (" + max_depth().to_str() + ") exceeded while writing";
+            return "maximum nesting depth (" + max_depth().to_str() + ") exceeded";
         }
     }
 }
@@ -283,7 +284,7 @@ Result<str, Error> string(Parser p) {
             parts.push(text.substr(from, p.at));
         }
         if (p.at >= n) {
-            return Result<str, Error>.Err(Error.Syntax("unterminated string", p.at));
+            return Result<str, Error>.Err(Error.Syntax);
         }
         int c = text.byte_at(p.at);
         if (c == '"') {
@@ -293,7 +294,7 @@ Result<str, Error> string(Parser p) {
         if (c == '\\') {
             parts.push(escape(p)?);
         } else {
-            return Result<str, Error>.Err(Error.Syntax("invalid control character in string", p.at));
+            return Result<str, Error>.Err(Error.Syntax);
         }
     }
 }
@@ -303,7 +304,7 @@ Result<str, Error> escape(Parser p) {
     str text = p.text;
     p.at = p.at + 1;
     if (p.at >= text.size()) {
-        return Result<str, Error>.Err(Error.Syntax("unterminated escape", p.at));
+        return Result<str, Error>.Err(Error.Syntax);
     }
     int c = text.byte_at(p.at);
     if (c == 'u') {
@@ -339,7 +340,7 @@ Result<str, Error> escape(Parser p) {
         return Result<str, Error>.Ok("\x0c");
     }
     p.at = p.at - 1;
-    return Result<str, Error>.Err(Error.Syntax("invalid escape '\\" + char_at(text, p.at) + "'", p.at));
+    return Result<str, Error>.Err(Error.Syntax);
 }
 
 // The code point of a `\uXXXX`, or of a surrogate pair of them, with `p.at`
@@ -360,10 +361,10 @@ Result<int, Error> unicode_escape(Parser p) {
             }
             p.at = save;
         }
-        return Result<int, Error>.Err(Error.Syntax("unpaired UTF-16 surrogate in \\u escape", p.at));
+        return Result<int, Error>.Err(Error.Syntax);
     }
     if (cp >= 56320 && cp <= 57343) {
-        return Result<int, Error>.Err(Error.Syntax("unpaired UTF-16 surrogate in \\u escape", p.at));
+        return Result<int, Error>.Err(Error.Syntax);
     }
     return Result<int, Error>.Ok(cp);
 }
@@ -378,7 +379,7 @@ Result<int, Error> hex4(Parser p) {
     int end = p.at;
     for (int k in 0 .. 4) {
         if (end >= n) {
-            return Result<int, Error>.Err(Error.Syntax("incomplete \\u escape", p.at));
+            return Result<int, Error>.Err(Error.Syntax);
         }
         end = end + char_length(text, end);
     }
@@ -386,7 +387,7 @@ Result<int, Error> hex4(Parser p) {
     for (int i in p.at .. end) {
         int d = hex_digit(text.byte_at(i));
         if (d < 0) {
-            return Result<int, Error>.Err(Error.Syntax("invalid \\u escape '" + text.substr(p.at, end) + "'", p.at));
+            return Result<int, Error>.Err(Error.Syntax);
         }
         cp = cp * 16 + d;
     }
@@ -502,13 +503,13 @@ void skip_ws(Parser p) {
 
 Error unexpected(Parser p) {
     if (p.at >= p.text.size()) {
-        return Error.Syntax("unexpected end of input", p.at);
+        return Error.Syntax;
     }
-    return Error.Syntax("unexpected '" + char_at(p.text, p.at) + "'", p.at);
+    return Error.Syntax;
 }
 
 Result<Value, Error> fail(str what, int at) {
-    return Result<Value, Error>.Err(Error.Syntax(what, at));
+    return Result<Value, Error>.Err(Error.Syntax);
 }
 
 // --- encoding ----------------------------------------------------------------
@@ -573,7 +574,7 @@ Result<int, Error> write_one(List<str> out, List<Job> jobs, Value v, int level, 
         }
         case Float(float f): {
             if (f != f || f - f != 0.0) {
-                return Result<int, Error>.Err(Error.NotFinite(f));
+                return Result<int, Error>.Err(Error.NotFinite);
             }
             str s = f.to_str();
             out.push(s);

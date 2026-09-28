@@ -28,11 +28,11 @@ b]
 2 rows: [name][age] / [x][1]
 1 rows: [a][b,c][d;e]
 1 rows: [a][b]
-error: csv separator must be one ASCII character, not ""
-error: csv separator must be one ASCII character, not ";;"
-error: csv separator may not be a quote or a line break: the format already gives those a meaning
-error: csv separator may not be a quote or a line break: the format already gives those a meaning
-error: csv separator must be one ASCII character, not "é"
+error: csv separator must be one ASCII character, and not a quote or a line break
+error: csv separator must be one ASCII character, and not a quote or a line break
+error: csv separator must be one ASCII character, and not a quote or a line break
+error: csv separator must be one ASCII character, and not a quote or a line break
+error: csv separator must be one ASCII character, and not a quote or a line break
 a,b<CRLF>1,2<CRLF>
 "x,y","he said ""hi"""<CRLF>
 "line
@@ -41,6 +41,6 @@ break","crhere", spaced <CRLF>
 ,<CRLF>
 
 "a;b";c,d<CRLF>
-error: csv separator may not be a quote or a line break: the format already gives those a meaning
+error: csv separator must be one ASCII character, and not a quote or a line break
 6 rows: [id][note] / [1][a
 b] / [2][say "x"] / [] / [][] / [3][a,b]

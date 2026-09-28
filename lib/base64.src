@@ -41,42 +41,35 @@
 // everywhere else `str` meets `bytes` (reference §3.10), rather than a second
 // function that differs only in the conversion it hides.
 
-/// Why `decode` refused its input. Every variant carries the position, in
-/// bytes from the start of the text, of what was wrong.
+/// Why `decode` refused its input. Payload-free (docs/errors-decision.md §4):
+/// the position of what was wrong is context the caller already has at the
+/// point it reports, not something this value carries.
 pub enum Error {
-    /// A byte that is neither in the chosen alphabet nor `=`: its position,
-    /// the byte, and whether the URL-safe alphabet was the one asked for.
-    Character(int, int, bool);
-    /// The text's length, which is not a multiple of four.
-    Length(int);
-    /// Where the padding starts, and where data follows it.
-    PaddingThenData(int, int);
-    /// How many padding characters there are, and where they start.
-    Padding(int, int);
+    /// A byte that is neither in the chosen alphabet nor `=`.
+    Character;
+    /// The text's length is not a multiple of four.
+    Length;
+    /// Padding, and then more data after it.
+    PaddingThenData;
+    /// More than two padding characters at the end.
+    Padding;
 }
 
-/// A sentence saying what was wrong, and where. A method named `to_str`, so
+/// A sentence saying what was wrong. A method named `to_str`, so
 /// `print(e)` prints it.
 pub str Error.to_str() {
     match (this) {
-        case Character(int at, int c, bool url): {
-            str head = "invalid base64 " + shown(c) + " at position " + at.to_str();
-            if (url && (c == '+' || c == '/')) {
-                return head + ": that is the standard alphabet, and url: true is the URL-safe one";
-            }
-            if (!url && (c == '-' || c == '_')) {
-                return head + ": that is the URL-safe alphabet, which is url: true";
-            }
-            return head;
+        case Character: {
+            return "invalid base64 character";
         }
-        case Length(int n): {
-            return "base64 text length " + n.to_str() + " is not a multiple of 4";
+        case Length: {
+            return "base64 text length is not a multiple of 4";
         }
-        case PaddingThenData(int pad, int data): {
-            return "base64 padding at position " + pad.to_str() + " is followed by data at position " + data.to_str();
+        case PaddingThenData: {
+            return "base64 padding is followed by more data";
         }
-        case Padding(int count, int at): {
-            return "base64 text ends in " + count.to_str() + " padding characters at position " + at.to_str() + "; at most 2 are allowed";
+        case Padding: {
+            return "base64 text ends in more than 2 padding characters";
         }
     }
 }
@@ -128,12 +121,12 @@ pub Result<bytes, Error> decode(str text, bool url = false) {
     while (i < n) {
         int c = text.byte_at(i);
         if (c != '=' && value(c, url) < 0) {
-            return Result<bytes, Error>.Err(Error.Character(i, c, url));
+            return Result<bytes, Error>.Err(Error.Character);
         }
         i = i + 1;
     }
     if (n % 4 != 0) {
-        return Result<bytes, Error>.Err(Error.Length(n));
+        return Result<bytes, Error>.Err(Error.Length);
     }
     // Everything is now alphabet or `=`, so the first `=` is where the padding
     // starts, and the padding must run from there to the end.
@@ -147,10 +140,10 @@ pub Result<bytes, Error> decode(str text, bool url = false) {
             after = after + 1;
         }
         if (after < n) {
-            return Result<bytes, Error>.Err(Error.PaddingThenData(data, after));
+            return Result<bytes, Error>.Err(Error.PaddingThenData);
         }
         if (n - data > 2) {
-            return Result<bytes, Error>.Err(Error.Padding(n - data, data));
+            return Result<bytes, Error>.Err(Error.Padding);
         }
     }
     int pad = n - data;
@@ -226,16 +219,4 @@ List<str> alphabet(bool url) {
         out.push(chars.substr(i, i + 1));
     }
     return out;
-}
-
-// A byte as a message names it: the character, quoted, if it is printable
-// ASCII, and its value in hex if it is not -- a byte of a multi-byte UTF-8
-// character is not a character on its own. One printable ASCII byte is always
-// valid UTF-8, so the `or` is never taken.
-str shown(int c) {
-    bytes one = [c];
-    if (c >= ' ' && c <= '~') {
-        return "character '" + one.utf8().or("?") + "'";
-    }
-    return "byte 0x" + one.hex();
 }
