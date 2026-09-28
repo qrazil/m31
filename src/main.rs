@@ -11,6 +11,7 @@ mod ast;
 mod diag;
 mod emit_c;
 mod fmt;
+mod hoist;
 mod ir;
 mod lexer;
 mod lower;

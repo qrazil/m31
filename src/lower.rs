@@ -616,7 +616,13 @@ pub fn lower_program(p: &Program) -> Result<ir::Module, Diag> {
         lw.forced_boxed = boxed.clone();
         lw.demote = Rc::clone(&asked);
         match lw.lower_program(p) {
-            Ok(m) => {
+            Ok(mut m) => {
+                // docs/perf-board.md item 1, second half: hoist an
+                // Array/List/bytes' data pointer and length out of a loop
+                // that does nothing opaque to it. Pure IR-to-IR, after
+                // lowering and before `verify`, so `verify` checks this
+                // pass's output too.
+                crate::hoist::hoist_seq_metadata(&mut m);
                 m.verify();
                 return Ok(m);
             }
