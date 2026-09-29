@@ -18,35 +18,55 @@
 // names. Hunk-level diff staging, push/pull, checkout and rebase are each a
 // named, deliberate gap there, not an oversight here.
 //
-// --- the one gap this ran into that `apps/git/design.md` did not name ------
+// --- launching `$EDITOR`, and the terminal handoff that takes ---------------
 //
-// Real `git commit` (no `-m`) launches `$EDITOR` as a child process. This
-// language has no way to do that: `lib/os.src`'s own header says plainly
-// that starting another program "belongs with whatever starts it", and
-// grepping every `prim` declaration in `lib/` (`os`, `fs`, `io`, `net`,
-// `term`, `date`, `random`) turns up sockets, files and a terminal's
-// `termios` -- never a `fork`/`exec`/`spawn` of any kind, in either the libc
-// or the raw-syscall half of `runtime/sys.h`. Adding one is not a small
-// primitive: `runtime/sys.h` speaks for two implementations (`sys_libc.c`,
-// and `sys_linux.c`'s inline assembly for three architectures under
-// `-DRT_SYS_RAW`), and every seam this codebase already crossed got its own
-// decision document first (`docs/errors-decision.md`, `docs/sys-layer.md`,
-// and the rest). That is a real, load-bearing gap discovered while building
-// this client -- the same shape of discovery `apps/git/design.md` itself
-// made about the missing diff algorithm -- and it is out of proportion to
-// this task to close unilaterally.
+// `lib/os.src` gained `os.run`/`ExitStatus` (`docs/sys-layer.md`'s "Process
+// launch", added the same day as this) after this client first shipped with
+// only the on-disk contract below -- a message file at a known path
+// (`COMMIT_EDITMSG`, git's own name), edited by *something*, read back and
+// refused if empty after stripping comments. `os.run` is now that
+// "something": the which-key overlay's `e` actually launches `$EDITOR` (`vi`
+// if unset, real git's own fallback) on `commit_msg_path`.
 //
-// So `finish_commit` keeps the exact on-disk contract real git's editor flow
-// uses -- a message file at a known path (`COMMIT_EDITMSG`, git's own name),
-// edited by *something*, read back and refused if empty after stripping
-// comments -- without pretending to launch an editor this runtime cannot
-// launch. The which-key overlay's `e` writes the template and tells the
-// operator the path to edit in another terminal; `f` reads it back and
-// commits; `a` discards it. A future `os.spawn` (or equivalent) primitive
-// is a one-line change here: replace the instruction in `edit_message`'s
-// result with an actual launch-and-wait, and everything downstream of it
-// -- the read-back, the stripping, the empty-message refusal, the commit
-// itself -- is already exactly what that primitive would need.
+// The wrinkle `os.run`'s own header does not have to solve, and this client
+// does: `os.run` leaves stdin/stdout/stderr untouched precisely so an
+// interactive child can take over the real terminal, but this program has
+// already put that terminal in raw mode with the alternate screen on
+// (`tuiapp.Loop.run`'s own `enter`/`leave` sequences) -- the wrong mode for
+// an editor expecting a normal, cooked terminal to draw on. `lib/term.src`'s
+// `Session` is exactly the value that knows how to undo that (`restore()`,
+// idempotent, called from its own destructor), but `Loop.run` holds it in
+// its own function scope and hands a caller only an `Action`
+// (`Continue`/`Redraw`/`Quit`) -- there is no `Suspend` a `Handler` can ask
+// for, and adding one to that enum would ripple through every `match` on
+// `Action` in `apps/tui`, which this task does not own.
+//
+// So `edit_message` does not call `os.run` itself. It sets `want_editor` and
+// returns `Quit` from the which-key's `e`, which unwinds `Loop.run` exactly
+// as a real quit would: the `Session` goes out of scope, its destructor
+// calls `restore()`, and the terminal is back in the ORIGINAL cooked mode
+// `raw()` snapshotted before it ever touched termios, alternate screen
+// already turned off by the `leave` sequence `Loop.run` registered with
+// `on_exit`. That is the drop half of "drop the Session and re-acquire
+// `raw()` afterward" -- `gitui.src`'s own top-level driver, watching
+// `want_editor`, is what does both: it runs `os.run` for real now that the
+// terminal is cooked and on the normal screen, calls `launch_editor` to
+// interpret the result, and -- unless the loop actually asked to quit --
+// calls `Loop.run` again. That is the re-acquire half: a fresh `raw()` call,
+// and a first frame `Loop.run` always draws with `tuidiff.full` rather than
+// a diff against whatever the editor left on screen.
+//
+// `f` (finish) and `a` (abort) are untouched: `launch_editor` reuses
+// `finish_commit` verbatim for a successful edit (exit 0, non-empty
+// message), so the "same stripping/empty-message-refusal logic" runs from
+// exactly one place either way. A nonzero exit or a signal is treated as a
+// cancelled edit -- `commit_open` stays true and the message file is left
+// alone, so `e` can be pressed again, `f` can still try to finish whatever
+// is on disk, and `a` can still discard it. `os.run` itself returning `Err`
+// -- no `$EDITOR`, no `vi`, nothing nowhere on `$PATH` -- falls back to
+// exactly the original behaviour: the template is already on disk (written
+// before the launch attempt, same as before), and the operator is told to
+// edit it externally and press `f`.
 
 import date;
 import fs;
@@ -518,6 +538,12 @@ pub type State {
     pub bool show_jump = false;
     pub bool jump_focused = false;
     pub bool commit_open = false;
+    /// Set by `edit_message` and read by `gitui.src`'s own top-level driver
+    /// after `tuiapp.Loop.run` returns: true means the loop stopped so
+    /// `$EDITOR` could have the terminal, not because the operator pressed
+    /// `q`. See this module's own header, "launching `$EDITOR`, and the
+    /// terminal handoff that takes".
+    pub bool want_editor = false;
     pub str commit_msg_path = "";
     pub str branch_label = "";
     pub str message = "";
@@ -936,8 +962,16 @@ pub void State.close_diff() {
 
 /// Write the commit-message template at `commit_msg_path`, unless something
 /// -- a previous `e`, or a person's own `git commit` in another terminal --
-/// already left one there. See this module's own header on why this cannot
-/// simply launch `$EDITOR` on it.
+/// already left one there, and ask `gitui.src`'s own driver to actually
+/// launch `$EDITOR` on it once the terminal is safe to hand over.
+///
+/// This cannot call `os.run` itself: the terminal is still in raw mode with
+/// the alternate screen on, owned by a `term.Session` this state has no
+/// access to (`tuiapp.Loop.run`'s own scope). Setting `want_editor` and
+/// letting the which-key's `e` return `Quit` is what unwinds that scope --
+/// see this module's own header, "launching `$EDITOR`, and the terminal
+/// handoff that takes" -- so `launch_editor` below is where the actual
+/// launch happens, called back once the terminal is cooked again.
 pub void State.edit_message() {
     if (!fs.exists(commit_msg_path)) {
         match (io.write(commit_msg_path, commit_template())) {
@@ -949,7 +983,56 @@ pub void State.edit_message() {
             }
         }
     }
-    message = "edit " + commit_msg_path + " in another terminal, then press f to finish or a to abort";
+    want_editor = true;
+    message = "launching editor...";
+}
+
+/// Actually launch `$EDITOR` (or `vi`) on `commit_msg_path` and act on how it
+/// ended -- called by `gitui.src`'s driver after `tuiapp.Loop.run` has
+/// returned with `want_editor` set, so the terminal `os.run`'s child
+/// inherits is the real, cooked one, not the raw alternate screen this
+/// program draws on.
+///
+/// Every `os.run` outcome the caller needs handled:
+///
+///   - exited 0: read `commit_msg_path` back and try to finish the commit --
+///     `finish_commit` is exactly "the same stripping/empty-message-refusal
+///     logic that already exists", so this calls it rather than repeating
+///     it, which also keeps `f`'s own behaviour the one place it is defined.
+///   - exited nonzero, or killed by a signal: a cancelled edit, real git's
+///     own treatment of an editor that did not report success (its own
+///     "There was a problem with the editor" -- a signal, `^C` most often,
+///     gets its own status line, a more unusual case worth naming
+///     differently even though the outcome -- leave everything as it is --
+///     is the same). `commit_open` stays true and the message file is left
+///     untouched, so `e` can be pressed again, `f` can still try to finish
+///     whatever is on disk right now, and `a` can still discard it.
+///   - `os.run` itself failed (`Err`) -- no `$EDITOR`, no `vi`, nothing
+///     found on `$PATH` -- there is no process to have run at all, so this
+///     falls back to exactly the original, pre-`os.run` behaviour: the
+///     template is already on disk (`edit_message` wrote it before setting
+///     `want_editor`), and the operator is told to edit it externally.
+pub void State.launch_editor() {
+    str editor = pick_editor(os.env("EDITOR"));
+    match (os.run([editor, commit_msg_path])) {
+        case Ok(os.ExitStatus st): {
+            match (st) {
+                case Exited(int code): {
+                    if (code == 0) {
+                        finish_commit();
+                    } else {
+                        message = "editor '" + editor + "' exited " + code.to_str() + "; message left at " + commit_msg_path + " -- e to edit again, f to finish, a to abort";
+                    }
+                }
+                case Signaled(int sig): {
+                    message = "editor '" + editor + "' was killed by signal " + sig.to_str() + "; message left at " + commit_msg_path + " -- e to edit again, f to finish, a to abort";
+                }
+            }
+        }
+        case Err(io.Error e): {
+            message = "cannot launch '" + editor + "' (" + e.to_str() + "); edit " + commit_msg_path + " in another terminal, then press f to finish or a to abort";
+        }
+    }
 }
 
 /// Discard the commit-in-progress: drop the template (if a person never got
@@ -1148,7 +1231,7 @@ pub void State.draw(tuibuf.Buffer buf, tuigeom.Rect area) {
     status_row.render(buf, tuigeom.Rect(footer_area.x, footer_area.y, footer_area.w, 1));
     tuifooter.Footer(footer_spans(theme)).render(buf, tuigeom.Rect(footer_area.x, footer_area.y + 1, footer_area.w, 1));
     if (commit_open) {
-        tuimenu.WhichKey wk = tuimenu.WhichKey("commit", [tuimenu.Item("e", "edit message (" + commit_msg_path + ")"), tuimenu.Item("f", "finish: write the commit"), tuimenu.Item("a", "abort")]);
+        tuimenu.WhichKey wk = tuimenu.WhichKey("commit", [tuimenu.Item("e", "edit message in $EDITOR (" + commit_msg_path + ")"), tuimenu.Item("f", "finish: write the commit"), tuimenu.Item("a", "abort")]);
         wk.render(buf, body);
     }
 }
@@ -1320,7 +1403,12 @@ tuiapp.Action State.handle_commit_key(term.Code code) {
         case Char(int c): {
             if (c == 'e') {
                 edit_message();
-                return tuiapp.Action.Redraw;
+                // `Quit` unwinds `tuiapp.Loop.run`'s own `Session`, which is
+                // what actually leaves raw mode and the alternate screen --
+                // see `edit_message`'s own header. `gitui.src`'s driver
+                // reads `want_editor` on the way out and calls `Loop.run`
+                // again once `launch_editor` is done.
+                return tuiapp.Action.Quit;
             }
             if (c == 'f') {
                 finish_commit();
@@ -1475,6 +1563,16 @@ Option<index.Entry> find_index_entry(index.Index ix, bytes path) {
         i = i + 1;
     }
     return Option<index.Entry>.None;
+}
+
+/// Which command real git's own editor flow would launch: `$EDITOR` if it is
+/// set, `vi` otherwise -- git's own fallback (`core.editor` and `$VISUAL`
+/// come before `vi` in real git's own chain, but both come from
+/// `.git/config`, which this client already does not read, `object.src`'s
+/// own README names that gap). Pure and total, so `t_gitclient.src` can
+/// check it with no environment and no process at all.
+pub str pick_editor(Option<str> env_editor) {
+    return env_editor.or("vi");
 }
 
 str branch_name(str full) {

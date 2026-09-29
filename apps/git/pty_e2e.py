@@ -70,7 +70,7 @@ CLIENT_ENV["GIT_COMMITTER_EMAIL"] = "client@example.com"
 class Session:
     """One `ourgitui` process on a pty, in one fixture directory."""
 
-    def __init__(self, binpath, fixture):
+    def __init__(self, binpath, fixture, env=None):
         self.master, slave = pty.openpty()
         self.proc = subprocess.Popen(
             [binpath, fixture],
@@ -78,7 +78,7 @@ class Session:
             stdout=slave,
             stderr=slave,
             cwd=fixture,
-            env=CLIENT_ENV,
+            env=env if env is not None else CLIENT_ENV,
         )
         os.close(slave)
         time.sleep(0.3)
@@ -122,6 +122,28 @@ def make_fixture(root, name):
     os.makedirs(fx)
     subprocess.run(["git", "init", "-q", "-b", "main", "."], cwd=fx, check=True)
     return fx
+
+
+def write_editor_script(path, message):
+    """A stand-in `$EDITOR`: overwrite the message file it is given with a
+    fixed line and exit 0. `e` now actually runs `$EDITOR` via `os.run` and
+    waits for it, so the pty tests below drive a real (if trivial) child
+    process rather than editing `COMMIT_EDITMSG` out of band from Python --
+    the same thing `apps/git/test_gitui.sh`'s own stand-in editors do for the
+    non-pty, oracle-level checks of every `os.run` outcome."""
+    with open(path, "w") as f:
+        f.write("#!/bin/sh\n")
+        f.write("cat >\"$1\" <<'STANDIN_EOF'\n")
+        f.write(message + "\n")
+        f.write("STANDIN_EOF\n")
+        f.write("exit 0\n")
+    os.chmod(path, 0o755)
+
+
+def env_with_editor(editor_path):
+    env = dict(CLIENT_ENV)
+    env["EDITOR"] = editor_path
+    return env
 
 
 def main():
@@ -227,23 +249,31 @@ def main():
     else:
         fail("unstage: fsck reports nothing but expected dangling blobs", fsck_out)
 
-    # --- committing: write the message externally, finish, check with git ---
+    # --- committing: a real $EDITOR launch (a stand-in script), finish -------
+    #
+    # `e` now actually runs `os.run([$EDITOR, COMMIT_EDITMSG])` and waits for
+    # it -- see `gitclient.src`'s own header, "launching `$EDITOR`, and the
+    # terminal handoff that takes" -- so this drives that for real, with a
+    # stand-in editor standing in for `$EDITOR` exactly as
+    # `apps/git/test_gitui.sh`'s own non-pty checks do for every `os.run`
+    # outcome. What only a pty can prove is the terminal handoff itself: raw
+    # mode and the alternate screen are left before the editor (a real child
+    # process) runs, at all -- this session would simply hang or scribble
+    # garbage over its own raw-mode screen otherwise -- and both are resumed
+    # cleanly, with a full redraw, once it exits.
+    editor_first = os.path.join(root, "editor-first.sh")
+    write_editor_script(editor_first, "first commit via the interactive client")
     fx3 = make_fixture(root, "commit")
     with open(os.path.join(fx3, "a.txt"), "w") as f:
         f.write("one\n")
     git(fx3, "add", "-A", env=GIT_ENV)
     # no commit yet -- unborn branch, exactly the case `finish_commit` must
     # also handle (no parent).
-    s5 = Session(binpath, fx3)
+    s5 = Session(binpath, fx3, env=env_with_editor(editor_first))
     s5.send("c")  # open the commit which-key overlay
-    s5.send("e")  # write the template at COMMIT_EDITMSG
-    time.sleep(0.1)
-    msgpath = os.path.join(fx3, ".git", "COMMIT_EDITMSG")
-    with open(msgpath) as f:
-        template = f.read()
-    with open(msgpath, "w") as f:
-        f.write("first commit via the interactive client\n" + template)
-    s5.send("f")  # finish
+    s5.send("e")  # launch the stand-in editor; exit 0 finishes the commit
+    time.sleep(0.2)
+    s5.drain()
     s5.quit()
 
     log_out, _, log_rc = git(fx3, "log", "--oneline")
@@ -270,21 +300,24 @@ def main():
     else:
         fail("commit: fsck reports nothing after the client's own commit", fsck_out)
 
+    if not os.path.exists(os.path.join(fx3, ".git", "COMMIT_EDITMSG")):
+        ok("commit: COMMIT_EDITMSG removed after the editor exits 0 and the commit finishes")
+    else:
+        fail("commit: COMMIT_EDITMSG removed after the editor exits 0 and the commit finishes", "still present")
+
     # a second commit, so the tree-builder is exercised with a real parent
     # and an existing history to extend.
+    editor_second = os.path.join(root, "editor-second.sh")
+    write_editor_script(editor_second, "second commit")
     with open(os.path.join(fx3, "b.txt"), "w") as f:
         f.write("two\n")
-    s6 = Session(binpath, fx3)
+    s6 = Session(binpath, fx3, env=env_with_editor(editor_second))
     s6.send("j")  # onto the untracked b.txt
     s6.send("s")  # stage it
     s6.send("c")
     s6.send("e")
-    time.sleep(0.1)
-    with open(msgpath) as f:
-        template2 = f.read()
-    with open(msgpath, "w") as f:
-        f.write("second commit\n" + template2)
-    s6.send("f")
+    time.sleep(0.2)
+    s6.drain()
     s6.quit()
     log_out, _, _ = git(fx3, "log", "--oneline")
     lines = log_out.splitlines()
@@ -299,15 +332,25 @@ def main():
     else:
         fail("commit: the second commit has exactly one parent", repr(parents))
 
-    # --- the empty-message refusal -------------------------------------------
+    # --- the empty-message refusal, reached through the editor too ----------
+    #
+    # A stand-in editor that leaves the template untouched (comment lines
+    # only) and exits 0 -- the same refusal `finish_commit`/`f` always gave,
+    # now reached without a separate `f` press since a successful edit
+    # finishes the commit on its own (real git's own behaviour).
+    editor_noop = os.path.join(root, "editor-noop.sh")
+    with open(editor_noop, "w") as f:
+        f.write("#!/bin/sh\nexit 0\n")
+    os.chmod(editor_noop, 0o755)
     fx4 = make_fixture(root, "empty-message")
     with open(os.path.join(fx4, "a.txt"), "w") as f:
         f.write("one\n")
     git(fx4, "add", "-A", env=GIT_ENV)
-    s7 = Session(binpath, fx4)
+    s7 = Session(binpath, fx4, env=env_with_editor(editor_noop))
     s7.send("c")
-    s7.send("e")  # a fresh template: comment lines only
-    out = s7.send("f")  # finish with nothing but comments -- must refuse
+    out = s7.send("e")  # a fresh template, untouched by the editor -- refused
+    time.sleep(0.2)
+    out += s7.drain()
     s7.quit()
     log_out, _, log_rc = git(fx4, "log", "--oneline")
     status_out, _, _ = git(fx4, "status", "--short")
@@ -377,6 +420,57 @@ def main():
             "diff: the fixture's own git diff/git diff --cached confirm the expected lines",
             "cached=%r plain=%r" % (cached_diff, plain_diff),
         )
+
+    # --- the terminal handoff itself, under a genuinely interactive editor --
+    #
+    # Everything above proves `os.run`'s outcomes are handled correctly with
+    # a stand-in editor that never touches the terminal. `ed` -- a real,
+    # interactive, but line-oriented (so scriptable over a pty with plain
+    # keystrokes) editor -- is what proves the handoff itself: that raw mode
+    # and the alternate screen are genuinely suspended (ed reads and echoes
+    # ordinary cooked-mode input; it would not work at all, or would garble
+    # the screen, sitting on top of this program's own raw mode) and cleanly
+    # resumed afterward (this session keeps talking to `ourgitui` right up to
+    # a normal quit once `ed` exits).
+    ed_path = shutil.which("ed")
+    if ed_path is None:
+        print("gitui pty: interactive $EDITOR (ed) check skipped, no ed on $PATH", file=sys.stderr)
+    else:
+        fx6 = make_fixture(root, "interactive-editor")
+        with open(os.path.join(fx6, "a.txt"), "w") as f:
+            f.write("one\n")
+        git(fx6, "add", "-A", env=GIT_ENV)
+        s9 = Session(binpath, fx6, env=env_with_editor(ed_path))
+        s9.send("c")
+        s9.send("e")  # ed starts; the template (comment lines) is its buffer
+        time.sleep(0.2)
+        s9.drain()
+        s9.send(",d\n")  # delete every line ed was given
+        s9.send("a\n")  # start appending
+        s9.send("an ed-authored commit message\n")
+        s9.send(".\n")  # end the append
+        s9.send("w\n")  # write the file
+        after_ed = s9.send("q\n")  # quit ed -- ourgitui resumes right here
+        time.sleep(0.2)
+        after_ed += s9.drain()
+        if b"\x1b[?1049h" in after_ed:
+            ok("commit: ourgitui re-enters the alternate screen after a real interactive $EDITOR exits")
+        else:
+            fail("commit: ourgitui re-enters the alternate screen after a real interactive $EDITOR exits", repr(after_ed[:200]))
+        rc = s9.quit()  # a plain "q" still reaches ourgitui and ends it cleanly
+        if rc == 0:
+            ok("commit: ourgitui still responds to input and exits cleanly after the $EDITOR handoff")
+        else:
+            fail("commit: ourgitui still responds to input and exits cleanly after the $EDITOR handoff", "returncode=%r" % rc)
+
+        log_out, _, log_rc = git(fx6, "log", "--oneline")
+        if log_rc == 0 and log_out.endswith("an ed-authored commit message"):
+            ok("commit: a message written by a real interactive editor (ed) over the handed-off terminal is committed")
+        else:
+            fail(
+                "commit: a message written by a real interactive editor (ed) over the handed-off terminal is committed",
+                "log=%r rc=%d" % (log_out, log_rc),
+            )
 
     return failures
 

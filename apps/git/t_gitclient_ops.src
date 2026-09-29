@@ -8,6 +8,7 @@
 //   ./t_gitclient_ops <gitdir> <worktree> unstage <relative-path>
 //   ./t_gitclient_ops <gitdir> <worktree> commit
 //   ./t_gitclient_ops <gitdir> <worktree> diff <untracked|unstaged|staged> <relative-path>
+//   ./t_gitclient_ops <gitdir> <worktree> edit
 //
 // `commit` reads whatever is already at `<gitdir>/COMMIT_EDITMSG` -- the
 // caller writes it first, the same file a person editing it by hand would
@@ -23,6 +24,16 @@
 // exactly as `test_hunks.sh` already does against `diff -u`'s. `Binary files
 // differ` on its own line if the pair was binary; `no diff shown: <message>`
 // if the row could not be found at all (a bad section/path argument).
+//
+// `edit` calls `edit_message()` then `launch_editor()` exactly as
+// `gitui.src`'s own driver does once `tuiapp.Loop.run` has handed the
+// terminal back -- there is no terminal or `Session` in this harness at all,
+// which is exactly what makes it able to drive `os.run`'s every outcome
+// (success, nonzero exit, signal, `$EDITOR` unset or not found)
+// deterministically: the caller sets `$EDITOR` (or leaves it unset, to drive
+// the `vi` fallback with a `$PATH` this process controls) to a stand-in
+// editor script before running this, and checks `State.message` and the
+// repository afterward the same way `commit` above is checked.
 
 import gitclient;
 import io;
@@ -82,6 +93,9 @@ if (op == "stage") {
         io.eprint("no such row: " + id);
         os.exit(2);
     }
+} else if (op == "edit") {
+    state.edit_message();
+    state.launch_editor();
 } else {
     io.eprint("unknown op: " + op);
     os.exit(2);
