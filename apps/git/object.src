@@ -1,4 +1,5 @@
-// Git's object store, as far as loose objects go.
+// Git's object store: loose objects, and -- `apps/git/pack.src` -- packed
+// ones, read through exactly the same API.
 //
 // An object lives at `.git/objects/ab/cdef...` -- the first two hex digits of
 // its name are the directory, the other thirty-eight the file -- and the file
@@ -12,11 +13,23 @@
 // come first. Reading an object here always recomputes it: an object store is
 // content-addressed or it is just a directory of files.
 //
+// Or it lives in a `.idx`/`.pack` pair under `.git/objects/pack/` instead --
+// `pack.src`'s problem, not this module's, except that `read` has to ask it
+// when the loose file is not there. `pack.read` hands back the same `<kind>,
+// content` pair a loose read has by the time it reaches `parse`, so `read`
+// rebuilds the identical `<type> <size>\0<content>` plaintext and calls
+// `parse` on it exactly as for a loose object -- the SHA-1 check, the tree,
+// commit and tag parsing below are shared between the two sources and cannot
+// drift apart, because there is only the one path through them.
+//
 // API
 // ---
-//   object.read(gitdir, id)      -> Result<Object, Error>
+//   object.read(gitdir, id)      -> Result<Object, Error>   loose, then packed
 //   object.parse(id, plaintext)  -> Result<Object, Error>   (no I/O, no zlib)
 //   object.resolve(gitdir, pfx)  -> Result<str, Error>      a unique short id
+//   object.matching(gitdir, pfx) -> List<str>               loose and packed ids
+//   object.loose(gitdir)         -> Result<List<str>, Error> loose ids only
+//   object.all(gitdir)           -> Result<List<str>, Error> loose ∪ packed ids
 //   o.kind()                     -> str, one of the four words
 //
 //   object.write_blob(gitdir, content)     -> Result<str, Error>
@@ -57,18 +70,30 @@
 // for the commands that have to understand -- `log` walking parents in date
 // order, `ls-tree` naming the type of each entry.
 //
-// --- what is NOT here --------------------------------------------------------
+// --- writing does not know about packs, on purpose ---------------------------
 //
-// Packfiles. An object in `.git/objects/pack/*.pack` is invisible to this,
-// and `read` says `NotFound` for it as it would for a name that never
-// existed. See `apps/git/README.md` for how much of a real repository that
-// costs.
+// The write path below (`write_blob`, `write_tree`, `write_commit`) always
+// writes a loose object, never a pack, regardless of whether the repository
+// is otherwise packed. That is correct, not an oversight: git itself does the
+// same (a new object is always loose; only `git gc`/`repack` ever collapses
+// loose objects into a pack), and packfile *writing* is out of scope here for
+// the reason `apps/git/design.md`'s "Going remote" gives -- it is what `push`
+// needs, and `push` is later, separate work.
+//
+// `object.loose(gitdir)` is deliberately unchanged by any of this: it answers
+// "every LOOSE object", exactly as its own doc comment always said, and
+// `t_object.src`'s existing oracle test still means what it always meant on
+// the all-loose fixtures it runs against. `object.all(gitdir)` is the new,
+// separate answer to "every object regardless of where it lives" -- the one
+// callers that must see the whole store (an oracle walking every object, or a
+// future `fsck`) should use instead of assuming loose is everything.
 
 import io;
 import fs;
 import repo;
 import sha1;
 import zlib;
+import pack;
 import random;
 
 /// Why an object could not be read, or could not be believed. Payload-free
@@ -100,6 +125,11 @@ pub enum Error {
     BadName;
     /// A short name that several objects begin with.
     Ambiguous;
+    /// Named by a `.idx` under `objects/pack/`, but `pack.src` could not read
+    /// it out: a corrupt or truncated pack, a malformed delta, a chain too
+    /// deep to be real. Never `NotFound` for a genuinely missing object --
+    /// that stays `Error.NotFound`, exactly as for a loose one.
+    Packed;
 }
 
 pub str Error.to_str() {
@@ -136,6 +166,9 @@ pub str Error.to_str() {
         }
         case Ambiguous: {
             return "that short name is ambiguous: more than one loose object begins with it";
+        }
+        case Packed: {
+            return "the object is in a pack, but the pack could not be read (corrupt, truncated, or an implausibly deep delta chain)";
         }
     }
 }
@@ -286,31 +319,76 @@ pub str Object.kind() {
     }
 }
 
-/// The loose object `id` in the repository whose git directory is `gitdir`.
+/// The object `id` in the repository whose git directory is `gitdir` -- loose
+/// if it is there, packed otherwise. Every caller above this module reads
+/// through here (or through `resolve`, which calls `read` too) and none of
+/// them has to know which of the two it was: `NotFound` means genuinely
+/// missing, not merely "not loose".
 pub Result<Object, Error> read(str gitdir, str id) {
     if (!is_name(id) || id.size() != 40) {
         return Result<Object, Error>.Err(Error.BadName);
     }
     str root = fs.join(repo.common(gitdir), "objects");
     str path = fs.join(fs.join(root, id.substr(0, 2)), id.substr(2, 40));
-    bytes stream = [];
-    match (io.read_bytes(path)) {
-        case Ok(bytes b): {
-            stream = b;
-        }
-        case Err(io.Error e): {
-            if (!fs.exists(path)) {
-                return Result<Object, Error>.Err(Error.NotFound);
+    if (fs.exists(path)) {
+        bytes stream = [];
+        match (io.read_bytes(path)) {
+            case Ok(bytes b): {
+                stream = b;
             }
-            return Result<Object, Error>.Err(Error.Io);
+            case Err(io.Error e): {
+                return Result<Object, Error>.Err(Error.Io);
+            }
+        }
+        match (zlib.decompress(stream)) {
+            case Ok(bytes plain): {
+                return parse(id, plain);
+            }
+            case Err(zlib.Error e): {
+                return Result<Object, Error>.Err(Error.Zlib);
+            }
         }
     }
-    match (zlib.decompress(stream)) {
-        case Ok(bytes plain): {
+    match (pack.read(gitdir, id)) {
+        case Ok(pack.Found f): {
+            bytes plain = [];
+            plain.extend(f.kind.to_bytes());
+            plain.push(' ');
+            plain.extend(f.content.size().to_str().to_bytes());
+            plain.push(0);
+            plain.extend(f.content);
             return parse(id, plain);
         }
-        case Err(zlib.Error e): {
-            return Result<Object, Error>.Err(Error.Zlib);
+        case Err(pack.Error e): {
+            // `NotFound` alone means genuinely missing -- everything else
+            // pack.src can say means it found the id but could not read the
+            // object out, which is `Error.Packed` here.
+            match (e) {
+                case NotFound: {
+                    return Result<Object, Error>.Err(Error.NotFound);
+                }
+                case Io: {
+                    return Result<Object, Error>.Err(Error.Packed);
+                }
+                case BadIdx: {
+                    return Result<Object, Error>.Err(Error.Packed);
+                }
+                case UnsupportedIdx: {
+                    return Result<Object, Error>.Err(Error.Packed);
+                }
+                case BadPack: {
+                    return Result<Object, Error>.Err(Error.Packed);
+                }
+                case Zlib: {
+                    return Result<Object, Error>.Err(Error.Packed);
+                }
+                case BadDelta: {
+                    return Result<Object, Error>.Err(Error.Packed);
+                }
+                case ChainTooDeep: {
+                    return Result<Object, Error>.Err(Error.Packed);
+                }
+            }
         }
     }
 }
@@ -358,11 +436,15 @@ pub Result<Object, Error> parse(str id, bytes plain) {
     return Result<Object, Error>.Err(Error.UnknownType);
 }
 
-/// Every loose object name beginning with `prefix`, sorted. Empty for a
-/// prefix that is not hex, is shorter than four digits, or matches nothing.
+/// Every object name beginning with `prefix` -- loose or packed -- sorted and
+/// deduplicated. Empty for a prefix that is not hex, is shorter than four
+/// digits, or matches nothing.
 ///
 /// A full forty-digit name is checked for on disk like any other prefix, so
-/// this answers "is it here" as well as "which is it".
+/// this answers "is it here" as well as "which is it". `rev_parse`'s DWIM
+/// (`refs.src`) calls this for a short object name, so a packed repository's
+/// abbreviated hashes resolve exactly as a loose repository's do -- one more
+/// reader that does not have to know which kind of store it is looking at.
 pub List<str> matching(str gitdir, str prefix) {
     List<str> hits = [];
     str p = prefix.to_lower();
@@ -382,8 +464,27 @@ pub List<str> matching(str gitdir, str prefix) {
         case Err: {
         }
     }
+    match (pack.ids(gitdir)) {
+        case Ok(List<str> names): {
+            for (str id in names) {
+                if (id.starts_with(p)) {
+                    hits.push(id);
+                }
+            }
+        }
+        case Err: {
+        }
+    }
     hits.sort();
-    return hits;
+    List<str> dedup = [];
+    str prev = "";
+    for (str h in hits) {
+        if (dedup.size() == 0 || h != prev) {
+            dedup.push(h);
+        }
+        prev = h;
+    }
+    return dedup;
 }
 
 /// The one full name that begins with `prefix`, if there is exactly one.
@@ -435,6 +536,34 @@ pub Result<List<str>, Error> loose(str gitdir) {
     }
     out.sort();
     return Result<List<str>, Error>.Ok(out);
+}
+
+/// Every object name in the repository, loose or packed, sorted and
+/// deduplicated -- what a caller that must see the whole store (an oracle
+/// walking every object the way `apps/git/oracle_object.py` does, or a future
+/// `fsck`) uses instead of `loose`, which -- unchanged, on purpose -- still
+/// answers only "every LOOSE object", exactly as it always has.
+pub Result<List<str>, Error> all(str gitdir) {
+    List<str> out = loose(gitdir)?;
+    match (pack.ids(gitdir)) {
+        case Ok(List<str> packed): {
+            for (str id in packed) {
+                out.push(id);
+            }
+        }
+        case Err(pack.Error e): {
+        }
+    }
+    out.sort();
+    List<str> dedup = [];
+    str prev = "";
+    for (str id in out) {
+        if (dedup.size() == 0 || id != prev) {
+            dedup.push(id);
+        }
+        prev = id;
+    }
+    return Result<List<str>, Error>.Ok(dedup);
 }
 
 // --- parsing the three structured bodies -------------------------------------

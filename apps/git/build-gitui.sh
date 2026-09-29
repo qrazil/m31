@@ -6,7 +6,7 @@
 #
 # `gitui.src`'s entry point lives in `apps/git/`, and imports both this
 # directory's own plumbing (`gitclient`, `gitlog`, `status`, `gitignore`,
-# `index`, `object`, `refs`, `repo`, `sha1`, `zlib`, `hunks`) and several
+# `index`, `object`, `pack`, `refs`, `repo`, `sha1`, `zlib`, `hunks`) and several
 # `apps/tui/` widgets (`tuiapp`, `tuioutline`, `tuijump`, `tuimenu`,
 # `tuifooter`, `tuidiffview`, and what those pull in). This compiler resolves
 # every `import` against the ENTRY file's own directory only
@@ -39,7 +39,7 @@ cp apps/tui/tuiapp.src apps/tui/tuibuf.src apps/tui/tuidiff.src \
     apps/tui/tuijump.src apps/tui/tuimenu.src apps/tui/tuioutline.src \
     apps/tui/tuiscroll.src apps/tui/tuistyle.src apps/tui/tuitext.src \
     apps/tui/tuiwidget.src \
-    apps/git/repo.src apps/git/sha1.src apps/git/zlib.src apps/git/object.src \
+    apps/git/repo.src apps/git/sha1.src apps/git/zlib.src apps/git/pack.src apps/git/object.src \
     apps/git/refs.src apps/git/index.src apps/git/gitignore.src apps/git/status.src \
     apps/git/gitlog.src apps/git/hunks.src apps/git/gitclient.src apps/git/gitui.src \
     "$stage/"
