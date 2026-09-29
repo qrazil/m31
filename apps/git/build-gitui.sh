@@ -6,15 +6,15 @@
 #
 # `gitui.src`'s entry point lives in `apps/git/`, and imports both this
 # directory's own plumbing (`gitclient`, `gitlog`, `status`, `index`,
-# `object`, `refs`, `repo`, `sha1`, `zlib`) and several `apps/tui/` widgets
-# (`tuiapp`, `tuioutline`, `tuijump`, `tuimenu`, `tuifooter`, and what those
-# pull in). This compiler resolves every `import` against the ENTRY file's
-# own directory only (`docs/modules-decision.md` §1: one flat namespace, no
-# search path) -- so a program built straight out of `apps/git` can never
-# see `apps/tui`'s files sitting next door, and `apps/tui`'s own files must
-# not be duplicated permanently into `apps/git` either, since that leaves two
-# copies of the same library to drift apart the moment one of them is
-# edited.
+# `object`, `refs`, `repo`, `sha1`, `zlib`, `hunks`) and several `apps/tui/`
+# widgets (`tuiapp`, `tuioutline`, `tuijump`, `tuimenu`, `tuifooter`,
+# `tuidiffview`, and what those pull in). This compiler resolves every
+# `import` against the ENTRY file's own directory only
+# (`docs/modules-decision.md` §1: one flat namespace, no search path) -- so a
+# program built straight out of `apps/git` can never see `apps/tui`'s files
+# sitting next door, and `apps/tui`'s own files must not be duplicated
+# permanently into `apps/git` either, since that leaves two copies of the
+# same library to drift apart the moment one of them is edited.
 #
 # The fix is `apps/git/test_hunks.sh`'s own `build_tui`, generalised into a
 # real build script rather than something that only runs inside a test: copy
@@ -35,12 +35,13 @@ stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 
 cp apps/tui/tuiapp.src apps/tui/tuibuf.src apps/tui/tuidiff.src \
-    apps/tui/tuifooter.src apps/tui/tuigeom.src apps/tui/tuijump.src \
-    apps/tui/tuimenu.src apps/tui/tuioutline.src apps/tui/tuiscroll.src \
-    apps/tui/tuistyle.src apps/tui/tuitext.src apps/tui/tuiwidget.src \
+    apps/tui/tuidiffview.src apps/tui/tuifooter.src apps/tui/tuigeom.src \
+    apps/tui/tuijump.src apps/tui/tuimenu.src apps/tui/tuioutline.src \
+    apps/tui/tuiscroll.src apps/tui/tuistyle.src apps/tui/tuitext.src \
+    apps/tui/tuiwidget.src \
     apps/git/repo.src apps/git/sha1.src apps/git/zlib.src apps/git/object.src \
     apps/git/refs.src apps/git/index.src apps/git/status.src apps/git/gitlog.src \
-    apps/git/gitclient.src apps/git/gitui.src \
+    apps/git/hunks.src apps/git/gitclient.src apps/git/gitui.src \
     "$stage/"
 
 "$LANGC" --emit-c "$stage/gitui.src" -o "$stage/gitui.c"

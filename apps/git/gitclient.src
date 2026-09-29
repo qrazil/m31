@@ -51,6 +51,7 @@
 import date;
 import fs;
 import gitlog;
+import hunks;
 import index;
 import io;
 import object;
@@ -60,6 +61,7 @@ import status;
 import term;
 import text;
 import tuibuf;
+import tuidiffview;
 import tuifooter;
 import tuigeom;
 import tuijump;
@@ -519,6 +521,25 @@ pub type State {
     pub str commit_msg_path = "";
     pub str branch_label = "";
     pub str message = "";
+    /// Whether the primary document is currently showing a hunk-level diff
+    /// instead of the outline -- see `show_diff_current`/`close_diff`. One
+    /// view the document can show, per `apps/git/design.md`'s locked "one
+    /// primary document" layout, not a second panel competing with the
+    /// outline for space.
+    pub bool diff_open = false;
+    /// Set instead of populating `diff_view`, when `hunks.hunks` reported
+    /// `Binary` for the pair being compared -- matching git's own "Binary
+    /// files differ" rather than trying to render binary content as text.
+    pub bool diff_binary = false;
+    /// The row label the diff view's border is drawn with, so the file
+    /// being diffed stays visible while the outline underneath is hidden.
+    pub str diff_title = "";
+    /// The hunks of the file under the cursor when `d` was last pressed,
+    /// with its own cursor -- `DiffView.at()` -- tracking which header or
+    /// line the cursor addresses. Actually staging that address is out of
+    /// scope for this change; keeping the addressing live here is what
+    /// makes hunk staging a small follow-up instead of another rewrite.
+    pub tuidiffview.DiffView diff_view = tuidiffview.DiffView([]);
     Map<str, bool> collapsed = {};
     Map<str, bytes> paths = {};
     status.Status last_status = status.Status([], [], []);
@@ -754,26 +775,54 @@ pub void State.unstage_path(bytes rel) {
     reload();
 }
 
-/// "Diff", degraded to what a whole-file view can say (`apps/git/design.md`'s
-/// own instruction for this wave): the row's own label, plus how many lines
-/// the file holds on disk right now. Hunk-level diff waits on the sibling
-/// diff-algorithm task.
+/// Real, hunk-level diff for the row under the cursor -- the diff-algorithm
+/// track (`lib/diff.src`/`apps/git/hunks.src`) and the rendering widget
+/// (`apps/tui/tuidiffview.DiffView`) both already existed; this is the
+/// wiring `apps/git/design.md`'s "Starting the client" section named as the
+/// follow-up once they did. A no-op on anything that is not a path row (a
+/// section heading or a commit).
+///
+/// The comparison made depends on which section the row is in, matching
+/// `status.src`'s own two-stage model exactly rather than picking a
+/// simplification of it:
+///
+///   - **unstaged** -- the index's blob for this path (`status.src`'s own
+///     "working tree vs index" comparison) against the file's content on
+///     disk right now. A path missing from disk (staged-deleted-on-disk)
+///     compares against an empty `new`, an all-removed hunk.
+///   - **staged** -- HEAD's tree's blob for this path against the index's
+///     blob for it (`status.src`'s "index vs HEAD" comparison). A path
+///     HEAD does not have compares an empty `old` (all-added, the newly
+///     staged file's whole content); a path the index no longer has (staged
+///     for deletion, though this client's own `stage`/`unstage` never
+///     produces that today) compares against an empty `new`.
+///   - **untracked** -- there is no "old" side at all, so this compares an
+///     empty `old` against the file's content on disk: one all-added hunk,
+///     the whole file. Deliberately not a separate "new file" display
+///     state: it reuses the exact same `hunks.hunks`/`DiffView` path every
+///     other case does, so an untracked file's diff is addressable and
+///     scrollable exactly like any other, and it matches what `git diff`
+///     itself shows for an intent-to-add path (`git add -N`) -- the closest
+///     real-git analogue to "tracked, nothing committed yet".
+///
+/// `hunks.hunks` reporting `Binary` (either side trips `diff.is_binary`'s
+/// NUL heuristic) sets `diff_binary` instead of populating `diff_view`,
+/// which `draw` shows as "Binary files differ", git's own wording, rather
+/// than attempting to render binary content as text.
 pub void State.show_diff_current() {
     match (outline.current()) {
         case Some(tuioutline.Row r): {
             match (paths.get(r.node.id)) {
                 case Some(bytes p): {
-                    str full = fs.join(worktree, p.utf8().or(""));
-                    int n = 0;
-                    match (io.read(full)) {
-                        case Ok(str s): {
-                            n = text.lines(s).size();
-                        }
-                        case Err: {
-                            n = 0;
-                        }
+                    if (r.node.id.starts_with("untracked:")) {
+                        open_diff(r.node.label, [], read_worktree(p));
+                    } else if (r.node.id.starts_with("unstaged:")) {
+                        open_diff(r.node.label, index_blob(p), read_worktree(p));
+                    } else if (r.node.id.starts_with("staged:")) {
+                        open_diff(r.node.label, head_blob(p), index_blob(p));
+                    } else {
+                        message = "diff: nothing to show here";
                     }
-                    message = r.node.label + " -- " + n.to_str() + " line(s) on disk (whole-file status only; hunk diff is a follow-up, see apps/git/design.md)";
                 }
                 case None: {
                     message = "diff: nothing to show here";
@@ -783,6 +832,106 @@ pub void State.show_diff_current() {
         case None: {
         }
     }
+}
+
+/// `rel`'s content on disk right now, or empty if it cannot be read (missing,
+/// a permissions error) -- the same "missing reads as empty" the unstaged
+/// comparison's deleted-on-disk case needs.
+bytes State.read_worktree(bytes rel) {
+    str full = fs.join(worktree, rel.utf8().or(""));
+    match (io.read_bytes(full)) {
+        case Ok(bytes b): {
+            return b;
+        }
+        case Err: {
+            return [];
+        }
+    }
+}
+
+/// `rel`'s blob content as the current index has it, or empty if the index
+/// has no entry for it -- the staged comparison's "no longer in the index"
+/// case, and a defensive default the unstaged comparison should never
+/// actually hit (every unstaged row's path is, by construction, in the
+/// index).
+bytes State.index_blob(bytes rel) {
+    index.Index ix = read_index(gitdir);
+    match (find_index_entry(ix, rel)) {
+        case Some(index.Entry e): {
+            return read_blob(e.id);
+        }
+        case None: {
+            return [];
+        }
+    }
+}
+
+/// `rel`'s blob content as HEAD's tree has it, or empty if HEAD has no entry
+/// there (an unborn branch, or a path newly staged with nothing committed
+/// yet) -- the staged comparison's "old" side.
+bytes State.head_blob(bytes rel) {
+    match (head_tree_id(gitdir)) {
+        case Some(str tid): {
+            match (find_in_tree(gitdir, tid, rel)) {
+                case Some(object.Entry e): {
+                    return read_blob(e.id);
+                }
+                case None: {
+                    return [];
+                }
+            }
+        }
+        case None: {
+            return [];
+        }
+    }
+}
+
+bytes State.read_blob(str id) {
+    match (object.read(gitdir, id)) {
+        case Ok(object.Object o): {
+            return o.raw;
+        }
+        case Err(object.Error e): {
+            message = "object read: " + e.to_str();
+            return [];
+        }
+    }
+}
+
+/// Compute `old` vs `new`'s hunks and open the diff view over them --
+/// `title` is what the border shows while it is open. Shared by every
+/// section `show_diff_current` handles, so the binary case and the
+/// addressable cursor behave identically regardless of which comparison fed
+/// it. `pub`, like `stage_path`/`unstage_path`, so a unit test can drive the
+/// hunks/binary wiring directly with hand-built `bytes` and no repository at
+/// all -- `t_gitclient.src`'s own reason for testing those two directly.
+pub void State.open_diff(str title, bytes old, bytes new) {
+    diff_title = title;
+    match (hunks.hunks(old, new)) {
+        case Binary: {
+            diff_binary = true;
+            diff_view = tuidiffview.DiffView([]);
+        }
+        case Hunks(List<tuidiffview.Hunk> hs): {
+            diff_binary = false;
+            diff_view = tuidiffview.DiffView(hs);
+        }
+    }
+    diff_open = true;
+    message = "";
+}
+
+/// Back out of the diff view to the outline -- `backspace`, the same "go
+/// back" key `apps/tui/browse.src` already uses for leaving a drilled-into
+/// view, and distinct from `commit_open`'s which-key overlay's `Escape`
+/// (that overlay sits *on top of* the outline; the diff view *replaces* it,
+/// closer to `browse.src`'s directory descent than to a popup).
+pub void State.close_diff() {
+    diff_open = false;
+    diff_binary = false;
+    diff_view = tuidiffview.DiffView([]);
+    message = "";
 }
 
 /// Write the commit-message template at `commit_msg_path`, unless something
@@ -940,6 +1089,10 @@ List<tuiwidget.Span> State.footer_spans(tuistyle.Theme theme) {
     out.push(tuiwidget.Span(" unstage  "));
     out.push(tuiwidget.Span("d", style: theme.accent));
     out.push(tuiwidget.Span(" diff  "));
+    if (diff_open) {
+        out.push(tuiwidget.Span("backspace", style: theme.accent));
+        out.push(tuiwidget.Span(" back  "));
+    }
     out.push(tuiwidget.Span("c", style: theme.accent));
     out.push(tuiwidget.Span(" commit  "));
     out.push(tuiwidget.Span("J", style: theme.accent));
@@ -953,12 +1106,17 @@ List<tuiwidget.Span> State.footer_spans(tuistyle.Theme theme) {
     return out;
 }
 
-/// The frame: the outline (and, toggled on, the jump list beside it), then
-/// the two-row footer `tuifooter.split` reserves -- a status line and the
-/// fixed key legend -- and, on top of everything, the commit which-key
-/// overlay when it is open. See `apps/git/design.md`'s locked layout: one
-/// primary document, one optional jump-list panel, a persistent footer, and
-/// overlays drawn over all of it rather than replacing any of it.
+/// The frame: the primary document -- either the outline (and, toggled on,
+/// the jump list beside it), or, once `d` has been pressed, the hunk-level
+/// diff view in its place -- then the two-row footer `tuifooter.split`
+/// reserves -- a status line and the fixed key legend -- and, on top of
+/// everything, the commit which-key overlay when it is open. See
+/// `apps/git/design.md`'s locked layout: one primary document, one optional
+/// jump-list panel, a persistent footer, and overlays drawn over all of it
+/// rather than replacing any of it. The diff view is not an overlay: it
+/// REPLACES the document the way `apps/tui/browse.src`'s preview pane
+/// changes with the selection, which is why the jump list (synced to the
+/// outline's own entries) is not shown alongside it.
 pub void State.draw(tuibuf.Buffer buf, tuigeom.Rect area) {
     tuistyle.Theme theme = tuistyle.Theme.plain;
     str frame_title = worktree;
@@ -971,16 +1129,20 @@ pub void State.draw(tuibuf.Buffer buf, tuigeom.Rect area) {
     List<tuigeom.Rect> bands = tuifooter.split(body, 2);
     tuigeom.Rect main = bands[0];
     tuigeom.Rect footer_area = bands[1];
-    tuigeom.Rect outline_area = main;
-    if (show_jump) {
-        List<tuigeom.Rect> cols = tuigeom.cols(main, [tuigeom.Constraint.Fill(1), tuigeom.Constraint.Length(28)]);
-        outline_area = cols[0];
-        outline.render(buf, outline_area);
-        tuiwidget.Block jb = tuiwidget.Block(title: "jump", borders: tuiwidget.Borders.Single);
-        jb.render(buf, cols[1]);
-        jump.render(buf, jb.inner(cols[1]));
+    if (diff_open) {
+        draw_diff(buf, main);
     } else {
-        outline.render(buf, outline_area);
+        tuigeom.Rect outline_area = main;
+        if (show_jump) {
+            List<tuigeom.Rect> cols = tuigeom.cols(main, [tuigeom.Constraint.Fill(1), tuigeom.Constraint.Length(28)]);
+            outline_area = cols[0];
+            outline.render(buf, outline_area);
+            tuiwidget.Block jb = tuiwidget.Block(title: "jump", borders: tuiwidget.Borders.Single);
+            jb.render(buf, cols[1]);
+            jump.render(buf, jb.inner(cols[1]));
+        } else {
+            outline.render(buf, outline_area);
+        }
     }
     tuiwidget.Line status_row = tuiwidget.Line([tuiwidget.Span(" " + status_line(), style: theme.dim)]);
     status_row.render(buf, tuigeom.Rect(footer_area.x, footer_area.y, footer_area.w, 1));
@@ -989,6 +1151,22 @@ pub void State.draw(tuibuf.Buffer buf, tuigeom.Rect area) {
         tuimenu.WhichKey wk = tuimenu.WhichKey("commit", [tuimenu.Item("e", "edit message (" + commit_msg_path + ")"), tuimenu.Item("f", "finish: write the commit"), tuimenu.Item("a", "abort")]);
         wk.render(buf, body);
     }
+}
+
+/// The diff view, in place of the outline: a bordered block naming the file
+/// (`diff_title`), and inside it either "binary files differ" (git's own
+/// wording, `diff_binary`) or `diff_view` itself -- a `DiffView` whose
+/// `at()`/`move()` already give hunk- and line-granular addressing, even
+/// though nothing in this change acts on that address yet.
+void State.draw_diff(tuibuf.Buffer buf, tuigeom.Rect area) {
+    tuiwidget.Block block = tuiwidget.Block(title: "diff: " + diff_title, borders: tuiwidget.Borders.Single);
+    block.render(buf, area);
+    tuigeom.Rect inner = block.inner(area);
+    if (diff_binary) {
+        tuiwidget.Paragraph("binary files differ").render(buf, inner);
+        return;
+    }
+    diff_view.render(buf, inner);
 }
 
 /// One decoded key, dispatched exactly as `apps/tui/browse.src`'s own
@@ -1015,6 +1193,9 @@ pub tuiapp.Action State.handle(term.Event ev) {
 tuiapp.Action State.handle_key(term.Code code) {
     if (commit_open) {
         return handle_commit_key(code);
+    }
+    if (diff_open) {
+        return handle_diff_key(code);
     }
     match (code) {
         case Char(int c): {
@@ -1201,6 +1382,99 @@ tuiapp.Action State.handle_commit_key(term.Code code) {
             return tuiapp.Action.Continue;
         }
     }
+}
+
+/// Keys while the diff view is showing: `j`/`k`/the arrows move its cursor
+/// (`DiffView.move`, which is what keeps `at()` meaningful), `q` still quits
+/// the whole program, and `Backspace` is the one new key this task adds --
+/// back out to the outline, `close_diff`, the same "go back" key
+/// `apps/tui/browse.src`'s own directory descent already uses (see its `up`)
+/// rather than inventing a second convention for the same idea. `Escape`
+/// is deliberately left at its top-level meaning (quit) rather than
+/// special-cased into another "back": the diff view is a drilled-into
+/// document, per `apps/git/design.md`'s "Drill-down as the universal verb",
+/// not a which-key-style overlay like the commit popup, whose `Escape`
+/// aborts it instead.
+tuiapp.Action State.handle_diff_key(term.Code code) {
+    match (code) {
+        case Char(int c): {
+            if (c == 'q') {
+                return tuiapp.Action.Quit;
+            }
+            if (c == 'j') {
+                diff_view.move(1);
+                return tuiapp.Action.Redraw;
+            }
+            if (c == 'k') {
+                diff_view.move(-1);
+                return tuiapp.Action.Redraw;
+            }
+            return tuiapp.Action.Continue;
+        }
+        case Backspace: {
+            close_diff();
+            return tuiapp.Action.Redraw;
+        }
+        case Escape: {
+            return tuiapp.Action.Quit;
+        }
+        case Up: {
+            diff_view.move(-1);
+            return tuiapp.Action.Redraw;
+        }
+        case Down: {
+            diff_view.move(1);
+            return tuiapp.Action.Redraw;
+        }
+        case Enter: {
+            return tuiapp.Action.Continue;
+        }
+        case Tab: {
+            return tuiapp.Action.Continue;
+        }
+        case BackTab: {
+            return tuiapp.Action.Continue;
+        }
+        case Right: {
+            return tuiapp.Action.Continue;
+        }
+        case Left: {
+            return tuiapp.Action.Continue;
+        }
+        case Home: {
+            return tuiapp.Action.Continue;
+        }
+        case End: {
+            return tuiapp.Action.Continue;
+        }
+        case PageUp: {
+            return tuiapp.Action.Continue;
+        }
+        case PageDown: {
+            return tuiapp.Action.Continue;
+        }
+        case Insert: {
+            return tuiapp.Action.Continue;
+        }
+        case Delete: {
+            return tuiapp.Action.Continue;
+        }
+        case F(int n): {
+            return tuiapp.Action.Continue;
+        }
+    }
+}
+
+/// `path`'s entry in `ix`, if it has one.
+Option<index.Entry> find_index_entry(index.Index ix, bytes path) {
+    int i = 0;
+    while (i < ix.entries.size()) {
+        if (bytes_eq(ix.entries[i].path, path)) {
+            return Option<index.Entry>.Some(ix.entries[i]);
+        }
+        i = i + 1;
+    }
+    return Option<index.Entry>.None;
 }
 
 str branch_name(str full) {

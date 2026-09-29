@@ -14,6 +14,7 @@ import gitclient;
 import gitlog;
 import object;
 import status;
+import tuidiffview;
 import tuioutline;
 import tuitext;
 
@@ -162,5 +163,89 @@ counter.check("commit message: comments dropped, body kept", gitclient.strip_com
 counter.check("commit message: leading and trailing blank lines trimmed", gitclient.strip_comment_lines("\n\n  hello  \n\n") == "hello", gitclient.strip_comment_lines("\n\n  hello  \n\n"));
 counter.check("commit message: all-comment input strips to empty (refused by finish_commit)", gitclient.strip_comment_lines(gitclient.commit_template()) == "", gitclient.strip_comment_lines(gitclient.commit_template()));
 counter.check("commit message: whitespace-only input strips to empty", gitclient.strip_comment_lines("   \n\t\n   ") == "", gitclient.strip_comment_lines("   \n\t\n   "));
+// --- open_diff / close_diff: the hunks.hunks/DiffView wiring, no repository ---
+//
+// `open_diff` and the comparison it feeds are `hunks.hunks(old, new)` and
+// `tuidiffview.DiffView`, both already tested elsewhere (`apps/git/t_hunks.src`,
+// `apps/tui`'s own suite) -- what these checks are actually for is that
+// `gitclient.State` wires the two together correctly: a text change becomes a
+// non-binary `DiffView` with an addressable cursor, and a NUL-bearing buffer
+// on either side becomes `diff_binary` instead of a garbled render. Which
+// on-disk/index/HEAD comparison feeds `open_diff` for each of the
+// unstaged/staged/untracked cases is exercised against real git in
+// `test_gitui.sh` instead, since that needs an actual repository.
+gitclient.State ds = gitclient.State.open("", "");
+ds.open_diff("t.txt", "a\nb\nc\n".to_bytes(), "a\nB\nc\n".to_bytes());
+counter.check("open_diff: a one-line text change opens a non-binary, single-hunk view", ds.diff_open && !ds.diff_binary && ds.diff_view.hunks.size() == 1, "diff_open=" + ds.diff_open.to_str() + " binary=" + ds.diff_binary.to_str() + " hunks=" + ds.diff_view.hunks.size().to_str());
+str header0 = "<no hunk>";
+if (ds.diff_view.hunks.size() > 0) {
+    header0 = ds.diff_view.hunks[0].header;
+}
+counter.check("open_diff: the hunk header is a unified-diff @@ line", header0 == "@@ -1,3 +1,3 @@", header0);
+match (ds.diff_view.at()) {
+    case Some(tuidiffview.Row r): {
+        bool is_header = false;
+        match (r.kind) {
+            case Header: {
+                is_header = true;
+            }
+            case Body: {
+                is_header = false;
+            }
+        }
+        counter.check("open_diff: the cursor starts on the first hunk's header (DiffView.at addressing)", is_header && r.hunk == 0, "row: kind is not Header or hunk != 0");
+    }
+    case None: {
+        counter.check("open_diff: the cursor starts on the first hunk's header (DiffView.at addressing)", false, "at() returned None on a non-empty diff");
+    }
+}
+ds.diff_view.move(1);
+match (ds.diff_view.at()) {
+    case Some(tuidiffview.Row r): {
+        bool is_body = false;
+        match (r.kind) {
+            case Header: {
+                is_body = false;
+            }
+            case Body: {
+                is_body = true;
+            }
+        }
+        counter.check("open_diff: moving the cursor addresses a body line of hunk 0", is_body && r.hunk == 0 && r.line == 0, "row did not address hunk 0's first body line");
+    }
+    case None: {
+        counter.check("open_diff: moving the cursor addresses a body line of hunk 0", false, "at() returned None after move(1)");
+    }
+}
+ds.close_diff();
+counter.check("close_diff: closing drops back to the outline and clears the view", !ds.diff_open && !ds.diff_binary && ds.diff_view.hunks.size() == 0, "diff_open=" + ds.diff_open.to_str() + " binary=" + ds.diff_binary.to_str() + " hunks=" + ds.diff_view.hunks.size().to_str());
+// A NUL on either side is `diff.is_binary`'s own heuristic (`lib/diff.src`) --
+// checked here only to confirm `open_diff` reports it as `diff_binary` rather
+// than trying to line-diff it.
+gitclient.State bs = gitclient.State.open("", "");
+bytes nul_old = [104, 101, 108, 108, 111, 0, 119, 111, 114, 108, 100, 10];
+bs.open_diff("bin.dat", nul_old, "hello world\n".to_bytes());
+counter.check("open_diff: a NUL-bearing old side reports diff_binary, not a garbled hunk view", bs.diff_open && bs.diff_binary && bs.diff_view.hunks.size() == 0, "diff_open=" + bs.diff_open.to_str() + " binary=" + bs.diff_binary.to_str() + " hunks=" + bs.diff_view.hunks.size().to_str());
+// Untracked: no "old" side at all -- open_diff against an empty old, exactly
+// what `show_diff_current` does for an untracked row, should be one
+// all-added hunk covering the whole file.
+gitclient.State us = gitclient.State.open("", "");
+us.open_diff("new.txt", [], "one\ntwo\n".to_bytes());
+bool all_added = us.diff_view.hunks.size() == 1;
+if (all_added) {
+    for (tuidiffview.Line l in us.diff_view.hunks[0].lines) {
+        match (l.kind) {
+            case Add: {
+            }
+            case Context: {
+                all_added = false;
+            }
+            case Remove: {
+                all_added = false;
+            }
+        }
+    }
+}
+counter.check("open_diff: an untracked file (empty old) is one all-added hunk", !us.diff_binary && all_added, "binary=" + us.diff_binary.to_str() + " hunks=" + us.diff_view.hunks.size().to_str());
 print("");
 print(counter.checks.to_str() + " checks, " + counter.failed.to_str() + " failed");
