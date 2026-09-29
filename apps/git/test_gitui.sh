@@ -34,8 +34,8 @@ build_tui() {
         apps/tui/tuimenu.src apps/tui/tuioutline.src apps/tui/tuiscroll.src \
         apps/tui/tuistyle.src apps/tui/tuitext.src apps/tui/tuiwidget.src \
         apps/git/repo.src apps/git/sha1.src apps/git/zlib.src apps/git/object.src \
-        apps/git/refs.src apps/git/index.src apps/git/status.src apps/git/gitlog.src \
-        apps/git/gitclient.src "apps/git/$name.src" "$stage/"
+        apps/git/refs.src apps/git/index.src apps/git/gitignore.src apps/git/status.src \
+        apps/git/gitlog.src apps/git/gitclient.src "apps/git/$name.src" "$stage/"
     if ! "$LANGC" --emit-c "$stage/$name.src" -o "$WORK/$name.c" 2>"$WORK/$name.diag"; then
         bad "compile $name (staged with apps/tui)" "$(head -5 "$WORK/$name.diag")"
         return 1

@@ -193,6 +193,10 @@ fi
 
 source apps/git/test_write.sh
 
+# --- .gitignore filtering, against real 'git status --short --untracked-files=all'
+
+source apps/git/test_gitignore.sh
+
 # --- the line diff, against real diff -u and git diff --------------------------
 
 source apps/git/test_hunks.sh
