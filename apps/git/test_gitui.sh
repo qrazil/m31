@@ -30,11 +30,13 @@ build_tui() {
     local stage="$WORK/tui-stage"
     mkdir -p "$stage"
     cp apps/tui/tuiapp.src apps/tui/tuibuf.src apps/tui/tuidiff.src \
+        apps/tui/tuidiffview.src \
         apps/tui/tuifooter.src apps/tui/tuigeom.src apps/tui/tuijump.src \
         apps/tui/tuimenu.src apps/tui/tuioutline.src apps/tui/tuiscroll.src \
         apps/tui/tuistyle.src apps/tui/tuitext.src apps/tui/tuiwidget.src \
         apps/git/repo.src apps/git/sha1.src apps/git/zlib.src apps/git/object.src \
         apps/git/refs.src apps/git/index.src apps/git/status.src apps/git/gitlog.src \
+        apps/git/hunks.src \
         apps/git/gitclient.src "apps/git/$name.src" "$stage/"
     if ! "$LANGC" --emit-c "$stage/$name.src" -o "$WORK/$name.c" 2>"$WORK/$name.diag"; then
         bad "compile $name (staged with apps/tui)" "$(head -5 "$WORK/$name.diag")"
@@ -150,6 +152,63 @@ if build_tui t_gitclient_ops; then
         note "gitui ops: finish_commit refuses an empty message and moves nothing"
     else
         bad "gitui ops: empty-message refusal" "before=$before after=$after" "$(cat "$WORK/ops6.out")"
+    fi
+
+    # --- show_diff_current: unstaged/staged/untracked/binary, against real git
+
+    diffx="$WORK/gitui_diff"
+    mkdir -p "$diffx"
+    (
+        set -e
+        cd "$diffx"
+        git init -q -b main .
+        git config user.email d@example.com
+        git config user.name 'Diff Tester'
+        printf 'a\nb\nc\n' >f.txt
+        printf 'keep me\n' >u.txt
+        git add -A
+        GIT_AUTHOR_DATE='1700000000 +0000' GIT_COMMITTER_DATE='1700000000 +0000' \
+            git commit -q -m first
+        # staged: f.txt changed and staged (index vs HEAD).
+        printf 'a\nB\nc\n' >f.txt
+        git add f.txt
+        # unstaged: a further change on top of the staged version (disk vs
+        # index) -- exactly the two-comparisons-on-one-file scenario
+        # `apps/git/design.md`'s own "how you'll know you're done" names.
+        printf 'a\nB\nC\n' >f.txt
+        printf 'brand\nnew\n' >new.txt
+        printf 'hello\000world\n' >bin.dat
+    ) >"$WORK/gitui_diff.log" 2>&1 || bad "gitui: diff fixture" "$(tail -5 "$WORK/gitui_diff.log")"
+
+    "$WORK/t_gitclient_ops" "$diffx/.git" "$diffx" diff staged f.txt >"$WORK/diff_staged.out" 2>"$WORK/diff_staged.err"
+    git -C "$diffx" diff --cached --no-color -- f.txt | tail -n +5 >"$WORK/diff_staged.want"
+    if cmp -s "$WORK/diff_staged.out" "$WORK/diff_staged.want"; then
+        note "gitui diff: staged row diffs the index's blob against HEAD's tree, matching git diff --cached"
+    else
+        bad "gitui diff: staged" "$(diff "$WORK/diff_staged.out" "$WORK/diff_staged.want")"
+    fi
+
+    "$WORK/t_gitclient_ops" "$diffx/.git" "$diffx" diff unstaged f.txt >"$WORK/diff_unstaged.out" 2>"$WORK/diff_unstaged.err"
+    git -C "$diffx" diff --no-color -- f.txt | tail -n +5 >"$WORK/diff_unstaged.want"
+    if cmp -s "$WORK/diff_unstaged.out" "$WORK/diff_unstaged.want"; then
+        note "gitui diff: unstaged row diffs the index's blob against the working tree, matching git diff"
+    else
+        bad "gitui diff: unstaged" "$(diff "$WORK/diff_unstaged.out" "$WORK/diff_unstaged.want")"
+    fi
+
+    "$WORK/t_gitclient_ops" "$diffx/.git" "$diffx" diff untracked new.txt >"$WORK/diff_untracked.out" 2>"$WORK/diff_untracked.err"
+    want_untracked=$'@@ -0,0 +1,2 @@\n+brand\n+new'
+    if [ "$(cat "$WORK/diff_untracked.out")" = "$want_untracked" ]; then
+        note "gitui diff: an untracked row is one all-added hunk against an empty old side"
+    else
+        bad "gitui diff: untracked" "got: $(cat "$WORK/diff_untracked.out")" "want: $want_untracked"
+    fi
+
+    "$WORK/t_gitclient_ops" "$diffx/.git" "$diffx" diff untracked bin.dat >"$WORK/diff_binary.out" 2>"$WORK/diff_binary.err"
+    if [ "$(cat "$WORK/diff_binary.out")" = "Binary files differ" ]; then
+        note "gitui diff: a NUL-bearing file reports 'Binary files differ', git's own wording"
+    else
+        bad "gitui diff: binary" "$(cat "$WORK/diff_binary.out")"
     fi
 fi
 

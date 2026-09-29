@@ -319,6 +319,65 @@ def main():
             "log_rc=%d status=%r saw_refusal=%s" % (log_rc, status_out, b"aborting commit due to empty commit message" in out),
         )
 
+    # --- diff: hunk-level view for a staged row and an unstaged row ----------
+    #
+    # One file, staged with one change and then changed again on disk -- the
+    # exact "stage a file, modify it further" scenario `apps/git/design.md`
+    # names, so both comparisons are exercised against real `git diff --cached`
+    # and `git diff` (plain) in the same session. `Theme.plain` means no SGR
+    # colour codes are ever written, so a rendered hunk's `+`/`-` lines and the
+    # bordered title survive as plain substrings of the raw pty bytes, the same
+    # way the empty-message refusal's status line does above.
+    fx5 = make_fixture(root, "diff")
+    with open(os.path.join(fx5, "f.txt"), "w") as f:
+        f.write("a\nb\nc\n")
+    git(fx5, "add", "-A", env=GIT_ENV)
+    git(fx5, "commit", "-q", "-m", "first", env=GIT_ENV)
+    with open(os.path.join(fx5, "f.txt"), "w") as f:  # staged change
+        f.write("a\nB\nc\n")
+    git(fx5, "add", "f.txt", env=GIT_ENV)
+    with open(os.path.join(fx5, "f.txt"), "w") as f:  # further, unstaged change
+        f.write("a\nB\nC\n")
+
+    cached_diff, _, _ = git(fx5, "diff", "--cached", "--no-color", "--", "f.txt")
+    plain_diff, _, _ = git(fx5, "diff", "--no-color", "--", "f.txt")
+
+    # rows: untracked section(0, no children), unstaged section(1): M f.txt,
+    # staged section(1): M f.txt, commits section(1) -> row0 untracked
+    # section, row1 unstaged section, row2 M f.txt (unstaged), row3 staged
+    # section, row4 M f.txt (staged).
+    s8 = Session(binpath, fx5)
+    s8.send("j")  # row1: unstaged section
+    s8.send("j")  # row2: M f.txt (unstaged)
+    out = s8.send("d")  # open its diff: index blob vs the working tree
+    if b"diff: M  f.txt" in out and b"-c" in out and b"+C" in out:
+        ok("diff: an unstaged row shows the index-vs-working-tree hunk (git diff)")
+    else:
+        fail("diff: an unstaged row shows the index-vs-working-tree hunk (git diff)", repr(out))
+
+    out = s8.send("\x7f")  # Backspace: back out to the outline
+    if b"Unstaged changes" in out and b"diff: M  f.txt" not in out:
+        ok("diff: Backspace returns to the outline")
+    else:
+        fail("diff: Backspace returns to the outline", repr(out))
+
+    s8.send("j")  # row3: staged section
+    s8.send("j")  # row4: M f.txt (staged)
+    out = s8.send("d")  # open its diff: HEAD's tree vs the index
+    if b"diff: M  f.txt" in out and b"-b" in out and b"+B" in out:
+        ok("diff: a staged row shows the HEAD-vs-index hunk (git diff --cached)")
+    else:
+        fail("diff: a staged row shows the HEAD-vs-index hunk (git diff --cached)", repr(out))
+    s8.quit()
+
+    if "-c" in plain_diff and "+C" in plain_diff and "-b" in cached_diff and "+B" in cached_diff:
+        ok("diff: the fixture's own git diff/git diff --cached confirm the expected lines")
+    else:
+        fail(
+            "diff: the fixture's own git diff/git diff --cached confirm the expected lines",
+            "cached=%r plain=%r" % (cached_diff, plain_diff),
+        )
+
     return failures
 
 
