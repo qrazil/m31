@@ -2665,6 +2665,67 @@ _Noreturn void rt_exit(int64_t code) {
     exit((int)code);
 }
 
+/* Starts `argv` as a child process (lib/os.src's os.run) -- not to be
+ * confused with `spawn`, a pthread inside this process (rt_spawn, above);
+ * sys.h's "process launch" section says why the two stay apart by name.
+ *
+ * `argv` is built into a malloc'd, NUL-terminated char* array here rather
+ * than read element by element inside the layer, for the reason rt_poll's
+ * comment gives for its SysPollFd array: the layer itself may not allocate,
+ * and a fixed bound would put a ceiling on how long a command line a
+ * program may launch. Every element must already be a NUL-free run of
+ * bytes -- Str.data is a C string (str_new), so the only way it could hold
+ * an embedded NUL is a slice built from one, and threading a truncated
+ * argument through to execve would run a different command than the one
+ * asked for, so that is refused rather than silently cut short, the same
+ * choice path_ok makes for a path.
+ *
+ * `environ` is read HERE, not in the layer: sys.h's comment on
+ * sys_proc_start explains why the raw backend cannot reach for it itself
+ * (runtime/sys_test.c's freestanding link would fail), so "the child
+ * inherits this process's environment" is this wrapper's decision, made by
+ * passing the same `environ` os.env_map already reads (above) straight
+ * through.
+ *
+ * `rt_out_flush()` first, for the reason rt_trap and rt_exit already call it
+ * before touching a descriptor directly: `print`'s buffer is this process's
+ * own memory, not yet written to fd 1, and a child that inherits fd 1
+ * writes to it directly and immediately once it execs. Skipping this made
+ * a child's output appear BEFORE everything this program had already
+ * printed but not yet flushed -- every line out of order -- which is
+ * exactly the bug docs/sys-layer.md §8 added `__out_flush` to prevent for
+ * `io`, one descriptor earlier. */
+int64_t rt_proc_start(Obj *argv_list) {
+    rt_out_flush();
+    int64_t n = rt_len_of(argv_list);
+    if (n <= 0) return -SYS_EINVAL;
+    char **argv = malloc((size_t)(n + 1) * sizeof *argv);
+    if (argv == NULL) return -SYS_ENOMEM;
+    const int64_t *elems = slots(argv_list);
+    for (int64_t i = 0; i < n; i++) {
+        Str *s = (Str *)(intptr_t)elems[i];
+        if (memchr(s->data, '\0', (size_t)s->len) != NULL) {
+            free(argv);
+            return -SYS_EINVAL;
+        }
+        argv[i] = (char *)s->data;
+    }
+    argv[n] = NULL;
+    int64_t r = sys_proc_start(argv, environ);
+    free(argv);
+    return r;
+}
+
+/* Waits for the process `pid` -- one this process's own rt_proc_start
+ * returned -- and reports how it ended, in sys.h's own encoding (see
+ * sys_proc_wait's comment there): 0..255 is an exit code, 256 and up is
+ * SYS_WAIT_SIGNAL_BASE plus the signal that killed it. lib/os.src decodes
+ * this into `ExitStatus`, a real enum a `match` can be exhaustive over,
+ * rather than a bare int a caller has to remember the encoding of. */
+int64_t rt_proc_wait(int64_t pid) {
+    return sys_proc_wait(pid);
+}
+
 /* `trap(msg)`: a program's way to say "this is a bug" -- the same trap the
  * language itself uses for an index out of range, with the program's own
  * message. Shaped like rt_trap: flush what `print` has buffered (it used

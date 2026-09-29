@@ -575,4 +575,109 @@ int64_t sys_getrandom(void *buf, int64_t n);
  * flushes its own output before calling this. */
 _Noreturn void sys_exit(int64_t code);
 
+/* ---- process launch ------------------------------------------------------
+ *
+ * A different program image in a CHILD process -- `vim`, `git`, the shell's
+ * job -- not to be confused with `spawn` (rt_spawn, runtime/rt.c), which is
+ * a pthread inside THIS process and shares its memory. That is a different
+ * mechanism at a different layer, which is why nothing here is named
+ * sys_spawn: sys_proc_start replaces a process's image, sys_spawn would
+ * suggest it replaces a thread's, and this layer needs both words to stay
+ * apart the way the language keeps `spawn`/`Chan<T>` apart from this.
+ *
+ * Two calls, not one that starts and waits, because a caller that wants to
+ * do something else while a child runs -- or start several before waiting
+ * on any -- needs them apart; lib/os.src's os.run calls both in a row for
+ * the caller who does not.
+ *
+ * A child is started with file descriptors 0, 1 and 2 completely untouched
+ * -- no pipe, no dup2, whatever they already are in this process is what
+ * the child gets -- which is the only thing that lets an interactive
+ * program the child execs (an editor, a pager) take over the real
+ * terminal. Every OTHER descriptor this layer ever handed out is already
+ * close-on-exec (sys.h §1), so it closes itself in the child for free; there
+ * is deliberately no way to CAPTURE a child's output here (that needs
+ * pipe2/dup3 and a reader that will not deadlock on a full pipe, a separate
+ * and larger feature) -- this is the inherit-only half.
+ *
+ * `argv` is NUL-terminated the way execve wants it: argv[argc] is NULL. The
+ * caller builds this array (rt_proc_start, runtime/rt.c, from a List<str>)
+ * rather than the layer reading the list element by element, for the same
+ * reason rt_poll builds its SysPollFd array there and not here: the layer
+ * itself may not allocate, and has nowhere to put a copy of arbitrary
+ * length.
+ *
+ * `envp` crosses the same way, and for one more reason: this layer cannot
+ * read the process's real environment on its own. The libc backend could --
+ * `environ` is a few lines away in sys_libc.c -- but the raw backend has no
+ * `environ` unless something already populated one, and runtime/sys_test.c
+ * proves the raw backend touches no C library at all by linking a build of
+ * it with none; an `extern char **environ` referenced ANYWHERE in
+ * sys_linux.c, called or not, would fail that link. So both backends take
+ * the array they are handed. rt_proc_start is the one place that reads
+ * `environ` -- it already does, for os.env_map -- and "the child inherits
+ * the parent's environment" is a decision the wrapper makes once, by
+ * passing that array through unchanged.
+ *
+ * `argv[0]` is searched for on `$PATH` when it names no directory (has no
+ * '/'), exactly execvp's own rule and the one every `$EDITOR` relies on --
+ * a full path is tried as given, unsearched. Both backends implement this
+ * identically: the libc one gets it from posix_spawnp, the raw one reads
+ * `PATH=` out of `envp` itself and walks it the way execvp does (sys_linux.c
+ * has the one place that needed writing rather than a lookup).
+ *
+ * Returns the child's pid on success, or a negative errno if the process
+ * could not be started AT ALL -- most commonly -SYS_ENOENT, argv[0] found
+ * nowhere on $PATH and not a path of its own. Both backends resolve this
+ * synchronously: a command that does not exist never produces a pid to
+ * wait for, on either backend, so lib/os.src's os.run can build its `Err`
+ * from this return alone. Once this returns a pid, the caller owns exactly
+ * one sys_proc_wait for it -- the kernel keeps a terminated child as a
+ * zombie, holding its exit status, until something waits for it, and there
+ * is no second way to collect one. */
+int64_t sys_proc_start(char *const argv[], char *const envp[]);      /* pid */
+
+/* A wait status, encoded as one non-negative int64_t:
+ *
+ *   0..255      the process EXITED normally; this is its exit code.
+ *   256 and up  the process was KILLED BY A SIGNAL; subtract
+ *               SYS_WAIT_SIGNAL_BASE (256) for the signal number.
+ *
+ * This is a real design decision, not a lookup: there was no encoding here
+ * to inherit. The alternative -- pass the kernel's own wait-status word
+ * through unchanged -- was rejected for the same reason SysAddr and SysStat
+ * exist at all: a value that crosses into the language must mean the same
+ * thing on every target, and a raw wait status is exactly the kind of
+ * kernel-shaped bit pattern (low 7 bits the signal or 0 for "exited", the
+ * next byte the exit code, one more bit for "dumped core") this layer
+ * exists to hide, not forward. Both backends decode it identically before
+ * returning, from the SAME kernel wait4 result, one directly (sys_linux.c)
+ * and one through libc's WIFEXITED/WIFSIGNALED macros (sys_libc.c), which
+ * are defined over that identical bit pattern.
+ *
+ * The two ranges cannot collide: an exit code is 0..255 by construction
+ * (os.exit enforces the same range on the way in, lib/os.src), and Linux's
+ * signal numbers top out at 64 (the real-time signals), so 256 is
+ * comfortably clear of both without needing more than one int64_t or a
+ * second return value. This is exactly why the caller-facing type
+ * (lib/os.src's ExitStatus) is worth having at all: real git's own editor
+ * flow treats "killed by a signal" as an abort, distinct from "exited
+ * nonzero", and a bare int cannot make a caller ask that question -- it
+ * would have to know to keep checking after `!= 0`, the way a shell script
+ * does with `$?` and usually gets wrong.
+ *
+ * Deliberately left out: a core-dump bit. Nothing above this layer has
+ * asked what to do with one yet, and 256 leaves headroom above the last
+ * real-time signal (64) to add it -- SYS_WAIT_SIGNAL_BASE * 2, say -- the
+ * day something does, with no existing caller's arithmetic invalidated.
+ *
+ * `pid` must be one this process's own sys_proc_start returned and has not
+ * already been waited for; anything else is -SYS_ECHILD, the kernel's own
+ * answer to "that is not my child". EINTR is hidden, as it is everywhere
+ * else in this layer (sys_poll, sys_getrandom): the wait is retried rather
+ * than handed to the caller to retry itself. */
+int64_t sys_proc_wait(int64_t pid);                                   /* encoded status */
+
+#define SYS_WAIT_SIGNAL_BASE 256
+
 #endif /* RT_SYS_H */
