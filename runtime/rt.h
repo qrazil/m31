@@ -292,6 +292,8 @@ void    rt_args(Obj *out);                      /* pushes every argv[i] as bytes
 int64_t rt_env(Obj *name, Obj *out);            /* 1 pushed the value as bytes, 0 unset */
 void    rt_env_map(Obj *out);                   /* pushes name, value, name, value ... */
 _Noreturn void rt_exit(int64_t code);           /* flushes stdout, then exit(code) */
+int64_t rt_proc_start(Obj *argv);               /* pid, or -errno; argv is a List<str> */
+int64_t rt_proc_wait(int64_t pid);              /* sys.h's encoded status, or -errno */
 _Noreturn void rt_panic(Obj *msg);              /* rt_trap with a str message */
 void    rt_clock(Obj *out);                     /* pushes seconds, then nanoseconds */
 int64_t rt_entropy(int64_t n, Obj *out);        /* pushes n octets; 0, or errno */

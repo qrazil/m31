@@ -223,6 +223,88 @@ hand the language a handle to leak. The libc backend opens with
 close-on-exec whatever the C library's `opendir` does. Order is the file
 system's; `fs.listdir` sorts.
 
+### Process launch: `sys_proc_start` / `sys_proc_wait`, and a wait-status encoding
+
+Added **2026-09-28**, for `lib/os.src`'s `os.run` -- a different program's
+image in a child process (an editor, a pager, `git`'s own subprocess-heavy
+plumbing), not `spawn`, which is a pthread inside this process and shares
+its memory (`docs/sys-layer.md` §4's table used to list this as future
+work, under "spawning the C compiler"; it is general now, not specific to
+that).
+
+| function | returns | libc | raw x86-64 | raw aarch64 / riscv64 |
+|---|---|---|---|
+| `sys_proc_start(argv, envp)` | pid | `posix_spawnp` | `pipe2` 293 + `clone` 56 + `execve` 59 | `pipe2` 59 + `clone` 220 + `execve` 221 |
+| `sys_proc_wait(pid)` | encoded status | `waitpid` | `wait4` 61 | `wait4` 260 |
+
+Four decisions, each forced by something in this section's own rules:
+
+  - **`envp` is a parameter, not something the layer reads for itself.** The
+    obvious design has `sys_proc_start` call `getenv`/`environ` internally,
+    and it is wrong for the same reason `sys_resolve` cannot dlopen NSS on
+    the raw backend: an `extern char **environ` referenced ANYWHERE in
+    `sys_linux.c`, called or not, would fail `sys_test.sh`'s freestanding
+    `-nostdlib -static` link, which proves the raw backend touches no C
+    library at all by linking one with none. So both backends take the
+    array they are handed, and `rt_proc_start` (runtime/rt.c) -- which
+    already reads `environ` for `os.env_map` -- is the one place "the child
+    inherits this process's environment" gets decided, by passing it
+    straight through.
+  - **`argv[0]` is searched on `$PATH` identically on both backends.** The
+    libc backend gets this for free from `posix_spawnp`; the raw backend
+    does not have one, because the raw `execve` syscall never searches
+    anything -- that is `execvp`'s userspace behaviour, not the kernel's.
+    `sys_linux.c` reimplements exactly that one piece of glibc (split
+    `$PATH` on `:`, an empty component means `.`, try each `dir/argv[0]`,
+    keep searching past `ENOENT`/`EACCES`/`ENOTDIR`, stop and report
+    anything else) rather than all of it -- explicitly not reimplemented is
+    `execvpe`'s shell fallback for a file with no `#!` line, which the
+    kernel's own interpreter-line handling already covers for every script
+    that names one.
+  - **A failed exec is reported synchronously, on both backends, with no
+    zombie left behind.** This machine's glibc (2.39) confirmed
+    `posix_spawnp` of a name on no `$PATH` returns `ENOENT` directly, no pid
+    and no zombie -- glibc has done this since 2.24, relaying a child's
+    exec failure back through an internal pipe before returning. The raw
+    backend has no such helper, so `sys_linux.c` builds the same
+    self-pipe by hand: `clone(SIGCHLD, 0)` (there is no `NR_fork` in the
+    generic table aarch64/riscv64 share, so x86-64 uses `clone` too, one
+    code path for the reason `ppoll` and the `*at` forms already are),
+    `execve` in the child with the write end of an `O_CLOEXEC` pipe open,
+    and a `wait4` in the parent's failure path to reap a child that will
+    never have a pid the caller can wait for itself. This is what makes
+    `os.run`'s `Result` mean what it says: a command that does not exist is
+    `Err` on both backends, never a pid whose `ExitStatus` turns out to be
+    127.
+  - **The wait status is this layer's own encoding, not the kernel's.**
+    `sys_proc_wait` returns one non-negative `int64_t`: 0..255 is a normal
+    exit code, 256 (`SYS_WAIT_SIGNAL_BASE`) plus a signal number is a kill.
+    The alternative -- pass the kernel's raw status word through -- was
+    rejected for the reason `SysAddr` and `SysStat` exist at all: a value
+    crossing into the language must mean the same thing everywhere, and
+    that word's bit layout (low 7 bits the signal or 0 for "exited", the
+    next byte the exit code) is exactly the kind of kernel-shaped detail
+    this layer hides rather than forwards. The two ranges cannot collide --
+    an exit code is 0..255 by construction and Linux's signal numbers top
+    out at 64 -- and a core-dump bit is deliberately left out, with room
+    above the last real-time signal to add one if a caller ever needs it.
+
+A child's file descriptors 0, 1 and 2 are left completely alone by both
+backends -- no pipe, no `dup2` -- which is what lets an interactive program
+the child execs take over the real terminal, and is also why there is
+nothing to translate: every OTHER descriptor this layer ever hands out is
+already close-on-exec (§1), so it closes itself in the child for free.
+Capturing a child's output is a different, larger feature (that needs
+`pipe2`/`dup3` in the child's stdio and a reader that will not deadlock on a
+full pipe) and is not what this is for.
+
+`runtime/rt.c`'s `rt_proc_start` flushes the runtime's own stdout buffer
+before starting a child, for the same reason `__out_flush` exists for `io`
+(§8 below): the buffer is this process's own memory, and a child that
+inherits fd 1 writes to it directly the moment it execs, so skipping the
+flush put a child's output before everything this program had already
+printed but not yet flushed.
+
 ### Addresses: one record, and who does the `htons`
 
 This is the part that needed a decision rather than a syscall number. The
@@ -377,7 +459,7 @@ language's job, and it is the same job on both backends.
 | `clone` 56/220 (or `clone3` 435), `futex` 202/98 | carrier threads for green threads | `docs/concurrency-decision.md`. `clone` is the easy part; see §5. |
 | `rt_sigaction` 13/134 **with a handler**, `sigaltstack` | stack-probe traps, preemption | When preemption lands. The SIGPIPE half is done — see below — and it is the half that needs no trampoline. SIGWINCH and SIGINT asked for this again in 2026-09 and did not get it; "Signals: what is here, and what a handler would cost" says what was decided instead. |
 | `getpid`, `kill`/`tgkill` | `abort` without libc | `rt_trap` still calls `abort()`. |
-| `pipe2`, `dup3`, `execve`, `wait4` | spawning the C compiler | Self-hosting needs it (`stdlib-seam.md` §5). |
+| `dup3` | capturing a child's stdio | `sys_proc_start` (§2, added 2026-09-28) inherits fds 0/1/2 directly and does not redirect them; `pipe2`, `clone` and `execve` are used there already, for that inherit-only case. Capturing a child's output for the caller to read needs `dup3` into its stdio and a reader that will not deadlock on a full pipe -- a separate, larger feature, and self-hosting (`stdlib-seam.md` §5) may still want it for spawning the C compiler. |
 | `sendto` 44/206, `recvfrom` 45/207 | unconnected UDP | A datagram socket works today by `connect`ing it and using `sys_read`/`sys_write`, which is what a UDP client does. A UDP *server*, which must answer whoever wrote to it, needs the peer address per message. The DNS client above is the first caller that will. |
 | `epoll_create1`, `epoll_ctl`, `epoll_wait` | a scheduler's readiness set | Beside `sys_poll`, not instead of it — see above. |
 | `socketpair` 53/199 | a connected pair with no name | `sys_test.c` builds one over a filesystem path instead, which also tests `bind` and `connect`. Wanted once the runtime needs to wake itself. |

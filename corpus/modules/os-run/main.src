@@ -1,0 +1,74 @@
+import os;
+import io;
+
+// os.run: launching a real, separate process, and telling apart every way
+// it can come back -- exited 0, exited nonzero, killed by a signal, or
+// never started at all. `true`, `false` and `echo` are found by BARE name,
+// which is the case a `$PATH`-search bug hides behind: a full path would
+// pass even if the search itself were broken.
+
+match (os.run(["true"])) {
+    case Ok(os.ExitStatus s): {
+        print(s.to_str());       // exited 0
+        print(s.success());      // true
+    }
+    case Err(io.Error e): {
+        print("unexpected error: " + e.to_str());
+    }
+}
+
+match (os.run(["false"])) {
+    case Ok(os.ExitStatus s): {
+        print(s.to_str());       // exited 1
+        print(s.success());      // false
+    }
+    case Err(io.Error e): {
+        print("unexpected error: " + e.to_str());
+    }
+}
+
+// A full path is tried as given, unsearched -- the other half of the rule
+// that keeps the two backends from disagreeing only on bare names.
+match (os.run(["/usr/bin/echo", "hello", "from", "echo"])) {
+    case Ok(os.ExitStatus s): {
+        print(s.to_str());       // exited 0, after echo's own line
+    }
+    case Err(io.Error e): {
+        print("unexpected error: " + e.to_str());
+    }
+}
+
+// A command nowhere on $PATH and not a path of its own: the process never
+// started, so this is Err, not a nonzero ExitStatus.
+match (os.run(["this-command-does-not-exist-anywhere-2026"])) {
+    case Ok(os.ExitStatus s): {
+        print("unexpectedly ran: " + s.to_str());
+    }
+    case Err(io.Error e): {
+        print(e.to_str());       // no such file
+    }
+}
+
+// Killed by a signal: a shell that sends itself SIGTERM (15). Distinct from
+// exiting nonzero, which is the whole point of ExitStatus having two cases.
+match (os.run(["sh", "-c", "kill -TERM $$"])) {
+    case Ok(os.ExitStatus s): {
+        print(s.to_str());       // killed by signal 15
+        print(s.success());      // false
+    }
+    case Err(io.Error e): {
+        print("unexpected error: " + e.to_str());
+    }
+}
+
+// An empty argv cannot name a command: Err, and nothing was ever started.
+match (os.run([])) {
+    case Ok(os.ExitStatus s): {
+        print("unexpectedly ran: " + s.to_str());
+    }
+    case Err(io.Error e): {
+        print(e.to_str());       // system error 22
+    }
+}
+
+print("done");

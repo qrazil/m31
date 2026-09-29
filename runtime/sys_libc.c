@@ -18,6 +18,7 @@
 #include <netinet/tcp.h>    /* TCP_NODELAY */
 #include <poll.h>
 #include <signal.h>         /* sigaction, for sys_ignore_sigpipe alone */
+#include <spawn.h>          /* posix_spawnp, for sys_proc_start -- does the $PATH search */
 #include <stddef.h>         /* offsetof, for sockaddr_un's length */
 #include <stdio.h>          /* rename is ISO C, so it lives here, not in unistd.h */
 #include <string.h>         /* memcpy and memset, for the address conversions */
@@ -25,6 +26,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>       /* waitpid and WIFEXITED/WIFSIGNALED, for sys_proc_wait */
 #include <termios.h>        /* tcgetattr and tcsetattr, for sys_tcget/sys_tcset */
 #include <time.h>
 #include <unistd.h>
@@ -759,4 +761,42 @@ int64_t sys_getrandom(void *buf, int64_t n) {
 
 _Noreturn void sys_exit(int64_t code) {
     _exit((int)code);
+}
+
+/* posix_spawnp, not fork+execvp, because it already IS the two things a
+ * hand-written fork+exec would have to add: it searches $PATH itself (the
+ * "p" in the name, POSIX's own execvp rule) and, on glibc since 2.24, it
+ * reports a failed exec back to THIS call rather than only to the child's
+ * exit status -- glibc's spawn helper runs the search and the exec in the
+ * child and relays a failure through an internal pipe before this returns,
+ * which is exactly the synchronisation sys_linux.c has to build by hand
+ * with its own pipe2 (that file's comment says why). Checked on this
+ * machine (glibc 2.39): posix_spawnp of a name on no $PATH returns ENOENT
+ * directly, with no pid and no zombie left behind, not a pid whose wait
+ * later reports 127 the way an older glibc or a naive fork+exec would.
+ *
+ * posix_spawn/posix_spawnp do not use errno: a failure is the return value
+ * itself, a plain positive errno number, so neg_errno takes it directly
+ * rather than through ret()'s -1-and-errno convention. */
+int64_t sys_proc_start(char *const argv[], char *const envp[]) {
+    pid_t pid;
+    int rc = posix_spawnp(&pid, argv[0], NULL, NULL, argv, envp);
+    if (rc != 0) return neg_errno(rc);
+    return (int64_t)pid;
+}
+
+/* waitpid, then sys.h's own encoding rather than the raw status: see
+ * sys.h's comment on sys_proc_wait for why this layer does not hand the
+ * kernel's WIFEXITED/WIFSIGNALED bit pattern through unchanged. */
+int64_t sys_proc_wait(int64_t pid) {
+    int status;
+    pid_t r;
+    for (;;) {
+        r = waitpid((pid_t)pid, &status, 0);
+        if (r < 0 && errno == EINTR) continue;  /* sys.h: EINTR is hidden here */
+        break;
+    }
+    if (r < 0) return neg_errno(errno);
+    if (WIFSIGNALED(status)) return SYS_WAIT_SIGNAL_BASE + WTERMSIG(status);
+    return WEXITSTATUS(status);
 }

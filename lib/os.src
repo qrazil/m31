@@ -1,4 +1,5 @@
-// The process: its command line, its environment, and how it ends.
+// The process: its command line, its environment, how it ends, and how it
+// starts another one.
 //
 // API
 // ---
@@ -13,6 +14,9 @@
 // gives a map, and a plain name gives text or a list of it.
 //   os.exit(code)         -> does not return; standard output is flushed first
 //
+//   os.run(argv)          -> Result<ExitStatus, io.Error>
+//   ExitStatus            enum: Exited(int) or Signaled(int)
+//
 // Three facts the operating system hands a process, and nothing built on
 // them: parsing the command line is `args`, and it is handed these tokens
 // rather than reading them itself, which is what makes a parser testable
@@ -24,11 +28,33 @@
 // `bytes` and `utf8()` -- the one conversion into `str` -- checks each.
 // docs/text-decision.md compares this with Rust, whose `env::args()` panics
 // here and whose `args_os()` is `args_bytes`.
+//
+// `run` is the odd one out: it is the only thing in this module that can
+// fail, and the only thing that takes as long as the child process runs.
+// `Err` is reserved for the process never starting at all -- `argv[0]`
+// nowhere on `$PATH`, most commonly -- built from the same `io.from_errno`
+// `io` and `fs` already use, one vocabulary for every failure that touches
+// the operating system. A process that DID start is always `Ok`, whether it
+// exited 0, exited nonzero, or was killed by a signal: those are three
+// different facts a caller may need to tell apart (real git's own editor
+// flow treats a signal as an abort, distinct from a nonzero exit), never a
+// reason to fail the call that only asked "did it run".
+//
+// This is a separate mechanism from `spawn`/`Chan<T>`: `spawn` starts a
+// thread inside this same process and shares its memory; `run` starts a
+// different program's image, in its own process, connected to the real
+// terminal (stdin, stdout and stderr are inherited untouched, which is what
+// lets an interactive program like an editor take it over) so the two
+// should never be reached for interchangeably.
+
+import io;
 
 prim void __args(List<bytes> out);
 prim int __env(str name, List<bytes> out);
 prim void __env_map(List<bytes> out);
 prim void __exit(int code);
+prim int __proc_start(List<str> argv);
+prim int __proc_wait(int pid);
 
 /// Every argument the program was started with, `argv[0]` -- the name it was
 /// invoked as -- first.
@@ -155,4 +181,89 @@ pub void exit(int code) {
         trap("os.exit(" + code.to_str() + "): an exit status is 0 through 255");
     }
     __exit(code);
+}
+
+/// How a process that ran to completion ended: normally, with a status
+/// `run` never has to guess at, or killed by a signal it never chose.
+///
+/// The two are kept apart because a caller has to be able to ask which:
+/// real git's own editor flow treats a signalled `$EDITOR` as the user
+/// aborting -- ^C, say -- and a nonzero exit as the editor itself refusing,
+/// which is a different thing to tell someone. A bare int, the way a shell
+/// reports `$?`, folds both into one number and a caller has to already
+/// know the encoding to pull them back apart; this does not have that
+/// encoding to know.
+pub enum ExitStatus {
+    /// The process called `exit` (or returned from `main`) with this code,
+    /// 0 through 255 -- the same range `os.exit` enforces on the way in.
+    Exited(int);
+    /// The process never got to choose its exit code: this signal ended it
+    /// first. `2` is ^C (SIGINT), `9` is a kill nothing can catch (SIGKILL),
+    /// `15` is an ordinary request to stop (SIGTERM).
+    Signaled(int);
+}
+
+/// A sentence saying how the process ended, for a log line or a trap
+/// message: `print(status)` and `"editor: " + status.to_str()` both read.
+pub str ExitStatus.to_str() {
+    match (this) {
+        case Exited(int code): {
+            return "exited " + code.to_str();
+        }
+        case Signaled(int sig): {
+            return "killed by signal " + sig.to_str();
+        }
+    }
+}
+
+/// Whether the process both ran and reported success: exit code 0, and not
+/// killed by a signal. Everything else -- a nonzero exit, a signal -- is
+/// `false`, on purpose: the two are different failures (see `ExitStatus`
+/// above), but only one of them is a *success*, so a caller that only wants
+/// "did it work" does not have to `match` to find out.
+pub bool ExitStatus.success() {
+    match (this) {
+        case Exited(int code): {
+            return code == 0;
+        }
+        case Signaled(int sig): {
+            return false;
+        }
+    }
+}
+
+/// Run `argv` as a child process -- `argv[0]` searched on `$PATH` when it
+/// names no directory, exactly the rule `$EDITOR` relies on -- and wait for
+/// it to finish. Standard input, standard output and standard error are the
+/// process's own, untouched: not captured, not redirected, which is what
+/// lets an interactive program `argv` names (an editor, a pager) take over
+/// the real terminal a person is sitting at. The environment is this
+/// process's own too, in full.
+///
+/// `Err` means the process never started at all -- `argv[0]` was nowhere on
+/// `$PATH` and not a path of its own, most commonly, which arrives as
+/// `io.Error.NotFound`. A process that DID start is always `Ok`, whatever
+/// its `ExitStatus` turned out to be: a nonzero exit is not a reason to fail
+/// this call, only a fact for the caller's own `match` on the result.
+///
+/// `argv` must hold at least one element -- the command itself -- or this
+/// is `Err(io.Error.Other(22))` (EINVAL) without ever trying to start
+/// anything; a `str` with an embedded NUL fails the same way, for the
+/// reason `fs`'s path functions refuse one: there is no way to pass it to
+/// the operating system without silently truncating the argument.
+pub Result<ExitStatus, io.Error> run(List<str> argv) {
+    int pid = __proc_start(argv);
+    if (pid < 0) {
+        return Result<ExitStatus, io.Error>.Err(io.from_errno(-pid));
+    }
+    int status = __proc_wait(pid);
+    if (status < 0) {
+        return Result<ExitStatus, io.Error>.Err(io.from_errno(-status));
+    }
+    // sys.h's sys_proc_wait: 0..255 is an exit code, 256 and up is
+    // SYS_WAIT_SIGNAL_BASE (256) plus the signal that killed the process.
+    if (status >= 256) {
+        return Result<ExitStatus, io.Error>.Ok(ExitStatus.Signaled(status - 256));
+    }
+    return Result<ExitStatus, io.Error>.Ok(ExitStatus.Exited(status));
 }

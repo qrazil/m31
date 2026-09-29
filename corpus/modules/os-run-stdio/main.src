@@ -1,0 +1,18 @@
+import os;
+import io;
+
+// The only real proof that a child inherits stdin/stdout directly, rather
+// than merely running without crashing: bytes actually round-trip through
+// the descriptors. `cat` with no arguments copies its stdin to its stdout
+// verbatim, and its stdin here is main.in, this program's OWN stdin --
+// inherited, not read and re-written by this program itself.
+print("before");
+match (os.run(["cat"])) {
+    case Ok(os.ExitStatus s): {
+        print(s.to_str());
+    }
+    case Err(io.Error e): {
+        print("unexpected error: " + e.to_str());
+    }
+}
+print("after");

@@ -1,0 +1,11 @@
+exited 0
+true
+exited 1
+false
+hello from echo
+exited 0
+no such file
+killed by signal 15
+false
+system error 22
+done

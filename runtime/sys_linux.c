@@ -50,8 +50,12 @@
 #define NR_close         3
 #define NR_lseek         8
 #define NR_ioctl        16
+#define NR_pipe2        293
 #define NR_socket       41
 #define NR_connect      42
+#define NR_clone        56
+#define NR_execve       59
+#define NR_wait4        61
 #define NR_shutdown     48
 #define NR_bind         49
 #define NR_listen       50
@@ -79,6 +83,7 @@
 #define NR_mkdirat       34
 #define NR_unlinkat      35
 #define NR_symlinkat     36
+#define NR_pipe2         59
 #define NR_openat        56
 #define NR_close         57
 #define NR_getdents64    61
@@ -91,12 +96,15 @@
 #define NR_socket       198
 #define NR_bind         200
 #define NR_listen       201
+#define NR_clone        220
+#define NR_execve       221
 #define NR_connect      203
 #define NR_getsockname  204
 #define NR_getpeername  205
 #define NR_setsockopt   208
 #define NR_getsockopt   209
 #define NR_shutdown     210
+#define NR_wait4        260
 #define NR_accept4      242
 #define NR_renameat2    276
 #define NR_getrandom    278
@@ -853,4 +861,183 @@ int64_t sys_getrandom(void *buf, int64_t n) {
  * spawned thread calling it would leave the process running. */
 _Noreturn void sys_exit(int64_t code) {
     for (;;) sc(NR_exit_group, code, 0, 0, 0, 0, 0);
+}
+
+/* ---- process launch ------------------------------------------------------
+ *
+ * clone(SIGCHLD, 0), not the fork syscall: the generic table this file uses
+ * for aarch64 and riscv64 (top of file) has no NR_fork at all -- it went out
+ * with the other calls the *at forms replaced -- so x86-64 uses clone here
+ * too, one code path for the same reason ppoll and the *at forms are. With
+ * no CLONE_VM and no child stack, this clone call has no address space to
+ * share and no separate stack to set up: it copies the caller exactly as
+ * fork() would (the kernel's own fork() is `clone(SIGCHLD, 0)` under a
+ * different name), execution continues right after the syscall in both
+ * processes, and musl's libc makes the identical choice for the identical
+ * reason in its own generic fork(). */
+#define PROC_SIGCHLD 17
+
+/* Is there a '/' anywhere in `s`? execve is tried on `s` itself, unsearched,
+ * exactly when there is -- execvp's own rule for telling a bare command
+ * name from a path. */
+static int64_t proc_has_slash(const char *s) {
+    for (; *s; s++) {
+        if (*s == '/') return 1;
+    }
+    return 0;
+}
+
+/* The value after "PATH=" in envp, or 0 if there is no such entry -- not
+ * NULL: that is stddef.h's, and this file has no headers (sys_getpeername's
+ * comment makes the same choice). envp is not environ (sys.h explains why
+ * this backend never reads that), so this is the one place that looks. */
+static const char *proc_path_value(char *const envp[]) {
+    if (envp == 0) return 0;
+    for (int64_t i = 0; envp[i] != 0; i++) {
+        const char *e = envp[i];
+        if (e[0] == 'P' && e[1] == 'A' && e[2] == 'T' && e[3] == 'H' && e[4] == '=') {
+            return e + 5;
+        }
+    }
+    return 0;
+}
+
+/* execve, searching $PATH when argv[0] has no '/' -- the one piece of
+ * execvp/execvpe this backend has to write out by hand, because the raw
+ * execve syscall does not search anything (sys.h). One component of $PATH
+ * at a time, an empty component meaning "." (POSIX's own rule, not this
+ * layer's invention), stopping at the first success (execve never returns
+ * then) or the first failure that is not "try the next directory instead".
+ * ENOENT, EACCES and ENOTDIR are exactly the failures glibc's own execvpe
+ * keeps searching past; anything else -- ENOEXEC for a file that exists but
+ * is not something the kernel can run, say -- is reported immediately,
+ * because trying five more directories would not change that answer.
+ *
+ * Left out on purpose: execvpe's shell fallback for a file with no '#!'
+ * line and no ELF header at all (POSIX's "then a shell must be able to run
+ * it" clause, glibc's /bin/sh -c re-exec). That is not the bare-name-on-PATH
+ * case this exists for, and the kernel's own '#!' handling already runs
+ * every script that says what to run it with. */
+static int64_t proc_exec_search(char *const argv[], char *const envp[]) {
+    const char *prog = argv[0];
+    if (proc_has_slash(prog)) {
+        return sc(NR_execve, P(prog), P(argv), P(envp), 0, 0, 0);
+    }
+    const char *path = proc_path_value(envp);
+    if (path == 0) return -SYS_ENOENT;
+    int64_t proglen = 0;
+    while (prog[proglen]) proglen++;
+    int64_t last = -SYS_ENOENT;
+    for (;;) {
+        const char *sep = path;
+        while (*sep && *sep != ':') sep++;
+        int64_t dirlen = (int64_t)(sep - path);
+        char buf[4096];
+        int64_t head = dirlen == 0 ? 1 : dirlen;  /* "" means "." */
+        if (head + 1 + proglen + 1 <= (int64_t)sizeof buf) {
+            int64_t p = 0;
+            if (dirlen == 0) {
+                buf[p++] = '.';
+            } else {
+                for (int64_t i = 0; i < dirlen; i++) buf[p++] = path[i];
+            }
+            buf[p++] = '/';
+            for (int64_t i = 0; i < proglen; i++) buf[p++] = prog[i];
+            buf[p] = '\0';
+            int64_t r = sc(NR_execve, P(buf), P(argv), P(envp), 0, 0, 0);
+            if (r != -SYS_ENOENT && r != -SYS_EACCES && r != -SYS_ENOTDIR) return r;
+            last = r;
+        }
+        /* A directory too long for the buffer is skipped rather than
+         * refused outright: some other component may still have the
+         * command, so `last` is left at whatever it already was. */
+        if (*sep == '\0') break;
+        path = sep + 1;
+    }
+    return last;
+}
+
+/* A self-pipe is the only way a fork-based backend can report "the exec
+ * failed and here is why" synchronously, the way sys_libc.c's posix_spawnp
+ * already does on this machine's glibc (that file's comment has the
+ * measurement). The write end is O_CLOEXEC: a SUCCESSFUL exec closes it for
+ * free, without the child doing anything, and the parent reads that as
+ * end-of-file. A failed exec instead writes its own errno before exiting,
+ * and the parent reaps that child right here -- it is not a pid the caller
+ * will ever see, so nothing else will ever wait for it, and leaving it
+ * unreaped would be a permanent zombie. */
+int64_t sys_proc_start(char *const argv[], char *const envp[]) {
+    int pfd[2];
+    int64_t pr = sc(NR_pipe2, P(pfd), O_CLOEXEC_, 0, 0, 0, 0);
+    if (pr < 0) return pr;
+
+    int64_t pid = sc(NR_clone, PROC_SIGCHLD, 0, 0, 0, 0, 0);
+    if (pid < 0) {
+        sc(NR_close, pfd[0], 0, 0, 0, 0, 0);
+        sc(NR_close, pfd[1], 0, 0, 0, 0, 0);
+        return pid;
+    }
+    if (pid == 0) {
+        /* The child. The read end is of no use here, closed so it is not
+         * one more descriptor left open by accident (close-on-exec would
+         * have taken it anyway, but exec may never happen). */
+        sc(NR_close, pfd[0], 0, 0, 0, 0, 0);
+        int64_t r = proc_exec_search(argv, envp);
+        /* execve returns only on failure -- on success the process image,
+         * and everything above this line, is already gone. */
+        int32_t code = (int32_t)r;
+        sc(NR_write, pfd[1], P(&code), 4, 0, 0, 0);
+        sc(NR_exit_group, 127, 0, 0, 0, 0, 0);
+        __builtin_unreachable();
+    }
+
+    /* The parent. */
+    sc(NR_close, pfd[1], 0, 0, 0, 0, 0);
+    int32_t code = 0;
+    int64_t n;
+    for (;;) {
+        n = sc(NR_read, pfd[0], P(&code), 4, 0, 0, 0);
+        if (n == -SYS_EINTR) continue;
+        break;
+    }
+    sc(NR_close, pfd[0], 0, 0, 0, 0, 0);
+    if (n == 0) {
+        /* End of file: the write end closed itself on exec, so exec
+         * succeeded and this pid is now a real, running child. */
+        return pid;
+    }
+    /* Either the child's own exec failed and said why (n > 0), or the read
+     * itself failed for some other reason (n < 0) -- either way the child
+     * exists and is already exiting, so it is reaped here rather than left
+     * for a wait the caller has no pid to make. */
+    int status;
+    for (;;) {
+        int64_t w = sc(NR_wait4, pid, P(&status), 0, 0, 0, 0);
+        if (w == -SYS_EINTR) continue;
+        break;
+    }
+    return n > 0 ? code : n;
+}
+
+/* wait4, then sys.h's own encoding by hand: the kernel's status word has one
+ * layout on every architecture (it always has -- this is not a struct the
+ * C library reshapes, unlike struct stat or struct termios), the low 7 bits
+ * the signal or 0 for "exited" and 0x7f for "stopped" (never seen here,
+ * since options is 0 and WUNTRACED was never requested), the next byte the
+ * exit code. sys.h's comment on sys_proc_wait says why this is translated
+ * rather than passed through as-is. */
+int64_t sys_proc_wait(int64_t pid) {
+    int status = 0;
+    int64_t r;
+    for (;;) {
+        r = sc(NR_wait4, pid, P(&status), 0, 0, 0, 0);
+        if (r == -SYS_EINTR) continue;
+        break;
+    }
+    if (r < 0) return r;
+    int termsig = status & 0x7f;
+    if (termsig != 0 && termsig != 0x7f) {
+        return SYS_WAIT_SIGNAL_BASE + termsig;
+    }
+    return (status >> 8) & 0xff;
 }
