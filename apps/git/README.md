@@ -32,12 +32,13 @@ bash apps/git/test.sh <repo> [<repo>…]   # those, and each repository named
 | `gitlog.src` | the commit-history walk, shared by `git.src -log` and `gitui.src` |
 | `gitclient.src` | the interactive client's state and logic (no top-level statements, so it is importable and testable) |
 | `gitui.src` | the interactive client's thin driver: parses a path, runs `tuiapp.Loop` |
+| `httpfetch.src` | git's smart-HTTP protocol, v0 fetch/clone only: pkt-line framing, the ref advertisement, want/have negotiation, side-band-64k demultiplexing, and pack checksum verification, over `lib/http.src` |
 | `build-gitui.sh` | builds `gitui.src`: this compiler resolves every `import` against the entry file's own directory (`src/modules.rs`'s `load`), not a search path, so `gitui.src`'s `apps/tui/` dependencies are staged into a temporary directory at build time rather than copied into this one -- see the script's own header |
 | `t_*.src` | test programs, each printing what a Python oracle prints, or asserting against its own expectations |
 | `oracle_*.py` | the oracles: `hashlib`, `zlib`, and a from-scratch format reader |
 | `pty_e2e.py` | drives `ourgitui` under a real pty against disposable fixtures, real `git` as the oracle |
 | `compare.sh` | every command beside the real `git`, compared octet for octet |
-| `test.sh` | all of the above (sources `test_write.sh`, `test_hunks.sh` and `test_gitui.sh`) |
+| `test.sh` | all of the above (sources `test_write.sh`, `test_gitignore.sh`, `test_hunks.sh`, `test_gitui.sh` and `test_httpfetch.sh`) |
 | `FRICTION.md` | **the other half of this**: what the language made hard, and what it made easy |
 
 ## What works
@@ -128,6 +129,36 @@ copy/insert delta format applied on top of a base object that may itself be a
 delta. It also wants the inflate in `zlib.src` to run from a mid-file offset
 without being handed the rest of the file, which is a change to that module's
 shape rather than an addition to it. That is stage 2.
+
+## Smart-HTTP fetch (`httpfetch.src`): a verified pack on disk, and no further
+
+`httpfetch.src` speaks enough of git's smart-HTTP protocol -- v0 only, over
+`lib/http.src` -- to fetch a real packfile from a real server: the ref
+advertisement (`GET .../info/refs?service=git-upload-pack`, refusing a
+"dumb HTTP" answer rather than misparsing it), want/have negotiation (a
+`clone`'s empty `have` list and a `fetch`'s non-empty one are both tested),
+side-band-64k demultiplexing, and the pack's own trailing SHA-1 checked
+before anything is written to disk. Tested against a real `git http-backend`
+run as a genuine CGI script (`test_httpfetch.sh`), not a hand-rolled
+stand-in: the ref advertisement matches `git ls-remote` byte for byte, a
+full clone's pack is byte-for-byte the server's own (repacked, so genuinely
+delta-compressed) pack, a `fetch` against a repository that already has
+history gets a visibly smaller pack, and both are accepted by real
+`git index-pack --stdin`. A truncated or corrupted transfer -- checked both
+as hand-corrupted bytes with no server involved, and as a genuinely
+truncated response over the wire -- is refused cleanly, never written.
+
+**This is exactly as far as it goes: verified bytes on disk, not a usable
+repository.** `httpfetch.src` does not unpack anything it fetches -- no
+`.idx`, no delta resolution, no loose objects written -- because doing that
+needs the same `OBJ_OFS_DELTA`/`OBJ_REF_DELTA` machinery stage 2 (above) is
+for, and duplicating an incomplete piece of that here was explicitly out of
+scope. Turning a fetched pack into a repository this program can `log` or
+`cat-file` is therefore stage 2's own follow-up, not a gap in this file.
+Push, SSH and protocol v2 are named, separate gaps, not oversights: v0 is
+universally supported as a fallback even where v2 is preferred, and
+`lib/http.src` itself already refuses `https://` before a socket exists, for
+the reason its own header gives.
 
 ## Smaller things this does not do
 
