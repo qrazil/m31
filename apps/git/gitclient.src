@@ -65,6 +65,7 @@ import tuigeom;
 import tuijump;
 import tuimenu;
 import tuioutline;
+import tuitext;
 import tuiwidget;
 import tuistyle;
 import tuiapp;
@@ -200,11 +201,51 @@ bool expanded_for(Map<str, bool> collapsed, str id, bool default_expanded) {
     }
 }
 
+// A commit message line, wrapped to a fixed fallback width rather than the
+// outline's real render width, because `commit_node` cannot see that width.
+//
+// `build_outline` (and so `commit_node`) runs once, from `State.reload()`,
+// after an action that changes the repository -- not on every frame. The
+// outline it returns is then rendered against whatever `tuigeom.Rect` the
+// terminal loop hands `State.draw()`, which can change across a resize with
+// no `reload()` in between (see `draw()` below: it calls `outline.render`
+// straight on the stored tree). So the real column count is known only
+// inside `tuioutline.Outline.render`, one row = one screen line, well after
+// these nodes are built.
+//
+// Making `tuioutline` itself wrap-aware -- so a resize could reflow without
+// a full rebuild -- would mean one logical `Row` can occupy a *variable*
+// number of physical lines, which reaches into `rows()`, `move()`,
+// `select_id()` and the `Viewport.reveal`/`clamped` scroll math that all
+// currently assume "one row is one line". That is a real feature, but a
+// bigger one than this fix: it would change the widget's row model for
+// every caller (`apps/tui/browse.src` included), not just this one.
+//
+// So this wraps eagerly, here, against `COMMIT_BODY_WRAP_COLS` -- a stand-in
+// for a typical terminal, chosen so it still looks right at the common case
+// rather than picking an arbitrary round number. Too-narrow a terminal can
+// still clip a wrapped row's tail in `Outline.render`, exactly as it always
+// could for any other row; too-wide a terminal wraps a little earlier than
+// it strictly needs to. Neither loses a character: `tuitext.wrap` only
+// drops whitespace exactly at a line break it introduces, never a
+// non-space byte, so joining a message line's wrapped rows back together
+// (with a single space where a break was) reproduces the original line.
+// General wrap-awareness in `tuioutline` itself is a real follow-up, not
+// attempted here.
+const int COMMIT_BODY_WRAP_COLS = 72;
+
 /// The outline's commit section: one collapsible node per commit, its short
 /// id and first message line as the label, and -- expanded -- its author,
 /// date and full message as leaf rows underneath. See `tuioutline.src`'s own
 /// header on why every row needs a stable `id`: folding must not renumber
 /// what the jump list or a saved cursor position names.
+///
+/// Unlike the summary rows this client builds elsewhere (a file path, a
+/// commit's own hash-plus-first-line label), a message line is not something
+/// anything needs to select as its own addressable row -- so, unlike those,
+/// a message line longer than the available width is wrapped across
+/// multiple leaf rows here rather than left for `Outline.render` to clip
+/// silently. A short line still yields exactly one leaf row.
 List<tuioutline.Node> commit_node(gitlog.Entry en, Map<str, bool> collapsed) {
     str id = "commit:" + en.id;
     str label = en.id.substr(0, 7) + "  " + first_line(en.commit.message);
@@ -215,7 +256,11 @@ List<tuioutline.Node> commit_node(gitlog.Entry en, Map<str, bool> collapsed) {
     str msg = en.commit.message.utf8().or("<non-utf8 message>");
     int i = 0;
     for (str line in text.lines(msg)) {
-        body.push(tuioutline.Node.leaf(id + ":m" + i.to_str(), "  " + line));
+        int j = 0;
+        for (str wrapped in tuitext.wrap(line, COMMIT_BODY_WRAP_COLS)) {
+            body.push(tuioutline.Node.leaf(id + ":m" + i.to_str() + ":" + j.to_str(), "  " + wrapped));
+            j = j + 1;
+        }
         i = i + 1;
     }
     return [tuioutline.Node.section(id, label, body, expanded: expanded_for(collapsed, id, false))];
