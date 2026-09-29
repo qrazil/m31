@@ -212,10 +212,10 @@ ok   content that all fits gets a full-length thumb
 == outline =====================================================
 ok   flattened rows, one section collapsed
 +------------------------------+
-|▾ Unstaged changes            |
+|v Unstaged changes            |
 |    modified: a.txt           |
 |    modified: b.txt           |
-|▸ Staged changes              |
+|> Staged changes              |
 |  stash@{0}: on main: wip     |
 +------------------------------+
 ok   cursor starts at the top

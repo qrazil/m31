@@ -501,7 +501,7 @@ void scroll_tests(Tally t) {
     check(t, "a thumb at the bottom", buf2.row_text(9), "#");
     tuibuf.Buffer buf3 = tuibuf.Buffer.sized(1, 5);
     tuiscroll.Scrollbar().render(buf3, tuigeom.Rect(0, 0, 1, 5), 5, 5, 0);
-    check(t, "content that all fits gets a full-length thumb", buf3.to_str(), "\u{2588}\n\u{2588}\n\u{2588}\n\u{2588}\n\u{2588}");
+    check(t, "content that all fits gets a full-length thumb", buf3.to_str(), "#\n#\n#\n#\n#");
 }
 
 tuioutline.Outline sample_outline() {
