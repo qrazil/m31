@@ -43,6 +43,7 @@ import text;
 import object;
 import refs;
 import repo;
+import gitlog;
 
 args.Parser p = args.Parser("ourgit", summary: "read-only git plumbing over loose objects");
 p.value("git-dir", help: "the repository's git directory", placeholder: "DIR");
@@ -257,128 +258,27 @@ int log(str gd, args.Parsed c) {
         case None: {
         }
     }
-    str tip = "";
-    match (refs.rev_parse(gd, spec)) {
-        case Ok(str v): {
-            tip = v;
-        }
-        case Err(refs.Error e): {
-            io.eprint(e.to_str());
-            return 1;
-        }
-    }
-    match (refs.peel(gd, spec, tip)) {
-        case Ok(str v): {
-            tip = v;
-        }
-        case Err(refs.Error e): {
-            io.eprint(e.to_str());
-            return 1;
-        }
-    }
-    // git's own walk: a queue kept in descending commit-date order, pop the
-    // front, print it, insert its parents by date. Equal dates keep the order
-    // they were inserted in, which is what `commit_list_insert_by_date` does
-    // and is why two commits made in the same second come out the same way
-    // round here as they do there.
-    List<str> queue = [tip];
-    List<int> dates = [0];
-    Map<str, bool> seen = {};
-    seen.set(tip, true);
-    int shown = 0;
-    while (queue.size() > 0) {
-        if (limit >= 0 && shown >= limit) {
+    // The walk itself -- git's date-ordered queue -- lives in `gitlog.src`
+    // now, shared with the interactive client (`gitui.src`) so there is one
+    // implementation of it rather than two (`apps/git/design.md`).
+    match (gitlog.walk(gd, spec, limit)) {
+        case Ok(List<gitlog.Entry> entries): {
+            int shown = 0;
+            for (gitlog.Entry en in entries) {
+                // The blank line goes BETWEEN commits and not after each one:
+                // git separates rather than terminates, so `log` of one
+                // commit ends at the last line of its message.
+                if (shown > 0) {
+                    write("\n".to_bytes());
+                }
+                write(commit_text(en.id, en.commit));
+                shown = shown + 1;
+            }
             return 0;
         }
-        str id = queue.remove_at(0);
-        dates.remove_at(0);
-        match (object.read(gd, id)) {
-            case Ok(object.Object o): {
-                match (o.body) {
-                    case Commit(object.Commit cm): {
-                        // The blank line goes BETWEEN commits and not after
-                        // each one: git separates rather than terminates, so
-                        // `log` of one commit ends at the last line of its
-                        // message.
-                        if (shown > 0) {
-                            write("\n".to_bytes());
-                        }
-                        write(commit_text(id, cm));
-                        shown = shown + 1;
-                        for (str par in cm.parents) {
-                            if (seen.contains(par)) {
-                                continue;
-                            }
-                            seen.set(par, true);
-                            insert(queue, dates, par, commit_date(gd, par));
-                        }
-                    }
-                    case Blob: {
-                        io.eprint("not a commit: " + id);
-                        return 1;
-                    }
-                    case Tree: {
-                        io.eprint("not a commit: " + id);
-                        return 1;
-                    }
-                    case Tag: {
-                        io.eprint("not a commit: " + id);
-                        return 1;
-                    }
-                }
-            }
-            case Err(object.Error e): {
-                io.eprint(e.to_str());
-                return 1;
-            }
-        }
-    }
-    return 0;
-}
-
-// `id` and `when` into the two parallel lists, before the first entry whose
-// date is strictly older. Two lists rather than a list of pairs because a
-// struct here would be a third type for four lines of code, and `remove_at`
-// on both is the pop.
-//
-// Known cost: every commit is read twice, once for its date when it goes into
-// the queue and once for its text when it comes out. Carrying the parsed
-// commit in the queue would halve it, at the price of a fourth type and of
-// losing the exact error for a parent that will not read. The queue is the
-// frontier and not the history, so this is a constant factor on an already
-// fast path, and it is written down rather than fixed.
-void insert(List<str> queue, List<int> dates, str id, int when) {
-    int i = 0;
-    while (i < dates.size() && dates[i] >= when) {
-        i = i + 1;
-    }
-    queue.insert(i, id);
-    dates.insert(i, when);
-}
-
-// A commit's committer timestamp, or 0 for anything that is not a readable
-// commit -- a parent in a packfile, say, which sorts to the end of the queue
-// and reports itself when it is reached.
-int commit_date(str gd, str id) {
-    match (object.read(gd, id)) {
-        case Ok(object.Object o): {
-            match (o.body) {
-                case Commit(object.Commit c): {
-                    return c.committer.when;
-                }
-                case Blob: {
-                    return 0;
-                }
-                case Tree: {
-                    return 0;
-                }
-                case Tag: {
-                    return 0;
-                }
-            }
-        }
-        case Err: {
-            return 0;
+        case Err(gitlog.Error e): {
+            io.eprint(e.to_str());
+            return 1;
         }
     }
 }
