@@ -58,9 +58,14 @@
 // otherwise. Every path this program itself ever writes is UTF-8, so this
 // only bites a working tree built by something else.
 //
-// **No `.gitignore`.** Explicitly out of scope (the task this was written
-// against says so directly): every file under the working tree that is not
-// `.git` itself and is not in the index is untracked, full stop.
+// **`.gitignore` filtering is `gitignore.src`'s job, not this module's.**
+// A candidate path that is on disk and not in the index used to be reported
+// untracked unconditionally; now `gitignore.Ignore.is_ignored` is asked
+// about each one first, and an ignored path is left out, matching what
+// `git status`'s own untracked-file scan does. The pattern matching, the
+// nested-`.gitignore` precedence and the negated-pattern-inside-an-excluded-
+// directory exception all live in `gitignore.src`'s own module header --
+// this module only calls it.
 
 import io;
 import fs;
@@ -69,6 +74,7 @@ import sha1;
 import object;
 import refs;
 import index;
+import gitignore;
 
 /// Why a status could not be produced. Payload-free variants wrap the
 /// underlying error (docs/errors-decision.md §4): the path or the object
@@ -81,6 +87,7 @@ pub enum Error {
     Index(index.Error);
     Object(object.Error);
     Refs(refs.Error);
+    Gitignore(gitignore.Error);
     /// HEAD resolves to something that is not a commit -- a corrupt or a
     /// very strange repository, not one this can report on.
     HeadNotCommit;
@@ -99,6 +106,9 @@ pub str Error.to_str() {
         }
         case Refs(refs.Error e): {
             return "refs: " + e.to_str();
+        }
+        case Gitignore(gitignore.Error e): {
+            return "gitignore: " + e.to_str();
         }
         case HeadNotCommit: {
             return "HEAD does not resolve to a commit";
@@ -251,9 +261,10 @@ pub Result<Status, Error> status(str gitdir, str worktree) {
             }
         }
     }
+    gitignore.Ignore ig = load_ignore(gitdir, worktree)?;
     List<bytes> untracked = [];
     for (WFile f in wt) {
-        if (!idx.contains(f.path)) {
+        if (!idx.contains(f.path) && !ig.is_ignored(f.path)) {
             untracked.push(f.path.to_bytes());
         }
     }
@@ -293,6 +304,21 @@ Result<Option<str>, Error> head_tree(str gitdir) {
         }
         case Err(refs.Error e): {
             return Result<Option<str>, Error>.Err(Error.Refs(e));
+        }
+    }
+}
+
+// `gitignore.load`'s own error, wrapped at this module's own Error type --
+// the same shape `commit_tree` below uses for `object.Error` -- so `status`
+// can propagate it with a plain `?` (§6.3: `?`'s error type must match the
+// enclosing function's exactly, with no conversion).
+Result<gitignore.Ignore, Error> load_ignore(str gitdir, str worktree) {
+    match (gitignore.load(gitdir, worktree)) {
+        case Ok(gitignore.Ignore ig): {
+            return Result<gitignore.Ignore, Error>.Ok(ig);
+        }
+        case Err(gitignore.Error e): {
+            return Result<gitignore.Ignore, Error>.Err(Error.Gitignore(e));
         }
     }
 }

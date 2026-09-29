@@ -5,11 +5,11 @@
 #   ./apps/git/build-gitui.sh -o mygitui   -> ./mygitui
 #
 # `gitui.src`'s entry point lives in `apps/git/`, and imports both this
-# directory's own plumbing (`gitclient`, `gitlog`, `status`, `index`,
-# `object`, `refs`, `repo`, `sha1`, `zlib`, `hunks`) and several `apps/tui/`
-# widgets (`tuiapp`, `tuioutline`, `tuijump`, `tuimenu`, `tuifooter`,
-# `tuidiffview`, and what those pull in). This compiler resolves every
-# `import` against the ENTRY file's own directory only
+# directory's own plumbing (`gitclient`, `gitlog`, `status`, `gitignore`,
+# `index`, `object`, `refs`, `repo`, `sha1`, `zlib`, `hunks`) and several
+# `apps/tui/` widgets (`tuiapp`, `tuioutline`, `tuijump`, `tuimenu`,
+# `tuifooter`, `tuidiffview`, and what those pull in). This compiler resolves
+# every `import` against the ENTRY file's own directory only
 # (`docs/modules-decision.md` §1: one flat namespace, no search path) -- so a
 # program built straight out of `apps/git` can never see `apps/tui`'s files
 # sitting next door, and `apps/tui`'s own files must not be duplicated
@@ -40,8 +40,8 @@ cp apps/tui/tuiapp.src apps/tui/tuibuf.src apps/tui/tuidiff.src \
     apps/tui/tuiscroll.src apps/tui/tuistyle.src apps/tui/tuitext.src \
     apps/tui/tuiwidget.src \
     apps/git/repo.src apps/git/sha1.src apps/git/zlib.src apps/git/object.src \
-    apps/git/refs.src apps/git/index.src apps/git/status.src apps/git/gitlog.src \
-    apps/git/hunks.src apps/git/gitclient.src apps/git/gitui.src \
+    apps/git/refs.src apps/git/index.src apps/git/gitignore.src apps/git/status.src \
+    apps/git/gitlog.src apps/git/hunks.src apps/git/gitclient.src apps/git/gitui.src \
     "$stage/"
 
 "$LANGC" --emit-c "$stage/gitui.src" -o "$stage/gitui.c"
