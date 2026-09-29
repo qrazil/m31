@@ -209,6 +209,79 @@ preemption at the probe is both cheaper and available.
 
 ---
 
+## Scheduler queues: per-carrier arrays, work-stealing, not one shared queue
+
+Decided **2026-09-29**. Fills in what "work-stealing scheduler" in the order
+of work actually means, mechanically.
+
+**State: a byte per green thread, indexed by id, never scanned.** A green
+thread's state is an enum (`Runnable`, `Running`, `Parked-on-I/O`,
+`Parked-on-channel`, `Parked-on-timer`, `Dead`), not a single bit, so a byte
+table beats a hand-packed bitmap — simpler code, and the memory difference
+is noise: a million threads is 1 MB of state against 4–64 **GB** of stack
+for the same million threads, at the 4–64 KB slab-stack sizes already
+decided. This table is read and written in O(1) by id. It is never scanned
+to find work — see below for why that distinction matters more than the
+byte-vs-bit choice that prompted it.
+
+**Each carrier — the OS thread, one per core — owns its own run queue**,
+not each green thread and not one shared queue. A fixed-size array used as
+a ring buffer (Go's own is 256 slots), not a linked list: contiguous memory
+is cache-friendly where a linked list's scattered nodes are not, there is no
+per-node allocation, and — the part that matters most — stealing a chunk of
+another carrier's queue is a couple of compare-and-swaps on array indices,
+where a linked list would need a lock or a considerably harder lock-free
+list algorithm to do the same thing safely.
+
+**One shared queue, with every carrier pulling from it, was Go's own first
+design (pre-1.1, 2012) and it did not scale**: one lock, every core
+fighting over the same cache line to pop the next goroutine, contention
+that gets *worse* as cores are added rather than better. Go 1.1 (2013)
+replaced it with per-carrier local queues and work-stealing, which is the
+design here. Independently, Java's `ForkJoinPool` (2011, built for the same
+kind of fine-grained parallel scheduling) landed on the identical
+local-queue-plus-stealing shape without copying Go — two unrelated,
+heavily-used systems converging on the same answer is strong evidence on
+its own. The reason a shared queue loses is not really about the words
+"push" versus "steal": a shared queue is *every* carrier touching one piece
+of memory on *every* dequeue, which is constant cross-core contention
+regardless of what the access pattern is called. A local queue is touched
+by its own carrier alone in the common case — zero contention — and only
+reached into from outside when a sibling is actually idle, which is rare by
+comparison.
+
+**Stealing takes a batch from the opposite end, not one item at a time.**
+Go steals half a victim's queue in one operation: a thief that had to steal
+again immediately for every single item would just move the contention
+problem rather than solve it. Taking the opposite end from where the owner
+works (the owner's own push/pop needs no synchronization at all; only the
+far end, touched by thieves, needs an atomic operation) is what makes the
+owner's own fast path free of stealing's cost.
+
+**A small global queue stays as a fallback, not a redesign.** Go did not
+eliminate its global queue in 1.1 — it demoted it from "the only queue" to
+the rare case: overflow when a local queue is full, and a way to stop one
+carrier's long local queue from starving a thread that just became
+runnable elsewhere. Same shape here.
+
+**A carrier-sized bitmap, not a green-thread-sized one, is where the
+bitmap instinct behind the byte-per-thread state table actually belongs.**
+A thief needs to find *which* sibling carrier has stealable work; with one
+bit per carrier (tens, at most — one per core), a bitmap scan is exactly
+the regime it is fast in, matching the real Linux O(1) scheduler's own
+technique (pre-2.6.23, before CFS replaced it): a bitmap over a *small*
+number of buckets, `find_first_bit` in O(1). The same technique over a
+million green threads instead of a handful of carriers is the mistake
+`select()` made and `epoll()` was built to fix: `select()` hands the kernel
+a bitmap and makes it scan the whole thing every call, cost scaling with
+*total* descriptors; `epoll()` hands back only what is actually ready, cost
+scaling with the *ready* count alone. Scanning a million-entry table on
+every scheduling tick would be exactly `select()`'s mistake, restated in a
+different subsystem — sized to carriers instead of threads, the same
+bitmap idea is simply the right tool.
+
+---
+
 ## Blocking FFI
 
 `O_NONBLOCK` is a no-op on regular files, `getaddrinfo` is synchronous by
@@ -276,7 +349,8 @@ freed. A program creates few, so the leak is bounded by that count.
 2. OS threads + channels, to get the channel semantics right against a simple
    scheduler.
 3. Context switch (asm, x86-64 then aarch64) + slab stack allocator + probes.
-4. Scheduler: per-carrier queues, work stealing, probe-based preemption.
+4. Scheduler: per-carrier queues, work stealing, probe-based preemption --
+   see "Scheduler queues" above for the exact mechanism.
 5. epoll reactor, then park/unpark.
 6. Blocking-FFI handoff.
 7. kqueue.
