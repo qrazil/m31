@@ -1,0 +1,178 @@
+// Drives `httpfetch.src` against a real smart-HTTP git server for
+// `test_httpfetch.sh`, and against hand-built bytes for the cases that do
+// not need a server at all (a truncated or corrupted pack).
+//
+//   ./t_httpfetch ls-remote <url>
+//       Prints "<id>\t<name>" per advertised ref, in the server's own order
+//       -- the same shape `git ls-remote <url>` prints, so the two can be
+//       diffed directly.
+//
+//   ./t_httpfetch clone <url> <out.pack>
+//       Discovers, wants every advertised ref (deduplicated), sends no
+//       `have`s, and writes the verified pack to `out.pack`. Prints
+//       "caps <c1> <c2> ..." and "pack <bytes> <objects>".
+//
+//   ./t_httpfetch fetch <url> <gitdir> <out.pack>
+//       As `clone`, but `have`s are every commit reachable from every ref in
+//       `gitdir` (`refs.all` + `gitlog.walk`, exactly as `-log` walks) --
+//       the case where negotiation is expected to shrink the pack.
+//
+//   ./t_httpfetch verify <pack-file> <out-path>
+//       Reads `pack-file` as plain bytes (no network, no server -- this is
+//       how a truncated or corrupted transfer is tested, per the task's own
+//       "simulate this at the test level") and calls `httpfetch.verify_pack`
+//       on them. Prints "ok <bytes> <objects>" or "error: <message>".
+//
+// Every command prints "error: <message>" to standard error and exits 1 on
+// failure; a successful command exits 0.
+
+import httpfetch;
+import gitlog;
+import io;
+import os;
+import refs;
+
+List<str> argv = os.args();
+if (argv.size() < 2) {
+    usage();
+}
+str cmd = argv[1];
+if (cmd == "ls-remote" && argv.size() == 3) {
+    ls_remote(argv[2]);
+} else if (cmd == "clone" && argv.size() == 4) {
+    do_clone(argv[2], argv[3]);
+} else if (cmd == "fetch" && argv.size() == 5) {
+    do_fetch(argv[2], argv[3], argv[4]);
+} else if (cmd == "verify" && argv.size() == 4) {
+    do_verify(argv[2], argv[3]);
+} else {
+    usage();
+}
+
+void usage() {
+    io.eprint("usage: t_httpfetch ls-remote <url>");
+    io.eprint("       t_httpfetch clone <url> <out.pack>");
+    io.eprint("       t_httpfetch fetch <url> <gitdir> <out.pack>");
+    io.eprint("       t_httpfetch verify <pack-file> <out-path>");
+    os.exit(2);
+}
+
+void fail(str msg) {
+    io.eprint("error: " + msg);
+    os.exit(1);
+}
+
+void ls_remote(str url) {
+    match (httpfetch.discover(url)) {
+        case Ok(httpfetch.Advertisement ad): {
+            for (httpfetch.RemoteRef r in ad.refs) {
+                print(r.id + "\t" + r.name);
+            }
+        }
+        case Err(httpfetch.Error e): {
+            fail(e.to_str());
+        }
+    }
+}
+
+void do_clone(str url, str out_path) {
+    match (httpfetch.discover(url)) {
+        case Ok(httpfetch.Advertisement ad): {
+            List<str> wants = unique_ids(ad.refs);
+            List<str> no_haves = [];
+            print("caps " + ad.capabilities.join(" "));
+            print("refs " + wants.size().to_str());
+            run_fetch(url, ad, wants, no_haves, out_path);
+        }
+        case Err(httpfetch.Error e): {
+            fail(e.to_str());
+        }
+    }
+}
+
+void do_fetch(str url, str gitdir, str out_path) {
+    match (httpfetch.discover(url)) {
+        case Ok(httpfetch.Advertisement ad): {
+            List<str> wants = unique_ids(ad.refs);
+            List<str> haves = local_haves(gitdir);
+            print("caps " + ad.capabilities.join(" "));
+            print("refs " + wants.size().to_str());
+            print("haves " + haves.size().to_str());
+            run_fetch(url, ad, wants, haves, out_path);
+        }
+        case Err(httpfetch.Error e): {
+            fail(e.to_str());
+        }
+    }
+}
+
+void run_fetch(str url, httpfetch.Advertisement ad, List<str> wants, List<str> haves, str out_path) {
+    match (httpfetch.fetch(url, ad, wants, haves, out_path)) {
+        case Ok(httpfetch.Summary s): {
+            print("pack " + s.pack_bytes.to_str() + " " + s.object_count.to_str());
+        }
+        case Err(httpfetch.Error e): {
+            fail(e.to_str());
+        }
+    }
+}
+
+void do_verify(str pack_path, str out_path) {
+    match (io.read_bytes(pack_path)) {
+        case Ok(bytes data): {
+            match (httpfetch.verify_pack(data, out_path)) {
+                case Ok(httpfetch.Summary s): {
+                    print("ok " + s.pack_bytes.to_str() + " " + s.object_count.to_str());
+                }
+                case Err(httpfetch.Error e): {
+                    fail(e.to_str());
+                }
+            }
+        }
+        case Err(io.Error e): {
+            fail("cannot read " + pack_path + ": " + e.to_str());
+        }
+    }
+}
+
+List<str> unique_ids(List<httpfetch.RemoteRef> advertised) {
+    Map<str, bool> seen = {};
+    List<str> out = [];
+    for (httpfetch.RemoteRef r in advertised) {
+        if (!seen.contains(r.id)) {
+            seen.set(r.id, true);
+            out.push(r.id);
+        }
+    }
+    return out;
+}
+
+// Every commit reachable from every local ref -- what a real `fetch` already
+// has, and so must not be asked for again. `refs.all` + `gitlog.walk` is
+// exactly what `-log` already does for one ref; this does it for all of
+// them, matching the module note's own recipe.
+List<str> local_haves(str gitdir) {
+    Map<str, bool> seen = {};
+    List<str> out = [];
+    match (refs.all(gitdir)) {
+        case Ok(List<refs.Ref> all): {
+            for (refs.Ref r in all) {
+                match (gitlog.walk(gitdir, r.name, -1)) {
+                    case Ok(List<gitlog.Entry> entries): {
+                        for (gitlog.Entry e in entries) {
+                            if (!seen.contains(e.id)) {
+                                seen.set(e.id, true);
+                                out.push(e.id);
+                            }
+                        }
+                    }
+                    case Err: {
+                    }
+                }
+            }
+        }
+        case Err: {
+        }
+    }
+    return out;
+}

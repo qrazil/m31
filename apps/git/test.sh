@@ -208,6 +208,13 @@ source apps/git/test_hunks.sh
 
 source apps/git/test_gitui.sh
 
+# --- smart-HTTP fetch/clone, against a real 'git http-backend' -------------
+#
+# `test_httpfetch.sh` shares this script's shell the same way the others do
+# -- see its own header for why it is the one file here that sets a `trap`.
+
+source apps/git/test_httpfetch.sh
+
 echo
 if [ $fail -eq 0 ]; then
     printf '\033[32mall %d apps/git checks passed\033[0m\n' "$pass"
