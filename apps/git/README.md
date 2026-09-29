@@ -55,12 +55,14 @@ The interactive client (`gitui.src`, `apps/git/design.md`'s locked design):
 a collapsible outline of untracked files, unstaged changes, staged changes
 and recent commits; whole-file staging and unstaging (`s`/`u`); a commit,
 via a message file at `COMMIT_EDITMSG` read back and refused if empty
-(`c` opens a which-key overlay: `e` writes the template, `f` finishes, `a`
-aborts -- see `gitclient.src`'s own header for why this cannot simply launch
-`$EDITOR`); a persistent footer of the base commands; and a synced jump list
-toggled with `J`. Hunk-level diff display and staging, push/pull, checkout
-and rebase are each a named, deliberate gap in `apps/git/design.md`, not an
-oversight here.
+(`c` opens a which-key overlay: `e` launches `$EDITOR` (`vi` if unset) on
+the message file, falling back to writing the template and naming the path
+if no editor can be launched at all; `f` finishes; `a` aborts -- see
+`gitclient.src`'s own header, "launching `$EDITOR`, and the terminal handoff
+that takes", for how the terminal is handed to the editor and back); a
+persistent footer of the base commands; and a synced jump list toggled with
+`J`. Hunk-level diff display and staging, push/pull, checkout and rebase are
+each a named, deliberate gap in `apps/git/design.md`, not an oversight here.
 
 Everything is checked against something that is not this program:
 

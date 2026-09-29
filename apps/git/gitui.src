@@ -21,13 +21,19 @@
 // obligation for its logic (`apps/git/design.md`'s "how you'll know you're
 // done").
 //
-// See `gitclient.src`'s own header for the one gap this ran into that
-// `apps/git/design.md` did not name: there is no way, anywhere in this
-// language's runtime, to launch another process, so the commit flow cannot
-// actually invoke `$EDITOR` the way real `git commit` does. It keeps the
-// same on-disk contract (a message file at a known path, edited by
-// something, read back and refused if empty) instead of pretending to shell
-// out.
+// See `gitclient.src`'s own header, "launching `$EDITOR`, and the terminal
+// handoff that takes", for why the loop below is a `while`, not a single
+// `loop.run` call: `gitclient.State.edit_message` cannot launch `$EDITOR`
+// itself (it has no access to the `term.Session` `tuiapp.Loop.run` owns), so
+// it sets `state.want_editor` and returns `Quit`, which unwinds that
+// `Session` and hands the now-cooked, normal-screen terminal back here. This
+// is the "drop the Session and re-acquire `raw()` afterward" a caller with
+// no `suspend`/`restore` pair on the `Session` itself has to do: this loop
+// notices `want_editor`, runs the editor for real (`launch_editor`), and
+// calls `loop.run` again -- which re-enters raw mode and always draws its
+// first frame with `tuidiff.full`, never a diff against whatever the editor
+// drew. A `q` (a real quit) leaves `want_editor` false and ends this loop
+// too.
 
 import fs;
 import io;
@@ -56,10 +62,20 @@ if (!term.is_terminal(0)) {
 gitclient.State state = gitclient.State.open(gd, path);
 state.reload();
 tuiapp.Loop loop = tuiapp.Loop();
-match (loop.run((tuibuf.Buffer buf, tuigeom.Rect area) => state.draw(buf, area), (term.Event ev) => state.handle(ev))) {
-    case Ok(int n): {
-    }
-    case Err(term.Error e): {
-        io.eprint("gitui: " + e.to_str());
+bool running = true;
+while (running) {
+    match (loop.run((tuibuf.Buffer buf, tuigeom.Rect area) => state.draw(buf, area), (term.Event ev) => state.handle(ev))) {
+        case Ok(int n): {
+            if (state.want_editor) {
+                state.want_editor = false;
+                state.launch_editor();
+            } else {
+                running = false;
+            }
+        }
+        case Err(term.Error e): {
+            io.eprint("gitui: " + e.to_str());
+            running = false;
+        }
     }
 }

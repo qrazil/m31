@@ -7,11 +7,22 @@
 //   ./t_gitclient_ops <gitdir> <worktree> stage <relative-path>
 //   ./t_gitclient_ops <gitdir> <worktree> unstage <relative-path>
 //   ./t_gitclient_ops <gitdir> <worktree> commit
+//   ./t_gitclient_ops <gitdir> <worktree> edit
 //
 // `commit` reads whatever is already at `<gitdir>/COMMIT_EDITMSG` -- the
 // caller writes it first, the same file a person editing it by hand would
 // have left there -- and prints `State.message` afterward either way, so the
 // shell test can tell a refusal (an empty message) from an actual commit.
+//
+// `edit` calls `edit_message()` then `launch_editor()` exactly as
+// `gitui.src`'s own driver does once `tuiapp.Loop.run` has handed the
+// terminal back -- there is no terminal or `Session` in this harness at all,
+// which is exactly what makes it able to drive `os.run`'s every outcome
+// (success, nonzero exit, signal, `$EDITOR` unset or not found)
+// deterministically: the caller sets `$EDITOR` (or leaves it unset, to drive
+// the `vi` fallback with a `$PATH` this process controls) to a stand-in
+// editor script before running this, and checks `State.message` and the
+// repository afterward the same way `commit` above is checked.
 
 import gitclient;
 import io;
@@ -42,6 +53,9 @@ if (op == "stage") {
     state.unstage_path(argv[4].to_bytes());
 } else if (op == "commit") {
     state.finish_commit();
+} else if (op == "edit") {
+    state.edit_message();
+    state.launch_editor();
 } else {
     io.eprint("unknown op: " + op);
     os.exit(2);

@@ -126,9 +126,9 @@ if build_tui t_gitclient_ops; then
         bad "gitui ops: fsck after stage/unstage" "$fsck_out"
     fi
 
-    # commit: write a message file directly (this program's stand-in for the
-    # editor no primitive here can launch, see gitclient.src's own header),
-    # then finish it.
+    # commit: write a message file directly -- exactly the fallback path
+    # `finish_commit`/`f` still cover when nothing can launch `$EDITOR` at
+    # all, or a person edited the file in another terminal -- then finish it.
     git -C "$opsfx" add a.txt >/dev/null
     printf 'a message written by the test, not an editor\n' >"$opsfx/.git/COMMIT_EDITMSG"
     "$WORK/t_gitclient_ops" "$opsfx/.git" "$opsfx" commit >"$WORK/ops5.out" 2>"$WORK/ops5.err"
@@ -150,6 +150,144 @@ if build_tui t_gitclient_ops; then
         note "gitui ops: finish_commit refuses an empty message and moves nothing"
     else
         bad "gitui ops: empty-message refusal" "before=$before after=$after" "$(cat "$WORK/ops6.out")"
+    fi
+
+    # --- e: actually launching $EDITOR, every os.run outcome ----------------
+    #
+    # A real, interactive $EDITOR (vim, nano) cannot be driven deterministically
+    # under a scripted pty, so each outcome here is exercised with a stand-in
+    # "editor" -- a tiny shell script, standing in for $EDITOR, that rewrites
+    # the message file and exits with whatever status the scenario needs.
+    # `edit` (t_gitclient_ops.src's own new op) calls `edit_message()` then
+    # `launch_editor()` exactly as `gitui.src`'s driver does once the terminal
+    # has been handed back -- there is no terminal in this harness at all,
+    # which is what makes every outcome reachable with no pty and no keystrokes.
+
+    cat >"$WORK/editor-ok.sh" <<'EOF'
+#!/bin/sh
+printf 'a message from the stand-in editor\n' >"$1"
+exit 0
+EOF
+    cat >"$WORK/editor-empty.sh" <<'EOF'
+#!/bin/sh
+printf '\n' >"$1"
+exit 0
+EOF
+    cat >"$WORK/editor-nonzero.sh" <<'EOF'
+#!/bin/sh
+printf 'edited but the editor refused\n' >"$1"
+exit 9
+EOF
+    cat >"$WORK/editor-signal.sh" <<'EOF'
+#!/bin/sh
+printf 'edited then the editor was killed\n' >"$1"
+kill -TERM "$$"
+EOF
+    chmod +x "$WORK/editor-ok.sh" "$WORK/editor-empty.sh" "$WORK/editor-nonzero.sh" "$WORK/editor-signal.sh"
+    mkdir -p "$WORK/fakebin"
+    cp "$WORK/editor-ok.sh" "$WORK/fakebin/vi"
+    chmod +x "$WORK/fakebin/vi"
+
+    editfx="$WORK/gitui_edit"
+    mkdir -p "$editfx"
+    (
+        set -e
+        cd "$editfx"
+        git init -q -b main .
+        git config user.email e@example.com
+        git config user.name 'Edit Tester'
+        printf 'one\n' >a.txt
+        git add -A
+        GIT_AUTHOR_DATE='1700000000 +0000' GIT_COMMITTER_DATE='1700000000 +0000' \
+            git commit -q -m first
+        printf 'changed\n' >>a.txt
+        git add -A
+        rm -f .git/COMMIT_EDITMSG
+    ) >"$WORK/gitui_edit.log" 2>&1 || bad "gitui edit fixture" "$(tail -5 "$WORK/gitui_edit.log")"
+
+    # exit 0, a real message: launch_editor reuses finish_commit's own
+    # stripping/empty-message logic, so a successful edit commits without a
+    # separate `f`, exactly like real git's own `$EDITOR` flow.
+    EDITOR="$WORK/editor-ok.sh" "$WORK/t_gitclient_ops" "$editfx/.git" "$editfx" edit >"$WORK/edit1.out" 2>"$WORK/edit1.err"
+    log_line=$(git -C "$editfx" log -1 --format=%s 2>&1)
+    status_out=$(git -C "$editfx" status --short)
+    if [ "$log_line" = "a message from the stand-in editor" ] && [ "$status_out" = "" ] && [ ! -f "$editfx/.git/COMMIT_EDITMSG" ]; then
+        note "gitui edit: exit 0 reads the message back and finishes the commit (git log/status agree)"
+    else
+        bad "gitui edit: exit 0 finishes the commit" "log_line=$log_line status=$status_out" "$(cat "$WORK/edit1.out")" "$(cat "$WORK/edit1.err")"
+    fi
+
+    # exit 0, an empty message: the same refusal `f` already gives, reached
+    # through the editor instead.
+    printf 'more\n' >"$editfx/b.txt"
+    git -C "$editfx" add -A >/dev/null
+    rm -f "$editfx/.git/COMMIT_EDITMSG"
+    before=$(git -C "$editfx" rev-parse HEAD)
+    EDITOR="$WORK/editor-empty.sh" "$WORK/t_gitclient_ops" "$editfx/.git" "$editfx" edit >"$WORK/edit2.out" 2>"$WORK/edit2.err"
+    after=$(git -C "$editfx" rev-parse HEAD)
+    if [ "$before" = "$after" ] && grep -qx "aborting commit due to empty commit message" "$WORK/edit2.out"; then
+        note "gitui edit: exit 0 with an empty message refuses, exactly like f"
+    else
+        bad "gitui edit: exit 0 empty-message refusal" "before=$before after=$after" "$(cat "$WORK/edit2.out")"
+    fi
+
+    # nonzero exit: a cancelled edit, real git's own treatment -- nothing is
+    # committed and the message file is left exactly as the editor wrote it,
+    # so e/f/a still have something to act on.
+    before=$(git -C "$editfx" rev-parse HEAD)
+    EDITOR="$WORK/editor-nonzero.sh" "$WORK/t_gitclient_ops" "$editfx/.git" "$editfx" edit >"$WORK/edit3.out" 2>"$WORK/edit3.err"
+    after=$(git -C "$editfx" rev-parse HEAD)
+    left=$(cat "$editfx/.git/COMMIT_EDITMSG" 2>/dev/null)
+    if [ "$before" = "$after" ] && grep -q "exited 9" "$WORK/edit3.out" && [ "$left" = "edited but the editor refused" ]; then
+        note "gitui edit: a nonzero exit cancels the edit, commits nothing, and leaves the message file"
+    else
+        bad "gitui edit: nonzero exit" "before=$before after=$after left=$left" "$(cat "$WORK/edit3.out")"
+    fi
+
+    # killed by a signal: also a cancelled edit, but named differently -- a
+    # more unusual case than a plain nonzero exit.
+    before=$(git -C "$editfx" rev-parse HEAD)
+    EDITOR="$WORK/editor-signal.sh" "$WORK/t_gitclient_ops" "$editfx/.git" "$editfx" edit >"$WORK/edit4.out" 2>"$WORK/edit4.err"
+    after=$(git -C "$editfx" rev-parse HEAD)
+    if [ "$before" = "$after" ] && grep -q "killed by signal 15" "$WORK/edit4.out"; then
+        note "gitui edit: a signalled editor cancels the edit and says so distinctly"
+    else
+        bad "gitui edit: signalled editor" "before=$before after=$after" "$(cat "$WORK/edit4.out")"
+    fi
+
+    # $EDITOR unset: falls back to vi, real git's own default -- proven here
+    # with a $PATH under this test's own control rather than the real vi.
+    before=$(git -C "$editfx" rev-parse HEAD)
+    got=$(cd "$editfx" && PATH="$WORK/fakebin:$PATH" env -u EDITOR "$WORK/t_gitclient_ops" "$editfx/.git" "$editfx" edit)
+    after=$(git -C "$editfx" rev-parse HEAD)
+    log_line=$(git -C "$editfx" log -1 --format=%s 2>&1)
+    if [ "$before" != "$after" ] && [ "$log_line" = "a message from the stand-in editor" ]; then
+        note "gitui edit: \$EDITOR unset falls back to vi, found on \$PATH"
+    else
+        bad "gitui edit: vi fallback" "before=$before after=$after log_line=$log_line got=$got"
+    fi
+
+    # os.run itself fails: no process ever started, so this falls back to
+    # exactly the pre-os.run behaviour -- the template on disk, and an
+    # instruction to edit it externally and press f.
+    printf 'yet another change\n' >"$editfx/c.txt"
+    git -C "$editfx" add -A >/dev/null
+    rm -f "$editfx/.git/COMMIT_EDITMSG"
+    before=$(git -C "$editfx" rev-parse HEAD)
+    EDITOR="$WORK/no-such-editor-anywhere" "$WORK/t_gitclient_ops" "$editfx/.git" "$editfx" edit >"$WORK/edit5.out" 2>"$WORK/edit5.err"
+    after=$(git -C "$editfx" rev-parse HEAD)
+    if [ "$before" = "$after" ] && grep -q "cannot launch" "$WORK/edit5.out" && grep -q "press f to finish" "$WORK/edit5.out" && [ -f "$editfx/.git/COMMIT_EDITMSG" ]; then
+        note "gitui edit: os.run itself failing falls back to the template-and-edit-externally path"
+    else
+        bad "gitui edit: os.run Err fallback" "before=$before after=$after" "$(cat "$WORK/edit5.out")"
+    fi
+
+    fsck_out=$(git -C "$editfx" fsck --full 2>&1)
+    bad_fsck=$(echo "$fsck_out" | grep -v '^dangling blob ' || true)
+    if [ -z "$bad_fsck" ]; then
+        note "gitui edit: fsck reports nothing but expected dangling blobs after the editor scenarios"
+    else
+        bad "gitui edit: fsck after the editor scenarios" "$fsck_out"
     fi
 fi
 

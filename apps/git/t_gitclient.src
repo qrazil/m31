@@ -100,5 +100,10 @@ counter.check("commit message: comments dropped, body kept", gitclient.strip_com
 counter.check("commit message: leading and trailing blank lines trimmed", gitclient.strip_comment_lines("\n\n  hello  \n\n") == "hello", gitclient.strip_comment_lines("\n\n  hello  \n\n"));
 counter.check("commit message: all-comment input strips to empty (refused by finish_commit)", gitclient.strip_comment_lines(gitclient.commit_template()) == "", gitclient.strip_comment_lines(gitclient.commit_template()));
 counter.check("commit message: whitespace-only input strips to empty", gitclient.strip_comment_lines("   \n\t\n   ") == "", gitclient.strip_comment_lines("   \n\t\n   "));
+
+// --- pick_editor ---------------------------------------------------------------
+
+counter.check("pick_editor: $EDITOR set is used as-is", gitclient.pick_editor(Option<str>.Some("emacs -nw")) == "emacs -nw", gitclient.pick_editor(Option<str>.Some("emacs -nw")));
+counter.check("pick_editor: $EDITOR unset falls back to vi, real git's own default", gitclient.pick_editor(Option<str>.None) == "vi", gitclient.pick_editor(Option<str>.None));
 print("");
 print(counter.checks.to_str() + " checks, " + counter.failed.to_str() + " failed");
