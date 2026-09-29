@@ -156,6 +156,45 @@ tree" primitive exists); rebase or merge; packfiles (already tracked).
 disposable fixture built and destroyed by the test itself, with real `git`
 as the oracle — never a real repository, including this one.
 
+## Going remote, 2026-09-29: packfiles, then HTTP fetch, SSH held separately
+
+Three things were named together as "make this tool complete" — packfiles,
+smart HTTP, and SSH — and they are not the same size or the same kind of
+risk, so they don't start together.
+
+**Packfiles first, on their own.** Nothing else can produce anything usable
+without them: a `clone`, a `fetch` and a `push` all traffic in packfiles,
+and this already matters with no network involved at all — 6 of the 31
+repositories on this project's own orogit server, and any repository a real
+`git clone` ever produced, are unreadable by this tool today for exactly
+this reason (`apps/git/README.md`'s own long-standing table). Fully
+independent of HTTP or SSH, and fully oracle-testable against real `git` in
+disposable fixtures, the same discipline as everything else here. Reading
+only for this pass -- writing a packfile (needed for `push`) is a named,
+separate follow-up, the same shape as the index/object/ref read-before-write
+split the rest of `apps/git` already went through.
+
+**Smart HTTP next, fetch/clone only, no push yet.** Builds on packfile
+reading (a fetched pack is only useful once something can unpack it) but its
+own wire protocol -- pkt-line framing, ref advertisement, want/have
+negotiation -- is independently buildable against `lib/http.src`, which
+already exists. A freshly fetched pack is unpacked straight into loose
+objects using the object-writing path that already exists, rather than also
+building a packfile indexer in the same pass -- keeping a fetched pack as a
+pack (what real git does, for space and time on a large repository) is a
+later optimisation, not a correctness requirement.
+
+**SSH is held, not simply sequenced after.** It is not a bigger version of
+the same task -- it needs a real cryptographic transport (key exchange, host
+verification, a cipher, a MAC) and public-key auth *before* the git protocol
+even starts, and a subtle bug there is a vulnerability, not a wrong diff:
+categorically different from "byte-for-byte matches real git." It is also
+the lowest-value of the three right now -- this project's own orogit
+deployment is Gitea, which serves HTTP remotes fine, so smart HTTP alone
+reaches GitHub, GitLab and this project's own server with no SSH at all. It
+gets its own scoping pass, the same way `docs/concurrency-decision.md`
+exists as its own document, rather than riding in as a third parallel track.
+
 ## What this deliberately does not decide yet
 
   - Exact keybindings (mnemonic, one key per base verb, is the only
