@@ -65,20 +65,21 @@ check "refs" "$WORK/a" "$WORK/b"
 
 # --- cat-file and ls-tree, over a sample of the store -------------------------
 #
-# Every loose object if there are few, and a spread of them if there are
-# thousands: the first, the last and every Nth, so the sample is the same on
-# every run and covers all four types.
+# Every object if there are few, and a spread of them if there are thousands:
+# the first, the last and every Nth, so the sample is the same on every run
+# and covers all four types. Enumerated through real `git`
+# (`--batch-all-objects`, which walks loose AND packed objects alike) rather
+# than a loose-only directory listing, so this sample -- and so every
+# cat-file/ls-tree comparison below -- covers a packed repository exactly as
+# it covers a loose one; `apps/git/test.sh` runs this same script against a
+# packed fixture for exactly that reason.
 
 common=$(cd "$REPO" && git rev-parse --path-format=absolute --git-common-dir)
-python3 - "$common" "$WORK/sample" <<'PY'
-import os, sys
-od = os.path.join(sys.argv[1], "objects")
-names = []
-for two in sorted(os.listdir(od)):
-    if len(two) == 2 and all(c in "0123456789abcdef" for c in two):
-        for rest in sorted(os.listdir(os.path.join(od, two))):
-            if len(rest) == 38:
-                names.append(two + rest)
+"${G[@]}" cat-file --batch-all-objects --batch-check='%(objectname)' | sort > "$WORK/allnames"
+python3 - "$WORK/allnames" "$WORK/sample" <<'PY'
+import sys
+with open(sys.argv[1]) as f:
+    names = [line.strip() for line in f if line.strip()]
 step = max(1, len(names) // 120)
 with open(sys.argv[2], "w") as f:
     f.write("\n".join(names[::step]))

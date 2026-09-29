@@ -82,6 +82,19 @@ if build t_inflate; then
     grep '^inflate:' "$WORK/z.time" | sed 's/^/     /'
 fi
 
+# --- inflate from a mid-file offset, isolated from apps/git/pack.src -----------
+
+if build t_inflate_at; then
+    python3 apps/git/oracle_inflate_at.py "$WORK/za" >"$WORK/za.want"
+    "$WORK/t_inflate_at" "$WORK/za" >"$WORK/za.got" 2>"$WORK/za.err"
+    if cmp -s "$WORK/za.got" "$WORK/za.want"; then
+        note "inflate_at/decompress_at: $(wc -l <"$WORK/za.got") mid-offset streams match zlib"
+    else
+        bad "inflate_at" "$(diff "$WORK/za.got" "$WORK/za.want" | head -12)" \
+            "$(cat "$WORK/za.err")"
+    fi
+fi
+
 # --- the fixture repository ----------------------------------------------------
 #
 # Everything the format can do that this program has to get right, in one
@@ -154,7 +167,54 @@ with a body'
 ) >"$WORK/fixture.log" 2>&1 || { bad "fixture repository" "$(tail -5 "$WORK/fixture.log")"; }
 [ -d "$fixture/.git" ] && note "fixture repository built"
 
-repos=("$fixture" "$@")
+# --- a packed fixture, with real OBJ_OFS_DELTA and OBJ_REF_DELTA chains --------
+#
+# `apps/git/README.md`'s whole remaining gap: every repository above is
+# entirely loose, and everything from here on runs against one that is
+# entirely packed instead, the same "walk every object, compare canonically"
+# and "every command, compared to real git" discipline, unchanged, applied to
+# the other storage format `object.src`/`pack.src` now read transparently.
+#
+# 30 commits touching two files with a shared line of boilerplate text is
+# little enough to build in a fraction of a second and similar enough that
+# `git repack -ad` chooses to delta most of it -- `OBJ_OFS_DELTA`, git's own
+# default. A second pack built from the same history with `git pack-objects
+# --no-delta-base-offset` (repack does not honour `pack.deltaBaseOffset` the
+# same way; asking `pack-objects` directly does) is real `OBJ_REF_DELTA`
+# instead, still against bases in the one pack, which is what proves the
+# in-`.idx` fast path in `pack.src`'s own `resolve_offset` and not only its
+# cross-pack/loose fallback. The new pack has to be written *before* the old
+# one is removed -- `pack-objects` reads the objects it is packing from
+# wherever they already are.
+packed="$WORK/packed"
+mkdir -p "$packed"
+(
+    set -e
+    cd "$packed"
+    git init -q -b main .
+    git config user.email t@example.com
+    git config user.name 'A U Thor'
+    for i in $(seq 1 30); do
+        printf 'line %d of file A\nsome shared boilerplate text goes here for delta compression\n' "$i" >>a.txt
+        printf 'line %d of file B\nsome shared boilerplate text goes here for delta compression\n' "$i" >>b.txt
+        git add -A
+        git commit -q -m "commit $i"
+    done
+    git repack -ad -q
+) >"$WORK/packed.log" 2>&1 || { bad "packed fixture (git repack -ad)" "$(tail -5 "$WORK/packed.log")"; }
+[ -d "$packed/.git" ] && note "packed fixture built and repacked (git repack -ad)"
+
+refdelta="$WORK/refdelta"
+cp -r "$packed" "$refdelta" 2>/dev/null
+(
+    set -e
+    cd "$refdelta"
+    git rev-list --objects --all | git pack-objects --no-delta-base-offset -q .git/objects/pack/refdelta
+    rm -f .git/objects/pack/pack-*
+) >"$WORK/refdelta.log" 2>&1 || { bad "OBJ_REF_DELTA fixture" "$(tail -5 "$WORK/refdelta.log")"; }
+[ -d "$refdelta/.git" ] && note "OBJ_REF_DELTA fixture built (git pack-objects --no-delta-base-offset)"
+
+repos=("$fixture" "$packed" "$refdelta" "$@")
 
 # --- objects, against the Python reader ----------------------------------------
 

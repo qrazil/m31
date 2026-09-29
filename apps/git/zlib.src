@@ -11,7 +11,13 @@
 // ---
 //   zlib.decompress(src)            -> Result<bytes, Error>   RFC 1950, checked
 //   zlib.decompress(src, limit: n)  -> the same, refusing to emit more than n
+//   zlib.decompress_at(src, start)  -> Result<Decoded, Error> RFC 1950,
+//                                      starting at `src[start]`, reporting how
+//                                      many input octets it consumed
 //   zlib.inflate(src)               -> Result<bytes, Error>   raw RFC 1951
+//   zlib.inflate_at(src, start)     -> Result<Decoded, Error> raw RFC 1951,
+//                                      starting at `src[start]`, reporting how
+//                                      many input octets it consumed
 //   zlib.adler32(b)                 -> int, the RFC 1950 check value
 //   zlib.deflate_stored(data)       -> bytes   RFC 1951, uncompressed stored blocks
 //   zlib.compress(data)             -> bytes   RFC 1950 wrapping the above
@@ -21,6 +27,30 @@
 // check value does not match is an error and not a warning: the bytes came off
 // a disk, and the one thing the format offers to say they arrived intact is
 // worth the one pass it costs.
+//
+// --- `inflate_at`: one DEFLATE stream among several in the same buffer -------
+//
+// A packfile (`apps/git/pack.src`) is many independently-compressed objects
+// back to back, so reading one of them means starting to decompress partway
+// into a buffer that holds many more objects after it, and stopping exactly
+// where that one object's stream ends -- DEFLATE streams are self-terminating
+// (an end-of-block symbol, RFC 1951 §3.2.3), so this never needs to be told in
+// advance how long the stream is, only where it starts.
+//
+// `Bits` already carries its own read position (`at`) rather than assuming
+// its `src` starts at octet zero -- `decompress` above already begins reading
+// at `at: 2`, past the two-octet zlib header -- so `inflate_at` costs nothing
+// new in the reader itself: it is `inflate`'s `Bits` construction with a
+// caller-given start instead of zero, plus `align()` afterwards (exactly the
+// alignment `decompress` already does before reading its trailing Adler-32)
+// to round the stopping point up to the octet boundary the next object starts
+// on, and `b.at - start` for how many input octets that was.
+//
+// **No copy.** `bytes` is a reference type (reference §3.10): passing the
+// whole packfile buffer into `Bits(src, at: start)` aliases it, it does not
+// clone it, so decompressing one small object from partway through a large
+// pack costs nothing proportional to the pack's size or to how far into it
+// the object sits -- only to the object's own compressed length.
 //
 // --- the bit reader does not fail --------------------------------------------
 //
@@ -545,6 +575,28 @@ pub Result<bytes, Error> inflate(bytes src, int limit = -1) {
     return Result<bytes, Error>.Ok(out);
 }
 
+/// `inflate_at`'s answer: the plaintext, and how many octets of `src` (from
+/// the `start` it was given) the stream actually occupied.
+pub type Decoded {
+    pub bytes data;
+    pub int used;
+}
+
+/// A raw DEFLATE stream (RFC 1951) that begins at `src[start]` rather than at
+/// `src[0]` -- one object's compressed data inside a packfile that holds many
+/// more before and after it. See the module header, "one DEFLATE stream among
+/// several in the same buffer": this does not copy `src`, and `used` is
+/// exactly the number of input octets between `start` and the octet boundary
+/// the stream's end-of-block symbol aligns up to, which is where the next
+/// object (or whatever else the caller placed after this one) begins.
+pub Result<Decoded, Error> inflate_at(bytes src, int start, int limit = -1) {
+    bytes out = [];
+    Bits b = Bits(src, at: start);
+    run(b, out, limit)?;
+    b.align();
+    return Result<Decoded, Error>.Ok(Decoded(out, b.at - start));
+}
+
 // --- writing: stored blocks only ---------------------------------------------
 //
 // There is no Huffman encoder here. RFC 1951 §3.2.4's stored block -- a
@@ -620,19 +672,38 @@ pub bytes compress(bytes data) {
 /// file compares the object's declared size with what came out, which is what
 /// `object.src` does.
 pub Result<bytes, Error> decompress(bytes src, int limit = -1) {
-    if (src.size() < 2) {
-        return Result<bytes, Error>.Err(Error.Truncated);
+    Decoded d = decompress_from(src, 0, limit)?;
+    return Result<bytes, Error>.Ok(d.data);
+}
+
+/// `decompress`, starting at `src[start]` instead of `src[0]` and reporting
+/// how many octets of `src` -- header, DEFLATE stream and trailing Adler-32
+/// together -- the object occupied, the same pairing `inflate_at` gives the
+/// raw format. This is the call `apps/git/pack.src` actually makes: a
+/// packfile entry is a full RFC 1950 stream exactly like a loose object's,
+/// just not alone in its buffer, so it needs everything `decompress` checks
+/// (the header, the preset-dictionary bit, the checksum) and not merely
+/// `inflate_at`'s raw DEFLATE. No copy, for the same reason `inflate_at` does
+/// not need one: `bytes` is a reference type, so `src` is aliased, not cloned,
+/// however large the packfile around this one object is.
+pub Result<Decoded, Error> decompress_at(bytes src, int start, int limit = -1) {
+    return decompress_from(src, start, limit);
+}
+
+Result<Decoded, Error> decompress_from(bytes src, int start, int limit) {
+    if (start + 2 > src.size()) {
+        return Result<Decoded, Error>.Err(Error.Truncated);
     }
-    int cmf = src[0];
-    int flg = src[1];
+    int cmf = src[start];
+    int flg = src[start + 1];
     if ((cmf & 0x0F) != 8 || cmf >> 4 > 7 || (cmf * 256 + flg) % 31 != 0) {
-        return Result<bytes, Error>.Err(Error.BadHeader);
+        return Result<Decoded, Error>.Err(Error.BadHeader);
     }
     if ((flg & 0x20) != 0) {
-        return Result<bytes, Error>.Err(Error.PresetDictionary);
+        return Result<Decoded, Error>.Err(Error.PresetDictionary);
     }
     bytes out = [];
-    Bits b = Bits(src, at: 2);
+    Bits b = Bits(src, at: start + 2);
     run(b, out, limit)?;
     b.align();
     int a0 = b.byte();
@@ -640,14 +711,14 @@ pub Result<bytes, Error> decompress(bytes src, int limit = -1) {
     int a2 = b.byte();
     int a3 = b.byte();
     if (b.over) {
-        return Result<bytes, Error>.Err(Error.Truncated);
+        return Result<Decoded, Error>.Err(Error.Truncated);
     }
     int want = a0 << 24 | a1 << 16 | a2 << 8 | a3;
     int got = adler32(out);
     if (want != got) {
-        return Result<bytes, Error>.Err(Error.Checksum);
+        return Result<Decoded, Error>.Err(Error.Checksum);
     }
-    return Result<bytes, Error>.Ok(out);
+    return Result<Decoded, Error>.Ok(Decoded(out, b.at - start));
 }
 
 /// RFC 1950's check value: two sums modulo 65521, the second of the first.

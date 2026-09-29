@@ -1,13 +1,20 @@
-// Every loose object in a repository, read and printed canonically, for
-// `oracle_object.py` to be diffed against.
+// Every object in a repository -- loose or packed -- read and printed
+// canonically, for `oracle_object.py` to be diffed against.
 //
 //   ./build.sh apps/git/t_object.src -o t_object && ./t_object <repo>
 //
-// This is the end-to-end check: it runs `zlib.decompress` over every object
-// in the store, verifies each one's SHA-1 against the name it is filed under,
-// and prints its parse in a form that has no text decoding in it -- a path,
-// a name, an email and a message are hex or a digest, never characters. So
-// a disagreement is a disagreement about the format and not about UTF-8.
+// This is the end-to-end check: it runs `object.read` (loose, then
+// `pack.src`, exactly as every other reader in this program does) over every
+// object `object.all` names, which checks each one's SHA-1 against the name
+// it is filed under -- reconstructed through a delta chain first, when it is
+// packed -- and prints its parse in a form that has no text decoding in it --
+// a path, a name, an email and a message are hex or a digest, never
+// characters. So a disagreement is a disagreement about the format and not
+// about UTF-8. `object.all` rather than `object.loose` is what makes this the
+// same check on a packed repository as on a loose one: on an all-loose
+// fixture (everything `apps/git/test.sh` built before packfiles existed
+// here) the two name exactly the same ids, so nothing about this file's
+// output changes for them.
 
 import object;
 import io;
@@ -23,7 +30,7 @@ if (argv.size() < 2) {
 }
 str gd = gitdir(argv[1]);
 List<str> names = [];
-match (object.loose(gd)) {
+match (object.all(gd)) {
     case Ok(List<str> ids): {
         names = ids;
     }
@@ -47,7 +54,7 @@ for (str id in names) {
 }
 int ns = date.now_ns() - t0;
 if (ns > 0) {
-    io.eprint("objects: " + names.size().to_str() + " loose objects, " + total.to_str() + " octets of content in " + (ns / 1_000_000).to_str() + " ms = " + (total * 1_000 / ns).to_str() + " MB/s");
+    io.eprint("objects: " + names.size().to_str() + " objects, " + total.to_str() + " octets of content in " + (ns / 1_000_000).to_str() + " ms = " + (total * 1_000 / ns).to_str() + " MB/s");
 }
 
 void show(object.Object o) {

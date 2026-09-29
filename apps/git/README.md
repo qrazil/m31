@@ -21,8 +21,9 @@ bash apps/git/test.sh <repo> [<repo>…]   # those, and each repository named
 | file | what it is |
 |---|---|
 | `sha1.src` | SHA-1 (FIPS 180-4), incremental and one-shot |
-| `zlib.src` | DEFLATE inflate (RFC 1951) and the zlib wrapper (RFC 1950), with Adler-32 |
-| `object.src` | loose objects: the header, the SHA-1 check, trees, commits, tags |
+| `zlib.src` | DEFLATE inflate (RFC 1951) and the zlib wrapper (RFC 1950), with Adler-32, from a mid-file offset as well as from the front |
+| `object.src` | the object store: the header, the SHA-1 check, trees, commits, tags -- loose or, via `pack.src`, packed, through the one `read` |
+| `pack.src` | packfiles: `.idx` v2, the pack's own object encoding, `OBJ_OFS_DELTA`/`OBJ_REF_DELTA` delta-chain resolution |
 | `refs.src` | HEAD, `refs/**`, `packed-refs`, symbolic refs, `rev-parse`'s DWIM |
 | `repo.src` | where the files are: `.git` as a file, and a linked worktree's `commondir` |
 | `git.src` | the read-only CLI |
@@ -44,7 +45,12 @@ bash apps/git/test.sh <repo> [<repo>…]   # those, and each repository named
 
 Read-only: `cat-file --type/--size/--pretty`, `ls-tree`, `log [--max N]
 [<rev>]`, `rev-parse` and `refs`, on a working tree, a bare repository or a
-linked worktree.
+linked worktree -- **loose or packed**, transparently: `object.read` checks
+the loose store first and `pack.src`'s `.idx`/`.pack` reading second, so
+every reader above it (this CLI, the interactive client's status/diff/commit
+reading, `rev-parse`'s short-hash resolution) works the same way on a
+repository a real `git clone` produced as on one this program has only ever
+committed to itself. See "Packfiles", below, for what that took.
 
 The write path: `.git/index` (read and write), loose object writing (blob,
 tree, commit), ref writing (`update`, `update_symbolic`, compare-and-swap),
@@ -83,13 +89,42 @@ object content end to end (open, inflate, verify the SHA-1, parse).
 `FRICTION.md` §5 takes the SHA-1 figure apart, because it is a language
 datapoint and not a git one.
 
-## What a real repository needs that this cannot do
+## Packfiles
 
-**Packfiles.** That is the whole of it, and how much it costs depends
-entirely on how the repository got there.
+This used to be the whole of what a real repository needed that this could
+not do, and how much it cost depended entirely on how the repository got
+there -- both still true of the numbers below, which describe the
+repositories this project actually has lying around, not this program's own
+ability to read them any more. `apps/git/design.md`'s "Going remote" names
+packfiles as the first, independent piece of that larger plan (reading only
+-- writing one, for `push`, is later, separate work), and it has landed:
+`pack.src` reads the `.idx` (format v2; v1 is refused, not guessed at, since
+nothing still writes it), the packfile's own variable-length object headers,
+and resolves an `OBJ_OFS_DELTA`/`OBJ_REF_DELTA` chain of either kind (or a
+mix) down to a real commit/tree/blob/tag, iteratively rather than
+recursively so a real chain cannot blow the stack. `zlib.src` grew the
+matching primitive, `inflate_at`/`decompress_at`: decompress one DEFLATE or
+zlib stream starting at an offset inside a much larger buffer, and report how
+many input octets it consumed, so a packfile's objects are read one at a time
+without ever copying the pack to get to the next one.
+
+`object.read` -- and so `log`, `cat-file`, `ls-tree`, `rev-parse`'s short
+names and the interactive client's own reading -- checks the loose store
+first and a repository's packs second, with nothing above `object.src`
+changed to make that true. Checked the same way everything else here is:
+`apps/git/oracle_object.py`'s from-scratch reader grew its own independent
+`.idx`/pack/delta implementation (Python's `zlib.decompressobj`, fed from an
+offset, stands in for `inflate_at`) and walks every object of a fixture
+`git repack -ad` packs into real `OBJ_OFS_DELTA` chains and, separately,
+`git pack-objects --no-delta-base-offset` packs into real `OBJ_REF_DELTA`
+ones instead; `apps/git/compare.sh`'s full command comparison against real
+`git` runs against both packed fixtures exactly as it runs against the loose
+one; and `apps/git/oracle_inflate_at.py` checks the mid-offset codec on its
+own, isolated from the packfile format around it.
 
 Counted by walking from every ref with loose objects alone, at the time of
-writing:
+writing (a measurement of these repositories' own history, unrelated to
+what this program can now read):
 
 | repository | objects reachable from its refs | loose | in packs |
 |---|---|---|---|
@@ -117,17 +152,20 @@ split:
 
 The line is not "old objects are packed and new ones are loose": it is
 "objects this machine wrote are loose, objects that arrived in a pack are
-packed, until something repacks". Stage 1 is therefore a usable tool on a
-repository you have been committing to and a useless one on a fresh clone,
-with very little in between. `apps/git/test.sh` is pointed at repositories of
-the first kind on purpose, and the fixture it builds for itself is one.
+packed, until something repacks". That split used to mean this program was a
+usable tool on a repository you have been committing to and a useless one on
+a fresh clone, with very little in between; `pack.src` is what closes that
+gap. `apps/git/test.sh`'s own built-in fixture is still an all-loose one on
+purpose (a repository this program itself commits to, same as `oro` and
+`lang`), and it now builds two packed fixtures alongside it -- one repacked
+with real `OBJ_OFS_DELTA` chains, one with real `OBJ_REF_DELTA` ones -- so
+every command comparison in this file's own test suite runs against a packed
+repository as well as a loose one.
 
-Reading a packfile needs the `.idx` fanout, the pack's own object encoding,
-and — the real work — `OBJ_OFS_DELTA` and `OBJ_REF_DELTA`, which are a
-copy/insert delta format applied on top of a base object that may itself be a
-delta. It also wants the inflate in `zlib.src` to run from a mid-file offset
-without being handed the rest of the file, which is a change to that module's
-shape rather than an addition to it. That is stage 2.
+Packfile *writing* remains out of scope here -- it is what `push` needs, and
+`apps/git/design.md`'s "Going remote" holds it as later, separate work, the
+same read-before-write split the index/object/ref write path already went
+through.
 
 ## Smaller things this does not do
 
