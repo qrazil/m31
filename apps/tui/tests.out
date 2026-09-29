@@ -89,6 +89,12 @@ ok   pad centre
 ok   pad counts columns, not bytes
 ok   fit does both
 ok   offset centres
+ok   drop_columns: cut's complement, keeps the tail
+ok   drop_columns: dropping nothing returns the whole string
+ok   drop_columns: dropping it all returns empty
+ok   drop_columns: dropping past the end returns empty
+ok   drop_columns: a wide character is dropped whole, never split
+ok   drop_columns then cut reproduces a scrolled window
 
 == renderer ====================================================
 ok   an unchanged frame writes nothing
@@ -226,6 +232,12 @@ ok   a row hidden by a fold cannot be selected
 ok   expanding the other section adds its child
 ok   select_id finds a row once it is visible
 ok   select_id moved the cursor to it
+ok   scroll_h: a fresh outline starts unscrolled
+ok   scroll_h: moves the offset by delta
+ok   scroll_h(4): the rendered rows actually change
+ok   scroll_h: back to zero
+ok   scroll_h: scrolling back restores the original view exactly
+ok   scroll_h: never goes negative, there is nothing left of the start
 
 == jump list, synced to an outline =============================
 ok   one entry per visible outline row
@@ -333,4 +345,4 @@ full redraw: 1210 bytes
 ok   a full frame is not empty
 ok   a diff against a blank frame is smaller than a full redraw
 
--- 163 passed, 0 failed
+-- 175 passed, 0 failed

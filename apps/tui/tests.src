@@ -303,6 +303,12 @@ void text_tests(Tally t) {
     check(t, "pad counts columns, not bytes", "[" + tuitext.pad("\u{6F22}", 4, tuitext.Align.Left) + "]", "[\u{6F22}  ]");
     check(t, "fit does both", "[" + tuitext.fit("hello world", 6, tuitext.Align.Left) + "]", "[hello\u{2026}]");
     check_int(t, "offset centres", tuitext.offset("abc", 9, tuitext.Align.Center), 3);
+    check(t, "drop_columns: cut's complement, keeps the tail", tuitext.drop_columns("hello world", 6), "world");
+    check(t, "drop_columns: dropping nothing returns the whole string", tuitext.drop_columns("hello", 0), "hello");
+    check(t, "drop_columns: dropping it all returns empty", tuitext.drop_columns("hello", 5), "");
+    check(t, "drop_columns: dropping past the end returns empty", tuitext.drop_columns("hi", 50), "");
+    check(t, "drop_columns: a wide character is dropped whole, never split", tuitext.drop_columns("\u{6F22}\u{5B57}x", 1), "\u{5B57}x");
+    check(t, "drop_columns then cut reproduces a scrolled window", tuitext.cut(tuitext.drop_columns("the quick brown fox", 4), 5), "quick");
 }
 
 // --- 5. the diffing renderer ------------------------------------------------
@@ -543,6 +549,28 @@ void outline_tests(Tally t) {
             check(t, "select_id moved the cursor to it", "none", "c.txt");
         }
     }
+    // scroll_h: a row wider than the buffer is clipped either way, so the
+    // check is the invariant, not a hand-counted substring -- scrolling
+    // right must change what is drawn, and scrolling back by the same
+    // amount must restore it exactly, the same round-trip `cut`/
+    // `drop_columns` themselves are tested against in `text_tests`.
+    tuioutline.Outline so = sample_outline();
+    tuibuf.Buffer sb = tuibuf.Buffer.sized(10, 5);
+    so.render(sb, tuigeom.Rect(0, 0, 10, 5));
+    str unscrolled = sb.frame();
+    check_int(t, "scroll_h: a fresh outline starts unscrolled", so.hscroll, 0);
+    so.scroll_h(4);
+    check_int(t, "scroll_h: moves the offset by delta", so.hscroll, 4);
+    tuibuf.Buffer sb2 = tuibuf.Buffer.sized(10, 5);
+    so.render(sb2, tuigeom.Rect(0, 0, 10, 5));
+    ok(t, "scroll_h(4): the rendered rows actually change", sb2.frame() != unscrolled);
+    so.scroll_h(-4);
+    check_int(t, "scroll_h: back to zero", so.hscroll, 0);
+    tuibuf.Buffer sb3 = tuibuf.Buffer.sized(10, 5);
+    so.render(sb3, tuigeom.Rect(0, 0, 10, 5));
+    check(t, "scroll_h: scrolling back restores the original view exactly", sb3.frame(), unscrolled);
+    so.scroll_h(-1000);
+    check_int(t, "scroll_h: never goes negative, there is nothing left of the start", so.hscroll, 0);
 }
 
 void jump_tests(Tally t) {

@@ -14,6 +14,7 @@
 //   outline.move(delta)                           step the cursor
 //   outline.toggle() / .expand() / .collapse()    fold the row under the cursor
 //   outline.select_id(id)      -> bool            move the cursor to a row by id
+//   outline.scroll_h(delta)                       pan every row sideways
 //   outline.render(buf, area)
 //
 // --- what "visible" means ----------------------------------------------------
@@ -38,6 +39,7 @@ import tuibuf;
 import tuigeom;
 import tuiscroll;
 import tuistyle;
+import tuitext;
 
 /// One entry in the outline, and the subtree rooted at it.
 pub type Node {
@@ -90,6 +92,23 @@ pub type Outline {
     pub str expanded_mark = "\u{25BE} ";
     pub str collapsed_mark = "\u{25B8} ";
     pub str leaf_mark = "  ";
+    /// Columns scrolled off the left of every row, uniformly -- content
+    /// wider than the terminal (a long commit message, an author's email, a
+    /// deep file path) is reachable by scrolling sideways rather than lost
+    /// to truncation with no way back. Applies to a whole row, mark
+    /// included, not just its label -- a fold marker that vanished while
+    /// scrolled would be worse than one that scrolls with everything else.
+    pub int hscroll = 0;
+}
+
+/// Scroll every row left or right by `delta` columns (negative scrolls
+/// left), clamped so it never goes negative -- there is nothing to reveal
+/// scrolling further left than the unscrolled view.
+pub void Outline.scroll_h(int delta) {
+    hscroll = hscroll + delta;
+    if (hscroll < 0) {
+        hscroll = 0;
+    }
 }
 
 /// The flattened list of rows the tree currently shows, in order, skipping
@@ -229,8 +248,8 @@ pub void Outline.render(tuibuf.Buffer buf, tuigeom.Rect area) {
         int x = area.x + row.depth * indent;
         int room = area.right() - x;
         if (room > 0) {
-            int used = buf.set_str(x, y, mark, st, max: room);
-            buf.set_str(x + used, y, row.node.label, st, max: room - used);
+            str content = tuitext.drop_columns(mark + row.node.label, hscroll);
+            buf.set_str(x, y, content, st, max: room);
         }
         i = i + 1;
     }

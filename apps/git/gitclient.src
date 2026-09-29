@@ -245,16 +245,25 @@ bool expanded_for(Map<str, bool> collapsed, str id, bool default_expanded) {
 //
 // So this wraps eagerly, here, against `COMMIT_BODY_WRAP_COLS` -- a stand-in
 // for a typical terminal, chosen so it still looks right at the common case
-// rather than picking an arbitrary round number. Too-narrow a terminal can
-// still clip a wrapped row's tail in `Outline.render`, exactly as it always
-// could for any other row; too-wide a terminal wraps a little earlier than
-// it strictly needs to. Neither loses a character: `tuitext.wrap` only
-// drops whitespace exactly at a line break it introduces, never a
-// non-space byte, so joining a message line's wrapped rows back together
-// (with a single space where a break was) reproduces the original line.
-// General wrap-awareness in `tuioutline` itself is a real follow-up, not
-// attempted here.
+// rather than picking an arbitrary round number. Neither direction loses a
+// character: `tuitext.wrap` only drops whitespace exactly at a line break
+// it introduces, never a non-space byte, so joining a message line's
+// wrapped rows back together (with a single space where a break was)
+// reproduces the original line. General wrap-awareness in `tuioutline`
+// itself is a real follow-up, not attempted here.
+//
+// A terminal narrower than this fallback still clips a wrapped row's tail
+// in `Outline.render`, exactly as it always could for any other row (a long
+// file path, the author line below, never wrapped at all) -- `h`/`l` and
+// the left/right arrows now cover that case directly, via
+// `tuioutline.Outline.scroll_h`, rather than waiting on wrap-awareness to
+// close it. Content is reachable by scrolling sideways; it no longer just
+// clips with no way back.
 const int COMMIT_BODY_WRAP_COLS = 72;
+/// Columns `h`/`l`/the left and right arrows move the outline's horizontal
+/// scroll per press -- a whole word or two at a time, not one column, so a
+/// long line clears in a handful of presses.
+const int SCROLL_H_STEP = 4;
 
 /// The outline's commit section: one collapsible node per commit, its short
 /// id and first message line as the label, and -- expanded -- its author,
@@ -1164,6 +1173,8 @@ List<tuiwidget.Span> State.footer_spans(tuistyle.Theme theme) {
     List<tuiwidget.Span> out = [];
     out.push(tuiwidget.Span(" j/k"));
     out.push(tuiwidget.Span(" move  "));
+    out.push(tuiwidget.Span("h/l", style: theme.accent));
+    out.push(tuiwidget.Span(" scroll  "));
     out.push(tuiwidget.Span("enter", style: theme.accent));
     out.push(tuiwidget.Span(" toggle  "));
     out.push(tuiwidget.Span("s", style: theme.accent));
@@ -1309,10 +1320,12 @@ tuiapp.Action State.handle_key(term.Code code) {
             return tuiapp.Action.Continue;
         }
         case Right: {
-            return tuiapp.Action.Continue;
+            outline.scroll_h(SCROLL_H_STEP);
+            return tuiapp.Action.Redraw;
         }
         case Left: {
-            return tuiapp.Action.Continue;
+            outline.scroll_h(-SCROLL_H_STEP);
+            return tuiapp.Action.Redraw;
         }
         case Home: {
             return tuiapp.Action.Continue;
@@ -1348,6 +1361,14 @@ tuiapp.Action State.handle_char(int c) {
     }
     if (c == 'k') {
         step_or_move(-1);
+        return tuiapp.Action.Redraw;
+    }
+    if (c == 'h') {
+        outline.scroll_h(-SCROLL_H_STEP);
+        return tuiapp.Action.Redraw;
+    }
+    if (c == 'l') {
+        outline.scroll_h(SCROLL_H_STEP);
         return tuiapp.Action.Redraw;
     }
     if (c == 's') {

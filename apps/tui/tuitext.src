@@ -255,6 +255,33 @@ pub str cut(str s, int cols) {
     return out.join("");
 }
 
+/// `s` with its first `cols` columns removed, cut between grapheme
+/// clusters -- `cut`'s complement, for a horizontally scrolled window into
+/// text wider than the room for it. Dropping partway through a wide cluster
+/// drops the whole cluster, the same "never split a cluster" rule `cut`
+/// follows, rather than showing half of one.
+pub str drop_columns(str s, int cols) {
+    if (cols <= 0) {
+        return s;
+    }
+    if (s.size() <= cols) {
+        return "";
+    }
+    if (plain(s)) {
+        return s.substr(cols, s.size());
+    }
+    List<str> out = [];
+    int w = 0;
+    for (str g in clusters(s)) {
+        if (w < cols) {
+            w = w + width(g);
+            continue;
+        }
+        out.push(g);
+    }
+    return out.join("");
+}
+
 /// `s` padded with spaces to `cols` columns. Text already that wide or wider
 /// is returned as it is -- padding never truncates, so that the two
 /// decisions stay separate.
