@@ -87,15 +87,8 @@ pub type Outline {
     pub tuistyle.Style highlight_style = tuistyle.Style(attrs: tuistyle.REVERSE);
     /// Columns of indent per level of nesting.
     pub int indent = 2;
-    /// ASCII on purpose, not `▾`/`▸`: those are Unicode's "Ambiguous" East
-    /// Asian Width category, and several real terminals -- disproportionately
-    /// phone terminal apps -- render an Ambiguous-width glyph as two columns
-    /// where this codebase's own `unicode.width` (and most others') calls it
-    /// one. Every row pays for that mark, so a one-column drift here
-    /// compounds down the whole outline. A theme is free to put the triangles
-    /// back if its target terminal is known to render them narrow.
-    pub str expanded_mark = "v ";
-    pub str collapsed_mark = "> ";
+    pub str expanded_mark = "\u{25BE} ";
+    pub str collapsed_mark = "\u{25B8} ";
     pub str leaf_mark = "  ";
 }
 

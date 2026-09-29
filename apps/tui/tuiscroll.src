@@ -91,11 +91,7 @@ pub type Scrollbar {
     pub tuistyle.Style track_style = tuistyle.Style();
     pub tuistyle.Style thumb_style = tuistyle.Style(attrs: tuistyle.REVERSE);
     pub str track_symbol = "\u{2502}";
-    /// A plain block, not `█` (U+2588): that one is Unicode's "Ambiguous"
-    /// East Asian Width category, which several real terminals render two
-    /// columns wide against this codebase's (and most others') width table
-    /// saying one -- see `tuioutline.Outline`'s marks for the same reasoning.
-    pub str thumb_symbol = "#";
+    pub str thumb_symbol = "\u{2588}";
 }
 
 int Scrollbar.length(tuigeom.Rect area) {
