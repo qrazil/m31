@@ -15,6 +15,7 @@ import gitlog;
 import object;
 import status;
 import tuioutline;
+import tuitext;
 
 // A local of the top-level program body is invisible to a function
 // (`apps/git/FRICTION.md` §6, `git.src`'s own `dispatch` comment) -- so the
@@ -93,6 +94,67 @@ for (tuioutline.Row r in o2.rows()) {
     }
 }
 counter.check("outline: an expanded commit shows its author/date/message rows", saw_body2, "author row missing after expanding");
+
+// --- commit_node: wrapping a long message line into multiple leaf rows -------
+//
+// `commit_node` wraps each logical message line to `COMMIT_BODY_WRAP_COLS`
+// (72, see its own comment in `gitclient.src`) rather than clipping it --
+// this is the fix itself, so it gets its own commit and its own checks
+// rather than piggybacking on `c1` above.
+
+str long_words = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod ";
+str long_line = long_words.repeat(3).trim();
+object.Commit c2 = object.Commit("0000000000000000000000000000000000000000", [], who, who, [], (long_line + "\n\nshort tail line\n").to_bytes());
+List<gitlog.Entry> log2 = [gitlog.Entry("2222222222222222222222222222222222222222", c2)];
+Map<str, bool> collapsed2 = {};
+collapsed2.set("commit:2222222222222222222222222222222222222222", false);
+Map<str, bytes> paths2 = {};
+tuioutline.Outline o3 = gitclient.build_outline(st, log2, collapsed2, paths2);
+List<str> m0_rows = [];
+List<str> m2_rows = [];
+bool saw_blank_line_row = false;
+for (tuioutline.Row r in o3.rows()) {
+    str rid = r.node.id;
+    if (rid.starts_with("commit:2222222222222222222222222222222222222222:m0:")) {
+        m0_rows.push(r.node.label);
+    }
+    if (rid == "commit:2222222222222222222222222222222222222222:m1:0") {
+        saw_blank_line_row = r.node.label == "  ";
+    }
+    if (rid.starts_with("commit:2222222222222222222222222222222222222222:m2:")) {
+        m2_rows.push(r.node.label);
+    }
+}
+counter.check("commit message wrap: a line far longer than the fallback width becomes more than one leaf row", m0_rows.size() > 1, m0_rows.size().to_str() + " row(s)");
+bool all_fit = true;
+List<str> pieces = [];
+for (str row in m0_rows) {
+    str content = row.substr(2, row.size());
+    if (tuitext.width(content) > 72) {
+        all_fit = false;
+    }
+    pieces.push(content);
+}
+counter.check("commit message wrap: every wrapped row fits within the fallback width", all_fit, m0_rows.join(" | "));
+counter.check("commit message wrap: rejoining the wrapped rows reproduces the original line losslessly", pieces.join(" ") == long_line, "got: " + pieces.join(" ") + "\nwant: " + long_line);
+counter.check("commit message wrap: a blank message line still yields exactly one, empty leaf row", saw_blank_line_row, "no lone blank-line row found");
+counter.check("commit message wrap: a line that already fits still yields exactly one leaf row", m2_rows.size() == 1 && m2_rows[0] == "  short tail line", m2_rows.join(" | "));
+// An empty commit message: no message rows at all, matching `first_line`'s
+// own "nothing to show" reading of an empty message (just the author/date
+// leaves).
+object.Commit c3 = object.Commit("0000000000000000000000000000000000000000", [], who, who, [], "".to_bytes());
+List<gitlog.Entry> log3 = [gitlog.Entry("3333333333333333333333333333333333333333", c3)];
+Map<str, bool> collapsed3 = {};
+collapsed3.set("commit:3333333333333333333333333333333333333333", false);
+Map<str, bytes> paths3 = {};
+tuioutline.Outline o4 = gitclient.build_outline(st, log3, collapsed3, paths3);
+bool saw_any_message_row = false;
+for (tuioutline.Row r in o4.rows()) {
+    if (r.node.id.starts_with("commit:3333333333333333333333333333333333333333:m")) {
+        saw_any_message_row = true;
+    }
+}
+counter.check("commit message wrap: an empty commit message yields no message rows", !saw_any_message_row, "unexpected message row for an empty commit message");
 
 // --- strip_comment_lines -------------------------------------------------------
 
