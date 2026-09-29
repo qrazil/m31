@@ -916,7 +916,14 @@ List<tuiwidget.Span> State.footer_spans(tuistyle.Theme theme) {
 /// overlays drawn over all of it rather than replacing any of it.
 pub void State.draw(tuibuf.Buffer buf, tuigeom.Rect area) {
     tuistyle.Theme theme = tuistyle.Theme.plain;
-    List<tuigeom.Rect> bands = tuifooter.split(area, 2);
+    str frame_title = worktree;
+    if (frame_title == ".") {
+        frame_title = "git";
+    }
+    tuiwidget.Block frame = tuiwidget.Block(title: frame_title, borders: tuiwidget.Borders.Rounded);
+    frame.render(buf, area);
+    tuigeom.Rect body = frame.inner(area);
+    List<tuigeom.Rect> bands = tuifooter.split(body, 2);
     tuigeom.Rect main = bands[0];
     tuigeom.Rect footer_area = bands[1];
     tuigeom.Rect outline_area = main;
@@ -935,7 +942,7 @@ pub void State.draw(tuibuf.Buffer buf, tuigeom.Rect area) {
     tuifooter.Footer(footer_spans(theme)).render(buf, tuigeom.Rect(footer_area.x, footer_area.y + 1, footer_area.w, 1));
     if (commit_open) {
         tuimenu.WhichKey wk = tuimenu.WhichKey("commit", [tuimenu.Item("e", "edit message (" + commit_msg_path + ")"), tuimenu.Item("f", "finish: write the commit"), tuimenu.Item("a", "abort")]);
-        wk.render(buf, area);
+        wk.render(buf, body);
     }
 }
 
