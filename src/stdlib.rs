@@ -42,6 +42,8 @@ pub fn source(name: &str) -> Option<&'static str> {
         "x25519" => include_str!("../lib/x25519.src"),
         "scalar25519" => include_str!("../lib/scalar25519.src"),
         "ed25519" => include_str!("../lib/ed25519.src"),
+        "sha256" => include_str!("../lib/sha256.src"),
+        "chacha20poly1305" => include_str!("../lib/chacha20poly1305.src"),
         _ => return None,
     })
 }
