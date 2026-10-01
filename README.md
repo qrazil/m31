@@ -22,9 +22,16 @@ which gcc and clang both build clean at `-O0` and `-O2`.
 `examples/tour.src` is a tour of every feature, and is also in the corpus so
 it cannot rot.
 
-- 95 corpus programs, 0 failing
-- 78 unit tests
+- 722 corpus programs, 0 failing
+- 130 unit tests
 - 0 dependencies, 0 `unsafe`, clippy clean at `-D warnings`
+
+Beyond the core language: a standard library (`lib/`, 27 modules) covering
+collections, JSON, CSV, HTML, a full HTTP/1.1 client and server
+(`lib/http.src`), filesystem and OS access, and a constant-time crypto stack
+(X25519, Ed25519, SHA-256/512, ChaCha20-Poly1305). On top of that, four real
+applications in `apps/`: an interactive `git` client, an `ssh` client, a
+`tui` framework, and a `markdown` renderer.
 
 ## What the language does today
 
@@ -194,8 +201,15 @@ compiler cannot see (two locals reaching the same object through a field).
 A **channel is exempt**, because it is how threads share; it is aliased
 rather than moved, and is immortal for now (see `rt_chan_new`).
 
-These are OS threads. The channel surface does not change when green threads
-replace them.
+`spawn` and `Chan` run on OS threads today; the channel surface does not
+change when green threads replace them. A complete, independently tested M:N
+green-thread runtime already exists underneath (`runtime/greenthread.*`,
+`scheduler.*`, `reactor.*` — context switching, a sharing-queue scheduler,
+and an epoll reactor with park/unpark), but it is not yet wired to
+`spawn`/`Chan`: that integration is in progress and currently blocked on a
+known cross-carrier data race, tracked as Phase 3.5 in
+`docs/concurrency-decision.md`. Treat the runtime as proven infrastructure,
+not yet as the thing `spawn` uses.
 
 **Embedding** is composition in place of inheritance: an anonymous field,
 named after its type, whose fields and methods are promoted.
@@ -280,8 +294,9 @@ form to use and no question of what order optional arguments come in.
 
 A callback is an ordinary **one-method interface**, and a function's name or
 a lambda may be written wherever one is expected — there is no function type
-(`docs/closures-decision.md`). Concurrency is OS threads for now; green
-threads are stage 3 of `docs/concurrency-decision.md`.
+(`docs/closures-decision.md`). Green threads are built (Phases 0–3 of
+`docs/concurrency-decision.md`) but not yet load-bearing; see Concurrency
+above for exactly what that means today.
 
 ## Decisions made
 
@@ -368,6 +383,19 @@ src/                   the compiler
 runtime/
   rt.h rt.c            the runtime — a SEPARATE translation unit, see §7.1
   rc_debug.h           refcount invariant, compiled in under -DRC_DEBUG
+  greenthread.h/.c     slab stack allocator, fiber state, ctx-switch glue
+  ctx_switch_x86_64.s  the x86-64 context switch itself
+  scheduler.h/.c       the M:N scheduler — not yet wired to spawn/Chan
+  reactor.h/.c         epoll reactor, park/unpark, blocking-FFI handoff
+lib/                   the standard library, written in the language itself
+  net.src http.src json.src fs.src os.src ...     27 modules total
+  x25519.src ed25519.src sha256.src sha512.src
+  chacha20poly1305.src                            constant-time crypto
+apps/                  real programs built on the language and stdlib
+  git/                 an interactive git client
+  ssh/                 an SSH client — see docs/ssh-decision.md
+  tui/                 a terminal UI framework
+  markdown/            a markdown renderer
 docs/
   reference.md             the language, stated normatively -- start here
   roadmap.md               what exists, what the freeze needs, what is out
@@ -375,10 +403,11 @@ docs/
   modules-decision.md      file = module, private by default, no cycles
   stdlib-decision.md       what an error is, and what the library will hold
   ir-v0.md                 the IR specification
-  concurrency-decision.md  the concurrency decision
+  concurrency-decision.md  the concurrency decision, and the phased build-out
   concurrency.md           the evidence behind it, and what was rejected
+  ssh-decision.md          SSH scope: client-only, publickey-only, exec-only
   types.md                 type system: proposal, plus the forks left open
-corpus/{core,twin,traps,errors}/
+corpus/{core,twin,traps,errors,fmt}/
 examples/tour.src      every feature in one file
 examples/enums.src     enums and match, including Option, Result and JSON
 ```
@@ -440,18 +469,17 @@ revisit it.
 
 ## Next
 
-1. `for` — sugar over `while` now that the loop machinery and its merge
-   points exist
-2. **The type system** — `docs/types.md`. The move checker is the only part
-   concurrency is waiting on, and it is the smallest part: one bit per local
-   over the CFG we already build
-3. ~~Closures and function values — one new IR op (`call_indirect`), a
-   function type, and a heap environment~~ — **done, and all three
-   predictions were wrong.** A callback is a one-method interface, which the
-   vtable in the object header already dispatches, so there is no function
-   type, no new IR op and no environment: a lambda is a construction of a
-   synthesised type whose fields are its captures, and one that captures
-   nothing is a single static immortal object. Cycles remain possible (a
-   capture is a field like any other) and weak references remain deferred
-4. User-defined types
-5. A C-emitter second look once there is enough language to benchmark
+1. **Fix the green-thread scheduler's cross-carrier race** — a data race
+   between a stack-limit write in `rt_fiber_switch` and a stack-probe read on
+   another carrier, reproducible stock under 2+ carriers. Tracked as Phase
+   3.5 in `docs/concurrency-decision.md`; this is the current release
+   blocker, not a nitpick
+2. **Wire `spawn`/`Chan`/`lib/net.src` through the green-thread runtime**,
+   once (1) is fixed — `spawn` and channels still run on OS threads today
+   even though the scheduler and reactor underneath them are done
+3. **An HTTP server as the first real application** on top of green
+   threads — `lib/http.src` already has a complete HTTP/1.1 implementation
+   (parsing, writing, `Handler`, `serve`) waiting on (2)
+4. GitHub Releases for the compiler and apps, so builds can be pulled by
+   URL from raw content
+5. A C-emitter second look, now that there is enough language to benchmark
