@@ -100,6 +100,16 @@ run "sys layer, every backend" bash runtime/sys_test.sh
 # header for what is and is not reachable from a pure-C test at this phase.
 run "green threads, Phase 1" bash runtime/greenthread_test.sh
 
+# Phase 2 of docs/concurrency-decision.md: the scheduler itself (shared
+# global queue with real backpressure, per-carrier local buffers with no
+# stealing, self-service draw, the random-permutation wake mechanism), built
+# standalone on Phase 1's primitives -- not wired to `spawn` yet, on
+# purpose; see runtime/scheduler.h's header. Every compiler/opt combo this
+# file already uses elsewhere, plus one dedicated ASan+UBSan build.
+# ThreadSanitizer is NOT run here -- it cannot share a binary with ASan --
+# see runtime/scheduler_tsan.sh, run by hand, for that.
+run "scheduler, Phase 2" bash runtime/scheduler_test.sh
+
 # The formatter must not change what a program means, and must reach a fixed
 # point. Both are checked against every corpus program rather than asserted:
 # a formatter that quietly alters a program is worse than no formatter.
