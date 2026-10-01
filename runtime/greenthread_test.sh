@@ -30,8 +30,14 @@ for cc in gcc clang; do
         label="$cc $opt"
         bin="$WORK/gt_${cc}_${opt#-}"
         err="$WORK/cc.err"
+        # rt.c unconditionally calls into the scheduler/reactor now (`spawn`
+        # and `Chan` always route through them), so every binary that links
+        # rt.c -- this hand-written C harness included -- links those two
+        # translation units too, even though this particular test never
+        # exercises them.
         if ! "$cc" "$opt" -Wall -Wextra -I runtime -pthread \
                 runtime/greenthread_test.c runtime/rt.c \
+                runtime/scheduler.c runtime/reactor.c \
                 runtime/ctx_switch_x86_64.s -o "$bin" 2>"$err" || [ -s "$err" ]; then
             note "build [$label]" FAILED
             sed 's/^/    /' "$err" | head -20
@@ -82,7 +88,8 @@ if command -v clang >/dev/null && \
     sbin="$WORK/gt_san"
     serr="$WORK/san.err"
     if ! clang -O1 -g $SAN -Wall -Wextra -I runtime -pthread \
-            runtime/greenthread_test.c runtime/rt.c runtime/ctx_switch_x86_64.s \
+            runtime/greenthread_test.c runtime/rt.c \
+            runtime/scheduler.c runtime/reactor.c runtime/ctx_switch_x86_64.s \
             -o "$sbin" 2>"$serr"; then
         note "sanitized build" FAILED
         sed 's/^/    /' "$serr" | head -20

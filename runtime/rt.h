@@ -329,6 +329,10 @@ int64_t rt_getsockopt(int64_t fd, int64_t opt);   /* the value, or -errno */
 int64_t rt_poll(Obj *fds, Obj *events, Obj *revents, int64_t timeout_ms);
 int64_t rt_resolve(Obj *host, int64_t port, int64_t family, Obj *out, Obj *addrs);
 int64_t rt_ignore_sigpipe(void);  /* so a write to a dead peer is EPIPE, not death */
+/* Parks the calling green thread until `fd` is ready for `events`
+ * (runtime/reactor.h's RT_REACTOR_READ/WRITE), instead of blocking the
+ * carrier on the syscall itself -- see rt.c's own comment on this function. */
+int64_t rt_wait_io(int64_t fd, int64_t events);
 /* ---- end net primitives ------------------------------------------------ */
 
 /* ---- terminal primitives: lib/term.src --------------------------------- */
@@ -703,10 +707,12 @@ int64_t rt_seq_index_of(Obj *o, int64_t v, int kind);
 
 /* ---- concurrency -------------------------------------------------------
  *
- * OS threads and blocking channels, which is stage 2 of
- * docs/concurrency-decision.md: get the channel semantics right against a
- * simple scheduler before building a real one. Green threads replace the
- * thread half later; the channel surface does not change.
+ * Green threads (docs/concurrency-decision.md, Phases 1-3 wired to `spawn`):
+ * every `spawn` is a green thread on a process-wide scheduler, never an OS
+ * thread -- see rt_spawn below and runtime/scheduler.h. `Chan`'s send/recv
+ * park the calling green thread instead of blocking the carrier OS thread
+ * (rt.c's rt_chan_send/rt_chan_recv) -- the channel surface itself did not
+ * change, exactly as this section used to promise it would not.
  *
  * A slot is 64 bits. The compiler knows the element type statically, so an
  * int rides in the slot directly and a reference rides as its pointer --
@@ -723,13 +729,23 @@ int64_t rt_chan_recv(Chan *c);
 void  rt_chan_close(Chan *c);
 void  rt_chan_drop(Chan *c);
 
-/* Spawn a thread running `entry(arg)`. The thread is detached: there is no
- * join yet, and `rt_wait_all` below is what the program end waits on. */
-void rt_spawn(void *(*entry)(void *), void *arg);
+/* Spawn a green thread running `entry(arg)`, on the process-wide scheduler
+ * (lazily created on first use -- rt_global_scheduler() in rt.c). `spawn`
+ * always means this now; there is no OS-thread spawn left (see
+ * docs/concurrency-decision.md's "The decision being made here" for why a
+ * conditional spawn was rejected). */
+void rt_spawn(void (*entry)(void *), void *arg);
 
-/* Block until every spawned thread has finished. Emitted at the end of the
- * program, so a spawn cannot outlive main and silently lose its output. */
-void rt_wait_all(void);
+/* The whole of `main` -- source order at the top level, emitted as `$main`
+ * -- also runs as a green thread (id 0 on the scheduler), not on the raw OS
+ * thread, which is what lets a `Chan`/`net` call made before any `spawn`
+ * park against something. Called exactly once, from generated `main()`:
+ * creates the scheduler, spawns `entry` as its first green thread, waits
+ * for it and everything it (transitively) spawns to finish -- including
+ * spawns made after `entry` itself has returned -- then shuts the scheduler
+ * down. See rt.c for why "spawned count caught up with completed count" is
+ * an exact, race-free quiescence signal here and not an approximation. */
+void rt_run_program(void (*entry)(void));
 
 /* Aborts with "trap: <msg>" on stderr and exit status 134 (SIGABRT).
  * Out-of-line and _Noreturn so the checks below stay cheap. `cold` too, not
@@ -775,13 +791,15 @@ void rt_check_unique(Obj *o);
  * local variable stands in for the current stack pointer, cheaply and
  * portably, without needing an intrinsic.
  *
- * A carrier not currently running a green thread on a slab stack -- which,
- * as of Phase 1, is every program there is, since nothing yet routes
- * `spawn` through this layer -- never sets this variable, so it keeps its
- * default value of 0. An address is never 0, so the comparison is always
- * false: the probe costs one compare and one untaken branch per call and
- * changes no program's behaviour until something starts calling
- * rt_fiber_switch (runtime/greenthread.h). */
+ * Every program now runs entirely on carriers (rt_run_program wraps `main`
+ * itself as green thread 0, and every `spawn` is a green thread too -- see
+ * the "concurrency" section above), so this is set for the whole of a
+ * compiled program's life, not left at its default of 0 the way it was
+ * before `spawn` was wired to the scheduler. A thread that is somehow not a
+ * carrier (a hand-written C test harness that calls runtime functions
+ * directly, never through rt_run_program) still sees the safe default: an
+ * address is never 0, so the comparison is always false and the probe costs
+ * one compare and one untaken branch per call. */
 extern _Thread_local uintptr_t rt_stack_limit;
 
 /* The real design (docs/concurrency-decision.md, Gambit's technique cited

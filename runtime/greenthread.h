@@ -71,10 +71,40 @@
 /* Every green-thread stack in Phase 1 is this one fixed size -- defined
  * here, ahead of Part 1, so it is available wherever it is needed; the full
  * rationale and the rest of the allocator built on it is Part 2, further
- * down. */
-#define RT_STACK_SIZE  (64 * 1024)                   /* 64 KiB per stack */
+ * down.
+ *
+ * Raised from the original 64 KiB during the task that wired `spawn`/
+ * `Chan`/`net` to this scheduler (docs/concurrency-decision.md, "Phase
+ * 3.5"). IMPORTANT, CORRECTED NOTE from that task's own report: this value
+ * was initially raised believing it fixed a `clang -O2`-only stack-overflow
+ * trap in corpus/modules/stdlib-http-client. It does not reliably fix that
+ * -- further investigation (same task) found the SAME program fails
+ * intermittently (roughly 1 run in 2-3) at every stack size tried, 64 KiB
+ * through 8 MiB, whenever more than one real carrier is active, and a TSan
+ * run caught the actual cause directly: a genuine data race on
+ * `rt_stack_limit` between two different carrier OS threads, one writing it
+ * in `rt_fiber_switch` (this file), the other reading it in a green
+ * thread's own compiler-emitted stack probe -- see that task's report for
+ * the full TSan transcript and why it was not fixed there (pre-existing
+ * Phase 1/2 mechanism, outside that task's stated scope to modify, and a
+ * hand-rolled context-switch bug is exactly the kind of thing this project
+ * has already learned not to patch half-confidently -- see the ASan note
+ * above). A bigger stack is kept anyway, independent of that unresolved
+ * bug, because it is still independently true that 64 KiB was never
+ * exercised by a real compiled program before that task (only Phase 1's own
+ * synthetic tests), and a real program's call depth under an aggressively-
+ * inlining compiler plausibly does need more than that even in the
+ * SINGLE-carrier case this race cannot reach -- not re-verified in isolation
+ * given time spent on the race above, so treat this specific number as a
+ * reasonable, cheap default rather than a precisely-justified one. Cheap
+ * because a slab's bytes are a virtual-memory reservation, demand-paged,
+ * not a commitment of real RAM per green thread that never uses it.
+ * RT_SLAB_STACKS is unchanged, so this only grows each slab's byte size,
+ * not its VMA count -- the "a million green threads is ~1000 VMAs"
+ * argument in docs/concurrency-decision.md is unaffected. */
+#define RT_STACK_SIZE  ((size_t)1024 * 1024)           /* 1 MiB per stack */
 #define RT_SLAB_STACKS 1024                           /* stacks per slab */
-#define RT_SLAB_BYTES  (RT_STACK_SIZE * RT_SLAB_STACKS) /* 64 MiB: 1 mmap */
+#define RT_SLAB_BYTES  (RT_STACK_SIZE * RT_SLAB_STACKS) /* 1 GiB: 1 mmap */
 
 /* ========================================================================
  * Part 1 -- context switch

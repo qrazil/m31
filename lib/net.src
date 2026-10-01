@@ -52,9 +52,19 @@
 // default, and what every errno means. A primitive answers a value or -errno
 // and decides nothing.
 //
+// **Every socket this module makes is non-blocking** (`socket_for`), and
+// every wait on one -- a connect finishing, more to read, room to write, a
+// connection to accept -- goes through `__wait_io`, which parks the green
+// thread on the epoll reactor instead of blocking the carrier OS thread on
+// the syscall (docs/concurrency-decision.md's whole argument for `spawn`
+// meaning a green thread). The one exception is a bounded wait: a
+// `set_read_timeout`/`set_write_timeout` deadline is honored with `__poll`
+// instead, because `__wait_io` has no way to say "gave up after N ms" --
+// see `Conn.wait_read_timeout`/`wait_write_timeout`.
+//
 // What is deliberately not here: UDP, Unix sockets, TLS, a connect timeout,
-// name resolution beyond "the first address the resolver gave", and any
-// non-blocking surface. Each is noted where it would have gone.
+// and name resolution beyond "the first address the resolver gave". Each is
+// noted where it would have gone.
 
 import io;
 
@@ -81,6 +91,15 @@ prim int __getsockopt(int fd, int opt);
 prim int __poll(List<int> fds, List<int> events, List<int> revents, int timeout_ms);
 prim int __resolve(str host, int port, int family, List<int> out, bytes addrs);
 prim int __ignore_sigpipe();
+// Park the current green thread until `fd` is ready for `events`
+// (IO_READABLE/IO_WRITABLE below), instead of blocking the carrier on the
+// syscall itself -- the epoll reactor's seam (runtime/reactor.h), through
+// the scheduler's park/unpark (docs/concurrency-decision.md, Phase 3).
+// Always succeeds (0) or traps on a genuine caller bug; there is no way for
+// it to report "gave up after N ms", which is exactly why it is used only
+// for an UNBOUNDED wait (no read/write timeout set) -- the bounded case
+// keeps using `__poll` with a timeout, as it already did.
+prim int __wait_io(int fd, int events);
 
 // The sys layer's own constants (runtime/sys.h), written here as numbers for
 // exactly the reason `io` writes the open flags as numbers: they are the
@@ -94,9 +113,21 @@ const int SO_ERROR = 3;
 const int SO_RCVTIMEO = 4;
 const int SO_SNDTIMEO = 5;
 const int TCP_NODELAY = 6;
+const int SO_NONBLOCK = 7;
 const int POLL_IN = 0x001;
 const int POLL_OUT = 0x004;
 const int SHUT_WR = 1;
+// `__wait_io`'s own event bits (runtime/reactor.h's RT_REACTOR_READ/WRITE)
+// -- a different, unrelated encoding from POLL_IN/POLL_OUT above, which are
+// the kernel's poll(2) bits for `__poll`. Named separately so the two are
+// never mixed up at a call site.
+const int IO_READABLE = 1;
+const int IO_WRITABLE = 2;
+// errno numbers this module checks for by name rather than leaving as a
+// bare number at the call site, now that making every socket non-blocking
+// means these two are checked often (runtime/sys.h).
+const int EAGAIN = 11;
+const int EINPROGRESS = 115;
 // How much of a connection is read from the kernel at once, and the size of
 // a `Conn`'s buffer: the same 64 KiB `io.File` reads a file in.
 const int CHUNK = 65536;
@@ -195,11 +226,14 @@ pub Error from_errno(int e) {
     if (e == 111) {
         return Error.Refused;
     }
-    // ETIMEDOUT is the kernel giving up on a connection; EAGAIN on a socket
-    // this module handed out is always a SO_RCVTIMEO or SO_SNDTIMEO expiry,
-    // because nothing here leaves a descriptor non-blocking. They are one
-    // outcome to a caller -- "it did not happen in time" -- so they are one
-    // variant.
+    // ETIMEDOUT is the kernel giving up on a connection; EAGAIN reaching
+    // here at all means `wait_read_timeout`/`wait_write_timeout` bounded the
+    // wait with `__poll` (a timeout was set) and it ran out -- every socket
+    // this module hands out is non-blocking, so an EAGAIN this module does
+    // not otherwise retry on its own (the unbounded, no-timeout case never
+    // surfaces one: it parks until ready instead) means exactly that. They
+    // are one outcome to a caller either way -- "it did not happen in time"
+    // -- so they are one variant.
     if (e == 110 || e == 11) {
         return Error.TimedOut;
     }
@@ -640,6 +674,16 @@ pub type Conn {
     bytes buf = [];
     int at = 0;
     int end = 0;
+    // 0 means "wait forever" (the default). The fd is always non-blocking
+    // (socket_for), so these can no longer be a kernel SO_RCVTIMEO/SNDTIMEO
+    // -- a non-blocking read never waits in the kernel for one to expire --
+    // and are instead consulted by `fill`/`write`/`write_some` themselves:
+    // 0 waits for readiness via `__wait_io` (parks, no carrier blocked,
+    // no bound), and anything else waits via `__poll` for at most that many
+    // milliseconds, which is the bounded wait this module already had a
+    // primitive for.
+    int read_timeout_ms = 0;
+    int write_timeout_ms = 0;
 }
 
 /// Between 1 and `n` bytes, or an empty `bytes` once the peer has stopped
@@ -778,6 +822,13 @@ pub Result<int, io.Error> Conn.write(bytes b) {
         if (r == -4) {
             continue;
         }
+        if (r == -EAGAIN) {
+            bool timed_out = wait_write_timeout()?;
+            if (timed_out) {
+                return Result<int, io.Error>.Err(io.from_errno(EAGAIN));
+            }
+            continue;
+        }
         if (r < 0) {
             return Result<int, io.Error>.Err(io.from_errno(-r));
         }
@@ -821,6 +872,13 @@ pub Result<int, io.Error> Conn.write_some(bytes b) {
     while (true) {
         int r = __write(fd, b, 0, b.size());
         if (r == -4) {
+            continue;
+        }
+        if (r == -EAGAIN) {
+            bool timed_out = wait_write_timeout()?;
+            if (timed_out) {
+                return Result<int, io.Error>.Err(io.from_errno(EAGAIN));
+            }
             continue;
         }
         if (r < 0) {
@@ -920,7 +978,7 @@ pub Result<bool, Error> Conn.shutdown_write() {
 /// `read_all` of a slow peer can take much longer than `ms` while never
 /// waiting that long for one packet.
 pub Result<bool, Error> Conn.set_read_timeout(int ms) {
-    return set_ms(SO_RCVTIMEO, ms);
+    return set_ms_read(ms);
 }
 
 /// The same for a write that cannot hand anything to the kernel because the
@@ -934,19 +992,67 @@ pub Result<bool, Error> Conn.set_read_timeout(int ms) {
 /// is written with `write_some`, which reports every byte it moved and
 /// fails only when it moved none.
 pub Result<bool, Error> Conn.set_write_timeout(int ms) {
-    return set_ms(SO_SNDTIMEO, ms);
+    return set_ms_write(ms);
 }
 
-Result<bool, Error> Conn.set_ms(int opt, int ms) {
+// The fd is always non-blocking (socket_for), so there is no kernel
+// SO_RCVTIMEO/SNDTIMEO to set any more -- a non-blocking read or write
+// never waits in the kernel at all, so that option has no effect on it.
+// `read_timeout_ms`/`write_timeout_ms` are this module's own replacement,
+// consulted by `fill`/`write`/`write_some` on every EAGAIN. Still a
+// `Result`, unchanged from before: the signature is part of this module's
+// public surface and a caller should not need to change to keep compiling,
+// even though setting a local field cannot actually fail any more.
+Result<bool, Error> Conn.set_ms_read(int ms) {
     check_live();
     if (ms < 0) {
         trap("a timeout is a count of milliseconds, 0 to wait forever");
     }
-    int r = __setsockopt(fd, opt, ms);
-    if (r < 0) {
-        return Result<bool, Error>.Err(from_errno(-r));
-    }
+    read_timeout_ms = ms;
     return Result<bool, Error>.Ok(true);
+}
+
+Result<bool, Error> Conn.set_ms_write(int ms) {
+    check_live();
+    if (ms < 0) {
+        trap("a timeout is a count of milliseconds, 0 to wait forever");
+    }
+    write_timeout_ms = ms;
+    return Result<bool, Error>.Ok(true);
+}
+
+// After an EAGAIN on a read: wait for more to arrive. 0 (the default)
+// parks on the reactor with no bound; otherwise waits at most
+// `read_timeout_ms` via `__poll` and says whether that time ran out.
+Result<bool, io.Error> Conn.wait_read_timeout() {
+    if (read_timeout_ms <= 0) {
+        int ignored = __wait_io(fd, IO_READABLE);
+        return Result<bool, io.Error>.Ok(false);
+    }
+    List<int> fds = [fd];
+    List<int> want = [POLL_IN];
+    List<int> got = [];
+    int n = __poll(fds, want, got, read_timeout_ms);
+    if (n < 0) {
+        return Result<bool, io.Error>.Err(io.from_errno(-n));
+    }
+    return Result<bool, io.Error>.Ok(got[0] == 0);
+}
+
+// The same, for a write that got EAGAIN because the send buffer is full.
+Result<bool, io.Error> Conn.wait_write_timeout() {
+    if (write_timeout_ms <= 0) {
+        int ignored = __wait_io(fd, IO_WRITABLE);
+        return Result<bool, io.Error>.Ok(false);
+    }
+    List<int> fds = [fd];
+    List<int> want = [POLL_OUT];
+    List<int> got = [];
+    int n = __poll(fds, want, got, write_timeout_ms);
+    if (n < 0) {
+        return Result<bool, io.Error>.Err(io.from_errno(-n));
+    }
+    return Result<bool, io.Error>.Ok(got[0] == 0);
 }
 
 /// Send a small write at once instead of waiting to fill a packet (turn
@@ -1011,6 +1117,13 @@ Result<int, io.Error> Conn.fill() {
     while (true) {
         int r = __read(fd, buf, 0, buf.size());
         if (r == -4) {
+            continue;
+        }
+        if (r == -EAGAIN) {
+            bool timed_out = wait_read_timeout()?;
+            if (timed_out) {
+                return Result<int, io.Error>.Err(io.from_errno(EAGAIN));
+            }
             continue;
         }
         if (r < 0) {
@@ -1082,8 +1195,26 @@ pub Result<Conn, Error> Listener.accept() {
         if (c == -4) {
             continue;
         }
+        // The listening socket is non-blocking (socket_for), so "nothing
+        // pending" is EAGAIN rather than a wait inside the kernel. There is
+        // no accept timeout to honor -- this type has never had one, only
+        // `wait` -- so this always parks on the reactor rather than
+        // checking a bound.
+        if (c == -EAGAIN) {
+            int ignored = __wait_io(fd, IO_READABLE);
+            continue;
+        }
         if (c < 0) {
             return Result<Conn, Error>.Err(from_errno(-c));
+        }
+        // Accept does not pass the listener's own non-blocking flag on to
+        // the new connection (docs/sys-layer.md §9's own note on
+        // SYS_SO_NONBLOCK) -- an accepted socket is exactly one that must
+        // not block a future read or write, so it is set here, once, before
+        // anything else can touch it.
+        int nb = __setsockopt(c, SO_NONBLOCK, 1);
+        if (nb < 0) {
+            return Result<Conn, Error>.Err(close_and(c, -nb));
         }
         return Result<Conn, Error>.Ok(Conn(c, Addr(ip_of(out[0], a), out[1])));
     }
@@ -1217,8 +1348,10 @@ pub Result<Listener, Error> listen(str host, int port, int backlog = 128) {
 /// A name with several addresses uses **the first the resolver gave**, which
 /// on the C library backend is already sorted by RFC 6724. There is no
 /// Happy Eyeballs here -- trying the addresses in parallel and keeping the
-/// first to answer -- because it needs a connect this module cannot express
-/// yet (a non-blocking one, several at a time, with a timer).
+/// first to answer -- because it needs several connects raced against each
+/// other with a per-address timer, not the one this function makes; the
+/// connect itself is already non-blocking (`socket_for`/`finish`), but
+/// racing several and a timer are not built.
 ///
 /// There is also **no connect timeout**. It would need the same machinery,
 /// and the kernel's own is a couple of minutes; a program that cannot wait
@@ -1229,11 +1362,15 @@ pub Result<Conn, Error> connect(str host, int port) {
     Ip a = host_ip(host)?;
     int fd = socket_for(a)?;
     int r = __connect(fd, family_of(a), port, sixteen(a));
-    // POSIX: a connect interrupted by a signal goes on in the background,
-    // and calling connect again answers EALREADY rather than finishing it.
-    // So the wait is done the way a non-blocking connect's is -- wait for
-    // the socket to become writable, then ask it how it went.
-    if (r == -4) {
+    // The socket is non-blocking (socket_for), so the ordinary case is
+    // EINPROGRESS at once, not a wait inside the kernel -- the comment this
+    // replaced predates that and was written for a connect interrupted by a
+    // signal (POSIX: it goes on in the background, and calling connect
+    // again answers EALREADY rather than finishing it); EINTR is kept here
+    // too, defensively, though a non-blocking connect has little room to
+    // produce it. Either way the wait is the same: for the socket to become
+    // writable, then ask it how the connect came to.
+    if (r == -EINPROGRESS || r == -4) {
         r = finish(fd);
     }
     if (r < 0) {
@@ -1242,17 +1379,16 @@ pub Result<Conn, Error> connect(str host, int port) {
     return Result<Conn, Error>.Ok(Conn(fd, Addr(a, port)));
 }
 
-// Wait for a connect that was interrupted, and report what it came to. The
-// pending error is positive (runtime/sys.h), so 0 is success and anything
-// else is the errno the connect would have returned.
+// Wait for a connect in progress, and report what it came to. The pending
+// error is positive (runtime/sys.h), so 0 is success and anything else is
+// the errno the connect would have returned. There is no connect timeout
+// (this function's own callers have never offered one, and the module's
+// doc comment above says why), so this always parks on the reactor rather
+// than bounding the wait -- `__wait_io` cannot itself fail (its own comment
+// in lib/net.src's prim list), so there is no error path to check here
+// before reading SO_ERROR.
 int finish(int fd) {
-    List<int> fds = [fd];
-    List<int> want = [POLL_OUT];
-    List<int> got = [];
-    int n = __poll(fds, want, got, -1);
-    if (n < 0) {
-        return n;
-    }
+    int ignored = __wait_io(fd, IO_WRITABLE);
     int e = __getsockopt(fd, SO_ERROR);
     if (e <= 0) {
         return e;
@@ -1292,6 +1428,18 @@ Result<int, Error> socket_for(Ip a) {
     int fd = __socket(family_of(a), SOCK_STREAM, 0);
     if (fd < 0) {
         return Result<int, Error>.Err(from_errno(-fd));
+    }
+    // Non-blocking from the moment it exists, for both the connecting and
+    // the listening socket this builds: every wait this module does on a
+    // socket -- a connect finishing, a read or write that would otherwise
+    // wait on the kernel, a listener with nothing pending -- goes through
+    // `__wait_io`/`__poll` instead of the syscall itself blocking the
+    // carrier (docs/concurrency-decision.md). An ACCEPTED connection is a
+    // separate fd the kernel hands back and does not inherit this, so
+    // `Listener.accept` sets it again there.
+    int nb = __setsockopt(fd, SO_NONBLOCK, 1);
+    if (nb < 0) {
+        return Result<int, Error>.Err(close_and(fd, -nb));
     }
     return Result<int, Error>.Ok(fd);
 }

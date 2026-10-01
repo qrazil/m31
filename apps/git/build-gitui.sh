@@ -45,5 +45,6 @@ cp apps/tui/tuiapp.src apps/tui/tuibuf.src apps/tui/tuidiff.src \
     "$stage/"
 
 "$LANGC" --emit-c "$stage/gitui.src" -o "$stage/gitui.c"
-"$CC" -O2 -pthread -I runtime -o "$out" "$stage/gitui.c" runtime/rt.c
+"$CC" -O2 -pthread -I runtime -o "$out" "$stage/gitui.c" \
+    runtime/rt.c runtime/scheduler.c runtime/reactor.c runtime/ctx_switch_x86_64.s
 echo "$out"

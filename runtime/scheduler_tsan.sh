@@ -38,7 +38,7 @@ bin="$WORK/sched_tsan"
 err="$WORK/cc.err"
 if ! clang -O1 -g -fsanitize=thread -fno-omit-frame-pointer -Wall -Wextra \
         -I runtime -pthread \
-        runtime/scheduler_test.c runtime/scheduler.c runtime/rt.c \
+        runtime/scheduler_test.c runtime/scheduler.c runtime/reactor.c runtime/rt.c \
         runtime/ctx_switch_x86_64.s -o "$bin" 2>"$err"; then
     echo "TSan build FAILED:"
     sed 's/^/    /' "$err"

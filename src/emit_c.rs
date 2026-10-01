@@ -513,7 +513,12 @@ pub fn emit(m: &Module) -> String {
             writeln!(o, "    int unused;").unwrap();
         }
         writeln!(o, "}} spawn_{cn};").unwrap();
-        writeln!(o, "static void *trampoline_{cn}(void *p) {{").unwrap();
+        // `void`, not `void *`: rt_spawn (runtime/rt.h) now takes
+        // `rt_sched_spawn`'s own entry signature (runtime/scheduler.h),
+        // `void (*)(void *)`, because every spawn is a green thread on the
+        // process-wide scheduler, never a pthread -- there is no return
+        // value for a pthread join to collect any more.
+        writeln!(o, "static void trampoline_{cn}(void *p) {{").unwrap();
         writeln!(o, "    spawn_{cn} *a = (spawn_{cn} *)p;").unwrap();
         let passed: Vec<String> = (0..target.params.len())
             .map(|i| format!("a->a{i}"))
@@ -529,7 +534,6 @@ pub fn emit(m: &Module) -> String {
             }
         }
         writeln!(o, "    free(a);").unwrap();
-        writeln!(o, "    return NULL;").unwrap();
         writeln!(o, "}}").unwrap();
     }
     if !spawned.is_empty() {
@@ -541,9 +545,13 @@ pub fn emit(m: &Module) -> String {
         o.push('\n');
     }
 
-    // rt_wait_all joins every spawned thread. Without it a spawn can
-    // outlive the program: its output is lost, and the refcount invariant
-    // is reported by atexit while threads are still running.
+    // rt_run_program runs the program's own top-level statements ($main) as
+    // the scheduler's green thread 0, not on the raw OS thread -- so that a
+    // `Chan`/`net` call made before any `spawn` has a scheduler and a
+    // green-thread id to park against -- and waits for it and everything it
+    // (transitively) spawns to finish before returning. Without that wait a
+    // spawn can outlive the program: its output is lost, and the refcount
+    // invariant is reported by atexit while a green thread is still live.
     //
     // argc/argv are handed to the runtime and nothing else: the program has
     // no parameters, and `os.args()` asks the runtime for them.
@@ -551,8 +559,7 @@ pub fn emit(m: &Module) -> String {
         o,
         "int main(int argc, char **argv) {{
     rt_args_init(argc, argv);
-    {}();
-    rt_wait_all();
+    rt_run_program({});
     return 0;
 }}",
         c_name("$main")

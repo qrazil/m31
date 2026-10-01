@@ -479,7 +479,7 @@ of it in C in 2012.
       tested (`runtime/greenthread.{h,c}`, `runtime/ctx_switch_x86_64.s`).
       x86-64 only; aarch64 is Phase 4.
 - [x] **Scheduler implementation, probe-based preemption** — Phase 2
-      (`runtime/scheduler.{h,c}`), standalone, not yet wired to `spawn`.
+      (`runtime/scheduler.{h,c}`).
 - [x] **epoll reactor, park/unpark** — Phase 3 (`runtime/reactor.{h,c}`,
       park/unpark surface added to `runtime/scheduler.{h,c}`). The 3-state
       textbook CAS design (EMPTY/PARKED/NOTIFIED) was tried and found to
@@ -494,6 +494,20 @@ of it in C in 2012.
       existing self-service draw path. The compile-time warning for an
       unannotated foreign call is a known-incomplete approximation (doesn't
       follow interface/virtual dispatch) — documented, not overclaimed.
+- [ ] **`spawn`/`Chan`/`net` wired to the real scheduler — Phase 3.5,
+      wiring done, NOT fully safe yet.** `spawn` always means a green
+      thread now, unconditionally, and the wiring itself (Chan's
+      multi-waiter park/unpark, net.src's non-blocking-plus-reactor
+      conversion) is complete and correct in isolation — but building and
+      stress-testing it surfaced a real, TSan-confirmed data race in the
+      PRE-EXISTING Phase 1/2 fiber-switching mechanism (`rt_stack_limit`,
+      written by one carrier and read by another), reliably reproducible
+      under genuine concurrent socket I/O across 2+ real carriers, that was
+      NOT fixed. See "Phase 3.5" below for the full account, the deadlock
+      found and mitigated (separately, fully fixed) along the way, and
+      exactly why the race was left open rather than patched
+      under-confidently. Do not treat this checklist item as "safe to ship"
+      until that race has a real fix.
 
 **Known gap, carried forward rather than fixed in Phase 3**: ThreadSanitizer
 itself intermittently segfaults (never a real race report, never in this
@@ -524,8 +538,7 @@ freed. A program creates few, so the leak is bounded by that count.
   point — see "Stacks: fixed, but not limited" above)
 - Byte-per-thread state table
 
-**Phase 2 — the scheduler itself. Done** (standalone, not yet wired to
-`spawn` — a deliberate, separate decision, not done here).
+**Phase 2 — the scheduler itself. Done.**
 - Per-carrier local buffers (a claimed batch of work, not a spawn landing
   spot)
 - Single shared queue; every spawn — local or external — routes through it
@@ -552,6 +565,120 @@ known, carried-forward TSan gap.
 - Blocking-FFI handoff (`enter_blocking`/`exit_blocking`, monitor thread,
   compile-time warning on unannotated foreign calls)
 
+**Phase 3.5 — wiring `spawn`/`Chan`/`net` to the real scheduler. Wiring
+done; ONE CRITICAL BUG FOUND, NOT FIXED — read this before relying on
+concurrent `net` from more than one carrier.**
+Phases 1-3 built the whole runtime standalone, exercised only by hand-written
+C test harnesses; this phase is what makes it real from a compiled `.src`
+program. `spawn` now always means a green thread (`rt_sched_spawn` on a
+process-wide scheduler, `runtime/rt.c`'s `rt_global_scheduler`) — never
+conditionally an OS thread, which would have reintroduced the uncoloured
+design's whole reason for existing. The program's own top level runs as
+green thread 0 (`rt_run_program`), not on the raw OS thread, so a
+`Chan`/`net` call made before any `spawn` has something to park against.
+
+- `Chan.send`/`recv` park instead of blocking their carrier
+  (`rt_sched_park`/`rt_sched_unpark`), with a FIFO linked-list queue per
+  channel for however many green threads are waiting to send or to receive
+  at once (plural matters — a condvar's wait queue did this for free under
+  OS-thread `spawn`; parking needs its own). `close` wakes every waiter on
+  both queues, not just one.
+- `lib/net.src`'s sockets are non-blocking from the moment they are made
+  (`SO_NONBLOCK`), and every wait that used to be the kernel blocking the
+  calling thread — a connect finishing, more to read, room to write, a
+  connection to accept — now goes through a new primitive, `__wait_io`,
+  that parks the calling green thread on the epoll reactor instead
+  (`rt_reactor_wait`). The one exception is a bounded wait: a
+  `set_read_timeout`/`set_write_timeout` deadline is honored with `__poll`
+  instead, because parking has no way to say "gave up after N ms" — SO_
+  RCVTIMEO/SNDTIMEO stopped being able to do this once the socket became
+  non-blocking (the kernel never waits long enough to time out), so this
+  module's own two fields (`read_timeout_ms`/`write_timeout_ms`) replaced it.
+- **A real deadlock was found, not merely a risk**: `rt_sched_spawn`'s own
+  backpressure (`scheduler.c`'s `squeue_push`, when the shared queue is
+  full) is a genuine OS-level `pthread_cond_wait` on the calling thread —
+  correct when the caller is an ordinary OS thread (every Phase 2/3 test
+  before this), wrong the instant the caller is a green thread running on
+  the only carrier that could ever drain the queue. With `LANG_NUM_CARRIERS=1`
+  and the default queue capacity (64), spawning 300 workers in a tight loop
+  from the top level hung forever. **Mitigated, not fixed**: the
+  process-wide scheduler raises its queue capacity by default (to 1,048,576,
+  unless an operator already set `LANG_GLOBAL_QUEUE_CAP`), which narrows the
+  window far past the scale this phase's own tests exercise but does not
+  close it. The real fix — teaching `rt_sched_spawn`'s backpressure wait to
+  park rather than block, the same treatment `Chan` got here — is scoped,
+  real, not-yet-started follow-up work inside `scheduler.c` itself.
+- **A second, more serious bug was found by TSan and is NOT fixed: a
+  genuine data race on `rt_stack_limit` between two carrier OS threads.**
+  Found empirically while stress-testing real concurrent socket I/O (a
+  server accept loop plus ~10-200 concurrent client/handler pairs, all
+  doing real TCP through the reactor) under `clang -O1`/`-O2` with 2+
+  carriers: the program crashes with a spurious "stack overflow" trap --
+  confirmed via gdb to fire 3-4 frames into a FRESH green thread's call
+  stack, nowhere near genuinely deep -- reproducing well over half the time
+  with as few as 2 carriers and ~10 real connections. A TSan build of the
+  identical program caught the mechanism directly: a WRITE to
+  `rt_stack_limit` inside `rt_fiber_switch` (`runtime/greenthread.h`) on one
+  carrier OS thread, racing a READ of the same address inside a different
+  green thread's own compiler-emitted stack probe, running on a DIFFERENT
+  carrier OS thread, at the same instant. `rt_stack_limit` is declared
+  `_Thread_local` and every other access to it in this codebase is
+  correctly scoped per-carrier, so this is a real, narrow, and so far
+  unexplained violation of that isolation under genuine SMP concurrency --
+  not a TSan tool artifact (unlike the already-documented gap below:
+  that one is a sanitizer-internal segfault with no race report attached;
+  this one IS a reported, categorized `ThreadSanitizer: data race`, and the
+  user-visible crash reproduces identically with no sanitizer involved at
+  all). Investigated at length before concluding it could not be safely
+  fixed in the time available: ruled out the blocking-FFI monitor racing a
+  carrier's local buffer (disabling the monitor entirely did not help),
+  ruled out the slab allocator and the green-thread state table (both
+  correctly locked), and ruled out naive TLS-address caching across the
+  hand-written context switch (an explicit compiler memory barrier placed
+  immediately after `rt_ctx_switch` did not help either) -- each a
+  plausible, targeted hypothesis, each tested directly and disproved.
+  Telling evidence gathered along the way: `runtime/scheduler_tsan.sh` and
+  `runtime/phase3_tsan.sh` -- which already exercise multiple real carriers
+  and the reactor's own park/unpark directly, via hand-written C, and
+  normally run clean -- stayed clean at 25/25 runs each when re-run during
+  this same investigation, so the bug is not in the standalone
+  scheduler/reactor mechanism in any way those harnesses' own test shapes
+  reach; it takes the SCALE and PATTERN of a real compiled program driving
+  many concurrent green threads through many park/unpark cycles via
+  `lib/net.src` to surface it, which is new coverage this task added and
+  neither existing harness happened to provide. Deliberately NOT patched:
+  this is hand-rolled, assembly-adjacent context-switching code this task
+  was scoped to reuse as-is, a wrong fix here is worse than no fix (this
+  project's own lesson from the ASan/fiber-annotation attempt noted
+  earlier in this file applies just as much here), and misdiagnosing a
+  genuine SMP race under real time pressure is exactly the overclaiming
+  this whole effort was warned against. **Practical consequence, stated
+  plainly: real concurrent socket I/O across more than one carrier is not
+  yet safe.** `LANG_NUM_CARRIERS=1` avoids it entirely (confirmed: the
+  demo below passes reliably with it, and removes genuine parallelism
+  between carriers, which is also why the race cannot occur -- there is
+  only ever one carrier OS thread to race against itself). See
+  `runtime/net_concurrency_demo/` (moved out of the ordinary corpus
+  specifically because it is not reliable there yet) and
+  `runtime/spawn_wiring_tsan.sh` for the reproduction and the TSan
+  transcript this was built from.
+- The blocking-FFI handoff monitor (Phase 3, built but opt-in) is now
+  actually turned on, unconditionally, for the one process-wide scheduler
+  every compiled program uses — it was built with exactly this moment in
+  mind but had nothing to protect until `spawn` meant a green thread.
+  Regular-file I/O, `os.run`'s process wait, DNS resolution and a terminal's
+  canonical-mode read are still genuinely blocking and NOT converted (out
+  of this phase's scope) — the monitor is this phase's safety net for
+  those, not a fix for them: it rescues a stuck carrier's queued siblings,
+  it does not make the stuck call itself faster.
+- Every build line in the repository that links `runtime/rt.c` — which is
+  all of them — now also links `runtime/scheduler.c`, `runtime/reactor.c`
+  and `runtime/ctx_switch_x86_64.s`, because `rt.c` calls into them
+  unconditionally. The whole language is therefore x86-64 only until Phase
+  4's aarch64 context switch lands — a strictly larger claim than before,
+  when only the Phase 1-3 test harnesses themselves (and any experimental
+  module built the same way) needed that architecture.
+
 **Phase 4 — portability.**
 - aarch64 context switch
 - kqueue (macOS/BSD)
@@ -566,36 +693,9 @@ Podman, disabled on Google's production fleet, libuv reverted it).
 ## Open
 
 - Channel syntax and typing — waits on the type system
-- **Decided 2026-10-01, deferred until it's real friction, not a capability
-  gap: `spawn` takes a named function plus explicit arguments, not a
-  closure.** This is not a workaround — anything a closure would capture can
-  be passed as an explicit argument instead, so it is exactly as capable,
-  just more typing at the call site. Closures stay deliberately unbuilt:
-  they are the most common source of reference cycles in a refcounted
-  language with no GC to collect them later, and that problem does not have
-  an answer yet. Separate from this, and lower-risk: an anonymous,
-  **non-capturing** function literal — reusing the existing
-  `fn name(params) { body }` syntax with the reserved name `_` (a compile
-  error to reference, not merely discouraged by convention the way
-  Python's `_` is), so a one-off function passed straight to `spawn` never
-  needs an invented name. This has nothing to do with closures — no
-  captured environment, no cycle risk — and is pure sugar: `fn _(x) {...}`
-  compiles to exactly what a top-level named function with a
-  compiler-generated name would. Safe to build whenever naming one-off
-  spawn workers becomes real friction; not needed for `spawn`/`Chan` to be
-  usable today.
-- **Deferred until it's real friction, not built speculatively: `select`
-  (wait on multiple channels/events, proceed with whichever is ready
-  first).** This is a genuine capability gap, not just ergonomics — unlike
-  the closure question above, `spawn`+`Chan` cannot fake it: watching N
-  channels by spawning N watcher threads leaks every losing watcher, since
-  the ones that do not win stay blocked forever. A real `select` needs the
-  same shape of mechanism the epoll reactor already has — register
-  interest in several things, get exactly one wakeup, cleanly withdraw
-  from the rest. Not needed for the immediate next goal (an HTTP server):
-  `http.serve`'s `timeout_ms:` and `net.src`'s own
-  `set_read_timeout`/`set_write_timeout` already solve per-connection
-  timeouts at the socket level, without needing general multiplexing.
+- Whether `spawn` takes a closure or a function plus arguments (closures are
+  not implemented yet, and closures plus refcounting is the most common source
+  of reference cycles)
 - Structured concurrency: does a spawning scope wait for its children? Loom
   says yes and it is a genuine improvement over Go's fire-and-forget
 - Cancellation. libdill's model — killing a thread makes every blocking call

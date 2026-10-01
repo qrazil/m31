@@ -194,8 +194,11 @@ compiler cannot see (two locals reaching the same object through a field).
 A **channel is exempt**, because it is how threads share; it is aliased
 rather than moved, and is immortal for now (see `rt_chan_new`).
 
-These are OS threads. The channel surface does not change when green threads
-replace them.
+**`spawn` means a green thread**, M:N over one carrier OS thread per core
+(`docs/concurrency-decision.md`) -- not an OS thread, and not conditionally
+one or the other: a value crossing between them is still moved, exactly as
+above, and the channel surface above did not change when green threads
+replaced OS threads, as promised.
 
 **Embedding** is composition in place of inheritance: an anonymous field,
 named after its type, whose fields and methods are promoted.
@@ -280,8 +283,9 @@ form to use and no question of what order optional arguments come in.
 
 A callback is an ordinary **one-method interface**, and a function's name or
 a lambda may be written wherever one is expected — there is no function type
-(`docs/closures-decision.md`). Concurrency is OS threads for now; green
-threads are stage 3 of `docs/concurrency-decision.md`.
+(`docs/closures-decision.md`). Concurrency is green threads
+(`docs/concurrency-decision.md`), Phases 1-3 of which are done and wired to
+`spawn`.
 
 ## Decisions made
 

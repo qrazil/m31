@@ -165,8 +165,9 @@ run "formatter preserves meaning" bash -c '
             # Behaviour, not just text -- but only where an expectation exists.
             exp="${f%.'"$LANG_EXT"'}.out"
             if [ -e "$exp" ]; then
-                if gcc -O0 -I runtime "$w/b.c" runtime/rt.c -lpthread \
-                       -o "$w/b" 2>/dev/null; then
+                if gcc -O0 -I runtime "$w/b.c" \
+                       runtime/rt.c runtime/scheduler.c runtime/reactor.c runtime/ctx_switch_x86_64.s \
+                       -lpthread -o "$w/b" 2>/dev/null; then
                     in="$PWD/${f%.'"$LANG_EXT"'}.in"
                     [ -e "$in" ] || in=/dev/null
                     # The same command line run.sh gives it, from `.args`.

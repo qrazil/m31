@@ -16,5 +16,9 @@ CC=${CC:-cc}
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
 "./target/debug/$LANG_BIN" --emit-c "$src" -o "$tmp/out.c"
-"$CC" -O2 -pthread -I runtime -o "$out" "$tmp/out.c" runtime/rt.c
+# `spawn` and `Chan` are always green threads now (docs/concurrency-decision.md),
+# so every program links the Phase 1-3 runtime unconditionally: the scheduler,
+# the epoll reactor, and the x86-64 context switch they are both built on.
+"$CC" -O2 -pthread -I runtime -o "$out" "$tmp/out.c" \
+    runtime/rt.c runtime/scheduler.c runtime/reactor.c runtime/ctx_switch_x86_64.s
 echo "$out"

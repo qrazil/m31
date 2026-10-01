@@ -23,8 +23,9 @@ trap 'rm -rf "$WORK"' EXIT
 
 build() {
     "$LANGC" --emit-c "bench/valenum/$1.$LANG_EXT" -o "$WORK/$1.c" || return 1
-    "$CC" -O2 -ffp-contract=off -I runtime "$WORK/$1.c" runtime/rt.c -lpthread \
-        -o "$WORK/$1.bin" || return 1
+    "$CC" -O2 -ffp-contract=off -I runtime "$WORK/$1.c" \
+        runtime/rt.c runtime/scheduler.c runtime/reactor.c runtime/ctx_switch_x86_64.s \
+        -lpthread -o "$WORK/$1.bin" || return 1
 }
 
 best() {
@@ -42,7 +43,8 @@ best() {
 # on a line of its own so the corpus's output is unchanged.
 allocs() {
     "$LANGC" --emit-c "bench/valenum/$1.$LANG_EXT" -o "$WORK/$1.dbg.c" || return 1
-    "$CC" -O2 -DRC_DEBUG -DRC_COUNT_ALLOCS -I runtime "$WORK/$1.dbg.c" runtime/rt.c \
+    "$CC" -O2 -DRC_DEBUG -DRC_COUNT_ALLOCS -I runtime "$WORK/$1.dbg.c" \
+        runtime/rt.c runtime/scheduler.c runtime/reactor.c runtime/ctx_switch_x86_64.s \
         -lpthread -o "$WORK/$1.dbg" 2>/dev/null || { echo "-"; return; }
     "$WORK/$1.dbg" 2>/dev/null | sed -n 's/^__rc_allocs=//p'
 }
