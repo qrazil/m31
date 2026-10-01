@@ -472,13 +472,39 @@ of it in C in 2012.
       as its pointer.
 - [x] **Scheduler design** — decided and simulation-validated above
       (2026-09-30): no stealing, single shared queue, self-service draw with
-      no minimum threshold, `fuel_size` tuning, configurable capacity. The
-      wake/notification mechanism is the one open item before this can move
-      to implementation — see Phase 2 below.
-- [ ] Context switch, slab stacks with probes
-- [ ] Scheduler implementation, probe-based preemption
-- [ ] epoll reactor, park/unpark
-- [ ] Blocking-FFI handoff
+      no minimum threshold, `fuel_size` tuning, configurable capacity, and
+      the wake/notification mechanism (random permutation + correct initial
+      idle state).
+- [x] **Context switch, slab stacks with probes** — Phase 1, implemented and
+      tested (`runtime/greenthread.{h,c}`, `runtime/ctx_switch_x86_64.s`).
+      x86-64 only; aarch64 is Phase 4.
+- [x] **Scheduler implementation, probe-based preemption** — Phase 2
+      (`runtime/scheduler.{h,c}`), standalone, not yet wired to `spawn`.
+- [x] **epoll reactor, park/unpark** — Phase 3 (`runtime/reactor.{h,c}`,
+      park/unpark surface added to `runtime/scheduler.{h,c}`). The 3-state
+      textbook CAS design (EMPTY/PARKED/NOTIFIED) was tried and found to
+      have a real, reproducible lost-wakeup-adjacent bug — it can publish
+      "externally resumable" before a context switch has actually finished
+      saving state, letting an unparking carrier switch into a context mid-
+      save (two OS threads on one stack). Fixed with a 4th state (ARMED)
+      marking "decided to park" distinctly from "provably resumable."
+- [x] **Blocking-FFI handoff** — Phase 3, `enter_blocking`/`exit_blocking`
+      wrapped around every `prim` call site by the compiler, a monitor
+      thread handing a stuck carrier's local buffer to a backup via the
+      existing self-service draw path. The compile-time warning for an
+      unannotated foreign call is a known-incomplete approximation (doesn't
+      follow interface/virtual dispatch) — documented, not overclaimed.
+
+**Known gap, carried forward rather than fixed in Phase 3**: ThreadSanitizer
+itself intermittently segfaults (never a real race report, never in this
+project's code) when a green thread is suspended by one carrier and resumed
+by a different one under TSan specifically — the same class of gap already
+noted for ASan's fiber-switching above, just a hard crash here instead of a
+warning. Mitigated by narrowing the two affected tests to 1 carrier under
+TSan only; every plain build and the ASan/UBSan build exercise full
+multi-carrier counts with no issue. The real fix — `__tsan_switch_to_fiber`
+annotations in `ctx_switch_x86_64.s` — is real, scoped, not-yet-started
+follow-up work before this is fully hardened under every tool.
 
 **Known v0 simplification: channels are immortal.** A channel must be
 reachable from several threads at once, so it is exempt from the move rule --
@@ -492,13 +518,14 @@ freed. A program creates few, so the leak is bounded by that count.
 - Type system with ownership
 - OS threads + channels (`spawn`, `Chan<T>`, move checker)
 
-**Phase 1 — runtime primitives.**
+**Phase 1 — runtime primitives. Done.**
 - Context switch (asm, x86-64 first, then aarch64)
 - Slab stack allocator with compiler-emitted probes (also the preemption
   point — see "Stacks: fixed, but not limited" above)
 - Byte-per-thread state table
 
-**Phase 2 — the scheduler itself.**
+**Phase 2 — the scheduler itself. Done** (standalone, not yet wired to
+`spawn` — a deliberate, separate decision, not done here).
 - Per-carrier local buffers (a claimed batch of work, not a spawn landing
   spot)
 - Single shared queue; every spawn — local or external — routes through it
@@ -517,7 +544,8 @@ freed. A program creates few, so the leak is bounded by that count.
   so cannot see where the real floor is. The algorithmic design above is
   otherwise ready to implement against.
 
-**Phase 3 — I/O integration.**
+**Phase 3 — I/O integration. Done**, see Progress above for the one
+known, carried-forward TSan gap.
 - epoll reactor
 - park/unpark, closing the lost-wakeup race against netpoll (the CAS state
   machine flagged under "What this costs" above)
