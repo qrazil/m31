@@ -1,4 +1,4 @@
-corpus/errors/612-result-void-try-value.src:7:20: type mismatch: expected int, found void
+corpus/errors/612-result-void-try-value.m31:7:20: type mismatch: expected int, found void
   |
 7 |     int x = check()?;
   |                    ^

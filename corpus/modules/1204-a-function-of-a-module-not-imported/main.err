@@ -1,4 +1,4 @@
-corpus/modules/1204-a-function-of-a-module-not-imported/main.src:4:11: `answer` is declared in `lib`; write `lib.answer`, and `import lib;` at the top
+corpus/modules/1204-a-function-of-a-module-not-imported/main.m31:4:11: `answer` is declared in `lib`; write `lib.answer`, and `import lib;` at the top
   |
 4 | print(str(answer()));
   |           ^

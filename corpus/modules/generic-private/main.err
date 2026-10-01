@@ -1,4 +1,4 @@
-corpus/modules/generic-private/main.src:3:10: `first` is private to `lib`; mark it `pub` to export it
+corpus/modules/generic-private/main.m31:3:10: `first` is private to `lib`; mark it `pub` to export it
   |
 3 | print(lib.first([1, 2]));
   |          ^

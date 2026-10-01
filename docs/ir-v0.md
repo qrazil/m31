@@ -408,7 +408,7 @@ exactly the kind of bug the `-O0` vs `-O2` differential will *not* catch.
 
 ### 7.3 Worked example
 
-`corpus/core/002-refcount.src`:
+`corpus/core/002-refcount.m31`:
 
 ```
 int take(str s) {

@@ -1,4 +1,4 @@
-corpus/modules/privfield-promoted-dot/main.src:9:8: field `tag` of `acct.Animal` is private to `acct`; only a `pub` field can be used from another module
+corpus/modules/privfield-promoted-dot/main.m31:9:8: field `tag` of `acct.Animal` is private to `acct`; only a `pub` field can be used from another module
   |
 9 | print(d.tag);
   |        ^

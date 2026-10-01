@@ -1,4 +1,4 @@
-corpus/errors/1134-lambda-two-method-interface.src:5:10: `Sink` declares 2 methods (`write`, `flush`); a lambda supplies one, so write a type with all of them and pass one of those
+corpus/errors/1134-lambda-two-method-interface.m31:5:10: `Sink` declares 2 methods (`write`, `flush`); a lambda supplies one, so write a type with all of them and pass one of those
   |
 5 | Sink s = (int v) => print(v);
   |          ^

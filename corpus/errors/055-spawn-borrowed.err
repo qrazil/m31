@@ -1,4 +1,4 @@
-corpus/errors/055-spawn-borrowed.src:8:16: `borrowed` is borrowed here and cannot cross a thread boundary; a reference two threads can reach would race on a non-atomic refcount. Use clone(borrowed) to send a copy.
+corpus/errors/055-spawn-borrowed.m31:8:16: `borrowed` is borrowed here and cannot cross a thread boundary; a reference two threads can reach would race on a non-atomic refcount. Use clone(borrowed) to send a copy.
   |
 8 |     spawn e(d, borrowed);
   |                ^

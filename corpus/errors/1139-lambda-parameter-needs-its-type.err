@@ -1,4 +1,4 @@
-corpus/errors/1139-lambda-parameter-needs-its-type.src:9:10: a lambda's parameters are written with their types, like every other binding in this language -- write `(int a) => ..`
+corpus/errors/1139-lambda-parameter-needs-its-type.m31:9:10: a lambda's parameters are written with their types, like every other binding in this language -- write `(int a) => ..`
   |
 9 | Get g = (a) => a;
   |          ^

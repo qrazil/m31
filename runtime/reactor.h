@@ -6,8 +6,8 @@
  *
  * This is a STANDALONE component, the same convention runtime/scheduler.h
  * documents for itself: not #included by rt.c, not reachable from a
- * compiled .src program, exercised only by runtime/reactor_test.c. Wiring a
- * future I/O primitive (`lib/net.src`/`lib/io.src`) to actually call this is
+ * compiled .m31 program, exercised only by runtime/reactor_test.c. Wiring a
+ * future I/O primitive (`lib/net.m31`/`lib/io.m31`) to actually call this is
  * explicitly out of scope for this phase -- see the task that produced this
  * file.
  *

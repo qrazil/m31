@@ -9,7 +9,7 @@
  * scheduler, with real OS-thread carriers actually running concurrently --
  * not a single-threaded stand-in -- the same spirit as
  * runtime/greenthread_test.c testing Phase 1's primitives directly rather
- * than through a compiled .src program (which cannot reach this scheduler
+ * than through a compiled .m31 program (which cannot reach this scheduler
  * at all: nothing wires `spawn` to it in this phase, by design).
  */
 #include "rt.h"

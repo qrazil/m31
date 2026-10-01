@@ -11,7 +11,7 @@ performance. §4 is the argument that a program cannot tell.
 It exists because of `apps/git/FRICTION.md` §1 and `apps/markdown/FRICTION.md`
 §1.4, which are the same complaint twice: `Result` and `Option` are the right
 types for a hot loop and cost an allocation per use, so both programs wrote a
-sentinel instead — a `bool over` checked in nine places in `zlib.src`, a
+sentinel instead — a `bool over` checked in nine places in `zlib.m31`, a
 `bool ok` field in `marker_of`. The reference's advice ("use `Result` for
 anything a caller should handle") lost to the cost of following it.
 
@@ -110,7 +110,7 @@ the C compiler would not always catch; this turns it into a loud compiler bug
 instead. It runs on every compile.
 
 The second check earned its place immediately. `str.parse_float` is
-implemented in the language (`lib/__floatfmt.src`) and its result was being
+implemented in the language (`lib/__floatfmt.m31`) and its result was being
 given the `Obj *` shape at the call site, because until now every user type
 had it. That was a C type error in eleven corpus programs, reported by gcc
 from inside forty thousand lines of generated code; the verifier names the
@@ -176,7 +176,7 @@ actually needed"; this is that decision, and it is confined to the C backend's
 
 ### What gcc and clang actually do — measured, not assumed
 
-x86-64, System V ABI, both compilers at `-O2` (`langc` emits no
+x86-64, System V ABI, both compilers at `-O2` (`m31c` emits no
 `__attribute__` and no packing, so this is the plain ABI):
 
 | size | example | returned |

@@ -1,4 +1,4 @@
-corpus/errors/1043-case-binding-is-not-the-sole-owner.src:21:38: `c` lives inside a value this `match` did not create, so it cannot be taken out and moved -- whoever else holds that value would be left with a hole. Match the call that produces it directly, so the `match` is its only owner.
+corpus/errors/1043-case-binding-is-not-the-sole-owner.m31:21:38: `c` lives inside a value this `match` did not create, so it cannot be taken out and moved -- whoever else holds that value would be left with a hole. Match the call that produces it directly, so the `match` is its only owner.
    |
 21 |         case Ok(Conn c): { send(out, c); }
    |                                      ^

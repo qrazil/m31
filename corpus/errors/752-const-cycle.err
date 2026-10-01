@@ -1,4 +1,4 @@
-corpus/errors/752-const-cycle.src:5:15: constant cycle: A
+corpus/errors/752-const-cycle.m31:5:15: constant cycle: A
     uses B
     uses C
     uses A

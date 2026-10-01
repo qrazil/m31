@@ -1,4 +1,4 @@
-// A fixture for `langc fmt`: laid out badly on purpose. 550-layout.want is
+// A fixture for `m31c fmt`: laid out badly on purpose. 550-layout.want is
 // the layout the formatter must produce, written by hand.
 
 // --- shapes ---

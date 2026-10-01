@@ -14,7 +14,7 @@ It is ordered by how much it cost, not by how interesting it is.
 > binds none of a variant's payload (§3 — *not* a `default`; exhaustiveness
 > is untouched), a range `for` that makes §8's non-terminating `indented`
 > impossible to write, and a formatter that keeps the parentheses the author
-> wrote, so `sha1.src`'s rounds are back in the shape FIPS 180-4 gives them
+> wrote, so `sha1.m31`'s rounds are back in the shape FIPS 180-4 gives them
 > (§10). A character literal, which this report did not ask for and
 > `apps/markdown`'s did, is in too. Everything else below still stands.
 > `docs/reference.md` §1.5, §5.5, §5.6 and §6.1 have the rules.
@@ -54,7 +54,7 @@ and every loop that consumes symbols checks `b.over` once per symbol. It
 works, it is fast, and it is strictly worse code: the failure is now a
 condition the caller must remember to test rather than one the type system
 enforces, and a truncated stream decodes one junk symbol before anyone
-notices. Nine places in `zlib.src` check `over`, and a tenth that forgot to
+notices. Nine places in `zlib.m31` check `over`, and a tenth that forgot to
 would silently accept a truncated stream.
 
 **What would fix it:** a `Result` (or any enum) whose payloads are all scalars
@@ -316,7 +316,7 @@ decoder here was chosen for clarity.
 The end-to-end figure is the one that matters for the application, and it is
 below what SHA-1 and inflate together predict (about 25 MB/s). The rest is
 `Object.raw` being a `substr` copy of the plaintext, the per-object file open,
-and the fact that `log` reads every commit twice (`git.src` says so at the
+and the fact that `log` reads every commit twice (`git.m31` says so at the
 place it happens). None of that is language friction; it is this program not
 being tuned, and it is fast enough that tuning it would be the wrong work
 before packfiles exist.
@@ -372,14 +372,14 @@ sort of thing every program that reads a binary format needs.
 
 | wanted | what I wrote | where |
 |---|---|---|
-| `b.index_of(needle, from)` — a scan from an offset | `int find(bytes hay, int b, int from)`, a loop | `object.src` |
-| a single-**octet** search — `index_of` takes a `bytes` needle, so looking for a NUL means allocating `[0]` | the same `find` | `object.src` |
-| `b.rindex_of(needle)` | `int rfind(bytes hay, int b)`, a loop | `object.src` |
-| `str.cmp` / `bytes.cmp` | `int before(str a, str b)` | `refs.src` (§4 above) |
-| zero-padded integer formatting | `str two(int v)`, `str hex8(int v)`, `str one(int v)` | `git.src`, `zlib.src` |
-| parse a decimal or octal run of **octets** | `int decimal(bytes)`, `int octal(bytes)` — `str.parse_int` exists but takes a `str`, so using it means building one first, and it accepts `+5` and surrounding space, which these formats do not | `object.src` |
-| an ordered `Map`, or a `Map` that iterates in insertion order | a parallel `List<str> order` beside the `Map` | `refs.src` |
-| a `bytes` literal | `bytes nl() { return "\n".to_bytes(); }` — and it still allocates on every call, because §3.10 says a literal of a mutable type must | `t_object.src` |
+| `b.index_of(needle, from)` — a scan from an offset | `int find(bytes hay, int b, int from)`, a loop | `object.m31` |
+| a single-**octet** search — `index_of` takes a `bytes` needle, so looking for a NUL means allocating `[0]` | the same `find` | `object.m31` |
+| `b.rindex_of(needle)` | `int rfind(bytes hay, int b)`, a loop | `object.m31` |
+| `str.cmp` / `bytes.cmp` | `int before(str a, str b)` | `refs.m31` (§4 above) |
+| zero-padded integer formatting | `str two(int v)`, `str hex8(int v)`, `str one(int v)` | `git.m31`, `zlib.m31` |
+| parse a decimal or octal run of **octets** | `int decimal(bytes)`, `int octal(bytes)` — `str.parse_int` exists but takes a `str`, so using it means building one first, and it accepts `+5` and surrounding space, which these formats do not | `object.m31` |
+| an ordered `Map`, or a `Map` that iterates in insertion order | a parallel `List<str> order` beside the `Map` | `refs.m31` |
+| a `bytes` literal | `bytes nl() { return "\n".to_bytes(); }` — and it still allocates on every call, because §3.10 says a literal of a mutable type must | `t_object.m31` |
 
 The `bytes`-literal one deserves its own note, because the reasoning in §3.10
 is completely convincing and the consequence still bites: `join` on a
@@ -408,7 +408,7 @@ used wherever it fits — all but one of the places that `continue` is a
 a codec walks an array by index, so most of these loops genuinely need the
 counter, and then the increment is a statement a `continue` skips past. The
 one counted `while` here that also needed a `continue` shows what that costs
-(`git.src`, `indented`, skipping a leading blank line):
+(`git.m31`, `indented`, skipping a leading blank line):
 
 ```c
 while (at < n) {
@@ -438,8 +438,8 @@ Two types in this program exist only because a function returns one thing,
 and a third type carries a field for the same reason:
 
 ```c
-type Tables  { Huff lit; Huff dist; }        // zlib.src: a dynamic block's two codes
-type Headers { List<bytes> lines; bytes message; }   // object.src: a commit's two halves
+type Tables  { Huff lit; Huff dist; }        // zlib.m31: a dynamic block's two codes
+type Headers { List<bytes> lines; bytes message; }   // object.m31: a commit's two halves
 ```
 
 and `Huff` carries a field `int left` that is not part of a Huffman code at
@@ -461,7 +461,7 @@ has to hold.
 f = d ^ (bb & (c ^ d));
 f = (bb & c) | (d & (bb | c));
 
-// what `langc fmt` leaves behind
+// what `m31c fmt` leaves behind
 f = d ^ bb & (c ^ d);
 f = bb & c | d & (bb | c);
 ```
@@ -554,7 +554,7 @@ This is not politeness; these are things that measurably did not go wrong.
   - **`Bits(src, at: 2)`** — mandatory positional, optional named — reads
     better than either C or Python at the call site, and I never had to look
     up an argument order.
-  - **It is fast to build.** `langc` turns the 2 700-line program into 43 000
+  - **It is fast to build.** `m31c` turns the 2 700-line program into 43 000
     lines of C in 0.19 s, in a debug build of the compiler.
   - **It worked, mostly first time.** SHA-1 was correct on its first run.
     Inflate produced the right octets for all 29 fixtures on its first run —

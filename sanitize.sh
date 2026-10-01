@@ -37,7 +37,7 @@ fi
 
 bad=0
 checked=0
-# A program is one core test, or one module test directory with a main.src
+# A program is one core test, or one module test directory with a main.m31
 # and no main.err (a program that is meant not to compile has nothing to run).
 programs=(corpus/core/*."$LANG_EXT")
 for d in corpus/modules/*/; do

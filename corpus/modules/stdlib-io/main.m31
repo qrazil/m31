@@ -1,0 +1,119 @@
+import io;
+import fs;
+
+// `io`, the first standard library module that has to fail. Every operation
+// that can returns a Result whose error is `io.Error`; the named variants are
+// the ones worth branching on and everything else is `Other(errno)`.
+str path = "/tmp/m31-corpus-stdlib-io.txt";
+// write replaces, append adds, and both report the bytes they wrote.
+match (io.write(path, "hello\n")) {
+    case Ok(int n): {
+        print(n);
+    }  // 6
+    case Err(io.Error e): {
+        print(e);
+    }
+}
+match (io.append(path, "world\n")) {
+    case Ok(int n): {
+        print(n);
+    }  // 6
+    case Err(io.Error e): {
+        print(e);
+    }
+}
+match (io.read(path)) {
+    case Ok(str s): {
+        print(s.size());  // 12
+        print(s.split("\n").size());
+    }  // 3 -- a trailing empty field
+    case Err(io.Error e): {
+        print(e);
+    }
+}
+// A failure a caller branches on is a variant, not a string to parse.
+match (io.read("/no/such/dir/file")) {
+    case Ok(str s): {
+        print(s);
+    }
+    case Err(io.Error e): {
+        match (e) {
+            case NotFound: {
+                print("not found");
+            }  // this one
+            case PermissionDenied: {
+                print("denied");
+            }
+            case IsDirectory: {
+                print("directory");
+            }
+            case NotADirectory: {
+                print("not a directory");
+            }
+            case AlreadyExists: {
+                print("exists");
+            }
+            case NotEmpty: {
+                print("not empty");
+            }
+            case InvalidUtf8: {
+                print("not text");
+            }
+            case Other(int code): {
+                print(code);
+            }
+        }
+    }
+}
+match (io.read("/")) {
+    case Ok(str s): {
+        print(s);
+    }
+    case Err(io.Error e): {
+        print(e);
+    }
+}  // is a directory
+// An empty path is not a file anybody meant: EINVAL, which has no name here.
+match (io.write("", "x")) {
+    case Ok(int n): {
+        print(n);
+    }
+    case Err(io.Error e): {
+        print(e);
+    }
+}  // system error 22
+// Lines from standard input -- main.in beside this file. The second line
+// ends in \r\n and the last has no newline at all; both read the same.
+// One `io.stdin()`, made once and kept, because the buffer lives in it.
+io.File input = io.stdin();
+int count = 0;
+bool more = true;
+while (more) {
+    match (io.read_line_of(input, 4096)) {
+        case Ok(Option<str> line): {
+            match (line) {
+                case Some(str text): {
+                    count = count + 1;
+                    print(concat("[", concat(text, "]")));
+                }
+                case None: {
+                    more = false;
+                }
+            }
+        }
+        case Err(io.Error e): {
+            print(e.to_str());
+            more = false;
+        }
+    }
+}
+print(count);
+// 3
+// Leave nothing behind in /tmp.
+match (fs.remove(path)) {
+    case Ok(bool b): {
+    }
+    case Err(io.Error e): {
+        print(e.to_str());
+    }
+}

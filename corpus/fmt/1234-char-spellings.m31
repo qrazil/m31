@@ -1,0 +1,11 @@
+// A fixture for `m31c fmt`: a character literal keeps its spelling. It is
+// an `int`, so the value alone would print `'*'` as 42 -- which is exactly
+// the magic number the literal exists to remove.
+int star='*';
+int nl = '\n';
+int e='é';
+int esc  =   '\u{e9}';
+print(star);print(nl);
+print(e==esc);
+bytes b=['h','i'];
+print(b.utf8().or("?"));

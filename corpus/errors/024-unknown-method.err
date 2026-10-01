@@ -1,4 +1,4 @@
-corpus/errors/024-unknown-method.src:6:8: type `Rect` has no method `nope`
+corpus/errors/024-unknown-method.m31:6:8: type `Rect` has no method `nope`
   |
 6 | print(r.nope());
   |        ^

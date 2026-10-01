@@ -73,7 +73,7 @@ impl Lowerer {
             // lossy on purpose -- "not a number" and "out of range" are both
             // None -- because a built-in cannot return a library's own error
             // type, and the question it answers does not need one.
-            // Parsing a float is language source, lib/__floatfmt.src, which
+            // Parsing a float is language source, lib/__floatfmt.m31, which
             // builds the Option itself.
             "parse_float" => {
                 let Some((oty, ..)) = self.option_of(Ty::Float) else {
@@ -199,7 +199,7 @@ impl Lowerer {
             // only hands them over without interpreting them.
             "to_bytes" => Ok(self.rt_value("rt_str_to_bytes", vec![o.val()], Ty::Bytes)),
             // The Unicode scalar values, decoded in language source
-            // (lib/__text.src). A list rather than a new loop form, so
+            // (lib/__text.m31). A list rather than a new loop form, so
             // `for (int c in s.chars())` needs nothing the language lacks.
             "chars" => {
                 let Some(lty) = self.list_of(Ty::Int) else {
@@ -1617,7 +1617,7 @@ impl Lowerer {
         Ok(d)
     }
 
-    /// A call to `format` or `parse` in lib/__floatfmt.src, which is how a
+    /// A call to `format` or `parse` in lib/__floatfmt.m31, which is how a
     /// float becomes text and text a float: the conversion is language
     /// source, not runtime C. Both take one borrowed argument and return
     /// what `ret` says -- a `str` for `format`, an `Option<float>` for
@@ -1664,7 +1664,7 @@ impl Lowerer {
         Ok(d)
     }
 
-    /// A call to `chars` or `from_chars` in lib/__text.src, which is how a
+    /// A call to `chars` or `from_chars` in lib/__text.m31, which is how a
     /// `str` becomes code points and code points a `str`: UTF-8 is bit
     /// manipulation the language can write, so it is source, not runtime C.
     /// One borrowed argument, an owned reference back -- the shape of

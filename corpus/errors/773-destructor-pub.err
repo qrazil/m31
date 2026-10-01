@@ -1,4 +1,4 @@
-corpus/errors/773-destructor-pub.src:5:5: `Res.drop` is a destructor, which is never called by name, so it cannot be `pub`; remove the `pub`
+corpus/errors/773-destructor-pub.m31:5:5: `Res.drop` is a destructor, which is never called by name, so it cannot be `pub`; remove the `pub`
   |
 5 | pub void Res.drop() {
   |     ^

@@ -1,4 +1,4 @@
-corpus/errors/012-missing-field.src:6:11: `Point` takes 2 positional argument(s), found 1
+corpus/errors/012-missing-field.m31:6:11: `Point` takes 2 positional argument(s), found 1
   |
 6 | Point p = Point(1);
   |           ^

@@ -1,4 +1,4 @@
-corpus/errors/765-const-struct.src:8:1: a constant must be an int, float, bool, str or bytes, or an Array, List or Map of those; `Point` is not
+corpus/errors/765-const-struct.m31:8:1: a constant must be an int, float, bool, str or bytes, or an Array, List or Map of those; `Point` is not
   |
 8 | const Point ORIGIN = Point(0, 0);
   | ^

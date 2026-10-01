@@ -108,7 +108,7 @@ with `byte_at`. Only arithmetic on a guess lands inside a character, and
 that is a bug at the call site, like an index out of range.
 
 The one legitimate computed offset is a byte budget — "at most 255 bytes of
-this name". `corpus/core/793-truncate-on-a-boundary.src` is the idiom: back
+this name". `corpus/core/793-truncate-on-a-boundary.m31` is the idiom: back
 up while the byte there is a continuation byte (`b & 192 == 128`).
 
 The standard library cut at computed offsets on text a caller supplied in
@@ -166,7 +166,7 @@ it.) `args` cannot: a list cannot leave one element out without moving the
 rest, so it has to fail as a whole.
 
 The runtime now pushes `bytes` for both (`rt_args`, `rt_env`), and
-`lib/os.src` decodes, so the runtime has no remaining way to make a `str`
+`lib/os.m31` decodes, so the runtime has no remaining way to make a `str`
 that nothing checked.
 
 ---
@@ -236,7 +236,7 @@ where here the check sits in the one function that builds text, and an
 
 Both are UTF-8 bit manipulation over what the language already reaches —
 `byte_at`, `bytes.push`, `utf8()` — so they are language source,
-`lib/__text.src`, loaded like `lib/__floatfmt.src`: only when a file
+`lib/__text.m31`, loaded like `lib/__floatfmt.m31`: only when a file
 mentions `chars` or `from_chars`, and unimportable (the name begins with
 `__`). `chars` decodes without validating, because the type guarantees
 validity; `from_chars` checks each value and still ends in `utf8()`, so it

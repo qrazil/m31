@@ -31,7 +31,7 @@ reader's tab width, so it picks the only width it can echo back.
 The **caret** printed under the echoed source line is a separate question,
 because that line is echoed *raw* and a terminal draws it in cells rather
 than code points. So the caret is padded by **display width**, by the same
-rule `unicode.width` uses (`lib/unicode.src`): per grapheme cluster, East
+rule `unicode.width` uses (`lib/unicode.m31`): per grapheme cluster, East
 Asian Wide or Fullwidth is two cells, a combining mark is none, a cluster
 carrying U+FE0F or a pair of regional indicators is two, everything else is
 one. A tab is echoed as a single space and so contributes one cell as well as
@@ -42,7 +42,7 @@ token in both.
 The two rules are *not* in tension: the number counts code points, the
 padding counts cells, and the compiler does not have to choose. The compiler
 does not carry its own copy of the Unicode data either — `src/width.rs`
-parses the tables out of the embedded text of `lib/unicode.src`, so a
+parses the tables out of the embedded text of `lib/unicode.m31`, so a
 regeneration for a new Unicode version moves both at once.
 
 ### 1.2 Comments
@@ -225,7 +225,7 @@ own stack.
 
 ## 2.1 Modules
 
-**A file is a module**, and its name is the file's basename: `strings.src` is
+**A file is a module**, and its name is the file's basename: `strings.m31` is
 the module `strings`. There is no `mod` declaration and no module tree to
 keep in agreement with the filesystem.
 
@@ -280,13 +280,13 @@ print(greet.shout("world"));
 
 A module's name has to be usable as an identifier, because it is written in
 source. The entry file is exempt — it is named on the command line and never
-in source, so `011-types.src` is a fine program and a hopeless import.
+in source, so `011-types.m31` is a fine program and a hopeless import.
 
 **Two files whose names differ only in case are an error on every platform**,
 not only where the filesystem would confuse them.
 
 Module names are therefore unique across a program: two files called
-`util.src` in different directories are a collision rather than two modules.
+`util.m31` in different directories are a collision rather than two modules.
 That is the cost of naming by basename, and it is the same cost OCaml pays.
 
 ---
@@ -2022,7 +2022,7 @@ as in Rust, rather than rounding or returning an `Option`: every offset the
 language gives out is on a boundary, so one that is not came from
 arithmetic on a guess — a bug, like an index out of range. The one honest
 computed offset, a byte budget, backs up over continuation bytes first
-(`b & 192 == 128`; `corpus/core/793-truncate-on-a-boundary.src`).
+(`b & 192 == 128`; `corpus/core/793-truncate-on-a-boundary.m31`).
 
 **A code point is an `int`**, as a byte is (§3.10): one integer type. `chars`
 is a list rather than a loop form, so `for (int c in s.chars())` needs
@@ -2036,7 +2036,7 @@ refuses an unpaired `\u` surrogate.
 `to_upper`, `to_lower` and `trim` stay ASCII until the Unicode tables exist:
 full case mapping, grapheme clusters and normalisation are a `unicode`
 module's (docs/text-decision.md §8). `chars` and `from_chars` are written in
-the language (`lib/__text.src`); the rest of this table is the runtime.
+the language (`lib/__text.m31`); the rest of this table is the runtime.
 
 ### 6.5a Methods on numbers
 

@@ -1,4 +1,4 @@
-corpus/modules/floatfmt-hidden/main.src:3:8: `__floatfmt` is reserved: a name may not begin with `__`
+corpus/modules/floatfmt-hidden/main.m31:3:8: `__floatfmt` is reserved: a name may not begin with `__`
   |
 3 | import __floatfmt;
   |        ^

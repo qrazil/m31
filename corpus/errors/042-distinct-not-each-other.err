@@ -1,4 +1,4 @@
-corpus/errors/042-distinct-not-each-other.src:8:3: type mismatch: expected Price, found UserId
+corpus/errors/042-distinct-not-each-other.m31:8:3: type mismatch: expected Price, found UserId
   |
 8 | f(UserId(1));
   |   ^

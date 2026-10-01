@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Every command of `apps/git/git.src`, beside the real `git`, on a real
+# Every command of `apps/git/git.m31`, beside the real `git`, on a real
 # repository, compared octet for octet.
 #
 #   bash apps/git/compare.sh <our-binary> <repo> [workdir]
@@ -7,7 +7,7 @@
 # `git` is only ever READ from here: `cat-file`, `ls-tree`, `log`,
 # `rev-parse`, `show-ref`. Nothing in this script writes to a repository.
 #
-# Two flags are pinned on git's side, and `git.src`'s header says why:
+# Two flags are pinned on git's side, and `git.m31`'s header says why:
 # `core.abbrev=7`, because git derives an abbreviation length from how many
 # objects a repository has, and `log.decorate=false`, because a repository
 # may have turned decoration on in its config and this program has no config

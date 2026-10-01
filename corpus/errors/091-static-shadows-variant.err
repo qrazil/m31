@@ -1,4 +1,4 @@
-corpus/errors/091-static-shadows-variant.src:5:1: `E` already has a variant `A`, and `E.A` would be both
+corpus/errors/091-static-shadows-variant.m31:5:1: `E` already has a variant `A`, and `E.A` would be both
   |
 5 | static E E.A() { return E.B(1); }
   | ^

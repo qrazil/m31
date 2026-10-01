@@ -1,4 +1,4 @@
-corpus/errors/013-wrong-arity.src:5:20: type `Wrap` takes 1 type argument(s), found 2
+corpus/errors/013-wrong-arity.m31:5:20: type `Wrap` takes 1 type argument(s), found 2
   |
 5 | Wrap<int, str> b = Wrap<int, str>(1);
   |                    ^

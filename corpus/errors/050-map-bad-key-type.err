@@ -1,4 +1,4 @@
-corpus/errors/050-map-bad-key-type.src:10:17: a map key is an `int`, a `str`, or a type that declares both `int P.hash()` and `bool P.eq(P other)`, and that hashes equal keys equally; `P` declares no `hash` and no `eq`
+corpus/errors/050-map-bad-key-type.m31:10:17: a map key is an `int`, a `str`, or a type that declares both `int P.hash()` and `bool P.eq(P other)`, and that hashes equal keys equally; `P` declares no `hash` and no `eq`
    |
 10 | Map<P, int> m = {};
    |                 ^

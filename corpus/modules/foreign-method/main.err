@@ -1,4 +1,4 @@
-corpus/modules/foreign-method/main.src:6:1: `Secret` is declared in `lib`; a method may only be added to a type its own module declared
+corpus/modules/foreign-method/main.m31:6:1: `Secret` is declared in `lib`; a method may only be added to a type its own module declared
   |
 6 | int Secret.doubled() { return code * 3; }
   | ^

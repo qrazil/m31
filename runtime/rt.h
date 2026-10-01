@@ -256,7 +256,7 @@ void rt_print(int64_t v);
 void rt_print_bool(bool v);
 void rt_print_str(Obj *o);
 
-/* The seam for `lib/io.src` and `lib/fs.src`: one sys-layer call each
+/* The seam for `lib/io.m31` and `lib/fs.m31`: one sys-layer call each
  * (runtime/sys.h), returning its value or -errno unchanged. A primitive
  * returns only what the runtime can build without the compiler's help: a
  * scalar, a str, an element pushed onto a collection the caller passed in,
@@ -278,12 +278,12 @@ int64_t rt_rmdir(Obj *path);
 int64_t rt_rename(Obj *from, Obj *to);
 int64_t rt_symlink(Obj *target, Obj *path);
 int64_t rt_listdir(Obj *path, Obj *buf);          /* bytes the listing needs */
-/* Writes out what `print` has buffered. lib/io.src calls it before writing
+/* Writes out what `print` has buffered. lib/io.m31 calls it before writing
  * to descriptor 1 or 2 itself, so the two paths to one stream land in the
  * order the program wrote them. */
 void    rt_out_flush(void);
 
-/* ---- process primitives: lib/os.src, lib/date.src, lib/random.src ------ */
+/* ---- process primitives: lib/os.m31, lib/date.m31, lib/random.m31 ------ */
 /* Raw facts about the process and nothing more: the command line, one
  * environment variable, the exit status, the wall clock, the kernel's
  * randomness. Everything built on them -- Option, Result, calendars,
@@ -300,10 +300,10 @@ void    rt_clock(Obj *out);                     /* pushes seconds, then nanoseco
 int64_t rt_entropy(int64_t n, Obj *out);        /* pushes n octets; 0, or errno */
 /* ---- end process primitives ------------------------------------------- */
 
-/* ---- net primitives: lib/net.src --------------------------------------- */
+/* ---- net primitives: lib/net.m31 --------------------------------------- */
 /* The socket seam, to the list docs/sys-layer.md §9 designed. One sys-layer
  * call each, its value or -errno passed through, and nothing decided here:
- * lib/net.src holds the address parser and printer, the retry loops,
+ * lib/net.m31 holds the address parser and printer, the retry loops,
  * SO_REUSEADDR's default and the errno mapping.
  *
  * An IP address crosses as (family, port, 16 bytes) rather than as a struct,
@@ -331,10 +331,10 @@ int64_t rt_resolve(Obj *host, int64_t port, int64_t family, Obj *out, Obj *addrs
 int64_t rt_ignore_sigpipe(void);  /* so a write to a dead peer is EPIPE, not death */
 /* ---- end net primitives ------------------------------------------------ */
 
-/* ---- terminal primitives: lib/term.src --------------------------------- */
+/* ---- terminal primitives: lib/term.m31 --------------------------------- */
 /* One sys-layer call each, the layer's value or -errno passed through. The
  * flag words are the layer's own constants (runtime/sys.h), so the numbers
- * lib/term.src writes mean the same thing on every target.
+ * lib/term.m31 writes mean the same thing on every target.
  *
  * Reading keys and writing escape sequences need nothing here: a terminal is
  * a descriptor, so rt_read, rt_write_str and rt_poll above already do it. */

@@ -1,4 +1,4 @@
-corpus/errors/722-pub-interface-method.src:3:5: an interface's methods are as visible as the interface; `pub` goes on the interface, not on a method
+corpus/errors/722-pub-interface-method.m31:3:5: an interface's methods are as visible as the interface; `pub` goes on the interface, not on a method
   |
 3 |     pub int area();
   |     ^

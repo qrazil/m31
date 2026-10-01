@@ -1,4 +1,4 @@
-corpus/errors/890-interface-method-default.src:1:33: `go` is an interface method, so `by` may not have a default: a call through an interface passes positions, not names, and the default could never be used
+corpus/errors/890-interface-method-default.m31:1:33: `go` is an interface method, so `by` may not have a default: a call through an interface passes positions, not names, and the default could never be used
   |
 1 | interface Scale { int go(int v, int by = 2); }
   |                                 ^

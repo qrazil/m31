@@ -1,4 +1,4 @@
-corpus/errors/504-this-static.src:7:12: `this` means nothing here: `Point.origin` is a static method, called on the type rather than a value, so there is no receiver
+corpus/errors/504-this-static.m31:7:12: `this` means nothing here: `Point.origin` is a static method, called on the type rather than a value, so there is no receiver
   |
 7 |     return this;
   |            ^

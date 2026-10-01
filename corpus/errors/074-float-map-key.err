@@ -1,4 +1,4 @@
-corpus/errors/074-float-map-key.src:1:21: a map key is an `int`, a `str`, or a type that declares both `int T.hash()` and `bool T.eq(T other)`; `float` is none of those
+corpus/errors/074-float-map-key.m31:1:21: a map key is an `int`, a `str`, or a type that declares both `int T.hash()` and `bool T.eq(T other)`; `float` is none of those
   |
 1 | Map<float, int> m = {};
   |                     ^

@@ -1,4 +1,4 @@
-corpus/errors/770-destructor-params.src:5:1: `Res.drop` is a destructor and takes no arguments: it runs when the object dies, and nobody calls it to pass any
+corpus/errors/770-destructor-params.m31:5:1: `Res.drop` is a destructor and takes no arguments: it runs when the object dies, and nobody calls it to pass any
   |
 5 | void Res.drop(int code) {
   | ^

@@ -1,4 +1,4 @@
-corpus/errors/615-trap-not-str.src:2:6: type mismatch: expected str, found int
+corpus/errors/615-trap-not-str.m31:2:6: type mismatch: expected str, found int
   |
 2 | trap(3);
   |      ^

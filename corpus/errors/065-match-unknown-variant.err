@@ -1,4 +1,4 @@
-corpus/errors/065-match-unknown-variant.src:7:5: `Color` has no variant `Pink`; it has Red, Green
+corpus/errors/065-match-unknown-variant.m31:7:5: `Color` has no variant `Pink`; it has Red, Green
   |
 7 |     case Pink: { print(3); }
   |     ^

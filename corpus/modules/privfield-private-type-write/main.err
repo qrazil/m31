@@ -1,4 +1,4 @@
-corpus/modules/privfield-private-type-write/main.src:2:1: `Secret` is private to `lib`; its fields cannot be written from here
+corpus/modules/privfield-private-type-write/main.m31:2:1: `Secret` is private to `lib`; its fields cannot be written from here
   |
 2 | lib.make().code = 5;
   | ^

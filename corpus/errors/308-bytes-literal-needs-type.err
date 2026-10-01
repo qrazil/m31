@@ -1,4 +1,4 @@
-corpus/errors/308-bytes-literal-needs-type.src:3:12: there is nothing here to say what this should be; a collection literal takes its type from where it is written
+corpus/errors/308-bytes-literal-needs-type.m31:3:12: there is nothing here to say what this should be; a collection literal takes its type from where it is written
   |
 3 | print(b == [1]);
   |            ^

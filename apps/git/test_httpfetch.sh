@@ -1,4 +1,4 @@
-# `httpfetch.src`: git's smart-HTTP protocol, against a real `git
+# `httpfetch.m31`: git's smart-HTTP protocol, against a real `git
 # http-backend` -- the task this file exists for names it plainly: "stand up
 # your own real smart-HTTP git server as the test oracle", never a hand-rolled
 # stand-in, so this is `git http-backend` run as a genuine CGI script behind
@@ -34,7 +34,7 @@
 #      claim, a genuinely truncated response over the wire -- a small
 #      corrupting proxy in front of the real server, adjusting
 #      `Content-Length` to match so it is this module's own checksum check
-#      catching it and not `lib/http.src`'s transport-level framing.
+#      catching it and not `lib/http.m31`'s transport-level framing.
 
 hf_root="$WORK/httpfetch"
 mkdir -p "$hf_root"

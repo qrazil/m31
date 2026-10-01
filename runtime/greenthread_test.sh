@@ -9,7 +9,7 @@
 # processes, plus one dedicated ASan+UBSan build of everything.
 #
 # A fourth check does not touch this binary at all: it compiles a trivial
-# .src program with the actual langc binary and greps the emitted C for the
+# .m31 program with the actual m31c binary and greps the emitted C for the
 # exact probe text src/emit_c.rs is supposed to emit -- the compiler side of
 # the Part 3 contract, which runtime/greenthread_test.c cannot reach (see
 # that file's header comment for why).
@@ -125,7 +125,7 @@ fi
 LANGC="./target/debug/$LANG_BIN"
 if [ -x "$LANGC" ]; then
     printf 'int f() { return 1; }\n' >"$WORK/probe_fn.$LANG_EXT"
-    if "$LANGC" --emit-c "$WORK/probe_fn.$LANG_EXT" -o "$WORK/probe_fn.c" 2>"$WORK/langc.err"; then
+    if "$LANGC" --emit-c "$WORK/probe_fn.$LANG_EXT" -o "$WORK/probe_fn.c" 2>"$WORK/m31c.err"; then
         if grep -qF '{ int __rt_probe_local; if ((uintptr_t)&__rt_probe_local < rt_stack_limit) rt_stack_probe_slow(); }' \
                 "$WORK/probe_fn.c"; then
             note "emit_c.rs probe text" "ok (exact text found in emitted C)"
@@ -152,7 +152,7 @@ if [ -x "$LANGC" ]; then
         fi
     else
         note "emit_c.rs probe text" FAILED
-        echo "    langc --emit-c failed: $(head -1 "$WORK/langc.err")"
+        echo "    m31c --emit-c failed: $(head -1 "$WORK/m31c.err")"
         fail=1
     fi
 else

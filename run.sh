@@ -23,7 +23,7 @@ fail=0
 # -ffp-contract=off on every build: without it a C compiler may fuse
 # `a * b + c` into one fused multiply-add, which rounds once instead of twice.
 # That changes float results between targets that have FMA and targets that
-# do not, and breaks the exact-arithmetic tricks lib/math.src relies on. x86-64
+# do not, and breaks the exact-arithmetic tricks lib/math.m31 relies on. x86-64
 # without -march has no FMA, so the flag changes nothing here today; it is
 # here so an ARM build cannot quietly disagree.
 # --- compiler matrix: whatever is installed ---------------------------------

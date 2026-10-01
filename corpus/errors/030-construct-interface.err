@@ -1,4 +1,4 @@
-corpus/errors/030-construct-interface.src:5:11: `Shape` is an interface; construct a type that satisfies it
+corpus/errors/030-construct-interface.m31:5:11: `Shape` is an interface; construct a type that satisfies it
   |
 5 | Shape s = Shape();
   |           ^

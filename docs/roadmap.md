@@ -144,7 +144,7 @@ sum type, which is why the next item is entangled with this one.
 cannot have a standard library worth the name.
 
 Enums exist now, so `Result<T, E>` is already writable -- see
-`examples/enums.src`. What is missing is the ergonomics and the decisions
+`examples/enums.m31`. What is missing is the ergonomics and the decisions
 around them:
 
   - a propagation operator, so a chain of fallible calls is not a staircase
@@ -211,7 +211,7 @@ Two things the implementation settled that the record left implicit:
 
   - Only an IMPORTED module needs a name that is an identifier. The entry
     file is named on the command line and never in source, so the corpus's
-    `011-types.src` keeps working.
+    `011-types.m31` keeps working.
   - Every declaration records which module declared it, because privacy has
     to survive the point where all the files are concatenated into one
     program.
@@ -235,7 +235,7 @@ list of a user type by the type's own `cmp`, and a `Map` keys on a user type
 that declares `int T.hash()` and `bool T.eq(T other)` -- both through
 reserved method names the runtime calls through the type's metadata, and
 neither needing a `Hashable` interface (docs/reference.md 4.4a). The `sort`
-that takes the comparison as an argument is now `lib/sort.src` --
+that takes the comparison as an argument is now `lib/sort.m31` --
 `Order<T>`, `by`, `max`, `min`, `search`, all written in the language over a
 one-method interface; `spawn` taking a closure should not happen at all
 (docs/closures-decision.md).
@@ -294,12 +294,12 @@ took from C and Rust took from OCaml.
 How it works, since it is easy to picture wrongly. The compiler emits C, so
 a C compiler never leaves the chain:
 
-    stage 0:  src/*.rs      --rustc-->            langc0
-    stage 1:  compiler.src  --langc0--> .c --cc--> langc1
-    stage 2:  compiler.src  --langc1--> .c --cc--> langc2
-    stage 3:  compiler.src  --langc2--> .c --cc--> langc3
+    stage 0:  src/*.rs      --rustc-->            m31c0
+    stage 1:  compiler.m31  --m31c0--> .c --cc--> m31c1
+    stage 2:  compiler.m31  --m31c1--> .c --cc--> m31c2
+    stage 3:  compiler.m31  --m31c2--> .c --cc--> m31c3
 
-`langc2` and `langc3` must be BYTE-IDENTICAL. Not 1 and 2: stage 1 was built
+`m31c2` and `m31c3` must be BYTE-IDENTICAL. Not 1 and 2: stage 1 was built
 by a different compiler and may legitimately generate different code. Stages
 2 and 3 are both built from this language's own source, so identical input
 must give identical output -- and that check only means anything because
@@ -309,7 +309,7 @@ HashMap-iteration bug guarantees.
 Prerequisites, all of which are on the pre-freeze list anyway:
 
   - **modules** -- 10,900 lines is not going in one file;
-  - **file I/O** -- it has to read a `.src` and write a `.c`, and there is no
+  - **file I/O** -- it has to read a `.m31` and write a `.c`, and there is no
     I/O of any kind today;
   - **command-line arguments** -- it has to know which file.
 

@@ -1,4 +1,4 @@
-corpus/errors/762-const-local-field.src:9:5: `p` is const and cannot be changed; clone(p) is a copy that can
+corpus/errors/762-const-local-field.m31:9:5: `p` is const and cannot be changed; clone(p) is a copy that can
   |
 9 |     p.x = 5;
   |     ^

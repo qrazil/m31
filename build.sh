@@ -2,8 +2,8 @@
 # Compile a source file to an executable. The C backend is an implementation
 # detail: it emits C, hands it to cc, and cleans up after itself.
 #
-#   ./build.sh examples/tour.src            -> ./tour
-#   ./build.sh examples/tour.src -o mybin   -> ./mybin
+#   ./build.sh examples/tour.m31            -> ./tour
+#   ./build.sh examples/tour.m31 -o mybin   -> ./mybin
 set -euo pipefail
 cd "$(dirname "$0")"
 . ./config.sh

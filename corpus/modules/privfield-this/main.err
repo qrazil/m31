@@ -1,4 +1,4 @@
-corpus/modules/privfield-this/main.src:10:16: field `tag` of `acct.Animal` is private to `acct`; only a `pub` field can be used from another module
+corpus/modules/privfield-this/main.m31:10:16: field `tag` of `acct.Animal` is private to `acct`; only a `pub` field can be used from another module
    |
 10 |     return this.tag;
    |                ^

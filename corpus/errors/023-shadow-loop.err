@@ -1,4 +1,4 @@
-corpus/errors/023-shadow-loop.src:3:5: `i` is already in scope; shadowing is not allowed, rename one
+corpus/errors/023-shadow-loop.m31:3:5: `i` is already in scope; shadowing is not allowed, rename one
   |
 3 |     int i = 9;
   |     ^

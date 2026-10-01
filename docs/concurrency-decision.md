@@ -593,7 +593,7 @@ Podman, disabled on Google's production fleet, libuv reverted it).
   same shape of mechanism the epoll reactor already has — register
   interest in several things, get exactly one wakeup, cleanly withdraw
   from the rest. Not needed for the immediate next goal (an HTTP server):
-  `http.serve`'s `timeout_ms:` and `net.src`'s own
+  `http.serve`'s `timeout_ms:` and `net.m31`'s own
   `set_read_timeout`/`set_write_timeout` already solve per-connection
   timeouts at the socket level, without needing general multiplexing.
 - Structured concurrency: does a spawning scope wait for its children? Loom

@@ -538,7 +538,7 @@ void show<T>(T v) { ... }
 show(by_x);                 // T could be any interface, or none
 ```
 ```
-by_x.src:9:6: `by_x` is a function; it becomes a value only where a
+by_x.m31:9:6: `by_x` is a function; it becomes a value only where a
 one-method interface is expected, and `T` here is not one — bind it to a
 local of the interface type first
 ```
@@ -1206,7 +1206,7 @@ Applying that:
 ### Comparison — the one the library needs now
 
 ```c
-// lib/sort.src
+// lib/sort.m31
 pub interface Order<T> { int cmp(T a, T b); }
 
 pub void       by<T>(List<T> xs, Order<T> order);        // sort in place
@@ -1254,7 +1254,7 @@ program ever writes down.
 Proposed so the shape is on record, **not** adopted:
 
 ```c
-// lib/seq.src, after the freeze, if at all
+// lib/seq.m31, after the freeze, if at all
 pub interface Step<A, B> { B of(A x); }        // map
 pub interface Keep<T>    { bool ok(T x); }     // filter
 pub interface Fold<A, B> { B step(B acc, A x); } // reduce
@@ -1638,7 +1638,7 @@ side.
 newcomers would now make. It says what to write instead.
 
 **Stage 5 — the standard library catches up. Days.**
-`lib/sort.src`: `Order<T>`, `by`, `max`, `min`, `search`. Whatever else has
+`lib/sort.m31`: `Order<T>`, `by`, `max`, `min`, `search`. Whatever else has
 by then earned a callback.
 
 *Done.* Ordinary source -- no `prim`, nothing added to the runtime, more
@@ -1787,7 +1787,7 @@ from another one.
     matters. An interface call is two loads and an indirect call, and a
     callback-driven sort of `int`s is several times slower than the built-in
     one — now measurable, since both exist.
-  - **Privacy is judged on a substituted type.** Found writing `lib/sort.src`:
+  - **Privacy is judged on a substituted type.** Found writing `lib/sort.m31`:
     a generic function in one module cannot declare a local of type `T` when
     the caller instantiated `T` with a type it keeps private. Not a callback
     question, and worked around there by tracking an index instead of an

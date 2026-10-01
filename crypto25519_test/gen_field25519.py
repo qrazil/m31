@@ -69,6 +69,6 @@ for idx, a in enumerate(inv_vals):
     want.append(f"inv{idx} " + pow(am, p - 2, p).to_bytes(32, 'little').hex())
     want.append(f"p58_{idx} " + pow(am, (p - 5) // 8, p).to_bytes(32, 'little').hex())
 
-open(os.path.join(OUT, "t_field25519.src"), "w").write("\n".join(src) + "\n")
+open(os.path.join(OUT, "t_field25519.m31"), "w").write("\n".join(src) + "\n")
 open(os.path.join(OUT, "t_field25519.want"), "w").write("\n".join(want) + "\n")
 print("wrote", len(src), "src lines,", len(want), "want lines")

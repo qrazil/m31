@@ -1,4 +1,4 @@
-corpus/errors/757-const-shadow.src:6:5: `LIMIT` is already a constant; shadowing is not allowed, rename one
+corpus/errors/757-const-shadow.m31:6:5: `LIMIT` is already a constant; shadowing is not allowed, rename one
   |
 6 |     int LIMIT = 3;
   |     ^

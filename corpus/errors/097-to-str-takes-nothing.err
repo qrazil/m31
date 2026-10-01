@@ -1,4 +1,4 @@
-corpus/errors/097-to-str-takes-nothing.src:2:8: `to_str` takes no arguments
+corpus/errors/097-to-str-takes-nothing.m31:2:8: `to_str` takes no arguments
   |
 2 | print(n.to_str(2));
   |        ^

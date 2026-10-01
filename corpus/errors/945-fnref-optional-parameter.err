@@ -1,4 +1,4 @@
-corpus/errors/945-fnref-optional-parameter.src:8:11: `scale` is `int (int, int)`, and `Scale.go` is `int (int)`; a function satisfies a one-method interface only on an exact match -- same parameter types, in order, and the same return type
+corpus/errors/945-fnref-optional-parameter.m31:8:11: `scale` is `int (int, int)`, and `Scale.go` is `int (int)`; a function satisfies a one-method interface only on an exact match -- same parameter types, in order, and the same return type
   |
 8 | Scale s = scale;
   |           ^

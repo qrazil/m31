@@ -1,4 +1,4 @@
-corpus/errors/213-bitwise-str.src:1:11: cannot apply `|` to str and str
+corpus/errors/213-bitwise-str.m31:1:11: cannot apply `|` to str and str
   |
 1 | print("a" | "b");
   |           ^

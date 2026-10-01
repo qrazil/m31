@@ -1,4 +1,4 @@
-corpus/errors/096-int-has-one-method.src:4:8: `int` has no method `abs`
+corpus/errors/096-int-has-one-method.m31:4:8: `int` has no method `abs`
   |
 4 | print(n.abs());
   |        ^

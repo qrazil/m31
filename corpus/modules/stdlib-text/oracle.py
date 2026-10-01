@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The expected output of main.src, computed with CPython.
+"""The expected output of main.m31, computed with CPython.
 
     python3 oracle.py | diff - main.out
 
@@ -7,12 +7,12 @@ Every line CPython can answer is CPython's own answer -- `str.replace`,
 `str.splitlines`, `str.split`, `str.strip`, `str.removeprefix`,
 `str.removesuffix`, `str.rjust`, `str.ljust`. The handful where this language
 deliberately answers something else are computed by `ours_*` below, each with
-the reason written next to it; `main.src` marks the same four DIFFERS.
+the reason written next to it; `main.m31` marks the same four DIFFERS.
 
 `parse_int` is the exception: CPython's `int()` is not an oracle for it,
 because `int()` accepts what `str.parse_int` refuses -- surrounding
 whitespace, `_` separators and non-ASCII decimal digits (`int("４２") == 42`).
-The oracle for the grammar is the language's own built-in, and main.src checks
+The oracle for the grammar is the language's own built-in, and main.m31 checks
 against it in the program, on every probe. CPython is still the oracle for the
 VALUE of everything that does parse, which is asserted here.
 """

@@ -1,4 +1,4 @@
-corpus/errors/103-main-declared.src:3:1: there is no `main`: statements at the top level are the program
+corpus/errors/103-main-declared.m31:3:1: there is no `main`: statements at the top level are the program
   |
 3 | int main() { return 0; }
   | ^

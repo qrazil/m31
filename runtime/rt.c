@@ -382,7 +382,7 @@ Obj *rt_str_clone(Obj *o) {
  * every function here that makes one keeps it so. Sizes and offsets are in
  * BYTES -- O(1), and what files and sockets speak -- so `size()` is a byte
  * count and `substr` takes byte offsets, which must land on a character
- * boundary. Code points are language source, lib/__text.src.
+ * boundary. Code points are language source, lib/__text.m31.
  *
  * Why the rest cannot break validity, so nobody has to re-derive it: concat,
  * repeat and join put whole valid strings side by side; trim and the case
@@ -2575,11 +2575,11 @@ void rt_exit_blocking(void) {
                            memory_order_release);
 }
 
-/* ---- io primitives: lib/io.src, lib/fs.src ----------------------------- */
+/* ---- io primitives: lib/io.m31, lib/fs.m31 ----------------------------- */
 /* Each is ONE sys-layer call with the layer's convention passed straight
  * through: a non-negative value, or -errno in Linux numbering. Nothing here
  * loops, buffers, retries on EINTR, splits lines or decides what an errno
- * means -- that is all language source in lib/io.src and lib/fs.src. What
+ * means -- that is all language source in lib/io.m31 and lib/fs.m31. What
  * is left in C is only what C must do because the language cannot see it:
  *
  *   - a path becomes a C string. A str is NUL-terminated by construction
@@ -2698,7 +2698,7 @@ int64_t rt_listdir(Obj *path, Obj *buf) {
 }
 
 
-/* ---- process primitives: lib/os.src, lib/date.src, lib/random.src ------ */
+/* ---- process primitives: lib/os.m31, lib/date.m31, lib/random.m31 ------ */
 /* Each is one OS fact, handed back as a scalar or pushed onto the caller's
  * list. None of them decides anything: whether argv[0] is included, what an
  * unset variable means, how a clock reading becomes a date, how octets
@@ -2715,7 +2715,7 @@ void rt_args_init(int argc, char **argv) {
 /* Octets, not text: on Unix an argument is any run of non-NUL bytes, and a
  * str must be valid UTF-8. Pushing a str here would be the one way into the
  * type that nothing checked, so the library decodes with utf8() and decides
- * what a non-UTF-8 argument means (lib/os.src). */
+ * what a non-UTF-8 argument means (lib/os.m31). */
 void rt_args(Obj *out) {
     for (int i = 0; i < rt_argc_saved; i++) {
         const char *a = rt_argv_saved[i];
@@ -2758,13 +2758,13 @@ void rt_env_map(Obj *out) {
 
 /* exit(), not _exit(): stdio is flushed and atexit handlers run, which is
  * how the -DRC_DEBUG report still appears. The range check (0..255) is in
- * lib/os.src, where the library can say what was wrong. */
+ * lib/os.m31, where the library can say what was wrong. */
 _Noreturn void rt_exit(int64_t code) {
     rt_out_flush();
     exit((int)code);
 }
 
-/* Starts `argv` as a child process (lib/os.src's os.run) -- not to be
+/* Starts `argv` as a child process (lib/os.m31's os.run) -- not to be
  * confused with `spawn`, a pthread inside this process (rt_spawn, above);
  * sys.h's "process launch" section says why the two stay apart by name.
  *
@@ -2818,7 +2818,7 @@ int64_t rt_proc_start(Obj *argv_list) {
 /* Waits for the process `pid` -- one this process's own rt_proc_start
  * returned -- and reports how it ended, in sys.h's own encoding (see
  * sys_proc_wait's comment there): 0..255 is an exit code, 256 and up is
- * SYS_WAIT_SIGNAL_BASE plus the signal that killed it. lib/os.src decodes
+ * SYS_WAIT_SIGNAL_BASE plus the signal that killed it. lib/os.m31 decodes
  * this into `ExitStatus`, a real enum a `match` can be exhaustive over,
  * rather than a bare int a caller has to remember the encoding of. */
 int64_t rt_proc_wait(int64_t pid) {
@@ -2887,13 +2887,13 @@ int64_t rt_entropy(int64_t n, Obj *out) {
 /* ---- end process primitives ------------------------------------------- */
 
 
-/* ---- net primitives: lib/net.src --------------------------------------- */
+/* ---- net primitives: lib/net.m31 --------------------------------------- */
 /* The socket seam, designed in docs/sys-layer.md §9 and built to that list.
  * Like the io primitives above, each one is ONE sys-layer call with the
  * layer's convention passed straight through -- a value, or -errno in Linux
  * numbering -- and none of them decides anything. The address parser and
  * printer, the retry loops, SO_REUSEADDR's default, what an errno means and
- * the whole of `Conn` and `Listener` are language source in lib/net.src.
+ * the whole of `Conn` and `Listener` are language source in lib/net.m31.
  *
  * There are no primitives here for reading, writing or closing a socket: a
  * socket is a descriptor, so io's `__read`, `__write` and `__close` (§8)
@@ -2918,7 +2918,7 @@ int64_t rt_entropy(int64_t n, Obj *out) {
  *     NUL, for the reason path_ok gives above.
  *
  * SYS_AF_UNIX is reachable through __bind_path, __connect_path and
- * __sockpath although lib/net.src is TCP only. That trio is what keeps a
+ * __sockpath although lib/net.m31 is TCP only. That trio is what keeps a
  * path OUT of __bind's argument list, which is the design §9 settled on, and
  * building the runtime half of the set now is what lets the module that
  * wants Unix sockets be language source alone. */
@@ -3117,7 +3117,7 @@ int64_t rt_poll(Obj *fds, Obj *events, Obj *revents, int64_t timeout_ms) {
  * This is the ONE primitive whose answer depends on the backend: the raw one
  * returns -SYS_ENOSYS always, because resolving a name is getaddrinfo and
  * getaddrinfo is glibc's NSS, which dlopens libnss_* at run time
- * (runtime/sys_linux.c). lib/net.src treats that as an ordinary error on
+ * (runtime/sys_linux.c). lib/net.m31 treats that as an ordinary error on
  * every path that uses a name, which is the right shape anyway. */
 int64_t rt_resolve(Obj *host, int64_t port, int64_t family, Obj *out, Obj *addrs) {
     if (!path_ok(host)) return -SYS_EINVAL;
@@ -3140,7 +3140,7 @@ int64_t rt_resolve(Obj *host, int64_t port, int64_t family, Obj *out, Obj *addrs
 /* Set SIGPIPE to ignore, so that a write to a socket whose peer has gone
  * away comes back as -EPIPE instead of killing the process (sys.h).
  *
- * lib/net.src calls it every time it opens a socket rather than once at
+ * lib/net.m31 calls it every time it opens a socket rather than once at
  * startup: a module cannot hold the "already done" flag
  * (docs/module-state-decision.md), the disposition is per process and
  * idempotent, and one system call per socket is nothing beside the connect
@@ -3151,12 +3151,12 @@ int64_t rt_ignore_sigpipe(void) {
 /* ---- end net primitives ------------------------------------------------ */
 
 
-/* ---- terminal primitives: lib/term.src ---------------------------------
+/* ---- terminal primitives: lib/term.m31 ---------------------------------
  *
  * Each of the first four is one sys-layer call with its value or -errno
  * passed straight through. What raw mode IS -- which flags to clear, what
  * VMIN and VTIME should be, what to do when the terminal is not one -- is
- * lib/term.src, in language source, over the layer's own flag constants.
+ * lib/term.m31, in language source, over the layer's own flag constants.
  *
  * Only six of a SysTermios's fields cross the seam, because a prim deals in
  * scalars and in what it pushes onto a collection it was handed: the four
@@ -3173,7 +3173,7 @@ int64_t rt_ignore_sigpipe(void) {
  * one keeps everything the SEAM drops. Two ioctls per change of mode, which
  * happens twice in a program's life.
  *
- * `cflag` crosses as an opaque number. Nothing in lib/term.src looks at it;
+ * `cflag` crosses as an opaque number. Nothing in lib/term.m31 looks at it;
  * it is carried out and back so that a restore puts back the control-mode
  * word it found, and so that a set does not have to invent one. */
 

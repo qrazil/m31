@@ -151,12 +151,12 @@ pub fn load(entry: &str) -> Result<Loaded, Located> {
     let ext = entry_path
         .extension()
         .map(|e| e.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "src".to_string());
+        .unwrap_or_else(|| "m31".to_string());
 
     let name = module_name(entry);
     // The entry file is named on the command line and is never imported, so
     // it escapes the collision check below. It still takes a module name, and
-    // `math.src` as the program would give two different modules called
+    // `math.m31` as the program would give two different modules called
     // `math` the moment anything imported the real one.
     if crate::stdlib::embedded(&name).is_some() {
         return Err(Located {
@@ -184,7 +184,7 @@ pub fn load(entry: &str) -> Result<Loaded, Located> {
     let mut order = l.visit(&name, entry, None)?;
     let entry_module = name.clone();
 
-    // Float text is written in the language (lib/__floatfmt.src), and the
+    // Float text is written in the language (lib/__floatfmt.m31), and the
     // lowering calls into it by name. It is loaded as though the entry file
     // imported it, which it cannot spell, and only when some file could need
     // it: a program with no float in it would otherwise carry, and compile,
@@ -202,7 +202,7 @@ pub fn load(entry: &str) -> Result<Loaded, Located> {
         )?;
         order.splice(0..0, extra);
     }
-    // Code points are language source too (lib/__text.src), loaded on the
+    // Code points are language source too (lib/__text.m31), loaded on the
     // same terms: only when some file could reach it.
     if l.wants_text {
         let tm = crate::stdlib::TEXT;
@@ -368,7 +368,7 @@ impl Loader {
         // Only an IMPORTED module needs a name that is an identifier, because
         // only an imported module is named in source. The entry file is
         // named on the command line, where the filename grammar is the
-        // shell's business -- so `011-types.src` is a fine program and a
+        // shell's business -- so `011-types.m31` is a fine program and a
         // hopeless import.
         if from.is_some() && !valid_module_name(name) {
             return Err(here(Diag::new(

@@ -1,4 +1,4 @@
-corpus/errors/022-shadow-function.src:5:1: `helper` is already a function; shadowing is not allowed, rename one
+corpus/errors/022-shadow-function.m31:5:1: `helper` is already a function; shadowing is not allowed, rename one
   |
 5 | int helper = 5;
   | ^

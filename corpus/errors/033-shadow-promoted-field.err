@@ -1,4 +1,4 @@
-corpus/errors/033-shadow-promoted-field.src:10:5: `v` is already a field of `B`; shadowing is not allowed, rename one
+corpus/errors/033-shadow-promoted-field.m31:10:5: `v` is already a field of `B`; shadowing is not allowed, rename one
    |
 10 |     int v = 1;
    |     ^

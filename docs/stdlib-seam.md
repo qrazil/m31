@@ -20,7 +20,7 @@ allowed to, and what `io`'s error type looks like so it survives the freeze.
 
 ## 1. Stdlib source is embedded in the compiler
 
-`lib/io.src` is an ordinary source file in this repository, compiled by this
+`lib/io.m31` is an ordinary source file in this repository, compiled by this
 compiler, with no privileges beyond §3 below. It reaches a program through
 `include_str!` — the compiler binary carries the text.
 
@@ -33,7 +33,7 @@ long enough to have its own documentation page. The compiler here is one
 binary with no dependencies, and the standard library not changing that is
 worth an `include_str!`.
 
-A file named `io.src` next to the program is then a **collision**, reported
+A file named `io.m31` next to the program is then a **collision**, reported
 by the same rule that already refuses two modules with one name. It is not
 shadowing and not an override: module names are globally unique, and `io` is
 taken.
@@ -190,7 +190,7 @@ is a real variant with the errno in it, which is strictly more useful than a
 
 ### The errno mapping lives in the library
 
-`from_errno` is ordinary language source in `lib/io.src`: a chain of
+`from_errno` is ordinary language source in `lib/io.m31`: a chain of
 comparisons on the handful of numbers worth naming, everything else to
 `Other`. The runtime returns the raw errno — in Linux numbering on every
 host, `docs/sys-layer.md` §1 — and does not interpret it, so the one place
@@ -224,11 +224,11 @@ argument above made concrete: it is affordable exactly once, now.
 
 1. `prim`: parse it, restrict it to `lib/`, reserve `__` names, lower it by
    the name transform.
-2. Embedded modules: `lib/*.src` via `include_str!`, resolved by `import`,
+2. Embedded modules: `lib/*.m31` via `include_str!`, resolved by `import`,
    colliding with a same-named local file.
-3. `lib/io.src` — `read`, `write`, `append`, `stdin_line`, `stderr`, and
+3. `lib/io.m31` — `read`, `write`, `append`, `stdin_line`, `stderr`, and
    `Error` with `from_errno`.
-4. ~~`lib/math.src` over `prim`~~ -- superseded: `math` is written
+4. ~~`lib/math.m31` over `prim`~~ -- superseded: `math` is written
    entirely in the language (§5).
 
 Steps 1 and 2 are independent of each other and both are small. Step 3 is
@@ -271,7 +271,7 @@ each is a freeze decision:
     has nothing to read into. Every codec (base64, UTF-8, hashing) needs the
     same thing. *Done: `bytes`, reference §3.10 -- one byte per element, a
     capacity that `clear` keeps, and strict `utf8()` decoding back to text.
-    `lib/io.src` is not rewired onto it yet.*
+    `lib/io.m31` is not rewired onto it yet.*
   - **Bitwise operators** `& | ^ ~ << >>` on `int`. Hashing, codecs, UTF-8
     decoding and float formatting are all bit manipulation; today they
     cannot be written at all. **Done**: reference §6.1, with the wrapping
@@ -313,7 +313,7 @@ blocks the compiler as surely as it blocks `io`. The path is Go's:
 | `__args(List<bytes> out)` | pushes every `argv[i]` as octets, `argv[0]` first (the emitted `main` hands argc/argv to `rt_args_init`); `os.args` decodes |
 | `__env_map(List<bytes> out)` | pushes every variable as name, value, name, value ... octets, from `environ`; `os.env_map` decodes and skips what is not text |
 | `__env(str name, List<bytes> out)` | 1 and pushes the value as octets, or 0 if unset; `os.env` decodes |
-| `__exit(int code)` | flushes stdout, then `exit` -- the 0..255 check is in `lib/os.src` |
+| `__exit(int code)` | flushes stdout, then `exit` -- the 0..255 check is in `lib/os.m31` |
 | `__clock(List<int> out)` | pushes seconds and nanoseconds from ONE `CLOCK_REALTIME` reading |
 | `__entropy(int n, List<int> out)` | pushes n octets from `getentropy`; 0, or an errno. `rt_entropy` cuts the request into 256-octet calls, because that is all `getentropy` answers at once -- which is why `random`'s pool is 256 and not larger |
 
@@ -336,7 +336,7 @@ operators, the pool that keeps `__entropy` to one call per 256 octets
 ## 7. Float text is a module the compiler calls
 
 `print` of a float, `f.to_str()`, `str(f)` and `s.parse_float()` are
-language source: `lib/__floatfmt.src`, whose `format(float) -> str` and
+language source: `lib/__floatfmt.m31`, whose `format(float) -> str` and
 `parse(str) -> Option<float>` the lowering calls by their qualified names
 where it used to call `rt_print_float`, `rt_float_to_str` and
 `rt_str_parse_float`. `print` formats and then prints the string.
@@ -378,7 +378,7 @@ under gcc and clang at -O0 and -O2, with no mismatch. It is faster than the C at
   - **Invisible.** The module is called `__floatfmt`. The parser refuses a
     `__` name in anything a program writes, `import` included, so no program
     can import it, name its functions, or collide with it, and the entry file
-    cannot be called `__floatfmt.src` either. It is not a module users need:
+    cannot be called `__floatfmt.m31` either. It is not a module users need:
     the conversions it provides are already spelt `print`, `to_str`, `str`
     and `parse_float`.
   - **It cannot recurse.** A `print` or `to_str` of a float inside the module
@@ -405,7 +405,7 @@ Decided and built 2026-09-21. `io` crossed at whole-file primitives
 splitting, the `\r\n` rule and EINTR handling in C. They are gone. Each
 primitive now is **one** sys-layer call (`runtime/sys.h`) with its result
 passed through unchanged -- a value, or -errno -- and everything that
-decides anything is in `lib/io.src` and `lib/fs.src`:
+decides anything is in `lib/io.m31` and `lib/fs.m31`:
 
 | prim | sys call | answers |
 |---|---|---|
@@ -493,9 +493,9 @@ at all and returns byte-identical results from both backends, which
 
 ---
 
-## 9. The socket primitives: `lib/net.src` over descriptors
+## 9. The socket primitives: `lib/net.m31` over descriptors
 
-Decided in `docs/sys-layer.md` §9 and built 2026-09-23. `lib/net.src` is TCP
+Decided in `docs/sys-layer.md` §9 and built 2026-09-23. `lib/net.m31` is TCP
 — connections, listeners, addresses — and it is language source down to
 fifteen primitives, each **one** sys-layer call with its value or `-errno`
 passed through:
@@ -592,7 +592,7 @@ program sees an `Err` that says what is wrong and what to do, not a crash,
 and the corpus asks the question in a form whose answer is the same on both
 backends.
 
-## 10. `lib/http.src` needs no primitive at all
+## 10. `lib/http.m31` needs no primitive at all
 
 Added 2026-09-23. It is the first module with **no `prim` line in it**, and
 that is the point rather than a happy accident: HTTP/1.1 is a wire format,
@@ -628,7 +628,7 @@ without changing a line — which is the other thing the interface buys.
 
 ---
 
-## 11. The terminal primitives: `lib/term.src` over the line discipline
+## 11. The terminal primitives: `lib/term.m31` over the line discipline
 
 Added 2026-09-24, for the interactive programs a terminal git client is the
 first of. Six primitives, and the shape of the list is the argument:
@@ -650,7 +650,7 @@ primitive at all. That is the same test `http` passed by asking for nothing
 
 **What did not cross the seam is the interesting part.** Raw mode is a set of
 flags to clear and two control characters to set, and every one of those
-decisions is in `lib/term.src`, in language source, over the layer's own
+decisions is in `lib/term.m31`, in language source, over the layer's own
 constants written as numbers — exactly as `io` writes the open flags and
 `net` the address families. There is no `rt_raw_mode()` in the runtime: C
 knows how to read and write a `termios`, and nothing else about terminals.

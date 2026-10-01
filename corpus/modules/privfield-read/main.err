@@ -1,4 +1,4 @@
-corpus/modules/privfield-read/main.src:3:8: field `balance` of `acct.Account` is private to `acct`; only a `pub` field can be used from another module
+corpus/modules/privfield-read/main.m31:3:8: field `balance` of `acct.Account` is private to `acct`; only a `pub` field can be used from another module
   |
 3 | print(a.balance);
   |        ^

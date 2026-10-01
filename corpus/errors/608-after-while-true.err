@@ -1,4 +1,4 @@
-corpus/errors/608-after-while-true.src:7:5: unreachable statement
+corpus/errors/608-after-while-true.m31:7:5: unreachable statement
   |
 7 |     return 0;
   |     ^

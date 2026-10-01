@@ -1,4 +1,4 @@
-corpus/errors/203-bitnot-bool.src:2:7: cannot apply `~` to a value of type bool
+corpus/errors/203-bitnot-bool.m31:2:7: cannot apply `~` to a value of type bool
   |
 2 | print(~true);
   |       ^

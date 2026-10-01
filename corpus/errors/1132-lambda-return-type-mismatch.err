@@ -1,4 +1,4 @@
-corpus/errors/1132-lambda-return-type-mismatch.src:5:28: `Less.cmp` returns int, this lambda's body is a str
+corpus/errors/1132-lambda-return-type-mismatch.m31:5:28: `Less.cmp` returns int, this lambda's body is a str
   |
 5 | Less l = (int a, int b) => "smaller";
   |                            ^

@@ -22,11 +22,11 @@ word, so this program's short option is spelled `--o` and `-o` is an error.
 
 | | |
 |---|---|
-| `main.src` | the command line (`lib/args`) and the files (`lib/io`) |
-| `blocks.src` | the block parser: source to a list of `doc.Block` |
-| `inlines.src` | the inline parser: one block's raw text to HTML |
-| `render.src` | the tree to HTML, with cmark's whitespace |
-| `doc.src` | the tree's types alone, so the other three need not import each other |
+| `main.m31` | the command line (`lib/args`) and the files (`lib/io`) |
+| `blocks.m31` | the block parser: source to a list of `doc.Block` |
+| `inlines.m31` | the inline parser: one block's raw text to HTML |
+| `render.m31` | the tree to HTML, with cmark's whitespace |
+| `doc.m31` | the tree's types alone, so the other three need not import each other |
 
 The block parser is line based and recursive: a container — a block quote, a
 list item — strips its own marker off the lines it owns and hands the rest
@@ -71,7 +71,7 @@ goal. Each of these was left out on purpose:
   own is a paragraph here, with its angle brackets escaped.
 - **Entity and numeric character references.** `&copy;` stays `&amp;copy;`.
   Decoding them means shipping HTML5's two-thousand-entry table, which
-  `lib/html` refuses to do for exactly the same reason (see `lib/html.src`,
+  `lib/html` refuses to do for exactly the same reason (see `lib/html.m31`,
   "There is no `unescape`").
 - **Link reference definitions** and reference, collapsed and shortcut links
   (`[foo]: /url`, `[text][ref]`, `[foo]`). These need a document-wide first

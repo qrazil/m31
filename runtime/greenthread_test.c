@@ -17,13 +17,13 @@
  * processes rather than in the main suite below, which must itself exit 0.
  *
  * One honest limitation, stated up front rather than glossed over: this
- * cannot test the probe end to end through a compiled .src program, because
+ * cannot test the probe end to end through a compiled .m31 program, because
  * nothing yet routes a compiled program's execution through
  * rt_fiber_switch -- `spawn` still means an OS thread (rt.h), and nothing
  * in this phase builds the scheduler that would make a real green thread
  * run on a slab stack. So the compiler side of the Part 3 contract is
  * checked separately, in runtime/greenthread_test.sh, by compiling a
- * trivial .src file with the actual langc binary and grepping the emitted C
+ * trivial .m31 file with the actual m31c binary and grepping the emitted C
  * for the exact agreed probe text; the `overflow`/`poison` sub-tests below
  * reproduce that same text by hand against a real stack and the real
  * rt_stack_probe_slow, which is the strongest check available on the
@@ -441,7 +441,7 @@ static void test_state_table(void) {
 /* Exactly the agreed probe idiom (rt.h), reproduced by hand against a real
  * fiber stack. This is the strongest check available in Phase 1 of the
  * runtime side of the Part 3 contract -- see the file header for why a real
- * compiled .src program cannot exercise this yet. */
+ * compiled .m31 program cannot exercise this yet. */
 #define PROBE()                                                              \
     do {                                                                     \
         int __rt_probe_local;                                                \

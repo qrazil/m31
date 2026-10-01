@@ -1,4 +1,4 @@
-corpus/errors/1232-multi-char-literal.src:3:9: a character literal is exactly one character; `ab` is 2, so write the str "ab"
+corpus/errors/1232-multi-char-literal.m31:3:9: a character literal is exactly one character; `ab` is 2, so write the str "ab"
   |
 3 | int c = 'ab';
   |         ^

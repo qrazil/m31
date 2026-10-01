@@ -1,4 +1,4 @@
-corpus/modules/reserved-name/main.src:2:5: `__count` is reserved: a name may not begin with `__`
+corpus/modules/reserved-name/main.m31:2:5: `__count` is reserved: a name may not begin with `__`
   |
 2 | int __count = 1;
   |     ^

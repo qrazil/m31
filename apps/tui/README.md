@@ -13,13 +13,13 @@ styled spans), the primitives `apps/git/design.md` names (a collapsible
 outline, a synced jump list, a which-key overlay and the transient menu
 built on it, an addressable diff view, a persistent footer, plus `Viewport`
 and `Scrollbar` in support of the first two), and `tuiapp.Loop`, which reads
-real keys through `lib/term.src` and redraws through this library's own
+real keys through `lib/term.m31` and redraws through this library's own
 renderer. See "Left deliberately undone" below for what stage 2's original
 wishlist dropped, and why.
 
     bash apps/tui/check.sh                       # tests, then the benchmark
-    ./build.sh apps/tui/demo.src -o /tmp/d       # a static screen; run /tmp/d
-    ./build.sh apps/tui/browse.src -o /tmp/b     # an interactive one; run /tmp/b
+    ./build.sh apps/tui/demo.m31 -o /tmp/d       # a static screen; run /tmp/d
+    ./build.sh apps/tui/browse.m31 -o /tmp/b     # an interactive one; run /tmp/b
 
 **This library is not part of the standard library.** The compiler knows
 nothing about it, nothing was added to `src/stdlib.rs`, and nothing was put
@@ -36,7 +36,7 @@ Fourteen, in dependency order. They are all prefixed `tui` because module
 names are globally unique and every unprefixed name a UI library wants is
 either taken by `lib/` or likely to collide with a user's own file — see
 `FRICTION.md` §1. `tuiapp` is the one exception worth naming: it is the only
-module that imports `lib/term.src` and touches raw mode, a real read and a
+module that imports `lib/term.m31` and touches raw mode, a real read and a
 real write; every other module below it is still pure computation against a
 buffer.
 
@@ -55,7 +55,7 @@ buffer.
 | `tuimenu`  | `Popup`, `WhichKey`, `Switch`, `Transient` — one base, two overlays |
 | `tuidiffview`| `Kind`, `Line`, `Hunk`, `DiffView` — a diff with a cursor addressable to the line |
 | `tuifooter`| `split`, `Footer` — a screen band reserved regardless of the main view |
-| `tuiapp`   | `Action`, `Handler`, `Loop` — the application loop, over `lib/term.src` |
+| `tuiapp`   | `Action`, `Handler`, `Loop` — the application loop, over `lib/term.m31` |
 
 Each file's header comment is its reference documentation.
 
@@ -105,7 +105,7 @@ width is 0. The renderer never writes a continuation, and every write keeps
 the invariant that a continuation has a two-wide cell immediately to its
 left. Overwriting either half of a pair turns the other into a space. That
 is where terminal libraries have bugs, and it is checked from both
-directions in `tests.src`.
+directions in `tests.m31`.
 
 ---
 
@@ -115,7 +115,7 @@ directions in `tests.src`.
 **the sizes always sum to exactly `total` and none is negative** — so the
 parts tile the whole with no gap and no overlap. That invariant is checked
 against 2 000 random constraint sets from a seeded generator, horizontally
-and vertically, in `tests.src`.
+and vertically, in `tests.m31`.
 
 Each constraint states a preferred size, clamped into `0..total`:
 `Length(v)` is `v`, `Percentage(p)` is `total * p / 100`, `Ratio(a, b)` is
@@ -130,7 +130,7 @@ segment has to give. Both directions use largest-remainder rounding, in
 whole cells, with ties to the earlier segment.
 
 The full statement, including why `[Max(30), Max(30)]` in 100 cells gives 30
-and 70, is the header comment of `tuigeom.src`.
+and 70, is the header comment of `tuigeom.m31`.
 
 ---
 
@@ -147,7 +147,7 @@ of plain blanks to the end of a row becomes `\x1b[K`.
 Colour depth is a value you pass in — `Ansi16`, `Ansi256`, `TrueColour` —
 and a colour too rich for the depth is converted to the nearest entry of the
 smaller palette. Detection belongs to whatever a program built on this does
-with `$TERM` and terminfo; `lib/term.src` deliberately leaves it out too,
+with `$TERM` and terminfo; `lib/term.m31` deliberately leaves it out too,
 for the same reason (its own header, "What is left out, and where it
 belongs").
 
@@ -155,7 +155,7 @@ belongs").
 
 ## The styling layer
 
-`Theme` (`tuistyle.src`) is a plain struct of `Style` fields, one per role —
+`Theme` (`tuistyle.m31`) is a plain struct of `Style` fields, one per role —
 `normal`, `dim`, `title`, `accent`, `highlight`, `selected`, `error`,
 `added`, `removed`, `border` — each with a sensible default, so `Theme()` is
 a working plain theme exactly as `Style()` is a working plain style.
@@ -164,7 +164,7 @@ than hunting down every `Style(...)` a widget was built with; there is no
 registry and no lookup by name, because a struct field is what this
 language's interfaces already give for free.
 
-`Span` and `Line` (`tuiwidget.src`) are ratatui's `Span`/`Line` *concept*
+`Span` and `Line` (`tuiwidget.m31`) are ratatui's `Span`/`Line` *concept*
 through this library's own idiom rather than its API: a `Span` is a run of
 text in one `Style`, and a `Line` is a `List<Span>` with a `render` method —
 a `Widget`, exactly like `Block` and `Paragraph`, composing with `tuigeom`
@@ -218,9 +218,9 @@ none of them git-specific:
 ## The application loop
 
 `tuiapp.Loop` is the one module that touches a real terminal: raw mode via
-`lib/term.src`'s `raw()`, a read with a timeout via its `Reader`, a frame
+`lib/term.m31`'s `raw()`, a read with a timeout via its `Reader`, a frame
 via this library's own diffing renderer, a flush via its `Writer`. It is
-the loop `examples/keys.src` hand-writes, pulled out so a program built on
+the loop `examples/keys.m31` hand-writes, pulled out so a program built on
 this library does not write it twice.
 
 ```c
@@ -237,14 +237,14 @@ language already use: `Action handle(term.Event ev)`, answering `Continue`,
 resize event — and whether that redraw is a full repaint or a diff against
 the previous frame.
 
-`apps/tui/browse.src` is a runnable proof: a small interactive file browser
+`apps/tui/browse.m31` is a runnable proof: a small interactive file browser
 built ONLY from widgets that existed before this loop (`ListView`,
 `Block`, `Paragraph`) — j/k or the arrows move, Enter descends into a
 directory, u or Backspace goes back up, q or Escape quits, and the terminal
 is always restored on the way out, trap included, because that is what
 `term.raw()`'s `Session` is for.
 
-    ./build.sh apps/tui/browse.src -o /tmp/browse && /tmp/browse
+    ./build.sh apps/tui/browse.m31 -o /tmp/browse && /tmp/browse
 
 ---
 
@@ -270,7 +270,7 @@ machine.
 
 ## Testing without a terminal
 
-`tests.src` prints a report — 163 assertions plus rendered frames — and
+`tests.m31` prints a report — 163 assertions plus rendered frames — and
 `check.sh` compares it against `tests.out`, checks for a `FAIL` line, checks
 `__rc_live=0`, and checks that gcc and clang at `-O0` and `-O2` all agree.
 Every widget and primitive added for stage 2 and stage 3 is in there,
@@ -279,7 +279,7 @@ anywhere near it — `tuiapp.Loop.run` is the one function in this library
 that cannot be (it opens raw mode and blocks on a real read), so its own
 pure pieces are tested instead (`resized`, and a `Handler` written outside
 the library dispatched directly, the same proof `Widget` gets below) and
-the loop itself is proven by `browse.src` against a real terminal.
+the loop itself is proven by `browse.m31` against a real terminal.
 
 A buffer prints itself: `print(buf)` gives the rows as text, and
 `buf.frame()` puts a rule around them so trailing spaces are visible and an
@@ -320,7 +320,7 @@ named, separate omission rather than a silent one:
     with a jump list beside it, not a set of screens to switch between; a
     tabs widget would be built for a shape this library is not taking.
   - **Mouse events** — the locked design is keyboard-driven throughout.
-    `lib/term.src` already decodes SGR mouse reports (`Event.Mouse`) for
+    `lib/term.m31` already decodes SGR mouse reports (`Event.Mouse`) for
     whatever does want them; there is simply nothing here that reads one.
   - **`TextInput`** — no named client need yet. Nothing in
     `apps/git/design.md` asks for free-text entry (a commit message is the
@@ -335,6 +335,6 @@ named, separate omission rather than a silent one:
     the whole of what that abstraction would have been; a second type
     wrapping the same two fields would have had no job left to do.
 
-`lib/term.src` itself is not on this list: it already existed, complete and
+`lib/term.m31` itself is not on this list: it already existed, complete and
 tested, before this work started — see the module table above, and do not
 believe an older copy of this README that says otherwise.

@@ -5,8 +5,8 @@
     python3 apps/git/oracle_object.py <repo-or-gitdir>
 
 prints one canonical line per object -- loose or packed -- and, for a tree,
-one more per entry, for `t_object.src` to be diffed against. It uses only
-`zlib` and `hashlib` (never `git` itself, and never `apps/git/pack.src`), so
+one more per entry, for `t_object.m31` to be diffed against. It uses only
+`zlib` and `hashlib` (never `git` itself, and never `apps/git/pack.m31`), so
 it agrees with the language program only if both read the format correctly;
 it is not `git` wearing a hat, and it is not this program checking itself.
 
@@ -25,7 +25,7 @@ offset from the object's own header, `+1`-folded 7-bit groups) and
 `OBJ_REF_DELTA` (a base named by id, looked up in the same `.idx` first and
 falling back to a loose object), and the copy/insert delta format applied
 against the resolved base -- independently of, and in general shaped
-differently from, `apps/git/pack.src`'s own version of all of this. Python's
+differently from, `apps/git/pack.m31`'s own version of all of this. Python's
 `zlib.decompressobj` does the mid-offset inflate: fed the tail of the pack
 buffer from a start offset, `.unused_data` after it returns is what is left
 over once the stream's own end is reached, so `len(fed) - len(unused_data)`
@@ -120,7 +120,7 @@ def entries(content):
     return out
 
 
-# --- packfiles, entirely independent of apps/git/pack.src -------------------
+# --- packfiles, entirely independent of apps/git/pack.m31 -------------------
 
 def loose_names(od):
     names = []
@@ -159,7 +159,7 @@ def find_packs(od):
 
 class Idx:
     """A parsed `.idx`, format v2 only -- v1 (no magic) is refused, the same
-    choice `apps/git/pack.src` makes and for the same reason (the module
+    choice `apps/git/pack.m31` makes and for the same reason (the module
     header there says it)."""
 
     def __init__(self, data):
@@ -290,7 +290,7 @@ def apply_delta(base, delta):
 def resolve_offset(idxes, packs_bytes, pack_i, offset, loose_od):
     """(kind_word, content) at `offset` in `packs_bytes[pack_i]`, walking an
     OFS_DELTA/REF_DELTA chain down iteratively and applying it back up --
-    `apps/git/pack.src`'s own `resolve_offset`, independently written."""
+    `apps/git/pack.m31`'s own `resolve_offset`, independently written."""
     pack = packs_bytes[pack_i]
     idx = idxes[pack_i]
     chain = []

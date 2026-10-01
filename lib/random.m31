@@ -1,0 +1,492 @@
+// Unpredictable randomness from the operating system, and, separately, a
+// seeded generator you can replay. Written in this language over one
+// primitive that asks the kernel for octets. A port of Oro's `random`.
+//
+// API -- unpredictable, from the OS
+// ---------------------------------
+//   random.System r = random.system()
+//   r.octets(n)                -> bytes, n of them
+//   r.hex(n)                   -> str, n octets as 2n lowercase hex digits
+//   r.integer(low, high)       -> int in [low, high], both ends included
+//   r.fraction()               -> float in [0.0, 1.0)
+//   r.permutation(n)           -> List<int>, 0..n-1 in a random order
+//   r.uuid4()                  -> str, an RFC 4122 version 4 UUID
+//
+// API -- reproducible, from a seed
+// --------------------------------
+//   random.Seeded g = random.seeded(42)
+//   g.octets(n) / g.hex(n) / g.integer(low, high) / g.fraction()
+//   g.permutation(n) / g.uuid4()
+//
+// --- two generators, told apart by where the call is -------------------------
+//
+// "Randomness nobody can predict" and "the same sequence again tomorrow" are
+// different operations, so there are two generators and no `seed()`:
+//
+//   random.system().integer(1, 6)     unpredictable, always; you hold it
+//   random.seeded(42).integer(1, 6)   reproducible, always; you hold it
+//
+// A reader of a call site knows which they are looking at without reading
+// anything else, and nothing at a distance can turn one into the other the
+// way CPython's global `random.seed(0)` can.
+//
+// The operations are written once. `Source` below is the protocol both
+// generators satisfy -- one method, `octets` -- and every algorithm is
+// written against it, so the two differ in that one method and nothing
+// else: a difference in behaviour between them cannot be written.
+//
+// `Seeded` is PCG-XSH-RR 64/32 (Melissa O'Neill's `pcg32`), seeded and
+// consumed exactly as Oro's is, so `random.seeded(42)` gives the same
+// octets, integers, fractions and UUIDs here as it does in Oro.
+//
+// --- there are no module-level draws -----------------------------------------
+//
+// `random.integer(1, 6)` was a function here once, and is not: there is one
+// way to draw an unpredictable value and it is through a `System` you hold.
+// The reason is the pool. A `System` fetches the kernel's octets a block at
+// a time and hands them out, so a program that holds one makes one system
+// call per BLOCK octets rather than one per draw; a module-level function
+// could not hold the pool, and a module-level function that made a `System`
+// per call would be a second spelling of the same draw with none of the
+// saving -- the exact trap of a convenience that is quietly 256 times the
+// work. One spelling, and it is the one that is fast.
+//
+// Each `random.system()` is its own pool, so call it once and keep it, as
+// `io.stdin()` asks. Holding it is not a performance note: it is how the
+// saving happens.
+//
+// --- what a pool of unused octets is, and is not, safe against ---------------
+//
+// A pool holds kernel octets that have been fetched and not yet handed out.
+// The classic hazard is `fork`: a child inherits the parent's pool and both
+// hand out the same octets, which is why arc4random and getrandom track a
+// fork generation.
+//
+// **It cannot happen here, because this language cannot duplicate a
+// process.** There is no fork, no exec and no posix_spawn -- `runtime/sys.h`
+// has no call that makes a second copy of the address space, and `os` offers
+// the command line, the environment and `exit` and nothing else. The only
+// second process a program can meet is one it did not start.
+//
+// The two ways a `System` can be doubled inside the language are both safe:
+//
+//   - `clone(r)` is shallow (reference §6.4), so the copy shares the one
+//     `io.Buffer` and no octet is handed out twice;
+//   - a value crosses a thread boundary by being MOVED, never shared
+//     (docs/concurrency-decision.md), so a `System` is drawn from by one
+//     thread at a time. A thread that wants its own draws makes its own
+//     `random.system()`, with its own pool, filled from the kernel.
+//
+// **The rule, if that ever changes:** a primitive that duplicates the
+// process image must not let a `System` made before it be drawn from after
+// it. The pool is the thing to drop -- the fix is a new `random.system()` in
+// the child, not a repair here.
+//
+// --- where this differs from Oro, and why ------------------------------------
+//
+// There is no `choice(xs)` or `shuffle(xs)` yet. Both are generic over the
+// element type, and a generic function cannot be called from another module
+// yet (`lib.first(xs)` is "`lib` has no function `first`"), nor can a method
+// have type parameters, which the seeded forms would need. What they are
+// built from is here and is not generic:
+//
+//   choice:   xs[r.integer(0, xs.size() - 1)]
+//   shuffle:  for (int i in r.permutation(xs.size())) { out.push(xs[i]); }
+//
+// `permutation(n)` is Fisher-Yates over 0..n-1, drawing exactly what Oro's
+// `shuffle` draws, so a seeded permutation is the order Oro's seeded shuffle
+// would put the same list in, and `xs[g.integer(0, n - 1)]` is Oro's seeded
+// `choice`. When generic calls cross modules, `choice` and `shuffle` return
+// as functions over these.
+//
+// The kernel's octets arrive in a `List<int>`, because that is what the one
+// primitive fills; `from_kernel` copies them into `bytes` at once, so
+// nothing past it sees the difference.
+//
+// Failures: a range with high below low and a negative count are bugs in the caller and trap, as an index out of range
+// does. So does the kernel refusing to supply randomness, which Go's
+// crypto/rand also treats as fatal: there is nothing a caller could do with
+// the error.
+import io;
+
+prim int __entropy(int n, List<int> out);
+
+// How many octets one refill fetches, and so how many draws one system call
+// pays for.
+//
+// **256, because that is the largest block that costs one system call.**
+// `rt_entropy` (runtime/rt.c) cuts every request into 256-octet chunks,
+// because `getentropy` answers no more than 256 per call and that is the one
+// spelling glibc, musl, macOS and the BSDs all have. So a 4 KiB pool would
+// make sixteen system calls to fill and would save nothing per octet over
+// this one; it would only keep fifteen more blocks of unused entropy in
+// memory. The optimum is the chunk size itself, and it is 256.
+const int BLOCK = 256;
+
+/// Where octets come from: the protocol the two generators satisfy, and the
+/// only thing they differ in.
+///
+/// Private, because it is not a way to write a third generator -- a program
+/// that wants one writes its own type with its own methods. It is here so
+/// that every algorithm below is written once, against `octets`, and
+/// dispatches to whichever generator it was handed. Interfaces are
+/// structural (reference §3.4), so neither `Seeded` nor `System` mentions
+/// it; each simply has the method.
+interface Source {
+    bytes octets(int n);
+}
+
+/// A reproducible generator: the same seed gives the same sequence, on every
+/// platform and every release, because every step of it is integer
+/// arithmetic written here. Made by `random.seeded(seed)`.
+///
+/// Its one field is private, so the only way to make one is `seeded`, and
+/// the only way to move it is a draw. (`state` is a list only so that a draw
+/// through the `Source` protocol advances the generator it came from.)
+pub type Seeded {
+    List<int> state;
+}
+
+/// n octets.
+///
+/// This is `Seeded`'s half of the `Source` protocol: the one method the two
+/// generators do not share an implementation of.
+pub bytes Seeded.octets(int n) {
+    check_count(n, "octets");
+    return pcg_fill(state, n);
+}
+
+/// n octets as 2n lowercase hex digits.
+pub str Seeded.hex(int n) {
+    return hex_from(this, n);
+}
+
+/// A uniform integer in [low, high], both ends included.
+pub int Seeded.integer(int low, int high) {
+    return integer_from(this, low, high);
+}
+
+/// A float in [0.0, 1.0).
+pub float Seeded.fraction() {
+    return fraction_from(this);
+}
+
+/// 0..n-1 in a uniformly random order.
+pub List<int> Seeded.permutation(int n) {
+    return permutation_from(this, n);
+}
+
+/// A version 4 UUID by construction but not in spirit: anyone who knows the
+/// seed can predict it. It belongs in a test fixture, never in a database.
+pub str Seeded.uuid4() {
+    return uuid4_from(this);
+}
+
+/// A generator seeded with `seed`.
+///
+/// The seed is required, so a generator seeded from somewhere the caller did
+/// not choose cannot be written. A negative seed is its 64-bit two's
+/// complement pattern, a seed like any other. The start is the standard
+/// `pcg32_srandom_r` -- state zero, step, add the seed, step again -- so
+/// that adjacent seeds do not open with correlated output.
+///
+/// A function and not `random.Seeded(seed)`, which is what Oro writes: the
+/// generator's state is not the seed, and a construction can only store
+/// what it is given.
+pub Seeded seeded(int seed) {
+    return Seeded([step(step(0).wrapping_add(seed))]);
+}
+
+/// The system generator: octets nobody can predict, from the operating
+/// system, a block at a time. Made by `random.system()`.
+///
+/// Its draws cost one system call per `BLOCK` octets, not one per draw,
+/// which is the whole reason it is an object rather than a set of functions.
+/// See the header for what a pool of unused octets is safe against.
+pub type System {
+    // Fetched from the kernel and not yet handed out. An `io.Buffer` is
+    // exactly this thing and is already written (lib/io.m31): reading from
+    // the front is amortised O(1), and a pool drained to empty reuses its
+    // own storage, so a long run of draws neither copies nor allocates.
+    io.Buffer pool;
+}
+
+/// n octets.
+///
+/// This is `System`'s half of the `Source` protocol. Anything already in the
+/// pool is handed out first, and the pool is refilled from the kernel when
+/// it runs short.
+pub bytes System.octets(int n) {
+    check_count(n, "octets");
+    // `io.Buffer.read(0)` traps -- an empty result has exactly one meaning
+    // there -- so a draw of nothing is answered before the pool is asked.
+    if (n == 0) {
+        bytes empty = [];
+        return empty;
+    }
+    // A draw of a whole block or more has nothing to gain from the pool: the
+    // kernel is asked for the same number of octets either way, and routing
+    // them through the pool would copy them a second time and evict what is
+    // there. It goes straight to the kernel and leaves the pool alone.
+    if (n >= BLOCK) {
+        return from_kernel(n);
+    }
+    if (pool.size() < n) {
+        // One block is always enough, whatever little was left: `n` is below
+        // `BLOCK`, so the pool holds at least `n` afterwards.
+        Result<int, io.Error> put = pool.write(from_kernel(BLOCK));
+    }
+    match (pool.read(n)) {
+        case Ok(bytes b): {
+            return b;
+        }
+        case Err(io.Error e): {
+            // Unreachable: an `io.Buffer` has no kernel to say no to it, and
+            // its results are always `Ok` (lib/io.m31). Written out because
+            // the arm exists, not because it can be taken.
+            trap("random: the octet pool refused a read (" + e.to_str() + ")");
+        }
+    }
+}
+
+/// n octets as 2n lowercase hex digits. The count is of octets, not
+/// characters: `hex(16)` is 128 bits however it is written.
+pub str System.hex(int n) {
+    return hex_from(this, n);
+}
+
+/// A uniform integer in [low, high], both ends included -- the bound a caller
+/// almost always means (a die is `integer(1, 6)`), and the one that can name
+/// the whole range of `int`.
+pub int System.integer(int low, int high) {
+    return integer_from(this, low, high);
+}
+
+/// A float in [0.0, 1.0), with all 53 bits of a double's mantissa.
+pub float System.fraction() {
+    return fraction_from(this);
+}
+
+/// 0..n-1 in a uniformly random order: a shuffle of any list of n
+/// elements, by index. See the header for why it is not `shuffle(xs)`.
+pub List<int> System.permutation(int n) {
+    return permutation_from(this, n);
+}
+
+/// An RFC 4122 version 4 UUID.
+pub str System.uuid4() {
+    return uuid4_from(this);
+}
+
+/// A generator whose octets come from the operating system, with a pool of
+/// its own.
+///
+/// **Call it once and keep it.** Two of them are two pools, each fetching
+/// blocks the other never sees -- the same warning `io.stdin()` carries, for
+/// the same reason. A program that makes one per draw is correct and slow,
+/// which is why there is no shorter spelling that does it for you.
+pub System system() {
+    return System(io.buffer());
+}
+
+// n octets straight from the kernel, no pool involved.
+bytes from_kernel(int n) {
+    List<int> got = [];
+    int e = __entropy(n, got);
+    if (e != 0) {
+        trap("random: the operating system supplied no randomness (errno " + e.to_str() + ")");
+    }
+    bytes out = [];
+    for (int b in got) {
+        out.push(b);
+    }
+    return out;
+}
+
+// --- the algorithms, once ---------------------------------------------------
+str hex_from(Source s, int n) {
+    check_count(n, "hex");
+    return s.octets(n).hex();
+}
+
+// By rejection sampling, never `% span`. A byte modulo 3 maps 256 values
+// onto 3, and 256 is not a multiple of 3, so one outcome is 2% rarer than
+// the others -- from one line that looks obviously correct. Instead: keep
+// only the low bits that cover the span, which is uniform because every bit
+// pattern is equally likely, and redraw anything past the end. The redraw
+// costs at most one extra draw on average.
+//
+// Keeping the low `bits` bits is exactly the mask Oro applies; the octets are
+// read most significant first, as Oro reads them, so a seeded generator
+// answers the same integers in both.
+int integer_from(Source s, int low, int high) {
+    if (high < low) {
+        trap("random.integer(" + low.to_str() + ", " + high.to_str() + "): the range is empty -- high is below low, and both ends are included");
+    }
+    if (low == high) {
+        return low;
+    }
+    // A span wider than 2^63 does not fit an int; it takes its own path.
+    if (low < 0 && high > max_int() + low) {
+        return integer_wide(s, low, high);
+    }
+    int last = high - low;
+    int bits = bit_length(last);
+    int count = (bits + 7) / 8;
+    int drawn = low_bits(s.octets(count), bits);
+    while (drawn > last) {
+        drawn = low_bits(s.octets(count), bits);
+    }
+    return low + drawn;
+}
+
+// [low, high] spanning more than 2^63 values: all 64 bits are drawn, read as
+// an unsigned number `top * 2^63 + rest`, and kept when low plus it is at
+// most high -- which accepts more than half of all draws.
+int integer_wide(Source s, int low, int high) {
+    while (true) {
+        bytes b = s.octets(8);
+        int top = b[0] >> 7;
+        int rest = low_bits(b, 63);
+        if (top == 0) {
+            // low < 0 and rest < 2^63, and high - low exceeds 2^63 - 1, so
+            // this is always inside the range.
+            return low + rest;
+        }
+        // low + 2^63, written so that no step overflows: low is negative.
+        int base = low + max_int() + 1;
+        if (rest <= high - base) {
+            return base + rest;
+        }
+    }
+}
+
+// Seven octets, three bits dropped: 53 bits over 2^53, which is CPython's
+// construction and the only one that cannot round up to exactly 1.0.
+float fraction_from(Source s) {
+    int n = low_bits(s.octets(7), 56) >> 3;
+    return float(n) / 9007199254740992.0;
+}
+
+// Fisher-Yates over 0..n-1, downwards, which is its own direction: element
+// `i` is settled by swapping it with one chosen from 0..i, so every
+// permutation is reachable exactly once.
+List<int> permutation_from(Source s, int n) {
+    check_count(n, "permutation");
+    List<int> out = [];
+    for (int k in 0 .. n) {
+        out.push(k);
+    }
+    int i = n - 1;
+    while (i > 0) {
+        int j = integer_from(s, 0, i);
+        int held = out[i];
+        out[i] = out[j];
+        out[j] = held;
+        i = i - 1;
+    }
+    return out;
+}
+
+// 122 random bits, with the version nibble (4) and the two-bit variant (10)
+// written over the draw where RFC 4122 puts them. The hyphens are part of the
+// format: this string is the UUID.
+str uuid4_from(Source s) {
+    bytes b = s.octets(16);
+    b[6] = b[6] & 0x0f | 0x40;
+    b[8] = b[8] & 0b0011_1111 | 0b1000_0000;
+    str h = b.hex();
+    return h.substr(0, 8) + "-" + h.substr(8, 12) + "-" + h.substr(12, 16) + "-" + h.substr(16, 20) + "-" + h.substr(20, 32);
+}
+
+// --- PCG-XSH-RR 64/32 ---------------------------------------------------------
+//
+// The state advances as a 64-bit LCG, state * 6364136223846793005 + inc,
+// modulo 2^64; the output is the OLD state xor-shifted down to 32 bits and
+// rotated by its own top five bits. With the reference demo's arguments (seed
+// 42, stream 54) this produces PCG's published output, a15c02b7 7b47f409
+// ba1d3330 ...
+//
+// The state is an `int` holding the 64-bit pattern, so the LCG is the two
+// wrapping methods and the output function is bit operators. `>>` copies the
+// sign bit in, and PCG means the unsigned shift, so every right shift of the
+// state goes through `shr`.
+//
+// step: state * multiplier + increment, mod 2^64. The increment is Oro's stream
+// constant, shifted left once with its low bit set:
+// (1442695040888963407 << 1) | 1.
+int step(int state) {
+    return state.wrapping_mul(6364136223846793005).wrapping_add(2885390081777926815);
+}
+
+// One 32-bit output: the previous state is what gets permuted, so the
+// multiply and the output function are independent of each other.
+int next32(List<int> state) {
+    int old = state[0];
+    state[0] = step(old);
+    int xorshifted = shr(shr(old, 18) ^ old, 27) & 0xFFFF_FFFF;
+    int rot = shr(old, 59);
+    // Rotate right by rot within 32 bits. A shift by 32 is in range, so
+    // rot == 0 needs no case of its own; the mask drops what it pushes up.
+    return (xorshifted >> rot | xorshifted << 32 - rot) & 0xFFFF_FFFF;
+}
+
+// n octets: each 32-bit output gives four, most significant first, and what
+// is left of the last one is dropped -- Oro's order, octet for octet.
+//
+// The dropped remainder is why a `Seeded` has no pool and must not get one:
+// keeping those octets for the next draw would be free and would change
+// every sequence, and the sequences are Oro's.
+bytes pcg_fill(List<int> state, int n) {
+    bytes out = [];
+    while (out.size() < n) {
+        int v = next32(state);
+        int shift = 24;
+        while (shift >= 0 && out.size() < n) {
+            out.push(v >> shift & 255);
+            shift = shift - 8;
+        }
+    }
+    return out;
+}
+
+// The logical right shift, `x >>> n` for 1 <= n <= 63: the arithmetic shift
+// with the copied-in sign bits masked off, as the reference spells it (§6.1).
+int shr(int x, int n) {
+    return x >> n & ~(-1 << 64 - n);
+}
+
+// --- small arithmetic -------------------------------------------------------
+int max_int() {
+    return 0x7FFF_FFFF_FFFF_FFFF;
+}
+
+// How many bits it takes to write `n`, which is positive here.
+int bit_length(int n) {
+    int bits = 0;
+    int rest = n;
+    while (rest > 0) {
+        bits = bits + 1;
+        rest = rest >> 1;
+    }
+    return bits;
+}
+
+// The octets as one number, most significant first, keeping only the low
+// `bits` bits (1..63). The top octet is masked before anything is shifted
+// past it, so eight octets never reach the sign bit.
+int low_bits(bytes b, int bits) {
+    int n = b.size();
+    int top = bits - 8 * (n - 1);
+    int out = b[0] & (1 << top) - 1;
+    for (int i in 1 .. n) {
+        out = out << 8 | b[i];
+    }
+    return out;
+}
+
+void check_count(int n, str who) {
+    if (n < 0) {
+        trap("random." + who + "(" + n.to_str() + "): a count cannot be negative");
+    }
+}

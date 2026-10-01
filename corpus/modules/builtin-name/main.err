@@ -1,4 +1,4 @@
-corpus/modules/builtin-name/lib2.src:4:1: `print` is a builtin function; shadowing is not allowed, rename this one
+corpus/modules/builtin-name/lib2.m31:4:1: `print` is a builtin function; shadowing is not allowed, rename this one
   |
 4 | int print(int x) { return x + 1; }
   | ^

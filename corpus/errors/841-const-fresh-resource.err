@@ -1,4 +1,4 @@
-corpus/errors/841-const-fresh-resource.src:14:5: `const` cannot hold `Res`: it owns a resource (it has a destructor); a constant can neither freeze a resource nor copy one, so bind it without `const`
+corpus/errors/841-const-fresh-resource.m31:14:5: `const` cannot hold `Res`: it owns a resource (it has a destructor); a constant can neither freeze a resource nor copy one, so bind it without `const`
    |
 14 |     const Res c = Res(8);
    |     ^

@@ -1,8 +1,8 @@
-//! langc -- the compiler driver.
+//! m31c -- the compiler driver.
 //!
 //! Usage:
-//!     langc --emit-c  <source> -o <out.c>
-//!     langc --emit-ir <source> [-o <out.ir>]
+//!     m31c --emit-c  <source> -o <out.c>
+//!     m31c --emit-ir <source> [-o <out.ir>]
 //!
 //! One error, one line, on stderr, exit 1. The corpus compares diagnostics
 //! byte-for-byte, so this is observable surface (src/diag.rs).
@@ -27,8 +27,8 @@ mod tests;
 use std::process::ExitCode;
 
 fn usage() -> ExitCode {
-    eprintln!("usage: langc --emit-c|--emit-ir|fmt <source> [-o <output>]");
-    eprintln!("       langc fmt --check <source>   exit 1 if it is not formatted");
+    eprintln!("usage: m31c --emit-c|--emit-ir|fmt <source> [-o <output>]");
+    eprintln!("       m31c fmt --check <source>   exit 1 if it is not formatted");
     ExitCode::from(2)
 }
 
@@ -55,8 +55,8 @@ fn main() -> ExitCode {
                 }
             }
             "--help" => {
-                println!("usage: langc --emit-c|--emit-ir|fmt <source> [-o <output>]");
-                println!("       langc fmt --check <source>");
+                println!("usage: m31c --emit-c|--emit-ir|fmt <source> [-o <output>]");
+                println!("       m31c fmt --check <source>");
                 return ExitCode::SUCCESS;
             }
             other if other.starts_with('-') => {
@@ -139,7 +139,7 @@ fn reformat(src: &str, module: &str) -> Result<String, diag::Diag> {
     // The formatter must be able to read the standard library's own source,
     // which is the only source that may write `prim`. Deciding that by module
     // name is right here and nowhere else: this reads a file to print it back,
-    // it never compiles it, so a program called `math.src` gets a formatter
+    // it never compiles it, so a program called `math.m31` gets a formatter
     // that is one keyword too permissive and no more.
     if stdlib::embedded(module).is_some() {
         p = p.stdlib();

@@ -34,7 +34,7 @@ Fifty million allocations and fifty million frees, gone, in each case.
 
 **Sixteen bytes is a cliff.** System V returns a struct of 16 bytes or less in
 `rax:rdx` and anything larger through a hidden pointer into the caller's
-stack. `langc` emits no attributes and no packing, so this is the plain ABI,
+stack. `m31c` emits no attributes and no packing, so this is the plain ABI,
 and both gcc and clang agree; verified by reading the assembly:
 
 | size | example | returned |

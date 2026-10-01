@@ -1,4 +1,4 @@
-corpus/errors/942-fnref-no-variance.src:11:10: `take_sq` is `void (Sq)`, and `Take.take` is `void (Shape)`; a function satisfies a one-method interface only on an exact match -- same parameter types, in order, and the same return type
+corpus/errors/942-fnref-no-variance.m31:11:10: `take_sq` is `void (Sq)`, and `Take.take` is `void (Shape)`; a function satisfies a one-method interface only on an exact match -- same parameter types, in order, and the same return type
    |
 11 | Take t = take_sq;
    |          ^

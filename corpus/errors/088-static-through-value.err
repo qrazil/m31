@@ -1,4 +1,4 @@
-corpus/errors/088-static-through-value.src:7:8: `origin` is a static method; call it on the type, as `P.origin(..)`
+corpus/errors/088-static-through-value.m31:7:8: `origin` is a static method; call it on the type, as `P.origin(..)`
   |
 7 | print(p.origin().x);
   |        ^

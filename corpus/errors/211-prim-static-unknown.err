@@ -1,4 +1,4 @@
-corpus/errors/211-prim-static-unknown.src:1:7: `int` has no static method `from_bits`
+corpus/errors/211-prim-static-unknown.m31:1:7: `int` has no static method `from_bits`
   |
 1 | print(int.from_bits(1));
   |       ^

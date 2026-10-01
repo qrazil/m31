@@ -1,4 +1,4 @@
-corpus/errors/090-static-without-type.src:1:1: `static` describes a method on a type; write it as `static T Type.name(..)`
+corpus/errors/090-static-without-type.m31:1:1: `static` describes a method on a type; write it as `static T Type.name(..)`
   |
 1 | static int foo() { return 1; }
   | ^

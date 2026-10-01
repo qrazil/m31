@@ -1,4 +1,4 @@
-corpus/errors/021-shadow-param.src:2:5: `a` is already in scope; shadowing is not allowed, rename one
+corpus/errors/021-shadow-param.m31:2:5: `a` is already in scope; shadowing is not allowed, rename one
   |
 2 |     int a = 2;
   |     ^

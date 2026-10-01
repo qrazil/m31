@@ -1,4 +1,4 @@
-corpus/errors/016-positional-optional.src:5:7: `f` takes 1 positional argument(s), found 2
+corpus/errors/016-positional-optional.m31:5:7: `f` takes 1 positional argument(s), found 2
   |
 5 | print(f(1, 2));
   |       ^

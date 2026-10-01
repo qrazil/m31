@@ -1,4 +1,4 @@
-corpus/errors/087-discarded-result.src:6:1: this Result is discarded; handle it with `match`, propagate it with `?`, or bind it to a name
+corpus/errors/087-discarded-result.m31:6:1: this Result is discarded; handle it with `match`, propagate it with `?`, or bind it to a name
   |
 6 | f();
   | ^

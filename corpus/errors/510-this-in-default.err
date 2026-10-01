@@ -1,4 +1,4 @@
-corpus/errors/510-this-in-default.src:7:35: `this` cannot appear in a default: a default is evaluated where the call or construction is written, where `this` is not this declaration's receiver
+corpus/errors/510-this-in-default.m31:7:35: `this` cannot appear in a default: a default is evaluated where the call or construction is written, where `this` is not this declaration's receiver
   |
 7 | bool Counter.same(Counter other = this) {
   |                                   ^

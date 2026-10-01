@@ -49,6 +49,6 @@ for idx, n in enumerate(check_vals):
     src.append(f'print("isred_{idx} " + scalar25519.is_reduced(cs{idx}).to_str());')
     want.append(f"isred_{idx} " + ("true" if n < L else "false"))
 
-open(os.path.join(OUT, "t_scalar25519.src"), "w").write("\n".join(src) + "\n")
+open(os.path.join(OUT, "t_scalar25519.m31"), "w").write("\n".join(src) + "\n")
 open(os.path.join(OUT, "t_scalar25519.want"), "w").write("\n".join(want) + "\n")
 print("wrote", len(want), "cases")

@@ -129,7 +129,7 @@ until this has landed on `master`.
 | | work | mostly touches |
 |---|---|---|
 | **A** | item 1 (accessor inlining + hoisting), then item 4 (`Array` inline storage) | `emit_c.rs`, `runtime/` |
-| **B** | item 3 (errors as an id), then item 5 (intern payload-free variants) | every `lib/*.src`, both `apps/`, enum lowering |
+| **B** | item 3 (errors as an id), then item 5 (intern payload-free variants) | every `lib/*.m31`, both `apps/`, enum lowering |
 | **C** | item 2 (required `const`, and the `const` block) | `lexer.rs`, `parser.rs`, `fmt.rs`, `lower/`, `reference.md`, corpus |
 
 A and B are ordered within themselves because the second item in each
@@ -182,15 +182,15 @@ the difference isn't lost once all three show green:
     program gets the win the moment it's merged — nothing to revisit.
   - **B (errors as an id) forces adoption by construction.** Changing
     `Error`'s shape breaks every signature that returns one, so the brief
-    already requires rewriting every `lib/*.src` error type and both
+    already requires rewriting every `lib/*.m31` error type and both
     applications in the same change. Nothing left to do here afterward.
   - **C (the `const` block, and `const` on parameters) does not.** The
     language gaining the ability to write `const b { ... }` changes no
     existing program. Two follow-up passes are real work, not automatic:
 
-    1. **Find the read-process-refill loops and wrap them.** `io.src`'s
-       read loop, `zlib.src`'s inflate loop, `sha1.src`'s block loop,
-       `base64.src`, anything in `apps/tui` that repeatedly reads into one
+    1. **Find the read-process-refill loops and wrap them.** `io.m31`'s
+       read loop, `zlib.m31`'s inflate loop, `sha1.m31`'s block loop,
+       `base64.m31`, anything in `apps/tui` that repeatedly reads into one
        buffer — these are exactly the shape the block was built for, and
        none of them use it until someone goes back and adds it.
     2. **Mark read-only parameters `const` across `lib/` and `apps/`.**

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Every check for `docs/ssh-decision.md` Phase 1: the crypto primitives in
-# `lib/sha256.src` and `lib/chacha20poly1305.src`, standalone -- no
+# `lib/sha256.m31` and `lib/chacha20poly1305.m31`, standalone -- no
 # networking, nothing wired into `apps/git`. Modelled directly on
 # `apps/git/test.sh`, with the same rule: nothing here compares this
 # program with itself.
@@ -16,7 +16,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
-LANGC=./target/debug/langc
+LANGC=./target/debug/m31c
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 pass=0
@@ -27,7 +27,7 @@ bad()  { printf '\033[31mFAIL\033[0m %s\n' "$1"; shift; printf '%s\n' "$@" | sed
 
 build() {
     local name=$1
-    if ! "$LANGC" --emit-c "apps/ssh/$name.src" -o "$WORK/$name.c" 2>"$WORK/$name.diag"; then
+    if ! "$LANGC" --emit-c "apps/ssh/$name.m31" -o "$WORK/$name.c" 2>"$WORK/$name.diag"; then
         bad "compile $name" "$(head -5 "$WORK/$name.diag")"
         return 1
     fi
@@ -46,13 +46,13 @@ build() {
 # over its own directory, here over this one plus the two library files.
 
 if out=$(
-    for f in apps/ssh/*.src lib/sha256.src lib/chacha20poly1305.src; do
+    for f in apps/ssh/*.m31 lib/sha256.m31 lib/chacha20poly1305.m31; do
         "$LANGC" fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then
     note "source is formatted"
 else
-    bad "source is not formatted (run: langc fmt <file>)" "$out"
+    bad "source is not formatted (run: m31c fmt <file>)" "$out"
 fi
 
 # --- SHA-256 --------------------------------------------------------------------

@@ -1,4 +1,4 @@
-corpus/errors/865-const-str-over-size-cap.src:21:21: this `+` gives a string of 2097152 bytes; a constant string may hold at most 1048576 bytes: it is written out in full in the compiled program
+corpus/errors/865-const-str-over-size-cap.m31:21:21: this `+` gives a string of 2097152 bytes; a constant string may hold at most 1048576 bytes: it is written out in full in the compiled program
    |
 21 | const str S17 = S16 + S16;
    |                     ^

@@ -7,7 +7,7 @@ want = []
 src.append("import sha512;")
 src.append("")
 
-# every length 0..300, deterministic pattern (matches t_sha1.src's approach)
+# every length 0..300, deterministic pattern (matches t_sha1.m31's approach)
 src.append("bytes pattern = [];")
 src.append("int n = 0;")
 src.append("while (n <= 300) {")
@@ -48,6 +48,6 @@ want.append("big-whole " + hashlib.sha512(bigbuf).hexdigest())
 for size in (1, 7, 63, 127, 128, 129, 255, 1000, 4096):
     want.append(f"big-by-{size} " + hashlib.sha512(bigbuf).hexdigest())
 
-open(os.path.join(OUT, "t_sha512.src"), "w").write("\n".join(src) + "\n")
+open(os.path.join(OUT, "t_sha512.m31"), "w").write("\n".join(src) + "\n")
 open(os.path.join(OUT, "t_sha512.want"), "w").write("\n".join(want) + "\n")
 print("wrote", len(want), "cases")

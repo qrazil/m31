@@ -1,0 +1,443 @@
+// `.gitignore` pattern matching: which paths `status.m31`'s untracked walk
+// should leave out, the way real git's own untracked-file scan does.
+//
+// API
+// ---
+//   gitignore.load(gitdir, worktree)  -> Result<Ignore, Error>
+//   ig.is_ignored(relpath)            -> bool
+//
+// `load` finds and parses every applicable ignore file once; `is_ignored`
+// is then a pure, in-memory question asked once per candidate path, with no
+// I/O of its own -- `status.status` calls it once per untracked candidate.
+//
+// --- what is read, and in what order (lowest precedence first) --------------
+//
+//   1. `.git/info/exclude`, if it exists -- an extra `.gitignore` at the
+//      repository root that is never itself a tracked file.
+//   2. A `.gitignore` at the repository root, if there is one.
+//   3. Every other `.gitignore` found anywhere under the working tree
+//      (`.git` itself excluded), ordered shallowest directory first, so a
+//      deeper file's patterns are checked after -- and so can override --
+//      every shallower one's, exactly as real git orders them.
+//
+// Within one file, patterns are checked in the order they are written, and
+// the LAST pattern in the whole ordered sequence above that matches a given
+// path decides whether it is ignored -- a later, more specific pattern
+// overrides an earlier, more general one, and `!pattern` (negation) is just
+// a pattern that, when it is the last match, decides "not ignored" instead
+// of "ignored".
+//
+// --- the exception that is easy to get wrong: an excluded directory -------
+//
+// A negated pattern cannot re-include a path inside a directory that is
+// itself excluded, because real git never descends into an excluded
+// directory to look for one -- the directory's own contents are never
+// walked, so no pattern written for a path underneath it, negation
+// included, is ever consulted. This is checked here by walking a
+// candidate's ancestors from the repository root down: the moment an
+// ancestor directory itself is found excluded (by the patterns visible
+// *above* it -- never its own `.gitignore`, which lives inside it and so is
+// never reached), the whole path is reported ignored and nothing at a
+// deeper level -- not even a `!` pattern naming the file directly -- is
+// looked at. `is_ignored` below is exactly this walk.
+//
+// --- the pattern language implemented here -----------------------------------
+//
+//   - a blank line, or one starting with `#`, is skipped;
+//   - `!` at the start negates -- checked before dropping a trailing `/`,
+//     matching git's own order (`gitignore(5)`);
+//   - a trailing, unescaped `/` means "matches a directory only" (checked
+//     against an ancestor directory in the walk above; a leaf path from
+//     `status.m31`'s own walk is always a file, so a directory-only pattern
+//     can only ever exclude something ABOVE the leaf, never the leaf
+//     itself);
+//   - a leading `/`, or a `/` anywhere before the last character, anchors
+//     the pattern to the directory holding the `.gitignore` file -- it is
+//     matched against the whole path from there down. A pattern with no
+//     such `/` may match at any depth below that directory, which is
+//     implemented by treating it exactly like an anchored pattern with a
+//     leading `**/` already on it -- one matching engine for both;
+//   - `*` matches any run of characters other than `/`, `?` matches exactly
+//     one character other than `/` (code points, not bytes, so `?` matches
+//     `é` whole); a `**` segment on its own matches zero or more whole path
+//     segments, so it can appear leading (`**/foo`), trailing (`foo/**`),
+//     or in the middle (`a/**/b`).
+//
+// --- deliberately out of scope -----------------------------------------------
+//
+// `[abc]`/`[a-z]`/`[!abc]` character classes: not asked for, and `fs.glob`
+// already has the one class parser this codebase owns should a future
+// caller want it. Backslash escapes are honoured only for a leading `\!` or
+// `\#` (a literal `!` or `#` that would otherwise be read as negation or a
+// comment) -- escaping `*`, `?` or a trailing space is not, since real
+// `.gitignore` files essentially never need it and it is not this task's
+// "common, load-bearing" bar. Trailing whitespace is always trimmed, not
+// only when unescaped, for the same reason. `core.excludesFile` (a global
+// ignore file named in `~/.gitconfig`) is a separate, pre-existing gap --
+// nothing here reads `.git/config` or `~/.gitconfig` at all -- and is left
+// alone rather than taken on as a side quest.
+
+import io;
+import fs;
+import text;
+import repo;
+
+/// Why the ignore rules for a repository could not be loaded. Payload-free
+/// (docs/errors-decision.md §4): a missing or unreadable ignore file is
+/// silently treated as "no rules from here" (git's own behaviour for a
+/// missing `.gitignore`), so the only way `load` fails is the working tree
+/// itself being unreadable, which `Io` already says as much as a caller
+/// needs.
+pub enum Error {
+    Io;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case Io: {
+            return "the working tree could not be read while looking for .gitignore files";
+        }
+    }
+}
+
+// One pattern, already normalised at parse time so matching never has to
+// re-inspect the raw text: `segments` is the path split on `/`, with a
+// literal "**" segment wherever the pattern meant "zero or more directories
+// here" -- including one synthesised at the front for a pattern that had no
+// `/` of its own, which is what makes it match at any depth.
+type Pattern {
+    bool negate;
+    bool dir_only;
+    List<str> segments;
+}
+
+// One ignore file's rules, and the directory (repository-relative, split on
+// `/`, empty for the repository root) it applies from. `.git/info/exclude`
+// is represented the same way, with an empty `base_segs` -- it behaves
+// exactly like a root `.gitignore`, only checked first (lowest precedence).
+type IgnoreFile {
+    List<str> base_segs;
+    List<Pattern> patterns;
+}
+
+// Files sort shallowest first, so `is_ignored` can apply them in precedence
+// order just by walking the list once. Two files at the same depth are
+// never both applicable to one candidate (their directories are disjoint),
+// so how ties break does not matter -- except `.git/info/exclude`, pushed
+// before any depth-0 `.gitignore` is found, whose place at the very front
+// `sort()`'s stability (`lib/sort.m31`) then preserves.
+int IgnoreFile.cmp(IgnoreFile other) {
+    return base_segs.size() - other.base_segs.size();
+}
+
+/// Every ignore rule that applies anywhere under `worktree`: `.git/info/exclude`
+/// plus every `.gitignore` found by walking the working tree (`.git` itself
+/// excluded), ready for repeated, I/O-free `is_ignored` calls.
+pub type Ignore {
+    List<IgnoreFile> files;
+}
+
+/// Is `relpath` -- a file, repository-relative, `/`-separated, exactly as
+/// `status.m31`'s own walk spells one -- ignored?
+///
+/// Walks every ancestor directory from the repository root down first: the
+/// moment one of them is itself excluded, the whole path is ignored and
+/// nothing below matters (the module header's negation exception). Only if
+/// every ancestor is clear does the file's own name get checked against the
+/// patterns that reach it.
+pub bool Ignore.is_ignored(str relpath) {
+    List<str> segs = split_segments(relpath);
+    int n = segs.size();
+    for (int k in 1 .. n) {
+        if (matched(files, segs, k, true)) {
+            return true;
+        }
+    }
+    return matched(files, segs, n, false);
+}
+
+/// Load every applicable ignore file for the repository at `gitdir`/`worktree`.
+/// A missing `.git/info/exclude` or a working tree with no `.gitignore`
+/// anywhere is not an error -- it is a repository with no rules, which
+/// `is_ignored` then always answers `false` for.
+pub Result<Ignore, Error> load(str gitdir, str worktree) {
+    List<IgnoreFile> files = [];
+    str excl = fs.join(repo.common(gitdir), "info/exclude");
+    match (io.read(excl)) {
+        case Ok(str s): {
+            files.push(IgnoreFile([], parse_patterns(s)));
+        }
+        case Err: {
+        }
+    }
+    match (fs.walk(worktree)) {
+        case Ok(List<str> paths): {
+            str base = fs.join(worktree, "");
+            for (str p in paths) {
+                str rel = text.strip_prefix(p, base);
+                if (rel == ".git" || rel.starts_with(".git/")) {
+                    continue;
+                }
+                if (rel != ".gitignore" && !rel.ends_with("/.gitignore")) {
+                    continue;
+                }
+                if (!fs.is_file(p)) {
+                    continue;
+                }
+                match (io.read(p)) {
+                    case Ok(str s): {
+                        str dir = "";
+                        if (rel != ".gitignore") {
+                            dir = text.strip_suffix(rel, "/.gitignore");
+                        }
+                        files.push(IgnoreFile(split_segments(dir), parse_patterns(s)));
+                    }
+                    case Err: {
+                    }
+                }
+            }
+        }
+        case Err: {
+            return Result<Ignore, Error>.Err(Error.Io);
+        }
+    }
+    files.sort();
+    return Result<Ignore, Error>.Ok(Ignore(files));
+}
+
+// The last-match-wins answer for the candidate made of `segs[0 .. k)`, over
+// every ignore file whose directory is a strict ancestor of it, in
+// precedence order (the list is already sorted shallowest first). `is_dir`
+// says whether that candidate is a directory (every ancestor is; the final
+// path itself, checked by `is_ignored`'s own last call, never is -- a leaf
+// from `status.m31`'s walk is always a file or a symlink).
+bool matched(List<IgnoreFile> files, List<str> segs, int k, bool is_dir) {
+    bool ignored = false;
+    for (IgnoreFile f in files) {
+        int bdepth = f.base_segs.size();
+        if (bdepth >= k) {
+            continue;
+        }
+        bool under = true;
+        for (int i in 0 .. bdepth) {
+            if (f.base_segs[i] != segs[i]) {
+                under = false;
+                break;
+            }
+        }
+        if (!under) {
+            continue;
+        }
+        List<str> rel = sub_segments(segs, bdepth, k);
+        for (Pattern p in f.patterns) {
+            if (p.dir_only && !is_dir) {
+                continue;
+            }
+            if (match_segments(p.segments, 0, rel, 0)) {
+                ignored = !p.negate;
+            }
+        }
+    }
+    return ignored;
+}
+
+// --- one .gitignore file's text, into `Pattern`s -----------------------------
+
+List<Pattern> parse_patterns(str content) {
+    List<Pattern> out = [];
+    for (str raw in text.lines(content)) {
+        match (parse_line(raw)) {
+            case Some(Pattern p): {
+                out.push(p);
+            }
+            case None: {
+            }
+        }
+    }
+    return out;
+}
+
+Option<Pattern> parse_line(str raw) {
+    if (raw.starts_with("#")) {
+        return Option<Pattern>.None;
+    }
+    str line = text.trim_end(raw);
+    if (line == "") {
+        return Option<Pattern>.None;
+    }
+    bool negate = false;
+    if (line.starts_with("\\!")) {
+        line = line.substr(1, line.size());
+    } else if (line.starts_with("\\#")) {
+        line = line.substr(1, line.size());
+    } else if (line.starts_with("!")) {
+        negate = true;
+        line = line.substr(1, line.size());
+    }
+    if (line == "") {
+        return Option<Pattern>.None;
+    }
+    bool dir_only = false;
+    if (line.ends_with("/")) {
+        dir_only = true;
+        line = line.substr(0, line.size() - 1);
+    }
+    if (line == "") {
+        return Option<Pattern>.None;
+    }
+    bool anchored = false;
+    if (line.starts_with("/")) {
+        anchored = true;
+        line = line.substr(1, line.size());
+    } else if (line.contains("/")) {
+        anchored = true;
+    }
+    if (line == "") {
+        return Option<Pattern>.None;
+    }
+    List<str> segments = [];
+    if (anchored) {
+        segments = split_segments(line);
+    } else {
+        segments.push("**");
+        segments.push(line);
+    }
+    return Option<Pattern>.Some(Pattern(negate, dir_only, segments));
+}
+
+// `s` split on `/` into non-empty segments -- `""` becomes `[]`, and
+// neither a leading nor a trailing `/` (there is never one here: callers
+// strip both before this is reached) would leave an empty piece behind.
+List<str> split_segments(str s) {
+    if (s == "") {
+        return [];
+    }
+    List<str> out = [];
+    for (str part in s.split("/")) {
+        out.push(part);
+    }
+    return out;
+}
+
+List<str> sub_segments(List<str> segs, int from, int to) {
+    List<str> out = [];
+    for (int i in from .. to) {
+        out.push(segs[i]);
+    }
+    return out;
+}
+
+// --- the segment-list matcher, "**" included ---------------------------------
+
+// Does the pattern's segment list, from `pi`, match the path's segment
+// list, from `si`, to the very end of both? A "**" segment tries every
+// number of path segments it could consume, zero included, which is what
+// makes it cross directories; any other segment must consume exactly one
+// path segment and glob-match it.
+bool match_segments(List<str> pat, int pi, List<str> path, int si) {
+    if (pi == pat.size()) {
+        return si == path.size();
+    }
+    if (pat[pi] == "**") {
+        int j = si;
+        while (j <= path.size()) {
+            if (match_segments(pat, pi + 1, path, j)) {
+                return true;
+            }
+            j = j + 1;
+        }
+        return false;
+    }
+    if (si == path.size()) {
+        return false;
+    }
+    if (!seg_match(chars_of(path[si]), chars_of(pat[pi]))) {
+        return false;
+    }
+    return match_segments(pat, pi + 1, path, si + 1);
+}
+
+// One path component against one pattern component: `*` (any run, zero
+// included) and `?` (exactly one character), in code points. The classic
+// backtracking matcher (`fs.m31`'s `matches`, minus its shell-only
+// leading-dot rule -- `.gitignore` patterns match a leading dot like any
+// other character -- and minus `[...]` classes, out of scope here).
+bool seg_match(List<int> name, List<int> pat) {
+    int n = name.size();
+    int m = pat.size();
+    int ni = 0;
+    int pi = 0;
+    int star = -1;
+    int star_ni = 0;
+    while (true) {
+        if (pi < m) {
+            int c = pat[pi];
+            if (c == 42) {
+                star = pi;
+                star_ni = ni;
+                pi = pi + 1;
+                continue;
+            }
+            if (ni < n) {
+                bool hit = false;
+                if (c == 63) {
+                    hit = true;
+                    pi = pi + 1;
+                } else {
+                    hit = c == name[ni];
+                    if (hit) {
+                        pi = pi + 1;
+                    }
+                }
+                if (hit) {
+                    ni = ni + 1;
+                    continue;
+                }
+            }
+        } else if (ni == n) {
+            return true;
+        }
+        if (star == -1) {
+            return false;
+        }
+        star_ni = star_ni + 1;
+        if (star_ni > n) {
+            return false;
+        }
+        ni = star_ni;
+        pi = star + 1;
+    }
+}
+
+// The code points of a str (`fs.m31`'s own `chars`, written out again here
+// for the reason `index.m31`'s header gives for `hex_decode`: a small
+// per-module helper, not a shared utility, for a language whose `str` has
+// no built-in code-point indexing).
+List<int> chars_of(str s) {
+    List<int> out = [];
+    int i = 0;
+    int n = s.size();
+    while (i < n) {
+        int b = s.byte_at(i);
+        int len = 1;
+        int cp = b;
+        if (b >= 240) {
+            len = 4;
+            cp = b & 7;
+        } else if (b >= 224) {
+            len = 3;
+            cp = b & 15;
+        } else if (b >= 192) {
+            len = 2;
+            cp = b & 31;
+        }
+        int j = 1;
+        while (j < len && i + j < n) {
+            cp = cp << 6 | s.byte_at(i + j) & 63;
+            j = j + 1;
+        }
+        out.push(cp);
+        i = i + len;
+    }
+    return out;
+}

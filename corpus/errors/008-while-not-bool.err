@@ -1,4 +1,4 @@
-corpus/errors/008-while-not-bool.src:2:8: type mismatch: expected bool, found int
+corpus/errors/008-while-not-bool.m31:2:8: type mismatch: expected bool, found int
   |
 2 | while (x) {
   |        ^

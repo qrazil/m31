@@ -1,4 +1,4 @@
-corpus/errors/756-const-overflow.src:4:22: integer overflow in +: at run time this would trap, so as a constant it is refused
+corpus/errors/756-const-overflow.m31:4:22: integer overflow in +: at run time this would trap, so as a constant it is refused
   |
 4 | const int OVER = MAX + 1;
   |                      ^

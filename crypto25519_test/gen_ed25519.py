@@ -109,6 +109,6 @@ src.append(f"bytes shortsig = {bytes_lit(sig[:63])};")
 src.append(f'print("short_sig_{idx} " + ed25519.verify(shortpk, shortmsg, shortsig).to_str());')
 want.append(f"short_sig_{idx} false")
 
-open(os.path.join(OUT, "t_ed25519.src"), "w").write("\n".join(src) + "\n")
+open(os.path.join(OUT, "t_ed25519.m31"), "w").write("\n".join(src) + "\n")
 open(os.path.join(OUT, "t_ed25519.want"), "w").write("\n".join(want) + "\n")
 print("wrote", len(want), "cases,", len(src), "src lines")

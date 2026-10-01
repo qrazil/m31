@@ -19,31 +19,31 @@
 /// (docs/modules-decision.md §1).
 pub fn source(name: &str) -> Option<&'static str> {
     Some(match name {
-        "base64" => include_str!("../lib/base64.src"),
-        "csv" => include_str!("../lib/csv.src"),
-        "diff" => include_str!("../lib/diff.src"),
-        "html" => include_str!("../lib/html.src"),
-        "http" => include_str!("../lib/http.src"),
-        "io" => include_str!("../lib/io.src"),
-        "fs" => include_str!("../lib/fs.src"),
-        "json" => include_str!("../lib/json.src"),
-        "math" => include_str!("../lib/math.src"),
-        "net" => include_str!("../lib/net.src"),
-        "os" => include_str!("../lib/os.src"),
-        "sort" => include_str!("../lib/sort.src"),
-        "term" => include_str!("../lib/term.src"),
-        "text" => include_str!("../lib/text.src"),
-        "date" => include_str!("../lib/date.src"),
-        "random" => include_str!("../lib/random.src"),
-        "args" => include_str!("../lib/args.src"),
-        "unicode" => include_str!("../lib/unicode.src"),
-        "field25519" => include_str!("../lib/field25519.src"),
-        "sha512" => include_str!("../lib/sha512.src"),
-        "x25519" => include_str!("../lib/x25519.src"),
-        "scalar25519" => include_str!("../lib/scalar25519.src"),
-        "ed25519" => include_str!("../lib/ed25519.src"),
-        "sha256" => include_str!("../lib/sha256.src"),
-        "chacha20poly1305" => include_str!("../lib/chacha20poly1305.src"),
+        "base64" => include_str!("../lib/base64.m31"),
+        "csv" => include_str!("../lib/csv.m31"),
+        "diff" => include_str!("../lib/diff.m31"),
+        "html" => include_str!("../lib/html.m31"),
+        "http" => include_str!("../lib/http.m31"),
+        "io" => include_str!("../lib/io.m31"),
+        "fs" => include_str!("../lib/fs.m31"),
+        "json" => include_str!("../lib/json.m31"),
+        "math" => include_str!("../lib/math.m31"),
+        "net" => include_str!("../lib/net.m31"),
+        "os" => include_str!("../lib/os.m31"),
+        "sort" => include_str!("../lib/sort.m31"),
+        "term" => include_str!("../lib/term.m31"),
+        "text" => include_str!("../lib/text.m31"),
+        "date" => include_str!("../lib/date.m31"),
+        "random" => include_str!("../lib/random.m31"),
+        "args" => include_str!("../lib/args.m31"),
+        "unicode" => include_str!("../lib/unicode.m31"),
+        "field25519" => include_str!("../lib/field25519.m31"),
+        "sha512" => include_str!("../lib/sha512.m31"),
+        "x25519" => include_str!("../lib/x25519.m31"),
+        "scalar25519" => include_str!("../lib/scalar25519.m31"),
+        "ed25519" => include_str!("../lib/ed25519.m31"),
+        "sha256" => include_str!("../lib/sha256.m31"),
+        "chacha20poly1305" => include_str!("../lib/chacha20poly1305.m31"),
         _ => return None,
     })
 }
@@ -69,10 +69,10 @@ pub const TEXT: &str = "__text";
 /// in a diagnostic.
 pub fn embedded(name: &str) -> Option<&'static str> {
     if name == FLOATFMT {
-        return Some(include_str!("../lib/__floatfmt.src"));
+        return Some(include_str!("../lib/__floatfmt.m31"));
     }
     if name == TEXT {
-        return Some(include_str!("../lib/__text.src"));
+        return Some(include_str!("../lib/__text.m31"));
     }
     source(name)
 }

@@ -1,4 +1,4 @@
-corpus/modules/modconst-private/main.src:6:10: `HIDDEN` is private to `lib`; mark it `pub` to export it
+corpus/modules/modconst-private/main.m31:6:10: `HIDDEN` is private to `lib`; mark it `pub` to export it
   |
 6 | print(lib.HIDDEN);
   |          ^

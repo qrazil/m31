@@ -1,4 +1,4 @@
-corpus/modules/1202-a-module-another-file-imports/main.src:4:11: `text` is a module of this program, but this file does not import it -- write `import text;` at the top
+corpus/modules/1202-a-module-another-file-imports/main.m31:4:11: `text` is a module of this program, but this file does not import it -- write `import text;` at the top
   |
 4 | print(str(text.split_whitespace("a b").size()));
   |           ^

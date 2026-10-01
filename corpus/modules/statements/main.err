@@ -1,4 +1,4 @@
-corpus/modules/statements/lib.src:1:1: `lib` is imported, so it may only declare things: statements at the top level are the program, and the program is the file you named
+corpus/modules/statements/lib.m31:1:1: `lib` is imported, so it may only declare things: statements at the top level are the program, and the program is the file you named
   |
 1 | print(99);
   | ^

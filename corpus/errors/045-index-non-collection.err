@@ -1,4 +1,4 @@
-corpus/errors/045-index-non-collection.src:2:8: int cannot be indexed
+corpus/errors/045-index-non-collection.m31:2:8: int cannot be indexed
   |
 2 | print(x[0]);
   |        ^

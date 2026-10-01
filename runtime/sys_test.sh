@@ -15,7 +15,7 @@
 # linked, a raw backend that quietly called one would not link.
 #
 # The sanitized builds are here and not only in sanitize.sh because that
-# script runs corpus PROGRAMS, which reach the layer through lib/io.src and
+# script runs corpus PROGRAMS, which reach the layer through lib/io.m31 and
 # never touch the socket address conversions -- the one part of this layer
 # that writes through pointers into structs of another shape.
 set -uo pipefail

@@ -24,7 +24,7 @@
  * The errno NUMBERS are Linux's (SYS_E* below), on every host. On Linux the
  * libc implementation's numbers are the same by construction; a port to a
  * host whose errno values differ translates them in its implementation, so
- * code above this line -- lib/io.src's from_errno -- is written once.
+ * code above this line -- lib/io.m31's from_errno -- is written once.
  *
  * Flags and clock ids are this layer's own constants, not the host's:
  * O_DIRECTORY is a different bit on aarch64 than on x86-64, and
@@ -465,7 +465,7 @@ int64_t sys_listdir(const char *path, char *buf, int64_t cap);    /* bytes neede
  * Ignoring rather than blocking, and process-wide rather than around each
  * write, for the reason Go, Rust and libcurl all landed on the same answer:
  * the alternative is MSG_NOSIGNAL on every send (Linux-only, and it does not
- * cover a write(2) to a socket, which is what lib/io.src's __write does) or
+ * cover a write(2) to a socket, which is what lib/io.m31's __write does) or
  * pthread_sigmask around every write (three system calls per write, and it
  * still leaves the signal pending). A program that genuinely wants SIGPIPE
  * to kill it -- a filter at the end of a shell pipeline -- is not a program
@@ -587,7 +587,7 @@ _Noreturn void sys_exit(int64_t code);
  *
  * Two calls, not one that starts and waits, because a caller that wants to
  * do something else while a child runs -- or start several before waiting
- * on any -- needs them apart; lib/os.src's os.run calls both in a row for
+ * on any -- needs them apart; lib/os.m31's os.run calls both in a row for
  * the caller who does not.
  *
  * A child is started with file descriptors 0, 1 and 2 completely untouched
@@ -630,7 +630,7 @@ _Noreturn void sys_exit(int64_t code);
  * could not be started AT ALL -- most commonly -SYS_ENOENT, argv[0] found
  * nowhere on $PATH and not a path of its own. Both backends resolve this
  * synchronously: a command that does not exist never produces a pid to
- * wait for, on either backend, so lib/os.src's os.run can build its `Err`
+ * wait for, on either backend, so lib/os.m31's os.run can build its `Err`
  * from this return alone. Once this returns a pid, the caller owns exactly
  * one sys_proc_wait for it -- the kernel keeps a terminated child as a
  * zombie, holding its exit status, until something waits for it, and there
@@ -656,11 +656,11 @@ int64_t sys_proc_start(char *const argv[], char *const envp[]);      /* pid */
  * are defined over that identical bit pattern.
  *
  * The two ranges cannot collide: an exit code is 0..255 by construction
- * (os.exit enforces the same range on the way in, lib/os.src), and Linux's
+ * (os.exit enforces the same range on the way in, lib/os.m31), and Linux's
  * signal numbers top out at 64 (the real-time signals), so 256 is
  * comfortably clear of both without needing more than one int64_t or a
  * second return value. This is exactly why the caller-facing type
- * (lib/os.src's ExitStatus) is worth having at all: real git's own editor
+ * (lib/os.m31's ExitStatus) is worth having at all: real git's own editor
  * flow treats "killed by a signal" as an abort, distinct from "exited
  * nonzero", and a bare int cannot make a caller ask that question -- it
  * would have to know to keep checking after `!= 0`, the way a shell script

@@ -1,25 +1,25 @@
-# lang (placeholder name)
+# m31
 
 A statically typed, compiled, high-level language. Go altitude, not embedded.
 Refcounted, no GC. Small and opinionated, intended to freeze.
 
-The name is a placeholder held in one file. Run `./rename.sh <name>` when
-there is one; it rewrites `config.sh` and moves the corpus files with it.
+The name is held in one file, `config.sh`. Run `./rename.sh <name>` to
+rename it again; it rewrites `config.sh` and moves the corpus files with it.
 
 ## Status
 
-**The walking skeleton is green.** `langc` compiles the corpus language to C,
+**The walking skeleton is green.** `m31c` compiles the corpus language to C,
 which gcc and clang both build clean at `-O0` and `-O2`.
 
 ```
-./build.sh examples/tour.src && ./tour    compile and run a program
-./target/debug/langc fmt <file>           format in place
-./target/debug/langc fmt --check <file>   exit 1 if it is not formatted
+./build.sh examples/tour.m31 && ./tour    compile and run a program
+./target/debug/m31c fmt <file>           format in place
+./target/debug/m31c fmt --check <file>   exit 1 if it is not formatted
 ./gates.sh                                every gate
 ./run.sh                                  the corpus alone
 ```
 
-`examples/tour.src` is a tour of every feature, and is also in the corpus so
+`examples/tour.m31` is a tour of every feature, and is also in the corpus so
 it cannot rot.
 
 - 95 corpus programs, 0 failing
@@ -332,7 +332,7 @@ start."*
   refcount invariant is not checked here, because `abort()` skips `atexit`.
 - **`corpus/errors/`** — programs that must be rejected, with their expected
   diagnostic. Diagnostics rot silently without this.
-- **`corpus/fmt/`** — formatter layout: `name.src` must format to the
+- **`corpus/fmt/`** — formatter layout: `name.m31` must format to the
   hand-written `name.want`. Checked by `gates.sh`, not `run.sh`; a `name.out`
   lets the meaning gate run the program too.
 
@@ -379,8 +379,8 @@ docs/
   concurrency.md           the evidence behind it, and what was rejected
   types.md                 type system: proposal, plus the forks left open
 corpus/{core,twin,traps,errors}/
-examples/tour.src      every feature in one file
-examples/enums.src     enums and match, including Option, Result and JSON
+examples/tour.m31      every feature in one file
+examples/enums.m31     enums and match, including Option, Result and JSON
 ```
 
 ## Three layers, so they do not get confused
@@ -397,7 +397,7 @@ examples/enums.src     enums and match, including Option, Result and JSON
 
 ## The formatter
 
-`langc fmt` has **one canonical layout and no options**. That is the other
+`m31c fmt` has **one canonical layout and no options**. That is the other
 half of the braces decision: the case for braces over significant indentation
 was that a formatter gives you one correct layout without putting whitespace
 in the grammar, so the language owes you the formatter.
@@ -418,7 +418,7 @@ quietly alters a program is worse than no formatter:
 - **it is idempotent** — formatting twice matches formatting once
 
 and the layout itself is pinned by hand-written fixtures in `corpus/fmt/`
-(`name.src` formats to `name.want`).
+(`name.m31` formats to `name.want`).
 
 ## Two rules that look like details and are not
 

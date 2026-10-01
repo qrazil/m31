@@ -1,4 +1,4 @@
-corpus/errors/943-fnref-method-name-is-not-a-value.src:9:11: type `Point` has no field `area`
+corpus/errors/943-fnref-method-name-is-not-a-value.m31:9:11: type `Point` has no field `area`
   |
 9 | Area a = p.area;
   |           ^

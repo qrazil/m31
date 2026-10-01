@@ -1,4 +1,4 @@
-corpus/errors/019-type-fn-collision.src:5:1: `foo` is already a type
+corpus/errors/019-type-fn-collision.m31:5:1: `foo` is already a type
   |
 5 | int foo(int n) {
   | ^

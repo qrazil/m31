@@ -1,4 +1,4 @@
-corpus/errors/914-map-key-missing-hash.src:11:21: a map key is an `int`, a `str`, or a type that declares both `int Point.hash()` and `bool Point.eq(Point other)`, and that hashes equal keys equally; `Point` declares no `hash`
+corpus/errors/914-map-key-missing-hash.m31:11:21: a map key is an `int`, a `str`, or a type that declares both `int Point.hash()` and `bool Point.eq(Point other)`, and that hashes equal keys equally; `Point` declares no `hash`
    |
 11 | Map<Point, str> m = {};
    |                     ^

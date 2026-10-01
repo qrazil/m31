@@ -62,7 +62,7 @@ The compiler tracks which locals have been moved and rejects any later use.
 This is the mistake people actually make, and it deserves a real diagnostic:
 
 ```
-corpus/errors/0NN-use-after-move.src:7:11: `chunk` was moved here
+corpus/errors/0NN-use-after-move.m31:7:11: `chunk` was moved here
   6 |     send(c, chunk);
     |             ----- moved on line 6
   7 |     print(chunk);

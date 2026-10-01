@@ -1,4 +1,4 @@
-corpus/errors/1242-no-three-clause-for.src:6:12: there is no three-clause `for`; write `for (int i in 0 .. n)` to count, or `for (T x in xs)` over a collection
+corpus/errors/1242-no-three-clause-for.m31:6:12: there is no three-clause `for`; write `for (int i in 0 .. n)` to count, or `for (T x in xs)` over a collection
   |
 6 | for (int i = 0; i < n; i = i + 1) {
   |            ^

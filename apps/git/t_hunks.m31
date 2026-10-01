@@ -1,0 +1,62 @@
+// `hunks.hunks`, printed the way `diff -u`'s own body prints -- a leading
+// ` `/`+`/`-` and the line, `@@ ... @@` before each group -- so `test.sh` can
+// diff this output directly against a real `diff -u`'s (with its `---`/`+++`
+// file-header lines stripped) as an oracle for hunk boundaries and line
+// classification. Not part of `apps/git`'s command surface: a throwaway
+// harness for `hunks.m31`'s own tests, the same role `t_object.m31` and
+// friends play for the rest of this program.
+//
+//   t_hunks <old-file> <new-file>
+
+import os;
+import io;
+import hunks;
+import tuidiffview;
+
+List<str> argv = os.args();
+if (argv.size() != 3) {
+    print("usage: t_hunks <old-file> <new-file>");
+    os.exit(1);
+}
+bytes old = read(argv[1]);
+bytes new = read(argv[2]);
+match (hunks.hunks(old, new)) {
+    case Binary: {
+        print("Binary files differ");
+    }
+    case Hunks(List<tuidiffview.Hunk> hs): {
+        for (tuidiffview.Hunk h in hs) {
+            print(h.header);
+            for (tuidiffview.Line l in h.lines) {
+                print(marker(l.kind) + l.text);
+            }
+        }
+    }
+}
+
+bytes read(str path) {
+    match (io.read_bytes(path)) {
+        case Ok(bytes b): {
+            return b;
+        }
+        case Err(io.Error e): {
+            print("cannot read " + path + ": " + e.to_str());
+            os.exit(1);
+            return [];
+        }
+    }
+}
+
+str marker(tuidiffview.Kind k) {
+    match (k) {
+        case Context: {
+            return " ";
+        }
+        case Add: {
+            return "+";
+        }
+        case Remove: {
+            return "-";
+        }
+    }
+}

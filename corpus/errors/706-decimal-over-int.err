@@ -1,4 +1,4 @@
-corpus/errors/706-decimal-over-int.src:3:7: integer literal `18446744073709551615` does not fit in int; to mean these 64 bits, write them in hex: `0xFFFFFFFFFFFFFFFF`
+corpus/errors/706-decimal-over-int.m31:3:7: integer literal `18446744073709551615` does not fit in int; to mean these 64 bits, write them in hex: `0xFFFFFFFFFFFFFFFF`
   |
 3 | print(18446744073709551615);
   |       ^

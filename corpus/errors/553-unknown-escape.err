@@ -1,4 +1,4 @@
-corpus/errors/553-unknown-escape.src:3:12: unknown escape `\a`; the escapes are \\ \" \n \t \r \0 \xNN and \u{N}
+corpus/errors/553-unknown-escape.m31:3:12: unknown escape `\a`; the escapes are \\ \" \n \t \r \0 \xNN and \u{N}
   |
 3 | print("bell\a");
   |            ^

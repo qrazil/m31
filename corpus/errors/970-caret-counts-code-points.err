@@ -1,4 +1,4 @@
-corpus/errors/970-caret-counts-code-points.src:7:21: unknown variable `nope`
+corpus/errors/970-caret-counts-code-points.m31:7:21: unknown variable `nope`
   |
 7 | print("héllo → 🎉" + nope);
   |                      ^

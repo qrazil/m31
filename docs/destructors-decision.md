@@ -2,7 +2,7 @@
 
 Decided **2026-09-21**. Implemented in the same change: `src/lower.rs`
 (`check_destructor_decls`, `refuse_destructor_call`), `src/emit_c.rs` (the
-drop function), `lib/io.src` (`File.drop`), tests `corpus/*/77N-*` and
+drop function), `lib/io.m31` (`File.drop`), tests `corpus/*/77N-*` and
 `corpus/modules/destructor-*`. The reference is §4.4.
 
 ---
@@ -11,7 +11,7 @@ drop function), `lib/io.src` (`File.drop`), tests `corpus/*/77N-*` and
 
 `io.File` dropped without `close()` kept its descriptor until the program
 ended, and every `?` between an `open` and its `close` skipped the close.
-lib/io.src said so in a doc comment -- "a `File` is not closed for you ...
+lib/io.m31 said so in a doc comment -- "a `File` is not closed for you ...
 close on every path, including the error paths" -- which is a rule every
 caller has to remember on every path, forever. `io.read_bytes` and
 `io.write` follow it by hand; a program that opens a file and propagates an
@@ -229,7 +229,7 @@ for three reasons:
     buffer position, a field), and so does `close()` (it sets `live`). A
     user of `const Log log = ..` would find `log.out.write(..)` working and
     `log.out.close()` trapping, and the line between them is an
-    implementation detail of lib/io.src.
+    implementation detail of lib/io.m31.
   - **The destructor would be the one change a constant allows.** Releasing
     a resource changes the object (a File marks itself closed) and the world
     (the descriptor goes). Letting it run on a frozen object means either
@@ -316,7 +316,7 @@ default 8 MiB stack:
 | 100 000 | segfault | ok |
 | 200 000 | segfault | segfault |
 
-identical with and without a destructor on `Node`. lib/json.src met the same
+identical with and without a destructor on `Node`. lib/json.m31 met the same
 limit building values (a 10 000-deep value needed MBs of stack at -O0, and
 it went iterative).
 

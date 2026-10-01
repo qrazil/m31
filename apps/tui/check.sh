@@ -2,18 +2,18 @@
 # The TUI library's gate. Run from anywhere:
 #
 #   bash apps/tui/check.sh            tests, then the benchmark
-#   bash apps/tui/check.sh --bless    rewrite tests.out from what tests.src prints
+#   bash apps/tui/check.sh --bless    rewrite tests.out from what tests.m31 prints
 #
 # Four things are checked, and the rule is the repository's own: grep for
 # FAILED, never for ok.
 #
-#   1. every file in apps/tui/ is formatted (`langc fmt --check`)
-#   2. apps/tui/tests.src, bench.src, demo.src and browse.src all compile
+#   1. every file in apps/tui/ is formatted (`m31c fmt --check`)
+#   2. apps/tui/tests.m31, bench.m31, demo.m31 and browse.m31 all compile
 #      under gcc and clang, at -O0 and -O2, with no warning from the emitted C
 #   3. its output matches apps/tui/tests.out, and contains no `FAIL` line
 #   4. the refcount invariant holds: `__rc_live=0` at exit
 #
-# Then bench.src is built and run, and its numbers printed. They are not
+# Then bench.m31 is built and run, and its numbers printed. They are not
 # compared against anything -- a time is not a fixture.
 #
 # This is NOT wired into ../../gates.sh. The TUI library is not part of the

@@ -1,4 +1,4 @@
-corpus/errors/505-this-assign.src:8:5: `this` cannot be assigned: it is the method's receiver, not a variable
+corpus/errors/505-this-assign.m31:8:5: `this` cannot be assigned: it is the method's receiver, not a variable
   |
 8 |     this = Counter();
   |     ^

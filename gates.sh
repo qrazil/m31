@@ -37,7 +37,7 @@ run "cargo fmt --check"        cargo fmt --check
 run "no dependencies" bash -c '
     n=$(grep -c "^name = " Cargo.lock 2>/dev/null || echo 0)
     if [ "$n" -ne 1 ]; then
-        echo "Cargo.lock names $n packages; expected 1 (langc alone)"
+        echo "Cargo.lock names $n packages; expected 1 (m31c alone)"
         grep "^name = " Cargo.lock
         exit 1
     fi'
@@ -198,7 +198,7 @@ run "formatter preserves meaning" bash -c '
 
 # The standard library is source like any other, and it is the source most
 # likely to be forgotten: it is not in the corpus, it is not compiled on its
-# own -- `math.src` cannot be a program -- and it reaches a build through
+# own -- `math.m31` cannot be a program -- and it reaches a build through
 # include_str!. Checking it is formatted is also a round-trip test, because
 # the checked-in file IS the canonical output: anything the formatter drops
 # or reorders in it shows up here as a diff.
@@ -231,7 +231,7 @@ run "formatter is idempotent" bash -c '
 # The layout itself. The gates above prove the formatter harmless -- same
 # meaning, a fixed point -- and neither notices a comment moved to the wrong
 # side of a brace or a section divider hoisted away from its section, which
-# is what it did. Each `corpus/fmt/*.src` must format to its `.want`, written
+# is what it did. Each `corpus/fmt/*.m31` must format to its `.want`, written
 # by hand, and the `.want` must already be formatted.
 run "formatter fixtures" bash -c '
     bad=0

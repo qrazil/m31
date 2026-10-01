@@ -1,0 +1,307 @@
+// A line-based diff between two byte buffers: which lines are unchanged,
+// removed or added, and nothing about how to show that to anyone.
+//
+// API
+// ---
+//   diff.is_binary(content)     -> bool                does `content` look
+//                                                        like a binary file?
+//   diff.diff(old, new)         -> Diff                 `Binary`, or the
+//                                                        line-level edit
+//                                                        script
+//   diff.Kind                   Keep | Add | Remove     what one line's op is
+//   diff.Op                     { kind, line }          one line, its
+//                                                        terminator kept
+//   diff.reconstruct_old(ops)   -> bytes                `old`, rebuilt
+//   diff.reconstruct_new(ops)   -> bytes                `new`, rebuilt
+//
+// This is a generic text utility -- `apps/git/design.md`'s "Starting the
+// client" section named it as the missing piece under hunk-level staging --
+// and it knows nothing about git, about a terminal, or about
+// `apps/tui/tuidiffview.Hunk`/`Line`. Grouping this module's output into
+// hunks with context, and turning a `bytes` line into the `str` a widget can
+// render, is `apps/git/hunks.m31`'s job: that conversion depends on
+// `apps/tui`, which this standalone standard library must not (see that
+// file for why the boundary sits there and not here).
+//
+// --- bytes, not str --------------------------------------------------------
+//
+// The content being diffed is whatever a blob holds -- `apps/git/object.m31`
+// already carries that as `bytes`, never `str`, because a blob is octets and
+// need not be valid UTF-8 (§3.10). Splitting on the byte `\n` is always safe
+// regardless of encoding, for the same reason `apps/git/csv.m31`'s comment
+// gives for splitting on a comma: `\n` is ASCII, and UTF-8 never reuses an
+// ASCII byte as a continuation byte, so the split can never land inside a
+// multi-byte character. Working in `bytes` end to end means this module
+// makes no claim about encoding at all, which is the honest answer for a
+// tool whose job includes noticing when a file is not text.
+//
+// --- binary detection --------------------------------------------------------
+//
+// `is_binary` is git's own heuristic (`buffer_is_binary` in git's
+// `xdiff-interface.c`): a NUL byte anywhere in roughly the first 8000 bytes.
+// No text file writes a NUL, and a binary one almost always has one within
+// the first few KB, so this is cheap and matches what `git diff` itself
+// decides -- the oracle a caller would otherwise disagree with. `diff` calls
+// it on both buffers before doing anything else, so a binary file is never
+// split into fake "lines" or fed to the edit-distance search below; it is
+// simply reported as `Diff.Binary`.
+//
+// This is a heuristic about *bytes that look like text*, not a claim that
+// the result is valid UTF-8 -- a file that passes it and is not UTF-8 (a
+// Latin-1 log, say) still reaches the line splitter below, whose splits stay
+// valid regardless. Only a caller that turns a line's `bytes` into a `str`
+// (`apps/git/hunks.m31` does, since `tuidiffview.Line.text` is one) has to
+// decide what to do with a line that fails `utf8()`; that is that module's
+// problem, not this one's, and is not the NUL heuristic this function gives.
+//
+// --- the algorithm -------------------------------------------------------------
+//
+// Myers' O(ND) algorithm (E. Myers, "An O(ND) Difference Algorithm and Its
+// Variations", 1986) -- the same algorithm `git diff` itself is built on, and
+// so a diff that is easy to check against real `git diff`/`diff -u` as an
+// oracle: same hunk boundaries, same lines called context, added or removed.
+// `N` and `M` are the two line counts and `D` is the size of the edit
+// script; for the ordinary case a caller has in mind -- two versions of one
+// source file, not two unrelated files pasted together -- `D` is small and
+// this is far faster than an O(N*M) LCS table, which is the choice this
+// module deliberately did not make.
+//
+// `diff` returns the shortest edit script as a flat `List<Op>` in old-to-new
+// order: a `Remove` op holds the line as it was in `old`, an `Add` holds the
+// line as it is in `new`, and a `Keep` holds the one line both agree on.
+// Concatenating a script's `Keep` and `Remove` lines reproduces `old`
+// exactly; concatenating its `Keep` and `Add` lines reproduces `new`
+// exactly -- `reconstruct_old`/`reconstruct_new` do exactly that, and are
+// what this module's own round-trip tests check.
+//
+// --- lines carry their own terminator -----------------------------------------
+//
+// A "line" here is a run of bytes up to and including its own `\n`, except
+// possibly the very last line of a buffer, which has none if the buffer does
+// not end in `\n`. Carrying the terminator (or its absence) INSIDE the line
+// is what makes `reconstruct_old`/`reconstruct_new` exact byte-for-byte
+// rebuilds with no extra bookkeeping: there is no separate "did this file
+// end in a newline" flag to thread through, because the answer is already
+// sitting on the last line, the same way it is sitting in the file itself.
+// An empty buffer has no lines at all, matching `text.lines("")`.
+
+/// What one line of an edit script is doing.
+pub enum Kind {
+    /// In both `old` and `new`, unchanged.
+    Keep;
+    /// In `new` only.
+    Add;
+    /// In `old` only.
+    Remove;
+}
+
+/// One line of an edit script: its own trailing `\n`, if it had one, is part
+/// of `line`.
+pub type Op {
+    pub Kind kind;
+    pub bytes line;
+}
+
+/// The result of comparing two buffers: either both looked like text and
+/// here is the edit script, or one of them did not look like text at all
+/// (`is_binary`) and no line diff was attempted.
+pub enum Diff {
+    Binary;
+    Lines(List<Op>);
+}
+
+/// Does `content` look like a binary file -- git's own heuristic: a NUL byte
+/// within roughly the first 8000 bytes. A text file, in any encoding, never
+/// contains one; nearly every binary format puts one within a few KB of the
+/// start, so this rarely has to read the whole file to answer.
+pub bool is_binary(bytes content) {
+    int n = content.size();
+    if (n > 8000) {
+        n = 8000;
+    }
+    int i = 0;
+    while (i < n) {
+        if (content[i] == 0) {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+/// Compare `old` and `new` line by line.
+///
+/// `Diff.Binary` if either buffer fails `is_binary`; otherwise
+/// `Diff.Lines(ops)`, the shortest edit script Myers' algorithm finds
+/// between the two buffers' lines.
+pub Diff diff(bytes old, bytes new) {
+    if (is_binary(old) || is_binary(new)) {
+        return Diff.Binary;
+    }
+    return Diff.Lines(myers(split_lines(old), split_lines(new)));
+}
+
+/// `old`, rebuilt from `ops`: every `Keep` and `Remove` line, in order.
+/// Exact, byte for byte, for any `ops` `diff` returned -- the round-trip
+/// property this module's own tests check.
+pub bytes reconstruct_old(List<Op> ops) {
+    bytes out = [];
+    for (Op op in ops) {
+        match (op.kind) {
+            case Keep: {
+                out.extend(op.line);
+            }
+            case Remove: {
+                out.extend(op.line);
+            }
+            case Add: {
+            }
+        }
+    }
+    return out;
+}
+
+/// `new`, rebuilt from `ops`: every `Keep` and `Add` line, in order.
+pub bytes reconstruct_new(List<Op> ops) {
+    bytes out = [];
+    for (Op op in ops) {
+        match (op.kind) {
+            case Keep: {
+                out.extend(op.line);
+            }
+            case Add: {
+                out.extend(op.line);
+            }
+            case Remove: {
+            }
+        }
+    }
+    return out;
+}
+
+// --- lines, terminator attached ------------------------------------------------
+//
+// `content`'s lines, each ending in its own `\n` except possibly the last,
+// which has none if `content` does not end in one. An empty buffer has no
+// lines. Splitting on the raw byte, not `text.lines` (which strips the
+// terminator on purpose, for a different job -- reference §6.5/`text.m31`):
+// this module needs the terminator kept, not dropped, so a rebuild needs
+// nothing else.
+List<bytes> split_lines(bytes content) {
+    List<bytes> out = [];
+    int n = content.size();
+    int start = 0;
+    int i = 0;
+    while (i < n) {
+        if (content[i] == 10) {
+            out.push(content.substr(start, i + 1));
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    if (start < n) {
+        out.push(content.substr(start, n));
+    }
+    return out;
+}
+
+// --- Myers' O(ND) algorithm ----------------------------------------------------
+//
+// The classic "greedy" formulation: for each edit distance `d` from 0 up,
+// walk every diagonal `k` a script of length `d` can reach, extend it along
+// any run of matching lines (a "snake"), and stop the moment one reaches
+// (n, m) -- the end of both sequences. `v[k]` is the furthest `x` reached on
+// diagonal `k` at the current `d`, indexed through `offset` because `k`
+// ranges over negative numbers. `trace` keeps one snapshot of `v` per `d`,
+// which is all `backtrack` needs to recover the path afterwards; nothing
+// else about the search is kept.
+List<Op> myers(List<bytes> a, List<bytes> b) {
+    int n = a.size();
+    int m = b.size();
+    int max = n + m;
+    if (max == 0) {
+        return [];
+    }
+    int offset = max;
+    List<int> v = [0; 2 * max + 1];
+    List<List<int>> trace = [];
+    int end_d = -1;
+    int d = 0;
+    while (d <= max) {
+        bool found = false;
+        int k = 0 - d;
+        while (k <= d) {
+            int x = 0;
+            if (k == 0 - d || (k != d && v[k - 1 + offset] < v[k + 1 + offset])) {
+                x = v[k + 1 + offset];
+            } else {
+                x = v[k - 1 + offset] + 1;
+            }
+            int y = x - k;
+            while (x < n && y < m && a[x] == b[y]) {
+                x = x + 1;
+                y = y + 1;
+            }
+            v[k + offset] = x;
+            if (x >= n && y >= m) {
+                found = true;
+                break;
+            }
+            k = k + 2;
+        }
+        trace.push(clone(v));
+        if (found) {
+            end_d = d;
+            break;
+        }
+        d = d + 1;
+    }
+    return backtrack(a, b, trace, end_d, offset);
+}
+
+// Walk `trace` from the end back to the start, turning the path Myers found
+// into an edit script. Each depth `d` says whether the move into it was an
+// insertion or a deletion (whichever side did NOT move to reach `prev_x`),
+// preceded by however long a diagonal (a run of `Keep`s) led into it; the
+// diagonal below `d == 0` -- the very start, before any edit -- is walked
+// once more after the loop, since no depth ever generates it. Built
+// backwards and reversed once at the end, rather than reversed at every
+// step.
+List<Op> backtrack(List<bytes> a, List<bytes> b, List<List<int>> trace, int end_d, int offset) {
+    List<Op> ops = [];
+    int x = a.size();
+    int y = b.size();
+    int d = end_d;
+    while (d > 0) {
+        List<int> v = trace[d];
+        int k = x - y;
+        int prev_k = 0;
+        if (k == 0 - d || (k != d && v[k - 1 + offset] < v[k + 1 + offset])) {
+            prev_k = k + 1;
+        } else {
+            prev_k = k - 1;
+        }
+        int prev_x = v[prev_k + offset];
+        int prev_y = prev_x - prev_k;
+        while (x > prev_x && y > prev_y) {
+            ops.push(Op(Kind.Keep, a[x - 1]));
+            x = x - 1;
+            y = y - 1;
+        }
+        if (x == prev_x) {
+            ops.push(Op(Kind.Add, b[y - 1]));
+            y = y - 1;
+        } else {
+            ops.push(Op(Kind.Remove, a[x - 1]));
+            x = x - 1;
+        }
+        d = d - 1;
+    }
+    while (x > 0 && y > 0) {
+        ops.push(Op(Kind.Keep, a[x - 1]));
+        x = x - 1;
+        y = y - 1;
+    }
+    ops.reverse();
+    return ops;
+}

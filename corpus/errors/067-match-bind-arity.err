@@ -1,4 +1,4 @@
-corpus/errors/067-match-bind-arity.src:5:5: `Red` carries 0 value(s), and this case binds 1
+corpus/errors/067-match-bind-arity.m31:5:5: `Red` carries 0 value(s), and this case binds 1
   |
 5 |     case Red(int x): { print(x); }
   |     ^

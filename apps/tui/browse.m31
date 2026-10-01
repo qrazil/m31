@@ -1,0 +1,299 @@
+// A minimal interactive file browser: the smallest proof that `tuiapp.Loop`
+// actually works against a real terminal -- read a key, change state,
+// redraw, flush -- built ONLY from widgets that existed before this change
+// (`tuilists.ListView`, `tuiwidget.Block`/`Paragraph`). It does not use, and
+// does not wait on, the outline/jump-list/which-key/transient/diff-cursor
+// primitives this same change adds elsewhere in `apps/tui`: proving the loop
+// itself is a separate concern from those, and this is deliberately as
+// simple as the loop allows.
+//
+//   ./build.sh apps/tui/browse.m31 -o /tmp/browse && /tmp/browse
+//
+// j/k or the arrows move the selection, Enter descends into a directory (and
+// does nothing on a file -- its preview is already on screen), u or
+// Backspace goes back up, q or Escape quits.
+//
+// This is NOT in the test corpus -- like `examples/keys.m31`, it needs a real
+// terminal and a person. What check.sh DOES check is that it compiles clean;
+// the loop it proves is `tuiapp.Loop`'s own, already tested against synthetic
+// buffers and events where that is possible (`apps/tui/tests.m31`, "the
+// application loop's own pieces").
+
+import fs;
+import io;
+import term;
+import text;
+import tuiapp;
+import tuibuf;
+import tuigeom;
+import tuilists;
+import tuistyle;
+import tuitext;
+import tuiwidget;
+
+/// How many lines of a text file's preview to show. Past this the panel
+/// would scroll, which is more than this demo needs to prove the loop works.
+const int PREVIEW_LINES = 40;
+
+/// Where the browser is, and what it currently shows. One object, held by
+/// the entry code below and reached by the `draw`/`handle` lambdas that
+/// close over it -- there is no mutable module state (reference §2), so this
+/// is where the state that would otherwise want to be one actually lives.
+type State {
+    /// Path components below where the program started; empty means ".".
+    List<str> parts = [];
+    /// The names `reload` last found in the current directory, in the same
+    /// order as `list`'s items -- what `enter` and `show_preview` look up by
+    /// the current selection.
+    List<str> names = [];
+    tuilists.ListView list = tuilists.ListView([]);
+    str preview = "";
+    str message = "";
+}
+
+/// The directory the browser is showing, `.` at the top.
+str State.path() {
+    if (parts.size() == 0) {
+        return ".";
+    }
+    return parts.join("/");
+}
+
+/// Re-read the current directory and select its first entry.
+void State.reload() {
+    match (fs.listdir(path())) {
+        case Ok(List<str> ns): {
+            names = ns;
+            List<str> items = [];
+            for (str n in ns) {
+                if (fs.is_dir(fs.join(path(), n))) {
+                    items.push(n + "/");
+                } else {
+                    items.push(n);
+                }
+            }
+            list = tuilists.ListView(items, selected: 0, highlight_symbol: "\u{25B8} ");
+            message = "";
+        }
+        case Err(io.Error e): {
+            names = [];
+            list = tuilists.ListView([]);
+            message = "cannot read " + path() + ": " + e.to_str();
+        }
+    }
+    show_preview();
+}
+
+/// What the right-hand panel shows for whatever is selected now: a
+/// directory says so, a text file shows its first lines, anything else says
+/// why not (binary, unreadable).
+void State.show_preview() {
+    if (names.size() == 0) {
+        preview = "";
+        return;
+    }
+    str name = names[list.selected];
+    str full = fs.join(path(), name);
+    if (fs.is_dir(full)) {
+        preview = "directory";
+        return;
+    }
+    match (io.read(full)) {
+        case Ok(str s): {
+            List<str> ls = text.lines(s);
+            int n = ls.size();
+            if (n > PREVIEW_LINES) {
+                n = PREVIEW_LINES;
+            }
+            preview = ls.slice(0, n).join("\n");
+        }
+        case Err(io.Error e): {
+            match (e) {
+                case InvalidUtf8: {
+                    preview = "(binary file)";
+                }
+                case NotFound: {
+                    preview = "cannot read: " + e.to_str();
+                }
+                case PermissionDenied: {
+                    preview = "cannot read: " + e.to_str();
+                }
+                case IsDirectory: {
+                    preview = "directory";
+                }
+                case NotADirectory: {
+                    preview = "cannot read: " + e.to_str();
+                }
+                case AlreadyExists: {
+                    preview = "cannot read: " + e.to_str();
+                }
+                case NotEmpty: {
+                    preview = "cannot read: " + e.to_str();
+                }
+                case Other(int code): {
+                    preview = "cannot read: " + e.to_str();
+                }
+            }
+        }
+    }
+}
+
+/// Enter: descend into the selected directory. Does nothing on a file --
+/// its preview is already what `show_preview` put on screen.
+void State.enter() {
+    if (names.size() == 0) {
+        return;
+    }
+    str name = names[list.selected];
+    str full = fs.join(path(), name);
+    if (fs.is_dir(full)) {
+        parts.push(name);
+        reload();
+    }
+}
+
+/// Go back up one directory. Does nothing at the top.
+void State.up() {
+    if (parts.size() == 0) {
+        return;
+    }
+    parts.pop();
+    reload();
+}
+
+/// The frame: a title bar naming the path, the listing on the left, a
+/// preview or a message on the right, a one-line key legend at the bottom --
+/// the same layout `apps/tui/demo.m31` builds once, run here through
+/// `tuiapp.Loop` instead.
+void State.draw(tuibuf.Buffer buf, tuigeom.Rect area) {
+    List<tuigeom.Rect> band = tuigeom.rows(area, [tuigeom.Constraint.Length(1), tuigeom.Constraint.Fill(1), tuigeom.Constraint.Length(1)]);
+    tuistyle.Style bold = tuistyle.Style(attrs: tuistyle.BOLD);
+    buf.fill(band[0], " ", bold);
+    buf.set_str(band[0].x, band[0].y, " " + path(), bold);
+    List<tuigeom.Rect> mid = tuigeom.cols(band[1], [tuigeom.Constraint.Percentage(45), tuigeom.Constraint.Fill(1)]);
+    tuiwidget.Block left = tuiwidget.Block(title: "files", borders: tuiwidget.Borders.Rounded);
+    left.render(buf, mid[0]);
+    list.render(buf, left.inner(mid[0]));
+    tuiwidget.Block right = tuiwidget.Block(title: "preview", borders: tuiwidget.Borders.Single, pad_x: 1);
+    right.render(buf, mid[1]);
+    str body = preview;
+    if (message != "") {
+        body = message;
+    }
+    tuiwidget.Paragraph(body).render(buf, right.inner(mid[1]));
+    tuistyle.Style rev = tuistyle.Style(attrs: tuistyle.REVERSE);
+    buf.fill(band[2], " ", rev);
+    buf.set_str(band[2].x + 1, band[2].y, "j/k move   enter open   u up   q quit", rev);
+}
+
+/// What a key does to the browser's state: `Redraw` on anything that changed
+/// it, `Continue` on everything else, `Quit` on q or Escape -- the same
+/// shape `examples/keys.m31` hand-writes its own read loop around, here
+/// answered instead of looped, since `tuiapp.Loop` does the looping.
+tuiapp.Action State.handle(term.Event ev) {
+    match (ev) {
+        case Key(term.Key k): {
+            match (k.code) {
+                case Char(int c): {
+                    if (c == 'q') {
+                        return tuiapp.Action.Quit;
+                    }
+                    if (c == 'j') {
+                        list.step(1);
+                        show_preview();
+                        return tuiapp.Action.Redraw;
+                    }
+                    if (c == 'k') {
+                        list.step(-1);
+                        show_preview();
+                        return tuiapp.Action.Redraw;
+                    }
+                    if (c == 'u') {
+                        up();
+                        return tuiapp.Action.Redraw;
+                    }
+                    return tuiapp.Action.Continue;
+                }
+                case Enter: {
+                    enter();
+                    return tuiapp.Action.Redraw;
+                }
+                case Backspace: {
+                    up();
+                    return tuiapp.Action.Redraw;
+                }
+                case Escape: {
+                    return tuiapp.Action.Quit;
+                }
+                case Up: {
+                    list.step(-1);
+                    show_preview();
+                    return tuiapp.Action.Redraw;
+                }
+                case Down: {
+                    list.step(1);
+                    show_preview();
+                    return tuiapp.Action.Redraw;
+                }
+                case Tab: {
+                    return tuiapp.Action.Continue;
+                }
+                case BackTab: {
+                    return tuiapp.Action.Continue;
+                }
+                case Right: {
+                    return tuiapp.Action.Continue;
+                }
+                case Left: {
+                    return tuiapp.Action.Continue;
+                }
+                case Home: {
+                    return tuiapp.Action.Continue;
+                }
+                case End: {
+                    return tuiapp.Action.Continue;
+                }
+                case PageUp: {
+                    return tuiapp.Action.Continue;
+                }
+                case PageDown: {
+                    return tuiapp.Action.Continue;
+                }
+                case Insert: {
+                    return tuiapp.Action.Continue;
+                }
+                case Delete: {
+                    return tuiapp.Action.Continue;
+                }
+                case F(int n): {
+                    return tuiapp.Action.Continue;
+                }
+            }
+        }
+        case Mouse(term.Mouse m): {
+            return tuiapp.Action.Continue;
+        }
+        case Paste(str p): {
+            return tuiapp.Action.Continue;
+        }
+        case Unknown(bytes u): {
+            return tuiapp.Action.Continue;
+        }
+    }
+}
+
+if (!term.is_terminal(0)) {
+    io.eprint("browse: standard input is not a terminal");
+    return;
+}
+State state = State();
+state.reload();
+tuiapp.Loop loop = tuiapp.Loop();
+match (loop.run((tuibuf.Buffer buf, tuigeom.Rect area) => state.draw(buf, area), (term.Event ev) => state.handle(ev))) {
+    case Ok(int n): {
+    }
+    case Err(term.Error e): {
+        io.eprint("browse: " + e.to_str());
+    }
+}
+print("bye");

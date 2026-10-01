@@ -1,4 +1,4 @@
-corpus/modules/1206-promoted-field-and-an-import/main.src:6:1: `text` is a field of `Doc` and also the module `text` this file imports; shadowing is not allowed, rename the field or drop the import
+corpus/modules/1206-promoted-field-and-an-import/main.m31:6:1: `text` is a field of `Doc` and also the module `text` this file imports; shadowing is not allowed, rename the field or drop the import
   |
 6 | type Doc {
   | ^

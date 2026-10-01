@@ -1,4 +1,4 @@
-corpus/errors/1133-lambda-body-has-no-value.src:5:21: `Step.of` returns str, but this lambda's body has no value
+corpus/errors/1133-lambda-body-has-no-value.m31:5:21: `Step.of` returns str, but this lambda's body has no value
   |
 5 | Step s = (int x) => print(x);
   |                     ^

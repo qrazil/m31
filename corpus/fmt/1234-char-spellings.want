@@ -1,4 +1,4 @@
-// A fixture for `langc fmt`: a character literal keeps its spelling. It is
+// A fixture for `m31c fmt`: a character literal keeps its spelling. It is
 // an `int`, so the value alone would print `'*'` as 42 -- which is exactly
 // the magic number the literal exists to remove.
 int star = '*';

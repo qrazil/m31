@@ -1,4 +1,4 @@
-corpus/errors/791-chars-takes-nothing.src:2:12: `chars` takes 0 argument(s), found 1
+corpus/errors/791-chars-takes-nothing.m31:2:12: `chars` takes 0 argument(s), found 1
   |
 2 | print("abc".chars(1).size());
   |            ^

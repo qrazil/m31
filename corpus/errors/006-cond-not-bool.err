@@ -1,4 +1,4 @@
-corpus/errors/006-cond-not-bool.src:2:5: type mismatch: expected bool, found int
+corpus/errors/006-cond-not-bool.m31:2:5: type mismatch: expected bool, found int
   |
 2 | if (x) {
   |     ^

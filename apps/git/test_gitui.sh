@@ -1,4 +1,4 @@
-# The interactive client (`gitui.src`/`gitclient.src`) -- unit-level,
+# The interactive client (`gitui.m31`/`gitclient.m31`) -- unit-level,
 # oracle-level and pty-driven end-to-end checks, the three tiers
 # `apps/git/design.md`'s "how you'll know you're done and correct" names.
 #
@@ -13,13 +13,13 @@
 # real repository, exactly as `apps/git/design.md`'s own "Safety" section
 # requires for this client specifically.
 #
-# `gitclient.src` (and so every test harness below that imports it) reaches
+# `gitclient.m31` (and so every test harness below that imports it) reaches
 # into `apps/tui/`, which this program's own module loader resolves relative
 # to the ENTRY file's directory only (`docs/modules-decision.md` §1: one flat
 # namespace, no search path) -- so a harness built straight out of `apps/git`
 # can never see `apps/tui`'s files. `build_tui` is `test.sh`'s own `build`,
 # staging both directories' sources into one throwaway place first -- the
-# same fix `apps/git/test_hunks.sh` already uses for `hunks.src`'s own
+# same fix `apps/git/test_hunks.sh` already uses for `hunks.m31`'s own
 # dependency on `tuidiffview`, and what `apps/git/build-gitui.sh` (the real,
 # user-facing build) does too. Nothing here duplicates an `apps/tui` file
 # into the repository itself; the staging directory is `$WORK`'s own and is
@@ -29,16 +29,16 @@ build_tui() {
     local name=$1
     local stage="$WORK/tui-stage"
     mkdir -p "$stage"
-    cp apps/tui/tuiapp.src apps/tui/tuibuf.src apps/tui/tuidiff.src \
-        apps/tui/tuidiffview.src \
-        apps/tui/tuifooter.src apps/tui/tuigeom.src apps/tui/tuijump.src \
-        apps/tui/tuimenu.src apps/tui/tuioutline.src apps/tui/tuiscroll.src \
-        apps/tui/tuistyle.src apps/tui/tuitext.src apps/tui/tuiwidget.src \
-        apps/git/repo.src apps/git/sha1.src apps/git/zlib.src apps/git/pack.src apps/git/object.src \
-        apps/git/refs.src apps/git/index.src apps/git/gitignore.src apps/git/status.src \
-        apps/git/gitlog.src apps/git/hunks.src \
-        apps/git/gitclient.src "apps/git/$name.src" "$stage/"
-    if ! "$LANGC" --emit-c "$stage/$name.src" -o "$WORK/$name.c" 2>"$WORK/$name.diag"; then
+    cp apps/tui/tuiapp.m31 apps/tui/tuibuf.m31 apps/tui/tuidiff.m31 \
+        apps/tui/tuidiffview.m31 \
+        apps/tui/tuifooter.m31 apps/tui/tuigeom.m31 apps/tui/tuijump.m31 \
+        apps/tui/tuimenu.m31 apps/tui/tuioutline.m31 apps/tui/tuiscroll.m31 \
+        apps/tui/tuistyle.m31 apps/tui/tuitext.m31 apps/tui/tuiwidget.m31 \
+        apps/git/repo.m31 apps/git/sha1.m31 apps/git/zlib.m31 apps/git/pack.m31 apps/git/object.m31 \
+        apps/git/refs.m31 apps/git/index.m31 apps/git/gitignore.m31 apps/git/status.m31 \
+        apps/git/gitlog.m31 apps/git/hunks.m31 \
+        apps/git/gitclient.m31 "apps/git/$name.m31" "$stage/"
+    if ! "$LANGC" --emit-c "$stage/$name.m31" -o "$WORK/$name.c" 2>"$WORK/$name.diag"; then
         bad "compile $name (staged with apps/tui)" "$(head -5 "$WORK/$name.diag")"
         return 1
     fi
@@ -217,8 +217,8 @@ if build_tui t_gitclient_ops; then
     # under a scripted pty, so each outcome here is exercised with a stand-in
     # "editor" -- a tiny shell script, standing in for $EDITOR, that rewrites
     # the message file and exits with whatever status the scenario needs.
-    # `edit` (t_gitclient_ops.src's own new op) calls `edit_message()` then
-    # `launch_editor()` exactly as `gitui.src`'s driver does once the terminal
+    # `edit` (t_gitclient_ops.m31's own new op) calls `edit_message()` then
+    # `launch_editor()` exactly as `gitui.m31`'s driver does once the terminal
     # has been handed back -- there is no terminal in this harness at all,
     # which is what makes every outcome reachable with no pty and no keystrokes.
 

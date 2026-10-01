@@ -1,4 +1,4 @@
-corpus/modules/1203-a-constant-of-a-module-not-imported/main.src:3:11: `lib` is a module of this program, but this file does not import it -- write `import lib;` at the top
+corpus/modules/1203-a-constant-of-a-module-not-imported/main.m31:3:11: `lib` is a module of this program, but this file does not import it -- write `import lib;` at the top
   |
 3 | print(str(lib.MAX));
   |           ^

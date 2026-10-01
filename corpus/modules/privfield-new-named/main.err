@@ -1,4 +1,4 @@
-corpus/modules/privfield-new-named/main.src:4:41: field `tag` of `acct.Animal` is private to `acct`; only a `pub` field can be set from another module
+corpus/modules/privfield-new-named/main.m31:4:41: field `tag` of `acct.Animal` is private to `acct`; only a `pub` field can be set from another module
   |
 4 | acct.Animal a = acct.Animal("Rex", tag: "forged");
   |                                         ^

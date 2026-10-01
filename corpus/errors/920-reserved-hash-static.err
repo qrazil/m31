@@ -1,4 +1,4 @@
-corpus/errors/920-reserved-hash-static.src:7:1: `Key.hash` is a reserved method and must be declared `int Key.hash()`: this one is static, and a reserved method acts on a receiver. The language calls it itself -- a `Map` keyed on this type -- so its signature is not the type's to choose; if this method means something else, give it another name.
+corpus/errors/920-reserved-hash-static.m31:7:1: `Key.hash` is a reserved method and must be declared `int Key.hash()`: this one is static, and a reserved method acts on a receiver. The language calls it itself -- a `Map` keyed on this type -- so its signature is not the type's to choose; if this method means something else, give it another name.
   |
 7 | static int Key.hash(Key k) {
   | ^

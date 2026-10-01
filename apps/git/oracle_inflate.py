@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fixtures for `t_inflate.src`, and the expected answers, from Python's zlib.
+"""Fixtures for `t_inflate.m31`, and the expected answers, from Python's zlib.
 
     python3 apps/git/oracle_inflate.py <dir>
 

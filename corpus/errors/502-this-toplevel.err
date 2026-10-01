@@ -1,4 +1,4 @@
-corpus/errors/502-this-toplevel.src:2:7: `this` means nothing here: top-level code is not inside a method, so there is no receiver
+corpus/errors/502-this-toplevel.m31:2:7: `this` means nothing here: top-level code is not inside a method, so there is no receiver
   |
 2 | print(this);
   |       ^

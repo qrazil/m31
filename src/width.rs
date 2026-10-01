@@ -13,10 +13,10 @@
 //!
 //! # Where the rule and the data come from
 //!
-//! `lib/unicode.src` already decided the rule and carries the tables, and
+//! `lib/unicode.m31` already decided the rule and carries the tables, and
 //! there must not be a second, drifting copy of either. So there is not one:
 //! this module **parses the tables out of the embedded text of
-//! `lib/unicode.src`** -- literally the same bytes the standard library
+//! `lib/unicode.m31`** -- literally the same bytes the standard library
 //! compiles, since `stdlib::source` carries the module inside the binary --
 //! and implements the same algorithm over them:
 //!
@@ -35,7 +35,7 @@
 use std::sync::OnceLock;
 
 /// Grapheme_Cluster_Break values, in the order `GCB_RANGES` was generated
-/// with. Kept in step with the same list in `lib/unicode.src`.
+/// with. Kept in step with the same list in `lib/unicode.m31`.
 const GCB_OTHER: i64 = 0;
 const GCB_CR: i64 = 1;
 const GCB_LF: i64 = 2;
@@ -56,7 +56,7 @@ const INCB_CONSONANT: i64 = 2;
 const INCB_EXTEND: i64 = 3;
 
 /// U+AC00 and the shape of the Hangul block: 19 leads x 21 vowels x 28
-/// trailings. Arithmetic rather than 798 table lines, as in `unicode.src`.
+/// trailings. Arithmetic rather than 798 table lines, as in `unicode.m31`.
 const HANGUL_BASE: i64 = 44032;
 const HANGUL_TRAILING: i64 = 28;
 const HANGUL_COUNT: i64 = 11172;
@@ -66,7 +66,7 @@ const EMOJI_PRESENTATION: i64 = 65039;
 const REGIONAL_INDICATOR_FIRST: i64 = 127462;
 const REGIONAL_INDICATOR_LAST: i64 = 127487;
 
-/// The two tables, parsed once from the embedded `lib/unicode.src`.
+/// The two tables, parsed once from the embedded `lib/unicode.m31`.
 struct Tables {
     /// (lo, hi, width) triples for every code point that is not one column.
     width: Vec<i64>,
@@ -113,7 +113,7 @@ fn parse_table(src: &str, name: &str) -> Vec<i64> {
 }
 
 /// How many (lo, hi, value) ranges each table holds. For the test that keeps
-/// this module and `lib/unicode.src` in step.
+/// this module and `lib/unicode.m31` in step.
 #[cfg(test)]
 pub fn table_sizes() -> (usize, usize) {
     let t = tables();

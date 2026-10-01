@@ -1,4 +1,4 @@
-corpus/errors/761-const-local-push.src:6:6: `a` is const and cannot be changed; clone(a) is a copy that can
+corpus/errors/761-const-local-push.m31:6:6: `a` is const and cannot be changed; clone(a) is a copy that can
   |
 6 |     a.push(3);
   |      ^

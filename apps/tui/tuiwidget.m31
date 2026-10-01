@@ -1,0 +1,389 @@
+// The widget protocol, and the two widgets everything else is drawn inside.
+//
+// API
+// ---
+//   interface tuiwidget.Widget { void render(Buffer b, Rect area); }
+//   tuiwidget.Block(...)      borders, a title and padding; `block.inner(r)`
+//   tuiwidget.Paragraph(text) wrapped, aligned, scrollable text
+//   tuiwidget.Span(text, style)   a run of text in one style
+//   tuiwidget.Line(spans)     spans drawn left to right on one row -- a Widget
+//
+// --- the protocol is one method ---------------------------------------------
+//
+// ```
+// interface Widget {
+//     void render(tuibuf.Buffer b, tuigeom.Rect area);
+// }
+// ```
+//
+// That is the whole of it, and it is a one-method interface, so **anything**
+// satisfies it: a struct with fields, the name of a plain function, or a
+// lambda written at the call site (reference §6.7). A program's own widget
+// needs no registration, no base type and no declaration that it is one --
+// it needs a `render` method with that signature. `apps/tui/tests.m31` writes
+// one of each of the three to prove it.
+//
+// A widget is **not** told where it is on the screen by a field; it is
+// handed the rectangle. So the same value can be drawn twice in two places,
+// and a container widget is a widget that cuts its rectangle up with
+// `tuigeom` and hands the parts on.
+//
+// --- composing ---------------------------------------------------------------
+//
+// There is no `.block(...)` on every widget, the way ratatui has. A block
+// and its content are two widgets and the caller puts them together:
+//
+// ```
+// tuiwidget.Block block = tuiwidget.Block(title: "Logs");
+// block.render(buf, area);
+// para.render(buf, block.inner(area));
+// ```
+//
+// Two lines instead of one, and in exchange every widget stays independent
+// of `Block`, `inner` is available on its own, and a widget a program writes
+// is no harder to use than a widget shipped here.
+
+import tuibuf;
+import tuigeom;
+import tuistyle;
+import tuitext;
+
+/// Anything that can draw itself into a rectangle of a buffer.
+pub interface Widget {
+    void render(tuibuf.Buffer b, tuigeom.Rect area);
+}
+
+/// The top edge.
+pub const int TOP = 1;
+/// The right edge.
+pub const int RIGHT = 2;
+/// The bottom edge.
+pub const int BOTTOM = 4;
+/// The left edge.
+pub const int LEFT = 8;
+/// All four edges: the default.
+pub const int SIDES_ALL = 15;
+
+/// Which line-drawing characters a block's border is made of.
+pub enum Borders {
+    /// No border at all. The block is then a background and a title.
+    None;
+    /// `┌─┐`
+    Single;
+    /// `╔═╗`
+    Double;
+    /// `╭─╮`
+    Rounded;
+    /// `┏━┓`
+    Thick;
+}
+
+/// Which row of `BORDER` this set is, or -1 for `None`.
+int Borders.row() {
+    match (this) {
+        case None: {
+            return -1;
+        }
+        case Single: {
+            return 0;
+        }
+        case Double: {
+            return 1;
+        }
+        case Rounded: {
+            return 2;
+        }
+        case Thick: {
+            return 3;
+        }
+    }
+}
+
+// Six characters a set: horizontal, vertical, and the four corners.
+const Array<str> BORDER = ["\u{2500}", "\u{2502}", "\u{250C}", "\u{2510}", "\u{2514}", "\u{2518}", "\u{2550}", "\u{2551}", "\u{2554}", "\u{2557}", "\u{255A}", "\u{255D}", "\u{2500}", "\u{2502}", "\u{256D}", "\u{256E}", "\u{2570}", "\u{256F}", "\u{2501}", "\u{2503}", "\u{250F}", "\u{2513}", "\u{2517}", "\u{251B}"];
+
+/// A frame around a rectangle: a border, a title on the top edge, and
+/// padding inside.
+///
+/// Every field has a default, so a plain single-line box is `Block()` and
+/// everything else is named:
+///
+/// ```
+/// tuiwidget.Block(title: "Files", borders: tuiwidget.Borders.Rounded, pad_x: 1)
+/// ```
+///
+/// **Render the block before its content.** `render` fills its rectangle
+/// with the block's style first, which is what makes a coloured panel one
+/// call; content drawn into `inner(area)` afterwards sits on top of it.
+pub type Block {
+    pub Borders borders = Borders.Single;
+    /// Which edges are drawn, as `TOP | RIGHT | BOTTOM | LEFT`.
+    pub int sides = SIDES_ALL;
+    pub str title = "";
+    pub tuitext.Align title_align = tuitext.Align.Left;
+    /// The border and the background.
+    pub tuistyle.Style style = tuistyle.Style();
+    pub tuistyle.Style title_style = tuistyle.Style();
+    /// Blank columns between the border and the content.
+    pub int pad_x = 0;
+    /// Blank rows between the border and the content.
+    pub int pad_y = 0;
+}
+
+bool Block.drawn(int side) {
+    return borders.row() >= 0 && (sides & side) != 0;
+}
+
+/// The rectangle left for content: `area` less the edges that are drawn,
+/// less the padding. A title with no top border still takes its row.
+pub tuigeom.Rect Block.inner(tuigeom.Rect area) {
+    int l = 0;
+    int r = 0;
+    int t = 0;
+    int b = 0;
+    if (drawn(LEFT)) {
+        l = 1;
+    }
+    if (drawn(RIGHT)) {
+        r = 1;
+    }
+    if (drawn(TOP)) {
+        t = 1;
+    }
+    if (drawn(BOTTOM)) {
+        b = 1;
+    }
+    if (t == 0 && title != "") {
+        t = 1;
+    }
+    int nx = area.x + l;
+    int ny = area.y + t;
+    int nw = area.w - l - r;
+    int nh = area.h - t - b;
+    if (nw < 0) {
+        nw = 0;
+    }
+    if (nh < 0) {
+        nh = 0;
+    }
+    return tuigeom.Rect(nx, ny, nw, nh).inset_xy(pad_x, pad_y);
+}
+
+pub void Block.render(tuibuf.Buffer buf, tuigeom.Rect area) {
+    if (area.is_empty()) {
+        return;
+    }
+    buf.fill(area, " ", style);
+    int row = borders.row();
+    if (row >= 0) {
+        int base = row * 6;
+        str h = BORDER[base];
+        str v = BORDER[base + 1];
+        if (drawn(TOP)) {
+            buf.fill(tuigeom.Rect(area.x, area.y, area.w, 1), h, style);
+        }
+        if (drawn(BOTTOM) && area.h >= 2) {
+            buf.fill(tuigeom.Rect(area.x, area.bottom() - 1, area.w, 1), h, style);
+        }
+        if (drawn(LEFT)) {
+            buf.fill(tuigeom.Rect(area.x, area.y, 1, area.h), v, style);
+        }
+        if (drawn(RIGHT) && area.w >= 2) {
+            buf.fill(tuigeom.Rect(area.right() - 1, area.y, 1, area.h), v, style);
+        }
+        if (drawn(TOP) && drawn(LEFT)) {
+            buf.set_str(area.x, area.y, BORDER[base + 2], style);
+        }
+        if (drawn(TOP) && drawn(RIGHT) && area.w >= 2) {
+            buf.set_str(area.right() - 1, area.y, BORDER[base + 3], style);
+        }
+        if (drawn(BOTTOM) && drawn(LEFT) && area.h >= 2) {
+            buf.set_str(area.x, area.bottom() - 1, BORDER[base + 4], style);
+        }
+        if (drawn(BOTTOM) && drawn(RIGHT) && area.w >= 2 && area.h >= 2) {
+            buf.set_str(area.right() - 1, area.bottom() - 1, BORDER[base + 5], style);
+        }
+    }
+    if (title == "") {
+        return;
+    }
+    int l = 0;
+    int r = 0;
+    if (drawn(LEFT)) {
+        l = 1;
+    }
+    if (drawn(RIGHT)) {
+        r = 1;
+    }
+    int room = area.w - l - r;
+    if (room <= 0) {
+        return;
+    }
+    str t = tuitext.truncate(title, room);
+    int tx = area.x + l + tuitext.offset(t, room, title_align);
+    buf.set_str(tx, area.y, t, title_style, max: room);
+}
+
+/// Text in a rectangle: wrapped or not, aligned, and scrolled vertically.
+///
+/// `text` is mandatory and positional; everything else is named.
+///
+/// ```
+/// tuiwidget.Paragraph(body, align: tuitext.Align.Center, scroll: 4)
+/// ```
+pub type Paragraph {
+    pub str text;
+    /// Break long lines to the width of the rectangle. With this off, a long
+    /// line is truncated instead.
+    pub bool wrap = true;
+    pub tuitext.Align align = tuitext.Align.Left;
+    /// How many wrapped lines to skip at the top.
+    pub int scroll = 0;
+    pub tuistyle.Style style = tuistyle.Style();
+    /// Put on the end of a line that had to be cut. Only used when `wrap` is
+    /// off.
+    pub str ellipsis = tuitext.ELLIPSIS;
+}
+
+/// The lines this paragraph would draw in a rectangle `room` columns wide --
+/// what a scrollbar needs to know, and what `scroll` counts.
+pub List<str> Paragraph.lines(int room) {
+    if (wrap) {
+        return tuitext.wrap(text, room);
+    }
+    List<str> out = [];
+    for (str l in text.split("\n")) {
+        if (l.ends_with("\r")) {
+            out.push(l.substr(0, l.size() - 1));
+        } else {
+            out.push(l);
+        }
+    }
+    return out;
+}
+
+pub void Paragraph.render(tuibuf.Buffer buf, tuigeom.Rect area) {
+    if (area.is_empty()) {
+        return;
+    }
+    buf.fill(area, " ", style);
+    List<str> ls = lines(area.w);
+    int from = scroll;
+    if (from < 0) {
+        from = 0;
+    }
+    int i = 0;
+    while (i < area.h) {
+        int k = from + i;
+        if (k >= ls.size()) {
+            return;
+        }
+        str line = tuitext.truncate(ls[k], area.w, ell: ellipsis);
+        int x = area.x + tuitext.offset(line, area.w, align);
+        buf.set_str(x, area.y + i, line, style, max: area.w - (x - area.x));
+        i = i + 1;
+    }
+}
+
+// --- styled spans -------------------------------------------------------------
+//
+// A `Style` already carries everything a cell needs (tuistyle.m31); what was
+// missing is a way to put more than one of them on the same row without a
+// caller hand-rolling the column arithmetic. `Span` and `Line` are that:
+// ratatui's `Span`/`Line` *concept*, through this library's own idiom rather
+// than its API -- `Line` is a `List<Span>` with a `render` method, so it is a
+// `Widget` exactly like `Block` and `Paragraph`, composes with `tuigeom` the
+// same way, and needs no separate "text buffer" type of its own.
+
+/// A run of text in one style -- the smallest styled unit a `Line` is built
+/// from. `"a" + Span("b") ` is not a thing; build a `Line` of both instead.
+pub type Span {
+    pub str text;
+    pub tuistyle.Style style = tuistyle.Style();
+}
+
+/// A plain, unstyled span. `Span.of("x")` and `Span("x")` mean the same
+/// thing; this spelling reads better in a list literal of otherwise-styled
+/// spans: `[Span.of("["), Span("staged", style: accent), Span.of("]")]`.
+pub static Span Span.of(str text) {
+    return Span(text);
+}
+
+/// How many columns this span takes, by `tuitext.width`.
+pub int Span.width() {
+    return tuitext.width(text);
+}
+
+/// A row of spans, drawn left to right: `apps/tui`'s answer to ratatui's
+/// `Line`. Like any other widget it does not know where it is drawn; unlike
+/// `Paragraph` it never wraps -- a `Line` is one row, by construction, and a
+/// caller that wants more builds more of them.
+///
+/// ```
+/// tuiwidget.Line([tuiwidget.Span("staged: ", style: dim),
+///     tuiwidget.Span("3 files", style: accent)])
+/// ```
+pub type Line {
+    pub List<Span> spans;
+    pub tuitext.Align align = tuitext.Align.Left;
+    /// Fills the rectangle first, so a span that does not reach the edge
+    /// still sits on a deliberate background rather than whatever was
+    /// already in the buffer -- the same reason `Paragraph.style` exists.
+    pub tuistyle.Style style = tuistyle.Style();
+}
+
+/// A `Line` of one span in one style -- the common case, and what a caller
+/// reaches for before building a `List<Span>` by hand.
+pub static Line Line.of(str text, tuistyle.Style style = tuistyle.Style()) {
+    return Line([Span(text, style: style)], style: style);
+}
+
+/// The line's total width: the sum of its spans', by `tuitext.width`.
+pub int Line.width() {
+    int w = 0;
+    for (Span s in spans) {
+        w = w + s.width();
+    }
+    return w;
+}
+
+/// The spans' text, concatenated with no separator -- what the line reads as
+/// with every style stripped off.
+pub str Line.plain() {
+    List<str> out = [];
+    for (Span s in spans) {
+        out.push(s.text);
+    }
+    return out.join("");
+}
+
+pub void Line.render(tuibuf.Buffer buf, tuigeom.Rect area) {
+    if (area.is_empty()) {
+        return;
+    }
+    buf.fill(area, " ", style);
+    int total = width();
+    int start = area.x;
+    if (total < area.w) {
+        match (align) {
+            case Left: {
+            }
+            case Right: {
+                start = area.x + area.w - total;
+            }
+            case Center: {
+                start = area.x + (area.w - total) / 2;
+            }
+        }
+    }
+    int x = start;
+    int budget = area.right() - start;
+    for (Span s in spans) {
+        if (budget <= 0) {
+            return;
+        }
+        int used = buf.set_str(x, area.y, s.text, s.style, max: budget);
+        x = x + used;
+        budget = budget - used;
+    }
+}

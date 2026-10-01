@@ -1,4 +1,4 @@
-corpus/errors/052-move-in-loop.src:5:13: `m` is declared outside this block and cannot be moved from here; a move inside a loop or a branch would run a different number of times than it was checked. Bind it in this block first.
+corpus/errors/052-move-in-loop.m31:5:13: `m` is declared outside this block and cannot be moved from here; a move inside a loop or a branch would run a different number of times than it was checked. Bind it in this block first.
   |
 5 |     send(c, m);
   |             ^

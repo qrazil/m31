@@ -1,0 +1,610 @@
+// HEAD, `refs/**` and `packed-refs`: the names a repository puts on objects.
+//
+// A ref is a file under `.git/refs` whose contents are an object name, or the
+// line `ref: <another ref>`, which makes it a symbolic ref. HEAD is the same
+// kind of file one level up, and is symbolic when a branch is checked out and
+// direct when it is detached. A ref may instead be a line in `packed-refs`,
+// which `git pack-refs` writes to stop a repository with ten thousand tags
+// costing ten thousand inodes; a loose file always wins over a packed line for
+// the same name, because that is how git makes an update atomic.
+//
+// API
+// ---
+//   refs.head(gitdir)            -> Result<Head, Error>
+//   refs.resolve(gitdir, name)   -> Result<str, Error>   a full ref name
+//   refs.all(gitdir)             -> Result<List<Ref>, Error>  sorted by name
+//   refs.rev_parse(gitdir, spec) -> Result<str, Error>   git's DWIM, and
+//                                                        short object names
+//
+//   refs.update(gitdir, name, new_id, expect_old)  -> Result<bool, Error>
+//   refs.update_symbolic(gitdir, name, target)     -> Result<bool, Error>
+//
+// --- what is NOT here --------------------------------------------------------
+//
+// The revision *grammar* -- `HEAD~3`, `main^2`, `v1^{commit}`, `@{upstream}`,
+// `:/message` -- is not implemented. `rev_parse` takes a ref, a short object
+// name, or a full one, and nothing else. The one peeling that is here is
+// `peel`, which follows an annotated tag to what it tags, because `log v1`
+// is otherwise a question with no answer.
+//
+// --- writing -------------------------------------------------------------
+//
+// `update` writes a ref -- `refs/heads/<name>`, `HEAD` detached, or any other
+// full ref name -- to a 40-digit object name, and `update_symbolic` writes
+// `HEAD` (or any ref) as `ref: <target>`. Both write a temporary file beside
+// the real one and rename it over, exactly as `object.m31`'s writers do:
+// never a direct in-place write, so a crash mid-write leaves the old ref
+// intact and a reader never sees a half-written one.
+//
+// `update`'s `expect_old` is a compare-and-swap: given, it is checked against
+// the ref's current value (what `resolve` would return; `""` for a ref that
+// does not exist yet) immediately before the write, and a mismatch fails the
+// whole call with nothing touched. **This is optimistic concurrency control,
+// not a lock.** The check and the write are two separate steps -- there is no
+// primitive here for an exclusive-create lockfile the way real git's
+// `.lock` files are -- so two writers racing in the gap between the check and
+// the `rename` can both pass it; what `rename` still guarantees is that the
+// file itself is never left half-written, whoever wins. A single process
+// serialising its own updates (which is the only caller this program has) is
+// safe; a true multi-writer guarantee would need an exclusive-create
+// primitive this standard library does not expose, so it is not claimed here.
+
+import io;
+import fs;
+import text;
+import object;
+import repo;
+import random;
+
+/// Why a name did not resolve. Payload-free (docs/errors-decision.md §4):
+/// the ref name, the underlying `io.Error`, or which kind a tag chain ended
+/// at is context the caller already has -- it passed the name in -- when it
+/// reports.
+pub enum Error {
+    /// The file or the line is not there.
+    NotFound;
+    /// A ref file exists and could not be read.
+    Io;
+    /// A ref file holds neither an object name nor `ref: <name>`.
+    Malformed;
+    /// Symbolic refs pointing at each other, or nested deeper than git's own
+    /// limit of five.
+    TooDeep;
+    /// `rev_parse` found nothing of that name, under any of the prefixes it
+    /// tries.
+    Unknown;
+    /// A short object name matching more than one object.
+    Ambiguous;
+    /// A tag chain that never reaches a commit.
+    NotACommit;
+    /// `update`'s `expect_old` did not match the ref's current value.
+    Mismatch;
+    /// A value handed to a write is not a well-formed 40-digit object name.
+    BadValue;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case NotFound: {
+            return "no ref of that name";
+        }
+        case Io: {
+            return "the ref file could not be read";
+        }
+        case Malformed: {
+            return "the ref holds neither an object name nor `ref: <name>`";
+        }
+        case TooDeep: {
+            return "symbolic refs go more than 5 deep, or round in a circle";
+        }
+        case Unknown: {
+            return "unknown revision or object name";
+        }
+        case Ambiguous: {
+            return "that short name is ambiguous: more than one loose object begins with it";
+        }
+        case NotACommit: {
+            return "that name is not a commit";
+        }
+        case Mismatch: {
+            return "compare-and-swap failed: the ref's current value is not the one expected";
+        }
+        case BadValue: {
+            return "not a well-formed object name: 40 hex digits";
+        }
+    }
+}
+
+/// A name and the object it points at.
+pub type Ref {
+    pub str name;
+    pub str id;
+}
+
+/// Refs sort by name, so `sort()` on a `List<Ref>` orders them (§3.9).
+///
+/// The body is `before(name, other.name)` and not `name < other.name`,
+/// because **`str` has no ordering operator**: `<` is defined on `int` and
+/// `float` and on a user type with `cmp`, and a `List<str>` sorts because the
+/// runtime knows how, not because the program can say how. So a type with a
+/// `str` field that wants to sort has to write the byte comparison out. See
+/// FRICTION.md.
+pub int Ref.cmp(Ref other) {
+    return before(name, other.name);
+}
+
+// Negative, zero or positive, comparing two strings by their octets -- which
+// for UTF-8 is code point order, and is the order `List<str>.sort()` uses.
+int before(str a, str b) {
+    int n = a.size();
+    if (b.size() < n) {
+        n = b.size();
+    }
+    for (int i in 0 .. n) {
+        int x = a.byte_at(i);
+        int y = b.byte_at(i);
+        if (x != y) {
+            return x - y;
+        }
+    }
+    return a.size() - b.size();
+}
+
+/// What HEAD is. Three states, because a repository really has three: on a
+/// branch, on a branch that has no commits yet, and detached.
+pub enum Head {
+    /// Detached: HEAD holds an object name directly.
+    Detached(str);
+    /// On a branch that exists: its full ref name, and the object.
+    Born(str, str);
+    /// On a branch with no commits yet -- a fresh `git init`. Its ref name.
+    Unborn(str);
+}
+
+/// Read HEAD.
+pub Result<Head, Error> head(str gitdir) {
+    str raw = contents(gitdir, "HEAD")?;
+    if (raw.starts_with("ref: ")) {
+        str target = raw.substr(5, raw.size()).trim();
+        // "Not there yet" is asked before resolving rather than recognised
+        // from the failure afterwards: telling one variant of an error apart
+        // from the others needs a `match` over every variant there is
+        // (reference §5.6 -- no `default`), which is six arms that all say
+        // the same thing. See FRICTION.md.
+        if (!exists(gitdir, target)) {
+            return Result<Head, Error>.Ok(Head.Unborn(target));
+        }
+        str id = resolve(gitdir, target)?;
+        return Result<Head, Error>.Ok(Head.Born(target, id));
+    }
+    if (object.is_name(raw) && raw.size() == 40) {
+        return Result<Head, Error>.Ok(Head.Detached(raw));
+    }
+    return Result<Head, Error>.Err(Error.Malformed);
+}
+
+/// Is there a ref of this name at all -- a loose file, or a packed line?
+pub bool exists(str gitdir, str name) {
+    match (loose_ref(gitdir, name)) {
+        case Some: {
+            return true;
+        }
+        case None: {
+        }
+    }
+    return packed(gitdir, name).is_some();
+}
+
+/// The object a full ref name points at, following symbolic refs. `name` is
+/// the whole thing -- `HEAD`, `refs/heads/main`, `refs/tags/v1` -- not a
+/// branch name; `rev_parse` is the one that guesses.
+pub Result<str, Error> resolve(str gitdir, str name) {
+    str at = name;
+    int depth = 0;
+    while (depth < 5) {
+        str raw = "";
+        match (loose_ref(gitdir, at)) {
+            case Some(str v): {
+                raw = v;
+            }
+            case None: {
+                match (packed(gitdir, at)) {
+                    case Some(str v): {
+                        return Result<str, Error>.Ok(v);
+                    }
+                    case None: {
+                        return Result<str, Error>.Err(Error.NotFound);
+                    }
+                }
+            }
+        }
+        if (raw.starts_with("ref: ")) {
+            at = raw.substr(5, raw.size()).trim();
+            depth = depth + 1;
+        } else if (object.is_name(raw) && raw.size() == 40) {
+            return Result<str, Error>.Ok(raw);
+        } else {
+            return Result<str, Error>.Err(Error.Malformed);
+        }
+    }
+    return Result<str, Error>.Err(Error.TooDeep);
+}
+
+/// Every ref in the repository, loose and packed, sorted by name. A loose
+/// file shadows a packed line of the same name. A symbolic ref that does not
+/// resolve is left out, which is what `git for-each-ref` does with one.
+pub Result<List<Ref>, Error> all(str gitdir) {
+    Map<str, str> seen = {};
+    List<str> order = [];
+    // The shared directory: in a linked worktree `refs` is not under the
+    // worktree's own git directory at all (`repo.m31`).
+    str shared = repo.common(gitdir);
+    str root = fs.join(shared, "refs");
+    match (fs.walk(root)) {
+        case Ok(List<str> paths): {
+            for (str p in paths) {
+                if (!fs.is_file(p)) {
+                    continue;
+                }
+                // `fs.walk` gives paths below `root`; the ref's name is the
+                // path from the git directory, with `/` as the separator on
+                // every platform because that is what the format says.
+                str name = text.strip_prefix(p, fs.join(shared, ""));
+                name = text.strip_prefix(name, "/");
+                match (resolve(gitdir, name)) {
+                    case Ok(str id): {
+                        if (!seen.contains(name)) {
+                            order.push(name);
+                        }
+                        seen.set(name, id);
+                    }
+                    case Err: {
+                    }
+                }
+            }
+        }
+        case Err: {
+        }
+    }
+    for (Ref r in packed_all(gitdir)) {
+        if (!seen.contains(r.name)) {
+            order.push(r.name);
+            seen.set(r.name, r.id);
+        }
+    }
+    List<Ref> out = [];
+    for (str name in order) {
+        match (seen.get(name)) {
+            case Some(str id): {
+                out.push(Ref(name, id));
+            }
+            case None: {
+            }
+        }
+    }
+    out.sort();
+    return Result<List<Ref>, Error>.Ok(out);
+}
+
+/// git's own guessing, in git's own order: a full object name or an
+/// unambiguous short one first, then `<spec>`, `refs/<spec>`,
+/// `refs/tags/<spec>`, `refs/heads/<spec>`, `refs/remotes/<spec>` and
+/// `refs/remotes/<spec>/HEAD`.
+///
+/// The bare-name forms -- `HEAD`, `FETCH_HEAD`, `ORIG_HEAD`, `MERGE_HEAD` --
+/// are files in the git directory rather than under `refs`, and are tried as
+/// `<spec>` by that first rule.
+pub Result<str, Error> rev_parse(str gitdir, str spec) {
+    List<str> hits = object.matching(gitdir, spec);
+    if (hits.size() == 1) {
+        return Result<str, Error>.Ok(hits[0]);
+    }
+    if (hits.size() > 1) {
+        return Result<str, Error>.Err(Error.Ambiguous);
+    }
+    List<str> tries = [spec, "refs/" + spec, "refs/tags/" + spec, "refs/heads/" + spec, "refs/remotes/" + spec, "refs/remotes/" + spec + "/HEAD"];
+    for (str name in tries) {
+        if (!safe_name(name)) {
+            continue;
+        }
+        match (resolve(gitdir, name)) {
+            case Ok(str id): {
+                return Result<str, Error>.Ok(id);
+            }
+            case Err: {
+            }
+        }
+    }
+    return Result<str, Error>.Err(Error.Unknown);
+}
+
+/// Follow annotated tags until something that is not a tag, then insist it is
+/// a commit. This is `<spec>^{commit}` for the one case that matters.
+pub Result<str, Error> peel(str gitdir, str spec, str id) {
+    str at = id;
+    int depth = 0;
+    while (depth < 10) {
+        match (object.read(gitdir, at)) {
+            case Ok(object.Object o): {
+                match (o.body) {
+                    case Tag(object.Tag t): {
+                        at = t.object;
+                        depth = depth + 1;
+                    }
+                    case Commit: {
+                        return Result<str, Error>.Ok(at);
+                    }
+                    case Blob: {
+                        return Result<str, Error>.Err(Error.NotACommit);
+                    }
+                    case Tree: {
+                        return Result<str, Error>.Err(Error.NotACommit);
+                    }
+                }
+            }
+            case Err: {
+                return Result<str, Error>.Err(Error.NotFound);
+            }
+        }
+    }
+    return Result<str, Error>.Err(Error.TooDeep);
+}
+
+// --- reading the files -------------------------------------------------------
+
+// A file in the git directory, trimmed, or the error. Used for HEAD, which
+// must exist; a missing ref file is `None` from `loose_ref` instead.
+Result<str, Error> contents(str gitdir, str name) {
+    str path = fs.join(gitdir, name);
+    match (io.read(path)) {
+        case Ok(str s): {
+            return Result<str, Error>.Ok(s.trim());
+        }
+        case Err(io.Error e): {
+            if (!fs.exists(path)) {
+                return Result<str, Error>.Err(Error.NotFound);
+            }
+            return Result<str, Error>.Err(Error.Io);
+        }
+    }
+}
+
+// A loose ref's raw contents, or `None` if there is no such file. A name
+// with `..` or a leading `/` in it never reaches the filesystem: `rev_parse`
+// builds paths out of what a user typed.
+Option<str> loose_ref(str gitdir, str name) {
+    if (!safe_name(name)) {
+        return Option<str>.None;
+    }
+    // HEAD and the handful of pseudo-refs beside it belong to this worktree;
+    // every branch, tag and remote lives in the shared directory, which is
+    // the same directory unless this is a linked worktree (`repo.m31`).
+    str where = gitdir;
+    if (!repo.per_worktree(name)) {
+        where = repo.common(gitdir);
+    }
+    str path = fs.join(where, name);
+    if (!fs.is_file(path)) {
+        return Option<str>.None;
+    }
+    match (io.read(path)) {
+        case Ok(str s): {
+            return Option<str>.Some(s.trim());
+        }
+        case Err: {
+            return Option<str>.None;
+        }
+    }
+}
+
+// One name from `packed-refs`.
+Option<str> packed(str gitdir, str name) {
+    for (Ref r in packed_all(gitdir)) {
+        if (r.name == name) {
+            return Option<str>.Some(r.id);
+        }
+    }
+    return Option<str>.None;
+}
+
+// Every line of `packed-refs` that names a ref.
+//
+// A line is `<object name> <ref name>`. A line beginning with `#` is the
+// header and a line beginning with `^` is the object an annotated tag on the
+// line above peels to -- useful, and not a ref, so neither is returned here.
+// The file is re-read per lookup, which is fine at this scale and is noted in
+// FRICTION.md as the thing a `Repo` holding state would fix.
+List<Ref> packed_all(str gitdir) {
+    List<Ref> out = [];
+    str path = fs.join(repo.common(gitdir), "packed-refs");
+    if (!fs.is_file(path)) {
+        return out;
+    }
+    str body = "";
+    match (io.read(path)) {
+        case Ok(str s): {
+            body = s;
+        }
+        case Err: {
+            return out;
+        }
+    }
+    for (str line in text.lines(body)) {
+        if (line.size() == 0 || line.starts_with("#") || line.starts_with("^")) {
+            continue;
+        }
+        int sp = line.index_of(" ").or(-1);
+        if (sp != 40) {
+            continue;
+        }
+        str id = line.substr(0, 40);
+        str name = line.substr(41, line.size()).trim();
+        if (!object.is_name(id) || name.size() == 0) {
+            continue;
+        }
+        out.push(Ref(name, id));
+    }
+    return out;
+}
+
+// Is this a ref name that may be turned into a path? No empty part, no `..`,
+// no absolute path, no backslash -- the checks that stop a name typed on a
+// command line from reading a file outside the repository.
+bool safe_name(str name) {
+    if (name.size() == 0 || name.starts_with("/") || name.contains("\\")) {
+        return false;
+    }
+    for (str part in name.split("/")) {
+        if (part.size() == 0 || part == "." || part == "..") {
+            return false;
+        }
+    }
+    return true;
+}
+
+// --- writing ------------------------------------------------------------------
+
+/// Write `name` (a full ref path -- `refs/heads/main`, or `HEAD` for a
+/// detached checkout) to point directly at the object `new_id`.
+///
+/// If `expect_old` is `Some`, the write only happens when `resolve(gitdir,
+/// name)` currently answers that value -- `""` if `expect_old` is `Some("")`
+/// and the ref does not exist yet -- and a mismatch is `Error.Mismatch` with
+/// nothing written. See the module header for exactly what this does and does
+/// not guarantee against a second writer.
+pub Result<bool, Error> update(str gitdir, str name, str new_id, Option<str> expect_old) {
+    if (!safe_name(name)) {
+        return Result<bool, Error>.Err(Error.Malformed);
+    }
+    if (!object.is_name(new_id) || new_id.size() != 40) {
+        return Result<bool, Error>.Err(Error.BadValue);
+    }
+    match (expect_old) {
+        case Some(str want): {
+            str have = current_or_empty(gitdir, name)?;
+            if (have != want) {
+                return Result<bool, Error>.Err(Error.Mismatch);
+            }
+        }
+        case None: {
+        }
+    }
+    return write_atomic(where_for(gitdir, name), new_id + "\n");
+}
+
+/// Write `name` as a symbolic ref: `ref: <target>`. `target` is a ref name,
+/// not checked for existence -- `HEAD` pointing at `refs/heads/<branch>`
+/// before that branch has a first commit (an "unborn" branch, `Head.Unborn`)
+/// is exactly this and is not an error.
+pub Result<bool, Error> update_symbolic(str gitdir, str name, str target) {
+    if (!safe_name(name) || !safe_name(target)) {
+        return Result<bool, Error>.Err(Error.Malformed);
+    }
+    return write_atomic(where_for(gitdir, name), "ref: " + target + "\n");
+}
+
+// `resolve`'s answer, with "the ref is not there at all" folded into `""`
+// rather than an error -- what a compare-and-swap against a ref that may not
+// exist yet needs. Every other failure of `resolve` is passed on.
+//
+// Six arms that differ only in which `Error` they repeat is exactly the
+// pattern the module header on `head()` already names: telling `NotFound`
+// apart from the rest needs a full `match`, because there is no `default`
+// (reference §5.6). Written once, here, rather than at every call site.
+Result<str, Error> current_or_empty(str gitdir, str name) {
+    match (resolve(gitdir, name)) {
+        case Ok(str id): {
+            return Result<str, Error>.Ok(id);
+        }
+        case Err(Error e): {
+            match (e) {
+                case NotFound: {
+                    return Result<str, Error>.Ok("");
+                }
+                case Io: {
+                    return Result<str, Error>.Err(Error.Io);
+                }
+                case Malformed: {
+                    return Result<str, Error>.Err(Error.Malformed);
+                }
+                case TooDeep: {
+                    return Result<str, Error>.Err(Error.TooDeep);
+                }
+                case Unknown: {
+                    return Result<str, Error>.Err(Error.Unknown);
+                }
+                case Ambiguous: {
+                    return Result<str, Error>.Err(Error.Ambiguous);
+                }
+                case NotACommit: {
+                    return Result<str, Error>.Err(Error.NotACommit);
+                }
+                case Mismatch: {
+                    return Result<str, Error>.Err(Error.Mismatch);
+                }
+                case BadValue: {
+                    return Result<str, Error>.Err(Error.BadValue);
+                }
+            }
+        }
+    }
+}
+
+// The file a ref name is written to: HEAD and the other per-worktree
+// pseudo-refs live beside `gitdir` itself, everything else in the shared
+// directory a linked worktree keeps its branches and tags in (`repo.m31`) --
+// the same split `loose_ref` reads by.
+str where_for(str gitdir, str name) {
+    str where = gitdir;
+    if (!repo.per_worktree(name)) {
+        where = repo.common(gitdir);
+    }
+    return fs.join(where, name);
+}
+
+// Write `content` to `path` without ever leaving a half-written file there: a
+// freshly named temporary file beside it, written whole, then renamed over
+// the target. `fs.rename` is atomic within one file system (its own docs),
+// which is what makes this safe against a crash between the two steps -- the
+// rename either lands or it does not, and either way `path` holds a complete
+// file, old or new.
+Result<bool, Error> write_atomic(str path, str content) {
+    match (fs.makedirs(dir_of(path))) {
+        case Ok: {
+        }
+        case Err(io.Error e): {
+            return Result<bool, Error>.Err(Error.Io);
+        }
+    }
+    random.System rnd = random.system();
+    str tmp = path + ".tmp" + rnd.hex(12);
+    match (io.write(tmp, content)) {
+        case Ok: {
+        }
+        case Err(io.Error e): {
+            return Result<bool, Error>.Err(Error.Io);
+        }
+    }
+    match (fs.rename(tmp, path)) {
+        case Ok: {
+            return Result<bool, Error>.Ok(true);
+        }
+        case Err(io.Error e): {
+            return Result<bool, Error>.Err(Error.Io);
+        }
+    }
+}
+
+// The directory `path` is in -- `fs` has `join` and nothing that goes the
+// other way, so the split is written out here: back from the end to the last
+// `/`, or `"."` if there is none.
+str dir_of(str path) {
+    int i = path.size() - 1;
+    while (i >= 0 && path.byte_at(i) != '/') {
+        i = i - 1;
+    }
+    if (i < 0) {
+        return ".";
+    }
+    return path.substr(0, i);
+}

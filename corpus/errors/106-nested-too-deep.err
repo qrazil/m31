@@ -1,4 +1,4 @@
-corpus/errors/106-nested-too-deep.src:16:16: expression nested too deeply (limit 256)
+corpus/errors/106-nested-too-deep.m31:16:16: expression nested too deeply (limit 256)
    |
 16 | ((((((((((((((((((((
    |                ^
