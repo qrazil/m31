@@ -295,6 +295,9 @@ typedef enum rt_green_state {
     RT_GT_PARKED_IO,
     RT_GT_PARKED_CHAN,
     RT_GT_PARKED_TIMER,
+    RT_GT_PARKED_QUEUE, /* scheduler.c's squeue_push backpressure -- a green
+                          * thread's `spawn` waiting for the shared queue to
+                          * have room, never a carrier blocking on it. */
     RT_GT_DEAD,
 } rt_green_state_t;
 

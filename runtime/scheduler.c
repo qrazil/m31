@@ -127,13 +127,63 @@ static uint32_t parse_env_u32(const char *name, uint32_t fallback) {
 
 typedef struct rt_green rt_green_t;
 
+/* Forward-declared so squeue_push (just below) can ask "is my caller a green
+ * thread or an ordinary OS thread" without needing struct rt_green's full
+ * definition visible yet -- that definition (and tls_current_green, which
+ * this answers from) comes much later in this file, where every OTHER
+ * green-thread-identity question this file asks is already answered the
+ * same way (rt_sched_current_carrier/rt_sched_current_green_id, both public,
+ * both also defined down there). Defined right next to tls_current_green. */
+static bool rt_sched_in_green_thread(void);
+
+/* A FIFO of green-thread ids parked on "the queue is full" -- the exact
+ * same shape as rt.c's own Chan waiter queue (rt_chan_wqueue_t there), kept
+ * as its own small copy here rather than shared across the rt.c/scheduler.c
+ * layering boundary, the same "correctness over cleverness, no shared
+ * plumbing across layers" choice reactor.c's own waiter map already makes.
+ * See squeue_push/squeue_draw below for why this exists at all: a condvar's
+ * wait queue is only a safe place to block an ordinary OS thread, never a
+ * green thread, which must never block its carrier. */
+typedef struct rt_squeue_waiter {
+    uint32_t                  id;
+    struct rt_squeue_waiter  *next;
+} rt_squeue_waiter_t;
+
+static void sqwq_push(rt_squeue_waiter_t **head, rt_squeue_waiter_t **tail,
+                       uint32_t id) {
+    rt_squeue_waiter_t *n = malloc(sizeof *n);
+    if (n == NULL) rt_trap("out of memory: scheduler queue waiter");
+    n->id = id;
+    n->next = NULL;
+    if (*tail != NULL) (*tail)->next = n; else *head = n;
+    *tail = n;
+}
+
+/* Detach the whole waiter list -- every one of them re-checks its own
+ * while-loop condition on resume (same reasoning as squeue_draw's existing
+ * pthread_cond_broadcast, just for the green-thread side of the same
+ * backpressure signal), so waking all of them whenever ANY room frees up is
+ * simply the green-thread-safe equivalent of that broadcast, not a
+ * separate, weaker guarantee. */
+static rt_squeue_waiter_t *sqwq_drain(rt_squeue_waiter_t **head,
+                                       rt_squeue_waiter_t **tail) {
+    rt_squeue_waiter_t *n = *head;
+    *head = *tail = NULL;
+    return n;
+}
+
 typedef struct {
-    pthread_mutex_t lock;
-    pthread_cond_t  not_full;
-    rt_green_t    **buf;
-    uint32_t        cap;
-    uint32_t        head;
-    uint32_t        len;
+    pthread_mutex_t      lock;
+    pthread_cond_t        not_full;
+    rt_green_t           **buf;
+    uint32_t              cap;
+    uint32_t              head;
+    uint32_t              len;
+    /* Green-thread pushers parked here instead of on `not_full` -- see
+     * squeue_push's own comment for why the two cases cannot share one
+     * waiting mechanism. */
+    rt_squeue_waiter_t   *full_head;
+    rt_squeue_waiter_t   *full_tail;
 } rt_squeue_t;
 
 static void squeue_init(rt_squeue_t *q, uint32_t cap) {
@@ -142,6 +192,7 @@ static void squeue_init(rt_squeue_t *q, uint32_t cap) {
     q->cap = cap;
     q->head = 0;
     q->len = 0;
+    q->full_head = q->full_tail = NULL;
     pthread_mutex_init(&q->lock, NULL);
     pthread_cond_init(&q->not_full, NULL);
 }
@@ -150,15 +201,50 @@ static void squeue_destroy(rt_squeue_t *q) {
     pthread_mutex_destroy(&q->lock);
     pthread_cond_destroy(&q->not_full);
     free(q->buf);
+    rt_squeue_waiter_t *n = q->full_head;
+    while (n != NULL) { rt_squeue_waiter_t *next = n->next; free(n); n = next; }
 }
 
 /* Blocks while full -- real backpressure, matching the design doc's stated
  * semantics exactly: "a push blocks until space frees", never silent
- * unbounded growth and never a dropped item. */
+ * unbounded growth and never a dropped item.
+ *
+ * TWO DIFFERENT WAYS TO BLOCK, chosen by who is calling -- a real,
+ * reproduced deadlock this distinction fixes, not a theoretical one. An
+ * ordinary OS thread (nothing has ever `spawn`ed from it, or a carrier's own
+ * post-dispatch bookkeeping, which runs with no green thread "currently
+ * running" on that OS thread -- see tls_current_green) blocking here via
+ * `pthread_cond_wait` is correct: some OTHER thread -- another carrier -- is
+ * always free to drain the queue and signal `not_full`. But when the caller
+ * IS a green thread (`spawn` called from ordinary program code, which always
+ * runs AS a green thread -- rt_run_program wraps even the top level as one),
+ * blocking the CARRIER this green thread happens to be running on is wrong
+ * the instant that carrier is the only one that could ever call
+ * squeue_draw and free room: the carrier is now blocked waiting on itself,
+ * forever. `LANG_NUM_CARRIERS=1` plus a tight `spawn` loop past the queue's
+ * capacity reproduces this exactly (docs/concurrency-decision.md, "Phase
+ * 3.5"). The fix mirrors Chan's own send/recv exactly (rt.c): park the
+ * GREEN THREAD instead of blocking the carrier, which frees the carrier to
+ * go dispatch other work (including, eventually, whatever drains this very
+ * queue) while this one waits its turn. The enqueue (sqwq_push) happens
+ * BEFORE the unlock, the same lost-wakeup fix Chan's own comment explains:
+ * a squeue_draw that runs in the gap between this unlock and the actual
+ * rt_sched_park call will already find this id on the list and unpark it,
+ * which rt_sched_park's own CAS protocol (scheduler.h) is documented to
+ * handle correctly no matter which order those two happen in. */
 static void squeue_push(rt_squeue_t *q, rt_green_t *g) {
+    bool in_green = rt_sched_in_green_thread();
+
     pthread_mutex_lock(&q->lock);
     while (q->len == q->cap) {
-        pthread_cond_wait(&q->not_full, &q->lock);
+        if (in_green) {
+            sqwq_push(&q->full_head, &q->full_tail, rt_sched_current_green_id());
+            pthread_mutex_unlock(&q->lock);
+            rt_sched_park(RT_GT_PARKED_QUEUE);
+            pthread_mutex_lock(&q->lock);
+        } else {
+            pthread_cond_wait(&q->not_full, &q->lock);
+        }
     }
     q->buf[(q->head + q->len) % q->cap] = g;
     q->len++;
@@ -168,7 +254,8 @@ static void squeue_push(rt_squeue_t *q, rt_green_t *g) {
 /* Non-blocking: draws min(available, max_n) into out[0..n), no minimum
  * threshold -- a single available item is drawn immediately. Returns the
  * count actually drawn, which may be 0. */
-static uint32_t squeue_draw(rt_squeue_t *q, rt_green_t **out, uint32_t max_n) {
+static uint32_t squeue_draw(rt_scheduler_t *s, rt_squeue_t *q,
+                             rt_green_t **out, uint32_t max_n) {
     pthread_mutex_lock(&q->lock);
     uint32_t n = q->len < max_n ? q->len : max_n;
     for (uint32_t i = 0; i < n; i++) {
@@ -176,13 +263,24 @@ static uint32_t squeue_draw(rt_squeue_t *q, rt_green_t **out, uint32_t max_n) {
     }
     q->head = (q->head + n) % q->cap;
     q->len -= n;
+    rt_squeue_waiter_t *woken = NULL;
     if (n > 0) {
         /* Freed room: every blocked pusher re-checks its own while-loop
          * condition, so a broadcast here is simply correct, not merely
-         * convenient -- no lost wakeup, no lost push. */
+         * convenient -- no lost wakeup, no lost push. Same for the
+         * green-thread side: drain and unpark every one of them, below,
+         * after releasing this lock (rt_sched_unpark must never be called
+         * while holding a lock a park/unpark participant might need). */
         pthread_cond_broadcast(&q->not_full);
+        woken = sqwq_drain(&q->full_head, &q->full_tail);
     }
     pthread_mutex_unlock(&q->lock);
+    while (woken != NULL) {
+        rt_squeue_waiter_t *next = woken->next;
+        rt_sched_unpark(s, woken->id);
+        free(woken);
+        woken = next;
+    }
     return n;
 }
 
@@ -571,6 +669,15 @@ struct rt_green {
  * life of that OS thread. */
 static _Thread_local rt_green_t *tls_current_green = NULL;
 static _Thread_local uint32_t    tls_carrier_index = UINT32_MAX;
+
+/* squeue_push's own forward declaration, above, explains why this exists:
+ * "is the calling OS thread currently running a green thread, or is it some
+ * other kind of caller" (an ordinary OS thread, or a carrier's own
+ * post-dispatch bookkeeping, which runs with tls_current_green already
+ * cleared -- see carrier_dispatch). */
+static bool rt_sched_in_green_thread(void) {
+    return tls_current_green != NULL;
+}
 
 /* ---- the wake notification itself -------------------------------------- */
 
@@ -964,7 +1071,7 @@ static void *carrier_main(void *argp) {
 
     for (;;) {
         if (c->local_len == 0) {
-            uint32_t n = squeue_draw(&c->sched->global, c->local, c->local_cap);
+            uint32_t n = squeue_draw(c->sched, &c->sched->global, c->local, c->local_cap);
             if (n > 0) {
                 c->local_head = 0;
                 c->local_len = n;

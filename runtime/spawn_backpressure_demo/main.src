@@ -1,0 +1,45 @@
+// Minimal reproduction for the `rt_sched_spawn` backpressure deadlock
+// (docs/concurrency-decision.md, "Phase 3.5"): a tight `spawn` loop, run as
+// green thread 0 (the top level, per rt_run_program) on the only carrier,
+// pushing past the shared queue's capacity.
+//
+// Before the fix, `squeue_push` blocked a FULL queue with a real
+// `pthread_cond_wait` no matter who called it -- correct for an ordinary OS
+// thread (some OTHER carrier is always free to drain and signal `not_full`),
+// wrong the instant the caller is a green thread running on the ONLY
+// carrier that could ever drain it: that carrier is now blocked waiting on
+// itself, forever. Run with `LANG_NUM_CARRIERS=1` and a small
+// `LANG_GLOBAL_QUEUE_CAP` (both set by runtime/spawn_backpressure_test.sh)
+// so N spawns past the cap is reached almost immediately rather than only
+// past the production default of a million.
+//
+// After the fix, the same scenario completes and prints N: `squeue_push`
+// parks the calling green thread instead of blocking the carrier when the
+// caller is one, exactly the way `Chan.send`/`recv` already park instead of
+// blocking (rt.c) -- freeing the carrier to go drain the very queue this
+// green thread is waiting on.
+
+const int N = 300;
+
+void worker(int id, Chan<int> out) {
+    send(out, id);
+}
+
+Chan<int> results = Chan<int>(N);
+
+int i = 0;
+while (i < N) {
+    spawn worker(i, results);
+    i = i + 1;
+}
+
+int got = 0;
+int sum = 0;
+while (got < N) {
+    sum = sum + recv(results);
+    got = got + 1;
+}
+// N consecutive integers 0..N-1 sum to N*(N-1)/2 -- printed as a plain
+// number so the test script can check it exactly, the same "sum, not an
+// order-dependent value" discipline corpus/core's own 025-spawn.src uses.
+print(sum);

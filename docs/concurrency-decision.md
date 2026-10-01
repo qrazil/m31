@@ -502,12 +502,13 @@ of it in C in 2012.
       stress-testing it surfaced a real, TSan-confirmed data race in the
       PRE-EXISTING Phase 1/2 fiber-switching mechanism (`rt_stack_limit`,
       written by one carrier and read by another), reliably reproducible
-      under genuine concurrent socket I/O across 2+ real carriers, that was
-      NOT fixed. See "Phase 3.5" below for the full account, the deadlock
-      found and mitigated (separately, fully fixed) along the way, and
-      exactly why the race was left open rather than patched
-      under-confidently. Do not treat this checklist item as "safe to ship"
-      until that race has a real fix.
+      under genuine concurrent socket I/O across 2+ real carriers, that is
+      STILL NOT fixed (investigated at length again, in depth; see "Phase
+      3.5" below for the full, updated account of exactly what is now known
+      and why it still was not patched). A SEPARATE real deadlock found
+      along the way (`rt_sched_spawn`'s backpressure, below) IS now fully
+      fixed, not merely mitigated. Do not treat this checklist item as "safe
+      to ship" until the race has a real fix.
 
 **Known gap, carried forward rather than fixed in Phase 3**: ThreadSanitizer
 itself intermittently segfaults (never a real race report, never in this
@@ -594,20 +595,51 @@ green thread 0 (`rt_run_program`), not on the raw OS thread, so a
   RCVTIMEO/SNDTIMEO stopped being able to do this once the socket became
   non-blocking (the kernel never waits long enough to time out), so this
   module's own two fields (`read_timeout_ms`/`write_timeout_ms`) replaced it.
-- **A real deadlock was found, not merely a risk**: `rt_sched_spawn`'s own
-  backpressure (`scheduler.c`'s `squeue_push`, when the shared queue is
-  full) is a genuine OS-level `pthread_cond_wait` on the calling thread —
-  correct when the caller is an ordinary OS thread (every Phase 2/3 test
-  before this), wrong the instant the caller is a green thread running on
-  the only carrier that could ever drain the queue. With `LANG_NUM_CARRIERS=1`
-  and the default queue capacity (64), spawning 300 workers in a tight loop
-  from the top level hung forever. **Mitigated, not fixed**: the
-  process-wide scheduler raises its queue capacity by default (to 1,048,576,
-  unless an operator already set `LANG_GLOBAL_QUEUE_CAP`), which narrows the
-  window far past the scale this phase's own tests exercise but does not
-  close it. The real fix — teaching `rt_sched_spawn`'s backpressure wait to
-  park rather than block, the same treatment `Chan` got here — is scoped,
-  real, not-yet-started follow-up work inside `scheduler.c` itself.
+- **A real deadlock was found, not merely a risk, and is now FIXED.**
+  `rt_sched_spawn`'s own backpressure (`scheduler.c`'s `squeue_push`, when
+  the shared queue is full) used to be a genuine OS-level
+  `pthread_cond_wait` on the calling thread, unconditionally — correct when
+  the caller is an ordinary OS thread (every Phase 2/3 test before this),
+  wrong the instant the caller is a green thread running on the only
+  carrier that could ever drain the queue: that carrier is now blocked
+  waiting on itself, forever. With `LANG_NUM_CARRIERS=1` and the default
+  queue capacity (64), spawning 300 workers in a tight loop from the top
+  level hung forever. Initially shipped as a raised default
+  `LANG_GLOBAL_QUEUE_CAP` (1,048,576) that only narrowed the window; that
+  mitigation is now replaced with the real fix: `squeue_push` asks
+  `tls_current_green` (via a small `rt_sched_in_green_thread` accessor)
+  whether its caller is a green thread. If so, it parks the calling green
+  thread (`rt_sched_park(RT_GT_PARKED_QUEUE)`) instead of blocking the
+  carrier — the exact same FIFO-waiter-queue-then-park shape `Chan.send`/
+  `recv` already use (`rt.c`), reimplemented locally in `scheduler.c`
+  (`rt_squeue_waiter_t`/`sqwq_push`/`sqwq_drain`) rather than shared across
+  the rt.c/scheduler.c layering boundary, matching this codebase's existing
+  per-layer-own-copy convention (reactor.c's waiter map does the same).
+  `squeue_draw`, which already frees room and broadcasts the OS-thread
+  condvar, now also drains and `rt_sched_unpark`s every green-thread waiter
+  whenever it draws anything — the green-thread-safe equivalent of that
+  broadcast, not a weaker guarantee (every waiter re-checks its own
+  `while (q->len == q->cap)` on resume, the same reason the broadcast was
+  already correct for the condvar side). The raised default queue capacity
+  is kept as a second line of defense (harmless, and it also helps batching),
+  but the hang it used to merely narrow no longer exists: verified with
+  `runtime/spawn_backpressure_demo/main.src` (300 spawns from the top level,
+  `LANG_NUM_CARRIERS=1`, `LANG_GLOBAL_QUEUE_CAP=4` so the cap is hit almost
+  immediately rather than only past a million) — hangs forever on the
+  pre-fix code (confirmed directly, `timeout` kills it), completes and
+  prints the correct sum on the fixed code, 40/40 consecutive runs clean at
+  1/2/4 carriers, and 15/15 clean under ThreadSanitizer at both 1 and 2
+  carriers (`runtime/spawn_backpressure_test.sh`). Not extended to
+  `squeue_push`'s other call sites (`carrier_dispatch`'s own post-dispatch
+  self-requeue, `try_handoff`'s handoff pushes) — those run with
+  `tls_current_green` already cleared (no green thread is "currently
+  running" by the time they execute, so there is nothing for
+  `rt_sched_park` to park), so the same fix shape does not apply directly;
+  they still rely on the raised queue capacity alone. Reaching the
+  equivalent hang through one of those paths needs a carrier's own local
+  buffer plus the shared queue both saturated at once, far past anything
+  this phase's own tests or the demo above exercise — a real, scoped,
+  smaller residual than the one this fix closes, not silently ignored.
 - **A second, more serious bug was found by TSan and is NOT fixed: a
   genuine data race on `rt_stack_limit` between two carrier OS threads.**
   Found empirically while stress-testing real concurrent socket I/O (a
@@ -662,6 +694,120 @@ green thread 0 (`rt_run_program`), not on the raw OS thread, so a
   specifically because it is not reliable there yet) and
   `runtime/spawn_wiring_tsan.sh` for the reproduction and the TSan
   transcript this was built from.
+
+  **Follow-up investigation (separate session, after the above was
+  written): re-confirmed everything above, found one more real bug along
+  the way, found something genuinely strange that could not be resolved,
+  and still did not fix the race.** Summary of what changed:
+
+  - **Minimal repro, reconfirmed precisely**: `LANG_NUM_CARRIERS=2` against
+    the full 200-connection demo reproduces the "stack overflow" trap
+    reliably under plain `clang -O2`, no sanitizer at all — 15/15 and then
+    20/20 consecutive runs crashed in independent batches. The SAME program
+    built with `gcc -O2` did NOT crash in 5/5 runs. This compiler-dependence
+    is new, confirmed information: it is consistent with a genuine race
+    whose window happens to be wide enough to hit reliably under clang's
+    codegen and narrow enough to miss under gcc's on this host, and is not
+    itself evidence of a miscompilation in either compiler (a race's
+    reproduction rate is expected to be codegen- and timing-sensitive; nothing
+    about this project's probe or ctx-switch code differs between the two
+    builds). Did not find a smaller reproducer than the full demo at
+    `LANG_NUM_CARRIERS=2` — every attempt to shrink connection count traded
+    reliability for size without actually isolating the mechanism further,
+    so further work used the full demo directly rather than a weaker proxy
+    for it.
+  - **gdb, directly, on a stock (non-TSan) crash**: confirms the prior
+    account precisely. The trap fires inside `Conn.close`'s own
+    compiler-emitted probe, called from `client()` at the very first thing
+    it does after `read_until` returns — `rt_ctx_trampoline` ->
+    `green_trampoline` -> the compiled `client` function -> `Conn.close` ->
+    `rt_stack_probe_slow` -> `rt_trap`. Four real frames, the second of
+    which (`ctx_trampoline`'s own fake caller) is `0x0` — the normal,
+    expected end of a backtrace for a green thread that has barely started,
+    not a sign of a corrupted unwind. This is not a deep, genuine overflow
+    by any reading of the call chain.
+  - **The blocking-FFI monitor is independently reconfirmed NOT the cause**,
+    by direct experiment this session (not just by re-trusting the earlier
+    claim): built a variant with `rt_sched_start_blocking_monitor`'s call
+    site in `init_global_scheduler` (`rt.c`) commented out entirely, so the
+    monitor thread never starts and `try_handoff` is never reachable. The
+    same crash still reproduced 20/20. (A real, independent, GENUINE data
+    race WAS found and reproduced directly along the way, in
+    `try_handoff`/`carrier_main`'s unsynchronized read of `c->local_len` —
+    TSan flags it repeatedly, correctly, by the letter of the C/pthread
+    memory model: `carrier_main` reads `c->local_len`/`c->local` with no
+    lock, relying on the invariant that a carrier reported "stuck" in a
+    blocking FFI call cannot concurrently be running its own dispatch loop,
+    which `rt_wait_io`'s own undo/rearm dance, above, narrows but — per this
+    session's reading of it — does not provably close for every ordinary
+    `prim` call, only for `rt_wait_io` itself. This is flagged here as a
+    real, separate, smaller bug worth a future look, NOT fixed in this
+    session because the monitor-disabled experiment above proves it is not
+    what is crashing this demo, and this session's remaining time went to
+    the bigger question instead.)
+  - **TSan's own race reports, read closely, point at something odder than
+    "two carriers touched the same byte"**: re-running
+    `runtime/spawn_wiring_tsan.sh`'s net case repeatedly surfaces several
+    DIFFERENT race locations across runs (`rt_fiber_switch`, the
+    try_handoff/carrier_main pair above, and — once — a probe inside
+    `Conn.close` itself), not always the same one, consistent with the
+    underlying corruption being real and then cascading into whatever code
+    happens to touch adjacent memory next, rather than one single,
+    isolated race site. For the specific, previously-documented
+    `rt_fiber_switch` race: TSan reports "Location is TLS of thread T1" for
+    a write made by T1 and a read made by a DIFFERENT real thread T2 — and
+    this session confirmed, by printing `(void*)&rt_stack_limit` directly
+    (not merely its value) at every fiber switch, that T1's and T2's own
+    computed addresses for this `_Thread_local` variable ARE genuinely
+    different, stable, never-colliding addresses throughout a run, exactly
+    as `_Thread_local`/the `fs`-relative local-exec TLS model (confirmed by
+    disassembly: `mov r14, -32; cmp QWORD PTR fs:[r14], ...`, a fixed
+    compile-time offset from the thread pointer, not a dynamic
+    `__tls_get_addr` call that could be miscached) guarantees they must be.
+    So hypothesis (a) from this task's own framing — "it looks cross-thread
+    to TSan but is really one thread's own stale read" — does not fit what
+    TSan is reporting either, at least not in the simple form.
+  - **A genuinely strange, NOT-fully-explained observation, reported
+    honestly rather than resolved**: instrumenting the compiler-emitted
+    probe directly (patching the generated C, not just the runtime) to
+    print `pthread_self()` and `&rt_stack_limit` together at the exact
+    moment a probe fires, in the same run, found the SAME `pthread_self()`
+    value reported at two different moments paired with TWO DIFFERENT
+    `&rt_stack_limit` addresses — which should be impossible for a real,
+    live OS thread under this TLS model (the thread pointer, and therefore
+    this fixed offset from it, cannot change for a living thread; nothing
+    in this runtime ever touches `%fs`). Also found, separately, that the
+    actual stack pointer at the moment a probe fires sits almost exactly
+    `RT_STACK_SIZE` (1 MiB) below the `rt_stack_limit` value read at that
+    same instant — not a few-byte race-window discrepancy, a clean,
+    suspiciously round, one-slab-slot-sized one, which smells more like
+    "running on the wrong green thread's stack slot entirely" than "read a
+    value a few instructions stale." Neither of these was run down to a
+    root cause: they could be a genuine, deeper bug in the slab allocator
+    or the spawn/dispatch path that only manifests at this scale, OR an
+    artifact of the ad hoc `fprintf`-based instrumentation itself (stdio
+    locking and multi-threaded output ordering were not independently
+    verified trustworthy for this purpose, and a printf-based probe changes
+    timing, which matters for a timing-sensitive race). Reported here
+    precisely so the next person does not have to rediscover either
+    number, and does not mistake "I could not fully explain my own
+    instrumentation's output" for "I found the root cause."
+  - **Conclusion, stated plainly**: this session did NOT reach confidence
+    sufficient to change `rt_fiber_switch`, `rt_ctx_switch`,
+    `rt_stack_probe_slow`, or the slab allocator. Hypothesis (b) from this
+    task's own framing — a narrow surviving window where the same green
+    thread is briefly live on two carriers at once — remains the most
+    plausible shape given the ~1 MiB stack-slot-sized discrepancy above,
+    but no specific mechanism in the park/unpark CAS protocol or the
+    reactor's waiter map (both re-read in full this session; see their own
+    files) was found to actually permit that double-dispatch, and the
+    try_handoff race, while real, is independently ruled out as the cause.
+    The honest state of this bug, after two independent sessions of
+    investigation, is: real, reproducible, NOT a TSan tool artifact, NOT
+    the blocking-FFI monitor, NOT the try_handoff/carrier_main race, NOT a
+    simple TLS-address collision — and still unexplained at the mechanism
+    level. `LANG_NUM_CARRIERS=1` remains the only known-safe configuration
+    for real concurrent socket I/O.
 - The blocking-FFI handoff monitor (Phase 3, built but opt-in) is now
   actually turned on, unconditionally, for the one process-wide scheduler
   every compiled program uses — it was built with exactly this moment in
