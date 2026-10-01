@@ -209,76 +209,201 @@ preemption at the probe is both cheaper and available.
 
 ---
 
-## Scheduler queues: per-carrier arrays, work-stealing, not one shared queue
+## Scheduler queues: no stealing, one shared entry point, a tuned batch size
 
-Decided **2026-09-29**. Fills in what "work-stealing scheduler" in the order
-of work actually means, mechanically.
+Decided **2026-09-30**, superseding the 2026-09-29 design below in full.
+That design was never implemented; it was tested first, in simulation,
+against synthetic load shaped like this language's own stated target
+workloads (a server accepting connections and handing them to workers is
+*the* motivating program — see "Taking a payload out of a `match`" above).
+The simulation found the original design's load-balancing was being done
+entirely by work-stealing — a mechanism borrowed from Go and Cilk's own
+lineage, not something this design contributed — and that removing
+stealing (a deliberate choice, to find out what this design's own
+mechanism actually buys on its own) exposed a severe, structural failure
+that a different fix, not stealing, turned out to solve.
 
-**State: a byte per green thread, indexed by id, never scanned.** A green
-thread's state is an enum (`Runnable`, `Running`, `Parked-on-I/O`,
-`Parked-on-channel`, `Parked-on-timer`, `Dead`), not a single bit, so a byte
-table beats a hand-packed bitmap — simpler code, and the memory difference
-is noise: a million threads is 1 MB of state against 4–64 **GB** of stack
-for the same million threads, at the 4–64 KB slab-stack sizes already
-decided. This table is read and written in O(1) by id. It is never scanned
-to find work — see below for why that distinction matters more than the
-byte-vs-bit choice that prompted it.
+**State: a byte per green thread, indexed by id, never scanned.** Unchanged
+from the original reasoning: an enum state (`Runnable`, `Running`,
+`Parked-on-I/O`, `Parked-on-channel`, `Parked-on-timer`, `Dead`) read and
+written in O(1) by id, never scanned to find work.
 
-**Each carrier — the OS thread, one per core — owns its own run queue**,
-not each green thread and not one shared queue. A fixed-size array used as
-a ring buffer (Go's own is 256 slots), not a linked list: contiguous memory
-is cache-friendly where a linked list's scattered nodes are not, there is no
-per-node allocation, and — the part that matters most — stealing a chunk of
-another carrier's queue is a couple of compare-and-swaps on array indices,
-where a linked list would need a lock or a considerably harder lock-free
-list algorithm to do the same thing safely.
+**Sibling-to-sibling work-stealing is removed. Not tuned down — gone.** No
+carrier may ever reach into another carrier's queue, under any
+circumstances, batch or single-item. This is a firm design decision, not a
+temporary simplification.
 
-**One shared queue, with every carrier pulling from it, was Go's own first
-design (pre-1.1, 2012) and it did not scale**: one lock, every core
-fighting over the same cache line to pop the next goroutine, contention
-that gets *worse* as cores are added rather than better. Go 1.1 (2013)
-replaced it with per-carrier local queues and work-stealing, which is the
-design here. Independently, Java's `ForkJoinPool` (2011, built for the same
-kind of fine-grained parallel scheduling) landed on the identical
-local-queue-plus-stealing shape without copying Go — two unrelated,
-heavily-used systems converging on the same answer is strong evidence on
-its own. The reason a shared queue loses is not really about the words
-"push" versus "steal": a shared queue is *every* carrier touching one piece
-of memory on *every* dequeue, which is constant cross-core contention
-regardless of what the access pattern is called. A local queue is touched
-by its own carrier alone in the common case — zero contention — and only
-reached into from outside when a sibling is actually idle, which is rare by
-comparison.
+**Every spawn — local or external in origin — routes through one shared
+global queue.** This reverses "each carrier owns its own run queue, spawns
+land there directly." The reversal is load-bearing, not cosmetic. Once
+stealing was removed, local-first spawn routing meant a coordinator fanning
+out N tasks — the single most common concurrency pattern here, an accept
+loop handing connections to workers — had all N tasks stuck on the
+spawning carrier permanently, because nothing else could ever reach in to
+help. Measured: throughput completely flat regardless of core count (4 vs.
+64 cores gave zero difference). This held even when the spawned tasks later
+yielded for I/O: a *resumed* task gets redistributed fine through the
+global path, but its *first* dispatch is still gated on the same
+bottleneck, so yielding rescues fairness, never fan-out throughput.
+Routing every spawn through the shared queue instead recovered near-linear
+core-count scaling on the worst-hit synthetic benchmarks, matching a real
+work-stealing reference (Go) within single digits of a percent on most
+load shapes, and beating it on some.
 
-**Stealing takes a batch from the opposite end, not one item at a time.**
-Go steals half a victim's queue in one operation: a thief that had to steal
-again immediately for every single item would just move the contention
-problem rather than solve it. Taking the opposite end from where the owner
-works (the owner's own push/pop needs no synchronization at all; only the
-far end, touched by thieves, needs an atomic operation) is what makes the
-owner's own fast path free of stealing's cost.
+**The cost on ordinary, non-fan-out load is real but small** — a low
+single-digit percent throughput tax on naturally-distributed bursty load,
+and a load-balance cost when many tasks land at the same instant. Both
+traced to the claim batch size below, not to the routing decision itself,
+and both closed by shrinking that batch size.
 
-**A small global queue stays as a fallback, not a redesign.** Go did not
-eliminate its global queue in 1.1 — it demoted it from "the only queue" to
-the rare case: overflow when a local queue is full, and a way to stop one
-carrier's long local queue from starving a thread that just became
-runnable elsewhere. Same shape here.
+**Carriers still keep a small local buffer — a claimed batch of work, not
+a landing spot for new spawns.** A carrier that runs dry draws another
+batch from the shared queue.
 
-**A carrier-sized bitmap, not a green-thread-sized one, is where the
-bitmap instinct behind the byte-per-thread state table actually belongs.**
-A thief needs to find *which* sibling carrier has stealable work; with one
-bit per carrier (tens, at most — one per core), a bitmap scan is exactly
-the regime it is fast in, matching the real Linux O(1) scheduler's own
-technique (pre-2.6.23, before CFS replaced it): a bitmap over a *small*
-number of buckets, `find_first_bit` in O(1). The same technique over a
-million green threads instead of a handful of carriers is the mistake
-`select()` made and `epoll()` was built to fix: `select()` hands the kernel
-a bitmap and makes it scan the whole thing every call, cost scaling with
-*total* descriptors; `epoll()` hands back only what is actually ready, cost
-scaling with the *ready* count alone. Scanning a million-entry table on
-every scheduling tick would be exactly `select()`'s mistake, restated in a
-different subsystem — sized to carriers instead of threads, the same
-bitmap idea is simply the right tool.
+**The claim/batch size is the one parameter that actually matters. Call it
+`fuel_size`**: how much work a carrier draws from the shared queue each
+time it runs low, the same idea as topping off a tank rather than idling
+on fumes. Every draw takes `min(available, fuel_size)`, with **no minimum
+threshold** — even a single item is claimed immediately rather than
+waiting for a full batch to accumulate, which is what fixes a real
+starvation bug: a lone task arriving during otherwise-idle time must not
+wait for company that may never come. Smaller `fuel_size` won on
+throughput, load-balance, and latency simultaneously in every load shape
+tested, no tradeoff found in the tested range — the mechanism is
+monopolization, not per-claim overhead: a large batch lets whichever
+carrier draws first vacuum most of the remaining backlog once the batch
+size exceeds roughly `remaining backlog ÷ idle carriers`, starving every
+other carrier that was also about to look. **Caveat that must be resolved
+before picking a production default**: the simulation that found this
+charges zero cost per draw regardless of size, so it cannot see the real
+downside of tiny batches — an actual draw is a genuinely nonzero
+synchronized operation (an uncontended atomic is ~7ns; a contended one is
+110–180ns, the same cost cited above for refcounting). There is almost
+certainly a real floor below which shrinking `fuel_size` stops helping and
+starts hurting; the simulated result is a strong signal to tune from, not
+a validated number to ship.
+
+**The shared queue's own capacity does not matter, once it is at least
+`fuel_size`.** Proven mathematically, not just measured: a draw is capped
+at `fuel_size` independent of the queue's total capacity, and anything that
+overflowed is re-admitted the instant any draw frees room — so the visible
+queue plus the overflow queue always equal the true backlog, and capacity
+only moves the line between "visible" and "in overflow," never what a draw
+can take or when the next one happens. Confirmed across every load shape
+tested, including the one that actually matters for a deployed system: a
+live horizontal-scaling event, new carriers joining mid-run after a
+realistic autoscaler-reaction lag. Even when an undersized queue genuinely
+engages backpressure during that lag, recovery afterward was
+indistinguishable from a generously-sized one — undersizing cost zero real
+lost or delayed work. Pick any capacity `>= fuel_size`; it is a
+monitoring/signaling knob, not a functional one.
+
+**Both `fuel_size` and the shared queue's capacity must be
+runtime-configurable, not compiled-in constants.** No single `fuel_size`
+value won across every load shape tested, its real floor is unknown per
+the caveat above, and different deployments will reasonably want different
+backpressure-signaling capacities even though outcomes don't depend on the
+choice.
+
+**Resolved 2026-09-30: an idle carrier learns something landed in the
+shared queue via a reshuffled random permutation, not a fixed order.**
+The obvious candidate — notify the carrier that spawned a task, if it's
+idle — is moot under all-spawns-to-the-shared-queue routing, since there
+is usually no local spawn to react to. Simulation went through three
+attempts before landing on a safe one, and the failures are as informative
+as the fix:
+
+- **Wake the spawning carrier only** (`wake_owner`): provides *zero* active
+  notification for shared-queue arrivals — there is no owner to notify —
+  so it degenerates to relying entirely on a periodic idle-retry check.
+  Safe, but leaves real fairness on the table on ordinary traffic.
+- **A persistent circular pointer**, advanced by one on every arrival,
+  skipping non-idle carriers: fixed the fairness gap on ordinary traffic,
+  but failed badly and deterministically on a workload shaped like
+  sustained, per-task-cost-skewed but never queue-depth-skewed load, via
+  two separate, compounding bugs. **Bug one**: the fixed, predictable
+  sequence phase-locked onto whichever carrier it happened to be pointing
+  at whenever that workload's periodic arrivals recurred. **Bug two**: a
+  "who is actually idle" bookkeeping gap at startup — a carrier was marked
+  idle only *after* it tried and failed to find work, so at t=0, when
+  every carrier genuinely *is* idle, none of them were marked as such yet,
+  and the wake mechanism found nobody eligible until something else
+  (a periodic fallback check) eventually intervened — and when several
+  carriers' fallback checks landed on the same instant, a **fixed
+  tie-break order** among them handed the same carrier the first claim on
+  every run, every time. Not bad luck — the flag didn't reflect reality,
+  and the fallback path that covered for it had its own hidden bias.
+- **The fix has two independent parts, confirmed separately, not
+  bundled.** For bug one: a reshuffled random permutation — walk every
+  carrier exactly once per round in a random order, reshuffling fresh each
+  time the round completes. The completeness guarantee (everyone visited
+  once per round — nobody starved) survives; the fixed, guessable sequence
+  that let the lock-on happen does not, because no correlation formed in
+  one round can persist into the next round's different order. For bug
+  two, the direct, root-cause fix is simpler than it first looked:
+  **initialize every carrier's idle/sleeping state to true at startup**,
+  reflecting what is actually true (everyone genuinely is idle before
+  anything has run), instead of leaving it false until a carrier
+  discovers its own idleness the hard way. Verified directly: a diagnostic
+  counting exactly how often this startup gap is hit went from `=
+  num_carriers` (every single carrier, every run) to exactly `0` once this
+  was fixed. Randomizing the fallback path's own tie-break order also
+  works as a one-step-removed workaround for bug two and was tried first,
+  but it treats the symptom; fixing the initial state directly is the
+  smaller, more correct change and makes the tie-break randomization
+  unnecessary as a load-bearing fix (cheap to keep anyway, as
+  defense-in-depth, since it costs nothing).
+
+This is not a novel technique — it is the same principle real production
+schedulers already use at the analogous decision point. Go picks randomly,
+every time, when a P looks for a stealable victim or checks its shared
+queue, specifically to avoid a fixed order ever favouring the same core.
+Erlang/BEAM avoids the race a different way, by assigning new work
+round-robin up front rather than having schedulers race to claim from one
+shared queue, and correcting imbalance only via a slow periodic rebalance
+rather than a reactive one. The bug fixed here was a simulation forgetting
+to randomize at exactly the spot Go already knows to.
+
+**One honestly-disclosed, shared limitation, not unique to this design**: a
+workload where per-task cost varies dramatically without a corresponding
+change in queue length defeats *any* length-based scheduling signal — this
+design's, and, confirmed directly, Go's and Erlang's identically. No fix
+for this exists in any design tested; it is a real, open gap.
+
+<details>
+<summary>Superseded 2026-09-29 reasoning (per-carrier arrays, work-stealing) — kept for the record</summary>
+
+Each carrier — the OS thread, one per core — was to own its own run queue,
+a fixed-size array ring buffer (Go's own is 256 slots), not a linked list:
+contiguous memory is cache-friendly where a linked list's scattered nodes
+are not, there is no per-node allocation, and stealing a chunk of another
+carrier's queue is a couple of compare-and-swaps on array indices, where a
+linked list would need a lock or a considerably harder lock-free algorithm
+to do the same thing safely.
+
+One shared queue, with every carrier pulling from it, was Go's own first
+design (pre-1.1, 2012) and it did not scale: one lock, every core fighting
+over the same cache line, contention that gets worse as cores are added.
+Go 1.1 (2013) replaced it with per-carrier local queues and work-stealing.
+Java's `ForkJoinPool` (2011) landed on the identical shape independently.
+
+Stealing was to take a batch from the opposite end of the queue, not one
+item at a time, and a small global queue was to remain as a rare-case
+fallback (overflow when a local queue is full), not the primary path.
+
+A carrier-sized bitmap (one bit per core, not per green thread) was the
+proposed mechanism for a thief to find a stealable sibling — matching the
+Linux O(1) scheduler's pre-CFS technique, and deliberately avoiding
+`select()`'s mistake of scanning cost proportional to *total* entries
+rather than *ready* entries.
+
+This entire mechanism is removed per the decision above. Kept here because
+the underlying reasoning about arrays-vs-linked-lists and about scan cost
+scaling with population size is still correct in general — it was the
+per-carrier-ownership and stealing-as-load-balancer parts that didn't
+survive contact with simulation, not the data-structure reasoning.
+
+</details>
 
 ---
 
@@ -331,8 +456,13 @@ of it in C in 2012.
       `close`, and the move checker. A slot is 64 bits and the element type
       is known statically, so an int rides in the slot and a reference rides
       as its pointer.
+- [x] **Scheduler design** — decided and simulation-validated above
+      (2026-09-30): no stealing, single shared queue, self-service draw with
+      no minimum threshold, `fuel_size` tuning, configurable capacity. The
+      wake/notification mechanism is the one open item before this can move
+      to implementation — see Phase 2 below.
 - [ ] Context switch, slab stacks with probes
-- [ ] Scheduler, work stealing, probe-based preemption
+- [ ] Scheduler implementation, probe-based preemption
 - [ ] epoll reactor, park/unpark
 - [ ] Blocking-FFI handoff
 
@@ -342,23 +472,52 @@ and that exemption is exactly what would make its own refcount race. Rather
 than make one refcount atomic ahead of the general answer, a channel is never
 freed. A program creates few, so the leak is bounded by that count.
 
-## Order of work
+## Phases
 
-1. **Type system with ownership** — `moved` has to be expressible and checked.
-   Blocks everything else.
-2. OS threads + channels, to get the channel semantics right against a simple
-   scheduler.
-3. Context switch (asm, x86-64 then aarch64) + slab stack allocator + probes.
-4. Scheduler: per-carrier queues, work stealing, probe-based preemption --
-   see "Scheduler queues" above for the exact mechanism.
-5. epoll reactor, then park/unpark.
-6. Blocking-FFI handoff.
-7. kqueue.
+**Phase 0 — foundations. Done.**
+- Type system with ownership
+- OS threads + channels (`spawn`, `Chan<T>`, move checker)
+
+**Phase 1 — runtime primitives.**
+- Context switch (asm, x86-64 first, then aarch64)
+- Slab stack allocator with compiler-emitted probes (also the preemption
+  point — see "Stacks: fixed, but not limited" above)
+- Byte-per-thread state table
+
+**Phase 2 — the scheduler itself.**
+- Per-carrier local buffers (a claimed batch of work, not a spawn landing
+  spot)
+- Single shared queue; every spawn — local or external — routes through it
+- Self-service draw, no minimum threshold, `fuel_size` as a configurable
+  batch cap
+- Shared queue capacity as a separate configurable parameter (functionally
+  inert above `fuel_size`, kept for backpressure signaling)
+- No stealing anywhere
+- **Blocking on this phase, not yet designed**: the wake/notification
+  mechanism — how an idle carrier learns something landed in the shared
+  queue, now that there is usually no local spawn to react to. This needs
+  its own decision, not a default inherited from the now-moot
+  local-spawn-wake framing.
+- **Blocking on this phase, needs empirical tuning against real hardware,
+  not simulation**: a production default for `fuel_size`, given the
+  simulation that found "smaller wins" charges zero cost per draw and so
+  cannot see where the real floor is.
+
+**Phase 3 — I/O integration.**
+- epoll reactor
+- park/unpark, closing the lost-wakeup race against netpoll (the CAS state
+  machine flagged under "What this costs" above)
+- Blocking-FFI handoff (`enter_blocking`/`exit_blocking`, monitor thread,
+  compile-time warning on unannotated foreign calls)
+
+**Phase 4 — portability.**
+- aarch64 context switch
+- kqueue (macOS/BSD)
+- Windows: AFD readiness emulation only, never native IOCP (forces buffer
+  pinning into the memory model) — no timeline yet
 
 Deferred with reasons: **io_uring** (blocked by default in Docker *and*
-Podman, disabled on Google's production fleet, libuv reverted it), **Windows**
-(use AFD readiness emulation when it happens, never native IOCP — it forces
-buffer pinning into the memory model).
+Podman, disabled on Google's production fleet, libuv reverted it).
 
 ---
 

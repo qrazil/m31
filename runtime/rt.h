@@ -794,14 +794,13 @@ static inline int64_t rt_irem(int64_t a, int64_t b) {
  * pattern, not on the number, so none of them traps on "overflow"; only a
  * shift count outside 0..63 traps, because C leaves that undefined and the
  * hardware disagrees about it (x86 masks the count to 6 bits, so `1 << 64`
- * would quietly be 1).
+ * would quietly be 1). That bounds check branches on `n`, never on `a` --
+ * see rt_ishr below for why that distinction is load-bearing.
  *
  * Nothing here relies on signed behaviour C leaves open. Shifting a negative
  * value left is undefined, so the shift is done on uint64_t. Converting a
  * uint64_t above INT64_MAX back to int64_t is implementation-defined, so it
- * goes back by bit pattern, the way rt_i2f does. Shifting a negative value
- * right is implementation-defined too, so the sign extension is spelled out:
- * for a < 0, ~a is non-negative, and ~(~a >> n) is the arithmetic shift. */
+ * goes back by bit pattern, the way rt_i2f does. */
 static inline int64_t rt_u2i(uint64_t u) {
     int64_t n;
     __builtin_memcpy(&n, &u, sizeof n);
@@ -817,9 +816,38 @@ static inline int64_t rt_ishl(int64_t a, int64_t n) {
     return rt_u2i((uint64_t)a << n);
 }
 
+/* Shifting a negative value right is implementation-defined in C, so the
+ * sign extension has to be spelled out -- and it has to be spelled out
+ * without branching on the sign of `a`. `a < 0 ? ~(~a >> n) : a >> n` (the
+ * previous version of this function) is exactly such a branch: its taken
+ * direction is correlated with the value being shifted, which is a real
+ * timing side channel the moment this function is ever used on secret data
+ * (found in review while building this project's SSH crypto -- a language
+ * whose stdlib includes cryptographic primitives cannot have this in its
+ * runtime).
+ *
+ * The fix does the shift entirely in the unsigned domain, then ORs in the
+ * sign-extension bits computed arithmetically instead of selected by branch:
+ *   - `ua >> n` is a logical shift -- well-defined, no sign extension.
+ *   - `sign_mask` is all-ones if `a` was negative, all-zero otherwise,
+ *     computed as an unsigned subtraction (wraps by definition, no UB) on
+ *     the sign bit alone -- no comparison, no branch.
+ *   - the top `n` bits of that mask are what a logical shift is missing;
+ *     `(sign_mask << (63 - n)) << 1` computes exactly those bits without
+ *     ever shifting by 64, which would itself be UB at n = 0 if written as
+ *     the more obvious `sign_mask << (64 - n)`. Splitting one full-width
+ *     shift into two shifts of at most 63 sidesteps that entirely.
+ * The only branch left is the bounds check on `n` above, and `n` -- a shift
+ * count -- is structural (fixed by the algorithm: "rotate by 6", "shift by
+ * 26") in every real use, never itself secret data. */
 static inline int64_t rt_ishr(int64_t a, int64_t n) {
     if (n < 0 || n > 63) rt_trap("shift count out of range in >>");
-    return a < 0 ? ~(~a >> n) : a >> n;
+    uint64_t ua;
+    __builtin_memcpy(&ua, &a, sizeof ua);
+    uint64_t logical   = ua >> n;
+    uint64_t sign_mask = (uint64_t)0 - (ua >> 63);
+    uint64_t fill      = (sign_mask << (63 - n)) << 1;
+    return rt_u2i(logical | fill);
 }
 
 /* Wrapping arithmetic, for hashes and PRNGs, which are defined modulo 2^64.
