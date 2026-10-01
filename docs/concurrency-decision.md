@@ -566,9 +566,36 @@ Podman, disabled on Google's production fleet, libuv reverted it).
 ## Open
 
 - Channel syntax and typing — waits on the type system
-- Whether `spawn` takes a closure or a function plus arguments (closures are
-  not implemented yet, and closures plus refcounting is the most common source
-  of reference cycles)
+- **Decided 2026-10-01, deferred until it's real friction, not a capability
+  gap: `spawn` takes a named function plus explicit arguments, not a
+  closure.** This is not a workaround — anything a closure would capture can
+  be passed as an explicit argument instead, so it is exactly as capable,
+  just more typing at the call site. Closures stay deliberately unbuilt:
+  they are the most common source of reference cycles in a refcounted
+  language with no GC to collect them later, and that problem does not have
+  an answer yet. Separate from this, and lower-risk: an anonymous,
+  **non-capturing** function literal — reusing the existing
+  `fn name(params) { body }` syntax with the reserved name `_` (a compile
+  error to reference, not merely discouraged by convention the way
+  Python's `_` is), so a one-off function passed straight to `spawn` never
+  needs an invented name. This has nothing to do with closures — no
+  captured environment, no cycle risk — and is pure sugar: `fn _(x) {...}`
+  compiles to exactly what a top-level named function with a
+  compiler-generated name would. Safe to build whenever naming one-off
+  spawn workers becomes real friction; not needed for `spawn`/`Chan` to be
+  usable today.
+- **Deferred until it's real friction, not built speculatively: `select`
+  (wait on multiple channels/events, proceed with whichever is ready
+  first).** This is a genuine capability gap, not just ergonomics — unlike
+  the closure question above, `spawn`+`Chan` cannot fake it: watching N
+  channels by spawning N watcher threads leaks every losing watcher, since
+  the ones that do not win stay blocked forever. A real `select` needs the
+  same shape of mechanism the epoll reactor already has — register
+  interest in several things, get exactly one wakeup, cleanly withdraw
+  from the rest. Not needed for the immediate next goal (an HTTP server):
+  `http.serve`'s `timeout_ms:` and `net.src`'s own
+  `set_read_timeout`/`set_write_timeout` already solve per-connection
+  timeouts at the socket level, without needing general multiplexing.
 - Structured concurrency: does a spawning scope wait for its children? Loom
   says yes and it is a genuine improvement over Go's fire-and-forget
 - Cancellation. libdill's model — killing a thread makes every blocking call
