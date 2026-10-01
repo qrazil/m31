@@ -2,3 +2,4 @@ target/
 *.o
 *.out.bin
 .claude/
+__pycache__/
