@@ -34,6 +34,24 @@
 #include "sys_libc.c"
 #endif
 
+/* Phase 1 green-thread primitives (docs/concurrency-decision.md, "Phases"):
+ * the slab stack allocator and the per-thread state table. #included for the
+ * same reason the sys layer is, just above: the runtime stays one
+ * translation unit, so this is exercised by gates.sh's "runtime compiles
+ * clean" under every compiler and optimisation level it already checks
+ * rt.c with, with no extra build line to remember.
+ *
+ * The context switch itself (runtime/ctx_switch_x86_64.s) is NOT pulled in
+ * this way -- it is real assembly, not C, so it is a separate translation
+ * unit by necessity, linked only by whatever actually calls rt_ctx_switch.
+ * Nothing in rt.c does (see runtime/greenthread.h's rt_ctx_make and
+ * rt_fiber_switch, both `static inline` for exactly this reason), so every
+ * existing build line in this repository that links runtime/rt.c alone --
+ * which is all of them -- keeps working unmodified without ever linking the
+ * .s file it does not need. */
+#include "greenthread.h"
+#include "greenthread.c"
+
 void rc_inc(Obj *o) {
     if (o->rc == RC_IMMORTAL) return;
     o->rc++;
@@ -2475,6 +2493,46 @@ _Noreturn void rt_trap(const char *msg) {
     abort();
 }
 
+/* ---- green threads, Phase 1: the probe's slow path ----------------------
+ *
+ * See rt.h for the contract this keeps with src/emit_c.rs's emitted probe
+ * and docs/concurrency-decision.md for the design. The fast path (the
+ * comparison itself) is inline in every emitted function on purpose, so it
+ * costs one compare and one untaken branch there; everything that happens
+ * only when the probe actually fires lives here instead, out of line, the
+ * same reason rt_trap and rt_frozen_trap above are out of line.
+ *
+ * Thread-local, zero-initialised, so every OS thread -- including the
+ * process's own main thread, which never runs on a slab stack at all --
+ * starts with the probe permanently disabled (rt.h explains why 0 does
+ * that) until something explicitly opts a carrier in via rt_fiber_switch
+ * (runtime/greenthread.h). */
+_Thread_local uintptr_t rt_stack_limit = 0;
+
+void rt_stack_probe_slow(void) {
+    if (rt_stack_limit == RT_STACK_LIMIT_POISON) {
+        /* Phase 2 stub -- deliberately not implemented. The eventual design
+         * poisons rt_stack_limit to force a probe to fire as a voluntary
+         * yield point; yielding needs a scheduler to yield TO, and there is
+         * none yet (docs/concurrency-decision.md, "Phases", Phase 2).
+         *
+         * Nothing in Phase 1 ever writes RT_STACK_LIMIT_POISON into
+         * rt_stack_limit, so this branch should be unreachable today. It
+         * traps rather than silently returning: silently returning here
+         * would mean every subsequent call on this thread re-enters this
+         * same branch forever (poisoning does not un-poison itself), which
+         * is a worse failure than a clear trap naming exactly what is
+         * missing. TODO(Phase 2): replace this trap with the real
+         * park-and-yield, once there is a scheduler. The probe's own call
+         * site does not need to change when that happens. */
+        rt_trap("stack probe: preemption was requested, but no scheduler "
+                "exists yet (Phase 2, docs/concurrency-decision.md)");
+    }
+    /* Not poisoned, so the probe fired because the comparison was honestly
+     * true: the thread's stack pointer proxy really is below the lowest
+     * valid address of its stack. That is a genuine overflow. */
+    rt_trap("stack overflow");
+}
 
 /* ---- io primitives: lib/io.src, lib/fs.src ----------------------------- */
 /* Each is ONE sys-layer call with the layer's convention passed straight

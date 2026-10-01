@@ -749,6 +749,61 @@ __attribute__((cold)) _Noreturn void rt_trap(const char *msg);
  * aliased earlier. Immortal objects pass: nothing ever counts them. */
 void rt_check_unique(Obj *o);
 
+/* ---- green threads, Phase 1: the compiler-emitted stack probe ----------
+ *
+ * docs/concurrency-decision.md, "Stacks: fixed, but not limited" and
+ * "Phases" (Phase 1). Fixed-size stacks with no guard page -- the compiler
+ * emits a check instead, so a million green threads cost ~1000 VMAs instead
+ * of ~2 million. The rest of Phase 1 (the x86-64 context switch, the slab
+ * allocator, the per-thread state table) is internal plumbing with no
+ * reason to appear in a header included by emitted code, so it lives in
+ * runtime/greenthread.h instead; this probe is the one piece every emitted
+ * function must see.
+ *
+ * `rt_stack_limit` holds the lowest valid address of the stack belonging to
+ * whichever green thread is currently running on THIS carrier OS thread --
+ * thread-local because one OS thread runs one green thread's code at a
+ * time. src/emit_c.rs (emit_func) opens every emitted function with:
+ *
+ *     { int __rt_probe_local;
+ *       if ((uintptr_t)&__rt_probe_local < rt_stack_limit)
+ *           rt_stack_probe_slow();
+ *     }
+ *
+ * which is CHICKEN's own idiom (cited by the design doc): the address of a
+ * local variable stands in for the current stack pointer, cheaply and
+ * portably, without needing an intrinsic.
+ *
+ * A carrier not currently running a green thread on a slab stack -- which,
+ * as of Phase 1, is every program there is, since nothing yet routes
+ * `spawn` through this layer -- never sets this variable, so it keeps its
+ * default value of 0. An address is never 0, so the comparison is always
+ * false: the probe costs one compare and one untaken branch per call and
+ * changes no program's behaviour until something starts calling
+ * rt_fiber_switch (runtime/greenthread.h). */
+extern _Thread_local uintptr_t rt_stack_limit;
+
+/* The real design (docs/concurrency-decision.md, Gambit's technique cited
+ * there) POISONS rt_stack_limit to a value above every real address, so the
+ * very same probe that catches overflow also doubles as a voluntary
+ * preemption point: the next function call traps into here on purpose, not
+ * because the stack is actually exhausted. RT_STACK_LIMIT_POISON is that
+ * sentinel.
+ *
+ * Phase 1 never sets rt_stack_limit to this value -- there is no scheduler
+ * yet for a "preempted" thread to yield TO, so nothing in this phase has a
+ * reason to poison anything. The constant and the branch in
+ * rt_stack_probe_slow exist now so Phase 2 can start poisoning without the
+ * probe's own call site in emit_c.rs ever needing to change again. */
+#define RT_STACK_LIMIT_POISON (~(uintptr_t)0)
+
+/* Called when the probe fires: either rt_stack_limit was poisoned (see
+ * above -- not reachable in Phase 1) or the thread genuinely ran off the
+ * end of its stack. Phase 1 only has to handle the second case, and it does
+ * what every other runtime check in this file does: rt_trap, cleanly, with
+ * a clear message. Defined in rt.c. */
+void rt_stack_probe_slow(void);
+
 /* Checked arithmetic. int is 64-bit and overflow TRAPS -- docs/ir-v0.md §3.
  * The operators never wrap; wrapping is a separately named method
  * (`a.wrapping_add(b)`, below), so a wrap is always visible in the source.

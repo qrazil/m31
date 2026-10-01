@@ -1,0 +1,154 @@
+/* Phase 1 green-thread primitives: the slab stack allocator (Part 2) and the
+ * byte-per-thread state table (Part 4). See runtime/greenthread.h for the
+ * declarations and the full design rationale, and
+ * docs/concurrency-decision.md for the decision these implement.
+ *
+ * #included by rt.c, never compiled on its own -- the contract is in
+ * greenthread.h, the same convention runtime/sys_libc.c and
+ * runtime/sys_linux.c already use for sys.h.
+ *
+ * rt_ctx_entry_returned also lives here rather than in the .s file: it is
+ * ordinary C (just a trap), and keeping it here means ctx_switch_x86_64.s
+ * stays nothing but the two things that genuinely have to be assembly.
+ */
+
+#include <sys/mman.h>
+
+/* ========================================================================
+ * Part 1 (the one piece of it that is plain C) -- what happens if a green
+ * thread's entry function returns.
+ * ====================================================================== */
+
+_Noreturn void rt_ctx_entry_returned(void) {
+    rt_trap("a green thread's entry function returned, which Phase 1 has no "
+            "scheduler to resume into (docs/concurrency-decision.md, "
+            "\"Phases\")");
+}
+
+/* ========================================================================
+ * Part 2 -- slab stack allocator
+ * ====================================================================== */
+
+/* One slab: a single 64 MiB mmap holding RT_SLAB_STACKS fixed-size stacks,
+ * plus a free list of which indices within it are not currently handed out.
+ *
+ * The free list is a plain array used as a LIFO stack of free indices
+ * (free_idx[0 .. free_top) are the free ones) rather than anything
+ * intrusive written into the stack memory itself -- this is not a hot path
+ * yet, so the simplest correct structure wins over anything cleverer. */
+struct rt_slab {
+    void *mem; /* mmap base, RT_SLAB_BYTES long */
+    struct rt_slab *next;
+    uint32_t free_idx[RT_SLAB_STACKS];
+    uint32_t free_top; /* free_idx[0 .. free_top) are free */
+};
+
+static pthread_mutex_t g_slab_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Newest-first. A brand new slab is entirely free, so prepending it and
+ * starting the next search there is what keeps allocation fast in the
+ * common case; a slab that has filled up simply gets walked past. Freed
+ * stacks go back to whichever slab they came from (rt_stack_t remembers),
+ * never anywhere else, so an old, partly-freed slab further down the list
+ * still gets reused -- just found by a slightly longer walk. Phase 1 is
+ * explicit about not optimising this walk; see greenthread.h. */
+static rt_slab_t *g_slabs = NULL;
+
+static rt_slab_t *rt_slab_new(void) {
+    void *mem = mmap(NULL, RT_SLAB_BYTES, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mem == MAP_FAILED) {
+        rt_trap("out of memory: mmap failed allocating a 64 MiB stack slab");
+    }
+    rt_slab_t *slab = malloc(sizeof *slab);
+    if (slab == NULL) {
+        munmap(mem, RT_SLAB_BYTES);
+        rt_trap("out of memory: could not allocate slab bookkeeping");
+    }
+    slab->mem = mem;
+    slab->next = NULL;
+    for (uint32_t i = 0; i < RT_SLAB_STACKS; i++) {
+        slab->free_idx[i] = i;
+    }
+    slab->free_top = RT_SLAB_STACKS;
+    return slab;
+}
+
+rt_stack_t rt_stack_alloc(void) {
+    pthread_mutex_lock(&g_slab_lock);
+
+    rt_slab_t *s = g_slabs;
+    while (s != NULL && s->free_top == 0) {
+        s = s->next;
+    }
+    if (s == NULL) {
+        /* Every existing slab (if any) is full -- the "exhausted slab"
+         * case. Allocate another; this is what lets the allocator scale to
+         * the millions-of-green-threads target instead of hitting a ceiling
+         * at 1024. */
+        s = rt_slab_new();
+        s->next = g_slabs;
+        g_slabs = s;
+    }
+
+    uint32_t idx = s->free_idx[--s->free_top];
+
+    pthread_mutex_unlock(&g_slab_lock);
+
+    rt_stack_t out;
+    out.base = (char *)s->mem + (size_t)idx * RT_STACK_SIZE;
+    out.top = (char *)out.base + RT_STACK_SIZE;
+    out.slab = s;
+    out.index = idx;
+    return out;
+}
+
+void rt_stack_free(rt_stack_t *s) {
+    pthread_mutex_lock(&g_slab_lock);
+    rt_slab_t *slab = s->slab;
+    slab->free_idx[slab->free_top++] = s->index;
+    pthread_mutex_unlock(&g_slab_lock);
+}
+
+/* ========================================================================
+ * Part 4 -- byte-per-thread state table
+ * ====================================================================== */
+
+static pthread_mutex_t g_gtstate_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint8_t *g_gtstate = NULL;
+static size_t g_gtstate_cap = 0;
+
+/* Grow the table so index `id` is valid, if it is not already. Freshly
+ * grown bytes start at RT_GT_RUNNABLE (0), matching the enum's own
+ * zero-value, so a green thread id that nothing has written yet reads back
+ * as runnable rather than an arbitrary byte. */
+static void rt_gtstate_ensure(uint32_t id) {
+    if ((size_t)id < g_gtstate_cap) {
+        return;
+    }
+    pthread_mutex_lock(&g_gtstate_lock);
+    if ((size_t)id >= g_gtstate_cap) {
+        size_t new_cap = g_gtstate_cap == 0 ? 1024 : g_gtstate_cap * 2;
+        while (new_cap <= (size_t)id) {
+            new_cap *= 2;
+        }
+        uint8_t *grown = realloc(g_gtstate, new_cap);
+        if (grown == NULL) {
+            pthread_mutex_unlock(&g_gtstate_lock);
+            rt_trap("out of memory: could not grow the green-thread state table");
+        }
+        memset(grown + g_gtstate_cap, RT_GT_RUNNABLE, new_cap - g_gtstate_cap);
+        g_gtstate = grown;
+        g_gtstate_cap = new_cap;
+    }
+    pthread_mutex_unlock(&g_gtstate_lock);
+}
+
+void rt_gtstate_set(uint32_t id, rt_green_state_t s) {
+    rt_gtstate_ensure(id);
+    g_gtstate[id] = (uint8_t)s;
+}
+
+rt_green_state_t rt_gtstate_get(uint32_t id) {
+    rt_gtstate_ensure(id);
+    return (rt_green_state_t)g_gtstate[id];
+}

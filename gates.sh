@@ -92,6 +92,14 @@ run "runtime compiles clean" bash -c '
 # same situation, which no corpus program asks directly.
 run "sys layer, every backend" bash runtime/sys_test.sh
 
+# Phase 1 of docs/concurrency-decision.md: the x86-64 context switch, the
+# slab stack allocator, the compiler-emitted probe (both sides: the runtime
+# half here, and the exact text src/emit_c.rs emits), and the per-thread
+# state table. Every compiler/opt combo this file already uses elsewhere,
+# plus one dedicated ASan+UBSan build -- see runtime/greenthread_test.c's
+# header for what is and is not reachable from a pure-C test at this phase.
+run "green threads, Phase 1" bash runtime/greenthread_test.sh
+
 # The formatter must not change what a program means, and must reach a fixed
 # point. Both are checked against every corpus program rather than asserted:
 # a formatter that quietly alters a program is worse than no formatter.
