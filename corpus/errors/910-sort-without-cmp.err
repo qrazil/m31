@@ -1,4 +1,4 @@
-corpus/errors/910-sort-without-cmp.src:9:3: `sort` orders `int`, `float` and `str`, and any type that declares `int Thing.cmp(Thing other)` -- the same method `<` uses; `Thing` declares no `cmp`
+corpus/errors/910-sort-without-cmp.m31:9:3: `sort` orders `int`, `float` and `str`, and any type that declares `int Thing.cmp(Thing other)` -- the same method `<` uses; `Thing` declares no `cmp`
   |
 9 | xs.sort();
   |   ^

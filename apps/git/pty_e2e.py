@@ -17,7 +17,7 @@ Every `ok`/`FAIL` line this prints is one check; the exit code is the number
 of failures, so `test_gitui.sh` can both grep for `FAIL` and trust `$?`. This
 is the "drive it under a pty against a disposable fixture, oracle-checked"
 half of the client's test obligations (`apps/git/design.md`, "how you'll know
-you're done and correct"); `t_gitclient.src` and `t_gitclient_ops.src` cover
+you're done and correct"); `t_gitclient.m31` and `t_gitclient_ops.m31` cover
 the unit- and oracle-level checks a pty adds nothing to.
 """
 import os
@@ -252,7 +252,7 @@ def main():
     # --- committing: a real $EDITOR launch (a stand-in script), finish -------
     #
     # `e` now actually runs `os.run([$EDITOR, COMMIT_EDITMSG])` and waits for
-    # it -- see `gitclient.src`'s own header, "launching `$EDITOR`, and the
+    # it -- see `gitclient.m31`'s own header, "launching `$EDITOR`, and the
     # terminal handoff that takes" -- so this drives that for real, with a
     # stand-in editor standing in for `$EDITOR` exactly as
     # `apps/git/test_gitui.sh`'s own non-pty checks do for every `os.run`

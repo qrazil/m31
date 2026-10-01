@@ -1,4 +1,4 @@
-corpus/errors/844-const-in-destructor-callee.src:10:5: `const` cannot hold `R`: it owns a resource (it has a destructor); a constant can neither freeze a resource nor copy one, so bind it without `const`
+corpus/errors/844-const-in-destructor-callee.m31:10:5: `const` cannot hold `R`: it owns a resource (it has a destructor); a constant can neither freeze a resource nor copy one, so bind it without `const`
    |
 10 |     const R seen = r;
    |     ^

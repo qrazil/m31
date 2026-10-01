@@ -1,4 +1,4 @@
-corpus/errors/011-unknown-field.src:6:8: type `Point` has no field `y`
+corpus/errors/011-unknown-field.m31:6:8: type `Point` has no field `y`
   |
 6 | print(p.y);
   |        ^

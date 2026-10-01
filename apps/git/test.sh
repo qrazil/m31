@@ -16,7 +16,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
-LANGC=./target/debug/langc
+LANGC=./target/debug/m31c
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 pass=0
@@ -27,7 +27,7 @@ bad()  { printf '\033[31mFAIL\033[0m %s\n' "$1"; shift; printf '%s\n' "$@" | sed
 
 build() {
     local name=$1
-    if ! "$LANGC" --emit-c "apps/git/$name.src" -o "$WORK/$name.c" 2>"$WORK/$name.diag"; then
+    if ! "$LANGC" --emit-c "apps/git/$name.m31" -o "$WORK/$name.c" 2>"$WORK/$name.diag"; then
         bad "compile $name" "$(head -5 "$WORK/$name.diag")"
         return 1
     fi
@@ -44,10 +44,10 @@ build() {
 # not look at `apps/`, so this source would drift out of the house layout with
 # nothing to notice. The same check, here, over this directory.
 
-if out=$(for f in apps/git/*.src; do "$LANGC" fmt --check "$f" || echo "$f"; done 2>&1) && [ -z "$out" ]; then
+if out=$(for f in apps/git/*.m31; do "$LANGC" fmt --check "$f" || echo "$f"; done 2>&1) && [ -z "$out" ]; then
     note "source is formatted"
 else
-    bad "source is not formatted (run: langc fmt apps/git/<file>.src)" "$out"
+    bad "source is not formatted (run: m31c fmt apps/git/<file>.m31)" "$out"
 fi
 
 # --- SHA-1 --------------------------------------------------------------------
@@ -82,7 +82,7 @@ if build t_inflate; then
     grep '^inflate:' "$WORK/z.time" | sed 's/^/     /'
 fi
 
-# --- inflate from a mid-file offset, isolated from apps/git/pack.src -----------
+# --- inflate from a mid-file offset, isolated from apps/git/pack.m31 -----------
 
 if build t_inflate_at; then
     python3 apps/git/oracle_inflate_at.py "$WORK/za" >"$WORK/za.want"
@@ -173,7 +173,7 @@ with a body'
 # entirely loose, and everything from here on runs against one that is
 # entirely packed instead, the same "walk every object, compare canonically"
 # and "every command, compared to real git" discipline, unchanged, applied to
-# the other storage format `object.src`/`pack.src` now read transparently.
+# the other storage format `object.m31`/`pack.m31` now read transparently.
 #
 # 30 commits touching two files with a shared line of boilerplate text is
 # little enough to build in a fraction of a second and similar enough that
@@ -182,7 +182,7 @@ with a body'
 # --no-delta-base-offset` (repack does not honour `pack.deltaBaseOffset` the
 # same way; asking `pack-objects` directly does) is real `OBJ_REF_DELTA`
 # instead, still against bases in the one pack, which is what proves the
-# in-`.idx` fast path in `pack.src`'s own `resolve_offset` and not only its
+# in-`.idx` fast path in `pack.m31`'s own `resolve_offset` and not only its
 # cross-pack/loose fallback. The new pack has to be written *before* the old
 # one is removed -- `pack-objects` reads the objects it is packing from
 # wherever they already are.

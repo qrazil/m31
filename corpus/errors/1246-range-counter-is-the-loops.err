@@ -1,4 +1,4 @@
-corpus/errors/1246-range-counter-is-the-loops.src:5:5: `i` is the loop's variable and cannot be assigned: the loop binds it afresh each time round, and assigning it could not change where the loop goes -- use another local
+corpus/errors/1246-range-counter-is-the-loops.m31:5:5: `i` is the loop's variable and cannot be assigned: the loop binds it afresh each time round, and assigning it could not change where the loop goes -- use another local
   |
 5 |     i = 9;
   |     ^

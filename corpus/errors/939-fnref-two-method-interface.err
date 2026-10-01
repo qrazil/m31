@@ -1,4 +1,4 @@
-corpus/errors/939-fnref-two-method-interface.src:6:10: `Both` declares 2 methods, so no function can satisfy it: a function is one operation, and `by_x` could only ever supply one of them -- declare a type with all of them and pass one of those
+corpus/errors/939-fnref-two-method-interface.m31:6:10: `Both` declares 2 methods, so no function can satisfy it: a function is one operation, and `by_x` could only ever supply one of them -- declare a type with all of them and pass one of those
   |
 6 | Both b = by_x;
   |          ^

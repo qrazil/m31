@@ -1,4 +1,4 @@
-corpus/errors/209-wrapping-arg-type.src:3:26: type mismatch: expected Hash, found int
+corpus/errors/209-wrapping-arg-type.m31:3:26: type mismatch: expected Hash, found int
   |
 3 | print(int(h.wrapping_mul(3)));
   |                          ^

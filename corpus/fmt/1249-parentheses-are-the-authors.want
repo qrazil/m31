@@ -1,4 +1,4 @@
-// A fixture for `langc fmt`: parentheses the author wrote are kept.
+// A fixture for `m31c fmt`: parentheses the author wrote are kept.
 //
 // They do not survive into the AST -- `(a && b) || c` and `a && b || c` are
 // one tree -- so the formatter is told where they were, the way it is told

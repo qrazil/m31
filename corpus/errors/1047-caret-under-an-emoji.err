@@ -1,4 +1,4 @@
-corpus/errors/1047-caret-under-an-emoji.src:6:15: unknown variable `nope`
+corpus/errors/1047-caret-under-an-emoji.m31:6:15: unknown variable `nope`
   |
 6 | print("🙂👍🏽" + nope);
   |                ^

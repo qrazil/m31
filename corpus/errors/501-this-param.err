@@ -1,4 +1,4 @@
-corpus/errors/501-this-param.src:3:15: `this` is a keyword -- it names a method's receiver -- and cannot be used as a name
+corpus/errors/501-this-param.m31:3:15: `this` is a keyword -- it names a method's receiver -- and cannot be used as a name
   |
 3 | int twice(int this) {
   |               ^

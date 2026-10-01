@@ -1,0 +1,420 @@
+import io;
+import fs;
+import random;
+
+// `io.File`: open with a mode, read(n), read_until, read_all, write, close --
+// over descriptors, with the buffering in lib/io.m31. Everything is created
+// under a directory named from the random source, so two runs of the corpus
+// at once cannot touch each other's files, and it is removed at the end.
+str dir = "/tmp/m31-corpus-io-file-" + random.system().hex(8);
+match (fs.mkdir(dir)) {
+    case Ok(bool b): {
+        print("dir made");
+    }
+    case Err(io.Error e): {
+        print(e.to_str());
+    }
+}
+
+str say(io.Error e) {
+    return e.to_str();
+}
+
+// --- binary data: NUL, 255, and a byte sequence that is not UTF-8 ----------
+// 0xC3 0x28 is a two-byte lead followed by something that is not a
+// continuation byte: invalid UTF-8.
+str bin = dir + "/bin";
+bytes data = [0, 1, 255, 195, 40, 0, 10];
+match (io.write_bytes(bin, data)) {
+    case Ok(int n): {
+        print(n);  // 7
+    }
+    case Err(io.Error e): {
+        print(say(e));
+    }
+}
+match (io.read_bytes(bin)) {
+    case Ok(bytes got): {
+        print(got == data);  // true -- every byte back, the NULs too
+        print(got.hex());  // 0001ffc328000a
+    }
+    case Err(io.Error e): {
+        print(say(e));
+    }
+}
+// As text it is refused, by name: read does not hand back a str that is not
+// one.
+match (io.read(bin)) {
+    case Ok(str s): {
+        print(s);
+    }
+    case Err(io.Error e): {
+        print(say(e));  // not valid UTF-8 text
+    }
+}
+
+// --- modes ------------------------------------------------------------------
+str notes = dir + "/notes";
+match (io.open(notes, mode: io.Mode.Write)) {
+    case Ok(io.File f): {
+        bytes one = "one\ntwo\n".to_bytes();
+        match (f.write(one)) {
+            case Ok(int n): {
+                print(n);  // 8
+            }
+            case Err(io.Error e): {
+                print(say(e));
+            }
+        }
+        match (f.close()) {
+            case Ok(bool b): {
+                print("closed");
+            }
+            case Err(io.Error e): {
+                print(say(e));
+            }
+        }
+        // A second close is not an error.
+        match (f.close()) {
+            case Ok(bool b): {
+                print("closed again");
+            }
+            case Err(io.Error e): {
+                print(say(e));
+            }
+        }
+    }
+    case Err(io.Error e): {
+        print(say(e));
+    }
+}
+match (io.open(notes, mode: io.Mode.Append)) {
+    case Ok(io.File f): {
+        bytes more = "three".to_bytes();
+        match (f.write(more)) {
+            case Ok(int n): {
+                print(n);  // 5
+            }
+            case Err(io.Error e): {
+                print(say(e));
+            }
+        }
+        Result<bool, io.Error> c = f.close();
+    }
+    case Err(io.Error e): {
+        print(say(e));
+    }
+}
+// Reading: read(n) hands out at most n, read_until stops after the
+// delimiter, and the last piece has none because the file ended first.
+match (io.open(notes)) {
+    case Ok(io.File f): {
+        bytes nl = "\n".to_bytes();
+        match (f.read(2)) {
+            case Ok(bytes b): {
+                print(b.utf8().or("?"));  // on
+            }
+            case Err(io.Error e): {
+                print(say(e));
+            }
+        }
+        match (f.read_until(nl, 100)) {
+            case Ok(bytes b): {
+                print(b.hex());  // 650a -- "e\n", the rest of the line and its newline
+            }
+            case Err(io.Error e): {
+                print(say(e));
+            }
+        }
+        // A limit smaller than the line: exactly `limit` bytes, no newline.
+        match (f.read_until(nl, 2)) {
+            case Ok(bytes b): {
+                print(b.utf8().or("?"));  // tw
+            }
+            case Err(io.Error e): {
+                print(say(e));
+            }
+        }
+        match (f.read_until(nl, 100)) {
+            case Ok(bytes b): {
+                print(b.hex());  // 6f0a -- "o\n"
+            }
+            case Err(io.Error e): {
+                print(say(e));
+            }
+        }
+        match (f.read_until(nl, 100)) {
+            case Ok(bytes b): {
+                print(b.utf8().or("?"));  // three -- shorter than the limit, no newline: the end
+            }
+            case Err(io.Error e): {
+                print(say(e));
+            }
+        }
+        match (f.read(10)) {
+            case Ok(bytes b): {
+                print(b.size());  // 0 -- at the end, and only there, read is empty
+            }
+            case Err(io.Error e): {
+                print(say(e));
+            }
+        }
+        Result<bool, io.Error> c = f.close();
+    }
+    case Err(io.Error e): {
+        print(say(e));
+    }
+}
+// Write empties the file first.
+match (io.open(notes, mode: io.Mode.Write)) {
+    case Ok(io.File f): {
+        Result<bool, io.Error> c = f.close();
+    }
+    case Err(io.Error e): {
+        print(say(e));
+    }
+}
+match (io.read(notes)) {
+    case Ok(str s): {
+        print(s.size());  // 0
+    }
+    case Err(io.Error e): {
+        print(say(e));
+    }
+}
+
+// --- larger than the 64 KiB buffer -------------------------------------------
+// 300 lines of 999 x's and a newline: 300,000 bytes, and line ends that fall
+// across buffer boundaries (65536 is not a multiple of 1000).
+str line = "x".repeat(999) + "\n";
+str body = line.repeat(300);
+str big = dir + "/big";
+match (io.write(big, body)) {
+    case Ok(int n): {
+        print(n);  // 300000
+    }
+    case Err(io.Error e): {
+        print(say(e));
+    }
+}
+match (io.read(big)) {
+    case Ok(str s): {
+        print(s == body);  // true
+    }
+    case Err(io.Error e): {
+        print(say(e));
+    }
+}
+match (io.open(big)) {
+    case Ok(io.File f): {
+        bytes nl = "\n".to_bytes();
+        int lines = 0;
+        int good = 0;
+        bool more = true;
+        while (more) {
+            match (f.read_until(nl, 5000)) {
+                case Ok(bytes b): {
+                    if (b.size() == 0) {
+                        more = false;
+                    } else {
+                        lines = lines + 1;
+                        if (b.size() == 1000 && b[999] == 10 && b[0] == 120) {
+                            good = good + 1;
+                        }
+                    }
+                }
+                case Err(io.Error e): {
+                    print(say(e));
+                    more = false;
+                }
+            }
+        }
+        print(lines);  // 300
+        print(good);  // 300
+        Result<bool, io.Error> c = f.close();
+    }
+    case Err(io.Error e): {
+        print(say(e));
+    }
+}
+// read(n) in pieces: never more than asked, and the pieces add up.
+match (io.open(big)) {
+    case Ok(io.File f): {
+        int total = 0;
+        int widest = 0;
+        bool more = true;
+        while (more) {
+            match (f.read(40000)) {
+                case Ok(bytes b): {
+                    if (b.size() == 0) {
+                        more = false;
+                    }
+                    if (b.size() > widest) {
+                        widest = b.size();
+                    }
+                    total = total + b.size();
+                }
+                case Err(io.Error e): {
+                    print(say(e));
+                    more = false;
+                }
+            }
+        }
+        print(total);  // 300000
+        print(widest <= 40000);  // true
+        Result<bool, io.Error> c = f.close();
+    }
+    case Err(io.Error e): {
+        print(say(e));
+    }
+}
+// read_all after a partial read: the buffered part first, then the rest.
+match (io.open(big)) {
+    case Ok(io.File f): {
+        match (f.read(10)) {
+            case Ok(bytes b): {
+                print(b.size());  // 10
+            }
+            case Err(io.Error e): {
+                print(say(e));
+            }
+        }
+        match (f.read_all()) {
+            case Ok(bytes b): {
+                print(b.size());  // 299990
+                print(b[989]);  // 10 -- the first newline, 999 - 10 bytes in
+            }
+            case Err(io.Error e): {
+                print(say(e));
+            }
+        }
+        Result<bool, io.Error> c = f.close();
+    }
+    case Err(io.Error e): {
+        print(say(e));
+    }
+}
+
+// --- failures ----------------------------------------------------------------
+match (io.open(dir + "/missing")) {
+    case Ok(io.File f): {
+        print("opened?");
+    }
+    case Err(io.Error e): {
+        print(say(e));  // no such file
+    }
+}
+// A directory opens for reading on Linux; it is reading it that fails.
+match (io.read_bytes(dir)) {
+    case Ok(bytes b): {
+        print("read a directory?");
+    }
+    case Err(io.Error e): {
+        print(say(e));  // is a directory
+    }
+}
+// Opening one for writing fails at once.
+match (io.open(dir, mode: io.Mode.Write)) {
+    case Ok(io.File f): {
+        print("opened?");
+    }
+    case Err(io.Error e): {
+        print(say(e));  // is a directory
+    }
+}
+// A path through a file: ENOTDIR.
+match (io.open(big + "/x")) {
+    case Ok(io.File f): {
+        print("opened?");
+    }
+    case Err(io.Error e): {
+        print(say(e));  // not a directory
+    }
+}
+// A file with no permission bits at all. Refused -- unless this runs as
+// root, which reads anything; the test checks the answer AGREES with the
+// user it runs as, read from /proc/self/status (a file whose size is
+// reported as 0, so this also reads past a wrong size hint).
+str locked = dir + "/locked";
+match (io.open(locked, mode: io.Mode.Write, perm: 0)) {
+    case Ok(io.File f): {
+        Result<bool, io.Error> c = f.close();
+    }
+    case Err(io.Error e): {
+        print(say(e));
+    }
+}
+bool root = false;
+match (io.read("/proc/self/status")) {
+    case Ok(str status): {
+        for (str l in status.split("\n")) {
+            if (l.starts_with("Uid:")) {
+                root = l.substr(4, l.size()).trim().starts_with("0\t");
+            }
+        }
+    }
+    case Err(io.Error e): {
+        print(say(e));
+    }
+}
+match (io.read(locked)) {
+    case Ok(str s): {
+        print(root);  // true, if it could be read at all
+    }
+    case Err(io.Error e): {
+        match (e) {
+            case PermissionDenied: {
+                print(!root);  // true
+            }
+            case NotFound: {
+                print("missing");
+            }
+            case IsDirectory: {
+                print("directory");
+            }
+            case NotADirectory: {
+                print("not a directory");
+            }
+            case AlreadyExists: {
+                print("exists");
+            }
+            case NotEmpty: {
+                print("not empty");
+            }
+            case InvalidUtf8: {
+                print("not text");
+            }
+            case Other(int code): {
+                print(code);
+            }
+        }
+    }
+}
+
+// --- the standard streams -------------------------------------------------------
+// stdout() writes through the same descriptor print uses, and print's buffer
+// is flushed first, so the lines come out in the order they were written.
+print("before");
+io.File out = io.stdout();
+bytes mid = "middle\n".to_bytes();
+match (out.write(mid)) {
+    case Ok(int n): {
+        print(n);  // 7
+    }
+    case Err(io.Error e): {
+        print(say(e));
+    }
+}
+// Closing it leaves descriptor 1 open: print still works.
+Result<bool, io.Error> oc = out.close();
+print("after");
+
+match (fs.rmtree(dir, dir)) {
+    case Ok(bool b): {
+        print("cleaned up");
+    }
+    case Err(io.Error e): {
+        print(say(e));
+    }
+}
+print(fs.exists(dir));  // false

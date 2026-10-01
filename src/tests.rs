@@ -450,7 +450,7 @@ fn str_lits(src: &str) -> Vec<String> {
 #[test]
 fn formatting_keeps_every_literal_byte_for_byte() {
     // Each character three ways: raw where a raw one can stand, as `\u{}`,
-    // and as `\x` where it is ASCII. `langc fmt` must hand back a file that
+    // and as `\x` where it is ASCII. `m31c fmt` must hand back a file that
     // lexes to the same strings -- it used to write `\u{1}`, Rust's escape,
     // which this lexer refuses.
     let mut src = String::new();
@@ -1593,7 +1593,7 @@ fn a_float_conversion_without_the_module_is_a_named_compiler_bug() {
 
 // ---- code points ----------------------------------------------------------
 
-/// `chars` and `from_chars` are lowered to calls into lib/__text.src, so the
+/// `chars` and `from_chars` are lowered to calls into lib/__text.m31, so the
 /// module using either through the method spelling would call itself.
 #[test]
 fn the_text_module_cannot_use_its_own_conversions() {
@@ -1959,7 +1959,7 @@ fn a_lambda_is_not_a_source_of_inference() {
 #[test]
 fn the_width_tables_are_the_ones_lib_unicode_carries() {
     // src/width.rs has no tables of its own: it parses WIDTH_RANGES and
-    // GCB_RANGES out of the embedded text of lib/unicode.src, so the compiler
+    // GCB_RANGES out of the embedded text of lib/unicode.m31, so the compiler
     // and the standard library cannot drift apart on what a column is. The
     // counts are the ones the generator recorded in that file's comments; a
     // regeneration for a new Unicode version changes both the numbers here

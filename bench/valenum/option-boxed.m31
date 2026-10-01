@@ -1,0 +1,33 @@
+// `option.m31`, with one line added: a `List<Option<int>>` that the program
+// never touches.
+//
+// A collection's element is one machine word, so that declaration alone
+// takes `Option<int>` back to being a heap object for the whole program
+// (docs/value-enums.md §2). The loop below is byte-for-byte the loop in
+// `option.m31`, so the difference between the two timings is exactly the
+// cost of the allocation, the two refcount calls and the free -- which is
+// what this program used to cost before value enums existed.
+
+List<Option<int>> sink = [];
+
+Option<int> half(int n) {
+    if (n % 2 == 0) {
+        return Option<int>.Some(n / 2);
+    }
+    return Option<int>.None;
+}
+
+int total = 0;
+int i = 0;
+while (i < 50000000) {
+    match (half(i)) {
+        case Some(int h): {
+            total = total + h;
+        }
+        case None: {
+        }
+    }
+    i = i + 1;
+}
+print(total);
+print(sink.size());

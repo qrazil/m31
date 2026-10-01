@@ -1,4 +1,4 @@
-corpus/errors/1244-no-augmented-shift.src:4:4: there is no `>>=`, and no augmented assignment at all: write `x = x >> ..`, or count with `for (int i in 0 .. n)`
+corpus/errors/1244-no-augmented-shift.m31:4:4: there is no `>>=`, and no augmented assignment at all: write `x = x >> ..`, or count with `for (int i in 0 .. n)`
   |
 4 | n >>= 2;
   |    ^

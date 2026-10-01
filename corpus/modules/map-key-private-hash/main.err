@@ -1,4 +1,4 @@
-corpus/modules/map-key-private-hash/main.src:3:23: `hash` is private to `lib`
+corpus/modules/map-key-private-hash/main.m31:3:23: `hash` is private to `lib`
   |
 3 | Map<lib.Key, int> m = {};
   |                       ^

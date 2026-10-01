@@ -1,4 +1,4 @@
-corpus/errors/776-destructor-distinct.src:5:1: `Email` cannot have a destructor: it is a distinct type, which is erased and has no object of its own to destroy
+corpus/errors/776-destructor-distinct.m31:5:1: `Email` cannot have a destructor: it is a distinct type, which is erased and has no object of its own to destroy
   |
 5 | void Email.drop() {
   | ^

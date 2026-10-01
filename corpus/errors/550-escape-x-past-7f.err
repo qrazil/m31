@@ -1,4 +1,4 @@
-corpus/errors/550-escape-x-past-7f.src:3:13: `\x` stops at 7f: a string literal is UTF-8, so write the character as `\u{e9}`, or raw octets as a `bytes`
+corpus/errors/550-escape-x-past-7f.m31:3:13: `\x` stops at 7f: a string literal is UTF-8, so write the character as `\u{e9}`, or raw octets as a `bytes`
   |
 3 | str s = "caf\xe9";
   |             ^

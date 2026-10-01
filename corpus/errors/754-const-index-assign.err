@@ -1,4 +1,4 @@
-corpus/errors/754-const-index-assign.src:4:1: `TABLE` is const and cannot be changed; clone(TABLE) is a copy that can
+corpus/errors/754-const-index-assign.m31:4:1: `TABLE` is const and cannot be changed; clone(TABLE) is a copy that can
   |
 4 | TABLE[0] = 5;
   | ^

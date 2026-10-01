@@ -1,4 +1,4 @@
-corpus/errors/075-float-literal-dot.src:1:13: expected a name, found `;`
+corpus/errors/075-float-literal-dot.m31:1:13: expected a name, found `;`
   |
 1 | float x = 1.;
   |             ^

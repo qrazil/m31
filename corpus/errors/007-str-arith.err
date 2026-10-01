@@ -1,4 +1,4 @@
-corpus/errors/007-str-arith.src:3:9: cannot apply `-` to str and str
+corpus/errors/007-str-arith.m31:3:9: cannot apply `-` to str and str
   |
 3 | print(a - a);
   |         ^

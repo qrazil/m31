@@ -28,7 +28,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-LANGC=./target/debug/langc
+LANGC=./target/debug/m31c
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 pass=0
@@ -44,7 +44,7 @@ check() {
         bad "$name: generator failed" "$(cat "$WORK/$name.gen.log")"
         return
     fi
-    if ! "$LANGC" --emit-c "$WORK/t_$name.src" -o "$WORK/t_$name.c" 2>"$WORK/$name.diag"; then
+    if ! "$LANGC" --emit-c "$WORK/t_$name.m31" -o "$WORK/t_$name.c" 2>"$WORK/$name.diag"; then
         bad "$name: compile" "$(head -8 "$WORK/$name.diag")"
         return
     fi
@@ -71,7 +71,7 @@ check ed25519 gen_ed25519.py
 # generators above: a non-canonical y-coordinate, a y that IS canonical but
 # is not on the curve at all, and an all-zero public key -- all of which
 # `ed25519.verify` must refuse without crashing, per RFC 8032 5.1.3.
-if "$LANGC" --emit-c crypto25519_test/t_ed25519_edge.src -o "$WORK/edge.c" 2>"$WORK/edge.diag"; then
+if "$LANGC" --emit-c crypto25519_test/t_ed25519_edge.m31 -o "$WORK/edge.c" 2>"$WORK/edge.diag"; then
     if cc -O2 -Wall -Wextra -I runtime -pthread -o "$WORK/edge" "$WORK/edge.c" runtime/rt.c 2>"$WORK/edge.cc"; then
         got=$("$WORK/edge")
         want=$'noncanon_y_rejected true\nnot_on_curve_rejected true\nzero_pk_no_crash true'

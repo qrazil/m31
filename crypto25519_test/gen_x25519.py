@@ -134,6 +134,6 @@ for i in range(30):
     want.append(f"chain{idx} " + shared1.hex())
     want.append(f"chain2_{idx} " + shared2.hex())
 
-open(os.path.join(OUT, "t_x25519.src"), "w").write("\n".join(src) + "\n")
+open(os.path.join(OUT, "t_x25519.m31"), "w").write("\n".join(src) + "\n")
 open(os.path.join(OUT, "t_x25519.want"), "w").write("\n".join(want) + "\n")
 print("wrote", len(want), "cases,", len(src), "src lines")

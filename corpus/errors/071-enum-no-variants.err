@@ -1,4 +1,4 @@
-corpus/errors/071-enum-no-variants.src:1:1: enum `Nothing` has no variants, so no value of it can exist
+corpus/errors/071-enum-no-variants.m31:1:1: enum `Nothing` has no variants, so no value of it can exist
   |
 1 | enum Nothing {
   | ^

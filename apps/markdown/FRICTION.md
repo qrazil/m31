@@ -42,7 +42,7 @@ That is a very high floor. Everything below is what happened above it.
 The only compile error the whole program produced:
 
 ```
-apps/markdown/inlines.src:448:5: `close` is already a function; shadowing is
+apps/markdown/inlines.m31:448:5: `close` is already a function; shadowing is
 not allowed, rename one
     |
 448 |     int close = close_bracket(s, open + 1);
@@ -88,7 +88,7 @@ which is nothing but cursors — it is the most-repeated line by a wide margin.
 
 Worse than the noise is the *hazard*: because the increment is the last
 statement of the body rather than part of the loop header, **every `continue`
-has to re-do it by hand**. `scan()` in `inlines.src` has eleven `continue`s and
+has to re-do it by hand**. `scan()` in `inlines.m31` has eleven `continue`s and
 each one is preceded by an explicit assignment to `i`; getting one wrong is an
 infinite loop, not a compile error. A three-clause `for` makes that class of
 bug impossible. I did not ship one, but only because I was watching for it.
@@ -159,7 +159,7 @@ expression, no `or_else`, no `map`. §3.7a says "There is no `unwrap`" and
 gives a good reason; the consequence is that `Option` is excellent as a value
 you immediately propagate and expensive as a value you immediately test.
 
-The same thing happened again with `Target` in `inlines.src` (`bool ok` plus
+The same thing happened again with `Target` in `inlines.m31` (`bool ok` plus
 four fields) — a link destination clause that may or may not parse.
 
 Two small things would fix most of it without reintroducing `unwrap`: a
@@ -302,7 +302,7 @@ return output.write(out.to_bytes());     // a File, a bytes copy, a Result
 ```
 
 inside a `Result`-returning function, with a `match` at the call site. That is
-`main.src`'s `emit()`, six lines for the last thing the program does, and the
+`main.m31`'s `emit()`, six lines for the last thing the program does, and the
 `to_bytes()` is a full copy of the megabyte I just built.
 
 `io.write(path, data)` takes a `str` and does the whole job for a file. The
@@ -311,7 +311,7 @@ close the gap, and would take the copy with it.
 
 ### 1.11 The formatter deletes grouping parentheses
 
-`langc fmt` rewrote
+`m31c fmt` rewrote
 
 ```c
 return (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
@@ -338,7 +338,7 @@ is not a rule.)
 ### 1.12 Smaller things
 
 - **`match` arms need a brace block even for one expression**, so a
-  three-variant dispatch is eleven lines. Fine in `render.src`, heavy in a
+  three-variant dispatch is eleven lines. Fine in `render.m31`, heavy in a
   predicate.
 - **`break` only leaves the innermost loop and there are no labels.** I used
   `bool done` / `bool ended` sentinels in five places where a labelled break
@@ -360,7 +360,7 @@ is not a rule.)
 
 | Wanted | Why | Workaround |
 |---|---|---|
-| `s.index_of(sub, from: i)` | every scanner in this program | a byte loop with `byte_at`, of which this program has two dozen. `lib/text.src` already confesses this one at length, and is right that the library cannot fix it — it has to be a builtin |
+| `s.index_of(sub, from: i)` | every scanner in this program | a byte loop with `byte_at`, of which this program has two dozen. `lib/text.m31` already confesses this one at length, and is right that the library cannot fix it — it has to be a builtin |
 | `s.contains_byte(c)` / `s.find_first_of(set)` | character-class tests | `HREF_SAFE.index_of(str.from_chars([c])).is_some()` (see 1.8) |
 | a string builder | building a megabyte of HTML | `List<str>` + `join("")`, everywhere |
 | `unicode.is_punctuation(cp)`, `unicode.is_whitespace(cp)` | **CommonMark's emphasis rules are literally defined in terms of Unicode punctuation and whitespace** | ASCII-only classification, documented as a divergence in README. `lib/unicode` is 2 500 lines of tables and exposes `upper`, `lower`, `fold`, `graphemes`, `grapheme_count`, `width`, `nfc`, `nfd` — every derived operation and no general category query. It is the one thing a text-processing program needs from those tables, and it is the one thing not exported |
@@ -382,7 +382,7 @@ need to tell the user *why* a list number did not parse.
 is hand-rolled loops from end to end. That is worth knowing about §6.7: the
 callback design may be excellent and this program had no opinion on it.
 
-`lib/text.src`'s "what is deliberately NOT here" section is the best piece of
+`lib/text.m31`'s "what is deliberately NOT here" section is the best piece of
 standard-library documentation I have read anywhere, and it is right about
 every entry.
 
@@ -416,12 +416,12 @@ be held to.
 **Two that are not:**
 
 ```
-apps/.../a.src:29:16: expected `in`, found `=`
+apps/.../a.m31:29:16: expected `in`, found `=`
    |
 29 |     for (int j = 0; j < n; j = j + 1) {
    |                ^
 
-apps/.../b.src:36:8: expected an expression, found `=`
+apps/.../b.m31:36:8: expected an expression, found `=`
    |
 36 |     n += 1;
    |        ^
@@ -502,7 +502,7 @@ program's own test suite say "this function took longer than it should".
 These are not consolation prizes; each of them saved real work.
 
 **Exhaustive `match` caught the change it exists to catch.** I added the
-`Grid` variant to `doc.Block` for tables after `render.src` was written. The
+`Grid` variant to `doc.Block` for tables after `render.m31` was written. The
 compiler pointed at the one `match` that had to learn about it. In Go or
 Python that is a silent fall-through to the default case and a missing
 `<table>` in production.
@@ -528,12 +528,12 @@ family sequence, a flag) passed the first time, and I wrote no encoding code.
 
 **Modules are files, and that is all there is to it.** Five modules, `import`
 by basename, forward references everywhere, no headers, no ordering, no build
-file, no `mod.rs`. `doc.src` exists only so `blocks` and `render` need not
+file, no `mod.rs`. `doc.m31` exists only so `blocks` and `render` need not
 import each other, and making it took thirty seconds.
 
-**Privacy by default.** `doc.src` exports six types, four constants and an
+**Privacy by default.** `doc.m31` exports six types, four constants and an
 enum; everything
-in `blocks.src` except `parse` is private; I never wrote `pub` by accident
+in `blocks.m31` except `parse` is private; I never wrote `pub` by accident
 and never had to audit what I had exported.
 
 **Trapping arithmetic and bounds checks, by default, with no opt-out.** This
@@ -583,7 +583,7 @@ app and not use the standard library's, which is worse. So the test harness
 brings the *oracle* to this program's spelling with one documented
 substitution (`reference.py`, and the `'` → `&#x27;` line is the only one).
 
-I am recording it not as a complaint — `lib/html.src` argues its case well and
+I am recording it not as a complaint — `lib/html.m31` argues its case well and
 "no `quote` flag" is the right call — but because it is a concrete instance
 of a general thing: **a standard library that is opinionated in the right way
 still costs you exactness against somebody else's opinionated implementation,

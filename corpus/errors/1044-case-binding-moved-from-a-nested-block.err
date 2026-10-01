@@ -1,4 +1,4 @@
-corpus/errors/1044-case-binding-moved-from-a-nested-block.src:17:27: `xs` is bound by the enclosing `case` and cannot be moved from inside a nested block; a move inside a loop or a branch would run a different number of times than it was checked. Move it in the `case` body itself.
+corpus/errors/1044-case-binding-moved-from-a-nested-block.m31:17:27: `xs` is bound by the enclosing `case` and cannot be moved from inside a nested block; a move inside a loop or a branch would run a different number of times than it was checked. Move it in the `case` body itself.
    |
 17 |                 send(out, xs);
    |                           ^

@@ -1,4 +1,4 @@
-corpus/modules/privacy-variant/main.src:2:11: `Color` is private to `lib`; its variants cannot be matched from here
+corpus/modules/privacy-variant/main.m31:2:11: `Color` is private to `lib`; its variants cannot be matched from here
   |
 2 | match (lib.pick()) {
   |           ^

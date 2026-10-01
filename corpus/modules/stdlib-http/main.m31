@@ -1,0 +1,414 @@
+import http;
+import io;
+import json;
+
+// The parser and the formatter, driven from memory.
+//
+// Every message here is an `io.Buffer` holding a transcript, because
+// `read_request`, `write_request`, `read_response` and `write_response` take
+// an `io.Stream` and never mention a socket -- so the whole of HTTP/1.1's
+// grammar is testable with no listener, no port and no timing. The socket
+// half is `stdlib-http-server`, and the refusals are `stdlib-http-errors`.
+//
+// **Every transcript here was read by Python's `http.client` and
+// `email.parser` first**, and this file records what they agreed on: the
+// duplicate-field joining, the header names folded to lower case, the chunk
+// decoding, the trailer being dropped, the 1xx being stepped over, and the
+// `HEAD` response that carries a `Content-Length` and no body. Where this
+// module is deliberately stricter than Python -- obsolete line folding, a
+// bare LF, both framing fields at once -- the case is in
+// `stdlib-http-errors` with the reason.
+
+// A message as lines, so a CRLF is visible as the end of one and the blank
+// line before the body is visible as an empty one.
+void show(str label, bytes msg) {
+    print(label + " (" + msg.size().to_str() + " bytes)");
+    for (bytes line in msg.split("\r\n".to_bytes())) {
+        match (line.utf8()) {
+            case Some(str t): {
+                print("| " + t);
+            }
+            case None: {
+                print("| 0x" + line.hex());
+            }
+        }
+    }
+}
+
+io.Buffer transcript(str text) {
+    return io.buffer_of(text.to_bytes());
+}
+
+str body_of(http.Response resp) {
+    match (resp.text()) {
+        case Ok(str t): {
+            return t;
+        }
+        case Err(http.Error e): {
+            return "(" + e.to_str() + ")";
+        }
+    }
+}
+
+// --- reading a request -----------------------------------------------------
+void read_one(str label, str text) {
+    io.Buffer b = transcript(text);
+    match (http.read_request(b)) {
+        case Ok(Option<http.Request> maybe): {
+            match (maybe) {
+                case Some(http.Request req): {
+                    print(label + ": " + req.method() + " " + req.path() + " q=" + req.query() + " v=" + req.version());
+                    print("  url " + req.url().to_str());
+                    print("  fields " + req_fields(req));
+                    print("  body " + req.body().size().to_str() + " " + show_text(req.body()));
+                }
+                case None: {
+                    print(label + ": no request, the stream was at a clean end");
+                }
+            }
+        }
+        case Err(http.Error e): {
+            print(label + ": " + e.to_str());
+        }
+    }
+}
+
+// Every field as `name=value`, in the order it was read: this is where the
+// lower-casing and the `", "` joining of a repeated field show up.
+str req_fields(http.Request req) {
+    List<str> out = [];
+    for (str n in req.header_names()) {
+        out.push(n + "=" + req.header(n).or("?"));
+    }
+    return out.join(" ");
+}
+
+str resp_fields(http.Response resp) {
+    List<str> out = [];
+    for (str n in resp.header_names()) {
+        out.push(n + "=" + resp.header(n).or("?"));
+    }
+    return out.join(" ");
+}
+
+str show_text(bytes b) {
+    match (b.utf8()) {
+        case Some(str t): {
+            if (t.size() > 60) {
+                return "...";
+            }
+            return t;
+        }
+        case None: {
+            return "0x" + b.hex();
+        }
+    }
+}
+
+void read_resp(str label, str method, str text) {
+    io.Buffer b = transcript(text);
+    match (http.read_response(b, method)) {
+        case Ok(http.Response resp): {
+            print(label + ": " + resp.version() + " " + resp.status().to_str() + " '" + resp.reason() + "'");
+            print("  fields " + resp_fields(resp));
+            print("  body " + resp.body().size().to_str() + " " + show_text(resp.body()));
+        }
+        case Err(http.Error e): {
+            print(label + ": " + e.to_str());
+        }
+    }
+}
+
+// The plainest request there is, and the one with everything: a query, a
+// duplicate field joined with ", ", names in three different casings, and a
+// body with a declared length.
+read_one("plain", "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n");
+read_one("full", "POST /a/b?x=1&y=2 HTTP/1.1\r\nHOST: Example.com:8080\r\nX-Two: one\r\nx-TWO: two\r\nContent-Length: 5\r\nContent-Type: text/plain\r\n\r\nhello");
+// Percent escapes in the path are decoded; the target keeps them.
+read_one("escaped", "GET /caf%C3%A9/a%2Fb?raw=%20 HTTP/1.1\r\nHost: h\r\n\r\n");
+// Absolute-form, which RFC 9112 requires a server to accept: the authority
+// is dropped and Host is what the URL is built from.
+read_one("absolute", "GET http://other.example/p HTTP/1.1\r\nHost: h\r\n\r\n");
+// Asterisk-form, for OPTIONS alone.
+read_one("asterisk", "OPTIONS * HTTP/1.1\r\nHost: h\r\n\r\n");
+// 1.0 may leave out Host; 1.1 may not (see stdlib-http-errors).
+read_one("http10", "GET /p HTTP/1.0\r\n\r\n");
+// No framing field is no body, never "read to the end" -- the second request
+// on this buffer is a second request and not this one's body.
+read_one("no-body", "POST /p HTTP/1.1\r\nHost: h\r\n\r\nGET /next HTTP/1.1\r\nHost: h\r\n\r\n");
+// A chunked body, with an extension on one size line and a trailer after the
+// last chunk. Both are read and dropped.
+read_one("chunked", "POST /p HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n5;ext=1\r\nhello\r\n6\r\n world\r\n0\r\nX-Trailer: yes\r\n\r\n");
+// An empty chunked body is a zero chunk and nothing else.
+read_one("chunked-empty", "POST /p HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n");
+// A field value may be empty, and its surrounding whitespace comes off.
+read_one("blank-value", "GET /p HTTP/1.1\r\nHost: h\r\nX-Empty:\r\nX-Padded:   spaced   \r\n\r\n");
+// A stream with nothing on it is a peer that closed between messages.
+read_one("clean-eof", "");
+// Two requests on one buffer, read one after the other: this is what a
+// kept-alive connection looks like to the parser, and the reason the body
+// rules above have to be exact.
+io.Buffer pipeline = transcript("GET /one HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\n\r\nabcGET /two HTTP/1.1\r\nHost: h\r\n\r\n");
+int seen = 0;
+while (seen < 3) {
+    match (http.read_request(pipeline)) {
+        case Ok(Option<http.Request> maybe): {
+            match (maybe) {
+                case Some(http.Request req): {
+                    print("pipelined " + seen.to_str() + ": " + req.method() + " " + req.path() + " body '" + show_text(req.body()) + "'");
+                }
+                case None: {
+                    print("pipelined " + seen.to_str() + ": end");
+                }
+            }
+        }
+        case Err(http.Error e): {
+            print("pipelined " + seen.to_str() + ": " + e.to_str());
+        }
+    }
+    seen = seen + 1;
+}
+// --- reading a response ----------------------------------------------------
+read_resp("sized", "GET", "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Type: text/plain\r\n\r\nhello");
+// A HEAD answer carries the framing the GET would have carried and no body.
+read_resp("head", "HEAD", "HTTP/1.1 200 OK\r\nContent-Length: 12345\r\n\r\n");
+// 204 and 304 have no body whatever they say, and a 304 does carry the
+// fields its 200 would have.
+read_resp("no-content", "GET", "HTTP/1.1 204 No Content\r\n\r\n");
+read_resp("not-modified", "GET", "HTTP/1.1 304 Not Modified\r\nContent-Length: 4096\r\n\r\n");
+// Neither framing field on a RESPONSE means "until the connection closes",
+// which is the exact inverse of the request rule.
+read_resp("to-eof", "GET", "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\neverything until the end");
+read_resp("chunked", "GET", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nwiki\r\n6\r\npedia \r\n0\r\n\r\n");
+// An interim response is stepped over rather than returned as the answer.
+read_resp("interim", "GET", "HTTP/1.1 103 Early Hints\r\nLink: </s.css>\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+// An empty reason phrase is legal, and so is a status line with no phrase at
+// all; both keep the code.
+read_resp("no-reason", "GET", "HTTP/1.1 404 \r\nContent-Length: 0\r\n\r\n");
+read_resp("bare-code", "GET", "HTTP/1.1 500\r\nContent-Length: 0\r\n\r\n");
+// A code nobody registered still gets its class's phrase from `http.reason`.
+print("reason 200/418/599: " + http.reason(200) + " / " + http.reason(418) + " / " + http.reason(599));
+// --- writing ---------------------------------------------------------------
+io.Buffer out = io.buffer();
+match (http.request("GET", "http://example.com/a?b=c")) {
+    case Ok(http.Request req): {
+        match (http.write_request(out, req)) {
+            case Ok: {
+                show("GET", out.peek());
+            }
+            case Err(http.Error e): {
+                print("write: " + e.to_str());
+            }
+        }
+    }
+    case Err(http.Error e): {
+        print("request: " + e.to_str());
+    }
+}
+io.Buffer out2 = io.buffer();
+match (http.request("POST", "http://example.com:8080/submit")) {
+    case Ok(http.Request req): {
+        req.set_text("field=value");
+        req.set("content-type", "application/x-www-form-urlencoded");
+        req.set("connection", "keep-alive");
+        match (http.write_request(out2, req)) {
+            case Ok: {
+                show("POST", out2.peek());
+            }
+            case Err(http.Error e): {
+                print("write: " + e.to_str());
+            }
+        }
+    }
+    case Err(http.Error e): {
+        print("request: " + e.to_str());
+    }
+}
+io.Buffer out3 = io.buffer();
+match (http.request("PUT", "http://h/big")) {
+    case Ok(http.Request req): {
+        req.set_text("one two three");
+        req.set_chunked(true);
+        match (http.write_request(out3, req)) {
+            case Ok: {
+                show("chunked PUT", out3.peek());
+            }
+            case Err(http.Error e): {
+                print("write: " + e.to_str());
+            }
+        }
+    }
+    case Err(http.Error e): {
+        print("request: " + e.to_str());
+    }
+}
+
+// The response side, against the request it answers: the framing, the
+// `Connection` field and the suppressed body are all decided here.
+void write_one(str label, str method, http.Response resp, bool keep_alive) {
+    io.Buffer w = io.buffer();
+    match (http.request(method, "http://h/p")) {
+        case Ok(http.Request req): {
+            match (http.write_response(w, req, resp, keep_alive)) {
+                case Ok: {
+                    show(label, w.peek());
+                }
+                case Err(http.Error e): {
+                    print(label + ": " + e.to_str());
+                }
+            }
+        }
+        case Err(http.Error e): {
+            print(label + ": " + e.to_str());
+        }
+    }
+}
+
+// The same, to an HTTP/1.0 peer, which is where the `Connection: keep-alive`
+// and the refusal to chunk come from.
+void write_ten(str label, http.Response resp) {
+    io.Buffer w = io.buffer();
+    match (http.read_request(transcript("GET /p HTTP/1.0\r\nConnection: keep-alive\r\n\r\n"))) {
+        case Ok(Option<http.Request> maybe): {
+            match (maybe) {
+                case Some(http.Request req): {
+                    match (http.write_response(w, req, resp, true)) {
+                        case Ok: {
+                            show(label, w.peek());
+                        }
+                        case Err(http.Error e): {
+                            print(label + ": " + e.to_str());
+                        }
+                    }
+                }
+                case None: {
+                    print(label + ": no request");
+                }
+            }
+        }
+        case Err(http.Error e): {
+            print(label + ": " + e.to_str());
+        }
+    }
+}
+
+write_one("200 close", "GET", http.text_response("hi"), false);
+write_one("200 keep", "GET", http.text_response("hi"), true);
+write_one("HEAD", "HEAD", http.text_response("hi"), false);
+write_one("204", "GET", http.response(204), false);
+http.Response chunky = http.text_response("chunk me");
+chunky.set_chunked(true);
+write_one("chunked", "GET", chunky, false);
+// A HEAD answer carries the framing fields its GET would have carried -- the
+// chunked coding included -- and simply leaves the body out.
+http.Response chunky_head = http.text_response("chunk me");
+chunky_head.set_chunked(true);
+write_one("HEAD chunked", "HEAD", chunky_head, false);
+// A 1.0 peer has no chunked coding, so the same response is sized instead.
+http.Response chunky_ten = http.text_response("chunk me");
+chunky_ten.set_chunked(true);
+write_ten("chunked to 1.0", chunky_ten);
+http.Response custom = http.response(418);
+custom.set_reason("I am a pot for tea");
+custom.set_text("short and stout");
+write_one("custom reason", "GET", custom, false);
+// `json_response` and `Response.json` are the two halves of the one place
+// this module meets `lib/json.m31`: it stringifies on the way out and parses
+// on the way in, and nothing else here knows what JSON is.
+Map<str, json.Value> doc = {"ok": json.Value.Bool(true), "n": json.Value.Int(7)};
+match (http.json_response(json.Value.Object(doc))) {
+    case Ok(http.Response resp): {
+        write_one("json", "GET", resp, false);
+    }
+    case Err(http.Error e): {
+        print("json_response: " + e.to_str());
+    }
+}
+io.Buffer jb = transcript("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 27\r\n\r\n{\"a\": [1, 2], \"b\": \"text\"}\n");
+match (http.read_response(jb, "GET")) {
+    case Ok(http.Response resp): {
+        match (resp.json()) {
+            case Ok(json.Value v): {
+                match (json.stringify(v)) {
+                    case Ok(str s): {
+                        print("json body: " + s);
+                    }
+                    case Err(json.Error je): {
+                        print("json body: " + je.to_str());
+                    }
+                }
+            }
+            case Err(http.Error e): {
+                print("json body: " + e.to_str());
+            }
+        }
+    }
+    case Err(http.Error e): {
+        print("json read: " + e.to_str());
+    }
+}
+// --- round trip ------------------------------------------------------------
+// What is written is what is read: the formatter and the parser are each
+// other's inverse over a message with a body, a duplicate-free field set and
+// a chunked framing.
+http.Response rt = http.text_response("round trip");
+rt.set("x-note", "kept");
+rt.set_chunked(true);
+io.Buffer wire = io.buffer();
+match (http.request("GET", "http://h/rt")) {
+    case Ok(http.Request req): {
+        match (http.write_response(wire, req, rt, false)) {
+            case Ok: {
+                match (http.read_response(io.buffer_of(wire.peek()), "GET")) {
+                    case Ok(http.Response back): {
+                        print("round trip: " + back.status().to_str() + " " + body_of(back) + " x-note=" + back.header("x-note").or("-") + " te=" + back.header("transfer-encoding").or("-"));
+                    }
+                    case Err(http.Error e): {
+                        print("round trip: " + e.to_str());
+                    }
+                }
+            }
+            case Err(http.Error e): {
+                print("round trip: " + e.to_str());
+            }
+        }
+    }
+    case Err(http.Error e): {
+        print("round trip: " + e.to_str());
+    }
+}
+
+// --- keep-alive ------------------------------------------------------------
+void decide(str label, str reqtext, str resptext) {
+    match (http.read_request(transcript(reqtext))) {
+        case Ok(Option<http.Request> maybe): {
+            match (maybe) {
+                case Some(http.Request req): {
+                    match (http.read_response(transcript(resptext), req.method())) {
+                        case Ok(http.Response resp): {
+                            print("keep-alive " + label + ": " + http.should_keep_alive(req, resp).to_str());
+                        }
+                        case Err(http.Error e): {
+                            print("keep-alive " + label + ": " + e.to_str());
+                        }
+                    }
+                }
+                case None: {
+                    print("keep-alive " + label + ": no request");
+                }
+            }
+        }
+        case Err(http.Error e): {
+            print("keep-alive " + label + ": " + e.to_str());
+        }
+    }
+}
+
+decide("1.1 default", "GET / HTTP/1.1\r\nHost: h\r\n\r\n", "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+decide("1.1 client close", "GET / HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n", "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+decide("1.1 server close", "GET / HTTP/1.1\r\nHost: h\r\n\r\n", "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+decide("1.0 default", "GET / HTTP/1.0\r\n\r\n", "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+decide("1.0 asked", "GET / HTTP/1.0\r\nConnection: keep-alive\r\n\r\n", "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+decide("token list", "GET / HTTP/1.1\r\nHost: h\r\nConnection: Upgrade, CLOSE\r\n\r\n", "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+// --- the limits are visible ------------------------------------------------
+print("limits: head=" + http.MAX_HEAD.to_str + " headers=" + http.MAX_HEADERS.to_str + " line=" + http.MAX_HEADER_LINE.to_str + " chunkline=" + http.MAX_CHUNK_LINE.to_str + " body=" + http.MAX_BODY.to_str + " redirects=" + http.MAX_REDIRECTS.to_str + " interim=" + http.MAX_INTERIM.to_str + " requests=" + http.MAX_REQUESTS.to_str + " timeout=" + http.TIMEOUT_MS.to_str + " chunk=" + http.CHUNK.to_str);

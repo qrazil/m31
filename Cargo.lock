@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "langc"
+name = "m31c"
 version = "0.0.0"

@@ -6,7 +6,7 @@
 //! `rt_index_set` and the `bytes` pair), item 1 expected gcc/clang to hoist
 //! the rest themselves: "a simple loop contains no opaque call and the
 //! compiler can see that for itself." Measured against that claim, on
-//! `apps/git/sha1.src`'s message-schedule loop (the one FRICTION.md §5
+//! `apps/git/sha1.m31`'s message-schedule loop (the one FRICTION.md §5
 //! names) at `cc -O2` and `-O3`, gcc and clang: they do not, even with the
 //! bounds check hoisted out of a runtime call and `restrict` on the element
 //! pointer. A from-scratch reduced C reproduction (no runtime, no frozen

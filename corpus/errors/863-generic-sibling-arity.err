@@ -1,4 +1,4 @@
-corpus/errors/863-generic-sibling-arity.src:14:12: `Picker.pick<int>` takes 1 positional argument(s), found 2
+corpus/errors/863-generic-sibling-arity.m31:14:12: `Picker.pick<int>` takes 1 positional argument(s), found 2
    |
 14 |     return pick(xs, 3);
    |            ^

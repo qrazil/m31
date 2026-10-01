@@ -1,4 +1,4 @@
-corpus/errors/066-match-duplicate-case.src:6:5: `Red` is already handled by an earlier case
+corpus/errors/066-match-duplicate-case.m31:6:5: `Red` is already handled by an earlier case
   |
 6 |     case Red: { print(2); }
   |     ^

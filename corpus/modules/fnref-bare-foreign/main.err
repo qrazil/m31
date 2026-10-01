@@ -1,4 +1,4 @@
-corpus/modules/fnref-bare-foreign/main.src:5:10: `by_x` is declared in `lib`; write `lib.by_x`
+corpus/modules/fnref-bare-foreign/main.m31:5:10: `by_x` is declared in `lib`; write `lib.by_x`
   |
 5 | Less l = by_x;
   |          ^

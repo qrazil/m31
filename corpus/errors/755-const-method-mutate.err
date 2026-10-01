@@ -1,4 +1,4 @@
-corpus/errors/755-const-method-mutate.src:6:12: `ROWS` is const and cannot be changed; clone(ROWS) is a copy that can
+corpus/errors/755-const-method-mutate.m31:6:12: `ROWS` is const and cannot be changed; clone(ROWS) is a copy that can
   |
 6 |     ROWS[0].sort();
   |            ^

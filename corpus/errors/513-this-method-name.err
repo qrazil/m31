@@ -1,4 +1,4 @@
-corpus/errors/513-this-method-name.src:6:10: `this` is a keyword -- it names a method's receiver -- and cannot be used as a name
+corpus/errors/513-this-method-name.m31:6:10: `this` is a keyword -- it names a method's receiver -- and cannot be used as a name
   |
 6 | int Rect.this() {
   |          ^

@@ -1,4 +1,4 @@
-corpus/errors/099-list-is-not-array.src:3:16: type mismatch: expected List<int>, found Array<int>
+corpus/errors/099-list-is-not-array.m31:3:16: type mismatch: expected List<int>, found Array<int>
   |
 3 | List<int> xs = a;
   |                ^

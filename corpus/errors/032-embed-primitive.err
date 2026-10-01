@@ -1,4 +1,4 @@
-corpus/errors/032-embed-primitive.src:2:5: only a user type can be embedded; give this field a name
+corpus/errors/032-embed-primitive.m31:2:5: only a user type can be embedded; give this field a name
   |
 2 |     int;
   |     ^

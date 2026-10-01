@@ -69,7 +69,7 @@ constant is a string literal.
 
 ### The float-formatting table, converted
 
-`lib/__floatfmt.src` kept 684 128-bit powers of ten as hex text — eight
+`lib/__floatfmt.m31` kept 684 128-bit powers of ten as hex text — eight
 entries to a string literal, found by a binary search over 86 literals and
 decoded a hex digit at a time on every lookup — because there was no constant
 array. It is now two `const Array<int>` of 684 64-bit words each, and a
@@ -82,7 +82,7 @@ exponent range (i7-8750H, release compiler, best of 5):
 
 | | before | after | |
 |---|---|---|---|
-| `langc --emit-c` | 10.0 ms | 11.5 ms | +1.5 ms: 1368 constant elements to evaluate (one loaded-machine run; ~7 ms on a quiet one) |
+| `m31c --emit-c` | 10.0 ms | 11.5 ms | +1.5 ms: 1368 constant elements to evaluate (one loaded-machine run; ~7 ms on a quiet one) |
 | emitted C | 175,230 bytes, 7,113 lines | 162,442 bytes, 5,682 lines | −7% bytes (this includes the per-type copy functions `const` snapshots added) |
 | `gcc -O2 -c` of it | 0.320 s | 0.290 s | −10% |
 | `clang -O2 -c` of it | 0.264 s | 0.237 s | −10% |
@@ -111,11 +111,11 @@ Two library modules want state that outlives one call, and cannot have it:
     `io.read_line()` cannot keep a buffer at all, so to leave the rest of
     the input for whoever reads next it reads **one byte per system call** on
     a pipe or a terminal (and two calls per line on a regular file, by
-    reading ahead and seeking back). Both are written in `lib/io.src` with
+    reading ahead and seeking back). Both are written in `lib/io.m31` with
     the comment "a module cannot hold state".
   - **random.** The system generator cannot buffer the kernel's randomness,
     so every draw is one `getentropy` call where Oro reads 256 octets at a
-    time and hands them out (`lib/random.src`).
+    time and hands them out (`lib/random.m31`).
 
 Every other library module so far is stateless by nature.
 
@@ -248,8 +248,8 @@ wants *language-level* state:
 **Cost:** no compiler change and no language change. Roughly 100–150 lines
 of C in `runtime/rt.c` (a mutex-protected stdin buffer with read, and a
 thread-local entropy buffer), one new primitive in `runtime/rt.h`,
-`lib/io.src` rewired to use it (`read_line`, `stdin()` and the stream
-fill), `lib/random.src` unchanged, a `sys_test` case for the new primitive,
+`lib/io.m31` rewired to use it (`read_line`, `stdin()` and the stream
+fill), `lib/random.m31` unchanged, a `sys_test` case for the new primitive,
 and corpus tests for mixed `read_line` / `io.stdin()` reading and for
 reading stdin from two threads. A day's work.
 
@@ -291,7 +291,7 @@ is the one the language already had, made explicit:
 Both customers in §2 were answered that way, and neither needed a language
 change:
 
-  - **io.** `io.Buffer` (`lib/io.src`) is "bytes I have fetched and not yet
+  - **io.** `io.Buffer` (`lib/io.m31`) is "bytes I have fetched and not yet
     handed out": a read position, compaction when the dead prefix is half the
     buffer, so reading from the front is amortised O(1). `io.File` holds one
     for its own read-ahead, and `io.Buffer` is a `Stream` in its own right.

@@ -1,4 +1,4 @@
-corpus/errors/036-send-non-channel.src:2:6: `send` needs a channel, found int
+corpus/errors/036-send-non-channel.m31:2:6: `send` needs a channel, found int
   |
 2 | send(x, 2);
   |      ^

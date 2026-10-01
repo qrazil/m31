@@ -1,4 +1,4 @@
-corpus/modules/privacy-operator/main.src:2:18: `cmp` is private to `lib`
+corpus/modules/privacy-operator/main.m31:2:18: `cmp` is private to `lib`
   |
 2 | print(lib.make() < lib.make());
   |                  ^

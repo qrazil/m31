@@ -1,4 +1,4 @@
-corpus/errors/1140-lambda-parameter-cannot-have-a-default.src:6:10: `a` cannot have a default: a lambda is called through an interface, which dispatches with no name to give an optional argument
+corpus/errors/1140-lambda-parameter-cannot-have-a-default.m31:6:10: `a` cannot have a default: a lambda is called through an interface, which dispatches with no name to give an optional argument
   |
 6 | Get g = (int a = 2) => a;
   |          ^

@@ -1,4 +1,4 @@
-corpus/errors/1135-lambda-with-no-target.src:5:7: a lambda takes its method name from the interface it is passed to, and nothing here expects one; declare an interface and bind it to a local of that type
+corpus/errors/1135-lambda-with-no-target.m31:5:7: a lambda takes its method name from the interface it is passed to, and nothing here expects one; declare an interface and bind it to a local of that type
   |
 5 | print((int x) => x);
   |       ^

@@ -1,4 +1,4 @@
-corpus/errors/617-trap-shadow.src:2:1: `trap` is already a function; shadowing is not allowed, rename one
+corpus/errors/617-trap-shadow.m31:2:1: `trap` is already a function; shadowing is not allowed, rename one
   |
 2 | int trap = 1;
   | ^

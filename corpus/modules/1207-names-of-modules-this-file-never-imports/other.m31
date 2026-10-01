@@ -1,0 +1,16 @@
+// This file is what puts nine standard library modules into the program.
+// Their names are in scope here and nowhere else, which is the whole point:
+// `main.m31` reuses every one of them.
+import text;
+import math;
+import json;
+import sort;
+import os;
+import csv;
+import html;
+import base64;
+import date;
+
+pub int reach() {
+    return text.split_whitespace("a b").size() + math.abs(-1);
+}

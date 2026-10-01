@@ -1,4 +1,4 @@
-corpus/errors/208-wrapping-on-float.src:3:10: `float` has no method `wrapping_add`
+corpus/errors/208-wrapping-on-float.m31:3:10: `float` has no method `wrapping_add`
   |
 3 | print(1.0.wrapping_add(2.0));
   |          ^

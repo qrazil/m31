@@ -1,4 +1,4 @@
-corpus/errors/079-option-unwrap.src:2:17: an Option has `is_some`, `is_none` and `or`; `unwrap` is not one of them -- use `match` to take the value out
+corpus/errors/079-option-unwrap.m31:2:17: an Option has `is_some`, `is_none` and `or`; `unwrap` is not one of them -- use `match` to take the value out
   |
 2 | print(m.get("a").unwrap());
   |                 ^

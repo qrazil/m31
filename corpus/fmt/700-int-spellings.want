@@ -1,4 +1,4 @@
-// A fixture for `langc fmt`: every integer literal keeps its spelling. The
+// A fixture for `m31c fmt`: every integer literal keeps its spelling. The
 // value alone would print `0o755` as 493 and `1_000_000` as 1000000, and the
 // author chose those spellings to be read.
 int perm = 0o755;

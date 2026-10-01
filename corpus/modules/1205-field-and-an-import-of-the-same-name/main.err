@@ -1,4 +1,4 @@
-corpus/modules/1205-field-and-an-import-of-the-same-name/main.src:7:5: `text` is a field of `Paragraph` and also the module `text` this file imports; shadowing is not allowed, rename the field or drop the import
+corpus/modules/1205-field-and-an-import-of-the-same-name/main.m31:7:5: `text` is a field of `Paragraph` and also the module `text` this file imports; shadowing is not allowed, rename the field or drop the import
   |
 7 |     str text;
   |     ^

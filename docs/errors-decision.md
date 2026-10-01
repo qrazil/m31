@@ -294,8 +294,8 @@ Three places needed to know about it, all gated on one new predicate,
     mask (`tag & 0xFFFFFFFF`) instead of a union read.
   - **`match` dispatch** (`lower::lower_match`, `src/lower/stmt.rs`): the
     comparison this arm gets is `tag >= OS_ERRNO_TAG_BASE` instead of
-    `tag == <constant>`, wherever in the arm list it appears — `net.src`'s
-    `error_of` writes `Other` FIRST, `io.src`'s and `term.src`'s `to_str`
+    `tag == <constant>`, wherever in the arm list it appears — `net.m31`'s
+    `error_of` writes `Other` FIRST, `io.m31`'s and `term.m31`'s `to_str`
     write it LAST, and both compile to correct dispatch, because the range
     test and every ordinary equality test are mutually exclusive by
     construction. `to_str`/message formatting needed no change at all: it

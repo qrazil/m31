@@ -1,4 +1,4 @@
-corpus/errors/010-const-assign.src:2:1: cannot assign to const `x`
+corpus/errors/010-const-assign.m31:2:1: cannot assign to const `x`
   |
 2 | x = 2;
   | ^

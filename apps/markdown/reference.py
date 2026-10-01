@@ -17,7 +17,7 @@ to write out in full:
 
 cmark escapes four characters in text (`&`, `<`, `>`, `"`) and leaves the
 apostrophe alone. `lib/html.escape` in this repository escapes all five, on
-purpose and with no flag to turn it off (see lib/html.src, and FRICTION.md
+purpose and with no flag to turn it off (see lib/html.m31, and FRICTION.md
 "lib/html.escape is stricter than cmark"). `&#x27;` is exactly what cmark's
 own href escaper emits for an apostrophe, so the two agree everywhere but in
 text and in a title attribute. Rather than write a second escaper in the app

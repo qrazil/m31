@@ -1,4 +1,4 @@
-corpus/errors/102-builtin-name.src:3:1: `print` is a builtin function; shadowing is not allowed, rename this one
+corpus/errors/102-builtin-name.m31:3:1: `print` is a builtin function; shadowing is not allowed, rename this one
   |
 3 | int print(int x) { return x + 1; }
   | ^

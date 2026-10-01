@@ -1,4 +1,4 @@
-corpus/modules/destructor-foreign-call/main.src:6:2: `res.Res.drop` is a destructor and cannot be called: it runs by itself when the last reference goes. Put what you want to do early in an ordinary method, and call that from `drop` too
+corpus/modules/destructor-foreign-call/main.m31:6:2: `res.Res.drop` is a destructor and cannot be called: it runs by itself when the last reference goes. Put what you want to do early in an ordinary method, and call that from `drop` too
   |
 6 | r.drop();
   |  ^

@@ -1,4 +1,4 @@
-corpus/errors/775-destructor-enum.src:7:1: `Shape` cannot have a destructor: it is an enum; a destructor belongs to a struct, whose fields hold what it releases
+corpus/errors/775-destructor-enum.m31:7:1: `Shape` cannot have a destructor: it is an enum; a destructor belongs to a struct, whose fields hold what it releases
   |
 7 | void Shape.drop() {
   | ^

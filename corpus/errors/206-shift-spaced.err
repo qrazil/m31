@@ -1,4 +1,4 @@
-corpus/errors/206-shift-spaced.src:4:11: expected an expression, found `>`
+corpus/errors/206-shift-spaced.m31:4:11: expected an expression, found `>`
   |
 4 | print(x > > 1);
   |           ^

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Build the interactive client (`gitui.src`) into a real executable.
+# Build the interactive client (`gitui.m31`) into a real executable.
 #
 #   ./apps/git/build-gitui.sh              -> ./ourgitui
 #   ./apps/git/build-gitui.sh -o mygitui   -> ./mygitui
 #
-# `gitui.src`'s entry point lives in `apps/git/`, and imports both this
+# `gitui.m31`'s entry point lives in `apps/git/`, and imports both this
 # directory's own plumbing (`gitclient`, `gitlog`, `status`, `gitignore`,
 # `index`, `object`, `pack`, `refs`, `repo`, `sha1`, `zlib`, `hunks`) and several
 # `apps/tui/` widgets (`tuiapp`, `tuioutline`, `tuijump`, `tuimenu`,
@@ -34,16 +34,16 @@ CC=${CC:-cc}
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 
-cp apps/tui/tuiapp.src apps/tui/tuibuf.src apps/tui/tuidiff.src \
-    apps/tui/tuidiffview.src apps/tui/tuifooter.src apps/tui/tuigeom.src \
-    apps/tui/tuijump.src apps/tui/tuimenu.src apps/tui/tuioutline.src \
-    apps/tui/tuiscroll.src apps/tui/tuistyle.src apps/tui/tuitext.src \
-    apps/tui/tuiwidget.src \
-    apps/git/repo.src apps/git/sha1.src apps/git/zlib.src apps/git/pack.src apps/git/object.src \
-    apps/git/refs.src apps/git/index.src apps/git/gitignore.src apps/git/status.src \
-    apps/git/gitlog.src apps/git/hunks.src apps/git/gitclient.src apps/git/gitui.src \
+cp apps/tui/tuiapp.m31 apps/tui/tuibuf.m31 apps/tui/tuidiff.m31 \
+    apps/tui/tuidiffview.m31 apps/tui/tuifooter.m31 apps/tui/tuigeom.m31 \
+    apps/tui/tuijump.m31 apps/tui/tuimenu.m31 apps/tui/tuioutline.m31 \
+    apps/tui/tuiscroll.m31 apps/tui/tuistyle.m31 apps/tui/tuitext.m31 \
+    apps/tui/tuiwidget.m31 \
+    apps/git/repo.m31 apps/git/sha1.m31 apps/git/zlib.m31 apps/git/pack.m31 apps/git/object.m31 \
+    apps/git/refs.m31 apps/git/index.m31 apps/git/gitignore.m31 apps/git/status.m31 \
+    apps/git/gitlog.m31 apps/git/hunks.m31 apps/git/gitclient.m31 apps/git/gitui.m31 \
     "$stage/"
 
-"$LANGC" --emit-c "$stage/gitui.src" -o "$stage/gitui.c"
+"$LANGC" --emit-c "$stage/gitui.m31" -o "$stage/gitui.c"
 "$CC" -O2 -pthread -I runtime -o "$out" "$stage/gitui.c" runtime/rt.c
 echo "$out"

@@ -1,4 +1,4 @@
-corpus/modules/privfield-promoted-bare/main.src:10:25: field `tag` of `acct.Animal` is private to `acct`; only a `pub` field can be used from another module
+corpus/modules/privfield-promoted-bare/main.m31:10:25: field `tag` of `acct.Animal` is private to `acct`; only a `pub` field can be used from another module
    |
 10 |     return name + " " + tag;
    |                         ^

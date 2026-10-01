@@ -1,5 +1,5 @@
 [package]
-name = "langc"
+name = "m31c"
 version = "0.0.0"
 edition = "2021"
 
@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 
 [[bin]]
-name = "langc"
+name = "m31c"
 path = "src/main.rs"
 
 [profile.dev]

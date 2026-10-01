@@ -1,4 +1,4 @@
-corpus/errors/047-for-wrong-type.src:4:1: type mismatch: expected str, found int
+corpus/errors/047-for-wrong-type.m31:4:1: type mismatch: expected str, found int
   |
 4 | for (str s in xs) {
   | ^

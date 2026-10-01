@@ -1,4 +1,4 @@
-corpus/errors/017-unknown-named.src:5:15: `f` has no parameter `c`
+corpus/errors/017-unknown-named.m31:5:15: `f` has no parameter `c`
   |
 5 | print(f(1, c: 2));
   |               ^

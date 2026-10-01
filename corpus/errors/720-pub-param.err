@@ -1,4 +1,4 @@
-corpus/errors/720-pub-param.src:2:11: `pub` exports a declaration or a field; a parameter has no visibility
+corpus/errors/720-pub-param.m31:2:11: `pub` exports a declaration or a field; a parameter has no visibility
   |
 2 | int twice(pub int x) {
   |           ^

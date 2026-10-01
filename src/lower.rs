@@ -751,7 +751,7 @@ fn value_enums(p: &Program, forced: &BTreeSet<String>) -> HashMap<String, u32> {
     // object because of the `bytes`, and if its payload were a machine-word
     // slot it would have dragged `Error` onto the heap with it -- and with
     // `Error` every `Result<int, Error>` in the program, which is exactly the
-    // type `apps/git/zlib.src` wanted in its inner loop.
+    // type `apps/git/zlib.m31` wanted in its inner loop.
     let mut ok = vec![false; p.types.len()];
     loop {
         let mut grew = false;

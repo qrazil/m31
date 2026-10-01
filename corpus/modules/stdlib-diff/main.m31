@@ -1,0 +1,223 @@
+import diff;
+import random;
+
+// `diff`: the generic line-level edit script `lib/diff.m31` computes. Hunk
+// grouping and rendering are `apps/git/hunks.m31`'s job (it depends on
+// `apps/tui`, which this standalone library must not) and are exercised by
+// `apps/git/test.sh`'s own oracle tests against real `diff -u`, not here.
+// This checks the algorithm itself: known small cases, the round-trip
+// property against many generated pairs, and the binary heuristic's 8000-byte
+// cutoff.
+
+// One op, one line: its marker and its line with `\n` shown as `\n` rather
+// than an actual newline, so every op is exactly one line of this program's
+// output regardless of what the line being described contains.
+str show_op(diff.Op op) {
+    str m = marker(op.kind);
+    match (op.line.utf8()) {
+        case Some(str s): {
+            return m + escape(s);
+        }
+        case None: {
+            return m + "<" + op.line.hex() + ">";
+        }
+    }
+}
+
+str marker(diff.Kind k) {
+    match (k) {
+        case Keep: {
+            return "=";
+        }
+        case Add: {
+            return "+";
+        }
+        case Remove: {
+            return "-";
+        }
+    }
+}
+
+str escape(str s) {
+    List<str> out = [];
+    for (int c in s.chars()) {
+        if (c == '\n') {
+            out.push("\\n");
+        } else if (c == '\r') {
+            out.push("\\r");
+        } else {
+            out.push(str.from_chars([c]));
+        }
+    }
+    return out.join("");
+}
+
+// Runs one case, printing its name, its edit script, and whether it
+// round-trips -- `diff.reconstruct_old(ops) == old` and
+// `diff.reconstruct_new(ops) == new`, the property every case here and the
+// random ones below both check the same way.
+void case_(str name, str old, str new) {
+    print("== " + name + " ==");
+    bytes ob = old.to_bytes();
+    bytes nb = new.to_bytes();
+    match (diff.diff(ob, nb)) {
+        case Binary: {
+            print("binary");
+        }
+        case Lines(List<diff.Op> ops): {
+            for (diff.Op op in ops) {
+                print(show_op(op));
+            }
+            check_roundtrip(name, ops, ob, nb);
+        }
+    }
+}
+
+void check_roundtrip(str name, List<diff.Op> ops, bytes old, bytes new) {
+    if (diff.reconstruct_old(ops) != old) {
+        print("ROUNDTRIP FAIL (old): " + name);
+    }
+    if (diff.reconstruct_new(ops) != new) {
+        print("ROUNDTRIP FAIL (new): " + name);
+    }
+}
+
+// --- known small cases ---------------------------------------------------------
+case_("no change", "a\nb\nc\n", "a\nb\nc\n");
+case_("pure addition", "a\nb\n", "a\nx\ny\nb\n");
+case_("pure deletion", "a\nx\ny\nb\n", "a\nb\n");
+case_("change in the middle", "1\n2\n3\n4\n5\n", "1\n2\nX\n4\n5\n");
+case_("change at the very start", "a\nb\nc\n", "Z\nb\nc\n");
+case_("change at the very end", "a\nb\nc\n", "a\nb\nZ\n");
+case_("both empty", "", "");
+case_("empty old", "", "a\nb\n");
+case_("empty new", "a\nb\n", "");
+case_("no trailing newline, old", "a\nb", "a\nb\nc\n");
+case_("no trailing newline, new", "a\nb\n", "a\nb");
+case_("no trailing newline, both, changed", "a\nb", "a\nc");
+case_("no trailing newline, both, same", "a\nb", "a\nb");
+print("known cases done");
+
+// --- binary detection ------------------------------------------------------------
+// git's own heuristic: a NUL within roughly the first 8000 bytes. Checked at
+// the boundary itself, not just "somewhere in a small buffer", since that
+// constant is the one thing a caller could get off-by-one on.
+bytes filled(int n, int v) {
+    bytes b = [v; n];
+    return b;
+}
+
+bytes with_byte_at(int n, int at, int v) {
+    bytes b = filled(n, 'a');
+    b[at] = v;
+    return b;
+}
+
+// A NUL well inside the window: binary.
+print(diff.is_binary(with_byte_at(8001, 100, 0)));
+// A NUL at the last byte the window covers (index 7999): still binary.
+print(diff.is_binary(with_byte_at(8001, 7999, 0)));
+// A NUL just past the window (index 8000): not binary -- the heuristic looks
+// at a PREFIX and stops.
+print(diff.is_binary(with_byte_at(8001, 8000, 0)));
+// A short buffer with no NUL at all: not binary.
+print(diff.is_binary("hello, world".to_bytes()));
+// An empty buffer: not binary -- there is nothing in it to call binary.
+print(diff.is_binary([]));
+// `diff.diff` itself refuses to line-diff a binary buffer.
+match (diff.diff(with_byte_at(20, 5, 0), "hello\n".to_bytes())) {
+    case Binary: {
+        print("diff() reports Binary for a NUL-bearing buffer");
+    }
+    case Lines(List<diff.Op> ops): {
+        print("BUG: diff() line-diffed a binary buffer");
+    }
+}
+print("binary detection done");
+
+// --- round trip, many generated pairs ---------------------------------------------
+//
+// `random.seeded` (docs/random.m31) so this is exactly reproducible: the
+// same 200 pairs, every run, forever. Half are `old` mutated by a handful of
+// random inserts/deletes/substitutions -- the realistic case, a small edit
+// distance -- and half are two independently drawn sequences, which stresses
+// the algorithm on pairs that share almost nothing.
+const List<str> pool = ["alpha", "beta", "gamma", "delta", "epsilon", "x", "y", "z", "1", "2"];
+
+List<str> random_lines(random.Seeded g, int n) {
+    List<str> out = [];
+    int i = 0;
+    while (i < n) {
+        out.push(pool[g.integer(0, pool.size() - 1)]);
+        i = i + 1;
+    }
+    return out;
+}
+
+List<str> mutate(random.Seeded g, List<str> base, int edits) {
+    List<str> xs = clone(base);
+    int i = 0;
+    while (i < edits) {
+        if (xs.size() == 0) {
+            xs.push(pool[g.integer(0, pool.size() - 1)]);
+        } else {
+            int at = g.integer(0, xs.size() - 1);
+            int op = g.integer(0, 2);
+            if (op == 0) {
+                xs.insert(at, pool[g.integer(0, pool.size() - 1)]);
+            } else if (op == 1) {
+                xs.remove_at(at);
+            } else {
+                xs[at] = pool[g.integer(0, pool.size() - 1)];
+            }
+        }
+        i = i + 1;
+    }
+    return xs;
+}
+
+bytes build(List<str> lines, bool trailing_nl) {
+    if (lines.size() == 0) {
+        return [];
+    }
+    str joined = lines.join("\n");
+    if (trailing_nl) {
+        joined = joined + "\n";
+    }
+    return joined.to_bytes();
+}
+
+random.Seeded g = random.seeded(1234);
+int trials = 200;
+int failures = 0;
+int t = 0;
+while (t < trials) {
+    int n = g.integer(0, 12);
+    List<str> old_lines = random_lines(g, n);
+    List<str> new_lines = [];
+    if (t % 2 == 0) {
+        new_lines = mutate(g, old_lines, g.integer(0, 5));
+    } else {
+        new_lines = random_lines(g, g.integer(0, 12));
+    }
+    bytes old = build(old_lines, g.integer(0, 1) == 1);
+    bytes new = build(new_lines, g.integer(0, 1) == 1);
+    match (diff.diff(old, new)) {
+        case Binary: {
+            print("BUG: generated text reported binary at trial " + t.to_str());
+            failures = failures + 1;
+        }
+        case Lines(List<diff.Op> ops): {
+            if (diff.reconstruct_old(ops) != old) {
+                print("round-trip failure (old) at trial " + t.to_str());
+                failures = failures + 1;
+            }
+            if (diff.reconstruct_new(ops) != new) {
+                print("round-trip failure (new) at trial " + t.to_str());
+                failures = failures + 1;
+            }
+        }
+    }
+    t = t + 1;
+}
+print(trials.to_str() + " round-trip trials, " + failures.to_str() + " failures");

@@ -12,12 +12,12 @@ restrictions here need justifying rather than asserting.
 
 ## 1. A file is a module, and its name is the basename
 
-`strings.src` is the module `strings`. No `mod` declarations, no module tree
+`strings.m31` is the module `strings`. No `mod` declarations, no module tree
 to keep in agreement with the filesystem — the part of Rust's system people
 trip over.
 
 **Module names are therefore globally unique across a program.** Two files
-named `util.src` in different directories are an error, not two modules. This
+named `util.m31` in different directories are an error, not two modules. This
 is OCaml's model and it has a real cost, which is worth stating rather than
 discovering: OCaml strips the directory the same way, and the resulting flat
 namespace is exactly why dune had to invent wrapped libraries and module
@@ -46,7 +46,7 @@ a mistake being lived with.
 ### A filename must be a valid identifier
 
 The filename becomes a name in the language, so the filename grammar becomes
-part of the language grammar. `my-mod.src` is an error **at discovery**, not
+part of the language grammar. `my-mod.m31` is an error **at discovery**, not
 at the import that first mentions it — this language has no warnings, and
 OCaml's `bad-module-name` being only a warning is the wrong end of that.
 

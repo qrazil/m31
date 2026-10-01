@@ -1,4 +1,4 @@
-corpus/errors/972-top-level-local-not-global.src:12:12: `root` is a local of the program body: the statements at the top level ARE the body, so a function cannot see them -- pass it in as an argument, or declare it `const`
+corpus/errors/972-top-level-local-not-global.m31:12:12: `root` is a local of the program body: the statements at the top level ARE the body, so a function cannot see them -- pass it in as an argument, or declare it `const`
    |
 12 |     return root;
    |            ^

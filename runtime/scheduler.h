@@ -4,7 +4,7 @@
  * byte-per-thread state table).
  *
  * This is a STANDALONE component. It is not #included by rt.c, it is not
- * reachable from a compiled .src program, and `spawn` still means an OS
+ * reachable from a compiled .m31 program, and `spawn` still means an OS
  * thread (rt.h's "concurrency" section) exactly as it did after Phase 1.
  * Wiring the language's `spawn` keyword to use this scheduler instead of a
  * raw OS thread is a deliberate, separate, later decision -- see the task

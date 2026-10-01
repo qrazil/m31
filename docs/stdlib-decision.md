@@ -118,7 +118,7 @@ same call. One rule for all of them.
 **`sort` by a comparison the CALLER supplies** was said here to need a
 function reference in the IR. It needed nothing of the kind: a callback's
 type is a one-method interface, which the language already had, so
-`lib/sort.src` is ordinary source with no runtime support at all —
+`lib/sort.m31` is ordinary source with no runtime support at all —
 `pub interface Order<T> { int cmp(T a, T b); }` and a stable merge sort
 written over `size()`, `[i]` and `push`. `sort.by(xs, order)` takes a
 function's name, a lambda or an object, because all three produce an

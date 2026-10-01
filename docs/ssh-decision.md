@@ -21,7 +21,7 @@ The only thing `apps/git` actually needs from SSH is: connect, authenticate,
 run one remote command (`git-upload-pack` or `git-receive-pack`), and get a
 bidirectional byte stream for the duration. Everything after that byte
 stream exists is git's own wire protocol, already implemented
-transport-independently in `apps/git/httpfetch.src`'s pkt-line/negotiation
+transport-independently in `apps/git/httpfetch.m31`'s pkt-line/negotiation
 logic — SSH does not need to know anything about git.
 
 So the v0 library scope is a **client**, not a server, with exactly enough
@@ -108,7 +108,7 @@ known test key authorized for it.
 send one `exec` request, get back a working bidirectional byte stream
 (stdout/stderr demultiplexing, channel close/EOF handling). This is the
 handoff point to `apps/git` — once this phase is done, `git-upload-pack`
-over SSH is "point `httpfetch.src`'s existing protocol logic at this
+over SSH is "point `httpfetch.m31`'s existing protocol logic at this
 stream instead of an HTTP body," not new git-protocol work.
 
 **Only after all four phases are independently validated does `apps/git`

@@ -1,0 +1,315 @@
+import net;
+import io;
+import fs;
+import random;
+
+// **A read that fails has consumed nothing.**
+//
+// A server and its client in one program, as `stdlib-net` does it: `spawn`
+// runs the client, one channel hands it the port and tells it when to send
+// the next thing, and another carries what it did back, so every line is
+// printed from one thread and the output cannot depend on scheduling.
+//
+// What it pins down, on a connection with a read timeout -- the one place
+// where a read failing part way through a message is the ordinary case and
+// not a disaster:
+//
+//   - `read_until` times out with half a line taken, and the next call
+//     returns the whole line, first byte included.
+//   - `wait` says `true` straight afterwards, because those bytes are back
+//     in the connection's buffer and a read will not block on them.
+//   - `io.read_line_of` inherits it, being one `read_until` over the
+//     `io.Stream` interface, in another module, with no idea what a socket
+//     is.
+//   - `read_all` times out having collected 100,000 bytes -- far more than
+//     the 64 KiB buffer it must go back into -- and the next call returns
+//     all 120,000, in order.
+//
+// The last one is the case that makes the push-back more than a one-line
+// fix: what goes back can be bigger than the buffer, so the buffer becomes
+// it, and the next refill has to allocate a proper chunk again rather than
+// read 100,000 bytes at a time forever. The `File` section at the end reads
+// across the same boundary for the same reason, on the same code shape.
+
+bool ok_or_die(Result<bool, net.Error> r) {
+    match (r) {
+        case Ok(bool b): {
+            return b;
+        }
+        case Err(net.Error e): {
+            trap("socket: " + e.to_str());
+        }
+    }
+}
+
+int int_or_die(Result<int, io.Error> r) {
+    match (r) {
+        case Ok(int n): {
+            return n;
+        }
+        case Err(io.Error e): {
+            trap("write: " + net.error_of(e).to_str());
+        }
+    }
+}
+
+bytes nl() {
+    bytes b = [10];
+    return b;
+}
+
+// A line as text, without the newline that ends it, so one print is one
+// line whatever the test read.
+str show(bytes b) {
+    bytes c = clone(b);
+    if (c.size() > 0 && c[c.size() - 1] == 10) {
+        int lf = c.pop();
+    }
+    return c.utf8().or("<not text>");
+}
+
+// 100,000 'x' then 20,000 'y': the whole of what the client sent in the
+// third exchange, in the order it sent it. Checked byte by byte rather than
+// by size, because a push-back that kept the bytes but reordered or
+// duplicated them would pass a size check.
+bool whole(bytes b) {
+    if (b.size() != 120000) {
+        return false;
+    }
+    int i = 0;
+    while (i < 120000) {
+        int want = 120;
+        if (i >= 100000) {
+            want = 121;
+        }
+        if (b[i] != want) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+void talk(net.Conn c, Chan<int> go, Chan<str> log) {
+    // 1. Half a line, then nothing: the server's `read_until` must run out
+    //    of time holding "par".
+    int w1 = int_or_die(c.write("par".to_bytes()));
+    send(log, clone("client sent 'par'"));
+    recv(go);
+    int w2 = int_or_die(c.write("tial".to_bytes()));
+    int w3 = int_or_die(c.write(nl()));
+    send(log, clone("client sent 'tial' and a newline"));
+    // 2. The same shape, read by `io.read_line_of`.
+    recv(go);
+    int w4 = int_or_die(c.write("hal".to_bytes()));
+    send(log, clone("client sent 'hal'"));
+    recv(go);
+    int w5 = int_or_die(c.write("f-line".to_bytes()));
+    int w6 = int_or_die(c.write(nl()));
+    send(log, clone("client sent 'f-line' and a newline"));
+    // 3. Enough that what the server has to put back does not fit in the
+    //    buffer it came out of.
+    recv(go);
+    bytes xs = [120; 100000];
+    int w7 = int_or_die(c.write(xs));
+    send(log, clone("client sent 100000 x and stopped"));
+    recv(go);
+    bytes ys = [121; 20000];
+    int w8 = int_or_die(c.write(ys));
+    bool half = ok_or_die(c.shutdown_write());
+    send(log, clone("client sent 20000 y and half-closed"));
+    recv(go);
+    Result<bool, io.Error> closed = c.close();
+    send(log, clone("client closed"));
+}
+
+void client(Chan<int> go, Chan<str> log) {
+    int port = recv(go);
+    match (net.connect("127.0.0.1", port)) {
+        case Ok(net.Conn c): {
+            talk(c, go, log);
+        }
+        case Err(net.Error e): {
+            trap("connect: " + e.to_str());
+        }
+    }
+}
+
+void serve(net.Conn s, Chan<int> go, Chan<str> log) {
+    print(recv(log));
+    bool t = ok_or_die(s.set_read_timeout(200));
+    // --- read_until -------------------------------------------------------
+    match (s.read_until(nl(), 100)) {
+        case Ok(bytes b): {
+            print("BUG: read_until returned " + b.size().to_str() + " bytes");
+        }
+        case Err(io.Error e): {
+            print("read_until: " + net.error_of(e).to_str());
+        }
+    }
+    // The bytes it had taken are in the buffer again, so a read will not
+    // block -- which is the same claim `wait` makes and the reason it
+    // answers from the buffer before it asks the kernel.
+    print("wait: " + ok_or_die(s.wait(0)).to_str());
+    send(go, 1);
+    print(recv(log));
+    match (s.read_until(nl(), 100)) {
+        case Ok(bytes b): {
+            print("read_until: [" + show(b) + "] " + b.size().to_str() + " bytes");
+        }
+        case Err(io.Error e): {
+            print("BUG: " + net.error_of(e).to_str());
+        }
+    }
+    // --- io.read_line_of, over the interface ------------------------------
+    send(go, 2);
+    print(recv(log));
+    match (io.read_line_of(s, 100)) {
+        case Ok(Option<str> o): {
+            print("BUG: read_line_of returned [" + o.or("<none>") + "]");
+        }
+        case Err(io.Error e): {
+            print("read_line_of: " + net.error_of(e).to_str());
+        }
+    }
+    send(go, 3);
+    print(recv(log));
+    match (io.read_line_of(s, 100)) {
+        case Ok(Option<str> o): {
+            print("read_line_of: [" + o.or("<none>") + "]");
+        }
+        case Err(io.Error e): {
+            print("BUG: " + net.error_of(e).to_str());
+        }
+    }
+    // --- read_all, with more to put back than the buffer holds ------------
+    send(go, 4);
+    print(recv(log));
+    match (s.read_all()) {
+        case Ok(bytes b): {
+            print("BUG: read_all returned " + b.size().to_str() + " bytes");
+        }
+        case Err(io.Error e): {
+            print("read_all: " + net.error_of(e).to_str());
+        }
+    }
+    bool t2 = ok_or_die(s.set_read_timeout(0));
+    send(go, 5);
+    print(recv(log));
+    match (s.read_all()) {
+        case Ok(bytes b): {
+            print("read_all: " + b.size().to_str() + " bytes");
+            print("read_all: every byte, in order: " + whole(b).to_str());
+        }
+        case Err(io.Error e): {
+            print("BUG: " + net.error_of(e).to_str());
+        }
+    }
+    send(go, 6);
+    print(recv(log));
+    Result<bool, io.Error> cl = s.close();
+}
+
+void run(net.Listener ln) {
+    Chan<int> go = Chan<int>(1);
+    Chan<str> log = Chan<str>(1);
+    spawn client(go, log);
+    send(go, ln.local().port());
+    match (ln.accept()) {
+        case Ok(net.Conn s): {
+            serve(s, go, log);
+        }
+        case Err(net.Error e): {
+            trap("accept: " + e.to_str());
+        }
+    }
+    Result<bool, net.Error> closed = ln.close();
+}
+
+match (net.listen("127.0.0.1", 0)) {
+    case Ok(net.Listener ln): {
+        run(ln);
+    }
+    case Err(net.Error e): {
+        trap("listen: " + e.to_str());
+    }
+}
+// --- the same reads on the types that cannot time out ------------------------
+//
+// An `io.Buffer` has no kernel to say no to it, so none of its reads can
+// fail and there is nothing for it to push back. What it does instead is
+// the thing `Stream` warns about: running out of written bytes looks exactly
+// like the end of a file, so a `read_until` whose delimiter has not been
+// written yet consumes what is there and reports no delimiter. A caller
+// tells the two apart by looking, which is why `ends_with` is the documented
+// check and not the size.
+io.Buffer half = io.buffer_of("par".to_bytes());
+match (half.read_until(nl(), 100)) {
+    case Ok(bytes b): {
+        print("Buffer read_until: [" + show(b) + "] ends with the delimiter: " + b.ends_with(nl()).to_str());
+    }
+    case Err(io.Error e): {
+        print("BUG: " + e.to_str());
+    }
+}
+print("Buffer has nothing left: " + half.size().to_str());
+// An `io.File` shares the buffer, the refill and the push-back with a
+// `Conn` -- and a regular file cannot be made to fail half way through a
+// read from a test, so what is checked here is the invariant the push-back
+// put at risk: the buffer is one chunk whenever the kernel reads into it.
+// A file read across the 64 KiB boundary, by both accumulating reads, is
+// where a buffer left at the wrong size shows up.
+str dir = "/tmp/m31-corpus-net-timeout-" + random.system().hex(8);
+match (fs.mkdir(dir)) {
+    case Ok(bool made): {
+        print("dir made");
+    }
+    case Err(io.Error e): {
+        print(e.to_str());
+    }
+}
+str path = dir + "/big";
+bytes body = [97; 150000];
+bytes tail = [98; 50000];
+body.extend(nl());
+body.extend(tail);
+match (io.write_bytes(path, body)) {
+    case Ok(int n): {
+        print("wrote " + n.to_str() + " bytes");
+    }
+    case Err(io.Error e): {
+        print(e.to_str());
+    }
+}
+match (io.open(path)) {
+    case Ok(io.File f): {
+        match (f.read_until(nl(), 200000)) {
+            case Ok(bytes b): {
+                print("File read_until: " + b.size().to_str() + " bytes, ends with the delimiter: " + b.ends_with(nl()).to_str());
+            }
+            case Err(io.Error e): {
+                print(e.to_str());
+            }
+        }
+        match (f.read_all()) {
+            case Ok(bytes b): {
+                print("File read_all: " + b.size().to_str() + " bytes");
+            }
+            case Err(io.Error e): {
+                print(e.to_str());
+            }
+        }
+        Result<bool, io.Error> cl = f.close();
+    }
+    case Err(io.Error e): {
+        print(e.to_str());
+    }
+}
+match (fs.rmtree(dir, dir)) {
+    case Ok(bool gone): {
+        print("cleaned up");
+    }
+    case Err(io.Error e): {
+        print(e.to_str());
+    }
+}

@@ -1,0 +1,69 @@
+import other;
+
+// Nine standard library module names, every one of them used here for
+// something of this file's own. None is imported here, so none is in scope
+// here, and adding an import to `other.m31` cannot change what any of them
+// means in this file.
+
+// a type
+type json {
+    int n;
+}
+
+// a function
+int math(int x) {
+    return x + 1;
+}
+
+// an enum variant
+enum Kind {
+    html;
+    plain;
+}
+
+// a field, and a sibling method named after a module too
+type Doc {
+    str sort;
+}
+
+str Doc.date() {
+    return sort;
+}
+
+str Doc.show() {
+    return date() + "!";
+}
+
+// a parameter
+int width(str os) {
+    return os.size();
+}
+
+// a case binding
+str payload(Option<str> o) {
+    match (o) {
+        case Some(str base64): { return base64; }
+        case None: { return "-"; }
+    }
+}
+
+// a local
+str text = "alpha beta";
+print(str(text.size()));
+
+// a loop variable
+List<str> rows = ["a", "bb"];
+for (str csv in rows) {
+    print(csv);
+}
+
+print(str(json(3).n));
+print(str(math(41)));
+match (Kind.html) {
+    case html: { print("html"); }
+    case plain: { print("plain"); }
+}
+print(Doc("deep").show());
+print(str(width("linux")));
+print(payload(Option<str>.Some("body")));
+print(str(other.reach()));

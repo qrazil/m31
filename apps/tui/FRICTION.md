@@ -39,13 +39,13 @@ the whole public API:
 
 | what the file should be called | what it is called | why |
 |---|---|---|
-| `style.src` | `tuistyle.src` | might collide with a user's own |
-| `geom.src` / `layout.src` | `tuigeom.src` | same |
-| `buffer.src` | `tuibuf.src` | same |
-| `text.src` | `tuitext.src` | **`text` is a standard library module** |
-| `diff.src` / `render.src` | `tuidiff.src` | might collide |
-| `widget.src` | `tuiwidget.src` | same |
-| `list.src` | `tuilists.src` | same |
+| `style.m31` | `tuistyle.m31` | might collide with a user's own |
+| `geom.m31` / `layout.m31` | `tuigeom.m31` | same |
+| `buffer.m31` | `tuibuf.m31` | same |
+| `text.m31` | `tuitext.m31` | **`text` is a standard library module** |
+| `diff.m31` / `render.m31` | `tuidiff.m31` | might collide |
+| `widget.m31` | `tuiwidget.m31` | same |
+| `list.m31` | `tuilists.m31` | same |
 
 Sixteen names are already taken by `lib/` (`args base64 csv date fs html
 http io json math net os random sort text unicode`), and every one of them
@@ -89,7 +89,7 @@ and know which of the seven each name lives in.
 **What I would want, in order of preference.**
 
 1. **A path is the module name.** `import tui/geom;` reads
-   `<root>/tui/geom.src` and binds it as `geom` locally (or `tui.geom` if
+   `<root>/tui/geom.m31` and binds it as `geom` locally (or `tui.geom` if
    the short name is taken). Roots: the entry file's directory, then
    anything named on the command line or in a one-line manifest. This makes
    the name *hierarchical*, which is the actual fix — `tui/text` and the
@@ -99,7 +99,7 @@ and know which of the seven each name lives in.
 2. **A namespace per dependency.** If a manifest names dependencies, then
    `tui.geom.Rect` where `tui` is the dependency and `geom` its module.
    Collisions become structurally impossible rather than a convention.
-3. **`pub import`** — one line in a `tui.src` that re-exports the seven, so a
+3. **`pub import`** — one line in a `tui.m31` that re-exports the seven, so a
    library has a front door. Additive; it does not change what any existing
    program means.
 
@@ -117,13 +117,13 @@ property for `lib/` and only extend it outwards.
 
 **Fixed.** A module's name is now in scope only in the file that imported it
 (reference §2.1), so `Paragraph.text` is the field again and the workaround
-below is gone from `tuiwidget.src`. A file that imports `text` *and* declares
+below is gone from `tuiwidget.m31`. A file that imports `text` *and* declares
 a field called `text` is refused at the field, naming both (§4.3).
 
 This is a bug, and it is the only thing here that produced a diagnostic I
 could not act on.
 
-`tuiwidget.src` declares
+`tuiwidget.m31` declares
 
 ```c
 pub type Paragraph {
@@ -139,17 +139,17 @@ for (str l in text.split("\n")) { ... }
 ```
 
 That compiled, and kept compiling, through every test in this directory.
-Then `bench.src` — a *different* file — added `import date;`, and
-`lib/date.src` imports `text`, and the build broke:
+Then `bench.m31` — a *different* file — added `import date;`, and
+`lib/date.m31` imports `text`, and the build broke:
 
 ```
-apps/tui/tuiwidget.src:253:23: `text` has no function `split`
+apps/tui/tuiwidget.m31:253:23: `text` has no function `split`
     |
 253 |     for (str l in text.split("\n")) {
     |                       ^
 ```
 
-`tuiwidget.src` does not import `text`. It never did. A module pulled in
+`tuiwidget.m31` does not import `text`. It never did. A module pulled in
 *transitively by another file of the same program* took the name away from
 my field. Reference §4.1 says nothing shadows "a module the file imports" —
 this is a module the file does not import, and the rule as implemented is
@@ -277,7 +277,7 @@ int Constraint.weight() {
 }
 ```
 
-`tuigeom.src` has four such methods — `kind`, `weight`, `preferred`,
+`tuigeom.m31` has four such methods — `kind`, `weight`, `preferred`,
 `to_str` — 28 `case` arms between them, and about 110 of the file's 605
 lines. The formatted source is three
 lines per arm, so it is worse than it looks above.
@@ -448,7 +448,7 @@ pub int width(str s) {
 gives `clusters()` a fast path (one byte per cluster in that range), which
 is the other half of the win.
 
-This belongs in `lib/unicode.src`, is provably equivalent inside
+This belongs in `lib/unicode.m31`, is provably equivalent inside
 0x20..0x7E — one byte is one code point, one code point is one cluster, one
 cluster is one column — and is about eight lines. It is the single highest
 value change available to the standard library for this kind of program. As
@@ -458,7 +458,7 @@ and some of them will get the boundary wrong.
 A second thing missing from `unicode`: **a way to walk grapheme clusters
 without allocating one `str` per cluster.** `graphemes(s)` builds
 `List<str>`, so wrapping a 1 400-character paragraph allocates 1 400
-strings. The private `cluster_starts` in `lib/unicode.src` already returns
+strings. The private `cluster_starts` in `lib/unicode.m31` already returns
 the offsets; making it `pub` would let a wrapper walk the text with
 `substr` only where it actually cuts.
 
@@ -466,7 +466,7 @@ the offsets; making it `pub` would let a wrapper walk the text with
 
 ## 12. What is missing from `str` and `bytes`
 
-  - **`s.index_of(sub, from: i)`.** `lib/text.src` explains at length why it
+  - **`s.index_of(sub, from: i)`.** `lib/text.m31` explains at length why it
     cannot provide this without being quadratic. It is right, and the
     built-in is still missing.
   - **`extend_str` / `push_str` on `bytes`** — see §9.
@@ -560,7 +560,7 @@ here.
 Good ones, quoted exactly as they arrived:
 
 ```
-apps/tui/bench.src:84:51: expected a name, found `bytes`
+apps/tui/bench.m31:84:51: expected a name, found `bytes`
    |
 84 | void report(str name, int total_ns, int runs, int bytes) {
    |                                                   ^
@@ -575,7 +575,7 @@ compiler decided without telling you there was a decision.
 
 One more: the shadowing rule catches a **parameter** that collides with a
 **module-level function in the same file**. I had `pub int cols(str s)` and
-`Paragraph.lines(int cols)` in `tuiwidget.src`; the parameter is refused.
+`Paragraph.lines(int cols)` in `tuiwidget.m31`; the parameter is refused.
 The message was clear, and the rule is right, but it is a rule that reaches
 further than people expect — a library author has to keep every parameter
 name clear of every function name in the module.
@@ -587,9 +587,9 @@ name clear of every function name in the module.
 It preserves meaning (checked against every test in this directory) and it
 is idempotent. Two things it does that I would rather it did not:
 
-  - **It removes blank lines between top-level statements.** `demo.src` is a
+  - **It removes blank lines between top-level statements.** `demo.m31` is a
     program made of top-level statements with `// the banner`, `// three
-    panels`, `// the status bar` section comments; after `langc fmt` every
+    panels`, `// the status bar` section comments; after `m31c fmt` every
     blank line between them is gone and each comment is glued to the
     statement above it. The file is materially harder to read after
     formatting than before.
@@ -662,7 +662,7 @@ draw((tuibuf.Buffer buf, tuigeom.Rect a) =>
      buf.set_str(a.x, a.y, "a lambda is a widget", st), b, area);
 ```
 
-All three are in `tests.src`. Nothing in ratatui (a trait and an `impl`
+All three are in `tests.m31`. Nothing in ratatui (a trait and an `impl`
 block) or bubbletea (an interface with three methods and a `tea.Msg` type
 switch) is this light. A user's own widget is genuinely no harder to write
 than a shipped one, which is the property the whole design was aiming at.

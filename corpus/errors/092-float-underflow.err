@@ -1,4 +1,4 @@
-corpus/errors/092-float-underflow.src:5:7: float literal `1.0e-400` is too small for float
+corpus/errors/092-float-underflow.m31:5:7: float literal `1.0e-400` is too small for float
   |
 5 | print(1.0e-400);
   |       ^

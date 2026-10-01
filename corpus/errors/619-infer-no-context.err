@@ -1,4 +1,4 @@
-corpus/errors/619-infer-no-context.src:7:7: cannot infer type parameter `T` of `nothing` from its arguments or from where its value goes; bind an argument, or the result, to a local with a written type first
+corpus/errors/619-infer-no-context.m31:7:7: cannot infer type parameter `T` of `nothing` from its arguments or from where its value goes; bind an argument, or the result, to a local with a written type first
   |
 7 | print(nothing().is_some());
   |       ^

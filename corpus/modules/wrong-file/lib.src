@@ -1,6 +1,0 @@
-pub int broken() {
-    // The error is here, and used to be reported against main.src at this
-    // same line number -- quoting an innocent line, or none at all.
-    str s = "x";
-    return s;
-}

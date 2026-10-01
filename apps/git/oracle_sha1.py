@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The other half of `t_sha1.src`: the same lines, from Python's hashlib.
+"""The other half of `t_sha1.m31`: the same lines, from Python's hashlib.
 
 `test.sh` diffs the two outputs. Nothing here may read the language's answer,
 which is the whole point -- an oracle that has seen the result is a tautology.

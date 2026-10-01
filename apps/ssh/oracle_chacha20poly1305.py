@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""The other half of `t_chacha20poly1305.src`: the same lines, computed
-independently through `cryptography`/OpenSSL instead of `lib/chacha20poly1305.src`.
+"""The other half of `t_chacha20poly1305.m31`: the same lines, computed
+independently through `cryptography`/OpenSSL instead of `lib/chacha20poly1305.m31`.
 
 `test.sh` diffs the two outputs. Nothing here reads the language's answer,
 which is the whole point -- an oracle that has seen the result is a
@@ -59,7 +59,7 @@ def aead_open_line(label, key, nonce, sealed, aad):
 
 # --- RFC 8439 official test vectors -----------------------------------------
 #
-# Same inputs as t_chacha20poly1305.src's RFC section -- see that file's
+# Same inputs as t_chacha20poly1305.m31's RFC section -- see that file's
 # header for why the expected numbers are not duplicated in either file.
 
 out.append("block 2.3.2 " + chacha_block(bytes.fromhex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"), 1, bytes.fromhex("000000090000004a00000000")).hex())
@@ -97,7 +97,7 @@ out.append(aead_open_line("open 2.8.2", bytes.fromhex("808182838485868788898a8b8
 out.append(aead_open_line("open A.5", bytes.fromhex("1c9240a5eb55d38af333888604f6b5f0473917c1402b80099dca5cbc207075c0"), bytes.fromhex("000000000102030405060708"), bytes.fromhex("64a0861575861af460f062c79be643bd5e805cfd345cf389f108670ac76c8cb24c6cfc18755d43eea09ee94e382d26b0bdb7b73c321b0100d4f03b7f355894cf332f830e710b97ce98c8a84abd0b948114ad176e008d33bd60f982b1ff37c8559797a06ef4f0ef61c186324e2b3506383606907b6a7c02b0f9f6157b53c867e4b9166c767b804d46a59b5216cde7a4e99040c5a40433225ee282a1b0a06c523eaf4534d7f83fa1155b0047718cbc546a0d072b04b3564eea1b422273f548271a0bb2316053fa76991955ebd63159434ecebb4e466dae5a1073a6727627097a1049e617d91d361094fa68f0ff77987130305beaba2eda04df997b714d6c6f2c29a6ad5cb4022b02709b") + bytes.fromhex("eead9d67890cbb22392336fea1851f38"), bytes.fromhex("f33388860000000000004e91")))
 
 
-# --- the same tiny deterministic generator as t_chacha20poly1305.src's `Rng` -
+# --- the same tiny deterministic generator as t_chacha20poly1305.m31's `Rng` -
 
 class Rng:
     def __init__(self, seed):
@@ -141,7 +141,7 @@ for aad_len in SWEEP_LENGTHS:
         sealed = aead_seal(key, nonce, pt, aad)
         out.append(f"sweep-seal {aad_len}-{pt_len} " + sealed.hex())
         # The round trip and the single-bit-tamper check are verified inside
-        # t_chacha20poly1305.src itself (both are properties of this
+        # t_chacha20poly1305.m31 itself (both are properties of this
         # library alone, needing no external oracle); only the sealed bytes
         # are compared here. Still, draw the same "flip_at" value from the
         # RNG stream so every later call's inputs line up between the two

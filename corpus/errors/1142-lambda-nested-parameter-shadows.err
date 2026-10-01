@@ -1,4 +1,4 @@
-corpus/errors/1142-lambda-nested-parameter-shadows.src:10:22: `v` is already in scope; shadowing is not allowed, rename one
+corpus/errors/1142-lambda-nested-parameter-shadows.m31:10:22: `v` is already in scope; shadowing is not allowed, rename one
    |
 10 | Make m = (int k) => (int v) => v + k;
    |                      ^

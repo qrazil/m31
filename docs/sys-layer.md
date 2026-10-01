@@ -45,7 +45,7 @@ helper (`ret`).
 The errno *values* are Linux's (`SYS_ENOENT` = 2, `SYS_EAGAIN` = 11, …) on
 every host, not whatever the host's C library uses. On Linux both backends
 agree by construction. On macOS and the BSDs the common values — the three
-`lib/io.src` names, `ENOENT` 2, `EACCES` 13, `EISDIR` 21 — happen to match,
+`lib/io.m31` names, `ENOENT` 2, `EACCES` 13, `EISDIR` 21 — happen to match,
 but others do not (`EAGAIN` is 35 on macOS, `ENOSYS` 78), so the libc
 backend translates through a `switch` on the host's symbolic names. On
 Linux every case of that switch is the identity; it is compiled and run by
@@ -53,7 +53,7 @@ the corpus anyway, so the code a macOS build depends on is not dead code
 here. A host errno with no case passes through unchanged — still an error,
 just in the host's numbering.
 
-This is what lets `from_errno` in `lib/io.src` be written once, with
+This is what lets `from_errno` in `lib/io.m31` be written once, with
 numbers, for every target.
 
 ### Flags and clocks are the layer's own constants
@@ -125,7 +125,7 @@ Sockets, added **2026-09-23** as the foundation for a `net`/`http` module:
 | `sys_resolve(host, port, af, out, cap)` | how many exist | `getaddrinfo` | **refused**, `-ENOSYS` | same |
 | `sys_ignore_sigpipe()` | 0 | `sigaction(SIGPIPE, SIG_IGN)` | `rt_sigaction` 13 | `rt_sigaction` 134 |
 
-The terminal, added **2026-09-24** as the foundation for `lib/term.src` and
+The terminal, added **2026-09-24** as the foundation for `lib/term.m31` and
 the interactive programs above it:
 
 | function | returns | libc | raw, all three architectures |
@@ -165,7 +165,7 @@ which hangs the line up.
 
 `sys_winsize` answers **0 by 0** rather than failing when the terminal does not
 know its size, because a serial line has none and a fresh pty has none until
-something sets one. That is a value a caller must expect, and `lib/term.src`
+something sets one. That is a value a caller must expect, and `lib/term.m31`
 documents 80 by 24 as the conventional fallback.
 
 A socket is a descriptor, so `sys_read`, `sys_write` and `sys_close` are the
@@ -200,11 +200,11 @@ retry, so that a signal restarts the wait with the full timeout in both
 backends rather than the remainder in one and the full value in the other.
 
 `sys_isatty` exists for the runtime's stdout buffer (§3) — and is now
-`lib/term.src`'s first question too, unchanged and with no second
+`lib/term.m31`'s first question too, unchanged and with no second
 implementation beside it — and `sys_rmdir` because the layer's own test cannot
 clean up after `sys_mkdir` without it.
 
-`sys_stat`, `sys_symlink` and `sys_listdir` arrived with `lib/fs.src`.
+`sys_stat`, `sys_symlink` and `sys_listdir` arrived with `lib/fs.m31`.
 `sys_stat` takes a path rather than opening the file and calling
 `sys_fstat`, because opening needs read permission the question does not,
 and opening a FIFO blocks; `follow` is zero for `lstat`, which is what lets
@@ -225,7 +225,7 @@ system's; `fs.listdir` sorts.
 
 ### Process launch: `sys_proc_start` / `sys_proc_wait`, and a wait-status encoding
 
-Added **2026-09-28**, for `lib/os.src`'s `os.run` -- a different program's
+Added **2026-09-28**, for `lib/os.m31`'s `os.run` -- a different program's
 image in a child process (an editor, a pager, `git`'s own subprocess-heavy
 plumbing), not `spawn`, which is a pthread inside this process and shares
 its memory (`docs/sys-layer.md` §4's table used to list this as future
@@ -467,7 +467,7 @@ language's job, and it is the same job on both backends.
 **SIGPIPE is the one sharp edge sockets add, and it is covered by exactly one
 call.** Writing to a connection whose peer has gone away kills the process by
 default. `sys_ignore_sigpipe()` sets that signal's disposition to ignore, so
-the write returns `-SYS_EPIPE` instead; `lib/net.src` calls it before its
+the write returns `-SYS_EPIPE` instead; `lib/net.m31` calls it before its
 first write, and `sys_test.c` now checks the other half of `shutdown`'s
 contract instead of explaining why it cannot.
 
@@ -493,7 +493,7 @@ sockets.
 
 ### Signals: what is here, and what a handler would cost
 
-**Decided 2026-09-24, when `lib/term.src` asked the question again and got
+**Decided 2026-09-24, when `lib/term.m31` asked the question again and got
 the same answer. There is still no `sys_sigaction`. The layer offers one
 disposition — `sys_ignore_sigpipe` — and nothing else; a program that needs
 to know its window changed size asks `sys_winsize` again, and a program that
@@ -508,8 +508,8 @@ lost. A full-screen program wants two signals:
   - **SIGWINCH**, to redraw when the window is resized. But the answer to it
     is one `ioctl`, and a program that draws frames is already asking for the
     size or could be. Polling costs a system call per frame and gets the
-    resize a frame late; a handler would cost a signal facility. `lib/term.src`
-    polls, and `examples/keys.src` shows the shape: a 250 ms read timeout, and
+    resize a frame late; a handler would cost a signal facility. `lib/term.m31`
+    polls, and `examples/keys.m31` shows the shape: a 250 ms read timeout, and
     the size re-read every time round the loop.
   - **SIGINT**, so ^C can put the terminal back before the process dies. But
     **raw mode clears `ISIG`, so ^C is not a signal at all** — it arrives as
@@ -560,7 +560,7 @@ and `sys_sigaction` belongs in that change rather than in this one.
 
 ## 3. What the runtime routes through it today
 
-`lib/io.src` and `lib/fs.src` reach it through one primitive per
+`lib/io.m31` and `lib/fs.m31` reach it through one primitive per
 function (§8): `rt_open` is `sys_open`, `rt_read` is `sys_read`, and so on,
 with the -errno passed through. The loops, the buffers and the errno policy
 that used to be C here (`rt_file_read` and its four siblings) are language
@@ -588,7 +588,7 @@ than one buffer) with an `eprint` in the middle that must land exactly
 between lines 6999 and 7000, and a file larger than the first read.
 
 The one other thing the runtime does with the layer on its own account is
-**put the terminal back**. `lib/term.src`'s `raw()` hands `rt_term_arm` a
+**put the terminal back**. `lib/term.m31`'s `raw()` hands `rt_term_arm` a
 snapshot through `sys_tcget`, and `rt_trap`, `rt_panic` and an `atexit`
 handler replay it through `sys_tcset` on the way out. That covers the two
 paths a destructor cannot — a trap, which aborts and runs none, and
@@ -757,7 +757,7 @@ is not attempted until a Windows target is.
 
 ---
 
-## 8. Where `lib/io.src` goes next
+## 8. Where `lib/io.m31` goes next
 
 > **Done 2026-09-21.** The list that was built, and why it differs from the
 > proposal below, is `docs/stdlib-seam.md` §7. In short: `__read`,
@@ -808,7 +808,7 @@ Points the `bytes` design has to settle for these to exist:
   - **`__fstat` pushes onto a `List<int>`** because a prim cannot return a
     struct; `io` builds its own `Stat` type from the three values.
   - **The flag and constant values** (`SYS_O_*`, `SYS_SEEK_*`,
-    `SYS_CLOCK_*`) are written in `lib/io.src` as numbers, which is safe
+    `SYS_CLOCK_*`) are written in `lib/io.m31` as numbers, which is safe
     precisely because they are the layer's constants and not the host's.
   - **`from_errno` takes `-r`.** The three named errnos stay 2, 13 and 21,
     now guaranteed on every host by §1 rather than by coincidence.
@@ -817,7 +817,7 @@ Points the `bytes` design has to settle for these to exist:
 
 ## 9. Where a `net` module starts
 
-> **Built 2026-09-23.** `lib/net.src` exists and is TCP: `Conn` (which
+> **Built 2026-09-23.** `lib/net.m31` exists and is TCP: `Conn` (which
 > satisfies `io.Stream`), `Listener`, `connect`, `listen`, an `Ip`/`Addr`
 > pair with a parser and an RFC 5952 printer written in language source, and
 > `net.Error`. The primitive list below is what it was built to, with two
@@ -828,7 +828,7 @@ Points the `bytes` design has to settle for these to exist:
 > which the module followed.
 
 The layer side of sockets is done (§2). What is *not* written here, on
-purpose, is a line of the module above it: no `lib/net.src`, and no `prim`s
+purpose, is a line of the module above it: no `lib/net.m31`, and no `prim`s
 for one. This is the list that module will want, in the same shape as §8's
 file primitives — each a thin wrapper over one `sys_*` function, keeping the
 layer's convention of a value or **-errno**:
@@ -902,14 +902,14 @@ Points the module has to settle, and the reasons they look like this:
     parsed in language source (§2).
 
   - **The constant values** (`SYS_AF_*`, `SYS_SOCK_*`, `SYS_SO_*`,
-    `SYS_POLL_*`, `SYS_SHUT_*`) are written in `lib/net.src` as numbers, which
+    `SYS_POLL_*`, `SYS_SHUT_*`) are written in `lib/net.m31` as numbers, which
     is safe for exactly the reason §8 gives for `SYS_O_*`: they are the
     layer's constants and not the host's, so 10 means IPv6 on every target.
 
   - **`net` must ignore SIGPIPE before its first write**, and now can (§2).
     That is a prerequisite, not a detail: without it a server dies the first
     time a client hangs up mid-response. `sys_ignore_sigpipe()` is the one
-    signal call the layer offers, on both backends. `lib/net.src` makes it
+    signal call the layer offers, on both backends. `lib/net.m31` makes it
     every time it opens a socket rather than once at startup, because a
     module cannot hold the "already done" flag
     (docs/module-state-decision.md); it is one idempotent system call per

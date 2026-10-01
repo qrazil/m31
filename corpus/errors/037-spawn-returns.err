@@ -1,4 +1,4 @@
-corpus/errors/037-spawn-returns.src:5:1: `spawn` needs a void function; `f` returns a value
+corpus/errors/037-spawn-returns.m31:5:1: `spawn` needs a void function; `f` returns a value
   |
 5 | spawn f(1);
   | ^

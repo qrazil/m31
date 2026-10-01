@@ -1,4 +1,4 @@
-corpus/errors/040-distinct-not-base.src:4:9: type mismatch: expected int, found Price
+corpus/errors/040-distinct-not-base.m31:4:9: type mismatch: expected int, found Price
   |
 4 | int n = p;
   |         ^

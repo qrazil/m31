@@ -2,8 +2,8 @@
 
 Git plumbing and an interactive client, written entirely in this language:
 SHA-1, zlib inflate, the loose-object format, refs, the index, working-tree
-status, and both a read-only CLI (`git.src`) and a `tuiapp.Loop`-driven
-interactive client (`gitui.src`) over `apps/tui`. Nothing here is a binding
+status, and both a read-only CLI (`git.m31`) and a `tuiapp.Loop`-driven
+interactive client (`gitui.m31`) over `apps/tui`. Nothing here is a binding
 to anything; the only C in the program is the runtime every program links.
 
 ```
@@ -11,7 +11,7 @@ cargo build
 bash apps/git/test.sh                    # the built-in fixtures
 bash apps/git/test.sh <repo> [<repo>…]   # those, and each repository named
 
-./build.sh apps/git/git.src -o ourgit
+./build.sh apps/git/git.m31 -o ourgit
 ./ourgit -log --max 5
 
 ./apps/git/build-gitui.sh -o ourgitui    # not build.sh -- see build-gitui.sh
@@ -20,22 +20,22 @@ bash apps/git/test.sh <repo> [<repo>…]   # those, and each repository named
 
 | file | what it is |
 |---|---|
-| `sha1.src` | SHA-1 (FIPS 180-4), incremental and one-shot |
-| `zlib.src` | DEFLATE inflate (RFC 1951) and the zlib wrapper (RFC 1950), with Adler-32, from a mid-file offset as well as from the front |
-| `object.src` | the object store: the header, the SHA-1 check, trees, commits, tags -- loose or, via `pack.src`, packed, through the one `read` |
-| `pack.src` | packfiles: `.idx` v2, the pack's own object encoding, `OBJ_OFS_DELTA`/`OBJ_REF_DELTA` delta-chain resolution |
-| `refs.src` | HEAD, `refs/**`, `packed-refs`, symbolic refs, `rev-parse`'s DWIM |
-| `repo.src` | where the files are: `.git` as a file, and a linked worktree's `commondir` |
-| `git.src` | the read-only CLI |
-| `index.src` | `.git/index`: read, write, a fresh entry from `fs.stat` |
-| `status.src` | working-tree status: staged, unstaged, untracked |
-| `hunks.src` | `lib/diff.src`'s edit script, grouped into `apps/tui/tuidiffview.Hunk`/`Line` with context |
-| `gitlog.src` | the commit-history walk, shared by `git.src -log` and `gitui.src` |
-| `gitclient.src` | the interactive client's state and logic (no top-level statements, so it is importable and testable) |
-| `gitui.src` | the interactive client's thin driver: parses a path, runs `tuiapp.Loop` |
-| `httpfetch.src` | git's smart-HTTP protocol, v0 fetch/clone only: pkt-line framing, the ref advertisement, want/have negotiation, side-band-64k demultiplexing, and pack checksum verification, over `lib/http.src` |
-| `build-gitui.sh` | builds `gitui.src`: this compiler resolves every `import` against the entry file's own directory (`src/modules.rs`'s `load`), not a search path, so `gitui.src`'s `apps/tui/` dependencies are staged into a temporary directory at build time rather than copied into this one -- see the script's own header |
-| `t_*.src` | test programs, each printing what a Python oracle prints, or asserting against its own expectations |
+| `sha1.m31` | SHA-1 (FIPS 180-4), incremental and one-shot |
+| `zlib.m31` | DEFLATE inflate (RFC 1951) and the zlib wrapper (RFC 1950), with Adler-32, from a mid-file offset as well as from the front |
+| `object.m31` | the object store: the header, the SHA-1 check, trees, commits, tags -- loose or, via `pack.m31`, packed, through the one `read` |
+| `pack.m31` | packfiles: `.idx` v2, the pack's own object encoding, `OBJ_OFS_DELTA`/`OBJ_REF_DELTA` delta-chain resolution |
+| `refs.m31` | HEAD, `refs/**`, `packed-refs`, symbolic refs, `rev-parse`'s DWIM |
+| `repo.m31` | where the files are: `.git` as a file, and a linked worktree's `commondir` |
+| `git.m31` | the read-only CLI |
+| `index.m31` | `.git/index`: read, write, a fresh entry from `fs.stat` |
+| `status.m31` | working-tree status: staged, unstaged, untracked |
+| `hunks.m31` | `lib/diff.m31`'s edit script, grouped into `apps/tui/tuidiffview.Hunk`/`Line` with context |
+| `gitlog.m31` | the commit-history walk, shared by `git.m31 -log` and `gitui.m31` |
+| `gitclient.m31` | the interactive client's state and logic (no top-level statements, so it is importable and testable) |
+| `gitui.m31` | the interactive client's thin driver: parses a path, runs `tuiapp.Loop` |
+| `httpfetch.m31` | git's smart-HTTP protocol, v0 fetch/clone only: pkt-line framing, the ref advertisement, want/have negotiation, side-band-64k demultiplexing, and pack checksum verification, over `lib/http.m31` |
+| `build-gitui.sh` | builds `gitui.m31`: this compiler resolves every `import` against the entry file's own directory (`src/modules.rs`'s `load`), not a search path, so `gitui.m31`'s `apps/tui/` dependencies are staged into a temporary directory at build time rather than copied into this one -- see the script's own header |
+| `t_*.m31` | test programs, each printing what a Python oracle prints, or asserting against its own expectations |
 | `oracle_*.py` | the oracles: `hashlib`, `zlib`, and a from-scratch format reader |
 | `pty_e2e.py` | drives `ourgitui` under a real pty against disposable fixtures, real `git` as the oracle |
 | `compare.sh` | every command beside the real `git`, compared octet for octet |
@@ -47,7 +47,7 @@ bash apps/git/test.sh <repo> [<repo>…]   # those, and each repository named
 Read-only: `cat-file --type/--size/--pretty`, `ls-tree`, `log [--max N]
 [<rev>]`, `rev-parse` and `refs`, on a working tree, a bare repository or a
 linked worktree -- **loose or packed**, transparently: `object.read` checks
-the loose store first and `pack.src`'s `.idx`/`.pack` reading second, so
+the loose store first and `pack.m31`'s `.idx`/`.pack` reading second, so
 every reader above it (this CLI, the interactive client's status/diff/commit
 reading, `rev-parse`'s short-hash resolution) works the same way on a
 repository a real `git clone` produced as on one this program has only ever
@@ -58,14 +58,14 @@ tree, commit), ref writing (`update`, `update_symbolic`, compare-and-swap),
 and working-tree status, all checked against real git in disposable
 fixtures (`test_write.sh`).
 
-The interactive client (`gitui.src`, `apps/git/design.md`'s locked design):
+The interactive client (`gitui.m31`, `apps/git/design.md`'s locked design):
 a collapsible outline of untracked files, unstaged changes, staged changes
 and recent commits; whole-file staging and unstaging (`s`/`u`); a commit,
 via a message file at `COMMIT_EDITMSG` read back and refused if empty
 (`c` opens a which-key overlay: `e` launches `$EDITOR` (`vi` if unset) on
 the message file, falling back to writing the template and naming the path
 if no editor can be launched at all; `f` finishes; `a` aborts -- see
-`gitclient.src`'s own header, "launching `$EDITOR`, and the terminal handoff
+`gitclient.m31`'s own header, "launching `$EDITOR`, and the terminal handoff
 that takes", for how the terminal is handed to the editor and back); a
 persistent footer of the base commands; and a synced jump list toggled with
 `J`. Hunk-level diff display and staging, push/pull, checkout and rebase are
@@ -81,7 +81,7 @@ Everything is checked against something that is not this program:
 | commands | the real `git` | 1 388 invocations compared byte for byte across those four repositories |
 
 Both `log` and `cat-file -p` reproduce git's output exactly, which is less
-obvious than it sounds — see `git.src` on tab expansion in commit messages,
+obvious than it sounds — see `git.m31` on tab expansion in commit messages,
 on trailing-whitespace trimming, and on C-style path quoting.
 
 Throughput, `cc -O2` on x86-64, best of several runs on a busy machine:
@@ -99,11 +99,11 @@ repositories this project actually has lying around, not this program's own
 ability to read them any more. `apps/git/design.md`'s "Going remote" names
 packfiles as the first, independent piece of that larger plan (reading only
 -- writing one, for `push`, is later, separate work), and it has landed:
-`pack.src` reads the `.idx` (format v2; v1 is refused, not guessed at, since
+`pack.m31` reads the `.idx` (format v2; v1 is refused, not guessed at, since
 nothing still writes it), the packfile's own variable-length object headers,
 and resolves an `OBJ_OFS_DELTA`/`OBJ_REF_DELTA` chain of either kind (or a
 mix) down to a real commit/tree/blob/tag, iteratively rather than
-recursively so a real chain cannot blow the stack. `zlib.src` grew the
+recursively so a real chain cannot blow the stack. `zlib.m31` grew the
 matching primitive, `inflate_at`/`decompress_at`: decompress one DEFLATE or
 zlib stream starting at an offset inside a much larger buffer, and report how
 many input octets it consumed, so a packfile's objects are read one at a time
@@ -111,7 +111,7 @@ without ever copying the pack to get to the next one.
 
 `object.read` -- and so `log`, `cat-file`, `ls-tree`, `rev-parse`'s short
 names and the interactive client's own reading -- checks the loose store
-first and a repository's packs second, with nothing above `object.src`
+first and a repository's packs second, with nothing above `object.m31`
 changed to make that true. Checked the same way everything else here is:
 `apps/git/oracle_object.py`'s from-scratch reader grew its own independent
 `.idx`/pack/delta implementation (Python's `zlib.decompressobj`, fed from an
@@ -155,7 +155,7 @@ The line is not "old objects are packed and new ones are loose": it is
 "objects this machine wrote are loose, objects that arrived in a pack are
 packed, until something repacks". That split used to mean this program was a
 usable tool on a repository you have been committing to and a useless one on
-a fresh clone, with very little in between; `pack.src` is what closes that
+a fresh clone, with very little in between; `pack.m31` is what closes that
 gap. `apps/git/test.sh`'s own built-in fixture is still an all-loose one on
 purpose (a repository this program itself commits to, same as `oro` and
 `lang`), and it now builds two packed fixtures alongside it -- one repacked
@@ -168,10 +168,10 @@ Packfile *writing* remains out of scope here -- it is what `push` needs, and
 same read-before-write split the index/object/ref write path already went
 through.
 
-## Smart-HTTP fetch (`httpfetch.src`): a verified pack on disk, and no further
+## Smart-HTTP fetch (`httpfetch.m31`): a verified pack on disk, and no further
 
-`httpfetch.src` speaks enough of git's smart-HTTP protocol -- v0 only, over
-`lib/http.src` -- to fetch a real packfile from a real server: the ref
+`httpfetch.m31` speaks enough of git's smart-HTTP protocol -- v0 only, over
+`lib/http.m31` -- to fetch a real packfile from a real server: the ref
 advertisement (`GET .../info/refs?service=git-upload-pack`, refusing a
 "dumb HTTP" answer rather than misparsing it), want/have negotiation (a
 `clone`'s empty `have` list and a `fetch`'s non-empty one are both tested),
@@ -187,7 +187,7 @@ as hand-corrupted bytes with no server involved, and as a genuinely
 truncated response over the wire -- is refused cleanly, never written.
 
 **This is exactly as far as it goes: verified bytes on disk, not a usable
-repository.** `httpfetch.src` does not unpack anything it fetches -- no
+repository.** `httpfetch.m31` does not unpack anything it fetches -- no
 `.idx`, no delta resolution, no loose objects written -- because doing that
 needs the same `OBJ_OFS_DELTA`/`OBJ_REF_DELTA` machinery stage 2 (above) is
 for, and duplicating an incomplete piece of that here was explicitly out of
@@ -195,7 +195,7 @@ scope. Turning a fetched pack into a repository this program can `log` or
 `cat-file` is therefore stage 2's own follow-up, not a gap in this file.
 Push, SSH and protocol v2 are named, separate gaps, not oversights: v0 is
 universally supported as a fallback even where v2 is preferred, and
-`lib/http.src` itself already refuses `https://` before a socket exists, for
+`lib/http.m31` itself already refuses `https://` before a socket exists, for
 the reason its own header gives.
 
 ## Smaller things this does not do
@@ -208,11 +208,11 @@ the reason its own header gives.
     `core.abbrev` (seven digits, fixed), no `log.decorate`, no
     `core.quotePath` (on, as it is by default), no colour, no pager, no
     `i18n.logOutputEncoding`.
-  - **Hunk-level diff against the working tree.** `status.src` reports
-    whole-file staged/unstaged/untracked; `hunks.src` can compute a
+  - **Hunk-level diff against the working tree.** `status.m31` reports
+    whole-file staged/unstaged/untracked; `hunks.m31` can compute a
     line-level diff between any two texts, but nothing yet wires the two
     together into a `diff`-shaped view of the working tree, or `ls-files`.
-  - **Writing beyond what `gitui.src` does.** The write path (index,
+  - **Writing beyond what `gitui.m31` does.** The write path (index,
     objects, refs) is real and checked against real `git`, but there is no
     standalone write-side CLI — only the interactive client and the tests
     exercise it today.

@@ -70,26 +70,26 @@ bare-code: 1.1 500 ''
   fields content-length=0
   body 0 
 reason 200/418/599: OK / I'm a teapot / Server Error
-GET (84 bytes)
+GET (83 bytes)
 | GET /a?b=c HTTP/1.1
 | host: example.com
-| user-agent: lang-http
+| user-agent: m31-http
 | connection: close
 | 
 | 
-POST (176 bytes)
+POST (175 bytes)
 | POST /submit HTTP/1.1
 | content-type: application/x-www-form-urlencoded
 | connection: keep-alive
 | host: example.com:8080
-| user-agent: lang-http
+| user-agent: m31-http
 | content-length: 11
 | 
 | field=value
-chunked PUT (123 bytes)
+chunked PUT (122 bytes)
 | PUT /big HTTP/1.1
 | host: h
-| user-agent: lang-http
+| user-agent: m31-http
 | connection: close
 | transfer-encoding: chunked
 | 

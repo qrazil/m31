@@ -1,4 +1,4 @@
-corpus/errors/009-break-outside-loop.src:1:1: `break` outside a loop
+corpus/errors/009-break-outside-loop.m31:1:1: `break` outside a loop
   |
 1 | break;
   | ^

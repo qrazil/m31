@@ -1,4 +1,4 @@
-corpus/errors/611-void-field.src:7:16: `Wrap` cannot be instantiated with `void`: its field `item` would hold no value
+corpus/errors/611-void-field.m31:7:16: `Wrap` cannot be instantiated with `void`: its field `item` would hold no value
   |
 7 | Wrap<void> b = Wrap<void>();
   |                ^

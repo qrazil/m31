@@ -1,0 +1,133 @@
+// Every object in a repository -- loose or packed -- read and printed
+// canonically, for `oracle_object.py` to be diffed against.
+//
+//   ./build.sh apps/git/t_object.m31 -o t_object && ./t_object <repo>
+//
+// This is the end-to-end check: it runs `object.read` (loose, then
+// `pack.m31`, exactly as every other reader in this program does) over every
+// object `object.all` names, which checks each one's SHA-1 against the name
+// it is filed under -- reconstructed through a delta chain first, when it is
+// packed -- and prints its parse in a form that has no text decoding in it --
+// a path, a name, an email and a message are hex or a digest, never
+// characters. So a disagreement is a disagreement about the format and not
+// about UTF-8. `object.all` rather than `object.loose` is what makes this the
+// same check on a packed repository as on a loose one: on an all-loose
+// fixture (everything `apps/git/test.sh` built before packfiles existed
+// here) the two name exactly the same ids, so nothing about this file's
+// output changes for them.
+
+import object;
+import io;
+import os;
+import fs;
+import sha1;
+import date;
+
+List<str> argv = os.args();
+if (argv.size() < 2) {
+    io.eprint("usage: t_object <repo-or-gitdir>");
+    os.exit(2);
+}
+str gd = gitdir(argv[1]);
+List<str> names = [];
+match (object.all(gd)) {
+    case Ok(List<str> ids): {
+        names = ids;
+    }
+    case Err(object.Error e): {
+        io.eprint(e.to_str());
+        os.exit(2);
+    }
+}
+int t0 = date.now_ns();
+int total = 0;
+for (str id in names) {
+    match (object.read(gd, id)) {
+        case Ok(object.Object o): {
+            total = total + o.raw.size();
+            show(o);
+        }
+        case Err(object.Error e): {
+            print(id + " ERROR " + e.to_str());
+        }
+    }
+}
+int ns = date.now_ns() - t0;
+if (ns > 0) {
+    io.eprint("objects: " + names.size().to_str() + " objects, " + total.to_str() + " octets of content in " + (ns / 1_000_000).to_str() + " ms = " + (total * 1_000 / ns).to_str() + " MB/s");
+}
+
+void show(object.Object o) {
+    str id = o.id;
+    match (o.body) {
+        case Blob: {
+            print(id + " blob " + o.raw.size().to_str() + " " + sha1.hex(o.raw));
+        }
+        case Tree(List<object.Entry> es): {
+            print(id + " tree " + o.raw.size().to_str() + " " + es.size().to_str());
+            for (int i in 0 .. es.size()) {
+                print(id + " tree-entry " + i.to_str() + " " + es[i].mode_text() + " " + es[i].id + " " + hx(es[i].name));
+            }
+        }
+        case Commit(object.Commit c): {
+            print(id + " commit " + o.raw.size().to_str() + " tree=" + c.tree + " parents=" + joined(c.parents) + " author=" + ident(c.author) + " committer=" + ident(c.committer) + " extra=" + c.extra.size().to_str() + "/" + sha1.hex(c.extra.join(nl())) + " msg=" + c.message.size().to_str() + "/" + sha1.hex(c.message));
+        }
+        case Tag(object.Tag t): {
+            str tagger = "-";
+            match (t.tagger) {
+                case Some(object.Ident who): {
+                    tagger = ident(who);
+                }
+                case None: {
+                }
+            }
+            print(id + " tag " + o.raw.size().to_str() + " object=" + t.object + " type=" + t.kind + " name=" + hx(t.name) + " tagger=" + tagger + " extra=" + t.extra.size().to_str() + "/" + sha1.hex(t.extra.join(nl())) + " msg=" + t.message.size().to_str() + "/" + sha1.hex(t.message));
+        }
+    }
+}
+
+str ident(object.Ident who) {
+    return hx(who.name) + "|" + hx(who.email) + "|" + who.when.to_str() + "|" + who.zone + "|" + who.offset.to_str();
+}
+
+// Hex, or `-` for nothing at all: an empty field and a field of no octets
+// print the same in hex, and the two are told apart in the Python twin the
+// same way.
+str hx(bytes b) {
+    if (b.size() == 0) {
+        return "-";
+    }
+    return b.hex();
+}
+
+str joined(List<str> xs) {
+    if (xs.size() == 0) {
+        return "-";
+    }
+    return xs.join(",");
+}
+
+// A one-octet `bytes` holding a newline. There is no `bytes` literal
+// (reference §3.10), and `join` on a `List<bytes>` takes a `bytes`, so the
+// separator has to be built -- and built here rather than at each call,
+// because a literal of a mutable type allocates every time it is evaluated.
+bytes nl() {
+    return "\n".to_bytes();
+}
+
+// A repository directory, or the git directory itself.
+//
+// Deliberately the naive version, and NOT `repo.find`: a `.git` file, a
+// linked worktree's `commondir` and the walk up to a parent are all
+// `repo.m31`'s job, and this program is the one that has to notice if
+// `repo.m31` gets them wrong. `test.sh` hands it the common git directory
+// that `git rev-parse --git-common-dir` printed, so the two sides of the
+// comparison agree about which store is being read without either of them
+// deciding it.
+str gitdir(str path) {
+    str inner = fs.join(path, ".git");
+    if (fs.is_dir(inner)) {
+        return inner;
+    }
+    return path;
+}

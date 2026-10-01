@@ -1,4 +1,4 @@
-corpus/errors/005-unreachable.src:3:5: unreachable statement
+corpus/errors/005-unreachable.m31:3:5: unreachable statement
   |
 3 |     return 2;
   |     ^

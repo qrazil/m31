@@ -1,4 +1,4 @@
-corpus/errors/020-shadow-outer.src:3:5: `x` is already in scope; shadowing is not allowed, rename one
+corpus/errors/020-shadow-outer.m31:3:5: `x` is already in scope; shadowing is not allowed, rename one
   |
 3 |     int x = 2;
   |     ^

@@ -1,0 +1,434 @@
+// Arithmetic in GF(2^255 - 19), the base field Curve25519 (RFC 7748) and
+// edwards25519 (RFC 8032) both share. Written from scratch for this
+// language, and shared by `x25519` and `y25519` -- er, `ed25519` -- the way
+// the one field belongs to both curves that use it.
+//
+// This module is the SECURITY-CRITICAL core of both: every operation here
+// runs on secret data at some point (an X25519 ladder step, an Ed25519
+// signing scalar multiplication), so every place this file relies on
+// something being constant-time says so, in a comment, at the line that
+// relies on it. Read that before changing anything below.
+//
+// --- representation: 16 limbs, radix 2^16 -----------------------------------
+//
+// A field element is an `Array<int> of 16, value = sum(limb[i] * 2^(16*i))`.
+// 16*16 = 256 bits of capacity for a 255-bit prime -- deliberately uniform
+// (unlike the mixed 25.5-bit-per-limb layout some other Curve25519 code
+// uses), because a uniform radix needs no per-limb weight correction in the
+// multiply, which is one whole source of off-by-one bugs this does not have
+// to get right. It also means a 32-byte encoding is exactly two bytes per
+// limb, with no leftover bits to special-case.
+//
+// Every function here returns a FULLY NORMALIZED element: every limb in
+// [0, 65535]. Nothing is ever left "lazily reduced" between calls, which
+// costs some carry passes but means every function's precondition on its
+// arguments is the same as its postcondition on its result -- one invariant,
+// checked nowhere because it is always true.
+//
+// --- constant time: what this file promises, and how ------------------------
+//
+// The two operations a secret value ever goes through are the four basic
+// operations (+ - * squaring) and the carry chain that normalizes them. All
+// four of those must take the same time and touch the same memory whatever
+// the secret bits are. Concretely:
+//
+//   - No comparison, `if`, `while` condition or array index in this file
+//     ever depends on a field element's value. Every loop bound below is a
+//     fixed count (16, 31, 254, ...) known at compile time; every `Array`
+//     index is a loop counter, never a value read out of a limb.
+//
+//   - **`>>` is NOT safe on a value that might be negative, and this is the
+//     one non-obvious fact this whole file is built around.** The runtime's
+//     `>>` (runtime/rt.h, `rt_ishr`) is
+//
+//         a < 0 ? ~(~a >> n) : a >> n
+//
+//     which branches on the SIGN of `a`. That branch is invisible from
+//     inside this language -- `>>` looks like one operation -- but the
+//     emitted C is a real `a < 0 ? ... : ...`, and at -O0 (which this
+//     project's own gates require every emitted program to build clean
+//     under) that is an actual conditional branch, not a predication that
+//     disappears. If `a` is a field-element limb derived from a secret
+//     scalar, the branch taken depends on the secret. This file therefore
+//     NEVER calls `>>` on a value that is not first proven, by construction,
+//     to be non-negative -- see `carry_pass` and `sub_p_borrow` below, which
+//     add a fixed public bias before every `>>` for exactly this reason.
+//     Everywhere else, `>>` here is a public, compile-time-constant shift of
+//     16 -- the exact same operation, just proven safe first.
+//
+//   - `+ - *` on `int` trap on overflow (reference §6.1) via a
+//     branch on the CPU's overflow flag (runtime/rt.h, `rt_iadd` etc.). That
+//     branch's OUTCOME never depends on secret data here, because every
+//     bound in this file (see the size comments on `mul_raw`) keeps every
+//     intermediate value far below 2^63 -- the overflow check always takes
+//     the same "did not overflow" path, for every legal input, so it carries
+//     no information about which secret input it was. This is unlike the
+//     `>>` case above: there, the two branch outcomes are both reachable by
+//     design (a limb really can be negative or not); here, only one ever is.
+//
+//   - `& | ^ ~` never trap and compile to a plain, unconditional C operator
+//     (`rt_iand` etc., `static inline`, no branch of any kind) -- these are
+//     the operations `cselect` below is built from, and they are the only
+//     genuinely branch-free primitive this language offers.
+//
+// What this file does NOT independently verify: that gcc/clang, across every
+// version and -O level, actually emit branch-free machine code for the
+// overflow-checked add/sub/mul (`__builtin_*_overflow`) and for the masked
+// `cselect` pattern, rather than something that LOOKS branch-free in C but a
+// specific compiler turns back into a branch or a secret-dependent memory
+// access. That is a real, known-hard problem for constant-time C in general
+// (see the "report" this module ships with) and this file does the one thing
+// under its own control -- never write a branch, a comparison or an index
+// that a compiler would have to remove -- and no more than that.
+
+// --- construction and encoding ----------------------------------------------
+
+/// The additive identity.
+pub Array<int> zero() {
+    return [0; 16];
+}
+
+/// The multiplicative identity.
+pub Array<int> one() {
+    Array<int> out = [0; 16];
+    out[0] = 1;
+    return out;
+}
+
+/// The element `n` names, for the handful of small constants the curves need
+/// (486662's Montgomery `(A-2)/4`, the `2*d` of the twisted Edwards curve, ...).
+/// `n` must fit in 32 bits, which is every constant this module is ever
+/// asked to build.
+pub Array<int> small(int n) {
+    Array<int> out = [0; 16];
+    out[0] = n & 0xFFFF;
+    out[1] = n >> 16 & 0xFFFF;
+    return out;
+}
+
+/// The field element 32 little-endian octets encode, taken as a raw 256-bit
+/// load -- exactly two octets per limb, with NO masking of any bit.
+///
+/// Both RFC 7748 (the u-coordinate's top bit) and RFC 8032 (the sign bit
+/// riding on the y-coordinate's encoding) reserve the top bit of the last
+/// octet for something that is not field data; masking it off is the
+/// caller's job, on the raw bytes, before this function ever sees them --
+/// this function only knows how to load 256 bits into 16 limbs.
+pub Array<int> from_bytes(bytes b) {
+    Array<int> out = [0; 16];
+    for (int k in 0 .. 16) {
+        out[k] = b[2 * k] | b[2 * k + 1] << 8;
+    }
+    return out;
+}
+
+/// `a`, canonically reduced to `[0, p)` and packed as 32 little-endian
+/// octets -- the encoding RFC 7748 and RFC 8032 both specify.
+///
+/// This runs on secret data (an X25519 shared secret, an Ed25519 nonce
+/// point) and its constant-time argument is `reduce_canonical`'s.
+pub bytes to_bytes(Array<int> a) {
+    Array<int> v = reduce_canonical(a);
+    bytes out = [0; 32];
+    for (int k in 0 .. 16) {
+        out[2 * k] = v[k] & 0xFF;
+        out[2 * k + 1] = v[k] >> 8 & 0xFF;
+    }
+    return out;
+}
+
+// --- the carry chain: the one place every operation below bottoms out at ----
+
+// 2^256 = 2 * 2^255 = 2*(p + 19) = 2p + 38, so a carry OUT of limb 15
+// (weight 2^240, the top limb) by an amount `c` represents `c * 2^256`,
+// which is `c * 38 (mod p)`, folded back into limb 0.
+const int WRAP = 38;
+// A public bias, and its exact quotient by 2^16 -- both compile-time
+// constants, never secret. `BIAS` only has to exceed the largest magnitude
+// any limb this file ever builds could go negative by; measured, that is
+// under 2^17 (an elementwise subtraction of two normalized limbs). `BIAS` is
+// four billion, an enormous margin over that, chosen as a round power of two
+// so `BIAS_HI` is exact. Adding it to an already-huge NON-negative value (as
+// `mul_raw`'s output can be, up to roughly 2^42) changes nothing but the sign
+// safety margin -- it is still added unconditionally, every time, which is
+// the point: this file does not ask which case it is in.
+const int BIAS = 1 << 32;
+const int BIAS_HI = BIAS >> 16;
+
+// One left-to-right ripple carry over 16 limbs, folding a carry out of the
+// top back in at 38x. Every input limb may be any `int` at all -- negative,
+// or far above 2^16 -- and every output limb is in [0, 65535].
+//
+// CONSTANT TIME: `biased` is `fe[i] + BIAS`, which is positive for every
+// value this file ever calls it with (see `BIAS` above), so the `>>` below
+// always takes the branch for a non-negative operand, regardless of whether
+// `fe[i]` itself was negative, zero, or large -- the two cases this function
+// exists to handle are indistinguishable to the CPU that runs it.
+Array<int> carry_pass(Array<int> fe) {
+    Array<int> out = clone(fe);
+    for (int i in 0 .. 16) {
+        int biased = out[i] + BIAS;
+        int q = biased >> 16;
+        out[i] = biased - (q << 16);
+        int c = q - BIAS_HI;
+        if (i < 15) {
+            out[i + 1] = out[i + 1] + c;
+        } else {
+            out[0] = out[0] + WRAP * c;
+        }
+    }
+    return out;
+}
+
+// Three ripple-carry passes, always enough to bring every limb into
+// [0, 65535] from anything this module produces (verified by differential
+// testing against Python's arbitrary-precision arithmetic -- see the test
+// harness) -- the value it represents may still be a small multiple of `p`,
+// not yet the canonical representative; only `reduce_canonical` produces
+// that.
+Array<int> normalize(Array<int> fe) {
+    Array<int> a = carry_pass(fe);
+    Array<int> b = carry_pass(a);
+    return carry_pass(b);
+}
+
+// --- the four operations -----------------------------------------------------
+
+pub Array<int> add(Array<int> a, Array<int> b) {
+    Array<int> out = [0; 16];
+    for (int i in 0 .. 16) {
+        out[i] = a[i] + b[i];
+    }
+    return normalize(out);
+}
+
+pub Array<int> sub(Array<int> a, Array<int> b) {
+    Array<int> out = [0; 16];
+    for (int i in 0 .. 16) {
+        out[i] = a[i] - b[i];
+    }
+    return normalize(out);
+}
+
+pub Array<int> neg(Array<int> a) {
+    return sub(zero(), a);
+}
+
+// The schoolbook convolution of two normalized elements (every input limb in
+// [0, 65535]), folded once at 38x, NOT yet carry-propagated.
+//
+// Size bound, checked by the differential tests and relied on by the
+// "overflow trap never fires on legal input" argument in the header: a term
+// `a[i]*b[j]` is at most (2^16-1)^2 < 2^32; up to 16 such terms land in one
+// `t[k]` before folding, so `t[k] < 2^36` going into the fold; the fold adds
+// `38 * t[k]` (< 2^42) into a `t[k-16]` that already held < 2^36, so every
+// entry handed to `normalize` is a non-negative value under 2^43 -- fifteen
+// bits of headroom below `int`'s trap threshold before it is even carried.
+Array<int> mul_raw(Array<int> a, Array<int> b) {
+    Array<int> t = [0; 31];
+    for (int i in 0 .. 16) {
+        int ai = a[i];
+        for (int j in 0 .. 16) {
+            t[i + j] = t[i + j] + ai * b[j];
+        }
+    }
+    int k = 30;
+    while (k > 15) {
+        t[k - 16] = t[k - 16] + WRAP * t[k];
+        k = k - 1;
+    }
+    return t.slice(0, 16);
+}
+
+pub Array<int> mul(Array<int> a, Array<int> b) {
+    return normalize(mul_raw(a, b));
+}
+
+pub Array<int> sq(Array<int> a) {
+    return mul(a, a);
+}
+
+/// `2*a*a` -- the extended-coordinates addition law wants this exact shape
+/// as its own step often enough (`ed25519.m31`) to give it a name; it is
+/// `add(sq(a), sq(a))` and nothing more.
+pub Array<int> sq2(Array<int> a) {
+    Array<int> s = sq(a);
+    return add(s, s);
+}
+
+// --- constant-time selection -------------------------------------------------
+
+/// `a` if `cond` is 1, `b` if `cond` is 0 -- with no branch, for any two
+/// normalized elements. `cond` must be exactly 0 or 1; anything else is a
+/// bug in the caller (not checked, the way an out-of-range index is not
+/// re-checked by every caller of `Array` indexing).
+///
+/// CONSTANT TIME: `mask` is `0 - cond`, which is 0 or -1 (all 64 bits set,
+/// two's complement) -- `-` never traps here because 0-0 and 0-1 both fit
+/// trivially, so the overflow check inside `-` always takes its "no
+/// overflow" path regardless of which of the two secret values `cond` is.
+/// `&`, `|` and `^` (inside `~`, `wrapping_` needed nowhere) are the
+/// runtime's plain, unconditional bitwise operators (see the header): the
+/// whole selection is arithmetic on 64-bit patterns, never a read of `cond`
+/// by anything that could branch on it.
+pub Array<int> cselect(int cond, Array<int> a, Array<int> b) {
+    int mask = 0 - cond;
+    int notmask = mask ^ -1;
+    Array<int> out = [0; 16];
+    for (int i in 0 .. 16) {
+        out[i] = a[i] & mask | b[i] & notmask;
+    }
+    return out;
+}
+
+/// Swap `a` and `b` in place when `cond` is 1, leave them alone when it is
+/// 0 -- the Montgomery ladder's `cswap`. `Array` is a reference type
+/// (reference §3.9), so `a` and `b` here are the caller's own arrays: this
+/// mutates them directly, element by element, rather than building and
+/// returning new ones. Same masking argument as `cselect`.
+pub void cswap(int cond, Array<int> a, Array<int> b) {
+    int mask = 0 - cond;
+    int notmask = mask ^ -1;
+    for (int i in 0 .. 16) {
+        int ai = a[i];
+        int bi = b[i];
+        a[i] = ai & notmask | bi & mask;
+        b[i] = ai & mask | bi & notmask;
+    }
+}
+
+// --- canonical reduction: exactly two conditional subtractions --------------
+
+const Array<int> P_LIMBS = [
+    0xFFED, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF,
+    0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x7FFF
+];
+
+// A public bias for the borrow chain, sized the same way as `BIAS` above:
+// comfortably larger than the at-most-~2^17 magnitude a borrowing
+// subtraction of two normalized, canonical-range limbs can ever produce.
+const int SBIAS = 1 << 20;
+const int SBIAS_HI = SBIAS >> 16;
+
+// A pair with no other reason to be public: `v - p`'s 16-limb difference and
+// the borrow out of the top limb.
+type Borrowed {
+    Array<int> diff;
+    int borrow;
+}
+
+/// `v - p`, elementwise, with an explicit borrow chain -- NOT folded at 38x,
+/// because the question this answers is "was `v` below `p`", which the fold
+/// would hide. Returns the 16-limb difference and the final borrow: 1 means
+/// `v < p` (the difference is garbage, `v - p + 2^256`, and must be
+/// discarded); 0 means `v >= p` (the difference is the true `v - p`).
+///
+/// CONSTANT TIME: same technique as `carry_pass`. `dd` ranges over roughly
+/// [-65536, 65535] (two canonical-range limbs and a 0/1 borrow-in), so
+/// `dd + SBIAS` is always positive, and the `>>` below never branches on the
+/// secret sign of `dd` itself.
+Borrowed sub_p_borrow(Array<int> v) {
+    Array<int> out = [0; 16];
+    int borrow = 0;
+    for (int i in 0 .. 16) {
+        int dd = v[i] - P_LIMBS[i] - borrow;
+        int biased = dd + SBIAS;
+        int q = biased >> 16;
+        out[i] = biased - (q << 16);
+        borrow = SBIAS_HI - q;
+    }
+    return Borrowed(out, borrow);
+}
+
+// `fe` is always the output of `normalize`, so every limb is in [0, 65535]
+// and the value it represents is under 2^256. Since 2*p = 2^256 - 38, that
+// value minus 2*p is at most (2^256-1) - (2^256-38) = 37 -- strictly less
+// than `p` -- so subtracting `p` twice, each time only if the subtraction
+// does not borrow, always lands in [0, p). No more, and no fewer, than two
+// subtractions are ever needed, so this is two fixed steps, not a loop
+// whose length could depend on the secret value.
+Array<int> reduce_canonical(Array<int> fe) {
+    Array<int> v = fe;
+    for (int step in 0 .. 2) {
+        Borrowed db = sub_p_borrow(v);
+        v = cselect(1 - db.borrow, db.diff, v);
+    }
+    return v;
+}
+
+// --- inversion and the square-root helper: fixed exponents, by squaring ----
+//
+// Both exponents below are FIXED public constants (they name the field, not
+// any input), so unlike everything above, there would be nothing wrong with
+// a variable-length addition chain here -- the reason this uses a plain
+// square-and-multiply over every bit instead of a shorter, hand-picked chain
+// (as e.g. ref10's fe_invert.c does) is simply that a 255-bit loop with two
+// documented skipped positions is far easier to independently verify against
+// the exponent's own binary expansion than an addition chain is to check by
+// eye, and inversion is not called often enough for the difference to matter.
+//
+// `p - 2 = 2^255 - 21`. For any n-bit X, `(2^n - 1) - X == (2^n - 1) XOR X`
+// (subtracting X from all-ones borrows nowhere), so with X = 20 = 0b10100:
+// the 255-bit binary expansion of `p - 2` is 255 ones with bits 2 and 4
+// cleared. Square-and-multiply from the top bit (254, folded into the
+// initial value) down to bit 0 is 254 squarings, multiplying by the base at
+// every bit except 2 and 4.
+
+/// `a^(p-2) = a^-1` for any nonzero `a` (undefined, like any inverse, at
+/// zero -- callers that can see zero must decide what that means to them).
+pub Array<int> invert(Array<int> a) {
+    Array<int> c = a;
+    int bit = 253;
+    while (bit >= 0) {
+        c = sq(c);
+        if (bit != 2 && bit != 4) {
+            c = mul(c, a);
+        }
+        bit = bit - 1;
+    }
+    return c;
+}
+
+// `(p - 5) / 8 = 2^252 - 3`. With X = 2 = 0b10: the 252-bit expansion of
+// `(p-5)/8` is 252 ones with bit 1 cleared. 251 squarings below the initial
+// (implicit) top bit, multiplying at every bit except 1.
+
+/// `a^((p-5)/8)` -- the candidate exponent RFC 8032 §5.1.3 uses to compute a
+/// square root mod p (since p = 5 mod 8): the caller still has to check the
+/// candidate and correct it by `sqrt(-1)` if needed, exactly as the RFC
+/// describes. Not a square root on its own.
+pub Array<int> pow_p_minus_5_over_8(Array<int> a) {
+    Array<int> c = a;
+    int bit = 250;
+    while (bit >= 0) {
+        c = sq(c);
+        if (bit != 1) {
+            c = mul(c, a);
+        }
+        bit = bit - 1;
+    }
+    return c;
+}
+
+// --- equality and parity -----------------------------------------------------
+
+/// Whether `a` and `b` are the same field element. Compares canonical
+/// encodings, so two representations of the same value always agree; this
+/// is used on public values only (a decoded point's coordinates against a
+/// recomputed candidate) and makes no constant-time claim -- `==` on `bytes`
+/// is ordinary byte comparison.
+pub bool eq(Array<int> a, Array<int> b) {
+    return to_bytes(a) == to_bytes(b);
+}
+
+pub bool is_zero(Array<int> a) {
+    return eq(a, zero());
+}
+
+/// The low bit of `a`'s canonical representative -- the "sign" RFC 8032
+/// packs into a point encoding's spare bit. Not a constant-time operation
+/// (it reads a public coordinate, never a secret scalar).
+pub int parity(Array<int> a) {
+    bytes b = to_bytes(a);
+    return b[0] & 1;
+}

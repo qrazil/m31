@@ -1,4 +1,4 @@
-corpus/errors/1131-lambda-parameter-type-mismatch.src:6:10: `Less.cmp` takes (Point, Point), this lambda takes (int, int)
+corpus/errors/1131-lambda-parameter-type-mismatch.m31:6:10: `Less.cmp` takes (Point, Point), this lambda takes (int, int)
   |
 6 | Less l = (int a, int b) => a - b;
   |          ^

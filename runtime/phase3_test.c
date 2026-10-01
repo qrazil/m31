@@ -543,7 +543,7 @@ static void blocker_worker(void *argp) {
     /* Exactly the shape src/emit_c.rs now wraps every `prim` call site in
      * (rt.h's rt_enter_blocking/rt_exit_blocking) -- here called directly,
      * since this test exercises the runtime mechanism itself rather than
-     * going through a compiled .src program (the compiler side of the
+     * going through a compiled .m31 program (the compiler side of the
      * contract -- that this text is actually emitted around a prim call --
      * is checked separately, directly on emitted C). A real blocking
      * syscall would behave identically from this scheduler's point of

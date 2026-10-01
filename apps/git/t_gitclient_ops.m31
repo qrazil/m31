@@ -1,0 +1,117 @@
+// Drives `gitclient.State`'s staging, unstaging, committing and diffing
+// directly -- no terminal, no `tuiapp.Loop` -- against a real, disposable
+// fixture, so `test_gitui.sh` can check each action's on-disk effect against
+// real git the same way `t_index_stage.m31` and `t_write_refs.m31` already
+// do for the plumbing underneath this client.
+//
+//   ./t_gitclient_ops <gitdir> <worktree> stage <relative-path>
+//   ./t_gitclient_ops <gitdir> <worktree> unstage <relative-path>
+//   ./t_gitclient_ops <gitdir> <worktree> commit
+//   ./t_gitclient_ops <gitdir> <worktree> diff <untracked|unstaged|staged> <relative-path>
+//   ./t_gitclient_ops <gitdir> <worktree> edit
+//
+// `commit` reads whatever is already at `<gitdir>/COMMIT_EDITMSG` -- the
+// caller writes it first, the same file a person editing it by hand would
+// have left there -- and prints `State.message` afterward either way, so the
+// shell test can tell a refusal (an empty message) from an actual commit.
+//
+// `diff` moves the outline's cursor onto the named row (`select_id`, the
+// same lookup `State.reload()` itself uses to keep the cursor on a rebuild)
+// and calls `show_diff_current()`, then prints the result the same way
+// `apps/git/t_hunks.m31` prints `hunks.hunks`'s own output -- one `@@ ...`
+// header line per hunk, one marker-prefixed line per body row -- so a shell
+// test can diff this against real `git diff`/`git diff --cached`'s body
+// exactly as `test_hunks.sh` already does against `diff -u`'s. `Binary files
+// differ` on its own line if the pair was binary; `no diff shown: <message>`
+// if the row could not be found at all (a bad section/path argument).
+//
+// `edit` calls `edit_message()` then `launch_editor()` exactly as
+// `gitui.m31`'s own driver does once `tuiapp.Loop.run` has handed the
+// terminal back -- there is no terminal or `Session` in this harness at all,
+// which is exactly what makes it able to drive `os.run`'s every outcome
+// (success, nonzero exit, signal, `$EDITOR` unset or not found)
+// deterministically: the caller sets `$EDITOR` (or leaves it unset, to drive
+// the `vi` fallback with a `$PATH` this process controls) to a stand-in
+// editor script before running this, and checks `State.message` and the
+// repository afterward the same way `commit` above is checked.
+
+import gitclient;
+import io;
+import os;
+import tuidiffview;
+
+List<str> argv = os.args();
+if (argv.size() < 4) {
+    io.eprint("usage: t_gitclient_ops <gitdir> <worktree> stage|unstage <path>");
+    io.eprint("       t_gitclient_ops <gitdir> <worktree> commit");
+    os.exit(2);
+}
+str gd = argv[1];
+str wt = argv[2];
+str op = argv[3];
+gitclient.State state = gitclient.State.open(gd, wt);
+state.refresh();
+if (op == "stage") {
+    if (argv.size() < 5) {
+        io.eprint("usage: t_gitclient_ops <gitdir> <worktree> stage <path>");
+        os.exit(2);
+    }
+    state.stage_path(argv[4].to_bytes());
+} else if (op == "unstage") {
+    if (argv.size() < 5) {
+        io.eprint("usage: t_gitclient_ops <gitdir> <worktree> unstage <path>");
+        os.exit(2);
+    }
+    state.unstage_path(argv[4].to_bytes());
+} else if (op == "commit") {
+    state.finish_commit();
+} else if (op == "diff") {
+    if (argv.size() < 6) {
+        io.eprint("usage: t_gitclient_ops <gitdir> <worktree> diff <untracked|unstaged|staged> <path>");
+        os.exit(2);
+    }
+    state.reload();
+    str id = argv[4] + ":" + argv[5];
+    if (state.outline.select_id(id)) {
+        state.show_diff_current();
+        if (state.diff_open) {
+            if (state.diff_binary) {
+                print("Binary files differ");
+            } else {
+                for (tuidiffview.Hunk h in state.diff_view.hunks) {
+                    print(h.header);
+                    for (tuidiffview.Line l in h.lines) {
+                        print(marker(l.kind) + l.text);
+                    }
+                }
+            }
+        } else {
+            print("no diff shown: " + state.message);
+        }
+        os.exit(0);
+    } else {
+        io.eprint("no such row: " + id);
+        os.exit(2);
+    }
+} else if (op == "edit") {
+    state.edit_message();
+    state.launch_editor();
+} else {
+    io.eprint("unknown op: " + op);
+    os.exit(2);
+}
+print(state.message);
+
+str marker(tuidiffview.Kind k) {
+    match (k) {
+        case Context: {
+            return " ";
+        }
+        case Add: {
+            return "+";
+        }
+        case Remove: {
+            return "-";
+        }
+    }
+}

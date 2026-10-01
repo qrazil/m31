@@ -1,4 +1,4 @@
-corpus/modules/privacy-new/main.src:2:10: `Secret` is private to `lib`; it cannot be constructed from here
+corpus/modules/privacy-new/main.m31:2:10: `Secret` is private to `lib`; it cannot be constructed from here
   |
 2 | print(lib.Secret(21).code);
   |          ^

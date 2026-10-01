@@ -1,4 +1,4 @@
-corpus/errors/095-distinct-satisfies-interface.src:12:6: type mismatch: expected Tagged, found Wrap: a distinct type is erased before it reaches the runtime, so it has no place to carry its own methods and cannot satisfy an interface. Use its base type, or make it a `type` of its own.
+corpus/errors/095-distinct-satisfies-interface.m31:12:6: type mismatch: expected Tagged, found Wrap: a distinct type is erased before it reaches the runtime, so it has no place to carry its own methods and cannot satisfy an interface. Use its base type, or make it a `type` of its own.
    |
 12 | show(Wrap(Base(5)));
    |      ^

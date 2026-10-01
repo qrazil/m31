@@ -1,4 +1,4 @@
-// A fixture for `langc fmt`: the range `for` has one layout, with a space on
+// A fixture for `m31c fmt`: the range `for` has one layout, with a space on
 // each side of `..` as every other binary-looking thing in the language has.
 int n = 4;
 for (int i in 0 .. n) {

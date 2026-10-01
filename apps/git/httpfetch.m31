@@ -1,0 +1,833 @@
+// Git's smart HTTP protocol, protocol v0 only: enough to fetch a real
+// packfile from a real server over `lib/http.m31`. See
+// `apps/git/design.md`'s "Going remote, 2026-09-29" for where this sits: a
+// fetched pack is written to disk here, verified byte for byte against its
+// own trailing checksum, and handed to nothing else in this program. Turning
+// it into loose objects a repository can actually use is a follow-up, once
+// packfile *reading* -- `.idx`, `OBJ_OFS_DELTA`/`OBJ_REF_DELTA` -- exists; it
+// is a sibling effort and none of its logic is duplicated here.
+//
+// API
+// ---
+//   httpfetch.discover(url)                         -> Result<Advertisement, Error>
+//   httpfetch.fetch(url, ad, wants, haves, out_path) -> Result<Summary, Error>
+//
+//   ad.service, ad.capabilities, ad.refs, ad.object_format
+//   summary.pack_bytes, summary.object_count
+//
+// The seam, testable with no socket in sight (`lib/http.m31`'s own reason,
+// quoted in its header, holds here too):
+//   httpfetch.read_packet(buf, at)      -> Result<Packet, Error>   Part 1
+//   httpfetch.pkt_line(payload)         -> bytes                  Part 1
+//   httpfetch.parse_advertisement(body) -> Result<Advertisement, Error>  Part 3
+//   httpfetch.demux(body)               -> Result<DemuxResult, Error>   Part 4
+//   httpfetch.verify_pack(pack, out_path) -> Result<Summary, Error>     Part 5
+//
+// `discover` and `fetch` are the only two functions that touch a socket, and
+// they do it by building a `http.Request` and calling `http.fetch` --
+// exactly the same two calls a caller of `lib/http.m31` would write by hand.
+// Everything else is a pure function over `bytes`, in memory, so the whole
+// wire format is unit-testable against fixed byte strings and the two real
+// exchanges are tested only for "does a real server's answer parse", not for
+// "does the parser work" -- the same split `object.m31` draws between
+// `read` (I/O) and `parse` (none).
+//
+// --- protocol version: v0, not v2 -------------------------------------------
+//
+// A client asks for protocol v2 by sending a `Git-Protocol: version=2`
+// header; this module never sends it, so every server answers with v0 (also
+// called v1 when a version is stated at all), which every smart-HTTP server
+// still speaks as its default or its fallback. v0's pkt-line framing has
+// exactly one control packet, the flush (`0000`, no payload); v2 adds a
+// delimiter (`0001`) and a response-end (`0002`), and this module refuses
+// both as `Syntax` rather than pretending to understand them, since a v0
+// server never sends them and misreading one as a length would be silent
+// corruption. Protocol v2 is a named follow-up (`apps/git/design.md`), not
+// an oversight.
+//
+// --- the ref advertisement, and what makes it "smart" ------------------------
+//
+// `GET <url>/info/refs?service=git-upload-pack` gets one of two answers. A
+// server that understands the smart protocol sends
+// `Content-Type: application/x-git-upload-pack-advertisement`, and the body
+// is pkt-lines: `# service=git-upload-pack\n`, a flush, then one ref line per
+// pkt-line (the first carrying every capability the server offers, packed
+// onto it after a NUL), ending in a flush. A server that does not understand
+// the query parameter at all -- an ordinary file server pointed at a bare
+// repository, "dumb HTTP" -- answers something else entirely, most often a
+// directory listing or a 404, and parsing that as pkt-lines would either trap
+// on the length prefix or silently read garbage as ref data. So the content
+// type is checked before a single byte of the body is treated as a pkt-line,
+// and anything else is `NotSmart`, refused rather than misparsed.
+//
+// A capabilities line advertising an object format other than SHA-1 --
+// `object-format=sha256` -- is `UnsupportedFormat`: `sha1.m31`'s own header
+// gives the reason there is no second digest in this program, and it holds
+// here too.
+//
+// --- negotiation: the simplest legal round, not the fastest one -------------
+//
+// This module never requests `multi_ack` or `multi_ack_detailed`, so the
+// exchange is git's own "basic" negotiation: every `want` (the first one
+// carrying the capabilities this module asks for), a flush, every `have`,
+// then `done` -- one round, no back-and-forth reading the server's ACKs in
+// between to prune what is sent next. That costs an occasional slightly
+// larger `have` list than a smarter client would send; it does not cost
+// correctness, and "matches what a modern client negotiates by default" was
+// explicitly not the bar (`apps/git/design.md`'s own task note). Computing
+// the `have` list itself -- which commits this program already possesses --
+// is the caller's job, not this module's: walk `refs.all(gitdir)` and
+// `gitlog.walk(gitdir, ref.name, -1)` for each, exactly as `apps/git`'s own
+// `-log` does, and hand the object names to `fetch`. For a first `clone`
+// that list is empty, which is the simpler case and the one to prove first;
+// a `fetch` against a repository that already has history is where `have`
+// actually does something, and is the second case this module's own tests
+// prove.
+//
+// **This module requires `side-band-64k`.** Real servers enable it by
+// default almost universally (the task's own framing, and every server this
+// was tested against), and it is checked against the advertisement rather
+// than assumed: a server that does not offer it gets `NoSideBand` rather
+// than a demultiplexer fed a stream it was never told to expect. There is
+// deliberately no fallback path for a server that omits it -- that path
+// would be exercised by nothing this program can reach, and an untested
+// branch in a wire parser is worse than no branch.
+//
+// `ofs-delta` is requested when the server offers it, and `thin-pack` is
+// never requested, so the pack this module receives is self-contained:
+// every base object a delta needs is inside the pack itself, verifiable with
+// nothing else, and indexable by real `git index-pack --stdin` with no
+// `--fix-thin`. Whether a delta is `OBJ_OFS_DELTA` or `OBJ_REF_DELTA` is a
+// question for the object inside the pack, not for this module, which never
+// looks past the pack's own envelope.
+//
+// --- the ACK/NAK preamble: zero or more lines, not exactly one --------------
+//
+// The first draft of this module assumed the server answers with a single
+// `NAK\n` or `ACK <id>\n` line before the pack stream starts, and it is
+// wrong: found by running this against a real `git http-backend` with more
+// than one `have` in common. `upload-pack` in stateless mode (smart HTTP
+// always uses it, since there is no persistent connection to negotiate over
+// several round trips) scans the whole `have` list at once and, without
+// `multi_ack`, sends one plain `ACK <id>\n` for **every** common commit it
+// finds -- not only the first -- before moving straight into the
+// side-band-framed pack. So `skip_ack_nak` reads plain pkt-lines for as long
+// as each one's payload starts with `ACK ` or `NAK` (or is a flush, skipped
+// as a no-op), and stops -- without consuming it -- at the first packet that
+// is neither: that packet is the first side-band pkt-line of the pack
+// stream. This can never be ambiguous with real pack data, because a
+// side-band payload's first byte is always `1`, `2` or `3`, and neither `A`
+// (0x41) nor `N` (0x4e) is one of those.
+//
+// --- side-band-64k: three channels, one byte each -----------------------------
+//
+// Once negotiation ends, every remaining pkt-line's payload is `<band><data>`:
+// band 1 is pack bytes, appended in order; band 2 is
+// progress text, printed to standard error and otherwise ignored -- it is
+// not framed into lines and a chunk split across two pkt-lines that happens
+// to cut a UTF-8 sequence in half is silently dropped rather than repaired,
+// which is the right amount of care for text nothing acts on; band 3 is an
+// error from the server's own `upload-pack`, printed to standard error as it
+// arrives and turned into `RemoteError` once demultiplexing finishes --
+// **never silently swallowed**, which is the one hard requirement on this
+// channel. A band outside `1..3`, or a side-band pkt-line with no band byte
+// at all, is `BadBand`.
+//
+// --- verification: the one thing that must never be skipped -----------------
+//
+// Every packfile ends with a 20-byte SHA-1 of everything before it.
+// `verify_pack` computes that digest itself (`sha1.m31`) and refuses to
+// write anything to disk if it does not match, or if fewer than 32 bytes
+// arrived, or if the first four are not `PACK` -- a truncated or corrupted
+// transfer is `Truncated`, `BadPack` or `ChecksumMismatch`, never a pack on
+// disk that looks fine and is not. The write itself never touches the
+// target path directly: a temporary file beside it, written whole, then
+// renamed over -- the same discipline `refs.m31` and `object.m31` already
+// use, for the same reason.
+//
+// --- what is NOT here ---------------------------------------------------------
+//
+//   - **Unpacking.** `Summary.object_count` is read straight out of the
+//     pack's own 12-byte header (`PACK`, a version, a count) as a sanity
+//     number to report; nothing here parses a single object out of the pack,
+//     resolves a delta, or writes a loose object. That is the sibling
+//     packfile-reading task's own `.idx`/`OBJ_OFS_DELTA`/`OBJ_REF_DELTA`
+//     work, and this module does not depend on any of it being done.
+//   - **Push**, and the capabilities that only matter for it
+//     (`report-status`, `delete-refs`, `push-options`, ...).
+//   - **Protocol v2** -- see above.
+//   - **SSH**, and TLS: `lib/http.m31`'s own `parse_url` already refuses
+//     `https://` before a socket exists, for the reason its header gives,
+//     and that refusal is inherited here rather than repeated.
+//   - **`multi_ack`/`multi_ack_detailed`** -- see "negotiation" above.
+
+import http;
+import io;
+import fs;
+import object;
+import random;
+import sha1;
+
+/// Why a fetch or a ref listing could not be completed. Payload-free
+/// (`docs/errors-decision.md` §4, the convention every module in this
+/// program past `zlib`/`refs`/`object`/`http` already follows): the URL, the
+/// bytes involved, and which capability or band was wrong are context the
+/// caller already has when it reports.
+pub enum Error {
+    /// The HTTP exchange itself failed -- a bad URL, a refused, reset or
+    /// timed-out connection, or a malformed HTTP message. `lib/http.m31`'s
+    /// own `Error` already said which; there is nothing more specific to add
+    /// at this layer.
+    Http;
+    /// The server answered, but not with `200`.
+    Status;
+    /// The response's `Content-Type` does not name a smart-HTTP git service
+    /// -- most likely a plain file server, "dumb HTTP", answering the same
+    /// URL a git server would.
+    NotSmart;
+    /// The ref advertisement is not shaped the way `info/refs` promises: no
+    /// `# service=...` line, no flush where one is required, or a ref line
+    /// this module cannot parse.
+    BadAdvertisement;
+    /// A pkt-line's length prefix is not four hex digits, or names `1`, `2`
+    /// or `3` -- protocol v2's delimiter and response-end packets, which a
+    /// v0-only client never sends and never expects back.
+    Syntax;
+    /// A pkt-line's length prefix names more bytes than actually arrived --
+    /// a message cut off in the middle.
+    Truncated;
+    /// The server's object format is not SHA-1. See `sha1.m31`'s own note on
+    /// why there is no second digest here.
+    UnsupportedFormat;
+    /// The ref advertisement does not offer `side-band-64k`, which this
+    /// module requires -- see the module note.
+    NoSideBand;
+    /// A side-band pkt-line named a channel other than 1, 2 or 3, or carried
+    /// no band byte at all.
+    BadBand;
+    /// Band 3 carried an error from the server's own `upload-pack`, already
+    /// printed to standard error by the time this is returned.
+    RemoteError;
+    /// The bytes that were meant to be a packfile do not begin with the
+    /// `PACK` magic.
+    BadPack;
+    /// The pack's trailing SHA-1 does not match the SHA-1 of what came
+    /// before it: a truncated or corrupted transfer.
+    ChecksumMismatch;
+    /// `fetch` was given no `want`s -- there is nothing to negotiate.
+    NoWant;
+    /// A `want` or a `have` is not a well-formed object name: 40 lowercase
+    /// hex digits.
+    BadName;
+    /// The verified pack could not be written to disk.
+    Io;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case Http: {
+            return "the HTTP exchange failed";
+        }
+        case Status: {
+            return "the server did not answer 200";
+        }
+        case NotSmart: {
+            return "the server answered dumb HTTP, not a smart-HTTP git service";
+        }
+        case BadAdvertisement: {
+            return "the ref advertisement is not well-formed";
+        }
+        case Syntax: {
+            return "the pkt-line framing is not well-formed, or is protocol v2's";
+        }
+        case Truncated: {
+            return "the message was cut off in the middle";
+        }
+        case UnsupportedFormat: {
+            return "the server's object format is not SHA-1";
+        }
+        case NoSideBand: {
+            return "the server did not offer side-band-64k, which this module requires";
+        }
+        case BadBand: {
+            return "a side-band pkt-line named an unknown channel";
+        }
+        case RemoteError: {
+            return "the server reported an error; see standard error";
+        }
+        case BadPack: {
+            return "the bytes received are not a packfile";
+        }
+        case ChecksumMismatch: {
+            return "the pack's trailing checksum does not match its content";
+        }
+        case NoWant: {
+            return "no want was given -- nothing to fetch";
+        }
+        case BadName: {
+            return "not a well-formed object name: 40 lowercase hex digits";
+        }
+        case Io: {
+            return "the pack could not be written to disk";
+        }
+    }
+}
+
+// --- pkt-line framing (Part 1) -----------------------------------------------
+
+/// One packet read out of `buf` at `at`: `flush` with no payload, or `data`
+/// with its payload -- the bytes strictly after the four-hex-digit length
+/// prefix, which counts itself. `next` is the offset just past this packet,
+/// for the caller's next call; there are no tuples in this language
+/// (`apps/git/FRICTION.md` §2), so a small result type carries both answers
+/// out of one call the way `gitlog.Entry` does.
+pub type Packet {
+    pub bool flush;
+    pub bytes payload;
+    pub int next;
+}
+
+/// `"0000"`, as bytes -- the one control packet this (v0-only) module knows.
+pub const bytes FLUSH_PKT = [48, 48, 48, 48];
+
+/// Read one pkt-line at `buf[at ..]`.
+///
+/// A length of `0000` is a flush, with no payload. Any other length must be
+/// at least 4 (it counts its own four digits) and no more than what remains
+/// in `buf`; `1`, `2` and `3` are protocol v2's delimiter and response-end
+/// packets and are refused as `Syntax` rather than misread as a one-, two- or
+/// three-byte payload, since this module never negotiates v2 and a real v0
+/// server never sends them.
+pub Result<Packet, Error> read_packet(bytes buf, int at) {
+    if (at < 0 || at + 4 > buf.size()) {
+        return Result<Packet, Error>.Err(Error.Truncated);
+    }
+    int len = 0;
+    for (int i in 0 .. 4) {
+        int d = hex_val(buf[at + i]);
+        if (d < 0) {
+            return Result<Packet, Error>.Err(Error.Syntax);
+        }
+        len = len * 16 + d;
+    }
+    if (len == 0) {
+        return Result<Packet, Error>.Ok(Packet(true, [], at + 4));
+    }
+    if (len < 4) {
+        return Result<Packet, Error>.Err(Error.Syntax);
+    }
+    int end = at + len;
+    if (end > buf.size()) {
+        return Result<Packet, Error>.Err(Error.Truncated);
+    }
+    bytes payload = buf.substr(at + 4, end);
+    return Result<Packet, Error>.Ok(Packet(false, payload, end));
+}
+
+/// Encode `payload` as one pkt-line: its length (itself included), in four
+/// lowercase hex digits, then the payload verbatim. Never used for a flush --
+/// callers append `FLUSH_PKT` directly.
+pub bytes pkt_line(bytes payload) {
+    bytes out = len_hex(payload.size() + 4);
+    out.extend(payload);
+    return out;
+}
+
+// The length-prefix trick: two big-endian octets, then `bytes.hex()` --
+// which zero-pads every octet to two digits -- gives exactly the four hex
+// digits a pkt-line length is, with no hand-written digit table.
+bytes len_hex(int n) {
+    bytes two = [n >> 8 & 0xFF, n & 0xFF];
+    return two.hex().to_bytes();
+}
+
+int hex_val(int c) {
+    if (c >= '0' && c <= '9') {
+        return c - 48;
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 87;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 55;
+    }
+    return -1;
+}
+
+const bytes SP1 = [32];
+const bytes NUL1 = [0];
+const bytes LF1 = [10];
+
+// --- the ref advertisement (Part 3) ------------------------------------------
+
+/// One advertised ref: its full name and the object it points at. A tag's
+/// peeled entry (`refs/tags/v1^{}`) is advertised as an ordinary ref of this
+/// shape with that literal name -- git's own convention, not a second
+/// mechanism -- and is not treated specially here.
+pub type RemoteRef {
+    pub str name;
+    pub str id;
+}
+
+/// The service announcement, the capabilities on the first ref line, and
+/// every ref -- in the server's own order, which is what `git ls-remote`
+/// prints and what this module's own tests compare against byte for byte.
+pub type Advertisement {
+    pub str service;
+    pub List<str> capabilities;
+    pub List<RemoteRef> refs;
+    pub str object_format;
+}
+
+/// `GET <url>/info/refs?service=git-upload-pack`, parsed.
+///
+/// Refuses `NotSmart` before looking at the body at all if the response is
+/// not `200` with `Content-Type: application/x-git-upload-pack-advertisement`
+/// -- see the module note on why a dumb-HTTP answer must never reach the
+/// pkt-line parser.
+pub Result<Advertisement, Error> discover(str url) {
+    str target = base_of(url) + "/info/refs?service=git-upload-pack";
+    match (http.request("GET", target)) {
+        case Ok(http.Request req): {
+            req.set("accept", "application/x-git-upload-pack-advertisement");
+            match (http.fetch(req)) {
+                case Ok(http.Response resp): {
+                    return after_refs_response(resp);
+                }
+                case Err(http.Error e): {
+                    return Result<Advertisement, Error>.Err(Error.Http);
+                }
+            }
+        }
+        case Err(http.Error e): {
+            return Result<Advertisement, Error>.Err(Error.Http);
+        }
+    }
+}
+
+Result<Advertisement, Error> after_refs_response(http.Response resp) {
+    if (resp.status() != 200) {
+        return Result<Advertisement, Error>.Err(Error.Status);
+    }
+    str ctype = resp.header("content-type").or("");
+    if (!ctype.starts_with("application/x-git-upload-pack-advertisement")) {
+        return Result<Advertisement, Error>.Err(Error.NotSmart);
+    }
+    return parse_advertisement(resp.body());
+}
+
+/// The ref advertisement, parsed out of the response body already read into
+/// memory -- no I/O, no socket, exactly `object.parse`'s split from
+/// `object.read`. Exposed on its own so the framing rules can be checked
+/// against a captured or hand-built advertisement with no server involved.
+pub Result<Advertisement, Error> parse_advertisement(bytes body) {
+    Packet first = read_packet(body, 0)?;
+    if (first.flush) {
+        return Result<Advertisement, Error>.Err(Error.BadAdvertisement);
+    }
+    str line0 = "";
+    match (first.payload.utf8()) {
+        case Some(str s): {
+            line0 = s.trim();
+        }
+        case None: {
+            return Result<Advertisement, Error>.Err(Error.BadAdvertisement);
+        }
+    }
+    if (!line0.starts_with("# service=")) {
+        return Result<Advertisement, Error>.Err(Error.BadAdvertisement);
+    }
+    str service = line0.substr(10, line0.size());
+    Packet flush1 = read_packet(body, first.next)?;
+    if (!flush1.flush) {
+        return Result<Advertisement, Error>.Err(Error.BadAdvertisement);
+    }
+    int at = flush1.next;
+    List<str> caps = [];
+    List<RemoteRef> refs = [];
+    bool first_ref = true;
+    while (true) {
+        Packet p = read_packet(body, at)?;
+        at = p.next;
+        if (p.flush) {
+            break;
+        }
+        bytes line = p.payload;
+        if (line.ends_with(LF1)) {
+            line = line.substr(0, line.size() - 1);
+        }
+        if (first_ref) {
+            first_ref = false;
+            match (line.index_of(NUL1)) {
+                case Some(int nul): {
+                    bytes capbytes = line.substr(nul + 1, line.size());
+                    line = line.substr(0, nul);
+                    match (capbytes.utf8()) {
+                        case Some(str s): {
+                            for (str c in s.split(" ")) {
+                                if (c.size() > 0) {
+                                    caps.push(c);
+                                }
+                            }
+                        }
+                        case None: {
+                            return Result<Advertisement, Error>.Err(Error.BadAdvertisement);
+                        }
+                    }
+                }
+                case None: {
+                }
+            }
+        }
+        RemoteRef r = parse_ref_line(line)?;
+        if (r.name != "capabilities^{}") {
+            refs.push(r);
+        }
+    }
+    str object_format = "sha1";
+    for (str c in caps) {
+        if (c.starts_with("object-format=")) {
+            object_format = c.substr(14, c.size());
+        }
+    }
+    if (object_format != "sha1") {
+        return Result<Advertisement, Error>.Err(Error.UnsupportedFormat);
+    }
+    return Result<Advertisement, Error>.Ok(Advertisement(service, caps, refs, object_format));
+}
+
+Result<RemoteRef, Error> parse_ref_line(bytes line) {
+    int sp = 0;
+    match (line.index_of(SP1)) {
+        case Some(int i): {
+            sp = i;
+        }
+        case None: {
+            return Result<RemoteRef, Error>.Err(Error.BadAdvertisement);
+        }
+    }
+    if (sp != 40) {
+        return Result<RemoteRef, Error>.Err(Error.BadAdvertisement);
+    }
+    str id = "";
+    match (line.substr(0, 40).utf8()) {
+        case Some(str s): {
+            id = s;
+        }
+        case None: {
+            return Result<RemoteRef, Error>.Err(Error.BadAdvertisement);
+        }
+    }
+    if (!object.is_name(id) || id.size() != 40) {
+        return Result<RemoteRef, Error>.Err(Error.BadAdvertisement);
+    }
+    str name = "";
+    match (line.substr(41, line.size()).utf8()) {
+        case Some(str s): {
+            name = s;
+        }
+        case None: {
+            return Result<RemoteRef, Error>.Err(Error.BadAdvertisement);
+        }
+    }
+    if (name.size() == 0) {
+        return Result<RemoteRef, Error>.Err(Error.BadAdvertisement);
+    }
+    return Result<RemoteRef, Error>.Ok(RemoteRef(name, id));
+}
+
+bool has_cap(List<str> caps, str name) {
+    for (str c in caps) {
+        if (c == name || c.starts_with(name + "=")) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// --- negotiation and the fetch itself (Part 4) -------------------------------
+
+/// What was demultiplexed out of a side-band-64k response: the reassembled
+/// pack bytes (band 1), and whether band 3 carried an error -- already
+/// printed to standard error by the time this is returned, per the module
+/// note; `remote_error` is what tells the caller to stop rather than go on
+/// to verify a pack that was never meant to be trusted.
+pub type DemuxResult {
+    pub bytes pack;
+    pub bool remote_error;
+}
+
+/// Demultiplex a side-band-64k byte stream: every pkt-line is
+/// `<band><data>`, band 1 accumulates into `pack`, band 2 is printed to
+/// standard error and discarded, band 3 is printed to standard error and
+/// sets `remote_error`. `body` starts right after the ACK/NAK preamble --
+/// `fetch` skips that (zero or more lines; see the module note) with
+/// `skip_ack_nak`, using the same `read_packet` this takes its input from, so
+/// this function is pure demultiplexing and nothing about negotiation.
+pub Result<DemuxResult, Error> demux(bytes body) {
+    int at = 0;
+    bytes pack = [];
+    bool saw_error = false;
+    while (at < body.size()) {
+        Packet p = read_packet(body, at)?;
+        at = p.next;
+        if (p.flush) {
+            continue;
+        }
+        if (p.payload.size() == 0) {
+            return Result<DemuxResult, Error>.Err(Error.BadBand);
+        }
+        int band = p.payload[0];
+        bytes data = p.payload.substr(1, p.payload.size());
+        if (band == 1) {
+            pack.extend(data);
+        } else if (band == 2) {
+            match (data.utf8()) {
+                case Some(str s): {
+                    io.eprint(s);
+                }
+                case None: {
+                }
+            }
+        } else if (band == 3) {
+            saw_error = true;
+            match (data.utf8()) {
+                case Some(str s): {
+                    io.eprint("remote: " + s);
+                }
+                case None: {
+                    io.eprint("remote: (an error, not valid UTF-8)");
+                }
+            }
+        } else {
+            return Result<DemuxResult, Error>.Err(Error.BadBand);
+        }
+    }
+    return Result<DemuxResult, Error>.Ok(DemuxResult(pack, saw_error));
+}
+
+/// What a fetch produced: the verified pack's size on disk, and the object
+/// count read out of its own 12-byte header (`PACK`, a version, a count) --
+/// a number this module reports and does not itself check against the
+/// pack's actual contents, since counting them means parsing them, which is
+/// the sibling packfile-reading task's job, not this one's.
+pub type Summary {
+    pub int pack_bytes;
+    pub int object_count;
+}
+
+/// `POST <url>/git-upload-pack`: negotiate for `wants` given `haves`
+/// (computed by the caller -- see the module note), and write the verified
+/// pack to `out_path`.
+///
+/// `ad` is the `Advertisement` `discover` already returned for this `url`:
+/// its capabilities decide what this module asks for (`ofs-delta` only if
+/// offered; `side-band-64k` always, and `NoSideBand` if the server never
+/// offered it). Every `want` and `have` must be a 40-digit lowercase hex
+/// object name, and there must be at least one `want`.
+pub Result<Summary, Error> fetch(str url, Advertisement ad, List<str> wants, List<str> haves, str out_path) {
+    if (wants.size() == 0) {
+        return Result<Summary, Error>.Err(Error.NoWant);
+    }
+    for (str w in wants) {
+        if (!object.is_name(w) || w.size() != 40) {
+            return Result<Summary, Error>.Err(Error.BadName);
+        }
+    }
+    for (str h in haves) {
+        if (!object.is_name(h) || h.size() != 40) {
+            return Result<Summary, Error>.Err(Error.BadName);
+        }
+    }
+    if (!has_cap(ad.capabilities, "side-band-64k")) {
+        return Result<Summary, Error>.Err(Error.NoSideBand);
+    }
+    bytes body = negotiation_body(ad, wants, haves);
+    str target = base_of(url) + "/git-upload-pack";
+    match (http.request("POST", target)) {
+        case Ok(http.Request req): {
+            req.set("content-type", "application/x-git-upload-pack-request");
+            req.set("accept", "application/x-git-upload-pack-result");
+            req.set_body(body);
+            match (http.fetch(req)) {
+                case Ok(http.Response resp): {
+                    return after_pack_response(resp, out_path);
+                }
+                case Err(http.Error e): {
+                    return Result<Summary, Error>.Err(Error.Http);
+                }
+            }
+        }
+        case Err(http.Error e): {
+            return Result<Summary, Error>.Err(Error.Http);
+        }
+    }
+}
+
+// The request body: every `want` (capabilities on the first only, per the
+// protocol's own rule), a flush, every `have`, then `done` -- git's basic,
+// single-round negotiation; see the module note on why there is no
+// `multi_ack`.
+bytes negotiation_body(Advertisement ad, List<str> wants, List<str> haves) {
+    List<str> use = ["side-band-64k"];
+    if (has_cap(ad.capabilities, "ofs-delta")) {
+        use.push("ofs-delta");
+    }
+    use.push("agent=m31-httpfetch/1");
+    str first_caps = use.join(" ");
+    bytes out = [];
+    bool first = true;
+    for (str w in wants) {
+        if (first) {
+            out.extend(pkt_line(("want " + w + " " + first_caps + "\n").to_bytes()));
+            first = false;
+        } else {
+            out.extend(pkt_line(("want " + w + "\n").to_bytes()));
+        }
+    }
+    out.extend(FLUSH_PKT);
+    for (str h in haves) {
+        out.extend(pkt_line(("have " + h + "\n").to_bytes()));
+    }
+    out.extend(pkt_line("done\n".to_bytes()));
+    return out;
+}
+
+Result<Summary, Error> after_pack_response(http.Response resp, str out_path) {
+    if (resp.status() != 200) {
+        return Result<Summary, Error>.Err(Error.Status);
+    }
+    str ctype = resp.header("content-type").or("");
+    if (!ctype.starts_with("application/x-git-upload-pack-result")) {
+        return Result<Summary, Error>.Err(Error.NotSmart);
+    }
+    bytes body = resp.body();
+    // Zero or more plain ACK/NAK lines, then the side-band pack stream --
+    // see the module note for why "zero or more" and not "exactly one".
+    int at = skip_ack_nak(body)?;
+    match (demux(body.substr(at, body.size()))) {
+        case Ok(DemuxResult d): {
+            if (d.remote_error) {
+                return Result<Summary, Error>.Err(Error.RemoteError);
+            }
+            return verify_pack(d.pack, out_path);
+        }
+        case Err(Error e): {
+            return Result<Summary, Error>.Err(e);
+        }
+    }
+}
+
+// The offset just past the ACK/NAK preamble: every plain `ACK ...`/`NAK...`
+// line (and any flush, a harmless no-op wherever it appears in this
+// implementation), for as long as the next packet still looks like one.
+// The first packet that does not is left unconsumed -- it is the first
+// side-band pkt-line of the pack stream, and `demux` reads it next.
+Result<int, Error> skip_ack_nak(bytes body) {
+    int at = 0;
+    while (at < body.size()) {
+        Packet p = read_packet(body, at)?;
+        if (p.flush) {
+            at = p.next;
+            continue;
+        }
+        if (!is_ack_or_nak(p.payload)) {
+            return Result<int, Error>.Ok(at);
+        }
+        at = p.next;
+    }
+    return Result<int, Error>.Ok(at);
+}
+
+bool is_ack_or_nak(bytes payload) {
+    match (payload.utf8()) {
+        case Some(str s): {
+            return s.starts_with("ACK ") || s.starts_with("NAK");
+        }
+        case None: {
+            return false;
+        }
+    }
+}
+
+// --- verification (Part 5) ---------------------------------------------------
+
+/// Check `pack`'s trailing 20-byte SHA-1 against the SHA-1 of everything
+/// before it (`sha1.m31`), and only then write it to `out_path`. Exposed on
+/// its own -- given bytes, not a URL -- so a truncated or corrupted transfer
+/// can be tested by handing this function a byte string that was never near
+/// a socket: a real pack with its tail cut off, or with one byte of its
+/// checksum flipped, must come back `Truncated`/`ChecksumMismatch` and must
+/// never reach `write_atomic`.
+pub Result<Summary, Error> verify_pack(bytes pack, str out_path) {
+    if (pack.size() < 32) {
+        return Result<Summary, Error>.Err(Error.Truncated);
+    }
+    if (pack[0] != 'P' || pack[1] != 'A' || pack[2] != 'C' || pack[3] != 'K') {
+        return Result<Summary, Error>.Err(Error.BadPack);
+    }
+    int count = be32(pack, 8);
+    bytes content = pack.substr(0, pack.size() - 20);
+    bytes trailer = pack.substr(pack.size() - 20, pack.size());
+    if (sha1.sum(content) != trailer) {
+        return Result<Summary, Error>.Err(Error.ChecksumMismatch);
+    }
+    match (write_atomic(out_path, pack)) {
+        case Ok: {
+            return Result<Summary, Error>.Ok(Summary(pack.size(), count));
+        }
+        case Err(io.Error e): {
+            return Result<Summary, Error>.Err(Error.Io);
+        }
+    }
+}
+
+int be32(bytes b, int at) {
+    return b[at] << 24 | b[at + 1] << 16 | b[at + 2] << 8 | b[at + 3];
+}
+
+// --- small shared helpers -----------------------------------------------------
+
+str base_of(str url) {
+    if (url.ends_with("/")) {
+        return url.substr(0, url.size() - 1);
+    }
+    return url;
+}
+
+// Write `content` to `path` without ever leaving a half-written file there --
+// a freshly named temporary file beside it, written whole, then renamed over
+// the target. The same discipline `refs.m31`'s own `write_atomic` uses, for
+// the same reason; duplicated here rather than imported, since `refs.m31`'s
+// copy is private to that module (`apps/git/FRICTION.md`'s `before`/`str_cmp`
+// are the same trade already made twice in this program).
+Result<bool, io.Error> write_atomic(str path, bytes content) {
+    match (fs.makedirs(dir_of(path))) {
+        case Ok: {
+        }
+        case Err(io.Error e): {
+            return Result<bool, io.Error>.Err(e);
+        }
+    }
+    random.System rnd = random.system();
+    str tmp = path + ".tmp" + rnd.hex(12);
+    match (io.write_bytes(tmp, content)) {
+        case Ok: {
+        }
+        case Err(io.Error e): {
+            return Result<bool, io.Error>.Err(e);
+        }
+    }
+    return fs.rename(tmp, path);
+}
+
+str dir_of(str path) {
+    int i = path.size() - 1;
+    while (i >= 0 && path.byte_at(i) != '/') {
+        i = i - 1;
+    }
+    if (i < 0) {
+        return ".";
+    }
+    return path.substr(0, i);
+}

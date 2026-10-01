@@ -1,4 +1,4 @@
-corpus/modules/fnref-private/main.src:6:13: `by_y` is private to `lib`; mark it `pub` to export it
+corpus/modules/fnref-private/main.m31:6:13: `by_y` is private to `lib`; mark it `pub` to export it
   |
 6 | Less l = lib.by_y;
   |             ^

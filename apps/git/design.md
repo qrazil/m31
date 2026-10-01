@@ -85,11 +85,11 @@ the git client and stuck there:
     whatever the main view is currently showing.
 
 None of this is scoped or estimated yet — this is the shape, not the plan.
-Revisit once `apps/tui` stage 2 lands and `lib/term.src` exists.
+Revisit once `apps/tui` stage 2 lands and `lib/term.m31` exists.
 
 ## The dependency chain to an actual client, 2026-09-28
 
-Checked before starting: `lib/term.src` already exists (raw mode, key
+Checked before starting: `lib/term.m31` already exists (raw mode, key
 decoding, window size, one-write flush, read-with-timeout — everything
 `apps/tui`'s own README implies is still pending under "being written
 separately", which is now stale). What's actually missing splits into three
@@ -105,8 +105,8 @@ independent pieces, plus one that depends on all of them:
   - **`apps/tui` stage 2** (styling layer) plus the primitives this design
     names (outline, jump list, which-key/transient, addressable diff
     cursor, footer) plus stage 3's actual remaining piece — the application
-    loop joining the renderer to the *existing* `lib/term.src`, since
-    `term.src` itself is done.
+    loop joining the renderer to the *existing* `lib/term.m31`, since
+    `term.m31` itself is done.
   - **The client itself** depends on both of the above and cannot start
     before they land — a second wave, not this one.
 
@@ -135,7 +135,7 @@ Split into two tracks:
   - **The client** — the document (outline sections for untracked,
     unstaged, staged, recent commits, populated from `status.status()` and
     the existing log/object read side), whole-file stage/unstage (already
-    buildable from `index.src`/`object.src`), commit via `$EDITOR` for the
+    buildable from `index.m31`/`object.m31`), commit via `$EDITOR` for the
     message (matching real git's own fallback when `-m` isn't given, and
     sidestepping a dependency on `TextInput`, which `apps/tui` deferred for
     lack of a caller — this is that caller, later, not now), and the loop
@@ -177,7 +177,7 @@ split the rest of `apps/git` already went through.
 **Smart HTTP next, fetch/clone only, no push yet.** Builds on packfile
 reading (a fetched pack is only useful once something can unpack it) but its
 own wire protocol -- pkt-line framing, ref advertisement, want/have
-negotiation -- is independently buildable against `lib/http.src`, which
+negotiation -- is independently buildable against `lib/http.m31`, which
 already exists. A freshly fetched pack is unpacked straight into loose
 objects using the object-writing path that already exists, rather than also
 building a packfile indexer in the same pass -- keeping a fetched pack as a

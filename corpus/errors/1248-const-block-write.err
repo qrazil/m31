@@ -1,4 +1,4 @@
-corpus/errors/1248-const-block-write.src:9:12: `buf` is const and cannot be changed; clone(buf) is a copy that can
+corpus/errors/1248-const-block-write.m31:9:12: `buf` is const and cannot be changed; clone(buf) is a copy that can
   |
 9 |         buf.push(4);
   |            ^

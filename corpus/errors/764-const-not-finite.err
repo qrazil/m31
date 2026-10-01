@@ -1,4 +1,4 @@
-corpus/errors/764-const-not-finite.src:4:24: this `/` gives an infinity; a float constant must be finite, as a float literal must
+corpus/errors/764-const-not-finite.m31:4:24: this `/` gives an infinity; a float constant must be finite, as a float literal must
   |
 4 | const float HUGE = 1.0 / 0.0;
   |                        ^

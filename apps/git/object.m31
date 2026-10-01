@@ -1,0 +1,1075 @@
+// Git's object store: loose objects, and -- `apps/git/pack.m31` -- packed
+// ones, read through exactly the same API.
+//
+// An object lives at `.git/objects/ab/cdef...` -- the first two hex digits of
+// its name are the directory, the other thirty-eight the file -- and the file
+// is one zlib stream whose plaintext is
+//
+//     <type> <size>\0<content>
+//
+// where `<type>` is `blob`, `tree`, `commit` or `tag` and `<size>` is the
+// decimal length of `<content>`. The object's NAME is the SHA-1 of that whole
+// plaintext, header included, which is why `sha1.m31` and `zlib.m31` had to
+// come first. Reading an object here always recomputes it: an object store is
+// content-addressed or it is just a directory of files.
+//
+// Or it lives in a `.idx`/`.pack` pair under `.git/objects/pack/` instead --
+// `pack.m31`'s problem, not this module's, except that `read` has to ask it
+// when the loose file is not there. `pack.read` hands back the same `<kind>,
+// content` pair a loose read has by the time it reaches `parse`, so `read`
+// rebuilds the identical `<type> <size>\0<content>` plaintext and calls
+// `parse` on it exactly as for a loose object -- the SHA-1 check, the tree,
+// commit and tag parsing below are shared between the two sources and cannot
+// drift apart, because there is only the one path through them.
+//
+// API
+// ---
+//   object.read(gitdir, id)      -> Result<Object, Error>   loose, then packed
+//   object.parse(id, plaintext)  -> Result<Object, Error>   (no I/O, no zlib)
+//   object.resolve(gitdir, pfx)  -> Result<str, Error>      a unique short id
+//   object.matching(gitdir, pfx) -> List<str>               loose and packed ids
+//   object.loose(gitdir)         -> Result<List<str>, Error> loose ids only
+//   object.all(gitdir)           -> Result<List<str>, Error> loose ∪ packed ids
+//   o.kind()                     -> str, one of the four words
+//
+//   object.write_blob(gitdir, content)     -> Result<str, Error>
+//   object.write_tree(gitdir, entries)     -> Result<str, Error>
+//   object.write_commit(gitdir, commit)    -> Result<str, Error>
+//
+// --- writing -----------------------------------------------------------------
+//
+// The three writers take the same shapes `read` hands back -- `write_tree`
+// takes a `List<Entry>`, `write_commit` a `Commit` -- so a caller that just
+// read a tree or a commit can change one field and write the result straight
+// back. Each hashes `<type> <size>\0<content>` exactly as `parse` expects to
+// find it, deflates it (`zlib.compress`, stored blocks -- see that module's
+// own header for why there is no Huffman encoder here), and writes it to
+// `objects/xx/yyyy...`. Content-addressed means idempotent: if the name is
+// already there, the write is skipped rather than redone, the same object
+// under the same name either way. The write itself is a temporary file
+// beside the target, written whole, then renamed over it, so nothing ever
+// reads a half-written zlib stream -- the same discipline `refs.m31` uses for
+// a ref file, for the same reason.
+//
+// `write_tree` sorts its entries into git's own tree order first, so a
+// caller does not have to reproduce `cmp_bytes`'s trailing-slash rule itself
+// (`Entry.cmp`, below) -- a tree written from an unsorted directory listing
+// comes out identical to the one git would have written for the same
+// entries.
+// --- names in a tree are octets, and so is a commit message ------------------
+//
+// A path in a tree entry is whatever octets the filesystem gave git, and an
+// author's name is whatever octets their editor wrote. Neither is required to
+// be UTF-8, and a repository containing one that is not is not corrupt. So
+// every one of them is `bytes` here and not `str`, and the crossing is the
+// caller's to make -- reference §3.10's rule, and the reason `git cat-file -p`
+// can print a name this program cannot put in a message.
+//
+// `Object.raw` is the content exactly, so a command that has to reproduce
+// git's output octet for octet writes that and never the parse. The parse is
+// for the commands that have to understand -- `log` walking parents in date
+// order, `ls-tree` naming the type of each entry.
+//
+// --- writing does not know about packs, on purpose ---------------------------
+//
+// The write path below (`write_blob`, `write_tree`, `write_commit`) always
+// writes a loose object, never a pack, regardless of whether the repository
+// is otherwise packed. That is correct, not an oversight: git itself does the
+// same (a new object is always loose; only `git gc`/`repack` ever collapses
+// loose objects into a pack), and packfile *writing* is out of scope here for
+// the reason `apps/git/design.md`'s "Going remote" gives -- it is what `push`
+// needs, and `push` is later, separate work.
+//
+// `object.loose(gitdir)` is deliberately unchanged by any of this: it answers
+// "every LOOSE object", exactly as its own doc comment always said, and
+// `t_object.m31`'s existing oracle test still means what it always meant on
+// the all-loose fixtures it runs against. `object.all(gitdir)` is the new,
+// separate answer to "every object regardless of where it lives" -- the one
+// callers that must see the whole store (an oracle walking every object, or a
+// future `fsck`) should use instead of assuming loose is everything.
+
+import io;
+import fs;
+import repo;
+import sha1;
+import zlib;
+import pack;
+import random;
+
+/// Why an object could not be read, or could not be believed. Payload-free
+/// (docs/errors-decision.md §4): the object name, the underlying `io.Error`
+/// or `zlib.Error`, and the detail behind a bad tree or a bad header are
+/// context the caller already has -- it passed the name or the bytes in --
+/// when it reports.
+pub enum Error {
+    /// No loose object of that name. It may still be in a packfile, which
+    /// this cannot read.
+    NotFound;
+    /// The file is there and could not be read.
+    Io;
+    /// The file is there and is not a zlib stream, or not an intact one.
+    Zlib;
+    /// The plaintext has no `<type> <size>\0` header.
+    NoHeader;
+    /// A type word that is none of the four.
+    UnknownType;
+    /// The header's size and the content's length disagree.
+    SizeMismatch;
+    /// The SHA-1 of the plaintext is not the name it was stored under.
+    HashMismatch;
+    /// A tree whose entries do not parse.
+    BadTree;
+    /// A commit or tag whose headers do not parse.
+    BadHeaders;
+    /// Not a hex object name at all, or too short to be one.
+    BadName;
+    /// A short name that several objects begin with.
+    Ambiguous;
+    /// Named by a `.idx` under `objects/pack/`, but `pack.m31` could not read
+    /// it out: a corrupt or truncated pack, a malformed delta, a chain too
+    /// deep to be real. Never `NotFound` for a genuinely missing object --
+    /// that stays `Error.NotFound`, exactly as for a loose one.
+    Packed;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case NotFound: {
+            return "not found among the loose objects (this reads no packfiles)";
+        }
+        case Io: {
+            return "the object file could not be read";
+        }
+        case Zlib: {
+            return "the object is not a zlib stream, or not an intact one";
+        }
+        case NoHeader: {
+            return "the object has no `<type> <size>\\0` header";
+        }
+        case UnknownType: {
+            return "the object claims a type that is none of blob, tree, commit, tag";
+        }
+        case SizeMismatch: {
+            return "the object's header size and its content's length disagree";
+        }
+        case HashMismatch: {
+            return "the object's SHA-1 is not the name it was stored under: the store is corrupt";
+        }
+        case BadTree: {
+            return "the tree's entries do not parse";
+        }
+        case BadHeaders: {
+            return "the commit or tag's headers do not parse";
+        }
+        case BadName: {
+            return "not an object name: 4 to 40 hex digits";
+        }
+        case Ambiguous: {
+            return "that short name is ambiguous: more than one loose object begins with it";
+        }
+        case Packed: {
+            return "the object is in a pack, but the pack could not be read (corrupt, truncated, or an implausibly deep delta chain)";
+        }
+    }
+}
+
+/// One entry of a tree. `mode` is the number the six octal digits spell, so
+/// 0o100644 for a file and 0o40000 for a subdirectory -- git stores a tree's
+/// mode with five digits and prints it with six, and this keeps the number
+/// and formats it where it is printed.
+pub type Entry {
+    pub int mode;
+    pub bytes name;
+    pub str id;
+}
+
+/// Is this entry a subdirectory? The top four bits of the mode are the file
+/// type, and 0o04 is a directory -- the same encoding as `stat`'s.
+pub bool Entry.is_tree() {
+    return mode >> 12 == 0o04;
+}
+
+/// Is it a submodule -- a commit named inside a tree?
+pub bool Entry.is_commit() {
+    return mode >> 12 == 0o16;
+}
+
+/// The word `git ls-tree` prints between the mode and the name.
+pub str Entry.type_word() {
+    if (is_tree()) {
+        return "tree";
+    }
+    if (is_commit()) {
+        return "commit";
+    }
+    return "blob";
+}
+
+/// git's own tree order, for sorting entries before `write_tree` serialises
+/// them: plain byte comparison of the name, except that a subdirectory's name
+/// compares as though a `/` had been appended. That is why `sub.txt` (whose
+/// fifth byte is `.`, 0x2E) sorts before the directory `sub` (which compares
+/// as `sub/`, 0x2F) even though the bare names would tie at four bytes and
+/// `sub` would otherwise look like a prefix that sorts first. A tree `read`
+/// off disk is already in this order -- git never writes one that is not, and
+/// `tree_entries` does not check -- so this is needed only for writing.
+pub int Entry.cmp(Entry other) {
+    bytes a = name;
+    if (is_tree()) {
+        a = clone(name);
+        a.push('/');
+    }
+    bytes b = other.name;
+    if (other.is_tree()) {
+        b = clone(other.name);
+        b.push('/');
+    }
+    return cmp_bytes(a, b);
+}
+
+/// The six-digit octal git prints, zero-padded -- `040000`, not `40000`.
+pub str Entry.mode_text() {
+    str s = "";
+    int i = 5;
+    while (i >= 0) {
+        s = s + (mode >> i * 3 & 7).to_str();
+        i = i - 1;
+    }
+    return s;
+}
+
+/// An `author` or `committer` line, taken apart. Everything before the last
+/// `<` is the name, what is between `<` and `>` is the email, and what
+/// follows is a Unix timestamp and a zone.
+///
+/// The zone is kept as the four characters it was written with as well as a
+/// number of minutes, because they are not the same information: `-0000`
+/// and `+0000` are both zero minutes and git prints back the one it was
+/// given, and there exist commits whose zone is nothing anyone would call an
+/// offset.
+pub type Ident {
+    pub bytes name;
+    pub bytes email;
+    pub int when;
+    pub int offset;
+    pub str zone;
+}
+
+/// A commit's headers and message.
+pub type Commit {
+    pub str tree;
+    pub List<str> parents;
+    pub Ident author;
+    pub Ident committer;
+    /// Every header line this does not interpret, in order and exactly as it
+    /// was written -- `gpgsig`, `encoding`, `mergetag` and whatever a future
+    /// git adds. A continuation line is joined to its header with the newline
+    /// kept and the leading space removed.
+    pub List<bytes> extra;
+    /// Everything after the blank line, exactly.
+    pub bytes message;
+}
+
+/// An annotated tag's headers and message.
+pub type Tag {
+    pub str object;
+    pub str kind;
+    pub bytes name;
+    pub List<bytes> extra;
+    pub bytes message;
+    /// A tag written by very old tools may have no `tagger`.
+    pub Option<Ident> tagger;
+}
+
+/// What an object is. The four shapes git has, and no fifth.
+pub enum Body {
+    Blob;
+    Tree(List<Entry>);
+    Commit(Commit);
+    Tag(Tag);
+}
+
+/// An object, read and checked.
+pub type Object {
+    /// The full forty-digit name, which has been verified against the
+    /// content: this is not what the caller asked for, it is what the content
+    /// hashes to, and they are equal or this was never built.
+    pub str id;
+    pub Body body;
+    /// The content, after the `<type> <size>\0` header and exactly as stored.
+    /// `git cat-file -p` prints this verbatim for a blob, a commit and a tag.
+    pub bytes raw;
+}
+
+/// `blob`, `tree`, `commit` or `tag`.
+pub str Object.kind() {
+    match (body) {
+        case Blob: {
+            return "blob";
+        }
+        case Tree: {
+            return "tree";
+        }
+        case Commit: {
+            return "commit";
+        }
+        case Tag: {
+            return "tag";
+        }
+    }
+}
+
+/// The object `id` in the repository whose git directory is `gitdir` -- loose
+/// if it is there, packed otherwise. Every caller above this module reads
+/// through here (or through `resolve`, which calls `read` too) and none of
+/// them has to know which of the two it was: `NotFound` means genuinely
+/// missing, not merely "not loose".
+pub Result<Object, Error> read(str gitdir, str id) {
+    if (!is_name(id) || id.size() != 40) {
+        return Result<Object, Error>.Err(Error.BadName);
+    }
+    str root = fs.join(repo.common(gitdir), "objects");
+    str path = fs.join(fs.join(root, id.substr(0, 2)), id.substr(2, 40));
+    if (fs.exists(path)) {
+        bytes stream = [];
+        match (io.read_bytes(path)) {
+            case Ok(bytes b): {
+                stream = b;
+            }
+            case Err(io.Error e): {
+                return Result<Object, Error>.Err(Error.Io);
+            }
+        }
+        match (zlib.decompress(stream)) {
+            case Ok(bytes plain): {
+                return parse(id, plain);
+            }
+            case Err(zlib.Error e): {
+                return Result<Object, Error>.Err(Error.Zlib);
+            }
+        }
+    }
+    match (pack.read(gitdir, id)) {
+        case Ok(pack.Found f): {
+            bytes plain = [];
+            plain.extend(f.kind.to_bytes());
+            plain.push(' ');
+            plain.extend(f.content.size().to_str().to_bytes());
+            plain.push(0);
+            plain.extend(f.content);
+            return parse(id, plain);
+        }
+        case Err(pack.Error e): {
+            // `NotFound` alone means genuinely missing -- everything else
+            // pack.m31 can say means it found the id but could not read the
+            // object out, which is `Error.Packed` here.
+            match (e) {
+                case NotFound: {
+                    return Result<Object, Error>.Err(Error.NotFound);
+                }
+                case Io: {
+                    return Result<Object, Error>.Err(Error.Packed);
+                }
+                case BadIdx: {
+                    return Result<Object, Error>.Err(Error.Packed);
+                }
+                case UnsupportedIdx: {
+                    return Result<Object, Error>.Err(Error.Packed);
+                }
+                case BadPack: {
+                    return Result<Object, Error>.Err(Error.Packed);
+                }
+                case Zlib: {
+                    return Result<Object, Error>.Err(Error.Packed);
+                }
+                case BadDelta: {
+                    return Result<Object, Error>.Err(Error.Packed);
+                }
+                case ChainTooDeep: {
+                    return Result<Object, Error>.Err(Error.Packed);
+                }
+            }
+        }
+    }
+}
+
+/// An object from its plaintext -- the `<type> <size>\0<content>` a loose
+/// object's zlib stream holds. `id` is the name it is expected to have, and
+/// the content is hashed and checked against it.
+pub Result<Object, Error> parse(str id, bytes plain) {
+    str actual = sha1.hex(plain);
+    if (actual != id) {
+        return Result<Object, Error>.Err(Error.HashMismatch);
+    }
+    int nul = find(plain, 0, 0);
+    if (nul < 0) {
+        return Result<Object, Error>.Err(Error.NoHeader);
+    }
+    int sp = find(plain, 32, 0);
+    if (sp < 0 || sp > nul) {
+        return Result<Object, Error>.Err(Error.NoHeader);
+    }
+    str word = ascii(plain.substr(0, sp));
+    int said = decimal(plain.substr(sp + 1, nul));
+    if (said < 0) {
+        return Result<Object, Error>.Err(Error.NoHeader);
+    }
+    bytes content = plain.substr(nul + 1, plain.size());
+    if (content.size() != said) {
+        return Result<Object, Error>.Err(Error.SizeMismatch);
+    }
+    if (word == "blob") {
+        return Result<Object, Error>.Ok(Object(id, Body.Blob, content));
+    }
+    if (word == "tree") {
+        List<Entry> entries = tree_entries(id, content)?;
+        return Result<Object, Error>.Ok(Object(id, Body.Tree(entries), content));
+    }
+    if (word == "commit") {
+        Commit c = commit_of(id, content)?;
+        return Result<Object, Error>.Ok(Object(id, Body.Commit(c), content));
+    }
+    if (word == "tag") {
+        Tag t = tag_of(id, content)?;
+        return Result<Object, Error>.Ok(Object(id, Body.Tag(t), content));
+    }
+    return Result<Object, Error>.Err(Error.UnknownType);
+}
+
+/// Every object name beginning with `prefix` -- loose or packed -- sorted and
+/// deduplicated. Empty for a prefix that is not hex, is shorter than four
+/// digits, or matches nothing.
+///
+/// A full forty-digit name is checked for on disk like any other prefix, so
+/// this answers "is it here" as well as "which is it". `rev_parse`'s DWIM
+/// (`refs.m31`) calls this for a short object name, so a packed repository's
+/// abbreviated hashes resolve exactly as a loose repository's do -- one more
+/// reader that does not have to know which kind of store it is looking at.
+pub List<str> matching(str gitdir, str prefix) {
+    List<str> hits = [];
+    str p = prefix.to_lower();
+    if (!is_name(p) || p.size() < 4 || p.size() > 40) {
+        return hits;
+    }
+    str two = p.substr(0, 2);
+    str rest = p.substr(2, p.size());
+    match (fs.listdir(fs.join(fs.join(repo.common(gitdir), "objects"), two))) {
+        case Ok(List<str> names): {
+            for (str n in names) {
+                if (n.size() == 38 && n.starts_with(rest)) {
+                    hits.push(two + n);
+                }
+            }
+        }
+        case Err: {
+        }
+    }
+    match (pack.ids(gitdir)) {
+        case Ok(List<str> names): {
+            for (str id in names) {
+                if (id.starts_with(p)) {
+                    hits.push(id);
+                }
+            }
+        }
+        case Err: {
+        }
+    }
+    hits.sort();
+    List<str> dedup = [];
+    str prev = "";
+    for (str h in hits) {
+        if (dedup.size() == 0 || h != prev) {
+            dedup.push(h);
+        }
+        prev = h;
+    }
+    return dedup;
+}
+
+/// The one full name that begins with `prefix`, if there is exactly one.
+pub Result<str, Error> resolve(str gitdir, str prefix) {
+    if (!is_name(prefix.to_lower()) || prefix.size() < 4 || prefix.size() > 40) {
+        return Result<str, Error>.Err(Error.BadName);
+    }
+    List<str> hits = matching(gitdir, prefix);
+    if (hits.size() == 0) {
+        return Result<str, Error>.Err(Error.NotFound);
+    }
+    if (hits.size() > 1) {
+        return Result<str, Error>.Err(Error.Ambiguous);
+    }
+    return Result<str, Error>.Ok(hits[0]);
+}
+
+/// Every loose object name in the repository, sorted. What a packfile holds
+/// is not here, by construction.
+pub Result<List<str>, Error> loose(str gitdir) {
+    str root = fs.join(repo.common(gitdir), "objects");
+    List<str> out = [];
+    List<str> fanout = [];
+    match (fs.listdir(root)) {
+        case Ok(List<str> names): {
+            fanout = names;
+        }
+        case Err(io.Error e): {
+            return Result<List<str>, Error>.Err(Error.Io);
+        }
+    }
+    fanout.sort();
+    for (str two in fanout) {
+        if (two.size() != 2 || !is_name(two)) {
+            continue;
+        }
+        match (fs.listdir(fs.join(root, two))) {
+            case Ok(List<str> files): {
+                for (str f in files) {
+                    if (f.size() == 38 && is_name(f)) {
+                        out.push(two + f);
+                    }
+                }
+            }
+            case Err: {
+                continue;
+            }
+        }
+    }
+    out.sort();
+    return Result<List<str>, Error>.Ok(out);
+}
+
+/// Every object name in the repository, loose or packed, sorted and
+/// deduplicated -- what a caller that must see the whole store (an oracle
+/// walking every object the way `apps/git/oracle_object.py` does, or a future
+/// `fsck`) uses instead of `loose`, which -- unchanged, on purpose -- still
+/// answers only "every LOOSE object", exactly as it always has.
+pub Result<List<str>, Error> all(str gitdir) {
+    List<str> out = loose(gitdir)?;
+    match (pack.ids(gitdir)) {
+        case Ok(List<str> packed): {
+            for (str id in packed) {
+                out.push(id);
+            }
+        }
+        case Err(pack.Error e): {
+        }
+    }
+    out.sort();
+    List<str> dedup = [];
+    str prev = "";
+    for (str id in out) {
+        if (dedup.size() == 0 || id != prev) {
+            dedup.push(id);
+        }
+        prev = id;
+    }
+    return Result<List<str>, Error>.Ok(dedup);
+}
+
+// --- parsing the three structured bodies -------------------------------------
+
+// `<octal mode> <name>\0<20 raw octets>`, repeated to the end. No separator
+// between entries and no count at the front: the entry's own length is the
+// only thing that says where the next one starts, so a tree that is one octet
+// short is a tree that does not parse rather than a tree with a wrong last
+// entry.
+Result<List<Entry>, Error> tree_entries(str id, bytes content) {
+    List<Entry> out = [];
+    int at = 0;
+    int n = content.size();
+    while (at < n) {
+        int sp = find(content, 32, at);
+        if (sp < 0) {
+            return Result<List<Entry>, Error>.Err(Error.BadTree);
+        }
+        int mode = octal(content.substr(at, sp));
+        if (mode < 0) {
+            return Result<List<Entry>, Error>.Err(Error.BadTree);
+        }
+        int nul = find(content, 0, sp + 1);
+        if (nul < 0) {
+            return Result<List<Entry>, Error>.Err(Error.BadTree);
+        }
+        if (nul + 21 > n) {
+            return Result<List<Entry>, Error>.Err(Error.BadTree);
+        }
+        out.push(Entry(mode, content.substr(sp + 1, nul), content.substr(nul + 1, nul + 21).hex()));
+        at = nul + 21;
+    }
+    return Result<List<Entry>, Error>.Ok(out);
+}
+
+Result<Commit, Error> commit_of(str id, bytes content) {
+    Headers h = headers(content);
+    str tree = "";
+    List<str> parents = [];
+    Option<Ident> author = Option<Ident>.None;
+    Option<Ident> committer = Option<Ident>.None;
+    List<bytes> extra = [];
+    for (bytes line in h.lines) {
+        int sp = find(line, 32, 0);
+        str key = "";
+        bytes value = [];
+        if (sp < 0) {
+            key = ascii(line);
+        } else {
+            key = ascii(line.substr(0, sp));
+            value = line.substr(sp + 1, line.size());
+        }
+        if (key == "tree" && tree == "") {
+            tree = ascii(value);
+        } else if (key == "parent") {
+            parents.push(ascii(value));
+        } else if (key == "author" && author.is_none()) {
+            author = Option<Ident>.Some(ident(value));
+        } else if (key == "committer" && committer.is_none()) {
+            committer = Option<Ident>.Some(ident(value));
+        } else {
+            extra.push(line);
+        }
+    }
+    if (tree.size() != 40 || !is_name(tree)) {
+        return Result<Commit, Error>.Err(Error.BadHeaders);
+    }
+    for (str p in parents) {
+        if (p.size() != 40 || !is_name(p)) {
+            return Result<Commit, Error>.Err(Error.BadHeaders);
+        }
+    }
+    match (author) {
+        case Some(Ident a): {
+            match (committer) {
+                case Some(Ident c): {
+                    return Result<Commit, Error>.Ok(Commit(tree, parents, a, c, extra, h.message));
+                }
+                case None: {
+                    return Result<Commit, Error>.Err(Error.BadHeaders);
+                }
+            }
+        }
+        case None: {
+            return Result<Commit, Error>.Err(Error.BadHeaders);
+        }
+    }
+}
+
+Result<Tag, Error> tag_of(str id, bytes content) {
+    Headers h = headers(content);
+    str object = "";
+    str kind = "";
+    bytes name = [];
+    Option<Ident> tagger = Option<Ident>.None;
+    List<bytes> extra = [];
+    for (bytes line in h.lines) {
+        int sp = find(line, 32, 0);
+        str key = "";
+        bytes value = [];
+        if (sp < 0) {
+            key = ascii(line);
+        } else {
+            key = ascii(line.substr(0, sp));
+            value = line.substr(sp + 1, line.size());
+        }
+        if (key == "object" && object == "") {
+            object = ascii(value);
+        } else if (key == "type" && kind == "") {
+            kind = ascii(value);
+        } else if (key == "tag" && name.size() == 0) {
+            name = value;
+        } else if (key == "tagger" && tagger.is_none()) {
+            tagger = Option<Ident>.Some(ident(value));
+        } else {
+            extra.push(line);
+        }
+    }
+    if (object.size() != 40 || !is_name(object)) {
+        return Result<Tag, Error>.Err(Error.BadHeaders);
+    }
+    return Result<Tag, Error>.Ok(Tag(object, kind, name, extra, h.message, tagger));
+}
+
+// The header block of a commit or a tag, and the message after it. A struct
+// because two values have to come back and there is no second return.
+type Headers {
+    List<bytes> lines;
+    bytes message;
+}
+
+// Header lines up to the first empty line; everything after it is the
+// message, exactly. A line beginning with a space continues the one before
+// it, which is how a `gpgsig` carries a whole PGP signature inside one
+// header -- the space is dropped and the newline kept, so the value is the
+// signature as it was written.
+Headers headers(bytes content) {
+    List<bytes> lines = [];
+    int at = 0;
+    int n = content.size();
+    while (at < n) {
+        int e = find(content, 10, at);
+        if (e < 0) {
+            e = n;
+        }
+        if (e == at) {
+            at = e + 1;
+            return Headers(lines, content.substr(at, n));
+        }
+        bytes line = content.substr(at, e);
+        at = e + 1;
+        while (at < n && content[at] == ' ') {
+            int c = find(content, 10, at);
+            if (c < 0) {
+                c = n;
+            }
+            line.push('\n');
+            line.extend(content.substr(at + 1, c));
+            at = c + 1;
+        }
+        lines.push(line);
+    }
+    return Headers(lines, []);
+}
+
+// `A U Thor <a@example.com> 1700000000 +0530`.
+//
+// The name is everything before the last `<`, the email what lies between
+// that and the next `>`, and what follows is a timestamp and a zone. Nothing
+// here can fail: git itself accepts an identity line it cannot understand and
+// prints it back, and a commit whose author line is strange is still a commit
+// whose parents can be walked. What cannot be read becomes an empty field and
+// a zero timestamp.
+Ident ident(bytes v) {
+    int lt = rfind(v, 60);
+    int gt = -1;
+    if (lt >= 0) {
+        gt = find(v, 62, lt + 1);
+    }
+    bytes name = [];
+    bytes email = [];
+    int rest = 0;
+    if (lt >= 0 && gt >= 0) {
+        int end = lt;
+        while (end > 0 && v[end - 1] == ' ') {
+            end = end - 1;
+        }
+        name = v.substr(0, end);
+        email = v.substr(lt + 1, gt);
+        rest = gt + 1;
+    } else {
+        name = v;
+        rest = v.size();
+    }
+    while (rest < v.size() && v[rest] == ' ') {
+        rest = rest + 1;
+    }
+    int sp = find(v, 32, rest);
+    int when = 0;
+    str zone = "+0000";
+    int offset = 0;
+    if (rest < v.size()) {
+        int end = v.size();
+        if (sp >= 0) {
+            end = sp;
+        }
+        when = decimal(v.substr(rest, end));
+        if (when < 0) {
+            when = 0;
+        }
+        if (sp >= 0) {
+            bytes z = v.substr(sp + 1, v.size()).trim();
+            str zs = ascii(z);
+            if (zs.size() == 5 && (z[0] == '+' || z[0] == '-')) {
+                int hh = decimal(z.substr(1, 3));
+                int mm = decimal(z.substr(3, 5));
+                if (hh >= 0 && mm >= 0) {
+                    zone = zs;
+                    offset = hh * 60 + mm;
+                    if (z[0] == '-') {
+                        offset = 0 - offset;
+                    }
+                }
+            }
+        }
+    }
+    return Ident(name, email, when, offset, zone);
+}
+
+// --- small things the standard library does not have -------------------------
+
+// The index of octet `b` at or after `from`, or -1. `bytes.index_of` takes a
+// needle and has no starting offset, so every scan over a structured buffer
+// has to be written out; see apps/git/FRICTION.md.
+int find(bytes hay, int b, int from) {
+    int i = from;
+    int n = hay.size();
+    while (i < n) {
+        if (hay[i] == b) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+// The index of the LAST octet `b`, or -1.
+int rfind(bytes hay, int b) {
+    int i = hay.size() - 1;
+    while (i >= 0) {
+        if (hay[i] == b) {
+            return i;
+        }
+        i = i - 1;
+    }
+    return -1;
+}
+
+// ASCII octets as text. Anything above 127 becomes `?`, which is safe because
+// every caller here uses it on a field git defines as ASCII -- a type word, a
+// hex name, a header key. A name or a message never goes through it.
+str ascii(bytes b) {
+    bytes safe = [];
+    for (int c in b) {
+        if (c < 128) {
+            safe.push(c);
+        } else {
+            safe.push('?');
+        }
+    }
+    return safe.utf8().or("");
+}
+
+// A non-negative decimal, or -1. `str.parse_int` exists and this does not use
+// it: the digits are octets, and going through a `str` would mean building
+// one first and would accept `+5` and leading space, which this format does
+// not have.
+int decimal(bytes b) {
+    if (b.size() == 0) {
+        return -1;
+    }
+    int v = 0;
+    for (int c in b) {
+        if (c < '0' || c > '9') {
+            return -1;
+        }
+        v = v * 10 + (c - 48);
+    }
+    return v;
+}
+
+// A non-negative octal, or -1.
+int octal(bytes b) {
+    if (b.size() == 0) {
+        return -1;
+    }
+    int v = 0;
+    for (int c in b) {
+        if (c < '0' || c > '7') {
+            return -1;
+        }
+        v = v * 8 + (c - 48);
+    }
+    return v;
+}
+
+// Is every character a lowercase hex digit?
+pub bool is_name(str s) {
+    if (s.size() == 0) {
+        return false;
+    }
+    for (int i in 0 .. s.size()) {
+        int c = s.byte_at(i);
+        if (!(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// --- writing ------------------------------------------------------------------
+
+/// A blob holding exactly `content`.
+pub Result<str, Error> write_blob(str gitdir, bytes content) {
+    return write_object(gitdir, "blob", content);
+}
+
+/// A tree of `entries`, sorted into git's own order first (`Entry.cmp`), so
+/// the caller need not have sorted them.
+pub Result<str, Error> write_tree(str gitdir, List<Entry> entries) {
+    List<Entry> sorted = clone(entries);
+    sorted.sort();
+    bytes content = [];
+    for (Entry e in sorted) {
+        content.extend(mode_octal(e.mode));
+        content.push(' ');
+        content.extend(e.name);
+        content.push(0);
+        content.extend(hex_decode(e.id));
+    }
+    return write_object(gitdir, "tree", content);
+}
+
+/// A commit exactly as `c` describes it: `tree`, then one `parent` line per
+/// entry of `c.parents` in order, then `author`, then `committer`, then every
+/// line of `c.extra` verbatim (folded back onto multiple physical lines if it
+/// holds one, the exact inverse of what `headers()` did to read it), a blank
+/// line, and `c.message`.
+pub Result<str, Error> write_commit(str gitdir, Commit c) {
+    bytes content = [];
+    content.extend("tree ".to_bytes());
+    content.extend(c.tree.to_bytes());
+    content.push('\n');
+    for (str p in c.parents) {
+        content.extend("parent ".to_bytes());
+        content.extend(p.to_bytes());
+        content.push('\n');
+    }
+    content.extend(ident_line("author", c.author));
+    content.extend(ident_line("committer", c.committer));
+    for (bytes line in c.extra) {
+        content.extend(fold_header(line));
+        content.push('\n');
+    }
+    content.push('\n');
+    content.extend(c.message);
+    return write_object(gitdir, "commit", content);
+}
+
+// `<key> <name> <<email>> <when> <zone>\n`.
+bytes ident_line(str key, Ident who) {
+    bytes out = [];
+    out.extend(key.to_bytes());
+    out.push(' ');
+    out.extend(who.name);
+    out.extend(" <".to_bytes());
+    out.extend(who.email);
+    out.extend("> ".to_bytes());
+    out.extend(who.when.to_str().to_bytes());
+    out.push(' ');
+    out.extend(who.zone.to_bytes());
+    out.push('\n');
+    return out;
+}
+
+// The inverse of `headers()`'s continuation handling: a line held in
+// `Commit.extra` or `Tag.extra` has each of its continuation newlines already
+// stripped of the leading space that told them apart from a new header, so
+// writing it back re-inserts exactly one space after every embedded `\n`.
+bytes fold_header(bytes line) {
+    bytes out = [];
+    for (int c in line) {
+        out.push(c);
+        if (c == '\n') {
+            out.push(' ');
+        }
+    }
+    return out;
+}
+
+// The header, the zlib stream, and the write itself: temporary file beside
+// the target, written whole, renamed over it -- never a direct write to the
+// object's own name, so a reader never opens a partial zlib stream. Content
+// addressed, so a name already on disk is left alone: the bytes it holds are
+// already this object's, by construction, or the store was corrupt before
+// this call and rewriting it here would not fix that.
+Result<str, Error> write_object(str gitdir, str kind, bytes content) {
+    bytes header = [];
+    header.extend(kind.to_bytes());
+    header.push(' ');
+    header.extend(content.size().to_str().to_bytes());
+    header.push(0);
+    header.extend(content);
+    str id = sha1.hex(header);
+    str dir = fs.join(fs.join(repo.common(gitdir), "objects"), id.substr(0, 2));
+    str path = fs.join(dir, id.substr(2, 40));
+    if (fs.exists(path)) {
+        return Result<str, Error>.Ok(id);
+    }
+    match (fs.makedirs(dir)) {
+        case Ok: {
+        }
+        case Err(io.Error e): {
+            return Result<str, Error>.Err(Error.Io);
+        }
+    }
+    bytes compressed = zlib.compress(header);
+    random.System rnd = random.system();
+    str tmp = fs.join(dir, "tmp" + rnd.hex(12));
+    match (io.write_bytes(tmp, compressed)) {
+        case Ok: {
+        }
+        case Err(io.Error e): {
+            return Result<str, Error>.Err(Error.Io);
+        }
+    }
+    match (fs.rename(tmp, path)) {
+        case Ok: {
+            return Result<str, Error>.Ok(id);
+        }
+        case Err(io.Error e): {
+            return Result<str, Error>.Err(Error.Io);
+        }
+    }
+}
+
+// `mode`'s octal digits, ASCII, with no leading zero -- `"40000"` for a tree
+// and `"100644"` for an ordinary file, which is the raw on-disk spelling and
+// not `mode_text()`'s fixed six digits for `ls-tree` to print.
+bytes mode_octal(int mode) {
+    if (mode == 0) {
+        return "0".to_bytes();
+    }
+    List<int> digits = [];
+    int m = mode;
+    while (m > 0) {
+        digits.push(m % 8);
+        m = m / 8;
+    }
+    bytes out = [];
+    int i = digits.size() - 1;
+    while (i >= 0) {
+        out.push('0' + digits[i]);
+        i = i - 1;
+    }
+    return out;
+}
+
+// 40 lowercase hex digits to the 20 octets they spell. Used only on strings
+// this module already trusts -- `sha1.hex`'s own output, or an `Entry.id`
+// that came from `tree_entries` parsing 20 raw octets in the first place --
+// so an invalid digit cannot arise and is not checked for.
+bytes hex_decode(str s) {
+    bytes out = [];
+    int i = 0;
+    while (i + 1 < s.size()) {
+        out.push(hex_val(s.byte_at(i)) << 4 | hex_val(s.byte_at(i + 1)));
+        i = i + 2;
+    }
+    return out;
+}
+
+int hex_val(int c) {
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return 0;
+}
+
+// Byte comparison of two runs, negative/zero/positive -- `refs.m31`'s
+// `before`, over `bytes` rather than `str`, needed here for `Entry.cmp`.
+int cmp_bytes(bytes a, bytes b) {
+    int n = a.size();
+    if (b.size() < n) {
+        n = b.size();
+    }
+    for (int i in 0 .. n) {
+        if (a[i] != b[i]) {
+            return a[i] - b[i];
+        }
+    }
+    return a.size() - b.size();
+}

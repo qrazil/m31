@@ -1,7 +1,7 @@
-diff --git a/apps/git/zlib.src b/apps/git/zlib.src
+diff --git a/apps/git/zlib.m31 b/apps/git/zlib.m31
 index a813257..8d7b7e1 100644
---- a/apps/git/zlib.src
-+++ b/apps/git/zlib.src
+--- a/apps/git/zlib.m31
++++ b/apps/git/zlib.m31
 @@ -20,21 +20,23 @@
  // a disk, and the one thing the format offers to say they arrived intact is
  // worth the one pass it costs.

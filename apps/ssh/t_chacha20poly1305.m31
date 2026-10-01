@@ -1,0 +1,256 @@
+// `lib/chacha20poly1305.m31` against RFC 8439's own worked examples and
+// against `cryptography`/OpenSSL, the way `apps/git/t_sha1.m31` checks
+// `sha1.m31` against Python's `hashlib`: every line this prints on stdout is
+// printed again, independently, by `oracle_chacha20poly1305.py`, and
+// `test.sh` diffs the two. Nothing expected is written down in this file --
+// see the RFC section's own header below for why, and its counterpart in the
+// oracle for the same reasoning from the other side.
+//
+//   ./build.sh apps/ssh/t_chacha20poly1305.m31 -o t_chacha20poly1305 && ./t_chacha20poly1305
+//
+// Four kinds of case, in order: RFC 8439's vectors (§2.3.2, Appendix A.1
+// block function; §2.4.2, A.2 encryption; §2.5.2, A.3 Poly1305, including
+// the eleven vectors A.3 built to stress the reduction; §2.6.2, A.4 key
+// generation; §2.8.2 and A.5, the full AEAD construction in both
+// directions); a length sweep from 0 to 260 octets, which is four ChaCha20
+// blocks plus change, so every block-boundary off-by-one has a case; a
+// second sweep crossing nineteen AAD lengths with nineteen plaintext
+// lengths at the 16-octet Poly1305 padding boundary and the 64-octet
+// ChaCha20 block boundary, 361 AEAD cases with their round trip and a
+// single-bit tamper checked in this file, needing no oracle for either; and
+// finally 900 cases (300 each of raw ChaCha20, raw Poly1305, and the full
+// AEAD) from a tiny seeded generator that produces the same stream of
+// "random-looking" keys, nonces, additional data and plaintexts here and in
+// the oracle from the same seed, the way `t_sha1.m31`'s own deterministic
+// pattern needs no shared fixture file.
+import chacha20poly1305;
+
+// 2N hex digits to the N octets they spell -- `apps/git/index.m31`'s own
+// helper, needed here too and not shared, per that file's own comment on why.
+bytes hex_decode(str s) {
+    bytes out = [];
+    int i = 0;
+    while (i + 1 < s.size()) {
+        out.push(hex_val(s.byte_at(i)) << 4 | hex_val(s.byte_at(i + 1)));
+        i = i + 2;
+    }
+    return out;
+}
+
+int hex_val(int c) {
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    trap("hex_decode: bad hex digit");
+}
+
+// `chacha20poly1305.open`'s result, printed as one line: "label ok <hex>" or
+// "label err <reason>" -- shared by every RFC AEAD-decryption case below.
+void print_open(str label, bytes key, bytes nonce, bytes ciphertext, bytes tag, bytes aad) {
+    bytes sealed = clone(ciphertext);
+    sealed.extend(tag);
+    match (chacha20poly1305.open(key, nonce, sealed, aad)) {
+        case Ok(bytes pt): {
+            print(label + " ok " + pt.hex());
+        }
+        case Err(chacha20poly1305.Error e): {
+            print(label + " err " + e.to_str());
+        }
+    }
+}
+
+// --- RFC 8439 official test vectors -----------------------------------------
+//
+// Every input below (key, nonce, counter, plaintext, AAD) was pulled out of
+// the RFC 8439 text (rfc-editor.org/rfc/rfc8439.txt) by a script, not retyped
+// by hand -- see the report. Only the INPUTS are shared with
+// oracle_chacha20poly1305.py: each side computes its own answer from them and
+// `test.sh` diffs the two outputs, so a passing line is this library agreeing
+// with the RFC's worked example through an independent implementation of it
+// (`cryptography`/OpenSSL), not with a copy of the RFC's own number pasted
+// into both files.
+
+print("block 2.3.2 " + chacha20poly1305.block(hex_decode("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"), 1, hex_decode("000000090000004a00000000")).hex());
+print("block A.1#1 " + chacha20poly1305.block(hex_decode("0000000000000000000000000000000000000000000000000000000000000000"), 0, hex_decode("000000000000000000000000")).hex());
+print("block A.1#2 " + chacha20poly1305.block(hex_decode("0000000000000000000000000000000000000000000000000000000000000000"), 1, hex_decode("000000000000000000000000")).hex());
+print("block A.1#3 " + chacha20poly1305.block(hex_decode("0000000000000000000000000000000000000000000000000000000000000001"), 1, hex_decode("000000000000000000000000")).hex());
+print("block A.1#4 " + chacha20poly1305.block(hex_decode("00ff000000000000000000000000000000000000000000000000000000000000"), 2, hex_decode("000000000000000000000000")).hex());
+print("block A.1#5 " + chacha20poly1305.block(hex_decode("0000000000000000000000000000000000000000000000000000000000000000"), 0, hex_decode("000000000000000000000002")).hex());
+print("encrypt 2.4.2 " + chacha20poly1305.encrypt(hex_decode("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"), 1, hex_decode("000000000000004a00000000"), hex_decode("4c616469657320616e642047656e746c656d656e206f662074686520636c617373206f66202739393a204966204920636f756c64206f6666657220796f75206f6e6c79206f6e652074697020666f7220746865206675747572652c2073756e73637265656e20776f756c642062652069742e")).hex());
+print("encrypt A.2#2 " + chacha20poly1305.encrypt(hex_decode("0000000000000000000000000000000000000000000000000000000000000001"), 1, hex_decode("000000000000000000000002"), hex_decode("416e79207375626d697373696f6e20746f20746865204945544620696e74656e6465642062792074686520436f6e7472696275746f7220666f72207075626c69636174696f6e20617320616c6c206f722070617274206f6620616e204945544620496e7465726e65742d4472616674206f722052464320616e6420616e792073746174656d656e74206d6164652077697468696e2074686520636f6e74657874206f6620616e204945544620616374697669747920697320636f6e7369646572656420616e20224945544620436f6e747269627574696f6e222e20537563682073746174656d656e747320696e636c756465206f72616c2073746174656d656e747320696e20494554462073657373696f6e732c2061732077656c6c206173207772697474656e20616e6420656c656374726f6e696320636f6d6d756e69636174696f6e73206d61646520617420616e792074696d65206f7220706c6163652c207768696368206172652061646472657373656420746f")).hex());
+print("encrypt A.2#3 " + chacha20poly1305.encrypt(hex_decode("1c9240a5eb55d38af333888604f6b5f0473917c1402b80099dca5cbc207075c0"), 42, hex_decode("000000000000000000000002"), hex_decode("2754776173206272696c6c69672c20616e642074686520736c6974687920746f7665730a446964206779726520616e642067696d626c6520696e2074686520776162653a0a416c6c206d696d737920776572652074686520626f726f676f7665732c0a416e6420746865206d6f6d65207261746873206f757467726162652e")).hex());
+print("keygen 2.6.2 " + chacha20poly1305.key_gen(hex_decode("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"), hex_decode("000000000001020304050607")).hex());
+print("keygen A.4#1 " + chacha20poly1305.key_gen(hex_decode("0000000000000000000000000000000000000000000000000000000000000000"), hex_decode("000000000000000000000000")).hex());
+print("keygen A.4#2 " + chacha20poly1305.key_gen(hex_decode("0000000000000000000000000000000000000000000000000000000000000001"), hex_decode("000000000000000000000002")).hex());
+print("keygen A.4#3 " + chacha20poly1305.key_gen(hex_decode("1c9240a5eb55d38af333888604f6b5f0473917c1402b80099dca5cbc207075c0"), hex_decode("000000000000000000000002")).hex());
+print("mac 2.5.2 " + chacha20poly1305.mac(hex_decode("85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b"), hex_decode("43727970746f6772617068696320466f72756d2052657365617263682047726f7570")).hex());
+print("mac A.3#1 " + chacha20poly1305.mac(hex_decode("0000000000000000000000000000000000000000000000000000000000000000"), hex_decode("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")).hex());
+print("mac A.3#2 " + chacha20poly1305.mac(hex_decode("0000000000000000000000000000000036e5f6b5c5e06070f0efca96227a863e"), hex_decode("416e79207375626d697373696f6e20746f20746865204945544620696e74656e6465642062792074686520436f6e7472696275746f7220666f72207075626c69636174696f6e20617320616c6c206f722070617274206f6620616e204945544620496e7465726e65742d4472616674206f722052464320616e6420616e792073746174656d656e74206d6164652077697468696e2074686520636f6e74657874206f6620616e204945544620616374697669747920697320636f6e7369646572656420616e20224945544620436f6e747269627574696f6e222e20537563682073746174656d656e747320696e636c756465206f72616c2073746174656d656e747320696e20494554462073657373696f6e732c2061732077656c6c206173207772697474656e20616e6420656c656374726f6e696320636f6d6d756e69636174696f6e73206d61646520617420616e792074696d65206f7220706c6163652c207768696368206172652061646472657373656420746f")).hex());
+print("mac A.3#3 " + chacha20poly1305.mac(hex_decode("36e5f6b5c5e06070f0efca96227a863e00000000000000000000000000000000"), hex_decode("416e79207375626d697373696f6e20746f20746865204945544620696e74656e6465642062792074686520436f6e7472696275746f7220666f72207075626c69636174696f6e20617320616c6c206f722070617274206f6620616e204945544620496e7465726e65742d4472616674206f722052464320616e6420616e792073746174656d656e74206d6164652077697468696e2074686520636f6e74657874206f6620616e204945544620616374697669747920697320636f6e7369646572656420616e20224945544620436f6e747269627574696f6e222e20537563682073746174656d656e747320696e636c756465206f72616c2073746174656d656e747320696e20494554462073657373696f6e732c2061732077656c6c206173207772697474656e20616e6420656c656374726f6e696320636f6d6d756e69636174696f6e73206d61646520617420616e792074696d65206f7220706c6163652c207768696368206172652061646472657373656420746f")).hex());
+print("mac A.3#4 " + chacha20poly1305.mac(hex_decode("1c9240a5eb55d38af333888604f6b5f0473917c1402b80099dca5cbc207075c0"), hex_decode("2754776173206272696c6c69672c20616e642074686520736c6974687920746f7665730a446964206779726520616e642067696d626c6520696e2074686520776162653a0a416c6c206d696d737920776572652074686520626f726f676f7665732c0a416e6420746865206d6f6d65207261746873206f757467726162652e")).hex());
+print("mac A.3#5 " + chacha20poly1305.mac(hex_decode("0200000000000000000000000000000000000000000000000000000000000000"), hex_decode("ffffffffffffffffffffffffffffffff")).hex());
+print("mac A.3#6 " + chacha20poly1305.mac(hex_decode("02000000000000000000000000000000ffffffffffffffffffffffffffffffff"), hex_decode("02000000000000000000000000000000")).hex());
+print("mac A.3#7 " + chacha20poly1305.mac(hex_decode("0100000000000000000000000000000000000000000000000000000000000000"), hex_decode("fffffffffffffffffffffffffffffffff0ffffffffffffffffffffffffffffff11000000000000000000000000000000")).hex());
+print("mac A.3#8 " + chacha20poly1305.mac(hex_decode("0100000000000000000000000000000000000000000000000000000000000000"), hex_decode("fffffffffffffffffffffffffffffffffbfefefefefefefefefefefefefefefe01010101010101010101010101010101")).hex());
+print("mac A.3#9 " + chacha20poly1305.mac(hex_decode("0200000000000000000000000000000000000000000000000000000000000000"), hex_decode("fdffffffffffffffffffffffffffffff")).hex());
+print("mac A.3#10 " + chacha20poly1305.mac(hex_decode("0100000000000000040000000000000000000000000000000000000000000000"), hex_decode("e33594d7505e43b900000000000000003394d7505e4379cd01000000000000000000000000000000000000000000000001000000000000000000000000000000")).hex());
+print("mac A.3#11 " + chacha20poly1305.mac(hex_decode("0100000000000000040000000000000000000000000000000000000000000000"), hex_decode("e33594d7505e43b900000000000000003394d7505e4379cd010000000000000000000000000000000000000000000000")).hex());
+print("seal 2.8.2 " + chacha20poly1305.seal(hex_decode("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"), hex_decode("070000004041424344454647"), hex_decode("4c616469657320616e642047656e746c656d656e206f662074686520636c617373206f66202739393a204966204920636f756c64206f6666657220796f75206f6e6c79206f6e652074697020666f7220746865206675747572652c2073756e73637265656e20776f756c642062652069742e"), hex_decode("50515253c0c1c2c3c4c5c6c7")).hex());
+print_open("open 2.8.2", hex_decode("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"), hex_decode("070000004041424344454647"), hex_decode("d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b6116"), hex_decode("1ae10b594f09e26a7e902ecbd0600691"), hex_decode("50515253c0c1c2c3c4c5c6c7"));
+print_open("open A.5", hex_decode("1c9240a5eb55d38af333888604f6b5f0473917c1402b80099dca5cbc207075c0"), hex_decode("000000000102030405060708"), hex_decode("64a0861575861af460f062c79be643bd5e805cfd345cf389f108670ac76c8cb24c6cfc18755d43eea09ee94e382d26b0bdb7b73c321b0100d4f03b7f355894cf332f830e710b97ce98c8a84abd0b948114ad176e008d33bd60f982b1ff37c8559797a06ef4f0ef61c186324e2b3506383606907b6a7c02b0f9f6157b53c867e4b9166c767b804d46a59b5216cde7a4e99040c5a40433225ee282a1b0a06c523eaf4534d7f83fa1155b0047718cbc546a0d072b04b3564eea1b422273f548271a0bb2316053fa76991955ebd63159434ecebb4e466dae5a1073a6727627097a1049e617d91d361094fa68f0ff77987130305beaba2eda04df997b714d6c6f2c29a6ad5cb4022b02709b"), hex_decode("eead9d67890cbb22392336fea1851f38"), hex_decode("f33388860000000000004e91"));
+
+// --- a tiny deterministic generator, shared in spirit with `oracle_chacha20poly1305.py` ---
+//
+// A glibc-constants LCG, confined to 31 bits so every value is already
+// non-negative and needs no logical-shift trick (reference §6.1) -- this is
+// a test-fixture generator, not a cryptographic PRNG, and its only job is to
+// produce the same stream of "random-looking" bytes here and in the Python
+// oracle's matching class from the same seed, the way `t_sha1.m31`'s own
+// `pattern.push(n * 7 + 13 & 0xFF)` needs no shared fixture file.
+type Rng {
+    int state;
+}
+
+int Rng.next() {
+    state = state * 1_103_515_245 + 12_345 & 0x7FFF_FFFF;
+    return state;
+}
+
+bytes Rng.gen(int n) {
+    bytes out = [];
+    int i = 0;
+    while (i < n) {
+        out.push(next() & 0xFF);
+        i = i + 1;
+    }
+    return out;
+}
+
+// A value in 0 .. n-1, for picking varied lengths -- not uniform in the way
+// a cryptographic RNG's `range` would need to be, which does not matter for
+// what this file uses it for.
+int Rng.range(int n) {
+    return next() % n;
+}
+
+// --- length sweep: every ChaCha20/Poly1305 length from 0 to 260 octets -----
+//
+// Four 64-octet blocks plus change, so every block-boundary off-by-one (63,
+// 64, 65, ..., 255, 256, 257) has a case, the same reasoning
+// `apps/git/t_sha1.m31`'s 0-to-200 sweep gives for SHA-1's own 64-octet
+// blocks.
+Rng sweep_rng = Rng(1);
+bytes sweep_key = sweep_rng.gen(32);
+bytes sweep_nonce = sweep_rng.gen(12);
+bytes pattern = [];
+int sweep_len = 0;
+while (sweep_len <= 260) {
+    print("sweep-encrypt " + sweep_len.to_str() + " " + chacha20poly1305.encrypt(sweep_key, 0, sweep_nonce, pattern).hex());
+    print("sweep-mac " + sweep_len.to_str() + " " + chacha20poly1305.mac(sweep_key, pattern).hex());
+    pattern.push(sweep_len * 7 + 13 & 0xFF);
+    sweep_len = sweep_len + 1;
+}
+
+// --- length sweep: chacha20poly1305.seal/open over a grid of AAD and ------
+// plaintext lengths at the 16-octet Poly1305 padding boundary and the
+// 64-octet ChaCha20 block boundary -- 19 times 19 cases, each one checked
+// for its own round trip and a single flipped bit's rejection right here,
+// which needs no oracle; the sealed bytes themselves are also printed, for
+// `oracle_chacha20poly1305.py` to check independently the way every other
+// section here does.
+const Array<int> SWEEP_LENGTHS = [0, 1, 15, 16, 17, 31, 32, 33, 47, 48, 49, 63, 64, 65, 100, 127, 128, 129, 200];
+
+Rng grid_rng = Rng(2);
+for (int aad_len in SWEEP_LENGTHS) {
+    for (int pt_len in SWEEP_LENGTHS) {
+        bytes key = grid_rng.gen(32);
+        bytes nonce = grid_rng.gen(12);
+        bytes aad = grid_rng.gen(aad_len);
+        bytes pt = grid_rng.gen(pt_len);
+        bytes sealed = chacha20poly1305.seal(key, nonce, pt, aad);
+        print("sweep-seal " + aad_len.to_str() + "-" + pt_len.to_str() + " " + sealed.hex());
+        match (chacha20poly1305.open(key, nonce, sealed, aad)) {
+            case Ok(bytes back): {
+                if (back != pt) {
+                    trap("AEAD round trip mismatch in the length grid");
+                }
+            }
+            case Err(chacha20poly1305.Error e): {
+                trap("AEAD open failed on its own seal: " + e.to_str());
+            }
+        }
+        if (sealed.size() > 0) {
+            bytes tampered = clone(sealed);
+            int flip_at = grid_rng.range(sealed.size());
+            tampered[flip_at] = tampered[flip_at] ^ 1;
+            match (chacha20poly1305.open(key, nonce, tampered, aad)) {
+                case Ok(bytes bad): {
+                    trap("a single flipped bit was not detected");
+                }
+                case Err(chacha20poly1305.Error e): {
+                    // Expected: the tag must not match.
+                }
+            }
+        }
+    }
+}
+
+// --- 900 further cases against a real library: 300 each of raw ChaCha20, --
+// raw Poly1305, and the full AEAD -----------------------------------------
+const int FUZZ_N = 300;
+
+Rng enc_rng = Rng(3);
+int i = 0;
+while (i < FUZZ_N) {
+    bytes key = enc_rng.gen(32);
+    bytes nonce = enc_rng.gen(12);
+    int counter = enc_rng.range(4);
+    bytes pt = enc_rng.gen(enc_rng.range(600));
+    print("fuzz-encrypt " + i.to_str() + " " + chacha20poly1305.encrypt(key, counter, nonce, pt).hex());
+    i = i + 1;
+}
+Rng mac_rng = Rng(4);
+i = 0;
+while (i < FUZZ_N) {
+    bytes key = mac_rng.gen(32);
+    bytes msg = mac_rng.gen(mac_rng.range(600));
+    print("fuzz-mac " + i.to_str() + " " + chacha20poly1305.mac(key, msg).hex());
+    i = i + 1;
+}
+Rng aead_rng = Rng(5);
+i = 0;
+while (i < FUZZ_N) {
+    bytes key = aead_rng.gen(32);
+    bytes nonce = aead_rng.gen(12);
+    bytes aad = aead_rng.gen(aead_rng.range(200));
+    bytes pt = aead_rng.gen(aead_rng.range(600));
+    bytes sealed = chacha20poly1305.seal(key, nonce, pt, aad);
+    print("fuzz-seal " + i.to_str() + " " + sealed.hex());
+    match (chacha20poly1305.open(key, nonce, sealed, aad)) {
+        case Ok(bytes back): {
+            if (back != pt) {
+                trap("fuzz round trip mismatch");
+            }
+        }
+        case Err(chacha20poly1305.Error e): {
+            trap("fuzz open failed on its own seal: " + e.to_str());
+        }
+    }
+    if (sealed.size() > 0) {
+        bytes tampered = clone(sealed);
+        int flip_at = aead_rng.range(sealed.size());
+        tampered[flip_at] = tampered[flip_at] ^ 1;
+        match (chacha20poly1305.open(key, nonce, tampered, aad)) {
+            case Ok(bytes bad): {
+                trap("tampered ciphertext was accepted");
+            }
+            case Err(chacha20poly1305.Error e): {
+                // Expected.
+            }
+        }
+    }
+    i = i + 1;
+}

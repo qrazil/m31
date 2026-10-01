@@ -1,4 +1,4 @@
-corpus/errors/771-destructor-returns.src:5:1: `Res.drop` is a destructor and must return `void`: nobody receives its result, so it cannot report an error either -- give the type an ordinary method that returns a Result, and call that from `drop` too
+corpus/errors/771-destructor-returns.m31:5:1: `Res.drop` is a destructor and must return `void`: nobody receives its result, so it cannot report an error either -- give the type an ordinary method that returns a Result, and call that from `drop` too
   |
 5 | Result<bool, str> Res.drop() {
   | ^

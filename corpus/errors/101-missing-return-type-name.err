@@ -1,4 +1,4 @@
-corpus/errors/101-missing-return-type-name.src:3:1: function `f` must return a value of type List<int>
+corpus/errors/101-missing-return-type-name.m31:3:1: function `f` must return a value of type List<int>
   |
 3 | List<int> f() {
   | ^

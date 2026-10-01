@@ -1,4 +1,4 @@
-corpus/errors/1042-send-a-resource-does-not-advise-clone.src:15:15: `c` is borrowed here and cannot cross a thread boundary; a reference two threads can reach would race on a non-atomic refcount. `Conn` cannot be cloned -- it owns a resource (it has a destructor), and a copy would release it a second time. A resource can only be moved on by whoever made it: bind it with `case` in a `match` on the call that produced it -- that binding may cross -- and send it from there
+corpus/errors/1042-send-a-resource-does-not-advise-clone.m31:15:15: `c` is borrowed here and cannot cross a thread boundary; a reference two threads can reach would race on a non-atomic refcount. `Conn` cannot be cloned -- it owns a resource (it has a destructor), and a copy would release it a second time. A resource can only be moved on by whoever made it: bind it with `case` in a `match` on the call that produced it -- that binding may cross -- and send it from there
    |
 15 |     send(out, c);
    |               ^

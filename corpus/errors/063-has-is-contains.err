@@ -1,4 +1,4 @@
-corpus/errors/063-has-is-contains.src:3:8: a map has no method `has`; it is `contains()`, which asks about a key
+corpus/errors/063-has-is-contains.m31:3:8: a map has no method `has`; it is `contains()`, which asks about a key
   |
 3 | print(m.has("a"));
   |        ^

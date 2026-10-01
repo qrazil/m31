@@ -1,4 +1,4 @@
-corpus/errors/1138-lambda-parameter-shadows-a-local.src:7:10: `n` is already in scope; shadowing is not allowed, rename one
+corpus/errors/1138-lambda-parameter-shadows-a-local.m31:7:10: `n` is already in scope; shadowing is not allowed, rename one
   |
 7 | Get g = (int n) => n;
   |          ^

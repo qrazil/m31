@@ -1,6 +1,6 @@
 /* Tests for the sys layer, run against each backend by runtime/sys_test.sh.
  *
- * The corpus exercises the layer through lib/io.src and lib/fs.src, but
+ * The corpus exercises the layer through lib/io.m31 and lib/fs.m31, but
  * only on one backend per run and only as far as those ask. This checks every
  * function sys.h declares, including the error results, because the point
  * of the layer is that both backends return the SAME value for the same
@@ -463,7 +463,7 @@ static void net_tests(void) {
     expect("getrandom for the socket directory", sys_getrandom(rnd, sizeof rnd),
            (int64_t)sizeof rnd);
     char dir[64];
-    join(dir, "/tmp/lang-sys-net-", "");
+    join(dir, "/tmp/m31-sys-net-", "");
     char *p = dir + len_of(dir);
     for (int i = 0; i < 8; i++) {
         *p++ = "0123456789abcdef"[rnd[i] >> 4];
@@ -597,7 +597,7 @@ static void net_tests(void) {
  * terminal emulator what they mean to a pty's line discipline. They are the
  * same line discipline -- a pty slave and a serial line both run n_tty -- so
  * the kernel side is covered; what a particular terminal does with the
- * BYTES that come out is lib/term.src's business and a human's. */
+ * BYTES that come out is lib/term.m31's business and a human's. */
 
 #ifdef RT_SYS_RAW
 
@@ -768,7 +768,7 @@ static void term_tests(void) {
      * that neither the layer nor a caller ever names. */
     expect("VINTR is ^C", saved.cc[0], 3);
 
-    /* ---- raw mode, the way lib/term.src builds it ---- */
+    /* ---- raw mode, the way lib/term.m31 builds it ---- */
     t = saved;
     t.iflag = t.iflag & ~(int64_t)(SYS_TC_IGNBRK | SYS_TC_BRKINT | SYS_TC_PARMRK |
                                    SYS_TC_ISTRIP | SYS_TC_INLCR | SYS_TC_IGNCR |
@@ -858,7 +858,7 @@ int test_main(void) {
     unsigned char rnd[8];
     expect("getrandom small", sys_getrandom(rnd, sizeof rnd), (int64_t)sizeof rnd);
     char dir[64];
-    join(dir, "/tmp/lang-sys-test-", "");
+    join(dir, "/tmp/m31-sys-test-", "");
     char *p = dir + len_of(dir);
     for (int i = 0; i < 8; i++) {
         *p++ = "0123456789abcdef"[rnd[i] >> 4];

@@ -1,4 +1,4 @@
-corpus/errors/604-generic-receiver-arity.src:7:1: type `Pair` takes 2 type argument(s), found 1
+corpus/errors/604-generic-receiver-arity.m31:7:1: type `Pair` takes 2 type argument(s), found 1
   |
 7 | A Pair<A>.first() {
   | ^
