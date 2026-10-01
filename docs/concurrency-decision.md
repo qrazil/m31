@@ -493,15 +493,15 @@ freed. A program creates few, so the leak is bounded by that count.
 - Shared queue capacity as a separate configurable parameter (functionally
   inert above `fuel_size`, kept for backpressure signaling)
 - No stealing anywhere
-- **Blocking on this phase, not yet designed**: the wake/notification
-  mechanism — how an idle carrier learns something landed in the shared
-  queue, now that there is usually no local spawn to react to. This needs
-  its own decision, not a default inherited from the now-moot
-  local-spawn-wake framing.
-- **Blocking on this phase, needs empirical tuning against real hardware,
-  not simulation**: a production default for `fuel_size`, given the
-  simulation that found "smaller wins" charges zero cost per draw and so
-  cannot see where the real floor is.
+- Wake targeting: a reshuffled random permutation over carriers, not a
+  fixed sequence, with every carrier's idle state initialized true at
+  startup — resolved, see "Scheduler queues" above for the two failure
+  modes this fixes and why. No longer blocking.
+- **Still blocking on this phase, needs empirical tuning against real
+  hardware, not simulation**: a production default for `fuel_size`, given
+  the simulation that found "smaller wins" charges zero cost per draw and
+  so cannot see where the real floor is. The algorithmic design above is
+  otherwise ready to implement against.
 
 **Phase 3 — I/O integration.**
 - epoll reactor
