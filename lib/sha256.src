@@ -1,0 +1,219 @@
+// SHA-256 (FIPS 180-4), written in the language over `bytes` and the bit
+// operators.
+//
+// It exists for `docs/ssh-decision.md` Phase 1: curve25519-sha256 key
+// exchange hashes and derives its session keys with SHA-256, and nothing
+// else in this codebase has needed a second digest before now (git's object
+// names are SHA-1, `apps/git/sha1.src`). This module is standalone and not
+// wired into anything yet -- see that decision doc.
+//
+// API
+// ---
+//   sha256.Hasher h = sha256.Hasher();
+//   h.update(chunk);            // as many times as you like
+//   bytes d = h.digest();       // 32 octets; ends the hash
+//
+//   sha256.sum(data)            -> bytes, the 32 octets
+//   sha256.hex(data)            -> str, 64 lowercase hex digits
+//
+// --- this is `apps/git/sha1.src`'s structure, with SHA-256's shape --------
+//
+// SHA-1 and SHA-256 are both Merkle-Damgard hashes over 64-octet blocks with
+// a 64-bit big-endian length suffix, so the outer shape here -- `update`
+// buffering a partial block, `digest` padding and draining it, one `block`
+// doing the compression -- is copied from that file rather than rediscovered.
+// What differs is inside `block`: eight chaining words instead of five, a
+// 64-word message schedule instead of 80, and a different round function.
+// The 32-bit-arithmetic argument that file's header makes -- every word kept
+// non-negative and below 2^32, so `>>` is already a logical shift and `+`
+// never approaches the 64-bit trap threshold, with `& 0xFFFF_FFFF` standing
+// in for "modulo 2^32" -- applies here without change.
+//
+// `Ch(e,f,g) = (e & f) ^ (~e & g)` is spelled `g ^ (e & (f ^ g))`, and
+// `Maj(a,b,c) = (a & b) ^ (a & c) ^ (b & c)` is spelled
+// `(a & b) | (c & (a | b))`, for the same reason `sha1.src` gives: both
+// avoid a `~` that would otherwise need masking back into range, and both
+// agree with the standard's formula on every 32-bit input.
+
+/// The eight initial hash words, FIPS 180-4 §5.3.3: the fractional part of
+/// the square root of each of the first eight primes, in 32 bits. Fields
+/// with defaults rather than module constants so that `Hasher()` is the
+/// whole of "start a hash".
+pub type Hasher {
+    int h0 = 0x6A09_E667;
+    int h1 = 0xBB67_AE85;
+    int h2 = 0x3C6E_F372;
+    int h3 = 0xA54F_F53A;
+    int h4 = 0x510E_527F;
+    int h5 = 0x9B05_688C;
+    int h6 = 0x1F83_D9AB;
+    int h7 = 0x5BE0_CD19;
+    /// Octets seen so far, which the padding needs as a bit count.
+    int total = 0;
+    /// The partial block: always fewer than 64 octets between `update`s.
+    bytes tail = [];
+    /// The message schedule, held across blocks so the 64-word array is
+    /// allocated once for a whole file rather than once per 64 octets --
+    /// `apps/git/sha1.src`'s `block` has the note on why this is read into a
+    /// local rather than indexed through the field directly.
+    Array<int> sched = [0; 64];
+}
+
+/// Feed `data` to the hash. Any number of calls, of any sizes, hash the same
+/// as one call with them joined.
+pub void Hasher.update(bytes data) {
+    int n = data.size();
+    total = total + n;
+    int i = 0;
+    // Finish the partial block first, if there is one, and only then run the
+    // whole blocks straight out of `data` -- no copy for the bulk of a file.
+    if (tail.size() > 0) {
+        while (i < n && tail.size() < 64) {
+            tail.push(data[i]);
+            i = i + 1;
+        }
+        if (tail.size() == 64) {
+            block(tail, 0);
+            tail.clear();
+        }
+    }
+    while (n - i >= 64) {
+        block(data, i);
+        i = i + 64;
+    }
+    while (i < n) {
+        tail.push(data[i]);
+        i = i + 1;
+    }
+}
+
+/// The 32-octet digest. **This ends the hash**: it appends the padding and
+/// consumes the buffered tail, so a second `digest()` on the same `Hasher`
+/// answers something that is not a SHA-256 of anything. Make another
+/// `Hasher` for another message.
+pub bytes Hasher.digest() {
+    int bits = total * 8;
+    tail.push(0x80);
+    while (tail.size() % 64 != 56) {
+        tail.push(0);
+    }
+    int s = 56;
+    while (s >= 0) {
+        tail.push(bits >> s & 0xFF);
+        s = s - 8;
+    }
+    int i = 0;
+    int n = tail.size();
+    while (i < n) {
+        block(tail, i);
+        i = i + 64;
+    }
+    tail.clear();
+    bytes out = [];
+    word(out, h0);
+    word(out, h1);
+    word(out, h2);
+    word(out, h3);
+    word(out, h4);
+    word(out, h5);
+    word(out, h6);
+    word(out, h7);
+    return out;
+}
+
+// One 64-octet block, read from `b` starting at `at`. The caller guarantees
+// that 64 octets are there.
+void Hasher.block(bytes b, int at) {
+    Array<int> w = sched;
+    for (int i in 0 .. 16) {
+        int j = at + i * 4;
+        w[i] = (b[j] << 24) | (b[j + 1] << 16) | (b[j + 2] << 8) | b[j + 3];
+    }
+    // The message schedule, FIPS 180-4 §6.2.2 step 1: each later word mixes
+    // four earlier ones through the two sigma functions -- a rotate-xor-rotate
+    // for the high bits, a shift for the low ones.
+    for (int i in 16 .. 64) {
+        int x15 = w[i - 15];
+        int s0 = (((x15 >> 7) | (x15 << 25)) & 0xFFFF_FFFF) ^ (((x15 >> 18) | (x15 << 14)) & 0xFFFF_FFFF) ^ (x15 >> 3);
+        int x2 = w[i - 2];
+        int s1 = (((x2 >> 17) | (x2 << 15)) & 0xFFFF_FFFF) ^ (((x2 >> 19) | (x2 << 13)) & 0xFFFF_FFFF) ^ (x2 >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1 & 0xFFFF_FFFF;
+    }
+    int a = h0;
+    int b2 = h1;
+    int c = h2;
+    int d = h3;
+    int e = h4;
+    int f = h5;
+    int g = h6;
+    int h = h7;
+    // The compression loop, FIPS 180-4 §6.2.2 step 3. Every parenthesis is
+    // written the way the standard writes it -- see `apps/git/sha1.src`'s
+    // note on why, which applies here too.
+    for (int i in 0 .. 64) {
+        int bs1 = (((e >> 6) | (e << 26)) & 0xFFFF_FFFF) ^ (((e >> 11) | (e << 21)) & 0xFFFF_FFFF) ^ (((e >> 25) | (e << 7)) & 0xFFFF_FFFF);
+        int ch = g ^ (e & (f ^ g));
+        int temp1 = h + bs1 + ch + K[i] + w[i] & 0xFFFF_FFFF;
+        int bs0 = (((a >> 2) | (a << 30)) & 0xFFFF_FFFF) ^ (((a >> 13) | (a << 19)) & 0xFFFF_FFFF) ^ (((a >> 22) | (a << 10)) & 0xFFFF_FFFF);
+        int maj = (a & b2) | (c & (a | b2));
+        int temp2 = bs0 + maj & 0xFFFF_FFFF;
+        h = g;
+        g = f;
+        f = e;
+        e = d + temp1 & 0xFFFF_FFFF;
+        d = c;
+        c = b2;
+        b2 = a;
+        a = temp1 + temp2 & 0xFFFF_FFFF;
+    }
+    h0 = h0 + a & 0xFFFF_FFFF;
+    h1 = h1 + b2 & 0xFFFF_FFFF;
+    h2 = h2 + c & 0xFFFF_FFFF;
+    h3 = h3 + d & 0xFFFF_FFFF;
+    h4 = h4 + e & 0xFFFF_FFFF;
+    h5 = h5 + f & 0xFFFF_FFFF;
+    h6 = h6 + g & 0xFFFF_FFFF;
+    h7 = h7 + h & 0xFFFF_FFFF;
+}
+
+/// The 64 round constants, FIPS 180-4 §4.2.2: the fractional part of the
+/// cube root of each of the first 64 primes, in 32 bits.
+const Array<int> K = [
+    0x428A_2F98, 0x7137_4491, 0xB5C0_FBCF, 0xE9B5_DBA5,
+    0x3956_C25B, 0x59F1_11F1, 0x923F_82A4, 0xAB1C_5ED5,
+    0xD807_AA98, 0x1283_5B01, 0x2431_85BE, 0x550C_7DC3,
+    0x72BE_5D74, 0x80DE_B1FE, 0x9BDC_06A7, 0xC19B_F174,
+    0xE49B_69C1, 0xEFBE_4786, 0x0FC1_9DC6, 0x240C_A1CC,
+    0x2DE9_2C6F, 0x4A74_84AA, 0x5CB0_A9DC, 0x76F9_88DA,
+    0x983E_5152, 0xA831_C66D, 0xB003_27C8, 0xBF59_7FC7,
+    0xC6E0_0BF3, 0xD5A7_9147, 0x06CA_6351, 0x1429_2967,
+    0x27B7_0A85, 0x2E1B_2138, 0x4D2C_6DFC, 0x5338_0D13,
+    0x650A_7354, 0x766A_0ABB, 0x81C2_C92E, 0x9272_2C85,
+    0xA2BF_E8A1, 0xA81A_664B, 0xC24B_8B70, 0xC76C_51A3,
+    0xD192_E819, 0xD699_0624, 0xF40E_3585, 0x106A_A070,
+    0x19A4_C116, 0x1E37_6C08, 0x2748_774C, 0x34B0_BCB5,
+    0x391C_0CB3, 0x4ED8_AA4A, 0x5B9C_CA4F, 0x682E_6FF3,
+    0x748F_82EE, 0x78A5_636F, 0x84C8_7814, 0x8CC7_0208,
+    0x90BE_FFFA, 0xA450_6CEB, 0xBEF9_A3F7, 0xC671_78F2
+];
+
+/// The digest of `data`, in one call.
+pub bytes sum(bytes data) {
+    Hasher h = Hasher();
+    h.update(data);
+    return h.digest();
+}
+
+/// The digest of `data` as 64 lowercase hex digits.
+pub str hex(bytes data) {
+    return sum(data).hex();
+}
+
+// A 32-bit word appended big-endian, which is the order every length and
+// every digit in this file is written in.
+void word(bytes out, int v) {
+    out.push(v >> 24 & 0xFF);
+    out.push(v >> 16 & 0xFF);
+    out.push(v >> 8 & 0xFF);
+    out.push(v & 0xFF);
+}

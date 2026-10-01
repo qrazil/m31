@@ -37,6 +37,8 @@ pub fn source(name: &str) -> Option<&'static str> {
         "random" => include_str!("../lib/random.src"),
         "args" => include_str!("../lib/args.src"),
         "unicode" => include_str!("../lib/unicode.src"),
+        "sha256" => include_str!("../lib/sha256.src"),
+        "chacha20poly1305" => include_str!("../lib/chacha20poly1305.src"),
         _ => return None,
     })
 }

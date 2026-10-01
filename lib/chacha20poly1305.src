@@ -1,0 +1,515 @@
+// ChaCha20, Poly1305, and the AEAD_CHACHA20_POLY1305 construction that
+// composes them -- RFC 8439 (which obsoletes RFC 7539 without changing the
+// bits). One module, not three, because RFC 8439 itself is: the two
+// primitives exist in this codebase for exactly one reason each other needs,
+// the one-time Poly1305 key comes out of the ChaCha20 block function, and a
+// caller of an AEAD cipher never wants the pieces separately (`docs/http.src`
+// and `json.src` are this codebase's own precedent for one module covering a
+// standard that is naturally one thing).
+//
+// It exists for `docs/ssh-decision.md` Phase 1: `chacha20-poly1305@openssh.com`
+// is the one cipher suite that library will ever negotiate, and RFC 8439's
+// AEAD construction is exactly what that OpenSSH cipher runs per packet.
+// Standalone and not wired into anything yet -- see that decision doc.
+//
+// API
+// ---
+//   chacha20poly1305.block(key, counter, nonce)       -> bytes, 64 octets
+//   chacha20poly1305.encrypt(key, counter, nonce, pt) -> bytes, len(pt)
+//   chacha20poly1305.key_gen(key, nonce)              -> bytes, 32 octets
+//   chacha20poly1305.mac(key, msg)                    -> bytes, 16 octets
+//   chacha20poly1305.seal(key, nonce, plaintext, aad) -> bytes, ciphertext || tag
+//   chacha20poly1305.open(key, nonce, sealed, aad)     -> Result<bytes, Error>
+//
+// `key` is always 32 octets and `nonce` always 12 -- the one modern IETF
+// variant, which is what `chacha20-poly1305@openssh.com` and every other
+// current use of this pair means by "ChaCha20". A wrong length is a bug in
+// the caller, not the world, so it **traps** (reference §6.6) rather than
+// returning a `Result` -- the same choice `Array`'s fixed length and
+// `bytes.push`'s range make. What a `Result` *is* for here: `open`'s tag
+// check, because a forged or corrupted ciphertext is exactly the world a
+// network parser has to expect, the same reasoning `base64.decode` gives for
+// its own `Error`.
+//
+// --- 32-bit arithmetic on a 64-bit int -------------------------------------
+//
+// ChaCha20 words are kept non-negative and below 2^32, exactly as
+// `apps/git/sha1.src` and `lib/sha256.src` keep theirs, for the same
+// reasons: `>>` is then already a logical shift, `+` on a handful of such
+// words never approaches the 64-bit trap threshold, and `& 0xFFFF_FFFF`
+// spells "modulo 2^32" at the one place each addition or rotate needs it.
+//
+// --- Poly1305: radix 2^26, not a bignum library ----------------------------
+//
+// RFC 8439 §3 warns against a generic big-number library for this: dynamic
+// allocation, and a variable-time codepath, in the one place where the
+//'variable' is the reader's own authentication key. This is Andrew Moon's
+// public-domain `poly1305-donna` 32-bit construction (§2.5's accumulator held
+// as five 26-bit limbs rather than one 130-bit number), the reference nearly
+// every constant-time, allocation-free Poly1305 in production is some
+// translation of, chosen for exactly the property RFC 8439 asks for: fixed,
+// input-independent work, no allocation, and -- because every intermediate
+// product is a 26-bit limb times at most a 29-bit one, summed five at a time
+// -- nothing within a factor of 60 of this language's 2^63 overflow trap
+// even at the most adversarial input (verified in the differential fuzz
+// harness, `apps/ssh/t_chacha20poly1305.src`, which is also checked against
+// RFC 8439 Appendix A.3's eleven vectors built specifically to stress the
+// reduction: a zero `r`, a carry out of the top limb, an accumulator landing
+// on exactly 2^130-5, and the two "5*H+L" 131-bit-intermediate cases).
+//
+// Poly1305 is one-shot rather than a streaming `Hasher` like `sha256`'s: RFC
+// 8439's own key generation and the AEAD construction both need the whole
+// padded buffer built before a tag can be computed, so there is no caller
+// this codebase has that would use a streaming update.
+//
+// --- constant time where it has to be --------------------------------------
+//
+// `open`'s tag comparison is `consttime_eq`, not `==`: `bytes`'s `==`
+// (reference §3.10) makes no promise about its timing, and a MAC check whose
+// time leaks *where* the first mismatched byte was is a forgery oracle --
+// the exact class of bug RFC 8439 §3 is warning about one paragraph over
+// from the big-number one.
+
+// --- ChaCha20 ---------------------------------------------------------------
+
+// "expand 32-byte k", as four little-endian 32-bit words -- RFC 8439 §2.3.
+const Array<int> CHACHA_CONST = [0x6170_7865, 0x3320_646E, 0x7962_2D32, 0x6B20_6574];
+
+// One byte, from wherever `>>` leaves it. `& 0xFF` is exact regardless of
+// this language's arithmetic (sign-extending) `>>` (reference §6.1): for
+// every shift used in this file the byte read out sits below the bits sign
+// extension can touch, so the low 8 bits of the shifted value are always the
+// original bits at that position.
+int byte_at(int x, int shift) {
+    return x >> shift & 0xFF;
+}
+
+// Four octets of `b` starting at `at`, little-endian -- the order every
+// ChaCha20 and Poly1305 word in this file is read in. Never masked with
+// `& 0xFFFF_FFFF`: each term is already narrower than where the next one
+// starts (a byte, shifted by at most 24), so the OR can never carry into a
+// bit the next term also sets.
+int word_le(bytes b, int at) {
+    return b[at] | (b[at + 1] << 8) | (b[at + 2] << 16) | (b[at + 3] << 24);
+}
+
+// A 32-bit word appended little-endian.
+void push_word_le(bytes out, int v) {
+    out.push(v & 0xFF);
+    out.push(byte_at(v, 8));
+    out.push(byte_at(v, 16));
+    out.push(byte_at(v, 24));
+}
+
+// `x` rotated left by `n` bits, as a 32-bit word. The mask is only needed on
+// the left-shifted half -- `x >> (32 - n)` is already below 2^32 because `x`
+// is -- but it is applied to the whole OR anyway, the way `apps/git/sha1.src`
+// masks its rotate, so every rotate in this file has the same shape.
+int rotl32(int x, int n) {
+    return (x << n | x >> (32 - n)) & 0xFFFF_FFFF;
+}
+
+// One quarter round, RFC 8439 §2.1, done in place on the sixteen words of
+// `x`. `Array<int>` is a reference type (reference §3.9), so the four
+// indices this touches are visible to the caller without `x` being returned.
+void quarter_round(Array<int> x, int a, int b, int c, int d) {
+    x[a] = x[a] + x[b] & 0xFFFF_FFFF;
+    x[d] = rotl32(x[d] ^ x[a], 16);
+    x[c] = x[c] + x[d] & 0xFFFF_FFFF;
+    x[b] = rotl32(x[b] ^ x[c], 12);
+    x[a] = x[a] + x[b] & 0xFFFF_FFFF;
+    x[d] = rotl32(x[d] ^ x[a], 8);
+    x[c] = x[c] + x[d] & 0xFFFF_FFFF;
+    x[b] = rotl32(x[b] ^ x[c], 7);
+}
+
+/// The ChaCha20 block function, RFC 8439 §2.3: one 64-octet keystream block
+/// for `key` (32 octets), `counter` (0 to 2^32-1) and `nonce` (12 octets).
+/// `key` or `nonce` at any other length, or `counter` outside its range, is a
+/// bug in the caller and **traps**, per this module's header.
+pub bytes block(bytes key, int counter, bytes nonce) {
+    if (key.size() != 32) {
+        trap("chacha20: key must be 32 bytes");
+    }
+    if (nonce.size() != 12) {
+        trap("chacha20: nonce must be 12 bytes");
+    }
+    if (counter < 0 || counter > 0xFFFF_FFFF) {
+        trap("chacha20: counter must fit in 32 bits");
+    }
+    Array<int> x = [0; 16];
+    x[0] = CHACHA_CONST[0];
+    x[1] = CHACHA_CONST[1];
+    x[2] = CHACHA_CONST[2];
+    x[3] = CHACHA_CONST[3];
+    for (int i in 0 .. 8) {
+        x[4 + i] = word_le(key, i * 4);
+    }
+    x[12] = counter;
+    x[13] = word_le(nonce, 0);
+    x[14] = word_le(nonce, 4);
+    x[15] = word_le(nonce, 8);
+    // The starting state, kept aside to add back in once the rounds are
+    // done (RFC 8439 §2.3's "adding the original input words") rather than
+    // reconstructed, per §3's implementation advice.
+    Array<int> orig = clone(x);
+    for (int round in 0 .. 10) {
+        // The four "column" quarter rounds, then the four "diagonal" ones --
+        // together, one full double-round of the twenty this function runs.
+        quarter_round(x, 0, 4, 8, 12);
+        quarter_round(x, 1, 5, 9, 13);
+        quarter_round(x, 2, 6, 10, 14);
+        quarter_round(x, 3, 7, 11, 15);
+        quarter_round(x, 0, 5, 10, 15);
+        quarter_round(x, 1, 6, 11, 12);
+        quarter_round(x, 2, 7, 8, 13);
+        quarter_round(x, 3, 4, 9, 14);
+    }
+    bytes out = [];
+    for (int i in 0 .. 16) {
+        push_word_le(out, x[i] + orig[i] & 0xFFFF_FFFF);
+    }
+    return out;
+}
+
+/// ChaCha20 encryption, RFC 8439 §2.4: `data` XORed with the keystream that
+/// `key`, `nonce` and the block counter starting at `counter` produce.
+/// Symmetric -- the same call decrypts, since XOR is its own inverse and the
+/// keystream does not depend on `data`.
+pub bytes encrypt(bytes key, int counter, bytes nonce, bytes data) {
+    bytes out = [];
+    int n = data.size();
+    int i = 0;
+    int ctr = counter;
+    while (i < n) {
+        bytes ks = block(key, ctr, nonce);
+        int end = i + 64;
+        if (end > n) {
+            end = n;
+        }
+        int j = i;
+        while (j < end) {
+            out.push(data[j] ^ ks[j - i]);
+            j = j + 1;
+        }
+        i = end;
+        ctr = ctr + 1;
+    }
+    return out;
+}
+
+// --- Poly1305 ----------------------------------------------------------------
+
+// One 16-octet block of the message, folded into the accumulator `h` and
+// reduced back into five 26-bit limbs. `hibit` is `1 << 24` for a full
+// 16-octet block (the implicit 2^128 that RFC 8439 §2.5.1's pseudocode adds
+// before every block) and `0` for the last, short block -- there the
+// trailing `0x01` the caller has already written into `m` stands for it
+// instead, because a block shorter than 17 octets has room for that byte and
+// a full one does not. `h`, like `Array<int>` above, is mutated in place.
+void poly1305_block(Array<int> h, int r0, int r1, int r2, int r3, int r4, int s1, int s2, int s3, int s4, bytes m, int at, int hibit) {
+    int h0 = h[0];
+    int h1 = h[1];
+    int h2 = h[2];
+    int h3 = h[3];
+    int h4 = h[4];
+    int t0 = word_le(m, at);
+    int t1 = word_le(m, at + 4);
+    int t2 = word_le(m, at + 8);
+    int t3 = word_le(m, at + 12);
+    // The 16-octet block, read as five overlapping 26-bit windows of the
+    // 128-bit little-endian number it is -- the same overlap `r`'s clamp
+    // below reads through, just without a mask on `t0`/`t3`'s own extremes.
+    h0 = h0 + (t0 & 0x03FF_FFFF);
+    h1 = h1 + ((t0 >> 26 | t1 << 6) & 0x03FF_FFFF);
+    h2 = h2 + ((t1 >> 20 | t2 << 12) & 0x03FF_FFFF);
+    h3 = h3 + ((t2 >> 14 | t3 << 18) & 0x03FF_FFFF);
+    h4 = h4 + (t3 >> 8 | hibit);
+    // h *= r, mod 2^130 - 5, done a limb at a time: d[i] collects every
+    // partial product that lands in limb i once the polynomial is expanded,
+    // with the wraparound from limb 5 and up folded back in early by using
+    // s[k] = r[k] * 5 in place of r[k] -- valid because 2^130 = 5 (mod p).
+    int d0 = h0 * r0 + h1 * s4 + h2 * s3 + h3 * s2 + h4 * s1;
+    int d1 = h0 * r1 + h1 * r0 + h2 * s4 + h3 * s3 + h4 * s2;
+    int d2 = h0 * r2 + h1 * r1 + h2 * r0 + h3 * s4 + h4 * s3;
+    int d3 = h0 * r3 + h1 * r2 + h2 * r1 + h3 * r0 + h4 * s4;
+    int d4 = h0 * r4 + h1 * r3 + h2 * r2 + h3 * r1 + h4 * r0;
+    // Carry radix-2^26, left to right, folding the final carry back into
+    // limb 0 multiplied by 5 (again, 2^130 = 5 mod p) rather than reducing
+    // all the way -- `h` is left slightly above its five 26-bit limbs when
+    // that carry itself overflows a limb, which `poly1305_finish` accounts
+    // for with its own full carry before serialising.
+    int c = d0 >> 26;
+    h0 = d0 & 0x03FF_FFFF;
+    d1 = d1 + c;
+    c = d1 >> 26;
+    h1 = d1 & 0x03FF_FFFF;
+    d2 = d2 + c;
+    c = d2 >> 26;
+    h2 = d2 & 0x03FF_FFFF;
+    d3 = d3 + c;
+    c = d3 >> 26;
+    h3 = d3 & 0x03FF_FFFF;
+    d4 = d4 + c;
+    c = d4 >> 26;
+    h4 = d4 & 0x03FF_FFFF;
+    h0 = h0 + c * 5;
+    c = h0 >> 26;
+    h0 = h0 & 0x03FF_FFFF;
+    h1 = h1 + c;
+    h[0] = h0;
+    h[1] = h1;
+    h[2] = h2;
+    h[3] = h3;
+    h[4] = h4;
+}
+
+/// The Poly1305 tag, RFC 8439 §2.5: 16 octets, for a 32-octet one-time `key`
+/// (`r` in its first 16 octets, `s` in its last, clamped and applied exactly
+/// as §2.5.1 specifies) and an arbitrary-length `msg`.
+pub bytes mac(bytes key, bytes msg) {
+    if (key.size() != 32) {
+        trap("poly1305: key must be 32 bytes");
+    }
+    // `r`, clamped (RFC 8439 §2.5.1) and split into five 26-bit limbs in one
+    // step: each limb is an overlapping 32-bit read of the 16-octet `r`,
+    // shifted down and masked, and the mask already carries the clamp's
+    // "top four bits clear" / "bottom two bits clear" requirement for the
+    // bits it keeps -- verified equal to clamp-then-split over 2000 random
+    // keys while this was developed (see the report).
+    int r0 = word_le(key, 0) & 0x03FF_FFFF;
+    int r1 = word_le(key, 3) >> 2 & 0x03FF_FF03;
+    int r2 = word_le(key, 6) >> 4 & 0x03FF_C0FF;
+    int r3 = word_le(key, 9) >> 6 & 0x03F0_3FFF;
+    int r4 = word_le(key, 12) >> 8 & 0x000F_FFFF;
+    int s1 = r1 * 5;
+    int s2 = r2 * 5;
+    int s3 = r3 * 5;
+    int s4 = r4 * 5;
+    int pad0 = word_le(key, 16);
+    int pad1 = word_le(key, 20);
+    int pad2 = word_le(key, 24);
+    int pad3 = word_le(key, 28);
+    Array<int> h = [0, 0, 0, 0, 0];
+    int n = msg.size();
+    int i = 0;
+    while (n - i >= 16) {
+        poly1305_block(h, r0, r1, r2, r3, r4, s1, s2, s3, s4, msg, i, 1 << 24);
+        i = i + 16;
+    }
+    if (i < n) {
+        // The final, short block: the real octets, a `0x01` marking where
+        // they end, then zeros out to 16 -- RFC 8439 §2.5.1's "add one bit
+        // beyond the number of octets", spelled as a byte because it always
+        // lands inside this block (it is at most 16 octets, with room for
+        // one more). `hibit` is 0 here; see `poly1305_block`'s note.
+        //
+        // An **empty** message gets no block at all, full stop -- not even
+        // this one: RFC 8439 §2.5.1's loop runs `ceil(0 / 16)` times, which
+        // is zero, so the tag is `s` alone. `i < n` already says exactly
+        // that (`0 < 0` is false) and needs no `|| n == 0` beside it; an
+        // earlier draft had one, on the mistaken worry that an empty message
+        // needed *some* block to fold `s` in -- it does not, `s` is added
+        // once at the end regardless -- and it was caught by this file's own
+        // length sweep, in the very first case, disagreeing with both the
+        // bignum reference and `cryptography`'s Poly1305 on `mac(key, "")`.
+        bytes last = msg.substr(i, n);
+        last.push(1);
+        while (last.size() < 16) {
+            last.push(0);
+        }
+        poly1305_block(h, r0, r1, r2, r3, r4, s1, s2, s3, s4, last, 0, 0);
+    }
+    int h0 = h[0];
+    int h1 = h[1];
+    int h2 = h[2];
+    int h3 = h[3];
+    int h4 = h[4];
+    // The full carry `poly1305_block` leaves undone, so every limb is
+    // exactly 26 bits before the final reduction below reasons about them.
+    int c = h1 >> 26;
+    h1 = h1 & 0x03FF_FFFF;
+    h2 = h2 + c;
+    c = h2 >> 26;
+    h2 = h2 & 0x03FF_FFFF;
+    h3 = h3 + c;
+    c = h3 >> 26;
+    h3 = h3 & 0x03FF_FFFF;
+    h4 = h4 + c;
+    c = h4 >> 26;
+    h4 = h4 & 0x03FF_FFFF;
+    h0 = h0 + c * 5;
+    c = h0 >> 26;
+    h0 = h0 & 0x03FF_FFFF;
+    h1 = h1 + c;
+    // `h` is below 2*p but may still be at or past p (RFC 8439's own
+    // "P" = 2^130-5): compute h - p alongside h, and keep whichever of the
+    // two is actually less than p. `g4`'s top bit (bit 31 of its 32-bit
+    // range) is 1 exactly when `h - p` borrowed, i.e. exactly when h was
+    // already below p, which is when `h` (not `g`) is the answer.
+    int g0 = h0 + 5;
+    c = g0 >> 26;
+    g0 = g0 & 0x03FF_FFFF;
+    int g1 = h1 + c;
+    c = g1 >> 26;
+    g1 = g1 & 0x03FF_FFFF;
+    int g2 = h2 + c;
+    c = g2 >> 26;
+    g2 = g2 & 0x03FF_FFFF;
+    int g3 = h3 + c;
+    c = g3 >> 26;
+    g3 = g3 & 0x03FF_FFFF;
+    int g4 = h4 + c - (1 << 26) & 0xFFFF_FFFF;
+    // `bit - 1` is all-zero bits when `bit` is 1 and all-one bits when `bit`
+    // is 0 (two's complement -1), which turns the single bit into the two
+    // masks below need -- an arithmetic recreation of the branch so the two
+    // 26-bit-limb paths take the same time regardless of which one the
+    // result needs, matching the constant-time discipline this module's
+    // header describes.
+    int mask = (g4 >> 31 & 1) - 1 & 0xFFFF_FFFF;
+    int notmask = ~mask & 0xFFFF_FFFF;
+    h0 = h0 & notmask | g0 & mask;
+    h1 = h1 & notmask | g1 & mask;
+    h2 = h2 & notmask | g2 & mask;
+    h3 = h3 & notmask | g3 & mask;
+    h4 = h4 & notmask | g4 & mask;
+    // Five 26-bit limbs back to four 32-bit words.
+    int w0 = (h0 | h1 << 26) & 0xFFFF_FFFF;
+    int w1 = (h1 >> 6 | h2 << 20) & 0xFFFF_FFFF;
+    int w2 = (h2 >> 12 | h3 << 14) & 0xFFFF_FFFF;
+    int w3 = (h3 >> 18 | h4 << 8) & 0xFFFF_FFFF;
+    // Finally, tag = (h + s) mod 2^128 -- a 128-bit little-endian add, one
+    // word at a time, each carry taken from the previous word's overflow
+    // past 32 bits rather than masked away.
+    int f = w0 + pad0;
+    w0 = f & 0xFFFF_FFFF;
+    f = w1 + pad1 + (f >> 32);
+    w1 = f & 0xFFFF_FFFF;
+    f = w2 + pad2 + (f >> 32);
+    w2 = f & 0xFFFF_FFFF;
+    f = w3 + pad3 + (f >> 32);
+    w3 = f & 0xFFFF_FFFF;
+    bytes out = [];
+    push_word_le(out, w0);
+    push_word_le(out, w1);
+    push_word_le(out, w2);
+    push_word_le(out, w3);
+    return out;
+}
+
+// --- the AEAD construction ---------------------------------------------------
+
+/// The one-time Poly1305 key, RFC 8439 §2.6: the first 32 octets of the
+/// ChaCha20 keystream for `key` and `nonce` at counter 0.
+pub bytes key_gen(bytes key, bytes nonce) {
+    return block(key, 0, nonce).substr(0, 32);
+}
+
+/// Why `open` refused to decrypt. Payload-free (docs/errors-decision.md §4):
+/// there is nothing to add to either reason that the caller does not already
+/// have from `sealed` and `aad`.
+pub enum Error {
+    /// `sealed` is shorter than a tag, so there is nothing to check.
+    Short;
+    /// The computed tag does not match the one `sealed` carried: `sealed`,
+    /// `aad`, `key` or `nonce` is not what it was sealed with.
+    Tag;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case Short: {
+            return "chacha20poly1305: shorter than a tag";
+        }
+        case Tag: {
+            return "chacha20poly1305: authentication tag mismatch";
+        }
+    }
+}
+
+// Zero octets appended until `out`'s length is a multiple of 16 -- RFC 8439
+// §2.8.1's `pad16`, done in place rather than returned since every caller
+// immediately extends with the padding it computes.
+void pad16(bytes out) {
+    while (out.size() % 16 != 0) {
+        out.push(0);
+    }
+}
+
+// `n`, as an 8-octet little-endian length field -- RFC 8439 §2.8's
+// "num_to_8_le_bytes". `n` is always a `size()`, so never negative and never
+// close to where a logical-shift distinction from this language's
+// arithmetic `>>` (reference §6.1) could matter, for the reason
+// `byte_at` documents above.
+void push_len(bytes out, int n) {
+    int i = 0;
+    while (i < 64) {
+        out.push(byte_at(n, i));
+        i = i + 8;
+    }
+}
+
+// The buffer Poly1305 authenticates -- RFC 8439 §2.8's `mac_data`: `aad`,
+// padded to 16; `ciphertext`, padded to 16; then both lengths, 8 octets each.
+// Shared between `seal` and `open` because it is defined once, over the
+// ciphertext, on both sides of the RFC's own description of decryption.
+bytes aead_buffer(bytes aad, bytes ciphertext) {
+    bytes buf = [];
+    buf.extend(aad);
+    pad16(buf);
+    buf.extend(ciphertext);
+    pad16(buf);
+    push_len(buf, aad.size());
+    push_len(buf, ciphertext.size());
+    return buf;
+}
+
+// Whether `a` and `b` hold the same octets, taking time that depends on
+// their lengths and nothing else -- see this module's header. `bytes`'s own
+// `==` (reference §3.10) makes no such promise, so `open`'s tag check uses
+// this instead.
+bool consttime_eq(bytes a, bytes b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    int diff = 0;
+    for (int i in 0 .. a.size()) {
+        diff = diff | (a[i] ^ b[i]);
+    }
+    return diff == 0;
+}
+
+/// Encrypt and authenticate: RFC 8439 §2.8, `AEAD_CHACHA20_POLY1305`'s
+/// encryption direction. `key` (32 octets) and `nonce` (12 octets) at any
+/// other length **trap**, per this module's header; `aad` may be empty and
+/// any length otherwise. The result is `plaintext`'s length plus 16 --
+/// ciphertext, then the tag.
+pub bytes seal(bytes key, bytes nonce, bytes plaintext, bytes aad) {
+    bytes otk = key_gen(key, nonce);
+    bytes ciphertext = encrypt(key, 1, nonce, plaintext);
+    bytes tag = mac(otk, aead_buffer(aad, ciphertext));
+    bytes out = [];
+    out.extend(ciphertext);
+    out.extend(tag);
+    return out;
+}
+
+/// Verify and decrypt: RFC 8439 §2.8's other direction. `Err(Error.Short)`
+/// if `sealed` is not even long enough to hold a tag; `Err(Error.Tag)` if the
+/// tag does not match -- in which case nothing about `sealed` should be
+/// trusted, `aad` included, and this returns before decrypting anything.
+/// `key` and `nonce` follow `seal`'s rule about length.
+pub Result<bytes, Error> open(bytes key, bytes nonce, bytes sealed, bytes aad) {
+    if (sealed.size() < 16) {
+        return Result<bytes, Error>.Err(Error.Short);
+    }
+    int ct_len = sealed.size() - 16;
+    bytes ciphertext = sealed.substr(0, ct_len);
+    bytes tag = sealed.substr(ct_len, sealed.size());
+    bytes otk = key_gen(key, nonce);
+    bytes want = mac(otk, aead_buffer(aad, ciphertext));
+    if (!consttime_eq(want, tag)) {
+        return Result<bytes, Error>.Err(Error.Tag);
+    }
+    return Result<bytes, Error>.Ok(encrypt(key, 1, nonce, ciphertext));
+}
