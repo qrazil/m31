@@ -620,6 +620,22 @@ pub struct Module {
     /// shape is IR-level, so `int area()` and `Price area()` still share --
     /// the cast is identical and a distinct type is erased.
     pub iface_slots: Vec<Slot>,
+    /// The exact set of runtime symbol names (`rt_open`, `rt_read`, ...) that
+    /// a `prim` call site's name-transform rule produces (docs/stdlib-seam.md
+    /// §2: strip the module qualifier, strip the reserved `__`, prefix
+    /// `rt_`). `Inst::Call.func` cannot itself distinguish a genuine foreign
+    /// call crossing the C seam from an ordinary internal runtime helper
+    /// call the lowering emits directly (`rt_concat`, `rt_chan_send`, ...) --
+    /// both are plain `rt_`-prefixed strings by the time they reach this IR.
+    /// This set is precomputed once, program-wide, by the lowerer (which
+    /// alone knows which signatures came from an actual `prim` declaration),
+    /// so `src/emit_c.rs` can tell the two apart at the one place it matters:
+    /// deciding which call sites need `rt_enter_blocking`/`rt_exit_blocking`
+    /// around them (docs/concurrency-decision.md, "Blocking FFI", Phase 3).
+    /// A plain `HashSet`, not iterated for emission order -- only ever
+    /// queried with `.contains`, so it cannot be the source of the
+    /// HashMap-iteration nondeterminism this project has a gate against.
+    pub prim_targets: std::collections::HashSet<String>,
 }
 
 impl Module {

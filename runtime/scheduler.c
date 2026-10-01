@@ -262,7 +262,21 @@ static void perm_reshuffle(rt_wake_perm_t *p) {
  * semaphore) -- the wake primitive, not the run queue -- which is exactly
  * what "individually addressable wake primitive" in the design doc means
  * and nothing more.
- * ====================================================================== */
+ *
+ * PHASE 3 AMENDS THIS, NARROWLY AND DELIBERATELY: the blocking-FFI monitor
+ * (see "blocking-FFI handoff" below) is a second, rare, explicitly-admitted
+ * exception to "nothing reaches into another carrier's local buffer" --
+ * but only ever while that carrier is provably stuck inside a blocking FFI
+ * call, never during ordinary operation, and only ever through
+ * `local_lock`, which this carrier's own thread also takes around its one
+ * remaining unsynchronised touch of `local`/`local_head`/`local_len`
+ * (local_push, in carrier_dispatch's post-switch bookkeeping). Every other
+ * access -- carrier_main's own draw/pop, every ordinary dispatch -- stays
+ * exactly as lock-free as Phase 2 made it; this is one mutex, taken at most
+ * once per green-thread dispatch, not a general-purpose lock around the
+ * local buffer. `blocking_rec` is this carrier's own blocking-FFI record
+ * (runtime/rt.h), registered into this OS thread's TLS once, at
+ * carrier_main startup. */
 
 typedef struct rt_carrier {
     struct rt_scheduler *sched;
@@ -277,8 +291,170 @@ typedef struct rt_carrier {
     uint32_t     local_head;
     uint32_t     local_len;
 
+    /* Phase 3: see the comment above for exactly what this does and does
+     * not protect. */
+    pthread_mutex_t   local_lock;
+    rt_blocking_rec_t blocking_rec;
+
     _Atomic uint64_t dispatched;
 } rt_carrier_t;
+
+/* ========================================================================
+ * Phase 3 -- the live-green-thread registry: id -> rt_green_t*, for the
+ * WHOLE life of every green thread this scheduler ever spawns, not just
+ * while parked.
+ *
+ * Why the whole life, not just while parked: rt_sched_unpark must be safe
+ * to call BEFORE the matching rt_sched_park (that is the entire lost-wakeup
+ * fix -- see scheduler.h's "park/unpark" section), which means the
+ * information "is green thread N parked, and if so, which control block is
+ * it" has to be findable by id from the moment a thread exists, not only
+ * from the moment it actually parks -- there is no earlier hook to
+ * populate a park-only map from.
+ *
+ * Mutex-protected open addressing, not lock-free: "correctness over
+ * cleverness" is this project's own stated preference (see the shared
+ * global queue just above, and runtime/greenthread.c's slab free-list
+ * comment making the identical choice), and this is not a hot path --
+ * inserted once per spawn, removed once per completion, looked up once per
+ * rt_sched_unpark call, none of which happen anywhere near as often as an
+ * ordinary dispatch.
+ *
+ * THE OTHER JOB THIS LOCK DOES: rt_sched_unpark must never touch a
+ * `rt_green_t` that carrier_dispatch has already freed. Removal (always
+ * paired with the eventual free, in carrier_dispatch's finished branch)
+ * happens-before the free, under this same lock, and rt_sched_unpark reads
+ * the map and touches the green thread's `park_word` in one critical
+ * section under this same lock -- so either a lookup completes entirely
+ * before a racing removal (sees the live pointer, which cannot be freed
+ * until this lock is released and removal gets its turn), or entirely
+ * after it (finds nothing, returns false). No lookup can ever observe a
+ * pointer whose removal has already started. */
+typedef struct {
+    pthread_mutex_t lock;
+    uint32_t       *keys;   /* RT_REG_EMPTY / RT_REG_TOMBSTONE / a real id */
+    rt_green_t    **vals;
+    uint32_t        cap;
+    uint32_t        used;   /* occupied slots INCLUDING tombstones */
+    uint32_t        live;   /* occupied slots EXCLUDING tombstones */
+} rt_registry_t;
+
+#define RT_REG_EMPTY     UINT32_MAX
+#define RT_REG_TOMBSTONE (UINT32_MAX - 1)
+/* Real ids never reach either sentinel: rt_sched_spawn traps before
+ * next_id could ever exceed RT_SCHED_ID_CAPACITY (far below both). */
+
+static void registry_init(rt_registry_t *r, uint32_t cap) {
+    r->cap = cap;
+    r->keys = malloc(sizeof(uint32_t) * cap);
+    r->vals = malloc(sizeof(rt_green_t *) * cap);
+    if (r->keys == NULL || r->vals == NULL) {
+        rt_trap("out of memory: scheduler green-thread registry");
+    }
+    for (uint32_t i = 0; i < cap; i++) r->keys[i] = RT_REG_EMPTY;
+    r->used = 0;
+    r->live = 0;
+    pthread_mutex_init(&r->lock, NULL);
+}
+
+static void registry_destroy(rt_registry_t *r) {
+    pthread_mutex_destroy(&r->lock);
+    free(r->keys);
+    free(r->vals);
+}
+
+/* Lock already held. Insert into THIS table (used directly, and again by
+ * resize's rehash below). `id` is assumed not already present -- true for
+ * every real caller: a fresh spawn's id has never been seen before
+ * (next_id is monotonic and never reused), and resize only ever re-inserts
+ * keys that were already distinct in the old table. */
+static void registry_insert_locked(rt_registry_t *r, uint32_t id, rt_green_t *g) {
+    uint32_t i = id % r->cap;
+    while (r->keys[i] != RT_REG_EMPTY && r->keys[i] != RT_REG_TOMBSTONE) {
+        i = (i + 1) % r->cap;
+    }
+    r->keys[i] = id;
+    r->vals[i] = g;
+}
+
+/* Lock already held. Doubles capacity once `used` (occupied, including
+ * tombstones -- a tombstone still costs a probe step, so it counts against
+ * the load factor exactly like a live entry) would exceed half of it.
+ * Rehashing drops every tombstone, which is also the only thing that ever
+ * reclaims the space a removal leaves behind. */
+static void registry_maybe_grow_locked(rt_registry_t *r) {
+    if ((uint64_t)(r->used + 1) * 2 <= r->cap) return;
+
+    uint32_t old_cap = r->cap;
+    uint32_t *old_keys = r->keys;
+    rt_green_t **old_vals = r->vals;
+
+    uint32_t new_cap = old_cap * 2;
+    r->keys = malloc(sizeof(uint32_t) * new_cap);
+    r->vals = malloc(sizeof(rt_green_t *) * new_cap);
+    if (r->keys == NULL || r->vals == NULL) {
+        rt_trap("out of memory: growing the scheduler green-thread registry");
+    }
+    for (uint32_t i = 0; i < new_cap; i++) r->keys[i] = RT_REG_EMPTY;
+    r->cap = new_cap;
+
+    for (uint32_t i = 0; i < old_cap; i++) {
+        if (old_keys[i] != RT_REG_EMPTY && old_keys[i] != RT_REG_TOMBSTONE) {
+            registry_insert_locked(r, old_keys[i], old_vals[i]);
+        }
+    }
+    r->used = r->live; /* every tombstone was just dropped */
+    free(old_keys);
+    free(old_vals);
+}
+
+static void registry_insert(rt_registry_t *r, uint32_t id, rt_green_t *g) {
+    pthread_mutex_lock(&r->lock);
+    registry_maybe_grow_locked(r);
+    registry_insert_locked(r, id, g);
+    r->used++;
+    r->live++;
+    pthread_mutex_unlock(&r->lock);
+}
+
+static void registry_remove(rt_registry_t *r, uint32_t id) {
+    pthread_mutex_lock(&r->lock);
+    uint32_t i = id % r->cap;
+    uint32_t steps = 0;
+    while (r->keys[i] != RT_REG_EMPTY && steps < r->cap) {
+        if (r->keys[i] == id) {
+            r->keys[i] = RT_REG_TOMBSTONE;
+            r->vals[i] = NULL;
+            r->live--;
+            break;
+        }
+        i = (i + 1) % r->cap;
+        steps++;
+    }
+    pthread_mutex_unlock(&r->lock);
+}
+
+/* Lock already held (by the caller -- rt_sched_unpark takes it, does this
+ * lookup, and acts on the result -- the exchange on g->park_word, and
+ * nothing that can block -- all before releasing it; see that function for
+ * exactly why staying under the lock for that long, and no longer, is what
+ * makes it safe). `*found` says whether `id` is present at all; the
+ * returned pointer is meaningless when it is false. */
+static rt_green_t *registry_lookup_locked(rt_registry_t *r, uint32_t id,
+                                           bool *found) {
+    uint32_t i = id % r->cap;
+    uint32_t steps = 0;
+    while (r->keys[i] != RT_REG_EMPTY && steps < r->cap) {
+        if (r->keys[i] == id) {
+            *found = true;
+            return r->vals[i];
+        }
+        i = (i + 1) % r->cap;
+        steps++;
+    }
+    *found = false;
+    return NULL;
+}
 
 /* ========================================================================
  * The scheduler itself.
@@ -290,6 +466,7 @@ struct rt_scheduler {
 
     rt_squeue_t    global;
     rt_wake_perm_t perm;
+    rt_registry_t  registry;
 
     uint32_t fuel_size;
     uint32_t queue_cap;
@@ -300,6 +477,62 @@ struct rt_scheduler {
     _Atomic uint64_t total_spawned;
     _Atomic uint64_t total_completed;
     _Atomic uint32_t max_draw_seen;
+
+    /* Blocking-FFI handoff monitor (opt-in; see
+     * rt_sched_start_blocking_monitor in scheduler.h). */
+    pthread_t         monitor_thread;
+    atomic_bool       monitor_started;
+    atomic_bool       monitor_stop;
+    uint64_t          monitor_timeout_ns;
+    uint64_t          monitor_poll_ns;
+    _Atomic uint64_t  total_handoffs;
+    _Atomic uint64_t  total_handoff_items;
+};
+
+/* Park/unpark's state word. FOUR states, not three -- scheduler.h's own
+ * comment describes the three-state EMPTY/PARKED/NOTIFIED shape this is
+ * based on (the standard LockSupport/std::thread::park shape), but a plain
+ * three-state version has a real bug this project's own TSan gate caught
+ * directly (see this enum's own trailing comment for the exact mechanism),
+ * which is why a fourth, ARMED, state exists.
+ *
+ * THE BUG A THREE-STATE VERSION HAS: rt_sched_park's CAS necessarily runs
+ * on the green thread's OWN stack, BEFORE it has actually switched away
+ * (rt_fiber_switch has not even been called yet at the point the CAS would
+ * need to run, to decide whether to switch away AT ALL). If that CAS
+ * directly published PARKED -- "externally resumable now" -- an unpark
+ * racing in during the (real, nonzero) window between the CAS and the
+ * ACTUAL context switch completing could push `g` onto the shared queue,
+ * have a DIFFERENT carrier draw it, and call rt_fiber_switch INTO g->ctx
+ * while g->ctx is still the STALE context from the last time it was saved
+ * (or, on a thread's very first park, the original entry-point context
+ * rt_ctx_make built) -- NOT the context this park call is in the middle of
+ * creating. That second carrier would then start running g's code FROM
+ * WHEREVER THAT STALE CONTEXT POINTS, on the SAME 64 KiB stack the first
+ * carrier's OS thread is STILL ACTIVELY EXECUTING ON. Two OS threads
+ * running on one stack at once is immediate, silent corruption -- observed
+ * directly, under TSan, as a SEGV inside rt_gtstate_set/green_trampoline
+ * with a faulting address right at a stack/page boundary, while Phase 2's
+ * own TSan gate (scheduler_tsan.sh, no park/unpark at all) stayed clean
+ * across 10 consecutive runs -- conclusive evidence this is a Phase 3 park/
+ * unpark bug, not a pre-existing fiber-switch/TSan interaction.
+ *
+ * THE FIX: splitting "decided to park" (ARMED) from "actually safely
+ * parked, off this thread's own stack, genuinely resumable elsewhere"
+ * (PARKED) into two distinct states, with the EMPTY/ARMED -> PARKED
+ * transition made ONLY by carrier_dispatch, AFTER rt_fiber_switch has
+ * already returned there -- i.e. only once g->ctx is provably saved and
+ * this OS thread is provably no longer running on g's stack. rt_sched_unpark
+ * treats EMPTY and ARMED identically (neither is safe to act on physically;
+ * both just record NOTIFIED for whoever checks next to find), and only
+ * ever pushes `g` onto the shared queue when it finds the thread was
+ * ALREADY, provably, PARKED. See rt_sched_park and carrier_dispatch's
+ * "parked" branch for the two sides of this. */
+enum {
+    RT_PARK_EMPTY = 0,
+    RT_PARK_ARMED = 1,
+    RT_PARK_PARKED = 2,
+    RT_PARK_NOTIFIED = 3,
 };
 
 /* One green thread. Opaque to callers of scheduler.h -- only this file
@@ -313,6 +546,22 @@ struct rt_green {
     rt_ctx_t  *carrier_ctx; /* this dispatch's switch-back target; reset on
                               * every dispatch, see carrier_dispatch below */
     bool       finished;
+
+    /* Phase 3 -- see scheduler.h's "park/unpark" section. */
+    rt_scheduler_t *sched;      /* set once, at spawn; never changes */
+    _Atomic int      park_word; /* RT_PARK_* */
+    bool             parked;    /* set immediately before the ONE switch-away
+                                  * this value describes -- see rt_sched_park
+                                  * and rt_sched_yield, and carrier_dispatch's
+                                  * post-switch branch, which reads it exactly
+                                  * once per dispatch, right after the switch
+                                  * that is either a park or a yield returns. */
+    bool             notified_before_park; /* set alongside `parked`; see
+                                  * rt_sched_park's own comment on why EVERY
+                                  * call to it performs a real switch, even
+                                  * when it already knows, before switching,
+                                  * that it must requeue itself immediately
+                                  * rather than genuinely wait. */
 };
 
 /* Which green thread (if any) is running on THIS OS thread right now, and
@@ -388,6 +637,14 @@ void rt_sched_yield(void) {
         rt_trap("rt_sched_yield called from outside a running green thread");
     }
     rt_gtstate_set(g->id, RT_GT_RUNNABLE);
+    /* Freshly false before THIS switch-away, so carrier_dispatch's
+     * post-switch read (which fires the instant this call below returns
+     * control to it) sees "ordinary yield", not a stale true left over
+     * from some earlier, unrelated park cycle on this same green thread --
+     * see struct rt_green's own comment on `parked` for why every
+     * switch-away has to set this fresh rather than relying on whatever
+     * the field already held. */
+    g->parked = false;
     rt_fiber_switch(&g->ctx, g->carrier_ctx, 0);
     /* Resumed: carrier_dispatch already set RT_GT_RUNNING and
      * tls_current_green again before switching back in, below -- nothing
@@ -396,6 +653,171 @@ void rt_sched_yield(void) {
 
 uint32_t rt_sched_current_carrier(void) {
     return tls_carrier_index;
+}
+
+uint32_t rt_sched_current_green_id(void) {
+    rt_green_t *g = tls_current_green;
+    if (g == NULL) {
+        rt_trap("rt_sched_current_green_id called from outside a running "
+                "green thread");
+    }
+    return g->id;
+}
+
+/* ========================================================================
+ * Park / unpark -- see scheduler.h's own, much longer, comment for the full
+ * protocol and the race it closes. This is the implementation of exactly
+ * that protocol and nothing more.
+ * ====================================================================== */
+
+void rt_sched_park(rt_green_state_t parked_state) {
+    rt_green_t *g = tls_current_green;
+    if (g == NULL) {
+        rt_trap("rt_sched_park called from outside a running green thread");
+    }
+
+    rt_gtstate_set(g->id, parked_state);
+
+    /* Stage 1 of 2 -- see the park_word enum's own long comment for why
+     * this is split into two stages at all and exactly what bug a single
+     * CAS here (straight to PARKED) actually has. This CAS only ever goes
+     * EMPTY -> ARMED, NEVER straight to PARKED: ARMED means "decided to
+     * park, about to switch away", and is NOT yet safe for an external
+     * rt_sched_unpark to act on physically, because the actual context
+     * switch below has not happened yet -- g->ctx does not yet hold a
+     * valid, safely-resumable saved state. Only this green thread's own
+     * carrier ever calls rt_sched_park for it, and only ever sequentially,
+     * so the only two values this word can hold at this exact point are
+     * EMPTY (ordinary case) or NOTIFIED (an rt_sched_unpark for this exact
+     * id already landed in the gap before we got here -- the lost-wakeup
+     * race, closed). ARMED or PARKED here would mean this function
+     * re-entered itself without an intervening full park/unpark cycle,
+     * which cannot happen and would be a real bug in this file -- rt_trap
+     * says so loudly rather than silently corrupting the state machine. */
+    int expected = RT_PARK_EMPTY;
+    bool already_notified = false;
+    if (!atomic_compare_exchange_strong_explicit(
+            &g->park_word, &expected, RT_PARK_ARMED, memory_order_acq_rel,
+            memory_order_acquire)) {
+        if (expected != RT_PARK_NOTIFIED) {
+            rt_trap("rt_sched_park: impossible park_word state (not EMPTY, "
+                    "not NOTIFIED) -- scheduler.c's park/unpark invariant "
+                    "is broken");
+        }
+        /* Already notified before we ever got here: consume it now --
+         * reset to EMPTY so the next park cycle starts clean -- but still
+         * fall through to an ACTUAL switch-away below rather than
+         * returning in place.
+         *
+         * An earlier version of this function returned immediately here,
+         * without ever calling rt_fiber_switch, as a deliberate fast path
+         * (correct in principle: nothing is lost, the notification is
+         * consumed, there is no stack-sharing hazard since nothing
+         * suspends). This project's own TSan gate caught that fast path
+         * being measurably LESS stable than the uniform one below: a green
+         * thread whose entire dispatch runs start-to-finish through
+         * rt_ctx_trampoline's synthetic entry point, doing several atomic
+         * CAS/exchange operations on park_word along the way, with no
+         * actual context switch ever happening in between, intermittently
+         * crashed INSIDE ThreadSanitizer's own stack-trace-capture code
+         * (__sanitizer::StackDepotBase::Put) -- not in any function this
+         * file defines. That is consistent with TSan's own stack-trace
+         * unwinder getting confused specifically by that one shape (a
+         * trampoline-rooted call chain that never performs the hand-rolled
+         * switch its own machinery expects), the same general class of
+         * problem already documented for ASan's fiber-switch handling in
+         * runtime/greenthread.h, just surfacing as a hard crash instead of
+         * a benign warning. Always switching away here, even when the
+         * outcome (requeue immediately) is already decided before the
+         * switch, keeps every rt_sched_park call shaped like the ordinary,
+         * already-proven-stable (Phase 2's own TSan gate) pattern: do the
+         * work, then rt_fiber_switch, then let carrier_dispatch finish up
+         * on the other side. `notified_before_park` tells carrier_dispatch
+         * which of its two post-switch paths to take -- requeue
+         * immediately itself (nobody else is ever going to call unpark
+         * again for this episode) rather than the ordinary ARMED -> PARKED
+         * promotion. */
+        atomic_store_explicit(&g->park_word, RT_PARK_EMPTY,
+                               memory_order_release);
+        already_notified = true;
+    }
+
+    /* Genuinely parking (or, if `already_notified`, about to be
+     * immediately self-requeued by carrier_dispatch the instant this
+     * switch returns there) -- see struct rt_green's comment on `parked`
+     * for why these are set fresh, immediately before this specific
+     * switch-away. Stage 2 -- promoting ARMED to the genuinely-
+     * externally-resumable PARKED, or performing the immediate self-requeue
+     * -- happens in carrier_dispatch, AFTER this switch has returned
+     * THERE (not here): that is the earliest point at which this green
+     * thread is provably off its own stack. */
+    g->parked = true;
+    g->notified_before_park = already_notified;
+    rt_fiber_switch(&g->ctx, g->carrier_ctx, 0);
+    /* Resumed -- either rt_sched_unpark, or carrier_dispatch's own
+     * immediate self-requeue path, pushed us back through the shared queue,
+     * and some carrier (not necessarily the one that parked us) dispatched
+     * us again; carrier_dispatch already set RT_GT_RUNNING and
+     * tls_current_green before switching back in. `park_word` was already
+     * reset to EMPTY before we were pushed in every case, so nothing to do
+     * to it here. */
+}
+
+bool rt_sched_unpark(rt_scheduler_t *s, uint32_t green_id) {
+    rt_green_t *g;
+    int prev;
+
+    /* The entire critical section is: find `g`, and -- while still holding
+     * the SAME lock that removal-before-free (carrier_dispatch's finished
+     * branch) also takes -- do the one atomic exchange on its park_word.
+     * Nothing in here can block (no squeue_push yet), so holding the
+     * registry lock for it is cheap and, more importantly, is what makes
+     * touching `g` safe at all: see rt_registry_t's own comment for why a
+     * lookup that completes under this lock can never observe a green
+     * thread whose removal has already started. */
+    pthread_mutex_lock(&s->registry.lock);
+    bool found;
+    g = registry_lookup_locked(&s->registry, green_id, &found);
+    if (!found) {
+        pthread_mutex_unlock(&s->registry.lock);
+        return false;
+    }
+    /* Exchange to NOTIFIED, learning the previous value -- see
+     * scheduler.h's "park/unpark" section for what each outcome means.
+     * acq_rel: acquire pairs with rt_sched_park's own release when it
+     * reset this word to EMPTY (or, on the very first park cycle, with the
+     * spawn-time atomic_init below); release publishes this write, and
+     * everything sequenced before it on THIS thread (nothing, yet, but see
+     * below), to whoever next acquires it. */
+    prev = atomic_exchange_explicit(&g->park_word, RT_PARK_NOTIFIED,
+                                     memory_order_acq_rel);
+    pthread_mutex_unlock(&s->registry.lock);
+
+    if (prev != RT_PARK_PARKED) {
+        /* prev == EMPTY: recorded for the green thread's own upcoming
+         * rt_sched_park to find (the lost-wakeup fix itself).
+         * prev == NOTIFIED: already notified -- idempotent, no double
+         * wake. Either way, nothing further to do: g is not suspended via
+         * this scheduler's queue right now, so there is nothing to push. */
+        return true;
+    }
+
+    /* Genuinely suspended: pull it back into real circulation. Reset to
+     * EMPTY first (g cannot be touched by anything else until WE push it
+     * below -- we are the unique winner of the CAS race by construction of
+     * atomic_exchange, so no other rt_sched_unpark call can also have
+     * observed PARKED for this same park cycle), then reuse the exact same
+     * path an ordinary spawn uses: push onto the shared queue, notify the
+     * wake permutation. carrier_dispatch does not care whether g->ctx is a
+     * fresh trampoline context or a previously-parked one -- rt_fiber_switch
+     * resumes either identically -- so no second "resume this saved
+     * context" entry kind is needed; g itself already serves as that
+     * entry, exactly as it does for a fresh spawn. */
+    atomic_store_explicit(&g->park_word, RT_PARK_EMPTY, memory_order_release);
+    rt_gtstate_set(g->id, RT_GT_RUNNABLE);
+    squeue_push(&s->global, g);
+    notify_new_work(s);
+    return true;
 }
 
 /* ---- the carrier's own local buffer (ring, capacity == fuel_size) ------ */
@@ -441,6 +863,12 @@ static void carrier_dispatch(rt_carrier_t *c, rt_green_t *g) {
     tls_current_green = NULL;
 
     if (g->finished) {
+        /* Remove from the registry BEFORE freeing -- rt_sched_unpark looks
+         * a green thread up and touches it entirely under the registry
+         * lock, so this removal (also under that lock) happening-before
+         * the free below is what makes that safe: see rt_registry_t's own
+         * comment for the full argument. */
+        registry_remove(&c->sched->registry, g->id);
         rt_stack_free(&g->stack);
         free(g);
         /* Same reasoning as the dispatched counter above, for the same
@@ -452,17 +880,87 @@ static void carrier_dispatch(rt_carrier_t *c, rt_green_t *g) {
          * of merely usually-true on this hardware. */
         atomic_fetch_add_explicit(&c->sched->total_completed, 1,
                                    memory_order_release);
+    } else if (g->parked) {
+        if (g->notified_before_park) {
+            /* rt_sched_park already knew, before it even switched away,
+             * that it had been notified in the gap before reaching its own
+             * CAS -- park_word is already back to EMPTY (reset there).
+             * Nobody else is ever going to call rt_sched_unpark again for
+             * this episode, so requeue g ourselves, immediately -- exactly
+             * the same requeue rt_sched_unpark's own "prev == PARKED" path
+             * takes, just reached from the other side of the race. See
+             * rt_sched_park's own long comment on `already_notified` for
+             * why this still goes through a real switch instead of
+             * returning in place. */
+            rt_gtstate_set(g->id, RT_GT_RUNNABLE);
+            squeue_push(&c->sched->global, g);
+            notify_new_work(c->sched);
+        } else {
+            /* Stage 2 of park/unpark -- see the park_word enum's own long
+             * comment and rt_sched_park's "Stage 1" comment for why this
+             * exists and the exact corruption it prevents. g is now
+             * PROVABLY off its own stack (this rt_fiber_switch call just
+             * returned), which is the one thing Stage 1's CAS, running
+             * before the switch, could not guarantee. Promote ARMED ->
+             * PARKED now, making it genuinely safe for an external
+             * rt_sched_unpark to resume g->ctx from here on. */
+            int expected = RT_PARK_ARMED;
+            if (!atomic_compare_exchange_strong_explicit(
+                    &g->park_word, &expected, RT_PARK_PARKED,
+                    memory_order_acq_rel, memory_order_acquire)) {
+                /* expected == NOTIFIED: an unpark raced in during the
+                 * window between rt_sched_park's own CAS (Stage 1) and this
+                 * promotion -- the external event this was waiting for
+                 * already happened, and whatever caused it (a reactor's
+                 * readiness callback, a channel send, a timer) will not
+                 * call rt_sched_unpark a SECOND time for the same episode.
+                 * Nobody else is ever going to requeue g, so we must, right
+                 * now, ourselves. */
+                if (expected != RT_PARK_NOTIFIED) {
+                    rt_trap("carrier_dispatch: impossible park_word state "
+                            "promoting ARMED (not NOTIFIED) -- "
+                            "scheduler.c's park/unpark invariant is broken");
+                }
+                atomic_store_explicit(&g->park_word, RT_PARK_EMPTY,
+                                       memory_order_release);
+                rt_gtstate_set(g->id, RT_GT_RUNNABLE);
+                squeue_push(&c->sched->global, g);
+                notify_new_work(c->sched);
+            }
+            /* Otherwise: genuinely, safely parked now. Already findable by
+             * id through the registry (inserted at spawn, for its whole
+             * life), so whichever thread eventually calls rt_sched_unpark
+             * for it will push it back onto the shared queue itself.
+             * Deliberately NOT requeued here in that case -- that omission
+             * is the entire difference between this branch and the one
+             * below. */
+        }
     } else {
-        /* Yielded, not finished: stays on THIS carrier, never anywhere
-         * else -- the whole of "no stealing" for an already-running green
-         * thread. */
+        /* Ordinary yield: stays on THIS carrier, never anywhere else --
+         * the whole of "no stealing" for an already-running green thread.
+         * Taken under local_lock -- see rt_carrier_t's own comment for
+         * exactly what this one lock does and does not protect: it is the
+         * ONLY thing standing between this write and the blocking-FFI
+         * monitor (below) draining this same local buffer from another
+         * thread, which can only legitimately happen while THIS carrier is
+         * stuck in a DIFFERENT dispatch's blocking call -- never this one,
+         * since we are plainly not stuck, we just returned -- but it is
+         * the lock, not that argument, that makes it true under TSan. */
+        pthread_mutex_lock(&c->local_lock);
         local_push(c, g);
+        pthread_mutex_unlock(&c->local_lock);
     }
 }
 
 static void *carrier_main(void *argp) {
     rt_carrier_t *c = (rt_carrier_t *)argp;
     tls_carrier_index = c->index;
+    /* Phase 3: so that any `prim` call any green thread this carrier ever
+     * dispatches makes can find ITS carrier's own blocking record through
+     * TLS, with no argument to pass -- see runtime/rt.h's "blocking FFI"
+     * section for why this has to work with zero information at the call
+     * site. Registered once, here, for this OS thread's whole life. */
+    rt_blocking_register(&c->blocking_rec);
 
     for (;;) {
         if (c->local_len == 0) {
@@ -571,6 +1069,21 @@ rt_scheduler_t *rt_sched_create(uint32_t n_carriers) {
     atomic_init(&s->total_completed, (uint64_t)0);
     atomic_init(&s->max_draw_seen, 0u);
 
+    /* Phase 3: the live-green-thread registry (park/unpark) and the
+     * blocking-FFI monitor's own bookkeeping -- the monitor thread itself
+     * is NOT started here (opt-in; see rt_sched_start_blocking_monitor). A
+     * small initial capacity: this grows (doubling) exactly like the
+     * shared queue's own backing store would if it needed to, and most
+     * callers of this scheduler today (every existing Phase 2 test) never
+     * put more than a few hundred green threads in flight at once. */
+    registry_init(&s->registry, 256);
+    atomic_init(&s->monitor_started, false);
+    atomic_init(&s->monitor_stop, false);
+    s->monitor_timeout_ns = 0;
+    s->monitor_poll_ns = 0;
+    atomic_init(&s->total_handoffs, (uint64_t)0);
+    atomic_init(&s->total_handoff_items, (uint64_t)0);
+
     s->carriers = calloc(n_carriers, sizeof(rt_carrier_t));
     if (s->carriers == NULL) rt_trap("out of memory: carriers");
 
@@ -593,6 +1106,8 @@ rt_scheduler_t *rt_sched_create(uint32_t n_carriers) {
         if (c->local == NULL) rt_trap("out of memory: carrier local buffer");
         c->local_head = 0;
         c->local_len = 0;
+        pthread_mutex_init(&c->local_lock, NULL);
+        atomic_init(&c->blocking_rec.blocking_since_ns, (uint64_t)0);
     }
 
     for (uint32_t i = 0; i < n_carriers; i++) {
@@ -622,6 +1137,19 @@ uint32_t rt_sched_spawn(rt_scheduler_t *s, void (*entry)(void *), void *arg) {
     g->finished = false;
     g->stack = rt_stack_alloc();
     rt_ctx_make(&g->ctx, g->stack.base, RT_STACK_SIZE, green_trampoline, g);
+
+    /* Phase 3: park/unpark surface, live for this green thread's whole
+     * life. `sched` and the registry entry exist from here on so that
+     * rt_sched_unpark(s, id) is well-defined for this id immediately --
+     * even before this function has returned the id to its caller, let
+     * alone before this green thread ever calls rt_sched_park -- which is
+     * exactly the property the lost-wakeup fix depends on (scheduler.h's
+     * "park/unpark" section). */
+    g->sched = s;
+    atomic_init(&g->park_word, RT_PARK_EMPTY);
+    g->parked = false;
+    g->notified_before_park = false;
+    registry_insert(&s->registry, g->id, g);
 
     rt_gtstate_set(g->id, RT_GT_RUNNABLE);
     /* Release/acquire, matching total_completed below and for the same
@@ -672,6 +1200,152 @@ uint32_t rt_sched_queue_len(rt_scheduler_t *s) {
     return squeue_len(&s->global);
 }
 
+/* ========================================================================
+ * Blocking-FFI handoff monitor -- see scheduler.h's "Blocking-FFI handoff"
+ * section for the full mechanism and why it is safe. This is that
+ * mechanism's implementation.
+ * ====================================================================== */
+
+static uint64_t monitor_now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+/* Attempt to rescue carrier `c`'s local buffer, having just observed its
+ * blocking record stuck at `since` for longer than the configured timeout.
+ * Safe to call even if `c` has since become unstuck -- see the re-check
+ * under the lock below, which is what makes that true. */
+static void try_handoff(rt_scheduler_t *s, rt_carrier_t *c, uint64_t since) {
+    rt_green_t *drained_buf[256]; /* fuel_size is realistically tiny
+                                    * (default 4; design doc's own
+                                    * reasoning never argues for anything
+                                    * near this large) -- a fixed-size
+                                    * on-stack scratch buffer avoids a
+                                    * malloc on this already-slow path
+                                    * while comfortably covering any
+                                    * LANG_FUEL_SIZE a real deployment would
+                                    * plausibly set. Falls back to malloc
+                                    * below on the (extreme) chance
+                                    * local_cap exceeds it. */
+    rt_green_t **drained = drained_buf;
+    bool heap = false;
+    uint32_t n = 0;
+
+    pthread_mutex_lock(&c->local_lock);
+    /* Re-check UNDER THE LOCK: the whole point. If this carrier's blocking
+     * call returned in the time it took to get here, `blocking_since_ns`
+     * is either 0 (it finished and exited_blocking) or a DIFFERENT nonzero
+     * value (a brand new blocking call started since) -- either way, this
+     * is no longer the same stuck episode the caller observed, and acting
+     * on a stale observation is exactly the race this lock exists to
+     * close (see rt_carrier_t's and scheduler.h's own comments). Abandon
+     * cleanly; the next poll will re-evaluate whatever is actually true. */
+    uint64_t still = atomic_load_explicit(&c->blocking_rec.blocking_since_ns,
+                                           memory_order_acquire);
+    if (still != since) {
+        pthread_mutex_unlock(&c->local_lock);
+        return;
+    }
+
+    n = c->local_len;
+    if (n > 0) {
+        if (n > (uint32_t)(sizeof(drained_buf) / sizeof(drained_buf[0]))) {
+            drained = malloc(sizeof(rt_green_t *) * n);
+            if (drained == NULL) rt_trap("out of memory: blocking-FFI handoff");
+            heap = true;
+        }
+        for (uint32_t i = 0; i < n; i++) {
+            drained[i] = c->local[(c->local_head + i) % c->local_cap];
+        }
+        c->local_head = 0;
+        c->local_len = 0;
+    }
+    pthread_mutex_unlock(&c->local_lock);
+
+    if (n == 0) return; /* genuinely stuck, but nothing else was queued here */
+
+    /* Outside the lock: squeue_push can block under backpressure, and
+     * local_lock must never be held across a blocking call (every other
+     * carrier's own post-dispatch local_push, which also takes this same
+     * lock, must never be made to wait on this). Reused verbatim from
+     * rt_sched_unpark/rt_sched_spawn: any other (non-stuck) carrier's
+     * completely ordinary self-service draw is the "backup carrier" -- no
+     * second thread type is needed. */
+    for (uint32_t i = 0; i < n; i++) {
+        squeue_push(&s->global, drained[i]);
+    }
+    notify_new_work(s);
+
+    atomic_fetch_add_explicit(&s->total_handoffs, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&s->total_handoff_items, n, memory_order_relaxed);
+
+    if (heap) free(drained);
+}
+
+static void *monitor_main(void *argp) {
+    rt_scheduler_t *s = (rt_scheduler_t *)argp;
+
+    while (!atomic_load_explicit(&s->monitor_stop, memory_order_relaxed)) {
+        for (uint32_t i = 0; i < s->n_carriers; i++) {
+            rt_carrier_t *c = &s->carriers[i];
+            uint64_t since = atomic_load_explicit(
+                &c->blocking_rec.blocking_since_ns, memory_order_acquire);
+            if (since == 0) continue;
+            uint64_t now = monitor_now_ns();
+            /* now < since is possible only across a CLOCK_MONOTONIC
+             * read racing right at the moment enter_blocking() wrote --
+             * treat it as "not yet timed out" rather than wrapping a
+             * uint64_t subtraction into a huge number. */
+            if (now <= since || now - since < s->monitor_timeout_ns) continue;
+            try_handoff(s, c, since);
+        }
+
+        struct timespec ts;
+        ts.tv_sec = (time_t)(s->monitor_poll_ns / 1000000000ull);
+        ts.tv_nsec = (long)(s->monitor_poll_ns % 1000000000ull);
+        nanosleep(&ts, NULL);
+    }
+    return NULL;
+}
+
+void rt_sched_start_blocking_monitor(rt_scheduler_t *s, uint64_t timeout_ns,
+                                      uint64_t poll_interval_ns) {
+    bool expected = false;
+    if (!atomic_compare_exchange_strong_explicit(
+            &s->monitor_started, &expected, true, memory_order_acq_rel,
+            memory_order_acquire)) {
+        rt_trap("rt_sched_start_blocking_monitor: already started for this "
+                "scheduler -- at most one monitor thread per scheduler");
+    }
+    s->monitor_timeout_ns = timeout_ns;
+    s->monitor_poll_ns = poll_interval_ns;
+    atomic_store_explicit(&s->monitor_stop, false, memory_order_relaxed);
+    if (pthread_create(&s->monitor_thread, NULL, monitor_main, s) != 0) {
+        rt_trap("could not start the blocking-FFI monitor thread");
+    }
+}
+
+void rt_sched_stop_blocking_monitor(rt_scheduler_t *s) {
+    if (!atomic_load_explicit(&s->monitor_started, memory_order_acquire)) {
+        return; /* never started -- a no-op, per the documented contract */
+    }
+    atomic_store_explicit(&s->monitor_stop, true, memory_order_relaxed);
+    pthread_join(s->monitor_thread, NULL);
+    /* Allow a later rt_sched_start_blocking_monitor on this same scheduler,
+     * should a caller ever want that -- not load-bearing for any test this
+     * phase ships, but costs nothing and avoids a surprising permanent
+     * "already started" trap after a legitimate stop. */
+    atomic_store_explicit(&s->monitor_started, false, memory_order_release);
+}
+
+uint64_t rt_sched_handoff_count(rt_scheduler_t *s) {
+    return atomic_load_explicit(&s->total_handoffs, memory_order_relaxed);
+}
+uint64_t rt_sched_handoff_items(rt_scheduler_t *s) {
+    return atomic_load_explicit(&s->total_handoff_items, memory_order_relaxed);
+}
+
 void rt_sched_shutdown(rt_scheduler_t *s) {
     atomic_store_explicit(&s->shutdown, true, memory_order_relaxed);
     for (uint32_t i = 0; i < s->n_carriers; i++) {
@@ -683,11 +1357,20 @@ void rt_sched_shutdown(rt_scheduler_t *s) {
 }
 
 void rt_sched_destroy(rt_scheduler_t *s) {
+    /* Defensive: a caller that started the monitor and forgot to stop it
+     * would otherwise leave a thread running against memory this function
+     * is about to free out from under it. rt_sched_stop_blocking_monitor is
+     * already a no-op if the monitor was never started, so this is safe to
+     * call unconditionally. */
+    rt_sched_stop_blocking_monitor(s);
+
     squeue_destroy(&s->global);
     pthread_mutex_destroy(&s->perm.lock);
     free(s->perm.order);
+    registry_destroy(&s->registry);
     for (uint32_t i = 0; i < s->n_carriers; i++) {
         sem_destroy(&s->carriers[i].wake_sem);
+        pthread_mutex_destroy(&s->carriers[i].local_lock);
         free(s->carriers[i].local);
     }
     free(s->carriers);

@@ -110,6 +110,17 @@ run "green threads, Phase 1" bash runtime/greenthread_test.sh
 # see runtime/scheduler_tsan.sh, run by hand, for that.
 run "scheduler, Phase 2" bash runtime/scheduler_test.sh
 
+# Phase 3 of docs/concurrency-decision.md: epoll reactor, park/unpark (and
+# the CAS state machine that closes the lost-wakeup race between a green
+# thread's EAGAIN and its park call), and the blocking-FFI handoff
+# (runtime/scheduler.c's additive Phase 3 surface, runtime/reactor.c/.h) --
+# built on the Phase 2 scheduler, standalone, same convention. Every
+# compiler/opt combo this file already uses elsewhere, plus one dedicated
+# ASan+UBSan build. ThreadSanitizer is NOT run here -- see
+# runtime/phase3_tsan.sh, run by hand, for that; it matters even more here
+# than for Phase 2's own TSan gate (see that script's own header).
+run "epoll/park-unpark/blocking-FFI, Phase 3" bash runtime/phase3_test.sh
+
 # The formatter must not change what a program means, and must reach a fixed
 # point. Both are checked against every corpus program rather than asserted:
 # a formatter that quietly alters a program is worse than no formatter.

@@ -14,6 +14,7 @@
 #define RT_H
 
 #include <limits.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -803,6 +804,59 @@ extern _Thread_local uintptr_t rt_stack_limit;
  * what every other runtime check in this file does: rt_trap, cleanly, with
  * a clear message. Defined in rt.c. */
 void rt_stack_probe_slow(void);
+
+/* ---- blocking FFI, Phase 3 (docs/concurrency-decision.md, "Blocking FFI")
+ *
+ * `O_NONBLOCK` is a no-op on a regular file and `getaddrinfo` is synchronous
+ * by specification, so any foreign (`prim`) call might block the OS thread
+ * underneath it for an arbitrary time. src/emit_c.rs wraps every such call
+ * site in rt_enter_blocking()/rt_exit_blocking() -- unconditionally, the
+ * same "always correct, always emitted" discipline the stack probe above
+ * uses, and for the same reason: this header, and rt.c's implementation of
+ * these two functions, are linked into EVERY compiled program, whether or
+ * not it uses the Phase 2/3 scheduler at all, so the common case (no
+ * scheduler) has to be free.
+ *
+ * The mechanism is the same shape as rt_stack_limit just above: a
+ * thread-local the compiler-emitted call site touches with no argument to
+ * pass, because src/emit_c.rs has no way to know, at a `prim` call site,
+ * which carrier (if any) is running on this OS thread. `rt_blocking_rec` is
+ * NULL on every OS thread that never registered one -- which, absent a
+ * scheduler, is every thread there is -- and on such a thread both
+ * functions below are a null check and nothing else.
+ *
+ * A carrier (runtime/scheduler.c) registers one rt_blocking_rec_t per
+ * carrier OS thread, once, before it ever dispatches a green thread
+ * (rt_blocking_register), and a monitor thread (runtime/monitor.c) polls
+ * every registered carrier's record: a nonzero `blocking_since_ns` older
+ * than its timeout means that carrier is stuck in a foreign call, and its
+ * local buffer of queued-but-not-yet-run green threads is hinted away to a
+ * backup carrier so they are not starved by the one carrier's blocking
+ * syscall. See runtime/monitor.h for the full mechanism. */
+typedef struct rt_blocking_rec {
+    /* 0 = not currently inside a blocking FFI call. Otherwise a
+     * CLOCK_MONOTONIC nanosecond timestamp of when the current call
+     * entered -- never wall-clock time, which can jump backwards and would
+     * make "how long has this been blocking" unanswerable. */
+    _Atomic uint64_t blocking_since_ns;
+} rt_blocking_rec_t;
+
+extern _Thread_local rt_blocking_rec_t *rt_blocking_rec;
+
+/* Called once by a carrier, on its own OS thread, before it dispatches any
+ * green thread -- sets rt_blocking_rec for THIS thread only, exactly like
+ * rt_fiber_switch sets rt_stack_limit. `rec`'s storage is owned by the
+ * caller (the scheduler) and must outlive every call this carrier makes to
+ * rt_enter_blocking/rt_exit_blocking, i.e. for the carrier's whole life. */
+void rt_blocking_register(rt_blocking_rec_t *rec);
+
+/* Emitted immediately before/after every `prim` call site (src/emit_c.rs).
+ * A plain, uncontended atomic store on the fast path when nobody is
+ * watching (rt_blocking_rec == NULL: no-op; non-NULL: one relaxed-adjacent
+ * store), so the cost of instrumenting every FFI call is negligible for a
+ * program that never uses the scheduler. */
+void rt_enter_blocking(void);
+void rt_exit_blocking(void);
 
 /* Checked arithmetic. int is 64-bit and overflow TRAPS -- docs/ir-v0.md §3.
  * The operators never wrap; wrapping is a separately named method

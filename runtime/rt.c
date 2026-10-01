@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* Every operating-system call the runtime makes goes through the sys layer
  * (runtime/sys.h, docs/sys-layer.md). Its implementation is #included here
@@ -2532,6 +2533,46 @@ void rt_stack_probe_slow(void) {
      * true: the thread's stack pointer proxy really is below the lowest
      * valid address of its stack. That is a genuine overflow. */
     rt_trap("stack overflow");
+}
+
+/* ---- blocking FFI, Phase 3 ----------------------------------------------
+ *
+ * See rt.h for the full contract. NULL (the default on every OS thread that
+ * never calls rt_blocking_register -- i.e. every program that does not use
+ * runtime/scheduler.c) makes both functions below a null check and nothing
+ * else, same discipline as rt_stack_limit defaulting to 0 above. */
+_Thread_local rt_blocking_rec_t *rt_blocking_rec = NULL;
+
+void rt_blocking_register(rt_blocking_rec_t *rec) {
+    rt_blocking_rec = rec;
+}
+
+/* CLOCK_MONOTONIC, never CLOCK_REALTIME: wall-clock time can jump (NTP, a
+ * manual clock change), which would make "how long has this carrier been
+ * blocking" briefly wrong in either direction -- including, worst case,
+ * appearing to leap backwards and never crossing the monitor's timeout at
+ * all. Monotonic cannot do either. */
+static uint64_t rt_monotonic_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+void rt_enter_blocking(void) {
+    if (rt_blocking_rec == NULL) return;
+    /* Release: the monitor thread's read of this value (acquire) must see
+     * every write this carrier made before entering the blocking call --
+     * not load-bearing for correctness today (the monitor only reads the
+     * timestamp), but cheap to get right now rather than leave a relaxed
+     * atomic here for the next reader to have to re-derive why it is safe. */
+    atomic_store_explicit(&rt_blocking_rec->blocking_since_ns, rt_monotonic_ns(),
+                           memory_order_release);
+}
+
+void rt_exit_blocking(void) {
+    if (rt_blocking_rec == NULL) return;
+    atomic_store_explicit(&rt_blocking_rec->blocking_since_ns, 0,
+                           memory_order_release);
 }
 
 /* ---- io primitives: lib/io.src, lib/fs.src ----------------------------- */

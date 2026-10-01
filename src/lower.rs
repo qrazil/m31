@@ -1289,12 +1289,26 @@ impl Lowerer {
             }
         }
 
+        // Every `prim`'s runtime symbol, by the same name-transform rule
+        // `lower_call` applies at its own call sites (docs/stdlib-seam.md
+        // §2) -- computed once, here, rather than re-derived ad hoc wherever
+        // it is needed later (src/emit_c.rs, for the blocking-FFI wrap; see
+        // `ir::Module::prim_targets`'s own doc comment for why this can't be
+        // recovered from an `Inst::Call`'s name alone).
+        let prim_targets: std::collections::HashSet<String> = self
+            .sigs
+            .iter()
+            .filter(|(_, sig)| sig.is_prim)
+            .map(|(name, _)| format!("rt_{}", crate::ast::bare(name).trim_start_matches('_')))
+            .collect();
+
         Ok(ir::Module {
             funcs,
             strings: self.strings,
             statics: self.static_objs,
             types: self.typedefs,
             iface_slots: self.iface_slots,
+            prim_targets,
         })
     }
 
