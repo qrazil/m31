@@ -37,6 +37,11 @@ pub fn source(name: &str) -> Option<&'static str> {
         "random" => include_str!("../lib/random.src"),
         "args" => include_str!("../lib/args.src"),
         "unicode" => include_str!("../lib/unicode.src"),
+        "field25519" => include_str!("../lib/field25519.src"),
+        "sha512" => include_str!("../lib/sha512.src"),
+        "x25519" => include_str!("../lib/x25519.src"),
+        "scalar25519" => include_str!("../lib/scalar25519.src"),
+        "ed25519" => include_str!("../lib/ed25519.src"),
         _ => return None,
     })
 }

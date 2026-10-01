@@ -1,0 +1,128 @@
+// X25519 (RFC 7748): the Diffie-Hellman function over Curve25519's
+// Montgomery form, `y^2 = x^3 + 486662*x^2 + x` mod `2^255 - 19`.
+//
+// API
+// ---
+//   bytes shared = x25519.x25519(my_secret, their_public);   // 32 bytes each
+//   bytes pub = x25519.base_point(secret);                   // x25519(secret, 9)
+//
+// This is the security-critical function `docs/ssh-decision.md` Phase 1
+// scoped: both arguments to `x25519` may be secret (a Diffie-Hellman
+// exchange runs this once with a local secret scalar against a peer's
+// public point, and once more -- with the SAME local secret -- against the
+// base point to publish a key), so the scalar multiplication below is the
+// Montgomery ladder, unconditionally, with no shortcut for a public
+// exponent. See `field25519.src`'s header for the constant-time argument
+// the ladder depends on (the carry chain, `cselect`/`cswap`); this file
+// adds exactly one more thing that has to hold: the ladder's own control
+// flow (which coordinates get updated, and how) must not depend on the
+// scalar's bits either, only the DATA it operates on may -- and that data
+// always goes through `field25519`'s masked selection, never a branch
+// written here.
+
+import field25519;
+
+// (486662 - 2) / 4, RFC 7748 §4.1 -- the constant the ladder step multiplies
+// by instead of carrying `A` (486662) itself through every round.
+const int A24 = 121665;
+
+/// `X25519(k, u)`: the scalar `k` applied to the Montgomery u-coordinate
+/// `u`, both 32 octets, RFC 7748 §5. Every input, including a `u` that is
+/// not a canonical field element (>= p) or that encodes a point on the
+/// curve's quadratic twist rather than the curve itself, is accepted and
+/// processed exactly as the RFC's own decode/ladder/encode steps specify --
+/// there is no validation beyond what decoding already does (masking the
+/// scalar's and the u-coordinate's reserved bits).
+pub bytes x25519(bytes k, bytes u) {
+    bytes kc = clamp_scalar(k);
+    bytes um = mask_u(u);
+    Array<int> x1 = field25519.from_bytes(um);
+    Array<int> x2 = field25519.one();
+    Array<int> z2 = field25519.zero();
+    // `x3` starts as a COPY of `x1`, not an alias: `x1` is read on every
+    // ladder round (`z3 = x1 * ...`) and must never be mutated, but `x3` is
+    // swapped in place by `cswap` below -- if the two shared one `Array`
+    // object, the first swap would corrupt `x1` through it.
+    Array<int> x3 = clone(x1);
+    Array<int> z3 = field25519.one();
+    int swap = 0;
+    int t = 254;
+    while (t >= 0) {
+        int kt = bit_at(kc, t);
+        swap = swap ^ kt;
+        field25519.cswap(swap, x2, x3);
+        field25519.cswap(swap, z2, z3);
+        swap = kt;
+        // RFC 7748 §5's ladder step, unchanged from the RFC's own naming so
+        // it can be checked against the text line by line.
+        Array<int> aa = field25519.add(x2, z2);
+        Array<int> aaa = field25519.sq(aa);
+        Array<int> bb = field25519.sub(x2, z2);
+        Array<int> bbb = field25519.sq(bb);
+        Array<int> e = field25519.sub(aaa, bbb);
+        Array<int> cc = field25519.add(x3, z3);
+        Array<int> dd = field25519.sub(x3, z3);
+        Array<int> da = field25519.mul(dd, aa);
+        Array<int> cb = field25519.mul(cc, bb);
+        Array<int> daplus = field25519.add(da, cb);
+        Array<int> daminus = field25519.sub(da, cb);
+        x3 = field25519.sq(daplus);
+        z3 = field25519.mul(x1, field25519.sq(daminus));
+        x2 = field25519.mul(aaa, bbb);
+        Array<int> a24e = field25519.mul(field25519.small(A24), e);
+        z2 = field25519.mul(e, field25519.add(aaa, a24e));
+        t = t - 1;
+    }
+    field25519.cswap(swap, x2, x3);
+    field25519.cswap(swap, z2, z3);
+    Array<int> result = field25519.mul(x2, field25519.invert(z2));
+    return field25519.to_bytes(result);
+}
+
+/// `x25519(k, 9)` -- the base point, encoded as RFC 7748 §5 defines it (the
+/// octet 9 followed by 31 zero octets). The public key a caller publishes
+/// for `k`.
+pub bytes base_point(bytes k) {
+    bytes u = [9; 32];
+    int i = 1;
+    while (i < 32) {
+        u[i] = 0;
+        i = i + 1;
+    }
+    return x25519(k, u);
+}
+
+// The scalar clamp, RFC 7748 §5: clear the low 3 bits (a multiple of the
+// cofactor 8), clear the top bit (so the value is below 2^255), set the
+// second-highest bit (so it is always exactly 255 bits, every ladder run
+// doing the same number of doublings). A copy, never the caller's own
+// `bytes` -- mutating an argument in place would be a surprising thing for
+// a function named `x25519` to do to the key material handed to it.
+bytes clamp_scalar(bytes k) {
+    bytes out = clone(k);
+    out[0] = out[0] & 0xF8;
+    out[31] = out[31] & 0x7F;
+    out[31] = out[31] | 0x40;
+    return out;
+}
+
+// RFC 7748 §5: the u-coordinate's reserved top bit, masked off before
+// decoding -- "implementations of X25519 MUST mask the most significant bit
+// in the final byte". Also a copy, for the same reason as `clamp_scalar`.
+bytes mask_u(bytes u) {
+    bytes out = clone(u);
+    out[31] = out[31] & 0x7F;
+    return out;
+}
+
+// Bit `t` of `b`, 0 = least significant of `b[0]`. `b[byte]` is a `bytes`
+// element, always in [0, 255] by construction (reference §3.10) -- so this
+// `>>` shifts a value that is ALWAYS non-negative regardless of which
+// secret bit it holds, unlike a shift on a field-element limb, which is why
+// this one needs no bias trick (`field25519.src`'s header explains the
+// general hazard).
+int bit_at(bytes b, int t) {
+    int byte_idx = t / 8;
+    int bit_idx = t % 8;
+    return b[byte_idx] >> bit_idx & 1;
+}
