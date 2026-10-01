@@ -305,6 +305,20 @@ the caveat above, and different deployments will reasonably want different
 backpressure-signaling capacities even though outcomes don't depend on the
 choice.
 
+**Mechanism: environment variables, read once at process startup** — the
+same approach Go uses for `GOMAXPROCS`, which this whole document already
+takes as its reference point. `LANG_FUEL_SIZE` and `LANG_GLOBAL_QUEUE_CAP`
+(names open to bikeshedding later), parsed into runtime globals during
+startup, falling back to a built-in default if unset or invalid. This
+serves both purposes at once with no extra mechanism: the project's own
+tuning against real hardware once Phase 2 exists, and an end user or
+operator tuning for their own machine or workload without a rebuild.
+Defaults: `fuel_size` starts at the simulated best value (4), explicitly
+provisional pending the real-hardware tuning Phase 2 still owes (see
+above); the queue capacity default can be anything `>= fuel_size` since
+outcomes don't depend on it — pick something that reads sensibly for
+monitoring (64 is as good as any).
+
 **Resolved 2026-09-30: an idle carrier learns something landed in the
 shared queue via a reshuffled random permutation, not a fixed order.**
 The obvious candidate — notify the carrier that spawned a task, if it's
