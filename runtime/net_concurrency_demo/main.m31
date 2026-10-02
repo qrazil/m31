@@ -86,7 +86,15 @@ void client(int id, int port, Chan<int> results) {
     }
 }
 
-match (net.listen("127.0.0.1", 0)) {
+// backlog defaults to 128 (lib/net.m31), below N -- fine on Linux (this
+// single-carrier accept loop apparently drains fast enough that the real
+// in-flight backlog never actually hits 128 there), but a real macOS CI
+// run hit "connect: the connection was broken by the peer" at this exact
+// N=200 default-backlog combination: kqueue's accept-readiness timing
+// differs enough from epoll's that it does happen there. Comfortably
+// above N so this demo tests the concurrency claim, not a backlog size
+// nobody chose on purpose.
+match (net.listen("127.0.0.1", 0, backlog: N + 56)) {
     case Ok(net.Listener ln): {
         int port = ln.local().port();
         Chan<int> results = Chan<int>(N);
