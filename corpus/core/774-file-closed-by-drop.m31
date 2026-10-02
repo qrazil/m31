@@ -4,16 +4,16 @@ import fs;
 // `io.File` has a destructor that closes it, so a descriptor cannot leak --
 // not when the program forgets `close()`, and not when a `?` leaves between
 // open and close. Observed from outside: the number of entries in
-// /proc/self/fd, relative to where the program started, since the runner
+// /dev/fd, relative to where the program started, since the runner
 // decides what the first few are.
 
 int open_fds() {
-    match (fs.listdir("/proc/self/fd")) {
+    match (fs.listdir("/dev/fd")) {
         case Ok(List<str> names): {
             return names.size();
         }
         case Err(io.Error e): {
-            trap("cannot list /proc/self/fd: " + e.to_str());
+            trap("cannot list /dev/fd: " + e.to_str());
         }
     }
 }

@@ -157,7 +157,15 @@ run "formatter preserves meaning" bash -c '
             # Blank the number before comparing; which literal each USE
             # refers to is then checked by actually running the program
             # below.
-            norm() { sed -E "s/\bstr[0-9]+\b/strN/g" "$1" | sort; }
+            # No \b here: it is a GNU extension to sed'"'"'s -E (ERE) mode,
+            # silently unsupported by macOS/BSD sed -- the substitution
+            # just never matches there, found for real when a macOS CI run
+            # printed raw, un-normalized str0/str3 numbers in this check'"'"'s
+            # own diff output instead of the strN this was meant to blank
+            # them to. str[0-9]+ alone is precise enough here: every name
+            # this matches is this compiler'"'"'s own synthetic strN literal
+            # variable, never a substring of some other identifier.
+            norm() { sed -E "s/str[0-9]+/strN/g" "$1" | sort; }
             if ! diff -q <(norm "$w/a.c") <(norm "$w/b.c") >/dev/null 2>&1; then
                 echo "formatting changed the emitted C: $f"
                 diff <(norm "$w/a.c") <(norm "$w/b.c") | head -6
@@ -183,9 +191,9 @@ run "formatter preserves meaning" bash -c '
                         mkdir "$rd"
                         (cd "$rd" && bash "$OLDPWD/$setup") >/dev/null 2>&1
                     fi
-                    if ! diff -q <(cd "$rd" && "$w/b" "${argv[@]}" 2>&1 <"$in") "$exp" >/dev/null 2>&1; then
+                    if ! diff -q <(cd "$rd" && "$w/b" "${argv[@]+"${argv[@]}"}" 2>&1 <"$in") "$exp" >/dev/null 2>&1; then
                         echo "formatted program prints something else: $f"
-                        diff <(cd "$rd" && "$w/b" "${argv[@]}" 2>&1 <"$in") "$exp" | head -6
+                        diff <(cd "$rd" && "$w/b" "${argv[@]+"${argv[@]}"}" 2>&1 <"$in") "$exp" | head -6
                         bad=1
                     fi
                 else

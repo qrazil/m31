@@ -102,7 +102,16 @@ run_one() {
     stdin="$PWD/${src%.$LANG_EXT}.in"
     [ -e "$stdin" ] || stdin=/dev/null
     # Command-line arguments are the test's `.args` file, one per line, and
-    # none otherwise -- the same shape as `.in`, for `os.args()`.
+    # none otherwise -- the same shape as `.in`, for `os.args()`. Expanded
+    # below as "${argv[@]+"${argv[@]}"}" rather than the plain "${argv[@]}"
+    # every other array in this file uses: bash's own nounset handling of
+    # a genuinely EMPTY array (the common case here -- most tests have no
+    # `.args` file) was only fixed in bash 4.4 (2016); macOS ships 3.2.57
+    # (2007, pre-GPLv3) as /bin/bash to this day, where it is "unbound
+    # variable" under `set -u` -- found for real on a macOS CI run, failing
+    # every corpus test with no `.args` file at once. The other arrays in
+    # this script (CCS, and gates.sh's/sanitize.sh's own non-argv arrays)
+    # are always populated before use and never hit this.
     argv=()
     [ -e "${src%.$LANG_EXT}.args" ] && mapfile -t argv <"${src%.$LANG_EXT}.args"
     # A test's `.setup` script, if it has one, builds a fixture the program
@@ -119,7 +128,7 @@ run_one() {
         return
       fi
     fi
-    got=$(cd "$rundir" && "$bin" "${argv[@]}" 2>&1 <"$stdin")
+    got=$(cd "$rundir" && "$bin" "${argv[@]+"${argv[@]}"}" 2>&1 <"$stdin")
     rc=$?
 
     # Layer 4: refcount invariant. The runtime prints this under -DRC_DEBUG.
@@ -212,7 +221,7 @@ for src in corpus/traps/*."$LANG_EXT"; do
     # test's: the one way to reach a trap that only a command line can cause.
     targv=()
     [ -e "${src%.$LANG_EXT}.args" ] && mapfile -t targv <"${src%.$LANG_EXT}.args"
-    got=$("$bin" "${targv[@]}" 2>&1 >/dev/null </dev/null); rc=$?
+    got=$("$bin" "${targv[@]+"${targv[@]}"}" 2>&1 >/dev/null </dev/null); rc=$?
     if [ $rc -ne 134 ]; then
       fail_test "$label [$cc $opt]" "expected abort (134), got exit $rc"
       trap_ok=0; break

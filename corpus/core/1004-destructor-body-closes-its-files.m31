@@ -9,15 +9,15 @@ import fs;
 // the release that was running -- and the reviewer's version of this,
 // 3 000 iterations under `ulimit -n 1024`, died at iteration 1021 with
 // EMFILE. Counted here rather than exhausted, so the corpus needs no limit
-// of its own: /proc/self/fd, the way corpus/core/774 does it.
+// of its own: /dev/fd, the way corpus/core/774 does it.
 
 int open_fds() {
-    match (fs.listdir("/proc/self/fd")) {
+    match (fs.listdir("/dev/fd")) {
         case Ok(List<str> names): {
             return names.size();
         }
         case Err(io.Error e): {
-            trap("cannot list /proc/self/fd: " + e.to_str());
+            trap("cannot list /dev/fd: " + e.to_str());
         }
     }
 }
