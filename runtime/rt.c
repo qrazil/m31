@@ -2067,6 +2067,22 @@ static rt_reactor_t *rt_global_reactor(void) {
     return g_reactor;
 }
 
+/* rt_run_program's own teardown, below, needs to stop the reactor thread
+ * (if one was ever started -- a program that never calls into `net` never
+ * triggers init_global_reactor, and `g_reactor` stays NULL for its whole
+ * life) before any scheduler memory it might still touch is freed. Reading
+ * `g_reactor` here with no lock is safe only because rt_run_program is the
+ * single, one-time, main-thread-only call site (its own header comment),
+ * invoked strictly after every carrier OS thread has already been joined
+ * (rt_sched_shutdown) -- so nothing concurrent can still be racing
+ * init_global_reactor's own write to it by the time this runs. */
+static void rt_global_reactor_destroy_if_created(void) {
+    if (g_reactor != NULL) {
+        rt_reactor_destroy(g_reactor);
+        g_reactor = NULL;
+    }
+}
+
 /* A FIFO queue of green-thread ids waiting to send or to receive on one
  * `Chan`. Plural matters: with OS-thread `spawn`, several threads could
  * block on `pthread_cond_wait` at once and the condvar's own wait queue
@@ -2333,6 +2349,27 @@ void rt_run_program(void (*entry)(void)) {
     }
 
     rt_sched_shutdown(s);
+    /* Stop and join the reactor thread (if `net` ever started one) BEFORE
+     * rt_sched_destroy frees anything it could still touch. The reactor
+     * thread is not one of the carriers rt_sched_shutdown above already
+     * joined -- it is a separate OS thread (runtime/reactor.c) that calls
+     * back into THIS scheduler, via rt_sched_unpark, every time epoll_wait
+     * reports a ready fd. Without this call, that thread keeps running
+     * (rt_reactor_destroy was never invoked anywhere else in this runtime)
+     * right through rt_sched_destroy's pthread_mutex_destroy/free calls
+     * below: a real event on any still-registered fd -- plausible even this
+     * late, since a peer's last FIN/RST can arrive concurrently with this
+     * process's own exit -- makes reactor_loop dereference `r->sched` and
+     * touch `s->registry.lock`/`s->global`/`s->carriers[...]`, all freed or
+     * about to be freed out from under it: a genuine TSan-confirmed
+     * data race between the main thread inside rt_sched_destroy and the
+     * reactor thread inside rt_sched_unpark (docs/concurrency-decision.md,
+     * "Phase 3.5"). Ordered after rt_sched_shutdown (every carrier is
+     * already stopped, so nothing else can still be pushing work the
+     * reactor's own wakeups would need a live carrier to drain) and before
+     * rt_sched_destroy (so the reactor thread has fully exited before any
+     * of the memory it reads is freed). */
+    rt_global_reactor_destroy_if_created();
     rt_sched_destroy(s);
 }
 
@@ -2770,6 +2807,22 @@ _Noreturn void rt_trap(const char *msg) {
  * that) until something explicitly opts a carrier in via rt_fiber_switch
  * (runtime/greenthread.h). */
 _Thread_local uintptr_t rt_stack_limit = 0;
+
+/* `noinline` is declared on the rt.h prototype and repeated here -- see
+ * rt_stack_limit's own comment in rt.h for exactly which bug this prevents.
+ * A real, separate function call, so every call site gets a fresh
+ * `%fs`-relative read of rt_stack_limit's address with nothing for the
+ * optimiser to cache across: the caller never emits a TLS access of its own
+ * to hoist in the first place. `local`'s address stands in for the caller's
+ * current stack depth the same way the old inlined version's did -- one
+ * real call frame deeper, which only ever makes the check more
+ * conservative, never less. */
+__attribute__((noinline)) void rt_stack_check(void) {
+    int local;
+    if ((uintptr_t)&local < rt_stack_limit) {
+        rt_stack_probe_slow();
+    }
+}
 
 void rt_stack_probe_slow(void) {
     if (rt_stack_limit == RT_STACK_LIMIT_POISON) {

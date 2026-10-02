@@ -780,16 +780,42 @@ void rt_check_unique(Obj *o);
  * `rt_stack_limit` holds the lowest valid address of the stack belonging to
  * whichever green thread is currently running on THIS carrier OS thread --
  * thread-local because one OS thread runs one green thread's code at a
- * time. src/emit_c.rs (emit_func) opens every emitted function with:
+ * time. src/emit_c.rs (emit_func) opens every emitted function with a call
+ * to `rt_stack_check()`, below.
  *
- *     { int __rt_probe_local;
- *       if ((uintptr_t)&__rt_probe_local < rt_stack_limit)
- *           rt_stack_probe_slow();
- *     }
- *
- * which is CHICKEN's own idiom (cited by the design doc): the address of a
- * local variable stands in for the current stack pointer, cheaply and
- * portably, without needing an intrinsic.
+ * THAT CALL MUST STAY A REAL, OUT-OF-LINE CALL -- not the inlined
+ * `{ int local; if (&local < rt_stack_limit) ... }` text this probe used to
+ * be, CHICKEN's own idiom (still cited by the design doc for the local-
+ * stands-in-for-rsp trick itself). A real, reproducible bug, found and fixed
+ * the hard way: a single function that is live across a park/resume cycle --
+ * any `prim` call can trigger one, since the compiler has no notion that the
+ * OS thread actually running this code can change mid-function -- gets
+ * exactly one probe at its own entry under this scheme, but a direct,
+ * unrelated SOURCE call to another small function (`Conn.close`, say) gets
+ * inlined under `-O2`, carrying ITS OWN copy of the same inlined probe text
+ * along with it, deeper in the caller's body. `clang -O2` (not `gcc -O2`,
+ * which happens not to in this exact shape) then computes `&rt_stack_limit`
+ * -- the THREAD-LOCAL ADDRESS, via the `%fs`-relative thread pointer, not
+ * merely its value -- ONCE, early in the caller, and caches it in a spilled
+ * register across the real, opaque calls in between (`connect`/`write`/
+ * `read_until`, any of which may have parked this green thread and resumed
+ * it on a DIFFERENT carrier). The second, inlined probe then reads through
+ * that stale, wrong-carrier address -- a value that carrier's own,
+ * completely unrelated activity may since have overwritten to anything --
+ * producing a spurious "stack overflow" trap a handful of real frames into a
+ * fresh green thread, reproducible well over half the time with 2+ carriers
+ * doing genuine concurrent socket I/O, confirmed via a hardware watchpoint on
+ * the live TLS slot showing every actual WRITE to it was correct throughout.
+ * This is ordinary, valid optimisation from the compiler's point of view --
+ * nothing in C's memory model says a TLS variable's resolved address can
+ * change mid-function, and nothing told it this runtime violates that.
+ * `rt_stack_check` being a genuine, `noinline`, separate-TU call (the
+ * runtime is already its own translation unit, with `-flto` off -- see the
+ * project README's "Two rules that look like details and are not") means
+ * the caller never sees a TLS access to cache in the first place: every call
+ * to it forces a fresh `%fs`-relative lookup inside, with nothing for the
+ * optimiser to hoist across. Do not re-inline the probe text at the call
+ * site; that reintroduces exactly this bug.
  *
  * Every program now runs entirely on carriers (rt_run_program wraps `main`
  * itself as green thread 0, and every `spawn` is a green thread too -- see
@@ -815,6 +841,15 @@ extern _Thread_local uintptr_t rt_stack_limit;
  * rt_stack_probe_slow exist now so Phase 2 can start poisoning without the
  * probe's own call site in emit_c.rs ever needing to change again. */
 #define RT_STACK_LIMIT_POISON (~(uintptr_t)0)
+
+/* The probe itself -- src/emit_c.rs calls this at the top of every emitted
+ * function. `__attribute__((noinline))` is load-bearing, not defensive
+ * styling: see rt_stack_limit's own comment above for exactly which bug
+ * re-inlining this reintroduces. `-flto` is already off project-wide, so
+ * cross-TU inlining could not happen anyway; the attribute documents the
+ * requirement explicitly and survives a future build-flag change that this
+ * comment might not get read before. */
+__attribute__((noinline)) void rt_stack_check(void);
 
 /* Called when the probe fires: either rt_stack_limit was poisoned (see
  * above -- not reachable in Phase 1) or the thread genuinely ran off the

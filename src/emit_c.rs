@@ -982,11 +982,15 @@ fn emit_func(
     writeln!(o, "{} {{", signature(f)).unwrap();
 
     // The compiler-emitted stack probe (docs/concurrency-decision.md,
-    // "Stacks: fixed, but not limited"; runtime/rt.h for the full contract).
-    // CHICKEN's own idiom, cited by the design doc: the address of a local
-    // variable stands in for the current stack pointer. Wrapped in its own
-    // block so `__rt_probe_local` cannot collide with (or be confused for)
-    // any of the function's own IR-numbered locals declared just below.
+    // "Stacks: fixed, but not limited"; runtime/rt.h for the full contract,
+    // including a real, reproduced bug: this MUST be a real out-of-line
+    // call, never the probe's own comparison text inlined directly here.
+    // Inlining it lets a cross-carrier park/resume inside THIS function
+    // leave a later, separately-inlined copy (e.g. from a small callee like
+    // `Conn.close` that `-O2` inlines back in) reading a stale, wrong-
+    // carrier's cached TLS address -- see rt_stack_limit's own comment in
+    // rt.h for the full account. `rt_stack_check` (runtime/rt.h/.c) is
+    // `noinline` specifically so every call site gets its own fresh read.
     //
     // Always correct, always emitted -- Phase 1 deliberately skips the
     // "primitives/leaf functions don't need it" optimisation the design
@@ -994,11 +998,7 @@ fn emit_func(
     // any thread that has never run a green thread (runtime/rt.c), and an
     // address is never 0, so this is a dead compare-and-branch for every
     // program until something starts switching into green threads.
-    writeln!(
-        o,
-        "    {{ int __rt_probe_local; if ((uintptr_t)&__rt_probe_local < rt_stack_limit) rt_stack_probe_slow(); }}"
-    )
-    .unwrap();
+    writeln!(o, "    rt_stack_check();").unwrap();
 
     // A block parameter is allowed to be dead: a merge point carries every
     // variable the arms disagree about, and nothing is obliged to read them

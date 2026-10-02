@@ -24,10 +24,13 @@
  * run on a slab stack. So the compiler side of the Part 3 contract is
  * checked separately, in runtime/greenthread_test.sh, by compiling a
  * trivial .src file with the actual langc binary and grepping the emitted C
- * for the exact agreed probe text; the `overflow`/`poison` sub-tests below
- * reproduce that same text by hand against a real stack and the real
- * rt_stack_probe_slow, which is the strongest check available on the
- * runtime side before Phase 2 exists to close this gap for real.
+ * for a call to rt_stack_check() (the real, `noinline` out-of-line probe --
+ * rt_stack_limit's own comment in rt.h explains why it must never be
+ * inlined comparison text at the call site instead); the `overflow`/
+ * `poison` sub-tests below reproduce the same comparison by hand against a
+ * real stack and the real rt_stack_probe_slow, which is the strongest check
+ * available on the runtime side before Phase 2 exists to close this gap
+ * for real.
  */
 #include "rt.h"
 #include "greenthread.h"

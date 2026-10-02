@@ -68,6 +68,62 @@
  * (a spurious hard error) than leaving it alone. Flagged here as a known,
  * legitimate follow-up rather than attempted again speculatively. */
 
+/* A note on ThreadSanitizer and this file -- the gap the ASan note above
+ * describes has a TSan equivalent, found and now fixed (docs/
+ * concurrency-decision.md, "Known gap" / "Phase 3.5"): TSan's own internal
+ * stack-trace bookkeeping (StackDepotBase::Put and friends) intermittently
+ * segfaulted -- never a real race report, never inside any function this
+ * project defines -- when a green thread was suspended by one carrier OS
+ * thread and resumed by a different one, purely because nothing told TSan
+ * that the OS thread doing the resuming was now running a completely
+ * different logical thread of execution on a completely different stack.
+ * Unlike the ASan situation above, TSan's own fiber API is NOT asymmetric
+ * (no separate "start"/"finish" halves, so none of the trampoline-threading
+ * problem described above applies here): `__tsan_switch_to_fiber(target,
+ * 0)` is one call, made by whichever side is ABOUT to jump, naming the
+ * fiber identity execution is jumping TO, immediately before the actual
+ * stack switch (rt_ctx_switch) that performs it. This file's callers
+ * (runtime/scheduler.c's carrier_dispatch/rt_sched_yield/rt_sched_park/
+ * green_trampoline) make exactly that call around each of their
+ * rt_fiber_switch invocations -- not added inside rt_fiber_switch itself,
+ * since not every caller of rt_fiber_switch has (or needs) a notion of a
+ * fiber identity to switch to: runtime/greenthread_test.c, Phase 1's own
+ * standalone harness, exercises raw fiber round-trips on a single OS
+ * thread, never the cross-carrier resume pattern that triggers this gap,
+ * and is never built under TSan (runtime/greenthread_test.sh has no TSan
+ * variant) -- so it is deliberately left uninstrumented rather than given
+ * fiber identities it has no use for. `flags` is always 0 (the default,
+ * synchronizing switch): the handoff this runtime performs across a
+ * context switch is a real happens-before edge (one real memory write,
+ * ordered before the switch; one real read after it, from whichever OS
+ * thread resumes), and 0 is what tells TSan to model it as one, same as an
+ * ordinary mutex unlock/lock pair would -- the non-synchronizing flag
+ * exists for fibers that already have their own separate synchronization
+ * and would otherwise be double-counted, which does not describe this
+ * runtime. Declared here, under the same portable thread_sanitizer feature
+ * test runtime/phase3_test.c already uses (gcc defines
+ * __SANITIZE_THREAD__ directly; clang exposes __has_feature(
+ * thread_sanitizer)), rather than via <sanitizer/tsan_interface.h>, so
+ * nothing in this build depends on that optional header being installed;
+ * these four signatures are stable, documented compiler-rt entry points. */
+#if defined(__SANITIZE_THREAD__)
+#define RT_TSAN_BUILD 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define RT_TSAN_BUILD 1
+#endif
+#endif
+#ifndef RT_TSAN_BUILD
+#define RT_TSAN_BUILD 0
+#endif
+
+#if RT_TSAN_BUILD
+void *__tsan_create_fiber(unsigned flags);
+void  __tsan_destroy_fiber(void *fiber);
+void  __tsan_switch_to_fiber(void *fiber, unsigned flags);
+void *__tsan_get_current_fiber(void);
+#endif
+
 /* Every green-thread stack in Phase 1 is this one fixed size -- defined
  * here, ahead of Part 1, so it is available wherever it is needed; the full
  * rationale and the rest of the allocator built on it is Part 2, further
@@ -270,15 +326,37 @@ typedef struct rt_stack {
     void *top;
     rt_slab_t *slab;
     uint32_t index;
+
+#if RT_TSAN_BUILD
+    /* This stack lease's own TSan fiber identity -- see this file's own
+     * "A note on ThreadSanitizer" comment, above, for the full account.
+     * Created in rt_stack_alloc, destroyed in rt_stack_free (runtime/
+     * greenthread.c): one TSan fiber per logical lease of a stack, not per
+     * physical slab slot, so a slot's later reuse by a completely
+     * different green thread gets a fresh fiber identity rather than
+     * inheriting a stale one's happens-before history. Field only exists
+     * in a TSan build -- rt_stack_t's layout is pure C with no asm-side
+     * contract (unlike rt_ctx_t), so varying its size by build mode is
+     * safe. */
+    void *tsan_fiber;
+#endif
 } rt_stack_t;
 
 /* Hand out one free stack, allocating a brand new 64 MiB slab first if
  * every existing slab is full. Never fails silently: out of memory traps,
- * the same as every other allocation failure in this runtime (rt_trap). */
+ * the same as every other allocation failure in this runtime (rt_trap).
+ * In a TSan build, also creates this lease's own tsan_fiber (above). */
 rt_stack_t rt_stack_alloc(void);
 
 /* Return a stack to its slab's free list. `s` must have come from
- * rt_stack_alloc and must not be used again afterwards. */
+ * rt_stack_alloc and must not be used again afterwards. In a TSan build,
+ * also destroys this lease's tsan_fiber (above) -- safe here because, by
+ * the time a green thread's stack is freed, the caller (runtime/
+ * scheduler.c's carrier_dispatch, in its `finished` branch) has always
+ * already switched this OS thread's TSan fiber identity back to the
+ * carrier's own native fiber (green_trampoline's switch-away does this
+ * before this stack can ever be freed), so tsan_fiber is never the
+ * current fiber of any thread at the point it is destroyed. */
 void rt_stack_free(rt_stack_t *s);
 
 /* ========================================================================
