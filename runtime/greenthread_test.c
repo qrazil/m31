@@ -90,8 +90,8 @@ static void rt1_entry(void *argp) {
     long f = 0x6666666666666666L;
 
     /* Eight floating-point values -- exactly the aarch64 callee-saved
-     * d8-d15 count (greenthread.h, ctx_switch_aarch64.s). On x86-64 this is
-     * a no-op as far as ctx_switch_x86_64.s is concerned (System V makes
+     * d8-d15 count (greenthread.h, ctx_switch_aarch64.S). On x86-64 this is
+     * a no-op as far as ctx_switch_x86_64.S is concerned (System V makes
      * every xmm register caller-saved, so the compiler must already spill
      * any of these it keeps live across the rt_fiber_switch calls below to
      * the stack, which rsp save/restore already protects) -- but on aarch64

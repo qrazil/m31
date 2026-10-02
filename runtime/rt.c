@@ -42,7 +42,7 @@
  * clean" under every compiler and optimisation level it already checks
  * rt.c with, with no extra build line to remember.
  *
- * The context switch itself (runtime/ctx_switch_x86_64.s) is NOT pulled in
+ * The context switch itself (runtime/ctx_switch_x86_64.S) is NOT pulled in
  * this way -- it is real assembly, not C, so it is a separate translation
  * unit by necessity, linked only by whatever actually calls rt_ctx_switch.
  * Nothing in rt.c does (see runtime/greenthread.h's rt_ctx_make and
@@ -57,9 +57,9 @@
  * greenthread.c above, scheduler.c and reactor.c are NOT #included here --
  * they stay their own translation units (see their own file headers for
  * why: scheduler.c takes the address of rt_ctx_trampoline, which only
- * ctx_switch_x86_64.s defines). Only their declarations are needed in this
+ * ctx_switch_x86_64.S defines). Only their declarations are needed in this
  * file; every build line that links runtime/rt.c now also links
- * runtime/scheduler.c, runtime/reactor.c and runtime/ctx_switch_x86_64.s,
+ * runtime/scheduler.c, runtime/reactor.c and runtime/ctx_switch_x86_64.S,
  * because `spawn` (rt_spawn, below) and `Chan` (rt_chan_send/recv/close,
  * "concurrency" section below) call into them unconditionally. This is the
  * one place that changes for every build line in the repository: `spawn`

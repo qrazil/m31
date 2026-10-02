@@ -177,13 +177,13 @@ jobs:
   #   - docs/concurrency-decision.md says this in so many words: "Every
   #     build line in the repository that links runtime/rt.c -- which is
   #     all of them -- now also links runtime/scheduler.c, runtime/
-  #     reactor.c and runtime/ctx_switch_x86_64.s... The whole language is
+  #     reactor.c and runtime/ctx_switch_x86_64.S... The whole language is
   #     therefore x86-64 [and Linux] only until Phase 4's aarch64 context
   #     switch [and kqueue reactor] lands", and lists "kqueue (macOS/BSD)"
   #     under "Phase 4 -- portability", not yet done.
   #
   # So macOS x86-64 apps need the SAME Phase 4 kqueue reactor that macOS
-  # arm64 apps need, on top of (for arm64 only) runtime/ctx_switch_aarch64.s.
+  # arm64 apps need, on top of (for arm64 only) runtime/ctx_switch_aarch64.S.
   # Enabling apps here is therefore not a one-line change even once aarch64
   # lands -- it needs reactor.c to grow a kqueue backend first. Tracked by
   # leaving no apps step in this job at all, rather than a disabled one that
@@ -225,7 +225,7 @@ jobs:
           # quietly shipping before x86-64 apps do. To enable (once
           # macos-x86_64 above is also re-enabled):
           #   1. uncomment the two lines below
-          #   2. runtime/ctx_switch_aarch64.s and a kqueue reactor backend
+          #   2. runtime/ctx_switch_aarch64.S and a kqueue reactor backend
           #      both now exist (tonight's work) -- add an apps step here
           #      matching build-linux-x86_64's, using macos-14's native
           #      arm64 toolchain (no cross-compilation needed either way)

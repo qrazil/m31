@@ -7,8 +7,8 @@
  * Three pieces, matching the design doc exactly:
  *
  *   Part 1 -- the context switch (rt_ctx_t, rt_ctx_switch, rt_ctx_make).
- *             The asm itself is runtime/ctx_switch_x86_64.s on x86-64,
- *             runtime/ctx_switch_aarch64.s on aarch64 (Phase 4 --
+ *             The asm itself is runtime/ctx_switch_x86_64.S on x86-64,
+ *             runtime/ctx_switch_aarch64.S on aarch64 (Phase 4 --
  *             portability; runtime/arch.sh picks the right one at build
  *             time). rt_ctx_t's layout and rt_ctx_make's body are each
  *             `#if defined(__x86_64__) / #elif defined(__aarch64__)`
@@ -59,7 +59,7 @@
  * was tried here and reverted: bracketing just rt_ctx_switch inside
  * rt_fiber_switch calls "finish" only on the ORIGINATING side's eventual
  * resume, never on the TARGET side's entry (first-time, via
- * ctx_switch_x86_64.s's trampoline, or on a later resume) -- so the moment a
+ * ctx_switch_x86_64.S's trampoline, or on a later resume) -- so the moment a
  * freshly-switched-into fiber initiates its OWN next switch, ASan sees a
  * second "start" before the first one's "finish" and reports "starting
  * fiber switch while in fiber switch", a real error this file would
@@ -189,7 +189,7 @@ void *__tsan_get_current_fiber(void);
  * that corrupts every stack silently rather than crashing cleanly. */
 #if defined(__x86_64__)
 
-/* System V x86-64 ABI. Byte offsets runtime/ctx_switch_x86_64.s hard-codes:
+/* System V x86-64 ABI. Byte offsets runtime/ctx_switch_x86_64.S hard-codes:
  * 0, 8, 16, 24, 32, 40, 48. */
 typedef struct rt_ctx {
     uint64_t rsp;
@@ -203,14 +203,14 @@ typedef struct rt_ctx {
 
 #elif defined(__aarch64__)
 
-/* AAPCS64. Byte offsets runtime/ctx_switch_aarch64.s hard-codes: 0, 8, 16,
+/* AAPCS64. Byte offsets runtime/ctx_switch_aarch64.S hard-codes: 0, 8, 16,
  * 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144,
  * 152, 160. The d8-d15 tail has no x86-64 analogue -- System V x86-64 makes
- * every xmm register caller-saved, so ctx_switch_x86_64.s's struct has
+ * every xmm register caller-saved, so ctx_switch_x86_64.S's struct has
  * nothing corresponding to it, but AAPCS64 requires the callee (this
  * function) to preserve d8-d15 across a call, so a value this project's
  * `float`/`double` keeps live in one of them across a context switch must
- * be saved here or it silently corrupts -- see ctx_switch_aarch64.s's
+ * be saved here or it silently corrupts -- see ctx_switch_aarch64.S's
  * header comment for the full reasoning. */
 typedef struct rt_ctx {
     uint64_t sp;
@@ -240,13 +240,13 @@ typedef struct rt_ctx {
 #error "runtime/greenthread.h: no struct rt_ctx layout for this architecture " \
        "-- this runtime has a hand-written context switch only for x86-64 " \
        "and aarch64 (docs/concurrency-decision.md, Phase 4); see " \
-       "ctx_switch_x86_64.s and ctx_switch_aarch64.s for what a new port " \
+       "ctx_switch_x86_64.S and ctx_switch_aarch64.S for what a new port " \
        "needs to provide."
 #endif
 
 /* Save the running context into *from, load *to, and resume there --
- * defined in runtime/ctx_switch_x86_64.s on x86-64, runtime/ctx_switch_
- * aarch64.s on aarch64 (selected by runtime/arch.sh at build time; see
+ * defined in runtime/ctx_switch_x86_64.S on x86-64, runtime/ctx_switch_
+ * aarch64.S on aarch64 (selected by runtime/arch.sh at build time; see
  * either file's own header for the mechanism). Both end in one `ret`, not
  * a jump, which is what turns "restore the registers" into "resume exactly
  * where that context left off" without this function needing to know
@@ -295,7 +295,7 @@ _Noreturn void rt_ctx_entry_returned(void);
  * One function per architecture below, rather than one function with
  * scattered #ifdefs in its body: the two stack-frame shapes are different
  * enough (x86-64 writes a fake return address onto the new stack; aarch64
- * needs no such write, see ctx_switch_aarch64.s) that interleaving them
+ * needs no such write, see ctx_switch_aarch64.S) that interleaving them
  * would be harder to audit than two short, self-contained versions. */
 #if defined(__x86_64__)
 
@@ -314,7 +314,7 @@ static inline void rt_ctx_make(rt_ctx_t *ctx, void *stack_base,
      * jumps to it; landing at rt_ctx_trampoline with %rsp sitting right
      * where a `call` would have left it (16-aligned minus the 8 bytes the
      * `call` itself would have pushed) is what lets the trampoline's own
-     * `call *%r12` be ABI-correct -- see ctx_switch_x86_64.s. */
+     * `call *%r12` be ABI-correct -- see ctx_switch_x86_64.S. */
     uint64_t *sp = (uint64_t *)(top - 8);
     sp[0] = (uint64_t)(uintptr_t)rt_ctx_trampoline;
 
@@ -343,7 +343,7 @@ static inline void rt_ctx_make(rt_ctx_t *ctx, void *stack_base,
      * branches to whatever is in `lr` (x30), a register rt_ctx_switch loads
      * from *ctx directly, not a value popped off the stack. So `sp` here is
      * simply the honest 16-aligned top of the stack -- see
-     * ctx_switch_aarch64.s's header for why that is a simplification, not a
+     * ctx_switch_aarch64.S's header for why that is a simplification, not a
      * shortcut. */
     ctx->sp = (uint64_t)(uintptr_t)top;
     ctx->lr = (uint64_t)(uintptr_t)rt_ctx_trampoline;

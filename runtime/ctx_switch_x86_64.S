@@ -28,6 +28,23 @@
  * crashing cleanly, so keep them in sync by hand with care.
  */
 
+/* C symbol -> linker symbol naming is an OS (not CPU) convention: Linux/ELF
+ * uses the C name unchanged, Darwin/Mach-O prepends an underscore to every
+ * C-linkage symbol, always, regardless of architecture. This file crosses
+ * that boundary three times (rt_ctx_switch, rt_ctx_trampoline defined here;
+ * rt_ctx_entry_returned called here but defined in greenthread.c), so every
+ * one of those three goes through C_SYM. Needs the .S (capital) extension
+ * to actually reach the C preprocessor -- GCC/Clang's own file-suffix
+ * convention, no special build-script flag required; renamed from .s for
+ * exactly this, found via ctx_switch_aarch64.S's matching comment (x86-64
+ * macOS, macos-13, is not exercised by any CI job today, but this is the
+ * identical bug waiting for the same file shape there). */
+#if defined(__APPLE__)
+#define C_SYM(x) _##x
+#else
+#define C_SYM(x) x
+#endif
+
     .text
 
 /* void rt_ctx_switch(rt_ctx_t *from, rt_ctx_t *to); -- from in rdi, to in rsi.
@@ -42,9 +59,9 @@
  * that context left off (or start it for the first time)" without this
  * function needing to know or care which case it is.
  */
-    .globl rt_ctx_switch
+    .globl C_SYM(rt_ctx_switch)
     .align 16
-rt_ctx_switch:
+C_SYM(rt_ctx_switch):
     /* --- save the running context into *from --- */
     movq %rsp, 0(%rdi)
     movq %rbx, 8(%rdi)
@@ -92,9 +109,9 @@ rt_ctx_switch:
  * alignment, the same as any other function call anywhere else in this
  * runtime.
  */
-    .globl rt_ctx_trampoline
+    .globl C_SYM(rt_ctx_trampoline)
     .align 16
-rt_ctx_trampoline:
+C_SYM(rt_ctx_trampoline):
     movq %r13, %rdi    /* argument -> first System V argument register */
     call *%r12          /* entry(arg) */
 
@@ -102,18 +119,17 @@ rt_ctx_trampoline:
      * control to come back TO. rt_ctx_entry_returned (runtime/greenthread.c)
      * traps cleanly; it is _Noreturn, so the ud2 below is an unreachable
      * safety net, not a load-bearing instruction. */
-    call rt_ctx_entry_returned
+    call C_SYM(rt_ctx_entry_returned)
     ud2
 
 /* No .type/.size/.note.GNU-stack here (there used to be -- see git history
- * if you want the original Linux-only reasoning for each). This file is
- * assembled unpreprocessed (no -x assembler-with-cpp anywhere in build.sh/
- * run.sh/gates.sh) and runtime/arch.sh picks it for every x86-64 OS this
- * runtime targets, including macOS once macos-13 is re-enabled (see
- * .github/workflows/release.yml's build-macos job) -- and Apple's
- * integrated assembler (Mach-O, no ELF symbol-table/stack-executability
- * concept) rejects all three directives outright with "unknown directive".
- * ctx_switch_aarch64.s hit this for real on its first genuine macOS CI run;
- * fixed here too, preemptively, since it is the identical bug waiting for
- * the same file shape on the other architecture. All three were
- * informational/hardening, not load-bearing for correctness. */
+ * if you want the original Linux-only reasoning for each). runtime/arch.sh
+ * picks this file for every x86-64 OS this runtime targets, including
+ * macOS once macos-13 is re-enabled (see .github/workflows/release.yml's
+ * build-macos job) -- and Apple's integrated assembler (Mach-O, no ELF
+ * symbol-table/stack-executability concept) rejects all three directives
+ * outright with "unknown directive". ctx_switch_aarch64.S hit this for
+ * real on its first genuine macOS CI run; fixed here too, preemptively,
+ * since it is the identical bug waiting for the same file shape on the
+ * other architecture. All three were informational/hardening, not
+ * load-bearing for correctness. */

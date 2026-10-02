@@ -3,7 +3,7 @@
 # scheduler (runtime/scheduler.c/.h), built on Phase 1's primitives.
 #
 # Mirrors runtime/greenthread_test.sh's shape: build runtime/scheduler_test.c
-# (together with scheduler.c, rt.c and ctx_switch_x86_64.s -- this scheduler
+# (together with scheduler.c, rt.c and ctx_switch_x86_64.S -- this scheduler
 # is its own standalone component, never #included by rt.c, so every build
 # line here names all four files explicitly) against every compiler/opt
 # combination gates.sh already checks the runtime with, run it, and

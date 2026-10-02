@@ -11,7 +11,7 @@
 # Mirrors their own shape and reasoning exactly (see their headers for the
 # fuller argument for why TSan, not ASan/UBSan, is the tool that can find
 # this class of bug): build each test program with clang+TSan, linking
-# runtime/rt.c/scheduler.c/reactor.c/ctx_switch_x86_64.s (the same four
+# runtime/rt.c/scheduler.c/reactor.c/ctx_switch_x86_64.S (the same four
 # files every ordinary build now links), run it N times.
 #
 # TWO DIFFERENT EXPECTATIONS, NOT ONE -- read this before changing either:

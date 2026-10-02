@@ -386,7 +386,7 @@ runtime/
   rt.h rt.c            the runtime — a SEPARATE translation unit, see §7.1
   rc_debug.h           refcount invariant, compiled in under -DRC_DEBUG
   greenthread.h/.c     slab stack allocator, fiber state, ctx-switch glue
-  ctx_switch_x86_64.s  the x86-64 context switch itself
+  ctx_switch_x86_64.S  the x86-64 context switch itself
   scheduler.h/.c       the M:N scheduler — not yet wired to spawn/Chan
   reactor.h/.c         epoll reactor, park/unpark, blocking-FFI handoff
 lib/                   the standard library, written in the language itself

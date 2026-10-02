@@ -414,7 +414,7 @@ static void test_park_unpark_race(void) {
  * runs of this exact file at this exact carrier count (4) under TSan,
  * zero recurrences of the internal crash, zero new false-positive race
  * reports. Implemented in runtime/greenthread.c/greenthread.h and
- * runtime/scheduler.c, not runtime/ctx_switch_x86_64.s -- the asm itself
+ * runtime/scheduler.c, not runtime/ctx_switch_x86_64.S -- the asm itself
  * (rt_ctx_switch) still knows nothing above the raw ABI, exactly as
  * designed; the annotation calls bracket it from the C side instead. */
 

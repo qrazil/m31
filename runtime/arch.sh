@@ -5,7 +5,7 @@
 #   $RT_REACTOR_C  which reactor backend (OS)
 #
 # runtime/greenthread.h's `struct rt_ctx` and exactly one of
-# runtime/ctx_switch_x86_64.s / runtime/ctx_switch_aarch64.s are one
+# runtime/ctx_switch_x86_64.S / runtime/ctx_switch_aarch64.S are one
 # contract (see either .s file's own header comment; docs/
 # concurrency-decision.md, "Phase 4" -- portability). runtime/reactor.h's
 # contract (rt_reactor_create/rt_reactor_wait/rt_reactor_destroy) is
@@ -15,7 +15,7 @@
 # concurrency-decision.md, "Phase 3.5" -- the kqueue port). Neither choice
 # is something a per-script `if` should decide ad hoc in a dozen different
 # places. Every build/test script that used to hard-code
-# "runtime/ctx_switch_x86_64.s" or "runtime/reactor.c" sources this instead
+# "runtime/ctx_switch_x86_64.S" or "runtime/reactor.c" sources this instead
 # and uses $RT_CTX_ASM / $RT_REACTOR_C, so there is exactly one place that
 # knows how to map `uname -m`/`uname -s` to a filename for each axis.
 #
@@ -25,10 +25,10 @@
 # rename.sh has no business touching.
 case "$(uname -m)" in
     x86_64 | amd64)
-        RT_CTX_ASM=runtime/ctx_switch_x86_64.s
+        RT_CTX_ASM=runtime/ctx_switch_x86_64.S
         ;;
     aarch64 | arm64)
-        RT_CTX_ASM=runtime/ctx_switch_aarch64.s
+        RT_CTX_ASM=runtime/ctx_switch_aarch64.S
         ;;
     *)
         echo "unsupported architecture: $(uname -m) -- this runtime has a" \

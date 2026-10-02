@@ -476,7 +476,7 @@ of it in C in 2012.
       the wake/notification mechanism (random permutation + correct initial
       idle state).
 - [x] **Context switch, slab stacks with probes** — Phase 1, implemented and
-      tested (`runtime/greenthread.{h,c}`, `runtime/ctx_switch_x86_64.s`).
+      tested (`runtime/greenthread.{h,c}`, `runtime/ctx_switch_x86_64.S`).
       x86-64 only; aarch64 is Phase 4.
 - [x] **Scheduler implementation, probe-based preemption** — Phase 2
       (`runtime/scheduler.{h,c}`).
@@ -538,7 +538,7 @@ this file's tests already use (see `runtime/greenthread.h`'s "A note on
 ThreadSanitizer" comment for the full mechanism), so every one of them --
 declarations, the `rt_stack_t` field holding each lease's fiber handle, and
 every call site -- compiles to nothing outside a TSan build. Deliberately
-NOT implemented in `ctx_switch_x86_64.s`: the annotations bracket
+NOT implemented in `ctx_switch_x86_64.S`: the annotations bracket
 `rt_fiber_switch` from the C side, so the hand-written asm context switch
 itself (`rt_ctx_switch`) is untouched, consistent with this project's
 standing rule about not touching that file half-confidently.

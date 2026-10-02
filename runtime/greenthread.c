@@ -8,7 +8,7 @@
  * runtime/sys_linux.c already use for sys.h.
  *
  * rt_ctx_entry_returned also lives here rather than in the .s file: it is
- * ordinary C (just a trap), and keeping it here means ctx_switch_x86_64.s
+ * ordinary C (just a trap), and keeping it here means ctx_switch_x86_64.S
  * stays nothing but the two things that genuinely have to be assembly.
  */
 

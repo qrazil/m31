@@ -6,12 +6,12 @@
  * greenthread.c. That matters for the same reason greenthread.h's rt_ctx_make
  * is `static inline` rather than living in rt.c's own compiled text: this
  * file calls rt_ctx_make, which takes the address of rt_ctx_trampoline
- * (defined only in ctx_switch_x86_64.s). If this file's object code lived
+ * (defined only in ctx_switch_x86_64.S). If this file's object code lived
  * inside rt.c's translation unit, every program that links runtime/rt.c --
  * which is every build line in this repository, build.sh included -- would
  * suddenly need to link ctx_switch_x86_64.o too, or fail at link time. Kept
  * separate, only this phase's own test harness (runtime/scheduler_test.c)
- * links it, alongside rt.c and ctx_switch_x86_64.s directly.
+ * links it, alongside rt.c and ctx_switch_x86_64.S directly.
  */
 #include "rt.h"
 #include "greenthread.h"

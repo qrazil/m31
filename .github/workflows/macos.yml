@@ -28,7 +28,7 @@ name: macOS runtime (kqueue reactor)
 # was never redundant, it is just unavailable right now.
 #
 # Do not retarget this at a Linux ARM64 runner (that is
-# runtime/ctx_switch_aarch64.s's own job, a completely orthogonal CPU-
+# runtime/ctx_switch_aarch64.S's own job, a completely orthogonal CPU-
 # architecture port -- see .github/workflows/aarch64.yml if it has been
 # merged by the time you read this) and do not add `ubuntu-*` here --
 # runtime/reactor_epoll.c already has full Linux coverage via gates.sh in

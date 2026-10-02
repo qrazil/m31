@@ -1,6 +1,6 @@
 /* aarch64 context switch for green threads (Phase 4 -- portability;
  * docs/concurrency-decision.md, "Phases"). The aarch64 twin of
- * ctx_switch_x86_64.s: same two functions, same contract shape, same
+ * ctx_switch_x86_64.S: same two functions, same contract shape, same
  * "nothing clever" discipline -- read that file's header first, since this
  * one only calls out where AAPCS64 actually differs from System V x86-64
  * rather than re-explaining what does not.
@@ -19,7 +19,7 @@
  *   - d8-d15 (the LOW 64 bits of v8-v15)
  *
  * That last line has no x86-64 analogue: System V x86-64 makes every xmm
- * register caller-saved, so ctx_switch_x86_64.s correctly saves none of
+ * register caller-saved, so ctx_switch_x86_64.S correctly saves none of
  * them -- any local the compiler wants to survive a `call` on x86-64 gets
  * spilled to the stack whether or not this file does anything about it.
  * AAPCS64 instead promises the CALLEE will preserve d8-d15 across a call,
@@ -59,8 +59,26 @@
  * This file and that struct definition are one contract; a change to
  * either without the other corrupts every stack silently rather than
  * crashing cleanly, so keep them in sync by hand with care -- exactly the
- * warning ctx_switch_x86_64.s gives for its own offsets.
+ * warning ctx_switch_x86_64.S gives for its own offsets.
  */
+
+/* C symbol -> linker symbol naming is an OS (not CPU) convention: Linux/ELF
+ * uses the C name unchanged, Darwin/Mach-O prepends an underscore to every
+ * C-linkage symbol, always, regardless of architecture. This file crosses
+ * that boundary three times (rt_ctx_switch, rt_ctx_trampoline defined here;
+ * rt_ctx_entry_returned called here but defined in greenthread.c), so every
+ * one of those three goes through C_SYM. Needs the .S (capital) extension
+ * to actually reach the C preprocessor -- GCC/Clang's own file-suffix
+ * convention, no special build-script flag required; renamed from .s for
+ * exactly this, the same CI run that found the GNU-as-directive issue this
+ * file's other comments describe also hit "Undefined symbols ... _rt_ctx_
+ * switch" once those directives were removed, from building the file
+ * without this. */
+#if defined(__APPLE__)
+#define C_SYM(x) _##x
+#else
+#define C_SYM(x) x
+#endif
 
     .text
 
@@ -79,9 +97,9 @@
  * register file, the same way `b lr` would if that were legal assembler
  * syntax.
  */
-    .globl rt_ctx_switch
+    .globl C_SYM(rt_ctx_switch)
     .align 4
-rt_ctx_switch:
+C_SYM(rt_ctx_switch):
     /* --- save the running context into *from (x0) ---
      * x9 is an ordinary caller-saved scratch register (AAPCS64's x9-x15),
      * not part of the saved set, used here only to get the live `sp` value
@@ -151,7 +169,7 @@ rt_ctx_switch:
 /* void rt_ctx_trampoline(void);
  *
  * The landing pad for a context that has never run before -- the aarch64
- * twin of ctx_switch_x86_64.s's trampoline, smuggling the entry function
+ * twin of ctx_switch_x86_64.S's trampoline, smuggling the entry function
  * and its argument through two callee-saved registers for the identical
  * reason: this was never actually CALLED (no `bl` executed, so `lr` was
  * never set by hardware for it; rt_ctx_make set it by hand), so there is no
@@ -165,13 +183,13 @@ rt_ctx_switch:
  * rt_ctx_make also arranges `sp` here to be 16-byte aligned, which AAPCS64
  * requires at every public interface -- including the `blr` below, which
  * is as much a "public interface" as any ordinary call. Unlike
- * ctx_switch_x86_64.s's trampoline, nothing needs to be reserved on the
+ * ctx_switch_x86_64.S's trampoline, nothing needs to be reserved on the
  * stack for a return address first: aarch64 return addresses live in `lr`,
  * a register, not on the stack, so `sp` here is simply the honest top of
  * the stack, no -8/-16 adjustment needed. */
-    .globl rt_ctx_trampoline
+    .globl C_SYM(rt_ctx_trampoline)
     .align 4
-rt_ctx_trampoline:
+C_SYM(rt_ctx_trampoline):
     mov  x0, x20       /* argument -> first AAPCS64 argument register */
     blr  x19           /* entry(arg) */
 
@@ -179,18 +197,17 @@ rt_ctx_trampoline:
      * matching comment. rt_ctx_entry_returned (runtime/greenthread.c) is
      * _Noreturn, so the trap below is an unreachable safety net, not a
      * load-bearing instruction. */
-    bl   rt_ctx_entry_returned
+    bl   C_SYM(rt_ctx_entry_returned)
     brk  #1
 
-/* No .type/.size/.note.GNU-stack here, unlike ctx_switch_x86_64.s: this
- * file is assembled unpreprocessed (no -x assembler-with-cpp anywhere in
- * build.sh/run.sh/gates.sh) on BOTH Linux aarch64 and macOS arm64 --
- * runtime/arch.sh picks this file by CPU architecture alone, and the two
- * OSes' assemblers do not share a syntax for ELF-only symbol-table/stack-
- * executability metadata. GNU as (Linux) accepts %function/.size/.note
- * .GNU-stack; Apple's integrated assembler (macOS, Mach-O, no preprocessor
- * run on a lowercase .s) rejects all three outright ("unknown directive"),
- * which is exactly what broke the first real macOS CI run of this file.
- * All three are informational/hardening, not load-bearing for correctness
- * -- see ctx_switch_x86_64.s's own comment for what .note.GNU-stack
- * buys on Linux, lost here for portability. */
+/* No .type/.size/.note.GNU-stack here: this file runs on BOTH Linux
+ * aarch64 and macOS arm64 (runtime/arch.sh picks it by CPU architecture
+ * alone), and the two OSes' assemblers do not share a syntax for ELF-only
+ * symbol-table/stack-executability metadata. GNU as (Linux) accepts
+ * %function/.size/.note.GNU-stack; Apple's integrated assembler (macOS,
+ * Mach-O, no ELF symbol-table/stack-executability concept) rejects all
+ * three outright ("unknown directive"), which is exactly what broke the
+ * first real macOS CI run of this file. All three are informational/
+ * hardening, not load-bearing for correctness -- see ctx_switch_x86_64.S's
+ * own comment for what .note.GNU-stack buys on Linux, lost here for
+ * portability. */

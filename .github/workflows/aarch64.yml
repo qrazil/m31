@@ -1,6 +1,6 @@
 name: aarch64 runtime
 
-# Validates runtime/ctx_switch_aarch64.s (docs/concurrency-decision.md,
+# Validates runtime/ctx_switch_aarch64.S (docs/concurrency-decision.md,
 # "Phase 4" -- portability) on GENUINE ARM64 hardware. This is the whole
 # point of the job: a hand-rolled, ABI-level context switch cannot be
 # honestly called working from reading the assembly or from cross-compiling
@@ -35,7 +35,7 @@ jobs:
           echo "uname -a: $(uname -a)"
           [ "$(uname -m)" = "aarch64" ] || {
             echo "::error::This runner is not aarch64 -- the whole point of this job" \
-                 "is testing runtime/ctx_switch_aarch64.s on real ARM64 hardware." >&2
+                 "is testing runtime/ctx_switch_aarch64.S on real ARM64 hardware." >&2
             exit 1
           }
 
@@ -64,9 +64,9 @@ jobs:
           set -eu
           . ./runtime/arch.sh
           echo "RT_CTX_ASM=$RT_CTX_ASM"
-          [ "$RT_CTX_ASM" = "runtime/ctx_switch_aarch64.s" ] || {
+          [ "$RT_CTX_ASM" = "runtime/ctx_switch_aarch64.S" ] || {
             echo "::error::runtime/arch.sh picked '$RT_CTX_ASM' on an aarch64 runner" \
-                 "-- expected runtime/ctx_switch_aarch64.s. This would mean the rest" \
+                 "-- expected runtime/ctx_switch_aarch64.S. This would mean the rest" \
                  "of this job silently tested the wrong architecture's context switch." >&2
             exit 1
           }
