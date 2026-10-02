@@ -52,7 +52,7 @@ jobs:
 
       - name: Show toolchain versions
         run: |
-          rustc --vV
+          rustc -vV
           cc --version
           command -v clang >/dev/null && clang --version || echo "clang not installed"
 
