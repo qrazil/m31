@@ -34,5 +34,13 @@ jobs:
           go-version: '1.22'
 
       - name: Run every gate
-        timeout-minutes: 30
+        # 30 minutes was a guess, never measured against a real run; the
+        # first one actually completed here (2026-10-02, commit a8afd8c)
+        # took ~31 minutes just to reach the timeout, with "corpus (raw
+        # syscalls)" and "sanitizers" never even starting -- GitHub's
+        # shared runners are not faster than this project's own dev
+        # machines, where a full gates.sh run takes 80-90 minutes
+        # end to end (dominated by the corpus run, twice, and ASan/UBSan).
+        # 120 is a real margin above that, not another guess.
+        timeout-minutes: 120
         run: ./gates.sh

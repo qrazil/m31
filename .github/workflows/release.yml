@@ -57,13 +57,15 @@ jobs:
         with:
           go-version: '1.22'
 
-      # Every gate. Locally (this repo's own worktree, Linux x86-64) this
-      # took a few minutes end to end, dominated by the corpus run and the
-      # ASan/UBSan pass; the timeout below is a generous multiple of that,
-      # not a measured CI number -- CI runners vary, and this has not
-      # actually run on one yet.
+      # Every gate. "A few minutes" here was never actually measured -- a
+      # real CI run of .github/workflows/ci.yml's identical step (commit
+      # a8afd8c) hit a 30-minute timeout with "corpus (raw syscalls)" and
+      # "sanitizers" never even starting. Locally (this repo's own
+      # worktree, Linux x86-64) gates.sh takes 80-90 minutes end to end,
+      # dominated by the corpus run (twice) and ASan/UBSan; 120 below is a
+      # real margin above that, not another guess.
       - name: Run every gate
-        timeout-minutes: 30
+        timeout-minutes: 120
         run: ./gates.sh
 
   # ---------------------------------------------------------------------
