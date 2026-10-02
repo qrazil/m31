@@ -826,6 +826,17 @@ Points the `bytes` design has to settle for these to exist:
 > §2 could offer it. `docs/stdlib-seam.md` §9 records what the module
 > settled and why; the rest of this section is the reasoning as it stood,
 > which the module followed.
+>
+> **Amended for `spawn`/green threads (docs/concurrency-decision.md, "Phase
+> 3.5").** Every socket this module makes is now non-blocking from the
+> moment it exists (`SYS_SO_NONBLOCK`, already in the table below), and a
+> third primitive joined the list: `__wait_io(fd, events)`, which parks the
+> calling green thread on the epoll reactor until `fd` is ready instead of
+> blocking a syscall on it -- used for every UNBOUNDED wait (no read/write
+> timeout set). A bounded wait (a timeout was set) still uses `__poll`, as
+> it already did, because parking has no way to report "gave up after N
+> ms". See `lib/net.src`'s own header comment and `runtime/rt.c`'s
+> `rt_wait_io` for the full reasoning.
 
 The layer side of sockets is done (§2). What is *not* written here, on
 purpose, is a line of the module above it: no `lib/net.m31`, and no `prim`s

@@ -9,13 +9,17 @@
 # processes, plus one dedicated ASan+UBSan build of everything.
 #
 # A fourth check does not touch this binary at all: it compiles a trivial
-# .m31 program with the actual m31c binary and greps the emitted C for the
-# exact probe text src/emit_c.rs is supposed to emit -- the compiler side of
-# the Part 3 contract, which runtime/greenthread_test.c cannot reach (see
-# that file's header comment for why).
+# .m31 program with the actual m31c binary and greps the emitted C for a
+# call to rt_stack_check() -- the compiler side of the Part 3 contract,
+# which runtime/greenthread_test.c cannot reach (see that file's header
+# comment for why). MUST be a real call, never the probe's comparison text
+# inlined directly at the call site -- see rt_stack_limit's own comment in
+# rt.h for the real, reproduced bug that shape causes under cross-carrier
+# park/resume.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 . ./config.sh
+. ./runtime/arch.sh
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -30,9 +34,15 @@ for cc in gcc clang; do
         label="$cc $opt"
         bin="$WORK/gt_${cc}_${opt#-}"
         err="$WORK/cc.err"
+        # rt.c unconditionally calls into the scheduler/reactor now (`spawn`
+        # and `Chan` always route through them), so every binary that links
+        # rt.c -- this hand-written C harness included -- links those two
+        # translation units too, even though this particular test never
+        # exercises them.
         if ! "$cc" "$opt" -Wall -Wextra -I runtime -pthread \
                 runtime/greenthread_test.c runtime/rt.c \
-                runtime/ctx_switch_x86_64.s -o "$bin" 2>"$err" || [ -s "$err" ]; then
+                runtime/scheduler.c "$RT_REACTOR_C" \
+                "$RT_CTX_ASM" -o "$bin" 2>"$err" || [ -s "$err" ]; then
             note "build [$label]" FAILED
             sed 's/^/    /' "$err" | head -20
             fail=1
@@ -82,7 +92,8 @@ if command -v clang >/dev/null && \
     sbin="$WORK/gt_san"
     serr="$WORK/san.err"
     if ! clang -O1 -g $SAN -Wall -Wextra -I runtime -pthread \
-            runtime/greenthread_test.c runtime/rt.c runtime/ctx_switch_x86_64.s \
+            runtime/greenthread_test.c runtime/rt.c \
+            runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" \
             -o "$sbin" 2>"$serr"; then
         note "sanitized build" FAILED
         sed 's/^/    /' "$serr" | head -20
@@ -120,13 +131,16 @@ fi
 # ---- 3. the compiler side of the Part 3 contract ---------------------------
 # runtime/greenthread_test.c cannot reach src/emit_c.rs at all (it is a C
 # program; emit_c.rs is part of the Rust compiler). This checks the OTHER
-# half of the same contract directly: that the compiler actually emits the
-# exact text rt.h documents and runtime/rt.c's rt_stack_probe_slow expects.
+# half of the same contract directly: that the compiler actually emits a
+# call to rt_stack_check(), the real out-of-line probe rt.h documents and
+# rt.c defines -- not the comparison inlined at the call site, which is
+# what this used to check for before the cross-carrier caching bug was
+# found and fixed (rt_stack_limit's own comment in rt.h has the account).
 LANGC="./target/debug/$LANG_BIN"
 if [ -x "$LANGC" ]; then
     printf 'int f() { return 1; }\n' >"$WORK/probe_fn.$LANG_EXT"
     if "$LANGC" --emit-c "$WORK/probe_fn.$LANG_EXT" -o "$WORK/probe_fn.c" 2>"$WORK/m31c.err"; then
-        if grep -qF '{ int __rt_probe_local; if ((uintptr_t)&__rt_probe_local < rt_stack_limit) rt_stack_probe_slow(); }' \
+        if grep -qF 'rt_stack_check();' \
                 "$WORK/probe_fn.c"; then
             note "emit_c.rs probe text" "ok (exact text found in emitted C)"
         else

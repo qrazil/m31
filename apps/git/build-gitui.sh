@@ -25,6 +25,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 . ./config.sh
+. ./runtime/arch.sh
 
 out=ourgitui
 [ "${1:-}" = "-o" ] && out=${2:?-o needs a name}
@@ -45,5 +46,6 @@ cp apps/tui/tuiapp.m31 apps/tui/tuibuf.m31 apps/tui/tuidiff.m31 \
     "$stage/"
 
 "$LANGC" --emit-c "$stage/gitui.m31" -o "$stage/gitui.c"
-"$CC" -O2 -pthread -I runtime -o "$out" "$stage/gitui.c" runtime/rt.c
+"$CC" -O2 -pthread -I runtime -o "$out" "$stage/gitui.c" \
+    runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM"
 echo "$out"

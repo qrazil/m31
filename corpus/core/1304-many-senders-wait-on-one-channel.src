@@ -1,0 +1,24 @@
+// The mirror of 1303, for the OTHER waiter queue (`rt.c`'s
+// `send_waiters`): N senders, all blocked on `send` to a full capacity-1
+// channel at once, drained one at a time from the top level. Same
+// deadlock-if-broken argument as 1303, same commutative-sum check.
+void sender(Chan<int> jobs, int id) {
+    send(jobs, id);
+}
+
+const int N = 300;
+Chan<int> jobs = Chan<int>(1);
+
+int i = 0;
+while (i < N) {
+    spawn sender(jobs, i);
+    i = i + 1;
+}
+
+int sum = 0;
+i = 0;
+while (i < N) {
+    sum = sum + recv(jobs);
+    i = i + 1;
+}
+print(sum);

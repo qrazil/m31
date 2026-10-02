@@ -13,6 +13,7 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 . ./config.sh
+. ./runtime/arch.sh
 
 LANGC=${LANGC:-./target/debug/$LANG_BIN}
 WORK=$(mktemp -d)
@@ -75,8 +76,13 @@ run_one() {
 
     # The runtime is a separate translation unit on purpose, and -flto is
     # deliberately absent — see docs/ir-v0.md §7.1 and runtime/rt.c.
+    # `spawn`/`Chan` always route through the Phase 1-3 green-thread runtime
+    # now, so every build links the scheduler, the reactor, and the x86-64
+    # context switch they share, alongside rt.c.
     if ! "$cc" "$opt" -ffp-contract=off -Wall -Wextra -DRC_DEBUG $RT_CFLAGS -I runtime \
-         -pthread -o "$bin" "$WORK/$base.c" runtime/rt.c 2>"$WORK/$base.cc"; then
+         -pthread -o "$bin" "$WORK/$base.c" \
+         runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" \
+         2>"$WORK/$base.cc"; then
       fail_test "$label [$cc $opt]" "C compiler rejected emitted code: $(head -1 "$WORK/$base.cc")"
       return
     fi
@@ -191,7 +197,9 @@ for src in corpus/traps/*."$LANG_EXT"; do
     opt=${entry##*:}
     bin="$WORK/$base.t.$cc$opt"
     if ! "$cc" "$opt" -ffp-contract=off -Wall -Wextra -DRC_DEBUG $RT_CFLAGS -I runtime \
-         -pthread -o "$bin" "$WORK/$base.c" runtime/rt.c 2>"$WORK/$base.tcc"; then
+         -pthread -o "$bin" "$WORK/$base.c" \
+         runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" \
+         2>"$WORK/$base.tcc"; then
       fail_test "$label [$cc $opt]" "C compiler rejected emitted code"
       trap_ok=0; break
     fi

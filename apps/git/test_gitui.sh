@@ -42,7 +42,9 @@ build_tui() {
         bad "compile $name (staged with apps/tui)" "$(head -5 "$WORK/$name.diag")"
         return 1
     fi
-    if ! cc -O2 -Wall -Wextra -I runtime -pthread -o "$WORK/$name" "$WORK/$name.c" runtime/rt.c 2>"$WORK/$name.cc"; then
+    if ! cc -O2 -Wall -Wextra -I runtime -pthread -o "$WORK/$name" "$WORK/$name.c" \
+           runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" \
+           2>"$WORK/$name.cc"; then
         bad "cc $name" "$(head -5 "$WORK/$name.cc")"
         return 1
     fi

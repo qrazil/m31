@@ -498,7 +498,15 @@ at all and returns byte-identical results from both backends, which
 Decided in `docs/sys-layer.md` §9 and built 2026-09-23. `lib/net.m31` is TCP
 — connections, listeners, addresses — and it is language source down to
 fifteen primitives, each **one** sys-layer call with its value or `-errno`
-passed through:
+passed through, **plus one more added when `spawn` was wired to the real
+green-thread scheduler (docs/concurrency-decision.md, "Phase 3.5")**:
+`__wait_io(int fd, int events)`, which is not a sys-layer call at all —
+it parks the calling green thread on the epoll reactor
+(`runtime/reactor.h`) until `fd` is ready, so every socket this module
+makes could be non-blocking without blocking a carrier on the wait. See
+`runtime/rt.c`'s `rt_wait_io` and `lib/net.src`'s own header comment for
+the full reasoning, including why it is used only for an unbounded wait
+and `__poll` still covers the bounded (timeout-set) case.
 
 | prim | sys call | answers |
 |---|---|---|

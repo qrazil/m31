@@ -41,6 +41,17 @@ struct rt_slab {
     struct rt_slab *next;
     uint32_t free_idx[RT_SLAB_STACKS];
     uint32_t free_top; /* free_idx[0 .. free_top) are free */
+
+    /* Diagnostic guard for the unresolved rt_stack_limit race
+     * (docs/concurrency-decision.md, "Phase 3.5"): an independent invariant
+     * from free_idx/free_top above, checked on every alloc/free under the
+     * same g_slab_lock, so a bug in the free-list bookkeeping itself (an
+     * index pushed twice, or handed out while something still holds it)
+     * traps loudly here instead of silently handing the same physical stack
+     * memory to two live green threads at once. Not a fix; a smoke
+     * detector, same spirit as struct rt_green's claimed_by_carrier
+     * (runtime/scheduler.c). */
+    bool in_use[RT_SLAB_STACKS];
 };
 
 static pthread_mutex_t g_slab_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -68,6 +79,7 @@ static rt_slab_t *rt_slab_new(void) {
     slab->next = NULL;
     for (uint32_t i = 0; i < RT_SLAB_STACKS; i++) {
         slab->free_idx[i] = i;
+        slab->in_use[i] = false;
     }
     slab->free_top = RT_SLAB_STACKS;
     return slab;
@@ -92,6 +104,14 @@ rt_stack_t rt_stack_alloc(void) {
 
     uint32_t idx = s->free_idx[--s->free_top];
 
+    if (s->in_use[idx]) {
+        rt_trap("rt_stack_alloc: slab slot already in use -- handed out "
+                "while something else still holds it (see rt_slab's "
+                "in_use comment and docs/concurrency-decision.md's "
+                "Phase 3.5)");
+    }
+    s->in_use[idx] = true;
+
     pthread_mutex_unlock(&g_slab_lock);
 
     rt_stack_t out;
@@ -99,12 +119,38 @@ rt_stack_t rt_stack_alloc(void) {
     out.top = (char *)out.base + RT_STACK_SIZE;
     out.slab = s;
     out.index = idx;
+#if RT_TSAN_BUILD
+    /* This lease's own TSan fiber identity -- see greenthread.h's "A note
+     * on ThreadSanitizer" comment for why this is created per-lease (here)
+     * rather than once per physical slot, and runtime/scheduler.c's
+     * carrier_dispatch/rt_sched_spawn for where it is actually switched to
+     * and (eventually) torn down. Created outside the slab lock on
+     * purpose -- it has nothing to do with free-list bookkeeping, and
+     * __tsan_create_fiber is not something that needs that lock's
+     * protection. */
+    out.tsan_fiber = __tsan_create_fiber(0);
+#endif
     return out;
 }
 
 void rt_stack_free(rt_stack_t *s) {
+#if RT_TSAN_BUILD
+    /* Destroyed before the slot is returned to the free list, same
+     * reasoning as above: this is about the lease's logical identity, not
+     * the slot's physical reuse, and by the time a stack is freed
+     * (runtime/scheduler.c's carrier_dispatch, `finished` branch) this OS
+     * thread's current TSan fiber has already been switched back to the
+     * carrier's own native fiber (green_trampoline's own switch-away),
+     * so this is never the current fiber of any thread here. */
+    __tsan_destroy_fiber(s->tsan_fiber);
+#endif
     pthread_mutex_lock(&g_slab_lock);
     rt_slab_t *slab = s->slab;
+    if (!slab->in_use[s->index]) {
+        rt_trap("rt_stack_free: double free of a slab slot (see "
+                "rt_slab's in_use comment)");
+    }
+    slab->in_use[s->index] = false;
     slab->free_idx[slab->free_top++] = s->index;
     pthread_mutex_unlock(&g_slab_lock);
 }

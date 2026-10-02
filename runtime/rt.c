@@ -53,6 +53,22 @@
 #include "greenthread.h"
 #include "greenthread.c"
 
+/* Phase 2/3 scheduler and reactor (docs/concurrency-decision.md). Unlike
+ * greenthread.c above, scheduler.c and reactor.c are NOT #included here --
+ * they stay their own translation units (see their own file headers for
+ * why: scheduler.c takes the address of rt_ctx_trampoline, which only
+ * ctx_switch_x86_64.s defines). Only their declarations are needed in this
+ * file; every build line that links runtime/rt.c now also links
+ * runtime/scheduler.c, runtime/reactor.c and runtime/ctx_switch_x86_64.s,
+ * because `spawn` (rt_spawn, below) and `Chan` (rt_chan_send/recv/close,
+ * "concurrency" section below) call into them unconditionally. This is the
+ * one place that changes for every build line in the repository: `spawn`
+ * meaning a green thread, not conditionally OS-thread-or-green-thread, is
+ * the whole point (docs/concurrency-decision.md, "The decision being made
+ * here, stated precisely"). */
+#include "scheduler.h"
+#include "reactor.h"
+
 void rc_inc(Obj *o) {
     if (o->rc == RC_IMMORTAL) return;
     o->rc++;
@@ -1937,26 +1953,232 @@ Obj *rt_map_clone(Obj *o) {
     return (Obj *)c;
 }
 
-/* ---- concurrency ------------------------------------------------------ */
+/* ---- concurrency ------------------------------------------------------
+ *
+ * `spawn` always means a green thread now (docs/concurrency-decision.md,
+ * "The decision being made here, stated precisely"): a conditional
+ * spawn -- OS thread sometimes, green thread other times -- would have
+ * reintroduced the exact "two kinds of concurrency" split this language's
+ * uncoloured design exists to reject, and it would have left `Chan`/`net`
+ * unable to tell which kind of caller they had, which is the other half of
+ * why the choice is unconditional rather than a runtime flag.
+ *
+ * One process-wide scheduler, created lazily on first use by whichever
+ * happens first -- `rt_run_program` (always first in practice, since it
+ * runs before the program's own first statement) or, defensively, a direct
+ * `rt_spawn`/`Chan` call from a hand-written C caller that does not go
+ * through `rt_run_program`. `pthread_once` makes this race-free without a
+ * hand-rolled double-checked lock. */
+static rt_scheduler_t *g_sched = NULL;
+static pthread_once_t  g_sched_once = PTHREAD_ONCE_INIT;
+
+static void init_global_scheduler(void) {
+    /* KNOWN, HONEST LIMITATION -- read before touching this.
+     *
+     * rt_sched_spawn's backpressure (scheduler.c's squeue_push, when the
+     * shared queue is full) is a real pthread_cond_wait on the CALLING OS
+     * thread -- correct and harmless when the caller is an ordinary OS
+     * thread, which is the only kind of caller every existing Phase 2/3
+     * test ever used. It stops being harmless the moment the caller is
+     * itself a green thread running on a carrier, which is exactly what
+     * EVERY `spawn` now is (this task's own change). With only ONE carrier,
+     * that carrier's OS thread can get stuck inside its own green thread's
+     * `squeue_push` wait -- and the only thing that could ever free room in
+     * that queue is a carrier drawing from it, which here means THIS SAME
+     * now-blocked carrier. Genuine deadlock: found directly, while testing
+     * this task's own "hundreds of green threads" requirement with
+     * LANG_NUM_CARRIERS=1 and the default queue capacity (64) -- spawning
+     * 300 workers in a tight loop from the top level hung forever. With two
+     * or more carriers this does not happen in practice: whichever carrier
+     * is NOT the one stuck spawning keeps draining the queue independently,
+     * which is what every existing scheduler test exercised without ever
+     * needing to know this path could block at all.
+     *
+     * The real fix is teaching rt_sched_spawn's own backpressure wait to
+     * park the calling green thread instead of blocking its carrier
+     * outright -- the exact same treatment this task already gave `Chan` --
+     * which is scoped, real work inside scheduler.c itself and is
+     * deliberately NOT done here: this task's brief is to reuse
+     * scheduler.c's existing contract unchanged, not to extend it, and
+     * scheduler.c's own standalone tests (every caller of rt_sched_spawn
+     * before tonight) never needed it to be green-thread-safe.
+     *
+     * What IS done here, as an honest mitigation rather than a fix: the
+     * queue capacity is raised, for this process-wide scheduler only, to
+     * comfortably absorb a tight burst of spawns far past the scale this
+     * task tests ("hundreds") on any carrier count including one -- UNLESS
+     * an operator has already set LANG_GLOBAL_QUEUE_CAP, which is left
+     * alone (scheduler.h's own env-var contract is respected, not
+     * overridden). This narrows the deadlock window; it does not close it
+     * -- an unyielding burst of more than this many spawns, with no
+     * carrier ever free to drain concurrently, reproduces the exact same
+     * hang. Phase 2/3's own test harnesses are unaffected: they create
+     * their own schedulers directly with rt_sched_create, never through
+     * this function, so their default (64) is exactly as before. */
+    if (getenv("LANG_GLOBAL_QUEUE_CAP") == NULL) {
+        setenv("LANG_GLOBAL_QUEUE_CAP", "1048576", 1);
+    }
+    g_sched = rt_sched_create(0); /* 0: auto-detect carrier count */
+    /* The blocking-FFI handoff monitor is opt-in (scheduler.h) and is turned
+     * on here, unconditionally, for every compiled program. Converting
+     * net.src's sockets to non-blocking-plus-reactor (below, and
+     * lib/net.src) covers the common, previously-UNBOUNDED blocking I/O
+     * paths, but it is not exhaustive: regular-file I/O, `os.run`'s process
+     * wait, DNS resolution (`__resolve`) and a terminal's canonical-mode
+     * read are all still genuinely blocking syscalls a green thread can make
+     * (unconverted -- out of this task's scope, which is `spawn`, `Chan` and
+     * net.src specifically), and any one of them can now wait indefinitely
+     * on a real event outside the process (another program's stdout, a
+     * user's keypress). Before `spawn` meant a green thread, each such call
+     * had its own OS thread and starved nobody; now several green threads
+     * can share one carrier, so one stuck in any of those calls would freeze
+     * every sibling queued behind it on the same carrier without this.  The
+     * monitor hands a stuck carrier's queued-but-not-yet-run siblings to
+     * another carrier -- it does not make the stuck call itself any faster,
+     * only stops it from also stalling unrelated work. 20ms/5ms are chosen
+     * to be short enough that an interactive or latency-sensitive program
+     * does not visibly stall on one slow carrier, and long enough not to
+     * mistake an ordinary brief syscall for a stuck one; like `fuel_size`,
+     * these are a reasonable starting point rather than a hardware-tuned
+     * figure. */
+    rt_sched_start_blocking_monitor(g_sched, 20ull * 1000 * 1000,
+                                     5ull * 1000 * 1000);
+}
+
+rt_scheduler_t *rt_global_scheduler(void) {
+    pthread_once(&g_sched_once, init_global_scheduler);
+    return g_sched;
+}
+
+/* The epoll reactor (runtime/reactor.h) that lib/net.src's `__wait_io`
+ * parks against (rt_wait_io, in the net primitives section below). Lazily
+ * created the same way as the scheduler, and bound to it: there is exactly
+ * one of each per process, matching "a real deployment has exactly one
+ * scheduler" (scheduler.h). */
+static rt_reactor_t   *g_reactor = NULL;
+static pthread_once_t  g_reactor_once = PTHREAD_ONCE_INIT;
+
+static void init_global_reactor(void) {
+    g_reactor = rt_reactor_create(rt_global_scheduler());
+}
+
+static rt_reactor_t *rt_global_reactor(void) {
+    pthread_once(&g_reactor_once, init_global_reactor);
+    return g_reactor;
+}
+
+/* rt_run_program's own teardown, below, needs to stop the reactor thread
+ * (if one was ever started -- a program that never calls into `net` never
+ * triggers init_global_reactor, and `g_reactor` stays NULL for its whole
+ * life) before any scheduler memory it might still touch is freed. Reading
+ * `g_reactor` here with no lock is safe only because rt_run_program is the
+ * single, one-time, main-thread-only call site (its own header comment),
+ * invoked strictly after every carrier OS thread has already been joined
+ * (rt_sched_shutdown) -- so nothing concurrent can still be racing
+ * init_global_reactor's own write to it by the time this runs. */
+static void rt_global_reactor_destroy_if_created(void) {
+    if (g_reactor != NULL) {
+        rt_reactor_destroy(g_reactor);
+        g_reactor = NULL;
+    }
+}
+
+/* A FIFO queue of green-thread ids waiting to send or to receive on one
+ * `Chan`. Plural matters: with OS-thread `spawn`, several threads could
+ * block on `pthread_cond_wait` at once and the condvar's own wait queue
+ * handled that for free. A green thread cannot block a carrier, so parking
+ * it needs somewhere of our own to remember WHICH green thread(s) are
+ * waiting, so the right one(s) get `rt_sched_unpark`-ed back -- not just
+ * "someone, whoever the OS wakes next", which a condvar does not actually
+ * promise in a useful order either.
+ *
+ * FIFO, not LIFO or unordered: a channel is a queue in the language's own
+ * vocabulary (docs/concurrency-decision.md's accept-loop example hands
+ * connections to workers through one), and waking the longest-waiting
+ * green thread first is the one order that cannot starve a waiter
+ * indefinitely while newer ones keep being satisfied first -- the same
+ * fairness argument that makes Go's channels and POSIX's own documented
+ * (if not always delivered) condvar semantics both pick FIFO. A plain
+ * singly-linked list, one small malloc per park and one free per wake: this
+ * is not a hot path relative to the rest of a channel operation (a lock
+ * already taken, a potential context switch already paid for), so the
+ * "correctness over cleverness" choice this codebase already makes for the
+ * scheduler's own registry (runtime/scheduler.c) and the reactor's waiter
+ * map (runtime/reactor.c) applies here too. */
+typedef struct rt_chan_waiter {
+    uint32_t               id;
+    struct rt_chan_waiter *next;
+} rt_chan_waiter_t;
+
+typedef struct {
+    rt_chan_waiter_t *head;
+    rt_chan_waiter_t *tail;
+} rt_chan_wqueue_t;
+
+static void wq_push(rt_chan_wqueue_t *q, uint32_t id) {
+    rt_chan_waiter_t *n = malloc(sizeof *n);
+    if (n == NULL) rt_trap("out of memory: channel waiter");
+    n->id = id;
+    n->next = NULL;
+    if (q->tail != NULL) q->tail->next = n; else q->head = n;
+    q->tail = n;
+}
+
+/* True and `*out` set if a waiter was dequeued; false if the queue is
+ * empty. Popping is the ONLY way an id ever leaves this queue -- there is
+ * no separate removal path -- so every successful `rt_sched_unpark` a
+ * send/recv does for a waiter corresponds to exactly one pop, which is what
+ * makes the wake protocol below race-free without a condvar-style
+ * "recheck, it might have been a spurious wakeup" step: the only way to be
+ * woken via this queue is for the waker to have already popped this exact
+ * id under this exact lock. */
+static bool wq_pop(rt_chan_wqueue_t *q, uint32_t *out) {
+    rt_chan_waiter_t *n = q->head;
+    if (n == NULL) return false;
+    q->head = n->next;
+    if (q->head == NULL) q->tail = NULL;
+    *out = n->id;
+    free(n);
+    return true;
+}
+
+/* Detach the whole queue (for `rt_chan_close`, which must wake EVERY
+ * waiter, not one) and hand back its head; the caller walks and frees it
+ * after unlocking, the same "collect under the lock, act after releasing
+ * it" shape send/recv use below. */
+static rt_chan_waiter_t *wq_drain(rt_chan_wqueue_t *q) {
+    rt_chan_waiter_t *n = q->head;
+    q->head = q->tail = NULL;
+    return n;
+}
 
 struct Chan {
-    Obj             hdr;
-    pthread_mutex_t lock;
-    pthread_cond_t  not_empty;
-    pthread_cond_t  not_full;
-    int64_t        *buf;
-    int64_t         cap;
-    int64_t         len;
-    int64_t         head;
-    bool            closed;
+    Obj              hdr;
+    pthread_mutex_t  lock;
+    int64_t         *buf;
+    int64_t          cap;
+    int64_t          len;
+    int64_t          head;
+    bool             closed;
+    rt_chan_wqueue_t recv_waiters; /* parked on `recv`: channel was empty */
+    rt_chan_wqueue_t send_waiters; /* parked on `send`: channel was full */
 };
 
 static void chan_drop(Obj *o) {
     Chan *c = (Chan *)o;
     pthread_mutex_destroy(&c->lock);
-    pthread_cond_destroy(&c->not_empty);
-    pthread_cond_destroy(&c->not_full);
     free(c->buf);
+    /* Channels are immortal (rt_chan_new's own comment below), so in
+     * practice this never runs with a live waiter on either queue -- a
+     * process exits by waiting for every green thread to finish first
+     * (rt_run_program), and a finished green thread cannot still be parked.
+     * Freed defensively anyway, so this function has no hidden dependency
+     * on that always being true. */
+    rt_chan_waiter_t *n;
+    n = wq_drain(&c->recv_waiters);
+    while (n != NULL) { rt_chan_waiter_t *next = n->next; free(n); n = next; }
+    n = wq_drain(&c->send_waiters);
+    while (n != NULL) { rt_chan_waiter_t *next = n->next; free(n); n = next; }
 }
 
 static const TypeInfo rt_chan_type = { chan_drop, NULL, NULL, NULL, NULL,
@@ -1984,16 +2206,38 @@ Chan *rt_chan_new(int64_t capacity) {
     c->len = 0;
     c->head = 0;
     c->closed = false;
+    c->recv_waiters.head = c->recv_waiters.tail = NULL;
+    c->send_waiters.head = c->send_waiters.tail = NULL;
     pthread_mutex_init(&c->lock, NULL);
-    pthread_cond_init(&c->not_empty, NULL);
-    pthread_cond_init(&c->not_full, NULL);
     return c;
 }
+
+/* send/recv below both follow the same shape: lock, loop while the channel
+ * cannot satisfy this call yet, enqueue THIS green thread's own id on the
+ * relevant waiter queue, unlock, park, relock, recheck. The enqueue happens
+ * BEFORE the unlock, which is what closes the lost-wakeup race: the id is
+ * findable by the other side (under the same lock) from the moment it is
+ * queued, so a send/recv on the other end that runs in the gap between this
+ * thread's unlock and its own rt_sched_park call will already find this id
+ * in the queue, pop it, and call rt_sched_unpark for it -- and
+ * rt_sched_unpark is documented safe to call at any point relative to the
+ * matching rt_sched_park, including before it (scheduler.h's "park/unpark"
+ * section). The `while`, not `if`, is still needed even though wakes are
+ * targeted rather than broadcast: the lock is released between "someone
+ * freed a slot" and "this thread actually runs again", during which a
+ * THIRD, never-parked green thread can walk straight in and take the slot
+ * first (ordinary lock contention, not a flaw in the wake protocol), so the
+ * condition is rechecked and the thread re-queues itself if it lost that
+ * race -- the same reason a condvar wait is always written in a loop. */
 
 void rt_chan_send(Chan *c, int64_t slot) {
     pthread_mutex_lock(&c->lock);
     while (c->len == c->cap && !c->closed) {
-        pthread_cond_wait(&c->not_full, &c->lock);
+        uint32_t my_id = rt_sched_current_green_id();
+        wq_push(&c->send_waiters, my_id);
+        pthread_mutex_unlock(&c->lock);
+        rt_sched_park(RT_GT_PARKED_CHAN);
+        pthread_mutex_lock(&c->lock);
     }
     if (c->closed) {
         pthread_mutex_unlock(&c->lock);
@@ -2001,14 +2245,20 @@ void rt_chan_send(Chan *c, int64_t slot) {
     }
     c->buf[(c->head + c->len) % c->cap] = slot;
     c->len++;
-    pthread_cond_signal(&c->not_empty);
+    uint32_t wake_id;
+    bool woke = wq_pop(&c->recv_waiters, &wake_id);
     pthread_mutex_unlock(&c->lock);
+    if (woke) rt_sched_unpark(rt_global_scheduler(), wake_id);
 }
 
 int64_t rt_chan_recv(Chan *c) {
     pthread_mutex_lock(&c->lock);
     while (c->len == 0 && !c->closed) {
-        pthread_cond_wait(&c->not_empty, &c->lock);
+        uint32_t my_id = rt_sched_current_green_id();
+        wq_push(&c->recv_waiters, my_id);
+        pthread_mutex_unlock(&c->lock);
+        rt_sched_park(RT_GT_PARKED_CHAN);
+        pthread_mutex_lock(&c->lock);
     }
     if (c->len == 0) {
         pthread_mutex_unlock(&c->lock);
@@ -2017,66 +2267,114 @@ int64_t rt_chan_recv(Chan *c) {
     int64_t v = c->buf[c->head];
     c->head = (c->head + 1) % c->cap;
     c->len--;
-    pthread_cond_signal(&c->not_full);
+    uint32_t wake_id;
+    bool woke = wq_pop(&c->send_waiters, &wake_id);
     pthread_mutex_unlock(&c->lock);
+    if (woke) rt_sched_unpark(rt_global_scheduler(), wake_id);
     return v;
 }
 
 void rt_chan_close(Chan *c) {
     pthread_mutex_lock(&c->lock);
     c->closed = true;
-    pthread_cond_broadcast(&c->not_empty);
-    pthread_cond_broadcast(&c->not_full);
+    /* Every waiter on both queues must wake -- closing flips `!c->closed` to
+     * false for everyone's loop condition, regardless of how much room or
+     * data there is -- so this is rt_sched_unpark called once per waiter,
+     * not the single targeted wake send/recv do. Detached under the lock,
+     * walked and unparked after releasing it, same shape as everywhere
+     * else here. */
+    rt_chan_waiter_t *recv_list = wq_drain(&c->recv_waiters);
+    rt_chan_waiter_t *send_list = wq_drain(&c->send_waiters);
     pthread_mutex_unlock(&c->lock);
+
+    rt_scheduler_t *s = rt_global_scheduler();
+    while (recv_list != NULL) {
+        rt_chan_waiter_t *next = recv_list->next;
+        rt_sched_unpark(s, recv_list->id);
+        free(recv_list);
+        recv_list = next;
+    }
+    while (send_list != NULL) {
+        rt_chan_waiter_t *next = send_list->next;
+        rt_sched_unpark(s, send_list->id);
+        free(send_list);
+        send_list = next;
+    }
 }
 
 void rt_chan_drop(Chan *c) {
     rc_dec((Obj *)c);
 }
 
-/* Spawned threads are tracked so the program can wait for them. A fixed
- * table keeps this dependency-free; exceeding it is a trap rather than a
- * silent drop, because a lost thread is a lost result. */
-#define RT_MAX_THREADS 1024
-static pthread_t   rt_threads[RT_MAX_THREADS];
-static int         rt_nthreads = 0;
-static pthread_mutex_t rt_threads_lock = PTHREAD_MUTEX_INITIALIZER;
-
-/* The handle and the count are published TOGETHER, under the lock.
- *
- * Reserving the slot first and writing the handle after unlocking made the
- * count say a thread existed before its handle did, so rt_wait_all could
- * join a slot that was still zero. ThreadSanitizer found the race on the
- * counter; the join was the part that mattered. */
-void rt_spawn(void *(*entry)(void *), void *arg) {
-    pthread_t t;
-    if (pthread_create(&t, NULL, entry, arg) != 0) {
-        rt_trap("could not spawn a thread");
-    }
-    pthread_mutex_lock(&rt_threads_lock);
-    if (rt_nthreads >= RT_MAX_THREADS) {
-        pthread_mutex_unlock(&rt_threads_lock);
-        rt_trap("too many spawned threads");
-    }
-    rt_threads[rt_nthreads++] = t;
-    pthread_mutex_unlock(&rt_threads_lock);
+/* `arg`'s cast through `void *` and back is the one place this file relies
+ * on the POSIX guarantee (not quite ISO C, but universal in practice --
+ * `dlsym` depends on the same thing) that a function pointer round-trips
+ * through `void *` unchanged; greenthread.h's rt_ctx_make already smuggles
+ * `entry`/`arg` through raw registers for the identical reason, so this is
+ * not a new kind of assumption for this runtime to make. */
+static void rt_main_trampoline(void *argp) {
+    void (*entry)(void) = (void (*)(void))(uintptr_t)argp;
+    entry();
 }
 
-/* A spawned thread may spawn more, so the count is re-read after each pass
- * rather than snapshotted once. The lock is released before joining: a
- * thread that spawns while we hold it would otherwise deadlock. */
-void rt_wait_all(void) {
-    int joined = 0;
-    for (;;) {
-        pthread_mutex_lock(&rt_threads_lock);
-        int n = rt_nthreads;
-        pthread_mutex_unlock(&rt_threads_lock);
-        if (joined >= n) return;
-        for (int i = joined; i < n; i++) {
-            pthread_join(rt_threads[i], NULL);
-        }
-        joined = n;
+void rt_run_program(void (*entry)(void)) {
+    rt_scheduler_t *s = rt_global_scheduler();
+    rt_sched_spawn(s, rt_main_trampoline, (void *)(uintptr_t)entry);
+
+    /* Wait for `entry` and everything it (transitively) spawns to finish.
+     * "spawned count caught up with completed count" is an exact
+     * quiescence signal here, not an approximation: the moment the two are
+     * equal, EVERY green thread ever spawned by this scheduler has reached
+     * RT_GT_DEAD, including green thread 0 running `entry` -- and a dead
+     * green thread cannot spawn, so no new spawn can appear after that
+     * instant without one already having been counted (whatever spawned it
+     * was itself still live, hence not yet counted as completed, hence
+     * spawned > completed at that moment). So there is no race between
+     * observing equality and some other thread incrementing `spawned`
+     * again a moment later: equality is a stable fixed point once reached.
+     *
+     * This also means a program that deadlocks -- a channel recv with
+     * nobody left to send, the same case that hung a `pthread_join` forever
+     * under the old OS-thread `spawn` -- hangs here forever too, which is
+     * the same observable behaviour as before, not a regression: this loop
+     * is the direct replacement for rt_wait_all's blocking joins, and it
+     * is deliberately not a busy spin -- a short sleep between checks costs
+     * nothing a program running real work would notice, and this is the
+     * only place in a compiled program's life that ever polls it. */
+    while (rt_sched_completed(s) < rt_sched_spawned(s)) {
+        struct timespec ts;
+        ts.tv_sec = 0;
+        ts.tv_nsec = 1000 * 1000; /* 1ms */
+        nanosleep(&ts, NULL);
     }
+
+    rt_sched_shutdown(s);
+    /* Stop and join the reactor thread (if `net` ever started one) BEFORE
+     * rt_sched_destroy frees anything it could still touch. The reactor
+     * thread is not one of the carriers rt_sched_shutdown above already
+     * joined -- it is a separate OS thread (runtime/reactor.c) that calls
+     * back into THIS scheduler, via rt_sched_unpark, every time epoll_wait
+     * reports a ready fd. Without this call, that thread keeps running
+     * (rt_reactor_destroy was never invoked anywhere else in this runtime)
+     * right through rt_sched_destroy's pthread_mutex_destroy/free calls
+     * below: a real event on any still-registered fd -- plausible even this
+     * late, since a peer's last FIN/RST can arrive concurrently with this
+     * process's own exit -- makes reactor_loop dereference `r->sched` and
+     * touch `s->registry.lock`/`s->global`/`s->carriers[...]`, all freed or
+     * about to be freed out from under it: a genuine TSan-confirmed
+     * data race between the main thread inside rt_sched_destroy and the
+     * reactor thread inside rt_sched_unpark (docs/concurrency-decision.md,
+     * "Phase 3.5"). Ordered after rt_sched_shutdown (every carrier is
+     * already stopped, so nothing else can still be pushing work the
+     * reactor's own wakeups would need a live carrier to drain) and before
+     * rt_sched_destroy (so the reactor thread has fully exited before any
+     * of the memory it reads is freed). */
+    rt_global_reactor_destroy_if_created();
+    rt_sched_destroy(s);
+}
+
+void rt_spawn(void (*entry)(void *), void *arg) {
+    rt_sched_spawn(rt_global_scheduler(), entry, arg);
 }
 
 /* Flush stdout first so anything already printed is not lost behind the trap
@@ -2510,6 +2808,22 @@ _Noreturn void rt_trap(const char *msg) {
  * (runtime/greenthread.h). */
 _Thread_local uintptr_t rt_stack_limit = 0;
 
+/* `noinline` is declared on the rt.h prototype and repeated here -- see
+ * rt_stack_limit's own comment in rt.h for exactly which bug this prevents.
+ * A real, separate function call, so every call site gets a fresh
+ * `%fs`-relative read of rt_stack_limit's address with nothing for the
+ * optimiser to cache across: the caller never emits a TLS access of its own
+ * to hoist in the first place. `local`'s address stands in for the caller's
+ * current stack depth the same way the old inlined version's did -- one
+ * real call frame deeper, which only ever makes the check more
+ * conservative, never less. */
+__attribute__((noinline)) void rt_stack_check(void) {
+    int local;
+    if ((uintptr_t)&local < rt_stack_limit) {
+        rt_stack_probe_slow();
+    }
+}
+
 void rt_stack_probe_slow(void) {
     if (rt_stack_limit == RT_STACK_LIMIT_POISON) {
         /* Phase 2 stub -- deliberately not implemented. The eventual design
@@ -2765,8 +3079,9 @@ _Noreturn void rt_exit(int64_t code) {
 }
 
 /* Starts `argv` as a child process (lib/os.m31's os.run) -- not to be
- * confused with `spawn`, a pthread inside this process (rt_spawn, above);
- * sys.h's "process launch" section says why the two stay apart by name.
+ * confused with `spawn`, a green thread inside this process (rt_spawn,
+ * above); sys.h's "process launch" section says why the two stay apart by
+ * name.
  *
  * `argv` is built into a malloc'd, NUL-terminated char* array here rather
  * than read element by element inside the layer, for the reason rt_poll's
@@ -3147,6 +3462,115 @@ int64_t rt_resolve(Obj *host, int64_t port, int64_t family, Obj *out, Obj *addrs
  * or the accept next to it. */
 int64_t rt_ignore_sigpipe(void) {
     return sys_ignore_sigpipe();
+}
+
+/* The seam lib/net.src uses to wait for a non-blocking socket instead of
+ * blocking the carrier OS thread on the syscall itself (docs/
+ * concurrency-decision.md's whole point for Phase 3's reactor). `events` is
+ * RT_REACTOR_READ/RT_REACTOR_WRITE (runtime/reactor.h), OR'd -- lib/net.src
+ * names its own constants with the same values (IO_READABLE/IO_WRITABLE)
+ * rather than reusing POLL_IN/POLL_OUT, which are a different, unrelated
+ * bit encoding (the kernel's poll(2) bits) that this primitive has nothing
+ * to do with.
+ *
+ * Unlike `__poll`, this can never itself fail with a value the caller must
+ * check: it parks the calling green thread (rt_reactor_wait ->
+ * rt_sched_park) until `fd` is ready, and traps only for a genuine caller
+ * bug (an invalid `fd`, or calling this from outside a green thread) --
+ * which is exactly why lib/net.src uses it only for the UNBOUNDED wait (no
+ * read/write timeout set): there is no way for it to report "gave up after
+ * N ms", which is what makes it wrong for the bounded case. The bounded
+ * case keeps using `__poll` with a timeout, exactly as it already did
+ * (`net.Conn.fill`/`write`/`write_some`, lib/net.src) -- see that file for
+ * the reasoning this split is built on.
+ *
+ * Always 0: there is nothing to report back; the fd is ready when this
+ * returns, full stop. A prim still needs a return type, and `int` rather
+ * than `void` keeps it uniform with every other primitive in this module.
+ *
+ * THE rt_enter_blocking/rt_exit_blocking PAIR THIS FUNCTION UNDOES AND
+ * RE-ARMS INTERNALLY, AND WHY -- a real, reproducible bug found and fixed
+ * while building this, serious enough to document in full:
+ *
+ * src/emit_c.rs wraps EVERY `prim` call site in rt_enter_blocking()/
+ * rt_exit_blocking() unconditionally (docs/concurrency-decision.md,
+ * "Blocking FFI") -- `__wait_io` is a `prim` like any other, so the
+ * compiler emits `rt_enter_blocking(); v = rt_wait_io(...); rt_exit_
+ * blocking();` at every call site, with no way yet to mark one primitive
+ * as different (the compiler's own warning about this says so). That
+ * wrapping is correct for a genuine blocking syscall: it marks the calling
+ * carrier as stuck, so the blocking-FFI monitor (scheduler.c) can rescue
+ * the OTHER green threads queued on that same carrier by moving them to
+ * another one. But the monitor's safety argument for doing that
+ * (scheduler.h, "Blocking-FFI handoff") rests entirely on one invariant:
+ * the carrier is PROVABLY stuck, meaning its own OS thread is not
+ * concurrently touching its own local buffer at all for as long as
+ * blocking_since_ns stays set. That is true for a real blocking syscall
+ * (the OS thread is inside the kernel, doing nothing else) and FALSE here:
+ * rt_reactor_wait parks the GREEN THREAD via rt_sched_park, which
+ * immediately switches the CARRIER back to its own ordinary dispatch loop
+ * -- carrier_main, drawing and dispatching from `c->local` with no lock,
+ * BY DESIGN, because nothing is supposed to be touching it concurrently.
+ * The carrier is genuinely free and busy with other work for the whole
+ * real-world duration of the park (which can be long -- waiting on a slow
+ * peer), while the compiler's own rt_enter_blocking(), made just before
+ * entering this function, has already told the monitor the opposite.
+ *
+ * Worse: the matching rt_exit_blocking() the compiler emits AFTER this
+ * call returns runs on WHICHEVER carrier the green thread happens to
+ * RESUME on -- which rt_sched_park's own contract explicitly allows to be
+ * a DIFFERENT carrier than the one that called rt_enter_blocking
+ * (scheduler.h: "a parked thread CAN resume on a different carrier than
+ * before"). So the ORIGINAL carrier's blocking_since_ns can be left set
+ * FOREVER: nothing on that carrier's own thread ever clears it, because
+ * the green thread that would have cleared it is not coming back there.
+ * That carrier then looks permanently stuck to the monitor, which
+ * repeatedly calls try_handoff on it -- concurrently mutating
+ * `c->local`/`local_head`/`local_len` under `c->local_lock` WHILE that
+ * carrier's own OS thread is ALSO concurrently reading and writing the
+ * exact same fields with no lock in its ordinary carrier_main loop,
+ * because nothing was ever supposed to be racing it there.
+ *
+ * That is a genuine, unsynchronized data race on a carrier's own run
+ * queue -- found directly, empirically, not merely suspected: reproducible
+ * well over half the time with as few as 2 carriers and ~10 concurrent
+ * real socket connections, manifesting as green threads dispatched through
+ * a corrupted `rt_green_t *` and promptly hitting the stack probe at a
+ * laughably shallow call depth (confirmed with gdb: several carriers
+ * simultaneously faulting inside `Conn.close`, 3-4 frames into a fresh
+ * green thread, with rt_stack_limit and the stack pointer both looking
+ * individually sane). Never reachable through `Chan`: `send`/`recv` are
+ * compiler intrinsics, not `prim` calls, so they never touch
+ * rt_enter_blocking/rt_exit_blocking at all, which is also why corpus/
+ * core's 1303/1304 (hundreds of green threads contending on a `Chan`) never
+ * hit this, while real concurrent socket I/O did.
+ *
+ * THE FIX, entirely local to this function, not touching scheduler.c:
+ * immediately undo the compiler's own rt_enter_blocking() on entry (this
+ * call is not a real blocking syscall, so the carrier should never have
+ * been marked stuck for it), and re-arm it immediately before returning,
+ * so the compiler's own trailing rt_exit_blocking() has a freshly-set,
+ * correctly-paired, near-instantaneous window to clear -- on whichever
+ * carrier this green thread actually resumes on, which is exactly where
+ * that bracket belongs. rt_enter_blocking/rt_exit_blocking are plain,
+ * idempotent, counter-free timestamp sets/clears (see their own
+ * definitions above this function's net-primitives section) -- calling
+ * them an extra, nested time each is explicitly safe by their own
+ * contract, not a hack. */
+int64_t rt_wait_io(int64_t fd, int64_t events) {
+    /* See this function's own doc comment above for the full account of
+     * why this exit/enter pair is here: it is not optional and not a
+     * stylistic choice. In short: the compiler already wrapped this call
+     * in rt_enter_blocking()/rt_exit_blocking() (it is a `prim`), which is
+     * wrong for THIS primitive specifically -- it parks the green thread
+     * rather than genuinely blocking the carrier, so the carrier must not
+     * be reported stuck for the park's duration, or the blocking-FFI
+     * monitor can race the carrier's own unsynchronized local-buffer
+     * access (a real, reproduced bug: see the comment above). */
+    rt_exit_blocking();
+    rt_reactor_wait(rt_global_reactor(), (int)fd, (uint32_t)events);
+    rt_enter_blocking();
+    return 0;
 }
 /* ---- end net primitives ------------------------------------------------ */
 

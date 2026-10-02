@@ -36,28 +36,32 @@
  *      confirming those siblings complete via the backup carrier WHILE the
  *      blocker is still asleep, rather than stalling behind it.
  *
- * A note on carrier counts, up front, so it is not a surprise further down:
- * test_park_unpark_race and test_reactor_real_pipe_wakeup both deliberately
- * drop to a SINGLE carrier specifically when this file is built with
- * ThreadSanitizer (RT_PHASE3_TSAN_BUILD, defined just below from the
- * portable __SANITIZE_THREAD__/__has_feature(thread_sanitizer) detection),
- * and use several otherwise. This was not the original design -- see
- * test_park_unpark_race's own trailing comment, right after it, for the
- * full, honest account of why, backed by a direct investigation this
- * project's own TSan gate triggered (a crash inside ThreadSanitizer's own
- * internal runtime, not inside any function this project defines, tied
- * specifically to a green thread being resumed by a DIFFERENT carrier than
- * the one that parked it -- new, correct, load-bearing park/unpark
- * behaviour this test would otherwise be the first thing in this project
- * to exercise at volume). Cross-carrier correctness is exercised at FULL
- * strength -- several carriers, not one -- by every plain and ASan+UBSan
- * build of this exact file, which have shown zero memory-safety failures
- * of any kind across many runs during development; only the TSan build
- * narrows to one carrier, and only for these two tests.
- * test_blocking_ffi_handoff genuinely needs two carriers unconditionally
- * (one gets stuck, the other is the backup) and keeps them in every build,
- * TSan included; it does not hit this issue, for reasons also explained
- * where it is used.
+ * A note on carrier counts, up front, in case the git history around this
+ * comment is confusing: test_park_unpark_race and test_reactor_real_pipe_
+ * wakeup used to drop to a SINGLE carrier specifically when this file was
+ * built with ThreadSanitizer -- a mitigation for a TSan-only gap (docs/
+ * concurrency-decision.md, "Known gap", now marked closed), NOT a
+ * correctness requirement of the tests themselves. The gap: TSan's own
+ * internal stack-trace bookkeeping intermittently crashed (never a real
+ * race report, never inside any function this project defines) when a
+ * green thread was suspended by one carrier OS thread and resumed by a
+ * different one, purely because nothing told TSan that the OS thread doing
+ * the resuming was now running a different logical thread of execution on
+ * a different stack. The real fix -- ThreadSanitizer's own documented
+ * fiber-switch interface, `__tsan_create_fiber`/`__tsan_destroy_fiber`/
+ * `__tsan_switch_to_fiber`, used exactly as that API intends in runtime/
+ * greenthread.c (stack alloc/free) and runtime/scheduler.c (every
+ * rt_fiber_switch call site) -- is in place now, and both tests run at
+ * their original, unnarrowed carrier counts (4 and 2) in every build,
+ * TSan included. See greenthread.h's "A note on ThreadSanitizer" comment
+ * for the full account of the fix, and docs/concurrency-decision.md's
+ * "Known gap" entry for its verification (100+ consecutive clean runs of
+ * this exact file at these exact carrier counts under TSan, zero
+ * recurrences of the internal crash, zero new false-positive race
+ * reports). test_blocking_ffi_handoff genuinely needs two carriers
+ * unconditionally (one gets stuck, the other is the backup) and always
+ * had them, in every build; it never hit this gap in the first place, for
+ * reasons also explained where it is used.
  */
 #include "reactor.h"
 #include "rt.h"
@@ -76,25 +80,6 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-
-/* Portable "is this binary built with ThreadSanitizer" detection -- gcc
- * defines __SANITIZE_THREAD__ directly; clang instead exposes
- * __has_feature(thread_sanitizer). Used below to pick a carrier count: see
- * test_park_unpark_race's own trailing comment for exactly why TSan needs
- * fewer carriers here than every other build of this same file. Kept to
- * the minimum needed (not >1) rather than widened further, so a plain or
- * ASan+UBSan build still exercises genuine cross-carrier park/unpark
- * resumption at full strength. */
-#if defined(__SANITIZE_THREAD__)
-#define RT_PHASE3_TSAN_BUILD 1
-#elif defined(__has_feature)
-#if __has_feature(thread_sanitizer)
-#define RT_PHASE3_TSAN_BUILD 1
-#endif
-#endif
-#ifndef RT_PHASE3_TSAN_BUILD
-#define RT_PHASE3_TSAN_BUILD 0
-#endif
 
 static int checks = 0;
 static int failures = 0;
@@ -322,10 +307,10 @@ static bool run_one_race_trial(rt_scheduler_t *s, unparker_pool_t *pool,
 }
 
 static void test_park_unpark_race(void) {
-    /* ONE carrier under TSan, several otherwise -- deliberately. See this
-     * function's own closing comment (right after the trial loop below)
-     * for the full account of why. */
-    rt_scheduler_t *s = rt_sched_create(RT_PHASE3_TSAN_BUILD ? 1 : 4);
+    /* Four carriers, in every build, TSan included -- see this function's
+     * own closing comment (right after the trial loop below) for why this
+     * used to be narrowed to one under TSan and no longer is. */
+    rt_scheduler_t *s = rt_sched_create(4);
     unparker_pool_t pool;
     unparker_pool_start(&pool, s);
 
@@ -361,8 +346,10 @@ static void test_park_unpark_race(void) {
     rt_sched_destroy(s);
 }
 
-/* Why RT_PHASE3_TSAN_BUILD narrows this to 1 carrier (and only under TSan)
- * -- the honest account.
+/* Why this test USED TO narrow to 1 carrier under TSan, and does not
+ * anymore -- the honest account, kept in full because the investigation
+ * that found the real fix (see this comment's own last paragraph) is worth
+ * more to the next person than a shorter, fix-only version would be.
  *
  * An earlier version of this test unconditionally used 4 carriers, on the
  * reasoning that a real multi-core scheduler should be tested as one. That
@@ -409,16 +396,27 @@ static void test_park_unpark_race(void) {
  * lifecycles are involved) showed the identical TSan-internal crash
  * signature before it was given the same narrowing.
  *
- * This is disclosed here, in the code, rather than only in this project's
- * own report, because the next person touching this file deserves to know
- * why it looks the way it does without having to redo the investigation.
- * The honest, likely real fix is implementing ThreadSanitizer's own fiber-
- * switch annotations (__tsan_create_fiber / __tsan_switch_to_fiber) in
- * runtime/ctx_switch_x86_64.s -- the same class of gap already disclosed
- * for AddressSanitizer in runtime/greenthread.h's own header comment, just
- * surfacing as a hard crash here instead of a benign warning. That is real,
- * scoped follow-up work on a Phase 1 file this phase deliberately does not
- * touch, not a one-line fix available within this phase's own scope. */
+ * This was disclosed here, in the code, rather than only in this project's
+ * own report, because the next person touching this file deserved to know
+ * why it looked the way it did without having to redo the investigation.
+ *
+ * **Follow-up: the real fix is now in, and this test is unnarrowed.**
+ * ThreadSanitizer's own documented fiber-switch interface --
+ * `__tsan_create_fiber`/`__tsan_destroy_fiber` (runtime/greenthread.c,
+ * rt_stack_alloc/rt_stack_free) and `__tsan_switch_to_fiber` (runtime/
+ * scheduler.c, around every rt_fiber_switch call site) -- tells TSan
+ * explicitly what it was never being told before: that control is now
+ * running a different logical thread of execution, on a different stack.
+ * See greenthread.h's "A note on ThreadSanitizer" comment for the full
+ * mechanism and why it does not have the asymmetric-API problem the
+ * AddressSanitizer note above ran into, and docs/concurrency-decision.md's
+ * "Known gap" entry (now closed) for the verification: 100+ consecutive
+ * runs of this exact file at this exact carrier count (4) under TSan,
+ * zero recurrences of the internal crash, zero new false-positive race
+ * reports. Implemented in runtime/greenthread.c/greenthread.h and
+ * runtime/scheduler.c, not runtime/ctx_switch_x86_64.s -- the asm itself
+ * (rt_ctx_switch) still knows nothing above the raw ABI, exactly as
+ * designed; the annotation calls bracket it from the C side instead. */
 
 /* ========================================================================
  * Test 2 -- a real epoll wakeup, over a real pipe, with real OS timing.
@@ -452,15 +450,14 @@ static void reactor_read_worker(void *argp) {
 }
 
 static void test_reactor_real_pipe_wakeup(void) {
-    /* ONE carrier under TSan, two otherwise -- see test_park_unpark_race's
-     * trailing comment for the full account (this test exercises the
-     * identical "parked by one carrier, resumed by another" pattern via
-     * rt_reactor_wait, just at far lower volume, where it showed the same
-     * TSan-internal crash signature far less often but not never).
-     * Cross-carrier correctness for an rt_reactor_wait-parked thread is
-     * exercised at full strength by every plain and ASan+UBSan build of
-     * this exact file, which keep n_carriers at 2 here. */
-    rt_scheduler_t *s = rt_sched_create(RT_PHASE3_TSAN_BUILD ? 1 : 2);
+    /* Two carriers, in every build, TSan included -- see
+     * test_park_unpark_race's trailing comment for the full account (this
+     * test exercises the identical "parked by one carrier, resumed by
+     * another" pattern via rt_reactor_wait, just at far lower volume,
+     * where it used to show the same TSan-internal crash signature far
+     * less often but not never, before the fiber annotations closed the
+     * gap). */
+    rt_scheduler_t *s = rt_sched_create(2);
     rt_reactor_t *r = rt_reactor_create(s);
 
     const int trials = 8;

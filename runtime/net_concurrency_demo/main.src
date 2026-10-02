@@ -1,0 +1,110 @@
+import net;
+import io;
+
+// N real TCP connections to one local listener, all at once, each its own
+// `spawn`ed green thread on both ends (a server-side accept loop spawning
+// one handler per connection, and N independent client green threads) --
+// proving that real socket I/O through the reactor (lib/net.src's
+// non-blocking sockets, `__wait_io`) does not serialize on a carrier the
+// way a blocking `read`/`write`/`accept`/`connect` would.
+//
+// Every connection does a full round trip (write, read the echo back,
+// check it matches byte for byte) so a bug that crossed wires between two
+// connections -- the reactor waking the wrong green thread for a ready fd,
+// say -- would show up as a mismatch, not just a slow or missing one.
+// Run under a small, explicit LANG_NUM_CARRIERS by the dedicated
+// concurrency test script (not this ordinary corpus run), the same way
+// corpus/core's 1303/1304 test `Chan` contention: if a parked green thread
+// blocked its carrier instead of freeing it, N connections on a handful of
+// carriers would not merely be slow, several of them would never even be
+// accepted, because the accept loop itself needs a carrier turn.
+
+const int N = 200;
+
+void handler(net.Conn c) {
+    match (c.read_until([10], 256)) {
+        case Ok(bytes line): {
+            match (c.write(line)) {
+                case Ok(int n): {
+                }
+                case Err(io.Error e): {
+                    trap("handler write: " + e.to_str());
+                }
+            }
+        }
+        case Err(io.Error e): {
+            trap("handler read: " + e.to_str());
+        }
+    }
+    Result<bool, io.Error> closed = c.close();
+}
+
+void serve(net.Listener ln, int n) {
+    int i = 0;
+    while (i < n) {
+        match (ln.accept()) {
+            case Ok(net.Conn c): {
+                spawn handler(c);
+            }
+            case Err(net.Error e): {
+                trap("accept: " + e.to_str());
+            }
+        }
+        i = i + 1;
+    }
+    Result<bool, net.Error> closed = ln.close();
+}
+
+void client(int id, int port, Chan<int> results) {
+    match (net.connect("127.0.0.1", port)) {
+        case Ok(net.Conn c): {
+            bytes line = (id.to_str() + "\n").to_bytes();
+            match (c.write(line)) {
+                case Ok(int n): {
+                }
+                case Err(io.Error e): {
+                    trap("client write: " + e.to_str());
+                }
+            }
+            match (c.read_until([10], 256)) {
+                case Ok(bytes echoed): {
+                    if (echoed.utf8().or("?") == id.to_str() + "\n") {
+                        send(results, 1);
+                    } else {
+                        send(results, 0);
+                    }
+                }
+                case Err(io.Error e): {
+                    trap("client read: " + e.to_str());
+                }
+            }
+            Result<bool, io.Error> closed = c.close();
+        }
+        case Err(net.Error e): {
+            trap("connect: " + e.to_str());
+        }
+    }
+}
+
+match (net.listen("127.0.0.1", 0)) {
+    case Ok(net.Listener ln): {
+        int port = ln.local().port();
+        Chan<int> results = Chan<int>(N);
+        spawn serve(ln, N);
+        int i = 0;
+        while (i < N) {
+            spawn client(i, port, results);
+            i = i + 1;
+        }
+        int sum = 0;
+        i = 0;
+        while (i < N) {
+            sum = sum + recv(results);
+            i = i + 1;
+        }
+        print(sum);
+    }
+    case Err(net.Error e): {
+        trap("listen: " + e.to_str());
+    }
+}

@@ -15,6 +15,7 @@
 # Run from the repository root, with the compiler built (`cargo build`).
 set -uo pipefail
 cd "$(dirname "$0")/../.."
+. ./runtime/arch.sh
 
 LANGC=./target/debug/m31c
 WORK=$(mktemp -d)
@@ -31,7 +32,9 @@ build() {
         bad "compile $name" "$(head -5 "$WORK/$name.diag")"
         return 1
     fi
-    if ! cc -O2 -Wall -Wextra -I runtime -pthread -o "$WORK/$name" "$WORK/$name.c" runtime/rt.c 2>"$WORK/$name.cc"; then
+    if ! cc -O2 -Wall -Wextra -I runtime -pthread -o "$WORK/$name" "$WORK/$name.c" \
+           runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" \
+           2>"$WORK/$name.cc"; then
         bad "cc $name" "$(head -5 "$WORK/$name.cc")"
         return 1
     fi

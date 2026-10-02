@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tests for Phase 3 of docs/concurrency-decision.md: epoll reactor,
 # park/unpark, blocking-FFI handoff (runtime/scheduler.c/.h's additive Phase
-# 3 surface, runtime/reactor.c/.h). Built on the Phase 2 scheduler and Phase
+# 3 surface, runtime/reactor.h). Built on the Phase 2 scheduler and Phase
 # 1's primitives, exactly mirroring runtime/scheduler_test.sh's own shape:
 # build runtime/phase3_test.c against every compiler/opt combination
 # gates.sh already checks the runtime with, run it, and additionally run
@@ -13,6 +13,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 . ./config.sh
+. ./runtime/arch.sh
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -20,7 +21,7 @@ fail=0
 
 note() { printf '%-56s %s\n' "$1" "$2"; }
 
-SRCS="runtime/phase3_test.c runtime/scheduler.c runtime/reactor.c runtime/rt.c runtime/ctx_switch_x86_64.s"
+SRCS="runtime/phase3_test.c runtime/scheduler.c "$RT_REACTOR_C" runtime/rt.c $RT_CTX_ASM"
 
 for cc in gcc clang; do
     command -v "$cc" >/dev/null || continue

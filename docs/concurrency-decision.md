@@ -479,7 +479,7 @@ of it in C in 2012.
       tested (`runtime/greenthread.{h,c}`, `runtime/ctx_switch_x86_64.s`).
       x86-64 only; aarch64 is Phase 4.
 - [x] **Scheduler implementation, probe-based preemption** — Phase 2
-      (`runtime/scheduler.{h,c}`), standalone, not yet wired to `spawn`.
+      (`runtime/scheduler.{h,c}`).
 - [x] **epoll reactor, park/unpark** — Phase 3 (`runtime/reactor.{h,c}`,
       park/unpark surface added to `runtime/scheduler.{h,c}`). The 3-state
       textbook CAS design (EMPTY/PARKED/NOTIFIED) was tried and found to
@@ -494,17 +494,87 @@ of it in C in 2012.
       existing self-service draw path. The compile-time warning for an
       unannotated foreign call is a known-incomplete approximation (doesn't
       follow interface/virtual dispatch) — documented, not overclaimed.
+- [x] **`spawn`/`Chan`/`net` wired to the real scheduler — Phase 3.5,
+      wiring done, the critical race FIXED.** `spawn` always means a green
+      thread now, unconditionally, and the wiring itself (Chan's
+      multi-waiter park/unpark, net.src's non-blocking-plus-reactor
+      conversion) is complete and correct in isolation. Building and
+      stress-testing it surfaced a real, TSan-confirmed data race in the
+      PRE-EXISTING Phase 1/2 fiber-switching mechanism (`rt_stack_limit`),
+      reliably reproducible under genuine concurrent socket I/O across 2+
+      real carriers; after two inconclusive investigation sessions, a third
+      found the actual root cause (a compiler TLS-address-caching issue, not
+      a scheduler or context-switch bug) and fixed it — see "Phase 3.5"
+      below for the full account, the fix (`rt_stack_check`, `runtime/
+      rt.h`/`rt.c`/`src/emit_c.rs`), and its verification. A SEPARATE real
+      deadlock found along the way (`rt_sched_spawn`'s backpressure, below)
+      is also fully fixed. Two smaller, separate races found by the same
+      TSan runs — `try_handoff`/`carrier_main`'s unsynchronized touch of a
+      carrier's own local buffer, and a shutdown-ordering race in
+      `rt_sched_destroy` — are now ALSO both fixed; see "Phase 3.5" below
+      for both accounts in full.
 
-**Known gap, carried forward rather than fixed in Phase 3**: ThreadSanitizer
-itself intermittently segfaults (never a real race report, never in this
-project's code) when a green thread is suspended by one carrier and resumed
-by a different one under TSan specifically — the same class of gap already
-noted for ASan's fiber-switching above, just a hard crash here instead of a
-warning. Mitigated by narrowing the two affected tests to 1 carrier under
-TSan only; every plain build and the ASan/UBSan build exercise full
-multi-carrier counts with no issue. The real fix — `__tsan_switch_to_fiber`
-annotations in `ctx_switch_x86_64.s` — is real, scoped, not-yet-started
-follow-up work before this is fully hardened under every tool.
+**Known gap, carried forward rather than fixed in Phase 3 — now CLOSED.**
+ThreadSanitizer itself used to intermittently segfault (never a real race
+report, never in this project's code) when a green thread was suspended by
+one carrier and resumed by a different one under TSan specifically — the
+same class of gap already noted for ASan's fiber-switching above, just a
+hard crash here instead of a warning. Previously mitigated by narrowing the
+two affected tests (`phase3_test.c`'s `test_park_unpark_race` and
+`test_reactor_real_pipe_wakeup`) to 1 carrier under TSan only.
+
+**The fix**: ThreadSanitizer's own documented fiber-switch interface --
+`__tsan_create_fiber`/`__tsan_destroy_fiber` (called once per green-thread
+stack lease, in `runtime/greenthread.c`'s `rt_stack_alloc`/`rt_stack_free`)
+and `__tsan_switch_to_fiber` (called immediately before every
+`rt_fiber_switch` in `runtime/scheduler.c` -- `carrier_dispatch`,
+`rt_sched_yield`, `rt_sched_park`, `green_trampoline` -- naming whichever
+fiber identity, the green thread's own or the carrier's native one,
+execution is about to switch to) -- tells TSan explicitly what it was never
+being told before: that control is now a different logical thread of
+execution, on a different stack. All four symbols are declared behind the
+same portable `__SANITIZE_THREAD__`/`__has_feature(thread_sanitizer)` check
+this file's tests already use (see `runtime/greenthread.h`'s "A note on
+ThreadSanitizer" comment for the full mechanism), so every one of them --
+declarations, the `rt_stack_t` field holding each lease's fiber handle, and
+every call site -- compiles to nothing outside a TSan build. Deliberately
+NOT implemented in `ctx_switch_x86_64.s`: the annotations bracket
+`rt_fiber_switch` from the C side, so the hand-written asm context switch
+itself (`rt_ctx_switch`) is untouched, consistent with this project's
+standing rule about not touching that file half-confidently.
+
+**Verified**: `runtime/phase3_tsan.sh`, run at the ORIGINAL, unnarrowed
+carrier counts (4 for `test_park_unpark_race`, 2 for
+`test_reactor_real_pipe_wakeup`) -- 110 consecutive clean runs across two
+batches (60 + 50), zero TSan-internal crashes, zero new false-positive race
+reports, 4,950 checks total, 0 failures. Confirmed directly beforehand that
+the pre-fix code still reproduces the gap at these same unnarrowed counts
+(the un-narrowed binary hung inside a TSan-instrumented run, killed after
+~5 minutes with no completion -- consistent with the previously-documented
+SEGV-inside-TSan's-own-runtime signature, just manifesting as a hang rather
+than a clean crash on this host/compiler-rt combination). `runtime/
+scheduler_tsan.sh` (never narrowed in the first place -- its own tests
+never hit this gap): 60/60 clean runs post-fix, 120 checks each, 0
+failures, confirming the new thread-local fiber-identity bookkeeping in
+`scheduler.c` introduces no regression there. `runtime/
+spawn_wiring_tsan.sh`'s Chan tests (`corpus/core/1303`/`1304`) keep their
+own, separate `LANG_NUM_CARRIERS=1` mitigation for a gap of their own
+(documented in that script) -- out of scope for this fix and deliberately
+left as-is; its `net_concurrent_clients` report case was re-built and
+re-run in isolation (43 runs) and showed only the already-documented,
+unrelated `try_handoff`/`c->local_len` race or a clean exit, exactly as
+expected -- no new failure mode introduced.
+
+Ordinary (non-TSan) builds are unaffected by construction, not just by
+testing: every line this fix adds is behind `#if` on the same
+TSan-detection macro, so a plain or ASan+UBSan build preprocesses all of it
+away entirely. Confirmed directly: `runtime/rt.c` and `runtime/scheduler.c`
+both still compile warning-free under `gcc -O2 -Wall -Wextra`, and the full
+Phase 1/2/3 standalone suites (`runtime/greenthread_test.sh`, `runtime/
+scheduler_test.sh`, `runtime/phase3_test.sh` -- every compiler/opt
+combination each already covers, plus their own ASan+UBSan builds) pass
+clean, exercising the exact modified functions (`rt_stack_alloc`/`free`,
+`rt_fiber_switch`'s callers) under every one of those configurations.
 
 **Known v0 simplification: channels are immortal.** A channel must be
 reachable from several threads at once, so it is exempt from the move rule --
@@ -524,8 +594,7 @@ freed. A program creates few, so the leak is bounded by that count.
   point — see "Stacks: fixed, but not limited" above)
 - Byte-per-thread state table
 
-**Phase 2 — the scheduler itself. Done** (standalone, not yet wired to
-`spawn` — a deliberate, separate decision, not done here).
+**Phase 2 — the scheduler itself. Done.**
 - Per-carrier local buffers (a claimed batch of work, not a spawn landing
   spot)
 - Single shared queue; every spawn — local or external — routes through it
@@ -545,16 +614,630 @@ freed. A program creates few, so the leak is bounded by that count.
   otherwise ready to implement against.
 
 **Phase 3 — I/O integration. Done**, see Progress above for the one
-known, carried-forward TSan gap.
+TSan gap this phase carried forward (now closed -- see "Known gap, carried
+forward rather than fixed in Phase 3 — now CLOSED").
 - epoll reactor
 - park/unpark, closing the lost-wakeup race against netpoll (the CAS state
   machine flagged under "What this costs" above)
 - Blocking-FFI handoff (`enter_blocking`/`exit_blocking`, monitor thread,
   compile-time warning on unannotated foreign calls)
 
+**Phase 3.5 — wiring `spawn`/`Chan`/`net` to the real scheduler. Wiring
+done; the one critical bug found along the way is now FIXED — see the end
+of this section for the root cause, the fix, and its verification.**
+Phases 1-3 built the whole runtime standalone, exercised only by hand-written
+C test harnesses; this phase is what makes it real from a compiled `.src`
+program. `spawn` now always means a green thread (`rt_sched_spawn` on a
+process-wide scheduler, `runtime/rt.c`'s `rt_global_scheduler`) — never
+conditionally an OS thread, which would have reintroduced the uncoloured
+design's whole reason for existing. The program's own top level runs as
+green thread 0 (`rt_run_program`), not on the raw OS thread, so a
+`Chan`/`net` call made before any `spawn` has something to park against.
+
+- `Chan.send`/`recv` park instead of blocking their carrier
+  (`rt_sched_park`/`rt_sched_unpark`), with a FIFO linked-list queue per
+  channel for however many green threads are waiting to send or to receive
+  at once (plural matters — a condvar's wait queue did this for free under
+  OS-thread `spawn`; parking needs its own). `close` wakes every waiter on
+  both queues, not just one.
+- `lib/net.src`'s sockets are non-blocking from the moment they are made
+  (`SO_NONBLOCK`), and every wait that used to be the kernel blocking the
+  calling thread — a connect finishing, more to read, room to write, a
+  connection to accept — now goes through a new primitive, `__wait_io`,
+  that parks the calling green thread on the epoll reactor instead
+  (`rt_reactor_wait`). The one exception is a bounded wait: a
+  `set_read_timeout`/`set_write_timeout` deadline is honored with `__poll`
+  instead, because parking has no way to say "gave up after N ms" — SO_
+  RCVTIMEO/SNDTIMEO stopped being able to do this once the socket became
+  non-blocking (the kernel never waits long enough to time out), so this
+  module's own two fields (`read_timeout_ms`/`write_timeout_ms`) replaced it.
+- **A real deadlock was found, not merely a risk, and is now FIXED.**
+  `rt_sched_spawn`'s own backpressure (`scheduler.c`'s `squeue_push`, when
+  the shared queue is full) used to be a genuine OS-level
+  `pthread_cond_wait` on the calling thread, unconditionally — correct when
+  the caller is an ordinary OS thread (every Phase 2/3 test before this),
+  wrong the instant the caller is a green thread running on the only
+  carrier that could ever drain the queue: that carrier is now blocked
+  waiting on itself, forever. With `LANG_NUM_CARRIERS=1` and the default
+  queue capacity (64), spawning 300 workers in a tight loop from the top
+  level hung forever. Initially shipped as a raised default
+  `LANG_GLOBAL_QUEUE_CAP` (1,048,576) that only narrowed the window; that
+  mitigation is now replaced with the real fix: `squeue_push` asks
+  `tls_current_green` (via a small `rt_sched_in_green_thread` accessor)
+  whether its caller is a green thread. If so, it parks the calling green
+  thread (`rt_sched_park(RT_GT_PARKED_QUEUE)`) instead of blocking the
+  carrier — the exact same FIFO-waiter-queue-then-park shape `Chan.send`/
+  `recv` already use (`rt.c`), reimplemented locally in `scheduler.c`
+  (`rt_squeue_waiter_t`/`sqwq_push`/`sqwq_drain`) rather than shared across
+  the rt.c/scheduler.c layering boundary, matching this codebase's existing
+  per-layer-own-copy convention (reactor.c's waiter map does the same).
+  `squeue_draw`, which already frees room and broadcasts the OS-thread
+  condvar, now also drains and `rt_sched_unpark`s every green-thread waiter
+  whenever it draws anything — the green-thread-safe equivalent of that
+  broadcast, not a weaker guarantee (every waiter re-checks its own
+  `while (q->len == q->cap)` on resume, the same reason the broadcast was
+  already correct for the condvar side). The raised default queue capacity
+  is kept as a second line of defense (harmless, and it also helps batching),
+  but the hang it used to merely narrow no longer exists: verified with
+  `runtime/spawn_backpressure_demo/main.src` (300 spawns from the top level,
+  `LANG_NUM_CARRIERS=1`, `LANG_GLOBAL_QUEUE_CAP=4` so the cap is hit almost
+  immediately rather than only past a million) — hangs forever on the
+  pre-fix code (confirmed directly, `timeout` kills it), completes and
+  prints the correct sum on the fixed code, 40/40 consecutive runs clean at
+  1/2/4 carriers, and 15/15 clean under ThreadSanitizer at both 1 and 2
+  carriers (`runtime/spawn_backpressure_test.sh`). Not extended to
+  `squeue_push`'s other call sites (`carrier_dispatch`'s own post-dispatch
+  self-requeue, `try_handoff`'s handoff pushes) — those run with
+  `tls_current_green` already cleared (no green thread is "currently
+  running" by the time they execute, so there is nothing for
+  `rt_sched_park` to park), so the same fix shape does not apply directly;
+  they still rely on the raised queue capacity alone. Reaching the
+  equivalent hang through one of those paths needs a carrier's own local
+  buffer plus the shared queue both saturated at once, far past anything
+  this phase's own tests or the demo above exercise — a real, scoped,
+  smaller residual than the one this fix closes, not silently ignored.
+- [ ] **kqueue reactor for macOS/BSD — Phase 3.5 extension (pulled forward
+  from Phase 4's stub below, in parallel with the aarch64 context-switch
+  port). Built and statically reviewed; NOT YET VALIDATED ON REAL
+  HARDWARE.** `runtime/reactor.h`'s contract (`rt_reactor_create`/
+  `rt_reactor_wait`/`rt_reactor_destroy`, same park/unpark semantics) now
+  has two backends — `runtime/reactor_epoll.c` (Linux, the original Phase 3
+  file, renamed, behavior unchanged and reconfirmed by the full x86-64
+  regression suite below) and `runtime/reactor_kqueue.c` (macOS/BSD, new).
+  `runtime/arch.sh` picks between them per `uname -s`, the same shape it
+  already uses for the per-CPU-architecture context-switch file; every
+  build/test script that used to hard-code `runtime/reactor.c` now sources
+  `arch.sh` and uses `$RT_REACTOR_C` instead (~20 scripts). See
+  `runtime/reactor_kqueue.c`'s own top comment for the full epoll→kqueue
+  mapping and reasoning; the two points worth repeating here:
+  - **EPOLLONESHOT → EV_ONESHOT is not a transparent swap.** kqueue splits
+    read/write into independent per-filter knotes where epoll has one
+    combined per-fd registration, which creates a spurious-wakeup hazard a
+    line-for-line port would have introduced silently: one requested
+    direction firing does not disarm the other, so a stale sibling knote
+    can fire later and call `rt_sched_unpark` for a green_id that has moved
+    on to something unrelated — and `rt_sched_unpark`'s own CAS word has no
+    notion of "which episode" a notification is for (see scheduler.h), so
+    that is a real corruption path, not a cosmetic one. Closed with a
+    per-registration sequence number (not the green_id) carried in each
+    kevent's `udata`; a firing is only acted on if it matches the fd's
+    CURRENT registration. Reasoned through carefully and believed correct;
+    not exercised under TSan on real hardware, which is exactly what the CI
+    workflow below is for.
+  - **eventfd → EVFILT_USER, not a self-pipe.** Chosen for no extra fd and
+    no self-pipe draining logic, and because kqueue namespaces idents
+    per-filter, so the shutdown signal can never collide with a real fd.
+    Lowest-confidence detail in the whole port: the exact `fflags`
+    control-bit convention for triggering it (`NOTE_TRIGGER` alone, no
+    explicit `NOTE_FFCOPY`/etc.) is written from documented/recalled
+    kevent(2) semantics, not confirmed against a real man page this session
+    (no macOS/BSD box available) — if wrong, the failure mode is a hang in
+    `rt_reactor_destroy`'s `pthread_join`, not silent corruption, so it
+    would be loud and immediate on the first real run.
+  **Verified so far**: the full x86-64/Linux regression suite (`gates.sh`,
+  `runtime/phase3_test.sh`, `runtime/scheduler_test.sh`,
+  `runtime/scheduler_tsan.sh`, `runtime/phase3_tsan.sh`) stays clean after
+  the epoll backend's rename/refactor — this change touches no epoll-path
+  logic, only its filename and the scripts that reference it. The kqueue
+  backend itself has had a careful static read-through against kevent(2)'s
+  documented semantics (see above) but has **never been compiled or run**
+  — this project has no macOS/BSD hardware. A GitHub Actions workflow
+  (`.github/workflows/macos.yml`) builds the runtime and runs the same test
+  suites on real `macos-13`/`macos-14` GitHub-hosted runners; it has been
+  reviewed for YAML correctness and its build commands dry-run locally
+  against the Linux path, but **a human still needs to push a branch/tag
+  and watch it run** before any claim here about the kqueue backend
+  graduates from "reasoned to be correct" to "confirmed." Do not treat this
+  checklist item as done until that run is green.
+
+  **`gates.sh` on this branch currently reports 2 corpus failures
+  (`modules/stdlib-http-client`/`modules/stdlib-http-server`, `clang -O2`
+  only) -- confirmed, directly, to be the PRE-EXISTING `rt_stack_limit` race
+  below (the same "trap: stack overflow" signature, the same gcc-passes/
+  clang-fails compiler-dependent pattern already on record there), NOT
+  anything this kqueue work touched.** Verified three ways before writing
+  this: (1) `runtime/reactor_epoll.c` is a byte-for-byte functional copy of
+  the original `runtime/reactor.c` (only the top comment changed -- `git
+  diff` confirms no code line moved); (2) `gcc -O2` passes this exact test
+  5/5 while `clang -O2` crashes 5/5 with "trap: stack overflow", matching
+  the compiler-dependence already recorded below precisely; (3) building
+  the ORIGINAL, completely unmodified `runtime/reactor.c` straight out of
+  this branch's own base commit (`git archive`, no kqueue-work files
+  involved at all) against the same test reproduces the identical crash
+  (2/3 runs). This is the same bug a separate, concurrent session is
+  already working on (see this branch's own history for `rt_stack_check`) --
+  tracked there, not a new regression, and not this task's to fix.
+- **A second, more serious bug was found by TSan and is NOT fixed: a
+  genuine data race on `rt_stack_limit` between two carrier OS threads.**
+  Found empirically while stress-testing real concurrent socket I/O (a
+  server accept loop plus ~10-200 concurrent client/handler pairs, all
+  doing real TCP through the reactor) under `clang -O1`/`-O2` with 2+
+  carriers: the program crashes with a spurious "stack overflow" trap --
+  confirmed via gdb to fire 3-4 frames into a FRESH green thread's call
+  stack, nowhere near genuinely deep -- reproducing well over half the time
+  with as few as 2 carriers and ~10 real connections. A TSan build of the
+  identical program caught the mechanism directly: a WRITE to
+  `rt_stack_limit` inside `rt_fiber_switch` (`runtime/greenthread.h`) on one
+  carrier OS thread, racing a READ of the same address inside a different
+  green thread's own compiler-emitted stack probe, running on a DIFFERENT
+  carrier OS thread, at the same instant. `rt_stack_limit` is declared
+  `_Thread_local` and every other access to it in this codebase is
+  correctly scoped per-carrier, so this is a real, narrow, and so far
+  unexplained violation of that isolation under genuine SMP concurrency --
+  not a TSan tool artifact (unlike the already-documented gap below:
+  that one is a sanitizer-internal segfault with no race report attached;
+  this one IS a reported, categorized `ThreadSanitizer: data race`, and the
+  user-visible crash reproduces identically with no sanitizer involved at
+  all). Investigated at length before concluding it could not be safely
+  fixed in the time available: ruled out the blocking-FFI monitor racing a
+  carrier's local buffer (disabling the monitor entirely did not help),
+  ruled out the slab allocator and the green-thread state table (both
+  correctly locked), and ruled out naive TLS-address caching across the
+  hand-written context switch (an explicit compiler memory barrier placed
+  immediately after `rt_ctx_switch` did not help either) -- each a
+  plausible, targeted hypothesis, each tested directly and disproved.
+  Telling evidence gathered along the way: `runtime/scheduler_tsan.sh` and
+  `runtime/phase3_tsan.sh` -- which already exercise multiple real carriers
+  and the reactor's own park/unpark directly, via hand-written C, and
+  normally run clean -- stayed clean at 25/25 runs each when re-run during
+  this same investigation, so the bug is not in the standalone
+  scheduler/reactor mechanism in any way those harnesses' own test shapes
+  reach; it takes the SCALE and PATTERN of a real compiled program driving
+  many concurrent green threads through many park/unpark cycles via
+  `lib/net.src` to surface it, which is new coverage this task added and
+  neither existing harness happened to provide. Deliberately NOT patched:
+  this is hand-rolled, assembly-adjacent context-switching code this task
+  was scoped to reuse as-is, a wrong fix here is worse than no fix (this
+  project's own lesson from the ASan/fiber-annotation attempt noted
+  earlier in this file applies just as much here), and misdiagnosing a
+  genuine SMP race under real time pressure is exactly the overclaiming
+  this whole effort was warned against. **Practical consequence, stated
+  plainly: real concurrent socket I/O across more than one carrier is not
+  yet safe.** `LANG_NUM_CARRIERS=1` avoids it entirely (confirmed: the
+  demo below passes reliably with it, and removes genuine parallelism
+  between carriers, which is also why the race cannot occur -- there is
+  only ever one carrier OS thread to race against itself). See
+  `runtime/net_concurrency_demo/` (moved out of the ordinary corpus
+  specifically because it is not reliable there yet) and
+  `runtime/spawn_wiring_tsan.sh` for the reproduction and the TSan
+  transcript this was built from.
+
+  **Follow-up investigation (separate session, after the above was
+  written): re-confirmed everything above, found one more real bug along
+  the way, found something genuinely strange that could not be resolved,
+  and still did not fix the race.** Summary of what changed:
+
+  - **Minimal repro, reconfirmed precisely**: `LANG_NUM_CARRIERS=2` against
+    the full 200-connection demo reproduces the "stack overflow" trap
+    reliably under plain `clang -O2`, no sanitizer at all — 15/15 and then
+    20/20 consecutive runs crashed in independent batches. The SAME program
+    built with `gcc -O2` did NOT crash in 5/5 runs. This compiler-dependence
+    is new, confirmed information: it is consistent with a genuine race
+    whose window happens to be wide enough to hit reliably under clang's
+    codegen and narrow enough to miss under gcc's on this host, and is not
+    itself evidence of a miscompilation in either compiler (a race's
+    reproduction rate is expected to be codegen- and timing-sensitive; nothing
+    about this project's probe or ctx-switch code differs between the two
+    builds). Did not find a smaller reproducer than the full demo at
+    `LANG_NUM_CARRIERS=2` — every attempt to shrink connection count traded
+    reliability for size without actually isolating the mechanism further,
+    so further work used the full demo directly rather than a weaker proxy
+    for it.
+  - **gdb, directly, on a stock (non-TSan) crash**: confirms the prior
+    account precisely. The trap fires inside `Conn.close`'s own
+    compiler-emitted probe, called from `client()` at the very first thing
+    it does after `read_until` returns — `rt_ctx_trampoline` ->
+    `green_trampoline` -> the compiled `client` function -> `Conn.close` ->
+    `rt_stack_probe_slow` -> `rt_trap`. Four real frames, the second of
+    which (`ctx_trampoline`'s own fake caller) is `0x0` — the normal,
+    expected end of a backtrace for a green thread that has barely started,
+    not a sign of a corrupted unwind. This is not a deep, genuine overflow
+    by any reading of the call chain.
+  - **The blocking-FFI monitor is independently reconfirmed NOT the cause**,
+    by direct experiment this session (not just by re-trusting the earlier
+    claim): built a variant with `rt_sched_start_blocking_monitor`'s call
+    site in `init_global_scheduler` (`rt.c`) commented out entirely, so the
+    monitor thread never starts and `try_handoff` is never reachable. The
+    same crash still reproduced 20/20. (A real, independent, GENUINE data
+    race WAS found and reproduced directly along the way, in
+    `try_handoff`/`carrier_main`'s unsynchronized read of `c->local_len` —
+    TSan flags it repeatedly, correctly, by the letter of the C/pthread
+    memory model: `carrier_main` reads `c->local_len`/`c->local` with no
+    lock, relying on the invariant that a carrier reported "stuck" in a
+    blocking FFI call cannot concurrently be running its own dispatch loop,
+    which `rt_wait_io`'s own undo/rearm dance, above, narrows but — per this
+    session's reading of it — does not provably close for every ordinary
+    `prim` call, only for `rt_wait_io` itself. This is flagged here as a
+    real, separate, smaller bug worth a future look, NOT fixed in this
+    session because the monitor-disabled experiment above proves it is not
+    what is crashing this demo, and this session's remaining time went to
+    the bigger question instead.)
+  - **TSan's own race reports, read closely, point at something odder than
+    "two carriers touched the same byte"**: re-running
+    `runtime/spawn_wiring_tsan.sh`'s net case repeatedly surfaces several
+    DIFFERENT race locations across runs (`rt_fiber_switch`, the
+    try_handoff/carrier_main pair above, and — once — a probe inside
+    `Conn.close` itself), not always the same one, consistent with the
+    underlying corruption being real and then cascading into whatever code
+    happens to touch adjacent memory next, rather than one single,
+    isolated race site. For the specific, previously-documented
+    `rt_fiber_switch` race: TSan reports "Location is TLS of thread T1" for
+    a write made by T1 and a read made by a DIFFERENT real thread T2 — and
+    this session confirmed, by printing `(void*)&rt_stack_limit` directly
+    (not merely its value) at every fiber switch, that T1's and T2's own
+    computed addresses for this `_Thread_local` variable ARE genuinely
+    different, stable, never-colliding addresses throughout a run, exactly
+    as `_Thread_local`/the `fs`-relative local-exec TLS model (confirmed by
+    disassembly: `mov r14, -32; cmp QWORD PTR fs:[r14], ...`, a fixed
+    compile-time offset from the thread pointer, not a dynamic
+    `__tls_get_addr` call that could be miscached) guarantees they must be.
+    So hypothesis (a) from this task's own framing — "it looks cross-thread
+    to TSan but is really one thread's own stale read" — does not fit what
+    TSan is reporting either, at least not in the simple form.
+  - **A genuinely strange, NOT-fully-explained observation, reported
+    honestly rather than resolved**: instrumenting the compiler-emitted
+    probe directly (patching the generated C, not just the runtime) to
+    print `pthread_self()` and `&rt_stack_limit` together at the exact
+    moment a probe fires, in the same run, found the SAME `pthread_self()`
+    value reported at two different moments paired with TWO DIFFERENT
+    `&rt_stack_limit` addresses — which should be impossible for a real,
+    live OS thread under this TLS model (the thread pointer, and therefore
+    this fixed offset from it, cannot change for a living thread; nothing
+    in this runtime ever touches `%fs`). Also found, separately, that the
+    actual stack pointer at the moment a probe fires sits almost exactly
+    `RT_STACK_SIZE` (1 MiB) below the `rt_stack_limit` value read at that
+    same instant — not a few-byte race-window discrepancy, a clean,
+    suspiciously round, one-slab-slot-sized one, which smells more like
+    "running on the wrong green thread's stack slot entirely" than "read a
+    value a few instructions stale." Neither of these was run down to a
+    root cause: they could be a genuine, deeper bug in the slab allocator
+    or the spawn/dispatch path that only manifests at this scale, OR an
+    artifact of the ad hoc `fprintf`-based instrumentation itself (stdio
+    locking and multi-threaded output ordering were not independently
+    verified trustworthy for this purpose, and a printf-based probe changes
+    timing, which matters for a timing-sensitive race). Reported here
+    precisely so the next person does not have to rediscover either
+    number, and does not mistake "I could not fully explain my own
+    instrumentation's output" for "I found the root cause."
+  - **Conclusion, stated plainly**: this session did NOT reach confidence
+    sufficient to change `rt_fiber_switch`, `rt_ctx_switch`,
+    `rt_stack_probe_slow`, or the slab allocator. Hypothesis (b) from this
+    task's own framing — a narrow surviving window where the same green
+    thread is briefly live on two carriers at once — remains the most
+    plausible shape given the ~1 MiB stack-slot-sized discrepancy above,
+    but no specific mechanism in the park/unpark CAS protocol or the
+    reactor's waiter map (both re-read in full this session; see their own
+    files) was found to actually permit that double-dispatch, and the
+    try_handoff race, while real, is independently ruled out as the cause.
+    The honest state of this bug, after two independent sessions of
+    investigation, is: real, reproducible, NOT a TSan tool artifact, NOT
+    the blocking-FFI monitor, NOT the try_handoff/carrier_main race, NOT a
+    simple TLS-address collision — and still unexplained at the mechanism
+    level. `LANG_NUM_CARRIERS=1` remains the only known-safe configuration
+    for real concurrent socket I/O.
+
+  **Third session: root cause found and FIXED.** Both leading hypotheses
+  from the first two sessions were first disproven directly rather than
+  re-argued: a diagnostic guard added to `carrier_dispatch` (a CAS claiming
+  a green thread before `rt_fiber_switch`, releasing it after, `rt_trap`ing
+  loudly on a failed claim) never fired across dozens of reproductions under
+  `clang -O2`/2 carriers — ruling out hypothesis (b), the same green thread
+  live on two carriers at once. A second guard on the slab allocator (an
+  `in_use` bitmap per slot, checked on every `rt_stack_alloc`/`rt_stack_free`)
+  also never fired — ruling out premature reuse of a stack slot. Forcing
+  `-fno-optimize-sibling-calls` (in case `rt_ctx_switch` was being
+  tail-call-optimized into a `jmp`, dropping a stack frame) made no
+  difference either — 30/30 still crashed.
+
+  The actual mechanism was found with a hardware watchpoint (GDB, plain
+  `watch`/`commands` scripting — Python watchpoint callbacks proved too
+  unstable at this hit rate and crashed GDB itself) on each carrier's own
+  live `rt_stack_limit` TLS slot, logging every write's call site and value
+  for an entire run. It proved every write to `rt_stack_limit` was correct,
+  always — the crashing green thread's slot held exactly its own correct
+  `g->stack.base` from the moment it was dispatched, with nothing writing to
+  it again before the crash. That flips the whole investigation: the bug is
+  not in `rt_stack_limit` at all, it is in what the probe compares it
+  against. Reading the actual compiled comparison at the crash site
+  (`objdump`) showed why:
+
+  ```
+  mov  %fs:0x0, %r15      ; compute &rt_stack_limit ONCE, early in the caller
+  add  %rax, %r15
+  mov  %r15, 0x18(%rsp)   ; spill that ADDRESS to the stack for later reuse
+       ... connect() / write() / read_until() happen here ...
+  mov  0x18(%rsp), %rcx   ; reload the SAME cached address for a later probe
+  cmp  %rax, (%rcx)       ; compare against it -- this is the one that traps
+  ```
+
+  `clang -O2` (not `gcc -O2`, which happens not to in this exact shape)
+  computes the THREAD-LOCAL ADDRESS of `rt_stack_limit` once, early in a
+  long-lived function, and caches it in a spilled register across real,
+  opaque calls in between — any of which may park the green thread and
+  resume it on a *different carrier*. A later probe inlined into the same
+  function (from a small callee like `Conn.close` that `-O2` inlines back
+  in) then reads through that stale, wrong-carrier address: whatever that
+  *other* carrier's own unrelated activity has since written there, which
+  can be anything. This is ordinary, valid optimisation from the compiler's
+  point of view — nothing in C's memory model says a thread-local variable's
+  resolved address can change mid-function, and nothing told it this runtime
+  violates that. It is not a bug in `rt_fiber_switch`, `rt_ctx_switch`, or
+  the slab allocator at all, and never was.
+
+  **The fix** (`runtime/rt.h`, `runtime/rt.c`, `src/emit_c.rs`): the probe
+  is no longer inlined comparison text. `src/emit_c.rs` now emits a plain
+  call, `rt_stack_check();`, to a new, `__attribute__((noinline))` function
+  in `rt.c` that does the same comparison internally. A real, out-of-line
+  call forces a fresh `%fs`-relative read inside it on every invocation,
+  because the caller no longer contains any TLS access of its own to cache
+  or hoist — there is nothing left for the optimiser to reuse across the
+  intervening calls. `-flto` is already off project-wide (see the README's
+  "Two rules that look like details and are not"), so this cannot be
+  silently undone by cross-TU inlining later; the `noinline` attribute
+  documents the requirement explicitly regardless.
+
+  **Verified**: 100+ consecutive stock runs (`clang -O2`, 2 and 4 carriers)
+  of the exact `net_concurrency_demo` reproducer, zero crashes (previously
+  well over half failed). 80 further runs under ThreadSanitizer: zero
+  recurrences of the `rt_stack_limit` race or the "stack overflow" trap:
+  65 clean, 15 hit one of the two separate, pre-existing, unrelated races
+  below (never this one). `runtime/spawn_wiring_tsan.sh`'s own Chan tests
+  remain clean. Full `gates.sh`, including the sanitized corpus, passes
+  (one test, `greenthread_test.sh`'s "emit_c.rs probe text" check, was
+  updated to assert the new call-based codegen instead of the old inlined
+  text it was written against).
+
+  **Two smaller, separate races were found by the same TSan runs, neither
+  responsible for the crash above. Both are now ALSO fixed** — see the two
+  sessions below.
+
+  **Fourth session: the `try_handoff`/`carrier_main` race, found and
+  FIXED.** What it actually was, read precisely rather than re-summarized:
+  `try_handoff` (the blocking-FFI monitor thread's rescue path) mutates a
+  stuck carrier's `c->local`/`c->local_head`/`c->local_len` under
+  `c->local_lock`, having re-checked `blocking_since_ns` under that same
+  lock first — correct, by itself. But `carrier_main`'s own ordinary
+  dispatch loop read and wrote those exact fields with NO lock at all: the
+  zero-length check, the post-draw `local_head`/`local_len` reset (and the
+  draw itself, which writes `c->local`'s contents directly), and `local_pop`
+  were all lock-free, resting entirely on the invariant that try_handoff
+  only ever runs while this carrier is PROVABLY not executing this loop —
+  true for a genuine blocking syscall, but, as `rt_wait_io`'s own comment
+  documents in full, NOT guaranteed for every `prim`: a `prim` that parks
+  the green thread switches the carrier straight back into this very loop
+  while `blocking_since_ns` can still be left looking set, which is exactly
+  what lets the monitor believe the carrier is stuck while it is actually
+  here, running. Either way, the result was a real, TSan-confirmed,
+  unsynchronized concurrent read/write of a carrier's own run-queue
+  bookkeeping from two different OS threads.
+
+  **The fix** (`runtime/scheduler.c`, `carrier_main` and its struct's own
+  comment; no change to `try_handoff`, `rt_wait_io`, `rt_fiber_switch`,
+  `rt_ctx_switch`, the slab allocator, or `rt_stack_check`): `carrier_main`'s
+  dispatch loop now takes `c->local_lock` around every one of its own
+  touches of `local`/`local_head`/`local_len` — the emptiness check, the
+  `squeue_draw`-and-reset, and `local_pop` — in one short critical section
+  per loop iteration, released before `carrier_dispatch(c, g)` runs (so
+  `carrier_dispatch`'s own later `local_push`, under the same lock, never
+  nests it). This makes the carrier safe against `try_handoff` by actual
+  mutual exclusion, not by an invariant about when try_handoff is allowed to
+  run. No new deadlock risk: `try_handoff` always releases `local_lock`
+  before its own `squeue_push` calls (unchanged), the new code never holds
+  `local_lock` while blocked on anything (`squeue_draw` is non-blocking),
+  and the two locks are always acquired in the same order wherever they
+  nest (`local_lock` outer, the global queue's `q->lock` inner, never the
+  reverse) — no AB-BA cycle is possible.
+
+  **Verified**: 25/25 clean runs each of `runtime/scheduler_tsan.sh` and
+  `runtime/phase3_tsan.sh`. `runtime/spawn_wiring_tsan.sh`'s `Chan` tests
+  stayed clean (30/30 each). For the actual target — real concurrent socket
+  I/O under TSan, `net_concurrency_demo` at `LANG_NUM_CARRIERS=2` — 180 total
+  runs across two batches: ZERO occurrences of the `try_handoff`/
+  `carrier_main` race in any of them (previously a real, repeatedly-observed
+  TSan report in this exact configuration). The 100-run batch's full output
+  was inspected run by run: 94/100 completely clean, 6/100 hit a data race,
+  and every one of those 6 was the OTHER open race below (`rt_sched_destroy`
+  shutdown ordering, confirmed by reading each report's full stack trace) —
+  never the fixed race, and never a new one. Full `gates.sh` passes clean on
+  top of this change.
+
+  **Fifth session: the `rt_sched_destroy` shutdown-ordering race, found and
+  FIXED.** Root cause, found by tracing `rt_sched_destroy`'s teardown
+  sequence against every OS thread the scheduler subsystem can have
+  running: `rt_sched_shutdown` correctly `pthread_join`s every carrier
+  before `rt_sched_destroy` frees anything, but the epoll reactor's
+  dedicated OS thread (`runtime/reactor.c`'s `reactor_loop`, started by
+  `rt_reactor_create`) is a SEPARATE thread `rt_sched_shutdown` never
+  touches — and `rt_reactor_destroy` (which exists, signals the reactor
+  thread's shutdown eventfd, and joins it) turned out to never be called
+  anywhere in this runtime at all. `rt_run_program` created the global
+  reactor the first time any `net` call needed it and then never tore it
+  down: the reactor thread keeps calling `epoll_wait` and, on any ready fd
+  (plausible even this late — a peer's last FIN/RST can arrive concurrently
+  with this process's own exit), calls `rt_sched_unpark`, which locks
+  `s->registry.lock`, looks `g` up, and pushes onto `s->global` — exactly
+  the objects `rt_sched_destroy` destroys and frees moments later.
+
+  Reproduced directly: the real `net_concurrency_demo` did not reliably
+  surface this specific race on its own (140 combined TSan runs, 100 at
+  `LANG_NUM_CARRIERS=1` and 40 at `=2`, produced zero reports of it — its
+  natural window at process exit is narrow). A dedicated, deterministic
+  standalone reproducer was built instead (one green thread parks on a real
+  pipe fd via `rt_reactor_wait`; a second OS thread makes that fd ready a
+  couple of milliseconds after `rt_sched_shutdown` returns, timed to land
+  while `rt_sched_destroy` is freeing scheduler state) and reliably
+  reproduced the exact mechanism, 10/10 runs, confirmed by TSan as a
+  heap-use-after-free: `registry_lookup_locked`/`rt_sched_unpark` on the
+  reactor's own OS thread, reading memory the main thread had already freed
+  inside `rt_sched_destroy` moments before.
+
+  **The fix** (`runtime/rt.c` only — `runtime/scheduler.c` untouched,
+  reactor/scheduler pairing is `rt.c`'s responsibility by this codebase's
+  existing layering, and standalone harnesses call `rt_sched_destroy`
+  directly with no reactor involved at all and must keep working
+  unchanged): `rt_run_program`'s own teardown now calls a new
+  `rt_global_reactor_destroy_if_created` between `rt_sched_shutdown` and
+  `rt_sched_destroy` — joining the reactor thread (if `net` was ever used;
+  a program that never calls it leaves the reactor uncreated, and this is a
+  correct no-op) strictly after every carrier is already stopped and
+  strictly before any scheduler memory is freed.
+
+  **Verified**: the standalone reproducer, 120/120 clean runs under
+  ThreadSanitizer with the fix applied (vs. 10/10 reproducing the
+  heap-use-after-free without it). The real compiled program was re-run
+  post-fix, 100 iterations at `LANG_NUM_CARRIERS=1` and 40 at `=2`, with no
+  change in behavior from the pre-fix baseline. Full `gates.sh` passes
+  clean with this change in place.
+
+  **Honest residual, after all five sessions**: every race this section
+  documents is now fixed and empirically verified against its own specific
+  reproducer — not against every conceivable interleaving a formal proof
+  would need to rule out one by one, which is the same epistemic standard
+  the rest of this file already holds itself to. `LANG_NUM_CARRIERS` greater
+  than 1 for real concurrent socket I/O is, as of this session, no longer
+  known to be unsafe for any previously-documented reason.
+- The blocking-FFI handoff monitor (Phase 3, built but opt-in) is now
+  actually turned on, unconditionally, for the one process-wide scheduler
+  every compiled program uses — it was built with exactly this moment in
+  mind but had nothing to protect until `spawn` meant a green thread.
+  Regular-file I/O, `os.run`'s process wait, DNS resolution and a terminal's
+  canonical-mode read are still genuinely blocking and NOT converted (out
+  of this phase's scope) — the monitor is this phase's safety net for
+  those, not a fix for them: it rescues a stuck carrier's queued siblings,
+  it does not make the stuck call itself faster.
+- Every build line in the repository that links `runtime/rt.c` — which is
+  all of them — now also links `runtime/scheduler.c`, one of
+  `runtime/reactor_epoll.c`/`runtime/reactor_kqueue.c` (picked by
+  `runtime/arch.sh`, per `uname -s` — see the Progress item above) and the
+  per-architecture context-switch file, because `rt.c` calls into them
+  unconditionally. The reactor choice is no longer an open question as of
+  the Progress item above, but it is UNVALIDATED on the macOS/BSD side
+  pending a real-hardware CI run.
+
+- **A second, independent macOS build blocker, found by the kqueue branch's
+  own CI run, NOT by inspection — found and FIXED.** The first real run of
+  `.github/workflows/macos.yml` (a genuine `macos-14`/Apple Silicon GitHub
+  Actions runner, not a guess) failed at compile time, before the kqueue
+  backend or the aarch64 context switch were even exercised:
+
+  ```
+  runtime/scheduler.c:1101:24: error: call to undeclared function
+  'sem_timedwait'; ISO C99 and later do not support implicit function
+  declarations
+  ```
+
+  Root cause: `runtime/scheduler.c` used POSIX *unnamed* semaphores
+  (`sem_t wake_sem` per `rt_carrier_t`, with `sem_init`/`sem_post`/
+  `sem_timedwait`/`sem_destroy`) as each carrier's wake primitive — the
+  thing `notify_new_work`'s wake-permutation mechanism posts to, and
+  `carrier_main`'s idle-wait loop blocks on with a 5ms periodic fallback
+  timeout. This is a genuinely different bug from the kqueue reactor or the
+  aarch64 port — it does not touch either — and is a long-standing, widely
+  documented macOS/Darwin gap, not something this project introduced: macOS
+  only ever properly supported *named* semaphores (`sem_open`); `sem_init`
+  for unnamed ones is explicitly deprecated there and reported to fail at
+  runtime (`ENOSYS`), and `sem_timedwait` is missing from the SDK's
+  `<semaphore.h>` declarations outright, which is exactly the "implicit
+  function declaration" error above — a hard compile error under
+  `-Werror`-equivalent strictness (ISO C99+ no longer tolerates implicit
+  declarations), not a warning.
+
+  **The fix** (`runtime/scheduler.c` only — no other file touched): replaced
+  the real `sem_t wake_sem` with a small, local `rt_wake_sem_t` — a
+  mutex + condvar + an explicit integer count, i.e. a semaphore emulated by
+  hand, the standard portable answer to exactly this gap. `rt_wake_sem_post`
+  locks, increments `count`, unlocks, then signals the condvar.
+  `rt_wake_sem_timedwait` locks and loops `while (count == 0)
+  pthread_cond_timedwait(&cond, &lock, abstime)`, decrementing `count` and
+  returning once it sees `count > 0`. This is deliberately not a bare
+  condvar wait: a bare `pthread_cond_signal` with nobody blocked yet is
+  simply lost, which is exactly the class of lost-wakeup bug this project
+  has already hunted down carefully elsewhere in this same file (the
+  park/unpark CAS protocol, the `try_handoff`/`carrier_main` race above) —
+  the explicit `count`, incremented unconditionally by every post and only
+  consumed by a wait that finds it already nonzero, is what reproduces a
+  real semaphore's "a post before the matching wait is remembered, not
+  lost" guarantee, which `carrier_main`'s own comment (immediately above its
+  wait call) documents as load-bearing for closing a genuine lost-wakeup
+  window: the idle flag is set, under this property, strictly before the
+  wait, so a `notify_new_work` that lands in between is never dropped.
+  `pthread_cond_timedwait` is called with the identical `CLOCK_REALTIME`-
+  based absolute `struct timespec` the old `sem_timedwait` call already
+  built (`clock_gettime(CLOCK_REALTIME, &ts)` plus the 5ms periodic
+  fallback, unchanged) — condition variables default to `CLOCK_REALTIME`
+  on both glibc and Darwin's libpthread unless `pthread_condattr_setclock`
+  says otherwise, which this file never calls, so no behavior changed on
+  the timeout side either. One implementation, no `#ifdef` between Linux
+  and macOS, per this project's own stated "no two ways to do the same
+  thing" preference: `pthread_mutex_*`/`pthread_cond_*` are plain POSIX.1
+  with no platform-specific attributes set on either object, so there is
+  nothing to special-case. (`carrier_main`'s own comment previously said a
+  timed-out wait could also return a "spurious-looking EINVAL from a clock
+  edge case" — that was about `sem_timedwait`'s own documented errno
+  behavior and no longer applies: `pthread_cond_timedwait` is specified to
+  never return `EINTR`, and the internal `while (count == 0)` loop already
+  absorbs any spurious condvar wakeup, so the call site no longer needs its
+  own retry loop at all — simplified accordingly, comment updated to match.)
+
+  **Verified on this Linux x86-64 host** (no macOS hardware available here
+  either — see below): `runtime/scheduler_test.sh` (120 checks across
+  gcc/clang at `-O0`/`-O2` plus the ASan/UBSan-sanitized build, all clean),
+  `runtime/scheduler_tsan.sh` raised from its 5-run default to 25/25 clean,
+  `runtime/phase3_test.sh` (45 checks, all clean) and `runtime/phase3_tsan.sh`
+  likewise raised to 25/25 clean, `runtime/spawn_backpressure_test.sh` (40/40
+  clean at 1/2/4 carriers stock, 15/15 clean under TSan at 1/2 carriers), and
+  `runtime/spawn_wiring_tsan.sh` (30/30 clean for both Chan cases, 5/5 clean
+  for the real-socket-I/O case) — all unchanged from this branch's pre-fix
+  baseline, as expected for a change that touches only the wake primitive's
+  implementation, not its contract. Full `gates.sh` also passes clean on top
+  of this change. TSan specifically matters here because this is a real
+  synchronization primitive on the hot wake/sleep path — a wrong
+  mutex/condvar/count implementation would be exactly the kind of lost-
+  wakeup or races-on-`count` bug TSan is built to catch, and none appeared
+  across any of the above runs.
+
+  **What this does NOT confirm, stated plainly**: this host has no macOS/BSD
+  hardware, so this fix has only been checked for standards-compliance by
+  reading what it calls against documented POSIX/Darwin behavior
+  (`pthread_mutex_init`/`_destroy`/`_lock`/`_unlock`,
+  `pthread_cond_init`/`_destroy`/`_signal`/`_timedwait` are all plain
+  POSIX.1 functions, confirmed present and behaving identically on Darwin —
+  including the `CLOCK_REALTIME`-by-default timeout clock and the absence of
+  an `EINTR` return from `pthread_cond_timedwait`, both checked against
+  Apple's own published manual page text, not assumed from the Linux side)
+  — it has never been compiled with an actual macOS SDK, let alone run or
+  TSan-checked on real Apple Silicon. Per this project's standing rule (the
+  kqueue backend above was held to the same line), no branch was pushed and
+  no CI run was triggered from this session to validate that; a human still
+  needs to push this branch and watch `.github/workflows/macos.yml` run
+  again; only that can move this from "reasoned to be correct against
+  documented POSIX/Darwin semantics" to "confirmed."
+
 **Phase 4 — portability.**
 - aarch64 context switch
-- kqueue (macOS/BSD)
+- ~~kqueue (macOS/BSD)~~ — pulled forward into Phase 3.5, see the Progress
+  checklist above: built, statically reviewed, pending real-hardware CI
+  validation (not yet checked off for that reason)
 - Windows: AFD readiness emulation only, never native IOCP (forces buffer
   pinning into the memory model) — no timeline yet
 

@@ -201,15 +201,17 @@ compiler cannot see (two locals reaching the same object through a field).
 A **channel is exempt**, because it is how threads share; it is aliased
 rather than moved, and is immortal for now (see `rt_chan_new`).
 
-`spawn` and `Chan` run on OS threads today; the channel surface does not
-change when green threads replace them. A complete, independently tested M:N
-green-thread runtime already exists underneath (`runtime/greenthread.*`,
-`scheduler.*`, `reactor.*` — context switching, a sharing-queue scheduler,
-and an epoll reactor with park/unpark), but it is not yet wired to
-`spawn`/`Chan`: that integration is in progress and currently blocked on a
-known cross-carrier data race, tracked as Phase 3.5 in
-`docs/concurrency-decision.md`. Treat the runtime as proven infrastructure,
-not yet as the thing `spawn` uses.
+**`spawn` means a green thread**, M:N over one carrier OS thread per core
+(`docs/concurrency-decision.md`) -- not an OS thread, and not conditionally
+one or the other: a value crossing between them is still moved, exactly as
+above, and the channel surface above did not change when green threads
+replaced OS threads, as promised. Getting here safely took real work:
+building and wiring the runtime surfaced three genuine data races under
+real concurrent socket I/O (a compiler TLS-caching bug in the stack-overflow
+probe, a scheduler local-buffer race, and a reactor-thread shutdown race),
+each found with ThreadSanitizer and a dedicated reproducer, fixed, and
+re-verified -- the full account, including exact verification numbers, is
+in `docs/concurrency-decision.md`'s "Phase 3.5" section.
 
 **Embedding** is composition in place of inheritance: an anonymous field,
 named after its type, whose fields and methods are promoted.
@@ -294,9 +296,9 @@ form to use and no question of what order optional arguments come in.
 
 A callback is an ordinary **one-method interface**, and a function's name or
 a lambda may be written wherever one is expected — there is no function type
-(`docs/closures-decision.md`). Green threads are built (Phases 0–3 of
-`docs/concurrency-decision.md`) but not yet load-bearing; see Concurrency
-above for exactly what that means today.
+(`docs/closures-decision.md`). Concurrency is green threads
+(`docs/concurrency-decision.md`), Phases 0-3 of which are done, verified
+under real concurrent load, and load-bearing -- see Concurrency above.
 
 ## Decisions made
 
@@ -469,17 +471,26 @@ revisit it.
 
 ## Next
 
-1. **Fix the green-thread scheduler's cross-carrier race** — a data race
-   between a stack-limit write in `rt_fiber_switch` and a stack-probe read on
-   another carrier, reproducible stock under 2+ carriers. Tracked as Phase
-   3.5 in `docs/concurrency-decision.md`; this is the current release
-   blocker, not a nitpick
-2. **Wire `spawn`/`Chan`/`lib/net.m31` through the green-thread runtime**,
-   once (1) is fixed — `spawn` and channels still run on OS threads today
-   even though the scheduler and reactor underneath them are done
-3. **An HTTP server as the first real application** on top of green
-   threads — `lib/http.m31` already has a complete HTTP/1.1 implementation
-   (parsing, writing, `Handler`, `serve`) waiting on (2)
-4. GitHub Releases for the compiler and apps, so builds can be pulled by
-   URL from raw content
+1. **A real profiling pass on the reactor's I/O dispatch path.**
+   `apps/httpserver/SCALING.md` found that `apps/httpserver` tracks an
+   equivalent Go server closely up to ~1,000-2,500 concurrent connections,
+   then degrades measurably faster from 5,000 upward (throughput and tail
+   latency) with no errors anywhere up to 20,000. The leading hypothesis,
+   from reading the code rather than a profiler: a single dedicated OS
+   thread discovers every I/O-ready event and serially takes three separate
+   global locks before any carrier can run the resulting work, a cost that
+   scales with request rate. Confirming this (and fixing it, likely by
+   batching the dispatch or sharding event discovery across carriers) is
+   the next concrete runtime item
+2. **A smaller default green-thread stack**, or real growable/relocatable
+   stacks. The same scaling test measured real resident-memory divergence
+   at high connection counts (1.56 GB vs. a comparable Go server's 460 MB at
+   20,000 connections) — the fixed, demand-paged 1 MiB-per-thread stack
+   this runtime uses in place of guard pages. Tuning the default down is
+   cheap to try; true growable stacks need compiler-level pointer maps first
+3. A second macOS CI remote, so `macos-13` (Intel) can be re-enabled
+   alongside `macos-14` (Apple Silicon) — see `.github/workflows/macos.yml`
+4. aarch64 and macOS CI both need a human to push and watch a real run
+   confirm clean before either platform is more than "written and reasoned
+   correct" — see `docs/concurrency-decision.md`'s Phase 3.5/Phase 4 entries
 5. A C-emitter second look, now that there is enough language to benchmark

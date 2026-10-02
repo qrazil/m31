@@ -1,0 +1,4 @@
+# The built programs. `bash apps/httpserver/build.sh` and `go build` (in
+# goserver/) make these.
+httpserver
+goserver/goserver

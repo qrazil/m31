@@ -211,7 +211,7 @@ uint32_t rt_sched_current_green_id(void);
 
 /* Must be called only from inside a running green thread's own call stack.
  * Suspends the calling green thread, marking it `parked_state`
- * (RT_GT_PARKED_IO / RT_GT_PARKED_CHAN / RT_GT_PARKED_TIMER --
+ * (RT_GT_PARKED_IO / RT_GT_PARKED_CHAN / RT_GT_PARKED_TIMER / RT_GT_PARKED_QUEUE --
  * runtime/greenthread.h) in the shared state table -- UNLESS a matching
  * rt_sched_unpark(this green thread's id) already happened (the CAS
  * above), in which case this returns immediately without suspending at

@@ -1,0 +1,42 @@
+// `spawn` is always a green thread now, and `Chan` parks instead of
+// blocking its carrier (docs/concurrency-decision.md's whole point). This
+// pins down the claim with real numbers: N receivers, far more than any
+// reasonable carrier count, all blocked on `recv` from the SAME
+// capacity-1 channel at once, fed one value at a time from the top level.
+//
+// If a parked green thread blocked its carrier instead of freeing it, this
+// would deadlock outright on a small carrier count: with N receivers and
+// only a handful of carriers, at most a handful of receivers could ever be
+// dispatched, the rest would never even reach their own `recv` call to
+// register as waiters, and the feed loop below would stall forever on its
+// first `send` once every carrier is wedged. It does not depend on
+// scheduling order to check correctness: addition is commutative, so the
+// sum is the same whichever receiver happens to get which value.
+void receiver(Chan<int> jobs, Chan<int> results) {
+    int v = recv(jobs);
+    send(results, v * 2);
+}
+
+const int N = 300;
+Chan<int> jobs = Chan<int>(1);
+Chan<int> results = Chan<int>(N);
+
+int i = 0;
+while (i < N) {
+    spawn receiver(jobs, results);
+    i = i + 1;
+}
+
+i = 0;
+while (i < N) {
+    send(jobs, i);
+    i = i + 1;
+}
+
+int sum = 0;
+i = 0;
+while (i < N) {
+    sum = sum + recv(results);
+    i = i + 1;
+}
+print(sum);

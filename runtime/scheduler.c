@@ -19,7 +19,6 @@
 
 #include <errno.h>
 #include <pthread.h>
-#include <semaphore.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -127,13 +126,63 @@ static uint32_t parse_env_u32(const char *name, uint32_t fallback) {
 
 typedef struct rt_green rt_green_t;
 
+/* Forward-declared so squeue_push (just below) can ask "is my caller a green
+ * thread or an ordinary OS thread" without needing struct rt_green's full
+ * definition visible yet -- that definition (and tls_current_green, which
+ * this answers from) comes much later in this file, where every OTHER
+ * green-thread-identity question this file asks is already answered the
+ * same way (rt_sched_current_carrier/rt_sched_current_green_id, both public,
+ * both also defined down there). Defined right next to tls_current_green. */
+static bool rt_sched_in_green_thread(void);
+
+/* A FIFO of green-thread ids parked on "the queue is full" -- the exact
+ * same shape as rt.c's own Chan waiter queue (rt_chan_wqueue_t there), kept
+ * as its own small copy here rather than shared across the rt.c/scheduler.c
+ * layering boundary, the same "correctness over cleverness, no shared
+ * plumbing across layers" choice reactor.c's own waiter map already makes.
+ * See squeue_push/squeue_draw below for why this exists at all: a condvar's
+ * wait queue is only a safe place to block an ordinary OS thread, never a
+ * green thread, which must never block its carrier. */
+typedef struct rt_squeue_waiter {
+    uint32_t                  id;
+    struct rt_squeue_waiter  *next;
+} rt_squeue_waiter_t;
+
+static void sqwq_push(rt_squeue_waiter_t **head, rt_squeue_waiter_t **tail,
+                       uint32_t id) {
+    rt_squeue_waiter_t *n = malloc(sizeof *n);
+    if (n == NULL) rt_trap("out of memory: scheduler queue waiter");
+    n->id = id;
+    n->next = NULL;
+    if (*tail != NULL) (*tail)->next = n; else *head = n;
+    *tail = n;
+}
+
+/* Detach the whole waiter list -- every one of them re-checks its own
+ * while-loop condition on resume (same reasoning as squeue_draw's existing
+ * pthread_cond_broadcast, just for the green-thread side of the same
+ * backpressure signal), so waking all of them whenever ANY room frees up is
+ * simply the green-thread-safe equivalent of that broadcast, not a
+ * separate, weaker guarantee. */
+static rt_squeue_waiter_t *sqwq_drain(rt_squeue_waiter_t **head,
+                                       rt_squeue_waiter_t **tail) {
+    rt_squeue_waiter_t *n = *head;
+    *head = *tail = NULL;
+    return n;
+}
+
 typedef struct {
-    pthread_mutex_t lock;
-    pthread_cond_t  not_full;
-    rt_green_t    **buf;
-    uint32_t        cap;
-    uint32_t        head;
-    uint32_t        len;
+    pthread_mutex_t      lock;
+    pthread_cond_t        not_full;
+    rt_green_t           **buf;
+    uint32_t              cap;
+    uint32_t              head;
+    uint32_t              len;
+    /* Green-thread pushers parked here instead of on `not_full` -- see
+     * squeue_push's own comment for why the two cases cannot share one
+     * waiting mechanism. */
+    rt_squeue_waiter_t   *full_head;
+    rt_squeue_waiter_t   *full_tail;
 } rt_squeue_t;
 
 static void squeue_init(rt_squeue_t *q, uint32_t cap) {
@@ -142,6 +191,7 @@ static void squeue_init(rt_squeue_t *q, uint32_t cap) {
     q->cap = cap;
     q->head = 0;
     q->len = 0;
+    q->full_head = q->full_tail = NULL;
     pthread_mutex_init(&q->lock, NULL);
     pthread_cond_init(&q->not_full, NULL);
 }
@@ -150,15 +200,50 @@ static void squeue_destroy(rt_squeue_t *q) {
     pthread_mutex_destroy(&q->lock);
     pthread_cond_destroy(&q->not_full);
     free(q->buf);
+    rt_squeue_waiter_t *n = q->full_head;
+    while (n != NULL) { rt_squeue_waiter_t *next = n->next; free(n); n = next; }
 }
 
 /* Blocks while full -- real backpressure, matching the design doc's stated
  * semantics exactly: "a push blocks until space frees", never silent
- * unbounded growth and never a dropped item. */
+ * unbounded growth and never a dropped item.
+ *
+ * TWO DIFFERENT WAYS TO BLOCK, chosen by who is calling -- a real,
+ * reproduced deadlock this distinction fixes, not a theoretical one. An
+ * ordinary OS thread (nothing has ever `spawn`ed from it, or a carrier's own
+ * post-dispatch bookkeeping, which runs with no green thread "currently
+ * running" on that OS thread -- see tls_current_green) blocking here via
+ * `pthread_cond_wait` is correct: some OTHER thread -- another carrier -- is
+ * always free to drain the queue and signal `not_full`. But when the caller
+ * IS a green thread (`spawn` called from ordinary program code, which always
+ * runs AS a green thread -- rt_run_program wraps even the top level as one),
+ * blocking the CARRIER this green thread happens to be running on is wrong
+ * the instant that carrier is the only one that could ever call
+ * squeue_draw and free room: the carrier is now blocked waiting on itself,
+ * forever. `LANG_NUM_CARRIERS=1` plus a tight `spawn` loop past the queue's
+ * capacity reproduces this exactly (docs/concurrency-decision.md, "Phase
+ * 3.5"). The fix mirrors Chan's own send/recv exactly (rt.c): park the
+ * GREEN THREAD instead of blocking the carrier, which frees the carrier to
+ * go dispatch other work (including, eventually, whatever drains this very
+ * queue) while this one waits its turn. The enqueue (sqwq_push) happens
+ * BEFORE the unlock, the same lost-wakeup fix Chan's own comment explains:
+ * a squeue_draw that runs in the gap between this unlock and the actual
+ * rt_sched_park call will already find this id on the list and unpark it,
+ * which rt_sched_park's own CAS protocol (scheduler.h) is documented to
+ * handle correctly no matter which order those two happen in. */
 static void squeue_push(rt_squeue_t *q, rt_green_t *g) {
+    bool in_green = rt_sched_in_green_thread();
+
     pthread_mutex_lock(&q->lock);
     while (q->len == q->cap) {
-        pthread_cond_wait(&q->not_full, &q->lock);
+        if (in_green) {
+            sqwq_push(&q->full_head, &q->full_tail, rt_sched_current_green_id());
+            pthread_mutex_unlock(&q->lock);
+            rt_sched_park(RT_GT_PARKED_QUEUE);
+            pthread_mutex_lock(&q->lock);
+        } else {
+            pthread_cond_wait(&q->not_full, &q->lock);
+        }
     }
     q->buf[(q->head + q->len) % q->cap] = g;
     q->len++;
@@ -168,7 +253,8 @@ static void squeue_push(rt_squeue_t *q, rt_green_t *g) {
 /* Non-blocking: draws min(available, max_n) into out[0..n), no minimum
  * threshold -- a single available item is drawn immediately. Returns the
  * count actually drawn, which may be 0. */
-static uint32_t squeue_draw(rt_squeue_t *q, rt_green_t **out, uint32_t max_n) {
+static uint32_t squeue_draw(rt_scheduler_t *s, rt_squeue_t *q,
+                             rt_green_t **out, uint32_t max_n) {
     pthread_mutex_lock(&q->lock);
     uint32_t n = q->len < max_n ? q->len : max_n;
     for (uint32_t i = 0; i < n; i++) {
@@ -176,13 +262,24 @@ static uint32_t squeue_draw(rt_squeue_t *q, rt_green_t **out, uint32_t max_n) {
     }
     q->head = (q->head + n) % q->cap;
     q->len -= n;
+    rt_squeue_waiter_t *woken = NULL;
     if (n > 0) {
         /* Freed room: every blocked pusher re-checks its own while-loop
          * condition, so a broadcast here is simply correct, not merely
-         * convenient -- no lost wakeup, no lost push. */
+         * convenient -- no lost wakeup, no lost push. Same for the
+         * green-thread side: drain and unpark every one of them, below,
+         * after releasing this lock (rt_sched_unpark must never be called
+         * while holding a lock a park/unpark participant might need). */
         pthread_cond_broadcast(&q->not_full);
+        woken = sqwq_drain(&q->full_head, &q->full_tail);
     }
     pthread_mutex_unlock(&q->lock);
+    while (woken != NULL) {
+        rt_squeue_waiter_t *next = woken->next;
+        rt_sched_unpark(s, woken->id);
+        free(woken);
+        woken = next;
+    }
     return n;
 }
 
@@ -244,6 +341,94 @@ static void perm_reshuffle(rt_wake_perm_t *p) {
 }
 
 /* ========================================================================
+ * A portable "wake semaphore": mutex + condvar + an explicit count,
+ * emulating exactly the one property of an unnamed POSIX semaphore
+ * (sem_init/sem_post/sem_timedwait/sem_destroy) this file actually needs --
+ * a post that happens before the matching wait is REMEMBERED, not lost, so
+ * `rt_wake_sem_timedwait` below can still return immediately even if the
+ * matching `rt_wake_sem_post` ran first. A bare condvar does NOT have this
+ * property (a `pthread_cond_signal` with nobody blocked on it yet vanishes),
+ * which is exactly why this needs its own count rather than being a condvar
+ * alone -- see carrier_main's own comment, below, for why that property is
+ * load-bearing for closing a real lost-wakeup window, not a nicety.
+ *
+ * This replaces a real `sem_t wake_sem` this file used to carry directly.
+ * Found and replaced the same night as the aarch64 port and the kqueue
+ * reactor, by this branch's own macOS CI run (`.github/workflows/macos.yml`,
+ * a real macos-14 runner) failing at compile time on `sem_timedwait` --
+ * "call to undeclared function" -- NOT found by inspection beforehand.
+ * macOS/Darwin's <semaphore.h> declares the unnamed-semaphore API only
+ * incompletely (sem_timedwait is missing outright on recent SDKs; sem_init
+ * exists but is documented by Apple as deprecated and, per long-standing
+ * reports, returns ENOSYS at runtime) -- only NAMED semaphores (sem_open)
+ * are actually supported there, which this runtime has no use for (naming
+ * a kernel-wide semaphore per carrier, then unlinking it correctly on every
+ * exit path including a crash, is real extra complexity this file does not
+ * need). A mutex+condvar+count is POSIX-standard on both platforms (no
+ * platform-specific attribute is set on either the mutex or the condvar, so
+ * both default to behavior POSIX guarantees identically -- in particular
+ * the condvar's default clock is CLOCK_REALTIME on both glibc and Darwin's
+ * libpthread, matching the CLOCK_REALTIME-based absolute `struct timespec`
+ * this file already builds for the timed wait, unchanged from what
+ * sem_timedwait itself required), so one implementation covers both
+ * platforms -- no #ifdef, per this project's standing "no two ways to do
+ * the same thing" preference (docs/concurrency-decision.md). */
+typedef struct rt_wake_sem {
+    pthread_mutex_t lock;
+    pthread_cond_t  cond;
+    unsigned int    count;
+} rt_wake_sem_t;
+
+static int rt_wake_sem_init(rt_wake_sem_t *ws) {
+    if (pthread_mutex_init(&ws->lock, NULL) != 0) return -1;
+    if (pthread_cond_init(&ws->cond, NULL) != 0) {
+        pthread_mutex_destroy(&ws->lock);
+        return -1;
+    }
+    ws->count = 0;
+    return 0;
+}
+
+static void rt_wake_sem_destroy(rt_wake_sem_t *ws) {
+    pthread_mutex_destroy(&ws->lock);
+    pthread_cond_destroy(&ws->cond);
+}
+
+/* Increments the count under the lock, then signals -- exactly
+ * sem_post's own "remembered until consumed" contract: a post that lands
+ * with nobody waiting yet is not lost, it just makes the count nonzero for
+ * the next rt_wake_sem_timedwait to find. */
+static void rt_wake_sem_post(rt_wake_sem_t *ws) {
+    pthread_mutex_lock(&ws->lock);
+    ws->count++;
+    pthread_mutex_unlock(&ws->lock);
+    pthread_cond_signal(&ws->cond);
+}
+
+/* sem_timedwait's replacement: block until the count is nonzero (consuming
+ * one post) or `abstime` (a CLOCK_REALTIME-based absolute deadline, same
+ * shape the old sem_timedwait call built) passes, whichever comes first.
+ * Returns true if a post was consumed, false on timeout. The `while
+ * (count == 0)` -- not `if` -- is the same spurious-wakeup-safe shape every
+ * condvar wait in this codebase already uses elsewhere, and it is also
+ * exactly what re-checks the deadline on every spurious or stolen wakeup
+ * rather than trusting a single wait call to mean one real event. */
+static bool rt_wake_sem_timedwait(rt_wake_sem_t *ws, const struct timespec *abstime) {
+    bool got_post = false;
+    pthread_mutex_lock(&ws->lock);
+    while (ws->count == 0) {
+        int rc = pthread_cond_timedwait(&ws->cond, &ws->lock, abstime);
+        if (rc != 0) break; /* ETIMEDOUT, or an error -- either way, stop waiting */
+    }
+    if (ws->count > 0) {
+        ws->count--;
+        got_post = true;
+    }
+    pthread_mutex_unlock(&ws->lock);
+    return got_post;
+}
+
+/* ========================================================================
  * One carrier: one OS thread, its own wake semaphore and idle flag, and its
  * own local buffer -- a ring buffer sized exactly fuel_size, which is
  * always enough: a draw only ever happens when the buffer is completely
@@ -258,33 +443,49 @@ static void perm_reshuffle(rt_wake_perm_t *p) {
  * carrier calling this, about itself". Nothing anywhere takes another
  * carrier's `c->local` by pointer, indexes into it, or iterates
  * `sched->carriers[j].local` for any j. The only per-carrier fields ANY
- * other thread ever touches are `idle` (atomic) and `wake_sem` (a
- * semaphore) -- the wake primitive, not the run queue -- which is exactly
+ * other thread ever touches are `idle` (atomic) and `wake_sem` (a mutex/
+ * condvar/count wake primitive, see `rt_wake_sem_t` above) -- the wake
+ * primitive, not the run queue -- which is exactly
  * what "individually addressable wake primitive" in the design doc means
  * and nothing more.
  *
  * PHASE 3 AMENDS THIS, NARROWLY AND DELIBERATELY: the blocking-FFI monitor
  * (see "blocking-FFI handoff" below) is a second, rare, explicitly-admitted
  * exception to "nothing reaches into another carrier's local buffer" --
- * but only ever while that carrier is provably stuck inside a blocking FFI
- * call, never during ordinary operation, and only ever through
- * `local_lock`, which this carrier's own thread also takes around its one
- * remaining unsynchronised touch of `local`/`local_head`/`local_len`
- * (local_push, in carrier_dispatch's post-switch bookkeeping). Every other
- * access -- carrier_main's own draw/pop, every ordinary dispatch -- stays
- * exactly as lock-free as Phase 2 made it; this is one mutex, taken at most
- * once per green-thread dispatch, not a general-purpose lock around the
- * local buffer. `blocking_rec` is this carrier's own blocking-FFI record
- * (runtime/rt.h), registered into this OS thread's TLS once, at
- * carrier_main startup. */
+ * reaching in only ever through `local_lock`, which this carrier's own
+ * thread ALSO takes around every one of its own touches of
+ * `local`/`local_head`/`local_len`: `local_push` (carrier_dispatch's
+ * post-switch bookkeeping) AND carrier_main's own draw-and-reset/pop in its
+ * dispatch loop, below. This used to be narrower -- only local_push took
+ * the lock, and carrier_main's own draw/pop stayed lock-free on the belief
+ * that try_handoff only ever runs while this carrier is PROVABLY not
+ * concurrently executing its own loop at all (genuinely blocked inside a
+ * real syscall). That belief was found FALSE and fixed:
+ * docs/concurrency-decision.md's Phase 3.5 section ("the try_handoff/
+ * carrier_main race") has the full, TSan-confirmed account -- in short, a
+ * `prim` that parks the green thread (switching this carrier straight back
+ * into carrier_main's loop) without perfectly clearing `blocking_since_ns`
+ * for every call shape can leave this carrier looking "stuck" to the
+ * monitor while it is actually right here, racing try_handoff's locked
+ * mutation of these exact fields with its own unlocked ones. Locking every
+ * touch, not just local_push, closes this unconditionally -- correct no
+ * matter what makes try_handoff fire, not merely whenever the "stuck"
+ * belief happens to be true. Still one mutex, taken at most a few times per
+ * green-thread dispatch (once per local_pop, once per draw, once per
+ * local_push), not a general-purpose lock held across anything blocking --
+ * see try_handoff's own comment for why it is released before its
+ * squeue_push calls, and carrier_main's loop for why the draw and the pop
+ * are each their own short critical section. `blocking_rec` is this
+ * carrier's own blocking-FFI record (runtime/rt.h), registered into this OS
+ * thread's TLS once, at carrier_main startup. */
 
 typedef struct rt_carrier {
     struct rt_scheduler *sched;
     uint32_t             index;
     pthread_t            os_thread;
 
-    sem_t       wake_sem;
-    atomic_bool idle;
+    rt_wake_sem_t wake_sem;
+    atomic_bool   idle;
 
     rt_green_t **local;
     uint32_t     local_cap;
@@ -562,6 +763,19 @@ struct rt_green {
                                   * when it already knows, before switching,
                                   * that it must requeue itself immediately
                                   * rather than genuinely wait. */
+
+    /* Diagnostic guard for the unresolved rt_stack_limit race
+     * (docs/concurrency-decision.md, "Phase 3.5"). Hypothesis (b) there --
+     * the same green thread briefly live on two carriers at once -- was
+     * never caught in the act because nothing makes that condition loud:
+     * if it happens, both carriers silently run rt_fiber_switch against the
+     * same g->ctx/g->stack, and whichever corruption follows surfaces far
+     * from its actual cause. This CAS's only job is to turn that silent
+     * double-dispatch into an immediate, pinpointed rt_trap instead --
+     * CAS false->true in carrier_dispatch right before rt_fiber_switch,
+     * false->... reset to false right after it returns. Not a fix; a smoke
+     * detector. */
+    _Atomic bool     claimed_by_carrier;
 };
 
 /* Which green thread (if any) is running on THIS OS thread right now, and
@@ -571,6 +785,30 @@ struct rt_green {
  * life of that OS thread. */
 static _Thread_local rt_green_t *tls_current_green = NULL;
 static _Thread_local uint32_t    tls_carrier_index = UINT32_MAX;
+
+#if RT_TSAN_BUILD
+/* This carrier OS thread's own native TSan fiber identity -- captured once,
+ * in carrier_main, before this thread ever switches into a green thread's
+ * fiber for the first time. See greenthread.h's "A note on ThreadSanitizer"
+ * comment for the full account of why this runtime needs fiber identities
+ * at all; this is the "switch back to being plain old carrier N" side of
+ * every pair, used by rt_sched_yield/rt_sched_park/green_trampoline right
+ * before each of their own switch-aways, mirroring carrier_dispatch's own
+ * switch-in (which targets g->stack.tsan_fiber instead). Thread-local for
+ * the same reason tls_current_green/tls_carrier_index are: this identity
+ * belongs to the OS thread, not to whichever green thread it happens to be
+ * running right now. */
+static _Thread_local void *tls_carrier_tsan_fiber = NULL;
+#endif
+
+/* squeue_push's own forward declaration, above, explains why this exists:
+ * "is the calling OS thread currently running a green thread, or is it some
+ * other kind of caller" (an ordinary OS thread, or a carrier's own
+ * post-dispatch bookkeeping, which runs with tls_current_green already
+ * cleared -- see carrier_dispatch). */
+static bool rt_sched_in_green_thread(void) {
+    return tls_current_green != NULL;
+}
 
 /* ---- the wake notification itself -------------------------------------- */
 
@@ -594,7 +832,7 @@ static void notify_new_work(rt_scheduler_t *s) {
         if (atomic_compare_exchange_strong_explicit(
                 &c->idle, &expected, false, memory_order_acq_rel,
                 memory_order_relaxed)) {
-            sem_post(&c->wake_sem);
+            rt_wake_sem_post(&c->wake_sem);
             pthread_mutex_unlock(&p->lock);
             return;
         }
@@ -626,6 +864,15 @@ static void green_trampoline(void *argp) {
     g->entry(g->arg);
     rt_gtstate_set(g->id, RT_GT_DEAD);
     g->finished = true;
+#if RT_TSAN_BUILD
+    /* Tell TSan this OS thread is about to stop being green thread g's
+     * fiber and go back to being plain carrier tls_carrier_index, BEFORE
+     * the actual stack switch below performs it -- see greenthread.h's "A
+     * note on ThreadSanitizer" comment for why this has to be a single
+     * call made by the originating side, not a pair bracketing the switch
+     * the way ASan's (unused) fiber API would need. */
+    __tsan_switch_to_fiber(tls_carrier_tsan_fiber, 0);
+#endif
     rt_fiber_switch(&g->ctx, g->carrier_ctx, 0);
     /* Unreachable: a Dead green thread is never dispatched again. */
     rt_ctx_entry_returned();
@@ -645,6 +892,15 @@ void rt_sched_yield(void) {
      * switch-away has to set this fresh rather than relying on whatever
      * the field already held. */
     g->parked = false;
+#if RT_TSAN_BUILD
+    /* Tell TSan this OS thread is about to stop being green thread g's
+     * fiber and go back to being plain carrier tls_carrier_index, BEFORE
+     * the actual stack switch below performs it -- see greenthread.h's "A
+     * note on ThreadSanitizer" comment for why this has to be a single
+     * call made by the originating side, not a pair bracketing the switch
+     * the way ASan's (unused) fiber API would need. */
+    __tsan_switch_to_fiber(tls_carrier_tsan_fiber, 0);
+#endif
     rt_fiber_switch(&g->ctx, g->carrier_ctx, 0);
     /* Resumed: carrier_dispatch already set RT_GT_RUNNING and
      * tls_current_green again before switching back in, below -- nothing
@@ -753,6 +1009,15 @@ void rt_sched_park(rt_green_state_t parked_state) {
      * thread is provably off its own stack. */
     g->parked = true;
     g->notified_before_park = already_notified;
+#if RT_TSAN_BUILD
+    /* Tell TSan this OS thread is about to stop being green thread g's
+     * fiber and go back to being plain carrier tls_carrier_index, BEFORE
+     * the actual stack switch below performs it -- see greenthread.h's "A
+     * note on ThreadSanitizer" comment for why this has to be a single
+     * call made by the originating side, not a pair bracketing the switch
+     * the way ASan's (unused) fiber API would need. */
+    __tsan_switch_to_fiber(tls_carrier_tsan_fiber, 0);
+#endif
     rt_fiber_switch(&g->ctx, g->carrier_ctx, 0);
     /* Resumed -- either rt_sched_unpark, or carrier_dispatch's own
      * immediate self-requeue path, pushed us back through the shared queue,
@@ -858,7 +1123,41 @@ static void carrier_dispatch(rt_carrier_t *c, rt_green_t *g) {
      * that gap (same fix shape as rt_spawn's own comment above about the
      * thread-count race TSan found during Phase 0). */
     atomic_fetch_add_explicit(&c->dispatched, 1, memory_order_release);
+
+    /* claimed_by_carrier's own comment: this is the actual guard, not just
+     * its declaration. A failed CAS here means some OTHER carrier's own
+     * rt_fiber_switch into this SAME g->ctx is concurrently in flight right
+     * now -- exactly the unresolved double-dispatch hypothesis for the
+     * rt_stack_limit race -- caught here, loudly, instead of silently
+     * corrupting whichever stack happens to be adjacent. */
+    bool not_claimed = false;
+    if (!atomic_compare_exchange_strong_explicit(
+            &g->claimed_by_carrier, &not_claimed, true, memory_order_acq_rel,
+            memory_order_acquire)) {
+        rt_trap("carrier_dispatch: green thread already claimed by another "
+                "carrier -- double-dispatch detected (see claimed_by_carrier's "
+                "comment and docs/concurrency-decision.md's Phase 3.5)");
+    }
+
+#if RT_TSAN_BUILD
+    /* Tell TSan this OS thread is about to become green thread g's fiber,
+     * BEFORE the actual stack switch below performs it -- see
+     * greenthread.h's "A note on ThreadSanitizer" comment. g->stack.tsan_fiber
+     * was created in rt_stack_alloc (rt_sched_spawn, above) and is destroyed
+     * in rt_stack_free once g finishes (this function's own `finished`
+     * branch, below) -- never while it could still be the current fiber of
+     * any thread, since every switch-away from it (rt_sched_yield/
+     * rt_sched_park/green_trampoline) already switches this thread's
+     * identity back to tls_carrier_tsan_fiber first. */
+    __tsan_switch_to_fiber(g->stack.tsan_fiber, 0);
+#endif
     rt_fiber_switch(&loop_ctx, &g->ctx, (uintptr_t)g->stack.base);
+
+    /* Released the instant this carrier is provably done directly driving
+     * g's context for this dispatch episode -- before anything below could
+     * make g visible to another carrier again (the requeue paths further
+     * down, or registry_remove/free in the finished branch). */
+    atomic_store_explicit(&g->claimed_by_carrier, false, memory_order_release);
 
     tls_current_green = NULL;
 
@@ -955,6 +1254,11 @@ static void carrier_dispatch(rt_carrier_t *c, rt_green_t *g) {
 static void *carrier_main(void *argp) {
     rt_carrier_t *c = (rt_carrier_t *)argp;
     tls_carrier_index = c->index;
+#if RT_TSAN_BUILD
+    /* Captured once, before this OS thread ever switches into a green
+     * thread's fiber -- see tls_carrier_tsan_fiber's own comment above. */
+    tls_carrier_tsan_fiber = __tsan_get_current_fiber();
+#endif
     /* Phase 3: so that any `prim` call any green thread this carrier ever
      * dispatches makes can find ITS carrier's own blocking record through
      * TLS, with no argument to pass -- see runtime/rt.h's "blocking FFI"
@@ -963,46 +1267,84 @@ static void *carrier_main(void *argp) {
     rt_blocking_register(&c->blocking_rec);
 
     for (;;) {
+        /* Every touch of local/local_head/local_len in this loop -- the
+         * emptiness check, the draw-and-reset, and the pop -- is now taken
+         * under local_lock, the SAME mutex local_push (carrier_dispatch,
+         * above) already takes and try_handoff (below) already takes.
+         *
+         * This loop used to touch these fields with no lock at all, resting
+         * on the invariant that try_handoff only ever runs while this
+         * carrier is PROVABLY not concurrently executing this very loop --
+         * true for a genuine blocking syscall (the OS thread is inside the
+         * kernel, doing nothing else), but NOT guaranteed for every `prim`:
+         * runtime/rt.c's rt_wait_io comment documents one concrete way a
+         * `prim` can park the green thread -- switching this carrier
+         * straight back into this loop -- while leaving blocking_since_ns
+         * set, which is exactly what makes the carrier look "stuck" to the
+         * monitor while it is actually running right here. rt_wait_io's own
+         * exit/enter-blocking dance closes that specific case, but not
+         * (per this project's own reading of it, docs/concurrency-decision.md
+         * Phase 3.5) every other `prim` call shape, and this was a real,
+         * TSan-confirmed data race between this loop and try_handoff as a
+         * result. Taking local_lock here closes it unconditionally: no
+         * matter what makes try_handoff fire, it and this loop can no
+         * longer touch local/local_head/local_len at the same time. */
+        rt_green_t *g = NULL;
+        bool drew = false;
+        uint32_t drew_n = 0;
+
+        pthread_mutex_lock(&c->local_lock);
         if (c->local_len == 0) {
-            uint32_t n = squeue_draw(&c->sched->global, c->local, c->local_cap);
+            uint32_t n = squeue_draw(c->sched, &c->sched->global, c->local, c->local_cap);
             if (n > 0) {
                 c->local_head = 0;
                 c->local_len = n;
-                atomic_store_explicit(&c->idle, false, memory_order_relaxed);
-                update_max_draw_seen(c->sched, n);
-            } else {
-                if (atomic_load_explicit(&c->sched->shutdown,
-                                          memory_order_relaxed)) {
-                    return NULL;
-                }
-                /* Genuinely nothing anywhere: go idle. Set the flag BEFORE
-                 * waiting, not after -- sem_post/sem_timedwait's own count
-                 * means a notify that lands between this store and the
-                 * wait call below is not lost (the semaphore remembers the
-                 * post), which is what actually closes the lost-wakeup
-                 * window; the periodic timeout is the remaining
-                 * correctness floor for anything this still misses. */
-                atomic_store_explicit(&c->idle, true, memory_order_relaxed);
-
-                struct timespec ts;
-                clock_gettime(CLOCK_REALTIME, &ts);
-                ts.tv_nsec += 5 * 1000 * 1000; /* 5ms periodic fallback */
-                if (ts.tv_nsec >= 1000000000L) {
-                    ts.tv_sec += 1;
-                    ts.tv_nsec -= 1000000000L;
-                }
-                while (sem_timedwait(&c->wake_sem, &ts) != 0 && errno == EINTR) {
-                    /* retry on signal interruption only */
-                }
-                /* Either a real post, or ETIMEDOUT (the fallback firing),
-                 * or a spurious-looking EINVAL from a clock edge case --
-                 * all three mean exactly the same thing here: go back to
-                 * the top and try to find work again. */
-                continue;
+                drew = true;
+                drew_n = n;
             }
         }
+        if (c->local_len > 0) {
+            g = local_pop(c);
+        }
+        pthread_mutex_unlock(&c->local_lock);
 
-        rt_green_t *g = local_pop(c);
+        if (g == NULL) {
+            if (atomic_load_explicit(&c->sched->shutdown,
+                                      memory_order_relaxed)) {
+                return NULL;
+            }
+            /* Genuinely nothing anywhere: go idle. Set the flag BEFORE
+             * waiting, not after -- rt_wake_sem_post/rt_wake_sem_timedwait's
+             * own count means a notify that lands between this store and
+             * the wait call below is not lost (the wake semaphore remembers
+             * the post, exactly like a real sem_t would), which is what
+             * actually closes the lost-wakeup window; the periodic timeout
+             * is the remaining correctness floor for anything this still
+             * misses. */
+            atomic_store_explicit(&c->idle, true, memory_order_relaxed);
+
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_nsec += 5 * 1000 * 1000; /* 5ms periodic fallback */
+            if (ts.tv_nsec >= 1000000000L) {
+                ts.tv_sec += 1;
+                ts.tv_nsec -= 1000000000L;
+            }
+            rt_wake_sem_timedwait(&c->wake_sem, &ts);
+            /* Either a real post or the 5ms fallback firing -- both mean
+             * exactly the same thing here: go back to the top and try to
+             * find work again. Unlike the old sem_timedwait call, there is
+             * no EINTR to retry on and no clock-edge EINVAL to shrug off:
+             * pthread_cond_timedwait is specified to never return EINTR,
+             * and rt_wake_sem_timedwait's own `while (count == 0)` loop
+             * already absorbs any spurious condvar wakeup internally. */
+            continue;
+        }
+
+        if (drew) {
+            atomic_store_explicit(&c->idle, false, memory_order_relaxed);
+            update_max_draw_seen(c->sched, drew_n);
+        }
         carrier_dispatch(c, g);
     }
 }
@@ -1091,7 +1433,7 @@ rt_scheduler_t *rt_sched_create(uint32_t n_carriers) {
         rt_carrier_t *c = &s->carriers[i];
         c->sched = s;
         c->index = i;
-        if (sem_init(&c->wake_sem, 0, 0) != 0) {
+        if (rt_wake_sem_init(&c->wake_sem) != 0) {
             rt_trap("could not create a carrier's wake semaphore");
         }
         /* Every carrier starts idle=true: it genuinely is, before anything
@@ -1149,6 +1491,7 @@ uint32_t rt_sched_spawn(rt_scheduler_t *s, void (*entry)(void *), void *arg) {
     atomic_init(&g->park_word, RT_PARK_EMPTY);
     g->parked = false;
     g->notified_before_park = false;
+    atomic_init(&g->claimed_by_carrier, false);
     registry_insert(&s->registry, g->id, g);
 
     rt_gtstate_set(g->id, RT_GT_RUNNABLE);
@@ -1349,7 +1692,7 @@ uint64_t rt_sched_handoff_items(rt_scheduler_t *s) {
 void rt_sched_shutdown(rt_scheduler_t *s) {
     atomic_store_explicit(&s->shutdown, true, memory_order_relaxed);
     for (uint32_t i = 0; i < s->n_carriers; i++) {
-        sem_post(&s->carriers[i].wake_sem);
+        rt_wake_sem_post(&s->carriers[i].wake_sem);
     }
     for (uint32_t i = 0; i < s->n_carriers; i++) {
         pthread_join(s->carriers[i].os_thread, NULL);
@@ -1369,7 +1712,7 @@ void rt_sched_destroy(rt_scheduler_t *s) {
     free(s->perm.order);
     registry_destroy(&s->registry);
     for (uint32_t i = 0; i < s->n_carriers; i++) {
-        sem_destroy(&s->carriers[i].wake_sem);
+        rt_wake_sem_destroy(&s->carriers[i].wake_sem);
         pthread_mutex_destroy(&s->carriers[i].local_lock);
         free(s->carriers[i].local);
     }

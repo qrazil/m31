@@ -1,8 +1,24 @@
-/* Phase 3 epoll reactor (docs/concurrency-decision.md, "Phases" -- Phase 3:
- * epoll reactor, park/unpark, blocking-FFI handoff). Built on top of the
- * Phase 2 scheduler's park/unpark surface (runtime/scheduler.h) -- this file
- * does not touch scheduler.c/.h itself at all, it only calls the additive
- * API that lives there.
+/* The reactor (docs/concurrency-decision.md, "Phases" -- Phase 3: epoll
+ * reactor, park/unpark, blocking-FFI handoff; "Phase 3.5": kqueue port for
+ * macOS/BSD). Built on top of the Phase 2 scheduler's park/unpark surface
+ * (runtime/scheduler.h) -- neither backend touches scheduler.c/.h itself at
+ * all, each only calls the additive API that lives there.
+ *
+ * ONE CONTRACT, TWO BACKENDS: this header is the entire cross-platform
+ * contract. Exactly one of runtime/reactor_epoll.c (Linux: epoll_wait,
+ * eventfd) or runtime/reactor_kqueue.c (macOS/BSD: kevent, EVFILT_USER) is
+ * compiled into any given build -- runtime/arch.sh picks which, per
+ * `uname -s`, the same way it already picks the per-architecture
+ * context-switch file. Nothing outside those two .c files -- not rt.c, not
+ * scheduler.c, not this header's own declarations below -- knows or needs
+ * to know which backend a given build linked; `struct rt_reactor` is
+ * opaque here specifically so each backend can give it entirely different
+ * fields. See whichever backend file is actually linked for the OS-specific
+ * design reasoning (the epoll<->kqueue mapping, why EVFILT_USER instead of
+ * a self-pipe, the EV_ONESHOT-vs-EPOLLONESHOT edge case that does NOT carry
+ * over unchanged -- kqueue splits read/write into independent knotes where
+ * epoll has one combined registration, which is the one place a naive
+ * line-for-line port would have introduced a spurious-wakeup bug).
  *
  * This is a STANDALONE component, the same convention runtime/scheduler.h
  * documents for itself: not #included by rt.c, not reachable from a
@@ -12,16 +28,17 @@
  * file.
  *
  * WHAT THIS IS: a component that watches registered file descriptors for
- * readiness via a dedicated OS thread running epoll_wait in a loop, and, on
- * a ready fd, looks up which green thread (if any) is waiting on it and
- * calls rt_sched_unpark for it.
+ * readiness via a dedicated OS thread running the platform's blocking
+ * readiness-wait syscall (epoll_wait or kevent) in a loop, and, on a ready
+ * fd, looks up which green thread (if any) is waiting on it and calls
+ * rt_sched_unpark for it.
  *
  * WHERE THE REACTOR LOOP RUNS, AND WHY: one dedicated OS thread per
  * rt_reactor_t, never a carrier. A carrier's whole job is dispatching green
- * threads; epoll_wait blocking for an arbitrary time is exactly the kind of
- * foreign block a carrier must never do on its own thread (that is what
- * Part 3's blocking-FFI handoff exists to rescue carriers FROM -- using the
- * reactor's own carrier thread to run epoll_wait would need to rescue
+ * threads; blocking in epoll_wait/kevent for an arbitrary time is exactly
+ * the kind of foreign block a carrier must never do on its own thread (that
+ * is what Part 3's blocking-FFI handoff exists to rescue carriers FROM --
+ * using the reactor's own carrier thread to run it would need to rescue
  * itself from itself, which is circular). One dedicated thread is also
  * simply the standard shape for a reactor in exactly this family of
  * designs (Go's netpoller, Node's libuv, Rust's tokio reactor all use a
@@ -68,18 +85,19 @@ rt_reactor_t *rt_reactor_create(rt_scheduler_t *sched);
 /* Called from inside a running green thread, after a non-blocking operation
  * on `fd` returned EAGAIN/EWOULDBLOCK and the caller wants to wait for
  * `events` (RT_REACTOR_READ/RT_REACTOR_WRITE, OR'd) before retrying.
- * Registers interest with epoll for `fd` and parks the calling green thread
- * (rt_sched_park) until `fd` becomes ready for at least one requested
- * event -- UNLESS the reactor's own thread already observed that readiness
- * before this call reached rt_sched_park, in which case rt_sched_park's own
- * CAS protocol makes this return immediately without ever suspending. See
- * this header's own top comment for why no second race-closing mechanism
- * is needed in this file for that to be correct.
+ * Registers interest with the OS readiness mechanism (epoll or kqueue, per
+ * backend) for `fd` and parks the calling green thread (rt_sched_park)
+ * until `fd` becomes ready for at least one requested event -- UNLESS the
+ * reactor's own thread already observed that readiness before this call
+ * reached rt_sched_park, in which case rt_sched_park's own CAS protocol
+ * makes this return immediately without ever suspending. See this header's
+ * own top comment for why no second race-closing mechanism is needed in
+ * either backend for that to be correct.
  *
  * Traps if called from outside a running green thread (rt_sched_park's own
- * contract) or if epoll_ctl fails for a reason other than the ordinary
- * "this fd is new to this epoll instance" case this function already
- * handles (e.g. a closed or otherwise invalid fd is a caller bug, not a
+ * contract) or if the backend's registration call fails for a reason other
+ * than the ordinary "this fd is new to this reactor's interest set" case
+ * each backend already handles (e.g. a closed or otherwise invalid fd is a
  * condition this function can usefully recover from). */
 void rt_reactor_wait(rt_reactor_t *r, int fd, uint32_t events);
 

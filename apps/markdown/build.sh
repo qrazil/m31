@@ -6,6 +6,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . ./config.sh
+. ./runtime/arch.sh
 
 LANGC=${LANGC:-./target/debug/$LANG_BIN}
 CC=${CC:-gcc}
@@ -22,5 +23,6 @@ fi
 "$LANGC" --emit-c "apps/markdown/main.$LANG_EXT" -o "$W/markdown.c" || exit 1
 # The same flags run.sh holds the corpus to: the emitted C must be clean.
 "$CC" "$OPT" -ffp-contract=off -Wall -Wextra -Werror -I runtime -pthread \
-      -o "$OUT" "$W/markdown.c" runtime/rt.c || exit 1
+      -o "$OUT" "$W/markdown.c" \
+      runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" || exit 1
 echo "built $OUT"
