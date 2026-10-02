@@ -55,8 +55,82 @@ void serve(net.Listener ln, int n) {
     Result<bool, net.Error> closed = ln.close();
 }
 
+// listen()'s backlog argument is a request, not a guarantee: the kernel
+// clamps it to its own ceiling (somaxconn) regardless of what this program
+// asks for, and a real macOS CI run showed the N+56 backlog above making
+// no difference at all -- byte-for-byte the same "connection was broken by
+// the peer" as the unmodified default, which only makes sense if both
+// requests were silently clamped to the same real kernel ceiling. This is
+// standard BSD/POSIX behavior under a genuine connection burst, not a bug
+// in this runtime's reactor: once N real connect()s fire at once on a
+// single carrier, some will race ahead of the accept loop's own turn and
+// land on a backlog the kernel has already decided is full, and BSD
+// kernels are documented to answer that with a RST (ECONNRESET) rather
+// than Linux's more common silent-drop-and-let-the-client's-own-SYN-retry
+// handle it. A production TCP client retries exactly this the same way.
+//
+// No stdlib sleep/yield primitive exists to wait between attempts.
+// connect() IS a blocking FFI call (every call site already goes through
+// enter_blocking/exit_blocking, see the compiler's own warnings above),
+// but that only yields the carrier when the syscall actually blocks --
+// confirmed locally (artificially set backlog: 1 to force every
+// connection past the first to be refused synchronously) that a
+// same-carrier RST-and-immediate-retry loop with no real wait in it can
+// come back so fast it never actually parks, starving the accept loop of
+// a turn forever on a single carrier. yield_once() below forces a real
+// scheduling round trip the same way: park on a channel recv, let a
+// spawned green thread (necessarily a separate scheduling turn) wake it.
+const int CONNECT_RETRIES = 20;
+
+void send_tick(Chan<int> tick) {
+    send(tick, 1);
+}
+
+void yield_once() {
+    Chan<int> tick = Chan<int>(1);
+    spawn send_tick(tick);
+    int ignored = recv(tick);
+}
+
 void client(int id, int port, Chan<int> results) {
-    match (net.connect("127.0.0.1", port)) {
+    Result<net.Conn, net.Error> attempt = net.connect("127.0.0.1", port);
+    int tries = 0;
+    while (true) {
+        bool retry = false;
+        match (attempt) {
+            case Ok(net.Conn c): {
+            }
+            case Err(net.Error e): {
+                match (e) {
+                    case Reset: {
+                        tries = tries + 1;
+                        if (tries < CONNECT_RETRIES) {
+                            retry = true;
+                        }
+                    }
+                    case Refused: {
+                    }
+                    case TimedOut: {
+                    }
+                    case Unreachable: {
+                    }
+                    case InUse: {
+                    }
+                    case NameNotFound: {
+                    }
+                    case Other(int code): {
+                    }
+                }
+            }
+        }
+        if (retry) {
+            yield_once();
+            attempt = net.connect("127.0.0.1", port);
+            continue;
+        }
+        break;
+    }
+    match (attempt) {
         case Ok(net.Conn c): {
             bytes line = (id.to_str() + "\n").to_bytes();
             match (c.write(line)) {
@@ -86,14 +160,11 @@ void client(int id, int port, Chan<int> results) {
     }
 }
 
-// backlog defaults to 128 (lib/net.m31), below N -- fine on Linux (this
-// single-carrier accept loop apparently drains fast enough that the real
-// in-flight backlog never actually hits 128 there), but a real macOS CI
-// run hit "connect: the connection was broken by the peer" at this exact
-// N=200 default-backlog combination: kqueue's accept-readiness timing
-// differs enough from epoll's that it does happen there. Comfortably
-// above N so this demo tests the concurrency claim, not a backlog size
-// nobody chose on purpose.
+// N + 56, comfortably above N, so this demo tests the concurrency claim
+// rather than a backlog size nobody chose on purpose -- though client()'s
+// own comment above is why this alone does not make the demo bulletproof
+// on every kernel: the real ceiling is somaxconn, which this argument
+// cannot raise past.
 match (net.listen("127.0.0.1", 0, backlog: N + 56)) {
     case Ok(net.Listener ln): {
         int port = ln.local().port();
