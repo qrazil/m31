@@ -35,6 +35,39 @@ fi
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
+# Portable stand-in for GNU coreutils' `timeout`, which macOS does not ship
+# (found for real: a macOS CI run of this exact script failed every case
+# with "line 67: timeout: command not found", exit 127 -- not a test
+# failure, a missing command). Background the real command, race it against
+# a background `sleep`-then-`kill` watchdog, and return the real command's
+# exit status -- or, on a timeout, whatever killing it with SIGTERM
+# produces (128+signal, always nonzero), which is all either call site
+# below actually checks for (`[ "$rc" -eq 0 ]`). Pure POSIX (kill, sleep,
+# wait, background jobs), nothing GNU- or Linux-specific.
+run_with_timeout() {
+    local secs=$1
+    shift
+    "$@" &
+    local pid=$!
+    # >/dev/null 2>&1 here is load-bearing, not cosmetic: this watcher
+    # would otherwise inherit THIS function's own stdout, which at every
+    # real call site is the write end of a $(...) command-substitution
+    # pipe -- and $(...) does not return until every process holding that
+    # write end has closed it, the watcher included. Without this
+    # redirect, killing "$pid" early still leaves the orphaned watcher (or
+    # its still-running `sleep`) holding the pipe open, so the surrounding
+    # $(...) silently blocks for the rest of $secs regardless of how fast
+    # the real command finished -- caught by this exact symptom locally
+    # before this ever reached CI.
+    (sleep "$secs"; kill -TERM "$pid" 2>/dev/null) >/dev/null 2>&1 &
+    local watcher=$!
+    wait "$pid" 2>/dev/null
+    local rc=$?
+    kill "$watcher" 2>/dev/null
+    wait "$watcher" 2>/dev/null
+    return "$rc"
+}
+
 stock_runs=${1:-40}
 tsan_runs=${2:-15}
 fail=0
@@ -64,7 +97,7 @@ for carriers in 1 2 4; do
     ok=0
     for i in $(seq 1 "$stock_runs"); do
         out=$(LANG_NUM_CARRIERS=$carriers LANG_GLOBAL_QUEUE_CAP=4 \
-              timeout 15 "$STOCK" 2>&1)
+              run_with_timeout 15 "$STOCK" 2>&1)
         rc=$?
         if [ "$rc" -eq 0 ] && [ "$out" = "$EXPECTED" ]; then
             ok=$((ok + 1))
@@ -93,7 +126,7 @@ if command -v clang >/dev/null; then
             for i in $(seq 1 "$tsan_runs"); do
                 out=$(LANG_NUM_CARRIERS=$carriers LANG_GLOBAL_QUEUE_CAP=4 \
                       TSAN_OPTIONS="halt_on_error=0 history_size=7" \
-                      timeout 20 "$TSAN" 2>&1)
+                      run_with_timeout 20 "$TSAN" 2>&1)
                 rc=$?
                 warnings=$(echo "$out" | grep -c "WARNING: ThreadSanitizer" || true)
                 got=$(echo "$out" | grep -v "WARNING: ThreadSanitizer" | grep -v '^    #[0-9]')
