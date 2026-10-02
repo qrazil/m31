@@ -17,7 +17,6 @@
 #include "scheduler.h"
 
 #include <pthread.h>
-#include <semaphore.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -63,15 +62,49 @@ static void sleep_ms(int ms) {
 /* A gate: occupies whichever carrier dispatches it, blocked, until the test
  * releases it -- the only way to deterministically force backlog to
  * accumulate in the shared queue for the fuel_size / backpressure tests
- * below, given carriers start consuming the instant anything is pushed. */
-typedef struct { sem_t sem; } gate_t;
+ * below, given carriers start consuming the instant anything is pushed.
+ *
+ * NOT a raw POSIX unnamed sem_t: macOS does not properly support
+ * sem_init/sem_wait for unnamed semaphores (the same gap
+ * runtime/scheduler.c's rt_wake_sem_t, in that file, was built to work
+ * around for the runtime itself -- see its own comment there). This
+ * matters here specifically because gate_release() must be safe to call
+ * BEFORE gate_worker() reaches its wait (the test releases the gate from
+ * the main thread without synchronizing on the worker having started) --
+ * exactly the "post remembered even if no one is waiting yet" guarantee a
+ * degraded macOS sem_wait can silently drop, which would make the gate
+ * never actually block and the backlog drain to 0 instead of accumulating,
+ * precisely what a real macOS CI run of this file showed. A small local
+ * mutex+condvar+count mirrors that same fix, scoped to this test file. */
+typedef struct {
+    pthread_mutex_t mu;
+    pthread_cond_t  cv;
+    int             count;
+} gate_t;
 
-static void gate_init(gate_t *g) { sem_init(&g->sem, 0, 0); }
-static void gate_release(gate_t *g) { sem_post(&g->sem); }
-static void gate_destroy(gate_t *g) { sem_destroy(&g->sem); }
+static void gate_init(gate_t *g) {
+    pthread_mutex_init(&g->mu, NULL);
+    pthread_cond_init(&g->cv, NULL);
+    g->count = 0;
+}
+static void gate_release(gate_t *g) {
+    pthread_mutex_lock(&g->mu);
+    g->count++;
+    pthread_cond_signal(&g->cv);
+    pthread_mutex_unlock(&g->mu);
+}
+static void gate_destroy(gate_t *g) {
+    pthread_mutex_destroy(&g->mu);
+    pthread_cond_destroy(&g->cv);
+}
 static void gate_worker(void *argp) {
     gate_t *g = (gate_t *)argp;
-    sem_wait(&g->sem);
+    pthread_mutex_lock(&g->mu);
+    while (g->count == 0) {
+        pthread_cond_wait(&g->cv, &g->mu);
+    }
+    g->count--;
+    pthread_mutex_unlock(&g->mu);
 }
 
 typedef struct { _Atomic uint32_t *completed; } noop_arg_t;

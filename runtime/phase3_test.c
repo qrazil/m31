@@ -71,7 +71,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
-#include <semaphore.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -111,13 +110,54 @@ static void sleep_ms(int ms) {
         *(out_ok) = (cond);                                                  \
     } while (0)
 
+/* A small test-scoped semaphore replacement, used everywhere this file
+ * would otherwise reach for a raw POSIX unnamed sem_t: macOS does not
+ * properly support sem_init/sem_wait for unnamed semaphores (the same gap
+ * runtime/scheduler.c's rt_wake_sem_t works around for the runtime itself,
+ * and runtime/scheduler_test.c's own gate_t works around the identical
+ * way). Every "post" below must be safe to call before the matching
+ * "wait" has even started -- the park/unpark race tests this file runs
+ * deliberately bias toward exactly that ordering (see race_park_worker's
+ * delay_mode) -- which is the one guarantee a degraded macOS sem_wait can
+ * silently drop. One shared mutex+condvar+count type replaces every sem_t
+ * in this file rather than three or four separate hand-rolled copies. */
+typedef struct {
+    pthread_mutex_t mu;
+    pthread_cond_t  cv;
+    int             count;
+} rt_test_sem_t;
+
+static void rt_test_sem_init(rt_test_sem_t *s) {
+    pthread_mutex_init(&s->mu, NULL);
+    pthread_cond_init(&s->cv, NULL);
+    s->count = 0;
+}
+static void rt_test_sem_post(rt_test_sem_t *s) {
+    pthread_mutex_lock(&s->mu);
+    s->count++;
+    pthread_cond_signal(&s->cv);
+    pthread_mutex_unlock(&s->mu);
+}
+static void rt_test_sem_wait(rt_test_sem_t *s) {
+    pthread_mutex_lock(&s->mu);
+    while (s->count == 0) {
+        pthread_cond_wait(&s->cv, &s->mu);
+    }
+    s->count--;
+    pthread_mutex_unlock(&s->mu);
+}
+static void rt_test_sem_destroy(rt_test_sem_t *s) {
+    pthread_mutex_destroy(&s->mu);
+    pthread_cond_destroy(&s->cv);
+}
+
 /* ========================================================================
  * Test 1 -- the lost-wakeup CAS race (Part 1).
  * ====================================================================== */
 
 typedef struct {
     _Atomic uint32_t my_id; /* UINT32_MAX until published */
-    sem_t             ready; /* posted right before this green thread either
+    rt_test_sem_t     ready; /* posted right before this green thread either
                                * delays-then-parks or parks immediately */
     _Atomic bool      finished;
     int               delay_mode; /* 0 = none, 1 = delay here (bias: the
@@ -129,11 +169,11 @@ static void race_park_worker(void *argp) {
     race_arg_t *a = (race_arg_t *)argp;
     atomic_store_explicit(&a->my_id, rt_sched_current_green_id(),
                            memory_order_release);
-    sem_post(&a->ready);
+    rt_test_sem_post(&a->ready);
     if (a->delay_mode == 1) {
         /* Deliberately widen the EAGAIN-to-park gap the task describes: by
          * the time we reach our own CAS below, the unparker (already
-         * released by the sem_post above) has almost certainly already
+         * released by the rt_test_sem_post above) has almost certainly already
          * called rt_sched_unpark, so this exercises "notified before we
          * ever parked" on purpose rather than by luck.
          *
@@ -181,13 +221,13 @@ static void race_park_worker(void *argp) {
  * next's. */
 typedef struct {
     pthread_t         thread;
-    sem_t             go;   /* test -> unparker: a new trial is ready */
-    sem_t             done; /* unparker -> test: this trial's unpark call
+    rt_test_sem_t     go;   /* test -> unparker: a new trial is ready */
+    rt_test_sem_t     done; /* unparker -> test: this trial's unpark call
                               * has happened (or was skipped -- see `stop`) */
     _Atomic bool      stop;
     rt_scheduler_t   *s;
     _Atomic uint32_t *id_ptr;
-    sem_t            *green_ready;
+    rt_test_sem_t    *green_ready;
     int               delay_mode; /* 2 = delay here before calling unpark,
                                     * biasing towards "genuine suspend, woken
                                     * later" instead */
@@ -196,11 +236,11 @@ typedef struct {
 static void *persistent_unparker_main(void *argp) {
     unparker_pool_t *p = (unparker_pool_t *)argp;
     for (;;) {
-        sem_wait(&p->go);
+        rt_test_sem_wait(&p->go);
         if (atomic_load_explicit(&p->stop, memory_order_acquire)) {
             return NULL;
         }
-        sem_wait(p->green_ready);
+        rt_test_sem_wait(p->green_ready);
         if (p->delay_mode == 2) {
             /* Safe here: this is an ordinary OS thread with an ordinary
              * (large, glibc-default) stack, not a green thread's 64 KiB
@@ -219,14 +259,14 @@ static void *persistent_unparker_main(void *argp) {
              * real wait in practice. */
         }
         rt_sched_unpark(p->s, id);
-        sem_post(&p->done);
+        rt_test_sem_post(&p->done);
     }
 }
 
 static void unparker_pool_start(unparker_pool_t *p, rt_scheduler_t *s) {
     p->s = s;
-    sem_init(&p->go, 0, 0);
-    sem_init(&p->done, 0, 0);
+    rt_test_sem_init(&p->go);
+    rt_test_sem_init(&p->done);
     atomic_init(&p->stop, false);
     if (pthread_create(&p->thread, NULL, persistent_unparker_main, p) != 0) {
         rt_trap("test harness: could not start the persistent unparker thread");
@@ -235,10 +275,10 @@ static void unparker_pool_start(unparker_pool_t *p, rt_scheduler_t *s) {
 
 static void unparker_pool_stop(unparker_pool_t *p) {
     atomic_store_explicit(&p->stop, true, memory_order_release);
-    sem_post(&p->go);
+    rt_test_sem_post(&p->go);
     pthread_join(p->thread, NULL);
-    sem_destroy(&p->go);
-    sem_destroy(&p->done);
+    rt_test_sem_destroy(&p->go);
+    rt_test_sem_destroy(&p->done);
 }
 
 /* One trial: spawn a green thread that parks, race the persistent unparker
@@ -268,14 +308,14 @@ static bool run_one_race_trial(rt_scheduler_t *s, unparker_pool_t *pool,
                                 int delay_mode) {
     race_arg_t *ra = malloc(sizeof *ra);
     atomic_init(&ra->my_id, UINT32_MAX);
-    sem_init(&ra->ready, 0, 0);
+    rt_test_sem_init(&ra->ready);
     atomic_init(&ra->finished, false);
     ra->delay_mode = delay_mode;
 
     pool->id_ptr = &ra->my_id;
     pool->green_ready = &ra->ready;
     pool->delay_mode = delay_mode;
-    sem_post(&pool->go); /* wake the persistent unparker for THIS trial */
+    rt_test_sem_post(&pool->go); /* wake the persistent unparker for THIS trial */
 
     rt_sched_spawn(s, race_park_worker, ra);
 
@@ -296,10 +336,10 @@ static bool run_one_race_trial(rt_scheduler_t *s, unparker_pool_t *pool,
      * are about to be overwritten by the next trial, and the persistent
      * thread must be done reading them (and done touching `ra` via
      * `id_ptr`) first, regardless of whether this trial itself timed out. */
-    sem_wait(&pool->done);
+    rt_test_sem_wait(&pool->done);
 
     if (ok) {
-        sem_destroy(&ra->ready);
+        rt_test_sem_destroy(&ra->ready);
         free(ra);
     }
     /* else: deliberately leaked -- see this function's own header comment. */
@@ -511,21 +551,21 @@ static void test_reactor_real_pipe_wakeup(void) {
  * a green thread lands on, the same trick scheduler_test.c's own gate_t
  * uses, extended here to record which carrier it landed on. */
 typedef struct {
-    sem_t             sem;
+    rt_test_sem_t     sem;
     _Atomic uint32_t  carrier;
 } hgate_t;
 
 static void hgate_init(hgate_t *g) {
-    sem_init(&g->sem, 0, 0);
+    rt_test_sem_init(&g->sem);
     atomic_init(&g->carrier, UINT32_MAX);
 }
-static void hgate_release(hgate_t *g) { sem_post(&g->sem); }
-static void hgate_destroy(hgate_t *g) { sem_destroy(&g->sem); }
+static void hgate_release(hgate_t *g) { rt_test_sem_post(&g->sem); }
+static void hgate_destroy(hgate_t *g) { rt_test_sem_destroy(&g->sem); }
 static void hgate_worker(void *argp) {
     hgate_t *g = (hgate_t *)argp;
     atomic_store_explicit(&g->carrier, rt_sched_current_carrier(),
                            memory_order_release);
-    sem_wait(&g->sem);
+    rt_test_sem_wait(&g->sem);
 }
 
 typedef struct {
