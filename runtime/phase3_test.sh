@@ -13,6 +13,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 . ./config.sh
+. ./runtime/arch.sh
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -20,7 +21,7 @@ fail=0
 
 note() { printf '%-56s %s\n' "$1" "$2"; }
 
-SRCS="runtime/phase3_test.c runtime/scheduler.c runtime/reactor.c runtime/rt.c runtime/ctx_switch_x86_64.s"
+SRCS="runtime/phase3_test.c runtime/scheduler.c runtime/reactor.c runtime/rt.c $RT_CTX_ASM"
 
 for cc in gcc clang; do
     command -v "$cc" >/dev/null || continue

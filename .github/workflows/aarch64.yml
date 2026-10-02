@@ -1,0 +1,87 @@
+name: aarch64 runtime
+
+# Validates runtime/ctx_switch_aarch64.s (docs/concurrency-decision.md,
+# "Phase 4" -- portability) on GENUINE ARM64 hardware. This is the whole
+# point of the job: a hand-rolled, ABI-level context switch cannot be
+# honestly called working from reading the assembly or from cross-compiling
+# it on x86-64 -- it has to actually run, save real callee-saved registers
+# (including d8-d15, which x86-64's SysV ABI has no equivalent requirement
+# for), and switch stacks on the real architecture it targets.
+#
+# `runs-on: ubuntu-24.04-arm` is GitHub's hosted, native (not emulated)
+# Linux ARM64 runner. Do not change this to a QEMU/binfmt step on an x86-64
+# runner, and do not retarget this at a macOS (Apple Silicon) runner --
+# runtime/reactor.c is epoll-based (Linux-only); macOS's own port
+# (kqueue, docs/concurrency-decision.md's Phase 4 list) is a separate,
+# not-yet-done item.
+on:
+  push:
+    branches: [ "aarch64-port", "master" ]
+  pull_request:
+    branches: [ "master" ]
+  workflow_dispatch: {}
+
+jobs:
+  aarch64-runtime:
+    name: context switch + green-thread runtime (native aarch64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Confirm this is genuinely aarch64, not an emulated/mislabeled runner
+        run: |
+          set -eu
+          echo "uname -m: $(uname -m)"
+          echo "uname -a: $(uname -a)"
+          [ "$(uname -m)" = "aarch64" ] || {
+            echo "::error::This runner is not aarch64 -- the whole point of this job" \
+                 "is testing runtime/ctx_switch_aarch64.s on real ARM64 hardware." >&2
+            exit 1
+          }
+
+      - name: Install C toolchains (gcc + clang -- gates.sh and the runtime
+          test scripts build with both)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc clang
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Show toolchain versions
+        run: |
+          rustc --vV
+          cc --version
+          command -v clang >/dev/null && clang --version || echo "clang not installed"
+
+      - name: cargo build (the compiler itself)
+        run: cargo build
+
+      - name: Sanity check -- the aarch64 .s file is actually what gets linked here
+        run: |
+          set -eu
+          . ./runtime/arch.sh
+          echo "RT_CTX_ASM=$RT_CTX_ASM"
+          [ "$RT_CTX_ASM" = "runtime/ctx_switch_aarch64.s" ] || {
+            echo "::error::runtime/arch.sh picked '$RT_CTX_ASM' on an aarch64 runner" \
+                 "-- expected runtime/ctx_switch_aarch64.s. This would mean the rest" \
+                 "of this job silently tested the wrong architecture's context switch." >&2
+            exit 1
+          }
+
+      - name: Phase 1 -- context switch, slab stacks, probe (round trip, interleaving, overflow trap, poison trap)
+        run: bash runtime/greenthread_test.sh
+
+      - name: Phase 2 -- scheduler
+        run: bash runtime/scheduler_test.sh
+
+      - name: Phase 3 -- epoll reactor, park/unpark, blocking-FFI handoff
+        run: bash runtime/phase3_test.sh
+
+      - name: Phase 3.5 -- spawn backpressure deadlock regression (real compiled program, many green threads through the real ctx switch)
+        run: bash runtime/spawn_backpressure_test.sh
+
+      - name: Full gates.sh (compiler build/test/lint, runtime suites above again as part of the gate, formatter, corpus, ASan/UBSan)
+        run: bash gates.sh

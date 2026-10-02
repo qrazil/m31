@@ -7,6 +7,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 . ./config.sh
+. ./runtime/arch.sh
 
 src=${1:?usage: ./build.sh <source> [-o out]}
 out=$(basename "$src" ".$LANG_EXT")
@@ -18,7 +19,8 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 "./target/debug/$LANG_BIN" --emit-c "$src" -o "$tmp/out.c"
 # `spawn` and `Chan` are always green threads now (docs/concurrency-decision.md),
 # so every program links the Phase 1-3 runtime unconditionally: the scheduler,
-# the epoll reactor, and the x86-64 context switch they are both built on.
+# the epoll reactor, and the context switch they are both built on
+# ($RT_CTX_ASM, picked per-architecture by runtime/arch.sh above).
 "$CC" -O2 -pthread -I runtime -o "$out" "$tmp/out.c" \
-    runtime/rt.c runtime/scheduler.c runtime/reactor.c runtime/ctx_switch_x86_64.s
+    runtime/rt.c runtime/scheduler.c runtime/reactor.c "$RT_CTX_ASM"
 echo "$out"

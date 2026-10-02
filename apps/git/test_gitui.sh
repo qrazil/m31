@@ -43,7 +43,7 @@ build_tui() {
         return 1
     fi
     if ! cc -O2 -Wall -Wextra -I runtime -pthread -o "$WORK/$name" "$WORK/$name.c" \
-           runtime/rt.c runtime/scheduler.c runtime/reactor.c runtime/ctx_switch_x86_64.s \
+           runtime/rt.c runtime/scheduler.c runtime/reactor.c "$RT_CTX_ASM" \
            2>"$WORK/$name.cc"; then
         bad "cc $name" "$(head -5 "$WORK/$name.cc")"
         return 1
