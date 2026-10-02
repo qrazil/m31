@@ -52,6 +52,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 . ./config.sh
+. ./runtime/arch.sh
 
 if ! command -v clang >/dev/null; then
     echo "skipped: clang not found (this host's gcc has no TSan runtime installed either)"
@@ -80,7 +81,7 @@ build() {
     fi
     if ! clang -O1 -g -fsanitize=thread -fno-omit-frame-pointer -Wall -Wextra \
             -I runtime -pthread \
-            "$c" runtime/rt.c runtime/scheduler.c runtime/reactor.c \
+            "$c" runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" \
             runtime/ctx_switch_x86_64.s -o "$bin" 2>"$err"; then
         echo "FAILED: $label: TSan build:"
         sed 's/^/    /' "$err" | head -20

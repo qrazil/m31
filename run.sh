@@ -13,6 +13,7 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 . ./config.sh
+. ./runtime/arch.sh
 
 LANGC=${LANGC:-./target/debug/$LANG_BIN}
 WORK=$(mktemp -d)
@@ -80,7 +81,7 @@ run_one() {
     # context switch they share, alongside rt.c.
     if ! "$cc" "$opt" -ffp-contract=off -Wall -Wextra -DRC_DEBUG $RT_CFLAGS -I runtime \
          -pthread -o "$bin" "$WORK/$base.c" \
-         runtime/rt.c runtime/scheduler.c runtime/reactor.c runtime/ctx_switch_x86_64.s \
+         runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" runtime/ctx_switch_x86_64.s \
          2>"$WORK/$base.cc"; then
       fail_test "$label [$cc $opt]" "C compiler rejected emitted code: $(head -1 "$WORK/$base.cc")"
       return
@@ -197,7 +198,7 @@ for src in corpus/traps/*."$LANG_EXT"; do
     bin="$WORK/$base.t.$cc$opt"
     if ! "$cc" "$opt" -ffp-contract=off -Wall -Wextra -DRC_DEBUG $RT_CFLAGS -I runtime \
          -pthread -o "$bin" "$WORK/$base.c" \
-         runtime/rt.c runtime/scheduler.c runtime/reactor.c runtime/ctx_switch_x86_64.s \
+         runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" runtime/ctx_switch_x86_64.s \
          2>"$WORK/$base.tcc"; then
       fail_test "$label [$cc $opt]" "C compiler rejected emitted code"
       trap_ok=0; break

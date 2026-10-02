@@ -16,6 +16,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 . ./config.sh
+. ./runtime/arch.sh
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -37,7 +38,7 @@ for cc in gcc clang; do
         # exercises them.
         if ! "$cc" "$opt" -Wall -Wextra -I runtime -pthread \
                 runtime/greenthread_test.c runtime/rt.c \
-                runtime/scheduler.c runtime/reactor.c \
+                runtime/scheduler.c "$RT_REACTOR_C" \
                 runtime/ctx_switch_x86_64.s -o "$bin" 2>"$err" || [ -s "$err" ]; then
             note "build [$label]" FAILED
             sed 's/^/    /' "$err" | head -20
@@ -89,7 +90,7 @@ if command -v clang >/dev/null && \
     serr="$WORK/san.err"
     if ! clang -O1 -g $SAN -Wall -Wextra -I runtime -pthread \
             runtime/greenthread_test.c runtime/rt.c \
-            runtime/scheduler.c runtime/reactor.c runtime/ctx_switch_x86_64.s \
+            runtime/scheduler.c "$RT_REACTOR_C" runtime/ctx_switch_x86_64.s \
             -o "$sbin" 2>"$serr"; then
         note "sanitized build" FAILED
         sed 's/^/    /' "$serr" | head -20

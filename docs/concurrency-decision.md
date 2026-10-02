@@ -640,6 +640,77 @@ green thread 0 (`rt_run_program`), not on the raw OS thread, so a
   buffer plus the shared queue both saturated at once, far past anything
   this phase's own tests or the demo above exercise — a real, scoped,
   smaller residual than the one this fix closes, not silently ignored.
+- [ ] **kqueue reactor for macOS/BSD — Phase 3.5 extension (pulled forward
+  from Phase 4's stub below, in parallel with the aarch64 context-switch
+  port). Built and statically reviewed; NOT YET VALIDATED ON REAL
+  HARDWARE.** `runtime/reactor.h`'s contract (`rt_reactor_create`/
+  `rt_reactor_wait`/`rt_reactor_destroy`, same park/unpark semantics) now
+  has two backends — `runtime/reactor_epoll.c` (Linux, the original Phase 3
+  file, renamed, behavior unchanged and reconfirmed by the full x86-64
+  regression suite below) and `runtime/reactor_kqueue.c` (macOS/BSD, new).
+  `runtime/arch.sh` picks between them per `uname -s`, the same shape it
+  already uses for the per-CPU-architecture context-switch file; every
+  build/test script that used to hard-code `runtime/reactor.c` now sources
+  `arch.sh` and uses `$RT_REACTOR_C` instead (~20 scripts). See
+  `runtime/reactor_kqueue.c`'s own top comment for the full epoll→kqueue
+  mapping and reasoning; the two points worth repeating here:
+  - **EPOLLONESHOT → EV_ONESHOT is not a transparent swap.** kqueue splits
+    read/write into independent per-filter knotes where epoll has one
+    combined per-fd registration, which creates a spurious-wakeup hazard a
+    line-for-line port would have introduced silently: one requested
+    direction firing does not disarm the other, so a stale sibling knote
+    can fire later and call `rt_sched_unpark` for a green_id that has moved
+    on to something unrelated — and `rt_sched_unpark`'s own CAS word has no
+    notion of "which episode" a notification is for (see scheduler.h), so
+    that is a real corruption path, not a cosmetic one. Closed with a
+    per-registration sequence number (not the green_id) carried in each
+    kevent's `udata`; a firing is only acted on if it matches the fd's
+    CURRENT registration. Reasoned through carefully and believed correct;
+    not exercised under TSan on real hardware, which is exactly what the CI
+    workflow below is for.
+  - **eventfd → EVFILT_USER, not a self-pipe.** Chosen for no extra fd and
+    no self-pipe draining logic, and because kqueue namespaces idents
+    per-filter, so the shutdown signal can never collide with a real fd.
+    Lowest-confidence detail in the whole port: the exact `fflags`
+    control-bit convention for triggering it (`NOTE_TRIGGER` alone, no
+    explicit `NOTE_FFCOPY`/etc.) is written from documented/recalled
+    kevent(2) semantics, not confirmed against a real man page this session
+    (no macOS/BSD box available) — if wrong, the failure mode is a hang in
+    `rt_reactor_destroy`'s `pthread_join`, not silent corruption, so it
+    would be loud and immediate on the first real run.
+  **Verified so far**: the full x86-64/Linux regression suite (`gates.sh`,
+  `runtime/phase3_test.sh`, `runtime/scheduler_test.sh`,
+  `runtime/scheduler_tsan.sh`, `runtime/phase3_tsan.sh`) stays clean after
+  the epoll backend's rename/refactor — this change touches no epoll-path
+  logic, only its filename and the scripts that reference it. The kqueue
+  backend itself has had a careful static read-through against kevent(2)'s
+  documented semantics (see above) but has **never been compiled or run**
+  — this project has no macOS/BSD hardware. A GitHub Actions workflow
+  (`.github/workflows/macos.yml`) builds the runtime and runs the same test
+  suites on real `macos-13`/`macos-14` GitHub-hosted runners; it has been
+  reviewed for YAML correctness and its build commands dry-run locally
+  against the Linux path, but **a human still needs to push a branch/tag
+  and watch it run** before any claim here about the kqueue backend
+  graduates from "reasoned to be correct" to "confirmed." Do not treat this
+  checklist item as done until that run is green.
+
+  **`gates.sh` on this branch currently reports 2 corpus failures
+  (`modules/stdlib-http-client`/`modules/stdlib-http-server`, `clang -O2`
+  only) -- confirmed, directly, to be the PRE-EXISTING `rt_stack_limit` race
+  below (the same "trap: stack overflow" signature, the same gcc-passes/
+  clang-fails compiler-dependent pattern already on record there), NOT
+  anything this kqueue work touched.** Verified three ways before writing
+  this: (1) `runtime/reactor_epoll.c` is a byte-for-byte functional copy of
+  the original `runtime/reactor.c` (only the top comment changed -- `git
+  diff` confirms no code line moved); (2) `gcc -O2` passes this exact test
+  5/5 while `clang -O2` crashes 5/5 with "trap: stack overflow", matching
+  the compiler-dependence already recorded below precisely; (3) building
+  the ORIGINAL, completely unmodified `runtime/reactor.c` straight out of
+  this branch's own base commit (`git archive`, no kqueue-work files
+  involved at all) against the same test reproduces the identical crash
+  (2/3 runs). This is the same bug a separate, concurrent session is
+  already working on (see this branch's own history for `rt_stack_check`) --
+  tracked there, not a new regression, and not this task's to fix.
 - **A second, more serious bug was found by TSan and is NOT fixed: a
   genuine data race on `rt_stack_limit` between two carrier OS threads.**
   Found empirically while stress-testing real concurrent socket I/O (a
@@ -818,16 +889,19 @@ green thread 0 (`rt_run_program`), not on the raw OS thread, so a
   those, not a fix for them: it rescues a stuck carrier's queued siblings,
   it does not make the stuck call itself faster.
 - Every build line in the repository that links `runtime/rt.c` — which is
-  all of them — now also links `runtime/scheduler.c`, `runtime/reactor.c`
-  and `runtime/ctx_switch_x86_64.s`, because `rt.c` calls into them
-  unconditionally. The whole language is therefore x86-64 only until Phase
-  4's aarch64 context switch lands — a strictly larger claim than before,
-  when only the Phase 1-3 test harnesses themselves (and any experimental
-  module built the same way) needed that architecture.
+  all of them — now also links `runtime/scheduler.c`, one of
+  `runtime/reactor_epoll.c`/`runtime/reactor_kqueue.c` (picked by
+  `runtime/arch.sh`, per `uname -s` — see the Progress item above) and the
+  per-architecture context-switch file, because `rt.c` calls into them
+  unconditionally. The reactor choice is no longer an open question as of
+  the Progress item above, but it is UNVALIDATED on the macOS/BSD side
+  pending a real-hardware CI run.
 
 **Phase 4 — portability.**
 - aarch64 context switch
-- kqueue (macOS/BSD)
+- ~~kqueue (macOS/BSD)~~ — pulled forward into Phase 3.5, see the Progress
+  checklist above: built, statically reviewed, pending real-hardware CI
+  validation (not yet checked off for that reason)
 - Windows: AFD readiness emulation only, never native IOCP (forces buffer
   pinning into the memory model) — no timeline yet
 

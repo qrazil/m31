@@ -14,6 +14,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
 . ./config.sh
+. ./runtime/arch.sh
 
 LANGC=${LANGC:-./target/debug/$LANG_BIN}
 CC=${CC:-gcc}
@@ -24,7 +25,7 @@ trap 'rm -rf "$WORK"' EXIT
 build() {
     "$LANGC" --emit-c "bench/valenum/$1.$LANG_EXT" -o "$WORK/$1.c" || return 1
     "$CC" -O2 -ffp-contract=off -I runtime "$WORK/$1.c" \
-        runtime/rt.c runtime/scheduler.c runtime/reactor.c runtime/ctx_switch_x86_64.s \
+        runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" runtime/ctx_switch_x86_64.s \
         -lpthread -o "$WORK/$1.bin" || return 1
 }
 
@@ -44,7 +45,7 @@ best() {
 allocs() {
     "$LANGC" --emit-c "bench/valenum/$1.$LANG_EXT" -o "$WORK/$1.dbg.c" || return 1
     "$CC" -O2 -DRC_DEBUG -DRC_COUNT_ALLOCS -I runtime "$WORK/$1.dbg.c" \
-        runtime/rt.c runtime/scheduler.c runtime/reactor.c runtime/ctx_switch_x86_64.s \
+        runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" runtime/ctx_switch_x86_64.s \
         -lpthread -o "$WORK/$1.dbg" 2>/dev/null || { echo "-"; return; }
     "$WORK/$1.dbg" 2>/dev/null | sed -n 's/^__rc_allocs=//p'
 }

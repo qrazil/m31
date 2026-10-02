@@ -6,6 +6,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . ./config.sh
+. ./runtime/arch.sh
 
 LANGC=${LANGC:-./target/debug/$LANG_BIN}
 CC=${CC:-gcc}
@@ -23,5 +24,5 @@ fi
 # The same flags run.sh holds the corpus to: the emitted C must be clean.
 "$CC" "$OPT" -ffp-contract=off -Wall -Wextra -Werror -I runtime -pthread \
       -o "$OUT" "$W/markdown.c" \
-      runtime/rt.c runtime/scheduler.c runtime/reactor.c runtime/ctx_switch_x86_64.s || exit 1
+      runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" runtime/ctx_switch_x86_64.s || exit 1
 echo "built $OUT"
