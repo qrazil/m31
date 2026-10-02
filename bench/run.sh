@@ -16,6 +16,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 . ./config.sh
+. ./runtime/arch.sh
 
 LANGC=${LANGC:-./target/debug/$LANG_BIN}
 RUNS=${RUNS:-5}
@@ -44,7 +45,7 @@ for dir in bench/*/; do
 
     "$LANGC" --emit-c "$dir/$name.$LANG_EXT" -o "$WORK/$name.c" || continue
     gcc -O2 -ffp-contract=off -I runtime "$WORK/$name.c" \
-        runtime/rt.c runtime/scheduler.c runtime/reactor.c runtime/ctx_switch_x86_64.s \
+        runtime/rt.c runtime/scheduler.c runtime/reactor.c "$RT_CTX_ASM" \
         -lpthread -o "$WORK/$name.ours" || continue
     ours=$(best "$WORK/$name.ours")
     mem=$(peak "$WORK/$name.ours")

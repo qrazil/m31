@@ -9,6 +9,7 @@
 set -uo pipefail
 cd "$(dirname "$0")"
 . ./config.sh
+. ./runtime/arch.sh
 
 quick=0
 [ "${1:-}" = "--quick" ] && quick=1
@@ -166,7 +167,7 @@ run "formatter preserves meaning" bash -c '
             exp="${f%.'"$LANG_EXT"'}.out"
             if [ -e "$exp" ]; then
                 if gcc -O0 -I runtime "$w/b.c" \
-                       runtime/rt.c runtime/scheduler.c runtime/reactor.c runtime/ctx_switch_x86_64.s \
+                       runtime/rt.c runtime/scheduler.c runtime/reactor.c '"$RT_CTX_ASM"' \
                        -lpthread -o "$w/b" 2>/dev/null; then
                     in="$PWD/${f%.'"$LANG_EXT"'}.in"
                     [ -e "$in" ] || in=/dev/null

@@ -6,8 +6,13 @@
  *
  * Three pieces, matching the design doc exactly:
  *
- *   Part 1 -- the x86-64 context switch (rt_ctx_t, rt_ctx_switch,
- *             rt_ctx_make). The asm itself is runtime/ctx_switch_x86_64.s.
+ *   Part 1 -- the context switch (rt_ctx_t, rt_ctx_switch, rt_ctx_make).
+ *             The asm itself is runtime/ctx_switch_x86_64.s on x86-64,
+ *             runtime/ctx_switch_aarch64.s on aarch64 (Phase 4 --
+ *             portability; runtime/arch.sh picks the right one at build
+ *             time). rt_ctx_t's layout and rt_ctx_make's body are each
+ *             `#if defined(__x86_64__) / #elif defined(__aarch64__)`
+ *             below, one shape per architecture's ABI.
  *   Part 2 -- a slab stack allocator (rt_stack_t, rt_stack_alloc/free).
  *   Part 4 -- a byte-per-thread state table (rt_green_state_t,
  *             rt_gtstate_set/get).
@@ -23,7 +28,7 @@
  * rt_ctx_make and rt_fiber_switch below for exactly why that matters: it is
  * what keeps every existing build line in this repository (build.sh, run.sh,
  * every app and bench under apps/ and bench/) working unmodified, without
- * any of them needing to link runtime/ctx_switch_x86_64.s.
+ * any of them needing to link the architecture's ctx_switch_*.s file.
  */
 #ifndef RT_GREENTHREAD_H
 #define RT_GREENTHREAD_H
@@ -166,20 +171,26 @@ void *__tsan_get_current_fiber(void);
  * Part 1 -- context switch
  * ====================================================================== */
 
-/* Callee-saved registers plus the stack pointer: the System V x86-64 ABI is
- * the entire contract (docs/concurrency-decision.md names nothing more
+/* Callee-saved registers plus the stack pointer: the platform ABI is the
+ * entire contract (docs/concurrency-decision.md names nothing more
  * exotic). Caller-saved registers get no slot -- the C calling convention
  * already means rt_ctx_switch's caller does not expect them preserved
  * across a call, and rt_ctx_switch IS a call.
  *
- * Field order matches the byte offsets runtime/ctx_switch_x86_64.s hard-
- * codes (0, 8, 16, 24, 32, 40, 48). The two files are one contract; there is
+ * Two shapes, one per architecture this runtime has a hand-written context
+ * switch for (docs/concurrency-decision.md, "Phase 4" -- portability).
+ * Exactly one of these is compiled, selected the same way the matching .s
+ * file is selected at build time (runtime/arch.sh): by the compiler's own
+ * predefined architecture macro, not a build flag this header would have
+ * to be told separately. Field order in each branch matches the byte
+ * offsets that branch's .s file hard-codes; the two are one contract, with
  * no shared source of truth for the layout beyond this comment and that
- * file's matching one, so a change to either without the other is a bug.
- *
- * aarch64 (Phase 4) will need its own, differently-shaped struct -- nothing
- * about this layout is assumed anywhere outside this file and
- * ctx_switch_x86_64.s. */
+ * file's matching one, so a change to either without the other is a bug
+ * that corrupts every stack silently rather than crashing cleanly. */
+#if defined(__x86_64__)
+
+/* System V x86-64 ABI. Byte offsets runtime/ctx_switch_x86_64.s hard-codes:
+ * 0, 8, 16, 24, 32, 40, 48. */
 typedef struct rt_ctx {
     uint64_t rsp;
     uint64_t rbx;
@@ -190,11 +201,56 @@ typedef struct rt_ctx {
     uint64_t r15;
 } rt_ctx_t;
 
+#elif defined(__aarch64__)
+
+/* AAPCS64. Byte offsets runtime/ctx_switch_aarch64.s hard-codes: 0, 8, 16,
+ * 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144,
+ * 152, 160. The d8-d15 tail has no x86-64 analogue -- System V x86-64 makes
+ * every xmm register caller-saved, so ctx_switch_x86_64.s's struct has
+ * nothing corresponding to it, but AAPCS64 requires the callee (this
+ * function) to preserve d8-d15 across a call, so a value this project's
+ * `float`/`double` keeps live in one of them across a context switch must
+ * be saved here or it silently corrupts -- see ctx_switch_aarch64.s's
+ * header comment for the full reasoning. */
+typedef struct rt_ctx {
+    uint64_t sp;
+    uint64_t x19;
+    uint64_t x20;
+    uint64_t x21;
+    uint64_t x22;
+    uint64_t x23;
+    uint64_t x24;
+    uint64_t x25;
+    uint64_t x26;
+    uint64_t x27;
+    uint64_t x28;
+    uint64_t fp;  /* x29 */
+    uint64_t lr;  /* x30 */
+    uint64_t d8;
+    uint64_t d9;
+    uint64_t d10;
+    uint64_t d11;
+    uint64_t d12;
+    uint64_t d13;
+    uint64_t d14;
+    uint64_t d15;
+} rt_ctx_t;
+
+#else
+#error "runtime/greenthread.h: no struct rt_ctx layout for this architecture " \
+       "-- this runtime has a hand-written context switch only for x86-64 " \
+       "and aarch64 (docs/concurrency-decision.md, Phase 4); see " \
+       "ctx_switch_x86_64.s and ctx_switch_aarch64.s for what a new port " \
+       "needs to provide."
+#endif
+
 /* Save the running context into *from, load *to, and resume there --
- * defined in runtime/ctx_switch_x86_64.s. See that file for the mechanism:
- * it ends in one `ret`, not a jump, which is what turns "restore the
- * registers" into "resume exactly where that context left off" without
- * this function needing to know whether `to` ever ran before.
+ * defined in runtime/ctx_switch_x86_64.s on x86-64, runtime/ctx_switch_
+ * aarch64.s on aarch64 (selected by runtime/arch.sh at build time; see
+ * either file's own header for the mechanism). Both end in one `ret`, not
+ * a jump, which is what turns "restore the registers" into "resume exactly
+ * where that context left off" without this function needing to know
+ * whether `to` ever ran before.
  *
  * Deliberately knows nothing about rt_stack_limit (rt.h) -- that is Part
  * 3's seam, kept out of this function on purpose so the asm stays minimal
@@ -204,17 +260,18 @@ void rt_ctx_switch(rt_ctx_t *from, rt_ctx_t *to);
 
 /* The landing pad for a context that has never run. rt_ctx_switch's `ret`
  * jumps here the first time a freshly-made context is switched into -- see
- * rt_ctx_make below for the fake stack frame that arranges this, and
- * ctx_switch_x86_64.s for the two registers it reads to find the real entry
- * point and argument. Not meant to be called directly from C -- there is no
- * ordinary call that could reach it with the ABI it actually expects. */
+ * rt_ctx_make below for how each architecture arranges this, and the
+ * matching ctx_switch_*.s file for the two registers it reads to find the
+ * real entry point and argument. Not meant to be called directly from C --
+ * there is no ordinary call that could reach it with the ABI it actually
+ * expects. */
 void rt_ctx_trampoline(void);
 
-/* Where ctx_switch_x86_64.s's trampoline goes if the entry function it
- * calls ever returns. Phase 1 has no scheduler for control to return TO, so
- * this traps, the same way every other "should not happen" in this runtime
- * does. Defined in greenthread.c; declared here because the .s file needs
- * to see this exact name. */
+/* Where the trampoline goes if the entry function it calls ever returns.
+ * Phase 1 has no scheduler for control to return TO, so this traps, the
+ * same way every other "should not happen" in this runtime does. Defined
+ * in greenthread.c; declared here because both .s files need to see this
+ * exact name. */
 _Noreturn void rt_ctx_entry_returned(void);
 
 /* Hand-build an initial context so that switching into it for the first
@@ -223,16 +280,25 @@ _Noreturn void rt_ctx_entry_returned(void);
  * rather than "resuming" something that never ran.
  *
  * `static inline`, and deliberately NOT moved into greenthread.c: it takes
- * the ADDRESS of rt_ctx_trampoline, which is defined only in
- * ctx_switch_x86_64.s. greenthread.c is #included into rt.c, and rt.c is
- * linked by every program in this repository whether or not it ever touches
- * green threads. If this function's body lived in rt.c's own compiled text,
- * that address-of would force rt_ctx_trampoline to be resolved at link time
- * for every one of those programs too, breaking every build line that links
- * runtime/rt.c without also linking ctx_switch_x86_64.o. As `static
- * inline`, the compiler only emits it into whichever translation unit
- * actually calls it -- this phase's test harness today, Phase 2's scheduler
- * later -- both of which link ctx_switch_x86_64.o on purpose. */
+ * the ADDRESS of rt_ctx_trampoline, which is defined only in the
+ * architecture's own ctx_switch_*.s file. greenthread.c is #included into
+ * rt.c, and rt.c is linked by every program in this repository whether or
+ * not it ever touches green threads. If this function's body lived in
+ * rt.c's own compiled text, that address-of would force rt_ctx_trampoline
+ * to be resolved at link time for every one of those programs too, breaking
+ * every build line that links runtime/rt.c without also linking the
+ * ctx_switch_*.o this architecture needs. As `static inline`, the compiler
+ * only emits it into whichever translation unit actually calls it -- this
+ * phase's test harness today, Phase 2's scheduler later -- both of which
+ * link the right ctx_switch_*.o on purpose (runtime/arch.sh picks it).
+ *
+ * One function per architecture below, rather than one function with
+ * scattered #ifdefs in its body: the two stack-frame shapes are different
+ * enough (x86-64 writes a fake return address onto the new stack; aarch64
+ * needs no such write, see ctx_switch_aarch64.s) that interleaving them
+ * would be harder to audit than two short, self-contained versions. */
+#if defined(__x86_64__)
+
 static inline void rt_ctx_make(rt_ctx_t *ctx, void *stack_base,
                                 size_t stack_size, void (*entry)(void *),
                                 void *arg) {
@@ -264,6 +330,52 @@ static inline void rt_ctx_make(rt_ctx_t *ctx, void *stack_base,
     ctx->r14 = 0;
     ctx->r15 = 0;
 }
+
+#elif defined(__aarch64__)
+
+static inline void rt_ctx_make(rt_ctx_t *ctx, void *stack_base,
+                                size_t stack_size, void (*entry)(void *),
+                                void *arg) {
+    /* Same usable-region/alignment reasoning as the x86-64 branch above. */
+    uintptr_t top = ((uintptr_t)stack_base + stack_size) & ~(uintptr_t)15;
+
+    /* No fake return address to write, unlike x86-64: aarch64's `ret`
+     * branches to whatever is in `lr` (x30), a register rt_ctx_switch loads
+     * from *ctx directly, not a value popped off the stack. So `sp` here is
+     * simply the honest 16-aligned top of the stack -- see
+     * ctx_switch_aarch64.s's header for why that is a simplification, not a
+     * shortcut. */
+    ctx->sp = (uint64_t)(uintptr_t)top;
+    ctx->lr = (uint64_t)(uintptr_t)rt_ctx_trampoline;
+
+    /* Smuggled through to the trampoline in two callee-saved registers --
+     * rt_ctx_switch is about to load these from *ctx right before the `ret`
+     * above fires, which is the only channel into a context that was never
+     * actually called with real arguments. */
+    ctx->x19 = (uint64_t)(uintptr_t)entry; /* the entry function */
+    ctx->x20 = (uint64_t)(uintptr_t)arg;   /* ... and its one argument */
+    ctx->x21 = 0;
+    ctx->x22 = 0;
+    ctx->x23 = 0;
+    ctx->x24 = 0;
+    ctx->x25 = 0;
+    ctx->x26 = 0;
+    ctx->x27 = 0;
+    ctx->x28 = 0;
+    ctx->fp = 0;
+    ctx->d8 = 0;
+    ctx->d9 = 0;
+    ctx->d10 = 0;
+    ctx->d11 = 0;
+    ctx->d12 = 0;
+    ctx->d13 = 0;
+    ctx->d14 = 0;
+    ctx->d15 = 0;
+}
+
+#endif /* rt_ctx_make per architecture -- see the #if/#elif on struct rt_ctx
+        * above for the #else/#error case; it already fired by the time
+        * either rt_ctx_make here would be reached, so none is needed again. */
 
 /* ---- the Part 1 / Part 3 seam -------------------------------------------
  *

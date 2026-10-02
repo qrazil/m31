@@ -25,6 +25,7 @@
 # Usage: bash runtime/scheduler_tsan.sh
 set -uo pipefail
 cd "$(dirname "$0")/.."
+. ./runtime/arch.sh
 
 if ! command -v clang >/dev/null; then
     echo "skipped: clang not found (this host's gcc has no TSan runtime installed either)"
@@ -39,7 +40,7 @@ err="$WORK/cc.err"
 if ! clang -O1 -g -fsanitize=thread -fno-omit-frame-pointer -Wall -Wextra \
         -I runtime -pthread \
         runtime/scheduler_test.c runtime/scheduler.c runtime/reactor.c runtime/rt.c \
-        runtime/ctx_switch_x86_64.s -o "$bin" 2>"$err"; then
+        "$RT_CTX_ASM" -o "$bin" 2>"$err"; then
     echo "TSan build FAILED:"
     sed 's/^/    /' "$err"
     exit 1

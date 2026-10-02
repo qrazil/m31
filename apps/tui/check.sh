@@ -22,6 +22,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . ./config.sh
+. ./runtime/arch.sh
 
 LANGC=${LANGC:-./target/debug/$LANG_BIN}
 DIR=apps/tui
@@ -66,7 +67,7 @@ for src in "$DIR"/tests."$LANG_EXT" "$DIR"/bench."$LANG_EXT" "$DIR"/demo."$LANG_
         cc=${entry%%:*}; opt=${entry##*:}
         if ! "$cc" "$opt" -ffp-contract=off -Wall -Wextra -DRC_DEBUG -I runtime \
              -pthread -o "$WORK/$base.$cc$opt" "$WORK/$base.c" \
-             runtime/rt.c runtime/scheduler.c runtime/reactor.c runtime/ctx_switch_x86_64.s \
+             runtime/rt.c runtime/scheduler.c runtime/reactor.c "$RT_CTX_ASM" \
              2>"$WORK/$base.cc"; then
             bad_cc=1; echo; sed 's/^/    /' "$WORK/$base.cc" | head -8; break
         fi
@@ -125,7 +126,7 @@ bcc=gcc
 command -v gcc >/dev/null || bcc=clang
 if "$bcc" -O2 -ffp-contract=off -I runtime -pthread -o "$WORK/bench.fast" \
        "$WORK/bench.c" \
-       runtime/rt.c runtime/scheduler.c runtime/reactor.c runtime/ctx_switch_x86_64.s \
+       runtime/rt.c runtime/scheduler.c runtime/reactor.c "$RT_CTX_ASM" \
        2>/dev/null; then
     "$WORK/bench.fast"
 else

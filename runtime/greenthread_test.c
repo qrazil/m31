@@ -1,8 +1,11 @@
-/* Tests for Phase 1 of docs/concurrency-decision.md: the x86-64 context
- * switch, the slab stack allocator, the compiler-emitted probe's runtime
- * side, and the per-thread state table. Run by runtime/greenthread_test.sh,
- * which builds this under every compiler/opt combination gates.sh already
- * uses elsewhere, plus a dedicated ASan+UBSan build.
+/* Tests for Phase 1 of docs/concurrency-decision.md: the context switch
+ * (x86-64 and, since Phase 4, aarch64 -- this file is architecture-generic,
+ * written entirely against rt_ctx_t/rt_ctx_make/rt_fiber_switch and never
+ * against a register name directly), the slab stack allocator, the
+ * compiler-emitted probe's runtime side, and the per-thread state table.
+ * Run by runtime/greenthread_test.sh, which builds this under every
+ * compiler/opt combination gates.sh already uses elsewhere, plus a
+ * dedicated ASan+UBSan build.
  *
  * There is no RFC-style oracle for a context switch, so this is hand-
  * constructed, known-interleaving testing throughout: every expected log in
@@ -70,19 +73,33 @@ static volatile int g_rt1_result = 0;
 static void rt1_entry(void *argp) {
     rt1_arg_t *arg = (rt1_arg_t *)argp;
 
-    /* Six values -- one more than the six callee-saved registers
-     * (rbx, rbp, r12-r15) rt_ctx_switch actually saves, so there is
-     * necessarily at least one the compiler cannot simply leave parked in a
-     * register across both calls below without ever touching memory,
-     * whichever way it chooses to allocate them. Either path (register,
-     * kept safe by ctx_switch_x86_64.s; or stack, kept safe by rsp being
-     * saved and restored) is exactly what this test means to exercise. */
+    /* Six values -- one more than the six callee-saved integer registers
+     * (rbx, rbp, r12-r15 on x86-64; x19-x28/fp on aarch64, which has more
+     * than enough, but the point is the same either way) rt_ctx_switch
+     * actually saves, so there is necessarily at least one the compiler
+     * cannot simply leave parked in a register across both calls below
+     * without ever touching memory, whichever way it chooses to allocate
+     * them. Either path (register, kept safe by the architecture's
+     * ctx_switch_*.s; or stack, kept safe by the stack pointer being saved
+     * and restored) is exactly what this test means to exercise. */
     long a = 0x1111111111111111L;
     long b = 0x2222222222222222L;
     long c = 0x3333333333333333L;
     long d = 0x4444444444444444L;
     long e = 0x5555555555555555L;
     long f = 0x6666666666666666L;
+
+    /* Eight floating-point values -- exactly the aarch64 callee-saved
+     * d8-d15 count (greenthread.h, ctx_switch_aarch64.s). On x86-64 this is
+     * a no-op as far as ctx_switch_x86_64.s is concerned (System V makes
+     * every xmm register caller-saved, so the compiler must already spill
+     * any of these it keeps live across the rt_fiber_switch calls below to
+     * the stack, which rsp save/restore already protects) -- but on aarch64
+     * a compiler is entitled to leave these live in d8-d15 across the call,
+     * trusting rt_ctx_switch to preserve them, which is exactly the
+     * guarantee this is here to catch a regression in. */
+    double fa = 1.0625, fb = -2.125, fc = 3.1875, fd = -4.375;
+    double fe = 5.5625, ff = -6.75, fg = 7.8125, fh = -8.9375;
 
     /* Trip away: suspend back to main. */
     rt_fiber_switch(arg->self, arg->main_ctx, 0);
@@ -94,7 +111,9 @@ static void rt1_entry(void *argp) {
      * between the two switches; main and anything else runs on its own. */
     bool ok = a == 0x1111111111111111L && b == 0x2222222222222222L &&
               c == 0x3333333333333333L && d == 0x4444444444444444L &&
-              e == 0x5555555555555555L && f == 0x6666666666666666L;
+              e == 0x5555555555555555L && f == 0x6666666666666666L &&
+              fa == 1.0625 && fb == -2.125 && fc == 3.1875 && fd == -4.375 &&
+              fe == 5.5625 && ff == -6.75 && fg == 7.8125 && fh == -8.9375;
     g_rt1_result = ok ? 1 : -1;
 
     rt_fiber_switch(arg->self, arg->main_ctx, 0);
