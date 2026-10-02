@@ -196,17 +196,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target_name: macos-x86_64
-            runner: macos-13 # last Intel GitHub-hosted macOS image
+          # Both entries TEMPORARILY DISABLED: GitHub's macos-13 (Intel)
+          # pool has had so little available capacity that a run queues
+          # indefinitely and the whole workflow never completes. Re-enable
+          # macos-x86_64 once a second macOS remote is available (self-
+          # hosted, or GitHub's queue easing) -- do not leave it off
+          # permanently, see the "last Intel image" note below.
+          # - target_name: macos-x86_64
+          #   runner: macos-13 # last Intel GitHub-hosted macOS image
 
           # Apple Silicon. The *compiler* would build here today with zero
           # changes (pure Rust) -- this entry is kept disabled anyway so
           # that "macOS" in this workflow has one consistent meaning
           # (compiler-only, both architectures together) instead of arm64
-          # quietly shipping before x86-64 apps do. To enable:
+          # quietly shipping before x86-64 apps do. To enable (once
+          # macos-x86_64 above is also re-enabled):
           #   1. uncomment the two lines below
-          #   2. once runtime/ctx_switch_aarch64.s exists AND runtime/
-          #      reactor.c has a kqueue backend, add an apps step here
+          #   2. runtime/ctx_switch_aarch64.s and a kqueue reactor backend
+          #      both now exist (tonight's work) -- add an apps step here
           #      matching build-linux-x86_64's, using macos-14's native
           #      arm64 toolchain (no cross-compilation needed either way)
           # - target_name: macos-arm64

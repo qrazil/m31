@@ -10,13 +10,22 @@ name: macOS runtime (kqueue reactor)
 # all, so this workflow is the ONLY way any of this gets to run before a
 # human actually does, on a real kernel.
 #
-# `macos-13` is GitHub's hosted Intel (x86_64) runner; `macos-14` is Apple
-# Silicon (arm64). Both are real hardware, not emulated -- running both
-# matters here specifically because `void*`-sized udata (this backend's
-# spurious-wakeup fix stores a 64-bit sequence number in kevent's `udata`
-# field) and the EVFILT_USER control-bit behavior this file is least
-# confident about could plausibly differ across Apple's two architectures'
-# XNU builds, not just across BSD vendors.
+# `macos-13` (GitHub's hosted Intel/x86_64 runner) is TEMPORARILY DISABLED
+# below -- GitHub's macos-13 pool has had so little available capacity that
+# a run queues indefinitely and the whole workflow never completes, even
+# though macos-14 (Apple Silicon) runs and reports within seconds. Re-add
+# "macos-13" to the matrix once a second real macOS remote (self-hosted, or
+# GitHub's queue easing) is available; the ideal end state is still both
+# architectures, for the reason below, not a permanent Apple-Silicon-only
+# choice.
+#
+# `macos-14` is Apple Silicon (arm64), real hardware, not emulated. Running
+# BOTH architectures matters here specifically because `void*`-sized udata
+# (this backend's spurious-wakeup fix stores a 64-bit sequence number in
+# kevent's `udata` field) and the EVFILT_USER control-bit behavior this file
+# is least confident about could plausibly differ across Apple's two
+# architectures' XNU builds, not just across BSD vendors -- macos-13 alone
+# was never redundant, it is just unavailable right now.
 #
 # Do not retarget this at a Linux ARM64 runner (that is
 # runtime/ctx_switch_aarch64.s's own job, a completely orthogonal CPU-
@@ -36,7 +45,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ macos-13, macos-14 ]
+        # macos-13 temporarily removed -- see the comment at the top of this
+        # file. Re-add it here once a second macOS remote is available.
+        os: [ macos-14 ]
     name: kqueue reactor + green-thread runtime (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     steps:
