@@ -1134,6 +1134,105 @@ green thread 0 (`rt_run_program`), not on the raw OS thread, so a
   the Progress item above, but it is UNVALIDATED on the macOS/BSD side
   pending a real-hardware CI run.
 
+- **A second, independent macOS build blocker, found by the kqueue branch's
+  own CI run, NOT by inspection — found and FIXED.** The first real run of
+  `.github/workflows/macos.yml` (a genuine `macos-14`/Apple Silicon GitHub
+  Actions runner, not a guess) failed at compile time, before the kqueue
+  backend or the aarch64 context switch were even exercised:
+
+  ```
+  runtime/scheduler.c:1101:24: error: call to undeclared function
+  'sem_timedwait'; ISO C99 and later do not support implicit function
+  declarations
+  ```
+
+  Root cause: `runtime/scheduler.c` used POSIX *unnamed* semaphores
+  (`sem_t wake_sem` per `rt_carrier_t`, with `sem_init`/`sem_post`/
+  `sem_timedwait`/`sem_destroy`) as each carrier's wake primitive — the
+  thing `notify_new_work`'s wake-permutation mechanism posts to, and
+  `carrier_main`'s idle-wait loop blocks on with a 5ms periodic fallback
+  timeout. This is a genuinely different bug from the kqueue reactor or the
+  aarch64 port — it does not touch either — and is a long-standing, widely
+  documented macOS/Darwin gap, not something this project introduced: macOS
+  only ever properly supported *named* semaphores (`sem_open`); `sem_init`
+  for unnamed ones is explicitly deprecated there and reported to fail at
+  runtime (`ENOSYS`), and `sem_timedwait` is missing from the SDK's
+  `<semaphore.h>` declarations outright, which is exactly the "implicit
+  function declaration" error above — a hard compile error under
+  `-Werror`-equivalent strictness (ISO C99+ no longer tolerates implicit
+  declarations), not a warning.
+
+  **The fix** (`runtime/scheduler.c` only — no other file touched): replaced
+  the real `sem_t wake_sem` with a small, local `rt_wake_sem_t` — a
+  mutex + condvar + an explicit integer count, i.e. a semaphore emulated by
+  hand, the standard portable answer to exactly this gap. `rt_wake_sem_post`
+  locks, increments `count`, unlocks, then signals the condvar.
+  `rt_wake_sem_timedwait` locks and loops `while (count == 0)
+  pthread_cond_timedwait(&cond, &lock, abstime)`, decrementing `count` and
+  returning once it sees `count > 0`. This is deliberately not a bare
+  condvar wait: a bare `pthread_cond_signal` with nobody blocked yet is
+  simply lost, which is exactly the class of lost-wakeup bug this project
+  has already hunted down carefully elsewhere in this same file (the
+  park/unpark CAS protocol, the `try_handoff`/`carrier_main` race above) —
+  the explicit `count`, incremented unconditionally by every post and only
+  consumed by a wait that finds it already nonzero, is what reproduces a
+  real semaphore's "a post before the matching wait is remembered, not
+  lost" guarantee, which `carrier_main`'s own comment (immediately above its
+  wait call) documents as load-bearing for closing a genuine lost-wakeup
+  window: the idle flag is set, under this property, strictly before the
+  wait, so a `notify_new_work` that lands in between is never dropped.
+  `pthread_cond_timedwait` is called with the identical `CLOCK_REALTIME`-
+  based absolute `struct timespec` the old `sem_timedwait` call already
+  built (`clock_gettime(CLOCK_REALTIME, &ts)` plus the 5ms periodic
+  fallback, unchanged) — condition variables default to `CLOCK_REALTIME`
+  on both glibc and Darwin's libpthread unless `pthread_condattr_setclock`
+  says otherwise, which this file never calls, so no behavior changed on
+  the timeout side either. One implementation, no `#ifdef` between Linux
+  and macOS, per this project's own stated "no two ways to do the same
+  thing" preference: `pthread_mutex_*`/`pthread_cond_*` are plain POSIX.1
+  with no platform-specific attributes set on either object, so there is
+  nothing to special-case. (`carrier_main`'s own comment previously said a
+  timed-out wait could also return a "spurious-looking EINVAL from a clock
+  edge case" — that was about `sem_timedwait`'s own documented errno
+  behavior and no longer applies: `pthread_cond_timedwait` is specified to
+  never return `EINTR`, and the internal `while (count == 0)` loop already
+  absorbs any spurious condvar wakeup, so the call site no longer needs its
+  own retry loop at all — simplified accordingly, comment updated to match.)
+
+  **Verified on this Linux x86-64 host** (no macOS hardware available here
+  either — see below): `runtime/scheduler_test.sh` (120 checks across
+  gcc/clang at `-O0`/`-O2` plus the ASan/UBSan-sanitized build, all clean),
+  `runtime/scheduler_tsan.sh` raised from its 5-run default to 25/25 clean,
+  `runtime/phase3_test.sh` (45 checks, all clean) and `runtime/phase3_tsan.sh`
+  likewise raised to 25/25 clean, `runtime/spawn_backpressure_test.sh` (40/40
+  clean at 1/2/4 carriers stock, 15/15 clean under TSan at 1/2 carriers), and
+  `runtime/spawn_wiring_tsan.sh` (30/30 clean for both Chan cases, 5/5 clean
+  for the real-socket-I/O case) — all unchanged from this branch's pre-fix
+  baseline, as expected for a change that touches only the wake primitive's
+  implementation, not its contract. Full `gates.sh` also passes clean on top
+  of this change. TSan specifically matters here because this is a real
+  synchronization primitive on the hot wake/sleep path — a wrong
+  mutex/condvar/count implementation would be exactly the kind of lost-
+  wakeup or races-on-`count` bug TSan is built to catch, and none appeared
+  across any of the above runs.
+
+  **What this does NOT confirm, stated plainly**: this host has no macOS/BSD
+  hardware, so this fix has only been checked for standards-compliance by
+  reading what it calls against documented POSIX/Darwin behavior
+  (`pthread_mutex_init`/`_destroy`/`_lock`/`_unlock`,
+  `pthread_cond_init`/`_destroy`/`_signal`/`_timedwait` are all plain
+  POSIX.1 functions, confirmed present and behaving identically on Darwin —
+  including the `CLOCK_REALTIME`-by-default timeout clock and the absence of
+  an `EINTR` return from `pthread_cond_timedwait`, both checked against
+  Apple's own published manual page text, not assumed from the Linux side)
+  — it has never been compiled with an actual macOS SDK, let alone run or
+  TSan-checked on real Apple Silicon. Per this project's standing rule (the
+  kqueue backend above was held to the same line), no branch was pushed and
+  no CI run was triggered from this session to validate that; a human still
+  needs to push this branch and watch `.github/workflows/macos.yml` run
+  again; only that can move this from "reasoned to be correct against
+  documented POSIX/Darwin semantics" to "confirmed."
+
 **Phase 4 — portability.**
 - aarch64 context switch
 - ~~kqueue (macOS/BSD)~~ — pulled forward into Phase 3.5, see the Progress

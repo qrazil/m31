@@ -19,7 +19,6 @@
 
 #include <errno.h>
 #include <pthread.h>
-#include <semaphore.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -342,6 +341,94 @@ static void perm_reshuffle(rt_wake_perm_t *p) {
 }
 
 /* ========================================================================
+ * A portable "wake semaphore": mutex + condvar + an explicit count,
+ * emulating exactly the one property of an unnamed POSIX semaphore
+ * (sem_init/sem_post/sem_timedwait/sem_destroy) this file actually needs --
+ * a post that happens before the matching wait is REMEMBERED, not lost, so
+ * `rt_wake_sem_timedwait` below can still return immediately even if the
+ * matching `rt_wake_sem_post` ran first. A bare condvar does NOT have this
+ * property (a `pthread_cond_signal` with nobody blocked on it yet vanishes),
+ * which is exactly why this needs its own count rather than being a condvar
+ * alone -- see carrier_main's own comment, below, for why that property is
+ * load-bearing for closing a real lost-wakeup window, not a nicety.
+ *
+ * This replaces a real `sem_t wake_sem` this file used to carry directly.
+ * Found and replaced the same night as the aarch64 port and the kqueue
+ * reactor, by this branch's own macOS CI run (`.github/workflows/macos.yml`,
+ * a real macos-14 runner) failing at compile time on `sem_timedwait` --
+ * "call to undeclared function" -- NOT found by inspection beforehand.
+ * macOS/Darwin's <semaphore.h> declares the unnamed-semaphore API only
+ * incompletely (sem_timedwait is missing outright on recent SDKs; sem_init
+ * exists but is documented by Apple as deprecated and, per long-standing
+ * reports, returns ENOSYS at runtime) -- only NAMED semaphores (sem_open)
+ * are actually supported there, which this runtime has no use for (naming
+ * a kernel-wide semaphore per carrier, then unlinking it correctly on every
+ * exit path including a crash, is real extra complexity this file does not
+ * need). A mutex+condvar+count is POSIX-standard on both platforms (no
+ * platform-specific attribute is set on either the mutex or the condvar, so
+ * both default to behavior POSIX guarantees identically -- in particular
+ * the condvar's default clock is CLOCK_REALTIME on both glibc and Darwin's
+ * libpthread, matching the CLOCK_REALTIME-based absolute `struct timespec`
+ * this file already builds for the timed wait, unchanged from what
+ * sem_timedwait itself required), so one implementation covers both
+ * platforms -- no #ifdef, per this project's standing "no two ways to do
+ * the same thing" preference (docs/concurrency-decision.md). */
+typedef struct rt_wake_sem {
+    pthread_mutex_t lock;
+    pthread_cond_t  cond;
+    unsigned int    count;
+} rt_wake_sem_t;
+
+static int rt_wake_sem_init(rt_wake_sem_t *ws) {
+    if (pthread_mutex_init(&ws->lock, NULL) != 0) return -1;
+    if (pthread_cond_init(&ws->cond, NULL) != 0) {
+        pthread_mutex_destroy(&ws->lock);
+        return -1;
+    }
+    ws->count = 0;
+    return 0;
+}
+
+static void rt_wake_sem_destroy(rt_wake_sem_t *ws) {
+    pthread_mutex_destroy(&ws->lock);
+    pthread_cond_destroy(&ws->cond);
+}
+
+/* Increments the count under the lock, then signals -- exactly
+ * sem_post's own "remembered until consumed" contract: a post that lands
+ * with nobody waiting yet is not lost, it just makes the count nonzero for
+ * the next rt_wake_sem_timedwait to find. */
+static void rt_wake_sem_post(rt_wake_sem_t *ws) {
+    pthread_mutex_lock(&ws->lock);
+    ws->count++;
+    pthread_mutex_unlock(&ws->lock);
+    pthread_cond_signal(&ws->cond);
+}
+
+/* sem_timedwait's replacement: block until the count is nonzero (consuming
+ * one post) or `abstime` (a CLOCK_REALTIME-based absolute deadline, same
+ * shape the old sem_timedwait call built) passes, whichever comes first.
+ * Returns true if a post was consumed, false on timeout. The `while
+ * (count == 0)` -- not `if` -- is the same spurious-wakeup-safe shape every
+ * condvar wait in this codebase already uses elsewhere, and it is also
+ * exactly what re-checks the deadline on every spurious or stolen wakeup
+ * rather than trusting a single wait call to mean one real event. */
+static bool rt_wake_sem_timedwait(rt_wake_sem_t *ws, const struct timespec *abstime) {
+    bool got_post = false;
+    pthread_mutex_lock(&ws->lock);
+    while (ws->count == 0) {
+        int rc = pthread_cond_timedwait(&ws->cond, &ws->lock, abstime);
+        if (rc != 0) break; /* ETIMEDOUT, or an error -- either way, stop waiting */
+    }
+    if (ws->count > 0) {
+        ws->count--;
+        got_post = true;
+    }
+    pthread_mutex_unlock(&ws->lock);
+    return got_post;
+}
+
+/* ========================================================================
  * One carrier: one OS thread, its own wake semaphore and idle flag, and its
  * own local buffer -- a ring buffer sized exactly fuel_size, which is
  * always enough: a draw only ever happens when the buffer is completely
@@ -356,8 +443,9 @@ static void perm_reshuffle(rt_wake_perm_t *p) {
  * carrier calling this, about itself". Nothing anywhere takes another
  * carrier's `c->local` by pointer, indexes into it, or iterates
  * `sched->carriers[j].local` for any j. The only per-carrier fields ANY
- * other thread ever touches are `idle` (atomic) and `wake_sem` (a
- * semaphore) -- the wake primitive, not the run queue -- which is exactly
+ * other thread ever touches are `idle` (atomic) and `wake_sem` (a mutex/
+ * condvar/count wake primitive, see `rt_wake_sem_t` above) -- the wake
+ * primitive, not the run queue -- which is exactly
  * what "individually addressable wake primitive" in the design doc means
  * and nothing more.
  *
@@ -396,8 +484,8 @@ typedef struct rt_carrier {
     uint32_t             index;
     pthread_t            os_thread;
 
-    sem_t       wake_sem;
-    atomic_bool idle;
+    rt_wake_sem_t wake_sem;
+    atomic_bool   idle;
 
     rt_green_t **local;
     uint32_t     local_cap;
@@ -744,7 +832,7 @@ static void notify_new_work(rt_scheduler_t *s) {
         if (atomic_compare_exchange_strong_explicit(
                 &c->idle, &expected, false, memory_order_acq_rel,
                 memory_order_relaxed)) {
-            sem_post(&c->wake_sem);
+            rt_wake_sem_post(&c->wake_sem);
             pthread_mutex_unlock(&p->lock);
             return;
         }
@@ -1226,12 +1314,13 @@ static void *carrier_main(void *argp) {
                 return NULL;
             }
             /* Genuinely nothing anywhere: go idle. Set the flag BEFORE
-             * waiting, not after -- sem_post/sem_timedwait's own count
-             * means a notify that lands between this store and the
-             * wait call below is not lost (the semaphore remembers the
-             * post), which is what actually closes the lost-wakeup
-             * window; the periodic timeout is the remaining
-             * correctness floor for anything this still misses. */
+             * waiting, not after -- rt_wake_sem_post/rt_wake_sem_timedwait's
+             * own count means a notify that lands between this store and
+             * the wait call below is not lost (the wake semaphore remembers
+             * the post, exactly like a real sem_t would), which is what
+             * actually closes the lost-wakeup window; the periodic timeout
+             * is the remaining correctness floor for anything this still
+             * misses. */
             atomic_store_explicit(&c->idle, true, memory_order_relaxed);
 
             struct timespec ts;
@@ -1241,13 +1330,14 @@ static void *carrier_main(void *argp) {
                 ts.tv_sec += 1;
                 ts.tv_nsec -= 1000000000L;
             }
-            while (sem_timedwait(&c->wake_sem, &ts) != 0 && errno == EINTR) {
-                /* retry on signal interruption only */
-            }
-            /* Either a real post, or ETIMEDOUT (the fallback firing),
-             * or a spurious-looking EINVAL from a clock edge case --
-             * all three mean exactly the same thing here: go back to
-             * the top and try to find work again. */
+            rt_wake_sem_timedwait(&c->wake_sem, &ts);
+            /* Either a real post or the 5ms fallback firing -- both mean
+             * exactly the same thing here: go back to the top and try to
+             * find work again. Unlike the old sem_timedwait call, there is
+             * no EINTR to retry on and no clock-edge EINVAL to shrug off:
+             * pthread_cond_timedwait is specified to never return EINTR,
+             * and rt_wake_sem_timedwait's own `while (count == 0)` loop
+             * already absorbs any spurious condvar wakeup internally. */
             continue;
         }
 
@@ -1343,7 +1433,7 @@ rt_scheduler_t *rt_sched_create(uint32_t n_carriers) {
         rt_carrier_t *c = &s->carriers[i];
         c->sched = s;
         c->index = i;
-        if (sem_init(&c->wake_sem, 0, 0) != 0) {
+        if (rt_wake_sem_init(&c->wake_sem) != 0) {
             rt_trap("could not create a carrier's wake semaphore");
         }
         /* Every carrier starts idle=true: it genuinely is, before anything
@@ -1602,7 +1692,7 @@ uint64_t rt_sched_handoff_items(rt_scheduler_t *s) {
 void rt_sched_shutdown(rt_scheduler_t *s) {
     atomic_store_explicit(&s->shutdown, true, memory_order_relaxed);
     for (uint32_t i = 0; i < s->n_carriers; i++) {
-        sem_post(&s->carriers[i].wake_sem);
+        rt_wake_sem_post(&s->carriers[i].wake_sem);
     }
     for (uint32_t i = 0; i < s->n_carriers; i++) {
         pthread_join(s->carriers[i].os_thread, NULL);
@@ -1622,7 +1712,7 @@ void rt_sched_destroy(rt_scheduler_t *s) {
     free(s->perm.order);
     registry_destroy(&s->registry);
     for (uint32_t i = 0; i < s->n_carriers; i++) {
-        sem_destroy(&s->carriers[i].wake_sem);
+        rt_wake_sem_destroy(&s->carriers[i].wake_sem);
         pthread_mutex_destroy(&s->carriers[i].local_lock);
         free(s->carriers[i].local);
     }
