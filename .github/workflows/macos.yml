@@ -108,10 +108,10 @@ jobs:
       - name: Phase 3.5 -- spawn backpressure deadlock regression (real compiled program, many green threads)
         run: bash runtime/spawn_backpressure_test.sh
 
-      - name: Phase 3.5 -- net concurrency demo (real TCP through lib/net.src -> __wait_io -> the kqueue reactor, the one real caller this whole backend exists to serve)
+      - name: Phase 3.5 -- net concurrency demo (real TCP through lib/net.m31 -> __wait_io -> the kqueue reactor, the one real caller this whole backend exists to serve)
         run: |
           set -eu
-          LANG_NUM_CARRIERS=1 ./build.sh runtime/net_concurrency_demo/main.src -o /tmp/demo
+          LANG_NUM_CARRIERS=1 ./build.sh runtime/net_concurrency_demo/main.m31 -o /tmp/demo
           out=$(/tmp/demo)
           echo "demo output: $out"
           [ "$out" = "200" ] || {

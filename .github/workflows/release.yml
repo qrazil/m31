@@ -104,12 +104,12 @@ jobs:
           cp "target/release/$LANG_BIN" "$OUT/$LANG_BIN"
 
           # apps/git -- the read-only CLI and the interactive client.
-          # gitui.src pulls in apps/tui/ as well as apps/git/'s own files,
+          # gitui.m31 pulls in apps/tui/ as well as apps/git/'s own files,
           # which this compiler cannot see from apps/git alone (imports
           # resolve against the entry file's own directory only) --
           # build-gitui.sh exists specifically to stage both into a temp
           # dir first. See apps/git/README.md and build-gitui.sh's header.
-          ./build.sh apps/git/git.src -o "$OUT/ourgit"
+          ./build.sh apps/git/git.m31 -o "$OUT/ourgit"
           ./apps/git/build-gitui.sh -o "$OUT/ourgitui"
 
           # apps/markdown -- the one app with its own build.sh, which wants
@@ -117,11 +117,11 @@ jobs:
           OUT="$OUT/markdown" bash apps/markdown/build.sh
 
           # apps/tui is a library (see apps/tui/README.md: "This library is
-          # not part of the standard library"); demo.src and browse.src are
+          # not part of the standard library"); demo.m31 and browse.m31 are
           # its only two standalone programs, so those are what ships.
           OUT="dist/${LANG_NAME}-linux-x86_64"
-          ./build.sh apps/tui/demo.src -o "$OUT/tuidemo"
-          ./build.sh apps/tui/browse.src -o "$OUT/tuibrowse"
+          ./build.sh apps/tui/demo.m31 -o "$OUT/tuidemo"
+          ./build.sh apps/tui/browse.m31 -o "$OUT/tuibrowse"
 
           # apps/ssh is Phase 1 of the ssh work: SHA-256 and
           # ChaCha20-Poly1305 primitives only (docs/ssh-decision.md) -- there
@@ -129,8 +129,8 @@ jobs:
           # ship. What exists and builds is the pair of self-check programs
           # that already run in apps/ssh/test.sh, named here for what they
           # are rather than implying a finished ssh client.
-          ./build.sh apps/ssh/t_sha256.src -o "$OUT/ssh-sha256-selftest"
-          ./build.sh apps/ssh/t_chacha20poly1305.src -o "$OUT/ssh-chacha20poly1305-selftest"
+          ./build.sh apps/ssh/t_sha256.m31 -o "$OUT/ssh-sha256-selftest"
+          ./build.sh apps/ssh/t_chacha20poly1305.m31 -o "$OUT/ssh-chacha20poly1305-selftest"
 
           sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
           ${LANG_NAME} — Linux x86-64 release build
@@ -192,6 +192,19 @@ jobs:
   build-macos:
     name: Build — macOS (${{ matrix.target_name }})
     needs: gates
+    # TEMPORARILY DISABLED, whole job: GitHub Actions requires a matrix to
+    # define at least one vector -- an `include:` with every entry commented
+    # out is a schema-invalid matrix, not an empty-and-skipped one, and
+    # fails the entire workflow at validation time before any job runs
+    # (discovered the hard way: it showed up as an immediate, job-less
+    # "failure" on every push, including ones that don't even touch a tag).
+    # `if: false` is the actual way to disable a job while keeping the YAML
+    # valid. Re-enable (flip this to `if: true` or delete the line, restore
+    # the matrix below, add build-macos back to the release job's `needs:`)
+    # once a second macOS remote is available -- do not leave it off
+    # permanently, see the "last Intel image" note on the commented-out
+    # macos-13 entry below.
+    if: false
     strategy:
       fail-fast: false
       matrix:
@@ -218,6 +231,8 @@ jobs:
           #      arm64 toolchain (no cross-compilation needed either way)
           # - target_name: macos-arm64
           #   runner: macos-14 # Apple Silicon GitHub-hosted image
+          - target_name: placeholder
+            runner: ubuntu-latest
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -261,13 +276,17 @@ jobs:
 
   # ---------------------------------------------------------------------
   # Attach every platform's tarball to the GitHub Release for this tag.
+  #
+  # build-macos is NOT in `needs` right now: it's `if: false` (see its own
+  # comment) while disabled, and a job's default `if: success()` treats a
+  # skipped need as unmet, which would skip this job forever too. Add
+  # build-macos back to `needs` in the same commit that re-enables it.
   # ---------------------------------------------------------------------
   release:
     name: Publish release
     needs:
       - gates
       - build-linux-x86_64
-      - build-macos
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
