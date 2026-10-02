@@ -43,7 +43,6 @@
  * function needing to know or care which case it is.
  */
     .globl rt_ctx_switch
-    .type rt_ctx_switch, @function
     .align 16
 rt_ctx_switch:
     /* --- save the running context into *from --- */
@@ -71,7 +70,6 @@ rt_ctx_switch:
     movq 48(%rsi), %r15
 
     ret
-    .size rt_ctx_switch, . - rt_ctx_switch
 
 /* void rt_ctx_trampoline(void);
  *
@@ -95,7 +93,6 @@ rt_ctx_switch:
  * runtime.
  */
     .globl rt_ctx_trampoline
-    .type rt_ctx_trampoline, @function
     .align 16
 rt_ctx_trampoline:
     movq %r13, %rdi    /* argument -> first System V argument register */
@@ -107,14 +104,16 @@ rt_ctx_trampoline:
      * safety net, not a load-bearing instruction. */
     call rt_ctx_entry_returned
     ud2
-    .size rt_ctx_trampoline, . - rt_ctx_trampoline
 
-/* Marks the stack non-executable. Without this, some linkers assume an
- * assembly file wants an executable stack (the historical default for
- * handwritten .s, from back when that was a common trampoline technique)
- * and emit a `.note.GNU-stack` section saying so, which disables an
- * otherwise-automatic hardening default for the whole binary. This file
- * builds no code on the stack it switches onto -- rt_ctx_make only ever
- * writes one return address there -- so there is nothing that needs an
- * executable stack, here or anywhere else in this runtime. */
-    .section .note.GNU-stack,"",@progbits
+/* No .type/.size/.note.GNU-stack here (there used to be -- see git history
+ * if you want the original Linux-only reasoning for each). This file is
+ * assembled unpreprocessed (no -x assembler-with-cpp anywhere in build.sh/
+ * run.sh/gates.sh) and runtime/arch.sh picks it for every x86-64 OS this
+ * runtime targets, including macOS once macos-13 is re-enabled (see
+ * .github/workflows/release.yml's build-macos job) -- and Apple's
+ * integrated assembler (Mach-O, no ELF symbol-table/stack-executability
+ * concept) rejects all three directives outright with "unknown directive".
+ * ctx_switch_aarch64.s hit this for real on its first genuine macOS CI run;
+ * fixed here too, preemptively, since it is the identical bug waiting for
+ * the same file shape on the other architecture. All three were
+ * informational/hardening, not load-bearing for correctness. */

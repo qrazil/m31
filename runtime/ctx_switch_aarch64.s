@@ -80,7 +80,6 @@
  * syntax.
  */
     .globl rt_ctx_switch
-    .type rt_ctx_switch, %function
     .align 4
 rt_ctx_switch:
     /* --- save the running context into *from (x0) ---
@@ -148,7 +147,6 @@ rt_ctx_switch:
     ldr  d15, [x1, #160]
 
     ret
-    .size rt_ctx_switch, . - rt_ctx_switch
 
 /* void rt_ctx_trampoline(void);
  *
@@ -172,7 +170,6 @@ rt_ctx_switch:
  * a register, not on the stack, so `sp` here is simply the honest top of
  * the stack, no -8/-16 adjustment needed. */
     .globl rt_ctx_trampoline
-    .type rt_ctx_trampoline, %function
     .align 4
 rt_ctx_trampoline:
     mov  x0, x20       /* argument -> first AAPCS64 argument register */
@@ -184,9 +181,16 @@ rt_ctx_trampoline:
      * load-bearing instruction. */
     bl   rt_ctx_entry_returned
     brk  #1
-    .size rt_ctx_trampoline, . - rt_ctx_trampoline
 
-/* Marks the stack non-executable -- identical reasoning to
- * ctx_switch_x86_64.s's matching section; this file writes no code onto
- * any stack it switches onto either. */
-    .section .note.GNU-stack,"",%progbits
+/* No .type/.size/.note.GNU-stack here, unlike ctx_switch_x86_64.s: this
+ * file is assembled unpreprocessed (no -x assembler-with-cpp anywhere in
+ * build.sh/run.sh/gates.sh) on BOTH Linux aarch64 and macOS arm64 --
+ * runtime/arch.sh picks this file by CPU architecture alone, and the two
+ * OSes' assemblers do not share a syntax for ELF-only symbol-table/stack-
+ * executability metadata. GNU as (Linux) accepts %function/.size/.note
+ * .GNU-stack; Apple's integrated assembler (macOS, Mach-O, no preprocessor
+ * run on a lowercase .s) rejects all three outright ("unknown directive"),
+ * which is exactly what broke the first real macOS CI run of this file.
+ * All three are informational/hardening, not load-bearing for correctness
+ * -- see ctx_switch_x86_64.s's own comment for what .note.GNU-stack
+ * buys on Linux, lost here for portability. */
