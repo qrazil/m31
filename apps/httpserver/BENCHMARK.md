@@ -9,6 +9,11 @@ second, more interesting one about read/write timeouts and this runtime's
 carrier model, found by *trying* to run this benchmark with the obviously
 "correct" server code and watching it fail.
 
+(`SCALING.md`, alongside this file, asks a different question with the same
+two servers: not throughput at a few fixed concurrency levels, but how far
+concurrency can be ramped -- 100 up to 20,000 connections -- before either
+one degrades or breaks, and where the two diverge from each other.)
+
 ## Environment, honestly
 
 - 12 logical CPUs (`nproc`), x86-64 Linux, both servers run on the same

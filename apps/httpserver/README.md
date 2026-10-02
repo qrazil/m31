@@ -90,4 +90,9 @@ mocking):
 `net/http` server, with methodology, raw numbers and honest caveats; it is
 exploratory measurement, not part of this test suite, and not part of the
 ordinary corpus (`apps/httpserver` is a long-running server, not a short
-pass/fail program, so `gates.sh` does not build or run it).
+pass/fail program, so `gates.sh` does not build or run it). `SCALING.md` is
+the complementary question -- not "how fast at a few fixed concurrency
+levels" but "how far does concurrency go before something degrades or
+breaks" -- ramping the same two servers from 100 to 20,000 concurrent
+connections and measuring where (and why) each one's throughput and
+latency diverge from the other.
