@@ -497,7 +497,7 @@ of it in C in 2012.
 - [x] **`spawn`/`Chan`/`net` wired to the real scheduler — Phase 3.5,
       wiring done, the critical race FIXED.** `spawn` always means a green
       thread now, unconditionally, and the wiring itself (Chan's
-      multi-waiter park/unpark, net.src's non-blocking-plus-reactor
+      multi-waiter park/unpark, net.m31's non-blocking-plus-reactor
       conversion) is complete and correct in isolation. Building and
       stress-testing it surfaced a real, TSan-confirmed data race in the
       PRE-EXISTING Phase 1/2 fiber-switching mechanism (`rt_stack_limit`),
@@ -626,7 +626,7 @@ forward rather than fixed in Phase 3 — now CLOSED").
 done; the one critical bug found along the way is now FIXED — see the end
 of this section for the root cause, the fix, and its verification.**
 Phases 1-3 built the whole runtime standalone, exercised only by hand-written
-C test harnesses; this phase is what makes it real from a compiled `.src`
+C test harnesses; this phase is what makes it real from a compiled `.m31`
 program. `spawn` now always means a green thread (`rt_sched_spawn` on a
 process-wide scheduler, `runtime/rt.c`'s `rt_global_scheduler`) — never
 conditionally an OS thread, which would have reintroduced the uncoloured
@@ -640,7 +640,7 @@ green thread 0 (`rt_run_program`), not on the raw OS thread, so a
   at once (plural matters — a condvar's wait queue did this for free under
   OS-thread `spawn`; parking needs its own). `close` wakes every waiter on
   both queues, not just one.
-- `lib/net.src`'s sockets are non-blocking from the moment they are made
+- `lib/net.m31`'s sockets are non-blocking from the moment they are made
   (`SO_NONBLOCK`), and every wait that used to be the kernel blocking the
   calling thread — a connect finishing, more to read, room to write, a
   connection to accept — now goes through a new primitive, `__wait_io`,
@@ -679,7 +679,7 @@ green thread 0 (`rt_run_program`), not on the raw OS thread, so a
   already correct for the condvar side). The raised default queue capacity
   is kept as a second line of defense (harmless, and it also helps batching),
   but the hang it used to merely narrow no longer exists: verified with
-  `runtime/spawn_backpressure_demo/main.src` (300 spawns from the top level,
+  `runtime/spawn_backpressure_demo/main.m31` (300 spawns from the top level,
   `LANG_NUM_CARRIERS=1`, `LANG_GLOBAL_QUEUE_CAP=4` so the cap is hit almost
   immediately rather than only past a million) — hangs forever on the
   pre-fix code (confirmed directly, `timeout` kills it), completes and
@@ -804,7 +804,7 @@ green thread 0 (`rt_run_program`), not on the raw OS thread, so a
   scheduler/reactor mechanism in any way those harnesses' own test shapes
   reach; it takes the SCALE and PATTERN of a real compiled program driving
   many concurrent green threads through many park/unpark cycles via
-  `lib/net.src` to surface it, which is new coverage this task added and
+  `lib/net.m31` to surface it, which is new coverage this task added and
   neither existing harness happened to provide. Deliberately NOT patched:
   this is hand-rolled, assembly-adjacent context-switching code this task
   was scoped to reuse as-is, a wrong fix here is worse than no fix (this

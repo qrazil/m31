@@ -1385,7 +1385,7 @@ pub Result<Conn, Error> connect(str host, int port) {
 // (this function's own callers have never offered one, and the module's
 // doc comment above says why), so this always parks on the reactor rather
 // than bounding the wait -- `__wait_io` cannot itself fail (its own comment
-// in lib/net.src's prim list), so there is no error path to check here
+// in lib/net.m31's prim list), so there is no error path to check here
 // before reading SO_ERROR.
 int finish(int fd) {
     int ignored = __wait_io(fd, IO_WRITABLE);

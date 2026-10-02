@@ -26,7 +26,7 @@ fail=0
 
 note() { printf '%-56s %s\n' "$1" "$2"; }
 
-# rt.c unconditionally calls into the epoll reactor now too (lib/net.src's
+# rt.c unconditionally calls into the epoll reactor now too (lib/net.m31's
 # `__wait_io` -> rt_wait_io -> rt_global_reactor/rt_reactor_wait), even
 # though this Phase 2 test never exercises that path, so reactor.c joins
 # the link line alongside scheduler.c.

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # ThreadSanitizer for the Phase 3.5 wiring (docs/concurrency-decision.md,
 # "Phase 3.5"): `spawn` always a green thread, `Chan.send`/`recv` parking
-# with a FIFO multi-waiter queue, and lib/net.src's sockets going through
+# with a FIFO multi-waiter queue, and lib/net.m31's sockets going through
 # the non-blocking-plus-reactor path. scheduler_tsan.sh and phase3_tsan.sh
 # already cover the STANDALONE scheduler/reactor via their own hand-written
 # C harnesses; this script covers the actual integration, which is only
-# reachable by compiling real `.src` programs through `langc` -- the thing
+# reachable by compiling real `.m31` programs through `langc` -- the thing
 # neither of those harnesses exercises at all.
 #
 # Mirrors their own shape and reasoning exactly (see their headers for the
@@ -21,7 +21,7 @@
 #      run CLEAN, every time -- `send`/`recv` are compiler intrinsics, never
 #      `prim` calls, so they never touch the code path below.
 #
-#   2. The real-socket-I/O test (runtime/net_concurrency_demo/main.src) is
+#   2. The real-socket-I/O test (runtime/net_concurrency_demo/main.m31) is
 #      run and its result is REPORTED, not gated on passing clean: while
 #      building this integration, running this exact program under this
 #      exact script caught a genuine, pre-existing data race on
@@ -145,19 +145,19 @@ report() {
     echo "report: $label -- $clean/$runs clean, $raced/$runs TSan data-race reports, $crashed_other/$runs other non-zero exit (see runtime/net_concurrency_demo/README.md)"
 }
 
-if bin=$(build corpus/core/1303-many-receivers-wait-on-one-channel.src chan_many_receivers); then
+if bin=$(build corpus/core/1303-many-receivers-wait-on-one-channel.m31 chan_many_receivers); then
     gate "$bin" 89700 chan_many_receivers "$chan_runs"
 else
     fail=1
 fi
 
-if bin=$(build corpus/core/1304-many-senders-wait-on-one-channel.src chan_many_senders); then
+if bin=$(build corpus/core/1304-many-senders-wait-on-one-channel.m31 chan_many_senders); then
     gate "$bin" 44850 chan_many_senders "$chan_runs"
 else
     fail=1
 fi
 
-if bin=$(build runtime/net_concurrency_demo/main.src net_concurrent_clients); then
+if bin=$(build runtime/net_concurrency_demo/main.m31 net_concurrent_clients); then
     report "$bin" net_concurrent_clients "$net_runs"
 else
     fail=1

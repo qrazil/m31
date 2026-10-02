@@ -4,7 +4,7 @@ import io;
 // N real TCP connections to one local listener, all at once, each its own
 // `spawn`ed green thread on both ends (a server-side accept loop spawning
 // one handler per connection, and N independent client green threads) --
-// proving that real socket I/O through the reactor (lib/net.src's
+// proving that real socket I/O through the reactor (lib/net.m31's
 // non-blocking sockets, `__wait_io`) does not serialize on a carrier the
 // way a blocking `read`/`write`/`accept`/`connect` would.
 //

@@ -1,7 +1,7 @@
 # `httpserver` -- a "Hello, World!" HTTP/1.1 server
 
 The first real network *server* application written in this language: built
-on `lib/http.src`'s real `Handler`/`serve_conn` machinery (request/response
+on `lib/http.m31`'s real `Handler`/`serve_conn` machinery (request/response
 parsing and writing, framing, keep-alive -- nothing hand-rolled), to exercise
 and measure what tonight's green-thread concurrency fix actually bought.
 Every accepted connection gets its own green thread and every request gets
@@ -18,7 +18,7 @@ a correct `Content-Length`, body `Hello, World!\n`.
     httpserver --help
 
 Port and host are command-line flags, not environment variables: this
-language's standard library has no `getenv` exposed to a `.src` program
+language's standard library has no `getenv` exposed to a `.m31` program
 today (`prim`s cover sockets, files and the clock, not the process
 environment), and `lib/args` already gives a `--port`/`--host` pair the usual
 shell idioms (`httpserver --port "${PORT:-8080}"`) work with anyway.
@@ -39,7 +39,7 @@ where a one-method interface is expected is one static, immortal instance
 per (function, interface) pair -- free across threads, nothing to move or
 clone, by construction. `hello` here is exactly that, so this program writes
 its own accept loop (the same shape as
-`runtime/net_concurrency_demo/main.src`): `ln.accept()`, `spawn
+`runtime/net_concurrency_demo/main.m31`): `ln.accept()`, `spawn
 handle_conn(c)`, repeat, with `handle_conn` calling the public
 `http.serve_conn(c, hello)` on its own green thread. This is precisely the
 pattern `http.serve`'s doc comment describes as "a program a caller can
@@ -51,7 +51,7 @@ This server does **not** call `set_read_timeout`/`set_write_timeout` on its
 connections, unlike `http.serve`'s own default (`deadline()`, 30s both
 ways). That is a deliberate choice, not an oversight -- see
 `BENCHMARK.md`'s "A second finding" for the full account: a *bounded*
-wait on a non-blocking socket is implemented in `lib/net.src` with a real
+wait on a non-blocking socket is implemented in `lib/net.m31` with a real
 blocking `poll(2)` syscall on the calling green thread's own carrier OS
 thread, because a non-blocking socket has no kernel-level receive timeout to
 fall back on any more. That syscall does not free its carrier the way the

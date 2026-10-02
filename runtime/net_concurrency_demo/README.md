@@ -1,7 +1,7 @@
 # net concurrency demo -- NOT part of the ordinary corpus, on purpose
 
-`main.src` spawns a server accept loop, 200 handler green threads and 200
-client green threads, all doing real TCP I/O through `lib/net.src` at once,
+`main.m31` spawns a server accept loop, 200 handler green threads and 200
+client green threads, all doing real TCP I/O through `lib/net.m31` at once,
 to demonstrate that real concurrent socket I/O does not serialize on a
 carrier (docs/concurrency-decision.md, "Phase 3.5"). It is correct, and when
 it works it is a strong demonstration of the integration this task built.
@@ -29,7 +29,7 @@ race above is fixed).
 ## How to run it
 
 ```
-LANG_NUM_CARRIERS=1 ./build.sh runtime/net_concurrency_demo/main.src -o /tmp/demo && /tmp/demo
+LANG_NUM_CARRIERS=1 ./build.sh runtime/net_concurrency_demo/main.m31 -o /tmp/demo && /tmp/demo
 ```
 
 prints `200` (every connection succeeded) reliably. Running it without

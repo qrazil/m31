@@ -835,7 +835,7 @@ Points the `bytes` design has to settle for these to exist:
 > blocking a syscall on it -- used for every UNBOUNDED wait (no read/write
 > timeout set). A bounded wait (a timeout was set) still uses `__poll`, as
 > it already did, because parking has no way to report "gave up after N
-> ms". See `lib/net.src`'s own header comment and `runtime/rt.c`'s
+> ms". See `lib/net.m31`'s own header comment and `runtime/rt.c`'s
 > `rt_wait_io` for the full reasoning.
 
 The layer side of sockets is done (§2). What is *not* written here, on

@@ -1,4 +1,4 @@
-// httpserver -- a "Hello, World!" HTTP/1.1 server over lib/http.src's real
+// httpserver -- a "Hello, World!" HTTP/1.1 server over lib/http.m31's real
 // Handler/serve machinery, built to prove (and measure) what tonight's
 // concurrency fix bought: every accepted connection gets its own green
 // thread, so N simultaneous clients are served concurrently rather than one
@@ -10,7 +10,7 @@
 //   httpserver --help
 //
 // Why this does not just call `http.serve(ln, hello)`: that function is
-// documented (lib/http.src, "One connection at a time, and why") to serve
+// documented (lib/http.m31, "One connection at a time, and why") to serve
 // one connection to completion before accepting the next, because a
 // *borrowed* `Handler` parameter cannot be moved into a `spawn`ed green
 // thread. `hello` below sidesteps that: a plain top-level function used
@@ -18,7 +18,7 @@
 // §3.4 ("No captures"), one static, immortal instance per (function,
 // interface) pair -- free across threads, nothing to move or clone. So this
 // program writes its own accept loop (the same shape as
-// `runtime/net_concurrency_demo/main.src`), `spawn`ing `handle_conn` per
+// `runtime/net_concurrency_demo/main.m31`), `spawn`ing `handle_conn` per
 // accepted connection and calling the public `http.serve_conn` inside it.
 import args;
 import http;
@@ -28,7 +28,7 @@ import os;
 
 // **Deliberately no `set_read_timeout`/`set_write_timeout` here** -- see
 // apps/httpserver/BENCHMARK.md, "A second finding: timeouts and the carrier
-// ceiling", for the full account, but in short: `lib/net.src`'s own doc
+// ceiling", for the full account, but in short: `lib/net.m31`'s own doc
 // comment says a *bounded* read/write wait (any nonzero timeout) is
 // implemented with `__poll`, a real blocking syscall on the calling
 // carrier's own OS thread, because a non-blocking socket's kernel timeout

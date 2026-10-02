@@ -10,7 +10,7 @@
 # (`rt_sched_park(RT_GT_PARKED_QUEUE)`) instead of blocking the carrier when
 # the caller IS one -- the same shape `Chan.send`/`recv` already use.
 #
-# runtime/spawn_backpressure_demo/main.src spawns 300 workers in a tight
+# runtime/spawn_backpressure_demo/main.m31 spawns 300 workers in a tight
 # loop from the top level (which always runs as green thread 0,
 # rt_run_program) over a channel of capacity 300, so none of them can block
 # on the channel itself -- the only thing that can possibly block here is
@@ -38,9 +38,9 @@ trap 'rm -rf "$WORK"' EXIT
 stock_runs=${1:-40}
 tsan_runs=${2:-15}
 fail=0
-EXPECTED=44850 # sum(0..299) -- see main.src's own comment
+EXPECTED=44850 # sum(0..299) -- see main.m31's own comment
 
-SRC=runtime/spawn_backpressure_demo/main.src
+SRC=runtime/spawn_backpressure_demo/main.m31
 C="$WORK/sb.c"
 
 if ! "$LANGC" --emit-c "$SRC" -o "$C" 2>"$WORK/compile.err"; then

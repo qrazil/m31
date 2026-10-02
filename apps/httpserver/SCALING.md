@@ -50,9 +50,9 @@ primitives.
   client-side ephemeral ports in use at once. At `c=20000` that is ~71% of
   the entire range. See "Why the ramp stopped at 20,000" below.
 - `somaxconn` (`/proc/sys/net/core/somaxconn`): **4096**.
-- **A pre-existing asymmetry worth flagging**: `apps/httpserver/main.src`
+- **A pre-existing asymmetry worth flagging**: `apps/httpserver/main.m31`
   calls `net.listen(host, port)` with no explicit `backlog`, so it gets
-  `lib/net.src`'s own default of **128** pending connections
+  `lib/net.m31`'s own default of **128** pending connections
   (`pub Result<Listener, Error> listen(str host, int port, int backlog =
   128)`). Go's `net.Listen` derives its backlog from `somaxconn` --
   **4096** here, over 30x larger. A connection-establishment burst (exactly
@@ -219,7 +219,7 @@ throughput and tail latency from 5,000 upward, and in resident memory by
 
 **This is not `BENCHMARK.md`'s already-documented timeout/carrier-ceiling
 bug.** That bug needs `set_read_timeout`/`set_write_timeout` to be set (it
-is not, here -- confirmed in `apps/httpserver/main.src`), and it has a
+is not, here -- confirmed in `apps/httpserver/main.m31`), and it has a
 specific signature: a *cliff* at exactly `n_carriers` simultaneously-idle
 connections, with `context deadline exceeded` errors. What this test
 observed instead is a *smooth, monotonically worsening* gap as concurrency
@@ -319,7 +319,7 @@ count (`ss -tn state established`) closely at every level -- e.g. at
 to the connection, but same order and same trend). This is a **direct**
 confirmation (not just an inference from connection counts) that
 `apps/httpserver`'s one-green-thread-per-accepted-connection design
-(`main.src`'s `accept_loop`/`spawn handle_conn(c)`) is doing exactly what
+(`main.m31`'s `accept_loop`/`spawn handle_conn(c)`) is doing exactly what
 it says at real scale: 19,030 simultaneously live green threads was
 observed directly, with the process still answering requests (if slowly)
 and never erroring.

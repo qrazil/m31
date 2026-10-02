@@ -1,7 +1,7 @@
 # `httpserver` vs. a minimal Go `net/http` server
 
 A throughput/latency comparison between `apps/httpserver` (this project's
-"Hello, World!" server, built on `lib/http.src`'s real `Handler`/`serve_conn`
+"Hello, World!" server, built on `lib/http.m31`'s real `Handler`/`serve_conn`
 machinery, one green thread per connection) and `apps/httpserver/goserver`
 (the same thing, `net/http` only, no third-party dependencies). Two findings
 came out of this exercise: the throughput/latency comparison itself, and a
@@ -131,7 +131,7 @@ new runtime machinery gets out of the way instead of becoming the ceiling.
 
 ## A second finding: timeouts and the carrier ceiling
 
-The server actually benchmarked above (`apps/httpserver/main.src`)
+The server actually benchmarked above (`apps/httpserver/main.m31`)
 deliberately does **not** call `set_read_timeout`/`set_write_timeout` on
 its connections. That was not the first thing written -- the first version
 did set both, to 30 seconds, matching `http.serve`'s own default
@@ -164,7 +164,7 @@ hey -z 10s -c 20 http://127.0.0.1:PORT/     # > carrier count
 | 20 (>12 carriers) | 1 | 11,960 | 8 | 29.9s (hey's own retry/timeout stretched it) |
 | 20 (>12 carriers) | 2 | 12,653 | 8 | 29.9s |
 
-**Root cause, read directly out of `lib/net.src`'s own doc comments** (not
+**Root cause, read directly out of `lib/net.m31`'s own doc comments** (not
 a guess -- the file says this plainly, around `Conn.wait_read_timeout`):
 once Phase 3.5 made every socket non-blocking, the kernel's own
 `SO_RCVTIMEO`/`SNDTIMEO` stopped being able to time anything out (a
@@ -199,7 +199,7 @@ every connection it accepts, so **any** server built the straightforward,
 recommended way (`http.serve` plus a spawn-per-connection accept loop, once
 that becomes possible some other way than a module-constant handler) would
 hit the same ceiling today. Worth flagging to whoever owns
-`lib/net.src`/`runtime/scheduler.c` next:
+`lib/net.m31`/`runtime/scheduler.c` next:
 
 - The ceiling is exactly `n_carriers` simultaneously-idle, timeout-bearing
   connections, independent of how many green threads exist in total --

@@ -504,7 +504,7 @@ green-thread scheduler (docs/concurrency-decision.md, "Phase 3.5")**:
 it parks the calling green thread on the epoll reactor
 (`runtime/reactor.h`) until `fd` is ready, so every socket this module
 makes could be non-blocking without blocking a carrier on the wait. See
-`runtime/rt.c`'s `rt_wait_io` and `lib/net.src`'s own header comment for
+`runtime/rt.c`'s `rt_wait_io` and `lib/net.m31`'s own header comment for
 the full reasoning, including why it is used only for an unbounded wait
 and `__poll` still covers the bounded (timeout-set) case.
 
