@@ -322,14 +322,19 @@ static void test_multi_slab_stress(void) {
      * toward one-VMA-per-stack, and absorbs anything else the process
      * might incidentally map (malloc growing the heap for bookkeeping, for
      * instance) without hiding that regression. */
+    /* /proc/self/maps is Linux-only -- count_vmas() returns -1 when it
+     * can't be opened (no procfs at all, e.g. macOS), and this is skipped
+     * silently rather than failed, exactly like the second count_vmas()
+     * use below: the structural "distinct slabs" check right after this is
+     * the real, platform-independent test of the same claim; this one is
+     * real, observed bonus evidence where it's available, not the only
+     * evidence the claim has. */
     if (vma_before >= 0 && vma_after_alloc >= 0) {
         long grew = vma_after_alloc - vma_before;
         CHECK(grew >= 0 && grew <= 10,
               "allocating ~2500 stacks must add a small, slab-sized number "
               "of VMAs (possibly zero, if the kernel merges them), not one "
               "per stack");
-    } else {
-        CHECK(false, "could not read /proc/self/maps to check the VMA claim");
     }
 
     /* The /proc/self/maps count above is real, observed evidence, but it is

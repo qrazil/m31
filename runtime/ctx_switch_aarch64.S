@@ -80,6 +80,19 @@
 #define C_SYM(x) x
 #endif
 
+/* .type/.size/.note.GNU-stack are ELF-only concepts (Apple's assembler has
+ * no symbol-table-type or stack-executability notion to accept Mach-O
+ * equivalents for), restored here behind plain #if !defined(__APPLE__)
+ * blocks at each site now that the .S extension makes conditionals
+ * possible. The GNU-stack note is not just cosmetic on Linux: a modern
+ * (Ubuntu 24.04 GitHub Actions runner's) `ld` emits "missing .note.GNU-
+ * stack section implies executable stack" as a build-breaking warning
+ * without it -- this project's own build scripts treat any non-empty
+ * stderr as a failed build, so dropping it outright (an earlier version of
+ * this fix did) is a real Linux regression, not a safe simplification.
+ * .type/.size have no such consequence (informational symbol-table
+ * metadata only) but are restored too, for completeness. */
+
     .text
 
 /* void rt_ctx_switch(rt_ctx_t *from, rt_ctx_t *to); -- from in x0, to in x1.
@@ -98,6 +111,9 @@
  * syntax.
  */
     .globl C_SYM(rt_ctx_switch)
+#if !defined(__APPLE__)
+    .type C_SYM(rt_ctx_switch), %function
+#endif
     .align 4
 C_SYM(rt_ctx_switch):
     /* --- save the running context into *from (x0) ---
@@ -165,6 +181,9 @@ C_SYM(rt_ctx_switch):
     ldr  d15, [x1, #160]
 
     ret
+#if !defined(__APPLE__)
+    .size C_SYM(rt_ctx_switch), . - C_SYM(rt_ctx_switch)
+#endif
 
 /* void rt_ctx_trampoline(void);
  *
@@ -188,6 +207,9 @@ C_SYM(rt_ctx_switch):
  * a register, not on the stack, so `sp` here is simply the honest top of
  * the stack, no -8/-16 adjustment needed. */
     .globl C_SYM(rt_ctx_trampoline)
+#if !defined(__APPLE__)
+    .type C_SYM(rt_ctx_trampoline), %function
+#endif
     .align 4
 C_SYM(rt_ctx_trampoline):
     mov  x0, x20       /* argument -> first AAPCS64 argument register */
@@ -199,15 +221,17 @@ C_SYM(rt_ctx_trampoline):
      * load-bearing instruction. */
     bl   C_SYM(rt_ctx_entry_returned)
     brk  #1
+#if !defined(__APPLE__)
+    .size C_SYM(rt_ctx_trampoline), . - C_SYM(rt_ctx_trampoline)
+#endif
 
-/* No .type/.size/.note.GNU-stack here: this file runs on BOTH Linux
- * aarch64 and macOS arm64 (runtime/arch.sh picks it by CPU architecture
- * alone), and the two OSes' assemblers do not share a syntax for ELF-only
- * symbol-table/stack-executability metadata. GNU as (Linux) accepts
- * %function/.size/.note.GNU-stack; Apple's integrated assembler (macOS,
- * Mach-O, no ELF symbol-table/stack-executability concept) rejects all
- * three outright ("unknown directive"), which is exactly what broke the
- * first real macOS CI run of this file. All three are informational/
- * hardening, not load-bearing for correctness -- see ctx_switch_x86_64.S's
- * own comment for what .note.GNU-stack buys on Linux, lost here for
- * portability. */
+/* Marks the stack non-executable on Linux only -- see ctx_switch_x86_64.S's
+ * matching comment for the full reasoning (including why dropping this
+ * outright, an earlier version of this fix, was itself a regression: a
+ * modern `ld` warns without it, and this project's build scripts treat any
+ * warning as a failed build). This file writes no code onto any stack it
+ * switches onto either, so nothing here ever needed an executable stack to
+ * begin with. */
+#if !defined(__APPLE__)
+    .section .note.GNU-stack,"",%progbits
+#endif
