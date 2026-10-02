@@ -114,7 +114,7 @@ run "scheduler, Phase 2" bash runtime/scheduler_test.sh
 # Phase 3 of docs/concurrency-decision.md: epoll reactor, park/unpark (and
 # the CAS state machine that closes the lost-wakeup race between a green
 # thread's EAGAIN and its park call), and the blocking-FFI handoff
-# (runtime/scheduler.c's additive Phase 3 surface, runtime/reactor.c/.h) --
+# (runtime/scheduler.c's additive Phase 3 surface, runtime/reactor.h) --
 # built on the Phase 2 scheduler, standalone, same convention. Every
 # compiler/opt combo this file already uses elsewhere, plus one dedicated
 # ASan+UBSan build. ThreadSanitizer is NOT run here -- see
@@ -167,7 +167,7 @@ run "formatter preserves meaning" bash -c '
             exp="${f%.'"$LANG_EXT"'}.out"
             if [ -e "$exp" ]; then
                 if gcc -O0 -I runtime "$w/b.c" \
-                       runtime/rt.c runtime/scheduler.c runtime/reactor.c '"$RT_CTX_ASM"' \
+                       runtime/rt.c runtime/scheduler.c '"$RT_REACTOR_C"' '"$RT_CTX_ASM"' \
                        -lpthread -o "$w/b" 2>/dev/null; then
                     in="$PWD/${f%.'"$LANG_EXT"'}.in"
                     [ -e "$in" ] || in=/dev/null

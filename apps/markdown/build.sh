@@ -24,5 +24,5 @@ fi
 # The same flags run.sh holds the corpus to: the emitted C must be clean.
 "$CC" "$OPT" -ffp-contract=off -Wall -Wextra -Werror -I runtime -pthread \
       -o "$OUT" "$W/markdown.c" \
-      runtime/rt.c runtime/scheduler.c runtime/reactor.c "$RT_CTX_ASM" || exit 1
+      runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" || exit 1
 echo "built $OUT"

@@ -47,5 +47,5 @@ cp apps/tui/tuiapp.src apps/tui/tuibuf.src apps/tui/tuidiff.src \
 
 "$LANGC" --emit-c "$stage/gitui.src" -o "$stage/gitui.c"
 "$CC" -O2 -pthread -I runtime -o "$out" "$stage/gitui.c" \
-    runtime/rt.c runtime/scheduler.c runtime/reactor.c "$RT_CTX_ASM"
+    runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM"
 echo "$out"

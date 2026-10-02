@@ -50,7 +50,7 @@ check() {
         return
     fi
     if ! cc -O2 -Wall -Wextra -I runtime -pthread -o "$WORK/t_$name" "$WORK/t_$name.c" \
-           runtime/rt.c runtime/scheduler.c runtime/reactor.c "$RT_CTX_ASM" \
+           runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" \
            2>"$WORK/$name.cc"; then
         bad "$name: cc" "$(head -8 "$WORK/$name.cc")"
         return
@@ -76,7 +76,7 @@ check ed25519 gen_ed25519.py
 # `ed25519.verify` must refuse without crashing, per RFC 8032 5.1.3.
 if "$LANGC" --emit-c crypto25519_test/t_ed25519_edge.src -o "$WORK/edge.c" 2>"$WORK/edge.diag"; then
     if cc -O2 -Wall -Wextra -I runtime -pthread -o "$WORK/edge" "$WORK/edge.c" \
-          runtime/rt.c runtime/scheduler.c runtime/reactor.c "$RT_CTX_ASM" \
+          runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" \
           2>"$WORK/edge.cc"; then
         got=$("$WORK/edge")
         want=$'noncanon_y_rejected true\nnot_on_curve_rejected true\nzero_pk_no_crash true'

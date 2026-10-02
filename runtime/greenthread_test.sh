@@ -41,7 +41,7 @@ for cc in gcc clang; do
         # exercises them.
         if ! "$cc" "$opt" -Wall -Wextra -I runtime -pthread \
                 runtime/greenthread_test.c runtime/rt.c \
-                runtime/scheduler.c runtime/reactor.c \
+                runtime/scheduler.c "$RT_REACTOR_C" \
                 "$RT_CTX_ASM" -o "$bin" 2>"$err" || [ -s "$err" ]; then
             note "build [$label]" FAILED
             sed 's/^/    /' "$err" | head -20
@@ -93,7 +93,7 @@ if command -v clang >/dev/null && \
     serr="$WORK/san.err"
     if ! clang -O1 -g $SAN -Wall -Wextra -I runtime -pthread \
             runtime/greenthread_test.c runtime/rt.c \
-            runtime/scheduler.c runtime/reactor.c "$RT_CTX_ASM" \
+            runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" \
             -o "$sbin" 2>"$serr"; then
         note "sanitized build" FAILED
         sed 's/^/    /' "$serr" | head -20

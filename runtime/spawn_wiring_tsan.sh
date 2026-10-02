@@ -81,7 +81,7 @@ build() {
     fi
     if ! clang -O1 -g -fsanitize=thread -fno-omit-frame-pointer -Wall -Wextra \
             -I runtime -pthread \
-            "$c" runtime/rt.c runtime/scheduler.c runtime/reactor.c \
+            "$c" runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" \
             "$RT_CTX_ASM" -o "$bin" 2>"$err"; then
         echo "FAILED: $label: TSan build:"
         sed 's/^/    /' "$err" | head -20

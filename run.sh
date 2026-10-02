@@ -81,7 +81,7 @@ run_one() {
     # context switch they share, alongside rt.c.
     if ! "$cc" "$opt" -ffp-contract=off -Wall -Wextra -DRC_DEBUG $RT_CFLAGS -I runtime \
          -pthread -o "$bin" "$WORK/$base.c" \
-         runtime/rt.c runtime/scheduler.c runtime/reactor.c "$RT_CTX_ASM" \
+         runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" \
          2>"$WORK/$base.cc"; then
       fail_test "$label [$cc $opt]" "C compiler rejected emitted code: $(head -1 "$WORK/$base.cc")"
       return
@@ -198,7 +198,7 @@ for src in corpus/traps/*."$LANG_EXT"; do
     bin="$WORK/$base.t.$cc$opt"
     if ! "$cc" "$opt" -ffp-contract=off -Wall -Wextra -DRC_DEBUG $RT_CFLAGS -I runtime \
          -pthread -o "$bin" "$WORK/$base.c" \
-         runtime/rt.c runtime/scheduler.c runtime/reactor.c "$RT_CTX_ASM" \
+         runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" \
          2>"$WORK/$base.tcc"; then
       fail_test "$label [$cc $opt]" "C compiler rejected emitted code"
       trap_ok=0; break

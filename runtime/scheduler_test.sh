@@ -30,7 +30,7 @@ note() { printf '%-56s %s\n' "$1" "$2"; }
 # `__wait_io` -> rt_wait_io -> rt_global_reactor/rt_reactor_wait), even
 # though this Phase 2 test never exercises that path, so reactor.c joins
 # the link line alongside scheduler.c.
-SRCS="runtime/scheduler_test.c runtime/scheduler.c runtime/reactor.c runtime/rt.c $RT_CTX_ASM"
+SRCS="runtime/scheduler_test.c runtime/scheduler.c "$RT_REACTOR_C" runtime/rt.c $RT_CTX_ASM"
 
 for cc in gcc clang; do
     command -v "$cc" >/dev/null || continue

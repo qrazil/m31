@@ -1,0 +1,112 @@
+name: macOS runtime (kqueue reactor)
+
+# Validates runtime/reactor_kqueue.c (docs/concurrency-decision.md, "Phase
+# 3.5" -- the kqueue port pulled forward from Phase 4's stub) on GENUINE
+# macOS hardware, both Intel and Apple Silicon. This is the whole point of
+# the job: a hand-written kqueue/kevent backend, with its own waiter map,
+# sequence-number spurious-wakeup fix and EVFILT_USER shutdown signal,
+# cannot be honestly called working from reading kevent(2) or from
+# cross-compiling it on Linux -- this project has no macOS/BSD hardware at
+# all, so this workflow is the ONLY way any of this gets to run before a
+# human actually does, on a real kernel.
+#
+# `macos-13` is GitHub's hosted Intel (x86_64) runner; `macos-14` is Apple
+# Silicon (arm64). Both are real hardware, not emulated -- running both
+# matters here specifically because `void*`-sized udata (this backend's
+# spurious-wakeup fix stores a 64-bit sequence number in kevent's `udata`
+# field) and the EVFILT_USER control-bit behavior this file is least
+# confident about could plausibly differ across Apple's two architectures'
+# XNU builds, not just across BSD vendors.
+#
+# Do not retarget this at a Linux ARM64 runner (that is
+# runtime/ctx_switch_aarch64.s's own job, a completely orthogonal CPU-
+# architecture port -- see .github/workflows/aarch64.yml if it has been
+# merged by the time you read this) and do not add `ubuntu-*` here --
+# runtime/reactor_epoll.c already has full Linux coverage via gates.sh in
+# ordinary CI on this project's existing Linux hosts.
+on:
+  push:
+    branches: [ "kqueue-reactor", "master" ]
+  pull_request:
+    branches: [ "master" ]
+  workflow_dispatch: {}
+
+jobs:
+  macos-runtime:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ macos-13, macos-14 ]
+    name: kqueue reactor + green-thread runtime (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Confirm this is genuinely Darwin, not a mislabeled runner
+        run: |
+          set -eu
+          echo "uname -s: $(uname -s)"
+          echo "uname -m: $(uname -m)"
+          echo "uname -a: $(uname -a)"
+          [ "$(uname -s)" = "Darwin" ] || {
+            echo "::error::This runner is not Darwin -- the whole point of this job" \
+                 "is testing runtime/reactor_kqueue.c on a real XNU kernel." >&2
+            exit 1
+          }
+
+      - name: Show toolchain versions (Xcode's clang is the only compiler these runners guarantee; gcc is usually an alias for it)
+        run: |
+          clang --version
+          cc --version
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: cargo build (the compiler itself)
+        run: cargo build
+
+      - name: Sanity check -- the kqueue backend is actually what gets linked here, not silently falling back to epoll
+        run: |
+          set -eu
+          . ./runtime/arch.sh
+          echo "RT_REACTOR_C=$RT_REACTOR_C"
+          [ "$RT_REACTOR_C" = "runtime/reactor_kqueue.c" ] || {
+            echo "::error::runtime/arch.sh picked '$RT_REACTOR_C' on a Darwin runner" \
+                 "-- expected runtime/reactor_kqueue.c. This would mean the rest of" \
+                 "this job silently tested the wrong reactor backend." >&2
+            exit 1
+          }
+
+      - name: Phase 1 -- context switch, slab stacks, probe (round trip, interleaving, overflow trap, poison trap)
+        run: bash runtime/greenthread_test.sh
+
+      - name: Phase 2 -- scheduler
+        run: bash runtime/scheduler_test.sh
+
+      - name: Phase 2 -- scheduler, ThreadSanitizer
+        run: bash runtime/scheduler_tsan.sh
+
+      - name: Phase 3 -- reactor, park/unpark, blocking-FFI handoff (this is the kqueue backend's own test suite, unchanged from the epoll backend's)
+        run: bash runtime/phase3_test.sh
+
+      - name: Phase 3 -- reactor, ThreadSanitizer (the park/unpark CAS protocol, exercised against the kqueue backend specifically)
+        run: bash runtime/phase3_tsan.sh
+
+      - name: Phase 3.5 -- spawn backpressure deadlock regression (real compiled program, many green threads)
+        run: bash runtime/spawn_backpressure_test.sh
+
+      - name: Phase 3.5 -- net concurrency demo (real TCP through lib/net.src -> __wait_io -> the kqueue reactor, the one real caller this whole backend exists to serve)
+        run: |
+          set -eu
+          LANG_NUM_CARRIERS=1 ./build.sh runtime/net_concurrency_demo/main.src -o /tmp/demo
+          out=$(/tmp/demo)
+          echo "demo output: $out"
+          [ "$out" = "200" ] || {
+            echo "::error::expected all 200 connections to succeed, got '$out'" >&2
+            exit 1
+          }
+
+      - name: Full gates.sh (compiler build/test/lint, runtime suites above again as part of the gate, formatter, corpus, ASan/UBSan)
+        run: bash gates.sh

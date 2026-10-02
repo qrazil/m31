@@ -22,5 +22,5 @@ tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 # the epoll reactor, and the context switch they are both built on
 # ($RT_CTX_ASM, picked per-architecture by runtime/arch.sh above).
 "$CC" -O2 -pthread -I runtime -o "$out" "$tmp/out.c" \
-    runtime/rt.c runtime/scheduler.c runtime/reactor.c "$RT_CTX_ASM"
+    runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM"
 echo "$out"

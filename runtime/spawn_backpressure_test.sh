@@ -53,7 +53,7 @@ fi
 # regress the ordinary multi-carrier case) -------------------------------
 STOCK="$WORK/sb.stock"
 if ! cc -O2 -pthread -I runtime -o "$STOCK" "$C" \
-        runtime/rt.c runtime/scheduler.c runtime/reactor.c \
+        runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" \
         "$RT_CTX_ASM" 2>"$WORK/stock.err"; then
     echo "FAILED: stock build:"
     sed 's/^/    /' "$WORK/stock.err" | head -20
@@ -86,7 +86,7 @@ if command -v clang >/dev/null; then
     TSAN="$WORK/sb.tsan"
     if clang -O1 -g -fsanitize=thread -fno-omit-frame-pointer -Wall -Wextra \
             -I runtime -pthread "$C" runtime/rt.c runtime/scheduler.c \
-            runtime/reactor.c "$RT_CTX_ASM" -o "$TSAN" \
+            "$RT_REACTOR_C" "$RT_CTX_ASM" -o "$TSAN" \
             2>"$WORK/tsan.err"; then
         for carriers in 1 2; do
             ok=0

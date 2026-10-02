@@ -53,7 +53,7 @@ for src in "${programs[@]}"; do
         continue
     fi
     if ! clang -O1 -g $SAN -ffp-contract=off -I runtime "$WORK/p.c" \
-            runtime/rt.c runtime/scheduler.c runtime/reactor.c "$RT_CTX_ASM" \
+            runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" \
             -lpthread -o "$WORK/p" 2>"$WORK/cc"; then
         echo "sanitized build failed: $src: $(head -1 "$WORK/cc")"
         bad=1

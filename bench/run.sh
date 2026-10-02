@@ -45,7 +45,7 @@ for dir in bench/*/; do
 
     "$LANGC" --emit-c "$dir/$name.$LANG_EXT" -o "$WORK/$name.c" || continue
     gcc -O2 -ffp-contract=off -I runtime "$WORK/$name.c" \
-        runtime/rt.c runtime/scheduler.c runtime/reactor.c "$RT_CTX_ASM" \
+        runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" \
         -lpthread -o "$WORK/$name.ours" || continue
     ours=$(best "$WORK/$name.ours")
     mem=$(peak "$WORK/$name.ours")

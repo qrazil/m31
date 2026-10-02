@@ -1,10 +1,11 @@
-/* Phase 3 epoll reactor implementation. See reactor.h for the contract and
- * the design reasoning (dedicated OS thread, why no second CAS state
- * machine lives here, the one-waiter-per-fd limitation).
- *
- * Linux-only (epoll, eventfd) -- matching this phase's own stated scope
- * (docs/concurrency-decision.md, "Phases": Phase 3 is Linux/epoll; kqueue
- * is explicitly Phase 4).
+/* Linux backend of the reactor: epoll_wait + eventfd. See reactor.h for the
+ * contract and the design reasoning (dedicated OS thread, why no second CAS
+ * state machine lives here, the one-waiter-per-fd limitation) -- that
+ * contract is shared with runtime/reactor_kqueue.c (the macOS/BSD backend,
+ * docs/concurrency-decision.md "Phase 3.5": kqueue port), and nothing
+ * outside these two files knows or cares which one a given build links.
+ * runtime/arch.sh is the single place that decides which one, per
+ * `uname -s`.
  */
 #include "reactor.h"
 #include "rt.h"
