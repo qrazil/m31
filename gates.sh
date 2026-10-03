@@ -176,7 +176,18 @@ run "formatter preserves meaning" bash -c '
         b=$(basename "$f")
         if ./target/debug/'"$LANG_BIN"' --emit-c "$f" -o "$w/a.c" 2>/dev/null; then
             ./target/debug/'"$LANG_BIN"' fmt "$w/$b" 2>/dev/null
-            ./target/debug/'"$LANG_BIN"' --emit-c "$w/$b" -o "$w/b.c" 2>/dev/null
+            if ! ./target/debug/'"$LANG_BIN"' --emit-c "$w/$b" -o "$w/b.c" 2>"$w/b.diag"; then
+                # Surfaced rather than discarded: a remote import (deps.rs)
+                # re-resolves on this second compile, over the same scratch
+                # copy the first compile already cloned into -- if that ever
+                # fails only here, the cause is in that second resolution,
+                # not in formatting, and silently losing this message is
+                # exactly what made a real macOS-only failure here
+                # undiagnosable from the CI log alone.
+                echo "second compile (after formatting) failed: $f"
+                cat "$w/b.diag"
+                bad=1
+            fi
             # String literals are numbered in the order they are first met,
             # and the formatter reorders top-level items -- so the same
             # program can emit the same literals under different numbers.
