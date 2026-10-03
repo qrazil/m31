@@ -1,0 +1,4 @@
+corpus/modules/remote-import-malformed-deps/deps:1:1: malformed `deps` line: expected 3 whitespace-separated fields, found 2
+  |
+1 | badname only-two-fields
+  | ^

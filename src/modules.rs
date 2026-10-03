@@ -18,6 +18,7 @@ use crate::parser::Parser;
 
 /// A diagnostic plus the file it came from. With several modules a bare
 /// line:col does not identify anything.
+#[derive(Debug)]
 pub struct Located {
     pub path: String,
     pub diag: Diag,
@@ -325,27 +326,46 @@ impl Loader {
             return self.parse(name, &display_path(name), text, from, true);
         }
 
-        let src = std::fs::read_to_string(path).map_err(|e| {
-            let (p, span) = match from {
-                Some((importer, span)) => (self.paths[importer].clone(), span),
-                None => (path.to_string(), Span::new(1, 1)),
-            };
-            Located {
-                path: p,
-                diag: match from {
-                    Some(_) => Diag::new(
+        match std::fs::read_to_string(path) {
+            Ok(src) => self.parse(name, path, &src, from, false),
+            Err(e) => {
+                // The entry file is named on the command line, not imported
+                // -- there is no `deps` fallback for it, only for a name some
+                // other module actually wrote `import` for. `from` is `None`
+                // exactly when this is the entry file.
+                let Some((importer, span)) = from else {
+                    return Err(Located {
+                        path: path.to_string(),
+                        diag: Diag::new(Span::new(1, 1), format!("cannot read {path}: {e}")),
+                    });
+                };
+
+                // Before giving up, a `deps` manifest beside this module's
+                // own directory (`self.dir` -- the same one place local
+                // imports already look) may name `name` as a remote git
+                // import. This is the one new fallback the decision doc
+                // adds, between the embedded standard library (above) and
+                // the "cannot find module" error (below) -- see
+                // docs/remote-imports-decision.md and src/deps.rs.
+                if let Some(remote_path) = crate::deps::resolve(&self.dir, name)? {
+                    let remote_str = remote_path.to_string_lossy().into_owned();
+                    let remote_src = std::fs::read_to_string(&remote_path)
+                        .expect("deps::resolve only ever returns a path it just verified exists");
+                    return self.parse(name, &remote_str, &remote_src, from, false);
+                }
+
+                Err(Located {
+                    path: self.paths[importer].clone(),
+                    diag: Diag::new(
                         span,
                         format!(
                             "cannot find module `{name}`: no `{name}.{}` beside it",
                             self.ext
                         ),
                     ),
-                    None => Diag::new(span, format!("cannot read {path}: {e}")),
-                },
+                })
             }
-        })?;
-
-        self.parse(name, path, &src, from, false)
+        }
     }
 
     /// Everything that happens once a module's text is in hand, whichever

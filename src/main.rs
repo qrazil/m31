@@ -8,6 +8,7 @@
 //! byte-for-byte, so this is observable surface (src/diag.rs).
 
 mod ast;
+mod deps;
 mod diag;
 mod emit_c;
 mod fmt;
