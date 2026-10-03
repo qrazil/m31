@@ -169,12 +169,28 @@ run "formatter preserves meaning" bash -c '
             cp "$(dirname "$f")/deps" "$w/"
             [ -e "$(dirname "$f")/deps.lock" ] && cp "$(dirname "$f")/deps.lock" "$w/"
             for d in "$(dirname "$f")"/*/; do
+                d="${d%/}"
                 [ "$(basename "$d")" = ".m31-deps" ] && continue
+                # No trailing slash on the source: BSD cp (macOS) and GNU cp
+                # (Linux) do not agree on what a trailing slash means for a
+                # directory copy, and this must put a `fixture.git` DIRECTORY
+                # at "$w/fixture.git", not flatten its contents into "$w/"
+                # itself.
                 cp -r "$d" "$w/"
             done
         fi
         b=$(basename "$f")
-        if ./target/debug/'"$LANG_BIN"' --emit-c "$f" -o "$w/a.c" 2>/dev/null; then
+        # Both compiles target the COPY ("$w/$b"), not "$f", even though
+        # formatting has not happened yet for the first one -- a remote
+        # import (deps.rs) resolves relative to the entry file'"'"'s own
+        # directory, so compiling "$f" first and "$w/$b" second would give
+        # the two calls two DIFFERENT resolution contexts (the real corpus
+        # directory, then the scratch one), not a true before/after of the
+        # same file. Found for real: that asymmetry let the first compile
+        # silently succeed against the original fixture while the second,
+        # scratch-only compile depended on the copy of it actually working,
+        # which is exactly where a macOS-only `cp -r` difference surfaced.
+        if ./target/debug/'"$LANG_BIN"' --emit-c "$w/$b" -o "$w/a.c" 2>/dev/null; then
             ./target/debug/'"$LANG_BIN"' fmt "$w/$b" 2>/dev/null
             if ! ./target/debug/'"$LANG_BIN"' --emit-c "$w/$b" -o "$w/b.c" 2>"$w/b.diag"; then
                 # Surfaced rather than discarded: a remote import (deps.rs)
