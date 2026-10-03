@@ -2929,6 +2929,39 @@ int64_t rt_read(int64_t fd, Obj *buf, int64_t off, int64_t n) {
     return sys_read(fd, b->data + off, n);
 }
 
+/* A landing spot for a read that is about to be copied out to its exact
+ * size (rt_read_chunk below), kept per-carrier rather than per-connection.
+ * Green threads are cooperative and only one runs per carrier at a time,
+ * and nothing between the sys_read below and the memcpy that follows it
+ * calls into compiled m31 code -- so none of it can cross rt_stack_check,
+ * the only preemption point this runtime has (docs/concurrency-decision.md,
+ * "Stacks: fixed, but not limited") -- so sharing this one buffer across
+ * every connection a carrier ever serves, instead of giving each connection
+ * its own CHUNK-sized buffer for its whole lifetime, is safe. */
+static _Thread_local uint8_t *rt_read_scratch = NULL;
+static _Thread_local int64_t rt_read_scratch_cap = 0;
+
+/* Read up to `max_n` bytes from `fd` into the per-carrier scratch buffer,
+ * then hand back only the part that was real: `out` (a caller-provided,
+ * normally empty, `bytes`) ends up holding exactly the bytes read, never
+ * padded to `max_n`. `out` is untouched on EAGAIN/EINTR/error (r <= 0). */
+int64_t rt_read_chunk(int64_t fd, int64_t max_n, Obj *out) {
+    if (max_n > rt_read_scratch_cap) {
+        uint8_t *scratch = realloc(rt_read_scratch, (size_t)max_n);
+        if (scratch == NULL) rt_trap("out of memory");
+        rt_read_scratch = scratch;
+        rt_read_scratch_cap = max_n;
+    }
+    int64_t r = sys_read(fd, rt_read_scratch, max_n);
+    if (r <= 0) return r;
+    rt_check_mutable(out);
+    Bytes *b = (Bytes *)out;
+    bytes_reserve(b, r);
+    memcpy(b->data, rt_read_scratch, (size_t)r);
+    b->len = r;
+    return r;
+}
+
 int64_t rt_write(int64_t fd, Obj *buf, int64_t off, int64_t n) {
     Bytes *b = (Bytes *)buf;
     range_ok(b->len, off, n, "__write: range outside the buffer");

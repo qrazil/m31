@@ -76,6 +76,12 @@ import io;
 prim int __read(int fd, bytes buf, int off, int n);
 prim int __write(int fd, bytes buf, int off, int n);
 prim int __close(int fd);
+// Like `__read`, but `out` is filled rather than written into: the read
+// lands in a scratch buffer the runtime keeps per carrier, and `out` (an
+// empty `bytes` the caller passes) ends up holding exactly the bytes that
+// arrived, not padded to `max_n`. Lets `Conn.fill` stop keeping a whole
+// CHUNK alive for every connection's whole lifetime -- see its own comment.
+prim int __read_chunk(int fd, int max_n, bytes out);
 // `kind` and not `type`, which docs/sys-layer.md §9 writes and this language
 // reserves (§1.4). The C side is one symbol and one order of arguments, so
 // only the spelling of the name moves.
@@ -1105,17 +1111,20 @@ void Conn.check_live() {
 
 // Refill an empty buffer. The number of bytes now buffered, 0 at the end.
 //
-// The buffer is one chunk whenever the kernel reads into it: allocated on
-// the first read, and allocated again after an `unread` replaced it with a
-// push-back of another size, which would otherwise fix every later read at
-// that size.
+// `buf` is replaced, not reused: `__read_chunk` reads into a scratch buffer
+// the runtime keeps per carrier (not per connection) and hands back a fresh
+// `bytes` sized to exactly what arrived, so a connection sitting idle holds
+// only the bytes it has actually buffered -- never a whole CHUNK it is not
+// using -- and the one real CHUNK-sized buffer per carrier is shared by
+// every connection that carrier ever serves. Safe because green threads are
+// cooperative: only one runs per carrier at a time, and nothing between the
+// read and the copy-out below crosses `rt_stack_check`, the only point this
+// runtime can switch which one is running (docs/concurrency-decision.md).
 Result<int, io.Error> Conn.fill() {
     check_live();
-    if (buf.size() != CHUNK) {
-        buf = [0; CHUNK];
-    }
+    bytes next = [];
     while (true) {
-        int r = __read(fd, buf, 0, buf.size());
+        int r = __read_chunk(fd, CHUNK, next);
         if (r == -4) {
             continue;
         }
@@ -1129,6 +1138,7 @@ Result<int, io.Error> Conn.fill() {
         if (r < 0) {
             return Result<int, io.Error>.Err(io.from_errno(-r));
         }
+        buf = next;
         at = 0;
         end = r;
         return Result<int, io.Error>.Ok(r);

@@ -266,6 +266,12 @@ void rt_print_str(Obj *o);
  * own error type from the errno, in source where the mapping can be read. */
 int64_t rt_open(Obj *path, int64_t flags, int64_t mode);         /* fd */
 int64_t rt_read(int64_t fd, Obj *buf, int64_t off, int64_t n);   /* bytes read, 0 at end */
+/* Reads into a per-carrier scratch buffer the compiler never sees, then
+ * fills `out` -- a caller-passed, normally empty `bytes` -- with exactly
+ * the bytes that arrived; `out` is a collection the caller passed in, same
+ * as rt_fstat's `out` below, just grown and filled in one call instead of
+ * one push at a time. `out` is untouched when r <= 0 (EAGAIN/EINTR/error). */
+int64_t rt_read_chunk(int64_t fd, int64_t max_n, Obj *out);      /* bytes read, 0 at end */
 int64_t rt_write(int64_t fd, Obj *buf, int64_t off, int64_t n);  /* bytes written */
 int64_t rt_write_str(int64_t fd, Obj *s, int64_t off, int64_t n);
 int64_t rt_close(int64_t fd);

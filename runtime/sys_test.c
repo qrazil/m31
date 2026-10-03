@@ -377,9 +377,30 @@ static void net_tests(void) {
     int64_t part = sys_write(fl, big_write, (int64_t)sizeof big_write);
     expect_true("a write larger than the buffers is short",
                 part > 0 && part < (int64_t)sizeof big_write);
-    /* Nobody has read a byte of it, so the connection is now full. */
-    expect("and the next write is refused outright",
-           sys_write(fl, big_write, (int64_t)sizeof big_write), -SYS_EAGAIN);
+    /* Nobody has read a byte of it, so the connection fills -- but kernel
+     * buffer accounting is not a single atomic number even with nobody
+     * calling read(): small amounts of headroom can still free up between
+     * one write() and the next purely from the kernel's own internal TCP
+     * bookkeeping, and a macOS CI run under the (much slower) ASan/UBSan
+     * build showed a second 32 MiB write still being accepted for a few
+     * hundred KB -- a tiny fraction of the buffer, not a sign the first
+     * write did not actually fill it. Loop until EAGAIN actually arrives,
+     * bounded, rather than assuming exactly one more write proves it: that
+     * is what this check actually wants to know, not an exact write count. */
+    int filled = 0;
+    for (int i = 0; i < 64 && !filled; i++) {
+        int64_t more = sys_write(fl, big_write, (int64_t)sizeof big_write);
+        if (more == -SYS_EAGAIN) {
+            filled = 1;
+        } else if (more <= 0) {
+            expect("filling the connection eventually gets EAGAIN, not some other error",
+                   more, -SYS_EAGAIN);
+            break;
+        }
+        /* more > 0: still being accepted, loop and try again. */
+    }
+    expect_true("eventually, writing enough unread data gets refused outright",
+                filled);
     sys_close(fl);
     sys_close(sv2);
 
