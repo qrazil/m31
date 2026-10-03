@@ -157,6 +157,22 @@ run "formatter preserves meaning" bash -c '
         # another cannot be compiled without its siblings, and the module
         # name comes from the basename so it has to keep its own.
         cp "$(dirname "$f")"/*.'"$LANG_EXT"' "$w/" 2>/dev/null
+        # A remote import (docs/remote-imports-decision.md) needs its own
+        # `deps` manifest, `deps.lock`, and whatever fixture repository a
+        # corpus test commits beside it, copied along with the module files
+        # above, or the from-scratch recompile below cannot resolve it at
+        # all. `.m31-deps/` is left out on purpose: it is the derived cache,
+        # and refetching it from the copied fixture -- locally, no network
+        # -- is itself part of what this gate is proving still works once
+        # formatting has moved things around.
+        if [ -e "$(dirname "$f")/deps" ]; then
+            cp "$(dirname "$f")/deps" "$w/"
+            [ -e "$(dirname "$f")/deps.lock" ] && cp "$(dirname "$f")/deps.lock" "$w/"
+            for d in "$(dirname "$f")"/*/; do
+                [ "$(basename "$d")" = ".m31-deps" ] && continue
+                cp -r "$d" "$w/"
+            done
+        fi
         b=$(basename "$f")
         if ./target/debug/'"$LANG_BIN"' --emit-c "$f" -o "$w/a.c" 2>/dev/null; then
             ./target/debug/'"$LANG_BIN"' fmt "$w/$b" 2>/dev/null

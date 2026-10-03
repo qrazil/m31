@@ -1,0 +1,4 @@
+# `fixture.git` is a throwaway local git repository committed beside this
+# file so the test is hermetic -- no network access, nothing fetched from a
+# real host. See docs/remote-imports-decision.md and src/deps.rs.
+greet ./fixture.git v1

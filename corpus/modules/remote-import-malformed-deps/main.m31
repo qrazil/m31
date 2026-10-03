@@ -1,0 +1,5 @@
+// `badname` is not beside this file, and the standard library has nothing
+// by that name either, so resolution falls through to `deps` -- which is
+// itself malformed. No fixture repository is needed for this one: the error
+// is caught while the manifest is read, before any `git` command ever runs.
+import badname;

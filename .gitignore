@@ -3,3 +3,9 @@ target/
 *.out.bin
 .claude/
 __pycache__/
+
+# A remote import's cache (docs/remote-imports-decision.md): a real `git`
+# checkout, rebuildable at any time from `deps`/`deps.lock`, not something to
+# commit. `deps.lock` itself IS meant to be committed, the same discipline as
+# `Cargo.lock` -- only the checkout it describes is derived, disposable state.
+.m31-deps/

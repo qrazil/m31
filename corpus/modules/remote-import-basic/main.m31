@@ -1,0 +1,7 @@
+// `greet` is not beside this file -- it is resolved through `deps`, pinned
+// in `deps.lock`, and fetched (or reused, if `.m31-deps/greet` already
+// matches the lock) from the throwaway git repository at `fixture.git`. See
+// docs/remote-imports-decision.md.
+import greet;
+
+print(greet.hello());
