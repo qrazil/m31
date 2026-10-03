@@ -667,6 +667,59 @@ pub type Regex {
     int ngroups;
 }
 
+/// Does `s` contain a match anywhere?
+pub bool Regex.is_match(str s) {
+    return run(this, s.chars(), 0).is_some();
+}
+
+/// The leftmost match in `s`, if there is one.
+///
+///     re.find("x42y")      -- for `re` from `regex.compile("\\d+")`
+pub Option<Match> Regex.find(str s) {
+    List<int> chars = s.chars();
+    match (run(this, chars, 0)) {
+        case Some(List<int> saved): {
+            return Option<Match>.Some(build_match(chars, ngroups, saved));
+        }
+        case None: {
+            return Option<Match>.None;
+        }
+    }
+}
+
+/// Every non-overlapping match in `s`, left to right. An empty match (a
+/// pattern like `a*` can match zero characters) advances by one code point
+/// afterwards so the search makes progress, the same rule Python's
+/// `re.finditer` and Go's `FindAllString` use.
+pub List<Match> Regex.find_all(str s) {
+    List<int> chars = s.chars();
+    int n = chars.size();
+    List<Match> out = [];
+    int pos = 0;
+    while (pos <= n) {
+        match (run(this, chars, pos)) {
+            case None: {
+                break;
+            }
+            case Some(List<int> saved): {
+                out.push(build_match(chars, ngroups, saved));
+                if (saved[1] == saved[0]) {
+                    pos = saved[1] + 1;
+                } else {
+                    pos = saved[1];
+                }
+            }
+        }
+    }
+    return out;
+}
+
+/// How many capturing groups `this` has. `m.groups.size()` on a `Match` from
+/// it is always this plus one (index 0 is unused -- see the module header).
+pub int Regex.group_count() {
+    return ngroups;
+}
+
 /// Compile `pattern`. See the module header for the syntax and
 /// `docs/regex-decision.md` for what is deliberately not in it.
 ///
@@ -684,7 +737,6 @@ pub Result<Regex, CompileError> compile(str pattern) {
     frag_append(real, body);
     real.code.push(Inst.Save(1));
     real.code.push(Inst.Match);
-
     // Unanchored search, built once here rather than re-run per start
     // position: try the real pattern at this code point first (higher
     // priority); only once every thread from that attempt has died does the
@@ -697,7 +749,6 @@ pub Result<Regex, CompileError> compile(str pattern) {
     prog.code.push(Inst.Any);
     prog.code.push(Inst.Jmp(0));
     prog.code[0] = Inst.Split(1, skip_at);
-
     return Result<Regex, CompileError>.Ok(Regex(prog.code, p.classes, p.ngroups));
 }
 
@@ -771,11 +822,9 @@ Option<List<int>> run(Regex re, List<int> chars, int from) {
     int n = chars.size();
     int nslots = 2 * (re.ngroups + 1);
     List<int> seed = [-1; nslots];
-
     List<Thread> clist = [];
     Array<bool> marked0 = [false; re.prog.size()];
     addthread(re.prog, clist, marked0, 0, seed, from, n);
-
     Option<List<int>> matched = Option<List<int>>.None;
     int i = from;
     while (clist.size() > 0) {
@@ -864,57 +913,4 @@ Match build_match(List<int> chars, int ngroups, List<int> saved) {
         g = g + 1;
     }
     return Match(whole, groups);
-}
-
-/// Does `s` contain a match anywhere?
-pub bool Regex.is_match(str s) {
-    return run(this, s.chars(), 0).is_some();
-}
-
-/// The leftmost match in `s`, if there is one.
-///
-///     re.find("x42y")      -- for `re` from `regex.compile("\\d+")`
-pub Option<Match> Regex.find(str s) {
-    List<int> chars = s.chars();
-    match (run(this, chars, 0)) {
-        case Some(List<int> saved): {
-            return Option<Match>.Some(build_match(chars, ngroups, saved));
-        }
-        case None: {
-            return Option<Match>.None;
-        }
-    }
-}
-
-/// Every non-overlapping match in `s`, left to right. An empty match (a
-/// pattern like `a*` can match zero characters) advances by one code point
-/// afterwards so the search makes progress, the same rule Python's
-/// `re.finditer` and Go's `FindAllString` use.
-pub List<Match> Regex.find_all(str s) {
-    List<int> chars = s.chars();
-    int n = chars.size();
-    List<Match> out = [];
-    int pos = 0;
-    while (pos <= n) {
-        match (run(this, chars, pos)) {
-            case None: {
-                break;
-            }
-            case Some(List<int> saved): {
-                out.push(build_match(chars, ngroups, saved));
-                if (saved[1] == saved[0]) {
-                    pos = saved[1] + 1;
-                } else {
-                    pos = saved[1];
-                }
-            }
-        }
-    }
-    return out;
-}
-
-/// How many capturing groups `this` has. `m.groups.size()` on a `Match` from
-/// it is always this plus one (index 0 is unused -- see the module header).
-pub int Regex.group_count() {
-    return ngroups;
 }
