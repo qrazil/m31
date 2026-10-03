@@ -714,6 +714,20 @@ int64_t sys_resolve(const char *host, int64_t port, int64_t family,
          * regardless of how strict the host's own getaddrinfo is about
          * honoring what hints.ai_family already asked for. */
         if (family != 0 && p->ai_family != hints.ai_family) continue;
+        /* The filter above is not enough on its own: macOS's synthesized
+         * answer IS a genuine, correctly-tagged AF_INET6 sockaddr (an
+         * IPv4-mapped address, ::ffff:a.b.c.d, encoded exactly as IPv6) --
+         * found for real, this check matching ai_family and the whole
+         * function still returning 1 instead of refusing. hints.ai_flags
+         * never requests AI_V4MAPPED (hints is zeroed above and never sets
+         * it), so this layer never wants that synthesis; any IPv4-mapped
+         * IPv6 answer is always exactly this artifact, safe to reject
+         * unconditionally rather than only when a specific family was
+         * asked for. */
+        if (p->ai_family == AF_INET6 &&
+            IN6_IS_ADDR_V4MAPPED(&((struct sockaddr_in6 *)p->ai_addr)->sin6_addr)) {
+            continue;
+        }
         if (found < cap) {
             /* Copied into a storage first: ai_addr points at exactly
              * ai_addrlen bytes, and from_sockaddr reads a whole struct. */

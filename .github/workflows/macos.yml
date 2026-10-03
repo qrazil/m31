@@ -75,6 +75,16 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      # gates.sh's own corpus gate needs a real `go` to run the twin-test
+      # oracles (run.sh's own `go run "$twin"`) -- missing here from the
+      # start (ci.yml and release.yml both have it; this file never did),
+      # found for real as "go: command not found" failing every twin/*.m31
+      # test the first time gates.sh ran all the way to the corpus gate on
+      # macOS. Same version ci.yml pins, for the same reason: consistency.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
       - name: cargo build (the compiler itself)
         run: cargo build
 

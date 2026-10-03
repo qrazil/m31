@@ -18,6 +18,50 @@ void check(Result<bool, io.Error> r) {
     }
 }
 
+// Unlinking a directory is EISDIR -> IsDirectory on Linux, but a macOS CI
+// run showed BSD's real answer is EPERM -> PermissionDenied instead (a
+// historical BSD distinction: unlink() on a directory was never "wrong
+// type", it was "not allowed at all", predating rmdir() splitting off as
+// its own call). Both are the kernel correctly refusing the exact same
+// request for the exact same reason, so both print the same label here;
+// anything else still prints verbatim, so a genuinely different error
+// still shows up as one.
+void check_refused_directory(Result<bool, io.Error> r) {
+    match (r) {
+        case Ok(bool b): {
+            print("ok");
+        }
+        case Err(io.Error e): {
+            match (e) {
+                case IsDirectory: {
+                    print("refused: is a directory");
+                }
+                case PermissionDenied: {
+                    print("refused: is a directory");
+                }
+                case NotFound: {
+                    print(e.to_str());
+                }
+                case NotADirectory: {
+                    print(e.to_str());
+                }
+                case AlreadyExists: {
+                    print(e.to_str());
+                }
+                case NotEmpty: {
+                    print(e.to_str());
+                }
+                case InvalidUtf8: {
+                    print(e.to_str());
+                }
+                case Other(int code): {
+                    print(e.to_str());
+                }
+            }
+        }
+    }
+}
+
 void count(Result<int, io.Error> r) {
     match (r) {
         case Ok(int n): {
@@ -85,9 +129,11 @@ check(fs.mkdir(file));  // already exists
 // ENOTEMPTY -> NotEmpty
 check(fs.rmdir(root + "/full"));  // directory not empty
 
-// EISDIR -> IsDirectory: unlinking a directory on Linux, and copy refusing
-// to guess that a directory destination meant "into".
-check(fs.remove(root + "/full"));  // is a directory
+// EISDIR -> IsDirectory on Linux, EPERM -> PermissionDenied on macOS/BSD --
+// see check_refused_directory's own comment. copy refusing to guess that a
+// directory destination meant "into" is unaffected (both ends are already
+// this project's own fs.copy, not a bare unlink).
+check_refused_directory(fs.remove(root + "/full"));  // refused: is a directory
 count(fs.copy(file, root + "/full"));  // is a directory
 count(fs.copy(root + "/full", root + "/copy"));  // is a directory
 

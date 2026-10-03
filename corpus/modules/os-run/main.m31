@@ -28,8 +28,11 @@ match (os.run(["false"])) {
 }
 
 // A full path is tried as given, unsearched -- the other half of the rule
-// that keeps the two backends from disagreeing only on bare names.
-match (os.run(["/usr/bin/echo", "hello", "from", "echo"])) {
+// that keeps the two backends from disagreeing only on bare names. /bin/
+// echo, not /usr/bin/echo: macOS has no /usr merge at all (a real macOS CI
+// run found /usr/bin/echo does not exist there), where /bin/echo is the
+// traditional, universal location present on every Unix this builds for.
+match (os.run(["/bin/echo", "hello", "from", "echo"])) {
     case Ok(os.ExitStatus s): {
         print(s.to_str());       // exited 0, after echo's own line
     }
