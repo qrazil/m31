@@ -53,6 +53,13 @@
 prim int __open(str path, int flags, int mode);
 prim int __read(int fd, bytes buf, int off, int n);
 prim int __write(int fd, bytes buf, int off, int n);
+// Like `__read`, but `out` is filled rather than written into: the read
+// lands in a scratch buffer the runtime keeps per carrier, and `out` (an
+// empty `bytes` the caller passes) ends up holding exactly the bytes that
+// arrived, not padded to `max_n`. Lets `File.fill` stop keeping a whole
+// CHUNK alive for every open file's whole lifetime -- see its own comment,
+// and lib/net.m31's `Conn.fill`, which uses the same primitive first.
+prim int __read_chunk(int fd, int max_n, bytes out);
 prim int __write_str(int fd, str s, int off, int n);
 prim int __close(int fd);
 prim int __seek(int fd, int off, int whence);
@@ -487,17 +494,22 @@ void File.check_readable() {
 
 // Refill an empty buffer. The number of bytes now buffered, 0 at the end.
 //
-// The buffer is always exactly one chunk when a read goes into it: it is
-// allocated on the first read, and it is reallocated after an `unread` has
-// replaced it with a push-back of some other size -- a three-byte one would
-// otherwise make every later read a three-byte read.
+// `buf` is replaced, not reused: `__read_chunk` reads into a scratch buffer
+// the runtime keeps per carrier (not per file) and hands back a fresh
+// `bytes` sized to exactly what arrived, so a file with little buffered
+// holds only that -- never a whole CHUNK it is not using -- and the one
+// real CHUNK-sized buffer per carrier is shared by every file that carrier
+// ever reads. Safe even though a file's `read` genuinely blocks the OS
+// thread: the scratch buffer is only ever touched by the one real OS thread
+// running this call, from the read to the copy-out below, with nothing of
+// this green thread's own resuming elsewhere in between -- unlike a
+// cooperative park (rt_wait_io's own comment, runtime/rt.c), a real
+// blocking syscall never hands the rest of this call to a different carrier.
 Result<int, Error> File.fill() {
     check_readable();
-    if (buf.size() != CHUNK) {
-        buf = [0; CHUNK];
-    }
+    bytes next = [];
     while (true) {
-        int r = __read(fd, buf, 0, buf.size());
+        int r = __read_chunk(fd, CHUNK, next);
         // A signal arriving during a read interrupts it without having read
         // anything. It is not a failure of the file, so it is not reported.
         if (r == -4) {
@@ -506,6 +518,7 @@ Result<int, Error> File.fill() {
         if (r < 0) {
             return Result<int, Error>.Err(from_errno(-r));
         }
+        buf = next;
         at = 0;
         end = r;
         return Result<int, Error>.Ok(r);

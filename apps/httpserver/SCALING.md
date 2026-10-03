@@ -25,6 +25,12 @@ profiler -- and flags it for follow-up rather than attempting a fix, per
 this project's own stated caution around its hand-rolled concurrency
 primitives.
 
+**Memory update:** the resident-memory gap this run measured (1.56 GB vs
+460 MB at 20,000 connections) has since been root-caused and fixed -- see
+"Follow-up: a shared per-carrier read buffer (memory fix)" below. It was not
+the green-thread stack; the "Root-cause analysis" section's original memory
+bullet has been corrected in place rather than deleted.
+
 ## Environment, honestly
 
 - Same machine as `BENCHMARK.md`: 12 logical CPUs, x86-64 Linux, `hey` and
@@ -271,18 +277,21 @@ concurrency levels.
   above) could plausibly cost m31 more at the connection-*establishment*
   burst each `hey` run starts with, independent of the steady-state
   reactor cost above.
-- **Memory**: `docs/concurrency-decision.md` ("Stacks: fixed, but not
-  limited") explains why m31 cannot have Go's growable-from-a-few-KB
-  stacks -- it has no way to relocate a stack's internal pointers without
-  owning codegen's pointer maps, so every green thread reserves a full,
-  fixed `RT_STACK_SIZE` (1 MiB, `runtime/greenthread.h`) stack, demand-
-  paged but committed up front per thread. At 20,000 concurrently open,
-  actively-reading/writing connections, that design choice plausibly
-  explains most of the 1.56 GB vs 460 MB gap in resident memory -- it is
-  not a bug, it is the documented, deliberate trade-off that design doc
-  already accepted in exchange for not needing guard pages (`~32,000`
-  thread ceiling with guard pages, "unacceptable" per that doc) -- but it
-  is real, measured cost, worth having the actual number for.
+- **Memory (superseded -- see "Follow-up" below): this was wrong.** This
+  section originally blamed the fixed 1 MiB green-thread stack
+  (`docs/concurrency-decision.md`, "Stacks: fixed, but not limited") for
+  most of the 1.56 GB vs 460 MB gap. That was an unprofiled guess, and
+  tracing the actual allocator calls (`runtime/rt.c`) found it was wrong:
+  dividing this run's own 1,565 MB by its own 19,030 live green threads
+  gives ~82 KB/thread average resident memory -- far below the full 1 MiB
+  reservation, confirming the stack slab (`rt_slab_new`'s plain
+  `mmap(MAP_PRIVATE|MAP_ANONYMOUS)`, no `MAP_POPULATE`) really is lazily
+  paged as designed. The real cost was `lib/net.m31`'s `Conn.fill`:
+  it allocated a 64 KiB buffer **and eagerly `memset` it to zero**
+  (`[0; CHUNK]`) on a connection's first read, then kept that buffer alive
+  -- unused capacity and all -- for the connection's entire lifetime. 64 KiB
+  x 20,000 connections is 1.28 GB on its own, which is where most of the
+  gap actually was. Fixed below.
 
 **What this analysis is not**: a profiler was not attached (no
 `perf`/`strace`) to confirm time is actually spent contending on these
@@ -298,6 +307,77 @@ follow-up** (profile `runtime/reactor_epoll.c`'s waiter-map lock and
 `runtime/scheduler.c`'s registry/global-queue locks under exactly this
 kind of sustained multi-thousand-connection HTTP load) rather than acted
 on here.
+
+## Follow-up: a shared per-carrier read buffer (memory fix)
+
+Found by tracing the real allocator calls behind `Conn.fill` (`lib/net.m31`)
+rather than guessing: every connection's first read allocated a 64 KiB
+`bytes` buffer via `[0; CHUNK]` -- which both `memset`s the whole thing to
+zero and keeps it alive, at that size, for the connection's entire
+lifetime, however little of it is ever in use at a given moment. At 20,000
+concurrent connections that is 1.28 GB on its own, and the "Memory" bullet
+above has been corrected: it is not the green-thread stack (already lazily
+paged, confirmed to average ~82 KB/thread actual RSS here, far below its
+1 MiB reservation).
+
+**The fix.** Green threads are cooperatively scheduled: only one runs per
+carrier (OS thread) at a time, and nothing between a `read()` call and
+copying its result out crosses `rt_stack_check` -- the only point this
+runtime's probe-based preemption can switch which green thread is running
+(`docs/concurrency-decision.md`; confirmed by reading `src/emit_c.rs`'s
+probe-emission, which happens only at a compiled function's entry, never
+inside a primitive call). That makes a **per-carrier**, not per-connection,
+scratch buffer safe: a new primitive, `rt_read_chunk` (`runtime/rt.c`),
+reads into a `_Thread_local` buffer the compiler never sees, then copies out
+only the bytes that actually arrived into a fresh, exactly-sized `bytes`.
+`Conn.fill` now replaces its buffer wholesale on every read instead of
+keeping one CHUNK-sized allocation alive for the connection's whole life, so
+a connection holds only as much as it actually has buffered, and the one
+real CHUNK-sized buffer per carrier (12 of them, here) is shared by every
+connection that carrier ever serves. The identical change was also applied
+to `lib/io.m31`'s `File.fill` -- safe for the same reason even though a
+file's `read` genuinely blocks the OS thread: a real blocking syscall never
+hands the rest of the call to a different carrier the way a cooperative
+park can (see `rt_wait_io`'s own comment in `runtime/rt.c` for the contrast,
+and the real bug that comment documents).
+
+**Re-measured** (not a full, clean 8-level x 2-server x 2-run repeat of the
+original methodology -- see caveat below) at the levels where the original
+gap was clearest:
+
+| concurrency | server | req/s | p99 | RSS after |
+|---:|---|---:|---:|---:|
+| 1,000 | m31 | 95,287 | 42ms | **24 MB** (was 93 MB) |
+| 1,000 | go | 98,760 | 44ms | 46 MB |
+| 5,000 | m31 | 24,548 | 675ms | **63 MB** (was 564 MB) |
+| 5,000 | go | 68,992 | 334ms | 229 MB |
+| 10,000 | m31 | 33,144 | 2297ms | **104 MB** (was 1,117-1,136 MB) |
+| 10,000 | go | 41,124 | 1021ms | 402 MB |
+| 20,000 | m31 | 9,407 | 8957ms | **140 MB** (was 1,565 MB) |
+| 20,000 | go | 15,345 | 4534ms | 605 MB |
+
+**Memory**: at 20,000 connections, m31's RSS dropped from 1,565 MB to
+140 MB -- an 11x reduction -- and now sits *below* Go's 605 MB, reversing
+the original finding (m31 was 3.4x heavier than Go; it is now roughly 4.3x
+lighter). The curve across concurrency levels is now close to flat
+(24 -> 63 -> 104 -> 140 MB from 1K to 20K connections) rather than scaling
+with connection count, which is exactly the fix's mechanism: the one real
+per-carrier buffer does not grow with how many connections exist, only with
+how many carriers there are.
+
+**Throughput/latency: not a clean comparison this time, stated plainly.**
+This re-run was done on a much noisier host than the original (load average
+15+ at the time, several unrelated processes including other agent sessions
+active on this shared machine), and it shows: both servers' numbers are
+non-monotonic across levels (e.g. Go's req/s at c=5000 exceeds its own
+c=1000 number), which only makes sense as contention, not a real effect.
+The c=20000 "errors" on both servers (217 for m31, 78 for Go) are `hey`'s
+own client-side ephemeral-port exhaustion, the same known methodology
+ceiling this document's own "Breaking point" section already names -- not
+a server-side fault. No throughput/latency verdict is drawn from this
+re-run; only the memory result, which host noise does not explain away
+(RSS is a property of what the process allocated, not of scheduling
+contention), is reported with confidence.
 
 ## Live green-thread count (direct measurement, not just inference)
 
