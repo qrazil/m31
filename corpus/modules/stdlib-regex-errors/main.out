@@ -1,0 +1,19 @@
+unbalanced parenthesis
+unbalanced parenthesis
+unterminated character class: missing ]
+quantifier has nothing to repeat
+quantifier has nothing to repeat
+quantifier has nothing to repeat
+invalid escape sequence
+invalid escape sequence
+pattern ends with a lone backslash
+invalid {m,n} repeat
+invalid {m,n} repeat
+invalid {m,n} repeat
+invalid {m,n} repeat
+repeat count is too large
+repeat count is too large
+character class range is reversed
+character class matches nothing
+character class matches nothing
+ok: a(b)c compiles

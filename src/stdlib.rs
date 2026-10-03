@@ -35,6 +35,7 @@ pub fn source(name: &str) -> Option<&'static str> {
         "text" => include_str!("../lib/text.m31"),
         "date" => include_str!("../lib/date.m31"),
         "random" => include_str!("../lib/random.m31"),
+        "regex" => include_str!("../lib/regex.m31"),
         "args" => include_str!("../lib/args.m31"),
         "unicode" => include_str!("../lib/unicode.m31"),
         "field25519" => include_str!("../lib/field25519.m31"),

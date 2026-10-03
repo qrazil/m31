@@ -1,0 +1,67 @@
+import regex;
+
+// The classic pathological pattern for a backtracking engine: `n` optional
+// `a`s followed by `n` mandatory ones. Against a subject one character
+// short of the minimum length, a backtracking engine (PCRE, Perl, Python's
+// `re`, every "regex" in JavaScript) explores on the order of 2^n branch
+// points -- one bit per optional `a`, deciding whether it consumes -- before
+// it can conclude there is no match; against the minimum length itself it
+// does the same search before landing on the one assignment (all optional,
+// none consuming) that works.
+//
+// This engine is a Thompson NFA simulated breadth-first (docs/regex-
+// decision.md §3): every code point is visited once, and a per-step
+// "already on this list" bitmap keeps the number of live threads at or
+// below the compiled program's size, so the time here is O(n*m) -- the
+// *length* of the pattern and the subject, not the number of ways the
+// optional `a`s could be assigned. n = 40 below would need roughly 2^40
+// (about 10^12) branch points for a backtracking engine to exhaust; this
+// test existing in `run.sh` at all, finishing in the same fraction of a
+// second as every other corpus test, is the demonstration -- not a timer,
+// but the absence of one being necessary.
+
+str pat = "a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?a?aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+// 40 "a?" followed by 42 mandatory "a"s: 42 code points is the minimum a
+// match needs, 82 the most (every optional one also consuming).
+str min_match = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";          // 42 a's: matches
+str one_short = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";           // 41 a's: cannot match
+str max_match = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; // 82 a's: matches, every optional one consumes
+
+match (regex.compile(pat)) {
+    case Ok(regex.Regex re): {
+        print(re.is_match(min_match));   // true
+        print(re.is_match(one_short));   // false
+        print(re.is_match(max_match));   // true
+
+        match (re.find(max_match)) {
+            case Some(regex.Match m): {
+                print(m.whole.start);     // 0
+                print(m.whole.end);       // 82
+            }
+            case None: {
+                print("(no match)");
+            }
+        }
+    }
+    case Err(regex.CompileError e): {
+        print(e.to_str());
+    }
+}
+
+// A second shape of the same trap: nested/adjacent stars, which is the
+// other classic exponential-blowup pattern family ((a*)*b against a long
+// run of a's with no trailing b). Thompson-NFA simulation is immune to this
+// one for the same reason -- `addthread`'s per-step "already visited this
+// pc" bitmap stops the inner `*` from re-adding threads the outer one
+// already queued (docs/regex-decision.md §3) -- rather than because this
+// particular pattern happens to be tame.
+match (regex.compile("(a*)*b")) {
+    case Ok(regex.Regex re): {
+        str long_run = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        print(re.is_match(long_run));          // false -- no `b` anywhere
+        print(re.is_match(long_run + "b"));    // true
+    }
+    case Err(regex.CompileError e): {
+        print(e.to_str());
+    }
+}

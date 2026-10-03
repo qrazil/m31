@@ -1,0 +1,220 @@
+import regex;
+
+// Core behaviour: literals, `.`, classes, anchors, quantifiers, alternation,
+// grouping/capture, the shorthand classes, and Unicode (code-point, not
+// byte) offsets. docs/regex-decision.md has the scope this is testing
+// against. Compile errors are corpus/modules/stdlib-regex-errors; the
+// no-exponential-blowup guarantee is corpus/modules/stdlib-regex-perf.
+//
+// `oracle.py` computes the same checks with Python's `re`, which is a real
+// independent oracle for every construct here: none of v0's syntax depends
+// on backtracking vs. simulation to mean what it means (docs/regex-decision
+// §5), so the two engines are required to agree on all of it.
+
+regex.Regex comp(str pat) {
+    match (regex.compile(pat)) {
+        case Ok(regex.Regex re): {
+            return re;
+        }
+        case Err(regex.CompileError e): {
+            print("COMPILE ERROR: " + e.to_str());
+            trap("stdlib-regex: a pattern this test expects to compile did not");
+        }
+    }
+}
+
+void show(Option<regex.Match> m) {
+    match (m) {
+        case Some(regex.Match got): {
+            print(got.whole.text);
+        }
+        case None: {
+            print("(no match)");
+        }
+    }
+}
+
+// --- literals -----------------------------------------------------------------
+print(comp("abc").is_match("xxabcxx"));   // true
+print(comp("abc").is_match("xxabxx"));    // false
+show(comp("abc").find("xxabcxx"));        // abc
+
+match (comp("abc").find("xxabcxx")) {
+    case Some(regex.Match m): {
+        print(m.whole.start);   // 2
+        print(m.whole.end);     // 5
+    }
+    case None: {
+        print("(no match)");
+    }
+}
+
+// --- `.` ------------------------------------------------------------------------
+print(comp("a.c").is_match("abc"));    // true
+// No flags exist to toggle it (docs/regex-decision.md §2a), so `.` always
+// includes a newline -- there is no other way to spell "any character" that
+// also reaches one.
+print(comp("a.c").is_match("a\nc"));   // true
+
+// --- character classes ------------------------------------------------------
+show(comp("[abc]+").find("xxabccbaxx"));    // abccba
+show(comp("[a-z]+").find("ABCdefGHI"));     // def
+show(comp("[^0-9]+").find("abc123"));       // abc
+print(comp("[\\]a-]").is_match("]"));       // true  -- an escaped ] inside a class
+print(comp("[\\]a-]").is_match("-"));       // true  -- a trailing - is literal
+print(comp("[\\]a-]").is_match("b"));       // false
+
+// --- anchors: string start/end, not line start/end (docs/regex-decision §2c) --
+print(comp("^abc").is_match("abcxyz"));   // true
+print(comp("^abc").is_match("xabcxyz"));  // false
+print(comp("xyz$").is_match("abcxyz"));   // true
+print(comp("xyz$").is_match("abcxyzq"));  // false
+print(comp("^abc$").is_match("abc"));     // true
+print(comp("^abc$").is_match("abcd"));    // false
+
+// --- quantifiers, and greedy means greedy ----------------------------------
+show(comp("a.*b").find("a123b456b"));     // a123b456b -- the LAST b, not the first
+print(comp("a+").is_match(""));           // false
+print(comp("a?").is_match(""));           // true
+show(comp("a*").find("bbb"));             // (empty match, printed as a blank line)
+
+// bounded
+show(comp("a{2,4}").find("aaaaaa"));      // aaaa
+show(comp("a{3}").find("aaaaaa"));        // aaa
+show(comp("a{2,}").find("aaaaaa"));       // aaaaaa
+
+// --- alternation ------------------------------------------------------------
+print(comp("cat|dog").is_match("I have a dog"));   // true
+print(comp("cat|dog").is_match("I have a bird"));  // false
+
+// --- grouping and capture ----------------------------------------------------
+match (comp("(\\d+)-(\\d+)").find("call 123-456 now")) {
+    case Some(regex.Match m): {
+        print(m.whole.text);           // 123-456
+        match (m.groups[1]) {
+            case Some(regex.Group g): { print(g.text); }   // 123
+            case None: { print("(none)"); }
+        }
+        match (m.groups[2]) {
+            case Some(regex.Group g): { print(g.text); }   // 456
+            case None: { print("(none)"); }
+        }
+    }
+    case None: {
+        print("(no match)");
+    }
+}
+
+// nested groups, numbered left to right by `(`
+match (comp("((a)(b))c").find("abc")) {
+    case Some(regex.Match m): {
+        match (m.groups[1]) { case Some(regex.Group g): { print(g.text); } case None: { print("(none)"); } }  // ab
+        match (m.groups[2]) { case Some(regex.Group g): { print(g.text); } case None: { print("(none)"); } }  // a
+        match (m.groups[3]) { case Some(regex.Group g): { print(g.text); } case None: { print("(none)"); } }  // b
+    }
+    case None: {
+        print("(no match)");
+    }
+}
+
+// a repeated capturing group keeps only its LAST iteration
+match (comp("(a)+").find("aaa")) {
+    case Some(regex.Match m): {
+        match (m.groups[1]) {
+            case Some(regex.Group g): {
+                print(g.text);    // a
+                print(g.start);   // 2
+                print(g.end);     // 3
+            }
+            case None: {
+                print("(none)");
+            }
+        }
+    }
+    case None: {
+        print("(no match)");
+    }
+}
+
+// a group on the side of an alternation that did not run captures nothing
+match (comp("(a)|(b)").find("b")) {
+    case Some(regex.Match m): {
+        match (m.groups[1]) {
+            case Some(regex.Group g): { print("some " + g.text); }
+            case None: { print("none"); }    // none -- group 1 never ran
+        }
+        match (m.groups[2]) {
+            case Some(regex.Group g): { print("some " + g.text); }   // some b
+            case None: { print("none"); }
+        }
+    }
+    case None: {
+        print("(no match)");
+    }
+}
+
+print(comp("(a)(b)(c)").group_count());  // 3
+print(comp("abc").group_count());        // 0
+
+// --- shorthand classes: \d \w \s and their negations -------------------------
+print(comp("\\d+").is_match("abc123"));   // true
+print(comp("\\w+").is_match("_abc123"));  // true
+print(comp("\\s+").is_match("a b"));      // true
+print(comp("\\D+").is_match("abc"));      // true
+print(comp("\\D+").is_match("123"));      // false
+print(comp("\\W+").is_match("!!"));       // true
+print(comp("\\S+").is_match("x"));        // true
+
+// --- escaped metacharacters ---------------------------------------------------
+print(comp("a\\.b").is_match("a.b"));     // true
+print(comp("a\\.b").is_match("axb"));     // false
+print(comp("a\\{3\\}").is_match("a{3}")); // true -- a literal { and }
+print(comp("a\\{3\\}").is_match("aaa"));  // false
+
+// --- edges: empty pattern, empty input, a pattern that matches empty --------
+print(comp("").is_match(""));     // true
+print(comp("").is_match("xx"));   // true -- an empty pattern matches at position 0 of anything
+print(comp("abc").is_match(""));  // false
+
+// --- find_all -----------------------------------------------------------------
+List<regex.Match> nums = comp("\\d+").find_all("a1 b22 c333");
+int i = 0;
+while (i < nums.size()) {
+    print(nums[i].whole.text);
+    i = i + 1;
+}
+// 1
+// 22
+// 333
+
+// an empty match advances by one code point so the scan always makes
+// progress: "baaab" gives an empty match before the run, the run itself,
+// then two more empty matches (at the trailing "b" and at the very end).
+print(comp("a*").find_all("baaab").size());   // 4
+
+// --- Unicode: offsets are CODE POINTS, not bytes (docs/regex-decision §2) ---
+// "café" is 4 code points and 5 bytes -- é is two bytes in UTF-8, so a byte
+// offset and a code-point offset disagree here, and this engine reports the
+// code-point one.
+match (comp("é+").find("café")) {
+    case Some(regex.Match m): {
+        print(m.whole.text);    // é
+        print(m.whole.start);   // 3
+        print(m.whole.end);     // 4
+    }
+    case None: {
+        print("(no match)");
+    }
+}
+print(comp("caf[eé]").is_match("café"));   // true
+print(comp("caf[eé]").is_match("cafe"));   // true
+
+List<regex.Match> es = comp("[ée]").find_all("café résumé");
+i = 0;
+while (i < es.size()) {
+    print(es[i].whole.text);
+    i = i + 1;
+}
+// é
+// é
+// é

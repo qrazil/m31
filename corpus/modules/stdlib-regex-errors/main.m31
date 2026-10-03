@@ -1,0 +1,47 @@
+import regex;
+
+// One pattern per `regex.CompileError` variant, and `to_str`'s message for
+// each. Matching never fails once a `Regex` exists (docs/regex-decision.md
+// §4), so `CompileError` only ever shows up here, at `compile`.
+
+void bad(str pat) {
+    match (regex.compile(pat)) {
+        case Ok(regex.Regex re): {
+            print("SHOULD NOT HAVE COMPILED: " + pat);
+        }
+        case Err(regex.CompileError e): {
+            print(e.to_str());
+        }
+    }
+}
+
+bad("a(b");          // UnbalancedParen -- no closing )
+bad("a)b");           // UnbalancedParen -- no opening (
+bad("[abc");          // UnbalancedBracket
+bad("*abc");          // DanglingQuantifier -- nothing before the *
+bad("a**");           // DanglingQuantifier -- a second quantifier stacked on the first
+bad("a*+");           // DanglingQuantifier -- same, mixed
+bad("\\q");           // BadEscape -- \q names nothing
+bad("[\\D]");         // BadEscape -- a negated shorthand is refused inside a class
+bad("ab\\");          // TrailingBackslash
+bad("a{");            // BadRepeat -- no digits, no closing brace
+bad("a{x}");          // BadRepeat -- not digits
+bad("a{3");           // BadRepeat -- no closing brace
+bad("a{5,2}");        // BadRepeat -- n < m
+bad("a{1001}");       // RepeatTooLarge
+bad("a{0,1001}");     // RepeatTooLarge
+bad("[z-a]");         // BadRange
+bad("[]");            // EmptyClass
+bad("[^]");           // EmptyClass -- negating nothing is still nothing in it
+
+// A pattern that DOES compile prints nothing from `bad` but is here as a
+// control: every variant above is a real refusal, not this engine simply
+// failing to compile anything.
+match (regex.compile("a(b)c")) {
+    case Ok(regex.Regex re): {
+        print("ok: a(b)c compiles");
+    }
+    case Err(regex.CompileError e): {
+        print("SHOULD HAVE COMPILED: " + e.to_str());
+    }
+}
