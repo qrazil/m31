@@ -142,6 +142,16 @@ run "formatter preserves meaning" bash -c '
     bad=0
     for f in corpus/*/*.'"$LANG_EXT"' corpus/modules/*/*.'"$LANG_EXT"' examples/*.'"$LANG_EXT"'; do
         [ -e "$f" ] || continue
+        # Same convention as run.sh'"'"'s own run_one(): a test whose
+        # `.skip-platform` sidecar names a different `uname -s` tests a
+        # platform-specific technique with no portable equivalent, not
+        # something this gate (the one that actually RUNS the compiled
+        # program, unlike the idempotence/reproducibility gates around it)
+        # should fail elsewhere just for lacking it.
+        skip_file="${f%.'"$LANG_EXT"'}.skip-platform"
+        if [ -e "$skip_file" ] && [ "$(uname -s)" != "$(cat "$skip_file")" ]; then
+            continue
+        fi
         w=$(mktemp -d)
         # The whole directory, not just this file: a module that imports
         # another cannot be compiled without its siblings, and the module
@@ -180,8 +190,15 @@ run "formatter preserves meaning" bash -c '
                     in="$PWD/${f%.'"$LANG_EXT"'}.in"
                     [ -e "$in" ] || in=/dev/null
                     # The same command line run.sh gives it, from `.args`.
+                    # Not `mapfile`: see run.sh'"'"'s own matching comment --
+                    # macOS /bin/bash does not have it, found for real as
+                    # "mapfile: command not found" right here.
                     argv=()
-                    [ -e "${f%.'"$LANG_EXT"'}.args" ] && mapfile -t argv <"${f%.'"$LANG_EXT"'}.args"
+                    if [ -e "${f%.'"$LANG_EXT"'}.args" ]; then
+                        while IFS= LC_ALL=C read -r line || [ -n "$line" ]; do
+                            argv+=("$line")
+                        done <"${f%.'"$LANG_EXT"'}.args"
+                    fi
                     # And the same fixture, from `.setup`, built in a fresh
                     # directory the program then runs in -- see run.sh.
                     rd=$PWD

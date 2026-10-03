@@ -1,0 +1,91 @@
+import io;
+import fs;
+import random;
+
+// Split out of corpus/modules/stdlib-io-file/main.m31 (see that file's own
+// header): every other check there is portable; this one reads /proc/self/
+// status to determine whether the test itself is running as root, which
+// macOS has no equivalent of at all (no /proc, and no portable getuid() is
+// exposed to this language yet). See this directory's own .skip-platform.
+str dir = "/tmp/m31-corpus-io-file-proc-" + random.system().hex(8);
+match (fs.mkdir(dir)) {
+    case Ok(bool b): {
+        print("dir made");
+    }
+    case Err(io.Error e): {
+        print(e.to_str());
+    }
+}
+
+str say(io.Error e) {
+    return e.to_str();
+}
+
+// A file with no permission bits at all. Refused -- unless this runs as
+// root, which reads anything; the test checks the answer AGREES with the
+// user it runs as, read from /proc/self/status (a file whose size is
+// reported as 0, so this also reads past a wrong size hint).
+str locked = dir + "/locked";
+match (io.open(locked, mode: io.Mode.Write, perm: 0)) {
+    case Ok(io.File f): {
+        Result<bool, io.Error> c = f.close();
+    }
+    case Err(io.Error e): {
+        print(say(e));
+    }
+}
+bool root = false;
+match (io.read("/proc/self/status")) {
+    case Ok(str status): {
+        for (str l in status.split("\n")) {
+            if (l.starts_with("Uid:")) {
+                root = l.substr(4, l.size()).trim().starts_with("0\t");
+            }
+        }
+    }
+    case Err(io.Error e): {
+        print(say(e));
+    }
+}
+match (io.read(locked)) {
+    case Ok(str s): {
+        print(root);  // true, if it could be read at all
+    }
+    case Err(io.Error e): {
+        match (e) {
+            case PermissionDenied: {
+                print(!root);  // true
+            }
+            case NotFound: {
+                print("missing");
+            }
+            case IsDirectory: {
+                print("directory");
+            }
+            case NotADirectory: {
+                print("not a directory");
+            }
+            case AlreadyExists: {
+                print("exists");
+            }
+            case NotEmpty: {
+                print("not empty");
+            }
+            case InvalidUtf8: {
+                print("not text");
+            }
+            case Other(int code): {
+                print(code);
+            }
+        }
+    }
+}
+
+match (fs.rmtree(dir, dir)) {
+    case Ok(bool b): {
+        print("cleaned up");
+    }
+    case Err(io.Error e): {
+        print(say(e));
+    }
+}

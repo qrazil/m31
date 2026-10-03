@@ -62,7 +62,13 @@ for src in "${programs[@]}"; do
     stdin="$PWD/$stem.in"
     [ -e "$stdin" ] || stdin=/dev/null
     argv=()
-    [ -e "$stem.args" ] && mapfile -t argv <"$stem.args"
+    if [ -e "$stem.args" ]; then
+        # Not `mapfile`: see run.sh's own matching comment -- macOS
+        # /bin/bash (3.2.57) does not have it at all.
+        while IFS= LC_ALL=C read -r line || [ -n "$line" ]; do
+            argv+=("$line")
+        done <"$stem.args"
+    fi
     rundir=$PWD
     if [ -e "$stem.setup" ]; then
         rundir=$(mktemp -d -p "$WORK")

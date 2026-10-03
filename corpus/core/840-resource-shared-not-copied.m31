@@ -5,15 +5,15 @@ import fs;
 // `clone` refuses one (corpus/errors/840-848), so a second name for a File is
 // always the SAME File, and its descriptor is closed exactly once, when the
 // last name goes. Observed from outside, as in corpus/core/774: the entries
-// of /proc/self/fd, relative to where the program started.
+// of /dev/fd, relative to where the program started.
 
 int open_fds() {
-    match (fs.listdir("/proc/self/fd")) {
+    match (fs.listdir("/dev/fd")) {
         case Ok(List<str> names): {
             return names.size();
         }
         case Err(io.Error e): {
-            trap("cannot list /proc/self/fd: " + e.to_str());
+            trap("cannot list /dev/fd: " + e.to_str());
         }
     }
 }

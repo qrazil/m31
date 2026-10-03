@@ -331,66 +331,6 @@ match (io.open(big + "/x")) {
         print(say(e));  // not a directory
     }
 }
-// A file with no permission bits at all. Refused -- unless this runs as
-// root, which reads anything; the test checks the answer AGREES with the
-// user it runs as, read from /proc/self/status (a file whose size is
-// reported as 0, so this also reads past a wrong size hint).
-str locked = dir + "/locked";
-match (io.open(locked, mode: io.Mode.Write, perm: 0)) {
-    case Ok(io.File f): {
-        Result<bool, io.Error> c = f.close();
-    }
-    case Err(io.Error e): {
-        print(say(e));
-    }
-}
-bool root = false;
-match (io.read("/proc/self/status")) {
-    case Ok(str status): {
-        for (str l in status.split("\n")) {
-            if (l.starts_with("Uid:")) {
-                root = l.substr(4, l.size()).trim().starts_with("0\t");
-            }
-        }
-    }
-    case Err(io.Error e): {
-        print(say(e));
-    }
-}
-match (io.read(locked)) {
-    case Ok(str s): {
-        print(root);  // true, if it could be read at all
-    }
-    case Err(io.Error e): {
-        match (e) {
-            case PermissionDenied: {
-                print(!root);  // true
-            }
-            case NotFound: {
-                print("missing");
-            }
-            case IsDirectory: {
-                print("directory");
-            }
-            case NotADirectory: {
-                print("not a directory");
-            }
-            case AlreadyExists: {
-                print("exists");
-            }
-            case NotEmpty: {
-                print("not empty");
-            }
-            case InvalidUtf8: {
-                print("not text");
-            }
-            case Other(int code): {
-                print(code);
-            }
-        }
-    }
-}
-
 // --- the standard streams -------------------------------------------------------
 // stdout() writes through the same descriptor print uses, and print's buffer
 // is flushed first, so the lines come out in the order they were written.

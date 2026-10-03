@@ -18,6 +18,11 @@
 
 #ifdef RT_SYS_RAW
 #include "sys_linux.c"
+/* The raw backend only exists for Linux (run.sh's own comment says so, and
+ * sys_linux.c does not include <termios.h> at all -- raw syscalls, no libc),
+ * so VINTR is unconditionally 0 here: glibc's own numbering, not a
+ * cross-platform concern this build path can ever have. */
+#define VINTR 0
 #else
 #include "sys_libc.c"
 #endif
@@ -219,14 +224,23 @@ static void net_tests(void) {
     expect("listen", sys_listen(ls, 8), 0);
 
     /* ---- a connection nobody will answer ----
-     * The refusing port is BOUND here and never listened on, so no other
-     * program can take it in between and the kernel answers with a reset.
-     * Picking a number and hoping would be a race. */
+     * The port is learned by binding, so picking a number and hoping would
+     * not be a race -- but closed again right away, not left bound-and-
+     * never-listened-on as a previous version of this test did. That shape
+     * (bound, no listen) turned out to be answered immediately with a reset
+     * on Linux but left to time out on macOS (found for real on a macOS CI
+     * run: ETIMEDOUT, not ECONNREFUSED) -- a genuine BSD kernel difference
+     * in how a bound-but-not-listening socket's SYN queue behaves, not a
+     * bug this layer can translate around. A port nothing holds at all
+     * gets an immediate reset on every platform this builds on; the gap
+     * between this close and the connect below is microseconds, which is a
+     * fully portable risk, unlike the one this replaces. */
     int64_t dead = sys_socket(SYS_AF_INET, SYS_SOCK_STREAM, 0);
     loopback4(&a1, 0);
     expect("bind a socket that will never listen", sys_bind(dead, &a1), 0);
     SysAddr refusing;
     expect("its address", sys_getsockname(dead, &refusing), 0);
+    sys_close(dead);
     int64_t cr = sys_socket(SYS_AF_INET, SYS_SOCK_STREAM, 0);
     expect("connect where nothing listens", sys_connect(cr, &refusing), -SYS_ECONNREFUSED);
     sys_close(cr);
@@ -251,7 +265,6 @@ static void net_tests(void) {
         expect("and reading it cleared it", sys_getsockopt(nb, SYS_SO_ERROR), 0);
     }
     sys_close(nb);
-    sys_close(dead);
 
     /* ---- a non-blocking listener with nobody waiting ---- */
     int64_t nl = sys_socket(SYS_AF_INET, SYS_SOCK_STREAM | SYS_SOCK_NONBLOCK, 0);
@@ -390,14 +403,21 @@ static void net_tests(void) {
     expect("shut down the reading end too", sys_shutdown(cl, SYS_SHUT_RD), 0);
     expect("a read after SHUT_RD is end of file", sys_read(cl, rb, sizeof rb), 0);
     /* A socket that was never connected has nothing to shut down. A
-     * LISTENING one is not that case and succeeds: Linux uses it to wake a
-     * blocked accept, which is how a server is told to stop. Both backends
-     * agree on both answers, which is what this is here to pin down. */
+     * LISTENING one is not that case on Linux, which allows it anyway and
+     * uses it to wake a blocked accept -- how a server is told to stop.
+     * Both of this project's own backends agree on that (it is a real
+     * extension, not a translation), but strict POSIX does not require it,
+     * and a macOS CI run showed macOS does not grant it either: ENOTCONN,
+     * the same answer as the never-connected case above, treating "never
+     * accept()ed a connection" the same as "never connect()ed one". Neither
+     * answer is this project's own bug, so both are accepted. */
     int64_t fresh = sys_socket(SYS_AF_INET, SYS_SOCK_STREAM, 0);
     expect("shutdown of a socket that never connected", sys_shutdown(fresh, SYS_SHUT_RDWR),
            -SYS_ENOTCONN);
     sys_close(fresh);
-    expect("shutdown of a listening socket is allowed", sys_shutdown(ls, SYS_SHUT_RDWR), 0);
+    int64_t ls_shutdown = sys_shutdown(ls, SYS_SHUT_RDWR);
+    expect_true("shutdown of a listening socket either succeeds (Linux) or says not connected (macOS/BSD)",
+                ls_shutdown == 0 || ls_shutdown == -SYS_ENOTCONN);
     sys_close(cl);
     sys_close(sv);
     sys_close(ls);
@@ -765,8 +785,17 @@ static void term_tests(void) {
     expect_flag("OPOST is on to start with", saved.oflag, SYS_TC_OPOST, 1);
     /* The interrupt character is ^C on every Unix, and this is the value the
      * round trip below has to bring back: it is in the part of the record
-     * that neither the layer nor a caller ever names. */
-    expect("VINTR is ^C", saved.cc[0], 3);
+     * that neither the layer nor a caller ever names. sys_tcget copies the
+     * host's c_cc[] into SysTermios.cc[] position for position (sys_libc.c,
+     * verified against the host only for VMIN/VTIME, the two indices this
+     * runtime actually interprets) -- cc[0] is VINTR on Linux (glibc's own
+     * <termios.h> numbering) but NOT on macOS/BSD, where VINTR is a
+     * different index entirely (8, not 0); a macOS CI run caught this for
+     * real (got 4 -- VEOF's position there, misread as if it were VINTR).
+     * The real system VINTR macro is in scope (sys_libc.c already includes
+     * <termios.h>), and resolves to whichever index each platform actually
+     * uses, so indexing by it is the portable fix -- not a hardcoded 0. */
+    expect("VINTR is ^C", saved.cc[VINTR], 3);
 
     /* ---- raw mode, the way lib/term.m31 builds it ---- */
     t = saved;
@@ -796,7 +825,7 @@ static void term_tests(void) {
     /* The two fields nothing above the layer names, and the reason sys_tcset
      * is a read-modify-write: a set that only knew about the flags it was
      * asked to change would have zeroed both. */
-    expect("VINTR survived the round trip", now.cc[0], saved.cc[0]);
+    expect("VINTR survived the round trip", now.cc[VINTR], saved.cc[VINTR]);
     expect("the control word survived the round trip", now.cflag, saved.cflag);
 
     /* ---- raw mode is not just bits: it changes what a read gives back ----
@@ -822,10 +851,28 @@ static void term_tests(void) {
     expect("tcset the saved settings back", sys_tcset(s, &saved), 0);
     zero(&now, (int64_t)sizeof now);
     expect("tcget after restoring", sys_tcget(s, &now), 0);
-    expect("iflag restored", now.iflag, saved.iflag);
-    expect("oflag restored", now.oflag, saved.oflag);
+    /* Masked to the bits sys.h actually names (SYS_TC_*), not raw equality:
+     * sys_libc.c's own to_host/from_host comment says why -- a bit its
+     * translation table does not name passes through UNCHANGED from the
+     * host, "exact on Linux... and the documented approximation anywhere
+     * else". A macOS CI run hit exactly that for lflag's PENDIN (0x20000000,
+     * not in local_flags[]): the kernel sets it as a side effect of the raw-
+     * mode read/write below, not something tcset(saved) can be expected to
+     * clear back out, and not a bit this layer ever promised to round-trip
+     * in the first place. The masks below are only as wide as what sys.h
+     * actually defines for each word; iflag/oflag share the identical
+     * unnamed-bits-pass-through design, so they get the same treatment on
+     * principle even though this run did not trip over either of them. */
+    const int64_t IFLAG_MASK = SYS_TC_IGNBRK | SYS_TC_BRKINT | SYS_TC_PARMRK |
+        SYS_TC_INPCK | SYS_TC_ISTRIP | SYS_TC_INLCR | SYS_TC_IGNCR |
+        SYS_TC_ICRNL | SYS_TC_IXON;
+    const int64_t OFLAG_MASK = SYS_TC_OPOST | SYS_TC_ONLCR;
+    const int64_t LFLAG_MASK = SYS_TC_ISIG | SYS_TC_ICANON | SYS_TC_ECHO |
+        SYS_TC_ECHONL | SYS_TC_IEXTEN;
+    expect("iflag restored", now.iflag & IFLAG_MASK, saved.iflag & IFLAG_MASK);
+    expect("oflag restored", now.oflag & OFLAG_MASK, saved.oflag & OFLAG_MASK);
     expect("cflag restored", now.cflag, saved.cflag);
-    expect("lflag restored", now.lflag, saved.lflag);
+    expect("lflag restored", now.lflag & LFLAG_MASK, saved.lflag & LFLAG_MASK);
     int cc_same = 1;
     for (int i = 0; i < SYS_NCCS; i++) {
         if (now.cc[i] != saved.cc[i]) cc_same = 0;

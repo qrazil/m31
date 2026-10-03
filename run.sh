@@ -20,6 +20,7 @@ WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 pass=0
 fail=0
+skipped=0
 
 # -ffp-contract=off on every build: without it a C compiler may fuse
 # `a * b + c` into one fused multiply-add, which rounds once instead of twice.
@@ -61,8 +62,27 @@ fail_test() {
 # run_one <source> <expected-stdout> <label>
 run_one() {
   local src=$1 expected=$2 label=$3
-  local base ref="" ref_tag="" entry cc opt bin got rc
+  local base ref="" ref_tag="" entry cc opt bin got rc line
   base=$(basename "$src" ".$LANG_EXT")
+
+  # A test's own `.skip-platform` file names the one `uname -s` value it can
+  # run under at all (verbatim, e.g. "Linux") -- for a test whose whole point
+  # is a platform-specific introspection technique with no portable
+  # equivalent (grep its own header comment for which and why), not a stand-
+  # in for actually porting the behavior. Skipped, not passed or failed: the
+  # project's own stated rule ("a gate that can only report success is not a
+  # gate") means this has to stay visible in the final tally, not vanish
+  # into "passed" silently.
+  local skip_file="${src%.$LANG_EXT}.skip-platform"
+  if [ -e "$skip_file" ]; then
+    local want_platform
+    want_platform=$(cat "$skip_file")
+    if [ "$(uname -s)" != "$want_platform" ]; then
+      printf '\033[33mSKIP\033[0m %s (needs %s)\n' "$label" "$want_platform"
+      skipped=$((skipped + 1))
+      return
+    fi
+  fi
 
   if ! "$LANGC" --emit-c "$src" -o "$WORK/$base.c" 2>"$WORK/$base.diag"; then
     fail_test "$label" "compile failed: $(head -1 "$WORK/$base.diag")"
@@ -113,7 +133,34 @@ run_one() {
     # this script (CCS, and gates.sh's/sanitize.sh's own non-argv arrays)
     # are always populated before use and never hit this.
     argv=()
-    [ -e "${src%.$LANG_EXT}.args" ] && mapfile -t argv <"${src%.$LANG_EXT}.args"
+    if [ -e "${src%.$LANG_EXT}.args" ]; then
+        # Not `mapfile -t argv <file`: mapfile is a bash 4.0+ builtin, and
+        # macOS's /bin/bash (3.2.57, 2007, pre-GPLv3) does not have it at
+        # all -- found for real on a macOS CI run, "mapfile: command not
+        # found". `|| [ -n "$line" ]` on the loop condition is what makes
+        # this match mapfile's own behavior on a final line with no
+        # trailing newline: `read` returns failure there but still
+        # populates `$line`, so without this the loop would silently drop
+        # that last line.
+        #
+        # `LC_ALL=C` scoped onto just this `read`, not the whole script, is
+        # also load-bearing, not cosmetic: corpus/modules/stdlib-os-not-
+        # utf8's own .args file has a line ending in a raw, non-UTF8 byte
+        # (0xE9, deliberately -- that test is ABOUT args_bytes() handling
+        # exactly that), and under a UTF-8 locale (en_US.UTF-8, what this
+        # host and most CI runners default to) bash's own `read` applies
+        # multibyte-aware line-ending detection that gets confused by that
+        # invalid byte -- it silently fails to strip the trailing newline
+        # for that one line, which a plain `diff` against that test's own
+        # committed .out then reports as "prints something else", a 0a byte
+        # that should not be there. Caught locally, by this exact test,
+        # before this ever reached CI a second time; `mapfile` itself does
+        # not have this failure mode, which is how the original version of
+        # this fix missed it.
+        while IFS= LC_ALL=C read -r line || [ -n "$line" ]; do
+            argv+=("$line")
+        done <"${src%.$LANG_EXT}.args"
+    fi
     # A test's `.setup` script, if it has one, builds a fixture the program
     # cannot build for itself -- a file whose name is not valid UTF-8, which
     # no `str` path can spell -- in a fresh directory, and the program runs
@@ -220,7 +267,12 @@ for src in corpus/traps/*."$LANG_EXT"; do
     # A trap test may have a `.args` file, the same shape as a program
     # test's: the one way to reach a trap that only a command line can cause.
     targv=()
-    [ -e "${src%.$LANG_EXT}.args" ] && mapfile -t targv <"${src%.$LANG_EXT}.args"
+    if [ -e "${src%.$LANG_EXT}.args" ]; then
+        # See run_one's own matching comment for why not `mapfile`.
+        while IFS= LC_ALL=C read -r line || [ -n "$line" ]; do
+            targv+=("$line")
+        done <"${src%.$LANG_EXT}.args"
+    fi
     got=$("$bin" "${targv[@]+"${targv[@]}"}" 2>&1 >/dev/null </dev/null); rc=$?
     if [ $rc -ne 134 ]; then
       fail_test "$label [$cc $opt]" "expected abort (134), got exit $rc"
@@ -284,5 +336,9 @@ for dir in corpus/modules/*/; do
   fi
 done
 
-echo "── $pass passed, $fail failed"
+if [ "$skipped" -gt 0 ]; then
+  echo "── $pass passed, $fail failed, $skipped skipped (platform-specific)"
+else
+  echo "── $pass passed, $fail failed"
+fi
 [ $fail -eq 0 ]

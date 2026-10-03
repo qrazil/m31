@@ -702,6 +702,18 @@ int64_t sys_resolve(const char *host, int64_t port, int64_t family,
     if (rc != 0) return gai_errno(rc);
     int64_t found = 0;
     for (struct addrinfo *p = res; p != NULL; p = p->ai_next) {
+        /* hints.ai_family already asked for this, but not every libc
+         * refuses to answer anyway: asked for AF_INET6 with an IPv4
+         * literal and no AI_V4MAPPED, glibc refuses outright (EAI_
+         * ADDRFAMILY, which is where the -SYS_ENOENT below actually comes
+         * from) -- macOS's resolver instead happily synthesizes an IPv4-
+         * mapped IPv6 address and returns it, found for real on a macOS CI
+         * run (this call returning 1 result instead of failing). Filtering
+         * defensively here makes the contract this layer actually
+         * documents -- a specific family, or none of them -- true
+         * regardless of how strict the host's own getaddrinfo is about
+         * honoring what hints.ai_family already asked for. */
+        if (family != 0 && p->ai_family != hints.ai_family) continue;
         if (found < cap) {
             /* Copied into a storage first: ai_addr points at exactly
              * ai_addrlen bytes, and from_sockaddr reads a whole struct. */
@@ -716,6 +728,7 @@ int64_t sys_resolve(const char *host, int64_t port, int64_t family,
         found++;
     }
     freeaddrinfo(res);
+    if (found == 0 && family != 0) return -SYS_ENOENT;
     return found;
 }
 

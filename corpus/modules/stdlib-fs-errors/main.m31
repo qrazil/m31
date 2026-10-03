@@ -91,12 +91,6 @@ check(fs.remove(root + "/full"));  // is a directory
 count(fs.copy(file, root + "/full"));  // is a directory
 count(fs.copy(root + "/full", root + "/copy"));  // is a directory
 
-// EACCES or EPERM -> PermissionDenied. Removing an entry of /proc is refused
-// to everybody: an ordinary user may not write to /proc (EACCES), and root,
-// who may, finds /proc has no unlink at all (EPERM). Both are the same
-// answer to a caller, which is why from_errno names them together.
-check(fs.remove("/proc/version"));  // permission denied
-
 // EINVAL, which has no name: an empty path names no file.
 check(fs.makedirs(""));  // system error 22
 check(fs.mkdir(""));  // system error 22

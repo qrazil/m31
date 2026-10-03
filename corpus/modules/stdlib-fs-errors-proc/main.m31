@@ -1,0 +1,25 @@
+import io;
+import fs;
+
+// Split out of corpus/modules/stdlib-fs-errors/main.m31 (see that file's own
+// header): every other check there is a portable fs.Error mapping, but this
+// one is Linux-only in its very premise -- /proc does not exist at all on
+// macOS, so there is no path with the same "exists, refused to everybody"
+// property to substitute. See this directory's own .skip-platform.
+
+void check(Result<bool, io.Error> r) {
+    match (r) {
+        case Ok(bool b): {
+            print("ok");
+        }
+        case Err(io.Error e): {
+            print(e.to_str());
+        }
+    }
+}
+
+// EACCES or EPERM -> PermissionDenied. Removing an entry of /proc is refused
+// to everybody: an ordinary user may not write to /proc (EACCES), and root,
+// who may, finds /proc has no unlink at all (EPERM). Both are the same
+// answer to a caller, which is why from_errno names them together.
+check(fs.remove("/proc/version"));  // permission denied

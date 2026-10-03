@@ -2,6 +2,12 @@
 // not UTF-8 (the `.setup` beside this makes them). glob skips the name that
 // is not text and still finds the others; listdir, which promises every
 // name, refuses the directory instead of leaving one out.
+//
+// Linux-only in its very premise (see this file's own .skip-platform):
+// macOS's APFS requires every filename to be valid Unicode and refuses to
+// create one that is not at the filesystem level -- the .setup's own
+// `touch` fails outright with "Illegal byte sequence" there, so there is no
+// non-UTF8 name for glob/listdir to disagree about in the first place.
 import fs;
 import io;
 
