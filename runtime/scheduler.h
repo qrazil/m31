@@ -108,6 +108,25 @@ uint32_t rt_sched_current_carrier(void);
  * through by hand. */
 uint32_t rt_sched_current_green_id(void);
 
+/* Caller-owned replacement for what used to be a second, shared,
+ * mutex-protected lookup table in the epoll reactor (runtime/reactor_epoll.c
+ * -- see its own top comment and rt_reactor_wait for the full reasoning):
+ * "has EPOLL_CTL_ADD already been done for whichever fd this green thread is
+ * currently waiting on, or does this registration need EPOLL_CTL_ADD rather
+ * than EPOLL_CTL_MOD". That bit is read and written only by the one green
+ * thread it describes, only while that green thread is the one actually
+ * running -- the exact same safety argument rt_sched_current_green_id
+ * already rests on (nothing else can be touching this green thread's own
+ * control block right now) -- so it can live directly on rt_green_t instead
+ * of in a structure anything else ever needs to lock. Starts false at
+ * rt_sched_spawn and is set true by rt_sched_current_reactor_mark_added;
+ * nothing ever resets it back to false, which is still correct even for a
+ * green thread that ends up waiting on more than one fd over its life --
+ * see reactor_epoll.c's rt_reactor_wait for why. Both trap if called from
+ * outside a running green thread, same as rt_sched_current_green_id. */
+bool rt_sched_current_reactor_added(void);
+void rt_sched_current_reactor_mark_added(void);
+
 /* ========================================================================
  * Park / unpark -- Phase 3 (docs/concurrency-decision.md, "Phases": epoll
  * reactor, park/unpark, blocking-FFI handoff). New surface, additive to

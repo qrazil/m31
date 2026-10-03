@@ -764,6 +764,13 @@ struct rt_green {
                                   * that it must requeue itself immediately
                                   * rather than genuinely wait. */
 
+    /* The epoll reactor's own per-green-thread ADD-vs-MOD bit -- see this
+     * header's rt_sched_current_reactor_added/_mark_added, declared in
+     * scheduler.h, for the full reasoning. Lives here, not in a structure
+     * reactor_epoll.c shares across fds, because only THIS green thread's
+     * own call stack ever reads or writes it. */
+    bool             reactor_added_to_epoll;
+
     /* Diagnostic guard for the unresolved rt_stack_limit race
      * (docs/concurrency-decision.md, "Phase 3.5"). Hypothesis (b) there --
      * the same green thread briefly live on two carriers at once -- was
@@ -918,6 +925,28 @@ uint32_t rt_sched_current_green_id(void) {
                 "green thread");
     }
     return g->id;
+}
+
+/* See scheduler.h's own comment on these two for the full reasoning --
+ * reads/writes tls_current_green's own control block, exactly like
+ * rt_sched_current_green_id above, so the same "nothing else can be
+ * touching it right now" safety argument applies and no lock is needed. */
+bool rt_sched_current_reactor_added(void) {
+    rt_green_t *g = tls_current_green;
+    if (g == NULL) {
+        rt_trap("rt_sched_current_reactor_added called from outside a "
+                "running green thread");
+    }
+    return g->reactor_added_to_epoll;
+}
+
+void rt_sched_current_reactor_mark_added(void) {
+    rt_green_t *g = tls_current_green;
+    if (g == NULL) {
+        rt_trap("rt_sched_current_reactor_mark_added called from outside a "
+                "running green thread");
+    }
+    g->reactor_added_to_epoll = true;
 }
 
 /* ========================================================================
@@ -1491,6 +1520,7 @@ uint32_t rt_sched_spawn(rt_scheduler_t *s, void (*entry)(void *), void *arg) {
     atomic_init(&g->park_word, RT_PARK_EMPTY);
     g->parked = false;
     g->notified_before_park = false;
+    g->reactor_added_to_epoll = false;
     atomic_init(&g->claimed_by_carrier, false);
     registry_insert(&s->registry, g->id, g);
 
