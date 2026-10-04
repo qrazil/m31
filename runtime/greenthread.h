@@ -471,6 +471,15 @@ rt_stack_t rt_stack_alloc(void);
  * current fiber of any thread at the point it is destroyed. */
 void rt_stack_free(rt_stack_t *s);
 
+/* DIAGNOSTIC ONLY, not for master -- see
+ * .claude/worktrees/diagnostics-fuel-dip-investigation's own commits. How
+ * many times rt_stack_alloc has had to create a fresh slab (each one a
+ * mmap(1 GiB) call made while holding g_slab_lock, the single global mutex
+ * every concurrent rt_stack_alloc/rt_stack_free call across every carrier
+ * contends for), and the total nanoseconds spent inside those mmap calls. */
+uint64_t rt_diag_slab_allocs(void);
+uint64_t rt_diag_slab_alloc_ns(void);
+
 /* ========================================================================
  * Part 4 -- byte-per-thread state table
  *

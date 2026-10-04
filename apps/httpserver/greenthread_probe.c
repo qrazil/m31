@@ -72,6 +72,9 @@ extern uint64_t rt_sched_diag_draw_items(rt_scheduler_t *s);
 extern uint64_t rt_sched_diag_notify_calls(rt_scheduler_t *s);
 extern uint64_t rt_sched_diag_notify_steps(rt_scheduler_t *s);
 extern uint64_t rt_sched_diag_notify_full_laps(rt_scheduler_t *s);
+/* DIAGNOSTIC ONLY, not for master -- see greenthread.h's own comment. */
+extern uint64_t rt_diag_slab_allocs(void);
+extern uint64_t rt_diag_slab_alloc_ns(void);
 
 static char *fmt_u64(char *out, uint64_t v) {
     char tmp[20];
@@ -172,6 +175,23 @@ static void on_sigusr1(int sig) {
     *r++ = '\n';
 
     write(2, buf3, (size_t)(r - buf3));
+
+    /* DIAGNOSTIC ONLY, not for master. Fourth line: the stack-slab
+     * allocator's own cost -- how many fresh 1 GiB slabs this process has
+     * had to mmap so far (each one a stall every concurrent rt_stack_alloc/
+     * rt_stack_free call, any carrier, is blocked behind), and the total
+     * nanoseconds spent inside those mmap calls. */
+    char buf4[160];
+    char *t = buf4;
+    const char *prefix4 = "[greenthread-probe] slab: allocs=";
+    while (*prefix4) *t++ = *prefix4++;
+    t = fmt_u64(t, rt_diag_slab_allocs());
+    const char *e1 = " total_ns=";
+    while (*e1) *t++ = *e1++;
+    t = fmt_u64(t, rt_diag_slab_alloc_ns());
+    *t++ = '\n';
+
+    write(2, buf4, (size_t)(t - buf4));
 }
 
 __attribute__((constructor)) static void install_greenthread_probe(void) {

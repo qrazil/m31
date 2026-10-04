@@ -54,6 +54,21 @@ struct rt_slab {
     bool in_use[RT_SLAB_STACKS];
 };
 
+/* DIAGNOSTIC ONLY, not for master -- see
+ * .claude/worktrees/diagnostics-fuel-dip-investigation's own commits.
+ * Investigating c=10000's specifically wide run-to-run variance (3x+
+ * between trials under otherwise-identical, calm conditions): rt_stack_
+ * alloc holds g_slab_lock -- one GLOBAL mutex -- for its entire duration,
+ * including rt_slab_new's mmap(1 GiB) call on the ~1-in-1024 new-thread
+ * event that needs a fresh slab. Every concurrent green-thread spawn,
+ * across every carrier, contends for this same lock meanwhile. c=10000's
+ * ramp-up needs roughly 10 such slab crossings; fewer levels need fewer,
+ * more need more -- these counters measure how many happened and how long
+ * each one actually held the lock, to find out whether THIS is where
+ * c=10000's variance comes from. */
+static _Atomic uint64_t diag_slab_allocs = 0;
+static _Atomic uint64_t diag_slab_alloc_ns = 0;
+
 static pthread_mutex_t g_slab_lock = PTHREAD_MUTEX_INITIALIZER;
 /* Newest-first. A brand new slab is entirely free, so prepending it and
  * starting the next search there is what keeps allocation fast in the
@@ -97,7 +112,18 @@ rt_stack_t rt_stack_alloc(void) {
          * case. Allocate another; this is what lets the allocator scale to
          * the millions-of-green-threads target instead of hitting a ceiling
          * at 1024. */
+        /* DIAGNOSTIC ONLY, not for master -- see diag_slab_allocs' own
+         * comment. Timed and counted here, INSIDE g_slab_lock, on purpose:
+         * this is exactly the window every other concurrent rt_stack_alloc
+         * call (any carrier, any green thread) is blocked waiting through. */
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
         s = rt_slab_new();
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        uint64_t ns = (uint64_t)(t1.tv_sec - t0.tv_sec) * 1000000000ull +
+                      (uint64_t)(t1.tv_nsec - t0.tv_nsec);
+        atomic_fetch_add_explicit(&diag_slab_allocs, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&diag_slab_alloc_ns, ns, memory_order_relaxed);
         s->next = g_slabs;
         g_slabs = s;
     }
@@ -153,6 +179,14 @@ void rt_stack_free(rt_stack_t *s) {
     slab->in_use[s->index] = false;
     slab->free_idx[slab->free_top++] = s->index;
     pthread_mutex_unlock(&g_slab_lock);
+}
+
+/* DIAGNOSTIC ONLY, not for master -- see diag_slab_allocs' own comment. */
+uint64_t rt_diag_slab_allocs(void) {
+    return atomic_load_explicit(&diag_slab_allocs, memory_order_relaxed);
+}
+uint64_t rt_diag_slab_alloc_ns(void) {
+    return atomic_load_explicit(&diag_slab_alloc_ns, memory_order_relaxed);
 }
 
 /* ========================================================================
