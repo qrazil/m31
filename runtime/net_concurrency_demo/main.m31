@@ -92,71 +92,121 @@ void yield_once() {
     int ignored = recv(tick);
 }
 
+// ECONNRESET, however it is found: the accept-queue-overflow-after-the-
+// handshake-completed race this file's own backlog comment describes is
+// not only a connect()-time failure. A real macOS CI run found it can
+// equally surface as the client's OWN write or read on an already-
+// connect()ed socket failing with this, if the server-side kernel drops an
+// already-established-but-not-yet-accept()ed connection AFTER connect()
+// returned Ok -- BSD kernels are documented to RST a completed connection
+// that overflows the accept queue, not only refuse a new one. io.Error has
+// no dedicated "reset" variant (docs/stdlib-decision.md's no-blessed-error-
+// type reasoning), so this is Other(104) -- 104 because every io.Error's
+// Other code is a Linux errno regardless of host (docs/sys-layer.md §1),
+// not whatever this platform's own ECONNRESET constant happens to be.
+bool is_reset(io.Error e) {
+    match (e) {
+        case NotFound: {
+            return false;
+        }
+        case PermissionDenied: {
+            return false;
+        }
+        case IsDirectory: {
+            return false;
+        }
+        case NotADirectory: {
+            return false;
+        }
+        case AlreadyExists: {
+            return false;
+        }
+        case NotEmpty: {
+            return false;
+        }
+        case InvalidUtf8: {
+            return false;
+        }
+        case Other(int code): {
+            return code == 104;
+        }
+    }
+}
+
 void client(int id, int port, Chan<int> results) {
-    Result<net.Conn, net.Error> attempt = net.connect("127.0.0.1", port);
     int tries = 0;
     while (true) {
         bool retry = false;
-        match (attempt) {
+        match (net.connect("127.0.0.1", port)) {
             case Ok(net.Conn c): {
+                bytes line = (id.to_str() + "\n").to_bytes();
+                match (c.write(line)) {
+                    case Ok(int n): {
+                        match (c.read_until([10], 256)) {
+                            case Ok(bytes echoed): {
+                                if (echoed.utf8().or("?") == id.to_str() + "\n") {
+                                    send(results, 1);
+                                } else {
+                                    send(results, 0);
+                                }
+                            }
+                            case Err(io.Error e): {
+                                if (is_reset(e) && tries < CONNECT_RETRIES) {
+                                    tries = tries + 1;
+                                    retry = true;
+                                } else {
+                                    trap("client read: " + e.to_str());
+                                }
+                            }
+                        }
+                    }
+                    case Err(io.Error e): {
+                        if (is_reset(e) && tries < CONNECT_RETRIES) {
+                            tries = tries + 1;
+                            retry = true;
+                        } else {
+                            trap("client write: " + e.to_str());
+                        }
+                    }
+                }
+                Result<bool, io.Error> closed = c.close();
             }
             case Err(net.Error e): {
                 match (e) {
                     case Reset: {
-                        tries = tries + 1;
                         if (tries < CONNECT_RETRIES) {
+                            tries = tries + 1;
                             retry = true;
+                        } else {
+                            trap("connect: " + e.to_str());
                         }
                     }
                     case Refused: {
+                        trap("connect: " + e.to_str());
                     }
                     case TimedOut: {
+                        trap("connect: " + e.to_str());
                     }
                     case Unreachable: {
+                        trap("connect: " + e.to_str());
                     }
                     case InUse: {
+                        trap("connect: " + e.to_str());
                     }
                     case NameNotFound: {
+                        trap("connect: " + e.to_str());
                     }
                     case Other(int code): {
+                        trap("connect: " + e.to_str());
                     }
                 }
             }
         }
         if (retry) {
             yield_once();
-            attempt = net.connect("127.0.0.1", port);
             continue;
         }
         break;
-    }
-    match (attempt) {
-        case Ok(net.Conn c): {
-            bytes line = (id.to_str() + "\n").to_bytes();
-            match (c.write(line)) {
-                case Ok(int n): {
-                }
-                case Err(io.Error e): {
-                    trap("client write: " + e.to_str());
-                }
-            }
-            match (c.read_until([10], 256)) {
-                case Ok(bytes echoed): {
-                    if (echoed.utf8().or("?") == id.to_str() + "\n") {
-                        send(results, 1);
-                    } else {
-                        send(results, 0);
-                    }
-                }
-                case Err(io.Error e): {
-                    trap("client read: " + e.to_str());
-                }
-            }
-            Result<bool, io.Error> closed = c.close();
-        }
-        case Err(net.Error e): {
-            trap("connect: " + e.to_str());
-        }
     }
 }
 
