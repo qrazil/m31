@@ -695,15 +695,6 @@ struct rt_scheduler {
     _Atomic uint64_t diag_notify_steps;
     _Atomic uint64_t diag_notify_full_laps;
 
-    /* EXPERIMENTAL FIX, not for master without further validation -- see
-     * notify_new_work's own comment. How many carriers are idle RIGHT NOW,
-     * maintained incrementally at every one of the three places c->idle
-     * itself changes, so notify_new_work can skip its locked permutation
-     * walk in O(1) in the common case (measured 80-95% of calls) where it
-     * is already known nobody is idle, instead of discovering that the
-     * expensive way every single time. */
-    _Atomic uint32_t idle_count;
-
     /* Blocking-FFI handoff monitor (opt-in; see
      * rt_sched_start_blocking_monitor in scheduler.h). */
     pthread_t         monitor_thread;
@@ -847,24 +838,6 @@ static void notify_new_work(rt_scheduler_t *s) {
     rt_wake_perm_t *p = &s->perm;
     /* DIAGNOSTIC ONLY, not for master -- see diag_notify_calls' own comment. */
     atomic_fetch_add_explicit(&s->diag_notify_calls, 1, memory_order_relaxed);
-
-    /* EXPERIMENTAL FIX, not for master without further validation. O(1),
-     * lock-free: measured 80-95% of calls to this function find nobody
-     * idle after walking the ENTIRE permutation under p->lock -- this skips
-     * straight to that same "do nothing" outcome without ever taking the
-     * lock or touching a single carrier's idle flag, in exactly the case
-     * that already dominates. Deliberately racy, same as the rest of this
-     * mechanism's own lost-wakeup tolerance (see carrier_main's own comment
-     * on why idle is set before waiting): idle_count can go from 0 to 1
-     * microseconds after this load returns, which just means this one push
-     * takes the slow path it would have taken anyway one call later, or
-     * the newly-idle carrier's own periodic 5ms wake-sem timeout finds the
-     * work itself -- never a permanent miss, only a bounded delay already
-     * budgeted for by that existing fallback. */
-    if (atomic_load_explicit(&s->idle_count, memory_order_relaxed) == 0) {
-        return;
-    }
-
     pthread_mutex_lock(&p->lock);
     for (uint32_t steps = 0; steps < s->n_carriers; steps++) {
         if (p->pos >= p->n) {
@@ -877,15 +850,6 @@ static void notify_new_work(rt_scheduler_t *s) {
         if (atomic_compare_exchange_strong_explicit(
                 &c->idle, &expected, false, memory_order_acq_rel,
                 memory_order_relaxed)) {
-            /* EXPERIMENTAL FIX, not for master without further validation.
-             * This CAS just transitioned a carrier true -> false, for
-             * certain (CAS only succeeds when the old value matched
-             * `expected`) -- idle_count's own correctness rests entirely on
-             * every site that touches c->idle adjusting it exactly once per
-             * REAL transition, never per attempt, which is why this is a
-             * plain add here (the transition is unconditional) but an
-             * old-value-checked exchange at the other two sites below. */
-            atomic_fetch_sub_explicit(&s->idle_count, 1, memory_order_relaxed);
             rt_wake_sem_post(&c->wake_sem);
             pthread_mutex_unlock(&p->lock);
             /* DIAGNOSTIC ONLY, not for master. */
@@ -1393,17 +1357,7 @@ static void *carrier_main(void *argp) {
              * actually closes the lost-wakeup window; the periodic timeout
              * is the remaining correctness floor for anything this still
              * misses. */
-            /* EXPERIMENTAL FIX, not for master without further validation.
-             * Exchange, not a plain store, so idle_count is only adjusted
-             * on a REAL transition: this site can run with idle already
-             * true (e.g. the 5ms periodic timeout fired, found nothing, and
-             * is about to go right back to sleep -- idle was never cleared
-             * in between), and double-counting that as a fresh transition
-             * would leak idle_count upward forever. */
-            if (!atomic_exchange_explicit(&c->idle, true, memory_order_relaxed)) {
-                atomic_fetch_add_explicit(&c->sched->idle_count, 1,
-                                           memory_order_relaxed);
-            }
+            atomic_store_explicit(&c->idle, true, memory_order_relaxed);
 
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
@@ -1424,17 +1378,7 @@ static void *carrier_main(void *argp) {
         }
 
         if (drew) {
-            /* EXPERIMENTAL FIX, not for master without further validation.
-             * Same reasoning as the exchange above, mirrored: only a real
-             * true -> false transition should decrement idle_count. This
-             * carrier's own idle flag could already be false here (e.g.
-             * notify_new_work's CAS already claimed it and this is that
-             * same wakeup reaching the top of the loop) -- decrementing
-             * again for that case would drive idle_count negative. */
-            if (atomic_exchange_explicit(&c->idle, false, memory_order_relaxed)) {
-                atomic_fetch_sub_explicit(&c->sched->idle_count, 1,
-                                           memory_order_relaxed);
-            }
+            atomic_store_explicit(&c->idle, false, memory_order_relaxed);
             update_max_draw_seen(c->sched, drew_n);
         }
         carrier_dispatch(c, g);
@@ -1508,12 +1452,6 @@ rt_scheduler_t *rt_sched_create(uint32_t n_carriers) {
     atomic_init(&s->diag_notify_calls, (uint64_t)0);
     atomic_init(&s->diag_notify_steps, (uint64_t)0);
     atomic_init(&s->diag_notify_full_laps, (uint64_t)0);
-    /* EXPERIMENTAL FIX, not for master without further validation. Every
-     * carrier starts idle=true (see the carrier-init loop's own comment),
-     * so idle_count starts at n_carriers to match -- not 0, which would
-     * make the very first notify_new_work call take the O(1) early-return
-     * path despite nobody actually having run yet. */
-    atomic_init(&s->idle_count, n_carriers);
 
     /* Phase 3: the live-green-thread registry (park/unpark) and the
      * blocking-FFI monitor's own bookkeeping -- the monitor thread itself
