@@ -256,6 +256,19 @@ uint32_t rt_sched_max_draw_seen(rt_scheduler_t *s);
 bool     rt_sched_carrier_idle(rt_scheduler_t *s, uint32_t carrier);
 uint64_t rt_sched_carrier_dispatched(rt_scheduler_t *s, uint32_t carrier);
 
+/* DIAGNOSTIC ONLY, not for master -- see
+ * .claude/worktrees/diagnostics-fuel-dip-investigation's own commits.
+ * diag_draw_items / diag_draw_calls is the actual average draw batch size,
+ * to compare against fuel_size directly; diag_notify_steps / diag_notify_
+ * calls is the average number of permutation steps notify_new_work takes
+ * per push; diag_notify_full_laps is how often a full lap finds nobody
+ * idle (pure wasted walk, every carrier already busy). */
+uint64_t rt_sched_diag_draw_calls(rt_scheduler_t *s);
+uint64_t rt_sched_diag_draw_items(rt_scheduler_t *s);
+uint64_t rt_sched_diag_notify_calls(rt_scheduler_t *s);
+uint64_t rt_sched_diag_notify_steps(rt_scheduler_t *s);
+uint64_t rt_sched_diag_notify_full_laps(rt_scheduler_t *s);
+
 /* Current length of the shared global queue (a momentary snapshot, taken
  * under its lock) -- diagnostics/tests only. */
 uint32_t rt_sched_queue_len(rt_scheduler_t *s);

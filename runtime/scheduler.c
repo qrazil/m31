@@ -679,6 +679,22 @@ struct rt_scheduler {
     _Atomic uint64_t total_completed;
     _Atomic uint32_t max_draw_seen;
 
+    /* DIAGNOSTIC ONLY, not for master -- see
+     * .claude/worktrees/diagnostics-fuel-dip-investigation's own commits.
+     * Direct evidence for the fuel_size/notify_new_work contention
+     * hypothesis: how many times the shared queue is actually drawn from
+     * and how many items each draw gets (average batch size vs fuel_size),
+     * and how many steps notify_new_work's wake-permutation walk takes per
+     * push, including how often a full lap finds nobody idle. Relaxed
+     * atomics: these are approximate counters for a diagnostic probe, not
+     * a correctness mechanism, so no ordering guarantee is needed beyond
+     * each individual add being atomic. */
+    _Atomic uint64_t diag_draw_calls;
+    _Atomic uint64_t diag_draw_items;
+    _Atomic uint64_t diag_notify_calls;
+    _Atomic uint64_t diag_notify_steps;
+    _Atomic uint64_t diag_notify_full_laps;
+
     /* Blocking-FFI handoff monitor (opt-in; see
      * rt_sched_start_blocking_monitor in scheduler.h). */
     pthread_t         monitor_thread;
@@ -820,6 +836,8 @@ static bool rt_sched_in_green_thread(void) {
  * nothing: everyone is already busy, exactly per the design doc. */
 static void notify_new_work(rt_scheduler_t *s) {
     rt_wake_perm_t *p = &s->perm;
+    /* DIAGNOSTIC ONLY, not for master -- see diag_notify_calls' own comment. */
+    atomic_fetch_add_explicit(&s->diag_notify_calls, 1, memory_order_relaxed);
     pthread_mutex_lock(&p->lock);
     for (uint32_t steps = 0; steps < s->n_carriers; steps++) {
         if (p->pos >= p->n) {
@@ -834,10 +852,18 @@ static void notify_new_work(rt_scheduler_t *s) {
                 memory_order_relaxed)) {
             rt_wake_sem_post(&c->wake_sem);
             pthread_mutex_unlock(&p->lock);
+            /* DIAGNOSTIC ONLY, not for master. */
+            atomic_fetch_add_explicit(&s->diag_notify_steps, steps + 1,
+                                       memory_order_relaxed);
             return;
         }
     }
     pthread_mutex_unlock(&p->lock);
+    /* DIAGNOSTIC ONLY, not for master. */
+    atomic_fetch_add_explicit(&s->diag_notify_steps, s->n_carriers,
+                               memory_order_relaxed);
+    atomic_fetch_add_explicit(&s->diag_notify_full_laps, 1,
+                               memory_order_relaxed);
 }
 
 static void update_max_draw_seen(rt_scheduler_t *s, uint32_t n) {
@@ -1296,6 +1322,16 @@ static void *carrier_main(void *argp) {
         pthread_mutex_lock(&c->local_lock);
         if (c->local_len == 0) {
             uint32_t n = squeue_draw(c->sched, &c->sched->global, c->local, c->local_cap);
+            /* DIAGNOSTIC ONLY, not for master -- see diag_draw_calls' own
+             * comment (scheduler.h). Counted here, not inside squeue_draw
+             * itself, because rt_scheduler_t is still an incomplete type at
+             * squeue_draw's own definition (it is declared well before
+             * `struct rt_scheduler` is), while this call site already has
+             * the complete type via c->sched. */
+            atomic_fetch_add_explicit(&c->sched->diag_draw_calls, 1,
+                                       memory_order_relaxed);
+            atomic_fetch_add_explicit(&c->sched->diag_draw_items, n,
+                                       memory_order_relaxed);
             if (n > 0) {
                 c->local_head = 0;
                 c->local_len = n;
@@ -1410,6 +1446,12 @@ rt_scheduler_t *rt_sched_create(uint32_t n_carriers) {
     atomic_init(&s->total_spawned, (uint64_t)0);
     atomic_init(&s->total_completed, (uint64_t)0);
     atomic_init(&s->max_draw_seen, 0u);
+    /* DIAGNOSTIC ONLY, not for master. */
+    atomic_init(&s->diag_draw_calls, (uint64_t)0);
+    atomic_init(&s->diag_draw_items, (uint64_t)0);
+    atomic_init(&s->diag_notify_calls, (uint64_t)0);
+    atomic_init(&s->diag_notify_steps, (uint64_t)0);
+    atomic_init(&s->diag_notify_full_laps, (uint64_t)0);
 
     /* Phase 3: the live-green-thread registry (park/unpark) and the
      * blocking-FFI monitor's own bookkeeping -- the monitor thread itself
@@ -1531,6 +1573,23 @@ uint64_t rt_sched_completed(rt_scheduler_t *s) {
 }
 uint32_t rt_sched_max_draw_seen(rt_scheduler_t *s) {
     return atomic_load_explicit(&s->max_draw_seen, memory_order_relaxed);
+}
+
+/* DIAGNOSTIC ONLY, not for master -- see diag_draw_calls' own comment. */
+uint64_t rt_sched_diag_draw_calls(rt_scheduler_t *s) {
+    return atomic_load_explicit(&s->diag_draw_calls, memory_order_relaxed);
+}
+uint64_t rt_sched_diag_draw_items(rt_scheduler_t *s) {
+    return atomic_load_explicit(&s->diag_draw_items, memory_order_relaxed);
+}
+uint64_t rt_sched_diag_notify_calls(rt_scheduler_t *s) {
+    return atomic_load_explicit(&s->diag_notify_calls, memory_order_relaxed);
+}
+uint64_t rt_sched_diag_notify_steps(rt_scheduler_t *s) {
+    return atomic_load_explicit(&s->diag_notify_steps, memory_order_relaxed);
+}
+uint64_t rt_sched_diag_notify_full_laps(rt_scheduler_t *s) {
+    return atomic_load_explicit(&s->diag_notify_full_laps, memory_order_relaxed);
 }
 bool rt_sched_carrier_idle(rt_scheduler_t *s, uint32_t carrier) {
     return atomic_load_explicit(&s->carriers[carrier].idle, memory_order_relaxed);

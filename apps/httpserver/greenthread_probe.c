@@ -65,6 +65,13 @@ extern uint64_t rt_sched_spawned(rt_scheduler_t *s);
 extern uint64_t rt_sched_completed(rt_scheduler_t *s);
 extern uint32_t rt_sched_ncarriers(rt_scheduler_t *s);
 extern uint64_t rt_sched_carrier_dispatched(rt_scheduler_t *s, uint32_t carrier);
+/* DIAGNOSTIC ONLY, not for master -- see scheduler.h's own comment on
+ * these. */
+extern uint64_t rt_sched_diag_draw_calls(rt_scheduler_t *s);
+extern uint64_t rt_sched_diag_draw_items(rt_scheduler_t *s);
+extern uint64_t rt_sched_diag_notify_calls(rt_scheduler_t *s);
+extern uint64_t rt_sched_diag_notify_steps(rt_scheduler_t *s);
+extern uint64_t rt_sched_diag_notify_full_laps(rt_scheduler_t *s);
 
 static char *fmt_u64(char *out, uint64_t v) {
     char tmp[20];
@@ -135,6 +142,36 @@ static void on_sigusr1(int sig) {
     *q++ = '\n';
 
     write(2, buf2, (size_t)(q - buf2));
+
+    /* DIAGNOSTIC ONLY, not for master. Third line: raw totals behind the
+     * fuel_size/notify_new_work contention hypothesis -- draw_items /
+     * draw_calls is the real average batch size pulled from the shared
+     * queue (compare against fuel_size), notify_steps / notify_calls is
+     * the average permutation walk length per push, and notify_full_laps
+     * is how often that walk finds nobody idle at all. Left as raw totals,
+     * not pre-divided: integer division here would silently floor a ratio
+     * that is often informative exactly in its fractional part, and there
+     * is no safe zero-call case to special-case in a signal handler. */
+    char buf3[320];
+    char *r = buf3;
+    const char *prefix3 = "[greenthread-probe] diag: draw_calls=";
+    while (*prefix3) *r++ = *prefix3++;
+    r = fmt_u64(r, rt_sched_diag_draw_calls(s));
+    const char *d1 = " draw_items=";
+    while (*d1) *r++ = *d1++;
+    r = fmt_u64(r, rt_sched_diag_draw_items(s));
+    const char *d2 = " notify_calls=";
+    while (*d2) *r++ = *d2++;
+    r = fmt_u64(r, rt_sched_diag_notify_calls(s));
+    const char *d3 = " notify_steps=";
+    while (*d3) *r++ = *d3++;
+    r = fmt_u64(r, rt_sched_diag_notify_steps(s));
+    const char *d4 = " notify_full_laps=";
+    while (*d4) *r++ = *d4++;
+    r = fmt_u64(r, rt_sched_diag_notify_full_laps(s));
+    *r++ = '\n';
+
+    write(2, buf3, (size_t)(r - buf3));
 }
 
 __attribute__((constructor)) static void install_greenthread_probe(void) {
