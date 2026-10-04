@@ -1,6 +1,17 @@
 # SSH: the decision
 
-Status: **scoping**. Nothing here is implemented. This exists because
+Status: **Phases 1 and 2 implemented and validated; 3 and 4 not started.**
+Phase 1 (crypto primitives) is `lib/sha256.m31`, `lib/chacha20poly1305.m31`,
+`lib/x25519.m31`, `lib/ed25519.m31` (plus `lib/field25519.m31`/
+`lib/sha512.m31`/`lib/scalar25519.m31` underneath), validated against RFC
+test vectors and real oracles in `crypto25519_test/test.sh` and
+`apps/ssh/test.sh`. Phase 2 (the transport protocol) is `lib/ssh.m31`,
+validated two ways: `apps/ssh/test.sh`'s pure wire-format checks (no
+`sshd`), and `apps/ssh/test_transport.sh`'s live handshake against a real,
+disposable local `sshd` — including a capstone round trip
+(`SSH_MSG_SERVICE_REQUEST`/`SSH_MSG_SERVICE_ACCEPT`) proving the derived
+keys actually decrypt real traffic, not just that no error was raised. This
+exists because
 `apps/git/design.md` explicitly held SSH back from the packfile/smart-HTTP
 work and required its own pass before any code gets written — a bug in a
 cryptographic transport is a vulnerability, not a wrong diff, and that
@@ -138,3 +149,32 @@ exists (all of Phase 1), it is the primary oracle; where one doesn't
   project has no crypto primitives at all today, but not deciding it before
   Phase 1 exists
 - Rekeying (§1) if a real usage pattern ever needs it
+
+## Phase 2: two things the live `sshd` fixture caught that a reading of the
+RFCs alone did not
+
+Both found by `apps/ssh/test_transport.sh` failing against a real `sshd`
+after `apps/ssh/test.sh`'s pure fixtures already passed clean — exactly the
+case `docs/ssh-decision.md` §4's two-oracle discipline exists for.
+
+- **RFC 4253 §6's padding-alignment rule covers the 4-byte `packet_length`
+  field itself** ("the length of the concatenation of 'packet_length',
+  'padding_length', 'payload', and 'random padding' MUST be a multiple of
+  the cipher block size or 8"), which is easy to misread as applying only to
+  the *value* `packet_length` names. Before any cipher exists this matters;
+  `lib/ssh.m31`'s `compute_padding_len` includes it. `chacha20-poly1305@
+  openssh.com`'s own ciphered framing does NOT include it — that cipher
+  encrypts its length field with a wholly separate keystream (`K_1`), so the
+  4 bytes are never part of the block-aligned run RFC 4253 §6 was written
+  for a generic block cipher. Two different rules, two different functions
+  (`compute_padding_len` vs. `compute_padding_len_ciphered`) — conflating
+  them produces "padding error ... block 8 mod 4" from a real `sshd` at
+  whichever of the two framings got the other one's rule.
+- **RFC 8731 §3.1's text describes the X25519 shared secret as reversed to
+  big-endian before `mpint`-encoding it.** A real `sshd` rejects the host
+  key's signature when that reversal is applied, and accepts it when
+  `x25519`'s raw little-endian output is `mpint`-encoded directly, with no
+  reversal. `lib/ssh.m31` does what OpenSSH actually ships, documented
+  in-line where it matters, not what the RFC's own wording suggests —
+  precisely because this library's whole testing discipline is built on not
+  trusting a reading of the spec over a real implementation's behavior.

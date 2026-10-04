@@ -1,0 +1,356 @@
+// `lib/ssh.m31`'s wire-format functions, self-checked: every round trip and
+// every named `Error` path, needing no external oracle -- the same style
+// `t_chacha20poly1305.m31`'s own length-grid round trip and tamper checks
+// use (that file's own comment: "needs no oracle for either"). `test.sh`
+// runs this and checks it exits 0; a `trap` here means one of these checks
+// failed. `t_ssh_wire.m31` is the sibling file that DOES need an oracle
+// (the exchange hash and key derivation, checked against independent
+// `hashlib` math in `oracle_ssh_wire.py`).
+import ssh;
+import random;
+
+// A top-level `int` is local to the program body (it is not a module
+// constant, and a function cannot see it), so `check` takes and returns the
+// running count rather than closing over one -- every call site reads
+// `checks = check(checks, ..., ...)`.
+int check(int n, bool ok, str label) {
+    if (!ok) {
+        trap("check failed: " + label);
+    }
+    return n + 1;
+}
+
+// `Error` has no `eq` (nothing in this codebase compares an error enum with
+// `==` -- it is always `match`), so a discriminant collapses the 13-arm
+// match this file would otherwise need to repeat at every error-path check
+// down to a plain `int ==`.
+int error_code(ssh.Error e) {
+    match (e) {
+        case BadVersion: {
+            return 0;
+        }
+        case Truncated: {
+            return 1;
+        }
+        case BadPacketLength: {
+            return 2;
+        }
+        case MacMismatch: {
+            return 3;
+        }
+        case UnexpectedMessage: {
+            return 4;
+        }
+        case NoCommonKex: {
+            return 5;
+        }
+        case NoCommonHostKey: {
+            return 6;
+        }
+        case NoCommonCipher: {
+            return 7;
+        }
+        case UnsupportedHostKeyType: {
+            return 8;
+        }
+        case HostKeyMismatch: {
+            return 9;
+        }
+        case BadSignature: {
+            return 10;
+        }
+        case Disconnected: {
+            return 11;
+        }
+        case Io: {
+            return 12;
+        }
+    }
+}
+
+bool is_error(ssh.Error e, ssh.Error want) {
+    return error_code(e) == error_code(want);
+}
+
+bytes range_bytes(int from, int to) {
+    bytes out = [];
+    int i = from;
+    while (i < to) {
+        out.push(i & 0xFF);
+        i = i + 1;
+    }
+    return out;
+}
+
+random.System rng = random.system();
+int checks = 0;
+
+// --- mpint: the sign-bit rule, checked against hand-computed hex -----------
+
+checks = check(checks, ssh.encode_mpint([0; 32]).hex() == "00000000", "mpint zero is the empty string");
+checks = check(checks, ssh.encode_mpint([0x80, 1, 2, 3]).hex() == "000000050080010203", "mpint high bit gets a leading 0x00");
+checks = check(checks, ssh.encode_mpint([0x7F, 1, 2, 3]).hex() == "000000047f010203", "mpint low bit needs no leading byte");
+checks = check(checks, ssh.encode_mpint([0, 0, 0x7F, 1]).hex() == "000000027f01", "mpint strips redundant leading zeros");
+
+// --- string / name-list round trips ------------------------------------------
+
+bytes s1 = [];
+bytes s1_content = [1, 2, 3, 4, 5];
+ssh.push_string(s1, s1_content);
+match (ssh.parse_string(s1, 0)) {
+    case Ok(ssh.Field f): {
+        checks = check(checks, f.value == s1_content && f.next == 9, "string round trip");
+    }
+    case Err(ssh.Error e): {
+        trap("string round trip: " + e.to_str());
+    }
+}
+// Truncated: a length prefix naming more bytes than are present.
+bytes trunc = [0, 0, 0, 10, 1, 2, 3];
+match (ssh.parse_string(trunc, 0)) {
+    case Ok(ssh.Field f): {
+        trap("truncated string unexpectedly parsed");
+    }
+    case Err(ssh.Error e): {
+        checks = check(checks, is_error(e, ssh.Error.Truncated), "truncated string is Error.Truncated");
+    }
+}
+bytes nl = ssh.encode_name_list(["curve25519-sha256", "foo"]);
+match (ssh.parse_name_list(nl, 0)) {
+    case Ok(ssh.NameList n): {
+        checks = check(checks, n.names.size() == 2 && n.names[0] == "curve25519-sha256" && n.names[1] == "foo", "name-list round trip");
+    }
+    case Err(ssh.Error e): {
+        trap("name-list round trip: " + e.to_str());
+    }
+}
+List<str> empty_names = [];
+match (ssh.parse_name_list(ssh.encode_name_list(empty_names), 0)) {
+    case Ok(ssh.NameList n): {
+        checks = check(checks, n.names.size() == 0, "empty name-list round trip is an empty list, not [\"\"]");
+    }
+    case Err(ssh.Error e): {
+        trap("empty name-list round trip: " + e.to_str());
+    }
+}
+
+// --- plaintext packet framing: round trip and every bounds failure ---------
+
+int sz = 0;
+while (sz <= 20) {
+    bytes payload = range_bytes(0, sz);
+    bytes pkt = ssh.encode_plain_packet(payload, rng);
+    match (ssh.parse_plain_packet(pkt, 0)) {
+        case Ok(ssh.RawPacket rp): {
+            checks = check(checks, rp.payload == payload && rp.next == pkt.size(), "plain packet round trip, size " + sz.to_str());
+        }
+        case Err(ssh.Error e): {
+            trap("plain packet round trip, size " + sz.to_str() + ": " + e.to_str());
+        }
+    }
+    sz = sz + 1;
+}
+match (ssh.parse_plain_packet([0, 0, 0, 100, 1, 2, 3], 0)) {
+    case Ok(ssh.RawPacket rp): {
+        trap("a packet_length past the buffer's end unexpectedly parsed");
+    }
+    case Err(ssh.Error e): {
+        checks = check(checks, is_error(e, ssh.Error.Truncated), "oversized packet_length is Error.Truncated");
+    }
+}
+match (ssh.parse_plain_packet([0, 0, 0, 5, 2, 1, 2, 3, 4], 0)) {
+    case Ok(ssh.RawPacket rp): {
+        trap("a padding_length below the RFC 4253 floor of 4 unexpectedly parsed");
+    }
+    case Err(ssh.Error e): {
+        checks = check(checks, is_error(e, ssh.Error.BadPacketLength), "padding_length below 4 is Error.BadPacketLength");
+    }
+}
+match (ssh.parse_plain_packet([0, 0, 0, 5, 10, 1, 2, 3, 4], 0)) {
+    case Ok(ssh.RawPacket rp): {
+        trap("a padding_length that leaves no room for itself unexpectedly parsed");
+    }
+    case Err(ssh.Error e): {
+        checks = check(checks, is_error(e, ssh.Error.BadPacketLength), "padding_length past packet_length-1 is Error.BadPacketLength");
+    }
+}
+
+// --- KEXINIT: round trip, and each negotiation failure on its own ----------
+
+bytes kex = ssh.build_client_kexinit(rng);
+match (ssh.parse_kexinit(kex)) {
+    case Ok(ssh.KexInit ki): {
+        checks = check(checks, ki.kex_algorithms.size() == 1 && ki.kex_algorithms[0] == "curve25519-sha256", "kexinit kex_algorithms");
+        checks = check(checks, ki.server_host_key_algorithms.size() == 1 && ki.server_host_key_algorithms[0] == "ssh-ed25519", "kexinit host key algorithms");
+        checks = check(checks, ki.encryption_algorithms_client_to_server[0] == "chacha20-poly1305@openssh.com", "kexinit cipher c2s");
+        checks = check(checks, ki.encryption_algorithms_server_to_client[0] == "chacha20-poly1305@openssh.com", "kexinit cipher s2c");
+        checks = check(checks, ki.mac_algorithms_client_to_server.size() == 0, "kexinit mac lists are empty");
+        checks = check(checks, ki.compression_algorithms_client_to_server[0] == "none", "kexinit compression is none");
+        checks = check(checks, !ki.first_kex_packet_follows, "kexinit first_kex_packet_follows is false");
+        match (ssh.check_server_kexinit(ki)) {
+            case Ok: {
+            }
+            case Err(ssh.Error e): {
+                trap("this client's own proposal failed its own negotiation check: " + e.to_str());
+            }
+        }
+    }
+    case Err(ssh.Error e): {
+        trap("kexinit round trip: " + e.to_str());
+    }
+}
+bytes one_name = [];
+one_name.push(20);
+one_name.extend(rng.octets(16));
+List<str> empty = [];
+// Each fixture below swaps exactly one list in this client's own layout for
+// a wrong algorithm, so only one of the three checks can ever fire. The
+// five lists and five trailing bytes after the cipher pair never change
+// across any of the three, so they are built once.
+bytes mac_comp_lang_tail = [];
+mac_comp_lang_tail.extend(ssh.encode_name_list(empty));
+mac_comp_lang_tail.extend(ssh.encode_name_list(empty));
+mac_comp_lang_tail.extend(ssh.encode_name_list(["none"]));
+mac_comp_lang_tail.extend(ssh.encode_name_list(["none"]));
+mac_comp_lang_tail.extend(ssh.encode_name_list(empty));
+mac_comp_lang_tail.extend(ssh.encode_name_list(empty));
+mac_comp_lang_tail.push(0);
+mac_comp_lang_tail.push(0);
+mac_comp_lang_tail.push(0);
+mac_comp_lang_tail.push(0);
+mac_comp_lang_tail.push(0);
+bytes no_kex = clone(one_name);
+no_kex.extend(ssh.encode_name_list(["wrong-kex"]));
+no_kex.extend(ssh.encode_name_list(["ssh-ed25519"]));
+no_kex.extend(ssh.encode_name_list(["chacha20-poly1305@openssh.com"]));
+no_kex.extend(ssh.encode_name_list(["chacha20-poly1305@openssh.com"]));
+no_kex.extend(mac_comp_lang_tail);
+match (ssh.parse_kexinit(no_kex)) {
+    case Ok(ssh.KexInit ki): {
+        match (ssh.check_server_kexinit(ki)) {
+            case Ok: {
+                trap("NoCommonKex fixture unexpectedly negotiated");
+            }
+            case Err(ssh.Error e): {
+                checks = check(checks, is_error(e, ssh.Error.NoCommonKex), "missing kex algorithm is Error.NoCommonKex");
+            }
+        }
+    }
+    case Err(ssh.Error e): {
+        trap("NoCommonKex fixture: " + e.to_str());
+    }
+}
+bytes no_hostkey = clone(one_name);
+no_hostkey.extend(ssh.encode_name_list(["curve25519-sha256"]));
+no_hostkey.extend(ssh.encode_name_list(["wrong-hostkey"]));
+no_hostkey.extend(ssh.encode_name_list(["chacha20-poly1305@openssh.com"]));
+no_hostkey.extend(ssh.encode_name_list(["chacha20-poly1305@openssh.com"]));
+no_hostkey.extend(mac_comp_lang_tail);
+match (ssh.parse_kexinit(no_hostkey)) {
+    case Ok(ssh.KexInit ki): {
+        match (ssh.check_server_kexinit(ki)) {
+            case Ok: {
+                trap("NoCommonHostKey fixture unexpectedly negotiated");
+            }
+            case Err(ssh.Error e): {
+                checks = check(checks, is_error(e, ssh.Error.NoCommonHostKey), "missing host key algorithm is Error.NoCommonHostKey");
+            }
+        }
+    }
+    case Err(ssh.Error e): {
+        trap("NoCommonHostKey fixture: " + e.to_str());
+    }
+}
+bytes no_cipher = clone(one_name);
+no_cipher.extend(ssh.encode_name_list(["curve25519-sha256"]));
+no_cipher.extend(ssh.encode_name_list(["ssh-ed25519"]));
+no_cipher.extend(ssh.encode_name_list(["wrong-cipher"]));
+no_cipher.extend(ssh.encode_name_list(["wrong-cipher"]));
+no_cipher.extend(mac_comp_lang_tail);
+match (ssh.parse_kexinit(no_cipher)) {
+    case Ok(ssh.KexInit ki): {
+        match (ssh.check_server_kexinit(ki)) {
+            case Ok: {
+                trap("NoCommonCipher fixture unexpectedly negotiated");
+            }
+            case Err(ssh.Error e): {
+                checks = check(checks, is_error(e, ssh.Error.NoCommonCipher), "missing cipher is Error.NoCommonCipher");
+            }
+        }
+    }
+    case Err(ssh.Error e): {
+        trap("NoCommonCipher fixture: " + e.to_str());
+    }
+}
+
+// --- host-key / signature blob parsing ---------------------------------------
+
+bytes bad_blob = [];
+ssh.push_string(bad_blob, "ssh-rsa".to_bytes());
+ssh.push_string(bad_blob, [1, 2, 3]);
+match (ssh.parse_host_key_blob(bad_blob)) {
+    case Ok(bytes b): {
+        trap("a non-ed25519 host key blob unexpectedly parsed");
+    }
+    case Err(ssh.Error e): {
+        checks = check(checks, is_error(e, ssh.Error.UnsupportedHostKeyType), "wrong host key algorithm name is Error.UnsupportedHostKeyType");
+    }
+}
+bytes good_blob = [];
+ssh.push_string(good_blob, "ssh-ed25519".to_bytes());
+ssh.push_string(good_blob, range_bytes(0, 32));
+match (ssh.parse_host_key_blob(good_blob)) {
+    case Ok(bytes b): {
+        checks = check(checks, b == range_bytes(0, 32), "ssh-ed25519 host key blob parses to its raw key");
+    }
+    case Err(ssh.Error e): {
+        trap("good host key blob: " + e.to_str());
+    }
+}
+
+// --- ciphered packet framing: round trip and tamper detection --------------
+
+int ci = 0;
+while (ci < 30) {
+    bytes k1 = rng.octets(32);
+    bytes k2 = rng.octets(32);
+    int seq = ci * 7;
+    bytes payload = range_bytes(0, ci * 3);
+    bytes ct = ssh.encrypt_packet(payload, k1, k2, seq, rng);
+    bytes length_ct = ct.substr(0, 4);
+    int rest_len = ct.size() - 4 - 16;
+    bytes rest_ct = ct.substr(4, 4 + rest_len);
+    bytes tag = ct.substr(ct.size() - 16, ct.size());
+    match (ssh.decrypt_packet(length_ct, rest_ct, tag, k1, k2, seq)) {
+        case Ok(bytes pt): {
+            checks = check(checks, pt == payload, "ciphered packet round trip, size " + (ci * 3).to_str());
+        }
+        case Err(ssh.Error e): {
+            trap("ciphered packet round trip, size " + (ci * 3).to_str() + ": " + e.to_str());
+        }
+    }
+    bytes bad_tag = clone(tag);
+    bad_tag[0] = bad_tag[0] ^ 1;
+    match (ssh.decrypt_packet(length_ct, rest_ct, bad_tag, k1, k2, seq)) {
+        case Ok(bytes pt): {
+            trap("a single flipped tag bit was not detected");
+        }
+        case Err(ssh.Error e): {
+            checks = check(checks, is_error(e, ssh.Error.MacMismatch), "a flipped tag bit is Error.MacMismatch");
+        }
+    }
+    if (rest_ct.size() > 0) {
+        bytes bad_ct = clone(rest_ct);
+        bad_ct[0] = bad_ct[0] ^ 1;
+        match (ssh.decrypt_packet(length_ct, bad_ct, tag, k1, k2, seq)) {
+            case Ok(bytes pt): {
+                trap("a single flipped ciphertext bit was not detected");
+            }
+            case Err(ssh.Error e): {
+                checks = check(checks, is_error(e, ssh.Error.MacMismatch), "a flipped ciphertext bit is Error.MacMismatch");
+            }
+        }
+    }
+    ci = ci + 1;
+}
+print(checks.to_str() + " checks, 0 failures");

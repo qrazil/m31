@@ -1,0 +1,68 @@
+// `lib/chacha20poly1305.m31`'s `openssh_block` against `cryptography`/OpenSSL,
+// the way `t_chacha20poly1305.m31` checks `block`: every line this prints is
+// printed again, independently, by `oracle_chacha20_openssh.py`, and
+// `test.sh` diffs the two. See that oracle's own header for how it gets an
+// independent answer for this word layout with no hand-rolled permutation
+// of its own.
+//
+//   ./build.sh apps/ssh/t_chacha20_openssh.m31 -o t_chacha20_openssh && ./t_chacha20_openssh
+import chacha20poly1305;
+
+bytes zero32 = [0; 32];
+bytes zero8 = [0; 8];
+bytes ones32 = [0xFF; 32];
+bytes ones8 = [0xFF; 8];
+print("fixed#0 " + chacha20poly1305.openssh_block(zero32, 0, zero8).hex());
+print("fixed#1 " + chacha20poly1305.openssh_block(zero32, 1, zero8).hex());
+print("fixed#2 " + chacha20poly1305.openssh_block(ones32, 0, ones8).hex());
+// Exercises word 13 (the counter's high 32 bits) being nonzero -- the one
+// state word `block`'s own IETF layout never sets to anything but part of
+// the nonce, so a layout mix-up would be invisible without a case like this.
+print("fixed#3 " + chacha20poly1305.openssh_block(zero32, 1 << 32, zero8).hex());
+print("fixed#4 " + chacha20poly1305.openssh_block(zero32, (1 << 40) + 7, [0, 1, 2, 3, 4, 5, 6, 7]).hex());
+bytes key5 = [];
+for (int i in 0 .. 32) {
+    key5.push(i);
+}
+bytes nonce5 = [8, 9, 10, 11, 12, 13, 14, 15];
+print("fixed#5 " + chacha20poly1305.openssh_block(key5, 0, nonce5).hex());
+
+// --- a small deterministic sweep, shared in spirit with ----------------------
+// `oracle_chacha20_openssh.py`'s own `Rng`: the same glibc-constants LCG as
+// `t_chacha20poly1305.m31`'s, confined to 31 bits (reference §6.1), so this
+// file and the oracle produce the same stream of "random-looking"
+// keys/counters/nonces from the same seed with no shared fixture file.
+type Rng {
+    int state;
+}
+
+int Rng.next() {
+    state = state * 1_103_515_245 + 12_345 & 0x7FFF_FFFF;
+    return state;
+}
+
+bytes Rng.gen(int n) {
+    bytes out = [];
+    int i = 0;
+    while (i < n) {
+        out.push(next() & 0xFF);
+        i = i + 1;
+    }
+    return out;
+}
+
+Rng rng = Rng(3);
+for (int i in 0 .. 64) {
+    bytes key = rng.gen(32);
+    bytes nonce = rng.gen(8);
+    // Counters spanning both the low and the high 32-bit half, including a
+    // handful of values that exercise bit 31 (the IETF layout's own ceiling)
+    // and bit 32 (impossible to reach in that layout at all).
+    int counter = 0;
+    if (i % 3 == 0) {
+        counter = (rng.next() << 32) | rng.next();
+    } else {
+        counter = rng.next() & 0xFFFF_FFFF;
+    }
+    print("sweep#" + i.to_str() + " " + chacha20poly1305.openssh_block(key, counter, nonce).hex());
+}

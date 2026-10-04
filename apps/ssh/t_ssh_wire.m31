@@ -1,0 +1,50 @@
+// `lib/ssh.m31`'s exchange hash and key derivation against an independent
+// `hashlib`-based computation: every line this prints is printed again by
+// `oracle_ssh_wire.py`, and `test.sh` diffs the two. See that oracle's own
+// header for why this -- not the live `sshd` fixture -- is where the
+// byte-order and `mpint` sign-bit rules get checked first.
+import ssh;
+
+bytes range_bytes(int from, int to) {
+    bytes out = [];
+    int i = from;
+    while (i < to) {
+        out.push(i & 0xFF);
+        i = i + 1;
+    }
+    return out;
+}
+
+bytes v_c = "SSH-2.0-m31_0.1".to_bytes();
+bytes v_s = "SSH-2.0-OpenSSH_9.6".to_bytes();
+bytes i_c = range_bytes(0, 40);
+bytes i_s = range_bytes(40, 80);
+bytes k_s = [];
+ssh.push_string(k_s, "ssh-ed25519".to_bytes());
+ssh.push_string(k_s, range_bytes(100, 132));
+bytes q_c = range_bytes(1, 33);
+bytes q_s = range_bytes(33, 65);
+bytes k_high_bit = [];
+k_high_bit.push(0x80);
+k_high_bit.extend(range_bytes(1, 32));
+bytes k_low_bit = [];
+k_low_bit.push(0x00);
+k_low_bit.push(0x7F);
+k_low_bit.extend(range_bytes(2, 32));
+bytes k_zero = [0; 32];
+List<bytes> cases = [k_high_bit, k_low_bit, k_zero];
+List<str> labels = ["highbit", "lowbit", "zero"];
+int idx = 0;
+while (idx < cases.size()) {
+    bytes k_raw = cases[idx];
+    str label = labels[idx];
+    bytes k_mpint = ssh.encode_mpint(k_raw);
+    bytes h = ssh.exchange_hash(v_c, v_s, i_c, i_s, k_s, q_c, q_s, k_mpint);
+    print("H-" + label + " " + h.hex());
+    bytes session_id = h;
+    bytes c2s = ssh.derive64(k_mpint, h, 'C', session_id);
+    bytes s2c = ssh.derive64(k_mpint, h, 'D', session_id);
+    print("derive64-C-" + label + " " + c2s.hex());
+    print("derive64-D-" + label + " " + s2c.hex());
+    idx = idx + 1;
+}

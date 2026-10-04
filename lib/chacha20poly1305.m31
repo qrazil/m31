@@ -15,12 +15,30 @@
 // API
 // ---
 //   chacha20poly1305.block(key, counter, nonce)       -> bytes, 64 octets
+//   chacha20poly1305.openssh_block(key, counter, nonce) -> bytes, 64 octets
 //   chacha20poly1305.encrypt(key, counter, nonce, pt) -> bytes, len(pt)
 //   chacha20poly1305.key_gen(key, nonce)              -> bytes, 32 octets
 //   chacha20poly1305.mac(key, msg)                    -> bytes, 16 octets
+//   chacha20poly1305.consttime_eq(a, b)               -> bool
 //   chacha20poly1305.seal(key, nonce, plaintext, aad) -> bytes, ciphertext || tag
 //   chacha20poly1305.open(key, nonce, sealed, aad)     -> Result<bytes, Error>
 //
+// --- `openssh_block`: a second word layout, for `docs/ssh-decision.md` Phase 2 --
+//
+// `block` is RFC 8439's IETF layout: a 32-bit counter in word 12, a 96-bit
+// nonce in words 13-15. `chacha20-poly1305@openssh.com`
+// (`/usr/share/doc/openssh/PROTOCOL.chacha20poly1305`) is built on the
+// older, original Bernstein layout instead: a 64-bit counter split across
+// words 12-13, and an 8-byte nonce (there, the SSH packet sequence number)
+// in words 14-15. These are not interchangeable and one is not a special
+// case of the other -- word 13 means "high 32 bits of the counter" in one
+// and "part of the nonce" in the other, so padding the 8-byte OpenSSH nonce
+// out to 12 bytes and calling `block` would compile, run, and produce a
+// keystream that is wrong but plausible-looking. `openssh_block` exists so
+// that mistake has nowhere to happen: it is `block`'s same permutation,
+// with only the last four words' assignment changed to match. `consttime_eq`
+// is exported for the same reason Phase 2 needs it: its own MAC-then-decrypt
+// step must not grow a second, hand-rolled constant-time comparison.
 // `key` is always 32 octets and `nonce` always 12 -- the one modern IETF
 // variant, which is what `chacha20-poly1305@openssh.com` and every other
 // current use of this pair means by "ChaCha20". A wrong length is a bug in
@@ -123,32 +141,11 @@ void quarter_round(Array<int> x, int a, int b, int c, int d) {
     x[b] = rotl32(x[b] ^ x[c], 7);
 }
 
-/// The ChaCha20 block function, RFC 8439 §2.3: one 64-octet keystream block
-/// for `key` (32 octets), `counter` (0 to 2^32-1) and `nonce` (12 octets).
-/// `key` or `nonce` at any other length, or `counter` outside its range, is a
-/// bug in the caller and **traps**, per this module's header.
-pub bytes block(bytes key, int counter, bytes nonce) {
-    if (key.size() != 32) {
-        trap("chacha20: key must be 32 bytes");
-    }
-    if (nonce.size() != 12) {
-        trap("chacha20: nonce must be 12 bytes");
-    }
-    if (counter < 0 || counter > 0xFFFF_FFFF) {
-        trap("chacha20: counter must fit in 32 bits");
-    }
-    Array<int> x = [0; 16];
-    x[0] = CHACHA_CONST[0];
-    x[1] = CHACHA_CONST[1];
-    x[2] = CHACHA_CONST[2];
-    x[3] = CHACHA_CONST[3];
-    for (int i in 0 .. 8) {
-        x[4 + i] = word_le(key, i * 4);
-    }
-    x[12] = counter;
-    x[13] = word_le(nonce, 0);
-    x[14] = word_le(nonce, 4);
-    x[15] = word_le(nonce, 8);
+// The twenty-round permutation and the final "add the original input words"
+// step, RFC 8439 §2.3, shared by both word layouts below: everything that
+// does not depend on how words 12-15 were assigned. `x`'s first twelve
+// words (the constant and the key) must already be set by the caller.
+bytes chacha20_core(Array<int> x) {
     // The starting state, kept aside to add back in once the rounds are
     // done (RFC 8439 §2.3's "adding the original input words") rather than
     // reconstructed, per §3's implementation advice.
@@ -170,6 +167,63 @@ pub bytes block(bytes key, int counter, bytes nonce) {
         push_word_le(out, x[i] + orig[i] & 0xFFFF_FFFF);
     }
     return out;
+}
+
+Array<int> chacha20_init(bytes key, bytes nonce, int nonce_len) {
+    if (key.size() != 32) {
+        trap("chacha20: key must be 32 bytes");
+    }
+    if (nonce.size() != nonce_len) {
+        trap("chacha20: nonce must be " + nonce_len.to_str() + " bytes");
+    }
+    Array<int> x = [0; 16];
+    x[0] = CHACHA_CONST[0];
+    x[1] = CHACHA_CONST[1];
+    x[2] = CHACHA_CONST[2];
+    x[3] = CHACHA_CONST[3];
+    for (int i in 0 .. 8) {
+        x[4 + i] = word_le(key, i * 4);
+    }
+    return x;
+}
+
+/// The ChaCha20 block function, RFC 8439 §2.3: one 64-octet keystream block
+/// for `key` (32 octets), `counter` (0 to 2^32-1) and `nonce` (12 octets).
+/// `key` or `nonce` at any other length, or `counter` outside its range, is a
+/// bug in the caller and **traps**, per this module's header. This is the
+/// IETF word layout: `counter` alone in word 12, `nonce` across words
+/// 13-15 -- see `openssh_block` for the other, incompatible layout
+/// `chacha20-poly1305@openssh.com` needs instead.
+pub bytes block(bytes key, int counter, bytes nonce) {
+    if (counter < 0 || counter > 0xFFFF_FFFF) {
+        trap("chacha20: counter must fit in 32 bits");
+    }
+    Array<int> x = chacha20_init(key, nonce, 12);
+    x[12] = counter;
+    x[13] = word_le(nonce, 0);
+    x[14] = word_le(nonce, 4);
+    x[15] = word_le(nonce, 8);
+    return chacha20_core(x);
+}
+
+/// The ChaCha20 block function, original (pre-IETF) layout: one 64-octet
+/// keystream block for `key` (32 octets), a 64-bit `counter` and an 8-octet
+/// `nonce`. `counter` is split little-endian across words 12 (low) and 13
+/// (high); `nonce` fills words 14-15, little-endian -- see this module's
+/// header for why this is a different, not merely differently-sized,
+/// construction than `block`'s IETF layout, and why `chacha20-poly1305@
+/// openssh.com` (`docs/ssh-decision.md` Phase 2) needs this one instead.
+/// `key` or `nonce` at any other length, or a negative `counter`, traps.
+pub bytes openssh_block(bytes key, int counter, bytes nonce) {
+    if (counter < 0) {
+        trap("chacha20: counter must not be negative");
+    }
+    Array<int> x = chacha20_init(key, nonce, 8);
+    x[12] = counter & 0xFFFF_FFFF;
+    x[13] = counter >> 32 & 0xFFFF_FFFF;
+    x[14] = word_le(nonce, 0);
+    x[15] = word_le(nonce, 4);
+    return chacha20_core(x);
 }
 
 /// ChaCha20 encryption, RFC 8439 §2.4: `data` XORed with the keystream that
@@ -464,11 +518,13 @@ bytes aead_buffer(bytes aad, bytes ciphertext) {
     return buf;
 }
 
-// Whether `a` and `b` hold the same octets, taking time that depends on
-// their lengths and nothing else -- see this module's header. `bytes`'s own
-// `==` (reference §3.10) makes no such promise, so `open`'s tag check uses
-// this instead.
-bool consttime_eq(bytes a, bytes b) {
+/// Whether `a` and `b` hold the same octets, taking time that depends on
+/// their lengths and nothing else -- see this module's header. `bytes`'s own
+/// `==` (reference §3.10) makes no such promise, so `open`'s tag check uses
+/// this instead. `pub`, not only `open`'s own helper: `docs/ssh-decision.md`
+/// Phase 2's own MAC verification needs the identical constant-time compare
+/// and must not grow a second, hand-rolled copy of it.
+pub bool consttime_eq(bytes a, bytes b) {
     if (a.size() != b.size()) {
         return false;
     }
