@@ -1291,6 +1291,28 @@ void Listener.drop() {
 /// It is a named argument, so a server that knows better says so and a
 /// reader sees the number at the call.
 ///
+/// **A server that genuinely expects bursts of concurrent connections --
+/// hundreds or thousands arriving close together, not steady traffic --
+/// should pass a deliberately large number** (`apps/httpserver` asks for
+/// 65535) rather than guess at its own host's real ceiling: the clamp
+/// above means the kernel's own configured maximum wins regardless, so
+/// asking for more than any real deployment needs is how a caller gets
+/// "whatever this host actually allows" without reading `/proc/sys/net/
+/// core/somaxconn` (Linux-only, and not how a program would even ask the
+/// equivalent `kern.ipc.somaxconn` on BSD/macOS) itself. Measured directly:
+/// at the historical 128, a burst of 10,000 near-simultaneous connections
+/// produced 32,000-44,000 dropped SYNs (`ListenOverflows`,
+/// `/proc/net/netstat`) in a single ten-second window and correspondingly
+/// wide, unpredictable throughput -- every refused connection forces the
+/// client into a TCP retransmit, often a second or more before the first
+/// retry. Asking for 65535 against the same host (its actual ceiling
+/// turned out to be lower, clamped automatically) eliminated the drops
+/// entirely. A deployment that needs a specific, audited number instead of
+/// whatever its host's clamp happens to be -- a security-hardened host
+/// with a deliberately low ceiling, or a value chosen to match a load
+/// balancer's own behavior rather than this host's -- still names it
+/// explicitly here, exactly as this parameter already allows.
+///
 /// ### SO_REUSEADDR is always on, and there is no switch
 ///
 /// Without it, a server that stops cannot start again until every

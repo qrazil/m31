@@ -91,6 +91,13 @@ void accept_loop(net.Listener ln) {
 args.Parser cli = args.Parser("httpserver", summary: "a \"Hello, World!\" HTTP server, one green thread per connection");
 cli.value("host", help: "address to listen on", placeholder: "HOST", default: "0.0.0.0");
 cli.integer("port", help: "port to listen on", placeholder: "PORT", default: "8080");
+// 65535: deliberately more than any real deployment needs -- the OS clamps
+// this to its own configured ceiling regardless (net.listen's own doc
+// comment, lib/net.m31), so asking for more than anyone needs is how this
+// gets "whatever this host actually allows" without this program reading
+// a sysctl itself. An operator who needs a specific, audited number
+// instead of whatever the clamp happens to be overrides it with --backlog.
+cli.integer("backlog", help: "listen backlog (see lib/net.m31's own doc comment on `listen`)", placeholder: "N", default: "65535");
 List<str> argv = os.args();
 argv.remove_at(0);
 match (cli.parse(argv)) {
@@ -107,6 +114,7 @@ match (cli.parse(argv)) {
             case None: {
                 str host = parsed.value("host").or("0.0.0.0");
                 int port = parsed.integer("port").or(8080);
+                int backlog = parsed.integer("backlog").or(65535);
                 // `net.listen` would `trap` on a bad port (it is not this
                 // library's job to make a CLI's job for it); a program that
                 // took the number from a user's command line wants a
@@ -115,18 +123,20 @@ match (cli.parse(argv)) {
                     io.eprint("httpserver: --port " + port.to_str() + ": a port is 0..65535");
                     os.exit(2);
                 }
-                // DIAGNOSTIC ONLY, not for master: testing whether the
-                // default backlog (128) being vastly undersized against
-                // hey -c 10000's near-simultaneous connection burst
-                // explains c=10000's run-to-run variance. Measured 32K-44K
-                // ListenOverflows (SYN drops) per 10s trial at the default.
-                // 4096, not higher: net.core.somaxconn caps the effective
-                // backlog at 4096 on this host regardless of what is
-                // requested here, confirmed via
-                // /proc/sys/net/core/somaxconn before picking this number.
-                match (net.listen(host, port, backlog: 4096)) {
+                if (backlog < 1) {
+                    io.eprint("httpserver: --backlog " + backlog.to_str() + ": must be at least 1");
+                    os.exit(2);
+                }
+                match (net.listen(host, port, backlog: backlog)) {
                     case Ok(net.Listener ln): {
-                        print("httpserver: listening on " + host + ":" + ln.local().port().to_str());
+                        // The requested value, not an attempt to read back
+                        // what the OS actually settled on (no portable way
+                        // to ask a listening socket its own effective
+                        // backlog) -- this is exactly the number --backlog's
+                        // own default comment explains: usually a stand-in
+                        // for "whatever this host's real ceiling is", not a
+                        // guarantee this host granted it in full.
+                        print("httpserver: listening on " + host + ":" + ln.local().port().to_str() + " (backlog " + backlog.to_str() + ")");
                         accept_loop(ln);
                     }
                     case Err(net.Error e): {
