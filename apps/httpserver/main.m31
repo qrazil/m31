@@ -115,7 +115,16 @@ match (cli.parse(argv)) {
                     io.eprint("httpserver: --port " + port.to_str() + ": a port is 0..65535");
                     os.exit(2);
                 }
-                match (net.listen(host, port)) {
+                // DIAGNOSTIC ONLY, not for master: testing whether the
+                // default backlog (128) being vastly undersized against
+                // hey -c 10000's near-simultaneous connection burst
+                // explains c=10000's run-to-run variance. Measured 32K-44K
+                // ListenOverflows (SYN drops) per 10s trial at the default.
+                // 4096, not higher: net.core.somaxconn caps the effective
+                // backlog at 4096 on this host regardless of what is
+                // requested here, confirmed via
+                // /proc/sys/net/core/somaxconn before picking this number.
+                match (net.listen(host, port, backlog: 4096)) {
                     case Ok(net.Listener ln): {
                         print("httpserver: listening on " + host + ":" + ln.local().port().to_str());
                         accept_loop(ln);
