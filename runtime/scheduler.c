@@ -695,6 +695,24 @@ struct rt_scheduler {
     _Atomic uint64_t diag_notify_steps;
     _Atomic uint64_t diag_notify_full_laps;
 
+    /* EXPERIMENTAL FIX v2, not for master without further validation. A
+     * single shared, deliberately asymmetric hint, not a precise count --
+     * v1 (reverted, see that commit) tried to keep an EXACT idle_count by
+     * turning two plain stores on carrier_main's hottest path into atomic
+     * exchanges, which made things WORSE: those two sites fire on every
+     * single dispatch cycle for every carrier, far hotter than
+     * notify_new_work's own lock, so the RMW cost added there dwarfed the
+     * lock cost it was meant to avoid. This version touches the BUSY
+     * transition not at all -- only "a carrier went idle" sets this (a
+     * plain, unconditional, relaxed store: always writing `true` needs no
+     * old-value check, so no RMW), and only a full permutation walk that
+     * confirms nobody is actually idle clears it, piggybacking on work
+     * notify_new_work is already doing in that case rather than adding a
+     * new write anywhere else. A stale `true` costs one extra walk; it can
+     * never cause a missed wakeup the existing 5ms periodic fallback
+     * (carrier_main) does not already cover. */
+    _Atomic bool maybe_idle;
+
     /* Blocking-FFI handoff monitor (opt-in; see
      * rt_sched_start_blocking_monitor in scheduler.h). */
     pthread_t         monitor_thread;
@@ -838,6 +856,17 @@ static void notify_new_work(rt_scheduler_t *s) {
     rt_wake_perm_t *p = &s->perm;
     /* DIAGNOSTIC ONLY, not for master -- see diag_notify_calls' own comment. */
     atomic_fetch_add_explicit(&s->diag_notify_calls, 1, memory_order_relaxed);
+
+    /* EXPERIMENTAL FIX v2, not for master without further validation -- see
+     * maybe_idle's own comment for why this is safe and why v1 (reverted)
+     * was not merely slower but actually counter-productive. One relaxed
+     * load, no lock, no RMW: skips straight to "nothing to do" in exactly
+     * the 80-95%-of-calls case already measured, at zero cost to the
+     * carrier-side dispatch path that cost v1 the whole benefit. */
+    if (!atomic_load_explicit(&s->maybe_idle, memory_order_relaxed)) {
+        return;
+    }
+
     pthread_mutex_lock(&p->lock);
     for (uint32_t steps = 0; steps < s->n_carriers; steps++) {
         if (p->pos >= p->n) {
@@ -859,6 +888,13 @@ static void notify_new_work(rt_scheduler_t *s) {
         }
     }
     pthread_mutex_unlock(&p->lock);
+    /* EXPERIMENTAL FIX v2, not for master without further validation. This
+     * walk just confirmed, for real, that nobody is idle -- piggyback that
+     * confirmation onto maybe_idle rather than paying for a separate check
+     * anywhere else. Plain store: the next carrier to go idle sets this
+     * back to true independently and unconditionally, so there is no
+     * old-value race to get wrong here either. */
+    atomic_store_explicit(&s->maybe_idle, false, memory_order_relaxed);
     /* DIAGNOSTIC ONLY, not for master. */
     atomic_fetch_add_explicit(&s->diag_notify_steps, s->n_carriers,
                                memory_order_relaxed);
@@ -1358,6 +1394,15 @@ static void *carrier_main(void *argp) {
              * is the remaining correctness floor for anything this still
              * misses. */
             atomic_store_explicit(&c->idle, true, memory_order_relaxed);
+            /* EXPERIMENTAL FIX v2, not for master without further
+             * validation -- see maybe_idle's own comment. Plain,
+             * unconditional store: always writing `true` needs no
+             * old-value check, so this is exactly as cheap as the store
+             * above it, not an RMW -- the busy-transition site below
+             * (`if (drew) { atomic_store_explicit(&c->idle, false, ...` is
+             * deliberately left untouched, zero added cost there. */
+            atomic_store_explicit(&c->sched->maybe_idle, true,
+                                   memory_order_relaxed);
 
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
@@ -1452,6 +1497,11 @@ rt_scheduler_t *rt_sched_create(uint32_t n_carriers) {
     atomic_init(&s->diag_notify_calls, (uint64_t)0);
     atomic_init(&s->diag_notify_steps, (uint64_t)0);
     atomic_init(&s->diag_notify_full_laps, (uint64_t)0);
+    /* EXPERIMENTAL FIX v2, not for master without further validation. Every
+     * carrier starts idle=true, so this starts true to match -- a false
+     * start would make the very first notify_new_work call short-circuit
+     * despite nobody having run yet. */
+    atomic_init(&s->maybe_idle, true);
 
     /* Phase 3: the live-green-thread registry (park/unpark) and the
      * blocking-FFI monitor's own bookkeeping -- the monitor thread itself
