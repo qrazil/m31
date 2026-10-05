@@ -16,6 +16,7 @@
 #include "rt.h"
 #include "greenthread.h"
 #include "scheduler.h"
+#include "sys.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -318,26 +319,37 @@ static uint64_t xorshift64star(uint64_t *state) {
     return x * 0x2545F4914F6CDD1DULL;
 }
 
-/* CI found a real weakness here (both an x86_64 and an aarch64 runner, same
- * push, same symptom: 30/30 trials of scheduler_test.c's [wake-variance]
- * check woke the identical carrier): time(NULL) has 1-SECOND resolution,
- * and every caller of this function (rt_sched_create, repeatedly, in a
- * tight loop -- that same test creates 30 schedulers back to back) can
- * easily call it many times within one second, making this term a
- * constant in practice rather than real entropy. getpid() and &s (this
- * function's own stack slot, identical on every call from the same call
- * site) are likewise constant across such a loop, so in that case the
- * ENTIRE seed's diversity was resting on `salt` alone -- a plain
- * arithmetic progression (salt, salt+C, salt+2C, ...), which xorshift64*
- * does not always diffuse as well as independent seeds. A monotonic clock
- * read at nanosecond resolution does not have this failure mode: it
- * genuinely differs between calls microseconds apart, which is exactly
- * the case that broke. */
+/* CI found a real weakness here, TWICE: 30/30 trials of scheduler_test.c's
+ * [wake-variance] check woke the identical carrier -- first on an x86_64
+ * and an aarch64 runner (both clang), then again later on a THIRD runner
+ * (gcc -O2) after the first fix below. The first attempt replaced
+ * time(NULL) (1-second resolution, easily constant across this test's
+ * tight loop of 30 scheduler creations) with CLOCK_MONOTONIC read at
+ * nanosecond resolution -- an improvement, but still a clock, and clocks
+ * are not a sound foundation for "the caller needs entropy, full stop":
+ * a virtualized CI runner's clock can be coarser, steppier, or more
+ * contended than this host's, and the recurrence on a second platform is
+ * exactly the evidence that mattered, not a reading of a man page. The
+ * real fix is to stop asking "is this source fine-grained enough" at all:
+ * sys_getrandom (runtime/sys.h) is getrandom(2)/getentropy(3), the same
+ * kernel CSPRNG lib/random.m31's own `random.system()` draws from for
+ * actual cryptographic use (including now, SSH's own key generation) --
+ * genuinely unpredictable per call, by construction, independent of
+ * wall-clock resolution, CPU speed, or how tight the calling loop is. */
 static uint64_t seed_from_entropy(void) {
+    uint64_t s = 0;
+    if (sys_getrandom(&s, (int64_t)sizeof s) == (int64_t)sizeof s && s != 0) {
+        return s;
+    }
+    /* sys_getrandom failing at all is already exceptional (lib/random.m31's
+     * own header calls the equivalent failure "fatal" for real crypto use);
+     * this permutation shuffle is not security-sensitive, only fair-wakeup-
+     * selection-sensitive, so degrade to the old clock/pid mix rather than
+     * trap -- still real entropy, just not the kernel's. */
     static _Atomic uint64_t salt = 1;
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    uint64_t s = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+    s = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
     s ^= ((uint64_t)(uintptr_t)&s) << 16;
     s ^= (uint64_t)getpid() << 32;
     s ^= atomic_fetch_add_explicit(&salt, 0x9E3779B97F4A7C15ULL,
