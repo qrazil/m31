@@ -173,4 +173,33 @@ else
     note "emit_c.rs probe text" "skipped ($LANGC not built)"
 fi
 
+# ---- 4. LANG_STACK_SIZE is actually tunable, not just parsed ---------------
+# rt_stack_size()'s own doc comment (greenthread.h) promises an app with
+# unusually deep recursion (apps/markdown's pathological-input case is the
+# motivating one) can ask for more than RT_STACK_SIZE's default without a
+# custom build. This proves the env var actually reaches the resolved
+# value, as two separate processes -- pthread_once caches the answer for a
+# process's own lifetime, so one process can only ever report what it
+# resolved on its first call.
+tbin="$WORK/gt_tunable"
+if cc -O0 -Wall -Wextra -I runtime -pthread \
+        runtime/greenthread_test.c runtime/rt.c \
+        runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" \
+        -o "$tbin" 2>"$WORK/tunable.err"; then
+    default_size=$("$tbin" stacksize 2>&1)
+    custom_size=$(LANG_STACK_SIZE=2097152 "$tbin" stacksize 2>&1)
+    if [ "$default_size" = "1048576" ] && [ "$custom_size" = "2097152" ]; then
+        note "LANG_STACK_SIZE is tunable" "ok (default $default_size, LANG_STACK_SIZE=2097152 -> $custom_size)"
+    else
+        note "LANG_STACK_SIZE is tunable" FAILED
+        echo "    default (env unset): got [$default_size], want [1048576] (RT_STACK_SIZE)"
+        echo "    LANG_STACK_SIZE=2097152: got [$custom_size], want [2097152]"
+        fail=1
+    fi
+else
+    note "LANG_STACK_SIZE is tunable" FAILED
+    sed 's/^/    /' "$WORK/tunable.err" | head -20
+    fail=1
+fi
+
 exit $fail

@@ -152,27 +152,22 @@ void *__tsan_get_current_fiber(void);
  * a space one, and still unfixed (pre-existing Phase 1/2 mechanism, outside
  * that task's own scope).
  *
- * Raised a second time here, from 1 MiB to 8 MiB, for a DIFFERENT and
- * properly distinguished reason: apps/markdown's own pathological-input
- * test (test.sh, "deep-quote" -- 20,000 nested blockquotes) traps here with
- * a genuine, 100%-reproducible overflow, confirmed to persist unchanged
- * under `LANG_NUM_CARRIERS=1` (10/10 runs, both with and without that env
- * var) -- ruling out the race above by the same test that would have to
- * trigger it (a single carrier cannot race itself), and confirming this one
- * really is a single green thread's own recursive call depth
+ * A second raise, to 8 MiB, was tried and reverted: apps/markdown's own
+ * pathological-input test ("deep-quote" -- 20,000 nested blockquotes) traps
+ * here with a genuine, 100%-reproducible overflow at 1 MiB (confirmed to
+ * persist unchanged under `LANG_NUM_CARRIERS=1`, ruling out the unfixed
+ * cross-carrier race above -- a single carrier cannot race itself -- so this
+ * really is one green thread's own recursive call depth
  * (apps/markdown/blocks.m31's own header: "nesting costs a recursive call
- * and nothing else") genuinely exceeding its stack, not a second instance
- * of the unresolved bug above. 8 MiB (empirically: the pathological case
- * passes cleanly with this, where 1 MiB started failing around ~4,500
- * levels) matches a typical OS thread's own default stack size, so this is
- * not an unusually generous number.
- *
- * Still cheap, same reasoning the first raise gave: a slab's bytes are a
- * virtual-memory reservation, demand-paged, not a commitment of real RAM
- * per green thread that never uses it. RT_SLAB_STACKS is unchanged, so this
- * only grows each slab's byte size (1 GiB to 8 GiB), not its VMA count --
- * the "a million green threads is ~1000 VMAs" argument in
- * docs/concurrency-decision.md is unaffected.
+ * and nothing else") genuinely exceeding its stack). But raising the
+ * DEFAULT for every green thread in every process just to cover one app's
+ * one pathological corner is the wrong lever when a narrower one already
+ * exists: `LANG_STACK_SIZE` (below) lets markdown's own test.sh/build.sh ask
+ * for a bigger stack for itself, leaving every other program's default
+ * footprint (and RT_SLAB_STACKS-sized slab's reservation) unchanged. 8x'ing
+ * RT_SLAB_STACKS * RT_STACK_SIZE (1 GiB to 8 GiB per slab, demand-paged or
+ * not) is a real-enough change in degenerate multi-slab-stress paths that it
+ * is not worth taking for every process just to fix one app's input.
  *
  * `LANG_STACK_SIZE` (an environment variable, parsed once, lazily, by
  * `rt_stack_size()` in greenthread.c): this constant is still the fixed
@@ -180,13 +175,14 @@ void *__tsan_get_current_fiber(void);
  * (above) is about there being no growth/copy mechanism DURING a green
  * thread's life, not about the number being unchangeable before any
  * thread exists. A workload with its own unusually deep recursion (the
- * exact shape that forced the raise above) can ask for more without a
- * custom build, the same way `LANG_NUM_CARRIERS`/`LANG_FUEL_SIZE`/
- * `LANG_GLOBAL_QUEUE_CAP` (scheduler.c) are already env-var-tunable
- * scheduler constants rather than build-time-only ones. RT_STACK_SIZE
- * below is that env var's fallback, used verbatim if it is unset or
- * invalid -- never a compile-time-only value itself now. */
-#define RT_STACK_SIZE  ((size_t)8 * 1024 * 1024)       /* 8 MiB per stack, if LANG_STACK_SIZE is unset */
+ * exact shape apps/markdown has) can ask for more without a custom build,
+ * the same way `LANG_NUM_CARRIERS`/`LANG_FUEL_SIZE`/`LANG_GLOBAL_QUEUE_CAP`
+ * (scheduler.c) are already env-var-tunable scheduler constants rather than
+ * build-time-only ones. RT_STACK_SIZE below is that env var's fallback,
+ * used verbatim if it is unset or invalid -- never a compile-time-only
+ * value itself now. See greenthread_test.c's own "tunable" test for proof
+ * this env var actually takes effect, not just that it parses. */
+#define RT_STACK_SIZE  ((size_t)1024 * 1024)           /* 1 MiB per stack, if LANG_STACK_SIZE is unset */
 #define RT_SLAB_STACKS 1024                           /* stacks per slab */
 
 /* The resolved stack size for this process: `LANG_STACK_SIZE` if it names a

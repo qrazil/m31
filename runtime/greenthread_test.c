@@ -588,6 +588,20 @@ static int run_poison_submode(void) {
     return 1;
 }
 
+/* `./greenthread_test stacksize`: prints rt_stack_size()'s resolved value
+ * and exits -- nothing about the allocator or a fiber is exercised here.
+ * Proof that `LANG_STACK_SIZE` actually changes the number a process
+ * resolves to, not just that getenv/strtoull parse it, lives in
+ * greenthread_test.sh's own shell-level check: it runs this submode once
+ * with the env var unset (expect RT_STACK_SIZE's default) and once with it
+ * set to a distinct value (expect that value back), as two separate
+ * processes -- rt_stack_size()'s pthread_once caching means one process can
+ * only ever report the answer it resolved on its first call. */
+static int run_stacksize_submode(void) {
+    printf("%zu\n", rt_stack_size());
+    return 0;
+}
+
 /* ========================================================================
  * Driver
  * ====================================================================== */
@@ -598,6 +612,9 @@ int main(int argc, char **argv) {
     }
     if (argc > 1 && strcmp(argv[1], "poison") == 0) {
         return run_poison_submode();
+    }
+    if (argc > 1 && strcmp(argv[1], "stacksize") == 0) {
+        return run_stacksize_submode();
     }
 
     test_round_trip();

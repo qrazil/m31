@@ -14,6 +14,15 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
+# The "deep-quote" pathological case below (20,000 nested blockquotes) needs
+# more than the runtime's 1 MiB default stack -- see runtime/greenthread.h's
+# own comment on RT_STACK_SIZE for why the default stays 1 MiB everywhere
+# else and this app asks for more itself instead. 8 MiB matches a typical OS
+# thread's own default stack size, and is plenty of margin (empirically,
+# deep-quote passes cleanly at 8 MiB where 1 MiB started failing around
+# ~4,500 levels).
+export LANG_STACK_SIZE=${LANG_STACK_SIZE:-8388608}
+
 BIN=apps/markdown/markdown
 T=apps/markdown/tests
 filter=${1:-}
