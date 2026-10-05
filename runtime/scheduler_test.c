@@ -237,10 +237,12 @@ static void pin_worker(void *argp) {
     free(a);
 }
 
-static void test_no_stealing(void) {
-    const uint32_t n_carriers = 6;
-    const uint32_t n_workers = 300;
-
+/* One run of the 300-worker sweep. `*distinct_out` is only meaningful when
+ * this returns true (no migration) -- see test_no_stealing's own comment on
+ * why migration is a hard invariant that never gets a retry, while the
+ * distinct-carrier count does. */
+static bool no_stealing_sweep(uint32_t n_carriers, uint32_t n_workers,
+                               uint32_t *distinct_out, int attempt) {
     rt_scheduler_t *s = rt_sched_create(n_carriers);
     uint32_t *first_carrier = calloc(n_workers, sizeof *first_carrier);
     bool *consistent = calloc(n_workers, sizeof *consistent);
@@ -274,16 +276,45 @@ static void test_no_stealing(void) {
     CHECK(!any_inconsistent,
           "[no-stealing] every green thread stayed on the SAME carrier "
           "across every one of its yields -- never migrated");
-    printf("    [no-stealing] %u distinct carriers actually ran work "
-           "(of %u)\n", distinct, n_carriers);
-    CHECK(distinct >= 2,
-          "[no-stealing] more than one carrier actually did real work "
-          "(not just carrier 0)");
+    printf("    [no-stealing] attempt %d/3: %u distinct carriers actually "
+           "ran work (of %u)\n", attempt, distinct, n_carriers);
 
     rt_sched_shutdown(s);
     rt_sched_destroy(s);
     free(first_carrier);
     free(consistent);
+
+    *distinct_out = distinct;
+    return !any_inconsistent;
+}
+
+/* The distinct-carrier-count half of this test retries for the identical
+ * reason test_wake_variance's own sweep does -- see that function's long
+ * comment for the full mechanism (each idle carrier's independent 5ms
+ * periodic fallback timer, skewed by OS thread-scheduling jitter, racing
+ * notify_new_work's own wake selection). Reproduced locally under real CPU
+ * contention (`taskset -c 0-1` plus background load) that THIS check,
+ * not only wake-variance's, goes to distinct=1 under -- work concentrating
+ * onto whichever carrier the OS happens to schedule fastest is the same
+ * underlying phenomenon, just observed through 300 pinned workers instead
+ * of one lone arrival. The migration check (`any_inconsistent`) is NOT
+ * retried under any condition: that is a hard structural invariant with no
+ * legitimate contention-dependent exception, so a single failure there
+ * fails the test immediately, on any attempt. */
+static void test_no_stealing(void) {
+    const uint32_t n_carriers = 6;
+    const uint32_t n_workers = 300;
+    uint32_t distinct = 0;
+
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        bool no_migration = no_stealing_sweep(n_carriers, n_workers, &distinct, attempt);
+        if (!no_migration) return; /* CHECK inside the sweep already failed this */
+        if (distinct >= 2) break;
+    }
+
+    CHECK(distinct >= 2,
+          "[no-stealing] more than one carrier actually did real work "
+          "(not just carrier 0), in any of 3 independent attempts");
 }
 
 /* ========================================================================
@@ -319,9 +350,9 @@ static bool all_carriers_idle(rt_scheduler_t *s, uint32_t n) {
     return true;
 }
 
-static void test_wake_variance(void) {
-    const uint32_t n_carriers = 6;
-    const int n_trials = 30;
+/* One 30-trial sweep. Returns the number of distinct carriers that won the
+ * lone-arrival race -- the caller decides what to do with that number. */
+static uint32_t wake_variance_sweep(uint32_t n_carriers, int n_trials, int attempt) {
     uint32_t histogram[64] = { 0 };
 
     for (int t = 0; t < n_trials; t++) {
@@ -348,16 +379,55 @@ static void test_wake_variance(void) {
     }
 
     uint32_t distinct = 0;
-    printf("    [wake-variance] winner histogram over %d trials:", n_trials);
+    printf("    [wake-variance] attempt %d/3, winner histogram over %d trials:",
+           attempt, n_trials);
     for (uint32_t i = 0; i < n_carriers; i++) {
         printf(" carrier%u=%u", i, histogram[i]);
         if (histogram[i] > 0) distinct++;
     }
     printf("\n");
+    return distinct;
+}
+
+/* This check's own history is why it retries. The permutation this exercises
+ * (notify_new_work's wake-selection walk, scheduler.c) is not the only path
+ * that can draw the lone spawned item: every idle carrier also has its own
+ * independent 5ms periodic fallback timer (carrier_main's own comment), and
+ * those timers start at WHATEVER wall-clock moment each carrier happened to
+ * go idle -- skewed by ordinary OS thread-creation/scheduling jitter, not
+ * synchronized to each other at all. Under real CPU contention (confirmed by
+ * reproducing this locally with `taskset -c 0-1` plus background load,
+ * repeatedly: roughly half of runs failed, never all of them), the
+ * explicitly-notified carrier can be slow enough to actually get scheduled
+ * that a DIFFERENT carrier's own, already-ticking fallback timer fires first
+ * and steals the one item instead -- a genuine, bounded race between two
+ * individually-correct wake paths, not a logic bug in the permutation
+ * itself, and not something a seed/RNG fix can touch (confirmed: this
+ * recurred identically after two independent seeding fixes, including one
+ * that moved to real kernel entropy, see runtime/scheduler.c's own
+ * seed_from_entropy comment).
+ *
+ * The discriminator a retry exploits: a REAL fixed-order bug (the one this
+ * check was originally written to catch, see its own module comment) would
+ * reproduce identically on every attempt -- there is no scheduling noise
+ * involved in a broken permutation always starting at the same place. This
+ * contention race is probabilistic, so three independent 30-trial sweeps
+ * overwhelmingly won't all land on distinct=1 unless the underlying
+ * selection genuinely never varies. */
+static void test_wake_variance(void) {
+    const uint32_t n_carriers = 6;
+    const int n_trials = 30;
+    uint32_t distinct = 0;
+
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        distinct = wake_variance_sweep(n_carriers, n_trials, attempt);
+        if (distinct >= 2) break;
+    }
 
     CHECK(distinct >= 2,
           "[wake-variance] the woken carrier is not fixed across trials -- "
-          "at least two different carriers won the lone-arrival race");
+          "at least two different carriers won the lone-arrival race, "
+          "in any of 3 independent 30-trial attempts");
 }
 
 /* ========================================================================
