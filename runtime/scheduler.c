@@ -1599,7 +1599,7 @@ uint32_t rt_sched_spawn(rt_scheduler_t *s, void (*entry)(void *), void *arg) {
     g->arg = arg;
     g->finished = false;
     g->stack = rt_stack_alloc();
-    rt_ctx_make(&g->ctx, g->stack.base, RT_STACK_SIZE, green_trampoline, g);
+    rt_ctx_make(&g->ctx, g->stack.base, rt_stack_size(), green_trampoline, g);
 
     /* Phase 3: park/unpark surface, live for this green thread's whole
      * life. `sched` and the registry entry exist from here on so that

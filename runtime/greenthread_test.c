@@ -126,7 +126,7 @@ static void test_round_trip(void) {
     rt_stack_t stack = rt_stack_alloc();
     rt_ctx_t fctx;
     rt1_arg_t arg = { &fctx, &main_ctx };
-    rt_ctx_make(&fctx, stack.base, RT_STACK_SIZE, rt1_entry, &arg);
+    rt_ctx_make(&fctx, stack.base, rt_stack_size(), rt1_entry, &arg);
 
     g_rt1_result = 0;
 
@@ -213,7 +213,7 @@ static void test_interleaving_and_isolation(void) {
         g_fibers[i].stack = rt_stack_alloc();
         g_fibers[i].main_ctx = &main_ctx;
         g_fibers[i].id = i;
-        rt_ctx_make(&g_fibers[i].ctx, g_fibers[i].stack.base, RT_STACK_SIZE,
+        rt_ctx_make(&g_fibers[i].ctx, g_fibers[i].stack.base, rt_stack_size(),
                     fiber2_entry, &g_fibers[i]);
     }
 
@@ -378,7 +378,7 @@ static void test_multi_slab_stress(void) {
         qsort(bases, STRESS_COUNT, sizeof *bases, ptrcmp);
         bool ok = true;
         for (int i = 1; i < STRESS_COUNT; i++) {
-            if ((uintptr_t)bases[i] - (uintptr_t)bases[i - 1] < RT_STACK_SIZE) {
+            if ((uintptr_t)bases[i] - (uintptr_t)bases[i - 1] < rt_stack_size()) {
                 ok = false;
                 break;
             }
@@ -566,7 +566,7 @@ static int run_overflow_submode(void) {
 
     rt_ctx_t fctx;
     overflow_arg_t arg = { &fctx, &main_ctx };
-    rt_ctx_make(&fctx, stack.base, RT_STACK_SIZE, overflow_entry, &arg);
+    rt_ctx_make(&fctx, stack.base, rt_stack_size(), overflow_entry, &arg);
 
     rt_fiber_switch(&main_ctx, &fctx, limit);
 

@@ -15,6 +15,52 @@
 #include <sys/mman.h>
 
 /* ========================================================================
+ * Stack size: RT_STACK_SIZE's fallback, overridable by LANG_STACK_SIZE --
+ * see greenthread.h's own long comment on RT_STACK_SIZE for why this is a
+ * fixed-per-process value, read once, and not a growth mechanism.
+ * ====================================================================== */
+
+/* scheduler.c's own `parse_env_u32`, verbatim -- `static` there, so not
+ * reachable from this file; duplicated rather than shared across a header,
+ * the same trade-off this project's own apps/git/FRICTION.md already names
+ * for a handful of small, self-contained helpers like this one. */
+static uint32_t stack_env_parse_u32(const char *name, uint32_t fallback) {
+    const char *v = getenv(name);
+    if (v == NULL || *v == '\0') return fallback;
+
+    const char *p = v;
+    while (*p == ' ' || *p == '\t') p++;
+    bool negative = (*p == '-');
+
+    char *end = NULL;
+    errno = 0;
+    unsigned long n = negative ? 0 : strtoul(v, &end, 10);
+    if (negative || errno != 0 || end == v || *end != '\0' || n == 0 ||
+        n > UINT32_MAX) {
+        fprintf(stderr,
+                "warning: %s=\"%s\" is not a valid positive integer; using "
+                "the default (%u)\n",
+                name, v, fallback);
+        return fallback;
+    }
+    return (uint32_t)n;
+}
+
+static size_t g_stack_size = 0;
+static pthread_once_t g_stack_size_once = PTHREAD_ONCE_INIT;
+
+static void init_stack_size(void) {
+    g_stack_size = (size_t)stack_env_parse_u32("LANG_STACK_SIZE",
+                                                (uint32_t)RT_STACK_SIZE);
+}
+
+/* See greenthread.h's own declaration comment. */
+size_t rt_stack_size(void) {
+    pthread_once(&g_stack_size_once, init_stack_size);
+    return g_stack_size;
+}
+
+/* ========================================================================
  * Part 1 (the one piece of it that is plain C) -- what happens if a green
  * thread's entry function returns.
  * ====================================================================== */
@@ -37,7 +83,7 @@ _Noreturn void rt_ctx_entry_returned(void) {
  * intrusive written into the stack memory itself -- this is not a hot path
  * yet, so the simplest correct structure wins over anything cleverer. */
 struct rt_slab {
-    void *mem; /* mmap base, RT_SLAB_BYTES long */
+    void *mem; /* mmap base, rt_stack_size() * RT_SLAB_STACKS bytes long */
     struct rt_slab *next;
     uint32_t free_idx[RT_SLAB_STACKS];
     uint32_t free_top; /* free_idx[0 .. free_top) are free */
@@ -80,14 +126,19 @@ static pthread_mutex_t g_slab_lock = PTHREAD_MUTEX_INITIALIZER;
 static rt_slab_t *g_slabs = NULL;
 
 static rt_slab_t *rt_slab_new(void) {
-    void *mem = mmap(NULL, RT_SLAB_BYTES, PROT_READ | PROT_WRITE,
+    size_t slab_bytes = rt_stack_size() * RT_SLAB_STACKS;
+    void *mem = mmap(NULL, slab_bytes, PROT_READ | PROT_WRITE,
                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (mem == MAP_FAILED) {
-        rt_trap("out of memory: mmap failed allocating a 64 MiB stack slab");
+        /* The exact size is no longer a fixed number worth naming here --
+         * RT_STACK_SIZE's own comment and LANG_STACK_SIZE (greenthread.h)
+         * are why -- demand-paged virtual memory, so this trapping at all
+         * means the address space itself is exhausted, not real RAM. */
+        rt_trap("out of memory: mmap failed allocating a new stack slab");
     }
     rt_slab_t *slab = malloc(sizeof *slab);
     if (slab == NULL) {
-        munmap(mem, RT_SLAB_BYTES);
+        munmap(mem, slab_bytes);
         rt_trap("out of memory: could not allocate slab bookkeeping");
     }
     slab->mem = mem;
@@ -141,8 +192,9 @@ rt_stack_t rt_stack_alloc(void) {
     pthread_mutex_unlock(&g_slab_lock);
 
     rt_stack_t out;
-    out.base = (char *)s->mem + (size_t)idx * RT_STACK_SIZE;
-    out.top = (char *)out.base + RT_STACK_SIZE;
+    size_t stack_size = rt_stack_size();
+    out.base = (char *)s->mem + (size_t)idx * stack_size;
+    out.top = (char *)out.base + stack_size;
     out.slab = s;
     out.index = idx;
 #if RT_TSAN_BUILD

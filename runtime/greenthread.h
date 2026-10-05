@@ -132,40 +132,74 @@ void *__tsan_get_current_fiber(void);
 /* Every green-thread stack in Phase 1 is this one fixed size -- defined
  * here, ahead of Part 1, so it is available wherever it is needed; the full
  * rationale and the rest of the allocator built on it is Part 2, further
- * down.
+ * down. Fixed-size, permanently: docs/concurrency.md's "Fixed-size stacks,
+ * forever" -- growable/copying stacks are incompatible with this runtime's
+ * C interop (raw pointers into a stack that a copy would invalidate), so
+ * the only lever here is this constant, not a growth mechanism.
  *
- * Raised from the original 64 KiB during the task that wired `spawn`/
- * `Chan`/`net` to this scheduler (docs/concurrency-decision.md, "Phase
- * 3.5"). IMPORTANT, CORRECTED NOTE from that task's own report: this value
- * was initially raised believing it fixed a `clang -O2`-only stack-overflow
- * trap in corpus/modules/stdlib-http-client. It does not reliably fix that
- * -- further investigation (same task) found the SAME program fails
- * intermittently (roughly 1 run in 2-3) at every stack size tried, 64 KiB
- * through 8 MiB, whenever more than one real carrier is active, and a TSan
- * run caught the actual cause directly: a genuine data race on
- * `rt_stack_limit` between two different carrier OS threads, one writing it
- * in `rt_fiber_switch` (this file), the other reading it in a green
- * thread's own compiler-emitted stack probe -- see that task's report for
- * the full TSan transcript and why it was not fixed there (pre-existing
- * Phase 1/2 mechanism, outside that task's stated scope to modify, and a
- * hand-rolled context-switch bug is exactly the kind of thing this project
- * has already learned not to patch half-confidently -- see the ASan note
- * above). A bigger stack is kept anyway, independent of that unresolved
- * bug, because it is still independently true that 64 KiB was never
- * exercised by a real compiled program before that task (only Phase 1's own
- * synthetic tests), and a real program's call depth under an aggressively-
- * inlining compiler plausibly does need more than that even in the
- * SINGLE-carrier case this race cannot reach -- not re-verified in isolation
- * given time spent on the race above, so treat this specific number as a
- * reasonable, cheap default rather than a precisely-justified one. Cheap
- * because a slab's bytes are a virtual-memory reservation, demand-paged,
- * not a commitment of real RAM per green thread that never uses it.
- * RT_SLAB_STACKS is unchanged, so this only grows each slab's byte size,
- * not its VMA count -- the "a million green threads is ~1000 VMAs"
- * argument in docs/concurrency-decision.md is unaffected. */
-#define RT_STACK_SIZE  ((size_t)1024 * 1024)           /* 1 MiB per stack */
+ * Raised once already, from the original 64 KiB during the task that wired
+ * `spawn`/`Chan`/`net` to this scheduler (docs/concurrency-decision.md,
+ * "Phase 3.5"), to 1 MiB. IMPORTANT, CORRECTED NOTE from that task's own
+ * report, still true and worth re-reading before ever raising this value
+ * again: that first raise was initially believed to fix a `clang
+ * -O2`-only stack-overflow trap in corpus/modules/stdlib-http-client, but
+ * does not reliably fix that -- a TSan run caught the real cause directly: a
+ * genuine data race on `rt_stack_limit` between two different carrier OS
+ * threads, one writing it in `rt_fiber_switch` (this file), the other
+ * reading it in a green thread's own compiler-emitted stack probe,
+ * reproducing intermittently (roughly 1 run in 2-3) ONLY when more than one
+ * real carrier is active, at every stack size tried -- a scheduling bug, not
+ * a space one, and still unfixed (pre-existing Phase 1/2 mechanism, outside
+ * that task's own scope).
+ *
+ * Raised a second time here, from 1 MiB to 8 MiB, for a DIFFERENT and
+ * properly distinguished reason: apps/markdown's own pathological-input
+ * test (test.sh, "deep-quote" -- 20,000 nested blockquotes) traps here with
+ * a genuine, 100%-reproducible overflow, confirmed to persist unchanged
+ * under `LANG_NUM_CARRIERS=1` (10/10 runs, both with and without that env
+ * var) -- ruling out the race above by the same test that would have to
+ * trigger it (a single carrier cannot race itself), and confirming this one
+ * really is a single green thread's own recursive call depth
+ * (apps/markdown/blocks.m31's own header: "nesting costs a recursive call
+ * and nothing else") genuinely exceeding its stack, not a second instance
+ * of the unresolved bug above. 8 MiB (empirically: the pathological case
+ * passes cleanly with this, where 1 MiB started failing around ~4,500
+ * levels) matches a typical OS thread's own default stack size, so this is
+ * not an unusually generous number.
+ *
+ * Still cheap, same reasoning the first raise gave: a slab's bytes are a
+ * virtual-memory reservation, demand-paged, not a commitment of real RAM
+ * per green thread that never uses it. RT_SLAB_STACKS is unchanged, so this
+ * only grows each slab's byte size (1 GiB to 8 GiB), not its VMA count --
+ * the "a million green threads is ~1000 VMAs" argument in
+ * docs/concurrency-decision.md is unaffected.
+ *
+ * `LANG_STACK_SIZE` (an environment variable, parsed once, lazily, by
+ * `rt_stack_size()` in greenthread.c): this constant is still the fixed
+ * size every stack in a given process gets -- "fixed-size stacks, forever"
+ * (above) is about there being no growth/copy mechanism DURING a green
+ * thread's life, not about the number being unchangeable before any
+ * thread exists. A workload with its own unusually deep recursion (the
+ * exact shape that forced the raise above) can ask for more without a
+ * custom build, the same way `LANG_NUM_CARRIERS`/`LANG_FUEL_SIZE`/
+ * `LANG_GLOBAL_QUEUE_CAP` (scheduler.c) are already env-var-tunable
+ * scheduler constants rather than build-time-only ones. RT_STACK_SIZE
+ * below is that env var's fallback, used verbatim if it is unset or
+ * invalid -- never a compile-time-only value itself now. */
+#define RT_STACK_SIZE  ((size_t)8 * 1024 * 1024)       /* 8 MiB per stack, if LANG_STACK_SIZE is unset */
 #define RT_SLAB_STACKS 1024                           /* stacks per slab */
-#define RT_SLAB_BYTES  (RT_STACK_SIZE * RT_SLAB_STACKS) /* 1 GiB: 1 mmap */
+
+/* The resolved stack size for this process: `LANG_STACK_SIZE` if it names a
+ * valid positive integer of bytes, RT_STACK_SIZE otherwise -- read and
+ * cached ONCE, via `pthread_once` (the same idiom rt.c's own
+ * `g_sched_once`/`g_reactor_once` already use for exactly this "lazy,
+ * race-free, one-time init" need), so every caller after the first gets the
+ * same answer regardless of which OS thread asks or how many ask at once.
+ * Declared here rather than left as a macro because RT_SLAB_BYTES (below,
+ * now computed, not `#define`d) and every other former use of RT_STACK_SIZE
+ * need a single runtime value, not a build-time constant, once it can come
+ * from the environment. */
+size_t rt_stack_size(void);
 
 /* ========================================================================
  * Part 1 -- context switch
