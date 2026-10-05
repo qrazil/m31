@@ -99,12 +99,29 @@ jobs:
           mkdir -p target/debug
           cp "target/release/$LANG_BIN" "target/debug/$LANG_BIN"
 
-      - name: Build every app
+      - name: Bundle the runtime SDK
         run: |
           set -euo pipefail
           OUT="dist/${LANG_NAME}-linux-x86_64"
           mkdir -p "$OUT"
           cp "target/release/$LANG_BIN" "$OUT/$LANG_BIN"
+          # $LANG_BIN alone only emits C (build.sh's own header: "it emits C,
+          # hands it to cc" -- the C backend is an implementation detail).
+          # Producing a runnable program also needs config.sh and runtime/'s
+          # own source (rt.c, scheduler.c, the platform reactor and context-
+          # switch files) to compile and link against -- there is no
+          # pre-built runtime library, by design (docs/apps-repo-split-
+          # decision.md section 6a's own note on why). Bundling both here
+          # means a consumer of this tarball alone -- this project's own
+          # extracted app repos included -- never needs a Rust toolchain or
+          # a git clone of this repo just to build something m31c emitted.
+          cp config.sh "$OUT/config.sh"
+          cp -r runtime "$OUT/runtime"
+
+      - name: Build every app
+        run: |
+          set -euo pipefail
+          OUT="dist/${LANG_NAME}-linux-x86_64"
 
           # apps/git -- the read-only CLI and the interactive client.
           # gitui.m31 pulls in apps/tui/ as well as apps/git/'s own files,
@@ -147,6 +164,12 @@ jobs:
           tuidemo, tuibrowse           apps/tui: the library's two standalone example programs
           ssh-sha256-selftest          apps/ssh: SHA-256 self-check (Phase 1 crypto primitives only --
           ssh-chacha20poly1305-selftest  no ssh client/server exists yet, see docs/ssh-decision.md)
+
+          config.sh, runtime/                 the runtime SDK: needed to build and link any program
+                                           $LANG_BIN emits (see runtime/'s own files) -- build.sh's own
+                                           header explains why $LANG_BIN alone only emits C. Point
+                                           M31_ROOT at this directory and LANGC at $LANG_BIN above when
+                                           building a program against this release from elsewhere.
           EOF
 
       - name: Package
@@ -191,12 +214,20 @@ jobs:
           mkdir -p target/debug
           cp "target/release/$LANG_BIN" "target/debug/$LANG_BIN"
 
-      - name: Build every app
+      - name: Bundle the runtime SDK
         run: |
           set -euo pipefail
           OUT="dist/${LANG_NAME}-linux-aarch64"
           mkdir -p "$OUT"
           cp "target/release/$LANG_BIN" "$OUT/$LANG_BIN"
+          # See build-linux-x86_64's identical step for why.
+          cp config.sh "$OUT/config.sh"
+          cp -r runtime "$OUT/runtime"
+
+      - name: Build every app
+        run: |
+          set -euo pipefail
+          OUT="dist/${LANG_NAME}-linux-aarch64"
 
           ./build.sh apps/git/git.m31 -o "$OUT/ourgit"
           ./apps/git/build-gitui.sh -o "$OUT/ourgitui"
@@ -222,6 +253,12 @@ jobs:
           tuidemo, tuibrowse           apps/tui: the library's two standalone example programs
           ssh-sha256-selftest          apps/ssh: SHA-256 self-check (Phase 1 crypto primitives only --
           ssh-chacha20poly1305-selftest  no ssh client/server exists yet, see docs/ssh-decision.md)
+
+          config.sh, runtime/                 the runtime SDK: needed to build and link any program
+                                           $LANG_BIN emits (see runtime/'s own files) -- build.sh's own
+                                           header explains why $LANG_BIN alone only emits C. Point
+                                           M31_ROOT at this directory and LANGC at $LANG_BIN above when
+                                           building a program against this release from elsewhere.
           EOF
 
       - name: Package
@@ -276,12 +313,20 @@ jobs:
           mkdir -p target/debug
           cp "target/release/$LANG_BIN" "target/debug/$LANG_BIN"
 
-      - name: Build every app
+      - name: Bundle the runtime SDK
         run: |
           set -euo pipefail
           OUT="dist/${LANG_NAME}-macos-arm64"
           mkdir -p "$OUT"
           cp "target/release/$LANG_BIN" "$OUT/$LANG_BIN"
+          # See build-linux-x86_64's identical step for why.
+          cp config.sh "$OUT/config.sh"
+          cp -r runtime "$OUT/runtime"
+
+      - name: Build every app
+        run: |
+          set -euo pipefail
+          OUT="dist/${LANG_NAME}-macos-arm64"
 
           ./build.sh apps/git/git.m31 -o "$OUT/ourgit"
           ./apps/git/build-gitui.sh -o "$OUT/ourgitui"
@@ -307,6 +352,12 @@ jobs:
           tuidemo, tuibrowse           apps/tui: the library's two standalone example programs
           ssh-sha256-selftest          apps/ssh: SHA-256 self-check (Phase 1 crypto primitives only --
           ssh-chacha20poly1305-selftest  no ssh client/server exists yet, see docs/ssh-decision.md)
+
+          config.sh, runtime/                 the runtime SDK: needed to build and link any program
+                                           $LANG_BIN emits (see runtime/'s own files) -- build.sh's own
+                                           header explains why $LANG_BIN alone only emits C. Point
+                                           M31_ROOT at this directory and LANGC at $LANG_BIN above when
+                                           building a program against this release from elsewhere.
           EOF
 
       - name: Package
