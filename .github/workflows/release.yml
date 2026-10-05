@@ -69,8 +69,9 @@ jobs:
         run: ./gates.sh
 
   # ---------------------------------------------------------------------
-  # Linux x86-64: compiler + every app. The only platform that fully
-  # builds today -- see the macOS job for why it alone ships apps.
+  # Linux x86-64 and Linux aarch64: compiler + every app, identically --
+  # see build-macos below for the one platform that still ships the
+  # compiler only, and why.
   # ---------------------------------------------------------------------
   build-linux-x86_64:
     name: Build — Linux x86-64
@@ -159,83 +160,19 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------
-  # macOS. Compiler only, for now -- read this before adding apps here.
-  #
-  # The compiler itself is pure Rust (Cargo.toml: zero dependencies, no
-  # `unsafe`), so `cargo build --release` on a native macOS runner is a
-  # plain cross-OS Rust build with nothing platform-specific to go wrong.
-  #
-  # The apps cannot be built on macOS AT ALL today, on EITHER architecture
-  # -- this is a bigger gap than "arm64 needs a context-switch port", and
-  # it is a research finding from reading this branch's own source and
-  # docs, not a guess:
-  #
-  #   - build.sh and every apps/*/build.sh unconditionally compile and link
-  #     runtime/reactor.c into every program (`spawn`/`Chan` always mean a
-  #     green thread now -- see build.sh's own comment).
-  #   - runtime/reactor.c unconditionally #includes <sys/epoll.h> and
-  #     <sys/eventfd.h> with no #ifdef guard -- both Linux-only; they do
-  #     not exist on macOS/BSD at all.
-  #   - docs/concurrency-decision.md says this in so many words: "Every
-  #     build line in the repository that links runtime/rt.c -- which is
-  #     all of them -- now also links runtime/scheduler.c, runtime/
-  #     reactor.c and runtime/ctx_switch_x86_64.S... The whole language is
-  #     therefore x86-64 [and Linux] only until Phase 4's aarch64 context
-  #     switch [and kqueue reactor] lands", and lists "kqueue (macOS/BSD)"
-  #     under "Phase 4 -- portability", not yet done.
-  #
-  # So macOS x86-64 apps need the SAME Phase 4 kqueue reactor that macOS
-  # arm64 apps need, on top of (for arm64 only) runtime/ctx_switch_aarch64.S.
-  # Enabling apps here is therefore not a one-line change even once aarch64
-  # lands -- it needs reactor.c to grow a kqueue backend first. Tracked by
-  # leaving no apps step in this job at all, rather than a disabled one that
-  # would look like it only needed uncommenting.
+  # Linux aarch64: the identical build-linux-x86_64 job, on GitHub's native
+  # (not emulated) ARM64 Linux runner -- `.github/workflows/aarch64.yml`
+  # already confirms the full gate suite, including every runtime phase
+  # test, passes natively here. This is the first time any app under
+  # apps/ has been built on this architecture specifically (gates.sh
+  # itself never touches apps/), so a failure here is new information,
+  # not a regression of something previously proven -- it is caught by
+  # this job alone, not by the `gates` precondition above.
   # ---------------------------------------------------------------------
-  build-macos:
-    name: Build — macOS (${{ matrix.target_name }})
+  build-linux-aarch64:
+    name: Build — Linux aarch64
     needs: gates
-    # TEMPORARILY DISABLED, whole job: GitHub Actions requires a matrix to
-    # define at least one vector -- an `include:` with every entry commented
-    # out is a schema-invalid matrix, not an empty-and-skipped one, and
-    # fails the entire workflow at validation time before any job runs
-    # (discovered the hard way: it showed up as an immediate, job-less
-    # "failure" on every push, including ones that don't even touch a tag).
-    # `if: false` is the actual way to disable a job while keeping the YAML
-    # valid. Re-enable (flip this to `if: true` or delete the line, restore
-    # the matrix below, add build-macos back to the release job's `needs:`)
-    # once a second macOS remote is available -- do not leave it off
-    # permanently, see the "last Intel image" note on the commented-out
-    # macos-13 entry below.
-    if: false
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Both entries TEMPORARILY DISABLED: GitHub's macos-13 (Intel)
-          # pool has had so little available capacity that a run queues
-          # indefinitely and the whole workflow never completes. Re-enable
-          # macos-x86_64 once a second macOS remote is available (self-
-          # hosted, or GitHub's queue easing) -- do not leave it off
-          # permanently, see the "last Intel image" note below.
-          # - target_name: macos-x86_64
-          #   runner: macos-13 # last Intel GitHub-hosted macOS image
-
-          # Apple Silicon. The *compiler* would build here today with zero
-          # changes (pure Rust) -- this entry is kept disabled anyway so
-          # that "macOS" in this workflow has one consistent meaning
-          # (compiler-only, both architectures together) instead of arm64
-          # quietly shipping before x86-64 apps do. To enable (once
-          # macos-x86_64 above is also re-enabled):
-          #   1. uncomment the two lines below
-          #   2. runtime/ctx_switch_aarch64.S and a kqueue reactor backend
-          #      both now exist (tonight's work) -- add an apps step here
-          #      matching build-linux-x86_64's, using macos-14's native
-          #      arm64 toolchain (no cross-compilation needed either way)
-          # - target_name: macos-arm64
-          #   runner: macos-14 # Apple Silicon GitHub-hosted image
-          - target_name: placeholder
-            runner: ubuntu-latest
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
 
@@ -246,49 +183,152 @@ jobs:
           . ./config.sh
           echo "LANG_NAME=$LANG_NAME" >> "$GITHUB_ENV"
           echo "LANG_BIN=$LANG_BIN" >> "$GITHUB_ENV"
+          echo "LANG_EXT=$LANG_EXT" >> "$GITHUB_ENV"
 
       - name: Build the compiler (release)
-        run: cargo build --release
+        run: |
+          cargo build --release
+          mkdir -p target/debug
+          cp "target/release/$LANG_BIN" "target/debug/$LANG_BIN"
 
-      - name: Package (compiler only -- see job comment above)
+      - name: Build every app
         run: |
           set -euo pipefail
-          OUT="dist/${LANG_NAME}-${{ matrix.target_name }}"
+          OUT="dist/${LANG_NAME}-linux-aarch64"
           mkdir -p "$OUT"
           cp "target/release/$LANG_BIN" "$OUT/$LANG_BIN"
+
+          ./build.sh apps/git/git.m31 -o "$OUT/ourgit"
+          ./apps/git/build-gitui.sh -o "$OUT/ourgitui"
+
+          OUT="$OUT/markdown" bash apps/markdown/build.sh
+
+          OUT="dist/${LANG_NAME}-linux-aarch64"
+          ./build.sh apps/tui/demo.m31 -o "$OUT/tuidemo"
+          ./build.sh apps/tui/browse.m31 -o "$OUT/tuibrowse"
+
+          ./build.sh apps/ssh/t_sha256.m31 -o "$OUT/ssh-sha256-selftest"
+          ./build.sh apps/ssh/t_chacha20poly1305.m31 -o "$OUT/ssh-chacha20poly1305-selftest"
+
           sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
-          ${LANG_NAME} — ${{ matrix.target_name }} release build
+          ${LANG_NAME} — Linux aarch64 release build
           Built from commit: ${GITHUB_SHA}
           Tag: ${GITHUB_REF_NAME}
 
-          This archive contains the COMPILER ONLY ($LANG_BIN). The apps
-          under apps/ are not built for macOS yet: every one of them links
-          runtime/reactor.c, which unconditionally uses epoll/eventfd
-          (Linux-only). A macOS (kqueue) reactor backend is Phase 4, not
-          yet implemented -- see docs/concurrency-decision.md. Once it
-          lands, this platform gets the same apps bundle Linux x86-64 does.
+          $LANG_BIN                        the compiler (./$LANG_BIN --emit-c foo.$LANG_EXT -o foo.c)
+          ourgit                       apps/git: read-only CLI (ourgit -log, -cat-file, ...)
+          ourgitui                     apps/git: interactive client (run inside a repo)
+          markdown                     apps/markdown: CommonMark subset to HTML
+          tuidemo, tuibrowse           apps/tui: the library's two standalone example programs
+          ssh-sha256-selftest          apps/ssh: SHA-256 self-check (Phase 1 crypto primitives only --
+          ssh-chacha20poly1305-selftest  no ssh client/server exists yet, see docs/ssh-decision.md)
           EOF
-          tar -C "dist/${LANG_NAME}-${{ matrix.target_name }}" -czf "${LANG_NAME}-${{ matrix.target_name }}.tar.gz" .
+
+      - name: Package
+        run: |
+          tar -C "dist/${LANG_NAME}-linux-aarch64" -czf "${LANG_NAME}-linux-aarch64.tar.gz" .
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.LANG_NAME }}-${{ matrix.target_name }}
-          path: ${{ env.LANG_NAME }}-${{ matrix.target_name }}.tar.gz
+          name: ${{ env.LANG_NAME }}-linux-aarch64
+          path: ${{ env.LANG_NAME }}-linux-aarch64.tar.gz
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------
+  # macOS, Apple Silicon only: compiler + every app, same shape as the two
+  # Linux jobs above.
+  #
+  # Re-enabled from a long-disabled, compiler-only placeholder: the two
+  # things that job's own comment named as blockers --
+  # runtime/ctx_switch_aarch64.S and a kqueue reactor backend
+  # (runtime/reactor_kqueue.c) -- both exist now, and
+  # `.github/workflows/macos.yml` already confirms the full gate suite
+  # passes natively on `macos-14` (Apple Silicon). This is still the
+  # FIRST time any app under apps/ has been built on macOS at all (gates.sh
+  # itself never touches apps/), so a failure here is new information, not
+  # a regression of something previously proven.
+  #
+  # `macos-13` (Intel) stays out on purpose, not an oversight: GitHub's
+  # macos-13 pool has had so little available capacity that a run queues
+  # indefinitely (the same reason `.github/workflows/macos.yml` dropped it
+  # from its own matrix) -- re-add it once a second macOS remote is
+  # available, matching that file's own note.
+  # ---------------------------------------------------------------------
+  build-macos:
+    name: Build — macOS (arm64)
+    needs: gates
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Load language identity from config.sh
+        run: |
+          . ./config.sh
+          echo "LANG_NAME=$LANG_NAME" >> "$GITHUB_ENV"
+          echo "LANG_BIN=$LANG_BIN" >> "$GITHUB_ENV"
+          echo "LANG_EXT=$LANG_EXT" >> "$GITHUB_ENV"
+
+      - name: Build the compiler (release)
+        run: |
+          cargo build --release
+          mkdir -p target/debug
+          cp "target/release/$LANG_BIN" "target/debug/$LANG_BIN"
+
+      - name: Build every app
+        run: |
+          set -euo pipefail
+          OUT="dist/${LANG_NAME}-macos-arm64"
+          mkdir -p "$OUT"
+          cp "target/release/$LANG_BIN" "$OUT/$LANG_BIN"
+
+          ./build.sh apps/git/git.m31 -o "$OUT/ourgit"
+          ./apps/git/build-gitui.sh -o "$OUT/ourgitui"
+
+          OUT="$OUT/markdown" bash apps/markdown/build.sh
+
+          OUT="dist/${LANG_NAME}-macos-arm64"
+          ./build.sh apps/tui/demo.m31 -o "$OUT/tuidemo"
+          ./build.sh apps/tui/browse.m31 -o "$OUT/tuibrowse"
+
+          ./build.sh apps/ssh/t_sha256.m31 -o "$OUT/ssh-sha256-selftest"
+          ./build.sh apps/ssh/t_chacha20poly1305.m31 -o "$OUT/ssh-chacha20poly1305-selftest"
+
+          sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
+          ${LANG_NAME} — macOS arm64 (Apple Silicon) release build
+          Built from commit: ${GITHUB_SHA}
+          Tag: ${GITHUB_REF_NAME}
+
+          $LANG_BIN                        the compiler (./$LANG_BIN --emit-c foo.$LANG_EXT -o foo.c)
+          ourgit                       apps/git: read-only CLI (ourgit -log, -cat-file, ...)
+          ourgitui                     apps/git: interactive client (run inside a repo)
+          markdown                     apps/markdown: CommonMark subset to HTML
+          tuidemo, tuibrowse           apps/tui: the library's two standalone example programs
+          ssh-sha256-selftest          apps/ssh: SHA-256 self-check (Phase 1 crypto primitives only --
+          ssh-chacha20poly1305-selftest  no ssh client/server exists yet, see docs/ssh-decision.md)
+          EOF
+
+      - name: Package
+        run: |
+          tar -C "dist/${LANG_NAME}-macos-arm64" -czf "${LANG_NAME}-macos-arm64.tar.gz" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.LANG_NAME }}-macos-arm64
+          path: ${{ env.LANG_NAME }}-macos-arm64.tar.gz
           if-no-files-found: error
 
   # ---------------------------------------------------------------------
   # Attach every platform's tarball to the GitHub Release for this tag.
-  #
-  # build-macos is NOT in `needs` right now: it's `if: false` (see its own
-  # comment) while disabled, and a job's default `if: success()` treats a
-  # skipped need as unmet, which would skip this job forever too. Add
-  # build-macos back to `needs` in the same commit that re-enables it.
   # ---------------------------------------------------------------------
   release:
     name: Publish release
     needs:
       - gates
       - build-linux-x86_64
+      - build-linux-aarch64
+      - build-macos
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
