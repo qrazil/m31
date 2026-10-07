@@ -15,6 +15,7 @@ mod fmt;
 mod hoist;
 mod ir;
 mod lexer;
+mod lint;
 mod lower;
 mod modules;
 mod mono;
@@ -30,11 +31,16 @@ use std::process::ExitCode;
 fn usage() -> ExitCode {
     eprintln!("usage: m31c --emit-c|--emit-ir|fmt <source> [-o <output>]");
     eprintln!("       m31c fmt --check <source>   exit 1 if it is not formatted");
+    eprintln!("       {}", lint::USAGE);
     ExitCode::from(2)
 }
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    if args.first().map(String::as_str) == Some("lint") {
+        return lint::main(&args[1..]);
+    }
 
     let mut mode: Option<&str> = None;
     let mut check = false;
@@ -58,6 +64,7 @@ fn main() -> ExitCode {
             "--help" => {
                 println!("usage: m31c --emit-c|--emit-ir|fmt <source> [-o <output>]");
                 println!("       m31c fmt --check <source>");
+                println!("       {}", lint::USAGE);
                 return ExitCode::SUCCESS;
             }
             other if other.starts_with('-') => {
