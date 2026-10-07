@@ -1,0 +1,529 @@
+// A strict DER reader (ITU-T X.690, the Distinguished Encoding Rules): the
+// encoding every X.509 certificate (RFC 5280) is written in. Built for
+// `lib/x509.m31`, usable on its own.
+//
+// API
+// ---
+//   der.parse(data)               -> Result<Element, Error>      one element, nothing after it
+//   der.read_at(data, at, limit)  -> Result<Element, Error>      one element inside a window
+//   der.validate(data, max_depth) -> Result<Element, Error>      the whole tree, iteratively
+//   e.children()                  -> Result<List<Element>, Error>
+//   e.integer_bytes() / e.unsigned_magnitude() / e.integer_value()
+//   e.boolean() / e.bit_string() / e.octet_string() / e.oid() / e.time()
+//   e.raw() / e.content() / e.is_constructed() / e.is_null()
+//
+// An `Element` is a *view*: the buffer it was read from plus four offsets.
+// Reading a tree copies nothing until `raw()` or `content()` asks for bytes,
+// which is what lets `x509` keep the exact `tbsCertificate` bytes a
+// signature was made over.
+//
+// --- what "strict" refuses ---------------------------------------------------
+//
+// A certificate's signature covers the bytes as sent, so a reader that
+// accepts two encodings of one value can be handed a different value than
+// the signer saw. Everything BER allows and DER does not is an `Error`:
+//
+//   - indefinite length (`0x80`) and the reserved length octet `0xFF`;
+//   - a length that is not minimal: long form for a value under 128, or a
+//     long form with a leading zero octet;
+//   - a high tag number (`0x1F` in the low five bits) -- X.509 has none;
+//   - a content length that runs past the buffer, or past its parent;
+//   - a constructed string or integer, or a primitive SEQUENCE/SET;
+//   - bytes left over after the one element `parse` was asked for;
+//   - an INTEGER with a redundant leading `0x00`/`0xFF`;
+//   - a BOOLEAN that is neither `0x00` nor `0xFF`;
+//   - a BIT STRING whose unused bits are not zero, or an OID that is empty,
+//     has a non-minimal arc, or ends inside one;
+//   - a time that is not `YYMMDDHHMMSSZ` / `YYYYMMDDHHMMSSZ` exactly.
+//
+// Nothing here traps on its input: a bad certificate is the world, not a
+// bug in the program (`docs/errors-decision.md`). Nesting is bounded
+// explicitly (`validate`) and never walked recursively, so a hostile
+// 10,000-deep SEQUENCE cannot exhaust the stack.
+//
+// SET OF ordering (X.690 §11.6) is not checked: no field this library reads
+// depends on it.
+
+import date;
+
+pub const int TAG_BOOLEAN = 0x01;
+pub const int TAG_INTEGER = 0x02;
+pub const int TAG_BIT_STRING = 0x03;
+pub const int TAG_OCTET_STRING = 0x04;
+pub const int TAG_NULL = 0x05;
+pub const int TAG_OID = 0x06;
+pub const int TAG_UTF8_STRING = 0x0C;
+pub const int TAG_PRINTABLE_STRING = 0x13;
+pub const int TAG_IA5_STRING = 0x16;
+pub const int TAG_UTC_TIME = 0x17;
+pub const int TAG_GENERALIZED_TIME = 0x18;
+pub const int TAG_SEQUENCE = 0x30;
+pub const int TAG_SET = 0x31;
+/// The context-specific class bits: `[n]` primitive is `CONTEXT_PRIMITIVE |
+/// n`, `[n]` constructed is `CONTEXT_CONSTRUCTED | n`.
+pub const int CONTEXT_PRIMITIVE = 0x80;
+pub const int CONTEXT_CONSTRUCTED = 0xA0;
+/// The deepest nesting `x509` accepts. A certificate nests about eight
+/// levels (Certificate > tbs > extensions > extension > value > ...), so 32
+/// is generous and still far from any stack limit.
+pub const int MAX_NESTING_DEPTH = 32;
+const int CONSTRUCTED_BIT = 0x20;
+const int CLASS_MASK = 0xC0;
+const int NUMBER_MASK = 0x1F;
+const int LONGEST_LENGTH_OCTETS = 7;
+const int LONGEST_ARC_OCTETS = 8;
+const int LONGEST_INTEGER_OCTETS = 7;
+
+/// Why a byte string is not valid DER, or not the type that was asked for.
+/// Payload-free (`docs/errors-decision.md` §4).
+pub enum Error {
+    /// An element's header or content runs past the end of its buffer (or of
+    /// the constructed element that holds it).
+    Truncated;
+    /// A length of `0x80`: BER's "ends at an end-of-contents marker".
+    IndefiniteLength;
+    /// A length written in more octets than it needs.
+    NonMinimalLength;
+    /// A reserved length octet, or a length too large to be a real buffer.
+    BadLength;
+    /// A tag number of 31 or more, which needs the multi-octet tag form.
+    HighTagNumber;
+    /// Bytes remain after the one element `parse` was asked for.
+    TrailingData;
+    /// Constructed elements nest deeper than the bound given.
+    NestingTooDeep;
+    /// The tag is not the type asked for, or its constructed bit is wrong
+    /// for it.
+    BadTag;
+    /// An INTEGER with a redundant leading `0x00` or `0xFF`, or no octets.
+    NonMinimalInteger;
+    /// An INTEGER that must be non-negative and is not.
+    NegativeInteger;
+    /// An INTEGER that does not fit this reader's `int`.
+    IntegerTooLarge;
+    /// A BOOLEAN that is not exactly one octet of `0x00` or `0xFF`.
+    BadBoolean;
+    /// A BIT STRING with no unused-bits octet, more than seven unused bits,
+    /// or non-zero unused bits.
+    BadBitString;
+    /// An OBJECT IDENTIFIER that is empty, non-minimal, too large or cut off.
+    BadOid;
+    /// A UTCTime or GeneralizedTime that is not the exact DER form, or not a
+    /// real calendar time.
+    BadTime;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case Truncated: {
+            return "an element runs past the end of its buffer";
+        }
+        case IndefiniteLength: {
+            return "indefinite length is BER, not DER";
+        }
+        case NonMinimalLength: {
+            return "a length is not written in its minimal form";
+        }
+        case BadLength: {
+            return "a length octet is reserved or the length is absurd";
+        }
+        case HighTagNumber: {
+            return "multi-octet tag numbers are not supported";
+        }
+        case TrailingData: {
+            return "bytes remain after the element";
+        }
+        case NestingTooDeep: {
+            return "elements nest deeper than the bound";
+        }
+        case BadTag: {
+            return "an element's tag is not the type expected";
+        }
+        case NonMinimalInteger: {
+            return "an INTEGER has a redundant leading octet";
+        }
+        case NegativeInteger: {
+            return "an INTEGER is negative where it must not be";
+        }
+        case IntegerTooLarge: {
+            return "an INTEGER does not fit in 56 bits";
+        }
+        case BadBoolean: {
+            return "a BOOLEAN is not 0x00 or 0xFF";
+        }
+        case BadBitString: {
+            return "a BIT STRING's unused-bits octet is wrong";
+        }
+        case BadOid: {
+            return "an OBJECT IDENTIFIER is malformed";
+        }
+        case BadTime: {
+            return "a UTCTime or GeneralizedTime is malformed";
+        }
+    }
+}
+
+/// One DER element: the buffer, and where in it the element sits. `offset`
+/// is the first octet of the tag, `body_start` the first octet of the
+/// content, `stop` one past the last.
+pub type Element {
+    pub bytes source;
+    pub int tag;
+    pub int offset;
+    pub int body_start;
+    pub int stop;
+}
+
+/// The whole element as encoded: tag, length and content, verbatim.
+pub bytes Element.raw() {
+    return source.substr(offset, stop);
+}
+
+/// The content octets alone.
+pub bytes Element.content() {
+    return source.substr(body_start, stop);
+}
+
+pub bool Element.is_constructed() {
+    return (tag & CONSTRUCTED_BIT) != 0;
+}
+
+pub bool Element.is_null() {
+    return tag == TAG_NULL && body_start == stop;
+}
+
+/// The elements directly inside a constructed element, in order, each read
+/// strictly and none allowed to run past its parent.
+pub Result<List<Element>, Error> Element.children() {
+    if (!is_constructed()) {
+        return Result<List<Element>, Error>.Err(Error.BadTag);
+    }
+    List<Element> found = [];
+    int cursor = body_start;
+    while (cursor < stop) {
+        Element child = read_at(source, cursor, stop)?;
+        found.push(child);
+        cursor = child.stop;
+    }
+    return Result<List<Element>, Error>.Ok(found);
+}
+
+/// An INTEGER's content as encoded: big-endian two's complement, minimal.
+pub Result<bytes, Error> Element.integer_bytes() {
+    if (tag != TAG_INTEGER) {
+        return Result<bytes, Error>.Err(Error.BadTag);
+    }
+    bytes body = content();
+    if (body.size() == 0) {
+        return Result<bytes, Error>.Err(Error.NonMinimalInteger);
+    }
+    if (body.size() > 1) {
+        bool redundant_zero = body[0] == 0x00 && (body[1] & 0x80) == 0;
+        bool redundant_ones = body[0] == 0xFF && (body[1] & 0x80) != 0;
+        if (redundant_zero || redundant_ones) {
+            return Result<bytes, Error>.Err(Error.NonMinimalInteger);
+        }
+    }
+    return Result<bytes, Error>.Ok(body);
+}
+
+/// A non-negative INTEGER's magnitude: big-endian, with the one `0x00`
+/// that keeps the top bit clear removed. An RSA modulus is this.
+pub Result<bytes, Error> Element.unsigned_magnitude() {
+    bytes body = integer_bytes()?;
+    if ((body[0] & 0x80) != 0) {
+        return Result<bytes, Error>.Err(Error.NegativeInteger);
+    }
+    if (body.size() > 1 && body[0] == 0x00) {
+        return Result<bytes, Error>.Ok(body.substr(1, body.size()));
+    }
+    return Result<bytes, Error>.Ok(body);
+}
+
+/// A non-negative INTEGER of at most seven magnitude octets, as an `int`.
+pub Result<int, Error> Element.integer_value() {
+    bytes magnitude = unsigned_magnitude()?;
+    if (magnitude.size() > LONGEST_INTEGER_OCTETS) {
+        return Result<int, Error>.Err(Error.IntegerTooLarge);
+    }
+    int total = 0;
+    for (int octet in magnitude) {
+        total = total * 256 + octet;
+    }
+    return Result<int, Error>.Ok(total);
+}
+
+pub Result<bool, Error> Element.boolean() {
+    if (tag != TAG_BOOLEAN) {
+        return Result<bool, Error>.Err(Error.BadTag);
+    }
+    if (stop - body_start != 1) {
+        return Result<bool, Error>.Err(Error.BadBoolean);
+    }
+    int octet = source[body_start];
+    if (octet == 0x00) {
+        return Result<bool, Error>.Ok(false);
+    }
+    if (octet == 0xFF) {
+        return Result<bool, Error>.Ok(true);
+    }
+    return Result<bool, Error>.Err(Error.BadBoolean);
+}
+
+pub Result<BitString, Error> Element.bit_string() {
+    if (tag != TAG_BIT_STRING) {
+        return Result<BitString, Error>.Err(Error.BadTag);
+    }
+    if (stop == body_start) {
+        return Result<BitString, Error>.Err(Error.BadBitString);
+    }
+    int unused = source[body_start];
+    if (unused > 7) {
+        return Result<BitString, Error>.Err(Error.BadBitString);
+    }
+    bytes body = source.substr(body_start + 1, stop);
+    if (unused > 0) {
+        if (body.size() == 0) {
+            return Result<BitString, Error>.Err(Error.BadBitString);
+        }
+        int padding_mask = (1 << unused) - 1;
+        if ((body[body.size() - 1] & padding_mask) != 0) {
+            return Result<BitString, Error>.Err(Error.BadBitString);
+        }
+    }
+    return Result<BitString, Error>.Ok(BitString(body, unused));
+}
+
+pub Result<bytes, Error> Element.octet_string() {
+    if (tag != TAG_OCTET_STRING) {
+        return Result<bytes, Error>.Err(Error.BadTag);
+    }
+    return Result<bytes, Error>.Ok(content());
+}
+
+/// An OBJECT IDENTIFIER as dotted decimal text, `"1.2.840.113549.1.1.11"`.
+/// Each arc is at most eight base-128 octets (56 bits), which no assigned
+/// OID approaches.
+pub Result<str, Error> Element.oid() {
+    if (tag != TAG_OID) {
+        return Result<str, Error>.Err(Error.BadTag);
+    }
+    bytes body = content();
+    if (body.size() == 0) {
+        return Result<str, Error>.Err(Error.BadOid);
+    }
+    str dotted = "";
+    int arc = 0;
+    int arc_octets = 0;
+    bool at_first_arc = true;
+    for (int octet in body) {
+        if (arc_octets == 0 && octet == 0x80) {
+            return Result<str, Error>.Err(Error.BadOid);
+        }
+        arc_octets = arc_octets + 1;
+        if (arc_octets > LONGEST_ARC_OCTETS) {
+            return Result<str, Error>.Err(Error.BadOid);
+        }
+        arc = arc * 128 + (octet & 0x7F);
+        if ((octet & 0x80) == 0) {
+            if (at_first_arc) {
+                if (arc < 40) {
+                    dotted = "0." + arc.to_str();
+                } else if (arc < 80) {
+                    dotted = "1." + (arc - 40).to_str();
+                } else {
+                    dotted = "2." + (arc - 80).to_str();
+                }
+                at_first_arc = false;
+            } else {
+                dotted = dotted + "." + arc.to_str();
+            }
+            arc = 0;
+            arc_octets = 0;
+        }
+    }
+    if (arc_octets != 0) {
+        return Result<str, Error>.Err(Error.BadOid);
+    }
+    return Result<str, Error>.Ok(dotted);
+}
+
+/// A UTCTime (`YYMMDDHHMMSSZ`, years 1950 to 2049) or GeneralizedTime
+/// (`YYYYMMDDHHMMSSZ`) as epoch seconds. DER's form only: seconds present,
+/// no fraction, no offset, `Z` last; a leap second (`60`) is refused.
+pub Result<int, Error> Element.time() {
+    bytes text = content();
+    int year = 0;
+    int cursor = 0;
+    if (tag == TAG_UTC_TIME) {
+        if (text.size() != 13) {
+            return Result<int, Error>.Err(Error.BadTime);
+        }
+        int short_year = two_digits(text, 0);
+        if (short_year < 0) {
+            return Result<int, Error>.Err(Error.BadTime);
+        }
+        if (short_year >= 50) {
+            year = 1900 + short_year;
+        } else {
+            year = 2000 + short_year;
+        }
+        cursor = 2;
+    } else if (tag == TAG_GENERALIZED_TIME) {
+        if (text.size() != 15) {
+            return Result<int, Error>.Err(Error.BadTime);
+        }
+        int century = two_digits(text, 0);
+        int year_in_century = two_digits(text, 2);
+        if (century < 0 || year_in_century < 0) {
+            return Result<int, Error>.Err(Error.BadTime);
+        }
+        year = century * 100 + year_in_century;
+        cursor = 4;
+    } else {
+        return Result<int, Error>.Err(Error.BadTag);
+    }
+    int month = two_digits(text, cursor);
+    int day = two_digits(text, cursor + 2);
+    int hour = two_digits(text, cursor + 4);
+    int minute = two_digits(text, cursor + 6);
+    int second = two_digits(text, cursor + 8);
+    if (month < 0 || day < 0 || hour < 0 || minute < 0 || second < 0) {
+        return Result<int, Error>.Err(Error.BadTime);
+    }
+    if (text[cursor + 10] != 'Z' || hour > 23 || minute > 59 || second > 59) {
+        return Result<int, Error>.Err(Error.BadTime);
+    }
+    match (date.epoch(year, month, day, hour: hour, minute: minute, second: second)) {
+        case Ok(int seconds): {
+            return Result<int, Error>.Ok(seconds);
+        }
+        case Err(date.Error calendar_error): {
+            return Result<int, Error>.Err(Error.BadTime);
+        }
+    }
+}
+
+/// A BIT STRING's bits, as whole octets plus how many trailing bits of the
+/// last octet are padding.
+pub type BitString {
+    pub bytes octets;
+    pub int unused_bits;
+}
+
+/// The one element that starts at `position` and ends at or before `limit`.
+/// `limit` is an offset into `data`, and bounds the element's content: this
+/// is how a child is kept inside its parent.
+///
+/// Traps if the window itself is not inside `data`: that is a caller's
+/// bug. Everything about the bytes is an `Error`.
+pub Result<Element, Error> read_at(bytes data, int position, int limit) {
+    if (position < 0 || limit > data.size() || position > limit) {
+        trap("der.read_at: the window is not inside the buffer");
+    }
+    if (position + 2 > limit) {
+        return Result<Element, Error>.Err(Error.Truncated);
+    }
+    int tag_byte = data[position];
+    int class_bits = tag_byte & CLASS_MASK;
+    int tag_number = tag_byte & NUMBER_MASK;
+    bool constructed = (tag_byte & CONSTRUCTED_BIT) != 0;
+    if (tag_number == NUMBER_MASK) {
+        return Result<Element, Error>.Err(Error.HighTagNumber);
+    }
+    if (class_bits == 0) {
+        bool is_collection = tag_number == 0x10 || tag_number == 0x11;
+        if (is_collection != constructed) {
+            return Result<Element, Error>.Err(Error.BadTag);
+        }
+    }
+    int first_length = data[position + 1];
+    int content_size = 0;
+    int content_start = position + 2;
+    if (first_length == 0x80) {
+        return Result<Element, Error>.Err(Error.IndefiniteLength);
+    }
+    if (first_length == 0xFF) {
+        return Result<Element, Error>.Err(Error.BadLength);
+    }
+    if (first_length < 0x80) {
+        content_size = first_length;
+    } else {
+        int octet_count = first_length & 0x7F;
+        if (position + 2 + octet_count > limit) {
+            return Result<Element, Error>.Err(Error.Truncated);
+        }
+        if (data[position + 2] == 0) {
+            return Result<Element, Error>.Err(Error.NonMinimalLength);
+        }
+        if (octet_count > LONGEST_LENGTH_OCTETS) {
+            return Result<Element, Error>.Err(Error.BadLength);
+        }
+        for (int i in 0 .. octet_count) {
+            content_size = content_size * 256 + data[position + 2 + i];
+        }
+        if (content_size < 0x80) {
+            return Result<Element, Error>.Err(Error.NonMinimalLength);
+        }
+        content_start = position + 2 + octet_count;
+    }
+    if (content_size > limit - content_start) {
+        return Result<Element, Error>.Err(Error.Truncated);
+    }
+    return Result<Element, Error>.Ok(Element(data, tag_byte, position, content_start, content_start + content_size));
+}
+
+/// `data` as exactly one element: an error if anything follows it.
+pub Result<Element, Error> parse(bytes data) {
+    Element element = read_at(data, 0, data.size())?;
+    if (element.stop != data.size()) {
+        return Result<Element, Error>.Err(Error.TrailingData);
+    }
+    return Result<Element, Error>.Ok(element);
+}
+
+/// `data` as one element, and every element inside it checked too, down to
+/// `max_depth` levels (the root is level 1). Walked with an explicit stack,
+/// not recursion, so depth costs memory proportional to the bound and not to
+/// the input.
+pub Result<Element, Error> validate(bytes data, int max_depth) {
+    Element root = parse(data)?;
+    if (!root.is_constructed()) {
+        return Result<Element, Error>.Ok(root);
+    }
+    if (max_depth < 1) {
+        return Result<Element, Error>.Err(Error.NestingTooDeep);
+    }
+    List<Element> parents = [root];
+    List<int> cursors = [root.body_start];
+    while (parents.size() > 0) {
+        int top = parents.size() - 1;
+        Element parent = parents[top];
+        int cursor = cursors[top];
+        if (cursor >= parent.stop) {
+            parents.pop();
+            cursors.pop();
+            continue;
+        }
+        Element child = read_at(data, cursor, parent.stop)?;
+        cursors[top] = child.stop;
+        if (child.is_constructed()) {
+            if (parents.size() >= max_depth) {
+                return Result<Element, Error>.Err(Error.NestingTooDeep);
+            }
+            parents.push(child);
+            cursors.push(child.body_start);
+        }
+    }
+    return Result<Element, Error>.Ok(root);
+}
+
+// Two ASCII digits at `first` as 0..99, or -1.
+int two_digits(bytes text, int first) {
+    int tens = text[first] - 48;
+    int units = text[first + 1] - 48;
+    if (tens < 0 || tens > 9 || units < 0 || units > 9) {
+        return -1;
+    }
+    return tens * 10 + units;
+}

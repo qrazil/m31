@@ -1,0 +1,503 @@
+// Hand-built vectors for `lib/der.m31`. Every byte string below is written
+// out from X.690, and every expected epoch comes from Python's
+// `calendar.timegm`, so nothing is checked against the reader itself.
+//
+//   der_selfcheck
+//
+// Prints one line per failure and a final `N checks, M failures`; the
+// exit status is the failure count (a trap is a failure too).
+import der;
+import os;
+
+type Tally {
+    int passed = 0;
+    int failed = 0;
+}
+
+void Tally.expect(str label, bool holds) {
+    if (holds) {
+        passed = passed + 1;
+    } else {
+        failed = failed + 1;
+        print("FAIL " + label);
+    }
+}
+
+Tally results = Tally();
+
+// A DER header for `size` content octets, in its one minimal form.
+bytes header(int tag_byte, int size) {
+    bytes head = [tag_byte];
+    if (size < 0x80) {
+        head.push(size);
+    } else if (size < 0x100) {
+        head.push(0x81);
+        head.push(size);
+    } else {
+        head.push(0x82);
+        head.push(size / 256);
+        head.push(size % 256);
+    }
+    return head;
+}
+
+bytes wrap(int tag_byte, bytes inner) {
+    bytes whole = header(tag_byte, inner.size());
+    whole.extend(inner);
+    return whole;
+}
+
+bytes nested_sequences(int levels) {
+    bytes inner = [];
+    for (int level in 0 .. levels) {
+        inner = wrap(0x30, inner);
+    }
+    return inner;
+}
+
+bytes time_element(int tag_byte, str text) {
+    return wrap(tag_byte, text.to_bytes());
+}
+
+void parse_fails(Tally tally, str label, bytes data, der.Error wanted) {
+    match (der.parse(data)) {
+        case Ok(der.Element element): {
+            tally.expect(label + ": parsed, wanted " + wanted.to_str(), false);
+        }
+        case Err(der.Error cause): {
+            tally.expect(label + ": got " + cause.to_str() + ", wanted " + wanted.to_str(), cause.to_str() == wanted.to_str());
+        }
+    }
+}
+
+void parses(Tally tally, str label, bytes data) {
+    match (der.parse(data)) {
+        case Ok(der.Element element): {
+            tally.expect(label, true);
+        }
+        case Err(der.Error cause): {
+            tally.expect(label + ": " + cause.to_str(), false);
+        }
+    }
+}
+
+void validate_fails(Tally tally, str label, bytes data, int depth, der.Error wanted) {
+    match (der.validate(data, depth)) {
+        case Ok(der.Element element): {
+            tally.expect(label + ": validated, wanted " + wanted.to_str(), false);
+        }
+        case Err(der.Error cause): {
+            tally.expect(label + ": got " + cause.to_str() + ", wanted " + wanted.to_str(), cause.to_str() == wanted.to_str());
+        }
+    }
+}
+
+void validates(Tally tally, str label, bytes data, int depth) {
+    match (der.validate(data, depth)) {
+        case Ok(der.Element element): {
+            tally.expect(label, true);
+        }
+        case Err(der.Error cause): {
+            tally.expect(label + ": " + cause.to_str(), false);
+        }
+    }
+}
+
+der.Element element_of(bytes data) {
+    match (der.parse(data)) {
+        case Ok(der.Element element): {
+            return element;
+        }
+        case Err(der.Error cause): {
+            trap("selfcheck vector does not parse: " + cause.to_str());
+        }
+    }
+}
+
+void integer_is(Tally tally, str label, bytes data, int wanted) {
+    match (element_of(data).integer_value()) {
+        case Ok(int value): {
+            tally.expect(label + ": got " + value.to_str(), value == wanted);
+        }
+        case Err(der.Error cause): {
+            tally.expect(label + ": " + cause.to_str(), false);
+        }
+    }
+}
+
+void integer_fails(Tally tally, str label, bytes data, der.Error wanted) {
+    match (element_of(data).integer_value()) {
+        case Ok(int value): {
+            tally.expect(label + ": read " + value.to_str() + ", wanted " + wanted.to_str(), false);
+        }
+        case Err(der.Error cause): {
+            tally.expect(label + ": got " + cause.to_str() + ", wanted " + wanted.to_str(), cause.to_str() == wanted.to_str());
+        }
+    }
+}
+
+void oid_is(Tally tally, str label, bytes data, str wanted) {
+    match (element_of(data).oid()) {
+        case Ok(str dotted): {
+            tally.expect(label + ": got " + dotted, dotted == wanted);
+        }
+        case Err(der.Error cause): {
+            tally.expect(label + ": " + cause.to_str(), false);
+        }
+    }
+}
+
+void oid_fails(Tally tally, str label, bytes data) {
+    match (element_of(data).oid()) {
+        case Ok(str dotted): {
+            tally.expect(label + ": read " + dotted, false);
+        }
+        case Err(der.Error cause): {
+            tally.expect(label + ": got " + cause.to_str(), cause.to_str() == der.Error.BadOid.to_str());
+        }
+    }
+}
+
+void time_is(Tally tally, str label, bytes data, int wanted) {
+    match (element_of(data).time()) {
+        case Ok(int seconds): {
+            tally.expect(label + ": got " + seconds.to_str(), seconds == wanted);
+        }
+        case Err(der.Error cause): {
+            tally.expect(label + ": " + cause.to_str(), false);
+        }
+    }
+}
+
+void time_fails(Tally tally, str label, bytes data) {
+    match (element_of(data).time()) {
+        case Ok(int seconds): {
+            tally.expect(label + ": read " + seconds.to_str(), false);
+        }
+        case Err(der.Error cause): {
+            tally.expect(label + ": got " + cause.to_str(), cause.to_str() == der.Error.BadTime.to_str());
+        }
+    }
+}
+
+void bit_string_is(Tally tally, str label, bytes data, bytes wanted_octets, int wanted_unused) {
+    match (element_of(data).bit_string()) {
+        case Ok(der.BitString bits): {
+            tally.expect(label, bits.octets == wanted_octets && bits.unused_bits == wanted_unused);
+        }
+        case Err(der.Error cause): {
+            tally.expect(label + ": " + cause.to_str(), false);
+        }
+    }
+}
+
+void bit_string_fails(Tally tally, str label, bytes data) {
+    match (element_of(data).bit_string()) {
+        case Ok(der.BitString bits): {
+            tally.expect(label + ": read it", false);
+        }
+        case Err(der.Error cause): {
+            tally.expect(label + ": got " + cause.to_str(), cause.to_str() == der.Error.BadBitString.to_str());
+        }
+    }
+}
+
+void boolean_is(Tally tally, str label, bytes data, bool wanted) {
+    match (element_of(data).boolean()) {
+        case Ok(bool value): {
+            tally.expect(label, value == wanted);
+        }
+        case Err(der.Error cause): {
+            tally.expect(label + ": " + cause.to_str(), false);
+        }
+    }
+}
+
+void boolean_fails(Tally tally, str label, bytes data) {
+    match (element_of(data).boolean()) {
+        case Ok(bool value): {
+            tally.expect(label + ": read it", false);
+        }
+        case Err(der.Error cause): {
+            tally.expect(label + ": got " + cause.to_str(), cause.to_str() == der.Error.BadBoolean.to_str());
+        }
+    }
+}
+
+// ---- framing: what is not DER ------------------------------------------------
+
+void check_framing(Tally tally) {
+    parse_fails(tally, "empty input", [], der.Error.Truncated);
+    parse_fails(tally, "one octet", [0x30], der.Error.Truncated);
+    parse_fails(tally, "header only, content missing", [0x04, 0x01], der.Error.Truncated);
+    parse_fails(tally, "content cut short", [0x04, 0x05, 1, 2, 3], der.Error.Truncated);
+    parse_fails(tally, "long form header cut off", [0x04, 0x82, 0x01], der.Error.Truncated);
+    parse_fails(tally, "long form, content missing", [0x04, 0x81, 0x80, 1, 2], der.Error.Truncated);
+    parse_fails(tally, "BER indefinite length", [0x30, 0x80, 0x04, 0x00, 0x00, 0x00], der.Error.IndefiniteLength);
+    parse_fails(tally, "indefinite length on a primitive", [0x04, 0x80, 1, 0, 0], der.Error.IndefiniteLength);
+    parse_fails(tally, "long form for a short length", [0x04, 0x81, 0x05, 1, 2, 3, 4, 5], der.Error.NonMinimalLength);
+    parse_fails(tally, "long form for 127", [0x04, 0x81, 0x7F], der.Error.NonMinimalLength);
+    parse_fails(tally, "leading zero length octet", [0x04, 0x82, 0x00, 0x80], der.Error.NonMinimalLength);
+    parse_fails(tally, "leading zero, then big", [0x04, 0x83, 0x00, 0x01, 0x00], der.Error.NonMinimalLength);
+    parse_fails(tally, "two octets for 0", [0x04, 0x82, 0x00, 0x00], der.Error.NonMinimalLength);
+    parse_fails(tally, "zero length octets claimed with a value", [0x04, 0x81, 0x00], der.Error.NonMinimalLength);
+    parse_fails(tally, "length octet 0xFF", [0x04, 0xFF, 0x01], der.Error.BadLength);
+    parse_fails(tally, "eight length octets", [0x04, 0x88, 1, 0, 0, 0, 0, 0, 0, 0, 0], der.Error.BadLength);
+    parse_fails(tally, "nine length octets", [0x04, 0x89, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0], der.Error.BadLength);
+    parse_fails(tally, "length 2^31 in a tiny buffer", [0x04, 0x84, 0x80, 0x00, 0x00, 0x00, 1, 2], der.Error.Truncated);
+    parse_fails(tally, "length 2^56 - 1 in a tiny buffer", [0x04, 0x87, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 1], der.Error.Truncated);
+    parse_fails(tally, "length 2^56 does not wrap", [0x04, 0x87, 0x01, 0, 0, 0, 0, 0, 0, 1], der.Error.Truncated);
+    parse_fails(tally, "length one past the buffer", [0x04, 0x03, 1, 2], der.Error.Truncated);
+    parse_fails(tally, "high tag number", [0x1F, 0x81, 0x00, 0x00], der.Error.HighTagNumber);
+    parse_fails(tally, "high tag number, context class", [0xBF, 0x21, 0x00], der.Error.HighTagNumber);
+    parse_fails(tally, "SEQUENCE without the constructed bit", [0x10, 0x00], der.Error.BadTag);
+    parse_fails(tally, "SET without the constructed bit", [0x11, 0x00], der.Error.BadTag);
+    parse_fails(tally, "constructed INTEGER", [0x22, 0x00], der.Error.BadTag);
+    parse_fails(tally, "constructed OCTET STRING", [0x24, 0x00], der.Error.BadTag);
+    parse_fails(tally, "constructed BIT STRING", [0x23, 0x00], der.Error.BadTag);
+    parse_fails(tally, "constructed OID", [0x26, 0x00], der.Error.BadTag);
+    parse_fails(tally, "trailing octet", [0x05, 0x00, 0x00], der.Error.TrailingData);
+    parse_fails(tally, "two elements", [0x05, 0x00, 0x05, 0x00], der.Error.TrailingData);
+    parse_fails(tally, "trailing garbage after a SEQUENCE", [0x30, 0x03, 0x02, 0x01, 0x05, 0xFF], der.Error.TrailingData);
+    parses(tally, "NULL", [0x05, 0x00]);
+    parses(tally, "empty SEQUENCE", [0x30, 0x00]);
+    parses(tally, "empty SET", [0x31, 0x00]);
+    parses(tally, "context primitive", [0x80, 0x01, 0x41]);
+    parses(tally, "context constructed", [0xA0, 0x03, 0x02, 0x01, 0x05]);
+    parses(tally, "application class, primitive", [0x41, 0x01, 0x00]);
+    parses(tally, "length 128, minimal long form", wrap(0x04, [0; 128]));
+    parses(tally, "length 255", wrap(0x04, [0; 255]));
+    parses(tally, "length 256", wrap(0x04, [0; 256]));
+    parses(tally, "length 65535", wrap(0x04, [0; 65535]));
+    bytes with_inner_garbage = [0x30, 0x04, 0x02, 0x01, 0x05, 0xFF];
+    validate_fails(tally, "a child cut off inside a SEQUENCE", with_inner_garbage, 8, der.Error.Truncated);
+    validate_fails(tally, "a child runs past its parent but not the buffer", [0x30, 0x04, 0x04, 0x03, 0x01, 0x02], 8, der.Error.Truncated);
+    validate_fails(tally, "indefinite length deep inside", [0x30, 0x04, 0x30, 0x80, 0x00, 0x00], 8, der.Error.IndefiniteLength);
+    validate_fails(tally, "non-minimal length deep inside", [0x30, 0x04, 0x04, 0x81, 0x01, 0xFF], 8, der.Error.NonMinimalLength);
+    validate_fails(tally, "trailing octet after the root", [0x30, 0x00, 0x00], 8, der.Error.TrailingData);
+    validates(tally, "a well-formed tree", [0x30, 0x07, 0x02, 0x01, 0x05, 0x31, 0x02, 0x05, 0x00], 8);
+}
+
+// ---- nesting: the bound and the absence of recursion -------------------------
+
+void check_nesting(Tally tally) {
+    bytes deep = nested_sequences(10000);
+    parses(tally, "10000 nested SEQUENCEs: the root alone parses", deep);
+    validate_fails(tally, "10000 nested SEQUENCEs against the default bound", deep, der.MAX_NESTING_DEPTH, der.Error.NestingTooDeep);
+    validate_fails(tally, "10000 nested SEQUENCEs against a bound of 100", deep, 100, der.Error.NestingTooDeep);
+    validates(tally, "10000 nested SEQUENCEs against a bound of 10000", deep, 10000);
+    validate_fails(tally, "10000 nested SEQUENCEs against a bound of 9999", deep, 9999, der.Error.NestingTooDeep);
+    validates(tally, "32 levels, at the bound", nested_sequences(der.MAX_NESTING_DEPTH), der.MAX_NESTING_DEPTH);
+    validate_fails(tally, "33 levels, one past the bound", nested_sequences(der.MAX_NESTING_DEPTH + 1), der.MAX_NESTING_DEPTH, der.Error.NestingTooDeep);
+    validates(tally, "one level", nested_sequences(1), 1);
+    validate_fails(tally, "two levels against a bound of 1", nested_sequences(2), 1, der.Error.NestingTooDeep);
+    validate_fails(tally, "a bound of 0 on a constructed root", nested_sequences(1), 0, der.Error.NestingTooDeep);
+    validates(tally, "a bound of 0 on a primitive root", [0x05, 0x00], 0);
+    bytes broken_bottom = nested_sequences(500);
+    bytes damaged = broken_bottom.substr(0, broken_bottom.size() - 1);
+    parse_fails(tally, "500 nested SEQUENCEs, last octet missing", damaged, der.Error.Truncated);
+    match (element_of(nested_sequences(3)).children()) {
+        case Ok(List<der.Element> inside): {
+            tally.expect("children of a 3-level tree", inside.size() == 1 && inside[0].is_constructed());
+        }
+        case Err(der.Error cause): {
+            tally.expect("children of a 3-level tree: " + cause.to_str(), false);
+        }
+    }
+    match (element_of([0x05, 0x00]).children()) {
+        case Ok(List<der.Element> inside): {
+            tally.expect("children of a primitive", false);
+        }
+        case Err(der.Error cause): {
+            tally.expect("children of a primitive: " + cause.to_str(), cause.to_str() == der.Error.BadTag.to_str());
+        }
+    }
+}
+
+// ---- INTEGER, BOOLEAN, BIT STRING, OCTET STRING ------------------------------
+
+void check_simple_types(Tally tally) {
+    integer_is(tally, "INTEGER 0", [0x02, 0x01, 0x00], 0);
+    integer_is(tally, "INTEGER 5", [0x02, 0x01, 0x05], 5);
+    integer_is(tally, "INTEGER 127", [0x02, 0x01, 0x7F], 127);
+    integer_is(tally, "INTEGER 128 needs a zero octet", [0x02, 0x02, 0x00, 0x80], 128);
+    integer_is(tally, "INTEGER 255", [0x02, 0x02, 0x00, 0xFF], 255);
+    integer_is(tally, "INTEGER 256", [0x02, 0x02, 0x01, 0x00], 256);
+    integer_is(tally, "INTEGER 65537", [0x02, 0x03, 0x01, 0x00, 0x01], 65537);
+    integer_is(tally, "INTEGER 2^55 - 1, the largest read", [0x02, 0x07, 0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF], 36028797018963967);
+    integer_is(tally, "INTEGER 2^56 - 1, seven magnitude octets", [0x02, 0x08, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF], 72057594037927935);
+    integer_fails(tally, "INTEGER 2^56, eight magnitude octets", [0x02, 0x09, 0x01, 0, 0, 0, 0, 0, 0, 0, 0], der.Error.IntegerTooLarge);
+    integer_fails(tally, "INTEGER with no octets", [0x02, 0x00], der.Error.NonMinimalInteger);
+    integer_fails(tally, "INTEGER 5 with a leading zero", [0x02, 0x02, 0x00, 0x05], der.Error.NonMinimalInteger);
+    integer_fails(tally, "INTEGER 0 as two octets", [0x02, 0x02, 0x00, 0x00], der.Error.NonMinimalInteger);
+    integer_fails(tally, "INTEGER -1 with a redundant 0xFF", [0x02, 0x02, 0xFF, 0xFF], der.Error.NonMinimalInteger);
+    integer_fails(tally, "INTEGER -128 with a redundant 0xFF", [0x02, 0x02, 0xFF, 0x80], der.Error.NonMinimalInteger);
+    integer_fails(tally, "INTEGER -1 is not unsigned", [0x02, 0x01, 0xFF], der.Error.NegativeInteger);
+    integer_fails(tally, "INTEGER -128 is not unsigned", [0x02, 0x01, 0x80], der.Error.NegativeInteger);
+    integer_fails(tally, "INTEGER -129 is not unsigned", [0x02, 0x02, 0xFF, 0x7F], der.Error.NegativeInteger);
+    integer_fails(tally, "an OCTET STRING is not an INTEGER", [0x04, 0x01, 0x05], der.Error.BadTag);
+    match (element_of([0x02, 0x03, 0x00, 0x80, 0x01]).unsigned_magnitude()) {
+        case Ok(bytes magnitude): {
+            tally.expect("magnitude drops the sign octet", magnitude.hex() == "8001");
+        }
+        case Err(der.Error cause): {
+            tally.expect("magnitude drops the sign octet: " + cause.to_str(), false);
+        }
+    }
+    match (element_of([0x02, 0x01, 0x00]).unsigned_magnitude()) {
+        case Ok(bytes magnitude): {
+            tally.expect("magnitude of 0 is one zero octet", magnitude.hex() == "00");
+        }
+        case Err(der.Error cause): {
+            tally.expect("magnitude of 0: " + cause.to_str(), false);
+        }
+    }
+    boolean_is(tally, "BOOLEAN TRUE", [0x01, 0x01, 0xFF], true);
+    boolean_is(tally, "BOOLEAN FALSE", [0x01, 0x01, 0x00], false);
+    boolean_fails(tally, "BOOLEAN 0x01 is BER", [0x01, 0x01, 0x01]);
+    boolean_fails(tally, "BOOLEAN 0x80", [0x01, 0x01, 0x80]);
+    boolean_fails(tally, "BOOLEAN with no octet", [0x01, 0x00]);
+    boolean_fails(tally, "BOOLEAN with two octets", [0x01, 0x02, 0xFF, 0xFF]);
+    bit_string_is(tally, "BIT STRING, no padding", [0x03, 0x03, 0x00, 0xDE, 0xAD], [0xDE, 0xAD], 0);
+    bit_string_is(tally, "BIT STRING, empty", [0x03, 0x01, 0x00], [], 0);
+    bit_string_is(tally, "BIT STRING, 7 unused bits", [0x03, 0x02, 0x07, 0x80], [0x80], 7);
+    bit_string_is(tally, "BIT STRING, 4 unused bits, clear", [0x03, 0x02, 0x04, 0xF0], [0xF0], 4);
+    bit_string_fails(tally, "BIT STRING, no unused-bits octet", [0x03, 0x00]);
+    bit_string_fails(tally, "BIT STRING, 8 unused bits", [0x03, 0x02, 0x08, 0x00]);
+    bit_string_fails(tally, "BIT STRING, 255 unused bits", [0x03, 0x02, 0xFF, 0x00]);
+    bit_string_fails(tally, "BIT STRING, unused bits set", [0x03, 0x02, 0x04, 0xF1]);
+    bit_string_fails(tally, "BIT STRING, unused bits but no data", [0x03, 0x01, 0x03]);
+    match (element_of([0x04, 0x01, 0x00]).bit_string()) {
+        case Ok(der.BitString bits): {
+            tally.expect("an OCTET STRING is not a BIT STRING", false);
+        }
+        case Err(der.Error cause): {
+            tally.expect("an OCTET STRING is not a BIT STRING: " + cause.to_str(), cause.to_str() == der.Error.BadTag.to_str());
+        }
+    }
+    match (element_of([0x04, 0x03, 0x01, 0x02, 0x03]).octet_string()) {
+        case Ok(bytes octets): {
+            tally.expect("OCTET STRING", octets.hex() == "010203");
+        }
+        case Err(der.Error cause): {
+            tally.expect("OCTET STRING: " + cause.to_str(), false);
+        }
+    }
+    match (element_of([0x04, 0x00]).octet_string()) {
+        case Ok(bytes octets): {
+            tally.expect("empty OCTET STRING", octets.size() == 0);
+        }
+        case Err(der.Error cause): {
+            tally.expect("empty OCTET STRING: " + cause.to_str(), false);
+        }
+    }
+    match (element_of([0x05, 0x00]).octet_string()) {
+        case Ok(bytes octets): {
+            tally.expect("NULL is not an OCTET STRING", false);
+        }
+        case Err(der.Error cause): {
+            tally.expect("NULL is not an OCTET STRING: " + cause.to_str(), cause.to_str() == der.Error.BadTag.to_str());
+        }
+    }
+    tally.expect("NULL is null", element_of([0x05, 0x00]).is_null());
+    tally.expect("NULL with content is not null", !element_of([0x05, 0x01, 0x00]).is_null());
+    tally.expect("an empty OCTET STRING is not null", !element_of([0x04, 0x00]).is_null());
+}
+
+// ---- OBJECT IDENTIFIER -------------------------------------------------------
+
+void check_oids(Tally tally) {
+    oid_is(tally, "rsaEncryption", [0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01], "1.2.840.113549.1.1.1");
+    oid_is(tally, "sha256WithRSAEncryption", [0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B], "1.2.840.113549.1.1.11");
+    oid_is(tally, "id-ecPublicKey", [0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01], "1.2.840.10045.2.1");
+    oid_is(tally, "prime256v1", [0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07], "1.2.840.10045.3.1.7");
+    oid_is(tally, "secp384r1", [0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x22], "1.3.132.0.34");
+    oid_is(tally, "commonName", [0x06, 0x03, 0x55, 0x04, 0x03], "2.5.4.3");
+    oid_is(tally, "serverAuth", [0x06, 0x08, 0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01], "1.3.6.1.5.5.7.3.1");
+    oid_is(tally, "anyExtendedKeyUsage", [0x06, 0x04, 0x55, 0x1D, 0x25, 0x00], "2.5.29.37.0");
+    oid_is(tally, "Ed25519", [0x06, 0x03, 0x2B, 0x65, 0x70], "1.3.101.112");
+    oid_is(tally, "first arc 0", [0x06, 0x01, 0x00], "0.0");
+    oid_is(tally, "first arc 0, second 39", [0x06, 0x01, 0x27], "0.39");
+    oid_is(tally, "first arc 1, second 0", [0x06, 0x01, 0x28], "1.0");
+    oid_is(tally, "first arc 1, second 39", [0x06, 0x01, 0x4F], "1.39");
+    oid_is(tally, "first arc 2, second 0", [0x06, 0x01, 0x50], "2.0");
+    oid_is(tally, "first arc 2, second 999", [0x06, 0x02, 0x88, 0x37], "2.999");
+    oid_is(tally, "arc 127 then 128", [0x06, 0x04, 0x2A, 0x7F, 0x81, 0x00], "1.2.127.128");
+    oid_is(tally, "an arc of 2^56 - 1", [0x06, 0x09, 0x2A, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F], "1.2.72057594037927935");
+    oid_fails(tally, "empty OID", [0x06, 0x00]);
+    oid_fails(tally, "leading 0x80 octet in an arc", [0x06, 0x03, 0x2A, 0x80, 0x01]);
+    oid_fails(tally, "leading 0x80 in the first arc", [0x06, 0x02, 0x80, 0x2A]);
+    oid_fails(tally, "last octet has the continuation bit", [0x06, 0x03, 0x2A, 0x86, 0x48 | 0x80]);
+    oid_fails(tally, "only a continuation octet", [0x06, 0x01, 0x81]);
+    oid_fails(tally, "arc of nine octets", [0x06, 0x0A, 0x2A, 0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00]);
+    match (element_of([0x04, 0x01, 0x2A]).oid()) {
+        case Ok(str dotted): {
+            tally.expect("an OCTET STRING is not an OID", false);
+        }
+        case Err(der.Error cause): {
+            tally.expect("an OCTET STRING is not an OID: " + cause.to_str(), cause.to_str() == der.Error.BadTag.to_str());
+        }
+    }
+}
+
+// ---- UTCTime and GeneralizedTime ---------------------------------------------
+
+void check_times(Tally tally) {
+    time_is(tally, "UTCTime 1970-01-01", time_element(0x17, "700101000000Z"), 0);
+    time_is(tally, "UTCTime 1999-12-31 23:59:59", time_element(0x17, "991231235959Z"), 946684799);
+    time_is(tally, "UTCTime 2000-01-01, YY = 00 is 2000", time_element(0x17, "000101000000Z"), 946684800);
+    time_is(tally, "UTCTime pivot, YY = 50 is 1950", time_element(0x17, "500101000000Z"), -631152000);
+    time_is(tally, "UTCTime pivot, YY = 49 is 2049", time_element(0x17, "491231235959Z"), 2524607999);
+    time_is(tally, "UTCTime leap day 2024", time_element(0x17, "240229120000Z"), 1709208000);
+    time_is(tally, "UTCTime leap day 2000", time_element(0x17, "000229000000Z"), 951782400);
+    time_is(tally, "GeneralizedTime 1970-01-01", time_element(0x18, "19700101000000Z"), 0);
+    time_is(tally, "GeneralizedTime 1950-01-01", time_element(0x18, "19500101000000Z"), -631152000);
+    time_is(tally, "GeneralizedTime 1900-01-01", time_element(0x18, "19000101000000Z"), -2208988800);
+    time_is(tally, "GeneralizedTime 2050-01-01", time_element(0x18, "20500101000000Z"), 2524608000);
+    time_is(tally, "GeneralizedTime 2049-12-31 23:59:59", time_element(0x18, "20491231235959Z"), 2524607999);
+    time_is(tally, "GeneralizedTime 9999-12-31 23:59:59", time_element(0x18, "99991231235959Z"), 253402300799);
+    time_is(tally, "GeneralizedTime leap day 2024", time_element(0x18, "20240229120000Z"), 1709208000);
+    time_is(tally, "GeneralizedTime leap day 2000", time_element(0x18, "20000229000000Z"), 951782400);
+    time_fails(tally, "Feb 30", time_element(0x17, "250230000000Z"));
+    time_fails(tally, "Feb 29 in a common year", time_element(0x17, "250229000000Z"));
+    time_fails(tally, "Feb 29 in 1900, not a leap year", time_element(0x18, "19000229000000Z"));
+    time_fails(tally, "month 13", time_element(0x17, "251301000000Z"));
+    time_fails(tally, "month 0", time_element(0x17, "250001000000Z"));
+    time_fails(tally, "day 0", time_element(0x17, "250100000000Z"));
+    time_fails(tally, "day 32", time_element(0x17, "250132000000Z"));
+    time_fails(tally, "April 31", time_element(0x17, "250431000000Z"));
+    time_fails(tally, "hour 24", time_element(0x17, "250101240000Z"));
+    time_fails(tally, "minute 60", time_element(0x17, "250101006000Z"));
+    time_fails(tally, "second 60, a leap second", time_element(0x17, "250101000060Z"));
+    time_fails(tally, "no Z", time_element(0x17, "2501010000000"));
+    time_fails(tally, "a lowercase z", time_element(0x17, "250101000000z"));
+    time_fails(tally, "an offset instead of Z", time_element(0x17, "250101000000+0000"));
+    time_fails(tally, "no seconds", time_element(0x17, "2501010000Z"));
+    time_fails(tally, "UTCTime with four-digit year", time_element(0x17, "20250101000000Z"));
+    time_fails(tally, "GeneralizedTime with two-digit year", time_element(0x18, "250101000000Z"));
+    time_fails(tally, "GeneralizedTime with a fraction", time_element(0x18, "20250101000000.0Z"));
+    time_fails(tally, "a letter among the digits", time_element(0x17, "25010100000aZ"));
+    time_fails(tally, "a sign among the digits", time_element(0x17, "-50101000000Z"));
+    time_fails(tally, "a space among the digits", time_element(0x17, "25 101000000Z"));
+    time_fails(tally, "empty UTCTime", time_element(0x17, ""));
+    time_fails(tally, "empty GeneralizedTime", time_element(0x18, ""));
+    time_fails(tally, "trailing octet", time_element(0x17, "250101000000Z0"));
+    time_fails(tally, "year digits just below '0'", time_element(0x17, "/50101000000Z"));
+    time_fails(tally, "year digits just above '9'", time_element(0x17, ":50101000000Z"));
+    match (element_of([0x05, 0x00]).time()) {
+        case Ok(int seconds): {
+            tally.expect("NULL is not a time", false);
+        }
+        case Err(der.Error cause): {
+            tally.expect("NULL is not a time: " + cause.to_str(), cause.to_str() == der.Error.BadTag.to_str());
+        }
+    }
+}
+
+check_framing(results);
+check_nesting(results);
+check_simple_types(results);
+check_oids(results);
+check_times(results);
+print((results.passed + results.failed).to_str() + " checks, " + results.failed.to_str() + " failures");
+os.exit(results.failed);

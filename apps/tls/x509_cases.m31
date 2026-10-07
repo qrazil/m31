@@ -1,0 +1,442 @@
+// Behavioural checks for `lib/x509.m31`, driven by what
+// `x509_make_certs.py` writes and by the committed fixture chains.
+//
+//   x509_cases <generated dir> <fixtures dir>
+//
+// Sections: malformed certificates (each mutant has a hand-written expected
+// error), hostname and key-usage tables, validity at an injected `now`, the
+// real github.com / codeload.github.com / dev.meghraj.uk chains, PEM
+// splitting, and a deterministic mutation fuzz that must never trap.
+// Prints one line per failure and `N checks, M failures`; the exit status is
+// the failure count.
+import io;
+import os;
+import x509;
+
+type Tally {
+    int passed = 0;
+    int failed = 0;
+}
+
+void Tally.expect(str label, bool holds) {
+    if (holds) {
+        passed = passed + 1;
+    } else {
+        failed = failed + 1;
+        print("FAIL " + label);
+    }
+}
+
+str error_name(x509.Error cause) {
+    match (cause) {
+        case Malformed: {
+            return "Malformed";
+        }
+        case BadVersion: {
+            return "BadVersion";
+        }
+        case UnexpectedExtensions: {
+            return "UnexpectedExtensions";
+        }
+        case UnknownCriticalExtension: {
+            return "UnknownCriticalExtension";
+        }
+        case DuplicateExtension: {
+            return "DuplicateExtension";
+        }
+        case BadSignatureAlgorithm: {
+            return "BadSignatureAlgorithm";
+        }
+        case BadValidity: {
+            return "BadValidity";
+        }
+        case BadPublicKey: {
+            return "BadPublicKey";
+        }
+        case BadExtension: {
+            return "BadExtension";
+        }
+        case BadName: {
+            return "BadName";
+        }
+        case BadPem: {
+            return "BadPem";
+        }
+    }
+}
+
+str read_text(str path) {
+    match (io.read(path)) {
+        case Ok(str text): {
+            return text;
+        }
+        case Err(io.Error read_error): {
+            trap("cannot read " + path + ": " + read_error.to_str());
+        }
+    }
+}
+
+List<bytes> blobs_in(str path) {
+    match (x509.pem_certificates(read_text(path))) {
+        case Ok(List<bytes> blobs): {
+            return blobs;
+        }
+        case Err(x509.Error pem_error): {
+            trap(path + ": " + error_name(pem_error));
+        }
+    }
+}
+
+x509.Certificate certificate_in(str path, int index) {
+    List<bytes> blobs = blobs_in(path);
+    match (x509.parse(blobs[index])) {
+        case Ok(x509.Certificate certificate): {
+            return certificate;
+        }
+        case Err(x509.Error parse_error): {
+            trap(path + ": " + error_name(parse_error));
+        }
+    }
+}
+
+str outcome_of(Result<x509.Certificate, x509.Error> parsed) {
+    match (parsed) {
+        case Ok(x509.Certificate certificate): {
+            return "Ok";
+        }
+        case Err(x509.Error parse_error): {
+            return error_name(parse_error);
+        }
+    }
+}
+
+List<List<str>> table_rows(str path) {
+    List<List<str>> rows = [];
+    for (str line in read_text(path).split("\n")) {
+        if (line != "") {
+            rows.push(line.split("\t"));
+        }
+    }
+    return rows;
+}
+
+void check_mutants(Tally tally, str generated) {
+    int count = 0;
+    for (List<str> row in table_rows(generated + "/x509_mutants.tsv")) {
+        count = count + 1;
+        str name = row[0];
+        List<bytes> blobs = blobs_in(generated + "/mutant_" + name + ".pem");
+        if (blobs.size() == 0) {
+            tally.expect(name + ": no certificate in its PEM", false);
+            continue;
+        }
+        str strict = outcome_of(x509.parse(blobs[0]));
+        str anchor = outcome_of(x509.parse_trust_anchor(blobs[0]));
+        tally.expect(name + ": parse gave " + strict + ", wanted " + row[1], strict == row[1]);
+        tally.expect(name + ": parse_trust_anchor gave " + anchor + ", wanted " + row[2], anchor == row[2]);
+    }
+    tally.expect("mutant table is not empty", count > 50);
+    tally.expect("empty input: Malformed", outcome_of(x509.parse([])) == "Malformed");
+    tally.expect("empty input as a trust anchor: Malformed", outcome_of(x509.parse_trust_anchor([])) == "Malformed");
+}
+
+void check_hostnames(Tally tally, str generated) {
+    int count = 0;
+    str current_file = "";
+    List<x509.Certificate> loaded = [];
+    for (List<str> row in table_rows(generated + "/x509_hostnames.tsv")) {
+        count = count + 1;
+        str file = row[0];
+        if (file != current_file) {
+            current_file = file;
+            loaded = [certificate_in(generated + "/" + file, 0)];
+        }
+        bool wanted = row[2] == "1";
+        bool got = loaded[0].matches_hostname(row[1]);
+        tally.expect(file + ": host `" + row[1] + "` gave " + got.to_str() + ", wanted " + wanted.to_str(), got == wanted);
+    }
+    tally.expect("hostname table is not empty", count > 50);
+}
+
+void check_semantics(Tally tally, str generated) {
+    int count = 0;
+    for (List<str> row in table_rows(generated + "/x509_semantics.tsv")) {
+        count = count + 1;
+        x509.Certificate certificate = certificate_in(generated + "/" + row[0], 0);
+        str label = row[0];
+        tally.expect(label + ": allows_server_auth", certificate.allows_server_auth() == (row[1] == "1"));
+        tally.expect(label + ": is_ca", certificate.is_ca == (row[2] == "1"));
+        tally.expect(label + ": path_length " + certificate.path_length.to_str(), certificate.path_length.to_str() == row[3]);
+        tally.expect(label + ": key_usage " + certificate.key_usage.to_str(), certificate.key_usage.to_str() == row[4]);
+    }
+    tally.expect("semantics table is not empty", count > 5);
+    x509.Certificate leaf = certificate_in(generated + "/good_ec256_leaf.pem", 0);
+    tally.expect("key usage mask names digitalSignature", (leaf.key_usage & x509.KEY_USAGE_DIGITAL_SIGNATURE) != 0);
+    tally.expect("key usage mask does not name keyEncipherment", (leaf.key_usage & x509.KEY_USAGE_KEY_ENCIPHERMENT) == 0);
+    tally.expect("key usage mask names keyCertSign", (leaf.key_usage & x509.KEY_USAGE_KEY_CERT_SIGN) != 0);
+    tally.expect("SAN dNSName list skips IP, email and URI entries", leaf.dns_names.join(",") == "leaf.example,www.leaf.example");
+    tally.expect("the key algorithm is EC", leaf.public_key.algorithm == x509.OID_EC_PUBLIC_KEY);
+    tally.expect("the curve is P-256", leaf.public_key.curve == x509.OID_CURVE_P256);
+    x509.Certificate rsa = certificate_in(generated + "/good_rsa_leaf.pem", 0);
+    tally.expect("the key algorithm is RSA", rsa.public_key.algorithm == x509.OID_RSA_ENCRYPTION);
+    tally.expect("an RSA exponent of 65537", rsa.public_key.public_exponent.hex() == "010001");
+    tally.expect("a 2048-bit RSA modulus", rsa.public_key.modulus.size() == 256);
+    x509.Certificate curve384 = certificate_in(generated + "/good_ec384_ca.pem", 0);
+    tally.expect("the curve is P-384", curve384.public_key.curve == x509.OID_CURVE_P384);
+    tally.expect("a P-384 point is 97 octets", curve384.public_key.key_bytes.size() == 97);
+}
+
+void check_fixture_chain(Tally tally, str fixtures, str file, int expected_not_before, int expected_not_after, List<str> accepted, List<str> refused) {
+    str path = fixtures + "/" + file;
+    List<bytes> blobs = blobs_in(path);
+    tally.expect(file + ": three certificates", blobs.size() == 3);
+    x509.Certificate leaf = certificate_in(path, 0);
+    x509.Certificate intermediate = certificate_in(path, 1);
+    tally.expect(file + ": not_before", leaf.not_before == expected_not_before);
+    tally.expect(file + ": not_after", leaf.not_after == expected_not_after);
+    tally.expect(file + ": valid at not_before", leaf.is_valid_at(expected_not_before));
+    tally.expect(file + ": invalid one second before not_before", !leaf.is_valid_at(expected_not_before - 1));
+    tally.expect(file + ": valid at not_after", leaf.is_valid_at(expected_not_after));
+    tally.expect(file + ": invalid one second after not_after", !leaf.is_valid_at(expected_not_after + 1));
+    tally.expect(file + ": valid in the middle", leaf.is_valid_at(expected_not_before + (expected_not_after - expected_not_before) / 2));
+    tally.expect(file + ": invalid at the epoch", !leaf.is_valid_at(0));
+    tally.expect(file + ": the intermediate is valid in the middle", intermediate.is_valid_at(expected_not_before + 86400));
+    tally.expect(file + ": leaf is issued by the intermediate", leaf.issued_by(intermediate));
+    tally.expect(file + ": leaf is not self-issued", !leaf.issued_by(leaf));
+    tally.expect(file + ": the intermediate does not issue itself", !intermediate.issued_by(intermediate));
+    tally.expect(file + ": the intermediate is a CA", intermediate.is_ca && intermediate.has_basic_constraints);
+    tally.expect(file + ": the leaf is not a CA", !leaf.is_ca);
+    tally.expect(file + ": the leaf allows server auth", leaf.allows_server_auth());
+    tally.expect(file + ": the leaf's key usage is present", leaf.has_key_usage);
+    tally.expect(file + ": the leaf has a SAN", leaf.has_subject_alt_name);
+    tally.expect(file + ": the leaf's tbs is inside its encoding", blobs[0].contains(leaf.tbs_certificate));
+    tally.expect(file + ": the leaf's encoding is the input", leaf.encoded == blobs[0]);
+    tally.expect(file + ": the leaf carries a subject key id", leaf.subject_key_id.size() > 0);
+    tally.expect(file + ": the leaf's authority key id is the intermediate's subject key id", leaf.authority_key_id == intermediate.subject_key_id);
+    for (str host in accepted) {
+        tally.expect(file + ": matches " + host, leaf.matches_hostname(host));
+    }
+    for (str host in refused) {
+        tally.expect(file + ": does not match " + host, !leaf.matches_hostname(host));
+    }
+}
+
+void check_fixtures(Tally tally, str fixtures) {
+    check_fixture_chain(tally, fixtures, "github.com.pem", 1788220800, 1795996799, ["github.com", "www.github.com", "GitHub.com", "github.com."], ["gist.github.com", "a.www.github.com", "github.com.evil.example", "xgithub.com", "140.82.121.4"]);
+    check_fixture_chain(tally, fixtures, "codeload.github.com.pem", 1788048000, 1795823999, ["codeload.github.com", "github.com", "x.github.com", "CODELOAD.GITHUB.COM"], ["a.b.github.com", "githubx.com", "com", "evil.example"]);
+    check_fixture_chain(tally, fixtures, "dev.meghraj.uk.pem", 1789265536, 1797045133, ["dev.meghraj.uk", "meghraj.uk", "git.meghraj.uk", "Dev.Meghraj.UK"], ["a.b.meghraj.uk", "uk", "meghraj.uk.evil.example", "xmeghraj.uk"]);
+    x509.Certificate github = certificate_in(fixtures + "/github.com.pem", 0);
+    x509.Certificate codeload = certificate_in(fixtures + "/codeload.github.com.pem", 0);
+    tally.expect("a leaf is not issued by another site's leaf", !github.issued_by(codeload));
+    tally.expect("distinct leaves have distinct serials", github.serial_number != codeload.serial_number);
+    x509.Certificate root = certificate_in(fixtures + "/github.com.pem", 2);
+    x509.Certificate middle = certificate_in(fixtures + "/github.com.pem", 1);
+    tally.expect("github chain: intermediate issued by root", middle.issued_by(root));
+    tally.expect("github chain: root is a CA", root.is_ca);
+}
+
+int pem_blob_count(str text) {
+    match (x509.pem_certificates(text)) {
+        case Ok(List<bytes> blobs): {
+            return blobs.size();
+        }
+        case Err(x509.Error pem_error): {
+            return -1;
+        }
+    }
+}
+
+str pem_error_of(str text) {
+    match (x509.pem_certificates(text)) {
+        case Ok(List<bytes> blobs): {
+            return "Ok " + blobs.size().to_str();
+        }
+        case Err(x509.Error pem_error): {
+            return error_name(pem_error);
+        }
+    }
+}
+
+void check_pem(Tally tally) {
+    str begin = "-----BEGIN CERTIFICATE-----";
+    str end = "-----END CERTIFICATE-----";
+    str block = begin + "\nMAA=\n" + end + "\n";
+    tally.expect("one block", pem_error_of(block) == "Ok 1");
+    tally.expect("two blocks", pem_error_of(block + block) == "Ok 2");
+    tally.expect("no trailing newline", pem_error_of(begin + "\nMAA=\n" + end) == "Ok 1");
+    tally.expect("CRLF line ends", pem_error_of(begin + "\r\nMAA=\r\n" + end + "\r\n") == "Ok 1");
+    tally.expect("a body wrapped at 4 characters", pem_error_of(begin + "\nMDAC\nAQU=\n" + end) == "Ok 1");
+    tally.expect("indented lines", pem_error_of("  " + begin + "  \n  MAA=  \n  " + end + "\n") == "Ok 1");
+    tally.expect("comments and chatter around blocks", pem_error_of("# a bundle\nsubject=CN=x\n" + block + "between\n" + block + "after") == "Ok 2");
+    tally.expect("other block types are skipped", pem_error_of("-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n" + block) == "Ok 1");
+    tally.expect("a trusted-certificate block is skipped", pem_error_of("-----BEGIN TRUSTED CERTIFICATE-----\nMAA=\n-----END TRUSTED CERTIFICATE-----\n") == "Ok 0");
+    tally.expect("no blocks at all", pem_error_of("nothing here\n") == "Ok 0");
+    tally.expect("empty text", pem_error_of("") == "Ok 0");
+    tally.expect("END without BEGIN is chatter", pem_error_of(end + "\n") == "Ok 0");
+    tally.expect("unterminated block", pem_error_of(begin + "\nMAA=\n") == "BadPem");
+    tally.expect("BEGIN alone", pem_error_of(begin + "\n") == "BadPem");
+    tally.expect("block cut off after the first block", pem_error_of(block + begin + "\nMAA=") == "BadPem");
+    tally.expect("empty block", pem_error_of(begin + "\n" + end + "\n") == "BadPem");
+    tally.expect("bad base64 character", pem_error_of(begin + "\nMA!=\n" + end) == "BadPem");
+    tally.expect("bad base64 padding", pem_error_of(begin + "\nMAA\n" + end) == "BadPem");
+    tally.expect("data after the padding", pem_error_of(begin + "\nMAA=MAA=\n" + end) == "BadPem");
+    tally.expect("a second BEGIN inside a block", pem_error_of(begin + "\nMAA=\n" + begin + "\nMAA=\n" + end) == "BadPem");
+    tally.expect("a different END inside a block", pem_error_of(begin + "\nMAA=\n-----END PRIVATE KEY-----\n") == "BadPem");
+    tally.expect("a non-ASCII byte in the body", pem_error_of(begin + "\nMAé=\n" + end) == "BadPem");
+    tally.expect("a space inside a base64 line", pem_error_of(begin + "\nMA A=\n" + end) == "BadPem");
+    tally.expect("the BEGIN line with a typo is chatter", pem_error_of("-----BEGIN CERTIFICAT-----\nMAA=\n" + end) == "Ok 0");
+    match (x509.parse_pem(begin + "\nMAA=\n" + end + "\n")) {
+        case Ok(List<x509.Certificate> certificates): {
+            tally.expect("parse_pem of a block that is not a certificate", false);
+        }
+        case Err(x509.Error parse_error): {
+            tally.expect("parse_pem of a block that is not a certificate: " + error_name(parse_error), error_name(parse_error) == "Malformed");
+        }
+    }
+    match (x509.parse_pem("nothing")) {
+        case Ok(List<x509.Certificate> certificates): {
+            tally.expect("parse_pem of nothing is an empty list", certificates.size() == 0);
+        }
+        case Err(x509.Error parse_error): {
+            tally.expect("parse_pem of nothing: " + error_name(parse_error), false);
+        }
+    }
+}
+
+// A cheap deterministic generator: reproducible, and enough to spread
+// mutations over a certificate.
+type Lcg {
+    int state;
+}
+
+int Lcg.below(int bound) {
+    state = (state * 1103515245 + 12345) & 0x7FFFFFFF;
+    return (state >> 8) % bound;
+}
+
+bytes flipped(bytes original, Lcg random) {
+    bytes copy = original.substr(0, original.size());
+    int edits = 1 + random.below(4);
+    for (int i in 0 .. edits) {
+        int where = random.below(copy.size());
+        int kind = random.below(4);
+        if (kind == 0) {
+            copy[where] = copy[where] ^ (1 << random.below(8));
+        } else if (kind == 1) {
+            copy[where] = random.below(256);
+        } else if (kind == 2) {
+            copy[where] = 0xFF;
+        } else {
+            copy[where] = 0x00;
+        }
+    }
+    return copy;
+}
+
+// Parses `data` both ways and exercises every accessor of what comes out;
+// a trap here fails the whole program, which is the point. The result is
+// 0 when both parsers refuse it, 2 when only `parse_trust_anchor` accepts
+// it, 3 when both do, and 1, or 4 and up, when an invariant is broken:
+// `parse` accepting what `parse_trust_anchor` refuses, or an accepted
+// certificate whose `encoded` is not its input or whose `tbs_certificate`
+// is not a slice of it.
+int exercise(bytes data, List<str> hosts) {
+    int verdict = 0;
+    match (x509.parse(data)) {
+        case Ok(x509.Certificate certificate): {
+            verdict = verdict + 1;
+            if (certificate.encoded != data || !data.contains(certificate.tbs_certificate)) {
+                verdict = verdict + 4;
+            }
+            for (str host in hosts) {
+                certificate.matches_hostname(host);
+            }
+            certificate.is_valid_at(1790000000);
+            certificate.allows_server_auth();
+            certificate.issued_by(certificate);
+        }
+        case Err(x509.Error parse_error): {
+            error_name(parse_error);
+        }
+    }
+    match (x509.parse_trust_anchor(data)) {
+        case Ok(x509.Certificate certificate): {
+            verdict = verdict + 2;
+            if (certificate.encoded != data) {
+                verdict = verdict + 4;
+            }
+        }
+        case Err(x509.Error parse_error): {
+            error_name(parse_error);
+        }
+    }
+    return verdict;
+}
+
+bool is_violation(int verdict) {
+    return verdict == 1 || verdict >= 4;
+}
+
+void check_fuzz(Tally tally, str fixtures, str generated) {
+    List<str> hosts = ["github.com", "x.github.com", "", "*", "a.b.c"];
+    List<str> subjects = [fixtures + "/github.com.pem", fixtures + "/dev.meghraj.uk.pem", generated + "/good_rsa_leaf.pem", generated + "/good_ec384_ca.pem"];
+    for (str file in subjects) {
+        bytes original = blobs_in(file)[0];
+        tally.expect(file + ": the original is accepted by both parsers", exercise(original, hosts) == 3);
+        int prefix_accepted = 0;
+        for (int length in 0 .. original.size()) {
+            prefix_accepted = prefix_accepted + exercise(original.substr(0, length), hosts);
+        }
+        tally.expect(file + ": no proper prefix is accepted", prefix_accepted == 0);
+        int suffix_accepted = 0;
+        for (int start in 1 .. original.size()) {
+            suffix_accepted = suffix_accepted + exercise(original.substr(start, original.size()), hosts);
+        }
+        tally.expect(file + ": no proper suffix is accepted", suffix_accepted == 0);
+        bytes extended = original.substr(0, original.size());
+        extended.push(0);
+        tally.expect(file + ": a trailing octet is refused", exercise(extended, hosts) == 0);
+        Lcg random = Lcg(0x5EED + original.size());
+        int violations = 0;
+        int rounds = 1500;
+        for (int round in 0 .. rounds) {
+            if (is_violation(exercise(flipped(original, random), hosts))) {
+                violations = violations + 1;
+            }
+        }
+        tally.expect(file + ": " + rounds.to_str() + " random mutations, none trapped, " + violations.to_str() + " broke an invariant", violations == 0);
+        int flip_violations = 0;
+        for (int position in 0 .. original.size()) {
+            bytes flipped_once = original.substr(0, original.size());
+            flipped_once[position] = flipped_once[position] ^ 0x01;
+            int verdict = exercise(flipped_once, hosts);
+            if (is_violation(verdict)) {
+                flip_violations = flip_violations + 1;
+            }
+        }
+        tally.expect(file + ": every single-bit flip, none trapped, " + flip_violations.to_str() + " broke an invariant", flip_violations == 0);
+    }
+    List<int> noise_sizes = [0, 1, 2, 3, 10, 100, 1000];
+    for (int length in noise_sizes) {
+        Lcg random = Lcg(length + 7);
+        bytes noise = [];
+        for (int i in 0 .. length) {
+            noise.push(random.below(256));
+        }
+        tally.expect("noise of " + length.to_str() + " octets is refused", exercise(noise, hosts) == 0);
+    }
+}
+
+List<str> arguments = os.args();
+if (arguments.size() < 3) {
+    trap("usage: x509_cases <generated dir> <fixtures dir>");
+}
+Tally results = Tally();
+check_mutants(results, arguments[1]);
+check_hostnames(results, arguments[1]);
+check_semantics(results, arguments[1]);
+check_fixtures(results, arguments[2]);
+check_pem(results);
+check_fuzz(results, arguments[2], arguments[1]);
+print((results.passed + results.failed).to_str() + " checks, " + results.failed.to_str() + " failures");
+os.exit(results.failed);

@@ -21,6 +21,7 @@ pub fn source(name: &str) -> Option<&'static str> {
     Some(match name {
         "base64" => include_str!("../lib/base64.m31"),
         "csv" => include_str!("../lib/csv.m31"),
+        "der" => include_str!("../lib/der.m31"),
         "diff" => include_str!("../lib/diff.m31"),
         "html" => include_str!("../lib/html.m31"),
         "http" => include_str!("../lib/http.m31"),
@@ -50,6 +51,7 @@ pub fn source(name: &str) -> Option<&'static str> {
         "hkdf" => include_str!("../lib/hkdf.m31"),
         "bignum" => include_str!("../lib/bignum.m31"),
         "ecdsa" => include_str!("../lib/ecdsa.m31"),
+        "x509" => include_str!("../lib/x509.m31"),
         _ => return None,
     })
 }
