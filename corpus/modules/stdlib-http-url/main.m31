@@ -13,10 +13,12 @@ import http;
 //   - **`quote` escapes everything outside the unreserved set and `safe`**,
 //     with uppercase hex digits, which is RFC 3986 §6.2.2.1's preference and
 //     `urllib`'s output too.
-//   - **`https` and a relative URL are refused** rather than parsed, because
+//   - **Only `http` and `https`, and an absolute URL, are accepted**; any
+//     other scheme and a relative URL are refused rather than parsed, because
 //     `parse_url` exists to produce something the client can dial. `urllib`
-//     is a syntax library and parses both.
-//   - **The host is lowercased** and the default port filled in, which
+//     is a syntax library and parses all of them.
+//   - **The host is lowercased** and the default port (80, or 443 for
+//     `https`) filled in, which
 //     `urlsplit` leaves to `.hostname` and `.port`.
 //
 // The refusals themselves are in `stdlib-http-errors`.
@@ -45,6 +47,13 @@ url("http://[2001:db8::1]/p");
 url("http://example.com/a%2Fb/caf%C3%A9?q=%20+%2B#dropped");
 url("http://example.com?only=query");
 url("http://example.com:80/explicit-default");
+url("https://example.com");
+url("HTTPS://EXAMPLE.COM/Path?q=1#frag");
+url("https://example.com:8443/a/b");
+url("https://example.com:443/explicit-default");
+url("https://example.com:80/not-the-default");
+url("http://example.com:443/not-the-default");
+url("https://[::1]/p");
 
 // --- percent-encoding ------------------------------------------------------
 void enc(str s, str safe) {
