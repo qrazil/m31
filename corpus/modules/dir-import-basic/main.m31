@@ -1,0 +1,11 @@
+// Directory-qualified imports: `import ui.panel;` is `ui/panel.m31`, and the
+// module is still called `panel`. Imports are paths from the project root, so
+// `ui/panel.m31` writes `import util.text_tools.pad;` -- not a path relative to
+// itself. See docs/project-layout-decision.md.
+import greet;
+import ui.panel;
+import ui.widgets.button;
+
+print(greet.hello());
+print(panel.frame("hi"));
+print(button.render("ok"));

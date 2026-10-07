@@ -1,0 +1,3 @@
+pub str area_label(int w, int h) {
+    return "local";
+}

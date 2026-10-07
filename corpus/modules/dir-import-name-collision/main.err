@@ -1,0 +1,4 @@
+corpus/modules/dir-import-name-collision/mid.m31:1:1: module `helper` is both corpus/modules/dir-import-name-collision/a/helper.m31 and corpus/modules/dir-import-name-collision/b/helper.m31: module names are globally unique, so two files in different directories cannot share one -- rename one of them
+  |
+1 | import b.helper;
+  | ^

@@ -1,0 +1,3 @@
+pub str title() {
+    return "panel";
+}

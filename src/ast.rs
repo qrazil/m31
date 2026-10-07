@@ -489,11 +489,22 @@ pub struct ConstDecl {
     pub span: Span,
 }
 
-/// One `import name;` -- the module this file depends on.
+/// One `import a.b.name;` -- the module this file depends on. `path` is
+/// every segment as written, directories first; `name` is the last one, which
+/// is the module's name and the qualifier its uses are written with. A plain
+/// `import name;` has a one-segment path. See docs/project-layout-decision.md.
 #[derive(Debug, Clone)]
 pub struct Import {
     pub name: String,
+    pub path: Vec<String>,
     pub span: Span,
+}
+
+impl Import {
+    /// The import as it is written: `a.b.name`.
+    pub fn dotted(&self) -> String {
+        self.path.join(".")
+    }
 }
 
 #[derive(Debug, Clone)]

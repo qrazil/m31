@@ -1,0 +1,13 @@
+pub str both(str s, int width) {
+    str out = s;
+    bool left = true;
+    while (out.size() < width) {
+        if (left) {
+            out = concat(" ", out);
+        } else {
+            out = concat(out, " ");
+        }
+        left = !left;
+    }
+    return out;
+}

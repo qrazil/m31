@@ -1,0 +1,6 @@
+import greet;
+import util.text_tools.pad;
+
+pub str frame(str s) {
+    return concat(concat("[", pad.both(s, 6)), concat("] ", greet.hello()));
+}

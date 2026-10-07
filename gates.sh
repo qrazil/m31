@@ -155,30 +155,25 @@ run "formatter preserves meaning" bash -c '
         w=$(mktemp -d)
         # The whole directory, not just this file: a module that imports
         # another cannot be compiled without its siblings, and the module
-        # name comes from the basename so it has to keep its own.
-        cp "$(dirname "$f")"/*.'"$LANG_EXT"' "$w/" 2>/dev/null
-        # A remote import (docs/remote-imports-decision.md) needs its own
-        # `deps` manifest, `deps.lock`, and whatever fixture repository a
-        # corpus test commits beside it, copied along with the module files
-        # above, or the from-scratch recompile below cannot resolve it at
-        # all. `.m31-deps/` is left out on purpose: it is the derived cache,
-        # and refetching it from the copied fixture -- locally, no network
-        # -- is itself part of what this gate is proving still works once
-        # formatting has moved things around.
-        if [ -e "$(dirname "$f")/deps" ]; then
-            cp "$(dirname "$f")/deps" "$w/"
-            [ -e "$(dirname "$f")/deps.lock" ] && cp "$(dirname "$f")/deps.lock" "$w/"
-            for d in "$(dirname "$f")"/*/; do
-                d="${d%/}"
-                [ "$(basename "$d")" = ".m31-deps" ] && continue
-                # No trailing slash on the source: BSD cp (macOS) and GNU cp
-                # (Linux) do not agree on what a trailing slash means for a
-                # directory copy, and this must put a `fixture.git` DIRECTORY
-                # at "$w/fixture.git", not flatten its contents into "$w/"
-                # itself.
-                cp -r "$d" "$w/"
-            done
-        fi
+        # name comes from the basename so it has to keep its own. For a
+        # `corpus/modules` case, recursively, because a program may import
+        # from a subdirectory
+        # (`import ui.panel;`, docs/project-layout-decision.md) and a remote
+        # import needs its `deps` manifest, `deps.lock` and whatever fixture
+        # repository a corpus test commits beside it. `.m31-deps/` is left
+        # out on purpose: it is the derived cache, and refetching it from the
+        # copied fixture -- locally, no network -- is itself part of what this
+        # gate is proving still works once formatting has moved things around.
+        # `cp -R dir/. dest` rather than `cp -r dir dest/`: BSD cp (macOS) and
+        # GNU cp (Linux) disagree about a trailing slash on a directory
+        # source, and this form means the same on both.
+        case "$f" in
+            corpus/modules/*)
+                cp -R "$(dirname "$f")/." "$w/" 2>/dev/null
+                rm -rf "$w/.m31-deps" ;;
+            *)
+                cp "$(dirname "$f")"/*.'"$LANG_EXT"' "$w/" 2>/dev/null ;;
+        esac
         b=$(basename "$f")
         # Both compiles target the COPY ("$w/$b"), not "$f", even though
         # formatting has not happened yet for the first one -- a remote
@@ -282,7 +277,7 @@ run "stdlib source is formatted" bash -c '
 
 run "formatter is idempotent" bash -c '
     bad=0
-    for f in corpus/*/*.'"$LANG_EXT"' corpus/modules/*/*.'"$LANG_EXT"'; do
+    for f in corpus/*/*.'"$LANG_EXT"' corpus/modules/*/*.'"$LANG_EXT"' corpus/modules/*/*/*.'"$LANG_EXT"' corpus/modules/*/*/*/*.'"$LANG_EXT"'; do
         [ -e "$f" ] || continue
         w=$(mktemp -d)
         cp "$f" "$w/t.'"$LANG_EXT"'"

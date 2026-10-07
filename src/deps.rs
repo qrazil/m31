@@ -309,13 +309,21 @@ fn append_lock(lock_path: &Path, name: &str, commit: &str) -> std::io::Result<()
 /// the repository's root -- hardcoded, not the entry file's own extension,
 /// because a remote import's shape is a property of the feature, not of
 /// whatever file happened to start the build that pulled it in.
+///
+/// A dependency imported by a dotted path (`import tui.geom;`) is a whole
+/// directory instead, and `package` is the file asked of it inside the
+/// checkout, e.g. `geom.m31`.
 fn require_module_file(
     module_file: &Path,
     deps_path: &Path,
     line: u32,
     name: &str,
+    package: Option<&str>,
 ) -> Result<Option<PathBuf>, Located> {
-    if module_file.is_file() {
+    if package.is_some() || module_file.is_file() {
+        // A package's file is not checked here: the loader reads it next and
+        // names the import that asked for a file the dependency lacks, which
+        // is a better place to point than the `deps` line.
         Ok(Some(module_file.to_path_buf()))
     } else {
         Err(located(
@@ -328,6 +336,18 @@ fn require_module_file(
             ),
         ))
     }
+}
+
+/// Does `dir`'s `deps` manifest name `name`? The loader asks before it
+/// resolves anything, because a dependency and a local directory of the same
+/// name are an ambiguity to refuse, and refusing it after a `git clone` is
+/// the wrong order.
+pub fn declares(dir: &Path, name: &str) -> Result<bool, Located> {
+    let deps_path = dir.join("deps");
+    let Ok(deps_text) = std::fs::read_to_string(&deps_path) else {
+        return Ok(false);
+    };
+    Ok(parse_manifest(&deps_path, &deps_text, 2, "deps")?.contains_key(name))
 }
 
 /// Try to resolve `name` as a remote import: the one new fallback `deps.rs`
@@ -344,6 +364,24 @@ fn require_module_file(
 /// be run, a clone or checkout that failed, or a lock entry the cache could
 /// not be made to match.
 pub fn resolve(dir: &Path, name: &str) -> Result<Option<PathBuf>, Located> {
+    resolve_in(dir, name, None)
+}
+
+/// A file inside a dependency that is a whole directory: `import tui.geom;`
+/// asks `dep` = `tui` for `rel` = `geom.m31`. Same fetch, same lock, same
+/// cache as a one-file remote import -- only the file looked for differs.
+/// `Ok(None)` only when `deps` does not name `dep` at all.
+pub fn resolve_package(dir: &Path, dep: &str, rel: &str) -> Result<Option<PathBuf>, Located> {
+    resolve_in(dir, dep, Some(rel))
+}
+
+/// Where a package dependency's files live once resolved: the checkout
+/// itself, the root its own imports resolve against.
+pub fn package_root(dir: &Path, dep: &str) -> PathBuf {
+    dir.join(".m31-deps").join(dep)
+}
+
+fn resolve_in(dir: &Path, name: &str, package: Option<&str>) -> Result<Option<PathBuf>, Located> {
     let deps_path = dir.join("deps");
     let Ok(deps_text) = std::fs::read_to_string(&deps_path) else {
         return Ok(None);
@@ -361,7 +399,10 @@ pub fn resolve(dir: &Path, name: &str) -> Result<Option<PathBuf>, Located> {
     let locks = parse_manifest(&lock_path, &lock_text, 1, "deps.lock")?;
 
     let cache_dir = dir.join(".m31-deps").join(name);
-    let module_file = cache_dir.join(format!("{name}.m31"));
+    let module_file = match package {
+        Some(rel) => cache_dir.join(rel),
+        None => cache_dir.join(format!("{name}.m31")),
+    };
 
     if let Some(lock) = locks.get(name) {
         // `deps.lock` is authoritative once a line exists: `ref` is never
@@ -372,11 +413,11 @@ pub fn resolve(dir: &Path, name: &str) -> Result<Option<PathBuf>, Located> {
         if cache_matches(&cache_dir, &commit) {
             // Already checked out, already matches -- no network access,
             // per the decision doc's resolution flow.
-            return require_module_file(&module_file, &deps_path, dep_line, name);
+            return require_module_file(&module_file, &deps_path, dep_line, name, package);
         }
         reclone(&url, &cache_dir, &deps_path, dep_line, name)?;
         checkout_locked_commit(&cache_dir, &commit, &lock_path, lock.line, name)?;
-        return require_module_file(&module_file, &deps_path, dep_line, name);
+        return require_module_file(&module_file, &deps_path, dep_line, name, package);
     }
 
     // No lock entry yet: this is the first time anything has asked for
@@ -392,7 +433,7 @@ pub fn resolve(dir: &Path, name: &str) -> Result<Option<PathBuf>, Located> {
             format!("cannot write {}: {e}", lock_path.display()),
         )
     })?;
-    require_module_file(&module_file, &deps_path, dep_line, name)
+    require_module_file(&module_file, &deps_path, dep_line, name, package)
 }
 
 #[cfg(test)]

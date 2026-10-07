@@ -1,0 +1,4 @@
+// A flat sibling: a one-segment import still means `<root>/greet.m31`.
+pub str hello() {
+    return "hello";
+}

@@ -1,0 +1,4 @@
+corpus/modules/dir-import-stdlib-shadow/main.m31:1:1: cannot find module `ui.math`: no `ui/math.m31` under the project root
+  |
+1 | import ui.math;
+  | ^

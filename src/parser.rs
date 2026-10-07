@@ -809,16 +809,44 @@ impl Parser {
         while self.peek() == &Tok::KwImport {
             let span = self.span();
             self.bump();
-            let (name, _) = self.expect_ident()?;
-            self.expect(Tok::Semi)?;
-            if name == module {
-                return Err(Diag::new(span, format!("`{name}` imports itself")));
+            let (first, _) = self.expect_ident()?;
+            let mut path = vec![first];
+            while self.eat(&Tok::Dot) {
+                path.push(self.expect_ident()?.0);
             }
-            if imports.iter().any(|i| i.name == name) {
-                return Err(Diag::new(span, format!("`{name}` is imported twice")));
+            self.expect(Tok::Semi)?;
+            let name = path.last().expect("a path has a segment").clone();
+            let dotted = path.join(".");
+            if name == module {
+                return Err(Diag::new(
+                    span,
+                    if path.len() == 1 {
+                        format!("`{name}` imports itself")
+                    } else {
+                        format!(
+                            "`{dotted}` has this file's own module name, `{name}`: \
+                             module names are globally unique"
+                        )
+                    },
+                ));
+            }
+            if let Some(prev) = imports.iter().find(|i| i.name == name) {
+                return Err(Diag::new(
+                    span,
+                    if prev.path == path {
+                        format!("`{dotted}` is imported twice")
+                    } else {
+                        format!(
+                            "`{dotted}` and `{}` would both be written `{name}` \
+                             in this file: an import is named by its last segment \
+                             and there are no aliases, so a file cannot import both",
+                            prev.dotted()
+                        )
+                    },
+                ));
             }
             self.imports.push(name.clone());
-            imports.push(Import { name, span });
+            imports.push(Import { name, path, span });
         }
 
         while self.peek() != &Tok::Eof {
