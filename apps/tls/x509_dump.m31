@@ -1,0 +1,98 @@
+// Prints every certificate in a PEM file as `key value` lines, in the exact
+// format `x509_oracle.py dump` prints from Python's `cryptography` package:
+// `x509_test.sh` diffs the two outputs, so a field that parses differently
+// is a failing diff, not a judgement call.
+//
+//   x509_dump <file.pem> [anchors]
+//
+// With `anchors` each certificate goes through `x509.parse_trust_anchor`
+// (needed for a root bundle). A certificate that does not parse prints one
+// `PARSE_ERROR` line naming the error and the loop carries on, so one bad
+// certificate cannot hide the rest.
+import io;
+import os;
+import sha256;
+import x509;
+
+str or_dash(str text) {
+    if (text == "") {
+        return "-";
+    }
+    return text;
+}
+
+str flag_text(bool flag) {
+    if (flag) {
+        return "1";
+    }
+    return "0";
+}
+
+void print_certificate(int number, x509.Certificate certificate) {
+    print("cert " + number.to_str());
+    print("version " + certificate.version.to_str());
+    print("serial " + certificate.serial_number.hex());
+    print("tbs_sha256 " + sha256.hex(certificate.tbs_certificate));
+    print("signature_algorithm " + certificate.signature_algorithm.algorithm_oid);
+    print("signature_parameters " + or_dash(certificate.signature_algorithm.parameters.hex()));
+    print("signature " + certificate.signature.hex());
+    print("issuer " + certificate.issuer.hex());
+    print("subject " + certificate.subject.hex());
+    print("not_before " + certificate.not_before.to_str());
+    print("not_after " + certificate.not_after.to_str());
+    print("spki " + certificate.subject_public_key_info.hex());
+    print("key_algorithm " + certificate.public_key.algorithm);
+    print("key_curve " + or_dash(certificate.public_key.curve));
+    print("key_modulus " + or_dash(certificate.public_key.modulus.hex()));
+    print("key_exponent " + or_dash(certificate.public_key.public_exponent.hex()));
+    print("key_bytes " + certificate.public_key.key_bytes.hex());
+    print("san " + flag_text(certificate.has_subject_alt_name) + " " + or_dash(certificate.dns_names.join(",")));
+    print("basic_constraints " + flag_text(certificate.has_basic_constraints) + " " + flag_text(certificate.is_ca) + " " + certificate.path_length.to_str());
+    print("key_usage " + flag_text(certificate.has_key_usage) + " " + certificate.key_usage.to_str());
+    print("extended_key_usage " + or_dash(certificate.extended_key_usages.join(",")));
+    print("subject_key_id " + or_dash(certificate.subject_key_id.hex()));
+    print("authority_key_id " + or_dash(certificate.authority_key_id.hex()));
+}
+
+List<str> arguments = os.args();
+if (arguments.size() < 2) {
+    trap("usage: x509_dump <file.pem> [anchors]");
+}
+bool anchors = arguments.size() > 2 && arguments[2] == "anchors";
+match (io.read(arguments[1])) {
+    case Ok(str text): {
+        match (x509.pem_certificates(text)) {
+            case Ok(List<bytes> blobs): {
+                int number = 0;
+                for (bytes blob in blobs) {
+                    number = number + 1;
+                    if (anchors) {
+                        match (x509.parse_trust_anchor(blob)) {
+                            case Ok(x509.Certificate certificate): {
+                                print_certificate(number, certificate);
+                            }
+                            case Err(x509.Error parse_error): {
+                                print("cert " + number.to_str() + " PARSE_ERROR " + parse_error.to_str());
+                            }
+                        }
+                    } else {
+                        match (x509.parse(blob)) {
+                            case Ok(x509.Certificate certificate): {
+                                print_certificate(number, certificate);
+                            }
+                            case Err(x509.Error parse_error): {
+                                print("cert " + number.to_str() + " PARSE_ERROR " + parse_error.to_str());
+                            }
+                        }
+                    }
+                }
+            }
+            case Err(x509.Error pem_error): {
+                print("PEM_ERROR " + pem_error.to_str());
+            }
+        }
+    }
+    case Err(io.Error read_error): {
+        print("READ_ERROR " + read_error.to_str());
+    }
+}

@@ -1,0 +1,18 @@
+Fixture chains for apps/tls/x509_cases.m31, captured with
+`openssl s_client -showcerts -servername <host> -connect <host>:443`.
+Each file holds the leaf, then the intermediate, then the root the server
+sent, in that order. These are public certificates; nothing here is secret.
+
+No test reads the clock. The checks below use an injected `now` against the
+exact validity bounds, which are recorded here (UTC, and as epoch seconds):
+
+  file                   leaf subject      leaf SAN (dNSName)                notBefore            notAfter
+  github.com.pem         CN=github.com     github.com, www.github.com        2026-09-01 (1788220800)       2026-11-29 (1795996799)
+  codeload.github.com.pem CN=*.github.com  *.github.com, github.com          2026-08-30 (1788048000)       2026-11-27 (1795823999)
+  dev.meghraj.uk.pem     CN=meghraj.uk     meghraj.uk, *.meghraj.uk          2026-09-13 (1789265536)       2026-12-12 (1797045133)
+
+The leaves expire, so a client that checked them against the real clock
+would start failing on those dates; these tests do not. The epoch seconds
+above are what `x509_cases.m31` asserts, and the independent oracle
+(`x509_oracle.py`, Python `cryptography` and `openssl x509`) agrees on
+every field of every certificate in the three files.
