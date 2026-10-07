@@ -76,6 +76,11 @@ local imports already use — `Loader.dir` in `src/modules.rs` — not a new
 - **`deps`** — intent. One line per remote import: `name url ref`
   (whitespace-separated; `#`-prefixed and blank lines ignored). `ref` is
   anything `git checkout` accepts — branch, tag, or commit.
+  *Since the project-layout work (docs/project-layout-decision.md):* the file
+  also starts with a required header, `name <project>` and `version
+  <x.y.z>`, and a line `name path <dir>` names a directory used in place
+  instead of a git repository. Everything below is about the `name url ref`
+  form.
 - **`deps.lock`** — reality, pinned. One line per resolved import: `name
   commit-sha`. Written automatically the first time `name` resolves.
   **Authoritative once present**: the compiler trusts a locked commit and

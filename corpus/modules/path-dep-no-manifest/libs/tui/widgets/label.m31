@@ -1,0 +1,3 @@
+pub str make(str s) {
+    return concat(s, ":");
+}

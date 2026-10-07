@@ -1,0 +1,4 @@
+import tui.geom;
+import tui.nosuch;
+
+print(geom.area_label(3, 4));

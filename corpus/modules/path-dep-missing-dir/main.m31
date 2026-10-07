@@ -1,0 +1,3 @@
+import tui.geom;
+
+print(geom.area_label(3, 4));

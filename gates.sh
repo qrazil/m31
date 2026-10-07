@@ -155,30 +155,25 @@ run "formatter preserves meaning" bash -c '
         w=$(mktemp -d)
         # The whole directory, not just this file: a module that imports
         # another cannot be compiled without its siblings, and the module
-        # name comes from the basename so it has to keep its own.
-        cp "$(dirname "$f")"/*.'"$LANG_EXT"' "$w/" 2>/dev/null
-        # A remote import (docs/remote-imports-decision.md) needs its own
-        # `deps` manifest, `deps.lock`, and whatever fixture repository a
-        # corpus test commits beside it, copied along with the module files
-        # above, or the from-scratch recompile below cannot resolve it at
-        # all. `.m31-deps/` is left out on purpose: it is the derived cache,
-        # and refetching it from the copied fixture -- locally, no network
-        # -- is itself part of what this gate is proving still works once
-        # formatting has moved things around.
-        if [ -e "$(dirname "$f")/deps" ]; then
-            cp "$(dirname "$f")/deps" "$w/"
-            [ -e "$(dirname "$f")/deps.lock" ] && cp "$(dirname "$f")/deps.lock" "$w/"
-            for d in "$(dirname "$f")"/*/; do
-                d="${d%/}"
-                [ "$(basename "$d")" = ".m31-deps" ] && continue
-                # No trailing slash on the source: BSD cp (macOS) and GNU cp
-                # (Linux) do not agree on what a trailing slash means for a
-                # directory copy, and this must put a `fixture.git` DIRECTORY
-                # at "$w/fixture.git", not flatten its contents into "$w/"
-                # itself.
-                cp -r "$d" "$w/"
-            done
-        fi
+        # name comes from the basename so it has to keep its own. For a
+        # `corpus/modules` case, recursively, because a program may import
+        # from a subdirectory
+        # (`import ui.panel;`, docs/project-layout-decision.md) and a remote
+        # import needs its `deps` manifest, `deps.lock` and whatever fixture
+        # repository a corpus test commits beside it. `.m31-deps/` is left
+        # out on purpose: it is the derived cache, and refetching it from the
+        # copied fixture -- locally, no network -- is itself part of what this
+        # gate is proving still works once formatting has moved things around.
+        # `cp -R dir/. dest` rather than `cp -r dir dest/`: BSD cp (macOS) and
+        # GNU cp (Linux) disagree about a trailing slash on a directory
+        # source, and this form means the same on both.
+        case "$f" in
+            corpus/modules/*)
+                cp -R "$(dirname "$f")/." "$w/" 2>/dev/null
+                rm -rf "$w/.m31-deps" ;;
+            *)
+                cp "$(dirname "$f")"/*.'"$LANG_EXT"' "$w/" 2>/dev/null ;;
+        esac
         b=$(basename "$f")
         # Both compiles target the COPY ("$w/$b"), not "$f", even though
         # formatting has not happened yet for the first one -- a remote
@@ -272,17 +267,43 @@ run "formatter preserves meaning" bash -c '
 # include_str!. Checking it is formatted is also a round-trip test, because
 # the checked-in file IS the canonical output: anything the formatter drops
 # or reorders in it shows up here as a diff.
-run "stdlib source is formatted" bash -c '
-    bad=0
-    for f in lib/*.'"$LANG_EXT"'; do
-        [ -e "$f" ] || continue
-        ./target/debug/'"$LANG_BIN"' fmt --check "$f" || bad=1
+run "stdlib source is formatted" ./target/debug/"$LANG_BIN" fmt --check -r lib
+
+# `fmt -r <dir>` is how each repository checks its own tree: every source file
+# under the directory, nested ones included, and never the derived or foreign
+# ones (`.m31-deps/` is somebody else'"'"'s source, `target/` and `.git/` are not
+# source at all). Proved on a scratch tree: --check names every unformatted
+# file and fails, the writing form fixes exactly those, and the skipped
+# directories are left alone.
+run "recursive formatter" bash -c '
+    w=$(mktemp -d)
+    trap "rm -rf $w" EXIT
+    mess="pub int  one( ){return 1;}"
+    mkdir -p "$w/a/b" "$w/.m31-deps/dep" "$w/target" "$w/.git"
+    for f in a/top a/b/deep .m31-deps/dep/theirs target/built .git/hook; do
+        echo "$mess" > "$w/$f.'"$LANG_EXT"'"
     done
-    exit $bad'
+    bin=./target/debug/'"$LANG_BIN"'
+    if out=$($bin fmt --check -r "$w" 2>&1); then
+        echo "--check -r passed on an unformatted tree"; exit 1
+    fi
+    for f in a/top a/b/deep; do
+        echo "$out" | grep -q "$f.'"$LANG_EXT"': not formatted" \
+            || { echo "--check -r did not name $f: $out"; exit 1; }
+    done
+    if echo "$out" | grep -qE "theirs|built|hook"; then
+        echo "--check -r looked inside a skipped directory: $out"; exit 1
+    fi
+    $bin fmt -r "$w" || { echo "fmt -r failed"; exit 1; }
+    $bin fmt --check -r "$w" || { echo "tree is not formatted after fmt -r"; exit 1; }
+    for f in .m31-deps/dep/theirs target/built .git/hook; do
+        [ "$(cat "$w/$f.'"$LANG_EXT"'")" = "$mess" ] \
+            || { echo "fmt -r rewrote $f"; exit 1; }
+    done'
 
 run "formatter is idempotent" bash -c '
     bad=0
-    for f in corpus/*/*.'"$LANG_EXT"' corpus/modules/*/*.'"$LANG_EXT"'; do
+    for f in corpus/*/*.'"$LANG_EXT"' corpus/modules/*/*.'"$LANG_EXT"' corpus/modules/*/*/*.'"$LANG_EXT"' corpus/modules/*/*/*/*.'"$LANG_EXT"'; do
         [ -e "$f" ] || continue
         w=$(mktemp -d)
         cp "$f" "$w/t.'"$LANG_EXT"'"

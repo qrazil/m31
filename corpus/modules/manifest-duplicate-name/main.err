@@ -1,0 +1,4 @@
+corpus/modules/manifest-duplicate-name/deps:2:1: duplicate `name` line: a `deps` file has exactly one
+  |
+2 | name two
+  | ^

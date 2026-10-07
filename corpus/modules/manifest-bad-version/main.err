@@ -1,0 +1,4 @@
+corpus/modules/manifest-bad-version/deps:2:1: `1.0` is not a version: write it as `major.minor.patch`, for example `0.1.0`
+  |
+2 | version 1.0
+  | ^

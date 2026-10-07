@@ -1,0 +1,3 @@
+// `deps` marks this directory as a project root, so it is validated
+// before anything is imported -- this program imports nothing at all.
+print("unreachable");

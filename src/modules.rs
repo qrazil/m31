@@ -5,6 +5,10 @@
 //! graph is not the type checker's business, which is the shape Go settled
 //! on after putting the check in three places.
 //!
+//! An import is a path from a project root: `import ui.tuiapp;` is
+//! `<root>/ui/tuiapp.m31`, and the module is still named `tuiapp`. See
+//! docs/project-layout-decision.md.
+//!
 //! Every module is parsed once and the results are concatenated into one
 //! `Program`. Past this point nothing downstream knows there were files.
 
@@ -114,8 +118,63 @@ fn mentions_float(toks: &[crate::lexer::Token]) -> bool {
     })
 }
 
+/// The nearest directory at or above `entry_dir` holding a `deps` manifest:
+/// the project root. `deps` is the project file -- present and empty is a
+/// project with no dependencies -- so a program's tests and tools can sit in
+/// subdirectories and still import the program's modules. The search stops at
+/// a repository boundary (`.git`), so a `deps` file somewhere above the
+/// checkout cannot reinterpret a program that never asked for one.
+///
+/// `None` is every program laid out before this existed: no manifest anywhere
+/// in sight, and the root is the entry file's own directory, as it always was.
+fn find_root(entry_dir: &Path) -> Option<PathBuf> {
+    let owned;
+    let entry_dir = if entry_dir
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        owned = std::fs::canonicalize(entry_dir).ok()?;
+        owned.as_path()
+    } else {
+        entry_dir
+    };
+    // Lexical ancestors first, so a relative entry keeps a relative root and
+    // diagnostics keep printing the paths the user typed.
+    let mut dirs: Vec<PathBuf> = entry_dir.ancestors().map(Path::to_path_buf).collect();
+    if entry_dir.is_relative() {
+        if let Ok(cwd) = std::env::current_dir() {
+            dirs.extend(cwd.ancestors().skip(1).map(Path::to_path_buf));
+        }
+    }
+    for d in dirs {
+        if d.join("deps").is_file() {
+            return Some(d);
+        }
+        if d.join(".git").exists() {
+            return None;
+        }
+    }
+    None
+}
+
+/// Where an import was found, and the root its own imports resolve against.
+struct Site {
+    path: String,
+    root: PathBuf,
+    /// Written with a directory in front of the name. A dotted import never
+    /// reaches the embedded standard library: `ui.math` is a file or it is
+    /// an error, never `math`.
+    dotted: bool,
+    /// The import as written, `a.b.name`, and what was looked for, for the
+    /// "cannot find module" diagnostic.
+    shown: String,
+    looked_for: String,
+}
+
 struct Loader {
-    dir: PathBuf,
+    /// The project root: where `deps`, `deps.lock` and `.m31-deps/` live and
+    /// where an import in the project's own files starts from.
+    root: PathBuf,
     ext: String,
     /// Parsed modules, by name.
     done: HashMap<String, Program>,
@@ -148,7 +207,12 @@ pub struct Loaded {
 /// Load the entry file and everything it imports, in dependency order.
 pub fn load(entry: &str) -> Result<Loaded, Located> {
     let entry_path = Path::new(entry);
-    let dir = entry_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let entry_dir = entry_path.parent().unwrap_or(Path::new("."));
+    let root = find_root(entry_dir).unwrap_or_else(|| entry_dir.to_path_buf());
+    // The project file is validated up front: a `deps` with no header is a
+    // mistake wherever the program happens to notice it, and a program whose
+    // imports never reach a dependency would otherwise never find out.
+    crate::deps::read_manifest(&root)?;
     let ext = entry_path
         .extension()
         .map(|e| e.to_string_lossy().into_owned())
@@ -172,7 +236,7 @@ pub fn load(entry: &str) -> Result<Loaded, Located> {
         });
     }
     let mut l = Loader {
-        dir,
+        root,
         ext,
         done: HashMap::new(),
         folded: HashMap::new(),
@@ -182,7 +246,14 @@ pub fn load(entry: &str) -> Result<Loaded, Located> {
         wants_floatfmt: false,
         wants_text: false,
     };
-    let mut order = l.visit(&name, entry, None)?;
+    let entry_site = Site {
+        path: entry.to_string(),
+        root: l.root.clone(),
+        dotted: false,
+        shown: name.clone(),
+        looked_for: String::new(),
+    };
+    let mut order = l.visit(&name, entry_site, None)?;
     let entry_module = name.clone();
 
     // Float text is written in the language (lib/__floatfmt.m31), and the
@@ -200,6 +271,7 @@ pub fn load(entry: &str) -> Result<Loaded, Located> {
             text,
             Some((&name, Span::new(1, 1))),
             true,
+            l.root.clone(),
         )?;
         order.splice(0..0, extra);
     }
@@ -214,6 +286,7 @@ pub fn load(entry: &str) -> Result<Loaded, Located> {
             text,
             Some((&name, Span::new(1, 1))),
             true,
+            l.root.clone(),
         )?;
         order.splice(0..0, extra);
     }
@@ -270,9 +343,39 @@ impl Loader {
     fn visit(
         &mut self,
         name: &str,
-        path: &str,
+        site: Site,
         from: Option<(&str, Span)>,
     ) -> Result<Vec<String>, Located> {
+        let path = site.path.as_str();
+
+        // A module's name is its identity, so a second file with the same
+        // basename -- now possible, since two directories can each hold one --
+        // is refused before anything else looks at the name. Checked ahead of
+        // the cycle test: `a/util` importing `b/util` would otherwise be
+        // reported as `util` importing itself.
+        if let Some(prev) = self.paths.get(name) {
+            if prev != path && (site.dotted || !prev.starts_with('<')) {
+                let (importer, span) = from.expect("only an import can collide");
+                let msg = if prev.starts_with('<') {
+                    format!(
+                        "`{name}` is a standard library module, so {path} \
+                         collides with it: module names are globally unique \
+                         and there is no way to override one"
+                    )
+                } else {
+                    format!(
+                        "module `{name}` is both {prev} and {path}: module \
+                         names are globally unique, so two files in different \
+                         directories cannot share one -- rename one of them"
+                    )
+                };
+                return Err(Located {
+                    path: self.paths[importer].clone(),
+                    diag: Diag::new(span, msg),
+                });
+            }
+        }
+
         // The STACK is checked first. A module is inserted into `done`
         // before recursing -- so that a cycle finds it rather than re-reading
         // the file -- which means checking `done` first swallowed every
@@ -323,11 +426,13 @@ impl Loader {
                     ),
                 });
             }
-            return self.parse(name, &display_path(name), text, from, true);
+            if !site.dotted {
+                return self.parse(name, &display_path(name), text, from, true, site.root);
+            }
         }
 
         match std::fs::read_to_string(path) {
-            Ok(src) => self.parse(name, path, &src, from, false),
+            Ok(src) => self.parse(name, path, &src, from, false, site.root),
             Err(e) => {
                 // The entry file is named on the command line, not imported
                 // -- there is no `deps` fallback for it, only for a name some
@@ -340,32 +445,118 @@ impl Loader {
                     });
                 };
 
-                // Before giving up, a `deps` manifest beside this module's
-                // own directory (`self.dir` -- the same one place local
-                // imports already look) may name `name` as a remote git
-                // import. This is the one new fallback the decision doc
-                // adds, between the embedded standard library (above) and
-                // the "cannot find module" error (below) -- see
-                // docs/remote-imports-decision.md and src/deps.rs.
-                if let Some(remote_path) = crate::deps::resolve(&self.dir, name)? {
-                    let remote_str = remote_path.to_string_lossy().into_owned();
-                    let remote_src = std::fs::read_to_string(&remote_path)
-                        .expect("deps::resolve only ever returns a path it just verified exists");
-                    return self.parse(name, &remote_str, &remote_src, from, false);
+                // Before giving up, a `deps` manifest at the project root
+                // may name `name` as a one-file remote git import. This is
+                // the fallback between the embedded standard library (above)
+                // and the "cannot find module" error (below) -- see
+                // docs/remote-imports-decision.md and src/deps.rs. Only the
+                // project's own files may reach it: a dependency does not
+                // bring dependencies of its own.
+                if !site.dotted && site.root == self.root {
+                    if let Some(remote_path) = crate::deps::resolve(&self.root, name)? {
+                        let remote_str = remote_path.to_string_lossy().into_owned();
+                        let remote_src = std::fs::read_to_string(&remote_path).expect(
+                            "deps::resolve only ever returns a path it just verified exists",
+                        );
+                        // Its own imports keep resolving against the project
+                        // root, as they always did.
+                        return self.parse(
+                            name,
+                            &remote_str,
+                            &remote_src,
+                            from,
+                            false,
+                            self.root.clone(),
+                        );
+                    }
                 }
 
+                let msg = if site.dotted {
+                    format!(
+                        "cannot find module `{}`: no {}",
+                        site.shown, site.looked_for
+                    )
+                } else {
+                    format!(
+                        "cannot find module `{name}`: no `{name}.{}` beside it",
+                        self.ext
+                    )
+                };
                 Err(Located {
+                    path: self.paths[importer].clone(),
+                    diag: Diag::new(span, msg),
+                })
+            }
+        }
+    }
+
+    /// Where `import a.b.name;` is looked for, from a module whose imports
+    /// resolve against `root`.
+    ///
+    /// Every import is a path from a root, never from the importing file's
+    /// own directory, so moving a file does not change what its imports
+    /// mean. The root is the project's, or -- for a module that came out of
+    /// a directory dependency -- that dependency's checkout.
+    fn locate(
+        &self,
+        segs: &[String],
+        root: &Path,
+        importer: &str,
+        span: Span,
+    ) -> Result<Site, Located> {
+        let name = segs.last().expect("a path has a segment");
+        let shown = segs.join(".");
+        if segs.len() == 1 {
+            let p = root.join(format!("{name}.{}", self.ext));
+            return Ok(Site {
+                path: p.to_string_lossy().into_owned(),
+                root: root.to_path_buf(),
+                dotted: false,
+                shown,
+                looked_for: String::new(),
+            });
+        }
+        let first = &segs[0];
+        // A dependency named in `deps` is a directory of modules, reached
+        // through its name: `import tui.geom;`. Only the project's own files
+        // can name one -- a dependency brings no dependencies of its own.
+        if root == self.root && crate::deps::declares(&self.root, first)? {
+            if self.root.join(first).is_dir() {
+                return Err(Located {
                     path: self.paths[importer].clone(),
                     diag: Diag::new(
                         span,
                         format!(
-                            "cannot find module `{name}`: no `{name}.{}` beside it",
-                            self.ext
+                            "`{first}` is both a directory here and a dependency \
+                             named in `deps`, so `{shown}` could be either: rename one"
                         ),
                     ),
-                })
+                });
             }
+            let rel = format!("{}.{}", segs[1..].join("/"), self.ext);
+            let found = crate::deps::resolve_package(&self.root, first, &rel)?
+                .expect("`declares` just said the dependency is named");
+            return Ok(Site {
+                path: found.file.to_string_lossy().into_owned(),
+                root: found.root,
+                dotted: true,
+                shown,
+                looked_for: format!("`{rel}` in dependency `{first}`"),
+            });
         }
+        let rel = format!("{}.{}", segs.join("/"), self.ext);
+        let under = if root == self.root {
+            "the project root"
+        } else {
+            "the dependency's root"
+        };
+        Ok(Site {
+            path: root.join(&rel).to_string_lossy().into_owned(),
+            root: root.to_path_buf(),
+            dotted: true,
+            shown,
+            looked_for: format!("`{rel}` under {under}"),
+        })
     }
 
     /// Everything that happens once a module's text is in hand, whichever
@@ -379,6 +570,7 @@ impl Loader {
         src: &str,
         from: Option<(&str, Span)>,
         stdlib: bool,
+        root: PathBuf,
     ) -> Result<Vec<String>, Located> {
         let here = |d: Diag| Located {
             path: path.to_string(),
@@ -451,21 +643,124 @@ impl Loader {
 
         self.stack.push(name.to_string());
         let mut order = Vec::new();
-        let imports: Vec<(String, Span)> = prog
+        let imports: Vec<(Vec<String>, Span)> = prog
             .imports
             .iter()
-            .map(|i| (i.name.clone(), i.span))
+            .map(|i| (i.path.clone(), i.span))
             .collect();
         // Insert before recursing so a cycle finds this module on the stack
         // rather than re-reading it.
         self.done.insert(name.to_string(), prog);
-        for (dep, span) in imports {
-            let p = self.dir.join(format!("{dep}.{}", self.ext));
-            let sub = self.visit(&dep, &p.to_string_lossy(), Some((name, span)))?;
+        for (segs, span) in imports {
+            let site = self.locate(&segs, &root, name, span)?;
+            let dep = segs.last().expect("a path has a segment").clone();
+            let sub = self.visit(&dep, site, Some((name, span)))?;
             order.extend(sub);
         }
         self.stack.pop();
         order.push(name.to_string());
         Ok(order)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn scratch() -> PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "m31-modules-test-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write(dir: &Path, rel: &str, text: &str) -> String {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, text).unwrap();
+        p.to_string_lossy().into_owned()
+    }
+
+    const HEADER: &str = "name test\nversion 0.1.0\n";
+    const LIB: &str = "pub int one() {\n    return 1;\n}\n";
+
+    #[test]
+    fn a_deps_file_above_the_entry_makes_its_directory_the_root() {
+        let d = scratch();
+        write(&d, "deps", HEADER);
+        write(&d, "repo.m31", LIB);
+        let t = write(
+            &d,
+            "tests/t.m31",
+            "import repo;\nimport util.more;\nprint(str(repo.one() + more.two()));\n",
+        );
+        write(
+            &d,
+            "util/more.m31",
+            "import repo;\npub int two() {\n    return repo.one() + 1;\n}\n",
+        );
+        let loaded = load(&t).unwrap_or_else(|e| panic!("{}", e.diag.msg));
+        assert!(loaded.paths.contains_key("repo"));
+        assert!(loaded.paths.contains_key("more"));
+    }
+
+    #[test]
+    fn without_a_deps_file_the_root_is_the_entry_directory() {
+        let d = scratch();
+        write(&d, "repo.m31", LIB);
+        let t = write(&d, "tests/t.m31", "import repo;\nprint(str(repo.one()));\n");
+        let err = load(&t).err().expect("repo.m31 is not beside the entry");
+        assert!(err.diag.msg.contains("cannot find module `repo`"));
+    }
+
+    #[test]
+    fn the_search_for_deps_stops_at_a_repository_boundary() {
+        let d = scratch();
+        write(&d, "deps", HEADER);
+        std::fs::create_dir_all(d.join("proj/.git")).unwrap();
+        write(&d, "proj/repo.m31", LIB);
+        let t = write(
+            &d,
+            "proj/tests/t.m31",
+            "import repo;\nprint(str(repo.one()));\n",
+        );
+        assert!(find_root(&d.join("proj/tests")).is_none());
+        assert!(load(&t).is_err());
+    }
+
+    #[test]
+    fn the_nearest_deps_file_wins() {
+        let d = scratch();
+        write(&d, "deps", HEADER);
+        write(&d, "inner/deps", HEADER);
+        assert_eq!(find_root(&d.join("inner/tests")), Some(d.join("inner")));
+        assert_eq!(find_root(&d.join("tests")), Some(d.clone()));
+    }
+
+    #[test]
+    fn imports_resolve_from_the_root_not_from_the_importing_file() {
+        let d = scratch();
+        write(&d, "deps", HEADER);
+        write(
+            &d,
+            "a/x.m31",
+            "import a.y;\npub int f() {\n    return y.g();\n}\n",
+        );
+        write(&d, "a/y.m31", "pub int g() {\n    return 7;\n}\n");
+        let t = write(&d, "main.m31", "import a.x;\nprint(str(x.f()));\n");
+        assert!(load(&t).is_ok());
+        // `y` alone would be `<root>/y.m31`, which is not there.
+        write(
+            &d,
+            "a/x.m31",
+            "import y;\npub int f() {\n    return y.g();\n}\n",
+        );
+        let err = load(&t).err().expect("a sibling is not found by name");
+        assert!(err.diag.msg.contains("cannot find module `y`"));
     }
 }

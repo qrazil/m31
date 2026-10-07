@@ -1,0 +1,4 @@
+corpus/modules/path-dep-missing-dir/deps:4:1: path dependency `tui` points at `libs/nowhere`, which is not a directory (looked for corpus/modules/path-dep-missing-dir/libs/nowhere)
+  |
+4 | tui path libs/nowhere
+  | ^

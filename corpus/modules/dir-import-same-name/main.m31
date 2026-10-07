@@ -1,0 +1,4 @@
+import a.helper;
+import b.helper;
+
+print(helper.name());

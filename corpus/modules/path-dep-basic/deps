@@ -1,0 +1,5 @@
+name path-dep-basic
+version 0.1.0
+
+# `tui` is a directory of this project used in place: no fetch, no lock.
+tui path libs/tui

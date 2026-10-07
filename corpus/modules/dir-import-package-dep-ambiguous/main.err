@@ -1,0 +1,4 @@
+corpus/modules/dir-import-package-dep-ambiguous/main.m31:1:1: `tui` is both a directory here and a dependency named in `deps`, so `tui.geom` could be either: rename one
+  |
+1 | import tui.geom;
+  | ^

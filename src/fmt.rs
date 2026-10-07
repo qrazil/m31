@@ -523,7 +523,7 @@ impl Fmt {
         }
         self.lo = e.start.line;
         match e.what {
-            What::Import(i) => self.line(&format!("import {};", i.name)),
+            What::Import(i) => self.line(&format!("import {};", i.dotted())),
             What::Type(t) => self.type_decl(t),
             What::Func(f) => self.func(f),
             What::Const(c) => self.const_decl(c),

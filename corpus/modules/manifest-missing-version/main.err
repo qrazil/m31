@@ -1,0 +1,4 @@
+corpus/modules/manifest-missing-version/deps:1:1: `deps` is missing its `version` line: add `version 0.1.0` (or the project's own version) below `name`
+  |
+1 | name manifest-missing-version
+  | ^

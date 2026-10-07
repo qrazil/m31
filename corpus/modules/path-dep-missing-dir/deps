@@ -1,0 +1,4 @@
+name path-dep-missing-dir
+version 0.1.0
+
+tui path libs/nowhere
