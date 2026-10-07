@@ -1,0 +1,417 @@
+// ECDSA signature VERIFICATION over NIST P-256 and P-384 (FIPS 186-5,
+// SEC 1 v2): the check a TLS 1.3 client makes on a server's CertificateVerify
+// and on every X.509 signature in the chain it is shown.
+//
+// API
+// ---
+//   Curve curve = ecdsa.p256();                            // or ecdsa.p384(); build once, reuse
+//   match (ecdsa.parse_public_key(curve, point_bytes)) {   // 0x04 || X || Y
+//       case None: { /* malformed, off the curve, or not a valid point */ }
+//       case Some(ecdsa.PublicKey key): {
+//           bool good = ecdsa.verify_der(curve, key, digest, signature);   // SEQUENCE { r, s }
+//           bool also = ecdsa.verify_raw(curve, key, digest, signature);   // r || s
+//       }
+//   }
+//
+// `digest` is the message hash as bytes, already computed: this module hashes
+// nothing, so P-256 callers pass a SHA-256 digest and P-384 callers a SHA-384
+// one (a digest longer than the curve's size is truncated to its leftmost
+// bytes and a shorter one is zero-extended, as FIPS 186-5 says).
+//
+// Every verify function answers only yes or no. A signature that does not
+// verify, one with `r` or `s` outside `[1, n-1]`, one whose DER is not
+// strictly valid and one of the wrong length are all the same `false`: a
+// caller has no use for a reason, and a reason is what a probing peer wants.
+//
+// --- public data only; not constant time ---------------------------------------
+//
+// Verification handles a public key, a digest and a signature, all public, so
+// nothing here is written to run in constant time -- the point arithmetic
+// branches on the exceptional cases (adding a point to itself, to its
+// negation, to infinity) and `bignum.m31` branches on the values it holds.
+// DO NOT use these functions to sign or to derive a key: both would put a
+// secret scalar through code that leaks it by timing. See `bignum.m31`.
+//
+// --- what is validated ------------------------------------------------------------
+//
+//   - the public point: exactly `0x04 || X || Y` of the curve's size, X and Y
+//     below the field prime, and `Y^2 = X^3 - 3X + b`. The uncompressed form
+//     cannot encode infinity, and both curves have cofactor 1, so a point on
+//     the curve is in the group of order n and no separate subgroup check is
+//     needed. Compressed forms and `0x00` (infinity) are refused.
+//   - the signature: `r` and `s` both in `[1, n-1]`. DER is parsed strictly
+//     (no BER): definite short-form lengths only, minimal INTEGERs (no
+//     superfluous leading `0x00`, no negative values), nothing after the
+//     SEQUENCE. Raw is exactly `2 * size` bytes.
+//
+// --- the algorithm ---------------------------------------------------------------
+//
+// With `e` the digest as a number below n: `w = s^-1 mod n`, `u1 = e*w`,
+// `u2 = r*w`, `R = u1*G + u2*Q`, and the signature is good iff `R` is not
+// infinity and `R.x mod n = r`. The two scalar multiplications are one
+// interleaved double-and-add (Shamir's trick) over the table
+// `[infinity, G, Q, G+Q]`, in Jacobian coordinates (`dbl-2001-b` for a = -3,
+// `add-2007-bl`). `R.x` is compared WITHOUT inverting `Z`: `x = X/Z^2`, so the
+// test is `X == r * Z^2` -- and also `X == (r + n) * Z^2` when `r + n < p`,
+// the (about 2^-128) case where the x coordinate wrapped past n.
+
+import bignum;
+
+const str P256_PRIME = "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff";
+const str P256_ORDER = "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551";
+const str P256_B = "5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b";
+const str P256_GX = "6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296";
+const str P256_GY = "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5";
+const str P384_PRIME = "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff";
+const str P384_ORDER = "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973";
+const str P384_B = "b3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013875ac656398d8a2ed19d2a85c8edd3ec2aef";
+const str P384_GX = "aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab7";
+const str P384_GY = "3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5f";
+
+// A point in Jacobian coordinates, every coordinate a Montgomery-form field
+// element: affine `(X/Z^2, Y/Z^3)`. `Z = 0` is the point at infinity.
+type Point {
+    Array<int> x;
+    Array<int> y;
+    Array<int> z;
+}
+
+/// A curve's parameters and the two Montgomery contexts (field and group
+/// order) its arithmetic runs in. Build one with `p256()` or `p384()`.
+pub type Curve {
+    pub int size;
+    bignum.Modulus field;
+    bignum.Modulus order;
+    Array<int> coefficient_b;
+    Point generator;
+    Array<int> prime_gap;
+}
+
+/// A validated public point, kept in Montgomery form. `parse_public_key` is
+/// the only way to get one, so holding one means the point is on the curve.
+pub type PublicKey {
+    Array<int> x;
+    Array<int> y;
+}
+
+// A parsed signature, both scalars known to be in `[1, n-1]`.
+type Signature {
+    Array<int> r;
+    Array<int> s;
+}
+
+bytes hex_bytes(str text) {
+    match (bignum.bytes_from_hex(text)) {
+        case None: {
+            return [];
+        }
+        case Some(bytes decoded): {
+            return decoded;
+        }
+    }
+}
+
+Curve build_curve(int size, str prime_hex, str order_hex, str b_hex, str gx_hex, str gy_hex) {
+    bignum.Modulus field = bignum.make_modulus(hex_bytes(prime_hex));
+    bignum.Modulus order = bignum.make_modulus(hex_bytes(order_hex));
+    int width = field.width;
+    Array<int> coefficient_b = bignum.to_montgomery(field, bignum.from_bytes(hex_bytes(b_hex), width));
+    Array<int> generator_x = bignum.to_montgomery(field, bignum.from_bytes(hex_bytes(gx_hex), width));
+    Array<int> generator_y = bignum.to_montgomery(field, bignum.from_bytes(hex_bytes(gy_hex), width));
+    Point generator = Point(generator_x, generator_y, bignum.montgomery_one(field));
+    Array<int> prime_gap = bignum.subtract_limbs(field.value, order.value);
+    return Curve(size, field, order, coefficient_b, generator, prime_gap);
+}
+
+/// NIST P-256 (secp256r1), for use with SHA-256 digests.
+pub Curve p256() {
+    return build_curve(32, P256_PRIME, P256_ORDER, P256_B, P256_GX, P256_GY);
+}
+
+/// NIST P-384 (secp384r1), for use with SHA-384 digests.
+pub Curve p384() {
+    return build_curve(48, P384_PRIME, P384_ORDER, P384_B, P384_GX, P384_GY);
+}
+
+// --- field shorthand -----------------------------------------------------------
+
+Array<int> field_add(bignum.Modulus field, Array<int> left, Array<int> right) {
+    return bignum.mod_add(field, left, right);
+}
+
+Array<int> field_subtract(bignum.Modulus field, Array<int> left, Array<int> right) {
+    return bignum.mod_subtract(field, left, right);
+}
+
+Array<int> field_multiply(bignum.Modulus field, Array<int> left, Array<int> right) {
+    return bignum.montgomery_multiply(field, left, right);
+}
+
+// --- point arithmetic ----------------------------------------------------------
+
+Point infinity(bignum.Modulus field) {
+    return Point(bignum.montgomery_one(field), bignum.montgomery_one(field), bignum.from_small(field.width, 0));
+}
+
+// `2 * point` (`dbl-2001-b`, for the curve coefficient a = -3).
+Point double_point(bignum.Modulus field, Point point) {
+    if (bignum.is_zero(point.z)) {
+        return point;
+    }
+    Array<int> delta = field_multiply(field, point.z, point.z);
+    Array<int> gamma = field_multiply(field, point.y, point.y);
+    Array<int> beta = field_multiply(field, point.x, gamma);
+    Array<int> product = field_multiply(field, field_subtract(field, point.x, delta), field_add(field, point.x, delta));
+    Array<int> alpha = field_add(field, product, field_add(field, product, product));
+    Array<int> beta_two = field_add(field, beta, beta);
+    Array<int> beta_four = field_add(field, beta_two, beta_two);
+    Array<int> beta_eight = field_add(field, beta_four, beta_four);
+    Array<int> x_out = field_subtract(field, field_multiply(field, alpha, alpha), beta_eight);
+    Array<int> y_plus_z = field_add(field, point.y, point.z);
+    Array<int> z_out = field_subtract(field, field_subtract(field, field_multiply(field, y_plus_z, y_plus_z), gamma), delta);
+    Array<int> gamma_squared = field_multiply(field, gamma, gamma);
+    Array<int> gamma_two = field_add(field, gamma_squared, gamma_squared);
+    Array<int> gamma_four = field_add(field, gamma_two, gamma_two);
+    Array<int> gamma_eight = field_add(field, gamma_four, gamma_four);
+    Array<int> y_out = field_subtract(field, field_multiply(field, alpha, field_subtract(field, beta_four, x_out)), gamma_eight);
+    return Point(x_out, y_out, z_out);
+}
+
+// `left + right` (`add-2007-bl`), with the exceptional cases -- either side
+// infinity, equal points, opposite points -- handled by explicit branches.
+Point add_points(bignum.Modulus field, Point left, Point right) {
+    if (bignum.is_zero(left.z)) {
+        return right;
+    }
+    if (bignum.is_zero(right.z)) {
+        return left;
+    }
+    Array<int> left_z_squared = field_multiply(field, left.z, left.z);
+    Array<int> right_z_squared = field_multiply(field, right.z, right.z);
+    Array<int> left_u = field_multiply(field, left.x, right_z_squared);
+    Array<int> right_u = field_multiply(field, right.x, left_z_squared);
+    Array<int> left_s = field_multiply(field, field_multiply(field, left.y, right.z), right_z_squared);
+    Array<int> right_s = field_multiply(field, field_multiply(field, right.y, left.z), left_z_squared);
+    Array<int> horizontal = field_subtract(field, right_u, left_u);
+    if (bignum.is_zero(horizontal)) {
+        if (bignum.compare(left_s, right_s) == 0) {
+            return double_point(field, left);
+        }
+        return infinity(field);
+    }
+    Array<int> horizontal_two = field_add(field, horizontal, horizontal);
+    Array<int> square = field_multiply(field, horizontal_two, horizontal_two);
+    Array<int> cube = field_multiply(field, horizontal, square);
+    Array<int> slope_half = field_subtract(field, right_s, left_s);
+    Array<int> slope = field_add(field, slope_half, slope_half);
+    Array<int> volume = field_multiply(field, left_u, square);
+    Array<int> volume_two = field_add(field, volume, volume);
+    Array<int> x_out = field_subtract(field, field_subtract(field, field_multiply(field, slope, slope), cube), volume_two);
+    Array<int> left_s_cube = field_multiply(field, left_s, cube);
+    Array<int> left_s_cube_two = field_add(field, left_s_cube, left_s_cube);
+    Array<int> y_out = field_subtract(field, field_multiply(field, slope, field_subtract(field, volume, x_out)), left_s_cube_two);
+    Array<int> z_sum = field_add(field, left.z, right.z);
+    Array<int> z_term = field_subtract(field, field_subtract(field, field_multiply(field, z_sum, z_sum), left_z_squared), right_z_squared);
+    Array<int> z_out = field_multiply(field, z_term, horizontal);
+    return Point(x_out, y_out, z_out);
+}
+
+// `first_scalar * G + second_scalar * key` by interleaved double-and-add.
+Point combine(Curve curve, PublicKey key, Array<int> first_scalar, Array<int> second_scalar) {
+    bignum.Modulus field = curve.field;
+    Point key_point = Point(key.x, key.y, bignum.montgomery_one(field));
+    Point both = add_points(field, curve.generator, key_point);
+    List<Point> table = [infinity(field), curve.generator, key_point, both];
+    int top = bignum.bit_length(first_scalar);
+    int second_top = bignum.bit_length(second_scalar);
+    if (second_top > top) {
+        top = second_top;
+    }
+    Point accumulator = infinity(field);
+    int position = top - 1;
+    while (position >= 0) {
+        accumulator = double_point(field, accumulator);
+        int selector = bignum.bit_at(first_scalar, position) + 2 * bignum.bit_at(second_scalar, position);
+        if (selector != 0) {
+            accumulator = add_points(field, accumulator, table[selector]);
+        }
+        position = position - 1;
+    }
+    return accumulator;
+}
+
+// --- public key -------------------------------------------------------------------
+
+/// The public key `encoded` holds, or `None`. `encoded` must be exactly
+/// `0x04 || X || Y` with each coordinate `curve.size` big-endian bytes, both
+/// below the field prime, and the point must satisfy the curve equation.
+pub Option<PublicKey> parse_public_key(Curve curve, bytes encoded) {
+    int size = curve.size;
+    if (encoded.size() != 1 + 2 * size || encoded[0] != 4) {
+        return Option<PublicKey>.None;
+    }
+    bignum.Modulus field = curve.field;
+    Array<int> plain_x = bignum.from_bytes(encoded.substr(1, 1 + size), field.width);
+    Array<int> plain_y = bignum.from_bytes(encoded.substr(1 + size, 1 + 2 * size), field.width);
+    if (bignum.compare(plain_x, field.value) >= 0 || bignum.compare(plain_y, field.value) >= 0) {
+        return Option<PublicKey>.None;
+    }
+    Array<int> point_x = bignum.to_montgomery(field, plain_x);
+    Array<int> point_y = bignum.to_montgomery(field, plain_y);
+    Array<int> left_side = field_multiply(field, point_y, point_y);
+    Array<int> x_squared = field_multiply(field, point_x, point_x);
+    Array<int> x_cubed = field_multiply(field, x_squared, point_x);
+    Array<int> three_x = field_add(field, point_x, field_add(field, point_x, point_x));
+    Array<int> right_side = field_add(field, field_subtract(field, x_cubed, three_x), curve.coefficient_b);
+    if (bignum.compare(left_side, right_side) != 0) {
+        return Option<PublicKey>.None;
+    }
+    return Option<PublicKey>.Some(PublicKey(point_x, point_y));
+}
+
+// --- signature parsing -------------------------------------------------------------
+
+// The scalar in `[1, n-1]` that `raw` (big-endian) encodes, or `None`.
+Option<Array<int>> scalar_in_range(Curve curve, bytes raw) {
+    Array<int> value = bignum.from_bytes(raw, curve.order.width);
+    if (bignum.is_zero(value) || bignum.compare(value, curve.order.value) >= 0) {
+        return Option<Array<int>>.None;
+    }
+    return Option<Array<int>>.Some(value);
+}
+
+// The content of one DER INTEGER (`data[start .. start+length]`), checked as
+// strict DER requires of a non-negative value, then as a scalar: the high bit
+// of the first byte is clear, and a leading 0x00 appears only when the next
+// byte's high bit is set. A value wider than the curve is rejected before
+// `from_bytes` could be asked to hold it.
+Option<Array<int>> der_scalar(Curve curve, bytes data, int start, int length) {
+    int first = data[start];
+    if (first >= 0x80) {
+        return Option<Array<int>>.None;
+    }
+    int skip = 0;
+    if (length > 1 && first == 0) {
+        if (data[start + 1] < 0x80) {
+            return Option<Array<int>>.None;
+        }
+        skip = 1;
+    }
+    if (length - skip > curve.size) {
+        return Option<Array<int>>.None;
+    }
+    return scalar_in_range(curve, data.substr(start + skip, start + length));
+}
+
+// `SEQUENCE { INTEGER r, INTEGER s }`, strict DER and nothing else. Lengths
+// are the definite short form only: the largest valid body is
+// `2 * (2 + 49)` bytes, under 128, so a long-form length is never needed and
+// is, being non-minimal, never accepted.
+Option<Signature> parse_der(Curve curve, bytes data) {
+    int total = data.size();
+    if (total < 8 || total > 0x81 || data[0] != 0x30 || data[1] != total - 2) {
+        return Option<Signature>.None;
+    }
+    int r_length = data[3];
+    if (data[2] != 0x02 || r_length < 1 || 4 + r_length + 2 > total) {
+        return Option<Signature>.None;
+    }
+    int s_header = 4 + r_length;
+    int s_length = data[s_header + 1];
+    if (data[s_header] != 0x02 || s_length < 1 || s_header + 2 + s_length != total) {
+        return Option<Signature>.None;
+    }
+    match (der_scalar(curve, data, 4, r_length)) {
+        case None: {
+            return Option<Signature>.None;
+        }
+        case Some(Array<int> r_value): {
+            match (der_scalar(curve, data, s_header + 2, s_length)) {
+                case None: {
+                    return Option<Signature>.None;
+                }
+                case Some(Array<int> s_value): {
+                    return Option<Signature>.Some(Signature(r_value, s_value));
+                }
+            }
+        }
+    }
+}
+
+// `r || s`, each exactly `curve.size` bytes.
+Option<Signature> parse_raw(Curve curve, bytes data) {
+    int size = curve.size;
+    if (data.size() != 2 * size) {
+        return Option<Signature>.None;
+    }
+    match (scalar_in_range(curve, data.substr(0, size))) {
+        case None: {
+            return Option<Signature>.None;
+        }
+        case Some(Array<int> r_value): {
+            match (scalar_in_range(curve, data.substr(size, 2 * size))) {
+                case None: {
+                    return Option<Signature>.None;
+                }
+                case Some(Array<int> s_value): {
+                    return Option<Signature>.Some(Signature(r_value, s_value));
+                }
+            }
+        }
+    }
+}
+
+// --- verification -------------------------------------------------------------------
+
+bool check_signature(Curve curve, PublicKey key, bytes digest, Signature signature) {
+    bignum.Modulus field = curve.field;
+    bignum.Modulus order = curve.order;
+    bytes leading = digest;
+    if (digest.size() > curve.size) {
+        leading = digest.substr(0, curve.size);
+    }
+    Array<int> digest_value = bignum.reduce_once(order, bignum.from_bytes(leading, order.width));
+    Array<int> inverse = bignum.montgomery_inverse(order, bignum.to_montgomery(order, signature.s));
+    Array<int> first_scalar = bignum.montgomery_multiply(order, digest_value, inverse);
+    Array<int> second_scalar = bignum.montgomery_multiply(order, signature.r, inverse);
+    Point result = combine(curve, key, first_scalar, second_scalar);
+    if (bignum.is_zero(result.z)) {
+        return false;
+    }
+    Array<int> z_squared = field_multiply(field, result.z, result.z);
+    Array<int> expected = field_multiply(field, bignum.to_montgomery(field, signature.r), z_squared);
+    if (bignum.compare(result.x, expected) == 0) {
+        return true;
+    }
+    if (bignum.compare(signature.r, curve.prime_gap) < 0) {
+        Array<int> wrapped = bignum.add_limbs_wrapping(signature.r, order.value);
+        Array<int> wrapped_expected = field_multiply(field, bignum.to_montgomery(field, wrapped), z_squared);
+        return bignum.compare(result.x, wrapped_expected) == 0;
+    }
+    return false;
+}
+
+/// Whether `signature` -- DER `SEQUENCE { INTEGER r, INTEGER s }` -- is a
+/// valid ECDSA signature by `key` over the message whose hash is `digest`.
+pub bool verify_der(Curve curve, PublicKey key, bytes digest, bytes signature) {
+    match (parse_der(curve, signature)) {
+        case None: {
+            return false;
+        }
+        case Some(Signature parsed): {
+            return check_signature(curve, key, digest, parsed);
+        }
+    }
+}
+
+/// Like `verify_der`, for the fixed-width `r || s` form (`2 * curve.size` bytes).
+pub bool verify_raw(Curve curve, PublicKey key, bytes digest, bytes signature) {
+    match (parse_raw(curve, signature)) {
+        case None: {
+            return false;
+        }
+        case Some(Signature parsed): {
+            return check_signature(curve, key, digest, parsed);
+        }
+    }
+}

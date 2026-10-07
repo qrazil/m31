@@ -48,6 +48,8 @@ pub fn source(name: &str) -> Option<&'static str> {
         "ssh" => include_str!("../lib/ssh.m31"),
         "hmac" => include_str!("../lib/hmac.m31"),
         "hkdf" => include_str!("../lib/hkdf.m31"),
+        "bignum" => include_str!("../lib/bignum.m31"),
+        "ecdsa" => include_str!("../lib/ecdsa.m31"),
         _ => return None,
     })
 }
