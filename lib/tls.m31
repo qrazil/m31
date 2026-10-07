@@ -1,0 +1,1136 @@
+// A TLS 1.3 client (RFC 8446) that trusts exactly the key it was told to.
+//
+// API
+// ---
+//   tls.connect(host, port, trust)   -> Result<Conn, Error>
+//   tls.pinned_key(sha256)           -> Trust            from 32 octets
+//   tls.pinned_key_hex(text)         -> Option<Trust>    from 64 hex digits
+//
+//   c.read(n), c.read_all(), c.read_until(delimiter, limit)
+//   c.write(data), c.close()                  `io.Stream`'s five methods
+//   c.last_error()                   -> Option<Error>    why the connection died
+//   c.peer_alert()                   -> int              the alert it sent, or -1
+//
+// A `Conn` is an `io.Stream`, so everything written against that protocol
+// runs on it unchanged: `http.write_request(conn, ...)` and
+// `http.read_response(conn, ...)` need no `https` branch.
+//
+// --- trust --------------------------------------------------------------------
+//
+// `Trust` says whose key the server must prove it holds. Today it has one
+// variant, `PinnedKey`: the SHA-256 of the leaf certificate's DER
+// SubjectPublicKeyInfo -- what `openssl x509 -pubkey -noout | openssl pkey
+// -pubin -outform DER | openssl dgst -sha256` prints, and what HPKP and
+// curl's `--pinnedpubkey` call a pin. The certificate is *not* otherwise
+// examined under a pin: no chain, no expiry, no host name. The pin names the
+// key, `host` is only where to connect and what to put in SNI, and a
+// certificate that is expired or issued to another name is accepted if its
+// key is the one pinned. Chain validation against roots arrives as further
+// `Trust` variants.
+//
+// **There is no way to skip verification**, and none will be added: every
+// connection checks the pin, the CertificateVerify signature over the
+// transcript, and the server's Finished MAC, or it does not exist.
+//
+// --- what is offered, and so what is accepted ---------------------------------
+//
+//   version              TLS 1.3 only
+//   cipher suite         TLS_CHACHA20_POLY1305_SHA256 only
+//   key exchange         x25519 only, one fresh key per connection
+//   signatures           ecdsa_secp256r1_sha256, ecdsa_secp384r1_sha384
+//   extensions           server_name (not for an IP address), supported_groups
+//                        (which RFC 8446 §4.2.7 requires beside a key_share),
+//                        signature_algorithms, supported_versions, key_share
+//
+// There is no `psk_key_exchange_modes`, so no resumption: a server's
+// NewSessionTicket is dropped. There is no ALPN and no early data, and the
+// client has no certificate, so a CertificateRequest ends the handshake. An
+// extension the client did not offer, in ServerHello or EncryptedExtensions,
+// is refused (RFC 8446 §4.2).
+//
+// A server that answers with HelloRetryRequest, with a TLS 1.2 (or older)
+// ServerHello, or with RFC 8446 §4.1.3's downgrade sentinel in its random,
+// is told no, each with an error of its own.
+//
+// --- the connection after the handshake ----------------------------------------
+//
+// **A connection that ends without the server's `close_notify` is an error**,
+// `Truncated`, never a quiet end of data: otherwise whoever sits on the wire
+// can cut a response short and it reads as complete. `read_all` returns only
+// for a `close_notify`. A `KeyUpdate` is followed (and answered, when asked),
+// and a `NewSessionTicket` is ignored.
+//
+// `io.Stream` fixes the error type at `io.Error`, and `Error` below is richer
+// than that, so a failed call answers `Other(errno)` -- 5 (EIO) for a failed
+// underlying stream, 104 (ECONNRESET) for a stream that ended without a
+// `close_notify`, 9 (EBADF) for a connection already closed, 71 (EPROTO) for
+// everything the peer got wrong -- and `last_error()` has the exact reason.
+// A failure ends the connection: every later call repeats it. There are no
+// timeouts to retry after, since a read that gave up half way through a
+// record could not be resumed.
+//
+// `read_all` and `read_until` hand back what they had collected to the
+// connection when a failure comes, as `net.Conn`'s do, but the failure ends
+// the connection so only `read` of what was buffered still works.
+//
+// **A `Conn` sends `close_notify` and closes the socket when its last
+// reference goes**, as a `net.Conn` closes itself.
+
+import io;
+import net;
+import random;
+import sha256;
+import sha512;
+import x25519;
+import x509;
+import ecdsa;
+import bignum;
+import tls13_schedule;
+import tls13_record;
+
+const int HANDSHAKE_CLIENT_HELLO = 1;
+const int HANDSHAKE_SERVER_HELLO = 2;
+const int HANDSHAKE_ENCRYPTED_EXTENSIONS = 8;
+const int HANDSHAKE_CERTIFICATE = 11;
+const int HANDSHAKE_CERTIFICATE_REQUEST = 13;
+const int HANDSHAKE_CERTIFICATE_VERIFY = 15;
+const int HANDSHAKE_FINISHED = 20;
+const int SUITE_CHACHA20_POLY1305_SHA256 = 0x1303;
+const int GROUP_X25519 = 0x001D;
+const int SCHEME_ECDSA_P256_SHA256 = 0x0403;
+const int SCHEME_ECDSA_P384_SHA384 = 0x0503;
+const int VERSION_TLS12 = 0x0303;
+const int VERSION_TLS13 = 0x0304;
+const int EXTENSION_SERVER_NAME = 0;
+const int EXTENSION_SUPPORTED_GROUPS = 10;
+const int EXTENSION_SIGNATURE_ALGORITHMS = 13;
+const int EXTENSION_SUPPORTED_VERSIONS = 43;
+const int EXTENSION_KEY_SHARE = 51;
+const int ALERT_HANDSHAKE_FAILURE = 40;
+const int ALERT_BAD_CERTIFICATE = 42;
+const int ALERT_ILLEGAL_PARAMETER = 47;
+const int ALERT_DECODE_ERROR = 50;
+const int ALERT_DECRYPT_ERROR = 51;
+const int ALERT_PROTOCOL_VERSION = 70;
+const int ALERT_UNSUPPORTED_EXTENSION = 110;
+const int ERRNO_BAD_DESCRIPTOR = 9;
+const int ERRNO_IO = 5;
+const int ERRNO_PROTOCOL = 71;
+const int ERRNO_RESET = 104;
+const int RANDOM_SIZE = 32;
+const int SESSION_ID_SIZE = 32;
+const int X25519_SIZE = 32;
+
+/// Whose key the server must prove it holds.
+pub enum Trust {
+    /// The SHA-256 of the leaf certificate's DER SubjectPublicKeyInfo.
+    PinnedKey(bytes);
+}
+
+/// A key pin from its 32 octets. Anything else **traps**: a pin of the wrong
+/// size would refuse every server, and silently.
+pub Trust pinned_key(bytes key_hash) {
+    if (key_hash.size() != 32) {
+        trap("tls: a key pin is the 32 octets of a SHA-256 hash");
+    }
+    return Trust.PinnedKey(key_hash);
+}
+
+/// A key pin from 64 hex digits, `None` if `text` is anything else.
+pub Option<Trust> pinned_key_hex(str text) {
+    match (bignum.bytes_from_hex(text)) {
+        case None: {
+            return Option<Trust>.None;
+        }
+        case Some(bytes key_hash): {
+            if (key_hash.size() != 32 || text.size() != 64) {
+                return Option<Trust>.None;
+            }
+            return Option<Trust>.Some(Trust.PinnedKey(key_hash));
+        }
+    }
+}
+
+/// Why a connection could not be made, or stopped. Payload-free
+/// (`docs/errors-decision.md` §4); the alert a peer sent is
+/// `Conn.peer_alert()`.
+pub enum Error {
+    /// The TCP connection could not be made.
+    Connect;
+    /// The stream failed under the connection: a reset, a timeout.
+    Io;
+    /// The stream ended without a `close_notify`.
+    Truncated;
+    /// The server sent a fatal alert.
+    PeerAlert;
+    /// The server's records broke a rule of the record layer: a version, a
+    /// size, a sequence number.
+    Record;
+    /// A record's authentication tag did not verify.
+    BadRecordMac;
+    /// The connection is closed, by this side or by an earlier failure.
+    Closed;
+    /// The server speaks TLS 1.2 or older, which this client does not.
+    UnsupportedVersion;
+    /// The server's random carries the TLS 1.3 downgrade sentinel.
+    Downgrade;
+    /// The server answered with HelloRetryRequest, which this client, having
+    /// offered the one group it will use, cannot follow.
+    RetryRequested;
+    /// A ServerHello field that is not what was offered.
+    IllegalParameter;
+    /// An extension the client never offered.
+    UnsupportedExtension;
+    /// A message that is not well formed.
+    Malformed;
+    /// A message that this point in the handshake does not allow.
+    UnexpectedMessage;
+    /// The server asked for a client certificate; this client has none.
+    ClientCertificateRequested;
+    /// The server's certificate is missing or not one this client can read.
+    BadCertificate;
+    /// The server's key is not the pinned one.
+    UntrustedKey;
+    /// A CertificateVerify scheme that was not offered, or one that does not
+    /// fit the certificate's key.
+    UnsupportedSignature;
+    /// The CertificateVerify signature does not verify: the server does not
+    /// hold the key.
+    BadSignature;
+    /// The server's Finished does not verify: the handshake was altered.
+    BadFinished;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case Connect: {
+            return "could not connect";
+        }
+        case Io: {
+            return "the underlying connection failed";
+        }
+        case Truncated: {
+            return "the connection ended without a close_notify";
+        }
+        case PeerAlert: {
+            return "the server sent a fatal alert";
+        }
+        case Record: {
+            return "the server broke a rule of the TLS record layer";
+        }
+        case BadRecordMac: {
+            return "a record's authentication tag did not verify";
+        }
+        case Closed: {
+            return "the connection is closed";
+        }
+        case UnsupportedVersion: {
+            return "the server does not speak TLS 1.3";
+        }
+        case Downgrade: {
+            return "the server's random carries the TLS downgrade sentinel";
+        }
+        case RetryRequested: {
+            return "the server sent a HelloRetryRequest, which this client does not support";
+        }
+        case IllegalParameter: {
+            return "the server's hello is not what was offered";
+        }
+        case UnsupportedExtension: {
+            return "the server used an extension that was not offered";
+        }
+        case Malformed: {
+            return "a handshake message is malformed";
+        }
+        case UnexpectedMessage: {
+            return "a handshake message arrived where it is not allowed";
+        }
+        case ClientCertificateRequested: {
+            return "the server asked for a client certificate";
+        }
+        case BadCertificate: {
+            return "the server's certificate is missing or unreadable";
+        }
+        case UntrustedKey: {
+            return "the server's key is not the pinned key";
+        }
+        case UnsupportedSignature: {
+            return "the server signed with a scheme that was not offered or does not fit its key";
+        }
+        case BadSignature: {
+            return "the server's CertificateVerify signature is wrong";
+        }
+        case BadFinished: {
+            return "the server's Finished does not verify";
+        }
+    }
+}
+
+// The alert that tells the server why, or -1 where the record layer has
+// already sent one or there is nobody to send to.
+int alert_for(Error error) {
+    match (error) {
+        case Connect: {
+            return -1;
+        }
+        case Io: {
+            return -1;
+        }
+        case Truncated: {
+            return -1;
+        }
+        case PeerAlert: {
+            return -1;
+        }
+        case Record: {
+            return -1;
+        }
+        case BadRecordMac: {
+            return -1;
+        }
+        case Closed: {
+            return -1;
+        }
+        case UnsupportedVersion: {
+            return ALERT_PROTOCOL_VERSION;
+        }
+        case Downgrade: {
+            return ALERT_ILLEGAL_PARAMETER;
+        }
+        case RetryRequested: {
+            return ALERT_HANDSHAKE_FAILURE;
+        }
+        case IllegalParameter: {
+            return ALERT_ILLEGAL_PARAMETER;
+        }
+        case UnsupportedExtension: {
+            return ALERT_UNSUPPORTED_EXTENSION;
+        }
+        case Malformed: {
+            return ALERT_DECODE_ERROR;
+        }
+        case UnexpectedMessage: {
+            return tls13_record.ALERT_UNEXPECTED_MESSAGE;
+        }
+        case ClientCertificateRequested: {
+            return ALERT_HANDSHAKE_FAILURE;
+        }
+        case BadCertificate: {
+            return ALERT_BAD_CERTIFICATE;
+        }
+        case UntrustedKey: {
+            return ALERT_BAD_CERTIFICATE;
+        }
+        case UnsupportedSignature: {
+            return ALERT_ILLEGAL_PARAMETER;
+        }
+        case BadSignature: {
+            return ALERT_DECRYPT_ERROR;
+        }
+        case BadFinished: {
+            return ALERT_DECRYPT_ERROR;
+        }
+    }
+}
+
+// The errno an `io.Error` carries for `error`.
+int errno_of(Error error) {
+    match (error) {
+        case Io: {
+            return ERRNO_IO;
+        }
+        case Truncated: {
+            return ERRNO_RESET;
+        }
+        case Closed: {
+            return ERRNO_BAD_DESCRIPTOR;
+        }
+        case Connect: {
+            return ERRNO_PROTOCOL;
+        }
+        case PeerAlert: {
+            return ERRNO_PROTOCOL;
+        }
+        case Record: {
+            return ERRNO_PROTOCOL;
+        }
+        case BadRecordMac: {
+            return ERRNO_PROTOCOL;
+        }
+        case UnsupportedVersion: {
+            return ERRNO_PROTOCOL;
+        }
+        case Downgrade: {
+            return ERRNO_PROTOCOL;
+        }
+        case RetryRequested: {
+            return ERRNO_PROTOCOL;
+        }
+        case IllegalParameter: {
+            return ERRNO_PROTOCOL;
+        }
+        case UnsupportedExtension: {
+            return ERRNO_PROTOCOL;
+        }
+        case Malformed: {
+            return ERRNO_PROTOCOL;
+        }
+        case UnexpectedMessage: {
+            return ERRNO_PROTOCOL;
+        }
+        case ClientCertificateRequested: {
+            return ERRNO_PROTOCOL;
+        }
+        case BadCertificate: {
+            return ERRNO_PROTOCOL;
+        }
+        case UntrustedKey: {
+            return ERRNO_PROTOCOL;
+        }
+        case UnsupportedSignature: {
+            return ERRNO_PROTOCOL;
+        }
+        case BadSignature: {
+            return ERRNO_PROTOCOL;
+        }
+        case BadFinished: {
+            return ERRNO_PROTOCOL;
+        }
+    }
+}
+
+Error error_of_record(tls13_record.Error error) {
+    match (error) {
+        case Io: {
+            return Error.Io;
+        }
+        case Truncated: {
+            return Error.Truncated;
+        }
+        case PeerAlert: {
+            return Error.PeerAlert;
+        }
+        case BadRecordMac: {
+            return Error.BadRecordMac;
+        }
+        case UnexpectedMessage: {
+            return Error.UnexpectedMessage;
+        }
+        case DecodeError: {
+            return Error.Malformed;
+        }
+        case Closed: {
+            return Error.Closed;
+        }
+        case BadVersion: {
+            return Error.Record;
+        }
+        case RecordOverflow: {
+            return Error.Record;
+        }
+        case HandshakeTooLarge: {
+            return Error.Record;
+        }
+        case SequenceExhausted: {
+            return Error.Record;
+        }
+    }
+}
+
+// --- byte-level helpers ---------------------------------------------------------
+
+void put_u16(bytes out, int value) {
+    out.push((value >> 8) & 0xFF);
+    out.push(value & 0xFF);
+}
+
+void put_u24(bytes out, int value) {
+    out.push((value >> 16) & 0xFF);
+    out.push((value >> 8) & 0xFF);
+    out.push(value & 0xFF);
+}
+
+// `content` behind its 16-bit length.
+bytes with_u16_length(bytes content) {
+    bytes out = [];
+    put_u16(out, content.size());
+    out.extend(content);
+    return out;
+}
+
+bytes extension(int kind, bytes data) {
+    bytes out = [];
+    put_u16(out, kind);
+    out.extend(with_u16_length(data));
+    return out;
+}
+
+// Whether two octet strings are equal, in time that depends on their length
+// and not on where they first differ.
+bool same_octets(bytes left, bytes right) {
+    if (left.size() != right.size()) {
+        return false;
+    }
+    int difference = 0;
+    for (int index in 0 .. left.size()) {
+        difference = difference | (left[index] ^ right[index]);
+    }
+    return difference == 0;
+}
+
+bool all_zero(bytes data) {
+    int accumulated = 0;
+    for (int index in 0 .. data.size()) {
+        accumulated = accumulated | data[index];
+    }
+    return accumulated == 0;
+}
+
+// What a received message holds after its four-octet header.
+bytes message_body(bytes message) {
+    return message.substr(4, message.size());
+}
+
+// A cursor over a received message's body, every read of which can find the
+// message too short.
+type Reader {
+    bytes data;
+    int at = 0;
+}
+
+int Reader.remaining() {
+    return data.size() - at;
+}
+
+Result<int, Error> Reader.u8() {
+    if (remaining() < 1) {
+        return Result<int, Error>.Err(Error.Malformed);
+    }
+    int value = data[at];
+    at = at + 1;
+    return Result<int, Error>.Ok(value);
+}
+
+Result<int, Error> Reader.u16() {
+    if (remaining() < 2) {
+        return Result<int, Error>.Err(Error.Malformed);
+    }
+    int value = data[at] * 256 + data[at + 1];
+    at = at + 2;
+    return Result<int, Error>.Ok(value);
+}
+
+Result<bytes, Error> Reader.take(int count) {
+    if (count < 0 || remaining() < count) {
+        return Result<bytes, Error>.Err(Error.Malformed);
+    }
+    bytes out = data.substr(at, at + count);
+    at = at + count;
+    return Result<bytes, Error>.Ok(out);
+}
+
+Result<bytes, Error> Reader.vector8() {
+    int count = u8()?;
+    return take(count);
+}
+
+Result<bytes, Error> Reader.vector16() {
+    int count = u16()?;
+    return take(count);
+}
+
+Result<bytes, Error> Reader.vector24() {
+    if (remaining() < 3) {
+        return Result<bytes, Error>.Err(Error.Malformed);
+    }
+    int count = data[at] * 65536 + data[at + 1] * 256 + data[at + 2];
+    at = at + 3;
+    return take(count);
+}
+
+// --- ClientHello ------------------------------------------------------------------
+
+bool is_ip_literal(str host) {
+    match (net.parse_ip(host)) {
+        case Some(net.Ip address): {
+            return true;
+        }
+        case None: {
+            return false;
+        }
+    }
+}
+
+// RFC 6066 §3: a list of one host_name entry. Never sent for an IP address.
+bytes server_name_data(str host) {
+    bytes name = host.to_bytes();
+    bytes entry = [0];
+    entry.extend(with_u16_length(name));
+    return with_u16_length(entry);
+}
+
+bytes client_hello(str host, bytes client_random, bytes session_id, bytes public_key) {
+    bytes body = [];
+    put_u16(body, VERSION_TLS12);
+    body.extend(client_random);
+    body.push(session_id.size());
+    body.extend(session_id);
+    put_u16(body, 2);
+    put_u16(body, SUITE_CHACHA20_POLY1305_SHA256);
+    body.push(1);
+    body.push(0);
+    bytes extensions = [];
+    if (!is_ip_literal(host)) {
+        extensions.extend(extension(EXTENSION_SERVER_NAME, server_name_data(host)));
+    }
+    bytes groups = [];
+    put_u16(groups, GROUP_X25519);
+    extensions.extend(extension(EXTENSION_SUPPORTED_GROUPS, with_u16_length(groups)));
+    bytes schemes = [];
+    put_u16(schemes, SCHEME_ECDSA_P256_SHA256);
+    put_u16(schemes, SCHEME_ECDSA_P384_SHA384);
+    extensions.extend(extension(EXTENSION_SIGNATURE_ALGORITHMS, with_u16_length(schemes)));
+    bytes versions = [2];
+    put_u16(versions, VERSION_TLS13);
+    extensions.extend(extension(EXTENSION_SUPPORTED_VERSIONS, versions));
+    bytes share = [];
+    put_u16(share, GROUP_X25519);
+    share.extend(with_u16_length(public_key));
+    extensions.extend(extension(EXTENSION_KEY_SHARE, with_u16_length(share)));
+    put_u16(body, extensions.size());
+    body.extend(extensions);
+    bytes message = [HANDSHAKE_CLIENT_HELLO];
+    put_u24(message, body.size());
+    message.extend(body);
+    return message;
+}
+
+// --- ServerHello ------------------------------------------------------------------
+
+// RFC 8446 §4.1.3: a ServerHello whose random is the SHA-256 of this text is
+// a HelloRetryRequest.
+bytes retry_request_random() {
+    return sha256.sum("HelloRetryRequest".to_bytes());
+}
+
+// RFC 8446 §4.1.3: the last eight octets of the random of a server that
+// supports TLS 1.3 but is answering with an older version: "DOWNGRD" and a 1
+// (TLS 1.2) or a 0 (TLS 1.1 and below).
+bool has_downgrade_sentinel(bytes server_random) {
+    bytes tail = server_random.substr(24, 32);
+    bytes name = "DOWNGRD".to_bytes();
+    if (!same_octets(tail.substr(0, 7), name)) {
+        return false;
+    }
+    return tail[7] == 0 || tail[7] == 1;
+}
+
+// The server's x25519 public key, once every field of its ServerHello has
+// been checked against what the ClientHello offered.
+Result<bytes, Error> check_server_hello(bytes message, bytes session_id) {
+    Reader reader = Reader(message_body(message));
+    int legacy_version = reader.u16()?;
+    bytes server_random = reader.take(RANDOM_SIZE)?;
+    if (same_octets(server_random, retry_request_random())) {
+        return Result<bytes, Error>.Err(Error.RetryRequested);
+    }
+    bytes echoed_session_id = reader.vector8()?;
+    int suite = reader.u16()?;
+    int compression = reader.u8()?;
+    bytes extension_block = reader.vector16()?;
+    if (reader.remaining() != 0) {
+        return Result<bytes, Error>.Err(Error.Malformed);
+    }
+    Reader extensions = Reader(extension_block);
+    bytes version_data = [];
+    bool has_version = false;
+    bytes share_data = [];
+    bool has_share = false;
+    bool has_other = false;
+    while (extensions.remaining() > 0) {
+        int kind = extensions.u16()?;
+        bytes data = extensions.vector16()?;
+        if (kind == EXTENSION_SUPPORTED_VERSIONS) {
+            if (has_version) {
+                return Result<bytes, Error>.Err(Error.IllegalParameter);
+            }
+            has_version = true;
+            version_data = data;
+        } else if (kind == EXTENSION_KEY_SHARE) {
+            if (has_share) {
+                return Result<bytes, Error>.Err(Error.IllegalParameter);
+            }
+            has_share = true;
+            share_data = data;
+        } else {
+            has_other = true;
+        }
+    }
+    bool is_tls13 = has_version && version_data.size() == 2 && version_data[0] == 3 && version_data[1] == 4;
+    if (has_downgrade_sentinel(server_random)) {
+        return Result<bytes, Error>.Err(Error.Downgrade);
+    }
+    if (!is_tls13) {
+        return Result<bytes, Error>.Err(Error.UnsupportedVersion);
+    }
+    if (legacy_version != VERSION_TLS12 || !same_octets(echoed_session_id, session_id) || suite != SUITE_CHACHA20_POLY1305_SHA256 || compression != 0) {
+        return Result<bytes, Error>.Err(Error.IllegalParameter);
+    }
+    if (has_other) {
+        return Result<bytes, Error>.Err(Error.UnsupportedExtension);
+    }
+    if (!has_share) {
+        return Result<bytes, Error>.Err(Error.IllegalParameter);
+    }
+    Reader share = Reader(share_data);
+    int group = share.u16()?;
+    bytes public_key = share.vector16()?;
+    if (share.remaining() != 0) {
+        return Result<bytes, Error>.Err(Error.Malformed);
+    }
+    if (group != GROUP_X25519 || public_key.size() != X25519_SIZE) {
+        return Result<bytes, Error>.Err(Error.IllegalParameter);
+    }
+    return Result<bytes, Error>.Ok(public_key);
+}
+
+// --- the rest of the server's flight ------------------------------------------------
+
+Result<void, Error> check_encrypted_extensions(bytes message) {
+    Reader reader = Reader(message_body(message));
+    bytes extension_block = reader.vector16()?;
+    if (reader.remaining() != 0) {
+        return Result<void, Error>.Err(Error.Malformed);
+    }
+    Reader extensions = Reader(extension_block);
+    List<int> seen = [];
+    while (extensions.remaining() > 0) {
+        int kind = extensions.u16()?;
+        bytes data = extensions.vector16()?;
+        if (seen.contains(kind)) {
+            return Result<void, Error>.Err(Error.IllegalParameter);
+        }
+        seen.push(kind);
+        if (kind != EXTENSION_SERVER_NAME && kind != EXTENSION_SUPPORTED_GROUPS) {
+            return Result<void, Error>.Err(Error.UnsupportedExtension);
+        }
+    }
+    return Result<void, Error>.Ok;
+}
+
+// The leaf of the Certificate message, parsed. The rest of the chain is
+// framed (so a malformed message is refused) and otherwise ignored: a pin
+// names the leaf's key and needs no chain.
+Result<x509.Certificate, Error> leaf_certificate(bytes message) {
+    Reader reader = Reader(message_body(message));
+    bytes request_context = reader.vector8()?;
+    if (request_context.size() != 0) {
+        return Result<x509.Certificate, Error>.Err(Error.Malformed);
+    }
+    bytes list = reader.vector24()?;
+    if (reader.remaining() != 0) {
+        return Result<x509.Certificate, Error>.Err(Error.Malformed);
+    }
+    Reader entries = Reader(list);
+    bytes leaf = [];
+    int count = 0;
+    while (entries.remaining() > 0) {
+        bytes encoded = entries.vector24()?;
+        bytes entry_extensions = entries.vector16()?;
+        if (count == 0) {
+            leaf = encoded;
+        }
+        count = count + 1;
+    }
+    if (count == 0) {
+        return Result<x509.Certificate, Error>.Err(Error.BadCertificate);
+    }
+    match (x509.parse(leaf)) {
+        case Ok(x509.Certificate certificate): {
+            return Result<x509.Certificate, Error>.Ok(certificate);
+        }
+        case Err(x509.Error parse_error): {
+            return Result<x509.Certificate, Error>.Err(Error.BadCertificate);
+        }
+    }
+}
+
+Result<void, Error> check_pin(x509.Certificate leaf, Trust trust) {
+    bytes key_hash = sha256.sum(leaf.subject_public_key_info);
+    match (trust) {
+        case PinnedKey(bytes pinned): {
+            if (!same_octets(key_hash, pinned)) {
+                return Result<void, Error>.Err(Error.UntrustedKey);
+            }
+            return Result<void, Error>.Ok;
+        }
+    }
+}
+
+// What a CertificateVerify signs (RFC 8446 §4.4.3): 64 spaces, a context
+// string, a zero, and the transcript hash up to the Certificate.
+bytes certificate_verify_content(bytes transcript_hash) {
+    bytes content = [0x20; 64];
+    content.extend("TLS 1.3, server CertificateVerify".to_bytes());
+    content.push(0);
+    content.extend(transcript_hash);
+    return content;
+}
+
+Result<void, Error> verify_signature(ecdsa.Curve curve, str curve_oid, x509.Certificate leaf, bytes digest, bytes signature) {
+    if (leaf.public_key.algorithm != x509.OID_EC_PUBLIC_KEY || leaf.public_key.curve != curve_oid) {
+        return Result<void, Error>.Err(Error.UnsupportedSignature);
+    }
+    match (ecdsa.parse_public_key(curve, leaf.public_key.key_bytes)) {
+        case None: {
+            return Result<void, Error>.Err(Error.BadCertificate);
+        }
+        case Some(ecdsa.PublicKey key): {
+            if (!ecdsa.verify_der(curve, key, digest, signature)) {
+                return Result<void, Error>.Err(Error.BadSignature);
+            }
+            return Result<void, Error>.Ok;
+        }
+    }
+}
+
+Result<void, Error> check_certificate_verify(bytes message, x509.Certificate leaf, bytes transcript_hash) {
+    Reader reader = Reader(message_body(message));
+    int scheme = reader.u16()?;
+    bytes signature = reader.vector16()?;
+    if (reader.remaining() != 0) {
+        return Result<void, Error>.Err(Error.Malformed);
+    }
+    bytes content = certificate_verify_content(transcript_hash);
+    if (scheme == SCHEME_ECDSA_P256_SHA256) {
+        return verify_signature(ecdsa.p256(), x509.OID_CURVE_P256, leaf, sha256.sum(content), signature);
+    }
+    if (scheme == SCHEME_ECDSA_P384_SHA384) {
+        return verify_signature(ecdsa.p384(), x509.OID_CURVE_P384, leaf, sha512.sum384(content), signature);
+    }
+    return Result<void, Error>.Err(Error.UnsupportedSignature);
+}
+
+Result<void, Error> check_finished(bytes message, bytes expected) {
+    bytes verify_data = message_body(message);
+    if (verify_data.size() != tls13_schedule.HASH_SIZE) {
+        return Result<void, Error>.Err(Error.Malformed);
+    }
+    if (!same_octets(verify_data, expected)) {
+        return Result<void, Error>.Err(Error.BadFinished);
+    }
+    return Result<void, Error>.Ok;
+}
+
+Result<void, Error> require_type(bytes message, int wanted) {
+    if (message[0] != wanted) {
+        return Result<void, Error>.Err(Error.UnexpectedMessage);
+    }
+    return Result<void, Error>.Ok;
+}
+
+// --- the handshake ------------------------------------------------------------------------
+
+Result<void, Error> lift(Result<void, tls13_record.Error> outcome) {
+    match (outcome) {
+        case Ok: {
+            return Result<void, Error>.Ok;
+        }
+        case Err(tls13_record.Error record_error): {
+            return Result<void, Error>.Err(error_of_record(record_error));
+        }
+    }
+}
+
+Result<bytes, Error> next_handshake(tls13_record.Connection record) {
+    match (record.receive_handshake()) {
+        case Ok(bytes message): {
+            return Result<bytes, Error>.Ok(message);
+        }
+        case Err(tls13_record.Error record_error): {
+            return Result<bytes, Error>.Err(error_of_record(record_error));
+        }
+    }
+}
+
+Result<void, Error> run_handshake(tls13_record.Connection record, str host, Trust trust) {
+    random.System source = random.system();
+    bytes secret = source.octets(X25519_SIZE);
+    bytes session_id = source.octets(SESSION_ID_SIZE);
+    bytes hello = client_hello(host, source.octets(RANDOM_SIZE), session_id, x25519.base_point(secret));
+    tls13_schedule.Transcript transcript = tls13_schedule.transcript();
+    transcript.add(hello);
+    lift(record.send_handshake(hello))?;
+    lift(record.send_change_cipher_spec())?;
+    bytes server_hello = next_handshake(record)?;
+    require_type(server_hello, HANDSHAKE_SERVER_HELLO)?;
+    bytes server_share = check_server_hello(server_hello, session_id)?;
+    bytes shared = x25519.x25519(secret, server_share);
+    if (all_zero(shared)) {
+        return Result<void, Error>.Err(Error.IllegalParameter);
+    }
+    transcript.add(server_hello);
+    bytes early = tls13_schedule.early_secret([]);
+    bytes handshake = tls13_schedule.handshake_secret(early, shared);
+    bytes hello_hash = transcript.digest();
+    bytes client_handshake = tls13_schedule.client_handshake_traffic_secret(handshake, hello_hash);
+    bytes server_handshake = tls13_schedule.server_handshake_traffic_secret(handshake, hello_hash);
+    lift(record.install_read_keys(server_handshake))?;
+    record.install_write_keys(client_handshake);
+    bytes encrypted_extensions = next_handshake(record)?;
+    require_type(encrypted_extensions, HANDSHAKE_ENCRYPTED_EXTENSIONS)?;
+    check_encrypted_extensions(encrypted_extensions)?;
+    transcript.add(encrypted_extensions);
+    bytes certificate_message = next_handshake(record)?;
+    if (certificate_message[0] == HANDSHAKE_CERTIFICATE_REQUEST) {
+        return Result<void, Error>.Err(Error.ClientCertificateRequested);
+    }
+    require_type(certificate_message, HANDSHAKE_CERTIFICATE)?;
+    x509.Certificate leaf = leaf_certificate(certificate_message)?;
+    check_pin(leaf, trust)?;
+    transcript.add(certificate_message);
+    bytes certificate_hash = transcript.digest();
+    bytes verify_message = next_handshake(record)?;
+    require_type(verify_message, HANDSHAKE_CERTIFICATE_VERIFY)?;
+    check_certificate_verify(verify_message, leaf, certificate_hash)?;
+    transcript.add(verify_message);
+    bytes server_finished = next_handshake(record)?;
+    require_type(server_finished, HANDSHAKE_FINISHED)?;
+    bytes server_key = tls13_schedule.finished_key(server_handshake);
+    check_finished(server_finished, tls13_schedule.finished_verify_data(server_key, transcript.digest()))?;
+    transcript.add(server_finished);
+    bytes finished_hash = transcript.digest();
+    bytes master = tls13_schedule.master_secret(handshake);
+    bytes client_application = tls13_schedule.client_application_traffic_secret(master, finished_hash);
+    bytes server_application = tls13_schedule.server_application_traffic_secret(master, finished_hash);
+    bytes client_key = tls13_schedule.finished_key(client_handshake);
+    bytes client_finished = [HANDSHAKE_FINISHED, 0, 0, tls13_schedule.HASH_SIZE];
+    client_finished.extend(tls13_schedule.finished_verify_data(client_key, finished_hash));
+    lift(record.send_handshake(client_finished))?;
+    record.install_write_keys(client_application);
+    lift(record.install_read_keys(server_application))?;
+    return Result<void, Error>.Ok;
+}
+
+// A failed handshake: the alert that says why (the record layer has sent its
+// own for the faults it finds), then the stream closed.
+Error abort_handshake(tls13_record.Connection record, Error error) {
+    int description = alert_for(error);
+    if (description >= 0) {
+        Result<void, tls13_record.Error> alerted = record.send_alert(description);
+    }
+    Result<bool, tls13_record.Error> closed = record.close();
+    return error;
+}
+
+/// Connects to `host` on `port`, runs the handshake and checks the server
+/// against `trust`. What comes back is a stream of the server's decrypted
+/// octets; every `Err` is a connection that does not exist.
+pub Result<Conn, Error> connect(str host, int port, Trust trust) {
+    match (net.connect(host, port)) {
+        case Err(net.Error connect_error): {
+            return Result<Conn, Error>.Err(Error.Connect);
+        }
+        case Ok(net.Conn socket): {
+            tls13_record.Connection record = tls13_record.connection(socket);
+            match (run_handshake(record, host, trust)) {
+                case Ok: {
+                    return Result<Conn, Error>.Ok(Conn(record));
+                }
+                case Err(Error handshake_error): {
+                    return Result<Conn, Error>.Err(abort_handshake(record, handshake_error));
+                }
+            }
+        }
+    }
+}
+
+// --- the connection ----------------------------------------------------------------------------
+
+/// A TLS 1.3 connection to a server whose key was checked. Made by
+/// `connect`; every field is private.
+pub type Conn {
+    tls13_record.Connection record;
+    // pending[offset ..] has been decrypted and not handed out.
+    bytes pending = [];
+    int offset = 0;
+    bool at_end = false;
+    bool closed = false;
+    bool failed = false;
+    Error failure = Error.Closed;
+}
+
+// The next chunk of application data, or an empty one once the server has
+// said it is finished.
+Result<bytes, io.Error> Conn.next_chunk() {
+    if (failed) {
+        return Result<bytes, io.Error>.Err(io.Error.Other(errno_of(failure)));
+    }
+    if (closed) {
+        return Result<bytes, io.Error>.Err(io.Error.Other(ERRNO_BAD_DESCRIPTOR));
+    }
+    if (at_end) {
+        bytes none = [];
+        return Result<bytes, io.Error>.Ok(none);
+    }
+    match (record.receive_application()) {
+        case Ok(bytes data): {
+            if (data.size() == 0) {
+                at_end = true;
+            }
+            return Result<bytes, io.Error>.Ok(data);
+        }
+        case Err(tls13_record.Error record_error): {
+            return Result<bytes, io.Error>.Err(fail(error_of_record(record_error)));
+        }
+    }
+}
+
+io.Error Conn.fail(Error error) {
+    failed = true;
+    failure = error;
+    return io.Error.Other(errno_of(error));
+}
+
+/// Between 1 and `n` octets, or an empty `bytes` once the server has sent
+/// `close_notify`. `n` below 1 traps.
+pub Result<bytes, io.Error> Conn.read(int count) {
+    if (count < 1) {
+        trap("read(" + count.to_str() + "): read at least one byte; read_all() reads everything");
+    }
+    if (offset == pending.size()) {
+        bytes chunk = next_chunk()?;
+        if (chunk.size() == 0) {
+            return Result<bytes, io.Error>.Ok(chunk);
+        }
+        pending = chunk;
+        offset = 0;
+    }
+    int take = pending.size() - offset;
+    if (take > count) {
+        take = count;
+    }
+    bytes out = pending.substr(offset, offset + take);
+    offset = offset + take;
+    return Result<bytes, io.Error>.Ok(out);
+}
+
+/// Everything until the server's `close_notify`. A connection that ends any
+/// other way is an `Err`, and what had arrived stays readable with `read`.
+pub Result<bytes, io.Error> Conn.read_all() {
+    bytes out = pending.substr(offset, pending.size());
+    bytes none = [];
+    pending = none;
+    offset = 0;
+    while (true) {
+        match (next_chunk()) {
+            case Ok(bytes chunk): {
+                if (chunk.size() == 0) {
+                    return Result<bytes, io.Error>.Ok(out);
+                }
+                out.extend(chunk);
+            }
+            case Err(io.Error read_error): {
+                pending = out;
+                return Result<bytes, io.Error>.Err(read_error);
+            }
+        }
+    }
+}
+
+/// Octets up to and including the first `delimiter`, at most `limit` of
+/// them; `net.Conn.read_until`'s three outcomes, told apart the same way.
+pub Result<bytes, io.Error> Conn.read_until(bytes delimiter, int limit) {
+    if (delimiter.size() == 0) {
+        trap("read_until: the delimiter is empty");
+    }
+    if (limit < 1) {
+        trap("read_until(" + limit.to_str() + "): the limit must be at least 1");
+    }
+    int last = delimiter[delimiter.size() - 1];
+    bytes out = [];
+    while (out.size() < limit) {
+        if (offset == pending.size()) {
+            match (next_chunk()) {
+                case Ok(bytes chunk): {
+                    if (chunk.size() == 0) {
+                        break;
+                    }
+                    pending = chunk;
+                    offset = 0;
+                }
+                case Err(io.Error read_error): {
+                    pending = out;
+                    offset = 0;
+                    return Result<bytes, io.Error>.Err(read_error);
+                }
+            }
+        }
+        int next = pending[offset];
+        offset = offset + 1;
+        out.push(next);
+        if (next == last && out.ends_with(delimiter)) {
+            break;
+        }
+    }
+    return Result<bytes, io.Error>.Ok(out);
+}
+
+/// Sends all of `data`, returning its size. An `Err` ends the connection.
+pub Result<int, io.Error> Conn.write(bytes data) {
+    if (closed) {
+        trap("write on a closed connection");
+    }
+    if (failed) {
+        return Result<int, io.Error>.Err(io.Error.Other(errno_of(failure)));
+    }
+    match (record.send_application(data)) {
+        case Ok(int sent): {
+            return Result<int, io.Error>.Ok(sent);
+        }
+        case Err(tls13_record.Error record_error): {
+            return Result<int, io.Error>.Err(fail(error_of_record(record_error)));
+        }
+    }
+}
+
+/// Tells the server the data is over with a `close_notify`, then closes the
+/// socket. Closing twice is not an error.
+pub Result<bool, io.Error> Conn.close() {
+    return release();
+}
+
+Result<bool, io.Error> Conn.release() {
+    if (closed) {
+        return Result<bool, io.Error>.Ok(true);
+    }
+    closed = true;
+    if (!failed) {
+        Result<void, tls13_record.Error> notified = record.send_close_notify();
+    }
+    match (record.close()) {
+        case Ok(bool done): {
+            return Result<bool, io.Error>.Ok(done);
+        }
+        case Err(tls13_record.Error record_error): {
+            return Result<bool, io.Error>.Err(io.Error.Other(ERRNO_IO));
+        }
+    }
+}
+
+void Conn.drop() {
+    Result<bool, io.Error> ignored = release();
+}
+
+/// Why the connection stopped working, or `None` while it has not.
+pub Option<Error> Conn.last_error() {
+    if (failed) {
+        return Option<Error>.Some(failure);
+    }
+    return Option<Error>.None;
+}
+
+/// The description of the fatal alert the server sent, or -1.
+pub int Conn.peer_alert() {
+    return record.received_alert();
+}
