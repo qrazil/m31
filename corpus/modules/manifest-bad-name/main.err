@@ -1,0 +1,4 @@
+corpus/modules/manifest-bad-name/deps:1:1: `bad/name` is not a project name: use letters, digits, `-` and `_`
+  |
+1 | name bad/name
+  | ^

@@ -1,0 +1,1 @@
+corpus/modules/manifest-empty/deps:1:1: `deps` has no project header: add `name <project-name>` and `version <x.y.z>` at the top, for example `name myapp` and `version 0.1.0`

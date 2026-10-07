@@ -1,7 +1,10 @@
 # Project layout: the decision
 
-Status: **decided, phase 1 prototyped** (branch `design/project-layout`,
-`src/modules.rs`). Written in the same discipline as
+Status: **decided and implemented** (`src/modules.rs`, `src/deps.rs`,
+`src/main.rs`). The `deps` project file has a required `name`/`version`
+header, a dependency can be a `path` used in place, and `m31c fmt -r`
+formats a tree. Wrapped identity (namespacing) is **decided against,
+permanently** (section 3, "What globally unique becomes"). Written in the same discipline as
 `docs/modules-decision.md` and `docs/remote-imports-decision.md`: this
 changes load-bearing compiler surface (module resolution), so the shape is
 settled once.
@@ -58,10 +61,13 @@ Rejected for now. `deps` + `deps.lock` already is the manifest, and a
 second one would have to be kept consistent with it.
 
 **D. Directory-qualified imports, resolved from the project root
-(chosen).** `import ui.widgets.button;` means `<root>/ui/widgets/button.m31`.
+(chosen).** `import ui.widgets.form_button;` means `<root>/ui/widgets/form_button.m31`.
 The root is the nearest ancestor of the entry file's directory that
 contains a `deps` file; with none, it is the entry's directory (so every
-existing program is unchanged). Dependencies are addressed by their name
+existing program is unchanged). `deps` is the project file in the sense of a
+`Cargo.toml`: it **always has content**, a required header of `name
+<project>` and `version <x.y.z>`, so a project with no dependencies is still
+a two-line file rather than an empty marker (see "The manifest" below). Dependencies are addressed by their name
 as the first segment: `import tui.geom;` means
 `.m31-deps/tui/geom.m31`.
 
@@ -111,34 +117,68 @@ is the same error with the stdlib wording, exactly as `math.m31` beside
 the entry is today ("collides rather than overrides"). A one-segment
 `import math;` is untouched.
 
-**What "globally unique" becomes.** In phase 1, nothing: it is still
-true, now per *program* (entry + everything it reaches), and the error
-now says which two paths clash instead of just "duplicate". This is
-deliberate — it is the whole reason the prototype touches only the
-loader. It means directories give you **organization, not namespacing**:
-`tui` still needs `tuitext` while it shares a program with stdlib `text`,
-and `ui/button.m31` and `forms/button.m31` still cannot meet. We
-considered doing the namespacing now and rejected it as a separate
-decision with a real cost.
+**What "globally unique" becomes.** Nothing: it stays true, per *program*
+(entry + everything it reaches), and the error now says which two paths
+clash instead of just "duplicate". Directories give you **organization,
+not namespacing**: `ui/form_button.m31` and `forms/form_button.m31` cannot
+meet.
 
-*Phase 2 (not built): wrapped identity.* Make the identity the full path
-(`ui.widgets.button`), keep the last segment as the in-file qualifier
-only when unambiguous. It would let `tui` drop its prefix and let two
-`button`s coexist. The cost is exactly: `lib#Type` interning, the
-`modules.contains(name)` checks in lower/mono/privacy, and C symbol
-mangling all key on a bare name today and would key on a path; error
-text and `fmt` need no change. It is a mechanical but wide compiler
-change (estimate 2–3 days with the gates re-run) and a **breaking
-symbol rename** for any emitted C that FFI-imports names. Do it only
-when a second consumer actually hits a collision.
+**Namespacing (wrapped identity) is decided against, permanently.** The
+earlier draft kept a "Phase 2" that would make a module's identity its full
+path (`ui.widgets.button`), so two `button`s could coexist and `tui` could
+drop its prefix. It is rejected, not deferred. A module name is its whole
+identity on purpose: when a reader meets `form_button.render(...)` they know
+which module it is without knowing where the file sits, and the name has to
+earn that by being descriptive (`form_button` or `formButton`, never a bare
+`button`). Two modules wanting the same name is a prompt to give one a better
+name, not a feature request. `tui`'s `tuitext` and `tuibuf` are therefore not a
+workaround waiting for namespacing; they are the convention working as
+designed. The compiler cost that would have been paid (`lib#Type` interning,
+the `modules.contains(name)` checks, C symbol mangling all keyed on a path)
+and the breaking symbol rename are avoided entirely, and the loader stays
+the only thing this feature touches.
 
-**Composition with remote imports.** `deps` / `deps.lock` / the
-`.m31-deps/<name>/` cache are unchanged. What changes is that a
-dependency is no longer limited to one file `<name>.m31`: the whole repo
-is checked out under `.m31-deps/<name>/` and addressed by path. The old
-single-file form (`import name;` where the dep repo has `name.m31` at
-its root) still works. One known limit stays: a dependency's own `deps`
-are not followed transitively (v0 rule); a consumer must list them.
+**The manifest.** `deps` is read line by line; `#` starts a comment only at
+the start of a line.
+
+```
+name myapp
+version 0.1.0
+tui  https://github.com/qrazil/tui v0.1.0    # name url ref: git, pinned in deps.lock
+shared path libs/shared                      # name path dir: in place
+```
+
+- `name` (`[A-Za-z0-9_-]+`) and `version` (`major.minor.patch`, optional
+  `-pre`/`+build`) are required, once each. Informational for now -- nothing
+  imports by project name -- but required so the file always says what it is
+  the root of. A missing or malformed header is a compile error naming the line
+  to add; the manifest is validated before any import is looked at, so a
+  program that imports nothing still finds out. `name` and `version` cannot be
+  dependency names. (A dependency named `path` as a url -- a relative git
+  repository literally called `path` -- would read as a path dependency; use
+  `./path`.)
+- `name path <dir>` resolves the directory relative to the `deps` file
+  (lexically folded, so diagnostics print `apps/tui/tuibuf.m31`, not
+  `apps/git/../tui/tuibuf.m31`) and uses it in place: no fetch, no
+  `deps.lock` line, no `.m31-deps` entry. The directory is a project, so it
+  must have its own `deps` with a valid header; inside it the root is that
+  directory, so its single-segment imports (`import tuibuf;`) resolve there.
+  This is what lets a monorepo's `apps/git` consume `apps/tui` with no copying:
+  making `apps/` the root would not work, because single-segment imports
+  resolve against the root and `tui`'s own `import tuibuf;` would look for
+  `apps/tuibuf.m31`.
+- A git dependency's checkout is not required to carry a manifest (the
+  existing fixtures predate it); a path dependency must, since it is the
+  project itself.
+
+**Composition with remote imports.** `deps.lock` and the `.m31-deps/<name>/`
+cache are unchanged. What changes is that a dependency is no longer limited
+to one file `<name>.m31`: the whole repo is checked out under
+`.m31-deps/<name>/` (or named by `path`) and addressed by path. The old
+single-file form (`import name;` where the dep repo has `name.m31` at its
+root) still works. One known limit stays: a dependency's own `deps` are not
+followed transitively (v0 rule, kept on purpose until a dependency really has
+dependencies of its own); a consumer must list them.
 
 **Why `build-gitui.sh`'s staging hack disappears.** The hack exists
 because the loader cannot see another checkout. With
@@ -159,9 +199,12 @@ line from `deps.lock`, the existing update mechanism).
   the new cases are just directories.
 - Parser: duplicate-name and self-import messages mention the dotted
   path.
-- Not done: a `m31c fmt <dir>` recursive mode. Each repo's
-  `for f in *.m31` check becomes `find . -name '*.m31' -not -path
-  './.m31-deps/*'`; a recursive `fmt --check` flag is a small follow-up.
+- `m31c fmt -r <dir>` and `m31c fmt --check -r <dir>` walk every `.m31`
+  file under a directory (sorted; `.m31-deps`, `.git` and `target` skipped,
+  symlinks not followed), report every file that is wrong rather than the
+  first, and `-r` without `--check` rewrites only the files that change. A
+  repository's CI check is `m31c fmt --check -r .`. Gated by "recursive
+  formatter" in `gates.sh`, and the stdlib check is now `fmt --check -r lib`.
 
 ## 4. The standard layout
 
@@ -170,7 +213,7 @@ everything else has a home.**
 
 ```
 <repo>/
-  deps  deps.lock          # the root marker; may be empty (see 7)
+  deps  deps.lock          # project file: name, version, dependencies
   <modules>.m31            # library modules a consumer imports (libraries)
   <entry>.m31              # or: cmd/<entry>.m31 when several programs
   tests/                   # t_*.m31 harnesses, *.sh drivers, fixtures
@@ -229,7 +272,7 @@ that `m31c` itself can check, since a wrong path is a compile error.
 - **tui** (library): modules stay at the root; `bench.m31`, `browse.m31`,
   `demo.m31`, `tests.m31`+`tests.out` go to `examples/` and `tests/`;
   `build.sh`/`check.sh` to `scripts/`; `FRICTION.md` to `docs/`. Gains
-  an empty `deps` marker (or, if it ever needs one, real lines).
+  a `deps` file with the `name`/`version` header (plus dependency lines if it ever needs them).
 - **markdown** (the `term-markdown` repo): modules (`blocks`, `doc`,
   `inlines`, `render`) at the root with `main.m31`; `corpus.py`,
   `fuzz.py`, `reference.py` to `tests/oracles/`; the 48-file `tests/`
@@ -240,21 +283,21 @@ that `m31c` itself can check, since a wrong path is a compile error.
   `build*.sh` to `scripts/`.
 - **m31 monorepo**: `lib/` stays flat — it *is* the embedded stdlib and
   names there are the global reserved set. `apps/{git,tui,markdown,
-  httpserver,ssh}` mirror the repo layouts above; `apps/git` stops
-  needing a copy of `tui` by importing `tui.*` from a sibling directory
-  (the monorepo root gets a `deps`-less marker plus a path rule — see
-  open question 3).
+  httpserver,ssh}` mirror the repo layouts above; each has its own `deps`,
+  and `apps/git/deps` says `tui path ../tui`, so `import tui.tuiapp;` in
+  git reads `apps/tui/tuiapp.m31` in place with no copy. (Why not simply
+  make `apps/` the root: see "The manifest".)
 
 ## 5. The migration plan
 
 Order matters: the compiler change is backward compatible, so no repo is
 broken by it landing first.
 
-1. **Compiler (m31)**, ~0.5 day beyond the prototype: review, merge,
-   document in `docs/reference.md`, cut a release. Gate: `./gates.sh`
+1. **Compiler (m31)**: done -- merged, documented in `docs/reference.md`,
+   released. Gate: `./gates.sh`
    green (80–90 min). Until a repo bumps `M31_REF` to that release it
    cannot use the new imports, which is the only coupling.
-2. **tui** (~0.5 day): move non-modules; add `deps` marker; `test.yml`
+2. **tui** (~0.5 day): move non-modules; add `deps` (header); `test.yml`
    and `build.sh` `cd` to the root; fmt check via `find`. No consumer
    breakage: the module paths do not move.
 3. **markdown, httpserver** (~0.5 day and ~0.25 day): moves as above;
@@ -271,8 +314,8 @@ broken by it landing first.
    full `test.sh` against real `git` as today.
 5. **Monorepo apps/** (~0.5 day): mirror 2–4; keeps the extractions and
    monorepo in step.
-6. **Phase B / Phase 2**, only on demand (grouping gitui's modules:
-   ~0.5 day; wrapped identity: 2–3 days).
+6. **Phase B**, at the owner's taste (grouping gitui's modules: ~0.5 day).
+   There is no Phase 2: wrapped identity was decided against.
 
 Total for phase 1 across everything: roughly 3.5–4 working days, of which
 the compiler is already prototyped.
@@ -280,7 +323,7 @@ the compiler is already prototyped.
 ## 6. Prototype status
 
 Implemented in `src/ast.rs` (`Import.path`), `parser.rs` (dotted
-imports), `fmt.rs`, `deps.rs` (`resolve_package`, `package_root`,
+imports), `fmt.rs`, `deps.rs` (`resolve_package`, `read_manifest`,
 `declares`) and `modules.rs` (`find_root`, `Site`, `locate`, the
 collision/not-found messages); `gates.sh` updated as in section 3.
 Corpus cases under `corpus/modules/dir-import-*`: basic nesting
@@ -294,21 +337,17 @@ wins, imports resolve from the root not the importer).
 
 ## 7. Open questions
 
-1. **The marker name.** I reused `deps` because it already exists and
-   was already "the project file". A repo with no dependencies needs an
-   empty `deps` just to say "this is the root", which is odd. Options:
-   keep it, or add an explicit empty-allowed `m31.toml`-style marker
-   later. Recommendation: keep `deps`; revisit if it confuses anyone.
-2. **Phase 2 timing** (wrapped identity): wait for a concrete collision,
-   or schedule it so `tui` can drop its prefix?
-3. **Monorepo sibling imports.** Within `m31/`, `apps/git` wants `tui`
-   from `apps/tui`. Either the monorepo gets a `deps` line pointing
-   at a path (`tui ../apps/tui` — works with git paths today but needs
-   a ref), or apps/git stays on a copy until the split is complete.
-4. **Directory name grammar.** Segments must be identifiers, so
-   `term-markdown/` as a *dependency directory* or `my-dir/` cannot be
-   imported. Fine for now; say so in `reference.md`.
-5. **Transitive deps.** Still v0 (consumer lists them). Revisit when a
-   dependency has its own `deps`.
-6. **`m31c fmt --check -r`.** Worth adding so each repo's CI does not
-   need a `find`.
+All closed.
+
+1. **The marker name.** Stays `deps`. It is now a real project file (required
+   `name`/`version` header), so it is no longer an "empty marker".
+2. **Phase 2 (wrapped identity).** Decided against, permanently: module names
+   stay globally unique and descriptive (`form_button` or `formButton`,
+   never a bare `button`). A feature, not a limitation (section 3).
+3. **Monorepo sibling imports.** Solved by path dependencies:
+   `apps/git/deps` says `tui path ../tui` and the dependency is used in place.
+4. **Directory name grammar.** Directory names used in an import must be
+   identifiers (`[A-Za-z_][A-Za-z0-9_]*`); documented in `reference.md`.
+5. **Transitive deps.** Still v0: a dependency's own `deps` are not followed,
+   the consumer lists them.
+6. **`m31c fmt --check -r`.** Done (section 5).

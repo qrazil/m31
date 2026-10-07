@@ -1,0 +1,3 @@
+pub str loud(str s) {
+    return concat(s, "!");
+}

@@ -4,8 +4,8 @@
 // itself. See docs/project-layout-decision.md.
 import greet;
 import ui.panel;
-import ui.widgets.button;
+import ui.widgets.form_button;
 
 print(greet.hello());
 print(panel.frame("hi"));
-print(button.render("ok"));
+print(form_button.render("ok"));

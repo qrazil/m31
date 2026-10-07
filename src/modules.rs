@@ -209,6 +209,10 @@ pub fn load(entry: &str) -> Result<Loaded, Located> {
     let entry_path = Path::new(entry);
     let entry_dir = entry_path.parent().unwrap_or(Path::new("."));
     let root = find_root(entry_dir).unwrap_or_else(|| entry_dir.to_path_buf());
+    // The project file is validated up front: a `deps` with no header is a
+    // mistake wherever the program happens to notice it, and a program whose
+    // imports never reach a dependency would otherwise never find out.
+    crate::deps::read_manifest(&root)?;
     let ext = entry_path
         .extension()
         .map(|e| e.to_string_lossy().into_owned())
@@ -533,8 +537,8 @@ impl Loader {
             let found = crate::deps::resolve_package(&self.root, first, &rel)?
                 .expect("`declares` just said the dependency is named");
             return Ok(Site {
-                path: found.to_string_lossy().into_owned(),
-                root: crate::deps::package_root(&self.root, first),
+                path: found.file.to_string_lossy().into_owned(),
+                root: found.root,
                 dotted: true,
                 shown,
                 looked_for: format!("`{rel}` in dependency `{first}`"),
@@ -682,12 +686,13 @@ mod tests {
         p.to_string_lossy().into_owned()
     }
 
+    const HEADER: &str = "name test\nversion 0.1.0\n";
     const LIB: &str = "pub int one() {\n    return 1;\n}\n";
 
     #[test]
     fn a_deps_file_above_the_entry_makes_its_directory_the_root() {
         let d = scratch();
-        write(&d, "deps", "# no dependencies\n");
+        write(&d, "deps", HEADER);
         write(&d, "repo.m31", LIB);
         let t = write(
             &d,
@@ -716,7 +721,7 @@ mod tests {
     #[test]
     fn the_search_for_deps_stops_at_a_repository_boundary() {
         let d = scratch();
-        write(&d, "deps", "");
+        write(&d, "deps", HEADER);
         std::fs::create_dir_all(d.join("proj/.git")).unwrap();
         write(&d, "proj/repo.m31", LIB);
         let t = write(
@@ -731,8 +736,8 @@ mod tests {
     #[test]
     fn the_nearest_deps_file_wins() {
         let d = scratch();
-        write(&d, "deps", "");
-        write(&d, "inner/deps", "");
+        write(&d, "deps", HEADER);
+        write(&d, "inner/deps", HEADER);
         assert_eq!(find_root(&d.join("inner/tests")), Some(d.join("inner")));
         assert_eq!(find_root(&d.join("tests")), Some(d.clone()));
     }
@@ -740,7 +745,7 @@ mod tests {
     #[test]
     fn imports_resolve_from_the_root_not_from_the_importing_file() {
         let d = scratch();
-        write(&d, "deps", "");
+        write(&d, "deps", HEADER);
         write(
             &d,
             "a/x.m31",
