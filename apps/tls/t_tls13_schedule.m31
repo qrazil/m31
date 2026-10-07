@@ -1,0 +1,112 @@
+// The TLS 1.3 key schedule (`lib/tls13_schedule.m31`) fed RFC 8448's traces.
+// Every line this prints is printed again by `oracle_tls13_schedule.py`, which
+// derives the same values from `hashlib`, `hmac` and the `cryptography`
+// package's HKDF-Expand, and asserts RFC 8448's published ones against them.
+// `test_tls13.sh` hands this program the RFC's messages as arguments:
+//
+//   shared_secret psk client_hello server_hello encrypted_extensions
+//   certificate certificate_verify server_finished client_finished
+//   psk_client_hello
+//
+//   ./build.sh apps/tls/t_tls13_schedule.m31 -o t_tls13_schedule
+//   ./t_tls13_schedule <hex>...
+
+import os;
+import sha256;
+import tls13_hex;
+import tls13_schedule;
+
+List<str> arguments = os.args();
+if (arguments.size() != 11) {
+    trap("t_tls13_schedule: expected 10 hex arguments");
+}
+bytes shared_secret = tls13_hex.decode(arguments[1]);
+bytes psk = tls13_hex.decode(arguments[2]);
+bytes client_hello = tls13_hex.decode(arguments[3]);
+bytes server_hello = tls13_hex.decode(arguments[4]);
+bytes encrypted_extensions = tls13_hex.decode(arguments[5]);
+bytes certificate = tls13_hex.decode(arguments[6]);
+bytes certificate_verify = tls13_hex.decode(arguments[7]);
+bytes server_finished = tls13_hex.decode(arguments[8]);
+bytes client_finished = tls13_hex.decode(arguments[9]);
+bytes psk_client_hello = tls13_hex.decode(arguments[10]);
+
+void show(str name, bytes value) {
+    print(name + " " + value.hex());
+}
+
+void show_keys(str name, bytes traffic_secret) {
+    show(name + ".key16", tls13_schedule.sized_traffic_key(traffic_secret, 16));
+    show(name + ".key32", tls13_schedule.traffic_key(traffic_secret));
+    show(name + ".iv", tls13_schedule.traffic_iv(traffic_secret));
+    tls13_schedule.TrafficKeys both = tls13_schedule.traffic_keys(traffic_secret);
+    show(name + ".pair_key", both.key);
+    show(name + ".pair_iv", both.iv);
+}
+
+show("empty_hash", tls13_schedule.empty_hash());
+// A full handshake without a PSK: RFC 8448 §3.
+bytes early = tls13_schedule.early_secret([]);
+show("early", early);
+bytes handshake = tls13_schedule.handshake_secret(early, shared_secret);
+show("handshake", handshake);
+tls13_schedule.Transcript transcript = tls13_schedule.transcript();
+transcript.add(client_hello);
+transcript.add(server_hello);
+bytes hello_hash = transcript.digest();
+show("hello_hash", hello_hash);
+show("hello_hash_again", transcript.digest());
+bytes client_handshake = tls13_schedule.client_handshake_traffic_secret(handshake, hello_hash);
+bytes server_handshake = tls13_schedule.server_handshake_traffic_secret(handshake, hello_hash);
+show("client_handshake_traffic", client_handshake);
+show("server_handshake_traffic", server_handshake);
+show_keys("client_handshake", client_handshake);
+show_keys("server_handshake", server_handshake);
+show("client_finished_key", tls13_schedule.finished_key(client_handshake));
+show("server_finished_key", tls13_schedule.finished_key(server_handshake));
+transcript.add(encrypted_extensions);
+transcript.add(certificate);
+transcript.add(certificate_verify);
+bytes verify_hash = transcript.digest();
+show("verify_hash", verify_hash);
+show("server_verify_data", tls13_schedule.finished_verify_data(tls13_schedule.finished_key(server_handshake), verify_hash));
+transcript.add(server_finished);
+bytes finished_hash = transcript.digest();
+show("finished_hash", finished_hash);
+show("client_verify_data", tls13_schedule.finished_verify_data(tls13_schedule.finished_key(client_handshake), finished_hash));
+bytes master = tls13_schedule.master_secret(handshake);
+show("master", master);
+bytes client_application = tls13_schedule.client_application_traffic_secret(master, finished_hash);
+bytes server_application = tls13_schedule.server_application_traffic_secret(master, finished_hash);
+show("client_application_traffic", client_application);
+show("server_application_traffic", server_application);
+show("exporter_master", tls13_schedule.exporter_master_secret(master, finished_hash));
+show_keys("client_application", client_application);
+show_keys("server_application", server_application);
+transcript.add(client_finished);
+show("resumption_master", tls13_schedule.resumption_master_secret(master, transcript.digest()));
+// KeyUpdate, RFC 8446 §7.2: twice, so that the second runs on the first's output.
+bytes client_next = tls13_schedule.next_traffic_secret(client_application);
+bytes server_next = tls13_schedule.next_traffic_secret(server_application);
+show("client_application_next", client_next);
+show("server_application_next", server_next);
+show("client_application_next2", tls13_schedule.next_traffic_secret(client_next));
+show_keys("client_application_next", client_next);
+// A HelloRetryRequest rewrites the transcript to a message_hash of the first
+// ClientHello, then the HelloRetryRequest (stood in for by the ServerHello
+// bytes) and the second ClientHello (stood in for by the PSK one) follow.
+tls13_schedule.Transcript retried = tls13_schedule.transcript();
+retried.add(client_hello);
+retried.restart_after_retry_request();
+show("retry_restarted", retried.digest());
+retried.add(server_hello);
+retried.add(psk_client_hello);
+show("retry_final", retried.digest());
+// A resumed handshake with a PSK: RFC 8448 §4.
+bytes early_psk = tls13_schedule.early_secret(psk);
+show("psk_early", early_psk);
+show("psk_binder_key_resumption", tls13_schedule.binder_key(early_psk, true));
+show("psk_binder_key_external", tls13_schedule.binder_key(early_psk, false));
+tls13_schedule.Transcript psk_transcript = tls13_schedule.transcript();
+psk_transcript.add(psk_client_hello);
+show("psk_client_early_traffic", tls13_schedule.client_early_traffic_secret(early_psk, psk_transcript.digest()));

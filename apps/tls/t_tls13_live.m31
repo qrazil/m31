@@ -1,0 +1,83 @@
+// A real server's bytes through `tls13_record`: what `openssl s_server
+// -tls1_3 -ciphersuites TLS_CHACHA20_POLY1305_SHA256` sent a client, with the
+// server's traffic secrets from its key log. `live_tls13.py` captures the
+// bytes and checks what this prints; `test_tls13.sh` runs it and skips it,
+// without failing, if OpenSSL is not there or does not cooperate.
+//
+//   t_tls13_live <server bytes> <server_handshake_traffic_secret>
+//                <server_traffic_secret_0>      (all hex)
+
+import io;
+import os;
+import sha256;
+import tls13_hex;
+import tls13_record;
+
+void say(str text) {
+    print(text);
+}
+
+List<str> arguments = os.args();
+if (arguments.size() != 4) {
+    trap("t_tls13_live: expected the capture and two traffic secrets as hex");
+}
+tls13_record.Connection connection = tls13_record.connection(io.buffer_of(tls13_hex.decode(arguments[1])));
+bytes handshake_secret = tls13_hex.decode(arguments[2]);
+bytes application_secret = tls13_hex.decode(arguments[3]);
+match (connection.receive_handshake()) {
+    case Ok(bytes server_hello): {
+        say("handshake type=" + str(server_hello[0]) + " size=" + str(server_hello.size()));
+    }
+    case Err(tls13_record.Error hello_error): {
+        say("error " + hello_error.to_str());
+        os.exit(1);
+    }
+}
+match (connection.install_read_keys(handshake_secret)) {
+    case Ok: {
+    }
+    case Err(tls13_record.Error key_error): {
+        say("error " + key_error.to_str());
+        os.exit(1);
+    }
+}
+bool finished = false;
+while (!finished) {
+    match (connection.receive_handshake()) {
+        case Ok(bytes message): {
+            say("handshake type=" + str(message[0]) + " size=" + str(message.size()));
+            finished = message[0] == 20;
+        }
+        case Err(tls13_record.Error message_error): {
+            say("error " + message_error.to_str());
+            os.exit(1);
+        }
+    }
+}
+match (connection.install_read_keys(application_secret)) {
+    case Ok: {
+    }
+    case Err(tls13_record.Error key_error): {
+        say("error " + key_error.to_str());
+        os.exit(1);
+    }
+}
+bytes received = [];
+bool ended = false;
+while (!ended) {
+    match (connection.receive_application()) {
+        case Ok(bytes data): {
+            if (data.size() == 0) {
+                ended = true;
+            } else {
+                received.extend(data);
+            }
+        }
+        case Err(tls13_record.Error data_error): {
+            say("error " + data_error.to_str());
+            os.exit(1);
+        }
+    }
+}
+say("application size=" + str(received.size()) + " sha256=" + sha256.sum(received).hex());
+say("close_notify " + str(connection.received_close_notify()));
