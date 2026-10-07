@@ -1,0 +1,182 @@
+// The TLS client under test, driven from `test_tls.sh`.
+//
+//   t_tls_client <mode> <host> <port> <pin as 64 hex digits> [argument]
+//
+// Modes, each printing what it saw and exiting 0 on success, or printing
+// `error: <reason>` and exiting 1 when the connection failed:
+//   handshake          connect, then close
+//   get <path>         GET over `lib/http.m31`'s own request and response code
+//   echo <text>        send `text` and a newline, print the line that comes back
+//   read_all [text]    send `text` (if any), then read to the server's close
+//   read_line          print the first line the server sends
+//   twice <text>       echo `text`, then once more, then print what `last_error` says
+
+import http;
+import io;
+import os;
+import tls;
+
+void fail(str reason) {
+    print("error: " + reason);
+    os.exit(1);
+}
+
+void describe(tls.Conn conn, io.Error cause) {
+    match (conn.last_error()) {
+        case Some(tls.Error reason): {
+            fail(reason.to_str());
+        }
+        case None: {
+            fail("io: " + cause.to_str());
+        }
+    }
+}
+
+tls.Trust trust_from(str text) {
+    match (tls.pinned_key_hex(text)) {
+        case Some(tls.Trust trust): {
+            return trust;
+        }
+        case None: {
+            trap("t_tls_client: the pin must be 64 hex digits");
+        }
+    }
+}
+
+tls.Conn open(str host, int port, tls.Trust trust) {
+    match (tls.connect(host, port, trust)) {
+        case Ok(tls.Conn conn): {
+            return conn;
+        }
+        case Err(tls.Error connect_error): {
+            fail(connect_error.to_str());
+            trap("unreachable");
+        }
+    }
+}
+
+str read_line(tls.Conn conn) {
+    match (conn.read_until("\n".to_bytes(), 4096)) {
+        case Ok(bytes line): {
+            match (line.utf8()) {
+                case Some(str text): {
+                    return text.substr(0, text.size() - 1);
+                }
+                case None: {
+                    fail("the line is not text");
+                    trap("unreachable");
+                }
+            }
+        }
+        case Err(io.Error read_error): {
+            describe(conn, read_error);
+            trap("unreachable");
+        }
+    }
+}
+
+void write_text(tls.Conn conn, str text) {
+    match (conn.write(text.to_bytes())) {
+        case Ok(int sent): {
+        }
+        case Err(io.Error write_error): {
+            describe(conn, write_error);
+        }
+    }
+}
+
+void get(tls.Conn conn, str host, str path) {
+    match (http.request("GET", "http://" + host + path)) {
+        case Err(http.Error request_error): {
+            fail(request_error.to_str());
+        }
+        case Ok(http.Request request): {
+            match (http.write_request(conn, request)) {
+                case Err(http.Error write_error): {
+                    fail("write: " + write_error.to_str());
+                }
+                case Ok: {
+                }
+            }
+            match (http.read_response(conn, "GET")) {
+                case Err(http.Error read_error): {
+                    fail("read: " + read_error.to_str());
+                }
+                case Ok(http.Response response): {
+                    print("status " + str(response.status()));
+                    print("body " + str(response.body().size()));
+                    match (response.text()) {
+                        case Ok(str text): {
+                            print(text);
+                        }
+                        case Err(http.Error text_error): {
+                            fail(text_error.to_str());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+void read_all(tls.Conn conn) {
+    match (conn.read_all()) {
+        case Ok(bytes data): {
+            print("read_all " + str(data.size()));
+        }
+        case Err(io.Error read_error): {
+            describe(conn, read_error);
+        }
+    }
+}
+
+List<str> arguments = os.args();
+if (arguments.size() < 5) {
+    trap("t_tls_client: <mode> <host> <port> <pin hex> [argument]");
+}
+str mode = arguments[1];
+str host = arguments[2];
+int port = 0;
+match (arguments[3].parse_int()) {
+    case Some(int parsed): {
+        port = parsed;
+    }
+    case None: {
+        trap("t_tls_client: the port is a number");
+    }
+}
+str extra = "";
+if (arguments.size() > 5) {
+    extra = arguments[5];
+}
+tls.Conn conn = open(host, port, trust_from(arguments[4]));
+if (mode == "handshake") {
+    print("connected");
+} else if (mode == "get") {
+    get(conn, host, extra);
+} else if (mode == "echo") {
+    write_text(conn, extra + "\n");
+    print("line " + read_line(conn));
+} else if (mode == "read_line") {
+    print("line " + read_line(conn));
+} else if (mode == "read_all") {
+    if (extra != "") {
+        write_text(conn, extra);
+    }
+    read_all(conn);
+} else if (mode == "twice") {
+    write_text(conn, extra + "\n");
+    print("line " + read_line(conn));
+    write_text(conn, extra + "\n");
+    print("line " + read_line(conn));
+} else {
+    trap("t_tls_client: unknown mode " + mode);
+}
+match (conn.close()) {
+    case Ok(bool closed): {
+        print("closed");
+    }
+    case Err(io.Error close_error): {
+        fail("close: " + close_error.to_str());
+    }
+}
