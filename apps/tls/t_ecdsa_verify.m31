@@ -1,0 +1,116 @@
+// ECDSA verification (`lib/ecdsa.m31`) against the cases `ecdsa_oracle.py`
+// generates with the `cryptography` package. Reads the vector file named on
+// the command line and prints one `name verdict` line per case; `test_ecdsa.sh`
+// diffs that against the oracle's own expected list, so no expectation is
+// written down in this program.
+//
+//   python3 apps/tls/ecdsa_oracle.py vectors.txt expected.txt
+//   ./build.sh apps/tls/t_ecdsa_verify.m31 -o t_ecdsa_verify && ./t_ecdsa_verify vectors.txt
+//
+// Timing goes to stderr: the average of the whole check over the accepted
+// signatures of each curve (a rejection can stop early, so it is left out),
+// DER and raw alike, plus the one-off curve setup.
+
+import ecdsa;
+import bignum;
+import io;
+import os;
+import date;
+
+int verdict(bool accepted) {
+    if (accepted) {
+        return 1;
+    }
+    return 0;
+}
+
+bytes decode(str hex) {
+    match (bignum.bytes_from_hex(hex)) {
+        case None: {
+            return [];
+        }
+        case Some(bytes decoded): {
+            return decoded;
+        }
+    }
+}
+
+ecdsa.Curve curve_named(str name, ecdsa.Curve first, ecdsa.Curve second) {
+    if (name == "p256") {
+        return first;
+    }
+    return second;
+}
+
+int run_case(List<str> fields, ecdsa.Curve first, ecdsa.Curve second) {
+    ecdsa.Curve curve = curve_named(fields[2], first, second);
+    if (fields[0] == "key") {
+        match (ecdsa.parse_public_key(curve, decode(fields[3]))) {
+            case None: {
+                return 0;
+            }
+            case Some(ecdsa.PublicKey key): {
+                return 1;
+            }
+        }
+    }
+    match (ecdsa.parse_public_key(curve, decode(fields[4]))) {
+        case None: {
+            return 0;
+        }
+        case Some(ecdsa.PublicKey key): {
+            bytes digest = decode(fields[5]);
+            bytes signature = decode(fields[6]);
+            if (fields[3] == "der") {
+                return verdict(ecdsa.verify_der(curve, key, digest, signature));
+            }
+            return verdict(ecdsa.verify_raw(curve, key, digest, signature));
+        }
+    }
+}
+
+List<str> argv = os.args();
+if (argv.size() < 2) {
+    io.eprint("usage: t_ecdsa_verify VECTORS");
+} else {
+    match (io.read(argv[1])) {
+        case Err(io.Error error): {
+            io.eprint("cannot read " + argv[1] + ": " + error.to_str());
+        }
+        case Ok(str text): {
+            int setup_start = date.now_ns();
+            ecdsa.Curve first = ecdsa.p256();
+            ecdsa.Curve second = ecdsa.p384();
+            io.eprint("curve setup: " + ((date.now_ns() - setup_start) / 1_000_000).to_str() + " ms (both curves)");
+            int p256_ns = 0;
+            int p256_count = 0;
+            int p384_ns = 0;
+            int p384_count = 0;
+            for (str line in text.split("\n")) {
+                if (line == "") {
+                    continue;
+                }
+                List<str> fields = line.split("|");
+                int began = date.now_ns();
+                int answer = run_case(fields, first, second);
+                int spent = date.now_ns() - began;
+                if (fields[0] == "sig" && answer == 1) {
+                    if (fields[2] == "p256") {
+                        p256_ns = p256_ns + spent;
+                        p256_count = p256_count + 1;
+                    } else {
+                        p384_ns = p384_ns + spent;
+                        p384_count = p384_count + 1;
+                    }
+                }
+                print(fields[1] + " " + answer.to_str());
+            }
+            if (p256_count > 0) {
+                io.eprint("p256: " + p256_count.to_str() + " accepted signatures, " + (p256_ns / p256_count / 1_000).to_str() + " us each on average");
+            }
+            if (p384_count > 0) {
+                io.eprint("p384: " + p384_count.to_str() + " accepted signatures, " + (p384_ns / p384_count / 1_000).to_str() + " us each on average");
+            }
+        }
+    }
+}
