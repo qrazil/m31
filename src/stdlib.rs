@@ -52,6 +52,7 @@ pub fn source(name: &str) -> Option<&'static str> {
         "bignum" => include_str!("../lib/bignum.m31"),
         "ecdsa" => include_str!("../lib/ecdsa.m31"),
         "x509" => include_str!("../lib/x509.m31"),
+        "rsa" => include_str!("../lib/rsa.m31"),
         "tls13_schedule" => include_str!("../lib/tls13_schedule.m31"),
         "tls13_record" => include_str!("../lib/tls13_record.m31"),
         _ => return None,
