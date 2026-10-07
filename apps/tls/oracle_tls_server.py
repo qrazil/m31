@@ -18,7 +18,8 @@ complete the handshake with the modes that are right (`ok`, `ticket`,
 `truncate`, `truncate_clean`, `peer_alert`) and refuse the rest:
   bad_finished        the server's Finished has one bit flipped
   bad_signature       CertificateVerify signs the client's context string
-  wrong_scheme        CertificateVerify names rsa_pss_rsae_sha256, never offered
+  wrong_scheme        CertificateVerify names rsa_pkcs1_sha256, offered only for certificates
+  scheme_rsa_on_ec    a P-256 key, but rsa_pss_rsae_sha256 (offered) claimed
   scheme_mismatch     a P-256 key, but ecdsa_secp384r1_sha384 claimed
   bad_record          one bit of the EncryptedExtensions record is flipped
   hrr                 a HelloRetryRequest
@@ -308,6 +309,8 @@ def serve(peer, mode, curve, key, certificate_der):
         scheme, algorithm = 0x0503, ec.ECDSA(hashes.SHA384())
     signature = key.sign(context, algorithm)
     if mode == "wrong_scheme":
+        scheme = 0x0401
+    if mode == "scheme_rsa_on_ec":
         scheme = 0x0804
     if mode == "scheme_mismatch":
         scheme = 0x0503 if curve == "p256" else 0x0403
