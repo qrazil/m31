@@ -133,7 +133,7 @@ else
     oracle ok_p256 ok p256 echo hello $LOCAL '^line echo: hello\nclosed$' 0 'client_finished ok'
     oracle ok_p384 ok p384 echo hello $LOCAL '^line echo: hello\nclosed$' 0 'client_finished ok'
     oracle offers ok p256 handshake '' $LOCAL '^connected\nclosed$' 0 \
-        'offered suites=1303 groups=001d versions=0304 sigalgs=0403,0503 extensions='
+        'offered suites=1303 groups=001d versions=0304 sigalgs=0403,0503,0804,0805,0806 extensions='
     ORACLE_BIND=::1 oracle sni ok p256 handshake '' localhost '^connected\nclosed$' 0 'sni=localhost'
     oracle no_sni_for_address ok p256 handshake '' $LOCAL '^connected\nclosed$' 0 'sni=none'
     oracle session_id ok p256 handshake '' $LOCAL '^connected\nclosed$' 0 'session_id_length=32'
@@ -153,6 +153,7 @@ else
     oracle bad_signature bad_signature p256 handshake '' $LOCAL "^error: the server's CertificateVerify signature is wrong$" 1 'client alert 51'
     oracle bad_signature_p384 bad_signature p384 handshake '' $LOCAL "^error: the server's CertificateVerify signature is wrong$" 1 'client alert 51'
     oracle scheme_not_offered wrong_scheme p256 handshake '' $LOCAL '^error: the server signed with a scheme that was not offered' 1 'client alert 47'
+    oracle scheme_rsa_on_ec_key scheme_rsa_on_ec p256 handshake '' $LOCAL '^error: the server signed with a scheme that was not offered' 1 'client alert 47'
     oracle scheme_wrong_curve scheme_mismatch p256 handshake '' $LOCAL '^error: the server signed with a scheme that was not offered' 1 'client alert 47'
     oracle bad_record_tag bad_record p256 handshake '' $LOCAL "^error: a record's authentication tag did not verify$" 1 -
     oracle hello_retry_request hrr p256 handshake '' $LOCAL '^error: the server sent a HelloRetryRequest' 1 'client alert 40'

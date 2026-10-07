@@ -1,0 +1,117 @@
+// Every root of a CA bundle, checked against itself, driven from
+// `test_chain.sh`.
+//
+//   t_chain_roots <bundle.pem>
+//
+// A root is self-issued, so its own signature has to verify under its own key:
+// the ECDSA and RSA code of `lib/x509_chain.m31` run over the real, varied
+// certificates of the system's roots. Prints one `fail` line per root that does
+// not verify (`self <family> <reason> signature <OID>`) and then the counts
+//
+//   roots <parsed> skipped <not parseable> rsa <n> ecdsa <n> other <n>
+//   verified <n> weak <n> unsupported <n> failed <n>
+//
+// `weak` is a root whose own signature uses MD5 or SHA-1: policy refuses such a
+// signature, and it never matters, since a root is trusted by its key and its
+// self-signature is not checked on a path. Exits 0 when no root `failed`, that
+// is when every root signed with a hash this client accepts verified.
+
+import io;
+import os;
+import x509;
+import x509_chain;
+
+List<str> arguments = os.args();
+if (arguments.size() != 2) {
+    trap("t_chain_roots: <bundle.pem>");
+}
+str text = "";
+match (io.read(arguments[1])) {
+    case Ok(str contents): {
+        text = contents;
+    }
+    case Err(io.Error read_error): {
+        trap("t_chain_roots: cannot read " + arguments[1]);
+    }
+}
+int failed = 0;
+int unsupported = 0;
+int weak = 0;
+int verified = 0;
+int rsa = 0;
+int ecdsa = 0;
+int other = 0;
+int roots = 0;
+int skipped = 0;
+match (x509_chain.parse_anchors(text)) {
+    case Err(x509.Error pem_error): {
+        trap("t_chain_roots: the bundle is not PEM");
+    }
+    case Ok(x509_chain.AnchorSet anchors): {
+        roots = anchors.certificates.size();
+        skipped = anchors.skipped;
+        for (x509.Certificate root in anchors.certificates) {
+            str family = "other";
+            if (root.public_key.algorithm == x509.OID_RSA_ENCRYPTION) {
+                family = "rsa";
+                rsa = rsa + 1;
+            } else if (root.public_key.algorithm == x509.OID_EC_PUBLIC_KEY) {
+                family = "ecdsa";
+                ecdsa = ecdsa + 1;
+            } else {
+                other = other + 1;
+            }
+            match (x509_chain.check_signed_by(root, root)) {
+                case Ok: {
+                    verified = verified + 1;
+                }
+                case Err(x509_chain.Error failure): {
+                    match (failure) {
+                        case UnsupportedAlgorithm: {
+                            unsupported = unsupported + 1;
+                        }
+                        case EmptyChain: {
+                            failed = failed + 1;
+                        }
+                        case UnknownAuthority: {
+                            failed = failed + 1;
+                        }
+                        case Expired: {
+                            failed = failed + 1;
+                        }
+                        case NotYetValid: {
+                            failed = failed + 1;
+                        }
+                        case HostnameMismatch: {
+                            failed = failed + 1;
+                        }
+                        case NotCertificateAuthority: {
+                            failed = failed + 1;
+                        }
+                        case PathLengthExceeded: {
+                            failed = failed + 1;
+                        }
+                        case WrongPurpose: {
+                            failed = failed + 1;
+                        }
+                        case BadSignature: {
+                            failed = failed + 1;
+                        }
+                        case WeakAlgorithm: {
+                            weak = weak + 1;
+                        }
+                        case TooDeep: {
+                            failed = failed + 1;
+                        }
+                    }
+                    print("self " + family + " " + failure.to_str() + " signature " + root.signature_algorithm.algorithm_oid);
+                }
+            }
+        }
+    }
+}
+print("roots " + roots.to_str() + " skipped " + skipped.to_str() + " rsa " + rsa.to_str() + " ecdsa " + ecdsa.to_str() + " other " + other.to_str());
+print("verified " + verified.to_str() + " weak " + weak.to_str() + " unsupported " + unsupported.to_str() + " failed " + failed.to_str());
+if (failed > 0) {
+    os.exit(1);
+}
