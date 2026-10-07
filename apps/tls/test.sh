@@ -81,7 +81,8 @@ fi
 if ! python3 -c 'import cryptography' 2>/dev/null; then
     bad "oracles" "the 'cryptography' package is not importable -- pip install cryptography"
 else
-    check hmac "hashlib/hmac (RFC 4231 cases plus a message-length by key-length grid)"
+    check sha384 "hashlib (FIPS 180-4 vectors, a 0-260 length sweep, a million-a in chunks)"
+    check hmac "hashlib/hmac (RFC 4231 SHA-256 and SHA-384 cases plus a message-length by key-length grid)"
     check hkdf "an independent RFC 5869/8446 implementation (RFC 5869 and RFC 8448 values, expand cross-checked against OpenSSL)"
 fi
 

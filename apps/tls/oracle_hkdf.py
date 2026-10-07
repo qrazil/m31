@@ -20,37 +20,37 @@ def pattern(n, multiplier, offset):
     return bytes((i * multiplier + offset) & 0xFF for i in range(n))
 
 
-def extract(salt, ikm):
+def extract(salt, ikm, name="sha256"):
     if len(salt) == 0:
-        salt = b"\x00" * 32
-    return hmac.new(salt, ikm, "sha256").digest()
+        salt = b"\x00" * hashlib.new(name).digest_size
+    return hmac.new(salt, ikm, name).digest()
 
 
-def expand(prk, info, length):
+def expand(prk, info, length, name="sha256"):
     out = b""
     previous = b""
     counter = 1
     while len(out) < length:
-        previous = hmac.new(prk, previous + info + bytes([counter]), "sha256").digest()
+        previous = hmac.new(prk, previous + info + bytes([counter]), name).digest()
         out += previous
         counter += 1
     return out[:length]
 
 
-def expand_cross_check(prk, info, length):
+def expand_cross_check(prk, info, length, algorithm=None):
     if length == 0:
         return b""
-    return HKDFExpand(hashes.SHA256(), length, info).derive(prk)
+    return HKDFExpand(algorithm or hashes.SHA256(), length, info).derive(prk)
 
 
-def expand_label(secret, label, context, length):
+def expand_label(secret, label, context, length, name="sha256"):
     full = b"tls13 " + label.encode()
     info = struct.pack(">H", length) + bytes([len(full)]) + full + bytes([len(context)]) + context
-    return expand(secret, info, length)
+    return expand(secret, info, length, name)
 
 
-def derive_secret(secret, label, transcript_hash):
-    return expand_label(secret, label, transcript_hash, 32)
+def derive_secret(secret, label, transcript_hash, name="sha256"):
+    return expand_label(secret, label, transcript_hash, hashlib.new(name).digest_size, name)
 
 
 out = []
@@ -127,5 +127,35 @@ for label in LABELS:
     out.append("derive %s %s" % (label, derive_secret(label_secret, label, transcript).hex()))
 
 out.append("longest-label " + expand_label(label_secret, "k" * 249, b"", 16).hex())
+
+# The SHA-384 flavour: the same sweeps over a 48-octet key.
+for salt_size in SALT_SIZES:
+    for ikm_size in IKM_SIZES:
+        out.append("extract384 salt%d ikm%d %s" % (
+            salt_size, ikm_size,
+            extract(pattern(salt_size, 5, 3), pattern(ikm_size, 9, 1), "sha384").hex()))
+
+OUTPUT_SIZES_384 = [0, 1, 47, 48, 49, 95, 96, 97, 100, 255, 1000, 12240]
+expand_key_384 = pattern(48, 3, 7)
+for output_size in OUTPUT_SIZES_384:
+    for info_size in INFO_SIZES:
+        info = pattern(info_size, 13, 2)
+        got = expand(expand_key_384, info, output_size, "sha384")
+        assert got == expand_cross_check(expand_key_384, info, output_size, hashes.SHA384()), \
+            "cryptography HKDFExpand (SHA-384) disagrees"
+        out.append("expand384 len%d info%d %s" % (output_size, info_size, got.hex()))
+
+label_secret_384 = pattern(48, 17, 29)
+for label in LABELS:
+    for output_size in LABEL_OUTPUT_SIZES:
+        for context_size in CONTEXT_SIZES:
+            context = pattern(context_size, 19, 31)
+            out.append("label384 %s len%d ctx%d %s" % (
+                label, output_size, context_size,
+                expand_label(label_secret_384, label, context, output_size, "sha384").hex()))
+    transcript = hashlib.sha384(label.encode()).digest()
+    out.append("derive384 %s %s" % (label, derive_secret(label_secret_384, label, transcript, "sha384").hex()))
+
+out.append("longest-label384 " + expand_label(label_secret_384, "k" * 249, b"", 16, "sha384").hex())
 
 print("\n".join(out))

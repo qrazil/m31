@@ -42,6 +42,20 @@ for number, (key, data) in CASES.items():
     assert got == RFC4231_SHA256[number], "RFC 4231 case %d disagrees with hashlib" % number
     out.append("rfc4231-%d %s" % (number, got))
 
+# RFC 4231 §4: published HMAC-SHA-384 digests.
+RFC4231_SHA384 = {
+    1: "afd03944d84895626b0825f4ab46907f15f9dadbe4101ec682aa034c7cebc59cfaea9ea9076ede7f4af152e8b2fa9cb6",
+    2: "af45d2e376484031617f78d2b58a6b1b9c7ef464f5a01b47e42ec3736322445e8e2240ca5e69e2c78b3239ecfab21649",
+    3: "88062608d3e6ad8a0aa2ace014c8a86f0aa635d947ac9febe83ef4e55966144b2a5ab39dc13814b94e3ab6e101a34f27",
+    4: "3e8a69b7783c25851933ab6290af6ca77a9981480850009cc5577c6e1f573b4e6801dd23c4a7d679ccf8a386c674cffb",
+    6: "4ece084485813e9088d2c63a041bc5b44f9ef1012a2b588f3cd11f05033ac4c60c2ef6ab4030fe8296248df163f44952",
+    7: "6617178e941f020d351e2f254e8fd32c602420feb0b8fb9adccebb82461e99c5a678cc31e799176d3860e6110c46523e",
+}
+for number, (key, data) in CASES.items():
+    got = mac("sha384", key, data)
+    assert got == RFC4231_SHA384[number], "RFC 4231 SHA-384 case %d disagrees with hashlib" % number
+    out.append("rfc4231-384-%d %s" % (number, got))
+
 MESSAGE_SIZES = [0, 1, 55, 56, 63, 64, 65, 111, 112, 127, 128, 129, 200, 1000]
 KEY_SIZES = [0, 1, 20, 32, 63, 64, 65, 100, 128, 129, 200]
 
@@ -50,5 +64,12 @@ for key_size in KEY_SIZES:
         key = pattern(key_size, 11, 5)
         message = pattern(message_size, 7, 13)
         out.append("sha256 key%d msg%d %s" % (key_size, message_size, mac("sha256", key, message)))
+
+KEY_SIZES_384 = [0, 1, 48, 100, 127, 128, 129, 200, 300]
+for key_size in KEY_SIZES_384:
+    for message_size in MESSAGE_SIZES:
+        key = pattern(key_size, 11, 5)
+        message = pattern(message_size, 7, 13)
+        out.append("sha384 key%d msg%d %s" % (key_size, message_size, mac("sha384", key, message)))
 
 print("\n".join(out))

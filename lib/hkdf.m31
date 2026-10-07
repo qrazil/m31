@@ -8,11 +8,14 @@
 // ---
 //   hkdf.sha256_extract(salt, input_key_material)        -> bytes, 32 octets
 //   hkdf.sha256_expand(pseudo_random_key, info, length)  -> bytes, `length`
+//   hkdf.sha384_extract(...) / hkdf.sha384_expand(...)   the same over SHA-384:
+//                                                        48-octet keys
 //
 // And RFC 8446 §7.1's two wrappers, which fix `info` to a `HkdfLabel`:
 //
 //   hkdf.sha256_expand_label(secret, label, context, length)
 //   hkdf.sha256_derive_secret(secret, label, transcript_hash)
+//   hkdf.sha384_expand_label(...) / hkdf.sha384_derive_secret(...)
 //
 // `label` is the bare RFC label ("derived", "c hs traffic", "key", ...): the
 // `"tls13 "` prefix the RFC requires on the wire is added here, once, so no
@@ -42,6 +45,8 @@ import hmac;
 
 /// Selector for the SHA-256 flavour of the private engine below.
 const int HASH_SHA256 = 256;
+/// Selector for the SHA-384 flavour.
+const int HASH_SHA384 = 384;
 
 /// HKDF-Extract with SHA-256 (RFC 5869 §2.2): `HMAC(salt, input_key_material)`,
 /// the 32-octet pseudo-random key. An empty `salt` stands for 32 zero octets.
@@ -69,6 +74,31 @@ pub bytes sha256_expand_label(bytes secret, str label, bytes context, int length
 /// the RFC says `""` -- not the messages.
 pub bytes sha256_derive_secret(bytes secret, str label, bytes transcript_hash) {
     return expand_label(HASH_SHA256, secret, label, transcript_hash, digest_size(HASH_SHA256));
+}
+
+/// HKDF-Extract with SHA-384: `HMAC-SHA-384(salt, input_key_material)`, the
+/// 48-octet pseudo-random key. An empty `salt` stands for 48 zero octets.
+pub bytes sha384_extract(bytes salt, bytes input_key_material) {
+    return extract(HASH_SHA384, salt, input_key_material);
+}
+
+/// HKDF-Expand with SHA-384: as `sha256_expand`, over a 48-octet
+/// `pseudo_random_key`. Traps if `length` is negative or more than
+/// 255 * 48 = 12240.
+pub bytes sha384_expand(bytes pseudo_random_key, bytes info, int length) {
+    return expand(HASH_SHA384, pseudo_random_key, info, length);
+}
+
+/// `HKDF-Expand-Label` of RFC 8446 §7.1 with SHA-384; traps as
+/// `sha256_expand_label` does.
+pub bytes sha384_expand_label(bytes secret, str label, bytes context, int length) {
+    return expand_label(HASH_SHA384, secret, label, context, length);
+}
+
+/// `Derive-Secret` of RFC 8446 §7.1 with SHA-384: 48 octets, the transcript
+/// hash passed in as for `sha256_derive_secret`.
+pub bytes sha384_derive_secret(bytes secret, str label, bytes transcript_hash) {
+    return expand_label(HASH_SHA384, secret, label, transcript_hash, digest_size(HASH_SHA384));
 }
 
 bytes extract(int hash, bytes salt, bytes input_key_material) {
@@ -128,9 +158,15 @@ bytes expand_label(int hash, bytes secret, str label, bytes context, int length)
 
 // The hash's output size in octets: HashLen in RFC 5869.
 int digest_size(int hash) {
+    if (hash == HASH_SHA384) {
+        return 48;
+    }
     return 32;
 }
 
 bytes mac_for(int hash, bytes key, bytes message) {
+    if (hash == HASH_SHA384) {
+        return hmac.sha384_mac(key, message);
+    }
     return hmac.sha256_mac(key, message);
 }

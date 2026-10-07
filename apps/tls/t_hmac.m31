@@ -29,6 +29,15 @@ print("rfc4231-4 " + hmac.sha256_hex(pattern(25, 1, 1), [0xCD; 50]));
 print("rfc4231-6 " + hmac.sha256_hex([0xAA; 131], "Test Using Larger Than Block-Size Key - Hash Key First".to_bytes()));
 print("rfc4231-7 " + hmac.sha256_hex([0xAA; 131], "This is a test using a larger than block-size key and a larger than block-size data. The key needs to be hashed before being used by the HMAC algorithm.".to_bytes()));
 
+// --- RFC 4231 §4 again, for HMAC-SHA-384 ----------------------------------------
+
+print("rfc4231-384-1 " + hmac.sha384_hex([0x0B; 20], "Hi There".to_bytes()));
+print("rfc4231-384-2 " + hmac.sha384_hex("Jefe".to_bytes(), "what do ya want for nothing?".to_bytes()));
+print("rfc4231-384-3 " + hmac.sha384_hex([0xAA; 20], [0xDD; 50]));
+print("rfc4231-384-4 " + hmac.sha384_hex(pattern(25, 1, 1), [0xCD; 50]));
+print("rfc4231-384-6 " + hmac.sha384_hex([0xAA; 131], "Test Using Larger Than Block-Size Key - Hash Key First".to_bytes()));
+print("rfc4231-384-7 " + hmac.sha384_hex([0xAA; 131], "This is a test using a larger than block-size key and a larger than block-size data. The key needs to be hashed before being used by the HMAC algorithm.".to_bytes()));
+
 // --- every message length against every key length -----------------------------
 //
 // The lengths straddle the 64-octet block (and the 55/56 padding boundary of
@@ -43,5 +52,18 @@ for (int key_size in KEY_SIZES) {
         bytes key = pattern(key_size, 11, 5);
         bytes message = pattern(message_size, 7, 13);
         print("sha256 key" + key_size.to_str() + " msg" + message_size.to_str() + " " + hmac.sha256_hex(key, message));
+    }
+}
+
+// The same grid for SHA-384, whose block is 128 octets: the key sizes that
+// matter are 127, 128 and 129, and the message sizes 111/112 are its padding
+// boundary.
+const Array<int> KEY_SIZES_384 = [0, 1, 48, 100, 127, 128, 129, 200, 300];
+
+for (int key_size in KEY_SIZES_384) {
+    for (int message_size in MESSAGE_SIZES) {
+        bytes key = pattern(key_size, 11, 5);
+        bytes message = pattern(message_size, 7, 13);
+        print("sha384 key" + key_size.to_str() + " msg" + message_size.to_str() + " " + hmac.sha384_hex(key, message));
     }
 }

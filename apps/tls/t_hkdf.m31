@@ -7,6 +7,7 @@
 
 import hkdf;
 import sha256;
+import sha512;
 
 // `n` octets of a deterministic pattern: `(i * multiplier + offset) & 0xFF`.
 bytes pattern(int n, int multiplier, int offset) {
@@ -103,3 +104,38 @@ for (int i in 0 .. 249) {
     longest_label = longest_label + "k";
 }
 print("longest-label " + hkdf.sha256_expand_label(label_secret, longest_label, [], 16).hex());
+
+// --- the SHA-384 flavour (TLS_AES_256_GCM_SHA384's key schedule) -------------------
+//
+// The same sweeps over a 48-octet key, with the 255 * 48 = 12240-octet maximum
+// and the 48-octet transcript hash of SHA-384.
+
+for (int salt_size in SALT_SIZES) {
+    for (int ikm_size in IKM_SIZES) {
+        bytes salt = pattern(salt_size, 5, 3);
+        bytes ikm = pattern(ikm_size, 9, 1);
+        print("extract384 salt" + salt_size.to_str() + " ikm" + ikm_size.to_str() + " " + hkdf.sha384_extract(salt, ikm).hex());
+    }
+}
+
+const Array<int> OUTPUT_SIZES_384 = [0, 1, 47, 48, 49, 95, 96, 97, 100, 255, 1000, 12240];
+
+bytes expand_key_384 = pattern(48, 3, 7);
+for (int output_size in OUTPUT_SIZES_384) {
+    for (int info_size in INFO_SIZES) {
+        bytes info = pattern(info_size, 13, 2);
+        print("expand384 len" + output_size.to_str() + " info" + info_size.to_str() + " " + hkdf.sha384_expand(expand_key_384, info, output_size).hex());
+    }
+}
+bytes label_secret_384 = pattern(48, 17, 29);
+for (str label in LABELS) {
+    for (int output_size in LABEL_OUTPUT_SIZES) {
+        for (int context_size in CONTEXT_SIZES) {
+            bytes context = pattern(context_size, 19, 31);
+            print("label384 " + label + " len" + output_size.to_str() + " ctx" + context_size.to_str() + " " + hkdf.sha384_expand_label(label_secret_384, label, context, output_size).hex());
+        }
+    }
+    bytes transcript = sha512.sum384(label.to_bytes());
+    print("derive384 " + label + " " + hkdf.sha384_derive_secret(label_secret_384, label, transcript).hex());
+}
+print("longest-label384 " + hkdf.sha384_expand_label(label_secret_384, longest_label, [], 16).hex());
