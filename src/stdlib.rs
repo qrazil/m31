@@ -46,6 +46,8 @@ pub fn source(name: &str) -> Option<&'static str> {
         "sha256" => include_str!("../lib/sha256.m31"),
         "chacha20poly1305" => include_str!("../lib/chacha20poly1305.m31"),
         "ssh" => include_str!("../lib/ssh.m31"),
+        "hmac" => include_str!("../lib/hmac.m31"),
+        "hkdf" => include_str!("../lib/hkdf.m31"),
         _ => return None,
     })
 }
