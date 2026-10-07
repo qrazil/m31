@@ -156,9 +156,11 @@
 //   - **Push**, and the capabilities that only matter for it
 //     (`report-status`, `delete-refs`, `push-options`, ...).
 //   - **Protocol v2** -- see above.
-//   - **SSH**, and TLS: `lib/http.m31`'s own `parse_url` already refuses
-//     `https://` before a socket exists, for the reason its header gives,
-//     and that refusal is inherited here rather than repeated.
+//   - **SSH.** `https://` URLs work with no code here: `http.fetch` speaks
+//     TLS and verifies the server's certificate against the system roots
+//     (`lib/tls.m31`), and that is inherited rather than repeated. A
+//     certificate failure arrives as `Error.Http`, like every other transport
+//     failure; a caller who needs the reason calls `http.fetch` itself.
 //   - **`multi_ack`/`multi_ack_detailed`** -- see "negotiation" above.
 
 import http;
@@ -175,7 +177,8 @@ import sha1;
 /// caller already has when it reports.
 pub enum Error {
     /// The HTTP exchange itself failed -- a bad URL, a refused, reset or
-    /// timed-out connection, or a malformed HTTP message. `lib/http.m31`'s
+    /// timed-out connection, an `https` certificate that did not verify, or a
+    /// malformed HTTP message. `lib/http.m31`'s
     /// own `Error` already said which; there is nothing more specific to add
     /// at this layer.
     Http;

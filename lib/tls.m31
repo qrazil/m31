@@ -5,6 +5,8 @@
 // ---
 //   tls.connect(host, port, trust)   -> Result<Conn, Error>
 //   tls.connect_at(host, port, trust, now) -> Result<Conn, Error>   the clock given, in epoch seconds
+//   tls.connect_over(socket, host, trust)  -> Result<Conn, Error>   over a net.Conn already open
+//   tls.connect_over_at(socket, host, trust, now)                   the same, the clock given
 //   tls.pinned_key(sha256)           -> Trust            from 32 octets
 //   tls.pinned_key_hex(text)         -> Option<Trust>    from 64 hex digits
 //   tls.Trust.SystemRoots            the operating system's CA bundle
@@ -1244,15 +1246,36 @@ pub Result<Conn, Error> connect_at(str host, int port, Trust trust, int now) {
             return Result<Conn, Error>.Err(Error.Connect);
         }
         case Ok(net.Conn socket): {
-            tls13_record.Connection record = tls13_record.connection(socket);
-            match (run_handshake(record, host, trust, anchors, now)) {
-                case Ok: {
-                    return Result<Conn, Error>.Ok(Conn(record));
-                }
-                case Err(Error handshake_error): {
-                    return Result<Conn, Error>.Err(abort_handshake(record, handshake_error));
-                }
-            }
+            return handshake_over(socket, host, trust, anchors, now);
+        }
+    }
+}
+
+/// `connect`, over a socket the caller already opened: for a caller that
+/// wants `net`'s own error names for the connection, or to set timeouts and
+/// options on the socket before the handshake. `host` is what the server's
+/// certificate must cover and what goes in SNI; it need not be where
+/// `socket` is connected, and a caller that connects somewhere else on
+/// purpose is the one who owns that decision. The socket is closed when the
+/// handshake fails.
+pub Result<Conn, Error> connect_over(net.Conn socket, str host, Trust trust) {
+    return connect_over_at(socket, host, trust, date.now());
+}
+
+/// `connect_over`, with the clock given in epoch seconds.
+pub Result<Conn, Error> connect_over_at(net.Conn socket, str host, Trust trust, int now) {
+    List<x509.Certificate> anchors = load_anchors(trust)?;
+    return handshake_over(socket, host, trust, anchors, now);
+}
+
+Result<Conn, Error> handshake_over(net.Conn socket, str host, Trust trust, List<x509.Certificate> anchors, int now) {
+    tls13_record.Connection record = tls13_record.connection(socket);
+    match (run_handshake(record, host, trust, anchors, now)) {
+        case Ok: {
+            return Result<Conn, Error>.Ok(Conn(record));
+        }
+        case Err(Error handshake_error): {
+            return Result<Conn, Error>.Err(abort_handshake(record, handshake_error));
         }
     }
 }

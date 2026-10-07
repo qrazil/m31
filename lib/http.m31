@@ -46,7 +46,8 @@
 // API -- the client
 // -----------------
 //   http.get(url)                    -> Result<Response, Error>
-//   http.fetch(request, redirects:, timeout_ms:)  -> Result<Response, Error>
+//   http.fetch(request, redirects:, timeout_ms:, trust:)  -> Result<Response, Error>
+//                                    trust: a tls.Trust, for https (default: the system roots)
 //
 // **The seam takes an `io.Stream`, so every parser here is testable without a
 // socket.** `read_request`, `write_request`, `read_response` and
@@ -151,12 +152,14 @@
 //
 // --- what is deliberately not here -----------------------------------------
 //
-//   - **TLS.** `parse_url` refuses `https://` before a socket exists, with a
-//     message that says why. Oro made the same call in `std/http.oro` and
-//     called it the most important line in its client, and it is: the
-//     alternative to failing at the parse is opening a plaintext connection
-//     to port 443 and sending in the clear a request the caller believed was
-//     encrypted. No later message undoes that.
+//   - **An unchecked `https`.** `https://` is supported, over `lib/tls.m31`,
+//     and checked: every connection proves a certificate chain (or a pinned key)
+//     before a byte of the request is sent, and there is no option, flag or
+//     environment variable that skips it. The alternative -- opening a
+//     plaintext connection to port 443, or accepting any certificate -- sends
+//     in the clear, or to anyone, a request the caller believed was private.
+//     What is checked and what is not (TLS 1.2, resumption, client
+//     certificates and revocation are not) is in `lib/tls.m31`'s header.
 //   - **A streaming body.** A body is read whole, into `bytes`, bounded by
 //     `MAX_BODY`. A reader object would have to own its place in the
 //     connection, which means a handler that does not read it desynchronises
@@ -181,6 +184,7 @@
 import io;
 import json;
 import net;
+import tls;
 
 // --- limits ----------------------------------------------------------------
 /// The whole header block -- request or status line, every field, and the
@@ -211,8 +215,10 @@ pub const int TIMEOUT_MS = 30000;
 /// How large a piece of a body `set_chunked` writes as one chunk, and how
 /// much is asked of a stream at a time.
 pub const int CHUNK = 16384;
-// The port an `http://` URL means when it does not say.
+// The port an `http://` URL means when it does not say, and an `https://`
+// one.
 const int DEFAULT_PORT = 80;
+const int DEFAULT_HTTPS_PORT = 443;
 // Sent unless the caller sets their own: a surprising number of services
 // answer 403 to a request without one.
 const str USER_AGENT = "m31-http";
@@ -241,9 +247,11 @@ const str HEX = "0123456789abcdef";
 /// The named variants are the ones a caller branches on -- "the peer sent
 /// nonsense", "the framing is ambiguous", "it was too big", "that URL cannot
 /// be requested", "it stopped in the middle", "the socket failed" -- and
-/// `Other` is what keeps the enum from ever having to grow: `match` is
-/// exhaustive and has no default (§5.6), so a new variant would break every
-/// program that handles an HTTP error.
+/// `Other` is what keeps the enum from growing often: `match` is exhaustive
+/// and has no default (§5.6), so a new variant breaks every program that
+/// matches on an HTTP error. The five TLS variants were the one deliberate
+/// exception -- a caller that sees `CertificateUntrusted` does something a
+/// caller that sees `TlsFailed` does not.
 ///
 /// Every variant carries a **sentence, not a code**. A refusal that a caller
 /// cannot act on differently is a refusal they have to read, and the whole
@@ -266,7 +274,8 @@ pub enum Error {
     Framing;
     /// A limit this module publishes was passed.
     TooLarge;
-    /// The URL cannot be requested at all -- no scheme, no host, `https`.
+    /// The URL cannot be requested at all -- no scheme, no host, a scheme
+    /// that is neither `http` nor `https`.
     BadUrl;
     /// The peer stopped in the middle of a message.
     Closed;
@@ -285,6 +294,21 @@ pub enum Error {
     /// A socket failure with none of the names above, or a refusal nobody
     /// named.
     Other;
+    /// An `https` server's certificate does not lead to a trusted root, is
+    /// not the pinned key, or breaks a rule of the chain.
+    CertificateUntrusted;
+    /// An `https` server's certificate, or one above it, is expired or not
+    /// yet valid.
+    CertificateExpired;
+    /// An `https` server's certificate is not valid for the host asked for.
+    HostnameMismatch;
+    /// Anything else that stopped a TLS connection: a handshake the server
+    /// failed, an alert, a record that did not verify, a stream cut without
+    /// `close_notify`, a CA bundle that could not be read.
+    TlsFailed;
+    /// An `https` URL answered with a redirect to plain `http`. Never
+    /// followed: the next request would go in the clear.
+    InsecureRedirect;
 }
 
 /// A sentence saying what went wrong. A method named `to_str`, so `print(e)`
@@ -326,6 +350,21 @@ pub str Error.to_str() {
         }
         case Other: {
             return "the request failed";
+        }
+        case CertificateUntrusted: {
+            return "the server's certificate is not trusted";
+        }
+        case CertificateExpired: {
+            return "the server's certificate has expired or is not yet valid";
+        }
+        case HostnameMismatch: {
+            return "the server's certificate is not valid for that host";
+        }
+        case TlsFailed: {
+            return "the TLS connection failed";
+        }
+        case InsecureRedirect: {
+            return "an https URL redirected to plain http";
         }
     }
 }
@@ -375,6 +414,21 @@ pub int Error.status() {
         case Other: {
             return 500;
         }
+        case CertificateUntrusted: {
+            return 500;
+        }
+        case CertificateExpired: {
+            return 500;
+        }
+        case HostnameMismatch: {
+            return 500;
+        }
+        case TlsFailed: {
+            return 500;
+        }
+        case InsecureRedirect: {
+            return 500;
+        }
     }
 }
 
@@ -411,6 +465,99 @@ Error from_net(net.Error e) {
         }
         case Other(int code): {
             return Error.Other;
+        }
+    }
+}
+
+// `tls.Error`, in this module's own vocabulary, for the same reason as
+// `from_net`. The three a caller acts on differently -- an untrusted
+// certificate, an expired one, one for another host -- keep their own names;
+// the rest of the thirty-odd reasons a TLS connection can stop are
+// `TlsFailed`, and `tls`'s `last_error()` is where the exact one lives for a
+// caller who holds the connection. The socket's own failures, which `tls`
+// reports as `Connect`, never reach here: `exchange` opens the socket itself.
+Error from_tls(tls.Error e) {
+    match (e) {
+        case Connect: {
+            return Error.TlsFailed;
+        }
+        case Io: {
+            return Error.TlsFailed;
+        }
+        case Truncated: {
+            return Error.TlsFailed;
+        }
+        case PeerAlert: {
+            return Error.TlsFailed;
+        }
+        case Record: {
+            return Error.TlsFailed;
+        }
+        case BadRecordMac: {
+            return Error.TlsFailed;
+        }
+        case Closed: {
+            return Error.TlsFailed;
+        }
+        case UnsupportedVersion: {
+            return Error.TlsFailed;
+        }
+        case Downgrade: {
+            return Error.TlsFailed;
+        }
+        case RetryRequested: {
+            return Error.TlsFailed;
+        }
+        case IllegalParameter: {
+            return Error.TlsFailed;
+        }
+        case UnsupportedExtension: {
+            return Error.TlsFailed;
+        }
+        case Malformed: {
+            return Error.TlsFailed;
+        }
+        case UnexpectedMessage: {
+            return Error.TlsFailed;
+        }
+        case ClientCertificateRequested: {
+            return Error.TlsFailed;
+        }
+        case BadCertificate: {
+            return Error.CertificateUntrusted;
+        }
+        case UntrustedKey: {
+            return Error.CertificateUntrusted;
+        }
+        case TrustStore: {
+            return Error.TlsFailed;
+        }
+        case UnknownAuthority: {
+            return Error.CertificateUntrusted;
+        }
+        case CertificateExpired: {
+            return Error.CertificateExpired;
+        }
+        case CertificateNotYetValid: {
+            return Error.CertificateExpired;
+        }
+        case HostnameMismatch: {
+            return Error.HostnameMismatch;
+        }
+        case InvalidChain: {
+            return Error.CertificateUntrusted;
+        }
+        case WeakCertificate: {
+            return Error.CertificateUntrusted;
+        }
+        case UnsupportedSignature: {
+            return Error.TlsFailed;
+        }
+        case BadSignature: {
+            return Error.TlsFailed;
+        }
+        case BadFinished: {
+            return Error.TlsFailed;
         }
     }
 }
@@ -791,7 +938,7 @@ Result<bytes, Error> pct_decode(bytes b, bool plus, str where) {
 }
 
 // --- URLs ------------------------------------------------------------------
-/// An absolute `http://` URL, taken apart.
+/// An absolute `http://` or `https://` URL, taken apart.
 ///
 /// Made by `parse_url`, or by this module out of a request's target and its
 /// `Host` field -- which is why a `Request` read off a socket answers
@@ -805,7 +952,7 @@ pub type Url {
     str tgt;
 }
 
-/// The scheme, lowercased. Always `"http"`: nothing else parses.
+/// The scheme, lowercased: `"http"` or `"https"`. Nothing else parses.
 pub str Url.scheme() {
     return sch;
 }
@@ -815,7 +962,8 @@ pub str Url.host() {
     return hst;
 }
 
-/// The port, filled in with 80 when the URL did not say.
+/// The port, filled in with 80 (`http`) or 443 (`https`) when the URL did
+/// not say.
 pub int Url.port() {
     return prt;
 }
@@ -852,7 +1000,7 @@ pub str Url.target() {
 /// virtual-hosts on the field should see `example.com` and not
 /// `example.com:80`. An IPv6 literal is bracketed.
 pub str Url.host_header() {
-    if (prt == DEFAULT_PORT) {
+    if (prt == default_port(sch)) {
         return bracket(hst);
     }
     return bracket(hst) + ":" + prt.to_str();
@@ -872,6 +1020,14 @@ pub str Url.to_str() {
         return sch + "://" + host_header();
     }
     return sch + "://" + host_header() + tgt;
+}
+
+// The port a scheme means when a URL does not say.
+int default_port(str scheme) {
+    if (scheme == "https") {
+        return DEFAULT_HTTPS_PORT;
+    }
+    return DEFAULT_PORT;
 }
 
 // The index of the first byte of `b` that is `a` or `c`, or -1. Two needles
@@ -895,7 +1051,7 @@ str bracket(str host) {
     return host;
 }
 
-/// Parse an absolute `http://` URL.
+/// Parse an absolute `http://` or `https://` URL.
 ///
 ///     http.parse_url("http://example.com:8080/a/b?x=1#frag")
 ///
@@ -904,14 +1060,14 @@ str bracket(str host) {
 /// somewhere nobody asked for. A fragment is parsed and dropped -- it names
 /// a place in the answer and RFC 9110 says it is never sent.
 ///
-/// **`https://` is refused here, before a socket exists, and that is the
-/// most important line in this client.** There is no TLS in this standard
-/// library, so there is no option to turn on. The alternative to failing at
-/// the parse is opening a plaintext connection to port 443 and sending in
-/// the clear a request the caller believed was encrypted -- a credential in
-/// an `Authorization` field, on the wire, because a scheme was quietly
-/// ignored. Oro's `std/http.oro` refuses at exactly the same point and for
-/// exactly this reason.
+/// **`https://` is spoken over TLS, and never quietly downgraded.** Whether
+/// a URL is `http` or `https` is kept on the `Url` and decides, in `fetch`,
+/// whether the request is written to the socket or to a verified TLS
+/// connection over it. The failure this module exists to prevent is the
+/// quiet one: a plaintext connection to port 443, or a certificate nobody
+/// checked, carrying a credential the caller believed was private. So there
+/// is no scheme guessing, no `http` retry after an `https` failure, and no
+/// way to switch verification off.
 ///
 /// Userinfo before the host (`http://user:pw@host/`) is refused: RFC 9110
 /// deprecates it and this client will not send it.
@@ -929,10 +1085,7 @@ pub Result<Url, Error> parse_url(str url) {
 
 Result<Url, Error> after_scheme(str url, bytes b, int sep) {
     str scheme = ascii(b.substr(0, sep)).to_lower();
-    if (scheme == "https") {
-        return Result<Url, Error>.Err(Error.BadUrl);
-    }
-    if (scheme != "http") {
+    if (scheme != "http" && scheme != "https") {
         return Result<Url, Error>.Err(Error.BadUrl);
     }
     bytes rest = b.substr(sep + 3, b.size());
@@ -967,8 +1120,9 @@ Result<Url, Error> after_scheme(str url, bytes b, int sep) {
     if (bad_target_at(target) >= 0) {
         return Result<Url, Error>.Err(Error.BadUrl);
     }
-    List<str> hp = split_host_port(authority, quoted(b))?;
-    return url_of("http", hp[0], hp[1].parse_int().or(DEFAULT_PORT), target, quoted(b));
+    int fallback = default_port(scheme);
+    List<str> hp = split_host_port(authority, quoted(b), fallback)?;
+    return url_of(scheme, hp[0], hp[1].parse_int().or(fallback), target, quoted(b));
 }
 
 // Build a `Url` out of a host, a port and a target. Shared by `parse_url` and
@@ -1006,7 +1160,7 @@ Result<Url, Error> url_of(str scheme, str host, int port, bytes target, str what
 // the closing bracket, for the reason `net`'s own does: an IPv6 literal is
 // nothing but colons, and the last one before the bracket is not a port
 // separator. A list rather than two returns, which the language has not got.
-Result<List<str>, Error> split_host_port(bytes authority, str what) {
+Result<List<str>, Error> split_host_port(bytes authority, str what, int fallback) {
     if (authority.size() == 0) {
         return Result<List<str>, Error>.Err(Error.BadUrl);
     }
@@ -1028,7 +1182,7 @@ Result<List<str>, Error> split_host_port(bytes authority, str what) {
         }
     }
     bytes host = authority;
-    str port = DEFAULT_PORT.to_str();
+    str port = fallback.to_str();
     if (colon >= 0) {
         host = authority.substr(0, colon);
         bytes digits = authority.substr(colon + 1, authority.size());
@@ -1207,7 +1361,7 @@ pub void Request.set_version(str v) {
     ver = v;
 }
 
-/// A request to send: the method, and an absolute `http://` URL.
+/// A request to send: the method, and an absolute `http://` or `https://` URL.
 ///
 ///     http.request("GET", "http://127.0.0.1:8080/health")
 ///
@@ -1788,7 +1942,7 @@ Result<Url, Error> target_url(str method, str target, str host) {
     str name = "";
     int port = DEFAULT_PORT;
     if (host != "") {
-        List<str> hp = split_host_port(host.to_bytes(), "the Host header field " + quoted(host.to_bytes()))?;
+        List<str> hp = split_host_port(host.to_bytes(), "the Host header field " + quoted(host.to_bytes()), DEFAULT_PORT)?;
         name = hp[0];
         port = hp[1].parse_int().or(DEFAULT_PORT);
     }
@@ -2193,6 +2347,21 @@ Result<int, Error> refuse(net.Conn c, Error e, int served) {
         }
         case Other: {
         }
+        case CertificateUntrusted: {
+            return Result<int, Error>.Ok(served);
+        }
+        case CertificateExpired: {
+            return Result<int, Error>.Ok(served);
+        }
+        case HostnameMismatch: {
+            return Result<int, Error>.Ok(served);
+        }
+        case TlsFailed: {
+            return Result<int, Error>.Ok(served);
+        }
+        case InsecureRedirect: {
+            return Result<int, Error>.Ok(served);
+        }
     }
     // A refusal is answered on a connection whose framing this end no longer
     // trusts, so it is the last thing written and the connection closes after
@@ -2342,12 +2511,19 @@ pub Result<Response, Error> get(str url) {
 ///
 /// ### Redirects: five hops, and never off the origin
 ///
+/// `trust` is whom an `https` server must prove it is: the operating
+/// system's roots by default, a CA file, or a pinned key (`lib/tls.m31`).
+/// It has no value that skips the check, and it is ignored by `http` URLs.
+///
 /// `redirects` is how many `Location` hops to follow; **0 hands back the 3xx
 /// itself**, which is what a caller who wants to decide for themselves
 /// passes. The default is `MAX_REDIRECTS`.
 ///
-/// **A redirect to another scheme, host or port is refused**, with the
-/// target named in the error. Following one would forward whatever the
+/// **A redirect to another host or port is refused**, as is one from `https`
+/// to `http` (`InsecureRedirect`); the single change followed is the same
+/// host from `http` to `https`.
+///
+/// **The target is named in the error.** Following one would forward whatever the
 /// caller set -- an `Authorization` field above all -- to a host they never
 /// wrote down, and this client has no credential model, no cookie jar and no
 /// header-stripping policy with which to make that safe. A caller who means
@@ -2366,11 +2542,11 @@ pub Result<Response, Error> get(str url) {
 /// what every browser and every other client does and what 303 means
 /// outright. **307 and 308 keep the method and the body**, which is what
 /// they were added to the standard to promise.
-pub Result<Response, Error> fetch(Request req, int redirects = MAX_REDIRECTS, int timeout_ms = TIMEOUT_MS) {
+pub Result<Response, Error> fetch(Request req, int redirects = MAX_REDIRECTS, int timeout_ms = TIMEOUT_MS, tls.Trust trust = tls.Trust.SystemRoots) {
     Request cur = req;
     int hops = 0;
     while (true) {
-        Response resp = exchange(cur, timeout_ms)?;
+        Response resp = exchange(cur, timeout_ms, trust)?;
         if (hops >= redirects || !is_redirect(resp.code)) {
             return Result<Response, Error>.Ok(resp);
         }
@@ -2383,8 +2559,10 @@ bool is_redirect(int code) {
     return code == 301 || code == 302 || code == 303 || code == 307 || code == 308;
 }
 
-// One connection, one request, one response.
-Result<Response, Error> exchange(Request req, int timeout_ms) {
+// One connection, one request, one response. An `https` URL puts a verified
+// TLS connection over the socket first: the certificate has been proven
+// before the first byte of the request is written.
+Result<Response, Error> exchange(Request req, int timeout_ms, tls.Trust trust) {
     match (net.connect(req.loc.host(), req.loc.port())) {
         case Ok(net.Conn c): {
             deadline(c, timeout_ms)?;
@@ -2395,6 +2573,17 @@ Result<Response, Error> exchange(Request req, int timeout_ms) {
                 }
                 case Err(net.Error e): {
                     return Result<Response, Error>.Err(from_net(e));
+                }
+            }
+            if (req.loc.scheme() == "https") {
+                match (tls.connect_over(c, req.loc.host(), trust)) {
+                    case Ok(tls.Conn secure): {
+                        write_request(secure, req)?;
+                        return read_response(secure, req.verb);
+                    }
+                    case Err(tls.Error te): {
+                        return Result<Response, Error>.Err(from_tls(te));
+                    }
                 }
             }
             write_request(c, req)?;
@@ -2421,7 +2610,16 @@ Result<Request, Error> redirected(Request req, Response resp) {
         return Result<Request, Error>.Err(Error.Syntax);
     }
     Url next = resolve(req.loc, where)?;
-    if (next.scheme() != req.loc.scheme() || next.host() != req.loc.host() || next.port() != req.loc.port()) {
+    if (req.loc.scheme() == "https" && next.scheme() != "https") {
+        return Result<Request, Error>.Err(Error.InsecureRedirect);
+    }
+    // The one change of origin that is followed: the same host, `http` to
+    // `https`, which is the upgrade nearly every site answers a plain request
+    // with. Whatever the caller set went in the clear to that host already,
+    // and now goes encrypted to it. Anything else -- another host, another
+    // port on the same scheme -- is refused, for the reason `fetch` gives.
+    bool upgrade = req.loc.scheme() == "http" && next.scheme() == "https" && next.host() == req.loc.host();
+    if (!upgrade && (next.scheme() != req.loc.scheme() || next.host() != req.loc.host() || next.port() != req.loc.port())) {
         return Result<Request, Error>.Err(Error.BadUrl);
     }
     str method = req.verb;

@@ -58,8 +58,8 @@ resp-both-framings [400] the message's framing is ambiguous or unsupported
 resp-short-body [400] the peer stopped in the middle of a message
 resp-truncated-head [400] the peer stopped in the middle of a message
 connect-tunnel [400] the message's framing is ambiguous or unsupported
-url https://example.com/secret [400] that URL cannot be requested
-url HTTPS://EXAMPLE.COM/ [400] that URL cannot be requested
+url gopher://example.com/secret [400] that URL cannot be requested
+url WSS://EXAMPLE.COM/ [400] that URL cannot be requested
 url ftp://example.com/ [400] that URL cannot be requested
 url /just/a/path [400] that URL cannot be requested
 url example.com/p [400] that URL cannot be requested
