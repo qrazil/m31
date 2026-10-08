@@ -632,9 +632,13 @@ deterministic program, and to compare each one against Python's
 not a system call and does not belong at this seam; it is `lib/tls.m31` up
 here, over the same `net.Conn`, and a `tls.Conn` is an `io.Stream`, so
 `http.write_request` and `http.read_response` run over it without changing a
-line — which is the other thing the interface buys. `http.fetch` opens the
-socket, sets its deadlines, and wraps it in TLS for an `https://` URL; nothing
-about the wire format knows which it has.
+line — which is the other thing the interface buys. `https.fetch` opens the
+socket with `http.open`, sets its deadlines, and wraps it in TLS for an
+`https://` URL; nothing about the wire format knows which it has. TLS is its own
+module, `lib/https.m31`, and `http` does not import it: a program that speaks
+only `http://` does not compile bignums, curves and X.509. `http.fetch` on an
+`https://` URL is `Error.SchemeNeedsTls`; both clients are `http.fetch_via`
+with a different `Transport`, so the redirect rules exist once.
 
 ---
 

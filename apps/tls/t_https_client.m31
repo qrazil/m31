@@ -1,4 +1,4 @@
-// `http.fetch` over `https://`, driven from `test_https.sh`.
+// `https.fetch` over `https://`, driven from `test_https.sh`.
 //
 //   t_https_client <url> <system|ca file|pin:<64 hex digits>> [redirects] [method]
 //   t_https_client parse <url>
@@ -9,6 +9,7 @@
 // `text <line>` (clipped to 60 octets); or `error <Name>` (the `http.Error` variant) and exits 1.
 
 import http;
+import https;
 import os;
 import tls;
 
@@ -65,6 +66,9 @@ str name_of(http.Error error) {
         case InsecureRedirect: {
             return "InsecureRedirect";
         }
+        case SchemeNeedsTls: {
+            return "SchemeNeedsTls";
+        }
     }
 }
 
@@ -115,7 +119,7 @@ match (http.request(method, url)) {
         fail(name_of(request_error));
     }
     case Ok(http.Request request): {
-        match (http.fetch(request, redirects: redirects, trust: trust)) {
+        match (https.fetch(request, redirects: redirects, trust: trust)) {
             case Err(http.Error fetch_error): {
                 fail(name_of(fetch_error));
             }

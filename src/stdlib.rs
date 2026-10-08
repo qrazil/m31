@@ -25,6 +25,7 @@ pub fn source(name: &str) -> Option<&'static str> {
         "diff" => include_str!("../lib/diff.m31"),
         "html" => include_str!("../lib/html.m31"),
         "http" => include_str!("../lib/http.m31"),
+        "https" => include_str!("../lib/https.m31"),
         "io" => include_str!("../lib/io.m31"),
         "fs" => include_str!("../lib/fs.m31"),
         "json" => include_str!("../lib/json.m31"),

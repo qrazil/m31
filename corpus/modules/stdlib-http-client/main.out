@@ -9,4 +9,5 @@ no-follow: 302 Found location=/final
 cross-host: that URL cannot be requested
 relative: that URL cannot be requested
 no-location: the message is not well-formed HTTP
+https: an https URL needs the https module
 connections served: 14

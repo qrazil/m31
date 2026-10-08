@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# `https://` through `lib/http.m31`: `http.get` and `http.fetch` over a verified
-# TLS connection.
+# `https://` through `lib/https.m31`: `https.get` and `https.fetch` over a
+# verified TLS connection.
 #
 #   bash apps/tls/test_https.sh
 #
