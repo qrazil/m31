@@ -1,0 +1,30 @@
+enum Pair {
+    Both(int, str);
+    Lone(int);
+    Nothing;
+}
+
+int pick(Pair p) {
+    match (p) {
+        case Both(_, str label): {
+            return 1;
+        }
+        case Lone(_): {
+            return 2;
+        }
+        case Nothing: {
+            return 3;
+        }
+    }
+}
+
+Result<int, str> r = Result<int, str>.Err("x");
+match (r) {
+    case Ok(_): {
+        print("ok");
+    }
+    case Err(_): {
+        print("err");
+    }
+}
+print(pick(Pair.Lone(1)));

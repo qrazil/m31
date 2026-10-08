@@ -921,18 +921,23 @@ impl Mono {
                     // A binding's written type may name a type parameter, so
                     // it substitutes like any other declaration.
                     let mut binds = Vec::new();
+                    // A discard has no type to substitute and no name to bind.
+                    // The slot stays, though: payloads are positional.
                     for b in &a.binds {
-                        binds.push(Param {
-                            ty: self.subst_ty(b.ty, sub, b.span)?,
-                            name: b.name.clone(),
-                            default: None,
-                            embedded: false,
-                            is_pub: false,
-                            span: b.span,
+                        binds.push(match b {
+                            Some(b) => Some(Param {
+                                ty: self.subst_ty(b.ty, sub, b.span)?,
+                                name: b.name.clone(),
+                                default: None,
+                                embedded: false,
+                                is_pub: false,
+                                span: b.span,
+                            }),
+                            None => None,
                         });
                     }
                     self.env.push(HashMap::new());
-                    for b in &a.binds {
+                    for b in a.binds.iter().flatten() {
                         self.env
                             .last_mut()
                             .expect("no scope")

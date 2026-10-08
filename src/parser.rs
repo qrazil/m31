@@ -640,6 +640,11 @@ impl Parser {
                 "`this` is a keyword -- it names a method's receiver -- and \
                  cannot be used as a name",
             )),
+            Tok::Underscore => Err(Diag::new(
+                span,
+                "`_` is a discard, not a name: only a `case` payload may be written \
+                 `_` (`case Err(_)`)",
+            )),
             other => Err(Diag::new(
                 span,
                 format!("expected a name, found {}", other.describe()),
@@ -1725,19 +1730,35 @@ impl Parser {
                 if self.eat(&Tok::LParen) {
                     loop {
                         let bspan = self.span();
+                        // `_` discards the payload: no name, and no type,
+                        // because the variant already says what it carries.
+                        if self.eat(&Tok::Underscore) {
+                            binds.push(None);
+                            if !self.eat(&Tok::Comma) {
+                                break;
+                            }
+                            continue;
+                        }
                         let ty = self.expect_ty()?;
                         if ty == Ty::Void {
                             return Err(Diag::new(bspan, "`void` is not a value type"));
                         }
+                        if self.peek() == &Tok::Underscore {
+                            return Err(Diag::new(
+                                self.span(),
+                                "a discard is written `_` alone, without a type: \
+                                 write `case V(_)`, not `case V(T _)`",
+                            ));
+                        }
                         let (name, _) = self.expect_ident()?;
-                        binds.push(Param {
+                        binds.push(Some(Param {
                             ty,
                             name,
                             default: None,
                             embedded: false,
                             is_pub: false,
                             span: bspan,
-                        });
+                        }));
                         if !self.eat(&Tok::Comma) {
                             break;
                         }
@@ -2316,6 +2337,10 @@ impl Parser {
                     ),
                 ))
             }
+            Tok::Underscore => Err(Diag::new(
+                span,
+                "`_` is a discard and cannot be used as a value",
+            )),
             // A range is loop syntax, not a value: it has no type, cannot be
             // stored and cannot be passed. Saying that beats reporting that
             // `..` surprised the parser.

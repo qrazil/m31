@@ -1,6 +1,6 @@
-// A case binds every value its variant carries, or none of them. There is no
-// `_` and no way to name some and not the rest: an arm that wants the second
-// of two names both.
+// A case binds a position for every value its variant carries, or none of
+// them: naming one of two is refused, and the message says how to discard the
+// other (`case Both(int a, _)`).
 enum Pair {
     None;
     Both(int, str);

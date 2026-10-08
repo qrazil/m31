@@ -1,4 +1,4 @@
-corpus/errors/1247-case-binds-all-or-none.m31:14:9: `Both` carries 2 value(s), and this case binds 1; bind every one of them, or write `case Both:` to bind none
+corpus/errors/1247-case-binds-all-or-none.m31:14:9: `Both` carries 2 value(s), and this case binds 1; bind every one of them (`_` discards one), or write `case Both:` to bind none
    |
 14 |         case Both(int a): {
    |         ^

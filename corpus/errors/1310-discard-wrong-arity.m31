@@ -1,0 +1,10 @@
+// A discard still stands for one position: `Ok` carries one value, not two.
+Result<int, str> r = Result<int, str>.Ok(1);
+match (r) {
+    case Ok(_, _): {
+        print("ok");
+    }
+    case Err(_): {
+        print("err");
+    }
+}
