@@ -1,10 +1,13 @@
-// TLS 1.3's record layer (RFC 8446 §5) for `TLS_CHACHA20_POLY1305_SHA256`,
-// the one suite this client speaks. Records in, handshake messages and
+// TLS 1.3's record layer (RFC 8446 §5) for the three suites
+// `tls13_schedule.Suite` names: `TLS_CHACHA20_POLY1305_SHA256` (the default),
+// `TLS_AES_128_GCM_SHA256` and `TLS_AES_256_GCM_SHA384`. Records in, handshake messages and
 // application data out, and back; the handshake state machine that decides
 // *which* messages to expect (`lib/tls13_client.m31`, a later milestone) sits
 // on top and touches only `Connection`. The keys come from
 // `lib/tls13_schedule.m31`; the AEAD is `lib/chacha20poly1305.m31`'s RFC 8439
-// `seal`/`open`, used as it is -- the IETF construction, not OpenSSH's.
+// `seal`/`open`, used as it is -- the IETF construction, not OpenSSH's -- or
+// `lib/aesgcm.m31`'s. `c.use_suite(suite)` picks the pair before the first
+// key is installed; the pure functions take the suite as their first argument.
 //
 // API
 // ---
@@ -84,7 +87,7 @@
 //
 // --- what is NOT here ----------------------------------------------------------
 //
-//   - Any other cipher suite, or SHA-384.
+//   - Any other cipher suite.
 //   - 0-RTT / early data: there is no third key direction.
 //   - The `record_size_limit` extension: the limits are always 2^14.
 //   - Which handshake message may come when. A `ChangeCipherSpec` before the
@@ -94,6 +97,7 @@
 
 import io;
 import chacha20poly1305;
+import aesgcm;
 import tls13_schedule;
 
 /// Octets in a record header.
@@ -266,7 +270,7 @@ pub bytes plain_record(int content_type, bytes content) {
 /// above `MAX_PLAINTEXT`, a negative `padding`, padding that would take the
 /// body past `MAX_CIPHERTEXT`, and a `key` or `iv` of the wrong length.
 /// `Err(SequenceExhausted)` once `sequence` reaches `MAX_SEQUENCE`.
-pub Result<bytes, Error> seal_record(bytes key, bytes iv, int sequence, int content_type, bytes content, int padding) {
+pub Result<bytes, Error> seal_record(tls13_schedule.Suite suite, bytes key, bytes iv, int sequence, int content_type, bytes content, int padding) {
     if (content.size() > MAX_PLAINTEXT) {
         trap("tls13_record: a record carries at most 2^14 octets");
     }
@@ -281,7 +285,7 @@ pub Result<bytes, Error> seal_record(bytes key, bytes iv, int sequence, int cont
     bytes zeros = [0; padding];
     inner.extend(zeros);
     bytes record = header_of(CONTENT_APPLICATION_DATA, inner.size() + TAG_SIZE);
-    bytes sealed = chacha20poly1305.seal(key, record_nonce(iv, sequence), inner, record);
+    bytes sealed = seal_aead(suite, key, record_nonce(iv, sequence), inner, record);
     record.extend(sealed);
     return Result<bytes, Error>.Ok(record);
 }
@@ -297,7 +301,7 @@ pub type Opened {
 /// `RecordOverflow` if the body, or what it held, is over its limit;
 /// `BadRecordMac` if the tag does not verify; `UnexpectedMessage` if the
 /// plaintext is all zeros and so names no content type.
-pub Result<Opened, Error> open_record(bytes key, bytes iv, int sequence, bytes header, bytes body) {
+pub Result<Opened, Error> open_record(tls13_schedule.Suite suite, bytes key, bytes iv, int sequence, bytes header, bytes body) {
     if (header.size() != HEADER_SIZE) {
         trap("tls13_record: a record header is 5 octets");
     }
@@ -307,13 +311,71 @@ pub Result<Opened, Error> open_record(bytes key, bytes iv, int sequence, bytes h
     if (body.size() > MAX_CIPHERTEXT) {
         return Result<Opened, Error>.Err(Error.RecordOverflow);
     }
-    match (chacha20poly1305.open(key, record_nonce(iv, sequence), body, header)) {
-        case Ok(bytes inner): {
+    match (open_aead(suite, key, record_nonce(iv, sequence), body, header)) {
+        case Some(bytes inner): {
             return split_inner(inner);
         }
-        case Err(chacha20poly1305.Error aead_error): {
+        case None: {
             return Result<Opened, Error>.Err(Error.BadRecordMac);
         }
+    }
+}
+
+// The suite's AEAD. Key length follows the suite (`key_size`); a `key` of any
+// other length traps in the AEAD, a caller bug.
+bytes seal_aead(tls13_schedule.Suite suite, bytes key, bytes nonce, bytes plaintext, bytes aad) {
+    match (suite) {
+        case ChaCha20Poly1305Sha256: {
+            return chacha20poly1305.seal(key, nonce, plaintext, aad);
+        }
+        case Aes128GcmSha256: {
+            check_key_size(suite, key);
+            return aesgcm.seal(key, nonce, plaintext, aad);
+        }
+        case Aes256GcmSha384: {
+            check_key_size(suite, key);
+            return aesgcm.seal(key, nonce, plaintext, aad);
+        }
+    }
+}
+
+Option<bytes> open_aead(tls13_schedule.Suite suite, bytes key, bytes nonce, bytes sealed, bytes aad) {
+    match (suite) {
+        case ChaCha20Poly1305Sha256: {
+            match (chacha20poly1305.open(key, nonce, sealed, aad)) {
+                case Ok(bytes plain): {
+                    return Option<bytes>.Some(plain);
+                }
+                case Err(chacha20poly1305.Error aead_error): {
+                    return Option<bytes>.None;
+                }
+            }
+        }
+        case Aes128GcmSha256: {
+            check_key_size(suite, key);
+            return open_gcm(key, nonce, sealed, aad);
+        }
+        case Aes256GcmSha384: {
+            check_key_size(suite, key);
+            return open_gcm(key, nonce, sealed, aad);
+        }
+    }
+}
+
+Option<bytes> open_gcm(bytes key, bytes nonce, bytes sealed, bytes aad) {
+    match (aesgcm.open(key, nonce, sealed, aad)) {
+        case Ok(bytes plain): {
+            return Option<bytes>.Some(plain);
+        }
+        case Err(aesgcm.Error aead_error): {
+            return Option<bytes>.None;
+        }
+    }
+}
+
+void check_key_size(tls13_schedule.Suite suite, bytes key) {
+    if (key.size() != suite.key_size()) {
+        trap("tls13_record: the key does not fit the suite");
     }
 }
 
@@ -355,6 +417,7 @@ pub type Message {
 /// `connection`; every field is private and only its own methods move them.
 pub type Connection {
     io.Stream stream;
+    tls13_schedule.Suite suite = tls13_schedule.Suite.ChaCha20Poly1305Sha256;
     bytes read_key = [];
     bytes read_iv = [];
     bytes read_secret = [];
@@ -379,13 +442,24 @@ pub type Connection {
     bool failed = false;
 }
 
+/// Chooses the suite the keys installed from now on are for. Call it once,
+/// when the ServerHello has named the suite and before any `install_*_keys`;
+/// calling it with keys already installed **traps** (a suite never changes
+/// mid-connection).
+pub void Connection.use_suite(tls13_schedule.Suite chosen) {
+    if (read_protected || write_protected) {
+        trap("tls13_record: use_suite after keys were installed");
+    }
+    suite = chosen;
+}
+
 /// Starts protecting what the peer sends, with the keys `traffic_secret`
 /// derives, and counts its records from zero. `Err(UnexpectedMessage)` if a
 /// handshake message is still partly or wholly unread, since RFC 8446 §5.1
-/// says none may span a key change. `traffic_secret` not 32 octets traps.
+/// says none may span a key change. `traffic_secret` not the suite's hash length traps.
 pub Result<void, Error> Connection.install_read_keys(bytes traffic_secret) {
-    if (traffic_secret.size() != tls13_schedule.HASH_SIZE) {
-        trap("tls13_record: a traffic secret is 32 octets");
+    if (traffic_secret.size() != suite.hash_size()) {
+        trap("tls13_record: a traffic secret is as long as the suite's hash");
     }
     if (failed) {
         return Result<void, Error>.Err(Error.Closed);
@@ -393,7 +467,7 @@ pub Result<void, Error> Connection.install_read_keys(bytes traffic_secret) {
     if (handshake_pending.size() > 0) {
         return Result<void, Error>.Err(break_down(Error.UnexpectedMessage));
     }
-    tls13_schedule.TrafficKeys keys = tls13_schedule.traffic_keys(traffic_secret);
+    tls13_schedule.TrafficKeys keys = tls13_schedule.traffic_keys(suite, traffic_secret);
     read_key = keys.key;
     read_iv = keys.iv;
     read_secret = traffic_secret;
@@ -403,13 +477,13 @@ pub Result<void, Error> Connection.install_read_keys(bytes traffic_secret) {
 }
 
 /// Starts protecting what this side sends, with the keys `traffic_secret`
-/// derives, and counts its records from zero. `traffic_secret` not 32
-/// octets traps.
+/// derives, and counts its records from zero. `traffic_secret` not the
+/// suite's hash length traps.
 pub void Connection.install_write_keys(bytes traffic_secret) {
-    if (traffic_secret.size() != tls13_schedule.HASH_SIZE) {
-        trap("tls13_record: a traffic secret is 32 octets");
+    if (traffic_secret.size() != suite.hash_size()) {
+        trap("tls13_record: a traffic secret is as long as the suite's hash");
     }
-    tls13_schedule.TrafficKeys keys = tls13_schedule.traffic_keys(traffic_secret);
+    tls13_schedule.TrafficKeys keys = tls13_schedule.traffic_keys(suite, traffic_secret);
     write_key = keys.key;
     write_iv = keys.iv;
     write_secret = traffic_secret;
@@ -425,7 +499,7 @@ pub Result<void, Error> Connection.update_read_keys() {
     if (!read_protected) {
         trap("tls13_record: update_read_keys before install_read_keys");
     }
-    return install_read_keys(tls13_schedule.next_traffic_secret(read_secret));
+    return install_read_keys(tls13_schedule.next_traffic_secret(suite, read_secret));
 }
 
 /// Moves the send direction to the next key generation. Send the KeyUpdate
@@ -435,7 +509,7 @@ pub void Connection.update_write_keys() {
     if (!write_protected) {
         trap("tls13_record: update_write_keys before install_write_keys");
     }
-    install_write_keys(tls13_schedule.next_traffic_secret(write_secret));
+    install_write_keys(tls13_schedule.next_traffic_secret(suite, write_secret));
 }
 
 /// Pads every protected record this side sends with `padding` zero octets
@@ -484,7 +558,7 @@ Result<void, Error> Connection.write_record(int content_type, bytes content) {
         if (padding > room) {
             padding = room;
         }
-        wire = seal_record(write_key, write_iv, write_sequence, content_type, content, padding)?;
+        wire = seal_record(suite, write_key, write_iv, write_sequence, content_type, content, padding)?;
         write_sequence = write_sequence + 1;
     } else {
         wire = plain_record(content_type, content);
@@ -641,7 +715,7 @@ Result<Opened, Error> Connection.read_record() {
     if (content_type != CONTENT_APPLICATION_DATA) {
         return Result<Opened, Error>.Err(Error.UnexpectedMessage);
     }
-    Opened record = open_record(read_key, read_iv, read_sequence, header, body)?;
+    Opened record = open_record(suite, read_key, read_iv, read_sequence, header, body)?;
     read_sequence = read_sequence + 1;
     return Result<Opened, Error>.Ok(record);
 }

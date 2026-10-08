@@ -1,27 +1,37 @@
 // A real server's bytes through `tls13_record`: what `openssl s_server
-// -tls1_3 -ciphersuites TLS_CHACHA20_POLY1305_SHA256` sent a client, with the
+// -tls1_3 -ciphersuites <suite>` sent a client, with the
 // server's traffic secrets from its key log. `live_tls13.py` captures the
 // bytes and checks what this prints; `test_tls13.sh` runs it and skips it,
 // without failing, if OpenSSL is not there or does not cooperate.
 //
 //   t_tls13_live <server bytes> <server_handshake_traffic_secret>
-//                <server_traffic_secret_0>      (all hex)
+//                <server_traffic_secret_0> <IANA suite name>      (hex, hex, hex, name)
 
 import io;
 import os;
 import sha256;
 import tls13_hex;
 import tls13_record;
+import tls13_schedule;
 
 void say(str text) {
     print(text);
 }
 
 List<str> arguments = os.args();
-if (arguments.size() != 4) {
-    trap("t_tls13_live: expected the capture and two traffic secrets as hex");
+if (arguments.size() != 5) {
+    trap("t_tls13_live: expected the capture, two traffic secrets as hex, and a suite name");
+}
+tls13_schedule.Suite suite = tls13_schedule.Suite.ChaCha20Poly1305Sha256;
+if (arguments[4] == "TLS_AES_128_GCM_SHA256") {
+    suite = tls13_schedule.Suite.Aes128GcmSha256;
+} else if (arguments[4] == "TLS_AES_256_GCM_SHA384") {
+    suite = tls13_schedule.Suite.Aes256GcmSha384;
+} else if (arguments[4] != "TLS_CHACHA20_POLY1305_SHA256") {
+    trap("t_tls13_live: unknown suite " + arguments[4]);
 }
 tls13_record.Connection connection = tls13_record.connection(io.buffer_of(tls13_hex.decode(arguments[1])));
+connection.use_suite(suite);
 bytes handshake_secret = tls13_hex.decode(arguments[2]);
 bytes application_secret = tls13_hex.decode(arguments[3]);
 match (connection.receive_handshake()) {

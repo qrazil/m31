@@ -66,7 +66,11 @@
 // --- what is offered, and so what is accepted ---------------------------------
 //
 //   version              TLS 1.3 only
-//   cipher suite         TLS_CHACHA20_POLY1305_SHA256 only
+//   cipher suites        TLS_CHACHA20_POLY1305_SHA256, TLS_AES_128_GCM_SHA256 and
+//                        TLS_AES_256_GCM_SHA384, offered in that order; the
+//                        server picks. ChaCha20 leads because the AES-GCM in
+//                        lib/aes.m31 is constant-time at the source level and
+//                        so about twelve times slower (see its header)
 //   key exchange         x25519 only, one fresh key per connection
 //   signatures           ecdsa_secp256r1_sha256, ecdsa_secp384r1_sha384,
 //                        rsa_pss_rsae_sha256/384/512 for the handshake
@@ -135,7 +139,6 @@ const int HANDSHAKE_CERTIFICATE = 11;
 const int HANDSHAKE_CERTIFICATE_REQUEST = 13;
 const int HANDSHAKE_CERTIFICATE_VERIFY = 15;
 const int HANDSHAKE_FINISHED = 20;
-const int SUITE_CHACHA20_POLY1305_SHA256 = 0x1303;
 const int GROUP_X25519 = 0x001D;
 const int SCHEME_ECDSA_P256_SHA256 = 0x0403;
 const int SCHEME_ECDSA_P384_SHA384 = 0x0503;
@@ -701,14 +704,23 @@ bytes server_name_data(str host) {
     return with_u16_length(entry);
 }
 
+// The suites in the ClientHello, most preferred first.
+List<tls13_schedule.Suite> offered_suites() {
+    List<tls13_schedule.Suite> suites = [tls13_schedule.Suite.ChaCha20Poly1305Sha256, tls13_schedule.Suite.Aes128GcmSha256, tls13_schedule.Suite.Aes256GcmSha384];
+    return suites;
+}
+
 bytes client_hello(str host, bytes client_random, bytes session_id, bytes public_key) {
     bytes body = [];
     put_u16(body, VERSION_TLS12);
     body.extend(client_random);
     body.push(session_id.size());
     body.extend(session_id);
-    put_u16(body, 2);
-    put_u16(body, SUITE_CHACHA20_POLY1305_SHA256);
+    List<tls13_schedule.Suite> suites = offered_suites();
+    put_u16(body, 2 * suites.size());
+    for (tls13_schedule.Suite offered in suites) {
+        put_u16(body, offered.code());
+    }
     body.push(1);
     body.push(0);
     bytes extensions = [];
@@ -770,21 +782,28 @@ bool has_downgrade_sentinel(bytes server_random) {
     return tail[7] == 0 || tail[7] == 1;
 }
 
-// The server's x25519 public key, once every field of its ServerHello has
-// been checked against what the ClientHello offered.
-Result<bytes, Error> check_server_hello(bytes message, bytes session_id) {
+// What a ServerHello settled: the suite the server chose and its x25519
+// public key.
+type ServerChoice {
+    tls13_schedule.Suite suite;
+    bytes public_key;
+}
+
+// The server's choice, once every field of its ServerHello has been checked
+// against what the ClientHello offered.
+Result<ServerChoice, Error> check_server_hello(bytes message, bytes session_id) {
     Reader reader = Reader(message_body(message));
     int legacy_version = reader.u16()?;
     bytes server_random = reader.take(RANDOM_SIZE)?;
     if (same_octets(server_random, retry_request_random())) {
-        return Result<bytes, Error>.Err(Error.RetryRequested);
+        return Result<ServerChoice, Error>.Err(Error.RetryRequested);
     }
     bytes echoed_session_id = reader.vector8()?;
-    int suite = reader.u16()?;
+    int suite_code = reader.u16()?;
     int compression = reader.u8()?;
     bytes extension_block = reader.vector16()?;
     if (reader.remaining() != 0) {
-        return Result<bytes, Error>.Err(Error.Malformed);
+        return Result<ServerChoice, Error>.Err(Error.Malformed);
     }
     Reader extensions = Reader(extension_block);
     bytes version_data = [];
@@ -797,13 +816,13 @@ Result<bytes, Error> check_server_hello(bytes message, bytes session_id) {
         bytes data = extensions.vector16()?;
         if (kind == EXTENSION_SUPPORTED_VERSIONS) {
             if (has_version) {
-                return Result<bytes, Error>.Err(Error.IllegalParameter);
+                return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
             }
             has_version = true;
             version_data = data;
         } else if (kind == EXTENSION_KEY_SHARE) {
             if (has_share) {
-                return Result<bytes, Error>.Err(Error.IllegalParameter);
+                return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
             }
             has_share = true;
             share_data = data;
@@ -813,30 +832,40 @@ Result<bytes, Error> check_server_hello(bytes message, bytes session_id) {
     }
     bool is_tls13 = has_version && version_data.size() == 2 && version_data[0] == 3 && version_data[1] == 4;
     if (has_downgrade_sentinel(server_random)) {
-        return Result<bytes, Error>.Err(Error.Downgrade);
+        return Result<ServerChoice, Error>.Err(Error.Downgrade);
     }
     if (!is_tls13) {
-        return Result<bytes, Error>.Err(Error.UnsupportedVersion);
+        return Result<ServerChoice, Error>.Err(Error.UnsupportedVersion);
     }
-    if (legacy_version != VERSION_TLS12 || !same_octets(echoed_session_id, session_id) || suite != SUITE_CHACHA20_POLY1305_SHA256 || compression != 0) {
-        return Result<bytes, Error>.Err(Error.IllegalParameter);
+    if (legacy_version != VERSION_TLS12 || !same_octets(echoed_session_id, session_id) || compression != 0) {
+        return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
+    }
+    Option<tls13_schedule.Suite> chosen = tls13_schedule.suite_for_code(suite_code);
+    tls13_schedule.Suite suite = tls13_schedule.Suite.ChaCha20Poly1305Sha256;
+    match (chosen) {
+        case Some(tls13_schedule.Suite known): {
+            suite = known;
+        }
+        case None: {
+            return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
+        }
     }
     if (has_other) {
-        return Result<bytes, Error>.Err(Error.UnsupportedExtension);
+        return Result<ServerChoice, Error>.Err(Error.UnsupportedExtension);
     }
     if (!has_share) {
-        return Result<bytes, Error>.Err(Error.IllegalParameter);
+        return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
     }
     Reader share = Reader(share_data);
     int group = share.u16()?;
     bytes public_key = share.vector16()?;
     if (share.remaining() != 0) {
-        return Result<bytes, Error>.Err(Error.Malformed);
+        return Result<ServerChoice, Error>.Err(Error.Malformed);
     }
     if (group != GROUP_X25519 || public_key.size() != X25519_SIZE) {
-        return Result<bytes, Error>.Err(Error.IllegalParameter);
+        return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
     }
-    return Result<bytes, Error>.Ok(public_key);
+    return Result<ServerChoice, Error>.Ok(ServerChoice(suite, public_key));
 }
 
 // --- the rest of the server's flight ------------------------------------------------
@@ -1116,9 +1145,9 @@ Result<void, Error> check_certificate_verify(bytes message, x509.Certificate lea
     return Result<void, Error>.Err(Error.UnsupportedSignature);
 }
 
-Result<void, Error> check_finished(bytes message, bytes expected) {
+Result<void, Error> check_finished(tls13_schedule.Suite suite, bytes message, bytes expected) {
     bytes verify_data = message_body(message);
-    if (verify_data.size() != tls13_schedule.HASH_SIZE) {
+    if (verify_data.size() != suite.hash_size()) {
         return Result<void, Error>.Err(Error.Malformed);
     }
     if (!same_octets(verify_data, expected)) {
@@ -1169,17 +1198,20 @@ Result<void, Error> run_handshake(tls13_record.Connection record, str host, Trus
     lift(record.send_change_cipher_spec())?;
     bytes server_hello = next_handshake(record)?;
     require_type(server_hello, HANDSHAKE_SERVER_HELLO)?;
-    bytes server_share = check_server_hello(server_hello, session_id)?;
+    ServerChoice choice = check_server_hello(server_hello, session_id)?;
+    tls13_schedule.Suite suite = choice.suite;
+    bytes server_share = choice.public_key;
+    record.use_suite(suite);
     bytes shared = x25519.x25519(secret, server_share);
     if (all_zero(shared)) {
         return Result<void, Error>.Err(Error.IllegalParameter);
     }
     transcript.add(server_hello);
-    bytes early = tls13_schedule.early_secret([]);
-    bytes handshake = tls13_schedule.handshake_secret(early, shared);
-    bytes hello_hash = transcript.digest();
-    bytes client_handshake = tls13_schedule.client_handshake_traffic_secret(handshake, hello_hash);
-    bytes server_handshake = tls13_schedule.server_handshake_traffic_secret(handshake, hello_hash);
+    bytes early = tls13_schedule.early_secret(suite, []);
+    bytes handshake = tls13_schedule.handshake_secret(suite, early, shared);
+    bytes hello_hash = transcript.digest(suite);
+    bytes client_handshake = tls13_schedule.client_handshake_traffic_secret(suite, handshake, hello_hash);
+    bytes server_handshake = tls13_schedule.server_handshake_traffic_secret(suite, handshake, hello_hash);
     lift(record.install_read_keys(server_handshake))?;
     record.install_write_keys(client_handshake);
     bytes encrypted_extensions = next_handshake(record)?;
@@ -1195,23 +1227,23 @@ Result<void, Error> run_handshake(tls13_record.Connection record, str host, Trus
     x509.Certificate leaf = presented[0];
     check_identity(presented, trust, anchors, host, now)?;
     transcript.add(certificate_message);
-    bytes certificate_hash = transcript.digest();
+    bytes certificate_hash = transcript.digest(suite);
     bytes verify_message = next_handshake(record)?;
     require_type(verify_message, HANDSHAKE_CERTIFICATE_VERIFY)?;
     check_certificate_verify(verify_message, leaf, certificate_hash)?;
     transcript.add(verify_message);
     bytes server_finished = next_handshake(record)?;
     require_type(server_finished, HANDSHAKE_FINISHED)?;
-    bytes server_key = tls13_schedule.finished_key(server_handshake);
-    check_finished(server_finished, tls13_schedule.finished_verify_data(server_key, transcript.digest()))?;
+    bytes server_key = tls13_schedule.finished_key(suite, server_handshake);
+    check_finished(suite, server_finished, tls13_schedule.finished_verify_data(suite, server_key, transcript.digest(suite)))?;
     transcript.add(server_finished);
-    bytes finished_hash = transcript.digest();
-    bytes master = tls13_schedule.master_secret(handshake);
-    bytes client_application = tls13_schedule.client_application_traffic_secret(master, finished_hash);
-    bytes server_application = tls13_schedule.server_application_traffic_secret(master, finished_hash);
-    bytes client_key = tls13_schedule.finished_key(client_handshake);
-    bytes client_finished = [HANDSHAKE_FINISHED, 0, 0, tls13_schedule.HASH_SIZE];
-    client_finished.extend(tls13_schedule.finished_verify_data(client_key, finished_hash));
+    bytes finished_hash = transcript.digest(suite);
+    bytes master = tls13_schedule.master_secret(suite, handshake);
+    bytes client_application = tls13_schedule.client_application_traffic_secret(suite, master, finished_hash);
+    bytes server_application = tls13_schedule.server_application_traffic_secret(suite, master, finished_hash);
+    bytes client_key = tls13_schedule.finished_key(suite, client_handshake);
+    bytes client_finished = [HANDSHAKE_FINISHED, 0, 0, suite.hash_size()];
+    client_finished.extend(tls13_schedule.finished_verify_data(suite, client_key, finished_hash));
     lift(record.send_handshake(client_finished))?;
     record.install_write_keys(client_application);
     lift(record.install_read_keys(server_application))?;

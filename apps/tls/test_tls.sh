@@ -7,8 +7,8 @@
 # Three kinds of peer, all on loopback, all disposable (a temporary directory,
 # an ephemeral port, a readiness poll, cleanup on exit; no bare sleeps):
 #
-#   openssl s_server    the real thing: `-tls1_3 -ciphersuites
-#                       TLS_CHACHA20_POLY1305_SHA256` with a throwaway P-256
+#   openssl s_server    the real thing: `-tls1_3 -ciphersuites` each of the
+#                       three suites (and one it does not offer) with a throwaway P-256
 #                       certificate. An HTTP GET through `lib/http.m31`
 #                       (`-www`), an echo (`-rev`), the wrong pin, a TLS 1.2
 #                       only server.
@@ -133,7 +133,7 @@ else
     oracle ok_p256 ok p256 echo hello $LOCAL '^line echo: hello\nclosed$' 0 'client_finished ok'
     oracle ok_p384 ok p384 echo hello $LOCAL '^line echo: hello\nclosed$' 0 'client_finished ok'
     oracle offers ok p256 handshake '' $LOCAL '^connected\nclosed$' 0 \
-        'offered suites=1303 groups=001d versions=0304 sigalgs=0403,0503,0804,0805,0806 extensions='
+        'offered suites=1303,1301,1302 groups=001d versions=0304 sigalgs=0403,0503,0804,0805,0806 extensions='
     ORACLE_BIND=::1 oracle sni ok p256 handshake '' localhost '^connected\nclosed$' 0 'sni=localhost'
     oracle no_sni_for_address ok p256 handshake '' $LOCAL '^connected\nclosed$' 0 'sni=none'
     oracle session_id ok p256 handshake '' $LOCAL '^connected\nclosed$' 0 'session_id_length=32'
@@ -159,6 +159,8 @@ else
     oracle hello_retry_request hrr p256 handshake '' $LOCAL '^error: the server sent a HelloRetryRequest' 1 'client alert 40'
     oracle downgrade_sentinel downgrade p256 handshake '' $LOCAL '^error: the server.s random carries the TLS downgrade sentinel$' 1 'client alert 47'
     oracle tls12_server tls12 p256 handshake '' $LOCAL '^error: the server does not speak TLS 1.3$' 1 'client alert 70'
+    oracle suite_not_offered_ccm suite_ccm p256 handshake '' $LOCAL "^error: the server's hello is not what was offered$" 1 'client alert 47'
+    oracle suite_not_offered_tls12_suite suite_ecdhe p256 handshake '' $LOCAL "^error: the server's hello is not what was offered$" 1 'client alert 47'
     oracle session_id_not_echoed bad_session_id p256 handshake '' $LOCAL "^error: the server's hello is not what was offered$" 1 'client alert 47'
     oracle zero_shared_secret zero_share p256 handshake '' $LOCAL "^error: the server's hello is not what was offered$" 1 'client alert 47'
     oracle unoffered_hello_extension server_hello_extra p256 handshake '' $LOCAL '^error: the server used an extension that was not offered$' 1 'client alert 110'
@@ -236,8 +238,22 @@ else
             live openssl_tls12_only '^error: the server (does not speak TLS 1.3|sent a fatal alert)$' 1 handshake 127.0.0.1 "$SERVER_PORT" "$PIN"
             kill "$SERVER_PID" 2>/dev/null
         fi
-        # A server that will only negotiate AES: no common suite, so a handshake_failure.
-        if serve aes_only -tls1_3 -ciphersuites TLS_AES_128_GCM_SHA256 -www; then
+        # A server that will only negotiate one AES-GCM suite is served by it.
+        if serve aes128 -tls1_3 -ciphersuites TLS_AES_128_GCM_SHA256 -rev; then
+            live openssl_aes128_echo '^line olleh\nclosed$' 0 echo 127.0.0.1 "$SERVER_PORT" "$PIN" hello
+            kill "$SERVER_PID" 2>/dev/null
+        fi
+        if serve aes256 -tls1_3 -ciphersuites TLS_AES_256_GCM_SHA384 -rev; then
+            live openssl_aes256_echo '^line olleh\nclosed$' 0 echo 127.0.0.1 "$SERVER_PORT" "$PIN" hello
+            kill "$SERVER_PID" 2>/dev/null
+        fi
+        if serve aes256_www -tls1_3 -ciphersuites TLS_AES_256_GCM_SHA384 -www; then
+            live openssl_aes256_http_get '^status 200\nbody [0-9]+\n(.|\n)*closed$' 0 get 127.0.0.1 "$SERVER_PORT" "$PIN" /
+            kill "$SERVER_PID" 2>/dev/null
+        fi
+        # A server that will only negotiate a suite this client never offers
+        # (AES-128-CCM): no common suite, so a handshake_failure.
+        if serve ccm_only -tls1_3 -ciphersuites TLS_AES_128_CCM_SHA256 -www; then
             live openssl_no_common_suite '^error: ' 1 handshake 127.0.0.1 "$SERVER_PORT" "$PIN"
             kill "$SERVER_PID" 2>/dev/null
         fi

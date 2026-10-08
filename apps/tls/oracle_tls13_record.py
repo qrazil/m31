@@ -2,7 +2,7 @@
 """Expected output of t_tls13_record.m31.
 
 Seals and opens TLS 1.3 records with the `cryptography` package's
-ChaCha20Poly1305 and RFC 8446 section 5.2-5.4 written out from the RFC:
+ChaCha20Poly1305 or AESGCM (argument: chacha, aes128 or aes256) and RFC 8446 section 5.2-5.4 written out from the RFC:
 
   nonce = iv XOR (sequence as 64 bits big-endian, left-padded to 12 octets)
   record = 17 03 03 len || AEAD(key, nonce, content || type || zeros, aad=header)
@@ -14,7 +14,9 @@ print the lines the m31 program must print.
 import hashlib
 
 from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+import sys
+
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305
 
 MAX_PLAINTEXT = 1 << 14
 MAX_CIPHERTEXT = (1 << 14) + 256
@@ -25,7 +27,15 @@ def pattern(n, multiplier, offset):
     return bytes((i * multiplier + offset) & 0xFF for i in range(n))
 
 
-KEY = pattern(32, 5, 1)
+SUITE = sys.argv[1] if len(sys.argv) > 1 else "chacha"
+KEY_SIZE = {"chacha": 32, "aes128": 16, "aes256": 32}[SUITE]
+
+
+def aead(key):
+    return ChaCha20Poly1305(key) if SUITE == "chacha" else AESGCM(key)
+
+
+KEY = pattern(KEY_SIZE, 5, 1)
 IV = pattern(12, 11, 7)
 
 
@@ -39,7 +49,7 @@ def header(length):
 
 def seal_inner(key, iv, sequence, inner):
     head = header(len(inner) + 16)
-    return head + ChaCha20Poly1305(key).encrypt(nonce(iv, sequence), inner, head)
+    return head + aead(key).encrypt(nonce(iv, sequence), inner, head)
 
 
 def seal(sequence, content_type, content, padding, key=KEY, iv=IV):
@@ -54,7 +64,7 @@ def open_reference(wire, sequence, key=KEY, iv=IV):
     if len(body) > MAX_CIPHERTEXT:
         return "RecordOverflow"
     try:
-        inner = ChaCha20Poly1305(key).decrypt(nonce(iv, sequence), body, head)
+        inner = aead(key).decrypt(nonce(iv, sequence), body, head)
     except (InvalidTag, ValueError):
         return "BadRecordMac"
     end = len(inner)
@@ -114,7 +124,7 @@ out("neg truncated_to_tag " + outcome(base[: 5 + 16], 9))
 out("neg shorter_than_tag " + outcome(base[: 5 + 15], 9))
 out("neg header_only " + outcome(base[:5], 9))
 out("neg extended_by_one " + outcome(base + b"\0", 9))
-out("neg wrong_key " + outcome(base, 9, key=pattern(32, 5, 2)))
+out("neg wrong_key " + outcome(base, 9, key=pattern(KEY_SIZE, 5, 2)))
 out("neg wrong_iv " + outcome(base, 9, iv=pattern(12, 11, 8)))
 
 largest = seal(0, 23, pattern(16384, 1, 0), 239)

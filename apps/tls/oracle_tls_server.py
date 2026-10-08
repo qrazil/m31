@@ -258,6 +258,10 @@ def serve(peer, mode, curve, key, certificate_der):
         server_random = sha256(b"HelloRetryRequest")
         legacy_extensions = [extension(43, b"\x03\x04"), extension(51, struct.pack(">H", 0x001D))]
     suite = SUITE
+    if mode == "suite_ccm":
+        suite = 0x1304
+    if mode == "suite_ecdhe":
+        suite = 0xC02F
     legacy_version = 0x0303
     if mode in ("downgrade", "tls12"):
         suite = 0xC02F
@@ -269,7 +273,7 @@ def serve(peer, mode, curve, key, certificate_der):
             + b"".join(legacy_extensions))
     server_hello = handshake_message(2, body)
     peer.send_plain(22, server_hello)
-    if mode in ("hrr", "downgrade", "tls12", "bad_session_id", "zero_share", "server_hello_extra"):
+    if mode in ("hrr", "downgrade", "tls12", "bad_session_id", "zero_share", "server_hello_extra", "suite_ccm", "suite_ecdhe"):
         # Whatever the client does next is the point: a fatal alert, then silence.
         report_next(peer)
         return
