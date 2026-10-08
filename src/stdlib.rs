@@ -21,6 +21,7 @@ pub fn source(name: &str) -> Option<&'static str> {
     Some(match name {
         "base64" => include_str!("../lib/base64.m31"),
         "csv" => include_str!("../lib/csv.m31"),
+        "der" => include_str!("../lib/der.m31"),
         "diff" => include_str!("../lib/diff.m31"),
         "html" => include_str!("../lib/html.m31"),
         "http" => include_str!("../lib/http.m31"),
@@ -46,6 +47,16 @@ pub fn source(name: &str) -> Option<&'static str> {
         "sha256" => include_str!("../lib/sha256.m31"),
         "chacha20poly1305" => include_str!("../lib/chacha20poly1305.m31"),
         "ssh" => include_str!("../lib/ssh.m31"),
+        "hmac" => include_str!("../lib/hmac.m31"),
+        "hkdf" => include_str!("../lib/hkdf.m31"),
+        "bignum" => include_str!("../lib/bignum.m31"),
+        "ecdsa" => include_str!("../lib/ecdsa.m31"),
+        "x509" => include_str!("../lib/x509.m31"),
+        "x509_chain" => include_str!("../lib/x509_chain.m31"),
+        "rsa" => include_str!("../lib/rsa.m31"),
+        "tls13_schedule" => include_str!("../lib/tls13_schedule.m31"),
+        "tls13_record" => include_str!("../lib/tls13_record.m31"),
+        "tls" => include_str!("../lib/tls.m31"),
         _ => return None,
     })
 }

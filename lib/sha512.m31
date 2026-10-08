@@ -13,6 +13,19 @@
 //   sha512.sum(data)            -> bytes, the 64 octets
 //   sha512.hex(data)            -> str, 128 lowercase hex digits
 //
+// And SHA-384 (FIPS 180-4 §6.5), which is SHA-512 with a different set of
+// initial chaining values and a digest cut to its first 48 octets -- nothing
+// else differs, so it lives here rather than in a module that would copy the
+// 80-round compression function. TLS 1.3 uses it for the
+// `TLS_AES_256_GCM_SHA384` key schedule and for verifying the ECDSA-with-SHA384
+// signatures on the certificate chains of real hosts.
+//
+//   sha512.Hasher h = sha512.sha384_hasher();   // then update/digest as above
+//   bytes d = h.digest();       // 48 octets; ends the hash
+//
+//   sha512.sum384(data)         -> bytes, the 48 octets
+//   sha512.hex384(data)         -> str, 96 lowercase hex digits
+//
 // --- why this is NOT sha1.m31 with bigger numbers ---------------------------
 //
 // `apps/git/sha1.m31` keeps every word comfortably inside 32 of this
@@ -173,6 +186,22 @@ Array<Word64> h_init() {
     return h;
 }
 
+// SHA-384's eight chaining values, FIPS 180-4 §5.3.4: the first 64 bits of the
+// fractional part of the square root of the ninth through sixteenth primes.
+// The compression function and the round constants are SHA-512's, unchanged.
+Array<Word64> h384_init() {
+    Array<Word64> h = [Word64(0, 0); 8];
+    h[0] = Word64(0xcbbb_9d5d, 0xc105_9ed8);
+    h[1] = Word64(0x629a_292a, 0x367c_d507);
+    h[2] = Word64(0x9159_015a, 0x3070_dd17);
+    h[3] = Word64(0x152f_ecd8, 0xf70e_5939);
+    h[4] = Word64(0x6733_2667, 0xffc0_0b31);
+    h[5] = Word64(0x8eb4_4a87, 0x6858_1511);
+    h[6] = Word64(0xdb0c_2e0d, 0x64f9_8fa7);
+    h[7] = Word64(0x47b5_481d, 0xbefa_4fa4);
+    return h;
+}
+
 // The eighty round constants, FIPS 180-4 §4.2.3 -- see the header.
 Array<Word64> k_init() {
     Array<Word64> k = [Word64(0, 0); 80];
@@ -277,6 +306,9 @@ pub type Hasher {
     /// the 128-bit field FIPS 180-4 specifies is written with its top 8
     /// octets always zero).
     int total = 0;
+    /// How many octets of the final chaining value `digest` returns: 64 for
+    /// SHA-512, 48 for SHA-384 (`sha384_hasher`).
+    int digest_size = 64;
     /// The partial block: always fewer than 128 octets between `update`s.
     bytes tail = [];
     /// The message schedule, held across blocks -- see `sha1.m31`'s note on
@@ -310,8 +342,8 @@ pub void Hasher.update(bytes data) {
     }
 }
 
-/// The 64-octet digest. Ends the hash, exactly as `sha1.m31`'s `digest`
-/// does: make a new `Hasher` for a new message.
+/// The digest: 64 octets, or 48 for a `sha384_hasher`. Ends the hash, exactly
+/// as `sha1.m31`'s `digest` does: make a new `Hasher` for a new message.
 pub bytes Hasher.digest() {
     int bits = total * 8;
     tail.push(0x80);
@@ -339,6 +371,7 @@ pub bytes Hasher.digest() {
     for (int w in 0 .. 8) {
         word(out, h[w]);
     }
+    out.truncate(digest_size);
     return out;
 }
 
@@ -400,6 +433,27 @@ pub bytes sum(bytes data) {
 /// The digest of `data` as 128 lowercase hex digits.
 pub str hex(bytes data) {
     return sum(data).hex();
+}
+
+/// A `Hasher` that computes SHA-384 instead of SHA-512: SHA-384's initial
+/// chaining values and a 48-octet digest, the same `update` and `block`.
+pub Hasher sha384_hasher() {
+    Hasher hasher = Hasher();
+    hasher.h = h384_init();
+    hasher.digest_size = 48;
+    return hasher;
+}
+
+/// The SHA-384 digest of `data`, 48 octets, in one call.
+pub bytes sum384(bytes data) {
+    Hasher hasher = sha384_hasher();
+    hasher.update(data);
+    return hasher.digest();
+}
+
+/// The SHA-384 digest of `data` as 96 lowercase hex digits.
+pub str hex384(bytes data) {
+    return sum384(data).hex();
 }
 
 // A 64-bit word appended big-endian, as two 32-bit big-endian halves.

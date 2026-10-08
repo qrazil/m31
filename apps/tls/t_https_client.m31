@@ -1,0 +1,139 @@
+// `http.fetch` over `https://`, driven from `test_https.sh`.
+//
+//   t_https_client <url> <system|ca file|pin:<64 hex digits>> [redirects] [method]
+//   t_https_client parse <url>
+//
+// `parse` prints what `http.parse_url` makes of the URL, with no network.
+//
+// Prints `status <code>`, `body <octets>` and the body's first line as
+// `text <line>` (clipped to 60 octets); or `error <Name>` (the `http.Error` variant) and exits 1.
+
+import http;
+import os;
+import tls;
+
+str name_of(http.Error error) {
+    match (error) {
+        case Syntax: {
+            return "Syntax";
+        }
+        case Framing: {
+            return "Framing";
+        }
+        case TooLarge: {
+            return "TooLarge";
+        }
+        case BadUrl: {
+            return "BadUrl";
+        }
+        case Closed: {
+            return "Closed";
+        }
+        case Refused: {
+            return "Refused";
+        }
+        case TimedOut: {
+            return "TimedOut";
+        }
+        case Unreachable: {
+            return "Unreachable";
+        }
+        case Reset: {
+            return "Reset";
+        }
+        case InUse: {
+            return "InUse";
+        }
+        case NameNotFound: {
+            return "NameNotFound";
+        }
+        case Other: {
+            return "Other";
+        }
+        case CertificateUntrusted: {
+            return "CertificateUntrusted";
+        }
+        case CertificateExpired: {
+            return "CertificateExpired";
+        }
+        case HostnameMismatch: {
+            return "HostnameMismatch";
+        }
+        case TlsFailed: {
+            return "TlsFailed";
+        }
+        case InsecureRedirect: {
+            return "InsecureRedirect";
+        }
+    }
+}
+
+void fail(str reason) {
+    print("error " + reason);
+    os.exit(1);
+}
+
+List<str> arguments = os.args();
+if (arguments.size() < 3) {
+    trap("t_https_client: <url> <system|ca file|pin:hex> [redirects] [method]");
+}
+str url = arguments[1];
+if (arguments[1] == "parse") {
+    match (http.parse_url(arguments[2])) {
+        case Ok(http.Url parsed): {
+            print(parsed.scheme() + " " + parsed.host() + " " + str(parsed.port()) + " " + parsed.host_header() + " " + parsed.to_str());
+        }
+        case Err(http.Error parse_error): {
+            fail(name_of(parse_error));
+        }
+    }
+    os.exit(0);
+}
+tls.Trust trust = tls.Trust.SystemRoots;
+if (arguments[2].starts_with("pin:")) {
+    match (tls.pinned_key_hex(arguments[2].substr(4, arguments[2].size()))) {
+        case Some(tls.Trust pinned): {
+            trust = pinned;
+        }
+        case None: {
+            trap("t_https_client: a pin is 64 hex digits");
+        }
+    }
+} else if (arguments[2] != "system") {
+    trust = tls.Trust.CaFile(arguments[2]);
+}
+int redirects = http.MAX_REDIRECTS;
+if (arguments.size() > 3) {
+    redirects = arguments[3].parse_int().or(redirects);
+}
+str method = "GET";
+if (arguments.size() > 4) {
+    method = arguments[4];
+}
+match (http.request(method, url)) {
+    case Err(http.Error request_error): {
+        fail(name_of(request_error));
+    }
+    case Ok(http.Request request): {
+        match (http.fetch(request, redirects: redirects, trust: trust)) {
+            case Err(http.Error fetch_error): {
+                fail(name_of(fetch_error));
+            }
+            case Ok(http.Response response): {
+                print("status " + str(response.status()));
+                print("body " + str(response.body().size()));
+                match (response.text()) {
+                    case Ok(str text): {
+                        str first = text.split("\n")[0];
+                        if (first.size() > 60) {
+                            first = first.substr(0, 60);
+                        }
+                        print("text " + first);
+                    }
+                    case Err: {
+                    }
+                }
+            }
+        }
+    }
+}

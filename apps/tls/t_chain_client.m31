@@ -1,0 +1,189 @@
+// The TLS client under chain validation, driven from `test_chain.sh`.
+//
+//   t_chain_client <mode> <host> <port> <trust> <now> [argument]
+//
+// `trust` is `system` (`Trust.SystemRoots`) or the path of a PEM file of
+// roots (`Trust.CaFile`). `now` is epoch seconds, or `real` for the machine's
+// clock. Modes:
+//   handshake       connect, then close
+//   get <path>      an HTTPS HEAD over `lib/http.m31`'s own request and response
+//                   code; prints the status code
+//
+// Prints `connected` and what the mode saw, exiting 0, or `error <Name>`
+// (the `tls.Error` variant) and exits 1.
+
+import date;
+import http;
+import io;
+import os;
+import tls;
+
+str name_of(tls.Error error) {
+    match (error) {
+        case TrustStore: {
+            return "TrustStore";
+        }
+        case UnknownAuthority: {
+            return "UnknownAuthority";
+        }
+        case CertificateExpired: {
+            return "CertificateExpired";
+        }
+        case CertificateNotYetValid: {
+            return "CertificateNotYetValid";
+        }
+        case HostnameMismatch: {
+            return "HostnameMismatch";
+        }
+        case InvalidChain: {
+            return "InvalidChain";
+        }
+        case WeakCertificate: {
+            return "WeakCertificate";
+        }
+        case BadCertificate: {
+            return "BadCertificate";
+        }
+        case UntrustedKey: {
+            return "UntrustedKey";
+        }
+        case BadSignature: {
+            return "BadSignature";
+        }
+        case UnsupportedSignature: {
+            return "UnsupportedSignature";
+        }
+        case Connect: {
+            return "Connect";
+        }
+        case Io: {
+            return "Io";
+        }
+        case Truncated: {
+            return "Truncated";
+        }
+        case PeerAlert: {
+            return "PeerAlert";
+        }
+        case Record: {
+            return "Record";
+        }
+        case BadRecordMac: {
+            return "BadRecordMac";
+        }
+        case Closed: {
+            return "Closed";
+        }
+        case UnsupportedVersion: {
+            return "UnsupportedVersion";
+        }
+        case Downgrade: {
+            return "Downgrade";
+        }
+        case RetryRequested: {
+            return "RetryRequested";
+        }
+        case IllegalParameter: {
+            return "IllegalParameter";
+        }
+        case UnsupportedExtension: {
+            return "UnsupportedExtension";
+        }
+        case Malformed: {
+            return "Malformed";
+        }
+        case UnexpectedMessage: {
+            return "UnexpectedMessage";
+        }
+        case ClientCertificateRequested: {
+            return "ClientCertificateRequested";
+        }
+        case BadFinished: {
+            return "BadFinished";
+        }
+    }
+}
+
+void fail(str reason) {
+    print("error " + reason);
+    os.exit(1);
+}
+
+void get(tls.Conn conn, str host, str path) {
+    match (http.request("HEAD", "http://" + host + path)) {
+        case Err(http.Error request_error): {
+            fail("request");
+        }
+        case Ok(http.Request request): {
+            match (http.write_request(conn, request)) {
+                case Err(http.Error write_error): {
+                    fail("write");
+                }
+                case Ok: {
+                }
+            }
+            match (http.read_response(conn, "HEAD")) {
+                case Err(http.Error read_error): {
+                    fail("read");
+                }
+                case Ok(http.Response response): {
+                    print("status " + str(response.status()));
+                }
+            }
+        }
+    }
+}
+
+List<str> arguments = os.args();
+if (arguments.size() < 6) {
+    trap("t_chain_client: <mode> <host> <port> <system|ca file> <now|real> [argument]");
+}
+str mode = arguments[1];
+str host = arguments[2];
+int port = 0;
+match (arguments[3].parse_int()) {
+    case Some(int parsed): {
+        port = parsed;
+    }
+    case None: {
+        trap("t_chain_client: the port is a number");
+    }
+}
+tls.Trust trust = tls.Trust.SystemRoots;
+if (arguments[4] != "system") {
+    trust = tls.Trust.CaFile(arguments[4]);
+}
+int now = date.now();
+if (arguments[5] != "real") {
+    match (arguments[5].parse_int()) {
+        case Some(int parsed): {
+            now = parsed;
+        }
+        case None: {
+            trap("t_chain_client: now is a number of seconds, or `real`");
+        }
+    }
+}
+str extra = "";
+if (arguments.size() > 6) {
+    extra = arguments[6];
+}
+match (tls.connect_at(host, port, trust, now)) {
+    case Err(tls.Error connect_error): {
+        fail(name_of(connect_error));
+    }
+    case Ok(tls.Conn conn): {
+        print("connected");
+        if (mode == "get") {
+            get(conn, host, extra);
+        }
+        match (conn.close()) {
+            case Ok(bool closed): {
+                print("closed");
+            }
+            case Err(io.Error close_error): {
+                fail("close");
+            }
+        }
+    }
+}

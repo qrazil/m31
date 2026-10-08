@@ -1,0 +1,96 @@
+// HMAC (RFC 2104, FIPS 198-1), written in the language over `bytes`, `sha256`
+// and `sha512` (which also computes SHA-384).
+//
+// It exists for the TLS 1.3 key schedule (RFC 8446 §7.1), which is HKDF
+// (`hkdf.m31`) over HMAC, and for the Finished message, which is an HMAC over
+// the handshake transcript. Nothing else in this codebase needed a keyed hash
+// before now.
+//
+// API
+// ---
+//   hmac.sha256_mac(key, message)   -> bytes, 32 octets
+//   hmac.sha256_hex(key, message)   -> str, 64 lowercase hex digits
+//   hmac.sha384_mac(key, message)   -> bytes, 48 octets
+//   hmac.sha384_hex(key, message)   -> str, 96 lowercase hex digits
+//
+// --- one construction, written once ------------------------------------------
+//
+// HMAC is `H((K' ^ opad) || H((K' ^ ipad) || message))`, where `K'` is the key
+// zero-padded to the hash's block size, or -- when the key is longer than a
+// block -- the hash of the key, zero-padded. SHA-256 has a 64-octet block;
+// SHA-384 has a 128-octet one, as SHA-512 does. That is the
+// only thing the two hashes change, so the pad construction is the one private
+// helper `padded_key_xor`, and each public function is the three lines that
+// name its hash and its block size.
+//
+// The key is not secret-dependent in length here -- its size is public in
+// every protocol this serves -- so the `key.size() > block` branch is not a
+// timing channel. The octets of the key only ever flow through `^`, `push`
+// and the hash itself.
+
+import sha256;
+import sha512;
+
+/// SHA-256's block size in octets, FIPS 180-4 §1.
+const int SHA256_BLOCK_SIZE = 64;
+/// SHA-384's block size in octets, FIPS 180-4 §1: SHA-512's, since it is
+/// SHA-512 with a different start and a shorter digest.
+const int SHA384_BLOCK_SIZE = 128;
+/// RFC 2104 §2's inner pad octet.
+const int INNER_PAD = 0x36;
+/// RFC 2104 §2's outer pad octet.
+const int OUTER_PAD = 0x5C;
+
+/// HMAC-SHA-256 of `message` under `key`: 32 octets. Any key length is
+/// accepted, including none; a key longer than 64 octets is hashed down first,
+/// as RFC 2104 §2 says.
+pub bytes sha256_mac(bytes key, bytes message) {
+    bytes block_key = key;
+    if (key.size() > SHA256_BLOCK_SIZE) {
+        block_key = sha256.sum(key);
+    }
+    bytes inner = padded_key_xor(block_key, SHA256_BLOCK_SIZE, INNER_PAD);
+    inner.extend(message);
+    bytes outer = padded_key_xor(block_key, SHA256_BLOCK_SIZE, OUTER_PAD);
+    outer.extend(sha256.sum(inner));
+    return sha256.sum(outer);
+}
+
+/// `sha256_mac` as 64 lowercase hex digits.
+pub str sha256_hex(bytes key, bytes message) {
+    return sha256_mac(key, message).hex();
+}
+
+/// HMAC-SHA-384 of `message` under `key`: 48 octets. As `sha256_mac`, with a
+/// 128-octet block: a key longer than that is hashed down first.
+pub bytes sha384_mac(bytes key, bytes message) {
+    bytes block_key = key;
+    if (key.size() > SHA384_BLOCK_SIZE) {
+        block_key = sha512.sum384(key);
+    }
+    bytes inner = padded_key_xor(block_key, SHA384_BLOCK_SIZE, INNER_PAD);
+    inner.extend(message);
+    bytes outer = padded_key_xor(block_key, SHA384_BLOCK_SIZE, OUTER_PAD);
+    outer.extend(sha512.sum384(inner));
+    return sha512.sum384(outer);
+}
+
+/// `sha384_mac` as 96 lowercase hex digits.
+pub str sha384_hex(bytes key, bytes message) {
+    return sha384_mac(key, message).hex();
+}
+
+// `key` zero-padded to `block_size` octets, each octet XORed with `pad`.
+// The caller has already hashed a key longer than a block, so `key` is at most
+// `block_size` here.
+bytes padded_key_xor(bytes key, int block_size, int pad) {
+    bytes out = [];
+    for (int i in 0 .. block_size) {
+        int octet = 0;
+        if (i < key.size()) {
+            octet = key[i];
+        }
+        out.push(octet ^ pad);
+    }
+    return out;
+}

@@ -1,0 +1,124 @@
+// `lib/x509_chain.m31` under test, driven from `test_chain.sh`.
+//
+//   t_chain_verify <anchors.pem> <chain.pem> <host> <now, epoch seconds>
+//
+// Prints `ok <number of certificates in the path>` or `error <Name>`, where
+// `<Name>` is the `x509_chain.Error` variant, or `LeafUnparseable` when the
+// first certificate of the chain is refused by `x509.parse`, and exits 0 for
+// an `ok` and 1 for an error.
+
+import io;
+import os;
+import x509;
+import x509_chain;
+
+str name_of(x509_chain.Error error) {
+    match (error) {
+        case EmptyChain: {
+            return "EmptyChain";
+        }
+        case UnknownAuthority: {
+            return "UnknownAuthority";
+        }
+        case Expired: {
+            return "Expired";
+        }
+        case NotYetValid: {
+            return "NotYetValid";
+        }
+        case HostnameMismatch: {
+            return "HostnameMismatch";
+        }
+        case NotCertificateAuthority: {
+            return "NotCertificateAuthority";
+        }
+        case PathLengthExceeded: {
+            return "PathLengthExceeded";
+        }
+        case WrongPurpose: {
+            return "WrongPurpose";
+        }
+        case BadSignature: {
+            return "BadSignature";
+        }
+        case WeakAlgorithm: {
+            return "WeakAlgorithm";
+        }
+        case UnsupportedAlgorithm: {
+            return "UnsupportedAlgorithm";
+        }
+        case TooDeep: {
+            return "TooDeep";
+        }
+    }
+}
+
+str read_text(str path) {
+    match (io.read(path)) {
+        case Ok(str text): {
+            return text;
+        }
+        case Err(io.Error read_error): {
+            trap("t_chain_verify: cannot read " + path);
+        }
+    }
+}
+
+// The chain as a server presents it: the first certificate has to parse, any
+// other that does not is left out, as `lib/tls.m31` leaves it out.
+List<x509.Certificate> presented_from(str path) {
+    List<x509.Certificate> certificates = [];
+    match (x509.pem_certificates(read_text(path))) {
+        case Err(x509.Error pem_error): {
+            trap("t_chain_verify: " + path + " is not PEM");
+        }
+        case Ok(List<bytes> blobs): {
+            int count = 0;
+            for (bytes blob in blobs) {
+                match (x509.parse(blob)) {
+                    case Ok(x509.Certificate certificate): {
+                        certificates.push(certificate);
+                    }
+                    case Err(x509.Error parse_error): {
+                        if (count == 0) {
+                            print("error LeafUnparseable");
+                            os.exit(1);
+                        }
+                    }
+                }
+                count = count + 1;
+            }
+        }
+    }
+    return certificates;
+}
+
+List<str> arguments = os.args();
+if (arguments.size() != 5) {
+    trap("t_chain_verify: <anchors.pem> <chain.pem> <host> <now>");
+}
+int now = 0;
+match (arguments[4].parse_int()) {
+    case Some(int parsed): {
+        now = parsed;
+    }
+    case None: {
+        trap("t_chain_verify: now is a number of seconds");
+    }
+}
+match (x509_chain.parse_anchors(read_text(arguments[1]))) {
+    case Err(x509.Error pem_error): {
+        trap("t_chain_verify: the anchors are not PEM");
+    }
+    case Ok(x509_chain.AnchorSet anchors): {
+        match (x509_chain.verify(presented_from(arguments[2]), anchors.certificates, arguments[3], now)) {
+            case Ok(List<x509.Certificate> path): {
+                print("ok " + path.size().to_str());
+            }
+            case Err(x509_chain.Error failure): {
+                print("error " + name_of(failure));
+                os.exit(1);
+            }
+        }
+    }
+}

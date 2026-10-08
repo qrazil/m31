@@ -1,0 +1,400 @@
+// Fixed-width unsigned big integers and prime-modulus Montgomery arithmetic:
+// the arithmetic under `ecdsa.m31`'s P-256 and P-384 verification, and the
+// piece TLS 1.3 certificate checking (X.509 signatures) needs first.
+//
+// API
+// ---
+//   Modulus modulus = bignum.make_modulus(prime_bytes);   // big-endian bytes of an odd modulus
+//   Array<int> one_mod = bignum.to_montgomery(modulus, bignum.from_bytes(raw, modulus.width));
+//   Array<int> product = bignum.montgomery_multiply(modulus, left, right);
+//   Array<int> plain = bignum.from_montgomery(modulus, product);
+//   Array<int> inverse = bignum.montgomery_inverse(modulus, value);   // prime modulus only
+//
+// --- NOT constant time, and why that is fine here ----------------------------
+//
+// **Every value this module is built to handle is public.** ECDSA
+// VERIFICATION runs on a public key, a message digest and a signature, none
+// of which is secret, so a timing difference in how long an operation takes
+// leaks nothing an attacker does not already have. This module therefore
+// branches on values freely (`compare`, the conditional subtract at the end of
+// every Montgomery multiply, the square-and-multiply exponent bits) and is
+// the opposite of `field25519.m31`, which is written line by line to avoid
+// exactly that. DO NOT USE THIS MODULE TO SIGN, to derive a key, to do a
+// Diffie-Hellman step, or on any other secret: it would leak that secret
+// through timing. A signing implementation needs a separate constant-time
+// field, written the way `field25519.m31` is.
+//
+// --- representation: 24-bit limbs, little-endian ------------------------------
+//
+// A value is an `Array<int>` of exactly `width` limbs,
+// `value = sum(limb[i] * 2^(24*i))`, every limb in `[0, 2^24)`. The width is a
+// property of the `Modulus` the value belongs to (`make_modulus` derives it
+// from the modulus's byte length: 32 bytes -> 11 limbs, 48 bytes -> 16), and
+// every function below takes values of that one width. A width-`w` value is
+// always fully normalized: no function leaves a limb outside `[0, 2^24)`.
+//
+// 24 bits because `int` is a signed 64-bit integer that TRAPS on overflow and
+// there is no unsigned type. A limb product is below `2^48`, and the sums a
+// Montgomery step forms (a limb, a product, a product, a carry) stay under
+// `2^50` -- thirteen bits of headroom below the `2^63` where a trap would
+// fire, so no operation here can trap on legal input. (A wider limb would
+// still fit, but 24 is the figure TLS's plan settled on, and it keeps a
+// `>> 24` and a `& 0xFFFFFF` exactly one limb.)
+//
+// --- Montgomery form ------------------------------------------------------------
+//
+// With `R = 2^(24*width)`, the Montgomery form of `x` is `x*R mod modulus`.
+// `montgomery_multiply(a, b)` returns `a*b*R^-1 mod modulus`, so on two
+// Montgomery forms it returns the Montgomery form of the product, and the
+// reduction needs no division. `mod_add` / `mod_subtract` are
+// representation-agnostic: they work on plain values and Montgomery forms
+// alike. A plain value `x` multiplied by a Montgomery form `y*R` gives the
+// plain product `x*y` directly, which `ecdsa.m31` uses to avoid converting
+// the scalars it multiplies by an inverse.
+//
+// A modulus must be odd (the Montgomery inverse `-modulus^-1 mod 2^24` does
+// not exist otherwise) and greater than 1.
+
+const int LIMB_BITS = 24;
+const int LIMB_MASK = 0xFFFFFF;
+const int LIMB_RADIX = 0x1000000;
+
+/// An odd modulus together with everything Montgomery multiplication needs
+/// that depends only on the modulus, computed once by `make_modulus`.
+pub type Modulus {
+    pub int width;
+    pub Array<int> value;
+    int negative_inverse;
+    Array<int> radix_squared;
+    Array<int> one_montgomery;
+    Array<int> inverse_exponent;
+}
+
+// --- construction and conversion ----------------------------------------------
+
+/// The number of limbs a big-endian value of `byte_count` bytes occupies.
+pub int limbs_for_bytes(int byte_count) {
+    return (byte_count * 8 + LIMB_BITS - 1) / LIMB_BITS;
+}
+
+/// `width` limbs holding the small non-negative `value` (below `2^24`).
+pub Array<int> from_small(int width, int value) {
+    Array<int> out = [0; width];
+    out[0] = value;
+    return out;
+}
+
+/// The `width`-limb value that `raw` (big-endian, any leading zeros) encodes.
+/// `raw` must fit: `raw.size() <= 3 * width`, or a limb index traps.
+pub Array<int> from_bytes(bytes raw, int width) {
+    Array<int> out = [0; width];
+    int count = raw.size();
+    for (int index in 0 .. count) {
+        int limb = index / 3;
+        int shift = 8 * (index % 3);
+        out[limb] = out[limb] | raw[count - 1 - index] << shift;
+    }
+    return out;
+}
+
+/// `value` as exactly `byte_count` big-endian bytes. The value must be less
+/// than `2^(8*byte_count)`; bits above that are silently dropped, so the
+/// caller (always a field or scalar with a known size) is responsible.
+pub bytes to_bytes(Array<int> value, int byte_count) {
+    bytes out = [0; byte_count];
+    for (int index in 0 .. byte_count) {
+        int limb = index / 3;
+        int shift = 8 * (index % 3);
+        out[byte_count - 1 - index] = value[limb] >> shift & 0xFF;
+    }
+    return out;
+}
+
+/// The octets `text` spells in hexadecimal (either case, no separators), or
+/// `None` for an odd length or a character that is not a hex digit.
+pub Option<bytes> bytes_from_hex(str text) {
+    List<int> chars = text.chars();
+    if (chars.size() % 2 != 0) {
+        return Option<bytes>.None;
+    }
+    bytes out = [];
+    int index = 0;
+    while (index < chars.size()) {
+        int high = hex_digit(chars[index]);
+        int low = hex_digit(chars[index + 1]);
+        if (high < 0 || low < 0) {
+            return Option<bytes>.None;
+        }
+        out.push(high * 16 + low);
+        index = index + 2;
+    }
+    return Option<bytes>.Some(out);
+}
+
+int hex_digit(int code) {
+    if (code >= 48 && code <= 57) {
+        return code - 48;
+    }
+    if (code >= 97 && code <= 102) {
+        return code - 87;
+    }
+    if (code >= 65 && code <= 70) {
+        return code - 55;
+    }
+    return -1;
+}
+
+// --- comparison and plain arithmetic --------------------------------------------
+
+/// `-1`, `0` or `1` as `left` is less than, equal to or greater than `right`.
+pub int compare(Array<int> left, Array<int> right) {
+    int index = left.size() - 1;
+    while (index >= 0) {
+        if (left[index] != right[index]) {
+            if (left[index] < right[index]) {
+                return -1;
+            }
+            return 1;
+        }
+        index = index - 1;
+    }
+    return 0;
+}
+
+pub bool is_zero(Array<int> value) {
+    for (int limb in value) {
+        if (limb != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Bit `position` of `value` (0 is the least significant), `0` past the top.
+pub int bit_at(Array<int> value, int position) {
+    int limb = position / LIMB_BITS;
+    if (limb >= value.size()) {
+        return 0;
+    }
+    return value[limb] >> (position % LIMB_BITS) & 1;
+}
+
+/// The position of the highest set bit plus one; 0 for zero.
+pub int bit_length(Array<int> value) {
+    int index = value.size() - 1;
+    while (index >= 0) {
+        int limb = value[index];
+        if (limb != 0) {
+            int bits = 0;
+            while (limb != 0) {
+                limb = limb >> 1;
+                bits = bits + 1;
+            }
+            return index * LIMB_BITS + bits;
+        }
+        index = index - 1;
+    }
+    return 0;
+}
+
+// `left - right` modulo `2^(24*width)`. Exact when `left >= right`, and the
+// correct wrap-around when the caller knows a carry out of `left` was
+// dropped (see `mod_add`).
+pub Array<int> subtract_limbs(Array<int> left, Array<int> right) {
+    int width = left.size();
+    Array<int> out = [0; width];
+    int borrow = 0;
+    for (int i in 0 .. width) {
+        int difference = left[i] - right[i] - borrow;
+        if (difference < 0) {
+            out[i] = difference + LIMB_RADIX;
+            borrow = 1;
+        } else {
+            out[i] = difference;
+            borrow = 0;
+        }
+    }
+    return out;
+}
+
+// `left + right` reduced once by `modulus_value`; both inputs must already be
+// below it. Shared by `mod_add` and by `make_modulus` before a `Modulus`
+// exists to hold the value.
+Array<int> add_limbs_mod(Array<int> modulus_value, Array<int> left, Array<int> right) {
+    int width = modulus_value.size();
+    Array<int> out = [0; width];
+    int carry = 0;
+    for (int i in 0 .. width) {
+        int sum = left[i] + right[i] + carry;
+        out[i] = sum & LIMB_MASK;
+        carry = sum >> LIMB_BITS;
+    }
+    if (carry != 0 || compare(out, modulus_value) >= 0) {
+        return subtract_limbs(out, modulus_value);
+    }
+    return out;
+}
+
+/// `(left + right) mod modulus`, for inputs already below the modulus.
+pub Array<int> mod_add(Modulus modulus, Array<int> left, Array<int> right) {
+    return add_limbs_mod(modulus.value, left, right);
+}
+
+/// `(left - right) mod modulus`, for inputs already below the modulus.
+pub Array<int> mod_subtract(Modulus modulus, Array<int> left, Array<int> right) {
+    int width = modulus.width;
+    Array<int> out = [0; width];
+    int borrow = 0;
+    for (int i in 0 .. width) {
+        int difference = left[i] - right[i] - borrow;
+        if (difference < 0) {
+            out[i] = difference + LIMB_RADIX;
+            borrow = 1;
+        } else {
+            out[i] = difference;
+            borrow = 0;
+        }
+    }
+    if (borrow != 0) {
+        return add_limbs_wrapping(out, modulus.value);
+    }
+    return out;
+}
+
+// `left + right` modulo `2^(24*width)`, dropping the carry out: the borrowed
+// bit `mod_subtract` owes goes back in as the `+ modulus` that wraps it.
+pub Array<int> add_limbs_wrapping(Array<int> left, Array<int> right) {
+    int width = left.size();
+    Array<int> out = [0; width];
+    int carry = 0;
+    for (int i in 0 .. width) {
+        int sum = left[i] + right[i] + carry;
+        out[i] = sum & LIMB_MASK;
+        carry = sum >> LIMB_BITS;
+    }
+    return out;
+}
+
+/// `value - modulus` when `value >= modulus`, else `value`: reduces a value
+/// known to be below `2 * modulus` (a hash truncated to the order's bit
+/// length, or a field element about to be compared with the order).
+pub Array<int> reduce_once(Modulus modulus, Array<int> value) {
+    if (compare(value, modulus.value) >= 0) {
+        return subtract_limbs(value, modulus.value);
+    }
+    return value;
+}
+
+// --- the modulus ------------------------------------------------------------------
+
+// `-value^-1 mod 2^24` for an odd `value`, by Newton's iteration: starting
+// from `x = value` (correct to 3 bits, since an odd square is 1 mod 8),
+// `x = x * (2 - value * x)` doubles the number of correct bits each round.
+// Every product is masked to a limb first so it stays below `2^48`.
+int negative_inverse_of(int low_limb) {
+    int inverse = low_limb;
+    for (int round in 0 .. 5) {
+        int product = low_limb * inverse & LIMB_MASK;
+        int correction = 2 - product & LIMB_MASK;
+        inverse = inverse * correction & LIMB_MASK;
+    }
+    return LIMB_RADIX - inverse & LIMB_MASK;
+}
+
+/// Everything Montgomery multiplication needs for the odd modulus whose
+/// big-endian bytes are `raw`. The limb width follows from `raw.size()`, so a
+/// 32-byte prime (P-256) gets 11 limbs and a 48-byte one (P-384) gets 16, and
+/// leading zero bytes are not stripped -- they pick the width.
+///
+/// `R mod modulus` and `R^2 mod modulus` come from doubling 1 modulo the
+/// modulus `24*width` and `48*width` times: no division routine is needed,
+/// and the cost (a few hundred modular doublings) is small beside one
+/// signature check.
+pub Modulus make_modulus(bytes raw) {
+    int width = limbs_for_bytes(raw.size());
+    Array<int> value = from_bytes(raw, width);
+    Array<int> running = from_small(width, 1);
+    for (int doubling in 0 .. LIMB_BITS * width) {
+        running = add_limbs_mod(value, running, running);
+    }
+    Array<int> one_montgomery = clone(running);
+    for (int doubling in 0 .. LIMB_BITS * width) {
+        running = add_limbs_mod(value, running, running);
+    }
+    Array<int> inverse_exponent = subtract_limbs(value, from_small(width, 2));
+    return Modulus(width, value, negative_inverse_of(value[0]), running, one_montgomery, inverse_exponent);
+}
+
+// --- Montgomery arithmetic ---------------------------------------------------------
+
+/// `left * right * R^-1 mod modulus` (CIOS Montgomery multiplication). Both
+/// inputs must be below the modulus; the result is too.
+pub Array<int> montgomery_multiply(Modulus modulus, Array<int> left, Array<int> right) {
+    int width = modulus.width;
+    Array<int> value = modulus.value;
+    Array<int> work = [0; width + 2];
+    for (int i in 0 .. width) {
+        int left_limb = left[i];
+        int carry = 0;
+        for (int j in 0 .. width) {
+            int sum = work[j] + left_limb * right[j] + carry;
+            work[j] = sum & LIMB_MASK;
+            carry = sum >> LIMB_BITS;
+        }
+        int top = work[width] + carry;
+        work[width] = top & LIMB_MASK;
+        work[width + 1] = top >> LIMB_BITS;
+        int factor = work[0] * modulus.negative_inverse & LIMB_MASK;
+        carry = (work[0] + factor * value[0]) >> LIMB_BITS;
+        for (int j in 1 .. width) {
+            int sum = work[j] + factor * value[j] + carry;
+            work[j - 1] = sum & LIMB_MASK;
+            carry = sum >> LIMB_BITS;
+        }
+        int next_top = work[width] + carry;
+        work[width - 1] = next_top & LIMB_MASK;
+        work[width] = work[width + 1] + (next_top >> LIMB_BITS);
+    }
+    Array<int> out = work.slice(0, width);
+    if (work[width] != 0 || compare(out, value) >= 0) {
+        return subtract_limbs(out, value);
+    }
+    return out;
+}
+
+/// The Montgomery form of the plain value `value`, which must be below the modulus.
+pub Array<int> to_montgomery(Modulus modulus, Array<int> value) {
+    return montgomery_multiply(modulus, value, modulus.radix_squared);
+}
+
+/// The plain value of the Montgomery form `value`.
+pub Array<int> from_montgomery(Modulus modulus, Array<int> value) {
+    return montgomery_multiply(modulus, value, from_small(modulus.width, 1));
+}
+
+/// The Montgomery form of 1.
+pub Array<int> montgomery_one(Modulus modulus) {
+    return clone(modulus.one_montgomery);
+}
+
+/// `base^exponent` for a Montgomery-form `base` and a plain `exponent`, by
+/// left-to-right square-and-multiply. The exponent is a limb array of any width.
+pub Array<int> montgomery_power(Modulus modulus, Array<int> base, Array<int> exponent) {
+    Array<int> result = montgomery_one(modulus);
+    int position = bit_length(exponent) - 1;
+    while (position >= 0) {
+        result = montgomery_multiply(modulus, result, result);
+        if (bit_at(exponent, position) == 1) {
+            result = montgomery_multiply(modulus, result, base);
+        }
+        position = position - 1;
+    }
+    return result;
+}
+
+/// The multiplicative inverse of the Montgomery-form `value`, also in
+/// Montgomery form, by Fermat: `value^(modulus-2)`. The modulus must be
+/// prime and `value` nonzero; zero comes back as zero.
+pub Array<int> montgomery_inverse(Modulus modulus, Array<int> value) {
+    return montgomery_power(modulus, value, modulus.inverse_exponent);
+}

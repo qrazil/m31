@@ -1,0 +1,116 @@
+// RSA verification (`lib/rsa.m31`) against the cases `rsa_oracle.py` makes with
+// the `cryptography` package and Python integers. Reads the vector file named
+// on the command line and prints one `name verdict` line per case;
+// `test_rsa.sh` diffs that against the oracle's own expected list, so no
+// expectation is written down in this program.
+//
+//   python3 apps/tls/rsa_oracle.py vectors.txt expected.txt
+//   ./build.sh apps/tls/t_rsa_verify.m31 -o t_rsa_verify && ./t_rsa_verify vectors.txt
+//
+// Timing goes to stderr: the average of parse plus verify over the accepted
+// signatures of each modulus size.
+
+import rsa;
+import bignum;
+import io;
+import os;
+import date;
+
+int verdict(bool accepted) {
+    if (accepted) {
+        return 1;
+    }
+    return 0;
+}
+
+bytes decode(str hex) {
+    match (bignum.bytes_from_hex(hex)) {
+        case None: {
+            return [];
+        }
+        case Some(bytes decoded): {
+            return decoded;
+        }
+    }
+}
+
+rsa.Hash hash_named(str name) {
+    if (name == "sha256") {
+        return rsa.Hash.Sha256;
+    }
+    if (name == "sha384") {
+        return rsa.Hash.Sha384;
+    }
+    return rsa.Hash.Sha512;
+}
+
+int run_case(List<str> fields) {
+    if (fields[0] == "key") {
+        match (rsa.parse_public_key(decode(fields[2]), decode(fields[3]))) {
+            case None: {
+                return 0;
+            }
+            case Some(rsa.PublicKey key): {
+                return 1;
+            }
+        }
+    }
+    match (rsa.parse_public_key(decode(fields[4]), decode(fields[5]))) {
+        case None: {
+            return 0;
+        }
+        case Some(rsa.PublicKey key): {
+            rsa.Hash hash = hash_named(fields[3]);
+            bytes digest = decode(fields[6]);
+            bytes signature = decode(fields[7]);
+            if (fields[2] == "pkcs1") {
+                return verdict(rsa.verify_pkcs1_v15(key, hash, digest, signature));
+            }
+            return verdict(rsa.verify_pss(key, hash, digest, signature));
+        }
+    }
+}
+
+int modulus_bits_of(str hex) {
+    match (bignum.bytes_from_hex(hex)) {
+        case None: {
+            return 0;
+        }
+        case Some(bytes decoded): {
+            return decoded.size() * 8;
+        }
+    }
+}
+
+List<str> argv = os.args();
+if (argv.size() < 2) {
+    io.eprint("usage: t_rsa_verify VECTORS");
+} else {
+    match (io.read(argv[1])) {
+        case Err(io.Error error): {
+            io.eprint("cannot read " + argv[1] + ": " + error.to_str());
+        }
+        case Ok(str text): {
+            Map<int, int> total_ns = {};
+            Map<int, int> total_count = {};
+            for (str line in text.split("\n")) {
+                if (line == "") {
+                    continue;
+                }
+                List<str> fields = line.split("|");
+                int began = date.now_ns();
+                int answer = run_case(fields);
+                int spent = date.now_ns() - began;
+                if (fields[0] == "sig" && answer == 1) {
+                    int size = modulus_bits_of(fields[4]);
+                    total_ns.set(size, total_ns.get(size).or(0) + spent);
+                    total_count.set(size, total_count.get(size).or(0) + 1);
+                }
+                print(fields[1] + " " + answer.to_str());
+            }
+            for (int size in total_count.keys()) {
+                io.eprint(size.to_str() + "-bit: " + total_count.get(size).or(1).to_str() + " accepted signatures, " + (total_ns.get(size).or(0) / total_count.get(size).or(1) / 1_000).to_str() + " us each on average (parse + verify)");
+            }
+        }
+    }
+}

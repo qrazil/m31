@@ -628,11 +628,13 @@ deterministic program, and to compare each one against Python's
 `http.client` and `email.parser`. Only `serve`, `serve_conn`, `get` and
 `fetch` mention `net`, because only they set a timeout or make a connection.
 
-**There is no TLS and no plan to add one below the language.** `parse_url`
-refuses `https://` before a socket exists. A TLS stack is not a system call
-and does not belong at this seam; when there is one it will be a module up
-here, over the same `net.Conn`, and `http` will take a `Stream` from it
-without changing a line — which is the other thing the interface buys.
+**TLS is not below the language, and it did not need to be.** A TLS stack is
+not a system call and does not belong at this seam; it is `lib/tls.m31` up
+here, over the same `net.Conn`, and a `tls.Conn` is an `io.Stream`, so
+`http.write_request` and `http.read_response` run over it without changing a
+line — which is the other thing the interface buys. `http.fetch` opens the
+socket, sets its deadlines, and wraps it in TLS for an `https://` URL; nothing
+about the wire format knows which it has.
 
 ---
 

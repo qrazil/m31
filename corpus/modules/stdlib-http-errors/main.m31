@@ -159,8 +159,8 @@ void bad_url(str url) {
     }
 }
 
-bad_url("https://example.com/secret");
-bad_url("HTTPS://EXAMPLE.COM/");
+bad_url("gopher://example.com/secret");
+bad_url("WSS://EXAMPLE.COM/");
 bad_url("ftp://example.com/");
 bad_url("/just/a/path");
 bad_url("example.com/p");

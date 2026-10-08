@@ -1,0 +1,75 @@
+// `lib/bignum.m31` against Python's integers. Reads the cases
+// `bignum_oracle.py` writes (one `op|modulus|a|b` per line, all hex) and
+// prints `index answer` for each; `test_ecdsa.sh` diffs that against the
+// oracle's expected list.
+//
+//   python3 apps/tls/bignum_oracle.py cases.txt expected.txt
+//   ./build.sh apps/tls/t_bignum.m31 -o t_bignum && ./t_bignum cases.txt
+
+import bignum;
+import io;
+import os;
+
+bytes decode(str hex) {
+    match (bignum.bytes_from_hex(hex)) {
+        case None: {
+            return [];
+        }
+        case Some(bytes decoded): {
+            return decoded;
+        }
+    }
+}
+
+str answer_for(List<str> fields) {
+    bytes modulus_bytes = decode(fields[1]);
+    bignum.Modulus modulus = bignum.make_modulus(modulus_bytes);
+    int width = modulus.width;
+    int size = modulus_bytes.size();
+    Array<int> left = bignum.from_bytes(decode(fields[2]), width);
+    Array<int> right = bignum.from_bytes(decode(fields[3]), width);
+    str op = fields[0];
+    if (op == "add") {
+        return bignum.to_bytes(bignum.mod_add(modulus, left, right), size).hex();
+    }
+    if (op == "sub") {
+        return bignum.to_bytes(bignum.mod_subtract(modulus, left, right), size).hex();
+    }
+    if (op == "mul") {
+        Array<int> product = bignum.montgomery_multiply(modulus, bignum.to_montgomery(modulus, left), bignum.to_montgomery(modulus, right));
+        return bignum.to_bytes(bignum.from_montgomery(modulus, product), size).hex();
+    }
+    if (op == "pow") {
+        Array<int> power = bignum.montgomery_power(modulus, bignum.to_montgomery(modulus, left), right);
+        return bignum.to_bytes(bignum.from_montgomery(modulus, power), size).hex();
+    }
+    if (op == "inv") {
+        Array<int> inverse = bignum.montgomery_inverse(modulus, bignum.to_montgomery(modulus, left));
+        return bignum.to_bytes(bignum.from_montgomery(modulus, inverse), size).hex();
+    }
+    if (op == "cmp") {
+        return bignum.compare(left, right).to_str();
+    }
+    return bignum.bit_length(left).to_str();
+}
+
+List<str> argv = os.args();
+if (argv.size() < 2) {
+    io.eprint("usage: t_bignum CASES");
+} else {
+    match (io.read(argv[1])) {
+        case Err(io.Error error): {
+            io.eprint("cannot read " + argv[1] + ": " + error.to_str());
+        }
+        case Ok(str text): {
+            int index = 0;
+            for (str line in text.split("\n")) {
+                if (line == "") {
+                    continue;
+                }
+                print(index.to_str() + " " + answer_for(line.split("|")));
+                index = index + 1;
+            }
+        }
+    }
+}

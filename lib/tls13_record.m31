@@ -1,0 +1,892 @@
+// TLS 1.3's record layer (RFC 8446 §5) for `TLS_CHACHA20_POLY1305_SHA256`,
+// the one suite this client speaks. Records in, handshake messages and
+// application data out, and back; the handshake state machine that decides
+// *which* messages to expect (`lib/tls13_client.m31`, a later milestone) sits
+// on top and touches only `Connection`. The keys come from
+// `lib/tls13_schedule.m31`; the AEAD is `lib/chacha20poly1305.m31`'s RFC 8439
+// `seal`/`open`, used as it is -- the IETF construction, not OpenSSH's.
+//
+// API
+// ---
+//   tls13_record.connection(stream)         -> Connection   any `io.Stream`
+//
+//   c.install_read_keys(traffic_secret)     -> Result<void, Error>
+//   c.install_write_keys(traffic_secret)    -> void
+//   c.update_read_keys() / c.update_write_keys()            (KeyUpdate)
+//
+//   c.send_handshake(message)               -> Result<void, Error>
+//   c.send_application(data)                -> Result<int, Error>
+//   c.send_change_cipher_spec()             -> Result<void, Error>
+//   c.send_key_update(request_update)       -> Result<void, Error>
+//   c.send_alert(description)               -> Result<void, Error>
+//   c.send_close_notify()                   -> Result<void, Error>
+//
+//   c.receive()             -> Result<Message, Error>   one thing, any kind
+//   c.receive_handshake()     -> Result<bytes, Error>     one whole message
+//   c.receive_application()   -> Result<bytes, Error>     data; empty = close_notify
+//
+//   c.close()                               -> Result<bool, Error>
+//
+// and, for tests and for callers with their own framing, the pure functions
+// `seal_record`, `open_record`, `plain_record` and `record_nonce`, which do
+// the cryptography of one record with no stream involved.
+//
+// --- what a record is --------------------------------------------------------
+//
+// A 5-octet header -- `content_type`, the legacy version `03 03`, a 16-bit
+// length -- then that many octets. Before keys are installed the body is the
+// content itself (ClientHello, ServerHello, alerts). Once a direction has
+// keys, every record in it is `application_data` on the outside, and the
+// body is
+//
+//     AEAD-seal( content || real_content_type || 0x00 * padding )
+//
+// with the nonce `iv XOR sequence` (the sequence number as 64 bits,
+// big-endian, left-padded with zeros to the IV's 12 octets) and the 5-octet
+// header as the additional data -- the received octets verbatim. The sequence
+// number counts that direction's records from zero at every key change.
+//
+// A protected record's body is at most 2^14 + 256 octets and its content at
+// most 2^14; either limit broken is `RecordOverflow`, and the body's is
+// checked from the header, before a byte of it is read. A protected record
+// with nothing but zeros inside has no content type and is
+// `UnexpectedMessage`.
+//
+// --- handshake messages and records are not the same size --------------------
+//
+// A handshake message may span records and a record may hold several
+// messages. `receive_handshake` hands back exactly one whole message (header
+// included, as the transcript wants it) however the peer cut them up, and
+// keeps the rest for the next call. RFC 8446 §5.1's rules around that are
+// enforced: no zero-length handshake record, nothing else between the
+// records of one message, and -- §4.2.1, §4.6.3 -- no message may straddle a
+// key change, which `install_read_keys` and `update_read_keys` refuse as
+// `UnexpectedMessage` while a partial or unread message is still buffered.
+//
+// --- alerts and the end of the connection ------------------------------------
+//
+// `close_notify` is how a TLS connection ends well; `receive` reports it as
+// `Kind.CloseNotify` (and `receive_application` as an empty result), and every
+// later `receive` says so again without touching the stream. **A stream that
+// ends any other way is `Truncated`**, never a quiet end of data: that is
+// the whole point of the alert, since otherwise whoever sits on the wire can
+// cut a response short and it reads as complete.
+//
+// Any other alert but `user_canceled` (which RFC 8446 §6.1 says to ignore)
+// ends the connection as `PeerAlert`; which one is `received_alert()`.
+// Alerts are exactly two octets in a record of their own.
+//
+// Every failure this layer finds in what the peer sent -- a bad tag, an
+// oversize record, a message out of place -- also sends the matching fatal
+// alert (protected, if write keys exist) before reporting the error, and the
+// connection is dead after: later calls say `Closed`. A failure of the
+// stream itself (`Io`, `Truncated`) sends nothing, there being nobody there.
+//
+// --- what is NOT here ----------------------------------------------------------
+//
+//   - Any other cipher suite, or SHA-384.
+//   - 0-RTT / early data: there is no third key direction.
+//   - The `record_size_limit` extension: the limits are always 2^14.
+//   - Which handshake message may come when. A `ChangeCipherSpec` before the
+//     first ClientHello is not noticed here, and the post-handshake
+//     `NewSessionTicket` is dropped by `receive_application` whichever role the
+//     caller has. Both are the handshake layer's to police.
+
+import io;
+import chacha20poly1305;
+import tls13_schedule;
+
+/// Octets in a record header.
+pub const int HEADER_SIZE = 5;
+/// Octets of Poly1305 tag a protected record carries.
+pub const int TAG_SIZE = 16;
+/// The most content one record may carry: 2^14, RFC 8446 §5.1.
+pub const int MAX_PLAINTEXT = 16384;
+/// The most a protected record's body may be: 2^14 + 256, RFC 8446 §5.2.
+pub const int MAX_CIPHERTEXT = 16640;
+/// The largest handshake message accepted, header included. The wire format
+/// allows 2^24 - 1; no real certificate chain comes near this, and without a
+/// bound a peer chooses how much memory a handshake costs.
+pub const int MAX_HANDSHAKE_MESSAGE = 131072;
+/// One more record than this many in a direction is refused, and the keys
+/// must be updated first: the sequence number is a 64-bit counter in the RFC
+/// and an `int` here, so the last value is the `int`'s. No connection gets
+/// anywhere near it -- the AEAD's own usage limits are a hundred million
+/// times closer -- but the check is cheap and the alternative is wrapping.
+pub const int MAX_SEQUENCE = 0x7FFF_FFFF_FFFF_FFFF;
+/// Record content types, RFC 8446 §5.
+pub const int CONTENT_CHANGE_CIPHER_SPEC = 20;
+pub const int CONTENT_ALERT = 21;
+pub const int CONTENT_HANDSHAKE = 22;
+pub const int CONTENT_APPLICATION_DATA = 23;
+/// Alert descriptions, RFC 8446 §6 -- the ones this layer sends or acts on.
+pub const int ALERT_CLOSE_NOTIFY = 0;
+pub const int ALERT_UNEXPECTED_MESSAGE = 10;
+pub const int ALERT_BAD_RECORD_MAC = 20;
+pub const int ALERT_RECORD_OVERFLOW = 22;
+pub const int ALERT_HANDSHAKE_FAILURE = 40;
+pub const int ALERT_ILLEGAL_PARAMETER = 47;
+pub const int ALERT_DECODE_ERROR = 50;
+pub const int ALERT_PROTOCOL_VERSION = 70;
+pub const int ALERT_INTERNAL_ERROR = 80;
+pub const int ALERT_USER_CANCELED = 90;
+// Handshake message types the record layer itself has to know.
+const int HANDSHAKE_NEW_SESSION_TICKET = 4;
+const int HANDSHAKE_FINISHED = 20;
+const int HANDSHAKE_KEY_UPDATE = 24;
+// What `read_record` calls a record that is to be dropped: no content type.
+const int IGNORED = -1;
+// Alert levels. TLS 1.3 ignores the level on receipt (every alert but
+// close_notify and user_canceled is fatal), and sends warning for those two.
+const int ALERT_LEVEL_WARNING = 1;
+const int ALERT_LEVEL_FATAL = 2;
+
+/// Why a record, a message or a connection could not be completed.
+/// Payload-free (`docs/errors-decision.md` §4): nothing here needs more
+/// context than the caller already has, and a received alert's description
+/// is `Connection.received_alert()`.
+pub enum Error {
+    /// The stream failed under us: a reset, a timeout, a write that did not
+    /// go. `io`'s own error already said which.
+    Io;
+    /// The stream ended without a `close_notify`: in the middle of a
+    /// record, or cleanly between records but with no alert. Whatever was
+    /// read may be only the start of what was sent.
+    Truncated;
+    /// A record header's version is not `03 xx`: this is not TLS.
+    BadVersion;
+    /// A record is longer than the limits allow, or its content is.
+    RecordOverflow;
+    /// A protected record's authentication tag did not verify: the record,
+    /// its header, the key or its sequence number is not what was sealed.
+    /// Reorder, replay, truncation of the body and any bit flip land here.
+    BadRecordMac;
+    /// A record, a message or a key change that this point in the
+    /// connection does not allow.
+    UnexpectedMessage;
+    /// A length or a field that is not self-consistent: an alert that is not
+    /// two octets, a KeyUpdate that is not one.
+    DecodeError;
+    /// A handshake message announces more than `MAX_HANDSHAKE_MESSAGE`.
+    HandshakeTooLarge;
+    /// The peer sent a fatal alert; `Connection.received_alert()` says which.
+    PeerAlert;
+    /// This side already sent `close_notify`, or the connection already
+    /// failed, and nothing more may be sent or read.
+    Closed;
+    /// A direction used up its sequence numbers without a key update.
+    SequenceExhausted;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case Io: {
+            return "the underlying connection failed";
+        }
+        case Truncated: {
+            return "the connection ended without a close_notify";
+        }
+        case BadVersion: {
+            return "a record header's version is not TLS";
+        }
+        case RecordOverflow: {
+            return "a record is longer than TLS allows";
+        }
+        case BadRecordMac: {
+            return "a record's authentication tag did not verify";
+        }
+        case UnexpectedMessage: {
+            return "a record or message arrived where it is not allowed";
+        }
+        case DecodeError: {
+            return "a message's length or contents are malformed";
+        }
+        case HandshakeTooLarge: {
+            return "a handshake message is larger than this client accepts";
+        }
+        case PeerAlert: {
+            return "the peer sent a fatal alert";
+        }
+        case Closed: {
+            return "the connection is closed";
+        }
+        case SequenceExhausted: {
+            return "a direction ran out of record sequence numbers";
+        }
+    }
+}
+
+// --- one record, with no stream ----------------------------------------------
+
+/// The per-record nonce, RFC 8446 §5.3: `iv` with the 64-bit big-endian
+/// `sequence` XORed into its last eight octets. `iv` must be 12 octets and
+/// `sequence` not negative; either wrong **traps**, as a caller bug.
+pub bytes record_nonce(bytes iv, int sequence) {
+    if (iv.size() != tls13_schedule.IV_SIZE) {
+        trap("tls13_record: the IV must be 12 octets");
+    }
+    if (sequence < 0) {
+        trap("tls13_record: a sequence number is never negative");
+    }
+    bytes nonce = clone(iv);
+    for (int i in 0 .. 8) {
+        int place = tls13_schedule.IV_SIZE - 1 - i;
+        nonce[place] = nonce[place] ^ ((sequence >> (8 * i)) & 0xFF);
+    }
+    return nonce;
+}
+
+bytes header_of(int content_type, int length) {
+    bytes header = [];
+    header.push(content_type);
+    header.push(3);
+    header.push(3);
+    header.push(length >> 8);
+    header.push(length & 0xFF);
+    return header;
+}
+
+/// An unprotected record: header and `content`. For the records that go out
+/// before keys exist, and for a ChangeCipherSpec at any time. `content`
+/// longer than `MAX_PLAINTEXT` **traps**.
+pub bytes plain_record(int content_type, bytes content) {
+    if (content.size() > MAX_PLAINTEXT) {
+        trap("tls13_record: a record carries at most 2^14 octets");
+    }
+    bytes record = header_of(content_type, content.size());
+    record.extend(content);
+    return record;
+}
+
+/// One protected record, header and body, ready to write: `content` and
+/// `content_type` (the real one, which goes inside) followed by `padding`
+/// zero octets, sealed under `key` and `iv` at `sequence`.
+///
+/// Traps on what is a caller bug rather than a network event: a `content`
+/// above `MAX_PLAINTEXT`, a negative `padding`, padding that would take the
+/// body past `MAX_CIPHERTEXT`, and a `key` or `iv` of the wrong length.
+/// `Err(SequenceExhausted)` once `sequence` reaches `MAX_SEQUENCE`.
+pub Result<bytes, Error> seal_record(bytes key, bytes iv, int sequence, int content_type, bytes content, int padding) {
+    if (content.size() > MAX_PLAINTEXT) {
+        trap("tls13_record: a record carries at most 2^14 octets");
+    }
+    if (padding < 0 || content.size() + 1 + padding + TAG_SIZE > MAX_CIPHERTEXT) {
+        trap("tls13_record: padding would take the record past 2^14 + 256 octets");
+    }
+    if (sequence >= MAX_SEQUENCE) {
+        return Result<bytes, Error>.Err(Error.SequenceExhausted);
+    }
+    bytes inner = clone(content);
+    inner.push(content_type);
+    bytes zeros = [0; padding];
+    inner.extend(zeros);
+    bytes record = header_of(CONTENT_APPLICATION_DATA, inner.size() + TAG_SIZE);
+    bytes sealed = chacha20poly1305.seal(key, record_nonce(iv, sequence), inner, record);
+    record.extend(sealed);
+    return Result<bytes, Error>.Ok(record);
+}
+
+/// What a protected record held once opened.
+pub type Opened {
+    pub int content_type;
+    pub bytes content;
+}
+
+/// Opens one protected record: `header` is its five octets exactly as
+/// received (they are the additional data), `body` what followed.
+/// `RecordOverflow` if the body, or what it held, is over its limit;
+/// `BadRecordMac` if the tag does not verify; `UnexpectedMessage` if the
+/// plaintext is all zeros and so names no content type.
+pub Result<Opened, Error> open_record(bytes key, bytes iv, int sequence, bytes header, bytes body) {
+    if (header.size() != HEADER_SIZE) {
+        trap("tls13_record: a record header is 5 octets");
+    }
+    if (sequence >= MAX_SEQUENCE) {
+        return Result<Opened, Error>.Err(Error.SequenceExhausted);
+    }
+    if (body.size() > MAX_CIPHERTEXT) {
+        return Result<Opened, Error>.Err(Error.RecordOverflow);
+    }
+    match (chacha20poly1305.open(key, record_nonce(iv, sequence), body, header)) {
+        case Ok(bytes inner): {
+            return split_inner(inner);
+        }
+        case Err(chacha20poly1305.Error aead_error): {
+            return Result<Opened, Error>.Err(Error.BadRecordMac);
+        }
+    }
+}
+
+// RFC 8446 §5.4: the content type is the last non-zero octet of the
+// plaintext; what is after it is padding, what is before it is the content.
+Result<Opened, Error> split_inner(bytes inner) {
+    int end = inner.size();
+    while (end > 0 && inner[end - 1] == 0) {
+        end = end - 1;
+    }
+    if (end == 0) {
+        return Result<Opened, Error>.Err(Error.UnexpectedMessage);
+    }
+    if (end - 1 > MAX_PLAINTEXT) {
+        return Result<Opened, Error>.Err(Error.RecordOverflow);
+    }
+    return Result<Opened, Error>.Ok(Opened(inner[end - 1], inner.substr(0, end - 1)));
+}
+
+// --- a connection ------------------------------------------------------------
+
+/// What `Connection.receive` found.
+pub enum Kind {
+    /// One whole handshake message, header included.
+    Handshake;
+    /// Application data, never empty.
+    ApplicationData;
+    /// The peer's `close_notify`: it will send nothing more. `data` is empty.
+    CloseNotify;
+}
+
+/// One thing `Connection.receive` read.
+pub type Message {
+    pub Kind kind;
+    pub bytes data;
+}
+
+/// A TLS 1.3 connection's two directions over one stream. Made by
+/// `connection`; every field is private and only its own methods move them.
+pub type Connection {
+    io.Stream stream;
+    bytes read_key = [];
+    bytes read_iv = [];
+    bytes read_secret = [];
+    int read_sequence = 0;
+    bool read_protected = false;
+    bytes write_key = [];
+    bytes write_iv = [];
+    bytes write_secret = [];
+    int write_sequence = 0;
+    bool write_protected = false;
+    // Handshake octets received and not yet handed out: whole messages the
+    // last record held beyond the one returned, or the start of one that a
+    // later record finishes.
+    bytes handshake_pending = [];
+    int padding_size = 0;
+    int alert_description = -1;
+    bool peer_closed = false;
+    bool close_sent = false;
+    // Set once the peer's Finished has been handed out, after which a
+    // compatibility ChangeCipherSpec is no longer allowed (RFC 8446 §5).
+    bool peer_finished = false;
+    bool failed = false;
+}
+
+/// Starts protecting what the peer sends, with the keys `traffic_secret`
+/// derives, and counts its records from zero. `Err(UnexpectedMessage)` if a
+/// handshake message is still partly or wholly unread, since RFC 8446 §5.1
+/// says none may span a key change. `traffic_secret` not 32 octets traps.
+pub Result<void, Error> Connection.install_read_keys(bytes traffic_secret) {
+    if (traffic_secret.size() != tls13_schedule.HASH_SIZE) {
+        trap("tls13_record: a traffic secret is 32 octets");
+    }
+    if (failed) {
+        return Result<void, Error>.Err(Error.Closed);
+    }
+    if (handshake_pending.size() > 0) {
+        return Result<void, Error>.Err(break_down(Error.UnexpectedMessage));
+    }
+    tls13_schedule.TrafficKeys keys = tls13_schedule.traffic_keys(traffic_secret);
+    read_key = keys.key;
+    read_iv = keys.iv;
+    read_secret = traffic_secret;
+    read_sequence = 0;
+    read_protected = true;
+    return Result<void, Error>.Ok;
+}
+
+/// Starts protecting what this side sends, with the keys `traffic_secret`
+/// derives, and counts its records from zero. `traffic_secret` not 32
+/// octets traps.
+pub void Connection.install_write_keys(bytes traffic_secret) {
+    if (traffic_secret.size() != tls13_schedule.HASH_SIZE) {
+        trap("tls13_record: a traffic secret is 32 octets");
+    }
+    tls13_schedule.TrafficKeys keys = tls13_schedule.traffic_keys(traffic_secret);
+    write_key = keys.key;
+    write_iv = keys.iv;
+    write_secret = traffic_secret;
+    write_sequence = 0;
+    write_protected = true;
+}
+
+/// Moves the receive direction to the next key generation (RFC 8446 §7.2),
+/// as the peer's KeyUpdate says it has. Same refusal as `install_read_keys`
+/// while a message is buffered; **traps** if no keys were installed, a
+/// caller bug.
+pub Result<void, Error> Connection.update_read_keys() {
+    if (!read_protected) {
+        trap("tls13_record: update_read_keys before install_read_keys");
+    }
+    return install_read_keys(tls13_schedule.next_traffic_secret(read_secret));
+}
+
+/// Moves the send direction to the next key generation. Send the KeyUpdate
+/// message under the old keys first -- or call `send_key_update`, which does
+/// both. **Traps** if no keys were installed.
+pub void Connection.update_write_keys() {
+    if (!write_protected) {
+        trap("tls13_record: update_write_keys before install_write_keys");
+    }
+    install_write_keys(tls13_schedule.next_traffic_secret(write_secret));
+}
+
+/// Pads every protected record this side sends with `padding` zero octets
+/// (RFC 8446 §5.4), to hide lengths; 0 to 255, 0 by default. A record whose
+/// content leaves less room than that is padded as far as fits.
+pub void Connection.set_padding(int padding) {
+    if (padding < 0 || padding > 255) {
+        trap("tls13_record: padding is 0 to 255 octets");
+    }
+    padding_size = padding;
+}
+
+/// The description of the fatal alert the peer sent, or -1 if it sent none.
+pub int Connection.received_alert() {
+    return alert_description;
+}
+
+/// Whether the peer's `close_notify` has arrived.
+pub bool Connection.received_close_notify() {
+    return peer_closed;
+}
+
+/// Whether this side has sent its `close_notify`.
+pub bool Connection.sent_close_notify() {
+    return close_sent;
+}
+
+/// How many records have been received under the current read keys.
+pub int Connection.read_records() {
+    return read_sequence;
+}
+
+/// How many records have been sent under the current write keys.
+pub int Connection.write_records() {
+    return write_sequence;
+}
+
+Result<void, Error> Connection.write_record(int content_type, bytes content) {
+    if (failed || close_sent) {
+        return Result<void, Error>.Err(Error.Closed);
+    }
+    bytes wire = [];
+    if (write_protected) {
+        int padding = padding_size;
+        int room = MAX_CIPHERTEXT - TAG_SIZE - 1 - content.size();
+        if (padding > room) {
+            padding = room;
+        }
+        wire = seal_record(write_key, write_iv, write_sequence, content_type, content, padding)?;
+        write_sequence = write_sequence + 1;
+    } else {
+        wire = plain_record(content_type, content);
+    }
+    return write_wire(wire);
+}
+
+Result<void, Error> Connection.write_wire(bytes wire) {
+    match (stream.write(wire)) {
+        case Ok(int written): {
+            return Result<void, Error>.Ok;
+        }
+        case Err(io.Error io_error): {
+            failed = true;
+            return Result<void, Error>.Err(Error.Io);
+        }
+    }
+}
+
+// `content` in records of at most MAX_PLAINTEXT octets, all of the same type.
+Result<int, Error> Connection.write_fragments(int content_type, bytes content) {
+    if (failed || close_sent) {
+        return Result<int, Error>.Err(Error.Closed);
+    }
+    int start = 0;
+    while (start < content.size()) {
+        int end = start + MAX_PLAINTEXT;
+        if (end > content.size()) {
+            end = content.size();
+        }
+        write_record(content_type, content.substr(start, end))?;
+        start = end;
+    }
+    return Result<int, Error>.Ok(content.size());
+}
+
+/// Sends one handshake message, header included, in as many records as its
+/// length needs. An empty `message` **traps**: RFC 8446 §5.1 forbids a
+/// zero-length handshake record, and every message has a four-octet header.
+pub Result<void, Error> Connection.send_handshake(bytes message) {
+    if (message.size() == 0) {
+        trap("tls13_record: a handshake message has at least its 4-octet header");
+    }
+    write_fragments(CONTENT_HANDSHAKE, message)?;
+    return Result<void, Error>.Ok;
+}
+
+/// Sends `data` as application data, in records of at most 2^14 octets.
+/// Returns how many octets went -- all of them, or an error, as
+/// `net.Conn.write` does. Nothing at all is sent for empty `data`.
+pub Result<int, Error> Connection.send_application(bytes data) {
+    return write_fragments(CONTENT_APPLICATION_DATA, data);
+}
+
+/// Sends the compatibility ChangeCipherSpec of RFC 8446 §5 -- one record
+/// holding the single octet 1 -- which a middlebox-friendly handshake sends
+/// once, unprotected even when write keys are already installed.
+pub Result<void, Error> Connection.send_change_cipher_spec() {
+    if (failed || close_sent) {
+        return Result<void, Error>.Err(Error.Closed);
+    }
+    return write_wire(plain_record(CONTENT_CHANGE_CIPHER_SPEC, [1]));
+}
+
+/// Sends an alert with this `description` (the `ALERT_*` constants): level
+/// warning for `close_notify` and `user_canceled`, fatal for the rest.
+/// `send_close_notify` is the one to end a connection with.
+pub Result<void, Error> Connection.send_alert(int description) {
+    bytes alert = [];
+    if (description == ALERT_CLOSE_NOTIFY || description == ALERT_USER_CANCELED) {
+        alert.push(ALERT_LEVEL_WARNING);
+    } else {
+        alert.push(ALERT_LEVEL_FATAL);
+    }
+    alert.push(description);
+    return write_record(CONTENT_ALERT, alert);
+}
+
+/// Ends this side's half of the connection the way RFC 8446 §6.1 asks: a
+/// `close_notify`, after which nothing more is sent (`Closed`) but the
+/// peer's remaining data can still be read until its own `close_notify`.
+pub Result<void, Error> Connection.send_close_notify() {
+    send_alert(ALERT_CLOSE_NOTIFY)?;
+    close_sent = true;
+    return Result<void, Error>.Ok;
+}
+
+/// Sends a KeyUpdate (RFC 8446 §4.6.3) under the current write keys, then
+/// moves the send direction to the next generation. `request_update` asks
+/// the peer to do the same for its own sends. **Traps** before write keys
+/// are installed: KeyUpdate is a post-handshake message.
+pub Result<void, Error> Connection.send_key_update(bool request_update) {
+    if (!write_protected) {
+        trap("tls13_record: send_key_update before install_write_keys");
+    }
+    bytes message = [HANDSHAKE_KEY_UPDATE, 0, 0, 1, 0];
+    if (request_update) {
+        message[4] = 1;
+    }
+    send_handshake(message)?;
+    update_write_keys();
+    return Result<void, Error>.Ok;
+}
+
+// Exactly `count` octets from the stream: `Truncated` if it ends first.
+Result<bytes, Error> Connection.read_exact(int count) {
+    bytes out = [];
+    while (out.size() < count) {
+        match (stream.read(count - out.size())) {
+            case Ok(bytes chunk): {
+                if (chunk.size() == 0) {
+                    return Result<bytes, Error>.Err(Error.Truncated);
+                }
+                out.extend(chunk);
+            }
+            case Err(io.Error io_error): {
+                return Result<bytes, Error>.Err(Error.Io);
+            }
+        }
+    }
+    return Result<bytes, Error>.Ok(out);
+}
+
+// One record off the stream, decrypted if the read direction is protected.
+// A compatibility ChangeCipherSpec that may be ignored comes back as
+// `IGNORED`, for the caller to drop.
+Result<Opened, Error> Connection.read_record() {
+    bytes header = read_exact(HEADER_SIZE)?;
+    int content_type = header[0];
+    if (header[1] != 3) {
+        return Result<Opened, Error>.Err(Error.BadVersion);
+    }
+    int length = header[3] * 256 + header[4];
+    int limit = MAX_PLAINTEXT;
+    if (read_protected) {
+        limit = MAX_CIPHERTEXT;
+    }
+    if (length > limit) {
+        return Result<Opened, Error>.Err(Error.RecordOverflow);
+    }
+    bytes body = read_exact(length)?;
+    if (content_type == CONTENT_CHANGE_CIPHER_SPEC) {
+        if (peer_finished || body.size() != 1 || body[0] != 1) {
+            return Result<Opened, Error>.Err(Error.UnexpectedMessage);
+        }
+        return Result<Opened, Error>.Ok(Opened(IGNORED, body));
+    }
+    if (!read_protected) {
+        if (content_type == CONTENT_APPLICATION_DATA) {
+            return Result<Opened, Error>.Err(Error.UnexpectedMessage);
+        }
+        return Result<Opened, Error>.Ok(Opened(content_type, body));
+    }
+    if (content_type != CONTENT_APPLICATION_DATA) {
+        return Result<Opened, Error>.Err(Error.UnexpectedMessage);
+    }
+    Opened record = open_record(read_key, read_iv, read_sequence, header, body)?;
+    read_sequence = read_sequence + 1;
+    return Result<Opened, Error>.Ok(record);
+}
+
+// The size of the first whole handshake message buffered, 0 if there is not
+// one yet, -1 if its header announces more than MAX_HANDSHAKE_MESSAGE.
+int Connection.ready_handshake_size() {
+    if (handshake_pending.size() < 4) {
+        return 0;
+    }
+    int body_size = handshake_pending[1] * 65536 + handshake_pending[2] * 256 + handshake_pending[3];
+    if (4 + body_size > MAX_HANDSHAKE_MESSAGE) {
+        return -1;
+    }
+    if (handshake_pending.size() < 4 + body_size) {
+        return 0;
+    }
+    return 4 + body_size;
+}
+
+bytes Connection.take_handshake(int size) {
+    bytes message = handshake_pending.substr(0, size);
+    handshake_pending.drop_front(size);
+    if (message[0] == HANDSHAKE_FINISHED) {
+        peer_finished = true;
+    }
+    return message;
+}
+
+// `receive` without the fatal-alert bookkeeping `receive` adds.
+Result<Message, Error> Connection.receive_unchecked() {
+    if (failed) {
+        return Result<Message, Error>.Err(Error.Closed);
+    }
+    while (true) {
+        if (peer_closed) {
+            bytes nothing = [];
+            return Result<Message, Error>.Ok(Message(Kind.CloseNotify, nothing));
+        }
+        int ready = ready_handshake_size();
+        if (ready < 0) {
+            return Result<Message, Error>.Err(Error.HandshakeTooLarge);
+        }
+        if (ready > 0) {
+            return Result<Message, Error>.Ok(Message(Kind.Handshake, take_handshake(ready)));
+        }
+        Opened record = read_record()?;
+        if (record.content_type == IGNORED) {
+            continue;
+        }
+        if (record.content_type == CONTENT_HANDSHAKE) {
+            if (record.content.size() == 0) {
+                return Result<Message, Error>.Err(Error.UnexpectedMessage);
+            }
+            handshake_pending.extend(record.content);
+            continue;
+        }
+        if (handshake_pending.size() > 0) {
+            return Result<Message, Error>.Err(Error.UnexpectedMessage);
+        }
+        if (record.content_type == CONTENT_APPLICATION_DATA) {
+            if (record.content.size() > 0) {
+                return Result<Message, Error>.Ok(Message(Kind.ApplicationData, record.content));
+            }
+            continue;
+        }
+        if (record.content_type != CONTENT_ALERT) {
+            return Result<Message, Error>.Err(Error.UnexpectedMessage);
+        }
+        if (record.content.size() != 2) {
+            return Result<Message, Error>.Err(Error.DecodeError);
+        }
+        int description = record.content[1];
+        if (description == ALERT_CLOSE_NOTIFY) {
+            peer_closed = true;
+        } else if (description != ALERT_USER_CANCELED) {
+            alert_description = description;
+            return Result<Message, Error>.Err(Error.PeerAlert);
+        }
+    }
+}
+
+// Ends the connection over `error`: the fatal alert it calls for, sent if
+// the connection is still writable (and never reported if it is not: the
+// error already in hand is the one the caller needs), then no more use.
+Error Connection.break_down(Error error) {
+    int description = alert_for(error);
+    if (description >= 0 && !failed && !close_sent) {
+        match (send_alert(description)) {
+            case Ok: {
+            }
+            case Err(Error alert_error): {
+            }
+        }
+    }
+    failed = true;
+    return error;
+}
+
+/// The next thing the peer sent: a whole handshake message, application
+/// data, or its `close_notify` (again and again, once it has come). The
+/// error cases are `Error`'s; each one that is the peer's fault has sent the
+/// alert it deserves, and the connection is dead after any of them.
+pub Result<Message, Error> Connection.receive() {
+    match (receive_unchecked()) {
+        case Ok(Message message): {
+            return Result<Message, Error>.Ok(message);
+        }
+        case Err(Error error): {
+            return Result<Message, Error>.Err(break_down(error));
+        }
+    }
+}
+
+/// One whole handshake message, header included, however many records
+/// carried it. Anything else arriving first -- application data, a
+/// `close_notify` before the handshake is done -- is `UnexpectedMessage`.
+pub Result<bytes, Error> Connection.receive_handshake() {
+    Message message = receive()?;
+    match (message.kind) {
+        case Handshake: {
+            return Result<bytes, Error>.Ok(message.data);
+        }
+        case ApplicationData: {
+            return Result<bytes, Error>.Err(break_down(Error.UnexpectedMessage));
+        }
+        case CloseNotify: {
+            return Result<bytes, Error>.Err(break_down(Error.UnexpectedMessage));
+        }
+    }
+}
+
+/// Application data, once the handshake is over: the next chunk the peer
+/// sent, or an **empty** result at its `close_notify` -- the end of the
+/// data, and the only end `receive_application` ever calls one. The handshake
+/// messages that legitimately follow a handshake are dealt with here:
+/// `NewSessionTicket` is dropped, and a `KeyUpdate` moves the receive keys
+/// on (answering with one of our own if it asks). Any other handshake
+/// message is `UnexpectedMessage`.
+pub Result<bytes, Error> Connection.receive_application() {
+    while (true) {
+        Message message = receive()?;
+        match (message.kind) {
+            case ApplicationData: {
+                return Result<bytes, Error>.Ok(message.data);
+            }
+            case CloseNotify: {
+                return Result<bytes, Error>.Ok(message.data);
+            }
+            case Handshake: {
+                match (after_handshake(message.data)) {
+                    case Ok: {
+                    }
+                    case Err(Error handshake_error): {
+                        return Result<bytes, Error>.Err(break_down(handshake_error));
+                    }
+                }
+            }
+        }
+    }
+}
+
+// RFC 8446 §4.6: the messages that may arrive once the handshake is done.
+Result<void, Error> Connection.after_handshake(bytes message) {
+    int message_type = message[0];
+    if (message_type == HANDSHAKE_NEW_SESSION_TICKET) {
+        return Result<void, Error>.Ok;
+    }
+    if (message_type != HANDSHAKE_KEY_UPDATE || !read_protected || !write_protected) {
+        return Result<void, Error>.Err(Error.UnexpectedMessage);
+    }
+    if (message.size() != 5 || message[1] != 0 || message[2] != 0 || message[3] != 1 || message[4] > 1) {
+        return Result<void, Error>.Err(Error.DecodeError);
+    }
+    update_read_keys()?;
+    if (message[4] == 1) {
+        send_key_update(false)?;
+    }
+    return Result<void, Error>.Ok;
+}
+
+/// Closes the underlying stream. Send `close_notify` first with
+/// `send_close_notify` if the peer should hear the end as an end.
+pub Result<bool, Error> Connection.close() {
+    failed = true;
+    match (stream.close()) {
+        case Ok(bool closed): {
+            return Result<bool, Error>.Ok(closed);
+        }
+        case Err(io.Error io_error): {
+            return Result<bool, Error>.Err(Error.Io);
+        }
+    }
+}
+
+/// A connection over `stream` -- a `net.Conn`, or any `io.Stream` -- with no
+/// keys yet: records go out and come in unprotected until `install_*_keys`.
+pub Connection connection(io.Stream stream) {
+    return Connection(stream);
+}
+
+// --- keys --------------------------------------------------------------------
+
+// --- what has happened -------------------------------------------------------
+
+// --- sending -----------------------------------------------------------------
+
+// --- receiving ---------------------------------------------------------------
+
+// The alert that answers `error`, or -1 when there is nobody to tell or
+// nothing to say.
+int alert_for(Error error) {
+    match (error) {
+        case RecordOverflow: {
+            return ALERT_RECORD_OVERFLOW;
+        }
+        case BadRecordMac: {
+            return ALERT_BAD_RECORD_MAC;
+        }
+        case UnexpectedMessage: {
+            return ALERT_UNEXPECTED_MESSAGE;
+        }
+        case DecodeError: {
+            return ALERT_DECODE_ERROR;
+        }
+        case HandshakeTooLarge: {
+            return ALERT_DECODE_ERROR;
+        }
+        case BadVersion: {
+            return ALERT_PROTOCOL_VERSION;
+        }
+        case SequenceExhausted: {
+            return ALERT_INTERNAL_ERROR;
+        }
+        case Io: {
+            return -1;
+        }
+        case Truncated: {
+            return -1;
+        }
+        case PeerAlert: {
+            return -1;
+        }
+        case Closed: {
+            return -1;
+        }
+    }
+}

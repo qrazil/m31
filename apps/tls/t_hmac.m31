@@ -1,0 +1,69 @@
+// HMAC against Python's `hmac` and `hashlib`. Every line this prints on stdout
+// is printed again by `oracle_hmac.py`, and `test.sh` diffs the two, so no
+// expectation is written down here that could drift from the standard -- the
+// standard is the other program. Structured like `apps/ssh/t_sha256.m31`.
+//
+//   ./build.sh apps/tls/t_hmac.m31 -o t_hmac && ./t_hmac
+
+import hmac;
+
+// `n` octets of a deterministic pattern: `(i * multiplier + offset) & 0xFF`.
+// The Python twin generates the same bytes from the same rule, so no fixture.
+bytes pattern(int n, int multiplier, int offset) {
+    bytes out = [];
+    for (int i in 0 .. n) {
+        out.push(i * multiplier + offset & 0xFF);
+    }
+    return out;
+}
+
+// --- RFC 4231 §4: the published HMAC-SHA-256 test cases ------------------------
+//
+// 4.2 through 4.8, each as the RFC gives its key and data. The long-key cases
+// (4.6 truncation aside) exercise a key longer than the block size.
+
+print("rfc4231-1 " + hmac.sha256_hex([0x0B; 20], "Hi There".to_bytes()));
+print("rfc4231-2 " + hmac.sha256_hex("Jefe".to_bytes(), "what do ya want for nothing?".to_bytes()));
+print("rfc4231-3 " + hmac.sha256_hex([0xAA; 20], [0xDD; 50]));
+print("rfc4231-4 " + hmac.sha256_hex(pattern(25, 1, 1), [0xCD; 50]));
+print("rfc4231-6 " + hmac.sha256_hex([0xAA; 131], "Test Using Larger Than Block-Size Key - Hash Key First".to_bytes()));
+print("rfc4231-7 " + hmac.sha256_hex([0xAA; 131], "This is a test using a larger than block-size key and a larger than block-size data. The key needs to be hashed before being used by the HMAC algorithm.".to_bytes()));
+
+// --- RFC 4231 §4 again, for HMAC-SHA-384 ----------------------------------------
+
+print("rfc4231-384-1 " + hmac.sha384_hex([0x0B; 20], "Hi There".to_bytes()));
+print("rfc4231-384-2 " + hmac.sha384_hex("Jefe".to_bytes(), "what do ya want for nothing?".to_bytes()));
+print("rfc4231-384-3 " + hmac.sha384_hex([0xAA; 20], [0xDD; 50]));
+print("rfc4231-384-4 " + hmac.sha384_hex(pattern(25, 1, 1), [0xCD; 50]));
+print("rfc4231-384-6 " + hmac.sha384_hex([0xAA; 131], "Test Using Larger Than Block-Size Key - Hash Key First".to_bytes()));
+print("rfc4231-384-7 " + hmac.sha384_hex([0xAA; 131], "This is a test using a larger than block-size key and a larger than block-size data. The key needs to be hashed before being used by the HMAC algorithm.".to_bytes()));
+
+// --- every message length against every key length -----------------------------
+//
+// The lengths straddle the 64-octet block (and the 55/56 padding boundary of
+// the hash underneath it), and the key lengths straddle the same block --
+// 63, 64 and 65 octets are where a key is padded, exact, and hashed first.
+
+const Array<int> MESSAGE_SIZES = [0, 1, 55, 56, 63, 64, 65, 111, 112, 127, 128, 129, 200, 1000];
+const Array<int> KEY_SIZES = [0, 1, 20, 32, 63, 64, 65, 100, 128, 129, 200];
+
+for (int key_size in KEY_SIZES) {
+    for (int message_size in MESSAGE_SIZES) {
+        bytes key = pattern(key_size, 11, 5);
+        bytes message = pattern(message_size, 7, 13);
+        print("sha256 key" + key_size.to_str() + " msg" + message_size.to_str() + " " + hmac.sha256_hex(key, message));
+    }
+}
+
+// The same grid for SHA-384, whose block is 128 octets: the key sizes that
+// matter are 127, 128 and 129, and the message sizes 111/112 are its padding
+// boundary.
+const Array<int> KEY_SIZES_384 = [0, 1, 48, 100, 127, 128, 129, 200, 300];
+
+for (int key_size in KEY_SIZES_384) {
+    for (int message_size in MESSAGE_SIZES) {
+        bytes key = pattern(key_size, 11, 5);
+        bytes message = pattern(message_size, 7, 13);
+        print("sha384 key" + key_size.to_str() + " msg" + message_size.to_str() + " " + hmac.sha384_hex(key, message));
+    }
+}

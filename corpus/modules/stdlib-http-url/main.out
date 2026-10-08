@@ -38,6 +38,34 @@ http://example.com:80/explicit-default
   scheme=http host=example.com port=80
   path=/explicit-default query= target=/explicit-default
   host_header=example.com to_str=http://example.com/explicit-default
+https://example.com
+  scheme=https host=example.com port=443
+  path=/ query= target=/
+  host_header=example.com to_str=https://example.com/
+HTTPS://EXAMPLE.COM/Path?q=1#frag
+  scheme=https host=example.com port=443
+  path=/Path query=q=1 target=/Path?q=1
+  host_header=example.com to_str=https://example.com/Path?q=1
+https://example.com:8443/a/b
+  scheme=https host=example.com port=8443
+  path=/a/b query= target=/a/b
+  host_header=example.com:8443 to_str=https://example.com:8443/a/b
+https://example.com:443/explicit-default
+  scheme=https host=example.com port=443
+  path=/explicit-default query= target=/explicit-default
+  host_header=example.com to_str=https://example.com/explicit-default
+https://example.com:80/not-the-default
+  scheme=https host=example.com port=80
+  path=/not-the-default query= target=/not-the-default
+  host_header=example.com:80 to_str=https://example.com:80/not-the-default
+http://example.com:443/not-the-default
+  scheme=http host=example.com port=443
+  path=/not-the-default query= target=/not-the-default
+  host_header=example.com:443 to_str=http://example.com:443/not-the-default
+https://[::1]/p
+  scheme=https host=::1 port=443
+  path=/p query= target=/p
+  host_header=[::1] to_str=https://[::1]/p
 quote(/a b/c, safe: '/') = /a%20b/c
 quote(/a b/c, safe: '') = %2Fa%20b%2Fc
 quote(a&b=c, safe: '') = a%26b%3Dc
