@@ -462,21 +462,28 @@ the same letter in two functions counts once per line:
 
 ---
 
-## 8. Open questions
+## 8. Decisions on the open questions (locked)
 
-1. **RFC-transcribed names.** `field25519`, `ed25519` and `sha256` carry the
-   RFC's `A`, `K`, `x1`, `t0`…; the rule makes them `ROUND_CONSTANTS`, `limb`,
-   …, which no longer greps against the standard. Options: give up and
-   rename, or allow a per-file `// naming: allow` escape the lint reads.
-   This document takes the first and leaves the second open, because
-   an escape hatch is a hole every file will use.
-2. **A discard binding.** `case Err(_)` — a language change, not a naming
-   one, and it would remove a large share of the `e`s that exist only
-   because a payload cannot be ignored. Not measured: it needs a use analysis
-   this lint does not do.
-3. **Is `len` an abbreviation?** Listed as one (§3.3); 24 hits across `lib/`,
-   `apps/`, gitui and tui. It is the only table entry where reasonable people disagree.
-4. **Function names `at`, `of`, `up`, `eq`, `by`, `ok`** are allowed (§3.2):
-   about 44 declarations in `lib/` and `apps/`. Keep, or require longer names
-   (`get`, `from`, `equals`)? Separately, `at` is a *binding* name over a hundred
-   times across the repos and is flagged there.
+1. **RFC-transcribed names are renamed.** `A`, `K`, `x1`, `t0` become role
+   names (`ROUND_CONSTANTS`, `limb`, ...), with the RFC's name in a trailing
+   comment so the code still greps against the standard. There is no
+   per-file escape hatch: every file would use it.
+2. **A discard binding is added to the language.** `case Err(_)` binds
+   nothing and names nothing. It is a compiler change, tracked separately;
+   until it lands an unused payload is still named (`error`).
+3. **`len` is an abbreviation.** It becomes `length`.
+4. **`at`, `by`, `eq`, `of`, `ok`, `up` stay**, for function names only.
+   As *binding* names they remain flagged.
+5. **Casing is snake_case, not camelCase.** Values, functions and modules
+   are `snake_case`; types and variants are `PascalCase`. The case of a name
+   tells a reader what it is: `Ip.eq(other)` is a type's method and
+   `field25519.eq(a, b)` is a module's function, and only the case separates
+   them. camelCase would erase that difference and make the long role names
+   this rule asks for harder to read.
+6. **Module names are lowercase snake_case, descriptive and unique**
+   (`form_button`, `tui_text`; never a bare `button`). A module name is also
+   a file name and the module's identity, so it must not depend on case
+   (macOS and Windows file systems fold it), and an upper-case module would
+   read as a type. A product prefix is spelled in lower case:
+   `tui_text`, not `TUI_text` or `TUIText`.
+
