@@ -46,8 +46,12 @@
 // API -- the client
 // -----------------
 //   http.get(url)                    -> Result<Response, Error>
-//   http.fetch(request, redirects:, timeout_ms:, trust:)  -> Result<Response, Error>
-//                                    trust: a tls.Trust, for https (default: the system roots)
+//   http.fetch(request, redirects:, timeout_ms:)  -> Result<Response, Error>
+//   http.fetch_via(transport, request, redirects:, timeout_ms:)
+//                                    -> Result<Response, Error>
+//   http.open(request, timeout_ms)   -> Result<net.Conn, Error>
+//                                    `http://` only. `https://` is `lib/https.m31`, which
+//                                    is `fetch_via` with a TLS transport.
 //
 // **The seam takes an `io.Stream`, so every parser here is testable without a
 // socket.** `read_request`, `write_request`, `read_response` and
@@ -152,12 +156,17 @@
 //
 // --- what is deliberately not here -----------------------------------------
 //
-//   - **An unchecked `https`.** `https://` is supported, over `lib/tls.m31`,
-//     and checked: every connection proves a certificate chain (or a pinned key)
-//     before a byte of the request is sent, and there is no option, flag or
-//     environment variable that skips it. The alternative -- opening a
-//     plaintext connection to port 443, or accepting any certificate -- sends
-//     in the clear, or to anyone, a request the caller believed was private.
+//   - **`https` in this module.** `http.fetch` and `http.get` refuse an
+//     `https://` URL with `Error.SchemeNeedsTls` before a socket exists;
+//     `lib/https.m31` fetches them, over `lib/tls.m31`, and checked: every
+//     connection proves a certificate chain (or a pinned key) before a byte of
+//     the request is sent, and there is no option, flag or environment
+//     variable that skips it. TLS is a separate library because it is most of
+//     a megabyte of compiled code -- bignums, curves, X.509 -- that a program
+//     which only speaks `http://` (a server, a test, a loopback client) would
+//     otherwise carry. The wire format and the redirect rules are shared:
+//     `https` reuses `write_request`, `read_response` and `fetch_via`, and
+//     an `https` URL's rules (never downgraded to `http`) live here.
 //     What is checked and what is not (TLS 1.2, resumption, client
 //     certificates and revocation are not) is in `lib/tls.m31`'s header.
 //   - **A streaming body.** A body is read whole, into `bytes`, bounded by
@@ -184,7 +193,6 @@
 import io;
 import json;
 import net;
-import tls;
 
 // --- limits ----------------------------------------------------------------
 /// The whole header block -- request or status line, every field, and the
@@ -309,6 +317,9 @@ pub enum Error {
     /// An `https` URL answered with a redirect to plain `http`. Never
     /// followed: the next request would go in the clear.
     InsecureRedirect;
+    /// An `https` URL was handed to `http.fetch`, which does not speak TLS.
+    /// `lib/https.m31` does.
+    SchemeNeedsTls;
 }
 
 /// A sentence saying what went wrong. A method named `to_str`, so `print(e)`
@@ -365,6 +376,9 @@ pub str Error.to_str() {
         }
         case InsecureRedirect: {
             return "an https URL redirected to plain http";
+        }
+        case SchemeNeedsTls: {
+            return "an https URL needs the https module";
         }
     }
 }
@@ -429,6 +443,9 @@ pub int Error.status() {
         case InsecureRedirect: {
             return 500;
         }
+        case SchemeNeedsTls: {
+            return 500;
+        }
     }
 }
 
@@ -465,99 +482,6 @@ Error from_net(net.Error e) {
         }
         case Other(int code): {
             return Error.Other;
-        }
-    }
-}
-
-// `tls.Error`, in this module's own vocabulary, for the same reason as
-// `from_net`. The three a caller acts on differently -- an untrusted
-// certificate, an expired one, one for another host -- keep their own names;
-// the rest of the thirty-odd reasons a TLS connection can stop are
-// `TlsFailed`, and `tls`'s `last_error()` is where the exact one lives for a
-// caller who holds the connection. The socket's own failures, which `tls`
-// reports as `Connect`, never reach here: `exchange` opens the socket itself.
-Error from_tls(tls.Error e) {
-    match (e) {
-        case Connect: {
-            return Error.TlsFailed;
-        }
-        case Io: {
-            return Error.TlsFailed;
-        }
-        case Truncated: {
-            return Error.TlsFailed;
-        }
-        case PeerAlert: {
-            return Error.TlsFailed;
-        }
-        case Record: {
-            return Error.TlsFailed;
-        }
-        case BadRecordMac: {
-            return Error.TlsFailed;
-        }
-        case Closed: {
-            return Error.TlsFailed;
-        }
-        case UnsupportedVersion: {
-            return Error.TlsFailed;
-        }
-        case Downgrade: {
-            return Error.TlsFailed;
-        }
-        case RetryRequested: {
-            return Error.TlsFailed;
-        }
-        case IllegalParameter: {
-            return Error.TlsFailed;
-        }
-        case UnsupportedExtension: {
-            return Error.TlsFailed;
-        }
-        case Malformed: {
-            return Error.TlsFailed;
-        }
-        case UnexpectedMessage: {
-            return Error.TlsFailed;
-        }
-        case ClientCertificateRequested: {
-            return Error.TlsFailed;
-        }
-        case BadCertificate: {
-            return Error.CertificateUntrusted;
-        }
-        case UntrustedKey: {
-            return Error.CertificateUntrusted;
-        }
-        case TrustStore: {
-            return Error.TlsFailed;
-        }
-        case UnknownAuthority: {
-            return Error.CertificateUntrusted;
-        }
-        case CertificateExpired: {
-            return Error.CertificateExpired;
-        }
-        case CertificateNotYetValid: {
-            return Error.CertificateExpired;
-        }
-        case HostnameMismatch: {
-            return Error.HostnameMismatch;
-        }
-        case InvalidChain: {
-            return Error.CertificateUntrusted;
-        }
-        case WeakCertificate: {
-            return Error.CertificateUntrusted;
-        }
-        case UnsupportedSignature: {
-            return Error.TlsFailed;
-        }
-        case BadSignature: {
-            return Error.TlsFailed;
-        }
-        case BadFinished: {
-            return Error.TlsFailed;
         }
     }
 }
@@ -2362,6 +2286,9 @@ Result<int, Error> refuse(net.Conn c, Error e, int served) {
         case InsecureRedirect: {
             return Result<int, Error>.Ok(served);
         }
+        case SchemeNeedsTls: {
+            return Result<int, Error>.Ok(served);
+        }
     }
     // A refusal is answered on a connection whose framing this end no longer
     // trusts, so it is the last thing written and the connection closes after
@@ -2511,10 +2438,6 @@ pub Result<Response, Error> get(str url) {
 ///
 /// ### Redirects: five hops, and never off the origin
 ///
-/// `trust` is whom an `https` server must prove it is: the operating
-/// system's roots by default, a CA file, or a pinned key (`lib/tls.m31`).
-/// It has no value that skips the check, and it is ignored by `http` URLs.
-///
 /// `redirects` is how many `Location` hops to follow; **0 hands back the 3xx
 /// itself**, which is what a caller who wants to decide for themselves
 /// passes. The default is `MAX_REDIRECTS`.
@@ -2542,11 +2465,24 @@ pub Result<Response, Error> get(str url) {
 /// what every browser and every other client does and what 303 means
 /// outright. **307 and 308 keep the method and the body**, which is what
 /// they were added to the standard to promise.
-pub Result<Response, Error> fetch(Request req, int redirects = MAX_REDIRECTS, int timeout_ms = TIMEOUT_MS, tls.Trust trust = tls.Trust.SystemRoots) {
+pub Result<Response, Error> fetch(Request req, int redirects = MAX_REDIRECTS, int timeout_ms = TIMEOUT_MS) {
+    return fetch_via(PlainTransport(), req, redirects: redirects, timeout_ms: timeout_ms);
+}
+
+/// One connection, one request, one response: what `fetch_via` calls once per
+/// hop. `lib/https.m31` is the other implementation, which puts a verified
+/// TLS connection over the socket first.
+pub interface Transport {
+    Result<Response, Error> round_trip(Request req, int timeout_ms);
+}
+
+/// `fetch`, with the connection made by `carrier`. The redirect rules above
+/// are here and nowhere else, so every transport follows the same ones.
+pub Result<Response, Error> fetch_via(Transport carrier, Request req, int redirects = MAX_REDIRECTS, int timeout_ms = TIMEOUT_MS) {
     Request cur = req;
     int hops = 0;
     while (true) {
-        Response resp = exchange(cur, timeout_ms, trust)?;
+        Response resp = carrier.round_trip(cur, timeout_ms)?;
         if (hops >= redirects || !is_redirect(resp.code)) {
             return Result<Response, Error>.Ok(resp);
         }
@@ -2559,40 +2495,45 @@ bool is_redirect(int code) {
     return code == 301 || code == 302 || code == 303 || code == 307 || code == 308;
 }
 
-// One connection, one request, one response. An `https` URL puts a verified
-// TLS connection over the socket first: the certificate has been proven
-// before the first byte of the request is written.
-Result<Response, Error> exchange(Request req, int timeout_ms, tls.Trust trust) {
+/// A connected socket to `req`'s host, with both timeouts set and Nagle
+/// off. A request is a message that waits for an answer, so there is nothing
+/// for the kernel to coalesce it with. Any scheme: it is the caller that
+/// decides whether TLS goes over it.
+pub Result<net.Conn, Error> open(Request req, int timeout_ms) {
     match (net.connect(req.loc.host(), req.loc.port())) {
         case Ok(net.Conn c): {
-            deadline(c, timeout_ms)?;
-            // A request is a message that waits for an answer, so there is
-            // nothing for the kernel to coalesce it with.
+            match (deadline(c, timeout_ms)) {
+                case Ok: {
+                }
+                case Err(Error e): {
+                    return Result<net.Conn, Error>.Err(e);
+                }
+            }
             match (c.set_nodelay(true)) {
                 case Ok: {
                 }
                 case Err(net.Error e): {
-                    return Result<Response, Error>.Err(from_net(e));
+                    return Result<net.Conn, Error>.Err(from_net(e));
                 }
             }
-            if (req.loc.scheme() == "https") {
-                match (tls.connect_over(c, req.loc.host(), trust)) {
-                    case Ok(tls.Conn secure): {
-                        write_request(secure, req)?;
-                        return read_response(secure, req.verb);
-                    }
-                    case Err(tls.Error te): {
-                        return Result<Response, Error>.Err(from_tls(te));
-                    }
-                }
-            }
-            write_request(c, req)?;
-            return read_response(c, req.verb);
+            return Result<net.Conn, Error>.Ok(c);
         }
         case Err(net.Error e): {
-            return Result<Response, Error>.Err(from_net(e));
+            return Result<net.Conn, Error>.Err(from_net(e));
         }
     }
+}
+
+type PlainTransport {
+}
+
+Result<Response, Error> PlainTransport.round_trip(Request req, int timeout_ms) {
+    if (req.loc.scheme() == "https") {
+        return Result<Response, Error>.Err(Error.SchemeNeedsTls);
+    }
+    net.Conn c = open(req, timeout_ms)?;
+    write_request(c, req)?;
+    return read_response(c, req.verb);
 }
 
 // The request the next hop makes, or why this redirect is not followed.

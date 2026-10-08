@@ -24,8 +24,8 @@
 //   httpfetch.verify_pack(pack, out_path) -> Result<Summary, Error>     Part 5
 //
 // `discover` and `fetch` are the only two functions that touch a socket, and
-// they do it by building a `http.Request` and calling `http.fetch` --
-// exactly the same two calls a caller of `lib/http.m31` would write by hand.
+// they do it by building a `http.Request` and calling `https.fetch` --
+// exactly the same two calls a caller of `lib/https.m31` would write by hand.
 // Everything else is a pure function over `bytes`, in memory, so the whole
 // wire format is unit-testable against fixed byte strings and the two real
 // exchanges are tested only for "does a real server's answer parse", not for
@@ -156,14 +156,15 @@
 //   - **Push**, and the capabilities that only matter for it
 //     (`report-status`, `delete-refs`, `push-options`, ...).
 //   - **Protocol v2** -- see above.
-//   - **SSH.** `https://` URLs work with no code here: `http.fetch` speaks
+//   - **SSH.** `https://` URLs work with no code here: `https.fetch` speaks
 //     TLS and verifies the server's certificate against the system roots
 //     (`lib/tls.m31`), and that is inherited rather than repeated. A
 //     certificate failure arrives as `Error.Http`, like every other transport
-//     failure; a caller who needs the reason calls `http.fetch` itself.
+//     failure; a caller who needs the reason calls `https.fetch` itself.
 //   - **`multi_ack`/`multi_ack_detailed`** -- see "negotiation" above.
 
 import http;
+import https;
 import io;
 import fs;
 import object;
@@ -393,7 +394,7 @@ pub Result<Advertisement, Error> discover(str url) {
     match (http.request("GET", target)) {
         case Ok(http.Request req): {
             req.set("accept", "application/x-git-upload-pack-advertisement");
-            match (http.fetch(req)) {
+            match (https.fetch(req)) {
                 case Ok(http.Response resp): {
                     return after_refs_response(resp);
                 }
@@ -652,7 +653,7 @@ pub Result<Summary, Error> fetch(str url, Advertisement ad, List<str> wants, Lis
             req.set("content-type", "application/x-git-upload-pack-request");
             req.set("accept", "application/x-git-upload-pack-result");
             req.set_body(body);
-            match (http.fetch(req)) {
+            match (https.fetch(req)) {
                 case Ok(http.Response resp): {
                     return after_pack_response(resp, out_path);
                 }

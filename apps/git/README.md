@@ -195,7 +195,7 @@ scope. Turning a fetched pack into a repository this program can `log` or
 `cat-file` is therefore stage 2's own follow-up, not a gap in this file.
 Push, SSH and protocol v2 are named, separate gaps, not oversights: v0 is
 universally supported as a fallback even where v2 is preferred, and
-`https://` URLs work as they are: `lib/http.m31` verifies the server's
+`https://` URLs work as they are: `lib/https.m31` (over `lib/tls.m31`) verifies the server's
 certificate against the system roots before sending a byte, and there is no
 way to turn that off.
 

@@ -18,13 +18,14 @@ import net;
 //     message, before a second connection is made.
 //   - **`redirects: 0`** hands the 3xx back instead of following it.
 //   - **A 3xx with no `Location`** is a refusal and not a loop.
-//   - **A relative `Location` never reaches a socket.** `https://` does, and
+//   - **`https://` never reaches a socket**, and neither does a relative
+//     `Location`. `http.fetch` does not speak TLS; `lib/https.m31` does and
 //     is covered by `apps/tls/test_https.sh`, which has a certificate to
-//     check; a corpus program has no TLS server to talk to.
+//     check -- a corpus program has no TLS server to talk to.
 
 // One per call, and two for the three redirects that are followed.
 const int CONNECTIONS = 14;
-const int LINES = 11;
+const int LINES = 12;
 
 type Router {
 }
@@ -135,6 +136,9 @@ void client(Chan<int> ports, Chan<str> log) {
     report(log, "cross-host", http.get(base + "/cross"));
     report(log, "relative", http.get(base + "/relative"));
     report(log, "no-location", http.get(base + "/nowhere-to-go"));
+    // No socket is opened for this one: it names a port this program never
+    // bound, and the answer is that this module does not speak TLS.
+    report(log, "https", http.get("https://127.0.0.1:443/hello"));
 }
 
 void run(net.Listener ln) {
