@@ -7,6 +7,10 @@
 // ---
 //   Result<Config, ConfigError> config = tlsserver.load_config_files("chain.pem", "key.pem");
 //   Result<Config, ConfigError> config = tlsserver.load_config(chain_pem_text, key_pem_text);
+//   Result<Config, ConfigError> config = tlsserver.load_config_der([leaf_der, intermediate_der], key_der);
+//   //   load_config_files takes PEM or DER for each of its two files, told apart by
+//   //   content: a chain file of DER is certificates laid end to end; a key file of
+//   //   DER is PKCS#8 (Ed25519 or P-256) or SEC1 EC (P-256), as signingkey.parse_der.
 //   config.serves("example.org")        -> bool: does the leaf cover that name?
 //   config.set_protocols(["h2", "http/1.1"]);       // ALPN, in server preference order
 //
@@ -14,8 +18,8 @@
 //   net.Conn raw = listener.accept()...;
 //   Result<tlsserver.Conn, tlsserver.Error> secure = tlsserver.accept(raw, config);
 //   Result<tlsserver.Conn, tlsserver.Error> secure = tlsserver.accept_among(raw, [one, two]);
-//   // The handshake's per-read timeout is passed by name:
-//   Result<tlsserver.Conn, tlsserver.Error> secure = tlsserver.accept(raw, config, timeout_ms: 5000);
+//   // The handshake's per-read timeout and its total deadline are passed by name:
+//   Result<tlsserver.Conn, tlsserver.Error> secure = tlsserver.accept(raw, config, timeout_ms: 5000, deadline_ms: 20000);
 //   secure.server_name()  -> str: the SNI the client asked for, lowercased, or ""
 //   secure.alpn()         -> str: the protocol selected, or "" when ALPN was not used
 //
@@ -35,7 +39,10 @@
 //     A name no Config covers is a fatal `unrecognized_name`. Signatures:
 //     Ed25519 (0x0807) or ECDSA P-256 with SHA-256 (0x0403). The client must
 //     list the Config's scheme in signature_algorithms. RSA keys are refused
-//     at load time: there is no RSA signing here.
+//     at load time: there is no RSA signing here. A Config whose leaf has an
+//     iPAddress SAN serves that IP literal (`serves("127.0.0.1")`); a leaf
+//     with only DNS names does not (RFC 6125 6.4.3: an IP literal matches
+//     only an iPAddress entry, never a dNSName or the CN).
 //   - ALPN (RFC 7301): with `set_protocols`, the first server protocol that
 //     the client also lists. A client list with no common entry gets
 //     `no_application_protocol`.
@@ -55,16 +62,25 @@
 //
 // Denial of service
 // -----------------
-//   `accept` takes a per-read timeout for the handshake (default 10 s); it
-//   bounds how long the server waits for any ONE read, not the whole
-//   handshake, so a peer that drips a byte at a time can hold a connection
-//   for a while. Handshake messages are bounded by `tls13record`'s limits.
+//   `accept` takes two bounds on the handshake: `timeout_ms`, how long any ONE
+//   read may wait (default 10 s), and `deadline_ms`, how long the WHOLE
+//   handshake, reads and writes together, may take (default 30 s; 0 for no
+//   total, which leaves a peer free to hold a connection by dripping a byte
+//   at a time inside the per-read limit). Running out of either is
+//   `Error.Io`. The deadline is `deadlinestream`'s: it reads the wall clock
+//   (the language has no monotonic clock), so a system clock set backwards
+//   during a handshake can stretch it by at most one `deadline_ms`. The
+//   deadline covers the handshake only; a connection that has completed it
+//   has no timeouts of the library's making. Handshake messages are bounded
+//   by `tls13record`'s limits.
 //   A handshake costs one signature (about 40 ms for P-256 on a development
 //   machine; check `apps/tls` for current numbers), so a flood of
 //   handshakes is an expensive flood; rate-limit in front of this if it
 //   matters.
 
 import consttime;
+import deadlinestream;
+import der;
 import io;
 import net;
 import random;
@@ -108,7 +124,8 @@ const int RANDOM_SIZE = 32;
 const int X25519_SIZE = 32;
 const int MAX_SESSION_ID = 32;
 const int DEFAULT_HANDSHAKE_TIMEOUT_MS = 10_000;
-const str OID_ED25519 = "1.3.101.112";
+/// The default whole-handshake deadline of `accept`, in milliseconds.
+pub const int DEFAULT_HANDSHAKE_DEADLINE_MS = 30_000;
 
 // --- configuration ---------------------------------------------------------------
 
@@ -232,7 +249,7 @@ bytes certificate_message_of(List<bytes> chain) {
 bool key_matches(signingkey.SigningKey key, x509.Certificate leaf) {
     match (key.kind()) {
         case Ed25519: {
-            return leaf.public_key.algorithm == OID_ED25519 && leaf.public_key.key_bytes == key.public_key;
+            return leaf.public_key.algorithm == x509.OBJECT_ID_ED25519 && leaf.public_key.key_bytes == key.public_key;
         }
         case EcdsaP256: {
             return leaf.public_key.algorithm == x509.OID_EC_PUBLIC_KEY && leaf.public_key.curve == x509.OID_CURVE_P256 && leaf.public_key.key_bytes == key.public_key;
@@ -255,6 +272,23 @@ pub Result<Config, ConfigError> load_config(str chain_pem, str key_pem) {
     if (blobs.size() == 0) {
         return Result<Config, ConfigError>.Err(ConfigError.BadPem);
     }
+    return config_of(blobs, signingkey.parse_pem(key_pem));
+}
+
+/// A `Config` from DER: each element of `chain` is one certificate (leaf
+/// first), `key` one private key as PKCS#8 (Ed25519 or P-256) or SEC1 EC.
+/// The same refusals as `load_config`: an empty chain is `BadCertificate`.
+pub Result<Config, ConfigError> load_config_der(List<bytes> chain, bytes key) {
+    if (chain.size() == 0) {
+        return Result<Config, ConfigError>.Err(ConfigError.BadCertificate);
+    }
+    return config_of(chain, signingkey.parse_der(key));
+}
+
+// The part `load_config` and `load_config_der` share: the certificates are
+// parsed (a bad one is reported before anything about the key), then the key
+// must be the one the leaf certifies.
+Result<Config, ConfigError> config_of(List<bytes> blobs, Result<signingkey.SigningKey, signingkey.Error> key_result) {
     List<x509.Certificate> parsed = [];
     for (bytes blob in blobs) {
         match (x509.parse(blob)) {
@@ -266,7 +300,7 @@ pub Result<Config, ConfigError> load_config(str chain_pem, str key_pem) {
             }
         }
     }
-    match (signingkey.parse_pem(key_pem)) {
+    match (key_result) {
         case Err(signingkey.Error key_error): {
             return Result<Config, ConfigError>.Err(config_error_of(key_error));
         }
@@ -296,21 +330,97 @@ ConfigError config_error_of(signingkey.Error error) {
     }
 }
 
-/// `load_config` from two files.
+// The certificates of a DER chain file: certificates laid end to end.
+Option<List<bytes>> split_der_chain(bytes data) {
+    List<bytes> blobs = [];
+    int position = 0;
+    while (position < data.size()) {
+        match (der.read_at(data, position, data.size())) {
+            case Err(der.Error split_error): {
+                return Option<List<bytes>>.None;
+            }
+            case Ok(der.Element element): {
+                blobs.push(element.raw());
+                position = element.stop;
+            }
+        }
+    }
+    return Option<List<bytes>>.Some(blobs);
+}
+
+// Does this file hold PEM text (valid UTF-8 with a `-----BEGIN ` line)?
+Option<str> pem_text_of(bytes data) {
+    match (data.utf8()) {
+        case None: {
+            return Option<str>.None;
+        }
+        case Some(str text): {
+            if (text.contains("-----BEGIN ")) {
+                return Option<str>.Some(text);
+            }
+            return Option<str>.None;
+        }
+    }
+}
+
+/// `load_config` from two files. Each file is PEM or DER, told apart by
+/// content (text containing `-----BEGIN ` is PEM, anything else is DER): the
+/// chain file as one or more concatenated DER certificates, the key file as
+/// `signingkey.parse_der` reads it. A chain and a key may be in different forms.
 pub Result<Config, ConfigError> load_config_files(str chain_path, str key_path) {
-    match (io.read(chain_path)) {
+    bytes chain_data = [];
+    bytes key_data = [];
+    match (io.read_bytes(chain_path)) {
         case Err(io.Error chain_error): {
             return Result<Config, ConfigError>.Err(ConfigError.Unreadable);
         }
-        case Ok(str chain_text): {
-            match (io.read(key_path)) {
-                case Err(io.Error key_error): {
-                    return Result<Config, ConfigError>.Err(ConfigError.Unreadable);
+        case Ok(bytes chain_found): {
+            chain_data = chain_found;
+        }
+    }
+    match (io.read_bytes(key_path)) {
+        case Err(io.Error key_error): {
+            return Result<Config, ConfigError>.Err(ConfigError.Unreadable);
+        }
+        case Ok(bytes key_found): {
+            key_data = key_found;
+        }
+    }
+    List<bytes> blobs = [];
+    match (pem_text_of(chain_data)) {
+        case Some(str chain_text): {
+            match (x509.pem_certificates(chain_text)) {
+                case Ok(List<bytes> found): {
+                    blobs = found;
                 }
-                case Ok(str key_text): {
-                    return load_config(chain_text, key_text);
+                case Err(x509.Error pem_error): {
+                    return Result<Config, ConfigError>.Err(ConfigError.BadPem);
                 }
             }
+            if (blobs.size() == 0) {
+                return Result<Config, ConfigError>.Err(ConfigError.BadPem);
+            }
+        }
+        case None: {
+            match (split_der_chain(chain_data)) {
+                case Some(List<bytes> split): {
+                    blobs = split;
+                }
+                case None: {
+                    return Result<Config, ConfigError>.Err(ConfigError.BadCertificate);
+                }
+            }
+            if (blobs.size() == 0) {
+                return Result<Config, ConfigError>.Err(ConfigError.BadCertificate);
+            }
+        }
+    }
+    match (pem_text_of(key_data)) {
+        case Some(str key_text): {
+            return config_of(blobs, signingkey.parse_pem(key_text));
+        }
+        case None: {
+            return config_of(blobs, signingkey.parse_der(key_data));
         }
     }
 }
@@ -1117,25 +1227,27 @@ Error abort_handshake(tls13record.Connection record, Error error) {
 /// Runs the server side of the handshake over `socket` with `config`. A
 /// stream of the client's decrypted octets comes back; every `Err` is a
 /// connection that does not exist and `socket` is closed.
-/// `timeout_ms` bounds each read of the handshake (0 waits forever).
-pub Result<Conn, Error> accept(net.Conn socket, Config config, int timeout_ms = DEFAULT_HANDSHAKE_TIMEOUT_MS) {
-    return accept_among(socket, [config], timeout_ms: timeout_ms);
+/// `timeout_ms` bounds each read of the handshake (0: no per-read limit) and
+/// `deadline_ms` the whole handshake, reads and writes together (0: no total).
+/// Running out of either is `Error.Io`.
+pub Result<Conn, Error> accept(net.Conn socket, Config config, int timeout_ms = DEFAULT_HANDSHAKE_TIMEOUT_MS, int deadline_ms = DEFAULT_HANDSHAKE_DEADLINE_MS) {
+    return accept_among(socket, [config], timeout_ms: timeout_ms, deadline_ms: deadline_ms);
 }
 
 /// `accept` with several Configs: the first whose leaf covers the client's
 /// SNI answers, and the first one answers a client that sent none.
-pub Result<Conn, Error> accept_among(net.Conn socket, List<Config> configs, int timeout_ms = DEFAULT_HANDSHAKE_TIMEOUT_MS) {
+pub Result<Conn, Error> accept_among(net.Conn socket, List<Config> configs, int timeout_ms = DEFAULT_HANDSHAKE_TIMEOUT_MS, int deadline_ms = DEFAULT_HANDSHAKE_DEADLINE_MS) {
     if (configs.size() == 0) {
         trap("tlsserver.accept_among: no Config to serve with");
     }
-    Result<bool, net.Error> armed = socket.set_read_timeout(timeout_ms);
-    tls13record.Connection record = tls13record.connection(socket);
+    deadlinestream.Bounded bounded = deadlinestream.bound(socket, deadline_ms, timeout_ms);
+    tls13record.Connection record = tls13record.connection(bounded);
     match (run_handshake(record, configs)) {
         case Err(Error handshake_error): {
             return Result<Conn, Error>.Err(abort_handshake(record, handshake_error));
         }
         case Ok(Session session): {
-            Result<bool, net.Error> disarmed = socket.set_read_timeout(0);
+            bounded.release();
             return Result<Conn, Error>.Ok(Conn(record, session.server_name, session.protocol));
         }
     }

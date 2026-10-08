@@ -58,9 +58,19 @@
 // one non-empty label, with at least two labels after it (so `*.example.com`
 // matches `www.example.com` but not `example.com`, `a.b.example.com`,
 // `w*.example.com` or `*.com`). Comparison is ASCII case-insensitive and a
-// single trailing dot on either side is ignored. A host that is an IP
-// address (or has a purely numeric last label) matches nothing: IP
-// identities are `iPAddress` SAN entries, which this module does not match.
+// single trailing dot on either side is ignored. A host that has a purely
+// numeric last label, and is not an IP address, matches nothing.
+//
+// A host that is an IP-address literal (`net.parse_ip`: dotted-quad IPv4, or
+// IPv6 without brackets or a zone) is a different kind of identity
+// (RFC 6125 §6.4.4, RFC 9110 §4.3.4): it matches only an `iPAddress` SAN
+// entry, compared as 4 or 16 binary octets, and never a `dNSName` or the
+// CommonName -- not even a `dNSName` that spells the same text. An IPv4
+// address and its IPv4-mapped IPv6 form are two addresses (4 octets against
+// 16 never compare equal). A certificate whose `iPAddress` entry is not 4 or
+// 16 octets is refused as `BadExtension`. A host name never matches an
+// `iPAddress` entry. The identity is the whole of `host`: there is no
+// wildcard form of an IP address.
 //
 // --- what is NOT here -------------------------------------------------------
 //
@@ -72,6 +82,7 @@
 
 import base64;
 import der;
+import net;
 
 pub const int KEY_USAGE_DIGITAL_SIGNATURE = 0x001;
 pub const int KEY_USAGE_NON_REPUDIATION = 0x002;
@@ -86,6 +97,9 @@ pub const str OID_RSA_ENCRYPTION = "1.2.840.113549.1.1.1";
 pub const str OID_EC_PUBLIC_KEY = "1.2.840.10045.2.1";
 pub const str OID_CURVE_P256 = "1.2.840.10045.3.1.7";
 pub const str OID_CURVE_P384 = "1.3.132.0.34";
+/// id-Ed25519 (RFC 8410): the key algorithm and the signature algorithm.
+pub const str OBJECT_ID_ED25519 = "1.3.101.112";
+const int ED25519_KEY_SIZE = 32;
 pub const str OID_SERVER_AUTH = "1.3.6.1.5.5.7.3.1";
 const str OID_SUBJECT_KEY_IDENTIFIER = "2.5.29.14";
 const str OID_KEY_USAGE = "2.5.29.15";
@@ -101,6 +115,7 @@ const int TAG_ISSUER_UNIQUE_ID = 0x81;
 const int TAG_SUBJECT_UNIQUE_ID = 0x82;
 const int TAG_EXTENSIONS = 0xA3;
 const int TAG_DNS_NAME = 0x82;
+const int TAG_IP_ADDRESS = 0x87;
 const int TAG_KEY_IDENTIFIER = 0x80;
 const int NAME_FIELD_COUNT = 6;
 const int KEY_USAGE_BIT_COUNT = 9;
@@ -181,11 +196,13 @@ pub type AlgorithmIdentifier {
 }
 
 /// A SubjectPublicKeyInfo, decoded as far as is useful for an algorithm this
-/// module knows (RSA and EC), and kept as OID plus raw key bytes otherwise.
+/// module knows (RSA, EC and Ed25519), and kept as OID plus raw key bytes otherwise.
 ///   - RSA: `modulus` and `public_exponent` are unsigned big-endian
 ///     magnitudes with no leading zero; `key_bytes` is the DER `RSAPublicKey`.
 ///   - EC: `curve` is the named-curve OID and `key_bytes` the encoded point
 ///     (`04 || X || Y` for uncompressed). The point is not validated here.
+///   - Ed25519 (RFC 8410): `key_bytes` is the 32-octet public key. The
+///     AlgorithmIdentifier must have no parameters.
 pub type PublicKey {
     pub str algorithm;
     pub str curve;
@@ -213,6 +230,8 @@ pub type Certificate {
     pub bytes signature;
     pub bool has_subject_alt_name = false;
     pub List<str> dns_names = [];
+    /// The `iPAddress` SAN entries, each 4 (IPv4) or 16 (IPv6) octets.
+    pub List<bytes> ip_addresses = [];
     pub bool has_basic_constraints = false;
     pub bool is_ca = false;
     pub int path_length = -1;
@@ -253,9 +272,24 @@ pub bool Certificate.allows_server_auth() {
     return false;
 }
 
-/// Whether the certificate's SAN `dNSName` entries cover `host`. See the
-/// header for the exact rules; the CommonName is never consulted.
+/// Whether the certificate's SAN covers `host`: an IP-literal host against
+/// the `iPAddress` entries only, any other host against the `dNSName`
+/// entries only. See the header for the exact rules; the CommonName is never
+/// consulted.
 pub bool Certificate.matches_hostname(str host) {
+    match (net.parse_ip(host)) {
+        case Some(net.Ip address): {
+            bytes wanted_octets = address.octets();
+            for (bytes candidate in ip_addresses) {
+                if (candidate == wanted_octets) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        case None: {
+        }
+    }
     str wanted = normalize_name(host);
     if (!is_plain_hostname(wanted)) {
         return false;
@@ -464,6 +498,11 @@ Result<PublicKey, Error> read_public_key(der.Element info) {
     } else if (identifier.algorithm_oid == OID_EC_PUBLIC_KEY) {
         der.Element curve_element = parse_of(identifier.parameters, Error.BadPublicKey)?;
         curve_oid = oid_of(curve_element, Error.BadPublicKey)?;
+    } else if (identifier.algorithm_oid == OBJECT_ID_ED25519) {
+        // RFC 8410 §3: the parameters are absent, and the key is 32 octets.
+        if (identifier.parameters.size() != 0 || bits.octets.size() != ED25519_KEY_SIZE) {
+            return Result<PublicKey, Error>.Err(Error.BadPublicKey);
+        }
     }
     return Result<PublicKey, Error>.Ok(PublicKey(identifier.algorithm_oid, curve_oid, bits.octets, modulus_bytes, exponent_bytes));
 }
@@ -499,12 +538,21 @@ Result<bool, Error> read_subject_alt_name(Certificate certificate, bytes value) 
         // ediPartyName, URI, iPAddress, registeredID.
         int name_tag = name.tag;
         bool known = name_tag == 0xA0 || name_tag == 0x81 || name_tag == TAG_DNS_NAME || name_tag == 0xA3;
-        known = known || name_tag == 0xA4 || name_tag == 0xA5 || name_tag == 0x86 || name_tag == 0x87 || name_tag == 0x88;
+        known = known || name_tag == 0xA4 || name_tag == 0xA5 || name_tag == 0x86 || name_tag == TAG_IP_ADDRESS || name_tag == 0x88;
         if (!known) {
             return Result<bool, Error>.Err(Error.BadExtension);
         }
         if (name_tag == TAG_DNS_NAME) {
             certificate.dns_names.push(read_dns_name(name.content())?);
+        }
+        if (name_tag == TAG_IP_ADDRESS) {
+            // RFC 5280 §4.2.1.6: 4 octets (IPv4) or 16 (IPv6). The 8 and 32
+            // octet forms are address-and-mask pairs, for name constraints.
+            bytes address = name.content();
+            if (address.size() != 4 && address.size() != 16) {
+                return Result<bool, Error>.Err(Error.BadExtension);
+            }
+            certificate.ip_addresses.push(address);
         }
     }
     certificate.has_subject_alt_name = true;

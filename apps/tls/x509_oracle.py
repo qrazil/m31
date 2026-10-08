@@ -20,7 +20,7 @@ warnings.simplefilter("ignore")
 
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 
 DER = serialization.Encoding.DER
 CURVE_OIDS = {
@@ -112,11 +112,15 @@ def dump_certificate(number, cert):
         key_bytes = key.public_bytes(
             serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint
         ).hex()
+    elif isinstance(key, ed25519.Ed25519PublicKey):
+        algorithm = "1.3.101.112"
+        key_bytes = key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
     else:
         raise SystemExit("oracle: unsupported key type %r" % type(key))
 
     san = extension(cert, x509.SubjectAlternativeName)
     dns = san.get_values_for_type(x509.DNSName) if san else []
+    ips = [address.packed.hex() for address in san.get_values_for_type(x509.IPAddress)] if san else []
     basic = extension(cert, x509.BasicConstraints)
     usage = extension(cert, x509.KeyUsage)
     mask = 0
@@ -150,6 +154,7 @@ def dump_certificate(number, cert):
         "key_exponent " + or_dash(exponent),
         "key_bytes " + key_bytes,
         "san %s %s" % (flag(san is not None), or_dash(",".join(dns))),
+        "san_ip_addresses " + or_dash(",".join(ips)),
         "basic_constraints %s %s %d"
         % (
             flag(basic is not None),
@@ -210,6 +215,15 @@ def openssl_check(path):
         for name in san.get_values_for_type(x509.DNSName) if san else []:
             if "DNS:" + name not in text:
                 problems.append("san " + name)
+        for address in san.get_values_for_type(x509.IPAddress) if san else []:
+            # `openssl x509 -text` prints IPv4 as a dotted quad and IPv6 as
+            # eight upper-case groups with no leading zeros.
+            if address.version == 4:
+                shown = str(address)
+            else:
+                shown = ":".join("%X" % int(group, 16) for group in address.exploded.split(":"))
+            if "IP Address:" + shown not in text:
+                problems.append("san ip " + str(address))
         basic = extension(cert, x509.BasicConstraints)
         if basic is not None:
             if ("CA:TRUE" in text) != basic.ca:

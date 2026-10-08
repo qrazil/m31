@@ -24,7 +24,7 @@ import sys
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 DER = serialization.Encoding.DER
@@ -32,6 +32,7 @@ NOT_BEFORE = datetime.datetime(2020, 1, 1)
 NOT_AFTER = datetime.datetime(2040, 1, 1)
 EC256 = ec.generate_private_key(ec.SECP256R1())
 EC384 = ec.generate_private_key(ec.SECP384R1())
+ED25519 = ed25519.Ed25519PrivateKey.generate()
 RSA2048 = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
 
@@ -61,7 +62,10 @@ def build(common_name, key, san=None, ca=None, pathlen=None, usage=None, eku=Non
             x509.AuthorityKeyIdentifier.from_issuer_public_key(EC256.public_key()), critical=False)
     for extension, critical in extra:
         builder = builder.add_extension(extension, critical=critical)
-    return builder.sign(sign_with or EC256, digest).public_bytes(DER)
+    signer = sign_with or EC256
+    if isinstance(signer, ed25519.Ed25519PrivateKey):
+        digest = None
+    return builder.sign(signer, digest).public_bytes(DER)
 
 
 def pem(der_bytes):
@@ -234,6 +238,14 @@ def make_mutants(base, rsa_base):
     add("rsa_parameters_missing", mutant(rsa_base, lambda t, b: b.content[6].content[0].content.pop()), "BadPublicKey")
     add("rsa_parameters_not_null", mutant(rsa_base, lambda t, b: b.content[6].content[0].content.__setitem__(1, INT(0))), "BadPublicKey")
 
+    # Ed25519 (RFC 8410): no parameters, a 32-octet key.
+    ed_base = build("ed.example", ED25519, san=[x509.DNSName("ed.example")], ca=None)
+    add("ed25519_baseline_ok", ed_base, "Ok")
+    add("ed25519_parameters_null", mutant(ed_base, lambda t, b: b.content[6].content[0].content.append(NULL)), "BadPublicKey")
+    add("ed25519_key_31_octets", mutant(ed_base, lambda t, b: b.content[6].content.__setitem__(1, Node(0x03, b"\x00" + b.content[6].content[1].content[1:32]))), "BadPublicKey")
+    add("ed25519_key_33_octets", mutant(ed_base, lambda t, b: b.content[6].content.__setitem__(1, Node(0x03, b.content[6].content[1].content + b"\x00"))), "BadPublicKey")
+    add("ed25519_signature_parameters_null", mutant(ed_base, lambda t, b: (t.content[1].content.append(NULL), b.content[2].content.append(NULL))), "Ok")
+
     def rsa_key_one_integer(t, b):
         b.content[6].content[1] = Node(0x03, b"\x00" + Node(0x30, [INT(5)]).encode())
     add("rsa_key_one_integer", mutant(rsa_base, rsa_key_one_integer), "BadPublicKey")
@@ -299,6 +311,13 @@ def make_mutants(base, rsa_base):
     add("san_non_ascii_dns_name", mutant(base, san_value(Node(0x30, [Node(0x82, "bücher.example".encode())]).encode())), "BadExtension")
     add("san_nul_in_dns_name", mutant(base, san_value(Node(0x30, [Node(0x82, b"a\x00b.example")]).encode())), "BadExtension")
     add("san_unknown_general_name", mutant(base, san_value(Node(0x30, [Node(0x89, b"x")]).encode())), "BadExtension")
+    add("san_ip_v4_ok", mutant(base, san_value(Node(0x30, [Node(0x87, bytes(4))]).encode())), "Ok")
+    add("san_ip_v6_ok", mutant(base, san_value(Node(0x30, [Node(0x87, bytes(16))]).encode())), "Ok")
+    add("san_ip_empty", mutant(base, san_value(Node(0x30, [Node(0x87, b"")]).encode())), "BadExtension")
+    add("san_ip_three_octets", mutant(base, san_value(Node(0x30, [Node(0x87, bytes(3))]).encode())), "BadExtension")
+    add("san_ip_five_octets", mutant(base, san_value(Node(0x30, [Node(0x87, bytes(5))]).encode())), "BadExtension")
+    add("san_ip_v4_with_mask", mutant(base, san_value(Node(0x30, [Node(0x87, bytes(8))]).encode())), "BadExtension")
+    add("san_ip_v6_with_mask", mutant(base, san_value(Node(0x30, [Node(0x87, bytes(32))]).encode())), "BadExtension")
     add("san_trailing_byte", mutant(base, san_value(Node(0x30, [Node(0x82, b"a.example")]).encode() + b"\x00")), "BadExtension")
     add("san_not_a_sequence", mutant(base, san_value(OCTETS(b"x").encode())), "BadExtension")
 
@@ -366,6 +385,9 @@ def main(out):
         "good_ec384_ca": build("ca384", EC384, ca=True, pathlen=0,
                                usage=x509.KeyUsage(False, False, False, False, False, True, True, False, False)),
         "good_ec256_no_extensions_but_ski": build("plain", EC256, include_ski=False),
+        "good_ed25519_leaf": build("ed", ED25519, san=[x509.DNSName("ed.example"), x509.IPAddress(__import__("ipaddress").ip_address("127.0.0.1")), x509.IPAddress(__import__("ipaddress").ip_address("::1"))],
+                                   ca=None, usage=x509.KeyUsage(True, False, False, False, False, False, False, False, False)),
+        "good_ed25519_signed": build("signed", EC256, san=[x509.DNSName("signed.example")], ca=None, sign_with=ED25519),
         "good_agreement_leaf": build("agree", EC256, san=[x509.DNSName("agree.example")], ca=None,
                                      usage=x509.KeyUsage(False, False, False, False, True, False, False, True, False),
                                      eku=[ExtendedKeyUsageOID.SERVER_AUTH], include_ski=False),
@@ -380,6 +402,8 @@ def main(out):
     semantic("good_rsa_leaf", rsa_base, 1, 0, -1, 0x001 | 0x004)
     semantic("good_ec384_ca", good["good_ec384_ca"], 1, 1, 0, 0x020 | 0x040)
     semantic("good_ec256_no_extensions_but_ski", good["good_ec256_no_extensions_but_ski"], 1, 0, -1, 0)
+    semantic("good_ed25519_leaf", good["good_ed25519_leaf"], 1, 0, -1, 0x001)
+    semantic("good_ed25519_signed", good["good_ed25519_signed"], 1, 0, -1, 0)
     semantic("good_agreement_leaf", good["good_agreement_leaf"], 1, 0, -1, 0x010 | 0x080)
     semantic("eku_client_only", build("c", EC256, eku=[ExtendedKeyUsageOID.CLIENT_AUTH]), 0, 0, -1, 0)
     semantic("eku_server_only", build("s", EC256, eku=[ExtendedKeyUsageOID.SERVER_AUTH]), 1, 0, -1, 0)
@@ -400,8 +424,11 @@ def main(out):
     names("names_deep_wildcard.pem", ["*.b.example.net"])
     names("names_trailing_dot.pem", ["trailing.example.io."])
     names("names_idna.pem", ["xn--bcher-kva.example", "*.xn--bcher-kva.example"])
-    names("names_ip.pem", ["192.0.2.2", "example.test"], extra_san=[x509.IPAddress(ip.ip_address("192.0.2.1")), x509.IPAddress(ip.ip_address("::1"))])
+    names("names_ip.pem", ["192.0.2.2", "example.test"], extra_san=[x509.IPAddress(ip.ip_address("192.0.2.1")), x509.IPAddress(ip.ip_address("::1")), x509.IPAddress(ip.ip_address("2001:db8::7"))])
     names("names_ip_only.pem", [], extra_san=[x509.IPAddress(ip.ip_address("192.0.2.1"))])
+    names("names_ip_v6_only.pem", [], extra_san=[x509.IPAddress(ip.ip_address("2001:db8::1"))])
+    names("names_dns_spelled_ip.pem", ["192.0.2.3", "::1", "[::1]"])
+    names("names_ip_cn.pem", [], cn="192.0.2.4")
     names("names_cn_only.pem", [], cn="cn.example.com")
     names("names_cn_and_san.pem", ["san.example.com"], cn="cn.example.com")
     names("names_public_suffix.pem", ["*.example.co.uk"])
@@ -426,12 +453,24 @@ def main(out):
         expect("names_trailing_dot.pem", host, wanted)
     for host, wanted in [("xn--bcher-kva.example", 1), ("www.xn--bcher-kva.example", 1), ("bücher.example", 0), ("xn--bcher-kvb.example", 0)]:
         expect("names_idna.pem", host, wanted)
-    for host, wanted in [("192.0.2.1", 0), ("192.0.2.2", 0), ("::1", 0), ("[::1]", 0), ("example.test", 1), ("1.2.3", 0), ("0x7f.1", 0), ("example.test.", 1)]:
+    # An IP-literal host matches an iPAddress entry only (RFC 6125 §6.4.4): by its
+    # octets, so any spelling of the same address does, and no dNSName does, not
+    # even one that spells the address (`192.0.2.2`).
+    for host, wanted in [("192.0.2.1", 1), ("192.0.2.2", 0), ("192.0.2.3", 0), ("::1", 1), ("0:0:0:0:0:0:0:1", 1),
+                         ("0000::0001", 1), ("2001:db8::7", 1), ("2001:DB8:0:0:0:0:0:7", 1), ("2001:db8::8", 0),
+                         ("::2", 0), ("::ffff:192.0.2.1", 0), ("192.0.2.10", 0), ("192.0.2.1.", 0), ("[::1]", 0),
+                         ("example.test", 1), ("1.2.3", 0), ("0x7f.1", 0), ("example.test.", 1), ("EXAMPLE.TEST", 1)]:
         expect("names_ip.pem", host, wanted)
-    for host in ["192.0.2.1", "example.test", "::1", ""]:
+    for host in ["example.test", "", "192.0.2.2", "192.0.2.10", "::2", "[::1]", "::ffff:192.0.2.1"]:
         expect("names_ip_only.pem", host, 0)
-    for host in ["cn.example.com", "CN.EXAMPLE.COM", "cn.invalid"]:
-        expect("names_cn_only.pem", host, 0)
+    expect("names_ip_only.pem", "192.0.2.1", 1)
+    for host, wanted in [("2001:db8::1", 1), ("2001:0db8:0000:0000:0000:0000:0000:0001", 1), ("2001:db8::2", 0),
+                         ("192.0.2.1", 0), ("::1", 0), ("::ffff:1.2.3.4", 0), ("example.test", 0)]:
+        expect("names_ip_v6_only.pem", host, wanted)
+    for host in ["192.0.2.3", "::1", "[::1]"]:
+        expect("names_dns_spelled_ip.pem", host, 0)
+    for host in ["192.0.2.4", "cn.invalid"]:
+        expect("names_ip_cn.pem", host, 0)
     for host, wanted in [("san.example.com", 1), ("cn.example.com", 0), ("cn.invalid", 0)]:
         expect("names_cn_and_san.pem", host, wanted)
     for host, wanted in [("a.example.co.uk", 1), ("example.co.uk", 0), ("a.b.example.co.uk", 0)]:

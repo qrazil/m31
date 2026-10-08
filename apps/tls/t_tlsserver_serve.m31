@@ -12,7 +12,9 @@
 //   big      read one request, answer with a 1 MiB body (octet i is i mod 251)
 //   hold     read to the client's close, send nothing
 // PROTOCOLS is a comma-separated ALPN list, or `-` for none. With CHAIN2 and
-// KEY2 the server holds two Configs and picks by SNI.
+// KEY2 the server holds two Configs and picks by SNI. The environment
+// variable TLSSERVER_DEADLINE_MS, if set, is the whole-handshake deadline in
+// milliseconds (0: none); unset keeps the library's default.
 
 import io;
 import net;
@@ -134,6 +136,21 @@ bytes big = [];
 if (mode == "big") {
     big = big_body();
 }
+int deadline_ms = tlsserver.DEFAULT_HANDSHAKE_DEADLINE_MS;
+match (os.env("TLSSERVER_DEADLINE_MS")) {
+    case Some(str deadline_text): {
+        match (deadline_text.parse_int()) {
+            case Some(int parsed): {
+                deadline_ms = parsed;
+            }
+            case None: {
+                os.exit(2);
+            }
+        }
+    }
+    case None: {
+    }
+}
 match (net.listen("127.0.0.1", 0)) {
     case Err(net.Error listen_error): {
         io.eprint("cannot listen: " + listen_error.to_str());
@@ -149,7 +166,7 @@ match (net.listen("127.0.0.1", 0)) {
                 }
                 case Ok(net.Conn raw): {
                     count = count + 1;
-                    match (tlsserver.accept_among(raw, configs, timeout_ms: timeout_ms)) {
+                    match (tlsserver.accept_among(raw, configs, timeout_ms: timeout_ms, deadline_ms: deadline_ms)) {
                         case Ok(tlsserver.Conn secure): {
                             say("conn " + count.to_str() + " ok sni=" + secure.server_name() + " alpn=" + secure.alpn());
                             serve(secure, mode, big);

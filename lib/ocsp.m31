@@ -67,7 +67,6 @@
 //   - A revoked response's reason and time are validated for shape and then
 //     dropped.
 //   - Checking more than the leaf: intermediates' revocation is not looked at.
-//   - OCSP responses signed with Ed25519 (certificates here are not either).
 
 import der;
 import sha1digest;

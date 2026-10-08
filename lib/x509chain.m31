@@ -20,11 +20,12 @@
 //   - keyUsage, if present, has digitalSignature (TLS 1.3 signs the handshake);
 //   - subjectAltName covers `host` (`x509.matches_hostname`: the CommonName is
 //     never read, a wildcard is one whole leftmost label with at least two
-//     labels after it, an IP address matches nothing).
+//     labels after it; an IP-literal host matches only an iPAddress entry).
 //
 // Every link, from the leaf up (certificate C signed by issuer X):
 //   - X's key verifies C's signature over C's `tbsCertificate`: ECDSA
-//     (P-256 or P-384 keys, SHA-256, SHA-384 or SHA-512), RSASSA-PKCS1-v1_5
+//     (P-256 or P-384 keys, SHA-256, SHA-384 or SHA-512), Ed25519 (RFC 8410:
+//     an Ed25519 key, the signature algorithm without parameters), RSASSA-PKCS1-v1_5
 //     and RSASSA-PSS (SHA-256, SHA-384, SHA-512; MGF1 with the same hash and
 //     a salt as long as the digest, the one parameter set TLS uses). The
 //     signature algorithm in C is the one `x509` already checked equals the
@@ -74,10 +75,10 @@
 //   - A public suffix list: `*.co.uk` is accepted as a wildcard pattern. Only
 //     `*.com`-style (a wildcard directly above a single label) is refused.
 //   - Self-issued-certificate exceptions beyond pathLen (RFC 5280 §6.1.4(h)).
-//   - IP address identities (iPAddress SAN entries).
 
 import hexcodec;
 import ecdsa;
+import ed25519;
 import rsa;
 import sha256;
 import sha512;
@@ -88,6 +89,7 @@ pub const int MAXIMUM_PATH_LENGTH = 10;
 const int FAMILY_ECDSA = 1;
 const int FAMILY_PKCS1 = 2;
 const int FAMILY_PSS = 3;
+const int FAMILY_ED25519 = 4;
 const str OID_ECDSA_SHA256 = "1.2.840.10045.4.3.2";
 const str OID_ECDSA_SHA384 = "1.2.840.10045.4.3.3";
 const str OID_ECDSA_SHA512 = "1.2.840.10045.4.3.4";
@@ -235,6 +237,10 @@ Option<Scheme> scheme_of(x509.AlgorithmIdentifier algorithm) {
     if (oid == OID_ECDSA_SHA512 && algorithm.parameters.size() == 0) {
         return Option<Scheme>.Some(Scheme(FAMILY_ECDSA, rsa.Hash.Sha512));
     }
+    if (oid == x509.OBJECT_ID_ED25519 && algorithm.parameters.size() == 0) {
+        // Ed25519 hashes inside the algorithm; the hash here is unused.
+        return Option<Scheme>.Some(Scheme(FAMILY_ED25519, rsa.Hash.Sha256));
+    }
     bool null_parameters = algorithm.parameters.size() == 0 || (algorithm.parameters.size() == 2 && algorithm.parameters[0] == 5 && algorithm.parameters[1] == 0);
     if (oid == OID_RSA_SHA256 && null_parameters) {
         return Option<Scheme>.Some(Scheme(FAMILY_PKCS1, rsa.Hash.Sha256));
@@ -296,6 +302,16 @@ Result<void, Error> verify_ecdsa(x509.PublicKey key, rsa.Hash hash, bytes messag
     }
 }
 
+Result<void, Error> verify_ed25519(x509.PublicKey key, bytes message, bytes signature) {
+    if (key.algorithm != x509.OBJECT_ID_ED25519) {
+        return Result<void, Error>.Err(Error.BadSignature);
+    }
+    if (!ed25519.verify(key.key_bytes, message, signature)) {
+        return Result<void, Error>.Err(Error.BadSignature);
+    }
+    return Result<void, Error>.Ok;
+}
+
 Result<void, Error> verify_rsa(x509.PublicKey key, Scheme scheme, bytes message, bytes signature) {
     if (key.algorithm != x509.OID_RSA_ENCRYPTION) {
         return Result<void, Error>.Err(Error.BadSignature);
@@ -324,7 +340,7 @@ Result<void, Error> verify_rsa(x509.PublicKey key, Scheme scheme, bytes message,
 }
 
 /// Whether `key` verifies `signature` over `message` under `algorithm` (an
-/// X.509 signatureAlgorithm: ECDSA or RSA with SHA-2). The same check, with
+/// X.509 signatureAlgorithm: ECDSA or RSA with SHA-2, or Ed25519). The same check, with
 /// the same refusals (SHA-1 and MD5 are `WeakAlgorithm`), that a
 /// certificate's signature gets; `lib/ocsp.m31` uses it for responses.
 pub Result<void, Error> check_signature(x509.AlgorithmIdentifier algorithm, bytes message, bytes signature, x509.PublicKey key) {
@@ -338,6 +354,9 @@ pub Result<void, Error> check_signature(x509.AlgorithmIdentifier algorithm, byte
         case Some(Scheme scheme): {
             if (scheme.family == FAMILY_ECDSA) {
                 return verify_ecdsa(key, scheme.hash, message, signature);
+            }
+            if (scheme.family == FAMILY_ED25519) {
+                return verify_ed25519(key, message, signature);
             }
             return verify_rsa(key, scheme, message, signature);
         }

@@ -18,8 +18,11 @@
 #                checks the alert it gets for each.
 #   signers      m31 Ed25519 and ECDSA P-256 signatures against `cryptography`
 #                (RFC 8032 and RFC 6979 vectors, then random keys and messages).
-#   loading      PKCS#8 and SEC1 keys, chains, and every way a key file can be
-#                wrong, with a check that no error text echoes key material.
+#   loading      PKCS#8 and SEC1 keys and chains, as PEM and as DER, and every way a
+#                key file can be wrong, with a check that no error text echoes key
+#                material.
+#   deadline     a client dripping one octet at a time (and, for the m31 client, a
+#                server doing so) is cut off at the whole-handshake deadline.
 #
 # SIGN_COUNT (default 2000) and ED_COUNT (default 1500) set the random cases.
 # The compiler is `LANGC` (default `./target/debug/m31c`, built with `cargo build`).
@@ -147,6 +150,14 @@ mkdir -p "$FX"
     cat ed.pem ca.pem >ed.chain
     cp p.pem p.chain
     cp s.pem s.chain
+    # The same material as DER: certificates, PKCS#8 and SEC1 keys.
+    openssl x509 -in p.pem -outform DER -out p.der
+    openssl x509 -in ed.pem -outform DER -out ed.der
+    openssl x509 -in ca.pem -outform DER -out ca.der
+    cat ed.der ca.der >ed.chain.der
+    openssl pkcs8 -topk8 -nocrypt -in p.key -outform DER -out p.pk8.der
+    openssl pkcs8 -topk8 -nocrypt -in ed.key -outform DER -out ed.pk8.der
+    openssl ec -in p.key -outform DER -out p.sec1.der
 ) >"$WORK/fixtures.log" 2>&1 || { bad "fixtures" "$(tail -5 "$WORK/fixtures.log")"; exit 1; }
 CA=$FX/ca.pem
 
@@ -154,15 +165,23 @@ CA=$FX/ca.pem
 
 config_case() { # config_case <label> <chain> <key> <want regex over the output> <want rc>
     local label=$1 chain=$2 key=$3 want=$4 want_rc=$5
-    "$CONFIG" "$chain" "$key" localhost LOCALHOST other.example 127.0.0.1 >"$WORK/config.out" 2>&1
+    TLSSERVER_CONFIG_API=${API:-files} "$CONFIG" "$chain" "$key" localhost LOCALHOST other.example 127.0.0.1 >"$WORK/config.out" 2>&1
     local rc=$?
     local text
     text=$(cat "$WORK/config.out")
     local leak=
     if [ -f "$key" ]; then
         local snippet
-        snippet=$(grep -v -e '^-----' -e '^[A-Za-z-]*:' "$key" | head -2 | tr -d '\n')
-        if [ ${#snippet} -ge 20 ] && grep -qF "${snippet:0:40}" <<<"$text"; then leak=yes; fi
+        if grep -q -a -e '-----BEGIN' "$key"; then
+            snippet=$(grep -v -e '^-----' -e '^[A-Za-z-]*:' "$key" | head -2 | tr -d '\n')
+            if [ ${#snippet} -ge 20 ] && grep -qF "${snippet:0:40}" <<<"$text"; then leak=yes; fi
+        else
+            # A DER key: its base64 and its hex must not appear either.
+            snippet=$(base64 -w0 "$key" | cut -c9-48)
+            if [ ${#snippet} -ge 20 ] && grep -qF "$snippet" <<<"$text"; then leak=yes; fi
+            snippet=$(od -An -tx1 -v "$key" | tr -d ' \n' | cut -c17-56)
+            if [ ${#snippet} -ge 20 ] && grep -qiF "$snippet" <<<"$text"; then leak=yes; fi
+        fi
     fi
     if [ "$rc" -ne "$want_rc" ]; then
         bad "load: $label" "exit $rc, wanted $want_rc" "$text"
@@ -175,7 +194,7 @@ config_case() { # config_case <label> <chain> <key> <want regex over the output>
     fi
 }
 
-SERVES='^ok\nserves localhost yes\nserves LOCALHOST yes\nserves other.example no\nserves 127.0.0.1 no\n$'
+SERVES='^ok\nserves localhost yes\nserves LOCALHOST yes\nserves other.example no\nserves 127.0.0.1 yes\n$'
 config_case "PKCS#8 P-256" "$FX/p.chain" "$FX/p.key" "$SERVES" 0
 config_case "SEC1 EC P-256" "$FX/p.chain" "$FX/p.sec1" "$SERVES" 0
 config_case "PKCS#8 Ed25519 with the CA after the leaf" "$FX/ed.chain" "$FX/ed.key" "$SERVES" 0
@@ -199,6 +218,41 @@ printf -- '-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n' >"$FX
 config_case "a truncated PKCS#8 body" "$FX/p.chain" "$FX/short.key" 'error:' 1
 printf -- '-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n' >"$FX/short.pem"
 config_case "a truncated certificate" "$FX/short.pem" "$FX/p.key" 'error:' 1
+
+# DER: the files form (told apart from PEM by content), then `load_config_der`.
+config_case "DER: PKCS#8 P-256 key, DER certificate" "$FX/p.der" "$FX/p.pk8.der" "$SERVES" 0
+config_case "DER: SEC1 EC P-256 key" "$FX/p.der" "$FX/p.sec1.der" "$SERVES" 0
+config_case "DER: PKCS#8 Ed25519 key, two concatenated DER certificates" "$FX/ed.chain.der" "$FX/ed.pk8.der" "$SERVES" 0
+config_case "DER chain with a PEM key" "$FX/ed.chain.der" "$FX/ed.key" "$SERVES" 0
+config_case "PEM chain with a DER key" "$FX/p.chain" "$FX/p.pk8.der" "$SERVES" 0
+config_case "DER: Ed25519 key for a P-256 leaf" "$FX/p.der" "$FX/ed.pk8.der" 'does not match' 1
+config_case "DER: P-256 key for an Ed25519 leaf" "$FX/ed.der" "$FX/p.pk8.der" 'does not match' 1
+config_case "DER: SEC1 key for an Ed25519 leaf" "$FX/ed.der" "$FX/p.sec1.der" 'does not match' 1
+openssl pkcs8 -topk8 -v2 aes256 -passout pass:throwaway -in "$FX/p.key" -outform DER -out "$FX/enc.pk8.der" 2>/dev/null
+config_case "DER: an encrypted PKCS#8 key" "$FX/p.der" "$FX/enc.pk8.der" 'encrypted' 1
+openssl rsa -in "$FX/rsa.key" -outform DER -out "$FX/rsa.pkcs1.der" 2>/dev/null
+openssl pkcs8 -topk8 -nocrypt -in "$FX/rsa.key" -outform DER -out "$FX/rsa.pk8.der" 2>/dev/null
+config_case "DER: an RSA key, PKCS#1 (no RSA signing)" "$FX/p.der" "$FX/rsa.pkcs1.der" 'cannot sign with' 1
+config_case "DER: an RSA key, PKCS#8 (no RSA signing)" "$FX/p.der" "$FX/rsa.pk8.der" 'cannot sign with' 1
+openssl pkcs8 -topk8 -nocrypt -in "$FX/p384.key" -outform DER -out "$FX/p384.pk8.der" 2>/dev/null
+config_case "DER: a P-384 key" "$FX/p.der" "$FX/p384.pk8.der" 'cannot sign with' 1
+head -c 40 "$FX/p.pk8.der" >"$FX/trunc.pk8.der"
+config_case "DER: a truncated PKCS#8 key" "$FX/p.der" "$FX/trunc.pk8.der" 'no usable private key' 1
+printf 'this is not a key at all, only a sentence of text' >"$FX/garbage.der"
+config_case "DER: garbage where the key belongs" "$FX/p.der" "$FX/garbage.der" 'no usable private key' 1
+config_case "DER: a certificate where the key belongs" "$FX/p.der" "$FX/p.der" 'no usable private key' 1
+head -c 100 "$FX/p.der" >"$FX/trunc.der"
+config_case "DER: a truncated certificate" "$FX/trunc.der" "$FX/p.pk8.der" 'could not be parsed' 1
+config_case "DER: garbage where the chain belongs" "$FX/garbage.der" "$FX/p.pk8.der" 'could not be parsed' 1
+: >"$FX/empty.der"
+config_case "DER: an empty chain file" "$FX/empty.der" "$FX/p.pk8.der" 'could not be parsed' 1
+API=der config_case "load_config_der: P-256 PKCS#8" "$FX/p.der" "$FX/p.pk8.der" "$SERVES" 0
+API=der config_case "load_config_der: P-256 SEC1" "$FX/p.der" "$FX/p.sec1.der" "$SERVES" 0
+API=der config_case "load_config_der: Ed25519 PKCS#8" "$FX/ed.der" "$FX/ed.pk8.der" "$SERVES" 0
+API=der config_case "load_config_der: a mismatched key" "$FX/p.der" "$FX/ed.pk8.der" 'does not match' 1
+API=der config_case "load_config_der: an encrypted key" "$FX/p.der" "$FX/enc.pk8.der" 'encrypted' 1
+API=der config_case "load_config_der: an RSA key" "$FX/p.der" "$FX/rsa.pk8.der" 'cannot sign with' 1
+API=der config_case "load_config_der: PEM text as the key" "$FX/p.der" "$FX/p.key" 'no usable private key' 1
 
 # --- servers -------------------------------------------------------------------------
 
@@ -423,13 +477,25 @@ EOF
         fi
     fi
 
-    # The m31 client lists no Ed25519 in signature_algorithms (it verifies P-256 and RSA only):
-    # the server must say so with an alert, not guess.
-    out=$(timeout 60 "$CLIENT" localhost 127.0.0.1 "$PORT" "$CA" 2>&1)
-    if [ $? -ne 0 ] && matches '^error: the server sent a fatal alert' <<<"$out"; then
-        note "m31 client against an Ed25519 certificate: it offers no such scheme, the server alerts"
+    # The m31 client offers Ed25519 (0x0807): CertificateVerify and the chain's Ed25519 leaf both check.
+    out=$(timeout 120 "$CLIENT" localhost 127.0.0.1 "$PORT" "$CA" 2>&1)
+    if [ "$out" = "$(printf 'status HTTP/1.1 200 OK\nsize 1048576')" ]; then
+        note "m31 client against an Ed25519 certificate: Ed25519 CertificateVerify, 1 MiB"
     else
         bad "m31 client against the Ed25519 server" "$out"
+    fi
+    # An IP-literal host is matched against the iPAddress SAN only.
+    out=$(timeout 120 "$CLIENT" 127.0.0.1 127.0.0.1 "$PORT" "$CA" 2>&1)
+    if [ "$out" = "$(printf 'status HTTP/1.1 200 OK\nsize 1048576')" ]; then
+        note "m31 client dialling 127.0.0.1 by name: the certificate's iPAddress SAN matches"
+    else
+        bad "m31 client with an IP-literal host" "$out"
+    fi
+    out=$(timeout 60 "$CLIENT" 127.0.0.2 127.0.0.1 "$PORT" "$CA" 2>&1)
+    if [ $? -ne 0 ] && matches '^error:' <<<"$out"; then
+        note "m31 client with an IP host the certificate does not list: refused"
+    else
+        bad "m31 client with the wrong IP host" "$out"
     fi
 
     probe=$(timeout 120 python3 apps/tls/tlsserver_probe.py "$PORT" "$CA" full full_big hrr no_sigalg 2>&1)
@@ -469,6 +535,114 @@ if start_server sni "$FX/p.chain" "$FX/p.key" static 3000 - "$FX/s.chain" "$FX/s
         bad "an SNI no certificate covers" "$(printf '%s' "$out" | head -12)"
     fi
     stop_server
+fi
+
+# --- the whole-handshake deadline --------------------------------------------------------
+#
+# The per-read timeout is 3 s here and the deadline 2 s. A client that sends one octet
+# every 0.4 s never lets a read time out, and would keep a handshake open for minutes
+# (it has 300 octets to send); only the total bound cuts it off.
+
+if TLSSERVER_DEADLINE_MS=2000 start_server drip "$FX/p.chain" "$FX/p.key" static 3000 http/1.1; then
+    PORT=$SERVER_PORT
+    if out=$(python3 - "$PORT" 2>&1 <<'EOF'
+import socket, sys, time
+start = time.monotonic()
+sock = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=5)
+sock.settimeout(0.4)
+sock.sendall(bytes([0x16, 0x03, 0x01, 0x01, 0x2c]))      # a record header promising 300 octets
+sent = 0
+ended = None
+while time.monotonic() - start < 12 and sent < 300:
+    try:
+        sock.sendall(b"\x01")
+        sent += 1
+    except OSError:
+        ended = "send failed"
+        break
+    try:
+        data = sock.recv(100)
+        ended = "closed" if data == b"" else "data"
+        break
+    except socket.timeout:
+        pass
+    except OSError:
+        ended = "reset"
+        break
+elapsed = time.monotonic() - start
+print("ended=%s elapsed=%.1f octets=%d" % (ended, elapsed, sent))
+if ended is None:
+    sys.exit("the server was still waiting after %.1f s" % elapsed)
+if not 1.5 <= elapsed <= 5.0:
+    sys.exit("cut off at %.1f s, wanted about 2 s" % elapsed)
+EOF
+    ); then
+        note "a client dripping one octet per 0.4 s is cut off at the 2 s deadline ($out)"
+    else
+        bad "the handshake deadline against a dripping client" "$out"
+    fi
+    if matches 'conn 1 error' <"$SERVER_LOG"; then
+        note "the cut-off handshake is reported as an error"
+    else
+        bad "the dripped handshake was not reported" "$(cat "$SERVER_LOG")"
+    fi
+    if out=$(py_get "$PORT" localhost http/1.1 http/1.1 2>&1) && matches 'status=HTTP/1\.1 200 OK' <<<"$out"; then
+        note "the server still serves a normal client after the cut-off"
+    else
+        bad "serving after the deadline fired" "$out"
+    fi
+    out=$(timeout 60 "$CLIENT" localhost 127.0.0.1 "$PORT" "$CA" 20000 5000 2>&1)
+    if [ "$out" = "$(printf 'status HTTP/1.1 200 OK\nsize 17')" ]; then
+        note "m31 client under connect_over_deadline: a normal handshake completes and the connection works after release"
+    else
+        bad "m31 client with a deadline against the m31 server" "$out"
+    fi
+    server_alive || bad "the deadline server died" "$(tail -3 "$WORK/server.drip.err")"
+    stop_server
+fi
+
+# The client side: a server that dribbles a record one octet at a time.
+if out=$(python3 - "$CLIENT" "$CA" 2>&1 <<'EOF'
+import socket, subprocess, sys, threading, time
+listener = socket.socket()
+listener.bind(("127.0.0.1", 0))
+listener.listen(1)
+port = listener.getsockname()[1]
+stop = threading.Event()
+def serve():
+    conn, _ = listener.accept()
+    conn.settimeout(0.3)
+    try:
+        conn.recv(65536)
+    except OSError:
+        pass
+    try:
+        conn.sendall(bytes([0x16, 0x03, 0x03, 0x01, 0x2c]))
+        for _ in range(300):
+            if stop.is_set():
+                break
+            time.sleep(0.4)
+            conn.sendall(b"\x02")
+    except OSError:
+        pass
+    conn.close()
+thread = threading.Thread(target=serve, daemon=True)
+thread.start()
+start = time.monotonic()
+done = subprocess.run([sys.argv[1], "localhost", "127.0.0.1", str(port), sys.argv[2], "2000", "3000"],
+                      capture_output=True, text=True, timeout=30)
+elapsed = time.monotonic() - start
+stop.set()
+print("exit=%d elapsed=%.1f out=%s" % (done.returncode, elapsed, done.stdout.strip()))
+if done.returncode == 0 or not done.stdout.startswith("error:"):
+    sys.exit("the client did not fail")
+if not 1.5 <= elapsed <= 6.0:
+    sys.exit("cut off at %.1f s, wanted about 2 s" % elapsed)
+EOF
+); then
+    note "m31 client: connect_over_deadline cuts off a server dripping a record ($out)"
+else
+    bad "the client handshake deadline" "$out"
 fi
 
 # --- the echo mode: reads, writes and a clean close ------------------------------------

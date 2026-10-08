@@ -1,0 +1,144 @@
+// A `net.Conn` with a deadline over a whole exchange, as an `io.Stream`.
+//
+// `net.Conn.set_read_timeout` bounds how long ONE read waits for the next
+// packet. A peer that sends one byte just inside that limit, forever, never
+// trips it, so a handshake guarded only by the per-read timeout can be held
+// open indefinitely. `Bounded` adds the missing total: every read and write
+// is armed with the time left until the deadline (and, if given, no more than
+// the per-read limit), and once the deadline has passed the next call fails
+// without touching the socket.
+//
+// API
+// ---
+//   deadlinestream.Bounded bounded = deadlinestream.bound(socket, 30000, 10000);
+//   //   socket       the net.Conn to wrap
+//   //   30000        total milliseconds from now for everything done through
+//   //                the wrapper; 0 means no total
+//   //   10000        milliseconds any single read may wait; 0 means no per-read limit
+//   bounded.read(count), bounded.read_all(), bounded.read_until(delimiter, limit),
+//   bounded.write(data), bounded.close()      as net.Conn's, so it is an io.Stream
+//   bounded.release()      the exchange is over: clears the socket's timeouts and
+//                          turns the wrapper into a plain pass-through
+//
+// What an expiry looks like: `io.Error.Other(110)` (ETIMEDOUT) for a deadline
+// that had already passed when the call began, and `io.Error.Other(11)` (what
+// `net.Conn` reports) for a wait that ran out of time during the call.
+// Either way `net.Conn`'s own rules hold: a failed read loses nothing, and a
+// connection whose write failed must be closed.
+//
+// Caveats
+// -------
+//   - The clock is the wall clock (`date.now_ns`); this language has no
+//     monotonic clock. A step of the system clock moves the deadline with it.
+//     The time left is capped at the total given to `bound`, so a clock set
+//     backwards stretches the exchange by at most one total, not without limit.
+//   - `read_all` is bounded per packet, not in total: each wait inside it is
+//     limited by the time left when the call began. Use `read`/`read_until`
+//     for anything that must stop on the deadline.
+
+import date;
+import io;
+import net;
+
+const int NANOSECONDS_PER_MILLISECOND = 1_000_000;
+const int ERRNO_TIMED_OUT = 110;
+
+/// A `net.Conn` under a deadline. Made by `bound`.
+pub type Bounded {
+    net.Conn socket;
+    // Epoch nanoseconds at which the exchange must be over; 0 means no total.
+    int deadline_ns;
+    int total_ns;
+    int read_limit_ms;
+    bool is_released = false;
+}
+
+// Milliseconds the next wait may last, or 0 for "no limit", or -1 when the
+// deadline has passed.
+int Bounded.allowance(int limit_ms) {
+    if (deadline_ns == 0) {
+        return limit_ms;
+    }
+    int remaining_ns = deadline_ns - date.now_ns();
+    if (remaining_ns > total_ns) {
+        remaining_ns = total_ns;
+    }
+    if (remaining_ns <= 0) {
+        return -1;
+    }
+    int remaining_ms = (remaining_ns + NANOSECONDS_PER_MILLISECOND - 1) / NANOSECONDS_PER_MILLISECOND;
+    if (limit_ms == 0 || remaining_ms < limit_ms) {
+        return remaining_ms;
+    }
+    return limit_ms;
+}
+
+Result<bool, io.Error> Bounded.arm_read() {
+    if (is_released) {
+        return Result<bool, io.Error>.Ok(true);
+    }
+    int allowed = allowance(read_limit_ms);
+    if (allowed < 0) {
+        return Result<bool, io.Error>.Err(io.Error.Other(ERRNO_TIMED_OUT));
+    }
+    Result<bool, net.Error> armed = socket.set_read_timeout(allowed);
+    return Result<bool, io.Error>.Ok(true);
+}
+
+/// As `net.Conn.read`, within the deadline.
+pub Result<bytes, io.Error> Bounded.read(int count) {
+    arm_read()?;
+    return socket.read(count);
+}
+
+/// As `net.Conn.read_all`, within the deadline for each wait (see the header).
+pub Result<bytes, io.Error> Bounded.read_all() {
+    arm_read()?;
+    return socket.read_all();
+}
+
+/// As `net.Conn.read_until`, within the deadline for each wait.
+pub Result<bytes, io.Error> Bounded.read_until(bytes delimiter, int limit) {
+    arm_read()?;
+    return socket.read_until(delimiter, limit);
+}
+
+/// As `net.Conn.write`, within the deadline. A failed write leaves the
+/// connection to be closed.
+pub Result<int, io.Error> Bounded.write(bytes data) {
+    if (!is_released) {
+        int allowed = allowance(0);
+        if (allowed < 0) {
+            return Result<int, io.Error>.Err(io.Error.Other(ERRNO_TIMED_OUT));
+        }
+        Result<bool, net.Error> armed = socket.set_write_timeout(allowed);
+    }
+    return socket.write(data);
+}
+
+/// Closes the socket.
+pub Result<bool, io.Error> Bounded.close() {
+    return socket.close();
+}
+
+/// The exchange is over: no deadline and no per-read limit apply from here on.
+pub void Bounded.release() {
+    is_released = true;
+    Result<bool, net.Error> read_cleared = socket.set_read_timeout(0);
+    Result<bool, net.Error> write_cleared = socket.set_write_timeout(0);
+}
+
+/// Wraps `socket` so that everything done through the result must finish
+/// within `total_ms` from now (0: no total), and no single read waits longer
+/// than `read_limit_ms` (0: no limit). Negative numbers trap.
+pub Bounded bound(net.Conn socket, int total_ms, int read_limit_ms) {
+    if (total_ms < 0 || read_limit_ms < 0) {
+        trap("deadlinestream.bound: milliseconds cannot be negative");
+    }
+    int total_ns = total_ms * NANOSECONDS_PER_MILLISECOND;
+    int deadline_ns = 0;
+    if (total_ms > 0) {
+        deadline_ns = date.now_ns() + total_ns;
+    }
+    return Bounded(socket, deadline_ns, total_ns, read_limit_ms);
+}

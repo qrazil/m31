@@ -175,8 +175,17 @@ void check_semantics(Tally tally, str generated) {
     tally.expect("key usage mask does not name keyEncipherment", (leaf.key_usage & x509.KEY_USAGE_KEY_ENCIPHERMENT) == 0);
     tally.expect("key usage mask names keyCertSign", (leaf.key_usage & x509.KEY_USAGE_KEY_CERT_SIGN) != 0);
     tally.expect("SAN dNSName list skips IP, email and URI entries", leaf.dns_names.join(",") == "leaf.example,www.leaf.example");
+    tally.expect("SAN iPAddress list holds the one IPv4 entry as 4 octets", leaf.ip_addresses.size() == 1 && leaf.ip_addresses[0].hex() == "c0000207");
     tally.expect("the key algorithm is EC", leaf.public_key.algorithm == x509.OID_EC_PUBLIC_KEY);
     tally.expect("the curve is P-256", leaf.public_key.curve == x509.OID_CURVE_P256);
+    x509.Certificate ed_leaf = certificate_in(generated + "/good_ed25519_leaf.pem", 0);
+    tally.expect("the key algorithm is Ed25519", ed_leaf.public_key.algorithm == x509.OBJECT_ID_ED25519);
+    tally.expect("an Ed25519 key is 32 octets", ed_leaf.public_key.key_bytes.size() == 32);
+    tally.expect("an Ed25519 key has no curve", ed_leaf.public_key.curve == "");
+    tally.expect("an Ed25519 leaf's SAN has an IPv4 and an IPv6 entry", ed_leaf.ip_addresses.size() == 2 && ed_leaf.ip_addresses[0].size() == 4 && ed_leaf.ip_addresses[1].size() == 16);
+    x509.Certificate ed_signed = certificate_in(generated + "/good_ed25519_signed.pem", 0);
+    tally.expect("an Ed25519 signature algorithm is the OID alone", ed_signed.signature_algorithm.algorithm_oid == x509.OBJECT_ID_ED25519 && ed_signed.signature_algorithm.parameters.size() == 0);
+    tally.expect("an Ed25519 signature is 64 octets", ed_signed.signature.size() == 64);
     x509.Certificate rsa = certificate_in(generated + "/good_rsa_leaf.pem", 0);
     tally.expect("the key algorithm is RSA", rsa.public_key.algorithm == x509.OID_RSA_ENCRYPTION);
     tally.expect("an RSA exponent of 65537", rsa.public_key.public_exponent.hex() == "010001");

@@ -3,6 +3,9 @@
 //
 //   t_tlsserver_config CHAIN KEY [NAME ...]
 //
+// With TLSSERVER_CONFIG_API=der in the environment the files are read as bytes
+// and handed to `load_config_der` (CHAIN as one certificate) instead.
+//
 // Prints `ok` and, for each NAME, `serves NAME yes|no`; or `error: REASON` and
 // exits 1. Whatever the files hold, nothing printed here may contain a byte of
 // the key: the driver greps this output for the key's base64 text.
@@ -11,12 +14,35 @@ import io;
 import os;
 import tlsserver;
 
+bytes octets_of(str path) {
+    match (io.read_bytes(path)) {
+        case Ok(bytes found): {
+            return found;
+        }
+        case Err(io.Error read_error): {
+            print("error: " + read_error.to_str());
+            os.exit(1);
+            trap("unreachable");
+        }
+    }
+}
+
 List<str> arguments = os.args();
 if (arguments.size() < 3) {
     io.eprint("usage: t_tlsserver_config CHAIN KEY [NAME ...]");
     os.exit(2);
 }
-match (tlsserver.load_config_files(arguments[1], arguments[2])) {
+Result<tlsserver.Config, tlsserver.ConfigError> loaded = tlsserver.load_config_files(arguments[1], arguments[2]);
+match (os.env("TLSSERVER_CONFIG_API")) {
+    case Some(str api): {
+        if (api == "der") {
+            loaded = tlsserver.load_config_der([octets_of(arguments[1])], octets_of(arguments[2]));
+        }
+    }
+    case None: {
+    }
+}
+match (loaded) {
     case Err(tlsserver.ConfigError config_error): {
         print("error: " + config_error.to_str());
         os.exit(1);

@@ -216,7 +216,7 @@ if python3 -c 'import cryptography' 2>/dev/null; then
     oracle offers_suites ok p256 c02b x25519 handshake '' '^connected\nclosed$' 0 \
         'offered suites=1303,1301,1302,cca9,cca8,c02b,c02f,c02c,c030 extensions=5,10,11,13,50,23,65281,43,51$'
     oracle offers_parameters ok p256 c02b x25519 handshake '' '^connected\nclosed$' 0 \
-        'groups=001d,0017 sigalgs=0403,0503,0804,0805,0806,0401,0501,0601 versions=03040303 ec_point_formats=0100 renegotiation_info=00$'
+        'groups=001d,0017 sigalgs=0403,0503,0807,0804,0805,0806,0401,0501,0601 versions=03040303 ec_point_formats=0100 renegotiation_info=00$'
 
     # The ones that are wrong: the hello.
     refused downgrade_sentinel downgrade "$REFUSED_SENTINEL" 47

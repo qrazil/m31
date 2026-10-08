@@ -1,9 +1,10 @@
-// A private signing key for a TLS server, read from PEM: the half of a
+// A private signing key for a TLS server, read from PEM or DER: the half of a
 // certificate that proves its owner is the one holding it.
 //
 // API
 // ---
 //   Result<SigningKey, Error> key = signingkey.parse_pem(text);
+//   Result<SigningKey, Error> key = signingkey.parse_der(octets);
 //   key.kind()               -> Kind.Ed25519 | Kind.EcdsaP256
 //   key.signature_scheme()   -> 0x0807 (ed25519) | 0x0403 (ecdsa_secp256r1_sha256)
 //   key.public_key           -> 32 octets (Ed25519) | 65 octets 04||X||Y (P-256)
@@ -16,6 +17,17 @@
 //   -----BEGIN PRIVATE KEY-----       PKCS#8 holding Ed25519 or P-256
 //   -----BEGIN EC PRIVATE KEY-----    SEC1 ECPrivateKey for P-256 (the named
 //                                     curve must be present in the block)
+// Accepted encodings (DER, the one key, as the body of those PEM blocks):
+//   PKCS#8 PrivateKeyInfo             Ed25519 or P-256
+//   SEC1 ECPrivateKey                 P-256, with the curve present
+// `parse_der` tells the encodings apart by their shape, since DER has no
+// label: SEQUENCE { INTEGER 1, OCTET STRING, ... } is SEC1, SEQUENCE
+// { INTEGER, SEQUENCE, OCTET STRING, ... } is PKCS#8, SEQUENCE { SEQUENCE,
+// OCTET STRING } is an EncryptedPrivateKeyInfo (`Encrypted`) and SEQUENCE
+// { INTEGER 0, INTEGER, ... nine or more integers } is an RSAPrivateKey
+// (`Unsupported`); anything else is `BadKey`. A passphrase-protected SEC1 key
+// has no DER marker of its own (the PEM header says it) and reads as `BadKey`.
+//
 // Refused, each with its own error: `ENCRYPTED PRIVATE KEY` and SEC1/PEM
 // blocks with a `Proc-Type: 4,ENCRYPTED` header (`Encrypted` -- decrypt the
 // file first, this module takes no passphrase), `RSA PRIVATE KEY` and RSA in
@@ -373,6 +385,34 @@ Result<SigningKey, Error> read_pkcs8(bytes data) {
                     return Result<SigningKey, Error>.Err(Error.Unsupported);
                 }
             }
+        }
+    }
+}
+
+/// The one private key in `data`, DER: PKCS#8 or SEC1, told apart by shape
+/// (see the header). Errors are those of `parse_pem`, and carry no key bytes.
+pub Result<SigningKey, Error> parse_der(bytes data) {
+    match (sequence_of(data)) {
+        case None: {
+            return Result<SigningKey, Error>.Err(Error.BadKey);
+        }
+        case Some(List<der.Element> parts): {
+            if (parts.size() == 2 && parts[0].tag == der.TAG_SEQUENCE && parts[1].tag == der.TAG_OCTET_STRING) {
+                return Result<SigningKey, Error>.Err(Error.Encrypted);
+            }
+            if (parts.size() < 2 || parts[0].tag != der.TAG_INTEGER) {
+                return Result<SigningKey, Error>.Err(Error.BadKey);
+            }
+            if (parts.size() >= 3 && parts[1].tag == der.TAG_SEQUENCE && parts[2].tag == der.TAG_OCTET_STRING) {
+                return read_pkcs8(data);
+            }
+            if (parts[1].tag == der.TAG_OCTET_STRING && parts[0].content().hex() == "01") {
+                return read_sec1(data, "");
+            }
+            if (parts.size() >= 9 && parts[0].content().hex() == "00" && parts[1].tag == der.TAG_INTEGER) {
+                return Result<SigningKey, Error>.Err(Error.Unsupported);
+            }
+            return Result<SigningKey, Error>.Err(Error.BadKey);
         }
     }
 }

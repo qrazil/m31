@@ -133,7 +133,7 @@ else
     oracle ok_p256 ok p256 echo hello $LOCAL '^line echo: hello\nclosed$' 0 'client_finished ok'
     oracle ok_p384 ok p384 echo hello $LOCAL '^line echo: hello\nclosed$' 0 'client_finished ok'
     oracle offers ok p256 handshake '' $LOCAL '^connected\nclosed$' 0 \
-        'offered suites=1303,1301,1302,cca9,cca8,c02b,c02f,c02c,c030 groups=001d,0017 versions=03040303 sigalgs=0403,0503,0804,0805,0806,0401,0501,0601 extensions='
+        'offered suites=1303,1301,1302,cca9,cca8,c02b,c02f,c02c,c030 groups=001d,0017 versions=03040303 sigalgs=0403,0503,0807,0804,0805,0806,0401,0501,0601 extensions='
     ORACLE_BIND=::1 oracle sni ok p256 handshake '' localhost '^connected\nclosed$' 0 'sni=localhost'
     oracle no_sni_for_address ok p256 handshake '' $LOCAL '^connected\nclosed$' 0 'sni=none'
     oracle session_id ok p256 handshake '' $LOCAL '^connected\nclosed$' 0 'session_id_length=32'

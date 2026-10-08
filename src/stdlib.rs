@@ -70,6 +70,7 @@ pub fn source(name: &str) -> Option<&'static str> {
         "tlsresume" => include_str!("../lib/tlsresume.m31"),
         "tls" => include_str!("../lib/tls.m31"),
         "tlsserver" => include_str!("../lib/tlsserver.m31"),
+        "deadlinestream" => include_str!("../lib/deadlinestream.m31"),
         _ => return None,
     })
 }
