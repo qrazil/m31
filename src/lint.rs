@@ -4,6 +4,20 @@
 //! typecheck, and on a program whose imports are not on disk (an extracted
 //! repo). Report mode only -- it prints findings and an exit code, it never
 //! edits a file and nothing in the gates calls it yet.
+//!
+//! Module names (a finding of kind "module name", on line 1) are checked
+//! from the file's path, since the rule depends on where the file lives:
+//!
+//! * under a `lib/` directory (the stdlib): lowercase, one word,
+//!   `^[a-z][a-z0-9]*$` -- `io`, `net`, `sha256`. The compiler-internal
+//!   seam files `__floatfmt` and `__text` keep their `__` prefix and are
+//!   skipped, like every other `__` name;
+//! * any other module: `^[A-Z][A-Z0-9]*_[a-z][a-z0-9_]*$` -- `TUI_text`,
+//!   `GIT_refs`, `MD_blocks`;
+//! * not modules, so exempt: an entry point (a file with top-level
+//!   statements, or named `main.m31` -- an imported file may not have
+//!   statements, so they identify the program) and anything under a
+//!   `tests/`, `corpus/`, `scripts/` or `docs/` directory.
 
 use crate::ast::{bare, Args, Expr, Func, MatchArm, Param, Program, Stmt, Ty};
 use crate::diag::Span;
@@ -22,7 +36,7 @@ pub enum Kind {
     Variant,
     Const,
     TypeParam,
-    Module,
+    ModuleName,
 }
 
 impl Kind {
@@ -39,7 +53,7 @@ impl Kind {
             Kind::Variant => "enum variant",
             Kind::Const => "constant",
             Kind::TypeParam => "type parameter",
-            Kind::Module => "module",
+            Kind::ModuleName => "module name",
         }
     }
 }
@@ -116,14 +130,14 @@ pub struct Linter<'a> {
     out: Vec<Finding>,
 }
 
-pub fn lint(prog: &Program, src: &str, module: &str, opts: &Opts) -> Vec<Finding> {
+pub fn lint(prog: &Program, src: &str, opts: &Opts) -> Vec<Finding> {
     let mut l = Linter {
         prog,
         lines: src.lines().collect(),
         opts,
         out: Vec::new(),
     };
-    l.run(module);
+    l.run();
     l.out.sort_by_key(|f| (f.line, f.col));
     l.out
 }
@@ -139,10 +153,7 @@ pub fn parse(src: &str, module: &str) -> Result<Program, crate::diag::Diag> {
 }
 
 impl Linter<'_> {
-    fn run(&mut self, module: &str) {
-        if !module.is_empty() {
-            self.check_module(module);
-        }
+    fn run(&mut self) {
         let prog = self.prog;
         for t in &prog.types {
             let name = bare(&t.name);
@@ -433,21 +444,6 @@ impl Linter<'_> {
         }
     }
 
-    fn check_module(&mut self, module: &str) {
-        if module.starts_with("__") || is_snake(module) {
-            return;
-        }
-        let reason = format!("module `{module}` is not snake_case");
-        self.out.push(Finding {
-            line: 1,
-            col: 1,
-            kind: Kind::Module,
-            name: module.to_string(),
-            reason,
-            suggestion: Some(to_snake(module)),
-        });
-    }
-
     /// Spans point at the start of the declaration, not the name, so find
     /// the name as a whole word on that line, after the span's column.
     fn locate(&self, span: Span, name: &str) -> (u32, u32) {
@@ -551,6 +547,102 @@ fn to_pascal(name: &str) -> String {
         .collect()
 }
 
+/// Directories whose files are not imported modules.
+const EXEMPT_DIRS: &[&str] = &["tests", "corpus", "scripts", "docs"];
+
+/// `^[a-z][a-z0-9]*$`: the stdlib shape.
+fn is_stdlib_name(name: &str) -> bool {
+    name.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+}
+
+/// `^[A-Z][A-Z0-9]*_[a-z][a-z0-9_]*$`: `PREFIX_name`.
+fn is_prefixed_name(name: &str) -> bool {
+    let Some((prefix, rest)) = name.split_once('_') else {
+        return false;
+    };
+    prefix
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_uppercase())
+        && prefix
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        && rest.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+        && rest
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// The module-name rule (docs/naming-decision.md section 8, item 6). Needs
+/// the file's path because the rule depends on where the file lives, so it
+/// is separate from `lint`, which sees only a parsed program.
+pub fn check_module_name(path: &str, prog: &Program, opts: &Opts) -> Option<Finding> {
+    let path = std::path::Path::new(path);
+    let stem = path.file_stem()?.to_string_lossy().into_owned();
+    if stem.starts_with("__") || opts.allow.contains(&stem) {
+        return None;
+    }
+    let dirs: Vec<String> = path
+        .parent()
+        .map(|p| {
+            p.components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    if dirs.iter().any(|d| EXEMPT_DIRS.contains(&d.as_str())) {
+        return None;
+    }
+    if !prog.toplevel.is_empty() || stem == "main" {
+        return None;
+    }
+    let (reason, suggestion) = if dirs.iter().any(|d| d == "lib") {
+        if is_stdlib_name(&stem) {
+            return None;
+        }
+        let one_word: String = stem
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        (
+            format!("module `{stem}` is not lowercase, one word (stdlib)"),
+            is_stdlib_name(&one_word).then_some(one_word),
+        )
+    } else {
+        if is_prefixed_name(&stem) {
+            return None;
+        }
+        // Derivable only when the name already has a PREFIX_ shape in the
+        // wrong case: `git_refs` -> `GIT_refs`.
+        let fixed = stem.split_once('_').and_then(|(prefix, rest)| {
+            let fixed = format!(
+                "{}_{}",
+                prefix.to_ascii_uppercase(),
+                rest.to_ascii_lowercase()
+            );
+            is_prefixed_name(&fixed).then_some(fixed)
+        });
+        let reason = if fixed.is_some() {
+            format!("module `{stem}` is not PREFIX_name")
+        } else {
+            format!("module `{stem}` is not PREFIX_name; needs a PREFIX_ and a descriptive part")
+        };
+        (reason, fixed)
+    };
+    Some(Finding {
+        line: 1,
+        col: 1,
+        kind: Kind::ModuleName,
+        name: stem,
+        reason,
+        suggestion,
+    })
+}
+
 /// Per-kind tallies, for `--summary`.
 pub fn tally(findings: &[Finding]) -> BTreeMap<Kind, usize> {
     let mut m = BTreeMap::new();
@@ -562,6 +654,13 @@ pub fn tally(findings: &[Finding]) -> BTreeMap<Kind, usize> {
 
 pub const USAGE: &str =
     "usage: m31c lint [--allow NAME[,NAME..]] [--strict] [--summary] <file|dir>...";
+
+/// Printed after `USAGE` by `lint --help`.
+const MODULE_HELP: &str = "module names (finding kind \"module name\", reported on line 1):
+  lib/ (stdlib)     lowercase, one word: io, net, sha256
+  any other module  PREFIX_name: TUI_text, GIT_refs, MD_blocks
+  exempt            entry points (top-level statements, or main.m31) and
+                    files under tests/, corpus/, scripts/, docs/";
 
 /// The `lint` subcommand. Exit 0 clean, 1 findings or a file that does not
 /// parse, 2 bad usage.
@@ -585,7 +684,7 @@ pub fn main(args: &[String]) -> std::process::ExitCode {
             "--strict" => opts.strict = true,
             "--summary" => summary = true,
             "--help" => {
-                println!("{USAGE}");
+                println!("{USAGE}\n{MODULE_HELP}");
                 return ExitCode::SUCCESS;
             }
             other if other.starts_with('-') => {
@@ -626,7 +725,8 @@ pub fn main(args: &[String]) -> std::process::ExitCode {
                 continue;
             }
         };
-        for f in lint(&prog, &src, &module, &opts) {
+        let named = check_module_name(path, &prog, &opts);
+        for f in named.into_iter().chain(lint(&prog, &src, &opts)) {
             let hint = f
                 .suggestion
                 .as_ref()
@@ -693,7 +793,7 @@ mod tests {
 
     fn run(src: &str, opts: &Opts) -> Vec<String> {
         let prog = parse(src, "sample").expect("parses");
-        lint(&prog, src, "sample", opts)
+        lint(&prog, src, opts)
             .into_iter()
             .map(|f| format!("{}:{} {}", f.line, f.col, f.name))
             .collect()
@@ -743,7 +843,7 @@ mod tests {
     fn match_payloads_get_a_type_derived_suggestion() {
         let src = "type Config {\n    int size;\n}\nResult<Config, str> load() {\n    return Result<Config, str>.Ok(Config(size: 1));\n}\nmatch (load()) {\n    case Ok(Config c): {\n    }\n    case Err(str e): {\n    }\n}\n";
         let prog = parse(src, "sample").expect("parses");
-        let found = lint(&prog, src, "sample", &Opts::default());
+        let found = lint(&prog, src, &Opts::default());
         let hints: Vec<_> = found.iter().map(|f| f.suggestion.clone()).collect();
         assert_eq!(
             hints,
@@ -777,8 +877,95 @@ mod tests {
     fn seam_names_with_a_double_underscore_prefix_are_exempt() {
         let src = "int __o(int q) {\n    return q;\n}\n";
         let prog = parse(src, "text").expect("parses as stdlib");
-        let found = lint(&prog, src, "text", &Opts::default());
+        let found = lint(&prog, src, &Opts::default());
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "q");
+    }
+
+    fn module_name(path: &str, src: &str, opts: &Opts) -> Option<(String, Option<String>)> {
+        let prog = parse(src, "sample").expect("parses");
+        check_module_name(path, &prog, opts).map(|f| (f.name, f.suggestion))
+    }
+
+    const DECLS: &str = "int double_it(int value) {\n    return value + value;\n}\n";
+
+    #[test]
+    fn stdlib_names_are_lowercase_one_word() {
+        let o = Opts::default();
+        for ok in ["lib/io.m31", "lib/sha256.m31", "./lib/chacha20poly1305.m31"] {
+            assert_eq!(module_name(ok, DECLS, &o), None, "{ok}");
+        }
+        assert_eq!(
+            module_name("lib/my_mod.m31", DECLS, &o),
+            Some(("my_mod".into(), Some("mymod".into())))
+        );
+        assert_eq!(
+            module_name("lib/Sha256.m31", DECLS, &o),
+            Some(("Sha256".into(), Some("sha256".into())))
+        );
+        // the compiler-internal seam files keep their `__` prefix
+        assert_eq!(module_name("lib/__floatfmt.m31", DECLS, &o), None);
+    }
+
+    #[test]
+    fn other_modules_need_a_prefix_and_a_descriptive_part() {
+        let o = Opts::default();
+        for ok in [
+            "TUI_text.m31",
+            "app/GIT_refs.m31",
+            "MD_blocks.m31",
+            "A1_b2_c.m31",
+        ] {
+            assert_eq!(module_name(ok, DECLS, &o), None, "{ok}");
+        }
+        assert_eq!(
+            module_name("git_refs.m31", DECLS, &o),
+            Some(("git_refs".into(), Some("GIT_refs".into())))
+        );
+        assert_eq!(
+            module_name("TUI_Text.m31", DECLS, &o),
+            Some(("TUI_Text".into(), Some("TUI_text".into())))
+        );
+        // not derivable: no way to know the prefix or the descriptive part
+        for bad in ["tuitext", "text", "Text", "TUI", "TUI_", "TuiText"] {
+            let path = format!("{bad}.m31");
+            assert_eq!(
+                module_name(&path, DECLS, &o),
+                Some((bad.into(), None)),
+                "{bad}"
+            );
+        }
+        let prog = parse(DECLS, "sample").expect("parses");
+        let f = check_module_name("tuitext.m31", &prog, &o).expect("flagged");
+        assert_eq!((f.line, f.col, f.kind), (1, 1, Kind::ModuleName));
+        assert!(f.reason.contains("needs a PREFIX_ and a descriptive part"));
+    }
+
+    #[test]
+    fn entry_points_and_non_module_directories_are_exempt() {
+        let o = Opts::default();
+        // statements at the top level make a file the program
+        assert_eq!(module_name("server.m31", "int a = 1;\n", &o), None);
+        assert_eq!(module_name("main.m31", DECLS, &o), None);
+        for dir in ["tests", "corpus", "scripts", "docs"] {
+            let path = format!("repo/{dir}/helper.m31");
+            assert_eq!(module_name(&path, DECLS, &o), None, "{dir}");
+        }
+        assert!(module_name("repo/helper.m31", DECLS, &o).is_some());
+    }
+
+    #[test]
+    fn module_name_follows_allow_and_ignores_strict() {
+        let allowed = Opts {
+            allow: vec!["tuitext".into()],
+            ..Opts::default()
+        };
+        assert_eq!(module_name("tuitext.m31", DECLS, &allowed), None);
+        let strict = Opts {
+            strict: true,
+            ..Opts::default()
+        };
+        assert_eq!(module_name("TUI_text.m31", DECLS, &strict), None);
+        assert!(module_name("tuitext.m31", DECLS, &strict).is_some());
     }
 }
