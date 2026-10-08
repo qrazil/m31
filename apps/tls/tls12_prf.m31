@@ -1,0 +1,62 @@
+// `lib/tls12.m31`'s PRF, master secret, key block, Finished and signed
+// content against `tls12_prf_oracle.py`, which implements RFC 5246 §5 with
+// `hmac`/`hashlib` alone. The first line is the PRF test vector that circulates
+// for SHA-256 (the oracle asserts it too); the rest is every suite over
+// patterned inputs.
+//
+//   ./build.sh apps/tls/tls12_prf.m31 -o tls12_prf && ./tls12_prf
+
+import bignum;
+import tls12;
+
+bytes hex_octets(str text) {
+    match (bignum.bytes_from_hex(text)) {
+        case None: {
+            trap("bad hex in the test");
+        }
+        case Some(bytes decoded): {
+            return decoded;
+        }
+    }
+}
+
+bytes pattern(int count, int multiplier, int offset) {
+    bytes out = [];
+    for (int index in 0 .. count) {
+        out.push(index * multiplier + offset & 0xFF);
+    }
+    return out;
+}
+
+tls12.Suite sha256_suite = tls12.Suite.EcdsaAes128Gcm;
+print("vector " + sha256_suite.prf(hex_octets("9bbe436ba940f017b17652849a71db35"), "test label", hex_octets("a0ba9f936cda311827a6f796ffd5198c"), 100).hex());
+for (tls12.Suite suite in tls12.all_suites()) {
+    str name = suite.code().to_str();
+    bytes premaster = pattern(32, 5, 1);
+    bytes session_hash = pattern(suite.aead().hash_size(), 3, 9);
+    bytes client_random = pattern(32, 7, 2);
+    bytes server_random = pattern(32, 11, 4);
+    bytes master = suite.master_secret(premaster, session_hash);
+    tls12.KeyBlock keys = suite.key_block(master, server_random, client_random);
+    print(name + " master " + master.hex());
+    print(name + " client_key " + keys.client_key.hex());
+    print(name + " server_key " + keys.server_key.hex());
+    print(name + " client_iv " + keys.client_iv.hex());
+    print(name + " server_iv " + keys.server_iv.hex());
+    print(name + " client_finished " + suite.verify_data(master, true, session_hash).hex());
+    print(name + " server_finished " + suite.verify_data(master, false, session_hash).hex());
+    print(name + " prf_long " + suite.prf(master, "label", client_random, 200).hex());
+    print(name + " prf_empty_seed " + suite.prf(master, "x", [], 1).hex());
+}
+print("signed " + tls12.signed_params(pattern(32, 1, 0), pattern(32, 2, 0), pattern(37, 3, 1)).hex());
+List<int> codes = [0xCCA9, 0xC02B, 0xC030, 0x1301, 0xC013, 0x009C, 0x0000];
+for (int code in codes) {
+    match (tls12.suite_for_code(code)) {
+        case None: {
+            print("code " + code.to_str() + " none");
+        }
+        case Some(tls12.Suite known): {
+            print("code " + code.to_str() + " " + known.to_str());
+        }
+    }
+}

@@ -502,6 +502,12 @@ Error from_tls(tls.Error e) {
         case UnsupportedVersion: {
             return Error.TlsFailed;
         }
+        case MissingExtendedMasterSecret: {
+            return Error.TlsFailed;
+        }
+        case BadRenegotiationInfo: {
+            return Error.TlsFailed;
+        }
         case Downgrade: {
             return Error.TlsFailed;
         }

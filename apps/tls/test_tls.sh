@@ -133,7 +133,7 @@ else
     oracle ok_p256 ok p256 echo hello $LOCAL '^line echo: hello\nclosed$' 0 'client_finished ok'
     oracle ok_p384 ok p384 echo hello $LOCAL '^line echo: hello\nclosed$' 0 'client_finished ok'
     oracle offers ok p256 handshake '' $LOCAL '^connected\nclosed$' 0 \
-        'offered suites=1303,1301,1302 groups=001d versions=0304 sigalgs=0403,0503,0804,0805,0806 extensions='
+        'offered suites=1303,1301,1302,cca9,cca8,c02b,c02f,c02c,c030 groups=001d,0017 versions=03040303 sigalgs=0403,0503,0804,0805,0806,0401,0501,0601 extensions='
     ORACLE_BIND=::1 oracle sni ok p256 handshake '' localhost '^connected\nclosed$' 0 'sni=localhost'
     oracle no_sni_for_address ok p256 handshake '' $LOCAL '^connected\nclosed$' 0 'sni=none'
     oracle session_id ok p256 handshake '' $LOCAL '^connected\nclosed$' 0 'session_id_length=32'
@@ -150,15 +150,15 @@ else
     # The ones that are wrong.
     PIN_OVERRIDE=$(printf '0%.0s' {1..64}) oracle wrong_pin ok p256 handshake '' $LOCAL '^error: the server.s key is not the pinned key$' 1 'client alert 42'
     oracle bad_finished bad_finished p256 handshake '' $LOCAL "^error: the server's Finished does not verify$" 1 'client alert 51'
-    oracle bad_signature bad_signature p256 handshake '' $LOCAL "^error: the server's CertificateVerify signature is wrong$" 1 'client alert 51'
-    oracle bad_signature_p384 bad_signature p384 handshake '' $LOCAL "^error: the server's CertificateVerify signature is wrong$" 1 'client alert 51'
+    oracle bad_signature bad_signature p256 handshake '' $LOCAL "^error: the server's handshake signature is wrong$" 1 'client alert 51'
+    oracle bad_signature_p384 bad_signature p384 handshake '' $LOCAL "^error: the server's handshake signature is wrong$" 1 'client alert 51'
     oracle scheme_not_offered wrong_scheme p256 handshake '' $LOCAL '^error: the server signed with a scheme that was not offered' 1 'client alert 47'
     oracle scheme_rsa_on_ec_key scheme_rsa_on_ec p256 handshake '' $LOCAL '^error: the server signed with a scheme that was not offered' 1 'client alert 47'
     oracle scheme_wrong_curve scheme_mismatch p256 handshake '' $LOCAL '^error: the server signed with a scheme that was not offered' 1 'client alert 47'
     oracle bad_record_tag bad_record p256 handshake '' $LOCAL "^error: a record's authentication tag did not verify$" 1 -
     oracle hello_retry_request hrr p256 handshake '' $LOCAL '^error: the server sent a HelloRetryRequest' 1 'client alert 40'
     oracle downgrade_sentinel downgrade p256 handshake '' $LOCAL '^error: the server.s random carries the TLS downgrade sentinel$' 1 'client alert 47'
-    oracle tls12_server tls12 p256 handshake '' $LOCAL '^error: the server does not speak TLS 1.3$' 1 'client alert 70'
+    oracle tls12_server_echoes_session_id tls12 p256 handshake '' $LOCAL "^error: the server's hello is not what was offered$" 1 'client alert 47'
     oracle suite_not_offered_ccm suite_ccm p256 handshake '' $LOCAL "^error: the server's hello is not what was offered$" 1 'client alert 47'
     oracle suite_not_offered_tls12_suite suite_ecdhe p256 handshake '' $LOCAL "^error: the server's hello is not what was offered$" 1 'client alert 47'
     oracle session_id_not_echoed bad_session_id p256 handshake '' $LOCAL "^error: the server's hello is not what was offered$" 1 'client alert 47'
@@ -235,7 +235,7 @@ else
             kill "$SERVER_PID" 2>/dev/null
         fi
         if serve tls12 -tls1_2 -www; then
-            live openssl_tls12_only '^error: the server (does not speak TLS 1.3|sent a fatal alert)$' 1 handshake 127.0.0.1 "$SERVER_PORT" "$PIN"
+            live openssl_tls12_handshake '^connected\nclosed$' 0 handshake 127.0.0.1 "$SERVER_PORT" "$PIN"
             kill "$SERVER_PID" 2>/dev/null
         fi
         # A server that will only negotiate one AES-GCM suite is served by it.

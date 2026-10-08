@@ -29,8 +29,13 @@
 // nothing here is written to run in constant time -- the point arithmetic
 // branches on the exceptional cases (adding a point to itself, to its
 // negation, to infinity) and `bignum.m31` branches on the values it holds.
-// DO NOT use these functions to sign or to derive a key: both would put a
-// secret scalar through code that leaks it by timing. See `bignum.m31`.
+// DO NOT use these functions to sign or to derive a long-lived key: both would
+// put a secret scalar through code that leaks it by timing. See `bignum.m31`.
+// The one exception is the ECDH section below (`ephemeral_public`,
+// `shared_secret`), which handles a secret scalar and is for the ephemeral
+// key of a single TLS 1.2 handshake only: the ladder leaks the scalar's bit
+// length by timing, which for a key generated afresh, used once and thrown
+// away is not worth an attack.
 //
 // --- what is validated ------------------------------------------------------------
 //
@@ -412,6 +417,133 @@ pub bool verify_raw(Curve curve, PublicKey key, bytes digest, bytes signature) {
         }
         case Some(Signature parsed): {
             return check_signature(curve, key, digest, parsed);
+        }
+    }
+}
+
+// --- ECDH (RFC 8422 / SEC 1 §3.3.1) -------------------------------------------------
+//
+// The one place this module touches a SECRET: TLS 1.2's ECDHE needs the
+// client's ephemeral scalar times a point. It is here, and not in a module of
+// its own, because it is the same curve arithmetic.
+//
+//   bytes secret = ...;                                   // curve.size random octets
+//   if (ecdsa.is_secret_scalar(curve, secret)) { ... }    // in [1, n-1]
+//   bytes mine = ecdsa.ephemeral_public(curve, secret);   // 0x04 || X || Y
+//   bytes shared = ecdsa.shared_secret(curve, peer, secret);   // X, curve.size octets
+//
+// **This is NOT constant time.** `bignum.m31` branches on the values it holds
+// and `add_points` on the exceptional cases, and a scalar multiplication here
+// leaks through timing exactly as the header of this file says a signature
+// would. What it does do is shape the leak: a Montgomery ladder (one double and
+// one add per scalar bit, whatever the bit; the two registers chosen by an
+// arithmetic mask, not a branch) instead of double-and-add, so the sequence of
+// operations does not depend on the secret except for its bit length (the
+// ladder starts at the top set bit). The remaining leak is the data-dependent
+// timing of the field arithmetic itself.
+//
+// That is acceptable only because the scalar is EPHEMERAL: one fresh scalar
+// per handshake, never reused, never stored, so an attacker gets one noisy
+// trace of a key that protects one connection -- not the thousands of traces
+// of one long-term key that timing attacks need. It would NOT be acceptable
+// for a static key, for ECDSA signing, or for any scalar used twice. A caller
+// with a static key needs a constant-time field, as `field25519.m31` is.
+
+// `first` if `flag` is 1, else `second`, limb by limb with an arithmetic mask.
+Array<int> select_limbs(int flag, Array<int> first, Array<int> second) {
+    int mask = 0 - flag;
+    Array<int> out = [0; first.size()];
+    for (int index in 0 .. first.size()) {
+        out[index] = second[index] ^ ((first[index] ^ second[index]) & mask);
+    }
+    return out;
+}
+
+Point select_point(int flag, Point first, Point second) {
+    return Point(select_limbs(flag, first.x, second.x), select_limbs(flag, first.y, second.y), select_limbs(flag, first.z, second.z));
+}
+
+// `scalar * base` for a scalar in `[1, n-1]`: the Montgomery ladder, with
+// `low = k*P` and `high = (k+1)*P` between steps, so `high - low = P` always
+// and `add_points` never meets two equal operands.
+Point ladder(Curve curve, Point base, Array<int> scalar) {
+    bignum.Modulus field = curve.field;
+    Point low = base;
+    Point high = double_point(field, base);
+    int position = bignum.bit_length(scalar) - 2;
+    while (position >= 0) {
+        int bit = bignum.bit_at(scalar, position);
+        Point left = select_point(bit, high, low);
+        Point right = select_point(bit, low, high);
+        Point sum = add_points(field, left, right);
+        Point twice = double_point(field, left);
+        low = select_point(bit, sum, twice);
+        high = select_point(bit, twice, sum);
+        position = position - 1;
+    }
+    return low;
+}
+
+// `0x04 || X || Y` of the affine point, or the empty string for infinity.
+bytes encode_point(Curve curve, Point point) {
+    bignum.Modulus field = curve.field;
+    if (bignum.is_zero(point.z)) {
+        return [];
+    }
+    Array<int> inverse = bignum.montgomery_inverse(field, point.z);
+    Array<int> inverse_squared = field_multiply(field, inverse, inverse);
+    Array<int> inverse_cubed = field_multiply(field, inverse_squared, inverse);
+    Array<int> affine_x = bignum.from_montgomery(field, field_multiply(field, point.x, inverse_squared));
+    Array<int> affine_y = bignum.from_montgomery(field, field_multiply(field, point.y, inverse_cubed));
+    bytes out = [4];
+    out.extend(bignum.to_bytes(affine_x, curve.size));
+    out.extend(bignum.to_bytes(affine_y, curve.size));
+    return out;
+}
+
+/// Whether `secret` is `curve.size` octets, big-endian, with a value in
+/// `[1, n-1]`: a usable ECDH scalar. A caller draws random octets and retries
+/// on `false` (about one draw in 2^32 for P-256).
+pub bool is_secret_scalar(Curve curve, bytes secret) {
+    if (secret.size() != curve.size) {
+        return false;
+    }
+    match (scalar_in_range(curve, secret)) {
+        case None: {
+            return false;
+        }
+        case Some(Array<int> scalar): {
+            return true;
+        }
+    }
+}
+
+/// `secret * G` as `0x04 || X || Y`. A `secret` that `is_secret_scalar`
+/// refuses **traps**: it is the caller's bug, never a peer's doing.
+pub bytes ephemeral_public(Curve curve, bytes secret) {
+    match (scalar_in_range(curve, secret)) {
+        case None: {
+            trap("ecdsa: an ECDH scalar is curve.size octets in [1, n-1]");
+        }
+        case Some(Array<int> scalar): {
+            return encode_point(curve, ladder(curve, curve.generator, scalar));
+        }
+    }
+}
+
+/// The ECDH shared secret: the X coordinate of `secret * peer`, `curve.size`
+/// big-endian octets. `peer` came from `parse_public_key`, so it is on the
+/// curve, and as both curves have cofactor 1 the product is never infinity
+/// for a scalar below n. A `secret` that `is_secret_scalar` refuses traps.
+pub bytes shared_secret(Curve curve, PublicKey peer, bytes secret) {
+    match (scalar_in_range(curve, secret)) {
+        case None: {
+            trap("ecdsa: an ECDH scalar is curve.size octets in [1, n-1]");
+        }
+        case Some(Array<int> scalar): {
+            Point base = Point(peer.x, peer.y, bignum.montgomery_one(curve.field));
+            bytes encoded = encode_point(curve, ladder(curve, base, scalar));
+            return encoded.substr(1, 1 + curve.size);
         }
     }
 }

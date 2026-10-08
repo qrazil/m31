@@ -101,6 +101,12 @@ str name_of(tls.Error error) {
         case BadFinished: {
             return "BadFinished";
         }
+        case MissingExtendedMasterSecret: {
+            return "MissingExtendedMasterSecret";
+        }
+        case BadRenegotiationInfo: {
+            return "BadRenegotiationInfo";
+        }
     }
 }
 

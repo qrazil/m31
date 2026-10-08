@@ -1,0 +1,115 @@
+// P-256 ECDH (`ecdsa.ephemeral_public`, `ecdsa.shared_secret`) against
+// `tls12_ecdh_oracle.py`, which derives the same keys and exchanges them with
+// the `cryptography` package (OpenSSL). The last section is the negative
+// tests: scalars outside [1, n-1] and peer points that are not on the curve
+// must be refused, never multiplied.
+//
+//   ./build.sh apps/tls/tls12_ecdh.m31 -o tls12_ecdh && ./tls12_ecdh
+
+import ecdsa;
+import bignum;
+
+bytes hex_octets(str text) {
+    match (bignum.bytes_from_hex(text)) {
+        case None: {
+            trap("bad hex in the test");
+        }
+        case Some(bytes decoded): {
+            return decoded;
+        }
+    }
+}
+
+bytes pattern(int count, int multiplier, int offset) {
+    bytes out = [];
+    for (int index in 0 .. count) {
+        out.push(index * multiplier + offset & 0xFF);
+    }
+    return out;
+}
+
+const str ORDER = "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551";
+const str PRIME = "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff";
+
+str verdict(bool flag) {
+    if (flag) {
+        return "yes";
+    }
+    return "no";
+}
+
+str shared_line(ecdsa.Curve curve, bytes peer_encoded, bytes secret) {
+    match (ecdsa.parse_public_key(curve, peer_encoded)) {
+        case None: {
+            return "refused";
+        }
+        case Some(ecdsa.PublicKey peer): {
+            return ecdsa.shared_secret(curve, peer, secret).hex();
+        }
+    }
+}
+
+void exchange(ecdsa.Curve curve, str label, bytes secret_a, bytes secret_b) {
+    bytes public_a = ecdsa.ephemeral_public(curve, secret_a);
+    bytes public_b = ecdsa.ephemeral_public(curve, secret_b);
+    print(label + "-public-a " + public_a.hex());
+    print(label + "-public-b " + public_b.hex());
+    print(label + "-shared-ab " + shared_line(curve, public_b, secret_a));
+    print(label + "-shared-ba " + shared_line(curve, public_a, secret_b));
+}
+
+ecdsa.Curve curve = ecdsa.p256();
+bytes one = hex_octets("0000000000000000000000000000000000000000000000000000000000000001");
+bytes two = hex_octets("0000000000000000000000000000000000000000000000000000000000000002");
+bytes order_less_one = hex_octets("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632550");
+bytes order_less_two = hex_octets("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc63254f");
+bytes half = hex_octets("7fffffff800000007fffffffffffffffde737d56d38bcf4279dce5617e3192a8");
+exchange(curve, "small", one, two);
+exchange(curve, "top", order_less_one, order_less_two);
+exchange(curve, "half", half, one);
+exchange(curve, "wide", hex_octets("c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721"), hex_octets("7d7dc5f71eb29ddaf80d6214632eeae03d9058af1fb6d22ed80badb62bc1a534"));
+for (int round in 0 .. 12) {
+    bytes first = pattern(32, 7 + round, 1 + round);
+    bytes second = pattern(32, 11 + 2 * round, 3 + round);
+    first[0] = first[0] & 0x7F;
+    second[0] = second[0] & 0x7F;
+    exchange(curve, "pattern" + round.to_str(), first, second);
+}
+bytes zero = [0; 32];
+bytes order = hex_octets(ORDER);
+bytes above = hex_octets("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632552");
+bytes all_ones = hex_octets("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+print("scalar-zero " + verdict(ecdsa.is_secret_scalar(curve, zero)));
+print("scalar-one " + verdict(ecdsa.is_secret_scalar(curve, one)));
+print("scalar-order-less-one " + verdict(ecdsa.is_secret_scalar(curve, order_less_one)));
+print("scalar-order " + verdict(ecdsa.is_secret_scalar(curve, order)));
+print("scalar-order-plus-one " + verdict(ecdsa.is_secret_scalar(curve, above)));
+print("scalar-all-ones " + verdict(ecdsa.is_secret_scalar(curve, all_ones)));
+print("scalar-short " + verdict(ecdsa.is_secret_scalar(curve, pattern(31, 1, 1))));
+print("scalar-long " + verdict(ecdsa.is_secret_scalar(curve, pattern(33, 1, 1))));
+bytes good = ecdsa.ephemeral_public(curve, half);
+bytes bad_y = clone(good);
+bad_y[64] = bad_y[64] ^ 1;
+bytes bad_x = clone(good);
+bad_x[1] = bad_x[1] ^ 1;
+bytes compressed = [2 + (good[64] & 1)];
+compressed.extend(good.substr(1, 33));
+bytes infinity = [0];
+bytes wide_x = [4];
+wide_x.extend(hex_octets(PRIME));
+wide_x.extend(good.substr(33, 65));
+bytes zeros_point = [4];
+bytes sixty_four_zeros = [0; 64];
+zeros_point.extend(sixty_four_zeros);
+bytes short_point = good.substr(0, 64);
+bytes hybrid = clone(good);
+hybrid[0] = 6;
+print("peer-good " + shared_line(curve, good, one));
+print("peer-bad-y " + shared_line(curve, bad_y, one));
+print("peer-bad-x " + shared_line(curve, bad_x, one));
+print("peer-compressed " + shared_line(curve, compressed, one));
+print("peer-infinity " + shared_line(curve, infinity, one));
+print("peer-x-at-prime " + shared_line(curve, wide_x, one));
+print("peer-zeros " + shared_line(curve, zeros_point, one));
+print("peer-short " + shared_line(curve, short_point, one));
+print("peer-hybrid " + shared_line(curve, hybrid, one));

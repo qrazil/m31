@@ -1,5 +1,6 @@
-// A TLS 1.3 client (RFC 8446) that checks who it is talking to, by pinned key
-// or by certificate chain, and has no way not to.
+// A TLS 1.3 client (RFC 8446), with a TLS 1.2 fallback (RFC 5246) that the
+// server alone can pick, that checks who it is talking to, by pinned key or by
+// certificate chain, and has no way not to.
 //
 // API
 // ---
@@ -60,27 +61,46 @@
 // transcript, and the server's Finished MAC, or it does not exist. There is
 // no insecure `Trust` variant, no option, no environment variable.
 //
-// Not done: revocation, name constraints, IP-address certificates, TLS 1.2,
-// and a public suffix list (`*.co.uk` is accepted as a wildcard).
+// Not done: revocation, name constraints, IP-address certificates, and a
+// public suffix list (`*.co.uk` is accepted as a wildcard).
 //
 // --- what is offered, and so what is accepted ---------------------------------
 //
-//   version              TLS 1.3 only
+//   versions             TLS 1.3 and TLS 1.2, via supported_versions. The
+//                        client never offers 1.1 or below, and a server that
+//                        answers with them is refused. It falls back to 1.2
+//                        only when the server itself picks 1.2 in its
+//                        ServerHello; a 1.3-capable server that answers 1.2 is
+//                        caught by the downgrade sentinel in its random
 //   cipher suites        TLS_CHACHA20_POLY1305_SHA256, TLS_AES_128_GCM_SHA256 and
-//                        TLS_AES_256_GCM_SHA384, offered in that order; the
-//                        server picks. ChaCha20 leads because the AES-GCM in
-//                        lib/aes.m31 is constant-time at the source level and
-//                        so about twelve times slower (see its header)
-//   key exchange         x25519 only, one fresh key per connection
+//                        TLS_AES_256_GCM_SHA384 for 1.3, offered in that order,
+//                        then for 1.2 ECDHE_ECDSA/ECDHE_RSA with
+//                        CHACHA20_POLY1305 (0xCCA9, 0xCCA8), AES_128_GCM
+//                        (0xC02B, 0xC02F) and AES_256_GCM (0xC02C, 0xC030).
+//                        The server picks. ChaCha20 leads because the AES-GCM
+//                        in lib/aes.m31 is constant-time at the source level
+//                        and so about twelve times slower (see its header).
+//                        No CBC, no RC4, no static RSA key exchange, no
+//                        compression, no renegotiation
+//   key exchange         x25519 and secp256r1 are advertised; the 1.3
+//                        key_share is x25519 only, so a 1.3 server that
+//                        insists on P-256 needs a HelloRetryRequest, which is
+//                        refused. In 1.2 the server picks either group from
+//                        supported_groups. One fresh key per connection
 //   signatures           ecdsa_secp256r1_sha256, ecdsa_secp384r1_sha384,
 //                        rsa_pss_rsae_sha256/384/512 for the handshake
 //                        signature (CertificateVerify); the same plus RSA
 //                        PKCS#1 v1.5 with SHA-256/384/512 for the
-//                        certificates (`signature_algorithms_cert`)
+//                        certificates (`signature_algorithms_cert`). TLS 1.2
+//                        additionally accepts rsa_pkcs1_sha256/384/512 on the
+//                        ServerKeyExchange; in 1.2 the ECDSA scheme names only
+//                        the hash and the leaf key gives the curve
 //   extensions           server_name (not for an IP address), supported_groups
 //                        (which RFC 8446 §4.2.7 requires beside a key_share),
 //                        signature_algorithms, signature_algorithms_cert,
-//                        supported_versions, key_share
+//                        supported_versions, key_share, and for 1.2
+//                        ec_point_formats (uncompressed only),
+//                        extended_master_secret and renegotiation_info
 //
 // There is no `psk_key_exchange_modes`, so no resumption: a server's
 // NewSessionTicket is dropped. There is no ALPN and no early data, and the
@@ -88,9 +108,31 @@
 // extension the client did not offer, in ServerHello or EncryptedExtensions,
 // is refused (RFC 8446 §4.2).
 //
-// A server that answers with HelloRetryRequest, with a TLS 1.2 (or older)
-// ServerHello, or with RFC 8446 §4.1.3's downgrade sentinel in its random,
-// is told no, each with an error of its own.
+// A server that answers with HelloRetryRequest, with a ServerHello for TLS 1.1
+// or older, or with RFC 8446 §4.1.3's downgrade sentinel in its random, is
+// told no, each with an error of its own.
+//
+// --- TLS 1.2: the rules ---------------------------------------------------------
+//
+// `extended_master_secret` (RFC 7627) is **required**: a 1.2 server without it
+// is refused with alert 40 (`MissingExtendedMasterSecret`), because without it
+// the master secret does not bind the handshake and the triple-handshake
+// attack applies. This turns away servers that are still on a pre-2015
+// OpenSSL, such as the badssl.com test hosts. `renegotiation_info` (RFC 5746)
+// may be absent from the ServerHello, but if present it must be exactly the
+// empty first-handshake value. Renegotiation is never accepted: a HelloRequest
+// after the handshake is answered with the warning alert `no_renegotiation`
+// and the connection goes on; any other handshake message after the Finished
+// is `UnexpectedMessage`. Every alert except `close_notify` is fatal, warnings
+// included, as in 1.3. The explicit nonce of an AES-GCM record is taken from
+// the record (RFC 5288 allows it), not forced to equal the sequence number.
+// A zero-length handshake record is refused.
+//
+// `secp384r1` is not advertised, so an OpenSSL server whose only certificate
+// is a P-384 key refuses us; a P-384 leaf is accepted (and tested) when the
+// server has some other group to agree on. The ECDH for secp256r1 uses
+// `lib/ecdsa.m31`'s non-constant-time arithmetic, which is acceptable only
+// because the scalar is ephemeral and used once (see that header).
 //
 // --- the connection after the handshake ----------------------------------------
 //
@@ -131,15 +173,21 @@ import date;
 import os;
 import tls13_schedule;
 import tls13_record;
+import tls12;
 
 const int HANDSHAKE_CLIENT_HELLO = 1;
 const int HANDSHAKE_SERVER_HELLO = 2;
 const int HANDSHAKE_ENCRYPTED_EXTENSIONS = 8;
 const int HANDSHAKE_CERTIFICATE = 11;
+const int HANDSHAKE_SERVER_KEY_EXCHANGE = 12;
 const int HANDSHAKE_CERTIFICATE_REQUEST = 13;
+const int HANDSHAKE_SERVER_HELLO_DONE = 14;
 const int HANDSHAKE_CERTIFICATE_VERIFY = 15;
 const int HANDSHAKE_FINISHED = 20;
+const int HANDSHAKE_CLIENT_KEY_EXCHANGE = 16;
 const int GROUP_X25519 = 0x001D;
+const int GROUP_SECP256R1 = 0x0017;
+const int CURVE_TYPE_NAMED = 3;
 const int SCHEME_ECDSA_P256_SHA256 = 0x0403;
 const int SCHEME_ECDSA_P384_SHA384 = 0x0503;
 const int SCHEME_RSA_PSS_RSAE_SHA256 = 0x0804;
@@ -151,7 +199,10 @@ const int SCHEME_RSA_PKCS1_SHA512 = 0x0601;
 const int VERSION_TLS12 = 0x0303;
 const int VERSION_TLS13 = 0x0304;
 const int EXTENSION_SERVER_NAME = 0;
+const int EXTENSION_EC_POINT_FORMATS = 11;
 const int EXTENSION_SUPPORTED_GROUPS = 10;
+const int EXTENSION_EXTENDED_MASTER_SECRET = 23;
+const int EXTENSION_RENEGOTIATION_INFO = 0xFF01;
 const int EXTENSION_SIGNATURE_ALGORITHMS = 13;
 const int EXTENSION_SIGNATURE_ALGORITHMS_CERT = 50;
 const int EXTENSION_SUPPORTED_VERSIONS = 43;
@@ -172,6 +223,7 @@ const int ERRNO_RESET = 104;
 const int RANDOM_SIZE = 32;
 const int SESSION_ID_SIZE = 32;
 const int X25519_SIZE = 32;
+const int P256_POINT_SIZE = 65;
 
 /// Whose key the server must prove it holds.
 pub enum Trust {
@@ -226,7 +278,7 @@ pub enum Error {
     BadRecordMac;
     /// The connection is closed, by this side or by an earlier failure.
     Closed;
-    /// The server speaks TLS 1.2 or older, which this client does not.
+    /// The server speaks TLS 1.1 or older, which this client does not.
     UnsupportedVersion;
     /// The server's random carries the TLS 1.3 downgrade sentinel.
     Downgrade;
@@ -271,6 +323,11 @@ pub enum Error {
     BadSignature;
     /// The server's Finished does not verify: the handshake was altered.
     BadFinished;
+    /// A TLS 1.2 server that does not do extended_master_secret (RFC 7627).
+    MissingExtendedMasterSecret;
+    /// A TLS 1.2 renegotiation_info that is not the empty one of a first
+    /// handshake (RFC 5746).
+    BadRenegotiationInfo;
 }
 
 pub str Error.to_str() {
@@ -297,7 +354,7 @@ pub str Error.to_str() {
             return "the connection is closed";
         }
         case UnsupportedVersion: {
-            return "the server does not speak TLS 1.3";
+            return "the server does not speak TLS 1.2 or 1.3";
         }
         case Downgrade: {
             return "the server's random carries the TLS downgrade sentinel";
@@ -351,10 +408,16 @@ pub str Error.to_str() {
             return "the server signed with a scheme that was not offered or does not fit its key";
         }
         case BadSignature: {
-            return "the server's CertificateVerify signature is wrong";
+            return "the server's handshake signature is wrong";
         }
         case BadFinished: {
             return "the server's Finished does not verify";
+        }
+        case MissingExtendedMasterSecret: {
+            return "the TLS 1.2 server does not support extended_master_secret";
+        }
+        case BadRenegotiationInfo: {
+            return "the server's renegotiation_info is not that of a first handshake";
         }
     }
 }
@@ -444,6 +507,12 @@ int alert_for(Error error) {
         case BadFinished: {
             return ALERT_DECRYPT_ERROR;
         }
+        case MissingExtendedMasterSecret: {
+            return ALERT_HANDSHAKE_FAILURE;
+        }
+        case BadRenegotiationInfo: {
+            return ALERT_HANDSHAKE_FAILURE;
+        }
     }
 }
 
@@ -529,6 +598,12 @@ int errno_of(Error error) {
             return ERRNO_PROTOCOL;
         }
         case BadFinished: {
+            return ERRNO_PROTOCOL;
+        }
+        case MissingExtendedMasterSecret: {
+            return ERRNO_PROTOCOL;
+        }
+        case BadRenegotiationInfo: {
             return ERRNO_PROTOCOL;
         }
     }
@@ -704,7 +779,7 @@ bytes server_name_data(str host) {
     return with_u16_length(entry);
 }
 
-// The suites in the ClientHello, most preferred first.
+// The TLS 1.3 suites in the ClientHello, most preferred first.
 List<tls13_schedule.Suite> offered_suites() {
     List<tls13_schedule.Suite> suites = [tls13_schedule.Suite.ChaCha20Poly1305Sha256, tls13_schedule.Suite.Aes128GcmSha256, tls13_schedule.Suite.Aes256GcmSha384];
     return suites;
@@ -717,9 +792,13 @@ bytes client_hello(str host, bytes client_random, bytes session_id, bytes public
     body.push(session_id.size());
     body.extend(session_id);
     List<tls13_schedule.Suite> suites = offered_suites();
-    put_u16(body, 2 * suites.size());
+    List<tls12.Suite> legacy_suites = tls12.all_suites();
+    put_u16(body, 2 * suites.size() + 2 * legacy_suites.size());
     for (tls13_schedule.Suite offered in suites) {
         put_u16(body, offered.code());
+    }
+    for (tls12.Suite legacy_offered in legacy_suites) {
+        put_u16(body, legacy_offered.code());
     }
     body.push(1);
     body.push(0);
@@ -729,13 +808,18 @@ bytes client_hello(str host, bytes client_random, bytes session_id, bytes public
     }
     bytes groups = [];
     put_u16(groups, GROUP_X25519);
+    put_u16(groups, GROUP_SECP256R1);
     extensions.extend(extension(EXTENSION_SUPPORTED_GROUPS, with_u16_length(groups)));
+    extensions.extend(extension(EXTENSION_EC_POINT_FORMATS, [1, 0]));
     bytes schemes = [];
     put_u16(schemes, SCHEME_ECDSA_P256_SHA256);
     put_u16(schemes, SCHEME_ECDSA_P384_SHA384);
     put_u16(schemes, SCHEME_RSA_PSS_RSAE_SHA256);
     put_u16(schemes, SCHEME_RSA_PSS_RSAE_SHA384);
     put_u16(schemes, SCHEME_RSA_PSS_RSAE_SHA512);
+    put_u16(schemes, SCHEME_RSA_PKCS1_SHA256);
+    put_u16(schemes, SCHEME_RSA_PKCS1_SHA384);
+    put_u16(schemes, SCHEME_RSA_PKCS1_SHA512);
     extensions.extend(extension(EXTENSION_SIGNATURE_ALGORITHMS, with_u16_length(schemes)));
     bytes certificate_schemes = [];
     put_u16(certificate_schemes, SCHEME_ECDSA_P256_SHA256);
@@ -747,8 +831,11 @@ bytes client_hello(str host, bytes client_random, bytes session_id, bytes public
     put_u16(certificate_schemes, SCHEME_RSA_PKCS1_SHA384);
     put_u16(certificate_schemes, SCHEME_RSA_PKCS1_SHA512);
     extensions.extend(extension(EXTENSION_SIGNATURE_ALGORITHMS_CERT, with_u16_length(certificate_schemes)));
-    bytes versions = [2];
+    extensions.extend(extension(EXTENSION_EXTENDED_MASTER_SECRET, []));
+    extensions.extend(extension(EXTENSION_RENEGOTIATION_INFO, [0]));
+    bytes versions = [4];
     put_u16(versions, VERSION_TLS13);
+    put_u16(versions, VERSION_TLS12);
     extensions.extend(extension(EXTENSION_SUPPORTED_VERSIONS, versions));
     bytes share = [];
     put_u16(share, GROUP_X25519);
@@ -782,16 +869,56 @@ bool has_downgrade_sentinel(bytes server_random) {
     return tail[7] == 0 || tail[7] == 1;
 }
 
-// What a ServerHello settled: the suite the server chose and its x25519
-// public key.
+// What a ServerHello settled. `legacy` says which of the two suites is the
+// one the server chose; `public_key` is its x25519 key_share, TLS 1.3 only.
 type ServerChoice {
+    bool legacy;
     tls13_schedule.Suite suite;
+    tls12.Suite legacy_suite;
     bytes public_key;
+    bytes server_random;
+}
+
+// The extensions of a ServerHello as they came, each kind at most once.
+type HelloExtensions {
+    List<int> kinds;
+    List<bytes> datas;
+}
+
+bool HelloExtensions.has(int kind) {
+    return kinds.contains(kind);
+}
+
+bytes HelloExtensions.data_of(int kind) {
+    for (int index in 0 .. kinds.size()) {
+        if (kinds[index] == kind) {
+            return datas[index];
+        }
+    }
+    trap("tls: data_of an extension that is not there");
+}
+
+Result<HelloExtensions, Error> parse_hello_extensions(bytes extension_block) {
+    Reader extensions = Reader(extension_block);
+    List<int> kinds = [];
+    List<bytes> datas = [];
+    while (extensions.remaining() > 0) {
+        int kind = extensions.u16()?;
+        bytes data = extensions.vector16()?;
+        if (kinds.contains(kind)) {
+            return Result<HelloExtensions, Error>.Err(Error.IllegalParameter);
+        }
+        kinds.push(kind);
+        datas.push(data);
+    }
+    return Result<HelloExtensions, Error>.Ok(HelloExtensions(kinds, datas));
 }
 
 // The server's choice, once every field of its ServerHello has been checked
-// against what the ClientHello offered.
-Result<ServerChoice, Error> check_server_hello(bytes message, bytes session_id) {
+// against what the ClientHello offered. A ServerHello is TLS 1.3's when it
+// carries supported_versions = 0x0304 and TLS 1.2's when it carries none and
+// says 0x0303 (RFC 8446 §4.2.1); anything else is refused.
+Result<ServerChoice, Error> check_server_hello(bytes message, bytes session_id, bool sent_server_name) {
     Reader reader = Reader(message_body(message));
     int legacy_version = reader.u16()?;
     bytes server_random = reader.take(RANDOM_SIZE)?;
@@ -801,42 +928,34 @@ Result<ServerChoice, Error> check_server_hello(bytes message, bytes session_id) 
     bytes echoed_session_id = reader.vector8()?;
     int suite_code = reader.u16()?;
     int compression = reader.u8()?;
-    bytes extension_block = reader.vector16()?;
+    bytes extension_block = [];
+    if (reader.remaining() > 0) {
+        extension_block = reader.vector16()?;
+    }
     if (reader.remaining() != 0) {
         return Result<ServerChoice, Error>.Err(Error.Malformed);
     }
-    Reader extensions = Reader(extension_block);
-    bytes version_data = [];
-    bool has_version = false;
-    bytes share_data = [];
-    bool has_share = false;
-    bool has_other = false;
-    while (extensions.remaining() > 0) {
-        int kind = extensions.u16()?;
-        bytes data = extensions.vector16()?;
-        if (kind == EXTENSION_SUPPORTED_VERSIONS) {
-            if (has_version) {
-                return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
-            }
-            has_version = true;
-            version_data = data;
-        } else if (kind == EXTENSION_KEY_SHARE) {
-            if (has_share) {
-                return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
-            }
-            has_share = true;
-            share_data = data;
-        } else {
-            has_other = true;
-        }
-    }
-    bool is_tls13 = has_version && version_data.size() == 2 && version_data[0] == 3 && version_data[1] == 4;
+    HelloExtensions found = parse_hello_extensions(extension_block)?;
     if (has_downgrade_sentinel(server_random)) {
         return Result<ServerChoice, Error>.Err(Error.Downgrade);
     }
-    if (!is_tls13) {
+    if (found.has(EXTENSION_SUPPORTED_VERSIONS)) {
+        bytes version_data = found.data_of(EXTENSION_SUPPORTED_VERSIONS);
+        if (version_data.size() != 2 || version_data[0] != 3 || version_data[1] != 4) {
+            return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
+        }
+        return check_tls13_hello(legacy_version, server_random, echoed_session_id, suite_code, compression, found, session_id);
+    }
+    if (legacy_version < VERSION_TLS12) {
         return Result<ServerChoice, Error>.Err(Error.UnsupportedVersion);
     }
+    if (legacy_version != VERSION_TLS12) {
+        return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
+    }
+    return check_tls12_hello(server_random, echoed_session_id, suite_code, compression, found, session_id, sent_server_name);
+}
+
+Result<ServerChoice, Error> check_tls13_hello(int legacy_version, bytes server_random, bytes echoed_session_id, int suite_code, int compression, HelloExtensions found, bytes session_id) {
     if (legacy_version != VERSION_TLS12 || !same_octets(echoed_session_id, session_id) || compression != 0) {
         return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
     }
@@ -850,13 +969,13 @@ Result<ServerChoice, Error> check_server_hello(bytes message, bytes session_id) 
             return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
         }
     }
-    if (has_other) {
-        return Result<ServerChoice, Error>.Err(Error.UnsupportedExtension);
-    }
-    if (!has_share) {
+    if (found.kinds.size() != 2 || !found.has(EXTENSION_KEY_SHARE)) {
+        if (found.has(EXTENSION_KEY_SHARE) || found.kinds.size() > 1) {
+            return Result<ServerChoice, Error>.Err(Error.UnsupportedExtension);
+        }
         return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
     }
-    Reader share = Reader(share_data);
+    Reader share = Reader(found.data_of(EXTENSION_KEY_SHARE));
     int group = share.u16()?;
     bytes public_key = share.vector16()?;
     if (share.remaining() != 0) {
@@ -865,7 +984,69 @@ Result<ServerChoice, Error> check_server_hello(bytes message, bytes session_id) 
     if (group != GROUP_X25519 || public_key.size() != X25519_SIZE) {
         return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
     }
-    return Result<ServerChoice, Error>.Ok(ServerChoice(suite, public_key));
+    return Result<ServerChoice, Error>.Ok(ServerChoice(false, suite, tls12.Suite.EcdsaChaCha20Poly1305, public_key, server_random));
+}
+
+// RFC 5246 §7.4.1.3 with RFC 7627 and RFC 5746: the server picked one of the
+// six suites, no compression, and no session (an echoed session id would be
+// a resumption, which this client never offered -- it sent a random id only
+// for TLS 1.3's sake). Of the extensions only the four that answer ours are
+// allowed, each once; extended_master_secret is required and
+// renegotiation_info, when there, is the empty one of a first handshake.
+Result<ServerChoice, Error> check_tls12_hello(bytes server_random, bytes echoed_session_id, int suite_code, int compression, HelloExtensions found, bytes session_id, bool sent_server_name) {
+    if (compression != 0 || echoed_session_id.size() > SESSION_ID_SIZE) {
+        return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
+    }
+    if (echoed_session_id.size() > 0 && same_octets(echoed_session_id, session_id)) {
+        return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
+    }
+    tls12.Suite suite = tls12.Suite.EcdsaChaCha20Poly1305;
+    match (tls12.suite_for_code(suite_code)) {
+        case Some(tls12.Suite known): {
+            suite = known;
+        }
+        case None: {
+            return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
+        }
+    }
+    for (int kind in found.kinds) {
+        if (kind != EXTENSION_EC_POINT_FORMATS && kind != EXTENSION_EXTENDED_MASTER_SECRET && kind != EXTENSION_RENEGOTIATION_INFO && kind != EXTENSION_SERVER_NAME) {
+            return Result<ServerChoice, Error>.Err(Error.UnsupportedExtension);
+        }
+        if (kind == EXTENSION_SERVER_NAME && !sent_server_name) {
+            return Result<ServerChoice, Error>.Err(Error.UnsupportedExtension);
+        }
+    }
+    if (found.has(EXTENSION_SERVER_NAME) && found.data_of(EXTENSION_SERVER_NAME).size() != 0) {
+        return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
+    }
+    if (found.has(EXTENSION_EC_POINT_FORMATS)) {
+        Reader formats = Reader(found.data_of(EXTENSION_EC_POINT_FORMATS));
+        bytes listed = formats.vector8()?;
+        bool has_uncompressed = false;
+        for (int index in 0 .. listed.size()) {
+            if (listed[index] == 0) {
+                has_uncompressed = true;
+            }
+        }
+        if (formats.remaining() != 0 || !has_uncompressed) {
+            return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
+        }
+    }
+    if (found.has(EXTENSION_RENEGOTIATION_INFO)) {
+        bytes info = found.data_of(EXTENSION_RENEGOTIATION_INFO);
+        if (info.size() != 1 || info[0] != 0) {
+            return Result<ServerChoice, Error>.Err(Error.BadRenegotiationInfo);
+        }
+    }
+    if (!found.has(EXTENSION_EXTENDED_MASTER_SECRET)) {
+        return Result<ServerChoice, Error>.Err(Error.MissingExtendedMasterSecret);
+    }
+    if (found.data_of(EXTENSION_EXTENDED_MASTER_SECRET).size() != 0) {
+        return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
+    }
+    bytes none = [];
+    return Result<ServerChoice, Error>.Ok(ServerChoice(true, tls13_schedule.Suite.ChaCha20Poly1305Sha256, suite, none, server_random));
 }
 
 // --- the rest of the server's flight ------------------------------------------------
@@ -892,16 +1073,20 @@ Result<void, Error> check_encrypted_extensions(bytes message) {
     return Result<void, Error>.Ok;
 }
 
-// Every certificate of the Certificate message, the server's own first. An
+// Every certificate of the Certificate message, the server's own first. In
+// TLS 1.2 (`legacy`) the message has no request context and no per-entry
+// extensions (RFC 5246 §7.4.2). An
 // entry after the first that does not parse is dropped: only a parsed
 // certificate can take part in a path, so it can neither help nor hurt, and a
 // server that sends a spare it cannot be faulted for is still served. The
 // first entry has to parse.
-Result<List<x509.Certificate>, Error> certificate_list(bytes message) {
+Result<List<x509.Certificate>, Error> certificate_list(bytes message, bool legacy) {
     Reader reader = Reader(message_body(message));
-    bytes request_context = reader.vector8()?;
-    if (request_context.size() != 0) {
-        return Result<List<x509.Certificate>, Error>.Err(Error.Malformed);
+    if (!legacy) {
+        bytes request_context = reader.vector8()?;
+        if (request_context.size() != 0) {
+            return Result<List<x509.Certificate>, Error>.Err(Error.Malformed);
+        }
     }
     bytes list = reader.vector24()?;
     if (reader.remaining() != 0) {
@@ -912,7 +1097,9 @@ Result<List<x509.Certificate>, Error> certificate_list(bytes message) {
     int count = 0;
     while (entries.remaining() > 0) {
         bytes encoded = entries.vector24()?;
-        bytes entry_extensions = entries.vector16()?;
+        if (!legacy) {
+            bytes entry_extensions = entries.vector16()?;
+        }
         match (x509.parse(encoded)) {
             case Ok(x509.Certificate certificate): {
                 certificates.push(certificate);
@@ -1119,6 +1306,23 @@ Result<void, Error> verify_rsa_pss(x509.Certificate leaf, rsa.Hash hash, bytes d
     }
 }
 
+Result<void, Error> verify_rsa_pkcs1(x509.Certificate leaf, rsa.Hash hash, bytes digest, bytes signature) {
+    if (leaf.public_key.algorithm != x509.OID_RSA_ENCRYPTION) {
+        return Result<void, Error>.Err(Error.UnsupportedSignature);
+    }
+    match (rsa.parse_public_key(leaf.public_key.modulus, leaf.public_key.public_exponent)) {
+        case None: {
+            return Result<void, Error>.Err(Error.BadCertificate);
+        }
+        case Some(rsa.PublicKey key): {
+            if (!rsa.verify_pkcs1_v15(key, hash, digest, signature)) {
+                return Result<void, Error>.Err(Error.BadSignature);
+            }
+            return Result<void, Error>.Ok;
+        }
+    }
+}
+
 Result<void, Error> check_certificate_verify(bytes message, x509.Certificate leaf, bytes transcript_hash) {
     Reader reader = Reader(message_body(message));
     int scheme = reader.u16()?;
@@ -1191,14 +1395,18 @@ Result<void, Error> run_handshake(tls13_record.Connection record, str host, Trus
     random.System source = random.system();
     bytes secret = source.octets(X25519_SIZE);
     bytes session_id = source.octets(SESSION_ID_SIZE);
-    bytes hello = client_hello(host, source.octets(RANDOM_SIZE), session_id, x25519.base_point(secret));
+    bytes client_random = source.octets(RANDOM_SIZE);
+    bytes hello = client_hello(host, client_random, session_id, x25519.base_point(secret));
     tls13_schedule.Transcript transcript = tls13_schedule.transcript();
     transcript.add(hello);
     lift(record.send_handshake(hello))?;
-    lift(record.send_change_cipher_spec())?;
     bytes server_hello = next_handshake(record)?;
     require_type(server_hello, HANDSHAKE_SERVER_HELLO)?;
-    ServerChoice choice = check_server_hello(server_hello, session_id)?;
+    ServerChoice choice = check_server_hello(server_hello, session_id, !is_ip_literal(host))?;
+    transcript.add(server_hello);
+    if (choice.legacy) {
+        return run_handshake_12(record, choice, transcript, client_random, secret, source, host, trust, anchors, now);
+    }
     tls13_schedule.Suite suite = choice.suite;
     bytes server_share = choice.public_key;
     record.use_suite(suite);
@@ -1206,7 +1414,7 @@ Result<void, Error> run_handshake(tls13_record.Connection record, str host, Trus
     if (all_zero(shared)) {
         return Result<void, Error>.Err(Error.IllegalParameter);
     }
-    transcript.add(server_hello);
+    lift(record.send_change_cipher_spec())?;
     bytes early = tls13_schedule.early_secret(suite, []);
     bytes handshake = tls13_schedule.handshake_secret(suite, early, shared);
     bytes hello_hash = transcript.digest(suite);
@@ -1223,7 +1431,7 @@ Result<void, Error> run_handshake(tls13_record.Connection record, str host, Trus
         return Result<void, Error>.Err(Error.ClientCertificateRequested);
     }
     require_type(certificate_message, HANDSHAKE_CERTIFICATE)?;
-    List<x509.Certificate> presented = certificate_list(certificate_message)?;
+    List<x509.Certificate> presented = certificate_list(certificate_message, false)?;
     x509.Certificate leaf = presented[0];
     check_identity(presented, trust, anchors, host, now)?;
     transcript.add(certificate_message);
@@ -1247,6 +1455,179 @@ Result<void, Error> run_handshake(tls13_record.Connection record, str host, Trus
     lift(record.send_handshake(client_finished))?;
     record.install_write_keys(client_application);
     lift(record.install_read_keys(server_application))?;
+    return Result<void, Error>.Ok;
+}
+
+// --- TLS 1.2 ------------------------------------------------------------------------------
+
+// The server's ECDHE parameters, signature checked: its group and public point.
+type KeyExchange {
+    int group;
+    bytes point;
+}
+
+// ECDSA over a TLS 1.2 key exchange. TLS 1.2 leaves the curve to the
+// certificate (RFC 8446 §4.2.3 note on ecdsa_secp256r1_sha256 in 1.2), and
+// real servers pair a P-384 key with SHA-256, so the scheme gives the hash and
+// the certificate's own key the curve -- P-256 or P-384, nothing else.
+Result<void, Error> verify_ecdsa_12(x509.Certificate leaf, int scheme, bytes content, bytes signature) {
+    bytes digest = sha256.sum(content);
+    if (scheme == SCHEME_ECDSA_P384_SHA384) {
+        digest = sha512.sum384(content);
+    }
+    if (leaf.public_key.algorithm == x509.OID_EC_PUBLIC_KEY && leaf.public_key.curve == x509.OID_CURVE_P256) {
+        return verify_signature(ecdsa.p256(), x509.OID_CURVE_P256, leaf, digest, signature);
+    }
+    if (leaf.public_key.algorithm == x509.OID_EC_PUBLIC_KEY && leaf.public_key.curve == x509.OID_CURVE_P384) {
+        return verify_signature(ecdsa.p384(), x509.OID_CURVE_P384, leaf, digest, signature);
+    }
+    return Result<void, Error>.Err(Error.UnsupportedSignature);
+}
+
+// The signature over a ServerKeyExchange: a scheme that was offered, that
+// fits the suite's authentication (an ECDSA suite is signed with ECDSA, an RSA
+// suite with RSA-PSS or PKCS#1 v1.5), and that verifies under the leaf's key.
+Result<void, Error> verify_key_exchange_signature(tls12.Suite suite, x509.Certificate leaf, int scheme, bytes content, bytes signature) {
+    if (suite.is_ecdsa()) {
+        if (scheme == SCHEME_ECDSA_P256_SHA256 || scheme == SCHEME_ECDSA_P384_SHA384) {
+            return verify_ecdsa_12(leaf, scheme, content, signature);
+        }
+        return Result<void, Error>.Err(Error.UnsupportedSignature);
+    }
+    if (scheme == SCHEME_RSA_PSS_RSAE_SHA256) {
+        return verify_rsa_pss(leaf, rsa.Hash.Sha256, sha256.sum(content), signature);
+    }
+    if (scheme == SCHEME_RSA_PSS_RSAE_SHA384) {
+        return verify_rsa_pss(leaf, rsa.Hash.Sha384, sha512.sum384(content), signature);
+    }
+    if (scheme == SCHEME_RSA_PSS_RSAE_SHA512) {
+        return verify_rsa_pss(leaf, rsa.Hash.Sha512, sha512.sum(content), signature);
+    }
+    if (scheme == SCHEME_RSA_PKCS1_SHA256) {
+        return verify_rsa_pkcs1(leaf, rsa.Hash.Sha256, sha256.sum(content), signature);
+    }
+    if (scheme == SCHEME_RSA_PKCS1_SHA384) {
+        return verify_rsa_pkcs1(leaf, rsa.Hash.Sha384, sha512.sum384(content), signature);
+    }
+    if (scheme == SCHEME_RSA_PKCS1_SHA512) {
+        return verify_rsa_pkcs1(leaf, rsa.Hash.Sha512, sha512.sum(content), signature);
+    }
+    return Result<void, Error>.Err(Error.UnsupportedSignature);
+}
+
+// RFC 8422 §5.4: `curve_type` (named_curve, 3), the group, the point, then the
+// signature over the randoms and those parameters.
+Result<KeyExchange, Error> check_server_key_exchange(bytes message, tls12.Suite suite, x509.Certificate leaf, bytes client_random, bytes server_random) {
+    bytes body = message_body(message);
+    Reader reader = Reader(body);
+    int curve_type = reader.u8()?;
+    int group = reader.u16()?;
+    bytes point = reader.vector8()?;
+    int params_size = reader.at;
+    int scheme = reader.u16()?;
+    bytes signature = reader.vector16()?;
+    if (reader.remaining() != 0) {
+        return Result<KeyExchange, Error>.Err(Error.Malformed);
+    }
+    if (curve_type != CURVE_TYPE_NAMED) {
+        return Result<KeyExchange, Error>.Err(Error.IllegalParameter);
+    }
+    if (!(group == GROUP_X25519 && point.size() == X25519_SIZE) && !(group == GROUP_SECP256R1 && point.size() == P256_POINT_SIZE)) {
+        return Result<KeyExchange, Error>.Err(Error.IllegalParameter);
+    }
+    bytes content = tls12.signed_params(client_random, server_random, body.substr(0, params_size));
+    verify_key_exchange_signature(suite, leaf, scheme, content, signature)?;
+    return Result<KeyExchange, Error>.Ok(KeyExchange(group, point));
+}
+
+// What the client sends in ClientKeyExchange and the premaster secret that
+// comes of it: a fresh x25519 or P-256 key against the server's.
+type ClientShare {
+    bytes public_point;
+    bytes premaster;
+}
+
+Result<ClientShare, Error> client_key_share(KeyExchange exchange, bytes x25519_secret, random.System source) {
+    if (exchange.group == GROUP_X25519) {
+        bytes shared = x25519.x25519(x25519_secret, exchange.point);
+        if (all_zero(shared)) {
+            return Result<ClientShare, Error>.Err(Error.IllegalParameter);
+        }
+        return Result<ClientShare, Error>.Ok(ClientShare(x25519.base_point(x25519_secret), shared));
+    }
+    ecdsa.Curve curve = ecdsa.p256();
+    match (ecdsa.parse_public_key(curve, exchange.point)) {
+        case None: {
+            return Result<ClientShare, Error>.Err(Error.IllegalParameter);
+        }
+        case Some(ecdsa.PublicKey peer): {
+            bytes scalar = source.octets(curve.size);
+            while (!ecdsa.is_secret_scalar(curve, scalar)) {
+                scalar = source.octets(curve.size);
+            }
+            return Result<ClientShare, Error>.Ok(ClientShare(ecdsa.ephemeral_public(curve, scalar), ecdsa.shared_secret(curve, peer, scalar)));
+        }
+    }
+}
+
+Result<void, Error> check_finished_12(bytes message, bytes expected) {
+    bytes verify_data = message_body(message);
+    if (verify_data.size() != tls12.VERIFY_DATA_SIZE) {
+        return Result<void, Error>.Err(Error.Malformed);
+    }
+    if (!same_octets(verify_data, expected)) {
+        return Result<void, Error>.Err(Error.BadFinished);
+    }
+    return Result<void, Error>.Ok;
+}
+
+// The rest of a TLS 1.2 handshake, once the ServerHello (already in
+// `transcript`) has named a suite: the server's flight up to ServerHelloDone,
+// our ClientKeyExchange, ChangeCipherSpec and Finished, and the server's.
+Result<void, Error> run_handshake_12(tls13_record.Connection record, ServerChoice choice, tls13_schedule.Transcript transcript, bytes client_random, bytes x25519_secret, random.System source, str host, Trust trust, List<x509.Certificate> anchors, int now) {
+    tls12.Suite suite = choice.legacy_suite;
+    tls13_schedule.Suite aead = suite.aead();
+    record.use_legacy_suite(aead);
+    bytes certificate_message = next_handshake(record)?;
+    require_type(certificate_message, HANDSHAKE_CERTIFICATE)?;
+    List<x509.Certificate> presented = certificate_list(certificate_message, true)?;
+    x509.Certificate leaf = presented[0];
+    check_identity(presented, trust, anchors, host, now)?;
+    transcript.add(certificate_message);
+    bytes exchange_message = next_handshake(record)?;
+    require_type(exchange_message, HANDSHAKE_SERVER_KEY_EXCHANGE)?;
+    KeyExchange exchange = check_server_key_exchange(exchange_message, suite, leaf, client_random, choice.server_random)?;
+    transcript.add(exchange_message);
+    bytes done_message = next_handshake(record)?;
+    if (done_message[0] == HANDSHAKE_CERTIFICATE_REQUEST) {
+        return Result<void, Error>.Err(Error.ClientCertificateRequested);
+    }
+    require_type(done_message, HANDSHAKE_SERVER_HELLO_DONE)?;
+    if (done_message.size() != 4) {
+        return Result<void, Error>.Err(Error.Malformed);
+    }
+    transcript.add(done_message);
+    ClientShare share = client_key_share(exchange, x25519_secret, source)?;
+    bytes key_exchange_body = [share.public_point.size()];
+    key_exchange_body.extend(share.public_point);
+    bytes key_exchange = [HANDSHAKE_CLIENT_KEY_EXCHANGE];
+    put_u24(key_exchange, key_exchange_body.size());
+    key_exchange.extend(key_exchange_body);
+    lift(record.send_handshake(key_exchange))?;
+    transcript.add(key_exchange);
+    bytes master = suite.master_secret(share.premaster, transcript.digest(aead));
+    tls12.KeyBlock keys = suite.key_block(master, choice.server_random, client_random);
+    lift(record.send_change_cipher_spec())?;
+    record.install_legacy_write_keys(keys.client_key, keys.client_iv);
+    bytes client_finished = [HANDSHAKE_FINISHED, 0, 0, tls12.VERIFY_DATA_SIZE];
+    client_finished.extend(suite.verify_data(master, true, transcript.digest(aead)));
+    lift(record.send_handshake(client_finished))?;
+    transcript.add(client_finished);
+    lift(record.receive_change_cipher_spec())?;
+    lift(record.install_legacy_read_keys(keys.server_key, keys.server_iv))?;
+    bytes server_finished = next_handshake(record)?;
+    require_type(server_finished, HANDSHAKE_FINISHED)?;
+    check_finished_12(server_finished, suite.verify_data(master, false, transcript.digest(aead)))?;
     return Result<void, Error>.Ok;
 }
 
