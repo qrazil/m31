@@ -486,10 +486,22 @@ the same letter in two functions counts once per line:
    `field25519.eq(a, b)` is a module's function, and only the case separates
    them. camelCase would erase that difference and make the long role names
    this rule asks for harder to read.
-6. **Module names are lowercase snake_case, descriptive and unique**
-   (`form_button`, `tui_text`; never a bare `button`). A module name is also
-   a file name and the module's identity, so it must not depend on case
-   (macOS and Windows file systems fold it), and an upper-case module would
-   read as a type. A product prefix is spelled in lower case:
-   `tui_text`, not `TUI_text` or `TUIText`.
+6. **Module names.** Five shapes, all distinguishable at a glance:
 
+   | Shape | Example | Kind |
+   |---|---|---|
+   | lowercase, one word | `io`, `net`, `sha256` | stdlib module (`lib/`) |
+   | `PREFIX_name` | `TUI_text`, `GIT_refs` | any other module |
+   | `PascalCase` | `TuiText` | type or variant |
+   | `SCREAMING_SNAKE` | `ROUND_CONSTANTS` | constant |
+   | `snake_case` | `form_button` | value or function |
+
+   A non-stdlib module name is an upper-case prefix (the project, or an
+   established acronym of it), an underscore, and a lowercase descriptive
+   part: `TUI_text`, never a bare `button` or `text`. The prefix cannot be
+   confused with a constant (those have no lowercase part) or a type (no
+   underscore). The stdlib stays lowercase because it is the language's own
+   namespace. The compiler already accepts upper-case module names and
+   already refuses a value that shares a module's name. Renaming a module
+   renames its file and every import of it, so it is a breaking change for
+   consumers and is done once per repo, in the migration of that repo.
