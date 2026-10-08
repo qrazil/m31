@@ -332,6 +332,51 @@ fn a_case_binds_every_value_or_none() {
 }
 
 #[test]
+fn a_case_payload_may_be_discarded_with_an_underscore() {
+    let decl = "enum E { A; B(int, str); }\n";
+    // Some of the payloads, by position: the first is projected, the second
+    // is not.
+    let out = ir(&format!(
+        "{decl}int f(E e) {{\n    match (e) {{\n        case A: {{ return 0; }}\n        \
+         case B(int n, _): {{ return n; }}\n    }}\n}}\nprint(f(E.B(1, \"x\")));\n"
+    ));
+    assert_eq!(out.matches("payload").count(), 1, "{out}");
+    // None of them: no payload is projected at all.
+    let out = ir(&format!(
+        "{decl}int f(E e) {{\n    match (e) {{\n        case A: {{ return 0; }}\n        \
+         case B(_, _): {{ return 1; }}\n    }}\n}}\nprint(f(E.A));\n"
+    ));
+    assert!(!out.contains("payload"), "{out}");
+    // It still stands for a position, so the count is checked.
+    let got = err(&format!(
+        "{decl}int f(E e) {{\n    match (e) {{\n        case A: {{ return 0; }}\n        \
+         case B(_): {{ return 1; }}\n    }}\n}}\nprint(f(E.A));\n"
+    ));
+    assert!(
+        got.contains("carries 2 value(s), and this case binds 1"),
+        "{got}"
+    );
+    // It is not a value, a name, or something with a type.
+    let got = err("print(_);\n");
+    assert!(
+        got.contains("`_` is a discard and cannot be used as a value"),
+        "{got}"
+    );
+    let got = err("int _ = 1;\n");
+    assert!(got.contains("`_` is a discard, not a name"), "{got}");
+    let got = err(&format!(
+        "{decl}int f(E e) {{\n    match (e) {{\n        case A: {{ return 0; }}\n        \
+         case B(int _, _): {{ return 1; }}\n    }}\n}}\nprint(f(E.A));\n"
+    ));
+    assert!(got.contains("a discard is written `_` alone"), "{got}");
+    // `_foo` is an ordinary identifier; only the lone underscore is special.
+    assert_eq!(
+        toks("_foo _"),
+        vec![Tok::Ident("_foo".into()), Tok::Underscore, Tok::Eof]
+    );
+}
+
+#[test]
 fn string_escapes_are_decoded() {
     assert_eq!(
         toks(r#""a\tb\nc\\d\"e""#),

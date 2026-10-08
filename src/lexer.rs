@@ -14,6 +14,10 @@ pub enum Tok {
     Float(f64),
     Str(String),
     Ident(String),
+    /// A lone `_`: the discard. Not an identifier -- it names nothing, so it
+    /// is a token of its own and every place that scans for a name passes it
+    /// by. Only a `case` payload accepts it (`case Err(_)`, §5.6).
+    Underscore,
 
     // type keywords
     KwInt,
@@ -148,6 +152,7 @@ impl Tok {
             Tok::KwIn => "in",
             Tok::Colon => ":",
             Tok::Dot => ".",
+            Tok::Underscore => "_",
             Tok::DotDot => "..",
             Tok::KwTrue => "true",
             Tok::KwFalse => "false",
@@ -680,6 +685,7 @@ impl<'a> Lexer<'a> {
             "true" => Tok::KwTrue,
             "false" => Tok::KwFalse,
             "this" => Tok::KwThis,
+            "_" => Tok::Underscore,
             _ => Tok::Ident(w.to_string()),
         }
     }
