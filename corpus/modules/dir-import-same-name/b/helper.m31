@@ -1,0 +1,3 @@
+pub str name() {
+    return "b";
+}

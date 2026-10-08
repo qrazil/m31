@@ -1,0 +1,9 @@
+// A dependency is a directory of modules. Its own files import each other by
+// path from ITS root -- `style` here is this repository's `style.m31`, not
+// anything of the program that depends on it.
+import style;
+import widgets.label;
+
+pub str area_label(int w, int h) {
+    return concat(style.bold(label.make("area")), concat(" ", str(w * h)));
+}

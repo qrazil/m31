@@ -26,11 +26,13 @@ mod width;
 #[cfg(test)]
 mod tests;
 
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 fn usage() -> ExitCode {
     eprintln!("usage: m31c --emit-c|--emit-ir|fmt <source> [-o <output>]");
     eprintln!("       m31c fmt --check <source>   exit 1 if it is not formatted");
+    eprintln!("       m31c fmt [--check] -r <dir> every .m31 file under <dir>");
     eprintln!("       {}", lint::USAGE);
     ExitCode::from(2)
 }
@@ -44,6 +46,7 @@ fn main() -> ExitCode {
 
     let mut mode: Option<&str> = None;
     let mut check = false;
+    let mut recursive = false;
     let mut input: Option<String> = None;
     let mut output: Option<String> = None;
 
@@ -52,6 +55,7 @@ fn main() -> ExitCode {
         match args[i].as_str() {
             "fmt" => mode = Some("fmt"),
             "--check" => check = true,
+            "-r" | "--recursive" => recursive = true,
             "--emit-c" => mode = Some("c"),
             "--emit-ir" => mode = Some("ir"),
             "-o" => {
@@ -64,6 +68,7 @@ fn main() -> ExitCode {
             "--help" => {
                 println!("usage: m31c --emit-c|--emit-ir|fmt <source> [-o <output>]");
                 println!("       m31c fmt --check <source>");
+                println!("       m31c fmt [--check] -r <dir>");
                 println!("       {}", lint::USAGE);
                 return ExitCode::SUCCESS;
             }
@@ -86,34 +91,34 @@ fn main() -> ExitCode {
         return usage();
     };
 
-    let src = match std::fs::read_to_string(&path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("cannot read {path}: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-
     if mode == "fmt" {
-        let formatted = match reformat(&src, &modules::module_name(&path)) {
-            Ok(s) => s,
-            Err(d) => {
-                eprintln!("{}", d.render_with_source(&path, &src));
-                return ExitCode::FAILURE;
+        let files = if recursive {
+            match source_files(Path::new(&path)) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("cannot read {path}: {e}");
+                    return ExitCode::FAILURE;
+                }
             }
+        } else {
+            vec![PathBuf::from(&path)]
         };
-        if check {
-            if formatted != src {
-                eprintln!("{path}: not formatted");
-                return ExitCode::FAILURE;
-            }
-            return ExitCode::SUCCESS;
+        // Every file is attempted, so one run reports everything wrong rather
+        // than the first thing.
+        let mut ok = true;
+        for f in &files {
+            ok &= format_file(&f.to_string_lossy(), check);
         }
-        if let Err(e) = std::fs::write(&path, formatted) {
-            eprintln!("cannot write {path}: {e}");
-            return ExitCode::FAILURE;
-        }
-        return ExitCode::SUCCESS;
+        return if ok {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
+    }
+
+    if let Err(e) = std::fs::read_to_string(&path) {
+        eprintln!("cannot read {path}: {e}");
+        return ExitCode::FAILURE;
     }
 
     let out = match compile(&path, mode) {
@@ -137,6 +142,74 @@ fn main() -> ExitCode {
         None => print!("{out}"),
     }
     ExitCode::SUCCESS
+}
+
+/// Format one file in place, or with `check` only report whether it already is
+/// formatted. True when the file is fine (and, without `check`, was written).
+fn format_file(path: &str, check: bool) -> bool {
+    let src = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("cannot read {path}: {e}");
+            return false;
+        }
+    };
+    let formatted = match reformat(&src, &modules::module_name(path)) {
+        Ok(s) => s,
+        Err(d) => {
+            eprintln!("{}", d.render_with_source(path, &src));
+            return false;
+        }
+    };
+    if check {
+        if formatted != src {
+            eprintln!("{path}: not formatted");
+            return false;
+        }
+        return true;
+    }
+    // Untouched files keep their modification time, so a recursive run over a
+    // formatted tree does not look like a change to anything watching it.
+    if formatted != src {
+        if let Err(e) = std::fs::write(path, formatted) {
+            eprintln!("cannot write {path}: {e}");
+            return false;
+        }
+    }
+    true
+}
+
+/// Every `.m31` file under `root`, sorted, for `fmt -r`. A file given
+/// directly is returned as is. Directories that are not the project's own
+/// source are skipped: `.m31-deps` (fetched dependencies), `.git` and
+/// `target`. Symbolic links are not followed, so a loop cannot trap the walk.
+fn source_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    if root.is_file() {
+        out.push(root.to_path_buf());
+        return Ok(out);
+    }
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                let skip = matches!(
+                    entry.file_name().to_str(),
+                    Some(".m31-deps" | ".git" | "target")
+                );
+                if !skip {
+                    dirs.push(path);
+                }
+            } else if kind.is_file() && path.extension().is_some_and(|e| e == "m31") {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 /// Format a source file. Parses only -- it must work on a program that does

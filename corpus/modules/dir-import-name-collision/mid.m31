@@ -1,0 +1,5 @@
+import b.helper;
+
+pub str name() {
+    return helper.name();
+}

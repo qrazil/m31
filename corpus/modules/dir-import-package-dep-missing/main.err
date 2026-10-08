@@ -1,0 +1,4 @@
+corpus/modules/dir-import-package-dep-missing/main.m31:2:1: cannot find module `tui.nosuch`: no `nosuch.m31` in dependency `tui`
+  |
+2 | import tui.nosuch;
+  | ^

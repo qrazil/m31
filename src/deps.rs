@@ -16,7 +16,10 @@
 //! Two files, beside the entry file, at the one place local imports already
 //! look (`Loader.dir`, not a new "project root"):
 //!
-//! - `deps` -- intent: `name url ref`, one remote import per line.
+//! - `deps` -- the project file. A header (`name <project>`, `version
+//!   <x.y.z>`, both required, like a `Cargo.toml`'s `[package]`) and then
+//!   intent, one dependency per line: `name url ref` for a git checkout or
+//!   `name path <dir>` for a directory used in place (no fetch, no lock line).
 //! - `deps.lock` -- reality: `name commit-sha`, appended once per name and
 //!   never rewritten after. A locked commit is authoritative forever; the
 //!   only way to move it is to delete its line by hand and let the next
@@ -52,6 +55,224 @@ fn located(path: &Path, line: u32, msg: String) -> Located {
         path: path.to_string_lossy().into_owned(),
         diag: Diag::new(Span::new(line, 1), msg),
     }
+}
+
+/// Where one dependency comes from.
+enum Source {
+    /// `name url ref`: a git checkout under `.m31-deps/<name>/`, pinned by
+    /// `deps.lock`.
+    Git { url: String, git_ref: String },
+    /// `name path <dir>`: a directory used in place, relative to the manifest.
+    Path(String),
+}
+
+struct Dep {
+    source: Source,
+    line: u32,
+}
+
+/// A parsed `deps` file: the project it names and what that project uses.
+/// The header is required so that a project with no dependencies still has
+/// content -- an empty file says nothing about what it is the root of.
+pub struct Manifest {
+    #[allow(dead_code)]
+    pub name: String,
+    #[allow(dead_code)]
+    pub version: String,
+    deps: HashMap<String, Dep>,
+}
+
+/// `[A-Za-z0-9_-]+`. Informational only: the name never reaches an import.
+fn valid_project_name(n: &str) -> bool {
+    !n.is_empty()
+        && n.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// `major.minor.patch`, each all digits, with an optional `-pre` and/or
+/// `+build` suffix of `[0-9A-Za-z.-]`.
+fn valid_version(v: &str) -> bool {
+    let core_end = v.find(['-', '+']).unwrap_or(v.len());
+    let (core, rest) = v.split_at(core_end);
+    let nums: Vec<&str> = core.split('.').collect();
+    nums.len() == 3
+        && nums
+            .iter()
+            .all(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+        && rest
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+}
+
+/// Parse a `deps` file. Every line is checked, including ones nothing has
+/// asked about yet -- see `parse_manifest` for why -- and then the header.
+fn parse_deps(path: &Path, text: &str) -> Result<Manifest, Located> {
+    let mut name: Option<String> = None;
+    let mut version: Option<String> = None;
+    let mut deps = HashMap::new();
+    for (i, raw) in text.lines().enumerate() {
+        let line_no = (i + 1) as u32;
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        match fields[0] {
+            key @ ("name" | "version") => {
+                if fields.len() != 2 {
+                    return Err(located(
+                        path,
+                        line_no,
+                        format!(
+                            "malformed `{key}` line: expected `{key} <{}>` -- \
+                             `name` and `version` are the project header, so a \
+                             dependency cannot be called `{key}`",
+                            if key == "name" {
+                                "project-name"
+                            } else {
+                                "x.y.z"
+                            }
+                        ),
+                    ));
+                }
+                let slot = if key == "name" {
+                    &mut name
+                } else {
+                    &mut version
+                };
+                if slot.is_some() {
+                    return Err(located(
+                        path,
+                        line_no,
+                        format!("duplicate `{key}` line: a `deps` file has exactly one"),
+                    ));
+                }
+                if key == "name" && !valid_project_name(fields[1]) {
+                    return Err(located(
+                        path,
+                        line_no,
+                        format!(
+                            "`{}` is not a project name: use letters, digits, `-` \
+                             and `_`",
+                            fields[1]
+                        ),
+                    ));
+                }
+                if key == "version" && !valid_version(fields[1]) {
+                    return Err(located(
+                        path,
+                        line_no,
+                        format!(
+                            "`{}` is not a version: write it as `major.minor.patch`, \
+                             for example `0.1.0`",
+                            fields[1]
+                        ),
+                    ));
+                }
+                *slot = Some(fields[1].to_string());
+            }
+            dep_name => {
+                if fields.len() != 3 {
+                    return Err(located(
+                        path,
+                        line_no,
+                        format!(
+                            "malformed `deps` line: expected 3 whitespace-separated \
+                             fields, found {}",
+                            fields.len()
+                        ),
+                    ));
+                }
+                let source = if fields[1] == "path" {
+                    Source::Path(fields[2].to_string())
+                } else {
+                    Source::Git {
+                        url: fields[1].to_string(),
+                        git_ref: fields[2].to_string(),
+                    }
+                };
+                if deps
+                    .insert(
+                        dep_name.to_string(),
+                        Dep {
+                            source,
+                            line: line_no,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(located(
+                        path,
+                        line_no,
+                        format!("duplicate dependency `{dep_name}`"),
+                    ));
+                }
+            }
+        }
+    }
+    match (name, version) {
+        (Some(name), Some(version)) => Ok(Manifest {
+            name,
+            version,
+            deps,
+        }),
+        (None, None) => Err(located(
+            path,
+            1,
+            "`deps` has no project header: add `name <project-name>` and \
+             `version <x.y.z>` at the top, for example `name myapp` and \
+             `version 0.1.0`"
+                .to_string(),
+        )),
+        (Some(_), None) => Err(located(
+            path,
+            1,
+            "`deps` is missing its `version` line: add `version 0.1.0` (or the \
+             project's own version) below `name`"
+                .to_string(),
+        )),
+        (None, Some(_)) => Err(located(
+            path,
+            1,
+            "`deps` is missing its `name` line: add `name <project-name>` above \
+             `version`"
+                .to_string(),
+        )),
+    }
+}
+
+/// The `deps` manifest in `dir`, parsed and validated, or `None` when there
+/// is no `deps` file there. A file that exists but has no valid header is an
+/// error, never a silent "no dependencies".
+pub fn read_manifest(dir: &Path) -> Result<Option<Manifest>, Located> {
+    let deps_path = dir.join("deps");
+    let Ok(text) = std::fs::read_to_string(&deps_path) else {
+        return Ok(None);
+    };
+    parse_deps(&deps_path, &text).map(Some)
+}
+
+/// `dir/rel` with `.` and `..` folded away lexically (no filesystem access,
+/// so a relative path stays relative), so a path dependency's files print as
+/// `apps/tui/tuibuf.m31` rather than `apps/git/../tui/tuibuf.m31`.
+fn clean(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        out.push(".");
+    }
+    out
 }
 
 /// Parse `deps` or `deps.lock`'s shared shape: `name` followed by exactly
@@ -309,13 +530,21 @@ fn append_lock(lock_path: &Path, name: &str, commit: &str) -> std::io::Result<()
 /// the repository's root -- hardcoded, not the entry file's own extension,
 /// because a remote import's shape is a property of the feature, not of
 /// whatever file happened to start the build that pulled it in.
+///
+/// A dependency imported by a dotted path (`import tui.geom;`) is a whole
+/// directory instead, and `package` is the file asked of it inside the
+/// checkout, e.g. `geom.m31`.
 fn require_module_file(
     module_file: &Path,
     deps_path: &Path,
     line: u32,
     name: &str,
+    package: Option<&str>,
 ) -> Result<Option<PathBuf>, Located> {
-    if module_file.is_file() {
+    if package.is_some() || module_file.is_file() {
+        // A package's file is not checked here: the loader reads it next and
+        // names the import that asked for a file the dependency lacks, which
+        // is a better place to point than the `deps` line.
         Ok(Some(module_file.to_path_buf()))
     } else {
         Err(located(
@@ -330,7 +559,22 @@ fn require_module_file(
     }
 }
 
-/// Try to resolve `name` as a remote import: the one new fallback `deps.rs`
+/// Does `dir`'s `deps` manifest name `name`? The loader asks before it
+/// resolves anything, because a dependency and a local directory of the same
+/// name are an ambiguity to refuse, and refusing it after a `git clone` is
+/// the wrong order.
+pub fn declares(dir: &Path, name: &str) -> Result<bool, Located> {
+    Ok(read_manifest(dir)?.is_some_and(|m| m.deps.contains_key(name)))
+}
+
+/// A file found inside a dependency, and the root that file's own imports
+/// resolve against: the dependency's directory.
+pub struct Package {
+    pub file: PathBuf,
+    pub root: PathBuf,
+}
+
+/// Try to resolve `name` as a one-file remote import: the fallback `deps.rs`
 /// adds to `Loader::visit`, consulted only after the embedded standard
 /// library and the plain `name.m31`-beside-the-entry-file check have both
 /// already missed.
@@ -344,24 +588,108 @@ fn require_module_file(
 /// be run, a clone or checkout that failed, or a lock entry the cache could
 /// not be made to match.
 pub fn resolve(dir: &Path, name: &str) -> Result<Option<PathBuf>, Located> {
+    Ok(resolve_in(dir, name, None)?.map(|p| p.file))
+}
+
+/// A file inside a dependency that is a whole directory: `import tui.geom;`
+/// asks `dep` = `tui` for `rel` = `geom.m31`. A git dependency is fetched,
+/// locked and cached exactly as a one-file one is; a path dependency is just
+/// the directory it names. `Ok(None)` only when `deps` does not name `dep`.
+pub fn resolve_package(dir: &Path, dep: &str, rel: &str) -> Result<Option<Package>, Located> {
+    resolve_in(dir, dep, Some(rel))
+}
+
+/// A `path` dependency, used in place. It is a project in its own right, so
+/// it must carry its own `deps` manifest; its own dependencies are not
+/// followed (the v0 rule that holds for git dependencies too).
+fn resolve_path_dep(
+    dir: &Path,
+    deps_path: &Path,
+    line: u32,
+    name: &str,
+    rel_dir: &str,
+    package: Option<&str>,
+) -> Result<Package, Located> {
+    let dep_dir = if Path::new(rel_dir).is_absolute() {
+        PathBuf::from(rel_dir)
+    } else {
+        clean(&dir.join(rel_dir))
+    };
+    if !dep_dir.is_dir() {
+        return Err(located(
+            deps_path,
+            line,
+            format!(
+                "path dependency `{name}` points at `{rel_dir}`, which is not a \
+                 directory (looked for {})",
+                dep_dir.display()
+            ),
+        ));
+    }
+    if read_manifest(&dep_dir)?.is_none() {
+        return Err(located(
+            deps_path,
+            line,
+            format!(
+                "path dependency `{name}` ({rel_dir}) has no `deps` file: a \
+                 dependency is a project, so add one there with its `name` and \
+                 `version` lines"
+            ),
+        ));
+    }
+    let file = match package {
+        Some(rel) => dep_dir.join(rel),
+        None => {
+            let f = dep_dir.join(format!("{name}.m31"));
+            if !f.is_file() {
+                return Err(located(
+                    deps_path,
+                    line,
+                    format!(
+                        "path dependency `{name}` has no `{name}.m31` at its \
+                         root: importing `{name}` alone is exactly one file, \
+                         named after the import, at the top of the directory"
+                    ),
+                ));
+            }
+            f
+        }
+    };
+    Ok(Package {
+        file,
+        root: dep_dir,
+    })
+}
+
+fn resolve_in(dir: &Path, name: &str, package: Option<&str>) -> Result<Option<Package>, Located> {
     let deps_path = dir.join("deps");
-    let Ok(deps_text) = std::fs::read_to_string(&deps_path) else {
+    let Some(manifest) = read_manifest(dir)? else {
         return Ok(None);
     };
-    let deps = parse_manifest(&deps_path, &deps_text, 2, "deps")?;
-    let Some(dep) = deps.get(name) else {
+    let Some(dep) = manifest.deps.get(name) else {
         return Ok(None);
     };
-    let url = resolve_url(dir, &dep.fields[0]);
-    let git_ref = dep.fields[1].clone();
     let dep_line = dep.line;
+    let (url, git_ref) = match &dep.source {
+        Source::Path(rel_dir) => {
+            return resolve_path_dep(dir, &deps_path, dep_line, name, rel_dir, package).map(Some);
+        }
+        Source::Git { url, git_ref } => (resolve_url(dir, url), git_ref.clone()),
+    };
 
     let lock_path = dir.join("deps.lock");
     let lock_text = std::fs::read_to_string(&lock_path).unwrap_or_default();
     let locks = parse_manifest(&lock_path, &lock_text, 1, "deps.lock")?;
 
     let cache_dir = dir.join(".m31-deps").join(name);
-    let module_file = cache_dir.join(format!("{name}.m31"));
+    let module_file = match package {
+        Some(rel) => cache_dir.join(rel),
+        None => cache_dir.join(format!("{name}.m31")),
+    };
+    let found = |file: PathBuf| Package {
+        file,
+        root: cache_dir.clone(),
+    };
 
     if let Some(lock) = locks.get(name) {
         // `deps.lock` is authoritative once a line exists: `ref` is never
@@ -369,14 +697,14 @@ pub fn resolve(dir: &Path, name: &str) -> Result<Option<PathBuf>, Located> {
         // sensible. See the module doc comment and
         // docs/remote-imports-decision.md §2.
         let commit = lock.fields[0].clone();
-        if cache_matches(&cache_dir, &commit) {
-            // Already checked out, already matches -- no network access,
-            // per the decision doc's resolution flow.
-            return require_module_file(&module_file, &deps_path, dep_line, name);
+        if !cache_matches(&cache_dir, &commit) {
+            reclone(&url, &cache_dir, &deps_path, dep_line, name)?;
+            checkout_locked_commit(&cache_dir, &commit, &lock_path, lock.line, name)?;
         }
-        reclone(&url, &cache_dir, &deps_path, dep_line, name)?;
-        checkout_locked_commit(&cache_dir, &commit, &lock_path, lock.line, name)?;
-        return require_module_file(&module_file, &deps_path, dep_line, name);
+        // A cache that already matches needs no network access, per the
+        // decision doc's resolution flow.
+        return require_module_file(&module_file, &deps_path, dep_line, name, package)
+            .map(|f| f.map(found));
     }
 
     // No lock entry yet: this is the first time anything has asked for
@@ -392,7 +720,7 @@ pub fn resolve(dir: &Path, name: &str) -> Result<Option<PathBuf>, Located> {
             format!("cannot write {}: {e}", lock_path.display()),
         )
     })?;
-    require_module_file(&module_file, &deps_path, dep_line, name)
+    require_module_file(&module_file, &deps_path, dep_line, name, package).map(|f| f.map(found))
 }
 
 #[cfg(test)]
@@ -468,10 +796,12 @@ mod tests {
         remote
     }
 
+    const HEADER: &str = "name test\nversion 0.1.0\n";
+
     fn write_deps(project: &Path, name: &str, url: &Path, git_ref: &str) {
         std::fs::write(
             project.join("deps"),
-            format!("{name} {} {git_ref}\n", url.display()),
+            format!("{HEADER}{name} {} {git_ref}\n", url.display()),
         )
         .unwrap();
     }
@@ -582,10 +912,14 @@ mod tests {
     fn malformed_deps_line_is_a_located_diagnostic() {
         let _guard = serial();
         let project = scratch_dir();
-        std::fs::write(project.join("deps"), "greet only-two-fields\n").unwrap();
+        std::fs::write(
+            project.join("deps"),
+            format!("{HEADER}greet only-two-fields\n"),
+        )
+        .unwrap();
         let err = resolve(&project, "greet").unwrap_err();
         assert!(err.path.ends_with("deps"));
-        assert_eq!(err.diag.span, Span::new(1, 1));
+        assert_eq!(err.diag.span, Span::new(3, 1));
         assert!(err.diag.msg.contains("malformed `deps` line"));
     }
 
@@ -665,11 +999,129 @@ mod tests {
         git_ok(&["commit", "--quiet", "-m", "initial"], &remote);
         git_ok(&["tag", "v1"], &remote);
 
-        std::fs::write(project.join("deps"), "greet ../fixture.git v1\n").unwrap();
+        std::fs::write(
+            project.join("deps"),
+            format!("{HEADER}greet ../fixture.git v1\n"),
+        )
+        .unwrap();
         let resolved = resolve(&project, "greet").unwrap().unwrap();
         assert_eq!(
             std::fs::read_to_string(&resolved).unwrap(),
             "pub str hi() { return \"hi\"; }\n"
         );
+    }
+
+    fn manifest_err(text: &str) -> Located {
+        let project = scratch_dir();
+        std::fs::write(project.join("deps"), text).unwrap();
+        match read_manifest(&project) {
+            Err(e) => e,
+            Ok(_) => panic!("{text:?} should be refused"),
+        }
+    }
+
+    #[test]
+    fn a_manifest_needs_a_name_and_a_version() {
+        assert!(manifest_err("").diag.msg.contains("no project header"));
+        assert!(manifest_err("# only a comment\n")
+            .diag
+            .msg
+            .contains("no project header"));
+        assert!(manifest_err("name app\n")
+            .diag
+            .msg
+            .contains("missing its `version` line"));
+        assert!(manifest_err("version 0.1.0\n")
+            .diag
+            .msg
+            .contains("missing its `name` line"));
+    }
+
+    #[test]
+    fn name_and_version_are_validated() {
+        assert!(manifest_err("name a/b\nversion 0.1.0\n")
+            .diag
+            .msg
+            .contains("is not a project name"));
+        for bad in ["1", "1.0", "1.0.x", "1..0", "v1.0.0", "1.0.0-be!ta"] {
+            let e = manifest_err(&format!("name a\nversion {bad}\n"));
+            assert!(e.diag.msg.contains("is not a version"), "{bad}");
+        }
+        let project = scratch_dir();
+        for good in [
+            "0.1.0",
+            "10.20.30",
+            "1.0.0-rc.1",
+            "1.0.0+build.5",
+            "1.0.0-a+b",
+        ] {
+            std::fs::write(
+                project.join("deps"),
+                format!("name my-app_2\nversion {good}\n"),
+            )
+            .unwrap();
+            assert!(read_manifest(&project).is_ok(), "{good}");
+        }
+    }
+
+    #[test]
+    fn name_and_version_cannot_be_dependencies_and_not_repeated() {
+        let e = manifest_err("name app\nversion 1.0.0\nname x/y/z url ref\n");
+        assert!(e.diag.msg.contains("malformed `name` line"));
+        assert_eq!(e.diag.span, Span::new(3, 1));
+        let e = manifest_err("name a\nversion 1.0.0\nversion 2.0.0\n");
+        assert!(e.diag.msg.contains("duplicate `version`"));
+        let e = manifest_err("name a\nversion 1.0.0\nd path x\nd path y\n");
+        assert!(e.diag.msg.contains("duplicate dependency `d`"));
+    }
+
+    #[test]
+    fn a_path_dependency_resolves_in_place_with_no_lock() {
+        let _guard = serial();
+        let parent = scratch_dir();
+        let project = parent.join("app");
+        let dep = parent.join("libs/tui");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&dep).unwrap();
+        std::fs::write(dep.join("deps"), "name tui\nversion 0.1.0\n").unwrap();
+        std::fs::write(dep.join("geom.m31"), "pub int one() { return 1; }\n").unwrap();
+        std::fs::write(
+            project.join("deps"),
+            format!("{HEADER}tui path ../libs/tui\n"),
+        )
+        .unwrap();
+
+        let pkg = resolve_package(&project, "tui", "geom.m31")
+            .unwrap()
+            .unwrap();
+        // `..` is folded away, so diagnostics print the tidy path.
+        assert_eq!(pkg.root, parent.join("libs/tui"));
+        assert_eq!(pkg.file, parent.join("libs/tui/geom.m31"));
+        // Nothing fetched, nothing locked, nothing cached.
+        assert!(!project.join("deps.lock").exists());
+        assert!(!project.join(".m31-deps").exists());
+    }
+
+    #[test]
+    fn a_path_dependency_must_exist_and_be_a_project() {
+        let _guard = serial();
+        let parent = scratch_dir();
+        std::fs::write(parent.join("deps"), format!("{HEADER}tui path libs/tui\n")).unwrap();
+        let e = resolve_package(&parent, "tui", "geom.m31").err().unwrap();
+        assert!(e.diag.msg.contains("is not a directory"));
+        std::fs::create_dir_all(parent.join("libs/tui")).unwrap();
+        let e = resolve_package(&parent, "tui", "geom.m31").err().unwrap();
+        assert!(e.diag.msg.contains("has no `deps` file"));
+        // And its own header is validated, reported against ITS file.
+        std::fs::write(parent.join("libs/tui/deps"), "name tui\n").unwrap();
+        let e = resolve_package(&parent, "tui", "geom.m31").err().unwrap();
+        assert!(e.path.ends_with("libs/tui/deps"));
+    }
+
+    #[test]
+    fn clean_folds_dots_lexically() {
+        assert_eq!(clean(Path::new("a/b/../c/./d")), PathBuf::from("a/c/d"));
+        assert_eq!(clean(Path::new("a/../..")), PathBuf::from(".."));
+        assert_eq!(clean(Path::new("a/..")), PathBuf::from("."));
     }
 }

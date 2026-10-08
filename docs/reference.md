@@ -285,9 +285,57 @@ in source, so `011-types.m31` is a fine program and a hopeless import.
 **Two files whose names differ only in case are an error on every platform**,
 not only where the filesystem would confuse them.
 
+### Directories, the project root and `deps`
+
+An import is a path from the **project root**, written with dots:
+`import ui.widgets.form_button;` is `<root>/ui/widgets/form_button.m31`, and
+the module is still called `form_button` — the last segment. Every segment
+must be an identifier (a directory called `my-dir` cannot be imported; rename
+it). The path never depends on which file wrote it, so moving a file does not
+change what its imports mean. A dotted import never falls through to the
+standard library.
+
+The root is the nearest directory, at or above the entry file's, that holds a
+`deps` file (the search stops at a `.git`); with none it is the entry file's
+own directory, so a program laid out without one is unchanged.
+
+`deps` is the project file, like a `Cargo.toml`, and it always has content:
+
+```
+# project name: letters, digits, - and _
+name myapp
+# major.minor.patch, with an optional -pre and +build suffix
+version 0.1.0
+# name url ref: a git checkout, pinned in deps.lock
+tui https://example.org/tui.git v0.2.0
+# name path dir: a directory used in place
+shared path ../shared
+```
+
+(`#` starts a comment only at the beginning of a line.) `name` and `version` are required and are the header; a file without them is
+an error that says which line to add, so a project with no dependencies is
+still a `deps` file with two lines. A dependency line is either `name url
+ref` (fetched into `.m31-deps/<name>/` and pinned in `deps.lock`;
+docs/remote-imports-decision.md) or `name path dir` (a directory relative to
+the `deps` file, used in place: nothing is fetched, locked or cached). A
+dependency is addressed by its name as the first segment — `import tui.tuiapp;`
+— and inside it the root is the dependency's own directory, so *its* imports
+(`import tuibuf;`) resolve there and not in the consumer. A path dependency is
+a project and must have its own `deps` header. A dependency's own dependencies
+are not followed: a consumer lists every one it needs. A directory and a
+dependency with the same name under one root are an error. `m31c fmt [--check]
+-r <dir>` formats or checks every `.m31` file under a directory, skipping
+`.m31-deps`, `.git` and `target`.
+
 Module names are therefore unique across a program: two files called
-`util.m31` in different directories are a collision rather than two modules.
-That is the cost of naming by basename, and it is the same cost OCaml pays.
+`util.m31` in different directories are a collision rather than two modules,
+and the diagnostic names both paths. **That is deliberate and permanent.**
+There is no namespacing: a directory organises files and nothing more, and a
+module name is the whole of its identity. So a name has to say what the thing
+is — `form_button` or `formButton`, never a bare `button` — and a reader who
+sees `form_button.render(...)` knows which module it came from without
+knowing the directory layout. docs/project-layout-decision.md records why
+wrapped identity was decided against.
 
 ---
 
@@ -2504,7 +2552,7 @@ grounds (types, privacy, shadowing).
 
 ```ebnf
 program     = { import } { item } ;
-import      = "import" IDENT ";" ;                    (* before any item *)
+import      = "import" IDENT { "." IDENT } ";" ;      (* before any item; §2.1 *)
 item        = [ "pub" ] decl_item | stmt ;            (* stmt: entry file only;
                                                          never a `const` decl, §4.5 *)
 decl_item   = typedecl | interface | enumdecl | distinct | func | prim

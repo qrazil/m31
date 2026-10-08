@@ -1,0 +1,5 @@
+// A project with no dependencies still has a `deps` file with content: its
+// name and version. See docs/project-layout-decision.md.
+import util.shout;
+
+print(shout.loud("hi"));

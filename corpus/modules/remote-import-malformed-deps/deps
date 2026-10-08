@@ -1,1 +1,4 @@
+name remote-import-malformed-deps
+version 0.1.0
+
 badname only-two-fields

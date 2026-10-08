@@ -1,0 +1,5 @@
+import a.helper;
+import mid;
+
+print(helper.name());
+print(mid.name());

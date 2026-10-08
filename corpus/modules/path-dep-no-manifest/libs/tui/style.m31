@@ -1,0 +1,3 @@
+pub str bold(str s) {
+    return concat("*", concat(s, "*"));
+}

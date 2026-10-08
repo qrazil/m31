@@ -1,0 +1,3 @@
+import ui.math;
+
+print(str(math.double(2)));

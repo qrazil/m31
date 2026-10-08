@@ -1,0 +1,4 @@
+corpus/modules/dir-import-missing/main.m31:2:1: cannot find module `ui.nothere`: no `ui/nothere.m31` under the project root
+  |
+2 | import ui.nothere;
+  | ^

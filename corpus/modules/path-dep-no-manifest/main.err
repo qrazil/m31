@@ -1,0 +1,4 @@
+corpus/modules/path-dep-no-manifest/deps:5:1: path dependency `tui` (libs/tui) has no `deps` file: a dependency is a project, so add one there with its `name` and `version` lines
+  |
+5 | tui path libs/tui
+  | ^

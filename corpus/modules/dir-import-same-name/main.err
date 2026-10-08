@@ -1,0 +1,4 @@
+corpus/modules/dir-import-same-name/main.m31:2:1: `b.helper` and `a.helper` would both be written `helper` in this file: an import is named by its last segment and there are no aliases, so a file cannot import both
+  |
+2 | import b.helper;
+  | ^

@@ -1,0 +1,5 @@
+import util.text_tools.pad;
+
+pub str render(str s) {
+    return concat("<", concat(pad.both(s, 4), ">"));
+}

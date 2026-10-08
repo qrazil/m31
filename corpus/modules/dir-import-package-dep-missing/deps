@@ -1,0 +1,7 @@
+name dir-import-package-dep-missing
+version 0.1.0
+
+# `tui` is a whole directory of modules, not one file: `import tui.geom;` is
+# `geom.m31` in the checkout of fixture.git, and its own imports resolve
+# against that checkout. See docs/project-layout-decision.md.
+tui ./fixture.git v1
