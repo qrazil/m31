@@ -1332,8 +1332,10 @@ impl Lowerer {
             // check exists (§5.6, docs/errors-decision.md). What it drops is
             // the requirement to name values the arm does not read.
             //
-            // All or nothing, with no `_` for one of several: one rule, and
-            // an arm that wants two of three payloads can name all three.
+            // Either way the count must match the variant. A payload may be
+            // written `_` to discard it, alone and without a type -- the
+            // variant already says what it carries -- so an arm that wants
+            // two of three names those two and writes `_` for the third.
             if !a.binds.is_empty() && a.binds.len() != want.len() {
                 let head = format!(
                     "`{}` carries {} value(s), and this case binds {}",
@@ -1350,13 +1352,16 @@ impl Lowerer {
                         head
                     } else {
                         format!(
-                            "{head}; bind every one of them, or write `case {}:` to bind none",
+                            "{head}; bind every one of them (`_` discards one), or write `case {}:` to bind none",
                             a.variant
                         )
                     },
                 ));
             }
+            // A `_` takes whatever the variant carries, so there is no type
+            // to compare.
             for (b, w) in a.binds.iter().zip(want.iter()) {
+                let Some(b) = b else { continue };
                 if !self.assignable(*w, b.ty) {
                     return Err(Diag::new(b.span, self.mismatch(b.ty, *w)));
                 }
@@ -1459,6 +1464,9 @@ impl Lowerer {
             // which names it may do it to.
             let binds_from = self.payload_binds.len();
             for (idx, b) in a.binds.iter().enumerate() {
+                // A discard projects nothing and enters no scope, so it can
+                // neither shadow nor be shadowed and may repeat freely.
+                let Some(b) = b else { continue };
                 self.check_shadow(&b.name, b.span)?;
                 let d = self.new_val(self.irty(b.ty));
                 self.push(Inst::EnumPayload {

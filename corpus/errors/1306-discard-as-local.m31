@@ -1,0 +1,4 @@
+// `_` is not an identifier: only a `case` payload may be written `_`, and a
+// declaration is not one.
+int _ = 3;
+print(1);

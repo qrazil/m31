@@ -51,7 +51,10 @@ regeneration for a new Unicode version moves both at once.
 
 ### 1.3 Identifiers
 
-A letter or `_`, then letters, digits or `_`. Case-sensitive.
+A letter or `_`, then letters, digits or `_`. Case-sensitive. **A lone `_` is
+not an identifier**: it is the discard, a token of its own, accepted only as a
+`case` payload (§5.6). `_` as a value, a variable, a parameter or a field is
+a compile error.
 
 ### 1.4 Keywords
 
@@ -1744,9 +1747,9 @@ Bindings are **type-first**, like every other binding in the language, and
 they bind the payload positionally. A binding is borrowed from the enum,
 which stays alive for the whole `match`.
 
-**A case binds every value its variant carries, or none of them.** None is
-`case Tag:` — the spelling a payload-less variant already uses — and it means
-what it looks like: this arm does not read the payload.
+**A case has one position for every value its variant carries, or none.** None
+is `case Tag:` — the spelling a payload-less variant already uses — and it
+means what it looks like: this arm does not read the payload.
 
 ```c
 match (e) {
@@ -1757,9 +1760,27 @@ match (e) {
 }
 ```
 
-There is no `_`, and no way to name some of a payload and not the rest: an
-arm that wants two of three values names all three. One rule, and nothing
-new to read.
+**A payload that is not read is written `_`**, alone — no type, no name:
+
+```c
+match (r) {
+    case Ok(int count): { return count; }
+    case Err(_):        { return -1; }
+}
+
+case Ambiguous(_, int n):  // the second value only
+case Rect(_, _):           // both discarded; `case Rect:` says the same
+```
+
+A discard is not a binding. It introduces **no name**, so it never meets the
+shadowing rule (§4.1), may appear any number of times in one arm, and leaves
+nothing to read, assign or move. It takes no type because the variant already
+says what the position holds — `case Err(str _)` is an error, not a longer
+spelling — and so it also follows a generic enum's instantiation without
+being written again. It still stands for one position: `case Ok(_, _)` on a
+`Result` is the same arity error as naming two values would be. `_` is
+accepted nowhere else (§1.3); in particular `int _ = f();` is refused, so a
+call whose result is unwanted is still a statement of its own.
 
 This is **not** a `default`. Every variant still needs its own case, so
 adding a variant is still a compile error at every `match` that has to learn
@@ -2530,9 +2551,10 @@ Stated so the absence is a decision and not an oversight:
     is refused for the same reason as `+=`, and the same pin (§6.1)
   - a range as a **value**: `a .. b` is `for` syntax and nothing else, so
     there is no range type, no iterator protocol and no step (§5.5)
-  - `_`, for a binding that is not used — a `match` arm that reads no part
-    of a payload names none of it (`case Tag:`, §5.6), and there is nothing
-    else in the language that binds a name you cannot choose not to write
+  - `_` as a general-purpose discard — it is a `case` payload and nothing
+    else (§5.6). Every other binding is a name the program chose to write,
+    so there is no unused one to hide; variable declarations, parameters,
+    loop variables and lambda parameters all keep their names
   - variadic functions
   - constraints on type parameters
   - reflection, runtime type queries, downcasting from an interface
@@ -2592,9 +2614,10 @@ constblock  = "const" IDENT { "," IDENT } block ;    (* §4.1a: freezes the
                                                          `decl` below *)
 match       = "match" "(" expr ")" "{" { case } "}" ;
 case        = "case" IDENT [ "(" bind { "," bind } ")" ] ":" block ;
-                                                      (* all the payload's
-                                                         values, or none *)
-bind        = type IDENT ;
+                                                      (* one bind per value
+                                                         the variant carries,
+                                                         or none *)
+bind        = type IDENT | "_" ;                      (* `_`: discard, no type *)
 
 decl        = [ "const" ] type IDENT "=" expr ";" ;   (* always initialised; const
                                                          binds a snapshot, §4.1 *)

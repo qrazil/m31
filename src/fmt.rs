@@ -826,7 +826,10 @@ impl Fmt {
                     let binds: Vec<String> = a
                         .binds
                         .iter()
-                        .map(|b| format!("{} {}", self.ty(b.ty), b.name))
+                        .map(|b| match b {
+                            Some(b) => format!("{} {}", self.ty(b.ty), b.name),
+                            None => "_".to_string(),
+                        })
                         .collect();
                     let head = if binds.is_empty() {
                         a.variant.clone()

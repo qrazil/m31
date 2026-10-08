@@ -1,0 +1,4 @@
+corpus/errors/1311-discard-on-payloadless-variant.m31:7:5: `None` carries 0 value(s), and this case binds 1
+  |
+7 |     case None(_): {
+  |     ^

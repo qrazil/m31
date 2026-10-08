@@ -1,0 +1,6 @@
+// A parameter is a name; `_` is not one.
+int pick(int _, int second) {
+    return second;
+}
+
+print(pick(1, 2));

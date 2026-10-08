@@ -371,10 +371,14 @@ pub enum Stmt {
 /// One arm of a `match`: a variant name, the bindings for its payload, and
 /// the body. Bindings are type-first like every other binding in the
 /// language -- `case Some(int v)`.
+///
+/// A payload written `_` is a discard: `None` here. It binds no name and
+/// writes no type (the variant already says what it carries), so it takes no
+/// part in scoping, shadowing or the payload-move rules.
 #[derive(Debug, Clone)]
 pub struct MatchArm {
     pub variant: String,
-    pub binds: Vec<Param>,
+    pub binds: Vec<Option<Param>>,
     pub body: Vec<Stmt>,
     pub span: Span,
 }

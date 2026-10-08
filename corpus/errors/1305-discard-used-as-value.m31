@@ -1,0 +1,11 @@
+// `_` discards a `case` payload; it is not a name, so there is nothing to read
+// back out of it.
+Result<int, str> r = Result<int, str>.Err("no");
+match (r) {
+    case Ok(int value): {
+        print(value);
+    }
+    case Err(_): {
+        print(_);
+    }
+}

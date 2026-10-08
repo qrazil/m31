@@ -1,0 +1,4 @@
+corpus/errors/1310-discard-wrong-arity.m31:4:5: `Ok` carries 1 value(s), and this case binds 2; bind every one of them (`_` discards one), or write `case Ok:` to bind none
+  |
+4 |     case Ok(_, _): {
+  |     ^

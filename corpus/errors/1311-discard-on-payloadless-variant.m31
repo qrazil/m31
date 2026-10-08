@@ -1,0 +1,10 @@
+// `None` carries nothing, so there is nothing for `_` to discard.
+Option<int> o = Option<int>.None;
+match (o) {
+    case Some(_): {
+        print("some");
+    }
+    case None(_): {
+        print("none");
+    }
+}

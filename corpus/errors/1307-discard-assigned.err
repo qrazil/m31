@@ -1,0 +1,4 @@
+corpus/errors/1307-discard-assigned.m31:6:1: `_` is a discard and cannot be used as a value
+  |
+6 | _ = compute();
+  | ^

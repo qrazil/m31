@@ -1,0 +1,4 @@
+corpus/errors/1309-discard-with-type.m31:7:18: a discard is written `_` alone, without a type: write `case V(_)`, not `case V(T _)`
+  |
+7 |     case Err(str _): {
+  |                  ^
