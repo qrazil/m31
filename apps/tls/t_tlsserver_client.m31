@@ -1,0 +1,89 @@
+// The m31 TLS client (`lib/tls.m31`) against this repository's TLS server,
+// driven from `test_tlsserver.sh`.
+//
+//   t_tlsserver_client NAME ADDRESS PORT CA_FILE
+//
+// Dials ADDRESS (a literal IP; this build's `tls.connect` cannot resolve
+// names), then runs the handshake over that socket expecting a certificate for
+// NAME. Connects with `tls.Trust.CaFile(CA_FILE)`, sends one GET and prints
+// `status LINE` (the response's first line) and `size N` (octets of body), or
+// `error: REASON` and exits 1. This checks the whole chain: certificate chain
+// validation against the CA, CertificateVerify, both Finished messages and the
+// application keys.
+
+import io;
+import net;
+import os;
+import tls;
+
+void fail(str reason) {
+    print("error: " + reason);
+    os.exit(1);
+}
+
+net.Conn dial(str address, int port) {
+    match (net.connect(address, port)) {
+        case Ok(net.Conn raw): {
+            return raw;
+        }
+        case Err(net.Error dial_error): {
+            fail("cannot connect: " + dial_error.to_str());
+            trap("unreachable");
+        }
+    }
+}
+
+List<str> arguments = os.args();
+if (arguments.size() != 5) {
+    io.eprint("usage: t_tlsserver_client NAME ADDRESS PORT CA_FILE");
+    os.exit(2);
+}
+int port = 0;
+match (arguments[3].parse_int()) {
+    case Some(int parsed): {
+        port = parsed;
+    }
+    case None: {
+        io.eprint("the port must be a number");
+        os.exit(2);
+    }
+}
+net.Conn raw = dial(arguments[2], port);
+match (tls.connect_over(raw, arguments[1], tls.Trust.CaFile(arguments[4]))) {
+    case Err(tls.Error connect_error): {
+        fail(connect_error.to_str());
+    }
+    case Ok(tls.Conn conn): {
+        str request = "GET / HTTP/1.1\r\nHost: " + arguments[1] + "\r\nConnection: close\r\n\r\n";
+        match (conn.write(request.to_bytes())) {
+            case Err(io.Error write_error): {
+                fail("write: " + write_error.to_str());
+            }
+            case Ok(int sent): {
+            }
+        }
+        match (conn.read_all()) {
+            case Err(io.Error read_error): {
+                fail("read: " + read_error.to_str());
+            }
+            case Ok(bytes response): {
+                int head_end = 0;
+                bytes marker = "\r\n\r\n".to_bytes();
+                while (head_end + 4 <= response.size() && response.substr(head_end, head_end + 4) != marker) {
+                    head_end = head_end + 1;
+                }
+                bytes head = response.substr(0, head_end);
+                match (head.utf8()) {
+                    case Some(str head_text): {
+                        print("status " + head_text.split("\r\n")[0]);
+                    }
+                    case None: {
+                        fail("the response head is not text");
+                    }
+                }
+                print("size " + (response.size() - head_end - 4).to_str());
+            }
+        }
+        Result<bool, io.Error> closed = conn.close();
+    }
+}

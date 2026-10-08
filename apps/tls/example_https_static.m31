@@ -1,0 +1,92 @@
+// The smallest https server: accept TCP connections, run the TLS 1.3
+// handshake on each, answer whatever request arrives with one static page.
+//
+//   example_https_static CHAIN_PEM KEY_PEM [PORT]
+//
+// Prints `listening on PORT` once it can take connections (PORT 0 or none
+// picks a free one). Serves one connection at a time; a real server accepts
+// in a loop and gives each connection its own greenthread, as `httpserver`
+// does.
+
+import io;
+import net;
+import os;
+import tls_server;
+
+// A line on standard output, handed to the kernel at once so a test (or a
+// supervisor) polling the log sees it without waiting for a full buffer.
+void say(str line) {
+    Result<int, io.Error> wrote = io.stdout().write((line + "\n").to_bytes());
+}
+
+const str PAGE = "hello over https\n";
+
+void serve(tls_server.Conn secure) {
+    match (secure.read_until("\r\n\r\n".to_bytes(), 65536)) {
+        case Err(io.Error read_error): {
+            return;
+        }
+        case Ok(bytes request): {
+            str head = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " + PAGE.size().to_str() + "\r\nConnection: close\r\n\r\n";
+            match (secure.write((head + PAGE).to_bytes())) {
+                case Ok(int sent): {
+                }
+                case Err(io.Error write_error): {
+                }
+            }
+        }
+    }
+    Result<bool, io.Error> closed = secure.close();
+}
+
+List<str> arguments = os.args();
+if (arguments.size() < 3) {
+    io.eprint("usage: example_https_static CHAIN_PEM KEY_PEM [PORT]");
+    os.exit(2);
+}
+int port = 0;
+if (arguments.size() > 3) {
+    match (arguments[3].parse_int()) {
+        case Some(int parsed): {
+            port = parsed;
+        }
+        case None: {
+            io.eprint("the port is a number");
+            os.exit(2);
+        }
+    }
+}
+match (tls_server.load_config_files(arguments[1], arguments[2])) {
+    case Err(tls_server.ConfigError config_error): {
+        io.eprint("cannot load the certificate and key: " + config_error.to_str());
+        os.exit(1);
+    }
+    case Ok(tls_server.Config config): {
+        match (net.listen("127.0.0.1", port)) {
+            case Err(net.Error listen_error): {
+                io.eprint("cannot listen: " + listen_error.to_str());
+                os.exit(1);
+            }
+            case Ok(net.Listener listener): {
+                say("listening on " + listener.local().port().to_str());
+                while (true) {
+                    match (listener.accept()) {
+                        case Err(net.Error accept_error): {
+                            io.eprint("accept: " + accept_error.to_str());
+                        }
+                        case Ok(net.Conn raw): {
+                            match (tls_server.accept(raw, config)) {
+                                case Ok(tls_server.Conn secure): {
+                                    serve(secure);
+                                }
+                                case Err(tls_server.Error handshake_error): {
+                                    io.eprint("handshake failed: " + handshake_error.to_str());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,34 @@
+// Key and chain loading for `lib/tls_server.m31`, driven from
+// `test_tlsserver.sh`.
+//
+//   t_tlsserver_config CHAIN KEY [NAME ...]
+//
+// Prints `ok` and, for each NAME, `serves NAME yes|no`; or `error: REASON` and
+// exits 1. Whatever the files hold, nothing printed here may contain a byte of
+// the key: the driver greps this output for the key's base64 text.
+
+import io;
+import os;
+import tls_server;
+
+List<str> arguments = os.args();
+if (arguments.size() < 3) {
+    io.eprint("usage: t_tlsserver_config CHAIN KEY [NAME ...]");
+    os.exit(2);
+}
+match (tls_server.load_config_files(arguments[1], arguments[2])) {
+    case Err(tls_server.ConfigError config_error): {
+        print("error: " + config_error.to_str());
+        os.exit(1);
+    }
+    case Ok(tls_server.Config config): {
+        print("ok");
+        for (int index in 3 .. arguments.size()) {
+            if (config.serves(arguments[index])) {
+                print("serves " + arguments[index] + " yes");
+            } else {
+                print("serves " + arguments[index] + " no");
+            }
+        }
+    }
+}
