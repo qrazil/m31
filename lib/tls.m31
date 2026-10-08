@@ -8,6 +8,8 @@
 //   tls.connect_at(host, port, trust, now) -> Result<Conn, Error>   the clock given, in epoch seconds
 //   tls.connect_over(socket, host, trust)  -> Result<Conn, Error>   over a net.Conn already open
 //   tls.connect_over_at(socket, host, trust, now)                   the same, the clock given
+//   tls.connect_over_deadline(socket, host, trust, deadline_ms, timeout_ms: 0)
+//                                         a total bound on the handshake (see below)
 //   tls.pinned_key(sha256)           -> Trust            from 32 octets
 //   tls.pinned_key_hex(text)         -> Option<Trust>    from 64 hex digits
 //   tls.Trust.SystemRoots            the operating system's CA bundle
@@ -61,9 +63,13 @@
 // transcript, and the server's Finished MAC, or it does not exist. There is
 // no insecure `Trust` variant, no option, no environment variable.
 //
+// Server certificates may be RSA, ECDSA (P-256, P-384) or Ed25519 (RFC 8410),
+// and so may the signatures in the chain above them. A host that is an IP
+// literal is matched against the certificate's iPAddress entries only (never
+// a dNSName), and sends no server_name (RFC 6066 §3).
+//
 // Not done: CRLs (and fetching anything: see "revocation" below), name
-// constraints, IP-address certificates, and a public suffix list (`*.co.uk` is
-// accepted as a wildcard).
+// constraints, and a public suffix list (`*.co.uk` is accepted as a wildcard).
 //
 // --- revocation: stapled OCSP only -------------------------------------------
 //
@@ -290,10 +296,18 @@
 // connection when a failure comes, as `net.Conn`'s do, but the failure ends
 // the connection so only `read` of what was buffered still works.
 //
+// **The handshake can be bounded as a whole.** `net.Conn`'s read timeout limits
+// one read, so a server dripping a byte at a time inside it can hold a
+// handshake open for as long as it likes. `connect_over_deadline` adds a total
+// (`deadlinestream`): once it passes the handshake fails with `Error.Io`. It
+// reads the wall clock, as the language has no monotonic clock. The plain
+// `connect` forms keep the per-read behaviour of the socket they were given.
+//
 // **A `Conn` sends `close_notify` and closes the socket when its last
 // reference goes**, as a `net.Conn` closes itself.
 
 import consttime;
+import deadlinestream;
 import io;
 import net;
 import random;
@@ -303,6 +317,7 @@ import x25519;
 import x509;
 import x509chain;
 import ecdsa;
+import ed25519;
 import rsa;
 import hexcodec;
 import date;
@@ -331,6 +346,7 @@ const int GROUP_SECP256R1 = 0x0017;
 const int CURVE_TYPE_NAMED = 3;
 const int SCHEME_ECDSA_P256_SHA256 = 0x0403;
 const int SCHEME_ECDSA_P384_SHA384 = 0x0503;
+const int SCHEME_ED25519 = 0x0807;
 const int SCHEME_RSA_PSS_RSAE_SHA256 = 0x0804;
 const int SCHEME_RSA_PSS_RSAE_SHA384 = 0x0805;
 const int SCHEME_RSA_PSS_RSAE_SHA512 = 0x0806;
@@ -1033,6 +1049,7 @@ bytes client_hello(str host, bytes client_random, bytes session_id, bytes public
     bytes schemes = [];
     put_u16(schemes, SCHEME_ECDSA_P256_SHA256);
     put_u16(schemes, SCHEME_ECDSA_P384_SHA384);
+    put_u16(schemes, SCHEME_ED25519);
     put_u16(schemes, SCHEME_RSA_PSS_RSAE_SHA256);
     put_u16(schemes, SCHEME_RSA_PSS_RSAE_SHA384);
     put_u16(schemes, SCHEME_RSA_PSS_RSAE_SHA512);
@@ -1043,6 +1060,7 @@ bytes client_hello(str host, bytes client_random, bytes session_id, bytes public
     bytes certificate_schemes = [];
     put_u16(certificate_schemes, SCHEME_ECDSA_P256_SHA256);
     put_u16(certificate_schemes, SCHEME_ECDSA_P384_SHA384);
+    put_u16(certificate_schemes, SCHEME_ED25519);
     put_u16(certificate_schemes, SCHEME_RSA_PSS_RSAE_SHA256);
     put_u16(certificate_schemes, SCHEME_RSA_PSS_RSAE_SHA384);
     put_u16(certificate_schemes, SCHEME_RSA_PSS_RSAE_SHA512);
@@ -1756,6 +1774,18 @@ Result<void, Error> verify_rsa_pkcs1(x509.Certificate leaf, rsa.Hash hash, bytes
     }
 }
 
+// Ed25519 (RFC 8032, pure mode) signs the content itself, not a digest of
+// it (RFC 8446 §4.2.3), and only an Ed25519 certificate key can have made it.
+Result<void, Error> verify_ed25519_signature(x509.Certificate leaf, bytes content, bytes signature) {
+    if (leaf.public_key.algorithm != x509.OBJECT_ID_ED25519) {
+        return Result<void, Error>.Err(Error.UnsupportedSignature);
+    }
+    if (!ed25519.verify(leaf.public_key.key_bytes, content, signature)) {
+        return Result<void, Error>.Err(Error.BadSignature);
+    }
+    return Result<void, Error>.Ok;
+}
+
 Result<void, Error> check_certificate_verify(bytes message, x509.Certificate leaf, bytes transcript_hash) {
     Reader reader = Reader(message_body(message));
     int scheme = reader.u16()?;
@@ -1769,6 +1799,9 @@ Result<void, Error> check_certificate_verify(bytes message, x509.Certificate lea
     }
     if (scheme == SCHEME_ECDSA_P384_SHA384) {
         return verify_signature(ecdsa.p384(), x509.OID_CURVE_P384, leaf, sha512.sum384(content), signature);
+    }
+    if (scheme == SCHEME_ED25519) {
+        return verify_ed25519_signature(leaf, content, signature);
     }
     if (scheme == SCHEME_RSA_PSS_RSAE_SHA256) {
         return verify_rsa_pss(leaf, rsa.Hash.Sha256, sha256.sum(content), signature);
@@ -2162,6 +2195,9 @@ Result<void, Error> verify_ecdsa_12(x509.Certificate leaf, int scheme, bytes con
 // suite with RSA-PSS or PKCS#1 v1.5), and that verifies under the leaf's key.
 Result<void, Error> verify_key_exchange_signature(tls12.Suite suite, x509.Certificate leaf, int scheme, bytes content, bytes signature) {
     if (suite.is_ecdsa()) {
+        if (scheme == SCHEME_ED25519) {
+            return verify_ed25519_signature(leaf, content, signature);
+        }
         if (scheme == SCHEME_ECDSA_P256_SHA256 || scheme == SCHEME_ECDSA_P384_SHA384) {
             return verify_ecdsa_12(leaf, scheme, content, signature);
         }
@@ -2437,7 +2473,30 @@ pub Result<Conn, Error> connect_over_at(net.Conn socket, str host, Trust trust, 
     return handshake_over(socket, host, trust, anchors, now, true, tlsresume.cache(0), Option<clientcert.Identity>.None);
 }
 
-Result<Conn, Error> handshake_over(net.Conn socket, str host, Trust trust, List<x509.Certificate> anchors, int now, bool fixed_clock, tlsresume.SessionCache cache, Option<clientcert.Identity> identity) {
+/// `connect_over` with a bound on the whole handshake: `deadline_ms` is the
+/// total time the handshake (reads and writes together) may take, and
+/// `timeout_ms` the longest any one read may wait; 0 means no limit for
+/// either. A server that drips one byte at a time inside the per-read limit
+/// is cut off at the deadline. Running out of either is `Error.Io`. While the
+/// handshake runs this sets the socket's read and write timeouts itself, and
+/// it clears both when the handshake ends, so set any timeouts for the
+/// connection's life afterwards. The clock is the wall clock; see
+/// `deadlinestream`.
+pub Result<Conn, Error> connect_over_deadline(net.Conn socket, str host, Trust trust, int deadline_ms, int timeout_ms = 0) {
+    List<x509.Certificate> anchors = load_anchors(trust)?;
+    deadlinestream.Bounded bounded = deadlinestream.bound(socket, deadline_ms, timeout_ms);
+    Result<Conn, Error> opened = handshake_over(bounded, host, trust, anchors, date.now(), false, tlsresume.cache(0), Option<clientcert.Identity>.None);
+    match (opened) {
+        case Ok(Conn connection): {
+            bounded.release();
+        }
+        case Err(Error handshake_error): {
+        }
+    }
+    return opened;
+}
+
+Result<Conn, Error> handshake_over(io.Stream socket, str host, Trust trust, List<x509.Certificate> anchors, int now, bool fixed_clock, tlsresume.SessionCache cache, Option<clientcert.Identity> identity) {
     tls13record.Connection record = tls13record.connection(socket);
     Outcome outcome = Outcome();
     match (run_handshake(record, host, trust, anchors, now, cache, outcome, identity)) {

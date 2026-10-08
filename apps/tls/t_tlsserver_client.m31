@@ -1,7 +1,7 @@
 // The m31 TLS client (`lib/tls.m31`) against this repository's TLS server,
 // driven from `test_tlsserver.sh`.
 //
-//   t_tlsserver_client NAME ADDRESS PORT CA_FILE
+//   t_tlsserver_client NAME ADDRESS PORT CA_FILE [DEADLINE_MS [TIMEOUT_MS]]
 //
 // Dials ADDRESS (a literal IP; this build's `tls.connect` cannot resolve
 // names), then runs the handshake over that socket expecting a certificate for
@@ -9,7 +9,8 @@
 // `status LINE` (the response's first line) and `size N` (octets of body), or
 // `error: REASON` and exits 1. This checks the whole chain: certificate chain
 // validation against the CA, CertificateVerify, both Finished messages and the
-// application keys.
+// application keys. With DEADLINE_MS the handshake runs under
+// `tls.connect_over_deadline` (a total bound, and TIMEOUT_MS per read).
 
 import io;
 import net;
@@ -34,8 +35,8 @@ net.Conn dial(str address, int port) {
 }
 
 List<str> arguments = os.args();
-if (arguments.size() != 5) {
-    io.eprint("usage: t_tlsserver_client NAME ADDRESS PORT CA_FILE");
+if (arguments.size() < 5 || arguments.size() > 7) {
+    io.eprint("usage: t_tlsserver_client NAME ADDRESS PORT CA_FILE [DEADLINE_MS [TIMEOUT_MS]]");
     os.exit(2);
 }
 int port = 0;
@@ -48,8 +49,31 @@ match (arguments[3].parse_int()) {
         os.exit(2);
     }
 }
+
+int number_at(List<str> arguments, int index) {
+    if (index >= arguments.size()) {
+        return 0;
+    }
+    match (arguments[index].parse_int()) {
+        case Some(int parsed): {
+            return parsed;
+        }
+        case None: {
+            io.eprint("the deadline and the timeout must be numbers");
+            os.exit(2);
+            trap("unreachable");
+        }
+    }
+}
+
 net.Conn raw = dial(arguments[2], port);
-match (tls.connect_over(raw, arguments[1], tls.Trust.CaFile(arguments[4]))) {
+Result<tls.Conn, tls.Error> opened = Result<tls.Conn, tls.Error>.Err(tls.Error.Closed);
+if (arguments.size() > 5) {
+    opened = tls.connect_over_deadline(raw, arguments[1], tls.Trust.CaFile(arguments[4]), number_at(arguments, 5), timeout_ms: number_at(arguments, 6));
+} else {
+    opened = tls.connect_over(raw, arguments[1], tls.Trust.CaFile(arguments[4]));
+}
+match (opened) {
     case Err(tls.Error connect_error): {
         fail(connect_error.to_str());
     }

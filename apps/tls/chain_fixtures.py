@@ -26,12 +26,13 @@ about validity, and the clock the tests hand the client is `NOW` below
 Needs the `cryptography` package.
 """
 import datetime
+import ipaddress
 import os
 import sys
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, padding, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 NOW = int(datetime.datetime(2030, 1, 1, 12, tzinfo=datetime.timezone.utc).timestamp())
@@ -49,6 +50,8 @@ def new_key(kind):
         return ec.generate_private_key(ec.SECP256R1())
     if kind == "p384":
         return ec.generate_private_key(ec.SECP384R1())
+    if kind == "ed25519":
+        return ed25519.Ed25519PrivateKey.generate()
     if kind == "rsa":
         return rsa.generate_private_key(65537, 2048)
     if kind == "rsa1024":
@@ -57,6 +60,8 @@ def new_key(kind):
 
 
 def default_hash(key):
+    if isinstance(key, ed25519.Ed25519PrivateKey):
+        return None
     if isinstance(key, ec.EllipticCurvePrivateKey) and key.curve.name == "secp384r1":
         return hashes.SHA384()
     return hashes.SHA256()
@@ -106,7 +111,9 @@ def issue(subject, issuer, *, ca=False, pathlen=None, key_usage="auto", eku="aut
     if eku is not None:
         builder = builder.add_extension(x509.ExtendedKeyUsage(eku), False)
     if san:
-        builder = builder.add_extension(x509.SubjectAlternativeName([x509.DNSName(n) for n in san]), False)
+        names = [x509.IPAddress(n) if isinstance(n, (ipaddress.IPv4Address, ipaddress.IPv6Address))
+                 else x509.DNSName(n) for n in san]
+        builder = builder.add_extension(x509.SubjectAlternativeName(names), False)
     if critical_unknown:
         builder = builder.add_extension(x509.UnrecognizedExtension(UNKNOWN_CRITICAL_OID, b"\x05\x00"), True)
     signing_hash = signature_hash or default_hash(issuer.key)
@@ -237,6 +244,48 @@ def generate(out):
     int_pss_384 = intermediate("Fixture Intermediate PSS 384", root_rsa, "p256", pss=True, signature_hash=hashes.SHA384())
     write(out, "ok_rsa_pss_signature_sha384", [root_rsa], leaf(int_pss_384), [int_pss_384])
 
+    # --- Ed25519 (RFC 8410): as the leaf's key, and as the signature on a link ------------
+    root_ed = root("Fixture Root Ed25519", "ed25519")
+    int_ed = intermediate("Fixture Intermediate Ed25519", root_ed, "ed25519")
+    write(out, "ok_ed25519_chain", [root_ed], leaf(int_ed, "ed25519"), [int_ed])
+    write(out, "ok_ed25519_leaf_under_ed25519_ca", [root_ed], leaf(root_ed, "ed25519"), [])
+    write(out, "ok_ed25519_leaf_under_p256_ca", [root_p256], leaf(int_p256, "ed25519"), [int_p256])
+    write(out, "ok_ed25519_leaf_under_rsa_ca", [root_rsa], leaf(int_rsa, "ed25519"), [int_rsa])
+    write(out, "ok_p256_leaf_under_ed25519_ca", [root_ed], leaf(int_ed, "p256"), [int_ed])
+    write(out, "ok_rsa_leaf_under_ed25519_ca", [root_ed], leaf(int_ed, "rsa"), [int_ed])
+    int_ed_under_p256 = intermediate("Fixture Ed25519 under P256", root_p256, "ed25519")
+    write(out, "ok_ed25519_intermediate_under_p256", [root_p256], leaf(int_ed_under_p256, "p256"), [int_ed_under_p256])
+
+    # --- IP-literal hosts: only an iPAddress SAN entry matches ---------------------------
+    loopback4 = ipaddress.IPv4Address("127.0.0.1")
+    loopback6 = ipaddress.IPv6Address("::1")
+    write(out, "ok_ip_v4", [root_p256], leaf(int_p256, san=(loopback4,)), [int_p256], host="127.0.0.1")
+    write(out, "ok_ip_v6", [root_p256], leaf(int_p256, san=(loopback6,)), [int_p256], host="::1")
+    write(out, "ok_ip_among_names", [root_p256], leaf(int_p256, san=("localhost", loopback4, loopback6)),
+          [int_p256], host="::1")
+    write(out, "ok_ip_ed25519_leaf", [root_ed], leaf(int_ed, "ed25519", san=(loopback4,)), [int_ed],
+          host="127.0.0.1")
+    write(out, "ok_dns_host_with_ip_san_too", [root_p256], leaf(int_p256, san=("localhost", loopback4)),
+          [int_p256])
+    write(out, "bad_ip_v4_other_address", [root_p256], leaf(int_p256, san=(ipaddress.IPv4Address("127.0.0.2"),)),
+          [int_p256], host="127.0.0.1", expect="HostnameMismatch")
+    write(out, "bad_ip_v6_other_address", [root_p256], leaf(int_p256, san=(ipaddress.IPv6Address("::2"),)),
+          [int_p256], host="::1", expect="HostnameMismatch")
+    write(out, "bad_ip_v4_host_v6_entry", [root_p256], leaf(int_p256, san=(loopback6,)), [int_p256],
+          host="127.0.0.1", expect="HostnameMismatch")
+    write(out, "bad_ip_v4_mapped_is_another_address", [root_p256],
+          leaf(int_p256, san=(ipaddress.IPv6Address("::ffff:127.0.0.1"),)), [int_p256],
+          host="127.0.0.1", expect="HostnameMismatch")
+    write(out, "bad_ip_host_dns_only_cert", [root_p256], leaf(int_p256, san=("localhost",)), [int_p256],
+          host="127.0.0.1", expect="HostnameMismatch")
+    write(out, "bad_ip_host_dns_name_spelling_the_address", [root_p256], leaf(int_p256, san=("127.0.0.1",)),
+          [int_p256], host="127.0.0.1", expect="HostnameMismatch", live=False)
+    write(out, "bad_ip_host_common_name_only", [root_p256],
+          leaf(int_p256, san=None, common_name="127.0.0.1"), [int_p256],
+          host="127.0.0.1", expect="HostnameMismatch")
+    write(out, "bad_dns_host_ip_san_only", [root_p256], leaf(int_p256, san=(loopback4,)), [int_p256],
+          host="localhost", expect="HostnameMismatch")
+
     cross_root = root("Fixture Cross Root")
     cross_signed = Node("Fixture Intermediate P256")
     cross_signed.key = int_p256.key
@@ -345,6 +394,27 @@ def generate(out):
     tampered = tamper(leaf_p256.cert, b"leaf.example", b"leaf.exbmple")
     write(out, "bad_signature_tbs_changed", [root_p256], leaf_p256, [int_p256], expect="BadSignature",
           leaf_pem=der_pem(tampered))
+    # Ed25519: a flipped byte in the leaf's signature (under an Ed25519 CA and under a P-256 CA),
+    # in the intermediate's, in the signed part, and a leaf key that is not the issuer's.
+    for tag, ca_node in (("ed25519_ca", int_ed), ("p256_ca", int_p256)):
+        ed_leaf = leaf(ca_node, "ed25519")
+        ed_der = bytearray(ed_leaf.cert.public_bytes(serialization.Encoding.DER))
+        ed_der[-10] ^= 0x01
+        write(out, f"bad_ed25519_signature_leaf_under_{tag}", [root_ed if tag == "ed25519_ca" else root_p256],
+              ed_leaf, [ca_node], expect="BadSignature", leaf_pem=der_pem(bytes(ed_der)))
+    ed_int_der = bytearray(int_ed.cert.public_bytes(serialization.Encoding.DER))
+    ed_int_der[-10] ^= 0x01
+    write(out, "bad_ed25519_signature_intermediate", [root_ed], leaf(int_ed, "p256"), [],
+          expect="BadSignature", rest_pem=der_pem(bytes(ed_int_der)))
+    ed_signed_leaf = leaf(int_ed, "ed25519")
+    write(out, "bad_ed25519_signature_tbs_changed", [root_ed], ed_signed_leaf, [int_ed], expect="BadSignature",
+          leaf_pem=der_pem(tamper(ed_signed_leaf.cert, b"leaf.example", b"leaf.exbmple")))
+    forged_ed_int = Node("Fixture Intermediate Ed25519", "ed25519")
+    forged_ed_int.cert = issue(forged_ed_int, int_ed, ca=True, san=None)
+    ed_forged = leaf(int_ed, "ed25519")
+    ed_forged.cert = issue(ed_forged, forged_ed_int, key_usage="leaf", authority_key_id=False)
+    write(out, "bad_ed25519_signed_by_other_key", [root_ed], ed_forged, [int_ed], expect="BadSignature")
+
     bad_int = bytearray(int_p256.cert.public_bytes(serialization.Encoding.DER))
     bad_int[-10] ^= 0x01
     write(out, "bad_signature_intermediate", [root_p256], leaf_p256, [], expect="BadSignature",

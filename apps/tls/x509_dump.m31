@@ -47,6 +47,11 @@ void print_certificate(int number, x509.Certificate certificate) {
     print("key_exponent " + or_dash(certificate.public_key.public_exponent.hex()));
     print("key_bytes " + certificate.public_key.key_bytes.hex());
     print("san " + flag_text(certificate.has_subject_alt_name) + " " + or_dash(certificate.dns_names.join(",")));
+    List<str> address_text = [];
+    for (bytes address in certificate.ip_addresses) {
+        address_text.push(address.hex());
+    }
+    print("san_ip_addresses " + or_dash(address_text.join(",")));
     print("basic_constraints " + flag_text(certificate.has_basic_constraints) + " " + flag_text(certificate.is_ca) + " " + certificate.path_length.to_str());
     print("key_usage " + flag_text(certificate.has_key_usage) + " " + certificate.key_usage.to_str());
     print("extended_key_usage " + or_dash(certificate.extended_key_usages.join(",")));
