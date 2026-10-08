@@ -159,7 +159,8 @@ table of the common ones and suggests the expansion:
 cfg→config  ctx→context  num→number  pos→position  arr→array  cur→current
 prev→previous  src→source  dst→destination  buf→buffer  ptr→pointer
 elem→element  args→arguments  param→parameter  tok→token  err→error
-dir→directory  len→length`
+dir→directory  len→length  conn→connection  req→request
+resp→response`
 
 The table is a list of *observed* abbreviations, not a dictionary — no tool
 can decide that `fd` is cryptic and `url` is not, and this document will not
@@ -463,6 +464,11 @@ the same letter in two functions counts once per line:
 ---
 
 ## 8. Decisions on the open questions (locked)
+
+0. **Full names.** The user's standing preference is a spelled-out word over a
+   clipped one: `connection`, not `conn`; `request`, not `req`. The table in
+   §3.3 is how the lint holds the line, and grows whenever review finds another.
+
 
 1. **RFC-transcribed names are renamed.** `A`, `K`, `x1`, `t0` become role
    names (`ROUND_CONSTANTS`, `limb`, ...), with the RFC's name in a trailing

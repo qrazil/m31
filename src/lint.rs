@@ -104,6 +104,9 @@ const ABBREVIATIONS: &[(&str, &str)] = &[
     ("err", "error"),
     ("dir", "directory"),
     ("len", "length"),
+    ("conn", "connection"),
+    ("req", "request"),
+    ("resp", "response"),
 ];
 
 pub struct Linter<'a> {
