@@ -140,7 +140,22 @@ class Peer:
         return content_type, plain
 
 
+EXTRA_CHAIN = []
+STAPLE = []
+
+
 def make_certificate(auth):
+    if os.environ.get("OCSP_CHAIN"):
+        # A real chain and the response to staple, for the stapling modes: the
+        # certificate file is the leaf then its issuer.
+        blocks = [b + b"-----END CERTIFICATE-----\n" for b in open(os.environ["OCSP_CHAIN"], "rb").read().split(b"-----END CERTIFICATE-----") if b"BEGIN" in b]
+        ders = [x509.load_pem_x509_certificate(b).public_bytes(serialization.Encoding.DER) for b in blocks]
+        EXTRA_CHAIN.extend(ders[1:])
+        if os.environ.get("OCSP_RESPONSE"):
+            STAPLE.append(open(os.environ["OCSP_RESPONSE"], "rb").read())
+        key = serialization.load_pem_private_key(open(os.environ["OCSP_KEY"], "rb").read(), None)
+        spki = key.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+        return key, ders[0], sha256(spki)
     if auth == "rsa":
         key = rsa.generate_private_key(65537, 2048)
     else:
@@ -179,6 +194,8 @@ def sign(key, auth, scheme, content):
 def certificate_message(der, tls13_format=False):
     """RFC 5246 §7.4.2's Certificate; `tls13_format` is RFC 8446's instead (context, entry extensions)."""
     entry = len(der).to_bytes(3, "big") + der
+    for extra in EXTRA_CHAIN:
+        entry += len(extra).to_bytes(3, "big") + extra
     if tls13_format:
         entry += b"\x00\x00"
         return handshake_message(11, b"\x00" + len(entry).to_bytes(3, "big") + entry)
@@ -210,6 +227,10 @@ def serve(peer, mode, auth, suite, group, key, certificate_der):
     hello_extensions = [extension(0xFF01, b"\x00"), extension(23, b""), extension(11, b"\x01\x00")]
     chosen_suite = suite
     legacy_version = 0x0303
+    if mode.startswith("staple_") and mode not in ("staple_unpromised",):
+        # The stapling modes: the server answers the client's status_request, with the
+        # empty extension RFC 6066 §8 says, or (staple_ext_data) with data it must not carry.
+        hello_extensions.append(extension(5, b"\x00" if mode == "staple_ext_data" else b""))
     if mode == "no_renegotiation_info":
         hello_extensions.pop(0)  # RFC 5746 allows a server that has no support
     if mode == "no_ems":
@@ -268,7 +289,8 @@ def serve(peer, mode, auth, suite, group, key, certificate_der):
     if mode in ("downgrade", "downgrade_tls11", "suite_tls13", "suite_cbc", "echo_session_id", "long_session_id",
                 "ext_unoffered", "ext_duplicate", "ext_sni_data", "ext_sni_empty", "ext_session_ticket", "points_no_uncompressed",
                 "version_tls11", "version_tls10", "version_ssl3", "version_future", "compression", "no_ems",
-                "ems_data", "renego_nonempty", "renego_empty_vector", "hello_trailing", "hello_no_extensions"):
+                "ems_data", "renego_nonempty", "renego_empty_vector", "hello_trailing", "hello_no_extensions",
+                "staple_ext_data"):
         report_next(peer)
         return
     transcript = client_hello + server_hello
@@ -366,6 +388,29 @@ def serve(peer, mode, auth, suite, group, key, certificate_der):
         flight.append(handshake_message(13, b"\x01\x40\x00\x04\x04\x03\x08\x04\x00\x00"))
     if mode == "cert_status":
         flight.insert(1, handshake_message(22, b"\x01\x00\x00\x00"))
+    if mode.startswith("staple_") and STAPLE:
+        response = STAPLE[0]
+        sized = len(response).to_bytes(3, "big") + response
+        status = {
+            "staple_good": b"\x01" + sized,
+            "staple_bad": b"\x01" + sized,
+            "staple_unpromised": b"\x01" + sized,
+            "staple_late": b"\x01" + sized,
+            "staple_twice": b"\x01" + sized,
+            "staple_badtype": b"\x02" + sized,
+            "staple_empty": b"\x01\x00\x00\x00",
+            "staple_trailing": b"\x01" + sized + b"\x00",
+            "staple_truncated": b"\x01" + (len(response) + 50).to_bytes(3, "big") + response,
+        }.get(mode)
+        if status is not None:
+            message = handshake_message(22, status)
+            if mode == "staple_late":
+                flight.insert(2, message)
+            elif mode == "staple_twice":
+                flight.insert(1, message)
+                flight.insert(1, message)
+            else:
+                flight.insert(1, message)
     hello_done = handshake_message(14, b"\x00" if mode == "done_body" else b"")
     if mode == "empty_done_record":
         hello_done = b""
@@ -391,7 +436,9 @@ def serve(peer, mode, auth, suite, group, key, certificate_der):
         for message in flight:
             peer.send_plain(22, message)
     if mode in ("cert_13_format", "cert_empty", "cert_request", "cert_status", "done_body", "empty_done_record",
-                "done_before_exchange", "no_exchange", "exchange_before_certificate"):
+                "done_before_exchange", "no_exchange", "exchange_before_certificate",
+                "staple_bad", "staple_unpromised", "staple_late", "staple_twice", "staple_badtype", "staple_empty",
+                "staple_trailing", "staple_truncated"):
         report_next(peer)
         return
     transcript += b"".join(flight)

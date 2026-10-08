@@ -44,6 +44,8 @@ pub fn source(name: &str) -> Option<&'static str> {
         "x25519" => include_str!("../lib/x25519.m31"),
         "scalar25519" => include_str!("../lib/scalar25519.m31"),
         "ed25519" => include_str!("../lib/ed25519.m31"),
+        "ocsp" => include_str!("../lib/ocsp.m31"),
+        "sha1digest" => include_str!("../lib/sha1digest.m31"),
         "sha256" => include_str!("../lib/sha256.m31"),
         "chacha20poly1305" => include_str!("../lib/chacha20poly1305.m31"),
         "aes" => include_str!("../lib/aes.m31"),

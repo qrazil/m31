@@ -33,7 +33,8 @@
 //   - A critical extension this module does not implement is
 //     `UnknownCriticalExtension` (RFC 5280 §4.2). The implemented ones are
 //     subjectAltName, basicConstraints, keyUsage, extendedKeyUsage,
-//     subjectKeyIdentifier and authorityKeyIdentifier; a critical
+//     subjectKeyIdentifier, authorityKeyIdentifier and TLS Feature (RFC 7633,
+//     read for `must_staple`); a critical
 //     nameConstraints, policyConstraints or certificatePolicies is therefore
 //     refused rather than silently ignored.
 //   - The same extension twice is `DuplicateExtension`.
@@ -91,6 +92,8 @@ const str OID_KEY_USAGE = "2.5.29.15";
 const str OID_SUBJECT_ALT_NAME = "2.5.29.17";
 const str OID_BASIC_CONSTRAINTS = "2.5.29.19";
 const str OID_AUTHORITY_KEY_IDENTIFIER = "2.5.29.35";
+const str OID_TLS_FEATURE = "1.3.6.1.5.5.7.1.24";
+const int TLS_FEATURE_STATUS_REQUEST = 5;
 const str OID_EXTENDED_KEY_USAGE = "2.5.29.37";
 const str OID_ANY_EXTENDED_KEY_USAGE = "2.5.29.37.0";
 const int TAG_VERSION = 0xA0;
@@ -219,6 +222,9 @@ pub type Certificate {
     pub bytes subject_key_id = [];
     pub bytes authority_key_id = [];
     pub bool unhandled_critical = false;
+    /// The TLS Feature extension (RFC 7633) lists status_request: the CA says
+    /// this certificate must always be served with a stapled OCSP response.
+    pub bool must_staple = false;
 }
 
 /// Whether this certificate names `other` as its issuer.
@@ -561,6 +567,23 @@ Result<bool, Error> read_extended_key_usage(Certificate certificate, bytes value
     return Result<bool, Error>.Ok(true);
 }
 
+// RFC 7633: `SEQUENCE OF INTEGER`, each a TLS extension number; 5 is
+// status_request, i.e. "must staple". Other numbers are not acted on, and an
+// empty or malformed list is refused.
+Result<bool, Error> read_tls_feature(Certificate certificate, bytes value) {
+    der.Element root = validate_of(value, Error.BadExtension)?;
+    List<der.Element> features = children_of(root, der.TAG_SEQUENCE, Error.BadExtension)?;
+    if (features.size() == 0) {
+        return Result<bool, Error>.Err(Error.BadExtension);
+    }
+    for (der.Element feature in features) {
+        if (integer_value_of(feature, Error.BadExtension)? == TLS_FEATURE_STATUS_REQUEST) {
+            certificate.must_staple = true;
+        }
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
 Result<bool, Error> read_subject_key_id(Certificate certificate, bytes value) {
     der.Element root = parse_of(value, Error.BadExtension)?;
     certificate.subject_key_id = octet_string_of(root, Error.BadExtension)?;
@@ -621,6 +644,8 @@ Result<bool, Error> read_extensions(Certificate certificate, der.Element wrapper
             read_key_usage(certificate, value)?;
         } else if (extension_oid == OID_EXTENDED_KEY_USAGE) {
             read_extended_key_usage(certificate, value)?;
+        } else if (extension_oid == OID_TLS_FEATURE) {
+            read_tls_feature(certificate, value)?;
         } else if (extension_oid == OID_SUBJECT_KEY_IDENTIFIER) {
             read_subject_key_id(certificate, value)?;
         } else if (extension_oid == OID_AUTHORITY_KEY_IDENTIFIER) {

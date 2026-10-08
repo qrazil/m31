@@ -139,7 +139,7 @@ scenario resume_basic full,resume,resume 8 \
     '2 psk binder=ok' "$NEVER" \
     a.example:same:1000:get a.example:same:1100:get a.example:same:1200:get
 scenario resume_second_has_psk_and_modes full,resume 8 '^step 1 .* resumed=false.*\nstep 2 .* resumed=true' \
-    '2 offered extensions=0,10,11,13,50,23,65281,43,51,45,41$' - \
+    '2 offered extensions=0,5,10,11,13,50,23,65281,43,51,45,41$' - \
     a.example:same:1000:get a.example:same:1100:get
 scenario resume_skips_certificate_only_on_a_resumption full,resume 8 '^step 1 a.example resumed=false.*\nstep 2 a.example resumed=true' \
     '2 resumption=accepted' - \

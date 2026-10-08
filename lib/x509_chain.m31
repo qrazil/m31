@@ -323,23 +323,31 @@ Result<void, Error> verify_rsa(x509.PublicKey key, Scheme scheme, bytes message,
     }
 }
 
-/// Whether `issuer`'s key verifies `certificate`'s signature. Only the
-/// signature: names, dates and constraints are `verify`'s.
-pub Result<void, Error> check_signed_by(x509.Certificate certificate, x509.Certificate issuer) {
-    if (is_weak_algorithm(certificate.signature_algorithm.algorithm_oid)) {
+/// Whether `key` verifies `signature` over `message` under `algorithm` (an
+/// X.509 signatureAlgorithm: ECDSA or RSA with SHA-2). The same check, with
+/// the same refusals (SHA-1 and MD5 are `WeakAlgorithm`), that a
+/// certificate's signature gets; `lib/ocsp.m31` uses it for responses.
+pub Result<void, Error> check_signature(x509.AlgorithmIdentifier algorithm, bytes message, bytes signature, x509.PublicKey key) {
+    if (is_weak_algorithm(algorithm.algorithm_oid)) {
         return Result<void, Error>.Err(Error.WeakAlgorithm);
     }
-    match (scheme_of(certificate.signature_algorithm)) {
+    match (scheme_of(algorithm)) {
         case None: {
             return Result<void, Error>.Err(Error.UnsupportedAlgorithm);
         }
         case Some(Scheme scheme): {
             if (scheme.family == FAMILY_ECDSA) {
-                return verify_ecdsa(issuer.public_key, scheme.hash, certificate.tbs_certificate, certificate.signature);
+                return verify_ecdsa(key, scheme.hash, message, signature);
             }
-            return verify_rsa(issuer.public_key, scheme, certificate.tbs_certificate, certificate.signature);
+            return verify_rsa(key, scheme, message, signature);
         }
     }
+}
+
+/// Whether `issuer`'s key verifies `certificate`'s signature. Only the
+/// signature: names, dates and constraints are `verify`'s.
+pub Result<void, Error> check_signed_by(x509.Certificate certificate, x509.Certificate issuer) {
+    return check_signature(certificate.signature_algorithm, certificate.tbs_certificate, certificate.signature, issuer.public_key);
 }
 
 // --- path building ------------------------------------------------------------------

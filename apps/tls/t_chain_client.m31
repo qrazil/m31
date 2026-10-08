@@ -107,6 +107,15 @@ str name_of(tls.Error error) {
         case MissingExtendedMasterSecret: {
             return "MissingExtendedMasterSecret";
         }
+        case CertificateRevoked: {
+            return "CertificateRevoked";
+        }
+        case BadStapledResponse: {
+            return "BadStapledResponse";
+        }
+        case StapleRequired: {
+            return "StapleRequired";
+        }
         case BadRenegotiationInfo: {
             return "BadRenegotiationInfo";
         }

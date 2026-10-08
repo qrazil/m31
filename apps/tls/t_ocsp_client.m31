@@ -1,0 +1,118 @@
+// The TLS client under stapled OCSP responses, driven from `test_ocsp.sh`.
+//
+//   t_ocsp_client <port> <ca.pem> <offsets> <plain|required> <connections> [host]
+//
+// Connects `connections` times to 127.0.0.1:<port> in turn, sharing one
+// session cache, trusting the roots in <ca.pem>; `required` is
+// `tls.require_stapled` over that trust. <offsets> is a comma-separated list
+// of seconds to add to the real clock, one per connection (the last one
+// repeats): the client's idea of `now` for that connection.
+// For each prints
+//   conn <n> ok resumed=<bool> stapled=<bool> status=<first line of the reply>
+//   conn <n> error=<Error.to_str()> alert=<alert the server sent, or -1>
+
+import date;
+import io;
+import net;
+import os;
+import tls;
+import tlsresume;
+
+int number(str text) {
+    match (text.parse_int()) {
+        case Some(int parsed): {
+            return parsed;
+        }
+        case None: {
+            trap("t_ocsp_client: not a number: " + text);
+        }
+    }
+}
+
+str first_line(bytes data) {
+    int end = 0;
+    while (end < data.size() && data[end] != 13 && data[end] != 10) {
+        end = end + 1;
+    }
+    match (data.substr(0, end).utf8()) {
+        case Some(str line): {
+            return line;
+        }
+        case None: {
+            return "(not text)";
+        }
+    }
+}
+
+void report(int index, Result<tls.Conn, tls.Error> opened) {
+    match (opened) {
+        case Err(tls.Error connect_error): {
+            print("conn " + str(index) + " error=" + connect_error.to_str() + " alert=-1");
+        }
+        case Ok(tls.Conn conn): {
+            str status = "";
+            match (conn.write("GET / HTTP/1.0\r\n\r\n".to_bytes())) {
+                case Ok(int sent): {
+                }
+                case Err(io.Error write_error): {
+                }
+            }
+            match (conn.read_all()) {
+                case Ok(bytes data): {
+                    status = first_line(data);
+                }
+                case Err(io.Error read_error): {
+                }
+            }
+            bool was_resumed = conn.resumed();
+            bool was_stapled = conn.stapled();
+            match (conn.last_error()) {
+                case Some(tls.Error failure): {
+                    print("conn " + str(index) + " error=" + failure.to_str() + " alert=" + str(conn.peer_alert()));
+                }
+                case None: {
+                    print("conn " + str(index) + " ok resumed=" + str(was_resumed) + " stapled=" + str(was_stapled) + " status=" + status);
+                }
+            }
+            match (conn.close()) {
+                case Ok(bool closed): {
+                }
+                case Err(io.Error close_error): {
+                }
+            }
+        }
+    }
+}
+
+List<str> arguments = os.args();
+if (arguments.size() < 6) {
+    trap("t_ocsp_client: <port> <ca.pem> <now|real> <plain|required> <connections> [host]");
+}
+int port = number(arguments[1]);
+tls.Trust trust = tls.Trust.CaFile(arguments[2]);
+if (arguments[4] == "required") {
+    trust = tls.require_stapled(trust);
+}
+List<int> offsets = [];
+for (str each in arguments[3].split(",")) {
+    offsets.push(number(each));
+}
+str host = "localhost";
+if (arguments.size() > 6) {
+    host = arguments[6];
+}
+tlsresume.SessionCache cache = tlsresume.cache(8);
+for (int index in 1 .. number(arguments[5]) + 1) {
+    match (net.connect("127.0.0.1", port)) {
+        case Err(net.Error connect_error): {
+            print("conn " + str(index) + " error=connect alert=-1");
+        }
+        case Ok(net.Conn socket): {
+            int offset = offsets[offsets.size() - 1];
+            if (index <= offsets.size()) {
+                offset = offsets[index - 1];
+            }
+            report(index, tls.connect_over_cached_at(socket, host, trust, cache, date.now() + offset));
+        }
+    }
+}

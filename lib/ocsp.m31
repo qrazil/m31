@@ -1,0 +1,645 @@
+// OCSP responses (RFC 6960) as a TLS client receives them, stapled by the
+// server (RFC 6066 §8, RFC 8446 §4.4.2.1): is this response a fresh, genuine
+// statement from the certificate's issuer about this certificate, and what
+// does it say? Nothing is fetched here; `lib/tls.m31` hands over the bytes
+// the server stapled.
+//
+// API
+// ---
+//   ocsp.check(response, leaf, issuer, now)  -> Result<Verdict, Error>
+//   verdict.this_update, verdict.next_update, verdict.produced_at   epoch seconds
+//
+// `Ok` means all of: the response is a well-formed, successful BasicOCSPResponse;
+// its signature verifies under the issuer's key or under a delegated
+// responder's; it has a single response whose CertID is `leaf` as issued by
+// `issuer`; `now` lies in [thisUpdate - 5 min, nextUpdate]; and the status is
+// *good*. Every other outcome is an `Err` that names the first thing wrong.
+// `leaf` and `issuer` come from the path the caller already validated; this
+// module does not validate them.
+//
+// --- what is checked ---------------------------------------------------------
+//
+//   Structure   Strict DER (`lib/der.m31`), including trailing bytes after the
+//               response, DEFAULT values that DER says to omit (an explicit
+//               v1), and every time as a GeneralizedTime. Anything else is
+//               `Malformed`. A well-formed response whose responseStatus is not
+//               `successful` (tryLater, unauthorized, ...) carries no answer and
+//               is `Unsuccessful`: unsigned and forgeable by anyone, it is treated
+//               by the TLS layer as *no staple*, not as evidence either way.
+//   Type        id-pkix-ocsp-basic only.
+//   Signer      Either the issuer itself, or a responder certificate carried in
+//               the response that (a) the issuer signed, (b) is valid at `now`,
+//               (c) has id-kp-OCSPSigning in its extendedKeyUsage -- and
+//               anyExtendedKeyUsage does not count --, (d) has digitalSignature
+//               if it has a keyUsage. The response's responderID (by name or by
+//               SHA-1 of the key) must name the signer. A responder certificate
+//               with an unknown critical extension does not parse and the
+//               response fails. No other certificate is considered, and the TLS
+//               server's own certificates are not a source of signers.
+//   Signature   Through the same `x509_chain.check_signature` as certificates:
+//               ECDSA P-256/P-384 and RSA (PKCS#1 v1.5 and PSS) with SHA-2.
+//               SHA-1 signatures are refused (`UnsupportedAlgorithm`), though
+//               real responders signed with them for years; that is the same
+//               stance as for certificates.
+//   CertID      hashAlgorithm SHA-1, SHA-256, SHA-384 or SHA-512 (others never
+//               match); issuerNameHash over the leaf's issuer name as encoded in
+//               the leaf; issuerKeyHash over the issuer's subjectPublicKey; the
+//               serial equal to the leaf's. Responses about other certificates are
+//               skipped; none about ours is `WrongCertificate`. SHA-1 is used here
+//               only to *find* the entry; the signature is what authenticates it.
+//   Freshness   thisUpdate no later than `now` + 300 s (clock skew), and a
+//               nextUpdate that exists, is not before thisUpdate, and is not
+//               before `now`. **A response without nextUpdate is `Stale`**: it
+//               claims newer information is always available, which bounds
+//               nothing, and a replayed one would never expire.
+//   Status      good is `Ok`; revoked is `Revoked`; unknown is `UnknownCertificate`
+//               (the responder does not know the certificate, which for a
+//               certificate its issuer issued is not a reassurance).
+//   Extensions  A critical extension in the response data or in a single
+//               response is `UnknownCriticalExtension`: none is implemented. A
+//               non-critical one (nonce, extended revoke, ...) is ignored.
+//
+// --- what is NOT here ---------------------------------------------------------
+//
+//   - Fetching: no request is built and no responder URL is contacted; the
+//     authorityInfoAccess extension is not read. CRLs are not fetched either.
+//   - Nonces: the client sends none, so none is checked.
+//   - A revoked response's reason and time are validated for shape and then
+//     dropped.
+//   - Checking more than the leaf: intermediates' revocation is not looked at.
+//   - OCSP responses signed with Ed25519 (certificates here are not either).
+
+import der;
+import sha1digest;
+import sha256;
+import sha512;
+import x509;
+import x509_chain;
+
+const str OID_OCSP_BASIC = "1.3.6.1.5.5.7.48.1.1";
+const str OID_OCSP_SIGNING = "1.3.6.1.5.5.7.3.9";
+const str OID_HASH_SHA1 = "1.3.14.3.2.26";
+const str OID_HASH_SHA256 = "2.16.840.1.101.3.4.2.1";
+const str OID_HASH_SHA384 = "2.16.840.1.101.3.4.2.2";
+const str OID_HASH_SHA512 = "2.16.840.1.101.3.4.2.3";
+const int TAG_ENUMERATED = 0x0A;
+const int TAG_EXPLICIT_0 = 0xA0;
+const int TAG_EXPLICIT_1 = 0xA1;
+const int TAG_EXPLICIT_2 = 0xA2;
+const int TAG_STATUS_GOOD = 0x80;
+const int TAG_STATUS_REVOKED = 0xA1;
+const int TAG_STATUS_UNKNOWN = 0x82;
+/// How far in the future a thisUpdate may be and still count, in seconds.
+pub const int CLOCK_SKEW = 300;
+
+/// Why a response is not an assurance that the certificate is good.
+/// Payload-free.
+pub enum Error {
+    /// Not a well-formed OCSPResponse / BasicOCSPResponse, or the wrong type.
+    Malformed;
+    /// Well-formed, but the responseStatus is not `successful`.
+    Unsuccessful;
+    /// A critical extension; none is understood.
+    UnknownCriticalExtension;
+    /// A signature algorithm that is not accepted (unknown, or SHA-1/MD5).
+    UnsupportedAlgorithm;
+    /// No acceptable signer: the responderID names nothing usable, or the
+    /// delegated responder is not authorised by the issuer.
+    UnauthorizedResponder;
+    /// The signature does not verify.
+    BadSignature;
+    /// No single response is about this certificate.
+    WrongCertificate;
+    /// thisUpdate is in the future.
+    NotYetValid;
+    /// nextUpdate has passed, or there is none.
+    Stale;
+    /// The certificate is revoked.
+    Revoked;
+    /// The responder says it does not know the certificate.
+    UnknownCertificate;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case Malformed: {
+            return "the OCSP response is malformed";
+        }
+        case Unsuccessful: {
+            return "the OCSP response carries no answer";
+        }
+        case UnknownCriticalExtension: {
+            return "the OCSP response has a critical extension that is not understood";
+        }
+        case UnsupportedAlgorithm: {
+            return "the OCSP response is signed with an algorithm that is not accepted";
+        }
+        case UnauthorizedResponder: {
+            return "the OCSP response was not signed by the issuer or an authorised responder";
+        }
+        case BadSignature: {
+            return "the OCSP response's signature does not verify";
+        }
+        case WrongCertificate: {
+            return "the OCSP response is not about this certificate";
+        }
+        case NotYetValid: {
+            return "the OCSP response is not yet valid";
+        }
+        case Stale: {
+            return "the OCSP response has expired";
+        }
+        case Revoked: {
+            return "the certificate is revoked";
+        }
+        case UnknownCertificate: {
+            return "the OCSP responder does not know the certificate";
+        }
+    }
+}
+
+/// What a good response proved, all in epoch seconds.
+pub type Verdict {
+    pub int produced_at;
+    pub int this_update;
+    pub int next_update;
+}
+
+// --- reading DER with this module's errors ------------------------------------------
+
+Result<der.Element, Error> whole(bytes data) {
+    match (der.validate(data, der.MAX_NESTING_DEPTH)) {
+        case Ok(der.Element root): {
+            return Result<der.Element, Error>.Ok(root);
+        }
+        case Err(der.Error cause): {
+            return Result<der.Element, Error>.Err(Error.Malformed);
+        }
+    }
+}
+
+// The children of `element`, which must have tag `wanted`.
+Result<List<der.Element>, Error> kids(der.Element element, int wanted) {
+    if (element.tag != wanted) {
+        return Result<List<der.Element>, Error>.Err(Error.Malformed);
+    }
+    match (element.children()) {
+        case Ok(List<der.Element> found): {
+            return Result<List<der.Element>, Error>.Ok(found);
+        }
+        case Err(der.Error cause): {
+            return Result<List<der.Element>, Error>.Err(Error.Malformed);
+        }
+    }
+}
+
+// The one child of an EXPLICIT wrapper.
+Result<der.Element, Error> inside(der.Element wrapper, int wanted) {
+    List<der.Element> found = kids(wrapper, wanted)?;
+    if (found.size() != 1) {
+        return Result<der.Element, Error>.Err(Error.Malformed);
+    }
+    return Result<der.Element, Error>.Ok(found[0]);
+}
+
+Result<bytes, Error> octets_of(der.Element element) {
+    match (element.octet_string()) {
+        case Ok(bytes found): {
+            return Result<bytes, Error>.Ok(found);
+        }
+        case Err(der.Error cause): {
+            return Result<bytes, Error>.Err(Error.Malformed);
+        }
+    }
+}
+
+Result<str, Error> oid_of(der.Element element) {
+    match (element.oid()) {
+        case Ok(str dotted): {
+            return Result<str, Error>.Ok(dotted);
+        }
+        case Err(der.Error cause): {
+            return Result<str, Error>.Err(Error.Malformed);
+        }
+    }
+}
+
+// A GeneralizedTime (and only that) as epoch seconds.
+Result<int, Error> generalized_time(der.Element element) {
+    if (element.tag != der.TAG_GENERALIZED_TIME) {
+        return Result<int, Error>.Err(Error.Malformed);
+    }
+    match (element.time()) {
+        case Ok(int seconds): {
+            return Result<int, Error>.Ok(seconds);
+        }
+        case Err(der.Error cause): {
+            return Result<int, Error>.Err(Error.Malformed);
+        }
+    }
+}
+
+// `AlgorithmIdentifier ::= SEQUENCE { OID, parameters ANY OPTIONAL }`.
+Result<x509.AlgorithmIdentifier, Error> algorithm_of(der.Element element) {
+    List<der.Element> parts = kids(element, der.TAG_SEQUENCE)?;
+    if (parts.size() < 1 || parts.size() > 2) {
+        return Result<x509.AlgorithmIdentifier, Error>.Err(Error.Malformed);
+    }
+    str oid = oid_of(parts[0])?;
+    bytes parameters = [];
+    if (parts.size() == 2) {
+        parameters = parts[1].raw();
+    }
+    return Result<x509.AlgorithmIdentifier, Error>.Ok(x509.AlgorithmIdentifier(oid, parameters));
+}
+
+// Whether `element` is `SEQUENCE OF Extension` with a critical one in it.
+// Everything about its shape is checked either way.
+Result<void, Error> reject_critical_extensions(der.Element wrapper) {
+    der.Element sequence = inside(wrapper, wrapper.tag)?;
+    List<der.Element> extensions = kids(sequence, der.TAG_SEQUENCE)?;
+    if (extensions.size() == 0) {
+        return Result<void, Error>.Err(Error.Malformed);
+    }
+    for (der.Element extension in extensions) {
+        List<der.Element> parts = kids(extension, der.TAG_SEQUENCE)?;
+        if (parts.size() < 2 || parts.size() > 3) {
+            return Result<void, Error>.Err(Error.Malformed);
+        }
+        oid_of(parts[0])?;
+        octets_of(parts[parts.size() - 1])?;
+        if (parts.size() == 3) {
+            match (parts[1].boolean()) {
+                case Ok(bool critical): {
+                    if (critical) {
+                        return Result<void, Error>.Err(Error.UnknownCriticalExtension);
+                    }
+                    // DER leaves out a FALSE that is the default.
+                    return Result<void, Error>.Err(Error.Malformed);
+                }
+                case Err(der.Error cause): {
+                    return Result<void, Error>.Err(Error.Malformed);
+                }
+            }
+        }
+    }
+    return Result<void, Error>.Ok;
+}
+
+// --- hashes --------------------------------------------------------------------------
+
+Option<bytes> digest_by_oid(str oid, bytes message) {
+    if (oid == OID_HASH_SHA1) {
+        return Option<bytes>.Some(sha1digest.sum(message));
+    }
+    if (oid == OID_HASH_SHA256) {
+        return Option<bytes>.Some(sha256.sum(message));
+    }
+    if (oid == OID_HASH_SHA384) {
+        return Option<bytes>.Some(sha512.sum384(message));
+    }
+    if (oid == OID_HASH_SHA512) {
+        return Option<bytes>.Some(sha512.sum(message));
+    }
+    return Option<bytes>.None;
+}
+
+// The subjectPublicKey BIT STRING's octets of a certificate: what a key hash
+// (CertID, ResponderID) is taken over.
+Result<bytes, Error> key_octets(x509.Certificate certificate) {
+    der.Element info = whole(certificate.subject_public_key_info)?;
+    List<der.Element> parts = kids(info, der.TAG_SEQUENCE)?;
+    if (parts.size() != 2) {
+        return Result<bytes, Error>.Err(Error.Malformed);
+    }
+    match (parts[1].bit_string()) {
+        case Ok(der.BitString key): {
+            return Result<bytes, Error>.Ok(key.octets);
+        }
+        case Err(der.Error cause): {
+            return Result<bytes, Error>.Err(Error.Malformed);
+        }
+    }
+}
+
+// --- the signer -----------------------------------------------------------------------
+
+// Whether the responderID (`[1]` Name or `[2]` KeyHash) names `candidate`.
+Result<bool, Error> names_responder(der.Element responder, x509.Certificate candidate) {
+    if (responder.tag == TAG_EXPLICIT_1) {
+        der.Element name = inside(responder, TAG_EXPLICIT_1)?;
+        if (name.tag != der.TAG_SEQUENCE) {
+            return Result<bool, Error>.Err(Error.Malformed);
+        }
+        return Result<bool, Error>.Ok(name.raw() == candidate.subject);
+    }
+    der.Element wrapped = inside(responder, TAG_EXPLICIT_2)?;
+    bytes key_hash = octets_of(wrapped)?;
+    return Result<bool, Error>.Ok(key_hash == sha1digest.sum(key_octets(candidate)?));
+}
+
+bool is_authorised_responder(x509.Certificate candidate, x509.Certificate issuer, int now) {
+    if (candidate.unhandled_critical || !candidate.issued_by(issuer) || !candidate.is_valid_at(now)) {
+        return false;
+    }
+    if (!candidate.extended_key_usages.contains(OID_OCSP_SIGNING)) {
+        return false;
+    }
+    if (candidate.has_key_usage && (candidate.key_usage & x509.KEY_USAGE_DIGITAL_SIGNATURE) == 0) {
+        return false;
+    }
+    match (x509_chain.check_signed_by(candidate, issuer)) {
+        case Ok: {
+            return true;
+        }
+        case Err(x509_chain.Error cause): {
+            return false;
+        }
+    }
+}
+
+// The certificate whose key signed the response: the issuer if the
+// responderID names it, else a delegated responder from `[0] certs`.
+Result<x509.Certificate, Error> find_signer(der.Element responder, Option<der.Element> carried, x509.Certificate issuer, int now) {
+    if (names_responder(responder, issuer)?) {
+        return Result<x509.Certificate, Error>.Ok(issuer);
+    }
+    match (carried) {
+        case None: {
+            return Result<x509.Certificate, Error>.Err(Error.UnauthorizedResponder);
+        }
+        case Some(der.Element wrapper): {
+            der.Element sequence = inside(wrapper, TAG_EXPLICIT_0)?;
+            List<der.Element> encoded = kids(sequence, der.TAG_SEQUENCE)?;
+            for (der.Element each in encoded) {
+                match (x509.parse(each.raw())) {
+                    case Err(x509.Error unreadable): {
+                        return Result<x509.Certificate, Error>.Err(Error.Malformed);
+                    }
+                    case Ok(x509.Certificate candidate): {
+                        if (names_responder(responder, candidate)? && is_authorised_responder(candidate, issuer, now)) {
+                            return Result<x509.Certificate, Error>.Ok(candidate);
+                        }
+                    }
+                }
+            }
+            return Result<x509.Certificate, Error>.Err(Error.UnauthorizedResponder);
+        }
+    }
+}
+
+// --- single responses ------------------------------------------------------------------
+
+const int STATUS_GOOD = 0;
+const int STATUS_REVOKED = 1;
+const int STATUS_UNKNOWN = 2;
+
+type Single {
+    int status;
+    int this_update;
+    int next_update;
+}
+
+// Whether `certid` is `leaf` issued by `issuer`.
+Result<bool, Error> certid_matches(der.Element certid, x509.Certificate leaf, x509.Certificate issuer) {
+    List<der.Element> parts = kids(certid, der.TAG_SEQUENCE)?;
+    if (parts.size() != 4) {
+        return Result<bool, Error>.Err(Error.Malformed);
+    }
+    x509.AlgorithmIdentifier hash = algorithm_of(parts[0])?;
+    bytes name_hash = octets_of(parts[1])?;
+    bytes key_hash = octets_of(parts[2])?;
+    if (parts[3].tag != der.TAG_INTEGER) {
+        return Result<bool, Error>.Err(Error.Malformed);
+    }
+    bytes serial = [];
+    match (parts[3].integer_bytes()) {
+        case Ok(bytes found): {
+            serial = found;
+        }
+        case Err(der.Error cause): {
+            return Result<bool, Error>.Err(Error.Malformed);
+        }
+    }
+    match (digest_by_oid(hash.algorithm_oid, leaf.issuer)) {
+        case None: {
+            return Result<bool, Error>.Ok(false);
+        }
+        case Some(bytes expected_name): {
+            match (digest_by_oid(hash.algorithm_oid, key_octets(issuer)?)) {
+                case None: {
+                    return Result<bool, Error>.Ok(false);
+                }
+                case Some(bytes expected_key): {
+                    return Result<bool, Error>.Ok(name_hash == expected_name && key_hash == expected_key && serial == leaf.serial_number);
+                }
+            }
+        }
+    }
+}
+
+// `SingleResponse ::= SEQUENCE { certID, certStatus, thisUpdate, nextUpdate [0] OPTIONAL, singleExtensions [1] OPTIONAL }`.
+// Every single response must be well-formed, ours or not.
+Result<Single, Error> read_single(der.Element element) {
+    List<der.Element> parts = kids(element, der.TAG_SEQUENCE)?;
+    if (parts.size() < 3 || parts.size() > 5) {
+        return Result<Single, Error>.Err(Error.Malformed);
+    }
+    int status = STATUS_GOOD;
+    der.Element status_element = parts[1];
+    if (status_element.tag == TAG_STATUS_GOOD || status_element.tag == TAG_STATUS_UNKNOWN) {
+        if (status_element.content().size() != 0) {
+            return Result<Single, Error>.Err(Error.Malformed);
+        }
+        if (status_element.tag == TAG_STATUS_UNKNOWN) {
+            status = STATUS_UNKNOWN;
+        }
+    } else if (status_element.tag == TAG_STATUS_REVOKED) {
+        List<der.Element> info = kids(status_element, TAG_STATUS_REVOKED)?;
+        if (info.size() < 1 || info.size() > 2) {
+            return Result<Single, Error>.Err(Error.Malformed);
+        }
+        generalized_time(info[0])?;
+        if (info.size() == 2) {
+            der.Element reason = inside(info[1], TAG_EXPLICIT_0)?;
+            if (reason.tag != TAG_ENUMERATED || reason.content().size() != 1) {
+                return Result<Single, Error>.Err(Error.Malformed);
+            }
+        }
+        status = STATUS_REVOKED;
+    } else {
+        return Result<Single, Error>.Err(Error.Malformed);
+    }
+    int this_update = generalized_time(parts[2])?;
+    int next_update = -1;
+    int next = 3;
+    if (next < parts.size() && parts[next].tag == TAG_EXPLICIT_0) {
+        next_update = generalized_time(inside(parts[next], TAG_EXPLICIT_0)?)?;
+        next = next + 1;
+    }
+    if (next < parts.size()) {
+        if (parts[next].tag != TAG_EXPLICIT_1 || next + 1 != parts.size()) {
+            return Result<Single, Error>.Err(Error.Malformed);
+        }
+        reject_critical_extensions(parts[next])?;
+    }
+    return Result<Single, Error>.Ok(Single(status, this_update, next_update));
+}
+
+// --- the response ------------------------------------------------------------------------
+
+/// Whether `response` (the DER OCSPResponse a server stapled) proves, at
+/// `now`, that `leaf` -- issued by `issuer` -- is not revoked. See the header
+/// for each check.
+pub Result<Verdict, Error> check(bytes response, x509.Certificate leaf, x509.Certificate issuer, int now) {
+    der.Element root = whole(response)?;
+    List<der.Element> outer = kids(root, der.TAG_SEQUENCE)?;
+    if (outer.size() < 1 || outer.size() > 2 || outer[0].tag != TAG_ENUMERATED || outer[0].content().size() != 1) {
+        return Result<Verdict, Error>.Err(Error.Malformed);
+    }
+    int response_status = outer[0].content()[0];
+    if (response_status != 0) {
+        if (outer.size() != 1 || response_status == 4 || response_status > 6) {
+            return Result<Verdict, Error>.Err(Error.Malformed);
+        }
+        return Result<Verdict, Error>.Err(Error.Unsuccessful);
+    }
+    if (outer.size() != 2) {
+        return Result<Verdict, Error>.Err(Error.Malformed);
+    }
+    List<der.Element> response_bytes = kids(inside(outer[1], TAG_EXPLICIT_0)?, der.TAG_SEQUENCE)?;
+    if (response_bytes.size() != 2 || oid_of(response_bytes[0])? != OID_OCSP_BASIC) {
+        return Result<Verdict, Error>.Err(Error.Malformed);
+    }
+    der.Element basic = whole(octets_of(response_bytes[1])?)?;
+    List<der.Element> basic_parts = kids(basic, der.TAG_SEQUENCE)?;
+    if (basic_parts.size() < 3 || basic_parts.size() > 4 || basic_parts[0].tag != der.TAG_SEQUENCE) {
+        return Result<Verdict, Error>.Err(Error.Malformed);
+    }
+    x509.AlgorithmIdentifier algorithm = algorithm_of(basic_parts[1])?;
+    bytes signature = [];
+    match (basic_parts[2].bit_string()) {
+        case Ok(der.BitString signed): {
+            if (signed.unused_bits != 0) {
+                return Result<Verdict, Error>.Err(Error.Malformed);
+            }
+            signature = signed.octets;
+        }
+        case Err(der.Error cause): {
+            return Result<Verdict, Error>.Err(Error.Malformed);
+        }
+    }
+    Option<der.Element> carried = Option<der.Element>.None;
+    if (basic_parts.size() == 4) {
+        if (basic_parts[3].tag != TAG_EXPLICIT_0) {
+            return Result<Verdict, Error>.Err(Error.Malformed);
+        }
+        carried = Option<der.Element>.Some(basic_parts[3]);
+    }
+    // ResponseData: [0] version (absent), responderID, producedAt, responses, [1] extensions.
+    List<der.Element> data = kids(basic_parts[0], der.TAG_SEQUENCE)?;
+    if (data.size() < 3 || data.size() > 4) {
+        return Result<Verdict, Error>.Err(Error.Malformed);
+    }
+    if (data[0].tag != TAG_EXPLICIT_1 && data[0].tag != TAG_EXPLICIT_2) {
+        return Result<Verdict, Error>.Err(Error.Malformed);
+    }
+    int produced_at = generalized_time(data[1])?;
+    List<der.Element> singles = kids(data[2], der.TAG_SEQUENCE)?;
+    if (singles.size() == 0) {
+        return Result<Verdict, Error>.Err(Error.Malformed);
+    }
+    if (data.size() == 4) {
+        if (data[3].tag != TAG_EXPLICIT_1) {
+            return Result<Verdict, Error>.Err(Error.Malformed);
+        }
+        reject_critical_extensions(data[3])?;
+    }
+    // Who signed, and does the signature hold, before anything in it is believed.
+    x509.Certificate signer = find_signer(data[0], carried, issuer, now)?;
+    match (x509_chain.check_signature(algorithm, basic_parts[0].raw(), signature, signer.public_key)) {
+        case Ok: {
+        }
+        case Err(x509_chain.Error cause): {
+            match (cause) {
+                case BadSignature: {
+                    return Result<Verdict, Error>.Err(Error.BadSignature);
+                }
+                case EmptyChain: {
+                    return Result<Verdict, Error>.Err(Error.UnsupportedAlgorithm);
+                }
+                case UnknownAuthority: {
+                    return Result<Verdict, Error>.Err(Error.UnsupportedAlgorithm);
+                }
+                case Expired: {
+                    return Result<Verdict, Error>.Err(Error.UnsupportedAlgorithm);
+                }
+                case NotYetValid: {
+                    return Result<Verdict, Error>.Err(Error.UnsupportedAlgorithm);
+                }
+                case HostnameMismatch: {
+                    return Result<Verdict, Error>.Err(Error.UnsupportedAlgorithm);
+                }
+                case NotCertificateAuthority: {
+                    return Result<Verdict, Error>.Err(Error.UnsupportedAlgorithm);
+                }
+                case PathLengthExceeded: {
+                    return Result<Verdict, Error>.Err(Error.UnsupportedAlgorithm);
+                }
+                case WrongPurpose: {
+                    return Result<Verdict, Error>.Err(Error.UnsupportedAlgorithm);
+                }
+                case WeakAlgorithm: {
+                    return Result<Verdict, Error>.Err(Error.UnsupportedAlgorithm);
+                }
+                case UnsupportedAlgorithm: {
+                    return Result<Verdict, Error>.Err(Error.UnsupportedAlgorithm);
+                }
+                case TooDeep: {
+                    return Result<Verdict, Error>.Err(Error.UnsupportedAlgorithm);
+                }
+            }
+        }
+    }
+    // The responses about this certificate; every one must hold.
+    List<Single> ours = [];
+    for (der.Element each in singles) {
+        List<der.Element> parts = kids(each, der.TAG_SEQUENCE)?;
+        if (parts.size() < 3) {
+            return Result<Verdict, Error>.Err(Error.Malformed);
+        }
+        bool matched = certid_matches(parts[0], leaf, issuer)?;
+        Single single = read_single(each)?;
+        if (matched) {
+            ours.push(single);
+        }
+    }
+    if (ours.size() == 0) {
+        return Result<Verdict, Error>.Err(Error.WrongCertificate);
+    }
+    for (Single each in ours) {
+        if (each.status == STATUS_REVOKED) {
+            return Result<Verdict, Error>.Err(Error.Revoked);
+        }
+    }
+    int latest_this = 0;
+    int earliest_next = -1;
+    for (Single each in ours) {
+        if (each.status == STATUS_UNKNOWN) {
+            return Result<Verdict, Error>.Err(Error.UnknownCertificate);
+        }
+        if (each.this_update > now + CLOCK_SKEW) {
+            return Result<Verdict, Error>.Err(Error.NotYetValid);
+        }
+        if (each.next_update < 0 || each.next_update < each.this_update || each.next_update < now) {
+            return Result<Verdict, Error>.Err(Error.Stale);
+        }
+        if (each.this_update > latest_this) {
+            latest_this = each.this_update;
+        }
+        if (earliest_next < 0 || each.next_update < earliest_next) {
+            earliest_next = each.next_update;
+        }
+    }
+    return Result<Verdict, Error>.Ok(Verdict(produced_at, latest_this, earliest_next));
+}

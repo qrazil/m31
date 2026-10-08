@@ -1,0 +1,103 @@
+// `ocsp.check` on files, driven from `test_ocsp.sh`.
+//
+//   t_ocsp_check <response.der> <leaf.pem> <issuer.pem> <now>
+//
+// Prints `ok this_update=<n> next_update=<n>` or `error <Name>`, exiting 0
+// either way; a file that cannot be read traps.
+
+import io;
+import ocsp;
+import os;
+import x509;
+
+str name_of(ocsp.Error failure) {
+    match (failure) {
+        case Malformed: {
+            return "Malformed";
+        }
+        case Unsuccessful: {
+            return "Unsuccessful";
+        }
+        case UnknownCriticalExtension: {
+            return "UnknownCriticalExtension";
+        }
+        case UnsupportedAlgorithm: {
+            return "UnsupportedAlgorithm";
+        }
+        case UnauthorizedResponder: {
+            return "UnauthorizedResponder";
+        }
+        case BadSignature: {
+            return "BadSignature";
+        }
+        case WrongCertificate: {
+            return "WrongCertificate";
+        }
+        case NotYetValid: {
+            return "NotYetValid";
+        }
+        case Stale: {
+            return "Stale";
+        }
+        case Revoked: {
+            return "Revoked";
+        }
+        case UnknownCertificate: {
+            return "UnknownCertificate";
+        }
+    }
+}
+
+x509.Certificate load_certificate(str path) {
+    match (io.read(path)) {
+        case Err(io.Error read_error): {
+            trap("cannot read " + path);
+        }
+        case Ok(str text): {
+            match (x509.parse_pem(text)) {
+                case Err(x509.Error parse_error): {
+                    trap("cannot parse " + path);
+                }
+                case Ok(List<x509.Certificate> found): {
+                    return found[0];
+                }
+            }
+        }
+    }
+}
+
+int number(str text) {
+    match (text.parse_int()) {
+        case Some(int parsed): {
+            return parsed;
+        }
+        case None: {
+            trap("t_ocsp_check: not a number: " + text);
+        }
+    }
+}
+
+List<str> arguments = os.args();
+if (arguments.size() != 5) {
+    trap("t_ocsp_check: <response.der> <leaf.pem> <issuer.pem> <now>");
+}
+bytes response = [];
+match (io.read_bytes(arguments[1])) {
+    case Err(io.Error read_error): {
+        trap("cannot read " + arguments[1]);
+    }
+    case Ok(bytes loaded): {
+        response = loaded;
+    }
+}
+x509.Certificate leaf = load_certificate(arguments[2]);
+x509.Certificate issuer = load_certificate(arguments[3]);
+int now = number(arguments[4]);
+match (ocsp.check(response, leaf, issuer, now)) {
+    case Ok(ocsp.Verdict verdict): {
+        print("ok this_update=" + verdict.this_update.to_str() + " next_update=" + verdict.next_update.to_str());
+    }
+    case Err(ocsp.Error failure): {
+        print("error " + name_of(failure));
+    }
+}

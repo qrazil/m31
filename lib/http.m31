@@ -505,6 +505,15 @@ Error from_tls(tls.Error e) {
         case MissingExtendedMasterSecret: {
             return Error.TlsFailed;
         }
+        case CertificateRevoked: {
+            return Error.CertificateUntrusted;
+        }
+        case BadStapledResponse: {
+            return Error.CertificateUntrusted;
+        }
+        case StapleRequired: {
+            return Error.CertificateUntrusted;
+        }
         case BadRenegotiationInfo: {
             return Error.TlsFailed;
         }

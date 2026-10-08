@@ -61,8 +61,66 @@
 // transcript, and the server's Finished MAC, or it does not exist. There is
 // no insecure `Trust` variant, no option, no environment variable.
 //
-// Not done: revocation, name constraints, IP-address certificates, and a
-// public suffix list (`*.co.uk` is accepted as a wildcard).
+// Not done: CRLs (and fetching anything: see "revocation" below), name
+// constraints, IP-address certificates, and a public suffix list (`*.co.uk` is
+// accepted as a wildcard).
+//
+// --- revocation: stapled OCSP only -------------------------------------------
+//
+// The client sends `status_request` (RFC 6066 §8: type ocsp, no responder IDs,
+// no request extensions) and checks the BasicOCSPResponse a server staples for
+// its leaf: in TLS 1.3 the `status_request` extension of the leaf's
+// CertificateEntry, in TLS 1.2 the CertificateStatus message (type 22) that
+// follows the Certificate when the ServerHello promised one with an empty
+// `status_request`. `lib/ocsp.m31` does the checking: signature (the issuer's,
+// or a delegated id-kp-OCSPSigning responder's certificate carried in the
+// response), CertID, thisUpdate/nextUpdate against the client's clock (five
+// minutes of skew; a response with no nextUpdate is stale), status, and no
+// unknown critical extension. Its header lists exactly what it accepts.
+//
+// The policy, which is the whole of it:
+//
+//   a staple that checks out and says good     accepted
+//   a staple that says revoked                 `CertificateRevoked`, alert 44
+//   a staple that is malformed, unsigned by
+//     the issuer or an authorised responder,
+//     for another certificate, expired or not
+//     yet valid, "unknown", signed with SHA-1,
+//     or has an unknown critical extension     `BadStapledResponse`, alert 42:
+//                                              **fail closed**
+//   a staple whose TLS framing is malformed
+//     (duplicate, trailing octets, a status
+//     type other than ocsp, ...)               `Malformed`, alert 50
+//   a status message that was not promised, or
+//     is not directly after the Certificate    `UnexpectedMessage`, alert 10
+//   no staple at all (also an OCSPResponse
+//     whose status is tryLater, unauthorized,
+//     ... which carries no answer)             **soft-fail**: accepted -- unless
+//                                              the leaf has the TLS Feature
+//                                              extension with status_request
+//                                              (RFC 7633 "must-staple"), or the
+//                                              trust is `require_stapled(...)`:
+//                                              then `StapleRequired`, alert 42
+//
+// A server can strip a staple, so soft-fail without must-staple buys a
+// network attacker who can also present a revoked certificate nothing; it
+// is the default because most servers do not staple and a client that fails
+// on every one of them is unusable. `tls.require_stapled(trust)` is for a
+// client that knows its server staples: it turns "no staple" into an error
+// for every certificate. A must-staple certificate is hard-fail always, with
+// no option to turn that off.
+//
+// Only the leaf is checked, against the certificate above it in the path.
+// A pinned key (`PinnedKey`) skips the whole check, as it skips everything
+// about the certificate; `require_stapled` over a pin is a trap, not a silent
+// no-op. The client never fetches: no OCSP responder URL is contacted, no CRL
+// is downloaded -- **CRL checking and OCSP fetching are out of scope** --, and
+// no nonce is sent, so a staple can be replayed until its nextUpdate (that is
+// what stapling is). A resumed session carries no new staple, but its
+// lifetime is capped by the nextUpdate of the staple it was made under (as it
+// is by the earliest certificate `not_after` and by seven days): it cannot
+// outlive the freshness of the evidence for the certificate. `Conn.stapled()`
+// says whether a staple was checked on this handshake.
 //
 // --- what is offered, and so what is accepted ---------------------------------
 //
@@ -95,7 +153,8 @@
 //                        additionally accepts rsa_pkcs1_sha256/384/512 on the
 //                        ServerKeyExchange; in 1.2 the ECDSA scheme names only
 //                        the hash and the leaf key gives the curve
-//   extensions           server_name (not for an IP address), supported_groups
+//   extensions           server_name (not for an IP address), status_request
+//                        (OCSP, below), supported_groups
 //                        (which RFC 8446 §4.2.7 requires beside a key_share),
 //                        signature_algorithms, signature_algorithms_cert,
 //                        supported_versions, key_share, and for 1.2
@@ -253,6 +312,7 @@ import tls12;
 import tlsresume;
 import clientcert;
 import signing_key;
+import ocsp;
 
 const int HANDSHAKE_CLIENT_HELLO = 1;
 const int HANDSHAKE_SERVER_HELLO = 2;
@@ -260,6 +320,7 @@ const int HANDSHAKE_ENCRYPTED_EXTENSIONS = 8;
 const int HANDSHAKE_CERTIFICATE = 11;
 const int HANDSHAKE_SERVER_KEY_EXCHANGE = 12;
 const int HANDSHAKE_CERTIFICATE_REQUEST = 13;
+const int HANDSHAKE_CERTIFICATE_STATUS = 22;
 const int HANDSHAKE_SERVER_HELLO_DONE = 14;
 const int HANDSHAKE_CERTIFICATE_VERIFY = 15;
 const int HANDSHAKE_FINISHED = 20;
@@ -278,6 +339,8 @@ const int SCHEME_RSA_PKCS1_SHA512 = 0x0601;
 const int VERSION_TLS12 = 0x0303;
 const int VERSION_TLS13 = 0x0304;
 const int EXTENSION_SERVER_NAME = 0;
+const int EXTENSION_STATUS_REQUEST = 5;
+const int STATUS_TYPE_OCSP = 1;
 const int EXTENSION_EC_POINT_FORMATS = 11;
 const int EXTENSION_SUPPORTED_GROUPS = 10;
 const int EXTENSION_EXTENDED_MASTER_SECRET = 23;
@@ -291,6 +354,7 @@ const int EXTENSION_PSK_KEY_EXCHANGE_MODES = 45;
 const int PSK_DHE_KE = 1;
 const int ALERT_HANDSHAKE_FAILURE = 40;
 const int ALERT_BAD_CERTIFICATE = 42;
+const int ALERT_CERTIFICATE_REVOKED = 44;
 const int ALERT_CERTIFICATE_EXPIRED = 45;
 const int ALERT_ILLEGAL_PARAMETER = 47;
 const int ALERT_UNKNOWN_CA = 48;
@@ -315,6 +379,30 @@ pub enum Trust {
     SystemRoots;
     /// A chain to a root in this PEM file.
     CaFile(str);
+    /// The same trust, and in addition every server certificate must come
+    /// with a valid stapled OCSP response (see "revocation" in the header).
+    /// Made by `require_stapled`; not meaningful over a pin.
+    RequireStapled(Trust);
+}
+
+/// `trust` with a stapled OCSP response required of every server, whether
+/// or not its certificate says must-staple. A pin **traps**: a pinned key is
+/// not examined for revocation, so the demand could never be met.
+pub Trust require_stapled(Trust trust) {
+    match (trust) {
+        case PinnedKey(bytes pinned): {
+            trap("tls: require_stapled over a pinned key: a pin is not checked for revocation");
+        }
+        case SystemRoots: {
+            return Trust.RequireStapled(trust);
+        }
+        case CaFile(str path): {
+            return Trust.RequireStapled(trust);
+        }
+        case RequireStapled(Trust inner): {
+            return trust;
+        }
+    }
 }
 
 /// A key pin from its 32 octets. Anything else **traps**: a pin of the wrong
@@ -414,6 +502,16 @@ pub enum Error {
     /// A TLS 1.2 renegotiation_info that is not the empty one of a first
     /// handshake (RFC 5746).
     BadRenegotiationInfo;
+    /// The server's stapled OCSP response says the certificate is revoked.
+    CertificateRevoked;
+    /// The server stapled an OCSP response that cannot be believed: it is
+    /// malformed, unsigned by the issuer or an authorised responder, stale,
+    /// for another certificate, or says "unknown".
+    BadStapledResponse;
+    /// A stapled OCSP response was required, by the certificate's
+    /// must-staple extension or by `require_stapled`, and the server sent
+    /// none (or one that carries no answer).
+    StapleRequired;
 }
 
 pub str Error.to_str() {
@@ -507,6 +605,15 @@ pub str Error.to_str() {
         }
         case BadRenegotiationInfo: {
             return "the server's renegotiation_info is not that of a first handshake";
+        }
+        case CertificateRevoked: {
+            return "the server's certificate is revoked";
+        }
+        case BadStapledResponse: {
+            return "the server's stapled OCSP response cannot be trusted";
+        }
+        case StapleRequired: {
+            return "a stapled OCSP response was required and the server sent none";
         }
     }
 }
@@ -605,6 +712,15 @@ int alert_for(Error error) {
         case BadRenegotiationInfo: {
             return ALERT_HANDSHAKE_FAILURE;
         }
+        case CertificateRevoked: {
+            return ALERT_CERTIFICATE_REVOKED;
+        }
+        case BadStapledResponse: {
+            return ALERT_BAD_CERTIFICATE;
+        }
+        case StapleRequired: {
+            return ALERT_BAD_CERTIFICATE;
+        }
     }
 }
 
@@ -699,6 +815,15 @@ int errno_of(Error error) {
             return ERRNO_PROTOCOL;
         }
         case BadRenegotiationInfo: {
+            return ERRNO_PROTOCOL;
+        }
+        case CertificateRevoked: {
+            return ERRNO_PROTOCOL;
+        }
+        case BadStapledResponse: {
+            return ERRNO_PROTOCOL;
+        }
+        case StapleRequired: {
             return ERRNO_PROTOCOL;
         }
     }
@@ -911,6 +1036,7 @@ bytes client_hello(str host, bytes client_random, bytes session_id, bytes public
     if (!is_ip_literal(host)) {
         extensions.extend(extension(EXTENSION_SERVER_NAME, server_name_data(host)));
     }
+    extensions.extend(extension(EXTENSION_STATUS_REQUEST, [STATUS_TYPE_OCSP, 0, 0, 0, 0]));
     bytes groups = [];
     put_u16(groups, GROUP_X25519);
     put_u16(groups, GROUP_SECP256R1);
@@ -1024,6 +1150,9 @@ type ServerChoice {
     bytes server_random;
     // The server took the pre_shared_key we offered (identity 0).
     bool psk_selected;
+    // TLS 1.2: the server answered our status_request, and so may send a
+    // CertificateStatus message after its Certificate.
+    bool status_promised;
 }
 
 // The extensions of a ServerHello as they came, each kind at most once.
@@ -1145,7 +1274,7 @@ Result<ServerChoice, Error> check_tls13_hello(int legacy_version, bytes server_r
     if (group != GROUP_X25519 || public_key.size() != X25519_SIZE) {
         return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
     }
-    return Result<ServerChoice, Error>.Ok(ServerChoice(false, suite, tls12.Suite.EcdsaChaCha20Poly1305, public_key, server_random, psk_selected));
+    return Result<ServerChoice, Error>.Ok(ServerChoice(false, suite, tls12.Suite.EcdsaChaCha20Poly1305, public_key, server_random, psk_selected, false));
 }
 
 // RFC 5246 §7.4.1.3 with RFC 7627 and RFC 5746: the server picked one of the
@@ -1171,7 +1300,7 @@ Result<ServerChoice, Error> check_tls12_hello(bytes server_random, bytes echoed_
         }
     }
     for (int kind in found.kinds) {
-        if (kind != EXTENSION_EC_POINT_FORMATS && kind != EXTENSION_EXTENDED_MASTER_SECRET && kind != EXTENSION_RENEGOTIATION_INFO && kind != EXTENSION_SERVER_NAME) {
+        if (kind != EXTENSION_STATUS_REQUEST && kind != EXTENSION_EC_POINT_FORMATS && kind != EXTENSION_EXTENDED_MASTER_SECRET && kind != EXTENSION_RENEGOTIATION_INFO && kind != EXTENSION_SERVER_NAME) {
             return Result<ServerChoice, Error>.Err(Error.UnsupportedExtension);
         }
         if (kind == EXTENSION_SERVER_NAME && !sent_server_name) {
@@ -1179,6 +1308,9 @@ Result<ServerChoice, Error> check_tls12_hello(bytes server_random, bytes echoed_
         }
     }
     if (found.has(EXTENSION_SERVER_NAME) && found.data_of(EXTENSION_SERVER_NAME).size() != 0) {
+        return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
+    }
+    if (found.has(EXTENSION_STATUS_REQUEST) && found.data_of(EXTENSION_STATUS_REQUEST).size() != 0) {
         return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
     }
     if (found.has(EXTENSION_EC_POINT_FORMATS)) {
@@ -1207,7 +1339,7 @@ Result<ServerChoice, Error> check_tls12_hello(bytes server_random, bytes echoed_
         return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
     }
     bytes none = [];
-    return Result<ServerChoice, Error>.Ok(ServerChoice(true, tls13_schedule.Suite.ChaCha20Poly1305Sha256, suite, none, server_random, false));
+    return Result<ServerChoice, Error>.Ok(ServerChoice(true, tls13_schedule.Suite.ChaCha20Poly1305Sha256, suite, none, server_random, false, found.has(EXTENSION_STATUS_REQUEST)));
 }
 
 // --- the rest of the server's flight ------------------------------------------------
@@ -1393,15 +1525,22 @@ Result<List<x509.Certificate>, Error> load_anchors(Trust trust) {
         case CaFile(str path): {
             return read_anchors(path);
         }
+        case RequireStapled(Trust inner): {
+            return load_anchors(inner);
+        }
     }
 }
 
 // Whether the server's certificates are who `trust` says: the pin matches the
 // leaf's key, or a chain leads from the leaf to an anchor and covers `host`.
-Result<void, Error> check_identity(List<x509.Certificate> presented, Trust trust, List<x509.Certificate> anchors, str host, int now) {
+// The chain's path (leaf first, anchor last) is what comes back, for the
+// revocation check; under a pin there is none and the list is empty.
+Result<List<x509.Certificate>, Error> check_identity(List<x509.Certificate> presented, Trust trust, List<x509.Certificate> anchors, str host, int now) {
     match (trust) {
         case PinnedKey(bytes pinned): {
-            return check_pin(presented[0], pinned);
+            check_pin(presented[0], pinned)?;
+            List<x509.Certificate> none = [];
+            return Result<List<x509.Certificate>, Error>.Ok(none);
         }
         case SystemRoots: {
             return check_chain(presented, anchors, host, now);
@@ -1409,18 +1548,163 @@ Result<void, Error> check_identity(List<x509.Certificate> presented, Trust trust
         case CaFile(str path): {
             return check_chain(presented, anchors, host, now);
         }
+        case RequireStapled(Trust inner): {
+            return check_identity(presented, inner, anchors, host, now);
+        }
     }
 }
 
-Result<void, Error> check_chain(List<x509.Certificate> presented, List<x509.Certificate> anchors, str host, int now) {
+Result<List<x509.Certificate>, Error> check_chain(List<x509.Certificate> presented, List<x509.Certificate> anchors, str host, int now) {
     match (x509_chain.verify(presented, anchors, host, now)) {
         case Ok(List<x509.Certificate> path): {
-            return Result<void, Error>.Ok;
+            return Result<List<x509.Certificate>, Error>.Ok(path);
         }
         case Err(x509_chain.Error chain_error): {
-            return Result<void, Error>.Err(error_of_chain(chain_error));
+            return Result<List<x509.Certificate>, Error>.Err(error_of_chain(chain_error));
         }
     }
+}
+
+// Whether `trust` demands a stapled response of every server.
+bool demands_staple(Trust trust) {
+    match (trust) {
+        case PinnedKey(bytes pinned): {
+            return false;
+        }
+        case SystemRoots: {
+            return false;
+        }
+        case CaFile(str path): {
+            return false;
+        }
+        case RequireStapled(Trust inner): {
+            return true;
+        }
+    }
+}
+
+// The staple policy (see "revocation" in the header). `staple` is the OCSP
+// response the server sent for its leaf, if any; `path` is the validated
+// chain, empty under a pin. What comes back is the instant after which the
+// answer no longer holds (a nextUpdate, epoch seconds), or -1 when no staple
+// was used and nothing bounds a session.
+Result<int, Error> check_revocation(Trust trust, List<x509.Certificate> path, Option<bytes> staple, int now) {
+    if (path.size() == 0) {
+        return Result<int, Error>.Ok(-1);
+    }
+    x509.Certificate leaf = path[0];
+    bool required = leaf.must_staple || demands_staple(trust);
+    match (staple) {
+        case None: {
+            if (required) {
+                return Result<int, Error>.Err(Error.StapleRequired);
+            }
+            return Result<int, Error>.Ok(-1);
+        }
+        case Some(bytes response): {
+            if (path.size() < 2) {
+                if (required) {
+                    return Result<int, Error>.Err(Error.StapleRequired);
+                }
+                return Result<int, Error>.Ok(-1);
+            }
+            match (ocsp.check(response, leaf, path[1], now)) {
+                case Ok(ocsp.Verdict verdict): {
+                    return Result<int, Error>.Ok(verdict.next_update);
+                }
+                case Err(ocsp.Error failure): {
+                    match (failure) {
+                        case Revoked: {
+                            return Result<int, Error>.Err(Error.CertificateRevoked);
+                        }
+                        case Unsuccessful: {
+                            if (required) {
+                                return Result<int, Error>.Err(Error.StapleRequired);
+                            }
+                            return Result<int, Error>.Ok(-1);
+                        }
+                        case Malformed: {
+                            return Result<int, Error>.Err(Error.BadStapledResponse);
+                        }
+                        case UnknownCriticalExtension: {
+                            return Result<int, Error>.Err(Error.BadStapledResponse);
+                        }
+                        case UnsupportedAlgorithm: {
+                            return Result<int, Error>.Err(Error.BadStapledResponse);
+                        }
+                        case UnauthorizedResponder: {
+                            return Result<int, Error>.Err(Error.BadStapledResponse);
+                        }
+                        case BadSignature: {
+                            return Result<int, Error>.Err(Error.BadStapledResponse);
+                        }
+                        case WrongCertificate: {
+                            return Result<int, Error>.Err(Error.BadStapledResponse);
+                        }
+                        case NotYetValid: {
+                            return Result<int, Error>.Err(Error.BadStapledResponse);
+                        }
+                        case Stale: {
+                            return Result<int, Error>.Err(Error.BadStapledResponse);
+                        }
+                        case UnknownCertificate: {
+                            return Result<int, Error>.Err(Error.BadStapledResponse);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The OCSP response in the status_request extension of the first (the
+// server's own) CertificateEntry of a TLS 1.3 Certificate message
+// (RFC 8446 §4.4.2.1): `CertificateStatus { status_type = ocsp(1),
+// opaque OCSPResponse<1..2^24-1> }`. Extensions of later entries (staples
+// for intermediates) are not read, and extensions of the first that are not
+// status_request are skipped; a status_request twice, a status_type other
+// than ocsp, an empty response or any trailing octet is `Malformed`.
+Result<Option<bytes>, Error> stapled_response(bytes message) {
+    Reader reader = Reader(message_body(message));
+    bytes request_context = reader.vector8()?;
+    bytes list = reader.vector24()?;
+    Reader entries = Reader(list);
+    Option<bytes> found = Option<bytes>.None;
+    if (entries.remaining() == 0) {
+        return Result<Option<bytes>, Error>.Ok(found);
+    }
+    bytes encoded = entries.vector24()?;
+    Reader extensions = Reader(entries.vector16()?);
+    while (extensions.remaining() > 0) {
+        int kind = extensions.u16()?;
+        bytes data = extensions.vector16()?;
+        if (kind == EXTENSION_STATUS_REQUEST) {
+            match (found) {
+                case Some(bytes earlier): {
+                    return Result<Option<bytes>, Error>.Err(Error.Malformed);
+                }
+                case None: {
+                    found = Option<bytes>.Some(certificate_status(data)?);
+                }
+            }
+        }
+    }
+    return Result<Option<bytes>, Error>.Ok(found);
+}
+
+// `CertificateStatus` as TLS 1.2 sends it as a handshake message body and
+// TLS 1.3 as extension data: the OCSP response inside.
+Result<bytes, Error> certificate_status(bytes data) {
+    Reader reader = Reader(data);
+    int status_type = reader.u8()?;
+    if (status_type != STATUS_TYPE_OCSP) {
+        return Result<bytes, Error>.Err(Error.Malformed);
+    }
+    bytes response = reader.vector24()?;
+    if (response.size() == 0 || reader.remaining() != 0) {
+        return Result<bytes, Error>.Err(Error.Malformed);
+    }
+    return Result<bytes, Error>.Ok(response);
 }
 
 // What a CertificateVerify signs (RFC 8446 §4.4.3): 64 spaces, a context
@@ -1561,6 +1845,9 @@ type Outcome {
     tls13_schedule.Suite suite = tls13_schedule.Suite.ChaCha20Poly1305Sha256;
     bytes resumption_master = [];
     int valid_until = 0;
+    // When the stapled OCSP response that vouched for the server's
+    // certificate stops holding, or -1 if none did.
+    int staple_expires = -1;
 }
 
 // What `trust` is, as text, for filing sessions: two connections share a
@@ -1579,6 +1866,9 @@ str trust_key(Trust trust) {
         }
         case CaFile(str path): {
             return "ca:" + path;
+        }
+        case RequireStapled(Trust inner): {
+            return "stapled:" + trust_key(inner);
         }
     }
 }
@@ -1608,6 +1898,9 @@ bool is_pinned(Trust trust) {
         case CaFile(str path): {
             return false;
         }
+        case RequireStapled(Trust inner): {
+            return is_pinned(inner);
+        }
     }
 }
 
@@ -1635,7 +1928,7 @@ Result<void, Error> run_handshake(tls13_record.Connection record, str host, Trus
     ServerChoice choice = check_server_hello(server_hello, session_id, !is_ip_literal(host), offered_psk)?;
     transcript.add(server_hello);
     if (choice.legacy) {
-        return run_handshake_12(record, choice, transcript, client_random, secret, source, host, trust, anchors, now);
+        return run_handshake_12(record, choice, transcript, client_random, secret, source, host, trust, anchors, now, outcome);
     }
     tls13_schedule.Suite suite = choice.suite;
     bytes server_share = choice.public_key;
@@ -1694,7 +1987,12 @@ Result<void, Error> run_handshake(tls13_record.Connection record, str host, Trus
         require_type(certificate_message, HANDSHAKE_CERTIFICATE)?;
         List<x509.Certificate> presented = certificate_list(certificate_message, false)?;
         x509.Certificate leaf = presented[0];
-        check_identity(presented, trust, anchors, host, now)?;
+        List<x509.Certificate> path = check_identity(presented, trust, anchors, host, now)?;
+        int answer_expires = check_revocation(trust, path, stapled_response(certificate_message)?, now)?;
+        outcome.staple_expires = answer_expires;
+        if (answer_expires >= 0 && answer_expires < valid_until) {
+            valid_until = answer_expires;
+        }
         if (!is_pinned(trust)) {
             for (x509.Certificate each in presented) {
                 if (each.not_after < valid_until) {
@@ -1971,7 +2269,7 @@ Result<void, Error> check_finished_12(bytes message, bytes expected) {
 // The rest of a TLS 1.2 handshake, once the ServerHello (already in
 // `transcript`) has named a suite: the server's flight up to ServerHelloDone,
 // our ClientKeyExchange, ChangeCipherSpec and Finished, and the server's.
-Result<void, Error> run_handshake_12(tls13_record.Connection record, ServerChoice choice, tls13_schedule.Transcript transcript, bytes client_random, bytes x25519_secret, random.System source, str host, Trust trust, List<x509.Certificate> anchors, int now) {
+Result<void, Error> run_handshake_12(tls13_record.Connection record, ServerChoice choice, tls13_schedule.Transcript transcript, bytes client_random, bytes x25519_secret, random.System source, str host, Trust trust, List<x509.Certificate> anchors, int now, Outcome outcome) {
     tls12.Suite suite = choice.legacy_suite;
     tls13_schedule.Suite aead = suite.aead();
     record.use_legacy_suite(aead);
@@ -1979,9 +2277,19 @@ Result<void, Error> run_handshake_12(tls13_record.Connection record, ServerChoic
     require_type(certificate_message, HANDSHAKE_CERTIFICATE)?;
     List<x509.Certificate> presented = certificate_list(certificate_message, true)?;
     x509.Certificate leaf = presented[0];
-    check_identity(presented, trust, anchors, host, now)?;
+    List<x509.Certificate> path = check_identity(presented, trust, anchors, host, now)?;
     transcript.add(certificate_message);
     bytes exchange_message = next_handshake(record)?;
+    Option<bytes> staple = Option<bytes>.None;
+    if (exchange_message[0] == HANDSHAKE_CERTIFICATE_STATUS) {
+        if (!choice.status_promised) {
+            return Result<void, Error>.Err(Error.UnexpectedMessage);
+        }
+        staple = Option<bytes>.Some(certificate_status(message_body(exchange_message))?);
+        transcript.add(exchange_message);
+        exchange_message = next_handshake(record)?;
+    }
+    outcome.staple_expires = check_revocation(trust, path, staple, now)?;
     require_type(exchange_message, HANDSHAKE_SERVER_KEY_EXCHANGE)?;
     KeyExchange exchange = check_server_key_exchange(exchange_message, suite, leaf, client_random, choice.server_random)?;
     transcript.add(exchange_message);
@@ -2186,6 +2494,14 @@ pub type Conn {
 /// PSK, and no certificate was exchanged on it.
 pub bool Conn.resumed() {
     return outcome.resumed;
+}
+
+/// Whether a stapled OCSP response vouched for the server's certificate on
+/// this connection: present, signed by its issuer or an authorised responder,
+/// fresh, and saying "good". `false` on a resumed connection (no certificate
+/// was exchanged) and wherever the staple was absent and not required.
+pub bool Conn.stapled() {
+    return outcome.staple_expires >= 0;
 }
 
 int Conn.now() {
