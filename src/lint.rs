@@ -282,7 +282,7 @@ impl Linter<'_> {
     }
 
     fn arm(&mut self, a: &MatchArm) {
-        for b in &a.binds {
+        for b in a.binds.iter().flatten() {
             self.bind(Kind::MatchBind, b, Some(&a.variant));
         }
         self.block(&a.body);

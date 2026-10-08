@@ -190,9 +190,9 @@ The biggest single source of short names (365 of the 1561 findings in
    whenever the payload is a user type, and does not for `int`, `str` or a
    container, where the type says nothing about the role.
 
-An unused payload is still named. That is a language gap, not a naming
-question: there is no discard (`case Err(_)`), so a handler that ignores the
-error must still bind it (`gitui/index.m31:184`). Open question 2.
+An unused payload is discarded, not named: `case Err(_)` binds nothing, and
+the whole binding (type and name) is replaced by `_`. `_` is accepted only as
+a case payload. A payload that is used is named for its role as above.
 
 ### 3.5 Loop variables
 
@@ -475,8 +475,10 @@ the same letter in two functions counts once per line:
    comment so the code still greps against the standard. There is no
    per-file escape hatch: every file would use it.
 2. **A discard binding is added to the language.** `case Err(_)` binds
-   nothing and names nothing. It is a compiler change, tracked separately;
-   until it lands an unused payload is still named (`error`).
+   nothing and names nothing. It is in the language now (branch
+   `feat/discard-binding`, merged here): the whole binding is `_`, the type
+   comes from the variant, and the migration replaces every unused payload
+   with it.
 3. **`len` is an abbreviation.** It becomes `length`.
 4. **`at`, `by`, `eq`, `of`, `ok`, `up` stay**, for function names only.
    As *binding* names they remain flagged.
