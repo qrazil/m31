@@ -27,6 +27,7 @@
 //   net.Addr: a.ip(), a.port(), a.to_str()
 //
 //   net.Error                  enum             why a connection could not be made
+//   e.to_str(), e.is_transient()                  the sentence; may an accept loop go on
 //   net.from_errno(e), net.error_of(io_error)
 //
 // **A `Conn` is an `io.Stream`.** Its first five methods are exactly the five
@@ -182,6 +183,8 @@ pub enum Error {
     Reset;
     InUse;
     NameNotFound;
+    OutOfDescriptors;
+    Aborted;
     Other(int);
 }
 
@@ -206,6 +209,12 @@ pub str Error.to_str() {
         case NameNotFound: {
             return "no such host";
         }
+        case OutOfDescriptors: {
+            return "out of file descriptors";
+        }
+        case Aborted: {
+            return "the connection was aborted before it was accepted";
+        }
         case Other(int code): {
             // ENOSYS from this module means one thing and it is worth
             // saying: the raw system call backend cannot resolve names --
@@ -218,6 +227,61 @@ pub str Error.to_str() {
                 return "this build cannot resolve host names; use a literal IP address";
             }
             return "system error " + code.to_str();
+        }
+    }
+}
+
+/// Whether the failure belongs to the moment and not to the call: the
+/// listener or the connection that produced it is still good, and the same
+/// call may succeed shortly.
+///
+/// **This is the answer to "may a server loop carry on after a failed
+/// `accept`?"** -- `true` for exactly the failures accept(2) says to treat
+/// like "try again": out of descriptors, a connection aborted in the
+/// backlog, and the kernel short of memory or buffers (`ENOMEM`, `ENOBUFS`),
+/// a network that went away (`Unreachable`, `ENETDOWN`, `EHOSTDOWN`,
+/// `ENONET`), a protocol error on one connection (`EPROTO`), one the firewall
+/// refused (`EPERM`) and an operation the connection's protocol lacked
+/// (`ENOPROTOOPT`, `EOPNOTSUPP`). Everything else -- a closed or invalid
+/// listener above all -- is `false`, and a loop that gets it should stop.
+///
+/// It is read from `accept`'s point of view. A `connect` that answers
+/// `Unreachable` has a different question to ask, and `Refused` and
+/// `TimedOut` are deliberately not here for that reason.
+///
+/// Out of descriptors answers `true` but does not heal by itself: the
+/// pending connection stays queued, so an immediate retry fails the same
+/// way. A loop that carries on should pause before it asks again.
+pub bool Error.is_transient() {
+    match (this) {
+        case OutOfDescriptors: {
+            return true;
+        }
+        case Aborted: {
+            return true;
+        }
+        case Unreachable: {
+            return true;
+        }
+        case Refused: {
+            return false;
+        }
+        case TimedOut: {
+            return false;
+        }
+        case Reset: {
+            return false;
+        }
+        case InUse: {
+            return false;
+        }
+        case NameNotFound: {
+            return false;
+        }
+        case Other(int code): {
+            // ENOMEM, ENOBUFS, EPROTO, EPERM, ENETDOWN, EHOSTDOWN, ENONET,
+            // ENOPROTOOPT, EOPNOTSUPP.
+            return code == 12 || code == 105 || code == 71 || code == 1 || code == 100 || code == 112 || code == 64 || code == 92 || code == 95;
         }
     }
 }
@@ -255,6 +319,17 @@ pub Error from_errno(int e) {
     }
     if (e == 98) {
         return Error.InUse;
+    }
+    // ENFILE and EMFILE: the system's table or this process's is full. Named
+    // because it is the failure an `accept` loop must survive -- the
+    // connection that could not be accepted is still queued, and descriptors
+    // come back as other connections close.
+    if (e == 23 || e == 24) {
+        return Error.OutOfDescriptors;
+    }
+    // ECONNABORTED: the peer gave up while its connection sat in the backlog.
+    if (e == 103) {
+        return Error.Aborted;
     }
     // ENOENT is what the layer answers when a name has no address
     // (runtime/sys_libc.c maps EAI_NONAME to it).
@@ -1192,6 +1267,19 @@ pub type Listener {
 }
 
 /// The next connection, waiting for one if none is ready.
+///
+/// **A failed accept is an `Err`, never a trap**, and some failures are the
+/// ordinary weather of a server: `OutOfDescriptors` while a burst of clients
+/// holds every descriptor, `Aborted` for a client that hung up in the
+/// backlog. Ask `e.is_transient()`: `true` means the listener is intact and
+/// the loop may log and ask again, `false` means stop. A signal (`EINTR`)
+/// and "nothing pending" (`EAGAIN`) never surface here at all -- this method
+/// retries the one and parks on the reactor for the other.
+///
+/// Out of descriptors leaves the pending connection queued, so asking again
+/// at once fails again at once: pause before the retry, as `http.serve` does.
+/// A listener that has been closed is not a failure of the world but a bug in
+/// the program, and still traps.
 pub Result<Conn, Error> Listener.accept() {
     if (!live) {
         trap("accept on a closed listener");

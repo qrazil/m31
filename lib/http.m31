@@ -40,8 +40,10 @@
 //   http.Handler                     interface   `Response handle(Request req)`
 //   http.serve(listener, handler, connections:, timeout_ms:, max_requests:)
 //                                    -> Result<int, Error>   connections served
+//   http.serve_stream(stream, handler, max_requests:)
+//                                    -> Result<int, Error>   requests served, over any io.Stream
 //   http.serve_conn(conn, handler, max_requests:)
-//                                    -> Result<int, Error>   requests served
+//                                    -> Result<int, Error>   serve_stream over a net.Conn
 //
 // API -- the client
 // -----------------
@@ -57,7 +59,8 @@
 // socket.** `read_request`, `write_request`, `read_response` and
 // `write_response` never mention `net`: hand them an `io.Buffer` and they
 // parse a transcript, hand them a `net.Conn` and they are a server or a
-// client. Only `serve`, `serve_conn`, `get` and `fetch` know what a socket
+// client. `serve_stream` is on the seam's side of that line: it takes an
+// `io.Stream`. Only `serve`, `serve_conn`, `get` and `fetch` know what a socket
 // is, because only they have to set a timeout or make a connection. That is
 // Oro's arrangement in `std/http.oro`, for Oro's reason: two parsers that
 // agree today drift tomorrow, so there is one of each and the corpus drives
@@ -194,6 +197,10 @@ import io;
 import json;
 import net;
 
+// `poll(2)` with an empty table: the one way this language has to wait a
+// fixed time. `back_off` is its only user.
+prim int __poll(List<int> fds, List<int> events, List<int> revents, int timeout_ms);
+
 // --- limits ----------------------------------------------------------------
 /// The whole header block -- request or status line, every field, and the
 /// blank line -- in bytes.
@@ -220,6 +227,8 @@ pub const int MAX_REQUESTS = 1000;
 /// How long a read or a write on a served connection waits, in
 /// milliseconds. 0 waits forever.
 pub const int TIMEOUT_MS = 30000;
+// How long `serve` pauses after a failed accept before it asks again.
+const int ACCEPT_BACKOFF_MS = 10;
 /// How large a piece of a body `set_chunked` writes as one chunk, and how
 /// much is asked of a stream at a time.
 pub const int CHUNK = 16384;
@@ -479,6 +488,12 @@ Error from_net(net.Error e) {
         }
         case NameNotFound: {
             return Error.NameNotFound;
+        }
+        case OutOfDescriptors: {
+            return Error.Other;
+        }
+        case Aborted: {
+            return Error.Reset;
         }
         case Other(int code): {
             return Error.Other;
@@ -2195,51 +2210,72 @@ pub interface Handler {
     Response handle(Request req);
 }
 
-/// Serve requests on one connection until the peer stops, either side says
+/// Serve requests on one `io.Stream` until the peer stops, either side says
 /// `close`, or `max_requests` have been served. The number served.
+///
+/// **Any stream will do.** A `net.Conn`, a TLS connection, or a test's own
+/// pair of buffers: this loop calls only `read_request`, `write_response` and
+/// `should_keep_alive`, which is the seam above, so it never learns whether
+/// there is a socket behind the stream. `serve_conn` is the same loop for the
+/// plain-socket case; a program with a different transport -- the https
+/// server, a proxy, a test -- calls this instead of copying the loop.
 ///
 /// **A malformed request is not this server's failure.** It is answered --
 /// with `e.status()` and the sentence `e.to_str()` -- the connection is
 /// closed, and this returns `Ok` with the count of requests that completed.
-/// `Err` is for a failure that could not be answered on: a socket that is
-/// gone, a timeout on an idle connection, a response this module could not
-/// write.
+/// `Err` is for a failure that could not be answered on: a stream that is
+/// gone, a response this module could not write.
 ///
-/// A timeout, if `set_read_timeout` was called on `c`, ends the connection
-/// quietly: a kept-alive connection that goes idle is the ordinary way one
-/// ends, and there is nobody to tell.
-pub Result<int, Error> serve_conn(net.Conn c, Handler h, int max_requests = MAX_REQUESTS) {
+/// A read that times out ends the connection quietly: a kept-alive connection
+/// that goes idle is the ordinary way one ends, and there is nobody to tell.
+/// The deadline is the stream's own business (`net.Conn.set_read_timeout`, or
+/// whatever the transport offers); this loop sets none, because it cannot
+/// know how.
+///
+/// **The stream is not closed here**; it closes when its owner lets go of it,
+/// as everywhere else.
+pub Result<int, Error> serve_stream(io.Stream stream, Handler handler, int max_requests = MAX_REQUESTS) {
     int served = 0;
     while (max_requests < 0 || served < max_requests) {
-        match (read_request(c)) {
+        match (read_request(stream)) {
             case Ok(Option<Request> maybe): {
                 match (maybe) {
                     case None: {
                         return Result<int, Error>.Ok(served);
                     }
-                    case Some(Request req): {
-                        Response resp = h.handle(req);
-                        bool again = should_keep_alive(req, resp) && (max_requests < 0 || served + 1 < max_requests);
-                        write_response(c, req, resp, again)?;
+                    case Some(Request incoming): {
+                        Response outgoing = handler.handle(incoming);
+                        bool will_continue = should_keep_alive(incoming, outgoing) && (max_requests < 0 || served + 1 < max_requests);
+                        write_response(stream, incoming, outgoing, will_continue)?;
                         served = served + 1;
-                        if (!again) {
+                        if (!will_continue) {
                             return Result<int, Error>.Ok(served);
                         }
                     }
                 }
             }
-            case Err(Error e): {
-                return refuse(c, e, served);
+            case Err(Error error): {
+                return refuse(stream, error, served);
             }
         }
     }
     return Result<int, Error>.Ok(served);
 }
 
+/// Serve requests on one connection: `serve_stream` over a `net.Conn`.
+///
+/// It exists so that the plain-socket call reads as what it is, and so that
+/// every caller written before `serve_stream` kept compiling; it adds
+/// nothing to the loop. A timeout, if `set_read_timeout` was called on the connection,
+/// ends the connection quietly, as `serve_stream` says.
+pub Result<int, Error> serve_conn(net.Conn connection, Handler handler, int max_requests = MAX_REQUESTS) {
+    return serve_stream(connection, handler, max_requests: max_requests);
+}
+
 // Answer a refusal and stop. A transport failure is not answered: there is
 // nothing to answer it on.
-Result<int, Error> refuse(net.Conn c, Error e, int served) {
-    match (e) {
+Result<int, Error> refuse(io.Stream stream, Error error, int served) {
+    match (error) {
         case Refused: {
             return Result<int, Error>.Ok(served);
         }
@@ -2293,9 +2329,9 @@ Result<int, Error> refuse(net.Conn c, Error e, int served) {
     // A refusal is answered on a connection whose framing this end no longer
     // trusts, so it is the last thing written and the connection closes after
     // it -- which `Connection: close` says and the `false` below arranges.
-    Response resp = text_response(e.to_str() + "\n", status: e.status());
+    Response refusal = text_response(error.to_str() + "\n", status: error.status());
     Request bare = bare_request();
-    match (write_response(c, bare, resp, false)) {
+    match (write_response(stream, bare, refusal, false)) {
         case Ok: {
             return Result<int, Error>.Ok(served);
         }
@@ -2361,13 +2397,36 @@ pub Result<int, Error> serve(net.Listener ln, Handler h, int connections = -1, i
                 // public for a caller who wants to see these.
                 one_connection(c, h, timeout_ms, max_requests);
             }
-            case Err(net.Error e): {
-                return Result<int, Error>.Err(from_net(e));
+            case Err(net.Error error): {
+                // The same rule one level down: a failed accept that is the
+                // weather -- out of descriptors, a client that gave up in
+                // the backlog -- is not the server's failure either. It is
+                // not a served connection, so it is not counted, and the
+                // loop asks again after a pause (an exhausted descriptor
+                // table leaves the connection queued, so asking at once
+                // would spin). Anything else means the listener is no
+                // good, and that ends the loop.
+                if (!error.is_transient()) {
+                    return Result<int, Error>.Err(from_net(error));
+                }
+                back_off(ACCEPT_BACKOFF_MS);
+                continue;
             }
         }
         done = done + 1;
     }
     return Result<int, Error>.Ok(done);
+}
+
+// Wait `milliseconds` without a descriptor to wait on: `poll` with an
+// empty table is a sleep. It holds the carrier for the duration, which is why
+// the pause is short and only taken on the failure path. There is no timer a
+// green thread could park on (docs/net-timeouts-decision.md).
+void back_off(int milliseconds) {
+    List<int> none = [];
+    List<int> wanted = [];
+    List<int> got = [];
+    int ignored = __poll(none, wanted, got, milliseconds);
 }
 
 // One accepted connection, to its end, with whatever went wrong on it kept

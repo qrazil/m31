@@ -1,0 +1,160 @@
+import http;
+import io;
+
+// `http.serve_stream`: the request-serving loop over any `io.Stream`, with no
+// socket in sight.
+//
+// `serve_conn` used to be the only way in, and it takes a `net.Conn`, so a
+// server whose transport is anything else -- a TLS connection above all -- had
+// to copy the loop (the https httpserver kept a private `serve_stream` that
+// was this function's body, line for line). Here the stream is a `Duplex`,
+// two `io.Buffer`s: what the "peer" sent, and what the server wrote back.
+// Nothing in `net` is imported, which is the point: it is the shape of a
+// type that is not a socket and still satisfies `io.Stream`.
+//
+// What it pins down, each with the loop's rule for it:
+//
+//   - **Keep-alive.** Two requests, the second `Connection: close`: both are
+//     answered, in order, the first without `Connection: close`, the second
+//     with it.
+//   - **The cap.** Three requests pipelined and `max_requests: 2`: two are
+//     served, and the second answer says `close`, because the server is the
+//     one hanging up.
+//   - **A refusal is answered, not failed.** A good request then one with two
+//     `Host` fields: `Ok(1)`, a 200 then a 400 with `Connection: close`.
+//   - **A clean end is not an error.** No bytes at all is `Ok(0)`.
+//   - **HTTP/1.0 closes** unless it asked to stay.
+//   - **A dead stream is an `Err`.** There is nobody to answer a failed write
+//     on, so it comes back as the transport failure it was.
+//   - **A stateful handler sees every request** on the stream, in order.
+
+// Both directions of a connection, in memory.
+type Duplex {
+    io.Buffer inbound;
+    io.Buffer outbound;
+}
+
+Result<bytes, io.Error> Duplex.read(int count) {
+    return inbound.read(count);
+}
+
+Result<bytes, io.Error> Duplex.read_all() {
+    return inbound.read_all();
+}
+
+Result<bytes, io.Error> Duplex.read_until(bytes delimiter, int limit) {
+    return inbound.read_until(delimiter, limit);
+}
+
+Result<int, io.Error> Duplex.write(bytes data) {
+    return outbound.write(data);
+}
+
+Result<bool, io.Error> Duplex.close() {
+    return outbound.close();
+}
+
+// What the server wrote, with CRLF shown as a newline so the expected output
+// can be read.
+str Duplex.written() {
+    match (outbound.peek().utf8()) {
+        case Some(str text): {
+            return text.split("\r\n").join("\n");
+        }
+        case None: {
+            return "(not text)";
+        }
+    }
+}
+
+Duplex duplex_of(str sent) {
+    return Duplex(io.buffer_of(sent.to_bytes()), io.buffer());
+}
+
+// A stream that can be read from and never written to: a peer that hung up
+// after sending.
+type Deaf {
+    io.Buffer inbound;
+}
+
+Result<bytes, io.Error> Deaf.read(int count) {
+    return inbound.read(count);
+}
+
+Result<bytes, io.Error> Deaf.read_all() {
+    return inbound.read_all();
+}
+
+Result<bytes, io.Error> Deaf.read_until(bytes delimiter, int limit) {
+    return inbound.read_until(delimiter, limit);
+}
+
+Result<int, io.Error> Deaf.write(bytes data) {
+    return Result<int, io.Error>.Err(io.Error.Other(32));
+}
+
+Result<bool, io.Error> Deaf.close() {
+    return Result<bool, io.Error>.Ok(true);
+}
+
+// A handler with state: it answers with how many requests it has seen.
+type Counting {
+    int seen = 0;
+}
+
+http.Response Counting.handle(http.Request request) {
+    seen = seen + 1;
+    return http.text_response(request.method() + " " + request.path() + " #" + seen.to_str());
+}
+
+http.Response hello(http.Request request) {
+    return http.text_response("hello");
+}
+
+str get(str path, str extra) {
+    return "GET " + path + " HTTP/1.1\r\nHost: example.test\r\n" + extra + "\r\n";
+}
+
+str outcome(Result<int, http.Error> result) {
+    match (result) {
+        case Ok(int served): {
+            return "served " + served.to_str();
+        }
+        case Err(http.Error error): {
+            return "failed: " + error.to_str();
+        }
+    }
+}
+
+void show(str label, Duplex stream, Result<int, http.Error> result) {
+    print("== " + label + ": " + outcome(result));
+    print(stream.written());
+}
+
+// --- keep-alive: two requests, the second closes ---
+Duplex first = duplex_of(get("/one", "") + get("/two", "Connection: close\r\n"));
+Counting counter = Counting();
+show("keep-alive", first, http.serve_stream(first, counter));
+// --- the cap: three pipelined, two allowed ---
+Duplex capped = duplex_of(get("/a", "") + get("/b", "") + get("/c", ""));
+show("cap of 2", capped, http.serve_stream(capped, hello, max_requests: 2));
+// --- a refusal is answered; the count is of requests that completed ---
+Duplex refused = duplex_of(get("/ok", "") + "GET /bad HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n");
+show("refusal", refused, http.serve_stream(refused, hello));
+// --- a clean end ---
+Duplex empty = duplex_of("");
+show("empty", empty, http.serve_stream(empty, hello));
+// --- HTTP/1.0 closes by default, and stays when it asks ---
+Duplex old = duplex_of("GET /old HTTP/1.0\r\n\r\n");
+show("http/1.0", old, http.serve_stream(old, hello));
+Duplex old_keep = duplex_of("GET /old HTTP/1.0\r\nConnection: keep-alive\r\n\r\nGET /again HTTP/1.0\r\n\r\n");
+show("http/1.0 keep-alive", old_keep, http.serve_stream(old_keep, hello));
+// --- a dead stream ---
+Deaf gone = Deaf(io.buffer_of(get("/x", "").to_bytes()));
+print("== dead stream: " + outcome(http.serve_stream(gone, hello)));
+// --- limits are the loop's too: a head over MAX_HEAD is a 431, answered ---
+Duplex huge = duplex_of("GET / HTTP/1.1\r\nX: " + "a".repeat(http.MAX_HEAD + 1) + "\r\n\r\n");
+show("oversize head", huge, http.serve_stream(huge, hello));
+// --- a peer that stops in the middle of a message is quietly done ---
+Duplex truncated = duplex_of(get("/ok", "") + "GET / HTTP/1.1\r\nHo");
+show("truncated", truncated, http.serve_stream(truncated, hello));

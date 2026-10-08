@@ -1,0 +1,19 @@
+23 -> out of file descriptors
+24 -> out of file descriptors
+103 -> the connection was aborted before it was accepted
+111 -> connection refused
+transient(24): true
+transient(103): true
+transient(12 ENOMEM): true
+transient(105 ENOBUFS): true
+transient(71 EPROTO): true
+transient(101 ENETUNREACH): true
+transient(111 refused): false
+transient(110 timed out): false
+transient(9 EBADF): false
+table filled: true
+accept with a full table: out of file descriptors transient=true
+accept after freeing one: ok
+answer while the table is full: false
+answer after freeing one: HTTP/1.1 200 OK
+child ok: true

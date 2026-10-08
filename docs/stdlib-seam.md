@@ -587,6 +587,27 @@ exactly once — which was spent when `fs` grew the set from three to seven.
 If it is ever paid again, `net.Error` folds into `io.Error` and `error_of`
 goes away; nothing here is shaped to prevent that.
 
+### A failed `accept` is a value, and some are survivable
+
+`Listener.accept` has always answered with a `Result`; what it could not do
+was say which failures a server may carry on past. ENFILE/EMFILE (the table is
+full) and ECONNABORTED (the client left while queued) are the ordinary
+weather of a busy listener, and they arrived as `Other(24)` and `Other(103)`.
+They are now the named variants `net.Error.OutOfDescriptors` and `Aborted`,
+and `e.is_transient()` is true for exactly the failures accept(2) says to
+treat like "try again" (those two, `Unreachable`, and the `Other` codes
+ENOMEM, ENOBUFS, EPROTO, EPERM, ENETDOWN, EHOSTDOWN, ENONET, ENOPROTOOPT,
+EOPNOTSUPP). EINTR and EAGAIN never surface: `accept` retries the first and
+parks on the reactor for the second. `http.serve` logs nothing but no longer
+ends on a transient failure -- it pauses 10 ms (`poll` with an empty table;
+there is no sleep that parks, see `docs/net-timeouts-decision.md`) and asks
+again. The pause matters: out of descriptors leaves the connection queued, so
+an immediate retry spins. The two new variants are an exhaustive-`match`
+break for anyone matching on `net.Error`; the in-tree cases were
+`http.from_net` (which folds them into `http.Error.Other` and `Reset`, so
+`http.Error` is unchanged) and `corpus/modules/stdlib-net-errors`.
+Out-of-tree programs that match `net.Error` exhaustively add two arms.
+
 ### `__resolve` is the one primitive with two answers
 
 On the C library backend it is `getaddrinfo`. On the raw backend it is
@@ -625,7 +646,10 @@ the interface, so the whole grammar is driven from an `io.Buffer` in
 `corpus/modules/stdlib-http*` with no listener, no port and no timing —
 which is what makes it possible to check ninety-odd refusals in one
 deterministic program, and to compare each one against Python's
-`http.client` and `email.parser`. Only `serve`, `serve_conn`, `get` and
+`http.client` and `email.parser`. `serve_stream` -- the request-serving loop
+-- takes an `io.Stream` too (a TLS connection, a test's pair of buffers: see
+`corpus/modules/stdlib-http-serve-stream`); `serve_conn` is that loop over a
+`net.Conn`, kept as a one-line wrapper. Only `serve`, `serve_conn`, `get` and
 `fetch` mention `net`, because only they set a timeout or make a connection.
 
 **TLS is not below the language, and it did not need to be.** A TLS stack is

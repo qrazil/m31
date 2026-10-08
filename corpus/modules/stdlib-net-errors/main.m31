@@ -90,6 +90,12 @@ bool refused_or_unresolvable(str host, int port) {
                 case InUse: {
                     return false;
                 }
+                case OutOfDescriptors: {
+                    return false;
+                }
+                case Aborted: {
+                    return false;
+                }
             }
         }
     }
