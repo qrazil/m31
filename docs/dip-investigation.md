@@ -7,7 +7,7 @@ document summarizes.
 
 ## Symptom
 
-`apps/httpserver/SCALING.md`'s own benchmark, and every re-run of it
+`SCALING.md`'s own benchmark (now in github.com/qrazil/httpserver under `bench/`), and every re-run of it
 tonight, found m31 and Go closely matched up to roughly c=500-1000
 concurrent connections, after which m31 diverges sharply and
 non-monotonically -- a deep, often 30-50%+ dip relative to Go somewhere in

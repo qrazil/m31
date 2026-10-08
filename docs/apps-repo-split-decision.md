@@ -1,5 +1,10 @@
 # Per-app repo split: the decision
 
+> **Update:** `git`, `tui`, `markdown` and `httpserver` have been extracted to
+> github.com/qrazil/{gitui,tui,term-markdown,httpserver} and removed from this
+> monorepo (releases there). `apps/ssh` remains; the text below is the original
+> scoping and is kept as history.
+
 Status: **scoping**. Nothing here is implemented — no repo created, no
 directory removed, no CI written. This document exists for the same reason
 `docs/ssh-decision.md` and `docs/remote-imports-decision.md` do: this changes

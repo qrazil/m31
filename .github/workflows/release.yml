@@ -123,26 +123,6 @@ jobs:
           set -euo pipefail
           OUT="dist/${LANG_NAME}-linux-x86_64"
 
-          # apps/git -- the read-only CLI and the interactive client.
-          # gitui.m31 pulls in apps/tui/ as well as apps/git/'s own files,
-          # which this compiler cannot see from apps/git alone (imports
-          # resolve against the entry file's own directory only) --
-          # build-gitui.sh exists specifically to stage both into a temp
-          # dir first. See apps/git/README.md and build-gitui.sh's header.
-          ./build.sh apps/git/git.m31 -o "$OUT/ourgit"
-          ./apps/git/build-gitui.sh -o "$OUT/ourgitui"
-
-          # apps/markdown -- the one app with its own build.sh, which wants
-          # OUT rather than -o.
-          OUT="$OUT/markdown" bash apps/markdown/build.sh
-
-          # apps/tui is a library (see apps/tui/README.md: "This library is
-          # not part of the standard library"); demo.m31 and browse.m31 are
-          # its only two standalone programs, so those are what ships.
-          OUT="dist/${LANG_NAME}-linux-x86_64"
-          ./build.sh apps/tui/demo.m31 -o "$OUT/tuidemo"
-          ./build.sh apps/tui/browse.m31 -o "$OUT/tuibrowse"
-
           # apps/ssh is Phase 1 of the ssh work: SHA-256 and
           # ChaCha20-Poly1305 primitives only (docs/ssh-decision.md) -- there
           # is no client or server yet, so there is no "ssh app" binary to
@@ -158,10 +138,6 @@ jobs:
           Tag: ${GITHUB_REF_NAME}
 
           $LANG_BIN                        the compiler (./$LANG_BIN --emit-c foo.$LANG_EXT -o foo.c)
-          ourgit                       apps/git: read-only CLI (ourgit -log, -cat-file, ...)
-          ourgitui                     apps/git: interactive client (run inside a repo)
-          markdown                     apps/markdown: CommonMark subset to HTML
-          tuidemo, tuibrowse           apps/tui: the library's two standalone example programs
           ssh-sha256-selftest          apps/ssh: SHA-256 self-check (Phase 1 crypto primitives only --
           ssh-chacha20poly1305-selftest  no ssh client/server exists yet, see docs/ssh-decision.md)
 
@@ -229,15 +205,6 @@ jobs:
           set -euo pipefail
           OUT="dist/${LANG_NAME}-linux-aarch64"
 
-          ./build.sh apps/git/git.m31 -o "$OUT/ourgit"
-          ./apps/git/build-gitui.sh -o "$OUT/ourgitui"
-
-          OUT="$OUT/markdown" bash apps/markdown/build.sh
-
-          OUT="dist/${LANG_NAME}-linux-aarch64"
-          ./build.sh apps/tui/demo.m31 -o "$OUT/tuidemo"
-          ./build.sh apps/tui/browse.m31 -o "$OUT/tuibrowse"
-
           ./build.sh apps/ssh/t_sha256.m31 -o "$OUT/ssh-sha256-selftest"
           ./build.sh apps/ssh/t_chacha20poly1305.m31 -o "$OUT/ssh-chacha20poly1305-selftest"
 
@@ -247,10 +214,6 @@ jobs:
           Tag: ${GITHUB_REF_NAME}
 
           $LANG_BIN                        the compiler (./$LANG_BIN --emit-c foo.$LANG_EXT -o foo.c)
-          ourgit                       apps/git: read-only CLI (ourgit -log, -cat-file, ...)
-          ourgitui                     apps/git: interactive client (run inside a repo)
-          markdown                     apps/markdown: CommonMark subset to HTML
-          tuidemo, tuibrowse           apps/tui: the library's two standalone example programs
           ssh-sha256-selftest          apps/ssh: SHA-256 self-check (Phase 1 crypto primitives only --
           ssh-chacha20poly1305-selftest  no ssh client/server exists yet, see docs/ssh-decision.md)
 
@@ -328,15 +291,6 @@ jobs:
           set -euo pipefail
           OUT="dist/${LANG_NAME}-macos-arm64"
 
-          ./build.sh apps/git/git.m31 -o "$OUT/ourgit"
-          ./apps/git/build-gitui.sh -o "$OUT/ourgitui"
-
-          OUT="$OUT/markdown" bash apps/markdown/build.sh
-
-          OUT="dist/${LANG_NAME}-macos-arm64"
-          ./build.sh apps/tui/demo.m31 -o "$OUT/tuidemo"
-          ./build.sh apps/tui/browse.m31 -o "$OUT/tuibrowse"
-
           ./build.sh apps/ssh/t_sha256.m31 -o "$OUT/ssh-sha256-selftest"
           ./build.sh apps/ssh/t_chacha20poly1305.m31 -o "$OUT/ssh-chacha20poly1305-selftest"
 
@@ -346,10 +300,6 @@ jobs:
           Tag: ${GITHUB_REF_NAME}
 
           $LANG_BIN                        the compiler (./$LANG_BIN --emit-c foo.$LANG_EXT -o foo.c)
-          ourgit                       apps/git: read-only CLI (ourgit -log, -cat-file, ...)
-          ourgitui                     apps/git: interactive client (run inside a repo)
-          markdown                     apps/markdown: CommonMark subset to HTML
-          tuidemo, tuibrowse           apps/tui: the library's two standalone example programs
           ssh-sha256-selftest          apps/ssh: SHA-256 self-check (Phase 1 crypto primitives only --
           ssh-chacha20poly1305-selftest  no ssh client/server exists yet, see docs/ssh-decision.md)
 

@@ -29,9 +29,12 @@ it cannot rot.
 Beyond the core language: a standard library (`lib/`, 27 modules) covering
 collections, JSON, CSV, HTML, a full HTTP/1.1 client and server
 (`lib/http.m31`), filesystem and OS access, and a constant-time crypto stack
-(X25519, Ed25519, SHA-256/512, ChaCha20-Poly1305). On top of that, four real
-applications in `apps/`: an interactive `git` client, an `ssh` client, a
-`tui` framework, and a `markdown` renderer.
+(X25519, Ed25519, SHA-256/512, ChaCha20-Poly1305). On top of that, an `ssh`
+client in `apps/`, and four applications that now live in their own repos:
+[gitui](https://github.com/qrazil/gitui) (interactive git client),
+[tui](https://github.com/qrazil/tui) (terminal UI framework),
+[term-markdown](https://github.com/qrazil/term-markdown) (markdown renderer) and
+[httpserver](https://github.com/qrazil/httpserver).
 
 ## What the language does today
 
@@ -394,10 +397,8 @@ lib/                   the standard library, written in the language itself
   x25519.m31 ed25519.m31 sha256.m31 sha512.m31
   chacha20poly1305.m31                            constant-time crypto
 apps/                  real programs built on the language and stdlib
-  git/                 an interactive git client
   ssh/                 an SSH client — see docs/ssh-decision.md
-  tui/                 a terminal UI framework
-  markdown/            a markdown renderer
+                       (git, tui, markdown, httpserver moved to github.com/qrazil/{gitui,tui,term-markdown,httpserver})
 docs/
   reference.md             the language, stated normatively -- start here
   roadmap.md               what exists, what the freeze needs, what is out
@@ -472,7 +473,7 @@ revisit it.
 ## Next
 
 1. **A real profiling pass on the reactor's I/O dispatch path.**
-   `apps/httpserver/SCALING.md` found that `apps/httpserver` tracks an
+   `SCALING.md` in [qrazil/httpserver](https://github.com/qrazil/httpserver) (`bench/`) found that `httpserver` tracks an
    equivalent Go server closely up to ~1,000-2,500 concurrent connections,
    then degrades measurably faster from 5,000 upward (throughput and tail
    latency) with no errors anywhere up to 20,000. The leading hypothesis,
