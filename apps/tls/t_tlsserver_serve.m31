@@ -1,0 +1,165 @@
+// The TLS server under test, driven from `test_tlsserver.sh`.
+//
+//   t_tlsserver_serve CHAIN KEY MODE TIMEOUT_MS PROTOCOLS [CHAIN2 KEY2]
+//
+// Listens on an ephemeral loopback port, prints `READY port`, and serves one
+// connection at a time, forever, printing one line per connection:
+//   conn N ok sni=NAME alpn=PROTOCOL
+//   conn N error REASON
+// MODE is what happens after a good handshake:
+//   static   read one request, answer with a small page
+//   echo     answer each line with `echo: ` and the line, until the client closes
+//   big      read one request, answer with a 1 MiB body (octet i is i mod 251)
+//   hold     read to the client's close, send nothing
+// PROTOCOLS is a comma-separated ALPN list, or `-` for none. With CHAIN2 and
+// KEY2 the server holds two Configs and picks by SNI.
+
+import io;
+import net;
+import os;
+import tls_server;
+
+// A line on standard output, handed to the kernel at once so a test (or a
+// supervisor) polling the log sees it without waiting for a full buffer.
+void say(str line) {
+    Result<int, io.Error> wrote = io.stdout().write((line + "\n").to_bytes());
+}
+
+const int BIG_SIZE = 1048576;
+
+bytes big_body() {
+    bytes body = [];
+    for (int index in 0 .. BIG_SIZE) {
+        body.push(index % 251);
+    }
+    return body;
+}
+
+void respond(tls_server.Conn secure, bytes body) {
+    str head = "HTTP/1.1 200 OK\r\nContent-Length: " + body.size().to_str() + "\r\nConnection: close\r\n\r\n";
+    bytes message = head.to_bytes();
+    message.extend(body);
+    match (secure.write(message)) {
+        case Ok(int sent): {
+        }
+        case Err(io.Error write_error): {
+            say("write error " + write_error.to_str());
+        }
+    }
+}
+
+void serve(tls_server.Conn secure, str mode, bytes big) {
+    if (mode == "echo") {
+        while (true) {
+            match (secure.read_until("\n".to_bytes(), 65536)) {
+                case Err(io.Error read_error): {
+                    break;
+                }
+                case Ok(bytes line): {
+                    if (line.size() == 0) {
+                        break;
+                    }
+                    bytes answer = "echo: ".to_bytes();
+                    answer.extend(line);
+                    match (secure.write(answer)) {
+                        case Ok(int sent): {
+                        }
+                        case Err(io.Error write_error): {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    } else if (mode == "hold") {
+        Result<bytes, io.Error> ignored = secure.read_all();
+    } else {
+        match (secure.read_until("\r\n\r\n".to_bytes(), 65536)) {
+            case Err(io.Error read_error): {
+                say("request error " + read_error.to_str());
+            }
+            case Ok(bytes request): {
+                if (mode == "big") {
+                    respond(secure, big);
+                } else {
+                    respond(secure, "hello over https\n".to_bytes());
+                }
+            }
+        }
+    }
+    Result<bool, io.Error> closed = secure.close();
+}
+
+tls_server.Config load(str chain, str key) {
+    match (tls_server.load_config_files(chain, key)) {
+        case Ok(tls_server.Config config): {
+            return config;
+        }
+        case Err(tls_server.ConfigError config_error): {
+            io.eprint("cannot load " + chain + ": " + config_error.to_str());
+            os.exit(1);
+            trap("unreachable");
+        }
+    }
+}
+
+List<str> arguments = os.args();
+if (arguments.size() < 6) {
+    io.eprint("usage: t_tlsserver_serve CHAIN KEY MODE TIMEOUT_MS PROTOCOLS [CHAIN2 KEY2]");
+    os.exit(2);
+}
+str mode = arguments[3];
+int timeout_ms = 0;
+match (arguments[4].parse_int()) {
+    case Some(int parsed): {
+        timeout_ms = parsed;
+    }
+    case None: {
+        os.exit(2);
+    }
+}
+List<tls_server.Config> configs = [];
+configs.push(load(arguments[1], arguments[2]));
+if (arguments.size() > 7) {
+    configs.push(load(arguments[6], arguments[7]));
+}
+for (tls_server.Config config in configs) {
+    if (arguments[5] == "-") {
+        config.set_protocols([]);
+    } else {
+        config.set_protocols(arguments[5].split(","));
+    }
+}
+bytes big = [];
+if (mode == "big") {
+    big = big_body();
+}
+match (net.listen("127.0.0.1", 0)) {
+    case Err(net.Error listen_error): {
+        io.eprint("cannot listen: " + listen_error.to_str());
+        os.exit(1);
+    }
+    case Ok(net.Listener listener): {
+        say("READY " + listener.local().port().to_str());
+        int count = 0;
+        while (true) {
+            match (listener.accept()) {
+                case Err(net.Error accept_error): {
+                    say("accept error " + accept_error.to_str());
+                }
+                case Ok(net.Conn raw): {
+                    count = count + 1;
+                    match (tls_server.accept_among(raw, configs, timeout_ms: timeout_ms)) {
+                        case Ok(tls_server.Conn secure): {
+                            say("conn " + count.to_str() + " ok sni=" + secure.server_name() + " alpn=" + secure.alpn());
+                            serve(secure, mode, big);
+                        }
+                        case Err(tls_server.Error handshake_error): {
+                            say("conn " + count.to_str() + " error " + handshake_error.to_str());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,69 @@
+// P-256 signing (`lib/ecdsa_sign.m31`) against the cases `tlsserver_sign_oracle.py`
+// writes. Each input line is `name|secret_hex|digest_hex`; the program prints
+// `name public_key_hex raw_signature_hex der_signature_hex`. The oracle prints
+// the expected lines, so no expectation is written down here.
+
+import ecdsa_sign;
+import bignum;
+import io;
+import os;
+
+bytes decode(str hex) {
+    match (bignum.bytes_from_hex(hex)) {
+        case None: {
+            return [];
+        }
+        case Some(bytes decoded): {
+            return decoded;
+        }
+    }
+}
+
+List<str> argv = os.args();
+if (argv.size() < 2) {
+    io.eprint("usage: t_tlsserver_sign CASES");
+} else {
+    match (io.read(argv[1])) {
+        case Err(io.Error error): {
+            io.eprint("cannot read " + argv[1] + ": " + error.to_str());
+        }
+        case Ok(str text): {
+            for (str line in text.split("\n")) {
+                if (line == "") {
+                    continue;
+                }
+                List<str> fields = line.split("|");
+                bytes secret = decode(fields[1]);
+                bytes digest = decode(fields[2]);
+                str public_text = "error";
+                match (ecdsa_sign.public_key(secret)) {
+                    case Err(ecdsa_sign.Error error): {
+                        public_text = "error";
+                    }
+                    case Ok(bytes point): {
+                        public_text = point.hex();
+                    }
+                }
+                str raw_text = "error";
+                match (ecdsa_sign.sign_raw(secret, digest)) {
+                    case Err(ecdsa_sign.Error error): {
+                        raw_text = "error";
+                    }
+                    case Ok(bytes raw): {
+                        raw_text = raw.hex();
+                    }
+                }
+                str der_text = "error";
+                match (ecdsa_sign.sign(secret, digest)) {
+                    case Err(ecdsa_sign.Error error): {
+                        der_text = "error";
+                    }
+                    case Ok(bytes der): {
+                        der_text = der.hex();
+                    }
+                }
+                print(fields[0] + " " + public_text + " " + raw_text + " " + der_text);
+            }
+        }
+    }
+}

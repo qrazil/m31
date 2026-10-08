@@ -51,12 +51,15 @@ pub fn source(name: &str) -> Option<&'static str> {
         "hkdf" => include_str!("../lib/hkdf.m31"),
         "bignum" => include_str!("../lib/bignum.m31"),
         "ecdsa" => include_str!("../lib/ecdsa.m31"),
+        "ecdsa_sign" => include_str!("../lib/ecdsa_sign.m31"),
+        "signing_key" => include_str!("../lib/signing_key.m31"),
         "x509" => include_str!("../lib/x509.m31"),
         "x509_chain" => include_str!("../lib/x509_chain.m31"),
         "rsa" => include_str!("../lib/rsa.m31"),
         "tls13_schedule" => include_str!("../lib/tls13_schedule.m31"),
         "tls13_record" => include_str!("../lib/tls13_record.m31"),
         "tls" => include_str!("../lib/tls.m31"),
+        "tls_server" => include_str!("../lib/tls_server.m31"),
         _ => return None,
     })
 }
