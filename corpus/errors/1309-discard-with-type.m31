@@ -1,0 +1,10 @@
+// The type is taken from the variant, so a discard is `_` alone: not `str _`.
+Result<int, str> r = Result<int, str>.Err("no");
+match (r) {
+    case Ok(int value): {
+        print(value);
+    }
+    case Err(str _): {
+        print("failed");
+    }
+}

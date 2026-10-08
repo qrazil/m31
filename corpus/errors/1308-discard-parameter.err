@@ -1,0 +1,4 @@
+corpus/errors/1308-discard-parameter.m31:2:14: `_` is a discard, not a name: only a `case` payload may be written `_` (`case Err(_)`)
+  |
+2 | int pick(int _, int second) {
+  |              ^

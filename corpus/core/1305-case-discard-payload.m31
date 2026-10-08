@@ -1,0 +1,165 @@
+// A `case` payload may be written `_`: it binds nothing, names nothing and
+// writes no type, because the variant already says what it carries.
+//
+// It is not a name, so it never meets the shadowing rules and may repeat in
+// one scope. And it is still a case of its own: every variant needs one.
+
+type Conn {
+    str who;
+}
+
+void Conn.drop() {
+    print("closed " + who);
+}
+
+enum Error {
+    NotFound(str);
+    Ambiguous(str, int);
+    Bad(List<str>);
+    Empty;
+}
+
+// The shape this is for: the error is not read, only the fact of it.
+int status(Result<int, str> r) {
+    match (r) {
+        case Ok(int value): {
+            return value;
+        }
+        case Err(_): {
+            return -1;
+        }
+    }
+}
+
+bool succeeded(Result<int, str> r) {
+    match (r) {
+        case Ok(_): {
+            return true;
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+// Some of several payloads: the positions stay, the names are optional.
+int second(Error e) {
+    match (e) {
+        case NotFound(_): {
+            return 0;
+        }
+        case Ambiguous(_, int n): {
+            return n;
+        }
+        case Bad(_): {
+            return 0;
+        }
+        case Empty: {
+            return 0;
+        }
+    }
+}
+
+str first(Error e) {
+    match (e) {
+        case NotFound(str name): {
+            return name;
+        }
+        case Ambiguous(str prefix, _): {
+            return prefix;
+        }
+        case Bad(_): {
+            return "bad";
+        }
+        case Empty: {
+            return "empty";
+        }
+    }
+}
+
+// Two discards in one arm, and a local called `error` in scope: nothing to
+// conflict with, because `_` introduced no name.
+str both(Error e) {
+    str error = "none";
+    match (e) {
+        case Ambiguous(_, _): {
+            error = "ambiguous";
+        }
+        case NotFound(_): {
+            error = "not found";
+        }
+        case Bad(_): {
+            error = "bad";
+        }
+        case Empty: {
+            error = "empty";
+        }
+    }
+    return error;
+}
+
+// A discarded payload that owns something is still released, exactly once:
+// the drop runs, and the corpus checks nothing is left live.
+Result<Conn, str> open(str who) {
+    if (who == "") {
+        return Result<Conn, str>.Err("no name");
+    }
+    return Result<Conn, str>.Ok(Conn(who));
+}
+
+// Inside a generic function the payload type is the type parameter's, which
+// is not written anywhere in the arm.
+bool present<T>(Option<T> o) {
+    match (o) {
+        case Some(_): {
+            return true;
+        }
+        case None: {
+            return false;
+        }
+    }
+}
+
+print(status(Result<int, str>.Ok(7)));
+print(status(Result<int, str>.Err("x")));
+print(succeeded(Result<int, str>.Ok(1)));
+print(succeeded(Result<int, str>.Err("y")));
+print(second(Error.Ambiguous("ab", 3)));
+print(second(Error.NotFound("z")));
+print(first(Error.Ambiguous("ab", 3)));
+print(first(Error.Bad(["q"])));
+print(both(Error.Ambiguous("ab", 3)));
+print(both(Error.Bad(["q", "r"])));
+print(both(Error.Empty));
+print(present(Option<int>.Some(1)));
+print(present(Option<str>.None));
+
+match (open("a")) {
+    case Ok(_): {
+        print("opened");
+    }
+    case Err(_): {
+        print("refused");
+    }
+}
+match (open("")) {
+    case Ok(_): {
+        print("opened");
+    }
+    case Err(_): {
+        print("refused");
+    }
+}
+
+// Beside a named payload that is moved: the discard is a different arm's.
+Chan<Conn> inbox = Chan<Conn>(1);
+match (open("b")) {
+    case Ok(Conn conn): {
+        send(inbox, conn);
+    }
+    case Err(_): {
+        print("refused");
+    }
+}
+Conn got = recv(inbox);
+print("got " + got.who);

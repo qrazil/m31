@@ -1,0 +1,4 @@
+corpus/errors/1305-discard-used-as-value.m31:9:15: `_` is a discard and cannot be used as a value
+  |
+9 |         print(_);
+  |               ^

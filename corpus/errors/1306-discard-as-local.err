@@ -1,0 +1,4 @@
+corpus/errors/1306-discard-as-local.m31:3:5: `_` is a discard, not a name: only a `case` payload may be written `_` (`case Err(_)`)
+  |
+3 | int _ = 3;
+  |     ^
