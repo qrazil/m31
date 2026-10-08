@@ -98,6 +98,9 @@ str name_of(tls.Error error) {
         case ClientCertificateRequested: {
             return "ClientCertificateRequested";
         }
+        case ClientCertificateUnusable: {
+            return "ClientCertificateUnusable";
+        }
         case BadFinished: {
             return "BadFinished";
         }

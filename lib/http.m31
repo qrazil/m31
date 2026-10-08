@@ -529,6 +529,9 @@ Error from_tls(tls.Error e) {
         case ClientCertificateRequested: {
             return Error.TlsFailed;
         }
+        case ClientCertificateUnusable: {
+            return Error.TlsFailed;
+        }
         case BadCertificate: {
             return Error.CertificateUntrusted;
         }
