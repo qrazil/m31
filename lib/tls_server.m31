@@ -1035,6 +1035,7 @@ type Session {
 
 Result<Session, Error> run_handshake(tls13_record.Connection record, List<Config> configs) {
     random.System source = random.system();
+    tls13_schedule.Suite suite = tls13_schedule.Suite.ChaCha20Poly1305Sha256;
     tls13_schedule.Transcript transcript = tls13_schedule.transcript();
     bytes first_message = next_client_hello(record)?;
     Hello hello = parse_client_hello(first_message)?;
@@ -1042,7 +1043,7 @@ Result<Session, Error> run_handshake(tls13_record.Connection record, List<Config
     transcript.add(first_message);
     bool compatibility_sent = false;
     if (!hello.has_x25519_share) {
-        transcript.restart_after_retry_request();
+        transcript.restart_after_retry_request(suite);
         bytes retry = retry_request_message(hello.session_id);
         transcript.add(retry);
         lift(record.send_handshake(retry))?;
@@ -1072,11 +1073,11 @@ Result<Session, Error> run_handshake(tls13_record.Connection record, List<Config
     if (!compatibility_sent) {
         lift(record.send_change_cipher_spec())?;
     }
-    bytes early = tls13_schedule.early_secret([]);
-    bytes handshake = tls13_schedule.handshake_secret(early, shared);
-    bytes hello_hash = transcript.digest();
-    bytes client_handshake = tls13_schedule.client_handshake_traffic_secret(handshake, hello_hash);
-    bytes server_handshake = tls13_schedule.server_handshake_traffic_secret(handshake, hello_hash);
+    bytes early = tls13_schedule.early_secret(suite, []);
+    bytes handshake = tls13_schedule.handshake_secret(suite, early, shared);
+    bytes hello_hash = transcript.digest(suite);
+    bytes client_handshake = tls13_schedule.client_handshake_traffic_secret(suite, handshake, hello_hash);
+    bytes server_handshake = tls13_schedule.server_handshake_traffic_secret(suite, handshake, hello_hash);
     record.install_write_keys(server_handshake);
     lift(record.install_read_keys(client_handshake))?;
     bytes extensions_message = encrypted_extensions(hello.server_name, choice.protocol);
@@ -1084,28 +1085,28 @@ Result<Session, Error> run_handshake(tls13_record.Connection record, List<Config
     lift(record.send_handshake(extensions_message))?;
     transcript.add(config.certificate_message);
     lift(record.send_handshake(config.certificate_message))?;
-    bytes verify_message = certificate_verify(config.key, transcript.digest())?;
+    bytes verify_message = certificate_verify(config.key, transcript.digest(suite))?;
     transcript.add(verify_message);
     lift(record.send_handshake(verify_message))?;
-    bytes server_key = tls13_schedule.finished_key(server_handshake);
-    bytes server_finished = [HANDSHAKE_FINISHED, 0, 0, tls13_schedule.HASH_SIZE];
-    server_finished.extend(tls13_schedule.finished_verify_data(server_key, transcript.digest()));
+    bytes server_key = tls13_schedule.finished_key(suite, server_handshake);
+    bytes server_finished = [HANDSHAKE_FINISHED, 0, 0, suite.hash_size()];
+    server_finished.extend(tls13_schedule.finished_verify_data(suite, server_key, transcript.digest(suite)));
     transcript.add(server_finished);
     lift(record.send_handshake(server_finished))?;
-    bytes finished_hash = transcript.digest();
-    bytes master = tls13_schedule.master_secret(handshake);
-    bytes client_application = tls13_schedule.client_application_traffic_secret(master, finished_hash);
-    bytes server_application = tls13_schedule.server_application_traffic_secret(master, finished_hash);
+    bytes finished_hash = transcript.digest(suite);
+    bytes master = tls13_schedule.master_secret(suite, handshake);
+    bytes client_application = tls13_schedule.client_application_traffic_secret(suite, master, finished_hash);
+    bytes server_application = tls13_schedule.server_application_traffic_secret(suite, master, finished_hash);
     bytes client_finished = next_handshake(record)?;
     if (client_finished[0] != HANDSHAKE_FINISHED) {
         return Result<Session, Error>.Err(Error.UnexpectedMessage);
     }
     bytes verify_data = message_body(client_finished);
-    if (verify_data.size() != tls13_schedule.HASH_SIZE) {
+    if (verify_data.size() != suite.hash_size()) {
         return Result<Session, Error>.Err(Error.Malformed);
     }
-    bytes client_key = tls13_schedule.finished_key(client_handshake);
-    if (!same_octets(verify_data, tls13_schedule.finished_verify_data(client_key, finished_hash))) {
+    bytes client_key = tls13_schedule.finished_key(suite, client_handshake);
+    if (!same_octets(verify_data, tls13_schedule.finished_verify_data(suite, client_key, finished_hash))) {
         return Result<Session, Error>.Err(Error.BadFinished);
     }
     record.install_write_keys(server_application);

@@ -102,9 +102,9 @@
 //                        ec_point_formats (uncompressed only),
 //                        extended_master_secret and renegotiation_info
 //
-// There is no `psk_key_exchange_modes`, so no resumption: a server's
-// NewSessionTicket is dropped. There is no ALPN and no early data, and the
-// client has no certificate, so a CertificateRequest ends the handshake. An
+// `psk_key_exchange_modes` (psk_dhe_ke only) and, when the cache holds a
+// session, `pre_shared_key` are added for resumption (below). There is no ALPN
+// and **never any early data**, and the client has no certificate, so a CertificateRequest ends the handshake. An
 // extension the client did not offer, in ServerHello or EncryptedExtensions,
 // is refused (RFC 8446 §4.2).
 //
@@ -140,7 +140,44 @@
 // `Truncated`, never a quiet end of data: otherwise whoever sits on the wire
 // can cut a response short and it reads as complete. `read_all` returns only
 // for a `close_notify`. A `KeyUpdate` is followed (and answered, when asked),
-// and a `NewSessionTicket` is ignored.
+// and a `NewSessionTicket` is filed in the session cache (below).
+//
+// --- session resumption (TLS 1.3 only) -------------------------------------------
+//
+//   tls.connect_cached(host, port, trust, cache)          and the `_at`, `_over_cached`,
+//   tls.connect_over_cached_at(socket, host, trust, cache, now)    forms
+//   tlsresume.cache(capacity)        an in-process `SessionCache` (0 = off)
+//   c.resumed()                      -> bool   did this connection resume?
+//
+// `connect` and friends keep no sessions and ask for no tickets. With a cache
+// the client offers `psk_key_exchange_modes = [psk_dhe_ke]` and files each
+// NewSessionTicket as a session; the next connection to the same host takes
+// the newest unexpired one and offers it as a `pre_shared_key` with its binder.
+// A fresh (EC)DHE share is always sent and used (`psk_ke`, a PSK alone, is
+// not offered), so a resumed connection keeps forward secrecy.
+//
+// * A session is bound to the exact `host` (the SNI) **and** the exact trust
+//   configuration (the pin's octets, or `SystemRoots`, or the `CaFile` path)
+//   of the connection that earned it, and is offered to no other.
+// * A full handshake validates the certificate chain as always. Only a
+//   handshake in which the server selected the PSK skips the Certificate and
+//   CertificateVerify, as RFC 8446 requires; any other Certificate in such a
+//   handshake is refused. The server must pick identity 0, the offered suite,
+//   and send a key_share.
+// * A session ends at the earliest of: the ticket lifetime, 7 days after the
+//   handshake that earned it, and the `not_after` of every certificate that
+//   server presented (not for a pinned key, which has no chain). A resumed
+//   session earns no further trust: tickets from a resumed connection expire
+//   with the original full handshake's certificates, not later.
+// * A ticket is used at most once (taken from the cache when offered), a
+//   ticket with lifetime 0 is not stored, and a malformed NewSessionTicket
+//   fails the connection with decode_error.
+// * **0-RTT is never offered**: no early_data extension is sent, whatever
+//   `max_early_data_size` the ticket carried.
+// * Tickets are filed while the connection is being read: a connection never
+//   read after the handshake files none.
+// * A server that does not recognise the ticket does a full handshake and
+//   the client validates it; the failed ticket is already spent.
 //
 // `io.Stream` fixes the error type at `io.Error`, and `Error` below is richer
 // than that, so a failed call answers `Other(errno)` -- 5 (EIO) for a failed
@@ -174,6 +211,7 @@ import os;
 import tls13_schedule;
 import tls13_record;
 import tls12;
+import tlsresume;
 
 const int HANDSHAKE_CLIENT_HELLO = 1;
 const int HANDSHAKE_SERVER_HELLO = 2;
@@ -207,6 +245,9 @@ const int EXTENSION_SIGNATURE_ALGORITHMS = 13;
 const int EXTENSION_SIGNATURE_ALGORITHMS_CERT = 50;
 const int EXTENSION_SUPPORTED_VERSIONS = 43;
 const int EXTENSION_KEY_SHARE = 51;
+const int EXTENSION_PRE_SHARED_KEY = 41;
+const int EXTENSION_PSK_KEY_EXCHANGE_MODES = 45;
+const int PSK_DHE_KE = 1;
 const int ALERT_HANDSHAKE_FAILURE = 40;
 const int ALERT_BAD_CERTIFICATE = 42;
 const int ALERT_CERTIFICATE_EXPIRED = 45;
@@ -661,6 +702,11 @@ void put_u24(bytes out, int value) {
 }
 
 // `content` behind its 16-bit length.
+void put_u32(bytes out, int value) {
+    put_u16(out, (value >> 16) & 0xFFFF);
+    put_u16(out, value & 0xFFFF);
+}
+
 bytes with_u16_length(bytes content) {
     bytes out = [];
     put_u16(out, content.size());
@@ -785,7 +831,12 @@ List<tls13_schedule.Suite> offered_suites() {
     return suites;
 }
 
-bytes client_hello(str host, bytes client_random, bytes session_id, bytes public_key) {
+// `offer_tickets` adds psk_key_exchange_modes (psk_dhe_ke only), which is what
+// lets a server send NewSessionTickets at all. `resumption`, when there, adds
+// the pre_shared_key extension for that session -- last, as RFC 8446 §4.2.11
+// requires, its binder computed over the message up to the binders. No
+// early_data extension is ever sent: there is no 0-RTT.
+bytes client_hello(str host, bytes client_random, bytes session_id, bytes public_key, bool offer_tickets, Option<tlsresume.Session> resumption, int now) {
     bytes body = [];
     put_u16(body, VERSION_TLS12);
     body.extend(client_random);
@@ -841,12 +892,52 @@ bytes client_hello(str host, bytes client_random, bytes session_id, bytes public
     put_u16(share, GROUP_X25519);
     share.extend(with_u16_length(public_key));
     extensions.extend(extension(EXTENSION_KEY_SHARE, with_u16_length(share)));
+    if (offer_tickets) {
+        extensions.extend(extension(EXTENSION_PSK_KEY_EXCHANGE_MODES, [1, PSK_DHE_KE]));
+    }
+    match (resumption) {
+        case Some(tlsresume.Session offered): {
+            bytes identity = with_u16_length(offered.ticket);
+            put_u32(identity, offered.obfuscated_age(now));
+            bytes binders = [offered.suite.hash_size()];
+            bytes placeholder = [0; offered.suite.hash_size()];
+            binders.extend(placeholder);
+            bytes preshared = with_u16_length(identity);
+            preshared.extend(with_u16_length(binders));
+            extensions.extend(extension(EXTENSION_PRE_SHARED_KEY, preshared));
+        }
+        case None: {
+        }
+    }
     put_u16(body, extensions.size());
     body.extend(extensions);
     bytes message = [HANDSHAKE_CLIENT_HELLO];
     put_u24(message, body.size());
     message.extend(body);
+    match (resumption) {
+        case Some(tlsresume.Session bound): {
+            fill_binder(message, bound);
+        }
+        case None: {
+        }
+    }
     return message;
+}
+
+// RFC 8446 §4.2.11.2: the binder is the Finished-style HMAC, under the key
+// derived from the PSK, of the hash of the ClientHello cut off before the
+// binders list (a 2-octet length, then one binder with its 1-octet length).
+// It is written over the zeros that stand in for it.
+void fill_binder(bytes message, tlsresume.Session session) {
+    tls13_schedule.Suite suite = session.suite;
+    int tail = 3 + suite.hash_size();
+    bytes truncated = message.substr(0, message.size() - tail);
+    bytes early = tls13_schedule.early_secret(suite, session.psk);
+    bytes finished = tls13_schedule.finished_key(suite, tls13_schedule.binder_key(suite, early, true));
+    bytes binder = tls13_schedule.finished_verify_data(suite, finished, tls13_schedule.hash_octets(suite, truncated));
+    for (int index in 0 .. binder.size()) {
+        message[message.size() - binder.size() + index] = binder[index];
+    }
 }
 
 // --- ServerHello ------------------------------------------------------------------
@@ -877,6 +968,8 @@ type ServerChoice {
     tls12.Suite legacy_suite;
     bytes public_key;
     bytes server_random;
+    // The server took the pre_shared_key we offered (identity 0).
+    bool psk_selected;
 }
 
 // The extensions of a ServerHello as they came, each kind at most once.
@@ -918,7 +1011,7 @@ Result<HelloExtensions, Error> parse_hello_extensions(bytes extension_block) {
 // against what the ClientHello offered. A ServerHello is TLS 1.3's when it
 // carries supported_versions = 0x0304 and TLS 1.2's when it carries none and
 // says 0x0303 (RFC 8446 §4.2.1); anything else is refused.
-Result<ServerChoice, Error> check_server_hello(bytes message, bytes session_id, bool sent_server_name) {
+Result<ServerChoice, Error> check_server_hello(bytes message, bytes session_id, bool sent_server_name, bool offered_psk) {
     Reader reader = Reader(message_body(message));
     int legacy_version = reader.u16()?;
     bytes server_random = reader.take(RANDOM_SIZE)?;
@@ -944,7 +1037,7 @@ Result<ServerChoice, Error> check_server_hello(bytes message, bytes session_id, 
         if (version_data.size() != 2 || version_data[0] != 3 || version_data[1] != 4) {
             return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
         }
-        return check_tls13_hello(legacy_version, server_random, echoed_session_id, suite_code, compression, found, session_id);
+        return check_tls13_hello(legacy_version, server_random, echoed_session_id, suite_code, compression, found, session_id, offered_psk);
     }
     if (legacy_version < VERSION_TLS12) {
         return Result<ServerChoice, Error>.Err(Error.UnsupportedVersion);
@@ -955,7 +1048,7 @@ Result<ServerChoice, Error> check_server_hello(bytes message, bytes session_id, 
     return check_tls12_hello(server_random, echoed_session_id, suite_code, compression, found, session_id, sent_server_name);
 }
 
-Result<ServerChoice, Error> check_tls13_hello(int legacy_version, bytes server_random, bytes echoed_session_id, int suite_code, int compression, HelloExtensions found, bytes session_id) {
+Result<ServerChoice, Error> check_tls13_hello(int legacy_version, bytes server_random, bytes echoed_session_id, int suite_code, int compression, HelloExtensions found, bytes session_id, bool offered_psk) {
     if (legacy_version != VERSION_TLS12 || !same_octets(echoed_session_id, session_id) || compression != 0) {
         return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
     }
@@ -969,11 +1062,25 @@ Result<ServerChoice, Error> check_tls13_hello(int legacy_version, bytes server_r
             return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
         }
     }
-    if (found.kinds.size() != 2 || !found.has(EXTENSION_KEY_SHARE)) {
-        if (found.has(EXTENSION_KEY_SHARE) || found.kinds.size() > 1) {
+    for (int kind in found.kinds) {
+        bool allowed = kind == EXTENSION_KEY_SHARE || kind == EXTENSION_SUPPORTED_VERSIONS || (kind == EXTENSION_PRE_SHARED_KEY && offered_psk);
+        if (!allowed) {
             return Result<ServerChoice, Error>.Err(Error.UnsupportedExtension);
         }
+    }
+    if (!found.has(EXTENSION_KEY_SHARE)) {
         return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
+    }
+    bool psk_selected = found.has(EXTENSION_PRE_SHARED_KEY);
+    if (psk_selected) {
+        Reader selection = Reader(found.data_of(EXTENSION_PRE_SHARED_KEY));
+        int identity = selection.u16()?;
+        if (selection.remaining() != 0) {
+            return Result<ServerChoice, Error>.Err(Error.Malformed);
+        }
+        if (identity != 0) {
+            return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
+        }
     }
     Reader share = Reader(found.data_of(EXTENSION_KEY_SHARE));
     int group = share.u16()?;
@@ -984,7 +1091,7 @@ Result<ServerChoice, Error> check_tls13_hello(int legacy_version, bytes server_r
     if (group != GROUP_X25519 || public_key.size() != X25519_SIZE) {
         return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
     }
-    return Result<ServerChoice, Error>.Ok(ServerChoice(false, suite, tls12.Suite.EcdsaChaCha20Poly1305, public_key, server_random));
+    return Result<ServerChoice, Error>.Ok(ServerChoice(false, suite, tls12.Suite.EcdsaChaCha20Poly1305, public_key, server_random, psk_selected));
 }
 
 // RFC 5246 §7.4.1.3 with RFC 7627 and RFC 5746: the server picked one of the
@@ -1046,7 +1153,7 @@ Result<ServerChoice, Error> check_tls12_hello(bytes server_random, bytes echoed_
         return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
     }
     bytes none = [];
-    return Result<ServerChoice, Error>.Ok(ServerChoice(true, tls13_schedule.Suite.ChaCha20Poly1305Sha256, suite, none, server_random));
+    return Result<ServerChoice, Error>.Ok(ServerChoice(true, tls13_schedule.Suite.ChaCha20Poly1305Sha256, suite, none, server_random, false));
 }
 
 // --- the rest of the server's flight ------------------------------------------------
@@ -1391,18 +1498,73 @@ Result<bytes, Error> next_handshake(tls13_record.Connection record) {
     }
 }
 
-Result<void, Error> run_handshake(tls13_record.Connection record, str host, Trust trust, List<x509.Certificate> anchors, int now) {
+// What a finished handshake leaves for the connection: whether it was a
+// resumption, and, for a TLS 1.3 handshake, what NewSessionTickets turn into
+// sessions.
+type Outcome {
+    bool resumed = false;
+    bool ticketable = false;
+    tls13_schedule.Suite suite = tls13_schedule.Suite.ChaCha20Poly1305Sha256;
+    bytes resumption_master = [];
+    int valid_until = 0;
+}
+
+// What `trust` is, as text, for filing sessions: two connections share a
+// session only when this and the host are the same.
+str trust_key(Trust trust) {
+    match (trust) {
+        case PinnedKey(bytes pinned): {
+            str text = "pin";
+            for (int index in 0 .. pinned.size()) {
+                text = text + ":" + pinned[index].to_str();
+            }
+            return text;
+        }
+        case SystemRoots: {
+            return "system";
+        }
+        case CaFile(str path): {
+            return "ca:" + path;
+        }
+    }
+}
+
+bool is_pinned(Trust trust) {
+    match (trust) {
+        case PinnedKey(bytes pinned): {
+            return true;
+        }
+        case SystemRoots: {
+            return false;
+        }
+        case CaFile(str path): {
+            return false;
+        }
+    }
+}
+
+Result<void, Error> run_handshake(tls13_record.Connection record, str host, Trust trust, List<x509.Certificate> anchors, int now, tlsresume.SessionCache cache, Outcome outcome) {
     random.System source = random.system();
     bytes secret = source.octets(X25519_SIZE);
     bytes session_id = source.octets(SESSION_ID_SIZE);
     bytes client_random = source.octets(RANDOM_SIZE);
-    bytes hello = client_hello(host, client_random, session_id, x25519.base_point(secret));
+    str key = trust_key(trust);
+    Option<tlsresume.Session> offered = cache.take(host, key, now);
+    bool offered_psk = false;
+    match (offered) {
+        case Some(tlsresume.Session candidate): {
+            offered_psk = true;
+        }
+        case None: {
+        }
+    }
+    bytes hello = client_hello(host, client_random, session_id, x25519.base_point(secret), cache.enabled(), offered, now);
     tls13_schedule.Transcript transcript = tls13_schedule.transcript();
     transcript.add(hello);
     lift(record.send_handshake(hello))?;
     bytes server_hello = next_handshake(record)?;
     require_type(server_hello, HANDSHAKE_SERVER_HELLO)?;
-    ServerChoice choice = check_server_hello(server_hello, session_id, !is_ip_literal(host))?;
+    ServerChoice choice = check_server_hello(server_hello, session_id, !is_ip_literal(host), offered_psk)?;
     transcript.add(server_hello);
     if (choice.legacy) {
         return run_handshake_12(record, choice, transcript, client_random, secret, source, host, trust, anchors, now);
@@ -1415,7 +1577,23 @@ Result<void, Error> run_handshake(tls13_record.Connection record, str host, Trus
         return Result<void, Error>.Err(Error.IllegalParameter);
     }
     lift(record.send_change_cipher_spec())?;
-    bytes early = tls13_schedule.early_secret(suite, []);
+    bytes psk = [];
+    int valid_until = now + tlsresume.MAX_LIFETIME;
+    if (choice.psk_selected) {
+        match (offered) {
+            case Some(tlsresume.Session accepted): {
+                if (accepted.suite.code() != suite.code()) {
+                    return Result<void, Error>.Err(Error.IllegalParameter);
+                }
+                psk = accepted.psk;
+                valid_until = accepted.valid_until;
+            }
+            case None: {
+                return Result<void, Error>.Err(Error.IllegalParameter);
+            }
+        }
+    }
+    bytes early = tls13_schedule.early_secret(suite, psk);
     bytes handshake = tls13_schedule.handshake_secret(suite, early, shared);
     bytes hello_hash = transcript.digest(suite);
     bytes client_handshake = tls13_schedule.client_handshake_traffic_secret(suite, handshake, hello_hash);
@@ -1426,20 +1604,32 @@ Result<void, Error> run_handshake(tls13_record.Connection record, str host, Trus
     require_type(encrypted_extensions, HANDSHAKE_ENCRYPTED_EXTENSIONS)?;
     check_encrypted_extensions(encrypted_extensions)?;
     transcript.add(encrypted_extensions);
-    bytes certificate_message = next_handshake(record)?;
-    if (certificate_message[0] == HANDSHAKE_CERTIFICATE_REQUEST) {
-        return Result<void, Error>.Err(Error.ClientCertificateRequested);
+    // A resumed handshake is authenticated by the PSK alone: no Certificate,
+    // no CertificateRequest, no CertificateVerify (RFC 8446 §2.2). A full one
+    // validates the server's chain exactly as before.
+    if (!choice.psk_selected) {
+        bytes certificate_message = next_handshake(record)?;
+        if (certificate_message[0] == HANDSHAKE_CERTIFICATE_REQUEST) {
+            return Result<void, Error>.Err(Error.ClientCertificateRequested);
+        }
+        require_type(certificate_message, HANDSHAKE_CERTIFICATE)?;
+        List<x509.Certificate> presented = certificate_list(certificate_message, false)?;
+        x509.Certificate leaf = presented[0];
+        check_identity(presented, trust, anchors, host, now)?;
+        if (!is_pinned(trust)) {
+            for (x509.Certificate each in presented) {
+                if (each.not_after < valid_until) {
+                    valid_until = each.not_after;
+                }
+            }
+        }
+        transcript.add(certificate_message);
+        bytes certificate_hash = transcript.digest(suite);
+        bytes verify_message = next_handshake(record)?;
+        require_type(verify_message, HANDSHAKE_CERTIFICATE_VERIFY)?;
+        check_certificate_verify(verify_message, leaf, certificate_hash)?;
+        transcript.add(verify_message);
     }
-    require_type(certificate_message, HANDSHAKE_CERTIFICATE)?;
-    List<x509.Certificate> presented = certificate_list(certificate_message, false)?;
-    x509.Certificate leaf = presented[0];
-    check_identity(presented, trust, anchors, host, now)?;
-    transcript.add(certificate_message);
-    bytes certificate_hash = transcript.digest(suite);
-    bytes verify_message = next_handshake(record)?;
-    require_type(verify_message, HANDSHAKE_CERTIFICATE_VERIFY)?;
-    check_certificate_verify(verify_message, leaf, certificate_hash)?;
-    transcript.add(verify_message);
     bytes server_finished = next_handshake(record)?;
     require_type(server_finished, HANDSHAKE_FINISHED)?;
     bytes server_key = tls13_schedule.finished_key(suite, server_handshake);
@@ -1455,6 +1645,12 @@ Result<void, Error> run_handshake(tls13_record.Connection record, str host, Trus
     lift(record.send_handshake(client_finished))?;
     record.install_write_keys(client_application);
     lift(record.install_read_keys(server_application))?;
+    transcript.add(client_finished);
+    outcome.resumed = choice.psk_selected;
+    outcome.ticketable = true;
+    outcome.suite = suite;
+    outcome.resumption_master = tls13_schedule.resumption_master_secret(suite, master, transcript.digest(suite));
+    outcome.valid_until = valid_until;
     return Result<void, Error>.Ok;
 }
 
@@ -1646,7 +1842,51 @@ Error abort_handshake(tls13_record.Connection record, Error error) {
 /// against `trust`. What comes back is a stream of the server's decrypted
 /// octets; every `Err` is a connection that does not exist.
 pub Result<Conn, Error> connect(str host, int port, Trust trust) {
-    return connect_at(host, port, trust, date.now());
+    return connect_cached(host, port, trust, tlsresume.cache(0));
+}
+
+/// `connect`, with session resumption: if `cache` holds a session for exactly
+/// this `host` under exactly this `trust` it is offered (once -- it leaves the
+/// cache), and the NewSessionTickets the server sends are filed in `cache` as
+/// the connection is read. See `tlsresume.m31` and the header of this file.
+pub Result<Conn, Error> connect_cached(str host, int port, Trust trust, tlsresume.SessionCache cache) {
+    List<x509.Certificate> anchors = load_anchors(trust)?;
+    match (net.connect(host, port)) {
+        case Err(net.Error connect_error): {
+            return Result<Conn, Error>.Err(Error.Connect);
+        }
+        case Ok(net.Conn socket): {
+            return handshake_over(socket, host, trust, anchors, date.now(), false, cache);
+        }
+    }
+}
+
+/// `connect_cached`, with the clock given in epoch seconds: the time the
+/// certificates are checked at, the age of the ticket offered and the time
+/// new tickets are stamped with. For tests.
+pub Result<Conn, Error> connect_cached_at(str host, int port, Trust trust, tlsresume.SessionCache cache, int now) {
+    List<x509.Certificate> anchors = load_anchors(trust)?;
+    match (net.connect(host, port)) {
+        case Err(net.Error connect_error): {
+            return Result<Conn, Error>.Err(Error.Connect);
+        }
+        case Ok(net.Conn socket): {
+            return handshake_over(socket, host, trust, anchors, now, true, cache);
+        }
+    }
+}
+
+/// `connect_cached`, over a socket the caller already opened (see
+/// `connect_over`).
+pub Result<Conn, Error> connect_over_cached(net.Conn socket, str host, Trust trust, tlsresume.SessionCache cache) {
+    List<x509.Certificate> anchors = load_anchors(trust)?;
+    return handshake_over(socket, host, trust, anchors, date.now(), false, cache);
+}
+
+/// `connect_over_cached`, with the clock given in epoch seconds.
+pub Result<Conn, Error> connect_over_cached_at(net.Conn socket, str host, Trust trust, tlsresume.SessionCache cache, int now) {
+    List<x509.Certificate> anchors = load_anchors(trust)?;
+    return handshake_over(socket, host, trust, anchors, now, true, cache);
 }
 
 /// `connect`, with the time certificates are checked against given as epoch
@@ -1659,7 +1899,7 @@ pub Result<Conn, Error> connect_at(str host, int port, Trust trust, int now) {
             return Result<Conn, Error>.Err(Error.Connect);
         }
         case Ok(net.Conn socket): {
-            return handshake_over(socket, host, trust, anchors, now);
+            return handshake_over(socket, host, trust, anchors, now, true, tlsresume.cache(0));
         }
     }
 }
@@ -1672,20 +1912,27 @@ pub Result<Conn, Error> connect_at(str host, int port, Trust trust, int now) {
 /// purpose is the one who owns that decision. The socket is closed when the
 /// handshake fails.
 pub Result<Conn, Error> connect_over(net.Conn socket, str host, Trust trust) {
-    return connect_over_at(socket, host, trust, date.now());
+    return connect_over_cached(socket, host, trust, tlsresume.cache(0));
 }
 
 /// `connect_over`, with the clock given in epoch seconds.
 pub Result<Conn, Error> connect_over_at(net.Conn socket, str host, Trust trust, int now) {
     List<x509.Certificate> anchors = load_anchors(trust)?;
-    return handshake_over(socket, host, trust, anchors, now);
+    return handshake_over(socket, host, trust, anchors, now, true, tlsresume.cache(0));
 }
 
-Result<Conn, Error> handshake_over(net.Conn socket, str host, Trust trust, List<x509.Certificate> anchors, int now) {
+Result<Conn, Error> handshake_over(net.Conn socket, str host, Trust trust, List<x509.Certificate> anchors, int now, bool fixed_clock, tlsresume.SessionCache cache) {
     tls13_record.Connection record = tls13_record.connection(socket);
-    match (run_handshake(record, host, trust, anchors, now)) {
+    Outcome outcome = Outcome();
+    match (run_handshake(record, host, trust, anchors, now, cache, outcome)) {
         case Ok: {
-            return Result<Conn, Error>.Ok(Conn(record));
+            Conn conn = Conn(record, cache);
+            conn.host = host;
+            conn.trust_key = trust_key(trust);
+            conn.outcome = outcome;
+            conn.clock = now;
+            conn.fixed_clock = fixed_clock;
+            return Result<Conn, Error>.Ok(conn);
         }
         case Err(Error handshake_error): {
             return Result<Conn, Error>.Err(abort_handshake(record, handshake_error));
@@ -1699,6 +1946,7 @@ Result<Conn, Error> handshake_over(net.Conn socket, str host, Trust trust, List<
 /// `connect`; every field is private.
 pub type Conn {
     tls13_record.Connection record;
+    tlsresume.SessionCache cache;
     // pending[offset ..] has been decrypted and not handed out.
     bytes pending = [];
     int offset = 0;
@@ -1706,6 +1954,69 @@ pub type Conn {
     bool closed = false;
     bool failed = false;
     Error failure = Error.Closed;
+    // For filing NewSessionTickets as sessions; see `file_tickets`.
+    str host = "";
+    str trust_key = "";
+    Outcome outcome = Outcome();
+    int clock = 0;
+    bool fixed_clock = false;
+}
+
+/// Whether this connection was resumed from a ticket: the server accepted the
+/// PSK, and no certificate was exchanged on it.
+pub bool Conn.resumed() {
+    return outcome.resumed;
+}
+
+int Conn.now() {
+    if (fixed_clock) {
+        return clock;
+    }
+    return date.now();
+}
+
+// RFC 8446 §4.6.1: ticket_lifetime(4) ticket_age_add(4) ticket_nonce<0..255>
+// ticket<1..2^16-1> extensions<0..2^16-2>. The only extension defined for it
+// is early_data, which is parsed over and otherwise ignored: no 0-RTT here. A
+// lifetime of 0 means the server does not want the ticket used. A message
+// that does not parse is a `decode_error`.
+Result<void, Error> Conn.file_ticket(bytes message) {
+    Reader reader = Reader(message_body(message));
+    int lifetime_high = reader.u16()?;
+    int lifetime_low = reader.u16()?;
+    int age_high = reader.u16()?;
+    int age_low = reader.u16()?;
+    int lifetime = lifetime_high * 65536 + lifetime_low;
+    int age_add = age_high * 65536 + age_low;
+    bytes nonce = reader.vector8()?;
+    bytes ticket = reader.vector16()?;
+    bytes extension_block = reader.vector16()?;
+    if (reader.remaining() != 0 || ticket.size() == 0) {
+        return Result<void, Error>.Err(Error.Malformed);
+    }
+    Reader extensions = Reader(extension_block);
+    while (extensions.remaining() > 0) {
+        int kind = extensions.u16()?;
+        bytes data = extensions.vector16()?;
+    }
+    if (lifetime == 0 || !cache.enabled()) {
+        return Result<void, Error>.Ok;
+    }
+    bytes psk = tls13_schedule.resumption_psk(outcome.suite, outcome.resumption_master, nonce);
+    int received = now();
+    cache.put(tlsresume.session(host, trust_key, outcome.suite, psk, ticket, age_add, received, lifetime, outcome.valid_until), received);
+    return Result<void, Error>.Ok;
+}
+
+Result<void, Error> Conn.file_tickets() {
+    List<bytes> arrived = record.take_tickets();
+    if (!outcome.ticketable) {
+        return Result<void, Error>.Ok;
+    }
+    for (bytes message in arrived) {
+        file_ticket(message)?;
+    }
+    return Result<void, Error>.Ok;
 }
 
 // The next chunk of application data, or an empty one once the server has
@@ -1723,6 +2034,14 @@ Result<bytes, io.Error> Conn.next_chunk() {
     }
     match (record.receive_application()) {
         case Ok(bytes data): {
+            match (file_tickets()) {
+                case Ok: {
+                }
+                case Err(Error ticket_error): {
+                    Result<void, tls13_record.Error> alerted = record.send_alert(alert_for(ticket_error));
+                    return Result<bytes, io.Error>.Err(fail(ticket_error));
+                }
+            }
             if (data.size() == 0) {
                 at_end = true;
             }

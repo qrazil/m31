@@ -1,0 +1,133 @@
+// The session-resumption client under test, driven from `test_resume.sh`.
+//
+//   t_resume_client <port> <pin as 64 hex digits> <capacity> <step>...
+//
+// Each step is `label:pin:now:action`, run in order against 127.0.0.1:<port>
+// with one shared session cache of the given capacity:
+//   label    the host name the connection is made *for* (SNI, cache key); the
+//            socket always goes to the loopback port
+//   pin      `same` for the pin given above (or, if that starts with `ca:`,
+//            the CA file after it), `other` for a pin nothing matches
+//   now      the clock for this connection, epoch seconds
+//   action   `handshake` (connect, close), `get` (send a request, read to the
+//            server's close_notify), `clear` (empty the cache, no connection)
+// and an optional fifth field, `port`, that sends this step to another port.
+// Prints one line per step:
+//   step <n> <label> resumed=<true|false> cache=<sessions held>
+//   step <n> <label> error=<reason> cache=<sessions held>
+
+import io;
+import net;
+import os;
+import tls;
+import tlsresume;
+
+tls.Trust trust_of(str text, str word) {
+    if (word == "other") {
+        return tls.pinned_key(bytes_of(0xAA, 32));
+    }
+    if (text.starts_with("ca:")) {
+        return tls.Trust.CaFile(text.substr(3, text.size()));
+    }
+    match (tls.pinned_key_hex(text)) {
+        case Some(tls.Trust trust): {
+            return trust;
+        }
+        case None: {
+            trap("t_resume_client: the pin must be 64 hex digits");
+        }
+    }
+}
+
+bytes bytes_of(int value, int count) {
+    bytes out = [];
+    for (int i in 0 .. count) {
+        out.push(value);
+    }
+    return out;
+}
+
+int number(str text) {
+    match (text.parse_int()) {
+        case Some(int parsed): {
+            return parsed;
+        }
+        case None: {
+            trap("t_resume_client: not a number: " + text);
+        }
+    }
+}
+
+void exchange(tls.Conn conn) {
+    match (conn.write("GET / HTTP/1.0\r\n\r\n".to_bytes())) {
+        case Ok(int sent): {
+        }
+        case Err(io.Error write_error): {
+            return;
+        }
+    }
+    match (conn.read_all()) {
+        case Ok(bytes data): {
+        }
+        case Err(io.Error read_error): {
+        }
+    }
+}
+
+void step(int index, str label, tls.Trust trust, int now, str action, tlsresume.SessionCache cache, int port) {
+    match (net.connect("127.0.0.1", port)) {
+        case Err(net.Error connect_error): {
+            print("step " + str(index) + " " + label + " error=connect cache=" + str(cache.size()));
+        }
+        case Ok(net.Conn socket): {
+            match (tls.connect_over_cached_at(socket, label, trust, cache, now)) {
+                case Err(tls.Error connect_error): {
+                    print("step " + str(index) + " " + label + " error=" + connect_error.to_str() + " cache=" + str(cache.size()));
+                }
+                case Ok(tls.Conn conn): {
+                    if (action == "get") {
+                        exchange(conn);
+                    }
+                    bool was_resumed = conn.resumed();
+                    match (conn.last_error()) {
+                        case Some(tls.Error failure): {
+                            print("step " + str(index) + " " + label + " error=" + failure.to_str() + " cache=" + str(cache.size()));
+                        }
+                        case None: {
+                            print("step " + str(index) + " " + label + " resumed=" + str(was_resumed) + " cache=" + str(cache.size()));
+                        }
+                    }
+                    match (conn.close()) {
+                        case Ok(bool closed): {
+                        }
+                        case Err(io.Error close_error): {
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+List<str> arguments = os.args();
+if (arguments.size() < 5) {
+    trap("t_resume_client: <port> <pin hex> <capacity> <step>...");
+}
+int port = number(arguments[1]);
+tlsresume.SessionCache cache = tlsresume.cache(number(arguments[3]));
+for (int index in 4 .. arguments.size()) {
+    List<str> fields = arguments[index].split(":");
+    if (fields.size() != 4 && fields.size() != 5) {
+        trap("t_resume_client: a step is label:pin:now:action[:port]");
+    }
+    int step_port = port;
+    if (fields.size() == 5) {
+        step_port = number(fields[4]);
+    }
+    if (fields[3] == "clear") {
+        cache.clear();
+        print("step " + str(index - 3) + " clear cache=" + str(cache.size()));
+    } else {
+        step(index - 3, fields[0], trust_of(arguments[2], fields[1]), number(fields[2]), fields[3], cache, step_port);
+    }
+}

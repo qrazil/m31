@@ -92,8 +92,8 @@
 //   - The `record_size_limit` extension: the limits are always 2^14.
 //   - Which handshake message may come when. A `ChangeCipherSpec` before the
 //     first ClientHello is not noticed here, and the post-handshake
-//     `NewSessionTicket` is dropped by `receive_application` whichever role the
-//     caller has. Both are the handshake layer's to police.
+//     `NewSessionTicket` is queued by `receive_application` (for `take_tickets`)
+//     whichever role the caller has. Both are the handshake layer's to police.
 
 import io;
 import chacha20poly1305;
@@ -576,6 +576,18 @@ pub type Connection {
     bool failed = false;
     // TLS 1.2 record format (see `use_legacy_suite`).
     bool legacy = false;
+    // The bodies of the NewSessionTickets `receive_application` went past,
+    // oldest first, at most `MAX_QUEUED_TICKETS`; see `take_tickets`.
+    List<bytes> tickets = [];
+}
+
+/// The NewSessionTicket messages (whole, with their 4-octet headers) that
+/// arrived since the last call, which the caller may file as it likes.
+pub List<bytes> Connection.take_tickets() {
+    List<bytes> taken = tickets;
+    List<bytes> none = [];
+    tickets = none;
+    return taken;
 }
 
 /// Chooses the suite the keys installed from now on are for. Call it once,
@@ -1111,7 +1123,7 @@ pub Result<bytes, Error> Connection.receive_handshake() {
 /// sent, or an **empty** result at its `close_notify` -- the end of the
 /// data, and the only end `receive_application` ever calls one. The handshake
 /// messages that legitimately follow a handshake are dealt with here:
-/// `NewSessionTicket` is dropped, and a `KeyUpdate` moves the receive keys
+/// `NewSessionTicket` is queued for `take_tickets`, and a `KeyUpdate` moves the receive keys
 /// on (answering with one of our own if it asks). Any other handshake
 /// message is `UnexpectedMessage`.
 pub Result<bytes, Error> Connection.receive_application() {
@@ -1144,6 +1156,9 @@ Result<void, Error> Connection.after_handshake(bytes message) {
         return after_legacy_handshake(message);
     }
     if (message_type == HANDSHAKE_NEW_SESSION_TICKET) {
+        if (tickets.size() < MAX_QUEUED_TICKETS) {
+            tickets.push(message);
+        }
         return Result<void, Error>.Ok;
     }
     if (message_type != HANDSHAKE_KEY_UPDATE || !read_protected || !write_protected) {
@@ -1183,6 +1198,10 @@ pub Result<bool, Error> Connection.close() {
         }
     }
 }
+
+/// The most NewSessionTickets kept between two `take_tickets` calls; a
+/// server that sends more has the rest dropped.
+pub const int MAX_QUEUED_TICKETS = 16;
 
 // One record's header fields and body, straight off the stream.
 type RawRecord {

@@ -317,6 +317,13 @@ pub bytes resumption_master_secret(Suite suite, bytes master_secret_value, bytes
     return derive_secret(suite, master_secret_value, "res master", client_finished_hash);
 }
 
+/// The PSK a resumption ticket stands for (RFC 8446 §4.6.1):
+/// `HKDF-Expand-Label(resumption_master_secret, "resumption", ticket_nonce,
+/// Hash.length)`.
+pub bytes resumption_psk(Suite suite, bytes resumption_master_secret_value, bytes ticket_nonce) {
+    return expand_label(suite, resumption_master_secret_value, "resumption", ticket_nonce, suite.hash_size());
+}
+
 /// `client_early_traffic_secret`: `hello_hash` is the transcript hash
 /// through the ClientHello.
 pub bytes client_early_traffic_secret(Suite suite, bytes early_secret_value, bytes hello_hash) {

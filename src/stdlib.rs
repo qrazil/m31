@@ -61,6 +61,7 @@ pub fn source(name: &str) -> Option<&'static str> {
         "tls13_schedule" => include_str!("../lib/tls13_schedule.m31"),
         "tls13_record" => include_str!("../lib/tls13_record.m31"),
         "tls12" => include_str!("../lib/tls12.m31"),
+        "tlsresume" => include_str!("../lib/tlsresume.m31"),
         "tls" => include_str!("../lib/tls.m31"),
         "tls_server" => include_str!("../lib/tls_server.m31"),
         _ => return None,
