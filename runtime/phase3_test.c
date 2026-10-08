@@ -917,7 +917,10 @@ static void test_timeout_spurious_wake(void) {
     sleep_ms(30);
     for (int i = 0; i < 5; i++) { rt_sched_unpark(s, id); sleep_ms(5); }
     sleep_ms(20);
-    CHECK(!atomic_load(&w.done), "[spurious] stray unparks did not end the wait");
+    /* A descheduled test thread (shared CI runner) may look after the
+     * deadline: a finished wait only counts as early if it ran short. */
+    CHECK(!atomic_load(&w.done) || twait_elapsed_ms(&w) >= 240.0,
+          "[spurious] stray unparks did not end the wait");
     CHECK(wait_done(&w, 3000), "[spurious] the wait still ends");
     CHECK(atomic_load(&w.result) == RT_REACTOR_WAIT_TIMEOUT, "[spurious] ... by its deadline");
     snprintf(msg, sizeof msg, "[spurious] elapsed %.1f ms >= 240", twait_elapsed_ms(&w));
