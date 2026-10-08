@@ -196,6 +196,12 @@ void client(int id, int port, Chan<int> results) {
                     case NameNotFound: {
                         trap("connect: " + e.to_str());
                     }
+                    case OutOfDescriptors: {
+                        trap("connect: " + e.to_str());
+                    }
+                    case Aborted: {
+                        trap("connect: " + e.to_str());
+                    }
                     case Other(int code): {
                         trap("connect: " + e.to_str());
                     }
