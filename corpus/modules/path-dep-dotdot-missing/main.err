@@ -1,0 +1,4 @@
+corpus/modules/path-dep-dotdot-missing/deps:4:1: path dependency `util` points at `../missing`, which is not a directory (looked for corpus/modules/missing)
+  |
+4 | util path ../missing
+  | ^

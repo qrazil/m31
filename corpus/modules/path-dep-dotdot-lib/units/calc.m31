@@ -1,0 +1,5 @@
+// A library project that is also a corpus case of its own, so the
+// `path-dep-dotdot*` cases can point `../path-dep-dotdot-lib` at a real sibling.
+pub int twice(int x) {
+    return x * 2;
+}

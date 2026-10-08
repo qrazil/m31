@@ -1,0 +1,3 @@
+import units.calc;
+
+print(calc.twice(4));

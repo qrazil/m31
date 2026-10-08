@@ -1,0 +1,4 @@
+name path-dep-dotdot-missing
+version 0.1.0
+
+util path ../missing
