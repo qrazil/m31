@@ -1,0 +1,71 @@
+// `lib/hexcodec.m31` against Python's `bytes.hex()` and a strict reading of
+// what `bytes.fromhex` would accept (it also takes whitespace, which
+// `hexcodec.decode` refuses, so the oracle checks the digits itself first).
+// Every line this prints is printed again by `oracle_hexcodec.py`, and
+// `test.sh` diffs the two.
+//
+//   ./build.sh apps/tls/t_hexcodec.m31 -o t_hexcodec && ./t_hexcodec
+
+import hexcodec;
+
+// `count` octets of a deterministic pattern: `(i * multiplier + offset) & 0xFF`.
+bytes pattern(int count, int multiplier, int offset) {
+    bytes out = [];
+    for (int index in 0 .. count) {
+        out.push(index * multiplier + offset & 0xFF);
+    }
+    return out;
+}
+
+// What `decode` made of `text`: the octets it spells, re-encoded, or the name
+// of the refusal.
+str outcome(str text) {
+    match (hexcodec.decode(text)) {
+        case Ok(bytes octets): {
+            return "ok " + hexcodec.encode(octets);
+        }
+        case Err(hexcodec.Error problem): {
+            match (problem) {
+                case Digit: {
+                    return "error digit";
+                }
+                case Length: {
+                    return "error length";
+                }
+            }
+        }
+    }
+}
+
+// --- encode, and the round trip ----------------------------------------------------
+
+print("empty [" + hexcodec.encode([]) + "]");
+for (int size in 0 .. 41) {
+    bytes data = pattern(size, 37, size);
+    str text = hexcodec.encode(data);
+    print("encode " + size.to_str() + " " + text);
+    print("roundtrip " + size.to_str() + " " + outcome(text));
+}
+bytes every = pattern(256, 1, 0);
+print("every-octet " + hexcodec.encode(every));
+print("every-octet-roundtrip " + outcome(hexcodec.encode(every)));
+
+// --- decode, either case -----------------------------------------------------------
+
+List<str> accepted = ["", "00", "ff", "FF", "aB", "Ab", "0123456789abcdef", "0123456789ABCDEF", "DeadBEEF", "deadbeef", "00FF10"];
+for (str text in accepted) {
+    print("decode [" + text + "] " + outcome(text));
+}
+
+// --- refusals ------------------------------------------------------------------------
+
+List<str> refused = ["0", "abc", "12345", "zz", "0g", "g0", "G1", "0x00", " 00", "00 ", "0 0", "ab\n", "-1", "+1", "a:", "@A", "`a", "/0", "abz", "z", "é1", "00é"];
+for (str text in refused) {
+    print("refuse [" + text + "] " + outcome(text));
+}
+
+// --- literal -------------------------------------------------------------------------
+
+print("literal " + hexcodec.encode(hexcodec.literal("00ff10")));
+print("literal-empty " + hexcodec.encode(hexcodec.literal("")).size().to_str());
+print("literal-upper " + hexcodec.encode(hexcodec.literal("ABCDEF")));

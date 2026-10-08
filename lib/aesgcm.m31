@@ -12,7 +12,7 @@
 // forged or corrupted `sealed` is the world a network parser expects and is a
 // `Result`'s `Err`, with a payload-free `Error` (docs/errors-decision.md §4).
 // The tag is 16 octets, never truncated. `open` checks the tag with
-// `chacha20poly1305.consttime_eq` before decrypting anything.
+// `consttime.is_equal` before decrypting anything.
 //
 // --- Limits ---------------------------------------------------------------
 //
@@ -42,7 +42,7 @@
 // `lib/chacha20poly1305.m31` keeps its words.
 
 import aes;
-import chacha20poly1305;
+import consttime;
 
 /// Why `open` refused.
 pub enum Error {
@@ -238,7 +238,7 @@ pub Result<bytes, Error> open(bytes key, bytes nonce, bytes sealed, bytes aad) {
     bytes tag = sealed.substr(text_size, sealed.size());
     aes.Cipher cipher = aes.cipher(key);
     bytes want = compute_tag(cipher, nonce, aad, ciphertext);
-    if (!chacha20poly1305.consttime_eq(want, tag)) {
+    if (!consttime.is_equal(want, tag)) {
         return Result<bytes, Error>.Err(Error.Tag);
     }
     return Result<bytes, Error>.Ok(ctr_xor(cipher, nonce, ciphertext));

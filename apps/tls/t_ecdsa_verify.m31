@@ -12,7 +12,7 @@
 // DER and raw alike, plus the one-off curve setup.
 
 import ecdsa;
-import bignum;
+import hexcodec;
 import io;
 import os;
 import date;
@@ -25,11 +25,11 @@ int verdict(bool accepted) {
 }
 
 bytes decode(str hex) {
-    match (bignum.bytes_from_hex(hex)) {
-        case None: {
+    match (hexcodec.decode(hex)) {
+        case Err(hexcodec.Error problem): {
             return [];
         }
-        case Some(bytes decoded): {
+        case Ok(bytes decoded): {
             return decoded;
         }
     }

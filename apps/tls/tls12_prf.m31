@@ -6,18 +6,11 @@
 //
 //   ./build.sh apps/tls/tls12_prf.m31 -o tls12_prf && ./tls12_prf
 
-import bignum;
+import hexcodec;
 import tls12;
 
 bytes hex_octets(str text) {
-    match (bignum.bytes_from_hex(text)) {
-        case None: {
-            trap("bad hex in the test");
-        }
-        case Some(bytes decoded): {
-            return decoded;
-        }
-    }
+    return hexcodec.literal(text);
 }
 
 bytes pattern(int count, int multiplier, int offset) {

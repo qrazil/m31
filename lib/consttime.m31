@@ -1,0 +1,30 @@
+// Constant-time comparison of secret octets.
+//
+// API
+// ---
+//   consttime.is_equal(left, right)   -> bool
+//
+// `bytes`'s own `==` (reference §3.10) makes no promise about its timing, and
+// a MAC, tag or Finished check whose time leaks *where* the first mismatched
+// octet was is a forgery oracle -- the class of bug RFC 8439 §3 warns about.
+// Anything that compares an authenticator against a value the peer chose uses
+// this instead. Public data (a certificate, a host key, a session id) has no
+// use for it and keeps `==`.
+//
+// The time taken depends on the two lengths and on nothing else. Lengths are
+// public in every protocol this serves, so unequal lengths answer `false` at
+// once: that is not a channel, and there is nothing to accumulate over.
+
+/// Whether `left` and `right` hold the same octets, taking time that depends
+/// on their lengths and not on where they first differ. Two empty strings are
+/// equal; strings of different lengths never are.
+pub bool is_equal(bytes left, bytes right) {
+    if (left.size() != right.size()) {
+        return false;
+    }
+    int difference = 0;
+    for (int index in 0 .. left.size()) {
+        difference = difference | (left[index] ^ right[index]);
+    }
+    return difference == 0;
+}

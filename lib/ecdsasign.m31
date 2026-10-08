@@ -73,6 +73,7 @@
 // the field GF(p) and, separately, for the group order n.
 
 import bignum;
+import hexcodec;
 import hmac;
 
 const int WIDTH = 11;
@@ -219,19 +220,8 @@ int negative_inverse_of(int low_limb) {
     return LIMB_RADIX - inverse & LIMB_MASK;
 }
 
-bytes hex_octets(str text) {
-    match (bignum.bytes_from_hex(text)) {
-        case None: {
-            return [];
-        }
-        case Some(bytes decoded): {
-            return decoded;
-        }
-    }
-}
-
 Field make_field(str modulus_hex) {
-    bignum.Modulus context = bignum.make_modulus(hex_octets(modulus_hex));
+    bignum.Modulus context = bignum.make_modulus(hexcodec.literal(modulus_hex));
     Array<int> one = bignum.montgomery_one(context);
     Array<int> radix_squared = bignum.to_montgomery(context, one);
     Array<int> exponent = bignum.subtract_limbs(context.value, bignum.from_small(WIDTH, 2));
@@ -391,9 +381,9 @@ Array<Array<int>> Curve.affine(Point point) {
 Curve build_curve() {
     Field field = make_field(PRIME_HEX);
     Field order = make_field(ORDER_HEX);
-    Array<int> coefficient_b = field.to_montgomery(limbs_of(hex_octets(COEFFICIENT_B_HEX)));
-    Array<int> generator_x = field.to_montgomery(limbs_of(hex_octets(GENERATOR_X_HEX)));
-    Array<int> generator_y = field.to_montgomery(limbs_of(hex_octets(GENERATOR_Y_HEX)));
+    Array<int> coefficient_b = field.to_montgomery(limbs_of(hexcodec.literal(COEFFICIENT_B_HEX)));
+    Array<int> generator_x = field.to_montgomery(limbs_of(hexcodec.literal(GENERATOR_X_HEX)));
+    Array<int> generator_y = field.to_montgomery(limbs_of(hexcodec.literal(GENERATOR_Y_HEX)));
     return Curve(field, order, coefficient_b, Point(generator_x, generator_y, clone(field.one)));
 }
 

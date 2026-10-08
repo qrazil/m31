@@ -110,40 +110,6 @@ pub bytes to_bytes(Array<int> value, int byte_count) {
     return out;
 }
 
-/// The octets `text` spells in hexadecimal (either case, no separators), or
-/// `None` for an odd length or a character that is not a hex digit.
-pub Option<bytes> bytes_from_hex(str text) {
-    List<int> chars = text.chars();
-    if (chars.size() % 2 != 0) {
-        return Option<bytes>.None;
-    }
-    bytes out = [];
-    int index = 0;
-    while (index < chars.size()) {
-        int high = hex_digit(chars[index]);
-        int low = hex_digit(chars[index + 1]);
-        if (high < 0 || low < 0) {
-            return Option<bytes>.None;
-        }
-        out.push(high * 16 + low);
-        index = index + 2;
-    }
-    return Option<bytes>.Some(out);
-}
-
-int hex_digit(int code) {
-    if (code >= 48 && code <= 57) {
-        return code - 48;
-    }
-    if (code >= 97 && code <= 102) {
-        return code - 87;
-    }
-    if (code >= 65 && code <= 70) {
-        return code - 55;
-    }
-    return -1;
-}
-
 // --- comparison and plain arithmetic --------------------------------------------
 
 /// `-1`, `0` or `1` as `left` is less than, equal to or greater than `right`.

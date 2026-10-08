@@ -61,6 +61,7 @@
 // the (about 2^-128) case where the x coordinate wrapped past n.
 
 import bignum;
+import hexcodec;
 
 const str P256_PRIME = "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff";
 const str P256_ORDER = "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551";
@@ -105,24 +106,13 @@ type Signature {
     Array<int> s;
 }
 
-bytes hex_bytes(str text) {
-    match (bignum.bytes_from_hex(text)) {
-        case None: {
-            return [];
-        }
-        case Some(bytes decoded): {
-            return decoded;
-        }
-    }
-}
-
 Curve build_curve(int size, str prime_hex, str order_hex, str b_hex, str gx_hex, str gy_hex) {
-    bignum.Modulus field = bignum.make_modulus(hex_bytes(prime_hex));
-    bignum.Modulus order = bignum.make_modulus(hex_bytes(order_hex));
+    bignum.Modulus field = bignum.make_modulus(hexcodec.literal(prime_hex));
+    bignum.Modulus order = bignum.make_modulus(hexcodec.literal(order_hex));
     int width = field.width;
-    Array<int> coefficient_b = bignum.to_montgomery(field, bignum.from_bytes(hex_bytes(b_hex), width));
-    Array<int> generator_x = bignum.to_montgomery(field, bignum.from_bytes(hex_bytes(gx_hex), width));
-    Array<int> generator_y = bignum.to_montgomery(field, bignum.from_bytes(hex_bytes(gy_hex), width));
+    Array<int> coefficient_b = bignum.to_montgomery(field, bignum.from_bytes(hexcodec.literal(b_hex), width));
+    Array<int> generator_x = bignum.to_montgomery(field, bignum.from_bytes(hexcodec.literal(gx_hex), width));
+    Array<int> generator_y = bignum.to_montgomery(field, bignum.from_bytes(hexcodec.literal(gy_hex), width));
     Point generator = Point(generator_x, generator_y, bignum.montgomery_one(field));
     Array<int> prime_gap = bignum.subtract_limbs(field.value, order.value);
     return Curve(size, field, order, coefficient_b, generator, prime_gap);

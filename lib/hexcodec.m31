@@ -1,0 +1,115 @@
+// Hexadecimal text and octets, both directions, in one place.
+//
+// API
+// ---
+//   hexcodec.encode(data)   -> str, two lowercase digits an octet, no separator
+//   hexcodec.decode(text)   -> Result<bytes, hexcodec.Error>
+//   hexcodec.literal(text)  -> bytes, trapping on text that does not decode
+//
+// **The two halves compose**: `decode(encode(b))` is `Ok(b)` for every
+// `bytes`. The reverse is not an identity, because `decode` takes either case
+// and `encode` gives lowercase: `encode(decode("AB")?)` is `"ab"`.
+//
+// **`decode` is strict.** An odd number of digits and a character that is not
+// a hex digit are each an `Error` saying which. There is no whitespace
+// skipping, no `0x` prefix, no separators: a decoder that accepts more than one
+// spelling is one that two parsers can disagree about. Either case of `A`-`F`
+// is accepted, because hex written by people and by other tools uses both.
+// The character check runs first, as in `base64.decode`, so the error names the
+// first thing wrong in reading order.
+//
+// `decode` answers an `Error` rather than trapping, and not `Option` either:
+// text that does not parse is the world's fault, not the program's
+// (docs/errors-decision.md), and `Result` tells the caller which refusal it was.
+// The crypto modules that decode hex *constants* of their own (curve
+// parameters, DigestInfo prefixes) hold literals that are valid by inspection;
+// for them `literal` is `decode` that traps on `Err`, since a bad literal is a
+// bug in the source and not something the program is meant to survive.
+//
+// Not covered, on purpose: `json.m31` reads hex only as the four digits of a
+// `\u` escape inside a JSON string, and `net.m31` reads one to four digits of an
+// IPv6 group as a number, not as octets. Neither is octets-from-text, so
+// neither uses this module.
+
+/// Why `decode` refused its input. Payload-free (docs/errors-decision.md §4).
+pub enum Error {
+    /// A character that is not one of `0-9`, `a-f`, `A-F`.
+    Digit;
+    /// The text has an odd number of digits.
+    Length;
+}
+
+/// A sentence saying what was wrong. A method named `to_str`, so
+/// `print(e)` prints it.
+pub str Error.to_str() {
+    match (this) {
+        case Digit: {
+            return "invalid hexadecimal digit";
+        }
+        case Length: {
+            return "hexadecimal text has an odd number of digits";
+        }
+    }
+}
+
+/// `data` as lowercase hex, two digits an octet.
+///
+///     hexcodec.encode([0, 255, 16])   == "00ff10"
+///     hexcodec.encode([])             == ""
+pub str encode(bytes data) {
+    return data.hex();
+}
+
+/// The octets hex `text` spells, either case.
+///
+///     hexcodec.decode("00FF10")   -> Ok([0, 255, 16])
+///     hexcodec.decode("abc")      -> Err(Error.Length)
+///     hexcodec.decode("zz")       -> Err(Error.Digit)
+pub Result<bytes, Error> decode(str text) {
+    bytes digits = text.to_bytes();
+    bytes out = [];
+    int high = 0;
+    for (int index in 0 .. digits.size()) {
+        int value = digit_value(digits[index]);
+        if (value < 0) {
+            return Result<bytes, Error>.Err(Error.Digit);
+        }
+        if (index % 2 == 0) {
+            high = value;
+        } else {
+            out.push(high * 16 + value);
+        }
+    }
+    if (digits.size() % 2 != 0) {
+        return Result<bytes, Error>.Err(Error.Length);
+    }
+    return Result<bytes, Error>.Ok(out);
+}
+
+/// The octets the hex `text` spells, for a constant written in the source.
+/// **Traps** on an odd length or a character that is not a hex digit; text
+/// that came from outside the program goes through `decode`.
+pub bytes literal(str text) {
+    match (decode(text)) {
+        case Ok(bytes decoded): {
+            return decoded;
+        }
+        case Err(Error problem): {
+            trap("hexcodec.literal: " + problem.to_str());
+        }
+    }
+}
+
+// The value of one hex digit, either case, or -1.
+int digit_value(int code) {
+    if (code >= 48 && code <= 57) {
+        return code - 48;
+    }
+    if (code >= 97 && code <= 102) {
+        return code - 87;
+    }
+    if (code >= 65 && code <= 70) {
+        return code - 55;
+    }
+    return -1;
+}

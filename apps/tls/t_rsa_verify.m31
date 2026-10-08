@@ -11,7 +11,7 @@
 // signatures of each modulus size.
 
 import rsa;
-import bignum;
+import hexcodec;
 import io;
 import os;
 import date;
@@ -24,11 +24,11 @@ int verdict(bool accepted) {
 }
 
 bytes decode(str hex) {
-    match (bignum.bytes_from_hex(hex)) {
-        case None: {
+    match (hexcodec.decode(hex)) {
+        case Err(hexcodec.Error problem): {
             return [];
         }
-        case Some(bytes decoded): {
+        case Ok(bytes decoded): {
             return decoded;
         }
     }
@@ -72,11 +72,11 @@ int run_case(List<str> fields) {
 }
 
 int modulus_bits_of(str hex) {
-    match (bignum.bytes_from_hex(hex)) {
-        case None: {
+    match (hexcodec.decode(hex)) {
+        case Err(hexcodec.Error problem): {
             return 0;
         }
-        case Some(bytes decoded): {
+        case Ok(bytes decoded): {
             return decoded.size() * 8;
         }
     }

@@ -35,8 +35,8 @@
 // implement RFC 8439's *different* construction (a cleartext length, an
 // AAD, a single key) and are not used here directly -- only
 // `chacha20poly1305.openssh_block` (the matching word layout),
-// `chacha20poly1305.mac` (Poly1305 alone) and `chacha20poly1305.
-// consttime_eq` are. See Part 6.
+// `chacha20poly1305.mac` (Poly1305 alone) are, plus `consttime.is_equal` for
+// the tag check. See Part 6.
 //
 // --- the shared secret's byte order: the RFC text vs. a real server ---------
 //
@@ -75,6 +75,7 @@ import io;
 import net;
 import sha256;
 import chacha20poly1305;
+import consttime;
 import x25519;
 import ed25519;
 import random;
@@ -762,7 +763,7 @@ pub Result<bytes, Error> decrypt_packet(bytes length_ct, bytes rest_ct, bytes ta
     bytes mac_input = clone(length_ct);
     mac_input.extend(rest_ct);
     bytes want = chacha20poly1305.mac(otk, mac_input);
-    if (!chacha20poly1305.consttime_eq(want, tag)) {
+    if (!consttime.is_equal(want, tag)) {
         return Result<bytes, Error>.Err(Error.MacMismatch);
     }
     bytes rest_pt = keystream_xor(k2, 1, seq8, rest_ct);

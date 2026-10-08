@@ -1,0 +1,57 @@
+// `lib/consttime.m31` against Python's `hmac.compare_digest`. Every line this
+// prints on stdout is printed again by `oracle_consttime.py`, and `test.sh`
+// diffs the two. Timing itself is not measured here -- a source-level loop
+// with no early exit is argued in the module header, and no test of a
+// compiled program's clock would be reliable -- so what is checked is the
+// answer: equal, unequal at each position, unequal lengths, and empty.
+//
+//   ./build.sh apps/tls/t_consttime.m31 -o t_consttime && ./t_consttime
+
+import consttime;
+
+// `count` octets of a deterministic pattern: `(i * multiplier + offset) & 0xFF`.
+bytes pattern(int count, int multiplier, int offset) {
+    bytes out = [];
+    for (int index in 0 .. count) {
+        out.push(index * multiplier + offset & 0xFF);
+    }
+    return out;
+}
+
+void show(str label, bytes left, bytes right) {
+    print(label + " " + left.size().to_str() + " " + right.size().to_str() + " " + consttime.is_equal(left, right).to_str());
+}
+
+// --- empty and unequal lengths -------------------------------------------------
+
+show("empty-empty", [], []);
+show("empty-one", [], [0]);
+show("one-empty", [0], []);
+show("prefix", [1, 2, 3], [1, 2, 3, 0]);
+show("shorter", [1, 2, 3, 4], [1, 2, 3]);
+show("zeros-sizes", [0; 16], [0; 17]);
+
+// --- equal, and unequal in exactly one bit at every position --------------------
+
+List<int> sizes = [1, 2, 15, 16, 17, 32, 33, 64];
+for (int size in sizes) {
+    bytes base = pattern(size, 7, 3);
+    show("same-" + size.to_str(), base, pattern(size, 7, 3));
+    for (int position in 0 .. size) {
+        List<int> bits = [0, 3, 7];
+        for (int bit in bits) {
+            bytes changed = pattern(size, 7, 3);
+            changed[position] = changed[position] ^ (1 << bit);
+            show("flip-" + size.to_str() + "-" + position.to_str() + "-" + bit.to_str(), base, changed);
+        }
+    }
+}
+
+// --- every octet value against every other, at one position ----------------------
+
+for (int left in 0 .. 256) {
+    List<int> rights = [0, 1, left, 255 - left, 128];
+    for (int right in rights) {
+        show("pair-" + left.to_str() + "-" + right.to_str(), [left], [right]);
+    }
+}

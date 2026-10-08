@@ -293,6 +293,7 @@
 // **A `Conn` sends `close_notify` and closes the socket when its last
 // reference goes**, as a `net.Conn` closes itself.
 
+import consttime;
 import io;
 import net;
 import random;
@@ -303,7 +304,7 @@ import x509;
 import x509chain;
 import ecdsa;
 import rsa;
-import bignum;
+import hexcodec;
 import date;
 import os;
 import tls13schedule;
@@ -416,12 +417,12 @@ pub Trust pinned_key(bytes key_hash) {
 
 /// A key pin from 64 hex digits, `None` if `text` is anything else.
 pub Option<Trust> pinned_key_hex(str text) {
-    match (bignum.bytes_from_hex(text)) {
-        case None: {
+    match (hexcodec.decode(text)) {
+        case Err(hexcodec.Error problem): {
             return Option<Trust>.None;
         }
-        case Some(bytes key_hash): {
-            if (key_hash.size() != 32 || text.size() != 64) {
+        case Ok(bytes key_hash): {
+            if (key_hash.size() != 32) {
                 return Option<Trust>.None;
             }
             return Option<Trust>.Some(Trust.PinnedKey(key_hash));
@@ -900,19 +901,6 @@ bytes extension(int kind, bytes data) {
     return out;
 }
 
-// Whether two octet strings are equal, in time that depends on their length
-// and not on where they first differ.
-bool same_octets(bytes left, bytes right) {
-    if (left.size() != right.size()) {
-        return false;
-    }
-    int difference = 0;
-    for (int index in 0 .. left.size()) {
-        difference = difference | (left[index] ^ right[index]);
-    }
-    return difference == 0;
-}
-
 bool all_zero(bytes data) {
     int accumulated = 0;
     for (int index in 0 .. data.size()) {
@@ -1134,7 +1122,7 @@ bytes retry_request_random() {
 bool has_downgrade_sentinel(bytes server_random) {
     bytes tail = server_random.substr(24, 32);
     bytes name = "DOWNGRD".to_bytes();
-    if (!same_octets(tail.substr(0, 7), name)) {
+    if (!consttime.is_equal(tail.substr(0, 7), name)) {
         return false;
     }
     return tail[7] == 0 || tail[7] == 1;
@@ -1198,7 +1186,7 @@ Result<ServerChoice, Error> check_server_hello(bytes message, bytes session_id, 
     Reader reader = Reader(message_body(message));
     int legacy_version = reader.u16()?;
     bytes server_random = reader.take(RANDOM_SIZE)?;
-    if (same_octets(server_random, retry_request_random())) {
+    if (consttime.is_equal(server_random, retry_request_random())) {
         return Result<ServerChoice, Error>.Err(Error.RetryRequested);
     }
     bytes echoed_session_id = reader.vector8()?;
@@ -1232,7 +1220,7 @@ Result<ServerChoice, Error> check_server_hello(bytes message, bytes session_id, 
 }
 
 Result<ServerChoice, Error> check_tls13_hello(int legacy_version, bytes server_random, bytes echoed_session_id, int suite_code, int compression, HelloExtensions found, bytes session_id, bool offered_psk) {
-    if (legacy_version != VERSION_TLS12 || !same_octets(echoed_session_id, session_id) || compression != 0) {
+    if (legacy_version != VERSION_TLS12 || !consttime.is_equal(echoed_session_id, session_id) || compression != 0) {
         return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
     }
     Option<tls13schedule.Suite> chosen = tls13schedule.suite_for_code(suite_code);
@@ -1287,7 +1275,7 @@ Result<ServerChoice, Error> check_tls12_hello(bytes server_random, bytes echoed_
     if (compression != 0 || echoed_session_id.size() > SESSION_ID_SIZE) {
         return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
     }
-    if (echoed_session_id.size() > 0 && same_octets(echoed_session_id, session_id)) {
+    if (echoed_session_id.size() > 0 && consttime.is_equal(echoed_session_id, session_id)) {
         return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
     }
     tls12.Suite suite = tls12.Suite.EcdsaChaCha20Poly1305;
@@ -1413,7 +1401,7 @@ Result<List<x509.Certificate>, Error> certificate_list(bytes message, bool legac
 
 Result<void, Error> check_pin(x509.Certificate leaf, bytes pinned) {
     bytes key_hash = sha256.sum(leaf.subject_public_key_info);
-    if (!same_octets(key_hash, pinned)) {
+    if (!consttime.is_equal(key_hash, pinned)) {
         return Result<void, Error>.Err(Error.UntrustedKey);
     }
     return Result<void, Error>.Ok;
@@ -1799,7 +1787,7 @@ Result<void, Error> check_finished(tls13schedule.Suite suite, bytes message, byt
     if (verify_data.size() != suite.hash_size()) {
         return Result<void, Error>.Err(Error.Malformed);
     }
-    if (!same_octets(verify_data, expected)) {
+    if (!consttime.is_equal(verify_data, expected)) {
         return Result<void, Error>.Err(Error.BadFinished);
     }
     return Result<void, Error>.Ok;
@@ -2260,7 +2248,7 @@ Result<void, Error> check_finished_12(bytes message, bytes expected) {
     if (verify_data.size() != tls12.VERIFY_DATA_SIZE) {
         return Result<void, Error>.Err(Error.Malformed);
     }
-    if (!same_octets(verify_data, expected)) {
+    if (!consttime.is_equal(verify_data, expected)) {
         return Result<void, Error>.Err(Error.BadFinished);
     }
     return Result<void, Error>.Ok;

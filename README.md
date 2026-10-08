@@ -396,6 +396,7 @@ lib/                   the standard library, written in the language itself
   net.m31 http.m31 json.m31 fs.m31 os.m31 ...     27 modules total
   x25519.m31 ed25519.m31 sha256.m31 sha512.m31
   chacha20poly1305.m31                            constant-time crypto
+  consttime.m31 hexcodec.m31                      shared crypto helpers: equal, hex
 apps/                  real programs built on the language and stdlib
   ssh/                 an SSH client — see docs/ssh-decision.md
                        (git, tui, markdown, httpserver moved to github.com/qrazil/{gitui,tui,term-markdown,httpserver})

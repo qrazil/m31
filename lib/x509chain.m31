@@ -76,7 +76,7 @@
 //   - Self-issued-certificate exceptions beyond pathLen (RFC 5280 §6.1.4(h)).
 //   - IP address identities (iPAddress SAN entries).
 
-import bignum;
+import hexcodec;
 import ecdsa;
 import rsa;
 import sha256;
@@ -214,11 +214,11 @@ bool is_weak_algorithm(str oid) {
 }
 
 bool has_pss_parameters(bytes parameters, str expected_hex) {
-    match (bignum.bytes_from_hex(expected_hex)) {
-        case None: {
+    match (hexcodec.decode(expected_hex)) {
+        case Err(hexcodec.Error problem): {
             return false;
         }
-        case Some(bytes expected): {
+        case Ok(bytes expected): {
             return parameters == expected;
         }
     }

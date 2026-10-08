@@ -7,15 +7,16 @@
 //   ./build.sh apps/tls/t_bignum.m31 -o t_bignum && ./t_bignum cases.txt
 
 import bignum;
+import hexcodec;
 import io;
 import os;
 
 bytes decode(str hex) {
-    match (bignum.bytes_from_hex(hex)) {
-        case None: {
+    match (hexcodec.decode(hex)) {
+        case Err(hexcodec.Error problem): {
             return [];
         }
-        case Some(bytes decoded): {
+        case Ok(bytes decoded): {
             return decoded;
         }
     }

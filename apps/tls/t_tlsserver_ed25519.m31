@@ -3,7 +3,7 @@
 // `name|seed_hex|message_hex`; the program prints `name public_key_hex
 // signature_hex`. The oracle prints the expected lines.
 
-import bignum;
+import hexcodec;
 import ed25519;
 import io;
 import os;
@@ -12,11 +12,11 @@ bytes decode(str hex) {
     if (hex == "") {
         return [];
     }
-    match (bignum.bytes_from_hex(hex)) {
-        case None: {
+    match (hexcodec.decode(hex)) {
+        case Err(hexcodec.Error problem): {
             return [];
         }
-        case Some(bytes decoded): {
+        case Ok(bytes decoded): {
             return decoded;
         }
     }

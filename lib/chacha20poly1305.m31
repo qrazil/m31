@@ -19,7 +19,6 @@
 //   chacha20poly1305.encrypt(key, counter, nonce, pt) -> bytes, len(pt)
 //   chacha20poly1305.key_gen(key, nonce)              -> bytes, 32 octets
 //   chacha20poly1305.mac(key, msg)                    -> bytes, 16 octets
-//   chacha20poly1305.consttime_eq(a, b)               -> bool
 //   chacha20poly1305.seal(key, nonce, plaintext, aad) -> bytes, ciphertext || tag
 //   chacha20poly1305.open(key, nonce, sealed, aad)     -> Result<bytes, Error>
 //
@@ -36,9 +35,7 @@
 // out to 12 bytes and calling `block` would compile, run, and produce a
 // keystream that is wrong but plausible-looking. `openssh_block` exists so
 // that mistake has nowhere to happen: it is `block`'s same permutation,
-// with only the last four words' assignment changed to match. `consttime_eq`
-// is exported for the same reason Phase 2 needs it: its own MAC-then-decrypt
-// step must not grow a second, hand-rolled constant-time comparison.
+// with only the last four words' assignment changed to match.
 // `key` is always 32 octets and `nonce` always 12 -- the one modern IETF
 // variant, which is what `chacha20-poly1305@openssh.com` and every other
 // current use of this pair means by "ChaCha20". A wrong length is a bug in
@@ -82,11 +79,13 @@
 //
 // --- constant time where it has to be --------------------------------------
 //
-// `open`'s tag comparison is `consttime_eq`, not `==`: `bytes`'s `==`
-// (reference §3.10) makes no promise about its timing, and a MAC check whose
-// time leaks *where* the first mismatched byte was is a forgery oracle --
-// the exact class of bug RFC 8439 §3 is warning about one paragraph over
-// from the big-number one.
+// `open`'s tag comparison is `consttime.is_equal` (`lib/consttime.m31`), not
+// `==`: `bytes`'s `==` (reference §3.10) makes no promise about its timing, and
+// a MAC check whose time leaks *where* the first mismatched byte was is a
+// forgery oracle -- the exact class of bug RFC 8439 §3 is warning about one
+// paragraph over from the big-number one.
+
+import consttime;
 
 // --- ChaCha20 ---------------------------------------------------------------
 
@@ -518,23 +517,6 @@ bytes aead_buffer(bytes aad, bytes ciphertext) {
     return buf;
 }
 
-/// Whether `a` and `b` hold the same octets, taking time that depends on
-/// their lengths and nothing else -- see this module's header. `bytes`'s own
-/// `==` (reference §3.10) makes no such promise, so `open`'s tag check uses
-/// this instead. `pub`, not only `open`'s own helper: `docs/ssh-decision.md`
-/// Phase 2's own MAC verification needs the identical constant-time compare
-/// and must not grow a second, hand-rolled copy of it.
-pub bool consttime_eq(bytes a, bytes b) {
-    if (a.size() != b.size()) {
-        return false;
-    }
-    int diff = 0;
-    for (int i in 0 .. a.size()) {
-        diff = diff | (a[i] ^ b[i]);
-    }
-    return diff == 0;
-}
-
 /// Encrypt and authenticate: RFC 8439 §2.8, `AEAD_CHACHA20_POLY1305`'s
 /// encryption direction. `key` (32 octets) and `nonce` (12 octets) at any
 /// other length **trap**, per this module's header; `aad` may be empty and
@@ -564,7 +546,7 @@ pub Result<bytes, Error> open(bytes key, bytes nonce, bytes sealed, bytes aad) {
     bytes tag = sealed.substr(ct_len, sealed.size());
     bytes otk = key_gen(key, nonce);
     bytes want = mac(otk, aead_buffer(aad, ciphertext));
-    if (!consttime_eq(want, tag)) {
+    if (!consttime.is_equal(want, tag)) {
         return Result<bytes, Error>.Err(Error.Tag);
     }
     return Result<bytes, Error>.Ok(encrypt(key, 1, nonce, ciphertext));

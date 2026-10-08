@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Every check for the TLS 1.3 building blocks that are not the protocol
 # itself: the hashes and keyed constructions the key schedule is made of
-# (`lib/hmac.m31`, `lib/hkdf.m31`, and SHA-384 in `lib/sha512.m31`). No
+# (`lib/hmac.m31`, `lib/hkdf.m31`, `lib/consttime.m31`, `lib/hexcodec.m31`, and SHA-384 in `lib/sha512.m31`). No
 # networking, nothing wired into `lib/http.m31`. Modelled directly on
 # `apps/ssh/test.sh`, with the same rule: nothing here compares this program
 # with itself.
@@ -69,7 +69,7 @@ check() {
 # check `apps/ssh/test.sh` runs, over this directory and the library files.
 
 if out=$(
-    for f in apps/tls/*.m31 lib/hmac.m31 lib/hkdf.m31 lib/sha512.m31; do
+    for f in apps/tls/*.m31 lib/hmac.m31 lib/hkdf.m31 lib/sha512.m31 lib/consttime.m31 lib/hexcodec.m31; do
         "$LANGC" fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then
@@ -83,6 +83,8 @@ if ! python3 -c 'import cryptography' 2>/dev/null; then
 else
     check sha384 "hashlib (FIPS 180-4 vectors, a 0-260 length sweep, a million-a in chunks)"
     check hmac "hashlib/hmac (RFC 4231 SHA-256 and SHA-384 cases plus a message-length by key-length grid)"
+    check consttime "hmac.compare_digest (empty, unequal lengths, a one-bit flip at every position of eight sizes, every octet pair)"
+    check hexcodec "bytes.hex() and a strict digit check (round trips, either case, odd length, bad digits, non-ASCII)"
     check hkdf "an independent RFC 5869/8446 implementation (RFC 5869 and RFC 8448 values, expand cross-checked against OpenSSL)"
 fi
 

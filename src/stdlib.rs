@@ -52,6 +52,8 @@ pub fn source(name: &str) -> Option<&'static str> {
         "aes" => include_str!("../lib/aes.m31"),
         "aesgcm" => include_str!("../lib/aesgcm.m31"),
         "ssh" => include_str!("../lib/ssh.m31"),
+        "consttime" => include_str!("../lib/consttime.m31"),
+        "hexcodec" => include_str!("../lib/hexcodec.m31"),
         "hmac" => include_str!("../lib/hmac.m31"),
         "hkdf" => include_str!("../lib/hkdf.m31"),
         "bignum" => include_str!("../lib/bignum.m31"),

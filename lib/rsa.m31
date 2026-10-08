@@ -72,6 +72,7 @@
 // octet of the `k`-octet value must be zero.
 
 import bignum;
+import hexcodec;
 import sha256;
 import sha512;
 
@@ -162,7 +163,7 @@ pub bool verify_pkcs1_v15(PublicKey key, Hash hash, bytes digest, bytes signatur
             return false;
         }
         case Some(bytes recovered): {
-            bytes prefix = hex_bytes(digest_info_hex(hash));
+            bytes prefix = hexcodec.literal(digest_info_hex(hash));
             int padding_length = key.modulus_size - 3 - prefix.size() - digest.size();
             if (padding_length < MINIMUM_PADDING_LENGTH) {
                 return false;
@@ -332,15 +333,4 @@ int octet_bit_length(bytes octets) {
         bits = bits + 1;
     }
     return (octets.size() - 1) * 8 + bits;
-}
-
-bytes hex_bytes(str text) {
-    match (bignum.bytes_from_hex(text)) {
-        case None: {
-            return [];
-        }
-        case Some(bytes decoded): {
-            return decoded;
-        }
-    }
 }

@@ -64,6 +64,7 @@
 //   handshakes is an expensive flood; rate-limit in front of this if it
 //   matters.
 
+import consttime;
 import io;
 import net;
 import random;
@@ -576,17 +577,6 @@ Error error_of_record(tls13record.Error error) {
 
 // --- reading a ClientHello ---------------------------------------------------------
 
-bool same_octets(bytes left, bytes right) {
-    if (left.size() != right.size()) {
-        return false;
-    }
-    int difference = 0;
-    for (int index in 0 .. left.size()) {
-        difference = difference | (left[index] ^ right[index]);
-    }
-    return difference == 0;
-}
-
 bool all_zero(bytes data) {
     int accumulated = 0;
     for (int index in 0 .. data.size()) {
@@ -1051,7 +1041,7 @@ Result<Session, Error> run_handshake(tls13record.Connection record, List<Config>
         compatibility_sent = true;
         bytes second_message = next_client_hello(record)?;
         Hello again = parse_client_hello(second_message)?;
-        if (!same_octets(again.client_random, hello.client_random) || !same_octets(again.session_id, hello.session_id) || again.server_name != hello.server_name) {
+        if (!consttime.is_equal(again.client_random, hello.client_random) || !consttime.is_equal(again.session_id, hello.session_id) || again.server_name != hello.server_name) {
             return Result<Session, Error>.Err(Error.IllegalParameter);
         }
         if (!again.has_x25519_share) {
@@ -1106,7 +1096,7 @@ Result<Session, Error> run_handshake(tls13record.Connection record, List<Config>
         return Result<Session, Error>.Err(Error.Malformed);
     }
     bytes client_key = tls13schedule.finished_key(suite, client_handshake);
-    if (!same_octets(verify_data, tls13schedule.finished_verify_data(suite, client_key, finished_hash))) {
+    if (!consttime.is_equal(verify_data, tls13schedule.finished_verify_data(suite, client_key, finished_hash))) {
         return Result<Session, Error>.Err(Error.BadFinished);
     }
     record.install_write_keys(server_application);
