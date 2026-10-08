@@ -3605,6 +3605,50 @@ int64_t rt_wait_io(int64_t fd, int64_t events) {
     rt_enter_blocking();
     return 0;
 }
+/* `__wait_io` with a deadline: park the calling GREEN thread until `fd` is
+ * ready for `events` (RT_REACTOR_READ/WRITE, as for rt_wait_io) or
+ * `timeout_ms` milliseconds have passed. 0: ready. 1: timed out. Negative: a
+ * -errno in the sys layer's numbering (a descriptor the OS will not watch --
+ * closed, not a socket -- or a bad argument), which unlike rt_wait_io is
+ * REPORTED rather than trapped, since a descriptor that is gone is an
+ * ordinary event for a caller who asked for a bound.
+ *
+ * `fd` < 0 (with `events` 0) waits on nothing: a sleep of `timeout_ms` that
+ * parks only the green thread, answering 1 when it ends (lib/timer.m31).
+ * Sleeping for ever (`timeout_ms` < 0) on nothing is -EINVAL.
+ *
+ * `timeout_ms` < 0 is rt_wait_io (no deadline, 0 when ready); 0 is a poll
+ * that never parks; > 0 parks, and the carrier is free to run other green
+ * threads for the whole wait -- the point of this primitive, and the thing
+ * `__poll` (a real ppoll on the carrier's OS thread) cannot do. The deadline
+ * lives in the reactor (runtime/reactor.h, reactor_timers.h); see
+ * docs/net-timeouts-decision.md.
+ *
+ * It undoes and re-arms the compiler's rt_enter_blocking/rt_exit_blocking
+ * pair around the park for exactly the reason rt_wait_io's long comment
+ * gives: it parks the green thread, it does not block the carrier. */
+int64_t rt_wait_io_timeout(int64_t fd, int64_t events, int64_t timeout_ms) {
+    /* fd < 0 is "no descriptor": a pure sleep (lib/timer.m31), which takes
+     * no events. Anything else needs a real fd and at least one event. */
+    if (fd < 0) {
+        if (events != 0) return -SYS_EINVAL;
+    } else if (fd > INT32_MAX || events < 1 ||
+               events > (RT_REACTOR_READ | RT_REACTOR_WRITE)) {
+        return -SYS_EINVAL;
+    }
+    rt_exit_blocking();
+    int r = rt_reactor_wait_timeout(rt_global_reactor(), (int)fd,
+                                    (uint32_t)events, timeout_ms);
+    rt_enter_blocking();
+    if (r >= 0) return r;
+    switch (-r) {
+    case EBADF: return -SYS_EBADF;
+    case EPERM: return -SYS_EPERM;
+    case ENOENT: return -SYS_ENOENT;
+    case ENOMEM: return -SYS_ENOMEM;
+    default: return -SYS_EINVAL;
+    }
+}
 /* ---- end net primitives ------------------------------------------------ */
 
 

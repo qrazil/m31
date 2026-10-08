@@ -720,6 +720,389 @@ static void test_blocking_ffi_handoff(void) {
 }
 
 /* ========================================================================
+ * Test 4 -- bounded waits: rt_reactor_wait_timeout (docs/net-timeouts-
+ * decision.md). A deadline parks only the green thread; the reactor thread
+ * keeps the deadline heap and claims each wait exactly once, whichever of
+ * readiness and the deadline gets there first.
+ * ====================================================================== */
+
+static uint64_t t_now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+static double ns_to_ms(uint64_t ns) { return (double)ns / 1e6; }
+
+typedef struct {
+    rt_reactor_t *r;
+    int           fd;
+    uint32_t      events;
+    int64_t       timeout_ms;
+    _Atomic int   result;     /* the wait's return value */
+    _Atomic uint64_t start_ns;
+    _Atomic uint64_t end_ns;
+    _Atomic bool  done;
+    _Atomic bool  started;
+} twait_t;
+
+static void twait_init(twait_t *w, rt_reactor_t *r, int fd, uint32_t events,
+                       int64_t timeout_ms) {
+    w->r = r;
+    w->fd = fd;
+    w->events = events;
+    w->timeout_ms = timeout_ms;
+    atomic_init(&w->result, -9999);
+    atomic_init(&w->start_ns, 0);
+    atomic_init(&w->end_ns, 0);
+    atomic_init(&w->done, false);
+    atomic_init(&w->started, false);
+}
+
+static void twait_worker(void *argp) {
+    twait_t *w = (twait_t *)argp;
+    atomic_store(&w->start_ns, t_now_ns());
+    atomic_store(&w->started, true);
+    int rc = rt_reactor_wait_timeout(w->r, w->fd, w->events, w->timeout_ms);
+    atomic_store(&w->end_ns, t_now_ns());
+    atomic_store(&w->result, rc);
+    atomic_store_explicit(&w->done, true, memory_order_release);
+}
+
+static double twait_elapsed_ms(twait_t *w) {
+    return ns_to_ms(atomic_load(&w->end_ns) - atomic_load(&w->start_ns));
+}
+
+static void make_pipe(int fds[2]) {
+    if (pipe(fds) != 0) { perror("pipe"); exit(2); }
+    fcntl(fds[0], F_SETFL, fcntl(fds[0], F_GETFL, 0) | O_NONBLOCK);
+}
+
+static bool wait_done(twait_t *w, int ms) {
+    bool ok;
+    WAIT_UNTIL(atomic_load_explicit(&w->done, memory_order_acquire), ms, &ok);
+    return ok;
+}
+
+static void test_timeout_basic(void) {
+    rt_scheduler_t *s = rt_sched_create(2);
+    rt_reactor_t *r = rt_reactor_create(s);
+    char msg[200];
+
+    /* Data arrives before the deadline: READY, and well before it. */
+    {
+        int p[2]; make_pipe(p);
+        twait_t w; twait_init(&w, r, p[0], RT_REACTOR_READ, 5000);
+        rt_sched_spawn(s, twait_worker, &w);
+        sleep_ms(30);
+        CHECK(write(p[1], "x", 1) == 1, "[timeout] harness write");
+        CHECK(wait_done(&w, 2000), "[timeout] data before deadline: the wait returned");
+        CHECK(atomic_load(&w.result) == RT_REACTOR_WAIT_READY,
+              "[timeout] data before deadline: READY");
+        CHECK(twait_elapsed_ms(&w) < 1000.0,
+              "[timeout] data before deadline: did not sit out the 5 s deadline");
+        CHECK(rt_reactor_timers_pending(r) == 0,
+              "[timeout] early readiness cancels its timer (no leak)");
+        close(p[0]); close(p[1]);
+    }
+
+    /* No data: TIMEOUT, at about the deadline, and the timer is gone. */
+    {
+        int p[2]; make_pipe(p);
+        twait_t w; twait_init(&w, r, p[0], RT_REACTOR_READ, 100);
+        rt_sched_spawn(s, twait_worker, &w);
+        CHECK(wait_done(&w, 3000), "[timeout] silent fd: the wait returned");
+        CHECK(atomic_load(&w.result) == RT_REACTOR_WAIT_TIMEOUT,
+              "[timeout] silent fd: TIMEOUT");
+        double e = twait_elapsed_ms(&w);
+        snprintf(msg, sizeof msg, "[timeout] silent fd: elapsed %.1f ms is within [95,400]", e);
+        CHECK(e >= 95.0 && e < 400.0, msg);
+        CHECK(rt_reactor_timers_pending(r) == 0, "[timeout] expiry leaves no timer");
+        /* Readiness arriving AFTER the deadline finds the registration
+         * released: nothing to wake, nothing to crash. */
+        CHECK(write(p[1], "x", 1) == 1, "[timeout] harness late write");
+        sleep_ms(30);
+        close(p[0]); close(p[1]);
+    }
+
+    /* timeout 0 never parks: a poll. */
+    {
+        int p[2]; make_pipe(p);
+        int rc = rt_reactor_wait_timeout(r, p[0], RT_REACTOR_READ, 0);
+        /* Called from the main (non-green) thread on purpose: it must not
+         * need to park. */
+        CHECK(rc == RT_REACTOR_WAIT_TIMEOUT, "[timeout] 0 ms on an empty pipe: TIMEOUT");
+        CHECK(write(p[1], "x", 1) == 1, "[timeout] harness write");
+        rc = rt_reactor_wait_timeout(r, p[0], RT_REACTOR_READ, 0);
+        CHECK(rc == RT_REACTOR_WAIT_READY, "[timeout] 0 ms on a readable pipe: READY");
+        rc = rt_reactor_wait_timeout(r, p[1], RT_REACTOR_WRITE, 0);
+        CHECK(rc == RT_REACTOR_WAIT_READY, "[timeout] 0 ms on a writable pipe: READY");
+        rc = rt_reactor_wait_timeout(r, -1, 0, 0);
+        CHECK(rc == RT_REACTOR_WAIT_TIMEOUT, "[timeout] 0 ms on nothing: TIMEOUT");
+        close(p[0]); close(p[1]);
+    }
+
+    /* Negative: no deadline, exactly rt_reactor_wait. */
+    {
+        int p[2]; make_pipe(p);
+        twait_t w; twait_init(&w, r, p[0], RT_REACTOR_READ, -1);
+        rt_sched_spawn(s, twait_worker, &w);
+        sleep_ms(150);
+        CHECK(!atomic_load(&w.done), "[timeout] infinite wait is still parked");
+        CHECK(rt_reactor_timers_pending(r) == 0, "[timeout] infinite wait holds no timer");
+        CHECK(write(p[1], "x", 1) == 1, "[timeout] harness write");
+        CHECK(wait_done(&w, 2000), "[timeout] infinite wait woke on data");
+        CHECK(atomic_load(&w.result) == RT_REACTOR_WAIT_READY, "[timeout] infinite wait: READY");
+        close(p[0]); close(p[1]);
+    }
+
+    /* Waiting on nothing is a parking sleep; forever on nothing is refused. */
+    {
+        twait_t w; twait_init(&w, r, -1, 0, 60);
+        rt_sched_spawn(s, twait_worker, &w);
+        CHECK(wait_done(&w, 2000), "[timeout] sleep-only returned");
+        CHECK(atomic_load(&w.result) == RT_REACTOR_WAIT_TIMEOUT, "[timeout] sleep-only: TIMEOUT");
+        snprintf(msg, sizeof msg, "[timeout] sleep-only: elapsed %.1f ms >= 55", twait_elapsed_ms(&w));
+        CHECK(twait_elapsed_ms(&w) >= 55.0, msg);
+        twait_t v; twait_init(&v, r, -1, 0, -1);
+        rt_sched_spawn(s, twait_worker, &v);
+        CHECK(wait_done(&v, 2000), "[timeout] sleep-only forever returned at once");
+        CHECK(atomic_load(&v.result) == -EINVAL, "[timeout] sleep-only forever: -EINVAL");
+    }
+
+    /* A bad fd is reported, not trapped; no timer is left behind. */
+    {
+        int p[2]; make_pipe(p);
+        close(p[0]);
+        twait_t w; twait_init(&w, r, p[0], RT_REACTOR_READ, 5000);
+        rt_sched_spawn(s, twait_worker, &w);
+        CHECK(wait_done(&w, 2000), "[timeout] closed fd: returned promptly");
+        CHECK(atomic_load(&w.result) < 0, "[timeout] closed fd: negative errno");
+        CHECK(rt_reactor_timers_pending(r) == 0, "[timeout] closed fd: no timer leaked");
+        close(p[1]);
+    }
+
+    /* The fd is closed WHILE parked: no event on either backend, so the
+     * wait ends at its deadline. */
+    {
+        int p[2]; make_pipe(p);
+        twait_t w; twait_init(&w, r, p[0], RT_REACTOR_READ, 120);
+        rt_sched_spawn(s, twait_worker, &w);
+        /* Wait until the timer is registered (the reactor lock orders the
+         * worker's epoll_ctl before this close; sleeping alone would not). */
+        bool reg;
+        WAIT_UNTIL(rt_reactor_timers_pending(r) == 1, 2000, &reg);
+        CHECK(reg, "[timeout] fd closed while parked: the wait registered");
+        close(p[0]);
+        CHECK(wait_done(&w, 3000), "[timeout] fd closed while parked: returned");
+        CHECK(atomic_load(&w.result) == RT_REACTOR_WAIT_TIMEOUT,
+              "[timeout] fd closed while parked: ends by TIMEOUT");
+        CHECK(rt_reactor_timers_pending(r) == 0, "[timeout] fd closed while parked: no leak");
+        close(p[1]);
+    }
+
+    rt_reactor_destroy(r);
+    rt_sched_shutdown(s);
+    rt_sched_destroy(s);
+}
+
+/* A stale wake-up (rt_sched_park may return early) must not end a bounded
+ * wait that has not been claimed. */
+static void test_timeout_spurious_wake(void) {
+    rt_scheduler_t *s = rt_sched_create(2);
+    rt_reactor_t *r = rt_reactor_create(s);
+    char msg[200];
+    int p[2]; make_pipe(p);
+    twait_t w; twait_init(&w, r, p[0], RT_REACTOR_READ, 250);
+    uint32_t id = rt_sched_spawn(s, twait_worker, &w);
+    sleep_ms(30);
+    for (int i = 0; i < 5; i++) { rt_sched_unpark(s, id); sleep_ms(5); }
+    sleep_ms(20);
+    CHECK(!atomic_load(&w.done), "[spurious] stray unparks did not end the wait");
+    CHECK(wait_done(&w, 3000), "[spurious] the wait still ends");
+    CHECK(atomic_load(&w.result) == RT_REACTOR_WAIT_TIMEOUT, "[spurious] ... by its deadline");
+    snprintf(msg, sizeof msg, "[spurious] elapsed %.1f ms >= 240", twait_elapsed_ms(&w));
+    CHECK(twait_elapsed_ms(&w) >= 240.0, msg);
+    CHECK(rt_reactor_timers_pending(r) == 0, "[spurious] no timer left");
+    close(p[0]); close(p[1]);
+    rt_reactor_destroy(r);
+    rt_sched_shutdown(s);
+    rt_sched_destroy(s);
+}
+
+/* Readiness and the deadline arriving together: exactly one wins, the wait
+ * returns once, nothing hangs, nothing leaks. */
+static void test_timeout_race(void) {
+    rt_scheduler_t *s = rt_sched_create(2);
+    rt_reactor_t *r = rt_reactor_create(s);
+    int ready = 0, timedout = 0, bad = 0;
+    const int trials = 150;
+    for (int i = 0; i < trials; i++) {
+        int p[2]; make_pipe(p);
+        twait_t w; twait_init(&w, r, p[0], RT_REACTOR_READ, 4);
+        rt_sched_spawn(s, twait_worker, &w);
+        while (!atomic_load(&w.started)) { }
+        /* Aim the write at the deadline, jittered either side of it. */
+        uint64_t at = atomic_load(&w.start_ns) + 4000000ull + (uint64_t)((i % 7) - 3) * 300000ull;
+        while (t_now_ns() < at) { }
+        (void)!write(p[1], "x", 1);
+        if (!wait_done(&w, 3000)) { bad++; break; }
+        int rc = atomic_load(&w.result);
+        if (rc == RT_REACTOR_WAIT_READY) ready++;
+        else if (rc == RT_REACTOR_WAIT_TIMEOUT) timedout++;
+        else bad++;
+        close(p[0]); close(p[1]);
+    }
+    CHECK(bad == 0, "[race] every wait returned exactly READY or TIMEOUT");
+    CHECK(ready + timedout == trials, "[race] every trial accounted for");
+    CHECK(rt_reactor_timers_pending(r) == 0, "[race] no timer leaked");
+    printf("  race outcomes: %d ready, %d timeout\n", ready, timedout);
+    rt_reactor_destroy(r);
+    rt_sched_shutdown(s);
+    rt_sched_destroy(s);
+}
+
+/* 1000 concurrent timers on two carriers: all fire, none early, heap empties. */
+static void test_timeout_many(void) {
+    rt_scheduler_t *s = rt_sched_create(2);
+    rt_reactor_t *r = rt_reactor_create(s);
+    char msg[200];
+    enum { N = 1000 };
+    static twait_t ws[N];
+    for (int i = 0; i < N; i++) {
+        twait_init(&ws[i], r, -1, 0, 60 + (i * 37) % 200);
+        rt_sched_spawn(s, twait_worker, &ws[i]);
+    }
+    int early = 0, wrong = 0, undone = 0;
+    for (int i = 0; i < N; i++) {
+        if (!wait_done(&ws[i], 10000)) { undone++; continue; }
+        if (atomic_load(&ws[i].result) != RT_REACTOR_WAIT_TIMEOUT) wrong++;
+        if (twait_elapsed_ms(&ws[i]) < (double)ws[i].timeout_ms - 2.0) early++;
+    }
+    CHECK(undone == 0, "[many] all 1000 timers fired");
+    CHECK(wrong == 0, "[many] all 1000 ended TIMEOUT");
+    snprintf(msg, sizeof msg, "[many] none fired early (%d did)", early);
+    CHECK(early == 0, msg);
+    CHECK(rt_reactor_timers_pending(r) == 0, "[many] heap is empty afterwards");
+
+    /* And 200 real fds: every other one gets data early, the rest time out. */
+    enum { M = 200 };
+    static twait_t fw[M];
+    static int pp[M][2];
+    for (int i = 0; i < M; i++) {
+        make_pipe(pp[i]);
+        twait_init(&fw[i], r, pp[i][0], RT_REACTOR_READ, 300);
+        rt_sched_spawn(s, twait_worker, &fw[i]);
+    }
+    sleep_ms(50);
+    for (int i = 0; i < M; i += 2) (void)!write(pp[i][1], "x", 1);
+    int rd = 0, to = 0, fail = 0;
+    for (int i = 0; i < M; i++) {
+        if (!wait_done(&fw[i], 5000)) { fail++; continue; }
+        int rc = atomic_load(&fw[i].result);
+        if (rc == RT_REACTOR_WAIT_READY) { rd++; CHECK((i % 2) == 0, "[many] only written fds were READY"); }
+        else if (rc == RT_REACTOR_WAIT_TIMEOUT) { to++; CHECK((i % 2) == 1, "[many] only silent fds timed out"); }
+        else fail++;
+    }
+    CHECK(fail == 0, "[many] all 200 fd waits returned");
+    CHECK(rd == M / 2 && to == M / 2, "[many] 100 ready, 100 timed out");
+    CHECK(rt_reactor_timers_pending(r) == 0, "[many] heap empty after the fd waits");
+    for (int i = 0; i < M; i++) { close(pp[i][0]); close(pp[i][1]); }
+
+    rt_reactor_destroy(r);
+    rt_sched_shutdown(s);
+    rt_sched_destroy(s);
+}
+
+/* The stall this feature exists to remove (docs/net-timeouts-decision.md):
+ * with 2 carriers, N silent waiters each bounded by 400 ms used to pin
+ * every carrier in ppoll, so a ready connection waited a whole timeout.
+ * Now the silent ones park as green threads, and a ready waiter spawned
+ * AFTER them is served at once. */
+static void stall_case(int n_silent) {
+    rt_scheduler_t *s = rt_sched_create(2);
+    rt_reactor_t *r = rt_reactor_create(s);
+    char msg[240];
+    twait_t *silent = calloc((size_t)n_silent, sizeof *silent);
+    int (*sp)[2] = calloc((size_t)n_silent, sizeof *sp);
+    for (int i = 0; i < n_silent; i++) {
+        make_pipe(sp[i]);
+        twait_init(&silent[i], r, sp[i][0], RT_REACTOR_READ, 400);
+        rt_sched_spawn(s, twait_worker, &silent[i]);
+    }
+    sleep_ms(30);
+    int rp[2]; make_pipe(rp);
+    twait_t ready; twait_init(&ready, r, rp[0], RT_REACTOR_READ, 400);
+    rt_sched_spawn(s, twait_worker, &ready);
+    sleep_ms(30);
+    uint64_t t_write = t_now_ns();
+    (void)!write(rp[1], "x", 1);
+    CHECK(wait_done(&ready, 3000), "[stall] the ready waiter returned");
+    double lat = ns_to_ms(atomic_load(&ready.end_ns) - t_write);
+    CHECK(atomic_load(&ready.result) == RT_REACTOR_WAIT_READY, "[stall] ... READY");
+    snprintf(msg, sizeof msg,
+             "[stall] %d silent waiters, 2 carriers: ready waiter woke %.1f ms "
+             "after the write (bound 150; the ppoll design measured 301 / 1501)",
+             n_silent, lat);
+    CHECK(lat < 150.0, msg);
+    printf("  stall %2d silent: ready waiter latency %.2f ms\n", n_silent, lat);
+
+    double worst = 0;
+    int ok = 1;
+    for (int i = 0; i < n_silent; i++) {
+        if (!wait_done(&silent[i], 5000)) { ok = 0; continue; }
+        if (atomic_load(&silent[i].result) != RT_REACTOR_WAIT_TIMEOUT) ok = 0;
+        double e = twait_elapsed_ms(&silent[i]);
+        if (e > worst) worst = e;
+        if (e < 395.0) ok = 0;
+    }
+    CHECK(ok, "[stall] every silent waiter timed out, none early");
+    snprintf(msg, sizeof msg, "[stall] silent waiters timed out by timeout+150 ms (worst %.1f ms)", worst);
+    CHECK(worst < 550.0, msg);
+    CHECK(rt_reactor_timers_pending(r) == 0, "[stall] no timer leaked");
+    for (int i = 0; i < n_silent; i++) { close(sp[i][0]); close(sp[i][1]); }
+    close(rp[0]); close(rp[1]);
+    free(silent); free(sp);
+    rt_reactor_destroy(r);
+    rt_sched_shutdown(s);
+    rt_sched_destroy(s);
+}
+
+static void test_timeout_stall(void) {
+    stall_case(2);
+    stall_case(16);
+}
+
+/* Bounded and unbounded waits share the reactor: neither starves the other. */
+static void test_timeout_fairness(void) {
+    rt_scheduler_t *s = rt_sched_create(2);
+    rt_reactor_t *r = rt_reactor_create(s);
+    enum { K = 8 };
+    twait_t plain[K], timed[K];
+    int pa[K][2], pb[K][2];
+    for (int i = 0; i < K; i++) {
+        make_pipe(pa[i]); make_pipe(pb[i]);
+        twait_init(&plain[i], r, pa[i][0], RT_REACTOR_READ, -1);
+        twait_init(&timed[i], r, pb[i][0], RT_REACTOR_READ, 2000);
+        rt_sched_spawn(s, twait_worker, &plain[i]);
+        rt_sched_spawn(s, twait_worker, &timed[i]);
+    }
+    sleep_ms(40);
+    for (int i = 0; i < K; i++) { (void)!write(pa[i][1], "x", 1); (void)!write(pb[i][1], "x", 1); }
+    int good = 0;
+    for (int i = 0; i < K; i++) {
+        if (wait_done(&plain[i], 2000) && atomic_load(&plain[i].result) == RT_REACTOR_WAIT_READY) good++;
+        if (wait_done(&timed[i], 2000) && atomic_load(&timed[i].result) == RT_REACTOR_WAIT_READY
+            && twait_elapsed_ms(&timed[i]) < 1000.0) good++;
+    }
+    CHECK(good == 2 * K, "[fair] plain and bounded waiters on one reactor all wake on readiness");
+    CHECK(rt_reactor_timers_pending(r) == 0, "[fair] no timer leaked");
+    for (int i = 0; i < K; i++) { close(pa[i][0]); close(pa[i][1]); close(pb[i][0]); close(pb[i][1]); }
+    rt_reactor_destroy(r);
+    rt_sched_shutdown(s);
+    rt_sched_destroy(s);
+}
+
+/* ========================================================================
  * Driver
  * ====================================================================== */
 
@@ -727,6 +1110,12 @@ int main(void) {
     test_park_unpark_race();
     test_reactor_real_pipe_wakeup();
     test_blocking_ffi_handoff();
+    test_timeout_basic();
+    test_timeout_spurious_wake();
+    test_timeout_race();
+    test_timeout_many();
+    test_timeout_stall();
+    test_timeout_fairness();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures == 0 ? 0 : 1;

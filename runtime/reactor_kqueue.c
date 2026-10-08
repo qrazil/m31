@@ -159,9 +159,11 @@
  * cleanup failure can never affect whether the real registration succeeded.
  */
 #include "reactor.h"
+#include "reactor_timers.h"
 #include "rt.h"
 
 #include <errno.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -189,6 +191,10 @@ typedef struct {
     uint64_t seq;             /* names this exact registration; see this
                                  file's top comment, "THE SPURIOUS-WAKEUP
                                  HAZARD" */
+    /* The bounded wait that owns this registration (runtime/
+     * reactor_timers.h), NULL for an unbounded one. Whoever claims the
+     * wait -- readiness or the deadline -- clears it, under `lock`. */
+    rt_timer_node_t *node;
 } rt_waiter_t;
 
 #define RT_WAITER_EMPTY UINT32_MAX
@@ -240,7 +246,7 @@ static rt_waiter_t *wmap_find_locked(rt_waiter_map_t *m, uint32_t fd) {
  * the probe chain has one, same as a fresh EMPTY slot). */
 static void wmap_insert_locked(rt_waiter_map_t *m, uint32_t fd,
                                 uint32_t green_id, uint32_t armed_mask,
-                                uint64_t seq) {
+                                uint64_t seq, rt_timer_node_t *node) {
     uint32_t i = fd % m->cap;
     while (m->slots[i].fd != RT_WAITER_EMPTY && m->slots[i].fd != RT_WAITER_TOMB) {
         i = (i + 1) % m->cap;
@@ -249,6 +255,7 @@ static void wmap_insert_locked(rt_waiter_map_t *m, uint32_t fd,
     m->slots[i].green_id = green_id;
     m->slots[i].armed_mask = armed_mask;
     m->slots[i].seq = seq;
+    m->slots[i].node = node;
 }
 
 static void wmap_grow_if_needed_locked(rt_waiter_map_t *m) {
@@ -266,7 +273,7 @@ static void wmap_grow_if_needed_locked(rt_waiter_map_t *m) {
     for (uint32_t i = 0; i < old_cap; i++) {
         if (old[i].fd != RT_WAITER_EMPTY && old[i].fd != RT_WAITER_TOMB) {
             wmap_insert_locked(m, old[i].fd, old[i].green_id,
-                                old[i].armed_mask, old[i].seq);
+                                old[i].armed_mask, old[i].seq, old[i].node);
         }
     }
     /* Growing naturally compacts away tombstones too: only LIVE entries are
@@ -275,15 +282,18 @@ static void wmap_grow_if_needed_locked(rt_waiter_map_t *m) {
     free(old);
 }
 
-/* Create-or-replace fd's registration with {green_id, new_mask}, minting a
- * fresh sequence number for it. Returns that new seq (to stamp into every
- * kevent udata this registration submits) and hands back the PREVIOUS
- * armed_mask in `*out_old_mask` (0 if there was no previous entry) so the
- * caller can tell which previously-armed filter(s), if any, are no longer
- * wanted and should be best-effort EV_DELETEd (see rt_reactor_wait). */
-static uint64_t wmap_upsert(rt_waiter_map_t *m, uint32_t fd, uint32_t green_id,
-                             uint32_t new_mask, uint32_t *out_old_mask) {
-    pthread_mutex_lock(&m->lock);
+/* Lock held. Create-or-replace fd's registration with {green_id, new_mask,
+ * node}, minting a fresh sequence number for it. Returns that new seq (to
+ * stamp into every kevent udata this registration submits) and hands back the
+ * PREVIOUS armed_mask in `*out_old_mask` (0 if there was no previous entry)
+ * so the caller can tell which previously-armed filter(s), if any, are no
+ * longer wanted and should be best-effort EV_DELETEd (see kq_arm). A
+ * previous owner's `node` is not touched (it stays in the heap and ends at
+ * its own deadline -- the one-waiter-per-fd limitation, reactor.h). */
+static uint64_t wmap_upsert_locked(rt_waiter_map_t *m, uint32_t fd,
+                                    uint32_t green_id, uint32_t new_mask,
+                                    rt_timer_node_t *node,
+                                    uint32_t *out_old_mask) {
     uint64_t seq = ++m->next_seq;
     rt_waiter_t *w = wmap_find_locked(m, fd);
     uint32_t old_mask = 0;
@@ -292,14 +302,23 @@ static uint64_t wmap_upsert(rt_waiter_map_t *m, uint32_t fd, uint32_t green_id,
         w->green_id = green_id;
         w->armed_mask = new_mask;
         w->seq = seq;
+        w->node = node;
     } else {
         wmap_grow_if_needed_locked(m);
-        wmap_insert_locked(m, fd, green_id, new_mask, seq);
+        wmap_insert_locked(m, fd, green_id, new_mask, seq, node);
         m->used++;
         m->live++;
     }
-    pthread_mutex_unlock(&m->lock);
     *out_old_mask = old_mask;
+    return seq;
+}
+
+static uint64_t wmap_upsert(rt_waiter_map_t *m, uint32_t fd, uint32_t green_id,
+                             uint32_t new_mask, uint32_t *out_old_mask) {
+    pthread_mutex_lock(&m->lock);
+    uint64_t seq = wmap_upsert_locked(m, fd, green_id, new_mask, NULL,
+                                      out_old_mask);
+    pthread_mutex_unlock(&m->lock);
     return seq;
 }
 
@@ -313,7 +332,8 @@ static uint64_t wmap_upsert(rt_waiter_map_t *m, uint32_t fd, uint32_t green_id,
  * "simultaneously" -- finds nothing and also no-ops) and hands back the
  * green_id to unpark and whichever OTHER filter bit(s), if any, were armed
  * alongside this one and have not fired yet. */
-static bool wmap_consume(rt_waiter_map_t *m, uint32_t fd, uint64_t seq,
+static bool wmap_consume(rt_waiter_map_t *m, rt_timer_heap_t *timers,
+                          uint32_t fd, uint64_t seq,
                           uint32_t filter_bit, uint32_t *out_green_id,
                           uint32_t *out_remaining) {
     pthread_mutex_lock(&m->lock);
@@ -322,6 +342,14 @@ static bool wmap_consume(rt_waiter_map_t *m, uint32_t fd, uint64_t seq,
     if (matched) {
         *out_green_id = w->green_id;
         *out_remaining = w->armed_mask & ~filter_bit;
+        if (w->node != NULL) {
+            /* A bounded wait: readiness claims it, so its deadline leaves
+             * the heap and the deadline pass cannot also fire for it. */
+            rt_timer_node_t *node = w->node;
+            w->node = NULL;
+            rt_timer_heap_remove(timers, node);
+            node->outcome = RT_TIMER_READY; /* last: `node` may be freed once unlocked */
+        }
         w->fd = RT_WAITER_TOMB;
         m->live--;
     }
@@ -338,30 +366,96 @@ static bool wmap_consume(rt_waiter_map_t *m, uint32_t fd, uint64_t seq,
  * this can never collide with a real fd=1 registered under
  * EVFILT_READ/EVFILT_WRITE. The exact value is arbitrary. */
 #define RT_REACTOR_SHUTDOWN_IDENT ((uintptr_t)1)
+/* A second EVFILT_USER knote, the epoll backend's wake_fd: fired when a new
+ * earliest deadline needs the sleeping reactor thread to re-aim its kevent
+ * timeout. A different ident, so reactor_loop tells it from shutdown. */
+#define RT_REACTOR_WAKE_IDENT ((uintptr_t)2)
 
 struct rt_reactor {
     rt_scheduler_t *sched;
     int             kq;
     pthread_t       thread;
     rt_waiter_map_t waiters;
+    /* Deadlines of the bounded waits, guarded by waiters.lock -- the same
+     * lock that guards the map, so that "claim this wait" is one critical
+     * section whichever of readiness and the deadline gets there. */
+    rt_timer_heap_t timers;
 };
+
+/* Claims up to `max` bounded waits whose deadline has passed, and returns the
+ * green ids to unpark (the caller does that AFTER this returns, lock
+ * released: rt_sched_unpark can block on a full shared queue, and a carrier
+ * may be waiting for this lock in rt_reactor_wait_timeout). Each claimed
+ * wait's registration is erased, so a knote that fires later finds no entry
+ * with its seq and is a no-op -- the same property that makes the sibling
+ * knote cleanup in reactor_loop best-effort. */
+static size_t expire_timers(rt_reactor_t *r, uint32_t *gids, size_t max) {
+    size_t k = 0;
+    pthread_mutex_lock(&r->waiters.lock);
+    uint64_t now = rt_timer_now_ns();
+    rt_timer_node_t *n;
+    while (k < max && (n = rt_timer_heap_pop_expired(&r->timers, now)) != NULL) {
+        int fd = n->fd;
+        gids[k++] = n->green_id;
+        if (fd >= 0) {
+            rt_waiter_t *w = wmap_find_locked(&r->waiters, (uint32_t)fd);
+            /* Only if the registration is still THIS wait's: a later wait
+             * on the same fd took it over otherwise, and is not ours. */
+            if (w != NULL && w->node == n) {
+                struct kevent del[2];
+                int nd = 0;
+                if (w->armed_mask & RT_REACTOR_READ) {
+                    EV_SET(&del[nd++], fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+                }
+                if (w->armed_mask & RT_REACTOR_WRITE) {
+                    EV_SET(&del[nd++], fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+                }
+                /* Best effort, its own call -- see this file's top comment. */
+                if (nd > 0) (void)kevent(r->kq, del, nd, NULL, 0, NULL);
+                w->fd = RT_WAITER_TOMB;
+                r->waiters.live--;
+            }
+        }
+        n->outcome = RT_TIMER_EXPIRED; /* last: `n` may be freed once we unlock */
+    }
+    pthread_mutex_unlock(&r->waiters.lock);
+    return k;
+}
 
 static void *reactor_loop(void *argp) {
     rt_reactor_t *r = (rt_reactor_t *)argp;
     struct kevent evs[64];
 
     for (;;) {
-        int n = kevent(r->kq, NULL, 0, evs, 64, NULL);
+        /* Sleep until an event, or until the nearest deadline. A deadline
+         * that appears while this is already asleep wakes it through the
+         * EVFILT_USER wake knote. */
+        pthread_mutex_lock(&r->waiters.lock);
+        int wait_ms = rt_timer_heap_wait_ms(&r->timers, rt_timer_now_ns());
+        pthread_mutex_unlock(&r->waiters.lock);
+        struct timespec ts;
+        struct timespec *tsp = NULL;
+        if (wait_ms >= 0) {
+            ts.tv_sec = wait_ms / 1000;
+            ts.tv_nsec = (long)(wait_ms % 1000) * 1000000L;
+            tsp = &ts;
+        }
+
+        int n = kevent(r->kq, NULL, 0, evs, 64, tsp);
         if (n < 0) {
             if (errno == EINTR) continue;
             rt_trap("rt_reactor: kevent wait failed");
         }
         for (int i = 0; i < n; i++) {
             if (evs[i].filter == EVFILT_USER) {
-                /* The shutdown signal (rt_reactor_destroy). Told apart from
-                 * a real fd event by FILTER, not by comparing fd numbers --
-                 * see RT_REACTOR_SHUTDOWN_IDENT's own comment. */
-                return NULL;
+                /* Told apart from a real fd event by FILTER, not by
+                 * comparing fd numbers -- see RT_REACTOR_SHUTDOWN_IDENT's
+                 * own comment. The shutdown signal (rt_reactor_destroy)
+                 * ends the loop; the wake knote (EV_CLEAR, so it re-arms by
+                 * itself) only means "recompute the timeout", which the top
+                 * of the next pass does. */
+                if (evs[i].ident == RT_REACTOR_SHUTDOWN_IDENT) return NULL;
+                continue;
             }
 
             uint32_t fd  = (uint32_t)evs[i].ident;
@@ -370,8 +464,8 @@ static void *reactor_loop(void *argp) {
                                        ? RT_REACTOR_WRITE : RT_REACTOR_READ;
 
             uint32_t green_id, remaining;
-            if (wmap_consume(&r->waiters, fd, seq, filter_bit, &green_id,
-                              &remaining)) {
+            if (wmap_consume(&r->waiters, &r->timers, fd, seq, filter_bit,
+                              &green_id, &remaining)) {
                 if (remaining != 0) {
                     /* The sibling direction (this fd was armed for both
                      * read and write, and only one fired) is still a live,
@@ -395,6 +489,15 @@ static void *reactor_loop(void *argp) {
              * or nobody is waiting any more -- exactly the epoll backend's
              * own "nothing to do" case. */
         }
+        /* Every pass, whether it woke for events, for a deadline, or both:
+         * a busy fd cannot starve a deadline, and a deadline pass costs one
+         * clock read when nothing has expired. */
+        uint32_t due[64];
+        size_t k;
+        do {
+            k = expire_timers(r, due, 64);
+            for (size_t j = 0; j < k; j++) rt_sched_unpark(r->sched, due[j]);
+        } while (k == 64);
     }
 }
 
@@ -414,6 +517,13 @@ rt_reactor_t *rt_reactor_create(rt_scheduler_t *sched) {
                 "shutdown event");
     }
 
+    EV_SET(&ev, RT_REACTOR_WAKE_IDENT, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0,
+           NULL);
+    if (kevent(r->kq, &ev, 1, NULL, 0, NULL) != 0) {
+        rt_trap("rt_reactor_create: could not register the EVFILT_USER "
+                "wake event");
+    }
+
     wmap_init(&r->waiters, 64);
 
     if (pthread_create(&r->thread, NULL, reactor_loop, r) != 0) {
@@ -422,16 +532,12 @@ rt_reactor_t *rt_reactor_create(rt_scheduler_t *sched) {
     return r;
 }
 
-void rt_reactor_wait(rt_reactor_t *r, int fd, uint32_t events) {
-    /* Traps if not called from inside a running green thread -- the same
-     * contract rt_sched_park (called below) already enforces; asking here
-     * too gives a clearer message naming THIS function if it is misused. */
-    uint32_t green_id = rt_sched_current_green_id();
-
-    uint32_t old_mask;
-    uint64_t seq = wmap_upsert(&r->waiters, (uint32_t)fd, green_id, events,
-                                &old_mask);
-
+/* Arm `fd` for `events` as EV_ONESHOT knotes stamped with `seq`, first
+ * best-effort deleting any filter a PREVIOUS wait on this fd armed that this
+ * one does not want (`old_mask`). Returns 0 or the errno. No lock needed:
+ * kevent registration is safe against the reactor thread's kevent wait. */
+static int kq_arm(rt_reactor_t *r, int fd, uint32_t events, uint64_t seq,
+                  uint32_t old_mask) {
     /* A filter armed by a PREVIOUS rt_reactor_wait call on this fd that
      * this call does not want any more. Unlike epoll's single combined
      * registration (one EPOLL_CTL_MOD atomically replaces the whole
@@ -466,7 +572,21 @@ void rt_reactor_wait(rt_reactor_t *r, int fd, uint32_t events) {
     if (events & RT_REACTOR_WRITE) {
         EV_SET(&add[na++], fd, EVFILT_WRITE, EV_ADD | EV_ONESHOT, 0, 0, udata);
     }
-    if (na > 0 && kevent(r->kq, add, na, NULL, 0, NULL) != 0) {
+    if (na > 0 && kevent(r->kq, add, na, NULL, 0, NULL) != 0) return errno;
+    return 0;
+}
+
+void rt_reactor_wait(rt_reactor_t *r, int fd, uint32_t events) {
+    /* Traps if not called from inside a running green thread -- the same
+     * contract rt_sched_park (called below) already enforces; asking here
+     * too gives a clearer message naming THIS function if it is misused. */
+    uint32_t green_id = rt_sched_current_green_id();
+
+    uint32_t old_mask;
+    uint64_t seq = wmap_upsert(&r->waiters, (uint32_t)fd, green_id, events,
+                                &old_mask);
+
+    if (kq_arm(r, fd, events, seq, old_mask) != 0) {
         /* No ADD-vs-MOD branch exists here to have gotten wrong (see this
          * file's top comment on EV_ADD's upsert semantics) -- any failure
          * here is a genuine caller bug (e.g. a closed or invalid fd), the
@@ -486,6 +606,94 @@ void rt_reactor_wait(rt_reactor_t *r, int fd, uint32_t events) {
     rt_sched_park(RT_GT_PARKED_IO);
 }
 
+int rt_reactor_wait_timeout(rt_reactor_t *r, int fd, uint32_t events,
+                            int64_t timeout_ms) {
+    bool sleep_only = (fd < 0 || events == 0);
+    if (timeout_ms < 0) {
+        if (sleep_only) return -EINVAL;
+        rt_reactor_wait(r, fd, events);
+        return RT_REACTOR_WAIT_READY;
+    }
+    if (timeout_ms == 0) {
+        /* An immediate poll: nothing to park, nothing to register. */
+        if (sleep_only) return RT_REACTOR_WAIT_TIMEOUT;
+        struct pollfd p;
+        p.fd = fd;
+        p.events = (short)(((events & RT_REACTOR_READ) ? POLLIN : 0) |
+                           ((events & RT_REACTOR_WRITE) ? POLLOUT : 0));
+        p.revents = 0;
+        int rc;
+        do {
+            rc = poll(&p, 1, 0);
+        } while (rc < 0 && errno == EINTR);
+        if (rc < 0) return -errno;
+        if (rc > 0 && (p.revents & POLLNVAL)) return -EBADF;
+        return rc > 0 ? RT_REACTOR_WAIT_READY : RT_REACTOR_WAIT_TIMEOUT;
+    }
+
+    rt_timer_node_t node;
+    node.deadline_ns = rt_timer_deadline_ns(timeout_ms);
+    node.green_id = rt_sched_current_green_id();
+    node.fd = sleep_only ? -1 : fd;
+    node.heap_idx = 0;
+    node.outcome = RT_TIMER_PENDING;
+
+    /* Registration and deadline go in under ONE hold of the lock, for the
+     * reason given in reactor_epoll.c: the reactor thread can claim neither
+     * until it is released, so there is no window in which one exists
+     * without the other. */
+    pthread_mutex_lock(&r->waiters.lock);
+    if (!sleep_only) {
+        uint32_t old_mask;
+        uint64_t seq = wmap_upsert_locked(&r->waiters, (uint32_t)fd,
+                                          node.green_id, events, &node,
+                                          &old_mask);
+        int e = kq_arm(r, fd, events, seq, old_mask);
+        if (e != 0) {
+            rt_waiter_t *w = wmap_find_locked(&r->waiters, (uint32_t)fd);
+            if (w != NULL && w->seq == seq) {
+                w->fd = RT_WAITER_TOMB;
+                r->waiters.live--;
+            }
+            pthread_mutex_unlock(&r->waiters.lock);
+            return -e;
+        }
+    }
+    bool earliest = rt_timer_heap_push(&r->timers, &node);
+    pthread_mutex_unlock(&r->waiters.lock);
+
+    if (earliest) {
+        /* The reactor thread may be asleep until some later deadline (or
+         * for ever): fire the wake knote. EV_CLEAR resets it once seen, and
+         * a trigger that lands while the thread is between kevent calls is
+         * still delivered to the next one. */
+        struct kevent wake;
+        EV_SET(&wake, RT_REACTOR_WAKE_IDENT, EVFILT_USER, 0, NOTE_TRIGGER, 0,
+               NULL);
+        (void)kevent(r->kq, &wake, 1, NULL, 0, NULL);
+    }
+
+    /* Park until the wait is CLAIMED; see reactor_epoll.c for why a park
+     * that returns early is absorbed here. */
+    for (;;) {
+        rt_sched_park(sleep_only ? RT_GT_PARKED_TIMER : RT_GT_PARKED_IO);
+        pthread_mutex_lock(&r->waiters.lock);
+        int oc = node.outcome;
+        pthread_mutex_unlock(&r->waiters.lock);
+        if (oc != RT_TIMER_PENDING) {
+            return oc == RT_TIMER_READY ? RT_REACTOR_WAIT_READY
+                                        : RT_REACTOR_WAIT_TIMEOUT;
+        }
+    }
+}
+
+size_t rt_reactor_timers_pending(rt_reactor_t *r) {
+    pthread_mutex_lock(&r->waiters.lock);
+    size_t n = r->timers.len;
+    pthread_mutex_unlock(&r->waiters.lock);
+    return n;
+}
+
 void rt_reactor_destroy(rt_reactor_t *r) {
     struct kevent ev;
     EV_SET(&ev, RT_REACTOR_SHUTDOWN_IDENT, EVFILT_USER, 0, NOTE_TRIGGER, 0,
@@ -496,6 +704,7 @@ void rt_reactor_destroy(rt_reactor_t *r) {
     }
     pthread_join(r->thread, NULL);
     close(r->kq);
+    free(r->timers.a);
     wmap_destroy(&r->waiters);
     free(r);
 }

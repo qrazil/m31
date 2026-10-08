@@ -1,0 +1,84 @@
+import timer;
+import date;
+
+// **`timer.sleep_ms` waits without holding an OS thread.**
+//
+// Every line is a fact and not a measurement: a time is only ever compared
+// with a bound far looser than it needs, so the output does not depend on how
+// busy the machine is. runtime/parked_waits_carriers_test.sh runs this very
+// program on one carrier and on two, where a sleep that held its carrier
+// would take a thousand times as long and fail the last check.
+//
+//   - a sleep lasts at least as long as it was asked to;
+//   - a sleep of 0 returns at once;
+//   - sleepers do not queue behind each other: 1000 of them, each asleep
+//     for 300 ms, are all awake after a little over one interval, not after
+//     the several seconds even a dozen carriers would need if each held one;
+//   - a sleeper does not stop other threads running: a thread that does a
+//     lot of work while others sleep still gets every turn it needs.
+
+const int SLEEPERS = 1000;
+const int INTERVAL_MS = 300;
+
+void sleeper(int ms, Chan<int> done) {
+    int t0 = date.now_ns();
+    timer.sleep_ms(ms);
+    send(done, date.now_ns() - t0);
+}
+
+int busy(int n) {
+    int sum = 0;
+    int i = 0;
+    while (i < n) {
+        sum = sum + i;
+        i = i + 1;
+    }
+    return sum;
+}
+
+void worker(Chan<int> out) {
+    int total = 0;
+    int round = 0;
+    while (round < 50) {
+        total = total + busy(10000);
+        round = round + 1;
+    }
+    send(out, total);
+}
+
+int t0 = date.now_ns();
+timer.sleep_ms(50);
+int took = date.now_ns() - t0;
+print("sleep_ms(50) lasted at least 50 ms: " + (took >= 50 * 1000000).to_str());
+print("sleep_ms(50) lasted under 1000 ms: " + (took < 1000 * 1000000).to_str());
+int t1 = date.now_ns();
+timer.sleep_ms(0);
+print("sleep_ms(0) returned at once: " + ((date.now_ns() - t1) < 100 * 1000000).to_str());
+Chan<int> done = Chan<int>(SLEEPERS);
+int t2 = date.now_ns();
+int i = 0;
+while (i < SLEEPERS) {
+    spawn sleeper(INTERVAL_MS + i % 10, done);
+    i = i + 1;
+}
+Chan<int> out = Chan<int>(1);
+spawn worker(out);
+int expected = 0;
+int r = 0;
+while (r < 50) {
+    expected = expected + busy(10000);
+    r = r + 1;
+}
+print("a thread working beside the sleepers got every turn: " + (recv(out) == expected).to_str());
+int early = 0;
+i = 0;
+while (i < SLEEPERS) {
+    int slept = recv(done);
+    if (slept < INTERVAL_MS * 1000000) {
+        early = early + 1;
+    }
+    i = i + 1;
+}
+int all = date.now_ns() - t2;
+print(SLEEPERS.to_str() + " sleepers woke; any early: " + early.to_str());
+print("all of them awake in under 4 intervals: " + (all < 4 * INTERVAL_MS * 1000000).to_str());

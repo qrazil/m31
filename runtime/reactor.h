@@ -67,6 +67,7 @@
 #ifndef RT_REACTOR_H
 #define RT_REACTOR_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "scheduler.h"
@@ -100,6 +101,50 @@ rt_reactor_t *rt_reactor_create(rt_scheduler_t *sched);
  * each backend already handles (e.g. a closed or otherwise invalid fd is a
  * condition this function can usefully recover from). */
 void rt_reactor_wait(rt_reactor_t *r, int fd, uint32_t events);
+
+/* Results of rt_reactor_wait_timeout. A negative result is -errno from the
+ * OS registration call (the host's errno numbers; rt.c translates). */
+#define RT_REACTOR_WAIT_READY   0
+#define RT_REACTOR_WAIT_TIMEOUT 1
+
+/* rt_reactor_wait with a deadline: parks only the calling GREEN THREAD (the
+ * carrier keeps dispatching others) until `fd` is ready for `events` or
+ * `timeout_ms` has passed, whichever is first, and says which.
+ *
+ *   timeout_ms < 0   no deadline: exactly rt_reactor_wait; READY.
+ *   timeout_ms == 0  never parks: a poll(2) of `fd` right now; READY if it is
+ *                    ready, TIMEOUT if not.
+ *   timeout_ms > 0   the deadline is kept by the reactor thread (a min-heap
+ *                    of deadlines, runtime/reactor_timers.h), which sleeps
+ *                    only until the nearest one. On expiry it releases the
+ *                    fd's registration, so a readiness that arrives later
+ *                    cannot wake a thread that has moved on.
+ *   fd < 0 or events == 0   waits on nothing: a parking sleep of timeout_ms,
+ *                    TIMEOUT when it ends. (timeout_ms < 0 would park for
+ *                    ever on nothing, and is refused: -EINVAL.)
+ *
+ * Exactly one of readiness and the deadline wins a given wait; it is decided
+ * under the reactor's lock, so the loser is a no-op and nothing is woken
+ * twice. A stale wake-up of the calling thread (rt_sched_park may return
+ * early) is absorbed here, not passed up: this returns only once a result is
+ * decided.
+ *
+ * Unlike rt_reactor_wait, a failing registration (a closed or invalid fd, a
+ * file epoll refuses) is RETURNED as -errno rather than trapped, because a
+ * descriptor closed under a waiter is an ordinary event for a caller with a
+ * timeout. A descriptor closed WHILE parked here generates no event on
+ * either backend; the wait then ends at its deadline (and, with
+ * timeout_ms < 0, never -- the same as rt_reactor_wait).
+ *
+ * One waiter per fd, as for rt_reactor_wait: a second wait on a fd that
+ * already has a parked waiter takes over the registration, and the first
+ * then ends at its own deadline. */
+int rt_reactor_wait_timeout(rt_reactor_t *r, int fd, uint32_t events,
+                            int64_t timeout_ms);
+
+/* How many bounded waits are registered right now. For tests: after every
+ * wait has returned this must be 0 (a non-zero is a leaked timer). */
+size_t rt_reactor_timers_pending(rt_reactor_t *r);
 
 /* Stops the reactor's OS thread and frees everything. The caller must have
  * no green thread currently parked via this reactor (same lifecycle

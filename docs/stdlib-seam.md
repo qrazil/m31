@@ -505,8 +505,13 @@ it parks the calling green thread on the epoll reactor
 (`runtime/reactor.h`) until `fd` is ready, so every socket this module
 makes could be non-blocking without blocking a carrier on the wait. See
 `runtime/rt.c`'s `rt_wait_io` and `lib/net.m31`'s own header comment for
-the full reasoning, including why it is used only for an unbounded wait
-and `__poll` still covers the bounded (timeout-set) case.
+the full reasoning. A bounded wait (a read or write timeout, `wait(ms)`) is
+`__wait_io_timeout(int fd, int events, int timeout_ms)`, also not a sys-layer
+call: the same park with a deadline kept by the reactor, answering 0 (ready),
+1 (timed out) or `-errno`. It used to be `__poll`, a real `ppoll(2)` on the
+carrier, which held an OS thread for the whole timeout
+(docs/net-timeouts-decision.md). With `fd` -1 and no events it is a pure
+sleep, which is all `lib/timer.m31`'s `timer.sleep_ms(ms)` is.
 
 | prim | sys call | answers |
 |---|---|---|
@@ -521,7 +526,8 @@ and `__poll` still covers the bounded (timeout-set) case.
 | `__shutdown(int fd, int how)` | `sys_shutdown` | 0 |
 | `__setsockopt(int fd, int opt, int value)` | `sys_setsockopt` | 0 |
 | `__getsockopt(int fd, int opt)` | `sys_getsockopt` | the value |
-| `__poll(List<int> fds, List<int> events, List<int> revents, int timeout_ms)` | `sys_poll` | how many are ready; clears `revents` and pushes one per descriptor |
+| `__poll(List<int> fds, List<int> events, List<int> revents, int timeout_ms)` | `sys_poll` (no longer declared by `lib/net.m31`; `lib/term.m31` still uses it) | how many are ready; clears `revents` and pushes one per descriptor |
+| `__wait_io_timeout(int fd, int events, int timeout_ms)` | none: `rt_wait_io_timeout`, the reactor | 0 ready, 1 timed out, `-errno` for an fd the OS will not watch; parks only the green thread |
 | `__resolve(str host, int port, int family, List<int> out, bytes addrs)` | `sys_resolve` | how many addresses the name **has**; `-38` on the raw backend, always |
 | `__ignore_sigpipe()` | `sys_ignore_sigpipe` | 0 |
 

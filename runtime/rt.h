@@ -339,6 +339,9 @@ int64_t rt_ignore_sigpipe(void);  /* so a write to a dead peer is EPIPE, not dea
  * (runtime/reactor.h's RT_REACTOR_READ/WRITE), instead of blocking the
  * carrier on the syscall itself -- see rt.c's own comment on this function. */
 int64_t rt_wait_io(int64_t fd, int64_t events);
+/* The same with a deadline: 0 ready, 1 timed out after `timeout_ms`
+ * (< 0: no deadline; 0: poll once), or -errno. Parks only the green thread. */
+int64_t rt_wait_io_timeout(int64_t fd, int64_t events, int64_t timeout_ms);
 /* ---- end net primitives ------------------------------------------------ */
 
 /* ---- terminal primitives: lib/term.m31 --------------------------------- */

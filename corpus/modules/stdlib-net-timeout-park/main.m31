@@ -1,0 +1,355 @@
+import net;
+import io;
+import date;
+
+// **A timeout parks the green thread, not the carrier.**
+//
+// `stdlib-net-timeout` pins down what a timed-out read leaves behind. This
+// is about the wait itself (docs/net-timeouts-decision.md): the deadline is
+// kept by the reactor, so a connection that says nothing for its whole
+// timeout holds no OS thread while it waits.
+//
+// Every line printed is a fact and not a measurement. A time is only ever
+// compared with a bound a hundred times looser than it needs, and the
+// output is printed from the main thread alone.
+//
+//   A. 150 connections say nothing, each with a one second read timeout --
+//      far more than there are carriers. A live connection beside them does
+//      20 round trips and is done long before any of the silent ones gives
+//      up, and then every one of them does give up, none early.
+//   B. A read whose data arrives before the deadline returns the data, and
+//      returns at once and not at the deadline; a read with no data times
+//      out at the deadline, and the connection is still good afterwards.
+//   C. `wait`: 0 only looks, a positive time bounds the wait, a negative
+//      one waits for ever -- on a connection and on a listener.
+
+const int SILENT = 150;
+const int SILENT_MS = 1000;
+const int ROUNDS = 20;
+
+bytes nl() {
+    bytes b = [10];
+    return b;
+}
+
+str show(bytes b) {
+    bytes c = clone(b);
+    if (c.size() > 0 && c[c.size() - 1] == 10) {
+        int lf = c.pop();
+    }
+    return c.utf8().or("<not text>");
+}
+
+bool ok_or_die(Result<bool, net.Error> r) {
+    match (r) {
+        case Ok(bool b): {
+            return b;
+        }
+        case Err(net.Error e): {
+            trap("socket: " + e.to_str());
+        }
+    }
+}
+
+void send_line(net.Conn c, str s) {
+    match (c.write((s + "\n").to_bytes())) {
+        case Ok(int n): {
+        }
+        case Err(io.Error e): {
+            trap("write: " + net.error_of(e).to_str());
+        }
+    }
+}
+
+// ---- A ---------------------------------------------------------------------
+
+void silent_client(int port, Chan<int> release) {
+    match (net.connect("127.0.0.1", port)) {
+        case Ok(net.Conn c): {
+            int ignored = recv(release);
+            Result<bool, io.Error> closed = c.close();
+        }
+        case Err(net.Error e): {
+            trap("silent connect: " + e.to_str());
+        }
+    }
+}
+
+// Reports how long its read took, in nanoseconds, or -1 if it did not time out.
+void silent_handler(net.Conn c, Chan<int> report) {
+    bool t = ok_or_die(c.set_read_timeout(SILENT_MS));
+    int t0 = date.now_ns();
+    int took = -1;
+    match (c.read_until(nl(), 100)) {
+        case Ok(bytes b): {
+        }
+        case Err(io.Error e): {
+            if (net.error_of(e).to_str() == "timed out") {
+                took = date.now_ns() - t0;
+            }
+        }
+    }
+    send(report, took);
+    Result<bool, io.Error> closed = c.close();
+}
+
+void acceptor(net.Listener ln, Chan<int> report) {
+    int i = 0;
+    while (i < SILENT) {
+        match (ln.accept()) {
+            case Ok(net.Conn c): {
+                spawn silent_handler(c, report);
+            }
+            case Err(net.Error e): {
+                trap("accept: " + e.to_str());
+            }
+        }
+        i = i + 1;
+    }
+    Result<bool, net.Error> closed = ln.close();
+}
+
+void echo_client(int port) {
+    match (net.connect("127.0.0.1", port)) {
+        case Ok(net.Conn c): {
+            int i = 0;
+            while (i < ROUNDS) {
+                send_line(c, "round " + i.to_str());
+                match (c.read_until(nl(), 100)) {
+                    case Ok(bytes b): {
+                        if (show(b) != "round " + i.to_str()) {
+                            trap("echo mismatch: " + show(b));
+                        }
+                    }
+                    case Err(io.Error e): {
+                        trap("echo read: " + net.error_of(e).to_str());
+                    }
+                }
+                i = i + 1;
+            }
+            Result<bool, io.Error> closed = c.close();
+        }
+        case Err(net.Error e): {
+            trap("echo connect: " + e.to_str());
+        }
+    }
+}
+
+void echo_server(net.Conn c) {
+    bool t = ok_or_die(c.set_read_timeout(SILENT_MS));
+    int i = 0;
+    while (i < ROUNDS) {
+        match (c.read_until(nl(), 100)) {
+            case Ok(bytes b): {
+                match (c.write(b)) {
+                    case Ok(int n): {
+                    }
+                    case Err(io.Error e): {
+                        trap("echo write: " + net.error_of(e).to_str());
+                    }
+                }
+            }
+            case Err(io.Error e): {
+                trap("echo server read: " + net.error_of(e).to_str());
+            }
+        }
+        i = i + 1;
+    }
+    Result<bool, io.Error> closed = c.close();
+}
+
+void part_a(net.Listener idle) {
+    int t0 = date.now_ns();
+    Chan<int> report = Chan<int>(SILENT);
+    Chan<int> release = Chan<int>(SILENT);
+    match (net.listen("127.0.0.1", 0)) {
+        case Ok(net.Listener silent_ln): {
+            int silent_port = silent_ln.local().port();
+            spawn acceptor(silent_ln, report);
+            int i = 0;
+            while (i < SILENT) {
+                spawn silent_client(silent_port, release);
+                i = i + 1;
+            }
+        }
+        case Err(net.Error e): {
+            trap("listen: " + e.to_str());
+        }
+    }
+    // Let the silent handlers get into their reads.
+    bool settled = ok_or_die(idle.wait(150));
+    match (net.listen("127.0.0.1", 0)) {
+        case Ok(net.Listener live_ln): {
+            spawn echo_client(live_ln.local().port());
+            match (live_ln.accept()) {
+                case Ok(net.Conn c): {
+                    echo_server(c);
+                }
+                case Err(net.Error e): {
+                    trap("accept: " + e.to_str());
+                }
+            }
+            Result<bool, net.Error> closed = live_ln.close();
+        }
+        case Err(net.Error e): {
+            trap("listen: " + e.to_str());
+        }
+    }
+    int t_live = date.now_ns();
+    print("live connection: " + ROUNDS.to_str() + " round trips");
+    print("live connection done before any silent one gave up: " + ((t_live - t0) < SILENT_MS * 1000000).to_str());
+    int timed_out = 0;
+    int early = 0;
+    int i = 0;
+    while (i < SILENT) {
+        int took = recv(report);
+        if (took >= 0) {
+            timed_out = timed_out + 1;
+            if (took < (SILENT_MS - 20) * 1000000) {
+                early = early + 1;
+            }
+        }
+        i = i + 1;
+    }
+    print("silent connections that timed out: " + timed_out.to_str() + " of " + SILENT.to_str());
+    print("silent connections that timed out early: " + early.to_str());
+    i = 0;
+    while (i < SILENT) {
+        send(release, 1);
+        i = i + 1;
+    }
+}
+
+// ---- B and C ---------------------------------------------------------------
+
+void peer(int port, Chan<int> go) {
+    match (net.connect("127.0.0.1", port)) {
+        case Ok(net.Conn c): {
+            // B1: data while the server is already waiting.
+            recv(go);
+            send_line(c, "ping");
+            // B2: nothing for a while, then data on the same connection.
+            recv(go);
+            send_line(c, "late");
+            // C: the connection is quiet until told otherwise.
+            recv(go);
+            send_line(c, "wake");
+            recv(go);
+            Result<bool, io.Error> closed = c.close();
+        }
+        case Err(net.Error e): {
+            trap("peer connect: " + e.to_str());
+        }
+    }
+}
+
+void late_peer(int port) {
+    match (net.connect("127.0.0.1", port)) {
+        case Ok(net.Conn c): {
+            Result<bool, io.Error> closed = c.close();
+        }
+        case Err(net.Error e): {
+            trap("late connect: " + e.to_str());
+        }
+    }
+}
+
+void read_one(net.Conn s, str label, int ms) {
+    int t0 = date.now_ns();
+    match (s.read_until(nl(), 100)) {
+        case Ok(bytes b): {
+            print(label + ": [" + show(b) + "]");
+        }
+        case Err(io.Error e): {
+            print(label + ": " + net.error_of(e).to_str());
+        }
+    }
+    print(label + " took under " + ms.to_str() + " ms: " + ((date.now_ns() - t0) < ms * 1000000).to_str());
+}
+
+void part_b(net.Listener ln, Chan<int> go) {
+    match (ln.accept()) {
+        case Ok(net.Conn s): {
+            // B1. A five second deadline, and the data arrives at once.
+            bool t = ok_or_die(s.set_read_timeout(5000));
+            send(go, 1);
+            read_one(s, "data before the deadline", 2500);
+            // B2. Nothing comes for 150 ms: a timeout, at about 150 ms.
+            bool t2 = ok_or_die(s.set_read_timeout(150));
+            int t0 = date.now_ns();
+            match (s.read_until(nl(), 100)) {
+                case Ok(bytes b): {
+                    print("BUG: read returned [" + show(b) + "]");
+                }
+                case Err(io.Error e): {
+                    print("no data: " + net.error_of(e).to_str());
+                }
+            }
+            int took = date.now_ns() - t0;
+            print("no data: waited at least the deadline: " + (took >= 140 * 1000000).to_str());
+            print("no data: and not a great deal more: " + (took < 1500 * 1000000).to_str());
+            // ... and the connection is as good as it was.
+            send(go, 2);
+            read_one(s, "same connection afterwards", 2500);
+            // C. wait.
+            print("wait(0), nothing there: " + ok_or_die(s.wait(0)).to_str());
+            int t1 = date.now_ns();
+            print("wait(60), nothing there: " + ok_or_die(s.wait(60)).to_str());
+            print("wait(60) waited at least 55 ms: " + ((date.now_ns() - t1) >= 55 * 1000000).to_str());
+            send(go, 3);
+            print("wait(-1), data on the way: " + ok_or_die(s.wait(-1)).to_str());
+            print("wait(0), data there: " + ok_or_die(s.wait(0)).to_str());
+            read_one(s, "the data", 2500);
+            send(go, 4);
+        }
+        case Err(net.Error e): {
+            trap("accept: " + e.to_str());
+        }
+    }
+}
+
+void part_c_listener() {
+    match (net.listen("127.0.0.1", 0)) {
+        case Ok(net.Listener ln): {
+            print("listener wait(0), nobody connecting: " + ok_or_die(ln.wait(0)).to_str());
+            print("listener wait(60), nobody connecting: " + ok_or_die(ln.wait(60)).to_str());
+            spawn late_peer(ln.local().port());
+            print("listener wait(5000), a connection coming: " + ok_or_die(ln.wait(5000)).to_str());
+            match (ln.accept()) {
+                case Ok(net.Conn c): {
+                    Result<bool, io.Error> closed = c.close();
+                    print("accepted it");
+                }
+                case Err(net.Error e): {
+                    trap("accept: " + e.to_str());
+                }
+            }
+            Result<bool, net.Error> closed = ln.close();
+        }
+        case Err(net.Error e): {
+            trap("listen: " + e.to_str());
+        }
+    }
+}
+
+match (net.listen("127.0.0.1", 0)) {
+    case Ok(net.Listener idle): {
+        part_a(idle);
+        Result<bool, net.Error> closed = idle.close();
+    }
+    case Err(net.Error e): {
+        trap("listen: " + e.to_str());
+    }
+}
+match (net.listen("127.0.0.1", 0)) {
+    case Ok(net.Listener ln): {
+        Chan<int> go = Chan<int>(1);
+        spawn peer(ln.local().port(), go);
+        part_b(ln, go);
+        Result<bool, net.Error> closed = ln.close();
+    }
+    case Err(net.Error e): {
+        trap("listen: " + e.to_str());
+    }
+}
+part_c_listener();

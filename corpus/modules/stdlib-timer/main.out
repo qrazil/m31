@@ -1,0 +1,6 @@
+sleep_ms(50) lasted at least 50 ms: true
+sleep_ms(50) lasted under 1000 ms: true
+sleep_ms(0) returned at once: true
+a thread working beside the sleepers got every turn: true
+1000 sleepers woke; any early: 0
+all of them awake in under 4 intervals: true

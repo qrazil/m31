@@ -196,10 +196,7 @@
 import io;
 import json;
 import net;
-
-// `poll(2)` with an empty table: the one way this language has to wait a
-// fixed time. `back_off` is its only user.
-prim int __poll(List<int> fds, List<int> events, List<int> revents, int timeout_ms);
+import timer;
 
 // --- limits ----------------------------------------------------------------
 /// The whole header block -- request or status line, every field, and the
@@ -2418,15 +2415,11 @@ pub Result<int, Error> serve(net.Listener ln, Handler h, int connections = -1, i
     return Result<int, Error>.Ok(done);
 }
 
-// Wait `milliseconds` without a descriptor to wait on: `poll` with an
-// empty table is a sleep. It holds the carrier for the duration, which is why
-// the pause is short and only taken on the failure path. There is no timer a
-// green thread could park on (docs/net-timeouts-decision.md).
+// Wait `milliseconds` before asking `accept` again. It parks this green
+// thread only (`timer.sleep_ms`), so the carrier runs other connections
+// meanwhile.
 void back_off(int milliseconds) {
-    List<int> none = [];
-    List<int> wanted = [];
-    List<int> got = [];
-    int ignored = __poll(none, wanted, got, milliseconds);
+    timer.sleep_ms(milliseconds);
 }
 
 // One accepted connection, to its end, with whatever went wrong on it kept

@@ -1,0 +1,22 @@
+live connection: 20 round trips
+live connection done before any silent one gave up: true
+silent connections that timed out: 150 of 150
+silent connections that timed out early: 0
+data before the deadline: [ping]
+data before the deadline took under 2500 ms: true
+no data: timed out
+no data: waited at least the deadline: true
+no data: and not a great deal more: true
+same connection afterwards: [late]
+same connection afterwards took under 2500 ms: true
+wait(0), nothing there: false
+wait(60), nothing there: false
+wait(60) waited at least 55 ms: true
+wait(-1), data on the way: true
+wait(0), data there: true
+the data: [wake]
+the data took under 2500 ms: true
+listener wait(0), nobody connecting: false
+listener wait(60), nobody connecting: false
+listener wait(5000), a connection coming: true
+accepted it

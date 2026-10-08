@@ -1,0 +1,47 @@
+// Waiting for a time to pass, without holding an operating-system thread.
+//
+// API
+// ---
+//   timer.sleep_ms(ms)    -> void, returns once `ms` milliseconds have passed
+//
+// **`sleep_ms` parks the calling green thread and nothing else.** The
+// carrier OS thread it was running on goes on running other green threads for
+// the whole wait, so a thousand sleepers on two carriers finish in about one
+// interval, not five hundred of them. The deadline is kept by the reactor
+// thread, which is also what bounds a socket read
+// (docs/net-timeouts-decision.md); this is the same wait with no descriptor
+// to be woken by.
+//
+// It sleeps for **at least** `ms` milliseconds on the monotonic clock (the
+// reactor rounds its own wake-up up, never down), and for as much longer as it
+// takes the scheduler to give the thread a turn back. `sleep_ms(0)` returns at
+// once without parking, and does not yield.
+//
+// A negative `ms` is a bug in the caller, as it is for `set_read_timeout`,
+// and traps: there is no "for ever" here, because a thread that sleeps for
+// ever on nothing can only be a mistake. Waiting for ever for something is
+// what a channel `recv` is for.
+//
+// What is deliberately not here: a monotonic clock to read (`date.now_ns` is
+// the wall clock, and says so), a cancellable sleep (a thread that has to
+// stop waiting early waits on a channel with a sender instead), and
+// sub-millisecond resolution (a `prim` carries milliseconds, like every other
+// timeout in the standard library).
+
+// Park the green thread for `timeout_ms` with no descriptor to wake it
+// earlier: the same primitive `net` bounds its waits with, called with fd -1
+// and no events. 1 when the time has passed, -errno for a refused argument.
+prim int __wait_io_timeout(int fd, int events, int timeout_ms);
+
+/// Return after `ms` milliseconds, parking only this green thread.
+///
+/// Traps on a negative `ms`.
+pub void sleep_ms(int ms) {
+    if (ms < 0) {
+        trap("timer.sleep_ms(" + ms.to_str() + "): a duration cannot be negative");
+    }
+    int n = __wait_io_timeout(-1, 0, ms);
+    if (n < 0) {
+        trap("timer.sleep_ms(" + ms.to_str() + "): the runtime refused the wait (errno " + (-n).to_str() + ")");
+    }
+}

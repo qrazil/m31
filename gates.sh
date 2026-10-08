@@ -122,6 +122,19 @@ run "scheduler, Phase 2" bash runtime/scheduler_test.sh
 # than for Phase 2's own TSan gate (see that script's own header).
 run "epoll/park-unpark/blocking-FFI, Phase 3" bash runtime/phase3_test.sh
 
+# A socket timeout parks only its green thread (docs/net-timeouts-decision.md).
+# This re-creates the stall measured before that: 2 carriers, a 400 ms read
+# timeout, 2 and then 16 silent clients, and one live connection that must
+# not wait behind them. The reactor's own side of it (the deadline heap, the
+# readiness-versus-deadline race, 1000 timers, leaks) is in the Phase 3 suite
+# above.
+run "socket timeouts do not stall carriers" bash runtime/net_timeout_stall_test.sh
+
+# The same idea for the programs that exercise it from m31: timer.sleep_ms
+# with 1000 sleepers and a socket read timeout beside 150 silent connections,
+# each on ONE and on TWO carriers, against the corpus's own expected output.
+run "parked waits on 1 and 2 carriers" bash runtime/parked_waits_carriers_test.sh
+
 # The formatter must not change what a program means, and must reach a fixed
 # point. Both are checked against every corpus program rather than asserted:
 # a formatter that quietly alters a program is worse than no formatter.

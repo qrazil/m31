@@ -58,10 +58,11 @@
 // connection to accept -- goes through `__wait_io`, which parks the green
 // thread on the epoll reactor instead of blocking the carrier OS thread on
 // the syscall (docs/concurrency-decision.md's whole argument for `spawn`
-// meaning a green thread). The one exception is a bounded wait: a
-// `set_read_timeout`/`set_write_timeout` deadline is honored with `__poll`
-// instead, because `__wait_io` has no way to say "gave up after N ms" --
-// see `Conn.wait_read_timeout`/`wait_write_timeout`.
+// meaning a green thread). A bounded wait -- a `set_read_timeout`/
+// `set_write_timeout` deadline, or `wait(ms)` -- goes through
+// `__wait_io_timeout`, which parks the green thread the same way and adds a
+// deadline kept by the reactor, so a silent peer holds no carrier for its
+// timeout (docs/net-timeouts-decision.md).
 //
 // What is deliberately not here: UDP, Unix sockets, TLS, a connect timeout,
 // and name resolution beyond "the first address the resolver gave". Each is
@@ -95,18 +96,22 @@ prim int __accept(int fd, List<int> out, bytes addr);
 prim int __sockname(int fd, int peer, List<int> out, bytes addr);
 prim int __setsockopt(int fd, int opt, int value);
 prim int __getsockopt(int fd, int opt);
-prim int __poll(List<int> fds, List<int> events, List<int> revents, int timeout_ms);
 prim int __resolve(str host, int port, int family, List<int> out, bytes addrs);
 prim int __ignore_sigpipe();
 // Park the current green thread until `fd` is ready for `events`
 // (IO_READABLE/IO_WRITABLE below), instead of blocking the carrier on the
 // syscall itself -- the epoll reactor's seam (runtime/reactor.h), through
 // the scheduler's park/unpark (docs/concurrency-decision.md, Phase 3).
-// Always succeeds (0) or traps on a genuine caller bug; there is no way for
-// it to report "gave up after N ms", which is exactly why it is used only
-// for an UNBOUNDED wait (no read/write timeout set) -- the bounded case
-// keeps using `__poll` with a timeout, as it already did.
+// Always succeeds (0) or traps on a genuine caller bug; it is the UNBOUNDED
+// wait. The bounded one is `__wait_io_timeout`.
 prim int __wait_io(int fd, int events);
+// `__wait_io` with a deadline, and the same parking: only the green thread
+// waits, the carrier goes on running others. Answers 0 when `fd` became ready
+// for `events` (an error or hang-up counts: a read or write will not block),
+// 1 when `timeout_ms` ran out first, or -errno when the fd cannot be waited
+// on (a closed or invalid one). `timeout_ms` of 0 is a poll that never
+// waits; negative waits without a deadline, like `__wait_io`.
+prim int __wait_io_timeout(int fd, int events, int timeout_ms);
 
 // The sys layer's own constants (runtime/sys.h), written here as numbers for
 // exactly the reason `io` writes the open flags as numbers: they are the
@@ -121,13 +126,10 @@ const int SO_RCVTIMEO = 4;
 const int SO_SNDTIMEO = 5;
 const int TCP_NODELAY = 6;
 const int SO_NONBLOCK = 7;
-const int POLL_IN = 0x001;
-const int POLL_OUT = 0x004;
 const int SHUT_WR = 1;
-// `__wait_io`'s own event bits (runtime/reactor.h's RT_REACTOR_READ/WRITE)
-// -- a different, unrelated encoding from POLL_IN/POLL_OUT above, which are
-// the kernel's poll(2) bits for `__poll`. Named separately so the two are
-// never mixed up at a call site.
+// `__wait_io`'s and `__wait_io_timeout`'s event bits (runtime/reactor.h's
+// RT_REACTOR_READ/WRITE), which are the layer's own and not the kernel's
+// poll(2) bits.
 const int IO_READABLE = 1;
 const int IO_WRITABLE = 2;
 // errno numbers this module checks for by name rather than leaving as a
@@ -298,7 +300,7 @@ pub Error from_errno(int e) {
     }
     // ETIMEDOUT is the kernel giving up on a connection; EAGAIN reaching
     // here at all means `wait_read_timeout`/`wait_write_timeout` bounded the
-    // wait with `__poll` (a timeout was set) and it ran out -- every socket
+    // wait (a timeout was set) and it ran out -- every socket
     // this module hands out is non-blocking, so an EAGAIN this module does
     // not otherwise retry on its own (the unbounded, no-timeout case never
     // surfaces one: it parks until ready instead) means exactly that. They
@@ -760,9 +762,8 @@ pub type Conn {
     // -- a non-blocking read never waits in the kernel for one to expire --
     // and are instead consulted by `fill`/`write`/`write_some` themselves:
     // 0 waits for readiness via `__wait_io` (parks, no carrier blocked,
-    // no bound), and anything else waits via `__poll` for at most that many
-    // milliseconds, which is the bounded wait this module already had a
-    // primitive for.
+    // no bound), and anything else waits via `__wait_io_timeout` for at most
+    // that many milliseconds -- parked the same way, with a deadline.
     int read_timeout_ms = 0;
     int write_timeout_ms = 0;
 }
@@ -1103,21 +1104,19 @@ Result<bool, Error> Conn.set_ms_write(int ms) {
 }
 
 // After an EAGAIN on a read: wait for more to arrive. 0 (the default)
-// parks on the reactor with no bound; otherwise waits at most
-// `read_timeout_ms` via `__poll` and says whether that time ran out.
+// parks on the reactor with no bound; otherwise parks for at most
+// `read_timeout_ms` and says whether that time ran out. Either way only the
+// green thread waits.
 Result<bool, io.Error> Conn.wait_read_timeout() {
     if (read_timeout_ms <= 0) {
         int ignored = __wait_io(fd, IO_READABLE);
         return Result<bool, io.Error>.Ok(false);
     }
-    List<int> fds = [fd];
-    List<int> want = [POLL_IN];
-    List<int> got = [];
-    int n = __poll(fds, want, got, read_timeout_ms);
+    int n = __wait_io_timeout(fd, IO_READABLE, read_timeout_ms);
     if (n < 0) {
         return Result<bool, io.Error>.Err(io.from_errno(-n));
     }
-    return Result<bool, io.Error>.Ok(got[0] == 0);
+    return Result<bool, io.Error>.Ok(n == 1);
 }
 
 // The same, for a write that got EAGAIN because the send buffer is full.
@@ -1126,14 +1125,11 @@ Result<bool, io.Error> Conn.wait_write_timeout() {
         int ignored = __wait_io(fd, IO_WRITABLE);
         return Result<bool, io.Error>.Ok(false);
     }
-    List<int> fds = [fd];
-    List<int> want = [POLL_OUT];
-    List<int> got = [];
-    int n = __poll(fds, want, got, write_timeout_ms);
+    int n = __wait_io_timeout(fd, IO_WRITABLE, write_timeout_ms);
     if (n < 0) {
         return Result<bool, io.Error>.Err(io.from_errno(-n));
     }
-    return Result<bool, io.Error>.Ok(got[0] == 0);
+    return Result<bool, io.Error>.Ok(n == 1);
 }
 
 /// Send a small write at once instead of waiting to fill a packet (turn
@@ -1173,7 +1169,7 @@ pub Result<bool, Error> Conn.wait(int timeout_ms) {
     if (at < end) {
         return Result<bool, Error>.Ok(true);
     }
-    return ready(fd, POLL_IN, timeout_ms);
+    return ready(fd, IO_READABLE, timeout_ms);
 }
 
 // A read on a closed connection is a bug in the program, not a failure of
@@ -1335,7 +1331,7 @@ pub Result<bool, Error> Listener.wait(int timeout_ms) {
     if (!live) {
         trap("wait on a closed listener");
     }
-    return ready(fd, POLL_IN, timeout_ms);
+    return ready(fd, IO_READABLE, timeout_ms);
 }
 
 /// Stop listening and release the port. Closing twice is not an error.
@@ -1516,19 +1512,17 @@ int finish(int fd) {
     return -e;
 }
 
-// Whether `fd` is ready for `events` within `timeout_ms`. POLL_ERR, HUP and
-// NVAL come back whether or not they were asked for, and every one of them
-// means a read or a write will return at once rather than wait -- which is
-// what this answers -- so any non-zero mask is `true`.
+// Whether `fd` is ready for `events` (IO_READABLE/IO_WRITABLE) within
+// `timeout_ms`; a negative timeout waits forever and 0 only looks. Only the
+// green thread waits. An error or hang-up on the descriptor is reported as
+// readiness whether or not it was asked for, because it means a read or a
+// write will return at once rather than wait -- which is what this answers.
 Result<bool, Error> ready(int fd, int events, int timeout_ms) {
-    List<int> fds = [fd];
-    List<int> want = [events];
-    List<int> got = [];
-    int n = __poll(fds, want, got, timeout_ms);
+    int n = __wait_io_timeout(fd, events, timeout_ms);
     if (n < 0) {
         return Result<bool, Error>.Err(from_errno(-n));
     }
-    return Result<bool, Error>.Ok(got[0] != 0);
+    return Result<bool, Error>.Ok(n == 0);
 }
 
 // A socket of the right family, with SIGPIPE already ignored.
@@ -1553,7 +1547,7 @@ Result<int, Error> socket_for(Ip a) {
     // the listening socket this builds: every wait this module does on a
     // socket -- a connect finishing, a read or write that would otherwise
     // wait on the kernel, a listener with nothing pending -- goes through
-    // `__wait_io`/`__poll` instead of the syscall itself blocking the
+    // `__wait_io`/`__wait_io_timeout` instead of the syscall itself blocking the
     // carrier (docs/concurrency-decision.md). An ACCEPTED connection is a
     // separate fd the kernel hands back and does not inherit this, so
     // `Listener.accept` sets it again there.
