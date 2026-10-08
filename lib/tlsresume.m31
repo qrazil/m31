@@ -43,13 +43,13 @@
 // Time is epoch seconds throughout and comes from the caller, so a test can
 // move the clock.
 
-import tls13_schedule;
+import tls13schedule;
 
 /// One resumable session: the PSK derived from a ticket, and the ticket.
 pub type Session {
     pub str host;
     pub str trust_key;
-    pub tls13_schedule.Suite suite;
+    pub tls13schedule.Suite suite;
     pub bytes psk;
     pub bytes ticket;
     pub int age_add;
@@ -77,7 +77,7 @@ pub const int MAX_LIFETIME = 604800;
 /// at `received_at` plus the smaller of that and `MAX_LIFETIME`, or at
 /// `valid_until` (the end of the authenticated certificate's validity),
 /// whichever is first.
-pub Session session(str host, str trust_key, tls13_schedule.Suite suite, bytes psk, bytes ticket, int age_add, int received_at, int lifetime, int valid_until) {
+pub Session session(str host, str trust_key, tls13schedule.Suite suite, bytes psk, bytes ticket, int age_add, int received_at, int lifetime, int valid_until) {
     int kept = lifetime;
     if (kept > MAX_LIFETIME) {
         kept = MAX_LIFETIME;

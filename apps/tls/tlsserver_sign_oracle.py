@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cases and expected output for `lib/ecdsa_sign.m31` (`t_tlsserver_sign.m31`).
+"""Cases and expected output for `lib/ecdsasign.m31` (`t_tlsserver_sign.m31`).
 
     python3 tlsserver_sign_oracle.py CASES_OUT EXPECTED_OUT [COUNT]
 

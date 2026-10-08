@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Every check for the TLS 1.3 server (`lib/tls_server.m31`, `lib/signing_key.m31`,
-# `lib/ecdsa_sign.m31`), against clients that are not this repository.
+# Every check for the TLS 1.3 server (`lib/tlsserver.m31`, `lib/signingkey.m31`,
+# `lib/ecdsasign.m31`), against clients that are not this repository.
 # Modelled on `apps/tls/test_tls.sh`.
 #
 #   bash apps/tls/test_tlsserver.sh
@@ -89,7 +89,7 @@ fi
 # --- house style -----------------------------------------------------------------
 
 if out=$(
-    for f in lib/tls_server.m31 lib/signing_key.m31 lib/ecdsa_sign.m31 apps/tls/t_tlsserver_*.m31 apps/tls/example_https_static.m31; do
+    for f in lib/tlsserver.m31 lib/signingkey.m31 lib/ecdsasign.m31 apps/tls/t_tlsserver_*.m31 apps/tls/example_https_static.m31; do
         "$LANGC" fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then

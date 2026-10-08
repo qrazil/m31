@@ -4,13 +4,13 @@
 //
 // API
 // ---
-//   Result<bytes, ecdsa_sign.Error> pub = ecdsa_sign.public_key(secret);
+//   Result<bytes, ecdsasign.Error> pub = ecdsasign.public_key(secret);
 //         // secret: the 32-octet big-endian private scalar d, 1 <= d < n.
 //         // pub: 0x04 || X || Y, 65 octets.
-//   Result<bytes, ecdsa_sign.Error> sig = ecdsa_sign.sign(secret, digest);
+//   Result<bytes, ecdsasign.Error> sig = ecdsasign.sign(secret, digest);
 //         // digest: the 32-octet SHA-256 of the message, already computed.
 //         // sig: DER SEQUENCE { INTEGER r, INTEGER s }, what TLS puts on the wire.
-//   Result<bytes, ecdsa_sign.Error> raw = ecdsa_sign.sign_raw(secret, digest);   // r || s, 64 octets
+//   Result<bytes, ecdsasign.Error> raw = ecdsasign.sign_raw(secret, digest);   // r || s, 64 octets
 //
 // Verification is `ecdsa.m31`'s; the two agree (`ecdsa.verify_der` accepts
 // what `sign` returns), and this module never imports it.

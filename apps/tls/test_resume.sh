@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Every check for TLS 1.3 session resumption in the client (`lib/tls.m31`,
-# `lib/tlsresume.m31`, the ticket queue of `lib/tls13_record.m31`), against
+# `lib/tlsresume.m31`, the ticket queue of `lib/tls13record.m31`), against
 # peers that are not this repository. Modelled on `apps/tls/test_tls12.sh`.
 #
 #   bash apps/tls/test_resume.sh
@@ -71,7 +71,7 @@ matches() { perl -0777 -e 'local $/; my $text = <STDIN>; exit($text =~ /$ARGV[0]
 # --- house style ---------------------------------------------------------------
 
 if out=$(
-    for f in lib/tls.m31 lib/tlsresume.m31 lib/tls13_record.m31 lib/tls13_schedule.m31 apps/tls/t_resume_client.m31; do
+    for f in lib/tls.m31 lib/tlsresume.m31 lib/tls13record.m31 lib/tls13schedule.m31 apps/tls/t_resume_client.m31; do
         "$LANGC" fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then

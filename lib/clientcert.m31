@@ -12,12 +12,12 @@
 //   identity.fingerprint()             -> "sha256:" + colon-separated hex of the leaf's DER hash
 //
 // The chain is PEM, leaf first, then intermediates (the root is normally left
-// out); the key is one PEM block as `signing_key.m31` reads it (PKCS#8 for
+// out); the key is one PEM block as `signingkey.m31` reads it (PKCS#8 for
 // Ed25519 or P-256, or SEC1 for P-256; encrypted keys and RSA are refused).
 // The key must be the one the leaf certifies, checked at load time: a
 // mismatch is `KeyMismatch`, not a handshake that fails later at the server.
 // There is exactly one signer in this library: this module calls
-// `signing_key.SigningKey.sign`, which calls `ecdsa_sign` or `ed25519`. It
+// `signingkey.SigningKey.sign`, which calls `ecdsasign` or `ed25519`. It
 // adds none of its own.
 //
 // --- the private key: what is and is not constant time --------------------------
@@ -25,11 +25,11 @@
 // This is the first place in the client where a long-lived secret is used.
 // (The client's ECDHE scalar is ephemeral; this one signs every handshake.)
 //
-//   * ECDSA P-256 signing (`ecdsa_sign.m31`): the scalar multiplications, the
+//   * ECDSA P-256 signing (`ecdsasign.m31`): the scalar multiplications, the
 //     field arithmetic and the nonce derivation are written constant-time-style
 //     -- no branch, memory index or loop count depends on a secret -- and the
 //     nonce is deterministic (RFC 6979), so there is no random-number failure
-//     that leaks the key. The header of `ecdsa_sign.m31` has the full list,
+//     that leaks the key. The header of `ecdsasign.m31` has the full list,
 //     including the one rejection loop of probability 2^-32.
 //   * Ed25519 signing (`ed25519.m31`): the same claim for `[scalar]B`, the
 //     SHA-512 and the arithmetic mod L; see its header.
@@ -50,7 +50,7 @@
 
 import io;
 import sha256;
-import signing_key;
+import signingkey;
 import x509;
 
 const str OID_ED25519 = "1.3.101.112";
@@ -104,7 +104,7 @@ pub str Error.to_str() {
 pub type Identity {
     pub x509.Certificate leaf;
     pub List<bytes> chain;
-    signing_key.SigningKey key;
+    signingkey.SigningKey key;
 }
 
 pub str Identity.to_str() {
@@ -119,7 +119,7 @@ pub int Identity.signature_scheme() {
 /// Signs `message` (what TLS calls the CertificateVerify content) under the
 /// private key. Ed25519: the signature of the message itself; P-256: SHA-256 of
 /// it, signed, as DER.
-pub Result<bytes, signing_key.Error> Identity.sign(bytes message) {
+pub Result<bytes, signingkey.Error> Identity.sign(bytes message) {
     return key.sign(message);
 }
 
@@ -138,7 +138,7 @@ pub str Identity.fingerprint() {
     return text;
 }
 
-bool key_matches(signing_key.SigningKey key, x509.Certificate leaf) {
+bool key_matches(signingkey.SigningKey key, x509.Certificate leaf) {
     match (key.kind()) {
         case Ed25519: {
             return leaf.public_key.algorithm == OID_ED25519 && leaf.public_key.key_bytes == key.public_key;
@@ -149,7 +149,7 @@ bool key_matches(signing_key.SigningKey key, x509.Certificate leaf) {
     }
 }
 
-Error error_of(signing_key.Error error) {
+Error error_of(signingkey.Error error) {
     match (error) {
         case BadKey: {
             return Error.BadKey;
@@ -191,11 +191,11 @@ pub Result<Identity, Error> load(str chain_pem, str key_pem) {
             }
         }
     }
-    match (signing_key.parse_pem(key_pem)) {
-        case Err(signing_key.Error key_error): {
+    match (signingkey.parse_pem(key_pem)) {
+        case Err(signingkey.Error key_error): {
             return Result<Identity, Error>.Err(error_of(key_error));
         }
-        case Ok(signing_key.SigningKey key): {
+        case Ok(signingkey.SigningKey key): {
             if (!key_matches(key, parsed[0])) {
                 return Result<Identity, Error>.Err(Error.KeyMismatch);
             }

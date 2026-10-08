@@ -36,7 +36,7 @@
 //               with an unknown critical extension does not parse and the
 //               response fails. No other certificate is considered, and the TLS
 //               server's own certificates are not a source of signers.
-//   Signature   Through the same `x509_chain.check_signature` as certificates:
+//   Signature   Through the same `x509chain.check_signature` as certificates:
 //               ECDSA P-256/P-384 and RSA (PKCS#1 v1.5 and PSS) with SHA-2.
 //               SHA-1 signatures are refused (`UnsupportedAlgorithm`), though
 //               real responders signed with them for years; that is the same
@@ -74,7 +74,7 @@ import sha1digest;
 import sha256;
 import sha512;
 import x509;
-import x509_chain;
+import x509chain;
 
 const str OID_OCSP_BASIC = "1.3.6.1.5.5.7.48.1.1";
 const str OID_OCSP_SIGNING = "1.3.6.1.5.5.7.3.9";
@@ -348,11 +348,11 @@ bool is_authorised_responder(x509.Certificate candidate, x509.Certificate issuer
     if (candidate.has_key_usage && (candidate.key_usage & x509.KEY_USAGE_DIGITAL_SIGNATURE) == 0) {
         return false;
     }
-    match (x509_chain.check_signed_by(candidate, issuer)) {
+    match (x509chain.check_signed_by(candidate, issuer)) {
         case Ok: {
             return true;
         }
-        case Err(x509_chain.Error cause): {
+        case Err(x509chain.Error cause): {
             return false;
         }
     }
@@ -557,10 +557,10 @@ pub Result<Verdict, Error> check(bytes response, x509.Certificate leaf, x509.Cer
     }
     // Who signed, and does the signature hold, before anything in it is believed.
     x509.Certificate signer = find_signer(data[0], carried, issuer, now)?;
-    match (x509_chain.check_signature(algorithm, basic_parts[0].raw(), signature, signer.public_key)) {
+    match (x509chain.check_signature(algorithm, basic_parts[0].raw(), signature, signer.public_key)) {
         case Ok: {
         }
-        case Err(x509_chain.Error cause): {
+        case Err(x509chain.Error cause): {
             match (cause) {
                 case BadSignature: {
                     return Result<Verdict, Error>.Err(Error.BadSignature);

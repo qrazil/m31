@@ -1,4 +1,4 @@
-// TLS 1.2 records (`lib/tls13_record.m31`'s `seal_record_legacy` and
+// TLS 1.2 records (`lib/tls13record.m31`'s `seal_record_legacy` and
 // `open_record_legacy`) against `tls12_record_oracle.py`, which builds the same
 // records from RFC 5246 §6.2.3.3, RFC 5288 §3 and RFC 7905 §2 with the
 // `cryptography` package's AEADs. Every line is printed again by the oracle;
@@ -9,8 +9,8 @@
 
 import os;
 import sha256;
-import tls13_record;
-import tls13_schedule;
+import tls13record;
+import tls13schedule;
 
 bytes pattern(int count, int multiplier, int offset) {
     bytes out = [];
@@ -20,7 +20,7 @@ bytes pattern(int count, int multiplier, int offset) {
     return out;
 }
 
-str error_name(tls13_record.Error error) {
+str error_name(tls13record.Error error) {
     match (error) {
         case Io: {
             return "Io";
@@ -62,13 +62,13 @@ List<str> arguments = os.args();
 if (arguments.size() != 2) {
     trap("tls12_record: expected one argument: chacha, aes128 or aes256");
 }
-tls13_schedule.Suite suite = tls13_schedule.Suite.ChaCha20Poly1305Sha256;
+tls13schedule.Suite suite = tls13schedule.Suite.ChaCha20Poly1305Sha256;
 int salt_size = 12;
 if (arguments[1] == "aes128") {
-    suite = tls13_schedule.Suite.Aes128GcmSha256;
+    suite = tls13schedule.Suite.Aes128GcmSha256;
     salt_size = 4;
 } else if (arguments[1] == "aes256") {
-    suite = tls13_schedule.Suite.Aes256GcmSha384;
+    suite = tls13schedule.Suite.Aes256GcmSha384;
     salt_size = 4;
 } else if (arguments[1] != "chacha") {
     trap("tls12_record: unknown suite " + arguments[1]);
@@ -76,23 +76,23 @@ if (arguments[1] == "aes128") {
 bytes key = pattern(suite.key_size(), 5, 1);
 bytes iv = pattern(salt_size, 11, 7);
 
-str outcome(tls13_schedule.Suite suite, bytes key, bytes iv, bytes wire, int sequence) {
-    match (tls13_record.open_record_legacy(suite, key, iv, sequence, wire.substr(0, 5), wire.substr(5, wire.size()))) {
-        case Ok(tls13_record.Opened opened): {
+str outcome(tls13schedule.Suite suite, bytes key, bytes iv, bytes wire, int sequence) {
+    match (tls13record.open_record_legacy(suite, key, iv, sequence, wire.substr(0, 5), wire.substr(5, wire.size()))) {
+        case Ok(tls13record.Opened opened): {
             return "Ok type=" + str(opened.content_type) + " size=" + str(opened.content.size()) + " sha256=" + sha256.sum(opened.content).hex();
         }
-        case Err(tls13_record.Error error): {
+        case Err(tls13record.Error error): {
             return error_name(error);
         }
     }
 }
 
-bytes seal_ok(tls13_schedule.Suite suite, bytes key, bytes iv, int sequence, int content_type, bytes content) {
-    match (tls13_record.seal_record_legacy(suite, key, iv, sequence, content_type, content)) {
+bytes seal_ok(tls13schedule.Suite suite, bytes key, bytes iv, int sequence, int content_type, bytes content) {
+    match (tls13record.seal_record_legacy(suite, key, iv, sequence, content_type, content)) {
         case Ok(bytes wire): {
             return wire;
         }
-        case Err(tls13_record.Error error): {
+        case Err(tls13record.Error error): {
             trap("tls12_record: seal failed: " + error_name(error));
         }
     }

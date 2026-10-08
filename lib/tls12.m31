@@ -3,7 +3,7 @@
 // the PRF, the extended master secret, the key block, the Finished values and
 // the content a ServerKeyExchange signs. Pure functions of octets; the
 // message parsing and the record layer are `lib/tls.m31`'s and
-// `lib/tls13_record.m31`'s.
+// `lib/tls13record.m31`'s.
 //
 // What is here, and what is not, is the whole TLS 1.2 stance of this library:
 //
@@ -24,7 +24,7 @@
 // ChaCha20-Poly1305 suites use SHA-256 (RFC 7905 §2).
 
 import hmac;
-import tls13_schedule;
+import tls13schedule;
 
 /// The TLS 1.2 cipher suites that are offered and accepted.
 pub enum Suite {
@@ -91,25 +91,25 @@ pub str Suite.to_str() {
 
 /// The AEAD the record layer protects with, named by the TLS 1.3 suite that
 /// has the same one.
-pub tls13_schedule.Suite Suite.aead() {
+pub tls13schedule.Suite Suite.aead() {
     match (this) {
         case EcdsaChaCha20Poly1305: {
-            return tls13_schedule.Suite.ChaCha20Poly1305Sha256;
+            return tls13schedule.Suite.ChaCha20Poly1305Sha256;
         }
         case RsaChaCha20Poly1305: {
-            return tls13_schedule.Suite.ChaCha20Poly1305Sha256;
+            return tls13schedule.Suite.ChaCha20Poly1305Sha256;
         }
         case EcdsaAes128Gcm: {
-            return tls13_schedule.Suite.Aes128GcmSha256;
+            return tls13schedule.Suite.Aes128GcmSha256;
         }
         case RsaAes128Gcm: {
-            return tls13_schedule.Suite.Aes128GcmSha256;
+            return tls13schedule.Suite.Aes128GcmSha256;
         }
         case EcdsaAes256Gcm: {
-            return tls13_schedule.Suite.Aes256GcmSha384;
+            return tls13schedule.Suite.Aes256GcmSha384;
         }
         case RsaAes256Gcm: {
-            return tls13_schedule.Suite.Aes256GcmSha384;
+            return tls13schedule.Suite.Aes256GcmSha384;
         }
     }
 }

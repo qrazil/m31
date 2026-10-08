@@ -1,4 +1,4 @@
-// Key and chain loading for `lib/tls_server.m31`, driven from
+// Key and chain loading for `lib/tlsserver.m31`, driven from
 // `test_tlsserver.sh`.
 //
 //   t_tlsserver_config CHAIN KEY [NAME ...]
@@ -9,19 +9,19 @@
 
 import io;
 import os;
-import tls_server;
+import tlsserver;
 
 List<str> arguments = os.args();
 if (arguments.size() < 3) {
     io.eprint("usage: t_tlsserver_config CHAIN KEY [NAME ...]");
     os.exit(2);
 }
-match (tls_server.load_config_files(arguments[1], arguments[2])) {
-    case Err(tls_server.ConfigError config_error): {
+match (tlsserver.load_config_files(arguments[1], arguments[2])) {
+    case Err(tlsserver.ConfigError config_error): {
         print("error: " + config_error.to_str());
         os.exit(1);
     }
-    case Ok(tls_server.Config config): {
+    case Ok(tlsserver.Config config): {
         print("ok");
         for (int index in 3 .. arguments.size()) {
             if (config.serves(arguments[index])) {

@@ -36,7 +36,7 @@
 // key is the one pinned.
 //
 // `SystemRoots` and `CaFile(path)` validate the whole chain
-// (`lib/x509_chain.m31` has the rules): a path from the server's certificate
+// (`lib/x509chain.m31` has the rules): a path from the server's certificate
 // through whatever intermediates it sent to a root in the bundle, every
 // signature verified, every validity period holding at connection time, the
 // CA and path-length constraints, serverAuth, and the leaf's subjectAltName
@@ -211,7 +211,7 @@
 // the leaf: Ed25519 or ECDSA P-256. When the server sends a CertificateRequest
 // after its EncryptedExtensions (RFC 8446 §4.3.2), the client answers with
 // Certificate (the chain, empty request context), CertificateVerify (signed
-// by `signing_key`, which is `ecdsa_sign` or `ed25519`: this file has no
+// by `signingkey`, which is `ecdsasign` or `ed25519`: this file has no
 // signer of its own) and a Finished that covers both. The certificate_authorities
 // extension is parsed and ignored; the chain goes whatever it says.
 //
@@ -300,18 +300,18 @@ import sha256;
 import sha512;
 import x25519;
 import x509;
-import x509_chain;
+import x509chain;
 import ecdsa;
 import rsa;
 import bignum;
 import date;
 import os;
-import tls13_schedule;
-import tls13_record;
+import tls13schedule;
+import tls13record;
 import tls12;
 import tlsresume;
 import clientcert;
-import signing_key;
+import signingkey;
 import ocsp;
 
 const int HANDSHAKE_CLIENT_HELLO = 1;
@@ -662,7 +662,7 @@ int alert_for(Error error) {
             return ALERT_DECODE_ERROR;
         }
         case UnexpectedMessage: {
-            return tls13_record.ALERT_UNEXPECTED_MESSAGE;
+            return tls13record.ALERT_UNEXPECTED_MESSAGE;
         }
         case ClientCertificateRequested: {
             return ALERT_HANDSHAKE_FAILURE;
@@ -829,7 +829,7 @@ int errno_of(Error error) {
     }
 }
 
-Error error_of_record(tls13_record.Error error) {
+Error error_of_record(tls13record.Error error) {
     match (error) {
         case Io: {
             return Error.Io;
@@ -1005,8 +1005,8 @@ bytes server_name_data(str host) {
 }
 
 // The TLS 1.3 suites in the ClientHello, most preferred first.
-List<tls13_schedule.Suite> offered_suites() {
-    List<tls13_schedule.Suite> suites = [tls13_schedule.Suite.ChaCha20Poly1305Sha256, tls13_schedule.Suite.Aes128GcmSha256, tls13_schedule.Suite.Aes256GcmSha384];
+List<tls13schedule.Suite> offered_suites() {
+    List<tls13schedule.Suite> suites = [tls13schedule.Suite.ChaCha20Poly1305Sha256, tls13schedule.Suite.Aes128GcmSha256, tls13schedule.Suite.Aes256GcmSha384];
     return suites;
 }
 
@@ -1021,10 +1021,10 @@ bytes client_hello(str host, bytes client_random, bytes session_id, bytes public
     body.extend(client_random);
     body.push(session_id.size());
     body.extend(session_id);
-    List<tls13_schedule.Suite> suites = offered_suites();
+    List<tls13schedule.Suite> suites = offered_suites();
     List<tls12.Suite> legacy_suites = tls12.all_suites();
     put_u16(body, 2 * suites.size() + 2 * legacy_suites.size());
-    for (tls13_schedule.Suite offered in suites) {
+    for (tls13schedule.Suite offered in suites) {
         put_u16(body, offered.code());
     }
     for (tls12.Suite legacy_offered in legacy_suites) {
@@ -1109,12 +1109,12 @@ bytes client_hello(str host, bytes client_random, bytes session_id, bytes public
 // binders list (a 2-octet length, then one binder with its 1-octet length).
 // It is written over the zeros that stand in for it.
 void fill_binder(bytes message, tlsresume.Session session) {
-    tls13_schedule.Suite suite = session.suite;
+    tls13schedule.Suite suite = session.suite;
     int tail = 3 + suite.hash_size();
     bytes truncated = message.substr(0, message.size() - tail);
-    bytes early = tls13_schedule.early_secret(suite, session.psk);
-    bytes finished = tls13_schedule.finished_key(suite, tls13_schedule.binder_key(suite, early, true));
-    bytes binder = tls13_schedule.finished_verify_data(suite, finished, tls13_schedule.hash_octets(suite, truncated));
+    bytes early = tls13schedule.early_secret(suite, session.psk);
+    bytes finished = tls13schedule.finished_key(suite, tls13schedule.binder_key(suite, early, true));
+    bytes binder = tls13schedule.finished_verify_data(suite, finished, tls13schedule.hash_octets(suite, truncated));
     for (int index in 0 .. binder.size()) {
         message[message.size() - binder.size() + index] = binder[index];
     }
@@ -1144,7 +1144,7 @@ bool has_downgrade_sentinel(bytes server_random) {
 // one the server chose; `public_key` is its x25519 key_share, TLS 1.3 only.
 type ServerChoice {
     bool legacy;
-    tls13_schedule.Suite suite;
+    tls13schedule.Suite suite;
     tls12.Suite legacy_suite;
     bytes public_key;
     bytes server_random;
@@ -1235,10 +1235,10 @@ Result<ServerChoice, Error> check_tls13_hello(int legacy_version, bytes server_r
     if (legacy_version != VERSION_TLS12 || !same_octets(echoed_session_id, session_id) || compression != 0) {
         return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
     }
-    Option<tls13_schedule.Suite> chosen = tls13_schedule.suite_for_code(suite_code);
-    tls13_schedule.Suite suite = tls13_schedule.Suite.ChaCha20Poly1305Sha256;
+    Option<tls13schedule.Suite> chosen = tls13schedule.suite_for_code(suite_code);
+    tls13schedule.Suite suite = tls13schedule.Suite.ChaCha20Poly1305Sha256;
     match (chosen) {
-        case Some(tls13_schedule.Suite known): {
+        case Some(tls13schedule.Suite known): {
             suite = known;
         }
         case None: {
@@ -1339,7 +1339,7 @@ Result<ServerChoice, Error> check_tls12_hello(bytes server_random, bytes echoed_
         return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
     }
     bytes none = [];
-    return Result<ServerChoice, Error>.Ok(ServerChoice(true, tls13_schedule.Suite.ChaCha20Poly1305Sha256, suite, none, server_random, false, found.has(EXTENSION_STATUS_REQUEST)));
+    return Result<ServerChoice, Error>.Ok(ServerChoice(true, tls13schedule.Suite.ChaCha20Poly1305Sha256, suite, none, server_random, false, found.has(EXTENSION_STATUS_REQUEST)));
 }
 
 // --- the rest of the server's flight ------------------------------------------------
@@ -1419,7 +1419,7 @@ Result<void, Error> check_pin(x509.Certificate leaf, bytes pinned) {
     return Result<void, Error>.Ok;
 }
 
-Error error_of_chain(x509_chain.Error error) {
+Error error_of_chain(x509chain.Error error) {
     match (error) {
         case EmptyChain: {
             return Error.BadCertificate;
@@ -1474,11 +1474,11 @@ Result<List<x509.Certificate>, Error> read_anchors(str path) {
             return Result<List<x509.Certificate>, Error>.Err(Error.TrustStore);
         }
         case Ok(str text): {
-            match (x509_chain.parse_anchors(text)) {
+            match (x509chain.parse_anchors(text)) {
                 case Err(x509.Error pem_error): {
                     return Result<List<x509.Certificate>, Error>.Err(Error.TrustStore);
                 }
-                case Ok(x509_chain.AnchorSet found): {
+                case Ok(x509chain.AnchorSet found): {
                     if (found.certificates.size() == 0) {
                         return Result<List<x509.Certificate>, Error>.Err(Error.TrustStore);
                     }
@@ -1555,11 +1555,11 @@ Result<List<x509.Certificate>, Error> check_identity(List<x509.Certificate> pres
 }
 
 Result<List<x509.Certificate>, Error> check_chain(List<x509.Certificate> presented, List<x509.Certificate> anchors, str host, int now) {
-    match (x509_chain.verify(presented, anchors, host, now)) {
+    match (x509chain.verify(presented, anchors, host, now)) {
         case Ok(List<x509.Certificate> path): {
             return Result<List<x509.Certificate>, Error>.Ok(path);
         }
-        case Err(x509_chain.Error chain_error): {
+        case Err(x509chain.Error chain_error): {
             return Result<List<x509.Certificate>, Error>.Err(error_of_chain(chain_error));
         }
     }
@@ -1794,7 +1794,7 @@ Result<void, Error> check_certificate_verify(bytes message, x509.Certificate lea
     return Result<void, Error>.Err(Error.UnsupportedSignature);
 }
 
-Result<void, Error> check_finished(tls13_schedule.Suite suite, bytes message, bytes expected) {
+Result<void, Error> check_finished(tls13schedule.Suite suite, bytes message, bytes expected) {
     bytes verify_data = message_body(message);
     if (verify_data.size() != suite.hash_size()) {
         return Result<void, Error>.Err(Error.Malformed);
@@ -1814,23 +1814,23 @@ Result<void, Error> require_type(bytes message, int wanted) {
 
 // --- the handshake ------------------------------------------------------------------------
 
-Result<void, Error> lift(Result<void, tls13_record.Error> outcome) {
+Result<void, Error> lift(Result<void, tls13record.Error> outcome) {
     match (outcome) {
         case Ok: {
             return Result<void, Error>.Ok;
         }
-        case Err(tls13_record.Error record_error): {
+        case Err(tls13record.Error record_error): {
             return Result<void, Error>.Err(error_of_record(record_error));
         }
     }
 }
 
-Result<bytes, Error> next_handshake(tls13_record.Connection record) {
+Result<bytes, Error> next_handshake(tls13record.Connection record) {
     match (record.receive_handshake()) {
         case Ok(bytes message): {
             return Result<bytes, Error>.Ok(message);
         }
-        case Err(tls13_record.Error record_error): {
+        case Err(tls13record.Error record_error): {
             return Result<bytes, Error>.Err(error_of_record(record_error));
         }
     }
@@ -1842,7 +1842,7 @@ Result<bytes, Error> next_handshake(tls13_record.Connection record) {
 type Outcome {
     bool resumed = false;
     bool ticketable = false;
-    tls13_schedule.Suite suite = tls13_schedule.Suite.ChaCha20Poly1305Sha256;
+    tls13schedule.Suite suite = tls13schedule.Suite.ChaCha20Poly1305Sha256;
     bytes resumption_master = [];
     int valid_until = 0;
     // When the stapled OCSP response that vouched for the server's
@@ -1904,7 +1904,7 @@ bool is_pinned(Trust trust) {
     }
 }
 
-Result<void, Error> run_handshake(tls13_record.Connection record, str host, Trust trust, List<x509.Certificate> anchors, int now, tlsresume.SessionCache cache, Outcome outcome, Option<clientcert.Identity> identity) {
+Result<void, Error> run_handshake(tls13record.Connection record, str host, Trust trust, List<x509.Certificate> anchors, int now, tlsresume.SessionCache cache, Outcome outcome, Option<clientcert.Identity> identity) {
     random.System source = random.system();
     bytes secret = source.octets(X25519_SIZE);
     bytes session_id = source.octets(SESSION_ID_SIZE);
@@ -1920,7 +1920,7 @@ Result<void, Error> run_handshake(tls13_record.Connection record, str host, Trus
         }
     }
     bytes hello = client_hello(host, client_random, session_id, x25519.base_point(secret), cache.enabled(), offered, now);
-    tls13_schedule.Transcript transcript = tls13_schedule.transcript();
+    tls13schedule.Transcript transcript = tls13schedule.transcript();
     transcript.add(hello);
     lift(record.send_handshake(hello))?;
     bytes server_hello = next_handshake(record)?;
@@ -1930,7 +1930,7 @@ Result<void, Error> run_handshake(tls13_record.Connection record, str host, Trus
     if (choice.legacy) {
         return run_handshake_12(record, choice, transcript, client_random, secret, source, host, trust, anchors, now, outcome);
     }
-    tls13_schedule.Suite suite = choice.suite;
+    tls13schedule.Suite suite = choice.suite;
     bytes server_share = choice.public_key;
     record.use_suite(suite);
     bytes shared = x25519.x25519(secret, server_share);
@@ -1954,11 +1954,11 @@ Result<void, Error> run_handshake(tls13_record.Connection record, str host, Trus
             }
         }
     }
-    bytes early = tls13_schedule.early_secret(suite, psk);
-    bytes handshake = tls13_schedule.handshake_secret(suite, early, shared);
+    bytes early = tls13schedule.early_secret(suite, psk);
+    bytes handshake = tls13schedule.handshake_secret(suite, early, shared);
     bytes hello_hash = transcript.digest(suite);
-    bytes client_handshake = tls13_schedule.client_handshake_traffic_secret(suite, handshake, hello_hash);
-    bytes server_handshake = tls13_schedule.server_handshake_traffic_secret(suite, handshake, hello_hash);
+    bytes client_handshake = tls13schedule.client_handshake_traffic_secret(suite, handshake, hello_hash);
+    bytes server_handshake = tls13schedule.server_handshake_traffic_secret(suite, handshake, hello_hash);
     lift(record.install_read_keys(server_handshake))?;
     record.install_write_keys(client_handshake);
     bytes encrypted_extensions = next_handshake(record)?;
@@ -2009,13 +2009,13 @@ Result<void, Error> run_handshake(tls13_record.Connection record, str host, Trus
     }
     bytes server_finished = next_handshake(record)?;
     require_type(server_finished, HANDSHAKE_FINISHED)?;
-    bytes server_key = tls13_schedule.finished_key(suite, server_handshake);
-    check_finished(suite, server_finished, tls13_schedule.finished_verify_data(suite, server_key, transcript.digest(suite)))?;
+    bytes server_key = tls13schedule.finished_key(suite, server_handshake);
+    check_finished(suite, server_finished, tls13schedule.finished_verify_data(suite, server_key, transcript.digest(suite)))?;
     transcript.add(server_finished);
     bytes finished_hash = transcript.digest(suite);
-    bytes master = tls13_schedule.master_secret(suite, handshake);
-    bytes client_application = tls13_schedule.client_application_traffic_secret(suite, master, finished_hash);
-    bytes server_application = tls13_schedule.server_application_traffic_secret(suite, master, finished_hash);
+    bytes master = tls13schedule.master_secret(suite, handshake);
+    bytes client_application = tls13schedule.client_application_traffic_secret(suite, master, finished_hash);
+    bytes server_application = tls13schedule.server_application_traffic_secret(suite, master, finished_hash);
     if (requested) {
         match (identity) {
             case Some(clientcert.Identity presenting): {
@@ -2026,9 +2026,9 @@ Result<void, Error> run_handshake(tls13_record.Connection record, str host, Trus
             }
         }
     }
-    bytes client_key = tls13_schedule.finished_key(suite, client_handshake);
+    bytes client_key = tls13schedule.finished_key(suite, client_handshake);
     bytes client_finished = [HANDSHAKE_FINISHED, 0, 0, suite.hash_size()];
-    client_finished.extend(tls13_schedule.finished_verify_data(suite, client_key, transcript.digest(suite)));
+    client_finished.extend(tls13schedule.finished_verify_data(suite, client_key, transcript.digest(suite)));
     lift(record.send_handshake(client_finished))?;
     record.install_write_keys(client_application);
     lift(record.install_read_keys(server_application))?;
@@ -2036,7 +2036,7 @@ Result<void, Error> run_handshake(tls13_record.Connection record, str host, Trus
     outcome.resumed = choice.psk_selected;
     outcome.ticketable = true;
     outcome.suite = suite;
-    outcome.resumption_master = tls13_schedule.resumption_master_secret(suite, master, transcript.digest(suite));
+    outcome.resumption_master = tls13schedule.resumption_master_secret(suite, master, transcript.digest(suite));
     outcome.valid_until = valid_until;
     return Result<void, Error>.Ok;
 }
@@ -2109,7 +2109,7 @@ bytes client_certificate_verify_content(bytes transcript_hash) {
 // Sends the client's Certificate (empty request context, the chain with no
 // per-certificate extensions) and CertificateVerify, adding both to the
 // transcript; the client Finished follows over the transcript so far.
-Result<void, Error> send_client_certificate(tls13_record.Connection record, tls13_schedule.Transcript transcript, tls13_schedule.Suite suite, clientcert.Identity identity) {
+Result<void, Error> send_client_certificate(tls13record.Connection record, tls13schedule.Transcript transcript, tls13schedule.Suite suite, clientcert.Identity identity) {
     bytes entries = [];
     for (bytes der_certificate in identity.chain) {
         put_u24(entries, der_certificate.size());
@@ -2125,7 +2125,7 @@ Result<void, Error> send_client_certificate(tls13_record.Connection record, tls1
     transcript.add(certificate);
     lift(record.send_handshake(certificate))?;
     match (identity.sign(client_certificate_verify_content(transcript.digest(suite)))) {
-        case Err(signing_key.Error sign_error): {
+        case Err(signingkey.Error sign_error): {
             return Result<void, Error>.Err(Error.UnsupportedSignature);
         }
         case Ok(bytes signature): {
@@ -2269,9 +2269,9 @@ Result<void, Error> check_finished_12(bytes message, bytes expected) {
 // The rest of a TLS 1.2 handshake, once the ServerHello (already in
 // `transcript`) has named a suite: the server's flight up to ServerHelloDone,
 // our ClientKeyExchange, ChangeCipherSpec and Finished, and the server's.
-Result<void, Error> run_handshake_12(tls13_record.Connection record, ServerChoice choice, tls13_schedule.Transcript transcript, bytes client_random, bytes x25519_secret, random.System source, str host, Trust trust, List<x509.Certificate> anchors, int now, Outcome outcome) {
+Result<void, Error> run_handshake_12(tls13record.Connection record, ServerChoice choice, tls13schedule.Transcript transcript, bytes client_random, bytes x25519_secret, random.System source, str host, Trust trust, List<x509.Certificate> anchors, int now, Outcome outcome) {
     tls12.Suite suite = choice.legacy_suite;
-    tls13_schedule.Suite aead = suite.aead();
+    tls13schedule.Suite aead = suite.aead();
     record.use_legacy_suite(aead);
     bytes certificate_message = next_handshake(record)?;
     require_type(certificate_message, HANDSHAKE_CERTIFICATE)?;
@@ -2328,12 +2328,12 @@ Result<void, Error> run_handshake_12(tls13_record.Connection record, ServerChoic
 
 // A failed handshake: the alert that says why (the record layer has sent its
 // own for the faults it finds), then the stream closed.
-Error abort_handshake(tls13_record.Connection record, Error error) {
+Error abort_handshake(tls13record.Connection record, Error error) {
     int description = alert_for(error);
     if (description >= 0) {
-        Result<void, tls13_record.Error> alerted = record.send_alert(description);
+        Result<void, tls13record.Error> alerted = record.send_alert(description);
     }
-    Result<bool, tls13_record.Error> closed = record.close();
+    Result<bool, tls13record.Error> closed = record.close();
     return error;
 }
 
@@ -2450,7 +2450,7 @@ pub Result<Conn, Error> connect_over_at(net.Conn socket, str host, Trust trust, 
 }
 
 Result<Conn, Error> handshake_over(net.Conn socket, str host, Trust trust, List<x509.Certificate> anchors, int now, bool fixed_clock, tlsresume.SessionCache cache, Option<clientcert.Identity> identity) {
-    tls13_record.Connection record = tls13_record.connection(socket);
+    tls13record.Connection record = tls13record.connection(socket);
     Outcome outcome = Outcome();
     match (run_handshake(record, host, trust, anchors, now, cache, outcome, identity)) {
         case Ok: {
@@ -2473,7 +2473,7 @@ Result<Conn, Error> handshake_over(net.Conn socket, str host, Trust trust, List<
 /// A TLS 1.3 connection to a server whose key was checked. Made by
 /// `connect`; every field is private.
 pub type Conn {
-    tls13_record.Connection record;
+    tls13record.Connection record;
     tlsresume.SessionCache cache;
     // pending[offset ..] has been decrypted and not handed out.
     bytes pending = [];
@@ -2538,7 +2538,7 @@ Result<void, Error> Conn.file_ticket(bytes message) {
     if (lifetime == 0 || !cache.enabled()) {
         return Result<void, Error>.Ok;
     }
-    bytes psk = tls13_schedule.resumption_psk(outcome.suite, outcome.resumption_master, nonce);
+    bytes psk = tls13schedule.resumption_psk(outcome.suite, outcome.resumption_master, nonce);
     int received = now();
     cache.put(tlsresume.session(host, trust_key, outcome.suite, psk, ticket, age_add, received, lifetime, outcome.valid_until), received);
     return Result<void, Error>.Ok;
@@ -2574,7 +2574,7 @@ Result<bytes, io.Error> Conn.next_chunk() {
                 case Ok: {
                 }
                 case Err(Error ticket_error): {
-                    Result<void, tls13_record.Error> alerted = record.send_alert(alert_for(ticket_error));
+                    Result<void, tls13record.Error> alerted = record.send_alert(alert_for(ticket_error));
                     return Result<bytes, io.Error>.Err(fail(ticket_error));
                 }
             }
@@ -2583,7 +2583,7 @@ Result<bytes, io.Error> Conn.next_chunk() {
             }
             return Result<bytes, io.Error>.Ok(data);
         }
-        case Err(tls13_record.Error record_error): {
+        case Err(tls13record.Error record_error): {
             return Result<bytes, io.Error>.Err(fail(error_of_record(record_error)));
         }
     }
@@ -2691,7 +2691,7 @@ pub Result<int, io.Error> Conn.write(bytes data) {
         case Ok(int sent): {
             return Result<int, io.Error>.Ok(sent);
         }
-        case Err(tls13_record.Error record_error): {
+        case Err(tls13record.Error record_error): {
             return Result<int, io.Error>.Err(fail(error_of_record(record_error)));
         }
     }
@@ -2709,13 +2709,13 @@ Result<bool, io.Error> Conn.release() {
     }
     closed = true;
     if (!failed) {
-        Result<void, tls13_record.Error> notified = record.send_close_notify();
+        Result<void, tls13record.Error> notified = record.send_close_notify();
     }
     match (record.close()) {
         case Ok(bool done): {
             return Result<bool, io.Error>.Ok(done);
         }
-        case Err(tls13_record.Error record_error): {
+        case Err(tls13record.Error record_error): {
             return Result<bool, io.Error>.Err(io.Error.Other(ERRNO_IO));
         }
     }

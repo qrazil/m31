@@ -1,4 +1,4 @@
-// A real server's bytes through `tls13_record`: what `openssl s_server
+// A real server's bytes through `tls13record`: what `openssl s_server
 // -tls1_3 -ciphersuites <suite>` sent a client, with the
 // server's traffic secrets from its key log. `live_tls13.py` captures the
 // bytes and checks what this prints; `test_tls13.sh` runs it and skips it,
@@ -11,8 +11,8 @@ import io;
 import os;
 import sha256;
 import tls13_hex;
-import tls13_record;
-import tls13_schedule;
+import tls13record;
+import tls13schedule;
 
 void say(str text) {
     print(text);
@@ -22,15 +22,15 @@ List<str> arguments = os.args();
 if (arguments.size() != 5) {
     trap("t_tls13_live: expected the capture, two traffic secrets as hex, and a suite name");
 }
-tls13_schedule.Suite suite = tls13_schedule.Suite.ChaCha20Poly1305Sha256;
+tls13schedule.Suite suite = tls13schedule.Suite.ChaCha20Poly1305Sha256;
 if (arguments[4] == "TLS_AES_128_GCM_SHA256") {
-    suite = tls13_schedule.Suite.Aes128GcmSha256;
+    suite = tls13schedule.Suite.Aes128GcmSha256;
 } else if (arguments[4] == "TLS_AES_256_GCM_SHA384") {
-    suite = tls13_schedule.Suite.Aes256GcmSha384;
+    suite = tls13schedule.Suite.Aes256GcmSha384;
 } else if (arguments[4] != "TLS_CHACHA20_POLY1305_SHA256") {
     trap("t_tls13_live: unknown suite " + arguments[4]);
 }
-tls13_record.Connection connection = tls13_record.connection(io.buffer_of(tls13_hex.decode(arguments[1])));
+tls13record.Connection connection = tls13record.connection(io.buffer_of(tls13_hex.decode(arguments[1])));
 connection.use_suite(suite);
 bytes handshake_secret = tls13_hex.decode(arguments[2]);
 bytes application_secret = tls13_hex.decode(arguments[3]);
@@ -38,7 +38,7 @@ match (connection.receive_handshake()) {
     case Ok(bytes server_hello): {
         say("handshake type=" + str(server_hello[0]) + " size=" + str(server_hello.size()));
     }
-    case Err(tls13_record.Error hello_error): {
+    case Err(tls13record.Error hello_error): {
         say("error " + hello_error.to_str());
         os.exit(1);
     }
@@ -46,7 +46,7 @@ match (connection.receive_handshake()) {
 match (connection.install_read_keys(handshake_secret)) {
     case Ok: {
     }
-    case Err(tls13_record.Error key_error): {
+    case Err(tls13record.Error key_error): {
         say("error " + key_error.to_str());
         os.exit(1);
     }
@@ -58,7 +58,7 @@ while (!finished) {
             say("handshake type=" + str(message[0]) + " size=" + str(message.size()));
             finished = message[0] == 20;
         }
-        case Err(tls13_record.Error message_error): {
+        case Err(tls13record.Error message_error): {
             say("error " + message_error.to_str());
             os.exit(1);
         }
@@ -67,7 +67,7 @@ while (!finished) {
 match (connection.install_read_keys(application_secret)) {
     case Ok: {
     }
-    case Err(tls13_record.Error key_error): {
+    case Err(tls13record.Error key_error): {
         say("error " + key_error.to_str());
         os.exit(1);
     }
@@ -83,7 +83,7 @@ while (!ended) {
                 received.extend(data);
             }
         }
-        case Err(tls13_record.Error data_error): {
+        case Err(tls13record.Error data_error): {
             say("error " + data_error.to_str());
             os.exit(1);
         }

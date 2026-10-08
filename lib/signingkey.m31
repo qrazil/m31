@@ -3,7 +3,7 @@
 //
 // API
 // ---
-//   Result<SigningKey, Error> key = signing_key.parse_pem(text);
+//   Result<SigningKey, Error> key = signingkey.parse_pem(text);
 //   key.kind()               -> Kind.Ed25519 | Kind.EcdsaP256
 //   key.signature_scheme()   -> 0x0807 (ed25519) | 0x0403 (ecdsa_secp256r1_sha256)
 //   key.public_key           -> 32 octets (Ed25519) | 65 octets 04||X||Y (P-256)
@@ -31,14 +31,14 @@
 // * The secret is NOT wiped from memory when the key goes away: the runtime
 //   gives no way to zero a freed buffer, so a core dump or swapped page of
 //   this process may hold it. Run key-holding servers with core dumps off.
-// * Timing: see the header of `ecdsa_sign.m31` (P-256) and `ed25519.m31`
+// * Timing: see the header of `ecdsasign.m31` (P-256) and `ed25519.m31`
 //   (Ed25519). PEM and DER parsing here run once at start-up on the key file
 //   and are not constant time; they handle the secret only to copy it.
 
 import base64;
 import der;
 import ed25519;
-import ecdsa_sign;
+import ecdsasign;
 import sha256;
 import x509;
 
@@ -122,11 +122,11 @@ pub Result<bytes, Error> SigningKey.sign(bytes message) {
             return Result<bytes, Error>.Ok(ed25519.sign(secret, message));
         }
         case EcdsaP256: {
-            match (ecdsa_sign.sign(secret, sha256.sum(message))) {
+            match (ecdsasign.sign(secret, sha256.sum(message))) {
                 case Ok(bytes signature): {
                     return Result<bytes, Error>.Ok(signature);
                 }
-                case Err(ecdsa_sign.Error refused): {
+                case Err(ecdsasign.Error refused): {
                     return Result<bytes, Error>.Err(Error.SigningFailed);
                 }
             }
@@ -243,8 +243,8 @@ Result<SigningKey, Error> p256_key(bytes raw_secret, bytes declared_public) {
             return Result<SigningKey, Error>.Err(Error.BadKey);
         }
         case Some(bytes secret): {
-            match (ecdsa_sign.public_key(secret)) {
-                case Err(ecdsa_sign.Error refused): {
+            match (ecdsasign.public_key(secret)) {
+                case Err(ecdsasign.Error refused): {
                     return Result<SigningKey, Error>.Err(Error.BadKey);
                 }
                 case Ok(bytes derived): {

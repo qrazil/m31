@@ -1,18 +1,18 @@
-// `lib/x509_chain.m31` under test, driven from `test_chain.sh`.
+// `lib/x509chain.m31` under test, driven from `test_chain.sh`.
 //
 //   t_chain_verify <anchors.pem> <chain.pem> <host> <now, epoch seconds>
 //
 // Prints `ok <number of certificates in the path>` or `error <Name>`, where
-// `<Name>` is the `x509_chain.Error` variant, or `LeafUnparseable` when the
+// `<Name>` is the `x509chain.Error` variant, or `LeafUnparseable` when the
 // first certificate of the chain is refused by `x509.parse`, and exits 0 for
 // an `ok` and 1 for an error.
 
 import io;
 import os;
 import x509;
-import x509_chain;
+import x509chain;
 
-str name_of(x509_chain.Error error) {
+str name_of(x509chain.Error error) {
     match (error) {
         case EmptyChain: {
             return "EmptyChain";
@@ -106,16 +106,16 @@ match (arguments[4].parse_int()) {
         trap("t_chain_verify: now is a number of seconds");
     }
 }
-match (x509_chain.parse_anchors(read_text(arguments[1]))) {
+match (x509chain.parse_anchors(read_text(arguments[1]))) {
     case Err(x509.Error pem_error): {
         trap("t_chain_verify: the anchors are not PEM");
     }
-    case Ok(x509_chain.AnchorSet anchors): {
-        match (x509_chain.verify(presented_from(arguments[2]), anchors.certificates, arguments[3], now)) {
+    case Ok(x509chain.AnchorSet anchors): {
+        match (x509chain.verify(presented_from(arguments[2]), anchors.certificates, arguments[3], now)) {
             case Ok(List<x509.Certificate> path): {
                 print("ok " + path.size().to_str());
             }
-            case Err(x509_chain.Error failure): {
+            case Err(x509chain.Error failure): {
                 print("error " + name_of(failure));
                 os.exit(1);
             }

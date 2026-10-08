@@ -12,7 +12,7 @@ Writes one directory per case, each holding
     key.pem       the leaf's private key
 
 and, in the output directory, `cases.tsv`: name, host name to verify, the
-`x509_chain` error the case must produce (`ok` for none), whether the case is
+`x509chain` error the case must produce (`ok` for none), whether the case is
 also run as a live handshake (`live` or `offline`). The host of a live
 case is `localhost`, or a `*.localhost` name for the wildcard cases (which
 resolve to the loopback on systems with systemd-resolved or nss-myhostname;

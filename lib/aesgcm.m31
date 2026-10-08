@@ -21,7 +21,7 @@
 // a TLS record is at most 2^14 + 256. The 32-bit block counter therefore
 // cannot wrap. Reusing a (key, nonce) pair is catastrophic for GCM (it leaks
 // the authentication key); TLS never does, because the nonce is the record
-// sequence number XOR a per-connection IV, and `lib/tls13_record.m31` stops
+// sequence number XOR a per-connection IV, and `lib/tls13record.m31` stops
 // at sequence 2^63 - 1. A caller that picks its own nonces owns that rule.
 //
 // --- Side channels ----------------------------------------------------------

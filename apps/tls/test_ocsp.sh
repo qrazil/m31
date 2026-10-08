@@ -80,7 +80,7 @@ matches() { perl -0777 -e 'local $/; my $text = <STDIN>; exit($text =~ /$ARGV[0]
 # --- house style ---------------------------------------------------------------
 
 if out=$(
-    for f in lib/ocsp.m31 lib/sha1digest.m31 lib/tls.m31 lib/x509.m31 lib/x509_chain.m31 lib/http.m31 \
+    for f in lib/ocsp.m31 lib/sha1digest.m31 lib/tls.m31 lib/x509.m31 lib/x509chain.m31 lib/http.m31 \
              apps/tls/t_ocsp_check.m31 apps/tls/t_ocsp_client.m31 apps/tls/t_chain_client.m31; do
         "$LANGC" fmt --check "$f" || echo "$f"
     done 2>&1

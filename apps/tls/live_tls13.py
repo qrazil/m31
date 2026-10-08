@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Optional live check: a real OpenSSL server's TLS 1.3 records through tls13_record.
+"""Optional live check: a real OpenSSL server's TLS 1.3 records through tls13record.
 
   live_tls13.py <compiled t_tls13_live> [workdir]
 

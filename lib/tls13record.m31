@@ -1,17 +1,17 @@
 // TLS 1.3's record layer (RFC 8446 §5) for the three suites
-// `tls13_schedule.Suite` names: `TLS_CHACHA20_POLY1305_SHA256` (the default),
+// `tls13schedule.Suite` names: `TLS_CHACHA20_POLY1305_SHA256` (the default),
 // `TLS_AES_128_GCM_SHA256` and `TLS_AES_256_GCM_SHA384`. Records in, handshake messages and
 // application data out, and back; the handshake state machine that decides
 // *which* messages to expect (`lib/tls13_client.m31`, a later milestone) sits
 // on top and touches only `Connection`. The keys come from
-// `lib/tls13_schedule.m31`; the AEAD is `lib/chacha20poly1305.m31`'s RFC 8439
+// `lib/tls13schedule.m31`; the AEAD is `lib/chacha20poly1305.m31`'s RFC 8439
 // `seal`/`open`, used as it is -- the IETF construction, not OpenSSH's -- or
 // `lib/aesgcm.m31`'s. `c.use_suite(suite)` picks the pair before the first
 // key is installed; the pure functions take the suite as their first argument.
 //
 // API
 // ---
-//   tls13_record.connection(stream)         -> Connection   any `io.Stream`
+//   tls13record.connection(stream)         -> Connection   any `io.Stream`
 //
 //   c.install_read_keys(traffic_secret)     -> Result<void, Error>
 //   c.install_write_keys(traffic_secret)    -> void
@@ -98,7 +98,7 @@
 import io;
 import chacha20poly1305;
 import aesgcm;
-import tls13_schedule;
+import tls13schedule;
 
 /// Octets in a record header.
 pub const int HEADER_SIZE = 5;
@@ -227,15 +227,15 @@ pub str Error.to_str() {
 /// `sequence` XORed into its last eight octets. `iv` must be 12 octets and
 /// `sequence` not negative; either wrong **traps**, as a caller bug.
 pub bytes record_nonce(bytes iv, int sequence) {
-    if (iv.size() != tls13_schedule.IV_SIZE) {
-        trap("tls13_record: the IV must be 12 octets");
+    if (iv.size() != tls13schedule.IV_SIZE) {
+        trap("tls13record: the IV must be 12 octets");
     }
     if (sequence < 0) {
-        trap("tls13_record: a sequence number is never negative");
+        trap("tls13record: a sequence number is never negative");
     }
     bytes nonce = clone(iv);
     for (int i in 0 .. 8) {
-        int place = tls13_schedule.IV_SIZE - 1 - i;
+        int place = tls13schedule.IV_SIZE - 1 - i;
         nonce[place] = nonce[place] ^ ((sequence >> (8 * i)) & 0xFF);
     }
     return nonce;
@@ -256,7 +256,7 @@ bytes header_of(int content_type, int length) {
 /// longer than `MAX_PLAINTEXT` **traps**.
 pub bytes plain_record(int content_type, bytes content) {
     if (content.size() > MAX_PLAINTEXT) {
-        trap("tls13_record: a record carries at most 2^14 octets");
+        trap("tls13record: a record carries at most 2^14 octets");
     }
     bytes record = header_of(content_type, content.size());
     record.extend(content);
@@ -271,12 +271,12 @@ pub bytes plain_record(int content_type, bytes content) {
 /// above `MAX_PLAINTEXT`, a negative `padding`, padding that would take the
 /// body past `MAX_CIPHERTEXT`, and a `key` or `iv` of the wrong length.
 /// `Err(SequenceExhausted)` once `sequence` reaches `MAX_SEQUENCE`.
-pub Result<bytes, Error> seal_record(tls13_schedule.Suite suite, bytes key, bytes iv, int sequence, int content_type, bytes content, int padding) {
+pub Result<bytes, Error> seal_record(tls13schedule.Suite suite, bytes key, bytes iv, int sequence, int content_type, bytes content, int padding) {
     if (content.size() > MAX_PLAINTEXT) {
-        trap("tls13_record: a record carries at most 2^14 octets");
+        trap("tls13record: a record carries at most 2^14 octets");
     }
     if (padding < 0 || content.size() + 1 + padding + TAG_SIZE > MAX_CIPHERTEXT) {
-        trap("tls13_record: padding would take the record past 2^14 + 256 octets");
+        trap("tls13record: padding would take the record past 2^14 + 256 octets");
     }
     if (sequence >= MAX_SEQUENCE) {
         return Result<bytes, Error>.Err(Error.SequenceExhausted);
@@ -302,9 +302,9 @@ pub type Opened {
 /// `RecordOverflow` if the body, or what it held, is over its limit;
 /// `BadRecordMac` if the tag does not verify; `UnexpectedMessage` if the
 /// plaintext is all zeros and so names no content type.
-pub Result<Opened, Error> open_record(tls13_schedule.Suite suite, bytes key, bytes iv, int sequence, bytes header, bytes body) {
+pub Result<Opened, Error> open_record(tls13schedule.Suite suite, bytes key, bytes iv, int sequence, bytes header, bytes body) {
     if (header.size() != HEADER_SIZE) {
-        trap("tls13_record: a record header is 5 octets");
+        trap("tls13record: a record header is 5 octets");
     }
     if (sequence >= MAX_SEQUENCE) {
         return Result<Opened, Error>.Err(Error.SequenceExhausted);
@@ -333,7 +333,7 @@ pub const int GCM_SALT_SIZE = 4;
 // and 256 of overhead (RFC 5246 allows 2048; no AEAD here needs more than 24).
 const int MAX_LEGACY_BODY = 16640;
 
-bool is_gcm(tls13_schedule.Suite suite) {
+bool is_gcm(tls13schedule.Suite suite) {
     match (suite) {
         case ChaCha20Poly1305Sha256: {
             return false;
@@ -366,13 +366,13 @@ bytes legacy_additional_data(int sequence, int content_type, int plain_size) {
     return data;
 }
 
-void check_legacy_iv(tls13_schedule.Suite suite, bytes iv) {
-    int want = tls13_schedule.IV_SIZE;
+void check_legacy_iv(tls13schedule.Suite suite, bytes iv) {
+    int want = tls13schedule.IV_SIZE;
     if (is_gcm(suite)) {
         want = GCM_SALT_SIZE;
     }
     if (iv.size() != want) {
-        trap("tls13_record: a TLS 1.2 IV is 4 octets for AES-GCM and 12 for ChaCha20-Poly1305");
+        trap("tls13record: a TLS 1.2 IV is 4 octets for AES-GCM and 12 for ChaCha20-Poly1305");
     }
 }
 
@@ -386,9 +386,9 @@ void check_legacy_iv(tls13_schedule.Suite suite, bytes iv) {
 /// length of content`. Traps on a caller bug (content over `MAX_PLAINTEXT`,
 /// an `iv` or `key` of the wrong length); `Err(SequenceExhausted)` at
 /// `MAX_SEQUENCE`.
-pub Result<bytes, Error> seal_record_legacy(tls13_schedule.Suite suite, bytes key, bytes iv, int sequence, int content_type, bytes content) {
+pub Result<bytes, Error> seal_record_legacy(tls13schedule.Suite suite, bytes key, bytes iv, int sequence, int content_type, bytes content) {
     if (content.size() > MAX_PLAINTEXT) {
-        trap("tls13_record: a record carries at most 2^14 octets");
+        trap("tls13record: a record carries at most 2^14 octets");
     }
     check_legacy_iv(suite, iv);
     if (sequence >= MAX_SEQUENCE) {
@@ -415,9 +415,9 @@ pub Result<bytes, Error> seal_record_legacy(tls13_schedule.Suite suite, bytes ke
 /// inverse of `seal_record_legacy`. `RecordOverflow` for a body or content
 /// over the limits, `BadRecordMac` for a body too short to hold its overhead
 /// and for a tag that does not verify.
-pub Result<Opened, Error> open_record_legacy(tls13_schedule.Suite suite, bytes key, bytes iv, int sequence, bytes header, bytes body) {
+pub Result<Opened, Error> open_record_legacy(tls13schedule.Suite suite, bytes key, bytes iv, int sequence, bytes header, bytes body) {
     if (header.size() != HEADER_SIZE) {
-        trap("tls13_record: a record header is 5 octets");
+        trap("tls13record: a record header is 5 octets");
     }
     check_legacy_iv(suite, iv);
     if (sequence >= MAX_SEQUENCE) {
@@ -457,7 +457,7 @@ pub Result<Opened, Error> open_record_legacy(tls13_schedule.Suite suite, bytes k
 
 // The suite's AEAD. Key length follows the suite (`key_size`); a `key` of any
 // other length traps in the AEAD, a caller bug.
-bytes seal_aead(tls13_schedule.Suite suite, bytes key, bytes nonce, bytes plaintext, bytes aad) {
+bytes seal_aead(tls13schedule.Suite suite, bytes key, bytes nonce, bytes plaintext, bytes aad) {
     match (suite) {
         case ChaCha20Poly1305Sha256: {
             return chacha20poly1305.seal(key, nonce, plaintext, aad);
@@ -473,7 +473,7 @@ bytes seal_aead(tls13_schedule.Suite suite, bytes key, bytes nonce, bytes plaint
     }
 }
 
-Option<bytes> open_aead(tls13_schedule.Suite suite, bytes key, bytes nonce, bytes sealed, bytes aad) {
+Option<bytes> open_aead(tls13schedule.Suite suite, bytes key, bytes nonce, bytes sealed, bytes aad) {
     match (suite) {
         case ChaCha20Poly1305Sha256: {
             match (chacha20poly1305.open(key, nonce, sealed, aad)) {
@@ -507,9 +507,9 @@ Option<bytes> open_gcm(bytes key, bytes nonce, bytes sealed, bytes aad) {
     }
 }
 
-void check_key_size(tls13_schedule.Suite suite, bytes key) {
+void check_key_size(tls13schedule.Suite suite, bytes key) {
     if (key.size() != suite.key_size()) {
-        trap("tls13_record: the key does not fit the suite");
+        trap("tls13record: the key does not fit the suite");
     }
 }
 
@@ -551,7 +551,7 @@ pub type Message {
 /// `connection`; every field is private and only its own methods move them.
 pub type Connection {
     io.Stream stream;
-    tls13_schedule.Suite suite = tls13_schedule.Suite.ChaCha20Poly1305Sha256;
+    tls13schedule.Suite suite = tls13schedule.Suite.ChaCha20Poly1305Sha256;
     bytes read_key = [];
     bytes read_iv = [];
     bytes read_secret = [];
@@ -594,9 +594,9 @@ pub List<bytes> Connection.take_tickets() {
 /// when the ServerHello has named the suite and before any `install_*_keys`;
 /// calling it with keys already installed **traps** (a suite never changes
 /// mid-connection).
-pub void Connection.use_suite(tls13_schedule.Suite chosen) {
+pub void Connection.use_suite(tls13schedule.Suite chosen) {
     if (read_protected || write_protected) {
-        trap("tls13_record: use_suite after keys were installed");
+        trap("tls13record: use_suite after keys were installed");
     }
     suite = chosen;
 }
@@ -609,7 +609,7 @@ pub void Connection.use_suite(tls13_schedule.Suite chosen) {
 /// and `install_legacy_write_keys`, each right after the ChangeCipherSpec of
 /// its direction. The TLS 1.3 key functions trap on a legacy connection, and
 /// so does `send_key_update`: TLS 1.2 has no KeyUpdate.
-pub void Connection.use_legacy_suite(tls13_schedule.Suite chosen) {
+pub void Connection.use_legacy_suite(tls13schedule.Suite chosen) {
     use_suite(chosen);
     legacy = true;
 }
@@ -620,7 +620,7 @@ pub void Connection.use_legacy_suite(tls13_schedule.Suite chosen) {
 /// buffered, and **traps** on a connection that is not legacy.
 pub Result<void, Error> Connection.install_legacy_read_keys(bytes key, bytes iv) {
     if (!legacy) {
-        trap("tls13_record: install_legacy_read_keys on a TLS 1.3 connection");
+        trap("tls13record: install_legacy_read_keys on a TLS 1.3 connection");
     }
     check_legacy_iv(suite, iv);
     check_key_size(suite, key);
@@ -641,7 +641,7 @@ pub Result<void, Error> Connection.install_legacy_read_keys(bytes key, bytes iv)
 /// records from zero. **Traps** on a connection that is not legacy.
 pub void Connection.install_legacy_write_keys(bytes key, bytes iv) {
     if (!legacy) {
-        trap("tls13_record: install_legacy_write_keys on a TLS 1.3 connection");
+        trap("tls13record: install_legacy_write_keys on a TLS 1.3 connection");
     }
     check_legacy_iv(suite, iv);
     check_key_size(suite, key);
@@ -659,7 +659,7 @@ pub void Connection.install_legacy_write_keys(bytes key, bytes iv) {
 /// ChangeCipherSpec by itself.
 pub Result<void, Error> Connection.receive_change_cipher_spec() {
     if (!legacy) {
-        trap("tls13_record: receive_change_cipher_spec on a TLS 1.3 connection");
+        trap("tls13record: receive_change_cipher_spec on a TLS 1.3 connection");
     }
     if (failed) {
         return Result<void, Error>.Err(Error.Closed);
@@ -691,10 +691,10 @@ pub Result<void, Error> Connection.receive_change_cipher_spec() {
 /// says none may span a key change. `traffic_secret` not the suite's hash length traps.
 pub Result<void, Error> Connection.install_read_keys(bytes traffic_secret) {
     if (legacy) {
-        trap("tls13_record: TLS 1.3 keys on a legacy connection");
+        trap("tls13record: TLS 1.3 keys on a legacy connection");
     }
     if (traffic_secret.size() != suite.hash_size()) {
-        trap("tls13_record: a traffic secret is as long as the suite's hash");
+        trap("tls13record: a traffic secret is as long as the suite's hash");
     }
     if (failed) {
         return Result<void, Error>.Err(Error.Closed);
@@ -702,7 +702,7 @@ pub Result<void, Error> Connection.install_read_keys(bytes traffic_secret) {
     if (handshake_pending.size() > 0) {
         return Result<void, Error>.Err(break_down(Error.UnexpectedMessage));
     }
-    tls13_schedule.TrafficKeys keys = tls13_schedule.traffic_keys(suite, traffic_secret);
+    tls13schedule.TrafficKeys keys = tls13schedule.traffic_keys(suite, traffic_secret);
     read_key = keys.key;
     read_iv = keys.iv;
     read_secret = traffic_secret;
@@ -716,12 +716,12 @@ pub Result<void, Error> Connection.install_read_keys(bytes traffic_secret) {
 /// suite's hash length traps.
 pub void Connection.install_write_keys(bytes traffic_secret) {
     if (legacy) {
-        trap("tls13_record: TLS 1.3 keys on a legacy connection");
+        trap("tls13record: TLS 1.3 keys on a legacy connection");
     }
     if (traffic_secret.size() != suite.hash_size()) {
-        trap("tls13_record: a traffic secret is as long as the suite's hash");
+        trap("tls13record: a traffic secret is as long as the suite's hash");
     }
-    tls13_schedule.TrafficKeys keys = tls13_schedule.traffic_keys(suite, traffic_secret);
+    tls13schedule.TrafficKeys keys = tls13schedule.traffic_keys(suite, traffic_secret);
     write_key = keys.key;
     write_iv = keys.iv;
     write_secret = traffic_secret;
@@ -735,9 +735,9 @@ pub void Connection.install_write_keys(bytes traffic_secret) {
 /// caller bug.
 pub Result<void, Error> Connection.update_read_keys() {
     if (!read_protected) {
-        trap("tls13_record: update_read_keys before install_read_keys");
+        trap("tls13record: update_read_keys before install_read_keys");
     }
-    return install_read_keys(tls13_schedule.next_traffic_secret(suite, read_secret));
+    return install_read_keys(tls13schedule.next_traffic_secret(suite, read_secret));
 }
 
 /// Moves the send direction to the next key generation. Send the KeyUpdate
@@ -745,9 +745,9 @@ pub Result<void, Error> Connection.update_read_keys() {
 /// both. **Traps** if no keys were installed.
 pub void Connection.update_write_keys() {
     if (!write_protected) {
-        trap("tls13_record: update_write_keys before install_write_keys");
+        trap("tls13record: update_write_keys before install_write_keys");
     }
-    install_write_keys(tls13_schedule.next_traffic_secret(suite, write_secret));
+    install_write_keys(tls13schedule.next_traffic_secret(suite, write_secret));
 }
 
 /// Pads every protected record this side sends with `padding` zero octets
@@ -755,7 +755,7 @@ pub void Connection.update_write_keys() {
 /// content leaves less room than that is padded as far as fits.
 pub void Connection.set_padding(int padding) {
     if (padding < 0 || padding > 255) {
-        trap("tls13_record: padding is 0 to 255 octets");
+        trap("tls13record: padding is 0 to 255 octets");
     }
     padding_size = padding;
 }
@@ -841,7 +841,7 @@ Result<int, Error> Connection.write_fragments(int content_type, bytes content) {
 /// zero-length handshake record, and every message has a four-octet header.
 pub Result<void, Error> Connection.send_handshake(bytes message) {
     if (message.size() == 0) {
-        trap("tls13_record: a handshake message has at least its 4-octet header");
+        trap("tls13record: a handshake message has at least its 4-octet header");
     }
     write_fragments(CONTENT_HANDSHAKE, message)?;
     return Result<void, Error>.Ok;
@@ -893,7 +893,7 @@ pub Result<void, Error> Connection.send_close_notify() {
 /// are installed: KeyUpdate is a post-handshake message.
 pub Result<void, Error> Connection.send_key_update(bool request_update) {
     if (!write_protected || legacy) {
-        trap("tls13_record: send_key_update before install_write_keys, or on a TLS 1.2 connection");
+        trap("tls13record: send_key_update before install_write_keys, or on a TLS 1.2 connection");
     }
     bytes message = [HANDSHAKE_KEY_UPDATE, 0, 0, 1, 0];
     if (request_update) {

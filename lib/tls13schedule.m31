@@ -6,7 +6,7 @@
 // instead of 32) and the key length (32, 16, 32). A `Suite` names the choice
 // and is the first argument of every function that depends on it. Every
 // function is pure and works on `bytes`; nothing touches a socket.
-// `lib/tls13_record.m31` is what puts the keys it derives to use.
+// `lib/tls13record.m31` is what puts the keys it derives to use.
 //
 // The schedule, with RFC 8446 §7.1's own names:
 //

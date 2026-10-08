@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A minimal TLS 1.3 client for probing `lib/tls_server.m31`, written from RFC 8446.
+"""A minimal TLS 1.3 client for probing `lib/tlsserver.m31`, written from RFC 8446.
 
     tlsserver_probe.py PORT CA_PEM CASE [CASE ...]
 

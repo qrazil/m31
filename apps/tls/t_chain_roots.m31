@@ -4,7 +4,7 @@
 //   t_chain_roots <bundle.pem>
 //
 // A root is self-issued, so its own signature has to verify under its own key:
-// the ECDSA and RSA code of `lib/x509_chain.m31` run over the real, varied
+// the ECDSA and RSA code of `lib/x509chain.m31` run over the real, varied
 // certificates of the system's roots. Prints one `fail` line per root that does
 // not verify (`self <family> <reason> signature <OID>`) and then the counts
 //
@@ -19,7 +19,7 @@
 import io;
 import os;
 import x509;
-import x509_chain;
+import x509chain;
 
 List<str> arguments = os.args();
 if (arguments.size() != 2) {
@@ -43,11 +43,11 @@ int ecdsa = 0;
 int other = 0;
 int roots = 0;
 int skipped = 0;
-match (x509_chain.parse_anchors(text)) {
+match (x509chain.parse_anchors(text)) {
     case Err(x509.Error pem_error): {
         trap("t_chain_roots: the bundle is not PEM");
     }
-    case Ok(x509_chain.AnchorSet anchors): {
+    case Ok(x509chain.AnchorSet anchors): {
         roots = anchors.certificates.size();
         skipped = anchors.skipped;
         for (x509.Certificate root in anchors.certificates) {
@@ -61,11 +61,11 @@ match (x509_chain.parse_anchors(text)) {
             } else {
                 other = other + 1;
             }
-            match (x509_chain.check_signed_by(root, root)) {
+            match (x509chain.check_signed_by(root, root)) {
                 case Ok: {
                     verified = verified + 1;
                 }
-                case Err(x509_chain.Error failure): {
+                case Err(x509chain.Error failure): {
                     match (failure) {
                         case UnsupportedAlgorithm: {
                             unsupported = unsupported + 1;

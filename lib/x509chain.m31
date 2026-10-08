@@ -4,9 +4,9 @@
 //
 // API
 // ---
-//   x509_chain.verify(presented, anchors, host, now) -> Result<List<Certificate>, Error>
-//   x509_chain.parse_anchors(pem_text)               -> Result<AnchorSet, x509.Error>
-//   x509_chain.check_signed_by(certificate, issuer)  -> Result<void, Error>
+//   x509chain.verify(presented, anchors, host, now) -> Result<List<Certificate>, Error>
+//   x509chain.parse_anchors(pem_text)               -> Result<AnchorSet, x509.Error>
+//   x509chain.check_signed_by(certificate, issuer)  -> Result<void, Error>
 //
 // `verify` answers with the path it found, the leaf first and the trust
 // anchor last, or the reason no acceptable path exists. `now` is epoch

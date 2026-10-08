@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Every check for TLS 1.3's key schedule and record layer
-# (`lib/tls13_schedule.m31`, `lib/tls13_record.m31`) for all three suites. No handshake, no
+# (`lib/tls13schedule.m31`, `lib/tls13record.m31`) for all three suites. No handshake, no
 # certificates: those are later milestones. Modelled on `apps/tls/test.sh`,
 # with the same rule: nothing here compares this program with itself.
 #
@@ -13,8 +13,8 @@
 # (default `./target/debug/m31c`, built with `cargo build`).
 #
 # Four checks diff the program's output against an oracle's:
-#   tls13_schedule    RFC 8448 section 3 and 4 secrets, keys, IVs, Finished
-#   tls13_record      sealed records for a grid of sequences, types, sizes and
+#   tls13schedule    RFC 8448 section 3 and 4 secrets, keys, IVs, Finished
+#   tls13record      sealed records for a grid of sequences, types, sizes and
 #                     paddings, plus every way a record can fail to open
 #   tls13_connection  a scripted peer's records, then one line per refused
 #                     stream (error and alert), then a loopback socket
@@ -87,20 +87,20 @@ check_record() {
     timeout 300 "$WORK/t_tls13_record" "$suite" >"$WORK/record.$suite.got" 2>"$WORK/record.$suite.err"
     local rc=$?
     if ! python3 apps/tls/oracle_tls13_record.py "$suite" >"$WORK/record.$suite.want" 2>"$WORK/record.$suite.oracle.err"; then
-        bad "tls13_record $suite" "oracle failed" "$(tail -5 "$WORK/record.$suite.oracle.err")"
+        bad "tls13record $suite" "oracle failed" "$(tail -5 "$WORK/record.$suite.oracle.err")"
     elif [ $rc -ne 0 ]; then
-        bad "tls13_record $suite" "t_tls13_record exited $rc" "$(tail -5 "$WORK/record.$suite.err")"
+        bad "tls13record $suite" "t_tls13_record exited $rc" "$(tail -5 "$WORK/record.$suite.err")"
     elif cmp -s "$WORK/record.$suite.got" "$WORK/record.$suite.want"; then
-        note "tls13_record $suite: $(wc -l <"$WORK/record.$suite.got" | tr -d ' ') lines match the AEAD with the TLS nonce rule (grid of records, every failure to open)"
+        note "tls13record $suite: $(wc -l <"$WORK/record.$suite.got" | tr -d ' ') lines match the AEAD with the TLS nonce rule (grid of records, every failure to open)"
     else
-        bad "tls13_record $suite" "$(diff "$WORK/record.$suite.got" "$WORK/record.$suite.want" | head -12 | cut -c1-200)"
+        bad "tls13record $suite" "$(diff "$WORK/record.$suite.got" "$WORK/record.$suite.want" | head -12 | cut -c1-200)"
     fi
 }
 
 # --- house style ---------------------------------------------------------------
 
 if out=$(
-    for f in apps/tls/tls13_*.m31 apps/tls/t_tls13_*.m31 lib/tls13_schedule.m31 lib/tls13_record.m31; do
+    for f in apps/tls/tls13_*.m31 apps/tls/t_tls13_*.m31 lib/tls13schedule.m31 lib/tls13record.m31; do
         "$LANGC" fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then
@@ -113,7 +113,7 @@ if ! python3 -c 'import cryptography' 2>/dev/null; then
     bad "oracles" "the 'cryptography' package is not importable -- pip install cryptography"
 else
     schedule_args=$(python3 apps/tls/oracle_tls13_schedule.py --args 2>"$WORK/schedule.args.err") || {
-        bad "tls13_schedule" "oracle_tls13_schedule.py --args failed" "$(tail -5 "$WORK/schedule.args.err")"
+        bad "tls13schedule" "oracle_tls13_schedule.py --args failed" "$(tail -5 "$WORK/schedule.args.err")"
         schedule_args=
     }
     if [ -n "$schedule_args" ] && build t_tls13_schedule; then
@@ -121,13 +121,13 @@ else
         "$WORK/t_tls13_schedule" $schedule_args >"$WORK/schedule.got" 2>"$WORK/schedule.err"
         rc=$?
         if ! python3 apps/tls/oracle_tls13_schedule.py >"$WORK/schedule.want" 2>"$WORK/schedule.oracle.err"; then
-            bad "tls13_schedule" "oracle failed" "$(tail -5 "$WORK/schedule.oracle.err")"
+            bad "tls13schedule" "oracle failed" "$(tail -5 "$WORK/schedule.oracle.err")"
         elif [ $rc -ne 0 ]; then
-            bad "tls13_schedule" "t_tls13_schedule exited $rc" "$(tail -5 "$WORK/schedule.err")"
+            bad "tls13schedule" "t_tls13_schedule exited $rc" "$(tail -5 "$WORK/schedule.err")"
         elif cmp -s "$WORK/schedule.got" "$WORK/schedule.want"; then
-            note "tls13_schedule: $(wc -l <"$WORK/schedule.got" | tr -d ' ') lines match hashlib/hmac/OpenSSL HKDF for all three suites (RFC 8448 values asserted by the oracle)"
+            note "tls13schedule: $(wc -l <"$WORK/schedule.got" | tr -d ' ') lines match hashlib/hmac/OpenSSL HKDF for all three suites (RFC 8448 values asserted by the oracle)"
         else
-            bad "tls13_schedule" "$(diff "$WORK/schedule.got" "$WORK/schedule.want" | head -12)"
+            bad "tls13schedule" "$(diff "$WORK/schedule.got" "$WORK/schedule.want" | head -12)"
         fi
     fi
     for suite in chacha aes128 aes256; do

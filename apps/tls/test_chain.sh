@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Every check for certificate-chain validation (`lib/x509_chain.m31`, and the
+# Every check for certificate-chain validation (`lib/x509chain.m31`, and the
 # trust modes of `lib/tls.m31`: `SystemRoots` and `CaFile`).
 #
 #   bash apps/tls/test_chain.sh
@@ -8,8 +8,8 @@
 # throwaway CA, intermediate and leaf per case, EC P-256 / P-384 and RSA 2048,
 # each case either right or wrong in one named way. Every case is run
 #
-#   offline   through `t_chain_verify`, which calls `x509_chain.verify` with a
-#             fixed clock and says which `x509_chain.Error` came out
+#   offline   through `t_chain_verify`, which calls `x509chain.verify` with a
+#             fixed clock and says which `x509chain.Error` came out
 #   live      through `t_chain_client` against `openssl s_server` serving that
 #             chain on loopback (`-tls1_3`, ChaCha20-Poly1305), which says which
 #             `tls.Error` the handshake ended with. A few cases (wildcards, a
@@ -91,7 +91,7 @@ await_line() {
 # --- house style ---------------------------------------------------------------
 
 if out=$(
-    for f in lib/tls.m31 lib/x509_chain.m31 apps/tls/t_chain_*.m31; do
+    for f in lib/tls.m31 lib/x509chain.m31 apps/tls/t_chain_*.m31; do
         "$LANGC" fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then
@@ -120,7 +120,7 @@ fi
 NOW=$(cat "$FX/now")
 note "fixtures: $(wc -l <"$FX/cases.tsv") cases"
 
-# --- offline: x509_chain.verify -----------------------------------------------------
+# --- offline: x509chain.verify -----------------------------------------------------
 
 offline_ok=0
 while IFS=$'\t' read -r name host want mode; do
@@ -150,7 +150,7 @@ fi
 
 # --- live: the handshake against openssl s_server -------------------------------------
 
-# The tls.Error that a handshake must end with for each x509_chain.Error.
+# The tls.Error that a handshake must end with for each x509chain.Error.
 live_error() {
     case $1 in
         Expired) echo CertificateExpired ;;

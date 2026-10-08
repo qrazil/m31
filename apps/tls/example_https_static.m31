@@ -11,7 +11,7 @@
 import io;
 import net;
 import os;
-import tls_server;
+import tlsserver;
 
 // A line on standard output, handed to the kernel at once so a test (or a
 // supervisor) polling the log sees it without waiting for a full buffer.
@@ -21,7 +21,7 @@ void say(str line) {
 
 const str PAGE = "hello over https\n";
 
-void serve(tls_server.Conn secure) {
+void serve(tlsserver.Conn secure) {
     match (secure.read_until("\r\n\r\n".to_bytes(), 65536)) {
         case Err(io.Error read_error): {
             return;
@@ -56,12 +56,12 @@ if (arguments.size() > 3) {
         }
     }
 }
-match (tls_server.load_config_files(arguments[1], arguments[2])) {
-    case Err(tls_server.ConfigError config_error): {
+match (tlsserver.load_config_files(arguments[1], arguments[2])) {
+    case Err(tlsserver.ConfigError config_error): {
         io.eprint("cannot load the certificate and key: " + config_error.to_str());
         os.exit(1);
     }
-    case Ok(tls_server.Config config): {
+    case Ok(tlsserver.Config config): {
         match (net.listen("127.0.0.1", port)) {
             case Err(net.Error listen_error): {
                 io.eprint("cannot listen: " + listen_error.to_str());
@@ -75,11 +75,11 @@ match (tls_server.load_config_files(arguments[1], arguments[2])) {
                             io.eprint("accept: " + accept_error.to_str());
                         }
                         case Ok(net.Conn raw): {
-                            match (tls_server.accept(raw, config)) {
-                                case Ok(tls_server.Conn secure): {
+                            match (tlsserver.accept(raw, config)) {
+                                case Ok(tlsserver.Conn secure): {
                                     serve(secure);
                                 }
-                                case Err(tls_server.Error handshake_error): {
+                                case Err(tlsserver.Error handshake_error): {
                                     io.eprint("handshake failed: " + handshake_error.to_str());
                                 }
                             }

@@ -1,4 +1,4 @@
-// The TLS 1.3 record layer's `Connection` (`lib/tls13_record.m31`): handshake
+// The TLS 1.3 record layer's `Connection` (`lib/tls13record.m31`): handshake
 // messages across records, application data, KeyUpdate, alerts, close_notify
 // against truncation, and the refusals. Every line this prints is printed
 // again by `oracle_tls13_connection.py`, which builds the peer's records with
@@ -21,8 +21,8 @@ import net;
 import os;
 import sha256;
 import tls13_hex;
-import tls13_record;
-import tls13_schedule;
+import tls13record;
+import tls13schedule;
 
 const int CHUNK = 7;
 
@@ -50,7 +50,7 @@ str describe(bytes data) {
     return "size=" + str(data.size()) + " sha256=" + sha256.sum(data).hex();
 }
 
-str error_name(tls13_record.Error error) {
+str error_name(tls13record.Error error) {
     match (error) {
         case Io: {
             return "Io";
@@ -125,43 +125,43 @@ Pipe pipe(bytes inbound) {
 
 // --- sending and receiving, with the failures turned into traps ----------------
 
-void sent(str what, Result<void, tls13_record.Error> result) {
+void sent(str what, Result<void, tls13record.Error> result) {
     match (result) {
         case Ok: {
         }
-        case Err(tls13_record.Error error): {
+        case Err(tls13record.Error error): {
             trap("t_tls13_connection: " + what + " failed: " + error_name(error));
         }
     }
 }
 
-void sent_data(str what, Result<int, tls13_record.Error> result) {
+void sent_data(str what, Result<int, tls13record.Error> result) {
     match (result) {
         case Ok(int count): {
         }
-        case Err(tls13_record.Error error): {
+        case Err(tls13record.Error error): {
             trap("t_tls13_connection: " + what + " failed: " + error_name(error));
         }
     }
 }
 
-bytes handshake_of(tls13_record.Connection connection) {
+bytes handshake_of(tls13record.Connection connection) {
     match (connection.receive_handshake()) {
         case Ok(bytes message): {
             return message;
         }
-        case Err(tls13_record.Error error): {
+        case Err(tls13record.Error error): {
             trap("t_tls13_connection: receive_handshake failed: " + error_name(error));
         }
     }
 }
 
-bytes application_of(tls13_record.Connection connection) {
+bytes application_of(tls13record.Connection connection) {
     match (connection.receive_application()) {
         case Ok(bytes data): {
             return data;
         }
-        case Err(tls13_record.Error error): {
+        case Err(tls13record.Error error): {
             trap("t_tls13_connection: receive_application failed: " + error_name(error));
         }
     }
@@ -177,7 +177,7 @@ bytes handshake_message(int kind, bytes body) {
 
 void scripted(bytes wire) {
     Pipe peer = pipe(wire);
-    tls13_record.Connection connection = tls13_record.connection(peer);
+    tls13record.Connection connection = tls13record.connection(peer);
     connection.install_write_keys(write_secret());
     sent("change_cipher_spec", connection.send_change_cipher_spec());
     sent("handshake", connection.send_handshake(handshake_message(11, pattern(39996, 5, 7))));
@@ -210,13 +210,13 @@ void scripted(bytes wire) {
         }
     }
     print("scripted written_records=" + str(connection.write_records()));
-    sent("user_canceled", connection.send_alert(tls13_record.ALERT_USER_CANCELED));
+    sent("user_canceled", connection.send_alert(tls13record.ALERT_USER_CANCELED));
     sent("close_notify", connection.send_close_notify());
     match (connection.send_application([1])) {
         case Ok(int count): {
             print("scripted send_after_close_notify Ok");
         }
-        case Err(tls13_record.Error error): {
+        case Err(tls13record.Error error): {
             print("scripted send_after_close_notify " + error_name(error));
         }
     }
@@ -227,12 +227,12 @@ void scripted(bytes wire) {
 // --- 2. refusals -------------------------------------------------------------------
 
 bytes protected_record(int sequence, int content_type, bytes content) {
-    tls13_schedule.TrafficKeys keys = tls13_schedule.traffic_keys(tls13_schedule.Suite.ChaCha20Poly1305Sha256, read_secret());
-    match (tls13_record.seal_record(tls13_schedule.Suite.ChaCha20Poly1305Sha256, keys.key, keys.iv, sequence, content_type, content, 0)) {
+    tls13schedule.TrafficKeys keys = tls13schedule.traffic_keys(tls13schedule.Suite.ChaCha20Poly1305Sha256, read_secret());
+    match (tls13record.seal_record(tls13schedule.Suite.ChaCha20Poly1305Sha256, keys.key, keys.iv, sequence, content_type, content, 0)) {
         case Ok(bytes wire): {
             return wire;
         }
-        case Err(tls13_record.Error error): {
+        case Err(tls13record.Error error): {
             trap("t_tls13_connection: seal failed: " + error_name(error));
         }
     }
@@ -241,9 +241,9 @@ bytes protected_record(int sequence, int content_type, bytes content) {
 // The AEAD applied to `inner` under `outer_type`'s header, as the library
 // itself would refuse to build it.
 bytes forged(int outer_type, bytes inner, int sequence) {
-    tls13_schedule.TrafficKeys keys = tls13_schedule.traffic_keys(tls13_schedule.Suite.ChaCha20Poly1305Sha256, read_secret());
+    tls13schedule.TrafficKeys keys = tls13schedule.traffic_keys(tls13schedule.Suite.ChaCha20Poly1305Sha256, read_secret());
     bytes wire = [outer_type, 3, 3, (inner.size() + 16) >> 8, (inner.size() + 16) & 0xFF];
-    wire.extend(chacha20poly1305.seal(keys.key, tls13_record.record_nonce(keys.iv, sequence), inner, wire));
+    wire.extend(chacha20poly1305.seal(keys.key, tls13record.record_nonce(keys.iv, sequence), inner, wire));
     return wire;
 }
 
@@ -254,12 +254,12 @@ bytes joined(bytes first, bytes second) {
 }
 
 bytes plain(int content_type, bytes content) {
-    return tls13_record.plain_record(content_type, content);
+    return tls13record.plain_record(content_type, content);
 }
 
-str step_receive(tls13_record.Connection connection) {
+str step_receive(tls13record.Connection connection) {
     match (connection.receive()) {
-        case Ok(tls13_record.Message message): {
+        case Ok(tls13record.Message message): {
             match (message.kind) {
                 case Handshake: {
                     return "hs:" + str(message.data.size());
@@ -272,24 +272,24 @@ str step_receive(tls13_record.Connection connection) {
                 }
             }
         }
-        case Err(tls13_record.Error error): {
+        case Err(tls13record.Error error): {
             return "err:" + error_name(error);
         }
     }
 }
 
-str step_handshake(tls13_record.Connection connection) {
+str step_handshake(tls13record.Connection connection) {
     match (connection.receive_handshake()) {
         case Ok(bytes message): {
             return "hs:" + str(message.size());
         }
-        case Err(tls13_record.Error error): {
+        case Err(tls13record.Error error): {
             return "err:" + error_name(error);
         }
     }
 }
 
-str step_application(tls13_record.Connection connection) {
+str step_application(tls13record.Connection connection) {
     match (connection.receive_application()) {
         case Ok(bytes data): {
             if (data.size() == 0) {
@@ -297,7 +297,7 @@ str step_application(tls13_record.Connection connection) {
             }
             return "data:" + str(data.size());
         }
-        case Err(tls13_record.Error error): {
+        case Err(tls13record.Error error): {
             return "err:" + error_name(error);
         }
     }
@@ -306,7 +306,7 @@ str step_application(tls13_record.Connection connection) {
 // mode 0: receive, 1: receive_handshake, 2: receive_application.
 void refusal(str name, bytes wire, bool read_protected, bool write_protected, int mode, int steps) {
     Pipe peer = pipe(wire);
-    tls13_record.Connection connection = tls13_record.connection(peer);
+    tls13record.Connection connection = tls13record.connection(peer);
     if (read_protected) {
         sent("read keys", connection.install_read_keys(read_secret()));
     }
@@ -432,13 +432,13 @@ void key_change_refusals() {
     bytes message_a = handshake_message(2, pattern(8, 1, 1));
     bytes partial = joined(message_a, [11, 0]);
     Pipe peer = pipe(plain(22, partial));
-    tls13_record.Connection connection = tls13_record.connection(peer);
+    tls13record.Connection connection = tls13record.connection(peer);
     print("case key_change_with_partial_message | " + step_handshake(connection) + " |");
     match (connection.install_read_keys(read_secret())) {
         case Ok: {
             print("case key_change_with_partial_message | install Ok");
         }
-        case Err(tls13_record.Error error): {
+        case Err(tls13record.Error error): {
             print("case key_change_with_partial_message | install " + error_name(error) + " | sent=" + peer.outbound.peek().hex());
         }
     }
@@ -446,18 +446,18 @@ void key_change_refusals() {
         case Ok(int count): {
             print("case key_change_with_partial_message | send Ok");
         }
-        case Err(tls13_record.Error error): {
+        case Err(tls13record.Error error): {
             print("case key_change_with_partial_message | send " + error_name(error));
         }
     }
     Pipe whole = pipe(plain(22, joined(message_a, message_a)));
-    tls13_record.Connection second = tls13_record.connection(whole);
+    tls13record.Connection second = tls13record.connection(whole);
     print("case key_change_with_whole_message_buffered | " + step_handshake(second) + " |");
     match (second.install_read_keys(read_secret())) {
         case Ok: {
             print("case key_change_with_whole_message_buffered | install Ok");
         }
-        case Err(tls13_record.Error error): {
+        case Err(tls13record.Error error): {
             print("case key_change_with_whole_message_buffered | install " + error_name(error));
         }
     }
@@ -498,7 +498,7 @@ net.Conn accepted(net.Listener listener) {
     }
 }
 
-bytes application_until(tls13_record.Connection connection, int total) {
+bytes application_until(tls13record.Connection connection, int total) {
     bytes got = [];
     while (got.size() < total) {
         bytes data = application_of(connection);
@@ -510,13 +510,13 @@ bytes application_until(tls13_record.Connection connection, int total) {
     return got;
 }
 
-void loopback(tls13_schedule.Suite suite, str label) {
+void loopback(tls13schedule.Suite suite, str label) {
     str prefix = "loopback-" + label + " ";
     net.Listener listener = listening();
     net.Conn client_socket = connected(listener);
     net.Conn server_socket = accepted(listener);
-    tls13_record.Connection client = tls13_record.connection(client_socket);
-    tls13_record.Connection server = tls13_record.connection(server_socket);
+    tls13record.Connection client = tls13record.connection(client_socket);
+    tls13record.Connection server = tls13record.connection(server_socket);
     client.use_suite(suite);
     server.use_suite(suite);
     bytes up = pattern(suite.hash_size(), 5, 9);
@@ -543,8 +543,8 @@ void loopback(tls13_schedule.Suite suite, str label) {
     print(prefix + "client end " + describe(application_of(client)));
     net.Conn cut_client_socket = connected(listener);
     net.Conn cut_server_socket = accepted(listener);
-    tls13_record.Connection cut_client = tls13_record.connection(cut_client_socket);
-    tls13_record.Connection cut_server = tls13_record.connection(cut_server_socket);
+    tls13record.Connection cut_client = tls13record.connection(cut_client_socket);
+    tls13record.Connection cut_server = tls13record.connection(cut_server_socket);
     cut_client.use_suite(suite);
     cut_server.use_suite(suite);
     cut_client.install_write_keys(up);
@@ -553,7 +553,7 @@ void loopback(tls13_schedule.Suite suite, str label) {
     match (cut_client.close()) {
         case Ok(bool closed): {
         }
-        case Err(tls13_record.Error close_error): {
+        case Err(tls13record.Error close_error): {
             trap("t_tls13_connection: close failed");
         }
     }
@@ -567,6 +567,6 @@ if (arguments.size() != 2) {
 scripted(tls13_hex.decode(arguments[1]));
 refusals();
 key_change_refusals();
-loopback(tls13_schedule.Suite.ChaCha20Poly1305Sha256, "chacha");
-loopback(tls13_schedule.Suite.Aes128GcmSha256, "aes128");
-loopback(tls13_schedule.Suite.Aes256GcmSha384, "aes256");
+loopback(tls13schedule.Suite.ChaCha20Poly1305Sha256, "chacha");
+loopback(tls13schedule.Suite.Aes128GcmSha256, "aes128");
+loopback(tls13schedule.Suite.Aes256GcmSha384, "aes256");

@@ -1,9 +1,9 @@
-// P-256 signing (`lib/ecdsa_sign.m31`) against the cases `tlsserver_sign_oracle.py`
+// P-256 signing (`lib/ecdsasign.m31`) against the cases `tlsserver_sign_oracle.py`
 // writes. Each input line is `name|secret_hex|digest_hex`; the program prints
 // `name public_key_hex raw_signature_hex der_signature_hex`. The oracle prints
 // the expected lines, so no expectation is written down here.
 
-import ecdsa_sign;
+import ecdsasign;
 import bignum;
 import io;
 import os;
@@ -36,8 +36,8 @@ if (argv.size() < 2) {
                 bytes secret = decode(fields[1]);
                 bytes digest = decode(fields[2]);
                 str public_text = "error";
-                match (ecdsa_sign.public_key(secret)) {
-                    case Err(ecdsa_sign.Error error): {
+                match (ecdsasign.public_key(secret)) {
+                    case Err(ecdsasign.Error error): {
                         public_text = "error";
                     }
                     case Ok(bytes point): {
@@ -45,8 +45,8 @@ if (argv.size() < 2) {
                     }
                 }
                 str raw_text = "error";
-                match (ecdsa_sign.sign_raw(secret, digest)) {
-                    case Err(ecdsa_sign.Error error): {
+                match (ecdsasign.sign_raw(secret, digest)) {
+                    case Err(ecdsasign.Error error): {
                         raw_text = "error";
                     }
                     case Ok(bytes raw): {
@@ -54,8 +54,8 @@ if (argv.size() < 2) {
                     }
                 }
                 str der_text = "error";
-                match (ecdsa_sign.sign(secret, digest)) {
-                    case Err(ecdsa_sign.Error error): {
+                match (ecdsasign.sign(secret, digest)) {
+                    case Err(ecdsasign.Error error): {
                         der_text = "error";
                     }
                     case Ok(bytes der): {

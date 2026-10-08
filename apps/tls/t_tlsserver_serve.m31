@@ -17,7 +17,7 @@
 import io;
 import net;
 import os;
-import tls_server;
+import tlsserver;
 
 // A line on standard output, handed to the kernel at once so a test (or a
 // supervisor) polling the log sees it without waiting for a full buffer.
@@ -35,7 +35,7 @@ bytes big_body() {
     return body;
 }
 
-void respond(tls_server.Conn secure, bytes body) {
+void respond(tlsserver.Conn secure, bytes body) {
     str head = "HTTP/1.1 200 OK\r\nContent-Length: " + body.size().to_str() + "\r\nConnection: close\r\n\r\n";
     bytes message = head.to_bytes();
     message.extend(body);
@@ -48,7 +48,7 @@ void respond(tls_server.Conn secure, bytes body) {
     }
 }
 
-void serve(tls_server.Conn secure, str mode, bytes big) {
+void serve(tlsserver.Conn secure, str mode, bytes big) {
     if (mode == "echo") {
         while (true) {
             match (secure.read_until("\n".to_bytes(), 65536)) {
@@ -90,12 +90,12 @@ void serve(tls_server.Conn secure, str mode, bytes big) {
     Result<bool, io.Error> closed = secure.close();
 }
 
-tls_server.Config load(str chain, str key) {
-    match (tls_server.load_config_files(chain, key)) {
-        case Ok(tls_server.Config config): {
+tlsserver.Config load(str chain, str key) {
+    match (tlsserver.load_config_files(chain, key)) {
+        case Ok(tlsserver.Config config): {
             return config;
         }
-        case Err(tls_server.ConfigError config_error): {
+        case Err(tlsserver.ConfigError config_error): {
             io.eprint("cannot load " + chain + ": " + config_error.to_str());
             os.exit(1);
             trap("unreachable");
@@ -118,12 +118,12 @@ match (arguments[4].parse_int()) {
         os.exit(2);
     }
 }
-List<tls_server.Config> configs = [];
+List<tlsserver.Config> configs = [];
 configs.push(load(arguments[1], arguments[2]));
 if (arguments.size() > 7) {
     configs.push(load(arguments[6], arguments[7]));
 }
-for (tls_server.Config config in configs) {
+for (tlsserver.Config config in configs) {
     if (arguments[5] == "-") {
         config.set_protocols([]);
     } else {
@@ -149,12 +149,12 @@ match (net.listen("127.0.0.1", 0)) {
                 }
                 case Ok(net.Conn raw): {
                     count = count + 1;
-                    match (tls_server.accept_among(raw, configs, timeout_ms: timeout_ms)) {
-                        case Ok(tls_server.Conn secure): {
+                    match (tlsserver.accept_among(raw, configs, timeout_ms: timeout_ms)) {
+                        case Ok(tlsserver.Conn secure): {
                             say("conn " + count.to_str() + " ok sni=" + secure.server_name() + " alpn=" + secure.alpn());
                             serve(secure, mode, big);
                         }
-                        case Err(tls_server.Error handshake_error): {
+                        case Err(tlsserver.Error handshake_error): {
                             say("conn " + count.to_str() + " error " + handshake_error.to_str());
                         }
                     }
