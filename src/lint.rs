@@ -37,6 +37,7 @@ pub enum Kind {
     Const,
     TypeParam,
     ModuleName,
+    BooleanName,
 }
 
 impl Kind {
@@ -54,6 +55,7 @@ impl Kind {
             Kind::Const => "constant",
             Kind::TypeParam => "type parameter",
             Kind::ModuleName => "module name",
+            Kind::BooleanName => "boolean name",
         }
     }
 }
@@ -121,7 +123,60 @@ const ABBREVIATIONS: &[(&str, &str)] = &[
     ("conn", "connection"),
     ("req", "request"),
     ("resp", "response"),
+    ("cols", "columns"),
+    ("vis", "visible"),
+    ("sym", "symbol"),
+    ("sty", "style"),
+    ("wid", "width"),
+    ("keyw", "keyword"),
+    ("rel", "relative"),
+    ("hdr", "header"),
+    ("oid", "object_id"),
+    ("nid", "node_id"),
+    ("segs", "segments"),
+    ("pat", "pattern"),
+    ("rep", "replacement"),
+    ("hay", "haystack"),
 ];
+
+/// Prefixes that mark a name as a yes/no question (naming-decision section 8,
+/// item 10): the locked `is_` and `has_`, plus the natural-language ones.
+const BOOL_PREFIXES: &[&str] = &[
+    "is_", "has_", "can_", "should_", "did_", "was_", "needs_", "will_",
+];
+
+/// The entry point, exempt from the boolean rule like it is from every
+/// other "reads at the call site" rule.
+const ENTRY_NAMES: &[&str] = &["main"];
+
+/// The name with every `_`-separated segment that is a table abbreviation
+/// expanded, or `None` when no segment is one. `upper` is for constants:
+/// segments are matched lower-cased and the expansion is upper-cased again.
+fn expand_abbreviations(name: &str, upper: bool) -> Option<String> {
+    let mut hit = false;
+    let parts: Vec<String> = name
+        .split('_')
+        .map(|seg| {
+            let low = seg.to_ascii_lowercase();
+            match ABBREVIATIONS.iter().find(|(a, _)| *a == low) {
+                Some((_, full)) => {
+                    hit = true;
+                    if upper {
+                        full.to_ascii_uppercase()
+                    } else {
+                        (*full).to_string()
+                    }
+                }
+                None => seg.to_string(),
+            }
+        })
+        .collect();
+    hit.then(|| parts.join("_"))
+}
+
+fn has_bool_prefix(name: &str) -> bool {
+    BOOL_PREFIXES.iter().any(|p| name.starts_with(p))
+}
 
 pub struct Linter<'a> {
     prog: &'a Program,
@@ -184,7 +239,11 @@ impl Linter<'_> {
     }
 
     fn func(&mut self, f: &Func) {
-        self.check_case(Kind::Function, bare(&f.name), f.span);
+        let name = bare(&f.name);
+        let flagged = self.check_case(Kind::Function, name, f.span);
+        if !flagged && f.ret == Ty::Bool && !self.bool_function_ok(name) {
+            self.report_boolean(Kind::Function, name, f.span);
+        }
         for tp in f.tparams.iter().chain(&f.recv_tparams) {
             self.check_case(Kind::TypeParam, tp, f.span);
         }
@@ -380,10 +439,48 @@ impl Linter<'_> {
             );
             return self.report(kind, name, span, reason, suggestion);
         }
-        if let Some((_, full)) = ABBREVIATIONS.iter().find(|(a, _)| *a == name) {
-            let reason = format!("{} `{name}` is an abbreviation", kind.label());
-            self.report(kind, name, span, reason, Some((*full).to_string()));
+        if let Some(full) = expand_abbreviations(name, false) {
+            return self.report_abbreviation(kind, name, span, full);
         }
+        let is_value = matches!(
+            kind,
+            Kind::Local | Kind::Param | Kind::Field | Kind::LambdaParam
+        );
+        if is_value && ty == Ty::Bool && !has_bool_prefix(name) {
+            self.report_boolean(kind, name, span);
+        }
+    }
+
+    /// A whole-name abbreviation (`buf`) or one segment of a longer name
+    /// (`msg_buf`); the suggestion is the full name either way.
+    fn report_abbreviation(&mut self, kind: Kind, name: &str, span: Span, full: String) {
+        let reason = if name.contains('_') {
+            format!("{} `{name}` contains an abbreviation", kind.label())
+        } else {
+            format!("{} `{name}` is an abbreviation", kind.label())
+        };
+        self.report(kind, name, span, reason, Some(full));
+    }
+
+    /// A value or function that answers a yes/no question and does not say
+    /// so. `kind` only words the reason; the finding is a "boolean name".
+    fn report_boolean(&mut self, what: Kind, name: &str, span: Span) {
+        let reason = format!(
+            "{} `{name}` is a bool; a yes/no name starts with is_, has_, can_, should_, did_, was_, needs_ or will_",
+            what.label()
+        );
+        let fix = format!("is_{name}");
+        self.report(Kind::BooleanName, name, span, reason, Some(fix));
+    }
+
+    /// Functions the boolean rule leaves alone: the entry point, the
+    /// two-letter words (`a.eq(b)`), the seam, and anything in `--allow`.
+    fn bool_function_ok(&self, name: &str) -> bool {
+        has_bool_prefix(name)
+            || name.starts_with("__")
+            || self.opts.allow.iter().any(|a| a == name)
+            || ENTRY_NAMES.contains(&name)
+            || (!self.opts.strict && SHORT_WORDS.contains(&name))
     }
 
     fn builtin_ok(&self, name: &str, ty: Ty, counting: bool) -> bool {
@@ -414,9 +511,11 @@ impl Linter<'_> {
         (snake.len() >= MIN_LEN && snake != name && is_snake(&snake)).then_some(snake)
     }
 
-    fn check_case(&mut self, kind: Kind, name: &str, span: Span) {
+    /// True when it reported something, so the caller can skip its own
+    /// checks: one finding per name.
+    fn check_case(&mut self, kind: Kind, name: &str, span: Span) -> bool {
         if name.starts_with("__") || self.opts.allow.iter().any(|a| a == name) {
-            return;
+            return false;
         }
         let (ok, want, fixed) = match kind {
             Kind::Type | Kind::Variant | Kind::TypeParam => {
@@ -432,7 +531,10 @@ impl Linter<'_> {
         if !ok {
             let reason = format!("{} `{name}` is not {want}", kind.label());
             self.report(kind, name, span, reason, Some(fixed));
-        } else if matches!(kind, Kind::Function | Kind::Const)
+            return true;
+        }
+        let valued = matches!(kind, Kind::Function | Kind::Const);
+        if valued
             && name.len() < MIN_LEN
             && !(kind == Kind::Function && !self.opts.strict && SHORT_WORDS.contains(&name))
         {
@@ -441,7 +543,15 @@ impl Linter<'_> {
                 kind.label()
             );
             self.report(kind, name, span, reason, None);
+            return true;
         }
+        if valued {
+            if let Some(full) = expand_abbreviations(name, kind == Kind::Const) {
+                self.report_abbreviation(kind, name, span, full);
+                return true;
+            }
+        }
+        false
     }
 
     /// Spans point at the start of the declaration, not the name, so find
@@ -656,11 +766,26 @@ pub const USAGE: &str =
     "usage: m31c lint [--allow NAME[,NAME..]] [--strict] [--summary] <file|dir>...";
 
 /// Printed after `USAGE` by `lint --help`.
-const MODULE_HELP: &str = "module names (finding kind \"module name\", reported on line 1):
+const HELP: &str = "module names (finding kind \"module name\", reported on line 1):
   lib/ (stdlib)     lowercase, one word: io, net, sha256
   any other module  PREFIX_name: TUI_text, GIT_refs, MD_blocks
   exempt            entry points (top-level statements, or main.m31) and
-                    files under tests/, corpus/, scripts/, docs/";
+                    files under tests/, corpus/, scripts/, docs/
+
+abbreviations (reported under the kind of the name that holds them):
+  a name is flagged when it is a table abbreviation or when any
+  `_`-separated segment is: header_len -> header_length, MAX_LEN ->
+  MAX_LENGTH. Types and variants are not checked; --allow NAME silences
+  the whole name
+
+boolean names (finding kind \"boolean name\"):
+  a local, parameter, lambda parameter or field of type bool, and a function
+  or method returning bool, starts with is_, has_, can_, should_, did_,
+  was_, needs_ or will_; suggestion is_<name>. Exempt: main, the
+  two-letter function words (at, by, eq, of, ok, up) and --allow names
+
+--summary prints a count per kind (\"boolean name\" included) and the
+twelve most common names";
 
 /// The `lint` subcommand. Exit 0 clean, 1 findings or a file that does not
 /// parse, 2 bad usage.
@@ -684,7 +809,7 @@ pub fn main(args: &[String]) -> std::process::ExitCode {
             "--strict" => opts.strict = true,
             "--summary" => summary = true,
             "--help" => {
-                println!("{USAGE}\n{MODULE_HELP}");
+                println!("{USAGE}\n{HELP}");
                 return ExitCode::SUCCESS;
             }
             other if other.starts_with('-') => {
@@ -967,5 +1092,150 @@ mod tests {
         };
         assert_eq!(module_name("TUI_text.m31", DECLS, &strict), None);
         assert!(module_name("tuitext.m31", DECLS, &strict).is_some());
+    }
+
+    fn kinds(src: &str, opts: &Opts) -> Vec<(String, Kind, Option<String>)> {
+        let prog = parse(src, "sample").expect("parses");
+        lint(&prog, src, opts)
+            .into_iter()
+            .map(|f| (f.name, f.kind, f.suggestion))
+            .collect()
+    }
+
+    #[test]
+    fn new_table_entries_are_abbreviations() {
+        for (short, full) in [
+            ("cols", "columns"),
+            ("vis", "visible"),
+            ("sym", "symbol"),
+            ("sty", "style"),
+            ("wid", "width"),
+            ("keyw", "keyword"),
+            ("rel", "relative"),
+            ("hdr", "header"),
+            ("oid", "object_id"),
+            ("nid", "node_id"),
+            ("segs", "segments"),
+            ("pat", "pattern"),
+            ("rep", "replacement"),
+            ("hay", "haystack"),
+        ] {
+            let src = format!("int use_it(int {short}) {{\n    return {short};\n}}\n");
+            assert_eq!(
+                kinds(&src, &Opts::default()),
+                [(short.to_string(), Kind::Param, Some(full.to_string()))]
+            );
+        }
+    }
+
+    #[test]
+    fn any_segment_of_a_name_may_be_an_abbreviation() {
+        let src = "type Frame {\n    int header_len;\n    int base_off;\n    int end;\n}\nint read_it(int msg_buf, int hex_val) {\n    int src_dst_len = msg_buf + hex_val;\n    return src_dst_len;\n}\n";
+        let found = kinds(src, &Opts::default());
+        let got: Vec<_> = found
+            .iter()
+            .map(|(n, k, s)| (n.as_str(), *k, s.as_deref().unwrap_or("")))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("header_len", Kind::Field, "header_length"),
+                ("msg_buf", Kind::Param, "message_buffer"),
+                ("hex_val", Kind::Param, "hex_value"),
+                ("src_dst_len", Kind::Local, "source_destination_length"),
+            ]
+        );
+    }
+
+    #[test]
+    fn segment_rule_matches_whole_segments_and_honours_allow() {
+        // `length`, `bufferize`, `plan` and `repeat` contain table entries
+        // as substrings only; `off`, `end`, `on`, `of` and `by` are words.
+        let src = "int plan_it(int bufferize, int repeat_by, int base_off, int on_end) {\n    return bufferize;\n}\n";
+        assert!(kinds(src, &Opts::default()).is_empty());
+        let src = "int use_it(int header_len) {\n    return header_len;\n}\n";
+        assert_eq!(kinds(src, &Opts::default()).len(), 1);
+        let allowed = Opts {
+            allow: vec!["header_len".into()],
+            ..Opts::default()
+        };
+        assert!(kinds(src, &allowed).is_empty());
+    }
+
+    #[test]
+    fn functions_and_constants_get_the_segment_rule_but_types_do_not() {
+        let src = "const int MAX_LEN = 4;\nconst int LIMIT = 4;\ntype Msg_Buf {\n    int size;\n}\ntype Args {\n    int size;\n}\nint Args.read_buf() {\n    return 1;\n}\nint parse_hdr() {\n    return 1;\n}\n";
+        let got: Vec<_> = kinds(src, &Opts::default())
+            .into_iter()
+            .map(|(n, k, s)| (n, k, s.unwrap_or_default()))
+            .collect();
+        let want = |n: &str, k, s: &str| (n.to_string(), k, s.to_string());
+        // `Msg_Buf` is not PascalCase, but that is the casing rule's finding
+        // (a type) and not an abbreviation finding.
+        assert!(got.contains(&want("MAX_LEN", Kind::Const, "MAX_LENGTH")));
+        assert!(got.contains(&want("parse_hdr", Kind::Function, "parse_header")));
+        assert!(got.contains(&want("read_buf", Kind::Function, "read_buffer")));
+        assert!(!got.iter().any(|(n, _, _)| n == "LIMIT" || n == "Args"));
+        let types: Vec<_> = got.iter().filter(|(_, k, _)| *k == Kind::Type).collect();
+        assert_eq!(types.len(), 1);
+        assert_eq!(types[0].2, "MsgBuf");
+    }
+
+    #[test]
+    fn module_qualified_uses_of_args_are_not_declarations() {
+        let src = "import args;\nint run_it() {\n    int count = args.count();\n    List<str> rest = args.rest();\n    return count + rest.size();\n}\n";
+        assert!(kinds(src, &Opts::default()).is_empty());
+    }
+
+    #[test]
+    fn bool_values_and_functions_need_a_question_prefix() {
+        let src = "type Cell {\n    bool dirty;\n    bool is_empty;\n    bool can_wrap;\n    int count;\n}\nbool visible(bool done, bool has_more, bool should_stop, bool did_fail, bool was_hit, bool needs_ink, bool will_run, int amount) {\n    bool found = done;\n    bool is_last = found;\n    return is_last;\n}\n";
+        let got: Vec<_> = kinds(src, &Opts::default())
+            .into_iter()
+            .map(|(n, k, s)| (n, k, s.unwrap_or_default()))
+            .collect();
+        let b = |n: &str| (n.to_string(), Kind::BooleanName, format!("is_{n}"));
+        assert_eq!(got, [b("dirty"), b("visible"), b("done"), b("found")]);
+    }
+
+    #[test]
+    fn boolean_rule_exemptions_and_non_bool_types() {
+        // eq/ok are function words, main is the entry, --allow is honoured,
+        // and only the exact type `bool` counts: a List<bool> or an int is
+        // not a yes/no answer.
+        let src = "bool eq(int left, int right) {\n    return left == right;\n}\nbool ok(int code) {\n    return code == 0;\n}\nbool main() {\n    return true;\n}\nbool enabled(List<bool> flags, int mask) {\n    return true;\n}\nint flag_count(int total) {\n    return total;\n}\n";
+        let got = kinds(src, &Opts::default());
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "enabled");
+        let allowed = Opts {
+            allow: vec!["enabled".into()],
+            ..Opts::default()
+        };
+        assert!(kinds(src, &allowed).is_empty());
+        // strict drops the function words, as it does for the length rule:
+        // `eq` is then too short, which is the one finding it gets
+        let strict = Opts {
+            strict: true,
+            ..Opts::default()
+        };
+        assert!(kinds(src, &strict).iter().any(|(n, _, _)| n == "eq"));
+    }
+
+    #[test]
+    fn a_bad_name_gets_one_finding_not_two() {
+        // `ok` as a bool parameter is too short; it is not also a boolean
+        // name. `done_buf` is an abbreviation and not also a boolean name.
+        let src = "int use_it(bool ok, bool done_buf) {\n    return 1;\n}\n";
+        let got = kinds(src, &Opts::default());
+        assert_eq!(got.len(), 2);
+        assert!(got.iter().all(|(_, k, _)| *k == Kind::Param));
+    }
+
+    #[test]
+    fn boolean_prefixes_need_the_underscore() {
+        // `island` starts with `is` and `hash` with `has`, but neither says
+        // `is_`/`has_`.
+        let src = "int use_it(bool island, bool hash) {\n    return 1;\n}\n";
+        assert_eq!(kinds(src, &Opts::default()).len(), 2);
     }
 }

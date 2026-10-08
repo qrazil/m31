@@ -160,7 +160,21 @@ cfg→config  ctx→context  num→number  pos→position  arr→array  cur→cu
 prev→previous  src→source  dst→destination  buf→buffer  ptr→pointer
 elem→element  args→arguments  param→parameter  tok→token  err→error
 dir→directory  len→length  conn→connection  req→request
-resp→response`
+resp→response  cols→columns  vis→visible  sym→symbol  sty→style  wid→width
+keyw→keyword  rel→relative  hdr→header  oid→object_id  nid→node_id
+segs→segments  pat→pattern  rep→replacement  hay→haystack`
+
+The table applies **per segment**: an underscore-separated name is flagged
+when *any* of its segments is a table entry, and the suggestion is the whole
+name with each such segment expanded — `header_len→header_length`,
+`msg_buf→message_buffer`, `hex_val→hex_value`, `MAX_LEN→MAX_LENGTH`. It covers
+locals, parameters, fields, functions, methods and constants (a constant's
+segments are matched lower-cased); type and variant names are PascalCase, have
+no segments, and are not checked. A name listed in `--allow` is accepted whole.
+Segments match exactly, so `bufferize` and `repeat` are fine, and `off`,
+`end`, `on`, `of` and `by` are full words that stay allowed: `base_off` passes.
+The lint reads declarations only, so `args.get()` — the stdlib `args` module —
+is never flagged; a *binding* called `args` is, as before.
 
 The table is a list of *observed* abbreviations, not a dictionary — no tool
 can decide that `fd` is cryptic and `url` is not, and this document will not
@@ -361,8 +375,8 @@ finding or any file that does not parse, **2** bad usage. A summary line goes
 to stderr; `--summary` adds per-kind counts and the twelve most common names.
 
 It checks: casing for every kind, the three-character floor for values and
-for function and constant names, the abbreviation table, and the exceptions of
-§3.2. It does not check that a name is *good* — `data` and `thing` pass —
+for function and constant names, the abbreviation table (per segment, §3.3),
+the boolean-name rule (§8 item 10), and the exceptions of §3.2. It does not check that a name is *good* — `data` and `thing` pass —
 and cannot. One finding per name at most: three findings on `e` is noise.
 
 Why in the compiler and not a script: the hard part is knowing a name's *kind*
@@ -519,7 +533,18 @@ the same letter in two functions counts once per line:
 9. **Acronyms are ordinary words**, except in a module prefix: `HttpServer`,
    `http_server`, but `HTTP_server` as a module.
 10. **Booleans and conversions.** A function or value that answers a yes/no
-    question starts with `is_` or `has_` (`is_ok`, `has_prefix`).
+    question starts with `is_` or `has_` (`is_ok`, `has_prefix`). The natural
+    boolean prefixes `can_`, `should_`, `did_`, `was_`, `needs_` and `will_`
+    are also accepted (`can_wrap`, `should_redraw`, `needs_flush`) — added to
+    this item with the lint rule below, because `is_`/`has_` alone forces
+    `is_should_redraw`. `m31c lint` enforces it syntactically: a local,
+    parameter, lambda parameter or field whose declared type is exactly
+    `bool`, and a function or method that returns `bool`, is reported as a
+    "boolean name" (suggestion `is_<name>`) unless it starts with one of the
+    eight prefixes. Exempt: `main`, the function words of §3.2 (`eq`, `ok`,
+    ...), `__` seam names, and anything in `--allow`. The lint cannot see a
+    yes/no question that is not typed `bool` (an `int` flag) and does not
+    check that a `bool`-typed name is *right*, only that it is a question.
     Conversions are `to_x` and `from_x` (`Error.to_str()`).
 11. **Generic type parameters** stay single capital letters: `T`, `E`, `K`,
     `V`. They are the one place a short name is conventional.
