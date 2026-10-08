@@ -1,0 +1,70 @@
+== keep-alive: served 2
+HTTP/1.1 200 OK
+content-type: text/plain; charset=utf-8
+content-length: 11
+
+GET /one #1HTTP/1.1 200 OK
+content-type: text/plain; charset=utf-8
+content-length: 11
+connection: close
+
+GET /two #2
+== cap of 2: served 2
+HTTP/1.1 200 OK
+content-type: text/plain; charset=utf-8
+content-length: 5
+
+helloHTTP/1.1 200 OK
+content-type: text/plain; charset=utf-8
+content-length: 5
+connection: close
+
+hello
+== refusal: served 1
+HTTP/1.1 200 OK
+content-type: text/plain; charset=utf-8
+content-length: 5
+
+helloHTTP/1.1 400 Bad Request
+content-type: text/plain; charset=utf-8
+content-length: 36
+connection: close
+
+the message is not well-formed HTTP
+
+== empty: served 0
+
+== http/1.0: served 1
+HTTP/1.1 200 OK
+content-type: text/plain; charset=utf-8
+content-length: 5
+connection: close
+
+hello
+== http/1.0 keep-alive: served 2
+HTTP/1.1 200 OK
+content-type: text/plain; charset=utf-8
+content-length: 5
+connection: keep-alive
+
+helloHTTP/1.1 200 OK
+content-type: text/plain; charset=utf-8
+content-length: 5
+connection: close
+
+hello
+== dead stream: failed: the connection was reset
+== oversize head: served 0
+HTTP/1.1 431 Request Header Fields Too Large
+content-type: text/plain; charset=utf-8
+content-length: 41
+connection: close
+
+a limit this module publishes was passed
+
+== truncated: served 1
+HTTP/1.1 200 OK
+content-type: text/plain; charset=utf-8
+content-length: 5
+
+hello
