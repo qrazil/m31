@@ -505,3 +505,23 @@ the same letter in two functions counts once per line:
    already refuses a value that shares a module's name. Renaming a module
    renames its file and every import of it, so it is a breaking change for
    consumers and is done once per repo, in the migration of that repo.
+
+7. **Prefixes.** The upper-case prefix is the project name or a short
+   established acronym of it: `TUI_` (tui), `GIT_` (gitui), `MD_`
+   (term-markdown). A one-file application needs none.
+8. **Multi-word stdlib names are joined words.** `lib/` modules stay one
+   lowercase word with no underscore: `x509chain`, `tls13record`,
+   `tlsserver`, `signingkey`, `ecdsasign`, like the existing `sha256` and
+   `chacha20poly1305`. Snake_case in `lib/` would make a module look like a
+   value.
+9. **Acronyms are ordinary words**, except in a module prefix: `HttpServer`,
+   `http_server`, but `HTTP_server` as a module.
+10. **Booleans and conversions.** A function or value that answers a yes/no
+    question starts with `is_` or `has_` (`is_ok`, `has_prefix`).
+    Conversions are `to_x` and `from_x` (`Error.to_str()`).
+11. **Generic type parameters** stay single capital letters: `T`, `E`, `K`,
+    `V`. They are the one place a short name is conventional.
+12. **Rollout.** The lint goes into `gates.sh` after every repo passes. Renames
+    in `lib/` are breaking and ship together as one minor release (0.3.0)
+    with a rename list in the release notes. Docs and comments that quote old
+    names are updated in the same commit as the rename.
