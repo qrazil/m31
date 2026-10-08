@@ -1,0 +1,5 @@
+name path-dep-dotdot
+version 0.1.0
+
+# `..` leads out of this directory to a sibling project, used in place.
+util path ../path-dep-dotdot-lib

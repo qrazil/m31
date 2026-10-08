@@ -1,0 +1,5 @@
+name path-dep-dotdot-up
+version 0.1.0
+
+# Two levels up, then back down: `..` segments fold against this directory.
+util path ../../modules/path-dep-dotdot-lib

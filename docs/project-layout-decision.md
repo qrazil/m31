@@ -159,7 +159,8 @@ shared path libs/shared                      # name path dir: in place
   `./path`.)
 - `name path <dir>` resolves the directory relative to the `deps` file
   (lexically folded, so diagnostics print `apps/tui/tuibuf.m31`, not
-  `apps/git/../tui/tuibuf.m31`) and uses it in place: no fetch, no
+  `apps/git/../tui/tuibuf.m31`; a `..` with nothing left to cancel is kept,
+  so `../../x` from a project at the working directory stays `../../x`) and uses it in place: no fetch, no
   `deps.lock` line, no `.m31-deps` entry. The directory is a project, so it
   must have its own `deps` with a valid header; inside it the root is that
   directory, so its single-segment imports (`import tuibuf;`) resolve there.

@@ -254,7 +254,9 @@ pub fn read_manifest(dir: &Path) -> Result<Option<Manifest>, Located> {
 
 /// `dir/rel` with `.` and `..` folded away lexically (no filesystem access,
 /// so a relative path stays relative), so a path dependency's files print as
-/// `apps/tui/tuibuf.m31` rather than `apps/git/../tui/tuibuf.m31`.
+/// `apps/tui/tuibuf.m31` rather than `apps/git/../tui/tuibuf.m31`. A `..` that
+/// has no segment left to cancel is kept, all of them: `../../x` stays
+/// `../../x`, resolved against the working directory like any relative path.
 fn clean(path: &Path) -> PathBuf {
     use std::path::Component;
     let mut out = PathBuf::new();
@@ -262,8 +264,15 @@ fn clean(path: &Path) -> PathBuf {
         match c {
             Component::CurDir => {}
             Component::ParentDir => {
-                if !out.pop() {
-                    out.push("..");
+                // Fold against a real segment only. Popping blindly would eat
+                // a `..` already kept ("../.." must stay "../..", not "x"),
+                // and nothing is above the filesystem root.
+                match out.components().next_back() {
+                    Some(Component::Normal(_)) => {
+                        out.pop();
+                    }
+                    Some(Component::RootDir | Component::Prefix(_)) => {}
+                    _ => out.push(".."),
                 }
             }
             other => out.push(other.as_os_str()),
@@ -1123,5 +1132,10 @@ mod tests {
         assert_eq!(clean(Path::new("a/b/../c/./d")), PathBuf::from("a/c/d"));
         assert_eq!(clean(Path::new("a/../..")), PathBuf::from(".."));
         assert_eq!(clean(Path::new("a/..")), PathBuf::from("."));
+        // Leading `..` that cannot fold are all kept, never eaten by a later one.
+        assert_eq!(clean(Path::new("../../x")), PathBuf::from("../../x"));
+        assert_eq!(clean(Path::new("../a/../../x")), PathBuf::from("../../x"));
+        assert_eq!(clean(Path::new("./../x")), PathBuf::from("../x"));
+        assert_eq!(clean(Path::new("/a/../../x")), PathBuf::from("/x"));
     }
 }
