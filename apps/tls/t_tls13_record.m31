@@ -1,14 +1,18 @@
 // One TLS 1.3 record at a time (`lib/tls13_record.m31`'s pure functions)
 // against `oracle_tls13_record.py`, which seals and opens the same records
-// with the `cryptography` package's ChaCha20Poly1305 and the RFC 8446 §5.3
-// nonce rule, written out separately in Python. Every line this prints is
-// printed again by the oracle; `test_tls13.sh` diffs the two.
+// with the `cryptography` package's ChaCha20Poly1305 / AESGCM and the RFC 8446
+// §5.3 nonce rule, written out separately in Python. Every line this prints is
+// printed again by the oracle; `test_tls13.sh` diffs the two, once per suite.
 //
-//   ./build.sh apps/tls/t_tls13_record.m31 -o t_tls13_record && ./t_tls13_record
+//   ./build.sh apps/tls/t_tls13_record.m31 -o t_tls13_record
+//   ./t_tls13_record chacha | aes128 | aes256
 
+import aesgcm;
 import chacha20poly1305;
+import os;
 import sha256;
 import tls13_record;
+import tls13_schedule;
 
 // `n` octets of a deterministic pattern: `(i * multiplier + offset) & 0xFF`.
 bytes pattern(int n, int multiplier, int offset) {
@@ -57,8 +61,8 @@ str error_name(tls13_record.Error error) {
     }
 }
 
-bytes test_key() {
-    return pattern(32, 5, 1);
+bytes test_key(tls13_schedule.Suite suite) {
+    return pattern(suite.key_size(), 5, 1);
 }
 
 bytes test_iv() {
@@ -66,10 +70,10 @@ bytes test_iv() {
 }
 
 // Opens `record` (header and body, as on the wire) and says what came out.
-str outcome(bytes wire, int sequence) {
+str outcome(tls13_schedule.Suite suite, bytes wire, int sequence) {
     bytes header = wire.substr(0, 5);
     bytes body = wire.substr(5, wire.size());
-    match (tls13_record.open_record(test_key(), test_iv(), sequence, header, body)) {
+    match (tls13_record.open_record(suite, test_key(suite), test_iv(), sequence, header, body)) {
         case Ok(tls13_record.Opened opened): {
             return "Ok type=" + str(opened.content_type) + " size=" + str(opened.content.size()) + " sha256=" + sha256.sum(opened.content).hex();
         }
@@ -81,15 +85,21 @@ str outcome(bytes wire, int sequence) {
 
 // A sealed record that the library itself would refuse to build: the AEAD
 // applied to `inner` directly, under the header a record of that size has.
-bytes forged(bytes inner, int sequence) {
+bytes forged(tls13_schedule.Suite suite, bytes inner, int sequence) {
     bytes wire = [tls13_record.CONTENT_APPLICATION_DATA, 3, 3, (inner.size() + 16) >> 8, (inner.size() + 16) & 0xFF];
-    bytes sealed = chacha20poly1305.seal(test_key(), tls13_record.record_nonce(test_iv(), sequence), inner, wire);
+    bytes nonce = tls13_record.record_nonce(test_iv(), sequence);
+    bytes sealed = [];
+    if (suite.key_size() == 32 && suite.hash_size() == 32) {
+        sealed = chacha20poly1305.seal(test_key(suite), nonce, inner, wire);
+    } else {
+        sealed = aesgcm.seal(test_key(suite), nonce, inner, wire);
+    }
     wire.extend(sealed);
     return wire;
 }
 
-bytes seal_ok(int sequence, int content_type, bytes content, int padding) {
-    match (tls13_record.seal_record(test_key(), test_iv(), sequence, content_type, content, padding)) {
+bytes seal_ok(tls13_schedule.Suite suite, int sequence, int content_type, bytes content, int padding) {
+    match (tls13_record.seal_record(suite, test_key(suite), test_iv(), sequence, content_type, content, padding)) {
         case Ok(bytes wire): {
             return wire;
         }
@@ -97,6 +107,19 @@ bytes seal_ok(int sequence, int content_type, bytes content, int padding) {
             trap("t_tls13_record: seal failed: " + error_name(error));
         }
     }
+}
+
+List<str> arguments = os.args();
+if (arguments.size() != 2) {
+    trap("t_tls13_record: expected one argument: chacha, aes128 or aes256");
+}
+tls13_schedule.Suite suite = tls13_schedule.Suite.ChaCha20Poly1305Sha256;
+if (arguments[1] == "aes128") {
+    suite = tls13_schedule.Suite.Aes128GcmSha256;
+} else if (arguments[1] == "aes256") {
+    suite = tls13_schedule.Suite.Aes256GcmSha384;
+} else if (arguments[1] != "chacha") {
+    trap("t_tls13_record: unknown suite " + arguments[1]);
 }
 
 // --- the nonce -----------------------------------------------------------------
@@ -121,53 +144,53 @@ for (int i in 0 .. sizes.size()) {
     }
     int sequence = sequences[i % sequences.size()];
     bytes content = pattern(size, 7, 3);
-    bytes wire = seal_ok(sequence, content_type, content, padding);
+    bytes wire = seal_ok(suite, sequence, content_type, content, padding);
     str label = "seal seq=" + str(sequence) + " type=" + str(content_type) + " size=" + str(size) + " pad=" + str(padding);
     print(label + " wire=" + str(wire.size()) + " sha256=" + sha256.sum(wire).hex());
     if (size <= 255) {
         print(label + " hex=" + wire.hex());
     }
-    print("open " + str(i) + " " + outcome(wire, sequence));
+    print("open " + str(i) + " " + outcome(suite, wire, sequence));
 }
 // Content that ends in zeros keeps them: only what follows the type octet is padding.
 bytes zeros = [0; 10];
-bytes zero_wire = seal_ok(4, 23, zeros, 3);
-print("zero_content " + outcome(zero_wire, 4));
+bytes zero_wire = seal_ok(suite, 4, 23, zeros, 3);
+print("zero_content " + outcome(suite, zero_wire, 4));
 bytes trailing = [1, 2, 0, 0];
-print("trailing_zero_content " + outcome(seal_ok(5, 22, trailing, 0), 5));
+print("trailing_zero_content " + outcome(suite, seal_ok(suite, 5, 22, trailing, 0), 5));
 
 // --- records that must not open ---------------------------------------------------
 
-bytes base = seal_ok(9, 23, pattern(40, 3, 1), 3);
-print("neg base " + outcome(base, 9));
+bytes base = seal_ok(suite, 9, 23, pattern(40, 3, 1), 3);
+print("neg base " + outcome(suite, base, 9));
 List<int> flip_places = [0, 1, 2, 3, 4, 5, 6, 20, base.size() - 17, base.size() - 16, base.size() - 1];
 for (int flip in 0 .. flip_places.size()) {
     int place = flip_places[flip];
     bytes flipped = clone(base);
     flipped[place] = flipped[place] ^ 0x01;
-    print("neg flip_bit_" + str(place) + " " + outcome(flipped, 9));
+    print("neg flip_bit_" + str(place) + " " + outcome(suite, flipped, 9));
 }
 bytes flipped_high = clone(base);
 flipped_high[30] = flipped_high[30] ^ 0x80;
-print("neg flip_high_bit_30 " + outcome(flipped_high, 9));
-print("neg replay_sequence_8 " + outcome(base, 8));
-print("neg reorder_sequence_10 " + outcome(base, 10));
-print("neg sequence_0 " + outcome(base, 0));
+print("neg flip_high_bit_30 " + outcome(suite, flipped_high, 9));
+print("neg replay_sequence_8 " + outcome(suite, base, 8));
+print("neg reorder_sequence_10 " + outcome(suite, base, 10));
+print("neg sequence_0 " + outcome(suite, base, 0));
 bytes cut_by_one = base.substr(0, base.size() - 1);
-print("neg truncated_by_one " + outcome(cut_by_one, 9));
+print("neg truncated_by_one " + outcome(suite, cut_by_one, 9));
 bytes cut_to_tag = base.substr(0, 5 + 16);
-print("neg truncated_to_tag " + outcome(cut_to_tag, 9));
+print("neg truncated_to_tag " + outcome(suite, cut_to_tag, 9));
 bytes cut_below_tag = base.substr(0, 5 + 15);
-print("neg shorter_than_tag " + outcome(cut_below_tag, 9));
+print("neg shorter_than_tag " + outcome(suite, cut_below_tag, 9));
 bytes cut_to_header = base.substr(0, 5);
-print("neg header_only " + outcome(cut_to_header, 9));
+print("neg header_only " + outcome(suite, cut_to_header, 9));
 bytes extended = clone(base);
 extended.push(0);
-print("neg extended_by_one " + outcome(extended, 9));
-bytes other_key = pattern(32, 5, 2);
+print("neg extended_by_one " + outcome(suite, extended, 9));
+bytes other_key = pattern(suite.key_size(), 5, 2);
 bytes base_header = base.substr(0, 5);
 bytes base_body = base.substr(5, base.size());
-match (tls13_record.open_record(other_key, test_iv(), 9, base_header, base_body)) {
+match (tls13_record.open_record(suite, other_key, test_iv(), 9, base_header, base_body)) {
     case Ok(tls13_record.Opened opened_other): {
         print("neg wrong_key Ok");
     }
@@ -176,7 +199,7 @@ match (tls13_record.open_record(other_key, test_iv(), 9, base_header, base_body)
     }
 }
 bytes other_iv = pattern(12, 11, 8);
-match (tls13_record.open_record(test_key(), other_iv, 9, base_header, base_body)) {
+match (tls13_record.open_record(suite, test_key(suite), other_iv, 9, base_header, base_body)) {
     case Ok(tls13_record.Opened opened_iv): {
         print("neg wrong_iv Ok");
     }
@@ -185,34 +208,34 @@ match (tls13_record.open_record(test_key(), other_iv, 9, base_header, base_body)
     }
 }
 // The limits.
-bytes largest = seal_ok(0, 23, pattern(16384, 1, 0), 239);
-print("limit largest_body " + str(largest.size() - 5) + " " + outcome(largest, 0));
+bytes largest = seal_ok(suite, 0, 23, pattern(16384, 1, 0), 239);
+print("limit largest_body " + str(largest.size() - 5) + " " + outcome(suite, largest, 0));
 bytes overlong_body = [tls13_record.CONTENT_APPLICATION_DATA, 3, 3, 0x41, 0x01];
 overlong_body.extend(pattern(16641, 1, 0));
-print("neg body_16641 " + outcome(overlong_body, 0));
+print("neg body_16641 " + outcome(suite, overlong_body, 0));
 bytes huge_body = [tls13_record.CONTENT_APPLICATION_DATA, 3, 3, 0xFF, 0xFF];
 huge_body.extend(pattern(65535, 1, 0));
-print("neg body_65535 " + outcome(huge_body, 0));
+print("neg body_65535 " + outcome(suite, huge_body, 0));
 bytes content_too_long = pattern(16385, 1, 0);
 content_too_long.push(23);
-print("neg content_16385 " + outcome(forged(content_too_long, 3), 3));
+print("neg content_16385 " + outcome(suite, forged(suite, content_too_long, 3), 3));
 bytes content_much_too_long = pattern(16600, 1, 0);
 content_much_too_long.push(22);
-print("neg content_16600 " + outcome(forged(content_much_too_long, 3), 3));
+print("neg content_16600 " + outcome(suite, forged(suite, content_much_too_long, 3), 3));
 bytes content_fits_with_padding = pattern(16384, 1, 0);
 content_fits_with_padding.push(22);
 bytes hundred_zeros = [0; 100];
 content_fits_with_padding.extend(hundred_zeros);
-print("limit content_16384_padded " + outcome(forged(content_fits_with_padding, 3), 3));
+print("limit content_16384_padded " + outcome(suite, forged(suite, content_fits_with_padding, 3), 3));
 // No content type to find.
 bytes all_zero = [0; 20];
-print("neg all_zero_plaintext " + outcome(forged(all_zero, 6), 6));
+print("neg all_zero_plaintext " + outcome(suite, forged(suite, all_zero, 6), 6));
 bytes empty_plaintext = [];
-print("neg empty_plaintext " + outcome(forged(empty_plaintext, 6), 6));
+print("neg empty_plaintext " + outcome(suite, forged(suite, empty_plaintext, 6), 6));
 bytes one_type_only = [22];
-print("empty_content_with_type " + outcome(forged(one_type_only, 6), 6));
+print("empty_content_with_type " + outcome(suite, forged(suite, one_type_only, 6), 6));
 // The sequence counter's end.
-match (tls13_record.seal_record(test_key(), test_iv(), tls13_record.MAX_SEQUENCE, 23, [1], 0)) {
+match (tls13_record.seal_record(suite, test_key(suite), test_iv(), tls13_record.MAX_SEQUENCE, 23, [1], 0)) {
     case Ok(bytes unexpected): {
         print("neg seal_at_max_sequence Ok");
     }
@@ -220,8 +243,8 @@ match (tls13_record.seal_record(test_key(), test_iv(), tls13_record.MAX_SEQUENCE
         print("neg seal_at_max_sequence " + error_name(exhausted_error));
     }
 }
-print("neg open_at_max_sequence " + outcome(base, tls13_record.MAX_SEQUENCE));
-print("open_at_max_sequence_minus_one " + outcome(seal_ok(tls13_record.MAX_SEQUENCE - 1, 21, [1, 0], 0), tls13_record.MAX_SEQUENCE - 1));
+print("neg open_at_max_sequence " + outcome(suite, base, tls13_record.MAX_SEQUENCE));
+print("open_at_max_sequence_minus_one " + outcome(suite, seal_ok(suite, tls13_record.MAX_SEQUENCE - 1, 21, [1, 0], 0), tls13_record.MAX_SEQUENCE - 1));
 // An unprotected record is only a header.
 print("plain " + tls13_record.plain_record(22, [1, 2, 3]).hex());
 print("plain_empty " + tls13_record.plain_record(23, []).hex());

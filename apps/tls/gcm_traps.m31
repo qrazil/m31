@@ -1,0 +1,45 @@
+// The caller-bug traps of `lib/aesgcm.m31` and `lib/aes.m31`: each mode
+// below must stop the program with a nonzero exit, and `test_aesgcm.sh`
+// checks that it does, and that the diagnostic names the module. Mode `ok`
+// is the control: the same call with right-sized arguments must succeed, so
+// a trap cannot pass by the harness being broken.
+//
+//   ./build.sh apps/tls/gcm_traps.m31 -o gcm_traps && ./gcm_traps <mode>
+
+import aes;
+import aesgcm;
+import os;
+
+List<str> arguments = os.args();
+if (arguments.size() != 2) {
+    trap("gcm_traps: expected one mode");
+}
+str mode = arguments[1];
+if (mode == "ok") {
+    bytes sealed = aesgcm.seal([1; 16], [2; 12], [3; 5], []);
+    print("sealed " + sealed.size().to_str());
+} else if (mode == "key-15") {
+    aesgcm.seal([1; 15], [2; 12], [3; 5], []);
+} else if (mode == "key-24") {
+    aesgcm.seal([1; 24], [2; 12], [3; 5], []);
+} else if (mode == "key-0") {
+    aesgcm.seal([], [2; 12], [3; 5], []);
+} else if (mode == "nonce-11") {
+    aesgcm.seal([1; 16], [2; 11], [3; 5], []);
+} else if (mode == "nonce-13") {
+    aesgcm.seal([1; 16], [2; 13], [3; 5], []);
+} else if (mode == "open-key-17") {
+    Result<bytes, aesgcm.Error> refused = aesgcm.open([1; 17], [2; 12], [3; 20], []);
+} else if (mode == "open-nonce-8") {
+    Result<bytes, aesgcm.Error> refused = aesgcm.open([1; 16], [2; 8], [3; 20], []);
+} else if (mode == "aes-key-8") {
+    aes.cipher([1; 8]);
+} else if (mode == "aes-block-15") {
+    aes.Cipher cipher = aes.cipher([1; 16]);
+    cipher.encrypt_block([0; 15]);
+} else if (mode == "aes-block-17") {
+    aes.Cipher cipher = aes.cipher([1; 32]);
+    cipher.encrypt_block([0; 17]);
+} else {
+    trap("gcm_traps: unknown mode");
+}

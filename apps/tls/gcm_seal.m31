@@ -1,0 +1,133 @@
+// AES-GCM (`lib/aesgcm.m31`) against `gcm_oracle.py`, which seals the same
+// messages with the `cryptography` package's AESGCM and asserts the McGrew &
+// Viega GCM specification's published test cases (the 128-bit cases 1-4, the
+// 256-bit cases 13-16) against it first. Every line this prints is printed
+// again by the oracle; `test_aesgcm.sh` diffs the two. The tamper lines are
+// the negative tests: every corrupted input must be refused, and the oracle
+// has OpenSSL refuse the same ones.
+//
+//   ./build.sh apps/tls/gcm_seal.m31 -o gcm_seal && ./gcm_seal
+
+import aesgcm;
+import tls13_hex;
+
+// `n` octets of a deterministic pattern: `(i * multiplier + offset) & 0xFF`.
+bytes pattern(int n, int multiplier, int offset) {
+    bytes out = [];
+    for (int index in 0 .. n) {
+        out.push(index * multiplier + offset & 0xFF);
+    }
+    return out;
+}
+
+str open_name(aesgcm.Error error) {
+    match (error) {
+        case Short: {
+            return "Short";
+        }
+        case Tag: {
+            return "Tag";
+        }
+    }
+}
+
+// What `open` says, as one word: "ok:<plaintext hex>" or the error.
+str open_result(bytes key, bytes nonce, bytes sealed, bytes aad) {
+    match (aesgcm.open(key, nonce, sealed, aad)) {
+        case Ok(bytes plaintext): {
+            return "ok:" + plaintext.hex();
+        }
+        case Err(aesgcm.Error error): {
+            return open_name(error);
+        }
+    }
+}
+
+// Seals, prints the sealed bytes, and checks the round trip.
+void emit(str label, bytes key, bytes nonce, bytes plaintext, bytes aad) {
+    bytes sealed = aesgcm.seal(key, nonce, plaintext, aad);
+    print(label + " " + sealed.hex());
+    print(label + "-open " + open_result(key, nonce, sealed, aad));
+}
+
+bytes flipped(bytes data, int index) {
+    bytes out = clone(data);
+    out[index] = out[index] ^ 0x01;
+    return out;
+}
+
+// Every kind of corruption of one sealed message must be refused.
+void tamper(str label, bytes key, bytes nonce, bytes plaintext, bytes aad) {
+    bytes sealed = aesgcm.seal(key, nonce, plaintext, aad);
+    int last = sealed.size() - 1;
+    int tag_start = sealed.size() - 16;
+    bytes longer_aad = clone(aad);
+    longer_aad.push(0);
+    print(label + "-tag-first " + open_result(key, nonce, flipped(sealed, tag_start), aad));
+    print(label + "-tag-last " + open_result(key, nonce, flipped(sealed, last), aad));
+    if (plaintext.size() > 0) {
+        print(label + "-ct-first " + open_result(key, nonce, flipped(sealed, 0), aad));
+        print(label + "-ct-last " + open_result(key, nonce, flipped(sealed, tag_start - 1), aad));
+    }
+    print(label + "-aad-extended " + open_result(key, nonce, sealed, longer_aad));
+    if (aad.size() > 0) {
+        print(label + "-aad-flipped " + open_result(key, nonce, sealed, flipped(aad, 0)));
+    }
+    print(label + "-nonce " + open_result(key, flipped(nonce, 11), sealed, aad));
+    print(label + "-key " + open_result(flipped(key, 0), nonce, sealed, aad));
+    print(label + "-truncated " + open_result(key, nonce, sealed.substr(0, last), aad));
+    print(label + "-dropped-first " + open_result(key, nonce, sealed.substr(1, sealed.size()), aad));
+}
+
+// --- the GCM specification's own test cases -----------------------------------
+
+bytes zero_key_128 = [0; 16];
+bytes zero_key_256 = [0; 32];
+bytes zero_nonce = [0; 12];
+bytes spec_key_128 = tls13_hex.decode("feffe9928665731c6d6a8f9467308308");
+bytes spec_key_256 = tls13_hex.decode("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308");
+bytes spec_nonce = tls13_hex.decode("cafebabefacedbaddecaf888");
+bytes spec_plain = tls13_hex.decode("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255");
+bytes spec_aad = tls13_hex.decode("feedfacedeadbeeffeedfacedeadbeefabaddad2");
+emit("spec-1", zero_key_128, zero_nonce, [], []);
+emit("spec-2", zero_key_128, zero_nonce, [0; 16], []);
+emit("spec-3", spec_key_128, spec_nonce, spec_plain, []);
+emit("spec-4", spec_key_128, spec_nonce, spec_plain.substr(0, 60), spec_aad);
+emit("spec-13", zero_key_256, zero_nonce, [], []);
+emit("spec-14", zero_key_256, zero_nonce, [0; 16], []);
+emit("spec-15", spec_key_256, spec_nonce, spec_plain, []);
+emit("spec-16", spec_key_256, spec_nonce, spec_plain.substr(0, 60), spec_aad);
+
+// --- a sweep over lengths on both sides of every block boundary ---------------
+
+List<int> key_sizes = [16, 32];
+List<int> plain_sizes = [0, 1, 15, 16, 17, 31, 32, 33, 48, 63, 64, 65, 100, 255];
+List<int> aad_sizes = [0, 1, 16, 20, 40];
+for (int key_size in key_sizes) {
+    for (int plain_size in plain_sizes) {
+        for (int aad_size in aad_sizes) {
+            str label = "sweep-" + (key_size * 8).to_str() + "-" + plain_size.to_str() + "-" + aad_size.to_str();
+            emit(label, pattern(key_size, 5, plain_size), pattern(12, 3, aad_size), pattern(plain_size, 7, 1), pattern(aad_size, 11, 2));
+        }
+    }
+}
+
+// --- a full-size TLS record (2^14 octets of plaintext plus type octet) ----------
+
+for (int key_size in key_sizes) {
+    emit("record-" + (key_size * 8).to_str(), pattern(key_size, 13, 4), pattern(12, 17, 6), pattern(16385, 31, 9), pattern(5, 1, 0x17));
+}
+
+// --- negative tests ------------------------------------------------------------
+
+for (int key_size in key_sizes) {
+    str prefix = "tamper-" + (key_size * 8).to_str();
+    tamper(prefix + "-empty", pattern(key_size, 5, 1), pattern(12, 3, 2), [], pattern(5, 1, 0x17));
+    tamper(prefix + "-short", pattern(key_size, 5, 1), pattern(12, 3, 2), pattern(1, 1, 1), []);
+    tamper(prefix + "-block", pattern(key_size, 5, 1), pattern(12, 3, 2), pattern(16, 1, 1), pattern(13, 2, 0));
+    tamper(prefix + "-long", pattern(key_size, 5, 1), pattern(12, 3, 2), pattern(100, 1, 1), pattern(5, 1, 0x17));
+    List<int> short_sizes = [0, 1, 15];
+    for (int size in short_sizes) {
+        print(prefix + "-input-" + size.to_str() + " " + open_result(pattern(key_size, 5, 1), pattern(12, 3, 2), pattern(size, 1, 1), []));
+    }
+}

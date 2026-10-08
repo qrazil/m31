@@ -98,8 +98,26 @@ str name_of(tls.Error error) {
         case ClientCertificateRequested: {
             return "ClientCertificateRequested";
         }
+        case ClientCertificateUnusable: {
+            return "ClientCertificateUnusable";
+        }
         case BadFinished: {
             return "BadFinished";
+        }
+        case MissingExtendedMasterSecret: {
+            return "MissingExtendedMasterSecret";
+        }
+        case CertificateRevoked: {
+            return "CertificateRevoked";
+        }
+        case BadStapledResponse: {
+            return "BadStapledResponse";
+        }
+        case StapleRequired: {
+            return "StapleRequired";
+        }
+        case BadRenegotiationInfo: {
+            return "BadRenegotiationInfo";
         }
     }
 }

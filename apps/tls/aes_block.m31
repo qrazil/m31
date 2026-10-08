@@ -1,0 +1,48 @@
+// AES block encryption (`lib/aes.m31`) against `aes_block_oracle.py`, which
+// computes the same lines with the `cryptography` package and asserts the
+// FIPS 197 published values against it. `test_aesgcm.sh` diffs the two.
+//
+//   ./build.sh apps/tls/aes_block.m31 -o aes_block && ./aes_block
+
+import aes;
+import tls13_hex;
+
+// `n` octets of a deterministic pattern: `(i * multiplier + offset) & 0xFF`.
+bytes pattern(int n, int multiplier, int offset) {
+    bytes out = [];
+    for (int index in 0 .. n) {
+        out.push(index * multiplier + offset & 0xFF);
+    }
+    return out;
+}
+
+// --- FIPS 197 appendix B and C ---------------------------------------------------
+
+aes.Cipher appendix_b = aes.cipher(tls13_hex.decode("2b7e151628aed2a6abf7158809cf4f3c"));
+print("fips197-b " + appendix_b.encrypt_block(tls13_hex.decode("3243f6a8885a308d313198a2e0370734")).hex());
+bytes plain = pattern(16, 0x11, 0);
+aes.Cipher appendix_c128 = aes.cipher(pattern(16, 1, 0));
+print("fips197-c128 " + appendix_c128.encrypt_block(plain).hex());
+aes.Cipher appendix_c256 = aes.cipher(pattern(32, 1, 0));
+print("fips197-c256 " + appendix_c256.encrypt_block(plain).hex());
+
+// --- a sweep: both key sizes, forty keys and blocks, including all-zero and
+// --- all-ones, so every S-box input and every round-key byte gets exercised ---
+
+List<int> key_sizes = [16, 32];
+for (int key_size in key_sizes) {
+    for (int round in 0 .. 40) {
+        aes.Cipher cipher = aes.cipher(pattern(key_size, 7 + round, round));
+        print("sweep-" + (key_size * 8).to_str() + " " + round.to_str() + " " + cipher.encrypt_block(pattern(16, 11 + round, 3 * round + 1)).hex());
+    }
+    aes.Cipher zeros = aes.cipher([0; key_size]);
+    print("zero-" + (key_size * 8).to_str() + " " + zeros.encrypt_block([0; 16]).hex());
+    aes.Cipher ones = aes.cipher([0xFF; key_size]);
+    print("ones-" + (key_size * 8).to_str() + " " + ones.encrypt_block([0xFF; 16]).hex());
+}
+// Every byte value goes through the S-box at least once: block `n` holds
+// n*16 .. n*16+15 and the key is fixed.
+aes.Cipher all_values = aes.cipher(pattern(16, 3, 5));
+for (int block in 0 .. 16) {
+    print("values " + block.to_str() + " " + all_values.encrypt_block(pattern(16, 1, block * 16)).hex());
+}

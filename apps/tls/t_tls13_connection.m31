@@ -227,8 +227,8 @@ void scripted(bytes wire) {
 // --- 2. refusals -------------------------------------------------------------------
 
 bytes protected_record(int sequence, int content_type, bytes content) {
-    tls13_schedule.TrafficKeys keys = tls13_schedule.traffic_keys(read_secret());
-    match (tls13_record.seal_record(keys.key, keys.iv, sequence, content_type, content, 0)) {
+    tls13_schedule.TrafficKeys keys = tls13_schedule.traffic_keys(tls13_schedule.Suite.ChaCha20Poly1305Sha256, read_secret());
+    match (tls13_record.seal_record(tls13_schedule.Suite.ChaCha20Poly1305Sha256, keys.key, keys.iv, sequence, content_type, content, 0)) {
         case Ok(bytes wire): {
             return wire;
         }
@@ -241,7 +241,7 @@ bytes protected_record(int sequence, int content_type, bytes content) {
 // The AEAD applied to `inner` under `outer_type`'s header, as the library
 // itself would refuse to build it.
 bytes forged(int outer_type, bytes inner, int sequence) {
-    tls13_schedule.TrafficKeys keys = tls13_schedule.traffic_keys(read_secret());
+    tls13_schedule.TrafficKeys keys = tls13_schedule.traffic_keys(tls13_schedule.Suite.ChaCha20Poly1305Sha256, read_secret());
     bytes wire = [outer_type, 3, 3, (inner.size() + 16) >> 8, (inner.size() + 16) & 0xFF];
     wire.extend(chacha20poly1305.seal(keys.key, tls13_record.record_nonce(keys.iv, sequence), inner, wire));
     return wire;
@@ -510,38 +510,43 @@ bytes application_until(tls13_record.Connection connection, int total) {
     return got;
 }
 
-void loopback() {
+void loopback(tls13_schedule.Suite suite, str label) {
+    str prefix = "loopback-" + label + " ";
     net.Listener listener = listening();
     net.Conn client_socket = connected(listener);
     net.Conn server_socket = accepted(listener);
     tls13_record.Connection client = tls13_record.connection(client_socket);
     tls13_record.Connection server = tls13_record.connection(server_socket);
-    bytes up = pattern(32, 5, 9);
-    bytes down = pattern(32, 7, 4);
+    client.use_suite(suite);
+    server.use_suite(suite);
+    bytes up = pattern(suite.hash_size(), 5, 9);
+    bytes down = pattern(suite.hash_size(), 7, 4);
     client.install_write_keys(up);
     sent("server read keys", server.install_read_keys(up));
     server.install_write_keys(down);
     sent("client read keys", client.install_read_keys(down));
     sent("client handshake", client.send_handshake(handshake_message(1, pattern(36000, 3, 3))));
-    print("loopback server handshake " + describe(handshake_of(server)));
+    print(prefix + "server handshake " + describe(handshake_of(server)));
     sent_data("client data", client.send_application(pattern(50000, 7, 7)));
-    print("loopback server data " + describe(application_until(server, 50000)));
+    print(prefix + "server data " + describe(application_until(server, 50000)));
     sent_data("server data", server.send_application(pattern(300, 3, 5)));
-    print("loopback client data " + describe(application_until(client, 300)));
+    print(prefix + "client data " + describe(application_until(client, 300)));
     sent("client key_update", client.send_key_update(true));
     sent_data("client data after update", client.send_application(pattern(1000, 1, 1)));
-    print("loopback server data " + describe(application_until(server, 1000)));
+    print(prefix + "server data " + describe(application_until(server, 1000)));
     sent_data("server data after update", server.send_application(pattern(2000, 1, 2)));
-    print("loopback client data " + describe(application_until(client, 2000)));
-    print("loopback records client_sent=" + str(client.write_records()) + " server_read=" + str(server.read_records()));
+    print(prefix + "client data " + describe(application_until(client, 2000)));
+    print(prefix + "records client_sent=" + str(client.write_records()) + " server_read=" + str(server.read_records()));
     sent("client close_notify", client.send_close_notify());
-    print("loopback server end " + describe(application_of(server)));
+    print(prefix + "server end " + describe(application_of(server)));
     sent("server close_notify", server.send_close_notify());
-    print("loopback client end " + describe(application_of(client)));
+    print(prefix + "client end " + describe(application_of(client)));
     net.Conn cut_client_socket = connected(listener);
     net.Conn cut_server_socket = accepted(listener);
     tls13_record.Connection cut_client = tls13_record.connection(cut_client_socket);
     tls13_record.Connection cut_server = tls13_record.connection(cut_server_socket);
+    cut_client.use_suite(suite);
+    cut_server.use_suite(suite);
     cut_client.install_write_keys(up);
     sent("cut server read keys", cut_server.install_read_keys(up));
     sent_data("cut data", cut_client.send_application(pattern(10, 1, 1)));
@@ -552,7 +557,7 @@ void loopback() {
             trap("t_tls13_connection: close failed");
         }
     }
-    print("loopback cut " + step_application(cut_server) + " " + step_application(cut_server));
+    print(prefix + "cut " + step_application(cut_server) + " " + step_application(cut_server));
 }
 
 List<str> arguments = os.args();
@@ -562,4 +567,6 @@ if (arguments.size() != 2) {
 scripted(tls13_hex.decode(arguments[1]));
 refusals();
 key_change_refusals();
-loopback();
+loopback(tls13_schedule.Suite.ChaCha20Poly1305Sha256, "chacha");
+loopback(tls13_schedule.Suite.Aes128GcmSha256, "aes128");
+loopback(tls13_schedule.Suite.Aes256GcmSha384, "aes256");

@@ -232,15 +232,17 @@ out("case key_change_with_partial_message | send Closed")
 out("case key_change_with_whole_message_buffered | hs:12 |")
 out("case key_change_with_whole_message_buffered | install UnexpectedMessage")
 
-out("loopback server handshake " + describe(message(1, pattern(36000, 3, 3))))
-out("loopback server data " + describe(pattern(50000, 7, 7)))
-out("loopback client data " + describe(pattern(300, 3, 5)))
-out("loopback server data " + describe(pattern(1000, 1, 1)))
-out("loopback client data " + describe(pattern(2000, 1, 2)))
-out("loopback records client_sent=1 server_read=1")
-out("loopback server end " + describe(b""))
-out("loopback client end " + describe(b""))
-out("loopback cut data:10 err:Truncated")
+for label in ("chacha", "aes128", "aes256"):
+    prefix = "loopback-%s " % label
+    out(prefix + "server handshake " + describe(message(1, pattern(36000, 3, 3))))
+    out(prefix + "server data " + describe(pattern(50000, 7, 7)))
+    out(prefix + "client data " + describe(pattern(300, 3, 5)))
+    out(prefix + "server data " + describe(pattern(1000, 1, 1)))
+    out(prefix + "client data " + describe(pattern(2000, 1, 2)))
+    out(prefix + "records client_sent=1 server_read=1")
+    out(prefix + "server end " + describe(b""))
+    out(prefix + "client end " + describe(b""))
+    out(prefix + "cut data:10 err:Truncated")
 
 if len(sys.argv) > 1 and sys.argv[1] == "--args":
     print(scripted_wire().hex())

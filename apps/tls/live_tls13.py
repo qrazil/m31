@@ -3,12 +3,13 @@
 
   live_tls13.py <compiled t_tls13_live> [workdir]
 
-Starts `openssl s_server -tls1_3 -ciphersuites TLS_CHACHA20_POLY1305_SHA256
--keylogfile ... -www`, connects Python's ssl client through a recording proxy,
+For each of the three TLS 1.3 suites, starts `openssl s_server -tls1_3
+-ciphersuites <that suite> -keylogfile ... -www`, connects Python's ssl client through a recording proxy,
 then gives the server-to-client bytes and the server's traffic secrets (from
 the key log) to the m31 program and compares what it decrypted with what the
-client received. Exit 0 = matched, 1 = mismatch, 2 = could not run (no
-openssl, no ChaCha20 suite, a timeout, ...): the caller treats 2 as a skip.
+client received. Exit 0 = every suite that could run matched (at least one), 1 = a mismatch,
+2 = nothing could run (no openssl, a timeout, ...): the caller treats 2 as a
+skip.
 """
 import hashlib
 import os
@@ -21,11 +22,15 @@ import threading
 import time
 
 TIMEOUT = 20
+SUITES = ["TLS_CHACHA20_POLY1305_SHA256", "TLS_AES_128_GCM_SHA256", "TLS_AES_256_GCM_SHA384"]
+
+
+class Skip(Exception):
+    pass
 
 
 def skip(reason):
-    print("skip: " + reason)
-    sys.exit(2)
+    raise Skip(reason)
 
 
 def free_port():
@@ -34,7 +39,7 @@ def free_port():
         return probe.getsockname()[1]
 
 
-def main():
+def main(suite):
     program = sys.argv[1]
     work = tempfile.mkdtemp(prefix="tls13_live_")
     key, cert, keylog = (os.path.join(work, n) for n in ("key.pem", "cert.pem", "keylog"))
@@ -49,7 +54,7 @@ def main():
     server_port = free_port()
     server = subprocess.Popen(
         ["openssl", "s_server", "-accept", "127.0.0.1:%d" % server_port, "-tls1_3",
-         "-ciphersuites", "TLS_CHACHA20_POLY1305_SHA256", "-cert", cert, "-key", key,
+         "-ciphersuites", suite, "-cert", cert, "-key", key,
          "-keylogfile", keylog, "-www", "-num_tickets", "2"],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
@@ -127,8 +132,8 @@ def main():
         except (OSError, ssl.SSLError) as error:
             skip("client could not talk to s_server: %s" % error)
         relayer.join(TIMEOUT)
-        if cipher != "TLS_CHACHA20_POLY1305_SHA256":
-            skip("negotiated %s, not ChaCha20-Poly1305" % cipher)
+        if cipher != suite:
+            skip("negotiated %s, not %s" % (cipher, suite))
         secrets = {}
         with open(keylog) as handle:
             for line in handle:
@@ -143,10 +148,9 @@ def main():
         server.wait()
 
     result = subprocess.run(
-        [program, bytes(captured).hex(), secrets[needed[0]], secrets[needed[1]]],
+        [program, bytes(captured).hex(), secrets[needed[0]], secrets[needed[1]], suite],
         capture_output=True, text=True, timeout=TIMEOUT)
     lines = result.stdout.splitlines()
-    print("\n".join(lines))
     expected_types = [2, 8, 11, 15, 20]
     seen_types = [int(line.split("type=")[1].split()[0]) for line in lines if line.startswith("handshake")]
     want = "application size=%d sha256=%s" % (len(body), hashlib.sha256(body).hexdigest())
@@ -160,9 +164,20 @@ def main():
     if "close_notify true" not in lines:
         problems.append("no close_notify")
     if problems:
-        print("MISMATCH: " + "; ".join(problems))
+        print("\n".join(lines))
+        print("MISMATCH %s: %s" % (suite, "; ".join(problems)))
         sys.exit(1)
-    print("matched: %d handshake messages, %d octets of application data, close_notify" % (len(seen_types), len(body)))
+    return "%s: %d handshake messages, %d octets of application data" % (suite, len(seen_types), len(body))
 
 
-main()
+done = []
+skipped = []
+for suite_name in SUITES:
+    try:
+        done.append(main(suite_name))
+    except Skip as reason:
+        skipped.append("%s (%s)" % (suite_name, reason))
+if not done:
+    print("skip: " + "; ".join(skipped))
+    sys.exit(2)
+print("matched %d suites, all with close_notify: %s%s" % (len(done), "; ".join(done), ("; skipped " + ", ".join(skipped)) if skipped else ""))

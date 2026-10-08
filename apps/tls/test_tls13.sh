@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Every check for TLS 1.3's key schedule and record layer
-# (`lib/tls13_schedule.m31`, `lib/tls13_record.m31`). No handshake, no
+# (`lib/tls13_schedule.m31`, `lib/tls13_record.m31`) for all three suites. No handshake, no
 # certificates: those are later milestones. Modelled on `apps/tls/test.sh`,
 # with the same rule: nothing here compares this program with itself.
 #
@@ -19,9 +19,9 @@
 #   tls13_connection  a scripted peer's records, then one line per refused
 #                     stream (error and alert), then a loopback socket
 # and one that compares with a real server:
-#   live_tls13        `openssl s_server -tls1_3 -ciphersuites
-#                     TLS_CHACHA20_POLY1305_SHA256`'s bytes and key log;
-#                     skipped, never failed, if OpenSSL does not cooperate.
+#   live_tls13        `openssl s_server -tls1_3 -ciphersuites <suite>`'s bytes
+#                     and key log, for each of the three suites; a suite that
+#                     OpenSSL does not cooperate on is skipped, never failed.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . ./runtime/arch.sh
@@ -65,7 +65,7 @@ check() {
             return
         fi
     fi
-    timeout 120 "$WORK/t_$name" ${input[@]+"${input[@]}"} >"$WORK/$name.got" 2>"$WORK/$name.err"
+    timeout 300 "$WORK/t_$name" ${input[@]+"${input[@]}"} >"$WORK/$name.got" 2>"$WORK/$name.err"
     local rc=$?
     if ! python3 "apps/tls/oracle_$name.py" >"$WORK/$name.want" 2>"$WORK/$name.oracle.err"; then
         bad "$name" "oracle_$name.py failed" "$(tail -5 "$WORK/$name.oracle.err")"
@@ -75,6 +75,25 @@ check() {
         note "$name: $(wc -l <"$WORK/$name.got" | tr -d ' ') lines match $what"
     else
         bad "$name" "$(diff "$WORK/$name.got" "$WORK/$name.want" | head -12 | cut -c1-200)"
+    fi
+}
+
+# t_tls13_record takes the suite as its argument and so does its oracle.
+check_record() {
+    local suite=$1
+    if ! build t_tls13_record; then
+        return
+    fi
+    timeout 300 "$WORK/t_tls13_record" "$suite" >"$WORK/record.$suite.got" 2>"$WORK/record.$suite.err"
+    local rc=$?
+    if ! python3 apps/tls/oracle_tls13_record.py "$suite" >"$WORK/record.$suite.want" 2>"$WORK/record.$suite.oracle.err"; then
+        bad "tls13_record $suite" "oracle failed" "$(tail -5 "$WORK/record.$suite.oracle.err")"
+    elif [ $rc -ne 0 ]; then
+        bad "tls13_record $suite" "t_tls13_record exited $rc" "$(tail -5 "$WORK/record.$suite.err")"
+    elif cmp -s "$WORK/record.$suite.got" "$WORK/record.$suite.want"; then
+        note "tls13_record $suite: $(wc -l <"$WORK/record.$suite.got" | tr -d ' ') lines match the AEAD with the TLS nonce rule (grid of records, every failure to open)"
+    else
+        bad "tls13_record $suite" "$(diff "$WORK/record.$suite.got" "$WORK/record.$suite.want" | head -12 | cut -c1-200)"
     fi
 }
 
@@ -106,12 +125,14 @@ else
         elif [ $rc -ne 0 ]; then
             bad "tls13_schedule" "t_tls13_schedule exited $rc" "$(tail -5 "$WORK/schedule.err")"
         elif cmp -s "$WORK/schedule.got" "$WORK/schedule.want"; then
-            note "tls13_schedule: $(wc -l <"$WORK/schedule.got" | tr -d ' ') lines match hashlib/hmac/OpenSSL HKDF (RFC 8448 values asserted by the oracle)"
+            note "tls13_schedule: $(wc -l <"$WORK/schedule.got" | tr -d ' ') lines match hashlib/hmac/OpenSSL HKDF for all three suites (RFC 8448 values asserted by the oracle)"
         else
             bad "tls13_schedule" "$(diff "$WORK/schedule.got" "$WORK/schedule.want" | head -12)"
         fi
     fi
-    check tls13_record "ChaCha20Poly1305 with the TLS nonce rule (grid of records, every failure to open)"
+    for suite in chacha aes128 aes256; do
+        check_record "$suite"
+    done
     check tls13_connection "scripted peer, refusals and loopback" args
 
     if ! command -v openssl >/dev/null 2>&1; then

@@ -1,0 +1,245 @@
+// AES-128-GCM and AES-256-GCM (NIST SP 800-38D), the AEAD of TLS 1.3's
+// `TLS_AES_128_GCM_SHA256` and `TLS_AES_256_GCM_SHA384` (RFC 8446 §B.4) and of
+// TLS 1.2's GCM suites (RFC 5288).
+//
+//   import aesgcm;
+//   bytes sealed = aesgcm.seal(key, nonce, plaintext, aad);   // ciphertext || tag
+//   match (aesgcm.open(key, nonce, sealed, aad)) { ... }      // Result<bytes, Error>
+//
+// `key` is 16 octets (AES-128) or 32 (AES-256); `nonce` is 12 octets, the
+// only length TLS uses and the only one this module accepts. A wrong length
+// is a bug in the caller and **traps**, as in `lib/chacha20poly1305.m31`; a
+// forged or corrupted `sealed` is the world a network parser expects and is a
+// `Result`'s `Err`, with a payload-free `Error` (docs/errors-decision.md §4).
+// The tag is 16 octets, never truncated. `open` checks the tag with
+// `chacha20poly1305.consttime_eq` before decrypting anything.
+//
+// --- Limits ---------------------------------------------------------------
+//
+// SP 800-38D caps one invocation at 2^36 - 32 octets of plaintext; this
+// module caps it far lower, at 2^24 octets (16 MiB), and traps above that --
+// a TLS record is at most 2^14 + 256. The 32-bit block counter therefore
+// cannot wrap. Reusing a (key, nonce) pair is catastrophic for GCM (it leaks
+// the authentication key); TLS never does, because the nonce is the record
+// sequence number XOR a per-connection IV, and `lib/tls13_record.m31` stops
+// at sequence 2^63 - 1. A caller that picks its own nonces owns that rule.
+//
+// --- Side channels ----------------------------------------------------------
+//
+// The block cipher is `lib/aes.m31`'s table-free one; its header documents
+// what that does and does not guarantee. GHASH is the other secret-dependent
+// part, and the usual fast implementations (Shoup's 4-bit or 8-bit tables of
+// multiples of H) index a table by data, which is what a cache-timing
+// attacker reads. This one is the bit-serial algorithm of SP 800-38D §6.3
+// with every conditional written as an arithmetic mask (`bit * 0xFFFF_FFFF`):
+// 128 fixed rounds per block, no table, no branch, no index that depends on H
+// or on the data. The same source-level-only caveat as `lib/aes.m31`
+// applies, and so does its cost: it is slow.
+//
+// GHASH values are four 32-bit limbs, most significant first, so the first
+// octet of a block is the top of limb 0 and "bit 0" of the GCM spec is the
+// top bit of limb 0. Limbs are kept non-negative and below 2^32, the way
+// `lib/chacha20poly1305.m31` keeps its words.
+
+import aes;
+import chacha20poly1305;
+
+/// Why `open` refused.
+pub enum Error {
+    /// `sealed` is shorter than the 16-octet tag, so there is nothing to
+    /// check.
+    Short;
+    /// The tag does not match: `sealed`, `aad`, `key` or `nonce` is not what
+    /// it was sealed with.
+    Tag;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case Short: {
+            return "aesgcm: shorter than a tag";
+        }
+        case Tag: {
+            return "aesgcm: authentication tag mismatch";
+        }
+    }
+}
+
+/// The tag length, and the overhead of `seal`.
+pub const int TAG_SIZE = 16;
+/// The nonce length.
+pub const int NONCE_SIZE = 12;
+/// The most plaintext one `seal` or `open` takes.
+pub const int MAX_MESSAGE = 16777216;
+
+// Four octets of `data` at `at`, big-endian.
+int word_be(bytes data, int at) {
+    return (data[at] << 24) | (data[at + 1] << 16) | (data[at + 2] << 8) | data[at + 3];
+}
+
+// A 32-bit word appended big-endian.
+void push_word_be(bytes out, int value) {
+    out.push(value >> 24 & 0xFF);
+    out.push(value >> 16 & 0xFF);
+    out.push(value >> 8 & 0xFF);
+    out.push(value & 0xFF);
+}
+
+// The 16 octets of `data` from `at` as four limbs, zero-padded on the right
+// past the end of `data` (SP 800-38D's zero padding of the last block).
+Array<int> block_limbs(bytes data, int at) {
+    bytes padded = [];
+    for (int index in 0 .. 16) {
+        if (at + index < data.size()) {
+            padded.push(data[at + index]);
+        } else {
+            padded.push(0);
+        }
+    }
+    return [word_be(padded, 0), word_be(padded, 4), word_be(padded, 8), word_be(padded, 12)];
+}
+
+// The GF(2^128) product `x * h` of SP 800-38D §6.3 (Algorithm 1), in 128
+// fixed steps. `x_limbs` and `h_limbs` are four limbs each.
+Array<int> multiply_blocks(Array<int> x_limbs, Array<int> h_limbs) {
+    int z0 = 0;
+    int z1 = 0;
+    int z2 = 0;
+    int z3 = 0;
+    int v0 = h_limbs[0];
+    int v1 = h_limbs[1];
+    int v2 = h_limbs[2];
+    int v3 = h_limbs[3];
+    for (int position in 0 .. 128) {
+        int bit = x_limbs[position / 32] >> (31 - position % 32) & 1;
+        int take = bit * 0xFFFF_FFFF;
+        z0 = z0 ^ (v0 & take);
+        z1 = z1 ^ (v1 & take);
+        z2 = z2 ^ (v2 & take);
+        z3 = z3 ^ (v3 & take);
+        int reduce = (v3 & 1) * 0xFFFF_FFFF;
+        v3 = v3 >> 1 | ((v2 & 1) << 31);
+        v2 = v2 >> 1 | ((v1 & 1) << 31);
+        v1 = v1 >> 1 | ((v0 & 1) << 31);
+        v0 = v0 >> 1 ^ (0xE100_0000 & reduce);
+    }
+    return [z0, z1, z2, z3];
+}
+
+// GHASH_H over `aad`, `ciphertext` and the length block (§6.4), as four
+// limbs.
+Array<int> ghash(Array<int> h_limbs, bytes aad, bytes ciphertext) {
+    Array<int> acc = [0, 0, 0, 0];
+    for (int part in 0 .. 2) {
+        bytes data = aad;
+        if (part == 1) {
+            data = ciphertext;
+        }
+        int at = 0;
+        while (at < data.size()) {
+            Array<int> block = block_limbs(data, at);
+            acc = multiply_blocks([acc[0] ^ block[0], acc[1] ^ block[1], acc[2] ^ block[2], acc[3] ^ block[3]], h_limbs);
+            at = at + 16;
+        }
+    }
+    int aad_bits = aad.size() * 8;
+    int text_bits = ciphertext.size() * 8;
+    Array<int> lengths = [aad_bits >> 32 & 0xFFFF_FFFF, aad_bits & 0xFFFF_FFFF, text_bits >> 32 & 0xFFFF_FFFF, text_bits & 0xFFFF_FFFF];
+    return multiply_blocks([acc[0] ^ lengths[0], acc[1] ^ lengths[1], acc[2] ^ lengths[2], acc[3] ^ lengths[3]], h_limbs);
+}
+
+// `nonce || counter` as a 16-octet block, the counter big-endian.
+bytes counter_block(bytes nonce, int counter) {
+    bytes block = clone(nonce);
+    push_word_be(block, counter);
+    return block;
+}
+
+// CTR mode from block counter 2 on (counter 1 is the tag mask), RFC/SP
+// 800-38D §6.5. Symmetric: the same call encrypts and decrypts.
+bytes ctr_xor(aes.Cipher cipher, bytes nonce, bytes data) {
+    bytes out = [];
+    int at = 0;
+    int counter = 2;
+    while (at < data.size()) {
+        bytes stream = cipher.encrypt_block(counter_block(nonce, counter));
+        int end = at + 16;
+        if (end > data.size()) {
+            end = data.size();
+        }
+        for (int index in at .. end) {
+            out.push(data[index] ^ stream[index - at]);
+        }
+        at = end;
+        counter = counter + 1;
+    }
+    return out;
+}
+
+// The tag: E(K, J0) XOR GHASH, with J0 = nonce || 1 (§7.1, 96-bit IV).
+bytes compute_tag(aes.Cipher cipher, bytes nonce, bytes aad, bytes ciphertext) {
+    Array<int> h_limbs = [0, 0, 0, 0];
+    bytes h_block = cipher.encrypt_block([0; 16]);
+    for (int index in 0 .. 4) {
+        h_limbs[index] = word_be(h_block, 4 * index);
+    }
+    Array<int> hash = ghash(h_limbs, aad, ciphertext);
+    bytes mask = cipher.encrypt_block(counter_block(nonce, 1));
+    bytes tag = [];
+    for (int index in 0 .. 4) {
+        push_word_be(tag, hash[index]);
+    }
+    for (int index in 0 .. 16) {
+        tag[index] = tag[index] ^ mask[index];
+    }
+    return tag;
+}
+
+void check_arguments(bytes key, bytes nonce, int message_size) {
+    if (key.size() != 16 && key.size() != 32) {
+        trap("aesgcm: key must be 16 or 32 bytes");
+    }
+    if (nonce.size() != NONCE_SIZE) {
+        trap("aesgcm: nonce must be 12 bytes");
+    }
+    if (message_size > MAX_MESSAGE) {
+        trap("aesgcm: message too long");
+    }
+}
+
+/// Encrypt and authenticate: SP 800-38D §7.1. The result is `plaintext`'s
+/// length plus 16 -- ciphertext, then the tag. `aad` may be empty. A `key`
+/// not 16 or 32 octets, a `nonce` not 12, or a `plaintext` over `MAX_MESSAGE`
+/// traps.
+pub bytes seal(bytes key, bytes nonce, bytes plaintext, bytes aad) {
+    check_arguments(key, nonce, plaintext.size());
+    aes.Cipher cipher = aes.cipher(key);
+    bytes ciphertext = ctr_xor(cipher, nonce, plaintext);
+    bytes tag = compute_tag(cipher, nonce, aad, ciphertext);
+    ciphertext.extend(tag);
+    return ciphertext;
+}
+
+/// Verify and decrypt: SP 800-38D §7.2. `Err(Short)` if `sealed` cannot
+/// hold a tag, `Err(Tag)` if the tag does not verify -- in which case
+/// nothing about `sealed` should be trusted, `aad` included, and this returns
+/// before decrypting anything. `key` and `nonce` follow `seal`'s rule about
+/// length.
+pub Result<bytes, Error> open(bytes key, bytes nonce, bytes sealed, bytes aad) {
+    check_arguments(key, nonce, 0);
+    if (sealed.size() < TAG_SIZE) {
+        return Result<bytes, Error>.Err(Error.Short);
+    }
+    int text_size = sealed.size() - TAG_SIZE;
+    if (text_size > MAX_MESSAGE) {
+        trap("aesgcm: message too long");
+    }
+    bytes ciphertext = sealed.substr(0, text_size);
+    bytes tag = sealed.substr(text_size, sealed.size());
+    aes.Cipher cipher = aes.cipher(key);
+    bytes want = compute_tag(cipher, nonce, aad, ciphertext);
+    if (!chacha20poly1305.consttime_eq(want, tag)) {
+        return Result<bytes, Error>.Err(Error.Tag);
+    }
+    return Result<bytes, Error>.Ok(ctr_xor(cipher, nonce, ciphertext));
+}

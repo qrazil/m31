@@ -62,6 +62,21 @@ http.Error from_tls(tls.Error e) {
         case UnsupportedVersion: {
             return http.Error.TlsFailed;
         }
+        case MissingExtendedMasterSecret: {
+            return http.Error.TlsFailed;
+        }
+        case CertificateRevoked: {
+            return http.Error.CertificateUntrusted;
+        }
+        case BadStapledResponse: {
+            return http.Error.CertificateUntrusted;
+        }
+        case StapleRequired: {
+            return http.Error.CertificateUntrusted;
+        }
+        case BadRenegotiationInfo: {
+            return http.Error.TlsFailed;
+        }
         case Downgrade: {
             return http.Error.TlsFailed;
         }
@@ -81,6 +96,9 @@ http.Error from_tls(tls.Error e) {
             return http.Error.TlsFailed;
         }
         case ClientCertificateRequested: {
+            return http.Error.TlsFailed;
+        }
+        case ClientCertificateUnusable: {
             return http.Error.TlsFailed;
         }
         case BadCertificate: {

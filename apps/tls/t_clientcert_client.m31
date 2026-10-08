@@ -1,0 +1,152 @@
+// The client-certificate client under test, driven from `test_clientcert.sh`.
+//
+//   t_clientcert_client <port> <pin hex | ca:path> <chains> <keys> <connections> [host]
+//
+// `chains` and `keys` are comma-separated lists of PEM files of equal length
+// (`none` in both: no identity); connection n presents the (n-1 mod length)th.
+// Connects to 127.0.0.1:<port> <connections> times over one session cache,
+// presenting the identity if there is one, sends
+// `GET /`, reads to the server's close_notify, and prints one line each:
+//   conn <n> ok resumed=<bool> status=<the first line of the reply>
+//   conn <n> error=<reason> alert=<the peer's alert, or -1>
+// Each identity loaded prints `identity <Identity.to_str()>` first. A bad chain
+// or key file prints `identity error=<reason>` and exits.
+
+import clientcert;
+import io;
+import net;
+import os;
+import tls;
+import tlsresume;
+
+tls.Trust trust_of(str text) {
+    if (text.starts_with("ca:")) {
+        return tls.Trust.CaFile(text.substr(3, text.size()));
+    }
+    match (tls.pinned_key_hex(text)) {
+        case Some(tls.Trust trust): {
+            return trust;
+        }
+        case None: {
+            trap("t_clientcert_client: the pin must be 64 hex digits");
+        }
+    }
+}
+
+int number(str text) {
+    match (text.parse_int()) {
+        case Some(int parsed): {
+            return parsed;
+        }
+        case None: {
+            trap("t_clientcert_client: not a number: " + text);
+        }
+    }
+}
+
+str first_line(bytes data) {
+    int end = 0;
+    while (end < data.size() && data[end] != 13 && data[end] != 10) {
+        end = end + 1;
+    }
+    match (data.substr(0, end).utf8()) {
+        case Some(str line): {
+            return line;
+        }
+        case None: {
+            return "(not text)";
+        }
+    }
+}
+
+void report(int index, Result<tls.Conn, tls.Error> opened) {
+    match (opened) {
+        case Err(tls.Error connect_error): {
+            print("conn " + str(index) + " error=" + connect_error.to_str() + " alert=-1");
+        }
+        case Ok(tls.Conn conn): {
+            str status = "";
+            match (conn.write("GET / HTTP/1.0\r\n\r\n".to_bytes())) {
+                case Ok(int sent): {
+                }
+                case Err(io.Error write_error): {
+                }
+            }
+            match (conn.read_all()) {
+                case Ok(bytes data): {
+                    status = first_line(data);
+                }
+                case Err(io.Error read_error): {
+                }
+            }
+            bool was_resumed = conn.resumed();
+            match (conn.last_error()) {
+                case Some(tls.Error failure): {
+                    print("conn " + str(index) + " error=" + failure.to_str() + " alert=" + str(conn.peer_alert()));
+                }
+                case None: {
+                    print("conn " + str(index) + " ok resumed=" + str(was_resumed) + " status=" + status);
+                }
+            }
+            match (conn.close()) {
+                case Ok(bool closed): {
+                }
+                case Err(io.Error close_error): {
+                }
+            }
+        }
+    }
+}
+
+void attempt(int index, str host, int port, tls.Trust trust, Option<clientcert.Identity> identity, tlsresume.SessionCache cache) {
+    match (net.connect("127.0.0.1", port)) {
+        case Err(net.Error connect_error): {
+            print("conn " + str(index) + " error=connect alert=-1");
+        }
+        case Ok(net.Conn socket): {
+            match (identity) {
+                case Some(clientcert.Identity presenting): {
+                    report(index, tls.connect_over_identified(socket, host, trust, presenting, cache));
+                }
+                case None: {
+                    report(index, tls.connect_over_cached(socket, host, trust, cache));
+                }
+            }
+        }
+    }
+}
+
+List<str> arguments = os.args();
+if (arguments.size() < 6) {
+    trap("t_clientcert_client: <port> <trust> <chain|none> <key|none> <connections> [host]");
+}
+List<str> chains = arguments[3].split(",");
+List<str> keys = arguments[4].split(",");
+if (chains.size() != keys.size()) {
+    trap("t_clientcert_client: as many keys as chains");
+}
+List<Option<clientcert.Identity>> identities = [];
+for (int index in 0 .. chains.size()) {
+    if (chains[index] == "none") {
+        identities.push(Option<clientcert.Identity>.None);
+    } else {
+        match (clientcert.load_files(chains[index], keys[index])) {
+            case Ok(clientcert.Identity loaded): {
+                print("identity " + loaded.to_str());
+                identities.push(Option<clientcert.Identity>.Some(loaded));
+            }
+            case Err(clientcert.Error load_error): {
+                print("identity error=" + load_error.to_str());
+                os.exit(0);
+            }
+        }
+    }
+}
+str host = "localhost";
+if (arguments.size() > 6) {
+    host = arguments[6];
+}
+tlsresume.SessionCache cache = tlsresume.cache(8);
+for (int index in 1 .. number(arguments[5]) + 1) {
+    attempt(index, host, number(arguments[1]), trust_of(arguments[2]), identities[(index - 1) % identities.size()], cache);
+}

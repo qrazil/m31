@@ -1,0 +1,45 @@
+// Ed25519 signing (`lib/ed25519.m31`) against the cases
+// `tlsserver_ed25519_oracle.py` writes. Each input line is
+// `name|seed_hex|message_hex`; the program prints `name public_key_hex
+// signature_hex`. The oracle prints the expected lines.
+
+import bignum;
+import ed25519;
+import io;
+import os;
+
+bytes decode(str hex) {
+    if (hex == "") {
+        return [];
+    }
+    match (bignum.bytes_from_hex(hex)) {
+        case None: {
+            return [];
+        }
+        case Some(bytes decoded): {
+            return decoded;
+        }
+    }
+}
+
+List<str> argv = os.args();
+if (argv.size() < 2) {
+    io.eprint("usage: t_tlsserver_ed25519 CASES");
+} else {
+    match (io.read(argv[1])) {
+        case Err(io.Error error): {
+            io.eprint("cannot read " + argv[1] + ": " + error.to_str());
+        }
+        case Ok(str text): {
+            for (str line in text.split("\n")) {
+                if (line == "") {
+                    continue;
+                }
+                List<str> fields = line.split("|");
+                bytes seed = decode(fields[1]);
+                bytes message = decode(fields[2]);
+                print(fields[0] + " " + ed25519.public_key(seed).hex() + " " + ed25519.sign(seed, message).hex());
+            }
+        }
+    }
+}
