@@ -48,6 +48,8 @@ dbg)
     s=$SECONDS; (ulimit -n $lim; WITH_TIMEOUT_NO_DIAG=1 bash runtime/with_timeout.sh 20 /tmp/$p.bin > /tmp/p.o 2>&1; echo "== park ulimit=$lim run $i rc=$? $((SECONDS-s))s"; diff /tmp/p.o corpus/modules/$p/main.out | head -4); done; done
   ;;
 probe)
+  cc -o /tmp/bp ci_dbg/backlogprobe.c && for cfg in "50 128" "100 128" "128 128" "140 128" "150 128" "192 128" "250 128" "150 256"; do /tmp/bp $cfg; /tmp/bp $cfg; done
+  exit 0
   cc -o /tmp/ap ci_dbg/acceptprobe.c && /tmp/ap
   p=stdlib-net-timeout-park
   ./target/debug/$LANG_BIN --emit-c corpus/modules/$p/main.m31 -o /tmp/$p.c 2>/dev/null
