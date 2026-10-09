@@ -20,11 +20,12 @@ run() {
     shift
     printf '%-28s' "$name"
     local out rc
-    # Every gate has a hard time limit (GATE_LIMIT seconds, default 25 min --
-    # the slowest gate takes a few). A gate's output is held until it ends,
-    # so without this a hang is silent for as long as the CI job lets it run;
-    # macOS has no timeout(1), hence runtime/with_timeout.sh.
-    out=$(bash runtime/with_timeout.sh "${GATE_LIMIT:-1500}" "$@" 2>&1)
+    # Every gate has a hard time limit (GATE_LIMIT seconds, default 60 min --
+    # the corpus gate takes 14 min on a macOS runner and over 25 on a loaded
+    # Linux box). A gate's output is held until it ends, so without this a
+    # hang is silent for as long as the CI job lets it run; macOS has no
+    # timeout(1), hence runtime/with_timeout.sh.
+    out=$(bash runtime/with_timeout.sh "${GATE_LIMIT:-3600}" "$@" 2>&1)
     rc=$?
     if [ $rc -eq 0 ]; then
         printf '\033[32mok\033[0m\n'

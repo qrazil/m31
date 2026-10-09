@@ -50,11 +50,12 @@ jobs:
         os: [ macos-14 ]
     name: kqueue reactor + green-thread runtime (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # A hang must fail the job in minutes, not run for GitHub's 6-hour default
-    # (the whole job takes about 10 minutes when it works). The steps below
-    # carry tighter limits of their own, so the log of the one that hung is
-    # the one that gets cut off.
-    timeout-minutes: 45
+    # A hang must fail the job in bounded time, not run for GitHub's 6-hour
+    # default. The whole job takes about 35 minutes when it works (the full
+    # gates.sh step alone is ~27: corpus ~14, sanitizers ~8). The steps below
+    # carry limits of their own, so the log of the one that hung is the one
+    # that gets cut off.
+    timeout-minutes: 70
     steps:
       - uses: actions/checkout@v4
 
@@ -142,5 +143,5 @@ jobs:
           }
 
       - name: Full gates.sh (compiler build/test/lint, runtime suites above again as part of the gate, formatter, corpus, ASan/UBSan)
-        timeout-minutes: 30
+        timeout-minutes: 55
         run: bash gates.sh
