@@ -19,8 +19,24 @@ progs)
       diff /tmp/$p.out corpus/modules/$p/main.out | head -5; tail -50 /tmp/$p.out | head -60
     done
   done ;;
+netprogs)
+  for p in stdlib-net-accept stdlib-net-timeout-park; do
+    ./target/debug/$LANG_BIN --emit-c corpus/modules/$p/main.m31 -o /tmp/$p.c
+    for flags in "-DRC_DEBUG" ""; do
+      for cc in gcc clang; do
+        $cc -O0 $flags -I runtime -pthread -o /tmp/$p.bin /tmp/$p.c runtime/rt.c runtime/scheduler.c $RT_REACTOR_C $RT_CTX_ASM || echo CCFAIL
+        for i in 1 2 3 4 5; do
+          s=$SECONDS
+          bash runtime/with_timeout.sh 30 /tmp/$p.bin > /tmp/$p.o 2>&1; rc=$?
+          echo "== $p $cc flags='$flags' run $i rc=$rc $((SECONDS-s))s"
+          diff /tmp/$p.o corpus/modules/$p/main.out | head -8
+          [ $rc -ne 0 ] && tail -12 /tmp/$p.o | cut -c1-200
+        done
+      done
+    done
+  done ;;
 corpus) RUN_LIMIT=60 bash run.sh ;;
 san) RUN_LIMIT=60 bash sanitize.sh ;;
 gates) GATE_LIMIT=400 bash gates.sh ;;
 esac
-echo "stage $stage exit=$?"
+

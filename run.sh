@@ -188,6 +188,10 @@ run_one() {
     # Layer 4: refcount invariant. The runtime prints this under -DRC_DEBUG.
     if ! grep -q '^__rc_live=0$' <<<"$got"; then
       fail_test "$label [$cc $opt]" "leak: $(grep '^__rc_live=' <<<"$got" || echo 'no marker emitted')"
+      if ! grep -q '^__rc_live=' <<<"$got"; then
+        # Why: a crash, a trap, or the time limit -- say which, with the tail.
+        printf '%s\n' "$got" | tail -15 | sed 's/^/      | /'
+      fi
       return
     fi
     got=$(grep -v '^__rc_live=' <<<"$got")
