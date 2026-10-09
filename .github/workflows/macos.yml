@@ -35,7 +35,7 @@ name: macOS runtime (kqueue reactor)
 # ordinary CI on this project's existing Linux hosts.
 on:
   push:
-    branches: [ "kqueue-reactor", "master" ]
+    branches: [ "kqueue-reactor", "master", "ci-debug/**" ]
   pull_request:
     branches: [ "master" ]
   workflow_dispatch: {}
