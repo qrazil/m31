@@ -77,10 +77,12 @@ import io;
 
 // Reading, writing and waiting need no primitives of their own: a terminal
 // is a descriptor. These are io's and net's, declared again here because a
-// prim is declared per module (docs/stdlib-seam.md).
+// prim is declared per module (docs/stdlib-seam.md). The wait parks only the
+// green thread, so a program with other threads keeps them running while one
+// waits for a key.
 prim int __read(int fd, bytes buf, int off, int n);
 prim int __write_str(int fd, str s, int off, int n);
-prim int __poll(List<int> fds, List<int> events, List<int> revents, int timeout_ms);
+prim int __wait_io_timeout(int fd, int events, int timeout_ms);
 prim void __out_flush();
 // The terminal itself.
 prim int __isatty(int fd);
@@ -110,9 +112,10 @@ const int L_ICANON = 0x0002;
 const int L_ECHO = 0x0008;
 const int L_ECHONL = 0x0040;
 const int L_IEXTEN = 0x8000;
-const int POLL_IN = 0x001;
+const int IO_READABLE = 1;
 const int ENOTTY = 25;
 const int EINTR = 4;
+const int EPERM = 1;
 // One read of the terminal. A keystroke is a handful of bytes and a paste is
 // as long as the clipboard; this is what one read takes at most, and a paste
 // arrives across as many as it needs.
@@ -1090,7 +1093,7 @@ pub int Reader.pending() {
 /// more is coming from a terminal that has closed.
 ///
 /// **A partial sequence restarts the timeout**, rather than continuing with
-/// what was left of it. That is the rule `sys_poll` already follows for an
+/// what was left of it. That is the rule `sys_poll` followed for an
 /// interrupted wait (runtime/sys.h), and it is chosen for the same reason:
 /// two implementations that disagreed about the remainder would be worse than
 /// one that is generous. A deadline a program really cares about is one it
@@ -1106,14 +1109,16 @@ pub Result<Input, Error> Reader.read(int timeout_ms) {
             case None: {
             }
         }
-        List<int> fds = [fd];
-        List<int> want = [POLL_IN];
-        List<int> got = [];
-        int n = __poll(fds, want, got, timeout_ms);
+        int n = __wait_io_timeout(fd, IO_READABLE, timeout_ms);
+        // A regular file or /dev/null cannot be waited on (-EPERM) and is
+        // always ready, which is the answer poll(2) gave for one.
+        if (n == -EPERM) {
+            n = 0;
+        }
         if (n < 0) {
             return Result<Input, Error>.Err(from_errno(-n));
         }
-        if (n == 0) {
+        if (n == 1) {
             // A timeout of 0 asks what has ALREADY arrived, and half a
             // sequence has not arrived. Resolving it here would turn a split
             // ESC [ 1 ; 5 A into an Escape in any loop that drains with 0 --

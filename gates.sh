@@ -148,6 +148,7 @@ run "socket timeouts do not stall carriers" bash runtime/net_timeout_stall_test.
 # with 1000 sleepers and a socket read timeout beside 150 silent connections,
 # each on ONE and on TWO carriers, against the corpus's own expected output.
 run "parked waits on 1 and 2 carriers" bash runtime/parked_waits_carriers_test.sh
+run "terminal reads park only the green thread" bash runtime/term_wait_test.sh
 
 # The formatter must not change what a program means, and must reach a fixed
 # point. Both are checked against every corpus program rather than asserted:

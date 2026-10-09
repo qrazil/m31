@@ -105,8 +105,11 @@ One primitive and one reactor feature, as proposed.
 - Then, in m31 only: `Conn.wait_read_timeout`, `wait_write_timeout`,
   `Listener.wait` and `Conn.wait` call `__wait_io_timeout`; the `__poll`
   declaration is gone from `lib/net.m31`. `http.serve`'s accept back-off is
-  `timer.sleep_ms`. `__poll` itself stays (`lib/term.m31` uses it for a
-  keyboard timeout, which waits on a terminal, not a socket).
+  `timer.sleep_ms`. `lib/term.m31`'s `Reader.read` followed (a keyboard timeout
+  waits on a terminal, which the reactor handles like a socket; a descriptor it
+  cannot wait on, such as a regular file or /dev/null, answers -EPERM and is
+  treated as ready, as poll(2) did). `__poll` is now declared by no stdlib
+  module.
 
 ### The race, and how it is closed
 

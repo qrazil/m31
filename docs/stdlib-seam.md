@@ -526,7 +526,7 @@ sleep, which is all `lib/timer.m31`'s `timer.sleep_ms(ms)` is.
 | `__shutdown(int fd, int how)` | `sys_shutdown` | 0 |
 | `__setsockopt(int fd, int opt, int value)` | `sys_setsockopt` | 0 |
 | `__getsockopt(int fd, int opt)` | `sys_getsockopt` | the value |
-| `__poll(List<int> fds, List<int> events, List<int> revents, int timeout_ms)` | `sys_poll` (no longer declared by `lib/net.m31`; `lib/term.m31` still uses it) | how many are ready; clears `revents` and pushes one per descriptor |
+| `__poll(List<int> fds, List<int> events, List<int> revents, int timeout_ms)` | `sys_poll` (no longer declared by any stdlib module; `lib/net.m31` and `lib/term.m31` wait through `__wait_io_timeout`) | how many are ready; clears `revents` and pushes one per descriptor |
 | `__wait_io_timeout(int fd, int events, int timeout_ms)` | none: `rt_wait_io_timeout`, the reactor | 0 ready, 1 timed out, `-errno` for an fd the OS will not watch; parks only the green thread |
 | `__resolve(str host, int port, int family, List<int> out, bytes addrs)` | `sys_resolve` | how many addresses the name **has**; `-38` on the raw backend, always |
 | `__ignore_sigpipe()` | `sys_ignore_sigpipe` | 0 |
@@ -686,7 +686,7 @@ prim int  __term_arm(int fd);                      // remember the settings for 
 prim int  __term_disarm();
 ```
 
-`__read`, `__write_str`, `__poll` and `__out_flush` are declared again in
+`__read`, `__write_str`, `__wait_io_timeout` and `__out_flush` are declared again in
 `term` and are `io`'s and `net`'s: **a terminal is a descriptor**, so reading
 keys, writing escape sequences and waiting with a timeout needed no new
 primitive at all. That is the same test `http` passed by asking for nothing

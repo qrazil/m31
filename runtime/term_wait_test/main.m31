@@ -1,0 +1,95 @@
+import date;
+import term;
+import timer;
+
+// **`term.Reader.read` parks only the green thread.** Driven by
+// runtime/term_wait_test.sh over a pty (raw mode needs a terminal) and, with
+// stdin from /dev/null, over a descriptor the reactor cannot wait on.
+
+void ticker(Chan<int> done) {
+    int i = 0;
+    while (i < 10) {
+        timer.sleep_ms(10);
+        i = i + 1;
+    }
+    send(done, date.now_ns());
+}
+
+Chan<int> done = Chan<int>(1);
+spawn ticker(done);
+term.Reader r = term.reader();
+Result<term.Session, term.Error> s = term.raw();
+match (s) {
+    case Ok(term.Session sess): {
+        print("ready");
+        int t0 = date.now_ns();
+        match (r.read(400)) {
+            case Ok(term.Input got): {
+                match (got) {
+                    case Timeout: {
+                        print("timeout");
+                    }
+                    case End: {
+                        print("end");
+                    }
+                    case Got(term.Event e): {
+                        print("early: " + e.to_str());
+                    }
+                }
+            }
+            case Err(term.Error e): {
+                print("error");
+            }
+        }
+        int t1 = date.now_ns();
+        print("waited at least 400 ms: " + ((t1 - t0) >= 400 * 1000000).to_str());
+        print("the ticker ran during the wait: " + (recv(done) < t1).to_str());
+        bool going = true;
+        while (going) {
+            match (r.read(-1)) {
+                case Ok(term.Input got): {
+                    match (got) {
+                        case Got(term.Event e): {
+                            print("got " + e.to_str());
+                            if (e.to_str() == "q") {
+                                going = false;
+                            }
+                        }
+                        case Timeout: {
+                            print("timeout");
+                        }
+                        case End: {
+                            going = false;
+                        }
+                    }
+                }
+                case Err(term.Error e): {
+                    print("error");
+                    going = false;
+                }
+            }
+        }
+        print("done");
+    }
+    case Err(term.Error e): {
+        // Not a terminal: read what is there. /dev/null ends at once.
+        match (r.read(400)) {
+            case Ok(term.Input got): {
+                match (got) {
+                    case End: {
+                        print("not a tty: end");
+                    }
+                    case Timeout: {
+                        print("not a tty: timeout");
+                    }
+                    case Got(term.Event ev): {
+                        print("not a tty: got");
+                    }
+                }
+            }
+            case Err(term.Error er): {
+                print("not a tty: error");
+            }
+        }
+    }
+}
