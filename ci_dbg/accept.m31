@@ -1,0 +1,191 @@
+import http;
+import io;
+import net;
+import os;
+
+// **A failed `accept` is a value a server loop can survive.**
+//
+// `Listener.accept` has always answered with a `Result`, but the failures that
+// are the ordinary weather of a server -- out of descriptors, a client that
+// hung up in the backlog -- came back as `Other(24)` and `Other(103)`: nothing
+// a loop could ask "may I go on?" of without knowing errno numbers, so the
+// loops in the wild either trapped (the https httpserver) or ended the server
+// (`http.serve`). Now they are `OutOfDescriptors` and `Aborted`, and
+// `Error.is_transient()` answers the question.
+//
+// What this pins down:
+//
+//   - the errno mapping, no sockets: 23 and 24 are `OutOfDescriptors`, 103 is
+//     `Aborted`, and `is_transient` is true for exactly the accept(2) list;
+//   - **descriptor exhaustion for real.** The program runs itself in a child
+//     under `ulimit -n 48` (a shell test inside a corpus test: the language
+//     cannot lower its own limit), fills the table with `/dev/null`, and
+//     `accept`s a connection that is waiting: `Err(OutOfDescriptors)`, not a
+//     trap, `is_transient`. Freeing one descriptor makes the same `accept`
+//     succeed -- the connection was never lost;
+//   - **`http.serve` rides it out.** With the table full again and a request
+//     waiting in the backlog, `serve` is started: it cannot accept, and it
+//     does not die. A moment later one descriptor is freed and the request is
+//     answered with a 200.
+
+// The two halves of the test are one binary. The parent has no argument and
+// starts the child; the child has `child` and does the work.
+const str CHILD = "child";
+
+void check_mapping() {
+    print("23 -> " + net.from_errno(23).to_str());
+    print("24 -> " + net.from_errno(24).to_str());
+    print("103 -> " + net.from_errno(103).to_str());
+    print("111 -> " + net.from_errno(111).to_str());
+    print("transient(24): " + net.from_errno(24).is_transient().to_str());
+    print("transient(103): " + net.from_errno(103).is_transient().to_str());
+    print("transient(12 ENOMEM): " + net.from_errno(12).is_transient().to_str());
+    print("transient(105 ENOBUFS): " + net.from_errno(105).is_transient().to_str());
+    print("transient(71 EPROTO): " + net.from_errno(71).is_transient().to_str());
+    print("transient(101 ENETUNREACH): " + net.from_errno(101).is_transient().to_str());
+    print("transient(111 refused): " + net.from_errno(111).is_transient().to_str());
+    print("transient(110 timed out): " + net.from_errno(110).is_transient().to_str());
+    print("transient(9 EBADF): " + net.from_errno(9).is_transient().to_str());
+}
+
+// Open /dev/null until the table is full. How many it took depends on the
+// limit and on what the runtime holds, so only "some" is printed.
+List<io.File> exhaust() {
+    List<io.File> held = [];
+    while (true) {
+        match (io.open("/dev/null")) {
+            case Ok(io.File file): {
+                held.push(file);
+            }
+            case Err(io.Error error): {
+                return held;
+            }
+        }
+    }
+}
+
+// Close `count` of the held descriptors.
+void release(List<io.File> held, int count) {
+    for (int step in 0 .. count) {
+        io.File file = held.pop();
+        Result<bool, io.Error> closed = file.close();
+    }
+}
+
+net.Listener listening() {
+    match (net.listen("127.0.0.1", 0)) {
+        case Ok(net.Listener listener): {
+            return listener;
+        }
+        case Err(net.Error error): {
+            trap("listen: " + error.to_str());
+        }
+    }
+}
+
+net.Conn connected(int port) {
+    match (net.connect("127.0.0.1", port)) {
+        case Ok(net.Conn connection): {
+            return connection;
+        }
+        case Err(net.Error error): {
+            trap("connect: " + error.to_str());
+        }
+    }
+}
+
+http.Response hello(http.Request request) {
+    return http.text_response("hello");
+}
+
+// `http.serve` for one connection, on a green thread of its own.
+void serve_one(net.Listener listener) {
+    match (http.serve(listener, hello, connections: 1)) {
+        case Ok(int done): {
+        }
+        case Err(http.Error error): {
+            // Only a failure prints: a success would race the main thread's
+            // own last line.
+            print("serve failed: " + error.to_str());
+        }
+    }
+}
+
+void child() {
+    io.eprint("DBG child start");
+    net.Listener listener = listening();
+    io.eprint("DBG listening");
+    int port = listener.local().port();
+    net.Conn first = connected(port);
+    io.eprint("DBG connected");
+    List<io.File> held = exhaust();
+    io.eprint("DBG exhausted " + held.size().to_str());
+    match (listener.accept()) {
+        case Ok(net.Conn unexpected): {
+            print("accept with a full table: unexpectedly succeeded");
+        }
+        case Err(net.Error error): {
+            print("accept with a full table: " + error.to_str() + " transient=" + error.is_transient().to_str());
+        }
+    }
+    io.eprint("DBG accept1 done");
+    release(held, 1);
+    match (listener.accept()) {
+        case Ok(net.Conn accepted): {
+            print("accept after freeing one: ok");
+        }
+        case Err(net.Error error): {
+            print("accept after freeing one: " + error.to_str());
+        }
+    }
+    io.eprint("DBG accept2 done");
+    release(held, 2);
+    net.Conn second = connected(port);
+    io.eprint("DBG second connected");
+    match (second.write("GET / HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n".to_bytes())) {
+        case Ok(int written): {
+        }
+        case Err(io.Error error): {
+            trap("write: " + net.error_of(error).to_str());
+        }
+    }
+    io.eprint("DBG written");
+    List<io.File> filler = exhaust();
+    io.eprint("DBG filler " + filler.size().to_str());
+    spawn serve_one(listener);
+    match (second.wait(200)) {
+        case Ok(bool arrived): {
+            print("answer while the table is full: " + arrived.to_str());
+        }
+        case Err(net.Error error): {
+            trap("wait: " + error.to_str());
+        }
+    }
+    io.eprint("DBG waited");
+    release(filler, 1);
+    match (second.read_all()) {
+        case Ok(bytes answer): {
+            print("answer after freeing one: ok");
+        }
+        case Err(io.Error error): {
+            print("answer after freeing one: failed " + net.error_of(error).to_str());
+        }
+    }
+    io.eprint("DBG child done");
+}
+
+List<str> arguments = os.args();
+if (arguments.size() > 1 && arguments[1] == CHILD) {
+    child();
+} else {
+    check_mapping();
+    List<str> command = ["sh", "-c", "ulimit -n 48 && exec \"$0\" " + CHILD, arguments[0]];
+    match (os.run(command)) {
+        case Ok(os.ExitStatus status): {
+            print("child ok: " + status.success().to_str());
+        }
+        case Err(io.Error error): {
+            print("child did not start: " + error.to_str());
+        }
+    }
+}
