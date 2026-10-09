@@ -2,21 +2,21 @@
 set -u
 cd "$(dirname "$0")"
 . ./config.sh; . ./runtime/arch.sh
-export WITH_TIMEOUT_NO_DIAG=
 cargo build 2>&1 | tail -1
-stress() { # name carriers runs
-  p=$1; ./target/debug/$LANG_BIN --emit-c corpus/modules/$p/main.m31 -o /tmp/$p.c 2>/dev/null
-  gcc -O0 -I runtime -pthread -o /tmp/$p.bin /tmp/$p.c runtime/rt.c runtime/scheduler.c $RT_REACTOR_C $RT_CTX_ASM || return
-  bad=0
-  for i in $(seq 1 $3); do
-    LANG_NUM_CARRIERS=$2 bash runtime/with_timeout.sh 25 /tmp/$p.bin > /tmp/o.txt 2>&1; rc=$?
-    if [ $rc -ne 0 ] || ! diff -q /tmp/o.txt corpus/modules/$p/main.out >/dev/null; then bad=$((bad+1)); echo "-- $p carriers=$2 run $i rc=$rc"; head -5 /tmp/o.txt; fi
-  done
-  echo "STRESS $p carriers=$2: $bad bad of $3"
-}
-stress stdlib-net-timeout-park 3 40
-stress stdlib-net-timeout-park 1 20
-stress stdlib-net-timeout-park 2 20
-stress stdlib-timer 3 20
-stress stdlib-net-timeout 3 20
-echo done
+p=stdlib-net-timeout-park
+./target/debug/$LANG_BIN --emit-c corpus/modules/$p/main.m31 -o /tmp/$p.c 2>/dev/null
+gcc -O0 -I runtime -pthread -o /tmp/$p.bin /tmp/$p.c runtime/rt.c runtime/scheduler.c $RT_REACTOR_C $RT_CTX_ASM
+hung=0
+for i in $(seq 1 60); do
+  /tmp/$p.bin > /tmp/p.o 2>&1 & pid=$!
+  for t in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do sleep 1; kill -0 $pid 2>/dev/null || break; done
+  if kill -0 $pid 2>/dev/null; then
+    hung=$((hung+1))
+    echo "== park run $i HUNG pid=$pid"; head -5 /tmp/p.o
+    netstat -an -p tcp | grep 127.0.0.1 | awk '{print $6}' | sort | uniq -c
+    sample $pid 1 2>&1 | grep -a -A40 'Call graph' | head -70
+    kill -9 $pid
+    [ $hung -ge 3 ] && break
+  else wait $pid; rc=$?; [ $rc -ne 0 ] && echo "== park run $i rc=$rc: $(grep -a -m1 trap /tmp/p.o)"; fi
+done
+echo "HUNG total $hung"
