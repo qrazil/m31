@@ -42,7 +42,7 @@ for prog in stdlib-timer stdlib-net-timeout-park; do
     fi
     for carriers in 1 2; do
         start=$SECONDS
-        out=$(LANG_NUM_CARRIERS=$carriers timeout 60 "$WORK/$prog" 2>&1)
+        out=$(LANG_NUM_CARRIERS=$carriers bash runtime/with_timeout.sh 60 "$WORK/$prog" 2>&1)
         rc=$?
         took=$((SECONDS - start))
         if [ "$rc" -eq 0 ] && [ "$out" = "$(cat "$dir/main.out")" ]; then

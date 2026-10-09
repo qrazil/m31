@@ -51,7 +51,7 @@ fi
 
 worst_live=0
 for i in $(seq 1 "$runs"); do
-    out=$(LANG_NUM_CARRIERS=2 timeout 60 "$WORK/stall" 2>&1)
+    out=$(LANG_NUM_CARRIERS=2 bash runtime/with_timeout.sh 60 "$WORK/stall" 2>&1)
     rc=$?
     lines=$(echo "$out" | grep -c '^silent=')
     if [ "$rc" -ne 0 ] || [ "$lines" -ne 2 ]; then

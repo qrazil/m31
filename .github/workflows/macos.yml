@@ -50,6 +50,11 @@ jobs:
         os: [ macos-14 ]
     name: kqueue reactor + green-thread runtime (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # A hang must fail the job in minutes, not run for GitHub's 6-hour default
+    # (the whole job takes about 10 minutes when it works). The steps below
+    # carry tighter limits of their own, so the log of the one that hung is
+    # the one that gets cut off.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -101,24 +106,31 @@ jobs:
           }
 
       - name: Phase 1 -- context switch, slab stacks, probe (round trip, interleaving, overflow trap, poison trap)
+        timeout-minutes: 10
         run: bash runtime/greenthread_test.sh
 
       - name: Phase 2 -- scheduler
+        timeout-minutes: 10
         run: bash runtime/scheduler_test.sh
 
       - name: Phase 2 -- scheduler, ThreadSanitizer
+        timeout-minutes: 10
         run: bash runtime/scheduler_tsan.sh
 
       - name: Phase 3 -- reactor, park/unpark, blocking-FFI handoff (this is the kqueue backend's own test suite, unchanged from the epoll backend's)
+        timeout-minutes: 10
         run: bash runtime/phase3_test.sh
 
       - name: Phase 3 -- reactor, ThreadSanitizer (the park/unpark CAS protocol, exercised against the kqueue backend specifically)
+        timeout-minutes: 10
         run: bash runtime/phase3_tsan.sh
 
       - name: Phase 3.5 -- spawn backpressure deadlock regression (real compiled program, many green threads)
+        timeout-minutes: 10
         run: bash runtime/spawn_backpressure_test.sh
 
       - name: Phase 3.5 -- net concurrency demo (real TCP through lib/net.m31 -> __wait_io -> the kqueue reactor, the one real caller this whole backend exists to serve)
+        timeout-minutes: 10
         run: |
           set -eu
           LANG_NUM_CARRIERS=1 ./build.sh runtime/net_concurrency_demo/main.m31 -o /tmp/demo
@@ -130,4 +142,5 @@ jobs:
           }
 
       - name: Full gates.sh (compiler build/test/lint, runtime suites above again as part of the gate, formatter, corpus, ASan/UBSan)
+        timeout-minutes: 30
         run: bash gates.sh

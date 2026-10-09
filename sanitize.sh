@@ -36,6 +36,11 @@ if ! clang $SAN "$WORK/probe.c" -o "$WORK/probe" 2>/dev/null; then
     exit 0
 fi
 
+# A hung program must fail this gate with a stack sample, not stall it: macOS
+# has no timeout(1), so the limit is runtime/with_timeout.sh.
+WT="$PWD/runtime/with_timeout.sh"
+RUN_LIMIT=${RUN_LIMIT:-300}
+
 bad=0
 checked=0
 # A program is one core test, or one module test directory with a main.m31
@@ -74,8 +79,13 @@ for src in "${programs[@]}"; do
         rundir=$(mktemp -d -p "$WORK")
         (cd "$rundir" && bash "$OLDPWD/$stem.setup") >/dev/null 2>&1
     fi
-    (cd "$rundir" && "$WORK/p" "${argv[@]}" <"$stdin") >"$WORK/out" 2>&1
+    (cd "$rundir" && bash "$WT" "$RUN_LIMIT" "$WORK/p" "${argv[@]+"${argv[@]}"}" <"$stdin") >"$WORK/out" 2>&1
     checked=$((checked + 1))
+    if grep -q '^with_timeout: ' "$WORK/out"; then
+        echo "hung (over ${RUN_LIMIT}s): $src"
+        head -40 "$WORK/out" | sed 's/^/    /'
+        bad=1
+    fi
     if grep -qE 'ERROR: (AddressSanitizer|LeakSanitizer)|runtime error:' "$WORK/out"; then
         echo "sanitizer: $src"
         grep -E 'ERROR:|runtime error:|^    #[0-3] ' "$WORK/out" | head -6 | sed 's/^/    /'

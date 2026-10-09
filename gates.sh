@@ -19,12 +19,25 @@ run() {
     local name=$1
     shift
     printf '%-28s' "$name"
-    local out
-    if out=$("$@" 2>&1); then
+    local out rc
+    # Every gate has a hard time limit (GATE_LIMIT seconds, default 25 min --
+    # the slowest gate takes a few). A gate's output is held until it ends,
+    # so without this a hang is silent for as long as the CI job lets it run;
+    # macOS has no timeout(1), hence runtime/with_timeout.sh.
+    out=$(bash runtime/with_timeout.sh "${GATE_LIMIT:-1500}" "$@" 2>&1)
+    rc=$?
+    if [ $rc -eq 0 ]; then
         printf '\033[32mok\033[0m\n'
     else
         printf '\033[31mFAILED\033[0m\n'
-        echo "$out" | sed 's/^/    /' | head -25
+        if [ $rc -eq 124 ]; then
+            # Timed out: the stack sample is at the END, keep the tail too.
+            echo "$out" | sed 's/^/    /' | head -25
+            echo "    [...]"
+            echo "$out" | sed 's/^/    /' | tail -60
+        else
+            echo "$out" | sed 's/^/    /' | head -25
+        fi
         fail=$((fail + 1))
     fi
 }

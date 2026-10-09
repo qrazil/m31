@@ -22,6 +22,13 @@ pass=0
 fail=0
 skipped=0
 
+# Every compiled program runs under a hard time limit (portable: macOS has no
+# timeout(1)), so a hang in one program fails that program with a stack sample
+# instead of stalling the whole run for hours. The slowest corpus program
+# takes a few seconds; this is generous on purpose.
+WT="$PWD/runtime/with_timeout.sh"
+RUN_LIMIT=${RUN_LIMIT:-120}
+
 # -ffp-contract=off on every build: without it a C compiler may fuse
 # `a * b + c` into one fused multiply-add, which rounds once instead of twice.
 # That changes float results between targets that have FMA and targets that
@@ -175,7 +182,7 @@ run_one() {
         return
       fi
     fi
-    got=$(cd "$rundir" && "$bin" "${argv[@]+"${argv[@]}"}" 2>&1 <"$stdin")
+    got=$(cd "$rundir" && bash "$WT" "$RUN_LIMIT" "$bin" "${argv[@]+"${argv[@]}"}" 2>&1 <"$stdin")
     rc=$?
 
     # Layer 4: refcount invariant. The runtime prints this under -DRC_DEBUG.
@@ -273,7 +280,7 @@ for src in corpus/traps/*."$LANG_EXT"; do
             targv+=("$line")
         done <"${src%.$LANG_EXT}.args"
     fi
-    got=$("$bin" "${targv[@]+"${targv[@]}"}" 2>&1 >/dev/null </dev/null); rc=$?
+    got=$(bash "$WT" "$RUN_LIMIT" "$bin" "${targv[@]+"${targv[@]}"}" 2>&1 >/dev/null </dev/null); rc=$?
     if [ $rc -ne 134 ]; then
       fail_test "$label [$cc $opt]" "expected abort (134), got exit $rc"
       trap_ok=0; break
