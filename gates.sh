@@ -166,6 +166,7 @@ run "parked waits on 1 and 2 carriers" bash runtime/parked_waits_carriers_test.s
 # byte-compare was standing in for, checked directly.
 run "formatter preserves meaning" bash -c '
     bad=0
+    wt="$PWD/runtime/with_timeout.sh"
     for f in corpus/*/*.'"$LANG_EXT"' corpus/modules/*/*.'"$LANG_EXT"' examples/*.'"$LANG_EXT"'; do
         [ -e "$f" ] || continue
         # Same convention as run.sh'"'"'s own run_one(): a test whose
@@ -272,9 +273,14 @@ run "formatter preserves meaning" bash -c '
                         mkdir "$rd"
                         (cd "$rd" && bash "$OLDPWD/$setup") >/dev/null 2>&1
                     fi
-                    if ! diff -q <(cd "$rd" && "$w/b" "${argv[@]+"${argv[@]}"}" 2>&1 <"$in") "$exp" >/dev/null 2>&1; then
+                    # Run ONCE, under a hard time limit (macOS has no
+                    # timeout(1)): a program that hangs here fails this gate,
+                    # naming the program, instead of stalling every later
+                    # gate for as long as the CI job lets it.
+                    (cd "$rd" && bash "$wt" 120 "$w/b" "${argv[@]+"${argv[@]}"}" 2>&1 <"$in") >"$w/got" 2>&1
+                    if ! diff -q "$w/got" "$exp" >/dev/null 2>&1; then
                         echo "formatted program prints something else: $f"
-                        diff <(cd "$rd" && "$w/b" "${argv[@]+"${argv[@]}"}" 2>&1 <"$in") "$exp" | head -6
+                        diff "$w/got" "$exp" | head -6
                         bad=1
                     fi
                 else

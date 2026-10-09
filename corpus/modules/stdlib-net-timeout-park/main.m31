@@ -170,6 +170,15 @@ void part_a(net.Listener idle) {
             while (i < SILENT) {
                 spawn silent_client(silent_port, release);
                 i = i + 1;
+                // Pause now and then so the acceptor drains the backlog. The
+                // 150 clients are more than a listen backlog of 128, and a
+                // full queue is where the platforms part: Linux drops the
+                // SYN and the client retries a second later, macOS resets the
+                // connection at once ("broken by the peer"). Neither is what
+                // this test is about.
+                if (i % 50 == 0) {
+                    bool paced = ok_or_die(idle.wait(20));
+                }
             }
         }
         case Err(net.Error e): {

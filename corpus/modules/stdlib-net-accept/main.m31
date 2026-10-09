@@ -28,6 +28,15 @@ import os;
 //     does not die. A moment later one descriptor is freed and the request is
 //     answered with a 200.
 
+// **Linux only** (`main.skip-platform`). The second and third bullets rest on
+// what Linux does when accept(2) fails with EMFILE: the connection stays in
+// the backlog, so freeing one descriptor and accepting again gets it. macOS
+// (and the BSDs) drop it -- measured on a macOS 14 runner: accept fails with
+// EMFILE, and after a descriptor is freed accept answers EAGAIN, the queue is
+// empty and poll never reports the listener readable. The unbounded `accept`
+// below would then wait for ever. The errno mapping in the first bullet is
+// exercised by every platform's other net tests.
+
 // The two halves of the test are one binary. The parent has no argument and
 // starts the child; the child has `child` and does the work.
 const str CHILD = "child";
