@@ -54,7 +54,8 @@ build() {
 # over its own directory, here over this one plus the two library files.
 
 if out=$(
-    for f in apps/ssh/*.m31 lib/sha256.m31 lib/chacha20poly1305.m31 lib/ssh.m31; do
+    for f in apps/ssh/*.m31 lib/sha256.m31 lib/chacha20poly1305.m31 lib/ssh.m31 \
+             lib/sshkey.m31 lib/sshhosts.m31 lib/sshauth.m31 lib/sshexec.m31 lib/sshclient.m31; do
         "$LANGC" fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then
@@ -144,6 +145,109 @@ if build t_ssh_wire; then
     fi
     sed 's/^/     /' "$WORK/wire.err"
 fi
+
+# --- lib/sshkey.m31 Phase 3: the openssh-key-v1 parser -------------------------
+#
+# The checks inside t_ssh_key are pure fixtures (one per Error variant, a
+# prefix sweep). Its real-key half is checked against `cryptography`/OpenSSL:
+# three keys made by `ssh-keygen` (different comments, one empty) must give
+# the same public key, comment and (deterministic) Ed25519 signature, and a
+# passphrase-protected `ssh-keygen -N` key must be refused with the message.
+
+if build t_ssh_key; then
+    if ! command -v ssh-keygen >/dev/null || ! python3 -c 'import cryptography' 2>/dev/null; then
+        bad "sshkey" "ssh-keygen and the 'cryptography' package are both needed"
+    else
+        for k in k1 k2 k3; do
+            ssh-keygen -t ed25519 -f "$WORK/$k" -N "" -q -C "$k comment"
+        done
+        ssh-keygen -t ed25519 -f "$WORK/k4" -N "" -q -C ""
+        ssh-keygen -t ed25519 -f "$WORK/kenc" -N "a passphrase" -q -C "encrypted"
+        keys=("$WORK/k1" "$WORK/k2" "$WORK/k3" "$WORK/k4")
+        "$WORK/t_ssh_key" "$WORK/kenc" "${keys[@]}" >"$WORK/key.got" 2>"$WORK/key.err"
+        rc=$?
+        python3 apps/ssh/oracle_ssh_key.py "$WORK/kenc" "${keys[@]}" >"$WORK/key.want"
+        head -1 "$WORK/key.got" >"$WORK/key.summary"
+        tail -n +2 "$WORK/key.got" >"$WORK/key.lines"
+        if [ $rc -ne 0 ] || ! grep -q ' checks, 0 failures$' "$WORK/key.summary"; then
+            bad "sshkey" "t_ssh_key exited $rc" "$(cat "$WORK/key.summary")" "$(tail -5 "$WORK/key.err")"
+        elif cmp -s "$WORK/key.lines" "$WORK/key.want"; then
+            note "sshkey: $(cat "$WORK/key.summary"); 4 ssh-keygen keys match cryptography (public key, comment, signature) and the encrypted one is refused"
+        else
+            bad "sshkey" "$(diff "$WORK/key.lines" "$WORK/key.want" | head -12)"
+        fi
+    fi
+fi
+
+# --- lib/sshhosts.m31 Phase 3: known_hosts ---------------------------------------
+#
+# Pure fixtures inside t_ssh_hosts (including three lines from a real
+# `ssh-keygen -H`). Here: a plain known_hosts and its `ssh-keygen -H` copy
+# must answer identically, and both must agree with `ssh-keygen -F`, the
+# OpenSSH lookup, on whether each name is listed at all.
+
+if build t_ssh_hosts; then
+    if ! command -v ssh-keygen >/dev/null; then
+        bad "sshhosts" "ssh-keygen is needed"
+    else
+        ssh-keygen -t ed25519 -f "$WORK/ha" -N "" -q
+        ssh-keygen -t ed25519 -f "$WORK/hb" -N "" -q
+        ssh-keygen -t ed25519 -f "$WORK/hc" -N "" -q
+        {
+            printf 'oracle.example,10.9.9.9 %s\n' "$(cut -d' ' -f1,2 "$WORK/ha.pub")"
+            printf '[other.example]:2222 %s\n' "$(cut -d' ' -f1,2 "$WORK/hb.pub")"
+            printf '10.1.2.3 %s\n' "$(cut -d' ' -f1,2 "$WORK/ha.pub")"
+            printf '[lab.example]:2200 %s\n' "$(cut -d' ' -f1,2 "$WORK/hc.pub")"
+        } >"$WORK/kh_plain"
+        cp "$WORK/kh_plain" "$WORK/kh_hashed"
+        ssh-keygen -H -f "$WORK/kh_hashed" >/dev/null 2>&1
+        "$WORK/t_ssh_hosts" "$WORK/kh_plain" "$WORK/kh_hashed" >"$WORK/hosts.got" 2>"$WORK/hosts.err"
+        rc=$?
+        head -1 "$WORK/hosts.got" >"$WORK/hosts.summary"
+        mismatch=""
+        n=0
+        while read -r hp arrow ans; do
+            [ "$arrow" = "->" ] || continue
+            host=${hp%:*}
+            port=${hp##*:}
+            if [ "$port" = 22 ]; then query=$host; else query="[$host]:$port"; fi
+            if ssh-keygen -F "$query" -f "$WORK/kh_plain" >/dev/null 2>&1; then want=listed; else want=unlisted; fi
+            if [ "$ans" = "!3" ]; then got=unlisted; else got=listed; fi
+            # ORACLE.example only tests case folding, which is not compared against
+            # ssh-keygen -F (t_ssh_hosts checks it itself).
+            if [ "$host" != "ORACLE.example" ] && [ "$want" != "$got" ]; then
+                mismatch="$mismatch $query (ssh-keygen: $want, m31: $got)"
+            fi
+            n=$((n + 1))
+        done <"$WORK/hosts.got"
+        if [ $rc -ne 0 ] || ! grep -q ' checks, 0 failures$' "$WORK/hosts.summary"; then
+            bad "sshhosts" "t_ssh_hosts exited $rc" "$(cat "$WORK/hosts.summary")" "$(tail -5 "$WORK/hosts.err")"
+        elif [ -n "$mismatch" ] || [ "$n" -lt 6 ]; then
+            bad "sshhosts" "disagreement with ssh-keygen -F:$mismatch" "$(cat "$WORK/hosts.got")"
+        else
+            note "sshhosts: $(cat "$WORK/hosts.summary"); plain and ssh-keygen -H copies agree, and agree with ssh-keygen -F on $n names"
+        fi
+    fi
+fi
+
+# --- lib/sshauth.m31 and lib/sshexec.m31: scripted-peer self-checks ---------------
+#
+# No network: byte-level layouts, one fixture per Error variant, prefix sweeps
+# of every parser, and reactive in-memory peers that enforce the channel
+# window and packet limits over multi-megabyte transfers. The live half is
+# test_auth_exec.sh.
+
+for t in t_ssh_auth t_ssh_exec; do
+    if build "$t"; then
+        out=$("$WORK/$t" 2>"$WORK/$t.err")
+        rc=$?
+        if [ $rc -eq 0 ] && [[ "$out" == *" checks, 0 failures" ]]; then
+            note "$t: $out"
+        else
+            bad "$t" "exited $rc" "$out" "$(tail -10 "$WORK/$t.err")"
+        fi
+    fi
+done
 
 echo
 if [ $fail -eq 0 ]; then

@@ -1,0 +1,148 @@
+// The whole SSH client in one call, for a git client that wants
+// `ssh user@host command`: connect, check the host key against a
+// `known_hosts` file, authenticate with a key file, run one command.
+//
+// API
+// ---
+//   sshclient.connect(host, port, user, key_path, known_hosts_path)
+//                                  -> Result<Session, Error>
+//   session.exec(command)          -> Result<sshexec.Channel, Error>
+//   session.banner()               -> str      the server's pre-login notice
+//   session.close()                -> Result<bool, Error>
+//
+// Everything is a thin composition of `sshhosts` (which keys are trusted for
+// this host), `ssh.connect_any` (transport, host-key check), `sshkey` (the
+// private key file) and `sshauth` / `sshexec`. This module adds no protocol
+// and no trust decisions of its own: a host that is not in `known_hosts` is
+// refused before any byte is sent to it, a passphrase-protected key is
+// refused with a clear error, and the files named are the only ones read --
+// `~/.ssh` is never consulted. One `Session` runs commands one after another
+// (finish with a channel -- `wait()` or `close()` -- before the next `exec`).
+//
+// `Error` says which stage failed and carries that stage's own error.
+
+import ssh;
+import sshkey;
+import sshhosts;
+import sshauth;
+import sshexec;
+
+pub enum Error {
+    /// The key file could not be used.
+    Key(sshkey.Error);
+    /// `known_hosts` could not be read, or does not trust this host.
+    KnownHosts(sshhosts.Error);
+    /// The connection or the host-key check failed.
+    Connect(ssh.Error);
+    /// The server refused authentication (or failed during it).
+    Auth(sshauth.Error);
+    /// Opening the channel or running the command failed.
+    Exec(sshexec.Error);
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case Key(sshkey.Error e): {
+            return "ssh key: " + e.to_str();
+        }
+        case KnownHosts(sshhosts.Error e): {
+            return "ssh known_hosts: " + e.to_str();
+        }
+        case Connect(ssh.Error e): {
+            return "ssh connect: " + e.to_str();
+        }
+        case Auth(sshauth.Error e): {
+            return "ssh authentication: " + e.to_str();
+        }
+        case Exec(sshexec.Error e): {
+            return "ssh exec: " + e.to_str();
+        }
+    }
+}
+
+/// An authenticated connection.
+pub type Session {
+    ssh.Transport transport;
+    str notice;
+}
+
+/// The server's pre-login notice (empty if it sent none).
+pub str Session.banner() {
+    return notice;
+}
+
+/// Runs `command` (handed to the user's login shell by the server, as with
+/// `ssh host command`).
+pub Result<sshexec.Channel, Error> Session.exec(str command) {
+    match (sshexec.exec(transport, command)) {
+        case Ok(sshexec.Channel ch): {
+            return Result<sshexec.Channel, Error>.Ok(ch);
+        }
+        case Err(sshexec.Error e): {
+            return Result<sshexec.Channel, Error>.Err(Error.Exec(e));
+        }
+    }
+}
+
+/// Closes the connection.
+pub Result<bool, Error> Session.close() {
+    match (transport.close()) {
+        case Ok(bool done): {
+            return Result<bool, Error>.Ok(done);
+        }
+        case Err(ssh.Error e): {
+            return Result<bool, Error>.Err(Error.Connect(e));
+        }
+    }
+}
+
+/// Connects to `host:port`, trusting only the keys `known_hosts_path` lists
+/// for it, and authenticates as `user` with the unencrypted Ed25519 key in
+/// `key_path`.
+pub Result<Session, Error> connect(str host, int port, str user, str key_path, str known_hosts_path) {
+    match (sshkey.load(key_path)) {
+        case Ok(sshkey.PrivateKey key): {
+            return connect_with(host, port, user, key, known_hosts_path);
+        }
+        case Err(sshkey.Error e): {
+            return Result<Session, Error>.Err(Error.Key(e));
+        }
+    }
+}
+
+/// `connect` with a key that is already loaded.
+pub Result<Session, Error> connect_with(str host, int port, str user, sshkey.PrivateKey key, str known_hosts_path) {
+    match (sshhosts.load(known_hosts_path)) {
+        case Ok(sshhosts.KnownHosts hosts): {
+            match (hosts.keys_for(host, port)) {
+                case Ok(List<bytes> trusted): {
+                    return open_session(host, port, user, key, trusted);
+                }
+                case Err(sshhosts.Error e): {
+                    return Result<Session, Error>.Err(Error.KnownHosts(e));
+                }
+            }
+        }
+        case Err(sshhosts.Error e): {
+            return Result<Session, Error>.Err(Error.KnownHosts(e));
+        }
+    }
+}
+
+Result<Session, Error> open_session(str host, int port, str user, sshkey.PrivateKey key, List<bytes> trusted) {
+    match (ssh.connect_any(host, port, trusted)) {
+        case Ok(ssh.Transport t): {
+            match (sshauth.authenticate(t, user, key)) {
+                case Ok(str banner): {
+                    return Result<Session, Error>.Ok(Session(t, banner));
+                }
+                case Err(sshauth.Error e): {
+                    return Result<Session, Error>.Err(Error.Auth(e));
+                }
+            }
+        }
+        case Err(ssh.Error e): {
+            return Result<Session, Error>.Err(Error.Connect(e));
+        }
+    }
+}
