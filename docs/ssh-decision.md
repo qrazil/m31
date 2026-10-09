@@ -1,6 +1,6 @@
 # SSH: the decision
 
-Status: **Phases 1 and 2 implemented and validated; 3 and 4 not started.**
+Status: **Phases 1, 2, 3 and 4 implemented and validated.**
 Phase 1 (crypto primitives) is `lib/sha256.m31`, `lib/chacha20poly1305.m31`,
 `lib/x25519.m31`, `lib/ed25519.m31` (plus `lib/field25519.m31`/
 `lib/sha512.m31`/`lib/scalar25519.m31` underneath), validated against RFC
@@ -10,7 +10,23 @@ validated two ways: `apps/ssh/test.sh`'s pure wire-format checks (no
 `sshd`), and `apps/ssh/test_transport.sh`'s live handshake against a real,
 disposable local `sshd` — including a capstone round trip
 (`SSH_MSG_SERVICE_REQUEST`/`SSH_MSG_SERVICE_ACCEPT`) proving the derived
-keys actually decrypt real traffic, not just that no error was raised. This
+keys actually decrypt real traffic, not just that no error was raised.
+Phases 3 and 4 are `lib/sshkey.m31` (unencrypted `openssh-key-v1` Ed25519
+keys; encrypted ones are refused with a clear error), `lib/sshhosts.m31`
+(`known_hosts`, plain, `[host]:port` and hashed; no trust on first use),
+`lib/sshauth.m31` (RFC 4252 `publickey`), `lib/sshexec.m31` (RFC 4254
+session channel: `exec`, flow control, stdin, separate stdout/stderr,
+exit status) and `lib/sshclient.m31` (all of it in one `connect` call).
+`ssh.connect_any` takes a list of acceptable host keys, and `ssh.Link`
+(`send`/`recv`/`session_id`) is what the new layers run over, so they are
+tested against scripted in-memory peers (`apps/ssh/t_ssh_auth.m31`,
+`t_ssh_exec.m31`, `t_ssh_key.m31`, `t_ssh_hosts.m31`, run by
+`apps/ssh/test.sh`) and, live, against a disposable `sshd` with fresh keys
+(`apps/ssh/test_auth_exec.sh`: wrong key, unknown user and unknown host
+refused; exit status; stderr separation; 8 MB read and write; a 6 MB `cat`
+round trip). Known limits: Ed25519 keys only, no rekeying, no
+passphrase-protected keys, and the receive window is replenished as data
+arrives (an unread stream is buffered in memory, not back-pressured). This
 exists because
 `apps/git/design.md` explicitly held SSH back from the packfile/smart-HTTP
 work and required its own pass before any code gets written — a bug in a

@@ -8,10 +8,17 @@
 // API
 // ---
 //   ssh.connect(host, port, expected_host_key) -> Result<Transport, Error>
+//   ssh.connect_any(host, port, host_keys)     -> Result<Transport, Error>
 //   t.send(payload)   -> Result<int, Error>     all of `payload`, or an error
 //   t.recv()          -> Result<bytes, Error>   one application message
 //   t.session_id()    -> bytes                  for Phase 3's auth signature
 //   t.close()         -> Result<bool, Error>
+//
+// `Link` (below) is the three-method interface Phase 3 (`lib/sshauth.m31`)
+// and Phase 4 (`lib/sshexec.m31`) are written against -- `Transport`
+// satisfies it structurally, and so does the scripted in-memory fake their
+// pure tests drive, which is what lets every message parser and state
+// machine in those modules be tested with no `sshd` in sight.
 //
 // The seam, testable with no `sshd` in sight (the same split
 // `apps/git/httpfetch.m31` draws, for the same reason -- see its own
@@ -64,12 +71,13 @@
 //   - Compression (always negotiates "none").
 //   - Authentication (`ssh-userauth`, RFC 4252) and the connection protocol
 //     (RFC 4254, channels/`exec`) -- Phase 3 and Phase 4, each its own file
-//     on top of `Transport`.
+//     on top of `Transport` (`lib/sshauth.m31`, `lib/sshexec.m31`).
 //   - A graceful `SSH_MSG_DISCONNECT` on `close()` -- nothing downstream
 //     depends on one yet; a two-line follow-up once something does.
-//   - Host-key *management* (`known_hosts`, TOFU prompting): `connect`
-//     takes the expected key as a plain argument and refuses outright on a
-//     mismatch; where that expectation comes from is the caller's problem.
+//   - Host-key *management* (TOFU prompting): `connect`/`connect_any` take
+//     the expected key(s) as plain arguments and refuse outright on a
+//     mismatch; where that expectation comes from is the caller's problem
+//     (`lib/sshhosts.m31` reads OpenSSH `known_hosts` files for it).
 
 import io;
 import net;
@@ -817,6 +825,15 @@ Result<void, Error> send_ciphered_payload(net.Conn conn, bytes payload, bytes k1
 
 // --- Part 7: SSH_MSG_NEWKEYS and the Transport type --------------------------
 
+/// What the layers above the transport need from one, and nothing more:
+/// `lib/sshauth.m31` and `lib/sshexec.m31` take a `Link`, never a
+/// `Transport`, so a test can hand them a scripted in-memory peer.
+pub interface Link {
+    Result<int, Error> send(bytes payload);
+    Result<bytes, Error> recv();
+    bytes session_id();
+}
+
 /// A live, key-exchanged SSH connection: `send`/`recv` carry application
 /// payloads (Phase 3/4's job to interpret), already encrypted/authenticated
 /// in both directions. Every field is private -- the only way to build one
@@ -883,12 +900,24 @@ pub Result<bool, Error> Transport.close() {
     }
 }
 
+// Whether `host_key` is exactly one of `allowed`. An empty list allows
+// nothing -- a caller with no expectation gets a refusal, never trust on
+// first use. Public keys are not secret, so plain `==` is fine.
+bool key_is_listed(bytes host_key, List<bytes> allowed) {
+    for (bytes k in allowed) {
+        if (k == host_key) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // The whole handshake, given an already-connected socket: version exchange,
 // KEXINIT both ways, the ECDH exchange and host-key check, key derivation,
 // then NEWKEYS both ways. Sequence numbers are tracked from each side's
 // very first packet (its own KEXINIT) and never reset at the NEWKEYS
 // boundary -- see this module's header and Part 6's own note.
-Result<Transport, Error> do_handshake(net.Conn conn, bytes expected_host_key) {
+Result<Transport, Error> do_handshake(net.Conn conn, List<bytes> expected_host_keys) {
     random.System rng = random.system();
     int send_seq = 0;
     int recv_seq = 0;
@@ -908,7 +937,7 @@ Result<Transport, Error> do_handshake(net.Conn conn, bytes expected_host_key) {
     recv_seq = recv_seq + 1;
     KexEcdhReply reply = parse_kex_ecdh_reply(reply_payload)?;
     bytes host_key = parse_host_key_blob(reply.k_s)?;
-    if (host_key != expected_host_key) {
+    if (!key_is_listed(host_key, expected_host_keys)) {
         return Result<Transport, Error>.Err(Error.HostKeyMismatch);
     }
     // RFC 8731 §3.1's text says this gets reversed (little-endian, RFC
@@ -947,9 +976,17 @@ Result<Transport, Error> do_handshake(net.Conn conn, bytes expected_host_key) {
 /// an expected host key as a parameter and refuses to proceed if it doesn't
 /// match."
 pub Result<Transport, Error> connect(str host, int port, bytes expected_host_key) {
+    return connect_any(host, port, [expected_host_key]);
+}
+
+/// As `connect`, but any one of `host_keys` is acceptable -- a host that
+/// has rotated keys, or a `known_hosts` file listing several. An empty list
+/// refuses every server (`Error.HostKeyMismatch`): there is no trust on
+/// first use.
+pub Result<Transport, Error> connect_any(str host, int port, List<bytes> host_keys) {
     match (net.connect(host, port)) {
         case Ok(net.Conn c): {
-            return do_handshake(c, expected_host_key);
+            return do_handshake(c, host_keys);
         }
         case Err(net.Error e): {
             return Result<Transport, Error>.Err(Error.Io);

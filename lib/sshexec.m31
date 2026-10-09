@@ -1,0 +1,698 @@
+// SSH Phase 4 (`docs/ssh-decision.md`): RFC 4254 -- one `session` channel
+// running one `exec` request, over an authenticated transport.
+//
+// API
+// ---
+//   sshexec.exec(link, command)  -> Result<Channel, Error>
+//
+//   ch.write(data)       -> Result<int, Error>     to the command's stdin
+//   ch.close_write()     -> Result<void, Error>    stdin EOF
+//   ch.read(max)         -> Result<bytes, Error>   stdout; empty == EOF
+//   ch.read_err(max)     -> Result<bytes, Error>   stderr; empty == EOF
+//   ch.read_all()        -> Result<bytes, Error>   stdout to EOF
+//   ch.read_all_err()    -> Result<bytes, Error>   stderr to EOF
+//   ch.wait()            -> Result<Exit, Error>    until the server closes
+//   ch.exit()            -> Exit                   what is known so far
+//   ch.close()           -> Result<void, Error>    close and drain
+//
+// `link` is an `ssh.Link` (an `ssh.Transport` after `sshauth.authenticate`).
+// That is the shape a git client wants: write the request to stdin, read the
+// response from stdout, see `git-upload-pack`'s diagnostics on stderr, and
+// get the exit status at the end. One channel at a time per link: the
+// connection layer is single-threaded and a second channel would need a
+// multiplexer; opening a second `exec` after the first is fully closed is
+// fine (the first channel's id is then free again).
+//
+// --- flow control (RFC 4254 §5.2) -------------------------------------------
+//
+// *Sending.* The server grants a window at open and tops it up with
+// `WINDOW_ADJUST`. `write` sends no more than the current window allows, in
+// packets of at most min(32768, the server's maximum packet size), and when
+// the window is empty it reads messages -- handling data, `WINDOW_ADJUST`,
+// `EOF`, `CLOSE` as they come -- until the window opens or the channel
+// closes. The data it reads meanwhile is buffered for `read`, so a command
+// that echoes while the client is still writing (`cat`) cannot deadlock the
+// two directions against each other.
+//
+// *Receiving.* This client advertises a 2 MiB window and 32768-byte packets.
+// It tops the window up as soon as it falls to half, **on receipt rather
+// than on `read`**: there is no backpressure, so a server writing faster
+// than the caller reads makes the buffers grow. Because the window is topped
+// up to 2 MiB whenever it falls to 1 MiB and one packet is at most 32768, a
+// well-behaved server can never run out of window mid-packet; a packet larger
+// than 32768 is the one violation left to detect, and gets
+// `Error.DataTooLarge` rather than a silent overrun.
+// Stderr is kept apart from stdout (`EXTENDED_DATA` type 1) and buffered the
+// same way; a caller that never reads stderr still sees it drained from the
+// window, so it cannot stall the command.
+//
+// --- everything else the server may say -------------------------------------
+//
+// `exit-status` and `exit-signal` become `Exit`. `GLOBAL_REQUEST`s (OpenSSH
+// sends `hostkeys-00@openssh.com` after login) are answered `REQUEST_FAILURE`
+// when they want a reply and are otherwise ignored; unknown `CHANNEL_REQUEST`s
+// likewise get `CHANNEL_FAILURE` when they want one. Anything else is
+// `Error.UnexpectedMessage`; a message for a channel number this client never
+// opened is `Error.BadChannel`.
+
+import ssh;
+
+/// Why a channel operation failed.
+pub enum Error {
+    /// The transport failed underneath; the `ssh.Error` says how.
+    Transport(ssh.Error);
+    /// A message named more bytes than it held.
+    Truncated;
+    /// A message type that cannot appear at this step.
+    UnexpectedMessage;
+    /// A message with the right type but impossible content: a window that
+    /// would pass 2^32-1, an unknown extended-data type, a zero packet size,
+    /// text that is not UTF-8.
+    BadMessage;
+    /// A channel message addressed to a channel this client does not have.
+    BadChannel;
+    /// The server refused to open the session channel (carries the RFC 4254
+    /// §5.1 reason code).
+    OpenRefused(int);
+    /// The server refused the `exec` request (command not allowed, forced
+    /// command, no shell).
+    ExecRefused;
+    /// The server sent one packet bigger than the maximum we advertised.
+    DataTooLarge;
+    /// The channel cannot take this operation: stdin was already closed, or
+    /// the server has closed the channel.
+    Closed;
+    /// A caller argument is out of range (`read(0)`).
+    BadArgument;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case Transport(ssh.Error e): {
+            return "the connection failed on the channel: " + e.to_str();
+        }
+        case Truncated: {
+            return "a channel message named more bytes than arrived";
+        }
+        case UnexpectedMessage: {
+            return "an unexpected message type arrived on the channel";
+        }
+        case BadMessage: {
+            return "a channel message had impossible content";
+        }
+        case BadChannel: {
+            return "a message was addressed to a channel that is not open";
+        }
+        case OpenRefused(int reason): {
+            return "the server refused to open a session channel (reason " + reason.to_str() + ")";
+        }
+        case ExecRefused: {
+            return "the server refused the exec request";
+        }
+        case DataTooLarge: {
+            return "the server sent a packet larger than the advertised maximum";
+        }
+        case Closed: {
+            return "the channel is closed";
+        }
+        case BadArgument: {
+            return "an argument is out of range";
+        }
+    }
+}
+
+/// How the remote command ended.
+pub enum Exit {
+    /// No `exit-status`/`exit-signal` has arrived (yet, or ever: the server
+    /// may close without one).
+    Unknown;
+    /// The command exited with this status.
+    Status(int);
+    /// The command was killed by this signal (name without the `SIG` prefix,
+    /// e.g. `KILL`).
+    Signal(str);
+}
+
+pub str Exit.to_str() {
+    match (this) {
+        case Unknown: {
+            return "exit status unknown";
+        }
+        case Status(int code): {
+            return "exit status " + code.to_str();
+        }
+        case Signal(str name): {
+            return "killed by signal " + name;
+        }
+    }
+}
+
+pub const int SSH_MSG_GLOBAL_REQUEST = 80;
+pub const int SSH_MSG_REQUEST_FAILURE = 82;
+pub const int SSH_MSG_CHANNEL_OPEN = 90;
+pub const int SSH_MSG_CHANNEL_OPEN_CONFIRMATION = 91;
+pub const int SSH_MSG_CHANNEL_OPEN_FAILURE = 92;
+pub const int SSH_MSG_CHANNEL_WINDOW_ADJUST = 93;
+pub const int SSH_MSG_CHANNEL_DATA = 94;
+pub const int SSH_MSG_CHANNEL_EXTENDED_DATA = 95;
+pub const int SSH_MSG_CHANNEL_EOF = 96;
+pub const int SSH_MSG_CHANNEL_CLOSE = 97;
+pub const int SSH_MSG_CHANNEL_REQUEST = 98;
+pub const int SSH_MSG_CHANNEL_SUCCESS = 99;
+pub const int SSH_MSG_CHANNEL_FAILURE = 100;
+/// Our channel number (one channel at a time).
+const int LOCAL_ID = 0;
+/// What we advertise: the receive window and the largest packet we accept.
+pub const int LOCAL_WINDOW = 2097152;
+pub const int LOCAL_MAX_PACKET = 32768;
+/// The most we send in one packet whatever the server allows.
+const int SEND_CHUNK = 32768;
+const int MAX_U32 = 4294967295;
+const int EXTENDED_STDERR = 1;
+
+// --- Part 0: wire helpers (pure) -------------------------------------------
+
+void push_u32(bytes out, int v) {
+    out.push(v >> 24 & 0xFF);
+    out.push(v >> 16 & 0xFF);
+    out.push(v >> 8 & 0xFF);
+    out.push(v & 0xFF);
+}
+
+// Big-endian u32 at `at`; the caller has already checked `at + 4 <= size`.
+int be32(bytes buf, int at) {
+    return (buf[at] << 24) | (buf[at + 1] << 16) | (buf[at + 2] << 8) | buf[at + 3];
+}
+
+/// `CHANNEL_OPEN "session"` (RFC 4254 §6.1).
+pub bytes build_open(int local_id, int window, int max_packet) {
+    bytes out = [];
+    out.push(SSH_MSG_CHANNEL_OPEN);
+    ssh.push_string(out, "session".to_bytes());
+    push_u32(out, local_id);
+    push_u32(out, window);
+    push_u32(out, max_packet);
+    return out;
+}
+
+/// `CHANNEL_REQUEST "exec"` with `want_reply` set (RFC 4254 §6.5).
+pub bytes build_exec(int remote_id, str command) {
+    bytes out = [];
+    out.push(SSH_MSG_CHANNEL_REQUEST);
+    push_u32(out, remote_id);
+    ssh.push_string(out, "exec".to_bytes());
+    out.push(1);
+    ssh.push_string(out, command.to_bytes());
+    return out;
+}
+
+/// A message that is only a type byte and a channel number: `EOF`, `CLOSE`,
+/// `SUCCESS`, `FAILURE`.
+pub bytes build_simple(int kind, int remote_id) {
+    bytes out = [];
+    out.push(kind);
+    push_u32(out, remote_id);
+    return out;
+}
+
+pub bytes build_window_adjust(int remote_id, int add) {
+    bytes out = build_simple(SSH_MSG_CHANNEL_WINDOW_ADJUST, remote_id);
+    push_u32(out, add);
+    return out;
+}
+
+pub bytes build_data(int remote_id, bytes data) {
+    bytes out = build_simple(SSH_MSG_CHANNEL_DATA, remote_id);
+    ssh.push_string(out, data);
+    return out;
+}
+
+// --- Part 1: message parsers (pure, every read bounds-checked) -------------
+
+/// `CHANNEL_OPEN_CONFIRMATION`: the server's channel number, window and
+/// maximum packet size.
+pub type Confirmation {
+    pub int remote_id;
+    pub int window;
+    pub int max_packet;
+}
+
+Result<ssh.Field, Error> string_at(bytes buf, int at) {
+    match (ssh.parse_string(buf, at)) {
+        case Ok(ssh.Field f): {
+            return Result<ssh.Field, Error>.Ok(f);
+        }
+        case Err(ssh.Error e): {
+            return Result<ssh.Field, Error>.Err(Error.Truncated);
+        }
+    }
+}
+
+// The u32 at `at`, or `Truncated`.
+Result<int, Error> u32_at(bytes buf, int at) {
+    if (at < 0 || at + 4 > buf.size()) {
+        return Result<int, Error>.Err(Error.Truncated);
+    }
+    return Result<int, Error>.Ok(be32(buf, at));
+}
+
+/// Checks the message type and that the recipient channel is ours; the rest
+/// of each parser starts at offset 5.
+Result<void, Error> expect_channel(bytes payload, int kind) {
+    if (payload.size() < 1 || payload[0] != kind) {
+        return Result<void, Error>.Err(Error.UnexpectedMessage);
+    }
+    int recipient = u32_at(payload, 1)?;
+    if (recipient != LOCAL_ID) {
+        return Result<void, Error>.Err(Error.BadChannel);
+    }
+    return Result<void, Error>.Ok;
+}
+
+pub Result<Confirmation, Error> parse_confirmation(bytes payload) {
+    expect_channel(payload, SSH_MSG_CHANNEL_OPEN_CONFIRMATION)?;
+    int remote_id = u32_at(payload, 5)?;
+    int window = u32_at(payload, 9)?;
+    int max_packet = u32_at(payload, 13)?;
+    if (max_packet == 0) {
+        return Result<Confirmation, Error>.Err(Error.BadMessage);
+    }
+    return Result<Confirmation, Error>.Ok(Confirmation(remote_id, window, max_packet));
+}
+
+/// `CHANNEL_OPEN_FAILURE`: the reason code (the description and language tag
+/// are parsed for bounds and dropped).
+pub Result<int, Error> parse_open_failure(bytes payload) {
+    expect_channel(payload, SSH_MSG_CHANNEL_OPEN_FAILURE)?;
+    int reason = u32_at(payload, 5)?;
+    ssh.Field description = string_at(payload, 9)?;
+    string_at(payload, description.next)?;
+    return Result<int, Error>.Ok(reason);
+}
+
+pub Result<int, Error> parse_window_adjust(bytes payload) {
+    expect_channel(payload, SSH_MSG_CHANNEL_WINDOW_ADJUST)?;
+    return u32_at(payload, 5);
+}
+
+pub Result<bytes, Error> parse_data(bytes payload) {
+    expect_channel(payload, SSH_MSG_CHANNEL_DATA)?;
+    ssh.Field data = string_at(payload, 5)?;
+    return Result<bytes, Error>.Ok(data.value);
+}
+
+/// `CHANNEL_EXTENDED_DATA`'s data-type code.
+pub Result<int, Error> parse_extended_code(bytes payload) {
+    expect_channel(payload, SSH_MSG_CHANNEL_EXTENDED_DATA)?;
+    return u32_at(payload, 5);
+}
+
+pub Result<bytes, Error> parse_extended_data(bytes payload) {
+    expect_channel(payload, SSH_MSG_CHANNEL_EXTENDED_DATA)?;
+    u32_at(payload, 5)?;
+    ssh.Field data = string_at(payload, 9)?;
+    return Result<bytes, Error>.Ok(data.value);
+}
+
+/// A `CHANNEL_REQUEST` from the server, parsed far enough to act on.
+pub type Request {
+    pub str name;
+    pub bool want_reply;
+    pub Exit exit;
+}
+
+pub Result<Request, Error> parse_request(bytes payload) {
+    expect_channel(payload, SSH_MSG_CHANNEL_REQUEST)?;
+    ssh.Field name_field = string_at(payload, 5)?;
+    str name = "";
+    match (name_field.value.utf8()) {
+        case Some(str s): {
+            name = s;
+        }
+        case None: {
+            return Result<Request, Error>.Err(Error.BadMessage);
+        }
+    }
+    int at = name_field.next;
+    if (at + 1 > payload.size()) {
+        return Result<Request, Error>.Err(Error.Truncated);
+    }
+    bool want_reply = payload[at] != 0;
+    at = at + 1;
+    Exit exit = Exit.Unknown;
+    if (name == "exit-status") {
+        exit = Exit.Status(u32_at(payload, at)?);
+    } else if (name == "exit-signal") {
+        ssh.Field sig = string_at(payload, at)?;
+        if (sig.next + 1 > payload.size()) {
+            return Result<Request, Error>.Err(Error.Truncated);
+        }
+        ssh.Field message = string_at(payload, sig.next + 1)?;
+        string_at(payload, message.next)?;
+        match (sig.value.utf8()) {
+            case Some(str s): {
+                exit = Exit.Signal(s);
+            }
+            case None: {
+                return Result<Request, Error>.Err(Error.BadMessage);
+            }
+        }
+    }
+    return Result<Request, Error>.Ok(Request(name, want_reply, exit));
+}
+
+// A GLOBAL_REQUEST's want_reply flag (name string, then boolean).
+Result<bool, Error> parse_global_want_reply(bytes payload) {
+    ssh.Field name = string_at(payload, 1)?;
+    if (name.next + 1 > payload.size()) {
+        return Result<bool, Error>.Err(Error.Truncated);
+    }
+    return Result<bool, Error>.Ok(payload[name.next] != 0);
+}
+
+// --- Part 2: the channel ----------------------------------------------------
+
+/// An open session channel running one command. Every field is private.
+pub type Channel {
+    ssh.Link link;
+    int remote_id;
+    int remote_window;
+    int remote_max_packet;
+    int local_window;
+    bytes out_buf;
+    bytes err_buf;
+    bool got_eof;
+    bool got_close;
+    bool sent_eof;
+    bool sent_close;
+    Exit status;
+}
+
+// Handles one message that arrived on the channel, updating buffers, windows
+// and state. The only place that interprets server messages after `exec`.
+Result<void, Error> Channel.dispatch(bytes payload) {
+    if (payload.size() == 0) {
+        return Result<void, Error>.Err(Error.Truncated);
+    }
+    int kind = payload[0];
+    if (kind == SSH_MSG_CHANNEL_DATA) {
+        bytes data = parse_data(payload)?;
+        if (got_eof) {
+            return Result<void, Error>.Err(Error.UnexpectedMessage);
+        }
+        take_window(data.size())?;
+        out_buf.extend(data);
+        replenish()?;
+    } else if (kind == SSH_MSG_CHANNEL_EXTENDED_DATA) {
+        int code = parse_extended_code(payload)?;
+        if (code != EXTENDED_STDERR) {
+            return Result<void, Error>.Err(Error.BadMessage);
+        }
+        bytes data = parse_extended_data(payload)?;
+        if (got_eof) {
+            return Result<void, Error>.Err(Error.UnexpectedMessage);
+        }
+        take_window(data.size())?;
+        err_buf.extend(data);
+        replenish()?;
+    } else if (kind == SSH_MSG_CHANNEL_WINDOW_ADJUST) {
+        int add = parse_window_adjust(payload)?;
+        if (remote_window + add > MAX_U32) {
+            return Result<void, Error>.Err(Error.BadMessage);
+        }
+        remote_window = remote_window + add;
+    } else if (kind == SSH_MSG_CHANNEL_EOF) {
+        expect_channel(payload, SSH_MSG_CHANNEL_EOF)?;
+        got_eof = true;
+    } else if (kind == SSH_MSG_CHANNEL_CLOSE) {
+        expect_channel(payload, SSH_MSG_CHANNEL_CLOSE)?;
+        got_eof = true;
+        got_close = true;
+        if (!sent_close) {
+            send_on(link, build_simple(SSH_MSG_CHANNEL_CLOSE, remote_id))?;
+            sent_close = true;
+        }
+    } else if (kind == SSH_MSG_CHANNEL_REQUEST) {
+        Request req = parse_request(payload)?;
+        match (req.exit) {
+            case Unknown: {
+                if (req.want_reply) {
+                    send_on(link, build_simple(SSH_MSG_CHANNEL_FAILURE, remote_id))?;
+                }
+            }
+            case Status(int code): {
+                status = req.exit;
+            }
+            case Signal(str name): {
+                status = req.exit;
+            }
+        }
+    } else if (kind == SSH_MSG_GLOBAL_REQUEST) {
+        answer_global(link, payload)?;
+    } else {
+        return Result<void, Error>.Err(Error.UnexpectedMessage);
+    }
+    return Result<void, Error>.Ok;
+}
+
+// Charges `n` received bytes against the window we granted. A packet within
+// `LOCAL_MAX_PACKET` always fits: `replenish` keeps `local_window` above half
+// of `LOCAL_WINDOW`, which is far more than one packet.
+Result<void, Error> Channel.take_window(int n) {
+    if (n > LOCAL_MAX_PACKET) {
+        return Result<void, Error>.Err(Error.DataTooLarge);
+    }
+    local_window = local_window - n;
+    return Result<void, Error>.Ok;
+}
+
+// Tops the window we granted back up once it is down to half.
+Result<void, Error> Channel.replenish() {
+    if (local_window <= LOCAL_WINDOW / 2 && !sent_close) {
+        int add = LOCAL_WINDOW - local_window;
+        send_on(link, build_window_adjust(remote_id, add))?;
+        local_window = LOCAL_WINDOW;
+    }
+    return Result<void, Error>.Ok;
+}
+
+// Reads and handles one message.
+Result<void, Error> Channel.pump() {
+    bytes payload = recv_on(link)?;
+    return dispatch(payload);
+}
+
+/// Sends `data` to the command's stdin, in as many packets as the server's
+/// window needs; returns `data.size()`. `Err(Closed)` after `close_write` or
+/// once the server has closed the channel.
+pub Result<int, Error> Channel.write(bytes data) {
+    int sent = 0;
+    while (sent < data.size()) {
+        if (sent_eof || sent_close || got_close) {
+            return Result<int, Error>.Err(Error.Closed);
+        }
+        if (remote_window == 0) {
+            pump()?;
+        } else {
+            int chunk = data.size() - sent;
+            if (chunk > remote_window) {
+                chunk = remote_window;
+            }
+            if (chunk > remote_max_packet) {
+                chunk = remote_max_packet;
+            }
+            if (chunk > SEND_CHUNK) {
+                chunk = SEND_CHUNK;
+            }
+            send_on(link, build_data(remote_id, data.substr(sent, sent + chunk)))?;
+            remote_window = remote_window - chunk;
+            sent = sent + chunk;
+        }
+    }
+    return Result<int, Error>.Ok(sent);
+}
+
+/// Signals end of stdin. A second call is a no-op.
+pub Result<void, Error> Channel.close_write() {
+    if (sent_eof) {
+        return Result<void, Error>.Ok;
+    }
+    if (sent_close || got_close) {
+        return Result<void, Error>.Err(Error.Closed);
+    }
+    send_on(link, build_simple(SSH_MSG_CHANNEL_EOF, remote_id))?;
+    sent_eof = true;
+    return Result<void, Error>.Ok;
+}
+
+/// Up to `max` bytes of the command's stdout, waiting for at least one;
+/// an empty result means the command closed stdout (EOF) and nothing is
+/// left to read.
+pub Result<bytes, Error> Channel.read(int max) {
+    if (max < 1) {
+        return Result<bytes, Error>.Err(Error.BadArgument);
+    }
+    while (out_buf.size() == 0 && !got_eof) {
+        pump()?;
+    }
+    return Result<bytes, Error>.Ok(take_front(out_buf, max));
+}
+
+/// As `read`, for stderr.
+pub Result<bytes, Error> Channel.read_err(int max) {
+    if (max < 1) {
+        return Result<bytes, Error>.Err(Error.BadArgument);
+    }
+    while (err_buf.size() == 0 && !got_eof) {
+        pump()?;
+    }
+    return Result<bytes, Error>.Ok(take_front(err_buf, max));
+}
+
+/// All of stdout until EOF.
+pub Result<bytes, Error> Channel.read_all() {
+    bytes all = [];
+    while (true) {
+        bytes part = read(LOCAL_MAX_PACKET)?;
+        if (part.size() == 0) {
+            return Result<bytes, Error>.Ok(all);
+        }
+        all.extend(part);
+    }
+}
+
+/// All of stderr until EOF.
+pub Result<bytes, Error> Channel.read_all_err() {
+    bytes all = [];
+    while (true) {
+        bytes part = read_err(LOCAL_MAX_PACKET)?;
+        if (part.size() == 0) {
+            return Result<bytes, Error>.Ok(all);
+        }
+        all.extend(part);
+    }
+}
+
+/// Reads until the server closes the channel, answers with our own `CLOSE`,
+/// and returns how the command ended. Output that arrives meanwhile stays
+/// readable. Call `close_write` first for a command that waits on stdin.
+pub Result<Exit, Error> Channel.wait() {
+    while (!got_close) {
+        pump()?;
+    }
+    return Result<Exit, Error>.Ok(status);
+}
+
+/// What is known about the exit so far (`Exit.Unknown` until the server has
+/// sent it, which it does before closing).
+pub Exit Channel.exit() {
+    return status;
+}
+
+/// Gives up on the command: sends `CLOSE`, then reads and discards whatever
+/// arrives until the server's `CLOSE` comes back. Idempotent.
+pub Result<void, Error> Channel.close() {
+    if (!sent_close) {
+        send_on(link, build_simple(SSH_MSG_CHANNEL_CLOSE, remote_id))?;
+        sent_close = true;
+    }
+    while (!got_close) {
+        pump()?;
+        out_buf.clear();
+        err_buf.clear();
+    }
+    return Result<void, Error>.Ok;
+}
+
+Result<void, Error> send_on(ssh.Link link, bytes payload) {
+    match (link.send(payload)) {
+        case Ok(int n): {
+            return Result<void, Error>.Ok;
+        }
+        case Err(ssh.Error e): {
+            return Result<void, Error>.Err(Error.Transport(e));
+        }
+    }
+}
+
+Result<bytes, Error> recv_on(ssh.Link link) {
+    match (link.recv()) {
+        case Ok(bytes payload): {
+            return Result<bytes, Error>.Ok(payload);
+        }
+        case Err(ssh.Error e): {
+            return Result<bytes, Error>.Err(Error.Transport(e));
+        }
+    }
+}
+
+/// Opens a session channel on `link` and asks the server to run `command`
+/// (the string is passed to the user's login shell by sshd, as with
+/// `ssh host command`; quote accordingly). `Ok` once the server has accepted
+/// the `exec`.
+pub Result<Channel, Error> exec(ssh.Link link, str command) {
+    send_on(link, build_open(LOCAL_ID, LOCAL_WINDOW, LOCAL_MAX_PACKET))?;
+    Confirmation conf = Confirmation(0, 0, 1);
+    bool opened = false;
+    while (!opened) {
+        bytes reply = recv_on(link)?;
+        if (reply.size() == 0) {
+            return Result<Channel, Error>.Err(Error.Truncated);
+        }
+        int kind = reply[0];
+        if (kind == SSH_MSG_CHANNEL_OPEN_CONFIRMATION) {
+            conf = parse_confirmation(reply)?;
+            opened = true;
+        } else if (kind == SSH_MSG_CHANNEL_OPEN_FAILURE) {
+            int reason = parse_open_failure(reply)?;
+            return Result<Channel, Error>.Err(Error.OpenRefused(reason));
+        } else if (kind == SSH_MSG_GLOBAL_REQUEST) {
+            answer_global(link, reply)?;
+        } else {
+            return Result<Channel, Error>.Err(Error.UnexpectedMessage);
+        }
+    }
+    Channel ch = Channel(link, conf.remote_id, conf.window, conf.max_packet, LOCAL_WINDOW, [], [], false, false, false, false, Exit.Unknown);
+    send_on(link, build_exec(conf.remote_id, command))?;
+    bool answered = false;
+    while (!answered) {
+        bytes reply = recv_on(link)?;
+        if (reply.size() == 0) {
+            return Result<Channel, Error>.Err(Error.Truncated);
+        }
+        int kind = reply[0];
+        if (kind == SSH_MSG_CHANNEL_SUCCESS) {
+            expect_channel(reply, SSH_MSG_CHANNEL_SUCCESS)?;
+            answered = true;
+        } else if (kind == SSH_MSG_CHANNEL_FAILURE) {
+            expect_channel(reply, SSH_MSG_CHANNEL_FAILURE)?;
+            return Result<Channel, Error>.Err(Error.ExecRefused);
+        } else {
+            ch.dispatch(reply)?;
+        }
+    }
+    return Result<Channel, Error>.Ok(ch);
+}
+
+// Answers a GLOBAL_REQUEST: REQUEST_FAILURE if it wants a reply (this client
+// implements none of them), nothing otherwise.
+Result<void, Error> answer_global(ssh.Link link, bytes payload) {
+    bool want = parse_global_want_reply(payload)?;
+    if (want) {
+        bytes out = [];
+        out.push(SSH_MSG_REQUEST_FAILURE);
+        send_on(link, out)?;
+    }
+    return Result<void, Error>.Ok;
+}
+
+// Up to `max` bytes off the front of `buf`.
+bytes take_front(bytes buf, int max) {
+    int n = buf.size();
+    if (n > max) {
+        n = max;
+    }
+    bytes out = buf.substr(0, n);
+    buf.drop_front(n);
+    return out;
+}
