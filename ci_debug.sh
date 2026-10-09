@@ -47,6 +47,20 @@ dbg)
   for lim in 256 1024 4096; do for i in 1 2 3 4 5 6; do
     s=$SECONDS; (ulimit -n $lim; WITH_TIMEOUT_NO_DIAG=1 bash runtime/with_timeout.sh 20 /tmp/$p.bin > /tmp/p.o 2>&1; echo "== park ulimit=$lim run $i rc=$? $((SECONDS-s))s"; diff /tmp/p.o corpus/modules/$p/main.out | head -4); done; done
   ;;
+probe)
+  cc -o /tmp/ap ci_dbg/acceptprobe.c && /tmp/ap
+  p=stdlib-net-timeout-park
+  ./target/debug/$LANG_BIN --emit-c corpus/modules/$p/main.m31 -o /tmp/$p.c 2>/dev/null
+  gcc -O0 -I runtime -pthread -o /tmp/$p.bin /tmp/$p.c runtime/rt.c runtime/scheduler.c $RT_REACTOR_C $RT_CTX_ASM
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    /tmp/$p.bin > /tmp/p.o 2>&1 & pid=$!
+    for t in 1 2 3 4 5 6 7 8 9 10 11 12; do sleep 1; kill -0 $pid 2>/dev/null || break; done
+    if kill -0 $pid 2>/dev/null; then
+      echo "== park run $i HUNG"; netstat -an -p tcp | grep 127.0.0.1 | awk '{print $6}' | sort | uniq -c; lsof -nP -p $pid 2>/dev/null | wc -l
+      sample $pid 1 2>&1 | grep -a -A12 'Call graph' | head -30
+      kill -9 $pid; head -5 /tmp/p.o
+    else wait $pid; echo "== park run $i rc=$?"; head -3 /tmp/p.o | grep -a trap; fi
+  done ;;
 corpus) RUN_LIMIT=60 bash run.sh ;;
 san) RUN_LIMIT=60 bash sanitize.sh ;;
 gates) GATE_LIMIT=400 bash gates.sh ;;
