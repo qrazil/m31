@@ -3,8 +3,11 @@
 Written before any rename, like `docs/modules-decision.md`. The prompt was
 "every variable needs proper names". This records what *proper* means well
 enough to be checked by a program, what the code looks like today, what the
-rule costs, and the order to pay it in. Nothing in `lib/`, `apps/` or `corpus/`
-has been touched; `m31c lint` (§6) only reports.
+rule costs, and the order to pay it in. It was written before any rename;
+§9 records the rename that followed (0.4.0: `lib/`, `apps/`, `examples/`,
+`runtime/`, `bench/` and `crypto25519_test/` are lint-clean and `gates.sh`
+enforces it). The sections before §9 are the decision as it stood then, and
+the counts in §2 and §7 are the pre-rename counts.
 
 Numbers below come from `m31c lint`, which walks the parsed AST, and from
 one regex survey (§2) taken before the lint existed. Where they disagree the
@@ -549,6 +552,57 @@ the same letter in two functions counts once per line:
 11. **Generic type parameters** stay single capital letters: `T`, `E`, `K`,
     `V`. They are the one place a short name is conventional.
 12. **Rollout.** The lint goes into `gates.sh` after every repo passes. Renames
-    in `lib/` are breaking and ship together as one minor release (0.3.0)
-    with a rename list in the release notes. Docs and comments that quote old
+    in `lib/` are breaking and ship together as one minor release (0.4.0)
+    with a rename list in the release notes (`CHANGELOG.md`). Docs and comments that quote old
     names are updated in the same commit as the rename.
+
+---
+
+## 9. What was done (0.4.0)
+
+The migration of §7 was done for this repository in one pass, by a
+tokenizer-aware script rather than by hand or by `sed`: each declaration was
+renamed to the end of its scope, every use was found by the same scope rules
+(a name in a string literal or a comment is never touched by accident), and
+comments and doc comments that quote a name in backticks follow it.
+
+- **Scope.** `lib/`, `apps/`, `examples/`, `runtime/`, `bench/` and
+  `crypto25519_test/` pass `m31c lint` with no `--allow`: 2495 findings
+  before (1955 in `lib/`), 0 after. `corpus/` is exempt, as §6 says, and was
+  only touched where a public name it uses changed.
+- **Local names** (parameters, locals, loop and `case` bindings): about 2150
+  declarations renamed. Unused `case` payloads became `_` (84).
+- **Public API.** Renamed functions, constants, fields, methods and keyword
+  arguments are listed in `CHANGELOG.md`. The groups: `fd` is `descriptor` /
+  `file_descriptor`; `conn`, `buf`, `err`, `msg`, `oid`, `len`, `pos`, `num`
+  and the rest of the §3.3 table are spelled out; a `bool` field or function
+  starts with `is_`, `has_`, `can_`, `should_` or `needs_`
+  (`fs.exists` is `fs.is_present`, `fs.is_dir` is `fs.is_directory`,
+  `ed25519.verify` is `ed25519.is_valid_signature`, `os.args` is
+  `os.arguments`); RFC-transcribed constants got role names
+  (`sha256.K` is `ROUND_CONSTANTS`, `ed25519.D` is `EDWARDS_D`); the `OID`,
+  `MSG` and `ERR` segments of a constant became `OBJECT_ID`, `MESSAGE` and
+  `ERROR`.
+- **Module names.** Every stdlib module was already one lowercase word. The
+  only non-stdlib module that broke item 6, `apps/tls/tls13_hex.m31`, became
+  `apps/tls/TLS13_hex.m31`.
+- **Shadowing and collisions** were checked per rename: a new name that would
+  collide with a keyword, a builtin, a module-level name, an imported module,
+  a member of the receiver, or another name in an overlapping scope was
+  rejected and a different spelling chosen. The compiler is the second check:
+  all 851 non-library programs and a program importing every stdlib module
+  compile with the same result as before.
+- **Trap messages.** A message that names an API (`os.arguments(): argument
+  1 is not valid UTF-8; read os.arguments_bytes() instead`) names the new
+  spelling, and `corpus/traps/850-args-not-utf8.trap` says the same.
+- **Enforcement.** `gates.sh` runs `m31c lint lib apps examples runtime
+  bench crypto25519_test` right after the stdlib formatting gate.
+
+`m31c` keeps two names it calls by string, `__floatfmt` and `__text`; they are
+the compiler's seam and were not renamed (only `__floatfmt.ult` became
+`is_unsigned_less`, which the compiler does not call).
+
+External repositories (gitui, httpserver, term-markdown, tui) pin an m31
+version through `M31_REF`; each moves to 0.4.0 in its own migration (§7
+order), which is a breaking change for them: see `CHANGELOG.md`.
+

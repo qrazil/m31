@@ -26,7 +26,7 @@ it cannot rot.
 - 130 unit tests
 - 0 dependencies, 0 `unsafe`, clippy clean at `-D warnings`
 
-Beyond the core language: a standard library (`lib/`, 27 modules) covering
+Beyond the core language: a standard library (`lib/`, 60 modules in folders) covering
 collections, JSON, CSV, HTML, a full HTTP/1.1 client and server
 (`lib/net/http.m31`), filesystem and OS access, and a constant-time crypto stack
 (X25519, Ed25519, SHA-256/512, ChaCha20-Poly1305). On top of that, an `ssh`
@@ -374,7 +374,7 @@ match the compiler.
 config.sh              name, binary, extension — the only place they appear
 rename.sh              renames the language and moves the corpus with it
 build.sh               compile a source file to an executable
-gates.sh               every gate, run after every commit
+gates.sh               every gate, run after every commit (includes `m31c lint`)
 run.sh                 the differential corpus runner
 src/                   the compiler
   lexer.rs             hand-written; type names are keywords
@@ -392,11 +392,13 @@ runtime/
   ctx_switch_x86_64.S  the x86-64 context switch itself
   scheduler.h/.c       the M:N scheduler — not yet wired to spawn/Chan
   reactor.h/.c         epoll reactor, park/unpark, blocking-FFI handoff
-lib/                   the standard library, written in the language itself
-  net.m31 http.m31 json.m31 fs.m31 os.m31 ...     27 modules total
-  x25519.m31 ed25519.m31 sha256.m31 sha512.m31
-  chacha20poly1305.m31                            constant-time crypto
-  consttime.m31 hexcodec.m31                      shared crypto helpers: equal, hex
+lib/                   the standard library, written in the language itself (60 modules)
+  os.m31 fs.m31 io.m31 net.m31 term.m31 ...       the everyday modules, at the top
+  crypto/                                         sha256 sha512 x25519 ed25519 aes ... (17)
+  encoding/                                       base64 csv der hexcodec html json
+  net/ pki/ ssh/ text/ tls/                       http and https; x509 and ocsp; the ssh
+                                                  client; regex and unicode; tls 1.2/1.3
+                                                  import crypto.sha256;  -- docs/stdlib-layout-decision.md
 apps/                  real programs built on the language and stdlib
   ssh/                 an SSH client — see docs/ssh-decision.md
                        (git, tui, markdown, httpserver moved to github.com/qrazil/{gitui,tui,term-markdown,httpserver})
