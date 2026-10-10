@@ -1,4 +1,4 @@
-import regex;
+import text.regex;
 
 // Core behaviour: literals, `.`, classes, anchors, quantifiers, alternation,
 // grouping/capture, the shorthand classes, and Unicode (code-point, not

@@ -1,4 +1,4 @@
-// TLS 1.2 records (`lib/tls13record.m31`'s `seal_record_legacy` and
+// TLS 1.2 records (`lib/tls/tls13record.m31`'s `seal_record_legacy` and
 // `open_record_legacy`) against `tls12_record_oracle.py`, which builds the same
 // records from RFC 5246 §6.2.3.3, RFC 5288 §3 and RFC 7905 §2 with the
 // `cryptography` package's AEADs. Every line is printed again by the oracle;
@@ -8,9 +8,9 @@
 //   ./tls12_record chacha | aes128 | aes256
 
 import os;
-import sha256;
-import tls13record;
-import tls13schedule;
+import crypto.sha256;
+import tls.tls13record;
+import tls.tls13schedule;
 
 bytes pattern(int count, int multiplier, int offset) {
     bytes out = [];

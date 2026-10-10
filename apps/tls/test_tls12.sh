@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Every check for the TLS 1.2 half of the client (`lib/tls.m31`, `lib/tls12.m31`,
-# the legacy record functions of `lib/tls13record.m31`, the ECDH section of
-# `lib/ecdsa.m31`), against peers that are not this repository. Modelled on
+# Every check for the TLS 1.2 half of the client (`lib/tls.m31`, `lib/tls/tls12.m31`,
+# the legacy record functions of `lib/tls/tls13record.m31`, the ECDH section of
+# `lib/crypto/ecdsa.m31`), against peers that are not this repository. Modelled on
 # `apps/tls/test_tls.sh`.
 #
 #   bash apps/tls/test_tls12.sh
@@ -98,7 +98,7 @@ matches() { perl -0777 -e 'local $/; my $text = <STDIN>; exit($text =~ /$ARGV[0]
 # --- house style ---------------------------------------------------------------
 
 if out=$(
-    for f in lib/tls.m31 lib/tls12.m31 lib/tls13record.m31 lib/ecdsa.m31 apps/tls/tls12_*.m31 apps/tls/t_tls_*.m31; do
+    for f in lib/tls.m31 lib/tls/tls12.m31 lib/tls/tls13record.m31 lib/crypto/ecdsa.m31 apps/tls/tls12_*.m31 apps/tls/t_tls_*.m31; do
         "$LANGC" fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then

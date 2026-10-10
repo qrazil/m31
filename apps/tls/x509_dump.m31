@@ -11,8 +11,8 @@
 // certificate cannot hide the rest.
 import io;
 import os;
-import sha256;
-import x509;
+import crypto.sha256;
+import pki.x509;
 
 str or_dash(str text) {
     if (text == "") {

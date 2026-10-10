@@ -1,0 +1,430 @@
+// A private signing key for a TLS server, read from PEM or DER: the half of a
+// certificate that proves its owner is the one holding it.
+//
+// API
+// ---
+//   Result<SigningKey, Error> key = signingkey.parse_pem(text);
+//   Result<SigningKey, Error> key = signingkey.parse_der(octets);
+//   key.kind()               -> Kind.Ed25519 | Kind.EcdsaP256
+//   key.signature_scheme()   -> 0x0807 (ed25519) | 0x0403 (ecdsa_secp256r1_sha256)
+//   key.public_key           -> 32 octets (Ed25519) | 65 octets 04||X||Y (P-256)
+//   Result<bytes, Error> signature = key.sign(message);
+//         // Ed25519: the 64-octet signature of the message itself (the scheme
+//         // hashes inside). P-256: SHA-256 of the message, signed, as DER.
+//
+// Accepted encodings (PEM, one key block; other blocks such as certificates or
+// `EC PARAMETERS` are skipped):
+//   -----BEGIN PRIVATE KEY-----       PKCS#8 holding Ed25519 or P-256
+//   -----BEGIN EC PRIVATE KEY-----    SEC1 ECPrivateKey for P-256 (the named
+//                                     curve must be present in the block)
+// Accepted encodings (DER, the one key, as the body of those PEM blocks):
+//   PKCS#8 PrivateKeyInfo             Ed25519 or P-256
+//   SEC1 ECPrivateKey                 P-256, with the curve present
+// `parse_der` tells the encodings apart by their shape, since DER has no
+// label: SEQUENCE { INTEGER 1, OCTET STRING, ... } is SEC1, SEQUENCE
+// { INTEGER, SEQUENCE, OCTET STRING, ... } is PKCS#8, SEQUENCE { SEQUENCE,
+// OCTET STRING } is an EncryptedPrivateKeyInfo (`Encrypted`) and SEQUENCE
+// { INTEGER 0, INTEGER, ... nine or more integers } is an RSAPrivateKey
+// (`Unsupported`); anything else is `BadKey`. A passphrase-protected SEC1 key
+// has no DER marker of its own (the PEM header says it) and reads as `BadKey`.
+//
+// Refused, each with its own error: `ENCRYPTED PRIVATE KEY` and SEC1/PEM
+// blocks with a `Proc-Type: 4,ENCRYPTED` header (`Encrypted` -- decrypt the
+// file first, this module takes no passphrase), `RSA PRIVATE KEY` and RSA in
+// PKCS#8 (`Unsupported` -- there is no RSA signing in this library), and any
+// other curve.
+//
+// --- what is protected, and what is not --------------------------------------
+//
+// * Errors never carry or echo key material: `Error` is a payload-free enum
+//   and no message names a byte of the input.
+// * The secret is a private field. `SigningKey.to_str()` prints only the kind.
+//   The only way to use the secret is `sign`.
+// * The secret is NOT wiped from memory when the key goes away: the runtime
+//   gives no way to zero a freed buffer, so a core dump or swapped page of
+//   this process may hold it. Run key-holding servers with core dumps off.
+// * Timing: see the header of `ecdsasign.m31` (P-256) and `ed25519.m31`
+//   (Ed25519). PEM and DER parsing here run once at start-up on the key file
+//   and are not constant time; they handle the secret only to copy it.
+
+import encoding.base64;
+import encoding.der;
+import crypto.ed25519;
+import crypto.ecdsasign;
+import crypto.sha256;
+import pki.x509;
+
+const str OID_ED25519 = "1.3.101.112";
+const int SCHEME_ED25519 = 0x0807;
+const int SCHEME_ECDSA_P256_SHA256 = 0x0403;
+
+pub enum Kind {
+    Ed25519;
+    EcdsaP256;
+}
+
+pub str Kind.to_str() {
+    match (this) {
+        case Ed25519: {
+            return "Ed25519";
+        }
+        case EcdsaP256: {
+            return "ECDSA P-256";
+        }
+    }
+}
+
+pub enum Error {
+    /// No private-key block, or its base64 or DER is malformed.
+    BadKey;
+    /// The key is passphrase-protected.
+    Encrypted;
+    /// A well-formed key of a kind this library does not sign with (RSA,
+    /// another curve).
+    Unsupported;
+    /// The signing primitive refused the request.
+    SigningFailed;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case BadKey: {
+            return "no usable private key in the input";
+        }
+        case Encrypted: {
+            return "the private key is encrypted; decrypt it first";
+        }
+        case Unsupported: {
+            return "the private key is of a kind this library cannot sign with";
+        }
+        case SigningFailed: {
+            return "signing failed";
+        }
+    }
+}
+
+pub type SigningKey {
+    pub Kind key_kind;
+    pub bytes public_key;
+    bytes secret;
+}
+
+pub str SigningKey.to_str() {
+    return "SigningKey(" + key_kind.to_str() + ", secret hidden)";
+}
+
+pub Kind SigningKey.kind() {
+    return key_kind;
+}
+
+pub int SigningKey.signature_scheme() {
+    match (key_kind) {
+        case Ed25519: {
+            return SCHEME_ED25519;
+        }
+        case EcdsaP256: {
+            return SCHEME_ECDSA_P256_SHA256;
+        }
+    }
+}
+
+pub Result<bytes, Error> SigningKey.sign(bytes message) {
+    match (key_kind) {
+        case Ed25519: {
+            return Result<bytes, Error>.Ok(ed25519.sign(secret, message));
+        }
+        case EcdsaP256: {
+            match (ecdsasign.sign(secret, sha256.sum(message))) {
+                case Ok(bytes signature): {
+                    return Result<bytes, Error>.Ok(signature);
+                }
+                case Err(ecdsasign.Error refused): {
+                    return Result<bytes, Error>.Err(Error.SigningFailed);
+                }
+            }
+        }
+    }
+}
+
+// --- PEM ---------------------------------------------------------------------
+
+// What `find_block` hands back: the label and the decoded body of the first
+// private-key block, or the reason there is none.
+type Block {
+    str label;
+    bytes body;
+}
+
+bool is_private_label(str label) {
+    return label == "PRIVATE KEY" || label == "EC PRIVATE KEY" || label == "ENCRYPTED PRIVATE KEY" || label == "RSA PRIVATE KEY";
+}
+
+Result<Block, Error> find_block(str text) {
+    bool inside = false;
+    bool wanted = false;
+    str label = "";
+    List<str> body = [];
+    for (str raw_line in text.split("\n")) {
+        str line = raw_line.trim();
+        if (!inside) {
+            if (line.starts_with("-----BEGIN ") && line.ends_with("-----")) {
+                label = line.substr(11, line.size() - 5);
+                wanted = is_private_label(label);
+                inside = true;
+                body = [];
+            }
+        } else if (line == "-----END " + label + "-----") {
+            if (wanted) {
+                if (label == "ENCRYPTED PRIVATE KEY") {
+                    return Result<Block, Error>.Err(Error.Encrypted);
+                }
+                match (base64.decode(body.join(""))) {
+                    case Ok(bytes decoded): {
+                        if (decoded.size() == 0) {
+                            return Result<Block, Error>.Err(Error.BadKey);
+                        }
+                        return Result<Block, Error>.Ok(Block(label, decoded));
+                    }
+                    case Err(base64.Error decode_error): {
+                        return Result<Block, Error>.Err(Error.BadKey);
+                    }
+                }
+            }
+            inside = false;
+        } else if (wanted) {
+            if (line.starts_with("Proc-Type:") && line.contains("ENCRYPTED")) {
+                return Result<Block, Error>.Err(Error.Encrypted);
+            }
+            if (line.contains(":")) {
+                continue;
+            }
+            body.push(line);
+        }
+    }
+    return Result<Block, Error>.Err(Error.BadKey);
+}
+
+// --- DER ---------------------------------------------------------------------
+
+Option<List<der.Element>> sequence_of(bytes data) {
+    match (der.validate(data, 8)) {
+        case Err(der.Error parse_error): {
+            return Option<List<der.Element>>.None;
+        }
+        case Ok(der.Element root): {
+            if (root.tag != der.TAG_SEQUENCE) {
+                return Option<List<der.Element>>.None;
+            }
+            match (root.children()) {
+                case Ok(List<der.Element> parts): {
+                    return Option<List<der.Element>>.Some(parts);
+                }
+                case Err(der.Error child_error): {
+                    return Option<List<der.Element>>.None;
+                }
+            }
+        }
+    }
+}
+
+// The dotted OID text of an OBJECT IDENTIFIER element, or "" if it is not one.
+str oid_text(der.Element element) {
+    match (element.oid()) {
+        case Ok(str text): {
+            return text;
+        }
+        case Err(der.Error oid_error): {
+            return "";
+        }
+    }
+}
+
+// Left-pad (or refuse to exceed) a private scalar to 32 octets.
+Option<bytes> fixed_scalar(bytes raw) {
+    if (raw.size() == 0 || raw.size() > 32) {
+        return Option<bytes>.None;
+    }
+    bytes padded = [0; 32 - raw.size()];
+    padded.extend(raw);
+    return Option<bytes>.Some(padded);
+}
+
+Result<SigningKey, Error> p256_key(bytes raw_secret, bytes declared_public) {
+    match (fixed_scalar(raw_secret)) {
+        case None: {
+            return Result<SigningKey, Error>.Err(Error.BadKey);
+        }
+        case Some(bytes secret): {
+            match (ecdsasign.public_key(secret)) {
+                case Err(ecdsasign.Error refused): {
+                    return Result<SigningKey, Error>.Err(Error.BadKey);
+                }
+                case Ok(bytes derived): {
+                    if (declared_public.size() > 0 && declared_public != derived) {
+                        return Result<SigningKey, Error>.Err(Error.BadKey);
+                    }
+                    return Result<SigningKey, Error>.Ok(SigningKey(Kind.EcdsaP256, derived, secret));
+                }
+            }
+        }
+    }
+}
+
+// An RFC 5915 ECPrivateKey. `known_curve` is the curve the PKCS#8 wrapper
+// declared, or "" for a bare SEC1 block, which must then carry its own.
+Result<SigningKey, Error> read_sec1(bytes data, str known_curve) {
+    match (sequence_of(data)) {
+        case None: {
+            return Result<SigningKey, Error>.Err(Error.BadKey);
+        }
+        case Some(List<der.Element> parts): {
+            if (parts.size() < 2 || parts[0].tag != der.TAG_INTEGER || parts[0].content().hex() != "01") {
+                return Result<SigningKey, Error>.Err(Error.BadKey);
+            }
+            if (parts[1].tag != der.TAG_OCTET_STRING) {
+                return Result<SigningKey, Error>.Err(Error.BadKey);
+            }
+            bytes raw_secret = parts[1].content();
+            str curve = known_curve;
+            bytes declared_public = [];
+            for (int index in 2 .. parts.size()) {
+                der.Element part = parts[index];
+                if (part.tag == 0xA0) {
+                    match (der.parse(part.content())) {
+                        case Ok(der.Element named): {
+                            curve = oid_text(named);
+                        }
+                        case Err(der.Error named_error): {
+                            return Result<SigningKey, Error>.Err(Error.BadKey);
+                        }
+                    }
+                } else if (part.tag == 0xA1) {
+                    match (der.parse(part.content())) {
+                        case Ok(der.Element wrapped): {
+                            match (wrapped.bit_string()) {
+                                case Ok(der.BitString bits): {
+                                    declared_public = bits.octets;
+                                }
+                                case Err(der.Error bits_error): {
+                                    return Result<SigningKey, Error>.Err(Error.BadKey);
+                                }
+                            }
+                        }
+                        case Err(der.Error wrapped_error): {
+                            return Result<SigningKey, Error>.Err(Error.BadKey);
+                        }
+                    }
+                }
+            }
+            if (curve == "") {
+                return Result<SigningKey, Error>.Err(Error.BadKey);
+            }
+            if (curve != x509.OID_CURVE_P256) {
+                return Result<SigningKey, Error>.Err(Error.Unsupported);
+            }
+            if (known_curve != "" && known_curve != curve) {
+                return Result<SigningKey, Error>.Err(Error.BadKey);
+            }
+            return p256_key(raw_secret, declared_public);
+        }
+    }
+}
+
+Result<SigningKey, Error> read_pkcs8(bytes data) {
+    match (sequence_of(data)) {
+        case None: {
+            return Result<SigningKey, Error>.Err(Error.BadKey);
+        }
+        case Some(List<der.Element> parts): {
+            if (parts.size() < 3 || parts[0].tag != der.TAG_INTEGER || parts[1].tag != der.TAG_SEQUENCE || parts[2].tag != der.TAG_OCTET_STRING) {
+                return Result<SigningKey, Error>.Err(Error.BadKey);
+            }
+            match (parts[1].children()) {
+                case Err(der.Error algorithm_error): {
+                    return Result<SigningKey, Error>.Err(Error.BadKey);
+                }
+                case Ok(List<der.Element> algorithm): {
+                    if (algorithm.size() < 1 || algorithm.size() > 2) {
+                        return Result<SigningKey, Error>.Err(Error.BadKey);
+                    }
+                    str algorithm_oid = oid_text(algorithm[0]);
+                    bytes inner = parts[2].content();
+                    if (algorithm_oid == OID_ED25519) {
+                        if (algorithm.size() != 1) {
+                            return Result<SigningKey, Error>.Err(Error.BadKey);
+                        }
+                        match (der.parse(inner)) {
+                            case Err(der.Error inner_error): {
+                                return Result<SigningKey, Error>.Err(Error.BadKey);
+                            }
+                            case Ok(der.Element seed_element): {
+                                if (seed_element.tag != der.TAG_OCTET_STRING || seed_element.content().size() != 32) {
+                                    return Result<SigningKey, Error>.Err(Error.BadKey);
+                                }
+                                bytes seed = seed_element.content();
+                                return Result<SigningKey, Error>.Ok(SigningKey(Kind.Ed25519, ed25519.public_key(seed), seed));
+                            }
+                        }
+                    }
+                    if (algorithm_oid == x509.OID_EC_PUBLIC_KEY) {
+                        if (algorithm.size() != 2) {
+                            return Result<SigningKey, Error>.Err(Error.BadKey);
+                        }
+                        str curve = oid_text(algorithm[1]);
+                        if (curve != x509.OID_CURVE_P256) {
+                            if (curve == "") {
+                                return Result<SigningKey, Error>.Err(Error.BadKey);
+                            }
+                            return Result<SigningKey, Error>.Err(Error.Unsupported);
+                        }
+                        return read_sec1(inner, curve);
+                    }
+                    if (algorithm_oid == "") {
+                        return Result<SigningKey, Error>.Err(Error.BadKey);
+                    }
+                    return Result<SigningKey, Error>.Err(Error.Unsupported);
+                }
+            }
+        }
+    }
+}
+
+/// The one private key in `data`, DER: PKCS#8 or SEC1, told apart by shape
+/// (see the header). Errors are those of `parse_pem`, and carry no key bytes.
+pub Result<SigningKey, Error> parse_der(bytes data) {
+    match (sequence_of(data)) {
+        case None: {
+            return Result<SigningKey, Error>.Err(Error.BadKey);
+        }
+        case Some(List<der.Element> parts): {
+            if (parts.size() == 2 && parts[0].tag == der.TAG_SEQUENCE && parts[1].tag == der.TAG_OCTET_STRING) {
+                return Result<SigningKey, Error>.Err(Error.Encrypted);
+            }
+            if (parts.size() < 2 || parts[0].tag != der.TAG_INTEGER) {
+                return Result<SigningKey, Error>.Err(Error.BadKey);
+            }
+            if (parts.size() >= 3 && parts[1].tag == der.TAG_SEQUENCE && parts[2].tag == der.TAG_OCTET_STRING) {
+                return read_pkcs8(data);
+            }
+            if (parts[1].tag == der.TAG_OCTET_STRING && parts[0].content().hex() == "01") {
+                return read_sec1(data, "");
+            }
+            if (parts.size() >= 9 && parts[0].content().hex() == "00" && parts[1].tag == der.TAG_INTEGER) {
+                return Result<SigningKey, Error>.Err(Error.Unsupported);
+            }
+            return Result<SigningKey, Error>.Err(Error.BadKey);
+        }
+    }
+}
+
+/// The first private key in `text`.
+pub Result<SigningKey, Error> parse_pem(str text) {
+    Block block = find_block(text)?;
+    if (block.label == "PRIVATE KEY") {
+        return read_pkcs8(block.body);
+    }
+    if (block.label == "EC PRIVATE KEY") {
+        return read_sec1(block.body, "");
+    }
+    return Result<SigningKey, Error>.Err(Error.Unsupported);
+}

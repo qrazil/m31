@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Every check for certificate-chain validation (`lib/x509chain.m31`, and the
+# Every check for certificate-chain validation (`lib/pki/x509chain.m31`, and the
 # trust modes of `lib/tls.m31`: `SystemRoots` and `CaFile`).
 #
 #   bash apps/tls/test_chain.sh
@@ -23,7 +23,7 @@
 #                 bundle, with counts
 #   real hosts    github.com, codeload.github.com, dev.meghraj.uk by
 #                 `Trust.SystemRoots`, and an https HEAD of github.com over
-#                 `lib/http.m31`, and the same host against a bundle that does
+#                 `lib/net/http.m31`, and the same host against a bundle that does
 #                 not hold its root, which must be refused
 #
 # Nothing here switches verification off; there is no such switch.
@@ -91,7 +91,7 @@ await_line() {
 # --- house style ---------------------------------------------------------------
 
 if out=$(
-    for f in lib/tls.m31 lib/x509chain.m31 apps/tls/t_chain_*.m31; do
+    for f in lib/tls.m31 lib/pki/x509chain.m31 apps/tls/t_chain_*.m31; do
         "$LANGC" fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then
@@ -330,7 +330,7 @@ real dev.meghraj.uk
 if have_network github.com; then
     out=$(timeout 90 "$CLIENT" get github.com 443 system real / 2>"$WORK/http.err" | tr '\n' ' ')
     if grep -Eq '^connected status [0-9]+ closed $' <<<"$out"; then
-        note "github.com: an https HEAD over lib/http.m31, $(grep -o 'status [0-9]*' <<<"$out")"
+        note "github.com: an https HEAD over lib/net/http.m31, $(grep -o 'status [0-9]*' <<<"$out")"
     else
         bad "github.com: https HEAD" "got '$out'" "$(head -3 "$WORK/http.err")"
     fi

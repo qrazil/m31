@@ -1,10 +1,10 @@
-// AES block encryption (`lib/aes.m31`) against `aes_block_oracle.py`, which
+// AES block encryption (`lib/crypto/aes.m31`) against `aes_block_oracle.py`, which
 // computes the same lines with the `cryptography` package and asserts the
 // FIPS 197 published values against it. `test_aesgcm.sh` diffs the two.
 //
 //   ./build.sh apps/tls/aes_block.m31 -o aes_block && ./aes_block
 
-import aes;
+import crypto.aes;
 import tls13_hex;
 
 // `n` octets of a deterministic pattern: `(i * multiplier + offset) & 0xFF`.

@@ -1,10 +1,10 @@
-// P-256 signing (`lib/ecdsasign.m31`) against the cases `tlsserver_sign_oracle.py`
+// P-256 signing (`lib/crypto/ecdsasign.m31`) against the cases `tlsserver_sign_oracle.py`
 // writes. Each input line is `name|secret_hex|digest_hex`; the program prints
 // `name public_key_hex raw_signature_hex der_signature_hex`. The oracle prints
 // the expected lines, so no expectation is written down here.
 
-import ecdsasign;
-import hexcodec;
+import crypto.ecdsasign;
+import encoding.hexcodec;
 import io;
 import os;
 

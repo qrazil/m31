@@ -1,6 +1,6 @@
-import http;
+import net.http;
 import io;
-import json;
+import encoding.json;
 
 // The parser and the formatter, driven from memory.
 //
@@ -313,7 +313,7 @@ custom.set_reason("I am a pot for tea");
 custom.set_text("short and stout");
 write_one("custom reason", "GET", custom, false);
 // `json_response` and `Response.json` are the two halves of the one place
-// this module meets `lib/json.m31`: it stringifies on the way out and parses
+// this module meets `lib/encoding/json.m31`: it stringifies on the way out and parses
 // on the way in, and nothing else here knows what JSON is.
 Map<str, json.Value> doc = {"ok": json.Value.Bool(true), "n": json.Value.Int(7)};
 match (http.json_response(json.Value.Object(doc))) {

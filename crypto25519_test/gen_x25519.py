@@ -55,7 +55,7 @@ print("RFC7748 6.1 Alice/Bob vector re-extracted and verified")
 
 src = []
 want = []
-src.append("import x25519;")
+src.append("import crypto.x25519;")
 src.append("")
 
 def add_case(tag, k, u):

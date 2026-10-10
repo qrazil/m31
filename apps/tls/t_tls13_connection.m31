@@ -1,4 +1,4 @@
-// The TLS 1.3 record layer's `Connection` (`lib/tls13record.m31`): handshake
+// The TLS 1.3 record layer's `Connection` (`lib/tls/tls13record.m31`): handshake
 // messages across records, application data, KeyUpdate, alerts, close_notify
 // against truncation, and the refusals. Every line this prints is printed
 // again by `oracle_tls13_connection.py`, which builds the peer's records with
@@ -15,14 +15,14 @@
 //   ./build.sh apps/tls/t_tls13_connection.m31 -o t_tls13_connection
 //   ./t_tls13_connection <hex>
 
-import chacha20poly1305;
+import crypto.chacha20poly1305;
 import io;
 import net;
 import os;
-import sha256;
+import crypto.sha256;
 import tls13_hex;
-import tls13record;
-import tls13schedule;
+import tls.tls13record;
+import tls.tls13schedule;
 
 const int CHUNK = 7;
 

@@ -316,7 +316,7 @@ default 8 MiB stack:
 | 100 000 | segfault | ok |
 | 200 000 | segfault | segfault |
 
-identical with and without a destructor on `Node`. lib/json.m31 met the same
+identical with and without a destructor on `Node`. lib/encoding/json.m31 met the same
 limit building values (a 10 000-deep value needed MBs of stack at -O0, and
 it went iterative).
 

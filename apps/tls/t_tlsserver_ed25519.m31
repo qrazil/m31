@@ -1,10 +1,10 @@
-// Ed25519 signing (`lib/ed25519.m31`) against the cases
+// Ed25519 signing (`lib/crypto/ed25519.m31`) against the cases
 // `tlsserver_ed25519_oracle.py` writes. Each input line is
 // `name|seed_hex|message_hex`; the program prints `name public_key_hex
 // signature_hex`. The oracle prints the expected lines.
 
-import hexcodec;
-import ed25519;
+import encoding.hexcodec;
+import crypto.ed25519;
 import io;
 import os;
 

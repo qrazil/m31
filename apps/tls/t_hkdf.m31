@@ -5,9 +5,9 @@
 //
 //   ./build.sh apps/tls/t_hkdf.m31 -o t_hkdf && ./t_hkdf
 
-import hkdf;
-import sha256;
-import sha512;
+import crypto.hkdf;
+import crypto.sha256;
+import crypto.sha512;
 
 // `n` octets of a deterministic pattern: `(i * multiplier + offset) & 0xFF`.
 bytes pattern(int n, int multiplier, int offset) {

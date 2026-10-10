@@ -1,4 +1,4 @@
-import json;
+import encoding.json;
 
 // JSON, RFC 8259. Every document that parses is written back compact, and
 // the expected text is CPython's `json.loads` then `json.dumps` with sorted

@@ -1,4 +1,4 @@
-import http;
+import net.http;
 import io;
 
 // `http.serve_stream`: the request-serving loop over any `io.Stream`, with no

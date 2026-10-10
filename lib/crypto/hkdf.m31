@@ -1,0 +1,172 @@
+// HKDF (RFC 5869) and the TLS 1.3 labelled forms built on it (RFC 8446 §7.1),
+// written in the language over `hmac.m31`.
+//
+// It exists for the TLS 1.3 key schedule: every secret and every traffic key
+// in a handshake is an `Extract` or an `Expand-Label` of another one.
+//
+// API
+// ---
+//   hkdf.sha256_extract(salt, input_key_material)        -> bytes, 32 octets
+//   hkdf.sha256_expand(pseudo_random_key, info, length)  -> bytes, `length`
+//   hkdf.sha384_extract(...) / hkdf.sha384_expand(...)   the same over SHA-384:
+//                                                        48-octet keys
+//
+// And RFC 8446 §7.1's two wrappers, which fix `info` to a `HkdfLabel`:
+//
+//   hkdf.sha256_expand_label(secret, label, context, length)
+//   hkdf.sha256_derive_secret(secret, label, transcript_hash)
+//   hkdf.sha384_expand_label(...) / hkdf.sha384_derive_secret(...)
+//
+// `label` is the bare RFC label ("derived", "c hs traffic", "key", ...): the
+// `"tls13 "` prefix the RFC requires on the wire is added here, once, so no
+// caller can forget it or write it twice.
+//
+// --- the contract, and what traps ---------------------------------------------
+//
+// `expand` can produce at most 255 hash-lengths of output (RFC 5869 §2.3: the
+// block counter is one octet), and a `HkdfLabel` has 8-bit and 16-bit length
+// fields (RFC 8446 §7.1). A request past those limits is a bug in the caller,
+// not something the network can cause -- every length this serves is a
+// constant of the protocol (16, 32, 12 octets) -- so each **traps** with a
+// message naming the limit (`docs/errors-decision.md`: a caller's own
+// precondition is a trap, not a `Result`), rather than silently truncating.
+//
+// An empty salt means "a string of `HashLen` zero octets" (RFC 5869 §2.2),
+// which is what TLS 1.3 passes for the very first `Extract`.
+//
+// --- one engine, written once ---------------------------------------------------
+//
+// `extract`, `expand` and the label encoding do not depend on which hash is
+// underneath, only on its output size and its MAC. Each public function is
+// therefore a one-line call into a private engine that takes a hash selector,
+// and `mac_for` / `digest_size` are the only places that name a hash.
+
+import crypto.hmac;
+
+/// Selector for the SHA-256 flavour of the private engine below.
+const int HASH_SHA256 = 256;
+/// Selector for the SHA-384 flavour.
+const int HASH_SHA384 = 384;
+
+/// HKDF-Extract with SHA-256 (RFC 5869 §2.2): `HMAC(salt, input_key_material)`,
+/// the 32-octet pseudo-random key. An empty `salt` stands for 32 zero octets.
+pub bytes sha256_extract(bytes salt, bytes input_key_material) {
+    return extract(HASH_SHA256, salt, input_key_material);
+}
+
+/// HKDF-Expand with SHA-256 (RFC 5869 §2.3): `length` octets of output keying
+/// material from the 32-octet `pseudo_random_key` and the context `info`.
+/// Traps if `length` is negative or more than 255 * 32 = 8160.
+pub bytes sha256_expand(bytes pseudo_random_key, bytes info, int length) {
+    return expand(HASH_SHA256, pseudo_random_key, info, length);
+}
+
+/// `HKDF-Expand-Label(Secret, Label, Context, Length)` of RFC 8446 §7.1 with
+/// SHA-256. Traps if `length` does not fit 16 bits, `context` is longer than
+/// 255 octets, or `"tls13 " + label` is outside the RFC's 7..255 octets.
+pub bytes sha256_expand_label(bytes secret, str label, bytes context, int length) {
+    return expand_label(HASH_SHA256, secret, label, context, length);
+}
+
+/// `Derive-Secret(Secret, Label, Messages)` of RFC 8446 §7.1 with SHA-256:
+/// `HKDF-Expand-Label(Secret, Label, Transcript-Hash(Messages), 32)`. The
+/// caller passes the transcript hash itself -- the empty-transcript hash when
+/// the RFC says `""` -- not the messages.
+pub bytes sha256_derive_secret(bytes secret, str label, bytes transcript_hash) {
+    return expand_label(HASH_SHA256, secret, label, transcript_hash, digest_size(HASH_SHA256));
+}
+
+/// HKDF-Extract with SHA-384: `HMAC-SHA-384(salt, input_key_material)`, the
+/// 48-octet pseudo-random key. An empty `salt` stands for 48 zero octets.
+pub bytes sha384_extract(bytes salt, bytes input_key_material) {
+    return extract(HASH_SHA384, salt, input_key_material);
+}
+
+/// HKDF-Expand with SHA-384: as `sha256_expand`, over a 48-octet
+/// `pseudo_random_key`. Traps if `length` is negative or more than
+/// 255 * 48 = 12240.
+pub bytes sha384_expand(bytes pseudo_random_key, bytes info, int length) {
+    return expand(HASH_SHA384, pseudo_random_key, info, length);
+}
+
+/// `HKDF-Expand-Label` of RFC 8446 §7.1 with SHA-384; traps as
+/// `sha256_expand_label` does.
+pub bytes sha384_expand_label(bytes secret, str label, bytes context, int length) {
+    return expand_label(HASH_SHA384, secret, label, context, length);
+}
+
+/// `Derive-Secret` of RFC 8446 §7.1 with SHA-384: 48 octets, the transcript
+/// hash passed in as for `sha256_derive_secret`.
+pub bytes sha384_derive_secret(bytes secret, str label, bytes transcript_hash) {
+    return expand_label(HASH_SHA384, secret, label, transcript_hash, digest_size(HASH_SHA384));
+}
+
+bytes extract(int hash, bytes salt, bytes input_key_material) {
+    bytes effective_salt = salt;
+    if (salt.size() == 0) {
+        effective_salt = [0; digest_size(hash)];
+    }
+    return mac_for(hash, effective_salt, input_key_material);
+}
+
+bytes expand(int hash, bytes pseudo_random_key, bytes info, int length) {
+    int size = digest_size(hash);
+    if (length < 0) {
+        trap("hkdf: output length must not be negative");
+    }
+    if (length > 255 * size) {
+        trap("hkdf: output length must be at most " + (255 * size).to_str() + " octets");
+    }
+    bytes output = [];
+    bytes previous = [];
+    int counter = 1;
+    while (output.size() < length) {
+        bytes block_input = [];
+        block_input.extend(previous);
+        block_input.extend(info);
+        block_input.push(counter);
+        previous = mac_for(hash, pseudo_random_key, block_input);
+        output.extend(previous);
+        counter = counter + 1;
+    }
+    output.truncate(length);
+    return output;
+}
+
+// RFC 8446 §7.1's `HkdfLabel`: a 16-bit length, the label with its "tls13 "
+// prefix as a one-octet-length vector, and the context likewise.
+bytes expand_label(int hash, bytes secret, str label, bytes context, int length) {
+    bytes full_label = ("tls13 " + label).to_bytes();
+    if (length < 0 || length > 0xFFFF) {
+        trap("hkdf: label output length must fit 16 bits");
+    }
+    if (full_label.size() < 7 || full_label.size() > 255) {
+        trap("hkdf: \"tls13 \" + label must be 7 to 255 octets");
+    }
+    if (context.size() > 255) {
+        trap("hkdf: label context must be at most 255 octets");
+    }
+    bytes hkdf_label = [];
+    hkdf_label.push(length >> 8 & 0xFF);
+    hkdf_label.push(length & 0xFF);
+    hkdf_label.push(full_label.size());
+    hkdf_label.extend(full_label);
+    hkdf_label.push(context.size());
+    hkdf_label.extend(context);
+    return expand(hash, secret, hkdf_label, length);
+}
+
+// The hash's output size in octets: HashLen in RFC 5869.
+int digest_size(int hash) {
+    if (hash == HASH_SHA384) {
+        return 48;
+    }
+    return 32;
+}
+
+bytes mac_for(int hash, bytes key, bytes message) {
+    if (hash == HASH_SHA384) {
+        return hmac.sha384_mac(key, message);
+    }
+    return hmac.sha256_mac(key, message);
+}

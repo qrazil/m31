@@ -1,4 +1,4 @@
-// Hand-built vectors for `lib/der.m31`. Every byte string below is written
+// Hand-built vectors for `lib/encoding/der.m31`. Every byte string below is written
 // out from X.690, and every expected epoch comes from Python's
 // `calendar.timegm`, so nothing is checked against the reader itself.
 //
@@ -6,7 +6,7 @@
 //
 // Prints one line per failure and a final `N checks, M failures`; the
 // exit status is the failure count (a trap is a failure too).
-import der;
+import encoding.der;
 import os;
 
 type Tally {

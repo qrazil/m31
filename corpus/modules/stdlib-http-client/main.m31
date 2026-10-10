@@ -1,4 +1,4 @@
-import http;
+import net.http;
 import io;
 import net;
 
@@ -19,7 +19,7 @@ import net;
 //   - **`redirects: 0`** hands the 3xx back instead of following it.
 //   - **A 3xx with no `Location`** is a refusal and not a loop.
 //   - **`https://` never reaches a socket**, and neither does a relative
-//     `Location`. `http.fetch` does not speak TLS; `lib/https.m31` does and
+//     `Location`. `http.fetch` does not speak TLS; `lib/net/https.m31` does and
 //     is covered by `apps/tls/test_https.sh`, which has a certificate to
 //     check -- a corpus program has no TLS server to talk to.
 

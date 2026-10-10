@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Vectors and expected verdicts for `lib/ecdsa.m31`'s verify, from the
+"""Vectors and expected verdicts for `lib/crypto/ecdsa.m31`'s verify, from the
 `cryptography` package (OpenSSL underneath) -- not from this project's code.
 
     python3 ecdsa_oracle.py VECTORS_OUT EXPECTED_OUT

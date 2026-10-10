@@ -1,0 +1,178 @@
+// tlsresume -- the client side of TLS 1.3 session resumption: the tickets a
+// server hands out after a handshake, kept in memory so the next connection to
+// the same place can skip the certificate exchange.
+//
+//   cache = tlsresume.cache(32)                       at most 32 sessions kept
+//   conn  = tls.connect_cached(host, 443, trust, cache)   offers one if it has it
+//   ... read from conn: the server's NewSessionTicket messages are collected
+//       as the reads go past them, and go into `cache` ...
+//
+// This module is only the store. The handshake that offers a ticket, checks
+// the binder's answer and files the new ones is in `tls.m31`.
+//
+// --- what a session is bound to -----------------------------------------------
+//
+// A session is filed under the **host name** the connection was made for (the
+// SNI and the name the certificate was checked against) and a **trust key**
+// that names the `tls.Trust` it was authenticated under: the pin, the CA file
+// path, or "system roots". `take` returns a session only for the same host and
+// the same trust key, so a ticket obtained from `a.example` under one pin is
+// never offered to `b.example`, and never offered under a different pin or CA
+// file. Nothing about a session is ever sent to a host other than the one it
+// came from, which is also what keeps the ticket from being a tracking handle
+// across sites.
+//
+// --- lifetime and reuse -------------------------------------------------------
+//
+//   - A ticket's `ticket_lifetime` is capped at 7 days (RFC 8446 §4.6.1), and
+//     the session stops being offered once the certificate the full handshake
+//     authenticated would have expired (`expires_at` is the earlier of the
+//     two). A lifetime of 0 means "do not use" and is not stored.
+//   - **A ticket is used once.** `take` removes the session it returns
+//     (RFC 8446 Appendix C.4: reusing a ticket lets an observer link the
+//     connections). A server that accepts the ticket sends new ones, which
+//     replace it; a server that refuses it costs the session, not the
+//     connection: the handshake carries on as a full one, with full
+//     certificate validation.
+//   - The cache holds at most `capacity` sessions in all; the oldest goes
+//     first. A capacity of 0 stores nothing, which is how `tls.connect` runs
+//     without resumption.
+//   - Sessions live in the process only. Nothing is written to disk; the PSKs
+//     in here are secrets, and are as safe as the process's memory is.
+//
+// Time is epoch seconds throughout and comes from the caller, so a test can
+// move the clock.
+
+import tls.tls13schedule;
+
+/// One resumable session: the PSK derived from a ticket, and the ticket.
+pub type Session {
+    pub str host;
+    pub str trust_key;
+    pub tls13schedule.Suite suite;
+    pub bytes psk;
+    pub bytes ticket;
+    pub int age_add;
+    pub int received_at;
+    pub int expires_at;
+    // The end of what the full handshake vouched for; resumed sessions
+    // inherit it, so a chain of resumptions cannot outlive it.
+    pub int valid_until;
+}
+
+/// `obfuscated_ticket_age` for the ClientHello (RFC 8446 §4.2.11.1): the age
+/// in milliseconds plus the ticket's `age_add`, modulo 2^32.
+pub int Session.obfuscated_age(int now) {
+    int age = now - received_at;
+    if (age < 0) {
+        age = 0;
+    }
+    return (age * 1000 + age_add) % 4294967296;
+}
+
+/// The longest a session is kept, seconds: 7 days.
+pub const int MAX_LIFETIME = 604800;
+
+/// A session. `lifetime` is the ticket's own, in seconds; the session expires
+/// at `received_at` plus the smaller of that and `MAX_LIFETIME`, or at
+/// `valid_until` (the end of the authenticated certificate's validity),
+/// whichever is first.
+pub Session session(str host, str trust_key, tls13schedule.Suite suite, bytes psk, bytes ticket, int age_add, int received_at, int lifetime, int valid_until) {
+    int kept = lifetime;
+    if (kept > MAX_LIFETIME) {
+        kept = MAX_LIFETIME;
+    }
+    int expires_at = received_at + kept;
+    if (valid_until < expires_at) {
+        expires_at = valid_until;
+    }
+    return Session(host, trust_key, suite, psk, ticket, age_add, received_at, expires_at, valid_until);
+}
+
+/// An in-memory store of sessions. Fields are private.
+pub type SessionCache {
+    int capacity;
+    List<Session> sessions;
+}
+
+/// Whether this cache stores anything (a capacity above 0).
+pub bool SessionCache.enabled() {
+    return capacity > 0;
+}
+
+/// How many sessions are held (expired ones included until the next `put` or
+/// `take` sweeps them).
+pub int SessionCache.size() {
+    return sessions.size();
+}
+
+/// Forgets everything.
+pub void SessionCache.clear() {
+    List<Session> none = [];
+    sessions = none;
+}
+
+void SessionCache.sweep(int now) {
+    List<Session> live = [];
+    for (Session held in sessions) {
+        if (held.expires_at > now) {
+            live.push(held);
+        }
+    }
+    sessions = live;
+}
+
+/// Files `stored`. Past its expiry it is not kept; at capacity the oldest
+/// session goes.
+pub void SessionCache.put(Session stored, int now) {
+    if (capacity == 0) {
+        return;
+    }
+    sweep(now);
+    if (stored.expires_at <= now) {
+        return;
+    }
+    List<Session> kept = [];
+    int drop = sessions.size() + 1 - capacity;
+    for (int index in 0 .. sessions.size()) {
+        if (index >= drop) {
+            kept.push(sessions[index]);
+        }
+    }
+    kept.push(stored);
+    sessions = kept;
+}
+
+/// The newest unexpired session for exactly this host and trust key, which is
+/// removed from the cache: a ticket is offered once.
+pub Option<Session> SessionCache.take(str host, str trust_key, int now) {
+    sweep(now);
+    int found = -1;
+    for (int index in 0 .. sessions.size()) {
+        Session held = sessions[index];
+        if (held.host == host && held.trust_key == trust_key) {
+            found = index;
+        }
+    }
+    if (found < 0) {
+        return Option<Session>.None;
+    }
+    Session chosen = sessions[found];
+    List<Session> rest = [];
+    for (int index in 0 .. sessions.size()) {
+        if (index != found) {
+            rest.push(sessions[index]);
+        }
+    }
+    sessions = rest;
+    return Option<Session>.Some(chosen);
+}
+
+/// A cache that keeps at most `capacity` sessions. Below 0 **traps**.
+pub SessionCache cache(int capacity) {
+    if (capacity < 0) {
+        trap("tlsresume: a cache capacity is 0 or more");
+    }
+    List<Session> none = [];
+    return SessionCache(capacity, none);
+}

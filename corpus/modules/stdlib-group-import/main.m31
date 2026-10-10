@@ -1,0 +1,7 @@
+// A module in a group of the standard library is imported by its path under
+// lib/ -- `crypto.sha256` is lib/crypto/sha256.m31 -- and is then used by its
+// NAME alone: the group is for finding it, not part of what it is called.
+import crypto.sha256;
+
+print(sha256.hex("abc".to_bytes()));
+print(sha256.sum("".to_bytes()).hex());

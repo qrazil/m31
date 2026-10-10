@@ -1,4 +1,4 @@
-// `lib/tls12.m31`'s PRF, master secret, key block, Finished and signed
+// `lib/tls/tls12.m31`'s PRF, master secret, key block, Finished and signed
 // content against `tls12_prf_oracle.py`, which implements RFC 5246 §5 with
 // `hmac`/`hashlib` alone. The first line is the PRF test vector that circulates
 // for SHA-256 (the oracle asserts it too); the rest is every suite over
@@ -6,8 +6,8 @@
 //
 //   ./build.sh apps/tls/tls12_prf.m31 -o tls12_prf && ./tls12_prf
 
-import hexcodec;
-import tls12;
+import encoding.hexcodec;
+import tls.tls12;
 
 bytes hex_octets(str text) {
     return hexcodec.literal(text);

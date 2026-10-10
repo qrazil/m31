@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The other half of `t_chacha20_openssh.m31`: the same lines, computed
 independently through `cryptography`/OpenSSL instead of
-`lib/chacha20poly1305.m31`'s `openssh_block`. `test.sh` diffs the two.
+`lib/crypto/chacha20poly1305.m31`'s `openssh_block`. `test.sh` diffs the two.
 
 `chacha20-poly1305@openssh.com` (`/usr/share/doc/openssh/PROTOCOL.chacha20poly1305`)
 uses the original (pre-IETF) ChaCha20 word layout: a 64-bit little-endian

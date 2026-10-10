@@ -1,0 +1,578 @@
+// Certificate chain validation (RFC 5280 §6, as a TLS client applies it to a
+// server's certificate), on top of `lib/pki/x509.m31` and the signature
+// verifiers in `lib/crypto/ecdsa.m31` and `lib/crypto/rsa.m31`.
+//
+// API
+// ---
+//   x509chain.verify(presented, anchors, host, now) -> Result<List<Certificate>, Error>
+//   x509chain.parse_anchors(pem_text)               -> Result<AnchorSet, x509.Error>
+//   x509chain.check_signed_by(certificate, issuer)  -> Result<void, Error>
+//
+// `verify` answers with the path it found, the leaf first and the trust
+// anchor last, or the reason no acceptable path exists. `now` is epoch
+// seconds and is the caller's: nothing here reads the clock.
+//
+// --- what is checked ---------------------------------------------------------------
+//
+// The leaf (`presented[0]`):
+//   - valid at `now`;
+//   - extendedKeyUsage, if present, allows serverAuth (or anyExtendedKeyUsage);
+//   - keyUsage, if present, has digitalSignature (TLS 1.3 signs the handshake);
+//   - subjectAltName covers `host` (`x509.matches_hostname`: the CommonName is
+//     never read, a wildcard is one whole leftmost label with at least two
+//     labels after it; an IP-literal host matches only an iPAddress entry).
+//
+// Every link, from the leaf up (certificate C signed by issuer X):
+//   - X's key verifies C's signature over C's `tbsCertificate`: ECDSA
+//     (P-256 or P-384 keys, SHA-256, SHA-384 or SHA-512), Ed25519 (RFC 8410:
+//     an Ed25519 key, the signature algorithm without parameters), RSASSA-PKCS1-v1_5
+//     and RSASSA-PSS (SHA-256, SHA-384, SHA-512; MGF1 with the same hash and
+//     a salt as long as the digest, the one parameter set TLS uses). The
+//     signature algorithm in C is the one `x509` already checked equals the
+//     one inside the signed part;
+//   - C's issuer Name is X's subject Name, byte for byte, and, where C has an
+//     authorityKeyIdentifier and X a subjectKeyIdentifier, they are equal;
+//   - X is valid at `now`;
+//   - X may sign certificates: an intermediate has basicConstraints
+//     `CA:TRUE`; a trust anchor needs no basicConstraints at all (old roots
+//     have none) but is refused if it has them and says `CA:FALSE`; if X has
+//     keyUsage it includes keyCertSign;
+//   - X's pathLenConstraint, when present, is at least the number of
+//     non-self-issued intermediates between X and the leaf;
+//   - an intermediate's extendedKeyUsage, if present, allows serverAuth. A
+//     trust anchor's is not consulted (RFC 5280 §6.1.1(d): a root's own
+//     extensions are inputs the caller chose, not data to process), but its
+//     basicConstraints, keyUsage and pathLen are, which is stricter than the
+//     RFC and what Go and OpenSSL both do.
+//
+// Refused outright:
+//   - a certificate signed with MD2, MD4, MD5 or SHA-1 (`WeakAlgorithm`),
+//     wherever it is in the chain, a trust anchor's own self-signature
+//     excepted because it is never verified;
+//   - an RSA key of fewer than 2048 bits (`WeakAlgorithm`) or more than 4096
+//     (`UnsupportedAlgorithm`);
+//   - a path longer than `MAXIMUM_PATH_LENGTH` certificates before the anchor;
+//   - a critical extension this build does not implement, anywhere in the
+//     presented chain: `x509.parse` refuses it, so it never becomes part of a
+//     path (on the leaf the connection fails; on an intermediate the path
+//     cannot be built through it).
+//
+// --- how the path is found ---------------------------------------------------------
+//
+// The presented list is a bag, not a sequence. Order, extra certificates and
+// cross-signed duplicates do not matter: from the leaf, every certificate in
+// `anchors` or in the presented list whose subject is the current issuer is
+// tried, depth first, and the first path that passes every check wins. A
+// presented certificate that is byte-for-byte a trust anchor is ignored (the
+// anchor itself is the candidate), so a server that sends its root costs
+// nothing. When no path passes, the error is the first *specific* failure
+// met -- a bad signature, an expired intermediate -- or `UnknownAuthority`
+// when no candidate issuer was found at all.
+//
+// --- what is NOT here ---------------------------------------------------------------
+//
+//   - Revocation (CRL, OCSP, stapling), name constraints, policy processing.
+//   - A public suffix list: `*.co.uk` is accepted as a wildcard pattern. Only
+//     `*.com`-style (a wildcard directly above a single label) is refused.
+//   - Self-issued-certificate exceptions beyond pathLen (RFC 5280 §6.1.4(h)).
+
+import encoding.hexcodec;
+import crypto.ecdsa;
+import crypto.ed25519;
+import crypto.rsa;
+import crypto.sha256;
+import crypto.sha512;
+import pki.x509;
+
+/// The most certificates in a path before its trust anchor, leaf included.
+pub const int MAXIMUM_PATH_LENGTH = 10;
+const int FAMILY_ECDSA = 1;
+const int FAMILY_PKCS1 = 2;
+const int FAMILY_PSS = 3;
+const int FAMILY_ED25519 = 4;
+const str OID_ECDSA_SHA256 = "1.2.840.10045.4.3.2";
+const str OID_ECDSA_SHA384 = "1.2.840.10045.4.3.3";
+const str OID_ECDSA_SHA512 = "1.2.840.10045.4.3.4";
+const str OID_RSA_SHA256 = "1.2.840.113549.1.1.11";
+const str OID_RSA_SHA384 = "1.2.840.113549.1.1.12";
+const str OID_RSA_SHA512 = "1.2.840.113549.1.1.13";
+const str OID_RSA_PSS = "1.2.840.113549.1.1.10";
+const str PSS_PARAMETERS_SHA256 = "3034a00f300d06096086480165030402010500a11c301a06092a864886f70d010108300d06096086480165030402010500a203020120";
+const str PSS_PARAMETERS_SHA384 = "3034a00f300d06096086480165030402020500a11c301a06092a864886f70d010108300d06096086480165030402020500a203020130";
+const str PSS_PARAMETERS_SHA512 = "3034a00f300d06096086480165030402030500a11c301a06092a864886f70d010108300d06096086480165030402030500a203020140";
+const int MINIMUM_RSA_MODULUS_BYTES = 256;
+
+/// Why no acceptable path exists. Payload-free (`docs/errors-decision.md` §4).
+pub enum Error {
+    /// The server presented no certificate.
+    EmptyChain;
+    /// No path leads from the leaf to a trust anchor: the issuer is not
+    /// presented and not trusted.
+    UnknownAuthority;
+    /// A certificate on the path has expired.
+    Expired;
+    /// A certificate on the path is not yet valid.
+    NotYetValid;
+    /// The leaf's subjectAltName does not cover the host.
+    HostnameMismatch;
+    /// A certificate that signed another is not allowed to: it is not a CA,
+    /// or its keyUsage has no keyCertSign.
+    NotCertificateAuthority;
+    /// A pathLenConstraint is exceeded.
+    PathLengthExceeded;
+    /// A key usage or extended key usage rules out TLS server authentication.
+    WrongPurpose;
+    /// A signature on the path does not verify.
+    BadSignature;
+    /// A signature algorithm or key size that is no longer believed: MD5,
+    /// SHA-1, RSA under 2048 bits.
+    WeakAlgorithm;
+    /// A signature algorithm or key type this client does not implement.
+    UnsupportedAlgorithm;
+    /// The path would be longer than `MAXIMUM_PATH_LENGTH`.
+    TooDeep;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case EmptyChain: {
+            return "the server presented no certificate";
+        }
+        case UnknownAuthority: {
+            return "the certificate was not issued by a trusted authority";
+        }
+        case Expired: {
+            return "a certificate in the chain has expired";
+        }
+        case NotYetValid: {
+            return "a certificate in the chain is not yet valid";
+        }
+        case HostnameMismatch: {
+            return "the certificate is not valid for this host name";
+        }
+        case NotCertificateAuthority: {
+            return "a certificate that signed another is not allowed to";
+        }
+        case PathLengthExceeded: {
+            return "the chain is longer than a CA's path length constraint allows";
+        }
+        case WrongPurpose: {
+            return "a certificate in the chain is not valid for TLS server authentication";
+        }
+        case BadSignature: {
+            return "a signature in the chain does not verify";
+        }
+        case WeakAlgorithm: {
+            return "the chain uses a signature algorithm or key size that is too weak";
+        }
+        case UnsupportedAlgorithm: {
+            return "the chain uses a signature algorithm or key type that is not supported";
+        }
+        case TooDeep: {
+            return "the chain is too long";
+        }
+    }
+}
+
+/// The trust anchors read from a PEM bundle, and how many of its
+/// certificates could not be read (and so trust nothing).
+pub type AnchorSet {
+    pub List<x509.Certificate> certificates;
+    pub int skipped;
+}
+
+/// Every certificate in `text` as a trust anchor. A certificate that does not
+/// parse -- a new extension, an encoding `x509` refuses -- is counted in
+/// `skipped` and trusted for nothing: a bundle with one odd entry does not
+/// become unusable, and the oddity can never widen what is trusted. A
+/// malformed PEM structure is an `Err`.
+pub Result<AnchorSet, x509.Error> parse_anchors(str text) {
+    List<bytes> blobs = x509.pem_certificates(text)?;
+    List<x509.Certificate> certificates = [];
+    int skipped = 0;
+    for (bytes blob in blobs) {
+        match (x509.parse_trust_anchor(blob)) {
+            case Ok(x509.Certificate anchor): {
+                certificates.push(anchor);
+            }
+            case Err(x509.Error parse_error): {
+                skipped = skipped + 1;
+            }
+        }
+    }
+    return Result<AnchorSet, x509.Error>.Ok(AnchorSet(certificates, skipped));
+}
+
+// --- signatures ---------------------------------------------------------------------
+
+type Scheme {
+    int family;
+    rsa.Hash hash;
+}
+
+bool is_weak_algorithm(str oid) {
+    List<str> weak = ["1.2.840.113549.1.1.2", "1.2.840.113549.1.1.3", "1.2.840.113549.1.1.4", "1.2.840.113549.1.1.5", "1.3.14.3.2.29", "1.2.840.10045.4.1", "1.2.840.10040.4.3"];
+    return weak.contains(oid);
+}
+
+bool has_pss_parameters(bytes parameters, str expected_hex) {
+    match (hexcodec.decode(expected_hex)) {
+        case Err(hexcodec.Error problem): {
+            return false;
+        }
+        case Ok(bytes expected): {
+            return parameters == expected;
+        }
+    }
+}
+
+Option<Scheme> scheme_of(x509.AlgorithmIdentifier algorithm) {
+    str oid = algorithm.algorithm_oid;
+    if (oid == OID_ECDSA_SHA256 && algorithm.parameters.size() == 0) {
+        return Option<Scheme>.Some(Scheme(FAMILY_ECDSA, rsa.Hash.Sha256));
+    }
+    if (oid == OID_ECDSA_SHA384 && algorithm.parameters.size() == 0) {
+        return Option<Scheme>.Some(Scheme(FAMILY_ECDSA, rsa.Hash.Sha384));
+    }
+    if (oid == OID_ECDSA_SHA512 && algorithm.parameters.size() == 0) {
+        return Option<Scheme>.Some(Scheme(FAMILY_ECDSA, rsa.Hash.Sha512));
+    }
+    if (oid == x509.OBJECT_ID_ED25519 && algorithm.parameters.size() == 0) {
+        // Ed25519 hashes inside the algorithm; the hash here is unused.
+        return Option<Scheme>.Some(Scheme(FAMILY_ED25519, rsa.Hash.Sha256));
+    }
+    bool null_parameters = algorithm.parameters.size() == 0 || (algorithm.parameters.size() == 2 && algorithm.parameters[0] == 5 && algorithm.parameters[1] == 0);
+    if (oid == OID_RSA_SHA256 && null_parameters) {
+        return Option<Scheme>.Some(Scheme(FAMILY_PKCS1, rsa.Hash.Sha256));
+    }
+    if (oid == OID_RSA_SHA384 && null_parameters) {
+        return Option<Scheme>.Some(Scheme(FAMILY_PKCS1, rsa.Hash.Sha384));
+    }
+    if (oid == OID_RSA_SHA512 && null_parameters) {
+        return Option<Scheme>.Some(Scheme(FAMILY_PKCS1, rsa.Hash.Sha512));
+    }
+    if (oid == OID_RSA_PSS) {
+        if (has_pss_parameters(algorithm.parameters, PSS_PARAMETERS_SHA256)) {
+            return Option<Scheme>.Some(Scheme(FAMILY_PSS, rsa.Hash.Sha256));
+        }
+        if (has_pss_parameters(algorithm.parameters, PSS_PARAMETERS_SHA384)) {
+            return Option<Scheme>.Some(Scheme(FAMILY_PSS, rsa.Hash.Sha384));
+        }
+        if (has_pss_parameters(algorithm.parameters, PSS_PARAMETERS_SHA512)) {
+            return Option<Scheme>.Some(Scheme(FAMILY_PSS, rsa.Hash.Sha512));
+        }
+    }
+    return Option<Scheme>.None;
+}
+
+bytes digest_of(rsa.Hash hash, bytes message) {
+    match (hash) {
+        case Sha256: {
+            return sha256.sum(message);
+        }
+        case Sha384: {
+            return sha512.sum384(message);
+        }
+        case Sha512: {
+            return sha512.sum(message);
+        }
+    }
+}
+
+Result<void, Error> verify_ecdsa(x509.PublicKey key, rsa.Hash hash, bytes message, bytes signature) {
+    if (key.algorithm != x509.OID_EC_PUBLIC_KEY) {
+        return Result<void, Error>.Err(Error.BadSignature);
+    }
+    ecdsa.Curve curve = ecdsa.p256();
+    if (key.curve == x509.OID_CURVE_P384) {
+        curve = ecdsa.p384();
+    } else if (key.curve != x509.OID_CURVE_P256) {
+        return Result<void, Error>.Err(Error.UnsupportedAlgorithm);
+    }
+    match (ecdsa.parse_public_key(curve, key.key_bytes)) {
+        case None: {
+            return Result<void, Error>.Err(Error.BadSignature);
+        }
+        case Some(ecdsa.PublicKey parsed): {
+            if (!ecdsa.verify_der(curve, parsed, digest_of(hash, message), signature)) {
+                return Result<void, Error>.Err(Error.BadSignature);
+            }
+            return Result<void, Error>.Ok;
+        }
+    }
+}
+
+Result<void, Error> verify_ed25519(x509.PublicKey key, bytes message, bytes signature) {
+    if (key.algorithm != x509.OBJECT_ID_ED25519) {
+        return Result<void, Error>.Err(Error.BadSignature);
+    }
+    if (!ed25519.verify(key.key_bytes, message, signature)) {
+        return Result<void, Error>.Err(Error.BadSignature);
+    }
+    return Result<void, Error>.Ok;
+}
+
+Result<void, Error> verify_rsa(x509.PublicKey key, Scheme scheme, bytes message, bytes signature) {
+    if (key.algorithm != x509.OID_RSA_ENCRYPTION) {
+        return Result<void, Error>.Err(Error.BadSignature);
+    }
+    match (rsa.parse_public_key(key.modulus, key.public_exponent)) {
+        case None: {
+            if (key.modulus.size() < MINIMUM_RSA_MODULUS_BYTES) {
+                return Result<void, Error>.Err(Error.WeakAlgorithm);
+            }
+            return Result<void, Error>.Err(Error.UnsupportedAlgorithm);
+        }
+        case Some(rsa.PublicKey parsed): {
+            bytes digest = digest_of(scheme.hash, message);
+            bool valid = false;
+            if (scheme.family == FAMILY_PSS) {
+                valid = rsa.verify_pss(parsed, scheme.hash, digest, signature);
+            } else {
+                valid = rsa.verify_pkcs1_v15(parsed, scheme.hash, digest, signature);
+            }
+            if (!valid) {
+                return Result<void, Error>.Err(Error.BadSignature);
+            }
+            return Result<void, Error>.Ok;
+        }
+    }
+}
+
+/// Whether `key` verifies `signature` over `message` under `algorithm` (an
+/// X.509 signatureAlgorithm: ECDSA or RSA with SHA-2, or Ed25519). The same check, with
+/// the same refusals (SHA-1 and MD5 are `WeakAlgorithm`), that a
+/// certificate's signature gets; `lib/pki/ocsp.m31` uses it for responses.
+pub Result<void, Error> check_signature(x509.AlgorithmIdentifier algorithm, bytes message, bytes signature, x509.PublicKey key) {
+    if (is_weak_algorithm(algorithm.algorithm_oid)) {
+        return Result<void, Error>.Err(Error.WeakAlgorithm);
+    }
+    match (scheme_of(algorithm)) {
+        case None: {
+            return Result<void, Error>.Err(Error.UnsupportedAlgorithm);
+        }
+        case Some(Scheme scheme): {
+            if (scheme.family == FAMILY_ECDSA) {
+                return verify_ecdsa(key, scheme.hash, message, signature);
+            }
+            if (scheme.family == FAMILY_ED25519) {
+                return verify_ed25519(key, message, signature);
+            }
+            return verify_rsa(key, scheme, message, signature);
+        }
+    }
+}
+
+/// Whether `issuer`'s key verifies `certificate`'s signature. Only the
+/// signature: names, dates and constraints are `verify`'s.
+pub Result<void, Error> check_signed_by(x509.Certificate certificate, x509.Certificate issuer) {
+    return check_signature(certificate.signature_algorithm, certificate.tbs_certificate, certificate.signature, issuer.public_key);
+}
+
+// --- path building ------------------------------------------------------------------
+
+type Search {
+    List<x509.Certificate> presented;
+    List<x509.Certificate> anchors;
+    int now;
+    bool has_specific_failure = false;
+    Error specific_failure = Error.UnknownAuthority;
+}
+
+void Search.note(Error failure) {
+    if (!has_specific_failure) {
+        has_specific_failure = true;
+        specific_failure = failure;
+    }
+}
+
+// One candidate issuer for the end of `path`: the finished path through it,
+// or None after noting why it will not do.
+Option<List<x509.Certificate>> Search.try_issuer(List<x509.Certificate> path, x509.Certificate issuer, bool is_anchor) {
+    x509.Certificate current = path[path.size() - 1];
+    match (authority_failure(path, issuer, is_anchor, now)) {
+        case Some(Error failure): {
+            note(failure);
+            return Option<List<x509.Certificate>>.None;
+        }
+        case None: {
+        }
+    }
+    match (check_signed_by(current, issuer)) {
+        case Err(Error failure): {
+            note(failure);
+            return Option<List<x509.Certificate>>.None;
+        }
+        case Ok: {
+        }
+    }
+    List<x509.Certificate> longer = appended(path, issuer);
+    if (is_anchor) {
+        return Option<List<x509.Certificate>>.Some(longer);
+    }
+    return extend(longer);
+}
+
+// A path from the end of `path` to a trust anchor, or None.
+Option<List<x509.Certificate>> Search.extend(List<x509.Certificate> path) {
+    if (path.size() > MAXIMUM_PATH_LENGTH) {
+        note(Error.TooDeep);
+        return Option<List<x509.Certificate>>.None;
+    }
+    x509.Certificate current = path[path.size() - 1];
+    for (x509.Certificate anchor in anchors) {
+        if (names_issuer(current, anchor)) {
+            match (try_issuer(path, anchor, true)) {
+                case Some(List<x509.Certificate> found): {
+                    return Option<List<x509.Certificate>>.Some(found);
+                }
+                case None: {
+                }
+            }
+        }
+    }
+    for (x509.Certificate candidate in presented) {
+        if (names_issuer(current, candidate) && !is_in(path, candidate) && !is_in(anchors, candidate)) {
+            match (try_issuer(path, candidate, false)) {
+                case Some(List<x509.Certificate> found): {
+                    return Option<List<x509.Certificate>>.Some(found);
+                }
+                case None: {
+                }
+            }
+        }
+    }
+    return Option<List<x509.Certificate>>.None;
+}
+
+bool is_in(List<x509.Certificate> certificates, x509.Certificate wanted) {
+    for (x509.Certificate candidate in certificates) {
+        if (candidate.encoded == wanted.encoded) {
+            return true;
+        }
+    }
+    return false;
+}
+
+List<x509.Certificate> appended(List<x509.Certificate> path, x509.Certificate next) {
+    List<x509.Certificate> longer = [];
+    for (x509.Certificate step in path) {
+        longer.push(step);
+    }
+    longer.push(next);
+    return longer;
+}
+
+// `None` when the certificate's validity period holds `now`, otherwise why not.
+Option<Error> validity_failure(x509.Certificate certificate, int now) {
+    if (now < certificate.not_before) {
+        return Option<Error>.Some(Error.NotYetValid);
+    }
+    if (now > certificate.not_after) {
+        return Option<Error>.Some(Error.Expired);
+    }
+    return Option<Error>.None;
+}
+
+// The non-self-issued certificates after the leaf: what an issuer's
+// pathLenConstraint counts.
+int intermediate_count(List<x509.Certificate> path) {
+    int count = 0;
+    for (int index in 1 .. path.size()) {
+        x509.Certificate step = path[index];
+        if (!x509.same_name(step.subject, step.issuer)) {
+            count = count + 1;
+        }
+    }
+    return count;
+}
+
+// Whether `issuer` may sign the certificate at the end of `path`, as an
+// intermediate or as a trust anchor. `None` when it may.
+Option<Error> authority_failure(List<x509.Certificate> path, x509.Certificate issuer, bool is_anchor, int now) {
+    match (validity_failure(issuer, now)) {
+        case Some(Error failure): {
+            return Option<Error>.Some(failure);
+        }
+        case None: {
+        }
+    }
+    if (is_anchor) {
+        if (issuer.has_basic_constraints && !issuer.is_ca) {
+            return Option<Error>.Some(Error.NotCertificateAuthority);
+        }
+    } else {
+        if (!issuer.has_basic_constraints || !issuer.is_ca) {
+            return Option<Error>.Some(Error.NotCertificateAuthority);
+        }
+        if (!issuer.allows_server_auth()) {
+            return Option<Error>.Some(Error.WrongPurpose);
+        }
+    }
+    if (issuer.has_key_usage && (issuer.key_usage & x509.KEY_USAGE_KEY_CERT_SIGN) == 0) {
+        return Option<Error>.Some(Error.NotCertificateAuthority);
+    }
+    if (issuer.path_length >= 0 && intermediate_count(path) > issuer.path_length) {
+        return Option<Error>.Some(Error.PathLengthExceeded);
+    }
+    return Option<Error>.None;
+}
+
+// Whether `issuer` could be the one that signed `certificate`: the names
+// agree, and the key identifiers do wherever both are given.
+bool names_issuer(x509.Certificate certificate, x509.Certificate issuer) {
+    if (!certificate.issued_by(issuer)) {
+        return false;
+    }
+    if (certificate.authority_key_id.size() > 0 && issuer.subject_key_id.size() > 0) {
+        return certificate.authority_key_id == issuer.subject_key_id;
+    }
+    return true;
+}
+
+Option<Error> leaf_failure(x509.Certificate leaf, int now) {
+    match (validity_failure(leaf, now)) {
+        case Some(Error failure): {
+            return Option<Error>.Some(failure);
+        }
+        case None: {
+        }
+    }
+    if (!leaf.allows_server_auth()) {
+        return Option<Error>.Some(Error.WrongPurpose);
+    }
+    if (leaf.has_key_usage && (leaf.key_usage & x509.KEY_USAGE_DIGITAL_SIGNATURE) == 0) {
+        return Option<Error>.Some(Error.WrongPurpose);
+    }
+    return Option<Error>.None;
+}
+
+/// The path from `presented[0]` -- the server's certificate -- to one of
+/// `anchors`, leaf first and anchor last, if every check in the header
+/// passes along it and the leaf is valid for `host` at `now`.
+pub Result<List<x509.Certificate>, Error> verify(List<x509.Certificate> presented, List<x509.Certificate> anchors, str host, int now) {
+    if (presented.size() == 0) {
+        return Result<List<x509.Certificate>, Error>.Err(Error.EmptyChain);
+    }
+    x509.Certificate leaf = presented[0];
+    match (leaf_failure(leaf, now)) {
+        case Some(Error failure): {
+            return Result<List<x509.Certificate>, Error>.Err(failure);
+        }
+        case None: {
+        }
+    }
+    Search search = Search(presented, anchors, now);
+    List<x509.Certificate> start = [leaf];
+    match (search.extend(start)) {
+        case None: {
+            return Result<List<x509.Certificate>, Error>.Err(search.specific_failure);
+        }
+        case Some(List<x509.Certificate> path): {
+            if (!leaf.matches_hostname(host)) {
+                return Result<List<x509.Certificate>, Error>.Err(Error.HostnameMismatch);
+            }
+            return Result<List<x509.Certificate>, Error>.Ok(path);
+        }
+    }
+}

@@ -4,7 +4,7 @@
 //   t_chain_roots <bundle.pem>
 //
 // A root is self-issued, so its own signature has to verify under its own key:
-// the ECDSA and RSA code of `lib/x509chain.m31` run over the real, varied
+// the ECDSA and RSA code of `lib/pki/x509chain.m31` run over the real, varied
 // certificates of the system's roots. Prints one `fail` line per root that does
 // not verify (`self <family> <reason> signature <OID>`) and then the counts
 //
@@ -18,8 +18,8 @@
 
 import io;
 import os;
-import x509;
-import x509chain;
+import pki.x509;
+import pki.x509chain;
 
 List<str> arguments = os.args();
 if (arguments.size() != 2) {

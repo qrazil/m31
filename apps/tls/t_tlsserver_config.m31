@@ -1,4 +1,4 @@
-// Key and chain loading for `lib/tlsserver.m31`, driven from
+// Key and chain loading for `lib/tls/tlsserver.m31`, driven from
 // `test_tlsserver.sh`.
 //
 //   t_tlsserver_config CHAIN KEY [NAME ...]
@@ -12,7 +12,7 @@
 
 import io;
 import os;
-import tlsserver;
+import tls.tlsserver;
 
 bytes octets_of(str path) {
     match (io.read_bytes(path)) {

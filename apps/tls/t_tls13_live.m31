@@ -9,10 +9,10 @@
 
 import io;
 import os;
-import sha256;
+import crypto.sha256;
 import tls13_hex;
-import tls13record;
-import tls13schedule;
+import tls.tls13record;
+import tls.tls13schedule;
 
 void say(str text) {
     print(text);

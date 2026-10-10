@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Every check for OCSP stapling in the client (`lib/ocsp.m31` and the revocation code
+# Every check for OCSP stapling in the client (`lib/pki/ocsp.m31` and the revocation code
 # of `lib/tls.m31`), against peers and fixtures that are not this repository. Modelled
 # on `apps/tls/test_clientcert.sh`.
 #
@@ -80,7 +80,7 @@ matches() { perl -0777 -e 'local $/; my $text = <STDIN>; exit($text =~ /$ARGV[0]
 # --- house style ---------------------------------------------------------------
 
 if out=$(
-    for f in lib/ocsp.m31 lib/sha1digest.m31 lib/tls.m31 lib/x509.m31 lib/x509chain.m31 lib/http.m31 \
+    for f in lib/pki/ocsp.m31 lib/crypto/sha1digest.m31 lib/tls.m31 lib/pki/x509.m31 lib/pki/x509chain.m31 lib/net/http.m31 \
              apps/tls/t_ocsp_check.m31 apps/tls/t_ocsp_client.m31 apps/tls/t_chain_client.m31; do
         "$LANGC" fmt --check "$f" || echo "$f"
     done 2>&1

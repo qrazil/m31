@@ -1,4 +1,4 @@
-import html;
+import encoding.html;
 
 // `html.escape`: the five characters CPython's `html.escape` replaces, with
 // the same references, and nothing else touched. The expected output is

@@ -1,4 +1,4 @@
-// `lib/chacha20poly1305.m31` against RFC 8439's own worked examples and
+// `lib/crypto/chacha20poly1305.m31` against RFC 8439's own worked examples and
 // against `cryptography`/OpenSSL, the way `apps/git/t_sha1.m31` checks
 // `sha1.m31` against Python's `hashlib`: every line this prints on stdout is
 // printed again, independently, by `oracle_chacha20poly1305.py`, and
@@ -23,7 +23,7 @@
 // "random-looking" keys, nonces, additional data and plaintexts here and in
 // the oracle from the same seed, the way `t_sha1.m31`'s own deterministic
 // pattern needs no shared fixture file.
-import chacha20poly1305;
+import crypto.chacha20poly1305;
 
 // 2N hex digits to the N octets they spell -- `apps/git/index.m31`'s own
 // helper, needed here too and not shared, per that file's own comment on why.

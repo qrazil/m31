@@ -6,14 +6,14 @@
 // roots (`Trust.CaFile`). `now` is epoch seconds, or `real` for the machine's
 // clock. Modes:
 //   handshake       connect, then close
-//   get <path>      an HTTPS HEAD over `lib/http.m31`'s own request and response
+//   get <path>      an HTTPS HEAD over `lib/net/http.m31`'s own request and response
 //                   code; prints the status code
 //
 // Prints `connected` and what the mode saw, exiting 0, or `error <Name>`
 // (the `tls.Error` variant) and exits 1.
 
 import date;
-import http;
+import net.http;
 import io;
 import os;
 import tls;

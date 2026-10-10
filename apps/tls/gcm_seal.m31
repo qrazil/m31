@@ -1,4 +1,4 @@
-// AES-GCM (`lib/aesgcm.m31`) against `gcm_oracle.py`, which seals the same
+// AES-GCM (`lib/crypto/aesgcm.m31`) against `gcm_oracle.py`, which seals the same
 // messages with the `cryptography` package's AESGCM and asserts the McGrew &
 // Viega GCM specification's published test cases (the 128-bit cases 1-4, the
 // 256-bit cases 13-16) against it first. Every line this prints is printed
@@ -8,7 +8,7 @@
 //
 //   ./build.sh apps/tls/gcm_seal.m31 -o gcm_seal && ./gcm_seal
 
-import aesgcm;
+import crypto.aesgcm;
 import tls13_hex;
 
 // `n` octets of a deterministic pattern: `(i * multiplier + offset) & 0xFF`.

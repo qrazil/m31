@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Every check for TLS 1.3's key schedule and record layer
-# (`lib/tls13schedule.m31`, `lib/tls13record.m31`) for all three suites. No handshake, no
+# (`lib/tls/tls13schedule.m31`, `lib/tls/tls13record.m31`) for all three suites. No handshake, no
 # certificates: those are later milestones. Modelled on `apps/tls/test.sh`,
 # with the same rule: nothing here compares this program with itself.
 #
@@ -100,7 +100,7 @@ check_record() {
 # --- house style ---------------------------------------------------------------
 
 if out=$(
-    for f in apps/tls/tls13_*.m31 apps/tls/t_tls13_*.m31 lib/tls13schedule.m31 lib/tls13record.m31; do
+    for f in apps/tls/tls13_*.m31 apps/tls/t_tls13_*.m31 lib/tls/tls13schedule.m31 lib/tls/tls13record.m31; do
         "$LANGC" fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then

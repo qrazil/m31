@@ -1,4 +1,4 @@
-// Behavioural checks for `lib/x509.m31`, driven by what
+// Behavioural checks for `lib/pki/x509.m31`, driven by what
 // `x509_make_certs.py` writes and by the committed fixture chains.
 //
 //   x509_cases <generated dir> <fixtures dir>
@@ -11,7 +11,7 @@
 // the failure count.
 import io;
 import os;
-import x509;
+import pki.x509;
 
 type Tally {
     int passed = 0;

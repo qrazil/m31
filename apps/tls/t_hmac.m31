@@ -5,7 +5,7 @@
 //
 //   ./build.sh apps/tls/t_hmac.m31 -o t_hmac && ./t_hmac
 
-import hmac;
+import crypto.hmac;
 
 // `n` octets of a deterministic pattern: `(i * multiplier + offset) & 0xFF`.
 // The Python twin generates the same bytes from the same rule, so no fixture.

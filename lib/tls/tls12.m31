@@ -1,0 +1,258 @@
+// The cryptographic half of a TLS 1.2 client handshake (RFC 5246, RFC 7627,
+// RFC 8422, RFC 5288, RFC 7905): the six cipher suites this library speaks,
+// the PRF, the extended master secret, the key block, the Finished values and
+// the content a ServerKeyExchange signs. Pure functions of octets; the
+// message parsing and the record layer are `lib/tls.m31`'s and
+// `lib/tls/tls13record.m31`'s.
+//
+// What is here, and what is not, is the whole TLS 1.2 stance of this library:
+//
+//   key exchange    ECDHE only (x25519, secp256r1): forward secrecy always.
+//                   No static RSA key exchange, no finite-field DHE.
+//   authentication  ECDSA or RSA, by the suite; the server's signature over
+//                   its ECDHE parameters is checked by `lib/tls.m31`.
+//   bulk            AES-128-GCM, AES-256-GCM, ChaCha20-Poly1305. No CBC, no
+//                   RC4, no 3DES, no compression, and nothing without an
+//                   AEAD tag.
+//   master secret   extended_master_secret (RFC 7627) only, which binds the
+//                   secret to the whole handshake and so defeats the triple
+//                   handshake attack. A server without it is refused.
+//   renegotiation   never; see `lib/tls.m31`.
+//
+// The PRF hash is SHA-256 for every suite except AES-256-GCM, whose suite
+// code names SHA-384 (RFC 5289 §3.1); the Finished hash is the same one.
+// ChaCha20-Poly1305 suites use SHA-256 (RFC 7905 §2).
+
+import crypto.hmac;
+import tls.tls13schedule;
+
+/// The TLS 1.2 cipher suites that are offered and accepted.
+pub enum Suite {
+    /// `TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256`, 0xCCA9.
+    EcdsaChaCha20Poly1305;
+    /// `TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256`, 0xCCA8.
+    RsaChaCha20Poly1305;
+    /// `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256`, 0xC02B.
+    EcdsaAes128Gcm;
+    /// `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`, 0xC02F.
+    RsaAes128Gcm;
+    /// `TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384`, 0xC02C.
+    EcdsaAes256Gcm;
+    /// `TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384`, 0xC030.
+    RsaAes256Gcm;
+}
+
+/// The two-octet code point, as it goes on the wire.
+pub int Suite.code() {
+    match (this) {
+        case EcdsaChaCha20Poly1305: {
+            return 0xCCA9;
+        }
+        case RsaChaCha20Poly1305: {
+            return 0xCCA8;
+        }
+        case EcdsaAes128Gcm: {
+            return 0xC02B;
+        }
+        case RsaAes128Gcm: {
+            return 0xC02F;
+        }
+        case EcdsaAes256Gcm: {
+            return 0xC02C;
+        }
+        case RsaAes256Gcm: {
+            return 0xC030;
+        }
+    }
+}
+
+pub str Suite.to_str() {
+    match (this) {
+        case EcdsaChaCha20Poly1305: {
+            return "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256";
+        }
+        case RsaChaCha20Poly1305: {
+            return "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256";
+        }
+        case EcdsaAes128Gcm: {
+            return "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256";
+        }
+        case RsaAes128Gcm: {
+            return "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256";
+        }
+        case EcdsaAes256Gcm: {
+            return "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384";
+        }
+        case RsaAes256Gcm: {
+            return "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384";
+        }
+    }
+}
+
+/// The AEAD the record layer protects with, named by the TLS 1.3 suite that
+/// has the same one.
+pub tls13schedule.Suite Suite.aead() {
+    match (this) {
+        case EcdsaChaCha20Poly1305: {
+            return tls13schedule.Suite.ChaCha20Poly1305Sha256;
+        }
+        case RsaChaCha20Poly1305: {
+            return tls13schedule.Suite.ChaCha20Poly1305Sha256;
+        }
+        case EcdsaAes128Gcm: {
+            return tls13schedule.Suite.Aes128GcmSha256;
+        }
+        case RsaAes128Gcm: {
+            return tls13schedule.Suite.Aes128GcmSha256;
+        }
+        case EcdsaAes256Gcm: {
+            return tls13schedule.Suite.Aes256GcmSha384;
+        }
+        case RsaAes256Gcm: {
+            return tls13schedule.Suite.Aes256GcmSha384;
+        }
+    }
+}
+
+/// Whether the server's certificate key must be an ECDSA one (else RSA).
+pub bool Suite.is_ecdsa() {
+    match (this) {
+        case EcdsaChaCha20Poly1305: {
+            return true;
+        }
+        case EcdsaAes128Gcm: {
+            return true;
+        }
+        case EcdsaAes256Gcm: {
+            return true;
+        }
+        case RsaChaCha20Poly1305: {
+            return false;
+        }
+        case RsaAes128Gcm: {
+            return false;
+        }
+        case RsaAes256Gcm: {
+            return false;
+        }
+    }
+}
+
+/// Whether the PRF and Finished hash is SHA-384 (else SHA-256).
+pub bool Suite.uses_sha384() {
+    return aead().hash_size() == 48;
+}
+
+/// The length of the salt (AES-GCM, RFC 5288 §3) or whole IV (ChaCha20,
+/// RFC 7905 §2) the key block holds for each direction.
+pub int Suite.iv_size() {
+    match (aead()) {
+        case ChaCha20Poly1305Sha256: {
+            return 12;
+        }
+        case Aes128GcmSha256: {
+            return 4;
+        }
+        case Aes256GcmSha384: {
+            return 4;
+        }
+    }
+}
+
+bytes Suite.mac(bytes key, bytes data) {
+    if (uses_sha384()) {
+        return hmac.sha384_mac(key, data);
+    }
+    return hmac.sha256_mac(key, data);
+}
+
+/// `PRF(secret, label, seed)` for `size` octets, RFC 5246 §5: P_hash over
+/// `label || seed`, with the suite's hash.
+pub bytes Suite.prf(bytes secret, str label, bytes seed, int size) {
+    bytes label_seed = label.to_bytes();
+    label_seed.extend(seed);
+    bytes out = [];
+    bytes chain = mac(secret, label_seed);
+    while (out.size() < size) {
+        bytes block_input = clone(chain);
+        block_input.extend(label_seed);
+        out.extend(mac(secret, block_input));
+        chain = mac(secret, chain);
+    }
+    return out.substr(0, size);
+}
+
+/// The master secret, RFC 7627 §4: the PRF over the hash of the handshake
+/// through the ClientKeyExchange.
+pub bytes Suite.master_secret(bytes premaster, bytes session_hash) {
+    return prf(premaster, "extended master secret", session_hash, MASTER_SECRET_SIZE);
+}
+
+/// RFC 5246 §6.3: the key block is `PRF(master, "key expansion",
+/// server_random || client_random)`, cut into the two keys and the two IVs
+/// (there are no MAC keys with an AEAD).
+pub KeyBlock Suite.key_block(bytes master, bytes server_random, bytes client_random) {
+    int key_size = aead().key_size();
+    int iv_size = iv_size();
+    bytes seed = clone(server_random);
+    seed.extend(client_random);
+    bytes block = prf(master, "key expansion", seed, 2 * key_size + 2 * iv_size);
+    int at = 0;
+    bytes client_key = block.substr(at, at + key_size);
+    at = at + key_size;
+    bytes server_key = block.substr(at, at + key_size);
+    at = at + key_size;
+    bytes client_iv = block.substr(at, at + iv_size);
+    at = at + iv_size;
+    bytes server_iv = block.substr(at, at + iv_size);
+    return KeyBlock(client_key, server_key, client_iv, server_iv);
+}
+
+/// RFC 5246 §7.4.9: `PRF(master, "client finished" or "server finished",
+/// Hash(handshake messages))`, its first 12 octets.
+pub bytes Suite.verify_data(bytes master, bool from_client, bytes handshake_hash) {
+    str label = "server finished";
+    if (from_client) {
+        label = "client finished";
+    }
+    return prf(master, label, handshake_hash, VERIFY_DATA_SIZE);
+}
+
+/// The suite with this code point, or `None` for any other.
+pub Option<Suite> suite_for_code(int code) {
+    for (Suite known in all_suites()) {
+        if (known.code() == code) {
+            return Option<Suite>.Some(known);
+        }
+    }
+    return Option<Suite>.None;
+}
+
+/// Every suite, in the order a ClientHello offers them: ChaCha20 first for
+/// the reason `lib/crypto/aes.m31` gives, ECDSA before RSA within a cipher.
+pub List<Suite> all_suites() {
+    List<Suite> suites = [Suite.EcdsaChaCha20Poly1305, Suite.RsaChaCha20Poly1305, Suite.EcdsaAes128Gcm, Suite.RsaAes128Gcm, Suite.EcdsaAes256Gcm, Suite.RsaAes256Gcm];
+    return suites;
+}
+
+/// The length of a Finished `verify_data` (RFC 5246 §7.4.9).
+pub const int VERIFY_DATA_SIZE = 12;
+/// The length of the master secret (RFC 5246 §8.1).
+pub const int MASTER_SECRET_SIZE = 48;
+
+/// The four secrets the key block splits into.
+pub type KeyBlock {
+    pub bytes client_key;
+    pub bytes server_key;
+    pub bytes client_iv;
+    pub bytes server_iv;
+}
+
+/// What the ServerKeyExchange signature covers, RFC 5246 §7.4.3:
+/// `client_random || server_random || ServerECDHParams`.
+pub bytes signed_params(bytes client_random, bytes server_random, bytes params) {
+    bytes content = clone(client_random);
+    content.extend(server_random);
+    content.extend(params);
+    return content;
+}

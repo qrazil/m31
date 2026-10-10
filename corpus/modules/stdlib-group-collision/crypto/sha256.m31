@@ -1,0 +1,3 @@
+pub str hex(bytes data) {
+    return "mine";
+}

@@ -1,4 +1,4 @@
-// `lib/hexcodec.m31` against Python's `bytes.hex()` and a strict reading of
+// `lib/encoding/hexcodec.m31` against Python's `bytes.hex()` and a strict reading of
 // what `bytes.fromhex` would accept (it also takes whitespace, which
 // `hexcodec.decode` refuses, so the oracle checks the digits itself first).
 // Every line this prints is printed again by `oracle_hexcodec.py`, and
@@ -6,7 +6,7 @@
 //
 //   ./build.sh apps/tls/t_hexcodec.m31 -o t_hexcodec && ./t_hexcodec
 
-import hexcodec;
+import encoding.hexcodec;
 
 // `count` octets of a deterministic pattern: `(i * multiplier + offset) & 0xFF`.
 bytes pattern(int count, int multiplier, int offset) {

@@ -103,10 +103,13 @@ There are no aliases. Importing `a.c` and `b.c` into one file is an error
 3. More than one segment, otherwise: `<root>/p1/.../pn.m31`.
 4. If `d` is both a directory under the root **and** a name in `deps`,
    the import is an error naming both; rename one. No silent precedence.
-5. A dotted import never falls through to the stdlib and never to a
-   single-file dependency: `import ui.math;` with no `ui/math.m31` is
-   "cannot find module `ui.math`: no `ui/math.m31` under the project
-   root". It does not quietly give you `lib/math.m31`.
+5. A dotted import never falls through to a single-file dependency, and
+   it reaches the stdlib only by the stdlib's own path: `import ui.math;`
+   with no `ui/math.m31` is "cannot find module `ui.math`: no
+   `ui/math.m31` under the project root". It does not quietly give you
+   `lib/math.m31`. The one dotted path that *does* reach the stdlib is a
+   group's (`import crypto.sha256;` is `lib/crypto/sha256.m31`): see
+   docs/stdlib-layout-decision.md.
 
 **Collisions.** Identity is still the last segment, so two *different*
 files that would both be `helper` (`a/helper.m31`, `b/helper.m31`) are
@@ -282,8 +285,10 @@ that `m31c` itself can check, since a wrong path is a compile error.
   `bench_raw/`, `scaling_raw/`, `goserver/`, `greenthread_probe.c` to
   `bench/` (they are comparison material, not the program);
   `build*.sh` to `scripts/`.
-- **m31 monorepo**: `lib/` stays flat — it *is* the embedded stdlib and
-  names there are the global reserved set. `apps/{git,tui,markdown,
+- **m31 monorepo**: `lib/` is grouped into directories since 0.4.0
+  (docs/stdlib-layout-decision.md; this document first kept it flat) --
+  it *is* the embedded stdlib and names there are still the global
+  reserved set, directories or not. `apps/{git,tui,markdown,
   httpserver,ssh}` mirror the repo layouts above; each has its own `deps`,
   and `apps/git/deps` says `tui path ../tui`, so `import tui.tuiapp;` in
   git reads `apps/tui/tuiapp.m31` in place with no copy. (Why not simply

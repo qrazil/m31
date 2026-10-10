@@ -15,7 +15,7 @@
 // A cluster is printed as its code points in decimal, and clusters are
 // separated by `/`, so a failure says where a boundary moved.
 
-import unicode;
+import text.unicode;
 
 /// The clusters of `s`, as decimal code points with `/` between clusters.
 str split(str s) {

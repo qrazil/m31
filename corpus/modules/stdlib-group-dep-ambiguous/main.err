@@ -1,0 +1,4 @@
+corpus/modules/stdlib-group-dep-ambiguous/main.m31:1:1: `crypto` is both a standard library group and a dependency named in `deps`, so `crypto.sha256` could be either: rename the dependency
+  |
+1 | import crypto.sha256;
+  | ^

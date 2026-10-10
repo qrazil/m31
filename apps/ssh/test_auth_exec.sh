@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # `docs/ssh-decision.md` Phases 3 and 4's live half: public-key authentication
-# (`lib/sshauth.m31`, `lib/sshkey.m31`), `known_hosts` (`lib/sshhosts.m31`) and
-# command execution (`lib/sshexec.m31`, through `lib/sshclient.m31`) against a
+# (`lib/ssh/sshauth.m31`, `lib/ssh/sshkey.m31`), `known_hosts` (`lib/ssh/sshhosts.m31`) and
+# command execution (`lib/ssh/sshexec.m31`, through `lib/ssh/sshclient.m31`) against a
 # real, independent SSH implementation -- a disposable OpenSSH `sshd` run as
 # the current user in a temp directory, never touching `~/.ssh`, with freshly
 # generated keys that are thrown away afterwards.
@@ -171,12 +171,12 @@ SEQ_SHA=$(seq 1 1200000 | sha256sum | cut -d' ' -f1)
 
 cat >"$WORK/t_live.m31" <<EOF
 import ssh;
-import sshkey;
-import sshclient;
-import sshexec;
-import sshhosts;
-import sshauth;
-import sha256;
+import ssh.sshkey;
+import ssh.sshclient;
+import ssh.sshexec;
+import ssh.sshhosts;
+import ssh.sshauth;
+import crypto.sha256;
 
 const str USER = "$USER_NAME";
 const int PORT = $PORT;

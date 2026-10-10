@@ -15,7 +15,7 @@ Writes, into <outdir>:
 
 Every validity period is fixed (2020 to 2040), so nothing here depends on
 the clock. The expected outcomes are written down by hand from RFC 5280 and
-from `lib/x509.m31`'s header, not computed by the parser under test.
+from `lib/pki/x509.m31`'s header, not computed by the parser under test.
 """
 import base64
 import datetime

@@ -1,4 +1,4 @@
-import http;
+import net.http;
 
 // URLs and percent-encoding: `http.parse_url`, `http.quote`, `http.unquote`.
 //

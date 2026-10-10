@@ -1,0 +1,336 @@
+// RSA signature VERIFICATION (RFC 8017): RSASSA-PKCS1-v1_5 and RSASSA-PSS, the
+// two schemes a TLS 1.3 client meets in a server's certificate chain (an RSA
+// X.509 signature is PKCS#1 v1.5; `rsa_pss_rsae_sha256/384` in CertificateVerify
+// is PSS) and the check that completes `ecdsa.m31`'s coverage of real hosts.
+//
+// API
+// ---
+//   match (rsa.parse_public_key(modulus_bytes, exponent_bytes)) {   // big-endian, as in DER
+//       case None: { /* too small, too large, even modulus, unusable exponent */ }
+//       case Some(rsa.PublicKey key): {
+//           bool good = rsa.verify_pkcs1_v15(key, rsa.Hash.Sha256, digest, signature);
+//           bool also = rsa.verify_pss(key, rsa.Hash.Sha384, digest, signature);
+//       }
+//   }
+//
+// `digest` is the hash of the signed message, already computed, as `ecdsa.m31`
+// takes it: `verify_pkcs1_v15` embeds it in the encoding, and `verify_pss`
+// embeds it in `M'`. It must be exactly the chosen hash's output size, or the
+// answer is `false`. This module hashes only what the PSS encoding itself
+// hashes (`M'` and the mask-generation blocks), never the caller's message.
+//
+// Every verify function answers only yes or no. A wrong length, a signature
+// not below the modulus, bad padding, a wrong digest and a wrong trailer are all the
+// same `false`: a caller has no use for a reason, and a reason is what a
+// probing peer wants.
+//
+// --- public data only; not constant time -----------------------------------------
+//
+// Verification handles a public key, a digest and a signature, all public, so
+// nothing here runs in constant time (`bignum.m31` branches on the values it
+// holds, and the encodings below are compared with plain `==`). DO NOT use
+// this module to sign or to decrypt: both put a secret exponent through code
+// that leaks it by timing. See `bignum.m31`.
+//
+// --- what is validated -----------------------------------------------------------
+//
+//   - the key: a modulus of 2048 to 4096 bits (leading zero bytes, such as the
+//     sign byte of a DER INTEGER, are not counted), and odd; a public exponent
+//     that is odd and in `[3, 2^32)` (so 3, 17 and 65537 all work, and a
+//     verification never costs more than 32 squarings). A 1024-bit key is
+//     refused rather than verified: it is no longer a key worth believing.
+//   - the signature: exactly as long as the modulus (RFC 8017 §8.2.2 step 1:
+//     a shorter or zero-padded form is a different, rejected, encoding) and,
+//     as a number, below the modulus. `s >= n` is rejected, not reduced, so
+//     one signature is never accepted under two encodings.
+//
+// --- PKCS#1 v1.5: compare the whole encoding, never parse it ------------------------
+//
+// The recovered `m = s^e mod n` is turned into `k` octets and compared, in
+// full, with the one encoding that is correct for this digest:
+//
+//   0x00 0x01 0xFF ... 0xFF 0x00 || DigestInfo prefix || digest
+//
+// (at least eight `0xFF`, as many more as fill the `k` octets). Building the
+// expected value and comparing it is what makes the Bleichenbacher e=3
+// forgery -- a cube root of a number whose encoding has garbage after the
+// digest -- fail: a verifier that PARSES the padding and stops at the digest
+// accepts it, and this one has no parser to fool. Nothing after the digest is
+// ever tolerated, and the `AlgorithmIdentifier` parameters are the NULL that
+// RFC 8017 §9.2 note 1 requires, byte for byte.
+//
+// --- PSS: salt length is the digest length --------------------------------------
+//
+// `verify_pss` follows RFC 8017 §9.1.2 with `sLen = hLen` and the trailer
+// `0xBC`, which is what TLS 1.3 (RFC 8446 §4.2.3) requires of
+// `rsa_pss_rsae_*`. The mask-generation function is MGF1 with the same hash.
+// It checks, in order: the encoded message's length against `hLen + sLen + 2`,
+// the trailer, the leftmost `8*emLen - emBits` bits of the masked data being
+// zero, the same bits of the unmasked data being cleared, the zero padding
+// followed by exactly `0x01`, and finally `H = Hash(0x00 * 8 || digest || salt)`.
+// When the modulus is `8n + 1` bits long, `emLen` is `k - 1` and the leading
+// octet of the `k`-octet value must be zero.
+
+import crypto.bignum;
+import encoding.hexcodec;
+import crypto.sha256;
+import crypto.sha512;
+
+/// The hash a signature scheme is using, for the DigestInfo of PKCS#1 v1.5 and
+/// for the PSS encoding and its MGF1.
+pub enum Hash {
+    Sha256;
+    Sha384;
+    Sha512;
+}
+
+/// ASN.1 `DigestInfo` up to (not including) the digest, RFC 8017 §9.2 note 1.
+const str SHA256_DIGEST_INFO = "3031300d060960864801650304020105000420";
+const str SHA384_DIGEST_INFO = "3041300d060960864801650304020205000430";
+const str SHA512_DIGEST_INFO = "3051300d060960864801650304020305000440";
+const int MINIMUM_MODULUS_BITS = 2048;
+const int MAXIMUM_MODULUS_BITS = 4096;
+const int MAXIMUM_EXPONENT_BYTES = 4;
+/// RFC 8017 §9.2 step 3: at least eight `0xFF` octets in the padding.
+const int MINIMUM_PADDING_LENGTH = 8;
+const int PSS_TRAILER = 0xBC;
+
+/// A validated public key. `parse_public_key` is the only way to get one.
+pub type PublicKey {
+    /// The modulus's length in bits, leading zero bits not counted.
+    pub int modulus_bits;
+    /// The modulus's length in octets, `k` in RFC 8017: what a signature must be.
+    pub int modulus_size;
+    bignum.Modulus modulus;
+    Array<int> exponent;
+}
+
+/// `hash`'s output size in octets: 32, 48 or 64.
+pub int digest_size(Hash hash) {
+    match (hash) {
+        case Sha256: {
+            return 32;
+        }
+        case Sha384: {
+            return 48;
+        }
+        case Sha512: {
+            return 64;
+        }
+    }
+}
+
+/// The key with this big-endian `modulus_bytes` and `public_exponent_bytes`
+/// (leading zero bytes allowed on both, as a DER INTEGER has them), or `None`
+/// for a modulus under 2048 bits, over 4096 bits or even, or an exponent that
+/// is even, below 3 or `2^32` and up.
+pub Option<PublicKey> parse_public_key(bytes modulus_bytes, bytes public_exponent_bytes) {
+    bytes modulus_octets = strip_leading_zeros(modulus_bytes);
+    bytes exponent_octets = strip_leading_zeros(public_exponent_bytes);
+    if (modulus_octets.size() == 0 || exponent_octets.size() == 0) {
+        return Option<PublicKey>.None;
+    }
+    if (exponent_octets.size() > MAXIMUM_EXPONENT_BYTES) {
+        return Option<PublicKey>.None;
+    }
+    int exponent_low = exponent_octets[exponent_octets.size() - 1];
+    if (exponent_low % 2 == 0) {
+        return Option<PublicKey>.None;
+    }
+    if (exponent_octets.size() == 1 && exponent_low < 3) {
+        return Option<PublicKey>.None;
+    }
+    if (modulus_octets[modulus_octets.size() - 1] % 2 == 0) {
+        return Option<PublicKey>.None;
+    }
+    int modulus_bits = octet_bit_length(modulus_octets);
+    if (modulus_bits < MINIMUM_MODULUS_BITS || modulus_bits > MAXIMUM_MODULUS_BITS) {
+        return Option<PublicKey>.None;
+    }
+    bignum.Modulus modulus = bignum.make_modulus(modulus_octets);
+    Array<int> exponent = bignum.from_bytes(exponent_octets, 2);
+    return Option<PublicKey>.Some(PublicKey(modulus_bits, modulus_octets.size(), modulus, exponent));
+}
+
+/// Whether `signature` is a valid RSASSA-PKCS1-v1_5 signature by `key`, under
+/// `hash`, over the message whose hash is `digest`.
+pub bool verify_pkcs1_v15(PublicKey key, Hash hash, bytes digest, bytes signature) {
+    if (digest.size() != digest_size(hash)) {
+        return false;
+    }
+    match (recover_encoded_message(key, signature)) {
+        case None: {
+            return false;
+        }
+        case Some(bytes recovered): {
+            bytes prefix = hexcodec.literal(digest_info_hex(hash));
+            int padding_length = key.modulus_size - 3 - prefix.size() - digest.size();
+            if (padding_length < MINIMUM_PADDING_LENGTH) {
+                return false;
+            }
+            bytes expected = [];
+            expected.push(0);
+            expected.push(1);
+            for (int index in 0 .. padding_length) {
+                expected.push(255);
+            }
+            expected.push(0);
+            expected.extend(prefix);
+            expected.extend(digest);
+            return recovered == expected;
+        }
+    }
+}
+
+/// Whether `signature` is a valid RSASSA-PSS signature by `key`, over the
+/// message whose hash is `digest`, using `hash` for the message hash and for
+/// MGF1, with a salt as long as the digest.
+pub bool verify_pss(PublicKey key, Hash hash, bytes digest, bytes signature) {
+    int hash_length = digest_size(hash);
+    if (digest.size() != hash_length) {
+        return false;
+    }
+    match (recover_encoded_message(key, signature)) {
+        case None: {
+            return false;
+        }
+        case Some(bytes recovered): {
+            int encoded_bits = key.modulus_bits - 1;
+            int encoded_length = (encoded_bits + 7) / 8;
+            bytes encoded = recovered;
+            if (encoded_length == key.modulus_size - 1) {
+                if (recovered[0] != 0) {
+                    return false;
+                }
+                encoded = recovered.substr(1, recovered.size());
+            }
+            return pss_encoding_matches(hash, digest, encoded, encoded_bits);
+        }
+    }
+}
+
+// `encoded` is `EM`, `ceil((modBits - 1) / 8)` octets, and `encoded_bits` is
+// `emBits`; RFC 8017 §9.1.2 steps 3 to 14, with `sLen = hLen`.
+bool pss_encoding_matches(Hash hash, bytes digest, bytes encoded, int encoded_bits) {
+    int hash_length = digest.size();
+    int salt_length = hash_length;
+    int encoded_length = encoded.size();
+    if (encoded_length < hash_length + salt_length + 2) {
+        return false;
+    }
+    if (encoded[encoded_length - 1] != PSS_TRAILER) {
+        return false;
+    }
+    int masked_length = encoded_length - hash_length - 1;
+    bytes masked = encoded.substr(0, masked_length);
+    bytes expected_hash = encoded.substr(masked_length, masked_length + hash_length);
+    int cleared_bits = 8 * encoded_length - encoded_bits;
+    int kept_mask = 0xFF >> cleared_bits;
+    if ((masked[0] & (0xFF ^ kept_mask)) != 0) {
+        return false;
+    }
+    bytes mask = mgf1(hash, expected_hash, masked_length);
+    bytes unmasked = [];
+    for (int index in 0 .. masked_length) {
+        unmasked.push(masked[index] ^ mask[index]);
+    }
+    unmasked[0] = unmasked[0] & kept_mask;
+    int padding_length = masked_length - salt_length - 1;
+    for (int index in 0 .. padding_length) {
+        if (unmasked[index] != 0) {
+            return false;
+        }
+    }
+    if (unmasked[padding_length] != 1) {
+        return false;
+    }
+    bytes salt = unmasked.substr(masked_length - salt_length, masked_length);
+    bytes combined = [0; 8];
+    combined.extend(digest);
+    combined.extend(salt);
+    return hash_bytes(hash, combined) == expected_hash;
+}
+
+// MGF1 (RFC 8017 appendix B.2.1): `length` octets of `Hash(seed || counter)`
+// blocks, the counter a 4-octet big-endian integer from 0.
+bytes mgf1(Hash hash, bytes seed, int length) {
+    bytes output = [];
+    int counter = 0;
+    while (output.size() < length) {
+        bytes block_input = [];
+        block_input.extend(seed);
+        block_input.push(counter >> 24 & 0xFF);
+        block_input.push(counter >> 16 & 0xFF);
+        block_input.push(counter >> 8 & 0xFF);
+        block_input.push(counter & 0xFF);
+        output.extend(hash_bytes(hash, block_input));
+        counter = counter + 1;
+    }
+    output.truncate(length);
+    return output;
+}
+
+// RSAVP1 (RFC 8017 §5.2.2) with the length check of §8.2.2 step 1: `s^e mod n`
+// as exactly `k` octets, or `None` for a signature of the wrong length or one
+// that is not below the modulus.
+Option<bytes> recover_encoded_message(PublicKey key, bytes signature) {
+    if (signature.size() != key.modulus_size) {
+        return Option<bytes>.None;
+    }
+    bignum.Modulus modulus = key.modulus;
+    Array<int> signature_value = bignum.from_bytes(signature, modulus.width);
+    if (bignum.compare(signature_value, modulus.value) >= 0) {
+        return Option<bytes>.None;
+    }
+    Array<int> in_montgomery = bignum.to_montgomery(modulus, signature_value);
+    Array<int> powered = bignum.montgomery_power(modulus, in_montgomery, key.exponent);
+    Array<int> plain = bignum.from_montgomery(modulus, powered);
+    return Option<bytes>.Some(bignum.to_bytes(plain, key.modulus_size));
+}
+
+bytes hash_bytes(Hash hash, bytes data) {
+    match (hash) {
+        case Sha256: {
+            return sha256.sum(data);
+        }
+        case Sha384: {
+            return sha512.sum384(data);
+        }
+        case Sha512: {
+            return sha512.sum(data);
+        }
+    }
+}
+
+str digest_info_hex(Hash hash) {
+    match (hash) {
+        case Sha256: {
+            return SHA256_DIGEST_INFO;
+        }
+        case Sha384: {
+            return SHA384_DIGEST_INFO;
+        }
+        case Sha512: {
+            return SHA512_DIGEST_INFO;
+        }
+    }
+}
+
+bytes strip_leading_zeros(bytes raw) {
+    int start = 0;
+    while (start < raw.size() && raw[start] == 0) {
+        start = start + 1;
+    }
+    return raw.substr(start, raw.size());
+}
+
+// The bit length of a nonempty big-endian value whose first octet is nonzero.
+int octet_bit_length(bytes octets) {
+    int top = octets[0];
+    int bits = 0;
+    while (top != 0) {
+        top = top >> 1;
+        bits = bits + 1;
+    }
+    return (octets.size() - 1) * 8 + bits;
+}

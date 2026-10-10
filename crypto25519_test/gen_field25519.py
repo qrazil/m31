@@ -29,7 +29,7 @@ src.append("// Differential test of field25519 against Python's exact bigint")
 src.append("// modular arithmetic mod 2^255-19, over random and boundary inputs")
 src.append("// (several >= p, to exercise from_bytes/to_bytes' non-canonical")
 src.append("// reduction, which RFC 7748 explicitly requires accepting).")
-src.append("import field25519;")
+src.append("import crypto.field25519;")
 src.append("")
 
 want = []

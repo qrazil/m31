@@ -8,8 +8,8 @@
 // Prints `status <code>`, `body <octets>` and the body's first line as
 // `text <line>` (clipped to 60 octets); or `error <Name>` (the `http.Error` variant) and exits 1.
 
-import http;
-import https;
+import net.http;
+import net.https;
 import os;
 import tls;
 

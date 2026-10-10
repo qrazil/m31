@@ -11,7 +11,7 @@
 import io;
 import net;
 import os;
-import tlsserver;
+import tls.tlsserver;
 
 // A line on standard output, handed to the kernel at once so a test (or a
 // supervisor) polling the log sees it without waiting for a full buffer.

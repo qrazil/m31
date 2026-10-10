@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Every check for TLS milestone M1: `lib/bignum.m31` (fixed-width bignum and
-# Montgomery arithmetic) and `lib/ecdsa.m31` (ECDSA verify over P-256 and
+# Every check for TLS milestone M1: `lib/crypto/bignum.m31` (fixed-width bignum and
+# Montgomery arithmetic) and `lib/crypto/ecdsa.m31` (ECDSA verify over P-256 and
 # P-384). Same shape as `apps/ssh/test.sh`: an m31 program prints a line per
 # case, a Python oracle prints the expected line, and the two are diffed.
 # Nothing here compares this project's code with itself.
@@ -58,7 +58,7 @@ compare() {
 # --- house style ---------------------------------------------------------------
 
 if out=$(
-    for f in apps/tls/t_bignum.m31 apps/tls/t_ecdsa_verify.m31 lib/bignum.m31 lib/ecdsa.m31; do
+    for f in apps/tls/t_bignum.m31 apps/tls/t_ecdsa_verify.m31 lib/crypto/bignum.m31 lib/crypto/ecdsa.m31; do
         "$LANGC" fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then

@@ -16,7 +16,7 @@ import io;
 import net;
 import os;
 import tls;
-import tlsresume;
+import tls.tlsresume;
 
 int number(str text) {
     match (text.parse_int()) {

@@ -1,0 +1,4 @@
+corpus/modules/stdlib-group-collision/main.m31:1:1: `sha256` is a standard library module, so corpus/modules/stdlib-group-collision/crypto/sha256.m31 collides with it: module names are globally unique and there is no way to override one
+  |
+1 | import crypto.sha256;
+  | ^

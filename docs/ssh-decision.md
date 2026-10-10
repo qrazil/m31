@@ -1,9 +1,9 @@
 # SSH: the decision
 
 Status: **Phases 1, 2, 3 and 4 implemented and validated.**
-Phase 1 (crypto primitives) is `lib/sha256.m31`, `lib/chacha20poly1305.m31`,
-`lib/x25519.m31`, `lib/ed25519.m31` (plus `lib/field25519.m31`/
-`lib/sha512.m31`/`lib/scalar25519.m31` underneath), validated against RFC
+Phase 1 (crypto primitives) is `lib/crypto/sha256.m31`, `lib/crypto/chacha20poly1305.m31`,
+`lib/crypto/x25519.m31`, `lib/crypto/ed25519.m31` (plus `lib/crypto/field25519.m31`/
+`lib/crypto/sha512.m31`/`lib/crypto/scalar25519.m31` underneath), validated against RFC
 test vectors and real oracles in `crypto25519_test/test.sh` and
 `apps/ssh/test.sh`. Phase 2 (the transport protocol) is `lib/ssh.m31`,
 validated two ways: `apps/ssh/test.sh`'s pure wire-format checks (no
@@ -11,12 +11,12 @@ validated two ways: `apps/ssh/test.sh`'s pure wire-format checks (no
 disposable local `sshd` — including a capstone round trip
 (`SSH_MSG_SERVICE_REQUEST`/`SSH_MSG_SERVICE_ACCEPT`) proving the derived
 keys actually decrypt real traffic, not just that no error was raised.
-Phases 3 and 4 are `lib/sshkey.m31` (unencrypted `openssh-key-v1` Ed25519
-keys; encrypted ones are refused with a clear error), `lib/sshhosts.m31`
+Phases 3 and 4 are `lib/ssh/sshkey.m31` (unencrypted `openssh-key-v1` Ed25519
+keys; encrypted ones are refused with a clear error), `lib/ssh/sshhosts.m31`
 (`known_hosts`, plain, `[host]:port` and hashed; no trust on first use),
-`lib/sshauth.m31` (RFC 4252 `publickey`), `lib/sshexec.m31` (RFC 4254
+`lib/ssh/sshauth.m31` (RFC 4252 `publickey`), `lib/ssh/sshexec.m31` (RFC 4254
 session channel: `exec`, flow control, stdin, separate stdout/stderr,
-exit status) and `lib/sshclient.m31` (all of it in one `connect` call).
+exit status) and `lib/ssh/sshclient.m31` (all of it in one `connect` call).
 `ssh.connect_any` takes a list of acceptable host keys, and `ssh.Link`
 (`send`/`recv`/`session_id`) is what the new layers run over, so they are
 tested against scripted in-memory peers (`apps/ssh/t_ssh_auth.m31`,
@@ -70,7 +70,7 @@ oversight:**
 - Host-key management UX (the prompt itself) — the library takes the
   expected host keys as a parameter and refuses to proceed if the server's
   is not among them; where that expectation comes from, and whether a
-  person is asked, is the caller's job. `lib/sshhosts.m31` reads and appends
+  person is asked, is the caller's job. `lib/ssh/sshhosts.m31` reads and appends
   `known_hosts`, and `ssh.presented_host_key` gives the caller what to ask
   about (below)
 - Algorithm negotiation beyond the one modern suite below — no fallback to
@@ -160,7 +160,7 @@ exists (all of Phase 1), it is the primary oracle; where one doesn't
 ## Open
 
 - ~~Where the expected host key comes from in `apps/git`'s eventual usage~~
-  — decided: a `known_hosts` file (`lib/sshhosts.m31`), with the caller
+  — decided: a `known_hosts` file (`lib/ssh/sshhosts.m31`), with the caller
   prompting for unknown hosts (below)
 - Whether Phase 1's primitives get exposed as their own general-purpose
   `lib/crypto`-style module (useful beyond SSH) or stay private to the SSH

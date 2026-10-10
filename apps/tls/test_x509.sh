@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Every check for `lib/der.m31` and `lib/x509.m31` (TLS milestone M3): no
+# Every check for `lib/encoding/der.m31` and `lib/pki/x509.m31` (TLS milestone M3): no
 # network, no clock, nothing wired into another app.
 #
 #   bash apps/tls/test_x509.sh
@@ -52,7 +52,7 @@ build() {
 # --- house style ---------------------------------------------------------------
 
 if out=$(
-    for f in lib/der.m31 lib/x509.m31 apps/tls/der_*.m31 apps/tls/x509_*.m31; do
+    for f in lib/encoding/der.m31 lib/pki/x509.m31 apps/tls/der_*.m31 apps/tls/x509_*.m31; do
         "$LANGC" fmt --check "$f" >/dev/null 2>&1 || echo "$f"
     done
 ) && [ -z "$out" ]; then

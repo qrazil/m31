@@ -1,4 +1,4 @@
-import ed25519;
+import crypto.ed25519;
 
 // A "public key" whose y-coordinate is exactly p (non-canonical: >= p).
 // RFC 8032 5.1.3 step 1 requires refusing this.

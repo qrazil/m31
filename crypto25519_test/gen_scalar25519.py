@@ -8,7 +8,7 @@ def bytes_lit(b):
     return "[" + ", ".join(str(x) for x in b) + "]"
 
 random.seed(99887766)
-src = ["import scalar25519;", ""]
+src = ["import crypto.scalar25519;", ""]
 want = []
 
 # reduce64 over random 64-byte inputs, and edge cases

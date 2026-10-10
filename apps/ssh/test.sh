@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Every check for `docs/ssh-decision.md` Phase 1 (the crypto primitives in
-# `lib/sha256.m31` and `lib/chacha20poly1305.m31`) and Phase 2's pure,
+# `lib/crypto/sha256.m31` and `lib/crypto/chacha20poly1305.m31`) and Phase 2's pure,
 # no-`sshd` half (`lib/ssh.m31`'s wire-format functions) -- no networking,
 # nothing wired into `apps/git`. Modelled directly on `apps/git/test.sh`,
 # with the same rule: nothing here compares this program with itself.
@@ -54,8 +54,8 @@ build() {
 # over its own directory, here over this one plus the two library files.
 
 if out=$(
-    for f in apps/ssh/*.m31 lib/sha256.m31 lib/chacha20poly1305.m31 lib/ssh.m31 \
-             lib/sshkey.m31 lib/sshhosts.m31 lib/sshauth.m31 lib/sshexec.m31 lib/sshclient.m31; do
+    for f in apps/ssh/*.m31 lib/crypto/sha256.m31 lib/crypto/chacha20poly1305.m31 lib/ssh.m31 \
+             lib/ssh/sshkey.m31 lib/ssh/sshhosts.m31 lib/ssh/sshauth.m31 lib/ssh/sshexec.m31 lib/ssh/sshclient.m31; do
         "$LANGC" fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then
@@ -146,7 +146,7 @@ if build t_ssh_wire; then
     sed 's/^/     /' "$WORK/wire.err"
 fi
 
-# --- lib/sshkey.m31 Phase 3: the openssh-key-v1 parser -------------------------
+# --- lib/ssh/sshkey.m31 Phase 3: the openssh-key-v1 parser -------------------------
 #
 # The checks inside t_ssh_key are pure fixtures (one per Error variant, a
 # prefix sweep). Its real-key half is checked against `cryptography`/OpenSSL:
@@ -179,7 +179,7 @@ if build t_ssh_key; then
     fi
 fi
 
-# --- lib/sshhosts.m31 Phase 3: known_hosts ---------------------------------------
+# --- lib/ssh/sshhosts.m31 Phase 3: known_hosts ---------------------------------------
 #
 # Pure fixtures inside t_ssh_hosts (including three lines from a real
 # `ssh-keygen -H`). Here: a plain known_hosts and its `ssh-keygen -H` copy
@@ -230,7 +230,7 @@ if build t_ssh_hosts; then
     fi
 fi
 
-# --- lib/sshauth.m31 and lib/sshexec.m31: scripted-peer self-checks ---------------
+# --- lib/ssh/sshauth.m31 and lib/ssh/sshexec.m31: scripted-peer self-checks ---------------
 #
 # No network: byte-level layouts, one fixture per Error variant, prefix sweeps
 # of every parser, and reactive in-memory peers that enforce the channel

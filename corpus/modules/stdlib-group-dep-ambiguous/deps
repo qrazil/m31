@@ -1,0 +1,6 @@
+name stdlib-group-dep-ambiguous
+version 0.1.0
+
+# A dependency named like a group of the standard library: `crypto.sha256`
+# could be either, so the import is refused rather than quietly resolved.
+crypto path libs/crypto

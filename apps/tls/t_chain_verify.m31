@@ -1,4 +1,4 @@
-// `lib/x509chain.m31` under test, driven from `test_chain.sh`.
+// `lib/pki/x509chain.m31` under test, driven from `test_chain.sh`.
 //
 //   t_chain_verify <anchors.pem> <chain.pem> <host> <now, epoch seconds>
 //
@@ -9,8 +9,8 @@
 
 import io;
 import os;
-import x509;
-import x509chain;
+import pki.x509;
+import pki.x509chain;
 
 str name_of(x509chain.Error error) {
     match (error) {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Vectors and expected verdicts for `lib/rsa.m31`'s verify, from the
+"""Vectors and expected verdicts for `lib/crypto/rsa.m31`'s verify, from the
 `cryptography` package (OpenSSL underneath), Python integers and the system CA
 bundle -- not from this project's code.
 

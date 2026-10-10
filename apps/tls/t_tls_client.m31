@@ -5,13 +5,13 @@
 // Modes, each printing what it saw and exiting 0 on success, or printing
 // `error: <reason>` and exiting 1 when the connection failed:
 //   handshake          connect, then close
-//   get <path>         GET over `lib/http.m31`'s own request and response code
+//   get <path>         GET over `lib/net/http.m31`'s own request and response code
 //   echo <text>        send `text` and a newline, print the line that comes back
 //   read_all [text]    send `text` (if any), then read to the server's close
 //   read_line          print the first line the server sends
 //   twice <text>       echo `text`, then once more, then print what `last_error` says
 
-import http;
+import net.http;
 import io;
 import os;
 import tls;

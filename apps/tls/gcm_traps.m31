@@ -1,4 +1,4 @@
-// The caller-bug traps of `lib/aesgcm.m31` and `lib/aes.m31`: each mode
+// The caller-bug traps of `lib/crypto/aesgcm.m31` and `lib/crypto/aes.m31`: each mode
 // below must stop the program with a nonzero exit, and `test_aesgcm.sh`
 // checks that it does, and that the diagnostic names the module. Mode `ok`
 // is the control: the same call with right-sized arguments must succeed, so
@@ -6,8 +6,8 @@
 //
 //   ./build.sh apps/tls/gcm_traps.m31 -o gcm_traps && ./gcm_traps <mode>
 
-import aes;
-import aesgcm;
+import crypto.aes;
+import crypto.aesgcm;
 import os;
 
 List<str> arguments = os.args();

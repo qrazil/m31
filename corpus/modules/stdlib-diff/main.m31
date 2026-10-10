@@ -1,7 +1,7 @@
-import diff;
+import text.diff;
 import random;
 
-// `diff`: the generic line-level edit script `lib/diff.m31` computes. Hunk
+// `diff`: the generic line-level edit script `lib/text/diff.m31` computes. Hunk
 // grouping and rendering are `apps/git/hunks.m31`'s job (it depends on
 // `apps/tui`, which this standalone library must not) and are exercised by
 // `apps/git/test.sh`'s own oracle tests against real `diff -u`, not here.

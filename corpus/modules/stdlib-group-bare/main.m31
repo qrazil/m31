@@ -1,0 +1,3 @@
+import sha256;
+
+print(sha256.hex("abc".to_bytes()));

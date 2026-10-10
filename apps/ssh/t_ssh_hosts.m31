@@ -1,4 +1,4 @@
-// `lib/sshhosts.m31`, self-checked: the known_hosts rules (plain names,
+// `lib/ssh/sshhosts.m31`, self-checked: the known_hosts rules (plain names,
 // `[host]:port`, wildcards, negation, markers, comments, odd whitespace),
 // one fixture per `sshhosts.Error` variant, and hashed entries -- both three
 // lines written by a real `ssh-keygen -H` (pinned below) and, when `test.sh`
@@ -10,9 +10,9 @@
 // A `trap` means a check failed.
 import io;
 import os;
-import base64;
+import encoding.base64;
 import ssh;
-import sshhosts;
+import ssh.sshhosts;
 
 int check(int n, bool ok, str label) {
     if (!ok) {

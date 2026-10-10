@@ -6,7 +6,7 @@
 //
 //   ./build.sh apps/tls/t_sha384.m31 -o t_sha384 && ./t_sha384
 
-import sha512;
+import crypto.sha512;
 
 // --- the FIPS 180-4 / RFC 6234 published test strings ------------------------
 

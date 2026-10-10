@@ -6,7 +6,7 @@
 //
 //   ./build.sh apps/ssh/t_sha256.m31 -o t_sha256 && ./t_sha256
 
-import sha256;
+import crypto.sha256;
 
 // --- the FIPS 180-4 / RFC 6234 published test strings ------------------------
 

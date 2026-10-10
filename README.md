@@ -28,7 +28,7 @@ it cannot rot.
 
 Beyond the core language: a standard library (`lib/`, 27 modules) covering
 collections, JSON, CSV, HTML, a full HTTP/1.1 client and server
-(`lib/http.m31`), filesystem and OS access, and a constant-time crypto stack
+(`lib/net/http.m31`), filesystem and OS access, and a constant-time crypto stack
 (X25519, Ed25519, SHA-256/512, ChaCha20-Poly1305). On top of that, an `ssh`
 client in `apps/`, and four applications that now live in their own repos:
 [gitui](https://github.com/qrazil/gitui) (interactive git client),

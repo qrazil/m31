@@ -627,7 +627,7 @@ program sees an `Err` that says what is wrong and what to do, not a crash,
 and the corpus asks the question in a form whose answer is the same on both
 backends.
 
-## 10. `lib/http.m31` needs no primitive at all
+## 10. `lib/net/http.m31` needs no primitive at all
 
 Added 2026-09-23. It is the first module with **no `prim` line in it**, and
 that is the point rather than a happy accident: HTTP/1.1 is a wire format,
@@ -665,7 +665,7 @@ here, over the same `net.Conn`, and a `tls.Conn` is an `io.Stream`, so
 line — which is the other thing the interface buys. `https.fetch` opens the
 socket with `http.open`, sets its deadlines, and wraps it in TLS for an
 `https://` URL; nothing about the wire format knows which it has. TLS is its own
-module, `lib/https.m31`, and `http` does not import it: a program that speaks
+module, `lib/net/https.m31`, and `http` does not import it: a program that speaks
 only `http://` does not compile bignums, curves and X.509. `http.fetch` on an
 `https://` URL is `Error.SchemeNeedsTls`; both clients are `http.fetch_via`
 with a different `Transport`, so the redirect rules exist once.

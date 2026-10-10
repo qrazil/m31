@@ -1,4 +1,4 @@
-import regex;
+import text.regex;
 
 // One pattern per `regex.CompileError` variant, and `to_str`'s message for
 // each. Matching never fails once a `Regex` exists (docs/regex-decision.md

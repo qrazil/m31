@@ -11,7 +11,7 @@
 // option name is not ASCII; this is the function that fixes it, and changing
 // `args` is not this module's business.
 
-import unicode;
+import text.unicode;
 
 str measure(str s) {
     return unicode.width(s).to_str() + " (" + s.size().to_str() + " bytes, " + unicode.grapheme_count(s).to_str() + " clusters)";

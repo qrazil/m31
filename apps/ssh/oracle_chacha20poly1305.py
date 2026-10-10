@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The other half of `t_chacha20poly1305.m31`: the same lines, computed
-independently through `cryptography`/OpenSSL instead of `lib/chacha20poly1305.m31`.
+independently through `cryptography`/OpenSSL instead of `lib/crypto/chacha20poly1305.m31`.
 
 `test.sh` diffs the two outputs. Nothing here reads the language's answer,
 which is the whole point -- an oracle that has seen the result is a

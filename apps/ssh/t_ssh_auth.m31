@@ -1,15 +1,15 @@
-// `lib/sshauth.m31`, self-checked against a scripted peer: the "server" is an
+// `lib/ssh/sshauth.m31`, self-checked against a scripted peer: the "server" is an
 // in-memory `ssh.Link` that replays canned messages and records what the
 // client sent, so every message parser, every branch of the exchange and
 // every `sshauth.Error` variant is exercised with nothing on the network.
 // (`test_auth_exec.sh` is the other half: the same exchange against a real
 // `sshd`.) A `trap` means a check failed.
 import io;
-import base64;
-import ed25519;
+import encoding.base64;
+import crypto.ed25519;
 import ssh;
-import sshkey;
-import sshauth;
+import ssh.sshkey;
+import ssh.sshauth;
 
 int check(int n, bool ok, str label) {
     if (!ok) {

@@ -161,10 +161,15 @@ fn find_root(entry_dir: &Path) -> Option<PathBuf> {
 struct Site {
     path: String,
     root: PathBuf,
-    /// Written with a directory in front of the name. A dotted import never
-    /// reaches the embedded standard library: `ui.math` is a file or it is
+    /// Written with a directory in front of the name, and not the path of an
+    /// embedded module. A dotted import reaches the embedded standard library
+    /// only by its exact path (`crypto.sha256`): `ui.math` is a file or it is
     /// an error, never `math`.
     dotted: bool,
+    /// The import's whole path is that of a module the compiler carries
+    /// (`io`, `crypto.sha256`), so the source is inside the binary unless a
+    /// file on disk collides with it.
+    embedded: bool,
     /// The import as written, `a.b.name`, and what was looked for, for the
     /// "cannot find module" diagnostic.
     shown: String,
@@ -250,6 +255,7 @@ pub fn load(entry: &str) -> Result<Loaded, Located> {
         path: entry.to_string(),
         root: l.root.clone(),
         dotted: false,
+        embedded: false,
         shown: name.clone(),
         looked_for: String::new(),
     };
@@ -426,7 +432,7 @@ impl Loader {
                     ),
                 });
             }
-            if !site.dotted {
+            if site.embedded {
                 return self.parse(name, &display_path(name), text, from, true, site.root);
             }
         }
@@ -506,12 +512,67 @@ impl Loader {
     ) -> Result<Site, Located> {
         let name = segs.last().expect("a path has a segment");
         let shown = segs.join(".");
+        // The standard library is addressed by the path of its file under
+        // `lib/`, like a project's own modules are under the project root
+        // (docs/stdlib-layout-decision.md): `io` is `lib/io.m31`, and
+        // `crypto.sha256` is `lib/crypto/sha256.m31`. The file on disk, if
+        // any, is still looked for at the same place, so that `visit` can
+        // refuse it as a collision rather than shadow it.
+        let from_stdlib = self.paths.get(importer).is_some_and(|p| p.starts_with('<'));
+        if crate::stdlib::by_path(&shown).is_some() {
+            if !from_stdlib && segs.len() > 1 && root == self.root {
+                let first = &segs[0];
+                if crate::deps::declares(&self.root, first)? {
+                    return Err(Located {
+                        path: self.paths[importer].clone(),
+                        diag: Diag::new(
+                            span,
+                            format!(
+                                "`{first}` is both a standard library group and a \
+                                 dependency named in `deps`, so `{shown}` could be \
+                                 either: rename the dependency"
+                            ),
+                        ),
+                    });
+                }
+            }
+            return Ok(Site {
+                path: root
+                    .join(format!("{}.{}", segs.join("/"), self.ext))
+                    .to_string_lossy()
+                    .into_owned(),
+                root: root.to_path_buf(),
+                dotted: false,
+                embedded: true,
+                shown,
+                looked_for: String::new(),
+            });
+        }
         if segs.len() == 1 {
             let p = root.join(format!("{name}.{}", self.ext));
+            // `sha256` is in a group, so the bare name reaches nothing. Say
+            // where it went instead of "cannot find module", unless a file
+            // of that name is here -- then `visit` reports the collision.
+            if !p.exists() {
+                if let Some(real) = crate::stdlib::path_of(name) {
+                    return Err(Located {
+                        path: self.paths[importer].clone(),
+                        diag: Diag::new(
+                            span,
+                            format!(
+                                "`{name}` is a standard library module in the group \
+                                 `{}`: write `import {real};`",
+                                real.rsplit_once('.').map_or("", |(g, _)| g)
+                            ),
+                        ),
+                    });
+                }
+            }
             return Ok(Site {
                 path: p.to_string_lossy().into_owned(),
                 root: root.to_path_buf(),
                 dotted: false,
+                embedded: false,
                 shown,
                 looked_for: String::new(),
             });
@@ -540,6 +601,7 @@ impl Loader {
                 path: found.file.to_string_lossy().into_owned(),
                 root: found.root,
                 dotted: true,
+                embedded: false,
                 shown,
                 looked_for: format!("`{rel}` in dependency `{first}`"),
             });
@@ -550,12 +612,20 @@ impl Loader {
         } else {
             "the dependency's root"
         };
+        // A name that is a group of the standard library, but not a module
+        // in it: the likeliest mistake is a misspelt member, so say so.
+        let hint = if crate::stdlib::is_group(first) {
+            format!(", and the standard library group `{first}` has no module `{name}`")
+        } else {
+            String::new()
+        };
         Ok(Site {
             path: root.join(&rel).to_string_lossy().into_owned(),
             root: root.to_path_buf(),
             dotted: true,
+            embedded: false,
             shown,
-            looked_for: format!("`{rel}` under {under}"),
+            looked_for: format!("`{rel}` under {under}{hint}"),
         })
     }
 
@@ -762,5 +832,33 @@ mod tests {
         );
         let err = load(&t).err().expect("a sibling is not found by name");
         assert!(err.diag.msg.contains("cannot find module `y`"));
+    }
+
+    #[test]
+    fn a_grouped_stdlib_module_is_imported_by_its_path_and_used_by_its_name() {
+        let d = scratch();
+        let t = write(
+            &d,
+            "main.m31",
+            "import crypto.sha256;\nprint(sha256.hex(\"\".to_bytes()));\n",
+        );
+        let loaded = load(&t).unwrap_or_else(|e| panic!("{}", e.diag.msg));
+        assert!(loaded.paths.contains_key("sha256"));
+    }
+
+    #[test]
+    fn a_grouped_stdlib_module_is_not_importable_by_its_bare_name() {
+        let d = scratch();
+        let t = write(&d, "main.m31", "import sha256;\n");
+        let err = load(&t).err().expect("sha256 lives in crypto");
+        assert!(err.diag.msg.contains("import crypto.sha256;"));
+    }
+
+    #[test]
+    fn a_group_without_the_module_says_so() {
+        let d = scratch();
+        let t = write(&d, "main.m31", "import crypto.nosuch;\n");
+        let err = load(&t).err().expect("no such module");
+        assert!(err.diag.msg.contains("has no module `nosuch`"));
     }
 }

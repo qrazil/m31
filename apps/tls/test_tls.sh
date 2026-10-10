@@ -9,7 +9,7 @@
 #
 #   openssl s_server    the real thing: `-tls1_3 -ciphersuites` each of the
 #                       three suites (and one it does not offer) with a throwaway P-256
-#                       certificate. An HTTP GET through `lib/http.m31`
+#                       certificate. An HTTP GET through `lib/net/http.m31`
 #                       (`-www`), an echo (`-rev`), the wrong pin, a TLS 1.2
 #                       only server.
 #   oracle_tls_server   a TLS 1.3 server written from RFC 8446 on Python's

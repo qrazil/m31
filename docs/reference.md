@@ -31,7 +31,7 @@ reader's tab width, so it picks the only width it can echo back.
 The **caret** printed under the echoed source line is a separate question,
 because that line is echoed *raw* and a terminal draws it in cells rather
 than code points. So the caret is padded by **display width**, by the same
-rule `unicode.width` uses (`lib/unicode.m31`): per grapheme cluster, East
+rule `unicode.width` uses (`lib/text/unicode.m31`): per grapheme cluster, East
 Asian Wide or Fullwidth is two cells, a combining mark is none, a cluster
 carrying U+FE0F or a pair of regional indicators is two, everything else is
 one. A tab is echoed as a single space and so contributes one cell as well as
@@ -42,7 +42,7 @@ token in both.
 The two rules are *not* in tension: the number counts code points, the
 padding counts cells, and the compiler does not have to choose. The compiler
 does not carry its own copy of the Unicode data either — `src/width.rs`
-parses the tables out of the embedded text of `lib/unicode.m31`, so a
+parses the tables out of the embedded text of `lib/text/unicode.m31`, so a
 regeneration for a new Unicode version moves both at once.
 
 ### 1.2 Comments

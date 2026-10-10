@@ -1,0 +1,389 @@
+// TLS 1.3's key schedule (RFC 8446 §7) for the three cipher suites this
+// library speaks -- `TLS_CHACHA20_POLY1305_SHA256`, `TLS_AES_128_GCM_SHA256`
+// and `TLS_AES_256_GCM_SHA384` (§B.4). The schedule is the same for all of
+// them; what differs is the hash (SHA-256 for the first two, SHA-384 for the
+// third, which makes every secret, transcript hash and Finished MAC 48 octets
+// instead of 32) and the key length (32, 16, 32). A `Suite` names the choice
+// and is the first argument of every function that depends on it. Every
+// function is pure and works on `bytes`; nothing touches a socket.
+// `lib/tls/tls13record.m31` is what puts the keys it derives to use.
+//
+// The schedule, with RFC 8446 §7.1's own names:
+//
+//                 0
+//                 |
+//   PSK ->  HKDF-Extract = early_secret(psk)
+//                 |
+//           Derive-Secret(., "derived", "")
+//                 |
+//   (EC)DHE -> HKDF-Extract = handshake_secret(early_secret, shared_secret)
+//                 |
+//                 +-> client_handshake_traffic_secret(., hello_hash)
+//                 +-> server_handshake_traffic_secret(., hello_hash)
+//                 |
+//           Derive-Secret(., "derived", "")
+//                 |
+//        0 -> HKDF-Extract = master_secret(handshake_secret)
+//                 |
+//                 +-> client_application_traffic_secret(., finished_hash)
+//                 +-> server_application_traffic_secret(., finished_hash)
+//                 +-> exporter_master_secret(., finished_hash)
+//                 +-> resumption_master_secret(., client_finished_hash)
+//
+// and from any traffic secret: `traffic_key`, `traffic_iv`, `finished_key`
+// and `next_traffic_secret` (KeyUpdate, RFC 8446 §7.2).
+//
+// Transcript hashes are not computed here from a running hash: this
+// language's `sha256.Hasher` cannot be cloned and `digest()` ends it, while
+// the schedule needs the hash after ClientHello..ServerHello, again after
+// ..server Finished, again after ..client Finished -- each a prefix of the
+// next. `Transcript` therefore keeps the message bytes and hashes the whole
+// of them on demand, which for a handshake of a few kilobytes costs nothing.
+// It does not know the suite -- the ClientHello is added before the server
+// has chosen one -- so `digest` is told.
+//
+// `hello_hash`, `finished_hash` and so on below are always the HashLen-octet
+// result of `Transcript.digest(suite)` at the point the RFC names, passed in
+// by the caller; "the empty transcript" is `empty_hash(suite)`.
+
+import crypto.sha256;
+import crypto.sha512;
+import crypto.hmac;
+import crypto.hkdf;
+
+/// The record-protection IV length of every suite here (RFC 8446 §5.3's
+/// `iv_length`, the AEAD's 12-octet nonce).
+pub const int IV_SIZE = 12;
+/// A handshake message's type octet (RFC 8446 §4), for the one the schedule
+/// itself must recognise: HelloRetryRequest rewrites the transcript.
+const int MESSAGE_HASH_TYPE = 254;
+
+/// A TLS 1.3 cipher suite (RFC 8446 §B.4): an AEAD and the hash the key
+/// schedule runs on.
+pub enum Suite {
+    /// `TLS_CHACHA20_POLY1305_SHA256`, 0x1303.
+    ChaCha20Poly1305Sha256;
+    /// `TLS_AES_128_GCM_SHA256`, 0x1301.
+    Aes128GcmSha256;
+    /// `TLS_AES_256_GCM_SHA384`, 0x1302.
+    Aes256GcmSha384;
+}
+
+/// The suite's two-octet code point, as it goes on the wire.
+pub int Suite.code() {
+    match (this) {
+        case ChaCha20Poly1305Sha256: {
+            return 0x1303;
+        }
+        case Aes128GcmSha256: {
+            return 0x1301;
+        }
+        case Aes256GcmSha384: {
+            return 0x1302;
+        }
+    }
+}
+
+/// The suite's IANA name.
+pub str Suite.to_str() {
+    match (this) {
+        case ChaCha20Poly1305Sha256: {
+            return "TLS_CHACHA20_POLY1305_SHA256";
+        }
+        case Aes128GcmSha256: {
+            return "TLS_AES_128_GCM_SHA256";
+        }
+        case Aes256GcmSha384: {
+            return "TLS_AES_256_GCM_SHA384";
+        }
+    }
+}
+
+/// HashLen of the suite's hash: the length of every secret in the schedule,
+/// of a transcript hash, of a Finished key and of a Finished `verify_data`.
+pub int Suite.hash_size() {
+    match (this) {
+        case ChaCha20Poly1305Sha256: {
+            return 32;
+        }
+        case Aes128GcmSha256: {
+            return 32;
+        }
+        case Aes256GcmSha384: {
+            return 48;
+        }
+    }
+}
+
+/// The AEAD's key length.
+pub int Suite.key_size() {
+    match (this) {
+        case ChaCha20Poly1305Sha256: {
+            return 32;
+        }
+        case Aes128GcmSha256: {
+            return 16;
+        }
+        case Aes256GcmSha384: {
+            return 32;
+        }
+    }
+}
+
+bool Suite.uses_sha384() {
+    match (this) {
+        case Aes256GcmSha384: {
+            return true;
+        }
+        case ChaCha20Poly1305Sha256: {
+            return false;
+        }
+        case Aes128GcmSha256: {
+            return false;
+        }
+    }
+}
+
+/// The suite with this code point, or `None` for any other -- including the
+/// TLS 1.3 suites this library does not implement.
+pub Option<Suite> suite_for_code(int code) {
+    if (code == 0x1303) {
+        return Option<Suite>.Some(Suite.ChaCha20Poly1305Sha256);
+    }
+    if (code == 0x1301) {
+        return Option<Suite>.Some(Suite.Aes128GcmSha256);
+    }
+    if (code == 0x1302) {
+        return Option<Suite>.Some(Suite.Aes256GcmSha384);
+    }
+    return Option<Suite>.None;
+}
+
+// --- the suite's hash --------------------------------------------------------
+
+bytes hash_of(Suite suite, bytes data) {
+    if (suite.uses_sha384()) {
+        return sha512.sum384(data);
+    }
+    return sha256.sum(data);
+}
+
+bytes extract(Suite suite, bytes salt, bytes keying_material) {
+    if (suite.uses_sha384()) {
+        return hkdf.sha384_extract(salt, keying_material);
+    }
+    return hkdf.sha256_extract(salt, keying_material);
+}
+
+bytes expand_label(Suite suite, bytes secret, str label, bytes context, int length) {
+    if (suite.uses_sha384()) {
+        return hkdf.sha384_expand_label(secret, label, context, length);
+    }
+    return hkdf.sha256_expand_label(secret, label, context, length);
+}
+
+bytes mac(Suite suite, bytes key, bytes message) {
+    if (suite.uses_sha384()) {
+        return hmac.sha384_mac(key, message);
+    }
+    return hmac.sha256_mac(key, message);
+}
+
+/// The hash of nothing, in the suite's hash: `Transcript-Hash("")`, which
+/// `Derive-Secret` is given for the "derived" steps and for `early_secret`-side
+/// labels used without any handshake yet.
+pub bytes empty_hash(Suite suite) {
+    return hash_of(suite, []);
+}
+
+/// `Transcript-Hash` of arbitrary octets under the suite's hash. For the
+/// handshake, use a `Transcript`; this is for the callers that hash something
+/// else the way the suite does (a PSK binder's partial ClientHello).
+pub bytes hash_octets(Suite suite, bytes data) {
+    return hash_of(suite, data);
+}
+
+// --- the transcript ----------------------------------------------------------
+
+/// The handshake messages so far, concatenated in the order sent and
+/// received, each with its own 4-octet header (RFC 8446 §4.4.1): everything
+/// from the first ClientHello's `msg_type` on, and nothing from the record
+/// layer. Fields are private; messages go in through `add`.
+pub type Transcript {
+    bytes messages;
+}
+
+/// Appends one complete handshake message, header included.
+pub void Transcript.add(bytes message) {
+    messages.extend(message);
+}
+
+/// `Transcript-Hash` of everything added so far, under `suite`'s hash. Does
+/// not change the transcript: ask as often as the schedule needs.
+pub bytes Transcript.digest(Suite suite) {
+    return hash_of(suite, messages);
+}
+
+/// Rewrites the transcript after a HelloRetryRequest, RFC 8446 §4.4.1: the
+/// messages so far -- which must be exactly the first ClientHello -- are
+/// replaced by a synthetic `message_hash` handshake message whose body is
+/// their hash under `suite`. The caller adds the HelloRetryRequest and the
+/// second ClientHello after this, as for any other messages.
+pub void Transcript.restart_after_retry_request(Suite suite) {
+    bytes first_hello_hash = hash_of(suite, messages);
+    bytes synthetic = [];
+    synthetic.push(MESSAGE_HASH_TYPE);
+    synthetic.push(0);
+    synthetic.push(0);
+    synthetic.push(first_hello_hash.size());
+    synthetic.extend(first_hello_hash);
+    messages = synthetic;
+}
+
+/// A transcript with nothing in it.
+pub Transcript transcript() {
+    bytes none = [];
+    return Transcript(none);
+}
+
+// --- the secrets -------------------------------------------------------------
+
+/// `Derive-Secret(secret, label, Messages)` of RFC 8446 §7.1, given the
+/// transcript hash itself. The named functions below are this with the
+/// label filled in; it is public for a label this module does not name.
+pub bytes derive_secret(Suite suite, bytes secret, str label, bytes transcript_hash) {
+    return expand_label(suite, secret, label, transcript_hash, suite.hash_size());
+}
+
+/// The Early Secret: `HKDF-Extract(0, psk)`. `psk` is the pre-shared key, or
+/// empty for a handshake without one, which RFC 8446 §7.1 spells as HashLen
+/// zero octets.
+pub bytes early_secret(Suite suite, bytes psk) {
+    bytes keying_material = psk;
+    if (psk.size() == 0) {
+        keying_material = [0; suite.hash_size()];
+    }
+    return extract(suite, [0; suite.hash_size()], keying_material);
+}
+
+/// The Handshake Secret:
+/// `HKDF-Extract(Derive-Secret(early_secret, "derived", ""), shared_secret)`,
+/// with `shared_secret` the (EC)DHE output.
+pub bytes handshake_secret(Suite suite, bytes early_secret_value, bytes shared_secret) {
+    bytes salt = derive_secret(suite, early_secret_value, "derived", empty_hash(suite));
+    return extract(suite, salt, shared_secret);
+}
+
+/// The Master Secret:
+/// `HKDF-Extract(Derive-Secret(handshake_secret, "derived", ""), 0)`.
+pub bytes master_secret(Suite suite, bytes handshake_secret_value) {
+    bytes salt = derive_secret(suite, handshake_secret_value, "derived", empty_hash(suite));
+    return extract(suite, salt, [0; suite.hash_size()]);
+}
+
+/// `client_handshake_traffic_secret`: `hello_hash` is the transcript hash
+/// through ServerHello.
+pub bytes client_handshake_traffic_secret(Suite suite, bytes handshake_secret_value, bytes hello_hash) {
+    return derive_secret(suite, handshake_secret_value, "c hs traffic", hello_hash);
+}
+
+/// `server_handshake_traffic_secret`: `hello_hash` is the transcript hash
+/// through ServerHello.
+pub bytes server_handshake_traffic_secret(Suite suite, bytes handshake_secret_value, bytes hello_hash) {
+    return derive_secret(suite, handshake_secret_value, "s hs traffic", hello_hash);
+}
+
+/// `client_application_traffic_secret_0`: `finished_hash` is the transcript
+/// hash through the server's Finished.
+pub bytes client_application_traffic_secret(Suite suite, bytes master_secret_value, bytes finished_hash) {
+    return derive_secret(suite, master_secret_value, "c ap traffic", finished_hash);
+}
+
+/// `server_application_traffic_secret_0`: `finished_hash` is the transcript
+/// hash through the server's Finished.
+pub bytes server_application_traffic_secret(Suite suite, bytes master_secret_value, bytes finished_hash) {
+    return derive_secret(suite, master_secret_value, "s ap traffic", finished_hash);
+}
+
+/// `exporter_master_secret`: `finished_hash` is the transcript hash through
+/// the server's Finished.
+pub bytes exporter_master_secret(Suite suite, bytes master_secret_value, bytes finished_hash) {
+    return derive_secret(suite, master_secret_value, "exp master", finished_hash);
+}
+
+/// `resumption_master_secret`: `client_finished_hash` is the transcript hash
+/// through the client's Finished.
+pub bytes resumption_master_secret(Suite suite, bytes master_secret_value, bytes client_finished_hash) {
+    return derive_secret(suite, master_secret_value, "res master", client_finished_hash);
+}
+
+/// The PSK a resumption ticket stands for (RFC 8446 §4.6.1):
+/// `HKDF-Expand-Label(resumption_master_secret, "resumption", ticket_nonce,
+/// Hash.length)`.
+pub bytes resumption_psk(Suite suite, bytes resumption_master_secret_value, bytes ticket_nonce) {
+    return expand_label(suite, resumption_master_secret_value, "resumption", ticket_nonce, suite.hash_size());
+}
+
+/// `client_early_traffic_secret`: `hello_hash` is the transcript hash
+/// through the ClientHello.
+pub bytes client_early_traffic_secret(Suite suite, bytes early_secret_value, bytes hello_hash) {
+    return derive_secret(suite, early_secret_value, "c e traffic", hello_hash);
+}
+
+/// The key a PSK binder is computed under (RFC 8446 §4.2.11.2):
+/// `Derive-Secret(early_secret, "ext binder" | "res binder", "")`.
+pub bytes binder_key(Suite suite, bytes early_secret_value, bool resumption) {
+    if (resumption) {
+        return derive_secret(suite, early_secret_value, "res binder", empty_hash(suite));
+    }
+    return derive_secret(suite, early_secret_value, "ext binder", empty_hash(suite));
+}
+
+// --- from a traffic secret ---------------------------------------------------
+
+/// The record-protection key for `traffic_secret`, RFC 8446 §7.3:
+/// `HKDF-Expand-Label(secret, "key", "", key_length)`. The key length is part
+/// of the HKDF label, so the 16-octet AES-128 key is not a prefix of a
+/// 32-octet one.
+pub bytes traffic_key(Suite suite, bytes traffic_secret) {
+    return expand_label(suite, traffic_secret, "key", [], suite.key_size());
+}
+
+/// The record-protection IV for `traffic_secret`, RFC 8446 §7.3:
+/// `HKDF-Expand-Label(secret, "iv", "", iv_length)`.
+pub bytes traffic_iv(Suite suite, bytes traffic_secret) {
+    return expand_label(suite, traffic_secret, "iv", [], IV_SIZE);
+}
+
+/// The key a Finished message's MAC is computed under, RFC 8446 §4.4.4:
+/// `HKDF-Expand-Label(base_key, "finished", "", HashLen)`, where `base_key`
+/// is the sender's handshake traffic secret.
+pub bytes finished_key(Suite suite, bytes base_key) {
+    return expand_label(suite, base_key, "finished", [], suite.hash_size());
+}
+
+/// A Finished message's `verify_data`: `HMAC(finished_key, transcript_hash)`,
+/// the transcript hash being through the message before Finished. The same
+/// computation is a PSK binder's (RFC 8446 §4.2.11.2), with the binder key.
+pub bytes finished_verify_data(Suite suite, bytes finished_key_value, bytes transcript_hash) {
+    return mac(suite, finished_key_value, transcript_hash);
+}
+
+/// The next generation of a traffic secret after a KeyUpdate, RFC 8446 §7.2:
+/// `HKDF-Expand-Label(secret, "traffic upd", "", HashLen)`. Feed the result
+/// to `traffic_key` and `traffic_iv` for the new keys.
+pub bytes next_traffic_secret(Suite suite, bytes traffic_secret) {
+    return expand_label(suite, traffic_secret, "traffic upd", [], suite.hash_size());
+}
+
+/// The key and IV of one direction, derived together from its traffic
+/// secret.
+pub type TrafficKeys {
+    pub bytes key;
+    pub bytes iv;
+}
+
+/// `traffic_key` and `traffic_iv` of `traffic_secret` as one value.
+pub TrafficKeys traffic_keys(Suite suite, bytes traffic_secret) {
+    return TrafficKeys(traffic_key(suite, traffic_secret), traffic_iv(suite, traffic_secret));
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Every check for TLS 1.3 client certificates in the client (`lib/clientcert.m31`
+# Every check for TLS 1.3 client certificates in the client (`lib/pki/clientcert.m31`
 # and the client-authentication code of `lib/tls.m31`), against peers that are not
 # this repository. Modelled on `apps/tls/test_resume.sh`.
 #
@@ -75,7 +75,7 @@ matches() { perl -0777 -e 'local $/; my $text = <STDIN>; exit($text =~ /$ARGV[0]
 # --- house style ---------------------------------------------------------------
 
 if out=$(
-    for f in lib/tls.m31 lib/clientcert.m31 lib/http.m31 apps/tls/t_clientcert_client.m31 apps/tls/t_chain_client.m31; do
+    for f in lib/tls.m31 lib/pki/clientcert.m31 lib/net/http.m31 apps/tls/t_clientcert_client.m31 apps/tls/t_chain_client.m31; do
         "$LANGC" fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then

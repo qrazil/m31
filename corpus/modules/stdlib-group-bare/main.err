@@ -1,0 +1,4 @@
+corpus/modules/stdlib-group-bare/main.m31:1:1: `sha256` is a standard library module in the group `crypto`: write `import crypto.sha256;`
+  |
+1 | import sha256;
+  | ^

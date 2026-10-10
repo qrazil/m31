@@ -14,7 +14,7 @@
 // case that needs no input cannot disagree with the runner about where its
 // input comes from.
 
-import unicode;
+import text.unicode;
 
 /// A string's code points in decimal.
 str show(str s) {

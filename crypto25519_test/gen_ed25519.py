@@ -6,7 +6,7 @@ import nacl.signing as nsig
 def bytes_lit(b):
     return "[" + ", ".join(str(x) for x in b) + "]"
 
-src = ["import ed25519;", ""]
+src = ["import crypto.ed25519;", ""]
 want = []
 
 # --- RFC 8032 7.1 test vectors, re-verified against pynacl earlier in this

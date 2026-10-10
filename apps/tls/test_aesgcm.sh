@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Every check for AES and AES-GCM (`lib/aes.m31`, `lib/aesgcm.m31`): the block
+# Every check for AES and AES-GCM (`lib/crypto/aes.m31`, `lib/crypto/aesgcm.m31`): the block
 # cipher against FIPS 197 and OpenSSL, GCM against the McGrew & Viega
 # specification's published cases and OpenSSL, the negative tests (every
 # corruption of a sealed message is refused) and the caller-bug traps. No
@@ -62,7 +62,7 @@ check() {
 # --- house style ---------------------------------------------------------------
 
 if out=$(
-    for f in apps/tls/aes_*.m31 apps/tls/gcm_*.m31 lib/aes.m31 lib/aesgcm.m31; do
+    for f in apps/tls/aes_*.m31 apps/tls/gcm_*.m31 lib/crypto/aes.m31 lib/crypto/aesgcm.m31; do
         "$LANGC" fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then

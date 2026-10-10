@@ -1,4 +1,4 @@
-import http;
+import net.http;
 import io;
 import net;
 import os;

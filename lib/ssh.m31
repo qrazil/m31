@@ -17,8 +17,8 @@
 //   t.session_id()    -> bytes                  for Phase 3's auth signature
 //   t.close()         -> Result<bool, Error>
 //
-// `Link` (below) is the three-method interface Phase 3 (`lib/sshauth.m31`)
-// and Phase 4 (`lib/sshexec.m31`) are written against -- `Transport`
+// `Link` (below) is the three-method interface Phase 3 (`lib/ssh/sshauth.m31`)
+// and Phase 4 (`lib/ssh/sshexec.m31`) are written against -- `Transport`
 // satisfies it structurally, and so does the scripted in-memory fake their
 // pure tests drive, which is what lets every message parser and state
 // machine in those modules be tested with no `sshd` in sight.
@@ -41,7 +41,7 @@
 // separate 256-bit keys per direction (`K_1`, used only to encrypt the
 // 4-byte packet length; `K_2`, used for the Poly1305 one-time key and the
 // payload itself), and a nonce that is simply the packet sequence number --
-// nothing is exchanged for it. `lib/chacha20poly1305.m31`'s `seal`/`open`
+// nothing is exchanged for it. `lib/crypto/chacha20poly1305.m31`'s `seal`/`open`
 // implement RFC 8439's *different* construction (a cleartext length, an
 // AAD, a single key) and are not used here directly -- only
 // `chacha20poly1305.openssh_block` (the matching word layout),
@@ -74,13 +74,13 @@
 //   - Compression (always negotiates "none").
 //   - Authentication (`ssh-userauth`, RFC 4252) and the connection protocol
 //     (RFC 4254, channels/`exec`) -- Phase 3 and Phase 4, each its own file
-//     on top of `Transport` (`lib/sshauth.m31`, `lib/sshexec.m31`).
+//     on top of `Transport` (`lib/ssh/sshauth.m31`, `lib/ssh/sshexec.m31`).
 //   - A graceful `SSH_MSG_DISCONNECT` on `close()` -- nothing downstream
 //     depends on one yet; a two-line follow-up once something does.
 //   - Host-key *management*: `connect`/`connect_any` take the expected
 //     key(s) as plain arguments and refuse outright on a mismatch, never
 //     trusting on first use; where that expectation comes from is the
-//     caller's problem (`lib/sshhosts.m31` reads and appends to OpenSSH
+//     caller's problem (`lib/ssh/sshhosts.m31` reads and appends to OpenSSH
 //     `known_hosts` files). What the library does give a caller who wants to
 //     ask a person ("the authenticity of host ... can't be established,
 //     fingerprint SHA256:..., continue?") is `presented_host_key`: the key a
@@ -93,11 +93,11 @@
 
 import io;
 import net;
-import sha256;
-import chacha20poly1305;
-import consttime;
-import x25519;
-import ed25519;
+import crypto.sha256;
+import crypto.chacha20poly1305;
+import crypto.consttime;
+import crypto.x25519;
+import crypto.ed25519;
 import random;
 import base64;
 
@@ -839,7 +839,7 @@ Result<void, Error> send_ciphered_payload(net.Conn conn, bytes payload, bytes k1
 // --- Part 7: SSH_MSG_NEWKEYS and the Transport type --------------------------
 
 /// What the layers above the transport need from one, and nothing more:
-/// `lib/sshauth.m31` and `lib/sshexec.m31` take a `Link`, never a
+/// `lib/ssh/sshauth.m31` and `lib/ssh/sshexec.m31` take a `Link`, never a
 /// `Transport`, so a test can hand them a scripted in-memory peer.
 pub interface Link {
     Result<int, Error> send(bytes payload);

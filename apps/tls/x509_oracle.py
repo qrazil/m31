@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent oracle for lib/x509.m31 and lib/der.m31.
+"""Independent oracle for lib/pki/x509.m31 and lib/encoding/der.m31.
 
   x509_oracle.py dump <file.pem>           the exact `key value` lines
                                            x509_dump.m31 prints, but computed

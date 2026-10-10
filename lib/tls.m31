@@ -38,7 +38,7 @@
 // key is the one pinned.
 //
 // `SystemRoots` and `CaFile(path)` validate the whole chain
-// (`lib/x509chain.m31` has the rules): a path from the server's certificate
+// (`lib/pki/x509chain.m31` has the rules): a path from the server's certificate
 // through whatever intermediates it sent to a root in the bundle, every
 // signature verified, every validity period holding at connection time, the
 // CA and path-length constraints, serverAuth, and the leaf's subjectAltName
@@ -78,7 +78,7 @@
 // its leaf: in TLS 1.3 the `status_request` extension of the leaf's
 // CertificateEntry, in TLS 1.2 the CertificateStatus message (type 22) that
 // follows the Certificate when the ServerHello promised one with an empty
-// `status_request`. `lib/ocsp.m31` does the checking: signature (the issuer's,
+// `status_request`. `lib/pki/ocsp.m31` does the checking: signature (the issuer's,
 // or a delegated id-kp-OCSPSigning responder's certificate carried in the
 // response), CertID, thisUpdate/nextUpdate against the client's clock (five
 // minutes of skew; a response with no nextUpdate is stale), status, and no
@@ -142,7 +142,7 @@
 //                        CHACHA20_POLY1305 (0xCCA9, 0xCCA8), AES_128_GCM
 //                        (0xC02B, 0xC02F) and AES_256_GCM (0xC02C, 0xC030).
 //                        The server picks. ChaCha20 leads because the AES-GCM
-//                        in lib/aes.m31 is constant-time at the source level
+//                        in lib/crypto/aes.m31 is constant-time at the source level
 //                        and so about twelve times slower (see its header).
 //                        No CBC, no RC4, no static RSA key exchange, no
 //                        compression, no renegotiation
@@ -196,7 +196,7 @@
 // `secp384r1` is not advertised, so an OpenSSL server whose only certificate
 // is a P-384 key refuses us; a P-384 leaf is accepted (and tested) when the
 // server has some other group to agree on. The ECDH for secp256r1 uses
-// `lib/ecdsa.m31`'s non-constant-time arithmetic, which is acceptable only
+// `lib/crypto/ecdsa.m31`'s non-constant-time arithmetic, which is acceptable only
 // because the scalar is ephemeral and used once (see that header).
 //
 // --- the connection after the handshake ----------------------------------------
@@ -213,7 +213,7 @@
 //   tls.connect_over_identified(socket, host, trust, identity, cache), `_at` forms
 //   clientcert.load(chain_pem, key_pem) / clientcert.load_files(chain_path, key_path)
 //
-// An `Identity` (`lib/clientcert.m31`) is a chain, leaf first, and the key of
+// An `Identity` (`lib/pki/clientcert.m31`) is a chain, leaf first, and the key of
 // the leaf: Ed25519 or ECDSA P-256. When the server sends a CertificateRequest
 // after its EncryptedExtensions (RFC 8446 §4.3.2), the client answers with
 // Certificate (the chain, empty request context), CertificateVerify (signed
@@ -242,7 +242,7 @@
 //   `ClientCertificateRequested`. Whether the server accepts the certificate is
 //   the server's business; a rejection arrives as its alert (`peer_alert`).
 //
-// What is and is not constant time is in the header of `lib/clientcert.m31`
+// What is and is not constant time is in the header of `lib/pki/clientcert.m31`
 // (the signers are written constant-time-style at source level, unaudited at
 // machine level; the key is not wiped from memory).
 //
@@ -306,29 +306,29 @@
 // **A `Conn` sends `close_notify` and closes the socket when its last
 // reference goes**, as a `net.Conn` closes itself.
 
-import consttime;
-import deadlinestream;
+import crypto.consttime;
+import net.deadlinestream;
 import io;
 import net;
 import random;
-import sha256;
-import sha512;
-import x25519;
-import x509;
-import x509chain;
-import ecdsa;
-import ed25519;
-import rsa;
-import hexcodec;
+import crypto.sha256;
+import crypto.sha512;
+import crypto.x25519;
+import pki.x509;
+import pki.x509chain;
+import crypto.ecdsa;
+import crypto.ed25519;
+import crypto.rsa;
+import encoding.hexcodec;
 import date;
 import os;
-import tls13schedule;
-import tls13record;
-import tls12;
-import tlsresume;
-import clientcert;
-import signingkey;
-import ocsp;
+import tls.tls13schedule;
+import tls.tls13record;
+import tls.tls12;
+import tls.tlsresume;
+import pki.clientcert;
+import pki.signingkey;
+import pki.ocsp;
 
 const int HANDSHAKE_CLIENT_HELLO = 1;
 const int HANDSHAKE_SERVER_HELLO = 2;

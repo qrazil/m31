@@ -1017,7 +1017,11 @@ mod tests {
     #[test]
     fn stdlib_names_are_lowercase_one_word() {
         let o = Opts::default();
-        for ok in ["lib/io.m31", "lib/sha256.m31", "./lib/chacha20poly1305.m31"] {
+        for ok in [
+            "lib/io.m31",
+            "lib/crypto/sha256.m31",
+            "./lib/crypto/chacha20poly1305.m31",
+        ] {
             assert_eq!(module_name(ok, DECLS, &o), None, "{ok}");
         }
         assert_eq!(

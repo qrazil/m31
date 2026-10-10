@@ -6,9 +6,9 @@
 // either way; a file that cannot be read traps.
 
 import io;
-import ocsp;
+import pki.ocsp;
 import os;
-import x509;
+import pki.x509;
 
 str name_of(ocsp.Error failure) {
     match (failure) {

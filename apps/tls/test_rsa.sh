@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Every check for TLS milestone M2: `lib/rsa.m31` (RSASSA-PKCS1-v1_5 and
+# Every check for TLS milestone M2: `lib/crypto/rsa.m31` (RSASSA-PKCS1-v1_5 and
 # RSASSA-PSS signature verification). Same shape as `test_ecdsa.sh`: an m31
 # program prints a line per case, a Python oracle prints the expected line, and
 # the two are diffed. Nothing here compares this project's code with itself.
@@ -42,7 +42,7 @@ build() {
 # --- house style ---------------------------------------------------------------
 
 if out=$(
-    for f in apps/tls/t_rsa_verify.m31 lib/rsa.m31; do
+    for f in apps/tls/t_rsa_verify.m31 lib/crypto/rsa.m31; do
         "$LANGC" fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then

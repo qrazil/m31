@@ -1,4 +1,4 @@
-// `lib/consttime.m31` against Python's `hmac.compare_digest`. Every line this
+// `lib/crypto/consttime.m31` against Python's `hmac.compare_digest`. Every line this
 // prints on stdout is printed again by `oracle_consttime.py`, and `test.sh`
 // diffs the two. Timing itself is not measured here -- a source-level loop
 // with no early exit is argued in the module header, and no test of a
@@ -7,7 +7,7 @@
 //
 //   ./build.sh apps/tls/t_consttime.m31 -o t_consttime && ./t_consttime
 
-import consttime;
+import crypto.consttime;
 
 // `count` octets of a deterministic pattern: `(i * multiplier + offset) & 0xFF`.
 bytes pattern(int count, int multiplier, int offset) {

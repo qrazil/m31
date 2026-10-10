@@ -6,8 +6,8 @@
 //
 //   ./build.sh apps/tls/tls12_ecdh.m31 -o tls12_ecdh && ./tls12_ecdh
 
-import ecdsa;
-import hexcodec;
+import crypto.ecdsa;
+import encoding.hexcodec;
 
 bytes hex_octets(str text) {
     return hexcodec.literal(text);

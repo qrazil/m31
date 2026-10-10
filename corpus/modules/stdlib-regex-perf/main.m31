@@ -1,4 +1,4 @@
-import regex;
+import text.regex;
 
 // The classic pathological pattern for a backtracking engine: `n` optional
 // `a`s followed by `n` mandatory ones. Against a subject one character

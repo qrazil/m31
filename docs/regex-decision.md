@@ -1,6 +1,6 @@
 # Regex: the decision
 
-Status: **scoping, then implemented in this change.** This is `lib/regex.m31`
+Status: **scoping, then implemented in this change.** This is `lib/text/regex.m31`
 -- a from-scratch regular expression engine, in the language, with no
 runtime support beyond what `text.m31` and `unicode.m31` already lean on
 (`s.chars()`, `str.from_chars`, `List`, `Map`-free). It exists because the

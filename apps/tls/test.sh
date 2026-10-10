@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Every check for the TLS 1.3 building blocks that are not the protocol
 # itself: the hashes and keyed constructions the key schedule is made of
-# (`lib/hmac.m31`, `lib/hkdf.m31`, `lib/consttime.m31`, `lib/hexcodec.m31`, and SHA-384 in `lib/sha512.m31`). No
-# networking, nothing wired into `lib/http.m31`. Modelled directly on
+# (`lib/crypto/hmac.m31`, `lib/crypto/hkdf.m31`, `lib/crypto/consttime.m31`, `lib/encoding/hexcodec.m31`, and SHA-384 in `lib/crypto/sha512.m31`). No
+# networking, nothing wired into `lib/net/http.m31`. Modelled directly on
 # `apps/ssh/test.sh`, with the same rule: nothing here compares this program
 # with itself.
 #
@@ -69,7 +69,7 @@ check() {
 # check `apps/ssh/test.sh` runs, over this directory and the library files.
 
 if out=$(
-    for f in apps/tls/*.m31 lib/hmac.m31 lib/hkdf.m31 lib/sha512.m31 lib/consttime.m31 lib/hexcodec.m31; do
+    for f in apps/tls/*.m31 lib/crypto/hmac.m31 lib/crypto/hkdf.m31 lib/crypto/sha512.m31 lib/crypto/consttime.m31 lib/encoding/hexcodec.m31; do
         "$LANGC" fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then

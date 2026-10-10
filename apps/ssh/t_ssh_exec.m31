@@ -1,4 +1,4 @@
-// `lib/sshexec.m31`, self-checked against in-memory peers (no network):
+// `lib/ssh/sshexec.m31`, self-checked against in-memory peers (no network):
 //
 //  * a *canned* peer replays fixed messages -- the layout of each message,
 //    every parser on every proper prefix, one fixture per `sshexec.Error`
@@ -13,7 +13,7 @@
 // `test_auth_exec.sh` runs the same operations against a real `sshd`. A
 // `trap` means a check failed.
 import ssh;
-import sshexec;
+import ssh.sshexec;
 
 int check(int n, bool ok, str label) {
     if (!ok) {

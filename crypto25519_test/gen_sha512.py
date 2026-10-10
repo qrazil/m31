@@ -4,7 +4,7 @@ import hashlib, random
 
 src = []
 want = []
-src.append("import sha512;")
+src.append("import crypto.sha512;")
 src.append("")
 
 # every length 0..300, deterministic pattern (matches t_sha1.m31's approach)

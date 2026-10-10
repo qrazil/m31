@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cases and expected output for `lib/ed25519.m31`'s signer (`t_tlsserver_ed25519.m31`).
+"""Cases and expected output for `lib/crypto/ed25519.m31`'s signer (`t_tlsserver_ed25519.m31`).
 
     python3 tlsserver_ed25519_oracle.py CASES_OUT EXPECTED_OUT [COUNT]
 

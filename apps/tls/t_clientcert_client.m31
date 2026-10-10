@@ -12,12 +12,12 @@
 // Each identity loaded prints `identity <Identity.to_str()>` first. A bad chain
 // or key file prints `identity error=<reason>` and exits.
 
-import clientcert;
+import pki.clientcert;
 import io;
 import net;
 import os;
 import tls;
-import tlsresume;
+import tls.tlsresume;
 
 tls.Trust trust_of(str text) {
     if (text.starts_with("ca:")) {

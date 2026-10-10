@@ -1,4 +1,4 @@
-// `lib/chacha20poly1305.m31`'s `openssh_block` against `cryptography`/OpenSSL,
+// `lib/crypto/chacha20poly1305.m31`'s `openssh_block` against `cryptography`/OpenSSL,
 // the way `t_chacha20poly1305.m31` checks `block`: every line this prints is
 // printed again, independently, by `oracle_chacha20_openssh.py`, and
 // `test.sh` diffs the two. See that oracle's own header for how it gets an
@@ -6,7 +6,7 @@
 // of its own.
 //
 //   ./build.sh apps/ssh/t_chacha20_openssh.m31 -o t_chacha20_openssh && ./t_chacha20_openssh
-import chacha20poly1305;
+import crypto.chacha20poly1305;
 
 bytes zero32 = [0; 32];
 bytes zero8 = [0; 8];

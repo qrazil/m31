@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cases and expected answers for `lib/bignum.m31`, from Python's own
+"""Cases and expected answers for `lib/crypto/bignum.m31`, from Python's own
 arbitrary-precision integers -- not from this project's code.
 
     python3 bignum_oracle.py CASES_OUT EXPECTED_OUT

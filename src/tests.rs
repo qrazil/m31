@@ -2004,7 +2004,7 @@ fn a_lambda_is_not_a_source_of_inference() {
 #[test]
 fn the_width_tables_are_the_ones_lib_unicode_carries() {
     // src/width.rs has no tables of its own: it parses WIDTH_RANGES and
-    // GCB_RANGES out of the embedded text of lib/unicode.m31, so the compiler
+    // GCB_RANGES out of the embedded text of lib/text/unicode.m31, so the compiler
     // and the standard library cannot drift apart on what a column is. The
     // counts are the ones the generator recorded in that file's comments; a
     // regeneration for a new Unicode version changes both the numbers here

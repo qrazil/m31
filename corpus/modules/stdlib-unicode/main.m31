@@ -7,7 +7,7 @@
 // method, which is here to show the division: it leaves every non-ASCII
 // character alone (docs/text-decision.md §7).
 
-import unicode;
+import text.unicode;
 
 print(unicode.VERSION);
 print("");

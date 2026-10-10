@@ -20,7 +20,7 @@ import io;
 import net;
 import os;
 import tls;
-import tlsresume;
+import tls.tlsresume;
 
 tls.Trust trust_of(str text, str word) {
     if (word == "other") {

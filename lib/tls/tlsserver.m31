@@ -1,0 +1,1454 @@
+// A TLS 1.3 server: what `httpserver` (or any program holding an accepted
+// `net.Conn`) needs to speak https. The mirror image of `tls.m31`'s client,
+// built on the same record layer (`tls13record`) and key schedule
+// (`tls13schedule`), with the same one suite and one group.
+//
+// API
+// ---
+//   Result<Config, ConfigError> config = tlsserver.load_config_files("chain.pem", "key.pem");
+//   Result<Config, ConfigError> config = tlsserver.load_config(chain_pem_text, key_pem_text);
+//   Result<Config, ConfigError> config = tlsserver.load_config_der([leaf_der, intermediate_der], key_der);
+//   //   load_config_files takes PEM or DER for each of its two files, told apart by
+//   //   content: a chain file of DER is certificates laid end to end; a key file of
+//   //   DER is PKCS#8 (Ed25519 or P-256) or SEC1 EC (P-256), as signingkey.parse_der.
+//   config.serves("example.org")        -> bool: does the leaf cover that name?
+//   config.set_protocols(["h2", "http/1.1"]);       // ALPN, in server preference order
+//
+//   net.Listener listener = net.listen("0.0.0.0", 8443)...;
+//   net.Conn raw = listener.accept()...;
+//   Result<tlsserver.Conn, tlsserver.Error> secure = tlsserver.accept(raw, config);
+//   Result<tlsserver.Conn, tlsserver.Error> secure = tlsserver.accept_among(raw, [one, two]);
+//   // The handshake's per-read timeout and its total deadline are passed by name:
+//   Result<tlsserver.Conn, tlsserver.Error> secure = tlsserver.accept(raw, config, timeout_ms: 5000, deadline_ms: 20000);
+//   secure.server_name()  -> str: the SNI the client asked for, lowercased, or ""
+//   secure.alpn()         -> str: the protocol selected, or "" when ALPN was not used
+//
+//   A `tlsserver.Conn` implements `io.Stream`: read, read_all, read_until,
+//   write, close, with the semantics `tls.Conn` documents for the client.
+//
+// What it speaks, exactly
+// -----------------------
+//   - TLS 1.3 only (RFC 8446). A client that offers only 1.2 or older gets a
+//     `protocol_version` alert.
+//   - TLS_CHACHA20_POLY1305_SHA256 and x25519. A client without the suite gets
+//     `handshake_failure`. A client that lists x25519 but sent no share for it
+//     gets a HelloRetryRequest; one that does not list x25519 gets
+//     `handshake_failure`.
+//   - Certificate authentication by the first Config whose leaf covers the
+//     SNI (`accept_among`), or the first Config when the client sent no SNI.
+//     A name no Config covers is a fatal `unrecognized_name`. Signatures:
+//     Ed25519 (0x0807) or ECDSA P-256 with SHA-256 (0x0403). The client must
+//     list the Config's scheme in signature_algorithms. RSA keys are refused
+//     at load time: there is no RSA signing here. A Config whose leaf has an
+//     iPAddress SAN serves that IP literal (`serves("127.0.0.1")`); a leaf
+//     with only DNS names does not (RFC 6125 6.4.3: an IP literal matches
+//     only an iPAddress entry, never a dNSName or the CN).
+//   - ALPN (RFC 7301): with `set_protocols`, the first server protocol that
+//     the client also lists. A client list with no common entry gets
+//     `no_application_protocol`.
+//   - No client certificate request, no session tickets, no resumption, no
+//     0-RTT (a client's PSK offer is ignored and a full handshake runs), no
+//     KeyUpdate initiated by the server (the client's are followed).
+//
+// Timing, and what the private key sees
+// -------------------------------------
+//   The only operation on the private key is the CertificateVerify
+//   signature, once per handshake. See `ecdsasign.m31` (P-256) and
+//   `ed25519.m31` (Ed25519) for exactly what each promises: both are written
+//   without secret-dependent branches or indexes, and neither has been
+//   verified at machine-code level or measured. The x25519 ephemeral secret
+//   uses `x25519.m31`'s ladder. The Finished comparison is constant time in
+//   the length of the value.
+//
+// Denial of service
+// -----------------
+//   `accept` takes two bounds on the handshake: `timeout_ms`, how long any ONE
+//   read may wait (default 10 s), and `deadline_ms`, how long the WHOLE
+//   handshake, reads and writes together, may take (default 30 s; 0 for no
+//   total, which leaves a peer free to hold a connection by dripping a byte
+//   at a time inside the per-read limit). Running out of either is
+//   `Error.Io`. The deadline is `deadlinestream`'s: it reads the wall clock
+//   (the language has no monotonic clock), so a system clock set backwards
+//   during a handshake can stretch it by at most one `deadline_ms`. The
+//   deadline covers the handshake only; a connection that has completed it
+//   has no timeouts of the library's making. Handshake messages are bounded
+//   by `tls13record`'s limits.
+//   A handshake costs one signature (about 40 ms for P-256 on a development
+//   machine; check `apps/tls` for current numbers), so a flood of
+//   handshakes is an expensive flood; rate-limit in front of this if it
+//   matters.
+
+import crypto.consttime;
+import net.deadlinestream;
+import encoding.der;
+import io;
+import net;
+import random;
+import crypto.sha256;
+import crypto.x25519;
+import pki.x509;
+import tls.tls13schedule;
+import tls.tls13record;
+import pki.signingkey;
+
+const int HANDSHAKE_CLIENT_HELLO = 1;
+const int HANDSHAKE_SERVER_HELLO = 2;
+const int HANDSHAKE_ENCRYPTED_EXTENSIONS = 8;
+const int HANDSHAKE_CERTIFICATE_VERIFY = 15;
+const int HANDSHAKE_FINISHED = 20;
+const int SUITE_CHACHA20_POLY1305_SHA256 = 0x1303;
+const int GROUP_X25519 = 0x001D;
+const int VERSION_TLS12 = 0x0303;
+const int VERSION_TLS13 = 0x0304;
+const int EXTENSION_SERVER_NAME = 0;
+const int EXTENSION_SUPPORTED_GROUPS = 10;
+const int EXTENSION_SIGNATURE_ALGORITHMS = 13;
+const int EXTENSION_ALPN = 16;
+const int EXTENSION_SUPPORTED_VERSIONS = 43;
+const int EXTENSION_KEY_SHARE = 51;
+const int ALERT_UNEXPECTED_MESSAGE = 10;
+const int ALERT_HANDSHAKE_FAILURE = 40;
+const int ALERT_ILLEGAL_PARAMETER = 47;
+const int ALERT_DECODE_ERROR = 50;
+const int ALERT_DECRYPT_ERROR = 51;
+const int ALERT_PROTOCOL_VERSION = 70;
+const int ALERT_INTERNAL_ERROR = 80;
+const int ALERT_MISSING_EXTENSION = 109;
+const int ALERT_UNRECOGNIZED_NAME = 112;
+const int ALERT_NO_APPLICATION_PROTOCOL = 120;
+const int ERRNO_BAD_DESCRIPTOR = 9;
+const int ERRNO_IO = 5;
+const int ERRNO_PROTOCOL = 71;
+const int ERRNO_RESET = 104;
+const int RANDOM_SIZE = 32;
+const int X25519_SIZE = 32;
+const int MAX_SESSION_ID = 32;
+const int DEFAULT_HANDSHAKE_TIMEOUT_MS = 10_000;
+/// The default whole-handshake deadline of `accept`, in milliseconds.
+pub const int DEFAULT_HANDSHAKE_DEADLINE_MS = 30_000;
+
+// --- configuration ---------------------------------------------------------------
+
+/// Why a certificate chain and key could not be turned into a `Config`.
+/// Payload-free: nothing here names a byte of either file.
+pub enum ConfigError {
+    /// A file could not be read.
+    Unreadable;
+    /// The chain file holds no PEM certificate, or a block is malformed.
+    BadPem;
+    /// A certificate in the chain could not be parsed.
+    BadCertificate;
+    /// The key file holds no usable private key.
+    BadKey;
+    /// The private key is passphrase-protected.
+    EncryptedKey;
+    /// The key is of a kind this library cannot sign with (RSA, a curve other
+    /// than P-256).
+    UnsupportedKey;
+    /// The private key is not the one the first certificate certifies.
+    KeyMismatch;
+}
+
+pub str ConfigError.to_str() {
+    match (this) {
+        case Unreadable: {
+            return "a certificate or key file could not be read";
+        }
+        case BadPem: {
+            return "the certificate chain holds no valid PEM certificate";
+        }
+        case BadCertificate: {
+            return "a certificate in the chain could not be parsed";
+        }
+        case BadKey: {
+            return "the key file holds no usable private key";
+        }
+        case EncryptedKey: {
+            return "the private key is encrypted; decrypt it first";
+        }
+        case UnsupportedKey: {
+            return "the private key is of a kind this server cannot sign with (supported: Ed25519, ECDSA P-256)";
+        }
+        case KeyMismatch: {
+            return "the private key does not match the first certificate";
+        }
+    }
+}
+
+/// A certificate chain and the key for its first certificate, ready to serve.
+/// Printing one shows only the names it serves.
+pub type Config {
+    pub x509.Certificate leaf;
+    pub List<str> protocols = ["http/1.1"];
+    signingkey.SigningKey key;
+    bytes certificate_message;
+}
+
+pub str Config.to_str() {
+    return "Config(" + leaf.dns_names.join(", ") + ")";
+}
+
+/// Whether the leaf certificate is valid for `host`.
+pub bool Config.serves(str host) {
+    return leaf.matches_hostname(host);
+}
+
+/// The protocols to offer through ALPN, most preferred first. An empty list
+/// switches ALPN off.
+pub void Config.set_protocols(List<str> names) {
+    protocols = names;
+}
+
+void put_u16(bytes out, int value) {
+    out.push((value >> 8) & 0xFF);
+    out.push(value & 0xFF);
+}
+
+void put_u24(bytes out, int value) {
+    out.push((value >> 16) & 0xFF);
+    out.push((value >> 8) & 0xFF);
+    out.push(value & 0xFF);
+}
+
+bytes with_u16_length(bytes content) {
+    bytes out = [];
+    put_u16(out, content.size());
+    out.extend(content);
+    return out;
+}
+
+bytes extension(int kind, bytes data) {
+    bytes out = [];
+    put_u16(out, kind);
+    out.extend(with_u16_length(data));
+    return out;
+}
+
+bytes handshake_message(int kind, bytes body) {
+    bytes out = [kind];
+    put_u24(out, body.size());
+    out.extend(body);
+    return out;
+}
+
+// RFC 8446 §4.4.2: a one-octet empty request context, then each certificate
+// as a 24-bit-length DER string followed by an empty extensions block.
+bytes certificate_message_of(List<bytes> chain) {
+    bytes entries = [];
+    for (bytes der_certificate in chain) {
+        put_u24(entries, der_certificate.size());
+        entries.extend(der_certificate);
+        put_u16(entries, 0);
+    }
+    bytes body = [0];
+    put_u24(body, entries.size());
+    body.extend(entries);
+    return handshake_message(11, body);
+}
+
+bool key_matches(signingkey.SigningKey key, x509.Certificate leaf) {
+    match (key.kind()) {
+        case Ed25519: {
+            return leaf.public_key.algorithm == x509.OBJECT_ID_ED25519 && leaf.public_key.key_bytes == key.public_key;
+        }
+        case EcdsaP256: {
+            return leaf.public_key.algorithm == x509.OID_EC_PUBLIC_KEY && leaf.public_key.curve == x509.OID_CURVE_P256 && leaf.public_key.key_bytes == key.public_key;
+        }
+    }
+}
+
+/// A `Config` from PEM text: certificates (leaf first, then intermediates;
+/// the root is optional and normally left out) and one private key.
+pub Result<Config, ConfigError> load_config(str chain_pem, str key_pem) {
+    List<bytes> blobs = [];
+    match (x509.pem_certificates(chain_pem)) {
+        case Ok(List<bytes> found): {
+            blobs = found;
+        }
+        case Err(x509.Error pem_error): {
+            return Result<Config, ConfigError>.Err(ConfigError.BadPem);
+        }
+    }
+    if (blobs.size() == 0) {
+        return Result<Config, ConfigError>.Err(ConfigError.BadPem);
+    }
+    return config_of(blobs, signingkey.parse_pem(key_pem));
+}
+
+/// A `Config` from DER: each element of `chain` is one certificate (leaf
+/// first), `key` one private key as PKCS#8 (Ed25519 or P-256) or SEC1 EC.
+/// The same refusals as `load_config`: an empty chain is `BadCertificate`.
+pub Result<Config, ConfigError> load_config_der(List<bytes> chain, bytes key) {
+    if (chain.size() == 0) {
+        return Result<Config, ConfigError>.Err(ConfigError.BadCertificate);
+    }
+    return config_of(chain, signingkey.parse_der(key));
+}
+
+// The part `load_config` and `load_config_der` share: the certificates are
+// parsed (a bad one is reported before anything about the key), then the key
+// must be the one the leaf certifies.
+Result<Config, ConfigError> config_of(List<bytes> blobs, Result<signingkey.SigningKey, signingkey.Error> key_result) {
+    List<x509.Certificate> parsed = [];
+    for (bytes blob in blobs) {
+        match (x509.parse(blob)) {
+            case Ok(x509.Certificate certificate): {
+                parsed.push(certificate);
+            }
+            case Err(x509.Error certificate_error): {
+                return Result<Config, ConfigError>.Err(ConfigError.BadCertificate);
+            }
+        }
+    }
+    match (key_result) {
+        case Err(signingkey.Error key_error): {
+            return Result<Config, ConfigError>.Err(config_error_of(key_error));
+        }
+        case Ok(signingkey.SigningKey key): {
+            if (!key_matches(key, parsed[0])) {
+                return Result<Config, ConfigError>.Err(ConfigError.KeyMismatch);
+            }
+            return Result<Config, ConfigError>.Ok(Config(parsed[0], key, certificate_message_of(blobs)));
+        }
+    }
+}
+
+ConfigError config_error_of(signingkey.Error error) {
+    match (error) {
+        case BadKey: {
+            return ConfigError.BadKey;
+        }
+        case Encrypted: {
+            return ConfigError.EncryptedKey;
+        }
+        case Unsupported: {
+            return ConfigError.UnsupportedKey;
+        }
+        case SigningFailed: {
+            return ConfigError.BadKey;
+        }
+    }
+}
+
+// The certificates of a DER chain file: certificates laid end to end.
+Option<List<bytes>> split_der_chain(bytes data) {
+    List<bytes> blobs = [];
+    int position = 0;
+    while (position < data.size()) {
+        match (der.read_at(data, position, data.size())) {
+            case Err(der.Error split_error): {
+                return Option<List<bytes>>.None;
+            }
+            case Ok(der.Element element): {
+                blobs.push(element.raw());
+                position = element.stop;
+            }
+        }
+    }
+    return Option<List<bytes>>.Some(blobs);
+}
+
+// Does this file hold PEM text (valid UTF-8 with a `-----BEGIN ` line)?
+Option<str> pem_text_of(bytes data) {
+    match (data.utf8()) {
+        case None: {
+            return Option<str>.None;
+        }
+        case Some(str text): {
+            if (text.contains("-----BEGIN ")) {
+                return Option<str>.Some(text);
+            }
+            return Option<str>.None;
+        }
+    }
+}
+
+/// `load_config` from two files. Each file is PEM or DER, told apart by
+/// content (text containing `-----BEGIN ` is PEM, anything else is DER): the
+/// chain file as one or more concatenated DER certificates, the key file as
+/// `signingkey.parse_der` reads it. A chain and a key may be in different forms.
+pub Result<Config, ConfigError> load_config_files(str chain_path, str key_path) {
+    bytes chain_data = [];
+    bytes key_data = [];
+    match (io.read_bytes(chain_path)) {
+        case Err(io.Error chain_error): {
+            return Result<Config, ConfigError>.Err(ConfigError.Unreadable);
+        }
+        case Ok(bytes chain_found): {
+            chain_data = chain_found;
+        }
+    }
+    match (io.read_bytes(key_path)) {
+        case Err(io.Error key_error): {
+            return Result<Config, ConfigError>.Err(ConfigError.Unreadable);
+        }
+        case Ok(bytes key_found): {
+            key_data = key_found;
+        }
+    }
+    List<bytes> blobs = [];
+    match (pem_text_of(chain_data)) {
+        case Some(str chain_text): {
+            match (x509.pem_certificates(chain_text)) {
+                case Ok(List<bytes> found): {
+                    blobs = found;
+                }
+                case Err(x509.Error pem_error): {
+                    return Result<Config, ConfigError>.Err(ConfigError.BadPem);
+                }
+            }
+            if (blobs.size() == 0) {
+                return Result<Config, ConfigError>.Err(ConfigError.BadPem);
+            }
+        }
+        case None: {
+            match (split_der_chain(chain_data)) {
+                case Some(List<bytes> split): {
+                    blobs = split;
+                }
+                case None: {
+                    return Result<Config, ConfigError>.Err(ConfigError.BadCertificate);
+                }
+            }
+            if (blobs.size() == 0) {
+                return Result<Config, ConfigError>.Err(ConfigError.BadCertificate);
+            }
+        }
+    }
+    match (pem_text_of(key_data)) {
+        case Some(str key_text): {
+            return config_of(blobs, signingkey.parse_pem(key_text));
+        }
+        case None: {
+            return config_of(blobs, signingkey.parse_der(key_data));
+        }
+    }
+}
+
+// --- errors -----------------------------------------------------------------------
+
+/// Why a connection could not be accepted, or stopped. Payload-free; the
+/// alert a peer sent is `Conn.peer_alert()`.
+pub enum Error {
+    /// The stream failed under the connection: a reset, a timeout.
+    Io;
+    /// The stream ended without a `close_notify`.
+    Truncated;
+    /// The client sent a fatal alert.
+    PeerAlert;
+    /// The client's records broke a rule of the record layer.
+    Record;
+    /// A record's authentication tag did not verify.
+    BadRecordMac;
+    /// The connection is closed, by this side or by an earlier failure.
+    Closed;
+    /// The client offers nothing newer than TLS 1.2.
+    UnsupportedVersion;
+    /// The client offers no cipher suite this server has.
+    NoCommonSuite;
+    /// The client supports no key-exchange group this server has.
+    NoCommonGroup;
+    /// The client does not list the signature scheme of this server's key.
+    NoCommonSignatureScheme;
+    /// The client asked for a name no Config serves.
+    UnknownServerName;
+    /// The client's ALPN list has nothing this server offers.
+    NoCommonProtocol;
+    /// An extension TLS 1.3 requires is absent.
+    MissingExtension;
+    /// A ClientHello field that no valid client sends.
+    IllegalParameter;
+    /// A message that is not well formed.
+    Malformed;
+    /// A message that this point in the handshake does not allow.
+    UnexpectedMessage;
+    /// The client's Finished does not verify.
+    BadFinished;
+    /// This side could not produce its signature.
+    SigningFailed;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case Io: {
+            return "the connection failed";
+        }
+        case Truncated: {
+            return "the connection ended without a close_notify";
+        }
+        case PeerAlert: {
+            return "the client sent a fatal alert";
+        }
+        case Record: {
+            return "the client broke a record-layer rule";
+        }
+        case BadRecordMac: {
+            return "a record failed authentication";
+        }
+        case Closed: {
+            return "the connection is closed";
+        }
+        case UnsupportedVersion: {
+            return "the client does not offer TLS 1.3";
+        }
+        case NoCommonSuite: {
+            return "the client offers no cipher suite this server supports";
+        }
+        case NoCommonGroup: {
+            return "the client supports no key-exchange group this server supports";
+        }
+        case NoCommonSignatureScheme: {
+            return "the client does not accept this server's signature scheme";
+        }
+        case UnknownServerName: {
+            return "no certificate for the requested server name";
+        }
+        case NoCommonProtocol: {
+            return "the client offers no application protocol this server supports";
+        }
+        case MissingExtension: {
+            return "the ClientHello lacks an extension TLS 1.3 requires";
+        }
+        case IllegalParameter: {
+            return "the ClientHello has a field no valid client sends";
+        }
+        case Malformed: {
+            return "a handshake message is malformed";
+        }
+        case UnexpectedMessage: {
+            return "a message arrived that the handshake does not allow here";
+        }
+        case BadFinished: {
+            return "the client's Finished does not verify";
+        }
+        case SigningFailed: {
+            return "this server could not sign";
+        }
+    }
+}
+
+// The alert to send for a handshake that failed, or -1 where the record layer
+// has already sent its own or there is nobody to tell.
+int alert_for(Error error) {
+    match (error) {
+        case Io: {
+            return -1;
+        }
+        case Truncated: {
+            return -1;
+        }
+        case PeerAlert: {
+            return -1;
+        }
+        case Record: {
+            return -1;
+        }
+        case BadRecordMac: {
+            return -1;
+        }
+        case Closed: {
+            return -1;
+        }
+        case UnsupportedVersion: {
+            return ALERT_PROTOCOL_VERSION;
+        }
+        case NoCommonSuite: {
+            return ALERT_HANDSHAKE_FAILURE;
+        }
+        case NoCommonGroup: {
+            return ALERT_HANDSHAKE_FAILURE;
+        }
+        case NoCommonSignatureScheme: {
+            return ALERT_HANDSHAKE_FAILURE;
+        }
+        case UnknownServerName: {
+            return ALERT_UNRECOGNIZED_NAME;
+        }
+        case NoCommonProtocol: {
+            return ALERT_NO_APPLICATION_PROTOCOL;
+        }
+        case MissingExtension: {
+            return ALERT_MISSING_EXTENSION;
+        }
+        case IllegalParameter: {
+            return ALERT_ILLEGAL_PARAMETER;
+        }
+        case Malformed: {
+            return ALERT_DECODE_ERROR;
+        }
+        case UnexpectedMessage: {
+            return ALERT_UNEXPECTED_MESSAGE;
+        }
+        case BadFinished: {
+            return ALERT_DECRYPT_ERROR;
+        }
+        case SigningFailed: {
+            return ALERT_INTERNAL_ERROR;
+        }
+    }
+}
+
+int errno_of(Error error) {
+    match (error) {
+        case Io: {
+            return ERRNO_IO;
+        }
+        case Truncated: {
+            return ERRNO_RESET;
+        }
+        case PeerAlert: {
+            return ERRNO_PROTOCOL;
+        }
+        case Record: {
+            return ERRNO_PROTOCOL;
+        }
+        case BadRecordMac: {
+            return ERRNO_PROTOCOL;
+        }
+        case Closed: {
+            return ERRNO_BAD_DESCRIPTOR;
+        }
+        case UnsupportedVersion: {
+            return ERRNO_PROTOCOL;
+        }
+        case NoCommonSuite: {
+            return ERRNO_PROTOCOL;
+        }
+        case NoCommonGroup: {
+            return ERRNO_PROTOCOL;
+        }
+        case NoCommonSignatureScheme: {
+            return ERRNO_PROTOCOL;
+        }
+        case UnknownServerName: {
+            return ERRNO_PROTOCOL;
+        }
+        case NoCommonProtocol: {
+            return ERRNO_PROTOCOL;
+        }
+        case MissingExtension: {
+            return ERRNO_PROTOCOL;
+        }
+        case IllegalParameter: {
+            return ERRNO_PROTOCOL;
+        }
+        case Malformed: {
+            return ERRNO_PROTOCOL;
+        }
+        case UnexpectedMessage: {
+            return ERRNO_PROTOCOL;
+        }
+        case BadFinished: {
+            return ERRNO_PROTOCOL;
+        }
+        case SigningFailed: {
+            return ERRNO_PROTOCOL;
+        }
+    }
+}
+
+Error error_of_record(tls13record.Error error) {
+    match (error) {
+        case Io: {
+            return Error.Io;
+        }
+        case Truncated: {
+            return Error.Truncated;
+        }
+        case PeerAlert: {
+            return Error.PeerAlert;
+        }
+        case BadRecordMac: {
+            return Error.BadRecordMac;
+        }
+        case UnexpectedMessage: {
+            return Error.UnexpectedMessage;
+        }
+        case DecodeError: {
+            return Error.Malformed;
+        }
+        case Closed: {
+            return Error.Closed;
+        }
+        case BadVersion: {
+            return Error.Record;
+        }
+        case RecordOverflow: {
+            return Error.Record;
+        }
+        case HandshakeTooLarge: {
+            return Error.Record;
+        }
+        case SequenceExhausted: {
+            return Error.Record;
+        }
+    }
+}
+
+// --- reading a ClientHello ---------------------------------------------------------
+
+bool all_zero(bytes data) {
+    int accumulated = 0;
+    for (int index in 0 .. data.size()) {
+        accumulated = accumulated | data[index];
+    }
+    return accumulated == 0;
+}
+
+bool has_value(List<int> values, int wanted) {
+    for (int value in values) {
+        if (value == wanted) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bytes message_body(bytes message) {
+    return message.substr(4, message.size());
+}
+
+type Reader {
+    bytes data;
+    int at = 0;
+}
+
+int Reader.remaining() {
+    return data.size() - at;
+}
+
+Result<int, Error> Reader.u8() {
+    if (remaining() < 1) {
+        return Result<int, Error>.Err(Error.Malformed);
+    }
+    int value = data[at];
+    at = at + 1;
+    return Result<int, Error>.Ok(value);
+}
+
+Result<int, Error> Reader.u16() {
+    if (remaining() < 2) {
+        return Result<int, Error>.Err(Error.Malformed);
+    }
+    int value = data[at] * 256 + data[at + 1];
+    at = at + 2;
+    return Result<int, Error>.Ok(value);
+}
+
+Result<bytes, Error> Reader.take(int count) {
+    if (count < 0 || remaining() < count) {
+        return Result<bytes, Error>.Err(Error.Malformed);
+    }
+    bytes out = data.substr(at, at + count);
+    at = at + count;
+    return Result<bytes, Error>.Ok(out);
+}
+
+Result<bytes, Error> Reader.vector8() {
+    int count = u8()?;
+    return take(count);
+}
+
+Result<bytes, Error> Reader.vector16() {
+    int count = u16()?;
+    return take(count);
+}
+
+// What the server reads out of a ClientHello. A field's `has_` flag says the
+// extension was present at all, which TLS 1.3 sometimes requires.
+type Hello {
+    bytes client_random = [];
+    bytes session_id = [];
+    List<int> suites = [];
+    str server_name = "";
+    bool offers_tls13 = false;
+    bool has_groups = false;
+    bool offers_x25519 = false;
+    bool has_schemes = false;
+    List<int> schemes = [];
+    bool has_key_share = false;
+    bool has_x25519_share = false;
+    bytes x25519_share = [];
+    bool has_alpn = false;
+    List<str> protocols = [];
+}
+
+// RFC 6066 §3: the first host_name entry, lowercased, or "" if there is none.
+Result<str, Error> read_server_name(bytes data) {
+    Reader outer = Reader(data);
+    bytes list = outer.vector16()?;
+    if (outer.remaining() != 0) {
+        return Result<str, Error>.Err(Error.Malformed);
+    }
+    Reader entries = Reader(list);
+    str found = "";
+    while (entries.remaining() > 0) {
+        int kind = entries.u8()?;
+        bytes name = entries.vector16()?;
+        if (kind == 0 && found == "") {
+            if (name.size() == 0) {
+                return Result<str, Error>.Err(Error.IllegalParameter);
+            }
+            for (int octet in name) {
+                if (octet < 0x21 || octet > 0x7E) {
+                    return Result<str, Error>.Err(Error.IllegalParameter);
+                }
+            }
+            match (name.utf8()) {
+                case Some(str text): {
+                    found = text.to_lower();
+                }
+                case None: {
+                    return Result<str, Error>.Err(Error.IllegalParameter);
+                }
+            }
+        }
+    }
+    return Result<str, Error>.Ok(found);
+}
+
+Result<List<int>, Error> read_u16_list(bytes data) {
+    Reader outer = Reader(data);
+    bytes list = outer.vector16()?;
+    if (outer.remaining() != 0 || list.size() % 2 != 0) {
+        return Result<List<int>, Error>.Err(Error.Malformed);
+    }
+    Reader items = Reader(list);
+    List<int> values = [];
+    while (items.remaining() > 0) {
+        values.push(items.u16()?);
+    }
+    return Result<List<int>, Error>.Ok(values);
+}
+
+Result<void, Error> read_key_share(bytes data, Hello hello) {
+    Reader outer = Reader(data);
+    bytes list = outer.vector16()?;
+    if (outer.remaining() != 0) {
+        return Result<void, Error>.Err(Error.Malformed);
+    }
+    Reader entries = Reader(list);
+    List<int> groups = [];
+    while (entries.remaining() > 0) {
+        int group = entries.u16()?;
+        bytes exchange = entries.vector16()?;
+        if (has_value(groups, group)) {
+            return Result<void, Error>.Err(Error.IllegalParameter);
+        }
+        groups.push(group);
+        if (group == GROUP_X25519) {
+            if (exchange.size() != X25519_SIZE) {
+                return Result<void, Error>.Err(Error.IllegalParameter);
+            }
+            hello.has_x25519_share = true;
+            hello.x25519_share = exchange;
+        }
+    }
+    hello.has_key_share = true;
+    return Result<void, Error>.Ok;
+}
+
+Result<void, Error> read_alpn(bytes data, Hello hello) {
+    Reader outer = Reader(data);
+    bytes list = outer.vector16()?;
+    if (outer.remaining() != 0 || list.size() == 0) {
+        return Result<void, Error>.Err(Error.Malformed);
+    }
+    Reader names = Reader(list);
+    while (names.remaining() > 0) {
+        bytes name = names.vector8()?;
+        if (name.size() == 0) {
+            return Result<void, Error>.Err(Error.Malformed);
+        }
+        match (name.utf8()) {
+            case Some(str text): {
+                hello.protocols.push(text);
+            }
+            case None: {
+                hello.protocols.push("");
+            }
+        }
+    }
+    hello.has_alpn = true;
+    return Result<void, Error>.Ok;
+}
+
+Result<void, Error> read_extension(int kind, bytes data, Hello hello) {
+    if (kind == EXTENSION_SERVER_NAME) {
+        hello.server_name = read_server_name(data)?;
+    } else if (kind == EXTENSION_SUPPORTED_GROUPS) {
+        List<int> groups = read_u16_list(data)?;
+        hello.has_groups = true;
+        hello.offers_x25519 = has_value(groups, GROUP_X25519);
+    } else if (kind == EXTENSION_SIGNATURE_ALGORITHMS) {
+        hello.schemes = read_u16_list(data)?;
+        hello.has_schemes = true;
+    } else if (kind == EXTENSION_SUPPORTED_VERSIONS) {
+        Reader outer = Reader(data);
+        bytes list = outer.vector8()?;
+        if (outer.remaining() != 0 || list.size() % 2 != 0 || list.size() == 0) {
+            return Result<void, Error>.Err(Error.Malformed);
+        }
+        Reader versions = Reader(list);
+        while (versions.remaining() > 0) {
+            if (versions.u16()? == VERSION_TLS13) {
+                hello.offers_tls13 = true;
+            }
+        }
+    } else if (kind == EXTENSION_KEY_SHARE) {
+        read_key_share(data, hello)?;
+    } else if (kind == EXTENSION_ALPN) {
+        read_alpn(data, hello)?;
+    }
+    return Result<void, Error>.Ok;
+}
+
+Result<Hello, Error> parse_client_hello(bytes message) {
+    Reader reader = Reader(message_body(message));
+    Hello hello = Hello();
+    int legacy_version = reader.u16()?;
+    hello.client_random = reader.take(RANDOM_SIZE)?;
+    hello.session_id = reader.vector8()?;
+    if (hello.session_id.size() > MAX_SESSION_ID) {
+        return Result<Hello, Error>.Err(Error.IllegalParameter);
+    }
+    bytes suites = reader.vector16()?;
+    if (suites.size() == 0 || suites.size() % 2 != 0) {
+        return Result<Hello, Error>.Err(Error.Malformed);
+    }
+    Reader suite_reader = Reader(suites);
+    while (suite_reader.remaining() > 0) {
+        hello.suites.push(suite_reader.u16()?);
+    }
+    bytes compressions = reader.vector8()?;
+    bool has_null = false;
+    for (int method in compressions) {
+        if (method == 0) {
+            has_null = true;
+        }
+    }
+    if (!has_null) {
+        return Result<Hello, Error>.Err(Error.IllegalParameter);
+    }
+    if (reader.remaining() == 0) {
+        return Result<Hello, Error>.Ok(hello);
+    }
+    bytes block = reader.vector16()?;
+    if (reader.remaining() != 0) {
+        return Result<Hello, Error>.Err(Error.Malformed);
+    }
+    Reader extensions = Reader(block);
+    List<int> seen = [];
+    while (extensions.remaining() > 0) {
+        int kind = extensions.u16()?;
+        bytes data = extensions.vector16()?;
+        if (has_value(seen, kind)) {
+            return Result<Hello, Error>.Err(Error.IllegalParameter);
+        }
+        seen.push(kind);
+        read_extension(kind, data, hello)?;
+    }
+    return Result<Hello, Error>.Ok(hello);
+}
+
+// --- choosing parameters -------------------------------------------------------------
+
+type Choice {
+    Config config;
+    str protocol;
+}
+
+Result<Choice, Error> negotiate(Hello hello, List<Config> configs) {
+    if (!hello.offers_tls13) {
+        return Result<Choice, Error>.Err(Error.UnsupportedVersion);
+    }
+    if (!has_value(hello.suites, SUITE_CHACHA20_POLY1305_SHA256)) {
+        return Result<Choice, Error>.Err(Error.NoCommonSuite);
+    }
+    Option<Config> chosen = Option<Config>.None;
+    if (hello.server_name == "") {
+        chosen = Option<Config>.Some(configs[0]);
+    } else {
+        for (Config candidate in configs) {
+            if (candidate.serves(hello.server_name)) {
+                chosen = Option<Config>.Some(candidate);
+                break;
+            }
+        }
+    }
+    match (chosen) {
+        case None: {
+            return Result<Choice, Error>.Err(Error.UnknownServerName);
+        }
+        case Some(Config config): {
+            if (!hello.has_schemes) {
+                return Result<Choice, Error>.Err(Error.MissingExtension);
+            }
+            if (!has_value(hello.schemes, config.key.signature_scheme())) {
+                return Result<Choice, Error>.Err(Error.NoCommonSignatureScheme);
+            }
+            if (!hello.has_groups || !hello.has_key_share) {
+                return Result<Choice, Error>.Err(Error.MissingExtension);
+            }
+            if (!hello.offers_x25519) {
+                return Result<Choice, Error>.Err(Error.NoCommonGroup);
+            }
+            str protocol = "";
+            if (hello.has_alpn && config.protocols.size() > 0) {
+                bool found = false;
+                for (str ours in config.protocols) {
+                    for (str theirs in hello.protocols) {
+                        if (!found && ours == theirs) {
+                            protocol = ours;
+                            found = true;
+                        }
+                    }
+                }
+                if (!found) {
+                    return Result<Choice, Error>.Err(Error.NoCommonProtocol);
+                }
+            }
+            return Result<Choice, Error>.Ok(Choice(config, protocol));
+        }
+    }
+}
+
+// --- writing the server's messages ----------------------------------------------------
+
+// RFC 8446 §4.1.3: a ServerHello whose random is the SHA-256 of this text is
+// a HelloRetryRequest.
+bytes retry_request_random() {
+    return sha256.sum("HelloRetryRequest".to_bytes());
+}
+
+bytes server_hello_message(bytes server_random, bytes session_id, bytes extensions) {
+    bytes body = [];
+    put_u16(body, VERSION_TLS12);
+    body.extend(server_random);
+    body.push(session_id.size());
+    body.extend(session_id);
+    put_u16(body, SUITE_CHACHA20_POLY1305_SHA256);
+    body.push(0);
+    body.extend(with_u16_length(extensions));
+    return handshake_message(HANDSHAKE_SERVER_HELLO, body);
+}
+
+bytes selected_version_extension() {
+    bytes version = [];
+    put_u16(version, VERSION_TLS13);
+    return extension(EXTENSION_SUPPORTED_VERSIONS, version);
+}
+
+bytes retry_request_message(bytes session_id) {
+    bytes extensions = selected_version_extension();
+    bytes group = [];
+    put_u16(group, GROUP_X25519);
+    extensions.extend(extension(EXTENSION_KEY_SHARE, group));
+    return server_hello_message(retry_request_random(), session_id, extensions);
+}
+
+bytes server_hello(bytes server_random, bytes session_id, bytes public_key) {
+    bytes extensions = selected_version_extension();
+    bytes share = [];
+    put_u16(share, GROUP_X25519);
+    share.extend(with_u16_length(public_key));
+    extensions.extend(extension(EXTENSION_KEY_SHARE, share));
+    return server_hello_message(server_random, session_id, extensions);
+}
+
+bytes encrypted_extensions(str server_name, str protocol) {
+    bytes extensions = [];
+    if (server_name != "") {
+        bytes empty = [];
+        extensions.extend(extension(EXTENSION_SERVER_NAME, empty));
+    }
+    if (protocol != "") {
+        bytes name = protocol.to_bytes();
+        bytes entry = [name.size()];
+        entry.extend(name);
+        extensions.extend(extension(EXTENSION_ALPN, with_u16_length(entry)));
+    }
+    return handshake_message(HANDSHAKE_ENCRYPTED_EXTENSIONS, with_u16_length(extensions));
+}
+
+// What a CertificateVerify signs (RFC 8446 §4.4.3): 64 spaces, a context
+// string, a zero, and the transcript hash up to the Certificate.
+bytes certificate_verify_content(bytes transcript_hash) {
+    bytes content = [0x20; 64];
+    content.extend("TLS 1.3, server CertificateVerify".to_bytes());
+    content.push(0);
+    content.extend(transcript_hash);
+    return content;
+}
+
+Result<bytes, Error> certificate_verify(signingkey.SigningKey key, bytes transcript_hash) {
+    match (key.sign(certificate_verify_content(transcript_hash))) {
+        case Err(signingkey.Error sign_error): {
+            return Result<bytes, Error>.Err(Error.SigningFailed);
+        }
+        case Ok(bytes signature): {
+            bytes body = [];
+            put_u16(body, key.signature_scheme());
+            body.extend(with_u16_length(signature));
+            return Result<bytes, Error>.Ok(handshake_message(HANDSHAKE_CERTIFICATE_VERIFY, body));
+        }
+    }
+}
+
+// --- the handshake ----------------------------------------------------------------------
+
+Result<void, Error> lift(Result<void, tls13record.Error> outcome) {
+    match (outcome) {
+        case Ok: {
+            return Result<void, Error>.Ok;
+        }
+        case Err(tls13record.Error record_error): {
+            return Result<void, Error>.Err(error_of_record(record_error));
+        }
+    }
+}
+
+Result<bytes, Error> next_handshake(tls13record.Connection record) {
+    match (record.receive_handshake()) {
+        case Ok(bytes message): {
+            return Result<bytes, Error>.Ok(message);
+        }
+        case Err(tls13record.Error record_error): {
+            return Result<bytes, Error>.Err(error_of_record(record_error));
+        }
+    }
+}
+
+Result<bytes, Error> next_client_hello(tls13record.Connection record) {
+    bytes message = next_handshake(record)?;
+    if (message[0] != HANDSHAKE_CLIENT_HELLO) {
+        return Result<bytes, Error>.Err(Error.UnexpectedMessage);
+    }
+    return Result<bytes, Error>.Ok(message);
+}
+
+// What the handshake settled, for `Conn` to report.
+type Session {
+    str server_name;
+    str protocol;
+}
+
+Result<Session, Error> run_handshake(tls13record.Connection record, List<Config> configs) {
+    random.System source = random.system();
+    tls13schedule.Suite suite = tls13schedule.Suite.ChaCha20Poly1305Sha256;
+    tls13schedule.Transcript transcript = tls13schedule.transcript();
+    bytes first_message = next_client_hello(record)?;
+    Hello hello = parse_client_hello(first_message)?;
+    Choice choice = negotiate(hello, configs)?;
+    transcript.add(first_message);
+    bool compatibility_sent = false;
+    if (!hello.has_x25519_share) {
+        transcript.restart_after_retry_request(suite);
+        bytes retry = retry_request_message(hello.session_id);
+        transcript.add(retry);
+        lift(record.send_handshake(retry))?;
+        lift(record.send_change_cipher_spec())?;
+        compatibility_sent = true;
+        bytes second_message = next_client_hello(record)?;
+        Hello again = parse_client_hello(second_message)?;
+        if (!consttime.is_equal(again.client_random, hello.client_random) || !consttime.is_equal(again.session_id, hello.session_id) || again.server_name != hello.server_name) {
+            return Result<Session, Error>.Err(Error.IllegalParameter);
+        }
+        if (!again.has_x25519_share) {
+            return Result<Session, Error>.Err(Error.IllegalParameter);
+        }
+        choice = negotiate(again, configs)?;
+        transcript.add(second_message);
+        hello = again;
+    }
+    Config config = choice.config;
+    bytes secret = source.octets(X25519_SIZE);
+    bytes shared = x25519.x25519(secret, hello.x25519_share);
+    if (all_zero(shared)) {
+        return Result<Session, Error>.Err(Error.IllegalParameter);
+    }
+    bytes hello_message = server_hello(source.octets(RANDOM_SIZE), hello.session_id, x25519.base_point(secret));
+    transcript.add(hello_message);
+    lift(record.send_handshake(hello_message))?;
+    if (!compatibility_sent) {
+        lift(record.send_change_cipher_spec())?;
+    }
+    bytes early = tls13schedule.early_secret(suite, []);
+    bytes handshake = tls13schedule.handshake_secret(suite, early, shared);
+    bytes hello_hash = transcript.digest(suite);
+    bytes client_handshake = tls13schedule.client_handshake_traffic_secret(suite, handshake, hello_hash);
+    bytes server_handshake = tls13schedule.server_handshake_traffic_secret(suite, handshake, hello_hash);
+    record.install_write_keys(server_handshake);
+    lift(record.install_read_keys(client_handshake))?;
+    bytes extensions_message = encrypted_extensions(hello.server_name, choice.protocol);
+    transcript.add(extensions_message);
+    lift(record.send_handshake(extensions_message))?;
+    transcript.add(config.certificate_message);
+    lift(record.send_handshake(config.certificate_message))?;
+    bytes verify_message = certificate_verify(config.key, transcript.digest(suite))?;
+    transcript.add(verify_message);
+    lift(record.send_handshake(verify_message))?;
+    bytes server_key = tls13schedule.finished_key(suite, server_handshake);
+    bytes server_finished = [HANDSHAKE_FINISHED, 0, 0, suite.hash_size()];
+    server_finished.extend(tls13schedule.finished_verify_data(suite, server_key, transcript.digest(suite)));
+    transcript.add(server_finished);
+    lift(record.send_handshake(server_finished))?;
+    bytes finished_hash = transcript.digest(suite);
+    bytes master = tls13schedule.master_secret(suite, handshake);
+    bytes client_application = tls13schedule.client_application_traffic_secret(suite, master, finished_hash);
+    bytes server_application = tls13schedule.server_application_traffic_secret(suite, master, finished_hash);
+    bytes client_finished = next_handshake(record)?;
+    if (client_finished[0] != HANDSHAKE_FINISHED) {
+        return Result<Session, Error>.Err(Error.UnexpectedMessage);
+    }
+    bytes verify_data = message_body(client_finished);
+    if (verify_data.size() != suite.hash_size()) {
+        return Result<Session, Error>.Err(Error.Malformed);
+    }
+    bytes client_key = tls13schedule.finished_key(suite, client_handshake);
+    if (!consttime.is_equal(verify_data, tls13schedule.finished_verify_data(suite, client_key, finished_hash))) {
+        return Result<Session, Error>.Err(Error.BadFinished);
+    }
+    record.install_write_keys(server_application);
+    lift(record.install_read_keys(client_application))?;
+    return Result<Session, Error>.Ok(Session(hello.server_name, choice.protocol));
+}
+
+// A failed handshake: the alert that says why, then the stream closed.
+Error abort_handshake(tls13record.Connection record, Error error) {
+    int description = alert_for(error);
+    if (description >= 0) {
+        Result<void, tls13record.Error> alerted = record.send_alert(description);
+    }
+    Result<bool, tls13record.Error> closed = record.close();
+    return error;
+}
+
+/// Runs the server side of the handshake over `socket` with `config`. A
+/// stream of the client's decrypted octets comes back; every `Err` is a
+/// connection that does not exist and `socket` is closed.
+/// `timeout_ms` bounds each read of the handshake (0: no per-read limit) and
+/// `deadline_ms` the whole handshake, reads and writes together (0: no total).
+/// Running out of either is `Error.Io`.
+pub Result<Conn, Error> accept(net.Conn socket, Config config, int timeout_ms = DEFAULT_HANDSHAKE_TIMEOUT_MS, int deadline_ms = DEFAULT_HANDSHAKE_DEADLINE_MS) {
+    return accept_among(socket, [config], timeout_ms: timeout_ms, deadline_ms: deadline_ms);
+}
+
+/// `accept` with several Configs: the first whose leaf covers the client's
+/// SNI answers, and the first one answers a client that sent none.
+pub Result<Conn, Error> accept_among(net.Conn socket, List<Config> configs, int timeout_ms = DEFAULT_HANDSHAKE_TIMEOUT_MS, int deadline_ms = DEFAULT_HANDSHAKE_DEADLINE_MS) {
+    if (configs.size() == 0) {
+        trap("tlsserver.accept_among: no Config to serve with");
+    }
+    deadlinestream.Bounded bounded = deadlinestream.bound(socket, deadline_ms, timeout_ms);
+    tls13record.Connection record = tls13record.connection(bounded);
+    match (run_handshake(record, configs)) {
+        case Err(Error handshake_error): {
+            return Result<Conn, Error>.Err(abort_handshake(record, handshake_error));
+        }
+        case Ok(Session session): {
+            bounded.release();
+            return Result<Conn, Error>.Ok(Conn(record, session.server_name, session.protocol));
+        }
+    }
+}
+
+// --- the connection ----------------------------------------------------------------------------
+
+/// A TLS 1.3 connection to a client that completed the handshake. Made by
+/// `accept`; it is an `io.Stream`.
+pub type Conn {
+    tls13record.Connection record;
+    str requested_name;
+    str selected_protocol;
+    // pending[offset ..] has been decrypted and not handed out.
+    bytes pending = [];
+    int offset = 0;
+    bool at_end = false;
+    bool closed = false;
+    bool failed = false;
+    Error failure = Error.Closed;
+}
+
+/// The server name the client asked for (lowercase), or "".
+pub str Conn.server_name() {
+    return requested_name;
+}
+
+/// The ALPN protocol selected, or "" when none was negotiated.
+pub str Conn.alpn() {
+    return selected_protocol;
+}
+
+Result<bytes, io.Error> Conn.next_chunk() {
+    if (failed) {
+        return Result<bytes, io.Error>.Err(io.Error.Other(errno_of(failure)));
+    }
+    if (closed) {
+        return Result<bytes, io.Error>.Err(io.Error.Other(ERRNO_BAD_DESCRIPTOR));
+    }
+    if (at_end) {
+        bytes none = [];
+        return Result<bytes, io.Error>.Ok(none);
+    }
+    match (record.receive_application()) {
+        case Ok(bytes data): {
+            if (data.size() == 0) {
+                at_end = true;
+            }
+            return Result<bytes, io.Error>.Ok(data);
+        }
+        case Err(tls13record.Error record_error): {
+            return Result<bytes, io.Error>.Err(fail(error_of_record(record_error)));
+        }
+    }
+}
+
+io.Error Conn.fail(Error error) {
+    failed = true;
+    failure = error;
+    return io.Error.Other(errno_of(error));
+}
+
+/// Between 1 and `n` octets, or an empty `bytes` once the client has sent
+/// `close_notify`. `n` below 1 traps.
+pub Result<bytes, io.Error> Conn.read(int count) {
+    if (count < 1) {
+        trap("read(" + count.to_str() + "): read at least one byte; read_all() reads everything");
+    }
+    if (offset == pending.size()) {
+        bytes chunk = next_chunk()?;
+        if (chunk.size() == 0) {
+            return Result<bytes, io.Error>.Ok(chunk);
+        }
+        pending = chunk;
+        offset = 0;
+    }
+    int take = pending.size() - offset;
+    if (take > count) {
+        take = count;
+    }
+    bytes out = pending.substr(offset, offset + take);
+    offset = offset + take;
+    return Result<bytes, io.Error>.Ok(out);
+}
+
+/// Everything until the client's `close_notify`. A connection that ends any
+/// other way is an `Err`, and what had arrived stays readable with `read`.
+pub Result<bytes, io.Error> Conn.read_all() {
+    bytes out = pending.substr(offset, pending.size());
+    bytes none = [];
+    pending = none;
+    offset = 0;
+    while (true) {
+        match (next_chunk()) {
+            case Ok(bytes chunk): {
+                if (chunk.size() == 0) {
+                    return Result<bytes, io.Error>.Ok(out);
+                }
+                out.extend(chunk);
+            }
+            case Err(io.Error read_error): {
+                pending = out;
+                return Result<bytes, io.Error>.Err(read_error);
+            }
+        }
+    }
+}
+
+/// Octets up to and including the first `delimiter`, at most `limit` of
+/// them; `net.Conn.read_until`'s three outcomes, told apart the same way.
+pub Result<bytes, io.Error> Conn.read_until(bytes delimiter, int limit) {
+    if (delimiter.size() == 0) {
+        trap("read_until: the delimiter is empty");
+    }
+    if (limit < 1) {
+        trap("read_until(" + limit.to_str() + "): the limit must be at least 1");
+    }
+    int last = delimiter[delimiter.size() - 1];
+    bytes out = [];
+    while (out.size() < limit) {
+        if (offset == pending.size()) {
+            match (next_chunk()) {
+                case Ok(bytes chunk): {
+                    if (chunk.size() == 0) {
+                        break;
+                    }
+                    pending = chunk;
+                    offset = 0;
+                }
+                case Err(io.Error read_error): {
+                    pending = out;
+                    offset = 0;
+                    return Result<bytes, io.Error>.Err(read_error);
+                }
+            }
+        }
+        int next = pending[offset];
+        offset = offset + 1;
+        out.push(next);
+        if (next == last && out.ends_with(delimiter)) {
+            break;
+        }
+    }
+    return Result<bytes, io.Error>.Ok(out);
+}
+
+/// Sends all of `data`, returning its size. An `Err` ends the connection.
+pub Result<int, io.Error> Conn.write(bytes data) {
+    if (closed) {
+        trap("write on a closed connection");
+    }
+    if (failed) {
+        return Result<int, io.Error>.Err(io.Error.Other(errno_of(failure)));
+    }
+    match (record.send_application(data)) {
+        case Ok(int sent): {
+            return Result<int, io.Error>.Ok(sent);
+        }
+        case Err(tls13record.Error record_error): {
+            return Result<int, io.Error>.Err(fail(error_of_record(record_error)));
+        }
+    }
+}
+
+/// Tells the client the data is over with a `close_notify`, then closes the
+/// socket. Closing twice is not an error.
+pub Result<bool, io.Error> Conn.close() {
+    return release();
+}
+
+Result<bool, io.Error> Conn.release() {
+    if (closed) {
+        return Result<bool, io.Error>.Ok(true);
+    }
+    closed = true;
+    if (!failed) {
+        Result<void, tls13record.Error> notified = record.send_close_notify();
+    }
+    match (record.close()) {
+        case Ok(bool done): {
+            return Result<bool, io.Error>.Ok(done);
+        }
+        case Err(tls13record.Error record_error): {
+            return Result<bool, io.Error>.Err(io.Error.Other(ERRNO_IO));
+        }
+    }
+}
+
+void Conn.drop() {
+    Result<bool, io.Error> ignored = release();
+}
+
+/// Why the connection stopped working, or `None` while it has not.
+pub Option<Error> Conn.last_error() {
+    if (failed) {
+        return Option<Error>.Some(failure);
+    }
+    return Option<Error>.None;
+}
+
+/// The description of the fatal alert the client sent, or -1.
+pub int Conn.peer_alert() {
+    return record.received_alert();
+}

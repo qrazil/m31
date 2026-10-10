@@ -1,4 +1,4 @@
-// `lib/sshkey.m31`, checked two ways.
+// `lib/ssh/sshkey.m31`, checked two ways.
 //
 // 1. In-process, with no oracle: a key file is *built here* from a known
 //    seed (the openssh-key-v1 layout, PROTOCOL.key), parsed back, and then
@@ -17,10 +17,10 @@
 //    must be refused with `Error.Encrypted`.
 import io;
 import os;
-import base64;
-import ed25519;
+import encoding.base64;
+import crypto.ed25519;
 import ssh;
-import sshkey;
+import ssh.sshkey;
 
 int check(int n, bool ok, str label) {
     if (!ok) {

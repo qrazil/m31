@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# `https://` through `lib/https.m31`: `https.get` and `https.fetch` over a
+# `https://` through `lib/net/https.m31`: `https.get` and `https.fetch` over a
 # verified TLS connection.
 #
 #   bash apps/tls/test_https.sh
@@ -96,7 +96,7 @@ fi
 # --- house style -------------------------------------------------------------
 
 if out=$(
-    for f in lib/http.m31 apps/tls/t_https_client.m31; do
+    for f in lib/net/http.m31 apps/tls/t_https_client.m31; do
         "$LANGC" fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then

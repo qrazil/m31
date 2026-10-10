@@ -3,12 +3,12 @@
 // `main.m31` reuses every one of them.
 import text;
 import math;
-import json;
+import encoding.json;
 import sort;
 import os;
-import csv;
-import html;
-import base64;
+import encoding.csv;
+import encoding.html;
+import encoding.base64;
 import date;
 
 pub int reach() {

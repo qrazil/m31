@@ -320,7 +320,7 @@ case Ok(bytes b): {                    case Ok(bytes contents): {
 case Err(io.Error e): {                case Err(io.Error error): {
 ```
 
-**`lib/field25519.m31:117-121`** — parameter and loop variable:
+**`lib/crypto/field25519.m31:117-121`** — parameter and loop variable:
 
 ```c
 // before
@@ -344,7 +344,7 @@ pub int min(int a, int b)                       // → min(int left, int right)
 sort.by(ps, (Point a, Point b) => a.x - b.x)    // → (Point left, Point right) => left.x - right.x
 ```
 
-**`lib/sha256.m31:181`, `lib/http.m31:230`** — constants:
+**`lib/crypto/sha256.m31:181`, `lib/net/http.m31:230`** — constants:
 
 ```c
 const Array<int> K = [...]     // → ROUND_CONSTANTS
