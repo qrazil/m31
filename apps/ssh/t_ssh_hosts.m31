@@ -215,33 +215,33 @@ checks = check(checks, answer(hashed, "nope.example", 22) == "!3", "an unlisted 
 
 bytes blob7 = [];
 ssh.push_string(blob7, "ssh-ed25519".to_bytes());
-ssh.push_string(blob7, k1);
-ssh.HostKey hk = ssh.HostKey("ssh-ed25519", blob7, k1);
-checks = check(checks, hk.blob_base64() == "AAAAC3NzaC1lZDI1NTE5AAAAIAoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygp", "HostKey.blob_base64 is the known_hosts key column");
-checks = check(checks, hk.fingerprint() == "SHA256:DZmPsbaWctxL57bCPdqkfYHPQS2xqBQI6Py0g0hWu20", "HostKey.fingerprint is SHA256: and unpadded base64 of the blob digest");
-checks = check(checks, sshhosts.plain_line("example.com", 22, hk) == "example.com ssh-ed25519 " + hk.blob_base64(), "a port-22 line names the bare host");
-checks = check(checks, sshhosts.plain_line("Example.COM", 2222, hk) == "[example.com]:2222 ssh-ed25519 " + hk.blob_base64(), "another port is [host]:port, lower-cased");
+ssh.push_string(blob7, first_key);
+ssh.HostKey host_key = ssh.HostKey("ssh-ed25519", blob7, first_key);
+checks = check(checks, host_key.blob_base64() == "AAAAC3NzaC1lZDI1NTE5AAAAIAoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygp", "HostKey.blob_base64 is the known_hosts key column");
+checks = check(checks, host_key.fingerprint() == "SHA256:DZmPsbaWctxL57bCPdqkfYHPQS2xqBQI6Py0g0hWu20", "HostKey.fingerprint is SHA256: and unpadded base64 of the blob digest");
+checks = check(checks, sshhosts.plain_line("example.com", 22, host_key) == "example.com ssh-ed25519 " + host_key.blob_base64(), "a port-22 line names the bare host");
+checks = check(checks, sshhosts.plain_line("Example.COM", 2222, host_key) == "[example.com]:2222 ssh-ed25519 " + host_key.blob_base64(), "another port is [host]:port, lower-cased");
 bytes salt7 = [];
-int si = 1;
-while (si <= 20) {
-    salt7.push(si);
-    si = si + 1;
+int salt_index = 1;
+while (salt_index <= 20) {
+    salt7.push(salt_index);
+    salt_index = salt_index + 1;
 }
-checks = check(checks, sshhosts.hashed_line("example.com", 22, hk, salt7) == "|1|AQIDBAUGBwgJCgsMDQ4PEBESExQ=|qvtG0DaqrsqPDhV2Ni+wmYohchA= ssh-ed25519 " + hk.blob_base64(), "a hashed line has OpenSSH's |1|salt|HMAC-SHA1 name");
-checks = check(checks, sshhosts.hashed_line("Example.com", 2222, hk, salt7) == "|1|AQIDBAUGBwgJCgsMDQ4PEBESExQ=|uVLj+YL3GsbtNOcCoC7AMM/WVh0= ssh-ed25519 " + hk.blob_base64(), "a hashed [host]:port line hashes the bracketed name");
-sshhosts.KnownHosts written = must_parse(sshhosts.plain_line("example.com", 22, hk) + "\n" + sshhosts.plain_line("example.com", 2222, hk) + "\n" + sshhosts.hashed_line("hashed.example", 2200, hk, salt7) + "\n");
+checks = check(checks, sshhosts.hashed_line("example.com", 22, host_key, salt7) == "|1|AQIDBAUGBwgJCgsMDQ4PEBESExQ=|qvtG0DaqrsqPDhV2Ni+wmYohchA= ssh-ed25519 " + host_key.blob_base64(), "a hashed line has OpenSSH's |1|salt|HMAC-SHA1 name");
+checks = check(checks, sshhosts.hashed_line("Example.com", 2222, host_key, salt7) == "|1|AQIDBAUGBwgJCgsMDQ4PEBESExQ=|uVLj+YL3GsbtNOcCoC7AMM/WVh0= ssh-ed25519 " + host_key.blob_base64(), "a hashed [host]:port line hashes the bracketed name");
+sshhosts.KnownHosts written = must_parse(sshhosts.plain_line("example.com", 22, host_key) + "\n" + sshhosts.plain_line("example.com", 2222, host_key) + "\n" + sshhosts.hashed_line("hashed.example", 2200, host_key, salt7) + "\n");
 checks = check(checks, answer(written, "example.com", 22) == "10", "a written plain line is found again by keys_for");
 checks = check(checks, answer(written, "EXAMPLE.com", 2222) == "10", "a written [host]:port line is found again, case-folded");
 checks = check(checks, answer(written, "hashed.example", 2200) == "10", "a written hashed line is found again");
 checks = check(checks, answer(written, "hashed.example", 22) == "!3", "a written hashed line does not match another port");
-sshhosts.KnownHosts revoking = must_parse("@revoked revoked.example " + ed(k1) + "\n" + "@revoked *.wild.example " + ed(k2) + "\n" + "plain.example " + ed(k3) + "\n");
-ssh.HostKey hk2 = ssh.HostKey("ssh-ed25519", [], k2);
-ssh.HostKey hk3 = ssh.HostKey("ssh-ed25519", [], k3);
+sshhosts.KnownHosts revoking = must_parse("@revoked revoked.example " + ed25519_line(first_key) + "\n" + "@revoked *.wild.example " + ed25519_line(second_key) + "\n" + "plain.example " + ed25519_line(third_key) + "\n");
+ssh.HostKey hk2 = ssh.HostKey("ssh-ed25519", [], second_key);
+ssh.HostKey hk3 = ssh.HostKey("ssh-ed25519", [], third_key);
 checks = check(checks, answer(revoking, "revoked.example", 22) == "!3", "a lone @revoked line leaves the host unknown to keys_for");
-checks = check(checks, revoking.is_revoked("revoked.example", 22, hk), "is_revoked: the revoked key for that host");
+checks = check(checks, revoking.is_revoked("revoked.example", 22, host_key), "is_revoked: the revoked key for that host");
 checks = check(checks, !revoking.is_revoked("revoked.example", 22, hk2), "is_revoked: not another key for that host");
-checks = check(checks, !revoking.is_revoked("other.example", 22, hk), "is_revoked: not the same key for another host");
-checks = check(checks, !revoking.is_revoked("revoked.example", 2222, hk), "is_revoked: not on another port");
+checks = check(checks, !revoking.is_revoked("other.example", 22, host_key), "is_revoked: not the same key for another host");
+checks = check(checks, !revoking.is_revoked("revoked.example", 2222, host_key), "is_revoked: not on another port");
 checks = check(checks, revoking.is_revoked("a.wild.example", 22, hk2), "is_revoked: a wildcard @revoked line");
 checks = check(checks, !revoking.is_revoked("plain.example", 22, hk3), "is_revoked: a trusted key is not revoked");
 checks = check(checks, ERROR_WRITE == error_code(sshhosts.Error.Write), "Error.Write has its own code");

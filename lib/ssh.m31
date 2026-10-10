@@ -1071,18 +1071,18 @@ pub Result<Transport, Error> connect_any(str host, int port, List<bytes> host_ke
 /// `connect_any`, which refuses any other.
 pub Result<HostKey, Error> presented_host_key(str host, int port) {
     match (net.connect(host, port)) {
-        case Ok(net.Conn c): {
-            Result<Exchange, Error> got = exchange_keys(c, random.system());
-            match (c.close()) {
+        case Ok(net.Conn connection): {
+            Result<Exchange, Error> got = exchange_keys(connection, random.system());
+            match (connection.close()) {
                 case Ok(bool done): {
                 }
-                case Err(io.Error e): {
+                case Err(io.Error close_error): {
                 }
             }
-            Exchange ex = got?;
-            return Result<HostKey, Error>.Ok(ex.host_key);
+            Exchange exchange = got?;
+            return Result<HostKey, Error>.Ok(exchange.host_key);
         }
-        case Err(net.Error e): {
+        case Err(net.Error error): {
             return Result<HostKey, Error>.Err(Error.Io);
         }
     }

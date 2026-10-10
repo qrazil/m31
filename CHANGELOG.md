@@ -167,6 +167,9 @@ parameters, locals, loop variables and `case` bindings were renamed in the
 standard library, the apps, the examples and the runtime tests; unused `case`
 payloads became `_`. They are not listed here.
 
+The v0.3.3 additions follow the same rules: `sshhosts.add` takes `is_hashed`
+and `ssh.presented_host_key` / `ssh.HostKey` are unchanged in name.
+
 ### Changed behaviour
 
 - `os.arguments()` traps with `os.arguments(): argument N is not valid UTF-8;

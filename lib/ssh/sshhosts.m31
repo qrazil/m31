@@ -172,8 +172,8 @@ pub Result<List<bytes>, Error> KnownHosts.keys_for(str host, int port) {
 /// `Revoked` only when a revoked key is also listed as trusted.
 pub bool KnownHosts.is_revoked(str host, int port, ssh.HostKey key) {
     str id = host_id(host, port);
-    for (Entry e in entries) {
-        if (e.revoked && e.key == key.key && entry_matches(e.patterns, id)) {
+    for (Entry entry in entries) {
+        if (entry.is_revoked && entry.key == key.key && is_entry_match(entry.patterns, id)) {
             return true;
         }
     }
@@ -412,7 +412,7 @@ pub str hashed_line(str host, int port, ssh.HostKey key, bytes salt) {
 }
 
 // The directory part of `path`, "" if it has none.
-str dir_of(str path) {
+str directory_of(str path) {
     int cut = path.size() - 1;
     while (cut > 0 && path.byte_at(cut) != '/') {
         cut = cut - 1;
@@ -424,43 +424,43 @@ str dir_of(str path) {
 }
 
 /// Appends `key` as the key for `host:port` to the `known_hosts` file at
-/// `path`: plain, or with `hashed` in OpenSSH's `HashKnownHosts` form. The
+/// `path`: plain, or with `is_hashed` in OpenSSH's `HashKnownHosts` form. The
 /// file (and its directory, with the process umask's permissions) is created
 /// if missing; a last line lacking its newline is not run into. See the
 /// module header for when to call this -- never for a changed key.
-pub Result<bool, Error> add(str path, str host, int port, ssh.HostKey key, bool hashed) {
-    str directory = dir_of(path);
-    if (directory != "" && !fs.exists(directory)) {
+pub Result<bool, Error> add(str path, str host, int port, ssh.HostKey key, bool is_hashed) {
+    str directory = directory_of(path);
+    if (directory != "" && !fs.is_present(directory)) {
         match (fs.makedirs(directory)) {
             case Ok(bool made): {
             }
-            case Err(io.Error e): {
+            case Err(io.Error error): {
                 return Result<bool, Error>.Err(Error.Write);
             }
         }
     }
     str prefix = "";
-    if (fs.exists(path)) {
+    if (fs.is_present(path)) {
         match (io.read(path)) {
             case Ok(str current): {
                 if (current != "" && !current.ends_with("\n")) {
                     prefix = "\n";
                 }
             }
-            case Err(io.Error e): {
+            case Err(io.Error error): {
                 return Result<bool, Error>.Err(Error.Io);
             }
         }
     }
     str text = plain_line(host, port, key);
-    if (hashed) {
+    if (is_hashed) {
         text = hashed_line(host, port, key, random.system().octets(20));
     }
     match (io.append(path, prefix + text + "\n")) {
-        case Ok(int n): {
+        case Ok(int written): {
             return Result<bool, Error>.Ok(true);
         }
-        case Err(io.Error e): {
+        case Err(io.Error error): {
             return Result<bool, Error>.Err(Error.Write);
         }
     }

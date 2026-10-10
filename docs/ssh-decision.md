@@ -219,9 +219,9 @@ The smallest addition that does it, all additive:
   `key`; `fingerprint()` is the `SHA256:<unpadded base64>` string
   `ssh-keygen -lf` prints, and `blob_base64()` the key column of a
   `known_hosts` line.
-- `sshhosts.add(path, host, port, key, hashed)` appends the line (creating
+- `sshhosts.add(path, host, port, key, is_hashed)` appends the line (creating
   the file and directory; a missing final newline is supplied). Plain by
-  default; `hashed: true` writes OpenSSH's `HashKnownHosts` form with a
+  default; `is_hashed: true` writes OpenSSH's `HashKnownHosts` form with a
   random 20-octet salt. Whether to hash is the caller's choice -- the
   library never reads `~/.ssh/config`. `plain_line` and `hashed_line` are the
   pure formatters under it.
