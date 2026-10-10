@@ -8,11 +8,36 @@
 //   sshhosts.parse(text)        -> Result<KnownHosts, Error>
 //   sshhosts.load(path)         -> Result<KnownHosts, Error>
 //   kh.keys_for(host, port)     -> Result<List<bytes>, Error>   32-octet keys
+//   kh.is_revoked(host, port, key)              -> bool          ssh.HostKey
+//   sshhosts.add(path, host, port, key, hashed)  -> Result<bool, Error>
+//   sshhosts.plain_line(host, port, key)         -> str
+//   sshhosts.hashed_line(host, port, key, salt)  -> str
 //
 // **No trust on first use.** A host with no entry is `Error.UnknownHost`;
 // there is no "add it and carry on" path, and an empty result is never
 // returned as success (`ssh.connect_any` also refuses an empty list, so a
 // caller who ignores this module's error still cannot connect).
+//
+// **Asking a person is the caller's job, and `add` is what it does after a
+// yes.** The flow OpenSSH calls "the authenticity of host ... can't be
+// established": on `UnknownHost`, `ssh.presented_host_key(host, port)` says
+// which key the server offers (`key.fingerprint()` is the `SHA256:...` string
+// to show); if the person agrees, `add` appends it and the next connection
+// succeeds -- through the same refusing check as any other. `add` writes
+// whatever it is given: it asks nobody, and it does not look for an existing
+// entry. So a caller must not call it
+//   - for a host whose key *changed* (`ssh.Error.HostKeyMismatch`): that is a
+//     refusal, which OpenSSH too leaves to the person to resolve by editing
+//     the file; nor
+//   - before checking `kh.is_revoked(host, port, key)`: a lone `@revoked`
+//     line makes `keys_for` answer `UnknownHost`, not `Revoked`, so a prompt
+//     would otherwise be shown for a key that can never be trusted.
+//
+// `add` writes plain `host key` lines by default (`[host]:port` for any port
+// but 22, lower-cased -- exactly what `keys_for` matches) and, with
+// `hashed: true`, OpenSSH's `HashKnownHosts` form (`|1|salt|HMAC-SHA1`, a
+// fresh random 20-octet salt each time). Which to use is the caller's call;
+// this module never reads `~/.ssh/config`.
 //
 // --- the format (sshd(8), "SSH_KNOWN_HOSTS FILE FORMAT") --------------------
 //
@@ -42,6 +67,8 @@
 import io;
 import base64;
 import sha1digest;
+import fs;
+import random;
 import ssh;
 
 /// Why a `known_hosts` file could not answer.
@@ -58,6 +85,8 @@ pub enum Error {
     UnknownHost;
     /// Every key the file lists for this host is marked `@revoked`.
     Revoked;
+    /// `add` could not create the file's directory or append to the file.
+    Write;
 }
 
 pub str Error.to_str() {
@@ -76,6 +105,9 @@ pub str Error.to_str() {
         }
         case Revoked: {
             return "the host's key is revoked in known_hosts";
+        }
+        case Write: {
+            return "the known_hosts file could not be written";
         }
     }
 }
@@ -133,6 +165,19 @@ pub Result<List<bytes>, Error> KnownHosts.keys_for(str host, int port) {
         return Result<List<bytes>, Error>.Err(Error.UnknownHost);
     }
     return Result<List<bytes>, Error>.Ok(usable);
+}
+
+/// Whether this file marks `key` `@revoked` for `host` on `port`. Ask this
+/// before offering a person a "trust this key?" prompt: `keys_for` answers
+/// `Revoked` only when a revoked key is also listed as trusted.
+pub bool KnownHosts.is_revoked(str host, int port, ssh.HostKey key) {
+    str id = host_id(host, port);
+    for (Entry e in entries) {
+        if (e.revoked && e.key == key.key && entry_matches(e.patterns, id)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // HMAC-SHA-1 (RFC 2104). Not in `lib/hmac.m31` (which has only the SHA-2
@@ -348,6 +393,75 @@ pub Result<KnownHosts, Error> load(str path) {
         }
         case Err(io.Error e): {
             return Result<KnownHosts, Error>.Err(Error.Io);
+        }
+    }
+}
+
+/// The plain `known_hosts` line for `key` on `host:port`, without the
+/// newline: `host ssh-ed25519 base64` (`[host]:port` unless the port is 22).
+pub str plain_line(str host, int port, ssh.HostKey key) {
+    return host_id(host, port) + " " + key.algorithm + " " + key.blob_base64();
+}
+
+/// The same line in OpenSSH's hashed form (`ssh-keygen -H`,
+/// `HashKnownHosts yes`): the name becomes `|1|base64(salt)|base64(HMAC-SHA1
+/// (salt, name))`. OpenSSH uses a random 20-octet salt; `add` draws one.
+pub str hashed_line(str host, int port, ssh.HostKey key, bytes salt) {
+    bytes mac = hmac_sha1(salt, host_id(host, port).to_bytes());
+    return HASH_PREFIX + base64.encode(salt) + "|" + base64.encode(mac) + " " + key.algorithm + " " + key.blob_base64();
+}
+
+// The directory part of `path`, "" if it has none.
+str dir_of(str path) {
+    int cut = path.size() - 1;
+    while (cut > 0 && path.byte_at(cut) != '/') {
+        cut = cut - 1;
+    }
+    if (cut <= 0) {
+        return "";
+    }
+    return path.substr(0, cut);
+}
+
+/// Appends `key` as the key for `host:port` to the `known_hosts` file at
+/// `path`: plain, or with `hashed` in OpenSSH's `HashKnownHosts` form. The
+/// file (and its directory, with the process umask's permissions) is created
+/// if missing; a last line lacking its newline is not run into. See the
+/// module header for when to call this -- never for a changed key.
+pub Result<bool, Error> add(str path, str host, int port, ssh.HostKey key, bool hashed) {
+    str directory = dir_of(path);
+    if (directory != "" && !fs.exists(directory)) {
+        match (fs.makedirs(directory)) {
+            case Ok(bool made): {
+            }
+            case Err(io.Error e): {
+                return Result<bool, Error>.Err(Error.Write);
+            }
+        }
+    }
+    str prefix = "";
+    if (fs.exists(path)) {
+        match (io.read(path)) {
+            case Ok(str current): {
+                if (current != "" && !current.ends_with("\n")) {
+                    prefix = "\n";
+                }
+            }
+            case Err(io.Error e): {
+                return Result<bool, Error>.Err(Error.Io);
+            }
+        }
+    }
+    str text = plain_line(host, port, key);
+    if (hashed) {
+        text = hashed_line(host, port, key, random.system().octets(20));
+    }
+    match (io.append(path, prefix + text + "\n")) {
+        case Ok(int n): {
+            return Result<bool, Error>.Ok(true);
+        }
+        case Err(io.Error e): {
+            return Result<bool, Error>.Err(Error.Write);
         }
     }
 }

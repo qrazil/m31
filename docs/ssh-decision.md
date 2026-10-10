@@ -24,7 +24,9 @@ tested against scripted in-memory peers (`apps/ssh/t_ssh_auth.m31`,
 `apps/ssh/test.sh`) and, live, against a disposable `sshd` with fresh keys
 (`apps/ssh/test_auth_exec.sh`: wrong key, unknown user and unknown host
 refused; exit status; stderr separation; 8 MB read and write; a 6 MB `cat`
-round trip). Known limits: Ed25519 keys only, no rekeying, no
+round trip). A caller that wants to ask a person about an unknown host
+(trust on first use, as `ssh` does) has `ssh.presented_host_key` and
+`sshhosts.add`; see "Host keys and trust on first use" below. Known limits: Ed25519 keys only, no rekeying, no
 passphrase-protected keys, and the receive window is replenished as data
 arrives (an unread stream is buffered in memory, not back-pressured). This
 exists because
@@ -65,10 +67,12 @@ oversight:**
 - SSH server side (nothing here needs to *accept* SSH connections)
 - Password / keyboard-interactive auth
 - PTY / shell / port-forwarding / SFTP channel types
-- Host-key management UX (known_hosts file format, TOFU prompting) — v0
-  takes an expected host key as a parameter and refuses to proceed if it
-  doesn't match; where that expectation comes from is `apps/git`'s problem,
-  not this library's
+- Host-key management UX (the prompt itself) — the library takes the
+  expected host keys as a parameter and refuses to proceed if the server's
+  is not among them; where that expectation comes from, and whether a
+  person is asked, is the caller's job. `lib/sshhosts.m31` reads and appends
+  `known_hosts`, and `ssh.presented_host_key` gives the caller what to ask
+  about (below)
 - Algorithm negotiation beyond the one modern suite below — no fallback to
   older algorithms, ever (see §2)
 - Rekeying (RFC 4253 §9's periodic re-key) — v0 fails a connection that
@@ -155,9 +159,9 @@ exists (all of Phase 1), it is the primary oracle; where one doesn't
 
 ## Open
 
-- Where the expected host key comes from in `apps/git`'s eventual usage
-  (a config file, a prompt, a `known_hosts`-format file) — deferred to the
-  integration follow-up in §3, deliberately not decided here
+- ~~Where the expected host key comes from in `apps/git`'s eventual usage~~
+  — decided: a `known_hosts` file (`lib/sshhosts.m31`), with the caller
+  prompting for unknown hosts (below)
 - Whether Phase 1's primitives get exposed as their own general-purpose
   `lib/crypto`-style module (useful beyond SSH) or stay private to the SSH
   library — leaning toward exposing them, since a from-scratch, tested
@@ -194,3 +198,54 @@ case `docs/ssh-decision.md` §4's two-oracle discipline exists for.
   in-line where it matters, not what the RFC's own wording suggests —
   precisely because this library's whole testing discipline is built on not
   trusting a reading of the spec over a real implementation's behavior.
+
+## Host keys and trust on first use (added for gitui's ssh remotes)
+
+The library still never trusts a host by itself: `connect_any` refuses every
+key it was not given, and an empty list refuses everything. What a git
+client needs on top ("The authenticity of host ... can't be established.
+Fingerprint SHA256:... Continue?" and, on yes, a line in `known_hosts`) is
+the *presented* key, which no error could carry: `ssh.Error` is payload-free
+(`docs/errors-decision.md` §4) and a freeze-level commitment, and a failure
+that needs structured detail returns a type of its own.
+
+The smallest addition that does it, all additive:
+
+- `ssh.presented_host_key(host, port) -> Result<ssh.HostKey, ssh.Error>`
+  runs the key exchange up to and including the check of the server's
+  signature (so the key belongs to whoever answered), then hangs up.
+  Nothing is trusted, nothing is offered, no session results.
+- `ssh.HostKey` carries `algorithm`, the wire `blob` and the raw 32-octet
+  `key`; `fingerprint()` is the `SHA256:<unpadded base64>` string
+  `ssh-keygen -lf` prints, and `blob_base64()` the key column of a
+  `known_hosts` line.
+- `sshhosts.add(path, host, port, key, hashed)` appends the line (creating
+  the file and directory; a missing final newline is supplied). Plain by
+  default; `hashed: true` writes OpenSSH's `HashKnownHosts` form with a
+  random 20-octet salt. Whether to hash is the caller's choice -- the
+  library never reads `~/.ssh/config`. `plain_line` and `hashed_line` are the
+  pure formatters under it.
+- `kh.is_revoked(host, port, key)`: a lone `@revoked` line makes `keys_for`
+  say `UnknownHost`, so a caller must check this before prompting.
+
+The flow is `sshclient.connect` -> `KnownHosts(UnknownHost)` ->
+`presented_host_key` -> show `fingerprint()` -> on yes `add` -> connect
+again. The second connection is the same refusing check as any other, so the
+key the person approved is the only one that can succeed; the probe
+connection only chooses what to *show*. A `Connect(HostKeyMismatch)` is a hard
+refusal, with `presented_host_key` available to show what was offered; there
+is no `add` path for it.
+
+One change to existing behaviour: the handshake now verifies the server's
+signature *before* comparing the key with the expected ones (it used to
+refuse a wrong key first), so `HostKeyMismatch` always names a key the
+server really holds. A wrong-key server that also signs badly now gets
+`BadSignature`.
+
+Tested in `apps/ssh/t_ssh_hosts.m31` (formatters, round trips, `is_revoked`)
+and live in `apps/ssh/test_auth_exec.sh`: the fingerprint equals
+`ssh-keygen -lf` of the real host key; files written by `add` (plain,
+hashed, new directory, no trailing newline) are found by `ssh-keygen -F` and
+accepted by the real `ssh` with `StrictHostKeyChecking=yes`; a second sshd
+with a different host key makes a changed key a `HostKeyMismatch`, which the
+real `ssh` also refuses.

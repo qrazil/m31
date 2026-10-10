@@ -19,6 +19,11 @@
 // `~/.ssh` is never consulted. One `Session` runs commands one after another
 // (finish with a channel -- `wait()` or `close()` -- before the next `exec`).
 //
+// A caller that wants to ask a person about an unknown host (trust on first
+// use) gets `Error.KnownHosts(UnknownHost)` here, then `ssh.presented_host_key`
+// for what to show and `sshhosts.add` to record a yes -- see `lib/sshhosts.m31`;
+// a `Connect(HostKeyMismatch)` has no such path.
+//
 // `Error` says which stage failed and carries that stage's own error.
 
 import ssh;

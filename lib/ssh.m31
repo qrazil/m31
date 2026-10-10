@@ -9,6 +9,9 @@
 // ---
 //   ssh.connect(host, port, expected_host_key) -> Result<Transport, Error>
 //   ssh.connect_any(host, port, host_keys)     -> Result<Transport, Error>
+//   ssh.presented_host_key(host, port)         -> Result<HostKey, Error>
+//   key.fingerprint()  -> str     "SHA256:..." exactly as `ssh-keygen -lf` prints it
+//   key.blob_base64()  -> str     the key column of a `known_hosts` line
 //   t.send(payload)   -> Result<int, Error>     all of `payload`, or an error
 //   t.recv()          -> Result<bytes, Error>   one application message
 //   t.session_id()    -> bytes                  for Phase 3's auth signature
@@ -74,10 +77,19 @@
 //     on top of `Transport` (`lib/sshauth.m31`, `lib/sshexec.m31`).
 //   - A graceful `SSH_MSG_DISCONNECT` on `close()` -- nothing downstream
 //     depends on one yet; a two-line follow-up once something does.
-//   - Host-key *management* (TOFU prompting): `connect`/`connect_any` take
-//     the expected key(s) as plain arguments and refuse outright on a
-//     mismatch; where that expectation comes from is the caller's problem
-//     (`lib/sshhosts.m31` reads OpenSSH `known_hosts` files for it).
+//   - Host-key *management*: `connect`/`connect_any` take the expected
+//     key(s) as plain arguments and refuse outright on a mismatch, never
+//     trusting on first use; where that expectation comes from is the
+//     caller's problem (`lib/sshhosts.m31` reads and appends to OpenSSH
+//     `known_hosts` files). What the library does give a caller who wants to
+//     ask a person ("the authenticity of host ... can't be established,
+//     fingerprint SHA256:..., continue?") is `presented_host_key`: the key a
+//     server offers, proved by its signature, with nothing trusted and no
+//     login attempted. The caller shows `key.fingerprint()`, and only if the
+//     person agrees records it (`sshhosts.add`) and connects again -- through
+//     the same refusing check as any other connection. `Error` stays
+//     payload-free (`docs/errors-decision.md` §4), so `HostKeyMismatch`
+//     does not carry the key; ask for it with `presented_host_key` instead.
 
 import io;
 import net;
@@ -87,6 +99,7 @@ import consttime;
 import x25519;
 import ed25519;
 import random;
+import base64;
 
 /// Why a handshake, or a later `send`/`recv`, could not be completed.
 /// Payload-free (`docs/errors-decision.md` §4): nothing here needs more
@@ -118,8 +131,8 @@ pub enum Error {
     /// `ssh-ed25519` -- this client never negotiated anything else, so this
     /// means a confused or malicious server, not a compatibility gap.
     UnsupportedHostKeyType;
-    /// The server's host key does not match the caller-supplied
-    /// `expected_host_key` -- refused before the signature is even checked.
+    /// The server's host key (whose signature did verify) is none of the keys
+    /// the caller expected. `presented_host_key` says which key it was.
     HostKeyMismatch;
     /// The host key's signature over the exchange hash did not verify.
     BadSignature;
@@ -900,6 +913,34 @@ pub Result<bool, Error> Transport.close() {
     }
 }
 
+/// A host key as a server presented it. Public, so nothing here is secret.
+pub type HostKey {
+    /// The key type, always `ssh-ed25519` (the one this client negotiates).
+    pub str algorithm;
+    /// The wire blob (`string "ssh-ed25519", string key`): what a
+    /// `known_hosts` line's base64 column encodes and what OpenSSH hashes
+    /// into a fingerprint.
+    pub bytes blob;
+    /// The raw 32-octet Ed25519 public key.
+    pub bytes key;
+}
+
+/// `SHA256:` and the unpadded base64 of the SHA-256 of the key blob, the
+/// spelling `ssh-keygen -lf` and OpenSSH's host-key prompt use.
+pub str HostKey.fingerprint() {
+    str encoded = base64.encode(sha256.sum(blob));
+    while (encoded.ends_with("=")) {
+        encoded = encoded.substr(0, encoded.size() - 1);
+    }
+    return "SHA256:" + encoded;
+}
+
+/// The blob in base64: the third column of a `known_hosts` line, the second
+/// of a `.pub` file.
+pub str HostKey.blob_base64() {
+    return base64.encode(blob);
+}
+
 // Whether `host_key` is exactly one of `allowed`. An empty list allows
 // nothing -- a caller with no expectation gets a refusal, never trust on
 // first use. Public keys are not secret, so plain `==` is fine.
@@ -912,34 +953,33 @@ bool key_is_listed(bytes host_key, List<bytes> allowed) {
     return false;
 }
 
-// The whole handshake, given an already-connected socket: version exchange,
-// KEXINIT both ways, the ECDH exchange and host-key check, key derivation,
-// then NEWKEYS both ways. Sequence numbers are tracked from each side's
-// very first packet (its own KEXINIT) and never reset at the NEWKEYS
-// boundary -- see this module's header and Part 6's own note.
-Result<Transport, Error> do_handshake(net.Conn conn, List<bytes> expected_host_keys) {
-    random.System rng = random.system();
-    int send_seq = 0;
-    int recv_seq = 0;
+// Everything the first half of a handshake leaves behind: the key exchange
+// is done and the server has proved, by signing the exchange hash, that it
+// holds the private half of `host_key` -- but no key has been trusted and no
+// `NEWKEYS` sent. Two packets each way have gone by, so both sequence
+// numbers stand at 2.
+type Exchange {
+    HostKey host_key;
+    bytes k_mpint;
+    bytes h;
+}
+
+// Version exchange, KEXINIT both ways, the ECDH exchange and the check of the
+// host key's signature -- the part of a handshake that is the same whether or
+// not the key is one the caller trusts.
+Result<Exchange, Error> exchange_keys(net.Conn conn, random.System rng) {
     VersionPair vp = exchange_version(conn)?;
     bytes i_c = build_client_kexinit(rng);
     send_plain_payload(conn, i_c, rng)?;
-    send_seq = send_seq + 1;
     bytes i_s = recv_plain_payload(conn)?;
-    recv_seq = recv_seq + 1;
     KexInit server_kex = parse_kexinit(i_s)?;
     check_server_kexinit(server_kex)?;
     bytes secret = rng.octets(32);
     bytes q_c = x25519.base_point(secret);
     send_plain_payload(conn, build_kex_ecdh_init(q_c), rng)?;
-    send_seq = send_seq + 1;
     bytes reply_payload = recv_plain_payload(conn)?;
-    recv_seq = recv_seq + 1;
     KexEcdhReply reply = parse_kex_ecdh_reply(reply_payload)?;
-    bytes host_key = parse_host_key_blob(reply.k_s)?;
-    if (!key_is_listed(host_key, expected_host_keys)) {
-        return Result<Transport, Error>.Err(Error.HostKeyMismatch);
-    }
+    bytes raw_key = parse_host_key_blob(reply.k_s)?;
     // RFC 8731 §3.1's text says this gets reversed (little-endian, RFC
     // 7748's own output, into big-endian before mpint-wrapping) -- but a
     // real `sshd` rejects the host key signature when that reversal is
@@ -951,11 +991,22 @@ Result<Transport, Error> do_handshake(net.Conn conn, List<bytes> expected_host_k
     bytes k_mpint = encode_mpint(shared);
     bytes h = exchange_hash(vp.v_c, vp.v_s, i_c, i_s, reply.k_s, q_c, reply.q_s, k_mpint);
     bytes sig = parse_signature_blob(reply.signature)?;
-    if (!ed25519.verify(host_key, h, sig)) {
-        return Result<Transport, Error>.Err(Error.BadSignature);
+    if (!ed25519.verify(raw_key, h, sig)) {
+        return Result<Exchange, Error>.Err(Error.BadSignature);
     }
-    bytes c2s_material = derive64(k_mpint, h, 'C', h);
-    bytes s2c_material = derive64(k_mpint, h, 'D', h);
+    return Result<Exchange, Error>.Ok(Exchange(HostKey(HOST_KEY_ALGO, reply.k_s, raw_key), k_mpint, h));
+}
+
+// The rest of the handshake, given an exchange whose host key the caller has
+// accepted: key derivation, then NEWKEYS both ways. Sequence numbers are
+// tracked from each side's very first packet (its own KEXINIT) and never
+// reset at the NEWKEYS boundary -- see this module's header and Part 6's own
+// note.
+Result<Transport, Error> finish_handshake(net.Conn conn, Exchange ex, random.System rng) {
+    int send_seq = 2;
+    int recv_seq = 2;
+    bytes c2s_material = derive64(ex.k_mpint, ex.h, 'C', ex.h);
+    bytes s2c_material = derive64(ex.k_mpint, ex.h, 'D', ex.h);
     bytes c2s_k2 = c2s_material.substr(0, 32);
     bytes c2s_k1 = c2s_material.substr(32, 64);
     bytes s2c_k2 = s2c_material.substr(0, 32);
@@ -967,7 +1018,19 @@ Result<Transport, Error> do_handshake(net.Conn conn, List<bytes> expected_host_k
     if (their_newkeys.size() != 1 || their_newkeys[0] != SSH_MSG_NEWKEYS) {
         return Result<Transport, Error>.Err(Error.UnexpectedMessage);
     }
-    return Result<Transport, Error>.Ok(Transport(conn, send_seq, recv_seq, c2s_k1, c2s_k2, s2c_k1, s2c_k2, h, rng));
+    return Result<Transport, Error>.Ok(Transport(conn, send_seq, recv_seq, c2s_k1, c2s_k2, s2c_k1, s2c_k2, ex.h, rng));
+}
+
+// The whole handshake, given an already-connected socket. The signature is
+// checked before the key is compared with the expected ones, so a
+// `HostKeyMismatch` always names a key the server really holds.
+Result<Transport, Error> do_handshake(net.Conn conn, List<bytes> expected_host_keys) {
+    random.System rng = random.system();
+    Exchange ex = exchange_keys(conn, rng)?;
+    if (!key_is_listed(ex.host_key.key, expected_host_keys)) {
+        return Result<Transport, Error>.Err(Error.HostKeyMismatch);
+    }
+    return finish_handshake(conn, ex, rng);
 }
 
 /// Connects to `host`:`port`, runs the whole handshake, and refuses unless
@@ -990,6 +1053,37 @@ pub Result<Transport, Error> connect_any(str host, int port, List<bytes> host_ke
         }
         case Err(net.Error e): {
             return Result<Transport, Error>.Err(Error.Io);
+        }
+    }
+}
+
+/// The host key the server at `host`:`port` presents, for a caller that
+/// wants to ask a person whether to trust it (`key.fingerprint()`, then
+/// `sshhosts.add`). Runs the key exchange as `connect_any` does, including
+/// the check of the server's signature -- so the key really belongs to
+/// whoever answered -- and then hangs up: nothing is trusted, no
+/// credentials are offered, and no session exists afterwards. A server that
+/// speaks something other than the one suite this client does
+/// (`NoCommonHostKey`, ...) is an error, not a key.
+///
+/// This is a second connection. That is safe: it decides only what to
+/// *show*; the key the person approves is then enforced by an ordinary
+/// `connect_any`, which refuses any other.
+pub Result<HostKey, Error> presented_host_key(str host, int port) {
+    match (net.connect(host, port)) {
+        case Ok(net.Conn c): {
+            Result<Exchange, Error> got = exchange_keys(c, random.system());
+            match (c.close()) {
+                case Ok(bool done): {
+                }
+                case Err(io.Error e): {
+                }
+            }
+            Exchange ex = got?;
+            return Result<HostKey, Error>.Ok(ex.host_key);
+        }
+        case Err(net.Error e): {
+            return Result<HostKey, Error>.Err(Error.Io);
         }
     }
 }
