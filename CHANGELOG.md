@@ -3,7 +3,7 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
-## 0.4.0 (unreleased)
+## 0.4.0 (2026-10-10)
 
 0.4.0 is a breaking release in two ways, both mechanical to follow: the
 standard library is grouped into folders, and every public name that broke the
@@ -176,6 +176,7 @@ and `ssh.presented_host_key` / `ssh.HostKey` are unchanged in name.
   read os.arguments_bytes() instead` (the message names the new functions).
 - `apps/tls/tls13_hex.m31` is `apps/tls/TLS13_hex.m31`, and its trap messages
   start `TLS13_hex:`.
+- The kqueue reactor reports a descriptor Darwin will not watch (`/dev/null`, regular files) as `EPERM`, as epoll does, so terminal reads on a non-tty park only the green thread on macOS too.
 
 ### Gates
 

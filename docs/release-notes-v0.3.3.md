@@ -1,6 +1,6 @@
 # m31 v0.3.3
 
-Not tagged yet. Suggested tag message:
+Tagged v0.3.3 (2026-10-10). Tag message:
 
     m31 0.3.3: ssh client (publickey auth, known_hosts, exec channel) with caller-driven trust on first use, terminal reads park only the green thread
 
