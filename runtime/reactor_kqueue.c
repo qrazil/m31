@@ -572,7 +572,16 @@ static int kq_arm(rt_reactor_t *r, int fd, uint32_t events, uint64_t seq,
     if (events & RT_REACTOR_WRITE) {
         EV_SET(&add[na++], fd, EVFILT_WRITE, EV_ADD | EV_ONESHOT, 0, 0, udata);
     }
-    if (na > 0 && kevent(r->kq, add, na, NULL, 0, NULL) != 0) return errno;
+    if (na > 0 && kevent(r->kq, add, na, NULL, 0, NULL) != 0) {
+        /* Darwin refuses /dev/null, regular files and other descriptors it
+         * will not watch with EINVAL or ENODEV where Linux's epoll says
+         * EPERM. Callers (lib/term.m31, lib/net.m31) read -EPERM as "never
+         * blocks, treat as ready", so every refusal of a live descriptor is
+         * reported that way. A closed one stays EBADF. */
+        int e = errno;
+        if (e == EBADF || e == ENOMEM || e == EINTR) return e;
+        return EPERM;
+    }
     return 0;
 }
 
