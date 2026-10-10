@@ -100,7 +100,7 @@ check_record() {
 # --- house style ---------------------------------------------------------------
 
 if out=$(
-    for f in apps/tls/tls13_*.m31 apps/tls/t_tls13_*.m31 lib/tls/tls13schedule.m31 lib/tls/tls13record.m31; do
+    for f in apps/tls/TLS13_*.m31 apps/tls/t_tls13_*.m31 lib/tls/tls13schedule.m31 lib/tls/tls13record.m31; do
         "$LANGC" fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then
