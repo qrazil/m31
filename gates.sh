@@ -303,6 +303,15 @@ run "formatter preserves meaning" bash -c '
 # or reorders in it shows up here as a diff.
 run "stdlib source is formatted" ./target/debug/"$LANG_BIN" fmt --check -r lib
 
+# The naming rules (docs/naming-decision.md) are enforced, not advised: a
+# name of three characters or more, snake_case, no abbreviations from the
+# closed table, a `is_`/`has_`/... prefix on a bool, one lowercase word per
+# stdlib module and PREFIX_name for a module that is not an entry point.
+# Every source tree that ships or documents the language must be clean.
+# corpus/ is exempt on purpose: its programs are compiler test inputs, many
+# of them written to be wrong.
+run "naming lint" ./target/debug/"$LANG_BIN" lint lib apps examples runtime bench crypto25519_test
+
 # `fmt -r <dir>` is how each repository checks its own tree: every source file
 # under the directory, nested ones included, and never the derived or foreign
 # ones (`.m31-deps/` is somebody else'"'"'s source, `target/` and `.git/` are not
