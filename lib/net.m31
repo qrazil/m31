@@ -75,43 +75,43 @@ import io;
 // here rather than reached through `io` because a `prim` is a declaration
 // like any other and `__` names are each module's own; both declarations
 // lower to the same `rt_read`, `rt_write` and `rt_close`.
-prim int __read(int fd, bytes buf, int off, int n);
-prim int __write(int fd, bytes buf, int off, int n);
-prim int __close(int fd);
+prim int __read(int file_descriptor, bytes buffer, int off, int byte_count);
+prim int __write(int file_descriptor, bytes buffer, int off, int byte_count);
+prim int __close(int file_descriptor);
 // Like `__read`, but `out` is filled rather than written into: the read
 // lands in a scratch buffer the runtime keeps per carrier, and `out` (an
 // empty `bytes` the caller passes) ends up holding exactly the bytes that
 // arrived, not padded to `max_n`. Lets `Conn.fill` stop keeping a whole
 // CHUNK alive for every connection's whole lifetime -- see its own comment.
-prim int __read_chunk(int fd, int max_n, bytes out);
+prim int __read_chunk(int file_descriptor, int max_n, bytes out);
 // `kind` and not `type`, which docs/sys-layer.md §9 writes and this language
 // reserves (§1.4). The C side is one symbol and one order of arguments, so
 // only the spelling of the name moves.
 prim int __socket(int domain, int kind, int protocol);
-prim int __listen(int fd, int backlog);
-prim int __shutdown(int fd, int how);
-prim int __bind(int fd, int family, int port, bytes addr);
-prim int __connect(int fd, int family, int port, bytes addr);
-prim int __accept(int fd, List<int> out, bytes addr);
-prim int __sockname(int fd, int peer, List<int> out, bytes addr);
-prim int __setsockopt(int fd, int opt, int value);
-prim int __getsockopt(int fd, int opt);
+prim int __listen(int file_descriptor, int backlog);
+prim int __shutdown(int file_descriptor, int how);
+prim int __bind(int file_descriptor, int family, int port, bytes addr);
+prim int __connect(int file_descriptor, int family, int port, bytes addr);
+prim int __accept(int file_descriptor, List<int> out, bytes addr);
+prim int __sockname(int file_descriptor, int peer, List<int> out, bytes addr);
+prim int __setsockopt(int file_descriptor, int opt, int value);
+prim int __getsockopt(int file_descriptor, int opt);
 prim int __resolve(str host, int port, int family, List<int> out, bytes addrs);
 prim int __ignore_sigpipe();
-// Park the current green thread until `fd` is ready for `events`
+// Park the current green thread until `file_descriptor` is ready for `events`
 // (IO_READABLE/IO_WRITABLE below), instead of blocking the carrier on the
 // syscall itself -- the epoll reactor's seam (runtime/reactor.h), through
 // the scheduler's park/unpark (docs/concurrency-decision.md, Phase 3).
 // Always succeeds (0) or traps on a genuine caller bug; it is the UNBOUNDED
 // wait. The bounded one is `__wait_io_timeout`.
-prim int __wait_io(int fd, int events);
+prim int __wait_io(int file_descriptor, int events);
 // `__wait_io` with a deadline, and the same parking: only the green thread
-// waits, the carrier goes on running others. Answers 0 when `fd` became ready
+// waits, the carrier goes on running others. Answers 0 when `file_descriptor` became ready
 // for `events` (an error or hang-up counts: a read or write will not block),
 // 1 when `timeout_ms` ran out first, or -errno when the fd cannot be waited
 // on (a closed or invalid one). `timeout_ms` of 0 is a poll that never
 // waits; negative waits without a deadline, like `__wait_io`.
-prim int __wait_io_timeout(int fd, int events, int timeout_ms);
+prim int __wait_io_timeout(int file_descriptor, int events, int timeout_ms);
 
 // The sys layer's own constants (runtime/sys.h), written here as numbers for
 // exactly the reason `io` writes the open flags as numbers: they are the
@@ -294,8 +294,8 @@ pub bool Error.is_transient() {
 /// Public because a program that holds a raw errno from somewhere else
 /// should reach the same vocabulary, and because `error_of` is written on
 /// top of it.
-pub Error from_errno(int e) {
-    if (e == 111) {
+pub Error from_errno(int error_number) {
+    if (error_number == 111) {
         return Error.Refused;
     }
     // ETIMEDOUT is the kernel giving up on a connection; EAGAIN reaching
@@ -306,39 +306,39 @@ pub Error from_errno(int e) {
     // surfaces one: it parks until ready instead) means exactly that. They
     // are one outcome to a caller either way -- "it did not happen in time"
     // -- so they are one variant.
-    if (e == 110 || e == 11) {
+    if (error_number == 110 || error_number == 11) {
         return Error.TimedOut;
     }
-    if (e == 101 || e == 113) {
+    if (error_number == 101 || error_number == 113) {
         return Error.Unreachable;
     }
     // ECONNRESET and EPIPE are the same event seen from the two sides: the
     // peer is gone. Which one the kernel picks depends on whether this end
     // was reading or writing when it found out, which is not something to
     // make a caller branch on.
-    if (e == 104 || e == 32) {
+    if (error_number == 104 || error_number == 32) {
         return Error.Reset;
     }
-    if (e == 98) {
+    if (error_number == 98) {
         return Error.InUse;
     }
     // ENFILE and EMFILE: the system's table or this process's is full. Named
     // because it is the failure an `accept` loop must survive -- the
     // connection that could not be accepted is still queued, and descriptors
     // come back as other connections close.
-    if (e == 23 || e == 24) {
+    if (error_number == 23 || error_number == 24) {
         return Error.OutOfDescriptors;
     }
     // ECONNABORTED: the peer gave up while its connection sat in the backlog.
-    if (e == 103) {
+    if (error_number == 103) {
         return Error.Aborted;
     }
     // ENOENT is what the layer answers when a name has no address
     // (runtime/sys_libc.c maps EAI_NONAME to it).
-    if (e == 2) {
+    if (error_number == 2) {
         return Error.NameNotFound;
     }
-    return Error.Other(e);
+    return Error.Other(error_number);
 }
 
 /// The `net.Error` for an `io.Error` that came off a `Conn`.
@@ -348,8 +348,8 @@ pub Error from_errno(int e) {
 /// The named `io.Error` variants below it are file failures a socket does
 /// not have, and each is mapped to the errno it stands for so that nothing
 /// silently becomes a different error.
-pub Error error_of(io.Error e) {
-    match (e) {
+pub Error error_of(io.Error error) {
+    match (error) {
         case Other(int code): {
             return from_errno(code);
         }
@@ -433,51 +433,51 @@ pub str Ip.to_str() {
     if (raw.size() == 4) {
         return raw[0].to_str() + "." + raw[1].to_str() + "." + raw[2].to_str() + "." + raw[3].to_str();
     }
-    List<int> g = [];
-    int i = 0;
-    while (i < 16) {
-        g.push(raw[i] * 256 + raw[i + 1]);
-        i = i + 2;
+    List<int> groups = [];
+    int byte_index = 0;
+    while (byte_index < 16) {
+        groups.push(raw[byte_index] * 256 + raw[byte_index + 1]);
+        byte_index = byte_index + 2;
     }
     // The longest run of zero groups, leftmost on a tie -- `>` and not `>=`
     // is what makes it leftmost.
     int best = -1;
-    int best_len = 0;
-    int k = 0;
-    while (k < 8) {
-        if (g[k] != 0) {
-            k = k + 1;
+    int best_length = 0;
+    int group_index = 0;
+    while (group_index < 8) {
+        if (groups[group_index] != 0) {
+            group_index = group_index + 1;
         } else {
-            int j = k;
-            while (j < 8 && g[j] == 0) {
-                j = j + 1;
+            int run_end = group_index;
+            while (run_end < 8 && groups[run_end] == 0) {
+                run_end = run_end + 1;
             }
-            if (j - k > best_len) {
-                best_len = j - k;
-                best = k;
+            if (run_end - group_index > best_length) {
+                best_length = run_end - group_index;
+                best = group_index;
             }
-            k = j;
+            group_index = run_end;
         }
     }
-    if (best_len < 2) {
+    if (best_length < 2) {
         best = -1;
-        best_len = 0;
+        best_length = 0;
     }
     str out = "";
-    k = 0;
-    while (k < 8) {
-        if (k == best) {
+    group_index = 0;
+    while (group_index < 8) {
+        if (group_index == best) {
             // The two colons of `::` are this run's own separators, so the
             // group after it must not add a third -- which is what the
             // `k != best + best_len` below says.
             out = out + "::";
-            k = k + best_len;
+            group_index = group_index + best_length;
         } else {
-            if (k > 0 && k != best + best_len) {
+            if (group_index > 0 && group_index != best + best_length) {
                 out = out + ":";
             }
-            out = out + hex16(g[k]);
-            k = k + 1;
+            out = out + hex16(groups[group_index]);
+            group_index = group_index + 1;
         }
     }
     return out;
@@ -486,16 +486,16 @@ pub str Ip.to_str() {
 // One group as lowercase hex with no leading zeros. Written out rather than
 // built from `bytes.hex()`, which pads each octet to two digits and would
 // print `2001:0db8` where RFC 5952 asks for `2001:db8`.
-str hex16(int v) {
-    if (v == 0) {
+str hex16(int group) {
+    if (group == 0) {
         return "0";
     }
     str out = "";
     int shift = 12;
     while (shift >= 0) {
-        int d = v >> shift & 15;
-        if (d != 0 || out.size() > 0) {
-            out = out + HEX.substr(d, d + 1);
+        int digit = group >> shift & 15;
+        if (digit != 0 || out.size() > 0) {
+            out = out + HEX.substr(digit, digit + 1);
         }
         shift = shift - 4;
     }
@@ -508,22 +508,22 @@ str hex16(int v) {
 /// `Conn.peer()` are where one comes from.
 pub type Addr {
     Ip host;
-    int num;
+    int number;
 }
 
 /// The address half.
-pub Ip Addr.ip() {
+pub Ip Addr.ip_address() {
     return host;
 }
 
 /// The port, 0..65535.
 pub int Addr.port() {
-    return num;
+    return number;
 }
 
 /// Two ends are the same when both halves are.
 pub bool Addr.eq(Addr other) {
-    return host == other.host && num == other.num;
+    return host == other.host && number == other.number;
 }
 
 /// `1.2.3.4:80`, or `[::1]:80` for IPv6.
@@ -533,9 +533,9 @@ pub bool Addr.eq(Addr other) {
 /// without one. Go, curl and the URL syntax itself all bracket it.
 pub str Addr.to_str() {
     if (host.is_v6()) {
-        return "[" + host.to_str() + "]:" + num.to_str();
+        return "[" + host.to_str() + "]:" + number.to_str();
     }
-    return host.to_str() + ":" + num.to_str();
+    return host.to_str() + ":" + number.to_str();
 }
 
 /// A literal IPv4 or IPv6 address, or `None` if the text is not one.
@@ -576,39 +576,39 @@ pub Option<Ip> parse_ip(str text) {
 // The dotted quad. Also used for the tail of an IPv6 address, where it is
 // handed the whole of what is left and must consume all of it.
 Option<Ip> parse_v4(str text) {
-    int n = text.size();
-    int i = 0;
+    int text_length = text.size();
+    int index = 0;
     int fields = 0;
     bytes out = [];
     while (fields < 4) {
-        int start = i;
-        int v = 0;
-        // At most three digits, so `v` cannot pass 999 and the 0..255 test
+        int start = index;
+        int field_value = 0;
+        // At most three digits, so `field_value` cannot pass 999 and the 0..255 test
         // below cannot be reached by overflow.
-        while (i < n && i - start < 3 && is_digit(text.byte_at(i))) {
-            v = v * 10 + text.byte_at(i) - 48;
-            i = i + 1;
+        while (index < text_length && index - start < 3 && is_digit(text.byte_at(index))) {
+            field_value = field_value * 10 + text.byte_at(index) - 48;
+            index = index + 1;
         }
-        int len = i - start;
-        if (len == 0 || v > 255) {
+        int length = index - start;
+        if (length == 0 || field_value > 255) {
             return Option<Ip>.None;
         }
         // `010` is ten here and eight to anything that reads it as octal.
-        if (len > 1 && text.byte_at(start) == '0') {
+        if (length > 1 && text.byte_at(start) == '0') {
             return Option<Ip>.None;
         }
-        out.push(v);
+        out.push(field_value);
         fields = fields + 1;
         if (fields < 4) {
-            if (i >= n || text.byte_at(i) != '.') {
+            if (index >= text_length || text.byte_at(index) != '.') {
                 return Option<Ip>.None;
             }
-            i = i + 1;
+            index = index + 1;
         }
     }
     // Four fields and nothing after them: a trailing dot, a fifth field or
     // a space is not an address.
-    if (i != n) {
+    if (index != text_length) {
         return Option<Ip>.None;
     }
     return Option<Ip>.Some(Ip(out));
@@ -619,73 +619,73 @@ Option<Ip> parse_v4(str text) {
 // the end where the total is known -- there is no other point at which how
 // many groups it stands for is knowable.
 Option<Ip> parse_v6(str text) {
-    int n = text.size();
-    List<int> g = [];
+    int text_length = text.size();
+    List<int> groups = [];
     int ell = -1;
-    int i = 0;
+    int index = 0;
     // A leading colon is only ever the first colon of a leading `::`. Dealt
     // with here so that the loop below can assume every group has a group
     // before it or is the first.
     if (text.byte_at(0) == ':') {
-        if (n < 2 || text.byte_at(1) != ':') {
+        if (text_length < 2 || text.byte_at(1) != ':') {
             return Option<Ip>.None;
         }
-        i = 2;
+        index = 2;
         ell = 0;
     }
-    while (i < n) {
+    while (index < text_length) {
         // Nine groups is not an address however the ninth is spelled, and
         // stopping here keeps the list from growing on hostile input.
-        if (g.size() >= 8) {
+        if (groups.size() >= 8) {
             return Option<Ip>.None;
         }
-        int start = i;
-        int v = 0;
-        while (i < n && i - start < 4 && hex_val(text.byte_at(i)) >= 0) {
-            v = v * 16 + hex_val(text.byte_at(i));
-            i = i + 1;
+        int start = index;
+        int group_value = 0;
+        while (index < text_length && index - start < 4 && hex_value(text.byte_at(index)) >= 0) {
+            group_value = group_value * 16 + hex_value(text.byte_at(index));
+            index = index + 1;
         }
-        if (i == start) {
+        if (index == start) {
             return Option<Ip>.None;
         }
-        if (i < n && text.byte_at(i) == '.') {
+        if (index < text_length && text.byte_at(index) == '.') {
             // A dot: the group just read was the first field of a dotted
             // quad, so the whole tail from where it started is one, and it
-            // fills the last two groups. `g` may reach nine this way, which
+            // fills the last two groups. `groups` may reach nine this way, which
             // the count at the end refuses.
-            match (parse_v4(text.substr(start, n))) {
+            match (parse_v4(text.substr(start, text_length))) {
                 case Some(Ip four): {
-                    bytes o = four.raw;
-                    g.push(o[0] * 256 + o[1]);
-                    g.push(o[2] * 256 + o[3]);
-                    i = n;
+                    bytes octets = four.raw;
+                    groups.push(octets[0] * 256 + octets[1]);
+                    groups.push(octets[2] * 256 + octets[3]);
+                    index = text_length;
                 }
                 case None: {
                     return Option<Ip>.None;
                 }
             }
         } else {
-            g.push(v);
-            if (i < n) {
-                if (text.byte_at(i) != ':') {
+            groups.push(group_value);
+            if (index < text_length) {
+                if (text.byte_at(index) != ':') {
                     return Option<Ip>.None;
                 }
-                i = i + 1;
+                index = index + 1;
                 // A colon at the very end is a group that never came.
-                if (i >= n) {
+                if (index >= text_length) {
                     return Option<Ip>.None;
                 }
-                if (text.byte_at(i) == ':') {
+                if (text.byte_at(index) == ':') {
                     if (ell >= 0) {
                         return Option<Ip>.None;
                     }
-                    ell = g.size();
-                    i = i + 1;
+                    ell = groups.size();
+                    index = index + 1;
                 }
             }
         }
     }
-    int have = g.size();
+    int have = groups.size();
     if (ell < 0) {
         if (have != 8) {
             return Option<Ip>.None;
@@ -698,34 +698,34 @@ Option<Ip> parse_v6(str text) {
     }
     int fill = 8 - have;
     bytes out = [];
-    for (int k in 0 .. 8) {
-        int v = 0;
-        if (ell < 0 || k < ell) {
-            v = g[k];
-        } else if (k >= ell + fill) {
-            v = g[k - fill];
+    for (int group_index in 0 .. 8) {
+        int group_value = 0;
+        if (ell < 0 || group_index < ell) {
+            group_value = groups[group_index];
+        } else if (group_index >= ell + fill) {
+            group_value = groups[group_index - fill];
         }
-        out.push(v >> 8);
-        out.push(v & 255);
+        out.push(group_value >> 8);
+        out.push(group_value & 255);
     }
     return Option<Ip>.Some(Ip(out));
 }
 
-bool is_digit(int c) {
-    return c >= 48 && c <= 57;
+bool is_digit(int character) {
+    return character >= 48 && character <= 57;
 }
 
 // A hex digit's value, or -1 for anything else -- which is how the parsers
 // above tell "the group ended" from "the group had a digit".
-int hex_val(int c) {
-    if (c >= 48 && c <= 57) {
-        return c - 48;
+int hex_value(int character) {
+    if (character >= 48 && character <= 57) {
+        return character - 48;
     }
-    if (c >= 97 && c <= 102) {
-        return c - 87;
+    if (character >= 97 && character <= 102) {
+        return character - 87;
     }
-    if (c >= 65 && c <= 70) {
-        return c - 55;
+    if (character >= 65 && character <= 70) {
+        return character - 55;
     }
     return -1;
 }
@@ -749,13 +749,13 @@ int hex_val(int c) {
 /// Every field is private: a `Conn` comes from `connect` or `accept`, and
 /// only its own methods move its buffer.
 pub type Conn {
-    int fd;
+    int descriptor;
     Addr remote;
-    bool live = true;
+    bool is_live = true;
     // Allocated on the first read, so a connection only ever written to
     // costs nothing. buf[at .. end] has arrived and not been handed out.
-    bytes buf = [];
-    int at = 0;
+    bytes buffer = [];
+    int position = 0;
     int end = 0;
     // 0 means "wait forever" (the default). The fd is always non-blocking
     // (socket_for), so these can no longer be a kernel SO_RCVTIMEO/SNDTIMEO
@@ -768,30 +768,30 @@ pub type Conn {
     int write_timeout_ms = 0;
 }
 
-/// Between 1 and `n` bytes, or an empty `bytes` once the peer has stopped
+/// Between 1 and `byte_count` bytes, or an empty `bytes` once the peer has stopped
 /// sending.
 ///
-/// **It may return fewer than `n` without the connection being over** --
-/// more than on a file, in fact: `n` is a maximum and the answer is what has
+/// **It may return fewer than `byte_count` without the connection being over** --
+/// more than on a file, in fact: `byte_count` is a maximum and the answer is what has
 /// arrived. Code that needs everything calls `read_all`, and code that needs
-/// a specific amount loops. `n` below 1 traps, so an empty result has one
+/// a specific amount loops. `byte_count` below 1 traps, so an empty result has one
 /// meaning.
-pub Result<bytes, io.Error> Conn.read(int n) {
-    if (n < 1) {
-        trap("read(" + n.to_str() + "): read at least one byte; read_all() reads everything");
+pub Result<bytes, io.Error> Conn.read(int byte_count) {
+    if (byte_count < 1) {
+        trap("read(" + byte_count.to_str() + "): read at least one byte; read_all() reads everything");
     }
-    if (at == end) {
+    if (position == end) {
         if (fill()? == 0) {
             bytes none = [];
             return Result<bytes, io.Error>.Ok(none);
         }
     }
-    int take = end - at;
-    if (take > n) {
-        take = n;
+    int take = end - position;
+    if (take > byte_count) {
+        take = byte_count;
     }
-    bytes out = buf.substr(at, at + take);
-    at = at + take;
+    bytes out = buffer.substr(position, position + take);
+    position = position + take;
     return Result<bytes, io.Error>.Ok(out);
 }
 
@@ -810,17 +810,17 @@ pub Result<bytes, io.Error> Conn.read(int n) {
 pub Result<bytes, io.Error> Conn.read_all() {
     check_live();
     bytes out = [];
-    if (at < end) {
-        out = buf.substr(at, end);
-        at = end;
+    if (position < end) {
+        out = buffer.substr(position, end);
+        position = end;
     }
     while (fill_keeping(out)? > 0) {
-        if (end == buf.size()) {
-            out.extend(buf);
+        if (end == buffer.size()) {
+            out.extend(buffer);
         } else {
-            out.extend(buf.substr(0, end));
+            out.extend(buffer.substr(0, end));
         }
-        at = end;
+        position = end;
     }
     return Result<bytes, io.Error>.Ok(out);
 }
@@ -854,22 +854,22 @@ pub Result<bytes, io.Error> Conn.read_until(bytes delim, int limit) {
     int last = delim[delim.size() - 1];
     bytes out = [];
     while (out.size() < limit) {
-        if (at == end) {
+        if (position == end) {
             if (fill_keeping(out)? == 0) {
                 break;
             }
         }
-        int b = buf[at];
-        at = at + 1;
-        out.push(b);
-        if (b == last && out.ends_with(delim)) {
+        int byte_value = buffer[position];
+        position = position + 1;
+        out.push(byte_value);
+        if (byte_value == last && out.ends_with(delim)) {
             break;
         }
     }
     return Result<bytes, io.Error>.Ok(out);
 }
 
-/// Write all of `b`, returning its size.
+/// Write all of `data`, returning its size.
 ///
 /// "All" is the promise, and on a socket it is the promise that earns its
 /// keep: a kernel takes a large write in pieces whenever the connection's
@@ -892,40 +892,40 @@ pub Result<bytes, io.Error> Conn.read_until(bytes delim, int limit) {
 /// a protocol that does that desynchronises without anyone noticing, which
 /// is the failure this doc exists to prevent. A caller that must stay on
 /// the connection uses `write_some` and keeps the offset itself.
-pub Result<int, io.Error> Conn.write(bytes b) {
-    if (!live) {
+pub Result<int, io.Error> Conn.write(bytes data) {
+    if (!is_live) {
         trap("write on a closed connection");
     }
     int off = 0;
-    while (off < b.size()) {
-        int r = __write(fd, b, off, b.size() - off);
+    while (off < data.size()) {
+        int written = __write(descriptor, data, off, data.size() - off);
         // A signal that arrives before anything was written is not a
         // failure of the connection, so it is not reported.
-        if (r == -4) {
+        if (written == -4) {
             continue;
         }
-        if (r == -EAGAIN) {
-            bool timed_out = wait_write_timeout()?;
-            if (timed_out) {
+        if (written == -EAGAIN) {
+            bool is_timed_out = wait_write_timeout()?;
+            if (is_timed_out) {
                 return Result<int, io.Error>.Err(io.from_errno(EAGAIN));
             }
             continue;
         }
-        if (r < 0) {
-            return Result<int, io.Error>.Err(io.from_errno(-r));
+        if (written < 0) {
+            return Result<int, io.Error>.Err(io.from_errno(-written));
         }
         // A write of nothing makes no progress and never will; calling it
         // an I/O error beats looping forever.
-        if (r == 0) {
+        if (written == 0) {
             return Result<int, io.Error>.Err(io.from_errno(5));
         }
-        off = off + r;
+        off = off + written;
     }
     return Result<int, io.Error>.Ok(off);
 }
 
-/// One attempt at sending `b`: how many bytes the kernel took, at least 1
-/// and at most `b.size()`. An empty `b` sends nothing and is 0.
+/// One attempt at sending `data`: how many bytes the kernel took, at least 1
+/// and at most `b.size()`. An empty `data` sends nothing and is 0.
 ///
 /// `write` with the loop taken out, and the whole point is what the error
 /// now means: **`Err` from here is "nothing was sent"**, never "some of it
@@ -944,34 +944,34 @@ pub Result<int, io.Error> Conn.write(bytes b) {
 ///
 /// A signal that arrives before any byte was sent is retried here, as in
 /// `write`, so it is not one of the errors either.
-pub Result<int, io.Error> Conn.write_some(bytes b) {
-    if (!live) {
+pub Result<int, io.Error> Conn.write_some(bytes data) {
+    if (!is_live) {
         trap("write on a closed connection");
     }
-    if (b.size() == 0) {
+    if (data.size() == 0) {
         return Result<int, io.Error>.Ok(0);
     }
     while (true) {
-        int r = __write(fd, b, 0, b.size());
-        if (r == -4) {
+        int written = __write(descriptor, data, 0, data.size());
+        if (written == -4) {
             continue;
         }
-        if (r == -EAGAIN) {
-            bool timed_out = wait_write_timeout()?;
-            if (timed_out) {
+        if (written == -EAGAIN) {
+            bool is_timed_out = wait_write_timeout()?;
+            if (is_timed_out) {
                 return Result<int, io.Error>.Err(io.from_errno(EAGAIN));
             }
             continue;
         }
-        if (r < 0) {
-            return Result<int, io.Error>.Err(io.from_errno(-r));
+        if (written < 0) {
+            return Result<int, io.Error>.Err(io.from_errno(-written));
         }
         // A write of nothing makes no progress and never will; calling it
         // an I/O error beats a caller looping on a zero forever.
-        if (r == 0) {
+        if (written == 0) {
             return Result<int, io.Error>.Err(io.from_errno(5));
         }
-        return Result<int, io.Error>.Ok(r);
+        return Result<int, io.Error>.Ok(written);
     }
 }
 
@@ -990,17 +990,17 @@ pub Result<bool, io.Error> Conn.close() {
 // A separate name because the destructor cannot call `close()` bare -- that
 // also names the channel builtin, which the language refuses as ambiguous.
 Result<bool, io.Error> Conn.release() {
-    if (!live) {
+    if (!is_live) {
         return Result<bool, io.Error>.Ok(true);
     }
-    live = false;
+    is_live = false;
     bytes none = [];
-    buf = none;
-    at = 0;
+    buffer = none;
+    position = 0;
     end = 0;
-    int r = __close(fd);
-    if (r < 0 && r != -4) {
-        return Result<bool, io.Error>.Err(io.from_errno(-r));
+    int status = __close(descriptor);
+    if (status < 0 && status != -4) {
+        return Result<bool, io.Error>.Err(io.from_errno(-status));
     }
     return Result<bool, io.Error>.Ok(true);
 }
@@ -1033,14 +1033,14 @@ pub Addr Conn.peer() {
 /// closed; this direction of it is over, and reading goes on.
 pub Result<bool, Error> Conn.shutdown_write() {
     check_live();
-    int r = __shutdown(fd, SHUT_WR);
-    if (r < 0) {
-        return Result<bool, Error>.Err(from_errno(-r));
+    int status = __shutdown(descriptor, SHUT_WR);
+    if (status < 0) {
+        return Result<bool, Error>.Err(from_errno(-status));
     }
     return Result<bool, Error>.Ok(true);
 }
 
-/// Give up on a read that has waited `ms` milliseconds; 0 waits forever,
+/// Give up on a read that has waited `timeout_milliseconds` milliseconds; 0 waits forever,
 /// which is where a connection starts.
 ///
 /// The expiry arrives as an ordinary failure of the read -- EAGAIN from the
@@ -1057,10 +1057,10 @@ pub Result<bool, Error> Conn.shutdown_write() {
 /// yet", never "you have lost the start of this".
 ///
 /// It is the socket option and not a deadline over a whole operation, so a
-/// `read_all` of a slow peer can take much longer than `ms` while never
+/// `read_all` of a slow peer can take much longer than `timeout_milliseconds` while never
 /// waiting that long for one packet.
-pub Result<bool, Error> Conn.set_read_timeout(int ms) {
-    return set_ms_read(ms);
+pub Result<bool, Error> Conn.set_read_timeout(int timeout_milliseconds) {
+    return set_ms_read(timeout_milliseconds);
 }
 
 /// The same for a write that cannot hand anything to the kernel because the
@@ -1073,8 +1073,8 @@ pub Result<bool, Error> Conn.set_read_timeout(int ms) {
 /// `Conn` whose failed `write` must be followed by `close()` -- or one that
 /// is written with `write_some`, which reports every byte it moved and
 /// fails only when it moved none.
-pub Result<bool, Error> Conn.set_write_timeout(int ms) {
-    return set_ms_write(ms);
+pub Result<bool, Error> Conn.set_write_timeout(int timeout_milliseconds) {
+    return set_ms_write(timeout_milliseconds);
 }
 
 // The fd is always non-blocking (socket_for), so there is no kernel
@@ -1085,21 +1085,21 @@ pub Result<bool, Error> Conn.set_write_timeout(int ms) {
 // `Result`, unchanged from before: the signature is part of this module's
 // public surface and a caller should not need to change to keep compiling,
 // even though setting a local field cannot actually fail any more.
-Result<bool, Error> Conn.set_ms_read(int ms) {
+Result<bool, Error> Conn.set_ms_read(int timeout_milliseconds) {
     check_live();
-    if (ms < 0) {
+    if (timeout_milliseconds < 0) {
         trap("a timeout is a count of milliseconds, 0 to wait forever");
     }
-    read_timeout_ms = ms;
+    read_timeout_ms = timeout_milliseconds;
     return Result<bool, Error>.Ok(true);
 }
 
-Result<bool, Error> Conn.set_ms_write(int ms) {
+Result<bool, Error> Conn.set_ms_write(int timeout_milliseconds) {
     check_live();
-    if (ms < 0) {
+    if (timeout_milliseconds < 0) {
         trap("a timeout is a count of milliseconds, 0 to wait forever");
     }
-    write_timeout_ms = ms;
+    write_timeout_ms = timeout_milliseconds;
     return Result<bool, Error>.Ok(true);
 }
 
@@ -1109,27 +1109,27 @@ Result<bool, Error> Conn.set_ms_write(int ms) {
 // green thread waits.
 Result<bool, io.Error> Conn.wait_read_timeout() {
     if (read_timeout_ms <= 0) {
-        int ignored = __wait_io(fd, IO_READABLE);
+        int ignored = __wait_io(descriptor, IO_READABLE);
         return Result<bool, io.Error>.Ok(false);
     }
-    int n = __wait_io_timeout(fd, IO_READABLE, read_timeout_ms);
-    if (n < 0) {
-        return Result<bool, io.Error>.Err(io.from_errno(-n));
+    int wait_status = __wait_io_timeout(descriptor, IO_READABLE, read_timeout_ms);
+    if (wait_status < 0) {
+        return Result<bool, io.Error>.Err(io.from_errno(-wait_status));
     }
-    return Result<bool, io.Error>.Ok(n == 1);
+    return Result<bool, io.Error>.Ok(wait_status == 1);
 }
 
 // The same, for a write that got EAGAIN because the send buffer is full.
 Result<bool, io.Error> Conn.wait_write_timeout() {
     if (write_timeout_ms <= 0) {
-        int ignored = __wait_io(fd, IO_WRITABLE);
+        int ignored = __wait_io(descriptor, IO_WRITABLE);
         return Result<bool, io.Error>.Ok(false);
     }
-    int n = __wait_io_timeout(fd, IO_WRITABLE, write_timeout_ms);
-    if (n < 0) {
-        return Result<bool, io.Error>.Err(io.from_errno(-n));
+    int wait_status = __wait_io_timeout(descriptor, IO_WRITABLE, write_timeout_ms);
+    if (wait_status < 0) {
+        return Result<bool, io.Error>.Err(io.from_errno(-wait_status));
     }
-    return Result<bool, io.Error>.Ok(n == 1);
+    return Result<bool, io.Error>.Ok(wait_status == 1);
 }
 
 /// Send a small write at once instead of waiting to fill a packet (turn
@@ -1139,15 +1139,15 @@ Result<bool, io.Error> Conn.wait_write_timeout() {
 /// does not exist until the answer to this one arrives, so waiting for more
 /// to say adds a round trip to every exchange. Not worth it for a stream of
 /// small writes that are going the same way anyway.
-pub Result<bool, Error> Conn.set_nodelay(bool on) {
+pub Result<bool, Error> Conn.set_nodelay(bool is_enabled) {
     check_live();
-    int v = 0;
-    if (on) {
-        v = 1;
+    int option_value = 0;
+    if (is_enabled) {
+        option_value = 1;
     }
-    int r = __setsockopt(fd, TCP_NODELAY, v);
-    if (r < 0) {
-        return Result<bool, Error>.Err(from_errno(-r));
+    int status = __setsockopt(descriptor, TCP_NODELAY, option_value);
+    if (status < 0) {
+        return Result<bool, Error>.Err(from_errno(-status));
     }
     return Result<bool, Error>.Ok(true);
 }
@@ -1166,16 +1166,16 @@ pub Result<bool, Error> Conn.set_nodelay(bool on) {
 /// caller that can in fact read at once.
 pub Result<bool, Error> Conn.wait(int timeout_ms) {
     check_live();
-    if (at < end) {
+    if (position < end) {
         return Result<bool, Error>.Ok(true);
     }
-    return ready(fd, IO_READABLE, timeout_ms);
+    return ready(descriptor, IO_READABLE, timeout_ms);
 }
 
 // A read on a closed connection is a bug in the program, not a failure of
 // the connection -- the same call `io.File` makes.
 void Conn.check_live() {
-    if (!live) {
+    if (!is_live) {
         trap("read on a closed connection");
     }
 }
@@ -1195,24 +1195,24 @@ Result<int, io.Error> Conn.fill() {
     check_live();
     bytes next = [];
     while (true) {
-        int r = __read_chunk(fd, CHUNK, next);
-        if (r == -4) {
+        int received = __read_chunk(descriptor, CHUNK, next);
+        if (received == -4) {
             continue;
         }
-        if (r == -EAGAIN) {
-            bool timed_out = wait_read_timeout()?;
-            if (timed_out) {
+        if (received == -EAGAIN) {
+            bool is_timed_out = wait_read_timeout()?;
+            if (is_timed_out) {
                 return Result<int, io.Error>.Err(io.from_errno(EAGAIN));
             }
             continue;
         }
-        if (r < 0) {
-            return Result<int, io.Error>.Err(io.from_errno(-r));
+        if (received < 0) {
+            return Result<int, io.Error>.Err(io.from_errno(-received));
         }
-        buf = next;
-        at = 0;
-        end = r;
-        return Result<int, io.Error>.Ok(r);
+        buffer = next;
+        position = 0;
+        end = received;
+        return Result<int, io.Error>.Ok(received);
     }
 }
 
@@ -1221,31 +1221,31 @@ Result<int, io.Error> Conn.fill() {
 // then propagate with `?`: the bytes are safe before the error moves.
 Result<int, io.Error> Conn.fill_keeping(bytes held) {
     match (fill()) {
-        case Ok(int n): {
-            return Result<int, io.Error>.Ok(n);
+        case Ok(int buffered_count): {
+            return Result<int, io.Error>.Ok(buffered_count);
         }
-        case Err(io.Error e): {
+        case Err(io.Error error): {
             unread(held);
-            return Result<int, io.Error>.Err(e);
+            return Result<int, io.Error>.Err(error);
         }
     }
 }
 
-// Put `b` back in front of the connection: the next read hands those bytes
+// Put `data` back in front of the connection: the next read hands those bytes
 // out before anything new arrives, and `wait` counts them as ready.
 //
 // Only a failing read calls it, and a failing read has drained the buffer
 // before asking `fill` for more -- `at == end` everywhere this is reached
-// -- so `b` simply becomes the buffer, with nothing to merge. `b` can be
+// -- so `data` simply becomes the buffer, with nothing to merge. `data` can be
 // far larger than a chunk, which is why `fill` checks the buffer's size and
 // not just whether there is one.
-void Conn.unread(bytes b) {
-    if (b.size() == 0) {
+void Conn.unread(bytes data) {
+    if (data.size() == 0) {
         return;
     }
-    buf = b;
-    at = 0;
-    end = b.size();
+    buffer = data;
+    position = 0;
+    end = data.size();
 }
 
 // --- listeners -------------------------------------------------------------
@@ -1257,9 +1257,9 @@ void Conn.unread(bytes b) {
 ///
 /// Like a `Conn`, it closes itself when its last reference goes.
 pub type Listener {
-    int fd;
+    int descriptor;
     Addr bound;
-    bool live = true;
+    bool is_live = true;
 }
 
 /// The next connection, waiting for one if none is ready.
@@ -1277,16 +1277,16 @@ pub type Listener {
 /// A listener that has been closed is not a failure of the world but a bug in
 /// the program, and still traps.
 pub Result<Conn, Error> Listener.accept() {
-    if (!live) {
+    if (!is_live) {
         trap("accept on a closed listener");
     }
     List<int> out = [];
-    bytes a = [0; 16];
+    bytes address_bytes = [0; 16];
     while (true) {
-        int c = __accept(fd, out, a);
+        int accepted_descriptor = __accept(descriptor, out, address_bytes);
         // A signal during a wait for a connection has not accepted one, so
         // the wait goes on. Nothing was pushed onto `out`.
-        if (c == -4) {
+        if (accepted_descriptor == -4) {
             continue;
         }
         // The listening socket is non-blocking (socket_for), so "nothing
@@ -1294,23 +1294,23 @@ pub Result<Conn, Error> Listener.accept() {
         // no accept timeout to honor -- this type has never had one, only
         // `wait` -- so this always parks on the reactor rather than
         // checking a bound.
-        if (c == -EAGAIN) {
-            int ignored = __wait_io(fd, IO_READABLE);
+        if (accepted_descriptor == -EAGAIN) {
+            int ignored = __wait_io(descriptor, IO_READABLE);
             continue;
         }
-        if (c < 0) {
-            return Result<Conn, Error>.Err(from_errno(-c));
+        if (accepted_descriptor < 0) {
+            return Result<Conn, Error>.Err(from_errno(-accepted_descriptor));
         }
         // Accept does not pass the listener's own non-blocking flag on to
         // the new connection (docs/sys-layer.md §9's own note on
         // SYS_SO_NONBLOCK) -- an accepted socket is exactly one that must
         // not block a future read or write, so it is set here, once, before
         // anything else can touch it.
-        int nb = __setsockopt(c, SO_NONBLOCK, 1);
-        if (nb < 0) {
-            return Result<Conn, Error>.Err(close_and(c, -nb));
+        int nonblocking_status = __setsockopt(accepted_descriptor, SO_NONBLOCK, 1);
+        if (nonblocking_status < 0) {
+            return Result<Conn, Error>.Err(close_and(accepted_descriptor, -nonblocking_status));
         }
-        return Result<Conn, Error>.Ok(Conn(c, Addr(ip_of(out[0], a), out[1])));
+        return Result<Conn, Error>.Ok(Conn(accepted_descriptor, Addr(ip_of(out[0], address_bytes), out[1])));
     }
 }
 
@@ -1328,10 +1328,10 @@ pub Addr Listener.local() {
 /// Whether `accept` would return at once, waiting up to `timeout_ms`;
 /// a negative timeout waits forever.
 pub Result<bool, Error> Listener.wait(int timeout_ms) {
-    if (!live) {
+    if (!is_live) {
         trap("wait on a closed listener");
     }
-    return ready(fd, IO_READABLE, timeout_ms);
+    return ready(descriptor, IO_READABLE, timeout_ms);
 }
 
 /// Stop listening and release the port. Closing twice is not an error.
@@ -1340,13 +1340,13 @@ pub Result<bool, Error> Listener.close() {
 }
 
 Result<bool, Error> Listener.shut() {
-    if (!live) {
+    if (!is_live) {
         return Result<bool, Error>.Ok(true);
     }
-    live = false;
-    int r = __close(fd);
-    if (r < 0 && r != -4) {
-        return Result<bool, Error>.Err(from_errno(-r));
+    is_live = false;
+    int status = __close(descriptor);
+    if (status < 0 && status != -4) {
+        return Result<bool, Error>.Err(from_errno(-status));
     }
     return Result<bool, Error>.Ok(true);
 }
@@ -1417,30 +1417,30 @@ pub Result<Listener, Error> listen(str host, int port, int backlog = 128) {
     if (backlog < 1) {
         trap("listen(backlog: " + backlog.to_str() + "): the backlog must be at least 1");
     }
-    Ip a = host_ip(host)?;
-    int fd = socket_for(a)?;
-    int ru = __setsockopt(fd, SO_REUSEADDR, 1);
-    if (ru < 0) {
-        return Result<Listener, Error>.Err(close_and(fd, -ru));
+    Ip address = host_ip(host)?;
+    int file_descriptor = socket_for(address)?;
+    int reuse_status = __setsockopt(file_descriptor, SO_REUSEADDR, 1);
+    if (reuse_status < 0) {
+        return Result<Listener, Error>.Err(close_and(file_descriptor, -reuse_status));
     }
-    int rb = __bind(fd, family_of(a), port, sixteen(a));
-    if (rb < 0) {
-        return Result<Listener, Error>.Err(close_and(fd, -rb));
+    int bind_status = __bind(file_descriptor, family_of(address), port, sixteen(address));
+    if (bind_status < 0) {
+        return Result<Listener, Error>.Err(close_and(file_descriptor, -bind_status));
     }
-    int rl = __listen(fd, backlog);
-    if (rl < 0) {
-        return Result<Listener, Error>.Err(close_and(fd, -rl));
+    int listen_status = __listen(file_descriptor, backlog);
+    if (listen_status < 0) {
+        return Result<Listener, Error>.Err(close_and(file_descriptor, -listen_status));
     }
     // Asked for rather than assumed: with port 0 the kernel chose one, and
     // even with a port given, binding "0.0.0.0" leaves the address for the
     // kernel to fill in.
     List<int> out = [];
     bytes got = [0; 16];
-    int rn = __sockname(fd, 0, out, got);
-    if (rn < 0) {
-        return Result<Listener, Error>.Err(close_and(fd, -rn));
+    int name_status = __sockname(file_descriptor, 0, out, got);
+    if (name_status < 0) {
+        return Result<Listener, Error>.Err(close_and(file_descriptor, -name_status));
     }
-    return Result<Listener, Error>.Ok(Listener(fd, Addr(ip_of(out[0], got), out[1])));
+    return Result<Listener, Error>.Ok(Listener(file_descriptor, Addr(ip_of(out[0], got), out[1])));
 }
 
 /// Connect to `host` and `port`.
@@ -1475,9 +1475,9 @@ pub Result<Listener, Error> listen(str host, int port, int backlog = 128) {
 /// job (docs/concurrency-decision.md) and not a socket option.
 pub Result<Conn, Error> connect(str host, int port) {
     check_port(port);
-    Ip a = host_ip(host)?;
-    int fd = socket_for(a)?;
-    int r = __connect(fd, family_of(a), port, sixteen(a));
+    Ip address = host_ip(host)?;
+    int file_descriptor = socket_for(address)?;
+    int status = __connect(file_descriptor, family_of(address), port, sixteen(address));
     // The socket is non-blocking (socket_for), so the ordinary case is
     // EINPROGRESS at once, not a wait inside the kernel -- the comment this
     // replaced predates that and was written for a connect interrupted by a
@@ -1486,13 +1486,13 @@ pub Result<Conn, Error> connect(str host, int port) {
     // too, defensively, though a non-blocking connect has little room to
     // produce it. Either way the wait is the same: for the socket to become
     // writable, then ask it how the connect came to.
-    if (r == -EINPROGRESS || r == -4) {
-        r = finish(fd);
+    if (status == -EINPROGRESS || status == -4) {
+        status = finish(file_descriptor);
     }
-    if (r < 0) {
-        return Result<Conn, Error>.Err(close_and(fd, -r));
+    if (status < 0) {
+        return Result<Conn, Error>.Err(close_and(file_descriptor, -status));
     }
-    return Result<Conn, Error>.Ok(Conn(fd, Addr(a, port)));
+    return Result<Conn, Error>.Ok(Conn(file_descriptor, Addr(address, port)));
 }
 
 // Wait for a connect in progress, and report what it came to. The pending
@@ -1503,26 +1503,26 @@ pub Result<Conn, Error> connect(str host, int port) {
 // than bounding the wait -- `__wait_io` cannot itself fail (its own comment
 // in lib/net.m31's prim list), so there is no error path to check here
 // before reading SO_ERROR.
-int finish(int fd) {
-    int ignored = __wait_io(fd, IO_WRITABLE);
-    int e = __getsockopt(fd, SO_ERROR);
-    if (e <= 0) {
-        return e;
+int finish(int file_descriptor) {
+    int ignored = __wait_io(file_descriptor, IO_WRITABLE);
+    int pending_error = __getsockopt(file_descriptor, SO_ERROR);
+    if (pending_error <= 0) {
+        return pending_error;
     }
-    return -e;
+    return -pending_error;
 }
 
-// Whether `fd` is ready for `events` (IO_READABLE/IO_WRITABLE) within
+// Whether `file_descriptor` is ready for `events` (IO_READABLE/IO_WRITABLE) within
 // `timeout_ms`; a negative timeout waits forever and 0 only looks. Only the
 // green thread waits. An error or hang-up on the descriptor is reported as
 // readiness whether or not it was asked for, because it means a read or a
 // write will return at once rather than wait -- which is what this answers.
-Result<bool, Error> ready(int fd, int events, int timeout_ms) {
-    int n = __wait_io_timeout(fd, events, timeout_ms);
-    if (n < 0) {
-        return Result<bool, Error>.Err(from_errno(-n));
+Result<bool, Error> ready(int file_descriptor, int events, int timeout_ms) {
+    int ready_status = __wait_io_timeout(file_descriptor, events, timeout_ms);
+    if (ready_status < 0) {
+        return Result<bool, Error>.Err(from_errno(-ready_status));
     }
-    return Result<bool, Error>.Ok(n == 0);
+    return Result<bool, Error>.Ok(ready_status == 0);
 }
 
 // A socket of the right family, with SIGPIPE already ignored.
@@ -1534,14 +1534,14 @@ Result<bool, Error> ready(int fd, int events, int timeout_ms) {
 // is nothing beside the connect or the bind that follows. Its failure is
 // reported rather than swallowed -- a program whose writes could still kill
 // it should not be handed a socket and told nothing.
-Result<int, Error> socket_for(Ip a) {
-    int ig = __ignore_sigpipe();
-    if (ig < 0) {
-        return Result<int, Error>.Err(from_errno(-ig));
+Result<int, Error> socket_for(Ip address) {
+    int ignore_status = __ignore_sigpipe();
+    if (ignore_status < 0) {
+        return Result<int, Error>.Err(from_errno(-ignore_status));
     }
-    int fd = __socket(family_of(a), SOCK_STREAM, 0);
-    if (fd < 0) {
-        return Result<int, Error>.Err(from_errno(-fd));
+    int file_descriptor = __socket(family_of(address), SOCK_STREAM, 0);
+    if (file_descriptor < 0) {
+        return Result<int, Error>.Err(from_errno(-file_descriptor));
     }
     // Non-blocking from the moment it exists, for both the connecting and
     // the listening socket this builds: every wait this module does on a
@@ -1551,19 +1551,19 @@ Result<int, Error> socket_for(Ip a) {
     // carrier (docs/concurrency-decision.md). An ACCEPTED connection is a
     // separate fd the kernel hands back and does not inherit this, so
     // `Listener.accept` sets it again there.
-    int nb = __setsockopt(fd, SO_NONBLOCK, 1);
-    if (nb < 0) {
-        return Result<int, Error>.Err(close_and(fd, -nb));
+    int nonblocking_status = __setsockopt(file_descriptor, SO_NONBLOCK, 1);
+    if (nonblocking_status < 0) {
+        return Result<int, Error>.Err(close_and(file_descriptor, -nonblocking_status));
     }
-    return Result<int, Error>.Ok(fd);
+    return Result<int, Error>.Ok(file_descriptor);
 }
 
 // Close a descriptor that is being abandoned because something after it
 // failed, and hand back the error that caused it. The close's own result is
 // dropped: there is nothing on a socket nobody ever used for it to report,
 // and replacing the real reason with it would hide why this happened.
-Error close_and(int fd, int errno) {
-    int ignored = __close(fd);
+Error close_and(int file_descriptor, int errno) {
+    int ignored = __close(file_descriptor);
     return from_errno(errno);
 }
 
@@ -1614,8 +1614,8 @@ Ip ip_of(int family, bytes raw) {
     return Ip(raw.substr(0, 4));
 }
 
-int family_of(Ip a) {
-    if (a.is_v6()) {
+int family_of(Ip address) {
+    if (address.is_v6()) {
         return AF_INET6;
     }
     return AF_INET;
@@ -1624,8 +1624,8 @@ int family_of(Ip a) {
 // The sixteen bytes `__bind` and `__connect` read, whatever the family: the
 // runtime checks the size and never trusts it, so a four-octet IPv4 address
 // is padded here rather than at the seam.
-bytes sixteen(Ip a) {
-    bytes out = a.octets();
+bytes sixteen(Ip address) {
+    bytes out = address.octets();
     while (out.size() < 16) {
         out.push(0);
     }

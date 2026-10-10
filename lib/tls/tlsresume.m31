@@ -96,7 +96,7 @@ pub type SessionCache {
 }
 
 /// Whether this cache stores anything (a capacity above 0).
-pub bool SessionCache.enabled() {
+pub bool SessionCache.is_enabled() {
     return capacity > 0;
 }
 

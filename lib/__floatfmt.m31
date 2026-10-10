@@ -51,23 +51,23 @@ pub str format(float x) {
     if (bits == 0) {
         return sign + "0";
     }
-    Decimal d = shortest(bits);
-    int n = digit_count(d.digits);
+    Decimal decimal = shortest(bits);
+    int digit_length = digit_count(decimal.digits);
     // The power of ten of the leading digit: 2 for 250, -3 for 0.00125.
-    int point = d.exp + n - 1;
+    int point = decimal.exp + digit_length - 1;
     // `%g` switches to an exponent once the exponent reaches the precision,
     // so the shortest 2500 is 2.5e+03. For a whole number a reader would
     // write out in full, the digits are the number itself -- every float from
     // 2^53 up is whole, and below that a shortest form ending before the
     // point names a whole number exactly -- so `int` states it exactly.
-    if (point >= n && float.from_bits(bits) < 100000000000000000.0) {
+    if (point >= digit_length && float.from_bits(bits) < 100000000000000000.0) {
         return int(x).to_str();
     }
-    str ds = d.digits.to_str();
-    if (point < -4 || point >= n) {
-        str mant = ds.substr(0, 1);
-        if (n > 1) {
-            mant = mant + "." + ds.substr(1, n);
+    str digit_text = decimal.digits.to_str();
+    if (point < -4 || point >= digit_length) {
+        str mant = digit_text.substr(0, 1);
+        if (digit_length > 1) {
+            mant = mant + "." + digit_text.substr(1, digit_length);
         }
         str esign = "+";
         int mag = point;
@@ -83,15 +83,15 @@ pub str format(float x) {
         return sign + mant + "e" + esign + pad + mag.to_str();
     }
     if (point >= 0) {
-        if (n > point + 1) {
-            return sign + ds.substr(0, point + 1) + "." + ds.substr(point + 1, n);
+        if (digit_length > point + 1) {
+            return sign + digit_text.substr(0, point + 1) + "." + digit_text.substr(point + 1, digit_length);
         }
-        return sign + ds;
+        return sign + digit_text;
     }
-    return sign + "0." + "0".repeat(-point - 1) + ds;
+    return sign + "0." + "0".repeat(-point - 1) + digit_text;
 }
 
-/// The float a decimal names, correctly rounded, or None if `s` is not one.
+/// The float a decimal names, correctly rounded, or None if `text` is not one.
 ///
 /// Accepted: an optional sign, then digits with an optional `.` and fraction
 /// (at least one digit in all), then an optional exponent `e` or `E` with an
@@ -100,38 +100,38 @@ pub str format(float x) {
 /// surrounding space, no hex, no `infinity`, the same as `parse_int`. A value
 /// too large for a float is None; one too small rounds to a subnormal or a
 /// zero, which is its correctly rounded value.
-pub Option<float> parse(str s) {
-    int n = s.size();
-    int i = 0;
+pub Option<float> parse(str text) {
+    int text_length = text.size();
+    int index = 0;
     int sign = 0;
-    if (n > 0 && (s.byte_at(0) == '+' || s.byte_at(0) == '-')) {
-        if (s.byte_at(0) == '-') {
+    if (text_length > 0 && (text.byte_at(0) == '+' || text.byte_at(0) == '-')) {
+        if (text.byte_at(0) == '-') {
             sign = 1 << 63;
         }
-        i = 1;
+        index = 1;
     }
-    if (n - i == 3) {
-        if (s.byte_at(i) == 'i' && s.byte_at(i + 1) == 'n' && s.byte_at(i + 2) == 'f') {
+    if (text_length - index == 3) {
+        if (text.byte_at(index) == 'i' && text.byte_at(index + 1) == 'n' && text.byte_at(index + 2) == 'f') {
             return Option<float>.Some(float.from_bits(sign | inf_bits()));
         }
         // The quiet NaN C's strtod gives, sign included.
-        if (s.byte_at(i) == 'n' && s.byte_at(i + 1) == 'a' && s.byte_at(i + 2) == 'n') {
+        if (text.byte_at(index) == 'n' && text.byte_at(index + 1) == 'a' && text.byte_at(index + 2) == 'n') {
             return Option<float>.Some(float.from_bits(sign | 0x7FF8_0000_0000_0000));
         }
     }
-    int start = i;
+    int start = index;
     int dot = -1;
     int count = 0;
     int frac = 0;
-    while (i < n && is_digit(s.byte_at(i))) {
-        i = i + 1;
+    while (index < text_length && is_digit(text.byte_at(index))) {
+        index = index + 1;
         count = count + 1;
     }
-    if (i < n && s.byte_at(i) == '.') {
-        dot = i;
-        i = i + 1;
-        while (i < n && is_digit(s.byte_at(i))) {
-            i = i + 1;
+    if (index < text_length && text.byte_at(index) == '.') {
+        dot = index;
+        index = index + 1;
+        while (index < text_length && is_digit(text.byte_at(index))) {
+            index = index + 1;
             count = count + 1;
             frac = frac + 1;
         }
@@ -139,34 +139,34 @@ pub Option<float> parse(str s) {
     if (count == 0) {
         return Option<float>.None;
     }
-    int end = i;
+    int end = index;
     int exp = 0;
-    if (i < n && (s.byte_at(i) == 'e' || s.byte_at(i) == 'E')) {
-        i = i + 1;
-        bool negative = false;
-        if (i < n && (s.byte_at(i) == '+' || s.byte_at(i) == '-')) {
-            negative = s.byte_at(i) == '-';
-            i = i + 1;
+    if (index < text_length && (text.byte_at(index) == 'e' || text.byte_at(index) == 'E')) {
+        index = index + 1;
+        bool is_negative = false;
+        if (index < text_length && (text.byte_at(index) == '+' || text.byte_at(index) == '-')) {
+            is_negative = text.byte_at(index) == '-';
+            index = index + 1;
         }
         int written = 0;
-        while (i < n && is_digit(s.byte_at(i))) {
+        while (index < text_length && is_digit(text.byte_at(index))) {
             // An exponent this large already means infinity or zero for any
             // input that fits in memory, so it stops growing rather than
             // overflowing.
             if (exp < 1000000000000000) {
-                exp = exp * 10 + s.byte_at(i) - 48;
+                exp = exp * 10 + text.byte_at(index) - 48;
             }
-            i = i + 1;
+            index = index + 1;
             written = written + 1;
         }
         if (written == 0) {
             return Option<float>.None;
         }
-        if (negative) {
+        if (is_negative) {
             exp = -exp;
         }
     }
-    if (i != n) {
+    if (index != text_length) {
         return Option<float>.None;
     }
     // The significant digits run from the first nonzero digit to the last.
@@ -174,33 +174,33 @@ pub Option<float> parse(str s) {
     // exponent up by one, so `digits * 10^e10` is the exact value with
     // `digits` free of zeros at either end.
     int first = start;
-    while (first < end && (s.byte_at(first) == '0' || s.byte_at(first) == '.')) {
+    while (first < end && (text.byte_at(first) == '0' || text.byte_at(first) == '.')) {
         first = first + 1;
     }
     if (first == end) {
         return Option<float>.Some(float.from_bits(sign));
     }
     int last = end - 1;
-    while (s.byte_at(last) == '0' || s.byte_at(last) == '.') {
+    while (text.byte_at(last) == '0' || text.byte_at(last) == '.') {
         last = last - 1;
     }
     int trailing = end - 1 - last;
     if (dot > last) {
         trailing = trailing - 1;
     }
-    int nd = last - first + 1;
+    int significant_digits = last - first + 1;
     if (dot > first && dot < last) {
-        nd = nd - 1;
+        significant_digits = significant_digits - 1;
     }
-    int bits = decimal_bits(s, first, last, nd, exp - frac + trailing);
+    int bits = decimal_bits(text, first, last, significant_digits, exp - frac + trailing);
     if (bits == inf_bits()) {
         return Option<float>.None;
     }
     return Option<float>.Some(float.from_bits(sign | bits));
 }
 
-bool is_digit(int b) {
-    return b >= '0' && b <= '9';
+bool is_digit(int octet) {
+    return octet >= '0' && octet <= '9';
 }
 
 // The bits of +infinity. Every positive float's bits are below it, and every
@@ -218,54 +218,54 @@ int mask32() {
     return 0xFFFF_FFFF;
 }
 
-int digit_count(int v) {
-    int n = 1;
-    int rest = v / 10;
+int digit_count(int value) {
+    int digits = 1;
+    int rest = value / 10;
     while (rest > 0) {
-        n = n + 1;
+        digits = digits + 1;
         rest = rest / 10;
     }
-    return n;
+    return digits;
 }
 
-int pow10_int(int n) {
-    int p = 1;
-    for (int k in 0 .. n) {
-        p = p * 10;
+int pow10_int(int exponent) {
+    int power = 1;
+    for (int step in 0 .. exponent) {
+        power = power * 10;
     }
-    return p;
+    return power;
 }
 
 // ---------------------------------------------------------------------------
 // 64-bit unsigned arithmetic on `int`.
 // `x >> n` with zeros shifted in rather than copies of the sign bit, for n in
 // 1..63.
-int lsr(int x, int n) {
-    return x >> n & ~(-1 << 64 - n);
+int lsr(int x, int shift) {
+    return x >> shift & ~(-1 << 64 - shift);
 }
 
 // `a < b` with both read as unsigned. Flipping the sign bit maps the
 // unsigned order onto the signed one.
-bool ult(int a, int b) {
-    return a ^ 1 << 63 < b ^ 1 << 63;
+bool is_unsigned_less(int left, int right) {
+    return left ^ 1 << 63 < right ^ 1 << 63;
 }
 
-// The high 64 bits of the 128-bit product of `a` and `b`, both unsigned.
+// The high 64 bits of the 128-bit product of `left` and `right`, both unsigned.
 // The low 64 bits are `a.wrapping_mul(b)`.
 //
 // Schoolbook multiplication on 32-bit halves. Each partial product fits in 64
 // unsigned bits, so `wrapping_mul` gives it exactly; the middle column sums
 // three values below 2^32 and cannot overflow; and the high word is below
 // 2^64 as a whole, so its wrapping additions never actually wrap.
-int umulhi(int a, int b) {
-    int a0 = a & mask32();
-    int a1 = lsr(a, 32);
-    int b0 = b & mask32();
-    int b1 = lsr(b, 32);
-    int p00 = a0.wrapping_mul(b0);
-    int p01 = a0.wrapping_mul(b1);
-    int p10 = a1.wrapping_mul(b0);
-    int p11 = a1.wrapping_mul(b1);
+int umulhi(int left, int right) {
+    int left_low = left & mask32();
+    int left_high = lsr(left, 32);
+    int right_low = right & mask32();
+    int right_high = lsr(right, 32);
+    int p00 = left_low.wrapping_mul(right_low);
+    int p01 = left_low.wrapping_mul(right_high);
+    int p10 = left_high.wrapping_mul(right_low);
+    int p11 = left_high.wrapping_mul(right_high);
     int mid = lsr(p00, 32) + (p01 & mask32()) + (p10 & mask32());
     return p11.wrapping_add(lsr(p01, 32)).wrapping_add(lsr(p10, 32)).wrapping_add(lsr(mid, 32));
 }
@@ -274,34 +274,34 @@ int umulhi(int a, int b) {
 // rounded to odd: the lowest bit is set if anything below it was not zero.
 // That one sticky bit is what lets Schubfach compare the scaled value with
 // the interval ends exactly, never mistaking a near miss for equality.
-int round_to_odd(int ghi, int glo, int cp) {
-    int x_hi = umulhi(glo, cp);
-    int y_lo = ghi.wrapping_mul(cp);
-    int y_hi = umulhi(ghi, cp);
-    int y0 = y_lo.wrapping_add(x_hi);
-    int y1 = y_hi;
-    if (ult(y0, x_hi)) {
-        y1 = y1 + 1;
+int round_to_odd(int ghi, int glo, int multiplier) {
+    int x_hi = umulhi(glo, multiplier);
+    int y_lo = ghi.wrapping_mul(multiplier);
+    int y_hi = umulhi(ghi, multiplier);
+    int sum_low = y_lo.wrapping_add(x_hi);
+    int sum_high = y_hi;
+    if (is_unsigned_less(sum_low, x_hi)) {
+        sum_high = sum_high + 1;
     }
-    if (ult(1, y0)) {
-        return y1 | 1;
+    if (is_unsigned_less(1, sum_low)) {
+        return sum_high | 1;
     }
-    return y1;
+    return sum_high;
 }
 
 // floor(log2(10^e)), floor(log10(2^e)) and floor(log10(3/4 * 2^e)), by fixed
 // point multiplication. Exact over the whole range any float needs, which was
 // checked against exact rational arithmetic for every e used.
-int floor_log2_pow10(int e) {
-    return e * 1741647 >> 19;
+int floor_log2_pow10(int exponent) {
+    return exponent * 1741647 >> 19;
 }
 
-int floor_log10_pow2(int e) {
-    return e * 1262611 >> 22;
+int floor_log10_pow2(int exponent) {
+    return exponent * 1262611 >> 22;
 }
 
-int floor_log10_three_quarters_pow2(int e) {
-    return e * 1262611 - 524031 >> 22;
+int floor_log10_three_quarters_pow2(int exponent) {
+    return exponent * 1262611 - 524031 >> 22;
 }
 
 // ---------------------------------------------------------------------------
@@ -311,97 +311,97 @@ int floor_log10_three_quarters_pow2(int e) {
 Decimal shortest(int bits) {
     int ieee_exp = bits >> 52;
     int frac = bits & hidden_bit() - 1;
-    int c = frac;
-    int q = -1074;
+    int significand = frac;
+    int binary_exponent = -1074;
     if (ieee_exp != 0) {
-        c = frac | hidden_bit();
-        q = ieee_exp - 1075;
+        significand = frac | hidden_bit();
+        binary_exponent = ieee_exp - 1075;
         // A whole number below 2^53 is its own shortest form: the floats
         // either side are at least 1/2 away, so nothing shorter reads back.
-        if (q <= 0 && q > -53 && c & (1 << -q) - 1 == 0) {
-            return strip(c >> -q, 0);
+        if (binary_exponent <= 0 && binary_exponent > -53 && significand & (1 << -binary_exponent) - 1 == 0) {
+            return strip(significand >> -binary_exponent, 0);
         }
     }
     // At a power of two the float below is half as far away as the float
     // above, so the rounding interval is lopsided.
-    bool lopsided = frac == 0 && ieee_exp > 1;
-    int k = floor_log10_pow2(q);
-    if (lopsided) {
-        k = floor_log10_three_quarters_pow2(q);
+    bool is_lopsided = frac == 0 && ieee_exp > 1;
+    int scale = floor_log10_pow2(binary_exponent);
+    if (is_lopsided) {
+        scale = floor_log10_three_quarters_pow2(binary_exponent);
     }
-    Decimal d = strip(schubfach(c, q, lopsided, k), k);
-    if (lopsided) {
-        return printf_digits(q, d);
+    Decimal decimal = strip(schubfach(significand, binary_exponent, is_lopsided, scale), scale);
+    if (is_lopsided) {
+        return printf_digits(binary_exponent, decimal);
     }
-    return d;
+    return decimal;
 }
 
 // The shortest decimal in the rounding interval of c * 2^q, and of those the
 // closest, as digits at the scale 10^k.
 //
 // Everything is scaled by 10^-k so the interval spans a few units, and by 4
-// so its ends are whole: the float is `cb`, the ends `cbl` and `cbr`. The
+// so its ends are whole: the float is `center`, the ends `cbl` and `cbr`. The
 // scaled values come from one table entry, g = 10^-k to 128 bits rounded up,
 // and are rounded to odd, which keeps every comparison below exact. Then:
 // if exactly one multiple of ten is inside the interval, it is the answer
 // with a digit fewer; otherwise the answer is whichever of s and s + 1 is
 // inside, or the closer of the two when both are.
-int schubfach(int c, int q, bool lopsided, int k) {
-    int h = q + floor_log2_pow10(-k) + 1;
-    int ghi = pow10_hi(-k);
-    int glo = pow10_lo(-k).wrapping_add(1);
-    int cb = 4 * c;
-    int cbl = cb - 2;
-    if (lopsided) {
-        cbl = cb - 1;
+int schubfach(int significand, int binary_exponent, bool is_lopsided, int scale) {
+    int shift = binary_exponent + floor_log2_pow10(-scale) + 1;
+    int ghi = pow10_hi(-scale);
+    int glo = pow10_lo(-scale).wrapping_add(1);
+    int center = 4 * significand;
+    int cbl = center - 2;
+    if (is_lopsided) {
+        cbl = center - 1;
     }
-    int cbr = cb + 2;
-    int vbl = round_to_odd(ghi, glo, cbl << h);
-    int vb = round_to_odd(ghi, glo, cb << h);
-    int vbr = round_to_odd(ghi, glo, cbr << h);
+    int cbr = center + 2;
+    int vbl = round_to_odd(ghi, glo, cbl << shift);
+    int center_scaled = round_to_odd(ghi, glo, center << shift);
+    int vbr = round_to_odd(ghi, glo, cbr << shift);
     // An end of the interval belongs to it when the float's significand is
     // even, because that is where round-half-to-even sends a tie.
     int lower = vbl;
     int upper = vbr;
-    if ((c & 1) == 1) {
+    if ((significand & 1) == 1) {
         lower = vbl + 1;
         upper = vbr - 1;
     }
-    int s = vb / 4;
-    if (s >= 10) {
-        int sp = s / 10;
-        bool up_inside = lower <= 40 * sp;
-        bool wp_inside = 40 * sp + 40 <= upper;
-        if (up_inside != wp_inside) {
-            if (wp_inside) {
-                return 10 * sp + 10;
+    int candidate = center_scaled / 4;
+    if (candidate >= 10) {
+        int tens = candidate / 10;
+        bool is_tens_down_inside = lower <= 40 * tens;
+        bool is_tens_up_inside = 40 * tens + 40 <= upper;
+        if (is_tens_down_inside != is_tens_up_inside) {
+            if (is_tens_up_inside) {
+                return 10 * tens + 10;
             }
-            return 10 * sp;
+            return 10 * tens;
         }
     }
-    bool u_inside = lower <= 4 * s;
-    bool w_inside = 4 * s + 4 <= upper;
-    if (u_inside != w_inside) {
-        if (w_inside) {
-            return s + 1;
+    bool is_down_inside = lower <= 4 * candidate;
+    bool is_up_inside = 4 * candidate + 4 <= upper;
+    if (is_down_inside != is_up_inside) {
+        if (is_up_inside) {
+            return candidate + 1;
         }
-        return s;
+        return candidate;
     }
-    int mid = 4 * s + 2;
-    if (vb > mid || vb == mid && (s & 1) == 1) {
-        return s + 1;
+    int mid = 4 * candidate + 2;
+    if (center_scaled > mid || center_scaled == mid && (candidate & 1) == 1) {
+        return candidate + 1;
     }
-    return s;
+    return candidate;
 }
 
 Decimal strip(int digits, int exp) {
-    int d = digits;
-    int e = exp;
-    while (d % 10 == 0) {
-        d = d / 10;
-        e = e + 1;
+    int trimmed_digits = digits;
+    int trimmed_exponent = exp;
+    while (trimmed_digits % 10 == 0) {
+        trimmed_digits = trimmed_digits / 10;
+        trimmed_exponent = trimmed_exponent + 1;
     }
-    return Decimal(d, e);
+    return Decimal(trimmed_digits, trimmed_exponent);
 }
 
 // The digits C's `%.{p}g` gives at the smallest precision that reads back,
@@ -419,88 +419,88 @@ Decimal strip(int digits, int exp) {
 // So the float is scaled to 18 digits, carrying the same sticky bit as
 // Schubfach, and rounded to p digits for each p from the shortest length up
 // until the rounded value is inside the interval.
-Decimal printf_digits(int q, Decimal d) {
-    int n = digit_count(d.digits);
-    int kf = d.exp + n - 1 - 17;
+Decimal printf_digits(int binary_exponent, Decimal decimal) {
+    int digit_length = digit_count(decimal.digits);
+    int scale = decimal.exp + digit_length - 1 - 17;
     // 4 * 2^52: the significand of a power of two, times 4 as in Schubfach.
-    int cb = 0x0040_0000_0000_0000;
-    int h = q + floor_log2_pow10(-kf) + 1;
-    int ghi = pow10_hi(-kf);
-    int glo = pow10_lo(-kf).wrapping_add(1);
-    int vb = round_to_odd(ghi, glo, cb << h);
+    int center = 0x0040_0000_0000_0000;
+    int shift = binary_exponent + floor_log2_pow10(-scale) + 1;
+    int ghi = pow10_hi(-scale);
+    int glo = pow10_lo(-scale).wrapping_add(1);
+    int center_scaled = round_to_odd(ghi, glo, center << shift);
     // The shortest form can round up to a power of ten -- 1e23 for a float
     // just below it -- which puts the float one digit short of 18. One step
     // further down fixes it.
-    if (vb < 400000000000000000) {
-        kf = kf - 1;
-        h = q + floor_log2_pow10(-kf) + 1;
-        ghi = pow10_hi(-kf);
-        glo = pow10_lo(-kf).wrapping_add(1);
-        vb = round_to_odd(ghi, glo, cb << h);
+    if (center_scaled < 400000000000000000) {
+        scale = scale - 1;
+        shift = binary_exponent + floor_log2_pow10(-scale) + 1;
+        ghi = pow10_hi(-scale);
+        glo = pow10_lo(-scale).wrapping_add(1);
+        center_scaled = round_to_odd(ghi, glo, center << shift);
     }
-    int vl = round_to_odd(ghi, glo, cb - 1 << h);
-    int vr = round_to_odd(ghi, glo, cb + 2 << h);
-    int p = n;
-    while (p <= 17) {
-        int j = 18 - p;
-        int m = 4 * pow10_int(j);
-        int r = vb / m;
-        int rem = vb - r * m;
+    int lower_scaled = round_to_odd(ghi, glo, center - 1 << shift);
+    int upper_scaled = round_to_odd(ghi, glo, center + 2 << shift);
+    int precision = digit_length;
+    while (precision <= 17) {
+        int dropped = 18 - precision;
+        int unit = 4 * pow10_int(dropped);
+        int rounded = center_scaled / unit;
+        int rem = center_scaled - rounded * unit;
         // `rem` equal to half is a true tie only when vb is even, i.e.
         // exact; an odd vb carries the sticky bit and is never equal to an
         // even value. Ties go to even, as C's printf rounds them.
-        if (rem > m / 2 || rem == m / 2 && (r & 1) == 1) {
-            r = r + 1;
+        if (rem > unit / 2 || rem == unit / 2 && (rounded & 1) == 1) {
+            rounded = rounded + 1;
         }
         // The significand is even, so both ends of the interval belong to
         // it, and a multiple of 4 is compared exactly against an odd vl or
         // vr for the same reason as above.
-        if (vl <= r * m && r * m <= vr) {
-            return strip(r, kf + j);
+        if (lower_scaled <= rounded * unit && rounded * unit <= upper_scaled) {
+            return strip(rounded, scale + dropped);
         }
-        p = p + 1;
+        precision = precision + 1;
     }
     // Not reached: 17 digits always read back.
-    return d;
+    return decimal;
 }
 
 // ---------------------------------------------------------------------------
 // Parsing: Eisel-Lemire, then an exact comparison when that cannot decide.
 // The bits of the positive float nearest `digits * 10^e10`, where `digits`
-// is the `nd` significant digits of `s` from `first` to `last` (skipping a
+// is the `significant_digits` significant digits of `text` from `first` to `last` (skipping a
 // `.`), with no zero at either end.
-int decimal_bits(str s, int first, int last, int nd, int e10) {
+int decimal_bits(str text, int first, int last, int significant_digits, int e10) {
     // The first 19 digits always fit in 64 unsigned bits.
-    int w = 0;
+    int decimal_mantissa = 0;
     int taken = 0;
-    int j = first;
-    while (taken < 19 && taken < nd) {
-        int b = s.byte_at(j);
-        if (b != '.') {
-            w = w.wrapping_mul(10).wrapping_add(b - 48);
+    int index = first;
+    while (taken < 19 && taken < significant_digits) {
+        int octet = text.byte_at(index);
+        if (octet != '.') {
+            decimal_mantissa = decimal_mantissa.wrapping_mul(10).wrapping_add(octet - 48);
             taken = taken + 1;
         }
-        j = j + 1;
+        index = index + 1;
     }
-    if (nd <= 19) {
-        int got = eisel_lemire(w, e10);
+    if (significant_digits <= 19) {
+        int got = eisel_lemire(decimal_mantissa, e10);
         if (got >= 0) {
             return got;
         }
-        return exact_bits(s, first, last, nd, e10, -got - 1);
+        return exact_bits(text, first, last, significant_digits, e10, -got - 1);
     }
     // Truncated to 19 digits, the value lies between w and w + 1 at this
     // scale. When both round to the same float, so does everything between.
-    int q = e10 + nd - 19;
-    int below = eisel_lemire(w, q);
-    int above = eisel_lemire(w.wrapping_add(1), q);
+    int truncated_exponent = e10 + significant_digits - 19;
+    int below = eisel_lemire(decimal_mantissa, truncated_exponent);
+    int above = eisel_lemire(decimal_mantissa.wrapping_add(1), truncated_exponent);
     if (below >= 0 && below == above) {
         return below;
     }
     if (below < 0) {
         below = -below - 1;
     }
-    return exact_bits(s, first, last, nd, e10, below);
+    return exact_bits(text, first, last, significant_digits, e10, below);
 }
 
 // The float nearest w * 10^q for an unsigned w, from a 128-bit product with a
@@ -510,39 +510,39 @@ int decimal_bits(str s, int first, int last, int nd, int e10) {
 // 2^64, and it is checked anyway because checking costs nothing.
 //
 // This is fast_float's `compute_float`, line for line.
-int eisel_lemire(int w, int q) {
-    if (w == 0 || q < -342) {
+int eisel_lemire(int decimal_mantissa, int decimal_exponent) {
+    if (decimal_mantissa == 0 || decimal_exponent < -342) {
         return 0;
     }
-    if (q > 308) {
+    if (decimal_exponent > 308) {
         return inf_bits();
     }
-    int lz = leading_zeros(w);
-    int ww = w << lz;
+    int leading_zero_count = leading_zeros(decimal_mantissa);
+    int normalized = decimal_mantissa << leading_zero_count;
     // fast_float's table rounds 10^q up for -27 <= q < 0, where the
     // reciprocal is exact to 128 bits, and down everywhere else.
-    int thi = pow10_hi(q);
-    int tlo = pow10_lo(q);
-    if (q < 0 && q >= -27) {
+    int thi = pow10_hi(decimal_exponent);
+    int tlo = pow10_lo(decimal_exponent);
+    if (decimal_exponent < 0 && decimal_exponent >= -27) {
         tlo = tlo.wrapping_add(1);
     }
-    int hi = umulhi(ww, thi);
-    int lo = ww.wrapping_mul(thi);
-    bool unsure = false;
+    int product_high = umulhi(normalized, thi);
+    int product_low = normalized.wrapping_mul(thi);
+    bool is_unsure = false;
     // Only when the bits below the 55 that matter are all ones could the
     // rest of the product carry into them, and only then is the second
     // half of the table entry needed.
-    if ((hi & 511) == 511) {
-        int lo2 = umulhi(ww, tlo);
-        lo = lo.wrapping_add(lo2);
-        if (ult(lo, lo2)) {
-            hi = hi.wrapping_add(1);
+    if ((product_high & 511) == 511) {
+        int lo2 = umulhi(normalized, tlo);
+        product_low = product_low.wrapping_add(lo2);
+        if (is_unsigned_less(product_low, lo2)) {
+            product_high = product_high.wrapping_add(1);
         }
-        unsure = lo == -1;
+        is_unsure = product_low == -1;
     }
-    int upper = lsr(hi, 63);
-    int mant = lsr(hi, upper + 9);
-    int power2 = (217706 * q >> 16) + 63 + upper - lz + 1023;
+    int upper = lsr(product_high, 63);
+    int mant = lsr(product_high, upper + 9);
+    int power2 = (217706 * decimal_exponent >> 16) + 63 + upper - leading_zero_count + 1023;
     int bits = 0;
     if (power2 <= 0) {
         // Subnormal, or zero.
@@ -562,8 +562,8 @@ int eisel_lemire(int w, int q) {
         // An exact tie can only come from a small power of ten, and then the
         // low product is zero and the dropped bits are exactly one half:
         // round it to even instead of up.
-        if (ult(lo, 2) && q >= -4 && q <= 23 && (mant & 3) == 1) {
-            if (mant << upper + 9 == hi) {
+        if (is_unsigned_less(product_low, 2) && decimal_exponent >= -4 && decimal_exponent <= 23 && (mant & 3) == 1) {
+            if (mant << upper + 9 == product_high) {
                 mant = mant & ~1;
             }
         }
@@ -579,7 +579,7 @@ int eisel_lemire(int w, int q) {
         }
         bits = power2 << 52 | mant;
     }
-    if (unsure) {
+    if (is_unsure) {
         return -bits - 1;
     }
     return bits;
@@ -589,32 +589,32 @@ int leading_zeros(int x) {
     if (x < 0) {
         return 0;
     }
-    int n = 0;
-    int v = x;
-    if (v >> 32 == 0) {
-        n = n + 32;
-        v = v << 32;
+    int zero_count = 0;
+    int shifted = x;
+    if (shifted >> 32 == 0) {
+        zero_count = zero_count + 32;
+        shifted = shifted << 32;
     }
-    if (v >> 48 == 0) {
-        n = n + 16;
-        v = v << 16;
+    if (shifted >> 48 == 0) {
+        zero_count = zero_count + 16;
+        shifted = shifted << 16;
     }
-    if (v >> 56 == 0) {
-        n = n + 8;
-        v = v << 8;
+    if (shifted >> 56 == 0) {
+        zero_count = zero_count + 8;
+        shifted = shifted << 8;
     }
-    if (v >> 60 == 0) {
-        n = n + 4;
-        v = v << 4;
+    if (shifted >> 60 == 0) {
+        zero_count = zero_count + 4;
+        shifted = shifted << 4;
     }
-    if (v >> 62 == 0) {
-        n = n + 2;
-        v = v << 2;
+    if (shifted >> 62 == 0) {
+        zero_count = zero_count + 2;
+        shifted = shifted << 2;
     }
-    if (v >> 63 == 0) {
-        n = n + 1;
+    if (shifted >> 63 == 0) {
+        zero_count = zero_count + 1;
     }
-    return n;
+    return zero_count;
 }
 
 // The correctly rounded bits, starting from a guess at most a float or two
@@ -625,16 +625,16 @@ int leading_zeros(int x) {
 // halfway point between two floats has at most 767 significant digits, so
 // none lies strictly between the kept digits and the full value, and the 1
 // keeps the full value's side when the kept digits equal one exactly.
-int exact_bits(str s, int first, int last, int nd, int e10, int guess) {
+int exact_bits(str text, int first, int last, int significant_digits, int e10, int guess) {
     List<int> big = [];
     int chunk = 0;
     int held = 0;
     int used = 0;
-    int j = first;
-    while (j <= last && used < 800) {
-        int ch = s.byte_at(j);
-        if (ch != '.') {
-            chunk = chunk * 10 + ch - 48;
+    int index = first;
+    while (index <= last && used < 800) {
+        int octet = text.byte_at(index);
+        if (octet != '.') {
+            chunk = chunk * 10 + octet - 48;
             held = held + 1;
             used = used + 1;
             if (held == 9) {
@@ -643,66 +643,66 @@ int exact_bits(str s, int first, int last, int nd, int e10, int guess) {
                 held = 0;
             }
         }
-        j = j + 1;
+        index = index + 1;
     }
     if (held > 0) {
         mul_add(big, pow10_int(held), chunk);
     }
     int scale = e10;
-    if (nd > 800) {
+    if (significant_digits > 800) {
         mul_add(big, 10, 1);
-        scale = e10 + nd - 800 - 1;
+        scale = e10 + significant_digits - 800 - 1;
     }
-    int b = guess;
-    bool moved = true;
-    while (moved) {
-        moved = false;
-        if (b < inf_bits()) {
-            int up = compare_half(big, scale, b);
-            if (up > 0 || up == 0 && (b & 1) == 1) {
-                b = b + 1;
-                moved = true;
+    int candidate_bits = guess;
+    bool is_moved = true;
+    while (is_moved) {
+        is_moved = false;
+        if (candidate_bits < inf_bits()) {
+            int up_comparison = compare_half(big, scale, candidate_bits);
+            if (up_comparison > 0 || up_comparison == 0 && (candidate_bits & 1) == 1) {
+                candidate_bits = candidate_bits + 1;
+                is_moved = true;
             }
         }
-        if (!moved && b > 0) {
-            int down = compare_half(big, scale, b - 1);
-            if (down < 0 || down == 0 && (b & 1) == 1) {
-                b = b - 1;
-                moved = true;
+        if (!is_moved && candidate_bits > 0) {
+            int down = compare_half(big, scale, candidate_bits - 1);
+            if (down < 0 || down == 0 && (candidate_bits & 1) == 1) {
+                candidate_bits = candidate_bits - 1;
+                is_moved = true;
             }
         }
     }
-    return b;
+    return candidate_bits;
 }
 
 // The sign of big * 10^e10 minus the point halfway between the float with
-// bits `b` and the next one up.
+// bits `bits` and the next one up.
 //
 // The halfway point is (2m + 1) * 2^(e2 - 1) for the float m * 2^e2, so both
 // sides are whole numbers times powers of 2 and 5: move the power of 5 to
 // whichever side makes it a multiplication, then line up the powers of 2.
-int compare_half(List<int> big, int e10, int b) {
-    int ieee_exp = b >> 52;
-    int m = b & hidden_bit() - 1;
-    int e2 = -1074;
+int compare_half(List<int> big, int e10, int bits) {
+    int ieee_exp = bits >> 52;
+    int significand = bits & hidden_bit() - 1;
+    int binary_exponent = -1074;
     if (ieee_exp != 0) {
-        m = m | hidden_bit();
-        e2 = ieee_exp - 1075;
+        significand = significand | hidden_bit();
+        binary_exponent = ieee_exp - 1075;
     }
-    int t = 2 * m + 1;
+    int odd_significand = 2 * significand + 1;
     List<int> lhs = clone(big);
-    List<int> rhs = [t & mask32(), t >> 32];
+    List<int> rhs = [odd_significand & mask32(), odd_significand >> 32];
     if (e10 >= 0) {
         mul_pow5(lhs, e10);
     } else {
         mul_pow5(rhs, -e10);
     }
-    int lp = e10;
-    int rp = e2 - 1;
-    if (lp > rp) {
-        lhs = shift_left(lhs, lp - rp);
+    int left_power = e10;
+    int right_power = binary_exponent - 1;
+    if (left_power > right_power) {
+        lhs = shift_left(lhs, left_power - right_power);
     } else {
-        rhs = shift_left(rhs, rp - lp);
+        rhs = shift_left(rhs, right_power - left_power);
     }
     return compare_big(lhs, rhs);
 }
@@ -710,51 +710,51 @@ int compare_half(List<int> big, int e10, int b) {
 // Big integers: a List of 32-bit limbs, least significant first.
 // a = a * m + add, for m and add below 2^31: a limb times m plus the carry
 // stays below 2^63.
-void mul_add(List<int> a, int m, int add) {
+void mul_add(List<int> limbs, int multiplier, int add) {
     int carry = add;
-    for (int i in 0 .. a.size()) {
-        int v = a[i] * m + carry;
-        a[i] = v & mask32();
-        carry = v >> 32;
+    for (int i in 0 .. limbs.size()) {
+        int product = limbs[i] * multiplier + carry;
+        limbs[i] = product & mask32();
+        carry = product >> 32;
     }
     while (carry != 0) {
-        a.push(carry & mask32());
+        limbs.push(carry & mask32());
         carry = carry >> 32;
     }
 }
 
-void mul_pow5(List<int> a, int e) {
-    int left = e;
+void mul_pow5(List<int> limbs, int exponent) {
+    int left = exponent;
     // 5^13 is the largest power of 5 below 2^31.
     while (left >= 13) {
-        mul_add(a, 1220703125, 0);
+        mul_add(limbs, 1220703125, 0);
         left = left - 13;
     }
-    int p = 1;
+    int power = 1;
     while (left > 0) {
-        p = p * 5;
+        power = power * 5;
         left = left - 1;
     }
-    mul_add(a, p, 0);
+    mul_add(limbs, power, 0);
 }
 
-List<int> shift_left(List<int> a, int bits) {
+List<int> shift_left(List<int> limbs, int bits) {
     List<int> out = [];
     int words = bits / 32;
-    int r = bits % 32;
+    int bit_shift = bits % 32;
     for (int i in 0 .. words) {
         out.push(0);
     }
-    if (r == 0) {
-        for (int v in a) {
-            out.push(v);
+    if (bit_shift == 0) {
+        for (int limb in limbs) {
+            out.push(limb);
         }
         return out;
     }
     int carry = 0;
-    for (int v in a) {
-        out.push(v << r & mask32() | carry);
-        carry = v >> 32 - r;
+    for (int limb in limbs) {
+        out.push(limb << bit_shift & mask32() | carry);
+        carry = limb >> 32 - bit_shift;
     }
     if (carry != 0) {
         out.push(carry);
@@ -762,32 +762,32 @@ List<int> shift_left(List<int> a, int bits) {
     return out;
 }
 
-int significant_limbs(List<int> a) {
-    int n = a.size();
-    while (n > 0 && a[n - 1] == 0) {
-        n = n - 1;
+int significant_limbs(List<int> limbs) {
+    int count = limbs.size();
+    while (count > 0 && limbs[count - 1] == 0) {
+        count = count - 1;
     }
-    return n;
+    return count;
 }
 
-int compare_big(List<int> a, List<int> b) {
-    int na = significant_limbs(a);
-    int nb = significant_limbs(b);
-    if (na != nb) {
-        if (na < nb) {
+int compare_big(List<int> left, List<int> right) {
+    int left_count = significant_limbs(left);
+    int right_count = significant_limbs(right);
+    if (left_count != right_count) {
+        if (left_count < right_count) {
             return -1;
         }
         return 1;
     }
-    int i = na - 1;
-    while (i >= 0) {
-        if (a[i] != b[i]) {
-            if (a[i] < b[i]) {
+    int index = left_count - 1;
+    while (index >= 0) {
+        if (left[index] != right[index]) {
+            if (left[index] < right[index]) {
                 return -1;
             }
             return 1;
         }
-        i = i - 1;
+        index = index - 1;
     }
     return 0;
 }
@@ -831,12 +831,12 @@ int compare_big(List<int> a, List<int> b) {
 //     assert all(F(e) & (2**64 - 1) != 2**64 - 1 for e in range(-342, 342))
 //
 // with each word written as its two's-complement int, four to a line.
-int pow10_hi(int e) {
-    return POW10_HI[e + 342];
+int pow10_hi(int exponent) {
+    return POW10_HI[exponent + 342];
 }
 
-int pow10_lo(int e) {
-    return POW10_LO[e + 342];
+int pow10_lo(int exponent) {
+    return POW10_LO[exponent + 342];
 }
 
 const Array<int> POW10_HI = [

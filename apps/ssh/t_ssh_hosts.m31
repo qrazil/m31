@@ -14,15 +14,15 @@ import encoding.base64;
 import ssh;
 import ssh.sshhosts;
 
-int check(int n, bool ok, str label) {
-    if (!ok) {
+int check(int passed_count, bool is_ok, str label) {
+    if (!is_ok) {
         trap("check failed: " + label);
     }
-    return n + 1;
+    return passed_count + 1;
 }
 
-int error_code(sshhosts.Error e) {
-    match (e) {
+int error_code(sshhosts.Error error) {
+    match (error) {
         case Io: {
             return 0;
         }
@@ -44,19 +44,19 @@ int error_code(sshhosts.Error e) {
     }
 }
 
-const int ERR_IO = 0;
-const int ERR_MALFORMED = 1;
-const int ERR_BAD_KEY = 2;
-const int ERR_UNKNOWN = 3;
-const int ERR_REVOKED = 4;
-const int ERR_WRITE = 5;
+const int ERROR_IO = 0;
+const int ERROR_MALFORMED = 1;
+const int ERROR_BAD_KEY = 2;
+const int ERROR_UNKNOWN = 3;
+const int ERROR_REVOKED = 4;
+const int ERROR_WRITE = 5;
 
 bytes key_of(int fill) {
     bytes out = [];
-    int i = 0;
-    while (i < 32) {
-        out.push((fill + i) & 0xFF);
-        i = i + 1;
+    int index = 0;
+    while (index < 32) {
+        out.push((fill + index) & 0xFF);
+        index = index + 1;
     }
     return out;
 }
@@ -70,18 +70,18 @@ str b64_of(bytes key) {
     return base64.encode(blob);
 }
 
-str ed(bytes key) {
+str ed25519_line(bytes key) {
     return "ssh-ed25519 " + b64_of(key);
 }
 
 // -1 if `text` parsed, else the error code.
 int parse_refusal(str text) {
     match (sshhosts.parse(text)) {
-        case Ok(sshhosts.KnownHosts kh): {
+        case Ok(_): {
             return -1;
         }
-        case Err(sshhosts.Error e): {
-            return error_code(e);
+        case Err(sshhosts.Error error): {
+            return error_code(error);
         }
     }
 }
@@ -91,61 +91,61 @@ int parse_refusal(str text) {
 // hit, or the refusal's code.
 sshhosts.KnownHosts must_parse(str text) {
     match (sshhosts.parse(text)) {
-        case Ok(sshhosts.KnownHosts kh): {
-            return kh;
+        case Ok(sshhosts.KnownHosts known_hosts): {
+            return known_hosts;
         }
-        case Err(sshhosts.Error e): {
-            trap("known_hosts did not parse: " + e.to_str());
+        case Err(sshhosts.Error error): {
+            trap("known_hosts did not parse: " + error.to_str());
         }
     }
 }
 
 // The first byte of every key returned for `host:port`, comma-joined, or
 // "!<code>" for a refusal.
-str answer(sshhosts.KnownHosts kh, str host, int port) {
-    match (kh.keys_for(host, port)) {
+str answer(sshhosts.KnownHosts known_hosts, str host, int port) {
+    match (known_hosts.keys_for(host, port)) {
         case Ok(List<bytes> keys): {
             List<str> firsts = [];
-            for (bytes k in keys) {
-                firsts.push(k[0].to_str());
+            for (bytes key in keys) {
+                firsts.push(key[0].to_str());
             }
             return firsts.join(",");
         }
-        case Err(sshhosts.Error e): {
-            return "!" + error_code(e).to_str();
+        case Err(sshhosts.Error error): {
+            return "!" + error_code(error).to_str();
         }
     }
 }
 
 int checks = 0;
-bytes k1 = key_of(10);
-bytes k2 = key_of(50);
-bytes k3 = key_of(90);
+bytes first_key = key_of(10);
+bytes second_key = key_of(50);
+bytes third_key = key_of(90);
 
 // --- 1. matching rules -------------------------------------------------------
 
-str rules = "# a comment\n\n" + "example.com,10.0.0.1 " + ed(k1) + " comment on the line\n" + "[example.com]:2222 " + ed(k2) + "\n" + "  \t*.corp.example,!secret.corp.example\t" + ed(k3) + "\n" + "h?.lab " + ed(k1) + "\r\n" + "twice.example " + ed(k1) + "\n" + "twice.example " + ed(k2) + "\n";
-sshhosts.KnownHosts kh = must_parse(rules);
-checks = check(checks, answer(kh, "example.com", 22) == "10", "a plain name matches port 22");
-checks = check(checks, answer(kh, "EXAMPLE.Com", 22) == "10", "host names compare case-insensitively");
-checks = check(checks, answer(kh, "10.0.0.1", 22) == "10", "the second name of a list matches");
-checks = check(checks, answer(kh, "example.com", 2222) == "50", "[host]:port matches only that port");
-checks = check(checks, answer(kh, "example.com", 2223) == "!3", "another port is unknown");
-checks = check(checks, answer(kh, "10.0.0.1", 2222) == "!3", "a plain name does not match a non-default port");
-checks = check(checks, answer(kh, "a.corp.example", 22) == "90", "a * wildcard matches");
-checks = check(checks, answer(kh, "x.y.corp.example", 22) == "90", "a * wildcard spans dots");
-checks = check(checks, answer(kh, "secret.corp.example", 22) == "!3", "a ! pattern excludes");
-checks = check(checks, answer(kh, "corp.example", 22) == "!3", "*.corp.example needs the dot");
-checks = check(checks, answer(kh, "h1.lab", 22) == "10", "a ? wildcard matches one character");
-checks = check(checks, answer(kh, "h.lab", 22) == "!3", "a ? wildcard does not match nothing");
-checks = check(checks, answer(kh, "h12.lab", 22) == "!3", "a ? wildcard does not match two");
-checks = check(checks, answer(kh, "twice.example", 22) == "10,50", "two entries for one host both come back, in file order");
-checks = check(checks, answer(kh, "nowhere", 22) == "!3", "an unlisted host is unknown (there is no trust on first use)");
-checks = check(checks, answer(kh, "", 22) == "!3", "an empty host is unknown");
+str rules = "# a comment\n\n" + "example.com,10.0.0.1 " + ed25519_line(first_key) + " comment on the line\n" + "[example.com]:2222 " + ed25519_line(second_key) + "\n" + "  \t*.corp.example,!secret.corp.example\t" + ed25519_line(third_key) + "\n" + "h?.lab " + ed25519_line(first_key) + "\r\n" + "twice.example " + ed25519_line(first_key) + "\n" + "twice.example " + ed25519_line(second_key) + "\n";
+sshhosts.KnownHosts rules_hosts = must_parse(rules);
+checks = check(checks, answer(rules_hosts, "example.com", 22) == "10", "a plain name matches port 22");
+checks = check(checks, answer(rules_hosts, "EXAMPLE.Com", 22) == "10", "host names compare case-insensitively");
+checks = check(checks, answer(rules_hosts, "10.0.0.1", 22) == "10", "the second name of a list matches");
+checks = check(checks, answer(rules_hosts, "example.com", 2222) == "50", "[host]:port matches only that port");
+checks = check(checks, answer(rules_hosts, "example.com", 2223) == "!3", "another port is unknown");
+checks = check(checks, answer(rules_hosts, "10.0.0.1", 2222) == "!3", "a plain name does not match a non-default port");
+checks = check(checks, answer(rules_hosts, "a.corp.example", 22) == "90", "a * wildcard matches");
+checks = check(checks, answer(rules_hosts, "x.y.corp.example", 22) == "90", "a * wildcard spans dots");
+checks = check(checks, answer(rules_hosts, "secret.corp.example", 22) == "!3", "a ! pattern excludes");
+checks = check(checks, answer(rules_hosts, "corp.example", 22) == "!3", "*.corp.example needs the dot");
+checks = check(checks, answer(rules_hosts, "h1.lab", 22) == "10", "a ? wildcard matches one character");
+checks = check(checks, answer(rules_hosts, "h.lab", 22) == "!3", "a ? wildcard does not match nothing");
+checks = check(checks, answer(rules_hosts, "h12.lab", 22) == "!3", "a ? wildcard does not match two");
+checks = check(checks, answer(rules_hosts, "twice.example", 22) == "10,50", "two entries for one host both come back, in file order");
+checks = check(checks, answer(rules_hosts, "nowhere", 22) == "!3", "an unlisted host is unknown (there is no trust on first use)");
+checks = check(checks, answer(rules_hosts, "", 22) == "!3", "an empty host is unknown");
 
 // --- 2. markers and skipped lines -------------------------------------------
 
-sshhosts.KnownHosts marks = must_parse("@revoked bad.example " + ed(k2) + "\n" + "bad.example " + ed(k1) + "\n" + "bad.example " + ed(k2) + "\n" + "onlyrevoked.example " + ed(k2) + "\n" + "@revoked onlyrevoked.example " + ed(k2) + "\n" + "@cert-authority *.ca.example " + ed(k3) + "\n" + "rsa.example ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC\n" + "ecdsa.example ecdsa-sha2-nistp256 notbase64!!\n");
+sshhosts.KnownHosts marks = must_parse("@revoked bad.example " + ed25519_line(second_key) + "\n" + "bad.example " + ed25519_line(first_key) + "\n" + "bad.example " + ed25519_line(second_key) + "\n" + "onlyrevoked.example " + ed25519_line(second_key) + "\n" + "@revoked onlyrevoked.example " + ed25519_line(second_key) + "\n" + "@cert-authority *.ca.example " + ed25519_line(third_key) + "\n" + "rsa.example ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC\n" + "ecdsa.example ecdsa-sha2-nistp256 notbase64!!\n");
 checks = check(checks, answer(marks, "bad.example", 22) == "10", "a @revoked key is removed from the answer");
 checks = check(checks, answer(marks, "onlyrevoked.example", 22) == "!4", "a host with only revoked keys is Revoked");
 checks = check(checks, answer(marks, "x.ca.example", 22) == "!3", "a @cert-authority line grants nothing");
@@ -155,37 +155,37 @@ checks = check(checks, answer(marks, "ecdsa.example", 22) == "!3", "a non-ed2551
 // --- 3. one fixture per Error variant ---------------------------------------
 
 match (sshhosts.load("/nonexistent/dir/known_hosts")) {
-    case Ok(sshhosts.KnownHosts x): {
+    case Ok(_): {
         trap("a missing file loaded");
     }
-    case Err(sshhosts.Error e): {
-        checks = check(checks, error_code(e) == ERR_IO, "a missing file is Error.Io");
+    case Err(sshhosts.Error error): {
+        checks = check(checks, error_code(error) == ERROR_IO, "a missing file is Error.Io");
     }
 }
-checks = check(checks, parse_refusal("example.com ssh-ed25519\n") == ERR_MALFORMED, "a line without a key is MalformedLine");
-checks = check(checks, parse_refusal("example.com\n") == ERR_MALFORMED, "a line with one field is MalformedLine");
-checks = check(checks, parse_refusal("@revoked example.com\n") == ERR_MALFORMED, "a marker with too few fields is MalformedLine");
-checks = check(checks, parse_refusal("@bogus example.com " + ed(k1) + "\n") == ERR_MALFORMED, "an unknown marker is MalformedLine");
-checks = check(checks, parse_refusal("a,,b " + ed(k1) + "\n") == ERR_MALFORMED, "an empty pattern is MalformedLine");
-checks = check(checks, parse_refusal(",a " + ed(k1) + "\n") == ERR_MALFORMED, "a leading comma is MalformedLine");
-checks = check(checks, parse_refusal("|1|AAAA|AAAA " + ed(k1) + "\n") == ERR_MALFORMED, "a hashed entry whose hash is the wrong size is MalformedLine");
-checks = check(checks, parse_refusal("|1|!!!|!!! " + ed(k1) + "\n") == ERR_MALFORMED, "a hashed entry that is not base64 is MalformedLine");
-checks = check(checks, parse_refusal("|2|AAAA|AAAAAAAAAAAAAAAAAAAAAAAAAAA= " + ed(k1) + "\n") == ERR_MALFORMED, "a hash scheme other than 1 is MalformedLine");
-checks = check(checks, parse_refusal("|1|Lwm6H/DrNjLZVKRxcfktUhO3emc=|P2mvjY0ed6Chn7W0BSHQRDo3qgY=,other " + ed(k1) + "\n") == ERR_MALFORMED, "a hashed entry in a list is MalformedLine");
-checks = check(checks, parse_refusal("example.com ssh-ed25519 !!!notbase64\n") == ERR_BAD_KEY, "an ed25519 key that is not base64 is BadKey");
+checks = check(checks, parse_refusal("example.com ssh-ed25519\n") == ERROR_MALFORMED, "a line without a key is MalformedLine");
+checks = check(checks, parse_refusal("example.com\n") == ERROR_MALFORMED, "a line with one field is MalformedLine");
+checks = check(checks, parse_refusal("@revoked example.com\n") == ERROR_MALFORMED, "a marker with too few fields is MalformedLine");
+checks = check(checks, parse_refusal("@bogus example.com " + ed25519_line(first_key) + "\n") == ERROR_MALFORMED, "an unknown marker is MalformedLine");
+checks = check(checks, parse_refusal("a,,b " + ed25519_line(first_key) + "\n") == ERROR_MALFORMED, "an empty pattern is MalformedLine");
+checks = check(checks, parse_refusal(",a " + ed25519_line(first_key) + "\n") == ERROR_MALFORMED, "a leading comma is MalformedLine");
+checks = check(checks, parse_refusal("|1|AAAA|AAAA " + ed25519_line(first_key) + "\n") == ERROR_MALFORMED, "a hashed entry whose hash is the wrong size is MalformedLine");
+checks = check(checks, parse_refusal("|1|!!!|!!! " + ed25519_line(first_key) + "\n") == ERROR_MALFORMED, "a hashed entry that is not base64 is MalformedLine");
+checks = check(checks, parse_refusal("|2|AAAA|AAAAAAAAAAAAAAAAAAAAAAAAAAA= " + ed25519_line(first_key) + "\n") == ERROR_MALFORMED, "a hash scheme other than 1 is MalformedLine");
+checks = check(checks, parse_refusal("|1|Lwm6H/DrNjLZVKRxcfktUhO3emc=|P2mvjY0ed6Chn7W0BSHQRDo3qgY=,other " + ed25519_line(first_key) + "\n") == ERROR_MALFORMED, "a hashed entry in a list is MalformedLine");
+checks = check(checks, parse_refusal("example.com ssh-ed25519 !!!notbase64\n") == ERROR_BAD_KEY, "an ed25519 key that is not base64 is BadKey");
 bytes short_blob = [];
 ssh.push_string(short_blob, "ssh-ed25519".to_bytes());
 ssh.push_string(short_blob, key_of(1).substr(0, 31));
-checks = check(checks, parse_refusal("example.com ssh-ed25519 " + base64.encode(short_blob) + "\n") == ERR_BAD_KEY, "a 31-byte key is BadKey");
+checks = check(checks, parse_refusal("example.com ssh-ed25519 " + base64.encode(short_blob) + "\n") == ERROR_BAD_KEY, "a 31-byte key is BadKey");
 bytes wrong_type = [];
 ssh.push_string(wrong_type, "ssh-rsa".to_bytes());
 ssh.push_string(wrong_type, key_of(1));
-checks = check(checks, parse_refusal("example.com ssh-ed25519 " + base64.encode(wrong_type) + "\n") == ERR_BAD_KEY, "a blob whose inner type is not ssh-ed25519 is BadKey");
-checks = check(checks, parse_refusal("example.com ssh-ed25519 AAAA\n") == ERR_BAD_KEY, "a truncated blob is BadKey");
+checks = check(checks, parse_refusal("example.com ssh-ed25519 " + base64.encode(wrong_type) + "\n") == ERROR_BAD_KEY, "a blob whose inner type is not ssh-ed25519 is BadKey");
+checks = check(checks, parse_refusal("example.com ssh-ed25519 AAAA\n") == ERROR_BAD_KEY, "a truncated blob is BadKey");
 checks = check(checks, parse_refusal("") == -1, "an empty file parses (and trusts nothing)");
 checks = check(checks, answer(must_parse(""), "example.com", 22) == "!3", "an empty file trusts nothing");
 // The refusal is for a malformed line even when other lines are fine.
-checks = check(checks, parse_refusal("good.example " + ed(k1) + "\nbad line\n") == ERR_MALFORMED, "one malformed line fails the whole file");
+checks = check(checks, parse_refusal("good.example " + ed25519_line(first_key) + "\nbad line\n") == ERROR_MALFORMED, "one malformed line fails the whole file");
 // UnknownHost and Revoked are covered above (answer == "!3" / "!4").
 
 // --- 4. hashed entries written by a real ssh-keygen -H ----------------------
@@ -197,8 +197,8 @@ match (hashed.keys_for("example.com", 22)) {
     case Ok(List<bytes> keys): {
         checks = check(checks, keys.size() == 1 && keys[0].hex() == "f65819b89e83f716607f47ad4643f67651e19ee92d403805f4d9b10eb6419119", "a hashed entry yields the right key");
     }
-    case Err(sshhosts.Error e): {
-        trap("hashed example.com: " + e.to_str());
+    case Err(sshhosts.Error error): {
+        trap("hashed example.com: " + error.to_str());
     }
 }
 checks = check(checks, answer(hashed, "EXAMPLE.COM", 22) != "!3", "a hashed entry matches case-insensitively");
@@ -244,41 +244,41 @@ checks = check(checks, !revoking.is_revoked("other.example", 22, hk), "is_revoke
 checks = check(checks, !revoking.is_revoked("revoked.example", 2222, hk), "is_revoked: not on another port");
 checks = check(checks, revoking.is_revoked("a.wild.example", 22, hk2), "is_revoked: a wildcard @revoked line");
 checks = check(checks, !revoking.is_revoked("plain.example", 22, hk3), "is_revoked: a trusted key is not revoked");
-checks = check(checks, ERR_WRITE == error_code(sshhosts.Error.Write), "Error.Write has its own code");
+checks = check(checks, ERROR_WRITE == error_code(sshhosts.Error.Write), "Error.Write has its own code");
 print(checks.to_str() + " checks, 0 failures");
 
 // --- 5. a plain file and its `ssh-keygen -H` copy agree ----------------------
 
-List<str> arguments = os.args();
+List<str> arguments = os.arguments();
 if (arguments.size() >= 3) {
-    sshhosts.KnownHosts plain = kh;
-    sshhosts.KnownHosts copy = kh;
+    sshhosts.KnownHosts plain = rules_hosts;
+    sshhosts.KnownHosts copy = rules_hosts;
     match (sshhosts.load(arguments[1])) {
-        case Ok(sshhosts.KnownHosts x): {
-            plain = x;
+        case Ok(sshhosts.KnownHosts loaded_hosts): {
+            plain = loaded_hosts;
         }
-        case Err(sshhosts.Error e): {
-            trap("plain known_hosts: " + e.to_str());
+        case Err(sshhosts.Error error): {
+            trap("plain known_hosts: " + error.to_str());
         }
     }
     match (sshhosts.load(arguments[2])) {
-        case Ok(sshhosts.KnownHosts x): {
-            copy = x;
+        case Ok(sshhosts.KnownHosts loaded_hosts): {
+            copy = loaded_hosts;
         }
-        case Err(sshhosts.Error e): {
-            trap("hashed known_hosts: " + e.to_str());
+        case Err(sshhosts.Error error): {
+            trap("hashed known_hosts: " + error.to_str());
         }
     }
     List<str> names = ["oracle.example", "ORACLE.example", "other.example", "10.1.2.3", "unlisted.example", "lab.example"];
     List<int> ports = [22, 22, 2222, 22, 22, 2200];
-    int i = 0;
-    while (i < names.size()) {
-        str a = answer(plain, names[i], ports[i]);
-        str b = answer(copy, names[i], ports[i]);
-        if (a != b) {
-            trap("plain and hashed known_hosts disagree for " + names[i] + ": " + a + " vs " + b);
+    int name_index = 0;
+    while (name_index < names.size()) {
+        str plain_answer = answer(plain, names[name_index], ports[name_index]);
+        str copy_answer = answer(copy, names[name_index], ports[name_index]);
+        if (plain_answer != copy_answer) {
+            trap("plain and hashed known_hosts disagree for " + names[name_index] + ": " + plain_answer + " vs " + copy_answer);
         }
-        print(names[i] + ":" + ports[i].to_str() + " -> " + a);
-        i = i + 1;
+        print(names[name_index] + ":" + ports[name_index].to_str() + " -> " + plain_answer);
+        name_index = name_index + 1;
     }
 }

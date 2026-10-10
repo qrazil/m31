@@ -9,26 +9,26 @@ enum Error {
     BadCode(int, int);
 }
 
-Result<int, Error> take(int n) {
-    if (n % 1024 == 1023) {
-        return Result<int, Error>.Err(Error.Truncated(n));
+Result<int, Error> take(int number) {
+    if (number % 1024 == 1023) {
+        return Result<int, Error>.Err(Error.Truncated(number));
     }
-    return Result<int, Error>.Ok(n & 15);
+    return Result<int, Error>.Ok(number & 15);
 }
 
 int total = 0;
 int bad = 0;
-int i = 0;
-while (i < 50000000) {
-    match (take(i)) {
-        case Ok(int v): {
-            total = total + v;
+int index = 0;
+while (index < 50000000) {
+    match (take(index)) {
+        case Ok(int value): {
+            total = total + value;
         }
-        case Err(Error e): {
+        case Err(Error error): {
             bad = bad + 1;
         }
     }
-    i = i + 1;
+    index = index + 1;
 }
 print(total);
 print(bad);

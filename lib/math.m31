@@ -54,37 +54,37 @@ pub float trunc(float x) {
     if (!(fabs(x) < whole_from())) {
         return x;
     }
-    float t = float(int(x));
+    float truncated = float(int(x));
     // int(-0.5) is 0, and the answer is -0.0, not 0.0: C keeps the sign of a
     // zero result, so this does too.
-    if (t == 0.0 && x < 0.0) {
+    if (truncated == 0.0 && x < 0.0) {
         return -0.0;
     }
-    if (t == 0.0) {
+    if (truncated == 0.0) {
         return x * 0.0;
     }
-    return t;
+    return truncated;
 }
 
 /// The largest whole number no greater than `x`, as a float. It stays a
 /// float: `floor` of 1e300 has no int to become.
 pub float floor(float x) {
-    float t = trunc(x);
-    if (t > x) {
-        return t - 1.0;
+    float truncated = trunc(x);
+    if (truncated > x) {
+        return truncated - 1.0;
     }
-    return t;
+    return truncated;
 }
 
 /// The smallest whole number no less than `x`, as a float.
 pub float ceil(float x) {
-    float t = trunc(x);
+    float truncated = trunc(x);
     // ceil(-0.5) is -0.0, and trunc already gave exactly that: t < x only
     // happens for a positive fraction, so the +1 never produces a zero.
-    if (t < x) {
-        return t + 1.0;
+    if (truncated < x) {
+        return truncated + 1.0;
     }
-    return t;
+    return truncated;
 }
 
 /// `x` to the nearest whole number, halves away from zero -- C's `round`.
@@ -93,15 +93,15 @@ pub float ceil(float x) {
 /// addition itself rounds up to 1.0. `x - trunc(x)` is exact below 2^52, so
 /// comparing the fraction loses nothing.
 pub float round(float x) {
-    float t = trunc(x);
-    float frac = x - t;
+    float truncated = trunc(x);
+    float frac = x - truncated;
     if (frac >= 0.5) {
-        return t + 1.0;
+        return truncated + 1.0;
     }
     if (frac <= -0.5) {
-        return t - 1.0;
+        return truncated - 1.0;
     }
-    return t;
+    return truncated;
 }
 
 /// The square root, correctly rounded -- the same bits C's `sqrt` gives.
@@ -118,30 +118,30 @@ pub float sqrt(float x) {
     }
     // Multiplying by 4 is exact, subnormals included, so the scaled value
     // carries every bit of the original.
-    float m = x;
-    int k = 0;
-    while (m >= 1.0) {
-        m = m / 4.0;
-        k = k + 1;
+    float scaled = x;
+    int exponent = 0;
+    while (scaled >= 1.0) {
+        scaled = scaled / 4.0;
+        exponent = exponent + 1;
     }
-    while (m < 0.25) {
-        m = m * 4.0;
-        k = k - 1;
+    while (scaled < 0.25) {
+        scaled = scaled * 4.0;
+        exponent = exponent - 1;
     }
-    float y = 0.41731 + 0.59016 * m;
+    float y = 0.41731 + 0.59016 * scaled;
     for (int i in 0 .. 5) {
-        y = 0.5 * (y + m / y);
+        y = 0.5 * (y + scaled / y);
     }
-    y = settle_sqrt(m, y);
+    y = settle_sqrt(scaled, y);
     // Undo the scaling: sqrt(m * 4^k) = sqrt(m) * 2^k, exact because the
     // result only shrinks towards 1.
-    while (k > 0) {
+    while (exponent > 0) {
         y = y * 2.0;
-        k = k - 1;
+        exponent = exponent - 1;
     }
-    while (k < 0) {
+    while (exponent < 0) {
         y = y / 2.0;
-        k = k + 1;
+        exponent = exponent + 1;
     }
     return y;
 }
@@ -154,14 +154,14 @@ pub float sqrt(float x) {
 // than approximate: r is a multiple of u^2 and the u^2/4 terms of the squares
 // fall between multiples, so they can never decide a comparison. A square
 // root of a double never lands on a midpoint, so there is no tie to break.
-float settle_sqrt(float m, float y) {
-    float u = 1.1102230246251565e-16;
+float settle_sqrt(float scaled, float y) {
+    float ulp = 1.1102230246251565e-16;
     for (int guard in 0 .. 4) {
-        float r = residual(m, y);
-        if (r > y * u) {
-            y = y + u;
-        } else if (r <= 0.0 - y * u) {
-            y = y - u;
+        float leftover = residual(scaled, y);
+        if (leftover > y * ulp) {
+            y = y + ulp;
+        } else if (leftover <= 0.0 - y * ulp) {
+            y = y - ulp;
         } else {
             return y;
         }
@@ -173,19 +173,19 @@ float settle_sqrt(float m, float y) {
 // error (Dekker's two-product), and m - p is exact because p is within a
 // factor of two of m (Sterbenz). This needs the C compiler not to fuse
 // `a * b + c` into one instruction -- see the note at the top.
-float residual(float m, float y) {
-    float p = y * y;
-    float hi = split_hi(y);
-    float lo = y - hi;
-    float err = hi * hi - p + 2.0 * hi * lo + lo * lo;
-    return m - p - err;
+float residual(float scaled, float y) {
+    float product = y * y;
+    float high = split_hi(y);
+    float low = y - high;
+    float rounding_error = high * high - product + 2.0 * high * low + low * low;
+    return scaled - product - rounding_error;
 }
 
 // The top 26 bits of a float, by Veltkamp's split: 2^27 + 1 scales it so the
 // rounding of the product discards exactly the low bits.
-float split_hi(float a) {
-    float t = 134217729.0 * a;
-    return t - (t - a);
+float split_hi(float value) {
+    float scaled = 134217729.0 * value;
+    return scaled - (scaled - value);
 }
 
 // ln 2 in two parts: `hi` has trailing zero bits, so k * hi is exact for the
@@ -212,41 +212,41 @@ pub float exp(float x) {
     if (x < -745.2) {
         return 0.0;
     }
-    float k = round(x / 0.6931471805599453);
-    float r = x - k * ln2_hi() - k * ln2_lo();
+    float multiple = round(x / 0.6931471805599453);
+    float reduced = x - multiple * ln2_hi() - multiple * ln2_lo();
     // Horner form, innermost term first: 1 + r(1 + r/2(1 + r/3(...))).
     // Summing the smallest terms first means the one rounding that matters
     // is the final `1 + r * t`, instead of twenty of them accumulating.
-    float t = 1.0;
-    int n = 20;
-    while (n >= 1) {
-        t = 1.0 + r * t / float(n);
-        n = n - 1;
+    float series = 1.0;
+    int term = 20;
+    while (term >= 1) {
+        series = 1.0 + reduced * series / float(term);
+        term = term - 1;
     }
-    return scale2(t, int(k));
+    return scale2(series, int(multiple));
 }
 
 // x * 2^k, one exact doubling at a time. Going through the subnormal range
 // in single steps rounds once per step instead of once in total, so the
 // scale-down is split: most of it while the value is still normal.
-float scale2(float x, int k) {
+float scale2(float x, int exponent) {
     float y = x;
-    int n = k;
-    while (n > 0) {
+    int remaining = exponent;
+    while (remaining > 0) {
         y = y * 2.0;
-        n = n - 1;
+        remaining = remaining - 1;
     }
-    while (n < -1000) {
+    while (remaining < -1000) {
         y = y / 2.0;
-        n = n + 1;
+        remaining = remaining + 1;
     }
-    if (n < 0) {
-        float f = 1.0;
-        while (n < 0) {
-            f = f / 2.0;
-            n = n + 1;
+    if (remaining < 0) {
+        float factor = 1.0;
+        while (remaining < 0) {
+            factor = factor / 2.0;
+            remaining = remaining + 1;
         }
-        y = y * f;
+        y = y * factor;
     }
     return y;
 }
@@ -267,28 +267,28 @@ pub float log(float x) {
     if (!is_finite(x)) {
         return x;
     }
-    float m = x;
-    int k = 0;
-    while (m >= 1.4142135623730951) {
-        m = m / 2.0;
-        k = k + 1;
+    float mantissa = x;
+    int exponent = 0;
+    while (mantissa >= 1.4142135623730951) {
+        mantissa = mantissa / 2.0;
+        exponent = exponent + 1;
     }
-    while (m < 0.7071067811865476) {
-        m = m * 2.0;
-        k = k - 1;
+    while (mantissa < 0.7071067811865476) {
+        mantissa = mantissa * 2.0;
+        exponent = exponent - 1;
     }
-    float s = (m - 1.0) / (m + 1.0);
+    float ratio = (mantissa - 1.0) / (mantissa + 1.0);
     // The odd series s + s^3/3 + s^5/5 + ..., summed innermost first for the
     // same reason as in `exp`.
-    float s2 = s * s;
-    float t = 0.0;
-    int n = 23;
-    while (n >= 3) {
-        t = s2 * (1.0 / float(n) + t);
-        n = n - 2;
+    float ratio_squared = ratio * ratio;
+    float series = 0.0;
+    int term = 23;
+    while (term >= 3) {
+        series = ratio_squared * (1.0 / float(term) + series);
+        term = term - 2;
     }
-    float fk = float(k);
-    return fk * ln2_hi() + (2.0 * s + (2.0 * s * t + fk * ln2_lo()));
+    float float_exponent = float(exponent);
+    return float_exponent * ln2_hi() + (2.0 * ratio + (2.0 * ratio * series + float_exponent * ln2_lo()));
 }
 
 /// `x` raised to `y`.
@@ -347,11 +347,11 @@ pub float pow(float x, float y) {
 // or collapses to zero depending on the sign, a base below 1 the other way
 // round, and exactly 1 stays 1 -- including -1, whose sign an infinite
 // exponent cannot settle.
-float pow_infinite(float ax, float y) {
-    if (ax == 1.0) {
+float pow_infinite(float magnitude, float y) {
+    if (magnitude == 1.0) {
         return 1.0;
     }
-    if (ax > 1.0 == y > 0.0) {
+    if (magnitude > 1.0 == y > 0.0) {
         return inf();
     }
     return 0.0;
@@ -365,26 +365,26 @@ float pow_infinite(float ax, float y) {
 // which carries about 106 bits, and each is held as a mantissa in [1, 2)
 // with its power of two apart, so no intermediate can overflow however
 // large n is. The answer is rounded to a float once, at the end.
-float pow_whole(float x, float n) {
+float pow_whole(float x, float exponent) {
     if (x == 0.0 || !is_finite(x)) {
-        return pow_plain(x, n);
+        return pow_plain(x, exponent);
     }
-    bool odd = fabs(n) - 2.0 * trunc(fabs(n) / 2.0) == 1.0;
-    bool neg = n < 0.0;
-    float e = fabs(n);
+    bool is_odd = fabs(exponent) - 2.0 * trunc(fabs(exponent) / 2.0) == 1.0;
+    bool is_negative = exponent < 0.0;
+    float remaining = fabs(exponent);
     int bexp = exponent_of(x);
     float bhi = scale2(x, 0 - bexp);
     float blo = 0.0;
     float ahi = 1.0;
     float alo = 0.0;
     int aexp = 0;
-    while (e > 0.0) {
-        float half = trunc(e / 2.0);
-        if (e - 2.0 * half == 1.0) {
-            float p = ahi * bhi;
-            float err = two_prod_err(ahi, bhi, p) + (ahi * blo + alo * bhi);
-            ahi = p + err;
-            alo = err - (ahi - p);
+    while (remaining > 0.0) {
+        float half = trunc(remaining / 2.0);
+        if (remaining - 2.0 * half == 1.0) {
+            float product = ahi * bhi;
+            float rounding_error = two_prod_error(ahi, bhi, product) + (ahi * blo + alo * bhi);
+            ahi = product + rounding_error;
+            alo = rounding_error - (ahi - product);
             aexp = aexp + bexp;
             if (fabs(ahi) >= 2.0) {
                 ahi = ahi / 2.0;
@@ -392,12 +392,12 @@ float pow_whole(float x, float n) {
                 aexp = aexp + 1;
             }
         }
-        e = half;
-        if (e > 0.0) {
-            float p = bhi * bhi;
-            float err = two_prod_err(bhi, bhi, p) + 2.0 * bhi * blo;
-            bhi = p + err;
-            blo = err - (bhi - p);
+        remaining = half;
+        if (remaining > 0.0) {
+            float product = bhi * bhi;
+            float rounding_error = two_prod_error(bhi, bhi, product) + 2.0 * bhi * blo;
+            bhi = product + rounding_error;
+            blo = rounding_error - (bhi - product);
             bexp = bexp + bexp;
             if (bhi >= 2.0) {
                 bhi = bhi / 2.0;
@@ -407,81 +407,81 @@ float pow_whole(float x, float n) {
             // Past this the answer is certainly out of range, and the
             // exponent would soon overflow an int if squaring went on.
             if (bexp > 4000 || bexp < -4000) {
-                return pow_out_of_range(x < 0.0 && odd, bexp > 0 != neg);
+                return pow_out_of_range(x < 0.0 && is_odd, bexp > 0 != is_negative);
             }
         }
     }
     if (aexp > 4000 || aexp < -4000) {
-        return pow_out_of_range(x < 0.0 && odd, aexp > 0 != neg);
+        return pow_out_of_range(x < 0.0 && is_odd, aexp > 0 != is_negative);
     }
-    if (!neg) {
+    if (!is_negative) {
         return scale2(ahi + alo, aexp);
     }
     // 1 / (ahi + alo) = q * (1 + d), with d = 1 - q * (ahi + alo) computed
     // exactly enough to correct the one rounding of the division.
-    float q = 1.0 / ahi;
-    float qa = q * ahi;
-    float r = 1.0 - qa - two_prod_err(q, ahi, qa);
-    return scale2(q + q * (r - q * alo), 0 - aexp);
+    float reciprocal = 1.0 / ahi;
+    float reciprocal_product = reciprocal * ahi;
+    float correction = 1.0 - reciprocal_product - two_prod_error(reciprocal, ahi, reciprocal_product);
+    return scale2(reciprocal + reciprocal * (correction - reciprocal * alo), 0 - aexp);
 }
 
 // Infinity or zero, with the sign an odd power of a negative base gives.
-float pow_out_of_range(bool negative, bool huge) {
-    float v = 0.0;
-    if (huge) {
-        v = inf();
+float pow_out_of_range(bool is_negative, bool is_huge) {
+    float magnitude = 0.0;
+    if (is_huge) {
+        magnitude = inf();
     }
-    if (negative) {
-        return -v;
+    if (is_negative) {
+        return -magnitude;
     }
-    return v;
+    return magnitude;
 }
 
 // The power of two that brings |x| into [1, 2), for finite nonzero x. Every
 // step is an exact doubling or halving, subnormals included.
 int exponent_of(float x) {
-    float m = fabs(x);
-    int k = 0;
-    while (m >= 2.0) {
-        m = m / 2.0;
-        k = k + 1;
+    float mantissa = fabs(x);
+    int exponent = 0;
+    while (mantissa >= 2.0) {
+        mantissa = mantissa / 2.0;
+        exponent = exponent + 1;
     }
-    while (m < 1.0) {
-        m = m * 2.0;
-        k = k - 1;
+    while (mantissa < 1.0) {
+        mantissa = mantissa * 2.0;
+        exponent = exponent - 1;
     }
-    return k;
+    return exponent;
 }
 
 // The rounding error of p = a * b, exactly: a*b - p. Dekker's algorithm, on
 // Veltkamp halves of each factor. Only called with factors in [1, 4), where
 // the split cannot overflow.
-float two_prod_err(float a, float b, float p) {
-    float ah = split_hi(a);
-    float al = a - ah;
-    float bh = split_hi(b);
-    float bl = b - bh;
-    return ah * bh - p + ah * bl + al * bh + al * bl;
+float two_prod_error(float left, float right, float product) {
+    float left_high = split_hi(left);
+    float left_low = left - left_high;
+    float right_high = split_hi(right);
+    float right_low = right - right_high;
+    return left_high * right_high - product + left_high * right_low + left_low * right_high + left_low * right_low;
 }
 
 // Zero and infinite bases, where every answer is 0, infinity or NaN and
 // plain squaring is exact.
-float pow_plain(float x, float n) {
-    bool neg = n < 0.0;
-    float e = fabs(n);
+float pow_plain(float x, float exponent) {
+    bool is_negative = exponent < 0.0;
+    float remaining = fabs(exponent);
     float base = x;
     float acc = 1.0;
-    while (e > 0.0) {
-        float half = trunc(e / 2.0);
-        if (e - 2.0 * half == 1.0) {
+    while (remaining > 0.0) {
+        float half = trunc(remaining / 2.0);
+        if (remaining - 2.0 * half == 1.0) {
             acc = acc * base;
         }
-        e = half;
-        if (e > 0.0) {
+        remaining = half;
+        if (remaining > 0.0) {
             base = base * base;
         }
     }
-    if (neg) {
+    if (is_negative) {
         return 1.0 / acc;
     }
     return acc;
@@ -506,30 +506,30 @@ pub float fabs(float x) {
     return x;
 }
 
-pub int min(int a, int b) {
-    if (a < b) {
-        return a;
+pub int min(int first, int second) {
+    if (first < second) {
+        return first;
     }
-    return b;
+    return second;
 }
 
-pub int max(int a, int b) {
-    if (a > b) {
-        return a;
+pub int max(int first, int second) {
+    if (first > second) {
+        return first;
     }
-    return b;
+    return second;
 }
 
-pub float fmin(float a, float b) {
-    if (a < b) {
-        return a;
+pub float fmin(float first, float second) {
+    if (first < second) {
+        return first;
     }
-    return b;
+    return second;
 }
 
-pub float fmax(float a, float b) {
-    if (a > b) {
-        return a;
+pub float fmax(float first, float second) {
+    if (first > second) {
+        return first;
     }
-    return b;
+    return second;
 }

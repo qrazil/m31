@@ -189,7 +189,7 @@ void child() {
     }
 }
 
-List<str> arguments = os.args();
+List<str> arguments = os.arguments();
 if (arguments.size() > 1 && arguments[1] == CHILD) {
     child();
 } else {
@@ -197,7 +197,7 @@ if (arguments.size() > 1 && arguments[1] == CHILD) {
     List<str> command = ["sh", "-c", "ulimit -n 48 && exec \"$0\" " + CHILD, arguments[0]];
     match (os.run(command)) {
         case Ok(os.ExitStatus status): {
-            print("child ok: " + status.success().to_str());
+            print("child ok: " + status.is_success().to_str());
         }
         case Err(io.Error error): {
             print("child did not start: " + error.to_str());

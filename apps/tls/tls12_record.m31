@@ -58,7 +58,7 @@ str error_name(tls13record.Error error) {
     }
 }
 
-List<str> arguments = os.args();
+List<str> arguments = os.arguments();
 if (arguments.size() != 2) {
     trap("tls12_record: expected one argument: chacha, aes128 or aes256");
 }
@@ -74,10 +74,10 @@ if (arguments[1] == "aes128") {
     trap("tls12_record: unknown suite " + arguments[1]);
 }
 bytes key = pattern(suite.key_size(), 5, 1);
-bytes iv = pattern(salt_size, 11, 7);
+bytes implicit_nonce = pattern(salt_size, 11, 7);
 
-str outcome(tls13schedule.Suite suite, bytes key, bytes iv, bytes wire, int sequence) {
-    match (tls13record.open_record_legacy(suite, key, iv, sequence, wire.substr(0, 5), wire.substr(5, wire.size()))) {
+str outcome(tls13schedule.Suite suite, bytes key, bytes implicit_nonce, bytes wire, int sequence) {
+    match (tls13record.open_record_legacy(suite, key, implicit_nonce, sequence, wire.substr(0, 5), wire.substr(5, wire.size()))) {
         case Ok(tls13record.Opened opened): {
             return "Ok type=" + str(opened.content_type) + " size=" + str(opened.content.size()) + " sha256=" + sha256.sum(opened.content).hex();
         }
@@ -87,8 +87,8 @@ str outcome(tls13schedule.Suite suite, bytes key, bytes iv, bytes wire, int sequ
     }
 }
 
-bytes seal_ok(tls13schedule.Suite suite, bytes key, bytes iv, int sequence, int content_type, bytes content) {
-    match (tls13record.seal_record_legacy(suite, key, iv, sequence, content_type, content)) {
+bytes seal_ok(tls13schedule.Suite suite, bytes key, bytes implicit_nonce, int sequence, int content_type, bytes content) {
+    match (tls13record.seal_record_legacy(suite, key, implicit_nonce, sequence, content_type, content)) {
         case Ok(bytes wire): {
             return wire;
         }
@@ -105,37 +105,37 @@ for (int i in 0 .. sizes.size()) {
     int sequence = sequences[i % sequences.size()];
     int content_type = types[i % 4];
     bytes content = pattern(sizes[i], 3 + i, i);
-    bytes wire = seal_ok(suite, key, iv, sequence, content_type, content);
+    bytes wire = seal_ok(suite, key, implicit_nonce, sequence, content_type, content);
     str shown = wire.hex();
     if (wire.size() > 100) {
         shown = str(wire.size()) + " " + sha256.sum(wire).hex();
     }
     print("seal " + str(sizes[i]) + " " + str(sequence) + " " + str(content_type) + " " + shown);
-    print("open " + str(sizes[i]) + " " + outcome(suite, key, iv, wire, sequence));
+    print("open " + str(sizes[i]) + " " + outcome(suite, key, implicit_nonce, wire, sequence));
 }
 // every way a record can be wrong
-bytes good = seal_ok(suite, key, iv, 5, 23, pattern(40, 3, 1));
-print("open_good " + outcome(suite, key, iv, good, 5));
-print("open_wrong_sequence " + outcome(suite, key, iv, good, 6));
-print("open_wrong_sequence_zero " + outcome(suite, key, iv, good, 0));
+bytes good = seal_ok(suite, key, implicit_nonce, 5, 23, pattern(40, 3, 1));
+print("open_good " + outcome(suite, key, implicit_nonce, good, 5));
+print("open_wrong_sequence " + outcome(suite, key, implicit_nonce, good, 6));
+print("open_wrong_sequence_zero " + outcome(suite, key, implicit_nonce, good, 0));
 for (int i in 0 .. good.size()) {
     bytes bent = clone(good);
     bent[i] = bent[i] ^ 0x01;
     if (i < 5) {
-        print("flip_header " + str(i) + " " + outcome(suite, key, iv, bent, 5));
+        print("flip_header " + str(i) + " " + outcome(suite, key, implicit_nonce, bent, 5));
     } else {
-        print("flip_body " + str(i - 5) + " " + outcome(suite, key, iv, bent, 5));
+        print("flip_body " + str(i - 5) + " " + outcome(suite, key, implicit_nonce, bent, 5));
     }
 }
 for (int cut in 5 .. good.size()) {
-    print("short " + str(cut - 5) + " " + outcome(suite, key, iv, good.substr(0, cut), 5));
+    print("short " + str(cut - 5) + " " + outcome(suite, key, implicit_nonce, good.substr(0, cut), 5));
 }
 bytes with_trailing = clone(good);
 with_trailing.push(0);
-print("trailing_octet " + outcome(suite, key, iv, with_trailing, 5));
-bytes empty = seal_ok(suite, key, iv, 9, 23, []);
-print("empty_record " + outcome(suite, key, iv, empty, 9));
+print("trailing_octet " + outcome(suite, key, implicit_nonce, with_trailing, 5));
+bytes empty = seal_ok(suite, key, implicit_nonce, 9, 23, []);
+print("empty_record " + outcome(suite, key, implicit_nonce, empty, 9));
 bytes retyped = clone(empty);
 retyped[0] = 22;
-print("empty_wrong_type " + outcome(suite, key, iv, retyped, 9));
-print("exhausted " + outcome(suite, key, iv, good, 0x7FFF_FFFF_FFFF_FFFF));
+print("empty_wrong_type " + outcome(suite, key, implicit_nonce, retyped, 9));
+print("exhausted " + outcome(suite, key, implicit_nonce, good, 0x7FFF_FFFF_FFFF_FFFF));

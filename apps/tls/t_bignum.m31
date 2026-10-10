@@ -29,32 +29,32 @@ str answer_for(List<str> fields) {
     int size = modulus_bytes.size();
     Array<int> left = bignum.from_bytes(decode(fields[2]), width);
     Array<int> right = bignum.from_bytes(decode(fields[3]), width);
-    str op = fields[0];
-    if (op == "add") {
+    str operation = fields[0];
+    if (operation == "add") {
         return bignum.to_bytes(bignum.mod_add(modulus, left, right), size).hex();
     }
-    if (op == "sub") {
+    if (operation == "sub") {
         return bignum.to_bytes(bignum.mod_subtract(modulus, left, right), size).hex();
     }
-    if (op == "mul") {
+    if (operation == "mul") {
         Array<int> product = bignum.montgomery_multiply(modulus, bignum.to_montgomery(modulus, left), bignum.to_montgomery(modulus, right));
         return bignum.to_bytes(bignum.from_montgomery(modulus, product), size).hex();
     }
-    if (op == "pow") {
+    if (operation == "pow") {
         Array<int> power = bignum.montgomery_power(modulus, bignum.to_montgomery(modulus, left), right);
         return bignum.to_bytes(bignum.from_montgomery(modulus, power), size).hex();
     }
-    if (op == "inv") {
+    if (operation == "inv") {
         Array<int> inverse = bignum.montgomery_inverse(modulus, bignum.to_montgomery(modulus, left));
         return bignum.to_bytes(bignum.from_montgomery(modulus, inverse), size).hex();
     }
-    if (op == "cmp") {
+    if (operation == "cmp") {
         return bignum.compare(left, right).to_str();
     }
     return bignum.bit_length(left).to_str();
 }
 
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 if (argv.size() < 2) {
     io.eprint("usage: t_bignum CASES");
 } else {

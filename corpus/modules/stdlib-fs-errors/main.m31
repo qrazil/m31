@@ -147,4 +147,4 @@ print(fs.glob(root + "/missing/*").size());  // 0
 print(fs.glob(file + "/*").size());  // 0
 
 check(fs.rmtree(root, root));  // ok
-print(fs.exists(root));  // false
+print(fs.is_present(root));  // false

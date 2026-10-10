@@ -223,17 +223,17 @@ pub str Error.to_str() {
 
 // --- one record, with no stream ----------------------------------------------
 
-/// The per-record nonce, RFC 8446 §5.3: `iv` with the 64-bit big-endian
-/// `sequence` XORed into its last eight octets. `iv` must be 12 octets and
+/// The per-record nonce, RFC 8446 §5.3: `initialization_vector` with the 64-bit big-endian
+/// `sequence` XORed into its last eight octets. `initialization_vector` must be 12 octets and
 /// `sequence` not negative; either wrong **traps**, as a caller bug.
-pub bytes record_nonce(bytes iv, int sequence) {
-    if (iv.size() != tls13schedule.IV_SIZE) {
+pub bytes record_nonce(bytes initialization_vector, int sequence) {
+    if (initialization_vector.size() != tls13schedule.IV_SIZE) {
         trap("tls13record: the IV must be 12 octets");
     }
     if (sequence < 0) {
         trap("tls13record: a sequence number is never negative");
     }
-    bytes nonce = clone(iv);
+    bytes nonce = clone(initialization_vector);
     for (int i in 0 .. 8) {
         int place = tls13schedule.IV_SIZE - 1 - i;
         nonce[place] = nonce[place] ^ ((sequence >> (8 * i)) & 0xFF);
@@ -265,13 +265,13 @@ pub bytes plain_record(int content_type, bytes content) {
 
 /// One protected record, header and body, ready to write: `content` and
 /// `content_type` (the real one, which goes inside) followed by `padding`
-/// zero octets, sealed under `key` and `iv` at `sequence`.
+/// zero octets, sealed under `key` and `initialization_vector` at `sequence`.
 ///
 /// Traps on what is a caller bug rather than a network event: a `content`
 /// above `MAX_PLAINTEXT`, a negative `padding`, padding that would take the
-/// body past `MAX_CIPHERTEXT`, and a `key` or `iv` of the wrong length.
+/// body past `MAX_CIPHERTEXT`, and a `key` or `initialization_vector` of the wrong length.
 /// `Err(SequenceExhausted)` once `sequence` reaches `MAX_SEQUENCE`.
-pub Result<bytes, Error> seal_record(tls13schedule.Suite suite, bytes key, bytes iv, int sequence, int content_type, bytes content, int padding) {
+pub Result<bytes, Error> seal_record(tls13schedule.Suite suite, bytes key, bytes initialization_vector, int sequence, int content_type, bytes content, int padding) {
     if (content.size() > MAX_PLAINTEXT) {
         trap("tls13record: a record carries at most 2^14 octets");
     }
@@ -286,7 +286,7 @@ pub Result<bytes, Error> seal_record(tls13schedule.Suite suite, bytes key, bytes
     bytes zeros = [0; padding];
     inner.extend(zeros);
     bytes record = header_of(CONTENT_APPLICATION_DATA, inner.size() + TAG_SIZE);
-    bytes sealed = seal_aead(suite, key, record_nonce(iv, sequence), inner, record);
+    bytes sealed = seal_aead(suite, key, record_nonce(initialization_vector, sequence), inner, record);
     record.extend(sealed);
     return Result<bytes, Error>.Ok(record);
 }
@@ -302,7 +302,7 @@ pub type Opened {
 /// `RecordOverflow` if the body, or what it held, is over its limit;
 /// `BadRecordMac` if the tag does not verify; `UnexpectedMessage` if the
 /// plaintext is all zeros and so names no content type.
-pub Result<Opened, Error> open_record(tls13schedule.Suite suite, bytes key, bytes iv, int sequence, bytes header, bytes body) {
+pub Result<Opened, Error> open_record(tls13schedule.Suite suite, bytes key, bytes initialization_vector, int sequence, bytes header, bytes body) {
     if (header.size() != HEADER_SIZE) {
         trap("tls13record: a record header is 5 octets");
     }
@@ -312,7 +312,7 @@ pub Result<Opened, Error> open_record(tls13schedule.Suite suite, bytes key, byte
     if (body.size() > MAX_CIPHERTEXT) {
         return Result<Opened, Error>.Err(Error.RecordOverflow);
     }
-    match (open_aead(suite, key, record_nonce(iv, sequence), body, header)) {
+    match (open_aead(suite, key, record_nonce(initialization_vector, sequence), body, header)) {
         case Some(bytes inner): {
             return split_inner(inner);
         }
@@ -366,31 +366,31 @@ bytes legacy_additional_data(int sequence, int content_type, int plain_size) {
     return data;
 }
 
-void check_legacy_iv(tls13schedule.Suite suite, bytes iv) {
+void check_legacy_iv(tls13schedule.Suite suite, bytes initialization_vector) {
     int want = tls13schedule.IV_SIZE;
     if (is_gcm(suite)) {
         want = GCM_SALT_SIZE;
     }
-    if (iv.size() != want) {
+    if (initialization_vector.size() != want) {
         trap("tls13record: a TLS 1.2 IV is 4 octets for AES-GCM and 12 for ChaCha20-Poly1305");
     }
 }
 
 /// One TLS 1.2 protected record, header and body: `content` sealed under
-/// `key` and `iv` at `sequence`, with the real content type in the header
+/// `key` and `initialization_vector` at `sequence`, with the real content type in the header
 /// (a TLS 1.2 record has no inner type and no padding). `suite` names only the
-/// AEAD. For AES-GCM `iv` is the 4-octet salt and the body starts with the
+/// AEAD. For AES-GCM `initialization_vector` is the 4-octet salt and the body starts with the
 /// 8-octet explicit nonce, which this sets to the sequence number; for
-/// ChaCha20-Poly1305 `iv` is 12 octets, the nonce is `iv XOR sequence` and
+/// ChaCha20-Poly1305 `initialization_vector` is 12 octets, the nonce is `iv XOR sequence` and
 /// nothing is explicit. The additional data is `sequence || type || 03 03 ||
 /// length of content`. Traps on a caller bug (content over `MAX_PLAINTEXT`,
-/// an `iv` or `key` of the wrong length); `Err(SequenceExhausted)` at
+/// an `initialization_vector` or `key` of the wrong length); `Err(SequenceExhausted)` at
 /// `MAX_SEQUENCE`.
-pub Result<bytes, Error> seal_record_legacy(tls13schedule.Suite suite, bytes key, bytes iv, int sequence, int content_type, bytes content) {
+pub Result<bytes, Error> seal_record_legacy(tls13schedule.Suite suite, bytes key, bytes initialization_vector, int sequence, int content_type, bytes content) {
     if (content.size() > MAX_PLAINTEXT) {
         trap("tls13record: a record carries at most 2^14 octets");
     }
-    check_legacy_iv(suite, iv);
+    check_legacy_iv(suite, initialization_vector);
     if (sequence >= MAX_SEQUENCE) {
         return Result<bytes, Error>.Err(Error.SequenceExhausted);
     }
@@ -398,11 +398,11 @@ pub Result<bytes, Error> seal_record_legacy(tls13schedule.Suite suite, bytes key
     bytes body = [];
     bytes nonce = [];
     if (is_gcm(suite)) {
-        nonce = clone(iv);
+        nonce = clone(initialization_vector);
         body = sequence_octets(sequence);
         nonce.extend(body);
     } else {
-        nonce = record_nonce(iv, sequence);
+        nonce = record_nonce(initialization_vector, sequence);
     }
     body.extend(seal_aead(suite, key, nonce, content, additional));
     bytes record = header_of(content_type, body.size());
@@ -415,11 +415,11 @@ pub Result<bytes, Error> seal_record_legacy(tls13schedule.Suite suite, bytes key
 /// inverse of `seal_record_legacy`. `RecordOverflow` for a body or content
 /// over the limits, `BadRecordMac` for a body too short to hold its overhead
 /// and for a tag that does not verify.
-pub Result<Opened, Error> open_record_legacy(tls13schedule.Suite suite, bytes key, bytes iv, int sequence, bytes header, bytes body) {
+pub Result<Opened, Error> open_record_legacy(tls13schedule.Suite suite, bytes key, bytes initialization_vector, int sequence, bytes header, bytes body) {
     if (header.size() != HEADER_SIZE) {
         trap("tls13record: a record header is 5 octets");
     }
-    check_legacy_iv(suite, iv);
+    check_legacy_iv(suite, initialization_vector);
     if (sequence >= MAX_SEQUENCE) {
         return Result<Opened, Error>.Err(Error.SequenceExhausted);
     }
@@ -439,10 +439,10 @@ pub Result<Opened, Error> open_record_legacy(tls13schedule.Suite suite, bytes ke
     }
     bytes nonce = [];
     if (is_gcm(suite)) {
-        nonce = clone(iv);
+        nonce = clone(initialization_vector);
         nonce.extend(body.substr(0, explicit));
     } else {
-        nonce = record_nonce(iv, sequence);
+        nonce = record_nonce(initialization_vector, sequence);
     }
     bytes additional = legacy_additional_data(sequence, header[0], plain_size);
     match (open_aead(suite, key, nonce, body.substr(explicit, body.size()), additional)) {
@@ -556,26 +556,26 @@ pub type Connection {
     bytes read_iv = [];
     bytes read_secret = [];
     int read_sequence = 0;
-    bool read_protected = false;
+    bool is_read_protected = false;
     bytes write_key = [];
     bytes write_iv = [];
     bytes write_secret = [];
     int write_sequence = 0;
-    bool write_protected = false;
+    bool is_write_protected = false;
     // Handshake octets received and not yet handed out: whole messages the
     // last record held beyond the one returned, or the start of one that a
     // later record finishes.
     bytes handshake_pending = [];
     int padding_size = 0;
     int alert_description = -1;
-    bool peer_closed = false;
-    bool close_sent = false;
+    bool is_peer_closed = false;
+    bool has_sent_close = false;
     // Set once the peer's Finished has been handed out, after which a
     // compatibility ChangeCipherSpec is no longer allowed (RFC 8446 §5).
-    bool peer_finished = false;
-    bool failed = false;
+    bool is_peer_finished = false;
+    bool is_failed = false;
     // TLS 1.2 record format (see `use_legacy_suite`).
-    bool legacy = false;
+    bool is_legacy = false;
     // The bodies of the NewSessionTickets `receive_application` went past,
     // oldest first, at most `MAX_QUEUED_TICKETS`; see `take_tickets`.
     List<bytes> tickets = [];
@@ -595,7 +595,7 @@ pub List<bytes> Connection.take_tickets() {
 /// calling it with keys already installed **traps** (a suite never changes
 /// mid-connection).
 pub void Connection.use_suite(tls13schedule.Suite chosen) {
-    if (read_protected || write_protected) {
+    if (is_read_protected || is_write_protected) {
         trap("tls13record: use_suite after keys were installed");
     }
     suite = chosen;
@@ -611,44 +611,44 @@ pub void Connection.use_suite(tls13schedule.Suite chosen) {
 /// so does `send_key_update`: TLS 1.2 has no KeyUpdate.
 pub void Connection.use_legacy_suite(tls13schedule.Suite chosen) {
     use_suite(chosen);
-    legacy = true;
+    is_legacy = true;
 }
 
-/// Starts protecting what the peer sends, under `key` and `iv` (4 octets of
+/// Starts protecting what the peer sends, under `key` and `initialization_vector` (4 octets of
 /// salt for AES-GCM, 12 for ChaCha20-Poly1305), counting records from zero.
 /// Same refusal as `install_read_keys` while a handshake message is
 /// buffered, and **traps** on a connection that is not legacy.
-pub Result<void, Error> Connection.install_legacy_read_keys(bytes key, bytes iv) {
-    if (!legacy) {
+pub Result<void, Error> Connection.install_legacy_read_keys(bytes key, bytes initialization_vector) {
+    if (!is_legacy) {
         trap("tls13record: install_legacy_read_keys on a TLS 1.3 connection");
     }
-    check_legacy_iv(suite, iv);
+    check_legacy_iv(suite, initialization_vector);
     check_key_size(suite, key);
-    if (failed) {
+    if (is_failed) {
         return Result<void, Error>.Err(Error.Closed);
     }
     if (handshake_pending.size() > 0) {
         return Result<void, Error>.Err(break_down(Error.UnexpectedMessage));
     }
     read_key = key;
-    read_iv = iv;
+    read_iv = initialization_vector;
     read_sequence = 0;
-    read_protected = true;
+    is_read_protected = true;
     return Result<void, Error>.Ok;
 }
 
-/// Starts protecting what this side sends, under `key` and `iv`, counting
+/// Starts protecting what this side sends, under `key` and `initialization_vector`, counting
 /// records from zero. **Traps** on a connection that is not legacy.
-pub void Connection.install_legacy_write_keys(bytes key, bytes iv) {
-    if (!legacy) {
+pub void Connection.install_legacy_write_keys(bytes key, bytes initialization_vector) {
+    if (!is_legacy) {
         trap("tls13record: install_legacy_write_keys on a TLS 1.3 connection");
     }
-    check_legacy_iv(suite, iv);
+    check_legacy_iv(suite, initialization_vector);
     check_key_size(suite, key);
     write_key = key;
-    write_iv = iv;
+    write_iv = initialization_vector;
     write_sequence = 0;
-    write_protected = true;
+    is_write_protected = true;
 }
 
 /// Reads the peer's one ChangeCipherSpec (a record of its own holding the
@@ -658,20 +658,20 @@ pub void Connection.install_legacy_write_keys(bytes key, bytes iv) {
 /// connections only: a TLS 1.3 connection ignores the compatibility
 /// ChangeCipherSpec by itself.
 pub Result<void, Error> Connection.receive_change_cipher_spec() {
-    if (!legacy) {
+    if (!is_legacy) {
         trap("tls13record: receive_change_cipher_spec on a TLS 1.3 connection");
     }
-    if (failed) {
+    if (is_failed) {
         return Result<void, Error>.Err(Error.Closed);
     }
-    if (handshake_pending.size() > 0 || read_protected) {
+    if (handshake_pending.size() > 0 || is_read_protected) {
         return Result<void, Error>.Err(break_down(Error.UnexpectedMessage));
     }
     match (read_raw_record()) {
         case Ok(RawRecord record): {
             if (record.content_type == CONTENT_ALERT && record.body.size() == 2 && record.body[1] != ALERT_CLOSE_NOTIFY) {
                 alert_description = record.body[1];
-                failed = true;
+                is_failed = true;
                 return Result<void, Error>.Err(Error.PeerAlert);
             }
             if (record.content_type != CONTENT_CHANGE_CIPHER_SPEC || record.body.size() != 1 || record.body[0] != 1) {
@@ -690,13 +690,13 @@ pub Result<void, Error> Connection.receive_change_cipher_spec() {
 /// handshake message is still partly or wholly unread, since RFC 8446 §5.1
 /// says none may span a key change. `traffic_secret` not the suite's hash length traps.
 pub Result<void, Error> Connection.install_read_keys(bytes traffic_secret) {
-    if (legacy) {
+    if (is_legacy) {
         trap("tls13record: TLS 1.3 keys on a legacy connection");
     }
     if (traffic_secret.size() != suite.hash_size()) {
         trap("tls13record: a traffic secret is as long as the suite's hash");
     }
-    if (failed) {
+    if (is_failed) {
         return Result<void, Error>.Err(Error.Closed);
     }
     if (handshake_pending.size() > 0) {
@@ -704,10 +704,10 @@ pub Result<void, Error> Connection.install_read_keys(bytes traffic_secret) {
     }
     tls13schedule.TrafficKeys keys = tls13schedule.traffic_keys(suite, traffic_secret);
     read_key = keys.key;
-    read_iv = keys.iv;
+    read_iv = keys.initialization_vector;
     read_secret = traffic_secret;
     read_sequence = 0;
-    read_protected = true;
+    is_read_protected = true;
     return Result<void, Error>.Ok;
 }
 
@@ -715,7 +715,7 @@ pub Result<void, Error> Connection.install_read_keys(bytes traffic_secret) {
 /// derives, and counts its records from zero. `traffic_secret` not the
 /// suite's hash length traps.
 pub void Connection.install_write_keys(bytes traffic_secret) {
-    if (legacy) {
+    if (is_legacy) {
         trap("tls13record: TLS 1.3 keys on a legacy connection");
     }
     if (traffic_secret.size() != suite.hash_size()) {
@@ -723,10 +723,10 @@ pub void Connection.install_write_keys(bytes traffic_secret) {
     }
     tls13schedule.TrafficKeys keys = tls13schedule.traffic_keys(suite, traffic_secret);
     write_key = keys.key;
-    write_iv = keys.iv;
+    write_iv = keys.initialization_vector;
     write_secret = traffic_secret;
     write_sequence = 0;
-    write_protected = true;
+    is_write_protected = true;
 }
 
 /// Moves the receive direction to the next key generation (RFC 8446 §7.2),
@@ -734,7 +734,7 @@ pub void Connection.install_write_keys(bytes traffic_secret) {
 /// while a message is buffered; **traps** if no keys were installed, a
 /// caller bug.
 pub Result<void, Error> Connection.update_read_keys() {
-    if (!read_protected) {
+    if (!is_read_protected) {
         trap("tls13record: update_read_keys before install_read_keys");
     }
     return install_read_keys(tls13schedule.next_traffic_secret(suite, read_secret));
@@ -744,7 +744,7 @@ pub Result<void, Error> Connection.update_read_keys() {
 /// message under the old keys first -- or call `send_key_update`, which does
 /// both. **Traps** if no keys were installed.
 pub void Connection.update_write_keys() {
-    if (!write_protected) {
+    if (!is_write_protected) {
         trap("tls13record: update_write_keys before install_write_keys");
     }
     install_write_keys(tls13schedule.next_traffic_secret(suite, write_secret));
@@ -766,13 +766,13 @@ pub int Connection.received_alert() {
 }
 
 /// Whether the peer's `close_notify` has arrived.
-pub bool Connection.received_close_notify() {
-    return peer_closed;
+pub bool Connection.has_received_close_notify() {
+    return is_peer_closed;
 }
 
 /// Whether this side has sent its `close_notify`.
-pub bool Connection.sent_close_notify() {
-    return close_sent;
+pub bool Connection.has_sent_close_notify() {
+    return has_sent_close;
 }
 
 /// How many records have been received under the current read keys.
@@ -786,14 +786,14 @@ pub int Connection.write_records() {
 }
 
 Result<void, Error> Connection.write_record(int content_type, bytes content) {
-    if (failed || close_sent) {
+    if (is_failed || has_sent_close) {
         return Result<void, Error>.Err(Error.Closed);
     }
     bytes wire = [];
-    if (write_protected && legacy) {
+    if (is_write_protected && is_legacy) {
         wire = seal_record_legacy(suite, write_key, write_iv, write_sequence, content_type, content)?;
         write_sequence = write_sequence + 1;
-    } else if (write_protected) {
+    } else if (is_write_protected) {
         int padding = padding_size;
         int room = MAX_CIPHERTEXT - TAG_SIZE - 1 - content.size();
         if (padding > room) {
@@ -813,7 +813,7 @@ Result<void, Error> Connection.write_wire(bytes wire) {
             return Result<void, Error>.Ok;
         }
         case Err(io.Error io_error): {
-            failed = true;
+            is_failed = true;
             return Result<void, Error>.Err(Error.Io);
         }
     }
@@ -821,7 +821,7 @@ Result<void, Error> Connection.write_wire(bytes wire) {
 
 // `content` in records of at most MAX_PLAINTEXT octets, all of the same type.
 Result<int, Error> Connection.write_fragments(int content_type, bytes content) {
-    if (failed || close_sent) {
+    if (is_failed || has_sent_close) {
         return Result<int, Error>.Err(Error.Closed);
     }
     int start = 0;
@@ -858,7 +858,7 @@ pub Result<int, Error> Connection.send_application(bytes data) {
 /// holding the single octet 1 -- which a middlebox-friendly handshake sends
 /// once, unprotected even when write keys are already installed.
 pub Result<void, Error> Connection.send_change_cipher_spec() {
-    if (failed || close_sent) {
+    if (is_failed || has_sent_close) {
         return Result<void, Error>.Err(Error.Closed);
     }
     return write_wire(plain_record(CONTENT_CHANGE_CIPHER_SPEC, [1]));
@@ -883,20 +883,20 @@ pub Result<void, Error> Connection.send_alert(int description) {
 /// peer's remaining data can still be read until its own `close_notify`.
 pub Result<void, Error> Connection.send_close_notify() {
     send_alert(ALERT_CLOSE_NOTIFY)?;
-    close_sent = true;
+    has_sent_close = true;
     return Result<void, Error>.Ok;
 }
 
 /// Sends a KeyUpdate (RFC 8446 §4.6.3) under the current write keys, then
-/// moves the send direction to the next generation. `request_update` asks
+/// moves the send direction to the next generation. `should_request_update` asks
 /// the peer to do the same for its own sends. **Traps** before write keys
 /// are installed: KeyUpdate is a post-handshake message.
-pub Result<void, Error> Connection.send_key_update(bool request_update) {
-    if (!write_protected || legacy) {
+pub Result<void, Error> Connection.send_key_update(bool should_request_update) {
+    if (!is_write_protected || is_legacy) {
         trap("tls13record: send_key_update before install_write_keys, or on a TLS 1.2 connection");
     }
     bytes message = [HANDSHAKE_KEY_UPDATE, 0, 0, 1, 0];
-    if (request_update) {
+    if (should_request_update) {
         message[4] = 1;
     }
     send_handshake(message)?;
@@ -932,7 +932,7 @@ Result<RawRecord, Error> Connection.read_raw_record() {
     }
     int length = header[3] * 256 + header[4];
     int limit = MAX_PLAINTEXT;
-    if (read_protected) {
+    if (is_read_protected) {
         limit = MAX_CIPHERTEXT;
     }
     if (length > limit) {
@@ -950,16 +950,16 @@ Result<Opened, Error> Connection.read_record() {
     int content_type = raw.content_type;
     bytes header = raw.header;
     bytes body = raw.body;
-    if (legacy) {
+    if (is_legacy) {
         return read_legacy_record(raw);
     }
     if (content_type == CONTENT_CHANGE_CIPHER_SPEC) {
-        if (peer_finished || body.size() != 1 || body[0] != 1) {
+        if (is_peer_finished || body.size() != 1 || body[0] != 1) {
             return Result<Opened, Error>.Err(Error.UnexpectedMessage);
         }
         return Result<Opened, Error>.Ok(Opened(IGNORED, body));
     }
-    if (!read_protected) {
+    if (!is_read_protected) {
         if (content_type == CONTENT_APPLICATION_DATA) {
             return Result<Opened, Error>.Err(Error.UnexpectedMessage);
         }
@@ -980,7 +980,7 @@ Result<Opened, Error> Connection.read_legacy_record(RawRecord raw) {
     if (raw.content_type != CONTENT_HANDSHAKE && raw.content_type != CONTENT_APPLICATION_DATA && raw.content_type != CONTENT_ALERT) {
         return Result<Opened, Error>.Err(Error.UnexpectedMessage);
     }
-    if (!read_protected) {
+    if (!is_read_protected) {
         if (raw.content_type == CONTENT_APPLICATION_DATA) {
             return Result<Opened, Error>.Err(Error.UnexpectedMessage);
         }
@@ -1011,18 +1011,18 @@ bytes Connection.take_handshake(int size) {
     bytes message = handshake_pending.substr(0, size);
     handshake_pending.drop_front(size);
     if (message[0] == HANDSHAKE_FINISHED) {
-        peer_finished = true;
+        is_peer_finished = true;
     }
     return message;
 }
 
 // `receive` without the fatal-alert bookkeeping `receive` adds.
 Result<Message, Error> Connection.receive_unchecked() {
-    if (failed) {
+    if (is_failed) {
         return Result<Message, Error>.Err(Error.Closed);
     }
     while (true) {
-        if (peer_closed) {
+        if (is_peer_closed) {
             bytes nothing = [];
             return Result<Message, Error>.Ok(Message(Kind.CloseNotify, nothing));
         }
@@ -1061,7 +1061,7 @@ Result<Message, Error> Connection.receive_unchecked() {
         }
         int description = record.content[1];
         if (description == ALERT_CLOSE_NOTIFY) {
-            peer_closed = true;
+            is_peer_closed = true;
         } else if (description != ALERT_USER_CANCELED) {
             alert_description = description;
             return Result<Message, Error>.Err(Error.PeerAlert);
@@ -1074,7 +1074,7 @@ Result<Message, Error> Connection.receive_unchecked() {
 // error already in hand is the one the caller needs), then no more use.
 Error Connection.break_down(Error error) {
     int description = alert_for(error);
-    if (description >= 0 && !failed && !close_sent) {
+    if (description >= 0 && !is_failed && !has_sent_close) {
         match (send_alert(description)) {
             case Ok: {
             }
@@ -1082,7 +1082,7 @@ Error Connection.break_down(Error error) {
             }
         }
     }
-    failed = true;
+    is_failed = true;
     return error;
 }
 
@@ -1152,7 +1152,7 @@ pub Result<bytes, Error> Connection.receive_application() {
 // RFC 8446 §4.6: the messages that may arrive once the handshake is done.
 Result<void, Error> Connection.after_handshake(bytes message) {
     int message_type = message[0];
-    if (legacy) {
+    if (is_legacy) {
         return after_legacy_handshake(message);
     }
     if (message_type == HANDSHAKE_NEW_SESSION_TICKET) {
@@ -1161,7 +1161,7 @@ Result<void, Error> Connection.after_handshake(bytes message) {
         }
         return Result<void, Error>.Ok;
     }
-    if (message_type != HANDSHAKE_KEY_UPDATE || !read_protected || !write_protected) {
+    if (message_type != HANDSHAKE_KEY_UPDATE || !is_read_protected || !is_write_protected) {
         return Result<void, Error>.Err(Error.UnexpectedMessage);
     }
     if (message.size() != 5 || message[1] != 0 || message[2] != 0 || message[3] != 1 || message[4] > 1) {
@@ -1188,7 +1188,7 @@ Result<void, Error> Connection.after_legacy_handshake(bytes message) {
 /// Closes the underlying stream. Send `close_notify` first with
 /// `send_close_notify` if the peer should hear the end as an end.
 pub Result<bool, Error> Connection.close() {
-    failed = true;
+    is_failed = true;
     match (stream.close()) {
         case Ok(bool closed): {
             return Result<bool, Error>.Ok(closed);

@@ -54,7 +54,7 @@ import crypto.ecdsasign;
 import crypto.sha256;
 import pki.x509;
 
-const str OID_ED25519 = "1.3.101.112";
+const str OBJECT_ID_ED25519 = "1.3.101.112";
 const int SCHEME_ED25519 = 0x0807;
 const int SCHEME_ECDSA_P256_SHA256 = 0x0403;
 
@@ -160,21 +160,21 @@ bool is_private_label(str label) {
 }
 
 Result<Block, Error> find_block(str text) {
-    bool inside = false;
-    bool wanted = false;
+    bool is_inside = false;
+    bool is_wanted = false;
     str label = "";
     List<str> body = [];
     for (str raw_line in text.split("\n")) {
         str line = raw_line.trim();
-        if (!inside) {
+        if (!is_inside) {
             if (line.starts_with("-----BEGIN ") && line.ends_with("-----")) {
                 label = line.substr(11, line.size() - 5);
-                wanted = is_private_label(label);
-                inside = true;
+                is_wanted = is_private_label(label);
+                is_inside = true;
                 body = [];
             }
         } else if (line == "-----END " + label + "-----") {
-            if (wanted) {
+            if (is_wanted) {
                 if (label == "ENCRYPTED PRIVATE KEY") {
                     return Result<Block, Error>.Err(Error.Encrypted);
                 }
@@ -190,8 +190,8 @@ Result<Block, Error> find_block(str text) {
                     }
                 }
             }
-            inside = false;
-        } else if (wanted) {
+            is_inside = false;
+        } else if (is_wanted) {
             if (line.starts_with("Proc-Type:") && line.contains("ENCRYPTED")) {
                 return Result<Block, Error>.Err(Error.Encrypted);
             }
@@ -228,12 +228,12 @@ Option<List<der.Element>> sequence_of(bytes data) {
 }
 
 // The dotted OID text of an OBJECT IDENTIFIER element, or "" if it is not one.
-str oid_text(der.Element element) {
-    match (element.oid()) {
+str object_id_text(der.Element element) {
+    match (element.object_id()) {
         case Ok(str text): {
             return text;
         }
-        case Err(der.Error oid_error): {
+        case Err(_): {
             return "";
         }
     }
@@ -292,7 +292,7 @@ Result<SigningKey, Error> read_sec1(bytes data, str known_curve) {
                 if (part.tag == 0xA0) {
                     match (der.parse(part.content())) {
                         case Ok(der.Element named): {
-                            curve = oid_text(named);
+                            curve = object_id_text(named);
                         }
                         case Err(der.Error named_error): {
                             return Result<SigningKey, Error>.Err(Error.BadKey);
@@ -319,7 +319,7 @@ Result<SigningKey, Error> read_sec1(bytes data, str known_curve) {
             if (curve == "") {
                 return Result<SigningKey, Error>.Err(Error.BadKey);
             }
-            if (curve != x509.OID_CURVE_P256) {
+            if (curve != x509.OBJECT_ID_CURVE_P256) {
                 return Result<SigningKey, Error>.Err(Error.Unsupported);
             }
             if (known_curve != "" && known_curve != curve) {
@@ -347,9 +347,9 @@ Result<SigningKey, Error> read_pkcs8(bytes data) {
                     if (algorithm.size() < 1 || algorithm.size() > 2) {
                         return Result<SigningKey, Error>.Err(Error.BadKey);
                     }
-                    str algorithm_oid = oid_text(algorithm[0]);
+                    str algorithm_object_id = object_id_text(algorithm[0]);
                     bytes inner = parts[2].content();
-                    if (algorithm_oid == OID_ED25519) {
+                    if (algorithm_object_id == OBJECT_ID_ED25519) {
                         if (algorithm.size() != 1) {
                             return Result<SigningKey, Error>.Err(Error.BadKey);
                         }
@@ -366,12 +366,12 @@ Result<SigningKey, Error> read_pkcs8(bytes data) {
                             }
                         }
                     }
-                    if (algorithm_oid == x509.OID_EC_PUBLIC_KEY) {
+                    if (algorithm_object_id == x509.OBJECT_ID_EC_PUBLIC_KEY) {
                         if (algorithm.size() != 2) {
                             return Result<SigningKey, Error>.Err(Error.BadKey);
                         }
-                        str curve = oid_text(algorithm[1]);
-                        if (curve != x509.OID_CURVE_P256) {
+                        str curve = object_id_text(algorithm[1]);
+                        if (curve != x509.OBJECT_ID_CURVE_P256) {
                             if (curve == "") {
                                 return Result<SigningKey, Error>.Err(Error.BadKey);
                             }
@@ -379,7 +379,7 @@ Result<SigningKey, Error> read_pkcs8(bytes data) {
                         }
                         return read_sec1(inner, curve);
                     }
-                    if (algorithm_oid == "") {
+                    if (algorithm_object_id == "") {
                         return Result<SigningKey, Error>.Err(Error.BadKey);
                     }
                     return Result<SigningKey, Error>.Err(Error.Unsupported);

@@ -130,7 +130,7 @@ pub int Suite.key_size() {
     }
 }
 
-bool Suite.uses_sha384() {
+bool Suite.is_sha384() {
     match (this) {
         case Aes256GcmSha384: {
             return true;
@@ -162,28 +162,28 @@ pub Option<Suite> suite_for_code(int code) {
 // --- the suite's hash --------------------------------------------------------
 
 bytes hash_of(Suite suite, bytes data) {
-    if (suite.uses_sha384()) {
+    if (suite.is_sha384()) {
         return sha512.sum384(data);
     }
     return sha256.sum(data);
 }
 
 bytes extract(Suite suite, bytes salt, bytes keying_material) {
-    if (suite.uses_sha384()) {
+    if (suite.is_sha384()) {
         return hkdf.sha384_extract(salt, keying_material);
     }
     return hkdf.sha256_extract(salt, keying_material);
 }
 
 bytes expand_label(Suite suite, bytes secret, str label, bytes context, int length) {
-    if (suite.uses_sha384()) {
+    if (suite.is_sha384()) {
         return hkdf.sha384_expand_label(secret, label, context, length);
     }
     return hkdf.sha256_expand_label(secret, label, context, length);
 }
 
 bytes mac(Suite suite, bytes key, bytes message) {
-    if (suite.uses_sha384()) {
+    if (suite.is_sha384()) {
         return hmac.sha384_mac(key, message);
     }
     return hmac.sha256_mac(key, message);
@@ -332,8 +332,8 @@ pub bytes client_early_traffic_secret(Suite suite, bytes early_secret_value, byt
 
 /// The key a PSK binder is computed under (RFC 8446 §4.2.11.2):
 /// `Derive-Secret(early_secret, "ext binder" | "res binder", "")`.
-pub bytes binder_key(Suite suite, bytes early_secret_value, bool resumption) {
-    if (resumption) {
+pub bytes binder_key(Suite suite, bytes early_secret_value, bool is_resumption) {
+    if (is_resumption) {
         return derive_secret(suite, early_secret_value, "res binder", empty_hash(suite));
     }
     return derive_secret(suite, early_secret_value, "ext binder", empty_hash(suite));
@@ -380,7 +380,7 @@ pub bytes next_traffic_secret(Suite suite, bytes traffic_secret) {
 /// secret.
 pub type TrafficKeys {
     pub bytes key;
-    pub bytes iv;
+    pub bytes initialization_vector;
 }
 
 /// `traffic_key` and `traffic_iv` of `traffic_secret` as one value.

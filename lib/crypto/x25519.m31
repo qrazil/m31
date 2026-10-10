@@ -26,70 +26,70 @@ import crypto.field25519;
 // by instead of carrying `A` (486662) itself through every round.
 const int A24 = 121665;
 
-/// `X25519(k, u)`: the scalar `k` applied to the Montgomery u-coordinate
-/// `u`, both 32 octets, RFC 7748 §5. Every input, including a `u` that is
+/// `X25519(k, u)`: the scalar `scalar` applied to the Montgomery u-coordinate
+/// `u_coordinate`, both 32 octets, RFC 7748 §5. Every input, including a `u_coordinate` that is
 /// not a canonical field element (>= p) or that encodes a point on the
 /// curve's quadratic twist rather than the curve itself, is accepted and
 /// processed exactly as the RFC's own decode/ladder/encode steps specify --
 /// there is no validation beyond what decoding already does (masking the
 /// scalar's and the u-coordinate's reserved bits).
-pub bytes x25519(bytes k, bytes u) {
-    bytes kc = clamp_scalar(k);
-    bytes um = mask_u(u);
-    Array<int> x1 = field25519.from_bytes(um);
-    Array<int> x2 = field25519.one();
-    Array<int> z2 = field25519.zero();
-    // `x3` starts as a COPY of `x1`, not an alias: `x1` is read on every
-    // ladder round (`z3 = x1 * ...`) and must never be mutated, but `x3` is
+pub bytes x25519(bytes scalar, bytes u_coordinate) {  // RFC 7748: u
+    bytes clamped_scalar = clamp_scalar(scalar);
+    bytes masked_u = mask_u(u_coordinate);
+    Array<int> input_x = field25519.from_bytes(masked_u);  // RFC 7748: x_1
+    Array<int> accumulator_x = field25519.one();  // RFC 7748: x_2
+    Array<int> accumulator_z = field25519.zero();  // RFC 7748: z_2
+    // `point_x` starts as a COPY of `input_x`, not an alias: `input_x` is read on every
+    // ladder round (`z3 = x1 * ...`) and must never be mutated, but `point_x` is
     // swapped in place by `cswap` below -- if the two shared one `Array`
-    // object, the first swap would corrupt `x1` through it.
-    Array<int> x3 = clone(x1);
-    Array<int> z3 = field25519.one();
+    // object, the first swap would corrupt `input_x` through it.
+    Array<int> point_x = clone(input_x);  // RFC 7748: x_3
+    Array<int> point_z = field25519.one();  // RFC 7748: z_3
     int swap = 0;
-    int t = 254;
-    while (t >= 0) {
-        int kt = bit_at(kc, t);
-        swap = swap ^ kt;
-        field25519.cswap(swap, x2, x3);
-        field25519.cswap(swap, z2, z3);
-        swap = kt;
+    int bit_position = 254;  // RFC 7748: t
+    while (bit_position >= 0) {
+        int scalar_bit = bit_at(clamped_scalar, bit_position);  // RFC 7748: k_t
+        swap = swap ^ scalar_bit;
+        field25519.cswap(swap, accumulator_x, point_x);
+        field25519.cswap(swap, accumulator_z, point_z);
+        swap = scalar_bit;
         // RFC 7748 §5's ladder step, unchanged from the RFC's own naming so
         // it can be checked against the text line by line.
-        Array<int> aa = field25519.add(x2, z2);
-        Array<int> aaa = field25519.sq(aa);
-        Array<int> bb = field25519.sub(x2, z2);
-        Array<int> bbb = field25519.sq(bb);
-        Array<int> e = field25519.sub(aaa, bbb);
-        Array<int> cc = field25519.add(x3, z3);
-        Array<int> dd = field25519.sub(x3, z3);
-        Array<int> da = field25519.mul(dd, aa);
-        Array<int> cb = field25519.mul(cc, bb);
-        Array<int> daplus = field25519.add(da, cb);
-        Array<int> daminus = field25519.sub(da, cb);
-        x3 = field25519.sq(daplus);
-        z3 = field25519.mul(x1, field25519.sq(daminus));
-        x2 = field25519.mul(aaa, bbb);
-        Array<int> a24e = field25519.mul(field25519.small(A24), e);
-        z2 = field25519.mul(e, field25519.add(aaa, a24e));
-        t = t - 1;
+        Array<int> accumulator_sum = field25519.add(accumulator_x, accumulator_z);  // RFC 7748: A
+        Array<int> aaa = field25519.square(accumulator_sum);
+        Array<int> accumulator_difference = field25519.sub(accumulator_x, accumulator_z);  // RFC 7748: B
+        Array<int> bbb = field25519.square(accumulator_difference);
+        Array<int> squares_difference = field25519.sub(aaa, bbb);  // RFC 7748: E
+        Array<int> point_sum = field25519.add(point_x, point_z);  // RFC 7748: C
+        Array<int> point_difference = field25519.sub(point_x, point_z);  // RFC 7748: D
+        Array<int> cross_first = field25519.mul(point_difference, accumulator_sum);  // RFC 7748: DA
+        Array<int> cross_second = field25519.mul(point_sum, accumulator_difference);  // RFC 7748: CB
+        Array<int> daplus = field25519.add(cross_first, cross_second);
+        Array<int> daminus = field25519.sub(cross_first, cross_second);
+        point_x = field25519.square(daplus);
+        point_z = field25519.mul(input_x, field25519.square(daminus));
+        accumulator_x = field25519.mul(aaa, bbb);
+        Array<int> a24e = field25519.mul(field25519.small(A24), squares_difference);
+        accumulator_z = field25519.mul(squares_difference, field25519.add(aaa, a24e));
+        bit_position = bit_position - 1;
     }
-    field25519.cswap(swap, x2, x3);
-    field25519.cswap(swap, z2, z3);
-    Array<int> result = field25519.mul(x2, field25519.invert(z2));
+    field25519.cswap(swap, accumulator_x, point_x);
+    field25519.cswap(swap, accumulator_z, point_z);
+    Array<int> result = field25519.mul(accumulator_x, field25519.invert(accumulator_z));
     return field25519.to_bytes(result);
 }
 
 /// `x25519(k, 9)` -- the base point, encoded as RFC 7748 §5 defines it (the
 /// octet 9 followed by 31 zero octets). The public key a caller publishes
-/// for `k`.
-pub bytes base_point(bytes k) {
-    bytes u = [9; 32];
-    int i = 1;
-    while (i < 32) {
-        u[i] = 0;
-        i = i + 1;
+/// for `scalar`.
+pub bytes base_point(bytes scalar) {
+    bytes u_coordinate = [9; 32];
+    int octet_index = 1;
+    while (octet_index < 32) {
+        u_coordinate[octet_index] = 0;
+        octet_index = octet_index + 1;
     }
-    return x25519(k, u);
+    return x25519(scalar, u_coordinate);
 }
 
 // The scalar clamp, RFC 7748 §5: clear the low 3 bits (a multiple of the
@@ -98,8 +98,8 @@ pub bytes base_point(bytes k) {
 // doing the same number of doublings). A copy, never the caller's own
 // `bytes` -- mutating an argument in place would be a surprising thing for
 // a function named `x25519` to do to the key material handed to it.
-bytes clamp_scalar(bytes k) {
-    bytes out = clone(k);
+bytes clamp_scalar(bytes scalar) {
+    bytes out = clone(scalar);
     out[0] = out[0] & 0xF8;
     out[31] = out[31] & 0x7F;
     out[31] = out[31] | 0x40;
@@ -109,20 +109,20 @@ bytes clamp_scalar(bytes k) {
 // RFC 7748 §5: the u-coordinate's reserved top bit, masked off before
 // decoding -- "implementations of X25519 MUST mask the most significant bit
 // in the final byte". Also a copy, for the same reason as `clamp_scalar`.
-bytes mask_u(bytes u) {
-    bytes out = clone(u);
+bytes mask_u(bytes u_coordinate) {
+    bytes out = clone(u_coordinate);
     out[31] = out[31] & 0x7F;
     return out;
 }
 
-// Bit `t` of `b`, 0 = least significant of `b[0]`. `b[byte]` is a `bytes`
+// Bit `bit_position` of `data`, 0 = least significant of `b[0]`. `b[byte]` is a `bytes`
 // element, always in [0, 255] by construction (reference §3.10) -- so this
 // `>>` shifts a value that is ALWAYS non-negative regardless of which
 // secret bit it holds, unlike a shift on a field-element limb, which is why
 // this one needs no bias trick (`field25519.m31`'s header explains the
 // general hazard).
-int bit_at(bytes b, int t) {
-    int byte_idx = t / 8;
-    int bit_idx = t % 8;
-    return b[byte_idx] >> bit_idx & 1;
+int bit_at(bytes data, int bit_position) {
+    int byte_index = bit_position / 8;
+    int bit_index = bit_position % 8;
+    return data[byte_index] >> bit_index & 1;
 }

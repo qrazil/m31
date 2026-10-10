@@ -21,8 +21,8 @@ void fail(str reason) {
     os.exit(1);
 }
 
-void describe(tls.Conn conn, io.Error cause) {
-    match (conn.last_error()) {
+void describe(tls.Conn connection, io.Error cause) {
+    match (connection.last_error()) {
         case Some(tls.Error reason): {
             fail(reason.to_str());
         }
@@ -45,8 +45,8 @@ tls.Trust trust_from(str text) {
 
 tls.Conn open(str host, int port, tls.Trust trust) {
     match (tls.connect(host, port, trust)) {
-        case Ok(tls.Conn conn): {
-            return conn;
+        case Ok(tls.Conn connection): {
+            return connection;
         }
         case Err(tls.Error connect_error): {
             fail(connect_error.to_str());
@@ -55,8 +55,8 @@ tls.Conn open(str host, int port, tls.Trust trust) {
     }
 }
 
-str read_line(tls.Conn conn) {
-    match (conn.read_until("\n".to_bytes(), 4096)) {
+str read_line(tls.Conn connection) {
+    match (connection.read_until("\n".to_bytes(), 4096)) {
         case Ok(bytes line): {
             match (line.utf8()) {
                 case Some(str text): {
@@ -69,36 +69,36 @@ str read_line(tls.Conn conn) {
             }
         }
         case Err(io.Error read_error): {
-            describe(conn, read_error);
+            describe(connection, read_error);
             trap("unreachable");
         }
     }
 }
 
-void write_text(tls.Conn conn, str text) {
-    match (conn.write(text.to_bytes())) {
+void write_text(tls.Conn connection, str text) {
+    match (connection.write(text.to_bytes())) {
         case Ok(int sent): {
         }
         case Err(io.Error write_error): {
-            describe(conn, write_error);
+            describe(connection, write_error);
         }
     }
 }
 
-void get(tls.Conn conn, str host, str path) {
+void get(tls.Conn connection, str host, str path) {
     match (http.request("GET", "http://" + host + path)) {
         case Err(http.Error request_error): {
             fail(request_error.to_str());
         }
         case Ok(http.Request request): {
-            match (http.write_request(conn, request)) {
+            match (http.write_request(connection, request)) {
                 case Err(http.Error write_error): {
                     fail("write: " + write_error.to_str());
                 }
                 case Ok: {
                 }
             }
-            match (http.read_response(conn, "GET")) {
+            match (http.read_response(connection, "GET")) {
                 case Err(http.Error read_error): {
                     fail("read: " + read_error.to_str());
                 }
@@ -119,18 +119,18 @@ void get(tls.Conn conn, str host, str path) {
     }
 }
 
-void read_all(tls.Conn conn) {
-    match (conn.read_all()) {
+void read_all(tls.Conn connection) {
+    match (connection.read_all()) {
         case Ok(bytes data): {
             print("read_all " + str(data.size()));
         }
         case Err(io.Error read_error): {
-            describe(conn, read_error);
+            describe(connection, read_error);
         }
     }
 }
 
-List<str> arguments = os.args();
+List<str> arguments = os.arguments();
 if (arguments.size() < 5) {
     trap("t_tls_client: <mode> <host> <port> <pin hex> [argument]");
 }
@@ -149,30 +149,30 @@ str extra = "";
 if (arguments.size() > 5) {
     extra = arguments[5];
 }
-tls.Conn conn = open(host, port, trust_from(arguments[4]));
+tls.Conn connection = open(host, port, trust_from(arguments[4]));
 if (mode == "handshake") {
     print("connected");
 } else if (mode == "get") {
-    get(conn, host, extra);
+    get(connection, host, extra);
 } else if (mode == "echo") {
-    write_text(conn, extra + "\n");
-    print("line " + read_line(conn));
+    write_text(connection, extra + "\n");
+    print("line " + read_line(connection));
 } else if (mode == "read_line") {
-    print("line " + read_line(conn));
+    print("line " + read_line(connection));
 } else if (mode == "read_all") {
     if (extra != "") {
-        write_text(conn, extra);
+        write_text(connection, extra);
     }
-    read_all(conn);
+    read_all(connection);
 } else if (mode == "twice") {
-    write_text(conn, extra + "\n");
-    print("line " + read_line(conn));
-    write_text(conn, extra + "\n");
-    print("line " + read_line(conn));
+    write_text(connection, extra + "\n");
+    print("line " + read_line(connection));
+    write_text(connection, extra + "\n");
+    print("line " + read_line(connection));
 } else {
     trap("t_tls_client: unknown mode " + mode);
 }
-match (conn.close()) {
+match (connection.close()) {
     case Ok(bool closed): {
         print("closed");
     }

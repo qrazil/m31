@@ -92,8 +92,8 @@
 /// always in `[0, 2^32)`; nothing outside this file should assume anything
 /// else about them.
 type Word64 {
-    int hi;
-    int lo;
+    int high;
+    int low;
 }
 
 const int M32 = 0xFFFF_FFFF;
@@ -106,186 +106,186 @@ const int M32 = 0xFFFF_FFFF;
 // carry out of it is shifting that always-non-negative sum, not either
 // secret input. Every `&` below is the runtime's plain, unconditional
 // bitwise operator (see `field25519.m31`'s header).
-Word64 add64(Word64 a, Word64 b) {
-    int lo = a.lo + b.lo;
-    int carry = lo >> 32;
-    int hi = (a.hi + b.hi + carry) & M32;
-    return Word64(hi, lo & M32);
+Word64 add64(Word64 first, Word64 second) {
+    int low_bits = first.low + second.low;
+    int carry = low_bits >> 32;
+    int high_bits = (first.high + second.high + carry) & M32;
+    return Word64(high_bits, low_bits & M32);
 }
 
-Word64 add3(Word64 a, Word64 b, Word64 c) {
-    return add64(add64(a, b), c);
+Word64 add3(Word64 first, Word64 second, Word64 third) {
+    return add64(add64(first, second), third);
 }
 
-Word64 add4(Word64 a, Word64 b, Word64 c, Word64 d) {
-    return add64(add3(a, b, c), d);
+Word64 add4(Word64 first, Word64 second, Word64 third, Word64 fourth) {
+    return add64(add3(first, second, third), fourth);
 }
 
-Word64 add5(Word64 a, Word64 b, Word64 c, Word64 d, Word64 e) {
-    return add64(add4(a, b, c, d), e);
+Word64 add5(Word64 first, Word64 second, Word64 third, Word64 fourth, Word64 fifth) {
+    return add64(add4(first, second, third, fourth), fifth);
 }
 
-Word64 xor64(Word64 a, Word64 b) {
-    return Word64(a.hi ^ b.hi, a.lo ^ b.lo);
+Word64 xor64(Word64 first, Word64 second) {
+    return Word64(first.high ^ second.high, first.low ^ second.low);
 }
 
-Word64 and64(Word64 a, Word64 b) {
-    return Word64(a.hi & b.hi, a.lo & b.lo);
+Word64 and64(Word64 first, Word64 second) {
+    return Word64(first.high & second.high, first.low & second.low);
 }
 
-Word64 not64(Word64 a) {
-    return Word64(a.hi ^ M32, a.lo ^ M32);
+Word64 not64(Word64 value) {
+    return Word64(value.high ^ M32, value.low ^ M32);
 }
 
-// Rotate `a` right by `n`, `1 <= n <= 63`. Three cases on which half of the
-// 64 bits `n` crosses into, all of them shifting only a `hi` or a `lo` --
+// Rotate `value` right by `distance`, `1 <= n <= 63`. Three cases on which half of the
+// 64 bits `distance` crosses into, all of them shifting only a `high_bits` or a `low_bits` --
 // see the header for why that is the whole point.
-Word64 rotr64(Word64 a, int n) {
-    if (n < 32) {
-        int lo = (a.lo >> n) | ((a.hi << (32 - n)) & M32);
-        int hi = (a.hi >> n) | ((a.lo << (32 - n)) & M32);
-        return Word64(hi, lo);
+Word64 rotr64(Word64 value, int distance) {
+    if (distance < 32) {
+        int low_bits = (value.low >> distance) | ((value.high << (32 - distance)) & M32);
+        int high_bits = (value.high >> distance) | ((value.low << (32 - distance)) & M32);
+        return Word64(high_bits, low_bits);
     }
-    if (n == 32) {
-        return Word64(a.lo, a.hi);
+    if (distance == 32) {
+        return Word64(value.low, value.high);
     }
-    int m = n - 32;
-    int lo = (a.hi >> m) | ((a.lo << (32 - m)) & M32);
-    int hi = (a.lo >> m) | ((a.hi << (32 - m)) & M32);
-    return Word64(hi, lo);
+    int half_distance = distance - 32;
+    int low_bits = (value.high >> half_distance) | ((value.low << (32 - half_distance)) & M32);
+    int high_bits = (value.low >> half_distance) | ((value.high << (32 - half_distance)) & M32);
+    return Word64(high_bits, low_bits);
 }
 
-// Logical shift right by `n`, `1 <= n <= 63` -- as `rotr64`, but the bits
-// that fall off the bottom of `hi` do not wrap back into `lo`'s top; they
-// are just gone, and `hi`'s vacated top bits are zero.
-Word64 shr64(Word64 a, int n) {
-    if (n < 32) {
-        int lo = (a.lo >> n) | ((a.hi << (32 - n)) & M32);
-        int hi = a.hi >> n;
-        return Word64(hi, lo);
+// Logical shift right by `distance`, `1 <= n <= 63` -- as `rotr64`, but the bits
+// that fall off the bottom of `high_bits` do not wrap back into `low_bits`'s top; they
+// are just gone, and `high_bits`'s vacated top bits are zero.
+Word64 shr64(Word64 value, int distance) {
+    if (distance < 32) {
+        int low_bits = (value.low >> distance) | ((value.high << (32 - distance)) & M32);
+        int high_bits = value.high >> distance;
+        return Word64(high_bits, low_bits);
     }
-    if (n == 32) {
-        return Word64(0, a.hi);
+    if (distance == 32) {
+        return Word64(0, value.high);
     }
-    int m = n - 32;
-    return Word64(0, a.hi >> m);
+    int half_distance = distance - 32;
+    return Word64(0, value.high >> half_distance);
 }
 
 // The eight chaining values, FIPS 180-4 §5.3.5 -- see the header for where
 // these numbers come from.
 Array<Word64> h_init() {
-    Array<Word64> h = [Word64(0, 0); 8];
-    h[0] = Word64(0x6a09_e667, 0xf3bc_c908);
-    h[1] = Word64(0xbb67_ae85, 0x84ca_a73b);
-    h[2] = Word64(0x3c6e_f372, 0xfe94_f82b);
-    h[3] = Word64(0xa54f_f53a, 0x5f1d_36f1);
-    h[4] = Word64(0x510e_527f, 0xade6_82d1);
-    h[5] = Word64(0x9b05_688c, 0x2b3e_6c1f);
-    h[6] = Word64(0x1f83_d9ab, 0xfb41_bd6b);
-    h[7] = Word64(0x5be0_cd19, 0x137e_2179);
-    return h;
+    Array<Word64> initial_values = [Word64(0, 0); 8];
+    initial_values[0] = Word64(0x6a09_e667, 0xf3bc_c908);
+    initial_values[1] = Word64(0xbb67_ae85, 0x84ca_a73b);
+    initial_values[2] = Word64(0x3c6e_f372, 0xfe94_f82b);
+    initial_values[3] = Word64(0xa54f_f53a, 0x5f1d_36f1);
+    initial_values[4] = Word64(0x510e_527f, 0xade6_82d1);
+    initial_values[5] = Word64(0x9b05_688c, 0x2b3e_6c1f);
+    initial_values[6] = Word64(0x1f83_d9ab, 0xfb41_bd6b);
+    initial_values[7] = Word64(0x5be0_cd19, 0x137e_2179);
+    return initial_values;
 }
 
 // SHA-384's eight chaining values, FIPS 180-4 §5.3.4: the first 64 bits of the
 // fractional part of the square root of the ninth through sixteenth primes.
 // The compression function and the round constants are SHA-512's, unchanged.
 Array<Word64> h384_init() {
-    Array<Word64> h = [Word64(0, 0); 8];
-    h[0] = Word64(0xcbbb_9d5d, 0xc105_9ed8);
-    h[1] = Word64(0x629a_292a, 0x367c_d507);
-    h[2] = Word64(0x9159_015a, 0x3070_dd17);
-    h[3] = Word64(0x152f_ecd8, 0xf70e_5939);
-    h[4] = Word64(0x6733_2667, 0xffc0_0b31);
-    h[5] = Word64(0x8eb4_4a87, 0x6858_1511);
-    h[6] = Word64(0xdb0c_2e0d, 0x64f9_8fa7);
-    h[7] = Word64(0x47b5_481d, 0xbefa_4fa4);
-    return h;
+    Array<Word64> initial_values = [Word64(0, 0); 8];
+    initial_values[0] = Word64(0xcbbb_9d5d, 0xc105_9ed8);
+    initial_values[1] = Word64(0x629a_292a, 0x367c_d507);
+    initial_values[2] = Word64(0x9159_015a, 0x3070_dd17);
+    initial_values[3] = Word64(0x152f_ecd8, 0xf70e_5939);
+    initial_values[4] = Word64(0x6733_2667, 0xffc0_0b31);
+    initial_values[5] = Word64(0x8eb4_4a87, 0x6858_1511);
+    initial_values[6] = Word64(0xdb0c_2e0d, 0x64f9_8fa7);
+    initial_values[7] = Word64(0x47b5_481d, 0xbefa_4fa4);
+    return initial_values;
 }
 
 // The eighty round constants, FIPS 180-4 §4.2.3 -- see the header.
 Array<Word64> k_init() {
-    Array<Word64> k = [Word64(0, 0); 80];
-    k[0] = Word64(0x428a_2f98, 0xd728_ae22);
-    k[1] = Word64(0x7137_4491, 0x23ef_65cd);
-    k[2] = Word64(0xb5c0_fbcf, 0xec4d_3b2f);
-    k[3] = Word64(0xe9b5_dba5, 0x8189_dbbc);
-    k[4] = Word64(0x3956_c25b, 0xf348_b538);
-    k[5] = Word64(0x59f1_11f1, 0xb605_d019);
-    k[6] = Word64(0x923f_82a4, 0xaf19_4f9b);
-    k[7] = Word64(0xab1c_5ed5, 0xda6d_8118);
-    k[8] = Word64(0xd807_aa98, 0xa303_0242);
-    k[9] = Word64(0x1283_5b01, 0x4570_6fbe);
-    k[10] = Word64(0x2431_85be, 0x4ee4_b28c);
-    k[11] = Word64(0x550c_7dc3, 0xd5ff_b4e2);
-    k[12] = Word64(0x72be_5d74, 0xf27b_896f);
-    k[13] = Word64(0x80de_b1fe, 0x3b16_96b1);
-    k[14] = Word64(0x9bdc_06a7, 0x25c7_1235);
-    k[15] = Word64(0xc19b_f174, 0xcf69_2694);
-    k[16] = Word64(0xe49b_69c1, 0x9ef1_4ad2);
-    k[17] = Word64(0xefbe_4786, 0x384f_25e3);
-    k[18] = Word64(0x0fc1_9dc6, 0x8b8c_d5b5);
-    k[19] = Word64(0x240c_a1cc, 0x77ac_9c65);
-    k[20] = Word64(0x2de9_2c6f, 0x592b_0275);
-    k[21] = Word64(0x4a74_84aa, 0x6ea6_e483);
-    k[22] = Word64(0x5cb0_a9dc, 0xbd41_fbd4);
-    k[23] = Word64(0x76f9_88da, 0x8311_53b5);
-    k[24] = Word64(0x983e_5152, 0xee66_dfab);
-    k[25] = Word64(0xa831_c66d, 0x2db4_3210);
-    k[26] = Word64(0xb003_27c8, 0x98fb_213f);
-    k[27] = Word64(0xbf59_7fc7, 0xbeef_0ee4);
-    k[28] = Word64(0xc6e0_0bf3, 0x3da8_8fc2);
-    k[29] = Word64(0xd5a7_9147, 0x930a_a725);
-    k[30] = Word64(0x06ca_6351, 0xe003_826f);
-    k[31] = Word64(0x1429_2967, 0x0a0e_6e70);
-    k[32] = Word64(0x27b7_0a85, 0x46d2_2ffc);
-    k[33] = Word64(0x2e1b_2138, 0x5c26_c926);
-    k[34] = Word64(0x4d2c_6dfc, 0x5ac4_2aed);
-    k[35] = Word64(0x5338_0d13, 0x9d95_b3df);
-    k[36] = Word64(0x650a_7354, 0x8baf_63de);
-    k[37] = Word64(0x766a_0abb, 0x3c77_b2a8);
-    k[38] = Word64(0x81c2_c92e, 0x47ed_aee6);
-    k[39] = Word64(0x9272_2c85, 0x1482_353b);
-    k[40] = Word64(0xa2bf_e8a1, 0x4cf1_0364);
-    k[41] = Word64(0xa81a_664b, 0xbc42_3001);
-    k[42] = Word64(0xc24b_8b70, 0xd0f8_9791);
-    k[43] = Word64(0xc76c_51a3, 0x0654_be30);
-    k[44] = Word64(0xd192_e819, 0xd6ef_5218);
-    k[45] = Word64(0xd699_0624, 0x5565_a910);
-    k[46] = Word64(0xf40e_3585, 0x5771_202a);
-    k[47] = Word64(0x106a_a070, 0x32bb_d1b8);
-    k[48] = Word64(0x19a4_c116, 0xb8d2_d0c8);
-    k[49] = Word64(0x1e37_6c08, 0x5141_ab53);
-    k[50] = Word64(0x2748_774c, 0xdf8e_eb99);
-    k[51] = Word64(0x34b0_bcb5, 0xe19b_48a8);
-    k[52] = Word64(0x391c_0cb3, 0xc5c9_5a63);
-    k[53] = Word64(0x4ed8_aa4a, 0xe341_8acb);
-    k[54] = Word64(0x5b9c_ca4f, 0x7763_e373);
-    k[55] = Word64(0x682e_6ff3, 0xd6b2_b8a3);
-    k[56] = Word64(0x748f_82ee, 0x5def_b2fc);
-    k[57] = Word64(0x78a5_636f, 0x4317_2f60);
-    k[58] = Word64(0x84c8_7814, 0xa1f0_ab72);
-    k[59] = Word64(0x8cc7_0208, 0x1a64_39ec);
-    k[60] = Word64(0x90be_fffa, 0x2363_1e28);
-    k[61] = Word64(0xa450_6ceb, 0xde82_bde9);
-    k[62] = Word64(0xbef9_a3f7, 0xb2c6_7915);
-    k[63] = Word64(0xc671_78f2, 0xe372_532b);
-    k[64] = Word64(0xca27_3ece, 0xea26_619c);
-    k[65] = Word64(0xd186_b8c7, 0x21c0_c207);
-    k[66] = Word64(0xeada_7dd6, 0xcde0_eb1e);
-    k[67] = Word64(0xf57d_4f7f, 0xee6e_d178);
-    k[68] = Word64(0x06f0_67aa, 0x7217_6fba);
-    k[69] = Word64(0x0a63_7dc5, 0xa2c8_98a6);
-    k[70] = Word64(0x113f_9804, 0xbef9_0dae);
-    k[71] = Word64(0x1b71_0b35, 0x131c_471b);
-    k[72] = Word64(0x28db_77f5, 0x2304_7d84);
-    k[73] = Word64(0x32ca_ab7b, 0x40c7_2493);
-    k[74] = Word64(0x3c9e_be0a, 0x15c9_bebc);
-    k[75] = Word64(0x431d_67c4, 0x9c10_0d4c);
-    k[76] = Word64(0x4cc5_d4be, 0xcb3e_42b6);
-    k[77] = Word64(0x597f_299c, 0xfc65_7e2a);
-    k[78] = Word64(0x5fcb_6fab, 0x3ad6_faec);
-    k[79] = Word64(0x6c44_198c, 0x4a47_5817);
-    return k;
+    Array<Word64> constants = [Word64(0, 0); 80];
+    constants[0] = Word64(0x428a_2f98, 0xd728_ae22);
+    constants[1] = Word64(0x7137_4491, 0x23ef_65cd);
+    constants[2] = Word64(0xb5c0_fbcf, 0xec4d_3b2f);
+    constants[3] = Word64(0xe9b5_dba5, 0x8189_dbbc);
+    constants[4] = Word64(0x3956_c25b, 0xf348_b538);
+    constants[5] = Word64(0x59f1_11f1, 0xb605_d019);
+    constants[6] = Word64(0x923f_82a4, 0xaf19_4f9b);
+    constants[7] = Word64(0xab1c_5ed5, 0xda6d_8118);
+    constants[8] = Word64(0xd807_aa98, 0xa303_0242);
+    constants[9] = Word64(0x1283_5b01, 0x4570_6fbe);
+    constants[10] = Word64(0x2431_85be, 0x4ee4_b28c);
+    constants[11] = Word64(0x550c_7dc3, 0xd5ff_b4e2);
+    constants[12] = Word64(0x72be_5d74, 0xf27b_896f);
+    constants[13] = Word64(0x80de_b1fe, 0x3b16_96b1);
+    constants[14] = Word64(0x9bdc_06a7, 0x25c7_1235);
+    constants[15] = Word64(0xc19b_f174, 0xcf69_2694);
+    constants[16] = Word64(0xe49b_69c1, 0x9ef1_4ad2);
+    constants[17] = Word64(0xefbe_4786, 0x384f_25e3);
+    constants[18] = Word64(0x0fc1_9dc6, 0x8b8c_d5b5);
+    constants[19] = Word64(0x240c_a1cc, 0x77ac_9c65);
+    constants[20] = Word64(0x2de9_2c6f, 0x592b_0275);
+    constants[21] = Word64(0x4a74_84aa, 0x6ea6_e483);
+    constants[22] = Word64(0x5cb0_a9dc, 0xbd41_fbd4);
+    constants[23] = Word64(0x76f9_88da, 0x8311_53b5);
+    constants[24] = Word64(0x983e_5152, 0xee66_dfab);
+    constants[25] = Word64(0xa831_c66d, 0x2db4_3210);
+    constants[26] = Word64(0xb003_27c8, 0x98fb_213f);
+    constants[27] = Word64(0xbf59_7fc7, 0xbeef_0ee4);
+    constants[28] = Word64(0xc6e0_0bf3, 0x3da8_8fc2);
+    constants[29] = Word64(0xd5a7_9147, 0x930a_a725);
+    constants[30] = Word64(0x06ca_6351, 0xe003_826f);
+    constants[31] = Word64(0x1429_2967, 0x0a0e_6e70);
+    constants[32] = Word64(0x27b7_0a85, 0x46d2_2ffc);
+    constants[33] = Word64(0x2e1b_2138, 0x5c26_c926);
+    constants[34] = Word64(0x4d2c_6dfc, 0x5ac4_2aed);
+    constants[35] = Word64(0x5338_0d13, 0x9d95_b3df);
+    constants[36] = Word64(0x650a_7354, 0x8baf_63de);
+    constants[37] = Word64(0x766a_0abb, 0x3c77_b2a8);
+    constants[38] = Word64(0x81c2_c92e, 0x47ed_aee6);
+    constants[39] = Word64(0x9272_2c85, 0x1482_353b);
+    constants[40] = Word64(0xa2bf_e8a1, 0x4cf1_0364);
+    constants[41] = Word64(0xa81a_664b, 0xbc42_3001);
+    constants[42] = Word64(0xc24b_8b70, 0xd0f8_9791);
+    constants[43] = Word64(0xc76c_51a3, 0x0654_be30);
+    constants[44] = Word64(0xd192_e819, 0xd6ef_5218);
+    constants[45] = Word64(0xd699_0624, 0x5565_a910);
+    constants[46] = Word64(0xf40e_3585, 0x5771_202a);
+    constants[47] = Word64(0x106a_a070, 0x32bb_d1b8);
+    constants[48] = Word64(0x19a4_c116, 0xb8d2_d0c8);
+    constants[49] = Word64(0x1e37_6c08, 0x5141_ab53);
+    constants[50] = Word64(0x2748_774c, 0xdf8e_eb99);
+    constants[51] = Word64(0x34b0_bcb5, 0xe19b_48a8);
+    constants[52] = Word64(0x391c_0cb3, 0xc5c9_5a63);
+    constants[53] = Word64(0x4ed8_aa4a, 0xe341_8acb);
+    constants[54] = Word64(0x5b9c_ca4f, 0x7763_e373);
+    constants[55] = Word64(0x682e_6ff3, 0xd6b2_b8a3);
+    constants[56] = Word64(0x748f_82ee, 0x5def_b2fc);
+    constants[57] = Word64(0x78a5_636f, 0x4317_2f60);
+    constants[58] = Word64(0x84c8_7814, 0xa1f0_ab72);
+    constants[59] = Word64(0x8cc7_0208, 0x1a64_39ec);
+    constants[60] = Word64(0x90be_fffa, 0x2363_1e28);
+    constants[61] = Word64(0xa450_6ceb, 0xde82_bde9);
+    constants[62] = Word64(0xbef9_a3f7, 0xb2c6_7915);
+    constants[63] = Word64(0xc671_78f2, 0xe372_532b);
+    constants[64] = Word64(0xca27_3ece, 0xea26_619c);
+    constants[65] = Word64(0xd186_b8c7, 0x21c0_c207);
+    constants[66] = Word64(0xeada_7dd6, 0xcde0_eb1e);
+    constants[67] = Word64(0xf57d_4f7f, 0xee6e_d178);
+    constants[68] = Word64(0x06f0_67aa, 0x7217_6fba);
+    constants[69] = Word64(0x0a63_7dc5, 0xa2c8_98a6);
+    constants[70] = Word64(0x113f_9804, 0xbef9_0dae);
+    constants[71] = Word64(0x1b71_0b35, 0x131c_471b);
+    constants[72] = Word64(0x28db_77f5, 0x2304_7d84);
+    constants[73] = Word64(0x32ca_ab7b, 0x40c7_2493);
+    constants[74] = Word64(0x3c9e_be0a, 0x15c9_bebc);
+    constants[75] = Word64(0x431d_67c4, 0x9c10_0d4c);
+    constants[76] = Word64(0x4cc5_d4be, 0xcb3e_42b6);
+    constants[77] = Word64(0x597f_299c, 0xfc65_7e2a);
+    constants[78] = Word64(0x5fcb_6fab, 0x3ad6_faec);
+    constants[79] = Word64(0x6c44_198c, 0x4a47_5817);
+    return constants;
 }
 
 /// Offset-basis chaining state and everything `update`/`digest` need across
@@ -298,8 +298,8 @@ Array<Word64> k_init() {
 /// user type, so it does not qualify, the same restriction `sched` (below)
 /// and `h` are already written around.
 pub type Hasher {
-    Array<Word64> h = h_init();
-    Array<Word64> k = k_init();
+    Array<Word64> state = h_init();
+    Array<Word64> round_constants = k_init();
     /// Octets seen so far, for the 128-bit length field. Kept as one `int`
     /// (so a message longer than 2^63 octets is not supported -- no value
     /// this language can hold reaches memory anywhere near that size, so
@@ -319,26 +319,26 @@ pub type Hasher {
 /// Feed `data` to the hash. Any number of calls, of any sizes, hash the same
 /// as one call with them joined.
 pub void Hasher.update(bytes data) {
-    int n = data.size();
-    total = total + n;
-    int i = 0;
+    int data_length = data.size();
+    total = total + data_length;
+    int offset = 0;
     if (tail.size() > 0) {
-        while (i < n && tail.size() < 128) {
-            tail.push(data[i]);
-            i = i + 1;
+        while (offset < data_length && tail.size() < 128) {
+            tail.push(data[offset]);
+            offset = offset + 1;
         }
         if (tail.size() == 128) {
             block(tail, 0);
             tail.clear();
         }
     }
-    while (n - i >= 128) {
-        block(data, i);
-        i = i + 128;
+    while (data_length - offset >= 128) {
+        block(data, offset);
+        offset = offset + 128;
     }
-    while (i < n) {
-        tail.push(data[i]);
-        i = i + 1;
+    while (offset < data_length) {
+        tail.push(data[offset]);
+        offset = offset + 1;
     }
 }
 
@@ -352,82 +352,82 @@ pub bytes Hasher.digest() {
     }
     // The 128-bit big-endian length: 8 octets of zero (see the field
     // comment on `total`), then the 64-bit bit count.
-    for (int z in 0 .. 8) {
+    for (int padding_index in 0 .. 8) {
         tail.push(0);
     }
-    int s = 56;
-    while (s >= 0) {
-        tail.push(bits >> s & 0xFF);
-        s = s - 8;
+    int shift = 56;
+    while (shift >= 0) {
+        tail.push(bits >> shift & 0xFF);
+        shift = shift - 8;
     }
-    int i = 0;
-    int n = tail.size();
-    while (i < n) {
-        block(tail, i);
-        i = i + 128;
+    int offset = 0;
+    int tail_length = tail.size();
+    while (offset < tail_length) {
+        block(tail, offset);
+        offset = offset + 128;
     }
     tail.clear();
     bytes out = [];
-    for (int w in 0 .. 8) {
-        word(out, h[w]);
+    for (int word_index in 0 .. 8) {
+        word(out, state[word_index]);
     }
     out.truncate(digest_size);
     return out;
 }
 
-// One 128-octet block, read from `b` starting at `at`.
-void Hasher.block(bytes b, int at) {
-    Array<Word64> w = sched;
+// One 128-octet block, read from `data` starting at `offset`.
+void Hasher.block(bytes data, int offset) {
+    Array<Word64> message_words = sched;
     for (int i in 0 .. 16) {
-        int j = at + i * 8;
-        int hi = (b[j] << 24) | (b[j + 1] << 16) | (b[j + 2] << 8) | b[j + 3];
-        int lo = (b[j + 4] << 24) | (b[j + 5] << 16) | (b[j + 6] << 8) | b[j + 7];
-        w[i] = Word64(hi, lo);
+        int byte_offset = offset + i * 8;
+        int high_bits = (data[byte_offset] << 24) | (data[byte_offset + 1] << 16) | (data[byte_offset + 2] << 8) | data[byte_offset + 3];
+        int low_bits = (data[byte_offset + 4] << 24) | (data[byte_offset + 5] << 16) | (data[byte_offset + 6] << 8) | data[byte_offset + 7];
+        message_words[i] = Word64(high_bits, low_bits);
     }
     for (int i in 16 .. 80) {
-        Word64 s0 = xor64(xor64(rotr64(w[i - 15], 1), rotr64(w[i - 15], 8)), shr64(w[i - 15], 7));
-        Word64 s1 = xor64(xor64(rotr64(w[i - 2], 19), rotr64(w[i - 2], 61)), shr64(w[i - 2], 6));
-        w[i] = add4(w[i - 16], s0, w[i - 7], s1);
+        Word64 small_sigma_0 = xor64(xor64(rotr64(message_words[i - 15], 1), rotr64(message_words[i - 15], 8)), shr64(message_words[i - 15], 7));  // FIPS 180-4 §6.4.2: σ0
+        Word64 small_sigma_1 = xor64(xor64(rotr64(message_words[i - 2], 19), rotr64(message_words[i - 2], 61)), shr64(message_words[i - 2], 6));  // FIPS 180-4 §6.4.2: σ1
+        message_words[i] = add4(message_words[i - 16], small_sigma_0, message_words[i - 7], small_sigma_1);
     }
-    Word64 a = h[0];
-    Word64 bb = h[1];
-    Word64 c = h[2];
-    Word64 d = h[3];
-    Word64 e = h[4];
-    Word64 f = h[5];
-    Word64 g = h[6];
-    Word64 hh = h[7];
+    Word64 working_a = state[0];  // FIPS 180-4 §6.4.2: a
+    Word64 working_b = state[1];  // FIPS 180-4 §6.4.2: b
+    Word64 working_c = state[2];  // FIPS 180-4 §6.4.2: c
+    Word64 working_d = state[3];  // FIPS 180-4 §6.4.2: d
+    Word64 working_e = state[4];  // FIPS 180-4 §6.4.2: e
+    Word64 working_f = state[5];  // FIPS 180-4 §6.4.2: f
+    Word64 working_g = state[6];  // FIPS 180-4 §6.4.2: g
+    Word64 working_h = state[7];  // FIPS 180-4 §6.4.2: h
     for (int i in 0 .. 80) {
-        Word64 s1 = xor64(xor64(rotr64(e, 14), rotr64(e, 18)), rotr64(e, 41));
-        Word64 ch = xor64(and64(e, f), and64(not64(e), g));
-        Word64 temp1 = add5(hh, s1, ch, k[i], w[i]);
-        Word64 s0 = xor64(xor64(rotr64(a, 28), rotr64(a, 34)), rotr64(a, 39));
-        Word64 maj = xor64(xor64(and64(a, bb), and64(a, c)), and64(bb, c));
-        Word64 temp2 = add64(s0, maj);
-        hh = g;
-        g = f;
-        f = e;
-        e = add64(d, temp1);
-        d = c;
-        c = bb;
-        bb = a;
-        a = add64(temp1, temp2);
+        Word64 big_sigma_1 = xor64(xor64(rotr64(working_e, 14), rotr64(working_e, 18)), rotr64(working_e, 41));  // FIPS 180-4 §4.1.3: Σ1
+        Word64 choose = xor64(and64(working_e, working_f), and64(not64(working_e), working_g));  // FIPS 180-4 §4.1.3: Ch
+        Word64 temp1 = add5(working_h, big_sigma_1, choose, round_constants[i], message_words[i]);
+        Word64 big_sigma_0 = xor64(xor64(rotr64(working_a, 28), rotr64(working_a, 34)), rotr64(working_a, 39));  // FIPS 180-4 §4.1.3: Σ0
+        Word64 maj = xor64(xor64(and64(working_a, working_b), and64(working_a, working_c)), and64(working_b, working_c));
+        Word64 temp2 = add64(big_sigma_0, maj);
+        working_h = working_g;
+        working_g = working_f;
+        working_f = working_e;
+        working_e = add64(working_d, temp1);
+        working_d = working_c;
+        working_c = working_b;
+        working_b = working_a;
+        working_a = add64(temp1, temp2);
     }
-    h[0] = add64(h[0], a);
-    h[1] = add64(h[1], bb);
-    h[2] = add64(h[2], c);
-    h[3] = add64(h[3], d);
-    h[4] = add64(h[4], e);
-    h[5] = add64(h[5], f);
-    h[6] = add64(h[6], g);
-    h[7] = add64(h[7], hh);
+    state[0] = add64(state[0], working_a);
+    state[1] = add64(state[1], working_b);
+    state[2] = add64(state[2], working_c);
+    state[3] = add64(state[3], working_d);
+    state[4] = add64(state[4], working_e);
+    state[5] = add64(state[5], working_f);
+    state[6] = add64(state[6], working_g);
+    state[7] = add64(state[7], working_h);
 }
 
 /// The digest of `data`, in one call.
 pub bytes sum(bytes data) {
-    Hasher h = Hasher();
-    h.update(data);
-    return h.digest();
+    Hasher hasher = Hasher();
+    hasher.update(data);
+    return hasher.digest();
 }
 
 /// The digest of `data` as 128 lowercase hex digits.
@@ -439,7 +439,7 @@ pub str hex(bytes data) {
 /// chaining values and a 48-octet digest, the same `update` and `block`.
 pub Hasher sha384_hasher() {
     Hasher hasher = Hasher();
-    hasher.h = h384_init();
+    hasher.state = h384_init();
     hasher.digest_size = 48;
     return hasher;
 }
@@ -457,13 +457,13 @@ pub str hex384(bytes data) {
 }
 
 // A 64-bit word appended big-endian, as two 32-bit big-endian halves.
-void word(bytes out, Word64 v) {
-    out.push(v.hi >> 24 & 0xFF);
-    out.push(v.hi >> 16 & 0xFF);
-    out.push(v.hi >> 8 & 0xFF);
-    out.push(v.hi & 0xFF);
-    out.push(v.lo >> 24 & 0xFF);
-    out.push(v.lo >> 16 & 0xFF);
-    out.push(v.lo >> 8 & 0xFF);
-    out.push(v.lo & 0xFF);
+void word(bytes out, Word64 value) {
+    out.push(value.high >> 24 & 0xFF);
+    out.push(value.high >> 16 & 0xFF);
+    out.push(value.high >> 8 & 0xFF);
+    out.push(value.high & 0xFF);
+    out.push(value.low >> 24 & 0xFF);
+    out.push(value.low >> 16 & 0xFF);
+    out.push(value.low >> 8 & 0xFF);
+    out.push(value.low & 0xFF);
 }

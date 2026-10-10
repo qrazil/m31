@@ -129,7 +129,7 @@ run_one() {
     stdin="$PWD/${src%.$LANG_EXT}.in"
     [ -e "$stdin" ] || stdin=/dev/null
     # Command-line arguments are the test's `.args` file, one per line, and
-    # none otherwise -- the same shape as `.in`, for `os.args()`. Expanded
+    # none otherwise -- the same shape as `.in`, for `os.arguments()`. Expanded
     # below as "${argv[@]+"${argv[@]}"}" rather than the plain "${argv[@]}"
     # every other array in this file uses: bash's own nounset handling of
     # a genuinely EMPTY array (the common case here -- most tests have no
@@ -153,7 +153,7 @@ run_one() {
         # `LC_ALL=C` scoped onto just this `read`, not the whole script, is
         # also load-bearing, not cosmetic: corpus/modules/stdlib-os-not-
         # utf8's own .args file has a line ending in a raw, non-UTF8 byte
-        # (0xE9, deliberately -- that test is ABOUT args_bytes() handling
+        # (0xE9, deliberately -- that test is ABOUT arguments_bytes() handling
         # exactly that), and under a UTF-8 locale (en_US.UTF-8, what this
         # host and most CI runners default to) bash's own `read` applies
         # multibyte-aware line-ending detection that gets confused by that

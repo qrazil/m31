@@ -189,8 +189,8 @@ pub str Config.to_str() {
 }
 
 /// Whether the leaf certificate is valid for `host`.
-pub bool Config.serves(str host) {
-    return leaf.matches_hostname(host);
+pub bool Config.can_serve(str host) {
+    return leaf.is_valid_for_hostname(host);
 }
 
 /// The protocols to offer through ALPN, most preferred first. An empty list
@@ -246,13 +246,13 @@ bytes certificate_message_of(List<bytes> chain) {
     return handshake_message(11, body);
 }
 
-bool key_matches(signingkey.SigningKey key, x509.Certificate leaf) {
+bool is_key_match(signingkey.SigningKey key, x509.Certificate leaf) {
     match (key.kind()) {
         case Ed25519: {
             return leaf.public_key.algorithm == x509.OBJECT_ID_ED25519 && leaf.public_key.key_bytes == key.public_key;
         }
         case EcdsaP256: {
-            return leaf.public_key.algorithm == x509.OID_EC_PUBLIC_KEY && leaf.public_key.curve == x509.OID_CURVE_P256 && leaf.public_key.key_bytes == key.public_key;
+            return leaf.public_key.algorithm == x509.OBJECT_ID_EC_PUBLIC_KEY && leaf.public_key.curve == x509.OBJECT_ID_CURVE_P256 && leaf.public_key.key_bytes == key.public_key;
         }
     }
 }
@@ -305,7 +305,7 @@ Result<Config, ConfigError> config_of(List<bytes> blobs, Result<signingkey.Signi
             return Result<Config, ConfigError>.Err(config_error_of(key_error));
         }
         case Ok(signingkey.SigningKey key): {
-            if (!key_matches(key, parsed[0])) {
+            if (!is_key_match(key, parsed[0])) {
                 return Result<Config, ConfigError>.Err(ConfigError.KeyMismatch);
             }
             return Result<Config, ConfigError>.Ok(Config(parsed[0], key, certificate_message_of(blobs)));
@@ -687,7 +687,7 @@ Error error_of_record(tls13record.Error error) {
 
 // --- reading a ClientHello ---------------------------------------------------------
 
-bool all_zero(bytes data) {
+bool is_all_zero(bytes data) {
     int accumulated = 0;
     for (int index in 0 .. data.size()) {
         accumulated = accumulated | data[index];
@@ -710,19 +710,19 @@ bytes message_body(bytes message) {
 
 type Reader {
     bytes data;
-    int at = 0;
+    int position = 0;
 }
 
 int Reader.remaining() {
-    return data.size() - at;
+    return data.size() - position;
 }
 
-Result<int, Error> Reader.u8() {
+Result<int, Error> Reader.octet() {
     if (remaining() < 1) {
         return Result<int, Error>.Err(Error.Malformed);
     }
-    int value = data[at];
-    at = at + 1;
+    int value = data[position];
+    position = position + 1;
     return Result<int, Error>.Ok(value);
 }
 
@@ -730,8 +730,8 @@ Result<int, Error> Reader.u16() {
     if (remaining() < 2) {
         return Result<int, Error>.Err(Error.Malformed);
     }
-    int value = data[at] * 256 + data[at + 1];
-    at = at + 2;
+    int value = data[position] * 256 + data[position + 1];
+    position = position + 2;
     return Result<int, Error>.Ok(value);
 }
 
@@ -739,13 +739,13 @@ Result<bytes, Error> Reader.take(int count) {
     if (count < 0 || remaining() < count) {
         return Result<bytes, Error>.Err(Error.Malformed);
     }
-    bytes out = data.substr(at, at + count);
-    at = at + count;
+    bytes out = data.substr(position, position + count);
+    position = position + count;
     return Result<bytes, Error>.Ok(out);
 }
 
 Result<bytes, Error> Reader.vector8() {
-    int count = u8()?;
+    int count = octet()?;
     return take(count);
 }
 
@@ -761,9 +761,9 @@ type Hello {
     bytes session_id = [];
     List<int> suites = [];
     str server_name = "";
-    bool offers_tls13 = false;
+    bool is_tls13_offered = false;
     bool has_groups = false;
-    bool offers_x25519 = false;
+    bool is_x25519_offered = false;
     bool has_schemes = false;
     List<int> schemes = [];
     bool has_key_share = false;
@@ -783,7 +783,7 @@ Result<str, Error> read_server_name(bytes data) {
     Reader entries = Reader(list);
     str found = "";
     while (entries.remaining() > 0) {
-        int kind = entries.u8()?;
+        int kind = entries.octet()?;
         bytes name = entries.vector16()?;
         if (kind == 0 && found == "") {
             if (name.size() == 0) {
@@ -879,7 +879,7 @@ Result<void, Error> read_extension(int kind, bytes data, Hello hello) {
     } else if (kind == EXTENSION_SUPPORTED_GROUPS) {
         List<int> groups = read_u16_list(data)?;
         hello.has_groups = true;
-        hello.offers_x25519 = has_value(groups, GROUP_X25519);
+        hello.is_x25519_offered = has_value(groups, GROUP_X25519);
     } else if (kind == EXTENSION_SIGNATURE_ALGORITHMS) {
         hello.schemes = read_u16_list(data)?;
         hello.has_schemes = true;
@@ -892,7 +892,7 @@ Result<void, Error> read_extension(int kind, bytes data, Hello hello) {
         Reader versions = Reader(list);
         while (versions.remaining() > 0) {
             if (versions.u16()? == VERSION_TLS13) {
-                hello.offers_tls13 = true;
+                hello.is_tls13_offered = true;
             }
         }
     } else if (kind == EXTENSION_KEY_SHARE) {
@@ -959,7 +959,7 @@ type Choice {
 }
 
 Result<Choice, Error> negotiate(Hello hello, List<Config> configs) {
-    if (!hello.offers_tls13) {
+    if (!hello.is_tls13_offered) {
         return Result<Choice, Error>.Err(Error.UnsupportedVersion);
     }
     if (!has_value(hello.suites, SUITE_CHACHA20_POLY1305_SHA256)) {
@@ -970,7 +970,7 @@ Result<Choice, Error> negotiate(Hello hello, List<Config> configs) {
         chosen = Option<Config>.Some(configs[0]);
     } else {
         for (Config candidate in configs) {
-            if (candidate.serves(hello.server_name)) {
+            if (candidate.can_serve(hello.server_name)) {
                 chosen = Option<Config>.Some(candidate);
                 break;
             }
@@ -990,21 +990,21 @@ Result<Choice, Error> negotiate(Hello hello, List<Config> configs) {
             if (!hello.has_groups || !hello.has_key_share) {
                 return Result<Choice, Error>.Err(Error.MissingExtension);
             }
-            if (!hello.offers_x25519) {
+            if (!hello.is_x25519_offered) {
                 return Result<Choice, Error>.Err(Error.NoCommonGroup);
             }
             str protocol = "";
             if (hello.has_alpn && config.protocols.size() > 0) {
-                bool found = false;
+                bool is_found = false;
                 for (str ours in config.protocols) {
                     for (str theirs in hello.protocols) {
-                        if (!found && ours == theirs) {
+                        if (!is_found && ours == theirs) {
                             protocol = ours;
-                            found = true;
+                            is_found = true;
                         }
                     }
                 }
-                if (!found) {
+                if (!is_found) {
                     return Result<Choice, Error>.Err(Error.NoCommonProtocol);
                 }
             }
@@ -1141,14 +1141,14 @@ Result<Session, Error> run_handshake(tls13record.Connection record, List<Config>
     Hello hello = parse_client_hello(first_message)?;
     Choice choice = negotiate(hello, configs)?;
     transcript.add(first_message);
-    bool compatibility_sent = false;
+    bool was_compatibility_sent = false;
     if (!hello.has_x25519_share) {
         transcript.restart_after_retry_request(suite);
         bytes retry = retry_request_message(hello.session_id);
         transcript.add(retry);
         lift(record.send_handshake(retry))?;
         lift(record.send_change_cipher_spec())?;
-        compatibility_sent = true;
+        was_compatibility_sent = true;
         bytes second_message = next_client_hello(record)?;
         Hello again = parse_client_hello(second_message)?;
         if (!consttime.is_equal(again.client_random, hello.client_random) || !consttime.is_equal(again.session_id, hello.session_id) || again.server_name != hello.server_name) {
@@ -1164,13 +1164,13 @@ Result<Session, Error> run_handshake(tls13record.Connection record, List<Config>
     Config config = choice.config;
     bytes secret = source.octets(X25519_SIZE);
     bytes shared = x25519.x25519(secret, hello.x25519_share);
-    if (all_zero(shared)) {
+    if (is_all_zero(shared)) {
         return Result<Session, Error>.Err(Error.IllegalParameter);
     }
     bytes hello_message = server_hello(source.octets(RANDOM_SIZE), hello.session_id, x25519.base_point(secret));
     transcript.add(hello_message);
     lift(record.send_handshake(hello_message))?;
-    if (!compatibility_sent) {
+    if (!was_compatibility_sent) {
         lift(record.send_change_cipher_spec())?;
     }
     bytes early = tls13schedule.early_secret(suite, []);
@@ -1264,9 +1264,9 @@ pub type Conn {
     // pending[offset ..] has been decrypted and not handed out.
     bytes pending = [];
     int offset = 0;
-    bool at_end = false;
-    bool closed = false;
-    bool failed = false;
+    bool is_at_end = false;
+    bool is_closed = false;
+    bool is_failed = false;
     Error failure = Error.Closed;
 }
 
@@ -1281,20 +1281,20 @@ pub str Conn.alpn() {
 }
 
 Result<bytes, io.Error> Conn.next_chunk() {
-    if (failed) {
+    if (is_failed) {
         return Result<bytes, io.Error>.Err(io.Error.Other(errno_of(failure)));
     }
-    if (closed) {
+    if (is_closed) {
         return Result<bytes, io.Error>.Err(io.Error.Other(ERRNO_BAD_DESCRIPTOR));
     }
-    if (at_end) {
+    if (is_at_end) {
         bytes none = [];
         return Result<bytes, io.Error>.Ok(none);
     }
     match (record.receive_application()) {
         case Ok(bytes data): {
             if (data.size() == 0) {
-                at_end = true;
+                is_at_end = true;
             }
             return Result<bytes, io.Error>.Ok(data);
         }
@@ -1305,7 +1305,7 @@ Result<bytes, io.Error> Conn.next_chunk() {
 }
 
 io.Error Conn.fail(Error error) {
-    failed = true;
+    is_failed = true;
     failure = error;
     return io.Error.Other(errno_of(error));
 }
@@ -1396,10 +1396,10 @@ pub Result<bytes, io.Error> Conn.read_until(bytes delimiter, int limit) {
 
 /// Sends all of `data`, returning its size. An `Err` ends the connection.
 pub Result<int, io.Error> Conn.write(bytes data) {
-    if (closed) {
+    if (is_closed) {
         trap("write on a closed connection");
     }
-    if (failed) {
+    if (is_failed) {
         return Result<int, io.Error>.Err(io.Error.Other(errno_of(failure)));
     }
     match (record.send_application(data)) {
@@ -1419,11 +1419,11 @@ pub Result<bool, io.Error> Conn.close() {
 }
 
 Result<bool, io.Error> Conn.release() {
-    if (closed) {
+    if (is_closed) {
         return Result<bool, io.Error>.Ok(true);
     }
-    closed = true;
-    if (!failed) {
+    is_closed = true;
+    if (!is_failed) {
         Result<void, tls13record.Error> notified = record.send_close_notify();
     }
     match (record.close()) {
@@ -1442,7 +1442,7 @@ void Conn.drop() {
 
 /// Why the connection stopped working, or `None` while it has not.
 pub Option<Error> Conn.last_error() {
-    if (failed) {
+    if (is_failed) {
         return Option<Error>.Some(failure);
     }
     return Option<Error>.None;

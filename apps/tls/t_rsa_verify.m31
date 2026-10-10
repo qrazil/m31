@@ -16,8 +16,8 @@ import io;
 import os;
 import date;
 
-int verdict(bool accepted) {
-    if (accepted) {
+int verdict(bool is_accepted) {
+    if (is_accepted) {
         return 1;
     }
     return 0;
@@ -64,9 +64,9 @@ int run_case(List<str> fields) {
             bytes digest = decode(fields[6]);
             bytes signature = decode(fields[7]);
             if (fields[2] == "pkcs1") {
-                return verdict(rsa.verify_pkcs1_v15(key, hash, digest, signature));
+                return verdict(rsa.is_valid_pkcs1_v15_signature(key, hash, digest, signature));
             }
-            return verdict(rsa.verify_pss(key, hash, digest, signature));
+            return verdict(rsa.is_valid_pss_signature(key, hash, digest, signature));
         }
     }
 }
@@ -82,7 +82,7 @@ int modulus_bits_of(str hex) {
     }
 }
 
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 if (argv.size() < 2) {
     io.eprint("usage: t_rsa_verify VECTORS");
 } else {

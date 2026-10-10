@@ -115,16 +115,16 @@ pub enum Diff {
 /// contains one; nearly every binary format puts one within a few KB of the
 /// start, so this rarely has to read the whole file to answer.
 pub bool is_binary(bytes content) {
-    int n = content.size();
-    if (n > 8000) {
-        n = 8000;
+    int scan_length = content.size();
+    if (scan_length > 8000) {
+        scan_length = 8000;
     }
-    int i = 0;
-    while (i < n) {
-        if (content[i] == 0) {
+    int index = 0;
+    while (index < scan_length) {
+        if (content[index] == 0) {
             return true;
         }
-        i = i + 1;
+        index = index + 1;
     }
     return false;
 }
@@ -146,13 +146,13 @@ pub Diff diff(bytes old, bytes new) {
 /// property this module's own tests check.
 pub bytes reconstruct_old(List<Op> ops) {
     bytes out = [];
-    for (Op op in ops) {
-        match (op.kind) {
+    for (Op operation in ops) {
+        match (operation.kind) {
             case Keep: {
-                out.extend(op.line);
+                out.extend(operation.line);
             }
             case Remove: {
-                out.extend(op.line);
+                out.extend(operation.line);
             }
             case Add: {
             }
@@ -164,13 +164,13 @@ pub bytes reconstruct_old(List<Op> ops) {
 /// `new`, rebuilt from `ops`: every `Keep` and `Add` line, in order.
 pub bytes reconstruct_new(List<Op> ops) {
     bytes out = [];
-    for (Op op in ops) {
-        match (op.kind) {
+    for (Op operation in ops) {
+        match (operation.kind) {
             case Keep: {
-                out.extend(op.line);
+                out.extend(operation.line);
             }
             case Add: {
-                out.extend(op.line);
+                out.extend(operation.line);
             }
             case Remove: {
             }
@@ -189,116 +189,116 @@ pub bytes reconstruct_new(List<Op> ops) {
 // nothing else.
 List<bytes> split_lines(bytes content) {
     List<bytes> out = [];
-    int n = content.size();
+    int byte_count = content.size();
     int start = 0;
-    int i = 0;
-    while (i < n) {
-        if (content[i] == 10) {
-            out.push(content.substr(start, i + 1));
-            start = i + 1;
+    int index = 0;
+    while (index < byte_count) {
+        if (content[index] == 10) {
+            out.push(content.substr(start, index + 1));
+            start = index + 1;
         }
-        i = i + 1;
+        index = index + 1;
     }
-    if (start < n) {
-        out.push(content.substr(start, n));
+    if (start < byte_count) {
+        out.push(content.substr(start, byte_count));
     }
     return out;
 }
 
 // --- Myers' O(ND) algorithm ----------------------------------------------------
 //
-// The classic "greedy" formulation: for each edit distance `d` from 0 up,
-// walk every diagonal `k` a script of length `d` can reach, extend it along
+// The classic "greedy" formulation: for each edit distance `edit_distance` from 0 up,
+// walk every diagonal `diagonal` a script of length `edit_distance` can reach, extend it along
 // any run of matching lines (a "snake"), and stop the moment one reaches
 // (n, m) -- the end of both sequences. `v[k]` is the furthest `x` reached on
-// diagonal `k` at the current `d`, indexed through `offset` because `k`
-// ranges over negative numbers. `trace` keeps one snapshot of `v` per `d`,
+// diagonal `diagonal` at the current `edit_distance`, indexed through `offset` because `diagonal`
+// ranges over negative numbers. `trace` keeps one snapshot of `furthest_x` per `edit_distance`,
 // which is all `backtrack` needs to recover the path afterwards; nothing
 // else about the search is kept.
-List<Op> myers(List<bytes> a, List<bytes> b) {
-    int n = a.size();
-    int m = b.size();
-    int max = n + m;
+List<Op> myers(List<bytes> old_lines, List<bytes> new_lines) {
+    int old_count = old_lines.size();
+    int new_count = new_lines.size();
+    int max = old_count + new_count;
     if (max == 0) {
         return [];
     }
     int offset = max;
-    List<int> v = [0; 2 * max + 1];
+    List<int> furthest_x = [0; 2 * max + 1];  // Myers: V
     List<List<int>> trace = [];
     int end_d = -1;
-    int d = 0;
-    while (d <= max) {
-        bool found = false;
-        int k = 0 - d;
-        while (k <= d) {
+    int edit_distance = 0;  // Myers: D
+    while (edit_distance <= max) {
+        bool has_reached_end = false;
+        int diagonal = 0 - edit_distance;  // Myers: k
+        while (diagonal <= edit_distance) {
             int x = 0;
-            if (k == 0 - d || (k != d && v[k - 1 + offset] < v[k + 1 + offset])) {
-                x = v[k + 1 + offset];
+            if (diagonal == 0 - edit_distance || (diagonal != edit_distance && furthest_x[diagonal - 1 + offset] < furthest_x[diagonal + 1 + offset])) {
+                x = furthest_x[diagonal + 1 + offset];
             } else {
-                x = v[k - 1 + offset] + 1;
+                x = furthest_x[diagonal - 1 + offset] + 1;
             }
-            int y = x - k;
-            while (x < n && y < m && a[x] == b[y]) {
+            int y = x - diagonal;
+            while (x < old_count && y < new_count && old_lines[x] == new_lines[y]) {
                 x = x + 1;
                 y = y + 1;
             }
-            v[k + offset] = x;
-            if (x >= n && y >= m) {
-                found = true;
+            furthest_x[diagonal + offset] = x;
+            if (x >= old_count && y >= new_count) {
+                has_reached_end = true;
                 break;
             }
-            k = k + 2;
+            diagonal = diagonal + 2;
         }
-        trace.push(clone(v));
-        if (found) {
-            end_d = d;
+        trace.push(clone(furthest_x));
+        if (has_reached_end) {
+            end_d = edit_distance;
             break;
         }
-        d = d + 1;
+        edit_distance = edit_distance + 1;
     }
-    return backtrack(a, b, trace, end_d, offset);
+    return backtrack(old_lines, new_lines, trace, end_d, offset);
 }
 
 // Walk `trace` from the end back to the start, turning the path Myers found
-// into an edit script. Each depth `d` says whether the move into it was an
-// insertion or a deletion (whichever side did NOT move to reach `prev_x`),
+// into an edit script. Each depth `edit_distance` says whether the move into it was an
+// insertion or a deletion (whichever side did NOT move to reach `previous_x`),
 // preceded by however long a diagonal (a run of `Keep`s) led into it; the
 // diagonal below `d == 0` -- the very start, before any edit -- is walked
 // once more after the loop, since no depth ever generates it. Built
 // backwards and reversed once at the end, rather than reversed at every
 // step.
-List<Op> backtrack(List<bytes> a, List<bytes> b, List<List<int>> trace, int end_d, int offset) {
+List<Op> backtrack(List<bytes> old_lines, List<bytes> new_lines, List<List<int>> trace, int end_d, int offset) {
     List<Op> ops = [];
-    int x = a.size();
-    int y = b.size();
-    int d = end_d;
-    while (d > 0) {
-        List<int> v = trace[d];
-        int k = x - y;
-        int prev_k = 0;
-        if (k == 0 - d || (k != d && v[k - 1 + offset] < v[k + 1 + offset])) {
-            prev_k = k + 1;
+    int x = old_lines.size();
+    int y = new_lines.size();
+    int edit_distance = end_d;
+    while (edit_distance > 0) {
+        List<int> furthest_x = trace[edit_distance];
+        int diagonal = x - y;
+        int previous_diagonal = 0;
+        if (diagonal == 0 - edit_distance || (diagonal != edit_distance && furthest_x[diagonal - 1 + offset] < furthest_x[diagonal + 1 + offset])) {
+            previous_diagonal = diagonal + 1;
         } else {
-            prev_k = k - 1;
+            previous_diagonal = diagonal - 1;
         }
-        int prev_x = v[prev_k + offset];
-        int prev_y = prev_x - prev_k;
-        while (x > prev_x && y > prev_y) {
-            ops.push(Op(Kind.Keep, a[x - 1]));
+        int previous_x = furthest_x[previous_diagonal + offset];
+        int previous_y = previous_x - previous_diagonal;
+        while (x > previous_x && y > previous_y) {
+            ops.push(Op(Kind.Keep, old_lines[x - 1]));
             x = x - 1;
             y = y - 1;
         }
-        if (x == prev_x) {
-            ops.push(Op(Kind.Add, b[y - 1]));
+        if (x == previous_x) {
+            ops.push(Op(Kind.Add, new_lines[y - 1]));
             y = y - 1;
         } else {
-            ops.push(Op(Kind.Remove, a[x - 1]));
+            ops.push(Op(Kind.Remove, old_lines[x - 1]));
             x = x - 1;
         }
-        d = d - 1;
+        edit_distance = edit_distance - 1;
     }
     while (x > 0 && y > 0) {
-        ops.push(Op(Kind.Keep, a[x - 1]));
+        ops.push(Op(Kind.Keep, old_lines[x - 1]));
         x = x - 1;
         y = y - 1;
     }

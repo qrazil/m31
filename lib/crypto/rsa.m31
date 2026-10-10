@@ -8,8 +8,8 @@
 //   match (rsa.parse_public_key(modulus_bytes, exponent_bytes)) {   // big-endian, as in DER
 //       case None: { /* too small, too large, even modulus, unusable exponent */ }
 //       case Some(rsa.PublicKey key): {
-//           bool good = rsa.verify_pkcs1_v15(key, rsa.Hash.Sha256, digest, signature);
-//           bool also = rsa.verify_pss(key, rsa.Hash.Sha384, digest, signature);
+//           bool good = rsa.is_valid_pkcs1_v15_signature(key, rsa.Hash.Sha256, digest, signature);
+//           bool also = rsa.is_valid_pss_signature(key, rsa.Hash.Sha384, digest, signature);
 //       }
 //   }
 //
@@ -154,7 +154,7 @@ pub Option<PublicKey> parse_public_key(bytes modulus_bytes, bytes public_exponen
 
 /// Whether `signature` is a valid RSASSA-PKCS1-v1_5 signature by `key`, under
 /// `hash`, over the message whose hash is `digest`.
-pub bool verify_pkcs1_v15(PublicKey key, Hash hash, bytes digest, bytes signature) {
+pub bool is_valid_pkcs1_v15_signature(PublicKey key, Hash hash, bytes digest, bytes signature) {
     if (digest.size() != digest_size(hash)) {
         return false;
     }
@@ -185,7 +185,7 @@ pub bool verify_pkcs1_v15(PublicKey key, Hash hash, bytes digest, bytes signatur
 /// Whether `signature` is a valid RSASSA-PSS signature by `key`, over the
 /// message whose hash is `digest`, using `hash` for the message hash and for
 /// MGF1, with a salt as long as the digest.
-pub bool verify_pss(PublicKey key, Hash hash, bytes digest, bytes signature) {
+pub bool is_valid_pss_signature(PublicKey key, Hash hash, bytes digest, bytes signature) {
     int hash_length = digest_size(hash);
     if (digest.size() != hash_length) {
         return false;
@@ -204,14 +204,14 @@ pub bool verify_pss(PublicKey key, Hash hash, bytes digest, bytes signature) {
                 }
                 encoded = recovered.substr(1, recovered.size());
             }
-            return pss_encoding_matches(hash, digest, encoded, encoded_bits);
+            return is_pss_encoding_match(hash, digest, encoded, encoded_bits);
         }
     }
 }
 
 // `encoded` is `EM`, `ceil((modBits - 1) / 8)` octets, and `encoded_bits` is
 // `emBits`; RFC 8017 §9.1.2 steps 3 to 14, with `sLen = hLen`.
-bool pss_encoding_matches(Hash hash, bytes digest, bytes encoded, int encoded_bits) {
+bool is_pss_encoding_match(Hash hash, bytes digest, bytes encoded, int encoded_bits) {
     int hash_length = digest.size();
     int salt_length = hash_length;
     int encoded_length = encoded.size();

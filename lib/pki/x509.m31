@@ -10,7 +10,7 @@
 //   x509.parse_trust_anchor(input)    -> Result<Certificate, Error>
 //   x509.pem_certificates(text)       -> Result<List<bytes>, Error>   PEM -> DER blobs
 //   x509.parse_pem(text, trust_anchors: false) -> Result<List<Certificate>, Error>
-//   x509.same_name(left, right)       -> bool                  two raw Names, byte for byte
+//   x509.is_same_name(left, right)       -> bool                  two raw Names, byte for byte
 //   c.issued_by(other)                -> bool                  c.issuer is other.subject
 //   c.is_valid_at(now)                -> bool                  `now` is epoch seconds, injected
 //   c.matches_hostname(host)          -> bool
@@ -93,23 +93,23 @@ pub const int KEY_USAGE_KEY_CERT_SIGN = 0x020;
 pub const int KEY_USAGE_CRL_SIGN = 0x040;
 pub const int KEY_USAGE_ENCIPHER_ONLY = 0x080;
 pub const int KEY_USAGE_DECIPHER_ONLY = 0x100;
-pub const str OID_RSA_ENCRYPTION = "1.2.840.113549.1.1.1";
-pub const str OID_EC_PUBLIC_KEY = "1.2.840.10045.2.1";
-pub const str OID_CURVE_P256 = "1.2.840.10045.3.1.7";
-pub const str OID_CURVE_P384 = "1.3.132.0.34";
+pub const str OBJECT_ID_RSA_ENCRYPTION = "1.2.840.113549.1.1.1";
+pub const str OBJECT_ID_EC_PUBLIC_KEY = "1.2.840.10045.2.1";
+pub const str OBJECT_ID_CURVE_P256 = "1.2.840.10045.3.1.7";
+pub const str OBJECT_ID_CURVE_P384 = "1.3.132.0.34";
 /// id-Ed25519 (RFC 8410): the key algorithm and the signature algorithm.
 pub const str OBJECT_ID_ED25519 = "1.3.101.112";
 const int ED25519_KEY_SIZE = 32;
-pub const str OID_SERVER_AUTH = "1.3.6.1.5.5.7.3.1";
-const str OID_SUBJECT_KEY_IDENTIFIER = "2.5.29.14";
-const str OID_KEY_USAGE = "2.5.29.15";
-const str OID_SUBJECT_ALT_NAME = "2.5.29.17";
-const str OID_BASIC_CONSTRAINTS = "2.5.29.19";
-const str OID_AUTHORITY_KEY_IDENTIFIER = "2.5.29.35";
-const str OID_TLS_FEATURE = "1.3.6.1.5.5.7.1.24";
+pub const str OBJECT_ID_SERVER_AUTH = "1.3.6.1.5.5.7.3.1";
+const str OBJECT_ID_SUBJECT_KEY_IDENTIFIER = "2.5.29.14";
+const str OBJECT_ID_KEY_USAGE = "2.5.29.15";
+const str OBJECT_ID_SUBJECT_ALT_NAME = "2.5.29.17";
+const str OBJECT_ID_BASIC_CONSTRAINTS = "2.5.29.19";
+const str OBJECT_ID_AUTHORITY_KEY_IDENTIFIER = "2.5.29.35";
+const str OBJECT_ID_TLS_FEATURE = "1.3.6.1.5.5.7.1.24";
 const int TLS_FEATURE_STATUS_REQUEST = 5;
-const str OID_EXTENDED_KEY_USAGE = "2.5.29.37";
-const str OID_ANY_EXTENDED_KEY_USAGE = "2.5.29.37.0";
+const str OBJECT_ID_EXTENDED_KEY_USAGE = "2.5.29.37";
+const str OBJECT_ID_ANY_EXTENDED_KEY_USAGE = "2.5.29.37.0";
 const int TAG_VERSION = 0xA0;
 const int TAG_ISSUER_UNIQUE_ID = 0x81;
 const int TAG_SUBJECT_UNIQUE_ID = 0x82;
@@ -191,7 +191,7 @@ pub str Error.to_str() {
 /// An AlgorithmIdentifier: the algorithm's OID in dotted form and the raw
 /// TLV of its parameters (empty when the field is absent).
 pub type AlgorithmIdentifier {
-    pub str algorithm_oid;
+    pub str algorithm_object_id;
     pub bytes parameters;
 }
 
@@ -240,15 +240,15 @@ pub type Certificate {
     pub List<str> extended_key_usages = [];
     pub bytes subject_key_id = [];
     pub bytes authority_key_id = [];
-    pub bool unhandled_critical = false;
+    pub bool has_unhandled_critical = false;
     /// The TLS Feature extension (RFC 7633) lists status_request: the CA says
     /// this certificate must always be served with a stapled OCSP response.
-    pub bool must_staple = false;
+    pub bool needs_staple = false;
 }
 
 /// Whether this certificate names `other` as its issuer.
-pub bool Certificate.issued_by(Certificate other) {
-    return same_name(issuer, other.subject);
+pub bool Certificate.is_issued_by(Certificate other) {
+    return is_same_name(issuer, other.subject);
 }
 
 /// Whether `now` (epoch seconds) lies within the validity period,
@@ -260,12 +260,12 @@ pub bool Certificate.is_valid_at(int now) {
 /// Whether the extendedKeyUsage extension permits TLS server
 /// authentication: it is absent (no restriction), or lists `serverAuth` or
 /// `anyExtendedKeyUsage`.
-pub bool Certificate.allows_server_auth() {
+pub bool Certificate.is_server_auth_allowed() {
     if (extended_key_usages.size() == 0) {
         return true;
     }
     for (str purpose in extended_key_usages) {
-        if (purpose == OID_SERVER_AUTH || purpose == OID_ANY_EXTENDED_KEY_USAGE) {
+        if (purpose == OBJECT_ID_SERVER_AUTH || purpose == OBJECT_ID_ANY_EXTENDED_KEY_USAGE) {
             return true;
         }
     }
@@ -276,7 +276,7 @@ pub bool Certificate.allows_server_auth() {
 /// the `iPAddress` entries only, any other host against the `dNSName`
 /// entries only. See the header for the exact rules; the CommonName is never
 /// consulted.
-pub bool Certificate.matches_hostname(str host) {
+pub bool Certificate.is_valid_for_hostname(str host) {
     match (net.parse_ip(host)) {
         case Some(net.Ip address): {
             bytes wanted_octets = address.octets();
@@ -295,7 +295,7 @@ pub bool Certificate.matches_hostname(str host) {
         return false;
     }
     for (str pattern in dns_names) {
-        if (name_matches(normalize_name(pattern), wanted)) {
+        if (is_name_match(normalize_name(pattern), wanted)) {
             return true;
         }
     }
@@ -338,8 +338,8 @@ Result<List<der.Element>, Error> elements_of(der.Element element, Error replacem
     }
 }
 
-Result<str, Error> oid_of(der.Element element, Error replacement) {
-    match (element.oid()) {
+Result<str, Error> object_id_of(der.Element element, Error replacement) {
+    match (element.object_id()) {
         case Ok(str dotted): {
             return Result<str, Error>.Ok(dotted);
         }
@@ -440,7 +440,7 @@ Result<AlgorithmIdentifier, Error> read_algorithm(der.Element element, Error rep
     if (parts.size() < 1 || parts.size() > 2) {
         return Result<AlgorithmIdentifier, Error>.Err(replacement);
     }
-    str dotted = oid_of(parts[0], replacement)?;
+    str dotted = object_id_of(parts[0], replacement)?;
     bytes parameter_bytes = [];
     if (parts.size() == 2) {
         parameter_bytes = parts[1].raw();
@@ -459,7 +459,7 @@ Result<bool, Error> check_name(der.Element name) {
         }
         for (der.Element attribute in attributes) {
             List<der.Element> pair = children_of(attribute, der.TAG_SEQUENCE, Error.BadName)?;
-            if (pair.size() != 2 || pair[0].tag != der.TAG_OID) {
+            if (pair.size() != 2 || pair[0].tag != der.TAG_OBJECT_ID) {
                 return Result<bool, Error>.Err(Error.BadName);
             }
         }
@@ -477,10 +477,10 @@ Result<PublicKey, Error> read_public_key(der.Element info) {
     if (bits.unused_bits != 0 || bits.octets.size() == 0) {
         return Result<PublicKey, Error>.Err(Error.BadPublicKey);
     }
-    str curve_oid = "";
+    str curve_object_id = "";
     bytes modulus_bytes = [];
     bytes exponent_bytes = [];
-    if (identifier.algorithm_oid == OID_RSA_ENCRYPTION) {
+    if (identifier.algorithm_object_id == OBJECT_ID_RSA_ENCRYPTION) {
         bytes null_parameters = [5, 0];
         if (identifier.parameters != null_parameters) {
             return Result<PublicKey, Error>.Err(Error.BadPublicKey);
@@ -495,16 +495,16 @@ Result<PublicKey, Error> read_public_key(der.Element info) {
         if (modulus_bytes[0] == 0 || exponent_bytes[0] == 0) {
             return Result<PublicKey, Error>.Err(Error.BadPublicKey);
         }
-    } else if (identifier.algorithm_oid == OID_EC_PUBLIC_KEY) {
+    } else if (identifier.algorithm_object_id == OBJECT_ID_EC_PUBLIC_KEY) {
         der.Element curve_element = parse_of(identifier.parameters, Error.BadPublicKey)?;
-        curve_oid = oid_of(curve_element, Error.BadPublicKey)?;
-    } else if (identifier.algorithm_oid == OBJECT_ID_ED25519) {
+        curve_object_id = object_id_of(curve_element, Error.BadPublicKey)?;
+    } else if (identifier.algorithm_object_id == OBJECT_ID_ED25519) {
         // RFC 8410 §3: the parameters are absent, and the key is 32 octets.
         if (identifier.parameters.size() != 0 || bits.octets.size() != ED25519_KEY_SIZE) {
             return Result<PublicKey, Error>.Err(Error.BadPublicKey);
         }
     }
-    return Result<PublicKey, Error>.Ok(PublicKey(identifier.algorithm_oid, curve_oid, bits.octets, modulus_bytes, exponent_bytes));
+    return Result<PublicKey, Error>.Ok(PublicKey(identifier.algorithm_object_id, curve_object_id, bits.octets, modulus_bytes, exponent_bytes));
 }
 
 // A GeneralName's dNSName text, refused unless it is plain visible ASCII.
@@ -537,9 +537,9 @@ Result<bool, Error> read_subject_alt_name(Certificate certificate, bytes value) 
         // otherName, rfc822Name, dNSName, x400Address, directoryName,
         // ediPartyName, URI, iPAddress, registeredID.
         int name_tag = name.tag;
-        bool known = name_tag == 0xA0 || name_tag == 0x81 || name_tag == TAG_DNS_NAME || name_tag == 0xA3;
-        known = known || name_tag == 0xA4 || name_tag == 0xA5 || name_tag == 0x86 || name_tag == TAG_IP_ADDRESS || name_tag == 0x88;
-        if (!known) {
+        bool is_known = name_tag == 0xA0 || name_tag == 0x81 || name_tag == TAG_DNS_NAME || name_tag == 0xA3;
+        is_known = is_known || name_tag == 0xA4 || name_tag == 0xA5 || name_tag == 0x86 || name_tag == TAG_IP_ADDRESS || name_tag == 0x88;
+        if (!is_known) {
             return Result<bool, Error>.Err(Error.BadExtension);
         }
         if (name_tag == TAG_DNS_NAME) {
@@ -563,11 +563,11 @@ Result<bool, Error> read_basic_constraints(Certificate certificate, bytes value)
     der.Element root = validate_of(value, Error.BadExtension)?;
     List<der.Element> parts = children_of(root, der.TAG_SEQUENCE, Error.BadExtension)?;
     int next = 0;
-    bool authority = false;
+    bool is_authority = false;
     int length_limit = -1;
     if (next < parts.size() && parts[next].tag == der.TAG_BOOLEAN) {
-        authority = boolean_of(parts[next], Error.BadExtension)?;
-        if (!authority) {
+        is_authority = boolean_of(parts[next], Error.BadExtension)?;
+        if (!is_authority) {
             return Result<bool, Error>.Err(Error.BadExtension);
         }
         next = next + 1;
@@ -576,11 +576,11 @@ Result<bool, Error> read_basic_constraints(Certificate certificate, bytes value)
         length_limit = integer_value_of(parts[next], Error.BadExtension)?;
         next = next + 1;
     }
-    if (next != parts.size() || (length_limit >= 0 && !authority)) {
+    if (next != parts.size() || (length_limit >= 0 && !is_authority)) {
         return Result<bool, Error>.Err(Error.BadExtension);
     }
     certificate.has_basic_constraints = true;
-    certificate.is_ca = authority;
+    certificate.is_ca = is_authority;
     certificate.path_length = length_limit;
     return Result<bool, Error>.Ok(true);
 }
@@ -610,7 +610,7 @@ Result<bool, Error> read_extended_key_usage(Certificate certificate, bytes value
         return Result<bool, Error>.Err(Error.BadExtension);
     }
     for (der.Element purpose in purposes) {
-        certificate.extended_key_usages.push(oid_of(purpose, Error.BadExtension)?);
+        certificate.extended_key_usages.push(object_id_of(purpose, Error.BadExtension)?);
     }
     return Result<bool, Error>.Ok(true);
 }
@@ -626,7 +626,7 @@ Result<bool, Error> read_tls_feature(Certificate certificate, bytes value) {
     }
     for (der.Element feature in features) {
         if (integer_value_of(feature, Error.BadExtension)? == TLS_FEATURE_STATUS_REQUEST) {
-            certificate.must_staple = true;
+            certificate.needs_staple = true;
         }
     }
     return Result<bool, Error>.Ok(true);
@@ -654,7 +654,7 @@ Result<bool, Error> read_authority_key_id(Certificate certificate, bytes value) 
 
 // `[3] EXPLICIT SEQUENCE SIZE (1..MAX) OF Extension`, applied to
 // `certificate`.
-Result<bool, Error> read_extensions(Certificate certificate, der.Element wrapper, bool trust_anchor) {
+Result<bool, Error> read_extensions(Certificate certificate, der.Element wrapper, bool is_trust_anchor) {
     List<der.Element> inner = children_of(wrapper, TAG_EXTENSIONS, Error.Malformed)?;
     if (inner.size() != 1) {
         return Result<bool, Error>.Err(Error.Malformed);
@@ -669,46 +669,46 @@ Result<bool, Error> read_extensions(Certificate certificate, der.Element wrapper
         if (parts.size() < 2 || parts.size() > 3) {
             return Result<bool, Error>.Err(Error.BadExtension);
         }
-        str extension_oid = oid_of(parts[0], Error.BadExtension)?;
-        bool critical = false;
+        str extension_object_id = object_id_of(parts[0], Error.BadExtension)?;
+        bool is_critical = false;
         if (parts.size() == 3) {
-            critical = boolean_of(parts[1], Error.BadExtension)?;
-            if (!critical) {
+            is_critical = boolean_of(parts[1], Error.BadExtension)?;
+            if (!is_critical) {
                 return Result<bool, Error>.Err(Error.BadExtension);
             }
         }
         bytes value = octet_string_of(parts[parts.size() - 1], Error.BadExtension)?;
         for (str earlier in seen) {
-            if (earlier == extension_oid) {
+            if (earlier == extension_object_id) {
                 return Result<bool, Error>.Err(Error.DuplicateExtension);
             }
         }
-        seen.push(extension_oid);
-        if (extension_oid == OID_SUBJECT_ALT_NAME) {
+        seen.push(extension_object_id);
+        if (extension_object_id == OBJECT_ID_SUBJECT_ALT_NAME) {
             read_subject_alt_name(certificate, value)?;
-        } else if (extension_oid == OID_BASIC_CONSTRAINTS) {
+        } else if (extension_object_id == OBJECT_ID_BASIC_CONSTRAINTS) {
             read_basic_constraints(certificate, value)?;
-        } else if (extension_oid == OID_KEY_USAGE) {
+        } else if (extension_object_id == OBJECT_ID_KEY_USAGE) {
             read_key_usage(certificate, value)?;
-        } else if (extension_oid == OID_EXTENDED_KEY_USAGE) {
+        } else if (extension_object_id == OBJECT_ID_EXTENDED_KEY_USAGE) {
             read_extended_key_usage(certificate, value)?;
-        } else if (extension_oid == OID_TLS_FEATURE) {
+        } else if (extension_object_id == OBJECT_ID_TLS_FEATURE) {
             read_tls_feature(certificate, value)?;
-        } else if (extension_oid == OID_SUBJECT_KEY_IDENTIFIER) {
+        } else if (extension_object_id == OBJECT_ID_SUBJECT_KEY_IDENTIFIER) {
             read_subject_key_id(certificate, value)?;
-        } else if (extension_oid == OID_AUTHORITY_KEY_IDENTIFIER) {
+        } else if (extension_object_id == OBJECT_ID_AUTHORITY_KEY_IDENTIFIER) {
             read_authority_key_id(certificate, value)?;
-        } else if (critical) {
-            if (!trust_anchor) {
+        } else if (is_critical) {
+            if (!is_trust_anchor) {
                 return Result<bool, Error>.Err(Error.UnknownCriticalExtension);
             }
-            certificate.unhandled_critical = true;
+            certificate.has_unhandled_critical = true;
         }
     }
     return Result<bool, Error>.Ok(true);
 }
 
-Result<Certificate, Error> parse_with(bytes input, bool trust_anchor) {
+Result<Certificate, Error> parse_with(bytes input, bool is_trust_anchor) {
     der.Element root = validate_of(input, Error.Malformed)?;
     List<der.Element> top = children_of(root, der.TAG_SEQUENCE, Error.Malformed)?;
     if (top.size() != 3 || top[0].tag != der.TAG_SEQUENCE) {
@@ -739,7 +739,7 @@ Result<Certificate, Error> parse_with(bytes input, bool trust_anchor) {
     }
     bytes serial = integer_bytes_of(fields[next], Error.Malformed)?;
     AlgorithmIdentifier inner_algorithm = read_algorithm(fields[next + 1], Error.BadSignatureAlgorithm)?;
-    if (inner_algorithm.algorithm_oid != outer_algorithm.algorithm_oid || inner_algorithm.parameters != outer_algorithm.parameters) {
+    if (inner_algorithm.algorithm_object_id != outer_algorithm.algorithm_object_id || inner_algorithm.parameters != outer_algorithm.parameters) {
         return Result<Certificate, Error>.Err(Error.BadSignatureAlgorithm);
     }
     check_name(fields[next + 2])?;
@@ -780,7 +780,7 @@ Result<Certificate, Error> parse_with(bytes input, bool trust_anchor) {
     }
     Certificate certificate = Certificate(input, top[0].raw(), version_number, serial, inner_algorithm, fields[next + 2].raw(), fields[next + 4].raw(), valid_from, valid_until, key, fields[next + 5].raw(), outer_algorithm, outer_signature.octets);
     if (has_extensions) {
-        read_extensions(certificate, fields[cursor], trust_anchor)?;
+        read_extensions(certificate, fields[cursor], is_trust_anchor)?;
     }
     return Result<Certificate, Error>.Ok(certificate);
 }
@@ -805,12 +805,12 @@ pub Result<Certificate, Error> parse_trust_anchor(bytes input) {
 pub Result<List<bytes>, Error> pem_certificates(str text) {
     List<bytes> found = [];
     List<str> body = [];
-    bool inside = false;
+    bool is_inside = false;
     for (str raw_line in text.split("\n")) {
         str line = raw_line.trim();
-        if (!inside) {
+        if (!is_inside) {
             if (line == "-----BEGIN CERTIFICATE-----") {
-                inside = true;
+                is_inside = true;
                 body = [];
             }
         } else if (line == "-----END CERTIFICATE-----") {
@@ -825,14 +825,14 @@ pub Result<List<bytes>, Error> pem_certificates(str text) {
                     return Result<List<bytes>, Error>.Err(Error.BadPem);
                 }
             }
-            inside = false;
+            is_inside = false;
         } else if (line.starts_with("-----")) {
             return Result<List<bytes>, Error>.Err(Error.BadPem);
         } else {
             body.push(line);
         }
     }
-    if (inside) {
+    if (is_inside) {
         return Result<List<bytes>, Error>.Err(Error.BadPem);
     }
     return Result<List<bytes>, Error>.Ok(found);
@@ -840,18 +840,18 @@ pub Result<List<bytes>, Error> pem_certificates(str text) {
 
 /// Every certificate in a PEM bundle, parsed. With `trust_anchors: true`
 /// each goes through `parse_trust_anchor`, for a bundle of roots.
-pub Result<List<Certificate>, Error> parse_pem(str text, bool trust_anchors = false) {
+pub Result<List<Certificate>, Error> parse_pem(str text, bool is_trust_bundle = false) {
     List<bytes> blobs = pem_certificates(text)?;
     List<Certificate> certificates = [];
     for (bytes blob in blobs) {
-        certificates.push(parse_with(blob, trust_anchors)?);
+        certificates.push(parse_with(blob, is_trust_bundle)?);
     }
     return Result<List<Certificate>, Error>.Ok(certificates);
 }
 
 /// Whether two raw Names (an `issuer` and a `subject`) are the same
 /// encoding, byte for byte.
-pub bool same_name(bytes left, bytes right) {
+pub bool is_same_name(bytes left, bytes right) {
     return left == right;
 }
 
@@ -876,24 +876,24 @@ bool is_plain_hostname(str host) {
             return false;
         }
         for (int octet in label.to_bytes()) {
-            bool letter = octet >= 'a' && octet <= 'z';
-            bool digit = octet >= '0' && octet <= '9';
-            if (!letter && !digit && octet != '-' && octet != '_') {
+            bool is_letter = octet >= 'a' && octet <= 'z';
+            bool is_digit = octet >= '0' && octet <= '9';
+            if (!is_letter && !is_digit && octet != '-' && octet != '_') {
                 return false;
             }
         }
     }
-    bool numeric = true;
+    bool is_numeric = true;
     for (int octet in labels[labels.size() - 1].to_bytes()) {
         if (octet < '0' || octet > '9') {
-            numeric = false;
+            is_numeric = false;
         }
     }
-    return !numeric;
+    return !is_numeric;
 }
 
 // `pattern` against `host`, both already normalized, `host` already plain.
-bool name_matches(str pattern, str host) {
+bool is_name_match(str pattern, str host) {
     if (pattern == host) {
         return true;
     }

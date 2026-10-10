@@ -24,8 +24,8 @@ bytes pattern(int count, int multiplier, int offset) {
 const str ORDER = "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551";
 const str PRIME = "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff";
 
-str verdict(bool flag) {
-    if (flag) {
+str verdict(bool is_valid) {
+    if (is_valid) {
         return "yes";
     }
     return "no";

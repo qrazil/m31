@@ -182,7 +182,7 @@ match (ssh.connect("127.0.0.1", port, good_key)) {
     case Ok(ssh.Transport t): {
         print("handshake ok");
         bytes req = [];
-        req.push(ssh.SSH_MSG_SERVICE_REQUEST);
+        req.push(ssh.SSH_MESSAGE_SERVICE_REQUEST);
         ssh.push_string(req, "ssh-userauth".to_bytes());
         match (t.send(req)) {
             case Ok(int n): {
@@ -193,7 +193,7 @@ match (ssh.connect("127.0.0.1", port, good_key)) {
         }
         match (t.recv()) {
             case Ok(bytes resp): {
-                if (resp.size() >= 1 && resp[0] == ssh.SSH_MSG_SERVICE_ACCEPT) {
+                if (resp.size() >= 1 && resp[0] == ssh.SSH_MESSAGE_SERVICE_ACCEPT) {
                     print("service-accept ok");
                 } else {
                     trap("unexpected response, first byte " + resp[0].to_str());

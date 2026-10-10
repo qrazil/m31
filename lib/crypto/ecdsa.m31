@@ -8,8 +8,8 @@
 //   match (ecdsa.parse_public_key(curve, point_bytes)) {   // 0x04 || X || Y
 //       case None: { /* malformed, off the curve, or not a valid point */ }
 //       case Some(ecdsa.PublicKey key): {
-//           bool good = ecdsa.verify_der(curve, key, digest, signature);   // SEQUENCE { r, s }
-//           bool also = ecdsa.verify_raw(curve, key, digest, signature);   // r || s
+//           bool good = ecdsa.is_valid_der_signature(curve, key, digest, signature);   // SEQUENCE { r, s }
+//           bool also = ecdsa.is_valid_raw_signature(curve, key, digest, signature);   // r || s
 //       }
 //   }
 //
@@ -77,9 +77,9 @@ const str P384_GY = "3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f
 // A point in Jacobian coordinates, every coordinate a Montgomery-form field
 // element: affine `(X/Z^2, Y/Z^3)`. `Z = 0` is the point at infinity.
 type Point {
-    Array<int> x;
-    Array<int> y;
-    Array<int> z;
+    Array<int> x_coordinate;
+    Array<int> y_coordinate;
+    Array<int> z_coordinate;
 }
 
 /// A curve's parameters and the two Montgomery contexts (field and group
@@ -96,14 +96,14 @@ pub type Curve {
 /// A validated public point, kept in Montgomery form. `parse_public_key` is
 /// the only way to get one, so holding one means the point is on the curve.
 pub type PublicKey {
-    Array<int> x;
-    Array<int> y;
+    Array<int> x_coordinate;
+    Array<int> y_coordinate;
 }
 
 // A parsed signature, both scalars known to be in `[1, n-1]`.
 type Signature {
-    Array<int> r;
-    Array<int> s;
+    Array<int> r_component;
+    Array<int> s_component;
 }
 
 Curve build_curve(int size, str prime_hex, str order_hex, str b_hex, str gx_hex, str gy_hex) {
@@ -150,19 +150,19 @@ Point infinity(bignum.Modulus field) {
 
 // `2 * point` (`dbl-2001-b`, for the curve coefficient a = -3).
 Point double_point(bignum.Modulus field, Point point) {
-    if (bignum.is_zero(point.z)) {
+    if (bignum.is_zero(point.z_coordinate)) {
         return point;
     }
-    Array<int> delta = field_multiply(field, point.z, point.z);
-    Array<int> gamma = field_multiply(field, point.y, point.y);
-    Array<int> beta = field_multiply(field, point.x, gamma);
-    Array<int> product = field_multiply(field, field_subtract(field, point.x, delta), field_add(field, point.x, delta));
+    Array<int> delta = field_multiply(field, point.z_coordinate, point.z_coordinate);
+    Array<int> gamma = field_multiply(field, point.y_coordinate, point.y_coordinate);
+    Array<int> beta = field_multiply(field, point.x_coordinate, gamma);
+    Array<int> product = field_multiply(field, field_subtract(field, point.x_coordinate, delta), field_add(field, point.x_coordinate, delta));
     Array<int> alpha = field_add(field, product, field_add(field, product, product));
     Array<int> beta_two = field_add(field, beta, beta);
     Array<int> beta_four = field_add(field, beta_two, beta_two);
     Array<int> beta_eight = field_add(field, beta_four, beta_four);
     Array<int> x_out = field_subtract(field, field_multiply(field, alpha, alpha), beta_eight);
-    Array<int> y_plus_z = field_add(field, point.y, point.z);
+    Array<int> y_plus_z = field_add(field, point.y_coordinate, point.z_coordinate);
     Array<int> z_out = field_subtract(field, field_subtract(field, field_multiply(field, y_plus_z, y_plus_z), gamma), delta);
     Array<int> gamma_squared = field_multiply(field, gamma, gamma);
     Array<int> gamma_two = field_add(field, gamma_squared, gamma_squared);
@@ -175,18 +175,18 @@ Point double_point(bignum.Modulus field, Point point) {
 // `left + right` (`add-2007-bl`), with the exceptional cases -- either side
 // infinity, equal points, opposite points -- handled by explicit branches.
 Point add_points(bignum.Modulus field, Point left, Point right) {
-    if (bignum.is_zero(left.z)) {
+    if (bignum.is_zero(left.z_coordinate)) {
         return right;
     }
-    if (bignum.is_zero(right.z)) {
+    if (bignum.is_zero(right.z_coordinate)) {
         return left;
     }
-    Array<int> left_z_squared = field_multiply(field, left.z, left.z);
-    Array<int> right_z_squared = field_multiply(field, right.z, right.z);
-    Array<int> left_u = field_multiply(field, left.x, right_z_squared);
-    Array<int> right_u = field_multiply(field, right.x, left_z_squared);
-    Array<int> left_s = field_multiply(field, field_multiply(field, left.y, right.z), right_z_squared);
-    Array<int> right_s = field_multiply(field, field_multiply(field, right.y, left.z), left_z_squared);
+    Array<int> left_z_squared = field_multiply(field, left.z_coordinate, left.z_coordinate);
+    Array<int> right_z_squared = field_multiply(field, right.z_coordinate, right.z_coordinate);
+    Array<int> left_u = field_multiply(field, left.x_coordinate, right_z_squared);
+    Array<int> right_u = field_multiply(field, right.x_coordinate, left_z_squared);
+    Array<int> left_s = field_multiply(field, field_multiply(field, left.y_coordinate, right.z_coordinate), right_z_squared);
+    Array<int> right_s = field_multiply(field, field_multiply(field, right.y_coordinate, left.z_coordinate), left_z_squared);
     Array<int> horizontal = field_subtract(field, right_u, left_u);
     if (bignum.is_zero(horizontal)) {
         if (bignum.compare(left_s, right_s) == 0) {
@@ -205,7 +205,7 @@ Point add_points(bignum.Modulus field, Point left, Point right) {
     Array<int> left_s_cube = field_multiply(field, left_s, cube);
     Array<int> left_s_cube_two = field_add(field, left_s_cube, left_s_cube);
     Array<int> y_out = field_subtract(field, field_multiply(field, slope, field_subtract(field, volume, x_out)), left_s_cube_two);
-    Array<int> z_sum = field_add(field, left.z, right.z);
+    Array<int> z_sum = field_add(field, left.z_coordinate, right.z_coordinate);
     Array<int> z_term = field_subtract(field, field_subtract(field, field_multiply(field, z_sum, z_sum), left_z_squared), right_z_squared);
     Array<int> z_out = field_multiply(field, z_term, horizontal);
     return Point(x_out, y_out, z_out);
@@ -214,7 +214,7 @@ Point add_points(bignum.Modulus field, Point left, Point right) {
 // `first_scalar * G + second_scalar * key` by interleaved double-and-add.
 Point combine(Curve curve, PublicKey key, Array<int> first_scalar, Array<int> second_scalar) {
     bignum.Modulus field = curve.field;
-    Point key_point = Point(key.x, key.y, bignum.montgomery_one(field));
+    Point key_point = Point(key.x_coordinate, key.y_coordinate, bignum.montgomery_one(field));
     Point both = add_points(field, curve.generator, key_point);
     List<Point> table = [infinity(field), curve.generator, key_point, both];
     int top = bignum.bit_length(first_scalar);
@@ -358,7 +358,7 @@ Option<Signature> parse_raw(Curve curve, bytes data) {
 
 // --- verification -------------------------------------------------------------------
 
-bool check_signature(Curve curve, PublicKey key, bytes digest, Signature signature) {
+bool is_signature_valid(Curve curve, PublicKey key, bytes digest, Signature signature) {
     bignum.Modulus field = curve.field;
     bignum.Modulus order = curve.order;
     bytes leading = digest;
@@ -366,47 +366,47 @@ bool check_signature(Curve curve, PublicKey key, bytes digest, Signature signatu
         leading = digest.substr(0, curve.size);
     }
     Array<int> digest_value = bignum.reduce_once(order, bignum.from_bytes(leading, order.width));
-    Array<int> inverse = bignum.montgomery_inverse(order, bignum.to_montgomery(order, signature.s));
+    Array<int> inverse = bignum.montgomery_inverse(order, bignum.to_montgomery(order, signature.s_component));
     Array<int> first_scalar = bignum.montgomery_multiply(order, digest_value, inverse);
-    Array<int> second_scalar = bignum.montgomery_multiply(order, signature.r, inverse);
+    Array<int> second_scalar = bignum.montgomery_multiply(order, signature.r_component, inverse);
     Point result = combine(curve, key, first_scalar, second_scalar);
-    if (bignum.is_zero(result.z)) {
+    if (bignum.is_zero(result.z_coordinate)) {
         return false;
     }
-    Array<int> z_squared = field_multiply(field, result.z, result.z);
-    Array<int> expected = field_multiply(field, bignum.to_montgomery(field, signature.r), z_squared);
-    if (bignum.compare(result.x, expected) == 0) {
+    Array<int> z_squared = field_multiply(field, result.z_coordinate, result.z_coordinate);
+    Array<int> expected = field_multiply(field, bignum.to_montgomery(field, signature.r_component), z_squared);
+    if (bignum.compare(result.x_coordinate, expected) == 0) {
         return true;
     }
-    if (bignum.compare(signature.r, curve.prime_gap) < 0) {
-        Array<int> wrapped = bignum.add_limbs_wrapping(signature.r, order.value);
+    if (bignum.compare(signature.r_component, curve.prime_gap) < 0) {
+        Array<int> wrapped = bignum.add_limbs_wrapping(signature.r_component, order.value);
         Array<int> wrapped_expected = field_multiply(field, bignum.to_montgomery(field, wrapped), z_squared);
-        return bignum.compare(result.x, wrapped_expected) == 0;
+        return bignum.compare(result.x_coordinate, wrapped_expected) == 0;
     }
     return false;
 }
 
 /// Whether `signature` -- DER `SEQUENCE { INTEGER r, INTEGER s }` -- is a
 /// valid ECDSA signature by `key` over the message whose hash is `digest`.
-pub bool verify_der(Curve curve, PublicKey key, bytes digest, bytes signature) {
+pub bool is_valid_der_signature(Curve curve, PublicKey key, bytes digest, bytes signature) {
     match (parse_der(curve, signature)) {
         case None: {
             return false;
         }
         case Some(Signature parsed): {
-            return check_signature(curve, key, digest, parsed);
+            return is_signature_valid(curve, key, digest, parsed);
         }
     }
 }
 
 /// Like `verify_der`, for the fixed-width `r || s` form (`2 * curve.size` bytes).
-pub bool verify_raw(Curve curve, PublicKey key, bytes digest, bytes signature) {
+pub bool is_valid_raw_signature(Curve curve, PublicKey key, bytes digest, bytes signature) {
     match (parse_raw(curve, signature)) {
         case None: {
             return false;
         }
         case Some(Signature parsed): {
-            return check_signature(curve, key, digest, parsed);
+            return is_signature_valid(curve, key, digest, parsed);
         }
     }
 }
@@ -450,7 +450,7 @@ Array<int> select_limbs(int flag, Array<int> first, Array<int> second) {
 }
 
 Point select_point(int flag, Point first, Point second) {
-    return Point(select_limbs(flag, first.x, second.x), select_limbs(flag, first.y, second.y), select_limbs(flag, first.z, second.z));
+    return Point(select_limbs(flag, first.x_coordinate, second.x_coordinate), select_limbs(flag, first.y_coordinate, second.y_coordinate), select_limbs(flag, first.z_coordinate, second.z_coordinate));
 }
 
 // `scalar * base` for a scalar in `[1, n-1]`: the Montgomery ladder, with
@@ -477,14 +477,14 @@ Point ladder(Curve curve, Point base, Array<int> scalar) {
 // `0x04 || X || Y` of the affine point, or the empty string for infinity.
 bytes encode_point(Curve curve, Point point) {
     bignum.Modulus field = curve.field;
-    if (bignum.is_zero(point.z)) {
+    if (bignum.is_zero(point.z_coordinate)) {
         return [];
     }
-    Array<int> inverse = bignum.montgomery_inverse(field, point.z);
+    Array<int> inverse = bignum.montgomery_inverse(field, point.z_coordinate);
     Array<int> inverse_squared = field_multiply(field, inverse, inverse);
     Array<int> inverse_cubed = field_multiply(field, inverse_squared, inverse);
-    Array<int> affine_x = bignum.from_montgomery(field, field_multiply(field, point.x, inverse_squared));
-    Array<int> affine_y = bignum.from_montgomery(field, field_multiply(field, point.y, inverse_cubed));
+    Array<int> affine_x = bignum.from_montgomery(field, field_multiply(field, point.x_coordinate, inverse_squared));
+    Array<int> affine_y = bignum.from_montgomery(field, field_multiply(field, point.y_coordinate, inverse_cubed));
     bytes out = [4];
     out.extend(bignum.to_bytes(affine_x, curve.size));
     out.extend(bignum.to_bytes(affine_y, curve.size));
@@ -531,7 +531,7 @@ pub bytes shared_secret(Curve curve, PublicKey peer, bytes secret) {
             trap("ecdsa: an ECDH scalar is curve.size octets in [1, n-1]");
         }
         case Some(Array<int> scalar): {
-            Point base = Point(peer.x, peer.y, bignum.montgomery_one(curve.field));
+            Point base = Point(peer.x_coordinate, peer.y_coordinate, bignum.montgomery_one(curve.field));
             bytes encoded = encode_point(curve, ladder(curve, base, scalar));
             return encoded.substr(1, 1 + curve.size);
         }

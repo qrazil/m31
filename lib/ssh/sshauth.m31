@@ -65,8 +65,8 @@ pub enum Error {
 
 pub str Error.to_str() {
     match (this) {
-        case Transport(ssh.Error e): {
-            return "the connection failed during authentication: " + e.to_str();
+        case Transport(ssh.Error error): {
+            return "the connection failed during authentication: " + error.to_str();
         }
         case Truncated: {
             return "an authentication message named more bytes than arrived";
@@ -86,11 +86,11 @@ pub str Error.to_str() {
     }
 }
 
-pub const int SSH_MSG_USERAUTH_REQUEST = 50;
-pub const int SSH_MSG_USERAUTH_FAILURE = 51;
-pub const int SSH_MSG_USERAUTH_SUCCESS = 52;
-pub const int SSH_MSG_USERAUTH_BANNER = 53;
-pub const int SSH_MSG_USERAUTH_PK_OK = 60;
+pub const int SSH_MESSAGE_USERAUTH_REQUEST = 50;
+pub const int SSH_MESSAGE_USERAUTH_FAILURE = 51;
+pub const int SSH_MESSAGE_USERAUTH_SUCCESS = 52;
+pub const int SSH_MESSAGE_USERAUTH_BANNER = 53;
+pub const int SSH_MESSAGE_USERAUTH_PK_OK = 60;
 const str SERVICE_NAME = "ssh-userauth";
 const str CONNECTION_SERVICE = "ssh-connection";
 const str METHOD = "publickey";
@@ -104,20 +104,20 @@ const int MAX_BANNERS = 32;
 /// `SSH_MSG_SERVICE_REQUEST "ssh-userauth"` (RFC 4253 §10).
 pub bytes build_service_request() {
     bytes out = [];
-    out.push(ssh.SSH_MSG_SERVICE_REQUEST);
+    out.push(ssh.SSH_MESSAGE_SERVICE_REQUEST);
     ssh.push_string(out, SERVICE_NAME.to_bytes());
     return out;
 }
 
 // The body every `publickey` request shares, up to and including the key
-// blob (RFC 4252 §7), with `have_sig` as the boolean.
-bytes request_prefix(str user, bool have_sig, bytes public_blob) {
+// blob (RFC 4252 §7), with `has_signature` as the boolean.
+bytes request_prefix(str user, bool has_signature, bytes public_blob) {
     bytes out = [];
-    out.push(SSH_MSG_USERAUTH_REQUEST);
+    out.push(SSH_MESSAGE_USERAUTH_REQUEST);
     ssh.push_string(out, user.to_bytes());
     ssh.push_string(out, CONNECTION_SERVICE.to_bytes());
     ssh.push_string(out, METHOD.to_bytes());
-    if (have_sig) {
+    if (has_signature) {
         out.push(1);
     } else {
         out.push(0);
@@ -154,11 +154,11 @@ pub bytes build_signed_request(str user, bytes public_blob, bytes signature_blob
 /// `USERAUTH_FAILURE`: the methods that can continue, and `partial success`.
 pub type Failure {
     pub List<str> methods;
-    pub bool partial_success;
+    pub bool is_partial_success;
 }
 
 pub Result<Failure, Error> parse_failure(bytes payload) {
-    if (payload.size() < 1 || payload[0] != SSH_MSG_USERAUTH_FAILURE) {
+    if (payload.size() < 1 || payload[0] != SSH_MESSAGE_USERAUTH_FAILURE) {
         return Result<Failure, Error>.Err(Error.UnexpectedMessage);
     }
     ssh.NameList names = name_list_at(payload, 1)?;
@@ -171,7 +171,7 @@ pub Result<Failure, Error> parse_failure(bytes payload) {
 /// `USERAUTH_BANNER`: the message text (UTF-8). The language tag after it is
 /// parsed for bounds and dropped.
 pub Result<str, Error> parse_banner(bytes payload) {
-    if (payload.size() < 1 || payload[0] != SSH_MSG_USERAUTH_BANNER) {
+    if (payload.size() < 1 || payload[0] != SSH_MESSAGE_USERAUTH_BANNER) {
         return Result<str, Error>.Err(Error.UnexpectedMessage);
     }
     ssh.Field message = string_at(payload, 1)?;
@@ -189,7 +189,7 @@ pub Result<str, Error> parse_banner(bytes payload) {
 /// `USERAUTH_PK_OK`: it must echo the algorithm and key blob that were
 /// offered, byte for byte.
 pub Result<bool, Error> parse_pk_ok(bytes payload, bytes public_blob) {
-    if (payload.size() < 1 || payload[0] != SSH_MSG_USERAUTH_PK_OK) {
+    if (payload.size() < 1 || payload[0] != SSH_MESSAGE_USERAUTH_PK_OK) {
         return Result<bool, Error>.Err(Error.UnexpectedMessage);
     }
     ssh.Field algo = string_at(payload, 1)?;
@@ -202,7 +202,7 @@ pub Result<bool, Error> parse_pk_ok(bytes payload, bytes public_blob) {
 
 /// `SERVICE_ACCEPT` for `ssh-userauth`.
 pub Result<bool, Error> parse_service_accept(bytes payload) {
-    if (payload.size() < 1 || payload[0] != ssh.SSH_MSG_SERVICE_ACCEPT) {
+    if (payload.size() < 1 || payload[0] != ssh.SSH_MESSAGE_SERVICE_ACCEPT) {
         return Result<bool, Error>.Err(Error.UnexpectedMessage);
     }
     ssh.Field name = string_at(payload, 1)?;
@@ -212,23 +212,23 @@ pub Result<bool, Error> parse_service_accept(bytes payload) {
     return Result<bool, Error>.Ok(true);
 }
 
-Result<ssh.Field, Error> string_at(bytes buf, int at) {
-    match (ssh.parse_string(buf, at)) {
-        case Ok(ssh.Field f): {
-            return Result<ssh.Field, Error>.Ok(f);
+Result<ssh.Field, Error> string_at(bytes buffer, int offset) {
+    match (ssh.parse_string(buffer, offset)) {
+        case Ok(ssh.Field field): {
+            return Result<ssh.Field, Error>.Ok(field);
         }
-        case Err(ssh.Error e): {
+        case Err(_): {
             return Result<ssh.Field, Error>.Err(Error.Truncated);
         }
     }
 }
 
-Result<ssh.NameList, Error> name_list_at(bytes buf, int at) {
-    match (ssh.parse_name_list(buf, at)) {
-        case Ok(ssh.NameList n): {
-            return Result<ssh.NameList, Error>.Ok(n);
+Result<ssh.NameList, Error> name_list_at(bytes buffer, int offset) {
+    match (ssh.parse_name_list(buffer, offset)) {
+        case Ok(ssh.NameList name_list): {
+            return Result<ssh.NameList, Error>.Ok(name_list);
         }
-        case Err(ssh.Error e): {
+        case Err(_): {
             return Result<ssh.NameList, Error>.Err(Error.Truncated);
         }
     }
@@ -238,11 +238,11 @@ Result<ssh.NameList, Error> name_list_at(bytes buf, int at) {
 
 Result<void, Error> send_message(ssh.Link link, bytes payload) {
     match (link.send(payload)) {
-        case Ok(int n): {
+        case Ok(_): {
             return Result<void, Error>.Ok;
         }
-        case Err(ssh.Error e): {
-            return Result<void, Error>.Err(Error.Transport(e));
+        case Err(ssh.Error error): {
+            return Result<void, Error>.Err(Error.Transport(error));
         }
     }
 }
@@ -252,8 +252,8 @@ Result<bytes, Error> recv_message(ssh.Link link) {
         case Ok(bytes payload): {
             return Result<bytes, Error>.Ok(payload);
         }
-        case Err(ssh.Error e): {
-            return Result<bytes, Error>.Err(Error.Transport(e));
+        case Err(ssh.Error error): {
+            return Result<bytes, Error>.Err(Error.Transport(error));
         }
     }
 }
@@ -275,23 +275,23 @@ pub Result<str, Error> authenticate_as(ssh.Link link, str user, bytes public_blo
     send_message(link, build_query(user, public_blob))?;
     str banner = "";
     int seen = 0;
-    bool probed = false;
-    while (!probed) {
+    bool is_probed = false;
+    while (!is_probed) {
         bytes reply = recv_message(link)?;
         if (reply.size() == 0) {
             return Result<str, Error>.Err(Error.Truncated);
         }
         int kind = reply[0];
-        if (kind == SSH_MSG_USERAUTH_BANNER) {
+        if (kind == SSH_MESSAGE_USERAUTH_BANNER) {
             seen = seen + 1;
             if (seen > MAX_BANNERS) {
                 return Result<str, Error>.Err(Error.UnexpectedMessage);
             }
             banner = banner + parse_banner(reply)?;
-        } else if (kind == SSH_MSG_USERAUTH_PK_OK) {
+        } else if (kind == SSH_MESSAGE_USERAUTH_PK_OK) {
             parse_pk_ok(reply, public_blob)?;
-            probed = true;
-        } else if (kind == SSH_MSG_USERAUTH_FAILURE) {
+            is_probed = true;
+        } else if (kind == SSH_MESSAGE_USERAUTH_FAILURE) {
             parse_failure(reply)?;
             return Result<str, Error>.Err(Error.KeyRejected);
         } else {
@@ -307,15 +307,15 @@ pub Result<str, Error> authenticate_as(ssh.Link link, str user, bytes public_blo
             return Result<str, Error>.Err(Error.Truncated);
         }
         int kind = reply[0];
-        if (kind == SSH_MSG_USERAUTH_BANNER) {
+        if (kind == SSH_MESSAGE_USERAUTH_BANNER) {
             seen = seen + 1;
             if (seen > MAX_BANNERS) {
                 return Result<str, Error>.Err(Error.UnexpectedMessage);
             }
             banner = banner + parse_banner(reply)?;
-        } else if (kind == SSH_MSG_USERAUTH_SUCCESS) {
+        } else if (kind == SSH_MESSAGE_USERAUTH_SUCCESS) {
             return Result<str, Error>.Ok(banner);
-        } else if (kind == SSH_MSG_USERAUTH_FAILURE) {
+        } else if (kind == SSH_MESSAGE_USERAUTH_FAILURE) {
             parse_failure(reply)?;
             return Result<str, Error>.Err(Error.AuthFailed);
         } else {

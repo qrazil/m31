@@ -3,23 +3,23 @@
 // The A/B partner is `option-boxed.m31`, which is this file plus one line.
 // See `bench/value-enums.md`.
 
-Option<int> half(int n) {
-    if (n % 2 == 0) {
-        return Option<int>.Some(n / 2);
+Option<int> half(int number) {
+    if (number % 2 == 0) {
+        return Option<int>.Some(number / 2);
     }
     return Option<int>.None;
 }
 
 int total = 0;
-int i = 0;
-while (i < 50000000) {
-    match (half(i)) {
-        case Some(int h): {
-            total = total + h;
+int index = 0;
+while (index < 50000000) {
+    match (half(index)) {
+        case Some(int halved): {
+            total = total + halved;
         }
         case None: {
         }
     }
-    i = i + 1;
+    index = index + 1;
 }
 print(total);

@@ -27,22 +27,22 @@ import crypto.chacha20poly1305;
 
 // 2N hex digits to the N octets they spell -- `apps/git/index.m31`'s own
 // helper, needed here too and not shared, per that file's own comment on why.
-bytes hex_decode(str s) {
+bytes hex_decode(str text) {
     bytes out = [];
-    int i = 0;
-    while (i + 1 < s.size()) {
-        out.push(hex_val(s.byte_at(i)) << 4 | hex_val(s.byte_at(i + 1)));
-        i = i + 2;
+    int index = 0;
+    while (index + 1 < text.size()) {
+        out.push(hex_value(text.byte_at(index)) << 4 | hex_value(text.byte_at(index + 1)));
+        index = index + 2;
     }
     return out;
 }
 
-int hex_val(int c) {
-    if (c >= '0' && c <= '9') {
-        return c - '0';
+int hex_value(int character) {
+    if (character >= '0' && character <= '9') {
+        return character - '0';
     }
-    if (c >= 'a' && c <= 'f') {
-        return c - 'a' + 10;
+    if (character >= 'a' && character <= 'f') {
+        return character - 'a' + 10;
     }
     trap("hex_decode: bad hex digit");
 }
@@ -53,11 +53,11 @@ void print_open(str label, bytes key, bytes nonce, bytes ciphertext, bytes tag, 
     bytes sealed = clone(ciphertext);
     sealed.extend(tag);
     match (chacha20poly1305.open(key, nonce, sealed, aad)) {
-        case Ok(bytes pt): {
-            print(label + " ok " + pt.hex());
+        case Ok(bytes plaintext): {
+            print(label + " ok " + plaintext.hex());
         }
-        case Err(chacha20poly1305.Error e): {
-            print(label + " err " + e.to_str());
+        case Err(chacha20poly1305.Error error): {
+            print(label + " err " + error.to_str());
         }
     }
 }
@@ -119,12 +119,12 @@ int Rng.next() {
     return state;
 }
 
-bytes Rng.gen(int n) {
+bytes Rng.gen(int count) {
     bytes out = [];
-    int i = 0;
-    while (i < n) {
+    int index = 0;
+    while (index < count) {
         out.push(next() & 0xFF);
-        i = i + 1;
+        index = index + 1;
     }
     return out;
 }
@@ -132,8 +132,8 @@ bytes Rng.gen(int n) {
 // A value in 0 .. n-1, for picking varied lengths -- not uniform in the way
 // a cryptographic RNG's `range` would need to be, which does not matter for
 // what this file uses it for.
-int Rng.range(int n) {
-    return next() % n;
+int Rng.range(int bound) {
+    return next() % bound;
 }
 
 // --- length sweep: every ChaCha20/Poly1305 length from 0 to 260 octets -----
@@ -146,12 +146,12 @@ Rng sweep_rng = Rng(1);
 bytes sweep_key = sweep_rng.gen(32);
 bytes sweep_nonce = sweep_rng.gen(12);
 bytes pattern = [];
-int sweep_len = 0;
-while (sweep_len <= 260) {
-    print("sweep-encrypt " + sweep_len.to_str() + " " + chacha20poly1305.encrypt(sweep_key, 0, sweep_nonce, pattern).hex());
-    print("sweep-mac " + sweep_len.to_str() + " " + chacha20poly1305.mac(sweep_key, pattern).hex());
-    pattern.push(sweep_len * 7 + 13 & 0xFF);
-    sweep_len = sweep_len + 1;
+int sweep_length = 0;
+while (sweep_length <= 260) {
+    print("sweep-encrypt " + sweep_length.to_str() + " " + chacha20poly1305.encrypt(sweep_key, 0, sweep_nonce, pattern).hex());
+    print("sweep-mac " + sweep_length.to_str() + " " + chacha20poly1305.mac(sweep_key, pattern).hex());
+    pattern.push(sweep_length * 7 + 13 & 0xFF);
+    sweep_length = sweep_length + 1;
 }
 
 // --- length sweep: chacha20poly1305.seal/open over a grid of AAD and ------
@@ -164,22 +164,22 @@ while (sweep_len <= 260) {
 const Array<int> SWEEP_LENGTHS = [0, 1, 15, 16, 17, 31, 32, 33, 47, 48, 49, 63, 64, 65, 100, 127, 128, 129, 200];
 
 Rng grid_rng = Rng(2);
-for (int aad_len in SWEEP_LENGTHS) {
-    for (int pt_len in SWEEP_LENGTHS) {
+for (int aad_length in SWEEP_LENGTHS) {
+    for (int plaintext_length in SWEEP_LENGTHS) {
         bytes key = grid_rng.gen(32);
         bytes nonce = grid_rng.gen(12);
-        bytes aad = grid_rng.gen(aad_len);
-        bytes pt = grid_rng.gen(pt_len);
-        bytes sealed = chacha20poly1305.seal(key, nonce, pt, aad);
-        print("sweep-seal " + aad_len.to_str() + "-" + pt_len.to_str() + " " + sealed.hex());
+        bytes aad = grid_rng.gen(aad_length);
+        bytes plaintext = grid_rng.gen(plaintext_length);
+        bytes sealed = chacha20poly1305.seal(key, nonce, plaintext, aad);
+        print("sweep-seal " + aad_length.to_str() + "-" + plaintext_length.to_str() + " " + sealed.hex());
         match (chacha20poly1305.open(key, nonce, sealed, aad)) {
             case Ok(bytes back): {
-                if (back != pt) {
+                if (back != plaintext) {
                     trap("AEAD round trip mismatch in the length grid");
                 }
             }
-            case Err(chacha20poly1305.Error e): {
-                trap("AEAD open failed on its own seal: " + e.to_str());
+            case Err(chacha20poly1305.Error error): {
+                trap("AEAD open failed on its own seal: " + error.to_str());
             }
         }
         if (sealed.size() > 0) {
@@ -190,7 +190,7 @@ for (int aad_len in SWEEP_LENGTHS) {
                 case Ok(bytes bad): {
                     trap("a single flipped bit was not detected");
                 }
-                case Err(chacha20poly1305.Error e): {
+                case Err(_): {
                     // Expected: the tag must not match.
                 }
             }
@@ -203,40 +203,40 @@ for (int aad_len in SWEEP_LENGTHS) {
 const int FUZZ_N = 300;
 
 Rng enc_rng = Rng(3);
-int i = 0;
-while (i < FUZZ_N) {
+int fuzz_index = 0;
+while (fuzz_index < FUZZ_N) {
     bytes key = enc_rng.gen(32);
     bytes nonce = enc_rng.gen(12);
     int counter = enc_rng.range(4);
-    bytes pt = enc_rng.gen(enc_rng.range(600));
-    print("fuzz-encrypt " + i.to_str() + " " + chacha20poly1305.encrypt(key, counter, nonce, pt).hex());
-    i = i + 1;
+    bytes plaintext = enc_rng.gen(enc_rng.range(600));
+    print("fuzz-encrypt " + fuzz_index.to_str() + " " + chacha20poly1305.encrypt(key, counter, nonce, plaintext).hex());
+    fuzz_index = fuzz_index + 1;
 }
 Rng mac_rng = Rng(4);
-i = 0;
-while (i < FUZZ_N) {
+fuzz_index = 0;
+while (fuzz_index < FUZZ_N) {
     bytes key = mac_rng.gen(32);
-    bytes msg = mac_rng.gen(mac_rng.range(600));
-    print("fuzz-mac " + i.to_str() + " " + chacha20poly1305.mac(key, msg).hex());
-    i = i + 1;
+    bytes message = mac_rng.gen(mac_rng.range(600));
+    print("fuzz-mac " + fuzz_index.to_str() + " " + chacha20poly1305.mac(key, message).hex());
+    fuzz_index = fuzz_index + 1;
 }
 Rng aead_rng = Rng(5);
-i = 0;
-while (i < FUZZ_N) {
+fuzz_index = 0;
+while (fuzz_index < FUZZ_N) {
     bytes key = aead_rng.gen(32);
     bytes nonce = aead_rng.gen(12);
     bytes aad = aead_rng.gen(aead_rng.range(200));
-    bytes pt = aead_rng.gen(aead_rng.range(600));
-    bytes sealed = chacha20poly1305.seal(key, nonce, pt, aad);
-    print("fuzz-seal " + i.to_str() + " " + sealed.hex());
+    bytes plaintext = aead_rng.gen(aead_rng.range(600));
+    bytes sealed = chacha20poly1305.seal(key, nonce, plaintext, aad);
+    print("fuzz-seal " + fuzz_index.to_str() + " " + sealed.hex());
     match (chacha20poly1305.open(key, nonce, sealed, aad)) {
         case Ok(bytes back): {
-            if (back != pt) {
+            if (back != plaintext) {
                 trap("fuzz round trip mismatch");
             }
         }
-        case Err(chacha20poly1305.Error e): {
-            trap("fuzz open failed on its own seal: " + e.to_str());
+        case Err(chacha20poly1305.Error error): {
+            trap("fuzz open failed on its own seal: " + error.to_str());
         }
     }
     if (sealed.size() > 0) {
@@ -247,10 +247,10 @@ while (i < FUZZ_N) {
             case Ok(bytes bad): {
                 trap("tampered ciphertext was accepted");
             }
-            case Err(chacha20poly1305.Error e): {
+            case Err(_): {
                 // Expected.
             }
         }
     }
-    i = i + 1;
+    fuzz_index = fuzz_index + 1;
 }

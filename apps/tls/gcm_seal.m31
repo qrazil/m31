@@ -9,12 +9,12 @@
 //   ./build.sh apps/tls/gcm_seal.m31 -o gcm_seal && ./gcm_seal
 
 import crypto.aesgcm;
-import tls13_hex;
+import TLS13_hex;
 
-// `n` octets of a deterministic pattern: `(i * multiplier + offset) & 0xFF`.
-bytes pattern(int n, int multiplier, int offset) {
+// `length` octets of a deterministic pattern: `(i * multiplier + offset) & 0xFF`.
+bytes pattern(int length, int multiplier, int offset) {
     bytes out = [];
-    for (int index in 0 .. n) {
+    for (int index in 0 .. length) {
         out.push(index * multiplier + offset & 0xFF);
     }
     return out;
@@ -84,11 +84,11 @@ void tamper(str label, bytes key, bytes nonce, bytes plaintext, bytes aad) {
 bytes zero_key_128 = [0; 16];
 bytes zero_key_256 = [0; 32];
 bytes zero_nonce = [0; 12];
-bytes spec_key_128 = tls13_hex.decode("feffe9928665731c6d6a8f9467308308");
-bytes spec_key_256 = tls13_hex.decode("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308");
-bytes spec_nonce = tls13_hex.decode("cafebabefacedbaddecaf888");
-bytes spec_plain = tls13_hex.decode("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255");
-bytes spec_aad = tls13_hex.decode("feedfacedeadbeeffeedfacedeadbeefabaddad2");
+bytes spec_key_128 = TLS13_hex.decode("feffe9928665731c6d6a8f9467308308");
+bytes spec_key_256 = TLS13_hex.decode("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308");
+bytes spec_nonce = TLS13_hex.decode("cafebabefacedbaddecaf888");
+bytes spec_plain = TLS13_hex.decode("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255");
+bytes spec_aad = TLS13_hex.decode("feedfacedeadbeeffeedfacedeadbeefabaddad2");
 emit("spec-1", zero_key_128, zero_nonce, [], []);
 emit("spec-2", zero_key_128, zero_nonce, [0; 16], []);
 emit("spec-3", spec_key_128, spec_nonce, spec_plain, []);

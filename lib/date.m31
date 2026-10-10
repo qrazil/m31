@@ -120,8 +120,8 @@ pub int now_ns() {
 
 /// Epoch seconds -> the civil fields of that instant in UTC. Traps outside
 /// years 1 through 9999.
-pub Civil civil(int t) {
-    return to_civil(checked(t, "civil"));
+pub Civil civil(int epoch_seconds) {
+    return to_civil(checked(epoch_seconds, "civil"));
 }
 
 /// Civil fields in UTC -> epoch seconds.
@@ -142,9 +142,9 @@ pub Result<int, Error> epoch(int year, int month, int day, int hour = 0, int min
 /// One format, always: four-digit year, `T`, seconds, `Z`. A program that
 /// wants another arrangement of the same six numbers has them on
 /// `date.civil(t)`.
-pub str iso(int t) {
-    Civil c = to_civil(checked(t, "iso"));
-    return c.to_str();
+pub str iso(int epoch_seconds) {
+    Civil civil_time = to_civil(checked(epoch_seconds, "iso"));
+    return civil_time.to_str();
 }
 
 /// An ISO-8601 UTC timestamp -> epoch seconds: the inverse of `iso`, and it
@@ -155,51 +155,51 @@ pub str iso(int t) {
 /// guess here is a silent hour-scale error in someone's data: a space for the
 /// `T`, a missing offset (not "assume UTC"), lowercase, fractional seconds,
 /// any offset but `Z`, a date with no time, no seconds, an expanded year.
-pub Result<int, Error> parse(str s) {
-    int n = s.size();
-    if (n == 10 && date_shaped(s)) {
-        return fail("date.parse(): '" + s + "' is a date with no time of day -- write date.epoch(" + field(s, 0, 4).to_str() + ", " + field(s, 5, 7).to_str() + ", " + field(s, 8, 10).to_str() + ") for its midnight");
+pub Result<int, Error> parse(str input) {
+    int text_length = input.size();
+    if (text_length == 10 && is_date_shaped(input)) {
+        return fail("date.parse(): '" + input + "' is a date with no time of day -- write date.epoch(" + field(input, 0, 4).to_str() + ", " + field(input, 5, 7).to_str() + ", " + field(input, 8, 10).to_str() + ") for its midnight");
     }
-    if (n < 11) {
-        return not_iso(s);
+    if (text_length < 11) {
+        return not_iso(input);
     }
-    // Byte 10 is compared as a byte: `s` is the caller's text and may hold
+    // Byte 10 is compared as a byte: `input` is the caller's text and may hold
     // any character there, where substr(10, 11) would trap inside one.
-    if (is_at(s, 10, " ")) {
-        return fail("date.parse(): '" + s + "' separates the date and the time with a space -- write the ISO-8601 'T'");
+    if (is_at(input, 10, " ")) {
+        return fail("date.parse(): '" + input + "' separates the date and the time with a space -- write the ISO-8601 'T'");
     }
-    if (is_at(s, 10, "t")) {
-        return fail("date.parse(): '" + s + "' has a lowercase 't' -- write the uppercase 'T'");
+    if (is_at(input, 10, "t")) {
+        return fail("date.parse(): '" + input + "' has a lowercase 't' -- write the uppercase 'T'");
     }
-    if (!is_at(s, 10, "T")) {
-        return not_iso(s);
+    if (!is_at(input, 10, "T")) {
+        return not_iso(input);
     }
-    if (n != 20) {
-        return refuse_tail(s);
+    if (text_length != 20) {
+        return refuse_tail(input);
     }
-    if (is_at(s, 19, "z")) {
-        return fail("date.parse(): '" + s + "' has a lowercase 'z' -- write the uppercase 'Z'");
+    if (is_at(input, 19, "z")) {
+        return fail("date.parse(): '" + input + "' has a lowercase 'z' -- write the uppercase 'Z'");
     }
-    if (!is_at(s, 19, "Z")) {
-        return refuse_tail(s);
+    if (!is_at(input, 19, "Z")) {
+        return refuse_tail(input);
     }
-    if (!date_shaped(s) || !is_at(s, 13, ":") || !is_at(s, 16, ":")) {
-        return not_iso(s);
+    if (!is_date_shaped(input) || !is_at(input, 13, ":") || !is_at(input, 16, ":")) {
+        return not_iso(input);
     }
-    if (!digits(s, 11, 13) || !digits(s, 14, 16) || !digits(s, 17, 19)) {
-        return not_iso(s);
+    if (!is_all_digits(input, 11, 13) || !is_all_digits(input, 14, 16) || !is_all_digits(input, 17, 19)) {
+        return not_iso(input);
     }
-    return to_epoch(field(s, 0, 4), field(s, 5, 7), field(s, 8, 10), field(s, 11, 13), field(s, 14, 16), field(s, 17, 19), "parse");
+    return to_epoch(field(input, 0, 4), field(input, 5, 7), field(input, 8, 10), field(input, 11, 13), field(input, 14, 16), field(input, 17, 19), "parse");
 }
 
 /// Epoch seconds as an IMF-fixdate, `Sun, 06 Nov 1994 08:49:37 GMT`: the one
 /// format RFC 9110 requires a server to send. The day and month names are
 /// English by specification, not by locale.
-pub str http_date(int t) {
-    Civil c = to_civil(checked(t, "http_date"));
-    str dayname = "Mon Tue Wed Thu Fri Sat Sun".split(" ")[c.weekday];
-    str monthname = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(" ")[c.month - 1];
-    return dayname + ", " + pad(c.day, 2) + " " + monthname + " " + pad(c.year, 4) + " " + pad(c.hour, 2) + ":" + pad(c.minute, 2) + ":" + pad(c.second, 2) + " GMT";
+pub str http_date(int epoch_seconds) {
+    Civil civil_time = to_civil(checked(epoch_seconds, "http_date"));
+    str dayname = "Mon Tue Wed Thu Fri Sat Sun".split(" ")[civil_time.weekday];
+    str monthname = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split(" ")[civil_time.month - 1];
+    return dayname + ", " + pad(civil_time.day, 2) + " " + monthname + " " + pad(civil_time.year, 4) + " " + pad(civil_time.hour, 2) + ":" + pad(civil_time.minute, 2) + ":" + pad(civil_time.second, 2) + " GMT";
 }
 
 // --- the calendar -----------------------------------------------------------
@@ -215,16 +215,16 @@ int max_epoch() {
 // Division rounding down, for a positive divisor. `/` truncates towards
 // zero, which splits -1 seconds into day 0 and second -1; the calendar needs
 // day -1 and second 86399.
-int floor_div(int a, int b) {
-    int q = a / b;
-    if (a % b < 0) {
-        return q - 1;
+int floor_div(int dividend, int divisor) {
+    int quotient = dividend / divisor;
+    if (dividend % divisor < 0) {
+        return quotient - 1;
     }
-    return q;
+    return quotient;
 }
 
-int floor_mod(int a, int b) {
-    return a - floor_div(a, b) * b;
+int floor_mod(int dividend, int divisor) {
+    return dividend - floor_div(dividend, divisor) * divisor;
 }
 
 // The conversion itself, on a timestamp that has already been checked.
@@ -234,15 +234,15 @@ Civil to_civil(int secs) {
     // Days since 1970-01-01 -> year, month, day, by Howard Hinnant's era
     // algorithm: shift the epoch to 0000-03-01 so a leap day lands at the
     // end of a year and the month lengths become a linear sequence.
-    int z = days + 719468;
-    int era = floor_div(z, 146097);
-    int doe = z - era * 146097;
+    int shifted_days = days + 719468;
+    int era = floor_div(shifted_days, 146097);
+    int doe = shifted_days - era * 146097;
     int yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
     int year = yoe + era * 400;
     int doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    int mp = (5 * doy + 2) / 153;
-    int day = doy - (153 * mp + 2) / 5 + 1;
-    int month = mp + 3;
+    int march_month = (5 * doy + 2) / 153;
+    int day = doy - (153 * march_month + 2) / 5 + 1;
+    int month = march_month + 3;
     if (month > 12) {
         month = month - 12;
         year = year + 1;
@@ -264,8 +264,8 @@ int days_from_civil(int year, int month, int day) {
     }
     int era = floor_div(y, 400);
     int yoe = y - era * 400;
-    int mp = (month + 9) % 12;
-    int doy = (153 * mp + 2) / 5 + day - 1;
+    int march_month = (month + 9) % 12;
+    int doy = (153 * march_month + 2) / 5 + day - 1;
     int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     return era * 146097 + doe - 719468;
 }
@@ -293,37 +293,37 @@ int days_in_month(int year, int month) {
 // Fields -> epoch seconds, told which name to blame, so a February 30th
 // arriving through `parse` is refused under the name the caller wrote.
 Result<int, Error> to_epoch(int year, int month, int day, int hour, int minute, int second, str who) {
-    str at = "date." + who + "(): ";
+    str message_prefix = "date." + who + "(): ";
     if (year < 1 || year > 9999) {
-        return fail(at + "year " + year.to_str() + " is out of range -- date covers years 1 through 9999");
+        return fail(message_prefix + "year " + year.to_str() + " is out of range -- date covers years 1 through 9999");
     }
     if (month < 1 || month > 12) {
-        return fail(at + "month " + month.to_str() + " is out of range 1..12");
+        return fail(message_prefix + "month " + month.to_str() + " is out of range 1..12");
     }
     int last = days_in_month(year, month);
     if (day < 1 || day > last) {
-        return fail(at + "day " + day.to_str() + " is out of range 1.." + last.to_str() + " for " + pad(year, 4) + "-" + pad(month, 2));
+        return fail(message_prefix + "day " + day.to_str() + " is out of range 1.." + last.to_str() + " for " + pad(year, 4) + "-" + pad(month, 2));
     }
     if (hour < 0 || hour > 23) {
-        return fail(at + "hour " + hour.to_str() + " is out of range 0..23");
+        return fail(message_prefix + "hour " + hour.to_str() + " is out of range 0..23");
     }
     if (minute < 0 || minute > 59) {
-        return fail(at + "minute " + minute.to_str() + " is out of range 0..59");
+        return fail(message_prefix + "minute " + minute.to_str() + " is out of range 0..59");
     }
     if (second < 0 || second > 59) {
-        return fail(at + "second " + second.to_str() + " is out of range 0..59 -- a leap second is not representable in epoch seconds, which count every day as 86400");
+        return fail(message_prefix + "second " + second.to_str() + " is out of range 0..59 -- a leap second is not representable in epoch seconds, which count every day as 86400");
     }
-    int t = days_from_civil(year, month, day) * 86400 + hour * 3600 + minute * 60 + second;
-    return Result<int, Error>.Ok(t);
+    int epoch_seconds = days_from_civil(year, month, day) * 86400 + hour * 3600 + minute * 60 + second;
+    return Result<int, Error>.Ok(epoch_seconds);
 }
 
 // A timestamp inside the domain, or a trap naming the function the caller
 // wrote and the bound it crossed.
-int checked(int t, str who) {
-    if (t < min_epoch() || t > max_epoch()) {
-        trap("date." + who + "(): epoch second " + t.to_str() + " is out of range " + min_epoch().to_str() + ".." + max_epoch().to_str() + " -- date covers years 1 through 9999");
+int checked(int epoch_seconds, str who) {
+    if (epoch_seconds < min_epoch() || epoch_seconds > max_epoch()) {
+        trap("date." + who + "(): epoch second " + epoch_seconds.to_str() + " is out of range " + min_epoch().to_str() + ".." + max_epoch().to_str() + " -- date covers years 1 through 9999");
     }
-    return t;
+    return epoch_seconds;
 }
 
 // --- text --------------------------------------------------------------------
@@ -331,31 +331,31 @@ str stamp(int year, int month, int day, int hour, int minute, int second) {
     return pad(year, 4) + "-" + pad(month, 2) + "-" + pad(day, 2) + "T" + pad(hour, 2) + ":" + pad(minute, 2) + ":" + pad(second, 2) + "Z";
 }
 
-// `n` in decimal, zero-padded on the left to `width` digits. Never called
-// with a negative `n`: every field here is at least 0 and years start at 1.
+// `number` in decimal, zero-padded on the left to `width` digits. Never called
+// with a negative `number`: every field here is at least 0 and years start at 1.
 //
 // A wrapper over `text.pad_left` rather than a call at each of its dozen
 // sites, because the field is a number everywhere it is used and the
 // conversion belongs here. Decimal digits are ASCII, so `pad_left`'s count in
 // code points is the digit count; and it does not truncate, so a year past
 // 9999 keeps all of its digits, as it did before.
-str pad(int n, int width) {
-    return text.pad_left(n.to_str(), width, fill: "0");
+str pad(int number, int width) {
+    return text.pad_left(number.to_str(), width, fill: "0");
 }
 
 Result<int, Error> fail(str message) {
     return Result<int, Error>.Err(Error(message));
 }
 
-Result<int, Error> not_iso(str s) {
-    return fail("date.parse(): '" + s + "' is not YYYY-MM-DDTHH:MM:SSZ");
+Result<int, Error> not_iso(str input) {
+    return fail("date.parse(): '" + input + "' is not YYYY-MM-DDTHH:MM:SSZ");
 }
 
 // Is every byte of s[from..to) an ASCII digit?
-bool digits(str s, int from, int to) {
-    for (int i in from .. to) {
-        int b = s.byte_at(i);
-        if (b < '0' || b > '9') {
+bool is_all_digits(str input, int from, int end) {
+    for (int i in from .. end) {
+        int octet = input.byte_at(i);
+        if (octet < '0' || octet > '9') {
             return false;
         }
     }
@@ -364,49 +364,49 @@ bool digits(str s, int from, int to) {
 
 // The digits s[from..to) as a number. Only called once `digits` has said
 // they are digits, so the parse cannot fail; 0 is never reached.
-int field(str s, int from, int to) {
-    return s.substr(from, to).parse_int().or(0);
+int field(str input, int from, int end) {
+    return input.substr(from, end).parse_int().or(0);
 }
 
-// Is byte `i` of `s` the one ASCII character `c`? A byte comparison, not
-// `s.substr(i, i + 1) == c`: the substr traps when byte `i` is inside a
-// multi-byte character (reference §6.5), and `s` here is whatever text a
+// Is byte `index` of `input` the one ASCII character `expected`? A byte comparison, not
+// `s.substr(i, i + 1) == c`: the substr traps when byte `index` is inside a
+// multi-byte character (reference §6.5), and `input` here is whatever text a
 // caller passed, so that would turn "not a timestamp" into a crash.
-bool is_at(str s, int i, str c) {
-    return s.byte_at(i) == c.byte_at(0);
+bool is_at(str input, int index, str expected) {
+    return input.byte_at(index) == expected.byte_at(0);
 }
 
 // `YYYY-MM-DD` in the first ten bytes. Used both to recognise a date-only
 // string and to check the date half of a full timestamp, so the two readings
 // cannot drift apart.
-bool date_shaped(str s) {
-    if (s.size() < 10) {
+bool is_date_shaped(str input) {
+    if (input.size() < 10) {
         return false;
     }
-    if (!is_at(s, 4, "-") || !is_at(s, 7, "-")) {
+    if (!is_at(input, 4, "-") || !is_at(input, 7, "-")) {
         return false;
     }
-    return digits(s, 0, 4) && digits(s, 5, 7) && digits(s, 8, 10);
+    return is_all_digits(input, 0, 4) && is_all_digits(input, 5, 7) && is_all_digits(input, 8, 10);
 }
 
 // The tail after `YYYY-MM-DDT` is not `HH:MM:SSZ`. Say which of the usual
 // reasons it is, because "not ISO-8601" sends a reader to the specification
 // when the answer is one character.
-Result<int, Error> refuse_tail(str s) {
-    int n = s.size();
-    if (s.contains(".") || s.contains(",")) {
-        return fail("date.parse(): '" + s + "' carries fractional seconds -- date.parse() answers whole epoch seconds; cut the fraction before parsing");
+Result<int, Error> refuse_tail(str input) {
+    int text_length = input.size();
+    if (input.contains(".") || input.contains(",")) {
+        return fail("date.parse(): '" + input + "' carries fractional seconds -- date.parse() answers whole epoch seconds; cut the fraction before parsing");
     }
-    if (n == 19) {
-        return fail("date.parse(): '" + s + "' carries no offset -- a timestamp with no offset is not assumed to be UTC; append 'Z' if it is");
+    if (text_length == 19) {
+        return fail("date.parse(): '" + input + "' carries no offset -- a timestamp with no offset is not assumed to be UTC; append 'Z' if it is");
     }
     // Only a sign at byte 19 starts an offset, and checking for one first
     // also makes 19 a character boundary for the substr.
-    if (n > 19 && (is_at(s, 19, "+") || is_at(s, 19, "-"))) {
-        str tail = s.substr(19, n);
+    if (text_length > 19 && (is_at(input, 19, "+") || is_at(input, 19, "-"))) {
+        str tail = input.substr(19, text_length);
         if (tail.starts_with("+") || tail.starts_with("-")) {
-            return fail("date.parse(): '" + s + "' carries the offset '" + tail + "' -- this module is UTC only, so only 'Z' is accepted; add the offset to the result yourself if that is what you mean");
+            return fail("date.parse(): '" + input + "' carries the offset '" + tail + "' -- this module is UTC only, so only 'Z' is accepted; add the offset to the result yourself if that is what you mean");
         }
     }
-    return not_iso(s);
+    return not_iso(input);
 }

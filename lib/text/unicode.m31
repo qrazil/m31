@@ -85,50 +85,50 @@
 /// The version of the Unicode Character Database these tables come from.
 pub const str VERSION = "16.0.0";
 
-/// `s` with every character replaced by its uppercase form.
+/// `text` with every character replaced by its uppercase form.
 ///
 /// Full mapping, so the result may be longer than the input in characters as
 /// well as in bytes: `unicode.upper("straße")` is `"STRASSE"`. Not
 /// locale-sensitive; see the module header.
-pub str upper(str s) {
+pub str upper(str text) {
     List<int> out = [];
-    for (int c in s.chars()) {
-        int at = key_index(SPECIAL_UPPER_FROM, c);
-        if (at >= 0) {
-            append_slice(out, SPECIAL_UPPER_TO, SPECIAL_UPPER_AT[at], SPECIAL_UPPER_AT[at + 1]);
+    for (int code_point in text.chars()) {
+        int special_index = key_index(SPECIAL_UPPER_FROM, code_point);
+        if (special_index >= 0) {
+            append_slice(out, SPECIAL_UPPER_TO, SPECIAL_UPPER_AT[special_index], SPECIAL_UPPER_AT[special_index + 1]);
         } else {
-            out.push(c + run_delta(UPPER_RUNS, c));
+            out.push(code_point + run_delta(UPPER_RUNS, code_point));
         }
     }
     return str.from_chars(out);
 }
 
-/// `s` with every character replaced by its lowercase form.
+/// `text` with every character replaced by its lowercase form.
 ///
 /// A capital sigma at the end of a word becomes `ς` rather than `σ`, which
 /// is the one context-dependent rule this module implements (see the header);
 /// `unicode.lower("ΟΔΟΣ")` is `"οδος"`.
-pub str lower(str s) {
-    List<int> cps = s.chars();
+pub str lower(str text) {
+    List<int> cps = text.chars();
     List<int> out = [];
-    int n = cps.size();
-    for (int i in 0 .. n) {
-        int c = cps[i];
-        if (c == CAPITAL_SIGMA && final_sigma(cps, i)) {
+    int code_point_count = cps.size();
+    for (int i in 0 .. code_point_count) {
+        int code_point = cps[i];
+        if (code_point == CAPITAL_SIGMA && is_final_sigma(cps, i)) {
             out.push(FINAL_SIGMA);
         } else {
-            int at = key_index(SPECIAL_LOWER_FROM, c);
-            if (at >= 0) {
-                append_slice(out, SPECIAL_LOWER_TO, SPECIAL_LOWER_AT[at], SPECIAL_LOWER_AT[at + 1]);
+            int special_index = key_index(SPECIAL_LOWER_FROM, code_point);
+            if (special_index >= 0) {
+                append_slice(out, SPECIAL_LOWER_TO, SPECIAL_LOWER_AT[special_index], SPECIAL_LOWER_AT[special_index + 1]);
             } else {
-                out.push(c + run_delta(LOWER_RUNS, c));
+                out.push(code_point + run_delta(LOWER_RUNS, code_point));
             }
         }
     }
     return str.from_chars(out);
 }
 
-/// `s` folded for caseless comparison: `unicode.fold(a) == unicode.fold(b)`
+/// `text` folded for caseless comparison: `unicode.fold(a) == unicode.fold(b)`
 /// is the caseless equality of `a` and `b`.
 ///
 /// This is Unicode's full, default case folding (`CaseFolding.txt`, statuses
@@ -137,14 +137,14 @@ pub str lower(str s) {
 /// be stable under itself. The result is not text to show anyone -- it is a
 /// key. Folding does not normalise, so `"é"` and `"e\u{301}"` still differ;
 /// that is `fold(nfc(s))`, in that order, and neither is a collation.
-pub str fold(str s) {
+pub str fold(str text) {
     List<int> out = [];
-    for (int c in s.chars()) {
-        int at = key_index(FOLD_FULL_FROM, c);
-        if (at >= 0) {
-            append_slice(out, FOLD_FULL_TO, FOLD_FULL_AT[at], FOLD_FULL_AT[at + 1]);
+    for (int code_point in text.chars()) {
+        int special_index = key_index(FOLD_FULL_FROM, code_point);
+        if (special_index >= 0) {
+            append_slice(out, FOLD_FULL_TO, FOLD_FULL_AT[special_index], FOLD_FULL_AT[special_index + 1]);
         } else {
-            out.push(c + run_delta(FOLD_RUNS, c));
+            out.push(code_point + run_delta(FOLD_RUNS, code_point));
         }
     }
     return str.from_chars(out);
@@ -152,23 +152,23 @@ pub str fold(str s) {
 
 // --- the lookups -------------------------------------------------------------
 
-/// What to add to `c` to map it, or 0 if this table leaves it alone.
+/// What to add to `code_point` to map it, or 0 if this table leaves it alone.
 ///
 /// A binary search over `(lo, hi, step, delta)` runs of four. A table is a
 /// module constant, so it is static data in the emitted program and this is
 /// four bounds-checked loads a step.
-int run_delta(Array<int> runs, int c) {
-    int lo = 0;
-    int hi = runs.size() / 4 - 1;
-    while (lo <= hi) {
-        int mid = (lo + hi) / 2;
-        int at = mid * 4;
-        if (c < runs[at]) {
-            hi = mid - 1;
-        } else if (c > runs[at + 1]) {
-            lo = mid + 1;
-        } else if ((c - runs[at]) % runs[at + 2] == 0) {
-            return runs[at + 3];
+int run_delta(Array<int> runs, int code_point) {
+    int low = 0;
+    int high = runs.size() / 4 - 1;
+    while (low <= high) {
+        int mid = (low + high) / 2;
+        int entry_start = mid * 4;
+        if (code_point < runs[entry_start]) {
+            high = mid - 1;
+        } else if (code_point > runs[entry_start + 1]) {
+            low = mid + 1;
+        } else if ((code_point - runs[entry_start]) % runs[entry_start + 2] == 0) {
+            return runs[entry_start + 3];
         } else {
             // Inside a run, but on one of the code points it steps over.
             return 0;
@@ -177,16 +177,16 @@ int run_delta(Array<int> runs, int c) {
     return 0;
 }
 
-/// Where `c` is in a sorted array of keys, or -1.
-int key_index(Array<int> keys, int c) {
-    int lo = 0;
-    int hi = keys.size() - 1;
-    while (lo <= hi) {
-        int mid = (lo + hi) / 2;
-        if (c < keys[mid]) {
-            hi = mid - 1;
-        } else if (c > keys[mid]) {
-            lo = mid + 1;
+/// Where `code_point` is in a sorted array of keys, or -1.
+int key_index(Array<int> keys, int code_point) {
+    int low = 0;
+    int high = keys.size() - 1;
+    while (low <= high) {
+        int mid = (low + high) / 2;
+        if (code_point < keys[mid]) {
+            high = mid - 1;
+        } else if (code_point > keys[mid]) {
+            low = mid + 1;
         } else {
             return mid;
         }
@@ -195,23 +195,23 @@ int key_index(Array<int> keys, int c) {
 }
 
 /// Append `from[at .. end]` to `out`.
-void append_slice(List<int> out, Array<int> from, int at, int end) {
-    for (int i in at .. end) {
+void append_slice(List<int> out, Array<int> from, int start, int end) {
+    for (int i in start .. end) {
         out.push(from[i]);
     }
 }
 
-/// Is `c` in a sorted list of `(lo, hi)` ranges?
-bool in_ranges(Array<int> ranges, int c) {
-    int lo = 0;
-    int hi = ranges.size() / 2 - 1;
-    while (lo <= hi) {
-        int mid = (lo + hi) / 2;
-        int at = mid * 2;
-        if (c < ranges[at]) {
-            hi = mid - 1;
-        } else if (c > ranges[at + 1]) {
-            lo = mid + 1;
+/// Is `code_point` in a sorted list of `(lo, hi)` ranges?
+bool is_in_ranges(Array<int> ranges, int code_point) {
+    int low = 0;
+    int high = ranges.size() / 2 - 1;
+    while (low <= high) {
+        int mid = (low + high) / 2;
+        int entry_start = mid * 2;
+        if (code_point < ranges[entry_start]) {
+            high = mid - 1;
+        } else if (code_point > ranges[entry_start + 1]) {
+            low = mid + 1;
         } else {
             return true;
         }
@@ -233,20 +233,20 @@ const int FINAL_SIGMA = 962;
 /// that carry no case of their own (accents, the apostrophe in `ΜΑΪΟΣ'`) in
 /// both directions. `"ΣΣ"` lowercases to `"σς"`: the first sigma has nothing
 /// cased before it, the second has nothing cased after it.
-bool final_sigma(List<int> cps, int i) {
-    int j = i - 1;
-    while (j >= 0 && in_ranges(CASE_IGNORABLE, cps[j])) {
-        j = j - 1;
+bool is_final_sigma(List<int> cps, int sigma_index) {
+    int before_index = sigma_index - 1;
+    while (before_index >= 0 && is_in_ranges(CASE_IGNORABLE, cps[before_index])) {
+        before_index = before_index - 1;
     }
-    if (j < 0 || !in_ranges(CASED, cps[j])) {
+    if (before_index < 0 || !is_in_ranges(CASED, cps[before_index])) {
         return false;
     }
-    int n = cps.size();
-    int k = i + 1;
-    while (k < n && in_ranges(CASE_IGNORABLE, cps[k])) {
-        k = k + 1;
+    int code_point_count = cps.size();
+    int after_index = sigma_index + 1;
+    while (after_index < code_point_count && is_in_ranges(CASE_IGNORABLE, cps[after_index])) {
+        after_index = after_index + 1;
     }
-    return k >= n || !in_ranges(CASED, cps[k]);
+    return after_index >= code_point_count || !is_in_ranges(CASED, cps[after_index]);
 }
 
 // --- grapheme clusters ---------------------------------------------------------
@@ -264,23 +264,23 @@ bool final_sigma(List<int> cps, int i) {
 // starts a new flag), an emoji joined by ZWJ, and an Indic consonant
 // conjunct.
 
-/// The grapheme clusters of `s`, in order: one element per character a
+/// The grapheme clusters of `text`, in order: one element per character a
 /// reader would count. `unicode.graphemes("")` is empty, and joining the
-/// result with `""` gives `s` back.
-pub List<str> graphemes(str s) {
-    List<int> starts = cluster_starts(s);
+/// result with `""` gives `text` back.
+pub List<str> graphemes(str text) {
+    List<int> starts = cluster_starts(text);
     List<str> out = [];
     for (int i in 1 .. starts.size()) {
-        out.push(s.substr(starts[i - 1], starts[i]));
+        out.push(text.substr(starts[i - 1], starts[i]));
     }
     return out;
 }
 
-/// How many grapheme clusters `s` has, without building them.
+/// How many grapheme clusters `text` has, without building them.
 ///
 /// `"👍🏽".size()` is 8, `"👍🏽".chars().size()` is 2, and this is 1.
-pub int grapheme_count(str s) {
-    return cluster_starts(s).size() - 1;
+pub int grapheme_count(str text) {
+    return cluster_starts(text).size() - 1;
 }
 
 /// The byte offset where each cluster begins, and `s.size()` last, so that
@@ -291,158 +291,158 @@ pub int grapheme_count(str s) {
 /// cuts the original bytes out with `substr` (which is why nothing is
 /// re-encoded, and why every offset is on a character boundary by
 /// construction), and `width` only measures.
-List<int> cluster_starts(str s) {
-    List<int> cps = s.chars();
+List<int> cluster_starts(str text) {
+    List<int> cps = text.chars();
     List<int> out = [0];
-    int n = cps.size();
-    int at = 0;
-    int prev = 0;
-    // The three pieces of history the rules need. `ri` is how many regional
+    int code_point_count = cps.size();
+    int byte_offset = 0;
+    int previous_class = 0;
+    // The three pieces of history the rules need. `indicator_run` is how many regional
     // indicators run up to the character before the one being judged; `pic`
     // is 1 after an emoji and any extending characters, 2 once a ZWJ has
     // followed it; `cons` is 1 after an Indic consonant and any extenders,
     // 2 once one of them was a linker.
-    int ri = 0;
+    int indicator_run = 0;
     int pic = 0;
     int cons = 0;
-    for (int i in 0 .. n) {
-        int cur = class_of(cps[i]);
+    for (int i in 0 .. code_point_count) {
+        int current_class = class_of(cps[i]);
         if (i > 0) {
-            at = at + utf8_len(cps[i - 1]);
-            if (breaks(prev, cur, ri, pic, cons)) {
-                out.push(at);
+            byte_offset = byte_offset + utf8_length(cps[i - 1]);
+            if (should_break(previous_class, current_class, indicator_run, pic, cons)) {
+                out.push(byte_offset);
             }
         }
-        int g = cur & 15;
-        if (g == GCB_REGIONAL_INDICATOR) {
-            ri = ri + 1;
+        int break_class = current_class & 15;
+        if (break_class == GCB_REGIONAL_INDICATOR) {
+            indicator_run = indicator_run + 1;
         } else {
-            ri = 0;
+            indicator_run = 0;
         }
-        if ((cur & 16) != 0) {
+        if ((current_class & 16) != 0) {
             pic = 1;
-        } else if (pic == 1 && g == GCB_EXTEND) {
+        } else if (pic == 1 && break_class == GCB_EXTEND) {
             pic = 1;
-        } else if (pic == 1 && g == GCB_ZWJ) {
+        } else if (pic == 1 && break_class == GCB_ZWJ) {
             pic = 2;
         } else {
             pic = 0;
         }
-        int b = cur >> 5 & 3;
-        if (b == INCB_CONSONANT) {
+        int conjunct_class = current_class >> 5 & 3;
+        if (conjunct_class == INCB_CONSONANT) {
             cons = 1;
-        } else if (cons > 0 && b == INCB_LINKER) {
+        } else if (cons > 0 && conjunct_class == INCB_LINKER) {
             cons = 2;
-        } else if (cons > 0 && b == INCB_EXTEND) {
+        } else if (cons > 0 && conjunct_class == INCB_EXTEND) {
             cons = cons;
         } else {
             cons = 0;
         }
-        prev = cur;
+        previous_class = current_class;
     }
-    if (n > 0) {
-        out.push(s.size());
+    if (code_point_count > 0) {
+        out.push(text.size());
     }
     return out;
 }
 
-/// Is there a cluster boundary between `prev` and `cur`?
+/// Is there a cluster boundary between `previous_class` and `current_class`?
 ///
 /// The rules of UAX #29 §3.1.1 in their order, which matters: the first one
 /// that matches decides. GB1, GB2 (start and end of text) are the caller's,
 /// and GB999 -- break anywhere else -- is the last line.
-bool breaks(int prev, int cur, int ri, int pic, int cons) {
-    int p = prev & 15;
-    int c = cur & 15;
+bool should_break(int previous_class, int current_class, int indicator_run, int pic, int cons) {
+    int previous_break = previous_class & 15;
+    int current_break = current_class & 15;
     // GB3: CR LF is one cluster, and GB4/GB5: everything else parts around
     // a control character, in both directions.
-    if (p == GCB_CR && c == GCB_LF) {
+    if (previous_break == GCB_CR && current_break == GCB_LF) {
         return false;
     }
-    if (p == GCB_CR || p == GCB_LF || p == GCB_CONTROL) {
+    if (previous_break == GCB_CR || previous_break == GCB_LF || previous_break == GCB_CONTROL) {
         return true;
     }
-    if (c == GCB_CR || c == GCB_LF || c == GCB_CONTROL) {
+    if (current_break == GCB_CR || current_break == GCB_LF || current_break == GCB_CONTROL) {
         return true;
     }
     // GB6, GB7, GB8: a Hangul syllable spelled out in jamo stays together.
-    if (p == GCB_L && (c == GCB_L || c == GCB_V || c == GCB_LV || c == GCB_LVT)) {
+    if (previous_break == GCB_L && (current_break == GCB_L || current_break == GCB_V || current_break == GCB_LV || current_break == GCB_LVT)) {
         return false;
     }
-    if ((p == GCB_LV || p == GCB_V) && (c == GCB_V || c == GCB_T)) {
+    if ((previous_break == GCB_LV || previous_break == GCB_V) && (current_break == GCB_V || current_break == GCB_T)) {
         return false;
     }
-    if ((p == GCB_LVT || p == GCB_T) && c == GCB_T) {
+    if ((previous_break == GCB_LVT || previous_break == GCB_T) && current_break == GCB_T) {
         return false;
     }
     // GB9, GB9a, GB9b: an accent, a spacing mark or a joiner belongs to what
     // it is attached to, and a prepending character to what follows it.
-    if (c == GCB_EXTEND || c == GCB_ZWJ) {
+    if (current_break == GCB_EXTEND || current_break == GCB_ZWJ) {
         return false;
     }
-    if (c == GCB_SPACINGMARK) {
+    if (current_break == GCB_SPACINGMARK) {
         return false;
     }
-    if (p == GCB_PREPEND) {
+    if (previous_break == GCB_PREPEND) {
         return false;
     }
     // GB9c: an Indic conjunct -- consonant, linker, consonant -- is one
     // cluster, however many extending characters are in between.
-    if (cons == 2 && cur >> 5 & 3 == INCB_CONSONANT) {
+    if (cons == 2 && current_class >> 5 & 3 == INCB_CONSONANT) {
         return false;
     }
     // GB11: emoji ZWJ emoji, which is how a family is spelled.
-    if (pic == 2 && (cur & 16) != 0) {
+    if (pic == 2 && (current_class & 16) != 0) {
         return false;
     }
     // GB12, GB13: regional indicators pair up into flags, so a break falls
     // between pairs and not inside one.
-    if (p == GCB_REGIONAL_INDICATOR && c == GCB_REGIONAL_INDICATOR && ri % 2 == 1) {
+    if (previous_break == GCB_REGIONAL_INDICATOR && current_break == GCB_REGIONAL_INDICATOR && indicator_run % 2 == 1) {
         return false;
     }
     return true;
 }
 
-/// The packed class of `c`: a Grapheme_Cluster_Break value in the low four
+/// The packed class of `code_point`: a Grapheme_Cluster_Break value in the low four
 /// bits, Extended_Pictographic in bit 4, and Indic_Conjunct_Break in bits
 /// 5 and 6.
-int class_of(int c) {
+int class_of(int code_point) {
     // The 11,172 Hangul syllables are arithmetic, not a table: they are laid
     // out as (lead, vowel, trailing), and a syllable with no trailing jamo is
     // LV, one with is LVT. That is 798 lines of GraphemeBreakProperty.txt
     // this table does not carry.
-    if (c >= HANGUL_BASE && c < HANGUL_BASE + HANGUL_COUNT) {
-        if ((c - HANGUL_BASE) % HANGUL_TRAILING == 0) {
+    if (code_point >= HANGUL_BASE && code_point < HANGUL_BASE + HANGUL_COUNT) {
+        if ((code_point - HANGUL_BASE) % HANGUL_TRAILING == 0) {
             return GCB_LV;
         }
         return GCB_LVT;
     }
-    int lo = 0;
-    int hi = GCB_RANGES.size() / 3 - 1;
-    while (lo <= hi) {
-        int mid = (lo + hi) / 2;
-        int at = mid * 3;
-        if (c < GCB_RANGES[at]) {
-            hi = mid - 1;
-        } else if (c > GCB_RANGES[at + 1]) {
-            lo = mid + 1;
+    int low = 0;
+    int high = GCB_RANGES.size() / 3 - 1;
+    while (low <= high) {
+        int mid = (low + high) / 2;
+        int entry_start = mid * 3;
+        if (code_point < GCB_RANGES[entry_start]) {
+            high = mid - 1;
+        } else if (code_point > GCB_RANGES[entry_start + 1]) {
+            low = mid + 1;
         } else {
-            return GCB_RANGES[at + 2];
+            return GCB_RANGES[entry_start + 2];
         }
     }
     return GCB_OTHER;
 }
 
-/// How many bytes `c` takes in UTF-8. The four cases of §3.2a, in the same
+/// How many bytes `code_point` takes in UTF-8. The four cases of §3.2a, in the same
 /// shape `__text.from_chars` encodes them.
-int utf8_len(int c) {
-    if (c < 128) {
+int utf8_length(int code_point) {
+    if (code_point < 128) {
         return 1;
     }
-    if (c < 2048) {
+    if (code_point < 2048) {
         return 2;
     }
-    if (c < 65536) {
+    if (code_point < 65536) {
         return 3;
     }
     return 4;
@@ -507,12 +507,12 @@ const int HANGUL_COUNT = 11172;
 // this text", and a program that cares whether its text has control characters
 // asks that separately.
 
-/// The width of `s` in terminal columns.
-pub int width(str s) {
-    List<int> starts = cluster_starts(s);
+/// The width of `text` in terminal columns.
+pub int width(str text) {
+    List<int> starts = cluster_starts(text);
     int total = 0;
     for (int i in 1 .. starts.size()) {
-        total = total + cluster_width(s.substr(starts[i - 1], starts[i]));
+        total = total + cluster_width(text.substr(starts[i - 1], starts[i]));
     }
     return total;
 }
@@ -523,16 +523,16 @@ int cluster_width(str cluster) {
     if (cps.size() == 0) {
         return 0;
     }
-    int ri = 0;
-    for (int c in cps) {
-        if (c == EMOJI_PRESENTATION) {
+    int indicator_count = 0;
+    for (int code_point in cps) {
+        if (code_point == EMOJI_PRESENTATION) {
             return 2;
         }
-        if (c >= REGIONAL_INDICATOR_FIRST && c <= REGIONAL_INDICATOR_LAST) {
-            ri = ri + 1;
+        if (code_point >= REGIONAL_INDICATOR_FIRST && code_point <= REGIONAL_INDICATOR_LAST) {
+            indicator_count = indicator_count + 1;
         }
     }
-    if (ri == 2) {
+    if (indicator_count == 2) {
         return 2;
     }
     return char_width(cps[0]);
@@ -540,18 +540,18 @@ int cluster_width(str cluster) {
 
 /// The width of one code point: 0, 1 or 2, from WIDTH_RANGES, which holds
 /// only the code points that are not 1.
-int char_width(int c) {
-    int lo = 0;
-    int hi = WIDTH_RANGES.size() / 3 - 1;
-    while (lo <= hi) {
-        int mid = (lo + hi) / 2;
-        int at = mid * 3;
-        if (c < WIDTH_RANGES[at]) {
-            hi = mid - 1;
-        } else if (c > WIDTH_RANGES[at + 1]) {
-            lo = mid + 1;
+int char_width(int code_point) {
+    int low = 0;
+    int high = WIDTH_RANGES.size() / 3 - 1;
+    while (low <= high) {
+        int mid = (low + high) / 2;
+        int entry_start = mid * 3;
+        if (code_point < WIDTH_RANGES[entry_start]) {
+            high = mid - 1;
+        } else if (code_point > WIDTH_RANGES[entry_start + 1]) {
+            low = mid + 1;
         } else {
-            return WIDTH_RANGES[at + 2];
+            return WIDTH_RANGES[entry_start + 2];
         }
     }
     return 1;
@@ -588,50 +588,50 @@ const int REGIONAL_INDICATOR_LAST = 127487;
 // text the way a dictionary does needs the Unicode Collation Algorithm,
 // which is a much larger table than any of these.
 
-/// `s` in Normalization Form D: fully decomposed, marks in canonical order.
-pub str nfd(str s) {
-    return str.from_chars(decomposed(s));
+/// `text` in Normalization Form D: fully decomposed, marks in canonical order.
+pub str nfd(str text) {
+    return str.from_chars(decomposed(text));
 }
 
-/// `s` in Normalization Form C: decomposed, then composed again.
+/// `text` in Normalization Form C: decomposed, then composed again.
 ///
 /// `unicode.nfc("e\u{301}") == "\u{e9}"`, and `nfc` of text that is already
 /// in NFC -- which most text is -- gives it back unchanged.
-pub str nfc(str s) {
-    return str.from_chars(composed(decomposed(s)));
+pub str nfc(str text) {
+    return str.from_chars(composed(decomposed(text)));
 }
 
-/// The code points of `s` decomposed and canonically ordered.
-List<int> decomposed(str s) {
+/// The code points of `text` decomposed and canonically ordered.
+List<int> decomposed(str text) {
     List<int> out = [];
-    for (int c in s.chars()) {
-        decompose(out, c);
+    for (int code_point in text.chars()) {
+        decompose(out, code_point);
     }
     reorder(out);
     return out;
 }
 
-/// Append the canonical decomposition of `c` to `out`.
-void decompose(List<int> out, int c) {
-    if (c >= HANGUL_BASE && c < HANGUL_BASE + HANGUL_COUNT) {
+/// Append the canonical decomposition of `code_point` to `out`.
+void decompose(List<int> out, int code_point) {
+    if (code_point >= HANGUL_BASE && code_point < HANGUL_BASE + HANGUL_COUNT) {
         // A syllable is (lead, vowel, trailing) in a fixed arithmetic
         // layout, so 11,172 of them need no table at all.
-        int n = c - HANGUL_BASE;
-        out.push(HANGUL_LEAD_BASE + n / (HANGUL_VOWELS * HANGUL_TRAILING));
-        out.push(HANGUL_VOWEL_BASE + n / HANGUL_TRAILING % HANGUL_VOWELS);
-        int t = n % HANGUL_TRAILING;
-        if (t > 0) {
-            out.push(HANGUL_TRAIL_BASE + t);
+        int syllable_offset = code_point - HANGUL_BASE;
+        out.push(HANGUL_LEAD_BASE + syllable_offset / (HANGUL_VOWELS * HANGUL_TRAILING));
+        out.push(HANGUL_VOWEL_BASE + syllable_offset / HANGUL_TRAILING % HANGUL_VOWELS);
+        int trailing_index = syllable_offset % HANGUL_TRAILING;
+        if (trailing_index > 0) {
+            out.push(HANGUL_TRAIL_BASE + trailing_index);
         }
         return;
     }
-    int at = key_index(DECOMP_FROM, c);
-    if (at < 0) {
-        out.push(c);
+    int decomposition_index = key_index(DECOMP_FROM, code_point);
+    if (decomposition_index < 0) {
+        out.push(code_point);
         return;
     }
     // DECOMP_TO is fully expanded, so what comes out never decomposes again.
-    append_slice(out, DECOMP_TO, DECOMP_AT[at], DECOMP_AT[at + 1]);
+    append_slice(out, DECOMP_TO, DECOMP_AT[decomposition_index], DECOMP_AT[decomposition_index + 1]);
 }
 
 /// Put every run of combining marks into canonical order, in place.
@@ -641,16 +641,16 @@ void decompose(List<int> out, int c) {
 /// equal class must keep their order, and a run is two or three characters
 /// in any real text.
 void reorder(List<int> cps) {
-    int n = cps.size();
-    for (int i in 1 .. n) {
-        int cc = ccc(cps[i]);
-        if (cc != 0) {
-            int j = i;
-            while (j > 0 && ccc(cps[j - 1]) > cc) {
-                int swap = cps[j - 1];
-                cps[j - 1] = cps[j];
-                cps[j] = swap;
-                j = j - 1;
+    int code_point_count = cps.size();
+    for (int i in 1 .. code_point_count) {
+        int combining_class = ccc(cps[i]);
+        if (combining_class != 0) {
+            int insert_index = i;
+            while (insert_index > 0 && ccc(cps[insert_index - 1]) > combining_class) {
+                int swap = cps[insert_index - 1];
+                cps[insert_index - 1] = cps[insert_index];
+                cps[insert_index] = swap;
+                insert_index = insert_index - 1;
             }
         }
     }
@@ -670,48 +670,48 @@ List<int> composed(List<int> cps) {
     // The class of the last character put after the starter, or -1 if the
     // next character follows the starter directly.
     int last = -1;
-    int n = cps.size();
-    for (int i in 0 .. n) {
-        int c = cps[i];
-        int cc = ccc(c);
-        if (starter >= 0 && (last < 0 || last < cc)) {
-            int p = composite(out[starter], c);
-            if (p >= 0) {
-                out[starter] = p;
+    int code_point_count = cps.size();
+    for (int i in 0 .. code_point_count) {
+        int code_point = cps[i];
+        int combining_class = ccc(code_point);
+        if (starter >= 0 && (last < 0 || last < combining_class)) {
+            int composite_point = composite(out[starter], code_point);
+            if (composite_point >= 0) {
+                out[starter] = composite_point;
                 continue;
             }
         }
-        if (cc == 0) {
+        if (combining_class == 0) {
             starter = out.size();
             last = -1;
         } else {
-            last = cc;
+            last = combining_class;
         }
-        out.push(c);
+        out.push(code_point);
     }
     return out;
 }
 
-/// The single character `a` and `b` compose to, or -1.
-int composite(int a, int b) {
+/// The single character `first_point` and `second_point` compose to, or -1.
+int composite(int first_point, int second_point) {
     // Hangul, again arithmetic: lead + vowel makes a syllable, and a
     // syllable with no trailing jamo plus one makes a fuller syllable.
-    if (a >= HANGUL_LEAD_BASE && a < HANGUL_LEAD_BASE + HANGUL_LEADS && b >= HANGUL_VOWEL_BASE && b < HANGUL_VOWEL_BASE + HANGUL_VOWELS) {
-        int n = (a - HANGUL_LEAD_BASE) * HANGUL_VOWELS + (b - HANGUL_VOWEL_BASE);
-        return HANGUL_BASE + n * HANGUL_TRAILING;
+    if (first_point >= HANGUL_LEAD_BASE && first_point < HANGUL_LEAD_BASE + HANGUL_LEADS && second_point >= HANGUL_VOWEL_BASE && second_point < HANGUL_VOWEL_BASE + HANGUL_VOWELS) {
+        int syllable_index = (first_point - HANGUL_LEAD_BASE) * HANGUL_VOWELS + (second_point - HANGUL_VOWEL_BASE);
+        return HANGUL_BASE + syllable_index * HANGUL_TRAILING;
     }
-    if (a >= HANGUL_BASE && a < HANGUL_BASE + HANGUL_COUNT && (a - HANGUL_BASE) % HANGUL_TRAILING == 0 && b > HANGUL_TRAIL_BASE && b < HANGUL_TRAIL_BASE + HANGUL_TRAILING) {
-        return a + b - HANGUL_TRAIL_BASE;
+    if (first_point >= HANGUL_BASE && first_point < HANGUL_BASE + HANGUL_COUNT && (first_point - HANGUL_BASE) % HANGUL_TRAILING == 0 && second_point > HANGUL_TRAIL_BASE && second_point < HANGUL_TRAIL_BASE + HANGUL_TRAILING) {
+        return first_point + second_point - HANGUL_TRAIL_BASE;
     }
-    int key = a << 21 | b;
-    int lo = 0;
-    int hi = COMPOSE_KEYS.size() - 1;
-    while (lo <= hi) {
-        int mid = (lo + hi) / 2;
+    int key = first_point << 21 | second_point;
+    int low = 0;
+    int high = COMPOSE_KEYS.size() - 1;
+    while (low <= high) {
+        int mid = (low + high) / 2;
         if (key < COMPOSE_KEYS[mid]) {
-            hi = mid - 1;
+            high = mid - 1;
         } else if (key > COMPOSE_KEYS[mid]) {
-            lo = mid + 1;
+            low = mid + 1;
         } else {
             return COMPOSE_TO[mid];
         }
@@ -719,20 +719,20 @@ int composite(int a, int b) {
     return -1;
 }
 
-/// The canonical combining class of `c`: 0 for everything that is not a
+/// The canonical combining class of `code_point`: 0 for everything that is not a
 /// mark, which is why the table holds only what is not 0.
-int ccc(int c) {
-    int lo = 0;
-    int hi = CCC_RANGES.size() / 3 - 1;
-    while (lo <= hi) {
-        int mid = (lo + hi) / 2;
-        int at = mid * 3;
-        if (c < CCC_RANGES[at]) {
-            hi = mid - 1;
-        } else if (c > CCC_RANGES[at + 1]) {
-            lo = mid + 1;
+int ccc(int code_point) {
+    int low = 0;
+    int high = CCC_RANGES.size() / 3 - 1;
+    while (low <= high) {
+        int mid = (low + high) / 2;
+        int entry_start = mid * 3;
+        if (code_point < CCC_RANGES[entry_start]) {
+            high = mid - 1;
+        } else if (code_point > CCC_RANGES[entry_start + 1]) {
+            low = mid + 1;
         } else {
-            return CCC_RANGES[at + 2];
+            return CCC_RANGES[entry_start + 2];
         }
     }
     return 0;

@@ -10,7 +10,7 @@
 import io;
 import os;
 import crypto.sha256;
-import tls13_hex;
+import TLS13_hex;
 import tls.tls13record;
 import tls.tls13schedule;
 
@@ -18,7 +18,7 @@ void say(str text) {
     print(text);
 }
 
-List<str> arguments = os.args();
+List<str> arguments = os.arguments();
 if (arguments.size() != 5) {
     trap("t_tls13_live: expected the capture, two traffic secrets as hex, and a suite name");
 }
@@ -30,10 +30,10 @@ if (arguments[4] == "TLS_AES_128_GCM_SHA256") {
 } else if (arguments[4] != "TLS_CHACHA20_POLY1305_SHA256") {
     trap("t_tls13_live: unknown suite " + arguments[4]);
 }
-tls13record.Connection connection = tls13record.connection(io.buffer_of(tls13_hex.decode(arguments[1])));
+tls13record.Connection connection = tls13record.connection(io.buffer_of(TLS13_hex.decode(arguments[1])));
 connection.use_suite(suite);
-bytes handshake_secret = tls13_hex.decode(arguments[2]);
-bytes application_secret = tls13_hex.decode(arguments[3]);
+bytes handshake_secret = TLS13_hex.decode(arguments[2]);
+bytes application_secret = TLS13_hex.decode(arguments[3]);
 match (connection.receive_handshake()) {
     case Ok(bytes server_hello): {
         say("handshake type=" + str(server_hello[0]) + " size=" + str(server_hello.size()));
@@ -51,12 +51,12 @@ match (connection.install_read_keys(handshake_secret)) {
         os.exit(1);
     }
 }
-bool finished = false;
-while (!finished) {
+bool is_finished = false;
+while (!is_finished) {
     match (connection.receive_handshake()) {
         case Ok(bytes message): {
             say("handshake type=" + str(message[0]) + " size=" + str(message.size()));
-            finished = message[0] == 20;
+            is_finished = message[0] == 20;
         }
         case Err(tls13record.Error message_error): {
             say("error " + message_error.to_str());
@@ -73,12 +73,12 @@ match (connection.install_read_keys(application_secret)) {
     }
 }
 bytes received = [];
-bool ended = false;
-while (!ended) {
+bool is_ended = false;
+while (!is_ended) {
     match (connection.receive_application()) {
         case Ok(bytes data): {
             if (data.size() == 0) {
-                ended = true;
+                is_ended = true;
             } else {
                 received.extend(data);
             }
@@ -90,4 +90,4 @@ while (!ended) {
     }
 }
 say("application size=" + str(received.size()) + " sha256=" + sha256.sum(received).hex());
-say("close_notify " + str(connection.received_close_notify()));
+say("close_notify " + str(connection.has_received_close_notify()));

@@ -23,7 +23,7 @@ for name, (sk, pk, msg, sigv) in vectors.items():
         src.append(f"bytes msg{idx} = {bytes_lit(msgb)};")
     src.append(f'print("rfc_pk_{idx} " + ed25519.public_key(seed{idx}).hex());')
     src.append(f'print("rfc_sig_{idx} " + ed25519.sign(seed{idx}, msg{idx}).hex());')
-    src.append(f'print("rfc_verify_{idx} " + ed25519.verify(ed25519.public_key(seed{idx}), msg{idx}, ed25519.sign(seed{idx}, msg{idx})).to_str());')
+    src.append(f'print("rfc_verify_{idx} " + ed25519.is_valid_signature(ed25519.public_key(seed{idx}), msg{idx}, ed25519.sign(seed{idx}, msg{idx})).to_str());')
     want.append(f"rfc_pk_{idx} " + pk)
     want.append(f"rfc_sig_{idx} " + sigv)
     want.append(f"rfc_verify_{idx} true")
@@ -58,7 +58,7 @@ for i in range(100):
     src.append(f"bytes vpk{idx} = {bytes_lit(pk)};")
     src.append(f"bytes vmsg{idx} = {bytes_lit(msg)};")
     src.append(f"bytes vsig{idx} = {bytes_lit(sig)};")
-    src.append(f'print("verify_ok_{idx} " + ed25519.verify(vpk{idx}, vmsg{idx}, vsig{idx}).to_str());')
+    src.append(f'print("verify_ok_{idx} " + ed25519.is_valid_signature(vpk{idx}, vmsg{idx}, vsig{idx}).to_str());')
     want.append(f"verify_ok_{idx} true")
 
     # tamper: flip a bit in the message (skip if message is empty)
@@ -67,7 +67,7 @@ for i in range(100):
         tampered[0] ^= 0x01
         idx2 = len(want)
         src.append(f"bytes tmsg{idx2} = {bytes_lit(bytes(tampered))};")
-        src.append(f'print("verify_tamper_msg_{idx2} " + ed25519.verify(vpk{idx}, tmsg{idx2}, vsig{idx}).to_str());')
+        src.append(f'print("verify_tamper_msg_{idx2} " + ed25519.is_valid_signature(vpk{idx}, tmsg{idx2}, vsig{idx}).to_str());')
         want.append(f"verify_tamper_msg_{idx2} false")
 
     # tamper: flip a bit in the signature
@@ -75,14 +75,14 @@ for i in range(100):
     tsig[10] ^= 0x01
     idx3 = len(want)
     src.append(f"bytes tsig{idx3} = {bytes_lit(bytes(tsig))};")
-    src.append(f'print("verify_tamper_sig_{idx3} " + ed25519.verify(vpk{idx}, vmsg{idx}, tsig{idx3}).to_str());')
+    src.append(f'print("verify_tamper_sig_{idx3} " + ed25519.is_valid_signature(vpk{idx}, vmsg{idx}, tsig{idx3}).to_str());')
     want.append(f"verify_tamper_sig_{idx3} false")
 
     # tamper: wrong public key (use a different random key)
     other_pk = nsig.SigningKey(_R.randbytes(32)).verify_key.encode()
     idx4 = len(want)
     src.append(f"bytes opk{idx4} = {bytes_lit(other_pk)};")
-    src.append(f'print("verify_wrong_key_{idx4} " + ed25519.verify(opk{idx4}, vmsg{idx}, vsig{idx}).to_str());')
+    src.append(f'print("verify_wrong_key_{idx4} " + ed25519.is_valid_signature(opk{idx4}, vmsg{idx}, vsig{idx}).to_str());')
     want.append(f"verify_wrong_key_{idx4} false")
 
 # --- non-canonical S: S = L, L+1, etc. must be rejected ---------------------
@@ -98,7 +98,7 @@ for bad_s in [L, L + 1, 2**255]:
     src.append(f"bytes npk{idx} = {bytes_lit(pk)};")
     src.append(f"bytes nmsg{idx} = {bytes_lit(msg)};")
     src.append(f"bytes nsig{idx} = {bytes_lit(bad_sig)};")
-    src.append(f'print("noncanon_S_{idx} " + ed25519.verify(npk{idx}, nmsg{idx}, nsig{idx}).to_str());')
+    src.append(f'print("noncanon_S_{idx} " + ed25519.is_valid_signature(npk{idx}, nmsg{idx}, nsig{idx}).to_str());')
     want.append(f"noncanon_S_{idx} false")
 
 # --- malformed lengths ------------------------------------------------------
@@ -106,7 +106,7 @@ idx = len(want)
 src.append(f"bytes shortpk = {bytes_lit(pk)};")
 src.append(f"bytes shortmsg = {bytes_lit(msg)};")
 src.append(f"bytes shortsig = {bytes_lit(sig[:63])};")
-src.append(f'print("short_sig_{idx} " + ed25519.verify(shortpk, shortmsg, shortsig).to_str());')
+src.append(f'print("short_sig_{idx} " + ed25519.is_valid_signature(shortpk, shortmsg, shortsig).to_str());')
 want.append(f"short_sig_{idx} false")
 
 open(os.path.join(OUT, "t_ed25519.m31"), "w").write("\n".join(src) + "\n")

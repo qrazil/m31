@@ -18,8 +18,8 @@ type Tally {
     int failed = 0;
 }
 
-void Tally.expect(str label, bool holds) {
-    if (holds) {
+void Tally.expect(str label, bool is_satisfied) {
+    if (is_satisfied) {
         passed = passed + 1;
     } else {
         failed = failed + 1;
@@ -151,9 +151,9 @@ void check_hostnames(Tally tally, str generated) {
             current_file = file;
             loaded = [certificate_in(generated + "/" + file, 0)];
         }
-        bool wanted = row[2] == "1";
-        bool got = loaded[0].matches_hostname(row[1]);
-        tally.expect(file + ": host `" + row[1] + "` gave " + got.to_str() + ", wanted " + wanted.to_str(), got == wanted);
+        bool is_expected = row[2] == "1";
+        bool is_matching = loaded[0].is_valid_for_hostname(row[1]);
+        tally.expect(file + ": host `" + row[1] + "` gave " + is_matching.to_str() + ", wanted " + is_expected.to_str(), is_matching == is_expected);
     }
     tally.expect("hostname table is not empty", count > 50);
 }
@@ -164,7 +164,7 @@ void check_semantics(Tally tally, str generated) {
         count = count + 1;
         x509.Certificate certificate = certificate_in(generated + "/" + row[0], 0);
         str label = row[0];
-        tally.expect(label + ": allows_server_auth", certificate.allows_server_auth() == (row[1] == "1"));
+        tally.expect(label + ": allows_server_auth", certificate.is_server_auth_allowed() == (row[1] == "1"));
         tally.expect(label + ": is_ca", certificate.is_ca == (row[2] == "1"));
         tally.expect(label + ": path_length " + certificate.path_length.to_str(), certificate.path_length.to_str() == row[3]);
         tally.expect(label + ": key_usage " + certificate.key_usage.to_str(), certificate.key_usage.to_str() == row[4]);
@@ -176,22 +176,22 @@ void check_semantics(Tally tally, str generated) {
     tally.expect("key usage mask names keyCertSign", (leaf.key_usage & x509.KEY_USAGE_KEY_CERT_SIGN) != 0);
     tally.expect("SAN dNSName list skips IP, email and URI entries", leaf.dns_names.join(",") == "leaf.example,www.leaf.example");
     tally.expect("SAN iPAddress list holds the one IPv4 entry as 4 octets", leaf.ip_addresses.size() == 1 && leaf.ip_addresses[0].hex() == "c0000207");
-    tally.expect("the key algorithm is EC", leaf.public_key.algorithm == x509.OID_EC_PUBLIC_KEY);
-    tally.expect("the curve is P-256", leaf.public_key.curve == x509.OID_CURVE_P256);
+    tally.expect("the key algorithm is EC", leaf.public_key.algorithm == x509.OBJECT_ID_EC_PUBLIC_KEY);
+    tally.expect("the curve is P-256", leaf.public_key.curve == x509.OBJECT_ID_CURVE_P256);
     x509.Certificate ed_leaf = certificate_in(generated + "/good_ed25519_leaf.pem", 0);
     tally.expect("the key algorithm is Ed25519", ed_leaf.public_key.algorithm == x509.OBJECT_ID_ED25519);
     tally.expect("an Ed25519 key is 32 octets", ed_leaf.public_key.key_bytes.size() == 32);
     tally.expect("an Ed25519 key has no curve", ed_leaf.public_key.curve == "");
     tally.expect("an Ed25519 leaf's SAN has an IPv4 and an IPv6 entry", ed_leaf.ip_addresses.size() == 2 && ed_leaf.ip_addresses[0].size() == 4 && ed_leaf.ip_addresses[1].size() == 16);
     x509.Certificate ed_signed = certificate_in(generated + "/good_ed25519_signed.pem", 0);
-    tally.expect("an Ed25519 signature algorithm is the OID alone", ed_signed.signature_algorithm.algorithm_oid == x509.OBJECT_ID_ED25519 && ed_signed.signature_algorithm.parameters.size() == 0);
+    tally.expect("an Ed25519 signature algorithm is the OID alone", ed_signed.signature_algorithm.algorithm_object_id == x509.OBJECT_ID_ED25519 && ed_signed.signature_algorithm.parameters.size() == 0);
     tally.expect("an Ed25519 signature is 64 octets", ed_signed.signature.size() == 64);
     x509.Certificate rsa = certificate_in(generated + "/good_rsa_leaf.pem", 0);
-    tally.expect("the key algorithm is RSA", rsa.public_key.algorithm == x509.OID_RSA_ENCRYPTION);
+    tally.expect("the key algorithm is RSA", rsa.public_key.algorithm == x509.OBJECT_ID_RSA_ENCRYPTION);
     tally.expect("an RSA exponent of 65537", rsa.public_key.public_exponent.hex() == "010001");
     tally.expect("a 2048-bit RSA modulus", rsa.public_key.modulus.size() == 256);
     x509.Certificate curve384 = certificate_in(generated + "/good_ec384_ca.pem", 0);
-    tally.expect("the curve is P-384", curve384.public_key.curve == x509.OID_CURVE_P384);
+    tally.expect("the curve is P-384", curve384.public_key.curve == x509.OBJECT_ID_CURVE_P384);
     tally.expect("a P-384 point is 97 octets", curve384.public_key.key_bytes.size() == 97);
 }
 
@@ -210,12 +210,12 @@ void check_fixture_chain(Tally tally, str fixtures, str file, int expected_not_b
     tally.expect(file + ": valid in the middle", leaf.is_valid_at(expected_not_before + (expected_not_after - expected_not_before) / 2));
     tally.expect(file + ": invalid at the epoch", !leaf.is_valid_at(0));
     tally.expect(file + ": the intermediate is valid in the middle", intermediate.is_valid_at(expected_not_before + 86400));
-    tally.expect(file + ": leaf is issued by the intermediate", leaf.issued_by(intermediate));
-    tally.expect(file + ": leaf is not self-issued", !leaf.issued_by(leaf));
-    tally.expect(file + ": the intermediate does not issue itself", !intermediate.issued_by(intermediate));
+    tally.expect(file + ": leaf is issued by the intermediate", leaf.is_issued_by(intermediate));
+    tally.expect(file + ": leaf is not self-issued", !leaf.is_issued_by(leaf));
+    tally.expect(file + ": the intermediate does not issue itself", !intermediate.is_issued_by(intermediate));
     tally.expect(file + ": the intermediate is a CA", intermediate.is_ca && intermediate.has_basic_constraints);
     tally.expect(file + ": the leaf is not a CA", !leaf.is_ca);
-    tally.expect(file + ": the leaf allows server auth", leaf.allows_server_auth());
+    tally.expect(file + ": the leaf allows server auth", leaf.is_server_auth_allowed());
     tally.expect(file + ": the leaf's key usage is present", leaf.has_key_usage);
     tally.expect(file + ": the leaf has a SAN", leaf.has_subject_alt_name);
     tally.expect(file + ": the leaf's tbs is inside its encoding", blobs[0].contains(leaf.tbs_certificate));
@@ -223,10 +223,10 @@ void check_fixture_chain(Tally tally, str fixtures, str file, int expected_not_b
     tally.expect(file + ": the leaf carries a subject key id", leaf.subject_key_id.size() > 0);
     tally.expect(file + ": the leaf's authority key id is the intermediate's subject key id", leaf.authority_key_id == intermediate.subject_key_id);
     for (str host in accepted) {
-        tally.expect(file + ": matches " + host, leaf.matches_hostname(host));
+        tally.expect(file + ": matches " + host, leaf.is_valid_for_hostname(host));
     }
     for (str host in refused) {
-        tally.expect(file + ": does not match " + host, !leaf.matches_hostname(host));
+        tally.expect(file + ": does not match " + host, !leaf.is_valid_for_hostname(host));
     }
 }
 
@@ -236,11 +236,11 @@ void check_fixtures(Tally tally, str fixtures) {
     check_fixture_chain(tally, fixtures, "dev.meghraj.uk.pem", 1789265536, 1797045133, ["dev.meghraj.uk", "meghraj.uk", "git.meghraj.uk", "Dev.Meghraj.UK"], ["a.b.meghraj.uk", "uk", "meghraj.uk.evil.example", "xmeghraj.uk"]);
     x509.Certificate github = certificate_in(fixtures + "/github.com.pem", 0);
     x509.Certificate codeload = certificate_in(fixtures + "/codeload.github.com.pem", 0);
-    tally.expect("a leaf is not issued by another site's leaf", !github.issued_by(codeload));
+    tally.expect("a leaf is not issued by another site's leaf", !github.is_issued_by(codeload));
     tally.expect("distinct leaves have distinct serials", github.serial_number != codeload.serial_number);
     x509.Certificate root = certificate_in(fixtures + "/github.com.pem", 2);
     x509.Certificate middle = certificate_in(fixtures + "/github.com.pem", 1);
-    tally.expect("github chain: intermediate issued by root", middle.issued_by(root));
+    tally.expect("github chain: intermediate issued by root", middle.is_issued_by(root));
     tally.expect("github chain: root is a CA", root.is_ca);
 }
 
@@ -358,11 +358,11 @@ int exercise(bytes data, List<str> hosts) {
                 verdict = verdict + 4;
             }
             for (str host in hosts) {
-                certificate.matches_hostname(host);
+                certificate.is_valid_for_hostname(host);
             }
             certificate.is_valid_at(1790000000);
-            certificate.allows_server_auth();
-            certificate.issued_by(certificate);
+            certificate.is_server_auth_allowed();
+            certificate.is_issued_by(certificate);
         }
         case Err(x509.Error parse_error): {
             error_name(parse_error);
@@ -436,7 +436,7 @@ void check_fuzz(Tally tally, str fixtures, str generated) {
     }
 }
 
-List<str> arguments = os.args();
+List<str> arguments = os.arguments();
 if (arguments.size() < 3) {
     trap("usage: x509_cases <generated dir> <fixtures dir>");
 }

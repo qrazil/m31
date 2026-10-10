@@ -21,8 +21,8 @@ str or_dash(str text) {
     return text;
 }
 
-str flag_text(bool flag) {
-    if (flag) {
+str flag_text(bool is_set) {
+    if (is_set) {
         return "1";
     }
     return "0";
@@ -33,7 +33,7 @@ void print_certificate(int number, x509.Certificate certificate) {
     print("version " + certificate.version.to_str());
     print("serial " + certificate.serial_number.hex());
     print("tbs_sha256 " + sha256.hex(certificate.tbs_certificate));
-    print("signature_algorithm " + certificate.signature_algorithm.algorithm_oid);
+    print("signature_algorithm " + certificate.signature_algorithm.algorithm_object_id);
     print("signature_parameters " + or_dash(certificate.signature_algorithm.parameters.hex()));
     print("signature " + certificate.signature.hex());
     print("issuer " + certificate.issuer.hex());
@@ -59,11 +59,11 @@ void print_certificate(int number, x509.Certificate certificate) {
     print("authority_key_id " + or_dash(certificate.authority_key_id.hex()));
 }
 
-List<str> arguments = os.args();
+List<str> arguments = os.arguments();
 if (arguments.size() < 2) {
     trap("usage: x509_dump <file.pem> [anchors]");
 }
-bool anchors = arguments.size() > 2 && arguments[2] == "anchors";
+bool is_anchor_mode = arguments.size() > 2 && arguments[2] == "anchors";
 match (io.read(arguments[1])) {
     case Ok(str text): {
         match (x509.pem_certificates(text)) {
@@ -71,7 +71,7 @@ match (io.read(arguments[1])) {
                 int number = 0;
                 for (bytes blob in blobs) {
                     number = number + 1;
-                    if (anchors) {
+                    if (is_anchor_mode) {
                         match (x509.parse_trust_anchor(blob)) {
                             case Ok(x509.Certificate certificate): {
                                 print_certificate(number, certificate);

@@ -11,15 +11,15 @@ import ssh;
 import ssh.sshkey;
 import ssh.sshauth;
 
-int check(int n, bool ok, str label) {
-    if (!ok) {
+int check(int passed_count, bool is_ok, str label) {
+    if (!is_ok) {
         trap("check failed: " + label);
     }
-    return n + 1;
+    return passed_count + 1;
 }
 
-int error_code(sshauth.Error e) {
-    match (e) {
+int error_code(sshauth.Error error) {
+    match (error) {
         case Transport(ssh.Error inner): {
             return 0;
         }
@@ -41,12 +41,12 @@ int error_code(sshauth.Error e) {
     }
 }
 
-const int ERR_TRANSPORT = 0;
-const int ERR_TRUNCATED = 1;
-const int ERR_UNEXPECTED = 2;
-const int ERR_BAD_MESSAGE = 3;
-const int ERR_KEY_REJECTED = 4;
-const int ERR_AUTH_FAILED = 5;
+const int ERROR_TRANSPORT = 0;
+const int ERROR_TRUNCATED = 1;
+const int ERROR_UNEXPECTED = 2;
+const int ERROR_BAD_MESSAGE = 3;
+const int ERROR_KEY_REJECTED = 4;
+const int ERROR_AUTH_FAILED = 5;
 
 // A scripted peer: `recv` hands out the canned messages in order and then
 // reports a disconnect; `send` records.
@@ -81,72 +81,72 @@ Script script(List<bytes> inbox) {
 
 bytes sid_bytes() {
     bytes out = [];
-    int i = 0;
-    while (i < 32) {
-        out.push(0xA0 + i);
-        i = i + 1;
+    int index = 0;
+    while (index < 32) {
+        out.push(0xA0 + index);
+        index = index + 1;
     }
     return out;
 }
 
-void push_u32(bytes out, int v) {
-    out.push(v >> 24 & 0xFF);
-    out.push(v >> 16 & 0xFF);
-    out.push(v >> 8 & 0xFF);
-    out.push(v & 0xFF);
+void push_u32(bytes out, int value) {
+    out.push(value >> 24 & 0xFF);
+    out.push(value >> 16 & 0xFF);
+    out.push(value >> 8 & 0xFF);
+    out.push(value & 0xFF);
 }
 
 // --- canned server messages -------------------------------------------------
 
 bytes service_accept() {
-    bytes m = [];
-    m.push(ssh.SSH_MSG_SERVICE_ACCEPT);
-    ssh.push_string(m, "ssh-userauth".to_bytes());
-    return m;
+    bytes message = [];
+    message.push(ssh.SSH_MESSAGE_SERVICE_ACCEPT);
+    ssh.push_string(message, "ssh-userauth".to_bytes());
+    return message;
 }
 
 bytes banner(str text) {
-    bytes m = [];
-    m.push(sshauth.SSH_MSG_USERAUTH_BANNER);
-    ssh.push_string(m, text.to_bytes());
-    ssh.push_string(m, "en".to_bytes());
-    return m;
+    bytes message = [];
+    message.push(sshauth.SSH_MESSAGE_USERAUTH_BANNER);
+    ssh.push_string(message, text.to_bytes());
+    ssh.push_string(message, "en".to_bytes());
+    return message;
 }
 
 bytes pk_ok(bytes blob) {
-    bytes m = [];
-    m.push(sshauth.SSH_MSG_USERAUTH_PK_OK);
-    ssh.push_string(m, "ssh-ed25519".to_bytes());
-    ssh.push_string(m, blob);
-    return m;
+    bytes message = [];
+    message.push(sshauth.SSH_MESSAGE_USERAUTH_PK_OK);
+    ssh.push_string(message, "ssh-ed25519".to_bytes());
+    ssh.push_string(message, blob);
+    return message;
 }
 
-bytes failure(List<str> methods, bool partial) {
-    bytes m = [];
-    m.push(sshauth.SSH_MSG_USERAUTH_FAILURE);
-    m.extend(ssh.encode_name_list(methods));
-    if (partial) {
-        m.push(1);
+bytes failure(List<str> methods, bool is_partial) {
+    bytes message = [];
+    message.push(sshauth.SSH_MESSAGE_USERAUTH_FAILURE);
+    message.extend(ssh.encode_name_list(methods));
+    if (is_partial) {
+        message.push(1);
     } else {
-        m.push(0);
+        message.push(0);
     }
-    return m;
+    return message;
 }
 
 bytes success() {
-    bytes m = [];
-    m.push(sshauth.SSH_MSG_USERAUTH_SUCCESS);
-    return m;
+    bytes message = [];
+    message.push(sshauth.SSH_MESSAGE_USERAUTH_SUCCESS);
+    return message;
 }
 
 // --- a key, built from a known seed ------------------------------------------
 
 bytes seed_of(int fill) {
     bytes out = [];
-    int i = 0;
-    while (i < 32) {
-        out.push((fill + i * 5) & 0xFF);
-        i = i + 1;
+    int index = 0;
+    while (index < 32) {
+        out.push((fill + index * 5) & 0xFF);
+        index = index + 1;
     }
     return out;
 }
@@ -163,10 +163,10 @@ sshkey.PrivateKey key_from(bytes seed) {
     ssh.push_string(sec, both);
     ssh.push_string(sec, "t".to_bytes());
     int pad = (8 - sec.size() % 8) % 8;
-    int i = 1;
-    while (i <= pad) {
-        sec.push(i);
-        i = i + 1;
+    int pad_byte = 1;
+    while (pad_byte <= pad) {
+        sec.push(pad_byte);
+        pad_byte = pad_byte + 1;
     }
     bytes outer = [];
     ssh.push_string(outer, "ssh-ed25519".to_bytes());
@@ -181,11 +181,11 @@ sshkey.PrivateKey key_from(bytes seed) {
     ssh.push_string(blob, sec);
     str text = "-----BEGIN OPENSSH PRIVATE KEY-----\n" + base64.encode(blob) + "\n-----END OPENSSH PRIVATE KEY-----\n";
     match (sshkey.parse(text)) {
-        case Ok(sshkey.PrivateKey k): {
-            return k;
+        case Ok(sshkey.PrivateKey private_key): {
+            return private_key;
         }
-        case Err(sshkey.Error e): {
-            trap("fixture key: " + e.to_str());
+        case Err(sshkey.Error error): {
+            trap("fixture key: " + error.to_str());
         }
     }
 }
@@ -196,68 +196,68 @@ int outcome(List<bytes> inbox, sshkey.PrivateKey key) {
     return run_auth(script(inbox), key);
 }
 
-int run_auth(Script s, sshkey.PrivateKey key) {
-    match (sshauth.authenticate(s, "git", key)) {
+int run_auth(Script server_script, sshkey.PrivateKey key) {
+    match (sshauth.authenticate(server_script, "git", key)) {
         case Ok(str text): {
             return -1;
         }
-        case Err(sshauth.Error e): {
-            return error_code(e);
+        case Err(sshauth.Error error): {
+            return error_code(error);
         }
     }
 }
 
-int run_auth_as(Script s, bytes announced, sshkey.PrivateKey signer) {
-    match (sshauth.authenticate_as(s, "git", announced, signer)) {
+int run_auth_as(Script server_script, bytes announced, sshkey.PrivateKey signer) {
+    match (sshauth.authenticate_as(server_script, "git", announced, signer)) {
         case Ok(str text): {
             return -1;
         }
-        case Err(sshauth.Error e): {
-            return error_code(e);
+        case Err(sshauth.Error error): {
+            return error_code(error);
         }
     }
 }
 
 int parse_code_failure(bytes payload) {
     match (sshauth.parse_failure(payload)) {
-        case Ok(sshauth.Failure f): {
+        case Ok(_): {
             return -1;
         }
-        case Err(sshauth.Error e): {
-            return error_code(e);
+        case Err(sshauth.Error error): {
+            return error_code(error);
         }
     }
 }
 
 int parse_code_banner(bytes payload) {
     match (sshauth.parse_banner(payload)) {
-        case Ok(str t): {
+        case Ok(_): {
             return -1;
         }
-        case Err(sshauth.Error e): {
-            return error_code(e);
+        case Err(sshauth.Error error): {
+            return error_code(error);
         }
     }
 }
 
 int parse_code_pk_ok(bytes payload, bytes blob) {
     match (sshauth.parse_pk_ok(payload, blob)) {
-        case Ok(bool b): {
+        case Ok(_): {
             return -1;
         }
-        case Err(sshauth.Error e): {
-            return error_code(e);
+        case Err(sshauth.Error error): {
+            return error_code(error);
         }
     }
 }
 
-ssh.Field must_string(bytes buf, int at) {
-    match (ssh.parse_string(buf, at)) {
-        case Ok(ssh.Field f): {
-            return f;
+ssh.Field must_string(bytes buffer, int offset) {
+    match (ssh.parse_string(buffer, offset)) {
+        case Ok(ssh.Field field): {
+            return field;
         }
-        case Err(ssh.Error e): {
-            trap("fixture string: " + e.to_str());
+        case Err(ssh.Error error): {
+            trap("fixture string: " + error.to_str());
         }
     }
 }
@@ -304,21 +304,21 @@ checks = check(checks, sshauth.build_signed_request("git", blob, sig_blob) == wa
 // --- 2. the happy path, and what the client sent -----------------------------
 
 List<bytes> happy = [service_accept(), pk_ok(blob), success()];
-Script s1 = script(happy);
-match (sshauth.authenticate(s1, "git", key)) {
+Script happy_script = script(happy);
+match (sshauth.authenticate(happy_script, "git", key)) {
     case Ok(str text): {
         checks = check(checks, text == "", "no banner gives an empty banner");
     }
-    case Err(sshauth.Error e): {
-        trap("the happy path failed: " + e.to_str());
+    case Err(sshauth.Error error): {
+        trap("the happy path failed: " + error.to_str());
     }
 }
-checks = check(checks, s1.sent.size() == 3, "the client sends exactly three messages");
-checks = check(checks, s1.sent[0] == want_service, "message 1 is the SERVICE_REQUEST");
-checks = check(checks, s1.sent[1] == want_query, "message 2 is the unsigned probe");
+checks = check(checks, happy_script.sent.size() == 3, "the client sends exactly three messages");
+checks = check(checks, happy_script.sent[0] == want_service, "message 1 is the SERVICE_REQUEST");
+checks = check(checks, happy_script.sent[1] == want_query, "message 2 is the unsigned probe");
 // Message 3: the signed request, whose signature must verify over the
 // session id and the request body.
-bytes third = s1.sent[2];
+bytes third = happy_script.sent[2];
 checks = check(checks, third.size() > want_query.size() && third[0] == 50, "message 3 is a USERAUTH_REQUEST");
 ssh.Field f_user = must_string(third, 1);
 ssh.Field f_service = must_string(third, f_user.next);
@@ -332,68 +332,68 @@ ssh.Field f_sig_algo = must_string(f_sig.value, 0);
 ssh.Field f_sig_raw = must_string(f_sig.value, f_sig_algo.next);
 checks = check(checks, f_sig_algo.value == "ssh-ed25519".to_bytes() && f_sig_raw.value.size() == 64, "the signature blob is ssh-ed25519 || 64 octets");
 bytes signed = sshauth.signature_data(sid_bytes(), "git", blob);
-checks = check(checks, ed25519.verify(pubkey, signed, f_sig_raw.value), "the signature verifies over session_id || request");
+checks = check(checks, ed25519.is_valid_signature(pubkey, signed, f_sig_raw.value), "the signature verifies over session_id || request");
 // ... and over nothing else: not another session id, not another user.
-checks = check(checks, !ed25519.verify(pubkey, sshauth.signature_data(seed_of(1), "git", blob), f_sig_raw.value), "the signature does not verify under another session id");
-checks = check(checks, !ed25519.verify(pubkey, sshauth.signature_data(sid_bytes(), "root", blob), f_sig_raw.value), "the signature does not verify for another user");
+checks = check(checks, !ed25519.is_valid_signature(pubkey, sshauth.signature_data(seed_of(1), "git", blob), f_sig_raw.value), "the signature does not verify under another session id");
+checks = check(checks, !ed25519.is_valid_signature(pubkey, sshauth.signature_data(sid_bytes(), "root", blob), f_sig_raw.value), "the signature does not verify for another user");
 
 // --- 3. banners are collected, never mistaken for an answer -----------------
 
-Script s2 = script([service_accept(), banner("first "), banner("second "), pk_ok(blob), banner("third"), success()]);
-match (sshauth.authenticate(s2, "git", key)) {
+Script banner_script = script([service_accept(), banner("first "), banner("second "), pk_ok(blob), banner("third"), success()]);
+match (sshauth.authenticate(banner_script, "git", key)) {
     case Ok(str text): {
         checks = check(checks, text == "first second third", "banners before and after the probe are concatenated");
     }
-    case Err(sshauth.Error e): {
-        trap("banners broke the exchange: " + e.to_str());
+    case Err(sshauth.Error error): {
+        trap("banners broke the exchange: " + error.to_str());
     }
 }
 // More banners than the cap is a server playing games.
 List<bytes> flood = [service_accept()];
-int b = 0;
-while (b < 40) {
+int banner_count = 0;
+while (banner_count < 40) {
     flood.push(banner("x"));
-    b = b + 1;
+    banner_count = banner_count + 1;
 }
-checks = check(checks, outcome(flood, key) == ERR_UNEXPECTED, "a flood of banners is UnexpectedMessage");
+checks = check(checks, outcome(flood, key) == ERROR_UNEXPECTED, "a flood of banners is UnexpectedMessage");
 
 // --- 4. one fixture per Error variant ----------------------------------------
 
 // Transport: the peer vanishes at each step.
-checks = check(checks, outcome([], key) == ERR_TRANSPORT, "no SERVICE_ACCEPT: Transport(Disconnected)");
-checks = check(checks, outcome([service_accept()], key) == ERR_TRANSPORT, "no answer to the probe: Transport(Disconnected)");
-checks = check(checks, outcome([service_accept(), pk_ok(blob)], key) == ERR_TRANSPORT, "no answer to the signed request: Transport(Disconnected)");
+checks = check(checks, outcome([], key) == ERROR_TRANSPORT, "no SERVICE_ACCEPT: Transport(Disconnected)");
+checks = check(checks, outcome([service_accept()], key) == ERROR_TRANSPORT, "no answer to the probe: Transport(Disconnected)");
+checks = check(checks, outcome([service_accept(), pk_ok(blob)], key) == ERROR_TRANSPORT, "no answer to the signed request: Transport(Disconnected)");
 // Truncated: an empty payload; and each parser below on every prefix.
-checks = check(checks, outcome([service_accept(), []], key) == ERR_TRUNCATED, "an empty payload after the probe is Truncated");
-checks = check(checks, outcome([service_accept(), pk_ok(blob), []], key) == ERR_TRUNCATED, "an empty payload after the signed request is Truncated");
+checks = check(checks, outcome([service_accept(), []], key) == ERROR_TRUNCATED, "an empty payload after the probe is Truncated");
+checks = check(checks, outcome([service_accept(), pk_ok(blob), []], key) == ERROR_TRUNCATED, "an empty payload after the signed request is Truncated");
 // UnexpectedMessage
-bytes wrong_service = [ssh.SSH_MSG_SERVICE_ACCEPT];
+bytes wrong_service = [ssh.SSH_MESSAGE_SERVICE_ACCEPT];
 ssh.push_string(wrong_service, "ssh-connection".to_bytes());
-checks = check(checks, outcome([wrong_service], key) == ERR_UNEXPECTED, "SERVICE_ACCEPT for another service is UnexpectedMessage");
-checks = check(checks, outcome([success()], key) == ERR_UNEXPECTED, "USERAUTH_SUCCESS in place of SERVICE_ACCEPT is UnexpectedMessage");
-checks = check(checks, outcome([service_accept(), success()], key) == ERR_UNEXPECTED, "USERAUTH_SUCCESS in answer to a probe is UnexpectedMessage (nothing was proven)");
-checks = check(checks, outcome([service_accept(), [94, 0, 0, 0, 0]], key) == ERR_UNEXPECTED, "a channel message in answer to the probe is UnexpectedMessage");
-checks = check(checks, outcome([service_accept(), pk_ok(blob), pk_ok(blob)], key) == ERR_UNEXPECTED, "a second PK_OK in answer to the signed request is UnexpectedMessage");
+checks = check(checks, outcome([wrong_service], key) == ERROR_UNEXPECTED, "SERVICE_ACCEPT for another service is UnexpectedMessage");
+checks = check(checks, outcome([success()], key) == ERROR_UNEXPECTED, "USERAUTH_SUCCESS in place of SERVICE_ACCEPT is UnexpectedMessage");
+checks = check(checks, outcome([service_accept(), success()], key) == ERROR_UNEXPECTED, "USERAUTH_SUCCESS in answer to a probe is UnexpectedMessage (nothing was proven)");
+checks = check(checks, outcome([service_accept(), [94, 0, 0, 0, 0]], key) == ERROR_UNEXPECTED, "a channel message in answer to the probe is UnexpectedMessage");
+checks = check(checks, outcome([service_accept(), pk_ok(blob), pk_ok(blob)], key) == ERROR_UNEXPECTED, "a second PK_OK in answer to the signed request is UnexpectedMessage");
 // BadMessage
 sshkey.PrivateKey other = key_from(seed_of(99));
-checks = check(checks, outcome([service_accept(), pk_ok(other.public_blob())], key) == ERR_BAD_MESSAGE, "PK_OK for another key is BadMessage");
-bytes other_algo = [sshauth.SSH_MSG_USERAUTH_PK_OK];
+checks = check(checks, outcome([service_accept(), pk_ok(other.public_blob())], key) == ERROR_BAD_MESSAGE, "PK_OK for another key is BadMessage");
+bytes other_algo = [sshauth.SSH_MESSAGE_USERAUTH_PK_OK];
 ssh.push_string(other_algo, "ssh-rsa".to_bytes());
 ssh.push_string(other_algo, blob);
-checks = check(checks, outcome([service_accept(), other_algo], key) == ERR_BAD_MESSAGE, "PK_OK naming another algorithm is BadMessage");
-bytes bad_utf8 = [sshauth.SSH_MSG_USERAUTH_BANNER];
+checks = check(checks, outcome([service_accept(), other_algo], key) == ERROR_BAD_MESSAGE, "PK_OK naming another algorithm is BadMessage");
+bytes bad_utf8 = [sshauth.SSH_MESSAGE_USERAUTH_BANNER];
 ssh.push_string(bad_utf8, [0xFF, 0xFE]);
 ssh.push_string(bad_utf8, []);
-checks = check(checks, outcome([service_accept(), bad_utf8], key) == ERR_BAD_MESSAGE, "a banner that is not UTF-8 is BadMessage");
+checks = check(checks, outcome([service_accept(), bad_utf8], key) == ERROR_BAD_MESSAGE, "a banner that is not UTF-8 is BadMessage");
 // KeyRejected: the probe is refused (unknown user / key not authorized).
-checks = check(checks, outcome([service_accept(), failure(["password"], false)], key) == ERR_KEY_REJECTED, "FAILURE in answer to the probe is KeyRejected");
+checks = check(checks, outcome([service_accept(), failure(["password"], false)], key) == ERROR_KEY_REJECTED, "FAILURE in answer to the probe is KeyRejected");
 List<bytes> rejected = [service_accept(), failure(["publickey"], false)];
-Script s3 = script(rejected);
-run_auth(s3, key);
-checks = check(checks, s3.sent.size() == 2, "after KeyRejected nothing was signed (only the request and the probe were sent)");
+Script rejected_script = script(rejected);
+run_auth(rejected_script, key);
+checks = check(checks, rejected_script.sent.size() == 2, "after KeyRejected nothing was signed (only the request and the probe were sent)");
 // AuthFailed: the signed request is refused.
-checks = check(checks, outcome([service_accept(), pk_ok(blob), failure(["publickey"], false)], key) == ERR_AUTH_FAILED, "FAILURE in answer to the signed request is AuthFailed");
-checks = check(checks, outcome([service_accept(), pk_ok(blob), failure(["publickey", "password"], true)], key) == ERR_AUTH_FAILED, "partial success needing another method is AuthFailed");
+checks = check(checks, outcome([service_accept(), pk_ok(blob), failure(["publickey"], false)], key) == ERROR_AUTH_FAILED, "FAILURE in answer to the signed request is AuthFailed");
+checks = check(checks, outcome([service_accept(), pk_ok(blob), failure(["publickey", "password"], true)], key) == ERROR_AUTH_FAILED, "partial success needing another method is AuthFailed");
 
 // --- 5. every parser refuses every proper prefix of a valid message ----------
 
@@ -422,38 +422,38 @@ while (cut < valid_pk_ok.size()) {
     cut = cut + 1;
 }
 checks = check(checks, parse_code_failure(valid_failure) == -1 && parse_code_banner(valid_banner) == -1 && parse_code_pk_ok(valid_pk_ok, blob) == -1, "the whole of each valid message parses");
-checks = check(checks, parse_code_failure(valid_failure.substr(0, 3)) == ERR_UNEXPECTED || parse_code_failure(valid_failure.substr(0, 3)) == ERR_TRUNCATED, "a cut FAILURE is refused");
+checks = check(checks, parse_code_failure(valid_failure.substr(0, 3)) == ERROR_UNEXPECTED || parse_code_failure(valid_failure.substr(0, 3)) == ERROR_TRUNCATED, "a cut FAILURE is refused");
 // A length field that names far more than the message holds.
-bytes huge = [sshauth.SSH_MSG_USERAUTH_FAILURE, 0xFF, 0xFF, 0xFF, 0xFF];
-checks = check(checks, parse_code_failure(huge) == ERR_TRUNCATED, "a name-list length of 4 GiB is Truncated, not a crash");
+bytes huge = [sshauth.SSH_MESSAGE_USERAUTH_FAILURE, 0xFF, 0xFF, 0xFF, 0xFF];
+checks = check(checks, parse_code_failure(huge) == ERROR_TRUNCATED, "a name-list length of 4 GiB is Truncated, not a crash");
 // The fields parse to what was sent.
 match (sshauth.parse_failure(valid_failure)) {
-    case Ok(sshauth.Failure f): {
-        checks = check(checks, f.methods.size() == 2 && f.methods[0] == "publickey" && f.methods[1] == "password" && f.partial_success, "FAILURE fields");
+    case Ok(sshauth.Failure parsed_failure): {
+        checks = check(checks, parsed_failure.methods.size() == 2 && parsed_failure.methods[0] == "publickey" && parsed_failure.methods[1] == "password" && parsed_failure.is_partial_success, "FAILURE fields");
     }
-    case Err(sshauth.Error e): {
-        trap("valid FAILURE: " + e.to_str());
+    case Err(sshauth.Error error): {
+        trap("valid FAILURE: " + error.to_str());
     }
 }
 match (sshauth.parse_failure(failure([], false))) {
-    case Ok(sshauth.Failure f): {
-        checks = check(checks, f.methods.size() == 0 && !f.partial_success, "an empty method list is an empty list");
+    case Ok(sshauth.Failure parsed_failure): {
+        checks = check(checks, parsed_failure.methods.size() == 0 && !parsed_failure.is_partial_success, "an empty method list is an empty list");
     }
-    case Err(sshauth.Error e): {
-        trap("empty FAILURE: " + e.to_str());
+    case Err(sshauth.Error error): {
+        trap("empty FAILURE: " + error.to_str());
     }
 }
 // Wrong message type for each parser.
-checks = check(checks, parse_code_failure(valid_banner) == ERR_UNEXPECTED, "parse_failure on a BANNER is UnexpectedMessage");
-checks = check(checks, parse_code_banner(valid_pk_ok) == ERR_UNEXPECTED, "parse_banner on a PK_OK is UnexpectedMessage");
-checks = check(checks, parse_code_pk_ok(valid_failure, blob) == ERR_UNEXPECTED, "parse_pk_ok on a FAILURE is UnexpectedMessage");
-checks = check(checks, parse_code_failure([]) == ERR_UNEXPECTED, "parse_failure on nothing is UnexpectedMessage");
+checks = check(checks, parse_code_failure(valid_banner) == ERROR_UNEXPECTED, "parse_failure on a BANNER is UnexpectedMessage");
+checks = check(checks, parse_code_banner(valid_pk_ok) == ERROR_UNEXPECTED, "parse_banner on a PK_OK is UnexpectedMessage");
+checks = check(checks, parse_code_pk_ok(valid_failure, blob) == ERROR_UNEXPECTED, "parse_pk_ok on a FAILURE is UnexpectedMessage");
+checks = check(checks, parse_code_failure([]) == ERROR_UNEXPECTED, "parse_failure on nothing is UnexpectedMessage");
 
 // --- 6. a wrong-key signature is a signature by the wrong key ----------------
 
-Script s4 = script([service_accept(), pk_ok(blob), failure(["publickey"], false)]);
-run_auth_as(s4, blob, other);
-bytes forged = s4.sent[2];
+Script forged_script = script([service_accept(), pk_ok(blob), failure(["publickey"], false)]);
+run_auth_as(forged_script, blob, other);
+bytes forged = forged_script.sent[2];
 ssh.Field g_user = must_string(forged, 1);
 ssh.Field g_service = must_string(forged, g_user.next);
 ssh.Field g_method = must_string(forged, g_service.next);
@@ -462,5 +462,5 @@ ssh.Field g_blob = must_string(forged, g_algo.next);
 ssh.Field g_sig = must_string(forged, g_blob.next);
 ssh.Field g_sig_algo = must_string(g_sig.value, 0);
 ssh.Field g_sig_raw = must_string(g_sig.value, g_sig_algo.next);
-checks = check(checks, !ed25519.verify(pubkey, sshauth.signature_data(sid_bytes(), "git", blob), g_sig_raw.value), "a signature made by a different key does not verify under the announced one");
+checks = check(checks, !ed25519.is_valid_signature(pubkey, sshauth.signature_data(sid_bytes(), "git", blob), g_sig_raw.value), "a signature made by a different key does not verify under the announced one");
 print(checks.to_str() + " checks, 0 failures");

@@ -127,20 +127,20 @@ void fail(str reason) {
     os.exit(1);
 }
 
-void get(tls.Conn conn, str host, str path) {
+void get(tls.Conn connection, str host, str path) {
     match (http.request("HEAD", "http://" + host + path)) {
         case Err(http.Error request_error): {
             fail("request");
         }
         case Ok(http.Request request): {
-            match (http.write_request(conn, request)) {
+            match (http.write_request(connection, request)) {
                 case Err(http.Error write_error): {
                     fail("write");
                 }
                 case Ok: {
                 }
             }
-            match (http.read_response(conn, "HEAD")) {
+            match (http.read_response(connection, "HEAD")) {
                 case Err(http.Error read_error): {
                     fail("read");
                 }
@@ -152,7 +152,7 @@ void get(tls.Conn conn, str host, str path) {
     }
 }
 
-List<str> arguments = os.args();
+List<str> arguments = os.arguments();
 if (arguments.size() < 6) {
     trap("t_chain_client: <mode> <host> <port> <system|ca file> <now|real> [argument]");
 }
@@ -190,12 +190,12 @@ match (tls.connect_at(host, port, trust, now)) {
     case Err(tls.Error connect_error): {
         fail(name_of(connect_error));
     }
-    case Ok(tls.Conn conn): {
+    case Ok(tls.Conn connection): {
         print("connected");
         if (mode == "get") {
-            get(conn, host, extra);
+            get(connection, host, extra);
         }
-        match (conn.close()) {
+        match (connection.close()) {
             case Ok(bool closed): {
                 print("closed");
             }

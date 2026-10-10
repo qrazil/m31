@@ -14,10 +14,10 @@ import crypto.sha256;
 import tls.tls13record;
 import tls.tls13schedule;
 
-// `n` octets of a deterministic pattern: `(i * multiplier + offset) & 0xFF`.
-bytes pattern(int n, int multiplier, int offset) {
+// `length` octets of a deterministic pattern: `(i * multiplier + offset) & 0xFF`.
+bytes pattern(int length, int multiplier, int offset) {
     bytes out = [];
-    for (int i in 0 .. n) {
+    for (int i in 0 .. length) {
         out.push((i * multiplier + offset) & 0xFF);
     }
     return out;
@@ -109,7 +109,7 @@ bytes seal_ok(tls13schedule.Suite suite, int sequence, int content_type, bytes c
     }
 }
 
-List<str> arguments = os.args();
+List<str> arguments = os.arguments();
 if (arguments.size() != 2) {
     trap("t_tls13_record: expected one argument: chacha, aes128 or aes256");
 }

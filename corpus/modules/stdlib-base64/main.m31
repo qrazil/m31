@@ -36,7 +36,7 @@ print(base64.encode("é".to_bytes()));
 print(base64.encode("日本語のテキスト".to_bytes()));
 // The two alphabets differ only in their last two digits.
 print(base64.encode("ÿþ?>".to_bytes()));
-print(base64.encode("ÿþ?>".to_bytes(), url: true));
+print(base64.encode("ÿþ?>".to_bytes(), is_url_safe: true));
 print(base64.encode("\0\0\0".to_bytes()));
 print(base64.encode("\n\t\r".to_bytes()));
 // Decoding reverses it, in either alphabet.
@@ -47,7 +47,7 @@ show(base64.decode("dXNlcjpwYXNz"));
 show(base64.decode("w6k="));
 show(base64.decode("5pel5pys6Kqe44Gu44OG44Kt44K544OI"));
 show(base64.decode("w7/Dvj8+"));
-show(base64.decode("w7_Dvj8-", url: true));
+show(base64.decode("w7_Dvj8-", is_url_safe: true));
 // A decoded NUL is an ordinary byte.
 match (base64.decode("AAAA")) {
     case Ok(bytes b): {
@@ -68,8 +68,8 @@ show(base64.decode("QQ="));
 show(base64.decode("QQ=A"));
 show(base64.decode("QUJ-"));
 show(base64.decode("QUJ_"));
-show(base64.decode("QUJ+", url: true));
-show(base64.decode("QUJ/", url: true));
+show(base64.decode("QUJ+", is_url_safe: true));
+show(base64.decode("QUJ/", is_url_safe: true));
 show(base64.decode("QU I="));
 show(base64.decode("QUJD\n"));
 show(base64.decode("QUJDé"));
@@ -85,7 +85,7 @@ show(base64.decode("Q=="));
 // 0x01, "/w==" is 0xFF, and "-_8=" in the URL alphabet is 0xFB 0xFF.
 show_hex(base64.decode("AQ=="));
 show_hex(base64.decode("QUJD/w=="));
-show_hex(base64.decode("-_8=", url: true));
+show_hex(base64.decode("-_8=", is_url_safe: true));
 // The error is a value a caller can branch on.
 match (base64.decode("QQ=")) {
     case Ok(bytes b): {
@@ -119,7 +119,7 @@ while (k <= mixed.size()) {
     bytes part = mixed.to_bytes().substr(0, k);
     List<bool> flags = [false, true];
     for (bool u in flags) {
-        match (base64.decode(base64.encode(part, url: u), url: u)) {
+        match (base64.decode(base64.encode(part, is_url_safe: u), is_url_safe: u)) {
             case Ok(bytes back): {
                 if (back == part) {
                     same = same + 1;
@@ -134,7 +134,7 @@ while (k <= mixed.size()) {
 }
 print(same);
 print(base64.encode(mixed.to_bytes()));
-print(base64.encode(mixed.to_bytes(), url: true));
+print(base64.encode(mixed.to_bytes(), is_url_safe: true));
 // Every single byte value, decoded from its own two-character spelling,
 // comes back as exactly that byte.
 str std = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -164,9 +164,9 @@ while (b < 256) {
 }
 List<bool> both = [false, true];
 for (bool u in both) {
-    str text = base64.encode(all, url: u);
+    str text = base64.encode(all, is_url_safe: u);
     print(text);
-    match (base64.decode(text, url: u)) {
+    match (base64.decode(text, is_url_safe: u)) {
         case Ok(bytes back): {
             print(back == all);
         }

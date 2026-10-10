@@ -13,10 +13,10 @@
 
 import os;
 import crypto.sha256;
-import tls13_hex;
+import TLS13_hex;
 import tls.tls13schedule;
 
-List<str> arguments = os.args();
+List<str> arguments = os.arguments();
 if (arguments.size() != 11) {
     trap("t_tls13_schedule: expected 10 hex arguments");
 }
@@ -47,7 +47,7 @@ void Printer.show_keys(tls13schedule.Suite suite, str name, bytes traffic_secret
     show(name + ".iv", tls13schedule.traffic_iv(suite, traffic_secret));
     tls13schedule.TrafficKeys both = tls13schedule.traffic_keys(suite, traffic_secret);
     show(name + ".pair_key", both.key);
-    show(name + ".pair_iv", both.iv);
+    show(name + ".pair_iv", both.initialization_vector);
 }
 
 void scenario(Trace trace, tls13schedule.Suite suite, str label) {
@@ -120,7 +120,7 @@ void scenario(Trace trace, tls13schedule.Suite suite, str label) {
     out.show("psk_client_early_traffic", tls13schedule.client_early_traffic_secret(suite, early_psk, psk_transcript.digest(suite)));
 }
 
-Trace trace = Trace(tls13_hex.decode(arguments[1]), tls13_hex.decode(arguments[2]), tls13_hex.decode(arguments[3]), tls13_hex.decode(arguments[4]), tls13_hex.decode(arguments[5]), tls13_hex.decode(arguments[6]), tls13_hex.decode(arguments[7]), tls13_hex.decode(arguments[8]), tls13_hex.decode(arguments[9]), tls13_hex.decode(arguments[10]));
+Trace trace = Trace(TLS13_hex.decode(arguments[1]), TLS13_hex.decode(arguments[2]), TLS13_hex.decode(arguments[3]), TLS13_hex.decode(arguments[4]), TLS13_hex.decode(arguments[5]), TLS13_hex.decode(arguments[6]), TLS13_hex.decode(arguments[7]), TLS13_hex.decode(arguments[8]), TLS13_hex.decode(arguments[9]), TLS13_hex.decode(arguments[10]));
 scenario(trace, tls13schedule.Suite.Aes128GcmSha256, "aes128");
 scenario(trace, tls13schedule.Suite.ChaCha20Poly1305Sha256, "chacha");
 scenario(trace, tls13schedule.Suite.Aes256GcmSha384, "aes256");

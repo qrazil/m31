@@ -47,20 +47,20 @@ pub enum Error {
 
 pub str Error.to_str() {
     match (this) {
-        case Key(sshkey.Error e): {
-            return "ssh key: " + e.to_str();
+        case Key(sshkey.Error error): {
+            return "ssh key: " + error.to_str();
         }
-        case KnownHosts(sshhosts.Error e): {
-            return "ssh known_hosts: " + e.to_str();
+        case KnownHosts(sshhosts.Error error): {
+            return "ssh known_hosts: " + error.to_str();
         }
-        case Connect(ssh.Error e): {
-            return "ssh connect: " + e.to_str();
+        case Connect(ssh.Error error): {
+            return "ssh connect: " + error.to_str();
         }
-        case Auth(sshauth.Error e): {
-            return "ssh authentication: " + e.to_str();
+        case Auth(sshauth.Error error): {
+            return "ssh authentication: " + error.to_str();
         }
-        case Exec(sshexec.Error e): {
-            return "ssh exec: " + e.to_str();
+        case Exec(sshexec.Error error): {
+            return "ssh exec: " + error.to_str();
         }
     }
 }
@@ -80,11 +80,11 @@ pub str Session.banner() {
 /// `ssh host command`).
 pub Result<sshexec.Channel, Error> Session.exec(str command) {
     match (sshexec.exec(transport, command)) {
-        case Ok(sshexec.Channel ch): {
-            return Result<sshexec.Channel, Error>.Ok(ch);
+        case Ok(sshexec.Channel channel): {
+            return Result<sshexec.Channel, Error>.Ok(channel);
         }
-        case Err(sshexec.Error e): {
-            return Result<sshexec.Channel, Error>.Err(Error.Exec(e));
+        case Err(sshexec.Error error): {
+            return Result<sshexec.Channel, Error>.Err(Error.Exec(error));
         }
     }
 }
@@ -95,8 +95,8 @@ pub Result<bool, Error> Session.close() {
         case Ok(bool done): {
             return Result<bool, Error>.Ok(done);
         }
-        case Err(ssh.Error e): {
-            return Result<bool, Error>.Err(Error.Connect(e));
+        case Err(ssh.Error error): {
+            return Result<bool, Error>.Err(Error.Connect(error));
         }
     }
 }
@@ -109,8 +109,8 @@ pub Result<Session, Error> connect(str host, int port, str user, str key_path, s
         case Ok(sshkey.PrivateKey key): {
             return connect_with(host, port, user, key, known_hosts_path);
         }
-        case Err(sshkey.Error e): {
-            return Result<Session, Error>.Err(Error.Key(e));
+        case Err(sshkey.Error error): {
+            return Result<Session, Error>.Err(Error.Key(error));
         }
     }
 }
@@ -123,31 +123,31 @@ pub Result<Session, Error> connect_with(str host, int port, str user, sshkey.Pri
                 case Ok(List<bytes> trusted): {
                     return open_session(host, port, user, key, trusted);
                 }
-                case Err(sshhosts.Error e): {
-                    return Result<Session, Error>.Err(Error.KnownHosts(e));
+                case Err(sshhosts.Error error): {
+                    return Result<Session, Error>.Err(Error.KnownHosts(error));
                 }
             }
         }
-        case Err(sshhosts.Error e): {
-            return Result<Session, Error>.Err(Error.KnownHosts(e));
+        case Err(sshhosts.Error error): {
+            return Result<Session, Error>.Err(Error.KnownHosts(error));
         }
     }
 }
 
 Result<Session, Error> open_session(str host, int port, str user, sshkey.PrivateKey key, List<bytes> trusted) {
     match (ssh.connect_any(host, port, trusted)) {
-        case Ok(ssh.Transport t): {
-            match (sshauth.authenticate(t, user, key)) {
+        case Ok(ssh.Transport transport): {
+            match (sshauth.authenticate(transport, user, key)) {
                 case Ok(str banner): {
-                    return Result<Session, Error>.Ok(Session(t, banner));
+                    return Result<Session, Error>.Ok(Session(transport, banner));
                 }
-                case Err(sshauth.Error e): {
-                    return Result<Session, Error>.Err(Error.Auth(e));
+                case Err(sshauth.Error error): {
+                    return Result<Session, Error>.Err(Error.Auth(error));
                 }
             }
         }
-        case Err(ssh.Error e): {
-            return Result<Session, Error>.Err(Error.Connect(e));
+        case Err(ssh.Error error): {
+            return Result<Session, Error>.Err(Error.Connect(error));
         }
     }
 }

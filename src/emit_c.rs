@@ -554,7 +554,7 @@ pub fn emit(m: &Module) -> String {
     // invariant is reported by atexit while a green thread is still live.
     //
     // argc/argv are handed to the runtime and nothing else: the program has
-    // no parameters, and `os.args()` asks the runtime for them.
+    // no parameters, and `os.arguments()` asks the runtime for them.
     writeln!(
         o,
         "int main(int argc, char **argv) {{

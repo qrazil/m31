@@ -22,15 +22,15 @@ import crypto.ed25519;
 import ssh;
 import ssh.sshkey;
 
-int check(int n, bool ok, str label) {
-    if (!ok) {
+int check(int passed_count, bool is_ok, str label) {
+    if (!is_ok) {
         trap("check failed: " + label);
     }
-    return n + 1;
+    return passed_count + 1;
 }
 
-int error_code(sshkey.Error e) {
-    match (e) {
+int error_code(sshkey.Error error) {
+    match (error) {
         case Io: {
             return 0;
         }
@@ -64,24 +64,24 @@ int error_code(sshkey.Error e) {
 // What a refusal looks like: -1 if the text parsed, else the error code.
 int refusal(str text) {
     match (sshkey.parse(text)) {
-        case Ok(sshkey.PrivateKey k): {
+        case Ok(_): {
             return -1;
         }
-        case Err(sshkey.Error e): {
-            return error_code(e);
+        case Err(sshkey.Error error): {
+            return error_code(error);
         }
     }
 }
 
-const int ERR_IO = 0;
-const int ERR_NOT_OPENSSH = 1;
-const int ERR_ENCRYPTED = 2;
-const int ERR_TRUNCATED = 3;
-const int ERR_KEY_TYPE = 4;
-const int ERR_KEY_COUNT = 5;
-const int ERR_CHECK = 6;
-const int ERR_KEY = 7;
-const int ERR_PADDING = 8;
+const int ERROR_IO = 0;
+const int ERROR_NOT_OPENSSH = 1;
+const int ERROR_ENCRYPTED = 2;
+const int ERROR_TRUNCATED = 3;
+const int ERROR_KEY_TYPE = 4;
+const int ERROR_KEY_COUNT = 5;
+const int ERROR_CHECK = 6;
+const int ERROR_KEY = 7;
+const int ERROR_PADDING = 8;
 
 // Every field of an `openssh-key-v1` file, so a fixture can change exactly
 // one of them.
@@ -106,10 +106,10 @@ type Spec {
 
 bytes seed_bytes() {
     bytes out = [];
-    int i = 0;
-    while (i < 32) {
-        out.push((i * 7 + 3) & 0xFF);
-        i = i + 1;
+    int index = 0;
+    while (index < 32) {
+        out.push((index * 7 + 3) & 0xFF);
+        index = index + 1;
     }
     return out;
 }
@@ -123,65 +123,65 @@ Spec valid_spec() {
     return Spec("none", "none", [], 1, "ssh-ed25519", public, 0x12345678, 0x12345678, "ssh-ed25519", public, secret, "fixture@m31".to_bytes(), 0, 0);
 }
 
-void push_u32(bytes out, int v) {
-    out.push(v >> 24 & 0xFF);
-    out.push(v >> 16 & 0xFF);
-    out.push(v >> 8 & 0xFF);
-    out.push(v & 0xFF);
+void push_u32(bytes out, int value) {
+    out.push(value >> 24 & 0xFF);
+    out.push(value >> 16 & 0xFF);
+    out.push(value >> 8 & 0xFF);
+    out.push(value & 0xFF);
 }
 
-bytes build_blob(Spec s) {
+bytes build_blob(Spec spec) {
     bytes sec = [];
-    push_u32(sec, s.check1);
-    push_u32(sec, s.check2);
-    ssh.push_string(sec, s.inner_type.to_bytes());
-    ssh.push_string(sec, s.inner_pub);
-    ssh.push_string(sec, s.secret);
-    ssh.push_string(sec, s.comment);
+    push_u32(sec, spec.check1);
+    push_u32(sec, spec.check2);
+    ssh.push_string(sec, spec.inner_type.to_bytes());
+    ssh.push_string(sec, spec.inner_pub);
+    ssh.push_string(sec, spec.secret);
+    ssh.push_string(sec, spec.comment);
     int pad = (8 - sec.size() % 8) % 8;
-    if (s.pad_mode == 1) {
-        int n = pad;
-        if (n == 0) {
-            n = 8;
+    if (spec.pad_mode == 1) {
+        int wrong_pad_count = pad;
+        if (wrong_pad_count == 0) {
+            wrong_pad_count = 8;
         }
-        int i = 0;
-        while (i < n) {
+        int pad_index = 0;
+        while (pad_index < wrong_pad_count) {
             sec.push(9);
-            i = i + 1;
+            pad_index = pad_index + 1;
         }
-    } else if (s.pad_mode == 2) {
-        int i = 1;
-        while (i <= pad + 8) {
-            sec.push(i);
-            i = i + 1;
+    } else if (spec.pad_mode == 2) {
+        int pad_byte = 1;
+        while (pad_byte <= pad + 8) {
+            sec.push(pad_byte);
+            pad_byte = pad_byte + 1;
         }
-    } else if (s.pad_mode == 3) {
+    } else if (spec.pad_mode == 3) {
         // no padding at all; only unaligned when the section needed some
         if (pad == 0) {
             sec.push(1);
         }
     } else {
-        int i = 1;
-        while (i <= pad) {
-            sec.push(i);
-            i = i + 1;
+        int pad_byte = 1;
+        while (pad_byte <= pad) {
+            sec.push(pad_byte);
+            pad_byte = pad_byte + 1;
         }
     }
     bytes outer = [];
-    ssh.push_string(outer, s.outer_type.to_bytes());
-    ssh.push_string(outer, s.outer_pub);
+    ssh.push_string(outer, spec.outer_type.to_bytes());
+    ssh.push_string(outer, spec.outer_pub);
     bytes out = "openssh-key-v1".to_bytes();
     out.push(0);
-    ssh.push_string(out, s.cipher.to_bytes());
-    ssh.push_string(out, s.kdf.to_bytes());
-    ssh.push_string(out, s.kdf_options);
-    push_u32(out, s.count);
+    ssh.push_string(out, spec.cipher.to_bytes());
+    ssh.push_string(out, spec.kdf.to_bytes());
+    ssh.push_string(out, spec.kdf_options);
+    push_u32(out, spec.count);
     ssh.push_string(out, outer);
     ssh.push_string(out, sec);
-    int t = 0;
-    while (t < s.trailing) {
+    int trailing_index = 0;
+    while (trailing_index < spec.trailing) {
         out.push(0);
-        t = t + 1;
+        trailing_index = trailing_index + 1;
     }
     return out;
 }
@@ -190,8 +190,8 @@ str armor(bytes blob) {
     return "-----BEGIN OPENSSH PRIVATE KEY-----\n" + base64.encode(blob) + "\n-----END OPENSSH PRIVATE KEY-----\n";
 }
 
-str spec_text(Spec s) {
-    return armor(build_blob(s));
+str spec_text(Spec spec) {
+    return armor(build_blob(spec));
 }
 
 int checks = 0;
@@ -202,43 +202,43 @@ Spec good = valid_spec();
 bytes good_seed = seed_bytes();
 bytes good_pub = ed25519.public_key(good_seed);
 match (sshkey.parse(spec_text(good))) {
-    case Ok(sshkey.PrivateKey k): {
-        checks = check(checks, k.public_key() == good_pub, "the parsed key has the seed's public key");
-        checks = check(checks, k.comment == "fixture@m31", "the comment is parsed");
+    case Ok(sshkey.PrivateKey private_key): {
+        checks = check(checks, private_key.public_key() == good_pub, "the parsed key has the seed's public key");
+        checks = check(checks, private_key.comment == "fixture@m31", "the comment is parsed");
         bytes expect_blob = [];
         ssh.push_string(expect_blob, "ssh-ed25519".to_bytes());
         ssh.push_string(expect_blob, good_pub);
-        checks = check(checks, k.public_blob() == expect_blob, "public_blob is string type || string key");
-        bytes msg = "message to sign".to_bytes();
-        bytes sig = k.sign(msg);
-        checks = check(checks, sig == ed25519.sign(good_seed, msg), "sign agrees with ed25519.sign on the seed");
-        checks = check(checks, ed25519.verify(good_pub, msg, sig), "the signature verifies under the public key");
-        bytes sig_blob = k.signature_blob(msg);
+        checks = check(checks, private_key.public_blob() == expect_blob, "public_blob is string type || string key");
+        bytes message = "message to sign".to_bytes();
+        bytes sig = private_key.sign(message);
+        checks = check(checks, sig == ed25519.sign(good_seed, message), "sign agrees with ed25519.sign on the seed");
+        checks = check(checks, ed25519.is_valid_signature(good_pub, message, sig), "the signature verifies under the public key");
+        bytes sig_blob = private_key.signature_blob(message);
         bytes expect_sig_blob = [];
         ssh.push_string(expect_sig_blob, "ssh-ed25519".to_bytes());
         ssh.push_string(expect_sig_blob, sig);
         checks = check(checks, sig_blob == expect_sig_blob, "signature_blob is string type || string sig");
         // The public key a caller gets is a copy: changing it changes nothing.
-        bytes copy = k.public_key();
+        bytes copy = private_key.public_key();
         copy[0] = copy[0] ^ 0xFF;
-        checks = check(checks, k.public_key() == good_pub, "public_key returns a copy");
+        checks = check(checks, private_key.public_key() == good_pub, "public_key returns a copy");
     }
-    case Err(sshkey.Error e): {
-        trap("the built fixture did not parse: " + e.to_str());
+    case Err(sshkey.Error error): {
+        trap("the built fixture did not parse: " + error.to_str());
     }
 }
 // A file with CRLF line ends and a 70-column wrapped
 // body (what ssh-keygen writes) parses the same.
 str one_line = base64.encode(build_blob(good));
 str wrapped = "";
-int w = 0;
-while (w < one_line.size()) {
-    int e = w + 70;
-    if (e > one_line.size()) {
-        e = one_line.size();
+int offset = 0;
+while (offset < one_line.size()) {
+    int chunk_end = offset + 70;
+    if (chunk_end > one_line.size()) {
+        chunk_end = one_line.size();
     }
-    wrapped = wrapped + one_line.substr(w, e) + "\r\n";
-    w = e;
+    wrapped = wrapped + one_line.substr(offset, chunk_end) + "\r\n";
+    offset = chunk_end;
 }
 checks = check(checks, refusal("-----BEGIN OPENSSH PRIVATE KEY-----\r\n" + wrapped + "-----END OPENSSH PRIVATE KEY-----\r\n") == -1, "a wrapped CRLF file parses");
 
@@ -246,24 +246,24 @@ checks = check(checks, refusal("-----BEGIN OPENSSH PRIVATE KEY-----\r\n" + wrapp
 
 // Io
 match (sshkey.load("/nonexistent/dir/no_such_key")) {
-    case Ok(sshkey.PrivateKey k): {
+    case Ok(_): {
         trap("a missing file loaded");
     }
-    case Err(sshkey.Error e): {
-        checks = check(checks, error_code(e) == ERR_IO, "a missing file is Error.Io");
+    case Err(sshkey.Error error): {
+        checks = check(checks, error_code(error) == ERROR_IO, "a missing file is Error.Io");
     }
 }
 // NotOpenSshKey
-checks = check(checks, refusal("") == ERR_NOT_OPENSSH, "an empty file is NotOpenSshKey");
-checks = check(checks, refusal("hello\n") == ERR_NOT_OPENSSH, "text without armor is NotOpenSshKey");
-checks = check(checks, refusal("-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n") == ERR_NOT_OPENSSH, "a PEM RSA key is NotOpenSshKey");
-checks = check(checks, refusal("-----BEGIN OPENSSH PRIVATE KEY-----\n" + one_line + "\n") == ERR_NOT_OPENSSH, "no END line is NotOpenSshKey");
-checks = check(checks, refusal(spec_text(good) + "junk\n") == ERR_NOT_OPENSSH, "text after the END line is NotOpenSshKey");
-checks = check(checks, refusal("-----BEGIN OPENSSH PRIVATE KEY-----\n!!!notbase64!!!\n-----END OPENSSH PRIVATE KEY-----\n") == ERR_NOT_OPENSSH, "a body that is not base64 is NotOpenSshKey");
+checks = check(checks, refusal("") == ERROR_NOT_OPENSSH, "an empty file is NotOpenSshKey");
+checks = check(checks, refusal("hello\n") == ERROR_NOT_OPENSSH, "text without armor is NotOpenSshKey");
+checks = check(checks, refusal("-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n") == ERROR_NOT_OPENSSH, "a PEM RSA key is NotOpenSshKey");
+checks = check(checks, refusal("-----BEGIN OPENSSH PRIVATE KEY-----\n" + one_line + "\n") == ERROR_NOT_OPENSSH, "no END line is NotOpenSshKey");
+checks = check(checks, refusal(spec_text(good) + "junk\n") == ERROR_NOT_OPENSSH, "text after the END line is NotOpenSshKey");
+checks = check(checks, refusal("-----BEGIN OPENSSH PRIVATE KEY-----\n!!!notbase64!!!\n-----END OPENSSH PRIVATE KEY-----\n") == ERROR_NOT_OPENSSH, "a body that is not base64 is NotOpenSshKey");
 bytes bad_magic = build_blob(good);
 bad_magic[0] = bad_magic[0] ^ 1;
-checks = check(checks, refusal(armor(bad_magic)) == ERR_NOT_OPENSSH, "a wrong magic is NotOpenSshKey");
-checks = check(checks, refusal(armor([1, 2, 3])) == ERR_NOT_OPENSSH, "a body shorter than the magic is NotOpenSshKey");
+checks = check(checks, refusal(armor(bad_magic)) == ERROR_NOT_OPENSSH, "a wrong magic is NotOpenSshKey");
+checks = check(checks, refusal(armor([1, 2, 3])) == ERROR_NOT_OPENSSH, "a body shorter than the magic is NotOpenSshKey");
 // Encrypted -- refused whatever else is in the file, and before the private
 // section is read (here it is garbage that would otherwise be BadCheck).
 Spec enc = valid_spec();
@@ -271,22 +271,22 @@ enc.cipher = "aes256-ctr";
 enc.kdf = "bcrypt";
 enc.kdf_options = [0, 0, 0, 16, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 0, 0, 0, 16];
 enc.check2 = 99;
-checks = check(checks, refusal(spec_text(enc)) == ERR_ENCRYPTED, "an encrypted key is Error.Encrypted");
+checks = check(checks, refusal(spec_text(enc)) == ERROR_ENCRYPTED, "an encrypted key is Error.Encrypted");
 Spec enc_kdf = valid_spec();
 enc_kdf.kdf = "bcrypt";
-checks = check(checks, refusal(spec_text(enc_kdf)) == ERR_ENCRYPTED, "a kdf other than none is Error.Encrypted");
+checks = check(checks, refusal(spec_text(enc_kdf)) == ERROR_ENCRYPTED, "a kdf other than none is Error.Encrypted");
 Spec enc_cipher = valid_spec();
 enc_cipher.cipher = "aes128-cbc";
-checks = check(checks, refusal(spec_text(enc_cipher)) == ERR_ENCRYPTED, "a cipher other than none is Error.Encrypted");
+checks = check(checks, refusal(spec_text(enc_cipher)) == ERROR_ENCRYPTED, "a cipher other than none is Error.Encrypted");
 // Truncated -- a cut inside the private section, and every proper prefix.
 bytes full = build_blob(good);
-checks = check(checks, refusal(armor(full.substr(0, 30))) == ERR_TRUNCATED, "a file cut inside the header is Truncated");
-checks = check(checks, refusal(armor(full.substr(0, 60))) == ERR_TRUNCATED, "a file cut inside the public key is Truncated");
-checks = check(checks, refusal(armor(full.substr(0, full.size() - 3))) == ERR_TRUNCATED, "a file cut inside the private section is Truncated");
+checks = check(checks, refusal(armor(full.substr(0, 30))) == ERROR_TRUNCATED, "a file cut inside the header is Truncated");
+checks = check(checks, refusal(armor(full.substr(0, 60))) == ERROR_TRUNCATED, "a file cut inside the public key is Truncated");
+checks = check(checks, refusal(armor(full.substr(0, full.size() - 3))) == ERROR_TRUNCATED, "a file cut inside the private section is Truncated");
 int cut = 15;
 while (cut < full.size()) {
-    int r = refusal(armor(full.substr(0, cut)));
-    if (r == -1) {
+    int refusal_code = refusal(armor(full.substr(0, cut)));
+    if (refusal_code == -1) {
         trap("a " + cut.to_str() + "-byte prefix of the key parsed");
     }
     cut = cut + 1;
@@ -295,73 +295,73 @@ checks = check(checks, true, "no proper prefix of the key file parses");
 // UnsupportedKeyType
 Spec rsa_outer = valid_spec();
 rsa_outer.outer_type = "ssh-rsa";
-checks = check(checks, refusal(spec_text(rsa_outer)) == ERR_KEY_TYPE, "an outer key type other than ed25519 is UnsupportedKeyType");
+checks = check(checks, refusal(spec_text(rsa_outer)) == ERROR_KEY_TYPE, "an outer key type other than ed25519 is UnsupportedKeyType");
 Spec rsa_inner = valid_spec();
 rsa_inner.inner_type = "ssh-rsa";
-checks = check(checks, refusal(spec_text(rsa_inner)) == ERR_KEY_TYPE, "an inner key type other than ed25519 is UnsupportedKeyType");
+checks = check(checks, refusal(spec_text(rsa_inner)) == ERROR_KEY_TYPE, "an inner key type other than ed25519 is UnsupportedKeyType");
 // UnsupportedKeyCount
 Spec two = valid_spec();
 two.count = 2;
-checks = check(checks, refusal(spec_text(two)) == ERR_KEY_COUNT, "two keys is UnsupportedKeyCount");
+checks = check(checks, refusal(spec_text(two)) == ERROR_KEY_COUNT, "two keys is UnsupportedKeyCount");
 Spec none = valid_spec();
 none.count = 0;
-checks = check(checks, refusal(spec_text(none)) == ERR_KEY_COUNT, "zero keys is UnsupportedKeyCount");
+checks = check(checks, refusal(spec_text(none)) == ERROR_KEY_COUNT, "zero keys is UnsupportedKeyCount");
 // BadCheck
 Spec check_bad = valid_spec();
 check_bad.check2 = check_bad.check1 + 1;
-checks = check(checks, refusal(spec_text(check_bad)) == ERR_CHECK, "unequal check words are BadCheck");
+checks = check(checks, refusal(spec_text(check_bad)) == ERROR_CHECK, "unequal check words are BadCheck");
 // BadKey
 Spec short_pub = valid_spec();
 short_pub.inner_pub = good_pub.substr(0, 31);
-checks = check(checks, refusal(spec_text(short_pub)) == ERR_KEY, "a 31-byte inner public key is BadKey");
+checks = check(checks, refusal(spec_text(short_pub)) == ERROR_KEY, "a 31-byte inner public key is BadKey");
 Spec short_secret = valid_spec();
 short_secret.secret = short_secret.secret.substr(0, 63);
-checks = check(checks, refusal(spec_text(short_secret)) == ERR_KEY, "a 63-byte secret is BadKey");
+checks = check(checks, refusal(spec_text(short_secret)) == ERROR_KEY, "a 63-byte secret is BadKey");
 Spec tail_wrong = valid_spec();
 bytes tail_secret = clone(tail_wrong.secret);
 tail_secret[40] = tail_secret[40] ^ 1;
 tail_wrong.secret = tail_secret;
-checks = check(checks, refusal(spec_text(tail_wrong)) == ERR_KEY, "a secret whose second half is not the public key is BadKey");
+checks = check(checks, refusal(spec_text(tail_wrong)) == ERROR_KEY, "a secret whose second half is not the public key is BadKey");
 Spec outer_wrong = valid_spec();
 bytes outer_bytes = clone(good_pub);
 outer_bytes[0] = outer_bytes[0] ^ 1;
 outer_wrong.outer_pub = outer_bytes;
-checks = check(checks, refusal(spec_text(outer_wrong)) == ERR_KEY, "an outer public key that differs from the inner one is BadKey");
+checks = check(checks, refusal(spec_text(outer_wrong)) == ERROR_KEY, "an outer public key that differs from the inner one is BadKey");
 Spec outer_short = valid_spec();
 outer_short.outer_pub = good_pub.substr(0, 16);
-checks = check(checks, refusal(spec_text(outer_short)) == ERR_KEY, "a short outer public key is BadKey");
+checks = check(checks, refusal(spec_text(outer_short)) == ERROR_KEY, "a short outer public key is BadKey");
 Spec seed_wrong = valid_spec();
 bytes seed_secret = clone(seed_wrong.secret);
 seed_secret[0] = seed_secret[0] ^ 1;
 seed_wrong.secret = seed_secret;
-checks = check(checks, refusal(spec_text(seed_wrong)) == ERR_KEY, "a seed that does not generate the public key is BadKey");
+checks = check(checks, refusal(spec_text(seed_wrong)) == ERROR_KEY, "a seed that does not generate the public key is BadKey");
 Spec opts = valid_spec();
 opts.kdf_options = [1];
-checks = check(checks, refusal(spec_text(opts)) == ERR_KEY, "kdf options with cipher none are BadKey");
+checks = check(checks, refusal(spec_text(opts)) == ERROR_KEY, "kdf options with cipher none are BadKey");
 Spec trail = valid_spec();
 trail.trailing = 1;
-checks = check(checks, refusal(spec_text(trail)) == ERR_KEY, "bytes after the private section are BadKey");
+checks = check(checks, refusal(spec_text(trail)) == ERROR_KEY, "bytes after the private section are BadKey");
 // BadPadding
 Spec pad_seq = valid_spec();
 pad_seq.pad_mode = 1;
-checks = check(checks, refusal(spec_text(pad_seq)) == ERR_PADDING, "padding that is not 1,2,3.. is BadPadding");
+checks = check(checks, refusal(spec_text(pad_seq)) == ERROR_PADDING, "padding that is not 1,2,3.. is BadPadding");
 Spec pad_long = valid_spec();
 pad_long.pad_mode = 2;
-checks = check(checks, refusal(spec_text(pad_long)) == ERR_PADDING, "a whole block of padding is BadPadding");
+checks = check(checks, refusal(spec_text(pad_long)) == ERROR_PADDING, "a whole block of padding is BadPadding");
 Spec pad_none = valid_spec();
 pad_none.pad_mode = 3;
-checks = check(checks, refusal(spec_text(pad_none)) == ERR_PADDING, "a section that is not a multiple of 8 is BadPadding");
+checks = check(checks, refusal(spec_text(pad_none)) == ERROR_PADDING, "a section that is not a multiple of 8 is BadPadding");
 
 // --- 3. no key material in the error text ------------------------------------
 
 Spec leak = valid_spec();
 leak.check2 = 7;
 match (sshkey.parse(spec_text(leak))) {
-    case Ok(sshkey.PrivateKey k): {
+    case Ok(_): {
         trap("expected a refusal");
     }
-    case Err(sshkey.Error e): {
-        str text = e.to_str();
+    case Err(sshkey.Error error): {
+        str text = error.to_str();
         checks = check(checks, !text.contains(good_pub.hex()) && !text.contains(good_seed.hex()), "an error message carries no key bytes");
     }
 }
@@ -369,32 +369,32 @@ print(checks.to_str() + " checks, 0 failures");
 
 // --- 4. real ssh-keygen keys (arguments) --------------------------------------
 
-List<str> arguments = os.args();
+List<str> arguments = os.arguments();
 if (arguments.size() >= 2) {
     match (sshkey.load(arguments[1])) {
-        case Ok(sshkey.PrivateKey k): {
+        case Ok(_): {
             trap("an encrypted key loaded");
         }
-        case Err(sshkey.Error e): {
-            if (error_code(e) != ERR_ENCRYPTED) {
-                trap("an encrypted key was refused with the wrong error: " + e.to_str());
+        case Err(sshkey.Error error): {
+            if (error_code(error) != ERROR_ENCRYPTED) {
+                trap("an encrypted key was refused with the wrong error: " + error.to_str());
             }
-            print("encrypted refused: " + e.to_str());
+            print("encrypted refused: " + error.to_str());
         }
     }
-    int a = 2;
-    while (a < arguments.size()) {
-        match (sshkey.load(arguments[a])) {
-            case Ok(sshkey.PrivateKey k): {
-                print("key " + (a - 2).to_str());
-                print("pub " + k.public_key().hex());
-                print("comment " + k.comment);
-                print("sig " + k.sign("oracle message".to_bytes()).hex());
+    int key_index = 2;
+    while (key_index < arguments.size()) {
+        match (sshkey.load(arguments[key_index])) {
+            case Ok(sshkey.PrivateKey private_key): {
+                print("key " + (key_index - 2).to_str());
+                print("pub " + private_key.public_key().hex());
+                print("comment " + private_key.comment);
+                print("sig " + private_key.sign("oracle message".to_bytes()).hex());
             }
-            case Err(sshkey.Error e): {
-                trap("a real key did not load: " + e.to_str());
+            case Err(sshkey.Error error): {
+                trap("a real key did not load: " + error.to_str());
             }
         }
-        a = a + 1;
+        key_index = key_index + 1;
     }
 }

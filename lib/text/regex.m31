@@ -116,27 +116,27 @@ enum Inst {
 // A character class: the union of `[lo[i], hi[i]]`, inclusive, for every i,
 // negated as a whole if `negate`.
 type ClassDef {
-    List<int> lo;
-    List<int> hi;
-    bool negate = false;
+    List<int> low;
+    List<int> high;
+    bool is_negated = false;
 }
 
-bool class_contains(List<ClassDef> classes, int idx, int c) {
-    ClassDef cd = classes[idx];
-    bool found = false;
-    int i = 0;
-    int n = cd.lo.size();
-    while (i < n) {
-        if (c >= cd.lo[i] && c <= cd.hi[i]) {
-            found = true;
+bool is_in_class(List<ClassDef> classes, int class_index, int code_point) {
+    ClassDef class_def = classes[class_index];
+    bool is_found = false;
+    int range_index = 0;
+    int range_count = class_def.low.size();
+    while (range_index < range_count) {
+        if (code_point >= class_def.low[range_index] && code_point <= class_def.high[range_index]) {
+            is_found = true;
             break;
         }
-        i = i + 1;
+        range_index = range_index + 1;
     }
-    if (cd.negate) {
-        return !found;
+    if (class_def.is_negated) {
+        return !is_found;
     }
-    return found;
+    return is_found;
 }
 
 // --- fragments: a self-contained piece of program, addressed from 0 ----------
@@ -151,36 +151,36 @@ type Frag {
     List<Inst> code;
 }
 
-void frag_append(Frag a, Frag b) {
-    int base = a.code.size();
-    for (Inst i in b.code) {
-        match (i) {
-            case Char(int c): {
-                a.code.push(Inst.Char(c));
+void frag_append(Frag destination, Frag source) {
+    int base = destination.code.size();
+    for (Inst instruction in source.code) {
+        match (instruction) {
+            case Char(int code_point): {
+                destination.code.push(Inst.Char(code_point));
             }
             case Any: {
-                a.code.push(Inst.Any);
+                destination.code.push(Inst.Any);
             }
-            case Class(int c): {
-                a.code.push(Inst.Class(c));
+            case Class(int class_index): {
+                destination.code.push(Inst.Class(class_index));
             }
             case Bol: {
-                a.code.push(Inst.Bol);
+                destination.code.push(Inst.Bol);
             }
             case Eol: {
-                a.code.push(Inst.Eol);
+                destination.code.push(Inst.Eol);
             }
-            case Save(int s): {
-                a.code.push(Inst.Save(s));
+            case Save(int slot): {
+                destination.code.push(Inst.Save(slot));
             }
-            case Jmp(int t): {
-                a.code.push(Inst.Jmp(t + base));
+            case Jmp(int target): {
+                destination.code.push(Inst.Jmp(target + base));
             }
             case Split(int x, int y): {
-                a.code.push(Inst.Split(x + base, y + base));
+                destination.code.push(Inst.Split(x + base, y + base));
             }
             case Match: {
-                a.code.push(Inst.Match);
+                destination.code.push(Inst.Match);
             }
         }
     }
@@ -223,26 +223,26 @@ Frag quest(Frag atom) {
     return out;
 }
 
-// `atom{m,n}` (`n < 0` means unbounded, `atom{m,}`): `m` mandatory copies,
+// `atom{m,n}` (`n < 0` means unbounded, `atom{m,}`): `minimum` mandatory copies,
 // then either `n - m` independently-optional copies or, if unbounded, a
 // `*` -- RE2's own translation (docs/regex-decision.md §3). `atom` is only
-// ever read here, never mutated, so appending it `m` (or more) times is
+// ever read here, never mutated, so appending it `minimum` (or more) times is
 // safe: each `frag_append` or `quest`/`star` call makes an independent copy
 // of its instructions.
-Frag repeat(Frag atom, int m, int n) {
+Frag repeat(Frag atom, int minimum, int maximum) {
     Frag out = Frag([]);
-    int i = 0;
-    while (i < m) {
+    int copy_index = 0;
+    while (copy_index < minimum) {
         frag_append(out, atom);
-        i = i + 1;
+        copy_index = copy_index + 1;
     }
-    if (n < 0) {
+    if (maximum < 0) {
         frag_append(out, star(atom));
     } else {
-        int j = m;
-        while (j < n) {
+        int optional_index = minimum;
+        while (optional_index < maximum) {
             frag_append(out, quest(atom));
-            j = j + 1;
+            optional_index = optional_index + 1;
         }
     }
     return out;
@@ -250,57 +250,57 @@ Frag repeat(Frag atom, int m, int n) {
 
 // --- escapes, shared between bare patterns and inside a class ----------------
 
-// `\n`, `\t`, `\r`, or `e` itself if `e` is punctuation (anything that is
+// `\n`, `\t`, `\r`, or `escape` itself if `escape` is punctuation (anything that is
 // not a letter or digit may always be escaped to mean itself: `\.` `\*`
 // `\\` and so on). A letter or digit that names none of the above
 // (`\q`, `\9`) is refused rather than silently meaning the bare letter --
 // a typo in a pattern should not compile into a different pattern.
-Result<int, CompileError> escape_literal(int e) {
-    if (e == 'n') {
+Result<int, CompileError> escape_literal(int escape) {
+    if (escape == 'n') {
         return Result<int, CompileError>.Ok(10);
     }
-    if (e == 't') {
+    if (escape == 't') {
         return Result<int, CompileError>.Ok(9);
     }
-    if (e == 'r') {
+    if (escape == 'r') {
         return Result<int, CompileError>.Ok(13);
     }
-    bool is_alnum = (e >= 'a' && e <= 'z') || (e >= 'A' && e <= 'Z') || (e >= '0' && e <= '9');
+    bool is_alnum = (escape >= 'a' && escape <= 'z') || (escape >= 'A' && escape <= 'Z') || (escape >= '0' && escape <= '9');
     if (is_alnum) {
         return Result<int, CompileError>.Err(CompileError.BadEscape);
     }
-    return Result<int, CompileError>.Ok(e);
+    return Result<int, CompileError>.Ok(escape);
 }
 
 // `\w`'s ranges: ASCII letters, digits, underscore.
-void word_ranges(ClassDef cd) {
-    cd.lo.push('a');
-    cd.hi.push('z');
-    cd.lo.push('A');
-    cd.hi.push('Z');
-    cd.lo.push('0');
-    cd.hi.push('9');
-    cd.lo.push('_');
-    cd.hi.push('_');
+void word_ranges(ClassDef class_def) {
+    class_def.low.push('a');
+    class_def.high.push('z');
+    class_def.low.push('A');
+    class_def.high.push('Z');
+    class_def.low.push('0');
+    class_def.high.push('9');
+    class_def.low.push('_');
+    class_def.high.push('_');
 }
 
 // `\s`'s ranges: the same six ASCII bytes `lib/text.m31`'s `is_space`
 // treats as space -- space, tab, \n, \r, \f, \v -- reused rather than
 // redefined, so the two modules can never disagree about what whitespace is
 // (docs/text-decision.md's consistency argument for `trim`).
-void space_ranges(ClassDef cd) {
-    cd.lo.push(32);
-    cd.hi.push(32);
-    cd.lo.push(9);
-    cd.hi.push(9);
-    cd.lo.push(10);
-    cd.hi.push(10);
-    cd.lo.push(13);
-    cd.hi.push(13);
-    cd.lo.push(12);
-    cd.hi.push(12);
-    cd.lo.push(11);
-    cd.hi.push(11);
+void space_ranges(ClassDef class_def) {
+    class_def.low.push(32);
+    class_def.high.push(32);
+    class_def.low.push(9);
+    class_def.high.push(9);
+    class_def.low.push(10);
+    class_def.high.push(10);
+    class_def.low.push(13);
+    class_def.high.push(13);
+    class_def.low.push(12);
+    class_def.high.push(12);
+    class_def.low.push(11);
+    class_def.high.push(11);
 }
 
 // The largest bound a `{m,n}` may name. A guard on `compile`'s own memory
@@ -316,51 +316,51 @@ const int MAX_REPEAT = 1000;
 // bound)?`, `atom = literal | '.' | class | '^' | '$' | '(' alt ')' |
 // escape`.
 type Parser {
-    List<int> pat;
-    int pos = 0;
+    List<int> pattern;
+    int position = 0;
     int ngroups = 0;
     List<ClassDef> classes = [];
 }
 
-bool Parser.eof() {
-    return pos >= pat.size();
+bool Parser.is_at_end() {
+    return position >= pattern.size();
 }
 
 int Parser.peek() {
-    return pat[pos];
+    return pattern[position];
 }
 
 int Parser.next() {
-    int c = pat[pos];
-    pos = pos + 1;
-    return c;
+    int code_point = pattern[position];
+    position = position + 1;
+    return code_point;
 }
 
 // One or more ASCII digits, or `None` if there are none at all -- `{`'s
 // bound needs to tell "no number here" from "the number 0".
 Option<int> Parser.parse_digits() {
-    int start = pos;
-    int v = 0;
-    while (!eof() && peek() >= '0' && peek() <= '9') {
+    int start = position;
+    int number = 0;
+    while (!is_at_end() && peek() >= '0' && peek() <= '9') {
         // Clamped rather than left to overflow: a pattern spelling a huge
         // bound is refused by the MAX_REPEAT check right after this runs,
         // and int overflow traps, which `{99999999999999999999}` would hit
         // first and for the wrong reason.
-        if (v < MAX_REPEAT + 1) {
-            v = v * 10 + (next() - '0');
+        if (number < MAX_REPEAT + 1) {
+            number = number * 10 + (next() - '0');
         } else {
             next();
         }
     }
-    if (pos == start) {
+    if (position == start) {
         return Option<int>.None;
     }
-    return Option<int>.Some(v);
+    return Option<int>.Some(number);
 }
 
 Result<Frag, CompileError> Parser.parse_alt() {
     Frag first = parse_concat()?;
-    if (eof() || peek() != '|') {
+    if (is_at_end() || peek() != '|') {
         return Result<Frag, CompileError>.Ok(first);
     }
     next();
@@ -385,7 +385,7 @@ Result<Frag, CompileError> Parser.parse_alt() {
 
 Result<Frag, CompileError> Parser.parse_concat() {
     Frag out = Frag([]);
-    while (!eof() && peek() != '|' && peek() != ')') {
+    while (!is_at_end() && peek() != '|' && peek() != ')') {
         Frag part = parse_repeat()?;
         frag_append(out, part);
     }
@@ -394,38 +394,38 @@ Result<Frag, CompileError> Parser.parse_concat() {
 
 Result<Frag, CompileError> Parser.parse_repeat() {
     Frag atom = parse_atom()?;
-    if (eof()) {
+    if (is_at_end()) {
         return Result<Frag, CompileError>.Ok(atom);
     }
-    int c = peek();
+    int code_point = peek();
     Frag result = atom;
-    bool quantified = false;
-    if (c == '*') {
+    bool is_quantified = false;
+    if (code_point == '*') {
         next();
         result = star(atom);
-        quantified = true;
-    } else if (c == '+') {
+        is_quantified = true;
+    } else if (code_point == '+') {
         next();
         result = plus(atom);
-        quantified = true;
-    } else if (c == '?') {
+        is_quantified = true;
+    } else if (code_point == '?') {
         next();
         result = quest(atom);
-        quantified = true;
-    } else if (c == '{') {
+        is_quantified = true;
+    } else if (code_point == '{') {
         match (parse_bound(atom)) {
-            case Ok(Frag f): {
-                result = f;
-                quantified = true;
+            case Ok(Frag bounded): {
+                result = bounded;
+                is_quantified = true;
             }
-            case Err(CompileError e): {
-                return Result<Frag, CompileError>.Err(e);
+            case Err(CompileError error): {
+                return Result<Frag, CompileError>.Err(error);
             }
         }
     }
-    if (quantified && !eof()) {
-        int c2 = peek();
-        if (c2 == '*' || c2 == '+' || c2 == '?' || c2 == '{') {
+    if (is_quantified && !is_at_end()) {
+        int following = peek();
+        if (following == '*' || following == '+' || following == '?' || following == '{') {
             return Result<Frag, CompileError>.Err(CompileError.DanglingQuantifier);
         }
     }
@@ -438,26 +438,26 @@ Result<Frag, CompileError> Parser.parse_bound(Frag atom) {
     next();
     int mval = 0;
     match (parse_digits()) {
-        case Some(int v): {
-            mval = v;
+        case Some(int lower_bound): {
+            mval = lower_bound;
         }
         case None: {
             return Result<Frag, CompileError>.Err(CompileError.BadRepeat);
         }
     }
     int nval = mval;
-    if (!eof() && peek() == ',') {
+    if (!is_at_end() && peek() == ',') {
         next();
         match (parse_digits()) {
-            case Some(int v): {
-                nval = v;
+            case Some(int upper_bound): {
+                nval = upper_bound;
             }
             case None: {
                 nval = -1;
             }
         }
     }
-    if (eof() || peek() != '}') {
+    if (is_at_end() || peek() != '}') {
         return Result<Frag, CompileError>.Err(CompileError.BadRepeat);
     }
     next();
@@ -471,55 +471,55 @@ Result<Frag, CompileError> Parser.parse_bound(Frag atom) {
 }
 
 Result<Frag, CompileError> Parser.parse_atom() {
-    int c = peek();
-    if (c == '*' || c == '+' || c == '?' || c == '{') {
+    int code_point = peek();
+    if (code_point == '*' || code_point == '+' || code_point == '?' || code_point == '{') {
         return Result<Frag, CompileError>.Err(CompileError.DanglingQuantifier);
     }
-    if (c == '(') {
+    if (code_point == '(') {
         next();
         ngroups = ngroups + 1;
-        int gn = ngroups;
+        int group_number = ngroups;
         Frag inner = parse_alt()?;
-        if (eof() || peek() != ')') {
+        if (is_at_end() || peek() != ')') {
             return Result<Frag, CompileError>.Err(CompileError.UnbalancedParen);
         }
         next();
         Frag out = Frag([]);
-        out.code.push(Inst.Save(2 * gn));
+        out.code.push(Inst.Save(2 * group_number));
         frag_append(out, inner);
-        out.code.push(Inst.Save(2 * gn + 1));
+        out.code.push(Inst.Save(2 * group_number + 1));
         return Result<Frag, CompileError>.Ok(out);
     }
-    if (c == ')') {
+    if (code_point == ')') {
         return Result<Frag, CompileError>.Err(CompileError.UnbalancedParen);
     }
-    if (c == '.') {
+    if (code_point == '.') {
         next();
         Frag out = Frag([]);
         out.code.push(Inst.Any);
         return Result<Frag, CompileError>.Ok(out);
     }
-    if (c == '^') {
+    if (code_point == '^') {
         next();
         Frag out = Frag([]);
         out.code.push(Inst.Bol);
         return Result<Frag, CompileError>.Ok(out);
     }
-    if (c == '$') {
+    if (code_point == '$') {
         next();
         Frag out = Frag([]);
         out.code.push(Inst.Eol);
         return Result<Frag, CompileError>.Ok(out);
     }
-    if (c == '[') {
+    if (code_point == '[') {
         return parse_class();
     }
-    if (c == '\\') {
+    if (code_point == '\\') {
         return parse_escape_atom();
     }
     next();
     Frag out = Frag([]);
-    out.code.push(Inst.Char(c));
+    out.code.push(Inst.Char(code_point));
     return Result<Frag, CompileError>.Ok(out);
 }
 
@@ -527,34 +527,34 @@ Result<Frag, CompileError> Parser.parse_atom() {
 // `\D \W \S` are the same, negated; everything else is `escape_literal`.
 Result<Frag, CompileError> Parser.parse_escape_atom() {
     next();
-    if (eof()) {
+    if (is_at_end()) {
         return Result<Frag, CompileError>.Err(CompileError.TrailingBackslash);
     }
-    int e = next();
-    if (e == 'd' || e == 'D' || e == 'w' || e == 'W' || e == 's' || e == 'S') {
-        ClassDef cd = ClassDef([], [], negate: (e == 'D' || e == 'W' || e == 'S'));
-        if (e == 'd' || e == 'D') {
-            cd.lo.push('0');
-            cd.hi.push('9');
-        } else if (e == 'w' || e == 'W') {
-            word_ranges(cd);
+    int escape = next();
+    if (escape == 'd' || escape == 'D' || escape == 'w' || escape == 'W' || escape == 's' || escape == 'S') {
+        ClassDef class_def = ClassDef([], [], is_negated: (escape == 'D' || escape == 'W' || escape == 'S'));
+        if (escape == 'd' || escape == 'D') {
+            class_def.low.push('0');
+            class_def.high.push('9');
+        } else if (escape == 'w' || escape == 'W') {
+            word_ranges(class_def);
         } else {
-            space_ranges(cd);
+            space_ranges(class_def);
         }
-        classes.push(cd);
-        int idx = classes.size() - 1;
+        classes.push(class_def);
+        int class_index = classes.size() - 1;
         Frag out = Frag([]);
-        out.code.push(Inst.Class(idx));
+        out.code.push(Inst.Class(class_index));
         return Result<Frag, CompileError>.Ok(out);
     }
-    match (escape_literal(e)) {
-        case Ok(int cp): {
+    match (escape_literal(escape)) {
+        case Ok(int code_point): {
             Frag out = Frag([]);
-            out.code.push(Inst.Char(cp));
+            out.code.push(Inst.Char(code_point));
             return Result<Frag, CompileError>.Ok(out);
         }
-        case Err(CompileError err): {
-            return Result<Frag, CompileError>.Err(err);
+        case Err(CompileError error): {
+            return Result<Frag, CompileError>.Err(error);
         }
     }
 }
@@ -565,18 +565,18 @@ Result<Frag, CompileError> Parser.parse_escape_atom() {
 // reaches here anyway (nothing else consumed it), `escape_literal` refuses
 // it as every other letter-escape it does not recognise.
 Result<int, CompileError> Parser.class_literal() {
-    if (eof()) {
+    if (is_at_end()) {
         return Result<int, CompileError>.Err(CompileError.UnbalancedBracket);
     }
-    int c = next();
-    if (c == '\\') {
-        if (eof()) {
+    int code_point = next();
+    if (code_point == '\\') {
+        if (is_at_end()) {
             return Result<int, CompileError>.Err(CompileError.TrailingBackslash);
         }
-        int e = next();
-        return escape_literal(e);
+        int escape = next();
+        return escape_literal(escape);
     }
-    return Result<int, CompileError>.Ok(c);
+    return Result<int, CompileError>.Ok(code_point);
 }
 
 // `[...]`, `[^...]`. A literal `]` must be escaped (`\]`) -- there is no
@@ -584,79 +584,79 @@ Result<int, CompileError> Parser.class_literal() {
 // (docs/regex-decision.md §4).
 Result<Frag, CompileError> Parser.parse_class() {
     next();
-    bool negate = false;
-    if (!eof() && peek() == '^') {
+    bool is_negate = false;
+    if (!is_at_end() && peek() == '^') {
         next();
-        negate = true;
+        is_negate = true;
     }
-    ClassDef cd = ClassDef([], [], negate: negate);
-    bool any_item = false;
+    ClassDef class_def = ClassDef([], [], is_negated: is_negate);
+    bool is_any_item = false;
     while (true) {
-        if (eof()) {
+        if (is_at_end()) {
             return Result<Frag, CompileError>.Err(CompileError.UnbalancedBracket);
         }
         if (peek() == ']') {
             next();
             break;
         }
-        if (peek() == '\\' && pos + 1 < pat.size()) {
-            int nxt = pat[pos + 1];
+        if (peek() == '\\' && position + 1 < pattern.size()) {
+            int nxt = pattern[position + 1];
             if (nxt == 'd' || nxt == 'w' || nxt == 's') {
                 next();
                 next();
                 if (nxt == 'd') {
-                    cd.lo.push('0');
-                    cd.hi.push('9');
+                    class_def.low.push('0');
+                    class_def.high.push('9');
                 } else if (nxt == 'w') {
-                    word_ranges(cd);
+                    word_ranges(class_def);
                 } else {
-                    space_ranges(cd);
+                    space_ranges(class_def);
                 }
-                any_item = true;
+                is_any_item = true;
                 continue;
             }
             if (nxt == 'D' || nxt == 'W' || nxt == 'S') {
                 return Result<Frag, CompileError>.Err(CompileError.BadEscape);
             }
         }
-        int lo = 0;
+        int range_start = 0;
         match (class_literal()) {
-            case Ok(int v): {
-                lo = v;
+            case Ok(int first_point): {
+                range_start = first_point;
             }
-            case Err(CompileError e): {
-                return Result<Frag, CompileError>.Err(e);
+            case Err(CompileError error): {
+                return Result<Frag, CompileError>.Err(error);
             }
         }
-        if (!eof() && peek() == '-' && pos + 1 < pat.size() && pat[pos + 1] != ']') {
+        if (!is_at_end() && peek() == '-' && position + 1 < pattern.size() && pattern[position + 1] != ']') {
             next();
-            int hi = 0;
+            int range_end = 0;
             match (class_literal()) {
-                case Ok(int v): {
-                    hi = v;
+                case Ok(int last_point): {
+                    range_end = last_point;
                 }
-                case Err(CompileError e): {
-                    return Result<Frag, CompileError>.Err(e);
+                case Err(CompileError error): {
+                    return Result<Frag, CompileError>.Err(error);
                 }
             }
-            if (hi < lo) {
+            if (range_end < range_start) {
                 return Result<Frag, CompileError>.Err(CompileError.BadRange);
             }
-            cd.lo.push(lo);
-            cd.hi.push(hi);
+            class_def.low.push(range_start);
+            class_def.high.push(range_end);
         } else {
-            cd.lo.push(lo);
-            cd.hi.push(lo);
+            class_def.low.push(range_start);
+            class_def.high.push(range_start);
         }
-        any_item = true;
+        is_any_item = true;
     }
-    if (!any_item) {
+    if (!is_any_item) {
         return Result<Frag, CompileError>.Err(CompileError.EmptyClass);
     }
-    classes.push(cd);
-    int idx = classes.size() - 1;
+    classes.push(class_def);
+    int class_index = classes.size() - 1;
     Frag out = Frag([]);
-    out.code.push(Inst.Class(idx));
+    out.code.push(Inst.Class(class_index));
     return Result<Frag, CompileError>.Ok(out);
 }
 
@@ -667,16 +667,16 @@ pub type Regex {
     int ngroups;
 }
 
-/// Does `s` contain a match anywhere?
-pub bool Regex.is_match(str s) {
-    return run(this, s.chars(), 0).is_some();
+/// Does `text` contain a match anywhere?
+pub bool Regex.is_match(str text) {
+    return run(this, text.chars(), 0).is_some();
 }
 
-/// The leftmost match in `s`, if there is one.
+/// The leftmost match in `text`, if there is one.
 ///
 ///     re.find("x42y")      -- for `re` from `regex.compile("\\d+")`
-pub Option<Match> Regex.find(str s) {
-    List<int> chars = s.chars();
+pub Option<Match> Regex.find(str text) {
+    List<int> chars = text.chars();
     match (run(this, chars, 0)) {
         case Some(List<int> saved): {
             return Option<Match>.Some(build_match(chars, ngroups, saved));
@@ -687,26 +687,26 @@ pub Option<Match> Regex.find(str s) {
     }
 }
 
-/// Every non-overlapping match in `s`, left to right. An empty match (a
+/// Every non-overlapping match in `text`, left to right. An empty match (a
 /// pattern like `a*` can match zero characters) advances by one code point
 /// afterwards so the search makes progress, the same rule Python's
 /// `re.finditer` and Go's `FindAllString` use.
-pub List<Match> Regex.find_all(str s) {
-    List<int> chars = s.chars();
-    int n = chars.size();
+pub List<Match> Regex.find_all(str text) {
+    List<int> chars = text.chars();
+    int code_point_count = chars.size();
     List<Match> out = [];
-    int pos = 0;
-    while (pos <= n) {
-        match (run(this, chars, pos)) {
+    int position = 0;
+    while (position <= code_point_count) {
+        match (run(this, chars, position)) {
             case None: {
                 break;
             }
             case Some(List<int> saved): {
                 out.push(build_match(chars, ngroups, saved));
                 if (saved[1] == saved[0]) {
-                    pos = saved[1] + 1;
+                    position = saved[1] + 1;
                 } else {
-                    pos = saved[1];
+                    position = saved[1];
                 }
             }
         }
@@ -726,9 +726,9 @@ pub int Regex.group_count() {
 ///     regex.compile("[a-z]+")           -> Ok(..)
 ///     regex.compile("a(b")              -> Err(UnbalancedParen)
 pub Result<Regex, CompileError> compile(str pattern) {
-    Parser p = Parser(pattern.chars());
-    Frag body = p.parse_alt()?;
-    if (!p.eof()) {
+    Parser parser = Parser(pattern.chars());
+    Frag body = parser.parse_alt()?;
+    if (!parser.is_at_end()) {
         // Only an unconsumed `)` can stop `parse_alt` before eof.
         return Result<Regex, CompileError>.Err(CompileError.UnbalancedParen);
     }
@@ -749,19 +749,19 @@ pub Result<Regex, CompileError> compile(str pattern) {
     prog.code.push(Inst.Any);
     prog.code.push(Inst.Jmp(0));
     prog.code[0] = Inst.Split(1, skip_at);
-    return Result<Regex, CompileError>.Ok(Regex(prog.code, p.classes, p.ngroups));
+    return Result<Regex, CompileError>.Ok(Regex(prog.code, parser.classes, parser.ngroups));
 }
 
 // --- matching: Pike's VM -------------------------------------------------------
 
 type Thread {
-    int pc;
+    int program_counter;
     List<int> saved;
 }
 
 // Follows every epsilon transition (Jmp, Split, Save, and the zero-width
-// Bol/Eol assertions) from `pc` and adds the live thread(s) it reaches to
-// `list`. `marked` is this step's "already added" bitmap, keyed by `pc`: it
+// Bol/Eol assertions) from `program_counter` and adds the live thread(s) it reaches to
+// `list`. `marked` is this step's "already added" bitmap, keyed by `program_counter`: it
 // is what stops a loop of epsilon transitions (`(a*)*`'s inner `*` feeding
 // the outer one) from adding the same thread twice or recursing forever,
 // and it is the reason this simulation is O(m) threads per code point
@@ -771,92 +771,92 @@ type Thread {
 // always `clone`s first (see its case below) -- so handing the SAME
 // reference to both of `Split`'s branches is safe: neither can see the
 // other's later writes, because there never are any to the shared object.
-void addthread(List<Inst> prog, List<Thread> list, Array<bool> marked, int pc, List<int> saved, int pos, int n) {
-    if (marked[pc]) {
+void addthread(List<Inst> prog, List<Thread> list, Array<bool> marked, int program_counter, List<int> saved, int position, int input_length) {
+    if (marked[program_counter]) {
         return;
     }
-    marked[pc] = true;
-    match (prog[pc]) {
-        case Jmp(int t): {
-            addthread(prog, list, marked, t, saved, pos, n);
+    marked[program_counter] = true;
+    match (prog[program_counter]) {
+        case Jmp(int target): {
+            addthread(prog, list, marked, target, saved, position, input_length);
         }
         case Split(int x, int y): {
-            addthread(prog, list, marked, x, saved, pos, n);
-            addthread(prog, list, marked, y, saved, pos, n);
+            addthread(prog, list, marked, x, saved, position, input_length);
+            addthread(prog, list, marked, y, saved, position, input_length);
         }
         case Save(int slot): {
-            List<int> s2 = clone(saved);
-            s2[slot] = pos;
-            addthread(prog, list, marked, pc + 1, s2, pos, n);
+            List<int> saved_copy = clone(saved);
+            saved_copy[slot] = position;
+            addthread(prog, list, marked, program_counter + 1, saved_copy, position, input_length);
         }
         case Bol: {
-            if (pos == 0) {
-                addthread(prog, list, marked, pc + 1, saved, pos, n);
+            if (position == 0) {
+                addthread(prog, list, marked, program_counter + 1, saved, position, input_length);
             }
         }
         case Eol: {
-            if (pos == n) {
-                addthread(prog, list, marked, pc + 1, saved, pos, n);
+            if (position == input_length) {
+                addthread(prog, list, marked, program_counter + 1, saved, position, input_length);
             }
         }
         case Char: {
-            list.push(Thread(pc, saved));
+            list.push(Thread(program_counter, saved));
         }
         case Any: {
-            list.push(Thread(pc, saved));
+            list.push(Thread(program_counter, saved));
         }
         case Class: {
-            list.push(Thread(pc, saved));
+            list.push(Thread(program_counter, saved));
         }
         case Match: {
-            list.push(Thread(pc, saved));
+            list.push(Thread(program_counter, saved));
         }
     }
 }
 
-// Run `re`'s program against `chars`, seeded at code point `from`, and
+// Run `compiled`'s program against `chars`, seeded at code point `from`, and
 // return the first (highest-priority, i.e. leftmost-greedy) match's capture
 // slots, if any. One pass, O((n - from) * m): every code point is visited
 // once, and `marked` keeps each step's thread count at or below `m`.
-Option<List<int>> run(Regex re, List<int> chars, int from) {
-    int n = chars.size();
-    int nslots = 2 * (re.ngroups + 1);
+Option<List<int>> run(Regex compiled, List<int> chars, int from) {
+    int input_length = chars.size();
+    int nslots = 2 * (compiled.ngroups + 1);
     List<int> seed = [-1; nslots];
     List<Thread> clist = [];
-    Array<bool> marked0 = [false; re.prog.size()];
-    addthread(re.prog, clist, marked0, 0, seed, from, n);
+    Array<bool> marked0 = [false; compiled.prog.size()];
+    addthread(compiled.prog, clist, marked0, 0, seed, from, input_length);
     Option<List<int>> matched = Option<List<int>>.None;
-    int i = from;
+    int position = from;
     while (clist.size() > 0) {
-        bool has_char = i < n;
-        int c = 0;
+        bool has_char = position < input_length;
+        int code_point = 0;
         if (has_char) {
-            c = chars[i];
+            code_point = chars[position];
         }
         List<Thread> nlist = [];
-        Array<bool> marked = [false; re.prog.size()];
-        int t = 0;
-        int tn = clist.size();
-        while (t < tn) {
-            Thread th = clist[t];
-            match (re.prog[th.pc]) {
-                case Char(int ch): {
-                    if (has_char && ch == c) {
-                        addthread(re.prog, nlist, marked, th.pc + 1, th.saved, i + 1, n);
+        Array<bool> marked = [false; compiled.prog.size()];
+        int thread_index = 0;
+        int thread_count = clist.size();
+        while (thread_index < thread_count) {
+            Thread thread = clist[thread_index];
+            match (compiled.prog[thread.program_counter]) {
+                case Char(int expected): {
+                    if (has_char && expected == code_point) {
+                        addthread(compiled.prog, nlist, marked, thread.program_counter + 1, thread.saved, position + 1, input_length);
                     }
                 }
                 case Any: {
                     if (has_char) {
-                        addthread(re.prog, nlist, marked, th.pc + 1, th.saved, i + 1, n);
+                        addthread(compiled.prog, nlist, marked, thread.program_counter + 1, thread.saved, position + 1, input_length);
                     }
                 }
-                case Class(int idx): {
-                    if (has_char && class_contains(re.classes, idx, c)) {
-                        addthread(re.prog, nlist, marked, th.pc + 1, th.saved, i + 1, n);
+                case Class(int class_index): {
+                    if (has_char && is_in_class(compiled.classes, class_index, code_point)) {
+                        addthread(compiled.prog, nlist, marked, thread.program_counter + 1, thread.saved, position + 1, input_length);
                     }
                 }
                 case Match: {
-                    matched = Option<List<int>>.Some(th.saved);
+                    matched = Option<List<int>>.Some(thread.saved);
                     break;
                 }
                 case Jmp: {
@@ -875,13 +875,13 @@ Option<List<int>> run(Regex re, List<int> chars, int from) {
                     trap("regex: Eol cannot be on a thread list -- addthread already followed it");
                 }
             }
-            t = t + 1;
+            thread_index = thread_index + 1;
         }
         clist = nlist;
         if (!has_char) {
             break;
         }
-        i = i + 1;
+        position = position + 1;
     }
     return matched;
 }
@@ -901,16 +901,16 @@ pub type Match {
 Match build_match(List<int> chars, int ngroups, List<int> saved) {
     Group whole = Group(saved[0], saved[1], str.from_chars(chars.slice(saved[0], saved[1])));
     List<Option<Group>> groups = [Option<Group>.None];
-    int g = 1;
-    while (g <= ngroups) {
-        int s0 = saved[2 * g];
-        int s1 = saved[2 * g + 1];
-        if (s0 < 0 || s1 < 0) {
+    int group_number = 1;
+    while (group_number <= ngroups) {
+        int group_start = saved[2 * group_number];
+        int group_end = saved[2 * group_number + 1];
+        if (group_start < 0 || group_end < 0) {
             groups.push(Option<Group>.None);
         } else {
-            groups.push(Option<Group>.Some(Group(s0, s1, str.from_chars(chars.slice(s0, s1)))));
+            groups.push(Option<Group>.Some(Group(group_start, group_end, str.from_chars(chars.slice(group_start, group_end)))));
         }
-        g = g + 1;
+        group_number = group_number + 1;
     }
     return Match(whole, groups);
 }

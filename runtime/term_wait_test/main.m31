@@ -7,23 +7,23 @@ import timer;
 // stdin from /dev/null, over a descriptor the reactor cannot wait on.
 
 void ticker(Chan<int> done) {
-    int i = 0;
-    while (i < 10) {
+    int tick_count = 0;
+    while (tick_count < 10) {
         timer.sleep_ms(10);
-        i = i + 1;
+        tick_count = tick_count + 1;
     }
     send(done, date.now_ns());
 }
 
 Chan<int> done = Chan<int>(1);
 spawn ticker(done);
-term.Reader r = term.reader();
-Result<term.Session, term.Error> s = term.raw();
-match (s) {
+term.Reader reader = term.reader();
+Result<term.Session, term.Error> session_result = term.raw();
+match (session_result) {
     case Ok(term.Session sess): {
         print("ready");
-        int t0 = date.now_ns();
-        match (r.read(400)) {
+        int start_time = date.now_ns();
+        match (reader.read(400)) {
             case Ok(term.Input got): {
                 match (got) {
                     case Timeout: {
@@ -32,48 +32,48 @@ match (s) {
                     case End: {
                         print("end");
                     }
-                    case Got(term.Event e): {
-                        print("early: " + e.to_str());
+                    case Got(term.Event event): {
+                        print("early: " + event.to_str());
                     }
                 }
             }
-            case Err(term.Error e): {
+            case Err(_): {
                 print("error");
             }
         }
-        int t1 = date.now_ns();
-        print("waited at least 400 ms: " + ((t1 - t0) >= 400 * 1000000).to_str());
-        print("the ticker ran during the wait: " + (recv(done) < t1).to_str());
-        bool going = true;
-        while (going) {
-            match (r.read(-1)) {
+        int end_time = date.now_ns();
+        print("waited at least 400 ms: " + ((end_time - start_time) >= 400 * 1000000).to_str());
+        print("the ticker ran during the wait: " + (recv(done) < end_time).to_str());
+        bool is_going = true;
+        while (is_going) {
+            match (reader.read(-1)) {
                 case Ok(term.Input got): {
                     match (got) {
-                        case Got(term.Event e): {
-                            print("got " + e.to_str());
-                            if (e.to_str() == "q") {
-                                going = false;
+                        case Got(term.Event event): {
+                            print("got " + event.to_str());
+                            if (event.to_str() == "q") {
+                                is_going = false;
                             }
                         }
                         case Timeout: {
                             print("timeout");
                         }
                         case End: {
-                            going = false;
+                            is_going = false;
                         }
                     }
                 }
-                case Err(term.Error e): {
+                case Err(_): {
                     print("error");
-                    going = false;
+                    is_going = false;
                 }
             }
         }
         print("done");
     }
-    case Err(term.Error e): {
+    case Err(_): {
         // Not a terminal: read what is there. /dev/null ends at once.
-        match (r.read(400)) {
+        match (reader.read(400)) {
             case Ok(term.Input got): {
                 match (got) {
                     case End: {
@@ -82,12 +82,12 @@ match (s) {
                     case Timeout: {
                         print("not a tty: timeout");
                     }
-                    case Got(term.Event ev): {
+                    case Got(_): {
                         print("not a tty: got");
                     }
                 }
             }
-            case Err(term.Error er): {
+            case Err(_): {
                 print("not a tty: error");
             }
         }

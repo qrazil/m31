@@ -94,13 +94,13 @@ pub str Error.to_str() {
 // Where the parser is.
 type Parser {
     str text;
-    int at = 0;
+    int position = 0;
 }
 
 // A container the parser is in the middle of: its items or members so far,
 // and for an object the key whose value is being read.
 type Frame {
-    bool object;
+    bool is_object;
     List<Value> items = [];
     Map<str, Value> members = {};
     str key = "";
@@ -112,9 +112,9 @@ type Frame {
 type Job {
     Value value;
     int level;
-    int at = -1;
+    int position = -1;
     int size = 0;
-    bool object = false;
+    bool is_object = false;
     List<Value> items = [];
     Map<str, Value> members = {};
     List<str> keys = [];
@@ -125,24 +125,24 @@ type Job {
 ///     json.parse("{\"a\": [1, 2.5, true, null]}")
 ///         -> Ok(Object({"a": Array([Int(1), Float(2.5), Bool(true), Null])}))
 pub Result<Value, Error> parse(str text) {
-    Parser p = Parser(text);
-    skip_ws(p);
-    Value v = value(p)?;
-    skip_ws(p);
-    if (p.at < text.size()) {
-        return Result<Value, Error>.Err(unexpected(p));
+    Parser parser = Parser(text);
+    skip_ws(parser);
+    Value document = value(parser)?;
+    skip_ws(parser);
+    if (parser.position < text.size()) {
+        return Result<Value, Error>.Err(unexpected(parser));
     }
-    return Result<Value, Error>.Ok(v);
+    return Result<Value, Error>.Ok(document);
 }
 
-/// `v` as JSON text: compact, or one value per line with `indent` spaces per
+/// `document` as JSON text: compact, or one value per line with `indent` spaces per
 /// level when `indent` is positive.
 ///
 ///     json.stringify(v)              -> Ok("{\"a\":1,\"b\":[true,null]}")
 ///     json.stringify(v, indent: 2)   -> Ok("{\n  \"a\": 1,\n  ...")
-pub Result<str, Error> stringify(Value v, int indent = 0) {
+pub Result<str, Error> stringify(Value document, int indent = 0) {
     List<str> out = [];
-    write(out, v, indent)?;
+    write(out, document, indent)?;
     return Result<str, Error>.Ok(out.join(""));
 }
 
@@ -160,139 +160,139 @@ int max_depth() {
 // overflowed an 8 MiB stack at 10 000 levels in an unoptimised build -- a
 // document chooses its own depth, so the parser must not let it choose how
 // much stack it uses.
-Result<Value, Error> value(Parser p) {
-    str text = p.text;
-    int n = text.size();
+Result<Value, Error> value(Parser parser) {
+    str text = parser.text;
+    int text_length = text.size();
     List<Frame> stack = [];
     // Whether the next thing to read is an object key rather than a value.
-    bool want_key = false;
+    bool is_key_expected = false;
     while (true) {
-        if (want_key) {
-            want_key = false;
-            skip_ws(p);
-            if (p.at >= n || text.byte_at(p.at) != '"') {
-                return fail("expected a string key", p.at);
+        if (is_key_expected) {
+            is_key_expected = false;
+            skip_ws(parser);
+            if (parser.position >= text_length || text.byte_at(parser.position) != '"') {
+                return fail("expected a string key", parser.position);
             }
-            str key = string(p)?;
-            skip_ws(p);
-            if (p.at >= n || text.byte_at(p.at) != ':') {
-                return fail("expected ':'", p.at);
+            str key = string(parser)?;
+            skip_ws(parser);
+            if (parser.position >= text_length || text.byte_at(parser.position) != ':') {
+                return fail("expected ':'", parser.position);
             }
-            p.at = p.at + 1;
+            parser.position = parser.position + 1;
             stack[stack.size() - 1].key = key;
         }
-        skip_ws(p);
-        if (p.at >= n) {
-            return fail("unexpected end of input", p.at);
+        skip_ws(parser);
+        if (parser.position >= text_length) {
+            return fail("unexpected end of input", parser.position);
         }
-        int c = text.byte_at(p.at);
-        Value v = Value.Null;
-        if (c == '{' || c == '[') {
-            int open = p.at;
-            p.at = p.at + 1;
-            skip_ws(p);
-            if (c == '{' && p.at < n && text.byte_at(p.at) == '}') {
-                p.at = p.at + 1;
-                v = Value.Object({});
-            } else if (c == '[' && p.at < n && text.byte_at(p.at) == ']') {
-                p.at = p.at + 1;
-                v = Value.Array([]);
+        int first_byte = text.byte_at(parser.position);
+        Value item = Value.Null;
+        if (first_byte == '{' || first_byte == '[') {
+            int open = parser.position;
+            parser.position = parser.position + 1;
+            skip_ws(parser);
+            if (first_byte == '{' && parser.position < text_length && text.byte_at(parser.position) == '}') {
+                parser.position = parser.position + 1;
+                item = Value.Object({});
+            } else if (first_byte == '[' && parser.position < text_length && text.byte_at(parser.position) == ']') {
+                parser.position = parser.position + 1;
+                item = Value.Array([]);
             } else {
                 // Only a container with something in it is a level: an
                 // empty one is finished where it opens.
                 if (stack.size() >= max_depth()) {
                     return fail("maximum nesting depth (" + max_depth().to_str() + ") exceeded", open);
                 }
-                stack.push(Frame(c == '{'));
-                want_key = c == '{';
+                stack.push(Frame(first_byte == '{'));
+                is_key_expected = first_byte == '{';
                 continue;
             }
-        } else if (c == '"') {
-            v = Value.Str(string(p)?);
-        } else if (c == '-' || is_digit(c)) {
-            v = number(p)?;
-        } else if (word(p, "true")) {
-            v = Value.Bool(true);
-        } else if (word(p, "false")) {
-            v = Value.Bool(false);
-        } else if (!word(p, "null")) {
-            return Result<Value, Error>.Err(unexpected(p));
+        } else if (first_byte == '"') {
+            item = Value.Str(string(parser)?);
+        } else if (first_byte == '-' || is_digit(first_byte)) {
+            item = number(parser)?;
+        } else if (has_word(parser, "true")) {
+            item = Value.Bool(true);
+        } else if (has_word(parser, "false")) {
+            item = Value.Bool(false);
+        } else if (!has_word(parser, "null")) {
+            return Result<Value, Error>.Err(unexpected(parser));
         }
         // A value is finished: hand it to the container underneath, and keep
         // handing containers up for as long as they close here.
-        bool closing = true;
-        while (closing) {
+        bool is_closing = true;
+        while (is_closing) {
             if (stack.size() == 0) {
-                return Result<Value, Error>.Ok(v);
+                return Result<Value, Error>.Ok(item);
             }
             Frame top = stack[stack.size() - 1];
-            if (top.object) {
+            if (top.is_object) {
                 // A repeated key keeps the last value.
-                top.members.set(top.key, v);
+                top.members.set(top.key, item);
             } else {
-                top.items.push(v);
+                top.items.push(item);
             }
-            skip_ws(p);
-            if (p.at >= n) {
-                if (top.object) {
-                    return fail("unterminated object", p.at);
+            skip_ws(parser);
+            if (parser.position >= text_length) {
+                if (top.is_object) {
+                    return fail("unterminated object", parser.position);
                 }
-                return fail("unterminated array", p.at);
+                return fail("unterminated array", parser.position);
             }
-            int d = text.byte_at(p.at);
-            if (d == ',') {
-                p.at = p.at + 1;
-                want_key = top.object;
-                closing = false;
-            } else if (top.object && d == '}') {
-                p.at = p.at + 1;
+            int delimiter = text.byte_at(parser.position);
+            if (delimiter == ',') {
+                parser.position = parser.position + 1;
+                is_key_expected = top.is_object;
+                is_closing = false;
+            } else if (top.is_object && delimiter == '}') {
+                parser.position = parser.position + 1;
                 stack.pop();
-                v = Value.Object(top.members);
-            } else if (!top.object && d == ']') {
-                p.at = p.at + 1;
+                item = Value.Object(top.members);
+            } else if (!top.is_object && delimiter == ']') {
+                parser.position = parser.position + 1;
                 stack.pop();
-                v = Value.Array(top.items);
+                item = Value.Array(top.items);
             } else {
-                return Result<Value, Error>.Err(unexpected(p));
+                return Result<Value, Error>.Err(unexpected(parser));
             }
         }
     }
 }
 
 // A string literal, with `p.at` on its opening quote.
-Result<str, Error> string(Parser p) {
-    str text = p.text;
-    int n = text.size();
-    p.at = p.at + 1;
+Result<str, Error> string(Parser parser) {
+    str text = parser.text;
+    int text_length = text.size();
+    parser.position = parser.position + 1;
     List<str> parts = [];
     while (true) {
         // Copy the longest run that needs no decoding in one go -- the whole
         // string, for nearly every key and value.
-        int from = p.at;
-        while (p.at < n) {
-            int c = text.byte_at(p.at);
+        int from = parser.position;
+        while (parser.position < text_length) {
+            int octet = text.byte_at(parser.position);
             // Every byte that stops the run is ASCII, and UTF-8 never uses
             // an ASCII byte inside a character, so the run ends on a
             // character boundary and the substr below cannot cut one. The
             // text needs no UTF-8 check: it is a `str`, so it is valid.
-            if (c == '"' || c == '\\' || c < ' ') {
+            if (octet == '"' || octet == '\\' || octet < ' ') {
                 break;
             }
-            p.at = p.at + 1;
+            parser.position = parser.position + 1;
         }
-        if (p.at > from) {
-            parts.push(text.substr(from, p.at));
+        if (parser.position > from) {
+            parts.push(text.substr(from, parser.position));
         }
-        if (p.at >= n) {
+        if (parser.position >= text_length) {
             return Result<str, Error>.Err(Error.Syntax);
         }
-        int c = text.byte_at(p.at);
-        if (c == '"') {
-            p.at = p.at + 1;
+        int stop_byte = text.byte_at(parser.position);
+        if (stop_byte == '"') {
+            parser.position = parser.position + 1;
             return Result<str, Error>.Ok(parts.join(""));
         }
-        if (c == '\\') {
-            parts.push(escape(p)?);
+        if (stop_byte == '\\') {
+            parts.push(escape(parser)?);
         } else {
             return Result<str, Error>.Err(Error.Syntax);
         }
@@ -300,147 +300,147 @@ Result<str, Error> string(Parser p) {
 }
 
 // One escape sequence, with `p.at` on its backslash.
-Result<str, Error> escape(Parser p) {
-    str text = p.text;
-    p.at = p.at + 1;
-    if (p.at >= text.size()) {
+Result<str, Error> escape(Parser parser) {
+    str text = parser.text;
+    parser.position = parser.position + 1;
+    if (parser.position >= text.size()) {
         return Result<str, Error>.Err(Error.Syntax);
     }
-    int c = text.byte_at(p.at);
-    if (c == 'u') {
-        int cp = unicode_escape(p)?;
+    int escape_char = text.byte_at(parser.position);
+    if (escape_char == 'u') {
+        int code_point = unicode_escape(parser)?;
         // Never a surrogate and never past U+10FFFF -- `unicode_escape` has
         // refused the one and cannot build the other -- so from_chars, which
         // traps on both, never does here.
-        return Result<str, Error>.Ok(str.from_chars([cp]));
+        return Result<str, Error>.Ok(str.from_chars([code_point]));
     }
-    p.at = p.at + 1;
-    if (c == '"') {
+    parser.position = parser.position + 1;
+    if (escape_char == '"') {
         return Result<str, Error>.Ok("\"");
     }
-    if (c == '\\') {
+    if (escape_char == '\\') {
         return Result<str, Error>.Ok("\\");
     }
-    if (c == '/') {
+    if (escape_char == '/') {
         return Result<str, Error>.Ok("/");
     }
-    if (c == 'n') {
+    if (escape_char == 'n') {
         return Result<str, Error>.Ok("\n");
     }
-    if (c == 'r') {
+    if (escape_char == 'r') {
         return Result<str, Error>.Ok("\r");
     }
-    if (c == 't') {
+    if (escape_char == 't') {
         return Result<str, Error>.Ok("\t");
     }
-    if (c == 'b') {
+    if (escape_char == 'b') {
         return Result<str, Error>.Ok("\x08");
     }
-    if (c == 'f') {
+    if (escape_char == 'f') {
         return Result<str, Error>.Ok("\x0c");
     }
-    p.at = p.at - 1;
+    parser.position = parser.position - 1;
     return Result<str, Error>.Err(Error.Syntax);
 }
 
 // The code point of a `\uXXXX`, or of a surrogate pair of them, with `p.at`
 // on the `u`.
-Result<int, Error> unicode_escape(Parser p) {
-    str text = p.text;
-    int cp = hex4(p)?;
-    if (cp >= 55296 && cp <= 56319) {
+Result<int, Error> unicode_escape(Parser parser) {
+    str text = parser.text;
+    int code_point = hex4(parser)?;
+    if (code_point >= 55296 && code_point <= 56319) {
         // A high surrogate (D800-DBFF) must be followed by a low one.
-        int n = text.size();
-        if (p.at + 1 < n && text.byte_at(p.at) == '\\' && text.byte_at(p.at + 1) == 'u') {
-            int save = p.at;
-            p.at = p.at + 1;
-            int low = hex4(p)?;
+        int text_length = text.size();
+        if (parser.position + 1 < text_length && text.byte_at(parser.position) == '\\' && text.byte_at(parser.position + 1) == 'u') {
+            int save = parser.position;
+            parser.position = parser.position + 1;
+            int low = hex4(parser)?;
             if (low >= 56320 && low <= 57343) {
                 // 0x10000 + ((hi - 0xD800) << 10 | lo - 0xDC00)
-                return Result<int, Error>.Ok(65536 + (cp - 55296 << 10 | low - 56320));
+                return Result<int, Error>.Ok(65536 + (code_point - 55296 << 10 | low - 56320));
             }
-            p.at = save;
+            parser.position = save;
         }
         return Result<int, Error>.Err(Error.Syntax);
     }
-    if (cp >= 56320 && cp <= 57343) {
+    if (code_point >= 56320 && code_point <= 57343) {
         return Result<int, Error>.Err(Error.Syntax);
     }
-    return Result<int, Error>.Ok(cp);
+    return Result<int, Error>.Ok(code_point);
 }
 
 // The four hex digits after a `u`, with `p.at` on the `u`. Four CHARACTERS
 // are taken, as Oro does, so a message quotes what was written even when it
 // is not ASCII.
-Result<int, Error> hex4(Parser p) {
-    str text = p.text;
-    int n = text.size();
-    p.at = p.at + 1;
-    int end = p.at;
-    for (int k in 0 .. 4) {
-        if (end >= n) {
+Result<int, Error> hex4(Parser parser) {
+    str text = parser.text;
+    int text_length = text.size();
+    parser.position = parser.position + 1;
+    int end = parser.position;
+    for (int character_index in 0 .. 4) {
+        if (end >= text_length) {
             return Result<int, Error>.Err(Error.Syntax);
         }
         end = end + char_length(text, end);
     }
-    int cp = 0;
-    for (int i in p.at .. end) {
-        int d = hex_digit(text.byte_at(i));
-        if (d < 0) {
+    int code_point = 0;
+    for (int i in parser.position .. end) {
+        int digit = hex_digit(text.byte_at(i));
+        if (digit < 0) {
             return Result<int, Error>.Err(Error.Syntax);
         }
-        cp = cp * 16 + d;
+        code_point = code_point * 16 + digit;
     }
-    p.at = end;
-    return Result<int, Error>.Ok(cp);
+    parser.position = end;
+    return Result<int, Error>.Ok(code_point);
 }
 
 // A number literal, with `p.at` on its first byte. The grammar is RFC 8259's
 // exactly: an optional minus, then 0 or a digit run not starting with 0, then
 // an optional fraction, then an optional exponent.
-Result<Value, Error> number(Parser p) {
-    str text = p.text;
-    int n = text.size();
-    int start = p.at;
-    if (text.byte_at(p.at) == '-') {
-        p.at = p.at + 1;
+Result<Value, Error> number(Parser parser) {
+    str text = parser.text;
+    int text_length = text.size();
+    int start = parser.position;
+    if (text.byte_at(parser.position) == '-') {
+        parser.position = parser.position + 1;
     }
-    if (p.at >= n || !is_digit(text.byte_at(p.at))) {
-        return fail("invalid number", p.at);
+    if (parser.position >= text_length || !is_digit(text.byte_at(parser.position))) {
+        return fail("invalid number", parser.position);
     }
-    if (text.byte_at(p.at) == '0') {
-        p.at = p.at + 1;
-        if (p.at < n && is_digit(text.byte_at(p.at))) {
-            return fail("invalid number: a leading zero cannot be followed by more digits", p.at);
+    if (text.byte_at(parser.position) == '0') {
+        parser.position = parser.position + 1;
+        if (parser.position < text_length && is_digit(text.byte_at(parser.position))) {
+            return fail("invalid number: a leading zero cannot be followed by more digits", parser.position);
         }
     } else {
-        skip_digits(p);
+        skip_digits(parser);
     }
     bool is_float = false;
-    if (p.at < n && text.byte_at(p.at) == '.') {
+    if (parser.position < text_length && text.byte_at(parser.position) == '.') {
         is_float = true;
-        p.at = p.at + 1;
-        if (p.at >= n || !is_digit(text.byte_at(p.at))) {
-            return fail("invalid number: expected a digit after '.'", p.at);
+        parser.position = parser.position + 1;
+        if (parser.position >= text_length || !is_digit(text.byte_at(parser.position))) {
+            return fail("invalid number: expected a digit after '.'", parser.position);
         }
-        skip_digits(p);
+        skip_digits(parser);
     }
-    if (p.at < n && (text.byte_at(p.at) == 'e' || text.byte_at(p.at) == 'E')) {
+    if (parser.position < text_length && (text.byte_at(parser.position) == 'e' || text.byte_at(parser.position) == 'E')) {
         is_float = true;
-        p.at = p.at + 1;
-        if (p.at < n && (text.byte_at(p.at) == '+' || text.byte_at(p.at) == '-')) {
-            p.at = p.at + 1;
+        parser.position = parser.position + 1;
+        if (parser.position < text_length && (text.byte_at(parser.position) == '+' || text.byte_at(parser.position) == '-')) {
+            parser.position = parser.position + 1;
         }
-        if (p.at >= n || !is_digit(text.byte_at(p.at))) {
-            return fail("invalid number: expected a digit in the exponent", p.at);
+        if (parser.position >= text_length || !is_digit(text.byte_at(parser.position))) {
+            return fail("invalid number: expected a digit in the exponent", parser.position);
         }
-        skip_digits(p);
+        skip_digits(parser);
     }
-    str literal = text.substr(start, p.at);
+    str literal = text.substr(start, parser.position);
     if (is_float) {
         match (literal.parse_float()) {
-            case Some(float f): {
-                return Result<Value, Error>.Ok(Value.Float(f));
+            case Some(float float_value): {
+                return Result<Value, Error>.Ok(Value.Float(float_value));
             }
             case None: {
                 // The literal is valid, so the only way it fails to parse is
@@ -454,8 +454,8 @@ Result<Value, Error> number(Parser p) {
         }
     }
     match (literal.parse_int()) {
-        case Some(int i): {
-            return Result<Value, Error>.Ok(Value.Int(i));
+        case Some(int int_value): {
+            return Result<Value, Error>.Ok(Value.Int(int_value));
         }
         case None: {
             return fail("integer out of range", start);
@@ -463,83 +463,83 @@ Result<Value, Error> number(Parser p) {
     }
 }
 
-void skip_digits(Parser p) {
-    while (p.at < p.text.size() && is_digit(p.text.byte_at(p.at))) {
-        p.at = p.at + 1;
+void skip_digits(Parser parser) {
+    while (parser.position < parser.text.size() && is_digit(parser.text.byte_at(parser.position))) {
+        parser.position = parser.position + 1;
     }
 }
 
-// Whether `w` is at `p.at`, stepping over it if so.
+// Whether `expected` is at `p.at`, stepping over it if so.
 //
 // Compared byte by byte rather than with substr: `end` is a byte count from
 // `p.at`, and in a document like `tru😀` it falls inside a character, where
 // substr traps. A mismatch there is a syntax error, not a bug.
-bool word(Parser p, str w) {
-    int end = p.at + w.size();
-    if (end > p.text.size()) {
+bool has_word(Parser parser, str expected) {
+    int end = parser.position + expected.size();
+    if (end > parser.text.size()) {
         return false;
     }
-    for (int i in 0 .. w.size()) {
-        if (p.text.byte_at(p.at + i) != w.byte_at(i)) {
+    for (int i in 0 .. expected.size()) {
+        if (parser.text.byte_at(parser.position + i) != expected.byte_at(i)) {
             return false;
         }
     }
-    p.at = end;
+    parser.position = end;
     return true;
 }
 
 // Whitespace is exactly space, tab, LF and CR.
-void skip_ws(Parser p) {
-    str text = p.text;
-    int n = text.size();
-    while (p.at < n) {
-        int c = text.byte_at(p.at);
-        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
+void skip_ws(Parser parser) {
+    str text = parser.text;
+    int text_length = text.size();
+    while (parser.position < text_length) {
+        int octet = text.byte_at(parser.position);
+        if (octet != ' ' && octet != '\t' && octet != '\n' && octet != '\r') {
             return;
         }
-        p.at = p.at + 1;
+        parser.position = parser.position + 1;
     }
 }
 
-Error unexpected(Parser p) {
-    if (p.at >= p.text.size()) {
+Error unexpected(Parser parser) {
+    if (parser.position >= parser.text.size()) {
         return Error.Syntax;
     }
     return Error.Syntax;
 }
 
-Result<Value, Error> fail(str what, int at) {
+Result<Value, Error> fail(str what, int error_offset) {
     return Result<Value, Error>.Err(Error.Syntax);
 }
 
 // --- encoding ----------------------------------------------------------------
-// Append `v` to `out`.
+// Append `document` to `out`.
 //
 // Iterative for the same reason `value` is: every step still to take is a
 // `Job` on an explicit stack, so a deep value costs heap and not C stack, and
 // a value that contains itself runs into the depth bound instead of off the
 // end of the stack.
-Result<int, Error> write(List<str> out, Value v, int indent) {
-    List<Job> jobs = [Job(v, 0)];
+Result<int, Error> write(List<str> out, Value document, int indent) {
+    List<Job> jobs = [Job(document, 0)];
     while (jobs.size() > 0) {
         Job job = jobs.pop();
-        if (job.at < 0) {
+        if (job.position < 0) {
             write_one(out, jobs, job.value, job.level, indent)?;
-        } else if (job.at == job.size) {
+        } else if (job.position == job.size) {
             newline(out, job.level, indent);
-            if (job.object) {
+            if (job.is_object) {
                 out.push("}");
             } else {
                 out.push("]");
             }
         } else {
-            if (job.at > 0) {
+            if (job.position > 0) {
                 out.push(",");
             }
             newline(out, job.level + 1, indent);
             Value item = Value.Null;
-            if (job.object) {
-                str key = job.keys[job.at];
+            if (job.is_object) {
+                str key = job.keys[job.position];
                 quote(out, key);
                 out.push(":");
                 if (indent > 0) {
@@ -547,9 +547,9 @@ Result<int, Error> write(List<str> out, Value v, int indent) {
                 }
                 item = job.members.get(key).or(Value.Null);
             } else {
-                item = job.items[job.at];
+                item = job.items[job.position];
             }
-            job.at = job.at + 1;
+            job.position = job.position + 1;
             jobs.push(job);
             jobs.push(Job(item, job.level + 1));
         }
@@ -558,40 +558,40 @@ Result<int, Error> write(List<str> out, Value v, int indent) {
 }
 
 // Write a scalar, or open a container and queue its contents.
-Result<int, Error> write_one(List<str> out, List<Job> jobs, Value v, int level, int indent) {
+Result<int, Error> write_one(List<str> out, List<Job> jobs, Value node, int level, int indent) {
     if (level > max_depth()) {
         return Result<int, Error>.Err(Error.TooDeep);
     }
-    match (v) {
+    match (node) {
         case Null: {
             out.push("null");
         }
-        case Bool(bool b): {
-            out.push(b.to_str());
+        case Bool(bool bool_value): {
+            out.push(bool_value.to_str());
         }
-        case Int(int i): {
-            out.push(i.to_str());
+        case Int(int int_value): {
+            out.push(int_value.to_str());
         }
-        case Float(float f): {
-            if (f != f || f - f != 0.0) {
+        case Float(float float_value): {
+            if (float_value != float_value || float_value - float_value != 0.0) {
                 return Result<int, Error>.Err(Error.NotFinite);
             }
-            str s = f.to_str();
-            out.push(s);
+            str rendered = float_value.to_str();
+            out.push(rendered);
             // 1.0 prints as `1`; without the `.0` it would read back as an Int.
-            if (!s.contains(".") && !s.contains("e")) {
+            if (!rendered.contains(".") && !rendered.contains("e")) {
                 out.push(".0");
             }
         }
-        case Str(str s): {
-            quote(out, s);
+        case Str(str text): {
+            quote(out, text);
         }
         case Array(List<Value> items): {
             if (items.size() == 0) {
                 out.push("[]");
             } else {
                 out.push("[");
-                jobs.push(Job(v, level, at: 0, size: items.size(), items: items));
+                jobs.push(Job(node, level, position: 0, size: items.size(), items: items));
             }
         }
         case Object(Map<str, Value> members): {
@@ -601,7 +601,7 @@ Result<int, Error> write_one(List<str> out, List<Job> jobs, Value v, int level, 
                 List<str> keys = members.keys();
                 keys.sort();
                 out.push("{");
-                jobs.push(Job(v, level, at: 0, size: keys.size(), object: true, members: members, keys: keys));
+                jobs.push(Job(node, level, position: 0, size: keys.size(), is_object: true, members: members, keys: keys));
             }
         }
     }
@@ -617,86 +617,86 @@ void newline(List<str> out, int level, int indent) {
     }
 }
 
-// `s` as a JSON string literal, quotes included.
-void quote(List<str> out, str s) {
+// `text` as a JSON string literal, quotes included.
+void quote(List<str> out, str text) {
     out.push("\"");
-    int n = s.size();
+    int text_length = text.size();
     int run = 0;
-    int i = 0;
-    while (i < n) {
-        int c = s.byte_at(i);
-        // Non-ASCII is written through, a byte at a time: `s` is a `str`, so
+    int byte_index = 0;
+    while (byte_index < text_length) {
+        int octet = text.byte_at(byte_index);
+        // Non-ASCII is written through, a byte at a time: `text` is a `str`, so
         // it is valid UTF-8 already, and the bytes that need escaping are
-        // all ASCII, so `run` and `i` only ever stop on a boundary.
-        if (c >= ' ' && c != '"' && c != '\\') {
-            i = i + 1;
+        // all ASCII, so `run` and `byte_index` only ever stop on a boundary.
+        if (octet >= ' ' && octet != '"' && octet != '\\') {
+            byte_index = byte_index + 1;
             continue;
         }
-        out.push(s.substr(run, i));
-        if (c == '"') {
+        out.push(text.substr(run, byte_index));
+        if (octet == '"') {
             out.push("\\\"");
-        } else if (c == '\\') {
+        } else if (octet == '\\') {
             out.push("\\\\");
-        } else if (c == '\n') {
+        } else if (octet == '\n') {
             out.push("\\n");
-        } else if (c == '\r') {
+        } else if (octet == '\r') {
             out.push("\\r");
-        } else if (c == '\t') {
+        } else if (octet == '\t') {
             out.push("\\t");
-        } else if (c == 8) {
+        } else if (octet == 8) {
             out.push("\\b");
-        } else if (c == 12) {
+        } else if (octet == 12) {
             out.push("\\f");
         } else {
             // The other C0 controls: one byte below 0x20, as `\u00xx`.
-            bytes one = [c];
+            bytes one = [octet];
             out.push("\\u00" + one.hex());
         }
-        i = i + 1;
-        run = i;
+        byte_index = byte_index + 1;
+        run = byte_index;
     }
-    out.push(s.substr(run, n));
+    out.push(text.substr(run, text_length));
     out.push("\"");
 }
 
 // --- bytes -------------------------------------------------------------------
-// How many bytes the character at `i` takes, by its lead byte alone, never
+// How many bytes the character at `byte_index` takes, by its lead byte alone, never
 // running past the end. For quoting text in a message, not for validating.
-int char_length(str s, int i) {
-    int c = s.byte_at(i);
-    int k = 1;
-    if (c >= 240) {
-        k = 4;
-    } else if (c >= 224) {
-        k = 3;
-    } else if (c >= 192) {
-        k = 2;
+int char_length(str text, int byte_index) {
+    int lead_byte = text.byte_at(byte_index);
+    int byte_count = 1;
+    if (lead_byte >= 240) {
+        byte_count = 4;
+    } else if (lead_byte >= 224) {
+        byte_count = 3;
+    } else if (lead_byte >= 192) {
+        byte_count = 2;
     }
-    if (i + k > s.size()) {
-        return s.size() - i;
+    if (byte_index + byte_count > text.size()) {
+        return text.size() - byte_index;
     }
-    return k;
+    return byte_count;
 }
 
-// The character at `i`, for a message.
-str char_at(str s, int i) {
-    return s.substr(i, i + char_length(s, i));
+// The character at `byte_index`, for a message.
+str char_at(str text, int byte_index) {
+    return text.substr(byte_index, byte_index + char_length(text, byte_index));
 }
 
-bool is_digit(int c) {
-    return c >= '0' && c <= '9';
+bool is_digit(int octet) {
+    return octet >= '0' && octet <= '9';
 }
 
 // The value of one hex digit, either case, or -1.
-int hex_digit(int c) {
-    if (c >= '0' && c <= '9') {
-        return c - 48;
+int hex_digit(int octet) {
+    if (octet >= '0' && octet <= '9') {
+        return octet - 48;
     }
-    if (c >= 'a' && c <= 'f') {
-        return c - 87;
+    if (octet >= 'a' && octet <= 'f') {
+        return octet - 87;
     }
-    if (c >= 'A' && c <= 'F') {
-        return c - 55;
+    if (octet >= 'A' && octet <= 'F') {
+        return octet - 55;
     }
     return -1;
 }

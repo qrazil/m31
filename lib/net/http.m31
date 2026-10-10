@@ -42,7 +42,7 @@
 //                                    -> Result<int, Error>   connections served
 //   http.serve_stream(stream, handler, max_requests:)
 //                                    -> Result<int, Error>   requests served, over any io.Stream
-//   http.serve_conn(conn, handler, max_requests:)
+//   http.serve_connection(conn, handler, max_requests:)
 //                                    -> Result<int, Error>   serve_stream over a net.Conn
 //
 // API -- the client
@@ -247,9 +247,9 @@ const bytes SEMI1 = [59];
 const bytes QUERY1 = [63];
 const bytes HASH1 = [35];
 const int HTAB = 9;
-const int LF = 10;
-const int CR = 13;
-const int SP = 32;
+const int LINE_FEED = 10;
+const int CARRIAGE_RETURN = 13;
+const int SPACE = 32;
 const int PERCENT = 37;
 const int PLUS = 43;
 const int DEL = 127;
@@ -458,16 +458,16 @@ pub int Error.status() {
 // An `io.Error` off a stream, in this module's vocabulary. It goes through
 // `net.error_of`, which is exact for everything a socket produces, so a
 // timeout arrives as `Error.TimedOut` and not as a number.
-Error transport(io.Error e) {
-    return from_net(net.error_of(e));
+Error transport(io.Error error) {
+    return from_net(net.error_of(error));
 }
 
 // `net.Error`, in this module's own vocabulary -- each module's error type
 // stays its own (docs/errors-decision.md §4), so a socket failure widens by
 // matching on `net`'s names and returning this module's, rather than nesting
 // a whole `net.Error` inside this one.
-Error from_net(net.Error e) {
-    match (e) {
+Error from_net(net.Error error) {
+    match (error) {
         case Refused: {
             return Error.Refused;
         }
@@ -504,77 +504,77 @@ Error from_net(net.Error e) {
 // near it.
 
 // tchar: what a method, a field name and a chunk extension name may contain.
-bool is_tchar(int c) {
-    if (c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
+bool is_tchar(int octet) {
+    if (octet >= '0' && octet <= '9' || octet >= 'a' && octet <= 'z' || octet >= 'A' && octet <= 'Z') {
         return true;
     }
-    return c == '!' || c == '#' || c == '$' || c == '%' || c == '&' || c == '\'' || c == '*' || c == '+' || c == '-' || c == '.' || c == '^' || c == '_' || c == '`' || c == '|' || c == '~';
+    return octet == '!' || octet == '#' || octet == '$' || octet == '%' || octet == '&' || octet == '\'' || octet == '*' || octet == '+' || octet == '-' || octet == '.' || octet == '^' || octet == '_' || octet == '`' || octet == '|' || octet == '~';
 }
 
 // A non-empty run of tchars.
-bool is_token(bytes b) {
-    if (b.size() == 0) {
+bool is_token(bytes data) {
+    if (data.size() == 0) {
         return false;
     }
-    for (int c in b) {
-        if (!is_tchar(c)) {
+    for (int octet in data) {
+        if (!is_tchar(octet)) {
             return false;
         }
     }
     return true;
 }
 
-// The first byte of `b` that may not appear in a field value, as an index,
+// The first byte of `data` that may not appear in a field value, as an index,
 // or -1. HTAB is allowed; everything below 0x20 is not, DEL is not, and
 // bytes above 127 are -- they are answered for by the UTF-8 decode that
 // turns a value into a `str`.
-int bad_value_at(bytes b) {
-    for (int i in 0 .. b.size()) {
-        int c = b[i];
-        if (c != HTAB && (c < SP || c == DEL)) {
+int bad_value_at(bytes data) {
+    for (int i in 0 .. data.size()) {
+        int octet = data[i];
+        if (octet != HTAB && (octet < SPACE || octet == DEL)) {
             return i;
         }
     }
     return -1;
 }
 
-// The first byte of `b` that may not appear in a request target, or -1:
+// The first byte of `data` that may not appear in a request target, or -1:
 // visible ASCII and above, so a control character or a space is refused and
 // raw UTF-8 in a path -- which clients do send -- is not.
-int bad_target_at(bytes b) {
-    for (int i in 0 .. b.size()) {
-        int c = b[i];
-        if (c <= SP || c == DEL) {
+int bad_target_at(bytes data) {
+    for (int i in 0 .. data.size()) {
+        int octet = data[i];
+        if (octet <= SPACE || octet == DEL) {
             return i;
         }
     }
     return -1;
 }
 
-int hex_val(int c) {
-    if (c >= '0' && c <= '9') {
-        return c - 48;
+int hex_value(int octet) {
+    if (octet >= '0' && octet <= '9') {
+        return octet - 48;
     }
-    if (c >= 'a' && c <= 'f') {
-        return c - 87;
+    if (octet >= 'a' && octet <= 'f') {
+        return octet - 87;
     }
-    if (c >= 'A' && c <= 'F') {
-        return c - 55;
+    if (octet >= 'A' && octet <= 'F') {
+        return octet - 55;
     }
     return -1;
 }
 
 // A non-negative int as lowercase hex with no leading zeros: a chunk size.
-str hex_of(int v) {
-    if (v == 0) {
+str hex_of(int value) {
+    if (value == 0) {
         return "0";
     }
     List<str> digits = [];
-    int n = v;
-    while (n > 0) {
-        int d = n & 15;
-        digits.push(HEX.substr(d, d + 1));
-        n = n >> 4;
+    int remaining = value;
+    while (remaining > 0) {
+        int digit = remaining & 15;
+        digits.push(HEX.substr(digit, digit + 1));
+        remaining = remaining >> 4;
     }
     digits.reverse();
     return digits.join("");
@@ -583,21 +583,21 @@ str hex_of(int v) {
 // How a message names one byte: the character if it is printable ASCII, and
 // the hex otherwise -- a byte of a multi-byte UTF-8 character is not a
 // character on its own, and a NUL has no spelling at all.
-str shown(int c) {
-    if (c == 0) {
+str shown(int octet) {
+    if (octet == 0) {
         return "a NUL byte";
     }
-    if (c == CR) {
+    if (octet == CARRIAGE_RETURN) {
         return "a carriage return";
     }
-    if (c == LF) {
+    if (octet == LINE_FEED) {
         return "a line feed";
     }
-    if (c >= '!' && c <= '~') {
-        bytes one = [c];
+    if (octet >= '!' && octet <= '~') {
+        bytes one = [octet];
         return "'" + one.utf8().or("?") + "'";
     }
-    bytes one = [c];
+    bytes one = [octet];
     return "the byte 0x" + one.hex();
 }
 
@@ -605,16 +605,16 @@ str shown(int c) {
 // the text in quotes if every byte is printable ASCII and there are few
 // enough of them, and hex otherwise. An error message is written to a log,
 // and a log that echoes whatever a client sent is a log nobody can read.
-str quoted(bytes b) {
-    bytes head = b;
+str quoted(bytes data) {
+    bytes head = data;
     str tail = "";
     if (head.size() > 48) {
-        head = b.substr(0, 48);
+        head = data.substr(0, 48);
         tail = "...";
     }
     for (int i in 0 .. head.size()) {
-        int c = head[i];
-        if (c < ' ' || c > '~') {
+        int octet = head[i];
+        if (octet < ' ' || octet > '~') {
             return "0x" + head.hex() + tail;
         }
     }
@@ -624,8 +624,8 @@ str quoted(bytes b) {
 // Bytes this module has already checked are printable ASCII, as text. The
 // `or` is never taken: every caller has run `is_token`, `bad_value_at` or
 // `bad_target_at` over these bytes first.
-str ascii(bytes b) {
-    return b.utf8().or("");
+str ascii(bytes data) {
+    return data.utf8().or("");
 }
 
 // --- headers ---------------------------------------------------------------
@@ -641,8 +641,8 @@ str ascii(bytes b) {
 /// Names are folded to lowercase once, when they go in, so every lookup is a
 /// comparison and no caller has to remember which spelling arrived.
 pub type Headers {
-    List<str> ns;
-    List<str> vs;
+    List<str> names;
+    List<str> values;
 }
 
 /// Set `name` to `value`, replacing whatever was there.
@@ -654,22 +654,22 @@ pub type Headers {
 /// program.
 pub void Headers.set(str name, str value) {
     str key = name.to_lower();
-    match (ns.index_of(key)) {
-        case Some(int i): {
-            vs[i] = value;
+    match (names.index_of(key)) {
+        case Some(int index): {
+            values[index] = value;
         }
         case None: {
-            ns.push(key);
-            vs.push(value);
+            names.push(key);
+            values.push(value);
         }
     }
 }
 
 /// The value of `name`, or `None`. The name is matched case-insensitively.
 pub Option<str> Headers.get(str name) {
-    match (ns.index_of(name.to_lower())) {
-        case Some(int i): {
-            return Option<str>.Some(vs[i]);
+    match (names.index_of(name.to_lower())) {
+        case Some(int index): {
+            return Option<str>.Some(values[index]);
         }
         case None: {
             return Option<str>.None;
@@ -678,16 +678,16 @@ pub Option<str> Headers.get(str name) {
 }
 
 /// Whether `name` is present.
-pub bool Headers.has(str name) {
-    return ns.contains(name.to_lower());
+pub bool Headers.has_name(str name) {
+    return names.contains(name.to_lower());
 }
 
 /// Remove `name` if it is there.
 pub void Headers.remove(str name) {
-    match (ns.index_of(name.to_lower())) {
-        case Some(int i): {
-            str gone = ns.remove_at(i);
-            str also = vs.remove_at(i);
+    match (names.index_of(name.to_lower())) {
+        case Some(int index): {
+            str gone = names.remove_at(index);
+            str also = values.remove_at(index);
         }
         case None: {
         }
@@ -696,18 +696,18 @@ pub void Headers.remove(str name) {
 
 /// The field names, lowercased, in order. A fresh list.
 pub List<str> Headers.names() {
-    return clone(ns);
+    return clone(names);
 }
 
 /// How many fields there are.
 pub int Headers.size() {
-    return ns.size();
+    return names.size();
 }
 
 // A copy, so that a `Request` handed to a handler cannot have its fields
 // changed under the caller that built it.
 Headers Headers.copy() {
-    return Headers(clone(ns), clone(vs));
+    return Headers(clone(names), clone(values));
 }
 
 // The parser's door: add a field that has just been read off the wire.
@@ -716,19 +716,19 @@ Headers Headers.copy() {
 // three fields that are not list-valued, where a repeat is refused. See the
 // module note on duplicates.
 Result<void, Error> Headers.merge(str name, str value) {
-    match (ns.index_of(name)) {
-        case Some(int i): {
+    match (names.index_of(name)) {
+        case Some(int index): {
             if (name == "content-length" || name == "transfer-encoding") {
                 return Result<void, Error>.Err(Error.Framing);
             }
             if (name == "host") {
                 return Result<void, Error>.Err(Error.Syntax);
             }
-            vs[i] = vs[i] + ", " + value;
+            values[index] = values[index] + ", " + value;
         }
         case None: {
-            ns.push(name);
-            vs.push(value);
+            names.push(name);
+            values.push(value);
         }
     }
     return Result<void, Error>.Ok;
@@ -740,9 +740,9 @@ Result<void, Error> Headers.merge(str name, str value) {
 // the message and nowhere else, because a client told that its *request*
 // field is an illegal *response* field looks in the wrong place.
 Result<void, Error> Headers.render(bytes out, str kind) {
-    for (int i in 0 .. ns.size()) {
-        bytes name = ns[i].to_bytes();
-        bytes value = vs[i].to_bytes();
+    for (int i in 0 .. names.size()) {
+        bytes name = names[i].to_bytes();
+        bytes value = values[i].to_bytes();
         if (!is_token(name)) {
             return Result<void, Error>.Err(Error.Syntax);
         }
@@ -752,7 +752,7 @@ Result<void, Error> Headers.render(bytes out, str kind) {
         }
         out.extend(name);
         out.push(':');
-        out.push(SP);
+        out.push(SPACE);
         out.extend(value);
         out.extend(CRLF);
     }
@@ -761,17 +761,17 @@ Result<void, Error> Headers.render(bytes out, str kind) {
 
 /// An empty `Headers`.
 pub Headers headers() {
-    List<str> ns = [];
-    List<str> vs = [];
-    return Headers(ns, vs);
+    List<str> field_names = [];
+    List<str> field_values = [];
+    return Headers(field_names, field_values);
 }
 
 // Whether a comma-separated field holds `token`, case-insensitively: the
 // question `Connection: keep-alive, Upgrade` is asked.
 bool has_token(Option<str> field, str token) {
     match (field) {
-        case Some(str v): {
-            for (str part in v.to_lower().split(",")) {
+        case Some(str field_value): {
+            for (str part in field_value.to_lower().split(",")) {
                 if (part.trim() == token) {
                     return true;
                 }
@@ -790,7 +790,7 @@ bool has_token(Option<str> field, str token) {
 // same sixty-six characters in both places.
 const str UNRESERVED = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
 
-/// `s` with every octet outside the unreserved set, and outside `safe`,
+/// `text` with every octet outside the unreserved set, and outside `safe`,
 /// written as `%HH`.
 ///
 /// `safe` is the extra characters to leave alone, and it differs by where
@@ -802,24 +802,24 @@ const str UNRESERVED = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123
 /// whose output nobody can compare.
 ///
 /// The digits are uppercase, which RFC 3986 §6.2.2.1 says to prefer.
-pub str quote(str s, str safe = "/") {
+pub str quote(str text, str safe = "/") {
     List<str> out = [];
-    for (int c in s.to_bytes()) {
-        bytes one = [c];
-        str ch = "";
-        if (c >= ' ' && c <= '~') {
-            ch = ascii(one);
+    for (int octet in text.to_bytes()) {
+        bytes one = [octet];
+        str character = "";
+        if (octet >= ' ' && octet <= '~') {
+            character = ascii(one);
         }
-        if (ch != "" && (UNRESERVED.contains(ch) || safe.contains(ch))) {
-            out.push(ch);
+        if (character != "" && (UNRESERVED.contains(character) || safe.contains(character))) {
+            out.push(character);
         } else {
-            out.push("%" + HEX.substr(c >> 4, (c >> 4) + 1).to_upper() + HEX.substr(c & 15, (c & 15) + 1).to_upper());
+            out.push("%" + HEX.substr(octet >> 4, (octet >> 4) + 1).to_upper() + HEX.substr(octet & 15, (octet & 15) + 1).to_upper());
         }
     }
     return out.join("");
 }
 
-/// The text `s` spells with its `%HH` escapes decoded.
+/// The text `text` spells with its `%HH` escapes decoded.
 ///
 /// `plus: true` also reads `+` as a space, which is the form a query string
 /// and an HTML form body use and a path does not. It is a flag on the one
@@ -831,11 +831,11 @@ pub str quote(str s, str safe = "/") {
 /// not encode it, and reading it through unchanged is how two readers
 /// disagree about what a path was. Escapes that spell bytes which are not
 /// UTF-8 are refused too, because the answer is a `str`.
-pub Result<str, Error> unquote(str s, bool plus = false) {
-    bytes raw = pct_decode(s.to_bytes(), plus, "the text")?;
+pub Result<str, Error> unquote(str text, bool should_decode_plus = false) {
+    bytes raw = pct_decode(text.to_bytes(), should_decode_plus, "the text")?;
     match (raw.utf8()) {
-        case Some(str t): {
-            return Result<str, Error>.Ok(t);
+        case Some(str decoded): {
+            return Result<str, Error>.Ok(decoded);
         }
         case None: {
             return Result<str, Error>.Err(Error.Syntax);
@@ -843,31 +843,31 @@ pub Result<str, Error> unquote(str s, bool plus = false) {
     }
 }
 
-// The octets `b` spells. `where` names the part of the message in the error,
+// The octets `encoded` spells. `where` names the part of the message in the error,
 // so "the request target" and "the URL" say which.
-Result<bytes, Error> pct_decode(bytes b, bool plus, str where) {
+Result<bytes, Error> pct_decode(bytes encoded, bool is_plus, str where) {
     bytes out = [];
-    int i = 0;
-    int n = b.size();
-    while (i < n) {
-        int c = b[i];
-        if (c == PERCENT) {
-            if (i + 2 >= n) {
+    int index = 0;
+    int encoded_length = encoded.size();
+    while (index < encoded_length) {
+        int octet = encoded[index];
+        if (octet == PERCENT) {
+            if (index + 2 >= encoded_length) {
                 return Result<bytes, Error>.Err(Error.Syntax);
             }
-            int hi = hex_val(b[i + 1]);
-            int lo = hex_val(b[i + 2]);
-            if (hi < 0 || lo < 0) {
+            int high_digit = hex_value(encoded[index + 1]);
+            int low_digit = hex_value(encoded[index + 2]);
+            if (high_digit < 0 || low_digit < 0) {
                 return Result<bytes, Error>.Err(Error.Syntax);
             }
-            out.push(hi * 16 + lo);
-            i = i + 3;
-        } else if (plus && c == PLUS) {
-            out.push(SP);
-            i = i + 1;
+            out.push(high_digit * 16 + low_digit);
+            index = index + 3;
+        } else if (is_plus && octet == PLUS) {
+            out.push(SPACE);
+            index = index + 1;
         } else {
-            out.push(c);
-            i = i + 1;
+            out.push(octet);
+            index = index + 1;
         }
     }
     return Result<bytes, Error>.Ok(out);
@@ -966,12 +966,12 @@ int default_port(str scheme) {
     return DEFAULT_PORT;
 }
 
-// The index of the first byte of `b` that is `a` or `c`, or -1. Two needles
+// The index of the first byte of `data` that is `first_needle` or `second_needle`, or -1. Two needles
 // and not `index_of` twice, because the answer is the earlier of the two and
 // finding both to compare them walks the string again.
-int first_of(bytes b, int a, int c) {
-    for (int i in 0 .. b.size()) {
-        if (b[i] == a || b[i] == c) {
+int first_of(bytes data, int first_needle, int second_needle) {
+    for (int i in 0 .. data.size()) {
+        if (data[i] == first_needle || data[i] == second_needle) {
             return i;
         }
     }
@@ -1008,10 +1008,10 @@ str bracket(str host) {
 /// Userinfo before the host (`http://user:pw@host/`) is refused: RFC 9110
 /// deprecates it and this client will not send it.
 pub Result<Url, Error> parse_url(str url) {
-    bytes b = url.to_bytes();
-    match (b.index_of("://".to_bytes())) {
+    bytes url_bytes = url.to_bytes();
+    match (url_bytes.index_of("://".to_bytes())) {
         case Some(int sep): {
-            return after_scheme(url, b, sep);
+            return after_scheme(url, url_bytes, sep);
         }
         case None: {
             return Result<Url, Error>.Err(Error.BadUrl);
@@ -1019,17 +1019,17 @@ pub Result<Url, Error> parse_url(str url) {
     }
 }
 
-Result<Url, Error> after_scheme(str url, bytes b, int sep) {
-    str scheme = ascii(b.substr(0, sep)).to_lower();
+Result<Url, Error> after_scheme(str url, bytes url_bytes, int sep) {
+    str scheme = ascii(url_bytes.substr(0, sep)).to_lower();
     if (scheme != "http" && scheme != "https") {
         return Result<Url, Error>.Err(Error.BadUrl);
     }
-    bytes rest = b.substr(sep + 3, b.size());
+    bytes rest = url_bytes.substr(sep + 3, url_bytes.size());
     // The fragment is cut before anything else looks at the bytes, so a `#`
     // cannot be mistaken for part of a query.
     match (rest.index_of(HASH1)) {
-        case Some(int h): {
-            rest = rest.substr(0, h);
+        case Some(int hash_index): {
+            rest = rest.substr(0, hash_index);
         }
         case None: {
         }
@@ -1057,8 +1057,8 @@ Result<Url, Error> after_scheme(str url, bytes b, int sep) {
         return Result<Url, Error>.Err(Error.BadUrl);
     }
     int fallback = default_port(scheme);
-    List<str> hp = split_host_port(authority, quoted(b), fallback)?;
-    return url_of(scheme, hp[0], hp[1].parse_int().or(fallback), target, quoted(b));
+    List<str> host_and_port = split_host_port(authority, quoted(url_bytes), fallback)?;
+    return url_of(scheme, host_and_port[0], host_and_port[1].parse_int().or(fallback), target, quoted(url_bytes));
 }
 
 // Build a `Url` out of a host, a port and a target. Shared by `parse_url` and
@@ -1070,9 +1070,9 @@ Result<Url, Error> url_of(str scheme, str host, int port, bytes target, str what
     str path = ascii(target);
     str query = "";
     match (target.index_of(QUERY1)) {
-        case Some(int q): {
-            path = ascii(target.substr(0, q));
-            query = ascii(target.substr(q + 1, target.size()));
+        case Some(int query_index): {
+            path = ascii(target.substr(0, query_index));
+            query = ascii(target.substr(query_index + 1, target.size()));
         }
         case None: {
         }
@@ -1080,8 +1080,8 @@ Result<Url, Error> url_of(str scheme, str host, int port, bytes target, str what
     if (path != "*") {
         bytes decoded = pct_decode(path.to_bytes(), false, what)?;
         match (decoded.utf8()) {
-            case Some(str t): {
-                path = t;
+            case Some(str decoded_path): {
+                path = decoded_path;
             }
             case None: {
                 return Result<Url, Error>.Err(Error.Syntax);
@@ -1104,16 +1104,16 @@ Result<List<str>, Error> split_host_port(bytes authority, str what, int fallback
     if (authority[authority.size() - 1] == ']') {
         colon = -1;
     } else {
-        int i = authority.size() - 1;
-        while (i >= 0) {
-            int c = authority[i];
-            if (c == ']') {
-                i = -1;
-            } else if (c == ':') {
-                colon = i;
-                i = -1;
+        int index = authority.size() - 1;
+        while (index >= 0) {
+            int octet = authority[index];
+            if (octet == ']') {
+                index = -1;
+            } else if (octet == ':') {
+                colon = index;
+                index = -1;
             } else {
-                i = i - 1;
+                index = index - 1;
             }
         }
     }
@@ -1125,14 +1125,14 @@ Result<List<str>, Error> split_host_port(bytes authority, str what, int fallback
         if (digits.size() == 0 || digits.size() > 5) {
             return Result<List<str>, Error>.Err(Error.BadUrl);
         }
-        for (int c in digits) {
-            if (c < '0' || c > '9') {
+        for (int octet in digits) {
+            if (octet < '0' || octet > '9') {
                 return Result<List<str>, Error>.Err(Error.BadUrl);
             }
         }
         port = ascii(digits);
-        int n = port.parse_int().or(0);
-        if (n < 1 || n > 65535) {
+        int port_number = port.parse_int().or(0);
+        if (port_number < 1 || port_number > 65535) {
             return Result<List<str>, Error>.Err(Error.BadUrl);
         }
     }
@@ -1143,8 +1143,8 @@ Result<List<str>, Error> split_host_port(bytes authority, str what, int fallback
         return Result<List<str>, Error>.Err(Error.BadUrl);
     }
     match (host.utf8()) {
-        case Some(str h): {
-            List<str> out = [h.to_lower(), port];
+        case Some(str host_text): {
+            List<str> out = [host_text.to_lower(), port];
             return Result<List<str>, Error>.Ok(out);
         }
         case None: {
@@ -1164,8 +1164,8 @@ const Map<int, str> REASONS = {100: "Continue", 101: "Switching Protocols", 200:
 /// its class.
 pub str reason(int status) {
     match (REASONS.get(status)) {
-        case Some(str r): {
-            return r;
+        case Some(str phrase_text): {
+            return phrase_text;
         }
         case None: {
         }
@@ -1188,7 +1188,7 @@ pub str reason(int status) {
 // 1xx, 204 and 304 have no body and no framing fields, ever. A
 // Content-Length on a 304 is a real interoperability bug and not a harmless
 // one: a client that believes it goes looking for a body that is not coming.
-bool bodiless(int status) {
+bool is_bodiless(int status) {
     return status >= 100 && status < 200 || status == 204 || status == 304;
 }
 
@@ -1206,7 +1206,7 @@ pub type Request {
     str ver;
     Headers head;
     bytes payload = [];
-    bool framed = false;
+    bool is_framed = false;
 }
 
 /// The method, as it was written: `"GET"`, `"POST"`. HTTP methods are
@@ -1267,13 +1267,13 @@ pub void Request.set(str name, str value) {
 }
 
 /// Replace the body.
-pub void Request.set_body(bytes b) {
-    payload = clone(b);
+pub void Request.set_body(bytes data) {
+    payload = clone(data);
 }
 
-/// Replace the body with the UTF-8 of `s`.
-pub void Request.set_text(str s) {
-    payload = s.to_bytes();
+/// Replace the body with the UTF-8 of `content`.
+pub void Request.set_text(str content) {
+    payload = content.to_bytes();
 }
 
 /// Send this body with `Transfer-Encoding: chunked` instead of a
@@ -1283,18 +1283,18 @@ pub void Request.set_text(str s) {
 /// is a **framing choice**, for a peer that wants chunks and for the tests
 /// that drive the decoder. A streaming body -- the thing chunked framing
 /// exists for -- is not in this module; see the module note.
-pub void Request.set_chunked(bool on) {
-    framed = on;
+pub void Request.set_chunked(bool is_chunked) {
+    is_framed = is_chunked;
 }
 
 /// Send `"1.0"` or `"1.1"` on the request line. Anything else traps: it is
 /// the program's own value, and there is no other version this module can
 /// speak.
-pub void Request.set_version(str v) {
-    if (v != "1.0" && v != "1.1") {
-        trap("set_version(" + v + "): this module speaks HTTP/1.0 and HTTP/1.1");
+pub void Request.set_version(str version_text) {
+    if (version_text != "1.0" && version_text != "1.1") {
+        trap("set_version(" + version_text + "): this module speaks HTTP/1.0 and HTTP/1.1");
     }
-    ver = v;
+    ver = version_text;
 }
 
 /// A request to send: the method, and an absolute `http://` or `https://` URL.
@@ -1308,8 +1308,8 @@ pub Result<Request, Error> request(str method, str url) {
     if (!is_token(method.to_bytes())) {
         return Result<Request, Error>.Err(Error.Syntax);
     }
-    Url u = parse_url(url)?;
-    return Result<Request, Error>.Ok(Request(method, u, "1.1", headers()));
+    Url parsed_url = parse_url(url)?;
+    return Result<Request, Error>.Ok(Request(method, parsed_url, "1.1", headers()));
 }
 
 // --- responses -------------------------------------------------------------
@@ -1321,7 +1321,7 @@ pub type Response {
     str ver;
     Headers head;
     bytes payload = [];
-    bool framed = false;
+    bool is_framed = false;
 }
 
 /// The status code.
@@ -1382,24 +1382,24 @@ pub void Response.set(str name, str value) {
 }
 
 /// Replace the body.
-pub void Response.set_body(bytes b) {
-    payload = clone(b);
+pub void Response.set_body(bytes data) {
+    payload = clone(data);
 }
 
-/// Replace the body with the UTF-8 of `s`.
-pub void Response.set_text(str s) {
-    payload = s.to_bytes();
+/// Replace the body with the UTF-8 of `content`.
+pub void Response.set_text(str content) {
+    payload = content.to_bytes();
 }
 
 /// Write this body as chunks rather than with a `Content-Length`. See
 /// `Request.set_chunked`: it is a framing choice, not a streaming one.
-pub void Response.set_chunked(bool on) {
-    framed = on;
+pub void Response.set_chunked(bool is_chunked) {
+    is_framed = is_chunked;
 }
 
-/// Send `r` as the reason phrase instead of the registered one.
-pub void Response.set_reason(str r) {
-    phrase = r;
+/// Send `reason_text` as the reason phrase instead of the registered one.
+pub void Response.set_reason(str reason_text) {
+    phrase = reason_text;
 }
 
 /// An empty response with this status and the registered reason phrase.
@@ -1415,34 +1415,34 @@ pub Response response(int status) {
 
 /// A `text/plain; charset=utf-8` response carrying `body`.
 pub Response text_response(str body, int status = 200) {
-    Response r = response(status);
-    r.set("content-type", "text/plain; charset=utf-8");
-    r.set_text(body);
-    return r;
+    Response reply = response(status);
+    reply.set("content-type", "text/plain; charset=utf-8");
+    reply.set_text(body);
+    return reply;
 }
 
-/// An `application/json` response carrying `v`.
+/// An `application/json` response carrying `value`.
 ///
 /// It is a `Result` because `json.stringify` is: a NaN, an infinity and a
 /// value that contains itself have no JSON spelling.
-pub Result<Response, Error> json_response(json.Value v, int status = 200) {
-    match (json.stringify(v)) {
+pub Result<Response, Error> json_response(json.Value value, int status = 200) {
+    match (json.stringify(value)) {
         case Ok(str text): {
-            Response r = response(status);
-            r.set("content-type", "application/json");
-            r.set_text(text);
-            return Result<Response, Error>.Ok(r);
+            Response reply = response(status);
+            reply.set("content-type", "application/json");
+            reply.set_text(text);
+            return Result<Response, Error>.Ok(reply);
         }
-        case Err(json.Error e): {
+        case Err(_): {
             return Result<Response, Error>.Err(Error.Other);
         }
     }
 }
 
-Result<str, Error> utf8_of(bytes b, str what) {
-    match (b.utf8()) {
-        case Some(str t): {
-            return Result<str, Error>.Ok(t);
+Result<str, Error> utf8_of(bytes data, str what) {
+    match (data.utf8()) {
+        case Some(str text): {
+            return Result<str, Error>.Ok(text);
         }
         case None: {
             return Result<str, Error>.Err(Error.Syntax);
@@ -1450,13 +1450,13 @@ Result<str, Error> utf8_of(bytes b, str what) {
     }
 }
 
-Result<json.Value, Error> json_of(bytes b, str what) {
-    str text = utf8_of(b, what)?;
+Result<json.Value, Error> json_of(bytes data, str what) {
+    str text = utf8_of(data, what)?;
     match (json.parse(text)) {
-        case Ok(json.Value v): {
-            return Result<json.Value, Error>.Ok(v);
+        case Ok(json.Value value): {
+            return Result<json.Value, Error>.Ok(value);
         }
-        case Err(json.Error e): {
+        case Err(_): {
             return Result<json.Value, Error>.Err(Error.Syntax);
         }
     }
@@ -1465,8 +1465,8 @@ Result<json.Value, Error> json_of(bytes b, str what) {
 // --- reading a message head ------------------------------------------------
 // The header block, up to and including the blank line, or an empty `bytes`
 // if the stream was at a clean end before anything arrived.
-Result<bytes, Error> read_head(io.Stream s) {
-    match (s.read_until(CRLF2, MAX_HEAD)) {
+Result<bytes, Error> read_head(io.Stream stream) {
+    match (stream.read_until(CRLF2, MAX_HEAD)) {
         case Ok(bytes raw): {
             if (raw.size() == 0 || raw.ends_with(CRLF2)) {
                 return Result<bytes, Error>.Ok(raw);
@@ -1476,8 +1476,8 @@ Result<bytes, Error> read_head(io.Stream s) {
             }
             return Result<bytes, Error>.Err(Error.Closed);
         }
-        case Err(io.Error e): {
-            return Result<bytes, Error>.Err(transport(e));
+        case Err(io.Error error): {
+            return Result<bytes, Error>.Err(transport(error));
         }
     }
 }
@@ -1493,8 +1493,8 @@ Result<List<bytes>, Error> head_lines(bytes raw) {
         if (line.size() > MAX_HEADER_LINE) {
             return Result<List<bytes>, Error>.Err(Error.TooLarge);
         }
-        for (int k in 0 .. line.size()) {
-            if (line[k] == CR || line[k] == LF) {
+        for (int byte_index in 0 .. line.size()) {
+            if (line[byte_index] == CARRIAGE_RETURN || line[byte_index] == LINE_FEED) {
                 return Result<List<bytes>, Error>.Err(Error.Syntax);
             }
         }
@@ -1504,33 +1504,33 @@ Result<List<bytes>, Error> head_lines(bytes raw) {
 
 // Every field line from `from` to the end of the block.
 Result<Headers, Error> parse_headers(List<bytes> lines, int from) {
-    Headers h = headers();
-    int i = from;
-    while (i < lines.size()) {
-        if (i - from >= MAX_HEADERS) {
+    Headers fields = headers();
+    int line_index = from;
+    while (line_index < lines.size()) {
+        if (line_index - from >= MAX_HEADERS) {
             return Result<Headers, Error>.Err(Error.TooLarge);
         }
-        bytes line = lines[i];
-        i = i + 1;
+        bytes line = lines[line_index];
+        line_index = line_index + 1;
         if (line.size() == 0) {
             // The block is split on CRLF, so an empty line inside it is a
             // message that ended and then went on -- which the read above
             // cannot produce, and which is refused rather than ignored.
             return Result<Headers, Error>.Err(Error.Syntax);
         }
-        if (line[0] == SP || line[0] == HTAB) {
+        if (line[0] == SPACE || line[0] == HTAB) {
             return Result<Headers, Error>.Err(Error.Syntax);
         }
-        parse_header_line(h, line)?;
+        parse_header_line(fields, line)?;
     }
-    return Result<Headers, Error>.Ok(h);
+    return Result<Headers, Error>.Ok(fields);
 }
 
-Result<void, Error> parse_header_line(Headers h, bytes line) {
+Result<void, Error> parse_header_line(Headers fields, bytes line) {
     int colon = -1;
     match (line.index_of(COLON1)) {
-        case Some(int c): {
-            colon = c;
+        case Some(int colon_index): {
+            colon = colon_index;
         }
         case None: {
             return Result<void, Error>.Err(Error.Syntax);
@@ -1556,8 +1556,8 @@ Result<void, Error> parse_header_line(Headers h, bytes line) {
     // whitespace RFC 9110 puts either side of a field value.
     bytes trimmed = value.trim();
     match (trimmed.utf8()) {
-        case Some(str v): {
-            return h.merge(ascii(name).to_lower(), v);
+        case Some(str field_value): {
+            return fields.merge(ascii(name).to_lower(), field_value);
         }
         case None: {
             return Result<void, Error>.Err(Error.Syntax);
@@ -1566,26 +1566,26 @@ Result<void, Error> parse_header_line(Headers h, bytes line) {
 }
 
 // --- bodies ----------------------------------------------------------------
-// Exactly `n` bytes. A stream that ends first is the peer having declared a
+// Exactly `byte_count` bytes. A stream that ends first is the peer having declared a
 // length it did not send, which is a lie and not a short answer: on the way
 // in it desynchronises the connection, and on the way out it is the JSON
 // document the caller is about to parse with half of it missing.
-Result<bytes, Error> read_exact(io.Stream s, int n, str what) {
+Result<bytes, Error> read_exact(io.Stream stream, int byte_count, str what) {
     bytes out = [];
-    while (out.size() < n) {
-        int want = n - out.size();
+    while (out.size() < byte_count) {
+        int want = byte_count - out.size();
         if (want > CHUNK) {
             want = CHUNK;
         }
-        match (s.read(want)) {
+        match (stream.read(want)) {
             case Ok(bytes got): {
                 if (got.size() == 0) {
                     return Result<bytes, Error>.Err(Error.Closed);
                 }
                 out.extend(got);
             }
-            case Err(io.Error e): {
-                return Result<bytes, Error>.Err(transport(e));
+            case Err(io.Error error): {
+                return Result<bytes, Error>.Err(transport(error));
             }
         }
     }
@@ -1593,10 +1593,10 @@ Result<bytes, Error> read_exact(io.Stream s, int n, str what) {
 }
 
 // Everything until the stream ends, up to `limit`.
-Result<bytes, Error> read_to_end(io.Stream s, int limit, str what) {
+Result<bytes, Error> read_to_end(io.Stream stream, int limit, str what) {
     bytes out = [];
     while (true) {
-        match (s.read(CHUNK)) {
+        match (stream.read(CHUNK)) {
             case Ok(bytes got): {
                 if (got.size() == 0) {
                     return Result<bytes, Error>.Ok(out);
@@ -1606,16 +1606,16 @@ Result<bytes, Error> read_to_end(io.Stream s, int limit, str what) {
                     return Result<bytes, Error>.Err(Error.TooLarge);
                 }
             }
-            case Err(io.Error e): {
-                return Result<bytes, Error>.Err(transport(e));
+            case Err(io.Error error): {
+                return Result<bytes, Error>.Err(transport(error));
             }
         }
     }
 }
 
 // One CRLF-terminated line, without its CRLF.
-Result<bytes, Error> read_line(io.Stream s, int limit, str what) {
-    match (s.read_until(CRLF, limit)) {
+Result<bytes, Error> read_line(io.Stream stream, int limit, str what) {
+    match (stream.read_until(CRLF, limit)) {
         case Ok(bytes got): {
             if (got.ends_with(CRLF)) {
                 return Result<bytes, Error>.Ok(got.substr(0, got.size() - 2));
@@ -1625,8 +1625,8 @@ Result<bytes, Error> read_line(io.Stream s, int limit, str what) {
             }
             return Result<bytes, Error>.Err(Error.Closed);
         }
-        case Err(io.Error e): {
-            return Result<bytes, Error>.Err(transport(e));
+        case Err(io.Error error): {
+            return Result<bytes, Error>.Err(transport(error));
         }
     }
 }
@@ -1638,21 +1638,21 @@ Result<bytes, Error> read_line(io.Stream s, int limit, str what) {
 /// discarded. Chunk extensions after a `;` are skipped. `limit` bounds the
 /// decoded body, because a chunked body declares no total and a peer that
 /// keeps sending chunks is otherwise a request for all of memory.
-Result<bytes, Error> read_chunked(io.Stream s, int limit) {
+Result<bytes, Error> read_chunked(io.Stream stream, int limit) {
     bytes out = [];
     while (true) {
-        bytes line = read_line(s, MAX_CHUNK_LINE, "a chunk size line")?;
+        bytes line = read_line(stream, MAX_CHUNK_LINE, "a chunk size line")?;
         int size = chunk_size(line)?;
         if (size == 0) {
-            skip_trailer(s)?;
+            skip_trailer(stream)?;
             return Result<bytes, Error>.Ok(out);
         }
         if (out.size() + size > limit) {
             return Result<bytes, Error>.Err(Error.TooLarge);
         }
-        out.extend(read_exact(s, size, "a chunk")?);
-        bytes term = read_exact(s, 2, "a chunk terminator")?;
-        if (term[0] != CR || term[1] != LF) {
+        out.extend(read_exact(stream, size, "a chunk")?);
+        bytes term = read_exact(stream, 2, "a chunk terminator")?;
+        if (term[0] != CARRIAGE_RETURN || term[1] != LINE_FEED) {
             return Result<bytes, Error>.Err(Error.Syntax);
         }
     }
@@ -1681,15 +1681,15 @@ Result<int, Error> chunk_size(bytes line) {
     if (digits.size() > 15) {
         return Result<int, Error>.Err(Error.Syntax);
     }
-    int v = 0;
-    for (int c in digits) {
-        int d = hex_val(c);
-        if (d < 0) {
+    int total = 0;
+    for (int octet in digits) {
+        int digit_value = hex_value(octet);
+        if (digit_value < 0) {
             return Result<int, Error>.Err(Error.Syntax);
         }
-        v = v * 16 + d;
+        total = total * 16 + digit_value;
     }
-    return Result<int, Error>.Ok(v);
+    return Result<int, Error>.Ok(total);
 }
 
 // Trailer fields are read and discarded. Acting on a field that arrives
@@ -1697,10 +1697,10 @@ Result<int, Error> chunk_size(bytes line) {
 // this module has no standing to make -- and a trailer that could change
 // what the body meant is exactly the thing a cache in front of it would not
 // have seen.
-Result<void, Error> skip_trailer(io.Stream s) {
+Result<void, Error> skip_trailer(io.Stream stream) {
     int count = 0;
     while (true) {
-        bytes line = read_line(s, MAX_HEADER_LINE, "a trailer line")?;
+        bytes line = read_line(stream, MAX_HEADER_LINE, "a trailer line")?;
         if (line.size() == 0) {
             return Result<void, Error>.Ok;
         }
@@ -1714,8 +1714,8 @@ Result<void, Error> skip_trailer(io.Stream s) {
 // A `Content-Length` value: a non-empty run of ASCII digits and nothing
 // else. That one rule refuses `+5`, `0x5`, ` 5`, `5 ` and the `5, 5` that a
 // duplicated field would have been joined into.
-Result<int, Error> content_length(str v) {
-    bytes digits = v.to_bytes();
+Result<int, Error> content_length(str text) {
+    bytes digits = text.to_bytes();
     if (digits.size() == 0) {
         return Result<int, Error>.Err(Error.Syntax);
     }
@@ -1726,14 +1726,14 @@ Result<int, Error> content_length(str v) {
     if (digits.size() > 18) {
         return Result<int, Error>.Err(Error.Syntax);
     }
-    for (int c in digits) {
-        if (c < '0' || c > '9') {
+    for (int octet in digits) {
+        if (octet < '0' || octet > '9') {
             return Result<int, Error>.Err(Error.Syntax);
         }
     }
-    match (v.parse_int()) {
-        case Some(int n): {
-            return Result<int, Error>.Ok(n);
+    match (text.parse_int()) {
+        case Some(int length): {
+            return Result<int, Error>.Ok(length);
         }
         case None: {
             return Result<int, Error>.Err(Error.Syntax);
@@ -1748,13 +1748,13 @@ Result<int, Error> content_length(str v) {
 // the classic request-smuggling vector: whichever this end picks, some proxy
 // in front of it picks the other, and the disagreement is an injected
 // message.
-Result<int, Error> framing(Headers h) {
-    match (h.get("transfer-encoding")) {
-        case Some(str te): {
-            if (h.has("content-length")) {
+Result<int, Error> framing(Headers fields) {
+    match (fields.get("transfer-encoding")) {
+        case Some(str transfer_coding): {
+            if (fields.has_name("content-length")) {
                 return Result<int, Error>.Err(Error.Framing);
             }
-            if (te.to_lower() != "chunked") {
+            if (transfer_coding.to_lower() != "chunked") {
                 return Result<int, Error>.Err(Error.Framing);
             }
             return Result<int, Error>.Ok(-2);
@@ -1762,13 +1762,13 @@ Result<int, Error> framing(Headers h) {
         case None: {
         }
     }
-    match (h.get("content-length")) {
-        case Some(str n): {
-            int len = content_length(n)?;
-            if (len > MAX_BODY) {
+    match (fields.get("content-length")) {
+        case Some(str length_text): {
+            int length = content_length(length_text)?;
+            if (length > MAX_BODY) {
                 return Result<int, Error>.Err(Error.TooLarge);
             }
-            return Result<int, Error>.Ok(len);
+            return Result<int, Error>.Ok(length);
         }
         case None: {
         }
@@ -1777,7 +1777,7 @@ Result<int, Error> framing(Headers h) {
 }
 
 // --- reading a request -----------------------------------------------------
-/// The next request on `s`, or `None` at a clean end -- the peer closed
+/// The next request on `stream`, or `None` at a clean end -- the peer closed
 /// between messages, which on a kept-alive connection is how it says it is
 /// finished.
 ///
@@ -1786,19 +1786,19 @@ Result<int, Error> framing(Headers h) {
 /// field has **no body**: not "read until the end", which on a kept-alive
 /// connection would read the next request as this one's body -- the same
 /// smuggling bug from the other direction.
-pub Result<Option<Request>, Error> read_request(io.Stream s) {
-    bytes raw = read_head(s)?;
+pub Result<Option<Request>, Error> read_request(io.Stream stream) {
+    bytes raw = read_head(stream)?;
     if (raw.size() == 0) {
         return Result<Option<Request>, Error>.Ok(Option<Request>.None);
     }
     List<bytes> lines = head_lines(raw)?;
     List<str> start = request_line(lines[0])?;
-    Headers h = parse_headers(lines, 1)?;
+    Headers fields = parse_headers(lines, 1)?;
     str version = start[2];
     str host = "";
-    match (h.get("host")) {
-        case Some(str v): {
-            host = v;
+    match (fields.get("host")) {
+        case Some(str host_text): {
+            host = host_text;
         }
         case None: {
             // RFC 9112 requires it of 1.1, and a virtual host that guesses is
@@ -1810,14 +1810,14 @@ pub Result<Option<Request>, Error> read_request(io.Stream s) {
         }
     }
     Url loc = target_url(start[0], start[1], host)?;
-    Request req = Request(start[0], loc, version, h);
-    int len = framing(h)?;
-    if (len == -2) {
-        req.payload = read_chunked(s, MAX_BODY)?;
-    } else if (len > 0) {
-        req.payload = read_exact(s, len, "the request body")?;
+    Request http_request = Request(start[0], loc, version, fields);
+    int length = framing(fields)?;
+    if (length == -2) {
+        http_request.payload = read_chunked(stream, MAX_BODY)?;
+    } else if (length > 0) {
+        http_request.payload = read_exact(stream, length, "the request body")?;
     }
-    return Result<Option<Request>, Error>.Ok(Option<Request>.Some(req));
+    return Result<Option<Request>, Error>.Ok(Option<Request>.Some(http_request));
 }
 
 // The method, the target and the version, as three strings.
@@ -1851,14 +1851,14 @@ Result<str, Error> version_of(bytes field, str where) {
         return Result<str, Error>.Err(Error.Syntax);
     }
     bytes rest = field.substr(5, field.size());
-    str v = ascii(rest);
-    if (v != "1.0" && v != "1.1") {
-        // `quoted` and not `v`: a version field that is not UTF-8 decodes to
+    str version = ascii(rest);
+    if (version != "1.0" && version != "1.1") {
+        // `quoted` and not `version`: a version field that is not UTF-8 decodes to
         // the empty string, and "unsupported HTTP version ''" says nothing
         // about what actually arrived.
         return Result<str, Error>.Err(Error.Syntax);
     }
-    return Result<str, Error>.Ok(v);
+    return Result<str, Error>.Ok(version);
 }
 
 // The URL a request target and a `Host` field name together.
@@ -1870,31 +1870,31 @@ Result<str, Error> version_of(bytes field, str where) {
 // Asterisk-form is accepted for `OPTIONS` alone. Everything else --
 // authority-form, a relative target, a fragment -- is refused.
 Result<Url, Error> target_url(str method, str target, str host) {
-    bytes t = target.to_bytes();
-    str what = "the request target " + quoted(t);
+    bytes target_bytes = target.to_bytes();
+    str what = "the request target " + quoted(target_bytes);
     // An HTTP/1.0 request may arrive with no `Host` at all, and then there is
     // no authority to put in the URL: the host is empty and the port is the
     // default. Every other path here has one, because 1.1 must send it.
     str name = "";
     int port = DEFAULT_PORT;
     if (host != "") {
-        List<str> hp = split_host_port(host.to_bytes(), "the Host header field " + quoted(host.to_bytes()), DEFAULT_PORT)?;
-        name = hp[0];
-        port = hp[1].parse_int().or(DEFAULT_PORT);
+        List<str> host_and_port = split_host_port(host.to_bytes(), "the Host header field " + quoted(host.to_bytes()), DEFAULT_PORT)?;
+        name = host_and_port[0];
+        port = host_and_port[1].parse_int().or(DEFAULT_PORT);
     }
-    if (t.contains(HASH1)) {
+    if (target_bytes.contains(HASH1)) {
         return Result<Url, Error>.Err(Error.Syntax);
     }
     if (target == "*") {
         if (method != "OPTIONS") {
             return Result<Url, Error>.Err(Error.Syntax);
         }
-        return url_of("http", name, port, t, what);
+        return url_of("http", name, port, target_bytes, what);
     }
-    if (t.starts_with("http://".to_bytes()) || t.starts_with("https://".to_bytes())) {
-        bytes rest = t.substr(7, t.size());
-        if (t.starts_with("https://".to_bytes())) {
-            rest = t.substr(8, t.size());
+    if (target_bytes.starts_with("http://".to_bytes()) || target_bytes.starts_with("https://".to_bytes())) {
+        bytes rest = target_bytes.substr(7, target_bytes.size());
+        if (target_bytes.starts_with("https://".to_bytes())) {
+            rest = target_bytes.substr(8, target_bytes.size());
         }
         match (rest.index_of("/".to_bytes())) {
             case Some(int slash): {
@@ -1905,14 +1905,14 @@ Result<Url, Error> target_url(str method, str target, str host) {
             }
         }
     }
-    if (t[0] != '/') {
+    if (target_bytes[0] != '/') {
         return Result<Url, Error>.Err(Error.Syntax);
     }
-    return url_of("http", name, port, t, what);
+    return url_of("http", name, port, target_bytes, what);
 }
 
 // --- writing a request -----------------------------------------------------
-/// Write `req` to `s`: the request line, its fields and its body, in **one**
+/// Write `http_request` to `stream`: the request line, its fields and its body, in **one**
 /// `write`.
 ///
 /// The framing is this function's and not the caller's: a chunked request
@@ -1928,41 +1928,41 @@ Result<Url, Error> target_url(str method, str target, str host) {
 ///
 /// The target is written byte for byte from the URL. This function never
 /// re-encodes what it was handed.
-pub Result<void, Error> write_request(io.Stream s, Request req) {
-    Headers h = req.head;
-    if (!h.has("host")) {
-        h.set("host", req.loc.host_header());
+pub Result<void, Error> write_request(io.Stream stream, Request http_request) {
+    Headers fields = http_request.head;
+    if (!fields.has_name("host")) {
+        fields.set("host", http_request.loc.host_header());
     }
-    if (!h.has("user-agent")) {
-        h.set("user-agent", USER_AGENT);
+    if (!fields.has_name("user-agent")) {
+        fields.set("user-agent", USER_AGENT);
     }
-    if (!h.has("connection")) {
-        h.set("connection", "close");
+    if (!fields.has_name("connection")) {
+        fields.set("connection", "close");
     }
-    if (req.framed) {
-        h.set("transfer-encoding", "chunked");
-        h.remove("content-length");
-    } else if (req.payload.size() > 0) {
-        h.set("content-length", req.payload.size().to_str());
-        h.remove("transfer-encoding");
+    if (http_request.is_framed) {
+        fields.set("transfer-encoding", "chunked");
+        fields.remove("content-length");
+    } else if (http_request.payload.size() > 0) {
+        fields.set("content-length", http_request.payload.size().to_str());
+        fields.remove("transfer-encoding");
     } else {
-        h.remove("content-length");
-        h.remove("transfer-encoding");
+        fields.remove("content-length");
+        fields.remove("transfer-encoding");
     }
-    bytes out = (req.verb + " " + req.loc.target() + " HTTP/" + req.ver).to_bytes();
+    bytes out = (http_request.verb + " " + http_request.loc.target() + " HTTP/" + http_request.ver).to_bytes();
     out.extend(CRLF);
-    h.render(out, "request")?;
+    fields.render(out, "request")?;
     out.extend(CRLF);
-    if (req.framed) {
-        chunk_into(out, req.payload);
+    if (http_request.is_framed) {
+        chunk_into(out, http_request.payload);
     } else {
-        out.extend(req.payload);
+        out.extend(http_request.payload);
     }
-    return write_all(s, out);
+    return write_all(stream, out);
 }
 
 // --- reading a response ----------------------------------------------------
-/// The response on `s` to a request that used `method`.
+/// The response on `stream` to a request that used `method`.
 ///
 /// **`method` is not decoration.** Nothing in a response marks that it has no
 /// body when it answers a `HEAD`; only the caller knows, and a client that
@@ -1978,12 +1978,12 @@ pub Result<void, Error> write_request(io.Stream s, Request req) {
 /// Reusing one rule for both would give an empty body for every
 /// HTTP/1.0-style response, or read the next request as a body on the server
 /// side.
-pub Result<Response, Error> read_response(io.Stream s, str method) {
+pub Result<Response, Error> read_response(io.Stream stream, str method) {
     int interim = 0;
     while (true) {
-        Response resp = read_one_response(s, method)?;
-        if (resp.code >= 200 || resp.code == 101) {
-            return Result<Response, Error>.Ok(resp);
+        Response http_response = read_one_response(stream, method)?;
+        if (http_response.code >= 200 || http_response.code == 101) {
+            return Result<Response, Error>.Ok(http_response);
         }
         interim = interim + 1;
         if (interim > MAX_INTERIM) {
@@ -1992,30 +1992,30 @@ pub Result<Response, Error> read_response(io.Stream s, str method) {
     }
 }
 
-Result<Response, Error> read_one_response(io.Stream s, str method) {
-    bytes raw = read_head(s)?;
+Result<Response, Error> read_one_response(io.Stream stream, str method) {
+    bytes raw = read_head(stream)?;
     if (raw.size() == 0) {
         return Result<Response, Error>.Err(Error.Closed);
     }
     List<bytes> lines = head_lines(raw)?;
     List<str> start = status_line(lines[0])?;
-    Headers h = parse_headers(lines, 1)?;
-    Response resp = Response(start[1].parse_int().or(0), start[2], start[0], h);
-    if (method == "HEAD" || bodiless(resp.code)) {
-        return Result<Response, Error>.Ok(resp);
+    Headers fields = parse_headers(lines, 1)?;
+    Response http_response = Response(start[1].parse_int().or(0), start[2], start[0], fields);
+    if (method == "HEAD" || is_bodiless(http_response.code)) {
+        return Result<Response, Error>.Ok(http_response);
     }
-    if (method == "CONNECT" && resp.code >= 200 && resp.code < 300) {
+    if (method == "CONNECT" && http_response.code >= 200 && http_response.code < 300) {
         return Result<Response, Error>.Err(Error.Framing);
     }
-    int len = framing(h)?;
-    if (len == -2) {
-        resp.payload = read_chunked(s, MAX_BODY)?;
-    } else if (len >= 0) {
-        resp.payload = read_exact(s, len, "the response body")?;
+    int length = framing(fields)?;
+    if (length == -2) {
+        http_response.payload = read_chunked(stream, MAX_BODY)?;
+    } else if (length >= 0) {
+        http_response.payload = read_exact(stream, length, "the response body")?;
     } else {
-        resp.payload = read_to_end(s, MAX_BODY, "the response body")?;
+        http_response.payload = read_to_end(stream, MAX_BODY, "the response body")?;
     }
-    return Result<Response, Error>.Ok(resp);
+    return Result<Response, Error>.Ok(http_response);
 }
 
 // The version, the status code and the reason phrase, as three strings. The
@@ -2026,8 +2026,8 @@ Result<Response, Error> read_one_response(io.Stream s, str method) {
 Result<List<str>, Error> status_line(bytes line) {
     int first = -1;
     match (line.index_of(SP1)) {
-        case Some(int i): {
-            first = i;
+        case Some(int space_index): {
+            first = space_index;
         }
         case None: {
             return Result<List<str>, Error>.Err(Error.Syntax);
@@ -2038,9 +2038,9 @@ Result<List<str>, Error> status_line(bytes line) {
     bytes digits = rest;
     bytes phrase = [];
     match (rest.index_of(SP1)) {
-        case Some(int i): {
-            digits = rest.substr(0, i);
-            phrase = rest.substr(i + 1, rest.size());
+        case Some(int space_index): {
+            digits = rest.substr(0, space_index);
+            phrase = rest.substr(space_index + 1, rest.size());
         }
         case None: {
         }
@@ -2048,8 +2048,8 @@ Result<List<str>, Error> status_line(bytes line) {
     if (digits.size() != 3) {
         return Result<List<str>, Error>.Err(Error.Syntax);
     }
-    for (int c in digits) {
-        if (c < '0' || c > '9') {
+    for (int octet in digits) {
+        if (octet < '0' || octet > '9') {
             return Result<List<str>, Error>.Err(Error.Syntax);
         }
     }
@@ -2059,8 +2059,8 @@ Result<List<str>, Error> status_line(bytes line) {
     }
     str said = "";
     match (phrase.utf8()) {
-        case Some(str t): {
-            said = t;
+        case Some(str phrase_text): {
+            said = phrase_text;
         }
         case None: {
             return Result<List<str>, Error>.Err(Error.Syntax);
@@ -2071,9 +2071,9 @@ Result<List<str>, Error> status_line(bytes line) {
 }
 
 // --- writing a response ----------------------------------------------------
-/// Write `resp` to `s` as the answer to `req`, in **one** `write`.
+/// Write `http_response` to `stream` as the answer to `http_request`, in **one** `write`.
 ///
-/// The framing fields are chosen here and written into `resp`, so a response
+/// The framing fields are chosen here and written into `http_response`, so a response
 /// that has been sent carries the headers that went out:
 ///
 ///   - a bodiless status (1xx, 204, 304) gets neither framing field and no
@@ -2083,7 +2083,7 @@ Result<List<str>, Error> status_line(bytes line) {
 ///     peer is 1.0, which has no chunked coding;
 ///   - everything else gets a `Content-Length`.
 ///
-/// `keep_alive` is what `should_keep_alive` decided: false writes
+/// `is_keep_alive` is what `should_keep_alive` decided: false writes
 /// `Connection: close`, and true tells a 1.0 client `Connection: keep-alive`,
 /// which it needs, because 1.0 closes by default and the reuse it asked for
 /// would otherwise silently not happen.
@@ -2091,40 +2091,40 @@ Result<List<str>, Error> status_line(bytes line) {
 /// The status line always says `HTTP/1.1`: a server answers in the protocol
 /// it speaks, not in the one it was told about. The reason phrase is the
 /// response's own, so a relayed response keeps the phrase it arrived with.
-pub Result<void, Error> write_response(io.Stream s, Request req, Response resp, bool keep_alive) {
-    Headers h = resp.head;
-    bool suppress = req.verb == "HEAD" || bodiless(resp.code);
-    // `bodiless` and not `suppress`: a HEAD answer carries the framing fields
+pub Result<void, Error> write_response(io.Stream stream, Request http_request, Response http_response, bool is_keep_alive) {
+    Headers fields = http_response.head;
+    bool is_suppress = http_request.verb == "HEAD" || is_bodiless(http_response.code);
+    // `bodiless` and not `is_suppress`: a HEAD answer carries the framing fields
     // its GET would have carried and simply omits the body, so the chunked
     // choice is made as if the body were going out.
-    bool chunked = resp.framed && !bodiless(resp.code) && req.ver != "1.0";
-    if (bodiless(resp.code)) {
-        h.remove("content-length");
-        h.remove("transfer-encoding");
-    } else if (chunked) {
-        h.set("transfer-encoding", "chunked");
-        h.remove("content-length");
+    bool is_chunked = http_response.is_framed && !is_bodiless(http_response.code) && http_request.ver != "1.0";
+    if (is_bodiless(http_response.code)) {
+        fields.remove("content-length");
+        fields.remove("transfer-encoding");
+    } else if (is_chunked) {
+        fields.set("transfer-encoding", "chunked");
+        fields.remove("content-length");
     } else {
-        h.set("content-length", resp.payload.size().to_str());
-        h.remove("transfer-encoding");
+        fields.set("content-length", http_response.payload.size().to_str());
+        fields.remove("transfer-encoding");
     }
-    if (!keep_alive) {
-        h.set("connection", "close");
-    } else if (req.ver == "1.0") {
-        h.set("connection", "keep-alive");
+    if (!is_keep_alive) {
+        fields.set("connection", "close");
+    } else if (http_request.ver == "1.0") {
+        fields.set("connection", "keep-alive");
     }
-    bytes out = ("HTTP/1.1 " + resp.code.to_str() + " " + resp.phrase).to_bytes();
+    bytes out = ("HTTP/1.1 " + http_response.code.to_str() + " " + http_response.phrase).to_bytes();
     out.extend(CRLF);
-    h.render(out, "response")?;
+    fields.render(out, "response")?;
     out.extend(CRLF);
-    if (!suppress) {
-        if (chunked) {
-            chunk_into(out, resp.payload);
+    if (!is_suppress) {
+        if (is_chunked) {
+            chunk_into(out, http_response.payload);
         } else {
-            out.extend(resp.payload);
+            out.extend(http_response.payload);
         }
     }
-    return write_all(s, out);
+    return write_all(stream, out);
 }
 
 /// Whether this connection can carry another request after this exchange.
@@ -2136,15 +2136,15 @@ pub Result<void, Error> write_response(io.Stream s, Request req, Response resp, 
 /// about two messages and not about a socket: a proxy deciding whether to
 /// reuse an upstream connection asks it too, and a test asks it of two
 /// transcripts.
-pub bool should_keep_alive(Request req, Response resp) {
-    if (has_token(req.head.get("connection"), "close")) {
+pub bool should_keep_alive(Request http_request, Response http_response) {
+    if (has_token(http_request.head.get("connection"), "close")) {
         return false;
     }
-    if (has_token(resp.head.get("connection"), "close")) {
+    if (has_token(http_response.head.get("connection"), "close")) {
         return false;
     }
-    if (req.ver == "1.0") {
-        return has_token(req.head.get("connection"), "keep-alive");
+    if (http_request.ver == "1.0") {
+        return has_token(http_request.head.get("connection"), "keep-alive");
     }
     return true;
 }
@@ -2170,13 +2170,13 @@ void chunk_into(bytes out, bytes body) {
     out.extend(CRLF);
 }
 
-Result<void, Error> write_all(io.Stream s, bytes out) {
-    match (s.write(out)) {
+Result<void, Error> write_all(io.Stream stream, bytes out) {
+    match (stream.write(out)) {
         case Ok: {
             return Result<void, Error>.Ok;
         }
-        case Err(io.Error e): {
-            return Result<void, Error>.Err(transport(e));
+        case Err(io.Error error): {
+            return Result<void, Error>.Err(transport(error));
         }
     }
 }
@@ -2204,7 +2204,7 @@ Result<void, Error> write_all(io.Stream s, bytes out) {
 /// lines turning it into a 500, and would leave open what to do with an
 /// error nobody can answer.
 pub interface Handler {
-    Response handle(Request req);
+    Response handle(Request http_request);
 }
 
 /// Serve requests on one `io.Stream` until the peer stops, either side says
@@ -2265,7 +2265,7 @@ pub Result<int, Error> serve_stream(io.Stream stream, Handler handler, int max_r
 /// every caller written before `serve_stream` kept compiling; it adds
 /// nothing to the loop. A timeout, if `set_read_timeout` was called on the connection,
 /// ends the connection quietly, as `serve_stream` says.
-pub Result<int, Error> serve_conn(net.Conn connection, Handler handler, int max_requests = MAX_REQUESTS) {
+pub Result<int, Error> serve_connection(net.Conn connection, Handler handler, int max_requests = MAX_REQUESTS) {
     return serve_stream(connection, handler, max_requests: max_requests);
 }
 
@@ -2345,7 +2345,7 @@ Request bare_request() {
     return Request("GET", Url("http", "", DEFAULT_PORT, "/", "", "/"), "1.1", headers());
 }
 
-/// Accept connections on `ln` and serve each one with `h`. The number of
+/// Accept connections on `listener` and serve each one with `handler`. The number of
 /// connections served.
 ///
 /// `connections` is how many to accept before returning; **-1 serves
@@ -2364,7 +2364,7 @@ Request bare_request() {
 /// `spawn f(..)` **moves** its arguments, and only a value the current block
 /// owns may be moved (§8.3). The connection half works: a `case Ok(net.Conn
 /// c)` binding of a temporary may be moved, and the reference says so in as
-/// many words. The **handler** half does not. `h` is a parameter, which is
+/// many words. The **handler** half does not. `handler` is a parameter, which is
 /// borrowed and may not be moved; `clone(h)` would hand each connection a
 /// different handler object, which is not what one handler means, and is
 /// refused outright for a handler that owns a resource. There is no way to
@@ -2381,18 +2381,18 @@ Request bare_request() {
 ///
 /// `timeout_ms` and `max_requests` are the mitigation that is available, and
 /// they are the reason they are arguments rather than constants.
-pub Result<int, Error> serve(net.Listener ln, Handler h, int connections = -1, int timeout_ms = TIMEOUT_MS, int max_requests = MAX_REQUESTS) {
+pub Result<int, Error> serve(net.Listener listener, Handler handler, int connections = -1, int timeout_ms = TIMEOUT_MS, int max_requests = MAX_REQUESTS) {
     int done = 0;
     while (connections < 0 || done < connections) {
-        match (ln.accept()) {
-            case Ok(net.Conn c): {
+        match (listener.accept()) {
+            case Ok(net.Conn connection): {
                 // One connection's failure is not the server's. A peer that
                 // hangs up in the middle of a response, or goes quiet until
                 // the read timeout, ends that connection and nothing else --
                 // a server that stopped accepting because one client did
                 // would be a server any client could stop. `serve_conn` is
                 // public for a caller who wants to see these.
-                one_connection(c, h, timeout_ms, max_requests);
+                one_connection(connection, handler, timeout_ms, max_requests);
             }
             case Err(net.Error error): {
                 // The same rule one level down: a failed accept that is the
@@ -2424,15 +2424,15 @@ void back_off(int milliseconds) {
 
 // One accepted connection, to its end, with whatever went wrong on it kept
 // on it. The `Conn` closes itself when this returns (§7.1).
-void one_connection(net.Conn c, Handler h, int timeout_ms, int max_requests) {
-    match (deadline(c, timeout_ms)) {
+void one_connection(net.Conn connection, Handler handler, int timeout_ms, int max_requests) {
+    match (deadline(connection, timeout_ms)) {
         case Ok: {
         }
         case Err: {
             return;
         }
     }
-    match (serve_conn(c, h, max_requests: max_requests)) {
+    match (serve_connection(connection, handler, max_requests: max_requests)) {
         case Ok: {
         }
         case Err: {
@@ -2443,19 +2443,19 @@ void one_connection(net.Conn c, Handler h, int timeout_ms, int max_requests) {
 // Both timeouts, or the failure that stopped them being set. A connection
 // with no deadline is a connection an idle peer can hold forever, and this
 // server has one at a time.
-Result<void, Error> deadline(net.Conn c, int timeout_ms) {
-    match (c.set_read_timeout(timeout_ms)) {
+Result<void, Error> deadline(net.Conn connection, int timeout_ms) {
+    match (connection.set_read_timeout(timeout_ms)) {
         case Ok: {
         }
-        case Err(net.Error e): {
-            return Result<void, Error>.Err(from_net(e));
+        case Err(net.Error error): {
+            return Result<void, Error>.Err(from_net(error));
         }
     }
-    match (c.set_write_timeout(timeout_ms)) {
+    match (connection.set_write_timeout(timeout_ms)) {
         case Ok: {
         }
-        case Err(net.Error e): {
-            return Result<void, Error>.Err(from_net(e));
+        case Err(net.Error error): {
+            return Result<void, Error>.Err(from_net(error));
         }
     }
     return Result<void, Error>.Ok;
@@ -2475,7 +2475,7 @@ pub Result<Response, Error> get(str url) {
     return fetch(request("GET", url)?);
 }
 
-/// Make `req`, follow up to `redirects` redirects, and answer with the
+/// Make `http_request`, follow up to `redirects` redirects, and answer with the
 /// response, its body already read and its connection already closed.
 ///
 /// This is the `send(request)` an HTTP library usually calls `send`. It
@@ -2517,28 +2517,28 @@ pub Result<Response, Error> get(str url) {
 /// what every browser and every other client does and what 303 means
 /// outright. **307 and 308 keep the method and the body**, which is what
 /// they were added to the standard to promise.
-pub Result<Response, Error> fetch(Request req, int redirects = MAX_REDIRECTS, int timeout_ms = TIMEOUT_MS) {
-    return fetch_via(PlainTransport(), req, redirects: redirects, timeout_ms: timeout_ms);
+pub Result<Response, Error> fetch(Request http_request, int redirects = MAX_REDIRECTS, int timeout_ms = TIMEOUT_MS) {
+    return fetch_via(PlainTransport(), http_request, redirects: redirects, timeout_ms: timeout_ms);
 }
 
 /// One connection, one request, one response: what `fetch_via` calls once per
 /// hop. `lib/net/https.m31` is the other implementation, which puts a verified
 /// TLS connection over the socket first.
 pub interface Transport {
-    Result<Response, Error> round_trip(Request req, int timeout_ms);
+    Result<Response, Error> round_trip(Request http_request, int timeout_ms);
 }
 
 /// `fetch`, with the connection made by `carrier`. The redirect rules above
 /// are here and nowhere else, so every transport follows the same ones.
-pub Result<Response, Error> fetch_via(Transport carrier, Request req, int redirects = MAX_REDIRECTS, int timeout_ms = TIMEOUT_MS) {
-    Request cur = req;
+pub Result<Response, Error> fetch_via(Transport carrier, Request http_request, int redirects = MAX_REDIRECTS, int timeout_ms = TIMEOUT_MS) {
+    Request current = http_request;
     int hops = 0;
     while (true) {
-        Response resp = carrier.round_trip(cur, timeout_ms)?;
-        if (hops >= redirects || !is_redirect(resp.code)) {
-            return Result<Response, Error>.Ok(resp);
+        Response http_response = carrier.round_trip(current, timeout_ms)?;
+        if (hops >= redirects || !is_redirect(http_response.code)) {
+            return Result<Response, Error>.Ok(http_response);
         }
-        cur = redirected(cur, resp)?;
+        current = redirected(current, http_response)?;
         hops = hops + 1;
     }
 }
@@ -2547,31 +2547,31 @@ bool is_redirect(int code) {
     return code == 301 || code == 302 || code == 303 || code == 307 || code == 308;
 }
 
-/// A connected socket to `req`'s host, with both timeouts set and Nagle
+/// A connected socket to `http_request`'s host, with both timeouts set and Nagle
 /// off. A request is a message that waits for an answer, so there is nothing
 /// for the kernel to coalesce it with. Any scheme: it is the caller that
 /// decides whether TLS goes over it.
-pub Result<net.Conn, Error> open(Request req, int timeout_ms) {
-    match (net.connect(req.loc.host(), req.loc.port())) {
-        case Ok(net.Conn c): {
-            match (deadline(c, timeout_ms)) {
+pub Result<net.Conn, Error> open(Request http_request, int timeout_ms) {
+    match (net.connect(http_request.loc.host(), http_request.loc.port())) {
+        case Ok(net.Conn connection): {
+            match (deadline(connection, timeout_ms)) {
                 case Ok: {
                 }
-                case Err(Error e): {
-                    return Result<net.Conn, Error>.Err(e);
+                case Err(Error error): {
+                    return Result<net.Conn, Error>.Err(error);
                 }
             }
-            match (c.set_nodelay(true)) {
+            match (connection.set_nodelay(true)) {
                 case Ok: {
                 }
-                case Err(net.Error e): {
-                    return Result<net.Conn, Error>.Err(from_net(e));
+                case Err(net.Error error): {
+                    return Result<net.Conn, Error>.Err(from_net(error));
                 }
             }
-            return Result<net.Conn, Error>.Ok(c);
+            return Result<net.Conn, Error>.Ok(connection);
         }
-        case Err(net.Error e): {
-            return Result<net.Conn, Error>.Err(from_net(e));
+        case Err(net.Error error): {
+            return Result<net.Conn, Error>.Err(from_net(error));
         }
     }
 }
@@ -2579,21 +2579,21 @@ pub Result<net.Conn, Error> open(Request req, int timeout_ms) {
 type PlainTransport {
 }
 
-Result<Response, Error> PlainTransport.round_trip(Request req, int timeout_ms) {
-    if (req.loc.scheme() == "https") {
+Result<Response, Error> PlainTransport.round_trip(Request http_request, int timeout_ms) {
+    if (http_request.loc.scheme() == "https") {
         return Result<Response, Error>.Err(Error.SchemeNeedsTls);
     }
-    net.Conn c = open(req, timeout_ms)?;
-    write_request(c, req)?;
-    return read_response(c, req.verb);
+    net.Conn connection = open(http_request, timeout_ms)?;
+    write_request(connection, http_request)?;
+    return read_response(connection, http_request.verb);
 }
 
 // The request the next hop makes, or why this redirect is not followed.
-Result<Request, Error> redirected(Request req, Response resp) {
+Result<Request, Error> redirected(Request http_request, Response http_response) {
     str where = "";
-    match (resp.head.get("location")) {
-        case Some(str v): {
-            where = v.trim();
+    match (http_response.head.get("location")) {
+        case Some(str location): {
+            where = location.trim();
         }
         case None: {
             return Result<Request, Error>.Err(Error.Syntax);
@@ -2602,8 +2602,8 @@ Result<Request, Error> redirected(Request req, Response resp) {
     if (where == "") {
         return Result<Request, Error>.Err(Error.Syntax);
     }
-    Url next = resolve(req.loc, where)?;
-    if (req.loc.scheme() == "https" && next.scheme() != "https") {
+    Url next = resolve(http_request.loc, where)?;
+    if (http_request.loc.scheme() == "https" && next.scheme() != "https") {
         return Result<Request, Error>.Err(Error.InsecureRedirect);
     }
     // The one change of origin that is followed: the same host, `http` to
@@ -2611,44 +2611,44 @@ Result<Request, Error> redirected(Request req, Response resp) {
     // with. Whatever the caller set went in the clear to that host already,
     // and now goes encrypted to it. Anything else -- another host, another
     // port on the same scheme -- is refused, for the reason `fetch` gives.
-    bool upgrade = req.loc.scheme() == "http" && next.scheme() == "https" && next.host() == req.loc.host();
-    if (!upgrade && (next.scheme() != req.loc.scheme() || next.host() != req.loc.host() || next.port() != req.loc.port())) {
+    bool is_upgrade = http_request.loc.scheme() == "http" && next.scheme() == "https" && next.host() == http_request.loc.host();
+    if (!is_upgrade && (next.scheme() != http_request.loc.scheme() || next.host() != http_request.loc.host() || next.port() != http_request.loc.port())) {
         return Result<Request, Error>.Err(Error.BadUrl);
     }
-    str method = req.verb;
-    bytes body = req.payload;
-    if (resp.code == 301 || resp.code == 302 || resp.code == 303) {
+    str method = http_request.verb;
+    bytes body = http_request.payload;
+    if (http_response.code == 301 || http_response.code == 302 || http_response.code == 303) {
         if (method != "GET" && method != "HEAD") {
             method = "GET";
             bytes none = [];
             body = none;
         }
     }
-    Headers h = req.head.copy();
-    h.remove("host");
+    Headers fields = http_request.head.copy();
+    fields.remove("host");
     if (body.size() == 0) {
-        h.remove("content-length");
-        h.remove("content-type");
-        h.remove("transfer-encoding");
+        fields.remove("content-length");
+        fields.remove("content-type");
+        fields.remove("transfer-encoding");
     }
-    Request out = Request(method, next, req.ver, h);
+    Request out = Request(method, next, http_request.ver, fields);
     out.payload = body;
-    out.framed = req.framed && body.size() > 0;
+    out.is_framed = http_request.is_framed && body.size() > 0;
     return Result<Request, Error>.Ok(out);
 }
 
 // A `Location` against the URL it arrived at: an absolute `http://` URL, or
 // an absolute path. Anything else is refused -- see `fetch`.
 Result<Url, Error> resolve(Url base, str where) {
-    bytes w = where.to_bytes();
-    if (w.contains("://".to_bytes())) {
+    bytes location_bytes = where.to_bytes();
+    if (location_bytes.contains("://".to_bytes())) {
         return parse_url(where);
     }
-    if (w.size() > 0 && w[0] == '/') {
-        if (bad_target_at(w) >= 0) {
+    if (location_bytes.size() > 0 && location_bytes[0] == '/') {
+        if (bad_target_at(location_bytes) >= 0) {
             return Result<Url, Error>.Err(Error.BadUrl);
         }
-        return url_of(base.scheme(), base.host(), base.port(), w, "the Location " + quoted(w));
+        return url_of(base.scheme(), base.host(), base.port(), location_bytes, "the Location " + quoted(location_bytes));
     }
     return Result<Url, Error>.Err(Error.BadUrl);
 }

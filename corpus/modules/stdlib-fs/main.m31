@@ -87,16 +87,16 @@ match (fs.stat(src + "/lib/b.txt")) {
     case Ok(fs.Stat s): {
         print(s.size);  // 3
         print(s.is_file());  // true
-        print(s.is_dir());  // false
+        print(s.is_directory());  // false
     }
     case Err(io.Error e): {
         print(e.to_str());
     }
 }
-print(fs.is_dir(src + "/link"));  // true -- through the link
+print(fs.is_directory(src + "/link"));  // true -- through the link
 print(fs.is_link(src + "/link"));  // true
 print(fs.is_link(src + "/lib"));  // false
-print(fs.exists(src + "/dangling"));  // false -- nothing at the end of it
+print(fs.is_present(src + "/dangling"));  // false -- nothing at the end of it
 print(fs.is_link(src + "/dangling"));  // true -- but the name is there
 print(fs.is_file(src + "/main.src"));  // true
 
@@ -150,8 +150,8 @@ match (fs.stat(src + "/lib/b.txt")) {
 
 // rename, remove, mkdir, rmdir.
 check(fs.rename(root + "/copy.txt", root + "/moved.txt"));  // ok
-print(fs.exists(root + "/copy.txt"));  // false
-print(fs.exists(root + "/moved.txt"));  // true
+print(fs.is_present(root + "/copy.txt"));  // false
+print(fs.is_present(root + "/moved.txt"));  // true
 check(fs.remove(root + "/moved.txt"));  // ok
 check(fs.remove(root + "/moved.txt"));  // no such file
 check(fs.mkdir(root + "/empty"));  // ok
@@ -164,7 +164,7 @@ check(fs.rmtree(src + "/link/deep", root));  // system error 40 -- through a lin
 check(fs.rmtree(src + "/main.src", root));  // not a directory
 // A tree holding a link out of it: the link goes, its target stays.
 check(fs.rmtree(src, root));  // ok
-print(fs.exists(src));  // false
-print(fs.exists(root + "/outside/keep.txt"));  // true
+print(fs.is_present(src));  // false
+print(fs.is_present(root + "/outside/keep.txt"));  // true
 check(fs.rmtree(root, root));  // ok -- the tree I made is the tree I may delete
-print(fs.exists(root));  // false
+print(fs.is_present(root));  // false

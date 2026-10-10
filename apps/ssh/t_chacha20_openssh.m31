@@ -41,12 +41,12 @@ int Rng.next() {
     return state;
 }
 
-bytes Rng.gen(int n) {
+bytes Rng.gen(int count) {
     bytes out = [];
-    int i = 0;
-    while (i < n) {
+    int index = 0;
+    while (index < count) {
         out.push(next() & 0xFF);
-        i = i + 1;
+        index = index + 1;
     }
     return out;
 }

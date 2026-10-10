@@ -57,7 +57,7 @@ Every way to make a `str` yields valid UTF-8:
 | a literal | the source is UTF-8 (the lexer refuses anything else), `\u{}` refuses surrogates and values past U+10FFFF, and `\x` stops at 7F (reference §1.5) |
 | `b.utf8()` | strict decoder, RFC 3629: no overlong forms, no surrogates, nothing past U+10FFFF, no truncation; `None` otherwise — never U+FFFD |
 | `io.read`, `io.read_line_of`, `fs.listdir` | built on `utf8()`, and an error value when it says no |
-| `os.args`, `os.env` | built on `utf8()` — **changed**: the runtime used to push argv and environment values straight into a `str` (§4) |
+| `os.arguments`, `os.env` | built on `utf8()` — **changed**: the runtime used to push argv and environment values straight into a `str` (§4) |
 | `+`, `concat`, `repeat`, `join` | valid strings side by side are valid |
 | `trim`, `to_upper`, `to_lower` | touch only ASCII bytes, and UTF-8 never uses an ASCII byte inside a multi-byte character |
 | `split`, `index_of` | a needle is valid UTF-8, so it begins with a non-continuation byte and ends a character: every match starts and ends on a boundary |
@@ -141,15 +141,15 @@ Here:
 
 | | |
 |---|---|
-| `os.args()` | `List<str>` — an argument that is not UTF-8 **traps**, naming it and `args_bytes()`. Rust's trade (`env::args()` panics): a `Result` here would put a `match` in every program that reads its command line, for input almost none will meet. |
-| `os.args_bytes()` | `List<bytes>`, exactly what the OS passed: Rust's `args_os` |
+| `os.arguments()` | `List<str>` — an argument that is not UTF-8 **traps**, naming it and `arguments_bytes()`. Rust's trade (`env::args()` panics): a `Result` here would put a `match` in every program that reads its command line, for input almost none will meet. |
+| `os.arguments_bytes()` | `List<bytes>`, exactly what the OS passed: Rust's `args_os` |
 | `os.env(name)` | `Option<str>` — `None` if unset **or** not UTF-8 |
 | `os.env_bytes(name)` | `Option<bytes>`, exactly what the OS holds |
 
 **Not a trap, unlike Rust's `args()`.** A Latin-1 file name on the command
 line is the world, not a bug in the program, and "a trap is for a bug, never
 for the world" (reference §6.6) is this language's rule even where Rust's is
-looser. A program that must take any argument reads `args_bytes`; the
+looser. A program that must take any argument reads `arguments_bytes`; the
 common one matches once.
 
 **Neither dropped nor repaired.** Dropping a bad argument would move every

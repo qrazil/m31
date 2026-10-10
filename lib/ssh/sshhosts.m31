@@ -120,7 +120,7 @@ const int SHA1_BLOCK = 64;
 type Entry {
     List<str> patterns;
     bytes key;
-    bool revoked;
+    bool is_revoked;
 }
 
 /// The ed25519 entries of one `known_hosts` file, in file order.
@@ -136,26 +136,26 @@ pub Result<List<bytes>, Error> KnownHosts.keys_for(str host, int port) {
     str id = host_id(host, port);
     List<bytes> keys = [];
     List<bytes> revoked_keys = [];
-    for (Entry e in entries) {
-        if (!entry_matches(e.patterns, id)) {
+    for (Entry entry in entries) {
+        if (!is_entry_match(entry.patterns, id)) {
             continue;
         }
-        if (e.revoked) {
-            revoked_keys.push(e.key);
+        if (entry.is_revoked) {
+            revoked_keys.push(entry.key);
         } else {
-            keys.push(e.key);
+            keys.push(entry.key);
         }
     }
     List<bytes> usable = [];
-    for (bytes k in keys) {
+    for (bytes key in keys) {
         bool is_revoked = false;
-        for (bytes r in revoked_keys) {
-            if (r == k) {
+        for (bytes revoked_key in revoked_keys) {
+            if (revoked_key == key) {
                 is_revoked = true;
             }
         }
         if (!is_revoked) {
-            usable.push(k);
+            usable.push(key);
         }
     }
     if (usable.size() == 0) {
@@ -191,15 +191,15 @@ bytes hmac_sha1(bytes key, bytes message) {
     }
     bytes inner = [];
     bytes outer = [];
-    int i = 0;
-    while (i < SHA1_BLOCK) {
-        int k = 0;
-        if (i < block_key.size()) {
-            k = block_key[i];
+    int byte_index = 0;
+    while (byte_index < SHA1_BLOCK) {
+        int key_byte = 0;
+        if (byte_index < block_key.size()) {
+            key_byte = block_key[byte_index];
         }
-        inner.push(k ^ 0x36);
-        outer.push(k ^ 0x5C);
-        i = i + 1;
+        inner.push(key_byte ^ 0x36);
+        outer.push(key_byte ^ 0x5C);
+        byte_index = byte_index + 1;
     }
     inner.extend(message);
     outer.extend(sha1digest.sum(inner));
@@ -207,29 +207,29 @@ bytes hmac_sha1(bytes key, bytes message) {
 }
 
 // A glob with `*` (any run, including none) and `?` (any one byte).
-bool glob_match(str pattern, int p, str s, int i) {
-    while (p < pattern.size()) {
-        int c = pattern.byte_at(p);
-        if (c == '*') {
-            int skip = i;
-            while (skip <= s.size()) {
-                if (glob_match(pattern, p + 1, s, skip)) {
+bool is_glob_match(str pattern, int pattern_index, str text, int text_index) {
+    while (pattern_index < pattern.size()) {
+        int pattern_byte = pattern.byte_at(pattern_index);
+        if (pattern_byte == '*') {
+            int skip = text_index;
+            while (skip <= text.size()) {
+                if (is_glob_match(pattern, pattern_index + 1, text, skip)) {
                     return true;
                 }
                 skip = skip + 1;
             }
             return false;
         }
-        if (i >= s.size()) {
+        if (text_index >= text.size()) {
             return false;
         }
-        if (c != '?' && c != s.byte_at(i)) {
+        if (pattern_byte != '?' && pattern_byte != text.byte_at(text_index)) {
             return false;
         }
-        p = p + 1;
-        i = i + 1;
+        pattern_index = pattern_index + 1;
+        text_index = text_index + 1;
     }
-    return i == s.size();
+    return text_index == text.size();
 }
 
 // How OpenSSH spells the name it matches and hashes: the bare host for port
@@ -250,18 +250,18 @@ Option<List<bytes>> parse_hashed(str pattern) {
     bytes salt = [];
     bytes hash = [];
     match (base64.decode(parts[2])) {
-        case Ok(bytes b): {
-            salt = b;
+        case Ok(bytes decoded_salt): {
+            salt = decoded_salt;
         }
-        case Err(base64.Error e): {
+        case Err(_): {
             return Option<List<bytes>>.None;
         }
     }
     match (base64.decode(parts[3])) {
-        case Ok(bytes b): {
-            hash = b;
+        case Ok(bytes decoded_hash): {
+            hash = decoded_hash;
         }
-        case Err(base64.Error e): {
+        case Err(_): {
             return Option<List<bytes>>.None;
         }
     }
@@ -274,44 +274,44 @@ Option<List<bytes>> parse_hashed(str pattern) {
 
 // Whether the comma-separated patterns of one entry cover `id`: some
 // non-negated pattern matches and no negated one does.
-bool entry_matches(List<str> patterns, str id) {
-    bool matched = false;
+bool is_entry_match(List<str> patterns, str id) {
+    bool is_matched = false;
     for (str pattern in patterns) {
         if (pattern.starts_with(HASH_PREFIX)) {
             match (parse_hashed(pattern)) {
-                case Some(List<bytes> sh): {
-                    if (hmac_sha1(sh[0], id.to_bytes()) == sh[1]) {
-                        matched = true;
+                case Some(List<bytes> salt_and_hash): {
+                    if (hmac_sha1(salt_and_hash[0], id.to_bytes()) == salt_and_hash[1]) {
+                        is_matched = true;
                     }
                 }
                 case None: {
                 }
             }
         } else if (pattern.starts_with("!")) {
-            if (glob_match(pattern.substr(1, pattern.size()).to_lower(), 0, id, 0)) {
+            if (is_glob_match(pattern.substr(1, pattern.size()).to_lower(), 0, id, 0)) {
                 return false;
             }
-        } else if (glob_match(pattern.to_lower(), 0, id, 0)) {
-            matched = true;
+        } else if (is_glob_match(pattern.to_lower(), 0, id, 0)) {
+            is_matched = true;
         }
     }
-    return matched;
+    return is_matched;
 }
 
 // The space- or tab-separated fields of a line, empty ones dropped.
 List<str> fields_of(str line) {
     List<str> out = [];
     int start = -1;
-    int i = 0;
-    while (i <= line.size()) {
-        bool blank = i == line.size() || line.byte_at(i) == ' ' || line.byte_at(i) == '\t';
-        if (blank && start >= 0) {
-            out.push(line.substr(start, i));
+    int byte_index = 0;
+    while (byte_index <= line.size()) {
+        bool is_blank = byte_index == line.size() || line.byte_at(byte_index) == ' ' || line.byte_at(byte_index) == '\t';
+        if (is_blank && start >= 0) {
+            out.push(line.substr(start, byte_index));
             start = -1;
-        } else if (!blank && start < 0) {
-            start = i;
+        } else if (!is_blank && start < 0) {
+            start = byte_index;
         }
-        i = i + 1;
+        byte_index = byte_index + 1;
     }
     return out;
 }
@@ -326,24 +326,24 @@ pub Result<KnownHosts, Error> parse(str text) {
         if (line.size() == 0 || line.starts_with("#")) {
             continue;
         }
-        List<str> f = fields_of(line);
-        bool revoked = false;
-        bool authority = false;
-        int at = 0;
-        if (f[0].starts_with("@")) {
-            if (f[0] == "@revoked") {
-                revoked = true;
-            } else if (f[0] == "@cert-authority") {
-                authority = true;
+        List<str> fields = fields_of(line);
+        bool is_revoked = false;
+        bool is_authority = false;
+        int field_offset = 0;
+        if (fields[0].starts_with("@")) {
+            if (fields[0] == "@revoked") {
+                is_revoked = true;
+            } else if (fields[0] == "@cert-authority") {
+                is_authority = true;
             } else {
                 return Result<KnownHosts, Error>.Err(Error.MalformedLine);
             }
-            at = 1;
+            field_offset = 1;
         }
-        if (f.size() < at + 3) {
+        if (fields.size() < field_offset + 3) {
             return Result<KnownHosts, Error>.Err(Error.MalformedLine);
         }
-        List<str> patterns = f[at].split(",");
+        List<str> patterns = fields[field_offset].split(",");
         for (str pattern in patterns) {
             if (pattern.size() == 0) {
                 return Result<KnownHosts, Error>.Err(Error.MalformedLine);
@@ -352,11 +352,11 @@ pub Result<KnownHosts, Error> parse(str text) {
                 return Result<KnownHosts, Error>.Err(Error.MalformedLine);
             }
         }
-        if (authority || f[at + 1] != KEY_TYPE) {
+        if (is_authority || fields[field_offset + 1] != KEY_TYPE) {
             continue;
         }
-        bytes key = decode_key(f[at + 2])?;
-        entries.push(Entry(patterns, key, revoked));
+        bytes key = decode_key(fields[field_offset + 2])?;
+        entries.push(Entry(patterns, key, is_revoked));
     }
     return Result<KnownHosts, Error>.Ok(KnownHosts(entries));
 }
@@ -365,10 +365,10 @@ pub Result<KnownHosts, Error> parse(str text) {
 Result<bytes, Error> decode_key(str b64) {
     bytes blob = [];
     match (base64.decode(b64)) {
-        case Ok(bytes b): {
-            blob = b;
+        case Ok(bytes decoded_blob): {
+            blob = decoded_blob;
         }
-        case Err(base64.Error e): {
+        case Err(_): {
             return Result<bytes, Error>.Err(Error.BadKey);
         }
     }
@@ -379,7 +379,7 @@ Result<bytes, Error> decode_key(str b64) {
             }
             return Result<bytes, Error>.Ok(key);
         }
-        case Err(ssh.Error e): {
+        case Err(_): {
             return Result<bytes, Error>.Err(Error.BadKey);
         }
     }
@@ -391,7 +391,7 @@ pub Result<KnownHosts, Error> load(str path) {
         case Ok(str text): {
             return parse(text);
         }
-        case Err(io.Error e): {
+        case Err(_): {
             return Result<KnownHosts, Error>.Err(Error.Io);
         }
     }

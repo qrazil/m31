@@ -276,8 +276,8 @@ print(term.ALT_SCREEN_ON.to_bytes.hex());
 print(term.MOUSE_ON.to_bytes.hex());
 print(term.move_to(1, 1).to_bytes().hex());
 print(term.move_to(24, 80).to_bytes().hex());
-print(term.fg(196).to_bytes().hex());
-print(term.bg(0).to_bytes().hex());
+print(term.foreground(196).to_bytes().hex());
+print(term.background(0).to_bytes().hex());
 print(term.fg_rgb(255, 128, 0).to_bytes().hex());
 print(term.RESET.to_bytes.hex());
 // --- the writer ------------------------------------------------------------

@@ -90,13 +90,13 @@ const int FAMILY_ECDSA = 1;
 const int FAMILY_PKCS1 = 2;
 const int FAMILY_PSS = 3;
 const int FAMILY_ED25519 = 4;
-const str OID_ECDSA_SHA256 = "1.2.840.10045.4.3.2";
-const str OID_ECDSA_SHA384 = "1.2.840.10045.4.3.3";
-const str OID_ECDSA_SHA512 = "1.2.840.10045.4.3.4";
-const str OID_RSA_SHA256 = "1.2.840.113549.1.1.11";
-const str OID_RSA_SHA384 = "1.2.840.113549.1.1.12";
-const str OID_RSA_SHA512 = "1.2.840.113549.1.1.13";
-const str OID_RSA_PSS = "1.2.840.113549.1.1.10";
+const str OBJECT_ID_ECDSA_SHA256 = "1.2.840.10045.4.3.2";
+const str OBJECT_ID_ECDSA_SHA384 = "1.2.840.10045.4.3.3";
+const str OBJECT_ID_ECDSA_SHA512 = "1.2.840.10045.4.3.4";
+const str OBJECT_ID_RSA_SHA256 = "1.2.840.113549.1.1.11";
+const str OBJECT_ID_RSA_SHA384 = "1.2.840.113549.1.1.12";
+const str OBJECT_ID_RSA_SHA512 = "1.2.840.113549.1.1.13";
+const str OBJECT_ID_RSA_PSS = "1.2.840.113549.1.1.10";
 const str PSS_PARAMETERS_SHA256 = "3034a00f300d06096086480165030402010500a11c301a06092a864886f70d010108300d06096086480165030402010500a203020120";
 const str PSS_PARAMETERS_SHA384 = "3034a00f300d06096086480165030402020500a11c301a06092a864886f70d010108300d06096086480165030402020500a203020130";
 const str PSS_PARAMETERS_SHA512 = "3034a00f300d06096086480165030402030500a11c301a06092a864886f70d010108300d06096086480165030402030500a203020140";
@@ -210,9 +210,9 @@ type Scheme {
     rsa.Hash hash;
 }
 
-bool is_weak_algorithm(str oid) {
+bool is_weak_algorithm(str object_id) {
     List<str> weak = ["1.2.840.113549.1.1.2", "1.2.840.113549.1.1.3", "1.2.840.113549.1.1.4", "1.2.840.113549.1.1.5", "1.3.14.3.2.29", "1.2.840.10045.4.1", "1.2.840.10040.4.3"];
-    return weak.contains(oid);
+    return weak.contains(object_id);
 }
 
 bool has_pss_parameters(bytes parameters, str expected_hex) {
@@ -227,31 +227,31 @@ bool has_pss_parameters(bytes parameters, str expected_hex) {
 }
 
 Option<Scheme> scheme_of(x509.AlgorithmIdentifier algorithm) {
-    str oid = algorithm.algorithm_oid;
-    if (oid == OID_ECDSA_SHA256 && algorithm.parameters.size() == 0) {
+    str object_id = algorithm.algorithm_object_id;
+    if (object_id == OBJECT_ID_ECDSA_SHA256 && algorithm.parameters.size() == 0) {
         return Option<Scheme>.Some(Scheme(FAMILY_ECDSA, rsa.Hash.Sha256));
     }
-    if (oid == OID_ECDSA_SHA384 && algorithm.parameters.size() == 0) {
+    if (object_id == OBJECT_ID_ECDSA_SHA384 && algorithm.parameters.size() == 0) {
         return Option<Scheme>.Some(Scheme(FAMILY_ECDSA, rsa.Hash.Sha384));
     }
-    if (oid == OID_ECDSA_SHA512 && algorithm.parameters.size() == 0) {
+    if (object_id == OBJECT_ID_ECDSA_SHA512 && algorithm.parameters.size() == 0) {
         return Option<Scheme>.Some(Scheme(FAMILY_ECDSA, rsa.Hash.Sha512));
     }
-    if (oid == x509.OBJECT_ID_ED25519 && algorithm.parameters.size() == 0) {
+    if (object_id == x509.OBJECT_ID_ED25519 && algorithm.parameters.size() == 0) {
         // Ed25519 hashes inside the algorithm; the hash here is unused.
         return Option<Scheme>.Some(Scheme(FAMILY_ED25519, rsa.Hash.Sha256));
     }
-    bool null_parameters = algorithm.parameters.size() == 0 || (algorithm.parameters.size() == 2 && algorithm.parameters[0] == 5 && algorithm.parameters[1] == 0);
-    if (oid == OID_RSA_SHA256 && null_parameters) {
+    bool has_null_parameters = algorithm.parameters.size() == 0 || (algorithm.parameters.size() == 2 && algorithm.parameters[0] == 5 && algorithm.parameters[1] == 0);
+    if (object_id == OBJECT_ID_RSA_SHA256 && has_null_parameters) {
         return Option<Scheme>.Some(Scheme(FAMILY_PKCS1, rsa.Hash.Sha256));
     }
-    if (oid == OID_RSA_SHA384 && null_parameters) {
+    if (object_id == OBJECT_ID_RSA_SHA384 && has_null_parameters) {
         return Option<Scheme>.Some(Scheme(FAMILY_PKCS1, rsa.Hash.Sha384));
     }
-    if (oid == OID_RSA_SHA512 && null_parameters) {
+    if (object_id == OBJECT_ID_RSA_SHA512 && has_null_parameters) {
         return Option<Scheme>.Some(Scheme(FAMILY_PKCS1, rsa.Hash.Sha512));
     }
-    if (oid == OID_RSA_PSS) {
+    if (object_id == OBJECT_ID_RSA_PSS) {
         if (has_pss_parameters(algorithm.parameters, PSS_PARAMETERS_SHA256)) {
             return Option<Scheme>.Some(Scheme(FAMILY_PSS, rsa.Hash.Sha256));
         }
@@ -280,13 +280,13 @@ bytes digest_of(rsa.Hash hash, bytes message) {
 }
 
 Result<void, Error> verify_ecdsa(x509.PublicKey key, rsa.Hash hash, bytes message, bytes signature) {
-    if (key.algorithm != x509.OID_EC_PUBLIC_KEY) {
+    if (key.algorithm != x509.OBJECT_ID_EC_PUBLIC_KEY) {
         return Result<void, Error>.Err(Error.BadSignature);
     }
     ecdsa.Curve curve = ecdsa.p256();
-    if (key.curve == x509.OID_CURVE_P384) {
+    if (key.curve == x509.OBJECT_ID_CURVE_P384) {
         curve = ecdsa.p384();
-    } else if (key.curve != x509.OID_CURVE_P256) {
+    } else if (key.curve != x509.OBJECT_ID_CURVE_P256) {
         return Result<void, Error>.Err(Error.UnsupportedAlgorithm);
     }
     match (ecdsa.parse_public_key(curve, key.key_bytes)) {
@@ -294,7 +294,7 @@ Result<void, Error> verify_ecdsa(x509.PublicKey key, rsa.Hash hash, bytes messag
             return Result<void, Error>.Err(Error.BadSignature);
         }
         case Some(ecdsa.PublicKey parsed): {
-            if (!ecdsa.verify_der(curve, parsed, digest_of(hash, message), signature)) {
+            if (!ecdsa.is_valid_der_signature(curve, parsed, digest_of(hash, message), signature)) {
                 return Result<void, Error>.Err(Error.BadSignature);
             }
             return Result<void, Error>.Ok;
@@ -306,14 +306,14 @@ Result<void, Error> verify_ed25519(x509.PublicKey key, bytes message, bytes sign
     if (key.algorithm != x509.OBJECT_ID_ED25519) {
         return Result<void, Error>.Err(Error.BadSignature);
     }
-    if (!ed25519.verify(key.key_bytes, message, signature)) {
+    if (!ed25519.is_valid_signature(key.key_bytes, message, signature)) {
         return Result<void, Error>.Err(Error.BadSignature);
     }
     return Result<void, Error>.Ok;
 }
 
 Result<void, Error> verify_rsa(x509.PublicKey key, Scheme scheme, bytes message, bytes signature) {
-    if (key.algorithm != x509.OID_RSA_ENCRYPTION) {
+    if (key.algorithm != x509.OBJECT_ID_RSA_ENCRYPTION) {
         return Result<void, Error>.Err(Error.BadSignature);
     }
     match (rsa.parse_public_key(key.modulus, key.public_exponent)) {
@@ -325,13 +325,13 @@ Result<void, Error> verify_rsa(x509.PublicKey key, Scheme scheme, bytes message,
         }
         case Some(rsa.PublicKey parsed): {
             bytes digest = digest_of(scheme.hash, message);
-            bool valid = false;
+            bool is_valid = false;
             if (scheme.family == FAMILY_PSS) {
-                valid = rsa.verify_pss(parsed, scheme.hash, digest, signature);
+                is_valid = rsa.is_valid_pss_signature(parsed, scheme.hash, digest, signature);
             } else {
-                valid = rsa.verify_pkcs1_v15(parsed, scheme.hash, digest, signature);
+                is_valid = rsa.is_valid_pkcs1_v15_signature(parsed, scheme.hash, digest, signature);
             }
-            if (!valid) {
+            if (!is_valid) {
                 return Result<void, Error>.Err(Error.BadSignature);
             }
             return Result<void, Error>.Ok;
@@ -344,7 +344,7 @@ Result<void, Error> verify_rsa(x509.PublicKey key, Scheme scheme, bytes message,
 /// the same refusals (SHA-1 and MD5 are `WeakAlgorithm`), that a
 /// certificate's signature gets; `lib/pki/ocsp.m31` uses it for responses.
 pub Result<void, Error> check_signature(x509.AlgorithmIdentifier algorithm, bytes message, bytes signature, x509.PublicKey key) {
-    if (is_weak_algorithm(algorithm.algorithm_oid)) {
+    if (is_weak_algorithm(algorithm.algorithm_object_id)) {
         return Result<void, Error>.Err(Error.WeakAlgorithm);
     }
     match (scheme_of(algorithm)) {
@@ -421,7 +421,7 @@ Option<List<x509.Certificate>> Search.extend(List<x509.Certificate> path) {
     }
     x509.Certificate current = path[path.size() - 1];
     for (x509.Certificate anchor in anchors) {
-        if (names_issuer(current, anchor)) {
+        if (is_possible_issuer(current, anchor)) {
             match (try_issuer(path, anchor, true)) {
                 case Some(List<x509.Certificate> found): {
                     return Option<List<x509.Certificate>>.Some(found);
@@ -432,7 +432,7 @@ Option<List<x509.Certificate>> Search.extend(List<x509.Certificate> path) {
         }
     }
     for (x509.Certificate candidate in presented) {
-        if (names_issuer(current, candidate) && !is_in(path, candidate) && !is_in(anchors, candidate)) {
+        if (is_possible_issuer(current, candidate) && !is_in(path, candidate) && !is_in(anchors, candidate)) {
             match (try_issuer(path, candidate, false)) {
                 case Some(List<x509.Certificate> found): {
                     return Option<List<x509.Certificate>>.Some(found);
@@ -480,7 +480,7 @@ int intermediate_count(List<x509.Certificate> path) {
     int count = 0;
     for (int index in 1 .. path.size()) {
         x509.Certificate step = path[index];
-        if (!x509.same_name(step.subject, step.issuer)) {
+        if (!x509.is_same_name(step.subject, step.issuer)) {
             count = count + 1;
         }
     }
@@ -505,7 +505,7 @@ Option<Error> authority_failure(List<x509.Certificate> path, x509.Certificate is
         if (!issuer.has_basic_constraints || !issuer.is_ca) {
             return Option<Error>.Some(Error.NotCertificateAuthority);
         }
-        if (!issuer.allows_server_auth()) {
+        if (!issuer.is_server_auth_allowed()) {
             return Option<Error>.Some(Error.WrongPurpose);
         }
     }
@@ -520,8 +520,8 @@ Option<Error> authority_failure(List<x509.Certificate> path, x509.Certificate is
 
 // Whether `issuer` could be the one that signed `certificate`: the names
 // agree, and the key identifiers do wherever both are given.
-bool names_issuer(x509.Certificate certificate, x509.Certificate issuer) {
-    if (!certificate.issued_by(issuer)) {
+bool is_possible_issuer(x509.Certificate certificate, x509.Certificate issuer) {
+    if (!certificate.is_issued_by(issuer)) {
         return false;
     }
     if (certificate.authority_key_id.size() > 0 && issuer.subject_key_id.size() > 0) {
@@ -538,7 +538,7 @@ Option<Error> leaf_failure(x509.Certificate leaf, int now) {
         case None: {
         }
     }
-    if (!leaf.allows_server_auth()) {
+    if (!leaf.is_server_auth_allowed()) {
         return Option<Error>.Some(Error.WrongPurpose);
     }
     if (leaf.has_key_usage && (leaf.key_usage & x509.KEY_USAGE_DIGITAL_SIGNATURE) == 0) {
@@ -569,7 +569,7 @@ pub Result<List<x509.Certificate>, Error> verify(List<x509.Certificate> presente
             return Result<List<x509.Certificate>, Error>.Err(search.specific_failure);
         }
         case Some(List<x509.Certificate> path): {
-            if (!leaf.matches_hostname(host)) {
+            if (!leaf.is_valid_for_hostname(host)) {
                 return Result<List<x509.Certificate>, Error>.Err(Error.HostnameMismatch);
             }
             return Result<List<x509.Certificate>, Error>.Ok(path);

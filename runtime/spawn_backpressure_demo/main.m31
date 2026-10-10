@@ -19,23 +19,21 @@
 // blocking (rt.c) -- freeing the carrier to go drain the very queue this
 // green thread is waiting on.
 
-const int N = 300;
+const int SPAWN_COUNT = 300;
 
 void worker(int id, Chan<int> out) {
     send(out, id);
 }
 
-Chan<int> results = Chan<int>(N);
-
-int i = 0;
-while (i < N) {
-    spawn worker(i, results);
-    i = i + 1;
+Chan<int> results = Chan<int>(SPAWN_COUNT);
+int worker_index = 0;
+while (worker_index < SPAWN_COUNT) {
+    spawn worker(worker_index, results);
+    worker_index = worker_index + 1;
 }
-
 int got = 0;
 int sum = 0;
-while (got < N) {
+while (got < SPAWN_COUNT) {
     sum = sum + recv(results);
     got = got + 1;
 }

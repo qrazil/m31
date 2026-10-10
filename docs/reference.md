@@ -1105,14 +1105,14 @@ it and answers with an error value when it says no:
 | `io.read` | `Err(io.Error.InvalidUtf8)`; `io.read_bytes` is the file exactly |
 | `io.read_line_of` | `Err(io.Error.InvalidUtf8)` — a `Result` has room to say why, where an `Option` would have to call it the end of the input |
 | `fs.listdir` | an error for a name that is not UTF-8 |
-| `os.args()` | **traps**, naming the argument and `os.args_bytes()`, which is every argument exactly |
+| `os.arguments()` | **traps**, naming the argument and `os.arguments_bytes()`, which is every argument exactly |
 | `os.env(name)` | `None`, as for an unset variable; `os.env_bytes(name)` tells the two apart |
 | `os.env_map()` | leaves the variable out; `os.env_bytes(name)` still finds it |
 
-Only `os.args()` traps, and it is the exception on purpose: every other
+Only `os.arguments()` traps, and it is the exception on purpose: every other
 answer would put a `match` in every program that reads its command line, for
 input almost no program ever meets. Rust makes the same trade -- its
-`env::args()` panics and its `args_os()` is `args_bytes`. Everything else
+`env::args()` panics and its `args_os()` is `arguments_bytes`. Everything else
 here reports a value, because a file or a variable that is not UTF-8 is the
 world, not a bug in the program (§6.6).
 

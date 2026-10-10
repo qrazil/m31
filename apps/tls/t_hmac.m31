@@ -7,11 +7,11 @@
 
 import crypto.hmac;
 
-// `n` octets of a deterministic pattern: `(i * multiplier + offset) & 0xFF`.
+// `length` octets of a deterministic pattern: `(i * multiplier + offset) & 0xFF`.
 // The Python twin generates the same bytes from the same rule, so no fixture.
-bytes pattern(int n, int multiplier, int offset) {
+bytes pattern(int length, int multiplier, int offset) {
     bytes out = [];
-    for (int i in 0 .. n) {
+    for (int i in 0 .. length) {
         out.push(i * multiplier + offset & 0xFF);
     }
     return out;

@@ -14,8 +14,8 @@ type Tally {
     int failed = 0;
 }
 
-void Tally.expect(str label, bool holds) {
-    if (holds) {
+void Tally.expect(str label, bool is_satisfied) {
+    if (is_satisfied) {
         passed = passed + 1;
     } else {
         failed = failed + 1;
@@ -136,8 +136,8 @@ void integer_fails(Tally tally, str label, bytes data, der.Error wanted) {
     }
 }
 
-void oid_is(Tally tally, str label, bytes data, str wanted) {
-    match (element_of(data).oid()) {
+void object_id_is(Tally tally, str label, bytes data, str wanted) {
+    match (element_of(data).object_id()) {
         case Ok(str dotted): {
             tally.expect(label + ": got " + dotted, dotted == wanted);
         }
@@ -147,8 +147,8 @@ void oid_is(Tally tally, str label, bytes data, str wanted) {
     }
 }
 
-void oid_fails(Tally tally, str label, bytes data) {
-    match (element_of(data).oid()) {
+void object_id_fails(Tally tally, str label, bytes data) {
+    match (element_of(data).object_id()) {
         case Ok(str dotted): {
             tally.expect(label + ": read " + dotted, false);
         }
@@ -202,10 +202,10 @@ void bit_string_fails(Tally tally, str label, bytes data) {
     }
 }
 
-void boolean_is(Tally tally, str label, bytes data, bool wanted) {
+void boolean_is(Tally tally, str label, bytes data, bool is_wanted) {
     match (element_of(data).boolean()) {
         case Ok(bool value): {
-            tally.expect(label, value == wanted);
+            tally.expect(label, value == is_wanted);
         }
         case Err(der.Error cause): {
             tally.expect(label + ": " + cause.to_str(), false);
@@ -407,30 +407,30 @@ void check_simple_types(Tally tally) {
 // ---- OBJECT IDENTIFIER -------------------------------------------------------
 
 void check_oids(Tally tally) {
-    oid_is(tally, "rsaEncryption", [0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01], "1.2.840.113549.1.1.1");
-    oid_is(tally, "sha256WithRSAEncryption", [0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B], "1.2.840.113549.1.1.11");
-    oid_is(tally, "id-ecPublicKey", [0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01], "1.2.840.10045.2.1");
-    oid_is(tally, "prime256v1", [0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07], "1.2.840.10045.3.1.7");
-    oid_is(tally, "secp384r1", [0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x22], "1.3.132.0.34");
-    oid_is(tally, "commonName", [0x06, 0x03, 0x55, 0x04, 0x03], "2.5.4.3");
-    oid_is(tally, "serverAuth", [0x06, 0x08, 0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01], "1.3.6.1.5.5.7.3.1");
-    oid_is(tally, "anyExtendedKeyUsage", [0x06, 0x04, 0x55, 0x1D, 0x25, 0x00], "2.5.29.37.0");
-    oid_is(tally, "Ed25519", [0x06, 0x03, 0x2B, 0x65, 0x70], "1.3.101.112");
-    oid_is(tally, "first arc 0", [0x06, 0x01, 0x00], "0.0");
-    oid_is(tally, "first arc 0, second 39", [0x06, 0x01, 0x27], "0.39");
-    oid_is(tally, "first arc 1, second 0", [0x06, 0x01, 0x28], "1.0");
-    oid_is(tally, "first arc 1, second 39", [0x06, 0x01, 0x4F], "1.39");
-    oid_is(tally, "first arc 2, second 0", [0x06, 0x01, 0x50], "2.0");
-    oid_is(tally, "first arc 2, second 999", [0x06, 0x02, 0x88, 0x37], "2.999");
-    oid_is(tally, "arc 127 then 128", [0x06, 0x04, 0x2A, 0x7F, 0x81, 0x00], "1.2.127.128");
-    oid_is(tally, "an arc of 2^56 - 1", [0x06, 0x09, 0x2A, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F], "1.2.72057594037927935");
-    oid_fails(tally, "empty OID", [0x06, 0x00]);
-    oid_fails(tally, "leading 0x80 octet in an arc", [0x06, 0x03, 0x2A, 0x80, 0x01]);
-    oid_fails(tally, "leading 0x80 in the first arc", [0x06, 0x02, 0x80, 0x2A]);
-    oid_fails(tally, "last octet has the continuation bit", [0x06, 0x03, 0x2A, 0x86, 0x48 | 0x80]);
-    oid_fails(tally, "only a continuation octet", [0x06, 0x01, 0x81]);
-    oid_fails(tally, "arc of nine octets", [0x06, 0x0A, 0x2A, 0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00]);
-    match (element_of([0x04, 0x01, 0x2A]).oid()) {
+    object_id_is(tally, "rsaEncryption", [0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01], "1.2.840.113549.1.1.1");
+    object_id_is(tally, "sha256WithRSAEncryption", [0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B], "1.2.840.113549.1.1.11");
+    object_id_is(tally, "id-ecPublicKey", [0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01], "1.2.840.10045.2.1");
+    object_id_is(tally, "prime256v1", [0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07], "1.2.840.10045.3.1.7");
+    object_id_is(tally, "secp384r1", [0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x22], "1.3.132.0.34");
+    object_id_is(tally, "commonName", [0x06, 0x03, 0x55, 0x04, 0x03], "2.5.4.3");
+    object_id_is(tally, "serverAuth", [0x06, 0x08, 0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01], "1.3.6.1.5.5.7.3.1");
+    object_id_is(tally, "anyExtendedKeyUsage", [0x06, 0x04, 0x55, 0x1D, 0x25, 0x00], "2.5.29.37.0");
+    object_id_is(tally, "Ed25519", [0x06, 0x03, 0x2B, 0x65, 0x70], "1.3.101.112");
+    object_id_is(tally, "first arc 0", [0x06, 0x01, 0x00], "0.0");
+    object_id_is(tally, "first arc 0, second 39", [0x06, 0x01, 0x27], "0.39");
+    object_id_is(tally, "first arc 1, second 0", [0x06, 0x01, 0x28], "1.0");
+    object_id_is(tally, "first arc 1, second 39", [0x06, 0x01, 0x4F], "1.39");
+    object_id_is(tally, "first arc 2, second 0", [0x06, 0x01, 0x50], "2.0");
+    object_id_is(tally, "first arc 2, second 999", [0x06, 0x02, 0x88, 0x37], "2.999");
+    object_id_is(tally, "arc 127 then 128", [0x06, 0x04, 0x2A, 0x7F, 0x81, 0x00], "1.2.127.128");
+    object_id_is(tally, "an arc of 2^56 - 1", [0x06, 0x09, 0x2A, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F], "1.2.72057594037927935");
+    object_id_fails(tally, "empty OID", [0x06, 0x00]);
+    object_id_fails(tally, "leading 0x80 octet in an arc", [0x06, 0x03, 0x2A, 0x80, 0x01]);
+    object_id_fails(tally, "leading 0x80 in the first arc", [0x06, 0x02, 0x80, 0x2A]);
+    object_id_fails(tally, "last octet has the continuation bit", [0x06, 0x03, 0x2A, 0x86, 0x48 | 0x80]);
+    object_id_fails(tally, "only a continuation octet", [0x06, 0x01, 0x81]);
+    object_id_fails(tally, "arc of nine octets", [0x06, 0x0A, 0x2A, 0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00]);
+    match (element_of([0x04, 0x01, 0x2A]).object_id()) {
         case Ok(str dotted): {
             tally.expect("an OCTET STRING is not an OID", false);
         }

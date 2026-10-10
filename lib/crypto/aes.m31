@@ -145,14 +145,14 @@ int substitute_word(int word) {
     return substitute_lanes(word) & 0xFFFF_FFFF;
 }
 
-// Four octets of `data` at `at`, little-endian.
-int word_le(bytes data, int at) {
-    return data[at] | (data[at + 1] << 8) | (data[at + 2] << 16) | (data[at + 3] << 24);
+// Four octets of `data` at `offset`, little-endian.
+int word_le(bytes data, int offset) {
+    return data[offset] | (data[offset + 1] << 8) | (data[offset + 2] << 16) | (data[offset + 3] << 24);
 }
 
-// Eight octets of `data` at `at`, little-endian, as one 64-bit pattern.
-int lanes_le(bytes data, int at) {
-    return word_le(data, at) | (word_le(data, at + 4) << 32);
+// Eight octets of `data` at `offset`, little-endian, as one 64-bit pattern.
+int lanes_le(bytes data, int offset) {
+    return word_le(data, offset) | (word_le(data, offset + 4) << 32);
 }
 
 // The expanded key, FIPS 197 §5.2. `i` and `rcon` are public.

@@ -44,7 +44,7 @@ for idx, (a, b) in enumerate(pairs):
     src.append(f'print("add{idx} " + field25519.to_bytes(field25519.add(fa{idx}, fb{idx})).hex());')
     src.append(f'print("sub{idx} " + field25519.to_bytes(field25519.sub(fa{idx}, fb{idx})).hex());')
     src.append(f'print("mul{idx} " + field25519.to_bytes(field25519.mul(fa{idx}, fb{idx})).hex());')
-    src.append(f'print("sq{idx} " + field25519.to_bytes(field25519.sq(fa{idx})).hex());')
+    src.append(f'print("sq{idx} " + field25519.to_bytes(field25519.square(fa{idx})).hex());')
     src.append(f'print("neg{idx} " + field25519.to_bytes(field25519.neg(fa{idx})).hex());')
     src.append(f'print("fromto{idx} " + field25519.to_bytes(fa{idx}).hex());')
 

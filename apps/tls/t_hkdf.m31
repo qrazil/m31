@@ -9,10 +9,10 @@ import crypto.hkdf;
 import crypto.sha256;
 import crypto.sha512;
 
-// `n` octets of a deterministic pattern: `(i * multiplier + offset) & 0xFF`.
-bytes pattern(int n, int multiplier, int offset) {
+// `length` octets of a deterministic pattern: `(i * multiplier + offset) & 0xFF`.
+bytes pattern(int length, int multiplier, int offset) {
     bytes out = [];
-    for (int i in 0 .. n) {
+    for (int i in 0 .. length) {
         out.push(i * multiplier + offset & 0xFF);
     }
     return out;

@@ -2,7 +2,7 @@
 // collection of the same kind, half-open, and out of bounds traps.
 //
 // Before this, taking any sub-range of a `List` needed a loop -- or, for the
-// one case every program meets, `os.args()` without the program's own name,
+// one case every program meets, `os.arguments()` without the program's own name,
 // a `remove_at(0)` that moves every element.
 List<int> xs = [10, 20, 30, 40, 50];
 List<int> mid = xs.slice(1, 4);

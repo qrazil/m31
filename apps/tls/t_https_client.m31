@@ -77,7 +77,7 @@ void fail(str reason) {
     os.exit(1);
 }
 
-List<str> arguments = os.args();
+List<str> arguments = os.arguments();
 if (arguments.size() < 3) {
     trap("t_https_client: <url> <system|ca file|pin:hex> [redirects] [method]");
 }

@@ -77,7 +77,7 @@ int number(str text) {
     }
 }
 
-List<str> arguments = os.args();
+List<str> arguments = os.arguments();
 if (arguments.size() != 5) {
     trap("t_ocsp_check: <response.der> <leaf.pem> <issuer.pem> <now>");
 }

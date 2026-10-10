@@ -76,7 +76,7 @@ pub str Error.to_str() {
 // reading a field has to answer both the field and how far it read.
 type Scan {
     str text;
-    int at = 0;
+    int position = 0;
 }
 
 /// Every row of `text`, each a list of its fields.
@@ -84,37 +84,37 @@ type Scan {
 ///     csv.parse("a,b\n1,2\n")         -> Ok([["a", "b"], ["1", "2"]])
 ///     csv.parse("a;b\n", sep: ";")    -> Ok([["a", "b"]])
 pub Result<List<List<str>>, Error> parse(str text, str sep = ",") {
-    int s = separator(sep)?;
+    int separator_byte = separator(sep)?;
     List<List<str>> rows = [];
-    Scan sc = Scan(text);
-    int n = text.size();
+    Scan scan = Scan(text);
+    int text_length = text.size();
     // A UTF-8 byte-order mark, EF BB BF, is not part of the first field.
-    if (n >= 3 && text.byte_at(0) == 239 && text.byte_at(1) == 187 && text.byte_at(2) == 191) {
-        sc.at = 3;
+    if (text_length >= 3 && text.byte_at(0) == 239 && text.byte_at(1) == 187 && text.byte_at(2) == 191) {
+        scan.position = 3;
     }
-    while (sc.at < n) {
-        int c = text.byte_at(sc.at);
+    while (scan.position < text_length) {
+        int octet = text.byte_at(scan.position);
         // A line with nothing on it is not a row.
-        if (c == '\r' || c == '\n') {
-            sc.at = sc.at + 1;
+        if (octet == '\r' || octet == '\n') {
+            scan.position = scan.position + 1;
             continue;
         }
         List<str> row = [];
-        bool more = true;
-        while (more) {
-            row.push(field(sc, s));
-            if (sc.at < n && text.byte_at(sc.at) == s) {
-                sc.at = sc.at + 1;
+        bool is_more = true;
+        while (is_more) {
+            row.push(field(scan, separator_byte));
+            if (scan.position < text_length && text.byte_at(scan.position) == separator_byte) {
+                scan.position = scan.position + 1;
             } else {
-                more = false;
+                is_more = false;
             }
         }
         // The field stopped at a line break or the end. CRLF is one break.
-        if (sc.at < n && text.byte_at(sc.at) == '\r') {
-            sc.at = sc.at + 1;
+        if (scan.position < text_length && text.byte_at(scan.position) == '\r') {
+            scan.position = scan.position + 1;
         }
-        if (sc.at < n && text.byte_at(sc.at) == '\n') {
-            sc.at = sc.at + 1;
+        if (scan.position < text_length && text.byte_at(scan.position) == '\n') {
+            scan.position = scan.position + 1;
         }
         rows.push(row);
     }
@@ -133,7 +133,7 @@ pub Result<List<List<str>>, Error> parse(str text, str sep = ",") {
 /// it means: it holds the separator, a quote, or a line break -- or it is an
 /// empty field alone on its row, which bare would be an empty line.
 pub Result<str, Error> format(List<List<str>> rows, str sep = ",") {
-    int s = separator(sep)?;
+    int separator_byte = separator(sep)?;
     List<str> lines = [];
     for (List<str> row in rows) {
         List<str> cells = [];
@@ -153,56 +153,56 @@ pub Result<str, Error> format(List<List<str>> rows, str sep = ",") {
 
 // One field, from `sc.at` up to (not including) the separator, line break or
 // end that finishes it.
-str field(Scan sc, int sep) {
-    str text = sc.text;
-    int n = text.size();
-    if (sc.at >= n || text.byte_at(sc.at) != '"') {
-        return bare(sc, sep);
+str field(Scan scan, int sep) {
+    str text = scan.text;
+    int text_length = text.size();
+    if (scan.position >= text_length || text.byte_at(scan.position) != '"') {
+        return bare(scan, sep);
     }
     // Quoted: runs to the next quote that is not doubled. A doubled quote is
     // one literal quote. No closing quote means the field is the rest of the
     // document.
     List<str> parts = [];
-    int from = sc.at + 1;
-    int i = from;
-    while (i < n) {
-        if (text.byte_at(i) == '"') {
-            parts.push(text.substr(from, i));
-            if (i + 1 < n && text.byte_at(i + 1) == '"') {
+    int from = scan.position + 1;
+    int byte_index = from;
+    while (byte_index < text_length) {
+        if (text.byte_at(byte_index) == '"') {
+            parts.push(text.substr(from, byte_index));
+            if (byte_index + 1 < text_length && text.byte_at(byte_index + 1) == '"') {
                 parts.push("\"");
-                i = i + 2;
-                from = i;
+                byte_index = byte_index + 2;
+                from = byte_index;
                 continue;
             }
             // The closing quote. Anything between it and the separator joins
             // the field as it is.
-            sc.at = i + 1;
-            parts.push(bare(sc, sep));
+            scan.position = byte_index + 1;
+            parts.push(bare(scan, sep));
             return parts.join("");
         }
-        i = i + 1;
+        byte_index = byte_index + 1;
     }
-    parts.push(text.substr(from, n));
-    sc.at = n;
+    parts.push(text.substr(from, text_length));
+    scan.position = text_length;
     return parts.join("");
 }
 
 // Bytes up to the separator, a line break or the end. A quote here is an
 // ordinary character.
-str bare(Scan sc, int sep) {
-    str text = sc.text;
-    int n = text.size();
-    int from = sc.at;
-    int i = from;
-    while (i < n) {
-        int c = text.byte_at(i);
-        if (c == sep || c == '\r' || c == '\n') {
+str bare(Scan scan, int sep) {
+    str text = scan.text;
+    int text_length = text.size();
+    int from = scan.position;
+    int byte_index = from;
+    while (byte_index < text_length) {
+        int octet = text.byte_at(byte_index);
+        if (octet == sep || octet == '\r' || octet == '\n') {
             break;
         }
-        i = i + 1;
+        byte_index = byte_index + 1;
     }
-    sc.at = i;
-    return text.substr(from, i);
+    scan.position = byte_index;
+    return text.substr(from, byte_index);
 }
 
 // One field as it must be written: bare when that is unambiguous, quoted with
@@ -222,9 +222,9 @@ Result<int, Error> separator(str sep) {
     if (sep.size() != 1) {
         return Result<int, Error>.Err(Error.Separator);
     }
-    int c = sep.byte_at(0);
-    if (c > 127 || c == '"' || c == '\r' || c == '\n') {
+    int octet = sep.byte_at(0);
+    if (octet > 127 || octet == '"' || octet == '\r' || octet == '\n') {
         return Result<int, Error>.Err(Error.Separator);
     }
-    return Result<int, Error>.Ok(c);
+    return Result<int, Error>.Ok(octet);
 }

@@ -10,7 +10,7 @@ import io;
 match (os.run(["true"])) {
     case Ok(os.ExitStatus s): {
         print(s.to_str());       // exited 0
-        print(s.success());      // true
+        print(s.is_success());      // true
     }
     case Err(io.Error e): {
         print("unexpected error: " + e.to_str());
@@ -20,7 +20,7 @@ match (os.run(["true"])) {
 match (os.run(["false"])) {
     case Ok(os.ExitStatus s): {
         print(s.to_str());       // exited 1
-        print(s.success());      // false
+        print(s.is_success());      // false
     }
     case Err(io.Error e): {
         print("unexpected error: " + e.to_str());
@@ -57,7 +57,7 @@ match (os.run(["this-command-does-not-exist-anywhere-2026"])) {
 match (os.run(["sh", "-c", "kill -TERM $$"])) {
     case Ok(os.ExitStatus s): {
         print(s.to_str());       // killed by signal 15
-        print(s.success());      // false
+        print(s.is_success());      // false
     }
     case Err(io.Error e): {
         print("unexpected error: " + e.to_str());

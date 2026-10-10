@@ -27,7 +27,7 @@ bytes octets_of(str path) {
     }
 }
 
-List<str> arguments = os.args();
+List<str> arguments = os.arguments();
 if (arguments.size() < 3) {
     io.eprint("usage: t_tlsserver_config CHAIN KEY [NAME ...]");
     os.exit(2);
@@ -50,7 +50,7 @@ match (loaded) {
     case Ok(tlsserver.Config config): {
         print("ok");
         for (int index in 3 .. arguments.size()) {
-            if (config.serves(arguments[index])) {
+            if (config.can_serve(arguments[index])) {
                 print("serves " + arguments[index] + " yes");
             } else {
                 print("serves " + arguments[index] + " no");

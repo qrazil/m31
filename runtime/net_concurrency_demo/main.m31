@@ -19,40 +19,40 @@ import io;
 // carriers would not merely be slow, several of them would never even be
 // accepted, because the accept loop itself needs a carrier turn.
 
-const int N = 200;
+const int CONNECTION_COUNT = 200;
 
-void handler(net.Conn c) {
-    match (c.read_until([10], 256)) {
+void handler(net.Conn connection) {
+    match (connection.read_until([10], 256)) {
         case Ok(bytes line): {
-            match (c.write(line)) {
-                case Ok(int n): {
+            match (connection.write(line)) {
+                case Ok(_): {
                 }
-                case Err(io.Error e): {
-                    trap("handler write: " + e.to_str());
+                case Err(io.Error error): {
+                    trap("handler write: " + error.to_str());
                 }
             }
         }
-        case Err(io.Error e): {
-            trap("handler read: " + e.to_str());
+        case Err(io.Error error): {
+            trap("handler read: " + error.to_str());
         }
     }
-    Result<bool, io.Error> closed = c.close();
+    Result<bool, io.Error> closed = connection.close();
 }
 
-void serve(net.Listener ln, int n) {
-    int i = 0;
-    while (i < n) {
-        match (ln.accept()) {
-            case Ok(net.Conn c): {
-                spawn handler(c);
+void serve(net.Listener listener, int connection_count) {
+    int accepted_count = 0;
+    while (accepted_count < connection_count) {
+        match (listener.accept()) {
+            case Ok(net.Conn connection): {
+                spawn handler(connection);
             }
-            case Err(net.Error e): {
-                trap("accept: " + e.to_str());
+            case Err(net.Error error): {
+                trap("accept: " + error.to_str());
             }
         }
-        i = i + 1;
+        accepted_count = accepted_count + 1;
     }
-    Result<bool, net.Error> closed = ln.close();
+    Result<bool, net.Error> closed = listener.close();
 }
 
 // listen()'s backlog argument is a request, not a guarantee: the kernel
@@ -104,8 +104,8 @@ void yield_once() {
 // type reasoning), so this is Other(104) -- 104 because every io.Error's
 // Other code is a Linux errno regardless of host (docs/sys-layer.md §1),
 // not whatever this platform's own ECONNRESET constant happens to be.
-bool is_reset(io.Error e) {
-    match (e) {
+bool is_reset(io.Error error) {
+    match (error) {
         case NotFound: {
             return false;
         }
@@ -136,13 +136,13 @@ bool is_reset(io.Error e) {
 void client(int id, int port, Chan<int> results) {
     int tries = 0;
     while (true) {
-        bool retry = false;
+        bool is_retry = false;
         match (net.connect("127.0.0.1", port)) {
-            case Ok(net.Conn c): {
+            case Ok(net.Conn connection): {
                 bytes line = (id.to_str() + "\n").to_bytes();
-                match (c.write(line)) {
-                    case Ok(int n): {
-                        match (c.read_until([10], 256)) {
+                match (connection.write(line)) {
+                    case Ok(_): {
+                        match (connection.read_until([10], 256)) {
                             case Ok(bytes echoed): {
                                 if (echoed.utf8().or("?") == id.to_str() + "\n") {
                                     send(results, 1);
@@ -150,65 +150,65 @@ void client(int id, int port, Chan<int> results) {
                                     send(results, 0);
                                 }
                             }
-                            case Err(io.Error e): {
-                                if (is_reset(e) && tries < CONNECT_RETRIES) {
+                            case Err(io.Error error): {
+                                if (is_reset(error) && tries < CONNECT_RETRIES) {
                                     tries = tries + 1;
-                                    retry = true;
+                                    is_retry = true;
                                 } else {
-                                    trap("client read: " + e.to_str());
+                                    trap("client read: " + error.to_str());
                                 }
                             }
                         }
                     }
-                    case Err(io.Error e): {
-                        if (is_reset(e) && tries < CONNECT_RETRIES) {
+                    case Err(io.Error error): {
+                        if (is_reset(error) && tries < CONNECT_RETRIES) {
                             tries = tries + 1;
-                            retry = true;
+                            is_retry = true;
                         } else {
-                            trap("client write: " + e.to_str());
+                            trap("client write: " + error.to_str());
                         }
                     }
                 }
-                Result<bool, io.Error> closed = c.close();
+                Result<bool, io.Error> closed = connection.close();
             }
-            case Err(net.Error e): {
-                match (e) {
+            case Err(net.Error error): {
+                match (error) {
                     case Reset: {
                         if (tries < CONNECT_RETRIES) {
                             tries = tries + 1;
-                            retry = true;
+                            is_retry = true;
                         } else {
-                            trap("connect: " + e.to_str());
+                            trap("connect: " + error.to_str());
                         }
                     }
                     case Refused: {
-                        trap("connect: " + e.to_str());
+                        trap("connect: " + error.to_str());
                     }
                     case TimedOut: {
-                        trap("connect: " + e.to_str());
+                        trap("connect: " + error.to_str());
                     }
                     case Unreachable: {
-                        trap("connect: " + e.to_str());
+                        trap("connect: " + error.to_str());
                     }
                     case InUse: {
-                        trap("connect: " + e.to_str());
+                        trap("connect: " + error.to_str());
                     }
                     case NameNotFound: {
-                        trap("connect: " + e.to_str());
+                        trap("connect: " + error.to_str());
                     }
                     case OutOfDescriptors: {
-                        trap("connect: " + e.to_str());
+                        trap("connect: " + error.to_str());
                     }
                     case Aborted: {
-                        trap("connect: " + e.to_str());
+                        trap("connect: " + error.to_str());
                     }
                     case Other(int code): {
-                        trap("connect: " + e.to_str());
+                        trap("connect: " + error.to_str());
                     }
                 }
             }
         }
-        if (retry) {
+        if (is_retry) {
             yield_once();
             continue;
         }
@@ -221,25 +221,25 @@ void client(int id, int port, Chan<int> results) {
 // own comment above is why this alone does not make the demo bulletproof
 // on every kernel: the real ceiling is somaxconn, which this argument
 // cannot raise past.
-match (net.listen("127.0.0.1", 0, backlog: N + 56)) {
-    case Ok(net.Listener ln): {
-        int port = ln.local().port();
-        Chan<int> results = Chan<int>(N);
-        spawn serve(ln, N);
-        int i = 0;
-        while (i < N) {
-            spawn client(i, port, results);
-            i = i + 1;
+match (net.listen("127.0.0.1", 0, backlog: CONNECTION_COUNT + 56)) {
+    case Ok(net.Listener listener): {
+        int port = listener.local().port();
+        Chan<int> results = Chan<int>(CONNECTION_COUNT);
+        spawn serve(listener, CONNECTION_COUNT);
+        int client_index = 0;
+        while (client_index < CONNECTION_COUNT) {
+            spawn client(client_index, port, results);
+            client_index = client_index + 1;
         }
         int sum = 0;
-        i = 0;
-        while (i < N) {
+        client_index = 0;
+        while (client_index < CONNECTION_COUNT) {
             sum = sum + recv(results);
-            i = i + 1;
+            client_index = client_index + 1;
         }
         print(sum);
     }
-    case Err(net.Error e): {
-        trap("listen: " + e.to_str());
+    case Err(net.Error error): {
+        trap("listen: " + error.to_str());
     }
 }

@@ -80,18 +80,18 @@ import io;
 // prim is declared per module (docs/stdlib-seam.md). The wait parks only the
 // green thread, so a program with other threads keeps them running while one
 // waits for a key.
-prim int __read(int fd, bytes buf, int off, int n);
-prim int __write_str(int fd, str s, int off, int n);
-prim int __wait_io_timeout(int fd, int events, int timeout_ms);
+prim int __read(int descriptor, bytes buffer, int off, int byte_count);
+prim int __write_str(int descriptor, str text, int off, int byte_count);
+prim int __wait_io_timeout(int descriptor, int events, int timeout_ms);
 prim void __out_flush();
 // The terminal itself.
-prim int __isatty(int fd);
-prim int __tcget(int fd, List<int> out);
-prim int __tcset(int fd, int iflag, int oflag, int cflag, int lflag, int vmin, int vtime);
-prim int __winsize(int fd, List<int> out);
+prim int __isatty(int descriptor);
+prim int __tcget(int descriptor, List<int> out);
+prim int __tcset(int descriptor, int iflag, int oflag, int cflag, int lflag, int vmin, int vtime);
+prim int __winsize(int descriptor, List<int> out);
 // The runtime's safety net: a snapshot to put back if the process ends
 // without running a destructor. See the module note above.
-prim int __term_arm(int fd);
+prim int __term_arm(int descriptor);
 prim int __term_disarm();
 
 // The sys layer's own termios bits (runtime/sys.h), written here as numbers
@@ -150,11 +150,11 @@ pub str Error.to_str() {
 
 /// The `Error` for a Linux errno -- positive, as errno is written; a
 /// primitive's `r < 0` is `from_errno(-r)`.
-pub Error from_errno(int e) {
-    if (e == ENOTTY) {
+pub Error from_errno(int errno_code) {
+    if (errno_code == ENOTTY) {
         return Error.NotATerminal;
     }
-    return Error.Other(e);
+    return Error.Other(errno_code);
 }
 
 // --- keys ------------------------------------------------------------------
@@ -195,11 +195,11 @@ pub enum Code {
 /// The key's own name, without modifiers.
 pub str Code.to_str() {
     match (this) {
-        case Char(int c): {
-            if (c == ' ') {
+        case Char(int code_point): {
+            if (code_point == ' ') {
                 return "space";
             }
-            return str.from_chars([c]);
+            return str.from_chars([code_point]);
         }
         case Enter: {
             return "enter";
@@ -246,8 +246,8 @@ pub str Code.to_str() {
         case Delete: {
             return "delete";
         }
-        case F(int n): {
-            return "f" + n.to_str();
+        case F(int function_number): {
+            return "f" + function_number.to_str();
         }
     }
 }
@@ -277,9 +277,9 @@ pub type Key {
     pub int mods;
 }
 
-/// Whether all of `m`'s bits are held -- `k.has(term.CTRL)`.
-pub bool Key.has(int m) {
-    return mods & m == m;
+/// Whether all of `modifier_bits`'s bits are held -- `k.has(term.CTRL)`.
+pub bool Key.has_modifiers(int modifier_bits) {
+    return mods & modifier_bits == modifier_bits;
 }
 
 /// `ctrl+alt+c`, `f5`, `page-up`: a name for a key, for a log or a help line.
@@ -288,20 +288,20 @@ pub bool Key.has(int m) {
 /// character itself, except for the space, which prints as `space` so that a
 /// line of them can be read.
 pub str Key.to_str() {
-    str s = "";
+    str modifier_prefix = "";
     if ((mods & CTRL) != 0) {
-        s = s + "ctrl+";
+        modifier_prefix = modifier_prefix + "ctrl+";
     }
     if ((mods & ALT) != 0) {
-        s = s + "alt+";
+        modifier_prefix = modifier_prefix + "alt+";
     }
     if ((mods & SHIFT) != 0) {
-        s = s + "shift+";
+        modifier_prefix = modifier_prefix + "shift+";
     }
     if ((mods & META) != 0) {
-        s = s + "meta+";
+        modifier_prefix = modifier_prefix + "meta+";
     }
-    return s + code.to_str();
+    return modifier_prefix + code.to_str();
 }
 
 // --- the mouse -------------------------------------------------------------
@@ -321,14 +321,14 @@ pub enum MouseKind {
 /// The name of one mouse action.
 pub str MouseKind.to_str() {
     match (this) {
-        case Down(int b): {
-            return button(b) + "-down";
+        case Down(int button_number): {
+            return button(button_number) + "-down";
         }
-        case Up(int b): {
-            return button(b) + "-up";
+        case Up(int button_number): {
+            return button(button_number) + "-up";
         }
-        case Drag(int b): {
-            return button(b) + "-drag";
+        case Drag(int button_number): {
+            return button(button_number) + "-drag";
         }
         case Moved: {
             return "moved";
@@ -364,30 +364,30 @@ pub type Mouse {
 
 /// `left-down 12,3`, `scroll-up 40,9`: a name for a mouse report.
 pub str Mouse.to_str() {
-    str m = "";
+    str modifier_prefix = "";
     if ((mods & CTRL) != 0) {
-        m = m + "ctrl+";
+        modifier_prefix = modifier_prefix + "ctrl+";
     }
     if ((mods & ALT) != 0) {
-        m = m + "alt+";
+        modifier_prefix = modifier_prefix + "alt+";
     }
     if ((mods & SHIFT) != 0) {
-        m = m + "shift+";
+        modifier_prefix = modifier_prefix + "shift+";
     }
-    return m + kind.to_str() + " " + col.to_str() + "," + row.to_str();
+    return modifier_prefix + kind.to_str() + " " + col.to_str() + "," + row.to_str();
 }
 
-str button(int b) {
-    if (b == 0) {
+str button(int button_number) {
+    if (button_number == 0) {
         return "left";
     }
-    if (b == 1) {
+    if (button_number == 1) {
         return "middle";
     }
-    if (b == 2) {
+    if (button_number == 2) {
         return "right";
     }
-    return "button" + b.to_str();
+    return "button" + button_number.to_str();
 }
 
 // --- events ----------------------------------------------------------------
@@ -408,17 +408,17 @@ pub enum Event {
 /// A name for the event, for a log or a test.
 pub str Event.to_str() {
     match (this) {
-        case Key(Key k): {
-            return k.to_str();
+        case Key(Key key_press): {
+            return key_press.to_str();
         }
-        case Mouse(Mouse m): {
-            return m.to_str();
+        case Mouse(Mouse mouse_report): {
+            return mouse_report.to_str();
         }
-        case Paste(str t): {
-            return "paste[" + t + "]";
+        case Paste(str text): {
+            return "paste[" + text + "]";
         }
-        case Unknown(bytes b): {
-            return "unknown[" + b.hex() + "]";
+        case Unknown(bytes sequence): {
+            return "unknown[" + sequence.hex() + "]";
         }
     }
 }
@@ -430,19 +430,19 @@ pub str Event.to_str() {
 // agree, and nothing outside this file sees a Step.
 type Step {
     int used;
-    Option<Event> ev;
+    Option<Event> event;
 }
 
 Step more() {
     return Step(0, Option<Event>.None);
 }
 
-Step one(int used, Code c, int mods) {
-    return Step(used, Option<Event>.Some(Event.Key(Key(c, mods))));
+Step one(int used, Code code, int mods) {
+    return Step(used, Option<Event>.Some(Event.Key(Key(code, mods))));
 }
 
-Step unknown(bytes b, int n) {
-    return Step(n, Option<Event>.Some(Event.Unknown(b.substr(0, n))));
+Step unknown(bytes sequence, int byte_count) {
+    return Step(byte_count, Option<Event>.Some(Event.Unknown(sequence.substr(0, byte_count))));
 }
 
 /// Bytes in, events out, and **nothing else**: no descriptor, no clock, no
@@ -464,19 +464,19 @@ Step unknown(bytes b, int n) {
 /// nothing followed it. Only the caller knows that nothing did -- `Reader`
 /// decides it with a timeout -- so the decoder does not guess.
 pub type Decoder {
-    bytes buf = [];
+    bytes buffer = [];
 }
 
 /// Add bytes, as they came off the descriptor.
-pub void Decoder.feed(bytes b) {
-    buf.extend(b);
+pub void Decoder.feed(bytes data) {
+    buffer.extend(data);
 }
 
 /// How many bytes are held but not yet decoded. Zero means the decoder is
 /// empty; anything else after `next()` has answered `None` is an incomplete
 /// sequence waiting for the rest of itself.
 pub int Decoder.pending() {
-    return buf.size();
+    return buffer.size();
 }
 
 /// The next whole event, or `None` if what is held is a prefix of one.
@@ -491,13 +491,13 @@ pub Option<Event> Decoder.flush() {
     return take(true);
 }
 
-Option<Event> Decoder.take(bool last) {
-    Step s = step(buf, last);
-    if (s.used == 0) {
+Option<Event> Decoder.take(bool is_last) {
+    Step outcome = step(buffer, is_last);
+    if (outcome.used == 0) {
         return Option<Event>.None;
     }
-    buf.drop_front(s.used);
-    return s.ev;
+    buffer.drop_front(outcome.used);
+    return outcome.event;
 }
 
 /// A decoder with nothing in it.
@@ -505,28 +505,28 @@ pub Decoder decoder() {
     return Decoder();
 }
 
-/// Every event in `b`, with `b` treated as a complete input.
+/// Every event in `input`, with `input` treated as a complete input.
 ///
 /// The one-call form of feed-next-flush, for a program that has the bytes
 /// already -- a test, a recorded session, a script driving a pty.
-pub List<Event> decode(bytes b) {
-    Decoder d = decoder();
-    d.feed(b);
+pub List<Event> decode(bytes input) {
+    Decoder event_decoder = decoder();
+    event_decoder.feed(input);
     List<Event> evs = [];
     while (true) {
-        match (d.next()) {
-            case Some(Event e): {
-                evs.push(e);
+        match (event_decoder.next()) {
+            case Some(Event event): {
+                evs.push(event);
             }
             case None: {
                 break;
             }
         }
     }
-    while (d.pending() > 0) {
-        match (d.flush()) {
-            case Some(Event e): {
-                evs.push(e);
+    while (event_decoder.pending() > 0) {
+        match (event_decoder.flush()) {
+            case Some(Event event): {
+                evs.push(event);
             }
             case None: {
                 break;
@@ -536,55 +536,55 @@ pub List<Event> decode(bytes b) {
     return evs;
 }
 
-// One event off the front of `b`. `last` says that no more bytes are coming,
+// One event off the front of `input`. `is_last` says that no more bytes are coming,
 // which is the only thing that can resolve a lone ESC or an unfinished
 // sequence.
-Step step(bytes b, bool last) {
-    if (b.size() == 0) {
+Step step(bytes input, bool is_last) {
+    if (input.size() == 0) {
         return more();
     }
-    int c0 = b[0];
-    if (c0 != 27) {
-        Step s = plain(b, 0, 0);
-        if (s.used == 0 && last) {
-            return unknown(b, b.size());
+    int first_byte = input[0];
+    if (first_byte != 27) {
+        Step plain_step = plain(input, 0, 0);
+        if (plain_step.used == 0 && is_last) {
+            return unknown(input, input.size());
         }
-        return s;
+        return plain_step;
     }
-    if (b.size() == 1) {
-        if (last) {
+    if (input.size() == 1) {
+        if (is_last) {
             return one(1, Code.Escape, 0);
         }
         return more();
     }
-    int c1 = b[1];
-    if (c1 == 27) {
+    int second_byte = input[1];
+    if (second_byte == 27) {
         // ESC ESC. The first is a key in its own right; whatever the second
         // one begins is decoded on the next call.
         return one(1, Code.Escape, 0);
     }
-    if (c1 == '[') {
-        return csi(b, last);
+    if (second_byte == '[') {
+        return csi(input, is_last);
     }
-    if (c1 == 'O') {
-        return ss3(b, last);
+    if (second_byte == 'O') {
+        return ss3(input, is_last);
     }
     // Anything else after an ESC is how nearly every terminal spells Alt.
-    Step s = plain(b, 1, ALT);
-    if (s.used == 0) {
-        if (last) {
-            return unknown(b, b.size());
+    Step alt_step = plain(input, 1, ALT);
+    if (alt_step.used == 0) {
+        if (is_last) {
+            return unknown(input, input.size());
         }
         return more();
     }
-    return Step(s.used + 1, s.ev);
+    return Step(alt_step.used + 1, alt_step.event);
 }
 
 // One key that is not an escape sequence: a control byte, or a character in
 // UTF-8. `mods` is what the caller has already worked out -- ALT, when this
 // is the tail of an ESC-prefixed key.
-Step plain(bytes b, int at, int mods) {
-    int c = b[at];
+Step plain(bytes input, int offset, int mods) {
+    int octet = input[offset];
     // Enter is 13 and ONLY 13. It sits inside the control range below and is
     // taken out of it because it is a key with a name rather than Ctrl+M.
     //
@@ -593,72 +593,72 @@ Step plain(bytes b, int at, int mods) {
     // sends into a 10 on the way in (ICRNL), and `raw()` turns that off --
     // so in raw mode a 10 can only be Ctrl+J, and calling it Enter would make
     // Ctrl+J unreachable in order to serve a mode this module exists to leave.
-    if (c == '\r') {
+    if (octet == '\r') {
         return one(1, Code.Enter, mods);
     }
-    if (c == '\t') {
+    if (octet == '\t') {
         return one(1, Code.Tab, mods);
     }
     // 127 is what a terminal sends for the key marked Backspace; 8 is Ctrl+H,
     // which the same key sends on a few of them. They cannot be told apart
     // and the useful reading is the same.
-    if (c == 127 || c == 8) {
+    if (octet == 127 || octet == 8) {
         return one(1, Code.Backspace, mods);
     }
-    if (c == 0) {
+    if (octet == 0) {
         return one(1, Code.Char(32), mods | CTRL);
     }
-    if (c >= 1 && c <= 26) {
+    if (octet >= 1 && octet <= 26) {
         // ^A is 1 and 'a' is 97.
-        return one(1, Code.Char(c + 96), mods | CTRL);
+        return one(1, Code.Char(octet + 96), mods | CTRL);
     }
-    if (c >= 28 && c <= 31) {
+    if (octet >= 28 && octet <= 31) {
         // The four control codes that are not a letter. ASCII makes a control
         // code by clearing the top three bits, so 28 is '\' and 31 is '_',
         // and reporting the character those bits came from is the reading a
         // user can check against the key they pressed.
-        return one(1, Code.Char(c + 64), mods | CTRL);
+        return one(1, Code.Char(octet + 64), mods | CTRL);
     }
-    if (c == 27) {
+    if (octet == 27) {
         return one(1, Code.Escape, mods);
     }
-    if (c < 128) {
-        return one(1, Code.Char(c), mods);
+    if (octet < 128) {
+        return one(1, Code.Char(octet), mods);
     }
     // UTF-8. The length comes from the lead byte, and the bytes themselves
     // are handed to the language's own decoder rather than to a second one
     // written here: `utf8()` refuses an overlong form, a surrogate and a
     // value past U+10FFFF, which is exactly the set a key may not carry.
-    int n = utf8_len(c);
-    if (n == 0) {
-        return unknown(b.substr(at, at + 1), 1);
+    int sequence_length = utf8_length(octet);
+    if (sequence_length == 0) {
+        return unknown(input.substr(offset, offset + 1), 1);
     }
-    if (at + n > b.size()) {
+    if (offset + sequence_length > input.size()) {
         return more();
     }
-    match (b.substr(at, at + n).utf8()) {
-        case Some(str s): {
-            return one(n, Code.Char(s.chars()[0]), mods);
+    match (input.substr(offset, offset + sequence_length).utf8()) {
+        case Some(str text): {
+            return one(sequence_length, Code.Char(text.chars()[0]), mods);
         }
         case None: {
-            return unknown(b.substr(at, at + 1), 1);
+            return unknown(input.substr(offset, offset + 1), 1);
         }
     }
 }
 
-// How many bytes a UTF-8 sequence beginning with `c` takes, or 0 if `c` is
+// How many bytes a UTF-8 sequence beginning with `lead_byte` takes, or 0 if `lead_byte` is
 // not a lead byte.
-int utf8_len(int c) {
-    if (c < 0x80) {
+int utf8_length(int lead_byte) {
+    if (lead_byte < 0x80) {
         return 1;
     }
-    if (c & 0xE0 == 0xC0) {
+    if (lead_byte & 0xE0 == 0xC0) {
         return 2;
     }
-    if (c & 0xF0 == 0xE0) {
+    if (lead_byte & 0xF0 == 0xE0) {
         return 3;
     }
-    if (c & 0xF8 == 0xF0) {
+    if (lead_byte & 0xF8 == 0xF0) {
         return 4;
     }
     return 0;
@@ -667,36 +667,36 @@ int utf8_len(int c) {
 // ESC O x -- the "application" spelling of the arrows, the home and end keys
 // and F1 to F4. A terminal chooses between this and ESC [ x depending on a
 // mode the program may never have set, so both have to be understood.
-Step ss3(bytes b, bool last) {
-    if (b.size() < 3) {
-        if (last) {
-            return unknown(b, b.size());
+Step ss3(bytes input, bool is_last) {
+    if (input.size() < 3) {
+        if (is_last) {
+            return unknown(input, input.size());
         }
         return more();
     }
-    int c = b[2];
-    if (c == 'A') {
+    int final_byte = input[2];
+    if (final_byte == 'A') {
         return one(3, Code.Up, 0);
     }
-    if (c == 'B') {
+    if (final_byte == 'B') {
         return one(3, Code.Down, 0);
     }
-    if (c == 'C') {
+    if (final_byte == 'C') {
         return one(3, Code.Right, 0);
     }
-    if (c == 'D') {
+    if (final_byte == 'D') {
         return one(3, Code.Left, 0);
     }
-    if (c == 'H') {
+    if (final_byte == 'H') {
         return one(3, Code.Home, 0);
     }
-    if (c == 'F') {
+    if (final_byte == 'F') {
         return one(3, Code.End, 0);
     }
-    if (c >= 'P' && c <= 'S') {
-        return one(3, Code.F(c - 79), 0);
+    if (final_byte >= 'P' && final_byte <= 'S') {
+        return one(3, Code.F(final_byte - 79), 0);
     }
-    return unknown(b, 3);
+    return unknown(input, 3);
 }
 
 // A parsed CSI sequence: ESC [ , an optional private marker, numeric
@@ -708,116 +708,116 @@ type Csi {
     int state;
     int end;
     int marker;
-    List<int> params;
+    List<int> parameters;
     int final;
 }
 
-Csi scan_csi(bytes b, int from) {
-    List<int> ps = [];
-    int i = from;
+Csi scan_csi(bytes input, int from) {
+    List<int> parameters = [];
+    int scan_index = from;
     int marker = 0;
-    if (i < b.size()) {
-        int c = b[i];
+    if (scan_index < input.size()) {
+        int octet = input[scan_index];
         // '<' '=' '>' '?' -- a private-use introducer, and only in first
         // position. SGR mouse reports use '<'.
-        if (c >= '<' && c <= '?') {
-            marker = c;
-            i = i + 1;
+        if (octet >= '<' && octet <= '?') {
+            marker = octet;
+            scan_index = scan_index + 1;
         }
     }
     // -1 is "this parameter was left out", which is not the same as 0: the
     // terminal writes ESC [ ; 5 A for a modified arrow with no first
     // parameter, and the default for a missing one depends on the final byte.
-    int cur = -1;
-    while (i < b.size()) {
-        int c = b[i];
-        if (c >= '0' && c <= '9') {
-            if (cur < 0) {
-                cur = 0;
+    int current_parameter = -1;
+    while (scan_index < input.size()) {
+        int octet = input[scan_index];
+        if (octet >= '0' && octet <= '9') {
+            if (current_parameter < 0) {
+                current_parameter = 0;
             }
             // Clamped rather than allowed to overflow: a parameter this
             // large is a terminal misbehaving, and arithmetic traps.
-            if (cur < 1000000) {
-                cur = cur * 10 + (c - 48);
+            if (current_parameter < 1000000) {
+                current_parameter = current_parameter * 10 + (octet - 48);
             }
-            i = i + 1;
-        } else if (c == ';') {
-            ps.push(cur);
-            cur = -1;
-            i = i + 1;
-        } else if (c >= 0x20 && c <= 0x3F) {
+            scan_index = scan_index + 1;
+        } else if (octet == ';') {
+            parameters.push(current_parameter);
+            current_parameter = -1;
+            scan_index = scan_index + 1;
+        } else if (octet >= 0x20 && octet <= 0x3F) {
             // An intermediate byte, or a sub-parameter after a colon. Both
             // are skipped: nothing decoded here depends on one.
-            i = i + 1;
-        } else if (c >= 0x40 && c <= 0x7E) {
-            ps.push(cur);
-            return Csi(1, i + 1, marker, ps, c);
+            scan_index = scan_index + 1;
+        } else if (octet >= 0x40 && octet <= 0x7E) {
+            parameters.push(current_parameter);
+            return Csi(1, scan_index + 1, marker, parameters, octet);
         } else {
-            return Csi(2, i, marker, ps, 0);
+            return Csi(2, scan_index, marker, parameters, 0);
         }
     }
-    return Csi(0, 0, marker, ps, 0);
+    return Csi(0, 0, marker, parameters, 0);
 }
 
-// Parameter `i`, or `dflt` if it was left out.
-int param(List<int> ps, int i, int dflt) {
-    if (i >= ps.size()) {
+// Parameter `parameter_index`, or `dflt` if it was left out.
+int parameter(List<int> parameters, int parameter_index, int dflt) {
+    if (parameter_index >= parameters.size()) {
         return dflt;
     }
-    if (ps[i] < 0) {
+    if (parameters[parameter_index] < 0) {
         return dflt;
     }
-    return ps[i];
+    return parameters[parameter_index];
 }
 
 // xterm's modifier parameter is 1 + the bits, so 5 is Ctrl and 1 is nothing.
-int mods_of(int p) {
-    if (p < 1) {
+int mods_of(int modifier_parameter) {
+    if (modifier_parameter < 1) {
         return 0;
     }
-    return p - 1 & 15;
+    return modifier_parameter - 1 & 15;
 }
 
-Step csi(bytes b, bool last) {
+Step csi(bytes input, bool is_last) {
     // ESC [ [ A .. ESC [ [ E -- the Linux console's F1 to F5, which is the
     // one sequence in common use that is not a well-formed CSI.
-    if (b.size() >= 3 && b[2] == '[') {
-        if (b.size() < 4) {
-            if (last) {
-                return unknown(b, b.size());
+    if (input.size() >= 3 && input[2] == '[') {
+        if (input.size() < 4) {
+            if (is_last) {
+                return unknown(input, input.size());
             }
             return more();
         }
-        int c = b[3];
-        if (c >= 'A' && c <= 'E') {
-            return one(4, Code.F(c - 64), 0);
+        int final_byte = input[3];
+        if (final_byte >= 'A' && final_byte <= 'E') {
+            return one(4, Code.F(final_byte - 64), 0);
         }
-        return unknown(b, 4);
+        return unknown(input, 4);
     }
-    Csi s = scan_csi(b, 2);
-    if (s.state == 0) {
-        if (last) {
-            return unknown(b, b.size());
+    Csi scan = scan_csi(input, 2);
+    if (scan.state == 0) {
+        if (is_last) {
+            return unknown(input, input.size());
         }
         return more();
     }
-    if (s.state == 2) {
-        return unknown(b, s.end);
+    if (scan.state == 2) {
+        return unknown(input, scan.end);
     }
-    int fin = s.final;
-    int used = s.end;
-    if (s.marker == 60) {
+    int fin = scan.final;
+    int used = scan.end;
+    if (scan.marker == 60) {
         if (fin == 77 || fin == 109) {
-            return mouse(s.params, fin, used);
+            return mouse(scan.parameters, fin, used);
         }
-        return unknown(b, used);
+        return unknown(input, used);
     }
-    if (s.marker != 0) {
+    if (scan.marker != 0) {
         // A private reply -- a device attribute answer, a mode report. Not a
         // key, and not this module's to interpret.
-        return unknown(b, used);
+        return unknown(input, used);
     }
-    int mods = mods_of(param(s.params, 1, 1));
+    int mods = mods_of(parameter(scan.parameters, 1, 1));
     if (fin >= 80 && fin <= 83) {
         // ESC [ 1 ; 3 P and friends: F1 to F4 held with a modifier, which is
         // how xterm spells them when the plain forms are ESC O P .. ESC O S.
@@ -827,44 +827,44 @@ Step csi(bytes b, bool last) {
         // REPORT, the answer to a question some other part of a program may
         // have asked. Reading it as F3 with a modifier would be a wrong key
         // rather than an unknown one, which is the worse failure.
-        if (param(s.params, 0, 1) == 1) {
+        if (parameter(scan.parameters, 0, 1) == 1) {
             return one(used, Code.F(fin - 79), mods);
         }
-        return unknown(b, used);
+        return unknown(input, used);
     }
     if (fin == 126) {
-        int p0 = param(s.params, 0, 0);
-        if (p0 == 200) {
-            return paste(b, used, last);
+        int first_parameter = parameter(scan.parameters, 0, 0);
+        if (first_parameter == 200) {
+            return paste(input, used, is_last);
         }
-        match (tilde(p0)) {
-            case Some(Code c): {
-                return one(used, c, mods);
+        match (tilde(first_parameter)) {
+            case Some(Code tilde_code): {
+                return one(used, tilde_code, mods);
             }
             case None: {
-                return unknown(b, used);
+                return unknown(input, used);
             }
         }
     }
     if (fin == 117) {
         // CSI u: a code point and its modifiers, which is the only encoding
         // that can say Ctrl+Shift+A. Kitty and recent xterms send it.
-        int cp = param(s.params, 0, -1);
-        match (csi_u(cp)) {
-            case Some(Code c): {
-                return one(used, c, mods);
+        int code_point = parameter(scan.parameters, 0, -1);
+        match (csi_u(code_point)) {
+            case Some(Code unicode_code): {
+                return one(used, unicode_code, mods);
             }
             case None: {
-                return unknown(b, used);
+                return unknown(input, used);
             }
         }
     }
     match (letter(fin)) {
-        case Some(Code c): {
-            return one(used, c, mods);
+        case Some(Code letter_code): {
+            return one(used, letter_code, mods);
         }
         case None: {
-            return unknown(b, used);
+            return unknown(input, used);
         }
     }
 }
@@ -899,39 +899,39 @@ Option<Code> letter(int fin) {
 // has used. The gaps are real -- there is no 16, 22, 27 or 30 -- and the
 // duplicates are real too: 1 and 7 are both Home because different terminals
 // chose differently.
-Option<Code> tilde(int n) {
-    if (n == 1 || n == 7) {
+Option<Code> tilde(int key_number) {
+    if (key_number == 1 || key_number == 7) {
         return Option<Code>.Some(Code.Home);
     }
-    if (n == 2) {
+    if (key_number == 2) {
         return Option<Code>.Some(Code.Insert);
     }
-    if (n == 3) {
+    if (key_number == 3) {
         return Option<Code>.Some(Code.Delete);
     }
-    if (n == 4 || n == 8) {
+    if (key_number == 4 || key_number == 8) {
         return Option<Code>.Some(Code.End);
     }
-    if (n == 5) {
+    if (key_number == 5) {
         return Option<Code>.Some(Code.PageUp);
     }
-    if (n == 6) {
+    if (key_number == 6) {
         return Option<Code>.Some(Code.PageDown);
     }
-    if (n >= 11 && n <= 15) {
-        return Option<Code>.Some(Code.F(n - 10));
+    if (key_number >= 11 && key_number <= 15) {
+        return Option<Code>.Some(Code.F(key_number - 10));
     }
-    if (n >= 17 && n <= 21) {
-        return Option<Code>.Some(Code.F(n - 11));
+    if (key_number >= 17 && key_number <= 21) {
+        return Option<Code>.Some(Code.F(key_number - 11));
     }
-    if (n >= 23 && n <= 26) {
-        return Option<Code>.Some(Code.F(n - 12));
+    if (key_number >= 23 && key_number <= 26) {
+        return Option<Code>.Some(Code.F(key_number - 12));
     }
-    if (n >= 28 && n <= 29) {
-        return Option<Code>.Some(Code.F(n - 13));
+    if (key_number >= 28 && key_number <= 29) {
+        return Option<Code>.Some(Code.F(key_number - 13));
     }
-    if (n >= 31 && n <= 34) {
-        return Option<Code>.Some(Code.F(n - 14));
+    if (key_number >= 31 && key_number <= 34) {
+        return Option<Code>.Some(Code.F(key_number - 14));
     }
     return Option<Code>.None;
 }
@@ -939,69 +939,69 @@ Option<Code> tilde(int n) {
 // The code point a CSI u sequence names. The four that have keys of their own
 // are reported as those keys, so a program matching on Enter sees an Enter
 // whichever encoding the terminal used.
-Option<Code> csi_u(int cp) {
-    if (cp == 13) {
+Option<Code> csi_u(int code_point) {
+    if (code_point == 13) {
         return Option<Code>.Some(Code.Enter);
     }
-    if (cp == 9) {
+    if (code_point == 9) {
         return Option<Code>.Some(Code.Tab);
     }
-    if (cp == 27) {
+    if (code_point == 27) {
         return Option<Code>.Some(Code.Escape);
     }
-    if (cp == 127 || cp == 8) {
+    if (code_point == 127 || code_point == 8) {
         return Option<Code>.Some(Code.Backspace);
     }
     // A surrogate or a value past the last plane has no character, and
     // `str.from_chars` would trap on one -- so it is refused here rather than
     // carried into a Key that nothing could print.
-    if (cp < 1 || cp > 0x10FFFF) {
+    if (code_point < 1 || code_point > 0x10FFFF) {
         return Option<Code>.None;
     }
-    if (cp >= 0xD800 && cp <= 0xDFFF) {
+    if (code_point >= 0xD800 && code_point <= 0xDFFF) {
         return Option<Code>.None;
     }
-    return Option<Code>.Some(Code.Char(cp));
+    return Option<Code>.Some(Code.Char(code_point));
 }
 
 // ESC [ < b ; col ; row M or m -- the SGR mouse encoding, the only one this
 // module reads (see the note at the top).
-Step mouse(List<int> ps, int fin, int used) {
-    int cb = param(ps, 0, 0);
-    int col = param(ps, 1, 1);
-    int row = param(ps, 2, 1);
+Step mouse(List<int> parameters, int fin, int used) {
+    int button_flags = parameter(parameters, 0, 0);
+    int col = parameter(parameters, 1, 1);
+    int row = parameter(parameters, 2, 1);
     int mods = 0;
-    if ((cb & 4) != 0) {
+    if ((button_flags & 4) != 0) {
         mods = mods | SHIFT;
     }
-    if ((cb & 8) != 0) {
+    if ((button_flags & 8) != 0) {
         mods = mods | ALT;
     }
-    if ((cb & 16) != 0) {
+    if ((button_flags & 16) != 0) {
         mods = mods | CTRL;
     }
-    int btn = cb & 3;
-    MouseKind k = MouseKind.Moved;
-    if ((cb & 64) != 0) {
+    int btn = button_flags & 3;
+    MouseKind mouse_kind = MouseKind.Moved;
+    if ((button_flags & 64) != 0) {
         if (btn == 0) {
-            k = MouseKind.ScrollUp;
+            mouse_kind = MouseKind.ScrollUp;
         } else if (btn == 1) {
-            k = MouseKind.ScrollDown;
+            mouse_kind = MouseKind.ScrollDown;
         } else if (btn == 2) {
-            k = MouseKind.ScrollLeft;
+            mouse_kind = MouseKind.ScrollLeft;
         } else {
-            k = MouseKind.ScrollRight;
+            mouse_kind = MouseKind.ScrollRight;
         }
-    } else if ((cb & 32) != 0) {
+    } else if ((button_flags & 32) != 0) {
         if (btn != 3) {
-            k = MouseKind.Drag(btn);
+            mouse_kind = MouseKind.Drag(btn);
         }
     } else if (fin == 109) {
-        k = MouseKind.Up(btn);
+        mouse_kind = MouseKind.Up(btn);
     } else if (btn != 3) {
-        k = MouseKind.Down(btn);
+        mouse_kind = MouseKind.Down(btn);
     }
-    return Step(used, Option<Event>.Some(Event.Mouse(Mouse(k, col, row, mods))));
+    return Step(used, Option<Event>.Some(Event.Mouse(Mouse(mouse_kind, col, row, mods))));
 }
 
 // A bracketed paste: everything between ESC [ 200 ~ and ESC [ 201 ~, which is
@@ -1011,24 +1011,24 @@ Step mouse(List<int> ps, int fin, int used) {
 // The whole paste is held until its end arrives, which is what makes it worth
 // having: the point of bracketed paste is that a program can tell a pasted
 // newline from a pressed Enter, and it cannot do that one key at a time.
-Step paste(bytes b, int from, bool last) {
-    match (b.index_of(PASTE_END)) {
-        case Some(int at): {
-            bytes body = b.substr(from, at);
+Step paste(bytes input, int from, bool is_last) {
+    match (input.index_of(PASTE_END)) {
+        case Some(int terminator_index): {
+            bytes body = input.substr(from, terminator_index);
             match (body.utf8()) {
-                case Some(str t): {
-                    return Step(at + PASTE_END.size(), Option<Event>.Some(Event.Paste(t)));
+                case Some(str text): {
+                    return Step(terminator_index + PASTE_END.size(), Option<Event>.Some(Event.Paste(text)));
                 }
                 case None: {
                     // A paste that is not text. There is nothing honest to
                     // put in a `str`, so the bytes go out as they are.
-                    return unknown(b, at + PASTE_END.size());
+                    return unknown(input, terminator_index + PASTE_END.size());
                 }
             }
         }
         case None: {
-            if (last) {
-                return unknown(b, b.size());
+            if (is_last) {
+                return unknown(input, input.size());
             }
             return more();
         }
@@ -1053,9 +1053,9 @@ pub enum Input {
 /// terminal would each hold keys the other never sees -- the rule `io.stdin`
 /// already follows.
 pub type Reader {
-    int fd;
+    int descriptor;
     Decoder dec = decoder();
-    bytes buf = [0; CHUNK];
+    bytes buffer = [0; CHUNK];
 }
 
 /// How many undecoded bytes are held. A loop that wants to drain what has
@@ -1103,22 +1103,22 @@ pub int Reader.pending() {
 pub Result<Input, Error> Reader.read(int timeout_ms) {
     while (true) {
         match (dec.next()) {
-            case Some(Event e): {
-                return Result<Input, Error>.Ok(Input.Got(e));
+            case Some(Event event): {
+                return Result<Input, Error>.Ok(Input.Got(event));
             }
             case None: {
             }
         }
-        int n = __wait_io_timeout(fd, IO_READABLE, timeout_ms);
+        int wait_result = __wait_io_timeout(descriptor, IO_READABLE, timeout_ms);
         // A regular file or /dev/null cannot be waited on (-EPERM) and is
         // always ready, which is the answer poll(2) gave for one.
-        if (n == -EPERM) {
-            n = 0;
+        if (wait_result == -EPERM) {
+            wait_result = 0;
         }
-        if (n < 0) {
-            return Result<Input, Error>.Err(from_errno(-n));
+        if (wait_result < 0) {
+            return Result<Input, Error>.Err(from_errno(-wait_result));
         }
-        if (n == 1) {
+        if (wait_result == 1) {
             // A timeout of 0 asks what has ALREADY arrived, and half a
             // sequence has not arrived. Resolving it here would turn a split
             // ESC [ 1 ; 5 A into an Escape in any loop that drains with 0 --
@@ -1129,17 +1129,17 @@ pub Result<Input, Error> Reader.read(int timeout_ms) {
             }
             return Result<Input, Error>.Ok(finish(Input.Timeout));
         }
-        int r = __read(fd, buf, 0, buf.size());
-        if (r == -EINTR) {
+        int read_result = __read(descriptor, buffer, 0, buffer.size());
+        if (read_result == -EINTR) {
             continue;
         }
-        if (r < 0) {
-            return Result<Input, Error>.Err(from_errno(-r));
+        if (read_result < 0) {
+            return Result<Input, Error>.Err(from_errno(-read_result));
         }
-        if (r == 0) {
+        if (read_result == 0) {
             return Result<Input, Error>.Ok(finish(Input.End));
         }
-        dec.feed(buf.substr(0, r));
+        dec.feed(buffer.substr(0, read_result));
     }
 }
 
@@ -1149,8 +1149,8 @@ pub Result<Input, Error> Reader.read(int timeout_ms) {
 Input Reader.finish(Input otherwise) {
     if (dec.pending() > 0) {
         match (dec.flush()) {
-            case Some(Event e): {
-                return Input.Got(e);
+            case Some(Event event): {
+                return Input.Got(event);
             }
             case None: {
             }
@@ -1159,27 +1159,27 @@ Input Reader.finish(Input otherwise) {
     return otherwise;
 }
 
-/// A reader on `fd`, standard input by default.
-pub Reader reader(int fd = 0) {
-    return Reader(fd);
+/// A reader on `descriptor`, standard input by default.
+pub Reader reader(int descriptor = 0) {
+    return Reader(descriptor);
 }
 
 // --- the terminal itself ---------------------------------------------------
-/// Whether `fd` is a terminal. Never fails: a closed descriptor, a pipe and
+/// Whether `descriptor` is a terminal. Never fails: a closed descriptor, a pipe and
 /// a file are all simply not one.
-pub bool is_terminal(int fd) {
-    return __isatty(fd) == 1;
+pub bool is_terminal(int descriptor) {
+    return __isatty(descriptor) == 1;
 }
 
 /// How many character cells the window has.
 pub type Size {
     pub int rows;
-    pub int cols;
+    pub int columns;
 }
 
 /// `80x24`, columns first, the way a terminal's own size is written.
 pub str Size.to_str() {
-    return cols.to_str() + "x" + rows.to_str();
+    return columns.to_str() + "x" + rows.to_str();
 }
 
 /// The window's size, from the descriptor's terminal -- standard output by
@@ -1192,11 +1192,11 @@ pub str Size.to_str() {
 ///
 /// There is no way to be told the size changed. Call this again -- once a
 /// frame is nothing -- and see the module note on signals for why.
-pub Result<Size, Error> size(int fd = 1) {
+pub Result<Size, Error> size(int descriptor = 1) {
     List<int> out = [];
-    int r = __winsize(fd, out);
-    if (r < 0) {
-        return Result<Size, Error>.Err(from_errno(-r));
+    int winsize_result = __winsize(descriptor, out);
+    if (winsize_result < 0) {
+        return Result<Size, Error>.Err(from_errno(-winsize_result));
     }
     return Result<Size, Error>.Ok(Size(out[0], out[1]));
 }
@@ -1227,7 +1227,7 @@ pub type Session {
     int vmin;
     int vtime;
     str leave = "";
-    bool live = true;
+    bool is_live = true;
 }
 
 /// Sequences to write when the session ends, in the order given.
@@ -1240,8 +1240,8 @@ pub type Session {
 ///
 /// Best effort: the write is one call and its result is not reported, because
 /// a destructor has nobody to report to.
-pub void Session.on_exit(str s) {
-    leave = leave + s;
+pub void Session.on_exit(str sequence) {
+    leave = leave + sequence;
 }
 
 /// Put the terminal back now, and say whether it worked.
@@ -1250,20 +1250,20 @@ pub void Session.on_exit(str s) {
 /// when the answer matters, or to leave raw mode before the session's scope
 /// ends. Calling it twice is not an error and the second time does nothing.
 pub Result<bool, Error> Session.restore() {
-    if (!live) {
+    if (!is_live) {
         return Result<bool, Error>.Ok(true);
     }
-    live = false;
+    is_live = false;
     if (leave.size() > 0) {
         // Through the runtime's own buffer first, so that anything `print`
         // has waiting lands before these sequences rather than after them.
         __out_flush();
-        int w = __write_str(out_fd, leave, 0, leave.size());
+        int write_result = __write_str(out_fd, leave, 0, leave.size());
     }
-    int d = __term_disarm();
-    int r = __tcset(in_fd, iflag, oflag, cflag, lflag, vmin, vtime);
-    if (r < 0) {
-        return Result<bool, Error>.Err(from_errno(-r));
+    int disarm_result = __term_disarm();
+    int tcset_result = __tcset(in_fd, iflag, oflag, cflag, lflag, vmin, vtime);
+    if (tcset_result < 0) {
+        return Result<bool, Error>.Err(from_errno(-tcset_result));
     }
     return Result<bool, Error>.Ok(true);
 }
@@ -1314,31 +1314,31 @@ pub Result<Session, Error> raw(int in_fd = 0, int out_fd = 1) {
     if (__isatty(in_fd) != 1) {
         return Result<Session, Error>.Err(Error.NotATerminal);
     }
-    List<int> t = [];
-    int g = __tcget(in_fd, t);
-    if (g < 0) {
-        return Result<Session, Error>.Err(from_errno(-g));
+    List<int> termios_fields = [];
+    int get_result = __tcget(in_fd, termios_fields);
+    if (get_result < 0) {
+        return Result<Session, Error>.Err(from_errno(-get_result));
     }
-    int iflag = t[0];
-    int oflag = t[1];
-    int cflag = t[2];
-    int lflag = t[3];
-    int vmin = t[4];
-    int vtime = t[5];
+    int iflag = termios_fields[0];
+    int oflag = termios_fields[1];
+    int cflag = termios_fields[2];
+    int lflag = termios_fields[3];
+    int vmin = termios_fields[4];
+    int vtime = termios_fields[5];
     // The runtime's snapshot, taken before anything is changed. It is what
     // puts the terminal back if the process ends without running a
     // destructor -- a trap, or os.exit. See the module note.
-    int a = __term_arm(in_fd);
-    if (a < 0) {
-        return Result<Session, Error>.Err(from_errno(-a));
+    int arm_result = __term_arm(in_fd);
+    if (arm_result < 0) {
+        return Result<Session, Error>.Err(from_errno(-arm_result));
     }
-    int ni = iflag & ~(I_IGNBRK | I_BRKINT | I_PARMRK | I_ISTRIP | I_INLCR | I_IGNCR | I_ICRNL | I_IXON);
-    int no = oflag & ~O_OPOST;
-    int nl = lflag & ~(L_ECHO | L_ECHONL | L_ICANON | L_ISIG | L_IEXTEN);
-    int w = __tcset(in_fd, ni, no, cflag, nl, 1, 0);
-    if (w < 0) {
-        int d = __term_disarm();
-        return Result<Session, Error>.Err(from_errno(-w));
+    int new_input_flags = iflag & ~(I_IGNBRK | I_BRKINT | I_PARMRK | I_ISTRIP | I_INLCR | I_IGNCR | I_ICRNL | I_IXON);
+    int new_output_flags = oflag & ~O_OPOST;
+    int new_local_flags = lflag & ~(L_ECHO | L_ECHONL | L_ICANON | L_ISIG | L_IEXTEN);
+    int set_result = __tcset(in_fd, new_input_flags, new_output_flags, cflag, new_local_flags, 1, 0);
+    if (set_result < 0) {
+        int disarm_result = __term_disarm();
+        return Result<Session, Error>.Err(from_errno(-set_result));
     }
     return Result<Session, Error>.Ok(Session(in_fd, out_fd, iflag, oflag, cflag, lflag, vmin, vtime));
 }
@@ -1357,23 +1357,23 @@ pub Result<Session, Error> raw(int in_fd = 0, int out_fd = 1) {
 /// bytes still in it loses them, on purpose: a destructor that wrote to a
 /// terminal at a moment nobody chose would be worse than a lost frame.
 pub type Writer {
-    io.File f;
-    bytes buf = [];
+    io.File file;
+    bytes buffer = [];
 }
 
 /// Add text to the frame.
-pub void Writer.put(str s) {
-    buf.extend(s.to_bytes());
+pub void Writer.put(str text) {
+    buffer.extend(text.to_bytes());
 }
 
 /// Add octets to the frame, for a caller that already has them.
-pub void Writer.put_bytes(bytes b) {
-    buf.extend(b);
+pub void Writer.put_bytes(bytes data) {
+    buffer.extend(data);
 }
 
 /// How many bytes are waiting.
 pub int Writer.pending() {
-    return buf.size();
+    return buffer.size();
 }
 
 /// Write everything at once, and empty the buffer.
@@ -1383,17 +1383,17 @@ pub int Writer.pending() {
 /// with a half-written frame but throw the whole stream away -- and a caller
 /// that wants to look at what it was drawing still can.
 pub Result<int, io.Error> Writer.flush() {
-    if (buf.size() == 0) {
+    if (buffer.size() == 0) {
         return Result<int, io.Error>.Ok(0);
     }
-    int n = f.write(buf)?;
-    buf.clear();
-    return Result<int, io.Error>.Ok(n);
+    int byte_count = file.write(buffer)?;
+    buffer.clear();
+    return Result<int, io.Error>.Ok(byte_count);
 }
 
 /// A `Writer` over a stream -- `term.writer(io.stdout())` for the usual case.
-pub Writer writer(io.File f) {
-    return Writer(f);
+pub Writer writer(io.File file) {
+    return Writer(file);
 }
 
 // --- sequences -------------------------------------------------------------
@@ -1456,33 +1456,33 @@ pub str move_to(int row, int col) {
 /// One of the 256 palette colours, as the foreground. 0 to 7 are the original
 /// eight, 8 to 15 their bright forms, 16 to 231 a 6x6x6 cube and 232 to 255 a
 /// grey ramp.
-pub str fg(int c) {
-    return "\x1b[38;5;" + colour(c).to_str() + "m";
+pub str foreground(int palette_index) {
+    return "\x1b[38;5;" + colour(palette_index).to_str() + "m";
 }
 
 /// The same, as the background.
-pub str bg(int c) {
-    return "\x1b[48;5;" + colour(c).to_str() + "m";
+pub str background(int palette_index) {
+    return "\x1b[48;5;" + colour(palette_index).to_str() + "m";
 }
 
 /// A 24-bit foreground colour. Not every terminal has true colour; one that
 /// does not ignores this or picks the nearest palette entry, and neither is
 /// this module's to detect.
-pub str fg_rgb(int r, int g, int b) {
-    return "\x1b[38;2;" + colour(r).to_str() + ";" + colour(g).to_str() + ";" + colour(b).to_str() + "m";
+pub str fg_rgb(int red, int green, int blue) {
+    return "\x1b[38;2;" + colour(red).to_str() + ";" + colour(green).to_str() + ";" + colour(blue).to_str() + "m";
 }
 
 /// A 24-bit background colour.
-pub str bg_rgb(int r, int g, int b) {
-    return "\x1b[48;2;" + colour(r).to_str() + ";" + colour(g).to_str() + ";" + colour(b).to_str() + "m";
+pub str bg_rgb(int red, int green, int blue) {
+    return "\x1b[48;2;" + colour(red).to_str() + ";" + colour(green).to_str() + ";" + colour(blue).to_str() + "m";
 }
 
 // A colour component is one byte. Out of range is the program's own bug --
 // the same reading `bytes` takes of a value past 255 -- so it traps rather
 // than wrapping into a colour nobody asked for.
-int colour(int c) {
-    if (c < 0 || c > 255) {
-        trap("term: a colour component is 0 to 255, not " + c.to_str());
+int colour(int component) {
+    if (component < 0 || component > 255) {
+        trap("term: a colour component is 0 to 255, not " + component.to_str());
     }
-    return c;
+    return component;
 }

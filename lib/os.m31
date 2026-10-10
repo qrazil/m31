@@ -3,9 +3,9 @@
 //
 // API
 // ---
-//   os.args()             -> List<str>, every argument, the program's own
+//   os.arguments()        -> List<str>, every argument, the program's own
 //                            name first
-//   os.args_bytes()       -> List<bytes>, the same, exactly as the OS passed them
+//   os.arguments_bytes()  -> List<bytes>, the same, exactly as the OS passed them
 //   os.env(name)          -> Option<str>, one environment variable, as text
 //   os.env_bytes(name)    -> Option<bytes>, the same, exactly as the OS holds it
 //   os.env_map()          -> Map<str, str>, every variable that is text
@@ -27,7 +27,7 @@
 // `str` is always valid UTF-8 (reference §3), so the runtime hands over
 // `bytes` and `utf8()` -- the one conversion into `str` -- checks each.
 // docs/text-decision.md compares this with Rust, whose `env::args()` panics
-// here and whose `args_os()` is `args_bytes`.
+// here and whose `args_os()` is `arguments_bytes`.
 //
 // `run` is the odd one out: it is the only thing in this module that can
 // fail, and the only thing that takes as long as the child process runs.
@@ -66,35 +66,35 @@ prim int __proc_wait(int pid);
 /// parser is handed the rest; see `args`.
 ///
 /// An argument that is not UTF-8 -- a file name from a Latin-1 disk, say --
-/// **traps**, naming the argument and `args_bytes`. This is Rust's trade
+/// **traps**, naming the argument and `arguments_bytes`. This is Rust's trade
 /// (`env::args()` panics, `args_os()` does not): nearly every program wants
 /// its arguments as text and would otherwise carry a `match` for a case it
 /// never meets, and the program that really does take any file name reads
-/// `args_bytes` instead. It is neither dropped nor repaired: dropping one
+/// `arguments_bytes` instead. It is neither dropped nor repaired: dropping one
 /// would move every later index, and a replacement character would hand the
 /// program a file name that names no file.
 ///
 /// A fresh list per call: changing it changes nothing but the copy.
-pub List<str> args() {
+pub List<str> arguments() {
     List<str> out = [];
-    int i = 0;
-    for (bytes a in args_bytes()) {
-        match (a.utf8()) {
-            case Some(str s): {
-                out.push(s);
+    int argument_index = 0;
+    for (bytes argument in arguments_bytes()) {
+        match (argument.utf8()) {
+            case Some(str text): {
+                out.push(text);
             }
             case None: {
-                trap("os.args(): argument " + i.to_str() + " is not valid UTF-8; read os.args_bytes() instead");
+                trap("os.arguments(): argument " + argument_index.to_str() + " is not valid UTF-8; read os.arguments_bytes() instead");
             }
         }
-        i = i + 1;
+        argument_index = argument_index + 1;
     }
     return out;
 }
 
 /// Every argument, exactly the octets the operating system passed, whether
 /// or not they are text: Rust's `args_os`. A fresh list per call.
-pub List<bytes> args_bytes() {
+pub List<bytes> arguments_bytes() {
     List<bytes> out = [];
     __args(out);
     return out;
@@ -119,8 +119,8 @@ pub List<bytes> args_bytes() {
 /// starts it.
 pub Option<str> env(str name) {
     match (env_bytes(name)) {
-        case Some(bytes v): {
-            return v.utf8();
+        case Some(bytes value_bytes): {
+            return value_bytes.utf8();
         }
         case None: {
             return Option<str>.None;
@@ -148,11 +148,11 @@ pub Map<str, str> env_map() {
     List<bytes> flat = [];
     __env_map(flat);
     Map<str, str> out = {};
-    int i = 0;
-    while (i + 1 < flat.size()) {
-        match (flat[i].utf8()) {
+    int index = 0;
+    while (index + 1 < flat.size()) {
+        match (flat[index].utf8()) {
             case Some(str name): {
-                match (flat[i + 1].utf8()) {
+                match (flat[index + 1].utf8()) {
                     case Some(str value): {
                         out.set(name, value);
                     }
@@ -163,7 +163,7 @@ pub Map<str, str> env_map() {
             case None: {
             }
         }
-        i = i + 2;
+        index = index + 2;
     }
     return out;
 }
@@ -221,7 +221,7 @@ pub str ExitStatus.to_str() {
 /// `false`, on purpose: the two are different failures (see `ExitStatus`
 /// above), but only one of them is a *success*, so a caller that only wants
 /// "did it work" does not have to `match` to find out.
-pub bool ExitStatus.success() {
+pub bool ExitStatus.is_success() {
     match (this) {
         case Exited(int code): {
             return code == 0;

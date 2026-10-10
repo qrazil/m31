@@ -31,17 +31,17 @@
 // Park the green thread for `timeout_ms` with no descriptor to wake it
 // earlier: the same primitive `net` bounds its waits with, called with fd -1
 // and no events. 1 when the time has passed, -errno for a refused argument.
-prim int __wait_io_timeout(int fd, int events, int timeout_ms);
+prim int __wait_io_timeout(int descriptor, int events, int timeout_ms);
 
-/// Return after `ms` milliseconds, parking only this green thread.
+/// Return after `milliseconds` milliseconds, parking only this green thread.
 ///
-/// Traps on a negative `ms`.
-pub void sleep_ms(int ms) {
-    if (ms < 0) {
-        trap("timer.sleep_ms(" + ms.to_str() + "): a duration cannot be negative");
+/// Traps on a negative `milliseconds`.
+pub void sleep_ms(int milliseconds) {
+    if (milliseconds < 0) {
+        trap("timer.sleep_ms(" + milliseconds.to_str() + "): a duration cannot be negative");
     }
-    int n = __wait_io_timeout(-1, 0, ms);
-    if (n < 0) {
-        trap("timer.sleep_ms(" + ms.to_str() + "): the runtime refused the wait (errno " + (-n).to_str() + ")");
+    int wait_result = __wait_io_timeout(-1, 0, milliseconds);
+    if (wait_result < 0) {
+        trap("timer.sleep_ms(" + milliseconds.to_str() + "): the runtime refused the wait (errno " + (-wait_result).to_str() + ")");
     }
 }

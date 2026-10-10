@@ -49,11 +49,11 @@
 /// them. They are fields with defaults rather than module constants so that
 /// `Hasher()` is the whole of "start a hash".
 pub type Hasher {
-    int h0 = 0x6745_2301;
-    int h1 = 0xEFCD_AB89;
-    int h2 = 0x98BA_DCFE;
-    int h3 = 0x1032_5476;
-    int h4 = 0xC3D2_E1F0;
+    int state0 = 0x6745_2301;
+    int state1 = 0xEFCD_AB89;
+    int state2 = 0x98BA_DCFE;
+    int state3 = 0x1032_5476;
+    int state4 = 0xC3D2_E1F0;
     /// Octets seen so far, which the padding needs as a bit count.
     int total = 0;
     /// The partial block: always fewer than 64 octets between `update`s.
@@ -67,28 +67,28 @@ pub type Hasher {
 /// Feed `data` to the hash. Any number of calls, of any sizes, hash the same
 /// as one call with them joined.
 pub void Hasher.update(bytes data) {
-    int n = data.size();
-    total = total + n;
-    int i = 0;
+    int length = data.size();
+    total = total + length;
+    int offset = 0;
     // Finish the partial block first, if there is one, and only then run the
     // whole blocks straight out of `data` -- no copy for the bulk of a file.
     if (tail.size() > 0) {
-        while (i < n && tail.size() < 64) {
-            tail.push(data[i]);
-            i = i + 1;
+        while (offset < length && tail.size() < 64) {
+            tail.push(data[offset]);
+            offset = offset + 1;
         }
         if (tail.size() == 64) {
             block(tail, 0);
             tail.clear();
         }
     }
-    while (n - i >= 64) {
-        block(data, i);
-        i = i + 64;
+    while (length - offset >= 64) {
+        block(data, offset);
+        offset = offset + 64;
     }
-    while (i < n) {
-        tail.push(data[i]);
-        i = i + 1;
+    while (offset < length) {
+        tail.push(data[offset]);
+        offset = offset + 1;
     }
 }
 
@@ -102,30 +102,30 @@ pub bytes Hasher.digest() {
     while (tail.size() % 64 != 56) {
         tail.push(0);
     }
-    int s = 56;
-    while (s >= 0) {
-        tail.push(bits >> s & 0xFF);
-        s = s - 8;
+    int shift = 56;
+    while (shift >= 0) {
+        tail.push(bits >> shift & 0xFF);
+        shift = shift - 8;
     }
-    int i = 0;
-    int n = tail.size();
-    while (i < n) {
-        block(tail, i);
-        i = i + 64;
+    int offset = 0;
+    int tail_length = tail.size();
+    while (offset < tail_length) {
+        block(tail, offset);
+        offset = offset + 64;
     }
     tail.clear();
     bytes out = [];
-    word(out, h0);
-    word(out, h1);
-    word(out, h2);
-    word(out, h3);
-    word(out, h4);
+    word(out, state0);
+    word(out, state1);
+    word(out, state2);
+    word(out, state3);
+    word(out, state4);
     return out;
 }
 
-// One 64-octet block, read from `b` starting at `at`. The caller guarantees
+// One 64-octet block, read from `data` starting at `offset`. The caller guarantees
 // that 64 octets are there.
-void Hasher.block(bytes b, int at) {
+void Hasher.block(bytes data, int offset) {
     // `sched` read once into a local, and every `w[i]` below goes through the
     // local. Reading it afresh each time -- writing `sched[i]` throughout --
     // is the same program and is 18% slower: a value read out of a field is
@@ -133,63 +133,63 @@ void Hasher.block(bytes b, int at) {
     // store through a field name costs an `rc_inc`/`rc_dec` pair, and those
     // are deliberately not inlinable (`gates.sh`, "runtime stays separate
     // TU"). A local is borrowed and costs nothing. See apps/git/FRICTION.md.
-    Array<int> w = sched;
+    Array<int> schedule = sched;  // FIPS 180-4: W
     for (int i in 0 .. 16) {
-        int j = at + i * 4;
-        w[i] = (b[j] << 24) | (b[j + 1] << 16) | (b[j + 2] << 8) | b[j + 3];
+        int byte_offset = offset + i * 4;
+        schedule[i] = (data[byte_offset] << 24) | (data[byte_offset + 1] << 16) | (data[byte_offset + 2] << 8) | data[byte_offset + 3];
     }
     for (int i in 16 .. 80) {
-        int x = w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16];
-        w[i] = ((x << 1) | (x >> 31)) & 0xFFFF_FFFF;
+        int x = schedule[i - 3] ^ schedule[i - 8] ^ schedule[i - 14] ^ schedule[i - 16];
+        schedule[i] = ((x << 1) | (x >> 31)) & 0xFFFF_FFFF;
     }
-    int a = h0;
-    int bb = h1;
-    int c = h2;
-    int d = h3;
-    int e = h4;
+    int state_a = state0;  // FIPS 180-4: a
+    int state_b = state1;  // FIPS 180-4: b
+    int state_c = state2;  // FIPS 180-4: c
+    int state_d = state3;  // FIPS 180-4: d
+    int state_e = state4;  // FIPS 180-4: e
     // The four rounds are one loop with a branch rather than four loops,
     // because four loops would repeat the eight lines of the step. The
     // branch predicts perfectly -- it changes three times in eighty
     // iterations.
     for (int i in 0 .. 80) {
-        int f = 0;
-        int k = 0;
+        int round_function = 0;  // FIPS 180-4: f
+        int round_constant = 0;  // FIPS 180-4: K
         // Every parenthesis below is written the way FIPS 180-4 writes it,
-        // so that the four `f`s and the step can be checked against the
+        // so that the four `round_function`s and the step can be checked against the
         // standard by eye rather than against the precedence table. The
         // formatter keeps them (reference §6.1); it used to take them out.
         if (i < 20) {
-            f = d ^ (bb & (c ^ d));
-            k = 0x5A82_7999;
+            round_function = state_d ^ (state_b & (state_c ^ state_d));
+            round_constant = 0x5A82_7999;
         } else if (i < 40) {
-            f = bb ^ c ^ d;
-            k = 0x6ED9_EBA1;
+            round_function = state_b ^ state_c ^ state_d;
+            round_constant = 0x6ED9_EBA1;
         } else if (i < 60) {
-            f = (bb & c) | (d & (bb | c));
-            k = 0x8F1B_BCDC;
+            round_function = (state_b & state_c) | (state_d & (state_b | state_c));
+            round_constant = 0x8F1B_BCDC;
         } else {
-            f = bb ^ c ^ d;
-            k = 0xCA62_C1D6;
+            round_function = state_b ^ state_c ^ state_d;
+            round_constant = 0xCA62_C1D6;
         }
-        int t = (((a << 5) | (a >> 27)) & 0xFFFF_FFFF) + f + e + k + w[i] & 0xFFFF_FFFF;
-        e = d;
-        d = c;
-        c = ((bb << 30) | (bb >> 2)) & 0xFFFF_FFFF;
-        bb = a;
-        a = t;
+        int next_state_a = (((state_a << 5) | (state_a >> 27)) & 0xFFFF_FFFF) + round_function + state_e + round_constant + schedule[i] & 0xFFFF_FFFF;  // FIPS 180-4: T
+        state_e = state_d;
+        state_d = state_c;
+        state_c = ((state_b << 30) | (state_b >> 2)) & 0xFFFF_FFFF;
+        state_b = state_a;
+        state_a = next_state_a;
     }
-    h0 = h0 + a & 0xFFFF_FFFF;
-    h1 = h1 + bb & 0xFFFF_FFFF;
-    h2 = h2 + c & 0xFFFF_FFFF;
-    h3 = h3 + d & 0xFFFF_FFFF;
-    h4 = h4 + e & 0xFFFF_FFFF;
+    state0 = state0 + state_a & 0xFFFF_FFFF;
+    state1 = state1 + state_b & 0xFFFF_FFFF;
+    state2 = state2 + state_c & 0xFFFF_FFFF;
+    state3 = state3 + state_d & 0xFFFF_FFFF;
+    state4 = state4 + state_e & 0xFFFF_FFFF;
 }
 
 /// The digest of `data`, in one call.
 pub bytes sum(bytes data) {
-    Hasher h = Hasher();
-    h.update(data);
-    return h.digest();
+    Hasher hasher = Hasher();
+    hasher.update(data);
+    return hasher.digest();
 }
 
 /// The digest of `data` as 40 lowercase hex digits -- the spelling git uses
@@ -200,9 +200,9 @@ pub str hex(bytes data) {
 
 // A 32-bit word appended big-endian, which is the order every length and
 // every digit in this file is written in.
-void word(bytes out, int v) {
-    out.push(v >> 24 & 0xFF);
-    out.push(v >> 16 & 0xFF);
-    out.push(v >> 8 & 0xFF);
-    out.push(v & 0xFF);
+void word(bytes out, int value) {
+    out.push(value >> 24 & 0xFF);
+    out.push(value >> 16 & 0xFF);
+    out.push(value >> 8 & 0xFF);
+    out.push(value & 0xFF);
 }

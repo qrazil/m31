@@ -159,7 +159,7 @@ fn char_width(c: i64) -> i64 {
 
 /// Is there a cluster boundary between `prev` and `cur`? UAX #29 §3.1.1 in
 /// its own order -- the first rule that matches decides. A transcription of
-/// `unicode.breaks`; the two must say the same thing.
+/// `unicode.should_break`; the two must say the same thing.
 fn breaks(prev: i64, cur: i64, ri: i64, pic: i64, cons: i64) -> bool {
     let p = prev & 15;
     let c = cur & 15;

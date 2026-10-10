@@ -19,7 +19,7 @@ bytes decode(str hex) {
     }
 }
 
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 if (argv.size() < 2) {
     io.eprint("usage: t_tlsserver_sign CASES");
 } else {

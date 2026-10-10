@@ -46,20 +46,20 @@ p.optional("dir", ".", help: "where to put it");
 p.tail("rest");
 print(p.usage());
 print(p.help());
-// The command line comes from `main.args`, through os.args() without the
+// The command line comes from `main.args`, through os.arguments() without the
 // program's own name -- the one list `args` never reads for itself.
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 argv.remove_at(0);
 match (p.parse(argv)) {
     case Err(args.UsageError e): {
         print("error: " + e.to_str());
     }
     case Ok(args.Parsed r): {
-        print(r.flag("quiet"));  // true, from --q
-        print(r.flag("dry-run"));  // false
+        print(r.is_flag_set("quiet"));  // true, from --q
+        print(r.is_flag_set("dry-run"));  // false
         print(show(r.value("out")));  // Some(-x), carried by =
         print(show(r.value("host")));  // Some(127.0.0.1), the default
-        print(r.given("host"));  // false
+        print(r.is_given("host"));  // false
         print(r.values("tag").join(","));  // a,b,c -- greedy to the next dash
         print(r.integer("width").or(0));  // -5, a sign and not a command
         print(r.number("scale").or(0.0));  // 7, a whole number widened
@@ -67,8 +67,8 @@ match (p.parse(argv)) {
         print(r.positional("src"));  // -, which is stdin and so data
         print(r.optional("dir"));  // out
         print(r.tail("rest").join(","));  // x,y
-        print(r.given("rest"));  // true
-        print(r.given("width"));  // true
+        print(r.is_given("rest"));  // true
+        print(r.is_given("width"));  // true
         print(r.word() == "");  // true -- the top level is no command
     }
 }
@@ -79,7 +79,7 @@ match (p.parse(["in.txt"])) {
     }
     case Ok(args.Parsed r): {
         print(r.optional("dir"));  // .
-        print(r.given("dir"));  // false
+        print(r.is_given("dir"));  // false
         print(r.values("tag").size());  // 0
         print(r.tail("rest").size());  // 0
         print(r.integer("width").or(0));  // 80
@@ -164,7 +164,7 @@ match (
         print(show(r.value("config")));  // Some(/etc/g.conf)
         for (args.Parsed c in r.commands()) {
             if (c.word() == "addrepo") {
-                print("addrepo " + c.positional("name") + " " + c.flag("public").to_str());
+                print("addrepo " + c.positional("name") + " " + c.is_flag_set("public").to_str());
             }
             if (c.word() == "grant") {
                 print("grant " + c.positional("repo") + " " + c.positional("user") + " " + c.optional("level"));

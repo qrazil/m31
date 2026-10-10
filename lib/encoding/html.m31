@@ -33,12 +33,12 @@
 // `text.replace` now: the same split and join, written once.
 import text;
 
-/// `s` made safe to use as HTML text or inside a quoted attribute value.
+/// `content` made safe to use as HTML text or inside a quoted attribute value.
 ///
 ///     html.escape("<a href='x'>Tom & Jerry</a>")
 ///         == "&lt;a href=&#x27;x&#x27;&gt;Tom &amp; Jerry&lt;/a&gt;"
-pub str escape(str s) {
-    str out = text.replace(s, "&", "&amp;");
+pub str escape(str content) {
+    str out = text.replace(content, "&", "&amp;");
     out = text.replace(out, "<", "&lt;");
     out = text.replace(out, ">", "&gt;");
     out = text.replace(out, "\"", "&quot;");

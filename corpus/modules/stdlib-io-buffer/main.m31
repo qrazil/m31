@@ -324,4 +324,4 @@ match (fs.rmtree(dir, dir)) {
         print(e.to_str());
     }
 }
-print(fs.exists(dir));  // false
+print(fs.is_present(dir));  // false

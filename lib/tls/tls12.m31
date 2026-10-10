@@ -139,7 +139,7 @@ pub bool Suite.is_ecdsa() {
 }
 
 /// Whether the PRF and Finished hash is SHA-384 (else SHA-256).
-pub bool Suite.uses_sha384() {
+pub bool Suite.is_sha384() {
     return aead().hash_size() == 48;
 }
 
@@ -160,7 +160,7 @@ pub int Suite.iv_size() {
 }
 
 bytes Suite.mac(bytes key, bytes data) {
-    if (uses_sha384()) {
+    if (is_sha384()) {
         return hmac.sha384_mac(key, data);
     }
     return hmac.sha256_mac(key, data);
@@ -197,22 +197,22 @@ pub KeyBlock Suite.key_block(bytes master, bytes server_random, bytes client_ran
     bytes seed = clone(server_random);
     seed.extend(client_random);
     bytes block = prf(master, "key expansion", seed, 2 * key_size + 2 * iv_size);
-    int at = 0;
-    bytes client_key = block.substr(at, at + key_size);
-    at = at + key_size;
-    bytes server_key = block.substr(at, at + key_size);
-    at = at + key_size;
-    bytes client_iv = block.substr(at, at + iv_size);
-    at = at + iv_size;
-    bytes server_iv = block.substr(at, at + iv_size);
+    int offset = 0;
+    bytes client_key = block.substr(offset, offset + key_size);
+    offset = offset + key_size;
+    bytes server_key = block.substr(offset, offset + key_size);
+    offset = offset + key_size;
+    bytes client_iv = block.substr(offset, offset + iv_size);
+    offset = offset + iv_size;
+    bytes server_iv = block.substr(offset, offset + iv_size);
     return KeyBlock(client_key, server_key, client_iv, server_iv);
 }
 
 /// RFC 5246 §7.4.9: `PRF(master, "client finished" or "server finished",
 /// Hash(handshake messages))`, its first 12 octets.
-pub bytes Suite.verify_data(bytes master, bool from_client, bytes handshake_hash) {
+pub bytes Suite.verify_data(bytes master, bool is_from_client, bytes handshake_hash) {
     str label = "server finished";
-    if (from_client) {
+    if (is_from_client) {
         label = "client finished";
     }
     return prf(master, label, handshake_hash, VERIFY_DATA_SIZE);
@@ -250,9 +250,9 @@ pub type KeyBlock {
 
 /// What the ServerKeyExchange signature covers, RFC 5246 §7.4.3:
 /// `client_random || server_random || ServerECDHParams`.
-pub bytes signed_params(bytes client_random, bytes server_random, bytes params) {
+pub bytes signed_parameters(bytes client_random, bytes server_random, bytes parameters) {
     bytes content = clone(client_random);
     content.extend(server_random);
-    content.extend(params);
+    content.extend(parameters);
     return content;
 }

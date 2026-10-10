@@ -70,23 +70,23 @@ const Array<int> L_LIMBS = [
 /// `is_reduced` itself (RFC 8032 §5.1.7); a caller building a scalar it
 /// knows is already below `L` (nothing in this file does that without also
 /// reducing) may skip the check.
-pub Array<int> from_bytes(bytes b) {
+pub Array<int> from_bytes(bytes data) {
     Array<int> out = [0; 16];
-    for (int k in 0 .. 16) {
-        out[k] = b[2 * k] | b[2 * k + 1] << 8;
+    for (int limb_index in 0 .. 16) {
+        out[limb_index] = data[2 * limb_index] | data[2 * limb_index + 1] << 8;
     }
     return out;
 }
 
-/// `s`, packed as 32 little-endian octets. `s` is assumed already below
+/// `scalar`, packed as 32 little-endian octets. `scalar` is assumed already below
 /// `L` (every function in this module that returns a scalar keeps that
 /// true), so this is a direct pack with no reduction step -- unlike
 /// `field25519.to_bytes`, which always canonicalizes first.
-pub bytes to_bytes(Array<int> s) {
+pub bytes to_bytes(Array<int> scalar) {
     bytes out = [0; 32];
-    for (int k in 0 .. 16) {
-        out[2 * k] = s[k] & 0xFF;
-        out[2 * k + 1] = s[k] >> 8 & 0xFF;
+    for (int limb_index in 0 .. 16) {
+        out[2 * limb_index] = scalar[limb_index] & 0xFF;
+        out[2 * limb_index + 1] = scalar[limb_index] >> 8 & 0xFF;
     }
     return out;
 }
@@ -105,55 +105,55 @@ type Borrowed {
 // `field25519.m31`'s `sub_p_borrow`, with `L` in place of `p`. See that
 // function's comment for the constant-time argument, which is identical
 // here.
-Borrowed sub_l_borrow(Array<int> v) {
+Borrowed sub_l_borrow(Array<int> value) {
     Array<int> out = [0; 16];
     int borrow = 0;
     for (int i in 0 .. 16) {
-        int dd = v[i] - L_LIMBS[i] - borrow;
-        int biased = dd + SBIAS;
-        int q = biased >> 16;
-        out[i] = biased - (q << 16);
-        borrow = SBIAS_HI - q;
+        int difference = value[i] - L_LIMBS[i] - borrow;
+        int biased = difference + SBIAS;
+        int quotient = biased >> 16;
+        out[i] = biased - (quotient << 16);
+        borrow = SBIAS_HI - quotient;
     }
     return Borrowed(out, borrow);
 }
 
-/// `s` if `cond` is 1, `t` if `cond` is 0 -- `field25519.cselect`'s exact
+/// `when_one` if `cond` is 1, `when_zero` if `cond` is 0 -- `field25519.cselect`'s exact
 /// technique, repeated here rather than imported so this module has no
 /// dependency on which internal helpers `field25519` chooses to keep
 /// private in the future; the public `field25519.cselect` operates on
 /// `field25519`'s own values, which happen to share this representation,
 /// but a scalar is not a field element and should not be passed to it.
-Array<int> cselect(int cond, Array<int> s, Array<int> t) {
+Array<int> cselect(int cond, Array<int> when_one, Array<int> when_zero) {
     int mask = 0 - cond;
     int notmask = mask ^ -1;
     Array<int> out = [0; 16];
     for (int i in 0 .. 16) {
-        out[i] = s[i] & mask | t[i] & notmask;
+        out[i] = when_one[i] & mask | when_zero[i] & notmask;
     }
     return out;
 }
 
-// `v` assumed `< 2*L`; returns `v mod L` with exactly one conditional
+// `value` assumed `< 2*L`; returns `v mod L` with exactly one conditional
 // subtraction.
-Array<int> reduce_once(Array<int> v) {
-    Borrowed db = sub_l_borrow(v);
-    return cselect(1 - db.borrow, db.diff, v);
+Array<int> reduce_once(Array<int> value) {
+    Borrowed borrowed = sub_l_borrow(value);
+    return cselect(1 - borrowed.borrow, borrowed.diff, value);
 }
 
 /// Whether `s < L` -- RFC 8032 §5.1.7 requires a verifier to check this of a
 /// signature's `S` before doing anything else with it. Not constant time
 /// (nor does it need to be: `S` is the public half of a signature).
-pub bool is_reduced(Array<int> s) {
-    Borrowed db = sub_l_borrow(s);
-    return db.borrow == 1;
+pub bool is_reduced(Array<int> scalar) {
+    Borrowed borrowed = sub_l_borrow(scalar);
+    return borrowed.borrow == 1;
 }
 
-// Bit `i` (0 = least significant) of a limb array in this module's radix.
-int bit_at_limbs(Array<int> a, int i) {
-    int limb = i / 16;
-    int off = i % 16;
-    return a[limb] >> off & 1;
+// Bit `bit_index` (0 = least significant) of a limb array in this module's radix.
+int bit_at_limbs(Array<int> limbs, int bit_index) {
+    int limb = bit_index / 16;
+    int off = bit_index % 16;
+    return limbs[limb] >> off & 1;
 }
 
 // Binary long division of a `nlimbs`-limb, radix-2^16 value (bits
@@ -162,22 +162,22 @@ int bit_at_limbs(Array<int> a, int i) {
 // rather than a fast, hand-tuned reduction.
 Array<int> reduce_wide_bits(Array<int> wide, int nbits) {
     Array<int> rem = [0; 16];
-    int i = nbits - 1;
-    while (i >= 0) {
-        int bit = bit_at_limbs(wide, i);
+    int bit_index = nbits - 1;
+    while (bit_index >= 0) {
+        int bit = bit_at_limbs(wide, bit_index);
         // rem = rem*2 + bit, kept to 16 limbs. Invariant: `rem < L` on
         // entry to this step (true at `i == nbits-1`, since `rem` starts at
         // 0), so `rem*2 + bit < 2*L` here, and the one `reduce_once` below
         // restores the invariant for the next bit.
         int carry = bit;
         Array<int> out = [0; 16];
-        for (int k in 0 .. 16) {
-            int v = rem[k] << 1 | carry;
-            out[k] = v & M16;
-            carry = v >> 16;
+        for (int limb_index in 0 .. 16) {
+            int doubled = rem[limb_index] << 1 | carry;
+            out[limb_index] = doubled & M16;
+            carry = doubled >> 16;
         }
         rem = reduce_once(out);
-        i = i - 1;
+        bit_index = bit_index - 1;
     }
     return rem;
 }
@@ -185,10 +185,10 @@ Array<int> reduce_wide_bits(Array<int> wide, int nbits) {
 /// The 64 octets of a SHA-512 output, read little-endian and reduced mod
 /// `L` -- RFC 8032 §5.1.6's nonce `r = H(...) mod L` and §5.1.7's challenge
 /// `k = H(...) mod L`.
-pub Array<int> reduce64(bytes h) {
+pub Array<int> reduce64(bytes digest) {
     Array<int> wide = [0; 32];
-    for (int k in 0 .. 32) {
-        wide[k] = h[2 * k] | h[2 * k + 1] << 8;
+    for (int limb_index in 0 .. 32) {
+        wide[limb_index] = digest[2 * limb_index] | digest[2 * limb_index + 1] << 8;
     }
     return reduce_wide_bits(wide, 512);
 }
@@ -199,8 +199,8 @@ pub Array<int> reduce64(bytes h) {
 /// set) puts below `2^255` but not necessarily below `L` -- `muladd` below
 /// wants every argument already reduced, and this is how a caller gets
 /// there without hand-rolling a second reduction.
-pub Array<int> reduce256(Array<int> v) {
-    return reduce_wide_bits(v, 256);
+pub Array<int> reduce256(Array<int> value) {
+    return reduce_wide_bits(value, 256);
 }
 
 // One left-to-right ripple carry over 32 limbs, WITHOUT folding a final
@@ -212,17 +212,17 @@ pub Array<int> reduce256(Array<int> v) {
 // CONSTANT TIME: identical technique to `field25519.carry_pass` -- see its
 // comment for why the bias makes every `>>` here operate on a provably
 // non-negative value.
-Array<int> carry_pass32(Array<int> a) {
-    Array<int> out = clone(a);
+Array<int> carry_pass32(Array<int> limbs) {
+    Array<int> out = clone(limbs);
     int bias = 1 << 32;
     int bias_hi = bias >> 16;
     for (int i in 0 .. 32) {
         int biased = out[i] + bias;
-        int q = biased >> 16;
-        out[i] = biased - (q << 16);
-        int c = q - bias_hi;
+        int quotient = biased >> 16;
+        out[i] = biased - (quotient << 16);
+        int carry = quotient - bias_hi;
         if (i < 31) {
-            out[i + 1] = out[i + 1] + c;
+            out[i + 1] = out[i + 1] + carry;
         }
     }
     return out;
@@ -238,30 +238,30 @@ Array<int> carry_pass32(Array<int> a) {
 // `2^36` going into `carry_pass32` -- far below the trap threshold, and (as
 // in `field25519.mul_raw`) always non-negative, so the overflow check
 // inside `+` always takes its "no overflow" path.
-Array<int> mul_wide_raw(Array<int> a, Array<int> b) {
-    Array<int> t = [0; 32];
+Array<int> mul_wide_raw(Array<int> left, Array<int> right) {
+    Array<int> product = [0; 32];
     for (int i in 0 .. 16) {
-        int ai = a[i];
+        int left_limb = left[i];
         for (int j in 0 .. 16) {
-            t[i + j] = t[i + j] + ai * b[j];
+            product[i + j] = product[i + j] + left_limb * right[j];
         }
     }
-    return t;
+    return product;
 }
 
-/// `(k*a + r) mod L` -- RFC 8032 §5.1.6's `S = (r + k*s) mod L`, with `k`
-/// and `a` in either order (multiplication commutes) and `r` the additive
-/// term. Every one of `k`, `a`, `r` must already be below `L` (every value
+/// `(k*a + r) mod L` -- RFC 8032 §5.1.6's `S = (r + k*s) mod L`, with `challenge`
+/// and `secret_scalar` in either order (multiplication commutes) and `nonce` the additive
+/// term. Every one of `challenge`, `secret_scalar`, `nonce` must already be below `L` (every value
 /// this module hands out is); the product is then under `L^2 < 2^506`, plus
 /// `r < L < 2^253` is under `2^507` -- comfortably inside the 32 limbs
 /// (512 bits) `mul_wide_raw` and `carry_pass32` work with, so no carry is
 /// ever lost off the top.
-pub Array<int> muladd(Array<int> k, Array<int> a, Array<int> r) {
-    Array<int> prod = carry_pass32(mul_wide_raw(k, a));
+pub Array<int> muladd(Array<int> challenge, Array<int> secret_scalar, Array<int> nonce) {  // RFC 8032: r
+    Array<int> prod = carry_pass32(mul_wide_raw(challenge, secret_scalar));
     Array<int> total = [0; 32];
     for (int i in 0 .. 32) {
         if (i < 16) {
-            total[i] = prod[i] + r[i];
+            total[i] = prod[i] + nonce[i];
         } else {
             total[i] = prod[i];
         }

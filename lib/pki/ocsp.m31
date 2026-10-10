@@ -75,12 +75,12 @@ import crypto.sha512;
 import pki.x509;
 import pki.x509chain;
 
-const str OID_OCSP_BASIC = "1.3.6.1.5.5.7.48.1.1";
-const str OID_OCSP_SIGNING = "1.3.6.1.5.5.7.3.9";
-const str OID_HASH_SHA1 = "1.3.14.3.2.26";
-const str OID_HASH_SHA256 = "2.16.840.1.101.3.4.2.1";
-const str OID_HASH_SHA384 = "2.16.840.1.101.3.4.2.2";
-const str OID_HASH_SHA512 = "2.16.840.1.101.3.4.2.3";
+const str OBJECT_ID_OCSP_BASIC = "1.3.6.1.5.5.7.48.1.1";
+const str OBJECT_ID_OCSP_SIGNING = "1.3.6.1.5.5.7.3.9";
+const str OBJECT_ID_HASH_SHA1 = "1.3.14.3.2.26";
+const str OBJECT_ID_HASH_SHA256 = "2.16.840.1.101.3.4.2.1";
+const str OBJECT_ID_HASH_SHA384 = "2.16.840.1.101.3.4.2.2";
+const str OBJECT_ID_HASH_SHA512 = "2.16.840.1.101.3.4.2.3";
 const int TAG_ENUMERATED = 0x0A;
 const int TAG_EXPLICIT_0 = 0xA0;
 const int TAG_EXPLICIT_1 = 0xA1;
@@ -212,8 +212,8 @@ Result<bytes, Error> octets_of(der.Element element) {
     }
 }
 
-Result<str, Error> oid_of(der.Element element) {
-    match (element.oid()) {
+Result<str, Error> object_id_of(der.Element element) {
+    match (element.object_id()) {
         case Ok(str dotted): {
             return Result<str, Error>.Ok(dotted);
         }
@@ -244,12 +244,12 @@ Result<x509.AlgorithmIdentifier, Error> algorithm_of(der.Element element) {
     if (parts.size() < 1 || parts.size() > 2) {
         return Result<x509.AlgorithmIdentifier, Error>.Err(Error.Malformed);
     }
-    str oid = oid_of(parts[0])?;
+    str object_id = object_id_of(parts[0])?;
     bytes parameters = [];
     if (parts.size() == 2) {
         parameters = parts[1].raw();
     }
-    return Result<x509.AlgorithmIdentifier, Error>.Ok(x509.AlgorithmIdentifier(oid, parameters));
+    return Result<x509.AlgorithmIdentifier, Error>.Ok(x509.AlgorithmIdentifier(object_id, parameters));
 }
 
 // Whether `element` is `SEQUENCE OF Extension` with a critical one in it.
@@ -265,7 +265,7 @@ Result<void, Error> reject_critical_extensions(der.Element wrapper) {
         if (parts.size() < 2 || parts.size() > 3) {
             return Result<void, Error>.Err(Error.Malformed);
         }
-        oid_of(parts[0])?;
+        object_id_of(parts[0])?;
         octets_of(parts[parts.size() - 1])?;
         if (parts.size() == 3) {
             match (parts[1].boolean()) {
@@ -287,17 +287,17 @@ Result<void, Error> reject_critical_extensions(der.Element wrapper) {
 
 // --- hashes --------------------------------------------------------------------------
 
-Option<bytes> digest_by_oid(str oid, bytes message) {
-    if (oid == OID_HASH_SHA1) {
+Option<bytes> digest_by_object_id(str object_id, bytes message) {
+    if (object_id == OBJECT_ID_HASH_SHA1) {
         return Option<bytes>.Some(sha1digest.sum(message));
     }
-    if (oid == OID_HASH_SHA256) {
+    if (object_id == OBJECT_ID_HASH_SHA256) {
         return Option<bytes>.Some(sha256.sum(message));
     }
-    if (oid == OID_HASH_SHA384) {
+    if (object_id == OBJECT_ID_HASH_SHA384) {
         return Option<bytes>.Some(sha512.sum384(message));
     }
-    if (oid == OID_HASH_SHA512) {
+    if (object_id == OBJECT_ID_HASH_SHA512) {
         return Option<bytes>.Some(sha512.sum(message));
     }
     return Option<bytes>.None;
@@ -338,10 +338,10 @@ Result<bool, Error> names_responder(der.Element responder, x509.Certificate cand
 }
 
 bool is_authorised_responder(x509.Certificate candidate, x509.Certificate issuer, int now) {
-    if (candidate.unhandled_critical || !candidate.issued_by(issuer) || !candidate.is_valid_at(now)) {
+    if (candidate.has_unhandled_critical || !candidate.is_issued_by(issuer) || !candidate.is_valid_at(now)) {
         return false;
     }
-    if (!candidate.extended_key_usages.contains(OID_OCSP_SIGNING)) {
+    if (!candidate.extended_key_usages.contains(OBJECT_ID_OCSP_SIGNING)) {
         return false;
     }
     if (candidate.has_key_usage && (candidate.key_usage & x509.KEY_USAGE_DIGITAL_SIGNATURE) == 0) {
@@ -420,12 +420,12 @@ Result<bool, Error> certid_matches(der.Element certid, x509.Certificate leaf, x5
             return Result<bool, Error>.Err(Error.Malformed);
         }
     }
-    match (digest_by_oid(hash.algorithm_oid, leaf.issuer)) {
+    match (digest_by_object_id(hash.algorithm_object_id, leaf.issuer)) {
         case None: {
             return Result<bool, Error>.Ok(false);
         }
         case Some(bytes expected_name): {
-            match (digest_by_oid(hash.algorithm_oid, key_octets(issuer)?)) {
+            match (digest_by_object_id(hash.algorithm_object_id, key_octets(issuer)?)) {
                 case None: {
                     return Result<bool, Error>.Ok(false);
                 }
@@ -507,7 +507,7 @@ pub Result<Verdict, Error> check(bytes response, x509.Certificate leaf, x509.Cer
         return Result<Verdict, Error>.Err(Error.Malformed);
     }
     List<der.Element> response_bytes = kids(inside(outer[1], TAG_EXPLICIT_0)?, der.TAG_SEQUENCE)?;
-    if (response_bytes.size() != 2 || oid_of(response_bytes[0])? != OID_OCSP_BASIC) {
+    if (response_bytes.size() != 2 || object_id_of(response_bytes[0])? != OBJECT_ID_OCSP_BASIC) {
         return Result<Verdict, Error>.Err(Error.Malformed);
     }
     der.Element basic = whole(octets_of(response_bytes[1])?)?;
@@ -607,9 +607,9 @@ pub Result<Verdict, Error> check(bytes response, x509.Certificate leaf, x509.Cer
         if (parts.size() < 3) {
             return Result<Verdict, Error>.Err(Error.Malformed);
         }
-        bool matched = certid_matches(parts[0], leaf, issuer)?;
+        bool is_matched = certid_matches(parts[0], leaf, issuer)?;
         Single single = read_single(each)?;
-        if (matched) {
+        if (is_matched) {
             ours.push(single);
         }
     }

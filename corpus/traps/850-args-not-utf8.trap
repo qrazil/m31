@@ -1,1 +1,1 @@
-trap: os.args(): argument 1 is not valid UTF-8; read os.args_bytes() instead
+trap: os.arguments(): argument 1 is not valid UTF-8; read os.arguments_bytes() instead

@@ -103,7 +103,7 @@ pub str ParseError.to_str() {
 }
 
 // --- replace -----------------------------------------------------------------
-/// `s` with every occurrence of `from` swapped for `to`, or with only the
+/// `text` with every occurrence of `from` swapped for `replacement`, or with only the
 /// first `count` of them if `count` is not negative.
 ///
 ///     text.replace("a-b-c", "-", "+")             == "a+b+c"
@@ -120,7 +120,7 @@ pub str ParseError.to_str() {
 /// **Matches are found left to right and do not overlap**, and the text that
 /// was replaced is never rescanned: `text.replace("aaa", "aa", "b")` is `"ba"`,
 /// and `text.replace("a", "a", "aa")` is `"aa"` and not a loop. Those are
-/// CPython's answers too. `from` and `to` may be any text, multi-byte
+/// CPython's answers too. `from` and `replacement` may be any text, multi-byte
 /// included: a needle is valid UTF-8, so it begins with a non-continuation
 /// byte and ends a character, and every match starts and ends on a boundary.
 ///
@@ -129,36 +129,36 @@ pub str ParseError.to_str() {
 /// copies each piece into it. Nothing here appends to a growing `str`, which
 /// would copy the result so far at every match and make a long string with
 /// many matches quadratic.
-pub str replace(str s, str from, str to, int count = -1) {
+pub str replace(str text, str from, str replacement, int count = -1) {
     if (from == "") {
         trap("text.replace(): the text to replace may not be empty");
     }
-    if (count == 0 || !s.contains(from)) {
-        return s;
+    if (count == 0 || !text.contains(from)) {
+        return text;
     }
-    List<str> parts = s.split(from);
+    List<str> parts = text.split(from);
     if (count < 0 || count >= parts.size() - 1) {
-        return parts.join(to);
+        return parts.join(replacement);
     }
     // A bounded count: the first `count + 1` pieces rejoin with the new text
     // and the rest rejoin with the old, which is what `split` cut them on --
     // so the tail comes back exactly as it went in.
     List<str> head = [];
     List<str> tail = [];
-    int i = 0;
-    while (i <= count) {
-        head.push(parts[i]);
-        i = i + 1;
+    int index = 0;
+    while (index <= count) {
+        head.push(parts[index]);
+        index = index + 1;
     }
-    while (i < parts.size()) {
-        tail.push(parts[i]);
-        i = i + 1;
+    while (index < parts.size()) {
+        tail.push(parts[index]);
+        index = index + 1;
     }
-    return head.join(to) + from + tail.join(from);
+    return head.join(replacement) + from + tail.join(from);
 }
 
 // --- lines -------------------------------------------------------------------
-/// The lines of `s`, without their terminators.
+/// The lines of `text`, without their terminators.
 ///
 ///     text.lines("a\nb\n")     == ["a", "b"]
 ///     text.lines("a\r\nb")     == ["a", "b"]
@@ -190,8 +190,8 @@ pub str replace(str s, str from, str to, int count = -1) {
 /// breaks, the last three need a Unicode answer this language defers
 /// (docs/text-decision.md §8), and a program that meets one in a log file
 /// wants it kept, not silently turned into a row.
-pub List<str> lines(str s) {
-    List<str> parts = s.split("\n");
+pub List<str> lines(str text) {
+    List<str> parts = text.split("\n");
     List<str> out = [];
     int last = parts.size() - 1;
     for (int i in 0 .. last) {
@@ -210,7 +210,7 @@ pub List<str> lines(str s) {
 }
 
 // --- whitespace ----------------------------------------------------------------
-/// The runs of non-space in `s`, in order.
+/// The runs of non-space in `text`, in order.
 ///
 ///     text.split_whitespace("  a\tb  c ")   == ["a", "b", "c"]
 ///     text.split_whitespace("   ")          == []
@@ -226,27 +226,27 @@ pub List<str> lines(str s) {
 /// carriage return, form feed and vertical tab, and nothing else. CPython also
 /// breaks on `\x1c` to `\x1f` and on every Unicode space; `trim` does not, and
 /// two definitions of space in one language would be the worse answer.
-pub List<str> split_whitespace(str s) {
+pub List<str> split_whitespace(str text) {
     List<str> out = [];
-    int n = s.size();
-    int i = 0;
-    while (i < n) {
-        while (i < n && is_space(s.byte_at(i))) {
-            i = i + 1;
+    int byte_count = text.size();
+    int index = 0;
+    while (index < byte_count) {
+        while (index < byte_count && is_space(text.byte_at(index))) {
+            index = index + 1;
         }
-        if (i >= n) {
+        if (index >= byte_count) {
             return out;
         }
-        int from = i;
-        while (i < n && !is_space(s.byte_at(i))) {
-            i = i + 1;
+        int from = index;
+        while (index < byte_count && !is_space(text.byte_at(index))) {
+            index = index + 1;
         }
-        out.push(s.substr(from, i));
+        out.push(text.substr(from, index));
     }
     return out;
 }
 
-/// `s` with `str.trim`'s whitespace removed from the front only.
+/// `text` with `str.trim`'s whitespace removed from the front only.
 ///
 ///     text.trim_start("  a  ")   == "a  "
 ///
@@ -256,28 +256,28 @@ pub List<str> split_whitespace(str s) {
 /// to rediscover which six bytes `trim` counts -- `\v` and `\f` are the two
 /// that get forgotten -- and a program that disagrees with `trim` by one byte
 /// disagrees only on input nobody tests.
-pub str trim_start(str s) {
-    int n = s.size();
-    int i = 0;
-    while (i < n && is_space(s.byte_at(i))) {
-        i = i + 1;
+pub str trim_start(str text) {
+    int byte_count = text.size();
+    int index = 0;
+    while (index < byte_count && is_space(text.byte_at(index))) {
+        index = index + 1;
     }
-    return s.substr(i, n);
+    return text.substr(index, byte_count);
 }
 
-/// `s` with `str.trim`'s whitespace removed from the end only.
+/// `text` with `str.trim`'s whitespace removed from the end only.
 ///
 ///     text.trim_end("  a  ")   == "  a"
-pub str trim_end(str s) {
-    int i = s.size();
-    while (i > 0 && is_space(s.byte_at(i - 1))) {
-        i = i - 1;
+pub str trim_end(str text) {
+    int index = text.size();
+    while (index > 0 && is_space(text.byte_at(index - 1))) {
+        index = index - 1;
     }
-    return s.substr(0, i);
+    return text.substr(0, index);
 }
 
 // --- affixes -------------------------------------------------------------------
-/// `s` without `prefix`, if it starts with it; `s` unchanged if it does not.
+/// `text` without `prefix`, if it starts with it; `text` unchanged if it does not.
 ///
 ///     text.strip_prefix("--verbose", "--")   == "verbose"
 ///     text.strip_prefix("verbose", "--")     == "verbose"
@@ -294,25 +294,25 @@ pub str trim_end(str s) {
 /// make the caller who has just asked ask again. "Remove it if it is there" is
 /// the whole meaning of the name. CPython's `removeprefix` and Oro's
 /// `rm_prefix` return the string.
-pub str strip_prefix(str s, str prefix) {
-    if (!s.starts_with(prefix)) {
-        return s;
+pub str strip_prefix(str text, str prefix) {
+    if (!text.starts_with(prefix)) {
+        return text;
     }
-    return s.substr(prefix.size(), s.size());
+    return text.substr(prefix.size(), text.size());
 }
 
-/// `s` without `suffix`, if it ends with it; `s` unchanged if it does not.
+/// `text` without `suffix`, if it ends with it; `text` unchanged if it does not.
 ///
 ///     text.strip_suffix("notes.txt", ".txt")   == "notes"
-pub str strip_suffix(str s, str suffix) {
-    if (!s.ends_with(suffix)) {
-        return s;
+pub str strip_suffix(str text, str suffix) {
+    if (!text.ends_with(suffix)) {
+        return text;
     }
-    return s.substr(0, s.size() - suffix.size());
+    return text.substr(0, text.size() - suffix.size());
 }
 
 // --- padding -------------------------------------------------------------------
-/// `s` with `fill` in front of it until it is `width` code points wide.
+/// `text` with `fill` in front of it until it is `width` code points wide.
 ///
 ///     text.pad_left("7", 3)              == "  7"
 ///     text.pad_left("7", 3, fill: "0")   == "007"
@@ -336,30 +336,30 @@ pub str strip_suffix(str s, str suffix) {
 /// does not change: it will still be the code point answer, next to a
 /// `unicode` one that counts cells.
 ///
-/// **Never truncates.** An `s` already `width` wide or wider comes back
+/// **Never truncates.** An `text` already `width` wide or wider comes back
 /// untouched; a column that has to hold `"--jobs"` is not improved by being
 /// told `"--job"`. `fill` must be exactly one code point, or it traps: a
 /// two-character fill cannot reach every width, so there is no answer to give.
-pub str pad_left(str s, int width, str fill = " ") {
-    return filling(s, width, fill, "pad_left") + s;
+pub str pad_left(str text, int width, str fill = " ") {
+    return filling(text, width, fill, "pad_left") + text;
 }
 
-/// `s` with `fill` after it until it is `width` code points wide. The
+/// `text` with `fill` after it until it is `width` code points wide. The
 /// rules are `pad_left`'s.
 ///
 ///     text.pad_right("--help", 10) + "|"   == "--help    |"
-pub str pad_right(str s, int width, str fill = " ") {
-    return s + filling(s, width, fill, "pad_right");
+pub str pad_right(str text, int width, str fill = " ") {
+    return text + filling(text, width, fill, "pad_right");
 }
 
-// What has to be added to `s` to make it `width` code points wide, and nothing
+// What has to be added to `text` to make it `width` code points wide, and nothing
 // if it is already. `who` is the caller's name, so the trap says which of the
 // two was written rather than naming both.
-str filling(str s, int width, str fill, str who) {
+str filling(str text, int width, str fill, str who) {
     if (fill.chars().size() != 1) {
         trap("text." + who + "(): fill must be one character, not \"" + fill + "\"");
     }
-    int have = s.chars().size();
+    int have = text.chars().size();
     if (have >= width) {
         return "";
     }
@@ -367,7 +367,7 @@ str filling(str s, int width, str fill, str who) {
 }
 
 // --- parsing -------------------------------------------------------------------
-/// The decimal integer `s` spells, or why it is not one.
+/// The decimal integer `text` spells, or why it is not one.
 ///
 ///     text.parse_int("42")      -> Ok(42)
 ///     text.parse_int("4 2")     -> Err(Digit(1, 32))
@@ -385,25 +385,25 @@ str filling(str s, int width, str fill, str who) {
 /// built-in's and cannot drift from it. A `Range` is therefore reported for
 /// precisely the strings the built-in calls `None` after this function has
 /// agreed every character is a digit.
-pub Result<int, ParseError> parse_int(str s) {
-    int n = s.size();
-    int i = 0;
-    if (n > 0 && (s.byte_at(0) == '+' || s.byte_at(0) == '-')) {
-        i = 1;
+pub Result<int, ParseError> parse_int(str text) {
+    int byte_count = text.size();
+    int index = 0;
+    if (byte_count > 0 && (text.byte_at(0) == '+' || text.byte_at(0) == '-')) {
+        index = 1;
     }
-    if (i >= n) {
+    if (index >= byte_count) {
         return Result<int, ParseError>.Err(ParseError.NoDigits);
     }
-    while (i < n) {
-        int c = s.byte_at(i);
-        if (c < '0' || c > '9') {
+    while (index < byte_count) {
+        int octet = text.byte_at(index);
+        if (octet < '0' || octet > '9') {
             return Result<int, ParseError>.Err(ParseError.Digit);
         }
-        i = i + 1;
+        index = index + 1;
     }
-    match (s.parse_int()) {
-        case Some(int v): {
-            return Result<int, ParseError>.Ok(v);
+    match (text.parse_int()) {
+        case Some(int value): {
+            return Result<int, ParseError>.Ok(value);
         }
         case None: {
             return Result<int, ParseError>.Err(ParseError.Range);
@@ -417,6 +417,6 @@ pub Result<int, ParseError> parse_int(str s) {
 // `trim` rather than trusted: corpus/modules/stdlib-text checks all 128 ASCII
 // bytes and fails if one of them vanishes under `trim` and not here, or the
 // other way about.
-bool is_space(int b) {
-    return b == 32 || b == 9 || b == 10 || b == 13 || b == 12 || b == 11;
+bool is_space(int octet) {
+    return octet == 32 || octet == 9 || octet == 10 || octet == 13 || octet == 12 || octet == 11;
 }

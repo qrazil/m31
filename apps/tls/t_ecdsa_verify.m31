@@ -17,8 +17,8 @@ import io;
 import os;
 import date;
 
-int verdict(bool accepted) {
-    if (accepted) {
+int verdict(bool is_accepted) {
+    if (is_accepted) {
         return 1;
     }
     return 0;
@@ -62,14 +62,14 @@ int run_case(List<str> fields, ecdsa.Curve first, ecdsa.Curve second) {
             bytes digest = decode(fields[5]);
             bytes signature = decode(fields[6]);
             if (fields[3] == "der") {
-                return verdict(ecdsa.verify_der(curve, key, digest, signature));
+                return verdict(ecdsa.is_valid_der_signature(curve, key, digest, signature));
             }
-            return verdict(ecdsa.verify_raw(curve, key, digest, signature));
+            return verdict(ecdsa.is_valid_raw_signature(curve, key, digest, signature));
         }
     }
 }
 
-List<str> argv = os.args();
+List<str> argv = os.arguments();
 if (argv.size() < 2) {
     io.eprint("usage: t_ecdsa_verify VECTORS");
 } else {

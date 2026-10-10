@@ -109,7 +109,7 @@
 // the error.
 import io;
 
-prim int __entropy(int n, List<int> out);
+prim int __entropy(int count, List<int> out);
 
 // How many octets one refill fetches, and so how many draws one system call
 // pays for.
@@ -133,7 +133,7 @@ const int BLOCK = 256;
 /// structural (reference §3.4), so neither `Seeded` nor `System` mentions
 /// it; each simply has the method.
 interface Source {
-    bytes octets(int n);
+    bytes octets(int count);
 }
 
 /// A reproducible generator: the same seed gives the same sequence, on every
@@ -151,14 +151,14 @@ pub type Seeded {
 ///
 /// This is `Seeded`'s half of the `Source` protocol: the one method the two
 /// generators do not share an implementation of.
-pub bytes Seeded.octets(int n) {
-    check_count(n, "octets");
-    return pcg_fill(state, n);
+pub bytes Seeded.octets(int count) {
+    check_count(count, "octets");
+    return pcg_fill(state, count);
 }
 
 /// n octets as 2n lowercase hex digits.
-pub str Seeded.hex(int n) {
-    return hex_from(this, n);
+pub str Seeded.hex(int count) {
+    return hex_from(this, count);
 }
 
 /// A uniform integer in [low, high], both ends included.
@@ -172,8 +172,8 @@ pub float Seeded.fraction() {
 }
 
 /// 0..n-1 in a uniformly random order.
-pub List<int> Seeded.permutation(int n) {
-    return permutation_from(this, n);
+pub List<int> Seeded.permutation(int length) {
+    return permutation_from(this, length);
 }
 
 /// A version 4 UUID by construction but not in spirit: anyone who knows the
@@ -216,11 +216,11 @@ pub type System {
 /// This is `System`'s half of the `Source` protocol. Anything already in the
 /// pool is handed out first, and the pool is refilled from the kernel when
 /// it runs short.
-pub bytes System.octets(int n) {
-    check_count(n, "octets");
+pub bytes System.octets(int count) {
+    check_count(count, "octets");
     // `io.Buffer.read(0)` traps -- an empty result has exactly one meaning
     // there -- so a draw of nothing is answered before the pool is asked.
-    if (n == 0) {
+    if (count == 0) {
         bytes empty = [];
         return empty;
     }
@@ -228,31 +228,31 @@ pub bytes System.octets(int n) {
     // kernel is asked for the same number of octets either way, and routing
     // them through the pool would copy them a second time and evict what is
     // there. It goes straight to the kernel and leaves the pool alone.
-    if (n >= BLOCK) {
-        return from_kernel(n);
+    if (count >= BLOCK) {
+        return from_kernel(count);
     }
-    if (pool.size() < n) {
-        // One block is always enough, whatever little was left: `n` is below
-        // `BLOCK`, so the pool holds at least `n` afterwards.
+    if (pool.size() < count) {
+        // One block is always enough, whatever little was left: `count` is below
+        // `BLOCK`, so the pool holds at least `count` afterwards.
         Result<int, io.Error> put = pool.write(from_kernel(BLOCK));
     }
-    match (pool.read(n)) {
-        case Ok(bytes b): {
-            return b;
+    match (pool.read(count)) {
+        case Ok(bytes data): {
+            return data;
         }
-        case Err(io.Error e): {
+        case Err(io.Error error): {
             // Unreachable: an `io.Buffer` has no kernel to say no to it, and
             // its results are always `Ok` (lib/io.m31). Written out because
             // the arm exists, not because it can be taken.
-            trap("random: the octet pool refused a read (" + e.to_str() + ")");
+            trap("random: the octet pool refused a read (" + error.to_str() + ")");
         }
     }
 }
 
 /// n octets as 2n lowercase hex digits. The count is of octets, not
 /// characters: `hex(16)` is 128 bits however it is written.
-pub str System.hex(int n) {
-    return hex_from(this, n);
+pub str System.hex(int count) {
+    return hex_from(this, count);
 }
 
 /// A uniform integer in [low, high], both ends included -- the bound a caller
@@ -269,8 +269,8 @@ pub float System.fraction() {
 
 /// 0..n-1 in a uniformly random order: a shuffle of any list of n
 /// elements, by index. See the header for why it is not `shuffle(xs)`.
-pub List<int> System.permutation(int n) {
-    return permutation_from(this, n);
+pub List<int> System.permutation(int length) {
+    return permutation_from(this, length);
 }
 
 /// An RFC 4122 version 4 UUID.
@@ -290,23 +290,23 @@ pub System system() {
 }
 
 // n octets straight from the kernel, no pool involved.
-bytes from_kernel(int n) {
+bytes from_kernel(int count) {
     List<int> got = [];
-    int e = __entropy(n, got);
-    if (e != 0) {
-        trap("random: the operating system supplied no randomness (errno " + e.to_str() + ")");
+    int error_code = __entropy(count, got);
+    if (error_code != 0) {
+        trap("random: the operating system supplied no randomness (errno " + error_code.to_str() + ")");
     }
     bytes out = [];
-    for (int b in got) {
-        out.push(b);
+    for (int octet in got) {
+        out.push(octet);
     }
     return out;
 }
 
 // --- the algorithms, once ---------------------------------------------------
-str hex_from(Source s, int n) {
-    check_count(n, "hex");
-    return s.octets(n).hex();
+str hex_from(Source source, int count) {
+    check_count(count, "hex");
+    return source.octets(count).hex();
 }
 
 // By rejection sampling, never `% span`. A byte modulo 3 maps 256 values
@@ -319,7 +319,7 @@ str hex_from(Source s, int n) {
 // Keeping the low `bits` bits is exactly the mask Oro applies; the octets are
 // read most significant first, as Oro reads them, so a seeded generator
 // answers the same integers in both.
-int integer_from(Source s, int low, int high) {
+int integer_from(Source source, int low, int high) {
     if (high < low) {
         trap("random.integer(" + low.to_str() + ", " + high.to_str() + "): the range is empty -- high is below low, and both ends are included");
     }
@@ -328,14 +328,14 @@ int integer_from(Source s, int low, int high) {
     }
     // A span wider than 2^63 does not fit an int; it takes its own path.
     if (low < 0 && high > max_int() + low) {
-        return integer_wide(s, low, high);
+        return integer_wide(source, low, high);
     }
     int last = high - low;
     int bits = bit_length(last);
     int count = (bits + 7) / 8;
-    int drawn = low_bits(s.octets(count), bits);
+    int drawn = low_bits(source.octets(count), bits);
     while (drawn > last) {
-        drawn = low_bits(s.octets(count), bits);
+        drawn = low_bits(source.octets(count), bits);
     }
     return low + drawn;
 }
@@ -343,11 +343,11 @@ int integer_from(Source s, int low, int high) {
 // [low, high] spanning more than 2^63 values: all 64 bits are drawn, read as
 // an unsigned number `top * 2^63 + rest`, and kept when low plus it is at
 // most high -- which accepts more than half of all draws.
-int integer_wide(Source s, int low, int high) {
+int integer_wide(Source source, int low, int high) {
     while (true) {
-        bytes b = s.octets(8);
-        int top = b[0] >> 7;
-        int rest = low_bits(b, 63);
+        bytes data = source.octets(8);
+        int top = data[0] >> 7;
+        int rest = low_bits(data, 63);
         if (top == 0) {
             // low < 0 and rest < 2^63, and high - low exceeds 2^63 - 1, so
             // this is always inside the range.
@@ -363,27 +363,27 @@ int integer_wide(Source s, int low, int high) {
 
 // Seven octets, three bits dropped: 53 bits over 2^53, which is CPython's
 // construction and the only one that cannot round up to exactly 1.0.
-float fraction_from(Source s) {
-    int n = low_bits(s.octets(7), 56) >> 3;
-    return float(n) / 9007199254740992.0;
+float fraction_from(Source source) {
+    int mantissa = low_bits(source.octets(7), 56) >> 3;
+    return float(mantissa) / 9007199254740992.0;
 }
 
 // Fisher-Yates over 0..n-1, downwards, which is its own direction: element
-// `i` is settled by swapping it with one chosen from 0..i, so every
+// `index` is settled by swapping it with one chosen from 0..i, so every
 // permutation is reachable exactly once.
-List<int> permutation_from(Source s, int n) {
-    check_count(n, "permutation");
+List<int> permutation_from(Source source, int length) {
+    check_count(length, "permutation");
     List<int> out = [];
-    for (int k in 0 .. n) {
-        out.push(k);
+    for (int value in 0 .. length) {
+        out.push(value);
     }
-    int i = n - 1;
-    while (i > 0) {
-        int j = integer_from(s, 0, i);
-        int held = out[i];
-        out[i] = out[j];
-        out[j] = held;
-        i = i - 1;
+    int index = length - 1;
+    while (index > 0) {
+        int swap_index = integer_from(source, 0, index);
+        int held = out[index];
+        out[index] = out[swap_index];
+        out[swap_index] = held;
+        index = index - 1;
     }
     return out;
 }
@@ -391,12 +391,12 @@ List<int> permutation_from(Source s, int n) {
 // 122 random bits, with the version nibble (4) and the two-bit variant (10)
 // written over the draw where RFC 4122 puts them. The hyphens are part of the
 // format: this string is the UUID.
-str uuid4_from(Source s) {
-    bytes b = s.octets(16);
-    b[6] = b[6] & 0x0f | 0x40;
-    b[8] = b[8] & 0b0011_1111 | 0b1000_0000;
-    str h = b.hex();
-    return h.substr(0, 8) + "-" + h.substr(8, 12) + "-" + h.substr(12, 16) + "-" + h.substr(16, 20) + "-" + h.substr(20, 32);
+str uuid4_from(Source source) {
+    bytes data = source.octets(16);
+    data[6] = data[6] & 0x0f | 0x40;
+    data[8] = data[8] & 0b0011_1111 | 0b1000_0000;
+    str hex_text = data.hex();
+    return hex_text.substr(0, 8) + "-" + hex_text.substr(8, 12) + "-" + hex_text.substr(12, 16) + "-" + hex_text.substr(16, 20) + "-" + hex_text.substr(20, 32);
 }
 
 // --- PCG-XSH-RR 64/32 ---------------------------------------------------------
@@ -437,13 +437,13 @@ int next32(List<int> state) {
 // The dropped remainder is why a `Seeded` has no pool and must not get one:
 // keeping those octets for the next draw would be free and would change
 // every sequence, and the sequences are Oro's.
-bytes pcg_fill(List<int> state, int n) {
+bytes pcg_fill(List<int> state, int count) {
     bytes out = [];
-    while (out.size() < n) {
-        int v = next32(state);
+    while (out.size() < count) {
+        int output = next32(state);
         int shift = 24;
-        while (shift >= 0 && out.size() < n) {
-            out.push(v >> shift & 255);
+        while (shift >= 0 && out.size() < count) {
+            out.push(output >> shift & 255);
             shift = shift - 8;
         }
     }
@@ -452,8 +452,8 @@ bytes pcg_fill(List<int> state, int n) {
 
 // The logical right shift, `x >>> n` for 1 <= n <= 63: the arithmetic shift
 // with the copied-in sign bits masked off, as the reference spells it (§6.1).
-int shr(int x, int n) {
-    return x >> n & ~(-1 << 64 - n);
+int shr(int x, int shift_count) {
+    return x >> shift_count & ~(-1 << 64 - shift_count);
 }
 
 // --- small arithmetic -------------------------------------------------------
@@ -461,10 +461,10 @@ int max_int() {
     return 0x7FFF_FFFF_FFFF_FFFF;
 }
 
-// How many bits it takes to write `n`, which is positive here.
-int bit_length(int n) {
+// How many bits it takes to write `value`, which is positive here.
+int bit_length(int value) {
     int bits = 0;
-    int rest = n;
+    int rest = value;
     while (rest > 0) {
         bits = bits + 1;
         rest = rest >> 1;
@@ -475,18 +475,18 @@ int bit_length(int n) {
 // The octets as one number, most significant first, keeping only the low
 // `bits` bits (1..63). The top octet is masked before anything is shifted
 // past it, so eight octets never reach the sign bit.
-int low_bits(bytes b, int bits) {
-    int n = b.size();
-    int top = bits - 8 * (n - 1);
-    int out = b[0] & (1 << top) - 1;
-    for (int i in 1 .. n) {
-        out = out << 8 | b[i];
+int low_bits(bytes data, int bits) {
+    int octet_count = data.size();
+    int top = bits - 8 * (octet_count - 1);
+    int out = data[0] & (1 << top) - 1;
+    for (int i in 1 .. octet_count) {
+        out = out << 8 | data[i];
     }
     return out;
 }
 
-void check_count(int n, str who) {
-    if (n < 0) {
-        trap("random." + who + "(" + n.to_str() + "): a count cannot be negative");
+void check_count(int count, str who) {
+    if (count < 0) {
+        trap("random." + who + "(" + count.to_str() + "): a count cannot be negative");
     }
 }

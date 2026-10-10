@@ -27,167 +27,167 @@ import date;
 const int TIMEOUT_MS = 400;
 const int SETTLE_MS = 60;
 
-bytes nl() {
-    bytes b = [10];
-    return b;
+bytes newline_bytes() {
+    bytes newline = [10];
+    return newline;
 }
 
 // A sleep that parks only the calling green thread: wait for a connection
 // on a listener nobody connects to.
-void pause(net.Listener idle, int ms) {
-    match (idle.wait(ms)) {
-        case Ok(bool b): {
+void pause(net.Listener idle, int milliseconds) {
+    match (idle.wait(milliseconds)) {
+        case Ok(_): {
         }
-        case Err(net.Error e): {
-            trap("wait: " + e.to_str());
+        case Err(net.Error error): {
+            trap("wait: " + error.to_str());
         }
     }
 }
 
 void silent_client(int port, Chan<int> release) {
     match (net.connect("127.0.0.1", port)) {
-        case Ok(net.Conn c): {
+        case Ok(net.Conn connection): {
             int ignored = recv(release);
-            Result<bool, io.Error> closed = c.close();
+            Result<bool, io.Error> closed = connection.close();
         }
-        case Err(net.Error e): {
-            trap("silent connect: " + e.to_str());
+        case Err(net.Error error): {
+            trap("silent connect: " + error.to_str());
         }
     }
 }
 
-void live_client(int port, Chan<int> go) {
+void live_client(int port, Chan<int> start_signal) {
     match (net.connect("127.0.0.1", port)) {
-        case Ok(net.Conn c): {
-            int ignored = recv(go);
-            match (c.write("hello\n".to_bytes())) {
-                case Ok(int n): {
+        case Ok(net.Conn connection): {
+            int ignored = recv(start_signal);
+            match (connection.write("hello\n".to_bytes())) {
+                case Ok(_): {
                 }
-                case Err(io.Error e): {
-                    trap("live write: " + e.to_str());
+                case Err(io.Error error): {
+                    trap("live write: " + error.to_str());
                 }
             }
-            Result<bool, io.Error> closed = c.close();
+            Result<bool, io.Error> closed = connection.close();
         }
-        case Err(net.Error e): {
-            trap("live connect: " + e.to_str());
+        case Err(net.Error error): {
+            trap("live connect: " + error.to_str());
         }
     }
 }
 
-void silent_handler(net.Conn c, Chan<int> started, Chan<int> report) {
-    match (c.set_read_timeout(TIMEOUT_MS)) {
-        case Ok(bool b): {
+void silent_handler(net.Conn connection, Chan<int> started, Chan<int> report) {
+    match (connection.set_read_timeout(TIMEOUT_MS)) {
+        case Ok(_): {
         }
-        case Err(net.Error e): {
-            trap("set_read_timeout: " + e.to_str());
+        case Err(net.Error error): {
+            trap("set_read_timeout: " + error.to_str());
         }
     }
-    int t0 = date.now_ns();
+    int start_time = date.now_ns();
     send(started, 1);
-    match (c.read_until(nl(), 100)) {
-        case Ok(bytes b): {
+    match (connection.read_until(newline_bytes(), 100)) {
+        case Ok(_): {
             trap("a silent client sent something");
         }
-        case Err(io.Error e): {
-            if (net.error_of(e).to_str() != "timed out") {
-                trap("silent read: " + net.error_of(e).to_str());
+        case Err(io.Error error): {
+            if (net.error_of(error).to_str() != "timed out") {
+                trap("silent read: " + net.error_of(error).to_str());
             }
         }
     }
-    send(report, date.now_ns() - t0);
-    Result<bool, io.Error> closed = c.close();
+    send(report, date.now_ns() - start_time);
+    Result<bool, io.Error> closed = connection.close();
 }
 
-void live_handler(net.Conn c, Chan<int> report) {
-    match (c.set_read_timeout(TIMEOUT_MS)) {
-        case Ok(bool b): {
+void live_handler(net.Conn connection, Chan<int> report) {
+    match (connection.set_read_timeout(TIMEOUT_MS)) {
+        case Ok(_): {
         }
-        case Err(net.Error e): {
-            trap("set_read_timeout: " + e.to_str());
+        case Err(net.Error error): {
+            trap("set_read_timeout: " + error.to_str());
         }
     }
-    match (c.read_until(nl(), 100)) {
-        case Ok(bytes b): {
+    match (connection.read_until(newline_bytes(), 100)) {
+        case Ok(_): {
             send(report, date.now_ns());
         }
-        case Err(io.Error e): {
-            trap("live read: " + net.error_of(e).to_str());
+        case Err(io.Error error): {
+            trap("live read: " + net.error_of(error).to_str());
         }
     }
-    Result<bool, io.Error> closed = c.close();
+    Result<bool, io.Error> closed = connection.close();
 }
 
-void acceptor(net.Listener ln, int silent, Chan<int> started, Chan<int> report, Chan<int> live_report) {
-    int i = 0;
-    while (i < silent) {
-        match (ln.accept()) {
-            case Ok(net.Conn c): {
-                spawn silent_handler(c, started, report);
+void acceptor(net.Listener listener, int silent, Chan<int> started, Chan<int> report, Chan<int> live_report) {
+    int accepted_count = 0;
+    while (accepted_count < silent) {
+        match (listener.accept()) {
+            case Ok(net.Conn connection): {
+                spawn silent_handler(connection, started, report);
             }
-            case Err(net.Error e): {
-                trap("accept: " + e.to_str());
+            case Err(net.Error error): {
+                trap("accept: " + error.to_str());
             }
         }
-        i = i + 1;
+        accepted_count = accepted_count + 1;
     }
-    match (ln.accept()) {
-        case Ok(net.Conn c): {
-            spawn live_handler(c, live_report);
+    match (listener.accept()) {
+        case Ok(net.Conn connection): {
+            spawn live_handler(connection, live_report);
         }
-        case Err(net.Error e): {
-            trap("accept: " + e.to_str());
+        case Err(net.Error error): {
+            trap("accept: " + error.to_str());
         }
     }
-    Result<bool, net.Error> closed = ln.close();
+    Result<bool, net.Error> closed = listener.close();
 }
 
 void run_case(int silent, net.Listener idle) {
     int t_start = date.now_ns();
     match (net.listen("127.0.0.1", 0)) {
-        case Ok(net.Listener ln): {
-            int port = ln.local().port();
+        case Ok(net.Listener listener): {
+            int port = listener.local().port();
             Chan<int> started = Chan<int>(silent + 1);
             Chan<int> report = Chan<int>(silent + 1);
             Chan<int> live_report = Chan<int>(1);
             Chan<int> release = Chan<int>(silent + 1);
-            Chan<int> go = Chan<int>(1);
-            spawn acceptor(ln, silent, started, report, live_report);
-            int i = 0;
-            while (i < silent) {
+            Chan<int> start_signal = Chan<int>(1);
+            spawn acceptor(listener, silent, started, report, live_report);
+            int loop_index = 0;
+            while (loop_index < silent) {
                 spawn silent_client(port, release);
-                i = i + 1;
+                loop_index = loop_index + 1;
             }
-            i = 0;
-            while (i < silent) {
+            loop_index = 0;
+            while (loop_index < silent) {
                 int ignored = recv(started);
-                i = i + 1;
+                loop_index = loop_index + 1;
             }
             pause(idle, SETTLE_MS);
-            spawn live_client(port, go);
+            spawn live_client(port, start_signal);
             pause(idle, SETTLE_MS);
-            send(go, 1);
+            send(start_signal, 1);
             int t_live = recv(live_report);
             int worst = 0;
-            i = 0;
-            while (i < silent) {
+            loop_index = 0;
+            while (loop_index < silent) {
                 int took = recv(report);
                 if (took > worst) {
                     worst = took;
                 }
-                i = i + 1;
+                loop_index = loop_index + 1;
             }
             // Only now: a client that closed early would turn a handler's
             // timeout into an end of file.
-            i = 0;
-            while (i < silent) {
+            loop_index = 0;
+            while (loop_index < silent) {
                 send(release, 1);
-                i = i + 1;
+                loop_index = loop_index + 1;
             }
             print("silent=" + silent.to_str() + " live_ms=" + ((t_live - t_start) / 1000000).to_str() + " silent_max_ms=" + (worst / 1000000).to_str());
         }
-        case Err(net.Error e): {
-            trap("listen: " + e.to_str());
+        case Err(net.Error error): {
+            trap("listen: " + error.to_str());
         }
     }
 }
@@ -198,7 +198,7 @@ match (net.listen("127.0.0.1", 0)) {
         run_case(16, idle);
         Result<bool, net.Error> closed = idle.close();
     }
-    case Err(net.Error e): {
-        trap("listen: " + e.to_str());
+    case Err(net.Error error): {
+        trap("listen: " + error.to_str());
     }
 }

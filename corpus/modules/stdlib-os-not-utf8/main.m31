@@ -4,10 +4,10 @@ import os;
 // byte E9 -- "café" in Latin-1, which is not UTF-8 (in UTF-8 é is C3 A9).
 // A file name from an old disk looks exactly like this.
 //
-// A `str` is always valid UTF-8, so os.args() cannot hand that argument
-// over as text: reading it traps and says to read args_bytes, which has
-// every argument exactly as it came. This program reads only args_bytes.
-List<bytes> raw = os.args_bytes();
+// A `str` is always valid UTF-8, so os.arguments() cannot hand that argument
+// over as text: reading it traps and says to read arguments_bytes, which has
+// every argument exactly as it came. This program reads only arguments_bytes.
+List<bytes> raw = os.arguments_bytes();
 print(raw.size());  // 3
 print(raw[1].utf8().or("?"));  // plain
 print(raw[2].hex());  // 636166e9

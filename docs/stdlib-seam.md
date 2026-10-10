@@ -310,7 +310,7 @@ blocks the compiler as surely as it blocks `io`. The path is Go's:
 
 | prim | answers |
 |---|---|
-| `__args(List<bytes> out)` | pushes every `argv[i]` as octets, `argv[0]` first (the emitted `main` hands argc/argv to `rt_args_init`); `os.args` decodes |
+| `__args(List<bytes> out)` | pushes every `argv[i]` as octets, `argv[0]` first (the emitted `main` hands argc/argv to `rt_args_init`); `os.arguments` decodes |
 | `__env_map(List<bytes> out)` | pushes every variable as name, value, name, value ... octets, from `environ`; `os.env_map` decodes and skips what is not text |
 | `__env(str name, List<bytes> out)` | 1 and pushes the value as octets, or 0 if unset; `os.env` decodes |
 | `__exit(int code)` | flushes stdout, then `exit` -- the 0..255 check is in `lib/os.m31` |

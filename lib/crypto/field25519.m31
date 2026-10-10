@@ -95,14 +95,14 @@ pub Array<int> one() {
     return out;
 }
 
-/// The element `n` names, for the handful of small constants the curves need
+/// The element `number` names, for the handful of small constants the curves need
 /// (486662's Montgomery `(A-2)/4`, the `2*d` of the twisted Edwards curve, ...).
-/// `n` must fit in 32 bits, which is every constant this module is ever
+/// `number` must fit in 32 bits, which is every constant this module is ever
 /// asked to build.
-pub Array<int> small(int n) {
+pub Array<int> small(int number) {
     Array<int> out = [0; 16];
-    out[0] = n & 0xFFFF;
-    out[1] = n >> 16 & 0xFFFF;
+    out[0] = number & 0xFFFF;
+    out[1] = number >> 16 & 0xFFFF;
     return out;
 }
 
@@ -114,25 +114,25 @@ pub Array<int> small(int n) {
 /// octet for something that is not field data; masking it off is the
 /// caller's job, on the raw bytes, before this function ever sees them --
 /// this function only knows how to load 256 bits into 16 limbs.
-pub Array<int> from_bytes(bytes b) {
+pub Array<int> from_bytes(bytes encoded) {
     Array<int> out = [0; 16];
-    for (int k in 0 .. 16) {
-        out[k] = b[2 * k] | b[2 * k + 1] << 8;
+    for (int limb_index in 0 .. 16) {
+        out[limb_index] = encoded[2 * limb_index] | encoded[2 * limb_index + 1] << 8;
     }
     return out;
 }
 
-/// `a`, canonically reduced to `[0, p)` and packed as 32 little-endian
+/// `element`, canonically reduced to `[0, p)` and packed as 32 little-endian
 /// octets -- the encoding RFC 7748 and RFC 8032 both specify.
 ///
 /// This runs on secret data (an X25519 shared secret, an Ed25519 nonce
 /// point) and its constant-time argument is `reduce_canonical`'s.
-pub bytes to_bytes(Array<int> a) {
-    Array<int> v = reduce_canonical(a);
+pub bytes to_bytes(Array<int> element) {
+    Array<int> canonical = reduce_canonical(element);
     bytes out = [0; 32];
-    for (int k in 0 .. 16) {
-        out[2 * k] = v[k] & 0xFF;
-        out[2 * k + 1] = v[k] >> 8 & 0xFF;
+    for (int limb_index in 0 .. 16) {
+        out[2 * limb_index] = canonical[limb_index] & 0xFF;
+        out[2 * limb_index + 1] = canonical[limb_index] >> 8 & 0xFF;
     }
     return out;
 }
@@ -164,17 +164,17 @@ const int BIAS_HI = BIAS >> 16;
 // always takes the branch for a non-negative operand, regardless of whether
 // `fe[i]` itself was negative, zero, or large -- the two cases this function
 // exists to handle are indistinguishable to the CPU that runs it.
-Array<int> carry_pass(Array<int> fe) {
-    Array<int> out = clone(fe);
+Array<int> carry_pass(Array<int> element) {
+    Array<int> out = clone(element);
     for (int i in 0 .. 16) {
         int biased = out[i] + BIAS;
-        int q = biased >> 16;
-        out[i] = biased - (q << 16);
-        int c = q - BIAS_HI;
+        int quotient = biased >> 16;
+        out[i] = biased - (quotient << 16);
+        int carry = quotient - BIAS_HI;
         if (i < 15) {
-            out[i + 1] = out[i + 1] + c;
+            out[i + 1] = out[i + 1] + carry;
         } else {
-            out[0] = out[0] + WRAP * c;
+            out[0] = out[0] + WRAP * carry;
         }
     }
     return out;
@@ -186,32 +186,32 @@ Array<int> carry_pass(Array<int> fe) {
 // harness) -- the value it represents may still be a small multiple of `p`,
 // not yet the canonical representative; only `reduce_canonical` produces
 // that.
-Array<int> normalize(Array<int> fe) {
-    Array<int> a = carry_pass(fe);
-    Array<int> b = carry_pass(a);
-    return carry_pass(b);
+Array<int> normalize(Array<int> element) {
+    Array<int> first_pass = carry_pass(element);
+    Array<int> second_pass = carry_pass(first_pass);
+    return carry_pass(second_pass);
 }
 
 // --- the four operations -----------------------------------------------------
 
-pub Array<int> add(Array<int> a, Array<int> b) {
+pub Array<int> add(Array<int> left, Array<int> right) {
     Array<int> out = [0; 16];
     for (int i in 0 .. 16) {
-        out[i] = a[i] + b[i];
+        out[i] = left[i] + right[i];
     }
     return normalize(out);
 }
 
-pub Array<int> sub(Array<int> a, Array<int> b) {
+pub Array<int> sub(Array<int> left, Array<int> right) {
     Array<int> out = [0; 16];
     for (int i in 0 .. 16) {
-        out[i] = a[i] - b[i];
+        out[i] = left[i] - right[i];
     }
     return normalize(out);
 }
 
-pub Array<int> neg(Array<int> a) {
-    return sub(zero(), a);
+pub Array<int> neg(Array<int> element) {
+    return sub(zero(), element);
 }
 
 // The schoolbook convolution of two normalized elements (every input limb in
@@ -224,41 +224,41 @@ pub Array<int> neg(Array<int> a) {
 // `38 * t[k]` (< 2^42) into a `t[k-16]` that already held < 2^36, so every
 // entry handed to `normalize` is a non-negative value under 2^43 -- fifteen
 // bits of headroom below `int`'s trap threshold before it is even carried.
-Array<int> mul_raw(Array<int> a, Array<int> b) {
-    Array<int> t = [0; 31];
+Array<int> mul_raw(Array<int> left, Array<int> right) {
+    Array<int> product = [0; 31];
     for (int i in 0 .. 16) {
-        int ai = a[i];
+        int left_limb = left[i];
         for (int j in 0 .. 16) {
-            t[i + j] = t[i + j] + ai * b[j];
+            product[i + j] = product[i + j] + left_limb * right[j];
         }
     }
-    int k = 30;
-    while (k > 15) {
-        t[k - 16] = t[k - 16] + WRAP * t[k];
-        k = k - 1;
+    int fold_index = 30;
+    while (fold_index > 15) {
+        product[fold_index - 16] = product[fold_index - 16] + WRAP * product[fold_index];
+        fold_index = fold_index - 1;
     }
-    return t.slice(0, 16);
+    return product.slice(0, 16);
 }
 
-pub Array<int> mul(Array<int> a, Array<int> b) {
-    return normalize(mul_raw(a, b));
+pub Array<int> mul(Array<int> left, Array<int> right) {
+    return normalize(mul_raw(left, right));
 }
 
-pub Array<int> sq(Array<int> a) {
-    return mul(a, a);
+pub Array<int> square(Array<int> element) {
+    return mul(element, element);
 }
 
 /// `2*a*a` -- the extended-coordinates addition law wants this exact shape
 /// as its own step often enough (`ed25519.m31`) to give it a name; it is
 /// `add(sq(a), sq(a))` and nothing more.
-pub Array<int> sq2(Array<int> a) {
-    Array<int> s = sq(a);
-    return add(s, s);
+pub Array<int> sq2(Array<int> element) {
+    Array<int> squared = square(element);
+    return add(squared, squared);
 }
 
 // --- constant-time selection -------------------------------------------------
 
-/// `a` if `cond` is 1, `b` if `cond` is 0 -- with no branch, for any two
+/// `when_one` if `cond` is 1, `when_zero` if `cond` is 0 -- with no branch, for any two
 /// normalized elements. `cond` must be exactly 0 or 1; anything else is a
 /// bug in the caller (not checked, the way an out-of-range index is not
 /// re-checked by every caller of `Array` indexing).
@@ -271,29 +271,29 @@ pub Array<int> sq2(Array<int> a) {
 /// runtime's plain, unconditional bitwise operators (see the header): the
 /// whole selection is arithmetic on 64-bit patterns, never a read of `cond`
 /// by anything that could branch on it.
-pub Array<int> cselect(int cond, Array<int> a, Array<int> b) {
+pub Array<int> cselect(int cond, Array<int> when_one, Array<int> when_zero) {
     int mask = 0 - cond;
     int notmask = mask ^ -1;
     Array<int> out = [0; 16];
     for (int i in 0 .. 16) {
-        out[i] = a[i] & mask | b[i] & notmask;
+        out[i] = when_one[i] & mask | when_zero[i] & notmask;
     }
     return out;
 }
 
-/// Swap `a` and `b` in place when `cond` is 1, leave them alone when it is
+/// Swap `first` and `second` in place when `cond` is 1, leave them alone when it is
 /// 0 -- the Montgomery ladder's `cswap`. `Array` is a reference type
-/// (reference §3.9), so `a` and `b` here are the caller's own arrays: this
+/// (reference §3.9), so `first` and `second` here are the caller's own arrays: this
 /// mutates them directly, element by element, rather than building and
 /// returning new ones. Same masking argument as `cselect`.
-pub void cswap(int cond, Array<int> a, Array<int> b) {
+pub void cswap(int cond, Array<int> first, Array<int> second) {
     int mask = 0 - cond;
     int notmask = mask ^ -1;
     for (int i in 0 .. 16) {
-        int ai = a[i];
-        int bi = b[i];
-        a[i] = ai & notmask | bi & mask;
-        b[i] = ai & mask | bi & notmask;
+        int first_limb = first[i];
+        int second_limb = second[i];
+        first[i] = first_limb & notmask | second_limb & mask;
+        second[i] = first_limb & mask | second_limb & notmask;
     }
 }
 
@@ -318,42 +318,42 @@ type Borrowed {
 }
 
 /// `v - p`, elementwise, with an explicit borrow chain -- NOT folded at 38x,
-/// because the question this answers is "was `v` below `p`", which the fold
+/// because the question this answers is "was `element` below `p`", which the fold
 /// would hide. Returns the 16-limb difference and the final borrow: 1 means
 /// `v < p` (the difference is garbage, `v - p + 2^256`, and must be
 /// discarded); 0 means `v >= p` (the difference is the true `v - p`).
 ///
-/// CONSTANT TIME: same technique as `carry_pass`. `dd` ranges over roughly
+/// CONSTANT TIME: same technique as `carry_pass`. `difference` ranges over roughly
 /// [-65536, 65535] (two canonical-range limbs and a 0/1 borrow-in), so
 /// `dd + SBIAS` is always positive, and the `>>` below never branches on the
-/// secret sign of `dd` itself.
-Borrowed sub_p_borrow(Array<int> v) {
+/// secret sign of `difference` itself.
+Borrowed sub_p_borrow(Array<int> element) {
     Array<int> out = [0; 16];
     int borrow = 0;
     for (int i in 0 .. 16) {
-        int dd = v[i] - P_LIMBS[i] - borrow;
-        int biased = dd + SBIAS;
-        int q = biased >> 16;
-        out[i] = biased - (q << 16);
-        borrow = SBIAS_HI - q;
+        int difference = element[i] - P_LIMBS[i] - borrow;
+        int biased = difference + SBIAS;
+        int quotient = biased >> 16;
+        out[i] = biased - (quotient << 16);
+        borrow = SBIAS_HI - quotient;
     }
     return Borrowed(out, borrow);
 }
 
-// `fe` is always the output of `normalize`, so every limb is in [0, 65535]
+// `element` is always the output of `normalize`, so every limb is in [0, 65535]
 // and the value it represents is under 2^256. Since 2*p = 2^256 - 38, that
 // value minus 2*p is at most (2^256-1) - (2^256-38) = 37 -- strictly less
 // than `p` -- so subtracting `p` twice, each time only if the subtraction
 // does not borrow, always lands in [0, p). No more, and no fewer, than two
 // subtractions are ever needed, so this is two fixed steps, not a loop
 // whose length could depend on the secret value.
-Array<int> reduce_canonical(Array<int> fe) {
-    Array<int> v = fe;
+Array<int> reduce_canonical(Array<int> element) {
+    Array<int> reduced = element;
     for (int step in 0 .. 2) {
-        Borrowed db = sub_p_borrow(v);
-        v = cselect(1 - db.borrow, db.diff, v);
+        Borrowed subtraction = sub_p_borrow(reduced);
+        reduced = cselect(1 - subtraction.borrow, subtraction.diff, reduced);
     }
-    return v;
+    return reduced;
 }
 
 // --- inversion and the square-root helper: fixed exponents, by squaring ----
@@ -374,19 +374,19 @@ Array<int> reduce_canonical(Array<int> fe) {
 // initial value) down to bit 0 is 254 squarings, multiplying by the base at
 // every bit except 2 and 4.
 
-/// `a^(p-2) = a^-1` for any nonzero `a` (undefined, like any inverse, at
+/// `a^(p-2) = a^-1` for any nonzero `element` (undefined, like any inverse, at
 /// zero -- callers that can see zero must decide what that means to them).
-pub Array<int> invert(Array<int> a) {
-    Array<int> c = a;
+pub Array<int> invert(Array<int> element) {
+    Array<int> power = element;
     int bit = 253;
     while (bit >= 0) {
-        c = sq(c);
+        power = square(power);
         if (bit != 2 && bit != 4) {
-            c = mul(c, a);
+            power = mul(power, element);
         }
         bit = bit - 1;
     }
-    return c;
+    return power;
 }
 
 // `(p - 5) / 8 = 2^252 - 3`. With X = 2 = 0b10: the 252-bit expansion of
@@ -397,38 +397,38 @@ pub Array<int> invert(Array<int> a) {
 /// square root mod p (since p = 5 mod 8): the caller still has to check the
 /// candidate and correct it by `sqrt(-1)` if needed, exactly as the RFC
 /// describes. Not a square root on its own.
-pub Array<int> pow_p_minus_5_over_8(Array<int> a) {
-    Array<int> c = a;
+pub Array<int> pow_p_minus_5_over_8(Array<int> element) {
+    Array<int> power = element;
     int bit = 250;
     while (bit >= 0) {
-        c = sq(c);
+        power = square(power);
         if (bit != 1) {
-            c = mul(c, a);
+            power = mul(power, element);
         }
         bit = bit - 1;
     }
-    return c;
+    return power;
 }
 
 // --- equality and parity -----------------------------------------------------
 
-/// Whether `a` and `b` are the same field element. Compares canonical
+/// Whether `left` and `right` are the same field element. Compares canonical
 /// encodings, so two representations of the same value always agree; this
 /// is used on public values only (a decoded point's coordinates against a
 /// recomputed candidate) and makes no constant-time claim -- `==` on `bytes`
 /// is ordinary byte comparison.
-pub bool eq(Array<int> a, Array<int> b) {
-    return to_bytes(a) == to_bytes(b);
+pub bool eq(Array<int> left, Array<int> right) {
+    return to_bytes(left) == to_bytes(right);
 }
 
-pub bool is_zero(Array<int> a) {
-    return eq(a, zero());
+pub bool is_zero(Array<int> element) {
+    return eq(element, zero());
 }
 
-/// The low bit of `a`'s canonical representative -- the "sign" RFC 8032
+/// The low bit of `element`'s canonical representative -- the "sign" RFC 8032
 /// packs into a point encoding's spare bit. Not a constant-time operation
 /// (it reads a public coordinate, never a secret scalar).
-pub int parity(Array<int> a) {
-    bytes b = to_bytes(a);
-    return b[0] & 1;
+pub int parity(Array<int> element) {
+    bytes encoded = to_bytes(element);
+    return encoded[0] & 1;
 }

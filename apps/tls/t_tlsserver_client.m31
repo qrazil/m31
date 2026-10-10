@@ -34,7 +34,7 @@ net.Conn dial(str address, int port) {
     }
 }
 
-List<str> arguments = os.args();
+List<str> arguments = os.arguments();
 if (arguments.size() < 5 || arguments.size() > 7) {
     io.eprint("usage: t_tlsserver_client NAME ADDRESS PORT CA_FILE [DEADLINE_MS [TIMEOUT_MS]]");
     os.exit(2);
@@ -77,16 +77,16 @@ match (opened) {
     case Err(tls.Error connect_error): {
         fail(connect_error.to_str());
     }
-    case Ok(tls.Conn conn): {
+    case Ok(tls.Conn connection): {
         str request = "GET / HTTP/1.1\r\nHost: " + arguments[1] + "\r\nConnection: close\r\n\r\n";
-        match (conn.write(request.to_bytes())) {
+        match (connection.write(request.to_bytes())) {
             case Err(io.Error write_error): {
                 fail("write: " + write_error.to_str());
             }
             case Ok(int sent): {
             }
         }
-        match (conn.read_all()) {
+        match (connection.read_all()) {
             case Err(io.Error read_error): {
                 fail("read: " + read_error.to_str());
             }
@@ -108,6 +108,6 @@ match (opened) {
                 print("size " + (response.size() - head_end - 4).to_str());
             }
         }
-        Result<bool, io.Error> closed = conn.close();
+        Result<bool, io.Error> closed = connection.close();
     }
 }

@@ -99,7 +99,7 @@ import crypto.consttime;
 import crypto.x25519;
 import crypto.ed25519;
 import random;
-import base64;
+import encoding.base64;
 
 /// Why a handshake, or a later `send`/`recv`, could not be completed.
 /// Payload-free (`docs/errors-decision.md` §4): nothing here needs more
@@ -190,16 +190,16 @@ pub str Error.to_str() {
 
 // --- message type numbers (RFC 4253) -----------------------------------------
 
-const int SSH_MSG_DISCONNECT = 1;
-const int SSH_MSG_IGNORE = 2;
-const int SSH_MSG_UNIMPLEMENTED = 3;
-const int SSH_MSG_DEBUG = 4;
-pub const int SSH_MSG_SERVICE_REQUEST = 5;
-pub const int SSH_MSG_SERVICE_ACCEPT = 6;
-const int SSH_MSG_KEXINIT = 20;
-const int SSH_MSG_NEWKEYS = 21;
-const int SSH_MSG_KEX_ECDH_INIT = 30;
-const int SSH_MSG_KEX_ECDH_REPLY = 31;
+const int SSH_MESSAGE_DISCONNECT = 1;
+const int SSH_MESSAGE_IGNORE = 2;
+const int SSH_MESSAGE_UNIMPLEMENTED = 3;
+const int SSH_MESSAGE_DEBUG = 4;
+pub const int SSH_MESSAGE_SERVICE_REQUEST = 5;
+pub const int SSH_MESSAGE_SERVICE_ACCEPT = 6;
+const int SSH_MESSAGE_KEXINIT = 20;
+const int SSH_MESSAGE_NEWKEYS = 21;
+const int SSH_MESSAGE_KEX_ECDH_INIT = 30;
+const int SSH_MESSAGE_KEX_ECDH_REPLY = 31;
 // The one suite this client ever proposes or accepts (`docs/ssh-decision.md`
 // §2) -- spelled once, here, rather than repeated at each call site.
 const str KEX_ALGO = "curve25519-sha256";
@@ -211,15 +211,15 @@ const str CIPHER_ALGO = "chacha20-poly1305@openssh.com";
 // A 32-bit word, big-endian, at `buf[at .. at+4)` -- the caller's own
 // responsibility to have already checked those bytes exist, exactly
 // `apps/git/httpfetch.m31`'s own `be32`.
-int be32(bytes buf, int at) {
-    return buf[at] << 24 | buf[at + 1] << 16 | buf[at + 2] << 8 | buf[at + 3];
+int be32(bytes buffer, int offset) {
+    return buffer[offset] << 24 | buffer[offset + 1] << 16 | buffer[offset + 2] << 8 | buffer[offset + 3];
 }
 
-void push_u32(bytes out, int v) {
-    out.push(v >> 24 & 0xFF);
-    out.push(v >> 16 & 0xFF);
-    out.push(v >> 8 & 0xFF);
-    out.push(v & 0xFF);
+void push_u32(bytes out, int value) {
+    out.push(value >> 24 & 0xFF);
+    out.push(value >> 16 & 0xFF);
+    out.push(value >> 8 & 0xFF);
+    out.push(value & 0xFF);
 }
 
 /// One field parsed off the wire: its raw content, and the caller's next
@@ -239,16 +239,16 @@ pub void push_string(bytes out, bytes content) {
 
 /// An SSH `string` parsed out of `buf[at ..]`. `Err(Error.Truncated)` if the
 /// length field itself, or the content it names, is not all there.
-pub Result<Field, Error> parse_string(bytes buf, int at) {
-    if (at < 0 || at + 4 > buf.size()) {
+pub Result<Field, Error> parse_string(bytes buffer, int offset) {
+    if (offset < 0 || offset + 4 > buffer.size()) {
         return Result<Field, Error>.Err(Error.Truncated);
     }
-    int len = be32(buf, at);
-    if (at + 4 + len > buf.size()) {
+    int length = be32(buffer, offset);
+    if (offset + 4 + length > buffer.size()) {
         return Result<Field, Error>.Err(Error.Truncated);
     }
-    bytes value = buf.substr(at + 4, at + 4 + len);
-    return Result<Field, Error>.Ok(Field(value, at + 4 + len));
+    bytes value = buffer.substr(offset + 4, offset + 4 + length);
+    return Result<Field, Error>.Ok(Field(value, offset + 4 + length));
 }
 
 /// A name-list (RFC 4251 §5): an SSH `string` whose content is a
@@ -265,13 +265,13 @@ pub bytes encode_name_list(List<str> names) {
     return out;
 }
 
-pub Result<NameList, Error> parse_name_list(bytes buf, int at) {
-    Field f = parse_string(buf, at)?;
+pub Result<NameList, Error> parse_name_list(bytes buffer, int offset) {
+    Field field = parse_string(buffer, offset)?;
     List<str> names = [];
-    match (f.value.utf8()) {
-        case Some(str s): {
-            if (s.size() > 0) {
-                for (str part in s.split(",")) {
+    match (field.value.utf8()) {
+        case Some(str names_text): {
+            if (names_text.size() > 0) {
+                for (str part in names_text.split(",")) {
                     names.push(part);
                 }
             }
@@ -280,7 +280,7 @@ pub Result<NameList, Error> parse_name_list(bytes buf, int at) {
             return Result<NameList, Error>.Err(Error.Truncated);
         }
     }
-    return Result<NameList, Error>.Ok(NameList(names, f.next));
+    return Result<NameList, Error>.Ok(NameList(names, field.next));
 }
 
 /// RFC 4251 §5 `mpint`: `be_value`'s big-endian bytes, re-encoded as the
@@ -290,22 +290,22 @@ pub Result<NameList, Error> parse_name_list(bytes buf, int at) {
 /// exchange hash or a packet payload. See this module's header for why the
 /// leading-zero rule is not an edge case here.
 pub bytes encode_mpint(bytes be_value) {
-    bool all_zero = true;
-    for (int b in be_value) {
-        if (b != 0) {
-            all_zero = false;
+    bool is_all_zero = true;
+    for (int octet in be_value) {
+        if (octet != 0) {
+            is_all_zero = false;
         }
     }
     bytes out = [];
-    if (all_zero) {
+    if (is_all_zero) {
         push_string(out, []);
         return out;
     }
-    int i = 0;
-    while (be_value[i] == 0) {
-        i = i + 1;
+    int first_nonzero = 0;
+    while (be_value[first_nonzero] == 0) {
+        first_nonzero = first_nonzero + 1;
     }
-    bytes trimmed = be_value.substr(i, be_value.size());
+    bytes trimmed = be_value.substr(first_nonzero, be_value.size());
     bytes content = [];
     if ((trimmed[0] & 0x80) != 0) {
         content.push(0);
@@ -315,20 +315,20 @@ pub bytes encode_mpint(bytes be_value) {
     return out;
 }
 
-// Reads exactly `n` bytes from `conn`, looping over `net.Conn.read`'s own
-// "1..n bytes, no exact-read primitive" contract. A 0-length read before `n`
+// Reads exactly `byte_count` bytes from `connection`, looping over `net.Conn.read`'s own
+// "1..n bytes, no exact-read primitive" contract. A 0-length read before `byte_count`
 // bytes have arrived means the peer is gone.
-Result<bytes, Error> read_exact(net.Conn conn, int n) {
+Result<bytes, Error> read_exact(net.Conn connection, int byte_count) {
     bytes out = [];
-    while (out.size() < n) {
-        match (conn.read(n - out.size())) {
+    while (out.size() < byte_count) {
+        match (connection.read(byte_count - out.size())) {
             case Ok(bytes chunk): {
                 if (chunk.size() == 0) {
                     return Result<bytes, Error>.Err(Error.Io);
                 }
                 out.extend(chunk);
             }
-            case Err(io.Error e): {
+            case Err(_): {
                 return Result<bytes, Error>.Err(Error.Io);
             }
         }
@@ -349,15 +349,15 @@ type VersionPair {
     bytes v_s;
 }
 
-Result<VersionPair, Error> exchange_version(net.Conn conn) {
+Result<VersionPair, Error> exchange_version(net.Conn connection) {
     bytes v_c = CLIENT_VERSION_STR.to_bytes();
     bytes line = clone(v_c);
     line.push(13);
     line.push(10);
-    match (conn.write(line)) {
-        case Ok(int n): {
+    match (connection.write(line)) {
+        case Ok(_): {
         }
-        case Err(io.Error e): {
+        case Err(_): {
             return Result<VersionPair, Error>.Err(Error.Io);
         }
     }
@@ -371,11 +371,11 @@ Result<VersionPair, Error> exchange_version(net.Conn conn) {
         }
         tries = tries + 1;
         bytes raw = [];
-        match (conn.read_until(crlf, 255)) {
-            case Ok(bytes b): {
-                raw = b;
+        match (connection.read_until(crlf, 255)) {
+            case Ok(bytes received): {
+                raw = received;
             }
-            case Err(io.Error e): {
+            case Err(_): {
                 return Result<VersionPair, Error>.Err(Error.Io);
             }
         }
@@ -422,8 +422,8 @@ const int BLOCK_SIZE = 8;
 // "padding error ... block 8 mod 4" on the very first post-`NEWKEYS` packet,
 // even though the plaintext handshake before it (using this exact rule) had
 // just succeeded -- the cipher's own padding target is smaller.
-int compute_padding_len(int payload_len) {
-    int pad = BLOCK_SIZE - (5 + payload_len) % BLOCK_SIZE;
+int compute_padding_length(int payload_length) {
+    int pad = BLOCK_SIZE - (5 + payload_length) % BLOCK_SIZE;
     if (pad < MIN_PADDING) {
         pad = pad + BLOCK_SIZE;
     }
@@ -435,8 +435,8 @@ int compute_padding_len(int payload_len) {
 // length field, which this cipher always encrypts separately. See
 // `compute_padding_len`'s own comment for why these two are not the same
 // function, confirmed against a real `sshd`.
-int compute_padding_len_ciphered(int payload_len) {
-    int pad = BLOCK_SIZE - (1 + payload_len) % BLOCK_SIZE;
+int compute_padding_length_ciphered(int payload_length) {
+    int pad = BLOCK_SIZE - (1 + payload_length) % BLOCK_SIZE;
     if (pad < MIN_PADDING) {
         pad = pad + BLOCK_SIZE;
     }
@@ -454,58 +454,58 @@ pub type RawPacket {
 /// RFC 4253 §6, before any cipher exists: `uint32 packet_length`, `byte
 /// padding_length`, `payload`, random padding -- no MAC.
 pub bytes encode_plain_packet(bytes payload, random.System rng) {
-    int pad_len = compute_padding_len(payload.size());
-    int packet_len = 1 + payload.size() + pad_len;
+    int pad_length = compute_padding_length(payload.size());
+    int packet_length = 1 + payload.size() + pad_length;
     bytes out = [];
-    push_u32(out, packet_len);
-    out.push(pad_len);
+    push_u32(out, packet_length);
+    out.push(pad_length);
     out.extend(payload);
-    out.extend(rng.octets(pad_len));
+    out.extend(rng.octets(pad_length));
     return out;
 }
 
-pub Result<RawPacket, Error> parse_plain_packet(bytes buf, int at) {
-    if (at < 0 || at + 4 > buf.size()) {
+pub Result<RawPacket, Error> parse_plain_packet(bytes buffer, int offset) {
+    if (offset < 0 || offset + 4 > buffer.size()) {
         return Result<RawPacket, Error>.Err(Error.Truncated);
     }
-    int packet_len = be32(buf, at);
-    if (packet_len < 1 || at + 4 + packet_len > buf.size()) {
+    int packet_length = be32(buffer, offset);
+    if (packet_length < 1 || offset + 4 + packet_length > buffer.size()) {
         return Result<RawPacket, Error>.Err(Error.Truncated);
     }
-    int pad_len = buf[at + 4];
-    if (pad_len < MIN_PADDING || pad_len > packet_len - 1) {
+    int pad_length = buffer[offset + 4];
+    if (pad_length < MIN_PADDING || pad_length > packet_length - 1) {
         return Result<RawPacket, Error>.Err(Error.BadPacketLength);
     }
-    int payload_end = at + 4 + packet_len - pad_len;
-    bytes payload = buf.substr(at + 5, payload_end);
-    return Result<RawPacket, Error>.Ok(RawPacket(payload, at + 4 + packet_len));
+    int payload_end = offset + 4 + packet_length - pad_length;
+    bytes payload = buffer.substr(offset + 5, payload_end);
+    return Result<RawPacket, Error>.Ok(RawPacket(payload, offset + 4 + packet_length));
 }
 
-// Reads one whole plaintext packet off `conn` and hands back just its
+// Reads one whole plaintext packet off `connection` and hands back just its
 // payload -- the length is sent in clear at this stage, so the total size
 // is known as soon as the first four bytes arrive, and this reuses
 // `parse_plain_packet` on the assembled buffer rather than duplicating its
 // padding-bounds logic.
-Result<bytes, Error> recv_plain_payload(net.Conn conn) {
-    bytes len_bytes = read_exact(conn, 4)?;
-    int packet_len = be32(len_bytes, 0);
-    if (packet_len < 1 || packet_len > 35000) {
+Result<bytes, Error> recv_plain_payload(net.Conn connection) {
+    bytes length_bytes = read_exact(connection, 4)?;
+    int packet_length = be32(length_bytes, 0);
+    if (packet_length < 1 || packet_length > 35000) {
         return Result<bytes, Error>.Err(Error.BadPacketLength);
     }
-    bytes rest = read_exact(conn, packet_len)?;
-    bytes whole = clone(len_bytes);
+    bytes rest = read_exact(connection, packet_length)?;
+    bytes whole = clone(length_bytes);
     whole.extend(rest);
-    RawPacket p = parse_plain_packet(whole, 0)?;
-    return Result<bytes, Error>.Ok(p.payload);
+    RawPacket raw_packet = parse_plain_packet(whole, 0)?;
+    return Result<bytes, Error>.Ok(raw_packet.payload);
 }
 
-Result<void, Error> send_plain_payload(net.Conn conn, bytes payload, random.System rng) {
+Result<void, Error> send_plain_payload(net.Conn connection, bytes payload, random.System rng) {
     bytes pkt = encode_plain_packet(payload, rng);
-    match (conn.write(pkt)) {
-        case Ok(int n): {
+    match (connection.write(pkt)) {
+        case Ok(_): {
             return Result<void, Error>.Ok;
         }
-        case Err(io.Error e): {
+        case Err(_): {
             return Result<void, Error>.Err(Error.Io);
         }
     }
@@ -529,7 +529,7 @@ pub type KexInit {
     pub List<str> compression_algorithms_server_to_client;
     pub List<str> languages_client_to_server;
     pub List<str> languages_server_to_client;
-    pub bool first_kex_packet_follows;
+    pub bool is_first_kex_packet_following;
     pub bytes raw;
 }
 
@@ -540,7 +540,7 @@ pub type KexInit {
 pub bytes build_client_kexinit(random.System rng) {
     List<str> empty = [];
     bytes out = [];
-    out.push(SSH_MSG_KEXINIT);
+    out.push(SSH_MESSAGE_KEXINIT);
     out.extend(rng.octets(16));
     out.extend(encode_name_list([KEX_ALGO]));
     out.extend(encode_name_list([HOST_KEY_ALGO]));
@@ -558,7 +558,7 @@ pub bytes build_client_kexinit(random.System rng) {
 }
 
 pub Result<KexInit, Error> parse_kexinit(bytes payload) {
-    if (payload.size() < 1 || payload[0] != SSH_MSG_KEXINIT) {
+    if (payload.size() < 1 || payload[0] != SSH_MESSAGE_KEXINIT) {
         return Result<KexInit, Error>.Err(Error.UnexpectedMessage);
     }
     if (payload.size() < 17) {
@@ -575,12 +575,12 @@ pub Result<KexInit, Error> parse_kexinit(bytes payload) {
     NameList comp_s2c = parse_name_list(payload, comp_c2s.next)?;
     NameList lang_c2s = parse_name_list(payload, comp_s2c.next)?;
     NameList lang_s2c = parse_name_list(payload, lang_c2s.next)?;
-    int at = lang_s2c.next;
-    if (at + 1 + 4 > payload.size()) {
+    int flags_offset = lang_s2c.next;
+    if (flags_offset + 1 + 4 > payload.size()) {
         return Result<KexInit, Error>.Err(Error.Truncated);
     }
-    bool follows = payload[at] != 0;
-    return Result<KexInit, Error>.Ok(KexInit(cookie, kex.names, host_key.names, enc_c2s.names, enc_s2c.names, mac_c2s.names, mac_s2c.names, comp_c2s.names, comp_s2c.names, lang_c2s.names, lang_s2c.names, follows, payload));
+    bool has_following_packet = payload[flags_offset] != 0;
+    return Result<KexInit, Error>.Ok(KexInit(cookie, kex.names, host_key.names, enc_c2s.names, enc_s2c.names, mac_c2s.names, mac_s2c.names, comp_c2s.names, comp_s2c.names, lang_c2s.names, lang_s2c.names, has_following_packet, payload));
 }
 
 /// Three independently-testable, named refusals -- never a partial
@@ -603,7 +603,7 @@ pub Result<void, Error> check_server_kexinit(KexInit server) {
 
 pub bytes build_kex_ecdh_init(bytes q_c) {
     bytes out = [];
-    out.push(SSH_MSG_KEX_ECDH_INIT);
+    out.push(SSH_MESSAGE_KEX_ECDH_INIT);
     push_string(out, q_c);
     return out;
 }
@@ -617,7 +617,7 @@ type KexEcdhReply {
 }
 
 Result<KexEcdhReply, Error> parse_kex_ecdh_reply(bytes payload) {
-    if (payload.size() < 1 || payload[0] != SSH_MSG_KEX_ECDH_REPLY) {
+    if (payload.size() < 1 || payload[0] != SSH_MESSAGE_KEX_ECDH_REPLY) {
         return Result<KexEcdhReply, Error>.Err(Error.UnexpectedMessage);
     }
     Field k_s = parse_string(payload, 1)?;
@@ -633,8 +633,8 @@ Result<KexEcdhReply, Error> parse_kex_ecdh_reply(bytes payload) {
 Result<bytes, Error> parse_blob(bytes blob) {
     Field name = parse_string(blob, 0)?;
     match (name.value.utf8()) {
-        case Some(str s): {
-            if (s != HOST_KEY_ALGO) {
+        case Some(str algorithm_name): {
+            if (algorithm_name != HOST_KEY_ALGO) {
                 return Result<bytes, Error>.Err(Error.UnsupportedHostKeyType);
             }
         }
@@ -661,16 +661,16 @@ pub Result<bytes, Error> parse_signature_blob(bytes blob) {
 /// `k_mpint` is already the full, length-prefixed encoding `encode_mpint`
 /// produces, so it is appended verbatim rather than wrapped again.
 pub bytes exchange_hash(bytes v_c, bytes v_s, bytes i_c, bytes i_s, bytes k_s, bytes q_c, bytes q_s, bytes k_mpint) {
-    bytes buf = [];
-    push_string(buf, v_c);
-    push_string(buf, v_s);
-    push_string(buf, i_c);
-    push_string(buf, i_s);
-    push_string(buf, k_s);
-    push_string(buf, q_c);
-    push_string(buf, q_s);
-    buf.extend(k_mpint);
-    return sha256.sum(buf);
+    bytes hash_input = [];
+    push_string(hash_input, v_c);
+    push_string(hash_input, v_s);
+    push_string(hash_input, i_c);
+    push_string(hash_input, i_s);
+    push_string(hash_input, k_s);
+    push_string(hash_input, q_c);
+    push_string(hash_input, q_s);
+    hash_input.extend(k_mpint);
+    return sha256.sum(hash_input);
 }
 
 // --- Part 5: key derivation (RFC 4253 §7.2, specialised per --------------
@@ -684,18 +684,18 @@ pub bytes exchange_hash(bytes v_c, bytes v_s, bytes i_c, bytes i_s, bytes k_s, b
 /// K1)`, result `K1 || K2` -- the standard extend-on-demand rule, run once,
 /// since one hash's worth (32 bytes) is not enough for this cipher's
 /// required 512 bits per direction.
-pub bytes derive64(bytes k_mpint, bytes h, int letter, bytes session_id) {
+pub bytes derive64(bytes k_mpint, bytes exchange_digest, int letter, bytes session_id) {
     bytes buf1 = clone(k_mpint);
-    buf1.extend(h);
+    buf1.extend(exchange_digest);
     buf1.push(letter);
     buf1.extend(session_id);
-    bytes k1 = sha256.sum(buf1);
+    bytes first_hash = sha256.sum(buf1);
     bytes buf2 = clone(k_mpint);
-    buf2.extend(h);
-    buf2.extend(k1);
-    bytes k2 = sha256.sum(buf2);
-    bytes out = clone(k1);
-    out.extend(k2);
+    buf2.extend(exchange_digest);
+    buf2.extend(first_hash);
+    bytes second_hash = sha256.sum(buf2);
+    bytes out = clone(first_hash);
+    out.extend(second_hash);
     return out;
 }
 
@@ -720,50 +720,50 @@ bytes seq_to_bytes(int seq) {
 // security-critical (the permutation itself), only the XOR loop around it.
 bytes keystream_xor(bytes key, int block_counter_start, bytes seq8, bytes data) {
     bytes out = [];
-    int n = data.size();
-    int i = 0;
+    int data_length = data.size();
+    int block_start = 0;
     int ctr = block_counter_start;
-    while (i < n) {
-        bytes ks = chacha20poly1305.openssh_block(key, ctr, seq8);
-        int end = i + 64;
-        if (end > n) {
-            end = n;
+    while (block_start < data_length) {
+        bytes keystream = chacha20poly1305.openssh_block(key, ctr, seq8);
+        int end = block_start + 64;
+        if (end > data_length) {
+            end = data_length;
         }
-        int j = i;
-        while (j < end) {
-            out.push(data[j] ^ ks[j - i]);
-            j = j + 1;
+        int byte_index = block_start;
+        while (byte_index < end) {
+            out.push(data[byte_index] ^ keystream[byte_index - block_start]);
+            byte_index = byte_index + 1;
         }
-        i = end;
+        block_start = end;
         ctr = ctr + 1;
     }
     return out;
 }
 
 /// One ciphered packet, `PROTOCOL.chacha20poly1305`'s construction exactly:
-/// the 4-byte length encrypted with `k1` (block counter 0), the
-/// padding-length/payload/padding encrypted with `k2` (block counter 1),
+/// the 4-byte length encrypted with `length_key` (block counter 0), the
+/// padding-length/payload/padding encrypted with `payload_key` (block counter 1),
 /// and a Poly1305 tag over both ciphertexts using the one-time key
 /// `openssh_block(k2, 0, seq8)`. `seq` is this direction's running sequence
 /// number -- never reset at the `NEWKEYS` boundary (this module's header).
-pub bytes encrypt_packet(bytes payload, bytes k1, bytes k2, int seq, random.System rng) {
-    int pad_len = compute_padding_len_ciphered(payload.size());
+pub bytes encrypt_packet(bytes payload, bytes length_key, bytes payload_key, int seq, random.System rng) {
+    int pad_length = compute_padding_length_ciphered(payload.size());
     bytes rest_pt = [];
-    rest_pt.push(pad_len);
+    rest_pt.push(pad_length);
     rest_pt.extend(payload);
-    rest_pt.extend(rng.octets(pad_len));
+    rest_pt.extend(rng.octets(pad_length));
     bytes seq8 = seq_to_bytes(seq);
     bytes length_pt = [];
     push_u32(length_pt, rest_pt.size());
-    bytes length_ks = chacha20poly1305.openssh_block(k1, 0, seq8);
+    bytes length_ks = chacha20poly1305.openssh_block(length_key, 0, seq8);
     bytes length_ct = [];
-    int li = 0;
-    while (li < 4) {
-        length_ct.push(length_pt[li] ^ length_ks[li]);
-        li = li + 1;
+    int length_index = 0;
+    while (length_index < 4) {
+        length_ct.push(length_pt[length_index] ^ length_ks[length_index]);
+        length_index = length_index + 1;
     }
-    bytes rest_ct = keystream_xor(k2, 1, seq8, rest_pt);
-    bytes otk = chacha20poly1305.openssh_block(k2, 0, seq8).substr(0, 32);
+    bytes rest_ct = keystream_xor(payload_key, 1, seq8, rest_pt);
+    bytes otk = chacha20poly1305.openssh_block(payload_key, 0, seq8).substr(0, 32);
     bytes mac_input = clone(length_ct);
     mac_input.extend(rest_ct);
     bytes tag = chacha20poly1305.mac(otk, mac_input);
@@ -778,21 +778,21 @@ pub bytes encrypt_packet(bytes payload, bytes k1, bytes k2, int seq, random.Syst
 /// decrypting anything**, per `PROTOCOL.chacha20poly1305`'s own stated
 /// reason: decrypting the length early, before the MAC is checked, would
 /// make it an oracle for the payload cipher.
-pub Result<bytes, Error> decrypt_packet(bytes length_ct, bytes rest_ct, bytes tag, bytes k1, bytes k2, int seq) {
+pub Result<bytes, Error> decrypt_packet(bytes length_ct, bytes rest_ct, bytes tag, bytes length_key, bytes payload_key, int seq) {
     bytes seq8 = seq_to_bytes(seq);
-    bytes otk = chacha20poly1305.openssh_block(k2, 0, seq8).substr(0, 32);
+    bytes otk = chacha20poly1305.openssh_block(payload_key, 0, seq8).substr(0, 32);
     bytes mac_input = clone(length_ct);
     mac_input.extend(rest_ct);
     bytes want = chacha20poly1305.mac(otk, mac_input);
     if (!consttime.is_equal(want, tag)) {
         return Result<bytes, Error>.Err(Error.MacMismatch);
     }
-    bytes rest_pt = keystream_xor(k2, 1, seq8, rest_ct);
-    int pad_len = rest_pt[0];
-    if (pad_len < MIN_PADDING || pad_len > rest_pt.size() - 1) {
+    bytes rest_pt = keystream_xor(payload_key, 1, seq8, rest_ct);
+    int pad_length = rest_pt[0];
+    if (pad_length < MIN_PADDING || pad_length > rest_pt.size() - 1) {
         return Result<bytes, Error>.Err(Error.BadPacketLength);
     }
-    bytes payload = rest_pt.substr(1, rest_pt.size() - pad_len);
+    bytes payload = rest_pt.substr(1, rest_pt.size() - pad_length);
     return Result<bytes, Error>.Ok(payload);
 }
 
@@ -801,36 +801,36 @@ pub Result<bytes, Error> decrypt_packet(bytes length_ct, bytes rest_ct, bytes ta
 // reasoning (quoted on `decrypt_packet`); `recv_ciphered_payload` bounds it
 // against a sane ceiling before reading, and `decrypt_packet` re-derives
 // and checks the MAC before any of `rest_ct` is trusted either.
-int decrypt_length(bytes length_ct, bytes k1, int seq) {
+int decrypt_length(bytes length_ct, bytes length_key, int seq) {
     bytes seq8 = seq_to_bytes(seq);
-    bytes length_ks = chacha20poly1305.openssh_block(k1, 0, seq8);
+    bytes length_ks = chacha20poly1305.openssh_block(length_key, 0, seq8);
     bytes length_pt = [];
-    int i = 0;
-    while (i < 4) {
-        length_pt.push(length_ct[i] ^ length_ks[i]);
-        i = i + 1;
+    int byte_index = 0;
+    while (byte_index < 4) {
+        length_pt.push(length_ct[byte_index] ^ length_ks[byte_index]);
+        byte_index = byte_index + 1;
     }
     return be32(length_pt, 0);
 }
 
-Result<bytes, Error> recv_ciphered_payload(net.Conn conn, bytes k1, bytes k2, int seq) {
-    bytes length_ct = read_exact(conn, 4)?;
-    int rest_len = decrypt_length(length_ct, k1, seq);
-    if (rest_len < 1 || rest_len > 35000) {
+Result<bytes, Error> recv_ciphered_payload(net.Conn connection, bytes length_key, bytes payload_key, int seq) {
+    bytes length_ct = read_exact(connection, 4)?;
+    int rest_length = decrypt_length(length_ct, length_key, seq);
+    if (rest_length < 1 || rest_length > 35000) {
         return Result<bytes, Error>.Err(Error.BadPacketLength);
     }
-    bytes rest_ct = read_exact(conn, rest_len)?;
-    bytes tag = read_exact(conn, 16)?;
-    return decrypt_packet(length_ct, rest_ct, tag, k1, k2, seq);
+    bytes rest_ct = read_exact(connection, rest_length)?;
+    bytes tag = read_exact(connection, 16)?;
+    return decrypt_packet(length_ct, rest_ct, tag, length_key, payload_key, seq);
 }
 
-Result<void, Error> send_ciphered_payload(net.Conn conn, bytes payload, bytes k1, bytes k2, int seq, random.System rng) {
-    bytes pkt = encrypt_packet(payload, k1, k2, seq, rng);
-    match (conn.write(pkt)) {
-        case Ok(int n): {
+Result<void, Error> send_ciphered_payload(net.Conn connection, bytes payload, bytes length_key, bytes payload_key, int seq, random.System rng) {
+    bytes pkt = encrypt_packet(payload, length_key, payload_key, seq, rng);
+    match (connection.write(pkt)) {
+        case Ok(_): {
             return Result<void, Error>.Ok;
         }
-        case Err(io.Error e): {
+        case Err(_): {
             return Result<void, Error>.Err(Error.Io);
         }
     }
@@ -852,7 +852,7 @@ pub interface Link {
 /// in both directions. Every field is private -- the only way to build one
 /// is `ssh.connect`.
 pub type Transport {
-    net.Conn conn;
+    net.Conn connection;
     int send_seq;
     int recv_seq;
     bytes c2s_k1;
@@ -872,7 +872,7 @@ pub bytes Transport.session_id() {
 /// Encrypts, pads and MACs `payload` as one packet and writes it. Mirrors
 /// `net.Conn.write`'s own "all of it, or an error" contract.
 pub Result<int, Error> Transport.send(bytes payload) {
-    send_ciphered_payload(conn, payload, c2s_k1, c2s_k2, send_seq, rng)?;
+    send_ciphered_payload(connection, payload, c2s_k1, c2s_k2, send_seq, rng)?;
     send_seq = send_seq + 1;
     return Result<int, Error>.Ok(payload.size());
 }
@@ -885,16 +885,16 @@ pub Result<int, Error> Transport.send(bytes payload) {
 /// `SSH_MSG_DISCONNECT` becomes `Err(Error.Disconnected)`.
 pub Result<bytes, Error> Transport.recv() {
     while (true) {
-        bytes payload = recv_ciphered_payload(conn, s2c_k1, s2c_k2, recv_seq)?;
+        bytes payload = recv_ciphered_payload(connection, s2c_k1, s2c_k2, recv_seq)?;
         recv_seq = recv_seq + 1;
         if (payload.size() == 0) {
             return Result<bytes, Error>.Err(Error.Truncated);
         }
-        int msg_type = payload[0];
-        if (msg_type == SSH_MSG_DISCONNECT) {
+        int message_type = payload[0];
+        if (message_type == SSH_MESSAGE_DISCONNECT) {
             return Result<bytes, Error>.Err(Error.Disconnected);
         }
-        if (msg_type != SSH_MSG_IGNORE && msg_type != SSH_MSG_DEBUG && msg_type != SSH_MSG_UNIMPLEMENTED) {
+        if (message_type != SSH_MESSAGE_IGNORE && message_type != SSH_MESSAGE_DEBUG && message_type != SSH_MESSAGE_UNIMPLEMENTED) {
             return Result<bytes, Error>.Ok(payload);
         }
     }
@@ -903,11 +903,11 @@ pub Result<bytes, Error> Transport.recv() {
 /// Closes the underlying connection. No courteous `SSH_MSG_DISCONNECT`
 /// first in v0 -- see this module's header.
 pub Result<bool, Error> Transport.close() {
-    match (conn.close()) {
-        case Ok(bool ok): {
-            return Result<bool, Error>.Ok(ok);
+    match (connection.close()) {
+        case Ok(bool is_closed): {
+            return Result<bool, Error>.Ok(is_closed);
         }
-        case Err(io.Error e): {
+        case Err(_): {
             return Result<bool, Error>.Err(Error.Io);
         }
     }
@@ -944,9 +944,9 @@ pub str HostKey.blob_base64() {
 // Whether `host_key` is exactly one of `allowed`. An empty list allows
 // nothing -- a caller with no expectation gets a refusal, never trust on
 // first use. Public keys are not secret, so plain `==` is fine.
-bool key_is_listed(bytes host_key, List<bytes> allowed) {
-    for (bytes k in allowed) {
-        if (k == host_key) {
+bool is_key_listed(bytes host_key, List<bytes> allowed) {
+    for (bytes allowed_key in allowed) {
+        if (allowed_key == host_key) {
             return true;
         }
     }
@@ -961,23 +961,23 @@ bool key_is_listed(bytes host_key, List<bytes> allowed) {
 type Exchange {
     HostKey host_key;
     bytes k_mpint;
-    bytes h;
+    bytes exchange_digest;
 }
 
 // Version exchange, KEXINIT both ways, the ECDH exchange and the check of the
 // host key's signature -- the part of a handshake that is the same whether or
 // not the key is one the caller trusts.
-Result<Exchange, Error> exchange_keys(net.Conn conn, random.System rng) {
-    VersionPair vp = exchange_version(conn)?;
+Result<Exchange, Error> exchange_keys(net.Conn connection, random.System rng) {
+    VersionPair version_pair = exchange_version(connection)?;
     bytes i_c = build_client_kexinit(rng);
-    send_plain_payload(conn, i_c, rng)?;
-    bytes i_s = recv_plain_payload(conn)?;
+    send_plain_payload(connection, i_c, rng)?;
+    bytes i_s = recv_plain_payload(connection)?;
     KexInit server_kex = parse_kexinit(i_s)?;
     check_server_kexinit(server_kex)?;
     bytes secret = rng.octets(32);
     bytes q_c = x25519.base_point(secret);
-    send_plain_payload(conn, build_kex_ecdh_init(q_c), rng)?;
-    bytes reply_payload = recv_plain_payload(conn)?;
+    send_plain_payload(connection, build_kex_ecdh_init(q_c), rng)?;
+    bytes reply_payload = recv_plain_payload(connection)?;
     KexEcdhReply reply = parse_kex_ecdh_reply(reply_payload)?;
     bytes raw_key = parse_host_key_blob(reply.k_s)?;
     // RFC 8731 §3.1's text says this gets reversed (little-endian, RFC
@@ -989,12 +989,12 @@ Result<Exchange, Error> exchange_keys(net.Conn conn, random.System rng) {
     // reading of the RFC text -- see this module's header.
     bytes shared = x25519.x25519(secret, reply.q_s);
     bytes k_mpint = encode_mpint(shared);
-    bytes h = exchange_hash(vp.v_c, vp.v_s, i_c, i_s, reply.k_s, q_c, reply.q_s, k_mpint);
+    bytes exchange_digest = exchange_hash(version_pair.v_c, version_pair.v_s, i_c, i_s, reply.k_s, q_c, reply.q_s, k_mpint);
     bytes sig = parse_signature_blob(reply.signature)?;
-    if (!ed25519.verify(raw_key, h, sig)) {
+    if (!ed25519.is_valid_signature(raw_key, exchange_digest, sig)) {
         return Result<Exchange, Error>.Err(Error.BadSignature);
     }
-    return Result<Exchange, Error>.Ok(Exchange(HostKey(HOST_KEY_ALGO, reply.k_s, raw_key), k_mpint, h));
+    return Result<Exchange, Error>.Ok(Exchange(HostKey(HOST_KEY_ALGO, reply.k_s, raw_key), k_mpint, exchange_digest));
 }
 
 // The rest of the handshake, given an exchange whose host key the caller has
@@ -1002,35 +1002,35 @@ Result<Exchange, Error> exchange_keys(net.Conn conn, random.System rng) {
 // tracked from each side's very first packet (its own KEXINIT) and never
 // reset at the NEWKEYS boundary -- see this module's header and Part 6's own
 // note.
-Result<Transport, Error> finish_handshake(net.Conn conn, Exchange ex, random.System rng) {
+Result<Transport, Error> finish_handshake(net.Conn connection, Exchange exchange, random.System rng) {
     int send_seq = 2;
     int recv_seq = 2;
-    bytes c2s_material = derive64(ex.k_mpint, ex.h, 'C', ex.h);
-    bytes s2c_material = derive64(ex.k_mpint, ex.h, 'D', ex.h);
+    bytes c2s_material = derive64(exchange.k_mpint, exchange.exchange_digest, 'C', exchange.exchange_digest);
+    bytes s2c_material = derive64(exchange.k_mpint, exchange.exchange_digest, 'D', exchange.exchange_digest);
     bytes c2s_k2 = c2s_material.substr(0, 32);
     bytes c2s_k1 = c2s_material.substr(32, 64);
     bytes s2c_k2 = s2c_material.substr(0, 32);
     bytes s2c_k1 = s2c_material.substr(32, 64);
-    send_plain_payload(conn, [SSH_MSG_NEWKEYS], rng)?;
+    send_plain_payload(connection, [SSH_MESSAGE_NEWKEYS], rng)?;
     send_seq = send_seq + 1;
-    bytes their_newkeys = recv_plain_payload(conn)?;
+    bytes their_newkeys = recv_plain_payload(connection)?;
     recv_seq = recv_seq + 1;
-    if (their_newkeys.size() != 1 || their_newkeys[0] != SSH_MSG_NEWKEYS) {
+    if (their_newkeys.size() != 1 || their_newkeys[0] != SSH_MESSAGE_NEWKEYS) {
         return Result<Transport, Error>.Err(Error.UnexpectedMessage);
     }
-    return Result<Transport, Error>.Ok(Transport(conn, send_seq, recv_seq, c2s_k1, c2s_k2, s2c_k1, s2c_k2, ex.h, rng));
+    return Result<Transport, Error>.Ok(Transport(connection, send_seq, recv_seq, c2s_k1, c2s_k2, s2c_k1, s2c_k2, exchange.exchange_digest, rng));
 }
 
 // The whole handshake, given an already-connected socket. The signature is
 // checked before the key is compared with the expected ones, so a
 // `HostKeyMismatch` always names a key the server really holds.
-Result<Transport, Error> do_handshake(net.Conn conn, List<bytes> expected_host_keys) {
+Result<Transport, Error> do_handshake(net.Conn connection, List<bytes> expected_host_keys) {
     random.System rng = random.system();
-    Exchange ex = exchange_keys(conn, rng)?;
-    if (!key_is_listed(ex.host_key.key, expected_host_keys)) {
+    Exchange exchange = exchange_keys(connection, rng)?;
+    if (!is_key_listed(exchange.host_key.key, expected_host_keys)) {
         return Result<Transport, Error>.Err(Error.HostKeyMismatch);
     }
-    return finish_handshake(conn, ex, rng);
+    return finish_handshake(connection, exchange, rng);
 }
 
 /// Connects to `host`:`port`, runs the whole handshake, and refuses unless
@@ -1048,10 +1048,10 @@ pub Result<Transport, Error> connect(str host, int port, bytes expected_host_key
 /// first use.
 pub Result<Transport, Error> connect_any(str host, int port, List<bytes> host_keys) {
     match (net.connect(host, port)) {
-        case Ok(net.Conn c): {
-            return do_handshake(c, host_keys);
+        case Ok(net.Conn connection): {
+            return do_handshake(connection, host_keys);
         }
-        case Err(net.Error e): {
+        case Err(_): {
             return Result<Transport, Error>.Err(Error.Io);
         }
     }

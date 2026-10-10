@@ -105,7 +105,7 @@ tlsserver.Config load(str chain, str key) {
     }
 }
 
-List<str> arguments = os.args();
+List<str> arguments = os.arguments();
 if (arguments.size() < 6) {
     io.eprint("usage: t_tlsserver_serve CHAIN KEY MODE TIMEOUT_MS PROTOCOLS [CHAIN2 KEY2]");
     os.exit(2);

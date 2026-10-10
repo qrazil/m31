@@ -92,7 +92,7 @@ void talk(net.Conn c, Chan<str> log) {
     send(log, "client read back " + back.hex());
     // The peer's port is the listener's; its address is the one thing about
     // it that is the same on every run.
-    send(log, "client peer ip " + c.peer().ip().to_str());
+    send(log, "client peer ip " + c.peer().ip_address().to_str());
     bool same = back == body();
     send(log, "client got its body back: " + same.to_str());
     Result<bool, io.Error> closed = c.close();
@@ -111,7 +111,7 @@ void client(Chan<int> ports, Chan<str> log) {
 }
 
 void serve(net.Conn s) {
-    print("server peer ip " + s.peer().ip().to_str());
+    print("server peer ip " + s.peer().ip_address().to_str());
     print("a Conn fits an io.Stream slot: " + stream_of(s).to_str());
     // `io.read_line_of` is written against `io.Stream` and reads through the
     // connection's own buffer, so the octets after the newline are still
@@ -143,7 +143,7 @@ void serve(net.Conn s) {
 }
 
 void run(net.Listener ln) {
-    print("listening on " + ln.local().ip().to_str());
+    print("listening on " + ln.local().ip_address().to_str());
     bool chosen = ln.local().port() > 0;
     print("kernel chose a port: " + chosen.to_str());
     Chan<int> ports = Chan<int>(1);

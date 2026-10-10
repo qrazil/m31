@@ -93,7 +93,7 @@ List<x509.Certificate> presented_from(str path) {
     return certificates;
 }
 
-List<str> arguments = os.args();
+List<str> arguments = os.arguments();
 if (arguments.size() != 5) {
     trap("t_chain_verify: <anchors.pem> <chain.pem> <host> <now>");
 }

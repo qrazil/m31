@@ -15,15 +15,15 @@
 import ssh;
 import ssh.sshexec;
 
-int check(int n, bool ok, str label) {
-    if (!ok) {
+int check(int passed_count, bool is_ok, str label) {
+    if (!is_ok) {
         trap("check failed: " + label);
     }
-    return n + 1;
+    return passed_count + 1;
 }
 
-int error_code(sshexec.Error e) {
-    match (e) {
+int error_code(sshexec.Error error) {
+    match (error) {
         case Transport(ssh.Error inner): {
             return 0;
         }
@@ -57,117 +57,117 @@ int error_code(sshexec.Error e) {
     }
 }
 
-const int ERR_TRANSPORT = 0;
-const int ERR_TRUNCATED = 1;
-const int ERR_UNEXPECTED = 2;
-const int ERR_BAD_MESSAGE = 3;
-const int ERR_BAD_CHANNEL = 4;
-const int ERR_OPEN_REFUSED = 5;
-const int ERR_EXEC_REFUSED = 6;
-const int ERR_TOO_LARGE = 7;
-const int ERR_CLOSED = 8;
-const int ERR_BAD_ARGUMENT = 9;
+const int ERROR_TRANSPORT = 0;
+const int ERROR_TRUNCATED = 1;
+const int ERROR_UNEXPECTED = 2;
+const int ERROR_BAD_MESSAGE = 3;
+const int ERROR_BAD_CHANNEL = 4;
+const int ERROR_OPEN_REFUSED = 5;
+const int ERROR_EXEC_REFUSED = 6;
+const int ERROR_TOO_LARGE = 7;
+const int ERROR_CLOSED = 8;
+const int ERROR_BAD_ARGUMENT = 9;
 const int MODE_CANNED = 0;
 const int MODE_WC = 1;
 const int MODE_CAT = 2;
 const int MODE_PRODUCE = 3;
 const int PEER_ID = 7;
 
-void push_u32(bytes out, int v) {
-    out.push(v >> 24 & 0xFF);
-    out.push(v >> 16 & 0xFF);
-    out.push(v >> 8 & 0xFF);
-    out.push(v & 0xFF);
+void push_u32(bytes out, int value) {
+    out.push(value >> 24 & 0xFF);
+    out.push(value >> 16 & 0xFF);
+    out.push(value >> 8 & 0xFF);
+    out.push(value & 0xFF);
 }
 
-int be32(bytes buf, int at) {
-    return buf[at] << 24 | buf[at + 1] << 16 | buf[at + 2] << 8 | buf[at + 3];
+int be32(bytes buffer, int offset) {
+    return buffer[offset] << 24 | buffer[offset + 1] << 16 | buffer[offset + 2] << 8 | buffer[offset + 3];
 }
 
 // --- message builders (the server's side; recipient is our channel 0) --------
 
-bytes msg_confirm(int window, int max_packet) {
-    bytes m = [sshexec.SSH_MSG_CHANNEL_OPEN_CONFIRMATION];
-    push_u32(m, 0);
-    push_u32(m, PEER_ID);
-    push_u32(m, window);
-    push_u32(m, max_packet);
-    return m;
+bytes message_confirm(int window, int max_packet) {
+    bytes message = [sshexec.SSH_MESSAGE_CHANNEL_OPEN_CONFIRMATION];
+    push_u32(message, 0);
+    push_u32(message, PEER_ID);
+    push_u32(message, window);
+    push_u32(message, max_packet);
+    return message;
 }
 
-bytes msg_open_failure(int reason) {
-    bytes m = [sshexec.SSH_MSG_CHANNEL_OPEN_FAILURE];
-    push_u32(m, 0);
-    push_u32(m, reason);
-    ssh.push_string(m, "no".to_bytes());
-    ssh.push_string(m, "".to_bytes());
-    return m;
+bytes message_open_failure(int reason) {
+    bytes message = [sshexec.SSH_MESSAGE_CHANNEL_OPEN_FAILURE];
+    push_u32(message, 0);
+    push_u32(message, reason);
+    ssh.push_string(message, "no".to_bytes());
+    ssh.push_string(message, "".to_bytes());
+    return message;
 }
 
-bytes msg_simple(int kind, int recipient) {
-    bytes m = [kind];
-    push_u32(m, recipient);
-    return m;
+bytes message_simple(int kind, int recipient) {
+    bytes message = [kind];
+    push_u32(message, recipient);
+    return message;
 }
 
-bytes msg_data(bytes data) {
-    bytes m = msg_simple(sshexec.SSH_MSG_CHANNEL_DATA, 0);
-    ssh.push_string(m, data);
-    return m;
+bytes message_data(bytes data) {
+    bytes message = message_simple(sshexec.SSH_MESSAGE_CHANNEL_DATA, 0);
+    ssh.push_string(message, data);
+    return message;
 }
 
-bytes msg_ext(int code, bytes data) {
-    bytes m = msg_simple(sshexec.SSH_MSG_CHANNEL_EXTENDED_DATA, 0);
-    push_u32(m, code);
-    ssh.push_string(m, data);
-    return m;
+bytes message_ext(int code, bytes data) {
+    bytes message = message_simple(sshexec.SSH_MESSAGE_CHANNEL_EXTENDED_DATA, 0);
+    push_u32(message, code);
+    ssh.push_string(message, data);
+    return message;
 }
 
-bytes msg_adjust(int add) {
-    bytes m = msg_simple(sshexec.SSH_MSG_CHANNEL_WINDOW_ADJUST, 0);
-    push_u32(m, add);
-    return m;
+bytes message_adjust(int add) {
+    bytes message = message_simple(sshexec.SSH_MESSAGE_CHANNEL_WINDOW_ADJUST, 0);
+    push_u32(message, add);
+    return message;
 }
 
-bytes msg_exit_status(int code) {
-    bytes m = msg_simple(sshexec.SSH_MSG_CHANNEL_REQUEST, 0);
-    ssh.push_string(m, "exit-status".to_bytes());
-    m.push(0);
-    push_u32(m, code);
-    return m;
+bytes message_exit_status(int code) {
+    bytes message = message_simple(sshexec.SSH_MESSAGE_CHANNEL_REQUEST, 0);
+    ssh.push_string(message, "exit-status".to_bytes());
+    message.push(0);
+    push_u32(message, code);
+    return message;
 }
 
-bytes msg_exit_signal(bytes name) {
-    bytes m = msg_simple(sshexec.SSH_MSG_CHANNEL_REQUEST, 0);
-    ssh.push_string(m, "exit-signal".to_bytes());
-    m.push(0);
-    ssh.push_string(m, name);
-    m.push(1);
-    ssh.push_string(m, "killed".to_bytes());
-    ssh.push_string(m, "".to_bytes());
-    return m;
+bytes message_exit_signal(bytes name) {
+    bytes message = message_simple(sshexec.SSH_MESSAGE_CHANNEL_REQUEST, 0);
+    ssh.push_string(message, "exit-signal".to_bytes());
+    message.push(0);
+    ssh.push_string(message, name);
+    message.push(1);
+    ssh.push_string(message, "killed".to_bytes());
+    ssh.push_string(message, "".to_bytes());
+    return message;
 }
 
-bytes msg_request(str name, bool want_reply) {
-    bytes m = msg_simple(sshexec.SSH_MSG_CHANNEL_REQUEST, 0);
-    ssh.push_string(m, name.to_bytes());
-    if (want_reply) {
-        m.push(1);
+bytes message_request(str name, bool needs_reply) {
+    bytes message = message_simple(sshexec.SSH_MESSAGE_CHANNEL_REQUEST, 0);
+    ssh.push_string(message, name.to_bytes());
+    if (needs_reply) {
+        message.push(1);
     } else {
-        m.push(0);
+        message.push(0);
     }
-    return m;
+    return message;
 }
 
-bytes msg_global(str name, bool want_reply) {
-    bytes m = [sshexec.SSH_MSG_GLOBAL_REQUEST];
-    ssh.push_string(m, name.to_bytes());
-    if (want_reply) {
-        m.push(1);
+bytes message_global(str name, bool needs_reply) {
+    bytes message = [sshexec.SSH_MESSAGE_GLOBAL_REQUEST];
+    ssh.push_string(message, name.to_bytes());
+    if (needs_reply) {
+        message.push(1);
     } else {
-        m.push(0);
+        message.push(0);
     }
-    return m;
+    return message;
 }
 
 // --- the peer ------------------------------------------------------------------
@@ -185,13 +185,13 @@ pub type Peer {
     pub int stdin_total;
     pub int stdin_sum;
     pub int max_data;
-    pub bool violated;
+    pub bool is_violated;
     int produce_total;
     int produced;
     bytes pending;
-    bool client_eof;
-    bool finished;
-    bool close_sent;
+    bool has_client_sent_eof;
+    bool is_finished;
+    bool has_sent_close;
     bytes sid;
 }
 
@@ -201,53 +201,53 @@ pub Result<int, ssh.Error> Peer.send(bytes payload) {
         return Result<int, ssh.Error>.Ok(payload.size());
     }
     int kind = payload[0];
-    if (kind == sshexec.SSH_MSG_CHANNEL_OPEN) {
+    if (kind == sshexec.SSH_MESSAGE_CHANNEL_OPEN) {
         sent.push(clone(payload));
         client_window = be32(payload, 16);
         client_max = be32(payload, 20);
         window_left = peer_window;
-        out.push(msg_confirm(peer_window, peer_max));
-    } else if (kind == sshexec.SSH_MSG_CHANNEL_REQUEST) {
+        out.push(message_confirm(peer_window, peer_max));
+    } else if (kind == sshexec.SSH_MESSAGE_CHANNEL_REQUEST) {
         sent.push(clone(payload));
-        out.push(msg_simple(sshexec.SSH_MSG_CHANNEL_SUCCESS, 0));
+        out.push(message_simple(sshexec.SSH_MESSAGE_CHANNEL_SUCCESS, 0));
         if (mode == MODE_PRODUCE) {
-            out.push(msg_ext(1, "err\n".to_bytes()));
+            out.push(message_ext(1, "err\n".to_bytes()));
             client_window = client_window - 4;
             produce_more();
         }
-    } else if (kind == sshexec.SSH_MSG_CHANNEL_DATA) {
-        int len = be32(payload, 5);
-        if (len > peer_max || len > window_left || be32(payload, 1) != PEER_ID) {
-            violated = true;
+    } else if (kind == sshexec.SSH_MESSAGE_CHANNEL_DATA) {
+        int length = be32(payload, 5);
+        if (length > peer_max || length > window_left || be32(payload, 1) != PEER_ID) {
+            is_violated = true;
         }
-        if (len > max_data) {
-            max_data = len;
+        if (length > max_data) {
+            max_data = length;
         }
-        window_left = window_left - len;
-        stdin_total = stdin_total + len;
-        int i = 9;
-        while (i < 9 + len) {
-            stdin_sum = (stdin_sum + payload[i]) & 0xFFFFFFFF;
-            i = i + 1;
+        window_left = window_left - length;
+        stdin_total = stdin_total + length;
+        int byte_index = 9;
+        while (byte_index < 9 + length) {
+            stdin_sum = (stdin_sum + payload[byte_index]) & 0xFFFFFFFF;
+            byte_index = byte_index + 1;
         }
         if (window_left <= peer_window / 2) {
-            out.push(msg_adjust(peer_window - window_left));
+            out.push(message_adjust(peer_window - window_left));
             window_left = peer_window;
         }
         if (mode == MODE_CAT) {
-            pending.extend(payload.substr(9, 9 + len));
+            pending.extend(payload.substr(9, 9 + length));
             flush_pending();
         }
-    } else if (kind == sshexec.SSH_MSG_CHANNEL_EOF) {
+    } else if (kind == sshexec.SSH_MESSAGE_CHANNEL_EOF) {
         sent.push(clone(payload));
-        client_eof = true;
+        has_client_sent_eof = true;
         if (mode == MODE_WC) {
-            out.push(msg_data((stdin_total.to_str() + "\n").to_bytes()));
+            out.push(message_data((stdin_total.to_str() + "\n").to_bytes()));
             finish();
         } else if (mode == MODE_CAT) {
             flush_pending();
         }
-    } else if (kind == sshexec.SSH_MSG_CHANNEL_WINDOW_ADJUST) {
+    } else if (kind == sshexec.SSH_MESSAGE_CHANNEL_WINDOW_ADJUST) {
         sent.push(clone(payload));
         client_window = client_window + be32(payload, 5);
         if (mode == MODE_PRODUCE) {
@@ -255,11 +255,11 @@ pub Result<int, ssh.Error> Peer.send(bytes payload) {
         } else if (mode == MODE_CAT) {
             flush_pending();
         }
-    } else if (kind == sshexec.SSH_MSG_CHANNEL_CLOSE) {
+    } else if (kind == sshexec.SSH_MESSAGE_CHANNEL_CLOSE) {
         sent.push(clone(payload));
-        if (!close_sent) {
-            out.push(msg_simple(sshexec.SSH_MSG_CHANNEL_CLOSE, 0));
-            close_sent = true;
+        if (!has_sent_close) {
+            out.push(message_simple(sshexec.SSH_MESSAGE_CHANNEL_CLOSE, 0));
+            has_sent_close = true;
         }
     } else {
         sent.push(clone(payload));
@@ -280,62 +280,62 @@ pub bytes Peer.session_id() {
 }
 
 void Peer.finish() {
-    if (finished) {
+    if (is_finished) {
         return;
     }
-    finished = true;
+    is_finished = true;
     int code = 0;
     if (mode == MODE_PRODUCE) {
         code = 3;
     }
-    out.push(msg_exit_status(code));
-    out.push(msg_simple(sshexec.SSH_MSG_CHANNEL_EOF, 0));
-    out.push(msg_simple(sshexec.SSH_MSG_CHANNEL_CLOSE, 0));
-    close_sent = true;
+    out.push(message_exit_status(code));
+    out.push(message_simple(sshexec.SSH_MESSAGE_CHANNEL_EOF, 0));
+    out.push(message_simple(sshexec.SSH_MESSAGE_CHANNEL_CLOSE, 0));
+    has_sent_close = true;
 }
 
 void Peer.flush_pending() {
     while (pending.size() > 0 && client_window > 0) {
-        int n = pending.size();
-        if (n > client_window) {
-            n = client_window;
+        int chunk_size = pending.size();
+        if (chunk_size > client_window) {
+            chunk_size = client_window;
         }
-        if (n > client_max) {
-            n = client_max;
+        if (chunk_size > client_max) {
+            chunk_size = client_max;
         }
-        if (n > 32768) {
-            n = 32768;
+        if (chunk_size > 32768) {
+            chunk_size = 32768;
         }
-        out.push(msg_data(pending.substr(0, n)));
-        pending.drop_front(n);
-        client_window = client_window - n;
+        out.push(message_data(pending.substr(0, chunk_size)));
+        pending.drop_front(chunk_size);
+        client_window = client_window - chunk_size;
     }
-    if (client_eof && pending.size() == 0) {
+    if (has_client_sent_eof && pending.size() == 0) {
         finish();
     }
 }
 
 void Peer.produce_more() {
     while (produced < produce_total && client_window > 0) {
-        int n = produce_total - produced;
-        if (n > client_window) {
-            n = client_window;
+        int chunk_size = produce_total - produced;
+        if (chunk_size > client_window) {
+            chunk_size = client_window;
         }
-        if (n > client_max) {
-            n = client_max;
+        if (chunk_size > client_max) {
+            chunk_size = client_max;
         }
-        if (n > 32768) {
-            n = 32768;
+        if (chunk_size > 32768) {
+            chunk_size = 32768;
         }
         bytes chunk = [];
-        int i = 0;
-        while (i < n) {
-            chunk.push(pattern(produced + i));
-            i = i + 1;
+        int byte_index = 0;
+        while (byte_index < chunk_size) {
+            chunk.push(pattern(produced + byte_index));
+            byte_index = byte_index + 1;
         }
-        out.push(msg_data(chunk));
-        produced = produced + n;
-        client_window = client_window - n;
+        out.push(message_data(chunk));
+        produced = produced + chunk_size;
+        client_window = client_window - chunk_size;
     }
     if (produced == produce_total) {
         finish();
@@ -352,9 +352,9 @@ Peer peer(int mode, List<bytes> out, int peer_window, int peer_max, int produce_
     return Peer(out, 0, sent, mode, peer_window, peer_max, 0, 0, 0, 0, 0, 0, false, produce_total, 0, pending, false, false, false, [9, 9, 9]);
 }
 
-// The producer's byte at offset `i`.
-int pattern(int i) {
-    return (i * 31 + i / 251) & 0xFF;
+// The producer's byte at offset `offset`.
+int pattern(int offset) {
+    return (offset * 31 + offset / 251) & 0xFF;
 }
 
 // --- helpers --------------------------------------------------------------------
@@ -362,31 +362,31 @@ int pattern(int i) {
 // An open channel on a canned peer: the confirmation, the exec's SUCCESS,
 // then `rest`.
 Peer ready(int window, int max_packet, List<bytes> rest) {
-    List<bytes> out = [msg_confirm(window, max_packet), msg_simple(sshexec.SSH_MSG_CHANNEL_SUCCESS, 0)];
-    for (bytes m in rest) {
-        out.push(m);
+    List<bytes> out = [message_confirm(window, max_packet), message_simple(sshexec.SSH_MESSAGE_CHANNEL_SUCCESS, 0)];
+    for (bytes message in rest) {
+        out.push(message);
     }
     return canned(out);
 }
 
-sshexec.Channel must_exec(Peer p, str command) {
-    match (sshexec.exec(p, command)) {
-        case Ok(sshexec.Channel ch): {
-            return ch;
+sshexec.Channel must_exec(Peer scripted_peer, str command) {
+    match (sshexec.exec(scripted_peer, command)) {
+        case Ok(sshexec.Channel channel): {
+            return channel;
         }
-        case Err(sshexec.Error e): {
-            trap("exec failed: " + e.to_str());
+        case Err(sshexec.Error error): {
+            trap("exec failed: " + error.to_str());
         }
     }
 }
 
-int exec_code(Peer p) {
-    match (sshexec.exec(p, "cmd")) {
-        case Ok(sshexec.Channel ch): {
+int exec_code(Peer scripted_peer) {
+    match (sshexec.exec(scripted_peer, "cmd")) {
+        case Ok(_): {
             return -1;
         }
-        case Err(sshexec.Error e): {
-            return error_code(e);
+        case Err(sshexec.Error error): {
+            return error_code(error);
         }
     }
 }
@@ -394,86 +394,86 @@ int exec_code(Peer p) {
 // The code of the first error a channel on `rest` hits while reading stdout
 // to the end and waiting for the close, or -1.
 int read_code(List<bytes> rest) {
-    Peer p = ready(1000, 1000, rest);
-    sshexec.Channel ch = must_exec(p, "cmd");
-    match (ch.read_all()) {
-        case Ok(bytes b): {
-            match (ch.wait()) {
-                case Ok(sshexec.Exit x): {
+    Peer scripted_peer = ready(1000, 1000, rest);
+    sshexec.Channel channel = must_exec(scripted_peer, "cmd");
+    match (channel.read_all()) {
+        case Ok(_): {
+            match (channel.wait()) {
+                case Ok(_): {
                     return -1;
                 }
-                case Err(sshexec.Error e): {
-                    return error_code(e);
+                case Err(sshexec.Error error): {
+                    return error_code(error);
                 }
             }
         }
-        case Err(sshexec.Error e): {
-            return error_code(e);
+        case Err(sshexec.Error error): {
+            return error_code(error);
         }
     }
 }
 
-int code_of_bytes(Result<bytes, sshexec.Error> r) {
-    match (r) {
-        case Ok(bytes b): {
+int code_of_bytes(Result<bytes, sshexec.Error> result) {
+    match (result) {
+        case Ok(_): {
             return -1;
         }
-        case Err(sshexec.Error e): {
-            return error_code(e);
+        case Err(sshexec.Error error): {
+            return error_code(error);
         }
     }
 }
 
-bytes must_bytes(Result<bytes, sshexec.Error> r) {
-    match (r) {
-        case Ok(bytes b): {
-            return b;
+bytes must_bytes(Result<bytes, sshexec.Error> result) {
+    match (result) {
+        case Ok(bytes data): {
+            return data;
         }
-        case Err(sshexec.Error e): {
-            trap("unexpected error: " + e.to_str());
-        }
-    }
-}
-
-sshexec.Exit must_wait(sshexec.Channel ch) {
-    match (ch.wait()) {
-        case Ok(sshexec.Exit x): {
-            return x;
-        }
-        case Err(sshexec.Error e): {
-            trap("wait failed: " + e.to_str());
+        case Err(sshexec.Error error): {
+            trap("unexpected error: " + error.to_str());
         }
     }
 }
 
-int write_code(sshexec.Channel ch, bytes data) {
-    match (ch.write(data)) {
-        case Ok(int n): {
+sshexec.Exit must_wait(sshexec.Channel channel) {
+    match (channel.wait()) {
+        case Ok(sshexec.Exit channel_exit): {
+            return channel_exit;
+        }
+        case Err(sshexec.Error error): {
+            trap("wait failed: " + error.to_str());
+        }
+    }
+}
+
+int write_code(sshexec.Channel channel, bytes data) {
+    match (channel.write(data)) {
+        case Ok(_): {
             return -1;
         }
-        case Err(sshexec.Error e): {
-            return error_code(e);
+        case Err(sshexec.Error error): {
+            return error_code(error);
         }
     }
 }
 
-int close_write_code(sshexec.Channel ch) {
-    match (ch.close_write()) {
+int close_write_code(sshexec.Channel channel) {
+    match (channel.close_write()) {
         case Ok: {
             return -1;
         }
-        case Err(sshexec.Error e): {
-            return error_code(e);
+        case Err(sshexec.Error error): {
+            return error_code(error);
         }
     }
 }
 
-bool exit_is(sshexec.Exit x, int code) {
-    match (x) {
-        case Status(int c): {
-            return c == code;
+bool is_exit_status(sshexec.Exit channel_exit, int code) {
+    match (channel_exit) {
+        case Status(int status_code): {
+            return status_code == code;
         }
-        case Signal(str s): {
+        case Signal(_): {
             return false;
         }
         case Unknown: {
@@ -482,13 +482,13 @@ bool exit_is(sshexec.Exit x, int code) {
     }
 }
 
-bool exit_is_signal(sshexec.Exit x, str name) {
-    match (x) {
-        case Status(int c): {
+bool is_exit_signal(sshexec.Exit channel_exit, str name) {
+    match (channel_exit) {
+        case Status(_): {
             return false;
         }
-        case Signal(str s): {
-            return s == name;
+        case Signal(str signal_name): {
+            return signal_name == name;
         }
         case Unknown: {
             return false;
@@ -496,12 +496,12 @@ bool exit_is_signal(sshexec.Exit x, str name) {
     }
 }
 
-bool exit_is_unknown(sshexec.Exit x) {
-    match (x) {
-        case Status(int c): {
+bool is_exit_unknown(sshexec.Exit channel_exit) {
+    match (channel_exit) {
+        case Status(_): {
             return false;
         }
-        case Signal(str s): {
+        case Signal(_): {
             return false;
         }
         case Unknown: {
@@ -510,14 +510,14 @@ bool exit_is_unknown(sshexec.Exit x) {
     }
 }
 
-int kind_count(Peer p, int kind) {
-    int n = 0;
-    for (bytes m in p.sent) {
-        if (m.size() > 0 && m[0] == kind) {
-            n = n + 1;
+int kind_count(Peer scripted_peer, int kind) {
+    int count = 0;
+    for (bytes message in scripted_peer.sent) {
+        if (message.size() > 0 && message[0] == kind) {
+            count = count + 1;
         }
     }
-    return n;
+    return count;
 }
 
 int checks = 0;
@@ -545,209 +545,209 @@ checks = check(checks, sshexec.build_simple(96, 7) == want_eof, "EOF layout");
 
 // --- 2. exec, output, status -----------------------------------------------------
 
-List<bytes> echo_rest = [msg_data("hello\n".to_bytes()), msg_ext(1, "oops\n".to_bytes()), msg_data("world\n".to_bytes()), msg_exit_status(7), msg_simple(96, 0), msg_simple(97, 0)];
-Peer p1 = ready(65536, 16384, echo_rest);
-sshexec.Channel c1 = must_exec(p1, "echo hello");
-checks = check(checks, p1.sent.size() == 2 && p1.sent[0] == want_open_with_id() && p1.sent[1] == sshexec.build_exec(PEER_ID, "echo hello"), "exec sends OPEN then the exec request to the server's channel number");
-checks = check(checks, exit_is_unknown(c1.exit()), "the exit status is unknown before it arrives");
-bytes out1 = must_bytes(c1.read(3));
+List<bytes> echo_rest = [message_data("hello\n".to_bytes()), message_ext(1, "oops\n".to_bytes()), message_data("world\n".to_bytes()), message_exit_status(7), message_simple(96, 0), message_simple(97, 0)];
+Peer echo_peer = ready(65536, 16384, echo_rest);
+sshexec.Channel echo_channel = must_exec(echo_peer, "echo hello");
+checks = check(checks, echo_peer.sent.size() == 2 && echo_peer.sent[0] == want_open_with_id() && echo_peer.sent[1] == sshexec.build_exec(PEER_ID, "echo hello"), "exec sends OPEN then the exec request to the server's channel number");
+checks = check(checks, is_exit_unknown(echo_channel.exit()), "the exit status is unknown before it arrives");
+bytes out1 = must_bytes(echo_channel.read(3));
 checks = check(checks, out1 == "hel".to_bytes(), "read(3) returns at most 3 bytes");
-checks = check(checks, must_bytes(c1.read(100)) == "lo\n".to_bytes(), "read returns what is buffered, not more");
-checks = check(checks, must_bytes(c1.read_all()) == "world\n".to_bytes(), "read_all returns the rest of stdout");
-checks = check(checks, must_bytes(c1.read(10)).size() == 0, "read at EOF is empty");
-checks = check(checks, must_bytes(c1.read_all_err()) == "oops\n".to_bytes(), "stderr is kept apart from stdout");
-checks = check(checks, exit_is(must_wait(c1), 7) && exit_is(c1.exit(), 7), "exit-status is reported");
-checks = check(checks, p1.sent[p1.sent.size() - 1] == sshexec.build_simple(97, PEER_ID), "the client answers the server's CLOSE with its own");
-checks = check(checks, kind_count(p1, 97) == 1, "exactly one CLOSE is sent");
+checks = check(checks, must_bytes(echo_channel.read(100)) == "lo\n".to_bytes(), "read returns what is buffered, not more");
+checks = check(checks, must_bytes(echo_channel.read_all()) == "world\n".to_bytes(), "read_all returns the rest of stdout");
+checks = check(checks, must_bytes(echo_channel.read(10)).size() == 0, "read at EOF is empty");
+checks = check(checks, must_bytes(echo_channel.read_all_error()) == "oops\n".to_bytes(), "stderr is kept apart from stdout");
+checks = check(checks, is_exit_status(must_wait(echo_channel), 7) && is_exit_status(echo_channel.exit(), 7), "exit-status is reported");
+checks = check(checks, echo_peer.sent[echo_peer.sent.size() - 1] == sshexec.build_simple(97, PEER_ID), "the client answers the server's CLOSE with its own");
+checks = check(checks, kind_count(echo_peer, 97) == 1, "exactly one CLOSE is sent");
 
 bytes want_open_with_id() {
     return sshexec.build_open(0, sshexec.LOCAL_WINDOW, sshexec.LOCAL_MAX_PACKET);
 }
 
 // A signal.
-Peer p2 = ready(1000, 1000, [msg_exit_signal("KILL".to_bytes()), msg_simple(96, 0), msg_simple(97, 0)]);
-sshexec.Channel c2 = must_exec(p2, "x");
-checks = check(checks, exit_is_signal(must_wait(c2), "KILL"), "exit-signal is reported");
+Peer signal_peer = ready(1000, 1000, [message_exit_signal("KILL".to_bytes()), message_simple(96, 0), message_simple(97, 0)]);
+sshexec.Channel signal_channel = must_exec(signal_peer, "x");
+checks = check(checks, is_exit_signal(must_wait(signal_channel), "KILL"), "exit-signal is reported");
 // No exit status at all.
-Peer p3 = ready(1000, 1000, [msg_simple(96, 0), msg_simple(97, 0)]);
-sshexec.Channel c3 = must_exec(p3, "x");
-checks = check(checks, exit_is_unknown(must_wait(c3)), "a close with no exit status is Exit.Unknown");
-checks = check(checks, must_bytes(c3.read(1)).size() == 0, "stdout is empty");
+Peer no_status_peer = ready(1000, 1000, [message_simple(96, 0), message_simple(97, 0)]);
+sshexec.Channel no_status_channel = must_exec(no_status_peer, "x");
+checks = check(checks, is_exit_unknown(must_wait(no_status_channel)), "a close with no exit status is Exit.Unknown");
+checks = check(checks, must_bytes(no_status_channel.read(1)).size() == 0, "stdout is empty");
 // Things the server may send that this client does not implement.
-Peer p4 = ready(1000, 1000, [msg_global("hostkeys-00@openssh.com", false), msg_global("probe@example", true), msg_request("keepalive@openssh.com", true), msg_request("break", false), msg_data("x".to_bytes()), msg_exit_status(0), msg_simple(96, 0), msg_simple(97, 0)]);
-sshexec.Channel c4 = must_exec(p4, "x");
-checks = check(checks, must_bytes(c4.read_all()) == "x".to_bytes(), "unknown requests do not disturb the data");
-checks = check(checks, kind_count(p4, 82) == 1, "a global request that wants a reply gets REQUEST_FAILURE (and one that does not, nothing)");
-checks = check(checks, kind_count(p4, 100) == 1, "an unknown channel request that wants a reply gets CHANNEL_FAILURE");
+Peer unknown_request_peer = ready(1000, 1000, [message_global("hostkeys-00@openssh.com", false), message_global("probe@example", true), message_request("keepalive@openssh.com", true), message_request("break", false), message_data("x".to_bytes()), message_exit_status(0), message_simple(96, 0), message_simple(97, 0)]);
+sshexec.Channel unknown_request_channel = must_exec(unknown_request_peer, "x");
+checks = check(checks, must_bytes(unknown_request_channel.read_all()) == "x".to_bytes(), "unknown requests do not disturb the data");
+checks = check(checks, kind_count(unknown_request_peer, 82) == 1, "a global request that wants a reply gets REQUEST_FAILURE (and one that does not, nothing)");
+checks = check(checks, kind_count(unknown_request_peer, 100) == 1, "an unknown channel request that wants a reply gets CHANNEL_FAILURE");
 // A global request between OPEN and its confirmation.
-Peer p5 = canned([msg_global("hostkeys-00@openssh.com", true), msg_confirm(1000, 1000), msg_simple(99, 0)]);
-sshexec.Channel c5 = must_exec(p5, "x");
-checks = check(checks, kind_count(p5, 82) == 1, "a global request before the confirmation is answered");
+Peer early_global_peer = canned([message_global("hostkeys-00@openssh.com", true), message_confirm(1000, 1000), message_simple(99, 0)]);
+sshexec.Channel early_global_channel = must_exec(early_global_peer, "x");
+checks = check(checks, kind_count(early_global_peer, 82) == 1, "a global request before the confirmation is answered");
 // close(): CLOSE out, the rest discarded, until the server's CLOSE.
-Peer p6 = ready(1000, 1000, [msg_data("discard me".to_bytes()), msg_simple(97, 0)]);
-sshexec.Channel c6 = must_exec(p6, "x");
-match (c6.close()) {
+Peer discard_peer = ready(1000, 1000, [message_data("discard me".to_bytes()), message_simple(97, 0)]);
+sshexec.Channel discard_channel = must_exec(discard_peer, "x");
+match (discard_channel.close()) {
     case Ok: {
-        checks = check(checks, kind_count(p6, 97) == 1 && p6.sent[p6.sent.size() - 1] == sshexec.build_simple(97, PEER_ID), "close() sends one CLOSE");
+        checks = check(checks, kind_count(discard_peer, 97) == 1 && discard_peer.sent[discard_peer.sent.size() - 1] == sshexec.build_simple(97, PEER_ID), "close() sends one CLOSE");
     }
-    case Err(sshexec.Error e): {
-        trap("close: " + e.to_str());
+    case Err(sshexec.Error error): {
+        trap("close: " + error.to_str());
     }
 }
-checks = check(checks, write_code(c6, [1]) == ERR_CLOSED, "write after close is Closed");
+checks = check(checks, write_code(discard_channel, [1]) == ERROR_CLOSED, "write after close is Closed");
 
 // --- 3. flow control on writes, with canned grants ---------------------------
 
 // A window of 4, then 3 more: 7 bytes go out as 4 + 3.
-Peer p7 = ready(4, 1000, [msg_adjust(3), msg_simple(97, 0)]);
-sshexec.Channel c7 = must_exec(p7, "x");
-checks = check(checks, write_code(c7, [1, 2, 3, 4, 5, 6, 7]) == -1, "a write larger than the window completes once the window is topped up");
-checks = check(checks, p7.sent.size() == 4 && p7.sent[2] == sshexec.build_data(PEER_ID, [1, 2, 3, 4]) && p7.sent[3] == sshexec.build_data(PEER_ID, [5, 6, 7]), "data is split at the window");
+Peer window_peer = ready(4, 1000, [message_adjust(3), message_simple(97, 0)]);
+sshexec.Channel window_channel = must_exec(window_peer, "x");
+checks = check(checks, write_code(window_channel, [1, 2, 3, 4, 5, 6, 7]) == -1, "a write larger than the window completes once the window is topped up");
+checks = check(checks, window_peer.sent.size() == 4 && window_peer.sent[2] == sshexec.build_data(PEER_ID, [1, 2, 3, 4]) && window_peer.sent[3] == sshexec.build_data(PEER_ID, [5, 6, 7]), "data is split at the window");
 // max packet 2: 5 bytes go as 2 + 2 + 1.
-Peer p8 = ready(100, 2, []);
-sshexec.Channel c8 = must_exec(p8, "x");
-checks = check(checks, write_code(c8, [1, 2, 3, 4, 5]) == -1, "a write larger than the max packet completes");
-checks = check(checks, p8.sent.size() == 5 && p8.sent[2] == sshexec.build_data(PEER_ID, [1, 2]) && p8.sent[4] == sshexec.build_data(PEER_ID, [5]), "data is split at the max packet size");
+Peer small_packet_peer = ready(100, 2, []);
+sshexec.Channel small_packet_channel = must_exec(small_packet_peer, "x");
+checks = check(checks, write_code(small_packet_channel, [1, 2, 3, 4, 5]) == -1, "a write larger than the max packet completes");
+checks = check(checks, small_packet_peer.sent.size() == 5 && small_packet_peer.sent[2] == sshexec.build_data(PEER_ID, [1, 2]) && small_packet_peer.sent[4] == sshexec.build_data(PEER_ID, [5]), "data is split at the max packet size");
 // An empty write sends nothing.
-checks = check(checks, write_code(c8, []) == -1 && p8.sent.size() == 5, "an empty write sends nothing");
+checks = check(checks, write_code(small_packet_channel, []) == -1 && small_packet_peer.sent.size() == 5, "an empty write sends nothing");
 // A window that never reopens: the peer goes quiet, which is an error, not a hang.
-Peer p9 = ready(0, 1000, []);
-sshexec.Channel c9 = must_exec(p9, "x");
-checks = check(checks, write_code(c9, [1]) == ERR_TRANSPORT, "a write into a closed window with a silent peer is Transport(Disconnected)");
+Peer closed_window_peer = ready(0, 1000, []);
+sshexec.Channel closed_window_channel = must_exec(closed_window_peer, "x");
+checks = check(checks, write_code(closed_window_channel, [1]) == ERROR_TRANSPORT, "a write into a closed window with a silent peer is Transport(Disconnected)");
 // The server closes the channel while we wait for window.
-Peer p10 = ready(0, 1000, [msg_simple(97, 0)]);
+Peer p10 = ready(0, 1000, [message_simple(97, 0)]);
 sshexec.Channel c10 = must_exec(p10, "x");
-checks = check(checks, write_code(c10, [1]) == ERR_CLOSED, "a write after the server closed is Closed");
+checks = check(checks, write_code(c10, [1]) == ERROR_CLOSED, "a write after the server closed is Closed");
 // close_write: EOF once, a second call is a no-op, a write after is Closed.
 Peer p11 = ready(100, 100, []);
 sshexec.Channel c11 = must_exec(p11, "x");
 checks = check(checks, close_write_code(c11) == -1 && close_write_code(c11) == -1 && kind_count(p11, 96) == 1, "close_write sends EOF once");
-checks = check(checks, write_code(c11, [1]) == ERR_CLOSED, "write after close_write is Closed");
+checks = check(checks, write_code(c11, [1]) == ERROR_CLOSED, "write after close_write is Closed");
 // close_write after the server closed.
-Peer p11b = ready(100, 100, [msg_simple(97, 0)]);
+Peer p11b = ready(100, 100, [message_simple(97, 0)]);
 sshexec.Channel c11b = must_exec(p11b, "x");
 checks = check(checks, must_bytes(c11b.read_all()).size() == 0, "the server closing ends stdout");
-checks = check(checks, close_write_code(c11b) == ERR_CLOSED, "close_write after the server closed is Closed");
+checks = check(checks, close_write_code(c11b) == ERROR_CLOSED, "close_write after the server closed is Closed");
 
 // --- 4. one fixture per Error variant ------------------------------------------
 
-checks = check(checks, exec_code(canned([])) == ERR_TRANSPORT, "no reply to OPEN: Transport(Disconnected)");
-checks = check(checks, exec_code(canned([msg_confirm(1, 1)])) == ERR_TRANSPORT, "no reply to exec: Transport(Disconnected)");
-checks = check(checks, exec_code(canned([[]])) == ERR_TRUNCATED, "an empty payload is Truncated");
-checks = check(checks, exec_code(canned([[ssh.SSH_MSG_SERVICE_ACCEPT]])) == ERR_UNEXPECTED, "a non-channel message in answer to OPEN is UnexpectedMessage");
-checks = check(checks, exec_code(canned([msg_confirm(1, 0)])) == ERR_BAD_MESSAGE, "a zero max packet size is BadMessage");
-bytes elsewhere = msg_confirm(1, 1);
+checks = check(checks, exec_code(canned([])) == ERROR_TRANSPORT, "no reply to OPEN: Transport(Disconnected)");
+checks = check(checks, exec_code(canned([message_confirm(1, 1)])) == ERROR_TRANSPORT, "no reply to exec: Transport(Disconnected)");
+checks = check(checks, exec_code(canned([[]])) == ERROR_TRUNCATED, "an empty payload is Truncated");
+checks = check(checks, exec_code(canned([[ssh.SSH_MESSAGE_SERVICE_ACCEPT]])) == ERROR_UNEXPECTED, "a non-channel message in answer to OPEN is UnexpectedMessage");
+checks = check(checks, exec_code(canned([message_confirm(1, 0)])) == ERROR_BAD_MESSAGE, "a zero max packet size is BadMessage");
+bytes elsewhere = message_confirm(1, 1);
 elsewhere[4] = 5;
-checks = check(checks, exec_code(canned([elsewhere])) == ERR_BAD_CHANNEL, "a confirmation for another channel is BadChannel");
-checks = check(checks, exec_code(canned([msg_open_failure(2)])) == ERR_OPEN_REFUSED, "OPEN_FAILURE is OpenRefused");
-match (sshexec.exec(canned([msg_open_failure(4)]), "x")) {
-    case Ok(sshexec.Channel ch): {
+checks = check(checks, exec_code(canned([elsewhere])) == ERROR_BAD_CHANNEL, "a confirmation for another channel is BadChannel");
+checks = check(checks, exec_code(canned([message_open_failure(2)])) == ERROR_OPEN_REFUSED, "OPEN_FAILURE is OpenRefused");
+match (sshexec.exec(canned([message_open_failure(4)]), "x")) {
+    case Ok(_): {
         trap("expected a refusal");
     }
-    case Err(sshexec.Error e): {
-        checks = check(checks, e.to_str() == "the server refused to open a session channel (reason 4)", "OpenRefused names the reason code");
+    case Err(sshexec.Error error): {
+        checks = check(checks, error.to_str() == "the server refused to open a session channel (reason 4)", "OpenRefused names the reason code");
     }
 }
-checks = check(checks, exec_code(canned([msg_confirm(1, 1), msg_simple(100, 0)])) == ERR_EXEC_REFUSED, "CHANNEL_FAILURE in answer to exec is ExecRefused");
-checks = check(checks, exec_code(canned([msg_confirm(1, 1), msg_simple(99, 4)])) == ERR_BAD_CHANNEL, "a SUCCESS for another channel is BadChannel");
-checks = check(checks, exec_code(canned([msg_confirm(1, 1), msg_simple(99, 0)])) == -1, "the minimal successful exec");
+checks = check(checks, exec_code(canned([message_confirm(1, 1), message_simple(100, 0)])) == ERROR_EXEC_REFUSED, "CHANNEL_FAILURE in answer to exec is ExecRefused");
+checks = check(checks, exec_code(canned([message_confirm(1, 1), message_simple(99, 4)])) == ERROR_BAD_CHANNEL, "a SUCCESS for another channel is BadChannel");
+checks = check(checks, exec_code(canned([message_confirm(1, 1), message_simple(99, 0)])) == -1, "the minimal successful exec");
 // Errors while reading.
-checks = check(checks, read_code([[sshexec.SSH_MSG_CHANNEL_DATA]]) == ERR_TRUNCATED, "a DATA with no channel number is Truncated");
-checks = check(checks, read_code([[94, 0, 0, 0, 0, 0, 0, 0, 9, 1]]) == ERR_TRUNCATED, "a DATA whose length overruns the message is Truncated");
-checks = check(checks, read_code([[]]) == ERR_TRUNCATED, "an empty payload while reading is Truncated");
-checks = check(checks, read_code([msg_simple(94, 3)]) == ERR_BAD_CHANNEL, "DATA for another channel is BadChannel");
-checks = check(checks, read_code([msg_simple(96, 3)]) == ERR_BAD_CHANNEL, "EOF for another channel is BadChannel");
-checks = check(checks, read_code([msg_simple(97, 3)]) == ERR_BAD_CHANNEL, "CLOSE for another channel is BadChannel");
-checks = check(checks, read_code([msg_ext(2, "x".to_bytes())]) == ERR_BAD_MESSAGE, "extended data of an unknown type is BadMessage");
-checks = check(checks, read_code([msg_adjust(0xFFFFFFFF)]) == ERR_BAD_MESSAGE, "a window past 2^32-1 is BadMessage");
-checks = check(checks, read_code([msg_exit_signal([0xFF, 0xFE])]) == ERR_BAD_MESSAGE, "a signal name that is not UTF-8 is BadMessage");
-checks = check(checks, read_code([msg_simple(99, 0)]) == ERR_UNEXPECTED, "a stray CHANNEL_SUCCESS while reading is UnexpectedMessage");
-checks = check(checks, read_code([[200]]) == ERR_UNEXPECTED, "an unknown message type while reading is UnexpectedMessage");
-checks = check(checks, read_code([msg_simple(96, 0), msg_data("late".to_bytes())]) == ERR_UNEXPECTED, "DATA after EOF is UnexpectedMessage");
-checks = check(checks, read_code([msg_data("x".to_bytes())]) == ERR_TRANSPORT, "the peer vanishing mid-stream is Transport(Disconnected)");
+checks = check(checks, read_code([[sshexec.SSH_MESSAGE_CHANNEL_DATA]]) == ERROR_TRUNCATED, "a DATA with no channel number is Truncated");
+checks = check(checks, read_code([[94, 0, 0, 0, 0, 0, 0, 0, 9, 1]]) == ERROR_TRUNCATED, "a DATA whose length overruns the message is Truncated");
+checks = check(checks, read_code([[]]) == ERROR_TRUNCATED, "an empty payload while reading is Truncated");
+checks = check(checks, read_code([message_simple(94, 3)]) == ERROR_BAD_CHANNEL, "DATA for another channel is BadChannel");
+checks = check(checks, read_code([message_simple(96, 3)]) == ERROR_BAD_CHANNEL, "EOF for another channel is BadChannel");
+checks = check(checks, read_code([message_simple(97, 3)]) == ERROR_BAD_CHANNEL, "CLOSE for another channel is BadChannel");
+checks = check(checks, read_code([message_ext(2, "x".to_bytes())]) == ERROR_BAD_MESSAGE, "extended data of an unknown type is BadMessage");
+checks = check(checks, read_code([message_adjust(0xFFFFFFFF)]) == ERROR_BAD_MESSAGE, "a window past 2^32-1 is BadMessage");
+checks = check(checks, read_code([message_exit_signal([0xFF, 0xFE])]) == ERROR_BAD_MESSAGE, "a signal name that is not UTF-8 is BadMessage");
+checks = check(checks, read_code([message_simple(99, 0)]) == ERROR_UNEXPECTED, "a stray CHANNEL_SUCCESS while reading is UnexpectedMessage");
+checks = check(checks, read_code([[200]]) == ERROR_UNEXPECTED, "an unknown message type while reading is UnexpectedMessage");
+checks = check(checks, read_code([message_simple(96, 0), message_data("late".to_bytes())]) == ERROR_UNEXPECTED, "DATA after EOF is UnexpectedMessage");
+checks = check(checks, read_code([message_data("x".to_bytes())]) == ERROR_TRANSPORT, "the peer vanishing mid-stream is Transport(Disconnected)");
 bytes too_big = [];
-int tb = 0;
-while (tb < 32769) {
+int fill_index = 0;
+while (fill_index < 32769) {
     too_big.push(1);
-    tb = tb + 1;
+    fill_index = fill_index + 1;
 }
-checks = check(checks, read_code([msg_data(too_big)]) == ERR_TOO_LARGE, "a packet over the advertised max is DataTooLarge");
+checks = check(checks, read_code([message_data(too_big)]) == ERROR_TOO_LARGE, "a packet over the advertised max is DataTooLarge");
 bytes at_max = too_big.substr(0, 32768);
-checks = check(checks, read_code([msg_data(at_max), msg_simple(96, 0), msg_simple(97, 0)]) == -1, "a packet at the advertised max is fine");
-Peer pbad = ready(1000, 1000, [msg_data("x".to_bytes())]);
+checks = check(checks, read_code([message_data(at_max), message_simple(96, 0), message_simple(97, 0)]) == -1, "a packet at the advertised max is fine");
+Peer pbad = ready(1000, 1000, [message_data("x".to_bytes())]);
 sshexec.Channel cbad = must_exec(pbad, "x");
-checks = check(checks, code_of_bytes(cbad.read(0)) == ERR_BAD_ARGUMENT, "read(0) is BadArgument");
-checks = check(checks, code_of_bytes(cbad.read_err(-1)) == ERR_BAD_ARGUMENT, "read_err(-1) is BadArgument");
+checks = check(checks, code_of_bytes(cbad.read(0)) == ERROR_BAD_ARGUMENT, "read(0) is BadArgument");
+checks = check(checks, code_of_bytes(cbad.read_error(-1)) == ERROR_BAD_ARGUMENT, "read_err(-1) is BadArgument");
 // Every parser refuses every proper prefix of a valid message.
-List<bytes> valids = [msg_confirm(5, 5), msg_open_failure(1), msg_adjust(9), msg_data("abc".to_bytes()), msg_ext(1, "abc".to_bytes()), msg_exit_status(3), msg_exit_signal("TERM".to_bytes())];
-int vi = 0;
-while (vi < valids.size()) {
-    bytes full = valids[vi];
+List<bytes> valids = [message_confirm(5, 5), message_open_failure(1), message_adjust(9), message_data("abc".to_bytes()), message_ext(1, "abc".to_bytes()), message_exit_status(3), message_exit_signal("TERM".to_bytes())];
+int fixture_index = 0;
+while (fixture_index < valids.size()) {
+    bytes full = valids[fixture_index];
     int cut = 0;
     while (cut < full.size()) {
         bytes part = full.substr(0, cut);
-        bool refused = false;
-        if (vi == 0) {
-            refused = parse_refused_confirmation(part);
-        } else if (vi == 1) {
-            refused = parse_refused_open_failure(part);
-        } else if (vi == 2) {
-            refused = parse_refused_adjust(part);
-        } else if (vi == 3) {
-            refused = code_of_bytes(sshexec.parse_data(part)) != -1;
-        } else if (vi == 4) {
-            refused = code_of_bytes(sshexec.parse_extended_data(part)) != -1;
+        bool is_refused = false;
+        if (fixture_index == 0) {
+            is_refused = is_confirmation_refused(part);
+        } else if (fixture_index == 1) {
+            is_refused = is_open_failure_refused(part);
+        } else if (fixture_index == 2) {
+            is_refused = is_adjust_refused(part);
+        } else if (fixture_index == 3) {
+            is_refused = code_of_bytes(sshexec.parse_data(part)) != -1;
+        } else if (fixture_index == 4) {
+            is_refused = code_of_bytes(sshexec.parse_extended_data(part)) != -1;
         } else {
-            refused = parse_refused_request(part);
+            is_refused = is_request_refused(part);
         }
-        if (!refused) {
-            trap("a " + cut.to_str() + "-byte prefix of message " + vi.to_str() + " parsed");
+        if (!is_refused) {
+            trap("a " + cut.to_str() + "-byte prefix of message " + fixture_index.to_str() + " parsed");
         }
         cut = cut + 1;
     }
-    vi = vi + 1;
+    fixture_index = fixture_index + 1;
 }
 checks = check(checks, true, "no proper prefix of any server message parses");
 
-bool parse_refused_confirmation(bytes part) {
+bool is_confirmation_refused(bytes part) {
     match (sshexec.parse_confirmation(part)) {
-        case Ok(sshexec.Confirmation c): {
+        case Ok(_): {
             return false;
         }
-        case Err(sshexec.Error e): {
+        case Err(_): {
             return true;
         }
     }
 }
 
-bool parse_refused_open_failure(bytes part) {
+bool is_open_failure_refused(bytes part) {
     match (sshexec.parse_open_failure(part)) {
-        case Ok(int r): {
+        case Ok(_): {
             return false;
         }
-        case Err(sshexec.Error e): {
+        case Err(_): {
             return true;
         }
     }
 }
 
-bool parse_refused_adjust(bytes part) {
+bool is_adjust_refused(bytes part) {
     match (sshexec.parse_window_adjust(part)) {
-        case Ok(int r): {
+        case Ok(_): {
             return false;
         }
-        case Err(sshexec.Error e): {
+        case Err(_): {
             return true;
         }
     }
 }
 
-bool parse_refused_request(bytes part) {
+bool is_request_refused(bytes part) {
     match (sshexec.parse_request(part)) {
-        case Ok(sshexec.Request r): {
+        case Ok(_): {
             return false;
         }
-        case Err(sshexec.Error e): {
+        case Err(_): {
             return true;
         }
     }
@@ -758,59 +758,59 @@ bool parse_refused_request(bytes part) {
 // A deterministic payload.
 bytes payload_of(int size) {
     bytes out = [];
-    int i = 0;
-    while (i < size) {
-        out.push(pattern(i));
-        i = i + 1;
+    int byte_index = 0;
+    while (byte_index < size) {
+        out.push(pattern(byte_index));
+        byte_index = byte_index + 1;
     }
     return out;
 }
 
-int sum_of(bytes b) {
-    int s = 0;
-    for (int v in b) {
-        s = (s + v) & 0xFFFFFFFF;
+int sum_of(bytes data) {
+    int total = 0;
+    for (int octet in data) {
+        total = (total + octet) & 0xFFFFFFFF;
     }
-    return s;
+    return total;
 }
 
 // wc -c over a peer that grants `window` and takes `max_packet`.
 void run_wc(str label, int window, int max_packet, int size, int write_chunk) {
-    Peer p = peer(MODE_WC, [], window, max_packet, 0);
-    sshexec.Channel ch = must_exec(p, "wc -c");
+    Peer scripted_peer = peer(MODE_WC, [], window, max_packet, 0);
+    sshexec.Channel channel = must_exec(scripted_peer, "wc -c");
     bytes data = payload_of(size);
-    int at = 0;
-    while (at < size) {
-        int e = at + write_chunk;
-        if (e > size) {
-            e = size;
+    int offset = 0;
+    while (offset < size) {
+        int chunk_end = offset + write_chunk;
+        if (chunk_end > size) {
+            chunk_end = size;
         }
-        if (write_code(ch, data.substr(at, e)) != -1) {
+        if (write_code(channel, data.substr(offset, chunk_end)) != -1) {
             trap(label + ": write failed");
         }
-        at = e;
+        offset = chunk_end;
     }
-    if (close_write_code(ch) != -1) {
+    if (close_write_code(channel) != -1) {
         trap(label + ": close_write failed");
     }
-    bytes got = must_bytes(ch.read_all());
+    bytes got = must_bytes(channel.read_all());
     if (got != (size.to_str() + "\n").to_bytes()) {
         trap(label + ": wc answered " + got.hex());
     }
-    if (!exit_is(must_wait(ch), 0)) {
+    if (!is_exit_status(must_wait(channel), 0)) {
         trap(label + ": exit status");
     }
-    if (p.violated) {
+    if (scripted_peer.is_violated) {
         trap(label + ": the client broke the peer's window or packet limit");
     }
-    if (p.stdin_total != size || p.stdin_sum != sum_of(data)) {
+    if (scripted_peer.stdin_total != size || scripted_peer.stdin_sum != sum_of(data)) {
         trap(label + ": the peer received different bytes");
     }
     int limit = max_packet;
     if (limit > 32768) {
         limit = 32768;
     }
-    if (p.max_data > limit) {
+    if (scripted_peer.max_data > limit) {
         trap(label + ": a packet larger than the limit was sent");
     }
 }
@@ -836,7 +836,7 @@ if (close_write_code(ccat) != -1) {
 }
 bytes cat_back = must_bytes(ccat.read_all());
 checks = check(checks, cat_back.size() == 6000000 && sum_of(cat_back) == sum_of(cat_data) && cat_back == cat_data, "cat: 6 MB written while being echoed comes back intact (no deadlock)");
-checks = check(checks, exit_is(must_wait(ccat), 0) && !pcat.violated, "cat: exit status and no window violation");
+checks = check(checks, is_exit_status(must_wait(ccat), 0) && !pcat.is_violated, "cat: exit status and no window violation");
 // A producer: the client must top up its window to receive 8 MB.
 Peer pprod = peer(MODE_PRODUCE, [], 100, 100, 8388608);
 sshexec.Channel cprod = must_exec(pprod, "head -c 8388608 /dev/zero");
@@ -844,18 +844,18 @@ bytes first = must_bytes(cprod.read(5));
 checks = check(checks, first == payload_of(5), "the first bytes of the producer");
 bytes rest = must_bytes(cprod.read_all());
 checks = check(checks, first.size() + rest.size() == 8388608, "8 MB read from the producer");
-bool intact = true;
-int ri = 0;
-while (ri < rest.size()) {
-    if (rest[ri] != pattern(5 + ri)) {
-        intact = false;
+bool is_intact = true;
+int stream_index = 0;
+while (stream_index < rest.size()) {
+    if (rest[stream_index] != pattern(5 + stream_index)) {
+        is_intact = false;
         break;
     }
-    ri = ri + 1;
+    stream_index = stream_index + 1;
 }
-checks = check(checks, intact, "every byte of the 8 MB stream is where it should be");
-checks = check(checks, must_bytes(cprod.read_all_err()) == "err\n".to_bytes(), "stderr arrives separately from the producer's stdout");
-checks = check(checks, exit_is(must_wait(cprod), 3), "the producer's exit status");
+checks = check(checks, is_intact, "every byte of the 8 MB stream is where it should be");
+checks = check(checks, must_bytes(cprod.read_all_error()) == "err\n".to_bytes(), "stderr arrives separately from the producer's stdout");
+checks = check(checks, is_exit_status(must_wait(cprod), 3), "the producer's exit status");
 // The client topped its window up (it started with 2 MiB and read 8 MB).
 checks = check(checks, kind_count(pprod, 93) >= 3, "the client sent WINDOW_ADJUST to receive more than its initial window");
 print(checks.to_str() + " checks, 0 failures");

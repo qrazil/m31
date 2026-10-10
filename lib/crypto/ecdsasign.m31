@@ -12,7 +12,7 @@
 //         // sig: DER SEQUENCE { INTEGER r, INTEGER s }, what TLS puts on the wire.
 //   Result<bytes, ecdsasign.Error> raw = ecdsasign.sign_raw(secret, digest);   // r || s, 64 octets
 //
-// Verification is `ecdsa.m31`'s; the two agree (`ecdsa.verify_der` accepts
+// Verification is `ecdsa.m31`'s; the two agree (`ecdsa.is_valid_der_signature` accepts
 // what `sign` returns), and this module never imports it.
 //
 // --- what is constant time here, and what is not -----------------------------
@@ -306,9 +306,9 @@ int below(Array<int> value, Array<int> modulus) {
 // Montgomery-form element of GF(p): affine (X/Z, Y/Z). The point at infinity is
 // (0 : 1 : 0). Private: nothing outside builds or reads one.
 type Point {
-    Array<int> x;
-    Array<int> y;
-    Array<int> z;
+    Array<int> x_coordinate;
+    Array<int> y_coordinate;
+    Array<int> z_coordinate;
 }
 
 // Everything a signature needs that depends only on the curve.
@@ -323,29 +323,29 @@ type Curve {
 // elliptic curves" (2015), Algorithm 4: P + Q for a = -3, valid for every pair
 // of points on the curve, doubling and infinity included.
 Point Curve.add_points(Point left, Point right) {
-    Array<int> xx = field.multiply(left.x, right.x);
-    Array<int> yy = field.multiply(left.y, right.y);
-    Array<int> zz = field.multiply(left.z, right.z);
-    Array<int> xy_product = field.multiply(field.add(left.x, left.y), field.add(right.x, right.y));
-    Array<int> xy_cross = field.subtract(xy_product, field.add(xx, yy));
-    Array<int> yz_product = field.multiply(field.add(left.y, left.z), field.add(right.y, right.z));
-    Array<int> yz_cross = field.subtract(yz_product, field.add(yy, zz));
-    Array<int> xz_product = field.multiply(field.add(left.x, left.z), field.add(right.x, right.z));
-    Array<int> xz_cross = field.subtract(xz_product, field.add(xx, zz));
-    Array<int> b_zz = field.multiply(coefficient_b, zz);
+    Array<int> x_product = field.multiply(left.x_coordinate, right.x_coordinate);
+    Array<int> y_product = field.multiply(left.y_coordinate, right.y_coordinate);
+    Array<int> z_product = field.multiply(left.z_coordinate, right.z_coordinate);
+    Array<int> xy_product = field.multiply(field.add(left.x_coordinate, left.y_coordinate), field.add(right.x_coordinate, right.y_coordinate));
+    Array<int> xy_cross = field.subtract(xy_product, field.add(x_product, y_product));
+    Array<int> yz_product = field.multiply(field.add(left.y_coordinate, left.z_coordinate), field.add(right.y_coordinate, right.z_coordinate));
+    Array<int> yz_cross = field.subtract(yz_product, field.add(y_product, z_product));
+    Array<int> xz_product = field.multiply(field.add(left.x_coordinate, left.z_coordinate), field.add(right.x_coordinate, right.z_coordinate));
+    Array<int> xz_cross = field.subtract(xz_product, field.add(x_product, z_product));
+    Array<int> b_zz = field.multiply(coefficient_b, z_product);
     Array<int> reduced = field.subtract(xz_cross, b_zz);
     Array<int> reduced_double = field.add(reduced, reduced);
     Array<int> reduced_triple = field.add(reduced, reduced_double);
-    Array<int> difference = field.subtract(yy, reduced_triple);
-    Array<int> total = field.add(yy, reduced_triple);
+    Array<int> difference = field.subtract(y_product, reduced_triple);
+    Array<int> total = field.add(y_product, reduced_triple);
     Array<int> b_xz = field.multiply(coefficient_b, xz_cross);
-    Array<int> zz_double = field.add(zz, zz);
-    Array<int> zz_triple = field.add(zz_double, zz);
-    Array<int> shifted = field.subtract(field.subtract(b_xz, zz_triple), xx);
+    Array<int> zz_double = field.add(z_product, z_product);
+    Array<int> zz_triple = field.add(zz_double, z_product);
+    Array<int> shifted = field.subtract(field.subtract(b_xz, zz_triple), x_product);
     Array<int> shifted_double = field.add(shifted, shifted);
     Array<int> shifted_triple = field.add(shifted_double, shifted);
-    Array<int> xx_double = field.add(xx, xx);
-    Array<int> xx_triple = field.add(xx_double, xx);
+    Array<int> xx_double = field.add(x_product, x_product);
+    Array<int> xx_triple = field.add(xx_double, x_product);
     Array<int> xx_adjusted = field.subtract(xx_triple, zz_triple);
     Array<int> yz_term = field.multiply(yz_cross, shifted_triple);
     Array<int> xx_term = field.multiply(xx_adjusted, shifted_triple);
@@ -371,9 +371,9 @@ Point Curve.scalar_multiply(bytes scalar, Point base) {
 // The affine x and y of a point that is not infinity, as plain values. Z is
 // inverted by Fermat (fixed public exponent).
 Array<Array<int>> Curve.affine(Point point) {
-    Array<int> z_inverse = field.invert(point.z);
-    Array<int> x_plain = field.from_montgomery(field.multiply(point.x, z_inverse));
-    Array<int> y_plain = field.from_montgomery(field.multiply(point.y, z_inverse));
+    Array<int> z_inverse = field.invert(point.z_coordinate);
+    Array<int> x_plain = field.from_montgomery(field.multiply(point.x_coordinate, z_inverse));
+    Array<int> y_plain = field.from_montgomery(field.multiply(point.y_coordinate, z_inverse));
     Array<Array<int>> out = [x_plain, y_plain];
     return out;
 }
@@ -393,7 +393,7 @@ Point infinity(Field field) {
 }
 
 Point select_point(int condition, Point left, Point right) {
-    return Point(select(condition, left.x, right.x), select(condition, left.y, right.y), select(condition, left.z, right.z));
+    return Point(select(condition, left.x_coordinate, right.x_coordinate), select(condition, left.y_coordinate, right.y_coordinate), select(condition, left.z_coordinate, right.z_coordinate));
 }
 
 // Bit `position` (0 = least significant) of a 32-octet big-endian scalar.

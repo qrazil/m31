@@ -31,8 +31,8 @@
 // type's own `cmp`, which is the common case; a chosen order over an array
 // waits until a program needs one badly enough to justify the names.
 
-/// A total order over `T`: negative if `a` comes first, zero if neither
-/// does, positive if `b` comes first.
+/// A total order over `T`: negative if `left` comes first, zero if neither
+/// does, positive if `right` comes first.
 ///
 /// **`Order`, not `Less` or `Comparator`.** It is a total order, not a
 /// predicate, and `cmp` answers three ways. `Less` would invite a `bool`,
@@ -47,10 +47,10 @@
 /// so a hand-written order and the built-in one can never disagree about
 /// what a comparison returns.
 pub interface Order<T> {
-    int cmp(T a, T b);
+    int cmp(T left, T right);
 }
 
-/// Sort `xs` in place, by `order`. **Stable**: elements `order` calls equal
+/// Sort `items` in place, by `order`. **Stable**: elements `order` calls equal
 /// keep the order they were in, so sorting by one key and then by another is
 /// the ordinary way to get a compound order, and `sort.by` is safe to use
 /// that way. `xs.sort()` promises the same thing, and the two must not
@@ -62,7 +62,7 @@ pub interface Order<T> {
 /// instead of there, and it needs nothing new in the runtime: the scratch
 /// list is a `List<T>` and the comparison is an interface call.
 ///
-/// **What `order.cmp` may do.** It may read `xs`. Changing `xs` from inside
+/// **What `order.cmp` may do.** It may read `items`. Changing `items` from inside
 /// it is a mistake, and it is the one difference from `xs.sort()`, which
 /// marks the list and traps: this cannot mark anything, because marking is
 /// a runtime operation and there is no primitive for it -- deliberately, as
@@ -71,65 +71,65 @@ pub interface Order<T> {
 /// shorter list makes an index trap, a longer one leaves the new elements
 /// unsorted. Memory is never at risk, because every access here is a checked
 /// `[i]`.
-pub void by<T>(List<T> xs, Order<T> order) {
-    int n = xs.size();
-    if (n < 2) {
+pub void by<T>(List<T> items, Order<T> order) {
+    int item_count = items.size();
+    if (item_count < 2) {
         return;
     }
     // The scratch half of the merge. Filled with the list's own elements so
-    // that it has `n` slots to write into; what is in them does not matter.
-    List<T> tmp = [];
-    for (T x in xs) {
-        tmp.push(x);
+    // that it has `item_count` slots to write into; what is in them does not matter.
+    List<T> scratch = [];
+    for (T item in items) {
+        scratch.push(item);
     }
     int width = 1;
-    while (width < n) {
-        int lo = 0;
-        while (lo < n) {
-            int mid = lo + width;
-            int hi = lo + 2 * width;
-            if (mid >= n) {
+    while (width < item_count) {
+        int run_start = 0;
+        while (run_start < item_count) {
+            int mid = run_start + width;
+            int run_end = run_start + 2 * width;
+            if (mid >= item_count) {
                 // The tail is a run of its own and is already sorted.
                 break;
             }
-            if (hi > n) {
-                hi = n;
+            if (run_end > item_count) {
+                run_end = item_count;
             }
-            int i = lo;
-            int j = mid;
-            int k = lo;
-            while (i < mid && j < hi) {
+            int left_index = run_start;
+            int right_index = mid;
+            int merge_index = run_start;
+            while (left_index < mid && right_index < run_end) {
                 // `<= 0` takes from the LEFT run on a tie, which is the
                 // whole of what makes this stable.
-                if (order.cmp(xs[i], xs[j]) <= 0) {
-                    tmp[k] = xs[i];
-                    i = i + 1;
+                if (order.cmp(items[left_index], items[right_index]) <= 0) {
+                    scratch[merge_index] = items[left_index];
+                    left_index = left_index + 1;
                 } else {
-                    tmp[k] = xs[j];
-                    j = j + 1;
+                    scratch[merge_index] = items[right_index];
+                    right_index = right_index + 1;
                 }
-                k = k + 1;
+                merge_index = merge_index + 1;
             }
-            while (i < mid) {
-                tmp[k] = xs[i];
-                i = i + 1;
-                k = k + 1;
+            while (left_index < mid) {
+                scratch[merge_index] = items[left_index];
+                left_index = left_index + 1;
+                merge_index = merge_index + 1;
             }
-            while (j < hi) {
-                tmp[k] = xs[j];
-                j = j + 1;
-                k = k + 1;
+            while (right_index < run_end) {
+                scratch[merge_index] = items[right_index];
+                right_index = right_index + 1;
+                merge_index = merge_index + 1;
             }
-            for (int back in lo .. hi) {
-                xs[back] = tmp[back];
+            for (int back in run_start .. run_end) {
+                items[back] = scratch[back];
             }
-            lo = lo + 2 * width;
+            run_start = run_start + 2 * width;
         }
         width = width * 2;
     }
 }
 
-/// The greatest element of `xs` under `order`.
+/// The greatest element of `items` under `order`.
 ///
 /// `max(xs, o)` is the element `by(xs, o)` would leave LAST, ties included,
 /// and `min` is the one it would leave first. That identity is the reason
@@ -144,9 +144,9 @@ pub void by<T>(List<T> xs, Order<T> order) {
 /// to invent one; returning an `Option` instead would put a `match` at every
 /// call site to handle a case most callers have already ruled out. It is the
 /// same answer `xs[0]` gives to the same question, with the same reasoning.
-pub T max<T>(List<T> xs, Order<T> order) {
-    int n = xs.size();
-    if (n == 0) {
+pub T max<T>(List<T> items, Order<T> order) {
+    int item_count = items.size();
+    if (item_count == 0) {
         trap("sort.max: the list is empty, so there is no greatest element");
     }
     // The best INDEX, not the best element. A `T best` local would be the
@@ -156,34 +156,34 @@ pub T max<T>(List<T> xs, Order<T> order) {
     // cannot name that type. An index needs no such local, and it costs a
     // retain less per improvement besides.
     int best = 0;
-    for (int i in 1 .. n) {
+    for (int i in 1 .. item_count) {
         // `>= 0`: a later element that ties replaces the earlier one, so
         // this is the element a stable sort would leave last.
-        if (order.cmp(xs[i], xs[best]) >= 0) {
+        if (order.cmp(items[i], items[best]) >= 0) {
             best = i;
         }
     }
-    return xs[best];
+    return items[best];
 }
 
-/// The least element of `xs` under `order`: the element `by(xs, order)`
+/// The least element of `items` under `order`: the element `by(xs, order)`
 /// would leave FIRST. An empty list traps, as `max` does.
-pub T min<T>(List<T> xs, Order<T> order) {
-    int n = xs.size();
-    if (n == 0) {
+pub T min<T>(List<T> items, Order<T> order) {
+    int item_count = items.size();
+    if (item_count == 0) {
         trap("sort.min: the list is empty, so there is no least element");
     }
     int best = 0;
-    for (int i in 1 .. n) {
+    for (int i in 1 .. item_count) {
         // `< 0` only: a tie leaves the earlier element in place.
-        if (order.cmp(xs[i], xs[best]) < 0) {
+        if (order.cmp(items[i], items[best]) < 0) {
             best = i;
         }
     }
-    return xs[best];
+    return items[best];
 }
 
-/// Where `want` is in `xs`, which must already be sorted by `order`.
+/// Where `want` is in `items`, which must already be sorted by `order`.
 ///
 /// **`search` is `index_of` for a sorted list, and answers the same question
 /// with the same type.** `xs.index_of(v)` gives `Option<int>` -- the FIRST
@@ -200,24 +200,24 @@ pub T min<T>(List<T> xs, Order<T> order) {
 /// "where is this", and if a program ever needs it, it earns a name of its
 /// own rather than a second meaning for this one's result.
 ///
-/// `order` must be the order `xs` is sorted by. If it is not, the answer is
+/// `order` must be the order `items` is sorted by. If it is not, the answer is
 /// unhelpful but never unsafe: every access here is a checked `[i]`.
-pub Option<int> search<T>(List<T> xs, T want, Order<T> order) {
+pub Option<int> search<T>(List<T> items, T want, Order<T> order) {
     // Lower bound: the first index whose element does not come before
     // `want`. The halving is `lo + (hi - lo) / 2`, not `(lo + hi) / 2`,
     // which cannot overflow however long the list is.
-    int lo = 0;
-    int hi = xs.size();
-    while (lo < hi) {
-        int mid = lo + (hi - lo) / 2;
-        if (order.cmp(xs[mid], want) < 0) {
-            lo = mid + 1;
+    int low = 0;
+    int high = items.size();
+    while (low < high) {
+        int mid = low + (high - low) / 2;
+        if (order.cmp(items[mid], want) < 0) {
+            low = mid + 1;
         } else {
-            hi = mid;
+            high = mid;
         }
     }
-    if (lo < xs.size() && order.cmp(xs[lo], want) == 0) {
-        return Option<int>.Some(lo);
+    if (low < items.size() && order.cmp(items[low], want) == 0) {
+        return Option<int>.Some(low);
     }
     return Option<int>.None;
 }

@@ -6,7 +6,7 @@
 // ---
 //   bytes pub = ed25519.public_key(seed);        // 32 octets, from a 32-octet seed
 //   bytes sig = ed25519.sign(seed, msg);          // 64 octets
-//   bool  ok  = ed25519.verify(pub, msg, sig);
+//   bool  ok  = ed25519.is_valid_signature(pub, msg, sig);
 //
 // --- which operations need to be constant time, and which do not -----------
 //
@@ -57,10 +57,10 @@ import crypto.sha512;
 /// that makes `point_add` complete. Private: nothing outside this file
 /// should construct or inspect one directly.
 type Point {
-    Array<int> x;
-    Array<int> y;
-    Array<int> z;
-    Array<int> t;
+    Array<int> x_coordinate;
+    Array<int> y_coordinate;
+    Array<int> z_coordinate;
+    Array<int> t_coordinate;
 }
 
 // The curve constant `d` (its double is computed where `point_add` needs
@@ -72,7 +72,7 @@ type Point {
 // from `-121665/121666`, `sqrt(-1)` from `2^((p-1)/4)`, the base point from
 // `y = 4/5` and the x-recovery formula), never copied from another
 // implementation by hand.
-const Array<int> D = [
+const Array<int> EDWARDS_D = [
     0x78A3, 0x1359, 0x4DCA, 0x75EB, 0xD8AB, 0x4141, 0x0A4D, 0x0070,
     0xE898, 0x7779, 0x4079, 0x8CC7, 0xFE73, 0x2B6F, 0x6CEE, 0x5203
 ];
@@ -97,8 +97,8 @@ Point identity() {
 }
 
 // An affine `(x, y)` lifted to extended coordinates.
-Point of_affine(Array<int> x, Array<int> y) {
-    return Point(x, y, field25519.one(), field25519.mul(x, y));
+Point of_affine(Array<int> x_coordinate, Array<int> y_coordinate) {
+    return Point(x_coordinate, y_coordinate, field25519.one(), field25519.mul(x_coordinate, y_coordinate));
 }
 
 Point base_point() {
@@ -117,40 +117,40 @@ Point base_point() {
 // Verified independently against `pynacl` over 300 random signatures and
 // every RFC 8032 §7.1 test vector before this file existed -- see the
 // report.
-Point point_add(Point p1, Point p2) {
+Point point_add(Point first_point, Point second_point) {
     Array<int> two = field25519.small(2);
-    Array<int> a = field25519.mul(field25519.sub(p1.y, p1.x), field25519.sub(p2.y, p2.x));
-    Array<int> b = field25519.mul(field25519.add(p1.y, p1.x), field25519.add(p2.y, p2.x));
-    Array<int> twod_t2 = field25519.mul(field25519.mul(two, D), p2.t);
-    Array<int> c = field25519.mul(p1.t, twod_t2);
-    Array<int> dd = field25519.mul(field25519.mul(two, p1.z), p2.z);
-    Array<int> e = field25519.sub(b, a);
-    Array<int> f = field25519.sub(dd, c);
-    Array<int> g = field25519.add(dd, c);
-    Array<int> h = field25519.add(b, a);
-    Array<int> x3 = field25519.mul(e, f);
-    Array<int> y3 = field25519.mul(g, h);
-    Array<int> t3 = field25519.mul(e, h);
-    Array<int> z3 = field25519.mul(f, g);
-    return Point(x3, y3, z3, t3);
+    Array<int> difference_product = field25519.mul(field25519.sub(first_point.y_coordinate, first_point.x_coordinate), field25519.sub(second_point.y_coordinate, second_point.x_coordinate));  // RFC 8032 §5.1.4: A
+    Array<int> sum_product = field25519.mul(field25519.add(first_point.y_coordinate, first_point.x_coordinate), field25519.add(second_point.y_coordinate, second_point.x_coordinate));  // RFC 8032 §5.1.4: B
+    Array<int> twod_t2 = field25519.mul(field25519.mul(two, EDWARDS_D), second_point.t_coordinate);
+    Array<int> t_product = field25519.mul(first_point.t_coordinate, twod_t2);  // RFC 8032 §5.1.4: C
+    Array<int> z_product = field25519.mul(field25519.mul(two, first_point.z_coordinate), second_point.z_coordinate);  // RFC 8032 §5.1.4: D
+    Array<int> sum_minus_difference = field25519.sub(sum_product, difference_product);  // RFC 8032 §5.1.4: E
+    Array<int> z_minus_t = field25519.sub(z_product, t_product);  // RFC 8032 §5.1.4: F
+    Array<int> z_plus_t = field25519.add(z_product, t_product);  // RFC 8032 §5.1.4: G
+    Array<int> sum_plus_difference = field25519.add(sum_product, difference_product);  // RFC 8032 §5.1.4: H
+    Array<int> sum_x = field25519.mul(sum_minus_difference, z_minus_t);
+    Array<int> sum_y = field25519.mul(z_plus_t, sum_plus_difference);
+    Array<int> sum_t = field25519.mul(sum_minus_difference, sum_plus_difference);
+    Array<int> sum_z = field25519.mul(z_minus_t, z_plus_t);
+    return Point(sum_x, sum_y, sum_z, sum_t);
 }
 
-// `a` if `cond` is 1, `b` if `cond` is 0 -- `field25519.cselect` applied to
+// `point_if_one` if `cond` is 1, `point_if_zero` if `cond` is 0 -- `field25519.cselect` applied to
 // all four coordinates, so a whole point is chosen with the same
 // constant-time guarantee as one field element.
-Point point_cselect(int cond, Point a, Point b) {
-    return Point(field25519.cselect(cond, a.x, b.x), field25519.cselect(cond, a.y, b.y), field25519.cselect(cond, a.z, b.z), field25519.cselect(cond, a.t, b.t));
+Point point_cselect(int cond, Point point_if_one, Point point_if_zero) {
+    return Point(field25519.cselect(cond, point_if_one.x_coordinate, point_if_zero.x_coordinate), field25519.cselect(cond, point_if_one.y_coordinate, point_if_zero.y_coordinate), field25519.cselect(cond, point_if_one.z_coordinate, point_if_zero.z_coordinate), field25519.cselect(cond, point_if_one.t_coordinate, point_if_zero.t_coordinate));
 }
 
-// Bit `i` (0 = least significant) of `b`, a 32-octet little-endian scalar.
-// Safe regardless of whether `b` holds secret data, for the same reason
+// Bit `bit_position` (0 = least significant) of `scalar`, a 32-octet little-endian scalar.
+// Safe regardless of whether `scalar` holds secret data, for the same reason
 // `x25519.m31`'s `bit_at` is: a `bytes` element is always in [0, 255],
 // never negative, so the `>>` below never exercises the sign-dependent
 // branch `field25519.m31`'s header describes.
-int bit_at(bytes b, int i) {
-    int byte_idx = i / 8;
-    int bit_idx = i % 8;
-    return b[byte_idx] >> bit_idx & 1;
+int bit_at(bytes scalar, int bit_position) {
+    int byte_index = bit_position / 8;
+    int bit_index = bit_position % 8;
+    return scalar[byte_index] >> bit_index & 1;
 }
 
 // `[scalar]base`, scalar given as 32 little-endian octets. Constant-time,
@@ -162,33 +162,33 @@ int bit_at(bytes b, int i) {
 // leaks that length through the iteration count, which is exactly the kind
 // of thing this function exists to not do.
 Point scalar_mult(bytes scalar, Point base) {
-    Point r = identity();
-    int i = 255;
-    while (i >= 0) {
-        r = point_add(r, r);
-        Point added = point_add(r, base);
-        int bit = bit_at(scalar, i);
-        r = point_cselect(bit, added, r);
-        i = i - 1;
+    Point accumulator = identity();
+    int bit_position = 255;
+    while (bit_position >= 0) {
+        accumulator = point_add(accumulator, accumulator);
+        Point added = point_add(accumulator, base);
+        int bit = bit_at(scalar, bit_position);
+        accumulator = point_cselect(bit, added, accumulator);
+        bit_position = bit_position - 1;
     }
-    return r;
+    return accumulator;
 }
 
-// `p`'s affine `y`, with `x`'s parity riding in the spare top bit -- RFC
+// `point`'s affine `y_coordinate`, with `x_coordinate`'s parity riding in the spare top bit -- RFC
 // 8032 §5.1.2's point encoding. Not constant time in itself (`field25519`'s
 // `invert`, called here, is; the point being encoded, `A` or `R`, is
 // public once computed), but see `sign`'s own note on what stays secret.
-bytes compress(Point p) {
-    Array<int> zinv = field25519.invert(p.z);
-    Array<int> x = field25519.mul(p.x, zinv);
-    Array<int> y = field25519.mul(p.y, zinv);
-    bytes out = field25519.to_bytes(y);
-    int sign_bit = field25519.parity(x);
+bytes compress(Point point) {
+    Array<int> zinv = field25519.invert(point.z_coordinate);
+    Array<int> x_coordinate = field25519.mul(point.x_coordinate, zinv);
+    Array<int> y_coordinate = field25519.mul(point.y_coordinate, zinv);
+    bytes out = field25519.to_bytes(y_coordinate);
+    int sign_bit = field25519.parity(x_coordinate);
     out[31] = out[31] | sign_bit << 7;
     return out;
 }
 
-// The inverse of `compress`, RFC 8032 §5.1.3: recover `x` from `y` and the
+// The inverse of `compress`, RFC 8032 §5.1.3: recover `x_coordinate` from `y_coordinate` and the
 // sign bit via `x^2 = (y^2-1) / (d*y^2+1)`, taking the square root with
 // `field25519.pow_p_minus_5_over_8` and correcting it by `sqrt(-1)` when
 // the first candidate is the wrong one of the two roots -- exactly RFC
@@ -197,50 +197,50 @@ bytes compress(Point p) {
 //
 // `d*y^2 + 1 = 0` has no solution for this curve's `d` (checked separately,
 // mod p: `-1/d` is not a quadratic residue), so the inversion below never
-// divides by zero for a `y` that reaches it -- and a non-canonical `y`
+// divides by zero for a `y_coordinate` that reaches it -- and a non-canonical `y_coordinate`
 // (>= p) is refused before that, by comparing the reduced encoding to the
 // one handed in.
 pub Option<Point> decompress(bytes enc) {
     int sign_bit = enc[31] >> 7 & 1;
-    bytes yb = clone(enc);
-    yb[31] = yb[31] & 0x7F;
-    Array<int> y = field25519.from_bytes(yb);
-    if (field25519.to_bytes(y) != yb) {
+    bytes y_bytes = clone(enc);
+    y_bytes[31] = y_bytes[31] & 0x7F;
+    Array<int> y_coordinate = field25519.from_bytes(y_bytes);
+    if (field25519.to_bytes(y_coordinate) != y_bytes) {
         return Option<Point>.None;
     }
-    Array<int> yy = field25519.sq(y);
-    Array<int> u = field25519.sub(yy, field25519.one());
-    Array<int> v = field25519.add(field25519.mul(D, yy), field25519.one());
-    Array<int> xx = field25519.mul(u, field25519.invert(v));
+    Array<int> y_squared = field25519.square(y_coordinate);
+    Array<int> numerator = field25519.sub(y_squared, field25519.one());  // RFC 8032 §5.1.3: u
+    Array<int> denominator = field25519.add(field25519.mul(EDWARDS_D, y_squared), field25519.one());  // RFC 8032 §5.1.3: v
+    Array<int> x_squared = field25519.mul(numerator, field25519.invert(denominator));
     // RFC 8032 §5.1.3: the candidate root is `xx^((p+3)/8)`, and
     // `(p+3)/8 == (p-5)/8 + 1`, so this is `field25519.pow_p_minus_5_over_8`
-    // (which computes the `(p-5)/8` power) times one more factor of `xx` --
+    // (which computes the `(p-5)/8` power) times one more factor of `x_squared` --
     // reusing that function rather than adding a second, near-identical
     // exponentiation loop for a one-off exponent.
-    Array<int> x = field25519.mul(field25519.pow_p_minus_5_over_8(xx), xx);
-    if (!field25519.eq(field25519.sq(x), xx)) {
-        x = field25519.mul(x, SQRTM1);
-        if (!field25519.eq(field25519.sq(x), xx)) {
+    Array<int> x_coordinate = field25519.mul(field25519.pow_p_minus_5_over_8(x_squared), x_squared);
+    if (!field25519.eq(field25519.square(x_coordinate), x_squared)) {
+        x_coordinate = field25519.mul(x_coordinate, SQRTM1);
+        if (!field25519.eq(field25519.square(x_coordinate), x_squared)) {
             return Option<Point>.None;
         }
     }
-    if (field25519.is_zero(x) && sign_bit == 1) {
+    if (field25519.is_zero(x_coordinate) && sign_bit == 1) {
         return Option<Point>.None;
     }
-    if (field25519.parity(x) != sign_bit) {
-        x = field25519.neg(x);
+    if (field25519.parity(x_coordinate) != sign_bit) {
+        x_coordinate = field25519.neg(x_coordinate);
     }
-    return Option<Point>.Some(of_affine(x, y));
+    return Option<Point>.Some(of_affine(x_coordinate, y_coordinate));
 }
 
-// Whether `p1` and `p2` are the same affine point, compared projectively
+// Whether `first_point` and `second_point` are the same affine point, compared projectively
 // (`x1*z2 == x2*z1` and `y1*z2 == y2*z1`) so neither side needs an
 // inversion. Both sides of `verify`'s check are public, so this makes no
 // constant-time claim.
-bool point_eq(Point p1, Point p2) {
-    bool xok = field25519.eq(field25519.mul(p1.x, p2.z), field25519.mul(p2.x, p1.z));
-    bool yok = field25519.eq(field25519.mul(p1.y, p2.z), field25519.mul(p2.y, p1.z));
-    return xok && yok;
+bool is_point_equal(Point first_point, Point second_point) {
+    bool is_x_equal = field25519.eq(field25519.mul(first_point.x_coordinate, second_point.z_coordinate), field25519.mul(second_point.x_coordinate, first_point.z_coordinate));
+    bool is_y_equal = field25519.eq(field25519.mul(first_point.y_coordinate, second_point.z_coordinate), field25519.mul(second_point.y_coordinate, first_point.z_coordinate));
+    return is_x_equal && is_y_equal;
 }
 
 // RFC 8032 §5.1.5's clamp: clear the low 3 bits, clear the top bit, set the
@@ -249,8 +249,8 @@ bool point_eq(Point p1, Point p2) {
 // own copy rather than shared, the way `field25519.m31`'s and
 // `scalar25519.m31`'s `cselect` are each their own copy: two three-line
 // functions cost less than a dependency neither module otherwise needs.
-bytes clamp(bytes k) {
-    bytes out = clone(k);
+bytes clamp(bytes scalar) {
+    bytes out = clone(scalar);
     out[0] = out[0] & 0xF8;
     out[31] = out[31] & 0x7F;
     out[31] = out[31] | 0x40;
@@ -258,28 +258,28 @@ bytes clamp(bytes k) {
 }
 
 // One SHA-512 over two pieces, without building a concatenated copy first.
-bytes hash2(bytes a, bytes b) {
-    sha512.Hasher h = sha512.Hasher();
-    h.update(a);
-    h.update(b);
-    return h.digest();
+bytes hash2(bytes first, bytes second) {
+    sha512.Hasher hasher = sha512.Hasher();
+    hasher.update(first);
+    hasher.update(second);
+    return hasher.digest();
 }
 
-bytes hash3(bytes a, bytes b, bytes c) {
-    sha512.Hasher h = sha512.Hasher();
-    h.update(a);
-    h.update(b);
-    h.update(c);
-    return h.digest();
+bytes hash3(bytes first, bytes second, bytes third) {
+    sha512.Hasher hasher = sha512.Hasher();
+    hasher.update(first);
+    hasher.update(second);
+    hasher.update(third);
+    return hasher.digest();
 }
 
 /// RFC 8032 §5.1.5: expand a 32-octet seed into the clamped scalar `a`
 /// (still as 32 octets -- callers needing it reduced mod `L` do that
 /// themselves) and the 32-octet nonce prefix.
 Array<bytes> secret_expand(bytes seed) {
-    bytes h = sha512.sum(seed);
-    bytes a_raw = clamp(h.substr(0, 32));
-    bytes prefix = h.substr(32, 64);
+    bytes digest = sha512.sum(seed);
+    bytes a_raw = clamp(digest.substr(0, 32));
+    bytes prefix = digest.substr(32, 64);
     Array<bytes> out = [a_raw, prefix];
     return out;
 }
@@ -292,39 +292,39 @@ pub bytes public_key(bytes seed) {
     return compress(a_point);
 }
 
-/// Sign `msg` with the 32-octet seed `seed`, RFC 8032 §5.1.6. `sign` and
+/// Sign `message` with the 32-octet seed `seed`, RFC 8032 §5.1.6. `sign` and
 /// `public_key` agree: `verify(public_key(seed), msg, sign(seed, msg))` is
 /// always `true`.
-pub bytes sign(bytes seed, bytes msg) {
+pub bytes sign(bytes seed, bytes message) {
     Array<bytes> expanded = secret_expand(seed);
     bytes a_raw = expanded[0];
     bytes prefix = expanded[1];
-    Array<int> a = scalar25519.reduce256(scalar25519.from_bytes(a_raw));
+    Array<int> secret_scalar = scalar25519.reduce256(scalar25519.from_bytes(a_raw));  // RFC 8032 §5.1.6: a
     Point big_a = scalar_mult(a_raw, base_point());
     bytes a_enc = compress(big_a);
-    Array<int> r = scalar25519.reduce64(hash2(prefix, msg));
-    bytes r_bytes = scalar25519.to_bytes(r);
+    Array<int> nonce_scalar = scalar25519.reduce64(hash2(prefix, message));  // RFC 8032 §5.1.6: r
+    bytes r_bytes = scalar25519.to_bytes(nonce_scalar);
     Point big_r = scalar_mult(r_bytes, base_point());
     bytes r_enc = compress(big_r);
-    Array<int> k = scalar25519.reduce64(hash3(r_enc, a_enc, msg));
-    Array<int> s = scalar25519.muladd(k, a, r);
+    Array<int> challenge_scalar = scalar25519.reduce64(hash3(r_enc, a_enc, message));  // RFC 8032 §5.1.6: k
+    Array<int> signature_scalar = scalar25519.muladd(challenge_scalar, secret_scalar, nonce_scalar);  // RFC 8032 §5.1.6: S
     bytes out = clone(r_enc);
-    out.extend(scalar25519.to_bytes(s));
+    out.extend(scalar25519.to_bytes(signature_scalar));
     return out;
 }
 
-/// Verify `sig` (64 octets) over `msg` under the 32-octet public key `pub`,
+/// Verify `sig` (64 octets) over `message` under the 32-octet public key `pub`,
 /// RFC 8032 §5.1.7. Rejects a malformed length, a non-canonical `S`
 /// (`S >= L`), an `R` or a public key that does not decompress to a point
 /// on the curve, and a signature that does not satisfy `[S]B = R + [k]A`.
-pub bool verify(bytes pub_key, bytes msg, bytes sig) {
+pub bool is_valid_signature(bytes pub_key, bytes message, bytes sig) {
     if (sig.size() != 64 || pub_key.size() != 32) {
         return false;
     }
     bytes r_enc = sig.substr(0, 32);
     bytes s_bytes = sig.substr(32, 64);
-    Array<int> s = scalar25519.from_bytes(s_bytes);
-    if (!scalar25519.is_reduced(s)) {
+    Array<int> signature_scalar = scalar25519.from_bytes(s_bytes);  // RFC 8032 §5.1.7: S
+    if (!scalar25519.is_reduced(signature_scalar)) {
         return false;
     }
     match (decompress(pub_key)) {
@@ -337,10 +337,10 @@ pub bool verify(bytes pub_key, bytes msg, bytes sig) {
                     return false;
                 }
                 case Some(Point big_r): {
-                    Array<int> k = scalar25519.reduce64(hash3(r_enc, pub_key, msg));
+                    Array<int> challenge_scalar = scalar25519.reduce64(hash3(r_enc, pub_key, message));  // RFC 8032 §5.1.7: k
                     Point lhs = scalar_mult(s_bytes, base_point());
-                    Point rhs = point_add(big_r, scalar_mult(scalar25519.to_bytes(k), big_a));
-                    return point_eq(lhs, rhs);
+                    Point rhs = point_add(big_r, scalar_mult(scalar25519.to_bytes(challenge_scalar), big_a));
+                    return is_point_equal(lhs, rhs);
                 }
             }
         }

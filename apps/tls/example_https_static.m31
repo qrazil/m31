@@ -39,7 +39,7 @@ void serve(tlsserver.Conn secure) {
     Result<bool, io.Error> closed = secure.close();
 }
 
-List<str> arguments = os.args();
+List<str> arguments = os.arguments();
 if (arguments.size() < 3) {
     io.eprint("usage: example_https_static CHAIN_PEM KEY_PEM [PORT]");
     os.exit(2);

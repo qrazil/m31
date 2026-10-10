@@ -24,50 +24,50 @@ import term;
 // there -- flickers, because the terminal draws what it has whenever it feels
 // like it. This is the shape that does not: build the whole frame, then
 // `flush()`, which is exactly one `write`.
-void draw(term.Writer w, term.Size sz, List<str> log) {
-    w.put(term.CLEAR);
-    w.put(term.move_to(1, 1));
-    w.put(term.BOLD + term.fg(213));
-    w.put("keys -- press anything, q to quit");
-    w.put(term.RESET);
-    w.put(term.move_to(2, 1));
-    w.put(term.fg(244) + sz.to_str() + " -- asked again every frame, since " + "there is no SIGWINCH" + term.RESET);
+void draw(term.Writer writer, term.Size screen_size, List<str> log) {
+    writer.put(term.CLEAR);
+    writer.put(term.move_to(1, 1));
+    writer.put(term.BOLD + term.foreground(213));
+    writer.put("keys -- press anything, q to quit");
+    writer.put(term.RESET);
+    writer.put(term.move_to(2, 1));
+    writer.put(term.foreground(244) + screen_size.to_str() + " -- asked again every frame, since " + "there is no SIGWINCH" + term.RESET);
     int row = 4;
     int first = 0;
     // Only what fits: the newest lines, oldest first.
-    if (log.size() > sz.rows - 4) {
-        first = log.size() - (sz.rows - 4);
+    if (log.size() > screen_size.rows - 4) {
+        first = log.size() - (screen_size.rows - 4);
     }
-    int i = first;
-    while (i < log.size()) {
-        w.put(term.move_to(row, 3));
-        w.put(log[i]);
+    int line_index = first;
+    while (line_index < log.size()) {
+        writer.put(term.move_to(row, 3));
+        writer.put(log[line_index]);
         row = row + 1;
-        i = i + 1;
+        line_index = line_index + 1;
     }
 }
 
 term.Size window() {
     match (term.size()) {
-        case Ok(term.Size sz): {
+        case Ok(term.Size screen_size): {
             // A terminal that does not know its size answers 0 by 0, which is
             // not an error and is not a size to draw into either.
-            if (sz.rows > 0 && sz.cols > 0) {
-                return sz;
+            if (screen_size.rows > 0 && screen_size.columns > 0) {
+                return screen_size;
             }
         }
-        case Err(term.Error e): {
+        case Err(_): {
         }
     }
     return term.Size(24, 80);
 }
 
-bool quits(term.Event e) {
-    match (e) {
-        case Key(term.Key k): {
-            match (k.code) {
-                case Char(int c): {
-                    return c == 113 || c == 99 && k.has(term.CTRL);
+bool is_quit_event(term.Event event) {
+    match (event) {
+        case Key(term.Key key): {
+            match (key.code) {
+                case Char(int code_point): {
+                    return code_point == 113 || code_point == 99 && key.has_modifiers(term.CTRL);
                 }
                 case Escape: {
                     return true;
@@ -114,18 +114,18 @@ bool quits(term.Event e) {
                 case Delete: {
                     return false;
                 }
-                case F(int n): {
+                case F(_): {
                     return false;
                 }
             }
         }
-        case Mouse(term.Mouse m): {
+        case Mouse(_): {
             return false;
         }
-        case Paste(str t): {
+        case Paste(_): {
             return false;
         }
-        case Unknown(bytes b): {
+        case Unknown(_): {
             return false;
         }
     }
@@ -136,54 +136,54 @@ if (!term.is_terminal(0)) {
     return;
 }
 match (term.raw()) {
-    case Err(term.Error e): {
-        io.eprint("keys: " + e.to_str());
+    case Err(term.Error error): {
+        io.eprint("keys: " + error.to_str());
     }
-    case Ok(term.Session s): {
+    case Ok(term.Session session): {
         // Everything written to GET here is undone when the session ends --
         // by `restore()`, by the end of this block, or by the runtime if the
         // program traps. Saying it once, here, is the whole trick: there is
         // no exit path left on which it can be forgotten.
-        s.on_exit(term.MOUSE_OFF + term.PASTE_OFF + term.SHOW_CURSOR + term.RESET + term.ALT_SCREEN_OFF);
-        term.Writer w = term.writer(io.stdout());
-        w.put(term.ALT_SCREEN_ON + term.HIDE_CURSOR + term.MOUSE_ON + term.PASTE_ON);
-        term.Reader r = term.reader();
+        session.on_exit(term.MOUSE_OFF + term.PASTE_OFF + term.SHOW_CURSOR + term.RESET + term.ALT_SCREEN_OFF);
+        term.Writer writer = term.writer(io.stdout());
+        writer.put(term.ALT_SCREEN_ON + term.HIDE_CURSOR + term.MOUSE_ON + term.PASTE_ON);
+        term.Reader reader = term.reader();
         List<str> log = ["(waiting)"];
-        bool running = true;
-        while (running) {
-            draw(w, window(), log);
-            match (w.flush()) {
-                case Ok(int n): {
+        bool is_running = true;
+        while (is_running) {
+            draw(writer, window(), log);
+            match (writer.flush()) {
+                case Ok(_): {
                 }
-                case Err(io.Error e): {
-                    running = false;
+                case Err(_): {
+                    is_running = false;
                 }
             }
             // 250 ms rather than for ever, so that a window resized while no
             // key is pressed is still noticed: the loop comes round, asks the
             // size again and redraws. It is also what makes a lone Escape
             // arrive as Escape rather than waiting for the next key.
-            match (r.read(250)) {
-                case Ok(term.Input i): {
-                    match (i) {
-                        case Got(term.Event e): {
+            match (reader.read(250)) {
+                case Ok(term.Input input): {
+                    match (input) {
+                        case Got(term.Event event): {
                             if (log.size() == 1 && log[0] == "(waiting)") {
                                 log.clear();
                             }
-                            log.push(e.to_str());
-                            if (quits(e)) {
-                                running = false;
+                            log.push(event.to_str());
+                            if (is_quit_event(event)) {
+                                is_running = false;
                             }
                         }
                         case Timeout: {
                         }
                         case End: {
-                            running = false;
+                            is_running = false;
                         }
                     }
                 }
-                case Err(term.Error e): {
-                    running = false;
+                case Err(_): {
+                    is_running = false;
                 }
             }
         }

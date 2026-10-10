@@ -73,7 +73,7 @@ check ed25519 gen_ed25519.py
 # A handful of hand-picked edge cases that are awkward to fold into the
 # generators above: a non-canonical y-coordinate, a y that IS canonical but
 # is not on the curve at all, and an all-zero public key -- all of which
-# `ed25519.verify` must refuse without crashing, per RFC 8032 5.1.3.
+# `ed25519.is_valid_signature` must refuse without crashing, per RFC 8032 5.1.3.
 if "$LANGC" --emit-c crypto25519_test/t_ed25519_edge.m31 -o "$WORK/edge.c" 2>"$WORK/edge.diag"; then
     if cc -O2 -Wall -Wextra -I runtime -pthread -o "$WORK/edge" "$WORK/edge.c" \
           runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" \

@@ -357,4 +357,4 @@ match (fs.rmtree(dir, dir)) {
         print(say(e));
     }
 }
-print(fs.exists(dir));  // false
+print(fs.is_present(dir));  // false

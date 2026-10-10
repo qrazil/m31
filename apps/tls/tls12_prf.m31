@@ -41,7 +41,7 @@ for (tls12.Suite suite in tls12.all_suites()) {
     print(name + " prf_long " + suite.prf(master, "label", client_random, 200).hex());
     print(name + " prf_empty_seed " + suite.prf(master, "x", [], 1).hex());
 }
-print("signed " + tls12.signed_params(pattern(32, 1, 0), pattern(32, 2, 0), pattern(37, 3, 1)).hex());
+print("signed " + tls12.signed_parameters(pattern(32, 1, 0), pattern(32, 2, 0), pattern(37, 3, 1)).hex());
 List<int> codes = [0xCCA9, 0xC02B, 0xC030, 0x1301, 0xC013, 0x009C, 0x0000];
 for (int code in codes) {
     match (tls12.suite_for_code(code)) {

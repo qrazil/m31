@@ -12,7 +12,7 @@ int digit_value(int octet) {
     if (octet >= 65 && octet <= 70) {
         return octet - 55;
     }
-    trap("tls13_hex: not a hex digit");
+    trap("TLS13_hex: not a hex digit");
 }
 
 /// The octets `text` spells, two hex digits to an octet, either case.
@@ -20,7 +20,7 @@ int digit_value(int octet) {
 pub bytes decode(str text) {
     bytes digits = text.to_bytes();
     if (digits.size() % 2 != 0) {
-        trap("tls13_hex: odd number of hex digits");
+        trap("TLS13_hex: odd number of hex digits");
     }
     bytes out = [];
     for (int i in 0 .. digits.size() / 2) {

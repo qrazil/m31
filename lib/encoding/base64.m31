@@ -78,30 +78,30 @@ pub str Error.to_str() {
 ///
 ///     base64.encode("user:pass".to_bytes())    == "dXNlcjpwYXNz"
 ///     base64.encode("é".to_bytes())            == "w6k="
-pub str encode(bytes data, bool url = false) {
-    List<str> digits = alphabet(url);
-    int n = data.size();
-    int whole = n - n % 3;
+pub str encode(bytes data, bool is_url_safe = false) {
+    List<str> digits = alphabet(is_url_safe);
+    int byte_count = data.size();
+    int whole = byte_count - byte_count % 3;
     List<str> out = [];
-    int i = 0;
-    while (i < whole) {
-        int v = data[i] << 16 | data[i + 1] << 8 | data[i + 2];
-        out.push(digits[v >> 18]);
-        out.push(digits[v >> 12 & 0x3F]);
-        out.push(digits[v >> 6 & 0x3F]);
-        out.push(digits[v & 0x3F]);
-        i = i + 3;
+    int byte_index = 0;
+    while (byte_index < whole) {
+        int group = data[byte_index] << 16 | data[byte_index + 1] << 8 | data[byte_index + 2];
+        out.push(digits[group >> 18]);
+        out.push(digits[group >> 12 & 0x3F]);
+        out.push(digits[group >> 6 & 0x3F]);
+        out.push(digits[group & 0x3F]);
+        byte_index = byte_index + 3;
     }
-    if (n - whole == 1) {
-        int v = data[whole] << 16;
-        out.push(digits[v >> 18]);
-        out.push(digits[v >> 12 & 0x3F]);
+    if (byte_count - whole == 1) {
+        int group = data[whole] << 16;
+        out.push(digits[group >> 18]);
+        out.push(digits[group >> 12 & 0x3F]);
         out.push("==");
-    } else if (n - whole == 2) {
-        int v = data[whole] << 16 | data[whole + 1] << 8;
-        out.push(digits[v >> 18]);
-        out.push(digits[v >> 12 & 0x3F]);
-        out.push(digits[v >> 6 & 0x3F]);
+    } else if (byte_count - whole == 2) {
+        int group = data[whole] << 16 | data[whole + 1] << 8;
+        out.push(digits[group >> 18]);
+        out.push(digits[group >> 12 & 0x3F]);
+        out.push(digits[group >> 6 & 0x3F]);
         out.push("=");
     }
     return out.join("");
@@ -115,92 +115,92 @@ pub str encode(bytes data, bool url = false) {
 /// The refusals are checked in reading order -- first a character that is not
 /// base64 at all, then the length, then the padding -- so the error names the
 /// first thing wrong with the input rather than whichever check ran first.
-pub Result<bytes, Error> decode(str text, bool url = false) {
-    int n = text.size();
-    int i = 0;
-    while (i < n) {
-        int c = text.byte_at(i);
-        if (c != '=' && value(c, url) < 0) {
+pub Result<bytes, Error> decode(str text, bool is_url_safe = false) {
+    int text_length = text.size();
+    int index = 0;
+    while (index < text_length) {
+        int octet = text.byte_at(index);
+        if (octet != '=' && value(octet, is_url_safe) < 0) {
             return Result<bytes, Error>.Err(Error.Character);
         }
-        i = i + 1;
+        index = index + 1;
     }
-    if (n % 4 != 0) {
+    if (text_length % 4 != 0) {
         return Result<bytes, Error>.Err(Error.Length);
     }
     // Everything is now alphabet or `=`, so the first `=` is where the padding
     // starts, and the padding must run from there to the end.
     int data = 0;
-    while (data < n && text.byte_at(data) != '=') {
+    while (data < text_length && text.byte_at(data) != '=') {
         data = data + 1;
     }
-    if (data < n) {
+    if (data < text_length) {
         int after = data;
-        while (after < n && text.byte_at(after) == '=') {
+        while (after < text_length && text.byte_at(after) == '=') {
             after = after + 1;
         }
-        if (after < n) {
+        if (after < text_length) {
             return Result<bytes, Error>.Err(Error.PaddingThenData);
         }
-        if (n - data > 2) {
+        if (text_length - data > 2) {
             return Result<bytes, Error>.Err(Error.Padding);
         }
     }
-    int pad = n - data;
-    int whole = n;
+    int pad = text_length - data;
+    int whole = text_length;
     if (pad > 0) {
-        whole = n - 4;
+        whole = text_length - 4;
     }
     bytes out = [];
-    i = 0;
-    while (i < whole) {
-        int v = quad(text, i, 4, url);
-        out.push(v >> 16);
-        out.push(v >> 8 & 0xFF);
-        out.push(v & 0xFF);
-        i = i + 4;
+    index = 0;
+    while (index < whole) {
+        int group = quad(text, index, 4, is_url_safe);
+        out.push(group >> 16);
+        out.push(group >> 8 & 0xFF);
+        out.push(group & 0xFF);
+        index = index + 4;
     }
     if (pad == 2) {
-        int v = quad(text, whole, 2, url);
-        out.push(v >> 16);
+        int group = quad(text, whole, 2, is_url_safe);
+        out.push(group >> 16);
     } else if (pad == 1) {
-        int v = quad(text, whole, 3, url);
-        out.push(v >> 16);
-        out.push(v >> 8 & 0xFF);
+        int group = quad(text, whole, 3, is_url_safe);
+        out.push(group >> 16);
+        out.push(group >> 8 & 0xFF);
     }
     return Result<bytes, Error>.Ok(out);
 }
 
-// The first `count` characters of the group at `at`, packed six bits each
+// The first `count` characters of the group at `start`, packed six bits each
 // from the top: `a << 18 | b << 12 | c << 6 | d`, with the missing ones zero.
-int quad(str text, int at, int count, bool url) {
-    int v = 0;
-    for (int k in 0 .. 4) {
-        v = v << 6;
-        if (k < count) {
-            v = v | value(text.byte_at(at + k), url);
+int quad(str text, int start, int count, bool is_url_safe) {
+    int packed = 0;
+    for (int slot in 0 .. 4) {
+        packed = packed << 6;
+        if (slot < count) {
+            packed = packed | value(text.byte_at(start + slot), is_url_safe);
         }
     }
-    return v;
+    return packed;
 }
 
-// The six-bit value of byte `c` in the chosen alphabet, or -1 if it is not
+// The six-bit value of byte `octet` in the chosen alphabet, or -1 if it is not
 // in it: A-Z are 0-25, a-z 26-51, 0-9 52-61, and the two alphabets differ
 // only in 62 and 63 -- `+ /` for the standard one, `- _` for the URL one.
-int value(int c, bool url) {
-    if (c >= 'A' && c <= 'Z') {
-        return c - 65;
+int value(int octet, bool is_url_safe) {
+    if (octet >= 'A' && octet <= 'Z') {
+        return octet - 65;
     }
-    if (c >= 'a' && c <= 'z') {
-        return c - 71;
+    if (octet >= 'a' && octet <= 'z') {
+        return octet - 71;
     }
-    if (c >= '0' && c <= '9') {
-        return c + 4;
+    if (octet >= '0' && octet <= '9') {
+        return octet + 4;
     }
-    if (url && c == '-' || !url && c == '+') {
+    if (is_url_safe && octet == '-' || !is_url_safe && octet == '+') {
         return 62;
     }
-    if (url && c == '_' || !url && c == '/') {
+    if (is_url_safe && octet == '_' || !is_url_safe && octet == '/') {
         return 63;
     }
     return -1;
@@ -209,9 +209,9 @@ int value(int c, bool url) {
 // The sixty-four digits of the chosen alphabet, one str each. Written out
 // rather than assembled, because they are quotations: a reader checking this
 // against RFC 4648's tables should read the same characters in both places.
-List<str> alphabet(bool url) {
+List<str> alphabet(bool is_url_safe) {
     str chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    if (url) {
+    if (is_url_safe) {
         chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     }
     List<str> out = [];

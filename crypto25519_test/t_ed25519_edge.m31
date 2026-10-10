@@ -7,9 +7,9 @@ bytes noncanon_y = [
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f
 ];
-bytes msg = "test".to_bytes();
+bytes message = "test".to_bytes();
 bytes zero_sig = [0; 64];
-print("noncanon_y_rejected " + (!ed25519.verify(noncanon_y, msg, zero_sig)).to_str());
+print("noncanon_y_rejected " + (!ed25519.is_valid_signature(noncanon_y, message, zero_sig)).to_str());
 
 // A y that IS canonical but for which x^2 = (y^2-1)/(dy^2+1) is not a
 // square mod p -- not a point on the curve at all.
@@ -17,10 +17,10 @@ bytes not_on_curve = [
     2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
 ];
-print("not_on_curve_rejected " + (!ed25519.verify(not_on_curve, msg, zero_sig)).to_str());
+print("not_on_curve_rejected " + (!ed25519.is_valid_signature(not_on_curve, message, zero_sig)).to_str());
 
 // All-zero signature and all-zero pubkey together (S=0 is "reduced", but
 // the pubkey 0x00...00 does not decompress to a curve point either way
 // this is exercised): must not crash, must return false.
 bytes zero_pk = [0; 32];
-print("zero_pk_no_crash " + (!ed25519.verify(zero_pk, msg, zero_sig)).to_str());
+print("zero_pk_no_crash " + (!ed25519.is_valid_signature(zero_pk, message, zero_sig)).to_str());

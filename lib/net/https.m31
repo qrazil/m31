@@ -36,8 +36,8 @@ import tls;
 // their own names; the rest of the thirty-odd reasons a TLS connection can
 // stop are `TlsFailed`. The socket's own failures, which `tls` reports as
 // `Connect`, never reach here: `http.open` opens the socket itself.
-http.Error from_tls(tls.Error e) {
-    match (e) {
+http.Error from_tls(tls.Error error) {
+    match (error) {
         case Connect: {
             return http.Error.TlsFailed;
         }
@@ -144,21 +144,21 @@ type Carrier {
     tls.Trust trust;
 }
 
-Result<http.Response, http.Error> Carrier.round_trip(http.Request req, int timeout_ms) {
-    net.Conn c = http.open(req, timeout_ms)?;
-    if (req.url().scheme() == "https") {
-        match (tls.connect_over(c, req.url().host(), trust)) {
+Result<http.Response, http.Error> Carrier.round_trip(http.Request http_request, int timeout_ms) {
+    net.Conn connection = http.open(http_request, timeout_ms)?;
+    if (http_request.url().scheme() == "https") {
+        match (tls.connect_over(connection, http_request.url().host(), trust)) {
             case Ok(tls.Conn secure): {
-                http.write_request(secure, req)?;
-                return http.read_response(secure, req.method());
+                http.write_request(secure, http_request)?;
+                return http.read_response(secure, http_request.method());
             }
-            case Err(tls.Error te): {
-                return Result<http.Response, http.Error>.Err(from_tls(te));
+            case Err(tls.Error tls_error): {
+                return Result<http.Response, http.Error>.Err(from_tls(tls_error));
             }
         }
     }
-    http.write_request(c, req)?;
-    return http.read_response(c, req.method());
+    http.write_request(connection, http_request)?;
+    return http.read_response(connection, http_request.method());
 }
 
 /// `GET url`, with the body read and the connection closed, over TLS for an
@@ -169,6 +169,6 @@ pub Result<http.Response, http.Error> get(str url, tls.Trust trust = tls.Trust.S
 
 /// `http.fetch`, for `https://` as well. `trust` is whom an `https` server
 /// must prove it is; it is ignored by `http://` URLs.
-pub Result<http.Response, http.Error> fetch(http.Request req, int redirects = http.MAX_REDIRECTS, int timeout_ms = http.TIMEOUT_MS, tls.Trust trust = tls.Trust.SystemRoots) {
-    return http.fetch_via(Carrier(trust), req, redirects: redirects, timeout_ms: timeout_ms);
+pub Result<http.Response, http.Error> fetch(http.Request http_request, int redirects = http.MAX_REDIRECTS, int timeout_ms = http.TIMEOUT_MS, tls.Trust trust = tls.Trust.SystemRoots) {
+    return http.fetch_via(Carrier(trust), http_request, redirects: redirects, timeout_ms: timeout_ms);
 }

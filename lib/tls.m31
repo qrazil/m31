@@ -917,7 +917,7 @@ bytes extension(int kind, bytes data) {
     return out;
 }
 
-bool all_zero(bytes data) {
+bool is_all_zero(bytes data) {
     int accumulated = 0;
     for (int index in 0 .. data.size()) {
         accumulated = accumulated | data[index];
@@ -934,19 +934,19 @@ bytes message_body(bytes message) {
 // message too short.
 type Reader {
     bytes data;
-    int at = 0;
+    int position = 0;
 }
 
 int Reader.remaining() {
-    return data.size() - at;
+    return data.size() - position;
 }
 
-Result<int, Error> Reader.u8() {
+Result<int, Error> Reader.octet() {
     if (remaining() < 1) {
         return Result<int, Error>.Err(Error.Malformed);
     }
-    int value = data[at];
-    at = at + 1;
+    int value = data[position];
+    position = position + 1;
     return Result<int, Error>.Ok(value);
 }
 
@@ -954,8 +954,8 @@ Result<int, Error> Reader.u16() {
     if (remaining() < 2) {
         return Result<int, Error>.Err(Error.Malformed);
     }
-    int value = data[at] * 256 + data[at + 1];
-    at = at + 2;
+    int value = data[position] * 256 + data[position + 1];
+    position = position + 2;
     return Result<int, Error>.Ok(value);
 }
 
@@ -963,13 +963,13 @@ Result<bytes, Error> Reader.take(int count) {
     if (count < 0 || remaining() < count) {
         return Result<bytes, Error>.Err(Error.Malformed);
     }
-    bytes out = data.substr(at, at + count);
-    at = at + count;
+    bytes out = data.substr(position, position + count);
+    position = position + count;
     return Result<bytes, Error>.Ok(out);
 }
 
 Result<bytes, Error> Reader.vector8() {
-    int count = u8()?;
+    int count = octet()?;
     return take(count);
 }
 
@@ -982,8 +982,8 @@ Result<bytes, Error> Reader.vector24() {
     if (remaining() < 3) {
         return Result<bytes, Error>.Err(Error.Malformed);
     }
-    int count = data[at] * 65536 + data[at + 1] * 256 + data[at + 2];
-    at = at + 3;
+    int count = data[position] * 65536 + data[position + 1] * 256 + data[position + 2];
+    position = position + 3;
     return take(count);
 }
 
@@ -1014,12 +1014,12 @@ List<tls13schedule.Suite> offered_suites() {
     return suites;
 }
 
-// `offer_tickets` adds psk_key_exchange_modes (psk_dhe_ke only), which is what
+// `should_offer_tickets` adds psk_key_exchange_modes (psk_dhe_ke only), which is what
 // lets a server send NewSessionTickets at all. `resumption`, when there, adds
 // the pre_shared_key extension for that session -- last, as RFC 8446 §4.2.11
 // requires, its binder computed over the message up to the binders. No
 // early_data extension is ever sent: there is no 0-RTT.
-bytes client_hello(str host, bytes client_random, bytes session_id, bytes public_key, bool offer_tickets, Option<tlsresume.Session> resumption, int now) {
+bytes client_hello(str host, bytes client_random, bytes session_id, bytes public_key, bool should_offer_tickets, Option<tlsresume.Session> resumption, int now) {
     bytes body = [];
     put_u16(body, VERSION_TLS12);
     body.extend(client_random);
@@ -1078,7 +1078,7 @@ bytes client_hello(str host, bytes client_random, bytes session_id, bytes public
     put_u16(share, GROUP_X25519);
     share.extend(with_u16_length(public_key));
     extensions.extend(extension(EXTENSION_KEY_SHARE, with_u16_length(share)));
-    if (offer_tickets) {
+    if (should_offer_tickets) {
         extensions.extend(extension(EXTENSION_PSK_KEY_EXCHANGE_MODES, [1, PSK_DHE_KE]));
     }
     match (resumption) {
@@ -1149,16 +1149,16 @@ bool has_downgrade_sentinel(bytes server_random) {
 // What a ServerHello settled. `legacy` says which of the two suites is the
 // one the server chose; `public_key` is its x25519 key_share, TLS 1.3 only.
 type ServerChoice {
-    bool legacy;
+    bool is_legacy;
     tls13schedule.Suite suite;
     tls12.Suite legacy_suite;
     bytes public_key;
     bytes server_random;
     // The server took the pre_shared_key we offered (identity 0).
-    bool psk_selected;
+    bool is_psk_selected;
     // TLS 1.2: the server answered our status_request, and so may send a
     // CertificateStatus message after its Certificate.
-    bool status_promised;
+    bool is_status_promised;
 }
 
 // The extensions of a ServerHello as they came, each kind at most once.
@@ -1167,7 +1167,7 @@ type HelloExtensions {
     List<bytes> datas;
 }
 
-bool HelloExtensions.has(int kind) {
+bool HelloExtensions.has_extension(int kind) {
     return kinds.contains(kind);
 }
 
@@ -1200,7 +1200,7 @@ Result<HelloExtensions, Error> parse_hello_extensions(bytes extension_block) {
 // against what the ClientHello offered. A ServerHello is TLS 1.3's when it
 // carries supported_versions = 0x0304 and TLS 1.2's when it carries none and
 // says 0x0303 (RFC 8446 §4.2.1); anything else is refused.
-Result<ServerChoice, Error> check_server_hello(bytes message, bytes session_id, bool sent_server_name, bool offered_psk) {
+Result<ServerChoice, Error> check_server_hello(bytes message, bytes session_id, bool did_send_server_name, bool did_offer_psk) {
     Reader reader = Reader(message_body(message));
     int legacy_version = reader.u16()?;
     bytes server_random = reader.take(RANDOM_SIZE)?;
@@ -1209,7 +1209,7 @@ Result<ServerChoice, Error> check_server_hello(bytes message, bytes session_id, 
     }
     bytes echoed_session_id = reader.vector8()?;
     int suite_code = reader.u16()?;
-    int compression = reader.u8()?;
+    int compression = reader.octet()?;
     bytes extension_block = [];
     if (reader.remaining() > 0) {
         extension_block = reader.vector16()?;
@@ -1221,12 +1221,12 @@ Result<ServerChoice, Error> check_server_hello(bytes message, bytes session_id, 
     if (has_downgrade_sentinel(server_random)) {
         return Result<ServerChoice, Error>.Err(Error.Downgrade);
     }
-    if (found.has(EXTENSION_SUPPORTED_VERSIONS)) {
+    if (found.has_extension(EXTENSION_SUPPORTED_VERSIONS)) {
         bytes version_data = found.data_of(EXTENSION_SUPPORTED_VERSIONS);
         if (version_data.size() != 2 || version_data[0] != 3 || version_data[1] != 4) {
             return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
         }
-        return check_tls13_hello(legacy_version, server_random, echoed_session_id, suite_code, compression, found, session_id, offered_psk);
+        return check_tls13_hello(legacy_version, server_random, echoed_session_id, suite_code, compression, found, session_id, did_offer_psk);
     }
     if (legacy_version < VERSION_TLS12) {
         return Result<ServerChoice, Error>.Err(Error.UnsupportedVersion);
@@ -1234,10 +1234,10 @@ Result<ServerChoice, Error> check_server_hello(bytes message, bytes session_id, 
     if (legacy_version != VERSION_TLS12) {
         return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
     }
-    return check_tls12_hello(server_random, echoed_session_id, suite_code, compression, found, session_id, sent_server_name);
+    return check_tls12_hello(server_random, echoed_session_id, suite_code, compression, found, session_id, did_send_server_name);
 }
 
-Result<ServerChoice, Error> check_tls13_hello(int legacy_version, bytes server_random, bytes echoed_session_id, int suite_code, int compression, HelloExtensions found, bytes session_id, bool offered_psk) {
+Result<ServerChoice, Error> check_tls13_hello(int legacy_version, bytes server_random, bytes echoed_session_id, int suite_code, int compression, HelloExtensions found, bytes session_id, bool did_offer_psk) {
     if (legacy_version != VERSION_TLS12 || !consttime.is_equal(echoed_session_id, session_id) || compression != 0) {
         return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
     }
@@ -1252,16 +1252,16 @@ Result<ServerChoice, Error> check_tls13_hello(int legacy_version, bytes server_r
         }
     }
     for (int kind in found.kinds) {
-        bool allowed = kind == EXTENSION_KEY_SHARE || kind == EXTENSION_SUPPORTED_VERSIONS || (kind == EXTENSION_PRE_SHARED_KEY && offered_psk);
-        if (!allowed) {
+        bool is_allowed = kind == EXTENSION_KEY_SHARE || kind == EXTENSION_SUPPORTED_VERSIONS || (kind == EXTENSION_PRE_SHARED_KEY && did_offer_psk);
+        if (!is_allowed) {
             return Result<ServerChoice, Error>.Err(Error.UnsupportedExtension);
         }
     }
-    if (!found.has(EXTENSION_KEY_SHARE)) {
+    if (!found.has_extension(EXTENSION_KEY_SHARE)) {
         return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
     }
-    bool psk_selected = found.has(EXTENSION_PRE_SHARED_KEY);
-    if (psk_selected) {
+    bool is_psk_selected = found.has_extension(EXTENSION_PRE_SHARED_KEY);
+    if (is_psk_selected) {
         Reader selection = Reader(found.data_of(EXTENSION_PRE_SHARED_KEY));
         int identity = selection.u16()?;
         if (selection.remaining() != 0) {
@@ -1280,7 +1280,7 @@ Result<ServerChoice, Error> check_tls13_hello(int legacy_version, bytes server_r
     if (group != GROUP_X25519 || public_key.size() != X25519_SIZE) {
         return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
     }
-    return Result<ServerChoice, Error>.Ok(ServerChoice(false, suite, tls12.Suite.EcdsaChaCha20Poly1305, public_key, server_random, psk_selected, false));
+    return Result<ServerChoice, Error>.Ok(ServerChoice(false, suite, tls12.Suite.EcdsaChaCha20Poly1305, public_key, server_random, is_psk_selected, false));
 }
 
 // RFC 5246 §7.4.1.3 with RFC 7627 and RFC 5746: the server picked one of the
@@ -1289,7 +1289,7 @@ Result<ServerChoice, Error> check_tls13_hello(int legacy_version, bytes server_r
 // for TLS 1.3's sake). Of the extensions only the four that answer ours are
 // allowed, each once; extended_master_secret is required and
 // renegotiation_info, when there, is the empty one of a first handshake.
-Result<ServerChoice, Error> check_tls12_hello(bytes server_random, bytes echoed_session_id, int suite_code, int compression, HelloExtensions found, bytes session_id, bool sent_server_name) {
+Result<ServerChoice, Error> check_tls12_hello(bytes server_random, bytes echoed_session_id, int suite_code, int compression, HelloExtensions found, bytes session_id, bool did_send_server_name) {
     if (compression != 0 || echoed_session_id.size() > SESSION_ID_SIZE) {
         return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
     }
@@ -1309,17 +1309,17 @@ Result<ServerChoice, Error> check_tls12_hello(bytes server_random, bytes echoed_
         if (kind != EXTENSION_STATUS_REQUEST && kind != EXTENSION_EC_POINT_FORMATS && kind != EXTENSION_EXTENDED_MASTER_SECRET && kind != EXTENSION_RENEGOTIATION_INFO && kind != EXTENSION_SERVER_NAME) {
             return Result<ServerChoice, Error>.Err(Error.UnsupportedExtension);
         }
-        if (kind == EXTENSION_SERVER_NAME && !sent_server_name) {
+        if (kind == EXTENSION_SERVER_NAME && !did_send_server_name) {
             return Result<ServerChoice, Error>.Err(Error.UnsupportedExtension);
         }
     }
-    if (found.has(EXTENSION_SERVER_NAME) && found.data_of(EXTENSION_SERVER_NAME).size() != 0) {
+    if (found.has_extension(EXTENSION_SERVER_NAME) && found.data_of(EXTENSION_SERVER_NAME).size() != 0) {
         return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
     }
-    if (found.has(EXTENSION_STATUS_REQUEST) && found.data_of(EXTENSION_STATUS_REQUEST).size() != 0) {
+    if (found.has_extension(EXTENSION_STATUS_REQUEST) && found.data_of(EXTENSION_STATUS_REQUEST).size() != 0) {
         return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
     }
-    if (found.has(EXTENSION_EC_POINT_FORMATS)) {
+    if (found.has_extension(EXTENSION_EC_POINT_FORMATS)) {
         Reader formats = Reader(found.data_of(EXTENSION_EC_POINT_FORMATS));
         bytes listed = formats.vector8()?;
         bool has_uncompressed = false;
@@ -1332,20 +1332,20 @@ Result<ServerChoice, Error> check_tls12_hello(bytes server_random, bytes echoed_
             return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
         }
     }
-    if (found.has(EXTENSION_RENEGOTIATION_INFO)) {
+    if (found.has_extension(EXTENSION_RENEGOTIATION_INFO)) {
         bytes info = found.data_of(EXTENSION_RENEGOTIATION_INFO);
         if (info.size() != 1 || info[0] != 0) {
             return Result<ServerChoice, Error>.Err(Error.BadRenegotiationInfo);
         }
     }
-    if (!found.has(EXTENSION_EXTENDED_MASTER_SECRET)) {
+    if (!found.has_extension(EXTENSION_EXTENDED_MASTER_SECRET)) {
         return Result<ServerChoice, Error>.Err(Error.MissingExtendedMasterSecret);
     }
     if (found.data_of(EXTENSION_EXTENDED_MASTER_SECRET).size() != 0) {
         return Result<ServerChoice, Error>.Err(Error.IllegalParameter);
     }
     bytes none = [];
-    return Result<ServerChoice, Error>.Ok(ServerChoice(true, tls13schedule.Suite.ChaCha20Poly1305Sha256, suite, none, server_random, false, found.has(EXTENSION_STATUS_REQUEST)));
+    return Result<ServerChoice, Error>.Ok(ServerChoice(true, tls13schedule.Suite.ChaCha20Poly1305Sha256, suite, none, server_random, false, found.has_extension(EXTENSION_STATUS_REQUEST)));
 }
 
 // --- the rest of the server's flight ------------------------------------------------
@@ -1373,15 +1373,15 @@ Result<void, Error> check_encrypted_extensions(bytes message) {
 }
 
 // Every certificate of the Certificate message, the server's own first. In
-// TLS 1.2 (`legacy`) the message has no request context and no per-entry
+// TLS 1.2 (`is_legacy`) the message has no request context and no per-entry
 // extensions (RFC 5246 §7.4.2). An
 // entry after the first that does not parse is dropped: only a parsed
 // certificate can take part in a path, so it can neither help nor hurt, and a
 // server that sends a spare it cannot be faulted for is still served. The
 // first entry has to parse.
-Result<List<x509.Certificate>, Error> certificate_list(bytes message, bool legacy) {
+Result<List<x509.Certificate>, Error> certificate_list(bytes message, bool is_legacy) {
     Reader reader = Reader(message_body(message));
-    if (!legacy) {
+    if (!is_legacy) {
         bytes request_context = reader.vector8()?;
         if (request_context.size() != 0) {
             return Result<List<x509.Certificate>, Error>.Err(Error.Malformed);
@@ -1396,7 +1396,7 @@ Result<List<x509.Certificate>, Error> certificate_list(bytes message, bool legac
     int count = 0;
     while (entries.remaining() > 0) {
         bytes encoded = entries.vector24()?;
-        if (!legacy) {
+        if (!is_legacy) {
             bytes entry_extensions = entries.vector16()?;
         }
         match (x509.parse(encoded)) {
@@ -1572,7 +1572,7 @@ Result<List<x509.Certificate>, Error> check_chain(List<x509.Certificate> present
 }
 
 // Whether `trust` demands a stapled response of every server.
-bool demands_staple(Trust trust) {
+bool needs_staple(Trust trust) {
     match (trust) {
         case PinnedKey(bytes pinned): {
             return false;
@@ -1599,17 +1599,17 @@ Result<int, Error> check_revocation(Trust trust, List<x509.Certificate> path, Op
         return Result<int, Error>.Ok(-1);
     }
     x509.Certificate leaf = path[0];
-    bool required = leaf.must_staple || demands_staple(trust);
+    bool is_required = leaf.needs_staple || needs_staple(trust);
     match (staple) {
         case None: {
-            if (required) {
+            if (is_required) {
                 return Result<int, Error>.Err(Error.StapleRequired);
             }
             return Result<int, Error>.Ok(-1);
         }
         case Some(bytes response): {
             if (path.size() < 2) {
-                if (required) {
+                if (is_required) {
                     return Result<int, Error>.Err(Error.StapleRequired);
                 }
                 return Result<int, Error>.Ok(-1);
@@ -1624,7 +1624,7 @@ Result<int, Error> check_revocation(Trust trust, List<x509.Certificate> path, Op
                             return Result<int, Error>.Err(Error.CertificateRevoked);
                         }
                         case Unsuccessful: {
-                            if (required) {
+                            if (is_required) {
                                 return Result<int, Error>.Err(Error.StapleRequired);
                             }
                             return Result<int, Error>.Ok(-1);
@@ -1702,7 +1702,7 @@ Result<Option<bytes>, Error> stapled_response(bytes message) {
 // TLS 1.3 as extension data: the OCSP response inside.
 Result<bytes, Error> certificate_status(bytes data) {
     Reader reader = Reader(data);
-    int status_type = reader.u8()?;
+    int status_type = reader.octet()?;
     if (status_type != STATUS_TYPE_OCSP) {
         return Result<bytes, Error>.Err(Error.Malformed);
     }
@@ -1723,8 +1723,8 @@ bytes certificate_verify_content(bytes transcript_hash) {
     return content;
 }
 
-Result<void, Error> verify_signature(ecdsa.Curve curve, str curve_oid, x509.Certificate leaf, bytes digest, bytes signature) {
-    if (leaf.public_key.algorithm != x509.OID_EC_PUBLIC_KEY || leaf.public_key.curve != curve_oid) {
+Result<void, Error> verify_signature(ecdsa.Curve curve, str curve_object_id, x509.Certificate leaf, bytes digest, bytes signature) {
+    if (leaf.public_key.algorithm != x509.OBJECT_ID_EC_PUBLIC_KEY || leaf.public_key.curve != curve_object_id) {
         return Result<void, Error>.Err(Error.UnsupportedSignature);
     }
     match (ecdsa.parse_public_key(curve, leaf.public_key.key_bytes)) {
@@ -1732,7 +1732,7 @@ Result<void, Error> verify_signature(ecdsa.Curve curve, str curve_oid, x509.Cert
             return Result<void, Error>.Err(Error.BadCertificate);
         }
         case Some(ecdsa.PublicKey key): {
-            if (!ecdsa.verify_der(curve, key, digest, signature)) {
+            if (!ecdsa.is_valid_der_signature(curve, key, digest, signature)) {
                 return Result<void, Error>.Err(Error.BadSignature);
             }
             return Result<void, Error>.Ok;
@@ -1741,7 +1741,7 @@ Result<void, Error> verify_signature(ecdsa.Curve curve, str curve_oid, x509.Cert
 }
 
 Result<void, Error> verify_rsa_pss(x509.Certificate leaf, rsa.Hash hash, bytes digest, bytes signature) {
-    if (leaf.public_key.algorithm != x509.OID_RSA_ENCRYPTION) {
+    if (leaf.public_key.algorithm != x509.OBJECT_ID_RSA_ENCRYPTION) {
         return Result<void, Error>.Err(Error.UnsupportedSignature);
     }
     match (rsa.parse_public_key(leaf.public_key.modulus, leaf.public_key.public_exponent)) {
@@ -1749,7 +1749,7 @@ Result<void, Error> verify_rsa_pss(x509.Certificate leaf, rsa.Hash hash, bytes d
             return Result<void, Error>.Err(Error.BadCertificate);
         }
         case Some(rsa.PublicKey key): {
-            if (!rsa.verify_pss(key, hash, digest, signature)) {
+            if (!rsa.is_valid_pss_signature(key, hash, digest, signature)) {
                 return Result<void, Error>.Err(Error.BadSignature);
             }
             return Result<void, Error>.Ok;
@@ -1758,7 +1758,7 @@ Result<void, Error> verify_rsa_pss(x509.Certificate leaf, rsa.Hash hash, bytes d
 }
 
 Result<void, Error> verify_rsa_pkcs1(x509.Certificate leaf, rsa.Hash hash, bytes digest, bytes signature) {
-    if (leaf.public_key.algorithm != x509.OID_RSA_ENCRYPTION) {
+    if (leaf.public_key.algorithm != x509.OBJECT_ID_RSA_ENCRYPTION) {
         return Result<void, Error>.Err(Error.UnsupportedSignature);
     }
     match (rsa.parse_public_key(leaf.public_key.modulus, leaf.public_key.public_exponent)) {
@@ -1766,7 +1766,7 @@ Result<void, Error> verify_rsa_pkcs1(x509.Certificate leaf, rsa.Hash hash, bytes
             return Result<void, Error>.Err(Error.BadCertificate);
         }
         case Some(rsa.PublicKey key): {
-            if (!rsa.verify_pkcs1_v15(key, hash, digest, signature)) {
+            if (!rsa.is_valid_pkcs1_v15_signature(key, hash, digest, signature)) {
                 return Result<void, Error>.Err(Error.BadSignature);
             }
             return Result<void, Error>.Ok;
@@ -1780,7 +1780,7 @@ Result<void, Error> verify_ed25519_signature(x509.Certificate leaf, bytes conten
     if (leaf.public_key.algorithm != x509.OBJECT_ID_ED25519) {
         return Result<void, Error>.Err(Error.UnsupportedSignature);
     }
-    if (!ed25519.verify(leaf.public_key.key_bytes, content, signature)) {
+    if (!ed25519.is_valid_signature(leaf.public_key.key_bytes, content, signature)) {
         return Result<void, Error>.Err(Error.BadSignature);
     }
     return Result<void, Error>.Ok;
@@ -1795,10 +1795,10 @@ Result<void, Error> check_certificate_verify(bytes message, x509.Certificate lea
     }
     bytes content = certificate_verify_content(transcript_hash);
     if (scheme == SCHEME_ECDSA_P256_SHA256) {
-        return verify_signature(ecdsa.p256(), x509.OID_CURVE_P256, leaf, sha256.sum(content), signature);
+        return verify_signature(ecdsa.p256(), x509.OBJECT_ID_CURVE_P256, leaf, sha256.sum(content), signature);
     }
     if (scheme == SCHEME_ECDSA_P384_SHA384) {
-        return verify_signature(ecdsa.p384(), x509.OID_CURVE_P384, leaf, sha512.sum384(content), signature);
+        return verify_signature(ecdsa.p384(), x509.OBJECT_ID_CURVE_P384, leaf, sha512.sum384(content), signature);
     }
     if (scheme == SCHEME_ED25519) {
         return verify_ed25519_signature(leaf, content, signature);
@@ -1861,8 +1861,8 @@ Result<bytes, Error> next_handshake(tls13record.Connection record) {
 // resumption, and, for a TLS 1.3 handshake, what NewSessionTickets turn into
 // sessions.
 type Outcome {
-    bool resumed = false;
-    bool ticketable = false;
+    bool is_resumed = false;
+    bool is_ticketable = false;
     tls13schedule.Suite suite = tls13schedule.Suite.ChaCha20Poly1305Sha256;
     bytes resumption_master = [];
     int valid_until = 0;
@@ -1932,36 +1932,36 @@ Result<void, Error> run_handshake(tls13record.Connection record, str host, Trust
     bytes client_random = source.octets(RANDOM_SIZE);
     str key = session_key(trust, identity);
     Option<tlsresume.Session> offered = cache.take(host, key, now);
-    bool offered_psk = false;
+    bool did_offer_psk = false;
     match (offered) {
         case Some(tlsresume.Session candidate): {
-            offered_psk = true;
+            did_offer_psk = true;
         }
         case None: {
         }
     }
-    bytes hello = client_hello(host, client_random, session_id, x25519.base_point(secret), cache.enabled(), offered, now);
+    bytes hello = client_hello(host, client_random, session_id, x25519.base_point(secret), cache.is_enabled(), offered, now);
     tls13schedule.Transcript transcript = tls13schedule.transcript();
     transcript.add(hello);
     lift(record.send_handshake(hello))?;
     bytes server_hello = next_handshake(record)?;
     require_type(server_hello, HANDSHAKE_SERVER_HELLO)?;
-    ServerChoice choice = check_server_hello(server_hello, session_id, !is_ip_literal(host), offered_psk)?;
+    ServerChoice choice = check_server_hello(server_hello, session_id, !is_ip_literal(host), did_offer_psk)?;
     transcript.add(server_hello);
-    if (choice.legacy) {
+    if (choice.is_legacy) {
         return run_handshake_12(record, choice, transcript, client_random, secret, source, host, trust, anchors, now, outcome);
     }
     tls13schedule.Suite suite = choice.suite;
     bytes server_share = choice.public_key;
     record.use_suite(suite);
     bytes shared = x25519.x25519(secret, server_share);
-    if (all_zero(shared)) {
+    if (is_all_zero(shared)) {
         return Result<void, Error>.Err(Error.IllegalParameter);
     }
     lift(record.send_change_cipher_spec())?;
     bytes psk = [];
     int valid_until = now + tlsresume.MAX_LIFETIME;
-    if (choice.psk_selected) {
+    if (choice.is_psk_selected) {
         match (offered) {
             case Some(tlsresume.Session accepted): {
                 if (accepted.suite.code() != suite.code()) {
@@ -1989,8 +1989,8 @@ Result<void, Error> run_handshake(tls13record.Connection record, str host, Trust
     // A resumed handshake is authenticated by the PSK alone: no Certificate,
     // no CertificateRequest, no CertificateVerify (RFC 8446 §2.2). A full one
     // validates the server's chain exactly as before.
-    bool requested = false;
-    if (!choice.psk_selected) {
+    bool is_requested = false;
+    if (!choice.is_psk_selected) {
         bytes certificate_message = next_handshake(record)?;
         if (certificate_message[0] == HANDSHAKE_CERTIFICATE_REQUEST) {
             match (identity) {
@@ -2002,7 +2002,7 @@ Result<void, Error> run_handshake(tls13record.Connection record, str host, Trust
                 }
             }
             transcript.add(certificate_message);
-            requested = true;
+            is_requested = true;
             certificate_message = next_handshake(record)?;
         }
         require_type(certificate_message, HANDSHAKE_CERTIFICATE)?;
@@ -2037,7 +2037,7 @@ Result<void, Error> run_handshake(tls13record.Connection record, str host, Trust
     bytes master = tls13schedule.master_secret(suite, handshake);
     bytes client_application = tls13schedule.client_application_traffic_secret(suite, master, finished_hash);
     bytes server_application = tls13schedule.server_application_traffic_secret(suite, master, finished_hash);
-    if (requested) {
+    if (is_requested) {
         match (identity) {
             case Some(clientcert.Identity presenting): {
                 send_client_certificate(record, transcript, suite, presenting)?;
@@ -2054,8 +2054,8 @@ Result<void, Error> run_handshake(tls13record.Connection record, str host, Trust
     record.install_write_keys(client_application);
     lift(record.install_read_keys(server_application))?;
     transcript.add(client_finished);
-    outcome.resumed = choice.psk_selected;
-    outcome.ticketable = true;
+    outcome.is_resumed = choice.is_psk_selected;
+    outcome.is_ticketable = true;
     outcome.suite = suite;
     outcome.resumption_master = tls13schedule.resumption_master_secret(suite, master, transcript.digest(suite));
     outcome.valid_until = valid_until;
@@ -2083,8 +2083,8 @@ Result<void, Error> check_certificate_request(bytes message, clientcert.Identity
     }
     Reader block = Reader(extensions);
     List<int> seen = [];
-    bool found = false;
-    bool usable = false;
+    bool is_found = false;
+    bool is_usable = false;
     while (block.remaining() > 0) {
         int kind = block.u16()?;
         bytes data = block.vector16()?;
@@ -2095,7 +2095,7 @@ Result<void, Error> check_certificate_request(bytes message, clientcert.Identity
         }
         seen.push(kind);
         if (kind == EXTENSION_SIGNATURE_ALGORITHMS) {
-            found = true;
+            is_found = true;
             Reader list = Reader(data);
             bytes pairs = list.vector16()?;
             if (list.remaining() != 0 || pairs.size() == 0 || pairs.size() % 2 != 0) {
@@ -2103,15 +2103,15 @@ Result<void, Error> check_certificate_request(bytes message, clientcert.Identity
             }
             for (int index in 0 .. pairs.size() / 2) {
                 if (pairs[2 * index] * 256 + pairs[2 * index + 1] == identity.signature_scheme()) {
-                    usable = true;
+                    is_usable = true;
                 }
             }
         }
     }
-    if (!found) {
+    if (!is_found) {
         return Result<void, Error>.Err(Error.IllegalParameter);
     }
-    if (!usable) {
+    if (!is_usable) {
         return Result<void, Error>.Err(Error.ClientCertificateUnusable);
     }
     return Result<void, Error>.Ok;
@@ -2181,11 +2181,11 @@ Result<void, Error> verify_ecdsa_12(x509.Certificate leaf, int scheme, bytes con
     if (scheme == SCHEME_ECDSA_P384_SHA384) {
         digest = sha512.sum384(content);
     }
-    if (leaf.public_key.algorithm == x509.OID_EC_PUBLIC_KEY && leaf.public_key.curve == x509.OID_CURVE_P256) {
-        return verify_signature(ecdsa.p256(), x509.OID_CURVE_P256, leaf, digest, signature);
+    if (leaf.public_key.algorithm == x509.OBJECT_ID_EC_PUBLIC_KEY && leaf.public_key.curve == x509.OBJECT_ID_CURVE_P256) {
+        return verify_signature(ecdsa.p256(), x509.OBJECT_ID_CURVE_P256, leaf, digest, signature);
     }
-    if (leaf.public_key.algorithm == x509.OID_EC_PUBLIC_KEY && leaf.public_key.curve == x509.OID_CURVE_P384) {
-        return verify_signature(ecdsa.p384(), x509.OID_CURVE_P384, leaf, digest, signature);
+    if (leaf.public_key.algorithm == x509.OBJECT_ID_EC_PUBLIC_KEY && leaf.public_key.curve == x509.OBJECT_ID_CURVE_P384) {
+        return verify_signature(ecdsa.p384(), x509.OBJECT_ID_CURVE_P384, leaf, digest, signature);
     }
     return Result<void, Error>.Err(Error.UnsupportedSignature);
 }
@@ -2229,10 +2229,10 @@ Result<void, Error> verify_key_exchange_signature(tls12.Suite suite, x509.Certif
 Result<KeyExchange, Error> check_server_key_exchange(bytes message, tls12.Suite suite, x509.Certificate leaf, bytes client_random, bytes server_random) {
     bytes body = message_body(message);
     Reader reader = Reader(body);
-    int curve_type = reader.u8()?;
+    int curve_type = reader.octet()?;
     int group = reader.u16()?;
     bytes point = reader.vector8()?;
-    int params_size = reader.at;
+    int parameters_size = reader.position;
     int scheme = reader.u16()?;
     bytes signature = reader.vector16()?;
     if (reader.remaining() != 0) {
@@ -2244,7 +2244,7 @@ Result<KeyExchange, Error> check_server_key_exchange(bytes message, tls12.Suite 
     if (!(group == GROUP_X25519 && point.size() == X25519_SIZE) && !(group == GROUP_SECP256R1 && point.size() == P256_POINT_SIZE)) {
         return Result<KeyExchange, Error>.Err(Error.IllegalParameter);
     }
-    bytes content = tls12.signed_params(client_random, server_random, body.substr(0, params_size));
+    bytes content = tls12.signed_parameters(client_random, server_random, body.substr(0, parameters_size));
     verify_key_exchange_signature(suite, leaf, scheme, content, signature)?;
     return Result<KeyExchange, Error>.Ok(KeyExchange(group, point));
 }
@@ -2259,7 +2259,7 @@ type ClientShare {
 Result<ClientShare, Error> client_key_share(KeyExchange exchange, bytes x25519_secret, random.System source) {
     if (exchange.group == GROUP_X25519) {
         bytes shared = x25519.x25519(x25519_secret, exchange.point);
-        if (all_zero(shared)) {
+        if (is_all_zero(shared)) {
             return Result<ClientShare, Error>.Err(Error.IllegalParameter);
         }
         return Result<ClientShare, Error>.Ok(ClientShare(x25519.base_point(x25519_secret), shared));
@@ -2306,7 +2306,7 @@ Result<void, Error> run_handshake_12(tls13record.Connection record, ServerChoice
     bytes exchange_message = next_handshake(record)?;
     Option<bytes> staple = Option<bytes>.None;
     if (exchange_message[0] == HANDSHAKE_CERTIFICATE_STATUS) {
-        if (!choice.status_promised) {
+        if (!choice.is_status_promised) {
             return Result<void, Error>.Err(Error.UnexpectedMessage);
         }
         staple = Option<bytes>.Some(certificate_status(message_body(exchange_message))?);
@@ -2496,18 +2496,18 @@ pub Result<Conn, Error> connect_over_deadline(net.Conn socket, str host, Trust t
     return opened;
 }
 
-Result<Conn, Error> handshake_over(io.Stream socket, str host, Trust trust, List<x509.Certificate> anchors, int now, bool fixed_clock, tlsresume.SessionCache cache, Option<clientcert.Identity> identity) {
+Result<Conn, Error> handshake_over(io.Stream socket, str host, Trust trust, List<x509.Certificate> anchors, int now, bool is_clock_fixed, tlsresume.SessionCache cache, Option<clientcert.Identity> identity) {
     tls13record.Connection record = tls13record.connection(socket);
     Outcome outcome = Outcome();
     match (run_handshake(record, host, trust, anchors, now, cache, outcome, identity)) {
         case Ok: {
-            Conn conn = Conn(record, cache);
-            conn.host = host;
-            conn.trust_key = session_key(trust, identity);
-            conn.outcome = outcome;
-            conn.clock = now;
-            conn.fixed_clock = fixed_clock;
-            return Result<Conn, Error>.Ok(conn);
+            Conn connection = Conn(record, cache);
+            connection.host = host;
+            connection.trust_key = session_key(trust, identity);
+            connection.outcome = outcome;
+            connection.clock = now;
+            connection.is_fixed_clock = is_clock_fixed;
+            return Result<Conn, Error>.Ok(connection);
         }
         case Err(Error handshake_error): {
             return Result<Conn, Error>.Err(abort_handshake(record, handshake_error));
@@ -2525,34 +2525,34 @@ pub type Conn {
     // pending[offset ..] has been decrypted and not handed out.
     bytes pending = [];
     int offset = 0;
-    bool at_end = false;
-    bool closed = false;
-    bool failed = false;
+    bool is_at_end = false;
+    bool is_closed = false;
+    bool is_failed = false;
     Error failure = Error.Closed;
     // For filing NewSessionTickets as sessions; see `file_tickets`.
     str host = "";
     str trust_key = "";
     Outcome outcome = Outcome();
     int clock = 0;
-    bool fixed_clock = false;
+    bool is_fixed_clock = false;
 }
 
 /// Whether this connection was resumed from a ticket: the server accepted the
 /// PSK, and no certificate was exchanged on it.
-pub bool Conn.resumed() {
-    return outcome.resumed;
+pub bool Conn.is_resumed() {
+    return outcome.is_resumed;
 }
 
 /// Whether a stapled OCSP response vouched for the server's certificate on
 /// this connection: present, signed by its issuer or an authorised responder,
 /// fresh, and saying "good". `false` on a resumed connection (no certificate
 /// was exchanged) and wherever the staple was absent and not required.
-pub bool Conn.stapled() {
+pub bool Conn.is_stapled() {
     return outcome.staple_expires >= 0;
 }
 
 int Conn.now() {
-    if (fixed_clock) {
+    if (is_fixed_clock) {
         return clock;
     }
     return date.now();
@@ -2582,7 +2582,7 @@ Result<void, Error> Conn.file_ticket(bytes message) {
         int kind = extensions.u16()?;
         bytes data = extensions.vector16()?;
     }
-    if (lifetime == 0 || !cache.enabled()) {
+    if (lifetime == 0 || !cache.is_enabled()) {
         return Result<void, Error>.Ok;
     }
     bytes psk = tls13schedule.resumption_psk(outcome.suite, outcome.resumption_master, nonce);
@@ -2593,7 +2593,7 @@ Result<void, Error> Conn.file_ticket(bytes message) {
 
 Result<void, Error> Conn.file_tickets() {
     List<bytes> arrived = record.take_tickets();
-    if (!outcome.ticketable) {
+    if (!outcome.is_ticketable) {
         return Result<void, Error>.Ok;
     }
     for (bytes message in arrived) {
@@ -2605,13 +2605,13 @@ Result<void, Error> Conn.file_tickets() {
 // The next chunk of application data, or an empty one once the server has
 // said it is finished.
 Result<bytes, io.Error> Conn.next_chunk() {
-    if (failed) {
+    if (is_failed) {
         return Result<bytes, io.Error>.Err(io.Error.Other(errno_of(failure)));
     }
-    if (closed) {
+    if (is_closed) {
         return Result<bytes, io.Error>.Err(io.Error.Other(ERRNO_BAD_DESCRIPTOR));
     }
-    if (at_end) {
+    if (is_at_end) {
         bytes none = [];
         return Result<bytes, io.Error>.Ok(none);
     }
@@ -2626,7 +2626,7 @@ Result<bytes, io.Error> Conn.next_chunk() {
                 }
             }
             if (data.size() == 0) {
-                at_end = true;
+                is_at_end = true;
             }
             return Result<bytes, io.Error>.Ok(data);
         }
@@ -2637,7 +2637,7 @@ Result<bytes, io.Error> Conn.next_chunk() {
 }
 
 io.Error Conn.fail(Error error) {
-    failed = true;
+    is_failed = true;
     failure = error;
     return io.Error.Other(errno_of(error));
 }
@@ -2728,10 +2728,10 @@ pub Result<bytes, io.Error> Conn.read_until(bytes delimiter, int limit) {
 
 /// Sends all of `data`, returning its size. An `Err` ends the connection.
 pub Result<int, io.Error> Conn.write(bytes data) {
-    if (closed) {
+    if (is_closed) {
         trap("write on a closed connection");
     }
-    if (failed) {
+    if (is_failed) {
         return Result<int, io.Error>.Err(io.Error.Other(errno_of(failure)));
     }
     match (record.send_application(data)) {
@@ -2751,11 +2751,11 @@ pub Result<bool, io.Error> Conn.close() {
 }
 
 Result<bool, io.Error> Conn.release() {
-    if (closed) {
+    if (is_closed) {
         return Result<bool, io.Error>.Ok(true);
     }
-    closed = true;
-    if (!failed) {
+    is_closed = true;
+    if (!is_failed) {
         Result<void, tls13record.Error> notified = record.send_close_notify();
     }
     match (record.close()) {
@@ -2774,7 +2774,7 @@ void Conn.drop() {
 
 /// Why the connection stopped working, or `None` while it has not.
 pub Option<Error> Conn.last_error() {
-    if (failed) {
+    if (is_failed) {
         return Option<Error>.Some(failure);
     }
     return Option<Error>.None;

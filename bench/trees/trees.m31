@@ -16,22 +16,22 @@ Tree build(int depth) {
     return Tree.Branch(build(depth - 1), build(depth - 1));
 }
 
-int check(Tree t) {
-    match (t) {
+int check(Tree tree) {
+    match (tree) {
         case Leaf: {
             return 1;
         }
-        case Branch(Tree l, Tree r): {
-            return 1 + check(l) + check(r);
+        case Branch(Tree left, Tree right): {
+            return 1 + check(left) + check(right);
         }
     }
 }
 
 int depth = 18;
 int total = 0;
-int i = 0;
-while (i < 16) {
+int index = 0;
+while (index < 16) {
     total = total + check(build(depth));
-    i = i + 1;
+    index = index + 1;
 }
 print(total);

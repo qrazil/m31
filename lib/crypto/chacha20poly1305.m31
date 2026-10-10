@@ -101,89 +101,89 @@ int byte_at(int x, int shift) {
     return x >> shift & 0xFF;
 }
 
-// Four octets of `b` starting at `at`, little-endian -- the order every
+// Four octets of `data` starting at `offset`, little-endian -- the order every
 // ChaCha20 and Poly1305 word in this file is read in. Never masked with
 // `& 0xFFFF_FFFF`: each term is already narrower than where the next one
 // starts (a byte, shifted by at most 24), so the OR can never carry into a
 // bit the next term also sets.
-int word_le(bytes b, int at) {
-    return b[at] | (b[at + 1] << 8) | (b[at + 2] << 16) | (b[at + 3] << 24);
+int word_le(bytes data, int offset) {
+    return data[offset] | (data[offset + 1] << 8) | (data[offset + 2] << 16) | (data[offset + 3] << 24);
 }
 
 // A 32-bit word appended little-endian.
-void push_word_le(bytes out, int v) {
-    out.push(v & 0xFF);
-    out.push(byte_at(v, 8));
-    out.push(byte_at(v, 16));
-    out.push(byte_at(v, 24));
+void push_word_le(bytes out, int word) {
+    out.push(word & 0xFF);
+    out.push(byte_at(word, 8));
+    out.push(byte_at(word, 16));
+    out.push(byte_at(word, 24));
 }
 
-// `x` rotated left by `n` bits, as a 32-bit word. The mask is only needed on
+// `x` rotated left by `bit_count` bits, as a 32-bit word. The mask is only needed on
 // the left-shifted half -- `x >> (32 - n)` is already below 2^32 because `x`
 // is -- but it is applied to the whole OR anyway, the way `apps/git/sha1.m31`
 // masks its rotate, so every rotate in this file has the same shape.
-int rotl32(int x, int n) {
-    return (x << n | x >> (32 - n)) & 0xFFFF_FFFF;
+int rotl32(int x, int bit_count) {
+    return (x << bit_count | x >> (32 - bit_count)) & 0xFFFF_FFFF;
 }
 
 // One quarter round, RFC 8439 §2.1, done in place on the sixteen words of
-// `x`. `Array<int>` is a reference type (reference §3.9), so the four
-// indices this touches are visible to the caller without `x` being returned.
-void quarter_round(Array<int> x, int a, int b, int c, int d) {
-    x[a] = x[a] + x[b] & 0xFFFF_FFFF;
-    x[d] = rotl32(x[d] ^ x[a], 16);
-    x[c] = x[c] + x[d] & 0xFFFF_FFFF;
-    x[b] = rotl32(x[b] ^ x[c], 12);
-    x[a] = x[a] + x[b] & 0xFFFF_FFFF;
-    x[d] = rotl32(x[d] ^ x[a], 8);
-    x[c] = x[c] + x[d] & 0xFFFF_FFFF;
-    x[b] = rotl32(x[b] ^ x[c], 7);
+// `state`. `Array<int>` is a reference type (reference §3.9), so the four
+// indices this touches are visible to the caller without `state` being returned.
+void quarter_round(Array<int> state, int index_a, int index_b, int index_c, int index_d) {  // RFC 8439 §2.1: d
+    state[index_a] = state[index_a] + state[index_b] & 0xFFFF_FFFF;
+    state[index_d] = rotl32(state[index_d] ^ state[index_a], 16);
+    state[index_c] = state[index_c] + state[index_d] & 0xFFFF_FFFF;
+    state[index_b] = rotl32(state[index_b] ^ state[index_c], 12);
+    state[index_a] = state[index_a] + state[index_b] & 0xFFFF_FFFF;
+    state[index_d] = rotl32(state[index_d] ^ state[index_a], 8);
+    state[index_c] = state[index_c] + state[index_d] & 0xFFFF_FFFF;
+    state[index_b] = rotl32(state[index_b] ^ state[index_c], 7);
 }
 
 // The twenty-round permutation and the final "add the original input words"
 // step, RFC 8439 §2.3, shared by both word layouts below: everything that
-// does not depend on how words 12-15 were assigned. `x`'s first twelve
+// does not depend on how words 12-15 were assigned. `state`'s first twelve
 // words (the constant and the key) must already be set by the caller.
-bytes chacha20_core(Array<int> x) {
+bytes chacha20_core(Array<int> state) {
     // The starting state, kept aside to add back in once the rounds are
     // done (RFC 8439 §2.3's "adding the original input words") rather than
     // reconstructed, per §3's implementation advice.
-    Array<int> orig = clone(x);
+    Array<int> orig = clone(state);
     for (int round in 0 .. 10) {
         // The four "column" quarter rounds, then the four "diagonal" ones --
         // together, one full double-round of the twenty this function runs.
-        quarter_round(x, 0, 4, 8, 12);
-        quarter_round(x, 1, 5, 9, 13);
-        quarter_round(x, 2, 6, 10, 14);
-        quarter_round(x, 3, 7, 11, 15);
-        quarter_round(x, 0, 5, 10, 15);
-        quarter_round(x, 1, 6, 11, 12);
-        quarter_round(x, 2, 7, 8, 13);
-        quarter_round(x, 3, 4, 9, 14);
+        quarter_round(state, 0, 4, 8, 12);
+        quarter_round(state, 1, 5, 9, 13);
+        quarter_round(state, 2, 6, 10, 14);
+        quarter_round(state, 3, 7, 11, 15);
+        quarter_round(state, 0, 5, 10, 15);
+        quarter_round(state, 1, 6, 11, 12);
+        quarter_round(state, 2, 7, 8, 13);
+        quarter_round(state, 3, 4, 9, 14);
     }
     bytes out = [];
     for (int i in 0 .. 16) {
-        push_word_le(out, x[i] + orig[i] & 0xFFFF_FFFF);
+        push_word_le(out, state[i] + orig[i] & 0xFFFF_FFFF);
     }
     return out;
 }
 
-Array<int> chacha20_init(bytes key, bytes nonce, int nonce_len) {
+Array<int> chacha20_init(bytes key, bytes nonce, int nonce_length) {
     if (key.size() != 32) {
         trap("chacha20: key must be 32 bytes");
     }
-    if (nonce.size() != nonce_len) {
-        trap("chacha20: nonce must be " + nonce_len.to_str() + " bytes");
+    if (nonce.size() != nonce_length) {
+        trap("chacha20: nonce must be " + nonce_length.to_str() + " bytes");
     }
-    Array<int> x = [0; 16];
-    x[0] = CHACHA_CONST[0];
-    x[1] = CHACHA_CONST[1];
-    x[2] = CHACHA_CONST[2];
-    x[3] = CHACHA_CONST[3];
+    Array<int> state = [0; 16];
+    state[0] = CHACHA_CONST[0];
+    state[1] = CHACHA_CONST[1];
+    state[2] = CHACHA_CONST[2];
+    state[3] = CHACHA_CONST[3];
     for (int i in 0 .. 8) {
-        x[4 + i] = word_le(key, i * 4);
+        state[4 + i] = word_le(key, i * 4);
     }
-    return x;
+    return state;
 }
 
 /// The ChaCha20 block function, RFC 8439 §2.3: one 64-octet keystream block
@@ -197,12 +197,12 @@ pub bytes block(bytes key, int counter, bytes nonce) {
     if (counter < 0 || counter > 0xFFFF_FFFF) {
         trap("chacha20: counter must fit in 32 bits");
     }
-    Array<int> x = chacha20_init(key, nonce, 12);
-    x[12] = counter;
-    x[13] = word_le(nonce, 0);
-    x[14] = word_le(nonce, 4);
-    x[15] = word_le(nonce, 8);
-    return chacha20_core(x);
+    Array<int> state = chacha20_init(key, nonce, 12);
+    state[12] = counter;
+    state[13] = word_le(nonce, 0);
+    state[14] = word_le(nonce, 4);
+    state[15] = word_le(nonce, 8);
+    return chacha20_core(state);
 }
 
 /// The ChaCha20 block function, original (pre-IETF) layout: one 64-octet
@@ -217,12 +217,12 @@ pub bytes openssh_block(bytes key, int counter, bytes nonce) {
     if (counter < 0) {
         trap("chacha20: counter must not be negative");
     }
-    Array<int> x = chacha20_init(key, nonce, 8);
-    x[12] = counter & 0xFFFF_FFFF;
-    x[13] = counter >> 32 & 0xFFFF_FFFF;
-    x[14] = word_le(nonce, 0);
-    x[15] = word_le(nonce, 4);
-    return chacha20_core(x);
+    Array<int> state = chacha20_init(key, nonce, 8);
+    state[12] = counter & 0xFFFF_FFFF;
+    state[13] = counter >> 32 & 0xFFFF_FFFF;
+    state[14] = word_le(nonce, 0);
+    state[15] = word_le(nonce, 4);
+    return chacha20_core(state);
 }
 
 /// ChaCha20 encryption, RFC 8439 §2.4: `data` XORed with the keystream that
@@ -231,21 +231,21 @@ pub bytes openssh_block(bytes key, int counter, bytes nonce) {
 /// keystream does not depend on `data`.
 pub bytes encrypt(bytes key, int counter, bytes nonce, bytes data) {
     bytes out = [];
-    int n = data.size();
-    int i = 0;
+    int data_length = data.size();
+    int block_start = 0;
     int ctr = counter;
-    while (i < n) {
-        bytes ks = block(key, ctr, nonce);
-        int end = i + 64;
-        if (end > n) {
-            end = n;
+    while (block_start < data_length) {
+        bytes keystream = block(key, ctr, nonce);
+        int end = block_start + 64;
+        if (end > data_length) {
+            end = data_length;
         }
-        int j = i;
-        while (j < end) {
-            out.push(data[j] ^ ks[j - i]);
-            j = j + 1;
+        int byte_position = block_start;
+        while (byte_position < end) {
+            out.push(data[byte_position] ^ keystream[byte_position - block_start]);
+            byte_position = byte_position + 1;
         }
-        i = end;
+        block_start = end;
         ctr = ctr + 1;
     }
     return out;
@@ -253,74 +253,74 @@ pub bytes encrypt(bytes key, int counter, bytes nonce, bytes data) {
 
 // --- Poly1305 ----------------------------------------------------------------
 
-// One 16-octet block of the message, folded into the accumulator `h` and
+// One 16-octet block of the message, folded into the accumulator `accumulator` and
 // reduced back into five 26-bit limbs. `hibit` is `1 << 24` for a full
 // 16-octet block (the implicit 2^128 that RFC 8439 §2.5.1's pseudocode adds
 // before every block) and `0` for the last, short block -- there the
-// trailing `0x01` the caller has already written into `m` stands for it
+// trailing `0x01` the caller has already written into `message_block` stands for it
 // instead, because a block shorter than 17 octets has room for that byte and
-// a full one does not. `h`, like `Array<int>` above, is mutated in place.
-void poly1305_block(Array<int> h, int r0, int r1, int r2, int r3, int r4, int s1, int s2, int s3, int s4, bytes m, int at, int hibit) {
-    int h0 = h[0];
-    int h1 = h[1];
-    int h2 = h[2];
-    int h3 = h[3];
-    int h4 = h[4];
-    int t0 = word_le(m, at);
-    int t1 = word_le(m, at + 4);
-    int t2 = word_le(m, at + 8);
-    int t3 = word_le(m, at + 12);
+// a full one does not. `accumulator`, like `Array<int>` above, is mutated in place.
+void poly1305_block(Array<int> accumulator, int multiplier_0, int multiplier_1, int multiplier_2, int multiplier_3, int multiplier_4, int scaled_1, int scaled_2, int scaled_3, int scaled_4, bytes message_block, int offset, int hibit) {  // RFC 8439 §2.5: r
+    int accumulator_0 = accumulator[0];
+    int accumulator_1 = accumulator[1];
+    int accumulator_2 = accumulator[2];
+    int accumulator_3 = accumulator[3];
+    int accumulator_4 = accumulator[4];
+    int word_0 = word_le(message_block, offset);
+    int word_1 = word_le(message_block, offset + 4);
+    int word_2 = word_le(message_block, offset + 8);
+    int word_3 = word_le(message_block, offset + 12);
     // The 16-octet block, read as five overlapping 26-bit windows of the
     // 128-bit little-endian number it is -- the same overlap `r`'s clamp
-    // below reads through, just without a mask on `t0`/`t3`'s own extremes.
-    h0 = h0 + (t0 & 0x03FF_FFFF);
-    h1 = h1 + ((t0 >> 26 | t1 << 6) & 0x03FF_FFFF);
-    h2 = h2 + ((t1 >> 20 | t2 << 12) & 0x03FF_FFFF);
-    h3 = h3 + ((t2 >> 14 | t3 << 18) & 0x03FF_FFFF);
-    h4 = h4 + (t3 >> 8 | hibit);
+    // below reads through, just without a mask on `word_0`/`word_3`'s own extremes.
+    accumulator_0 = accumulator_0 + (word_0 & 0x03FF_FFFF);
+    accumulator_1 = accumulator_1 + ((word_0 >> 26 | word_1 << 6) & 0x03FF_FFFF);
+    accumulator_2 = accumulator_2 + ((word_1 >> 20 | word_2 << 12) & 0x03FF_FFFF);
+    accumulator_3 = accumulator_3 + ((word_2 >> 14 | word_3 << 18) & 0x03FF_FFFF);
+    accumulator_4 = accumulator_4 + (word_3 >> 8 | hibit);
     // h *= r, mod 2^130 - 5, done a limb at a time: d[i] collects every
     // partial product that lands in limb i once the polynomial is expanded,
     // with the wraparound from limb 5 and up folded back in early by using
     // s[k] = r[k] * 5 in place of r[k] -- valid because 2^130 = 5 (mod p).
-    int d0 = h0 * r0 + h1 * s4 + h2 * s3 + h3 * s2 + h4 * s1;
-    int d1 = h0 * r1 + h1 * r0 + h2 * s4 + h3 * s3 + h4 * s2;
-    int d2 = h0 * r2 + h1 * r1 + h2 * r0 + h3 * s4 + h4 * s3;
-    int d3 = h0 * r3 + h1 * r2 + h2 * r1 + h3 * r0 + h4 * s4;
-    int d4 = h0 * r4 + h1 * r3 + h2 * r2 + h3 * r1 + h4 * r0;
+    int product_0 = accumulator_0 * multiplier_0 + accumulator_1 * scaled_4 + accumulator_2 * scaled_3 + accumulator_3 * scaled_2 + accumulator_4 * scaled_1;
+    int product_1 = accumulator_0 * multiplier_1 + accumulator_1 * multiplier_0 + accumulator_2 * scaled_4 + accumulator_3 * scaled_3 + accumulator_4 * scaled_2;
+    int product_2 = accumulator_0 * multiplier_2 + accumulator_1 * multiplier_1 + accumulator_2 * multiplier_0 + accumulator_3 * scaled_4 + accumulator_4 * scaled_3;
+    int product_3 = accumulator_0 * multiplier_3 + accumulator_1 * multiplier_2 + accumulator_2 * multiplier_1 + accumulator_3 * multiplier_0 + accumulator_4 * scaled_4;
+    int product_4 = accumulator_0 * multiplier_4 + accumulator_1 * multiplier_3 + accumulator_2 * multiplier_2 + accumulator_3 * multiplier_1 + accumulator_4 * multiplier_0;
     // Carry radix-2^26, left to right, folding the final carry back into
     // limb 0 multiplied by 5 (again, 2^130 = 5 mod p) rather than reducing
-    // all the way -- `h` is left slightly above its five 26-bit limbs when
+    // all the way -- `accumulator` is left slightly above its five 26-bit limbs when
     // that carry itself overflows a limb, which `poly1305_finish` accounts
     // for with its own full carry before serialising.
-    int c = d0 >> 26;
-    h0 = d0 & 0x03FF_FFFF;
-    d1 = d1 + c;
-    c = d1 >> 26;
-    h1 = d1 & 0x03FF_FFFF;
-    d2 = d2 + c;
-    c = d2 >> 26;
-    h2 = d2 & 0x03FF_FFFF;
-    d3 = d3 + c;
-    c = d3 >> 26;
-    h3 = d3 & 0x03FF_FFFF;
-    d4 = d4 + c;
-    c = d4 >> 26;
-    h4 = d4 & 0x03FF_FFFF;
-    h0 = h0 + c * 5;
-    c = h0 >> 26;
-    h0 = h0 & 0x03FF_FFFF;
-    h1 = h1 + c;
-    h[0] = h0;
-    h[1] = h1;
-    h[2] = h2;
-    h[3] = h3;
-    h[4] = h4;
+    int carry = product_0 >> 26;
+    accumulator_0 = product_0 & 0x03FF_FFFF;
+    product_1 = product_1 + carry;
+    carry = product_1 >> 26;
+    accumulator_1 = product_1 & 0x03FF_FFFF;
+    product_2 = product_2 + carry;
+    carry = product_2 >> 26;
+    accumulator_2 = product_2 & 0x03FF_FFFF;
+    product_3 = product_3 + carry;
+    carry = product_3 >> 26;
+    accumulator_3 = product_3 & 0x03FF_FFFF;
+    product_4 = product_4 + carry;
+    carry = product_4 >> 26;
+    accumulator_4 = product_4 & 0x03FF_FFFF;
+    accumulator_0 = accumulator_0 + carry * 5;
+    carry = accumulator_0 >> 26;
+    accumulator_0 = accumulator_0 & 0x03FF_FFFF;
+    accumulator_1 = accumulator_1 + carry;
+    accumulator[0] = accumulator_0;
+    accumulator[1] = accumulator_1;
+    accumulator[2] = accumulator_2;
+    accumulator[3] = accumulator_3;
+    accumulator[4] = accumulator_4;
 }
 
 /// The Poly1305 tag, RFC 8439 §2.5: 16 octets, for a 32-octet one-time `key`
 /// (`r` in its first 16 octets, `s` in its last, clamped and applied exactly
-/// as §2.5.1 specifies) and an arbitrary-length `msg`.
-pub bytes mac(bytes key, bytes msg) {
+/// as §2.5.1 specifies) and an arbitrary-length `message`.
+pub bytes mac(bytes key, bytes message) {
     if (key.size() != 32) {
         trap("poly1305: key must be 32 bytes");
     }
@@ -330,27 +330,27 @@ pub bytes mac(bytes key, bytes msg) {
     // "top four bits clear" / "bottom two bits clear" requirement for the
     // bits it keeps -- verified equal to clamp-then-split over 2000 random
     // keys while this was developed (see the report).
-    int r0 = word_le(key, 0) & 0x03FF_FFFF;
-    int r1 = word_le(key, 3) >> 2 & 0x03FF_FF03;
-    int r2 = word_le(key, 6) >> 4 & 0x03FF_C0FF;
-    int r3 = word_le(key, 9) >> 6 & 0x03F0_3FFF;
-    int r4 = word_le(key, 12) >> 8 & 0x000F_FFFF;
-    int s1 = r1 * 5;
-    int s2 = r2 * 5;
-    int s3 = r3 * 5;
-    int s4 = r4 * 5;
+    int multiplier_0 = word_le(key, 0) & 0x03FF_FFFF;  // RFC 8439 §2.5: r
+    int multiplier_1 = word_le(key, 3) >> 2 & 0x03FF_FF03;  // RFC 8439 §2.5: r
+    int multiplier_2 = word_le(key, 6) >> 4 & 0x03FF_C0FF;  // RFC 8439 §2.5: r
+    int multiplier_3 = word_le(key, 9) >> 6 & 0x03F0_3FFF;  // RFC 8439 §2.5: r
+    int multiplier_4 = word_le(key, 12) >> 8 & 0x000F_FFFF;  // RFC 8439 §2.5: r
+    int scaled_1 = multiplier_1 * 5;
+    int scaled_2 = multiplier_2 * 5;
+    int scaled_3 = multiplier_3 * 5;
+    int scaled_4 = multiplier_4 * 5;
     int pad0 = word_le(key, 16);
     int pad1 = word_le(key, 20);
     int pad2 = word_le(key, 24);
     int pad3 = word_le(key, 28);
-    Array<int> h = [0, 0, 0, 0, 0];
-    int n = msg.size();
-    int i = 0;
-    while (n - i >= 16) {
-        poly1305_block(h, r0, r1, r2, r3, r4, s1, s2, s3, s4, msg, i, 1 << 24);
-        i = i + 16;
+    Array<int> accumulator = [0, 0, 0, 0, 0];  // RFC 8439 §2.5: h
+    int message_length = message.size();
+    int offset = 0;
+    while (message_length - offset >= 16) {
+        poly1305_block(accumulator, multiplier_0, multiplier_1, multiplier_2, multiplier_3, multiplier_4, scaled_1, scaled_2, scaled_3, scaled_4, message, offset, 1 << 24);
+        offset = offset + 16;
     }
-    if (i < n) {
+    if (offset < message_length) {
         // The final, short block: the real octets, a `0x01` marking where
         // they end, then zeros out to 16 -- RFC 8439 §2.5.1's "add one bit
         // beyond the number of octets", spelled as a byte because it always
@@ -366,87 +366,87 @@ pub bytes mac(bytes key, bytes msg) {
         // once at the end regardless -- and it was caught by this file's own
         // length sweep, in the very first case, disagreeing with both the
         // bignum reference and `cryptography`'s Poly1305 on `mac(key, "")`.
-        bytes last = msg.substr(i, n);
+        bytes last = message.substr(offset, message_length);
         last.push(1);
         while (last.size() < 16) {
             last.push(0);
         }
-        poly1305_block(h, r0, r1, r2, r3, r4, s1, s2, s3, s4, last, 0, 0);
+        poly1305_block(accumulator, multiplier_0, multiplier_1, multiplier_2, multiplier_3, multiplier_4, scaled_1, scaled_2, scaled_3, scaled_4, last, 0, 0);
     }
-    int h0 = h[0];
-    int h1 = h[1];
-    int h2 = h[2];
-    int h3 = h[3];
-    int h4 = h[4];
+    int accumulator_0 = accumulator[0];
+    int accumulator_1 = accumulator[1];
+    int accumulator_2 = accumulator[2];
+    int accumulator_3 = accumulator[3];
+    int accumulator_4 = accumulator[4];
     // The full carry `poly1305_block` leaves undone, so every limb is
     // exactly 26 bits before the final reduction below reasons about them.
-    int c = h1 >> 26;
-    h1 = h1 & 0x03FF_FFFF;
-    h2 = h2 + c;
-    c = h2 >> 26;
-    h2 = h2 & 0x03FF_FFFF;
-    h3 = h3 + c;
-    c = h3 >> 26;
-    h3 = h3 & 0x03FF_FFFF;
-    h4 = h4 + c;
-    c = h4 >> 26;
-    h4 = h4 & 0x03FF_FFFF;
-    h0 = h0 + c * 5;
-    c = h0 >> 26;
-    h0 = h0 & 0x03FF_FFFF;
-    h1 = h1 + c;
-    // `h` is below 2*p but may still be at or past p (RFC 8439's own
+    int carry = accumulator_1 >> 26;
+    accumulator_1 = accumulator_1 & 0x03FF_FFFF;
+    accumulator_2 = accumulator_2 + carry;
+    carry = accumulator_2 >> 26;
+    accumulator_2 = accumulator_2 & 0x03FF_FFFF;
+    accumulator_3 = accumulator_3 + carry;
+    carry = accumulator_3 >> 26;
+    accumulator_3 = accumulator_3 & 0x03FF_FFFF;
+    accumulator_4 = accumulator_4 + carry;
+    carry = accumulator_4 >> 26;
+    accumulator_4 = accumulator_4 & 0x03FF_FFFF;
+    accumulator_0 = accumulator_0 + carry * 5;
+    carry = accumulator_0 >> 26;
+    accumulator_0 = accumulator_0 & 0x03FF_FFFF;
+    accumulator_1 = accumulator_1 + carry;
+    // `accumulator` is below 2*p but may still be at or past p (RFC 8439's own
     // "P" = 2^130-5): compute h - p alongside h, and keep whichever of the
-    // two is actually less than p. `g4`'s top bit (bit 31 of its 32-bit
+    // two is actually less than p. `difference_4`'s top bit (bit 31 of its 32-bit
     // range) is 1 exactly when `h - p` borrowed, i.e. exactly when h was
-    // already below p, which is when `h` (not `g`) is the answer.
-    int g0 = h0 + 5;
-    c = g0 >> 26;
-    g0 = g0 & 0x03FF_FFFF;
-    int g1 = h1 + c;
-    c = g1 >> 26;
-    g1 = g1 & 0x03FF_FFFF;
-    int g2 = h2 + c;
-    c = g2 >> 26;
-    g2 = g2 & 0x03FF_FFFF;
-    int g3 = h3 + c;
-    c = g3 >> 26;
-    g3 = g3 & 0x03FF_FFFF;
-    int g4 = h4 + c - (1 << 26) & 0xFFFF_FFFF;
+    // already below p, which is when `accumulator` (not `g`) is the answer.
+    int difference_0 = accumulator_0 + 5;  // RFC 8439 §2.5.1: h - P
+    carry = difference_0 >> 26;
+    difference_0 = difference_0 & 0x03FF_FFFF;
+    int difference_1 = accumulator_1 + carry;  // RFC 8439 §2.5.1: h - P
+    carry = difference_1 >> 26;
+    difference_1 = difference_1 & 0x03FF_FFFF;
+    int difference_2 = accumulator_2 + carry;  // RFC 8439 §2.5.1: h - P
+    carry = difference_2 >> 26;
+    difference_2 = difference_2 & 0x03FF_FFFF;
+    int difference_3 = accumulator_3 + carry;  // RFC 8439 §2.5.1: h - P
+    carry = difference_3 >> 26;
+    difference_3 = difference_3 & 0x03FF_FFFF;
+    int difference_4 = accumulator_4 + carry - (1 << 26) & 0xFFFF_FFFF;  // RFC 8439 §2.5.1: h - P
     // `bit - 1` is all-zero bits when `bit` is 1 and all-one bits when `bit`
     // is 0 (two's complement -1), which turns the single bit into the two
     // masks below need -- an arithmetic recreation of the branch so the two
     // 26-bit-limb paths take the same time regardless of which one the
     // result needs, matching the constant-time discipline this module's
     // header describes.
-    int mask = (g4 >> 31 & 1) - 1 & 0xFFFF_FFFF;
+    int mask = (difference_4 >> 31 & 1) - 1 & 0xFFFF_FFFF;
     int notmask = ~mask & 0xFFFF_FFFF;
-    h0 = h0 & notmask | g0 & mask;
-    h1 = h1 & notmask | g1 & mask;
-    h2 = h2 & notmask | g2 & mask;
-    h3 = h3 & notmask | g3 & mask;
-    h4 = h4 & notmask | g4 & mask;
+    accumulator_0 = accumulator_0 & notmask | difference_0 & mask;
+    accumulator_1 = accumulator_1 & notmask | difference_1 & mask;
+    accumulator_2 = accumulator_2 & notmask | difference_2 & mask;
+    accumulator_3 = accumulator_3 & notmask | difference_3 & mask;
+    accumulator_4 = accumulator_4 & notmask | difference_4 & mask;
     // Five 26-bit limbs back to four 32-bit words.
-    int w0 = (h0 | h1 << 26) & 0xFFFF_FFFF;
-    int w1 = (h1 >> 6 | h2 << 20) & 0xFFFF_FFFF;
-    int w2 = (h2 >> 12 | h3 << 14) & 0xFFFF_FFFF;
-    int w3 = (h3 >> 18 | h4 << 8) & 0xFFFF_FFFF;
+    int tag_word_0 = (accumulator_0 | accumulator_1 << 26) & 0xFFFF_FFFF;
+    int tag_word_1 = (accumulator_1 >> 6 | accumulator_2 << 20) & 0xFFFF_FFFF;
+    int tag_word_2 = (accumulator_2 >> 12 | accumulator_3 << 14) & 0xFFFF_FFFF;
+    int tag_word_3 = (accumulator_3 >> 18 | accumulator_4 << 8) & 0xFFFF_FFFF;
     // Finally, tag = (h + s) mod 2^128 -- a 128-bit little-endian add, one
     // word at a time, each carry taken from the previous word's overflow
     // past 32 bits rather than masked away.
-    int f = w0 + pad0;
-    w0 = f & 0xFFFF_FFFF;
-    f = w1 + pad1 + (f >> 32);
-    w1 = f & 0xFFFF_FFFF;
-    f = w2 + pad2 + (f >> 32);
-    w2 = f & 0xFFFF_FFFF;
-    f = w3 + pad3 + (f >> 32);
-    w3 = f & 0xFFFF_FFFF;
+    int word_sum = tag_word_0 + pad0;
+    tag_word_0 = word_sum & 0xFFFF_FFFF;
+    word_sum = tag_word_1 + pad1 + (word_sum >> 32);
+    tag_word_1 = word_sum & 0xFFFF_FFFF;
+    word_sum = tag_word_2 + pad2 + (word_sum >> 32);
+    tag_word_2 = word_sum & 0xFFFF_FFFF;
+    word_sum = tag_word_3 + pad3 + (word_sum >> 32);
+    tag_word_3 = word_sum & 0xFFFF_FFFF;
     bytes out = [];
-    push_word_le(out, w0);
-    push_word_le(out, w1);
-    push_word_le(out, w2);
-    push_word_le(out, w3);
+    push_word_le(out, tag_word_0);
+    push_word_le(out, tag_word_1);
+    push_word_le(out, tag_word_2);
+    push_word_le(out, tag_word_3);
     return out;
 }
 
@@ -489,16 +489,16 @@ void pad16(bytes out) {
     }
 }
 
-// `n`, as an 8-octet little-endian length field -- RFC 8439 §2.8's
-// "num_to_8_le_bytes". `n` is always a `size()`, so never negative and never
+// `length`, as an 8-octet little-endian length field -- RFC 8439 §2.8's
+// "num_to_8_le_bytes". `length` is always a `size()`, so never negative and never
 // close to where a logical-shift distinction from this language's
 // arithmetic `>>` (reference §6.1) could matter, for the reason
 // `byte_at` documents above.
-void push_len(bytes out, int n) {
-    int i = 0;
-    while (i < 64) {
-        out.push(byte_at(n, i));
-        i = i + 8;
+void push_length(bytes out, int length) {
+    int shift = 0;
+    while (shift < 64) {
+        out.push(byte_at(length, shift));
+        shift = shift + 8;
     }
 }
 
@@ -507,14 +507,14 @@ void push_len(bytes out, int n) {
 // Shared between `seal` and `open` because it is defined once, over the
 // ciphertext, on both sides of the RFC's own description of decryption.
 bytes aead_buffer(bytes aad, bytes ciphertext) {
-    bytes buf = [];
-    buf.extend(aad);
-    pad16(buf);
-    buf.extend(ciphertext);
-    pad16(buf);
-    push_len(buf, aad.size());
-    push_len(buf, ciphertext.size());
-    return buf;
+    bytes buffer = [];
+    buffer.extend(aad);
+    pad16(buffer);
+    buffer.extend(ciphertext);
+    pad16(buffer);
+    push_length(buffer, aad.size());
+    push_length(buffer, ciphertext.size());
+    return buffer;
 }
 
 /// Encrypt and authenticate: RFC 8439 §2.8, `AEAD_CHACHA20_POLY1305`'s
@@ -541,9 +541,9 @@ pub Result<bytes, Error> open(bytes key, bytes nonce, bytes sealed, bytes aad) {
     if (sealed.size() < 16) {
         return Result<bytes, Error>.Err(Error.Short);
     }
-    int ct_len = sealed.size() - 16;
-    bytes ciphertext = sealed.substr(0, ct_len);
-    bytes tag = sealed.substr(ct_len, sealed.size());
+    int ciphertext_length = sealed.size() - 16;
+    bytes ciphertext = sealed.substr(0, ciphertext_length);
+    bytes tag = sealed.substr(ciphertext_length, sealed.size());
     bytes otk = key_gen(key, nonce);
     bytes want = mac(otk, aead_buffer(aad, ciphertext));
     if (!consttime.is_equal(want, tag)) {

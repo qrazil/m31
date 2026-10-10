@@ -22,11 +22,11 @@ print("896 " + sha256.hex("abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijk
 // 260 is four 64-octet blocks plus change, past `sha1.m31`'s own 200.
 
 bytes pattern = [];
-int n = 0;
-while (n <= 260) {
-    print("len" + n.to_str() + " " + sha256.hex(pattern));
-    pattern.push(n * 7 + 13 & 0xFF);
-    n = n + 1;
+int length = 0;
+while (length <= 260) {
+    print("len" + length.to_str() + " " + sha256.hex(pattern));
+    pattern.push(length * 7 + 13 & 0xFF);
+    length = length + 1;
 }
 
 // --- the million-a test, whole and in pieces ---------------------------------
@@ -41,15 +41,15 @@ print("million " + sha256.hex(million));
 const Array<int> CHUNKS = [1, 3, 63, 64, 65, 1000, 4096];
 
 for (int size in CHUNKS) {
-    sha256.Hasher h = sha256.Hasher();
-    int at = 0;
-    while (at < million.size()) {
-        int end = at + size;
+    sha256.Hasher hasher = sha256.Hasher();
+    int offset = 0;
+    while (offset < million.size()) {
+        int end = offset + size;
         if (end > million.size()) {
             end = million.size();
         }
-        h.update(million.substr(at, end));
-        at = end;
+        hasher.update(million.substr(offset, end));
+        offset = end;
     }
-    print("million-by-" + size.to_str() + " " + h.digest().hex());
+    print("million-by-" + size.to_str() + " " + hasher.digest().hex());
 }

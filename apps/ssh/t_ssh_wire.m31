@@ -5,12 +5,12 @@
 // byte-order and `mpint` sign-bit rules get checked first.
 import ssh;
 
-bytes range_bytes(int from, int to) {
+bytes range_bytes(int from, int limit) {
     bytes out = [];
-    int i = from;
-    while (i < to) {
-        out.push(i & 0xFF);
-        i = i + 1;
+    int value = from;
+    while (value < limit) {
+        out.push(value & 0xFF);
+        value = value + 1;
     }
     return out;
 }
@@ -34,17 +34,17 @@ k_low_bit.extend(range_bytes(2, 32));
 bytes k_zero = [0; 32];
 List<bytes> cases = [k_high_bit, k_low_bit, k_zero];
 List<str> labels = ["highbit", "lowbit", "zero"];
-int idx = 0;
-while (idx < cases.size()) {
-    bytes k_raw = cases[idx];
-    str label = labels[idx];
+int index = 0;
+while (index < cases.size()) {
+    bytes k_raw = cases[index];
+    str label = labels[index];
     bytes k_mpint = ssh.encode_mpint(k_raw);
-    bytes h = ssh.exchange_hash(v_c, v_s, i_c, i_s, k_s, q_c, q_s, k_mpint);
-    print("H-" + label + " " + h.hex());
-    bytes session_id = h;
-    bytes c2s = ssh.derive64(k_mpint, h, 'C', session_id);
-    bytes s2c = ssh.derive64(k_mpint, h, 'D', session_id);
+    bytes exchange_digest = ssh.exchange_hash(v_c, v_s, i_c, i_s, k_s, q_c, q_s, k_mpint);  // RFC 4253: H
+    print("H-" + label + " " + exchange_digest.hex());
+    bytes session_id = exchange_digest;
+    bytes c2s = ssh.derive64(k_mpint, exchange_digest, 'C', session_id);
+    bytes s2c = ssh.derive64(k_mpint, exchange_digest, 'D', session_id);
     print("derive64-C-" + label + " " + c2s.hex());
     print("derive64-D-" + label + " " + s2c.hex());
-    idx = idx + 1;
+    index = index + 1;
 }

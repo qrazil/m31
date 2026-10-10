@@ -146,15 +146,15 @@ pub bytes PrivateKey.public_blob() {
     return ed25519_blob(public);
 }
 
-/// The 64-octet Ed25519 signature of `msg`.
-pub bytes PrivateKey.sign(bytes msg) {
-    return ed25519.sign(seed, msg);
+/// The 64-octet Ed25519 signature of `message`.
+pub bytes PrivateKey.sign(bytes message) {
+    return ed25519.sign(seed, message);
 }
 
 /// `sign(msg)` as RFC 8709 §6 puts a signature on the wire: `string
 /// "ssh-ed25519"`, then `string <64 octets>`.
-pub bytes PrivateKey.signature_blob(bytes msg) {
-    return ed25519_blob(ed25519.sign(seed, msg));
+pub bytes PrivateKey.signature_blob(bytes message) {
+    return ed25519_blob(ed25519.sign(seed, message));
 }
 
 bytes ed25519_blob(bytes raw) {
@@ -164,62 +164,62 @@ bytes ed25519_blob(bytes raw) {
     return out;
 }
 
-// A `string` at `at`, with `ssh.Error.Truncated` from the shared parser
+// A `string` at `offset`, with `ssh.Error.Truncated` from the shared parser
 // mapped to this module's own `Truncated`.
-Result<ssh.Field, Error> string_at(bytes buf, int at) {
-    match (ssh.parse_string(buf, at)) {
-        case Ok(ssh.Field f): {
-            return Result<ssh.Field, Error>.Ok(f);
+Result<ssh.Field, Error> string_at(bytes buffer, int offset) {
+    match (ssh.parse_string(buffer, offset)) {
+        case Ok(ssh.Field field): {
+            return Result<ssh.Field, Error>.Ok(field);
         }
-        case Err(ssh.Error e): {
+        case Err(_): {
             return Result<ssh.Field, Error>.Err(Error.Truncated);
         }
     }
 }
 
-// A `string` at `at` whose content must be exactly the text `want`; the
+// A `string` at `offset` whose content must be exactly the text `want`; the
 // offset after it.
-Result<int, Error> expect_string(bytes buf, int at, str want, Error otherwise) {
-    ssh.Field f = string_at(buf, at)?;
-    if (f.value != want.to_bytes()) {
+Result<int, Error> expect_string(bytes buffer, int offset, str want, Error otherwise) {
+    ssh.Field field = string_at(buffer, offset)?;
+    if (field.value != want.to_bytes()) {
         return Result<int, Error>.Err(otherwise);
     }
-    return Result<int, Error>.Ok(f.next);
+    return Result<int, Error>.Ok(field.next);
 }
 
-int be32(bytes buf, int at) {
-    return buf[at] << 24 | buf[at + 1] << 16 | buf[at + 2] << 8 | buf[at + 3];
+int be32(bytes buffer, int offset) {
+    return buffer[offset] << 24 | buffer[offset + 1] << 16 | buffer[offset + 2] << 8 | buffer[offset + 3];
 }
 
 // The base64 body between the armor lines, as one string with no
 // whitespace in it.
 Result<str, Error> unarmor(str text) {
     List<str> body = [];
-    bool begun = false;
-    bool ended = false;
+    bool is_begun = false;
+    bool is_ended = false;
     for (str raw in text.split("\n")) {
         str line = raw.trim();
         if (line.size() == 0) {
             continue;
         }
-        if (!begun) {
+        if (!is_begun) {
             if (line != BEGIN_LINE) {
                 return Result<str, Error>.Err(Error.NotOpenSshKey);
             }
-            begun = true;
+            is_begun = true;
             continue;
         }
-        if (ended) {
+        if (is_ended) {
             // Anything after the END line other than blank space.
             return Result<str, Error>.Err(Error.NotOpenSshKey);
         }
         if (line == END_LINE) {
-            ended = true;
+            is_ended = true;
             continue;
         }
         body.push(line);
     }
-    if (!ended) {
+    if (!is_ended) {
         return Result<str, Error>.Err(Error.NotOpenSshKey);
     }
     return Result<str, Error>.Ok(body.join(""));
@@ -231,10 +231,10 @@ pub Result<PrivateKey, Error> parse(str text) {
     str body = unarmor(text)?;
     bytes raw = [];
     match (base64.decode(body)) {
-        case Ok(bytes b): {
-            raw = b;
+        case Ok(bytes decoded): {
+            raw = decoded;
         }
-        case Err(base64.Error e): {
+        case Err(_): {
             return Result<PrivateKey, Error>.Err(Error.NotOpenSshKey);
         }
     }
@@ -247,7 +247,7 @@ pub Result<PrivateKey, Error> load(str path) {
         case Ok(str text): {
             return parse(text);
         }
-        case Err(io.Error e): {
+        case Err(_): {
             return Result<PrivateKey, Error>.Err(Error.Io);
         }
     }
@@ -261,8 +261,8 @@ Result<PrivateKey, Error> parse_binary(bytes raw) {
     if (raw.size() < magic.size() || raw.substr(0, magic.size()) != magic) {
         return Result<PrivateKey, Error>.Err(Error.NotOpenSshKey);
     }
-    int at = magic.size();
-    ssh.Field cipher = string_at(raw, at)?;
+    int cipher_offset = magic.size();
+    ssh.Field cipher = string_at(raw, cipher_offset)?;
     ssh.Field kdf = string_at(raw, cipher.next)?;
     ssh.Field kdf_options = string_at(raw, kdf.next)?;
     if (cipher.value != "none".to_bytes() || kdf.value != "none".to_bytes()) {
@@ -321,13 +321,13 @@ Result<PrivateKey, Error> parse_private_section(bytes sec, bytes outer_pub) {
     }
     // The padding: 1, 2, 3, ... to the end of the section.
     int want = 1;
-    int i = comment_field.next;
-    while (i < sec.size()) {
-        if (sec[i] != want) {
+    int padding_offset = comment_field.next;
+    while (padding_offset < sec.size()) {
+        if (sec[padding_offset] != want) {
             return Result<PrivateKey, Error>.Err(Error.BadPadding);
         }
         want = want + 1;
-        i = i + 1;
+        padding_offset = padding_offset + 1;
     }
     if (want - 1 >= PAD_BLOCK) {
         return Result<PrivateKey, Error>.Err(Error.BadPadding);
@@ -337,8 +337,8 @@ Result<PrivateKey, Error> parse_private_section(bytes sec, bytes outer_pub) {
     }
     str comment = "";
     match (comment_field.value.utf8()) {
-        case Some(str c): {
-            comment = c;
+        case Some(str comment_text): {
+            comment = comment_text;
         }
         case None: {
             comment = "";

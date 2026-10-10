@@ -10,7 +10,7 @@ import crypto.aes;
 import crypto.aesgcm;
 import os;
 
-List<str> arguments = os.args();
+List<str> arguments = os.arguments();
 if (arguments.size() != 2) {
     trap("gcm_traps: expected one mode");
 }

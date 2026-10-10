@@ -64,31 +64,31 @@ void report(int index, Result<tls.Conn, tls.Error> opened) {
         case Err(tls.Error connect_error): {
             print("conn " + str(index) + " error=" + connect_error.to_str() + " alert=-1");
         }
-        case Ok(tls.Conn conn): {
+        case Ok(tls.Conn connection): {
             str status = "";
-            match (conn.write("GET / HTTP/1.0\r\n\r\n".to_bytes())) {
+            match (connection.write("GET / HTTP/1.0\r\n\r\n".to_bytes())) {
                 case Ok(int sent): {
                 }
                 case Err(io.Error write_error): {
                 }
             }
-            match (conn.read_all()) {
+            match (connection.read_all()) {
                 case Ok(bytes data): {
                     status = first_line(data);
                 }
                 case Err(io.Error read_error): {
                 }
             }
-            bool was_resumed = conn.resumed();
-            match (conn.last_error()) {
+            bool was_resumed = connection.is_resumed();
+            match (connection.last_error()) {
                 case Some(tls.Error failure): {
-                    print("conn " + str(index) + " error=" + failure.to_str() + " alert=" + str(conn.peer_alert()));
+                    print("conn " + str(index) + " error=" + failure.to_str() + " alert=" + str(connection.peer_alert()));
                 }
                 case None: {
                     print("conn " + str(index) + " ok resumed=" + str(was_resumed) + " status=" + status);
                 }
             }
-            match (conn.close()) {
+            match (connection.close()) {
                 case Ok(bool closed): {
                 }
                 case Err(io.Error close_error): {
@@ -116,7 +116,7 @@ void attempt(int index, str host, int port, tls.Trust trust, Option<clientcert.I
     }
 }
 
-List<str> arguments = os.args();
+List<str> arguments = os.arguments();
 if (arguments.size() < 6) {
     trap("t_clientcert_client: <port> <trust> <chain|none> <key|none> <connections> [host]");
 }

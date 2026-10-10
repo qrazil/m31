@@ -5,12 +5,12 @@
 //   ./build.sh apps/tls/aes_block.m31 -o aes_block && ./aes_block
 
 import crypto.aes;
-import tls13_hex;
+import TLS13_hex;
 
-// `n` octets of a deterministic pattern: `(i * multiplier + offset) & 0xFF`.
-bytes pattern(int n, int multiplier, int offset) {
+// `length` octets of a deterministic pattern: `(i * multiplier + offset) & 0xFF`.
+bytes pattern(int length, int multiplier, int offset) {
     bytes out = [];
-    for (int index in 0 .. n) {
+    for (int index in 0 .. length) {
         out.push(index * multiplier + offset & 0xFF);
     }
     return out;
@@ -18,8 +18,8 @@ bytes pattern(int n, int multiplier, int offset) {
 
 // --- FIPS 197 appendix B and C ---------------------------------------------------
 
-aes.Cipher appendix_b = aes.cipher(tls13_hex.decode("2b7e151628aed2a6abf7158809cf4f3c"));
-print("fips197-b " + appendix_b.encrypt_block(tls13_hex.decode("3243f6a8885a308d313198a2e0370734")).hex());
+aes.Cipher appendix_b = aes.cipher(TLS13_hex.decode("2b7e151628aed2a6abf7158809cf4f3c"));
+print("fips197-b " + appendix_b.encrypt_block(TLS13_hex.decode("3243f6a8885a308d313198a2e0370734")).hex());
 bytes plain = pattern(16, 0x11, 0);
 aes.Cipher appendix_c128 = aes.cipher(pattern(16, 1, 0));
 print("fips197-c128 " + appendix_c128.encrypt_block(plain).hex());

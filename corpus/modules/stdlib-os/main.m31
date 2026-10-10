@@ -4,9 +4,9 @@ import os;
 // path the binary was run as, which differs between run.sh and the gates, so
 // only its presence is printed.
 //
-// os.args() is a plain list: an argument that is not UTF-8 traps and names
-// args_bytes, which is Rust's trade. Every argument here is text.
-List<str> argv = os.args();
+// os.arguments() is a plain list: an argument that is not UTF-8 traps and names
+// arguments_bytes, which is Rust's trade. Every argument here is text.
+List<str> argv = os.arguments();
 print(argv.size());  // 5: the program, then four arguments
 print(argv[0].size() > 0);  // true
 print(argv[1]);  // -serve
@@ -15,9 +15,9 @@ print(argv[3]);  // two words -- one argument, spaces and all
 print(argv[4].size());  // 0 -- an empty argument is still an argument
 // A fresh list every call: changing one copy changes nothing else.
 argv.push("extra");
-print(os.args_bytes().size());  // 5
+print(os.arguments_bytes().size());  // 5
 // The same arguments as octets, whether or not they are text.
-print(os.args_bytes()[1].hex());  // 2d7365727665 -- "-serve"
+print(os.arguments_bytes()[1].hex());  // 2d7365727665 -- "-serve"
 // An unset variable is None, and so is a name that could never be one.
 print(os.env("LANG_CORPUS_SURELY_NOT_SET").is_none());  // true
 print(os.env("").is_none());  // true

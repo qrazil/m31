@@ -69,7 +69,7 @@ enc("~-._", "/");
 enc("100%", "");
 
 void dec(str s, bool plus) {
-    match (http.unquote(s, plus: plus)) {
+    match (http.unquote(s, should_decode_plus: plus)) {
         case Ok(str t): {
             print("unquote(" + s + ", plus: " + plus.to_str() + ") = " + t);
         }

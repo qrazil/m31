@@ -413,7 +413,7 @@ bytes slurp(sshexec.Channel ch) {
 }
 
 bytes slurp_err(sshexec.Channel ch) {
-    match (ch.read_all_err()) {
+    match (ch.read_all_error()) {
         case Ok(bytes b): {
             return b;
         }
