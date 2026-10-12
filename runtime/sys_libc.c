@@ -45,9 +45,11 @@ static int64_t neg_errno(int e) {
     switch (e) {
     case EPERM:        return -SYS_EPERM;
     case ENOENT:       return -SYS_ENOENT;
+    case ESRCH:        return -SYS_ESRCH;
     case EINTR:        return -SYS_EINTR;
     case EIO:          return -SYS_EIO;
     case EBADF:        return -SYS_EBADF;
+    case ECHILD:       return -SYS_ECHILD;
     case EAGAIN:       return -SYS_EAGAIN;
     case ENOMEM:       return -SYS_ENOMEM;
     case EACCES:       return -SYS_EACCES;
@@ -806,10 +808,115 @@ _Noreturn void sys_exit(int64_t code) {
  * itself, a plain positive errno number, so neg_errno takes it directly
  * rather than through ret()'s -1-and-errno convention. */
 int64_t sys_proc_start(char *const argv[], char *const envp[]) {
-    pid_t pid;
-    int rc = posix_spawnp(&pid, argv[0], NULL, NULL, argv, envp);
+    return sys_proc_start_fds(argv, envp, NULL, -1, -1, -1);
+}
+
+/* The same posix_spawnp with file actions, which is the portable, vfork-cheap
+ * way to do "dup2 these onto 0, 1 and 2, chdir, then exec" in a child. A
+ * file action that fails (a cwd that is not a directory, a descriptor that
+ * is closed) is reported by posix_spawn itself as the return value, like a
+ * missing program -- no pid, no zombie.
+ *
+ * The attribute resets SIGPIPE to SIG_DFL and the mask to empty; sys.h says
+ * why. posix_spawn_file_actions_addchdir_np is glibc 2.29, musl 1.1.24 and
+ * macOS 10.15: older than anything this layer otherwise supports. */
+int64_t sys_proc_start_fds(char *const argv[], char *const envp[], const char *cwd,
+                           int64_t stdin_fd, int64_t stdout_fd, int64_t stderr_fd) {
+    const int64_t src[3] = {stdin_fd, stdout_fd, stderr_fd};
+    for (int i = 0; i < 3; i++) {
+        if (src[i] < -1 || src[i] > 0x7fffffff) return -SYS_EINVAL;
+        if (src[i] >= 0 && src[i] <= 2 && src[i] != i) return -SYS_EINVAL;
+    }
+    posix_spawn_file_actions_t fa;
+    posix_spawnattr_t at;
+    int rc = posix_spawn_file_actions_init(&fa);
+    if (rc != 0) return neg_errno(rc);
+    rc = posix_spawnattr_init(&at);
+    if (rc != 0) {
+        posix_spawn_file_actions_destroy(&fa);
+        return neg_errno(rc);
+    }
+    sigset_t none, dfl;
+    sigemptyset(&none);
+    sigemptyset(&dfl);
+    sigaddset(&dfl, SIGPIPE);
+    rc = posix_spawnattr_setsigmask(&at, &none);
+    if (rc == 0) rc = posix_spawnattr_setsigdefault(&at, &dfl);
+    if (rc == 0) rc = posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
+    for (int i = 0; rc == 0 && i < 3; i++) {
+        if (src[i] >= 3) rc = posix_spawn_file_actions_adddup2(&fa, (int)src[i], i);
+    }
+    if (rc == 0 && cwd != NULL) rc = posix_spawn_file_actions_addchdir_np(&fa, cwd);
+    pid_t pid = 0;
+    if (rc == 0) rc = posix_spawnp(&pid, argv[0], &fa, &at, argv, envp);
+    posix_spawn_file_actions_destroy(&fa);
+    posix_spawnattr_destroy(&at);
     if (rc != 0) return neg_errno(rc);
     return (int64_t)pid;
+}
+
+/* A pipe, then FD_CLOEXEC on both ends: plain pipe and not pipe2 for the
+ * reason sys_accept gives (glibc hides pipe2 behind __USE_GNU, which this
+ * file cannot turn on). Same window as there: a fork from another thread
+ * between the calls inherits the ends; the raw backend uses pipe2 and has
+ * none. */
+int64_t sys_pipe(int64_t fds[2]) {
+    int p[2];
+    if (pipe(p) != 0) return neg_errno(errno);
+    for (int i = 0; i < 2; i++) {
+        if (fcntl(p[i], F_SETFD, FD_CLOEXEC) != 0) {
+            int e = errno;
+            close(p[0]);
+            close(p[1]);
+            return neg_errno(e);
+        }
+    }
+    fds[0] = p[0];
+    fds[1] = p[1];
+    return 0;
+}
+
+/* Linux signal numbers and the host's. On Linux every row is the identity
+ * (and a number outside the table is passed through when it is a valid Linux
+ * signal, so the raw backend, which passes everything through, agrees); on
+ * macOS and the BSDs the rows are what changes the meaning of 10 or 17. */
+static const struct { int linux_number; int host; } sig_table[] = {
+    {1, SIGHUP},   {2, SIGINT},   {3, SIGQUIT}, {4, SIGILL},   {5, SIGTRAP},
+    {6, SIGABRT},  {7, SIGBUS},   {8, SIGFPE},  {9, SIGKILL},  {10, SIGUSR1},
+    {11, SIGSEGV}, {12, SIGUSR2}, {13, SIGPIPE}, {14, SIGALRM}, {15, SIGTERM},
+    {17, SIGCHLD}, {18, SIGCONT}, {19, SIGSTOP}, {20, SIGTSTP}, {21, SIGTTIN},
+    {22, SIGTTOU}, {23, SIGURG},  {24, SIGXCPU}, {25, SIGXFSZ}, {26, SIGVTALRM},
+    {27, SIGPROF}, {28, SIGWINCH}, {31, SIGSYS},
+};
+
+/* -1 when the host has no such signal. */
+static int sig_to_host(int64_t linux_sig) {
+    if (linux_sig == 0) return 0;
+    for (size_t i = 0; i < sizeof sig_table / sizeof sig_table[0]; i++) {
+        if (sig_table[i].linux_number == linux_sig) return sig_table[i].host;
+    }
+#if defined(__linux__)
+    if (linux_sig > 0 && linux_sig <= 64) return (int)linux_sig;
+#endif
+    return -1;
+}
+
+static int64_t sig_from_host(int host_sig) {
+    for (size_t i = 0; i < sizeof sig_table / sizeof sig_table[0]; i++) {
+        if (sig_table[i].host == host_sig) return sig_table[i].linux_number;
+    }
+    return host_sig;
+}
+
+int64_t sys_kill(int64_t pid, int64_t sig) {
+    if (pid <= 0 || pid > 0x7fffffff) return -SYS_EINVAL;
+    int h = sig_to_host(sig);
+    if (h < 0) return -SYS_EINVAL;
+    return ret(kill((pid_t)pid, h));
+}
+
+int64_t sys_readlink(const char *path, char *buf, int64_t cap) {
+    return ret((int64_t)readlink(path, buf, (size_t)cap));
 }
 
 /* waitpid, then sys.h's own encoding rather than the raw status: see
@@ -824,6 +931,6 @@ int64_t sys_proc_wait(int64_t pid) {
         break;
     }
     if (r < 0) return neg_errno(errno);
-    if (WIFSIGNALED(status)) return SYS_WAIT_SIGNAL_BASE + WTERMSIG(status);
+    if (WIFSIGNALED(status)) return SYS_WAIT_SIGNAL_BASE + sig_from_host(WTERMSIG(status));
     return WEXITSTATUS(status);
 }

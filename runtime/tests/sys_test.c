@@ -904,6 +904,213 @@ static void term_tests(void) {
     expect("close the master", sys_close(m), 0);
 }
 
+/* ---- child processes with chosen stdio, pipes, kill, readlink -----------
+ *
+ * Programs are named by full path (/bin/sh, /bin/cat, /bin/sleep exist on
+ * Linux and macOS alike); the environment is built by hand because the
+ * layer reads none (sys.h), and a hand-built one is also what lets the test
+ * say exactly what the child may see.
+ *
+ * The child's output is read to its end on the parent's side of a pipe, so
+ * these also prove that the parent's copy of the write end has to be closed
+ * for the end to arrive: a leaked descriptor hangs the read, which is the
+ * bug this layer exists to make impossible by making every end
+ * close-on-exec.
+ */
+static char *const proc_env[] = {"PATH=/bin:/usr/bin", "FOO=bar", 0};
+
+/* Reads fd to its end into buf (cap bytes, NUL-terminated); the length. */
+static int64_t slurp(int64_t fd, char *buf, int64_t cap) {
+    int64_t n = 0;
+    for (;;) {
+        int64_t r = sys_read(fd, buf + n, cap - 1 - n);
+        if (r == -SYS_EINTR) continue;
+        if (r <= 0) break;
+        n += r;
+    }
+    buf[n] = 0;
+    return n;
+}
+
+/* Runs argv with stdout on a pipe and returns the output in `out`; the
+ * child's encoded status goes to *status. cwd may be 0. */
+static int64_t run_capture(char *const argv[], char *const envp[], const char *cwd,
+                           char *out, int64_t cap, int64_t *status) {
+    int64_t p[2] = {-1, -1};
+    if (sys_pipe(p) != 0) return -SYS_EIO;
+    int64_t pid = sys_proc_start_fds(argv, envp, cwd, -1, p[1], -1);
+    sys_close(p[1]);
+    if (pid < 0) {
+        sys_close(p[0]);
+        out[0] = 0;
+        return pid;
+    }
+    slurp(p[0], out, cap);
+    sys_close(p[0]);
+    *status = sys_proc_wait(pid);
+    return pid;
+}
+
+static void proc_tests(void) {
+    char out[512];
+    int64_t st = -1;
+
+    /* ---- sys_pipe ---- */
+    int64_t pp[2] = {-1, -1};
+    expect("pipe", sys_pipe(pp), 0);
+    expect_true("pipe ends are distinct descriptors", pp[0] >= 0 && pp[1] >= 0 && pp[0] != pp[1]);
+    expect("write into the pipe", sys_write(pp[1], "hi", 2), 2);
+    expect("read it back", sys_read(pp[0], out, sizeof out), 2);
+    expect_true("the bytes", out[0] == 'h' && out[1] == 'i');
+    expect("a nonblocking flag on the read end", sys_setsockopt(pp[0], SYS_SO_NONBLOCK, 1), 0);
+    expect("an empty nonblocking pipe is EAGAIN", sys_read(pp[0], out, 1), -SYS_EAGAIN);
+    expect("the write end is still blocking", sys_getsockopt(pp[1], SYS_SO_NONBLOCK), 0);
+    sys_close(pp[1]);
+    expect("EOF once the write end is closed", sys_read(pp[0], out, 1), 0);
+    sys_close(pp[0]);
+
+    /* ---- a round trip through cat: stdin and stdout both chosen ---- */
+    int64_t in[2] = {-1, -1}, ou[2] = {-1, -1};
+    expect("pipe in", sys_pipe(in), 0);
+    expect("pipe out", sys_pipe(ou), 0);
+    char *const cat[] = {"/bin/cat", 0};
+    int64_t pid = sys_proc_start_fds(cat, proc_env, 0, in[0], ou[1], -1);
+    expect_true("cat started", pid > 0);
+    sys_close(in[0]);
+    sys_close(ou[1]);
+    expect("write to cat", sys_write(in[1], "round trip\n", 11), 11);
+    sys_close(in[1]);
+    expect("cat's output", slurp(ou[0], out, sizeof out), 11);
+    expect_true("cat's bytes", same(out, "round trip\n", 11));
+    sys_close(ou[0]);
+    expect("cat exits 0", sys_proc_wait(pid), 0);
+
+    /* ---- environment, working directory, exit codes ---- */
+    char *const echo_foo[] = {"/bin/sh", "-c", "echo $FOO", 0};
+    pid = run_capture(echo_foo, proc_env, 0, out, sizeof out, &st);
+    expect_true("sh started", pid > 0);
+    expect_true("the given environment", same(out, "bar\n", 5));
+    char *const empty_env[] = {0};
+    char *const echo_path[] = {"/bin/sh", "-c", "echo \"[$FOO]\"", 0};
+    pid = run_capture(echo_path, empty_env, 0, out, sizeof out, &st);
+    expect_true("an empty environment is empty", pid > 0 && same(out, "[]\n", 4));
+
+    char *const pwd[] = {"/bin/sh", "-c", "pwd", 0};
+    pid = run_capture(pwd, proc_env, "/", out, sizeof out, &st);
+    expect_true("cwd is honoured", pid > 0 && same(out, "/\n", 3));
+    char *const never[] = {"/bin/sh", "-c", "exit 0", 0};
+    expect("a cwd that does not exist", sys_proc_start_fds(never, proc_env, "/no/such/dir-2026", -1, -1, -1), -SYS_ENOENT);
+    expect("a cwd that is a file", sys_proc_start_fds(never, proc_env, "/bin/sh", -1, -1, -1), -SYS_ENOTDIR);
+
+    char *const exit7[] = {"/bin/sh", "-c", "exit 7", 0};
+    pid = run_capture(exit7, proc_env, 0, out, sizeof out, &st);
+    expect_true("exit 7 started", pid > 0);
+    expect("exit 7", st, 7);
+
+    char *const nothere[] = {"/no/such/program-2026", 0};
+    expect("a program that is not there", sys_proc_start_fds(nothere, proc_env, 0, -1, -1, -1), -SYS_ENOENT);
+    char *const notexec[] = {"/etc/passwd", 0};
+    expect("a file that cannot be run", sys_proc_start_fds(notexec, proc_env, 0, -1, -1, -1), -SYS_EACCES);
+
+    /* ---- arguments the layer refuses ---- */
+    expect("stdin_fd 1 is refused", sys_proc_start_fds(never, proc_env, 0, 1, -1, -1), -SYS_EINVAL);
+    expect("stderr_fd 0 is refused", sys_proc_start_fds(never, proc_env, 0, -1, -1, 0), -SYS_EINVAL);
+    expect("a closed descriptor", sys_proc_start_fds(never, proc_env, 0, -1, 9999, -1) < 0, 1);
+
+    /* ---- descriptors do not leak into the child ---- */
+    /* Ten descriptors first, so the pipe's numbers are well above anything
+     * the child could use for itself. */
+    int64_t pad[10];
+    for (int i = 0; i < 10; i++) pad[i] = sys_open("/", SYS_O_RDONLY, 0);
+    int64_t keep[2] = {-1, -1};
+    expect("a pipe that must not leak", sys_pipe(keep), 0);
+    expect_true("its numbers are high", keep[0] > 6 && keep[1] > 6);
+    char *const lsfd[] = {"/bin/sh", "-c", "ls /dev/fd", 0};
+    pid = run_capture(lsfd, proc_env, 0, out, sizeof out, &st);
+    expect_true("ls started", pid > 0);
+    {
+        /* Entries are 0 1 2 and the directory ls itself opened (3, or 4 on
+         * some shells); nothing from this process, whose descriptors here
+         * are higher than that, may appear. */
+        int64_t worst = -1, cur = -1;
+        for (int64_t i = 0; out[i]; i++) {
+            if (out[i] >= '0' && out[i] <= '9') cur = (cur < 0 ? 0 : cur * 10) + (out[i] - '0');
+            else {
+                if (cur > worst) worst = cur;
+                cur = -1;
+            }
+        }
+        if (cur > worst) worst = cur;
+        expect_true("only the child's own descriptors", worst >= 2 && worst <= 4);
+    }
+    sys_close(keep[0]);
+    sys_close(keep[1]);
+    for (int i = 0; i < 10; i++) sys_close(pad[i]);
+
+    /* ---- SIGPIPE is back to the default in the child (Linux: /proc) ---- */
+#if defined(__linux__)
+    expect("ignore SIGPIPE here", sys_ignore_sigpipe(), 0);
+    char *const sigs[] = {"/bin/sh", "-c", "grep SigIgn /proc/self/status", 0};
+    pid = run_capture(sigs, proc_env, 0, out, sizeof out, &st);
+    {
+        int64_t len = 0;
+        while (out[len]) len++;
+        /* "SigIgn:\t" + 16 hex digits + "\n": digit index 12 holds bits
+         * 12..15, and SIGPIPE (13) is bit 12 -- its lowest bit. */
+        int ok = pid > 0 && len >= 16 + 8;
+        int bit = 1;
+        if (ok) {
+            char d = out[8 + 12];
+            int v = d >= 'a' ? d - 'a' + 10 : d >= 'A' ? d - 'A' + 10 : d - '0';
+            bit = v & 1;
+        }
+        expect_true("SIGPIPE is not ignored in the child", ok && bit == 0);
+    }
+#endif
+
+    /* ---- kill, and death by signal ---- */
+    char *const sleeper[] = {"/bin/sleep", "30", 0};
+    pid = sys_proc_start_fds(sleeper, proc_env, 0, -1, -1, -1);
+    expect_true("sleep started", pid > 0);
+    expect("signal 0 finds it", sys_kill(pid, 0), 0);
+    expect("kill 9", sys_kill(pid, 9), 0);
+    expect("killed by 9", sys_proc_wait(pid), SYS_WAIT_SIGNAL_BASE + 9);
+    expect("pid 0 is refused", sys_kill(0, 9), -SYS_EINVAL);
+    expect("a negative pid is refused", sys_kill(-1, 9), -SYS_EINVAL);
+    expect("signal 9999 is refused", sys_kill(1, 9999), -SYS_EINVAL);
+    pid = sys_proc_start_fds(sleeper, proc_env, 0, -1, -1, -1);
+    expect("kill 15", sys_kill(pid, 15), 0);
+    expect("killed by 15", sys_proc_wait(pid), SYS_WAIT_SIGNAL_BASE + 15);
+
+    /* ---- readlink ---- */
+    char dir[128];
+    char tgt[160], lnk[160];
+    unsigned char rnd[4];
+    sys_getrandom(rnd, 4);
+    {
+        static const char hex[] = "0123456789abcdef";
+        char name[32] = "/tmp/m31-rl-";
+        int64_t n = 12;
+        for (int i = 0; i < 4; i++) {
+            name[n++] = hex[rnd[i] >> 4];
+            name[n++] = hex[rnd[i] & 15];
+        }
+        name[n] = 0;
+        join(dir, name, "");
+    }
+    join(lnk, dir, "-link");
+    join(tgt, "../a/b/", "target");
+    expect("symlink for readlink", sys_symlink(tgt, lnk), 0);
+    char rl[16];
+    expect("readlink", sys_readlink(lnk, rl, sizeof rl), 13);
+    expect_true("readlink bytes", same(rl, "../a/b/target", 13));
+    expect("readlink into a short buffer fills it", sys_readlink(lnk, rl, 4), 4);
+    expect_true("and cuts the target", same(rl, "../a", 4));
+    expect("readlink of a missing path", sys_readlink("/no/such/link-2026", rl, sizeof rl), -SYS_ENOENT);
+    expect("readlink of a non-link", sys_readlink("/", rl, sizeof rl), -SYS_EINVAL);
+    sys_unlink(lnk);
+}
+
 int test_main(void);
 int test_main(void) {
     /* ---- errors every backend must spell the same way ---- */
@@ -1060,6 +1267,7 @@ int test_main(void) {
 
     term_tests();
     net_tests();
+    proc_tests();
 
     put("sys layer: ");
     put_int(checks - failures);

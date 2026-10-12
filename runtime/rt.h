@@ -284,6 +284,7 @@ int64_t rt_rmdir(Obj *path);
 int64_t rt_rename(Obj *from, Obj *to);
 int64_t rt_symlink(Obj *target, Obj *path);
 int64_t rt_listdir(Obj *path, Obj *buf);          /* bytes the listing needs */
+int64_t rt_readlink(Obj *path, Obj *buf);         /* bytes of the target written, or -errno */
 /* Writes out what `print` has buffered. lib/io.m31 calls it before writing
  * to descriptor 1 or 2 itself, so the two paths to one stream land in the
  * order the program wrote them. */
@@ -301,6 +302,13 @@ void    rt_env_map(Obj *out);                   /* pushes name, value, name, val
 _Noreturn void rt_exit(int64_t code);           /* flushes stdout, then exit(code) */
 int64_t rt_proc_start(Obj *argv);               /* pid, or -errno; argv is a List<str> */
 int64_t rt_proc_wait(int64_t pid);              /* sys.h's encoded status, or -errno */
+/* env_list is a List<str> of NAME=value used when has_env; cwd "" inherits;
+ * a descriptor of -1 inherits (sys.h, sys_proc_start_fds). */
+int64_t rt_proc_start_fds(Obj *argv, Obj *env_list, int64_t has_env, Obj *cwd,
+                          int64_t stdin_fd, int64_t stdout_fd, int64_t stderr_fd);
+int64_t rt_pipe(Obj *out);                      /* pushes read end, write end; 0 or -errno */
+int64_t rt_kill(int64_t pid, int64_t sig);      /* 0 or -errno */
+int64_t rt_clock_monotonic(void);               /* nanoseconds, monotonic */
 _Noreturn void rt_panic(Obj *msg);              /* rt_trap with a str message */
 void    rt_clock(Obj *out);                     /* pushes seconds, then nanoseconds */
 int64_t rt_entropy(int64_t n, Obj *out);        /* pushes n octets; 0, or errno */
