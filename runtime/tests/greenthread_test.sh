@@ -129,7 +129,7 @@ else
 fi
 
 # ---- 3. the compiler side of the Part 3 contract ---------------------------
-# runtime/tests/greenthread_test.c cannot reach src/emit_c.rs at all (it is a C
+# runtime/tests/greenthread_test.c cannot reach src/back/emit_c/mod.rs at all (it is a C
 # program; emit_c.rs is part of the Rust compiler). This checks the OTHER
 # half of the same contract directly: that the compiler actually emits a
 # call to rt_stack_check(), the real out-of-line probe rt.h documents and

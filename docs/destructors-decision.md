@@ -1,7 +1,7 @@
 # Destructors: the decision
 
-Decided **2026-09-21**. Implemented in the same change: `src/lower.rs`
-(`check_destructor_decls`, `refuse_destructor_call`), `src/emit_c.rs` (the
+Decided **2026-09-21**. Implemented in the same change: `src/middle/lower.rs`
+(`check_destructor_decls`, `refuse_destructor_call`), `src/back/emit_c/mod.rs` (the
 drop function), `lib/io.m31` (`File.drop`), tests `corpus/*/77N-*` and
 `corpus/modules/destructor-*`. The reference is §4.4.
 
@@ -148,8 +148,8 @@ declares a destructor, and nothing for any other type.
 
 Decided **2026-09-22**, after an adversarial review found three bugs where
 destructors met `const` (docs/const-decision.md) and `clone`. Implemented in
-`src/lower/consts.rs` (`refuse_const_resource`, `resource_in`), the `clone`
-path in `src/lower.rs`, `rt_snapshot` in `runtime/rt.c`, and a `resource`
+`src/middle/lower/consts.rs` (`refuse_const_resource`, `resource_in`), the `clone`
+path in `src/middle/lower.rs`, `rt_snapshot` in `runtime/rt.c`, and a `resource`
 name in every `TypeInfo`. Tests corpus/core/840-842, corpus/errors/840-848,
 corpus/traps/840-843.
 
@@ -350,7 +350,7 @@ by a local and dies one local at a time; `corpus/core/980` is the new case
 that shows the difference and pins the answer. Getting depth-first back
 would mean every drop function, generated and runtime alike, handing its
 children over in reverse so a LIFO stack unwound them in order -- a change
-to `src/emit_c.rs` and to every collection in the runtime, to restore an
+to `src/back/emit_c/mod.rs` and to every collection in the runtime, to restore an
 order nothing promised.
 
 **What it did not cost.** Two separate releases still run in their own
@@ -367,7 +367,7 @@ dropped went into the same queue. That is the next section.
 
 Implemented in `runtime/rt.c` (`rt_drop_enter`, `rt_drop_leave`, and the
 note "a destructor's body is top-level code"), `runtime/rt.h` (`RcDrain`)
-and `src/emit_c.rs` (the two lines that bracket the call to the destructor).
+and `src/back/emit_c/mod.rs` (the two lines that bracket the call to the destructor).
 Tests corpus/core/1003-1006. The reference is §4.4 and §7.1.
 
 ### What went wrong
@@ -400,7 +400,7 @@ in it to reach zero owns a drain of its own and runs it before the body's
 next statement.
 
 `rt_drop_enter` and `rt_drop_leave` bracket the call to the destructor, and
-nothing else -- `src/emit_c.rs` emits them either side of it, which is the
+nothing else -- `src/back/emit_c/mod.rs` emits them either side of it, which is the
 one place the runtime's release reaches the program. `enter` sets the queue
 state aside and hands the body a fresh, empty one; `leave` puts the outer
 walk's back, untouched. Five words, saved in the drop function's own frame,

@@ -222,7 +222,7 @@ release (`clear` on a List; `clear`, `remove` and `set` on a Map) count as
 running code in a program that declares a destructor. The test for "can run
 code" is syntactic and conservative: any call, construction or `?` can; a
 field, element or local read, a literal and a built-in operator cannot. The
-rule and its reasoning live in `src/lower/hold.rs`.
+rule and its reasoning live in `src/middle/lower/hold.rs`.
 
 ### 5.2 Returns are **owned (+1)**
 

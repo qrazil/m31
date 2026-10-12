@@ -506,7 +506,7 @@ of it in C in 2012.
       found the actual root cause (a compiler TLS-address-caching issue, not
       a scheduler or context-switch bug) and fixed it — see "Phase 3.5"
       below for the full account, the fix (`rt_stack_check`, `runtime/
-      rt.h`/`rt.c`/`src/emit_c.rs`), and its verification. A SEPARATE real
+      rt.h`/`rt.c`/`src/back/emit_c/mod.rs`), and its verification. A SEPARATE real
       deadlock found along the way (`rt_sched_spawn`'s backpressure, below)
       is also fully fixed. Two smaller, separate races found by the same
       TSan runs — `try_handoff`/`carrier_main`'s unsynchronized touch of a
@@ -984,8 +984,8 @@ green thread 0 (`rt_run_program`), not on the raw OS thread, so a
   violates that. It is not a bug in `rt_fiber_switch`, `rt_ctx_switch`, or
   the slab allocator at all, and never was.
 
-  **The fix** (`runtime/rt.h`, `runtime/rt.c`, `src/emit_c.rs`): the probe
-  is no longer inlined comparison text. `src/emit_c.rs` now emits a plain
+  **The fix** (`runtime/rt.h`, `runtime/rt.c`, `src/back/emit_c/mod.rs`): the probe
+  is no longer inlined comparison text. `src/back/emit_c/mod.rs` now emits a plain
   call, `rt_stack_check();`, to a new, `__attribute__((noinline))` function
   in `rt.c` that does the same comparison internally. A real, out-of-line
   call forces a fresh `%fs`-relative read inside it on every invocation,

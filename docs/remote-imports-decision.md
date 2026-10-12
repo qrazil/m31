@@ -3,14 +3,14 @@
 Status: **scoping, v0**. Nothing here is implemented yet. Written before
 building, same discipline as `docs/modules-decision.md` and
 `docs/ssh-decision.md` — this changes load-bearing compiler surface
-(`src/modules.rs`'s module resolution), so the shape gets decided once
+(`src/resolve/modules.rs`'s module resolution), so the shape gets decided once
 rather than discovered mid-implementation.
 
 `docs/modules-decision.md` deliberately deferred this: "Nested directories
 and how a program's source set is named... answering it badly now would be
 worse than answering it later." Today an `import x;` resolves to exactly one
 place — `x.m31` beside the importing file, or the embedded standard library
-(`src/modules.rs`'s `Loader::visit`) — with no search path, no project
+(`src/resolve/modules.rs`'s `Loader::visit`) — with no search path, no project
 manifest, no network access of any kind. This document is that deferred
 answer's first slice: pulling a library from a remote git repository.
 
@@ -70,7 +70,7 @@ One remote, pinned, single-file library, fetched and cached locally,
 resolved the same way a local import already is.
 
 **Two new files, beside the entry file** (the one existing search location
-local imports already use — `Loader.dir` in `src/modules.rs` — not a new
+local imports already use — `Loader.dir` in `src/resolve/modules.rs` — not a new
 "project root" concept):
 
 - **`deps`** — intent. One line per remote import: `name url ref`
@@ -115,7 +115,7 @@ own `deps` line pointed at a different ref of the same repo, if a mono-repo
 layout is wanted later) — not decided further than that here.
 
 **Resolution flow**, the one new fallback added to `Loader::visit`
-(`src/modules.rs`), between "check the embedded stdlib" and "error: cannot
+(`src/resolve/modules.rs`), between "check the embedded stdlib" and "error: cannot
 find module": if `name.m31` is not beside the entry file, and a `deps`
 file beside it has a line for `name`, resolve it there instead:
 

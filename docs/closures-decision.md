@@ -97,23 +97,23 @@ return, a `Chan<Less>` payload, and the receiver of a method call on a call's
 result (`pick().cmp(a, b)`). None of it needed a new rule.
 
 **Dispatch is already indirect and already constant-folded.** `CallIface`
-(`src/ir.rs`, around line 261) carries a **constant** slot index, and the C
+(`src/middle/ir.rs`, around line 261) carries a **constant** slot index, and the C
 backend emits exactly the cast-and-call a callback invocation needs
-(`src/emit_c.rs:990`):
+(`src/back/emit_c/mod.rs:990`):
 
 ```c
 v16 = ((int64_t (*)(Obj *, Obj *, Obj *))v1->ty->vtable[0])(v1, v12, v15); /* .cmp */
 ```
 
-**Slots are keyed by a method's name *and its IR shape*** (`src/ir.rs:440`,
-`src/lower.rs:2334`). Two interfaces declaring `cmp` with the same shape
+**Slots are keyed by a method's name *and its IR shape*** (`src/middle/ir.rs:440`,
+`src/middle/lower.rs:2334`). Two interfaces declaring `cmp` with the same shape
 share one slot; two declaring `cmp` with different shapes do not. Checked
 both ways: one type satisfying two identically-shaped interfaces works and
 dispatches identically through each.
 
 **An interface value is a bare `Obj *`** — `struct Obj { long rc; const
 TypeInfo *ty; }` (`runtime/rt.h:94`) — because the object knows its own type.
-`IrTy` has four variants and only `Ref` is managed (`src/ir.rs`).
+`IrTy` has four variants and only `Ref` is managed (`src/middle/ir.rs`).
 
 **The function namespace and the value namespace are already disjoint.**
 *(checked)* A local may not take a function's name:
@@ -151,7 +151,7 @@ spelled, and every consequence follows from that:
     what `Less` already is. The first draft's own representation section
     proved this and then added a type form on top of it anyway.
   - **A type form is not free.** `int(Point, Point) by = ...;` breaks the
-    parser's two-token declaration rule (`src/parser.rs`, the comment at the
+    parser's two-token declaration rule (`src/front/parser/mod.rs`, the comment at the
     head of the statement parser: *"Declaration. Three spellings, all
     decidable with two tokens"*), because `int(x)` is a conversion and
     `Point(1,2)` is a construction, so a statement beginning `int (` needs a
@@ -306,7 +306,7 @@ useful way: **two of the three are not waiting on callbacks at all**, and the
 third should not happen.
 
 **`ps.sort()` on a user type with `cmp`.** The diagnostic says it plainly
-today (`src/lower.rs:996`, checked):
+today (`src/middle/lower.rs:996`, checked):
 
 ```
 `sort` orders `int`, `float` and `str`; P would need the compiler to call its
@@ -347,7 +347,7 @@ it), so **`hash` is the only new name.** That is strictly less language than
 an interface declaration, and it is the same shape of rule as everything else
 about user types: define the method and the feature works; do not and the
 compiler names the method it wanted. The current refusal is
-`src/lower.rs:6986`, checked:
+`src/middle/lower.rs:6986`, checked:
 
 ```
 a map key must be int or str, found K; hashing a user type would need a
@@ -358,7 +358,7 @@ Hashable interface, which does not exist yet
 
 One honest caveat: a **module constant** `Map<P, int>` stays refused. The
 compiler lays constant maps out as static data and must therefore compute
-each key's hash itself (`src/lower/consts.rs`, `map_hash`), and it cannot run
+each key's hash itself (`src/middle/lower/consts.rs`, `map_hash`), and it cannot run
 a user's `hash` method at compile time. Small, well-bounded, with a clear
 message, and additive to relax if constant evaluation grows up.
 
@@ -433,7 +433,7 @@ leaves `__rc_live=0`.
 
 Worth recording, because it is counter-intuitive: a closure-taking `spawn`
 would *simplify* the backend. The emitter generates one argument struct and
-one trampoline per spawned function name (`src/emit_c.rs:294-345`); with a
+one trampoline per spawned function name (`src/back/emit_c/mod.rs:294-345`); with a
 closure there would be one trampoline for the whole program. The reason to
 refuse it is semantic, not mechanical.
 
@@ -808,7 +808,7 @@ the live object for the other.
 
 **1. Refcounting applies unchanged.** A capture is a field store, so it takes
 a +1, and the synthesised type gets a generated `drop_T`, `walk_T` and
-`copy_T` like every other type (`src/emit_c.rs:73,135,165`). Checked
+`copy_T` like every other type (`src/back/emit_c/mod.rs:73,135,165`). Checked
 indirectly by every program in this record ending `__rc_live=0`.
 
 **2. `const` applies unchanged, including the deep copy.** Checked:
@@ -863,7 +863,7 @@ destructor); a constant can neither freeze a resource nor copy one, so bind it
 without `const`
 ```
 
-`resource_in` (`src/lower/consts.rs:371`) walks fields, and a lambda's
+`resource_in` (`src/middle/lower/consts.rs:371`) walks fields, and a lambda's
 captures *are* fields, so **a lambda that captures an `io.File` cannot be
 bound to a `const`**, with that message, with no new code. `rt_snapshot`'s
 runtime backstop catches what the type cannot show, through an interface.
@@ -967,12 +967,12 @@ hit it; weak references remain additive.
 
 The claim holds, and is stronger than stated.
 
-  - `IrTy` is `I64 | F64 | I1 | Ref` (`src/ir.rs`), and `docs/ir-v0.md:38`
+  - `IrTy` is `I64 | F64 | I1 | Ref` (`src/middle/ir.rs`), and `docs/ir-v0.md:38`
     states the invariant: "`ref` is the only managed type". A callback is a
     `Ref`. Nothing to add.
   - The code pointer does **not** live in the object. It lives in the type's
     vtable, a static array the C emitter already writes
-    (`src/emit_c.rs:216-241`). So the object is header plus captures, and
+    (`src/back/emit_c/mod.rs:216-241`). So the object is header plus captures, and
     every instance made at one lambda site shares one `TypeInfo`. Checked in
     the emitted C for the `ByX` program:
     ```c
@@ -1138,7 +1138,7 @@ new evidence, and it lands squarely on §"Iterators" below.
 
 A lambda written inside a generic function becomes a synthesised generic type
 and is instantiated per instantiation of its enclosing function — no new
-machinery, because `src/mono.rs` is an AST→AST pass that already does this
+machinery, because `src/middle/mono/mod.rs` is an AST→AST pass that already does this
 for nested generic types, and the desugaring happens in the AST before it.
 
 An interface *parameter* does not multiply code: `sort.by<Point>` is
@@ -1401,7 +1401,7 @@ types, bound method values, weak references, and devirtualisation.
 **Stage 0 — before the freeze, independent of everything else. ~1 day.**
 Reserve `=>` as a token. Refuse a default on an interface method signature
 (freeze item 3) and fix the grammar's `sig`. Reserve the three vtable slots
-(mechanical, at the `iface_slots` push in `src/lower.rs`). *Must* be
+(mechanical, at the `iface_slots` push in `src/middle/lower.rs`). *Must* be
 pre-freeze. Note what is **not** here: no keyword to reserve.
 
 **Stage 1 — `sort()` and `Map` on user types. ~1 week.**
@@ -1421,7 +1421,7 @@ and construct from it instead of calling `rt_alloc`. This also makes
 `ByX()` — the hand-written form, which allocates today — free, so it pays
 before any new syntax exists.
 
-*Done.* `TypeDef::is_immortal_singleton` (`src/ir.rs`) decides it and the
+*Done.* `TypeDef::is_immortal_singleton` (`src/middle/ir.rs`) decides it and the
 emitter writes one `static T{i} imm_T{i} = { { RC_IMMORTAL, &ti_T{i} } };`
 per such type; `Inst::Alloc` on one becomes `&imm_T{i}.hdr`. Four kinds of
 type are excluded because they are not really field-less — an interface, a
@@ -1594,7 +1594,7 @@ reader can see which program proves which:
 | a lambda made in a loop holds that turn's value | `corpus/core/1101` |
 | a lambda in a method holds the receiver, live | `corpus/core/1102` |
 | a lambda in a lambda, and one in a method | `corpus/core/1103` |
-| no captures: one immortal static, in a `const`, across a thread | `corpus/core/1104`, `src/tests.rs` |
+| no captures: one immortal static, in a `const`, across a thread | `corpus/core/1104`, `src/tests/` |
 | `const` deep-copies a capture held outside | `corpus/core/1105` |
 | a captured destructor runs when the lambda dies, and not before | `corpus/core/1105` |
 | a frozen lambda's captured list cannot be changed | `corpus/traps/1121` |
@@ -1628,7 +1628,7 @@ harness has no category for.
 
 **Measured.** A captureless lambda emits `v = &imm_T{i}.hdr` and no
 `rt_alloc` — asserted on the emitted C in
-`src/tests.rs::a_lambda_with_no_captures_never_allocates`, since no program
+`src/tests/::a_lambda_with_no_captures_never_allocates`, since no program
 can observe the difference from inside the language. A capturing one is an
 ordinary construction, which the same test's twin asserts from the other
 side.

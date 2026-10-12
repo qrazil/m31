@@ -38,7 +38,7 @@ Consequences, all enforced by the compiler:
   as for the flat modules.
 - A dependency in `deps` named like a group (`crypto`) makes `crypto.sha256`
   ambiguous and is refused; rename the dependency.
-- The embedded table in `src/stdlib.rs` is keyed by the dotted path; a unit
+- The embedded table in `src/resolve/stdlib.rs` is keyed by the dotted path; a unit
   test checks it is exactly the set of files under `lib/`, and that no two
   modules share a name across groups.
 

@@ -102,7 +102,7 @@ probe into a quadratic one. It also leaves the program with a defined-but-
 useless behaviour where a trap is the honest answer.
 
 **A flag field in `Lst`, `Arr` and `Map`.** A whole word, or a layout change
-in three structs that `src/lower/consts.rs` emits as static data for module
+in three structs that `src/middle/lower/consts.rs` emits as static data for module
 constants. The header word was already being loaded and tested.
 
 **Refuse it at compile time.** A `cmp` cannot be shown not to reach its own
@@ -136,7 +136,7 @@ references to one object.
 An immortal object is never marked: `RC_IMMORTAL` is every bit set, so the
 bits could not be cleared again. It does not need them — it reads as frozen,
 so sorting it already traps, and a module-constant map's keys can only be
-ints or strs (`src/lower/consts.rs` refuses a user-typed key, because the
+ints or strs (`src/middle/lower/consts.rs` refuses a user-typed key, because the
 compiler would have to run the program's `hash` to lay the table out), which
 run no program code.
 
@@ -144,7 +144,7 @@ run no program code.
 
 **A list's `contains` and `index_of` need no mark at all.** They were on the
 list of things to check, and the answer is that they cannot get there:
-`src/lower.rs` *refuses* `contains` on a list whose element type is a
+`src/middle/lower.rs` *refuses* `contains` on a list whose element type is a
 reference other than `str` — "`contains` compares `int`, `float`, `bool` and `str`; `P` would
 need its own comparison" — so `rt_seq_contains` compares a str by value, a
 float as a float, and anything else by word, and runs no program code
@@ -205,7 +205,7 @@ The second half is what keeps the receiver's own lifetime out of the
 question. A destructor may drop the last reference to the collection it is
 being released from, and then the collection is freed halfway through the
 operation. The caller does retain the receiver across a call that can
-release (`src/lower/hold.rs`, `releases`), so this cannot happen as things
+release (`src/middle/lower/hold.rs`, `releases`), so this cannot happen as things
 stand — but that is a compiler invariant holding up a runtime file, and the
 runtime is cheaper to write so that it does not need it. `rt_map_remove`
 read `m->val_is_ref` *after* releasing the key, which is exactly the shape
@@ -214,7 +214,7 @@ the rule forbids; both flags are read up front now.
 That retain stays where it is. `releases` is not only about the receiver: it
 is what makes `may_run_code` true for a `clear`, a `remove` or a `set`, and
 so what holds every *other* borrowed operand of the statement they appear in
-(`src/lower/hold.rs`). Only the receiver half of it is now belt-and-braces.
+(`src/middle/lower/hold.rs`). Only the receiver half of it is now belt-and-braces.
 Its comment still says the runtime goes on to the next element after a
 release, which `rt_list_clear` no longer does.
 
@@ -229,8 +229,8 @@ for what it sees.
 | `rt_list_clear` | yes, every element | **detach** — the whole buffer, then release from the local |
 | `rt_list_pop`, `rt_list_remove_at` | no | the reference is handed OUT; the statement that discards it releases afterwards, with the list already short |
 | `rt_list_insert`, `rt_list_push`, growth/realloc | no | nothing is released, so no program code runs; `insert` re-reads `l->data` after the push that may have moved it |
-| index store (`rt_index_set`), Array element store | no, in the runtime | the lowering reads the old value, retains the new, stores, and releases the old LAST (`src/lower.rs`) — the runtime holds nothing across it |
-| a struct field store | no, in the runtime | same order, emitted by `src/lower.rs`: the field already holds the new value when the old one's destructor runs, so a destructor that writes the same field wins |
+| index store (`rt_index_set`), Array element store | no, in the runtime | the lowering reads the old value, retains the new, stores, and releases the old LAST (`src/middle/lower.rs`) — the runtime holds nothing across it |
+| a struct field store | no, in the runtime | same order, emitted by `src/middle/lower.rs`: the field already holds the new value when the old one's destructor runs, so a destructor that writes the same field wins |
 | `rt_map_set` replacing | yes, the old value | the slot holds the new value and the flag is in hand before the release; the probing mark comes off first |
 | `rt_map_remove` | yes, key and value | the slot is DEAD and `len` decremented first; both flags read first |
 | `rt_map_clear` | yes, every entry | **detach** — the whole table. Complete: key and value both come out of the detached table, and only a local is touched afterwards |
@@ -259,7 +259,7 @@ zero too, so the same argument applies to it, one level up, all the way out.
 
 Two escape hatches, both already closed: a destructor that stores `this`
 somewhere that outlives the call is the **resurrection trap**
-(`src/emit_c.rs`, §4.4), and a **cycle** is never released at all (§7.1), so
+(`src/back/emit_c/mod.rs`, §4.4), and a **cycle** is never released at all (§7.1), so
 its members' destructors never run.
 
 ## What a destructor sees, and what stays legal

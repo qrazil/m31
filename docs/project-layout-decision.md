@@ -1,6 +1,6 @@
 # Project layout: the decision
 
-Status: **decided and implemented** (`src/modules.rs`, `src/deps.rs`,
+Status: **decided and implemented** (`src/resolve/modules.rs`, `src/resolve/deps.rs`,
 `src/main.rs`). The `deps` project file has a required `name`/`version`
 header, a dependency can be a `path` used in place, and `m31c fmt -r`
 formats a tree. Wrapped identity (namespacing) is **decided against,
@@ -23,7 +23,7 @@ that uses it, and a program cannot live anywhere but next to its modules.
 
 ## 1. What forces the flat layout today (the root cause)
 
-In `Loader` (`src/modules.rs`) every import is resolved at
+In `Loader` (`src/resolve/modules.rs`) every import is resolved at
 `entry_dir.join(name + ".m31")`, and a module's **identity is its basename**
 (`lib.f`, `lib#Type`, `modules.contains(name)` in lower/mono/privacy).
 Three consequences ripple out into the sibling repos:
@@ -328,7 +328,7 @@ the compiler is already prototyped.
 
 ## 6. Prototype status
 
-Implemented in `src/ast.rs` (`Import.path`), `parser.rs` (dotted
+Implemented in `src/front/ast.rs` (`Import.path`), `parser.rs` (dotted
 imports), `fmt.rs`, `deps.rs` (`resolve_package`, `read_manifest`,
 `declares`) and `modules.rs` (`find_root`, `Site`, `locate`, the
 collision/not-found messages); `gates.sh` updated as in section 3.

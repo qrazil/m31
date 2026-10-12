@@ -112,7 +112,7 @@ workloads is available more cheaply through `const`.
 
 ## The Monday run — 2026-09-28
 
-### Step 0, sequential, before anything else: split `src/lower.rs`
+### Step 0, sequential, before anything else: split `src/middle/lower.rs`
 
 Item 4 of `docs/readability-plan.md`, moved to the front for a practical
 reason rather than a readability one: **items 2, 3 and 5 all edit

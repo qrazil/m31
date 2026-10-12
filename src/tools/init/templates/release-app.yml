@@ -1,0 +1,81 @@
+name: Release
+
+# Builds the @@NAME@@ binary for each platform and attaches it to the GitHub
+# Release for a pushed version tag. test.yml is a hard precondition: a broken
+# build never produces a release.
+#
+#   git tag v@@VERSION@@ && git push origin v@@VERSION@@
+env:
+  M31_REF: @@M31_REF@@
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write # softprops/action-gh-release creates the release and uploads assets
+
+jobs:
+  test:
+    name: Test (precondition)
+    uses: ./.github/workflows/test.yml
+
+  build:
+    name: Build — ${{ matrix.label }}
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: "Linux x86-64", os: ubuntu-latest, asset: linux-x86_64 }
+          - { label: "Linux aarch64", os: ubuntu-24.04-arm, asset: linux-aarch64 }
+          - { label: "macOS (arm64)", os: macos-14, asset: macos-arm64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download and extract the m31 release (${{ env.M31_REF }})
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/m31.tar.gz" \
+            "https://github.com/qrazil/m31/releases/download/${{ env.M31_REF }}/m31-${{ matrix.asset }}.tar.gz"
+          mkdir -p "$RUNNER_TEMP/m31"
+          tar -C "$RUNNER_TEMP/m31" -xzf "$RUNNER_TEMP/m31.tar.gz"
+          chmod +x "$RUNNER_TEMP/m31/m31c"
+          echo "LANGC=$RUNNER_TEMP/m31/m31c" >> "$GITHUB_ENV"
+          echo "M31_ROOT=$RUNNER_TEMP/m31" >> "$GITHUB_ENV"
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          OUT=dist/@@NAME@@-${{ matrix.asset }}
+          mkdir -p "$OUT"
+          bash scripts/build.sh -o "$OUT/@@NAME@@"
+          cp README.md "$OUT/"
+
+      - name: Package
+        run: tar -C "dist/@@NAME@@-${{ matrix.asset }}" -czf "@@NAME@@-${{ matrix.asset }}.tar.gz" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: @@NAME@@-${{ matrix.asset }}
+          path: "@@NAME@@-${{ matrix.asset }}.tar.gz"
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
+          fail_on_unmatched_files: true
+          generate_release_notes: true

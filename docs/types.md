@@ -332,7 +332,7 @@ The known hazard is accidental satisfaction: a `Shape.draw()` silently
 satisfying a `Cowboy.draw()`. Rare, and the cost is accepted.
 
 **Generics arrive from day one**, monomorphised. **Implemented** — see
-`src/mono.rs`. The reason is not
+`src/middle/mono/mod.rs`. The reason is not
 convenience, it is that **containers are generic and we need `Chan<T>`
 immediately.** The alternative is special-casing channels, arrays and maps in
 the compiler so users cannot write their own — which is what Go did for ten

@@ -81,7 +81,7 @@ rather than assuming it applies by default.** `deps` resolves a *remote m31
 library* — another repo's `<name>.m31`, pulled by the compiler at build
 time. `httpserver` imports nothing like that: every one of its imports
 (`args`, `http`, `net`, `io`, `os`) is embedded *inside the `m31c` binary
-itself* (`src/stdlib.rs`), resolved with no network access regardless of
+itself* (`src/resolve/stdlib.rs`), resolved with no network access regardless of
 which repository the importing program lives in. A standalone `httpserver`
 repo needs exactly the same `m31c` binary this repo builds — not an m31-level
 dependency at all, but a **tooling** dependency, same shape as "this repo

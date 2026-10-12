@@ -285,14 +285,14 @@ already-frozen enums, not a second error representation living alongside
 per-module enums.
 
 Three places needed to know about it, all gated on one new predicate,
-`TypeDef::os_errno_variant(tag)` (`src/ir.rs`):
+`TypeDef::os_errno_variant(tag)` (`src/middle/ir.rs`):
 
-  - **Construction** (`Inst::EnumPack`, `src/emit_c.rs`): for this one
+  - **Construction** (`Inst::EnumPack`, `src/back/emit_c/mod.rs`): for this one
     variant, the tag is computed (`base | (uint32_t)errno`) instead of
     written as the constant every other variant's tag is.
-  - **Reading the payload back** (`Inst::EnumPayload`, `src/emit_c.rs`): a
+  - **Reading the payload back** (`Inst::EnumPayload`, `src/back/emit_c/mod.rs`): a
     mask (`tag & 0xFFFFFFFF`) instead of a union read.
-  - **`match` dispatch** (`lower::lower_match`, `src/lower/stmt.rs`): the
+  - **`match` dispatch** (`lower::lower_match`, `src/middle/lower/stmt.rs`): the
     comparison this arm gets is `tag >= OS_ERRNO_TAG_BASE` instead of
     `tag == <constant>`, wherever in the arm list it appears — `net.m31`'s
     `error_of` writes `Other` FIRST, `io.m31`'s and `term.m31`'s `to_str`
@@ -302,7 +302,7 @@ Three places needed to know about it, all gated on one new predicate,
     already just calls `code.to_str()` on the bound payload, and the
     payload now arrives the same value through a different read.
 
-The layout change is one line: `emit_enum_body` (`src/emit_c.rs`) skips
+The layout change is one line: `emit_enum_body` (`src/back/emit_c/mod.rs`) skips
 generating a union member for this one variant, exactly as it already skips
 one for every payload-free variant, so `io.Error` — whose ONLY
 payload-carrying variant this is — gets no union at all: `{ int64_t tag; }`,

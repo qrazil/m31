@@ -385,7 +385,7 @@ and cannot. One finding per name at most: three findings on `e` is noise.
 Why in the compiler and not a script: the hard part is knowing a name's *kind*
 (loop counter or element, payload or local, `Err` or `Ok`), and the parser
 already has that. A regex script (the §2 survey) cannot see lambda parameters
-or fields and misreads `for (x in xs)`. The cost is `src/lint.rs`, about 690
+or fields and misreads `for (x in xs)`. The cost is `src/tools/lint.rs`, about 690
 lines of tree walk and CLI, plus 90 of unit tests, and no new dependency.
 
 **Not wired into `gates.sh`** — by instruction, and rightly: it reports

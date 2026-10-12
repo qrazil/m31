@@ -33,7 +33,7 @@ const Map<str, int> KEYWORDS = {"if": 1, "else": 2};
 | At the top level `const` always declares a module constant | One spelling, one meaning. Every top-level `const` in the corpus before this (`012`, `015`, `201`) was already a constant expression, so none had to change. |
 | The type is mandatory | The language writes every name's type. A constant is read far from its declaration, which is where a written type pays most. |
 | No naming rule | Nothing else in the language is case-checked (types may be lowercase, `017`). The standard library uses `UPPER_SNAKE_CASE` by convention, which keeps constants out of the way of locals — useful because a local may not take a constant's name. |
-| The initialiser is a constant expression: literals, other constants, operators, collection literals | Evaluated **by the compiler** (`src/lower/consts.rs`). No calls: a compile-time call needs the whole language at compile time — a second implementation that can disagree with the first. |
+| The initialiser is a constant expression: literals, other constants, operators, collection literals | Evaluated **by the compiler** (`src/middle/lower/consts.rs`). No calls: a compile-time call needs the whole language at compile time — a second implementation that can disagree with the first. |
 | Arithmetic follows the run-time rules; what would trap is an error; a float result must be finite | A constant and the same expression at run time must not disagree. A non-finite constant follows the rule a float literal already follows (§1.5). |
 | Constants may reference each other in any order; a cycle is an error printing the whole chain | Declarations are order-independent everywhere else. The chain format is the import cycle's. |
 | Types: `int`, `float`, `bool`, `str`, `bytes`, and `Array`/`List`/`Map` of those, nested | Everything the compiler can lay out as static data. `List` and `bytes` are allowed because a `const List<int>` local is legal and `const` means one thing (`docs/const-decision.md`). A user type waits for a use. |
@@ -47,7 +47,7 @@ const Map<str, int> KEYWORDS = {"if": 1, "else": 2};
 
 A collection constant is **static, immortal data** in the emitted C, laid out
 exactly as the runtime lays out the same collection built at run time, with
-a count of `RC_IMMORTAL` (`src/emit_c.rs`, `emit_statics`):
+a count of `RC_IMMORTAL` (`src/back/emit_c/mod.rs`, `emit_statics`):
 
   - `Array` — an anonymous struct `{ Obj hdr; int64_t len; int64_t data[N]; }`
     with the same layout as the runtime's `Arr` (whose flexible array member

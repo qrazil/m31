@@ -3,25 +3,22 @@
 //! Usage:
 //!     m31c --emit-c  <source> -o <out.c>
 //!     m31c --emit-ir <source> [-o <out.ir>]
+//!     m31c init [--lib] [--name N] [--prefix P] [dir]
 //!
 //! One error, one line, on stderr, exit 1. The corpus compares diagnostics
-//! byte-for-byte, so this is observable surface (src/diag.rs).
+//! byte-for-byte, so this is observable surface (src/front/diag.rs).
 
-mod ast;
-mod deps;
-mod diag;
-mod emit_c;
-mod fmt;
-mod hoist;
-mod ir;
-mod lexer;
-mod lint;
-mod lower;
-mod modules;
-mod mono;
-mod parser;
-mod stdlib;
-mod width;
+mod back;
+mod front;
+mod middle;
+mod resolve;
+mod tools;
+
+use back::emit_c;
+use front::{ast, diag, lexer, parser};
+use middle::{lower, mono};
+use resolve::{modules, stdlib};
+use tools::{fmt, init, lint};
 
 #[cfg(test)]
 mod tests;
@@ -34,6 +31,7 @@ fn usage() -> ExitCode {
     eprintln!("       m31c fmt --check <source>   exit 1 if it is not formatted");
     eprintln!("       m31c fmt [--check] -r <dir> every .m31 file under <dir>");
     eprintln!("       {}", lint::USAGE);
+    eprintln!("       {}", init::USAGE);
     ExitCode::from(2)
 }
 
@@ -42,6 +40,9 @@ fn main() -> ExitCode {
 
     if args.first().map(String::as_str) == Some("lint") {
         return lint::main(&args[1..]);
+    }
+    if args.first().map(String::as_str) == Some("init") {
+        return init::main(&args[1..]);
     }
 
     let mut mode: Option<&str> = None;
@@ -70,6 +71,7 @@ fn main() -> ExitCode {
                 println!("       m31c fmt --check <source>");
                 println!("       m31c fmt [--check] -r <dir>");
                 println!("       {}", lint::USAGE);
+                println!("       {}", init::USAGE);
                 return ExitCode::SUCCESS;
             }
             other if other.starts_with('-') => {
@@ -255,7 +257,7 @@ fn compile(entry: &str, mode: &str) -> Result<String, modules::Located> {
 /// filesystem -- they test the compiler, not the loader.
 fn finish(prog: ast::Program, mode: &str) -> Result<String, diag::Diag> {
     // Generics are erased before lowering, which is why the IR has never
-    // needed to know about them. See src/mono.rs.
+    // needed to know about them. See src/middle/mono/.
     lower::check_destructor_decls(&prog)?;
     lower::check_reserved_decls(&prog)?;
     let prog = mono::Mono::run(prog)?;

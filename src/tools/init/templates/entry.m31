@@ -1,0 +1,13 @@
+// @@NAME@@ -- the program's entry point.
+//
+//   @@NAME@@ [who]
+
+import core.@@PREFIX@@_core;
+import os;
+
+List<str> argv = os.arguments();
+str who = "world";
+if (argv.size() > 1) {
+    who = argv[1];
+}
+print(@@PREFIX@@_core.greeting(who));

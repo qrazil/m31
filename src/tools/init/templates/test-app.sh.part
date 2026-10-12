@@ -1,0 +1,18 @@
+
+# --- the program -------------------------------------------------------------------
+
+BIN="$WORK/@@NAME@@"
+if bash scripts/build.sh -o "$BIN" >"$WORK/build.log" 2>&1; then
+    if [ "$("$BIN" 2>&1)" = "hello, world" ]; then
+        note "program: default greeting"
+    else
+        bad "program: default greeting" "$("$BIN" 2>&1)"
+    fi
+    if [ "$("$BIN" you 2>&1)" = "hello, you" ]; then
+        note "program: greets its argument"
+    else
+        bad "program: greets its argument" "$("$BIN" you 2>&1)"
+    fi
+else
+    bad "build @@NAME@@" "$(tail -n 8 "$WORK/build.log")"
+fi

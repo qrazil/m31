@@ -41,7 +41,7 @@ token in both.
 
 The two rules are *not* in tension: the number counts code points, the
 padding counts cells, and the compiler does not have to choose. The compiler
-does not carry its own copy of the Unicode data either — `src/width.rs`
+does not carry its own copy of the Unicode data either — `src/front/width.rs`
 parses the tables out of the embedded text of `lib/text/unicode.m31`, so a
 regeneration for a new Unicode version moves both at once.
 

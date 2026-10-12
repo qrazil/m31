@@ -1,0 +1,7 @@
+// @@NAME@@'s core module. Modules are named PREFIX_name, so `@@PREFIX@@_core` is
+// unique in any program that imports it, and the folder is only for finding
+// the file: `import core.@@PREFIX@@_core;` from anywhere in this project.
+
+pub str greeting(str who) {
+    return "hello, " + who;
+}

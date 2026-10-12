@@ -102,7 +102,7 @@ typedef Obj *(*CopyFn)(Obj *o, void *ctx);
  * indices at the head of the vtable (the shape docs/closures-decision.md
  * sketched) for two reasons: a field has a real prototype, so the C compiler
  * checks the signature at every call instead of a hard-coded slot number
- * having to agree between src/lower.rs and this file; and a program with no
+ * having to agree between src/middle/lower.rs and this file; and a program with no
  * interfaces at all keeps its empty vtable.
  *
  * NULL when the type declares no such method. The compiler refuses any
@@ -460,7 +460,7 @@ __attribute__((cold)) _Noreturn void rt_trap(const char *msg);
  * most of item 1's win by itself; hoisting the length and the pointer THEMSELVES
  * across a loop turned out to need help beyond inlining -- gcc/clang do not
  * do it on their own even then, measured (see rt_index_get's comment,
- * below) -- so src/hoist.rs does it explicitly, in the IR, after lowering.
+ * below) -- so src/middle/hoist.rs does it explicitly, in the IR, after lowering.
  *
  * The trap stays out of line and cold (rt_trap, below), so the path where
  * nothing traps -- the only one that runs in a tight loop -- is a handful of
@@ -488,7 +488,7 @@ static inline int64_t rt_index_get(Obj *o, int64_t i) {
      * `restrict` in place, reduced to a header-plus-inline-array C
      * repro with no runtime involved at all. `int64_t` is `int64_t`, and
      * that is apparently enough doubt for the alias oracle even when the
-     * regions provably do not overlap. src/hoist.rs is what actually
+     * regions provably do not overlap. src/middle/hoist.rs is what actually
      * hoists these two across such a loop, in the IR, where the object's
      * SSA identity makes the invariance exact rather than inferred -- see
      * its file comment for the measurement (~13%, on top of inlining this
@@ -506,7 +506,7 @@ static inline void rt_index_set(Obj *o, int64_t i, int64_t v) {
     data[i] = v;
 }
 
-/* The other half of "hoist the metadata" (src/hoist.rs): a fixed pointer and
+/* The other half of "hoist the metadata" (src/middle/hoist.rs): a fixed pointer and
  * length, read ONCE outside a loop the pass proved safe, rather than
  * re-derived by rt_index_get/rt_index_set on every element. `ptr` is really
  * an `int64_t *`, carried as `int64_t` for the same reason a collection's own
@@ -607,7 +607,7 @@ static inline void rt_bytes_set(Obj *o, int64_t i, int64_t v) {
     data[i] = (uint8_t)v;
 }
 
-/* The `bytes` half of src/hoist.rs's "hoist the metadata" -- see
+/* The `bytes` half of src/middle/hoist.rs's "hoist the metadata" -- see
  * rt_seq_data_addr/rt_index_get_at/rt_index_set_at above, same idea, one
  * octet at a time instead of one word. */
 static inline int64_t rt_bytes_data_addr(Obj *o) {
@@ -789,7 +789,7 @@ void rt_check_unique(Obj *o);
  * `rt_stack_limit` holds the lowest valid address of the stack belonging to
  * whichever green thread is currently running on THIS carrier OS thread --
  * thread-local because one OS thread runs one green thread's code at a
- * time. src/emit_c.rs (emit_func) opens every emitted function with a call
+ * time. src/back/emit_c/mod.rs (emit_func) opens every emitted function with a call
  * to `rt_stack_check()`, below.
  *
  * THAT CALL MUST STAY A REAL, OUT-OF-LINE CALL -- not the inlined
@@ -851,7 +851,7 @@ extern _Thread_local uintptr_t rt_stack_limit;
  * probe's own call site in emit_c.rs ever needing to change again. */
 #define RT_STACK_LIMIT_POISON (~(uintptr_t)0)
 
-/* The probe itself -- src/emit_c.rs calls this at the top of every emitted
+/* The probe itself -- src/back/emit_c/mod.rs calls this at the top of every emitted
  * function. `__attribute__((noinline))` is load-bearing, not defensive
  * styling: see rt_stack_limit's own comment above for exactly which bug
  * re-inlining this reintroduces. `-flto` is already off project-wide, so
@@ -871,7 +871,7 @@ void rt_stack_probe_slow(void);
  *
  * `O_NONBLOCK` is a no-op on a regular file and `getaddrinfo` is synchronous
  * by specification, so any foreign (`prim`) call might block the OS thread
- * underneath it for an arbitrary time. src/emit_c.rs wraps every such call
+ * underneath it for an arbitrary time. src/back/emit_c/mod.rs wraps every such call
  * site in rt_enter_blocking()/rt_exit_blocking() -- unconditionally, the
  * same "always correct, always emitted" discipline the stack probe above
  * uses, and for the same reason: this header, and rt.c's implementation of
@@ -881,7 +881,7 @@ void rt_stack_probe_slow(void);
  *
  * The mechanism is the same shape as rt_stack_limit just above: a
  * thread-local the compiler-emitted call site touches with no argument to
- * pass, because src/emit_c.rs has no way to know, at a `prim` call site,
+ * pass, because src/back/emit_c/mod.rs has no way to know, at a `prim` call site,
  * which carrier (if any) is running on this OS thread. `rt_blocking_rec` is
  * NULL on every OS thread that never registered one -- which, absent a
  * scheduler, is every thread there is -- and on such a thread both
@@ -912,7 +912,7 @@ extern _Thread_local rt_blocking_rec_t *rt_blocking_rec;
  * rt_enter_blocking/rt_exit_blocking, i.e. for the carrier's whole life. */
 void rt_blocking_register(rt_blocking_rec_t *rec);
 
-/* Emitted immediately before/after every `prim` call site (src/emit_c.rs).
+/* Emitted immediately before/after every `prim` call site (src/back/emit_c/mod.rs).
  * A plain, uncontended atomic store on the fast path when nobody is
  * watching (rt_blocking_rec == NULL: no-op; non-NULL: one relaxed-adjacent
  * store), so the cost of instrumenting every FFI call is negligible for a

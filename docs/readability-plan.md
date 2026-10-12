@@ -24,7 +24,7 @@ prose:
     (several are: `stdlib-decision.md` §"three features waiting on one
     mechanism" was overtaken by the sort/map-key work, and the closures
     record rewrote itself once).
-  - **`src/lower.rs` is ~7,000 lines.** It is the typechecker and the
+  - **`src/middle/lower.rs` is ~7,000 lines.** It is the typechecker and the
     lowerer fused on purpose (`README.md` says why, and the reason is good),
     but one file is not the only way to keep them in step. It has natural
     seams: declaration checking, expression lowering, statement lowering,
@@ -54,7 +54,7 @@ prose:
    test of each kind, the rules that are easy to break (the runtime is a
    separate translation unit; `.out` files are hand-written; never iterate a
    HashMap to produce output).
-4. **Split `src/lower.rs`** along its existing seams into a `lower/`
+4. **Split `src/middle/lower.rs`** along its existing seams into a `lower/`
    directory, mechanically, with no behaviour change — the gates are exactly
    the safety net that makes this safe to do. `consts.rs` and `hold.rs` are
    already there, so the pattern exists.

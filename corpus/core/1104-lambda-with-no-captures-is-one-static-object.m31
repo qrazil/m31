@@ -4,7 +4,7 @@
 // `rc_inc`/`rc_dec` on it are a compare and a return.
 //
 // That it does not allocate is checked where it can be seen, in the emitted
-// C (`lambda_with_no_captures_never_allocates`, src/tests.rs). What is
+// C (`lambda_with_no_captures_never_allocates`, src/tests/). What is
 // checked here is everything that follows from it and IS observable: a hot
 // loop leaks nothing, an immortal reads as frozen so a `const` over one
 // needs no copy, and one crosses a thread boundary without tripping the

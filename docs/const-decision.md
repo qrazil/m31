@@ -81,7 +81,7 @@ reference says so plainly (§4.1).
 
 **The deep copy** is a real graph copy. A `CopyFn` joins `DropFn` and
 `WalkFn` in `TypeInfo`; the compiler emits one per user type (`copy_T*`,
-`src/emit_c.rs`) and the runtime copies its own collections itself. Every
+`src/back/emit_c/mod.rs`) and the runtime copies its own collections itself. Every
 copy is registered in an old→new map **before** its children are copied, so
 a child already copied is shared — a diamond stays a diamond — and a cycle
 closes onto the copy instead of recursing forever. The objects the copy made
@@ -145,7 +145,7 @@ So the binding is refused, fresh or shared:
 
   - **at compile time** whenever the declared type, after monomorphisation,
     can hold a type with a destructor (`Lowerer::refuse_const_resource`,
-    `resource_in` in src/lower/consts.rs: a walk over fields, variant
+    `resource_in` in src/middle/lower/consts.rs: a walk over fields, variant
     payloads and collection element types, stopping at interfaces and
     channels);
   - **at run time** through an interface, where the type cannot show it:

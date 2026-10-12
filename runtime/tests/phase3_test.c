@@ -31,7 +31,7 @@
  *   3. test_blocking_ffi_handoff -- a green thread that calls a genuinely
  *      blocking operation (nanosleep, wrapped in rt_enter_blocking/
  *      rt_exit_blocking exactly as compiled code around a `prim` call now
- *      does -- src/emit_c.rs) long enough to trigger the monitor, with
+ *      does -- src/back/emit_c/mod.rs) long enough to trigger the monitor, with
  *      several sibling green threads queued behind it on the SAME carrier,
  *      confirming those siblings complete via the backup carrier WHILE the
  *      blocker is still asleep, rather than stalling behind it.
@@ -577,7 +577,7 @@ typedef struct {
 static void blocker_worker(void *argp) {
     blocker_arg_t *a = (blocker_arg_t *)argp;
     atomic_store_explicit(&a->started, true, memory_order_release);
-    /* Exactly the shape src/emit_c.rs now wraps every `prim` call site in
+    /* Exactly the shape src/back/emit_c/mod.rs now wraps every `prim` call site in
      * (rt.h's rt_enter_blocking/rt_exit_blocking) -- here called directly,
      * since this test exercises the runtime mechanism itself rather than
      * going through a compiled .m31 program (the compiler side of the

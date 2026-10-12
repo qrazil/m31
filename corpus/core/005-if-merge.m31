@@ -1,5 +1,5 @@
 // Both arms reassign x, so the join block needs a parameter for it. This is
-// the SSA construction in src/lower.rs::lower_if.
+// the SSA construction in src/middle/lower.rs::lower_if.
 
 int x = 10;
 if (x > 5) {

@@ -59,7 +59,7 @@ run "no dependencies" bash -c '
 
 # No unsafe, in the compiler or in the runtime we ship.
 run "no unsafe" bash -c '
-    if grep -rn "unsafe" src/ 2>/dev/null | grep -v "^src/tests.rs" | grep -q .; then
+    if grep -rn "unsafe" src/ 2>/dev/null | grep -v "^src/tests/" | grep -q .; then
         echo "unsafe found in src/:"
         grep -rn "unsafe" src/
         exit 1
@@ -109,7 +109,7 @@ run "sys layer, every backend" bash runtime/tests/sys_test.sh
 
 # Phase 1 of docs/concurrency-decision.md: the x86-64 context switch, the
 # slab stack allocator, the compiler-emitted probe (both sides: the runtime
-# half here, and the exact text src/emit_c.rs emits), and the per-thread
+# half here, and the exact text src/back/emit_c/mod.rs emits), and the per-thread
 # state table. Every compiler/opt combo this file already uses elsewhere,
 # plus one dedicated ASan+UBSan build -- see runtime/tests/greenthread_test.c's
 # header for what is and is not reachable from a pure-C test at this phase.

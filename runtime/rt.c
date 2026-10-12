@@ -117,7 +117,7 @@ void rc_inc(Obj *o) {
  * reference §4.4 says cannot happen.
  *
  * So `rt_drop_enter` / `rt_drop_leave` bracket the call to a user `drop`
- * body -- emitted by src/emit_c.rs, the only place the runtime's release
+ * body -- emitted by src/back/emit_c/mod.rs, the only place the runtime's release
  * reaches the program -- and give the body a FRESH, empty queue: inside it
  * the first decrement to reach zero owns a drain of its own and runs it
  * before the body's next statement, exactly as at the top level. The outer
@@ -786,7 +786,7 @@ void rt_print_str(Obj *o) {
  * the program to reach it through. A destructor that could name it would be
  * holding one, and the count would not be zero. The one way to acquire one
  * during the walk -- storing `this` somewhere that outlives the call -- is
- * the resurrection trap (src/emit_c.rs). A cycle would be the exception, and
+ * the resurrection trap (src/back/emit_c/mod.rs). A cycle would be the exception, and
  * a cycle is never released at all (reference §7.1).
  *
  * So the elements' own destructors cannot see these containers, and nothing
@@ -1068,7 +1068,7 @@ int64_t rt_list_remove_at(Obj *o, int64_t i) {
  *
  * Nothing below touches `l` after the first release, which is the other
  * half of the rule. The caller does retain the receiver across a call that
- * can release (src/lower/hold.rs, `releases`), so the list cannot actually
+ * can release (src/middle/lower/hold.rs, `releases`), so the list cannot actually
  * go out from under this -- but the runtime does not have to know that, and
  * a `clear` that only ever reads its own locals after the first `rc_dec`
  * stays correct whichever side holds the reference.
@@ -1620,7 +1620,7 @@ bool rt_bytes_utf8(Obj *o, Obj **out) {
  * laid out by the compiler as static data. So is the hashing: the compiler
  * places each key where map_probe below will look for it, which makes
  * hash_int, hash_key and the probe order part of that contract. Change them
- * together with src/lower/consts.rs (`map_hash`), or every constant map
+ * together with src/middle/lower/consts.rs (`map_hash`), or every constant map
  * silently stops finding its keys -- corpus/core/742-const-map checks.
  *
  * A MK_OBJ key is the one kind the compiler CANNOT lay out: the hash is the
@@ -1853,7 +1853,7 @@ void rt_map_remove(Obj *o, int64_t k) {
      * reads the map again: `m->val_is_ref` sat after `rc_dec(dk)`, and a key
      * destructor that dropped the last reference to this map would have made
      * that a read of freed memory. It cannot today -- the caller retains the
-     * receiver across a call that can release (src/lower/hold.rs,
+     * receiver across a call that can release (src/middle/lower/hold.rs,
      * `releases`) -- and the runtime no longer relies on it either
      * (docs/reentrancy-decision.md, "The release paths"; corpus/core/1154). */
     bool key_is_ref = m->key_is_ref;
@@ -2794,7 +2794,7 @@ _Noreturn void rt_trap(const char *msg) {
 
 /* ---- green threads, Phase 1: the probe's slow path ----------------------
  *
- * See rt.h for the contract this keeps with src/emit_c.rs's emitted probe
+ * See rt.h for the contract this keeps with src/back/emit_c/mod.rs's emitted probe
  * and docs/concurrency-decision.md for the design. The fast path (the
  * comparison itself) is inline in every emitted function on purpose, so it
  * costs one compare and one untaken branch there; everything that happens
@@ -3525,7 +3525,7 @@ int64_t rt_ignore_sigpipe(void) {
  * RE-ARMS INTERNALLY, AND WHY -- a real, reproducible bug found and fixed
  * while building this, serious enough to document in full:
  *
- * src/emit_c.rs wraps EVERY `prim` call site in rt_enter_blocking()/
+ * src/back/emit_c/mod.rs wraps EVERY `prim` call site in rt_enter_blocking()/
  * rt_exit_blocking() unconditionally (docs/concurrency-decision.md,
  * "Blocking FFI") -- `__wait_io` is a `prim` like any other, so the
  * compiler emits `rt_enter_blocking(); v = rt_wait_io(...); rt_exit_

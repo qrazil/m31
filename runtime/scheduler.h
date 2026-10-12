@@ -275,7 +275,7 @@ uint32_t rt_sched_queue_len(rt_scheduler_t *s);
 
 /* ========================================================================
  * Blocking-FFI handoff -- Phase 3 (docs/concurrency-decision.md, "Blocking
- * FFI"). src/emit_c.rs wraps every genuine foreign (`prim`) call site in
+ * FFI"). src/back/emit_c/mod.rs wraps every genuine foreign (`prim`) call site in
  * rt_enter_blocking()/rt_exit_blocking() (runtime/rt.h) -- unconditionally,
  * in every compiled program, whether or not it ever touches this scheduler.
  * This is the other half, scoped to here: a monitor OS thread that watches

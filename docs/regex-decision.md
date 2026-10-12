@@ -13,7 +13,7 @@ for a primitive.
 
 **This is a library, not a language feature.** Nothing about the compiler,
 the IR, or the runtime changes. The one non-`lib/` edit is the one-line
-registration every embedded module needs in `src/stdlib.rs`, the same entry
+registration every embedded module needs in `src/resolve/stdlib.rs`, the same entry
 `math` and `sort` have.
 
 ---
@@ -339,7 +339,7 @@ the corpus, which is the demonstration: not a timer, but the absence of
     backtracking engines this module exists to avoid, but not the
     single-pass `O(n*m)` a `find_all`-aware driver could give it. Worth
     revisiting if a real caller matches many times over long text.
-  - Whether `compile`'s one-line registration in `src/stdlib.rs` is the
+  - Whether `compile`'s one-line registration in `src/resolve/stdlib.rs` is the
     pattern every future `lib/` module should follow, or whether that file
     wants a lookup table instead of a `match` arm per module -- unrelated to
     this module, not decided here.
