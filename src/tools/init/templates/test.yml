@@ -1,0 +1,47 @@
+name: Test
+
+# Builds and tests this repo against a pinned release of github.com/qrazil/m31,
+# on Linux x86-64, Linux aarch64 and macOS arm64. The release tarball carries
+# the compiler and the runtime sources together (config.sh + runtime/), and is
+# extracted under $RUNNER_TEMP so `m31c fmt --check -r .` never scans it.
+#
+# Bump M31_REF, or the commit on a dependency line of `deps`, by hand when this
+# repo should pick up a newer release.
+env:
+  M31_REF: @@M31_REF@@
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+  workflow_dispatch: {}
+  workflow_call: {}
+
+jobs:
+  test:
+    name: Test — ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: "Linux x86-64", os: ubuntu-latest, asset: linux-x86_64 }
+          - { label: "Linux aarch64", os: ubuntu-24.04-arm, asset: linux-aarch64 }
+          - { label: "macOS (arm64)", os: macos-14, asset: macos-arm64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download and extract the m31 release (${{ env.M31_REF }})
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/m31.tar.gz" \
+            "https://github.com/qrazil/m31/releases/download/${{ env.M31_REF }}/m31-${{ matrix.asset }}.tar.gz"
+          mkdir -p "$RUNNER_TEMP/m31"
+          tar -C "$RUNNER_TEMP/m31" -xzf "$RUNNER_TEMP/m31.tar.gz"
+          chmod +x "$RUNNER_TEMP/m31/m31c"
+          echo "LANGC=$RUNNER_TEMP/m31/m31c" >> "$GITHUB_ENV"
+          echo "M31_ROOT=$RUNNER_TEMP/m31" >> "$GITHUB_ENV"
+
+      - name: Test
+        run: bash tests/test.sh

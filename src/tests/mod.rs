@@ -40,6 +40,7 @@ mod control_flow;
 mod destructors;
 mod diagnostics;
 mod generics;
+mod init;
 mod interfaces;
 mod lambdas;
 mod lexer;

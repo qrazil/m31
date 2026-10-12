@@ -303,6 +303,17 @@ a lambda may be written wherever one is expected — there is no function type
 (`docs/concurrency-decision.md`), Phases 0-3 of which are done, verified
 under real concurrent load, and load-bearing -- see Concurrency above.
 
+## Starting a project
+
+```
+m31c init [--lib] [--name NAME] [--prefix PREFIX] [dir]
+```
+
+writes the standard layout (`deps`, an entry point, `core/`, `tests/test.sh`,
+`scripts/`, `docs/`, test and release workflows) with a passing test, and
+refuses to overwrite anything. The layout and its rules are in
+`docs/project-layout.md`.
+
 ## Decisions made
 
 | Decision | Choice | Note |

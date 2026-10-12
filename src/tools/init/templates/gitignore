@@ -1,0 +1,5 @@
+.m31-deps/
+/@@NAME@@
+/dist/
+__pycache__/
+*.log

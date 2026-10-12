@@ -3,6 +3,28 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
+## Unreleased
+
+### Added
+
+- `m31c init [--lib] [--name N] [--prefix PFX] [dir]` creates a new project in
+  the standard layout, with a passing test, CI and release workflows.
+  `docs/project-layout.md` describes the layout and the rules behind it.
+
+### Changed (source layout; no change to the language or the generated C)
+
+- `src/` is grouped into `front/` (lexer, parser, ast, diag), `resolve/`
+  (modules, deps, stdlib), `middle/` (mono, lower, hoist, width, ir), `back/`
+  (emit_c) and `tools/` (fmt, lint, init).
+- The largest files are split by area: `src/tests.rs` into `src/tests/`,
+  `parser` into `types`, `decl`, `stmt`, `expr`; `emit_c` into `types`,
+  `statics`, `func`, `inst`, `blocking`; `lower/expr` into `call`, `enums`,
+  `literal`, `ops`; `mono` into `types`, `items`, `body`, `infer`. The emitted
+  C of the whole corpus, lib, examples and apps is byte-identical before and
+  after.
+- The blocking-FFI warning's text names `src/back/emit_c/blocking.rs` instead
+  of `src/emit_c.rs`.
+
 ## 0.4.0 (2026-10-10)
 
 0.4.0 is a breaking release in two ways, both mechanical to follow: the
