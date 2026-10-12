@@ -51,6 +51,11 @@
 //   http.fetch(request, redirects:, timeout_ms:)  -> Result<Response, Error>
 //   http.fetch_via(transport, request, redirects:, timeout_ms:)
 //                                    -> Result<Response, Error>
+//   http.fetch_stream(request, timeout_ms:)  -> Result<BodyStream, Error>
+//                                    the head read, the body left for `body.read(n)`;
+//                                    no redirects. `http.read_response_stream(s, method)` is
+//                                    the same over any `io.Stream`.
+//   body.status(), body.reason(), body.header(n), body.read(n), body.is_finished()
 //   http.open(request, timeout_ms)   -> Result<net.Conn, Error>
 //                                    `http://` only. `https://` is `lib/net/https.m31`, which
 //                                    is `fetch_via` with a TLS transport.
@@ -1999,7 +2004,8 @@ pub Result<Response, Error> read_response(io.Stream stream, str method) {
     }
 }
 
-Result<Response, Error> read_one_response(io.Stream stream, str method) {
+// One status line and its fields, as a response with no body read.
+Result<Response, Error> read_one_head(io.Stream stream) {
     bytes raw = read_head(stream)?;
     if (raw.size() == 0) {
         return Result<Response, Error>.Err(Error.Closed);
@@ -2007,7 +2013,12 @@ Result<Response, Error> read_one_response(io.Stream stream, str method) {
     List<bytes> lines = head_lines(raw)?;
     List<str> start = status_line(lines[0])?;
     Headers fields = parse_headers(lines, 1)?;
-    Response http_response = Response(start[1].parse_int().or(0), start[2], start[0], fields);
+    return Result<Response, Error>.Ok(Response(start[1].parse_int().or(0), start[2], start[0], fields));
+}
+
+Result<Response, Error> read_one_response(io.Stream stream, str method) {
+    Response http_response = read_one_head(stream)?;
+    Headers fields = http_response.head;
     if (method == "HEAD" || is_bodiless(http_response.code)) {
         return Result<Response, Error>.Ok(http_response);
     }
@@ -2023,6 +2034,164 @@ Result<Response, Error> read_one_response(io.Stream stream, str method) {
         http_response.payload = read_to_end(stream, MAX_BODY, "the response body")?;
     }
     return Result<Response, Error>.Ok(http_response);
+}
+
+// --- reading a response body as it arrives ---------------------------------
+/// A response whose head has been read and whose body has not: the body comes
+/// out of `read` a piece at a time, so a download need not be held in memory
+/// and a long-lived response (a log tail, an event stream) can be consumed
+/// while it is still being written.
+///
+/// `read_response` and `fetch` are unchanged and still buffer: they read the
+/// same body through the same framing rules, to the end, with a ceiling
+/// (`MAX_BODY`). **A `BodyStream` has no ceiling** -- the caller decides how
+/// much to take, and stopping early is just not calling `read` again -- and
+/// has no redirect handling: a 3xx is handed back as it is.
+///
+/// Dropping a `BodyStream` before the end closes the connection it holds when
+/// that was opened by `fetch_stream`; over a stream the caller owns
+/// (`read_response_stream`), the caller's stream is left as it stood, part way
+/// through the body.
+pub type BodyStream {
+    Response head;
+    io.Stream source;
+    // 0: no more body, 1: `left` bytes of a length-delimited body,
+    // 2: chunked, `left` bytes of the current chunk, 3: until the stream ends.
+    int mode = 0;
+    int left = 0;
+}
+
+/// The status code.
+pub int BodyStream.status() {
+    return head.code;
+}
+
+/// The reason phrase the server sent.
+pub str BodyStream.reason() {
+    return head.phrase;
+}
+
+/// `"1.0"` or `"1.1"`.
+pub str BodyStream.version() {
+    return head.ver;
+}
+
+/// The first value of the field `name`, which is matched without regard to
+/// case.
+pub Option<str> BodyStream.header(str name) {
+    return head.head.get(name);
+}
+
+/// Every field name that arrived, lowercased, in order.
+pub List<str> BodyStream.header_names() {
+    return head.head.names();
+}
+
+/// True once the whole body has been handed out: the next `read` answers an
+/// empty `bytes`.
+pub bool BodyStream.is_finished() {
+    return mode == 0;
+}
+
+/// Between 1 and `max_bytes` bytes of the body, or an empty `bytes` once it
+/// has ended. As with `io.File.read`, fewer than `max_bytes` is not the end;
+/// an empty answer is, and is the only way the end is reported.
+///
+/// A body that stops short of what its framing declared, or a chunk that is
+/// malformed, is an `Err` (`Closed`, `Syntax`), never a quiet short body. A
+/// read that times out is an `Err` and the stream can be read again.
+/// Traps on `max_bytes` below 1, so an empty answer has one meaning.
+pub Result<bytes, Error> BodyStream.read(int max_bytes) {
+    if (max_bytes < 1) {
+        trap("BodyStream.read(" + max_bytes.to_str() + "): read at least one byte");
+    }
+    bytes none = [];
+    if (mode == 2 && left == 0) {
+        bytes line = read_line(source, MAX_CHUNK_LINE, "a chunk size line")?;
+        int size = chunk_size(line)?;
+        if (size == 0) {
+            skip_trailer(source)?;
+            mode = 0;
+        } else {
+            left = size;
+        }
+    }
+    if (mode == 0) {
+        return Result<bytes, Error>.Ok(none);
+    }
+    int want = max_bytes;
+    if (mode != 3 && want > left) {
+        want = left;
+    }
+    if (want > CHUNK) {
+        want = CHUNK;
+    }
+    match (source.read(want)) {
+        case Ok(bytes got): {
+            if (got.size() == 0) {
+                if (mode == 3) {
+                    mode = 0;
+                    return Result<bytes, Error>.Ok(none);
+                }
+                // A declared length, or a chunk, that the peer did not send:
+                // not a short body.
+                return Result<bytes, Error>.Err(Error.Closed);
+            }
+            if (mode != 3) {
+                left = left - got.size();
+            }
+            if (left == 0 && mode == 1) {
+                mode = 0;
+            }
+            if (left == 0 && mode == 2) {
+                bytes term = read_exact(source, 2, "a chunk terminator")?;
+                if (term[0] != CARRIAGE_RETURN || term[1] != LINE_FEED) {
+                    return Result<bytes, Error>.Err(Error.Syntax);
+                }
+            }
+            return Result<bytes, Error>.Ok(got);
+        }
+        case Err(io.Error error): {
+            return Result<bytes, Error>.Err(transport(error));
+        }
+    }
+}
+
+/// The response on `stream` to a request that used `method`, with the head
+/// read and the body left on the stream for `BodyStream.read`: the streaming
+/// form of `read_response`, with the same interim-response and framing rules.
+pub Result<BodyStream, Error> read_response_stream(io.Stream stream, str method) {
+    int interim = 0;
+    while (true) {
+        Response http_response = read_one_head(stream)?;
+        if (http_response.code >= 200 || http_response.code == 101) {
+            return body_stream_of(stream, http_response, method);
+        }
+        interim = interim + 1;
+        if (interim > MAX_INTERIM) {
+            return Result<BodyStream, Error>.Err(Error.TooLarge);
+        }
+    }
+}
+
+Result<BodyStream, Error> body_stream_of(io.Stream stream, Response http_response, str method) {
+    BodyStream out = BodyStream(http_response, stream);
+    if (method == "HEAD" || is_bodiless(http_response.code)) {
+        return Result<BodyStream, Error>.Ok(out);
+    }
+    if (method == "CONNECT" && http_response.code >= 200 && http_response.code < 300) {
+        return Result<BodyStream, Error>.Err(Error.Framing);
+    }
+    int length = framing(http_response.head)?;
+    if (length == -2) {
+        out.mode = 2;
+    } else if (length > 0) {
+        out.mode = 1;
+        out.left = length;
+    } else if (length < 0) {
+        out.mode = 3;
+    }
+    return Result<BodyStream, Error>.Ok(out);
 }
 
 // The version, the status code and the reason phrase, as three strings. The
@@ -2581,6 +2750,21 @@ pub Result<net.Conn, Error> open(Request http_request, int timeout_ms) {
             return Result<net.Conn, Error>.Err(from_net(error));
         }
     }
+}
+
+/// `http_request` sent on a new connection with its response head read and
+/// the body left to be read incrementally -- `fetch` without the buffering and
+/// without redirects (a 3xx is the answer). `http://` only: a TLS transport
+/// calls `read_response_stream` on its own connection.
+///
+/// The connection is closed when the returned `BodyStream` goes away.
+pub Result<BodyStream, Error> fetch_stream(Request http_request, int timeout_ms = TIMEOUT_MS) {
+    if (http_request.loc.scheme() == "https") {
+        return Result<BodyStream, Error>.Err(Error.SchemeNeedsTls);
+    }
+    net.Conn connection = open(http_request, timeout_ms)?;
+    write_request(connection, http_request)?;
+    return read_response_stream(connection, http_request.verb);
 }
 
 type PlainTransport {

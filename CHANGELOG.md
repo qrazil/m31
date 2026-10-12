@@ -22,6 +22,15 @@ change landed on master.
   random operation scripts across the read buffer with Python's raw file
   object.
 
+- `http.fetch_stream(request, timeout_ms:)` and `http.read_response_stream(stream,
+  method)` return a `BodyStream`: the head is read, the body comes out of
+  `read(n)` as it arrives (Content-Length, chunked or close-delimited), with
+  no ceiling and no buffering. A body that stops short of its framing is an
+  error. `fetch`, `get` and `read_response` are unchanged. Tests: corpus
+  `stdlib-http-stream` and `tests/http/test_stream.sh`, where a Python origin
+  server withholds the second half of every body until the client has read
+  the first, so a buffering client deadlocks.
+
 ## 0.4.1 (2026-10-12)
 
 Repository layout, plus the new `m31c init`; no language or standard-library

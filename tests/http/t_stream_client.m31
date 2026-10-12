@@ -1,0 +1,72 @@
+import net.http;
+import io;
+import os;
+
+// The client half of tests/http/test_stream.sh. Arguments: the URL, the file
+// to write the body to, and a marker file to create as soon as the first
+// piece of the body has arrived -- the Python server withholds the rest of
+// the body until it exists, so a client that buffered the whole response
+// before returning would deadlock instead of passing.
+//
+// Prints the status, the number of reads that returned data, and the number
+// of body bytes.
+
+List<str> argv = os.arguments();
+match (http.request("GET", argv[1])) {
+    case Ok(http.Request request): {
+        match (http.fetch_stream(request, timeout_ms: 15000)) {
+            case Ok(http.BodyStream body): {
+                print("status " + body.status().to_str());
+                match (io.open(argv[2], mode: io.Mode.Write)) {
+                    case Ok(io.File out): {
+                        int reads = 0;
+                        int total = 0;
+                        bool is_ok = true;
+                        while (is_ok && !body.is_finished()) {
+                            match (body.read(4096)) {
+                                case Ok(bytes piece): {
+                                    if (piece.size() > 0) {
+                                        reads = reads + 1;
+                                        total = total + piece.size();
+                                        if (reads == 1) {
+                                            match (io.write(argv[3], "first")) {
+                                                case Ok(int written): {
+                                                }
+                                                case Err(io.Error failure): {
+                                                    print("marker: " + failure.to_str());
+                                                }
+                                            }
+                                        }
+                                        match (out.write(piece)) {
+                                            case Ok(int written): {
+                                            }
+                                            case Err(io.Error failure): {
+                                                print("write: " + failure.to_str());
+                                                is_ok = false;
+                                            }
+                                        }
+                                    }
+                                }
+                                case Err(http.Error failure): {
+                                    print("read: " + failure.to_str());
+                                    is_ok = false;
+                                }
+                            }
+                        }
+                        print("reads>1 " + (reads > 1).to_str());
+                        print("bytes " + total.to_str());
+                    }
+                    case Err(io.Error failure): {
+                        print("open: " + failure.to_str());
+                    }
+                }
+            }
+            case Err(http.Error failure): {
+                print("fetch: " + failure.to_str());
+            }
+        }
+    }
+    case Err(http.Error failure): {
+        print("request: " + failure.to_str());
+    }
+}

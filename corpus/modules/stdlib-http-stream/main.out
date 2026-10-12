@@ -1,0 +1,15 @@
+length: 200 OK | hello world [3 reads, finished=true]
+length-big-step: 200 OK | hello world [1 reads, finished=true]
+chunked: 200 OK | hello world [4 reads, finished=true]
+chunked-big-step: 200 OK | hello world [2 reads, finished=true]
+close: 200 OK | hello world [3 reads, finished=true]
+interim: 200 OK | hello world [1 reads, finished=true]
+head: 200 OK |  [0 reads, finished=true]
+no-content: 204 No Content |  [0 reads, finished=true]
+truncated-length: 200 OK | hello ERR the peer stopped in the middle of a message
+bad-chunk-size: 200 OK |  ERR the message is not well-formed HTTP
+bad-chunk-terminator: 200 OK |  ERR the message is not well-formed HTTP
+both-framings: head failed: the message's framing is ambiguous or unsupported
+buffered length : hello world
+buffered chunked: hello world
+buffered close  : hello world
