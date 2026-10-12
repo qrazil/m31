@@ -377,13 +377,15 @@ build.sh               compile a source file to an executable
 gates.sh               every gate, run after every commit (includes `m31c lint`)
 run.sh                 the differential corpus runner
 src/                   the compiler, one folder per pipeline stage
-  front/               lexer.rs (hand-written; type names are keywords), parser.rs
-                       (recursive descent + Pratt, C precedence), ast.rs, diag.rs, width.rs
+  front/               lexer.rs (hand-written; type names are keywords), parser/
+                       (mod, types, decl, stmt, expr: recursive descent + Pratt, C
+                       precedence), ast.rs, diag.rs, width.rs
   resolve/             modules.rs (import lookup), deps.rs (remote and path deps), stdlib.rs
   middle/              mono.rs (monomorphisation; generics are erased here),
                        lower.rs + lower/ (typecheck and lower in ONE pass, deliberately fused),
                        hoist.rs, ir.rs (docs/ir-v0.md made real)
-  back/                emit_c.rs: post-refcount IR to C
+  back/                emit_c/: post-refcount IR to C (mod, types, statics, func, inst,
+                       blocking)
   tools/               fmt.rs (the formatter: one layout, no options), lint.rs
   tests/               unit tests by area, mostly IR assertions
 runtime/

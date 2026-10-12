@@ -3,7 +3,7 @@
 //!
 //! A constant's initialiser is evaluated HERE, by the compiler, never by the
 //! program. That is what makes a constant free to use: a collection is laid
-//! out as static data in the emitted C (src/back/emit_c.rs, `emit_statics`), a
+//! out as static data in the emitted C (src/back/emit_c/, `emit_statics`), a
 //! scalar is folded into every use, and nothing runs before the program's
 //! first statement -- so there is no initialisation order to get wrong,
 //! across modules or within one, and no cost at run time.

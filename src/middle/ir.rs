@@ -189,7 +189,7 @@ pub struct TypeDef {
     /// this type's implementation, or `None` if it has none.
     pub vtable: Vec<Option<String>>,
     /// Non-empty only for an enum. An enum is laid out as a tag and a union
-    /// of one struct per variant that carries a payload (src/back/emit_c.rs,
+    /// of one struct per variant that carries a payload (src/back/emit_c/,
     /// `emit_enum_body`), and which members hold references depends on the
     /// tag -- so its drop and walk functions switch on it.
     pub variants: Vec<Variant>,
@@ -629,7 +629,7 @@ pub struct Module {
     /// both are plain `rt_`-prefixed strings by the time they reach this IR.
     /// This set is precomputed once, program-wide, by the lowerer (which
     /// alone knows which signatures came from an actual `prim` declaration),
-    /// so `src/back/emit_c.rs` can tell the two apart at the one place it matters:
+    /// so `src/back/emit_c/` can tell the two apart at the one place it matters:
     /// deciding which call sites need `rt_enter_blocking`/`rt_exit_blocking`
     /// around them (docs/concurrency-decision.md, "Blocking FFI", Phase 3).
     /// A plain `HashSet`, not iterated for emission order -- only ever

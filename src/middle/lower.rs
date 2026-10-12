@@ -312,7 +312,7 @@ const BUILTIN_FNS: &[&str] = &["print", "concat", "clone", "send", "recv", "clos
 
 /// The name of the synthesised function whose body is the program: the
 /// statements at the entry file's top level. It starts with `$`, which no
-/// identifier may, so no program can name it (src/back/emit_c.rs mangles it).
+/// identifier may, so no program can name it (src/back/emit_c/ mangles it).
 const ENTRY: &str = "$main";
 
 /// The reserved method name of a destructor: `void File.drop() { .. }` runs
@@ -1292,7 +1292,7 @@ impl Lowerer {
         // Every `prim`'s runtime symbol, by the same name-transform rule
         // `lower_call` applies at its own call sites (docs/stdlib-seam.md
         // §2) -- computed once, here, rather than re-derived ad hoc wherever
-        // it is needed later (src/back/emit_c.rs, for the blocking-FFI wrap; see
+        // it is needed later (src/back/emit_c/, for the blocking-FFI wrap; see
         // `ir::Module::prim_targets`'s own doc comment for why this can't be
         // recovered from an `Inst::Call`'s name alone).
         let prim_targets: std::collections::HashSet<String> = self
