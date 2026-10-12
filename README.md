@@ -30,7 +30,7 @@ Beyond the core language: a standard library (`lib/`, 60 modules in folders) cov
 collections, JSON, CSV, HTML, a full HTTP/1.1 client and server
 (`lib/net/http.m31`), filesystem and OS access, and a constant-time crypto stack
 (X25519, Ed25519, SHA-256/512, ChaCha20-Poly1305). On top of that, an `ssh`
-client in `apps/`, and four applications that now live in their own repos:
+client in `lib/ssh/`, and four applications that now live in their own repos:
 [gitui](https://github.com/qrazil/gitui) (interactive git client),
 [tui](https://github.com/qrazil/tui) (terminal UI framework),
 [term-markdown](https://github.com/qrazil/term-markdown) (markdown renderer) and
@@ -399,8 +399,10 @@ lib/                   the standard library, written in the language itself (60 
   net/ pki/ ssh/ text/ tls/                       http and https; x509 and ocsp; the ssh
                                                   client; regex and unicode; tls 1.2/1.3
                                                   import crypto.sha256;  -- docs/stdlib-layout-decision.md
-apps/                  real programs built on the language and stdlib
-  ssh/                 an SSH client — see docs/ssh-decision.md
+tests/                 protocol suites with real-world oracles, run by hand (not part of gates.sh)
+  ssh/                 the SSH client against OpenSSH — see docs/ssh-decision.md
+  tls/                 TLS 1.2/1.3, X.509, OCSP against OpenSSL and Python peers
+  crypto25519/         X25519 / Ed25519 against RFC vectors
                        (git, tui, markdown, httpserver moved to github.com/qrazil/{gitui,tui,term-markdown,httpserver})
 docs/
   reference.md             the language, stated normatively -- start here

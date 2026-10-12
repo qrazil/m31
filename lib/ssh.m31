@@ -55,7 +55,7 @@
 // exchange hash's `mpint K`. A real `sshd` disagrees: the host-key signature
 // only verifies when `x25519`'s raw little-endian output is mpint-encoded
 // directly, with NO reversal -- found and confirmed the hard way, with
-// `apps/ssh/test_transport.sh`'s live fixture, exactly the kind of gap
+// `tests/ssh/test_transport.sh`'s live fixture, exactly the kind of gap
 // `docs/ssh-decision.md` §4's "the oracle is a real implementation" rule
 // exists to catch. Part 4/`do_handshake` does what OpenSSH actually does,
 // not what the RFC's own wording suggests.
@@ -408,7 +408,7 @@ const int BLOCK_SIZE = 8;
 // 'packet_length', 'padding_length', 'payload', and 'random padding' MUST be
 // a multiple of the cipher block size or 8" -- so this is `4 + 1 +
 // payload_len + pad`, not `1 + payload_len + pad`. Confirmed against a real
-// `sshd` (`apps/ssh/test_transport.sh`): without the `+4` it rejected this
+// `sshd` (`tests/ssh/test_transport.sh`): without the `+4` it rejected this
 // client's own `KEXINIT` with "padding error ... block 8 mod 4" before any
 // cipher existed to blame.
 //
@@ -984,7 +984,7 @@ Result<Exchange, Error> exchange_keys(net.Conn connection, random.System rng) {
     // 7748's own output, into big-endian before mpint-wrapping) -- but a
     // real `sshd` rejects the host key signature when that reversal is
     // applied, and accepts it when `x25519`'s raw output is mpint-encoded
-    // directly, confirmed with `apps/ssh/test_transport.sh`'s live fixture.
+    // directly, confirmed with `tests/ssh/test_transport.sh`'s live fixture.
     // This is the actual, shipped OpenSSH behavior, not this module's own
     // reading of the RFC text -- see this module's header.
     bytes shared = x25519.x25519(secret, reply.q_s);

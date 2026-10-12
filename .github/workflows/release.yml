@@ -1,6 +1,6 @@
 name: Release
 
-# Build release binaries for the compiler and every app under apps/, and
+# Build release binaries for the compiler and the ssh self-check programs under tests/, and
 # attach them to the GitHub Release for a pushed version tag -- so they can
 # be pulled by a direct URL (a release asset URL, stable per tag), not just
 # built from source.
@@ -92,7 +92,7 @@ jobs:
       - name: Build the compiler (release)
         run: |
           cargo build --release
-          # build.sh and every apps/*/build.sh hardcode target/debug/$LANG_BIN
+          # build.sh and every tests/*/build.sh hardcode target/debug/$LANG_BIN
           # (none take a compiler-path override except build-gitui.sh's
           # LANGC= env var) -- so the release binary is placed there too,
           # rather than teaching every build script a new convention.
@@ -126,14 +126,14 @@ jobs:
           set -euo pipefail
           OUT="dist/${LANG_NAME}-linux-x86_64"
 
-          # apps/ssh is Phase 1 of the ssh work: SHA-256 and
+          # tests/ssh is Phase 1 of the ssh work: SHA-256 and
           # ChaCha20-Poly1305 primitives only (docs/ssh-decision.md) -- there
           # is no client or server yet, so there is no "ssh app" binary to
           # ship. What exists and builds is the pair of self-check programs
-          # that already run in apps/ssh/test.sh, named here for what they
+          # that already run in tests/ssh/test.sh, named here for what they
           # are rather than implying a finished ssh client.
-          ./build.sh apps/ssh/t_sha256.m31 -o "$OUT/ssh-sha256-selftest"
-          ./build.sh apps/ssh/t_chacha20poly1305.m31 -o "$OUT/ssh-chacha20poly1305-selftest"
+          ./build.sh tests/ssh/t_sha256.m31 -o "$OUT/ssh-sha256-selftest"
+          ./build.sh tests/ssh/t_chacha20poly1305.m31 -o "$OUT/ssh-chacha20poly1305-selftest"
 
           sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
           ${LANG_NAME} — Linux x86-64 release build
@@ -141,7 +141,7 @@ jobs:
           Tag: ${GITHUB_REF_NAME}
 
           $LANG_BIN                        the compiler (./$LANG_BIN --emit-c foo.$LANG_EXT -o foo.c)
-          ssh-sha256-selftest          apps/ssh: SHA-256 self-check (Phase 1 crypto primitives only --
+          ssh-sha256-selftest          tests/ssh: SHA-256 self-check (Phase 1 crypto primitives only --
           ssh-chacha20poly1305-selftest  no ssh client/server exists yet, see docs/ssh-decision.md)
 
           config.sh, runtime/                 the runtime SDK: needed to build and link any program
@@ -166,8 +166,8 @@ jobs:
   # (not emulated) ARM64 Linux runner -- `.github/workflows/aarch64.yml`
   # already confirms the full gate suite, including every runtime phase
   # test, passes natively here. This is the first time any app under
-  # apps/ has been built on this architecture specifically (gates.sh
-  # itself never touches apps/), so a failure here is new information,
+  # tests/ has been built on this architecture specifically (gates.sh
+  # itself never touches tests/), so a failure here is new information,
   # not a regression of something previously proven -- it is caught by
   # this job alone, not by the `gates` precondition above.
   # ---------------------------------------------------------------------
@@ -211,8 +211,8 @@ jobs:
           set -euo pipefail
           OUT="dist/${LANG_NAME}-linux-aarch64"
 
-          ./build.sh apps/ssh/t_sha256.m31 -o "$OUT/ssh-sha256-selftest"
-          ./build.sh apps/ssh/t_chacha20poly1305.m31 -o "$OUT/ssh-chacha20poly1305-selftest"
+          ./build.sh tests/ssh/t_sha256.m31 -o "$OUT/ssh-sha256-selftest"
+          ./build.sh tests/ssh/t_chacha20poly1305.m31 -o "$OUT/ssh-chacha20poly1305-selftest"
 
           sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
           ${LANG_NAME} — Linux aarch64 release build
@@ -220,7 +220,7 @@ jobs:
           Tag: ${GITHUB_REF_NAME}
 
           $LANG_BIN                        the compiler (./$LANG_BIN --emit-c foo.$LANG_EXT -o foo.c)
-          ssh-sha256-selftest          apps/ssh: SHA-256 self-check (Phase 1 crypto primitives only --
+          ssh-sha256-selftest          tests/ssh: SHA-256 self-check (Phase 1 crypto primitives only --
           ssh-chacha20poly1305-selftest  no ssh client/server exists yet, see docs/ssh-decision.md)
 
           config.sh, runtime/                 the runtime SDK: needed to build and link any program
@@ -250,8 +250,8 @@ jobs:
   # (runtime/reactor_kqueue.c) -- both exist now, and
   # `.github/workflows/macos.yml` already confirms the full gate suite
   # passes natively on `macos-14` (Apple Silicon). This is still the
-  # FIRST time any app under apps/ has been built on macOS at all (gates.sh
-  # itself never touches apps/), so a failure here is new information, not
+  # FIRST time any program under tests/ has been built on macOS at all (gates.sh
+  # itself never touches tests/), so a failure here is new information, not
   # a regression of something previously proven.
   #
   # `macos-13` (Intel) stays out on purpose, not an oversight: GitHub's
@@ -300,8 +300,8 @@ jobs:
           set -euo pipefail
           OUT="dist/${LANG_NAME}-macos-arm64"
 
-          ./build.sh apps/ssh/t_sha256.m31 -o "$OUT/ssh-sha256-selftest"
-          ./build.sh apps/ssh/t_chacha20poly1305.m31 -o "$OUT/ssh-chacha20poly1305-selftest"
+          ./build.sh tests/ssh/t_sha256.m31 -o "$OUT/ssh-sha256-selftest"
+          ./build.sh tests/ssh/t_chacha20poly1305.m31 -o "$OUT/ssh-chacha20poly1305-selftest"
 
           sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
           ${LANG_NAME} — macOS arm64 (Apple Silicon) release build
@@ -309,7 +309,7 @@ jobs:
           Tag: ${GITHUB_REF_NAME}
 
           $LANG_BIN                        the compiler (./$LANG_BIN --emit-c foo.$LANG_EXT -o foo.c)
-          ssh-sha256-selftest          apps/ssh: SHA-256 self-check (Phase 1 crypto primitives only --
+          ssh-sha256-selftest          tests/ssh: SHA-256 self-check (Phase 1 crypto primitives only --
           ssh-chacha20poly1305-selftest  no ssh client/server exists yet, see docs/ssh-decision.md)
 
           config.sh, runtime/                 the runtime SDK: needed to build and link any program

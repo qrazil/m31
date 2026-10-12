@@ -310,7 +310,7 @@ run "stdlib source is formatted" ./target/debug/"$LANG_BIN" fmt --check -r lib
 # Every source tree that ships or documents the language must be clean.
 # corpus/ is exempt on purpose: its programs are compiler test inputs, many
 # of them written to be wrong.
-run "naming lint" ./target/debug/"$LANG_BIN" lint lib apps examples runtime bench crypto25519_test
+run "naming lint" ./target/debug/"$LANG_BIN" lint lib tests examples runtime bench
 
 # `fmt -r <dir>` is how each repository checks its own tree: every source file
 # under the directory, nested ones included, and never the derived or foreign

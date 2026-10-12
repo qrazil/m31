@@ -67,7 +67,7 @@
 // product is a 26-bit limb times at most a 29-bit one, summed five at a time
 // -- nothing within a factor of 60 of this language's 2^63 overflow trap
 // even at the most adversarial input (verified in the differential fuzz
-// harness, `apps/ssh/t_chacha20poly1305.m31`, which is also checked against
+// harness, `tests/ssh/t_chacha20poly1305.m31`, which is also checked against
 // RFC 8439 Appendix A.3's eleven vectors built specifically to stress the
 // reduction: a zero `r`, a carry out of the top limb, an accumulator landing
 // on exactly 2^130-5, and the two "5*H+L" 131-bit-intermediate cases).

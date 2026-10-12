@@ -74,7 +74,7 @@
 //   has no timeouts of the library's making. Handshake messages are bounded
 //   by `tls13record`'s limits.
 //   A handshake costs one signature (about 40 ms for P-256 on a development
-//   machine; check `apps/tls` for current numbers), so a flood of
+//   machine; check `tests/tls` for current numbers), so a flood of
 //   handshakes is an expensive flood; rate-limit in front of this if it
 //   matters.
 

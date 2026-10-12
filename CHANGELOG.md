@@ -3,6 +3,21 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
+## Unreleased (0.4.1)
+
+Repository layout only; no language or standard-library behaviour changes.
+
+- Root scripts moved to `scripts/`: `rename.sh`, `run.sh`, `sanitize.sh` and
+  `bench/run.sh` (now `scripts/bench.sh`). `build.sh`, `config.sh` and
+  `gates.sh` stay at the root.
+- `runtime/tests/` holds the runtime's own test suites and demos and
+  `runtime/tools/with_timeout.sh` the helper; the library files and `arch.sh`
+  stay in `runtime/`. The release tarball no longer contains `runtime/tests/`.
+- `apps/ssh`, `apps/tls` and `crypto25519_test/` are now `tests/ssh`,
+  `tests/tls` and `tests/crypto25519`; `apps/` is gone. `m31c lint` covers
+  `tests/` instead.
+- `docs/README.md` indexes the documentation; the stray `ts.exp` was removed.
+
 ## 0.4.0 (2026-10-10)
 
 0.4.0 is a breaking release in two ways, both mechanical to follow: the
