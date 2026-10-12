@@ -1,0 +1,75 @@
+import io;
+import fs;
+import random;
+
+// `io.File.seek` and `tell`. The exhaustive check -- random operation scripts
+// against Python's raw file object, across the 64 KiB read buffer -- is
+// tests/io/test_seek.sh; this entry is the small deterministic part.
+str dir = "/tmp/m31-corpus-io-seek-" + random.system().hex(8);
+str path = dir + "/f";
+
+str say(Result<int, io.Error> result) {
+    match (result) {
+        case Ok(int value): {
+            return value.to_str();
+        }
+        case Err(io.Error failure): {
+            return "err " + failure.to_str();
+        }
+    }
+}
+
+str text_of(Result<bytes, io.Error> result) {
+    match (result) {
+        case Ok(bytes data): {
+            return "'" + data.utf8().or("?") + "'";
+        }
+        case Err(io.Error failure): {
+            return "err " + failure.to_str();
+        }
+    }
+}
+
+match (fs.mkdir(dir)) {
+    case Ok(bool made): {
+        print("dir made");
+    }
+    case Err(io.Error failure): {
+        print(failure.to_str());
+    }
+}
+match (io.write(path, "0123456789abcdef")) {
+    case Ok(int written): {
+        print(written);
+    }
+    case Err(io.Error failure): {
+        print(failure.to_str());
+    }
+}
+match (io.open(path)) {
+    case Ok(io.File file): {
+        print(text_of(file.read(4)));
+        print(say(file.tell()));
+        print(say(file.seek_by(2)));
+        print(text_of(file.read(3)));
+        print(say(file.seek_from_end(-4)));
+        print(text_of(file.read_all()));
+        print(say(file.seek(0)));
+        print(text_of(file.read(2)));
+        print(say(file.seek(100)));
+        print(text_of(file.read(1)));
+        print(say(file.seek(-1)));
+        print(say(file.tell()));
+    }
+    case Err(io.Error failure): {
+        print(failure.to_str());
+    }
+}
+match (fs.rmtree(dir, dir)) {
+    case Ok(bool removed): {
+        print("removed");
+    }
+    case Err(io.Error failure): {
+        print(failure.to_str());
+    }
+}

@@ -13,6 +13,15 @@ change landed on master.
   `stdlib-http-invalid-utf8` and `tests/http/test_invalid_utf8.sh`, which sends
   raw invalid-UTF-8 requests from Python's `socket` to a live server.
 
+### Added
+
+- `io.File.seek(offset)`, `seek_by(delta)`, `seek_from_end(offset)` and
+  `tell()`: reposition and query a file, accounting for the 64 KiB read-ahead
+  (so `seek_by` and `tell` are relative to what `read` would hand out next).
+  Tests: corpus `stdlib-io-seek`, and `tests/io/test_seek.sh`, which compares
+  random operation scripts across the read buffer with Python's raw file
+  object.
+
 ## 0.4.1 (2026-10-12)
 
 Repository layout, plus the new `m31c init`; no language or standard-library

@@ -16,9 +16,13 @@
 //   f.read_until(delim, limit) -> Result<bytes, Error>  through `delim`, at most `limit`
 //   f.write(b)                 -> Result<int, Error>    all of `b`
 //   f.write_some(b)            -> Result<int, Error>    one attempt; what the kernel took
+//   f.seek(n)                  -> Result<int, Error>    to `n` from the start; the position
+//   f.seek_by(d)               -> Result<int, Error>    `d` from where `read` continues
+//   f.seek_from_end(n)         -> Result<int, Error>    to `n` from the end (0 or below)
+//   f.tell()                   -> Result<int, Error>    where `read` continues
 //   f.close()                  -> Result<bool, Error>
 //
-//   io.Stream                  interface                the five methods above
+//   io.Stream                 interface                the five methods above
 //   io.copy(src, dst)          -> Result<int, Error>    everything from one to the other
 //   io.read_line_of(s, limit)  -> Result<Option<str>, Error>  a line of any stream
 //
@@ -444,6 +448,66 @@ pub Result<int, Error> File.write_some(bytes data) {
         __out_flush();
     }
     return write_once(descriptor, data);
+}
+
+/// Move the file's position to `offset` bytes from its start, and answer it.
+///
+/// **The position is the one `read` sees**, not the kernel's: a `File` reads
+/// ahead 64 KiB at a time, so what had been read ahead is dropped, and the
+/// next `read` starts at `offset`. `tell` is the same position without
+/// moving. Seeking past the end is allowed, as it is for `lseek(2)`: a read
+/// there is at the end of the file, and a write leaves a hole. A negative
+/// `offset` is `Err`, as is a file that cannot seek (a pipe, a socket, a
+/// terminal: `Other(29)`, ESPIPE). Writes are not buffered, so there is
+/// nothing to flush first. Seeking a closed file traps.
+pub Result<int, Error> File.seek(int offset) {
+    return reposition(offset, 0);
+}
+
+/// Move the position by `delta` bytes from where `read` would continue --
+/// not from the kernel's offset, which is ahead of it by whatever has been
+/// read ahead. The new position counted from the start, or `Err` as for
+/// `seek`.
+pub Result<int, Error> File.seek_by(int delta) {
+    return reposition(delta - (end - position), 1);
+}
+
+/// Move the position to `offset` bytes from the end of the file -- zero or
+/// negative to land inside it. The new position counted from the start, or
+/// `Err` as for `seek`.
+pub Result<int, Error> File.seek_from_end(int offset) {
+    return reposition(offset, 2);
+}
+
+/// The position `read` would continue from, counted from the start of the
+/// file.
+pub Result<int, Error> File.tell() {
+    if (!is_live) {
+        trap("tell on a closed file");
+    }
+    int here = __seek(descriptor, 0, 1);
+    if (here < 0) {
+        return Result<int, Error>.Err(from_errno(-here));
+    }
+    return Result<int, Error>.Ok(here - (end - position));
+}
+
+// The three seeks, on the kernel's own `whence` numbers (SET 0, CUR 1,
+// END 2): the sys layer's constants, as everywhere in this module.
+Result<int, Error> File.reposition(int offset, int whence) {
+    if (!is_live) {
+        trap("seek on a closed file");
+    }
+    int moved = __seek(descriptor, offset, whence);
+    if (moved < 0) {
+        return Result<int, Error>.Err(from_errno(-moved));
+    }
+    // Everything buffered belonged to the old position.
+    bytes none = [];
+    buffer = none;
+    position = 0;
+    end = 0;
+    return Result<int, Error>.Ok(moved);
 }
 
 /// Release the descriptor. Closing twice is not an error; any other use of
