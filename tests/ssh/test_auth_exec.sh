@@ -272,6 +272,9 @@ str why(sshclient.Error e) {
                 case Io: {
                     return "connect-io";
                 }
+                case TimedOut: {
+                    return "connect-timed-out";
+                }
                 case Truncated: {
                     return "connect-truncated";
                 }

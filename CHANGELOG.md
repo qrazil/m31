@@ -31,6 +31,17 @@ change landed on master.
   server withholds the second half of every body until the client has read
   the first, so a buffering client deadlocks.
 
+- ssh read timeouts: `ssh.connect` / `ssh.connect_any` and
+  `sshclient.connect` / `connect_with` take `timeout_ms` (default 0, wait for
+  ever), `ssh.Transport.set_read_timeout(ms)` and
+  `sshclient.Session.set_read_timeout(ms)` change it later. They bound every
+  wait for the server -- handshake, authentication and each channel read --
+  and a wait that runs out is the new `ssh.Error.TimedOut` (before, a timeout
+  was folded into `Io`). After `TimedOut` the transport must be closed. This
+  adds a variant to `ssh.Error`: an exhaustive `match` over it needs a
+  `case TimedOut`. Tests: `tests/ssh/test_timeout.sh`, against a real `sshd`
+  and a silent Python peer, timed from the shell.
+
 ## 0.4.1 (2026-10-12)
 
 Repository layout, plus the new `m31c init`; no language or standard-library

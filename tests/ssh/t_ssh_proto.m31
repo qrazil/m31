@@ -65,6 +65,9 @@ int error_code(ssh.Error error) {
         case Io: {
             return 12;
         }
+        case TimedOut: {
+            return 13;
+        }
     }
 }
 
