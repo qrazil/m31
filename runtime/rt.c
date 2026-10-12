@@ -3203,8 +3203,9 @@ static char **rt_cstr_array(Obj *list, int64_t *bad) {
     return a;
 }
 
-int64_t rt_proc_start_fds(Obj *argv_list, Obj *env_list, int64_t has_env, Obj *cwd,
-                          int64_t stdin_fd, int64_t stdout_fd, int64_t stderr_fd) {
+static int64_t rt_start_common(Obj *argv_list, Obj *env_list, int64_t has_env, Obj *cwd,
+                               int64_t stdin_fd, int64_t stdout_fd, int64_t stderr_fd,
+                               Obj *tty) {
     rt_out_flush();
     if (rt_len_of(argv_list) <= 0) return -SYS_EINVAL;
     int64_t bad = 0;
@@ -3222,18 +3223,52 @@ int64_t rt_proc_start_fds(Obj *argv_list, Obj *env_list, int64_t has_env, Obj *c
     }
     Str *c = (Str *)cwd;
     const char *dir = NULL;
-    if (c->len > 0) {
-        if (memchr(c->data, '\0', (size_t)c->len) != NULL) {
-            free(argv);
-            free(owned_env);
-            return -SYS_EINVAL;
+    int64_t r;
+    if (c->len > 0 && memchr(c->data, '\0', (size_t)c->len) != NULL) {
+        r = -SYS_EINVAL;
+    } else {
+        if (c->len > 0) dir = (const char *)c->data;
+        if (tty != NULL) {
+            Str *t = (Str *)tty;
+            if (t->len == 0 || memchr(t->data, '\0', (size_t)t->len) != NULL) {
+                r = -SYS_EINVAL;
+            } else {
+                r = sys_proc_start_pty(argv, envp, dir, (const char *)t->data);
+            }
+        } else {
+            r = sys_proc_start_fds(argv, envp, dir, stdin_fd, stdout_fd, stderr_fd);
         }
-        dir = (const char *)c->data;
     }
-    int64_t r = sys_proc_start_fds(argv, envp, dir, stdin_fd, stdout_fd, stderr_fd);
     free(argv);
     free(owned_env);
     return r;
+}
+
+int64_t rt_proc_start_fds(Obj *argv_list, Obj *env_list, int64_t has_env, Obj *cwd,
+                          int64_t stdin_fd, int64_t stdout_fd, int64_t stderr_fd) {
+    return rt_start_common(argv_list, env_list, has_env, cwd, stdin_fd, stdout_fd, stderr_fd, NULL);
+}
+
+/* The same on a pseudo-terminal's slave, named by `slave_path`. */
+int64_t rt_proc_start_pty(Obj *argv_list, Obj *env_list, int64_t has_env, Obj *cwd,
+                          Obj *slave_path) {
+    return rt_start_common(argv_list, env_list, has_env, cwd, -1, -1, -1, slave_path);
+}
+
+/* Pushes the master descriptor; writes the slave's name, NUL-terminated,
+ * into `path` (a caller-sized bytes, never grown here). 0 or -errno. */
+int64_t rt_pty_open(Obj *out, Obj *path) {
+    rt_check_mutable(path);
+    Bytes *b = (Bytes *)path;
+    int64_t master = -1;
+    int64_t r = sys_pty_open(&master, (char *)b->data, b->len);
+    if (r < 0) return r;
+    rt_list_push(out, master);
+    return 0;
+}
+
+int64_t rt_set_winsize(int64_t fd, int64_t rows, int64_t cols) {
+    return sys_set_winsize(fd, rows, cols);
 }
 
 /* Pushes the read end, then the write end, of a new close-on-exec blocking

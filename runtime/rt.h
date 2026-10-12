@@ -306,6 +306,9 @@ int64_t rt_proc_wait(int64_t pid);              /* sys.h's encoded status, or -e
  * a descriptor of -1 inherits (sys.h, sys_proc_start_fds). */
 int64_t rt_proc_start_fds(Obj *argv, Obj *env_list, int64_t has_env, Obj *cwd,
                           int64_t stdin_fd, int64_t stdout_fd, int64_t stderr_fd);
+int64_t rt_proc_start_pty(Obj *argv, Obj *env_list, int64_t has_env, Obj *cwd, Obj *slave_path);
+int64_t rt_pty_open(Obj *out, Obj *path);       /* pushes the master; the slave's name into path */
+int64_t rt_set_winsize(int64_t fd, int64_t rows, int64_t cols);
 int64_t rt_pipe(Obj *out);                      /* pushes read end, write end; 0 or -errno */
 int64_t rt_kill(int64_t pid, int64_t sig);      /* 0 or -errno */
 int64_t rt_clock_monotonic(void);               /* nanoseconds, monotonic */

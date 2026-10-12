@@ -741,6 +741,41 @@ int64_t sys_proc_start_fds(char *const argv[], char *const envp[],
                            int64_t stdout_fd, int64_t stderr_fd);   /* pid */
 int64_t sys_kill(int64_t pid, int64_t sig);                           /* 0 */
 
+/* ---- pseudo-terminals -------------------------------------------------------
+ *
+ * A child that must believe it is on a terminal: line editing, colours, a
+ * pager, `stty`, a REPL. Three calls, because the three things are done by
+ * different processes at different times (docs/proc-decision.md).
+ *
+ * sys_pty_open makes a pseudo-terminal: the MASTER descriptor (close-on-exec,
+ * blocking; make it non-blocking with sys_setsockopt(SYS_SO_NONBLOCK) for the
+ * reactor, as for a pipe) and the NAME of the slave, NUL-terminated into
+ * `slave_path` (`cap` bytes; "/dev/pts/7" on Linux). The slave is not opened
+ * here: the child opens it by name (below), which is what makes it the child's
+ * controlling terminal. -SYS_ENOSPC when `cap` is too small.
+ *
+ * sys_set_winsize sets the window size, `rows` by `cols` cells, on a terminal
+ * master (sys_winsize reads it). The kernel tells the foreground process group
+ * with SIGWINCH, so calling it again IS the resize. A new pty has size 0 by 0
+ * until this is called.
+ *
+ * sys_proc_start_pty is sys_proc_start_fds with the child's three streams all
+ * on the slave named `slave_path`, opened by the CHILD in a new session of its
+ * own, which makes it the controlling terminal -- ^C then reaches the child
+ * rather than this process, and `tty` and `stty` work. Everything else is
+ * sys_proc_start_fds: `cwd`, the child's own `envp` and `$PATH`, SIGPIPE back
+ * at its default, only 0, 1 and 2. A failure of the open is reported like a
+ * failed exec: a negative errno, no pid.
+ *
+ * Reading the master after the child (and everything that inherited the
+ * slave) has gone is end-of-file on macOS and EIO on Linux; that difference
+ * is not translated here, it is a fact of the descriptor, and lib/proc.m31
+ * folds it. */
+int64_t sys_pty_open(int64_t *master_fd, char *slave_path, int64_t cap);  /* 0 */
+int64_t sys_set_winsize(int64_t fd, int64_t rows, int64_t cols);          /* 0 */
+int64_t sys_proc_start_pty(char *const argv[], char *const envp[],
+                           const char *cwd, const char *slave_path);      /* pid */
+
 /* The target of the symbolic link `path`: its bytes (no NUL) are written to
  * `buf`, at most `cap` of them, and the number written is returned. A
  * result equal to `cap` may be a truncated target -- the kernel does not say

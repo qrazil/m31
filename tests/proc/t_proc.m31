@@ -2,6 +2,7 @@ import proc;
 import io;
 import os;
 import timer;
+import encoding.hexcodec;
 
 // The program tests/proc/test_proc.sh drives. Every mode prints something
 // Python's subprocess module is asked for too, and the script compares.
@@ -13,6 +14,11 @@ import timer;
 //   start SPEC           the same through proc.start and its three streams
 //   timeout MS           proc.run(["sleep", "30"], timeout_ms: MS)
 //   cap                  70 MB of output through run: kept to the 64 MiB cap
+//   pty [rows=R] [columns=C] [until=TEXT] [type=HEX] -- PROGRAM ARGUMENT...
+//                        a child on a pseudo-terminal: wait for TEXT to be
+//                        printed, type HEX, read to the end; prints the exit
+//                        code and the output in hex
+//   pty-resize           stty size, resize, stty size
 //   write-after-exit     a write after the child has gone
 //
 // SPEC is: [cwd=DIR] [env=NAME=VALUE]... -- PROGRAM ARGUMENT...
@@ -247,6 +253,140 @@ void cap_mode() {
     }
 }
 
+// A terminal conversation, as the tests drive it: optionally wait until the
+// child has printed `until` (so that a mode it sets is set before typing),
+// then type, then read everything the terminal says until the child is gone.
+void pty_mode(List<str> words) {
+    int rows = 24;
+    int columns = 80;
+    str until = "";
+    bytes typed = [];
+    List<str> argv = [];
+    bool is_command = false;
+    for (str word in words) {
+        if (is_command) {
+            argv.push(word);
+        } else if (word == "--") {
+            is_command = true;
+        } else if (word.starts_with("rows=")) {
+            rows = word.substr(5, word.size()).parse_int().or(24);
+        } else if (word.starts_with("columns=")) {
+            columns = word.substr(8, word.size()).parse_int().or(80);
+        } else if (word.starts_with("until=")) {
+            until = word.substr(6, word.size());
+        } else if (word.starts_with("type=")) {
+            match (hexcodec.decode(word.substr(5, word.size()))) {
+                case Ok(bytes data): {
+                    typed = data;
+                }
+                case Err(hexcodec.Error error): {
+                    fail("bad hex");
+                }
+            }
+        } else {
+            fail("bad word: " + word);
+        }
+    }
+    match (proc.start_pty(argv, rows: rows, columns: columns)) {
+        case Ok(proc.Pty child): {
+            bytes seen = [];
+            bool is_ended = false;
+            if (until != "") {
+                bytes marker = until.to_bytes();
+                while (!seen.contains(marker) && !is_ended) {
+                    match (child.master.read(4096)) {
+                        case Ok(bytes chunk): {
+                            if (chunk.size() == 0) {
+                                is_ended = true;
+                            } else {
+                                seen.extend(chunk);
+                            }
+                        }
+                        case Err(io.Error error): {
+                            fail("read failed: " + error.to_str());
+                        }
+                    }
+                }
+            }
+            if (typed.size() > 0) {
+                Result<int, io.Error> wrote = child.master.write(typed);
+            }
+            match (child.master.read_all()) {
+                case Ok(bytes rest): {
+                    seen.extend(rest);
+                }
+                case Err(io.Error error): {
+                    fail("read failed: " + error.to_str());
+                }
+            }
+            match (child.wait()) {
+                case Ok(os.ExitStatus status): {
+                    int code = 0;
+                    match (status) {
+                        case Exited(int exit_code): {
+                            code = exit_code;
+                        }
+                        case Signaled(int signal_number): {
+                            code = -signal_number;
+                        }
+                    }
+                    print("pty " + code.to_str() + " " + seen.hex());
+                }
+                case Err(proc.Error error): {
+                    fail("wait failed: " + error.to_str());
+                }
+            }
+        }
+        case Err(proc.Error error): {
+            print("pty error " + error.to_str());
+        }
+    }
+}
+
+// The size is read by `stty size`, changed with resize, and read again.
+void pty_resize_mode() {
+    match (proc.start_pty(["sh", "-c", "stty size; read line; stty size"], rows: 24, columns: 80)) {
+        case Ok(proc.Pty child): {
+            match (child.master.read_until("\n".to_bytes(), 100)) {
+                case Ok(bytes first): {
+                    print("first " + first.hex());
+                }
+                case Err(io.Error error): {
+                    fail("read failed: " + error.to_str());
+                }
+            }
+            match (child.resize(40, 132)) {
+                case Ok(bool done): {
+                    print("resized " + done.to_str());
+                }
+                case Err(proc.Error error): {
+                    fail("resize failed: " + error.to_str());
+                }
+            }
+            Result<int, io.Error> wrote = child.master.write("\n".to_bytes());
+            match (child.master.read_all()) {
+                case Ok(bytes rest): {
+                    print("rest " + rest.hex());
+                }
+                case Err(io.Error error): {
+                    fail("read failed: " + error.to_str());
+                }
+            }
+            match (child.wait()) {
+                case Ok(os.ExitStatus status): {
+                    print("status " + status.to_str());
+                }
+                case Err(proc.Error error): {
+                    fail("wait failed: " + error.to_str());
+                }
+            }
+        }
+        case Err(proc.Error error): {
+            print("pty error " + error.to_str());
+        }
+    }
+}
+
 void write_after_exit() {
     match (proc.start(["true"])) {
         case Ok(proc.Proc child): {
@@ -298,6 +438,10 @@ if (mode == "copy" && rest.size() == 2) {
     }
 } else if (mode == "cap") {
     cap_mode();
+} else if (mode == "pty") {
+    pty_mode(rest);
+} else if (mode == "pty-resize") {
+    pty_resize_mode();
 } else if (mode == "write-after-exit") {
     write_after_exit();
 } else {

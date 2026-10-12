@@ -2,7 +2,7 @@
 
 Decided **2026-10-12**, implemented in the same change: `lib/proc.m31`, four
 sys-layer functions (`docs/sys-layer.md`, "Child stdio, pipes, signals and
-links"), tests `corpus/modules/proc-*`, `tests/proc/test_proc.sh`.
+links" and "Pseudo-terminals"), tests `corpus/modules/proc-*`, `tests/proc/test_proc.sh`.
 
 ---
 
@@ -111,14 +111,37 @@ long sleep would hold a quick run up for the full timeout). The watchdog and
 the reaper share a one-slot channel as a lock, and the reaper records the
 reaping in it before the watchdog may signal again.
 
+## `start_pty`: a terminal
+
+`proc.start_pty(argv, rows:, columns:, cwd:, env:)` returns a `Pty { pid,
+master }` where `master` is one `Pipe` that is readable and writable and the
+child's 0, 1 and 2 are the slave end, in a session of its own with the slave
+as its controlling terminal (`docs/sys-layer.md`, "Pseudo-terminals").
+
+  - **One stream.** Standard output and standard error are not separable on
+    a terminal; the master carries both, and everything typed.
+  - **The line discipline is the kernel's.** Echo, `\n` to `\r\n`, `^C`
+    to SIGINT, `^D` as end of file: written to the master, they behave as a
+    keyboard. A program wanting raw bytes runs `stty raw -echo` itself; a
+    test of it is in `tests/proc/test_proc.sh`, against Python's `pty`.
+  - **End of file.** Linux's master reads EIO once the child is gone, macOS
+    reads 0; the `Pipe` of a terminal answers an empty `bytes` on both.
+  - **`resize(rows, columns)`** is the one ioctl; the child's foreground
+    group gets SIGWINCH from the kernel.
+  - **`columns`, not `cols`**: the naming lint's table.
+  - **Not here**: terminal modes (a `Pty` has none of its own; use the
+    `term` module on the master descriptor if one is needed, or `stty` in the
+    child), and the window size is a character grid with no pixel size.
+
 ## Limits, said plainly
 
   - **No shell.** Not in this module, and not as an option. `["sh", "-c",
     text]` is the spelling, and owning it is the point.
-  - **No pseudo-terminal.** A child sees pipes, so `isatty` is false and
-    programs that colour or page behave as in a script. A pty is a separate
-    piece of the sys layer (open, session, controlling terminal, window size).
-  - **No process groups or sessions.** `kill` signals one process. A
+  - **`start` is pipes**: a child sees `isatty` false and behaves as in a
+    script. `start_pty` is the terminal, below.
+  - **No process groups or sessions of your own.** A pty child has a session
+    (that is what a terminal needs) and nothing more is exposed. `kill`
+    signals one process. A
     shell's children outlive the shell it is killed under; `setsid` and
     `kill(-pgid)` are a later seam.
   - **No extra descriptors.** Only 0, 1 and 2 reach the child, and only as
@@ -137,7 +160,11 @@ reaping in it before the watchdog may signal again.
   - **The child's PATH.** A program with no `/` is looked up on the `PATH` in
     `env`, or `/bin:/usr/bin`, never on this process's (a difference from
     `posix_spawnp`, and the same as Python).
-  - **macOS.** Pipes go through the kqueue reactor like sockets; this was
-    written and tested on Linux only. CI runs `tests/proc/test_proc.sh` on
-    macOS and aarch64 (`.github/workflows/`), which is the first time it
-    will have run there.
+  - **macOS.** Pipes and pty masters go through the kqueue reactor like
+    sockets; this was written and tested on Linux only. CI runs
+    `tests/proc/test_proc.sh` on macOS and aarch64 (`.github/workflows/`),
+    which is the first time it will have run there. Known differences it
+    meets: `ru_maxrss` is in bytes (the test accounts for it), the pty
+    master reads 0 rather than EIO at the end (handled), and the controlling
+    terminal is taken by the child's `open` of the slave, which XNU does for
+    a session leader as Linux does -- unverified.

@@ -17,6 +17,9 @@
 #   cap       70 MB of output is kept to 64 MiB and says so
 #   timeout   a timed-out run is TimedOut, in time
 #   epipe     a write after the child has exited is BrokenPipe
+#   pty       the same commands on a pseudo-terminal through proc.start_pty and
+#             through Python's pty module: tty, stty size, isatty, an
+#             interactive cat (echo and ^D), a raw-mode program, ^C, a resize
 #
 #   bash tests/proc/test_proc.sh
 #
@@ -208,6 +211,83 @@ try:
 except Exception as exc:
     py = "?%r" % exc
 check("a write after the child exited is BrokenPipe", out.splitlines()[-1] == py, out + err)
+
+# ---- pseudo-terminals, against Python's pty module ----
+import fcntl, pty, re, select, struct, termios
+
+def pty_oracle(argv, rows=24, cols=80, until=b"", typed=b""):
+    pid, fd = pty.fork()
+    if pid == 0:
+        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        try:
+            os.execvp(argv[0], argv)
+        finally:
+            os._exit(127)
+    seen = b""
+    def pull():
+        try:
+            return os.read(fd, 4096)
+        except OSError:
+            return b""
+    ended = False
+    while until and until not in seen and not ended:
+        chunk = pull()
+        if not chunk:
+            ended = True
+        seen += chunk
+    if typed:
+        os.write(fd, typed)
+    while True:
+        chunk = pull()
+        if not chunk:
+            break
+        seen += chunk
+    _, st = os.waitpid(pid, 0)
+    code = os.waitstatus_to_exitcode(st)
+    os.close(fd)
+    return code, seen
+
+def norm(data):
+    return re.sub(rb"/dev/(pts/\d+|tty[a-z0-9]+)", b"/dev/pts/N", data)
+
+def m31_pty(argv, rows=24, cols=80, until="", typed=b""):
+    words = ["pty", "rows=%d" % rows, "columns=%d" % cols]
+    if until:
+        words.append("until=" + until)
+    if typed:
+        words.append("type=" + typed.hex())
+    out, rc, err = m31(*words, "--", *argv)
+    parts = out.split(" ")
+    if len(parts) < 2 or parts[0] != "pty":
+        return None, out + err
+    try:
+        return int(parts[1]), bytes.fromhex(parts[2] if len(parts) > 2 else "")
+    except ValueError:
+        return None, out
+
+pty_cases = [
+    ("tty and stty size, 31 by 97", ["sh", "-c", "tty; stty size; echo err >&2"], dict(rows=31, cols=97)),
+    ("isatty on 0, 1 and 2", ["sh", "-c", "[ -t 0 ] && [ -t 1 ] && [ -t 2 ] && echo istty"], {}),
+    ("controlling terminal: /dev/tty opens", ["sh", "-c", "echo viatty > /dev/tty"], {}),
+    ("exit code 7", ["sh", "-c", "exit 7"], {}),
+    ("interactive cat: echo, then ^D", ["cat"], dict(until=b"", typed=b"hello\nworld\n\x04")),
+    ("raw mode passes ^C and ^D through", ["sh", "-c", "stty raw -echo; echo ready; head -c 8"], dict(until=b"ready", typed=b"abc\x03def\x04Z")),
+    ("^C interrupts the child", ["sh", "-c", "echo ready; exec sleep 30"], dict(until=b"ready", typed=b"\x03")),
+    ("a line is read once typed", ["sh", "-c", "printf 'name? '; read n; echo \"hi $n\""], dict(until=b"name? ", typed=b"ann\n")),
+]
+for label, argv, kw in pty_cases:
+    until = kw.get("until", b"")
+    want_code, want_out = pty_oracle(argv, rows=kw.get("rows", 24), cols=kw.get("cols", 80), until=until, typed=kw.get("typed", b""))
+    got_code, got_out = m31_pty(argv, rows=kw.get("rows", 24), cols=kw.get("cols", 80), until=until.decode(), typed=kw.get("typed", b""))
+    check("pty: " + label, got_code == want_code and norm(got_out) == norm(want_out), "got %r %r want %r %r" % (got_code, got_out, want_code, want_out))
+
+# A resize is seen by the child: stty size before and after.
+out, rc, err = m31("pty-resize")
+want = ["first %s" % b"24 80\r\n".hex(), "resized true", "rest %s" % b"\r\n40 132\r\n".hex(), "status exited 0"]
+check("pty: resize, seen by stty size", out.splitlines() == want, out + err)
+
+out, rc, err = m31("pty", "--", "no-such-program-2026")
+check("pty: a program that is not there", out == "pty error program or directory not found", out + err)
 
 sys.exit(1 if bad else 0)
 PY

@@ -381,6 +381,44 @@ child. The descriptor test found it; `reactor_epoll.c` now creates all
 three with `EPOLL_CLOEXEC`/`EFD_CLOEXEC`, and `reactor_kqueue.c` sets
 `FD_CLOEXEC` on the kqueue.
 
+### Pseudo-terminals: `sys_pty_open`, `sys_set_winsize`, `sys_proc_start_pty`
+
+Added **2026-10-12**, after the pipes above, for `proc.start_pty`.
+
+| function | returns | libc | raw x86-64 | raw aarch64 / riscv64 |
+|---|---|---|---|---|
+| `sys_pty_open(&master, path, cap)` | 0 | `posix_openpt`, `grantpt`, `unlockpt`, `ptsname_r` (`TIOCPTYGNAME` on macOS) | `openat("/dev/ptmx")`, `ioctl(TIOCSPTLCK)`, `ioctl(TIOCGPTN)` | same, generic ioctls |
+| `sys_set_winsize(fd, rows, cols)` | 0 | `ioctl(TIOCSWINSZ)` | `ioctl(TIOCSWINSZ)` 0x5414 | same |
+| `sys_proc_start_pty(argv, envp, cwd, slave_path)` | pid | `posix_spawn` with `POSIX_SPAWN_SETSID`, `addopen` of the slave on 0, `dup2` onto 1 and 2 | `clone`, `setsid` 112, `openat`, `ioctl(TIOCSCTTY)`, `dup3`, `execve` | `setsid` 157 |
+
+  - **The slave is opened by the child, by name.** That is what makes it the
+    controlling terminal of the new session: a session leader with no
+    terminal that opens one without `O_NOCTTY` gets it. The raw backend also
+    issues `TIOCSCTTY`, which is harmless when the open already did it. The
+    parent never opens the slave at all, so no copy of it can outlive the
+    child and hold the master open.
+  - **`grantpt` has nothing to do on raw.** devpts is mounted with the right
+    group on every Linux that still has `/dev/ptmx`; glibc's own `grantpt` is
+    a no-op there for the same reason.
+  - **Resizing is `sys_set_winsize` again.** The kernel signals the
+    foreground group with SIGWINCH; nothing here listens (there is no signal
+    handler in this layer), a program that wants to know asks `sys_winsize`.
+  - **End of file is a fact of the descriptor, not translated**: macOS reads
+    0 from a master once the slave side is gone, Linux reads EIO.
+    `lib/proc.m31` folds EIO into the end of the stream for a terminal master.
+  - **The libc backend declares `posix_openpt`, `grantpt`, `unlockpt` and
+    `ptsname_r` itself.** glibc hides them behind `_XOPEN_SOURCE`, which this
+    file cannot define (the reason `sys_accept` is `accept` plus `fcntl`),
+    and so it does `POSIX_SPAWN_SETSID`, repeated by value (0x80, which musl
+    uses too). macOS has all of them in its own headers (10.15 and later for
+    the flag).
+
+Tested in `sys_test.c` on every backend, freestanding and under qemu: the
+slave's name, the size read back through both ends, a child that sees `tty`,
+`stty size` and a working `/dev/tty`, a line typed and echoed and answered,
+`^C` typed on the master killing the child by SIGINT, and a start with a
+missing program or slave failing without a pid.
+
 ### Addresses: one record, and who does the `htons`
 
 This is the part that needed a decision rather than a syscall number. The

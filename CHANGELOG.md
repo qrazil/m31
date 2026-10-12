@@ -22,6 +22,12 @@ change landed on master.
   working directory, SIGPIPE and signal mask reset), `sys_kill`,
   `sys_readlink`, on both backends, with `rt_*` wrappers. A child's `$PATH`
   lookup now uses the `PATH` of the environment it is given on both backends.
+- `proc.start_pty(argv, rows:, columns:, cwd:, env:)` returns a `Pty`: the
+  child on a pseudo-terminal in a session of its own, `master` one readable
+  and writable stream, `resize(rows, columns)`, `wait()`, `kill(signal)`.
+  Sys layer: `sys_pty_open`, `sys_set_winsize`, `sys_proc_start_pty`. Tested
+  against Python's `pty` module (`tty`, `stty size`, an interactive `cat`, a
+  raw-mode program, `^C`, a resize) and in corpus `proc-pty`.
 - `timer.monotonic_ns()`: nanoseconds on the monotonic clock.
 - `fs.readlink(path)` and `fs.realpath(path)` (Python's
   `os.path.realpath(strict=True)`; relative paths need `/proc/self/cwd`).

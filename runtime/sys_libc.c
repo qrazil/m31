@@ -871,8 +871,27 @@ int64_t sys_proc_start(char *const argv[], char *const envp[]) {
  * The attribute resets SIGPIPE to SIG_DFL and the mask to empty; sys.h says
  * why. posix_spawn_file_actions_addchdir_np is glibc 2.29, musl 1.1.24 and
  * macOS 10.15: older than anything this layer otherwise supports. */
-int64_t sys_proc_start_fds(char *const argv[], char *const envp[], const char *cwd,
-                           int64_t stdin_fd, int64_t stdout_fd, int64_t stderr_fd) {
+/* The pseudo-terminal functions of the XSI group are declared by glibc only
+ * under _XOPEN_SOURCE, which this file cannot define (rt.c #includes it
+ * after its own headers, as sys_accept's comment says); the signatures are
+ * POSIX's and are repeated here. posix_spawn's "new session" flag is
+ * POSIX_SPAWN_SETSID on glibc (under __USE_GNU, so by value: 0x80, which musl
+ * uses too) and on macOS 10.15 or later (its own header). */
+extern int posix_openpt(int flags);
+extern int grantpt(int fd);
+extern int unlockpt(int fd);
+#if defined(__linux__)
+extern int ptsname_r(int fd, char *buf, size_t buflen);
+#endif
+#if defined(POSIX_SPAWN_SETSID)
+#define SPAWN_SETSID POSIX_SPAWN_SETSID
+#elif defined(__linux__)
+#define SPAWN_SETSID 0x80
+#endif
+
+static int64_t proc_start(char *const argv[], char *const envp[], const char *cwd,
+                          int64_t stdin_fd, int64_t stdout_fd, int64_t stderr_fd,
+                          const char *tty) {
     const int64_t src[3] = {stdin_fd, stdout_fd, stderr_fd};
     for (int i = 0; i < 3; i++) {
         if (src[i] < -1 || src[i] > 0x7fffffff) return -SYS_EINVAL;
@@ -904,9 +923,20 @@ int64_t sys_proc_start_fds(char *const argv[], char *const envp[], const char *c
     sigaddset(&dfl, SIGPIPE);
     rc = posix_spawnattr_setsigmask(&at, &none);
     if (rc == 0) rc = posix_spawnattr_setsigdefault(&at, &dfl);
-    if (rc == 0) rc = posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
+    int flags = POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF;
+    if (tty != NULL) flags |= SPAWN_SETSID;
+    if (rc == 0) rc = posix_spawnattr_setflags(&at, flags);
     for (int i = 0; rc == 0 && i < 3; i++) {
         if (src[i] >= 3) rc = posix_spawn_file_actions_adddup2(&fa, (int)src[i], i);
+    }
+    if (rc == 0 && tty != NULL) {
+        /* A new session (flag above), then the slave opened WITHOUT
+         * O_NOCTTY as descriptor 0: the first terminal a session leader with
+         * none opens becomes its controlling terminal. Then 1 and 2 are
+         * copies of it. */
+        rc = posix_spawn_file_actions_addopen(&fa, 0, tty, O_RDWR, 0);
+        if (rc == 0) rc = posix_spawn_file_actions_adddup2(&fa, 0, 1);
+        if (rc == 0) rc = posix_spawn_file_actions_adddup2(&fa, 0, 2);
     }
     if (rc == 0 && cwd != NULL) rc = posix_spawn_file_actions_addchdir_np(&fa, cwd);
     pid_t pid = 0;
@@ -915,6 +945,22 @@ int64_t sys_proc_start_fds(char *const argv[], char *const envp[], const char *c
     posix_spawnattr_destroy(&at);
     if (rc != 0) return neg_errno(rc);
     return (int64_t)pid;
+}
+
+int64_t sys_proc_start_fds(char *const argv[], char *const envp[], const char *cwd,
+                           int64_t stdin_fd, int64_t stdout_fd, int64_t stderr_fd) {
+    return proc_start(argv, envp, cwd, stdin_fd, stdout_fd, stderr_fd, NULL);
+}
+
+int64_t sys_proc_start_pty(char *const argv[], char *const envp[], const char *cwd,
+                           const char *slave_path) {
+#if defined(SPAWN_SETSID)
+    if (slave_path == NULL) return -SYS_EINVAL;
+    return proc_start(argv, envp, cwd, -1, -1, -1, slave_path);
+#else
+    (void)argv; (void)envp; (void)cwd; (void)slave_path;
+    return -SYS_ENOSYS;
+#endif
 }
 
 /* A pipe, then FD_CLOEXEC on both ends: plain pipe and not pipe2 for the
@@ -979,6 +1025,61 @@ int64_t sys_kill(int64_t pid, int64_t sig) {
 
 int64_t sys_readlink(const char *path, char *buf, int64_t cap) {
     return ret((int64_t)readlink(path, buf, (size_t)cap));
+}
+
+int64_t sys_pty_open(int64_t *master_fd, char *slave_path, int64_t cap) {
+    int m = posix_openpt(O_RDWR | O_NOCTTY);
+    if (m < 0) return neg_errno(errno);
+    if (fcntl(m, F_SETFD, FD_CLOEXEC) != 0 || grantpt(m) != 0 || unlockpt(m) != 0) {
+        int e = errno;
+        close(m);
+        return neg_errno(e);
+    }
+    char name[256];
+    name[0] = '\0';
+#if defined(__APPLE__)
+    /* What macOS's own ptsname() does, without its static buffer. */
+    char gname[128];
+    if (ioctl(m, TIOCPTYGNAME, gname) != 0) {
+        int e = errno;
+        close(m);
+        return neg_errno(e);
+    }
+    strncpy(name, gname, sizeof name - 1);
+    name[sizeof name - 1] = '\0';
+#elif defined(__linux__)
+    int rc = ptsname_r(m, name, sizeof name);
+    if (rc != 0) {
+        close(m);
+        return neg_errno(rc);
+    }
+#else
+    const char *n = ptsname(m);
+    if (n == NULL) {
+        int e = errno;
+        close(m);
+        return neg_errno(e);
+    }
+    strncpy(name, n, sizeof name - 1);
+    name[sizeof name - 1] = '\0';
+#endif
+    size_t need = strlen(name) + 1;
+    if (cap < 0 || need > (size_t)cap) {
+        close(m);
+        return -SYS_ENOSPC;
+    }
+    memcpy(slave_path, name, need);
+    *master_fd = m;
+    return 0;
+}
+
+int64_t sys_set_winsize(int64_t fd, int64_t rows, int64_t cols) {
+    if (rows < 0 || rows > 65535 || cols < 0 || cols > 65535) return -SYS_EINVAL;
+    struct winsize w;
+    memset(&w, 0, sizeof w);
+    w.ws_row = (unsigned short)rows;
+    w.ws_col = (unsigned short)cols;
+    return ret(ioctl((int)fd, TIOCSWINSZ, &w));
 }
 
 /* waitpid, then sys.h's own encoding rather than the raw status: see

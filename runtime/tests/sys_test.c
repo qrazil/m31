@@ -1123,6 +1123,88 @@ static void proc_tests(void) {
     sys_unlink(lnk);
 }
 
+
+/* ---- pseudo-terminals ---------------------------------------------------
+ *
+ * The master is read until the child is gone: end-of-file on macOS, EIO on
+ * Linux (sys.h says why that is not translated), so both end a read here.
+ * Lines come back with \r\n, because the slave's line discipline turns \n
+ * into that on output. */
+static int64_t slurp_master(int64_t fd, char *buf, int64_t cap) {
+    int64_t n = 0;
+    for (;;) {
+        int64_t r = sys_read(fd, buf + n, cap - 1 - n);
+        if (r == -SYS_EINTR) continue;
+        if (r <= 0) break;
+        n += r;
+    }
+    buf[n] = 0;
+    return n;
+}
+
+static int contains(const char *hay, const char *needle) {
+    int64_t n = len_of(needle);
+    for (int64_t i = 0; hay[i]; i++) {
+        if (same(hay + i, needle, n) && (n == 0 || hay[i + n - 1] == needle[n - 1])) return 1;
+    }
+    return 0;
+}
+
+static void pty_tests(void) {
+    char out[1024], path[128];
+    int64_t master = -1, rows = -1, cols = -1;
+
+    expect("pty open", sys_pty_open(&master, path, sizeof path), 0);
+    expect_true("a master", master >= 0);
+    expect_true("a slave name under /dev", same(path, "/dev/", 5));
+    int64_t small_master = -1;
+    char tiny[4];
+    expect("a name that does not fit", sys_pty_open(&small_master, tiny, sizeof tiny), -SYS_ENOSPC);
+    expect("a fresh pty has no size", sys_winsize(master, &rows, &cols), 0);
+    expect_true("0 by 0", rows == 0 && cols == 0);
+    expect("set the size", sys_set_winsize(master, 31, 97), 0);
+    expect("read it back", sys_winsize(master, &rows, &cols), 0);
+    expect_true("31 by 97", rows == 31 && cols == 97);
+    expect("a size that does not fit", sys_set_winsize(master, 70000, 1), -SYS_EINVAL);
+    expect("not a terminal", sys_set_winsize(1000, 1, 1) < 0, 1);
+
+    /* tty and stty inside: a terminal of the size set, which is the
+     * controlling terminal (the write to /dev/tty finds it). */
+    char *const probe[] = {"/bin/sh", "-c", "tty; stty size; echo viatty > /dev/tty", 0};
+    int64_t pid = sys_proc_start_pty(probe, proc_env, 0, path);
+    expect_true("sh on a pty started", pid > 0);
+    slurp_master(master, out, sizeof out);
+    expect_true("tty names the slave", contains(out, path));
+    expect_true("stty size is the size set", contains(out, "31 97"));
+    expect_true("/dev/tty is the controlling terminal", contains(out, "viatty"));
+    expect("it exited 0", sys_proc_wait(pid), 0);
+    sys_close(master);
+
+    /* Input is echoed by the line discipline, then the program answers. */
+    expect("second pty", sys_pty_open(&master, path, sizeof path), 0);
+    char *const reader[] = {"/bin/sh", "-c", "read line; echo got:$line", 0};
+    pid = sys_proc_start_pty(reader, proc_env, 0, path);
+    expect_true("reader started", pid > 0);
+    expect("type a line", sys_write(master, "abc\n", 4), 4);
+    slurp_master(master, out, sizeof out);
+    expect_true("echo then answer", contains(out, "abc\r\ngot:abc\r\n"));
+    expect("reader exited 0", sys_proc_wait(pid), 0);
+
+    /* ^C on the master reaches the child, not this process: the child's
+     * session has the terminal, and the line discipline signals its
+     * foreground group. */
+    char *const sleeper2[] = {"/bin/sleep", "30", 0};
+    pid = sys_proc_start_pty(sleeper2, proc_env, 0, path);
+    expect_true("sleeper started", pid > 0);
+    expect("type ^C", sys_write(master, "\003", 1), 1);
+    expect("sleep died of SIGINT", sys_proc_wait(pid), SYS_WAIT_SIGNAL_BASE + 2);
+    sys_close(master);
+
+    /* Failures are values, as for a pipe. */
+    expect("a program that is not there", sys_proc_start_pty((char *const[]){"/no/such/program-2026", 0}, proc_env, 0, path) < 0, 1);
+    expect("a slave that is not there", sys_proc_start_pty(probe, proc_env, 0, "/dev/pts/987654") < 0, 1);
+}
+
 int test_main(void);
 int test_main(void) {
     /* ---- errors every backend must spell the same way ---- */
@@ -1280,6 +1362,7 @@ int test_main(void) {
     term_tests();
     net_tests();
     proc_tests();
+    pty_tests();
 
     put("sys layer: ");
     put_int(checks - failures);

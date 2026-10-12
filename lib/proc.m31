@@ -6,6 +6,7 @@
 //   proc.run(argv, input:, cwd:, env:, timeout_ms:, should_check:, is_quiet:)
 //                              -> Result<Completed, Error>
 //   proc.start(argv, cwd:, env:)   -> Result<Proc, Error>
+//   proc.start_pty(argv, rows:, columns:, cwd:, env:)  -> Result<Pty, Error>
 //
 //   Completed                  .status .returncode .is_truncated .stdout .stderr; c.is_success()
 //   Proc                       .pid .stdin .stdout .stderr
@@ -13,7 +14,8 @@
 //   p.kill(signal)             -> Result<bool, Error>            false: already gone
 //   p.take_stdin(), p.take_stdout(), p.take_stderr()   -> Pipe   to move into a thread
 //
-//   Pipe                       an io.Stream over one end of a pipe
+//   Pty                        .pid .master; pty.resize(rows, columns), .wait(), .kill(signal)
+//   Pipe                       an io.Stream over one end of a pipe, or a terminal master
 //   pipe.read(n), .read_all(), .read_until(delim, limit)          the stream protocol
 //   pipe.write(b), .write_some(b), .close()
 //   pipe.set_deadline_ns(t)    reads and writes give up at monotonic time t
@@ -56,8 +58,8 @@
 // subprocess API. A `Proc` that is dropped without `wait` kills its child
 // (SIGKILL) and reaps it, so none is left running or a zombie.
 //
-// What is deliberately not here: a shell, a pseudo-terminal, process groups
-// and sessions, and a way to pass an extra descriptor. docs/proc-decision.md
+// What is deliberately not here: a shell, process groups and sessions, and a
+// way to pass an extra descriptor. docs/proc-decision.md
 // says why and what each would take.
 
 import io;
@@ -79,6 +81,13 @@ prim int __pipe(List<int> out);
 // descriptor of -1 inherits. The pid, or -errno.
 prim int __proc_start_fds(List<str> argv, List<str> env_list, int has_env, str cwd, int stdin_fd, int stdout_fd, int stderr_fd);
 prim int __proc_wait(int pid);
+// As __proc_start_fds, but all three streams on the pseudo-terminal slave
+// named `slave_path`, in a new session of its own.
+prim int __proc_start_pty(List<str> argv, List<str> env_list, int has_env, str cwd, str slave_path);
+// Pushes the master descriptor and writes the slave's NUL-terminated name
+// into `path` (a bytes of the size the name may have).
+prim int __pty_open(List<int> out, bytes path);
+prim int __set_winsize(int descriptor, int rows, int columns);
 prim int __kill(int pid, int signal);
 
 // The layer's constants, as numbers (docs/sys-layer.md): the events
@@ -88,6 +97,7 @@ const int IO_WRITABLE = 2;
 const int SO_NONBLOCK = 7;
 const int CHUNK = 65536;
 const int EAGAIN = 11;
+const int EIO = 5;
 const int ESRCH = 3;
 const int EPIPE = 32;
 const int ETIMEDOUT = 110;
@@ -261,6 +271,10 @@ int errno_of(io.Error error) {
 pub type Pipe {
     int descriptor;
     bool is_readable;
+    bool is_writable;
+    // A pseudo-terminal master, which Linux reports as EIO, not end-of-file,
+    // once every process holding the slave is gone.
+    bool is_terminal = false;
     bool is_live = true;
     // buffer[position .. end] has arrived and not been handed out.
     bytes buffer = [];
@@ -453,7 +467,7 @@ void Pipe.check_writable() {
     if (!is_live) {
         trap("write on a closed pipe");
     }
-    if (is_readable) {
+    if (!is_writable) {
         trap("write to a pipe that is the child's output");
     }
 }
@@ -493,6 +507,10 @@ Result<int, io.Error> Pipe.fill() {
             wait_ready(IO_READABLE)?;
             continue;
         }
+        // The slave is gone: the terminal's end of file.
+        if (received == -EIO && is_terminal) {
+            received = 0;
+        }
         if (received < 0) {
             return Result<int, io.Error>.Err(io.from_errno(-received));
         }
@@ -524,7 +542,7 @@ Result<int, io.Error> Pipe.fill_keeping(bytes held) {
 // A pipe end that is already closed: what `take_stdin` leaves behind, so a
 // taken stream is a closed one and not a hole.
 Pipe closed_pipe() {
-    return Pipe(-1, false, is_live: false);
+    return Pipe(-1, false, false, is_live: false);
 }
 
 // --- a running process ---------------------------------------------------
@@ -748,9 +766,9 @@ Result<Proc, Error> launch(List<str> argv, str cwd, Option<Map<str, str>> env) {
         closed = __close(standard_error[0]);
         return Result<Proc, Error>.Err(from_errno(-pid));
     }
-    Pipe child_in = Pipe(standard_in[1], false);
-    Pipe child_out = Pipe(standard_out[0], true);
-    Pipe child_error = Pipe(standard_error[0], true);
+    Pipe child_in = Pipe(standard_in[1], false, true);
+    Pipe child_out = Pipe(standard_out[0], true, false);
+    Pipe child_error = Pipe(standard_error[0], true, false);
     return Result<Proc, Error>.Ok(Proc(pid, child_in, child_out, child_error));
 }
 
@@ -775,6 +793,157 @@ void close_all(List<int> descriptors) {
 /// arguments are refused (`InvalidArgument`).
 pub Result<Proc, Error> start(List<str> argv, str cwd = "", Option<Map<str, str>> env = Option<Map<str, str>>.None) {
     return launch(argv, cwd, env);
+}
+
+// --- a child on a pseudo-terminal ------------------------------------------
+/// A child process whose standard input, output and error are one terminal,
+/// and the master end of that terminal.
+///
+/// **What it is for**: a program that behaves differently on a terminal --
+/// line editing, colours, paging, a REPL, `ssh`, `top` -- or that needs one
+/// to run at all. Under pipes (`start`) such a program sees `isatty` false.
+///
+/// **`master` is the whole conversation**, one `Pipe` that is both readable
+/// and writable: what the program prints is read from it, and what is
+/// written to it is the keyboard. The line discipline is the terminal's, not
+/// this library's: typed characters are echoed back into the output, `\n`
+/// comes out as `\r\n`, `^C` (byte 3) written to the master interrupts the
+/// child's foreground group, and `^D` is its end of file. A program that
+/// wants raw bytes puts the terminal in raw mode itself (`stty raw -echo`).
+/// Standard output and standard error are **one stream** here, as on any
+/// terminal.
+///
+/// The end of the stream is the child (and everything that inherited the
+/// terminal) going away: `read` then answers an empty `bytes` on every host,
+/// where Linux's descriptor says EIO.
+///
+/// **The child has a session and a controlling terminal of its own**, so
+/// `tty` names it, `/dev/tty` opens, and signals from the line discipline
+/// reach it and not this process. Dropping a `Pty` that was not waited for
+/// kills the child and reaps it, as for a `Proc`.
+pub type Pty {
+    pub int pid;
+    pub Pipe master;
+    bool is_reaped = false;
+    os.ExitStatus status = os.ExitStatus.Exited(0);
+}
+
+/// Hand out the master stream, leaving a closed one in its place.
+pub Pipe Pty.take_master() {
+    Pipe taken = master;
+    master = closed_pipe();
+    return taken;
+}
+
+/// Tell the terminal it is now `rows` by `columns`. The child's foreground
+/// group is sent SIGWINCH by the kernel, which is how a program redraws.
+pub Result<bool, Error> Pty.resize(int rows, int columns) {
+    if (rows < 1 || rows > 65535 || columns < 1 || columns > 65535) {
+        return Result<bool, Error>.Err(Error.InvalidArgument);
+    }
+    if (!master.is_live) {
+        return Result<bool, Error>.Err(Error.Io);
+    }
+    int status_code = __set_winsize(master.descriptor, rows, columns);
+    if (status_code < 0) {
+        return Result<bool, Error>.Err(from_errno(-status_code));
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+/// Wait for the child to end: `Proc.wait`'s contract, parking only the
+/// calling thread, and answering the same for every later call.
+pub Result<os.ExitStatus, Error> Pty.wait() {
+    if (is_reaped) {
+        return Result<os.ExitStatus, Error>.Ok(status);
+    }
+    int raw = __proc_wait(pid);
+    if (raw < 0) {
+        return Result<os.ExitStatus, Error>.Err(from_errno(-raw));
+    }
+    is_reaped = true;
+    status = decode_status(raw);
+    return Result<os.ExitStatus, Error>.Ok(status);
+}
+
+/// Signal the child: `Proc.kill`'s contract.
+pub Result<bool, Error> Pty.kill(int signal) {
+    if (is_reaped) {
+        return Result<bool, Error>.Ok(false);
+    }
+    int status_code = __kill(pid, signal);
+    if (status_code == -ESRCH) {
+        return Result<bool, Error>.Ok(false);
+    }
+    if (status_code < 0) {
+        return Result<bool, Error>.Err(from_errno(-status_code));
+    }
+    return Result<bool, Error>.Ok(true);
+}
+
+void Pty.drop() {
+    if (!is_reaped) {
+        int ignored_kill = __kill(pid, 9);
+        int ignored_wait = __proc_wait(pid);
+    }
+}
+
+/// Start `argv` on a new pseudo-terminal of `rows` by `columns` character cells
+/// (the default is the classic 24 by 80). `cwd` and `env` are `start`'s.
+///
+/// `Err(InvalidArgument)` for a size outside 1 to 65535. The size can be
+/// changed later with `resize`.
+pub Result<Pty, Error> start_pty(List<str> argv, int rows = 24, int columns = 80, str cwd = "", Option<Map<str, str>> env = Option<Map<str, str>>.None) {
+    if (rows < 1 || rows > 65535 || columns < 1 || columns > 65535) {
+        return Result<Pty, Error>.Err(Error.InvalidArgument);
+    }
+    check_argv(argv)?;
+    List<str> env_list = [];
+    int has_env = 0;
+    match (env) {
+        case Some(Map<str, str> table): {
+            env_list = environment_list(table)?;
+            has_env = 1;
+        }
+        case None: {
+        }
+    }
+    int ignored = __ignore_sigpipe();
+    List<int> opened = [];
+    bytes name = [0; 256];
+    int made = __pty_open(opened, name);
+    if (made < 0) {
+        return Result<Pty, Error>.Err(from_errno(-made));
+    }
+    int master = opened[0];
+    int sized = __set_winsize(master, rows, columns);
+    if (sized == 0) {
+        sized = __setsockopt(master, SO_NONBLOCK, 1);
+    }
+    if (sized < 0) {
+        int closed = __close(master);
+        return Result<Pty, Error>.Err(from_errno(-sized));
+    }
+    // The name is up to the first NUL.
+    int length = 0;
+    while (length < name.size() && name[length] != 0) {
+        length = length + 1;
+    }
+    match (name.substr(0, length).utf8()) {
+        case Some(str slave_path): {
+            int pid = __proc_start_pty(argv, env_list, has_env, cwd, slave_path);
+            if (pid < 0) {
+                int closed = __close(master);
+                return Result<Pty, Error>.Err(from_errno(-pid));
+            }
+            Pipe end = Pipe(master, true, true, is_terminal: true);
+            return Result<Pty, Error>.Ok(Pty(pid, end));
+        }
+        case None: {
+            int closed = __close(master);
+            return Result<Pty, Error>.Err(Error.Io);
+        }
+    }
 }
 
 // --- run: the whole conversation -------------------------------------------

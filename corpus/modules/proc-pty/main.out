@@ -1,0 +1,10 @@
+[31 97
+terminal
+]
+exited 0
+[name? ann
+hello ann
+]
+exited 3
+start failed: program or directory not found
+rows 0: invalid argument

@@ -69,6 +69,7 @@
 #define NR_rt_sigprocmask 14
 #define NR_readlinkat  267
 #define NR_dup3        292
+#define NR_setsid      112
 #define NR_getdents64  217
 #define NR_clock_gettime 228
 #define NR_exit_group   231
@@ -85,6 +86,7 @@
 #elif defined(__aarch64__) || (defined(__riscv) && __riscv_xlen == 64)
 #define NR_fcntl         25
 #define NR_dup3          24
+#define NR_setsid       157
 #define NR_chdir         49
 #define NR_readlinkat    78
 #define NR_kill         129
@@ -998,8 +1000,9 @@ int64_t sys_proc_start(char *const argv[], char *const envp[]) {
  * The same pipe carries every other failure between clone and exec: a
  * dup3 of a closed descriptor, a cwd that cannot be entered. All of them
  * are one errno written before exit(127). */
-int64_t sys_proc_start_fds(char *const argv[], char *const envp[], const char *cwd,
-                           int64_t stdin_fd, int64_t stdout_fd, int64_t stderr_fd) {
+static int64_t proc_start(char *const argv[], char *const envp[], const char *cwd,
+                          int64_t stdin_fd, int64_t stdout_fd, int64_t stderr_fd,
+                          const char *tty) {
     const int64_t src[3] = {stdin_fd, stdout_fd, stderr_fd};
     for (int i = 0; i < 3; i++) {
         if (src[i] < -1 || src[i] > 0x7fffffff) return -SYS_EINVAL;
@@ -1033,6 +1036,25 @@ int64_t sys_proc_start_fds(char *const argv[], char *const envp[], const char *c
          * the copy, which is what the exec must keep. */
         for (int i = 0; r >= 0 && i < 3; i++) {
             if (src[i] >= 3) r = sc(NR_dup3, src[i], i, 0, 0, 0, 0);
+        }
+        if (r >= 0 && tty != 0) {
+            /* A session of its own, then the slave opened without O_NOCTTY:
+             * the first terminal a session leader with none opens becomes
+             * its controlling terminal, and TIOCSCTTY says so explicitly in
+             * case the kernel's rule were not what it is (EPERM when it
+             * already is: ignored). Then the three streams are copies of it. */
+            r = sc(NR_setsid, 0, 0, 0, 0, 0, 0);
+            int64_t slave = r < 0 ? r : sc(NR_openat, AT_FDCWD, P(tty), 2 /* O_RDWR */, 0, 0, 0);
+            if (slave >= 0) {
+                sc(NR_ioctl, slave, 0x540E /* TIOCSCTTY */, 0, 0, 0, 0);
+                r = 0;
+                for (int i = 0; r >= 0 && i < 3; i++) {
+                    if (slave != i) r = sc(NR_dup3, slave, i, 0, 0, 0, 0);
+                }
+                if (slave > 2) sc(NR_close, slave, 0, 0, 0, 0, 0);
+            } else {
+                r = slave;
+            }
         }
         if (r >= 0 && cwd != 0) r = sc(NR_chdir, P(cwd), 0, 0, 0, 0, 0);
         if (r >= 0) {
@@ -1080,6 +1102,17 @@ int64_t sys_proc_start_fds(char *const argv[], char *const envp[], const char *c
     return n > 0 ? code : n;
 }
 
+int64_t sys_proc_start_fds(char *const argv[], char *const envp[], const char *cwd,
+                           int64_t stdin_fd, int64_t stdout_fd, int64_t stderr_fd) {
+    return proc_start(argv, envp, cwd, stdin_fd, stdout_fd, stderr_fd, 0);
+}
+
+int64_t sys_proc_start_pty(char *const argv[], char *const envp[], const char *cwd,
+                           const char *slave_path) {
+    if (slave_path == 0) return -SYS_EINVAL;
+    return proc_start(argv, envp, cwd, -1, -1, -1, slave_path);
+}
+
 int64_t sys_pipe(int64_t fds[2]) {
     int p[2];
     int64_t r = sc(NR_pipe2, P(p), O_CLOEXEC_, 0, 0, 0, 0);
@@ -1099,6 +1132,55 @@ int64_t sys_kill(int64_t pid, int64_t sig) {
 
 int64_t sys_readlink(const char *path, char *buf, int64_t cap) {
     return sc(NR_readlinkat, AT_FDCWD, P(path), P(buf), cap, 0, 0);
+}
+
+/* /dev/ptmx, then the two ioctls glibc's unlockpt and ptsname are made of:
+ * TIOCSPTLCK with 0 unlocks the slave, TIOCGPTN is its number, and the name
+ * is /dev/pts/N (the only place devpts is mounted, which glibc assumes too).
+ * grantpt is a no-op on a devpts that is mounted with gid=5, as every one is
+ * today, so there is nothing to call. O_NOCTTY (0400 on all three
+ * architectures) so that this process does not take the new terminal as its
+ * own. */
+int64_t sys_pty_open(int64_t *master_fd, char *slave_path, int64_t cap) {
+    int64_t m = sc(NR_openat, AT_FDCWD, P("/dev/ptmx"), 02 /* O_RDWR */ | 0400 /* O_NOCTTY */ | O_CLOEXEC_, 0, 0, 0);
+    if (m < 0) return m;
+    int32_t zero_lock = 0;
+    int64_t r = sc(NR_ioctl, m, 0x40045431 /* TIOCSPTLCK */, P(&zero_lock), 0, 0, 0);
+    uint32_t number = 0;
+    if (r >= 0) r = sc(NR_ioctl, m, 0x80045430 /* TIOCGPTN */, P(&number), 0, 0, 0);
+    if (r < 0) {
+        sc(NR_close, m, 0, 0, 0, 0, 0);
+        return r;
+    }
+    char digits[12];
+    int64_t nd = 0;
+    uint32_t v = number;
+    do {
+        digits[nd++] = (char)('0' + v % 10);
+        v /= 10;
+    } while (v);
+    const char prefix[] = "/dev/pts/";
+    int64_t pl = (int64_t)sizeof prefix - 1;
+    if (cap < pl + nd + 1) {
+        sc(NR_close, m, 0, 0, 0, 0, 0);
+        return -SYS_ENOSPC;
+    }
+    for (int64_t i = 0; i < pl; i++) slave_path[i] = prefix[i];
+    for (int64_t i = 0; i < nd; i++) slave_path[pl + i] = digits[nd - 1 - i];
+    slave_path[pl + nd] = '\0';
+    *master_fd = m;
+    return 0;
+}
+
+#define TIOCSWINSZ 0x5414
+
+int64_t sys_set_winsize(int64_t fd, int64_t rows, int64_t cols) {
+    if (rows < 0 || rows > 65535 || cols < 0 || cols > 65535) return -SYS_EINVAL;
+    KWinsize w;
+    zero_bytes((unsigned char *)&w, (int64_t)sizeof w);
+    w.ws_row = (uint16_t)rows;
+    w.ws_col = (uint16_t)cols;
+    return sc(NR_ioctl, fd, TIOCSWINSZ, P(&w), 0, 0, 0);
 }
 
 /* wait4, then sys.h's own encoding by hand: the kernel's status word has one
