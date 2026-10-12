@@ -3,7 +3,7 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
-## Unreleased (0.4.1)
+## 0.4.1 (2026-10-12)
 
 Repository layout, plus the new `m31c init`; no language or standard-library
 behaviour changes.
