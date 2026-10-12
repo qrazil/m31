@@ -150,9 +150,10 @@ entry naming a commit `.m31-deps/<name>/` cannot be made to check out to
   ever need compatible-but-different versions of a third, v0 cannot
   express that — it can express only "one remote repo, one pinned commit,"
   the same granularity Go had before modules existed at all.
-- **Transitive remote dependencies.** A remote dependency's own `deps`
-  file, if it has one, is not read in v0. A remote library may only use
-  the embedded standard library and whatever it ships in its own one file.
+- **Transitive remote dependencies.** Not in v0 (a remote dependency's own
+  `deps` file was not read). Done in 0.4.2: see "Transitive dependencies" in
+  docs/project-layout-decision.md. There is still no version resolution: two
+  different sources for one name are an error.
 - **Multi-file remote packages.** One file per remote import, per §2.
 - **A shared/global cache.** Per-project only, per §2's reasoning.
 - **Integrity beyond git's own commit addressing.** No separate signature

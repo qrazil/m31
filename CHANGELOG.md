@@ -3,6 +3,26 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
+## Unreleased (0.4.2)
+
+### Added
+
+- Transitive dependencies: a dependency's own `deps` is followed, for path and
+  git dependencies alike, recursively. Paths in it are relative to that
+  dependency's root; a diamond is resolved once; two different sources for one
+  name, and dependency cycles, are errors that name the chains. Every git
+  dependency of the graph is locked in the top project's `deps.lock` and cached
+  flat in its `.m31-deps/`. See `docs/project-layout-decision.md`.
+
+### Changed
+
+- The path-dependency graph is checked when the project is loaded, so a cycle
+  or conflict is reported even if nothing imports the branch it is in.
+- A one-file dependency (`import x;` resolved through `deps`) now resolves its
+  own imports against that dependency's root rather than the importer's, and
+  importing it from several modules no longer reports a collision.
+- Generated C for existing programs is unchanged.
+
 ## 0.4.1 (2026-10-12)
 
 Repository layout, plus the new `m31c init`; no language or standard-library

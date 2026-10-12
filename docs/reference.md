@@ -324,8 +324,14 @@ the `deps` file, used in place: nothing is fetched, locked or cached). A
 dependency is addressed by its name as the first segment — `import tui.tuiapp;`
 — and inside it the root is the dependency's own directory, so *its* imports
 (`import tuibuf;`) resolve there and not in the consumer. A path dependency is
-a project and must have its own `deps` header. A dependency's own dependencies
-are not followed: a consumer lists every one it needs. A directory and a
+a project and must have its own `deps` header. A dependency's own `deps` is followed
+too, recursively: the dependencies it lists (path ones relative to *its* root)
+are available to its files, and a consumer lists only what it imports itself.
+Every git dependency of the whole graph is pinned in the top project's
+`deps.lock` and cached flat in its `.m31-deps/`; a dependency's own lock is not
+read. A name wanted by several dependencies must mean one source (a diamond is
+resolved once); two different sources, or a dependency cycle, are errors that
+name the chains. A directory and a
 dependency with the same name under one root are an error. `m31c fmt [--check]
 -r <dir>` formats or checks every `.m31` file under a directory, skipping
 `.m31-deps`, `.git` and `target`.

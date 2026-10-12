@@ -40,6 +40,11 @@ release workflow that only tests and publishes the source.
 - **`deps`** lists `name <git-url> <sha>` or `name path <dir>`, after the
   `name` and `version` header lines. A dependency's first import segment is its
   name: `import tui.TUI_app;`.
+- **A dependency's own `deps` is followed.** An app lists what it imports
+  directly; a library lists what it uses, relative to its own directory. The
+  top project's `deps.lock` and `.m31-deps/` pin and hold every git dependency
+  of the whole graph, flat by name. One name must mean one source everywhere
+  (a diamond is fine; a conflict or a cycle is an error naming the chain).
 - **CI pins the toolchain** with `M31_REF` (a release tag of this repository)
   in both workflows. Moving it is a commit of its own.
 

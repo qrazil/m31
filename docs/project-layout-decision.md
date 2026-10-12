@@ -180,9 +180,8 @@ cache are unchanged. What changes is that a dependency is no longer limited
 to one file `<name>.m31`: the whole repo is checked out under
 `.m31-deps/<name>/` (or named by `path`) and addressed by path. The old
 single-file form (`import name;` where the dep repo has `name.m31` at its
-root) still works. One known limit stays: a dependency's own `deps` are not
-followed transitively (v0 rule, kept on purpose until a dependency really has
-dependencies of its own); a consumer must list them.
+root) still works. A dependency's own `deps` is followed transitively (0.4.2):
+see "Transitive dependencies" below.
 
 **Why `build-gitui.sh`'s staging hack disappears.** The hack exists
 because the loader cannot see another checkout. With
@@ -354,6 +353,44 @@ All closed.
    `apps/git/deps` says `tui path ../tui` and the dependency is used in place.
 4. **Directory name grammar.** Directory names used in an import must be
    identifiers (`[A-Za-z_][A-Za-z0-9_]*`); documented in `reference.md`.
-5. **Transitive deps.** Still v0: a dependency's own `deps` are not followed,
-   the consumer lists them.
+5. **Transitive deps.** Done in 0.4.2, see the section below.
 6. **`m31c fmt --check -r`.** Done (section 5).
+
+## Transitive dependencies (0.4.2)
+
+A dependency that has a `deps` file of its own has those dependencies resolved
+too, recursively, for both path and git dependencies. The rules, none of which
+changes how a program without such a chain behaves:
+
+- **Whose manifest.** A module's imports are resolved against the project it
+  belongs to: the top project's files use the top `deps`, a dependency's files
+  use that dependency's own `deps` (and its own root, for `import tuibuf;`
+  and `import widgets.label;`). A dependency does not see its consumer's
+  dependencies unless it lists them. Paths in a dependency's `deps` are
+  relative to that dependency's root, `url`s likewise.
+- **One name, one source.** Module names are globally unique, so the whole
+  graph shares one namespace of dependency names. Listing the same name from
+  several manifests is fine when the source is the same (same directory,
+  however spelt; same url and ref): a diamond is resolved once. Different
+  sources are an error that names both chains
+  (`app -> a -> util` and `app -> b -> util`), at the later declaration. The
+  top project does not override a dependency's choice: make them agree.
+- **Cycles.** A dependency that reaches itself (`a -> b -> a`), or a path that
+  leads back to the project's own directory, is an error printing the chain.
+  This is separate from, and earlier than, the module import cycle check.
+- **Git dependencies.** Locking is the top project's: every git dependency of
+  the graph, however deep, gets one line in the top `deps.lock` and one
+  checkout in the top `.m31-deps/<name>/` (flat, by name; there is nothing to
+  nest because names are unique). A dependency's own `deps.lock` is not
+  consulted, so a library's pins are not its consumers'. A git dependency's
+  own `deps` is read when it is fetched, which stays lazy: nothing is fetched
+  for a dependency nothing imports.
+- **When errors appear.** The path-dependency graph is walked up front, so a
+  cycle or conflict among path dependencies is reported even if nothing
+  imports the branch it is in. Anything below a git dependency is walked as
+  soon as that checkout exists.
+- **One-file dependencies.** `import x;` where `x` is a dependency's single
+  file `x.m31`: the file's own imports now resolve against that dependency's
+  root (it used to be the importer's project root), which is what lets it
+  reach what its own `deps` lists. Importing one such dependency from
+  several modules is one module, not a collision.
