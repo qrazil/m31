@@ -283,9 +283,10 @@ pub Result<str, io.Error> readlink(str path) {
 /// there, because only an existing path has a real one; a dangling link is
 /// missing. `..` is applied to the path already resolved, so `link/..` is
 /// the directory ABOVE what `link` points to, as the kernel does it, and not
-/// the directory `link` is in. A `..` that follows something that is not a
-/// directory is `NotADirectory`. More than 40 links met on the way is
-/// `Other(40)` (ELOOP), the kernel's own limit.
+/// the directory `link` is in. A `..` is not checked to follow a directory:
+/// `file/..` is the directory holding the file, as Python has it (the C
+/// library's `realpath` says `NotADirectory`). More than 40 links met on the
+/// way is `Other(40)` (ELOOP), the kernel's own limit.
 ///
 /// **A relative path is resolved from the current directory, which needs
 /// `/proc/self/cwd`** (Linux): the layer has no `getcwd`, and nothing in the
@@ -319,17 +320,11 @@ pub Result<str, io.Error> realpath(str path) {
             continue;
         }
         if (part == "..") {
+            // Applied to what is resolved so far, which holds no links, so
+            // dropping the last component is the parent. Not checked for
+            // being a directory: `file/..` is the directory the file is in,
+            // as Python's realpath has it (realpath(3) says ENOTDIR).
             if (resolved.size() > 0) {
-                match (stat_of("/" + resolved.join("/"), false)) {
-                    case Ok(Stat above): {
-                        if (!above.is_directory()) {
-                            return Result<str, io.Error>.Err(io.Error.NotADirectory);
-                        }
-                    }
-                    case Err(io.Error error): {
-                        return Result<str, io.Error>.Err(error);
-                    }
-                }
                 resolved.pop();
             }
             continue;

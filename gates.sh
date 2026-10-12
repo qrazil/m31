@@ -150,6 +150,15 @@ run "socket timeouts do not stall carriers" bash runtime/tests/net_timeout_stall
 run "parked waits on 1 and 2 carriers" bash runtime/tests/parked_waits_carriers_test.sh
 run "terminal reads park only the green thread" bash runtime/tests/term_wait_test.sh
 
+# Child processes (docs/proc-decision.md): lib/proc.m31 over the sys layer's
+# pipes and the reactor, against Python's subprocess module and coreutils,
+# on both sys-layer backends -- exit codes, signals, stderr apart, env/cwd,
+# 200 MiB through `cat` in constant memory, 8 MiB of stdin beside draining,
+# the 64 MiB cap, timeouts, EPIPE. And fs.realpath/readlink against Python's
+# os.path.realpath on a tree of links, with the monotonic clock.
+run "child processes vs python3 subprocess" bash tests/proc/test_proc.sh
+run "realpath, readlink, monotonic clock" bash tests/fs/test_realpath.sh
+
 # The formatter must not change what a program means, and must reach a fixed
 # point. Both are checked against every corpus program rather than asserted:
 # a formatter that quietly alters a program is worse than no formatter.

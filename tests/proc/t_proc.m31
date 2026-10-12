@@ -132,8 +132,8 @@ Spec parse_spec(List<str> words) {
         } else if (word.starts_with("env=")) {
             str pair = word.substr(4, word.size());
             match (pair.index_of("=")) {
-                case Some(int at): {
-                    table.set(pair.substr(0, at), pair.substr(at + 1, pair.size()));
+                case Some(int equals): {
+                    table.set(pair.substr(0, equals), pair.substr(equals + 1, pair.size()));
                     has_env = true;
                 }
                 case None: {
@@ -150,8 +150,8 @@ Spec parse_spec(List<str> words) {
     return spec;
 }
 
-void report(str how, int code, bytes out_data, bytes err_data) {
-    print(how + " " + code.to_str() + " " + out_data.hex() + " " + err_data.hex());
+void report(str how, int code, bytes out_data, bytes error_data) {
+    print(how + " " + code.to_str() + " " + out_data.hex() + " " + error_data.hex());
 }
 
 void run_mode(List<str> words) {
@@ -198,7 +198,7 @@ void start_mode(List<str> words) {
                     fail("read stdout: " + error.to_str());
                 }
             }
-            bytes err_data = recv(errors);
+            bytes error_data = recv(errors);
             match (child.wait()) {
                 case Ok(os.ExitStatus status): {
                     int code = 0;
@@ -210,7 +210,7 @@ void start_mode(List<str> words) {
                             code = -signal_number;
                         }
                     }
-                    report("run", code, out_data, err_data);
+                    report("run", code, out_data, error_data);
                 }
                 case Err(proc.Error error): {
                     fail("wait failed: " + error.to_str());

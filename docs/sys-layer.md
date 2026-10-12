@@ -294,9 +294,8 @@ backends -- no pipe, no `dup2` -- which is what lets an interactive program
 the child execs take over the real terminal, and is also why there is
 nothing to translate: every OTHER descriptor this layer ever hands out is
 already close-on-exec (§1), so it closes itself in the child for free.
-Capturing a child's output is a different, larger feature (that needs
-`pipe2`/`dup3` in the child's stdio and a reader that will not deadlock on a
-full pipe) and is not what this is for.
+Capturing a child's output is a different, larger feature and is not what
+this is for; `sys_proc_start_fds`, below, is that half.
 
 `runtime/rt.c`'s `rt_proc_start` flushes the runtime's own stdout buffer
 before starting a child, for the same reason `__out_flush` exists for `io`
@@ -304,6 +303,83 @@ before starting a child, for the same reason `__out_flush` exists for `io`
 inherits fd 1 writes to it directly the moment it execs, so skipping the
 flush put a child's output before everything this program had already
 printed but not yet flushed.
+
+### Child stdio, pipes, signals and links: `sys_pipe`, `sys_proc_start_fds`, `sys_kill`, `sys_readlink`
+
+Added **2026-10-12** for `lib/proc.m31` (`docs/proc-decision.md`), and the
+last of them for `fs.realpath`. Everything above `sys_proc_start` was
+inherit-only; capturing a child's output needs a pipe, a `dup2` in the child
+and a reader that cannot deadlock, and only the first two are below the
+language.
+
+| function | returns | libc | raw x86-64 | raw aarch64 / riscv64 |
+|---|---|---|---|---|
+| `sys_pipe(fds[2])` | 0 | `pipe` + `fcntl(FD_CLOEXEC)` | `pipe2` 293 | `pipe2` 59 |
+| `sys_proc_start_fds(argv, envp, cwd, in, out, err)` | pid | `posix_spawn` + file actions | `clone` 56, `dup3` 292, `chdir` 80, `rt_sigaction`, `rt_sigprocmask` 14, `execve` 59 | `clone` 220, `dup3` 24, `chdir` 49, `rt_sigprocmask` 135, `execve` 221 |
+| `sys_kill(pid, sig)` | 0 | `kill` | `kill` 62 | `kill` 129 |
+| `sys_readlink(path, buf, cap)` | bytes written | `readlink` | `readlinkat` 267 | `readlinkat` 78 |
+
+  - **A pipe's ends are close-on-exec and blocking; the reactor needs the
+    parent's end non-blocking, and that is not a new function.**
+    `sys_setsockopt(fd, SYS_SO_NONBLOCK, 1)` is `fcntl(F_SETFL, O_NONBLOCK)`
+    and works on any descriptor (it is spelled as a socket option only
+    because that is where it was first needed). The two ends of a pipe are
+    two open file descriptions, so making the parent's end non-blocking does
+    not reach the end the child holds. The libc backend makes a pipe with
+    `pipe` and two `fcntl`s, for the reason `sys_accept` does: glibc hides
+    `pipe2` behind `__USE_GNU`, which this file cannot turn on.
+  - **`-1` inherits, a source is dup'ed on, and 0..2 are not sources.** The
+    child gets its own copies of the three descriptors; the caller still owns
+    its. A descriptor numbered 0..2 is accepted only as the same slot's
+    inherit spelling, and anything else there is `-EINVAL`: the order of
+    copies onto a slot that is itself a source would otherwise be the
+    caller's secret. The raw backend moves its own self-pipe above 2 first,
+    so a process that has closed its standard descriptors does not have the
+    report of a failed exec overwritten by the child's own `dup3`.
+  - **The child's `$PATH` is searched, not the caller's.** `posix_spawnp`
+    searches the calling process's `PATH`, which would make an `env=` that
+    replaces the environment leave program lookup behind and could not be
+    matched by the raw backend, which has no `environ`. Both backends now walk
+    the `PATH=` entry of the `envp` they are given (default `/bin:/usr/bin`,
+    Python's `os.get_exec_path`), with execvp's rule for which errors move on
+    and EACCES-wins-if-seen. The libc one does it as a loop of `posix_spawn`,
+    each of which reports an exec failure synchronously. `sys_proc_start` is
+    the new function with all three descriptors -1 and no `cwd`, so it
+    changed too: `os.run` passes `environ`, whose `PATH` is the caller's own.
+  - **The `cwd` is entered before the search, and a bad one is its own
+    error.** The libc backend checks it with `stat` and `access` first,
+    because a failing `chdir` inside the spawn fails every attempt of the
+    search and would surface as "no such program".
+  - **SIGPIPE is back to default and the signal mask is empty in the child.**
+    An ignored disposition survives `exec`, and this process ignores SIGPIPE
+    (`sys_ignore_sigpipe`) so that a write to a dead peer is an error value.
+    Without the reset a child such as `yes | head` would see `EPIPE` errors
+    it was never written for, instead of the death it expects. Python's
+    `subprocess` does the same (`restore_signals`). `os.run` benefits too.
+  - **Signal numbers are Linux's.** The libc backend maps the common ones to
+    the host's through a table (the same table decodes a wait status, so
+    `Signaled(10)` means SIGUSR1 on macOS as well); a number with no mapping
+    is `-EINVAL` on a host that is not Linux. `pid <= 0` is `-EINVAL`, never a
+    process group, and a pid that has been waited for must not be signalled:
+    the layer cannot know, `lib/proc.m31` tracks it.
+  - **`sys_readlink` cannot say how big the target is.** The result equals
+    `cap` when the target may have been cut, and the caller asks again with a
+    larger buffer (`fs.readlink` does, doubling from 256).
+
+`runtime/tests/sys_test.c` covers every one of these on every backend,
+freestanding, and under qemu for aarch64 and riscv64: a round trip through
+`cat` with both ends chosen, an environment that is replaced, the child's
+`PATH`, a `cwd` that is missing and one that is a file, a program that is
+missing and one that cannot be run, descriptors that must not reach the
+child (a `ls /dev/fd` with twelve more held here), SIGPIPE's disposition in
+the child, `kill` and death by signal, and `readlink` into a buffer that is
+too small.
+
+The reactor's own descriptors were the surprise: the epoll descriptor and
+its two eventfds were created without close-on-exec and so reached every
+child. The descriptor test found it; `reactor_epoll.c` now creates all
+three with `EPOLL_CLOEXEC`/`EFD_CLOEXEC`, and `reactor_kqueue.c` sets
+`FD_CLOEXEC` on the kqueue.
 
 ### Addresses: one record, and who does the `htons`
 

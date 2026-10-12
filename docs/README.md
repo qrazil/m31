@@ -38,6 +38,7 @@ the CHANGELOG cite them by name.
 | `text-decision.md` | Text |
 | `regex-decision.md` | Regex |
 | `ssh-decision.md` | The SSH client |
+| `proc-decision.md` | Child processes: pipes, run, start |
 | `apps-repo-split-decision.md` | Per-app repository split |
 
 ## History and working notes
