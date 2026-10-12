@@ -3,7 +3,7 @@
  * written entirely against rt_ctx_t/rt_ctx_make/rt_fiber_switch and never
  * against a register name directly), the slab stack allocator, the
  * compiler-emitted probe's runtime side, and the per-thread state table.
- * Run by runtime/greenthread_test.sh, which builds this under every
+ * Run by runtime/tests/greenthread_test.sh, which builds this under every
  * compiler/opt combination gates.sh already uses elsewhere, plus a
  * dedicated ASan+UBSan build.
  *
@@ -16,7 +16,7 @@
  *
  * Two argv-selected failure-mode sub-tests (`overflow`, `poison`) are meant
  * to abort the process -- SIGABRT, exit 134, exactly like a corpus/traps
- * program -- so runtime/greenthread_test.sh runs those as separate child
+ * program -- so runtime/tests/greenthread_test.sh runs those as separate child
  * processes rather than in the main suite below, which must itself exit 0.
  *
  * One honest limitation, stated up front rather than glossed over: this
@@ -25,7 +25,7 @@
  * rt_fiber_switch -- `spawn` still means an OS thread (rt.h), and nothing
  * in this phase builds the scheduler that would make a real green thread
  * run on a slab stack. So the compiler side of the Part 3 contract is
- * checked separately, in runtime/greenthread_test.sh, by compiling a
+ * checked separately, in runtime/tests/greenthread_test.sh, by compiling a
  * trivial .m31 file with the actual m31c binary and grepping the emitted C
  * for a call to rt_stack_check() (the real, `noinline` out-of-line probe --
  * rt_stack_limit's own comment in rt.h explains why it must never be

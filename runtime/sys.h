@@ -610,7 +610,7 @@ _Noreturn void sys_exit(int64_t code);
  * `envp` crosses the same way, and for one more reason: this layer cannot
  * read the process's real environment on its own. The libc backend could --
  * `environ` is a few lines away in sys_libc.c -- but the raw backend has no
- * `environ` unless something already populated one, and runtime/sys_test.c
+ * `environ` unless something already populated one, and runtime/tests/sys_test.c
  * proves the raw backend touches no C library at all by linking a build of
  * it with none; an `extern char **environ` referenced ANYWHERE in
  * sys_linux.c, called or not, would fail that link. So both backends take

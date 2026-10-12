@@ -2,7 +2,7 @@
 # Tests for Phase 1 of docs/concurrency-decision.md (x86-64 context switch,
 # slab stack allocator, the probe, the per-thread state table).
 #
-# Mirrors runtime/sys_test.sh's shape: build runtime/greenthread_test.c
+# Mirrors runtime/tests/sys_test.sh's shape: build runtime/tests/greenthread_test.c
 # against every compiler/opt combination gates.sh already checks the
 # runtime with, run it, and additionally run the two failure-mode
 # sub-tests (which are MEANT to abort -- SIGABRT, exit 134) as separate
@@ -11,13 +11,13 @@
 # A fourth check does not touch this binary at all: it compiles a trivial
 # .m31 program with the actual m31c binary and greps the emitted C for a
 # call to rt_stack_check() -- the compiler side of the Part 3 contract,
-# which runtime/greenthread_test.c cannot reach (see that file's header
+# which runtime/tests/greenthread_test.c cannot reach (see that file's header
 # comment for why). MUST be a real call, never the probe's comparison text
 # inlined directly at the call site -- see rt_stack_limit's own comment in
 # rt.h for the real, reproduced bug that shape causes under cross-carrier
 # park/resume.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 . ./config.sh
 . ./runtime/arch.sh
 
@@ -40,7 +40,7 @@ for cc in gcc clang; do
         # translation units too, even though this particular test never
         # exercises them.
         if ! "$cc" "$opt" -Wall -Wextra -I runtime -pthread \
-                runtime/greenthread_test.c runtime/rt.c \
+                runtime/tests/greenthread_test.c runtime/rt.c \
                 runtime/scheduler.c "$RT_REACTOR_C" \
                 "$RT_CTX_ASM" -o "$bin" 2>"$err" || [ -s "$err" ]; then
             note "build [$label]" FAILED
@@ -92,7 +92,7 @@ if command -v clang >/dev/null && \
     sbin="$WORK/gt_san"
     serr="$WORK/san.err"
     if ! clang -O1 -g $SAN -Wall -Wextra -I runtime -pthread \
-            runtime/greenthread_test.c runtime/rt.c \
+            runtime/tests/greenthread_test.c runtime/rt.c \
             runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" \
             -o "$sbin" 2>"$serr"; then
         note "sanitized build" FAILED
@@ -129,7 +129,7 @@ else
 fi
 
 # ---- 3. the compiler side of the Part 3 contract ---------------------------
-# runtime/greenthread_test.c cannot reach src/emit_c.rs at all (it is a C
+# runtime/tests/greenthread_test.c cannot reach src/emit_c.rs at all (it is a C
 # program; emit_c.rs is part of the Rust compiler). This checks the OTHER
 # half of the same contract directly: that the compiler actually emits a
 # call to rt_stack_check(), the real out-of-line probe rt.h documents and
@@ -183,7 +183,7 @@ fi
 # resolved on its first call.
 tbin="$WORK/gt_tunable"
 if cc -O0 -Wall -Wextra -I runtime -pthread \
-        runtime/greenthread_test.c runtime/rt.c \
+        runtime/tests/greenthread_test.c runtime/rt.c \
         runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" \
         -o "$tbin" 2>"$WORK/tunable.err"; then
     default_size=$("$tbin" stacksize 2>&1)

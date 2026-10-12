@@ -30,7 +30,7 @@
  * whichever OTHER context last ran on this carrier, corrupting floating-
  * point state no analysis of the integer registers or the stack would ever
  * catch. This project's own `float`/`double` are exactly the kind of code
- * that would trip over it. See runtime/greenthread_test.c's round-trip
+ * that would trip over it. See runtime/tests/greenthread_test.c's round-trip
  * test, which now carries float locals across the switch specifically to
  * catch a regression here.
  *

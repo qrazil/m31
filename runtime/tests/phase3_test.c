@@ -2,10 +2,10 @@
  * park/unpark (and the lost-wakeup CAS race it closes), and the
  * blocking-FFI handoff -- built on the Phase 2 scheduler (runtime/
  * scheduler.c/.h) and Phase 1's primitives, exactly as Phase 2's own tests
- * (runtime/scheduler_test.c) are built on Phase 1's.
+ * (runtime/tests/scheduler_test.c) are built on Phase 1's.
  *
- * Run by runtime/phase3_test.sh, which also builds a dedicated TSan variant
- * separately (runtime/phase3_tsan.sh) -- same reasoning as Phase 2's own
+ * Run by runtime/tests/phase3_test.sh, which also builds a dedicated TSan variant
+ * separately (runtime/tests/phase3_tsan.sh) -- same reasoning as Phase 2's own
  * scheduler_tsan.sh: TSan and ASan/UBSan cannot share one binary.
  *
  * Three things this file specifically sets out to prove, matching the task
@@ -114,7 +114,7 @@ static void sleep_ms(int ms) {
  * would otherwise reach for a raw POSIX unnamed sem_t: macOS does not
  * properly support sem_init/sem_wait for unnamed semaphores (the same gap
  * runtime/scheduler.c's rt_wake_sem_t works around for the runtime itself,
- * and runtime/scheduler_test.c's own gate_t works around the identical
+ * and runtime/tests/scheduler_test.c's own gate_t works around the identical
  * way). Every "post" below must be safe to call before the matching
  * "wait" has even started -- the park/unpark race tests this file runs
  * deliberately bias toward exactly that ordering (see race_park_worker's

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ThreadSanitizer, for the Phase 2 scheduler specifically. NOT run by
-# gates.sh and NOT run by runtime/scheduler_test.sh -- TSan instrumentation
+# gates.sh and NOT run by runtime/tests/scheduler_test.sh -- TSan instrumentation
 # and ASan/UBSan instrumentation are mutually exclusive in one binary (TSan
 # uses its own shadow-memory scheme, incompatible with ASan's), so this is
 # its own separate build-and-run step, by design, the same way
@@ -22,9 +22,9 @@
 # acquire/release does. Fixed by switching those specific counters to
 # release (writer) / acquire (reader) pairs; nothing else changed.
 #
-# Usage: bash runtime/scheduler_tsan.sh
+# Usage: bash runtime/tests/scheduler_tsan.sh
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 . ./runtime/arch.sh
 
 if ! command -v clang >/dev/null; then
@@ -39,7 +39,7 @@ bin="$WORK/sched_tsan"
 err="$WORK/cc.err"
 if ! clang -O1 -g -fsanitize=thread -fno-omit-frame-pointer -Wall -Wextra \
         -I runtime -pthread \
-        runtime/scheduler_test.c runtime/scheduler.c "$RT_REACTOR_C" runtime/rt.c \
+        runtime/tests/scheduler_test.c runtime/scheduler.c "$RT_REACTOR_C" runtime/rt.c \
         "$RT_CTX_ASM" -o "$bin" 2>"$err"; then
     echo "TSan build FAILED:"
     sed 's/^/    /' "$err"

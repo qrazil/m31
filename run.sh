@@ -26,7 +26,7 @@ skipped=0
 # timeout(1)), so a hang in one program fails that program with a stack sample
 # instead of stalling the whole run for hours. The slowest corpus program
 # takes a few seconds; this is generous on purpose.
-WT="$PWD/runtime/with_timeout.sh"
+WT="$PWD/runtime/tools/with_timeout.sh"
 RUN_LIMIT=${RUN_LIMIT:-120}
 
 # -ffp-contract=off on every build: without it a C compiler may fuse

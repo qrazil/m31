@@ -1,4 +1,4 @@
-/* Tests for the sys layer, run against each backend by runtime/sys_test.sh.
+/* Tests for the sys layer, run against each backend by runtime/tests/sys_test.sh.
  *
  * The corpus exercises the layer through lib/io.m31 and lib/fs.m31, but
  * only on one backend per run and only as far as those ask. This checks every
@@ -754,7 +754,7 @@ static void term_tests(void) {
 
     /* Zeroed before it is passed anywhere, so a backend that read it on a
      * path that should have failed first reads zeros rather than the stack,
-     * which is what the sanitized builds of runtime/sys_test.sh look for. */
+     * which is what the sanitized builds of runtime/tests/sys_test.sh look for. */
     zero(&t, (int64_t)sizeof t);
 
     /* ---- not a terminal: the same answer from both backends ---- */

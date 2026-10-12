@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ThreadSanitizer, for Phase 3 specifically (epoll reactor, park/unpark,
-# blocking-FFI handoff) -- mirrors runtime/scheduler_tsan.sh exactly, for
+# blocking-FFI handoff) -- mirrors runtime/tests/scheduler_tsan.sh exactly, for
 # the identical reason: TSan and ASan/UBSan are mutually exclusive
 # instrumentation modes, so this is its own separate build-and-run step, not
-# run by gates.sh or by runtime/phase3_test.sh.
+# run by gates.sh or by runtime/tests/phase3_test.sh.
 #
 # This is, if anything, MORE load-bearing here than for Phase 2's own TSan
 # gate: this phase adds a second mutex (rt_carrier_t.local_lock) explicitly
@@ -18,9 +18,9 @@
 # names as the most likely thing to be gotten wrong (docs/
 # concurrency-decision.md, "What this costs").
 #
-# Usage: bash runtime/phase3_tsan.sh [runs]
+# Usage: bash runtime/tests/phase3_tsan.sh [runs]
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 . ./runtime/arch.sh
 
 if ! command -v clang >/dev/null; then
@@ -35,7 +35,7 @@ bin="$WORK/phase3_tsan"
 err="$WORK/cc.err"
 if ! clang -O1 -g -fsanitize=thread -fno-omit-frame-pointer -Wall -Wextra \
         -I runtime -pthread \
-        runtime/phase3_test.c runtime/scheduler.c "$RT_REACTOR_C" \
+        runtime/tests/phase3_test.c runtime/scheduler.c "$RT_REACTOR_C" \
         runtime/rt.c "$RT_CTX_ASM" -o "$bin" 2>"$err"; then
     echo "TSan build FAILED:"
     sed 's/^/    /' "$err"

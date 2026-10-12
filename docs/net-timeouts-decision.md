@@ -155,8 +155,8 @@ refused by epoll (`-EPERM`).
 
 ### The stall, before and after
 
-`runtime/net_timeout_stall_demo/main.m31`, run on two carriers
-(`LANG_NUM_CARRIERS=2`) by `runtime/net_timeout_stall_test.sh`: N silent
+`runtime/tests/net_timeout_stall_demo/main.m31`, run on two carriers
+(`LANG_NUM_CARRIERS=2`) by `runtime/tests/net_timeout_stall_test.sh`: N silent
 connections each with a 400 ms read timeout, then one live connection that
 sends a line. The number is the time from the start of the case to the live
 line being read; the case needs about 120 ms by itself (two 60 ms settling
@@ -171,14 +171,14 @@ pauses).
 than section 1's Python-client table (301 ms and 1501 ms) because here the
 accept loop and this program's own main also wait behind the pinned carriers.
 The silent connections themselves time out at 400-401 ms in both. In the
-reactor-level test (runtime/phase3_test.c, `stall_case`) the ready waiter wakes
+reactor-level test (runtime/tests/phase3_test.c, `stall_case`) the ready waiter wakes
 0.07-0.2 ms after the write with 2 or 16 silent waiters. The gates assert
 `ideal + 150 ms`, which a loaded machine meets and the stall (400 ms and up)
 cannot.
 
 ### Tests
 
-- `runtime/phase3_test.c`: ready before the deadline; timeout with no data
+- `runtime/tests/phase3_test.c`: ready before the deadline; timeout with no data
   (elapsed within bounds); a late write finding the registration released;
   `0` (poll, on empty, readable, writable and nothing), negative, and sleep-only
   forever (`-EINVAL`); a closed fd (`-errno`, no leak); an fd closed while
@@ -192,7 +192,7 @@ cannot.
 - `corpus/modules/stdlib-net-timeout-park` (150 silent connections beside a
   live one; data before the deadline; none; `wait(0)`, `wait(60)`, `wait(-1)`,
   on a connection and a listener) and `corpus/modules/stdlib-timer`.
-  `runtime/parked_waits_carriers_test.sh` runs both on one and on two
+  `runtime/tests/parked_waits_carriers_test.sh` runs both on one and on two
   carriers against the corpus `.out`: on one carrier the old design could not
   have passed the first.
 

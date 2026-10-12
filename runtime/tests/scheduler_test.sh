@@ -2,7 +2,7 @@
 # Tests for Phase 2 of docs/concurrency-decision.md: the green-thread
 # scheduler (runtime/scheduler.c/.h), built on Phase 1's primitives.
 #
-# Mirrors runtime/greenthread_test.sh's shape: build runtime/scheduler_test.c
+# Mirrors runtime/tests/greenthread_test.sh's shape: build runtime/tests/scheduler_test.c
 # (together with scheduler.c, rt.c and ctx_switch_x86_64.S -- this scheduler
 # is its own standalone component, never #included by rt.c, so every build
 # line here names all four files explicitly) against every compiler/opt
@@ -13,10 +13,10 @@
 # ASan/UBSan are mutually exclusive instrumentation modes that cannot be
 # linked into the same binary, and this project's existing convention
 # (sanitize.sh, greenthread_test.sh) is already an ASan+UBSan gate. Run
-# runtime/scheduler_tsan.sh by hand to build and run the dedicated
+# runtime/tests/scheduler_tsan.sh by hand to build and run the dedicated
 # TSan-instrumented variant; see that file's header for how and why.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 . ./config.sh
 . ./runtime/arch.sh
 
@@ -30,7 +30,7 @@ note() { printf '%-56s %s\n' "$1" "$2"; }
 # `__wait_io` -> rt_wait_io -> rt_global_reactor/rt_reactor_wait), even
 # though this Phase 2 test never exercises that path, so reactor.c joins
 # the link line alongside scheduler.c.
-SRCS="runtime/scheduler_test.c runtime/scheduler.c "$RT_REACTOR_C" runtime/rt.c $RT_CTX_ASM"
+SRCS="runtime/tests/scheduler_test.c runtime/scheduler.c "$RT_REACTOR_C" runtime/rt.c $RT_CTX_ASM"
 
 for cc in gcc clang; do
     command -v "$cc" >/dev/null || continue

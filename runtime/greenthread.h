@@ -92,10 +92,10 @@
  * green_trampoline) make exactly that call around each of their
  * rt_fiber_switch invocations -- not added inside rt_fiber_switch itself,
  * since not every caller of rt_fiber_switch has (or needs) a notion of a
- * fiber identity to switch to: runtime/greenthread_test.c, Phase 1's own
+ * fiber identity to switch to: runtime/tests/greenthread_test.c, Phase 1's own
  * standalone harness, exercises raw fiber round-trips on a single OS
  * thread, never the cross-carrier resume pattern that triggers this gap,
- * and is never built under TSan (runtime/greenthread_test.sh has no TSan
+ * and is never built under TSan (runtime/tests/greenthread_test.sh has no TSan
  * variant) -- so it is deliberately left uninstrumented rather than given
  * fiber identities it has no use for. `flags` is always 0 (the default,
  * synchronizing switch): the handoff this runtime performs across a
@@ -106,7 +106,7 @@
  * exists for fibers that already have their own separate synchronization
  * and would otherwise be double-counted, which does not describe this
  * runtime. Declared here, under the same portable thread_sanitizer feature
- * test runtime/phase3_test.c already uses (gcc defines
+ * test runtime/tests/phase3_test.c already uses (gcc defines
  * __SANITIZE_THREAD__ directly; clang exposes __has_feature(
  * thread_sanitizer)), rather than via <sanitizer/tsan_interface.h>, so
  * nothing in this build depends on that optional header being installed;

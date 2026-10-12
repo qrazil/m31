@@ -1,14 +1,14 @@
 /* Tests for Phase 2 of docs/concurrency-decision.md: the green-thread
  * scheduler built on Phase 1's primitives (runtime/scheduler.c/.h). Run by
- * runtime/scheduler_test.sh, which also runs a dedicated ThreadSanitizer
+ * runtime/tests/scheduler_test.sh, which also runs a dedicated ThreadSanitizer
  * build separately (see that file and the report this work produced for
  * why TSan needs its own build rather than piggybacking on the ASan+UBSan
- * one runtime/greenthread_test.sh uses).
+ * one runtime/tests/greenthread_test.sh uses).
  *
  * This creates and runs REAL green threads end to end through the real
  * scheduler, with real OS-thread carriers actually running concurrently --
  * not a single-threaded stand-in -- the same spirit as
- * runtime/greenthread_test.c testing Phase 1's primitives directly rather
+ * runtime/tests/greenthread_test.c testing Phase 1's primitives directly rather
  * than through a compiled .m31 program (which cannot reach this scheduler
  * at all: nothing wires `spawn` to it in this phase, by design).
  */
@@ -646,7 +646,7 @@ static void test_state_table_transitions(void) {
 /* ========================================================================
  * Failure-mode submode, run by the .sh harness as a separate process
  * because it is meant to abort (SIGABRT, exit 134) -- same convention
- * runtime/greenthread_test.c uses for its `overflow`/`poison` submodes.
+ * runtime/tests/greenthread_test.c uses for its `overflow`/`poison` submodes.
  * ====================================================================== */
 
 /* `./scheduler_test yield_outside`: rt_sched_yield from a context that is

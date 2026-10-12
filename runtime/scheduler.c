@@ -10,7 +10,7 @@
  * inside rt.c's translation unit, every program that links runtime/rt.c --
  * which is every build line in this repository, build.sh included -- would
  * suddenly need to link ctx_switch_x86_64.o too, or fail at link time. Kept
- * separate, only this phase's own test harness (runtime/scheduler_test.c)
+ * separate, only this phase's own test harness (runtime/tests/scheduler_test.c)
  * links it, alongside rt.c and ctx_switch_x86_64.S directly.
  */
 #include "rt.h"

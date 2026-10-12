@@ -10,7 +10,7 @@
 # (`rt_sched_park(RT_GT_PARKED_QUEUE)`) instead of blocking the carrier when
 # the caller IS one -- the same shape `Chan.send`/`recv` already use.
 #
-# runtime/spawn_backpressure_demo/main.m31 spawns 300 workers in a tight
+# runtime/tests/spawn_backpressure_demo/main.m31 spawns 300 workers in a tight
 # loop from the top level (which always runs as green thread 0,
 # rt_run_program) over a channel of capacity 300, so none of them can block
 # on the channel itself -- the only thing that can possibly block here is
@@ -20,9 +20,9 @@
 # but would make irrelevant to testing too if left at its default (the test
 # would "pass" by never actually reaching the backpressure path at all).
 #
-# Usage: bash runtime/spawn_backpressure_test.sh [stock-runs] [tsan-runs]
+# Usage: bash runtime/tests/spawn_backpressure_test.sh [stock-runs] [tsan-runs]
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 . ./config.sh
 . ./runtime/arch.sh
 
@@ -73,7 +73,7 @@ tsan_runs=${2:-15}
 fail=0
 EXPECTED=44850 # sum(0..299) -- see main.m31's own comment
 
-SRC=runtime/spawn_backpressure_demo/main.m31
+SRC=runtime/tests/spawn_backpressure_demo/main.m31
 C="$WORK/sb.c"
 
 if ! "$LANGC" --emit-c "$SRC" -o "$C" 2>"$WORK/compile.err"; then

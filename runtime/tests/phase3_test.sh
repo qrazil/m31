@@ -2,16 +2,16 @@
 # Tests for Phase 3 of docs/concurrency-decision.md: epoll reactor,
 # park/unpark, blocking-FFI handoff (runtime/scheduler.c/.h's additive Phase
 # 3 surface, runtime/reactor.h). Built on the Phase 2 scheduler and Phase
-# 1's primitives, exactly mirroring runtime/scheduler_test.sh's own shape:
-# build runtime/phase3_test.c against every compiler/opt combination
+# 1's primitives, exactly mirroring runtime/tests/scheduler_test.sh's own shape:
+# build runtime/tests/phase3_test.c against every compiler/opt combination
 # gates.sh already checks the runtime with, run it, and additionally run
 # one dedicated ASan+UBSan build.
 #
 # ThreadSanitizer is NOT run by this script or by gates.sh -- see
-# runtime/phase3_tsan.sh, run by hand, for that (same reasoning as
+# runtime/tests/phase3_tsan.sh, run by hand, for that (same reasoning as
 # scheduler_tsan.sh: TSan and ASan/UBSan cannot share one binary).
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 . ./config.sh
 . ./runtime/arch.sh
 
@@ -21,7 +21,7 @@ fail=0
 
 note() { printf '%-56s %s\n' "$1" "$2"; }
 
-SRCS="runtime/phase3_test.c runtime/scheduler.c "$RT_REACTOR_C" runtime/rt.c $RT_CTX_ASM"
+SRCS="runtime/tests/phase3_test.c runtime/scheduler.c "$RT_REACTOR_C" runtime/rt.c $RT_CTX_ASM"
 
 for cc in gcc clang; do
     command -v "$cc" >/dev/null || continue

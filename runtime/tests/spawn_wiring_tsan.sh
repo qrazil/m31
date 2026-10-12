@@ -21,7 +21,7 @@
 #      run CLEAN, every time -- `send`/`recv` are compiler intrinsics, never
 #      `prim` calls, so they never touch the code path below.
 #
-#   2. The real-socket-I/O test (runtime/net_concurrency_demo/main.m31) is
+#   2. The real-socket-I/O test (runtime/tests/net_concurrency_demo/main.m31) is
 #      run and its result is REPORTED, not gated on passing clean: while
 #      building this integration, running this exact program under this
 #      exact script caught a genuine, pre-existing data race on
@@ -33,7 +33,7 @@
 #      test patterns never drove genuinely concurrent multi-carrier fiber
 #      dispatch at the rate real concurrent socket I/O does. It was not
 #      fixed as part of this task (see runtime/greenthread.h's
-#      RT_STACK_SIZE comment and runtime/net_concurrency_demo/README.md for
+#      RT_STACK_SIZE comment and runtime/tests/net_concurrency_demo/README.md for
 #      the full account and why). This script keeps running that case
 #      specifically so the race stays reproducible and visible -- silently
 #      dropping it would hide a real, serious, open bug.
@@ -48,9 +48,9 @@
 # (mitigated, not fixed, there) -- a separate, already-understood
 # limitation, not a TSan question.
 #
-# Usage: bash runtime/spawn_wiring_tsan.sh [chan-runs] [net-runs]
+# Usage: bash runtime/tests/spawn_wiring_tsan.sh [chan-runs] [net-runs]
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 . ./config.sh
 . ./runtime/arch.sh
 
@@ -142,7 +142,7 @@ report() {
             clean=$((clean + 1))
         fi
     done
-    echo "report: $label -- $clean/$runs clean, $raced/$runs TSan data-race reports, $crashed_other/$runs other non-zero exit (see runtime/net_concurrency_demo/README.md)"
+    echo "report: $label -- $clean/$runs clean, $raced/$runs TSan data-race reports, $crashed_other/$runs other non-zero exit (see runtime/tests/net_concurrency_demo/README.md)"
 }
 
 if bin=$(build corpus/core/1303-many-receivers-wait-on-one-channel.m31 chan_many_receivers); then
@@ -157,7 +157,7 @@ else
     fail=1
 fi
 
-if bin=$(build runtime/net_concurrency_demo/main.m31 net_concurrent_clients); then
+if bin=$(build runtime/tests/net_concurrency_demo/main.m31 net_concurrent_clients); then
     report "$bin" net_concurrent_clients "$net_runs"
 else
     fail=1

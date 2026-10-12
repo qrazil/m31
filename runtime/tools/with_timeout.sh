@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run a command with a hard time limit, on Linux AND on macOS.
 #
-#     bash runtime/with_timeout.sh SECONDS command [args...]
+#     bash runtime/tools/with_timeout.sh SECONDS command [args...]
 #
 # macOS has no timeout(1) (coreutils' is installed as `gtimeout`, if at all),
 # and a test that cannot be bounded turns a hang into hours of silence. perl is

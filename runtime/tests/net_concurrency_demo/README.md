@@ -29,9 +29,9 @@ race above is fixed).
 ## How to run it
 
 ```
-LANG_NUM_CARRIERS=1 ./build.sh runtime/net_concurrency_demo/main.m31 -o /tmp/demo && /tmp/demo
+LANG_NUM_CARRIERS=1 ./build.sh runtime/tests/net_concurrency_demo/main.m31 -o /tmp/demo && /tmp/demo
 ```
 
 prints `200` (every connection succeeded) reliably. Running it without
-`LANG_NUM_CARRIERS=1` is how `runtime/spawn_wiring_tsan.sh` reproduces and
+`LANG_NUM_CARRIERS=1` is how `runtime/tests/spawn_wiring_tsan.sh` reproduces and
 documents the race under ThreadSanitizer -- see that script.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run runtime/sys_test.c against every sys-layer backend this machine can
+# Run runtime/tests/sys_test.c against every sys-layer backend this machine can
 # build and run. Exits non-zero if any build or any check fails.
 #
 #   libc   gcc and clang, -O0 and -O2          always
@@ -19,7 +19,7 @@
 # never touch the socket address conversions -- the one part of this layer
 # that writes through pointers into structs of another shape.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -61,11 +61,11 @@ for cc in gcc clang; do
     command -v "$cc" >/dev/null || continue
     for opt in -O0 -O2; do
         l="libc $cc $opt"
-        build "$l" "$WORK/t" "$cc" "$opt" -Wall -Wextra -I runtime runtime/sys_test.c &&
+        build "$l" "$WORK/t" "$cc" "$opt" -Wall -Wextra -I runtime runtime/tests/sys_test.c &&
             check "$l" "$WORK/t"
         [ $raw_native -eq 1 ] || continue
         l="raw  $cc $opt"
-        build "$l" "$WORK/t" "$cc" "$opt" -Wall -Wextra -DRT_SYS_RAW -I runtime runtime/sys_test.c &&
+        build "$l" "$WORK/t" "$cc" "$opt" -Wall -Wextra -DRT_SYS_RAW -I runtime runtime/tests/sys_test.c &&
             check "$l" "$WORK/t"
     done
 done
@@ -81,7 +81,7 @@ if command -v clang >/dev/null &&
         l="libc clang ASan UBSan"
         [ -n "$b" ] && l="raw  clang ASan UBSan"
         build "$l" "$WORK/s" clang -O1 -g "${SAN[@]}" -Wall -Wextra $b \
-            -I runtime runtime/sys_test.c && check "$l" "$WORK/s"
+            -I runtime runtime/tests/sys_test.c && check "$l" "$WORK/s"
     done
 else
     printf '%-44s skipped (clang cannot link a sanitized program)\n' "both clang ASan UBSan"
@@ -90,7 +90,7 @@ fi
 # No C library at all. -fno-stack-protector because the protector's guard
 # lives in the C library's thread block, which does not exist here.
 FREE=(-O2 -Wall -Wextra -DRT_SYS_RAW -DSYS_TEST_FREESTANDING -ffreestanding
-      -fno-stack-protector -fno-builtin -nostdlib -static -I runtime runtime/sys_test.c)
+      -fno-stack-protector -fno-builtin -nostdlib -static -I runtime runtime/tests/sys_test.c)
 if [ $raw_native -eq 1 ]; then
     l="raw  gcc -nostdlib -static ($arch)"
     build "$l" "$WORK/f" gcc "${FREE[@]}" && check "$l" "$WORK/f"

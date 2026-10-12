@@ -543,7 +543,7 @@ NOT implemented in `ctx_switch_x86_64.S`: the annotations bracket
 itself (`rt_ctx_switch`) is untouched, consistent with this project's
 standing rule about not touching that file half-confidently.
 
-**Verified**: `runtime/phase3_tsan.sh`, run at the ORIGINAL, unnarrowed
+**Verified**: `runtime/tests/phase3_tsan.sh`, run at the ORIGINAL, unnarrowed
 carrier counts (4 for `test_park_unpark_race`, 2 for
 `test_reactor_real_pipe_wakeup`) -- 110 consecutive clean runs across two
 batches (60 + 50), zero TSan-internal crashes, zero new false-positive race
@@ -570,8 +570,8 @@ testing: every line this fix adds is behind `#if` on the same
 TSan-detection macro, so a plain or ASan+UBSan build preprocesses all of it
 away entirely. Confirmed directly: `runtime/rt.c` and `runtime/scheduler.c`
 both still compile warning-free under `gcc -O2 -Wall -Wextra`, and the full
-Phase 1/2/3 standalone suites (`runtime/greenthread_test.sh`, `runtime/
-scheduler_test.sh`, `runtime/phase3_test.sh` -- every compiler/opt
+Phase 1/2/3 standalone suites (`runtime/tests/greenthread_test.sh`, `runtime/
+scheduler_test.sh`, `runtime/tests/phase3_test.sh` -- every compiler/opt
 combination each already covers, plus their own ASan+UBSan builds) pass
 clean, exercising the exact modified functions (`rt_stack_alloc`/`free`,
 `rt_fiber_switch`'s callers) under every one of those configurations.
@@ -679,13 +679,13 @@ green thread 0 (`rt_run_program`), not on the raw OS thread, so a
   already correct for the condvar side). The raised default queue capacity
   is kept as a second line of defense (harmless, and it also helps batching),
   but the hang it used to merely narrow no longer exists: verified with
-  `runtime/spawn_backpressure_demo/main.m31` (300 spawns from the top level,
+  `runtime/tests/spawn_backpressure_demo/main.m31` (300 spawns from the top level,
   `LANG_NUM_CARRIERS=1`, `LANG_GLOBAL_QUEUE_CAP=4` so the cap is hit almost
   immediately rather than only past a million) — hangs forever on the
   pre-fix code (confirmed directly, `timeout` kills it), completes and
   prints the correct sum on the fixed code, 40/40 consecutive runs clean at
   1/2/4 carriers, and 15/15 clean under ThreadSanitizer at both 1 and 2
-  carriers (`runtime/spawn_backpressure_test.sh`). Not extended to
+  carriers (`runtime/tests/spawn_backpressure_test.sh`). Not extended to
   `squeue_push`'s other call sites (`carrier_dispatch`'s own post-dispatch
   self-requeue, `try_handoff`'s handoff pushes) — those run with
   `tls_current_green` already cleared (no green thread is "currently
@@ -735,8 +735,8 @@ green thread 0 (`rt_run_program`), not on the raw OS thread, so a
     `rt_reactor_destroy`'s `pthread_join`, not silent corruption, so it
     would be loud and immediate on the first real run.
   **Verified so far**: the full x86-64/Linux regression suite (`gates.sh`,
-  `runtime/phase3_test.sh`, `runtime/scheduler_test.sh`,
-  `runtime/scheduler_tsan.sh`, `runtime/phase3_tsan.sh`) stays clean after
+  `runtime/tests/phase3_test.sh`, `runtime/tests/scheduler_test.sh`,
+  `runtime/tests/scheduler_tsan.sh`, `runtime/tests/phase3_tsan.sh`) stays clean after
   the epoll backend's rename/refactor — this change touches no epoll-path
   logic, only its filename and the scripts that reference it. The kqueue
   backend itself has had a careful static read-through against kevent(2)'s
@@ -796,8 +796,8 @@ green thread 0 (`rt_run_program`), not on the raw OS thread, so a
   hand-written context switch (an explicit compiler memory barrier placed
   immediately after `rt_ctx_switch` did not help either) -- each a
   plausible, targeted hypothesis, each tested directly and disproved.
-  Telling evidence gathered along the way: `runtime/scheduler_tsan.sh` and
-  `runtime/phase3_tsan.sh` -- which already exercise multiple real carriers
+  Telling evidence gathered along the way: `runtime/tests/scheduler_tsan.sh` and
+  `runtime/tests/phase3_tsan.sh` -- which already exercise multiple real carriers
   and the reactor's own park/unpark directly, via hand-written C, and
   normally run clean -- stayed clean at 25/25 runs each when re-run during
   this same investigation, so the bug is not in the standalone
@@ -817,9 +817,9 @@ green thread 0 (`rt_run_program`), not on the raw OS thread, so a
   demo below passes reliably with it, and removes genuine parallelism
   between carriers, which is also why the race cannot occur -- there is
   only ever one carrier OS thread to race against itself). See
-  `runtime/net_concurrency_demo/` (moved out of the ordinary corpus
+  `runtime/tests/net_concurrency_demo/` (moved out of the ordinary corpus
   specifically because it is not reliable there yet) and
-  `runtime/spawn_wiring_tsan.sh` for the reproduction and the TSan
+  `runtime/tests/spawn_wiring_tsan.sh` for the reproduction and the TSan
   transcript this was built from.
 
   **Follow-up investigation (separate session, after the above was
@@ -874,7 +874,7 @@ green thread 0 (`rt_run_program`), not on the raw OS thread, so a
     the bigger question instead.)
   - **TSan's own race reports, read closely, point at something odder than
     "two carriers touched the same byte"**: re-running
-    `runtime/spawn_wiring_tsan.sh`'s net case repeatedly surfaces several
+    `runtime/tests/spawn_wiring_tsan.sh`'s net case repeatedly surfaces several
     DIFFERENT race locations across runs (`rt_fiber_switch`, the
     try_handoff/carrier_main pair above, and — once — a probe inside
     `Conn.close` itself), not always the same one, consistent with the
@@ -1001,7 +1001,7 @@ green thread 0 (`rt_run_program`), not on the raw OS thread, so a
   well over half failed). 80 further runs under ThreadSanitizer: zero
   recurrences of the `rt_stack_limit` race or the "stack overflow" trap:
   65 clean, 15 hit one of the two separate, pre-existing, unrelated races
-  below (never this one). `runtime/spawn_wiring_tsan.sh`'s own Chan tests
+  below (never this one). `runtime/tests/spawn_wiring_tsan.sh`'s own Chan tests
   remain clean. Full `gates.sh`, including the sanitized corpus, passes
   (one test, `greenthread_test.sh`'s "emit_c.rs probe text" check, was
   updated to assert the new call-based codegen instead of the old inlined
@@ -1048,8 +1048,8 @@ green thread 0 (`rt_run_program`), not on the raw OS thread, so a
   nest (`local_lock` outer, the global queue's `q->lock` inner, never the
   reverse) — no AB-BA cycle is possible.
 
-  **Verified**: 25/25 clean runs each of `runtime/scheduler_tsan.sh` and
-  `runtime/phase3_tsan.sh`. `runtime/spawn_wiring_tsan.sh`'s `Chan` tests
+  **Verified**: 25/25 clean runs each of `runtime/tests/scheduler_tsan.sh` and
+  `runtime/tests/phase3_tsan.sh`. `runtime/tests/spawn_wiring_tsan.sh`'s `Chan` tests
   stayed clean (30/30 each). For the actual target — real concurrent socket
   I/O under TSan, `net_concurrency_demo` at `LANG_NUM_CARRIERS=2` — 180 total
   runs across two batches: ZERO occurrences of the `try_handoff`/
@@ -1200,13 +1200,13 @@ green thread 0 (`rt_run_program`), not on the raw OS thread, so a
   own retry loop at all — simplified accordingly, comment updated to match.)
 
   **Verified on this Linux x86-64 host** (no macOS hardware available here
-  either — see below): `runtime/scheduler_test.sh` (120 checks across
+  either — see below): `runtime/tests/scheduler_test.sh` (120 checks across
   gcc/clang at `-O0`/`-O2` plus the ASan/UBSan-sanitized build, all clean),
-  `runtime/scheduler_tsan.sh` raised from its 5-run default to 25/25 clean,
-  `runtime/phase3_test.sh` (45 checks, all clean) and `runtime/phase3_tsan.sh`
-  likewise raised to 25/25 clean, `runtime/spawn_backpressure_test.sh` (40/40
+  `runtime/tests/scheduler_tsan.sh` raised from its 5-run default to 25/25 clean,
+  `runtime/tests/phase3_test.sh` (45 checks, all clean) and `runtime/tests/phase3_tsan.sh`
+  likewise raised to 25/25 clean, `runtime/tests/spawn_backpressure_test.sh` (40/40
   clean at 1/2/4 carriers stock, 15/15 clean under TSan at 1/2 carriers), and
-  `runtime/spawn_wiring_tsan.sh` (30/30 clean for both Chan cases, 5/5 clean
+  `runtime/tests/spawn_wiring_tsan.sh` (30/30 clean for both Chan cases, 5/5 clean
   for the real-socket-I/O case) — all unchanged from this branch's pre-fix
   baseline, as expected for a change that touches only the wake primitive's
   implementation, not its contract. Full `gates.sh` also passes clean on top

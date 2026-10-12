@@ -9,7 +9,7 @@
  * Wiring the language's `spawn` keyword to use this scheduler instead of a
  * raw OS thread is a deliberate, separate, later decision -- see the task
  * that produced this file. Everything here is exercised only by
- * runtime/scheduler_test.c, its own test harness, which links this file,
+ * runtime/tests/scheduler_test.c, its own test harness, which links this file,
  * runtime/rt.c and runtime/ctx_switch_x86_64.S directly.
  *
  * The design, summarised (docs/concurrency-decision.md has the full

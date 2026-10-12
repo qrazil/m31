@@ -489,7 +489,7 @@ destructors then; docs/destructors-decision.md added them later, which
 removes the leak but not the per-backend handle). One call that writes every name into a caller's buffer, and
 says how big a buffer it needed if that one was too small, has no handle
 at all and returns byte-identical results from both backends, which
-`runtime/sys_test.c` checks.
+`runtime/tests/sys_test.c` checks.
 
 ---
 

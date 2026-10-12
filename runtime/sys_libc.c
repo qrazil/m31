@@ -475,7 +475,7 @@ int64_t sys_socket(int64_t domain, int64_t type, int64_t protocol) {
     if (d < 0) return -SYS_EAFNOSUPPORT;
     /* The type is validated here rather than left to the kernel, so that
      * both backends refuse exactly the same arguments with exactly the same
-     * errno -- which is the property runtime/sys_test.c exists to check. */
+     * errno -- which is the property runtime/tests/sys_test.c exists to check. */
     if (type & ~(int64_t)(SYS_SOCK_TYPEMASK | SYS_SOCK_NONBLOCK)) return -SYS_EINVAL;
     int t;
     switch (type & SYS_SOCK_TYPEMASK) {
@@ -753,7 +753,7 @@ int64_t sys_resolve(const char *host, int64_t port, int64_t family,
  * one meaning everywhere costs three extra lines. sa_mask is zeroed rather
  * than left as it came off the stack: it is read by the kernel even for
  * SIG_IGN on some systems, and an uninitialised read is what the sanitized
- * builds of runtime/sys_test.sh exist to catch. */
+ * builds of runtime/tests/sys_test.sh exist to catch. */
 int64_t sys_ignore_sigpipe(void) {
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);

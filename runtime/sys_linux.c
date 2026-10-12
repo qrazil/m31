@@ -186,7 +186,7 @@ static inline int64_t sc(int64_t n, int64_t a, int64_t b, int64_t c,
 
 /* No memcpy or memset by name: this file has no C library to take them from.
  * The compiler may still synthesise a call for a struct assignment, which is
- * why the freestanding test defines both (runtime/sys_test.c). */
+ * why the freestanding test defines both (runtime/tests/sys_test.c). */
 static void zero_bytes(unsigned char *p, int64_t n) {
     for (int64_t i = 0; i < n; i++) p[i] = 0;
 }

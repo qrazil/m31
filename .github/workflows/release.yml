@@ -117,6 +117,9 @@ jobs:
           # a git clone of this repo just to build something m31c emitted.
           cp config.sh "$OUT/config.sh"
           cp -r runtime "$OUT/runtime"
+          # runtime/tests is this repo's own test suites and demos; no
+          # consumer of the SDK builds them.
+          rm -rf "$OUT/runtime/tests"
 
       - name: Build every app
         run: |
@@ -199,6 +202,9 @@ jobs:
           # See build-linux-x86_64's identical step for why.
           cp config.sh "$OUT/config.sh"
           cp -r runtime "$OUT/runtime"
+          # runtime/tests is this repo's own test suites and demos; no
+          # consumer of the SDK builds them.
+          rm -rf "$OUT/runtime/tests"
 
       - name: Build every app
         run: |
@@ -285,6 +291,9 @@ jobs:
           # See build-linux-x86_64's identical step for why.
           cp config.sh "$OUT/config.sh"
           cp -r runtime "$OUT/runtime"
+          # runtime/tests is this repo's own test suites and demos; no
+          # consumer of the SDK builds them.
+          rm -rf "$OUT/runtime/tests"
 
       - name: Build every app
         run: |

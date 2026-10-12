@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The stall measurement behind docs/net-timeouts-decision.md, as a test.
 #
-# runtime/net_timeout_stall_demo/main.m31 opens N connections that never say
+# runtime/tests/net_timeout_stall_demo/main.m31 opens N connections that never say
 # anything, gives every one a 400 ms read timeout, and then serves one more
 # connection that does. Run on TWO carriers, N = 2 and N = 16. While a
 # timeout was a ppoll(2) on the carrier, N silent connections pinned both
@@ -15,9 +15,9 @@
 # the ideal -- generous on purpose, a loaded machine must not fail it, and
 # the stall it guards against is 400 ms and up.
 #
-# Usage: bash runtime/net_timeout_stall_test.sh [runs]
+# Usage: bash runtime/tests/net_timeout_stall_test.sh [runs]
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 . ./config.sh
 . ./runtime/arch.sh
 
@@ -36,7 +36,7 @@ IDEAL_MS=120       # two 60 ms settling pauses in main.m31
 TIMEOUT_MS=400
 SLACK_MS=150
 
-SRC=runtime/net_timeout_stall_demo/main.m31
+SRC=runtime/tests/net_timeout_stall_demo/main.m31
 if ! "$LANGC" --emit-c "$SRC" -o "$WORK/stall.c" 2>"$WORK/compile.err"; then
     echo "FAILED: compile: $(grep -v '^warning' "$WORK/compile.err" | head -5)"
     exit 1
@@ -51,7 +51,7 @@ fi
 
 worst_live=0
 for i in $(seq 1 "$runs"); do
-    out=$(LANG_NUM_CARRIERS=2 bash runtime/with_timeout.sh 60 "$WORK/stall" 2>&1)
+    out=$(LANG_NUM_CARRIERS=2 bash runtime/tools/with_timeout.sh 60 "$WORK/stall" 2>&1)
     rc=$?
     lines=$(echo "$out" | grep -c '^silent=')
     if [ "$rc" -ne 0 ] || [ "$lines" -ne 2 ]; then

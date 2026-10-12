@@ -3,7 +3,7 @@ import term;
 import timer;
 
 // **`term.Reader.read` parks only the green thread.** Driven by
-// runtime/term_wait_test.sh over a pty (raw mode needs a terminal) and, with
+// runtime/tests/term_wait_test.sh over a pty (raw mode needs a terminal) and, with
 // stdin from /dev/null, over a descriptor the reactor cannot wait on.
 
 void ticker(Chan<int> done) {

@@ -9,9 +9,9 @@
 # main.out. If a wait held its carrier, a program on one or two carriers
 # would take minutes, and its bound would fail.
 #
-# Usage: bash runtime/parked_waits_carriers_test.sh
+# Usage: bash runtime/tests/parked_waits_carriers_test.sh
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 . ./config.sh
 . ./runtime/arch.sh
 
@@ -42,7 +42,7 @@ for prog in stdlib-timer stdlib-net-timeout-park; do
     fi
     for carriers in 1 2; do
         start=$SECONDS
-        out=$(LANG_NUM_CARRIERS=$carriers bash runtime/with_timeout.sh 60 "$WORK/$prog" 2>&1)
+        out=$(LANG_NUM_CARRIERS=$carriers bash runtime/tools/with_timeout.sh 60 "$WORK/$prog" 2>&1)
         rc=$?
         took=$((SECONDS - start))
         if [ "$rc" -eq 0 ] && [ "$out" = "$(cat "$dir/main.out")" ]; then

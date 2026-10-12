@@ -72,16 +72,16 @@ jobs:
           }
 
       - name: Phase 1 -- context switch, slab stacks, probe (round trip, interleaving, overflow trap, poison trap)
-        run: bash runtime/greenthread_test.sh
+        run: bash runtime/tests/greenthread_test.sh
 
       - name: Phase 2 -- scheduler
-        run: bash runtime/scheduler_test.sh
+        run: bash runtime/tests/scheduler_test.sh
 
       - name: Phase 3 -- epoll reactor, park/unpark, blocking-FFI handoff
-        run: bash runtime/phase3_test.sh
+        run: bash runtime/tests/phase3_test.sh
 
       - name: Phase 3.5 -- spawn backpressure deadlock regression (real compiled program, many green threads through the real ctx switch)
-        run: bash runtime/spawn_backpressure_test.sh
+        run: bash runtime/tests/spawn_backpressure_test.sh
 
       - name: Full gates.sh (compiler build/test/lint, runtime suites above again as part of the gate, formatter, corpus, ASan/UBSan)
         run: bash gates.sh

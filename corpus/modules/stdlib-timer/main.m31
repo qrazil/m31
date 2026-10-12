@@ -5,7 +5,7 @@ import date;
 //
 // Every line is a fact and not a measurement: a time is only ever compared
 // with a bound far looser than it needs, so the output does not depend on how
-// busy the machine is. runtime/parked_waits_carriers_test.sh runs this very
+// busy the machine is. runtime/tests/parked_waits_carriers_test.sh runs this very
 // program on one carrier and on two, where a sleep that held its carrier
 // would take a thousand times as long and fail the last check.
 //

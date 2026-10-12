@@ -37,8 +37,8 @@ if ! clang $SAN "$WORK/probe.c" -o "$WORK/probe" 2>/dev/null; then
 fi
 
 # A hung program must fail this gate with a stack sample, not stall it: macOS
-# has no timeout(1), so the limit is runtime/with_timeout.sh.
-WT="$PWD/runtime/with_timeout.sh"
+# has no timeout(1), so the limit is runtime/tools/with_timeout.sh.
+WT="$PWD/runtime/tools/with_timeout.sh"
 RUN_LIMIT=${RUN_LIMIT:-300}
 
 bad=0

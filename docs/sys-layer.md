@@ -613,7 +613,7 @@ library call. The process still links the C library, for:
 | `memcpy`, `memcmp`, `strlen`, `memchr` | everywhere | a dozen lines each; compilers emit calls to `memcpy`/`memset` even with `-ffreestanding`, so they must exist regardless |
 | `_start`, `__libc_start_main` | process startup | §5 |
 
-`runtime/sys_test.sh` proves the layer itself is free of the C library by
+`runtime/tests/sys_test.sh` proves the layer itself is free of the C library by
 building it with `-nostdlib -static` — no C library linked at all — and
 running it natively and for aarch64 and riscv64 under qemu. A raw backend
 that quietly called libc would not link.

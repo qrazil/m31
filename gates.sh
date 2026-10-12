@@ -24,8 +24,8 @@ run() {
     # the corpus gate takes 14 min on a macOS runner and over 25 on a loaded
     # Linux box). A gate's output is held until it ends, so without this a
     # hang is silent for as long as the CI job lets it run; macOS has no
-    # timeout(1), hence runtime/with_timeout.sh.
-    out=$(bash runtime/with_timeout.sh "${GATE_LIMIT:-3600}" "$@" 2>&1)
+    # timeout(1), hence runtime/tools/with_timeout.sh.
+    out=$(bash runtime/tools/with_timeout.sh "${GATE_LIMIT:-3600}" "$@" 2>&1)
     rc=$?
     if [ $rc -eq 0 ]; then
         printf '\033[32mok\033[0m\n'
@@ -105,15 +105,15 @@ run "runtime compiles clean" bash -c '
 # for aarch64 and riscv64 under qemu-user when those tools are present. Both
 # backends must return the same value -- the same -errno included -- for the
 # same situation, which no corpus program asks directly.
-run "sys layer, every backend" bash runtime/sys_test.sh
+run "sys layer, every backend" bash runtime/tests/sys_test.sh
 
 # Phase 1 of docs/concurrency-decision.md: the x86-64 context switch, the
 # slab stack allocator, the compiler-emitted probe (both sides: the runtime
 # half here, and the exact text src/emit_c.rs emits), and the per-thread
 # state table. Every compiler/opt combo this file already uses elsewhere,
-# plus one dedicated ASan+UBSan build -- see runtime/greenthread_test.c's
+# plus one dedicated ASan+UBSan build -- see runtime/tests/greenthread_test.c's
 # header for what is and is not reachable from a pure-C test at this phase.
-run "green threads, Phase 1" bash runtime/greenthread_test.sh
+run "green threads, Phase 1" bash runtime/tests/greenthread_test.sh
 
 # Phase 2 of docs/concurrency-decision.md: the scheduler itself (shared
 # global queue with real backpressure, per-carrier local buffers with no
@@ -122,8 +122,8 @@ run "green threads, Phase 1" bash runtime/greenthread_test.sh
 # purpose; see runtime/scheduler.h's header. Every compiler/opt combo this
 # file already uses elsewhere, plus one dedicated ASan+UBSan build.
 # ThreadSanitizer is NOT run here -- it cannot share a binary with ASan --
-# see runtime/scheduler_tsan.sh, run by hand, for that.
-run "scheduler, Phase 2" bash runtime/scheduler_test.sh
+# see runtime/tests/scheduler_tsan.sh, run by hand, for that.
+run "scheduler, Phase 2" bash runtime/tests/scheduler_test.sh
 
 # Phase 3 of docs/concurrency-decision.md: epoll reactor, park/unpark (and
 # the CAS state machine that closes the lost-wakeup race between a green
@@ -132,9 +132,9 @@ run "scheduler, Phase 2" bash runtime/scheduler_test.sh
 # built on the Phase 2 scheduler, standalone, same convention. Every
 # compiler/opt combo this file already uses elsewhere, plus one dedicated
 # ASan+UBSan build. ThreadSanitizer is NOT run here -- see
-# runtime/phase3_tsan.sh, run by hand, for that; it matters even more here
+# runtime/tests/phase3_tsan.sh, run by hand, for that; it matters even more here
 # than for Phase 2's own TSan gate (see that script's own header).
-run "epoll/park-unpark/blocking-FFI, Phase 3" bash runtime/phase3_test.sh
+run "epoll/park-unpark/blocking-FFI, Phase 3" bash runtime/tests/phase3_test.sh
 
 # A socket timeout parks only its green thread (docs/net-timeouts-decision.md).
 # This re-creates the stall measured before that: 2 carriers, a 400 ms read
@@ -142,13 +142,13 @@ run "epoll/park-unpark/blocking-FFI, Phase 3" bash runtime/phase3_test.sh
 # not wait behind them. The reactor's own side of it (the deadline heap, the
 # readiness-versus-deadline race, 1000 timers, leaks) is in the Phase 3 suite
 # above.
-run "socket timeouts do not stall carriers" bash runtime/net_timeout_stall_test.sh
+run "socket timeouts do not stall carriers" bash runtime/tests/net_timeout_stall_test.sh
 
 # The same idea for the programs that exercise it from m31: timer.sleep_ms
 # with 1000 sleepers and a socket read timeout beside 150 silent connections,
 # each on ONE and on TWO carriers, against the corpus's own expected output.
-run "parked waits on 1 and 2 carriers" bash runtime/parked_waits_carriers_test.sh
-run "terminal reads park only the green thread" bash runtime/term_wait_test.sh
+run "parked waits on 1 and 2 carriers" bash runtime/tests/parked_waits_carriers_test.sh
+run "terminal reads park only the green thread" bash runtime/tests/term_wait_test.sh
 
 # The formatter must not change what a program means, and must reach a fixed
 # point. Both are checked against every corpus program rather than asserted:
@@ -168,7 +168,7 @@ run "terminal reads park only the green thread" bash runtime/term_wait_test.sh
 # byte-compare was standing in for, checked directly.
 run "formatter preserves meaning" bash -c '
     bad=0
-    wt="$PWD/runtime/with_timeout.sh"
+    wt="$PWD/runtime/tools/with_timeout.sh"
     for f in corpus/*/*.'"$LANG_EXT"' corpus/modules/*/*.'"$LANG_EXT"' examples/*.'"$LANG_EXT"'; do
         [ -e "$f" ] || continue
         # Same convention as run.sh'"'"'s own run_one(): a test whose

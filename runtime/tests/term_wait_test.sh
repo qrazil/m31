@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # term.Reader.read waits through the reactor: only the green thread parks.
 #
-# runtime/term_wait_test/main.m31 starts a ticker thread and then waits 400 ms
+# runtime/tests/term_wait_test/main.m31 starts a ticker thread and then waits 400 ms
 # for a key on a pty. On ONE carrier, a wait that held the carrier would run
 # the ticker only after the read returned, so the program prints whether the
 # ticker finished first. Then keys are typed into the pty and read back.
 # A second run has stdin on /dev/null, a descriptor the reactor cannot wait on
 # (-EPERM), which must read as ready and end.
 #
-# Usage: bash runtime/term_wait_test.sh
+# Usage: bash runtime/tests/term_wait_test.sh
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 . ./config.sh
 . ./runtime/arch.sh
 
@@ -23,7 +23,7 @@ fi
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-if ! "$LANGC" --emit-c runtime/term_wait_test/main.m31 -o "$WORK/t.c" 2>"$WORK/t.err"; then
+if ! "$LANGC" --emit-c runtime/tests/term_wait_test/main.m31 -o "$WORK/t.c" 2>"$WORK/t.err"; then
     echo "FAILED: compile: $(grep -v '^warning' "$WORK/t.err" | head -5)"
     exit 1
 fi
@@ -36,7 +36,7 @@ fi
 
 fail=0
 export LANG_NUM_CARRIERS=1
-out=$(bash runtime/with_timeout.sh 20 "$WORK/t" </dev/null 2>&1)
+out=$(bash runtime/tools/with_timeout.sh 20 "$WORK/t" </dev/null 2>&1)
 if [ "$out" = "not a tty: end" ]; then
     echo "ok: stdin on /dev/null reads as ready and ends"
 else

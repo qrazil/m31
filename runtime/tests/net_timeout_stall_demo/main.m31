@@ -3,7 +3,7 @@ import io;
 import date;
 
 // The stall `set_read_timeout` used to cause, measured (docs/net-timeouts-
-// decision.md). Run by runtime/net_timeout_stall_test.sh with
+// decision.md). Run by runtime/tests/net_timeout_stall_test.sh with
 // LANG_NUM_CARRIERS=2, not by the ordinary corpus: its output is timings.
 //
 // N clients connect to a server and say nothing. The server gives each

@@ -8,7 +8,7 @@
 // Unlike the other examples this one is NOT in the corpus, because it needs a
 // terminal and a person. What the corpus does cover is the part that matters:
 // `corpus/modules/term-keys` drives the escape-sequence decoder over a table
-// of real xterm, rxvt and Linux-console sequences, and `runtime/sys_test.c`
+// of real xterm, rxvt and Linux-console sequences, and `runtime/tests/sys_test.c`
 // drives the termios and window-size calls over a pty on both sys-layer
 // backends and three architectures. What is left for a human is whether the
 // keys on the keyboard in front of them produce the sequences the table says

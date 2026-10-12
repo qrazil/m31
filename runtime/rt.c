@@ -3129,7 +3129,7 @@ _Noreturn void rt_exit(int64_t code) {
  *
  * `environ` is read HERE, not in the layer: sys.h's comment on
  * sys_proc_start explains why the raw backend cannot reach for it itself
- * (runtime/sys_test.c's freestanding link would fail), so "the child
+ * (runtime/tests/sys_test.c's freestanding link would fail), so "the child
  * inherits this process's environment" is this wrapper's decision, made by
  * passing the same `environ` os.env_map already reads (above) straight
  * through.
