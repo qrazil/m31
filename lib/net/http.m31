@@ -1841,6 +1841,13 @@ Result<List<str>, Error> request_line(bytes line) {
     if (parts[1].size() == 0) {
         return Result<List<str>, Error>.Err(Error.Syntax);
     }
+    // Raw UTF-8 in a target is allowed (`bad_target_at` says so), and bytes
+    // that are not UTF-8 are not text: refused here, because `ascii` below
+    // would turn them into the empty string and the target would then be
+    // read as if it were empty.
+    if (parts[1].utf8().is_none()) {
+        return Result<List<str>, Error>.Err(Error.Syntax);
+    }
     str version = version_of(parts[2], "request line")?;
     List<str> out = [ascii(parts[0]), ascii(parts[1]), version];
     return Result<List<str>, Error>.Ok(out);

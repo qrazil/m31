@@ -3,6 +3,16 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
+## Unreleased (0.4.2)
+
+### Fixed
+
+- `http.read_request` no longer traps on a request target that is not UTF-8:
+  the target decoded to the empty string and was then indexed. It is now
+  refused as a `Syntax` error (status 400). Tests: the corpus entry
+  `stdlib-http-invalid-utf8` and `tests/http/test_invalid_utf8.sh`, which sends
+  raw invalid-UTF-8 requests from Python's `socket` to a live server.
+
 ## 0.4.1 (2026-10-12)
 
 Repository layout, plus the new `m31c init`; no language or standard-library
