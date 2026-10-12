@@ -13,8 +13,8 @@
 //! consulted unless a `deps` file exists and names the module being looked
 //! for.
 //!
-//! Two files, beside the entry file, at the one place local imports already
-//! look (`Loader.dir`, not a new "project root"):
+//! Two files, at the project root (the nearest ancestor of the entry file
+//! holding `deps`):
 //!
 //! - `deps` -- the project file. A header (`name <project>`, `version
 //!   <x.y.z>`, both required, like a `Cargo.toml`'s `[package]`) and then
@@ -25,7 +25,11 @@
 //!   only way to move it is to delete its line by hand and let the next
 //!   build re-resolve `ref`.
 //!
-//! The cache is `.m31-deps/<name>/`, also beside the entry file -- a real
+//! A dependency's own `deps` is followed too, recursively (see `Deps`): every
+//! remote dependency of the whole graph is locked in the top project's
+//! `deps.lock` and cached flat in its `.m31-deps/`, by name.
+//!
+//! The cache is `.m31-deps/<name>/`, also at the project root -- a real
 //! `git` checkout at the locked commit, not a global `~/.cargo`-style shared
 //! cache (see the decision doc's §2 for why: this build has no other
 //! environment-dependent state today, and a shared cache is exactly what Go's
@@ -549,12 +553,12 @@ fn require_module_file(
     line: u32,
     name: &str,
     package: Option<&str>,
-) -> Result<Option<PathBuf>, Located> {
+) -> Result<PathBuf, Located> {
     if package.is_some() || module_file.is_file() {
         // A package's file is not checked here: the loader reads it next and
         // names the import that asked for a file the dependency lacks, which
         // is a better place to point than the `deps` line.
-        Ok(Some(module_file.to_path_buf()))
+        Ok(module_file.to_path_buf())
     } else {
         Err(located(
             deps_path,
@@ -571,7 +575,8 @@ fn require_module_file(
 /// Does `dir`'s `deps` manifest name `name`? The loader asks before it
 /// resolves anything, because a dependency and a local directory of the same
 /// name are an ambiguity to refuse, and refusing it after a `git clone` is
-/// the wrong order.
+/// the wrong order. `dir` is the root of whichever project the importing
+/// module belongs to: the top project, or a dependency.
 pub fn declares(dir: &Path, name: &str) -> Result<bool, Located> {
     Ok(read_manifest(dir)?.is_some_and(|m| m.deps.contains_key(name)))
 }
@@ -583,47 +588,337 @@ pub struct Package {
     pub root: PathBuf,
 }
 
-/// Try to resolve `name` as a one-file remote import: the fallback `deps.rs`
-/// adds to `Loader::visit`, consulted only after the embedded standard
-/// library and the plain `name.m31`-beside-the-entry-file check have both
-/// already missed.
+/// The directory a path or checkout really is, for comparing two spellings of
+/// it: canonical when it exists, lexically cleaned when it does not.
+fn ident(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| clean(p))
+}
+
+/// What one dependency name resolved to, once, for the whole build.
+enum Resolved {
+    /// A directory used in place.
+    Path { dir: PathBuf, rel: String },
+    /// A checkout under the top project's `.m31-deps/<name>/`.
+    Git { url: String, git_ref: String },
+}
+
+/// The first declaration of a name. Names are globally unique, so there is
+/// exactly one per name however many manifests list it: a second, equal one is
+/// a diamond and costs nothing, a different one is a conflict.
+struct Entry {
+    /// Identity for the equal-or-conflict test.
+    key: String,
+    resolved: Resolved,
+    /// How the declaration read, for diagnostics.
+    shown: String,
+    /// The manifest and line that declared it first.
+    decl: PathBuf,
+    line: u32,
+    /// Dependency names from the top project down to and including this one.
+    chain: Vec<String>,
+}
+
+/// The dependency graph of one build. The top project's `deps` and
+/// `deps.lock` and its `.m31-deps/` cache hold every git dependency of the
+/// whole graph, flat and by name (names are globally unique, so there is
+/// nothing to nest); a dependency's own `deps.lock` is not consulted. A
+/// dependency's manifest is read relative to that dependency's own root.
 ///
-/// `Ok(None)` means this module has nothing to say -- no `deps` file beside
-/// `dir`, or one that exists but never mentions `name` -- and the caller
-/// falls through to its own "cannot find module" error exactly as it did
-/// before this fallback existed. `Ok(Some(path))` is a file on disk, ready to
-/// be read and parsed exactly like a local import. Anything else is a
-/// `Located` diagnostic: a malformed manifest line, a `git` that could not
-/// be run, a clone or checkout that failed, or a lock entry the cache could
-/// not be made to match.
+/// Path dependencies are walked as soon as their owner is: cycles and
+/// conflicts there are found before any import is looked at. A git
+/// dependency's own `deps` can only be read once it is fetched, which stays
+/// lazy -- it is walked the moment its checkout exists.
+pub struct Deps {
+    top: PathBuf,
+    top_id: PathBuf,
+    top_name: String,
+    entries: HashMap<String, Entry>,
+    /// Chain of the dependency whose root (identity) this is; the top project
+    /// is the empty chain.
+    chains: HashMap<PathBuf, Vec<String>>,
+    walked: std::collections::HashSet<PathBuf>,
+}
+
+impl Deps {
+    pub fn new(top: PathBuf) -> Deps {
+        let top_id = ident(&top);
+        let mut chains = HashMap::new();
+        chains.insert(top_id.clone(), Vec::new());
+        Deps {
+            top,
+            top_id,
+            top_name: "<project>".to_string(),
+            entries: HashMap::new(),
+            chains,
+            walked: std::collections::HashSet::new(),
+        }
+    }
+
+    /// `app -> a -> b`: the chain a diagnostic prints, starting at the project.
+    fn show(&self, chain: &[String]) -> String {
+        let mut s = self.top_name.clone();
+        for c in chain {
+            s.push_str(" -> ");
+            s.push_str(c);
+        }
+        s
+    }
+
+    /// Read the manifest in `root` (the root of the top project or of a
+    /// dependency), register everything it declares, and follow path
+    /// dependencies into theirs. A directory without a manifest has nothing to
+    /// register; whether that is an error is for the import that needs it.
+    pub fn walk(&mut self, root: &Path) -> Result<(), Located> {
+        let Some(m) = read_manifest(root)? else {
+            return Ok(());
+        };
+        let id = ident(root);
+        if !self.walked.insert(id.clone()) {
+            return Ok(());
+        }
+        if id == self.top_id {
+            self.top_name = m.name.clone();
+        }
+        let chain = self.chains.get(&id).cloned().unwrap_or_default();
+        let deps_path = root.join("deps");
+        let mut items: Vec<(&String, &Dep)> = m.deps.iter().collect();
+        items.sort_by_key(|(_, d)| d.line);
+        for (name, dep) in items {
+            let (resolved, key, shown) = match &dep.source {
+                Source::Path(rel) => {
+                    let dir = if Path::new(rel).is_absolute() {
+                        PathBuf::from(rel)
+                    } else {
+                        clean(&root.join(rel))
+                    };
+                    let key = format!("path {}", ident(&dir).display());
+                    (
+                        Resolved::Path {
+                            dir,
+                            rel: rel.clone(),
+                        },
+                        key,
+                        format!("path {rel}"),
+                    )
+                }
+                Source::Git { url, git_ref } => {
+                    let resolved_url = resolve_url(root, url);
+                    // Two relative spellings of one repository are one source.
+                    let plain = if resolved_url.contains("://") || resolved_url.contains('@') {
+                        resolved_url.clone()
+                    } else {
+                        ident(Path::new(&resolved_url))
+                            .to_string_lossy()
+                            .into_owned()
+                    };
+                    (
+                        Resolved::Git {
+                            url: resolved_url,
+                            git_ref: git_ref.clone(),
+                        },
+                        format!("git {plain} {git_ref}"),
+                        format!("{url} {git_ref}"),
+                    )
+                }
+            };
+            let mut child_chain = chain.clone();
+            child_chain.push(name.clone());
+            if let Some(prev) = self.entries.get(name) {
+                if prev.key != key {
+                    return Err(located(
+                        &deps_path,
+                        dep.line,
+                        format!(
+                            "dependency `{name}` has two different sources: \
+                             `{}` via {} ({}:{}) and `{shown}` via {} -- \
+                             module names are globally unique, so a build \
+                             uses one `{name}`; make the declarations agree",
+                            prev.shown,
+                            self.show(&prev.chain),
+                            prev.decl.display(),
+                            prev.line,
+                            self.show(&child_chain),
+                        ),
+                    ));
+                }
+            }
+            if chain.contains(name) {
+                return Err(located(
+                    &deps_path,
+                    dep.line,
+                    format!("dependency cycle: {}", self.show(&child_chain)),
+                ));
+            }
+            let entry = self.entries.entry(name.clone()).or_insert_with(|| Entry {
+                key,
+                resolved,
+                shown,
+                decl: deps_path.clone(),
+                line: dep.line,
+                chain: child_chain.clone(),
+            });
+            let (dir, entry_chain) = match &entry.resolved {
+                Resolved::Path { dir, .. } => (dir.clone(), entry.chain.clone()),
+                Resolved::Git { .. } => continue,
+            };
+            if !dir.is_dir() {
+                continue;
+            }
+            let did = ident(&dir);
+            if let Some(c) = self.chains.get(&did) {
+                // Already known: reaching an ancestor's root again (the
+                // project's own directory included) is the cycle.
+                if self.walked.contains(&did) && chain.starts_with(c) {
+                    return Err(located(
+                        &deps_path,
+                        dep.line,
+                        format!(
+                            "dependency cycle: {}, and `{name}` is the \
+                             directory of {}",
+                            self.show(&child_chain),
+                            self.show(c),
+                        ),
+                    ));
+                }
+            } else {
+                self.chains.insert(did, entry_chain);
+            }
+            self.walk(&dir)?;
+        }
+        Ok(())
+    }
+
+    /// Resolve `name`, as declared by the manifest in `owner`, to a file. With
+    /// `package` it is `import name.<package-path>;`, a file inside the
+    /// dependency; without, the one-file form `<name>.m31` at its root.
+    ///
+    /// `Ok(None)` means this module has nothing to say -- no `deps` file in
+    /// `owner`, or one that never mentions `name` -- and the caller falls
+    /// through to its own "cannot find module" error. Anything else wrong is a
+    /// `Located` diagnostic: a malformed manifest line, a `git` that could not
+    /// be run, a failed clone or checkout, a lock the cache cannot be made to
+    /// match, a cycle or a conflict.
+    pub fn resolve(
+        &mut self,
+        owner: &Path,
+        name: &str,
+        package: Option<&str>,
+    ) -> Result<Option<Package>, Located> {
+        self.walk(owner)?;
+        let Some(manifest) = read_manifest(owner)? else {
+            return Ok(None);
+        };
+        if !manifest.deps.contains_key(name) {
+            return Ok(None);
+        }
+        let entry = self
+            .entries
+            .get(name)
+            .expect("walking a manifest registers every name it declares");
+        let deps_path = entry.decl.clone();
+        let dep_line = entry.line;
+        let entry_chain = entry.chain.clone();
+        match &entry.resolved {
+            Resolved::Path { dir, rel } => {
+                resolve_path_dep(dir, &deps_path, dep_line, name, rel, package).map(Some)
+            }
+            Resolved::Git { url, git_ref } => {
+                let (url, git_ref) = (url.clone(), git_ref.clone());
+                let pkg = self.resolve_git(&url, &git_ref, &deps_path, dep_line, name, package)?;
+                // The checkout may carry a manifest of its own: its
+                // dependencies are registered now, under this one's chain.
+                self.chains.entry(ident(&pkg.root)).or_insert(entry_chain);
+                let root = pkg.root.clone();
+                self.walk(&root)?;
+                Ok(Some(pkg))
+            }
+        }
+    }
+
+    fn resolve_git(
+        &self,
+        url: &str,
+        git_ref: &str,
+        deps_path: &Path,
+        dep_line: u32,
+        name: &str,
+        package: Option<&str>,
+    ) -> Result<Package, Located> {
+        let lock_path = self.top.join("deps.lock");
+        let lock_text = std::fs::read_to_string(&lock_path).unwrap_or_default();
+        let locks = parse_manifest(&lock_path, &lock_text, 1, "deps.lock")?;
+
+        let cache_dir = self.top.join(".m31-deps").join(name);
+        let module_file = match package {
+            Some(rel) => cache_dir.join(rel),
+            None => cache_dir.join(format!("{name}.m31")),
+        };
+        let found = |file: PathBuf| Package {
+            file,
+            root: cache_dir.clone(),
+        };
+
+        if let Some(lock) = locks.get(name) {
+            // `deps.lock` is authoritative once a line exists: `ref` is never
+            // consulted again, not even to check it still points somewhere
+            // sensible. See the module doc comment and
+            // docs/remote-imports-decision.md §2.
+            let commit = lock.fields[0].clone();
+            if !cache_matches(&cache_dir, &commit) {
+                reclone(url, &cache_dir, deps_path, dep_line, name)?;
+                checkout_locked_commit(&cache_dir, &commit, &lock_path, lock.line, name)?;
+            }
+            // A cache that already matches needs no network access, per the
+            // decision doc's resolution flow.
+            return require_module_file(&module_file, deps_path, dep_line, name, package)
+                .map(found);
+        }
+
+        // No lock entry yet: this is the first time anything has asked for
+        // `name`. Clone, check out `ref`, and whatever commit that lands on
+        // becomes the lock -- permanently, until a human deletes the line.
+        reclone(url, &cache_dir, deps_path, dep_line, name)?;
+        checkout_ref(&cache_dir, git_ref, deps_path, dep_line, name)?;
+        let commit = rev_parse_head(&cache_dir, deps_path, dep_line, name)?;
+        append_lock(&lock_path, name, &commit).map_err(|e| {
+            located(
+                deps_path,
+                dep_line,
+                format!("cannot write {}: {e}", lock_path.display()),
+            )
+        })?;
+        require_module_file(&module_file, deps_path, dep_line, name, package).map(found)
+    }
+}
+
+/// Resolve `name` as a one-file remote import against the manifest in `dir`
+/// alone (a fresh graph rooted there). The loader keeps one `Deps` for the
+/// whole build; this is the standalone form.
+#[cfg(test)]
 pub fn resolve(dir: &Path, name: &str) -> Result<Option<PathBuf>, Located> {
-    Ok(resolve_in(dir, name, None)?.map(|p| p.file))
+    Ok(Deps::new(dir.to_path_buf())
+        .resolve(dir, name, None)?
+        .map(|p| p.file))
 }
 
 /// A file inside a dependency that is a whole directory: `import tui.geom;`
-/// asks `dep` = `tui` for `rel` = `geom.m31`. A git dependency is fetched,
-/// locked and cached exactly as a one-file one is; a path dependency is just
-/// the directory it names. `Ok(None)` only when `deps` does not name `dep`.
+/// asks `dep` = `tui` for `rel` = `geom.m31`. See `Deps::resolve`.
+#[cfg(test)]
 pub fn resolve_package(dir: &Path, dep: &str, rel: &str) -> Result<Option<Package>, Located> {
-    resolve_in(dir, dep, Some(rel))
+    Deps::new(dir.to_path_buf()).resolve(dir, dep, Some(rel))
 }
 
 /// A `path` dependency, used in place. It is a project in its own right, so
-/// it must carry its own `deps` manifest; its own dependencies are not
-/// followed (the v0 rule that holds for git dependencies too).
+/// it must carry its own `deps` manifest; its own dependencies are followed
+/// like any other (`Deps::walk`).
 fn resolve_path_dep(
-    dir: &Path,
+    dep_dir: &Path,
     deps_path: &Path,
     line: u32,
     name: &str,
     rel_dir: &str,
     package: Option<&str>,
 ) -> Result<Package, Located> {
-    let dep_dir = if Path::new(rel_dir).is_absolute() {
-        PathBuf::from(rel_dir)
-    } else {
-        clean(&dir.join(rel_dir))
-    };
     if !dep_dir.is_dir() {
         return Err(located(
             deps_path,
@@ -635,7 +930,7 @@ fn resolve_path_dep(
             ),
         ));
     }
-    if read_manifest(&dep_dir)?.is_none() {
+    if read_manifest(dep_dir)?.is_none() {
         return Err(located(
             deps_path,
             line,
@@ -666,70 +961,8 @@ fn resolve_path_dep(
     };
     Ok(Package {
         file,
-        root: dep_dir,
+        root: dep_dir.to_path_buf(),
     })
-}
-
-fn resolve_in(dir: &Path, name: &str, package: Option<&str>) -> Result<Option<Package>, Located> {
-    let deps_path = dir.join("deps");
-    let Some(manifest) = read_manifest(dir)? else {
-        return Ok(None);
-    };
-    let Some(dep) = manifest.deps.get(name) else {
-        return Ok(None);
-    };
-    let dep_line = dep.line;
-    let (url, git_ref) = match &dep.source {
-        Source::Path(rel_dir) => {
-            return resolve_path_dep(dir, &deps_path, dep_line, name, rel_dir, package).map(Some);
-        }
-        Source::Git { url, git_ref } => (resolve_url(dir, url), git_ref.clone()),
-    };
-
-    let lock_path = dir.join("deps.lock");
-    let lock_text = std::fs::read_to_string(&lock_path).unwrap_or_default();
-    let locks = parse_manifest(&lock_path, &lock_text, 1, "deps.lock")?;
-
-    let cache_dir = dir.join(".m31-deps").join(name);
-    let module_file = match package {
-        Some(rel) => cache_dir.join(rel),
-        None => cache_dir.join(format!("{name}.m31")),
-    };
-    let found = |file: PathBuf| Package {
-        file,
-        root: cache_dir.clone(),
-    };
-
-    if let Some(lock) = locks.get(name) {
-        // `deps.lock` is authoritative once a line exists: `ref` is never
-        // consulted again, not even to check it still points somewhere
-        // sensible. See the module doc comment and
-        // docs/remote-imports-decision.md §2.
-        let commit = lock.fields[0].clone();
-        if !cache_matches(&cache_dir, &commit) {
-            reclone(&url, &cache_dir, &deps_path, dep_line, name)?;
-            checkout_locked_commit(&cache_dir, &commit, &lock_path, lock.line, name)?;
-        }
-        // A cache that already matches needs no network access, per the
-        // decision doc's resolution flow.
-        return require_module_file(&module_file, &deps_path, dep_line, name, package)
-            .map(|f| f.map(found));
-    }
-
-    // No lock entry yet: this is the first time anything has asked for
-    // `name`. Clone, check out `ref`, and whatever commit that lands on
-    // becomes the lock -- permanently, until a human deletes the line.
-    reclone(&url, &cache_dir, &deps_path, dep_line, name)?;
-    checkout_ref(&cache_dir, &git_ref, &deps_path, dep_line, name)?;
-    let commit = rev_parse_head(&cache_dir, &deps_path, dep_line, name)?;
-    append_lock(&lock_path, name, &commit).map_err(|e| {
-        located(
-            &deps_path,
-            dep_line,
-            format!("cannot write {}: {e}", lock_path.display()),
-        )
-    })?;
-    require_module_file(&module_file, &deps_path, dep_line, name, package).map(|f| f.map(found))
 }
 
 #[cfg(test)]

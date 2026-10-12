@@ -37,6 +37,7 @@ mod arguments;
 mod collections;
 mod concurrency;
 mod control_flow;
+mod deps;
 mod destructors;
 mod diagnostics;
 mod generics;

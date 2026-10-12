@@ -180,6 +180,9 @@ struct Loader {
     /// The project root: where `deps`, `deps.lock` and `.m31-deps/` live and
     /// where an import in the project's own files starts from.
     root: PathBuf,
+    /// The dependency graph: every `deps` manifest reached so far, resolved
+    /// once per name.
+    deps: crate::resolve::deps::Deps,
     ext: String,
     /// Parsed modules, by name.
     done: HashMap<String, Program>,
@@ -217,7 +220,10 @@ pub fn load(entry: &str) -> Result<Loaded, Located> {
     // The project file is validated up front: a `deps` with no header is a
     // mistake wherever the program happens to notice it, and a program whose
     // imports never reach a dependency would otherwise never find out.
-    crate::resolve::deps::read_manifest(&root)?;
+    // The whole path-dependency graph is walked here too, so a cycle or a
+    // conflict among them is reported whether or not anything imports it.
+    let mut deps = crate::resolve::deps::Deps::new(root.clone());
+    deps.walk(&root)?;
     let ext = entry_path
         .extension()
         .map(|e| e.to_string_lossy().into_owned())
@@ -242,6 +248,7 @@ pub fn load(entry: &str) -> Result<Loaded, Located> {
     }
     let mut l = Loader {
         root,
+        deps,
         ext,
         done: HashMap::new(),
         folded: HashMap::new(),
@@ -359,8 +366,27 @@ impl Loader {
         // is refused before anything else looks at the name. Checked ahead of
         // the cycle test: `a/util` importing `b/util` would otherwise be
         // reported as `util` importing itself.
+        // The file this import denotes. For `import x;` with no `x.m31` at the
+        // root it is the one-file dependency `x` of the importer's project,
+        // and the SAME file for every importer that reaches it -- so two
+        // imports of one dependency are one module, not a collision between
+        // `<root>/x.m31` (which is not there) and where it was first found.
+        let identity = match from {
+            Some(_)
+                if !site.dotted
+                    && !site.embedded
+                    && self.paths.contains_key(name)
+                    && !Path::new(path).exists() =>
+            {
+                match self.deps.resolve(&site.root, name, None)? {
+                    Some(pkg) => pkg.file.to_string_lossy().into_owned(),
+                    None => path.to_string(),
+                }
+            }
+            _ => path.to_string(),
+        };
         if let Some(prev) = self.paths.get(name) {
-            if prev != path && (site.dotted || !prev.starts_with('<')) {
+            if prev != &identity && (site.dotted || !prev.starts_with('<')) {
                 let (importer, span) = from.expect("only an import can collide");
                 let msg = if prev.starts_with('<') {
                     format!(
@@ -451,28 +477,30 @@ impl Loader {
                     });
                 };
 
-                // Before giving up, a `deps` manifest at the project root
-                // may name `name` as a one-file remote git import. This is
-                // the fallback between the embedded standard library (above)
-                // and the "cannot find module" error (below) -- see
-                // docs/remote-imports-decision.md and src/resolve/deps.rs. Only the
-                // project's own files may reach it: a dependency does not
-                // bring dependencies of its own.
-                if !site.dotted && site.root == self.root {
-                    if let Some(remote_path) = crate::resolve::deps::resolve(&self.root, name)? {
-                        let remote_str = remote_path.to_string_lossy().into_owned();
-                        let remote_src = std::fs::read_to_string(&remote_path).expect(
+                // Before giving up, the `deps` manifest of the project the
+                // importing module belongs to -- the top project's, or a
+                // dependency's own -- may name `name` as a one-file remote
+                // import. This is the fallback between the embedded standard
+                // library (above) and the "cannot find module" error (below)
+                // -- see docs/remote-imports-decision.md and
+                // src/resolve/deps.rs.
+                if !site.dotted {
+                    if let Some(pkg) = self.deps.resolve(&site.root, name, None)? {
+                        let remote_str = pkg.file.to_string_lossy().into_owned();
+                        let remote_src = std::fs::read_to_string(&pkg.file).expect(
                             "deps::resolve only ever returns a path it just verified exists",
                         );
-                        // Its own imports keep resolving against the project
-                        // root, as they always did.
+                        // Its own imports resolve against the dependency's
+                        // root, like the rest of a dependency's files: that
+                        // is where its own `deps` is, so that what it in
+                        // turn depends on is reachable.
                         return self.parse(
                             name,
                             &remote_str,
                             &remote_src,
                             from,
                             false,
-                            self.root.clone(),
+                            pkg.root.clone(),
                         );
                     }
                 }
@@ -504,7 +532,7 @@ impl Loader {
     /// mean. The root is the project's, or -- for a module that came out of
     /// a directory dependency -- that dependency's checkout.
     fn locate(
-        &self,
+        &mut self,
         segs: &[String],
         root: &Path,
         importer: &str,
@@ -520,9 +548,9 @@ impl Loader {
         // refuse it as a collision rather than shadow it.
         let from_stdlib = self.paths.get(importer).is_some_and(|p| p.starts_with('<'));
         if crate::resolve::stdlib::by_path(&shown).is_some() {
-            if !from_stdlib && segs.len() > 1 && root == self.root {
+            if !from_stdlib && segs.len() > 1 {
                 let first = &segs[0];
-                if crate::resolve::deps::declares(&self.root, first)? {
+                if crate::resolve::deps::declares(root, first)? {
                     return Err(Located {
                         path: self.paths[importer].clone(),
                         diag: Diag::new(
@@ -579,10 +607,11 @@ impl Loader {
         }
         let first = &segs[0];
         // A dependency named in `deps` is a directory of modules, reached
-        // through its name: `import tui.geom;`. Only the project's own files
-        // can name one -- a dependency brings no dependencies of its own.
-        if root == self.root && crate::resolve::deps::declares(&self.root, first)? {
-            if self.root.join(first).is_dir() {
+        // through its name: `import tui.geom;`. A module names the
+        // dependencies of the project it belongs to: the top project's files
+        // those in its `deps`, a dependency's files those in its own.
+        if crate::resolve::deps::declares(root, first)? {
+            if root.join(first).is_dir() {
                 return Err(Located {
                     path: self.paths[importer].clone(),
                     diag: Diag::new(
@@ -595,7 +624,9 @@ impl Loader {
                 });
             }
             let rel = format!("{}.{}", segs[1..].join("/"), self.ext);
-            let found = crate::resolve::deps::resolve_package(&self.root, first, &rel)?
+            let found = self
+                .deps
+                .resolve(root, first, Some(&rel))?
                 .expect("`declares` just said the dependency is named");
             return Ok(Site {
                 path: found.file.to_string_lossy().into_owned(),
