@@ -138,10 +138,16 @@ pub enum Error {
     BadSignature;
     /// The peer sent `SSH_MSG_DISCONNECT`.
     Disconnected;
-    /// The underlying connection failed -- a reset, a timeout, a closed
-    /// peer. `net`/`io`'s own error already said which; there is nothing
-    /// more specific to add here.
+    /// The underlying connection failed -- a reset, a closed peer. `net`/`io`'s
+    /// own error already said which; there is nothing more specific to add
+    /// here.
     Io;
+    /// A read waited as long as the read timeout allows (`connect_any`'s
+    /// `timeout_ms`, `Transport.set_read_timeout`). **The transport cannot be
+    /// used afterwards**: the timeout may have fallen part way through a
+    /// packet, whose bytes were consumed, so the next packet would be read
+    /// from the middle of this one. Close it.
+    TimedOut;
 }
 
 pub str Error.to_str() {
@@ -184,6 +190,9 @@ pub str Error.to_str() {
         }
         case Io: {
             return "the underlying connection failed";
+        }
+        case TimedOut: {
+            return "a read timed out waiting for the peer";
         }
     }
 }
@@ -315,6 +324,42 @@ pub bytes encode_mpint(bytes be_value) {
     return out;
 }
 
+// A failed read, as this module's error: the socket's read timeout expiring
+// (EAGAIN, 11, which `net` documents as how a timeout arrives through a
+// stream method) is `TimedOut`, anything else `Io`. The cases are listed one
+// by one because `io.Error`'s `match` has no default.
+Error failure_of(io.Error cause) {
+    match (cause) {
+        case Other(int code): {
+            if (code == 11) {
+                return Error.TimedOut;
+            }
+            return Error.Io;
+        }
+        case NotFound: {
+            return Error.Io;
+        }
+        case PermissionDenied: {
+            return Error.Io;
+        }
+        case IsDirectory: {
+            return Error.Io;
+        }
+        case NotADirectory: {
+            return Error.Io;
+        }
+        case AlreadyExists: {
+            return Error.Io;
+        }
+        case NotEmpty: {
+            return Error.Io;
+        }
+        case InvalidUtf8: {
+            return Error.Io;
+        }
+    }
+}
+
 // Reads exactly `byte_count` bytes from `connection`, looping over `net.Conn.read`'s own
 // "1..n bytes, no exact-read primitive" contract. A 0-length read before `byte_count`
 // bytes have arrived means the peer is gone.
@@ -328,8 +373,8 @@ Result<bytes, Error> read_exact(net.Conn connection, int byte_count) {
                 }
                 out.extend(chunk);
             }
-            case Err(_): {
-                return Result<bytes, Error>.Err(Error.Io);
+            case Err(io.Error cause): {
+                return Result<bytes, Error>.Err(failure_of(cause));
             }
         }
     }
@@ -375,8 +420,8 @@ Result<VersionPair, Error> exchange_version(net.Conn connection) {
             case Ok(bytes received): {
                 raw = received;
             }
-            case Err(_): {
-                return Result<VersionPair, Error>.Err(Error.Io);
+            case Err(io.Error cause): {
+                return Result<VersionPair, Error>.Err(failure_of(cause));
             }
         }
         if (!raw.ends_with(crlf)) {
@@ -900,6 +945,25 @@ pub Result<bytes, Error> Transport.recv() {
     }
 }
 
+/// Bound every later read on this connection -- `recv`, and so every channel
+/// read above it -- to `timeout_ms` milliseconds of waiting for the peer; 0
+/// waits for ever, which is where a connection starts. A read that runs out
+/// of time is `Err(Error.TimedOut)`, after which the transport must be
+/// closed (see `Error.TimedOut`). It bounds one wait for bytes, not a whole
+/// `recv`: a peer that sends a byte a second is never timed out by it.
+///
+/// A negative `timeout_ms` traps, as `net.Conn.set_read_timeout` does.
+pub Result<void, Error> Transport.set_read_timeout(int timeout_ms) {
+    match (connection.set_read_timeout(timeout_ms)) {
+        case Ok(bool is_set): {
+            return Result<void, Error>.Ok;
+        }
+        case Err(_): {
+            return Result<void, Error>.Err(Error.Io);
+        }
+    }
+}
+
 /// Closes the underlying connection. No courteous `SSH_MSG_DISCONNECT`
 /// first in v0 -- see this module's header.
 pub Result<bool, Error> Transport.close() {
@@ -1038,17 +1102,26 @@ Result<Transport, Error> do_handshake(net.Conn connection, List<bytes> expected_
 /// `ssh-ed25519` public-key octets) -- `docs/ssh-decision.md` §1's "v0 takes
 /// an expected host key as a parameter and refuses to proceed if it doesn't
 /// match."
-pub Result<Transport, Error> connect(str host, int port, bytes expected_host_key) {
-    return connect_any(host, port, [expected_host_key]);
+pub Result<Transport, Error> connect(str host, int port, bytes expected_host_key, int timeout_ms = 0) {
+    return connect_any(host, port, [expected_host_key], timeout_ms: timeout_ms);
 }
 
 /// As `connect`, but any one of `host_keys` is acceptable -- a host that
 /// has rotated keys, or a `known_hosts` file listing several. An empty list
 /// refuses every server (`Error.HostKeyMismatch`): there is no trust on
 /// first use.
-pub Result<Transport, Error> connect_any(str host, int port, List<bytes> host_keys) {
+pub Result<Transport, Error> connect_any(str host, int port, List<bytes> host_keys, int timeout_ms = 0) {
     match (net.connect(host, port)) {
         case Ok(net.Conn connection): {
+            if (timeout_ms > 0) {
+                match (connection.set_read_timeout(timeout_ms)) {
+                    case Ok(bool is_set): {
+                    }
+                    case Err(_): {
+                        return Result<Transport, Error>.Err(Error.Io);
+                    }
+                }
+            }
             return do_handshake(connection, host_keys);
         }
         case Err(_): {

@@ -1,0 +1,33 @@
+import net.http;
+import io;
+import net;
+
+// The server half of tests/http/test_invalid_utf8.sh: it listens on a port the
+// kernel picks, prints it on stderr, and serves exactly CONNECTIONS connections. The
+// handler answers 200 and the path, so a client can tell a request that was
+// read from one that was refused with a 4xx.
+type Echo {
+}
+
+http.Response Echo.handle(http.Request request) {
+    return http.text_response("ok " + request.path());
+}
+
+const int CONNECTIONS = 14;
+
+match (net.listen("127.0.0.1", 0)) {
+    case Ok(net.Listener listener): {
+        io.eprint(listener.local().port().to_str() + "\n");
+        match (http.serve(listener, Echo(), connections: CONNECTIONS, timeout_ms: 5000)) {
+            case Ok(int served): {
+                print("served " + served.to_str());
+            }
+            case Err(http.Error failure): {
+                print("serve failed: " + failure.to_str());
+            }
+        }
+    }
+    case Err(net.Error failure): {
+        print("listen failed: " + failure.to_str());
+    }
+}

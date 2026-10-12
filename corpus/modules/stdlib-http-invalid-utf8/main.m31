@@ -1,0 +1,57 @@
+import net.http;
+import io;
+
+// `http.read_request` on bytes that are not UTF-8. It used to trap -- the
+// target was decoded to a `str`, a target that was not UTF-8 decoded to "" and
+// `target[0]` was then read past the end. Every line below must come back as
+// a value: an error with the status a server answers with, or a request
+// whose body is the opaque bytes it was sent.
+//
+// The wire-level oracle (Python's `socket` against a live `http.serve`) is
+// tests/http/test_invalid_utf8.sh; this entry keeps the same cases in the
+// corpus, where every build matrix member runs them.
+
+void check(str label, bytes data) {
+    io.Buffer b = io.buffer_of(data);
+    match (http.read_request(b)) {
+        case Ok(Option<http.Request> maybe): {
+            match (maybe) {
+                case Some(http.Request req): {
+                    print(label + ": request " + req.method() + " " + req.path() + " body=" + req.body().size().to_str());
+                }
+                case None: {
+                    print(label + ": clean end");
+                }
+            }
+        }
+        case Err(http.Error e): {
+            print(label + ": [" + e.status().to_str() + "] " + e.to_str());
+        }
+    }
+}
+
+bytes with_byte(str before, int octet, str after) {
+    bytes out = before.to_bytes();
+    out.push(octet);
+    out.extend(after.to_bytes());
+    return out;
+}
+
+check("target-ff", with_byte("GET /", 255, " HTTP/1.1\r\nHost: h\r\n\r\n"));
+check("target-truncated-seq", with_byte("GET /", 195, "( HTTP/1.1\r\nHost: h\r\n\r\n"));
+check("absolute-form", with_byte("GET http", 255, "//h/x HTTP/1.1\r\nHost: h\r\n\r\n"));
+check("header-value", with_byte("GET /a HTTP/1.1\r\nHost: h\r\nX-A: ", 255, "\r\n\r\n"));
+check("header-name", with_byte("GET /a HTTP/1.1\r\nHost: h\r\nX-", 255, "A: v\r\n\r\n"));
+check("host", with_byte("GET /a HTTP/1.1\r\nHost: ", 255, "h\r\n\r\n"));
+check("method", with_byte("G", 255, "T /a HTTP/1.1\r\nHost: h\r\n\r\n"));
+check("version", with_byte("GET /a HTTP/1.", 255, "\r\nHost: h\r\n\r\n"));
+bytes junk = [255, 195, 40];
+bytes cl = "POST /b HTTP/1.1\r\nHost: h\r\nContent-Length: 3\r\n\r\n".to_bytes();
+cl.extend(junk);
+check("body-content-length", cl);
+bytes ch = "POST /c HTTP/1.1\r\nHost: h\r\nTransfer-Encoding: chunked\r\n\r\n3\r\n".to_bytes();
+ch.extend(junk);
+ch.extend("\r\n0\r\n\r\n".to_bytes());
+check("body-chunked", ch);
+check("percent-ff", "GET /%ff HTTP/1.1\r\nHost: h\r\n\r\n".to_bytes());
+check("valid-utf8-target", "GET /é HTTP/1.1\r\nHost: h\r\n\r\n".to_bytes());

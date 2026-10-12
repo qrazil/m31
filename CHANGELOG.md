@@ -5,7 +5,42 @@ change landed on master.
 
 ## Unreleased (0.4.2)
 
+### Fixed
+
+- `http.read_request` no longer traps on a request target that is not UTF-8:
+  the target decoded to the empty string and was then indexed. It is now
+  refused as a `Syntax` error (status 400). Tests: the corpus entry
+  `stdlib-http-invalid-utf8` and `tests/http/test_invalid_utf8.sh`, which sends
+  raw invalid-UTF-8 requests from Python's `socket` to a live server.
+
 ### Added
+
+- `io.File.seek(offset)`, `seek_by(delta)`, `seek_from_end(offset)` and
+  `tell()`: reposition and query a file, accounting for the 64 KiB read-ahead
+  (so `seek_by` and `tell` are relative to what `read` would hand out next).
+  Tests: corpus `stdlib-io-seek`, and `tests/io/test_seek.sh`, which compares
+  random operation scripts across the read buffer with Python's raw file
+  object.
+
+- `http.fetch_stream(request, timeout_ms:)` and `http.read_response_stream(stream,
+  method)` return a `BodyStream`: the head is read, the body comes out of
+  `read(n)` as it arrives (Content-Length, chunked or close-delimited), with
+  no ceiling and no buffering. A body that stops short of its framing is an
+  error. `fetch`, `get` and `read_response` are unchanged. Tests: corpus
+  `stdlib-http-stream` and `tests/http/test_stream.sh`, where a Python origin
+  server withholds the second half of every body until the client has read
+  the first, so a buffering client deadlocks.
+
+- ssh read timeouts: `ssh.connect` / `ssh.connect_any` and
+  `sshclient.connect` / `connect_with` take `timeout_ms` (default 0, wait for
+  ever), `ssh.Transport.set_read_timeout(ms)` and
+  `sshclient.Session.set_read_timeout(ms)` change it later. They bound every
+  wait for the server -- handshake, authentication and each channel read --
+  and a wait that runs out is the new `ssh.Error.TimedOut` (before, a timeout
+  was folded into `Io`). After `TimedOut` the transport must be closed. This
+  adds a variant to `ssh.Error`: an exhaustive `match` over it needs a
+  `case TimedOut`. Tests: `tests/ssh/test_timeout.sh`, against a real `sshd`
+  and a silent Python peer, timed from the shell.
 
 - Transitive dependencies: a dependency's own `deps` is followed, for path and
   git dependencies alike, recursively. Paths in it are relative to that
@@ -22,6 +57,7 @@ change landed on master.
   own imports against that dependency's root rather than the importer's, and
   importing it from several modules no longer reports a collision.
 - Generated C for existing programs is unchanged.
+
 
 ## 0.4.1 (2026-10-12)
 

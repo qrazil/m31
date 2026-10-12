@@ -1,0 +1,73 @@
+import io;
+import os;
+
+// The program half of tests/io/test_seek.sh. Arguments: a path, then
+// operations, each printed on its own line:
+//
+//   S:n  seek(n)   C:n  seek_by(n)   E:n  seek_from_end(n)
+//   T    tell()             R:n  read up to n bytes, as hex
+//
+// A seek prints the new position or "ERR"; the oracle, Python's raw
+// `open(path, "rb", buffering=0)`, answers the same operations.
+
+str hex_of(bytes data) {
+    return data.hex();
+}
+
+str position_of(Result<int, io.Error> result) {
+    match (result) {
+        case Ok(int moved): {
+            return moved.to_str();
+        }
+        case Err(io.Error failure): {
+            return "ERR";
+        }
+    }
+}
+
+// `n` bytes or up to the end of the file: `read` may return less than asked
+// for at a buffer boundary, which is not something Python's raw read does.
+str read_exactly(io.File file, int wanted) {
+    bytes got = [];
+    while (got.size() < wanted) {
+        match (file.read(wanted - got.size())) {
+            case Ok(bytes part): {
+                if (part.size() == 0) {
+                    return hex_of(got);
+                }
+                got.extend(part);
+            }
+            case Err(io.Error failure): {
+                return "ERR";
+            }
+        }
+    }
+    return hex_of(got);
+}
+
+List<str> argv = os.arguments();
+match (io.open(argv[1])) {
+    case Ok(io.File file): {
+        for (int index in 2 .. argv.size()) {
+            str operation = argv[index];
+            if (operation == "T") {
+                print(position_of(file.tell()));
+                continue;
+            }
+            int amount = operation.substr(2, operation.size()).parse_int().or(0);
+            str kind = operation.substr(0, 1);
+            if (kind == "S") {
+                print(position_of(file.seek(amount)));
+            } else if (kind == "C") {
+                print(position_of(file.seek_by(amount)));
+            } else if (kind == "E") {
+                print(position_of(file.seek_from_end(amount)));
+            } else {
+                print(read_exactly(file, amount));
+            }
+        }
+    }
+    case Err(io.Error failure): {
+        print("open failed: " + failure.to_str());
+    }
+}

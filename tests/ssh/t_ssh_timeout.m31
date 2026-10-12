@@ -1,0 +1,137 @@
+import ssh;
+import ssh.sshclient;
+import ssh.sshexec;
+import os;
+
+// The program half of tests/ssh/test_timeout.sh. Arguments: a mode, a port,
+// a user, a private-key path and a known_hosts path. It prints one word
+// describing what happened, and the script times it from outside:
+//
+//   connect-silent   connect(timeout_ms: 600) to a peer that accepts and
+//                    says nothing: "connect-timed-out"
+//   exec-stall       connect(timeout_ms: 800), `sleep 8`, read_all:
+//                    "read-timed-out"
+//   exec-after       connect without a timeout, then
+//                    Session.set_read_timeout(800), `sleep 8`:
+//                    "read-timed-out"
+//   exec-fast        connect(timeout_ms: 800), `echo hi`: "hi" and exit 0,
+//                    which a timeout that fired early would not give
+//   exec-slow-ok     connect(timeout_ms: 2000), `sleep 1; echo done`: "done"
+//                    -- the timeout bounds one wait, and this one is shorter
+
+bool is_timed_out(ssh.Error error) {
+    return error.to_str() == ssh.Error.TimedOut.to_str();
+}
+
+str outcome_of_exec(sshclient.Session session, str command) {
+    match (session.exec(command)) {
+        case Ok(sshexec.Channel channel): {
+            match (channel.read_all()) {
+                case Ok(bytes data): {
+                    return data.utf8().or("?").trim();
+                }
+                case Err(sshexec.Error error): {
+                    match (error) {
+                        case Transport(ssh.Error inner): {
+                            if (is_timed_out(inner)) {
+                                return "read-timed-out";
+                            }
+                            return "read-failed: " + inner.to_str();
+                        }
+                        case Truncated: {
+                            return "read-failed: " + error.to_str();
+                        }
+                        case UnexpectedMessage: {
+                            return "read-failed: " + error.to_str();
+                        }
+                        case BadMessage: {
+                            return "read-failed: " + error.to_str();
+                        }
+                        case BadChannel: {
+                            return "read-failed: " + error.to_str();
+                        }
+                        case OpenRefused(int reason): {
+                            return "read-failed: " + error.to_str();
+                        }
+                        case ExecRefused: {
+                            return "read-failed: " + error.to_str();
+                        }
+                        case DataTooLarge: {
+                            return "read-failed: " + error.to_str();
+                        }
+                        case Closed: {
+                            return "read-failed: " + error.to_str();
+                        }
+                        case BadArgument: {
+                            return "read-failed: " + error.to_str();
+                        }
+                    }
+                }
+            }
+        }
+        case Err(sshclient.Error error): {
+            return "exec-failed: " + error.to_str();
+        }
+    }
+}
+
+str connect_failure(sshclient.Error error) {
+    match (error) {
+        case Connect(ssh.Error inner): {
+            if (is_timed_out(inner)) {
+                return "connect-timed-out";
+            }
+            return "connect-failed: " + inner.to_str();
+        }
+        case Key(_): {
+            return "connect-failed: " + error.to_str();
+        }
+        case KnownHosts(_): {
+            return "connect-failed: " + error.to_str();
+        }
+        case Auth(_): {
+            return "connect-failed: " + error.to_str();
+        }
+        case Exec(_): {
+            return "connect-failed: " + error.to_str();
+        }
+    }
+}
+
+List<str> argv = os.arguments();
+str mode = argv[1];
+int port = argv[2].parse_int().or(0);
+str user = argv[3];
+str key = argv[4];
+str hosts = argv[5];
+int timeout = 0;
+if (mode == "connect-silent") {
+    timeout = 600;
+} else if (mode == "exec-stall" || mode == "exec-fast") {
+    timeout = 800;
+} else if (mode == "exec-slow-ok") {
+    timeout = 2000;
+}
+match (sshclient.connect("127.0.0.1", port, user, key, hosts, timeout_ms: timeout)) {
+    case Ok(sshclient.Session session): {
+        if (mode == "exec-after") {
+            match (session.set_read_timeout(800)) {
+                case Ok: {
+                }
+                case Err(sshclient.Error error): {
+                    print("set_read_timeout: " + error.to_str());
+                }
+            }
+        }
+        str command = "echo hi";
+        if (mode == "exec-stall" || mode == "exec-after") {
+            command = "sleep 8";
+        } else if (mode == "exec-slow-ok") {
+            command = "sleep 1; echo done";
+        }
+        print(outcome_of_exec(session, command));
+    }
+    case Err(sshclient.Error error): {
+        print(connect_failure(error));
+    }
+}

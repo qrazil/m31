@@ -89,6 +89,23 @@ pub Result<sshexec.Channel, Error> Session.exec(str command) {
     }
 }
 
+/// Bound every later read on the connection -- each `Channel` read among
+/// them -- to `timeout_ms` milliseconds of waiting for the server; 0 waits
+/// for ever. A read that runs out of time fails with
+/// `Exec(Transport(TimedOut))` (or `Connect(TimedOut)` here), and the session
+/// must then be closed: see `ssh.Error.TimedOut`. `connect`'s own
+/// `timeout_ms` sets the same bound from the first byte of the handshake.
+pub Result<void, Error> Session.set_read_timeout(int timeout_ms) {
+    match (transport.set_read_timeout(timeout_ms)) {
+        case Ok: {
+            return Result<void, Error>.Ok;
+        }
+        case Err(ssh.Error error): {
+            return Result<void, Error>.Err(Error.Connect(error));
+        }
+    }
+}
+
 /// Closes the connection.
 pub Result<bool, Error> Session.close() {
     match (transport.close()) {
@@ -104,10 +121,15 @@ pub Result<bool, Error> Session.close() {
 /// Connects to `host:port`, trusting only the keys `known_hosts_path` lists
 /// for it, and authenticates as `user` with the unencrypted Ed25519 key in
 /// `key_path`.
-pub Result<Session, Error> connect(str host, int port, str user, str key_path, str known_hosts_path) {
+///
+/// `timeout_ms` above 0 bounds every read of the connection -- the handshake,
+/// authentication and every later channel read -- to that many milliseconds
+/// of waiting for the server (`Session.set_read_timeout` changes it later);
+/// 0, the default, waits for ever.
+pub Result<Session, Error> connect(str host, int port, str user, str key_path, str known_hosts_path, int timeout_ms = 0) {
     match (sshkey.load(key_path)) {
         case Ok(sshkey.PrivateKey key): {
-            return connect_with(host, port, user, key, known_hosts_path);
+            return connect_with(host, port, user, key, known_hosts_path, timeout_ms: timeout_ms);
         }
         case Err(sshkey.Error error): {
             return Result<Session, Error>.Err(Error.Key(error));
@@ -116,12 +138,12 @@ pub Result<Session, Error> connect(str host, int port, str user, str key_path, s
 }
 
 /// `connect` with a key that is already loaded.
-pub Result<Session, Error> connect_with(str host, int port, str user, sshkey.PrivateKey key, str known_hosts_path) {
+pub Result<Session, Error> connect_with(str host, int port, str user, sshkey.PrivateKey key, str known_hosts_path, int timeout_ms = 0) {
     match (sshhosts.load(known_hosts_path)) {
         case Ok(sshhosts.KnownHosts hosts): {
             match (hosts.keys_for(host, port)) {
                 case Ok(List<bytes> trusted): {
-                    return open_session(host, port, user, key, trusted);
+                    return open_session(host, port, user, key, trusted, timeout_ms);
                 }
                 case Err(sshhosts.Error error): {
                     return Result<Session, Error>.Err(Error.KnownHosts(error));
@@ -134,8 +156,8 @@ pub Result<Session, Error> connect_with(str host, int port, str user, sshkey.Pri
     }
 }
 
-Result<Session, Error> open_session(str host, int port, str user, sshkey.PrivateKey key, List<bytes> trusted) {
-    match (ssh.connect_any(host, port, trusted)) {
+Result<Session, Error> open_session(str host, int port, str user, sshkey.PrivateKey key, List<bytes> trusted, int timeout_ms) {
+    match (ssh.connect_any(host, port, trusted, timeout_ms: timeout_ms)) {
         case Ok(ssh.Transport transport): {
             match (sshauth.authenticate(transport, user, key)) {
                 case Ok(str banner): {

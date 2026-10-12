@@ -1,0 +1,12 @@
+target-ff: [400] the message is not well-formed HTTP
+target-truncated-seq: [400] the message is not well-formed HTTP
+absolute-form: [400] the message is not well-formed HTTP
+header-value: [400] the message is not well-formed HTTP
+header-name: [400] the message is not well-formed HTTP
+host: [400] the message is not well-formed HTTP
+method: [400] the message is not well-formed HTTP
+version: [400] the message is not well-formed HTTP
+body-content-length: request POST /b body=3
+body-chunked: request POST /c body=3
+percent-ff: [400] the message is not well-formed HTTP
+valid-utf8-target: request GET /é body=0

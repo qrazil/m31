@@ -1,0 +1,77 @@
+import net.http;
+import io;
+
+// `http.read_response_stream`: the body handed out a few bytes at a time over
+// an in-memory stream, for each framing, and the same bytes `read_response`
+// buffers. The live-socket check, against Python's `http.server` and with the
+// second half of every body withheld until the first has been read, is
+// tests/http/test_stream.sh.
+
+str drain(http.BodyStream body, int step) {
+    str out = "";
+    int reads = 0;
+    while (true) {
+        match (body.read(step)) {
+            case Ok(bytes piece): {
+                if (piece.size() == 0) {
+                    return out + " [" + reads.to_str() + " reads, finished=" + body.is_finished().to_str() + "]";
+                }
+                reads = reads + 1;
+                out = out + piece.utf8().or("?");
+            }
+            case Err(http.Error failure): {
+                return out + " ERR " + failure.to_str();
+            }
+        }
+    }
+}
+
+void streamed(str label, str method, str wire, int step) {
+    io.Buffer source = io.buffer_of(wire.to_bytes());
+    match (http.read_response_stream(source, method)) {
+        case Ok(http.BodyStream body): {
+            print(label + ": " + body.status().to_str() + " " + body.reason() + " | " + drain(body, step));
+        }
+        case Err(http.Error failure): {
+            print(label + ": head failed: " + failure.to_str());
+        }
+    }
+}
+
+str buffered(str wire) {
+    io.Buffer source = io.buffer_of(wire.to_bytes());
+    match (http.read_response(source, "GET")) {
+        case Ok(http.Response response): {
+            match (response.text()) {
+                case Ok(str text): {
+                    return text;
+                }
+                case Err(http.Error failure): {
+                    return "ERR " + failure.to_str();
+                }
+            }
+        }
+        case Err(http.Error failure): {
+            return "ERR " + failure.to_str();
+        }
+    }
+}
+
+str length_wire = "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nhello world";
+str chunked_wire = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;x=1\r\nhello\r\n6\r\n world\r\n0\r\nT: v\r\n\r\n";
+str close_wire = "HTTP/1.0 200 OK\r\n\r\nhello world";
+streamed("length", "GET", length_wire, 4);
+streamed("length-big-step", "GET", length_wire, 100);
+streamed("chunked", "GET", chunked_wire, 4);
+streamed("chunked-big-step", "GET", chunked_wire, 100);
+streamed("close", "GET", close_wire, 4);
+streamed("interim", "GET", "HTTP/1.1 103 Early Hints\r\nLink: x\r\n\r\n" + length_wire, 100);
+streamed("head", "HEAD", "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n", 4);
+streamed("no-content", "GET", "HTTP/1.1 204 No Content\r\n\r\n", 4);
+streamed("truncated-length", "GET", "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\nhello", 4);
+streamed("bad-chunk-size", "GET", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nhello\r\n0\r\n\r\n", 4);
+streamed("bad-chunk-terminator", "GET", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhelloXX0\r\n\r\n", 100);
+streamed("both-framings", "GET", "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\nhello", 4);
+print("buffered length : " + buffered(length_wire));
+print("buffered chunked: " + buffered(chunked_wire));
+print("buffered close  : " + buffered(close_wire));
