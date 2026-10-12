@@ -1,0 +1,4 @@
+corpus/modules/transitive-cycle/libs/b/deps:4:1: dependency cycle: transitive-cycle -> a -> b -> a
+  |
+4 | a path ../a
+  | ^

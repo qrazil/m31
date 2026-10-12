@@ -1,0 +1,3 @@
+pub int base() {
+    return 100;
+}

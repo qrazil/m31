@@ -1,0 +1,5 @@
+import util;
+
+pub int one() {
+    return util.one();
+}

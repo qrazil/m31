@@ -1,0 +1,5 @@
+import base.basenum;
+
+pub int plus_base(int n) {
+    return n + basenum.base();
+}

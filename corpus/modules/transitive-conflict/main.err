@@ -1,0 +1,4 @@
+corpus/modules/transitive-conflict/libs/b/deps:4:1: dependency `util` has two different sources: `path ../util1` via transitive-conflict -> a -> util (corpus/modules/transitive-conflict/libs/a/deps:4) and `path ../util2` via transitive-conflict -> b -> util -- module names are globally unique, so a build uses one `util`; make the declarations agree
+  |
+4 | util path ../util2
+  | ^

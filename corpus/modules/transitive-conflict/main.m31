@@ -1,0 +1,4 @@
+import a.amod;
+import b.bmod;
+
+print(str(amod.one() + bmod.two()));

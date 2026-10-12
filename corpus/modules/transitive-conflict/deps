@@ -1,0 +1,5 @@
+name transitive-conflict
+version 0.1.0
+
+a path libs/a
+b path libs/b

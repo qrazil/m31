@@ -1,0 +1,6 @@
+import leaf.leafcore;
+import util;
+
+pub str describe(int n) {
+    return concat("mid:", str(util.twice(leafcore.plus_base(n))));
+}

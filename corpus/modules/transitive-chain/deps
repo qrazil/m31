@@ -1,0 +1,8 @@
+name transitive-chain
+version 0.1.0
+
+# Only the direct dependencies are listed: `leaf`, `base` and `util` are
+# found through the manifests of `mid` and `side`, each relative to its own
+# directory. `util` is wanted by both (a diamond) and resolved once.
+mid path libs/mid
+side path libs/side

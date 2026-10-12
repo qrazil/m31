@@ -1,0 +1,4 @@
+name transitive-cycle
+version 0.1.0
+
+a path libs/a
