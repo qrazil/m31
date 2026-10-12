@@ -11,7 +11,7 @@
 # Exits non-zero on any failure. Until the compiler exists, everything fails;
 # that is correct. The first "1 passed" is the walking-skeleton milestone.
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 . ./config.sh
 . ./runtime/arch.sh
 

@@ -3,7 +3,7 @@
 A statically typed, compiled, high-level language. Go altitude, not embedded.
 Refcounted, no GC. Small and opinionated, intended to freeze.
 
-The name is held in one file, `config.sh`. Run `./rename.sh <name>` to
+The name is held in one file, `config.sh`. Run `./scripts/rename.sh <name>` to
 rename it again; it rewrites `config.sh` and moves the corpus files with it.
 
 ## Status
@@ -372,10 +372,10 @@ match the compiler.
 
 ```
 config.sh              name, binary, extension — the only place they appear
-rename.sh              renames the language and moves the corpus with it
 build.sh               compile a source file to an executable
 gates.sh               every gate, run after every commit (includes `m31c lint`)
-run.sh                 the differential corpus runner
+scripts/               rename.sh (renames the language and moves the corpus with it),
+                       run.sh (the differential corpus runner), sanitize.sh, bench.sh
 src/                   the compiler
   lexer.rs             hand-written; type names are keywords
   parser.rs            recursive descent + Pratt, C precedence

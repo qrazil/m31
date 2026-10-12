@@ -17,7 +17,7 @@
 # cannot link a sanitized binary at all, the check is skipped and says so,
 # rather than passing silently or failing for a reason that is not a bug.
 set -uo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 . ./config.sh
 . ./runtime/arch.sh
 

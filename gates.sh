@@ -71,7 +71,7 @@ run "runtime stays separate TU" bash -c '
     # Only run.sh, and only real code: this check kept matching prose about
     # itself -- first this script own source, then run.sh comment explaining
     # why LTO is off. Strip comments before looking for the flag.
-    if grep -vE "^[[:space:]]*#" run.sh | grep -qE -- "-flto" 2>/dev/null; then
+    if grep -vE "^[[:space:]]*#" scripts/run.sh | grep -qE -- "-flto" 2>/dev/null; then
         echo "LTO must not be enabled: it reintroduces -Wfree-nonheap-object"
         exit 1
     fi
@@ -415,19 +415,19 @@ run "emission is reproducible" bash -c '
     exit $bad'
 
 if [ $quick -eq 0 ]; then
-    run "corpus" bash run.sh
+    run "corpus" bash scripts/run.sh
     # The whole corpus again with the runtime on raw system calls: same
     # programs, same expected output, no C library underneath print or io.
     # Checked here on x86-64 because that is what this runs on; the raw
     # backend's other architectures are covered by the sys-layer gate above.
     if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then
-        run "corpus (raw syscalls)" env RT_CFLAGS=-DRT_SYS_RAW bash run.sh
+        run "corpus (raw syscalls)" env RT_CFLAGS=-DRT_SYS_RAW bash scripts/run.sh
     fi
     # Every program the corpus runs, once, under AddressSanitizer and
     # UndefinedBehaviorSanitizer. The oracle compares builds with each other,
     # so a bug that makes all four wrong the same way -- a use-after-free
     # whose freed block is reused identically -- passes it. See sanitize.sh.
-    run "sanitizers (ASan, UBSan)" bash sanitize.sh
+    run "sanitizers (ASan, UBSan)" bash scripts/sanitize.sh
 fi
 
 echo

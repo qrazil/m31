@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Rename the language. Rewrites config.sh and moves every corpus file.
 #
-#   ./rename.sh <name> [binary] [extension]
+#   ./scripts/rename.sh <name> [binary] [extension]
 #
 # Defaults: binary = <name>c, extension = first three letters of <name>.
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 . ./config.sh
 
 [ $# -ge 1 ] || { echo "usage: $0 <name> [binary] [extension]" >&2; exit 1; }
@@ -33,7 +33,7 @@ cat > config.sh <<EOF
 # Single source of truth for the language's identity.
 #
 # Everything else — run.sh, the corpus file extensions, the README — reads
-# these. To rename the language, run ./rename.sh; do not edit this by hand,
+# these. To rename the language, run ./scripts/rename.sh; do not edit this by hand,
 # because the corpus files have to move at the same time.
 
 LANG_NAME=$new_name
