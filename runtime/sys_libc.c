@@ -878,6 +878,17 @@ int64_t sys_proc_start_fds(char *const argv[], char *const envp[], const char *c
         if (src[i] < -1 || src[i] > 0x7fffffff) return -SYS_EINVAL;
         if (src[i] >= 0 && src[i] <= 2 && src[i] != i) return -SYS_EINVAL;
     }
+    /* The working directory is checked here, not left to the spawn: a
+     * chdir that fails inside it fails every attempt of the $PATH search,
+     * and the search's own verdict (ENOENT, "no such program") would hide
+     * which it was. The raw backend reports the child's chdir directly, so
+     * the answers agree. */
+    if (cwd != NULL) {
+        struct stat dir;
+        if (stat(cwd, &dir) != 0) return neg_errno(errno);
+        if (!S_ISDIR(dir.st_mode)) return -SYS_ENOTDIR;
+        if (access(cwd, X_OK) != 0) return neg_errno(errno);
+    }
     posix_spawn_file_actions_t fa;
     posix_spawnattr_t at;
     int rc = posix_spawn_file_actions_init(&fa);

@@ -1,0 +1,20 @@
+cat said [stream me]
+stderr []
+cat exited 0
+again exited 0
+first one
+second three
+third <none>
+error stream [two
+]
+status exited 4
+copied 18890 bytes, buffer holds 18890
+status exited 0
+sent true
+status killed by signal 15
+sent after wait false
+status exited 0
+write: the process closed its input
+kill -0 of the dropped child exits nonzero: true
+child sees true descriptors, highest below 6: true
+done

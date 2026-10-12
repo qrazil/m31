@@ -1,0 +1,243 @@
+import proc;
+import io;
+import os;
+
+// proc.start: a live child whose three streams are ordinary io streams.
+// Everything here is read back through the same io protocol a file or a
+// socket answers, which is the point.
+
+str text_of(bytes data) {
+    match (data.utf8()) {
+        case Some(str text): {
+            return text;
+        }
+        case None: {
+            return "<not text>";
+        }
+    }
+}
+
+str status_of(Result<os.ExitStatus, proc.Error> outcome) {
+    match (outcome) {
+        case Ok(os.ExitStatus status): {
+            return status.to_str();
+        }
+        case Err(proc.Error error): {
+            return "error " + error.to_str();
+        }
+    }
+}
+
+str read_text(proc.Pipe pipe) {
+    match (pipe.read_all()) {
+        case Ok(bytes data): {
+            return text_of(data);
+        }
+        case Err(io.Error error): {
+            return "read failed: " + error.to_str();
+        }
+    }
+}
+
+// One conversation with cat: write, close the input, read the answer.
+void cat_round_trip() {
+    match (proc.start(["cat"])) {
+        case Ok(proc.Proc child): {
+            Result<int, io.Error> wrote = child.stdin.write("stream ".to_bytes());
+            wrote = child.stdin.write("me".to_bytes());
+            Result<bool, io.Error> closed = child.stdin.close();
+            print("cat said [" + read_text(child.stdout) + "]");
+            print("stderr [" + read_text(child.stderr) + "]");
+            print("cat " + status_of(child.wait()));
+            print("again " + status_of(child.wait()));
+        }
+        case Err(proc.Error error): {
+            print("start failed: " + error.to_str());
+        }
+    }
+}
+
+// Lines come off a pipe with the same read_until a file uses, and the
+// streams are separate.
+void lines() {
+    match (proc.start(["sh", "-c", "echo one; echo two >&2; echo three; exit 4"])) {
+        case Ok(proc.Proc child): {
+            match (io.read_line_of(child.stdout, 100)) {
+                case Ok(Option<str> first): {
+                    print("first " + first.or("<none>"));
+                }
+                case Err(io.Error error): {
+                    print("line failed: " + error.to_str());
+                }
+            }
+            match (io.read_line_of(child.stdout, 100)) {
+                case Ok(Option<str> second): {
+                    print("second " + second.or("<none>"));
+                }
+                case Err(io.Error error): {
+                    print("line failed: " + error.to_str());
+                }
+            }
+            match (io.read_line_of(child.stdout, 100)) {
+                case Ok(Option<str> third): {
+                    print("third " + third.or("<none>"));
+                }
+                case Err(io.Error error): {
+                    print("line failed: " + error.to_str());
+                }
+            }
+            print("error stream [" + read_text(child.stderr) + "]");
+            print("status " + status_of(child.wait()));
+        }
+        case Err(proc.Error error): {
+            print("start failed: " + error.to_str());
+        }
+    }
+}
+
+// io.copy takes the pipe as a Stream, into a Buffer.
+void copied() {
+    match (proc.start(["sh", "-c", "i=0; while [ $i -lt 2000 ]; do echo line-$i; i=$((i+1)); done"])) {
+        case Ok(proc.Proc child): {
+            io.Buffer sink = io.buffer();
+            match (io.copy(child.stdout, sink)) {
+                case Ok(int count): {
+                    print("copied " + count.to_str() + " bytes, buffer holds " + sink.size().to_str());
+                }
+                case Err(io.Error error): {
+                    print("copy failed: " + error.to_str());
+                }
+            }
+            print("status " + status_of(child.wait()));
+        }
+        case Err(proc.Error error): {
+            print("start failed: " + error.to_str());
+        }
+    }
+}
+
+// Death by signal, kill(), and kill after wait.
+void signals() {
+    match (proc.start(["sleep", "30"])) {
+        case Ok(proc.Proc child): {
+            match (child.kill(proc.SIGTERM)) {
+                case Ok(bool sent): {
+                    print("sent " + sent.to_str());
+                }
+                case Err(proc.Error error): {
+                    print("kill failed: " + error.to_str());
+                }
+            }
+            print("status " + status_of(child.wait()));
+            match (child.kill(proc.SIGKILL)) {
+                case Ok(bool sent): {
+                    print("sent after wait " + sent.to_str());
+                }
+                case Err(proc.Error error): {
+                    print("kill failed: " + error.to_str());
+                }
+            }
+        }
+        case Err(proc.Error error): {
+            print("start failed: " + error.to_str());
+        }
+    }
+}
+
+// A write after the child stopped reading is a value, not a dead process.
+void broken_pipe() {
+    match (proc.start(["true"])) {
+        case Ok(proc.Proc child): {
+            print("status " + status_of(child.wait()));
+            match (child.stdin.write("anyone there?".to_bytes())) {
+                case Ok(int count): {
+                    print("wrote " + count.to_str());
+                }
+                case Err(io.Error error): {
+                    print("write: " + proc.error_of(error).to_str());
+                }
+            }
+        }
+        case Err(proc.Error error): {
+            print("start failed: " + error.to_str());
+        }
+    }
+}
+
+// A Proc that goes out of scope without wait() kills and reaps its child.
+int dropped() {
+    match (proc.start(["sleep", "30"])) {
+        case Ok(proc.Proc child): {
+            return child.pid;
+        }
+        case Err(proc.Error error): {
+            return -1;
+        }
+    }
+}
+
+void drop_kills() {
+    int pid = dropped();
+    // A zombie would still answer `kill -0`; a reaped child does not.
+    match (proc.run(["kill", "-0", pid.to_str()], should_check: false, is_quiet: true)) {
+        case Ok(proc.Completed done): {
+            print("kill -0 of the dropped child exits nonzero: " + (done.returncode != 0).to_str());
+        }
+        case Err(proc.Error error): {
+            print("run failed: " + error.to_str());
+        }
+    }
+}
+
+// The child gets 0, 1 and 2 and nothing else, whatever this process holds.
+void descriptors() {
+    List<io.File> held = [];
+    for (int index in 0 .. 12) {
+        match (io.open("/dev/null")) {
+            case Ok(io.File file): {
+                held.push(file);
+            }
+            case Err(io.Error error): {
+                print("open failed: " + error.to_str());
+            }
+        }
+    }
+    match (proc.run(["ls", "/dev/fd"], is_quiet: true)) {
+        case Ok(proc.Completed done): {
+            List<str> names = text_of(done.stdout).split("\n");
+            int highest = 0;
+            int count = 0;
+            for (str name in names) {
+                if (name == "") {
+                    continue;
+                }
+                count = count + 1;
+                match (name.parse_int()) {
+                    case Some(int number): {
+                        if (number > highest) {
+                            highest = number;
+                        }
+                    }
+                    case None: {
+                        print("not a number: " + name);
+                    }
+                }
+            }
+            // 0, 1, 2 and the directory ls itself opened; this process holds
+            // twelve more, which must not be among them.
+            print("child sees " + (count <= 5).to_str() + " descriptors, highest below 6: " + (highest < 6).to_str());
+        }
+        case Err(proc.Error error): {
+            print("run failed: " + error.to_str());
+        }
+    }
+}
+
+cat_round_trip();
+lines();
+copied();
+signals();
+broken_pipe();
+drop_kills();
+descriptors();
+print("done");

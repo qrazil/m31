@@ -163,6 +163,7 @@
 #include "rt.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -508,6 +509,10 @@ rt_reactor_t *rt_reactor_create(rt_scheduler_t *sched) {
 
     r->kq = kqueue();
     if (r->kq < 0) rt_trap("rt_reactor_create: kqueue() failed");
+    /* Not inherited by a fork child on macOS, but a posix_spawn'd one is a
+     * different path and a descriptor that is not ours to give away should
+     * say so (lib/proc.m31 promises the child only 0, 1 and 2). */
+    (void)fcntl(r->kq, F_SETFD, FD_CLOEXEC);
 
     struct kevent ev;
     EV_SET(&ev, RT_REACTOR_SHUTDOWN_IDENT, EVFILT_USER, EV_ADD | EV_CLEAR, 0,

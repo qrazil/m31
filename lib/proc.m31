@@ -3,11 +3,11 @@
 //
 // API
 // ---
-//   proc.run(argv, input:, cwd:, env:, timeout_ms:, check:, quiet:)
+//   proc.run(argv, input:, cwd:, env:, timeout_ms:, should_check:, is_quiet:)
 //                              -> Result<Completed, Error>
 //   proc.start(argv, cwd:, env:)   -> Result<Proc, Error>
 //
-//   Completed                  .status .returncode .ok .truncated .stdout .stderr
+//   Completed                  .status .returncode .is_truncated .stdout .stderr; c.is_success()
 //   Proc                       .pid .stdin .stdout .stderr
 //   p.wait()                   -> Result<os.ExitStatus, Error>   parks only the caller
 //   p.kill(signal)             -> Result<bool, Error>            false: already gone
@@ -24,7 +24,7 @@
 //
 // **`run` is for the answer, `start` is for the conversation.** `run` starts
 // the program, feeds it `input`, collects everything it writes to standard
-// output and standard error (at most 64 MiB of each, with `truncated` saying
+// output and standard error (at most 64 MiB of each, with `is_truncated` saying
 // so), waits for it, and returns. `start` returns at once with the three
 // pipes and the pid; what flows through them, and when, is the caller's.
 //
@@ -94,7 +94,6 @@ const int ETIMEDOUT = 110;
 // What `run` keeps of one stream before it only drains and discards: Oro's
 // bound, and the reason `start` exists for output that does not fit.
 const int CAPTURE_LIMIT = 67108864;
-
 /// Linux signal numbers, the same on every host (docs/sys-layer.md).
 pub const int SIGHUP = 1;
 pub const int SIGINT = 2;
@@ -125,8 +124,8 @@ pub enum Error {
     BrokenPipe;
     /// A deadline passed before the process finished.
     TimedOut;
-    /// `run` with `check` true: the process ran and did not succeed -- a
-    /// nonzero exit, or killed by a signal. `check: false` gives the output
+    /// `run` with `should_check` true: the process ran and did not succeed -- a
+    /// nonzero exit, or killed by a signal. `should_check: false` gives the output
     /// of such a process back, and its `status` says which.
     NonZeroExit;
     /// Any other failure of the operating system.
@@ -700,12 +699,11 @@ Result<Proc, Error> launch(List<str> argv, str cwd, Option<Map<str, str>> env) {
     // A write to a child that has gone must be an error value, not a signal
     // that ends this process. Idempotent.
     int ignored = __ignore_sigpipe();
-
     // [read end, write end] of each: the child reads in[0], writes out[1]
     // and err[1]; this process keeps in[1], out[0] and err[0].
     List<int> standard_in = [];
     List<int> standard_out = [];
-    List<int> standard_err = [];
+    List<int> standard_error = [];
     int made = __pipe(standard_in);
     if (made < 0) {
         return Result<Proc, Error>.Err(from_errno(-made));
@@ -715,7 +713,7 @@ Result<Proc, Error> launch(List<str> argv, str cwd, Option<Map<str, str>> env) {
         close_all(standard_in);
         return Result<Proc, Error>.Err(from_errno(-made));
     }
-    made = __pipe(standard_err);
+    made = __pipe(standard_error);
     if (made < 0) {
         close_all(standard_in);
         close_all(standard_out);
@@ -729,32 +727,31 @@ Result<Proc, Error> launch(List<str> argv, str cwd, Option<Map<str, str>> env) {
         flagged = __setsockopt(standard_out[0], SO_NONBLOCK, 1);
     }
     if (flagged == 0) {
-        flagged = __setsockopt(standard_err[0], SO_NONBLOCK, 1);
+        flagged = __setsockopt(standard_error[0], SO_NONBLOCK, 1);
     }
     if (flagged < 0) {
         close_all(standard_in);
         close_all(standard_out);
-        close_all(standard_err);
+        close_all(standard_error);
         return Result<Proc, Error>.Err(from_errno(-flagged));
     }
-
-    int pid = __proc_start_fds(argv, env_list, has_env, cwd, standard_in[0], standard_out[1], standard_err[1]);
+    int pid = __proc_start_fds(argv, env_list, has_env, cwd, standard_in[0], standard_out[1], standard_error[1]);
     // The child has its own copies now (or never existed): these three are
     // the child's side and are of no use here, and keeping them open would
     // stop the end-of-file from ever arriving.
     int closed = __close(standard_in[0]);
     closed = __close(standard_out[1]);
-    closed = __close(standard_err[1]);
+    closed = __close(standard_error[1]);
     if (pid < 0) {
         closed = __close(standard_in[1]);
         closed = __close(standard_out[0]);
-        closed = __close(standard_err[0]);
+        closed = __close(standard_error[0]);
         return Result<Proc, Error>.Err(from_errno(-pid));
     }
     Pipe child_in = Pipe(standard_in[1], false);
     Pipe child_out = Pipe(standard_out[0], true);
-    Pipe child_err = Pipe(standard_err[0], true);
-    return Result<Proc, Error>.Ok(Proc(pid, child_in, child_out, child_err));
+    Pipe child_error = Pipe(standard_error[0], true);
+    return Result<Proc, Error>.Ok(Proc(pid, child_in, child_out, child_error));
 }
 
 void close_all(List<int> descriptors) {
@@ -785,16 +782,21 @@ pub Result<Proc, Error> start(List<str> argv, str cwd = "", Option<Map<str, str>
 ///
 /// `returncode` is Python's: the exit code, or minus the signal number that
 /// killed it; `status` is the same fact as an `os.ExitStatus`, which a
-/// `match` can be exhaustive over. `ok` is "exited 0". `truncated` says that
+/// `match` can be exhaustive over, and `is_success()` is "exited 0".
+/// `is_truncated` says that
 /// one of the streams went past 64 MiB: what is here is its first 64 MiB, the
 /// rest was read and thrown away so that the child did not block.
 pub type Completed {
     pub os.ExitStatus status;
     pub int returncode;
-    pub bool ok;
-    pub bool truncated;
+    pub bool is_truncated;
     pub bytes stdout;
     pub bytes stderr;
+}
+
+/// Did it exit with code 0, and not die of a signal?
+pub bool Completed.is_success() {
+    return returncode == 0;
 }
 
 // What one of `run`'s helper threads reports back.
@@ -908,12 +910,12 @@ void watchdog(int pid, int deadline_ns, Chan<int> gate) {
 /// reading the output, so an input far larger than the pipe buffer does not
 /// deadlock against a child that writes as it reads. Standard output and
 /// standard error are collected separately, up to 64 MiB each
-/// (`truncated`); **they are also echoed live** to this process's own
-/// unless `quiet`.
+/// (`is_truncated`); **they are also echoed live** to this process's own
+/// unless `is_quiet`.
 ///
-/// `check` (the default) makes a process that did not exit with 0 an `Err`
+/// `should_check` (the default) makes a process that did not exit with 0 an `Err`
 /// of `NonZeroExit` -- a signal included -- and discards its output; pass
-/// `check: false` to get the `Completed` of a failing process and decide
+/// `should_check: false` to get the `Completed` of a failing process and decide
 /// from `status`. `timeout_ms` above 0 bounds the whole run: when it passes
 /// the child is killed (SIGKILL), reaped, and the result is `Err(TimedOut)`.
 /// What the others mean is `start`'s.
@@ -925,7 +927,7 @@ void watchdog(int pid, int deadline_ns, Chan<int> gate) {
 /// the timeout kills it. Grandchildren that inherit the pipes keep the
 /// streams open past the child's own end until `timeout_ms` or their own
 /// exit, as with `subprocess.run`.
-pub Result<Completed, Error> run(List<str> argv, bytes input = [], str cwd = "", Option<Map<str, str>> env = Option<Map<str, str>>.None, int timeout_ms = 0, bool check = true, bool quiet = false) {
+pub Result<Completed, Error> run(List<str> argv, bytes input = [], str cwd = "", Option<Map<str, str>> env = Option<Map<str, str>>.None, int timeout_ms = 0, bool should_check = true, bool is_quiet = false) {
     if (timeout_ms < 0) {
         trap("run: timeout_ms is a count of milliseconds, 0 for none");
     }
@@ -936,30 +938,29 @@ pub Result<Completed, Error> run(List<str> argv, bytes input = [], str cwd = "",
     }
     Pipe sink = child.take_stdin();
     Pipe out_pipe = child.take_stdout();
-    Pipe err_pipe = child.take_stderr();
+    Pipe error_pipe = child.take_stderr();
     if (deadline_ns > 0) {
         sink.set_deadline_ns(deadline_ns);
         out_pipe.set_deadline_ns(deadline_ns);
-        err_pipe.set_deadline_ns(deadline_ns);
+        error_pipe.set_deadline_ns(deadline_ns);
     }
     int echo_out = 1;
-    int echo_err = 2;
-    if (quiet) {
+    int echo_error = 2;
+    if (is_quiet) {
         echo_out = 0;
-        echo_err = 0;
+        echo_error = 0;
     }
     Chan<Drained> results = Chan<Drained>(3);
     Chan<int> gate = Chan<int>(1);
     send(gate, 0);
     spawn feed(sink, clone(input), results);
     spawn drain(out_pipe, 1, echo_out, results);
-    spawn drain(err_pipe, 2, echo_err, results);
+    spawn drain(error_pipe, 2, echo_error, results);
     if (deadline_ns > 0) {
         spawn watchdog(child.pid, deadline_ns, gate);
     }
-
     bytes out_data = [];
-    bytes err_data = [];
+    bytes error_data = [];
     bool is_truncated = false;
     int failure = 0;
     for (int arrived in 0 .. 3) {
@@ -968,7 +969,7 @@ pub Result<Completed, Error> run(List<str> argv, bytes input = [], str cwd = "",
             out_data = part.data;
         }
         if (part.which == 2) {
-            err_data = part.data;
+            error_data = part.data;
         }
         if (part.is_truncated) {
             is_truncated = true;
@@ -977,7 +978,6 @@ pub Result<Completed, Error> run(List<str> argv, bytes input = [], str cwd = "",
             failure = part.failure;
         }
     }
-
     // Every stream is at its end; reap the child. This is the only wait.
     os.ExitStatus status = child.wait()?;
     // Record the reaping so a watchdog still looking never signals the pid
@@ -1007,8 +1007,8 @@ pub Result<Completed, Error> run(List<str> argv, bytes input = [], str cwd = "",
         return Result<Completed, Error>.Err(from_errno(failure));
     }
     bool is_ok = code == 0;
-    if (check && !is_ok) {
+    if (should_check && !is_ok) {
         return Result<Completed, Error>.Err(Error.NonZeroExit);
     }
-    return Result<Completed, Error>.Ok(Completed(status, code, is_ok, is_truncated, out_data, err_data));
+    return Result<Completed, Error>.Ok(Completed(status, code, is_truncated, out_data, error_data));
 }

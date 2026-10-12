@@ -1,0 +1,305 @@
+import proc;
+import io;
+import os;
+import timer;
+
+// The program tests/proc/test_proc.sh drives. Every mode prints something
+// Python's subprocess module is asked for too, and the script compares.
+//
+//   copy IN OUT          IN -> `cat` -> OUT through io.copy, one thread
+//                        feeding while this one drains, constant memory
+//   run-input IN OUT     proc.run(["cat"], input: the contents of IN) -> OUT
+//   run SPEC             proc.run, then one line: rc, stdout hex, stderr hex
+//   start SPEC           the same through proc.start and its three streams
+//   timeout MS           proc.run(["sleep", "30"], timeout_ms: MS)
+//   cap                  70 MB of output through run: kept to the 64 MiB cap
+//   write-after-exit     a write after the child has gone
+//
+// SPEC is: [cwd=DIR] [env=NAME=VALUE]... -- PROGRAM ARGUMENT...
+
+void fail(str message) {
+    io.eprint(message);
+    os.exit(2);
+}
+
+// Feeds `source` to the child's input, then closes it so cat reads the end.
+void pump(io.File source, proc.Pipe sink, Chan<int> done) {
+    int moved = -1;
+    match (io.copy(source, sink)) {
+        case Ok(int count): {
+            moved = count;
+        }
+        case Err(io.Error error): {
+            moved = -1;
+        }
+    }
+    Result<bool, io.Error> closed = sink.close();
+    send(done, moved);
+}
+
+// Everything that moves to the feeding thread -- the source file and the
+// pipe -- is bound in the innermost case body, which is the only place a
+// value may be moved from.
+void copy_mode(str input_path, str output_path) {
+    match (proc.start(["cat"])) {
+        case Ok(proc.Proc child): {
+            match (io.open(output_path, mode: io.Mode.Write)) {
+                case Ok(io.File target): {
+                    match (io.open(input_path)) {
+                        case Ok(io.File source): {
+                            Chan<int> done = Chan<int>(1);
+                            proc.Pipe sink = child.take_stdin();
+                            spawn pump(source, sink, done);
+                            match (io.copy(child.stdout, target)) {
+                                case Ok(int count): {
+                                    print("drained " + count.to_str());
+                                }
+                                case Err(io.Error error): {
+                                    fail("drain failed: " + error.to_str());
+                                }
+                            }
+                            print("fed " + recv(done).to_str());
+                            match (child.wait()) {
+                                case Ok(os.ExitStatus status): {
+                                    print("status " + status.to_str());
+                                }
+                                case Err(proc.Error error): {
+                                    fail("wait failed: " + error.to_str());
+                                }
+                            }
+                        }
+                        case Err(io.Error error): {
+                            fail("open input: " + error.to_str());
+                        }
+                    }
+                }
+                case Err(io.Error error): {
+                    fail("open output: " + error.to_str());
+                }
+            }
+        }
+        case Err(proc.Error error): {
+            fail("start failed: " + error.to_str());
+        }
+    }
+}
+
+void run_input_mode(str input_path, str output_path) {
+    match (io.read_bytes(input_path)) {
+        case Ok(bytes data): {
+            match (proc.run(["cat"], input: data, is_quiet: true)) {
+                case Ok(proc.Completed done): {
+                    match (io.write_bytes(output_path, done.stdout)) {
+                        case Ok(int count): {
+                            print("wrote " + count.to_str() + " truncated " + done.is_truncated.to_str());
+                        }
+                        case Err(io.Error error): {
+                            fail("write: " + error.to_str());
+                        }
+                    }
+                }
+                case Err(proc.Error error): {
+                    fail("run failed: " + error.to_str());
+                }
+            }
+        }
+        case Err(io.Error error): {
+            fail("read: " + error.to_str());
+        }
+    }
+}
+
+// SPEC: the working directory, the environment (None if no env= was given)
+// and the command.
+type Spec {
+    str cwd = "";
+    Option<Map<str, str>> env = Option<Map<str, str>>.None;
+    List<str> argv = [];
+}
+
+Spec parse_spec(List<str> words) {
+    Spec spec = Spec();
+    Map<str, str> table = {};
+    bool has_env = false;
+    bool is_command = false;
+    for (str word in words) {
+        if (is_command) {
+            spec.argv.push(word);
+        } else if (word == "--") {
+            is_command = true;
+        } else if (word.starts_with("cwd=")) {
+            spec.cwd = word.substr(4, word.size());
+        } else if (word.starts_with("env=")) {
+            str pair = word.substr(4, word.size());
+            match (pair.index_of("=")) {
+                case Some(int at): {
+                    table.set(pair.substr(0, at), pair.substr(at + 1, pair.size()));
+                    has_env = true;
+                }
+                case None: {
+                    fail("bad env: " + word);
+                }
+            }
+        } else {
+            fail("bad spec word: " + word);
+        }
+    }
+    if (has_env) {
+        spec.env = Option<Map<str, str>>.Some(table);
+    }
+    return spec;
+}
+
+void report(str how, int code, bytes out_data, bytes err_data) {
+    print(how + " " + code.to_str() + " " + out_data.hex() + " " + err_data.hex());
+}
+
+void run_mode(List<str> words) {
+    Spec spec = parse_spec(words);
+    match (proc.run(spec.argv, cwd: spec.cwd, env: spec.env, should_check: false, is_quiet: true)) {
+        case Ok(proc.Completed done): {
+            report("run", done.returncode, done.stdout, done.stderr);
+        }
+        case Err(proc.Error error): {
+            print("run error " + error.to_str());
+        }
+    }
+}
+
+// Reads a stream to its end on its own thread.
+void collect(proc.Pipe source, Chan<bytes> out) {
+    match (source.read_all()) {
+        case Ok(bytes data): {
+            send(out, data);
+        }
+        case Err(io.Error error): {
+            send(out, "read failed".to_bytes());
+        }
+    }
+}
+
+// Standard error is read on another thread, as it has to be: a child that
+// fills it while this one waits for the end of standard output would never
+// finish either.
+void start_mode(List<str> words) {
+    Spec spec = parse_spec(words);
+    match (proc.start(spec.argv, cwd: spec.cwd, env: spec.env)) {
+        case Ok(proc.Proc child): {
+            Result<bool, io.Error> closed = child.stdin.close();
+            Chan<bytes> errors = Chan<bytes>(1);
+            proc.Pipe error_pipe = child.take_stderr();
+            spawn collect(error_pipe, errors);
+            bytes out_data = [];
+            match (child.stdout.read_all()) {
+                case Ok(bytes data): {
+                    out_data = data;
+                }
+                case Err(io.Error error): {
+                    fail("read stdout: " + error.to_str());
+                }
+            }
+            bytes err_data = recv(errors);
+            match (child.wait()) {
+                case Ok(os.ExitStatus status): {
+                    int code = 0;
+                    match (status) {
+                        case Exited(int exit_code): {
+                            code = exit_code;
+                        }
+                        case Signaled(int signal_number): {
+                            code = -signal_number;
+                        }
+                    }
+                    report("run", code, out_data, err_data);
+                }
+                case Err(proc.Error error): {
+                    fail("wait failed: " + error.to_str());
+                }
+            }
+        }
+        case Err(proc.Error error): {
+            print("run error " + error.to_str());
+        }
+    }
+}
+
+void timeout_mode(int milliseconds) {
+    int before = timer.monotonic_ns();
+    match (proc.run(["sleep", "30"], timeout_ms: milliseconds, is_quiet: true)) {
+        case Ok(proc.Completed done): {
+            print("finished?! " + done.returncode.to_str());
+        }
+        case Err(proc.Error error): {
+            int took_ms = (timer.monotonic_ns() - before) / 1000000;
+            print("error " + error.to_str() + " within " + (took_ms < milliseconds + 2000).to_str());
+        }
+    }
+}
+
+void cap_mode() {
+    match (proc.run(["sh", "-c", "head -c 70000000 /dev/zero"], is_quiet: true)) {
+        case Ok(proc.Completed done): {
+            print("kept " + done.stdout.size().to_str() + " truncated " + done.is_truncated.to_str() + " rc " + done.returncode.to_str());
+        }
+        case Err(proc.Error error): {
+            print("error " + error.to_str());
+        }
+    }
+}
+
+void write_after_exit() {
+    match (proc.start(["true"])) {
+        case Ok(proc.Proc child): {
+            match (child.wait()) {
+                case Ok(os.ExitStatus status): {
+                    print("status " + status.to_str());
+                }
+                case Err(proc.Error error): {
+                    fail("wait failed: " + error.to_str());
+                }
+            }
+            match (child.stdin.write("late".to_bytes())) {
+                case Ok(int count): {
+                    print("wrote " + count.to_str());
+                }
+                case Err(io.Error error): {
+                    print("write error " + proc.error_of(error).to_str());
+                }
+            }
+        }
+        case Err(proc.Error error): {
+            fail("start failed: " + error.to_str());
+        }
+    }
+}
+
+List<str> words = os.arguments();
+if (words.size() < 2) {
+    fail("usage: t_proc MODE ...");
+}
+str mode = words[1];
+List<str> rest = words.slice(2, words.size());
+if (mode == "copy" && rest.size() == 2) {
+    copy_mode(rest[0], rest[1]);
+} else if (mode == "run-input" && rest.size() == 2) {
+    run_input_mode(rest[0], rest[1]);
+} else if (mode == "run") {
+    run_mode(rest);
+} else if (mode == "start") {
+    start_mode(rest);
+} else if (mode == "timeout" && rest.size() == 1) {
+    match (rest[0].parse_int()) {
+        case Some(int milliseconds): {
+            timeout_mode(milliseconds);
+        }
+        case None: {
+            fail("timeout: not a number");
+        }
+    }
+} else if (mode == "cap") {
+    cap_mode();
+} else if (mode == "write-after-exit") {
+    write_after_exit();
+} else {
+    fail("unknown mode " + mode);
+}
