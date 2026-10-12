@@ -951,7 +951,7 @@ impl Lowerer {
         if !args.named.is_empty() {
             return Err(Diag::new(span, format!("`{m}` takes no named arguments")));
         }
-        // `Option<void>` has no payload at all (mono.rs drops a void one):
+        // `Option<void>` has no payload at all (mono/ drops a void one):
         // it can answer `is_some`, and has nothing for `or` to hand back.
         let inner = self.variant_surface[tid as usize]
             .iter()

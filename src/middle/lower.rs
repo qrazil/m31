@@ -725,7 +725,7 @@ fn value_enums(p: &Program, forced: &BTreeSet<String>) -> HashMap<String, u32> {
 
     // A container's element, key or value type rides in one machine word.
     // Monomorphisation planted the type arguments as the declaration's
-    // `$t0`/`$t1` fields (src/middle/mono.rs, `builtin_decl`).
+    // `$t0`/`$t1` fields (src/middle/mono/, `builtin_decl`).
     for t in &p.types {
         let container = ["Array$", "List$", "Map$", "Chan$"]
             .iter()

@@ -251,7 +251,7 @@ fn compile(entry: &str, mode: &str) -> Result<String, modules::Located> {
 /// filesystem -- they test the compiler, not the loader.
 fn finish(prog: ast::Program, mode: &str) -> Result<String, diag::Diag> {
     // Generics are erased before lowering, which is why the IR has never
-    // needed to know about them. See src/middle/mono.rs.
+    // needed to know about them. See src/middle/mono/.
     lower::check_destructor_decls(&prog)?;
     lower::check_reserved_decls(&prog)?;
     let prog = mono::Mono::run(prog)?;

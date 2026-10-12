@@ -187,7 +187,7 @@ impl Lowerer {
 
         // Exact error types, for a Result.
         if is_result {
-            // A `void` payload has been dropped (mono.rs), so an empty one
+            // A `void` payload has been dropped (mono/), so an empty one
             // is `void`.
             let err_of = |lw: &Self, t: u32| {
                 lw.variant_surface[t as usize][1]

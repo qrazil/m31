@@ -381,7 +381,7 @@ src/                   the compiler, one folder per pipeline stage
                        (mod, types, decl, stmt, expr: recursive descent + Pratt, C
                        precedence), ast.rs, diag.rs, width.rs
   resolve/             modules.rs (import lookup), deps.rs (remote and path deps), stdlib.rs
-  middle/              mono.rs (monomorphisation; generics are erased here),
+  middle/              mono/ (monomorphisation; generics are erased here),
                        lower.rs + lower/ (typecheck and lower in ONE pass, deliberately fused),
                        hoist.rs, ir.rs (docs/ir-v0.md made real)
   back/                emit_c/: post-refcount IR to C (mod, types, statics, func, inst,
