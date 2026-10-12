@@ -16,8 +16,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::*;
-use crate::diag::{Diag, Span};
+use crate::front::ast::*;
+use crate::front::diag::{Diag, Span};
 
 pub struct Mono {
     /// Generic declarations, by name.
@@ -293,7 +293,7 @@ impl Mono {
     /// names the reader's own module uses, which is all a receiver can be.
     fn show_out(&self, name: &str) -> String {
         let Some((base, args)) = self.shown.get(name) else {
-            return crate::ast::bare(name).to_string();
+            return crate::front::ast::bare(name).to_string();
         };
         let args: Vec<String> = args
             .iter()
@@ -302,7 +302,7 @@ impl Mono {
                 t => self.ty_key(*t),
             })
             .collect();
-        format!("{}<{}>", crate::ast::bare(base), args.join(", "))
+        format!("{}<{}>", crate::front::ast::bare(base), args.join(", "))
     }
 
     /// Resolve a type written inside a declaration into a concrete output
@@ -367,7 +367,7 @@ impl Mono {
                     span,
                     format!(
                         "type `{}` takes {} type argument(s), found {}",
-                        crate::ast::bare(&e.name),
+                        crate::front::ast::bare(&e.name),
                         decl.tparams.len(),
                         args.len()
                     ),
@@ -381,7 +381,7 @@ impl Mono {
         if !args.is_empty() {
             return Err(Diag::new(
                 span,
-                format!("type `{}` is not generic", crate::ast::bare(&e.name)),
+                format!("type `{}` is not generic", crate::front::ast::bare(&e.name)),
             ));
         }
         Ok(self.intern(e.name, Vec::new()))
@@ -415,7 +415,7 @@ impl Mono {
                     span,
                     format!(
                         "`{}` cannot be instantiated with `void`: its field `{}` would hold no value",
-                        crate::ast::bare(&decl.name),
+                        crate::front::ast::bare(&decl.name),
                         f.name
                     ),
                 ));
@@ -511,7 +511,7 @@ impl Mono {
                 span,
                 format!(
                     "function `{}` takes {} type argument(s), found {}",
-                    crate::ast::bare(name),
+                    crate::front::ast::bare(name),
                     decl.tparams.len(),
                     args.len()
                 ),
@@ -560,7 +560,7 @@ impl Mono {
             .recv
             .as_deref()
             .expect("receiver type parameters need a receiver");
-        let shown = crate::ast::bare(r);
+        let shown = crate::front::ast::bare(r);
         let Some(d) = self.decls.get(r) else {
             let suffix = format!("#{r}");
             if let Some(d) = self.decls.values().find(|d| d.name.ends_with(&suffix)) {
@@ -1076,7 +1076,7 @@ impl Mono {
                          slot holds one code address and a generic function has one per \
                          instantiation. Wrap the instantiation you want in a function of \
                          its own and pass that",
-                        crate::ast::bare(n)
+                        crate::front::ast::bare(n)
                     ),
                 ))
             }
@@ -1197,7 +1197,7 @@ impl Mono {
                         // checks the call against `lib`'s privacy; it builds
                         // `lib#first$int` from it, which is the
                         // instantiation's name.
-                        let bare = crate::ast::bare(&mangled).to_string();
+                        let bare = crate::front::ast::bare(&mangled).to_string();
                         return Ok(Expr::MethodCall(
                             obj.clone(),
                             bare,
@@ -1439,7 +1439,7 @@ impl Mono {
                             "cannot infer type parameter `{tp}` of `{}` from its arguments or \
                              from where its value goes; bind an argument, or the result, to a \
                              local with a written type first",
-                            crate::ast::bare(&decl.name)
+                            crate::front::ast::bare(&decl.name)
                         ),
                     ))
                 }

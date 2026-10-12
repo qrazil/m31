@@ -2,9 +2,9 @@
 //! -- calls, `new`, binary operators, and their supporting helpers.
 
 use super::{a_or_an, Lowerer, Val, BUILTIN_FNS};
-use crate::ast::*;
-use crate::diag::{Diag, Span};
-use crate::ir::{ArithOp, Cmp, Inst, IrTy, Term, Value};
+use crate::front::ast::*;
+use crate::front::diag::{Diag, Span};
+use crate::middle::ir::{ArithOp, Cmp, Inst, IrTy, Term, Value};
 use std::collections::HashMap;
 
 impl Lowerer {
@@ -97,7 +97,7 @@ impl Lowerer {
             if !self.assignable(v.ty, p.ty) {
                 return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
             }
-            // The method itself is user code (src/lower/hold.rs).
+            // The method itself is user code (src/middle/lower/hold.rs).
             let v = self.hold(a, v, true);
             vals.push(v.val());
         }
@@ -555,7 +555,7 @@ impl Lowerer {
             return Ok(None);
         }
         let written = match self.shown.get(name) {
-            Some((generic, _)) => crate::ast::bare(generic).to_string(),
+            Some((generic, _)) => crate::front::ast::bare(generic).to_string(),
             None => name.to_string(),
         };
         let (rtid, _) = self.recv.expect("checked above");
@@ -731,7 +731,7 @@ impl Lowerer {
                 if !self.assignable(v.ty, p.ty) {
                     return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
                 }
-                // The dispatch itself is user code (src/lower/hold.rs).
+                // The dispatch itself is user code (src/middle/lower/hold.rs).
                 let v = self.hold(a, v, true);
                 vals.push(v.val());
             }
@@ -796,7 +796,7 @@ impl Lowerer {
             if !self.assignable(v.ty, p.ty) {
                 return Err(Diag::new(a.span(), self.mismatch(p.ty, v.ty)));
             }
-            // The method itself is user code (src/lower/hold.rs).
+            // The method itself is user code (src/middle/lower/hold.rs).
             let v = self.hold(a, v, true);
             vals.push(v.val());
         }
@@ -1480,7 +1480,7 @@ impl Lowerer {
                         // `m` may be a generic method's instantiation, which
                         // monomorphisation renamed; say it as it was written.
                         let m = match self.shown.get(m) {
-                            Some((generic, _)) => crate::ast::bare(generic).to_string(),
+                            Some((generic, _)) => crate::front::ast::bare(generic).to_string(),
                             None => m.clone(),
                         };
                         return Err(Diag::new(
@@ -2661,7 +2661,10 @@ impl Lowerer {
             // strip the reserved `__`, prefix `rt_`. No table of special
             // cases, and a runtime function nobody wrote is a link error
             // naming the exact symbol. See docs/stdlib-seam.md.
-            format!("rt_{}", crate::ast::bare(name).trim_start_matches('_'))
+            format!(
+                "rt_{}",
+                crate::front::ast::bare(name).trim_start_matches('_')
+            )
         } else {
             match name {
                 "concat" => "rt_concat".to_string(),

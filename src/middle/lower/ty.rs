@@ -3,8 +3,8 @@
 //! other seams build on.
 
 use super::{ir_ty, Lowerer};
-use crate::ast::*;
-use crate::ir::IrTy;
+use crate::front::ast::*;
+use crate::middle::ir::IrTy;
 
 impl Lowerer {
     /// Find the `Ty` for an already-declared type, by name.
@@ -102,9 +102,9 @@ impl Lowerer {
         let head = match self.shown.get(head) {
             Some((base, args)) => {
                 let args: Vec<String> = args.iter().map(|a| self.tyname(*a)).collect();
-                format!("{}<{}>", crate::ast::bare(base), args.join(", "))
+                format!("{}<{}>", crate::front::ast::bare(base), args.join(", "))
             }
-            None => crate::ast::bare(head).to_string(),
+            None => crate::front::ast::bare(head).to_string(),
         };
         match rest {
             // The method may be an instantiation too: `Picker.pick<int>`
@@ -112,7 +112,11 @@ impl Lowerer {
             Some(m) => match self.shown.get(m) {
                 Some((base, args)) => {
                     let args: Vec<String> = args.iter().map(|a| self.tyname(*a)).collect();
-                    format!("{head}.{}<{}>", crate::ast::bare(base), args.join(", "))
+                    format!(
+                        "{head}.{}<{}>",
+                        crate::front::ast::bare(base),
+                        args.join(", ")
+                    )
                 }
                 None => format!("{head}.{m}"),
             },
@@ -316,7 +320,7 @@ impl Lowerer {
                 return Some(format!(
                     "`{}` is private to `{}`, so its method `{}` cannot \
                      satisfy `{}` here",
-                    crate::ast::bare(fname),
+                    crate::front::ast::bare(fname),
                     self.type_module[ft as usize],
                     m.name,
                     self.show_name(&self.typedefs[tt as usize].name)

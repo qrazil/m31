@@ -356,7 +356,7 @@ start."*
   hand-written `name.want`. Checked by `gates.sh`, not `run.sh`; a `name.out`
   lets the meaning gate run the program too.
 
-The unit tests in `src/tests.rs` cover what the corpus structurally cannot
+The unit tests in `src/tests/` cover what the corpus structurally cannot
 see. A redundant retain/release pair, an unreachable block or a stray
 temporary all still produce correct output, so the refcount tests assert on
 the IR directly.
@@ -376,15 +376,16 @@ rename.sh              renames the language and moves the corpus with it
 build.sh               compile a source file to an executable
 gates.sh               every gate, run after every commit (includes `m31c lint`)
 run.sh                 the differential corpus runner
-src/                   the compiler
-  lexer.rs             hand-written; type names are keywords
-  parser.rs            recursive descent + Pratt, C precedence
-  mono.rs              monomorphisation; generics are erased here
-  lower.rs             typecheck and lower in ONE pass, deliberately fused
-  ir.rs                docs/ir-v0.md made real
-  emit_c.rs            post-refcount IR to C
-  fmt.rs               the formatter: one layout, no options
-  tests.rs             unit tests, mostly IR assertions
+src/                   the compiler, one folder per pipeline stage
+  front/               lexer.rs (hand-written; type names are keywords), parser.rs
+                       (recursive descent + Pratt, C precedence), ast.rs, diag.rs, width.rs
+  resolve/             modules.rs (import lookup), deps.rs (remote and path deps), stdlib.rs
+  middle/              mono.rs (monomorphisation; generics are erased here),
+                       lower.rs + lower/ (typecheck and lower in ONE pass, deliberately fused),
+                       hoist.rs, ir.rs (docs/ir-v0.md made real)
+  back/                emit_c.rs: post-refcount IR to C
+  tools/               fmt.rs (the formatter: one layout, no options), lint.rs
+  tests/               unit tests by area, mostly IR assertions
 runtime/
   rt.h rt.c            the runtime — a SEPARATE translation unit, see §7.1
   rc_debug.h           refcount invariant, compiled in under -DRC_DEBUG
@@ -443,7 +444,7 @@ which was accepted on exactly this basis; nothing else moves, so a section
 divider stays in its section. A comment block touching the declaration below
 it travels with it; one with a blank line after it stays where it is. String
 literals are printed as they were spelled. **Lines are not wrapped** — gofmt's
-choice, not rustfmt's; see the header of `src/fmt.rs`.
+choice, not rustfmt's; see the header of `src/tools/fmt.rs`.
 
 Two properties are gated rather than asserted, because a formatter that
 quietly alters a program is worse than no formatter:

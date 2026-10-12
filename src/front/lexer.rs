@@ -5,7 +5,7 @@
 //! two tokens of lookahead and no symbol-table feedback -- the thing C needs
 //! its lexer hack for. See docs/ir-v0.md §7.3.
 
-use crate::diag::{Diag, Span};
+use crate::front::diag::{Diag, Span};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok {

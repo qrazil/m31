@@ -3,7 +3,7 @@
 //! Deliberately thin: the AST exists to be typechecked and lowered, and every
 //! interesting transformation happens on the IR instead. See docs/ir-v0.md §4.
 
-use crate::diag::Span;
+use crate::front::diag::Span;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ty {

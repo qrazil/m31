@@ -2,7 +2,7 @@
 //! may see, and the diagnostics for reaching past that boundary.
 
 use super::{Lowerer, Sig, DESTRUCTOR};
-use crate::diag::{Diag, Span};
+use crate::front::diag::{Diag, Span};
 
 impl Lowerer {
     /// Does `module` import a module called `name`?
@@ -215,7 +215,7 @@ impl Lowerer {
     ) -> Result<(), Diag> {
         let sig = self.sigs.get(key).expect("fn_ref_name found it");
         let owner = &sig.module;
-        let bare = crate::ast::bare(key);
+        let bare = crate::front::ast::bare(key);
         let ours = owner.is_empty() || *owner == self.cur_module;
         // `shown` carries the spelling, and the two spellings have different
         // rules. A BARE name means this module's declaration and nothing

@@ -42,8 +42,8 @@
 //! consumed by the next one before anything else runs.
 
 use super::{Lowerer, Val, DESTRUCTOR};
-use crate::ast::*;
-use crate::ir::Inst;
+use crate::front::ast::*;
+use crate::middle::ir::Inst;
 
 impl Lowerer {
     /// Hold `v`, the value `e` evaluated to, if it is borrowed from a place

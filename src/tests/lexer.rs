@@ -432,7 +432,7 @@ fn quote_lexes_back_to_the_same_string() {
     for &c in &cs {
         all.push(c);
         for s in [c.to_string(), format!("a{c}b"), format!("{c}{c}")] {
-            let q = crate::lexer::quote(&s);
+            let q = crate::front::lexer::quote(&s);
             assert_eq!(
                 toks(&q),
                 vec![Tok::Str(s.clone()), Tok::Eof],
@@ -441,7 +441,7 @@ fn quote_lexes_back_to_the_same_string() {
         }
     }
     assert_eq!(
-        toks(&crate::lexer::quote(&all)),
+        toks(&crate::front::lexer::quote(&all)),
         vec![Tok::Str(all), Tok::Eof]
     );
 }

@@ -2,9 +2,9 @@
 //! ownership rules it depends on: thread transfer and payload binding.
 
 use super::{Lowerer, PayloadBind, Val, NO_CLONE, OWNER_MOVES};
-use crate::ast::*;
-use crate::diag::{Diag, Span};
-use crate::ir::{Inst, Value};
+use crate::front::ast::*;
+use crate::front::diag::{Diag, Span};
+use crate::middle::ir::{Inst, Value};
 
 impl Lowerer {
     /// Hand a reference across a thread boundary -- `send` or `spawn`.

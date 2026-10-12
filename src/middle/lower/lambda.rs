@@ -2,9 +2,9 @@
 //! method a lambda actually becomes.
 
 use super::{Lowerer, Sig, Val, BUILTIN_FNS};
-use crate::ast::*;
-use crate::diag::{Diag, Span};
-use crate::ir::{Inst, IrTy, TypeDef};
+use crate::front::ast::*;
+use crate::front::diag::{Diag, Span};
+use crate::middle::ir::{Inst, IrTy, TypeDef};
 
 impl Lowerer {
     /// The function an expression names, when it names one: its key in
@@ -493,7 +493,7 @@ impl Lowerer {
         if let Expr::Call(name, _, span) = e {
             if self.sibling_method(name).is_some() {
                 let written = match self.shown.get(name) {
-                    Some((generic, _)) => crate::ast::bare(generic).to_string(),
+                    Some((generic, _)) => crate::front::ast::bare(generic).to_string(),
                     None => name.clone(),
                 };
                 if self.sigs.contains_key(&self.resolve_fn(&written))

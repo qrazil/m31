@@ -2,9 +2,9 @@
 //! forwarders, and the per-function entry point into lowering a body.
 
 use super::{quoted, Lowerer, Sig, BUILTIN_FNS, DESTRUCTOR, ENTRY};
-use crate::ast::*;
-use crate::diag::{Diag, Span};
-use crate::ir::{self, Block, Term};
+use crate::front::ast::*;
+use crate::front::diag::{Diag, Span};
+use crate::middle::ir::{self, Block, Term};
 use std::collections::HashMap;
 
 impl Lowerer {
@@ -88,7 +88,7 @@ impl Lowerer {
         let mut seen: HashMap<String, String> = HashMap::new();
         for f in p.funcs.iter().chain(forwarders.iter()) {
             let key = f.key();
-            let c = crate::emit_c::c_ident(&key);
+            let c = crate::back::emit_c::c_ident(&key);
             if let Some(other) = seen.insert(c, key.clone()) {
                 if other != key {
                     return Err(Diag::new(
@@ -96,8 +96,8 @@ impl Lowerer {
                         format!(
                             "`{}` and `{}` would both be emitted as the same \
                              C function; rename one",
-                            crate::ast::bare(&key),
-                            crate::ast::bare(&other)
+                            crate::front::ast::bare(&key),
+                            crate::front::ast::bare(&other)
                         ),
                     ));
                 }

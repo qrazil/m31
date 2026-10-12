@@ -2,9 +2,9 @@
 //! `Result`, `Map`, channels and the primitive types.
 
 use super::{Lowerer, Val};
-use crate::ast::*;
-use crate::diag::{Diag, Span};
-use crate::ir::{ArithOp, Cmp, Inst, IrTy, Term, Value};
+use crate::front::ast::*;
+use crate::front::diag::{Diag, Span};
+use crate::middle::ir::{ArithOp, Cmp, Inst, IrTy, Term, Value};
 
 impl Lowerer {
     /// `s.size()`. The only method a `str` has for now; the string library
@@ -1635,7 +1635,7 @@ impl Lowerer {
         arg: Value,
         span: Span,
     ) -> Result<Value, Diag> {
-        let fm = crate::stdlib::FLOATFMT;
+        let fm = crate::resolve::stdlib::FLOATFMT;
         // The module converting floats cannot convert one itself: the call
         // would be to itself, and it would recurse until the stack ran out.
         if self.cur_module == fm {
@@ -1670,7 +1670,7 @@ impl Lowerer {
     /// One borrowed argument, an owned reference back -- the shape of
     /// `float_text`, and guarded the same two ways.
     fn text_call(&mut self, name: &str, arg: Value, span: Span) -> Result<Value, Diag> {
-        let tm = crate::stdlib::TEXT;
+        let tm = crate::resolve::stdlib::TEXT;
         // The module cannot use what it defines through the method spelling:
         // the call would be to itself.
         if self.cur_module == tm {

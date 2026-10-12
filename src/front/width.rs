@@ -26,7 +26,7 @@
 //! * look a code point up in `WIDTH_RANGES`, default 1 (`unicode.char_width`).
 //!
 //! A regeneration of the tables for a new Unicode version therefore lands in
-//! both at once, and `src/tests.rs` asserts the parse still finds them with
+//! both at once, and `src/tests/` asserts the parse still finds them with
 //! the range counts the generator recorded. If a future edit renames or
 //! reshapes a table, the parse yields nothing and every character falls back
 //! to width 1 -- the behaviour before this module existed, so a diagnostic is
@@ -77,7 +77,7 @@ struct Tables {
 fn tables() -> &'static Tables {
     static T: OnceLock<Tables> = OnceLock::new();
     T.get_or_init(|| {
-        let src = crate::stdlib::source("unicode").unwrap_or("");
+        let src = crate::resolve::stdlib::source("unicode").unwrap_or("");
         Tables {
             width: parse_table(src, "WIDTH_RANGES"),
             gcb: parse_table(src, "GCB_RANGES"),

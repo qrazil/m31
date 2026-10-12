@@ -84,12 +84,12 @@ impl Diag {
         // draws it in cells: `漢` takes two of them and a combining mark
         // takes none, so one space per code point lands the caret in the
         // wrong place in both directions. Same rule as `unicode.width`, off
-        // the same tables -- see src/width.rs.
+        // the same tables -- see src/front/width.rs.
         let before: String = shown
             .chars()
             .take(self.span.col.saturating_sub(1) as usize)
             .collect();
-        let caret = " ".repeat(crate::width::display_width(&before));
+        let caret = " ".repeat(crate::front::width::display_width(&before));
         format!("{head}\n{pad} |\n{num} | {shown}\n{pad} | {caret}^")
     }
 }

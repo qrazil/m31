@@ -2,9 +2,9 @@
 //! snapshot/restore their branches share.
 
 use super::{stmt_span, Binding, LoopCtx, Lowerer, PayloadBind};
-use crate::ast::*;
-use crate::diag::{Diag, Span};
-use crate::ir::{ArithOp, BlockId, Cmp, Inst, IrTy, Term, Value};
+use crate::front::ast::*;
+use crate::front::diag::{Diag, Span};
+use crate::middle::ir::{ArithOp, BlockId, Cmp, Inst, IrTy, Term, Value};
 use std::collections::HashMap;
 
 impl Lowerer {
@@ -83,7 +83,7 @@ impl Lowerer {
                         let (owner, owner_tid) = if path.len() == 1 {
                             (robj, rtid)
                         } else {
-                            // Not held (src/lower/hold.rs), though read out
+                            // Not held (src/middle/lower/hold.rs), though read out
                             // of the receiver before the value runs: an
                             // embedded field has no name a program can
                             // write, so it keeps the object it was built
@@ -332,7 +332,7 @@ impl Lowerer {
                 self.refuse_const_write(obj, *span)?;
                 let o = self.lower_expr(obj)?;
                 // `h.ps[i] = f(h)`: the index or the value can replace the
-                // collection before the store (src/lower/hold.rs).
+                // collection before the store (src/middle/lower/hold.rs).
                 let later = self.may_run_code(index, true) || self.may_run_code(value, true);
                 let o = self.hold(obj, o, later);
                 // No refcounts to move: a byte is a value. The runtime traps
@@ -438,7 +438,7 @@ impl Lowerer {
                 let o = self.lower_expr(obj)?;
                 // `h.p.x = f(h)`: the value can replace `h.p` before the
                 // store, which must then land in the object read first --
-                // alive, not freed (src/lower/hold.rs).
+                // alive, not freed (src/middle/lower/hold.rs).
                 let o = self.hold(obj, o, self.may_run_code(value, true));
                 let Some(tid) = self.tdef_of(o.ty) else {
                     return Err(Diag::new(
@@ -1424,7 +1424,7 @@ impl Lowerer {
                 // tag can ever reach that range, so the two tests can never
                 // both pass. See `TypeDef::os_errno_variant`.
                 let (cmp, k_val) = if self.typedefs[tid as usize].os_errno_variant(tag) {
-                    (Cmp::Ge, crate::ir::OS_ERRNO_TAG_BASE)
+                    (Cmp::Ge, crate::middle::ir::OS_ERRNO_TAG_BASE)
                 } else {
                     (Cmp::Eq, tag as i64)
                 };

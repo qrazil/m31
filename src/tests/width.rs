@@ -1,20 +1,20 @@
 #[test]
 fn the_width_tables_are_the_ones_lib_unicode_carries() {
-    // src/width.rs has no tables of its own: it parses WIDTH_RANGES and
+    // src/front/width.rs has no tables of its own: it parses WIDTH_RANGES and
     // GCB_RANGES out of the embedded text of lib/text/unicode.m31, so the compiler
     // and the standard library cannot drift apart on what a column is. The
     // counts are the ones the generator recorded in that file's comments; a
     // regeneration for a new Unicode version changes both the numbers here
     // and the prose there, together. A rename or a reshape of either table
     // yields zero, which is what this catches.
-    let (width, gcb) = crate::width::table_sizes();
+    let (width, gcb) = crate::front::width::table_sizes();
     assert_eq!(width, 494, "WIDTH_RANGES ranges");
     assert_eq!(gcb, 683, "GCB_RANGES ranges");
 }
 
 #[test]
 fn display_width_measures_clusters_not_code_points() {
-    let w = crate::width::display_width;
+    let w = crate::front::width::display_width;
     assert_eq!(w("abc"), 3);
     // East Asian Wide.
     assert_eq!(w("漢字"), 4);

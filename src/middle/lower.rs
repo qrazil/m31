@@ -16,9 +16,9 @@ use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
-use crate::ast::*;
-use crate::diag::{Diag, Span};
-use crate::ir::{self, BlockId, Inst, IrTy, Term, TypeDef, Value};
+use crate::front::ast::*;
+use crate::front::diag::{Diag, Span};
+use crate::middle::ir::{self, BlockId, Inst, IrTy, Term, TypeDef, Value};
 
 mod builtins;
 mod consts;
@@ -40,7 +40,7 @@ type Binding = (Ty, Value, bool);
 /// A lowered expression, plus whether we are holding a +1 on it that somebody
 /// must release. Literals are immortal and variables are borrowed from their
 /// local, so only a call result arrives owned -- or a borrowed operand that
-/// had to be held across a call (src/lower/hold.rs).
+/// had to be held across a call (src/middle/lower/hold.rs).
 #[derive(Clone, Copy)]
 struct Val {
     /// `None` for a void expression. A void call has no value, and inventing
@@ -200,7 +200,7 @@ pub struct Lowerer {
     iface_slots: Vec<ir::Slot>,
     strings: Vec<String>,
     /// Module constants by qualified name, with their computed values
-    /// (src/lower/consts.rs).
+    /// (src/middle/lower/consts.rs).
     consts: HashMap<String, ConstInfo>,
     /// The same keys in declaration order, so constants are checked -- and
     /// their static objects numbered -- the same way on every run.
@@ -261,7 +261,7 @@ pub struct Lowerer {
     ret_ty: Ty,
     /// Whether any type declares a destructor. Without one, releasing a
     /// reference runs only the runtime, which decides whether a built-in
-    /// method can run user code (src/lower/hold.rs, `releases`).
+    /// method can run user code (src/middle/lower/hold.rs, `releases`).
     has_destructors: bool,
     /// The synthesised wrapper type for each (function, interface) pair a
     /// function's name has been used as a value at, by (function key,
@@ -312,7 +312,7 @@ const BUILTIN_FNS: &[&str] = &["print", "concat", "clone", "send", "recv", "clos
 
 /// The name of the synthesised function whose body is the program: the
 /// statements at the entry file's top level. It starts with `$`, which no
-/// identifier may, so no program can name it (src/emit_c.rs mangles it).
+/// identifier may, so no program can name it (src/back/emit_c.rs mangles it).
 const ENTRY: &str = "$main";
 
 /// The reserved method name of a destructor: `void File.drop() { .. }` runs
@@ -637,7 +637,7 @@ pub fn lower_program(p: &Program) -> Result<ir::Module, Diag> {
                 // that does nothing opaque to it. Pure IR-to-IR, after
                 // lowering and before `verify`, so `verify` checks this
                 // pass's output too.
-                crate::hoist::hoist_seq_metadata(&mut m);
+                crate::middle::hoist::hoist_seq_metadata(&mut m);
                 m.verify();
                 return Ok(m);
             }
@@ -725,7 +725,7 @@ fn value_enums(p: &Program, forced: &BTreeSet<String>) -> HashMap<String, u32> {
 
     // A container's element, key or value type rides in one machine word.
     // Monomorphisation planted the type arguments as the declaration's
-    // `$t0`/`$t1` fields (src/mono.rs, `builtin_decl`).
+    // `$t0`/`$t1` fields (src/middle/mono.rs, `builtin_decl`).
     for t in &p.types {
         let container = ["Array$", "List$", "Map$", "Chan$"]
             .iter()
@@ -916,7 +916,7 @@ impl Lowerer {
         // Type table first: signatures and field types may refer to any type,
         // including one declared later in the file.
         for t in &p.types {
-            self.check_not_import(&t.module, crate::ast::bare(&t.name), t.span)
+            self.check_not_import(&t.module, crate::front::ast::bare(&t.name), t.span)
                 .map_err(|d| d.in_module(&t.module))?;
             if self.typedefs.iter().any(|d| d.name == t.name) {
                 return Err(Diag::new(
@@ -1042,7 +1042,7 @@ impl Lowerer {
             // the worst failure mode for someone who has written C before.
             // Names are interned module-qualified by now, so compare the bare
             // one; comparing `f.name` itself had quietly stopped matching.
-            if f.recv.is_none() && crate::ast::bare(&f.name) == "main" {
+            if f.recv.is_none() && crate::front::ast::bare(&f.name) == "main" {
                 return Err(Diag::new(
                     f.span,
                     "there is no `main`: statements at the top level are the program",
@@ -1052,18 +1052,18 @@ impl Lowerer {
             // In every module, not only the entry file. Allowing it in an
             // imported module would give `lib.print(..)` and bare `print(..)`
             // two meanings a reader has to keep apart, for no gain.
-            if f.recv.is_none() && BUILTIN_FNS.contains(&crate::ast::bare(&f.name)) {
+            if f.recv.is_none() && BUILTIN_FNS.contains(&crate::front::ast::bare(&f.name)) {
                 return Err(Diag::new(
                     f.span,
                     format!(
                         "`{}` is a builtin function; shadowing is not allowed, rename this one",
-                        crate::ast::bare(&f.name)
+                        crate::front::ast::bare(&f.name)
                     ),
                 )
                 .in_module(&f.module));
             }
             if f.recv.is_none() {
-                self.check_not_import(&f.module, crate::ast::bare(&f.name), f.span)
+                self.check_not_import(&f.module, crate::front::ast::bare(&f.name), f.span)
                     .map_err(|d| d.in_module(&f.module))?;
             }
             if self.sigs.contains_key(&f.key()) {
@@ -1138,7 +1138,7 @@ impl Lowerer {
             if self.typedefs.iter().any(|d| d.name == f.name) {
                 return Err(Diag::new(
                     f.span,
-                    format!("`{}` is already a type", crate::ast::bare(&f.name)),
+                    format!("`{}` is already a type", crate::front::ast::bare(&f.name)),
                 ));
             }
             self.sigs.insert(
@@ -1199,7 +1199,7 @@ impl Lowerer {
         };
 
         self.has_destructors = self.any_destructor();
-        // Only the entry file may hold statements (src/modules.rs), so these
+        // Only the entry file may hold statements (src/resolve/modules.rs), so these
         // names belong to exactly one body: this one.
         self.entry_module = p.module.clone();
         self.entry_locals = entry
@@ -1292,14 +1292,19 @@ impl Lowerer {
         // Every `prim`'s runtime symbol, by the same name-transform rule
         // `lower_call` applies at its own call sites (docs/stdlib-seam.md
         // §2) -- computed once, here, rather than re-derived ad hoc wherever
-        // it is needed later (src/emit_c.rs, for the blocking-FFI wrap; see
+        // it is needed later (src/back/emit_c.rs, for the blocking-FFI wrap; see
         // `ir::Module::prim_targets`'s own doc comment for why this can't be
         // recovered from an `Inst::Call`'s name alone).
         let prim_targets: std::collections::HashSet<String> = self
             .sigs
             .iter()
             .filter(|(_, sig)| sig.is_prim)
-            .map(|(name, _)| format!("rt_{}", crate::ast::bare(name).trim_start_matches('_')))
+            .map(|(name, _)| {
+                format!(
+                    "rt_{}",
+                    crate::front::ast::bare(name).trim_start_matches('_')
+                )
+            })
             .collect();
 
         Ok(ir::Module {

@@ -48,7 +48,7 @@
 //! read once, in a new block spliced in before the loop, and every access
 //! inside the loop is rewritten to use those two values directly.
 
-use crate::ir::{Block, BlockId, Func, Inst, IrTy, Module, Term, Value};
+use crate::middle::ir::{Block, BlockId, Func, Inst, IrTy, Module, Term, Value};
 use std::collections::{HashMap, HashSet};
 
 /// Runtime functions this pass already knows are safe inside a loop it is

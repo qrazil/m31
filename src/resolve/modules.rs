@@ -15,10 +15,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::ast::{Program, TyExpr};
-use crate::diag::{Diag, Span};
-use crate::lexer::Lexer;
-use crate::parser::Parser;
+use crate::front::ast::{Program, TyExpr};
+use crate::front::diag::{Diag, Span};
+use crate::front::lexer::Lexer;
+use crate::front::parser::Parser;
 
 /// A diagnostic plus the file it came from. With several modules a bare
 /// line:col does not identify anything.
@@ -63,7 +63,7 @@ pub fn display_path(name: &str) -> String {
 /// line instead of an empty file.
 pub fn read_source(path: &str) -> String {
     if let Some(name) = path.strip_prefix('<').and_then(|p| p.strip_suffix('>')) {
-        if let Some(text) = crate::stdlib::embedded(name) {
+        if let Some(text) = crate::resolve::stdlib::embedded(name) {
             return text.to_string();
         }
     }
@@ -92,8 +92,8 @@ fn valid_module_name(n: &str) -> bool {
 /// `str.from_chars(xs)` -- so the token is enough. A program that uses
 /// `chars` as a name of its own loads the module for nothing, which costs
 /// compile time and nothing else.
-fn mentions_text(toks: &[crate::lexer::Token]) -> bool {
-    use crate::lexer::Tok;
+fn mentions_text(toks: &[crate::front::lexer::Token]) -> bool {
+    use crate::front::lexer::Tok;
     toks.iter()
         .any(|t| matches!(&t.tok, Tok::Ident(n) if n == "chars" || n == "from_chars"))
 }
@@ -109,8 +109,8 @@ fn mentions_text(toks: &[crate::lexer::Token]) -> bool {
 /// conservative direction costs compile time; in the other it would be a
 /// missing function, which the lowering reports as a compiler bug rather than
 /// leaving to the C compiler.
-fn mentions_float(toks: &[crate::lexer::Token]) -> bool {
-    use crate::lexer::Tok;
+fn mentions_float(toks: &[crate::front::lexer::Token]) -> bool {
+    use crate::front::lexer::Tok;
     toks.iter().any(|t| match &t.tok {
         Tok::KwFloat | Tok::Float(_) => true,
         Tok::Ident(n) => n == "parse_float",
@@ -217,7 +217,7 @@ pub fn load(entry: &str) -> Result<Loaded, Located> {
     // The project file is validated up front: a `deps` with no header is a
     // mistake wherever the program happens to notice it, and a program whose
     // imports never reach a dependency would otherwise never find out.
-    crate::deps::read_manifest(&root)?;
+    crate::resolve::deps::read_manifest(&root)?;
     let ext = entry_path
         .extension()
         .map(|e| e.to_string_lossy().into_owned())
@@ -228,7 +228,7 @@ pub fn load(entry: &str) -> Result<Loaded, Located> {
     // it escapes the collision check below. It still takes a module name, and
     // `math.m31` as the program would give two different modules called
     // `math` the moment anything imported the real one.
-    if crate::stdlib::embedded(&name).is_some() {
+    if crate::resolve::stdlib::embedded(&name).is_some() {
         return Err(Located {
             path: entry.to_string(),
             diag: Diag::new(
@@ -269,8 +269,8 @@ pub fn load(entry: &str) -> Result<Loaded, Located> {
     // a few thousand lines it never calls. It goes first, as a dependency
     // would.
     if l.wants_floatfmt {
-        let fm = crate::stdlib::FLOATFMT;
-        let text = crate::stdlib::embedded(fm).expect("the float module is embedded");
+        let fm = crate::resolve::stdlib::FLOATFMT;
+        let text = crate::resolve::stdlib::embedded(fm).expect("the float module is embedded");
         let extra = l.parse(
             fm,
             &display_path(fm),
@@ -284,8 +284,8 @@ pub fn load(entry: &str) -> Result<Loaded, Located> {
     // Code points are language source too (lib/__text.m31), loaded on the
     // same terms: only when some file could reach it.
     if l.wants_text {
-        let tm = crate::stdlib::TEXT;
-        let text = crate::stdlib::embedded(tm).expect("the text module is embedded");
+        let tm = crate::resolve::stdlib::TEXT;
+        let text = crate::resolve::stdlib::embedded(tm).expect("the text module is embedded");
         let extra = l.parse(
             tm,
             &display_path(tm),
@@ -417,7 +417,7 @@ impl Loader {
         // file of the same name beside the program is a COLLISION rather
         // than an override -- module names are globally unique, and `math`
         // is taken.
-        if let Some(text) = crate::stdlib::source(name) {
+        if let Some(text) = crate::resolve::stdlib::source(name) {
             if std::path::Path::new(path).exists() {
                 let (importer, span) = from.expect("an embedded module is always imported");
                 return Err(Located {
@@ -455,11 +455,11 @@ impl Loader {
                 // may name `name` as a one-file remote git import. This is
                 // the fallback between the embedded standard library (above)
                 // and the "cannot find module" error (below) -- see
-                // docs/remote-imports-decision.md and src/deps.rs. Only the
+                // docs/remote-imports-decision.md and src/resolve/deps.rs. Only the
                 // project's own files may reach it: a dependency does not
                 // bring dependencies of its own.
                 if !site.dotted && site.root == self.root {
-                    if let Some(remote_path) = crate::deps::resolve(&self.root, name)? {
+                    if let Some(remote_path) = crate::resolve::deps::resolve(&self.root, name)? {
                         let remote_str = remote_path.to_string_lossy().into_owned();
                         let remote_src = std::fs::read_to_string(&remote_path).expect(
                             "deps::resolve only ever returns a path it just verified exists",
@@ -519,10 +519,10 @@ impl Loader {
         // any, is still looked for at the same place, so that `visit` can
         // refuse it as a collision rather than shadow it.
         let from_stdlib = self.paths.get(importer).is_some_and(|p| p.starts_with('<'));
-        if crate::stdlib::by_path(&shown).is_some() {
+        if crate::resolve::stdlib::by_path(&shown).is_some() {
             if !from_stdlib && segs.len() > 1 && root == self.root {
                 let first = &segs[0];
-                if crate::deps::declares(&self.root, first)? {
+                if crate::resolve::deps::declares(&self.root, first)? {
                     return Err(Located {
                         path: self.paths[importer].clone(),
                         diag: Diag::new(
@@ -554,7 +554,7 @@ impl Loader {
             // where it went instead of "cannot find module", unless a file
             // of that name is here -- then `visit` reports the collision.
             if !p.exists() {
-                if let Some(real) = crate::stdlib::path_of(name) {
+                if let Some(real) = crate::resolve::stdlib::path_of(name) {
                     return Err(Located {
                         path: self.paths[importer].clone(),
                         diag: Diag::new(
@@ -581,7 +581,7 @@ impl Loader {
         // A dependency named in `deps` is a directory of modules, reached
         // through its name: `import tui.geom;`. Only the project's own files
         // can name one -- a dependency brings no dependencies of its own.
-        if root == self.root && crate::deps::declares(&self.root, first)? {
+        if root == self.root && crate::resolve::deps::declares(&self.root, first)? {
             if self.root.join(first).is_dir() {
                 return Err(Located {
                     path: self.paths[importer].clone(),
@@ -595,7 +595,7 @@ impl Loader {
                 });
             }
             let rel = format!("{}.{}", segs[1..].join("/"), self.ext);
-            let found = crate::deps::resolve_package(&self.root, first, &rel)?
+            let found = crate::resolve::deps::resolve_package(&self.root, first, &rel)?
                 .expect("`declares` just said the dependency is named");
             return Ok(Site {
                 path: found.file.to_string_lossy().into_owned(),
@@ -614,7 +614,7 @@ impl Loader {
         };
         // A name that is a group of the standard library, but not a module
         // in it: the likeliest mistake is a misspelt member, so say so.
-        let hint = if crate::stdlib::is_group(first) {
+        let hint = if crate::resolve::stdlib::is_group(first) {
             format!(", and the standard library group `{first}` has no module `{name}`")
         } else {
             String::new()

@@ -11,7 +11,7 @@
 //! a block that is never reached, an extra temporary -- is invisible at the
 //! C level and obvious here.
 
-use crate::{compile_str, lexer::Lexer, lexer::Tok};
+use crate::{compile_str, front::lexer::Lexer, front::lexer::Tok};
 
 fn ir(src: &str) -> String {
     compile_str(src, "ir").expect("expected this program to compile")

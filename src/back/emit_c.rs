@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write;
 
-use crate::ir::{ArithOp, Inst, IrTy, Module, Term, TypeDef, Value};
+use crate::middle::ir::{ArithOp, Inst, IrTy, Module, Term, TypeDef, Value};
 
 /// Phase 3 of docs/concurrency-decision.md, "Blocking FFI": "unannotated
 /// foreign calls from a green thread's call path produce a compile-time
@@ -51,7 +51,7 @@ use crate::ir::{ArithOp, Inst, IrTy, Module, Term, TypeDef, Value};
 ///     phase's own timeline, so this check ships as a real but incomplete
 ///     signal rather than a silently-incomplete one pretending otherwise.
 fn warn_unannotated_foreign_calls_from_spawn(m: &Module) {
-    let by_name: HashMap<&str, &crate::ir::Func> =
+    let by_name: HashMap<&str, &crate::middle::ir::Func> =
         m.funcs.iter().map(|f| (f.name.as_str(), f)).collect();
 
     let mut roots: Vec<&str> = Vec::new();
@@ -87,7 +87,7 @@ fn warn_unannotated_foreign_calls_from_spawn(m: &Module) {
                      spawned function is flagged for awareness \
                      (docs/concurrency-decision.md, \"Blocking FFI\"; this \
                      check does not see through interface/virtual calls --\
-                     see src/emit_c.rs's own comment on this function for \
+                     see src/back/emit_c.rs's own comment on this function for \
                      exactly what it can and cannot detect)"
                 );
                 continue; // a prim target has no Func/body to expand into
@@ -689,7 +689,7 @@ fn emit_enum_body(o: &mut String, t: &TypeDef) {
 /// same -- header, length, then the slots -- and the runtime only ever sees
 /// the object through an `Obj *` in its own translation unit.
 fn emit_statics(o: &mut String, m: &Module) {
-    use crate::ir::{StaticObj, StaticSlot};
+    use crate::middle::ir::{StaticObj, StaticSlot};
     let slot = |s: &StaticSlot| match s {
         StaticSlot::Word(v) if *v == i64::MIN => "INT64_MIN".to_string(),
         StaticSlot::Word(v) => format!("INT64_C({v})"),
@@ -937,7 +937,7 @@ pub fn c_ident(name: &str) -> String {
         .replace('#', "____")
 }
 
-fn signature(f: &crate::ir::Func) -> String {
+fn signature(f: &crate::middle::ir::Func) -> String {
     let ret = match f.ret {
         Some(t) => t.c_name(),
         None => "void".to_string(),
@@ -968,7 +968,7 @@ fn signature(f: &crate::ir::Func) -> String {
 
 fn emit_func(
     o: &mut String,
-    f: &crate::ir::Func,
+    f: &crate::middle::ir::Func,
     types: &[TypeDef],
     prim_targets: &std::collections::HashSet<String>,
 ) {
@@ -1159,7 +1159,7 @@ fn emit_func(
 
 fn emit_inst(
     o: &mut String,
-    f: &crate::ir::Func,
+    f: &crate::middle::ir::Func,
     types: &[TypeDef],
     i: &Inst,
     prim_targets: &std::collections::HashSet<String>,
@@ -1269,7 +1269,7 @@ fn emit_inst(
                     // word whatever the element type is.
                     ("rt_chan_send", 1)
                     | ("rt_index_set", 2)
-                    // The hoisted-pointer accessor (src/hoist.rs,
+                    // The hoisted-pointer accessor (src/middle/hoist.rs,
                     // "rt_index_set_at(o, ptr, len, i, v)"): same value,
                     // shifted two slots by the extra `ptr`/`len` arguments.
                     | ("rt_index_set_at", 4)
@@ -1359,7 +1359,7 @@ fn emit_inst(
                     writeln!(
                         o,
                         "    {dst}.tag = INT64_C({base}) | (int64_t)(uint32_t){arg};",
-                        base = crate::ir::OS_ERRNO_TAG_BASE,
+                        base = crate::middle::ir::OS_ERRNO_TAG_BASE,
                         arg = args[0],
                     )
                     .unwrap();
@@ -1501,7 +1501,12 @@ fn emit_inst(
 /// assigned in sequence -- and it costs nothing, because the C compiler
 /// removes the redundant copies. docs/ir-v0.md §7.2 flags this as a trap worth
 /// not being clever about.
-fn emit_jump(o: &mut String, f: &crate::ir::Func, to: crate::ir::BlockId, args: &[Value]) {
+fn emit_jump(
+    o: &mut String,
+    f: &crate::middle::ir::Func,
+    to: crate::middle::ir::BlockId,
+    args: &[Value],
+) {
     let target = f.block(to);
     debug_assert_eq!(
         target.params.len(),
@@ -1526,7 +1531,7 @@ fn emit_jump(o: &mut String, f: &crate::ir::Func, to: crate::ir::BlockId, args: 
     writeln!(o, "    }}").unwrap();
 }
 
-fn emit_term(o: &mut String, f: &crate::ir::Func, t: &Term) {
+fn emit_term(o: &mut String, f: &crate::middle::ir::Func, t: &Term) {
     match t {
         Term::Jump { to, args } => emit_jump(o, f, *to, args),
         Term::Brif {

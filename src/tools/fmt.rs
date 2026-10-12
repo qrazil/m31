@@ -36,9 +36,9 @@
 //! reflowed paragraph in the diff. A line too long to read is better fixed by
 //! its author with a name for a subexpression, which no formatter can invent.
 
-use crate::ast::*;
-use crate::diag::Span;
-use crate::lexer::{Comment, Tok, Token};
+use crate::front::ast::*;
+use crate::front::diag::Span;
+use crate::front::lexer::{Comment, Tok, Token};
 use std::collections::HashMap;
 
 pub struct Fmt {
@@ -127,7 +127,7 @@ struct Run {
     last: u32,
 }
 
-pub fn format(p: &Program, lexed: crate::lexer::Lexed, parens: &[Span]) -> String {
+pub fn format(p: &Program, lexed: crate::front::lexer::Lexed, parens: &[Span]) -> String {
     let n = lexed.comments.len();
     let mut closer = HashMap::new();
     let mut open: Vec<usize> = Vec::new();
@@ -990,7 +990,7 @@ impl Fmt {
             Expr::Bool(b, _) => b.to_string(),
             Expr::Str(s, span) => match self.spellings.get(&(span.line, span.col)) {
                 Some(text) => text.clone(),
-                None => crate::lexer::quote(s),
+                None => crate::front::lexer::quote(s),
             },
             Expr::Var(n, _) => n.clone(),
             Expr::This(_) => "this".to_string(),

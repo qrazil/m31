@@ -2,9 +2,9 @@
 //! and the field paths embedding produces.
 
 use super::{Binding, Lowerer, Val};
-use crate::ast::*;
-use crate::diag::{Diag, Span};
-use crate::ir::{Inst, IrTy, Value};
+use crate::front::ast::*;
+use crate::front::diag::{Diag, Span};
+use crate::middle::ir::{Inst, IrTy, Value};
 
 impl Lowerer {
     pub(super) fn lookup(&self, name: &str) -> Option<(Ty, Value)> {

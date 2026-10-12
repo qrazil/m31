@@ -19,8 +19,8 @@
 //!   statements, so they identify the program) and anything under a
 //!   `tests/`, `corpus/`, `scripts/` or `docs/` directory.
 
-use crate::ast::{bare, Args, Expr, Func, MatchArm, Param, Program, Stmt, Ty};
-use crate::diag::Span;
+use crate::front::ast::{bare, Args, Expr, Func, MatchArm, Param, Program, Stmt, Ty};
+use crate::front::diag::Span;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -198,10 +198,10 @@ pub fn lint(prog: &Program, src: &str, opts: &Opts) -> Vec<Finding> {
 }
 
 /// Parse without typechecking, as `fmt` does.
-pub fn parse(src: &str, module: &str) -> Result<Program, crate::diag::Diag> {
-    let lexed = crate::lexer::Lexer::tokenize_for_fmt(src)?;
-    let mut p = crate::parser::Parser::new(lexed.toks);
-    if crate::stdlib::embedded(module).is_some() {
+pub fn parse(src: &str, module: &str) -> Result<Program, crate::front::diag::Diag> {
+    let lexed = crate::front::lexer::Lexer::tokenize_for_fmt(src)?;
+    let mut p = crate::front::parser::Parser::new(lexed.toks);
+    if crate::resolve::stdlib::embedded(module).is_some() {
         p = p.stdlib();
     }
     p.parse_program(module)
@@ -841,7 +841,7 @@ pub fn main(args: &[String]) -> std::process::ExitCode {
             unparsed += 1;
             continue;
         };
-        let module = crate::modules::module_name(path);
+        let module = crate::resolve::modules::module_name(path);
         let prog = match parse(&src, &module) {
             Ok(p) => p,
             Err(d) => {

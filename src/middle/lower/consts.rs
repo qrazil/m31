@@ -3,7 +3,7 @@
 //!
 //! A constant's initialiser is evaluated HERE, by the compiler, never by the
 //! program. That is what makes a constant free to use: a collection is laid
-//! out as static data in the emitted C (src/emit_c.rs, `emit_statics`), a
+//! out as static data in the emitted C (src/back/emit_c.rs, `emit_statics`), a
 //! scalar is folded into every use, and nothing runs before the program's
 //! first statement -- so there is no initialisation order to get wrong,
 //! across modules or within one, and no cost at run time.
@@ -16,9 +16,9 @@
 //! or a division by zero, which would trap at run time, is refused here.
 
 use super::{Lowerer, Val, BUILTIN_FNS};
-use crate::ast::*;
-use crate::diag::{Diag, Span};
-use crate::ir::{Inst, IrTy, StaticObj, StaticSlot};
+use crate::front::ast::*;
+use crate::front::diag::{Diag, Span};
+use crate::middle::ir::{Inst, IrTy, StaticObj, StaticSlot};
 
 /// The most slots one constant collection may have. It is written out in the
 /// emitted C, so this bounds the C file and the compile time rather than
@@ -88,7 +88,7 @@ impl Lowerer {
     /// error whether or not anything reads it yet.
     pub(super) fn register_consts(&mut self, p: &Program) -> Result<(), Diag> {
         for c in &p.consts {
-            let bare = crate::ast::bare(&c.name).to_string();
+            let bare = crate::front::ast::bare(&c.name).to_string();
             let here = |msg: String| Diag::new(c.span, msg).in_module(&c.module);
             self.check_not_import(&c.module, &bare, c.span)
                 .map_err(|d| d.in_module(&c.module))?;
@@ -307,7 +307,7 @@ impl Lowerer {
     /// Trap at run time if `obj` is frozen -- emitted before a store into an
     /// object that already exists. `rt_check_mutable` is a static inline in
     /// rt.h, so this is a load and a branch, not a call.
-    pub(super) fn check_mutable(&mut self, obj: crate::ir::Value) {
+    pub(super) fn check_mutable(&mut self, obj: crate::middle::ir::Value) {
         self.push(Inst::Call {
             dst: None,
             func: "rt_check_mutable".to_string(),

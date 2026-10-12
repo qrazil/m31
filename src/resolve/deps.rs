@@ -1,6 +1,6 @@
 //! Remote imports: one `deps` manifest line resolved to a git checkout. See
 //! docs/remote-imports-decision.md for the design, and `Loader::visit` in
-//! src/modules.rs for the one call site -- this is the single new fallback
+//! src/resolve/modules.rs for the one call site -- this is the single new fallback
 //! between "check the embedded standard library" and "error: cannot find
 //! module", nothing more.
 //!
@@ -34,8 +34,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::diag::{Diag, Span};
-use crate::modules::Located;
+use crate::front::diag::{Diag, Span};
+use crate::resolve::modules::Located;
 
 /// One parsed, non-comment, non-blank line of `deps` or `deps.lock`: the
 /// fields after the name, and the line it came from, so a diagnostic about a
@@ -48,7 +48,7 @@ struct ManifestLine {
 
 /// A line of text with a file and a line number, built into a `Located` the
 /// same shape every other diagnostic in this compiler uses -- so an error
-/// raised here prints exactly like `src/modules.rs`'s "cannot find module",
+/// raised here prints exactly like `src/resolve/modules.rs`'s "cannot find module",
 /// not a different shape bolted on beside it.
 fn located(path: &Path, line: u32, msg: String) -> Located {
     Located {

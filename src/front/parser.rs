@@ -7,9 +7,9 @@
 //! names arrive, the rule becomes `IDENT IDENT` with two tokens of lookahead,
 //! which is how Java manages the same grammar.
 
-use crate::ast::*;
-use crate::diag::{Diag, Span};
-use crate::lexer::{Tok, Token};
+use crate::front::ast::*;
+use crate::front::diag::{Diag, Span};
+use crate::front::lexer::{Tok, Token};
 
 pub struct Parser {
     toks: Vec<Token>,
@@ -1290,7 +1290,7 @@ impl Parser {
                 span,
                 format!(
                     "enum `{}` has no variants, so no value of it can exist",
-                    crate::ast::bare(&name)
+                    crate::front::ast::bare(&name)
                 ),
             ));
         }
