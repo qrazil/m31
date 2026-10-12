@@ -1007,6 +1007,18 @@ static void proc_tests(void) {
     expect_true("exit 7 started", pid > 0);
     expect("exit 7", st, 7);
 
+    /* The search path is the CHILD's: its PATH= entry, or /bin:/usr/bin when
+     * it has none -- never the calling process's own. */
+    char *const bare_sh[] = {"sh", "-c", "echo found", 0};
+    pid = run_capture(bare_sh, proc_env, 0, out, sizeof out, &st);
+    expect_true("a bare name is searched on the child's PATH", pid > 0 && same(out, "found\n", 7));
+    pid = run_capture(bare_sh, empty_env, 0, out, sizeof out, &st);
+    expect_true("no PATH in the environment means /bin:/usr/bin", pid > 0 && same(out, "found\n", 7));
+    char *const wrong_path[] = {"PATH=/no/such/dir-2026", 0};
+    expect("a PATH that has no such program", sys_proc_start_fds(bare_sh, wrong_path, 0, -1, -1, -1), -SYS_ENOENT);
+    char *const empty_entry[] = {"PATH=:/no/such", 0};
+    expect("an empty PATH entry is the cwd, which has no sh", sys_proc_start_fds(bare_sh, empty_entry, "/no", -1, -1, -1), -SYS_ENOENT);
+
     char *const nothere[] = {"/no/such/program-2026", 0};
     expect("a program that is not there", sys_proc_start_fds(nothere, proc_env, 0, -1, -1, -1), -SYS_ENOENT);
     char *const notexec[] = {"/etc/passwd", 0};

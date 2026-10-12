@@ -3,6 +3,7 @@
 // API
 // ---
 //   timer.sleep_ms(ms)    -> void, returns once `ms` milliseconds have passed
+//   timer.monotonic_ns()  -> int, nanoseconds on the monotonic clock
 //
 // **`sleep_ms` parks the calling green thread and nothing else.** The
 // carrier OS thread it was running on goes on running other green threads for
@@ -22,16 +23,23 @@
 // ever on nothing can only be a mistake. Waiting for ever for something is
 // what a channel `recv` is for.
 //
-// What is deliberately not here: a monotonic clock to read (`date.now_ns` is
-// the wall clock, and says so), a cancellable sleep (a thread that has to
+// **`monotonic_ns` is the clock for measuring, `date.now_ns` the clock for
+// dating.** The monotonic clock never goes back and never jumps when the wall
+// clock is set; its zero is arbitrary (boot, usually), so a reading means
+// nothing alone and only the difference of two does. It is the clock every
+// timeout in the runtime is kept on.
+//
+// What is deliberately not here: a cancellable sleep (a thread that has to
 // stop waiting early waits on a channel with a sender instead), and
-// sub-millisecond resolution (a `prim` carries milliseconds, like every other
-// timeout in the standard library).
+// sub-millisecond resolution in a wait (a `prim` carries milliseconds, like
+// every other timeout in the standard library).
 
 // Park the green thread for `timeout_ms` with no descriptor to wake it
 // earlier: the same primitive `net` bounds its waits with, called with fd -1
 // and no events. 1 when the time has passed, -errno for a refused argument.
 prim int __wait_io_timeout(int descriptor, int events, int timeout_ms);
+// Nanoseconds on the monotonic clock: sys_clock_ns(SYS_CLOCK_MONOTONIC).
+prim int __clock_monotonic();
 
 /// Return after `milliseconds` milliseconds, parking only this green thread.
 ///
@@ -44,4 +52,13 @@ pub void sleep_ms(int milliseconds) {
     if (wait_result < 0) {
         trap("timer.sleep_ms(" + milliseconds.to_str() + "): the runtime refused the wait (errno " + (-wait_result).to_str() + ")");
     }
+}
+
+/// Nanoseconds on the monotonic clock: an arbitrary zero, never going back.
+///
+/// Subtract two readings to time something; a single reading is not a date
+/// (`date.now_ns` is, and can be set backwards). An int holds 292 years of
+/// nanoseconds, so the difference of two readings does not overflow.
+pub int monotonic_ns() {
+    return __clock_monotonic();
 }

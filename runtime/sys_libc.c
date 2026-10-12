@@ -807,6 +807,57 @@ _Noreturn void sys_exit(int64_t code) {
  * posix_spawn/posix_spawnp do not use errno: a failure is the return value
  * itself, a plain positive errno number, so neg_errno takes it directly
  * rather than through ret()'s -1-and-errno convention. */
+/* posix_spawn with execvp's search done here rather than by posix_spawnp,
+ * so that $PATH is the CHILD's (the `PATH=` entry of `envp`, or
+ * "/bin:/usr/bin" when it has none -- Python's os.get_exec_path rule) on
+ * both backends. posix_spawnp searches the CALLING process's PATH, which
+ * would make `env` replace everything except where the program is looked
+ * for, and which the raw backend cannot do at all (it has no environ).
+ * Each attempt is a whole spawn, and a spawn reports an exec failure
+ * synchronously, so "try the next directory" is a loop over the return
+ * values, with execvp's own rule: ENOENT, EACCES and ENOTDIR move on, and
+ * if nothing worked EACCES wins when any directory said it. */
+static int spawn_searching(pid_t *pid, char *const argv[], char *const envp[],
+                           const posix_spawn_file_actions_t *fa,
+                           const posix_spawnattr_t *at) {
+    const char *prog = argv[0];
+    if (strchr(prog, '/') != NULL) return posix_spawn(pid, prog, fa, at, argv, envp);
+    const char *path = "/bin:/usr/bin";
+    if (envp != NULL) {
+        for (size_t i = 0; envp[i] != NULL; i++) {
+            if (strncmp(envp[i], "PATH=", 5) == 0) {
+                path = envp[i] + 5;
+                break;
+            }
+        }
+    }
+    size_t proglen = strlen(prog);
+    int got_eacces = 0;
+    for (;;) {
+        const char *sep = strchr(path, ':');
+        size_t dirlen = sep != NULL ? (size_t)(sep - path) : strlen(path);
+        char buf[4096];
+        size_t head = dirlen == 0 ? 1 : dirlen;
+        if (head + 1 + proglen + 1 <= sizeof buf) {
+            size_t p = 0;
+            if (dirlen == 0) buf[p++] = '.';
+            else {
+                memcpy(buf, path, dirlen);
+                p = dirlen;
+            }
+            buf[p++] = '/';
+            memcpy(buf + p, prog, proglen + 1);
+            int rc = posix_spawn(pid, buf, fa, at, argv, envp);
+            if (rc == 0) return 0;
+            if (rc == EACCES) got_eacces = 1;
+            else if (rc != ENOENT && rc != ENOTDIR) return rc;
+        }
+        if (sep == NULL) break;
+        path = sep + 1;
+    }
+    return got_eacces ? EACCES : ENOENT;
+}
+
 int64_t sys_proc_start(char *const argv[], char *const envp[]) {
     return sys_proc_start_fds(argv, envp, NULL, -1, -1, -1);
 }
@@ -848,7 +899,7 @@ int64_t sys_proc_start_fds(char *const argv[], char *const envp[], const char *c
     }
     if (rc == 0 && cwd != NULL) rc = posix_spawn_file_actions_addchdir_np(&fa, cwd);
     pid_t pid = 0;
-    if (rc == 0) rc = posix_spawnp(&pid, argv[0], &fa, &at, argv, envp);
+    if (rc == 0) rc = spawn_searching(&pid, argv, envp, &fa, &at);
     posix_spawn_file_actions_destroy(&fa);
     posix_spawnattr_destroy(&at);
     if (rc != 0) return neg_errno(rc);

@@ -622,11 +622,15 @@ _Noreturn void sys_exit(int64_t code);
  * passing that array through unchanged.
  *
  * `argv[0]` is searched for on `$PATH` when it names no directory (has no
- * '/'), exactly execvp's own rule and the one every `$EDITOR` relies on --
- * a full path is tried as given, unsearched. Both backends implement this
- * identically: the libc one gets it from posix_spawnp, the raw one reads
- * `PATH=` out of `envp` itself and walks it the way execvp does (sys_linux.c
- * has the one place that needed writing rather than a lookup).
+ * '/'), execvp's own rule and the one every `$EDITOR` relies on -- a full
+ * path is tried as given, unsearched. The path searched is THE CHILD'S: the
+ * `PATH=` entry of `envp`, or "/bin:/usr/bin" when it has none (Python's
+ * os.get_exec_path). Both backends implement this identically: the raw one
+ * reads `PATH=` out of `envp` itself and walks it the way execvp does
+ * (sys_linux.c), and the libc one does the same walk over posix_spawn
+ * rather than posix_spawnp, which would search the CALLING process's PATH
+ * and make an `env=` that replaces the environment silently not replace
+ * where programs are found.
  *
  * Returns the child's pid on success, or a negative errno if the process
  * could not be started AT ALL -- most commonly -SYS_ENOENT, argv[0] found

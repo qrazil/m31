@@ -1,0 +1,70 @@
+import proc;
+import io;
+import os;
+
+// proc.run: output captured whole, every way a run can end, and the
+// arguments it refuses. Programs are found by bare name (the $PATH search);
+// the oracle for what each one prints is coreutils itself, in main.out.
+
+str text_of(bytes data) {
+    match (data.utf8()) {
+        case Some(str text): {
+            return text;
+        }
+        case None: {
+            return "<not text>";
+        }
+    }
+}
+
+void show(str label, Result<proc.Completed, proc.Error> outcome) {
+    match (outcome) {
+        case Ok(proc.Completed done): {
+            print(label + ": rc=" + done.returncode.to_str() + " ok=" + done.ok.to_str() + " truncated=" + done.truncated.to_str() + " out=[" + text_of(done.stdout) + "] err=[" + text_of(done.stderr) + "]");
+        }
+        case Err(proc.Error error) : {
+            print(label + ": error " + error.to_str());
+        }
+    }
+}
+
+// stdout and stderr are separate, and the exit code comes back.
+show("echo", proc.run(["echo", "hello", "world"], quiet: true));
+show("stderr", proc.run(["sh", "-c", "echo out; echo err >&2; exit 0"], quiet: true));
+show("exit 3 unchecked", proc.run(["sh", "-c", "echo before; exit 3"], check: false, quiet: true));
+show("exit 3 checked", proc.run(["sh", "-c", "exit 3"], quiet: true));
+
+// A signal is a different fact from a nonzero exit.
+match (proc.run(["sh", "-c", "kill -TERM $$"], check: false, quiet: true)) {
+    case Ok(proc.Completed done): {
+        print("signal: rc=" + done.returncode.to_str() + " ok=" + done.ok.to_str() + " " + done.status.to_str());
+    }
+    case Err(proc.Error error): {
+        print("signal: error " + error.to_str());
+    }
+}
+
+// input= is written, then the child reads the end.
+show("cat", proc.run(["cat"], input: "round trip".to_bytes(), quiet: true));
+show("no input", proc.run(["cat"], quiet: true));
+show("wc", proc.run(["wc", "-c"], input: "12345".to_bytes(), quiet: true));
+
+// env= replaces the environment; cwd= is the working directory.
+show("env", proc.run(["sh", "-c", "echo [$FOO] [$HOME]"], env: Option<Map<str, str>>.Some({"FOO": "bar"}), quiet: true));
+show("cwd", proc.run(["pwd"], cwd: "/", quiet: true));
+show("bad cwd", proc.run(["pwd"], cwd: "/no/such/directory-2026", quiet: true));
+
+// Programs that never start.
+show("missing", proc.run(["no-such-program-2026"], quiet: true));
+show("not executable", proc.run(["/etc/passwd"], quiet: true));
+show("empty argv", proc.run([], quiet: true));
+show("whitespace", proc.run(["echo hello"], quiet: true));
+show("env name", proc.run(["true"], env: Option<Map<str, str>>.Some({"A=B": "c"}), quiet: true));
+
+// A timeout kills the child and is an error.
+show("timeout", proc.run(["sleep", "30"], timeout_ms: 300, quiet: true));
+show("in time", proc.run(["sh", "-c", "echo quick"], timeout_ms: 20000, quiet: true));
+
+// The default is to echo live as well as capture.
+show("echoed", proc.run(["echo", "both"]));
+print("done");

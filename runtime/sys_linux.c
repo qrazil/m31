@@ -914,14 +914,18 @@ static const char *proc_path_value(char *const envp[]) {
 
 /* execve, searching $PATH when argv[0] has no '/' -- the one piece of
  * execvp/execvpe this backend has to write out by hand, because the raw
- * execve syscall does not search anything (sys.h). One component of $PATH
- * at a time, an empty component meaning "." (POSIX's own rule, not this
- * layer's invention), stopping at the first success (execve never returns
- * then) or the first failure that is not "try the next directory instead".
- * ENOENT, EACCES and ENOTDIR are exactly the failures glibc's own execvpe
- * keeps searching past; anything else -- ENOEXEC for a file that exists but
- * is not something the kernel can run, say -- is reported immediately,
- * because trying five more directories would not change that answer.
+ * execve syscall does not search anything (sys.h). The path searched is the
+ * child's own (`PATH=` in envp, "/bin:/usr/bin" when it has none), the rule
+ * sys_libc.c's spawn_searching implements too. One component at a time, an
+ * empty component meaning "." (POSIX's own rule, not this layer's
+ * invention), stopping at the first success (execve never returns then) or
+ * the first failure that is not "try the next directory instead". ENOENT,
+ * EACCES and ENOTDIR are exactly the failures glibc's own execvpe keeps
+ * searching past; anything else -- ENOEXEC for a file that exists but is not
+ * something the kernel can run, say -- is reported immediately, because
+ * trying five more directories would not change that answer. If nothing
+ * worked, EACCES is the answer when any directory said it (execvp's rule),
+ * otherwise ENOENT.
  *
  * Left out on purpose: execvpe's shell fallback for a file with no '#!'
  * line and no ELF header at all (POSIX's "then a shell must be able to run
@@ -934,10 +938,10 @@ static int64_t proc_exec_search(char *const argv[], char *const envp[]) {
         return sc(NR_execve, P(prog), P(argv), P(envp), 0, 0, 0);
     }
     const char *path = proc_path_value(envp);
-    if (path == 0) return -SYS_ENOENT;
+    if (path == 0) path = "/bin:/usr/bin";
     int64_t proglen = 0;
     while (prog[proglen]) proglen++;
-    int64_t last = -SYS_ENOENT;
+    int got_eacces = 0;
     for (;;) {
         const char *sep = path;
         while (*sep && *sep != ':') sep++;
@@ -955,16 +959,16 @@ static int64_t proc_exec_search(char *const argv[], char *const envp[]) {
             for (int64_t i = 0; i < proglen; i++) buf[p++] = prog[i];
             buf[p] = '\0';
             int64_t r = sc(NR_execve, P(buf), P(argv), P(envp), 0, 0, 0);
-            if (r != -SYS_ENOENT && r != -SYS_EACCES && r != -SYS_ENOTDIR) return r;
-            last = r;
+            if (r == -SYS_EACCES) got_eacces = 1;
+            else if (r != -SYS_ENOENT && r != -SYS_ENOTDIR) return r;
         }
         /* A directory too long for the buffer is skipped rather than
          * refused outright: some other component may still have the
-         * command, so `last` is left at whatever it already was. */
+         * command. */
         if (*sep == '\0') break;
         path = sep + 1;
     }
-    return last;
+    return got_eacces ? -SYS_EACCES : -SYS_ENOENT;
 }
 
 /* Move `fd` to a descriptor number of 3 or more if it is below, so the

@@ -13,6 +13,8 @@
 //   fs.rmdir(path)           -> Result<bool, io.Error>        an empty directory
 //   fs.rename(from, to)      -> Result<bool, io.Error>
 //   fs.symlink(target, path) -> Result<bool, io.Error>        a link at path, to target
+//   fs.readlink(path)        -> Result<str, io.Error>         where a link points, as written
+//   fs.realpath(path)        -> Result<str, io.Error>         absolute, no links, no . or ..
 //   fs.join(a, b)            -> str
 //   fs.makedirs(path)        -> Result<bool, io.Error>        every missing component
 //   fs.walk(root)            -> Result<List<str>, io.Error>   every entry below root
@@ -42,6 +44,9 @@ prim int __unlink(str path);
 prim int __rmdir(str path);
 prim int __rename(str from, str to_path);
 prim int __symlink(str target, str path);
+// The target's bytes into `buffer`, at most its size: the count, or -errno.
+// A count equal to the size may be a cut target (runtime/sys.h).
+prim int __readlink(str path, bytes buffer);
 prim int __listdir(str path, bytes buffer);
 
 // File type bits in a mode, the historical Unix values and the same on
@@ -236,6 +241,135 @@ pub Result<bool, io.Error> rename(str from, str to_path) {
 /// already at `path` is `AlreadyExists`; links are never replaced.
 pub Result<bool, io.Error> symlink(str target, str path) {
     return done(__symlink(target, path));
+}
+
+/// Where the symbolic link `path` points, exactly as it was written: relative
+/// stays relative, and nothing is checked -- the target may not exist.
+///
+/// `path` that is not a link is `Other(22)` (EINVAL), as the kernel says it;
+/// a missing one is `NotFound`. A target that is not valid UTF-8 cannot be a
+/// `str` and is `InvalidUtf8`.
+pub Result<str, io.Error> readlink(str path) {
+    int capacity = 256;
+    while (true) {
+        bytes buffer = [0; capacity];
+        int count = __readlink(path, buffer);
+        if (count < 0) {
+            return Result<str, io.Error>.Err(io.from_errno(-count));
+        }
+        // A target as long as the buffer may have been cut, and the kernel
+        // does not say; ask again with twice the room (PATH_MAX is 4096).
+        if (count == capacity) {
+            capacity = capacity * 2;
+            continue;
+        }
+        match (buffer.substr(0, count).utf8()) {
+            case Some(str target): {
+                return Result<str, io.Error>.Ok(target);
+            }
+            case None: {
+                return Result<str, io.Error>.Err(io.Error.InvalidUtf8);
+            }
+        }
+    }
+}
+
+/// The one absolute path of `path`: every symbolic link replaced by what it
+/// points to, every `.` and `..` and doubled `/` gone. Python's
+/// `os.path.realpath(p, strict=True)`.
+///
+/// **A path that does not exist is an error**, `NotFound` -- unlike Python's
+/// default, which spells the missing part as it was. Every component must be
+/// there, because only an existing path has a real one; a dangling link is
+/// missing. `..` is applied to the path already resolved, so `link/..` is
+/// the directory ABOVE what `link` points to, as the kernel does it, and not
+/// the directory `link` is in. A `..` that follows something that is not a
+/// directory is `NotADirectory`. More than 40 links met on the way is
+/// `Other(40)` (ELOOP), the kernel's own limit.
+///
+/// **A relative path is resolved from the current directory, which needs
+/// `/proc/self/cwd`** (Linux): the layer has no `getcwd`, and nothing in the
+/// standard library has needed one before. Where there is no `/proc` a
+/// relative path is `Other(38)` and an absolute one works as everywhere.
+pub Result<str, io.Error> realpath(str path) {
+    if (path == "") {
+        return Result<str, io.Error>.Err(io.Error.NotFound);
+    }
+    // Components still to process, the next one LAST.
+    List<str> pending = [];
+    // Components of the answer so far; each is a real directory or, last, a
+    // real non-link.
+    List<str> resolved = [];
+    str origin = path;
+    if (!path.starts_with("/")) {
+        match (readlink("/proc/self/cwd")) {
+            case Ok(str here): {
+                origin = here + "/" + path;
+            }
+            case Err(io.Error error): {
+                return Result<str, io.Error>.Err(io.from_errno(38));
+            }
+        }
+    }
+    push_components(origin, pending);
+    int links = 0;
+    while (pending.size() > 0) {
+        str part = pending.pop();
+        if (part == "" || part == ".") {
+            continue;
+        }
+        if (part == "..") {
+            if (resolved.size() > 0) {
+                match (stat_of("/" + resolved.join("/"), false)) {
+                    case Ok(Stat above): {
+                        if (!above.is_directory()) {
+                            return Result<str, io.Error>.Err(io.Error.NotADirectory);
+                        }
+                    }
+                    case Err(io.Error error): {
+                        return Result<str, io.Error>.Err(error);
+                    }
+                }
+                resolved.pop();
+            }
+            continue;
+        }
+        resolved.push(part);
+        str here = "/" + resolved.join("/");
+        match (stat_of(here, false)) {
+            case Ok(Stat file_status): {
+                if (file_status.mode & 0o170000 != 0o120000) {
+                    continue;
+                }
+            }
+            case Err(io.Error error): {
+                return Result<str, io.Error>.Err(error);
+            }
+        }
+        // A link: replace it by its target, which is processed next, from
+        // the directory the link is in (relative) or from the root.
+        links = links + 1;
+        if (links > 40) {
+            return Result<str, io.Error>.Err(io.from_errno(40));
+        }
+        resolved.pop();
+        str target = readlink(here)?;
+        if (target.starts_with("/")) {
+            resolved = [];
+        }
+        push_components(target, pending);
+    }
+    return Result<str, io.Error>.Ok("/" + resolved.join("/"));
+}
+
+// Push the parts of `path` onto `stack` so that the first is on top.
+void push_components(str path, List<str> stack) {
+    List<str> parts = path.split("/");
+    int at = parts.size();
+    while (at > 0) {
+        at = at - 1;
+        stack.push(parts[at]);
+    }
 }
 
 /// `child` below `parent`: `join("src", "a.txt")` is `src/a.txt`.
