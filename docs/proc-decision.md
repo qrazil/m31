@@ -129,9 +129,9 @@ as its controlling terminal (`docs/sys-layer.md`, "Pseudo-terminals").
   - **`resize(rows, columns)`** is the one ioctl; the child's foreground
     group gets SIGWINCH from the kernel.
   - **`columns`, not `cols`**: the naming lint's table.
-  - **Not here**: terminal modes (a `Pty` has none of its own; use the
-    `term` module on the master descriptor if one is needed, or `stty` in the
-    child), and the window size is a character grid with no pixel size.
+  - **Not here**: terminal modes (a `Pty` has none of its own; `stty` in the
+    child sets them), and a pixel size for the window: it is a character
+    grid.
 
 ## Limits, said plainly
 

@@ -98,6 +98,7 @@ const int SO_NONBLOCK = 7;
 const int CHUNK = 65536;
 const int EAGAIN = 11;
 const int EIO = 5;
+const int EPERM = 1;
 const int ESRCH = 3;
 const int EPIPE = 32;
 const int ETIMEDOUT = 110;
@@ -473,22 +474,42 @@ void Pipe.check_writable() {
 }
 
 // Park until the descriptor is ready for `events` or the deadline passes.
-// Ok when it is ready; Err(ETIMEDOUT) when the time ran out.
+// Ok when it is ready, or when it is worth looking again; Err(ETIMEDOUT)
+// when the deadline ran out.
+//
+// A pipe with no deadline waits without a bound, as a socket does. A
+// terminal master and any pipe with a deadline wait in bounded slices, and
+// a descriptor the reactor refuses to watch (answered EPERM -- macOS's
+// kqueue and some terminal devices) is polled every 10 ms instead of being
+// waited on, so that the one thing the reactor cannot do slows a read down
+// rather than stopping it.
 Result<bool, io.Error> Pipe.wait_ready(int events) {
-    if (deadline_ns <= 0) {
+    if (deadline_ns <= 0 && !is_terminal) {
         int ignored = __wait_io(descriptor, events);
         return Result<bool, io.Error>.Ok(true);
     }
-    int left_ns = deadline_ns - __clock_monotonic();
-    if (left_ns <= 0) {
-        return Result<bool, io.Error>.Err(io.from_errno(ETIMEDOUT));
+    int budget_ms = 60000;
+    if (deadline_ns > 0) {
+        int left_ns = deadline_ns - __clock_monotonic();
+        if (left_ns <= 0) {
+            return Result<bool, io.Error>.Err(io.from_errno(ETIMEDOUT));
+        }
+        // Rounded up: waking a hair early would only come back to wait again.
+        budget_ms = (left_ns + 999999) / 1000000;
     }
-    // Rounded up: waking a hair early would only come back to wait again.
-    int wait_status = __wait_io_timeout(descriptor, events, (left_ns + 999999) / 1000000);
+    int wait_status = __wait_io_timeout(descriptor, events, budget_ms);
+    if (wait_status == -EPERM) {
+        int nap_ms = 10;
+        if (budget_ms < nap_ms) {
+            nap_ms = budget_ms;
+        }
+        timer.sleep_ms(nap_ms);
+        return Result<bool, io.Error>.Ok(true);
+    }
     if (wait_status < 0) {
         return Result<bool, io.Error>.Err(io.from_errno(-wait_status));
     }
-    if (wait_status == 1) {
+    if (wait_status == 1 && deadline_ns > 0) {
         return Result<bool, io.Error>.Err(io.from_errno(ETIMEDOUT));
     }
     return Result<bool, io.Error>.Ok(true);
