@@ -3,6 +3,21 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
+## 0.4.4 (2026-10-13)
+
+### Fixed
+
+- A child process now gets only descriptors 0, 1 and 2 even when this process
+  was itself started with others open and not close-on-exec (a CI runner's, a
+  shell's `exec 9<file`): the raw backend marks everything above 2
+  close-on-exec before the exec (`close_range`), the libc backend closes it
+  with posix_spawn's closefrom action (glibc 2.34+) or macOS's
+  `POSIX_SPAWN_CLOEXEC_DEFAULT`. 0.4.3's CI caught the leak that a clean
+  development shell never shows.
+- `proc.start_pty` on macOS: the window size is now set through the slave when
+  the kernel refuses it on a master whose slave is not open yet.
+- Internal: the unit tests that run `git` or change `PATH` share one lock.
+
 ## 0.4.3 (2026-10-12)
 
 ### Added

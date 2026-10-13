@@ -925,9 +925,15 @@ static int64_t proc_start(char *const argv[], char *const envp[], const char *cw
     if (rc == 0) rc = posix_spawnattr_setsigdefault(&at, &dfl);
     int flags = POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF;
     if (tty != NULL) flags |= SPAWN_SETSID;
+#if defined(__APPLE__) && defined(POSIX_SPAWN_CLOEXEC_DEFAULT)
+    flags |= POSIX_SPAWN_CLOEXEC_DEFAULT;
+#endif
     if (rc == 0) rc = posix_spawnattr_setflags(&at, flags);
     for (int i = 0; rc == 0 && i < 3; i++) {
         if (src[i] >= 3) rc = posix_spawn_file_actions_adddup2(&fa, (int)src[i], i);
+#if defined(__APPLE__) && defined(POSIX_SPAWN_CLOEXEC_DEFAULT)
+        else if (tty == NULL) rc = posix_spawn_file_actions_addinherit_np(&fa, i);
+#endif
     }
     if (rc == 0 && tty != NULL) {
         /* A new session (flag above), then the slave opened WITHOUT
@@ -938,6 +944,13 @@ static int64_t proc_start(char *const argv[], char *const envp[], const char *cw
         if (rc == 0) rc = posix_spawn_file_actions_adddup2(&fa, 0, 1);
         if (rc == 0) rc = posix_spawn_file_actions_adddup2(&fa, 0, 2);
     }
+    /* Only 0, 1 and 2 reach the program. Every descriptor this layer opens
+     * is close-on-exec; what it did not open (inherited from its own parent)
+     * is closed here: glibc 2.34's closefrom action, or macOS's
+     * close-everything-but-what-is-named attribute. */
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 34))
+    if (rc == 0) rc = posix_spawn_file_actions_addclosefrom_np(&fa, 3);
+#endif
     if (rc == 0 && cwd != NULL) rc = posix_spawn_file_actions_addchdir_np(&fa, cwd);
     pid_t pid = 0;
     if (rc == 0) rc = spawn_searching(&pid, argv, envp, &fa, &at);
@@ -1079,7 +1092,23 @@ int64_t sys_set_winsize(int64_t fd, int64_t rows, int64_t cols) {
     memset(&w, 0, sizeof w);
     w.ws_row = (unsigned short)rows;
     w.ws_col = (unsigned short)cols;
-    return ret(ioctl((int)fd, TIOCSWINSZ, &w));
+    int r = ioctl((int)fd, TIOCSWINSZ, &w);
+#if defined(__APPLE__)
+    /* macOS refuses TIOCSWINSZ on a master whose slave has not been opened
+     * yet; the slave's name is the master's TIOCPTYGNAME, and the size set
+     * through a briefly opened slave stays with the pair. */
+    if (r != 0 && (errno == ENOTTY || errno == EINVAL || errno == EIO)) {
+        char gname[128];
+        if (ioctl((int)fd, TIOCPTYGNAME, gname) == 0) {
+            int s = open(gname, O_RDWR | O_NOCTTY | O_CLOEXEC);
+            if (s >= 0) {
+                r = ioctl(s, TIOCSWINSZ, &w);
+                close(s);
+            }
+        }
+    }
+#endif
+    return ret(r);
 }
 
 /* waitpid, then sys.h's own encoding rather than the raw status: see

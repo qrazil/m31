@@ -987,6 +987,9 @@ int64_t sys_proc_start(char *const argv[], char *const envp[]) {
     return sys_proc_start_fds(argv, envp, 0, -1, -1, -1);
 }
 
+/* close_range: the same number on every architecture the layer supports. */
+#define NR_close_range 436
+
 /* A self-pipe is the only way a fork-based backend can report "the exec
  * failed and here is why" synchronously, the way sys_libc.c's posix_spawnp
  * already does on this machine's glibc (that file's comment has the
@@ -1054,6 +1057,18 @@ static int64_t proc_start(char *const argv[], char *const envp[], const char *cw
                 if (slave > 2) sc(NR_close, slave, 0, 0, 0, 0, 0);
             } else {
                 r = slave;
+            }
+        }
+        if (r >= 0) {
+            /* Only 0, 1 and 2 reach the program: everything else this
+             * process inherited from its own parent (descriptors this layer
+             * never opened, so never made close-on-exec) is marked
+             * close-on-exec here. CLOSE_RANGE_CLOEXEC (Linux 5.11) does it
+             * in one call; older kernels get the loop. The error pipe is
+             * close-on-exec already, so it still reports until the exec. */
+            if (sc(NR_close_range, 3, 0xffffffffll, 4 /* CLOSE_RANGE_CLOEXEC */, 0, 0, 0) < 0) {
+                for (int64_t fd = 3; fd < 1024; fd++)
+                    sc(NR_fcntl, fd, 2 /* F_SETFD */, 1 /* FD_CLOEXEC */, 0, 0, 0);
             }
         }
         if (r >= 0 && cwd != 0) r = sc(NR_chdir, P(cwd), 0, 0, 0, 0, 0);

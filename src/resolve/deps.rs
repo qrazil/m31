@@ -965,6 +965,13 @@ fn resolve_path_dep(
     })
 }
 
+/// The one lock every test that runs `git` (or mutates `PATH`) holds.
+#[cfg(test)]
+pub(crate) fn git_serial() -> std::sync::MutexGuard<'static, ()> {
+    static GIT_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    GIT_SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1370,11 +1377,4 @@ mod tests {
         assert_eq!(clean(Path::new("./../x")), PathBuf::from("../x"));
         assert_eq!(clean(Path::new("/a/../../x")), PathBuf::from("/x"));
     }
-}
-
-/// The one lock every test that runs `git` (or mutates `PATH`) holds.
-#[cfg(test)]
-pub(crate) fn git_serial() -> std::sync::MutexGuard<'static, ()> {
-    static GIT_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    GIT_SERIAL.lock().unwrap_or_else(|e| e.into_inner())
 }
