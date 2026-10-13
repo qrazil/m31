@@ -1,0 +1,55 @@
+import proc;
+import io;
+import os;
+
+// Two hundred children one after another, then fifty at once -- each its own
+// green thread doing a full run (start, feed, drain, wait) while the others
+// are in the middle of theirs. Every one echoes its own number back through
+// cat, so a mix-up between concurrent children is a wrong line, not a hang.
+
+void one(int number, Chan<int> answers) {
+    str want = "child-" + number.to_str();
+    match (proc.run(["cat"], input: want.to_bytes(), is_quiet: true)) {
+        case Ok(proc.Completed done): {
+            match (done.stdout.utf8()) {
+                case Some(str text): {
+                    if (text == want) {
+                        send(answers, 1);
+                    } else {
+                        send(answers, 0);
+                    }
+                }
+                case None: {
+                    send(answers, 0);
+                }
+            }
+        }
+        case Err(proc.Error error): {
+            send(answers, 0);
+        }
+    }
+}
+
+int sequential = 0;
+for (int number in 0 .. 200) {
+    match (proc.run(["sh", "-c", "exit 0"], is_quiet: true)) {
+        case Ok(proc.Completed done): {
+            if (done.is_success()) {
+                sequential = sequential + 1;
+            }
+        }
+        case Err(proc.Error error): {
+            print("run " + number.to_str() + ": " + error.to_str());
+        }
+    }
+}
+print("sequential ok: " + sequential.to_str());
+Chan<int> answers = Chan<int>(64);
+for (int number in 0 .. 50) {
+    spawn one(number, answers);
+}
+int good = 0;
+for (int number in 0 .. 50) {
+    good = good + recv(answers);
+}
+print("concurrent ok: " + good.to_str());

@@ -1,0 +1,30 @@
+echo: rc=0 ok=true truncated=false out=[hello world
+] err=[]
+stderr: rc=0 ok=true truncated=false out=[out
+] err=[err
+]
+exit 3 unchecked: rc=3 ok=false truncated=false out=[before
+] err=[]
+exit 3 checked: error the process did not exit successfully
+signal: rc=-15 ok=false killed by signal 15
+cat: rc=0 ok=true truncated=false out=[round trip] err=[]
+no input: rc=0 ok=true truncated=false out=[] err=[]
+wc: rc=0 ok=true truncated=false out=[5
+] err=[]
+env: rc=0 ok=true truncated=false out=[[bar] []
+] err=[]
+cwd: rc=0 ok=true truncated=false out=[/
+] err=[]
+bad cwd: error program or directory not found
+missing: error program or directory not found
+not executable: error permission denied
+empty argv: error invalid argument
+whitespace: error invalid argument
+env name: error invalid argument
+timeout: error timed out
+in time: rc=0 ok=true truncated=false out=[quick
+] err=[]
+both
+echoed: rc=0 ok=true truncated=false out=[both
+] err=[]
+done

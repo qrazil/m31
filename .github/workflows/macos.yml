@@ -142,6 +142,14 @@ jobs:
             exit 1
           }
 
+      - name: Child processes -- pipes parked by the reactor (proc.run/proc.start vs python3 subprocess, 200 MiB through cat in constant memory, fd-leak check)
+        timeout-minutes: 15
+        run: bash tests/proc/test_proc.sh
+
+      - name: realpath/readlink vs python3, and the monotonic clock
+        timeout-minutes: 5
+        run: bash tests/fs/test_realpath.sh
+
       - name: Full gates.sh (compiler build/test/lint, runtime suites above again as part of the gate, formatter, corpus, ASan/UBSan)
         timeout-minutes: 55
         run: bash gates.sh

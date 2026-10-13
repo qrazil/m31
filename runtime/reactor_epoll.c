@@ -300,10 +300,13 @@ rt_reactor_t *rt_reactor_create(rt_scheduler_t *sched) {
     if (r == NULL) rt_trap("out of memory: reactor");
     r->sched = sched;
 
-    r->epfd = epoll_create1(0);
+    /* Close-on-exec on all three descriptors: a child started by lib/proc.m31
+     * must get 0, 1 and 2 and nothing the runtime keeps for itself
+     * (docs/sys-layer.md, "every descriptor is close-on-exec"). */
+    r->epfd = epoll_create1(EPOLL_CLOEXEC);
     if (r->epfd < 0) rt_trap("rt_reactor_create: epoll_create1 failed");
 
-    r->shutdown_fd = eventfd(0, EFD_NONBLOCK);
+    r->shutdown_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (r->shutdown_fd < 0) rt_trap("rt_reactor_create: eventfd failed");
 
     struct epoll_event ev;
@@ -314,7 +317,7 @@ rt_reactor_t *rt_reactor_create(rt_scheduler_t *sched) {
         rt_trap("rt_reactor_create: could not register the shutdown eventfd");
     }
 
-    r->wake_fd = eventfd(0, EFD_NONBLOCK);
+    r->wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (r->wake_fd < 0) rt_trap("rt_reactor_create: eventfd failed");
     memset(&ev, 0, sizeof ev);
     ev.events = EPOLLIN;

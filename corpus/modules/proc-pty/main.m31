@@ -1,0 +1,79 @@
+import proc;
+import io;
+import os;
+
+// A child on a pseudo-terminal: it sees a terminal of the size asked for,
+// its input is echoed by the line discipline, and the end of the stream is
+// the child going away. The names of terminals differ per machine, so the
+// output is shown with carriage returns removed and nothing else.
+
+str shown(bytes data) {
+    match (data.utf8()) {
+        case Some(str text): {
+            return text.split("\r").join("");
+        }
+        case None: {
+            return "<not text>";
+        }
+    }
+}
+
+// Reads until `until` has been printed (so that what is typed lands after
+// the prompt, always), types `typed`, and reads to the end.
+void conversation(List<str> argv, int rows, int columns, str until, str typed) {
+    match (proc.start_pty(argv, rows: rows, columns: columns)) {
+        case Ok(proc.Pty child): {
+            bytes seen = [];
+            bytes marker = until.to_bytes();
+            while (until != "" && !seen.contains(marker)) {
+                match (child.master.read(100)) {
+                    case Ok(bytes chunk): {
+                        if (chunk.size() == 0) {
+                            break;
+                        }
+                        seen.extend(chunk);
+                    }
+                    case Err(io.Error error): {
+                        print("read failed: " + error.to_str());
+                        break;
+                    }
+                }
+            }
+            if (typed != "") {
+                Result<int, io.Error> wrote = child.master.write(typed.to_bytes());
+            }
+            match (child.master.read_all()) {
+                case Ok(bytes output): {
+                    seen.extend(output);
+                    print("[" + shown(seen) + "]");
+                }
+                case Err(io.Error error): {
+                    print("read failed: " + error.to_str());
+                }
+            }
+            match (child.wait()) {
+                case Ok(os.ExitStatus status): {
+                    print(status.to_str());
+                }
+                case Err(proc.Error error): {
+                    print("wait failed: " + error.to_str());
+                }
+            }
+        }
+        case Err(proc.Error error): {
+            print("start failed: " + error.to_str());
+        }
+    }
+}
+
+conversation(["sh", "-c", "stty size; [ -t 0 ] && [ -t 1 ] && [ -t 2 ] && echo terminal"], 31, 97, "", "");
+conversation(["sh", "-c", "printf 'name? '; read name; echo hello $name; exit 3"], 24, 80, "name? ", "ann\n");
+conversation(["no-such-program-2026"], 24, 80, "", "");
+match (proc.start_pty(["true"], rows: 0)) {
+    case Ok(proc.Pty child): {
+        print("a size of 0 rows was accepted");
+    }
+    case Err(proc.Error error): {
+        print("rows 0: " + error.to_str());
+    }
+}

@@ -46,6 +46,10 @@
 // terminal (stdin, stdout and stderr are inherited untouched, which is what
 // lets an interactive program like an editor take it over) so the two
 // should never be reached for interchangeably.
+//
+// A child whose output is wanted -- or fed, or on a terminal of its own -- is
+// the `proc` module's (`proc.run`, `proc.start`, `proc.start_pty`); `os.run`
+// is for the one that should have the real terminal.
 
 import io;
 

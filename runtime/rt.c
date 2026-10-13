@@ -3045,6 +3045,15 @@ int64_t rt_listdir(Obj *path, Obj *buf) {
 }
 
 
+/* Writes the link's target into `buf`, at most its size; the bytes written,
+ * or -errno (sys.h, sys_readlink). A result equal to the size may be cut. */
+int64_t rt_readlink(Obj *path, Obj *buf) {
+    rt_check_mutable(buf);
+    if (!path_ok(path)) return -SYS_EINVAL;
+    Bytes *b = (Bytes *)buf;
+    return sys_readlink(((Str *)path)->data, (char *)b->data, b->len);
+}
+
 /* ---- process primitives: lib/os.m31, lib/date.m31, lib/random.m31 ------ */
 /* Each is one OS fact, handed back as a scalar or pushed onto the caller's
  * list. None of them decides anything: whether argv[0] is included, what an
@@ -3161,6 +3170,127 @@ int64_t rt_proc_start(Obj *argv_list) {
     int64_t r = sys_proc_start(argv, environ);
     free(argv);
     return r;
+}
+
+/* A start with the child's stdio and working directory chosen, and an
+ * environment that is not this process's (lib/proc.m31). The same
+ * conversions as rt_proc_start, and the same flush for the same reason.
+ *
+ * `env` is a List<str> of "NAME=value" entries used INSTEAD of `environ`
+ * when `has_env` is nonzero (an empty list is then an empty environment);
+ * building those entries -- merging, replacing, refusing a name with '=' --
+ * is language source. `cwd` is "" for "inherit". A descriptor is -1 for
+ * "inherit", else one of this process's own, which the child gets as its
+ * 0, 1 or 2 (sys.h). */
+static char **rt_cstr_array(Obj *list, int64_t *bad) {
+    int64_t n = rt_len_of(list);
+    char **a = malloc((size_t)(n + 1) * sizeof *a);
+    if (a == NULL) {
+        *bad = -SYS_ENOMEM;
+        return NULL;
+    }
+    const int64_t *elems = slots(list);
+    for (int64_t i = 0; i < n; i++) {
+        Str *s = (Str *)(intptr_t)elems[i];
+        if (memchr(s->data, '\0', (size_t)s->len) != NULL) {
+            free(a);
+            *bad = -SYS_EINVAL;
+            return NULL;
+        }
+        a[i] = (char *)s->data;
+    }
+    a[n] = NULL;
+    return a;
+}
+
+static int64_t rt_start_common(Obj *argv_list, Obj *env_list, int64_t has_env, Obj *cwd,
+                               int64_t stdin_fd, int64_t stdout_fd, int64_t stderr_fd,
+                               Obj *tty) {
+    rt_out_flush();
+    if (rt_len_of(argv_list) <= 0) return -SYS_EINVAL;
+    int64_t bad = 0;
+    char **argv = rt_cstr_array(argv_list, &bad);
+    if (argv == NULL) return bad;
+    char **envp = environ;
+    char **owned_env = NULL;
+    if (has_env) {
+        owned_env = rt_cstr_array(env_list, &bad);
+        if (owned_env == NULL) {
+            free(argv);
+            return bad;
+        }
+        envp = owned_env;
+    }
+    Str *c = (Str *)cwd;
+    const char *dir = NULL;
+    int64_t r;
+    if (c->len > 0 && memchr(c->data, '\0', (size_t)c->len) != NULL) {
+        r = -SYS_EINVAL;
+    } else {
+        if (c->len > 0) dir = (const char *)c->data;
+        if (tty != NULL) {
+            Str *t = (Str *)tty;
+            if (t->len == 0 || memchr(t->data, '\0', (size_t)t->len) != NULL) {
+                r = -SYS_EINVAL;
+            } else {
+                r = sys_proc_start_pty(argv, envp, dir, (const char *)t->data);
+            }
+        } else {
+            r = sys_proc_start_fds(argv, envp, dir, stdin_fd, stdout_fd, stderr_fd);
+        }
+    }
+    free(argv);
+    free(owned_env);
+    return r;
+}
+
+int64_t rt_proc_start_fds(Obj *argv_list, Obj *env_list, int64_t has_env, Obj *cwd,
+                          int64_t stdin_fd, int64_t stdout_fd, int64_t stderr_fd) {
+    return rt_start_common(argv_list, env_list, has_env, cwd, stdin_fd, stdout_fd, stderr_fd, NULL);
+}
+
+/* The same on a pseudo-terminal's slave, named by `slave_path`. */
+int64_t rt_proc_start_pty(Obj *argv_list, Obj *env_list, int64_t has_env, Obj *cwd,
+                          Obj *slave_path) {
+    return rt_start_common(argv_list, env_list, has_env, cwd, -1, -1, -1, slave_path);
+}
+
+/* Pushes the master descriptor; writes the slave's name, NUL-terminated,
+ * into `path` (a caller-sized bytes, never grown here). 0 or -errno. */
+int64_t rt_pty_open(Obj *out, Obj *path) {
+    rt_check_mutable(path);
+    Bytes *b = (Bytes *)path;
+    int64_t master = -1;
+    int64_t r = sys_pty_open(&master, (char *)b->data, b->len);
+    if (r < 0) return r;
+    rt_list_push(out, master);
+    return 0;
+}
+
+int64_t rt_set_winsize(int64_t fd, int64_t rows, int64_t cols) {
+    return sys_set_winsize(fd, rows, cols);
+}
+
+/* Pushes the read end, then the write end, of a new close-on-exec blocking
+ * pipe; 0 or -errno. */
+int64_t rt_pipe(Obj *out) {
+    int64_t fds[2];
+    int64_t r = sys_pipe(fds);
+    if (r < 0) return r;
+    rt_list_push(out, fds[0]);
+    rt_list_push(out, fds[1]);
+    return 0;
+}
+
+int64_t rt_kill(int64_t pid, int64_t sig) {
+    return sys_kill(pid, sig);
+}
+
+/* The monotonic clock in nanoseconds since an arbitrary start. */
+int64_t rt_clock_monotonic(void) {
+    int64_t ns = sys_clock_ns(SYS_CLOCK_MONOTONIC);
+    if (ns < 0) rt_trap("the monotonic clock is unavailable");
+    return ns;
 }
 
 /* Waits for the process `pid` -- one this process's own rt_proc_start

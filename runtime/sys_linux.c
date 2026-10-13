@@ -64,6 +64,12 @@
 #define NR_setsockopt   54
 #define NR_getsockopt   55
 #define NR_fcntl        72
+#define NR_chdir        80
+#define NR_kill         62
+#define NR_rt_sigprocmask 14
+#define NR_readlinkat  267
+#define NR_dup3        292
+#define NR_setsid      112
 #define NR_getdents64  217
 #define NR_clock_gettime 228
 #define NR_exit_group   231
@@ -79,6 +85,12 @@
 #define NR_statx        332
 #elif defined(__aarch64__) || (defined(__riscv) && __riscv_xlen == 64)
 #define NR_fcntl         25
+#define NR_dup3          24
+#define NR_setsid       157
+#define NR_chdir         49
+#define NR_readlinkat    78
+#define NR_kill         129
+#define NR_rt_sigprocmask 135
 #define NR_ioctl         29
 #define NR_mkdirat       34
 #define NR_unlinkat      35
@@ -904,14 +916,18 @@ static const char *proc_path_value(char *const envp[]) {
 
 /* execve, searching $PATH when argv[0] has no '/' -- the one piece of
  * execvp/execvpe this backend has to write out by hand, because the raw
- * execve syscall does not search anything (sys.h). One component of $PATH
- * at a time, an empty component meaning "." (POSIX's own rule, not this
- * layer's invention), stopping at the first success (execve never returns
- * then) or the first failure that is not "try the next directory instead".
- * ENOENT, EACCES and ENOTDIR are exactly the failures glibc's own execvpe
- * keeps searching past; anything else -- ENOEXEC for a file that exists but
- * is not something the kernel can run, say -- is reported immediately,
- * because trying five more directories would not change that answer.
+ * execve syscall does not search anything (sys.h). The path searched is the
+ * child's own (`PATH=` in envp, "/bin:/usr/bin" when it has none), the rule
+ * sys_libc.c's spawn_searching implements too. One component at a time, an
+ * empty component meaning "." (POSIX's own rule, not this layer's
+ * invention), stopping at the first success (execve never returns then) or
+ * the first failure that is not "try the next directory instead". ENOENT,
+ * EACCES and ENOTDIR are exactly the failures glibc's own execvpe keeps
+ * searching past; anything else -- ENOEXEC for a file that exists but is not
+ * something the kernel can run, say -- is reported immediately, because
+ * trying five more directories would not change that answer. If nothing
+ * worked, EACCES is the answer when any directory said it (execvp's rule),
+ * otherwise ENOENT.
  *
  * Left out on purpose: execvpe's shell fallback for a file with no '#!'
  * line and no ELF header at all (POSIX's "then a shell must be able to run
@@ -924,10 +940,10 @@ static int64_t proc_exec_search(char *const argv[], char *const envp[]) {
         return sc(NR_execve, P(prog), P(argv), P(envp), 0, 0, 0);
     }
     const char *path = proc_path_value(envp);
-    if (path == 0) return -SYS_ENOENT;
+    if (path == 0) path = "/bin:/usr/bin";
     int64_t proglen = 0;
     while (prog[proglen]) proglen++;
-    int64_t last = -SYS_ENOENT;
+    int got_eacces = 0;
     for (;;) {
         const char *sep = path;
         while (*sep && *sep != ':') sep++;
@@ -945,16 +961,30 @@ static int64_t proc_exec_search(char *const argv[], char *const envp[]) {
             for (int64_t i = 0; i < proglen; i++) buf[p++] = prog[i];
             buf[p] = '\0';
             int64_t r = sc(NR_execve, P(buf), P(argv), P(envp), 0, 0, 0);
-            if (r != -SYS_ENOENT && r != -SYS_EACCES && r != -SYS_ENOTDIR) return r;
-            last = r;
+            if (r == -SYS_EACCES) got_eacces = 1;
+            else if (r != -SYS_ENOENT && r != -SYS_ENOTDIR) return r;
         }
         /* A directory too long for the buffer is skipped rather than
          * refused outright: some other component may still have the
-         * command, so `last` is left at whatever it already was. */
+         * command. */
         if (*sep == '\0') break;
         path = sep + 1;
     }
-    return last;
+    return got_eacces ? -SYS_EACCES : -SYS_ENOENT;
+}
+
+/* Move `fd` to a descriptor number of 3 or more if it is below, so the
+ * child's dup3 onto 0..2 below cannot overwrite the self-pipe in a process
+ * that has closed its own standard descriptors. */
+static int64_t proc_high_fd(int64_t fd) {
+    if (fd >= 3) return fd;
+    int64_t n = sc(NR_fcntl, fd, 1030 /* F_DUPFD_CLOEXEC */, 3, 0, 0, 0);
+    sc(NR_close, fd, 0, 0, 0, 0, 0);
+    return n;
+}
+
+int64_t sys_proc_start(char *const argv[], char *const envp[]) {
+    return sys_proc_start_fds(argv, envp, 0, -1, -1, -1);
 }
 
 /* A self-pipe is the only way a fork-based backend can report "the exec
@@ -965,11 +995,29 @@ static int64_t proc_exec_search(char *const argv[], char *const envp[]) {
  * end-of-file. A failed exec instead writes its own errno before exiting,
  * and the parent reaps that child right here -- it is not a pid the caller
  * will ever see, so nothing else will ever wait for it, and leaving it
- * unreaped would be a permanent zombie. */
-int64_t sys_proc_start(char *const argv[], char *const envp[]) {
+ * unreaped would be a permanent zombie.
+ *
+ * The same pipe carries every other failure between clone and exec: a
+ * dup3 of a closed descriptor, a cwd that cannot be entered. All of them
+ * are one errno written before exit(127). */
+static int64_t proc_start(char *const argv[], char *const envp[], const char *cwd,
+                          int64_t stdin_fd, int64_t stdout_fd, int64_t stderr_fd,
+                          const char *tty) {
+    const int64_t src[3] = {stdin_fd, stdout_fd, stderr_fd};
+    for (int i = 0; i < 3; i++) {
+        if (src[i] < -1 || src[i] > 0x7fffffff) return -SYS_EINVAL;
+        if (src[i] >= 0 && src[i] <= 2 && src[i] != i) return -SYS_EINVAL;
+    }
     int pfd[2];
     int64_t pr = sc(NR_pipe2, P(pfd), O_CLOEXEC_, 0, 0, 0, 0);
     if (pr < 0) return pr;
+    int64_t hi0 = proc_high_fd(pfd[0]);
+    int64_t hi1 = hi0 < 0 ? hi0 : proc_high_fd(pfd[1]);
+    if (hi0 < 0 || hi1 < 0) {
+        return hi0 < 0 ? hi0 : hi1;
+    }
+    pfd[0] = (int)hi0;
+    pfd[1] = (int)hi1;
 
     int64_t pid = sc(NR_clone, PROC_SIGCHLD, 0, 0, 0, 0, 0);
     if (pid < 0) {
@@ -982,7 +1030,42 @@ int64_t sys_proc_start(char *const argv[], char *const envp[]) {
          * one more descriptor left open by accident (close-on-exec would
          * have taken it anyway, but exec may never happen). */
         sc(NR_close, pfd[0], 0, 0, 0, 0, 0);
-        int64_t r = proc_exec_search(argv, envp);
+        int64_t r = 0;
+        /* The sources are all >= 3 or the slot's own number, so the copies
+         * cannot clobber one another. dup3 with flags 0 clears CLOEXEC on
+         * the copy, which is what the exec must keep. */
+        for (int i = 0; r >= 0 && i < 3; i++) {
+            if (src[i] >= 3) r = sc(NR_dup3, src[i], i, 0, 0, 0, 0);
+        }
+        if (r >= 0 && tty != 0) {
+            /* A session of its own, then the slave opened without O_NOCTTY:
+             * the first terminal a session leader with none opens becomes
+             * its controlling terminal, and TIOCSCTTY says so explicitly in
+             * case the kernel's rule were not what it is (EPERM when it
+             * already is: ignored). Then the three streams are copies of it. */
+            r = sc(NR_setsid, 0, 0, 0, 0, 0, 0);
+            int64_t slave = r < 0 ? r : sc(NR_openat, AT_FDCWD, P(tty), 2 /* O_RDWR */, 0, 0, 0);
+            if (slave >= 0) {
+                sc(NR_ioctl, slave, 0x540E /* TIOCSCTTY */, 0, 0, 0, 0);
+                r = 0;
+                for (int i = 0; r >= 0 && i < 3; i++) {
+                    if (slave != i) r = sc(NR_dup3, slave, i, 0, 0, 0, 0);
+                }
+                if (slave > 2) sc(NR_close, slave, 0, 0, 0, 0, 0);
+            } else {
+                r = slave;
+            }
+        }
+        if (r >= 0 && cwd != 0) r = sc(NR_chdir, P(cwd), 0, 0, 0, 0, 0);
+        if (r >= 0) {
+            /* sys.h: SIGPIPE back to the default and nothing blocked. */
+            KSigaction act;
+            zero_bytes((unsigned char *)&act, (int64_t)sizeof act);
+            sc(NR_rt_sigaction, K_SIGPIPE, P(&act), 0, (int64_t)sizeof act.mask, 0, 0);
+            uint64_t none = 0;
+            sc(NR_rt_sigprocmask, 2 /* SIG_SETMASK */, P(&none), 0, 8, 0, 0);
+            r = proc_exec_search(argv, envp);
+        }
         /* execve returns only on failure -- on success the process image,
          * and everything above this line, is already gone. */
         int32_t code = (int32_t)r;
@@ -1017,6 +1100,87 @@ int64_t sys_proc_start(char *const argv[], char *const envp[]) {
         break;
     }
     return n > 0 ? code : n;
+}
+
+int64_t sys_proc_start_fds(char *const argv[], char *const envp[], const char *cwd,
+                           int64_t stdin_fd, int64_t stdout_fd, int64_t stderr_fd) {
+    return proc_start(argv, envp, cwd, stdin_fd, stdout_fd, stderr_fd, 0);
+}
+
+int64_t sys_proc_start_pty(char *const argv[], char *const envp[], const char *cwd,
+                           const char *slave_path) {
+    if (slave_path == 0) return -SYS_EINVAL;
+    return proc_start(argv, envp, cwd, -1, -1, -1, slave_path);
+}
+
+int64_t sys_pipe(int64_t fds[2]) {
+    int p[2];
+    int64_t r = sc(NR_pipe2, P(p), O_CLOEXEC_, 0, 0, 0, 0);
+    if (r < 0) return r;
+    fds[0] = p[0];
+    fds[1] = p[1];
+    return 0;
+}
+
+/* The kernel takes any signal number up to 64 and answers -EINVAL itself for
+ * the rest; the pid test is the layer's, so that 0 and negative values --
+ * process groups and "everything" -- are not reachable by accident. */
+int64_t sys_kill(int64_t pid, int64_t sig) {
+    if (pid <= 0 || pid > 0x7fffffff) return -SYS_EINVAL;
+    return sc(NR_kill, pid, sig, 0, 0, 0, 0);
+}
+
+int64_t sys_readlink(const char *path, char *buf, int64_t cap) {
+    return sc(NR_readlinkat, AT_FDCWD, P(path), P(buf), cap, 0, 0);
+}
+
+/* /dev/ptmx, then the two ioctls glibc's unlockpt and ptsname are made of:
+ * TIOCSPTLCK with 0 unlocks the slave, TIOCGPTN is its number, and the name
+ * is /dev/pts/N (the only place devpts is mounted, which glibc assumes too).
+ * grantpt is a no-op on a devpts that is mounted with gid=5, as every one is
+ * today, so there is nothing to call. O_NOCTTY (0400 on all three
+ * architectures) so that this process does not take the new terminal as its
+ * own. */
+int64_t sys_pty_open(int64_t *master_fd, char *slave_path, int64_t cap) {
+    int64_t m = sc(NR_openat, AT_FDCWD, P("/dev/ptmx"), 02 /* O_RDWR */ | 0400 /* O_NOCTTY */ | O_CLOEXEC_, 0, 0, 0);
+    if (m < 0) return m;
+    int32_t zero_lock = 0;
+    int64_t r = sc(NR_ioctl, m, 0x40045431 /* TIOCSPTLCK */, P(&zero_lock), 0, 0, 0);
+    uint32_t number = 0;
+    if (r >= 0) r = sc(NR_ioctl, m, 0x80045430 /* TIOCGPTN */, P(&number), 0, 0, 0);
+    if (r < 0) {
+        sc(NR_close, m, 0, 0, 0, 0, 0);
+        return r;
+    }
+    char digits[12];
+    int64_t nd = 0;
+    uint32_t v = number;
+    do {
+        digits[nd++] = (char)('0' + v % 10);
+        v /= 10;
+    } while (v);
+    const char prefix[] = "/dev/pts/";
+    int64_t pl = (int64_t)sizeof prefix - 1;
+    if (cap < pl + nd + 1) {
+        sc(NR_close, m, 0, 0, 0, 0, 0);
+        return -SYS_ENOSPC;
+    }
+    for (int64_t i = 0; i < pl; i++) slave_path[i] = prefix[i];
+    for (int64_t i = 0; i < nd; i++) slave_path[pl + i] = digits[nd - 1 - i];
+    slave_path[pl + nd] = '\0';
+    *master_fd = m;
+    return 0;
+}
+
+#define TIOCSWINSZ 0x5414
+
+int64_t sys_set_winsize(int64_t fd, int64_t rows, int64_t cols) {
+    if (rows < 0 || rows > 65535 || cols < 0 || cols > 65535) return -SYS_EINVAL;
+    KWinsize w;
+    zero_bytes((unsigned char *)&w, (int64_t)sizeof w);
+    w.ws_row = (uint16_t)rows;
+    w.ws_col = (uint16_t)cols;
+    return sc(NR_ioctl, fd, TIOCSWINSZ, P(&w), 0, 0, 0);
 }
 
 /* wait4, then sys.h's own encoding by hand: the kernel's status word has one

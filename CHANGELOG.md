@@ -3,8 +3,46 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
-## 0.4.2 (2026-10-12)
+## Unreleased (0.4.3)
 
+### Added
+
+- `proc` (`lib/proc.m31`, `docs/proc-decision.md`): child processes with their
+  standard streams on pipes. `proc.run(argv, input:, cwd:, env:, timeout_ms:,
+  should_check:, is_quiet:)` returns a `Completed` (status, returncode, output
+  and error, capped at 64 MiB each with `is_truncated`); `proc.start(argv,
+  cwd:, env:)` returns a `Proc` whose `stdin`, `stdout` and `stderr` are
+  `proc.Pipe`s -- ordinary `io` streams that park only the green thread
+  through the reactor and hold no unbounded buffer -- with `wait()`,
+  `kill(signal)` and a destructor that kills and reaps. `argv` is a list of
+  strings straight to `execve`; `env` replaces the environment. Errors are the
+  payload-free `proc.Error`. `os.run` is unchanged. (`proc.start`, not
+  Oro's `spawn`: `spawn` is a keyword.)
+- Sys layer: `sys_pipe`, `sys_proc_start_fds` (child stdio by descriptor,
+  working directory, SIGPIPE and signal mask reset), `sys_kill`,
+  `sys_readlink`, on both backends, with `rt_*` wrappers. A child's `$PATH`
+  lookup now uses the `PATH` of the environment it is given on both backends.
+- `proc.start_pty(argv, rows:, columns:, cwd:, env:)` returns a `Pty`: the
+  child on a pseudo-terminal in a session of its own, `master` one readable
+  and writable stream, `resize(rows, columns)`, `wait()`, `kill(signal)`.
+  Sys layer: `sys_pty_open`, `sys_set_winsize`, `sys_proc_start_pty`. Tested
+  against Python's `pty` module (`tty`, `stty size`, an interactive `cat`, a
+  raw-mode program, `^C`, a resize) and in corpus `proc-pty`.
+- `timer.monotonic_ns()`: nanoseconds on the monotonic clock.
+- `fs.readlink(path)` and `fs.realpath(path)` (Python's
+  `os.path.realpath(strict=True)`; relative paths need `/proc/self/cwd`).
+- Tests: corpus `proc-run`, `proc-start`, `proc-many`; `tests/proc/test_proc.sh`
+  (parity with Python's `subprocess`, 200 MiB through `cat` in constant
+  memory, 8 MiB of stdin beside draining, the cap, timeouts, EPIPE, on both
+  backends) and `tests/fs/test_realpath.sh`, both in `gates.sh` and in the
+  macOS and aarch64 workflows.
+
+### Fixed
+
+- The reactor's epoll descriptor and its two eventfds were not close-on-exec
+  and reached every child process; they are now (and the kqueue descriptor).
+
+## 0.4.2 (2026-10-12)
 ### Fixed
 
 - `http.read_request` no longer traps on a request target that is not UTF-8:

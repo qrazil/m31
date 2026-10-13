@@ -44,9 +44,11 @@
 
 #define SYS_EPERM         1
 #define SYS_ENOENT        2
+#define SYS_ESRCH         3
 #define SYS_EINTR         4
 #define SYS_EIO           5
 #define SYS_EBADF         9
+#define SYS_ECHILD       10
 #define SYS_EAGAIN       11
 #define SYS_ENOMEM       12
 #define SYS_EACCES       13
@@ -620,11 +622,15 @@ _Noreturn void sys_exit(int64_t code);
  * passing that array through unchanged.
  *
  * `argv[0]` is searched for on `$PATH` when it names no directory (has no
- * '/'), exactly execvp's own rule and the one every `$EDITOR` relies on --
- * a full path is tried as given, unsearched. Both backends implement this
- * identically: the libc one gets it from posix_spawnp, the raw one reads
- * `PATH=` out of `envp` itself and walks it the way execvp does (sys_linux.c
- * has the one place that needed writing rather than a lookup).
+ * '/'), execvp's own rule and the one every `$EDITOR` relies on -- a full
+ * path is tried as given, unsearched. The path searched is THE CHILD'S: the
+ * `PATH=` entry of `envp`, or "/bin:/usr/bin" when it has none (Python's
+ * os.get_exec_path). Both backends implement this identically: the raw one
+ * reads `PATH=` out of `envp` itself and walks it the way execvp does
+ * (sys_linux.c), and the libc one does the same walk over posix_spawn
+ * rather than posix_spawnp, which would search the CALLING process's PATH
+ * and make an `env=` that replaces the environment silently not replace
+ * where programs are found.
  *
  * Returns the child's pid on success, or a negative errno if the process
  * could not be started AT ALL -- most commonly -SYS_ENOENT, argv[0] found
@@ -679,5 +685,102 @@ int64_t sys_proc_start(char *const argv[], char *const envp[]);      /* pid */
 int64_t sys_proc_wait(int64_t pid);                                   /* encoded status */
 
 #define SYS_WAIT_SIGNAL_BASE 256
+
+/* ---- child stdio, pipes and signals ----------------------------------------
+ *
+ * Added for lib/proc.m31 (docs/proc-decision.md): the inherit-only
+ * sys_proc_start above cannot capture a child's output, and capturing is
+ * "a pipe, a dup2 in the child, and a reader that does not deadlock" -- the
+ * pipe and the dup2 are here, the reader is language source.
+ *
+ * sys_pipe makes a pipe: fds[0] is the read end, fds[1] the write end, both
+ * close-on-exec like every descriptor this layer opens (so a pipe given to a
+ * child as its stdout is closed again in the child by exec, after the dup
+ * made its own copy on 1) and both BLOCKING. A parent's end that the reactor
+ * is to park on is made non-blocking afterwards with
+ *   sys_setsockopt(fd, SYS_SO_NONBLOCK, 1)
+ * which is `fcntl(F_SETFL, O_NONBLOCK)` and therefore works on a pipe as on
+ * a socket. The two ends are two open file descriptions, so setting the flag
+ * on the parent's end does not reach the end the child holds.
+ *
+ * sys_proc_start_fds is sys_proc_start with the child's stdio chosen:
+ * stdin_fd, stdout_fd and stderr_fd become the child's descriptors 0, 1 and
+ * 2 (the child gets its OWN copies; the caller still owns, and must close,
+ * its own). -1 leaves that descriptor inherited, exactly as sys_proc_start
+ * does. A descriptor numbered 0..2 is accepted only as the inherit spelling
+ * for the same slot (0 for stdin_fd, ...); any other 0..2 is -SYS_EINVAL,
+ * because dup2'ing onto a slot that is itself a source would make the
+ * result depend on the order of the copies. Nothing else is inherited:
+ * every other descriptor of this layer is close-on-exec already.
+ *
+ * `cwd`, when not NULL, is the child's working directory (chdir before the
+ * program is looked up, so a relative argv[0] containing '/' and the empty
+ * entries of $PATH are relative to it, as with execvp after chdir). A cwd
+ * that cannot be entered is reported like a program that cannot be run: a
+ * negative errno from THIS call, no pid, no zombie.
+ *
+ * The child starts with SIGPIPE back at SIG_DFL and an empty signal mask.
+ * Ignored dispositions survive exec, and this process ignores SIGPIPE
+ * (sys_ignore_sigpipe), so without the reset `yes | head`-style programs
+ * would get EPIPE errors they never expected instead of the death every
+ * Unix program is written for -- Python's subprocess does the same
+ * (restore_signals). sys_proc_start is this function with every stdio
+ * argument -1 and no cwd.
+ *
+ * sys_kill sends Linux signal number `sig` (0 only checks that the process
+ * exists) to the process `pid`, which must be positive: 0 and negative
+ * values would signal process groups, or everything, and are
+ * -SYS_EINVAL here. Signal numbers are Linux's on every host; the libc
+ * backend translates the common ones for the host, and a number it has no
+ * mapping for is -SYS_EINVAL. Killing a pid this process has already waited
+ * for may hit an unrelated process that has been given the number since --
+ * the caller must not kill after a wait (lib/proc.m31 tracks this). */
+int64_t sys_pipe(int64_t fds[2]);                                     /* 0 */
+int64_t sys_proc_start_fds(char *const argv[], char *const envp[],
+                           const char *cwd, int64_t stdin_fd,
+                           int64_t stdout_fd, int64_t stderr_fd);   /* pid */
+int64_t sys_kill(int64_t pid, int64_t sig);                           /* 0 */
+
+/* ---- pseudo-terminals -------------------------------------------------------
+ *
+ * A child that must believe it is on a terminal: line editing, colours, a
+ * pager, `stty`, a REPL. Three calls, because the three things are done by
+ * different processes at different times (docs/proc-decision.md).
+ *
+ * sys_pty_open makes a pseudo-terminal: the MASTER descriptor (close-on-exec,
+ * blocking; make it non-blocking with sys_setsockopt(SYS_SO_NONBLOCK) for the
+ * reactor, as for a pipe) and the NAME of the slave, NUL-terminated into
+ * `slave_path` (`cap` bytes; "/dev/pts/7" on Linux). The slave is not opened
+ * here: the child opens it by name (below), which is what makes it the child's
+ * controlling terminal. -SYS_ENOSPC when `cap` is too small.
+ *
+ * sys_set_winsize sets the window size, `rows` by `cols` cells, on a terminal
+ * master (sys_winsize reads it). The kernel tells the foreground process group
+ * with SIGWINCH, so calling it again IS the resize. A new pty has size 0 by 0
+ * until this is called.
+ *
+ * sys_proc_start_pty is sys_proc_start_fds with the child's three streams all
+ * on the slave named `slave_path`, opened by the CHILD in a new session of its
+ * own, which makes it the controlling terminal -- ^C then reaches the child
+ * rather than this process, and `tty` and `stty` work. Everything else is
+ * sys_proc_start_fds: `cwd`, the child's own `envp` and `$PATH`, SIGPIPE back
+ * at its default, only 0, 1 and 2. A failure of the open is reported like a
+ * failed exec: a negative errno, no pid.
+ *
+ * Reading the master after the child (and everything that inherited the
+ * slave) has gone is end-of-file on macOS and EIO on Linux; that difference
+ * is not translated here, it is a fact of the descriptor, and lib/proc.m31
+ * folds it. */
+int64_t sys_pty_open(int64_t *master_fd, char *slave_path, int64_t cap);  /* 0 */
+int64_t sys_set_winsize(int64_t fd, int64_t rows, int64_t cols);          /* 0 */
+int64_t sys_proc_start_pty(char *const argv[], char *const envp[],
+                           const char *cwd, const char *slave_path);      /* pid */
+
+/* The target of the symbolic link `path`: its bytes (no NUL) are written to
+ * `buf`, at most `cap` of them, and the number written is returned. A
+ * result equal to `cap` may be a truncated target -- the kernel does not say
+ * -- so a caller asks again with a larger buffer until the result is below
+ * `cap`. -SYS_EINVAL when `path` is not a link. */
+int64_t sys_readlink(const char *path, char *buf, int64_t cap);       /* bytes */
 
 #endif /* RT_SYS_H */

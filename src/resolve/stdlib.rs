@@ -38,6 +38,7 @@ const MODULES: &[(&str, &str)] = &[
     ("math", include_str!("../../lib/math.m31")),
     ("net", include_str!("../../lib/net.m31")),
     ("os", include_str!("../../lib/os.m31")),
+    ("proc", include_str!("../../lib/proc.m31")),
     ("sort", include_str!("../../lib/sort.m31")),
     ("term", include_str!("../../lib/term.m31")),
     ("text", include_str!("../../lib/text.m31")),
