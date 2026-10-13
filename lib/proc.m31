@@ -957,6 +957,10 @@ pub Result<Pty, Error> start_pty(List<str> argv, int rows = 24, int columns = 80
                 int closed = __close(master);
                 return Result<Pty, Error>.Err(from_errno(-pid));
             }
+            // Once more with the slave open: macOS forgets a size set on a
+            // master whose slave had never been opened, when the child
+            // opens it. Harmless elsewhere.
+            int sized_again = __set_winsize(master, rows, columns);
             Pipe end = Pipe(master, true, true, is_terminal: true);
             return Result<Pty, Error>.Ok(Pty(pid, end));
         }

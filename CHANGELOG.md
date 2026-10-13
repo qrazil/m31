@@ -14,8 +14,9 @@ change landed on master.
   with posix_spawn's closefrom action (glibc 2.34+) or macOS's
   `POSIX_SPAWN_CLOEXEC_DEFAULT`. 0.4.3's CI caught the leak that a clean
   development shell never shows.
-- `proc.start_pty` on macOS: the window size is now set through the slave when
-  the kernel refuses it on a master whose slave is not open yet.
+- `proc.start_pty` on macOS: the window size is set again once the child has
+  the slave open (the kernel forgets a size set before the first open), and
+  through the slave when it refuses it on the master.
 - Internal: the unit tests that run `git` or change `PATH` share one lock.
 
 ## 0.4.3 (2026-10-12)
