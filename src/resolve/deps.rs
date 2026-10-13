@@ -969,7 +969,7 @@ fn resolve_path_dep(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::MutexGuard;
 
     /// `cargo test` runs this module's tests in parallel threads of one
     /// process, but one of them (`git_not_on_path_...`) has to mutate the
@@ -979,9 +979,8 @@ mod tests {
     /// test's own git invocation -- `.lock().unwrap_or_else(PoisonError::
     /// into_inner)` because one test panicking (an assertion failure) must
     /// not poison the lock for every test after it.
-    static GIT_SERIAL: Mutex<()> = Mutex::new(());
     fn serial() -> MutexGuard<'static, ()> {
-        GIT_SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+        super::git_serial()
     }
 
     /// A fresh scratch directory under the system temp dir, unique per call
@@ -1371,4 +1370,11 @@ mod tests {
         assert_eq!(clean(Path::new("./../x")), PathBuf::from("../x"));
         assert_eq!(clean(Path::new("/a/../../x")), PathBuf::from("/x"));
     }
+}
+
+/// The one lock every test that runs `git` (or mutates `PATH`) holds.
+#[cfg(test)]
+pub(crate) fn git_serial() -> std::sync::MutexGuard<'static, ()> {
+    static GIT_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    GIT_SERIAL.lock().unwrap_or_else(|e| e.into_inner())
 }

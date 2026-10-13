@@ -257,6 +257,7 @@ fn remote(dir: &Path, rel: &str, files: &[(&str, &str)]) -> PathBuf {
 
 #[test]
 fn a_git_dependencys_own_deps_are_fetched_and_locked_at_the_top() {
+    let _guard = crate::resolve::deps::git_serial();
     let d = scratch();
     let base = remote(
         &d,
@@ -305,6 +306,7 @@ fn a_git_dependencys_own_deps_are_fetched_and_locked_at_the_top() {
 
 #[test]
 fn a_git_dependency_may_use_a_path_dependency_inside_its_checkout() {
+    let _guard = crate::resolve::deps::git_serial();
     let d = scratch();
     let lib = remote(
         &d,
@@ -335,6 +337,7 @@ fn a_git_dependency_may_use_a_path_dependency_inside_its_checkout() {
 
 #[test]
 fn a_one_file_git_dependency_reaches_its_own_dependencies() {
+    let _guard = crate::resolve::deps::git_serial();
     let d = scratch();
     let util = remote(
         &d,
