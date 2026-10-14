@@ -719,8 +719,11 @@ int64_t sys_proc_wait(int64_t pid);                                   /* encoded
  * that cannot be entered is reported like a program that cannot be run: a
  * negative errno from THIS call, no pid, no zombie.
  *
- * The child starts with SIGPIPE back at SIG_DFL and an empty signal mask.
- * Ignored dispositions survive exec, and this process ignores SIGPIPE
+ * The child starts with SIGPIPE, SIGINT, SIGQUIT, SIGHUP and SIGTERM back at
+ * SIG_DFL and an empty signal mask (a launcher that ran this process with
+ * SIGINT ignored, as a CI runner's job shell does, must not make ^C a no-op
+ * for every program started). Ignored dispositions survive exec, and this
+ * process ignores SIGPIPE
  * (sys_ignore_sigpipe), so without the reset `yes | head`-style programs
  * would get EPIPE errors they never expected instead of the death every
  * Unix program is written for -- Python's subprocess does the same

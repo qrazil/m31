@@ -7,6 +7,10 @@ change landed on master.
 
 ### Fixed
 
+- A child process starts with SIGINT, SIGQUIT, SIGHUP and SIGTERM at their
+  defaults, as it already did SIGPIPE, even when the program that started
+  this one ignored them (a CI runner's job shell ignores SIGINT, which made
+  `^C` on a pty a no-op). 0.4.4 was never tagged: its changes ship in 0.4.5.
 - `term.Decoder` is linear in its input. An unfinished bracketed paste was
   searched for its end from the first byte on every feed, so a 1 MB paste in
   4 KB reads took half a second (and 16 MB would have taken minutes); it now

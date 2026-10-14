@@ -1073,10 +1073,13 @@ static int64_t proc_start(char *const argv[], char *const envp[], const char *cw
         }
         if (r >= 0 && cwd != 0) r = sc(NR_chdir, P(cwd), 0, 0, 0, 0, 0);
         if (r >= 0) {
-            /* sys.h: SIGPIPE back to the default and nothing blocked. */
+            /* sys.h: SIGPIPE, SIGINT, SIGQUIT, SIGHUP and SIGTERM back to the
+             * default and nothing blocked. */
             KSigaction act;
             zero_bytes((unsigned char *)&act, (int64_t)sizeof act);
-            sc(NR_rt_sigaction, K_SIGPIPE, P(&act), 0, (int64_t)sizeof act.mask, 0, 0);
+            static const int64_t reset[] = {K_SIGPIPE, 1, 2, 3, 15};
+            for (int i = 0; i < 5; i++)
+                sc(NR_rt_sigaction, reset[i], P(&act), 0, (int64_t)sizeof act.mask, 0, 0);
             uint64_t none = 0;
             sc(NR_rt_sigprocmask, 2 /* SIG_SETMASK */, P(&none), 0, 8, 0, 0);
             r = proc_exec_search(argv, envp);

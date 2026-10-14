@@ -920,7 +920,13 @@ static int64_t proc_start(char *const argv[], char *const envp[], const char *cw
     sigset_t none, dfl;
     sigemptyset(&none);
     sigemptyset(&dfl);
+    /* sys.h: the interactive and termination signals start at the default
+     * too, whatever this process (or its launcher) ignores. */
     sigaddset(&dfl, SIGPIPE);
+    sigaddset(&dfl, SIGINT);
+    sigaddset(&dfl, SIGQUIT);
+    sigaddset(&dfl, SIGHUP);
+    sigaddset(&dfl, SIGTERM);
     rc = posix_spawnattr_setsigmask(&at, &none);
     if (rc == 0) rc = posix_spawnattr_setsigdefault(&at, &dfl);
     int flags = POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF;
