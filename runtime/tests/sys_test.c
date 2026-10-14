@@ -1160,8 +1160,11 @@ static void pty_tests(void) {
     int64_t small_master = -1;
     char tiny[4];
     expect("a name that does not fit", sys_pty_open(&small_master, tiny, sizeof tiny), -SYS_ENOSPC);
+#if !defined(__APPLE__)
+    /* macOS cannot read the size of a master whose slave was never opened. */
     expect("a fresh pty has no size", sys_winsize(master, &rows, &cols), 0);
     expect_true("0 by 0", rows == 0 && cols == 0);
+#endif
     expect("set the size", sys_set_winsize(master, 31, 97), 0);
     expect("read it back", sys_winsize(master, &rows, &cols), 0);
     expect_true("31 by 97", rows == 31 && cols == 97);
@@ -1170,9 +1173,12 @@ static void pty_tests(void) {
 
     /* tty and stty inside: a terminal of the size set, which is the
      * controlling terminal (the write to /dev/tty finds it). */
-    char *const probe[] = {"/bin/sh", "-c", "tty; stty size; echo viatty > /dev/tty", 0};
+    char *const probe[] = {"/bin/sh", "-c", "tty; sleep 1; stty size; echo viatty > /dev/tty", 0};
     int64_t pid = sys_proc_start_pty(probe, proc_env, 0, path);
     expect_true("sh on a pty started", pid > 0);
+    /* macOS forgets a size set before the slave's first open: set it again
+     * now that the child has the slave (proc.start_pty does the same). */
+    expect("set the size again", sys_set_winsize(master, 31, 97), 0);
     slurp_master(master, out, sizeof out);
     expect_true("tty names the slave", contains(out, path));
     expect_true("stty size is the size set", contains(out, "31 97"));
@@ -1196,6 +1202,13 @@ static void pty_tests(void) {
     char *const sleeper2[] = {"/bin/sleep", "30", 0};
     pid = sys_proc_start_pty(sleeper2, proc_env, 0, path);
     expect_true("sleeper started", pid > 0);
+    {
+        /* Let the child get its session and terminal first: a ^C typed
+         * before that is only a queued character. */
+        int64_t until = sys_clock_ns(1) + 400000000;
+        while (sys_clock_ns(1) < until) {
+        }
+    }
     expect("type ^C", sys_write(master, "\003", 1), 1);
     expect("sleep died of SIGINT", sys_proc_wait(pid), SYS_WAIT_SIGNAL_BASE + 2);
     sys_close(master);
