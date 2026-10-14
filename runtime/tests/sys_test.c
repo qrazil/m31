@@ -1199,6 +1199,10 @@ static void pty_tests(void) {
     /* ^C on the master reaches the child, not this process: the child's
      * session has the terminal, and the line discipline signals its
      * foreground group. */
+    sys_close(master);
+    /* A pty of its own: macOS keeps the previous session on a slave that is
+     * reused, and a new session leader then gets no controlling terminal. */
+    expect("third pty", sys_pty_open(&master, path, sizeof path), 0);
     char *const sleeper2[] = {"/bin/sleep", "30", 0};
     pid = sys_proc_start_pty(sleeper2, proc_env, 0, path);
     expect_true("sleeper started", pid > 0);
