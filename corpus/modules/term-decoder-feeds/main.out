@@ -1,0 +1,33 @@
+== a paste in every chunk size
+paste: 10102 bytes, 11 chunk sizes
+true
+== keys around a paste
+a b up ctrl+right é paste[x
+y] left-down 10,5 f1 paste[] z paste[] q escape
+mixed: 68 bytes, 10 chunk sizes
+== every split point
+paste markers: 15 split points, 0 differ
+empty paste: 15 split points, 0 differ
+lookalike body: 25 split points, 0 differ
+two pastes: 31 split points, 0 differ
+utf8 in a paste: 24 split points, 0 differ
+not text: 16 split points, 0 differ
+unknown[1b5b3230307efffe1b5b3230317e] k
+keys: 33 split points, 0 differ
+== a lone ESC waits for the timeout
+held 1
+escape
+0
+== an unfinished paste is held, and flush gives it up as unknown
+24
+flushed 57 chars
+0
+== time
+true
+true
+true
+true
+300000
+true
+== result
+0

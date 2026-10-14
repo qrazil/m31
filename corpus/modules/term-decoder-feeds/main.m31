@@ -1,0 +1,224 @@
+import date;
+import term;
+
+// `term.Decoder` fed in pieces: the events must not depend on where the
+// pieces end, and a long paste must cost time proportional to its size.
+//
+// The decoder used to look for the end of an unfinished bracketed paste from
+// the start of everything it held on every feed (a 1 MB paste in 4 KB reads
+// took half a second) and to move the whole buffer once per decoded event.
+
+// The events of `data` fed in `size`-byte pieces, `next()` asked after every
+// piece, what is left then flushed: one line.
+str run(bytes data, int size) {
+    term.Decoder d = term.decoder();
+    List<str> out = [];
+    int pos = 0;
+    while (pos < data.size()) {
+        int stop = pos + size;
+        if (stop > data.size()) {
+            stop = data.size();
+        }
+        d.feed(data.substr(pos, stop));
+        pos = stop;
+        drain(d, out, false);
+    }
+    drain(d, out, true);
+    return out.join(" ");
+}
+
+void drain(term.Decoder d, List<str> out, bool last) {
+    while (true) {
+        Option<term.Event> got = d.next();
+        if (last && d.pending() > 0) {
+            got = d.flush();
+        }
+        match (got) {
+            case Some(term.Event e): {
+                out.push(e.to_str());
+            }
+            case None: {
+                break;
+            }
+        }
+    }
+}
+
+// Feed the two halves of `data` split at `at`.
+str halves(bytes data, int at) {
+    term.Decoder d = term.decoder();
+    List<str> out = [];
+    d.feed(data.substr(0, at));
+    drain(d, out, false);
+    d.feed(data.substr(at, data.size()));
+    drain(d, out, false);
+    drain(d, out, true);
+    return out.join(" ");
+}
+
+int same(str label, bytes data, List<int> sizes) {
+    int bad = 0;
+    str want = run(data, data.size());
+    for (int size in sizes) {
+        if (run(data, size) != want) {
+            bad = bad + 1;
+            print("DIFFERENT " + label + " at chunk " + size.to_str());
+        }
+    }
+    print(label + ": " + data.size().to_str() + " bytes, " + sizes.size().to_str() + " chunk sizes");
+    return bad;
+}
+
+int every_split(str label, bytes data) {
+    str want = run(data, data.size());
+    int bad = 0;
+    for (int at in 0 .. data.size() + 1) {
+        if (halves(data, at) != want) {
+            bad = bad + 1;
+            print("DIFFERENT " + label + " split at " + at.to_str());
+        }
+    }
+    print(label + ": " + (data.size() + 1).to_str() + " split points, " + bad.to_str() + " differ");
+    return bad;
+}
+
+// A paste with multi-byte text, newlines, and bytes that begin the end
+// marker without finishing it.
+str body_of(int lines) {
+    List<str> parts = [];
+    for (int i in 0 .. lines) {
+        parts.push("line " + i.to_str() + " é中\u{1f600} \x1b[20 \x1b[2 \x1b[201\n");
+    }
+    return parts.join("");
+}
+
+int failures = 0;
+print("== a paste in every chunk size");
+bytes paste = ("\x1b[200~" + body_of(300) + "\x1b[201~").to_bytes();
+failures = failures + same("paste", paste, [1, 2, 3, 5, 6, 7, 64, 65, 100, 4096, 5000]);
+print(run(paste, 4096).size() > 1000);
+
+print("== keys around a paste");
+bytes mixed = ("ab\x1b[A\x1b[1;5Cé\x1b[200~x\ny\x1b[201~\x1b[<0;10;5M\x1bOP\x1b[200~\x1b[201~z\x1b[200~\x1b[201~q\x1b").to_bytes();
+print(run(mixed, mixed.size()));
+failures = failures + same("mixed", mixed, [1, 2, 3, 4, 5, 7, 11, 63, 64, 65]);
+
+print("== every split point");
+failures = failures + every_split("paste markers", "\x1b[200~hi\x1b[201~".to_bytes());
+failures = failures + every_split("empty paste", "a\x1b[200~\x1b[201~b".to_bytes());
+failures = failures + every_split("lookalike body", "\x1b[200~\x1b[201\x1b[20\x1b[2\x1b[201~".to_bytes());
+failures = failures + every_split("two pastes", "\x1b[200~one\x1b[201~\x1b[200~two\x1b[201~".to_bytes());
+failures = failures + every_split("utf8 in a paste", "\x1b[200~é中\u{1f600}\x1b[201~é".to_bytes());
+bytes junk = "\x1b[200~".to_bytes();
+junk.push(255);
+junk.push(254);
+junk.extend("\x1b[201~k".to_bytes());
+failures = failures + every_split("not text", junk);
+print(run(junk, 3));
+failures = failures + every_split("keys", "\x1b[1;5A\x1b[<35;120;40m\x1b[[A中x\x1bOQ\x1bx".to_bytes());
+
+print("== a lone ESC waits for the timeout");
+term.Decoder d = term.decoder();
+d.feed([27]);
+match (d.next()) {
+    case Some(term.Event e): {
+        print("early " + e.to_str());
+    }
+    case None: {
+        print("held " + d.pending().to_str());
+    }
+}
+match (d.flush()) {
+    case Some(term.Event e): {
+        print(e.to_str());
+    }
+    case None: {
+        print("nothing");
+    }
+}
+print(d.pending());
+
+print("== an unfinished paste is held, and flush gives it up as unknown");
+d.feed("\x1b[200~abc".to_bytes());
+for (int i in 0 .. 5) {
+    d.feed("def".to_bytes());
+    match (d.next()) {
+        case Some(term.Event e): {
+            print("early " + e.to_str());
+        }
+        case None: {
+        }
+    }
+}
+print(d.pending());
+match (d.flush()) {
+    case Some(term.Event e): {
+        print("flushed " + e.to_str().size().to_str() + " chars");
+    }
+    case None: {
+        print("nothing");
+    }
+}
+print(d.pending());
+
+// --- speed -----------------------------------------------------------------
+// Limits are 10 to 50 times what a healthy build takes, so that a loaded
+// machine does not fail them and a quadratic decoder always does.
+print("== time");
+List<str> chunks = [];
+for (int i in 0 .. 23000) {
+    chunks.push("the quick brown fox jumps over the lazy dog\n");
+}
+bytes big = ("\x1b[200~" + chunks.join("") + "\x1b[201~").to_bytes();
+int t0 = date.now_ns();
+str big_events = run(big, 4096);
+int paste_ms = (date.now_ns() - t0) / 1000000;
+print(big_events.size() > 1000000);
+print(paste_ms < 1000);
+if (paste_ms >= 1000) {
+    print("1 MB paste in 4 KB feeds took " + paste_ms.to_str() + " ms");
+    failures = failures + 1;
+}
+// Four times the size must cost four times as much, not sixteen.
+List<str> more_chunks = [];
+for (int i in 0 .. 92000) {
+    more_chunks.push("the quick brown fox jumps over the lazy dog\n");
+}
+bytes huge = ("\x1b[200~" + more_chunks.join("") + "\x1b[201~").to_bytes();
+int t2 = date.now_ns();
+str huge_events = run(huge, 4096);
+int huge_ms = (date.now_ns() - t2) / 1000000;
+print(huge_events.size() > 4000000);
+print(huge_ms < 2000);
+if (huge_ms >= 2000) {
+    print("4 MB paste in 4 KB feeds took " + huge_ms.to_str() + " ms");
+    failures = failures + 1;
+}
+List<str> keys = [];
+for (int i in 0 .. 100000) {
+    keys.push("ab\x1b[A");
+}
+bytes typed = keys.join("").to_bytes();
+int t1 = date.now_ns();
+term.Decoder one = term.decoder();
+one.feed(typed);
+int count = 0;
+while (true) {
+    match (one.next()) {
+        case Some(term.Event e): {
+            count = count + 1;
+        }
+        case None: {
+            break;
+        }
+    }
+}
+int keys_ms = (date.now_ns() - t1) / 1000000;
+print(count);
+print(keys_ms < 1500);
+if (keys_ms >= 1500) {
+    print("300000 keys in one feed took " + keys_ms.to_str() + " ms");
+    failures = failures + 1;
+}
+print("== result");
+print(failures);
