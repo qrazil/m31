@@ -6,6 +6,14 @@ Refcounted, no GC. Small and opinionated, intended to freeze.
 The name is held in one file, `config.sh`. Run `./scripts/rename.sh <name>` to
 rename it again; it rewrites `config.sh` and moves the corpus files with it.
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/qrazil/m31/master/install.sh | sh
+```
+
+Picks the release for your OS and CPU, unpacks it under `~/.local/opt/m31/<version>` and links the programs into `~/.local/bin`. `VERSION=v1.2.3` pins a release, `PREFIX=...` moves the install, `sh install.sh --uninstall` removes it.
+
 ## Status
 
 **The walking skeleton is green.** `m31c` compiles the corpus language to C,
