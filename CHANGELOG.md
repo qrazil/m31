@@ -3,6 +3,20 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
+## 0.4.5 (2026-10-13)
+
+### Fixed
+
+- `term.Decoder` is linear in its input. An unfinished bracketed paste was
+  searched for its end from the first byte on every feed, so a 1 MB paste in
+  4 KB reads took half a second (and 16 MB would have taken minutes); it now
+  looks only at the bytes that arrived since. A large feed of ordinary keys
+  no longer moves the rest of the buffer once per event (300000 keys in one
+  feed: 2 s down to under 0.1 s). Events are unchanged byte for byte.
+  `corpus/modules/term-decoder-feeds` feeds pastes in many chunk sizes,
+  splits paste markers and keys at every offset, and carries generous
+  timing guards.
+
 ## 0.4.4 (2026-10-13)
 
 ### Fixed

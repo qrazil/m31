@@ -120,6 +120,10 @@ const int EPERM = 1;
 // as long as the clipboard; this is what one read takes at most, and a paste
 // arrives across as many as it needs.
 const int CHUNK = 4096;
+// How much of the front of a large buffer one decoding attempt looks at
+// first. Longer than any key or mouse report; a sequence that does not end
+// inside it is decoded again from the whole buffer.
+const int WINDOW = 64;
 // The end of a bracketed paste: ESC [ 2 0 1 ~
 const bytes PASTE_END = [27, 91, 50, 48, 49, 126];
 
@@ -465,6 +469,17 @@ Step unknown(bytes sequence, int byte_count) {
 /// decides it with a timeout -- so the decoder does not guess.
 pub type Decoder {
     bytes buffer = [];
+    // Where the next search for the end of an unfinished bracketed paste
+    // starts, or 0 when the buffer does not begin with one. The bytes before
+    // it are known to hold no terminator, so each feed costs the size of the
+    // new bytes and not of the whole paste held so far.
+    int paste_scan = 0;
+    // How many bytes at the front of `buffer` have been decoded already.
+    // Dropping them one event at a time would move the rest of the buffer
+    // once per event, which is quadratic for a large feed of ordinary keys;
+    // they are dropped in one go when they are half the buffer, or when a
+    // step needs the buffer to begin where the next event does.
+    int head = 0;
 }
 
 /// Add bytes, as they came off the descriptor.
@@ -476,7 +491,7 @@ pub void Decoder.feed(bytes data) {
 /// empty; anything else after `next()` has answered `None` is an incomplete
 /// sequence waiting for the rest of itself.
 pub int Decoder.pending() {
-    return buffer.size();
+    return buffer.size() - head;
 }
 
 /// The next whole event, or `None` if what is held is a prefix of one.
@@ -492,10 +507,56 @@ pub Option<Event> Decoder.flush() {
 }
 
 Option<Event> Decoder.take(bool is_last) {
+    if (paste_scan > 0 && !is_last) {
+        // An unfinished paste is held and its start has been scanned
+        // already. Look only at the bytes that arrived since, plus enough of
+        // the tail before them to catch a terminator split across feeds.
+        int held = buffer.size();
+        int overlap = PASTE_END.size() - 1;
+        int from = paste_scan;
+        if (from < 0 || from > held) {
+            from = held;
+        }
+        match (buffer.substr(from, held).index_of(PASTE_END)) {
+            case None: {
+                int next_scan = held - overlap;
+                if (next_scan > paste_scan) {
+                    paste_scan = next_scan;
+                }
+                return Option<Event>.None;
+            }
+            case Some(int found): {
+                paste_scan = 0;
+            }
+        }
+    }
+    if (!is_last && buffer.size() - head > WINDOW) {
+        // Almost every event is a few bytes. Decode it from a small copy of
+        // the front, which is the same answer as from the whole buffer
+        // whenever it is a whole event (a decision never looks past the end
+        // of the sequence it makes), and leave the buffer where it is.
+        Step quick = step(buffer.substr(head, head + WINDOW), false);
+        if (quick.used > 0) {
+            head = head + quick.used;
+            if (head * 2 >= buffer.size()) {
+                buffer.drop_front(head);
+                head = 0;
+            }
+            return quick.event;
+        }
+    }
+    if (head > 0) {
+        buffer.drop_front(head);
+        head = 0;
+    }
     Step outcome = step(buffer, is_last);
     if (outcome.used == 0) {
+        if (!is_last) {
+            paste_scan = open_paste_end(buffer);
+        }
         return Option<Event>.None;
     }
+    paste_scan = 0;
     buffer.drop_front(outcome.used);
     return outcome.event;
 }
@@ -534,6 +595,24 @@ pub List<Event> decode(bytes input) {
         }
     }
     return evs;
+}
+
+// Where the opening marker of a bracketed paste, ESC [ 200 ~, ends at the
+// front of `input`, or 0 if it does not begin with one. Called only when a
+// step has answered "not yet", which for a complete marker can only mean a
+// paste whose end has not arrived.
+int open_paste_end(bytes input) {
+    if (input.size() < 6 || input[0] != 27 || input[1] != '[' || input[2] == '[') {
+        return 0;
+    }
+    Csi scan = scan_csi(input, 2);
+    if (scan.state != 1 || scan.marker != 0 || scan.final != 126) {
+        return 0;
+    }
+    if (parameter(scan.parameters, 0, 0) != 200) {
+        return 0;
+    }
+    return scan.end;
 }
 
 // One event off the front of `input`. `is_last` says that no more bytes are coming,
