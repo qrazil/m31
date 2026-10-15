@@ -134,6 +134,10 @@ jobs:
           # are rather than implying a finished ssh client.
           ./build.sh tests/ssh/t_sha256.m31 -o "$OUT/ssh-sha256-selftest"
           ./build.sh tests/ssh/t_chacha20poly1305.m31 -o "$OUT/ssh-chacha20poly1305-selftest"
+          bash apps/build.sh m31ssh -o "$OUT/m31ssh"
+          bash apps/build.sh m31scp -o "$OUT/m31scp"
+          bash apps/build.sh m31sftp -o "$OUT/m31sftp"
+          bash apps/build.sh m31ssh-keygen -o "$OUT/m31ssh-keygen"
 
           sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
           ${LANG_NAME} — Linux x86-64 release build
@@ -142,7 +146,8 @@ jobs:
 
           $LANG_BIN                        the compiler (./$LANG_BIN --emit-c foo.$LANG_EXT -o foo.c)
           ssh-sha256-selftest          tests/ssh: SHA-256 self-check (Phase 1 crypto primitives only --
-          ssh-chacha20poly1305-selftest  no ssh client/server exists yet, see docs/ssh-decision.md)
+          ssh-chacha20poly1305-selftest  (crypto primitive self-checks)
+          m31ssh, m31scp, m31sftp, m31ssh-keygen   SSH client, copy, sftp and key tool (unaudited, docs/m31ssh.md)
 
           config.sh, runtime/                 the runtime SDK: needed to build and link any program
                                            $LANG_BIN emits (see runtime/'s own files) -- build.sh's own
@@ -213,6 +218,10 @@ jobs:
 
           ./build.sh tests/ssh/t_sha256.m31 -o "$OUT/ssh-sha256-selftest"
           ./build.sh tests/ssh/t_chacha20poly1305.m31 -o "$OUT/ssh-chacha20poly1305-selftest"
+          bash apps/build.sh m31ssh -o "$OUT/m31ssh"
+          bash apps/build.sh m31scp -o "$OUT/m31scp"
+          bash apps/build.sh m31sftp -o "$OUT/m31sftp"
+          bash apps/build.sh m31ssh-keygen -o "$OUT/m31ssh-keygen"
 
           sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
           ${LANG_NAME} — Linux aarch64 release build
@@ -221,7 +230,8 @@ jobs:
 
           $LANG_BIN                        the compiler (./$LANG_BIN --emit-c foo.$LANG_EXT -o foo.c)
           ssh-sha256-selftest          tests/ssh: SHA-256 self-check (Phase 1 crypto primitives only --
-          ssh-chacha20poly1305-selftest  no ssh client/server exists yet, see docs/ssh-decision.md)
+          ssh-chacha20poly1305-selftest  (crypto primitive self-checks)
+          m31ssh, m31scp, m31sftp, m31ssh-keygen   SSH client, copy, sftp and key tool (unaudited, docs/m31ssh.md)
 
           config.sh, runtime/                 the runtime SDK: needed to build and link any program
                                            $LANG_BIN emits (see runtime/'s own files) -- build.sh's own
@@ -302,6 +312,10 @@ jobs:
 
           ./build.sh tests/ssh/t_sha256.m31 -o "$OUT/ssh-sha256-selftest"
           ./build.sh tests/ssh/t_chacha20poly1305.m31 -o "$OUT/ssh-chacha20poly1305-selftest"
+          bash apps/build.sh m31ssh -o "$OUT/m31ssh"
+          bash apps/build.sh m31scp -o "$OUT/m31scp"
+          bash apps/build.sh m31sftp -o "$OUT/m31sftp"
+          bash apps/build.sh m31ssh-keygen -o "$OUT/m31ssh-keygen"
 
           sed 's/^ *//' > "$OUT/NOTES.txt" <<EOF
           ${LANG_NAME} — macOS arm64 (Apple Silicon) release build
@@ -310,7 +324,8 @@ jobs:
 
           $LANG_BIN                        the compiler (./$LANG_BIN --emit-c foo.$LANG_EXT -o foo.c)
           ssh-sha256-selftest          tests/ssh: SHA-256 self-check (Phase 1 crypto primitives only --
-          ssh-chacha20poly1305-selftest  no ssh client/server exists yet, see docs/ssh-decision.md)
+          ssh-chacha20poly1305-selftest  (crypto primitive self-checks)
+          m31ssh, m31scp, m31sftp, m31ssh-keygen   SSH client, copy, sftp and key tool (unaudited, docs/m31ssh.md)
 
           config.sh, runtime/                 the runtime SDK: needed to build and link any program
                                            $LANG_BIN emits (see runtime/'s own files) -- build.sh's own
