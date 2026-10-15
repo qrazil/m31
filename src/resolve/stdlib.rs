@@ -81,9 +81,15 @@ const MODULES: &[(&str, &str)] = &[
     ("ssh.sshexec", include_str!("../../lib/ssh/sshexec.m31")),
     ("ssh.sshclient", include_str!("../../lib/ssh/sshclient.m31")),
     ("ssh.sshcipher", include_str!("../../lib/ssh/sshcipher.m31")),
-    ("ssh.sshforward", include_str!("../../lib/ssh/sshforward.m31")),
+    (
+        "ssh.sshforward",
+        include_str!("../../lib/ssh/sshforward.m31"),
+    ),
     ("ssh.sshjump", include_str!("../../lib/ssh/sshjump.m31")),
-    ("ssh.sshconnect", include_str!("../../lib/ssh/sshconnect.m31")),
+    (
+        "ssh.sshconnect",
+        include_str!("../../lib/ssh/sshconnect.m31"),
+    ),
     ("ssh.sshsftp", include_str!("../../lib/ssh/sshsftp.m31")),
     ("ssh.sshshell", include_str!("../../lib/ssh/sshshell.m31")),
     ("ssh.sshagent", include_str!("../../lib/ssh/sshagent.m31")),
@@ -110,8 +116,14 @@ const MODULES: &[(&str, &str)] = &[
     ),
     ("pki.x509", include_str!("../../lib/pki/x509.m31")),
     ("pki.x509chain", include_str!("../../lib/pki/x509chain.m31")),
-    ("crypto.bcryptpbkdf", include_str!("../../lib/crypto/bcryptpbkdf.m31")),
-    ("crypto.rsasign", include_str!("../../lib/crypto/rsasign.m31")),
+    (
+        "crypto.bcryptpbkdf",
+        include_str!("../../lib/crypto/bcryptpbkdf.m31"),
+    ),
+    (
+        "crypto.rsasign",
+        include_str!("../../lib/crypto/rsasign.m31"),
+    ),
     ("crypto.rsa", include_str!("../../lib/crypto/rsa.m31")),
     (
         "tls.tls13schedule",
