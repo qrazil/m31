@@ -98,6 +98,7 @@ prim int __setsockopt(int file_descriptor, int opt, int value);
 prim int __getsockopt(int file_descriptor, int opt);
 prim int __resolve(str host, int port, int family, List<int> out, bytes addrs);
 prim int __ignore_sigpipe();
+prim int __poll(List<int> fds, List<int> events, List<int> revents, int timeout_ms);
 // Park the current green thread until `file_descriptor` is ready for `events`
 // (IO_READABLE/IO_WRITABLE below), instead of blocking the carrier on the
 // syscall itself -- the epoll reactor's seam (runtime/reactor.h), through
@@ -1508,6 +1509,57 @@ pub Result<Conn, Error> connect(str host, int port) {
         return Result<Conn, Error>.Err(close_and(file_descriptor, -status));
     }
     return Result<Conn, Error>.Ok(Conn(file_descriptor, Addr(address, port)));
+}
+
+/// `connect`, waiting for the connection with `poll(2)` on the carrier's own
+/// OS thread instead of parking the green thread on the reactor, and with a
+/// bound: `timeout_ms` above 0 gives up with `TimedOut` after that long (the
+/// kernel's own, minutes, otherwise).
+///
+/// For a program that runs one thread of control and wants no dependence on
+/// the reactor: it blocks the whole program while it waits, which is exactly
+/// what such a program wants and a server must never do. An interactive SSH
+/// client uses it so that its connection never sits in a reactor wait.
+pub Result<Conn, Error> connect_polled(str host, int port, int timeout_ms = 0) {
+    check_port(port);
+    Ip address = host_ip(host)?;
+    int file_descriptor = socket_for(address)?;
+    int status = __connect(file_descriptor, family_of(address), port, sixteen(address));
+    if (status == -EINPROGRESS || status == -4) {
+        status = finish_polled(file_descriptor, timeout_ms);
+    }
+    if (status < 0) {
+        return Result<Conn, Error>.Err(close_and(file_descriptor, -status));
+    }
+    return Result<Conn, Error>.Ok(Conn(file_descriptor, Addr(address, port)));
+}
+
+int finish_polled(int file_descriptor, int timeout_ms) {
+    List<int> fds = [file_descriptor];
+    List<int> events = [4];
+    int wait_ms = -1;
+    if (timeout_ms > 0) {
+        wait_ms = timeout_ms;
+    }
+    while (true) {
+        List<int> revents = [];
+        int polled = __poll(fds, events, revents, wait_ms);
+        if (polled == -4) {
+            continue;
+        }
+        if (polled < 0) {
+            return polled;
+        }
+        if (polled == 0) {
+            return -110;
+        }
+        break;
+    }
+    int pending_error = __getsockopt(file_descriptor, SO_ERROR);
+    if (pending_error <= 0) {
+        return pending_error;
+    }
+    return -pending_error;
 }
 
 // Wait for a connect in progress, and report what it came to. The pending

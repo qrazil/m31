@@ -138,6 +138,17 @@ bytes hash(bytes sha2_pass, bytes sha2_salt) {
         out[index * 4 + 1] = words[index] >> 8 & 0xFF;
         out[index * 4] = words[index] & 0xFF;
     }
+    // Best effort: the cipher state and the digests it was keyed with do not
+    // outlive the call in a buffer this code still owns.
+    for (int index in 0 .. 1042) {
+        state[index] = 0;
+    }
+    for (int index in 0 .. pass_words.size()) {
+        pass_words[index] = 0;
+    }
+    for (int index in 0 .. salt_words.size()) {
+        salt_words[index] = 0;
+    }
     return out;
 }
 
@@ -188,6 +199,15 @@ pub bytes derive(bytes password, bytes salt, int rounds, int length) {
         }
         remaining = remaining - written;
         count = count + 1;
+        for (int index in 0 .. out.size()) {
+            out[index] = 0;
+        }
+        for (int index in 0 .. temporary.size()) {
+            temporary[index] = 0;
+        }
+    }
+    for (int index in 0 .. sha2_pass.size()) {
+        sha2_pass[index] = 0;
     }
     return key;
 }

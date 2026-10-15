@@ -390,6 +390,131 @@ pub interface Wire {
     int fileno();
 }
 
+prim int __poll(List<int> fds, List<int> events, List<int> revents, int timeout_ms);
+
+/// A `net.Conn` as a `Wire` that **never parks on the reactor**: every wait
+/// for the socket is a `poll(2)` on the carrier's own thread, so a program
+/// with one thread of control (an interactive client) depends on nothing but
+/// the kernel for its connection. (A server running many green threads
+/// wants the other thing -- the parked wait -- and should use the `net.Conn`
+/// itself.) Reads honour the read timeout (`Error.TimedOut`); writes wait for
+/// the socket to be writable before each attempt, so `write_some` never
+/// finds it full.
+pub type PollWire {
+    pub net.Conn connection;
+    int timeout_ms = 0;
+}
+
+// Waits for `events` (1 readable, 4 writable) for up to the read timeout;
+// 1 ready, 0 timed out, -1 failed.
+int PollWire.await(int events) {
+    List<int> fds = [connection.fileno()];
+    List<int> wanted = [events];
+    int wait_ms = -1;
+    if (timeout_ms > 0) {
+        wait_ms = timeout_ms;
+    }
+    while (true) {
+        List<int> revents = [];
+        int ready = __poll(fds, wanted, revents, wait_ms);
+        if (ready == -4) {
+            continue;
+        }
+        if (ready < 0) {
+            return -1;
+        }
+        if (ready == 0) {
+            return 0;
+        }
+        return 1;
+    }
+}
+
+pub Result<bytes, io.Error> PollWire.read(int byte_count) {
+    match (connection.wait(0)) {
+        case Ok(bool is_ready): {
+            if (!is_ready) {
+                int state = await(1);
+                if (state == 0) {
+                    return Result<bytes, io.Error>.Err(io.Error.Other(11));
+                }
+                if (state < 0) {
+                    return Result<bytes, io.Error>.Err(io.Error.Other(5));
+                }
+            }
+        }
+        case Err(_): {
+            return Result<bytes, io.Error>.Err(io.Error.Other(5));
+        }
+    }
+    return connection.read(byte_count);
+}
+
+pub Result<bytes, io.Error> PollWire.read_until(bytes delimiter, int limit) {
+    bytes out = [];
+    while (out.size() < limit) {
+        bytes one = read(1)?;
+        if (one.size() == 0) {
+            return Result<bytes, io.Error>.Ok(out);
+        }
+        out.extend(one);
+        if (out.ends_with(delimiter)) {
+            return Result<bytes, io.Error>.Ok(out);
+        }
+    }
+    return Result<bytes, io.Error>.Ok(out);
+}
+
+pub Result<int, io.Error> PollWire.write(bytes data) {
+    int sent = 0;
+    while (sent < data.size()) {
+        int state = await(4);
+        if (state <= 0) {
+            return Result<int, io.Error>.Err(io.Error.Other(32));
+        }
+        int wrote = connection.write_some(data.substr(sent, data.size()))?;
+        sent = sent + wrote;
+    }
+    return Result<int, io.Error>.Ok(sent);
+}
+
+pub Result<bool, io.Error> PollWire.close() {
+    return connection.close();
+}
+
+pub Result<bool, net.Error> PollWire.set_read_timeout(int timeout_milliseconds) {
+    if (timeout_milliseconds < 0) {
+        trap("PollWire.set_read_timeout: a negative timeout");
+    }
+    timeout_ms = timeout_milliseconds;
+    return Result<bool, net.Error>.Ok(true);
+}
+
+pub Result<bool, net.Error> PollWire.wait(int timeout_milliseconds) {
+    match (connection.wait(0)) {
+        case Ok(bool is_ready): {
+            if (is_ready || timeout_milliseconds == 0) {
+                return Result<bool, net.Error>.Ok(is_ready);
+            }
+        }
+        case Err(net.Error error): {
+            return Result<bool, net.Error>.Err(error);
+        }
+    }
+    List<int> fds = [connection.fileno()];
+    List<int> wanted = [1];
+    List<int> revents = [];
+    int ready = __poll(fds, wanted, revents, timeout_milliseconds);
+    if (ready < 0 && ready != -4) {
+        return Result<bool, net.Error>.Err(net.Error.Other(5));
+    }
+    return Result<bool, net.Error>.Ok(ready > 0);
+}
+
+pub int PollWire.fileno() {
+    return connection.fileno();
+}
+
 // Reads exactly `byte_count` bytes from `connection`, looping over `net.Conn.read`'s own
 // "1..n bytes, no exact-read primitive" contract. A 0-length read before `byte_count`
 // bytes have arrived means the peer is gone.
@@ -1195,24 +1320,40 @@ pub Result<int, Error> Transport.send(bytes payload) {
     return Result<int, Error>.Ok(payload.size());
 }
 
+/// Reads, authenticates and decrypts **one** packet. An application message
+/// is returned as it is; `SSH_MSG_IGNORE`/`DEBUG`/`UNIMPLEMENTED` (transport
+/// housekeeping RFC 4253 says any implementation must tolerate at any
+/// time -- OpenSSH sends IGNORE as keystroke-timing chaff) come back as an
+/// **empty** `bytes`; `SSH_MSG_DISCONNECT` is `Err(Error.Disconnected)`.
+///
+/// This is what an event loop calls after `wait(0)` said something was
+/// there: unlike `recv` it never reads *another* packet after swallowing a
+/// housekeeping one, which would block for ever on an idle connection.
+pub Result<bytes, Error> Transport.recv_once() {
+    bytes payload = recv_ciphered_payload(connection, recv_cipher, recv_seq)?;
+    recv_seq = recv_seq + 1;
+    if (payload.size() == 0) {
+        return Result<bytes, Error>.Err(Error.Truncated);
+    }
+    int message_type = payload[0];
+    if (message_type == SSH_MESSAGE_DISCONNECT) {
+        return Result<bytes, Error>.Err(Error.Disconnected);
+    }
+    if (message_type == SSH_MESSAGE_IGNORE || message_type == SSH_MESSAGE_DEBUG || message_type == SSH_MESSAGE_UNIMPLEMENTED) {
+        bytes none = [];
+        return Result<bytes, Error>.Ok(none);
+    }
+    return Result<bytes, Error>.Ok(payload);
+}
+
 /// Reads, authenticates and decrypts packets until one carries an
-/// application-layer payload: `SSH_MSG_IGNORE`/`DEBUG`/`UNIMPLEMENTED` are
-/// transport-layer housekeeping RFC 4253 says any implementation must
-/// tolerate silently at any time, so this layer absorbs them rather than
-/// handing them to the layers above. `SSH_MSG_DISCONNECT` becomes
-/// `Err(Error.Disconnected)`.
+/// application-layer payload: housekeeping messages are absorbed (see
+/// `recv_once`) so the layers above only ever see their own messages.
+/// `SSH_MSG_DISCONNECT` becomes `Err(Error.Disconnected)`.
 pub Result<bytes, Error> Transport.recv() {
     while (true) {
-        bytes payload = recv_ciphered_payload(connection, recv_cipher, recv_seq)?;
-        recv_seq = recv_seq + 1;
-        if (payload.size() == 0) {
-            return Result<bytes, Error>.Err(Error.Truncated);
-        }
-        int message_type = payload[0];
-        if (message_type == SSH_MESSAGE_DISCONNECT) {
-            return Result<bytes, Error>.Err(Error.Disconnected);
-        }
-        if (message_type != SSH_MESSAGE_IGNORE && message_type != SSH_MESSAGE_DEBUG && message_type != SSH_MESSAGE_UNIMPLEMENTED) {
+        bytes payload = recv_once()?;
+        if (payload.size() > 0) {
             return Result<bytes, Error>.Ok(payload);
         }
     }
