@@ -1,0 +1,170 @@
+// A byte stream through another SSH server: the transport under a
+// `ProxyJump` / `-J` hop. A `direct-tcpip` channel on an authenticated
+// connection to the jump host (`sshexec.direct_tcpip`) carries the raw bytes
+// of a TCP connection the jump host makes to the next hop, and this type
+// presents that channel as an `ssh.Wire`, so the next hop's SSH handshake,
+// authentication and session run over it unchanged -- the jump host sees
+// only ciphertext of the inner session, and the inner host key is checked by
+// the inner handshake against the inner host's `known_hosts` entry, not the
+// jump host's.
+//
+// API
+// ---
+//   sshjump.ChannelWire w = sshjump.open(transport, "inner.example", 22)?;
+//   ssh.connect_with_offer(w, check, offer)       // w is an ssh.Wire
+//
+// The wire owns the jump host's transport and channel; closing it hangs up
+// the channel and then the jump connection.
+//
+// `wait(timeout)` is exact: it is true only when bytes for the inner
+// connection are buffered or the jump socket yields some within the
+// timeout. Jump-host messages that carry none (window adjustments,
+// keepalive replies) are consumed on the way and do not make it true. That
+// is what lets an event loop `poll` the jump host's socket (`fileno`)
+// and still never block inside the inner transport's read for a packet
+// that is not coming.
+
+import io;
+import net;
+import ssh;
+import ssh.sshexec;
+
+pub type ChannelWire {
+    ssh.Transport jump;
+    sshexec.Channel channel;
+    int timeout_ms = 0;
+}
+
+// Reads jump-host messages until some bytes for us are buffered, the
+// channel ends, or (with `is_blocking` false) the jump socket has nothing.
+// `Err` is the transport's failure.
+Result<void, io.Error> ChannelWire.pump_until_data(bool is_blocking) {
+    while (!channel.has_pending() && !channel.is_eof()) {
+        if (!is_blocking) {
+            match (jump.wait(0)) {
+                case Ok(bool is_ready): {
+                    if (!is_ready) {
+                        return Result<void, io.Error>.Ok;
+                    }
+                }
+                case Err(_): {
+                    return Result<void, io.Error>.Err(io.Error.Other(5));
+                }
+            }
+        }
+        match (channel.pump_one()) {
+            case Ok: {
+            }
+            case Err(sshexec.Error error): {
+                if (is_timed_out(error)) {
+                    return Result<void, io.Error>.Err(io.Error.Other(11));
+                }
+                return Result<void, io.Error>.Err(io.Error.Other(5));
+            }
+        }
+    }
+    return Result<void, io.Error>.Ok;
+}
+
+/// Between 1 and `byte_count` bytes, or empty at the end of the connection.
+pub Result<bytes, io.Error> ChannelWire.read(int byte_count) {
+    pump_until_data(true)?;
+    return Result<bytes, io.Error>.Ok(channel.take_output(byte_count));
+}
+
+/// Bytes up to and including `delimiter`, or `limit` bytes, or the end.
+pub Result<bytes, io.Error> ChannelWire.read_until(bytes delimiter, int limit) {
+    bytes out = [];
+    while (out.size() < limit) {
+        bytes one = read(1)?;
+        if (one.size() == 0) {
+            return Result<bytes, io.Error>.Ok(out);
+        }
+        out.extend(one);
+        if (out.ends_with(delimiter)) {
+            return Result<bytes, io.Error>.Ok(out);
+        }
+    }
+    return Result<bytes, io.Error>.Ok(out);
+}
+
+/// All of `data`, in channel packets as the jump host's window allows.
+pub Result<int, io.Error> ChannelWire.write(bytes data) {
+    match (channel.write(data)) {
+        case Ok(int sent): {
+            return Result<int, io.Error>.Ok(sent);
+        }
+        case Err(_): {
+            return Result<int, io.Error>.Err(io.Error.Other(32));
+        }
+    }
+}
+
+/// Closes the channel (waiting for the jump host's CLOSE) and then the jump
+/// connection.
+pub Result<bool, io.Error> ChannelWire.close() {
+    Result<void, sshexec.Error> closed = channel.close();
+    Result<bool, ssh.Error> hung_up = jump.disconnect();
+    return Result<bool, io.Error>.Ok(true);
+}
+
+pub Result<bool, net.Error> ChannelWire.set_read_timeout(int timeout_milliseconds) {
+    timeout_ms = timeout_milliseconds;
+    match (jump.set_read_timeout(timeout_milliseconds)) {
+        case Ok: {
+            return Result<bool, net.Error>.Ok(true);
+        }
+        case Err(_): {
+            return Result<bool, net.Error>.Err(net.Error.Other(5));
+        }
+    }
+}
+
+/// Whether bytes of the inner connection can be read without waiting.
+pub Result<bool, net.Error> ChannelWire.wait(int timeout_milliseconds) {
+    if (channel.has_pending() || channel.is_eof()) {
+        return Result<bool, net.Error>.Ok(true);
+    }
+    match (jump.wait(timeout_milliseconds)) {
+        case Ok(bool is_ready): {
+            if (!is_ready) {
+                return Result<bool, net.Error>.Ok(false);
+            }
+        }
+        case Err(_): {
+            return Result<bool, net.Error>.Err(net.Error.Other(5));
+        }
+    }
+    Result<void, io.Error> pumped = pump_until_data(false);
+    match (pumped) {
+        case Ok: {
+        }
+        case Err(_): {
+            // the jump connection failed: say "readable" so the reader finds out
+            return Result<bool, net.Error>.Ok(true);
+        }
+    }
+    return Result<bool, net.Error>.Ok(channel.has_pending() || channel.is_eof());
+}
+
+/// The jump connection's socket, which is what an event loop polls.
+pub int ChannelWire.fileno() {
+    return jump.descriptor();
+}
+
+/// Opens a connection to `host`:`port` through `jump` (an authenticated
+/// transport to the jump host). `Err` names the reason.
+pub Result<ChannelWire, str> open(ssh.Transport jump, str host, int port) {
+    match (sshexec.direct_tcpip(jump, host, port)) {
+        case Ok(sshexec.Channel channel): {
+            return Result<ChannelWire, str>.Ok(ChannelWire(jump, channel));
+        }
+        case Err(sshexec.Error error): {
+            return Result<ChannelWire, str>.Err(error.to_str());
+        }
+    }
+}
+
+bool is_timed_out(sshexec.Error error) {
+    return error.to_str() == sshexec.Error.Transport(ssh.Error.TimedOut).to_str();
+}

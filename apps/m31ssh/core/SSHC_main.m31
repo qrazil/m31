@@ -14,6 +14,7 @@ import ssh.sshexec;
 import ssh.sshagent;
 import ssh.sshconfig;
 import ssh.sshshell;
+import ssh.sshjump;
 import core.SSHC_cli;
 
 const int EXIT_ERROR = 255;
@@ -550,103 +551,94 @@ str tty_notice(int mode, bool is_stdin_tty) {
     return "";
 }
 
-pub int start(List<str> argv) {
-    List<str> arguments = [];
-    if (argv.size() > 1) {
-        arguments = argv.slice(1, argv.size());
-    }
-    SSHC_cli.Cli cli = SSHC_cli.Cli(0, "", [], [], "", "", "", 0, false, false, false, 126, "", [], [], false, false);
-    match (SSHC_cli.parse(arguments)) {
-        case Ok(SSHC_cli.Cli parsed): {
-            cli = parsed;
+/// One host on the way: the jump hosts, then the target.
+type Hop {
+    /// The name as typed (what config `Host` patterns match).
+    str alias;
+    str host_name;
+    int port;
+    str user;
+    sshconfig.Settings settings;
+}
+
+// `[user@]host[:port]` of a ProxyJump entry.
+Result<Hop, str> hop_of(str spec, str base_config, str login, str home) {
+    str text = spec.trim();
+    str user = "";
+    int at_sign = -1;
+    int index = 0;
+    while (index < text.size()) {
+        if (text.byte_at(index) == 64) {
+            at_sign = index;
         }
-        case Err(str message): {
-            io.eprint("m31ssh: " + message);
-            io.eprint("try 'm31ssh --help'");
-            return EXIT_ERROR;
+        index = index + 1;
+    }
+    if (at_sign >= 0) {
+        user = text.substr(0, at_sign);
+        text = text.substr(at_sign + 1, text.size());
+    }
+    int port = 0;
+    int colon = -1;
+    index = 0;
+    while (index < text.size()) {
+        if (text.byte_at(index) == 58) {
+            colon = index;
         }
+        index = index + 1;
     }
-    if (cli.is_help) {
-        print(SSHC_cli.usage());
-        return 0;
-    }
-    if (cli.is_version) {
-        print("m31ssh " + SSHC_cli.VERSION + " (UNAUDITED)");
-        return 0;
-    }
-    str home = home_directory();
-    str login = local_user();
-    // Configuration: command line first (first value wins), then the file.
-    str config_text = "";
-    if (cli.port > 0) {
-        config_text = config_text + "Port " + cli.port.to_str() + "\n";
-    }
-    if (cli.user != "") {
-        config_text = config_text + "User " + cli.user + "\n";
-    }
-    for (str option in cli.options) {
-        str lower = option.to_lower();
-        if (lower.starts_with("host ") || lower.starts_with("match ") || lower.starts_with("include ")) {
-            warn("-o " + option + " is not supported");
-            return EXIT_ERROR;
+    if (colon >= 0) {
+        Option<int> number = text.substr(colon + 1, text.size()).parse_int();
+        match (number) {
+            case Some(int value): {
+                if (value < 1 || value > 65535) {
+                    return Result<Hop, str>.Err("bad port in jump host '" + spec + "'");
+                }
+                port = value;
+            }
+            case None: {
+                return Result<Hop, str>.Err("bad port in jump host '" + spec + "'");
+            }
         }
-        config_text = config_text + option + "\n";
+        text = text.substr(0, colon);
     }
-    for (str identity in cli.identities) {
-        config_text = config_text + "IdentityFile \"" + identity + "\"\n";
+    if (text == "" || text.starts_with("-")) {
+        return Result<Hop, str>.Err("bad jump host '" + spec + "'");
     }
-    if (cli.config_file != "") {
-        if (!fs.is_file(cli.config_file)) {
-            warn("cannot read configuration file " + cli.config_file);
-            return EXIT_ERROR;
-        }
-        config_text = config_text + read_text(cli.config_file) + "\n";
-    } else if (home != "") {
-        config_text = config_text + read_text(home + "/.ssh/config") + "\n";
-    }
-    sshconfig.Settings settings = sshconfig.resolve(config_text, cli.host, login, home);
+    sshconfig.Settings settings = sshconfig.resolve(base_config, text, login, home);
     if (settings.errors.size() > 0) {
-        warn("configuration error: " + settings.errors[0]);
-        return EXIT_ERROR;
+        return Result<Hop, str>.Err("configuration error: " + settings.errors[0]);
     }
-    if (cli.jump != "" || settings.proxy_jump != "") {
-        warn("ProxyJump / -J is not supported yet");
-        return EXIT_ERROR;
+    if (user == "") {
+        user = settings.user;
     }
-    if (cli.local_forwards.size() > 0 || cli.remote_forwards.size() > 0 || cli.is_no_command) {
-        warn("port forwarding (-L, -R, -N) is not supported yet");
-        return EXIT_ERROR;
-    }
-    str user = settings.user;
     if (user == "") {
         user = login;
     }
-    if (user == "") {
-        warn("cannot determine the login name; use -l or user@host");
-        return EXIT_ERROR;
+    if (port == 0) {
+        port = settings.port;
     }
-    int port = settings.port;
     if (port == 0) {
         port = 22;
     }
-    str host_name = settings.host_name;
-    str known_hosts_path = settings.known_hosts_file;
+    return Result<Hop, str>.Ok(Hop(text, settings.host_name, port, user, settings));
+}
+
+// The host-key policy object for one hop.
+Result<HostCheck, str> check_for(Hop hop, str home, bool is_quiet, bool is_interactive) {
+    str known_hosts_path = hop.settings.known_hosts_file;
     if (known_hosts_path == "") {
         if (home == "") {
-            warn("HOME is not set and no UserKnownHostsFile is configured");
-            return EXIT_ERROR;
+            return Result<HostCheck, str>.Err("HOME is not set and no UserKnownHostsFile is configured");
         }
         known_hosts_path = home + "/.ssh/known_hosts";
     }
-    str policy = settings.strict_host_key_checking;
+    str policy = hop.settings.strict_host_key_checking;
     if (policy == "") {
         policy = "ask";
     }
     if (policy == "off") {
         policy = "no";
     }
-    bool is_stdin_tty = term.is_terminal(0);
-    bool is_interactive = is_stdin_tty;
     str known_text = "";
     if (fs.is_present(known_hosts_path)) {
         match (io.read(known_hosts_path)) {
@@ -654,64 +646,28 @@ pub int start(List<str> argv) {
                 known_text = text;
             }
             case Err(io.Error error): {
-                warn("cannot read " + known_hosts_path + ": " + error.to_str());
-                return EXIT_ERROR;
+                return Result<HostCheck, str>.Err("cannot read " + known_hosts_path + ": " + error.to_str());
             }
         }
     }
-    List<sshhosts.KnownHosts> loaded_hosts = [];
     match (sshhosts.parse(known_text)) {
         case Ok(sshhosts.KnownHosts loaded): {
-            loaded_hosts.push(loaded);
+            return Result<HostCheck, str>.Ok(HostCheck(hop.host_name, hop.port, known_hosts_path, policy, is_interactive, is_quiet, loaded));
         }
         case Err(sshhosts.Error error): {
-            warn(known_hosts_path + ": " + error.to_str() + "; refusing to continue");
-            return EXIT_ERROR;
-        }
-    }
-    HostCheck check = HostCheck(host_name, port, known_hosts_path, policy, is_interactive, cli.is_quiet, loaded_hosts[0]);
-    // Keys are read before the connection so a bad -i fails fast.
-    List<Candidate> candidates = gather(settings, home, cli.is_quiet);
-    if (candidates.size() == 0) {
-        warn("no usable identity: no key file and no agent key (tried IdentityFile and ~/.ssh/id_ed25519)");
-        return EXIT_ERROR;
-    }
-    int handshake_ms = HANDSHAKE_TIMEOUT_MS;
-    if (settings.connect_timeout > 0) {
-        handshake_ms = settings.connect_timeout * 1000;
-    }
-    match (net.connect(host_name, port)) {
-        case Ok(net.Conn connection): {
-            ssh.Offer offer = ssh.offer_preferring(check.hosts.algorithms_for(host_name, port));
-            match (ssh.connect_with_offer(connection, check, offer, timeout_ms: handshake_ms)) {
-                case Ok(ssh.Transport transport): {
-                    return run_session(transport, settings, cli, candidates, user, host_name, is_stdin_tty);
-                }
-                case Err(ssh.Error error): {
-                    if (check.failure != "") {
-                        warn(check.failure);
-                    } else {
-                        warn("connection to " + display_name(host_name, port) + " failed: " + error.to_str());
-                    }
-                    return EXIT_ERROR;
-                }
-            }
-        }
-        case Err(net.Error error): {
-            warn("could not connect to " + display_name(host_name, port) + ": " + error.to_str());
-            return EXIT_ERROR;
+            return Result<HostCheck, str>.Err(known_hosts_path + ": " + error.to_str() + "; refusing to continue");
         }
     }
 }
 
-// Authenticates (trying each candidate), opens the channel and runs it.
-int run_session(ssh.Transport transport, sshconfig.Settings settings, SSHC_cli.Cli cli, List<Candidate> candidates, str user, str host_name, bool is_stdin_tty) {
+// Tries each candidate identity over the transport; `Ok` carries the
+// server's banner.
+Result<str, str> authenticate(ssh.Transport transport, str user, str host_name, List<Candidate> candidates) {
     match (sshauth.start(transport)) {
         case Ok: {
         }
         case Err(sshauth.Error error): {
-            warn("authentication could not start: " + error.to_str());
-            return EXIT_ERROR;
+            return Result<str, str>.Err("authentication could not start: " + error.to_str());
         }
     }
     bool is_authenticated = false;
@@ -751,20 +707,16 @@ int run_session(ssh.Transport transport, sshconfig.Settings settings, SSHC_cli.C
                             warn("signing with " + candidate.label + " failed");
                         }
                         case Transport(ssh.Error inner): {
-                            warn("connection lost during authentication: " + inner.to_str());
-                            return EXIT_ERROR;
+                            return Result<str, str>.Err("connection lost during authentication: " + inner.to_str());
                         }
                         case Truncated: {
-                            warn("authentication failed: the server sent a malformed message");
-                            return EXIT_ERROR;
+                            return Result<str, str>.Err("authentication failed: the server sent a malformed message");
                         }
                         case UnexpectedMessage: {
-                            warn("authentication failed: the server sent an unexpected message");
-                            return EXIT_ERROR;
+                            return Result<str, str>.Err("authentication failed: the server sent an unexpected message");
                         }
                         case BadMessage: {
-                            warn("authentication failed: the server sent a malformed message");
-                            return EXIT_ERROR;
+                            return Result<str, str>.Err("authentication failed: the server sent a malformed message");
                         }
                     }
                 }
@@ -775,13 +727,209 @@ int run_session(ssh.Transport transport, sshconfig.Settings settings, SSHC_cli.C
         }
     }
     if (!is_authenticated) {
-        warn(user + "@" + host_name + ": Permission denied (publickey).");
         Result<bool, ssh.Error> closed = transport.disconnect();
+        return Result<str, str>.Err(user + "@" + host_name + ": Permission denied (publickey).");
+    }
+    return Result<str, str>.Ok(banner);
+}
+
+// Handshake, host-key decision and authentication over `wire` for one hop;
+// the authenticated transport, or a one-line reason.
+Result<ssh.Transport, str> open_hop(ssh.Wire wire, Hop hop, str home, bool is_quiet, bool is_interactive, bool is_target) {
+    HostCheck check = check_for(hop, home, is_quiet, is_interactive)?;
+    List<Candidate> candidates = gather(hop.settings, home, is_quiet);
+    if (candidates.size() == 0) {
+        return Result<ssh.Transport, str>.Err("no usable identity for " + hop.alias + ": no key file and no agent key (tried IdentityFile and ~/.ssh/id_ed25519, id_ecdsa, id_rsa)");
+    }
+    int handshake_ms = HANDSHAKE_TIMEOUT_MS;
+    if (hop.settings.connect_timeout > 0) {
+        handshake_ms = hop.settings.connect_timeout * 1000;
+    }
+    ssh.Offer offer = ssh.offer_preferring(check.hosts.algorithms_for(hop.host_name, hop.port));
+    match (ssh.connect_with_offer(wire, check, offer, timeout_ms: handshake_ms)) {
+        case Err(ssh.Error error): {
+            if (check.failure != "") {
+                return Result<ssh.Transport, str>.Err(check.failure);
+            }
+            return Result<ssh.Transport, str>.Err("connection to " + display_name(hop.host_name, hop.port) + " failed: " + error.to_str());
+        }
+        case Ok(ssh.Transport transport): {
+            match (authenticate(transport, hop.user, hop.host_name, candidates)) {
+                case Err(str reason): {
+                    return Result<ssh.Transport, str>.Err(reason);
+                }
+                case Ok(str banner): {
+                    if (banner != "" && !is_quiet && is_target) {
+                        Result<int, io.Error> shown = io.stderr().write((sanitize(banner) + "\n").to_bytes());
+                    }
+                    return Result<ssh.Transport, str>.Ok(transport);
+                }
+            }
+        }
+    }
+}
+
+// Walks `hops`: TCP to the first, then each next hop over a direct-tcpip
+// channel on the previous one. Every hop's host key is checked against its
+// own `known_hosts` entry and every hop authenticates for itself.
+Result<ssh.Transport, str> establish(List<Hop> hops, str home, bool is_quiet, bool is_interactive) {
+    Hop first = hops[0];
+    match (net.connect(first.host_name, first.port)) {
+        case Err(net.Error error): {
+            return Result<ssh.Transport, str>.Err("could not connect to " + display_name(first.host_name, first.port) + ": " + error.to_str());
+        }
+        case Ok(net.Conn connection): {
+            ssh.Wire wire = connection;
+            int index = 0;
+            while (true) {
+                bool is_target = index == hops.size() - 1;
+                match (open_hop(wire, hops[index], home, is_quiet, is_interactive, is_target)) {
+                    case Err(str reason): {
+                        return Result<ssh.Transport, str>.Err(reason);
+                    }
+                    case Ok(ssh.Transport transport): {
+                        if (is_target) {
+                            return Result<ssh.Transport, str>.Ok(transport);
+                        }
+                        Hop next = hops[index + 1];
+                        match (sshjump.open(transport, next.host_name, next.port)) {
+                            case Err(str reason): {
+                                return Result<ssh.Transport, str>.Err("jump host " + hops[index].alias + " could not reach " + display_name(next.host_name, next.port) + ": " + reason);
+                            }
+                            case Ok(sshjump.ChannelWire through): {
+                                wire = through;
+                            }
+                        }
+                    }
+                }
+                index = index + 1;
+            }
+        }
+    }
+}
+
+pub int start(List<str> argv) {
+    List<str> arguments = [];
+    if (argv.size() > 1) {
+        arguments = argv.slice(1, argv.size());
+    }
+    SSHC_cli.Cli cli = SSHC_cli.Cli(0, "", [], [], "", "", "", 0, false, false, false, 126, "", [], [], false, false);
+    match (SSHC_cli.parse(arguments)) {
+        case Ok(SSHC_cli.Cli parsed): {
+            cli = parsed;
+        }
+        case Err(str message): {
+            io.eprint("m31ssh: " + message);
+            io.eprint("try 'm31ssh --help'");
+            return EXIT_ERROR;
+        }
+    }
+    if (cli.is_help) {
+        print(SSHC_cli.usage());
+        return 0;
+    }
+    if (cli.is_version) {
+        print("m31ssh " + SSHC_cli.VERSION + " (UNAUDITED)");
+        return 0;
+    }
+    str home = home_directory();
+    str login = local_user();
+    // Configuration: command line first (first value wins), then the file.
+    // -o, -p, -l and -i are the target's own.
+    str options_text = "";
+    for (str option in cli.options) {
+        str lower = option.to_lower();
+        if (lower.starts_with("host ") || lower.starts_with("match ") || lower.starts_with("include ")) {
+            warn("-o " + option + " is not supported");
+            return EXIT_ERROR;
+        }
+        options_text = options_text + option + "\n";
+    }
+    str file_text = "";
+    if (cli.config_file != "") {
+        if (!fs.is_file(cli.config_file)) {
+            warn("cannot read configuration file " + cli.config_file);
+            return EXIT_ERROR;
+        }
+        file_text = read_text(cli.config_file) + "\n";
+    } else if (home != "") {
+        file_text = read_text(home + "/.ssh/config") + "\n";
+    }
+    // OpenSSH's rule (ssh(1), -J): "configuration directives supplied on the
+    // command line generally apply to the destination host and not any
+    // specified jump hosts", so a jump host sees the configuration file only.
+    str base_config = file_text;
+    str target_config = "";
+    if (cli.port > 0) {
+        target_config = target_config + "Port " + cli.port.to_str() + "\n";
+    }
+    if (cli.user != "") {
+        target_config = target_config + "User " + cli.user + "\n";
+    }
+    str identity_lines = "";
+    for (str identity in cli.identities) {
+        identity_lines = identity_lines + "IdentityFile \"" + identity + "\"\n";
+    }
+    sshconfig.Settings settings = sshconfig.resolve(target_config + options_text + identity_lines + file_text, cli.host, login, home);
+    if (settings.errors.size() > 0) {
+        warn("configuration error: " + settings.errors[0]);
         return EXIT_ERROR;
     }
-    if (banner != "" && !cli.is_quiet) {
-        Result<int, io.Error> shown = io.stderr().write((sanitize(banner) + "\n").to_bytes());
+    if (cli.local_forwards.size() > 0 || cli.remote_forwards.size() > 0 || cli.is_no_command) {
+        warn("port forwarding (-L, -R, -N) is not supported yet");
+        return EXIT_ERROR;
     }
+    str user = settings.user;
+    if (user == "") {
+        user = login;
+    }
+    if (user == "") {
+        warn("cannot determine the login name; use -l or user@host");
+        return EXIT_ERROR;
+    }
+    int port = settings.port;
+    if (port == 0) {
+        port = 22;
+    }
+    bool is_stdin_tty = term.is_terminal(0);
+    // The path to the target: ProxyJump entries (command line first), each
+    // resolved on its own, then the target.
+    List<Hop> hops = [];
+    str jump_text = cli.jump;
+    if (jump_text == "") {
+        jump_text = settings.proxy_jump;
+    }
+    if (jump_text != "" && jump_text.to_lower() != "none") {
+        for (str spec in jump_text.split(",")) {
+            match (hop_of(spec, base_config, login, home)) {
+                case Ok(Hop jump): {
+                    hops.push(jump);
+                }
+                case Err(str reason): {
+                    warn(reason);
+                    return EXIT_ERROR;
+                }
+            }
+        }
+    }
+    hops.push(Hop(cli.host, settings.host_name, port, user, settings));
+    match (establish(hops, home, cli.is_quiet, is_stdin_tty)) {
+        case Err(str reason): {
+            warn(reason);
+            return EXIT_ERROR;
+        }
+        case Ok(ssh.Transport transport): {
+            return run_session(transport, settings, cli, host_name_of(hops), is_stdin_tty);
+        }
+    }
+}
+
+str host_name_of(List<Hop> hops) {
+    return hops[hops.size() - 1].host_name;
+}
+
+// Opens the channel on an authenticated transport and runs it.
+int run_session(ssh.Transport transport, sshconfig.Settings settings, SSHC_cli.Cli cli, str host_name, bool is_stdin_tty) {
     match (transport.set_read_timeout(STALL_TIMEOUT_MS)) {
         case Ok: {
         }
