@@ -22,11 +22,11 @@ bytes ed_blob(int fill) {
     return out;
 }
 
-bytes rsa_blob() {
+bytes dss_blob() {
     bytes out = [];
-    ssh.push_string(out, octets("ssh-rsa"));
-    ssh.push_string(out, [1; 3]);
-    ssh.push_string(out, [2; 3]);
+    ssh.push_string(out, octets("ssh-dss"));
+    bytes filler = [1; 20];
+    ssh.push_string(out, filler);
     return out;
 }
 
@@ -47,13 +47,13 @@ bytes answer = [12];
 push_u32(answer, 3);
 ssh.push_string(answer, ed_blob(1));
 ssh.push_string(answer, octets("first"));
-ssh.push_string(answer, rsa_blob());
+ssh.push_string(answer, dss_blob());
 ssh.push_string(answer, octets("an rsa key"));
 ssh.push_string(answer, ed_blob(2));
 ssh.push_string(answer, octets("second"));
 match (sshagent.parse_identities(answer)) {
     case Ok(List<sshagent.Identity> keys): {
-        checks = check(checks, keys.size() == 2, "non-ed25519 identities are skipped");
+        checks = check(checks, keys.size() == 2, "identities of a key type this client cannot use are skipped");
         checks = check(checks, keys[0].comment == "first" && keys[1].comment == "second" && keys[1].blob == ed_blob(2), "identities and comments in order");
     }
     case Err(sshagent.Error error): {

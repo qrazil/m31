@@ -12,7 +12,7 @@ import sys
 
 from cryptography.hazmat.primitives import serialization
 
-print("encrypted refused: the private key is passphrase-protected; only unencrypted keys are supported (ssh-keygen -p -N \"\" -f <copy of the key> removes the passphrase)")
+print("encrypted refused: the private key is passphrase-protected")
 for i, path in enumerate(sys.argv[2:]):
     with open(path, "rb") as f:
         key = serialization.load_ssh_private_key(f.read(), password=None)

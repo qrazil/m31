@@ -1,0 +1,486 @@
+// RSA SIGNING, RSASSA-PKCS1-v1_5 (RFC 8017 §8.2, §9.2), with the private key
+// in CRT form: what an SSH client needs to authenticate with an `ssh-rsa` key
+// by `rsa-sha2-256` / `rsa-sha2-512`.
+//
+// API
+// ---
+//   Option<SigningKey> key = rsasign.parse_private(n, e, iqmp, p, q);   // big-endian, as in a key file
+//   Result<bytes, Error> sig = rsasign.sign_pkcs1_v15(key, rsa.Hash.Sha256, digest);
+//         // digest: the hash of the message, already computed (32 or 64 octets)
+//         // sig:    exactly modulus-size octets, what the wire carries
+//
+// Verification is `rsa.m31`'s, and `sign_pkcs1_v15` calls it on its own output
+// before returning (see "faults").
+//
+// --- what is constant time here, and what is not --------------------------------
+//
+// The claims are about THE SOURCE (nobody measured the machine code; see
+// `ecdsasign.m31` for the same caveat and its reasons).
+//
+//   CONSTANT-TIME-STYLE (no branch, no memory index and no loop count depends
+//   on a secret value):
+//     - Montgomery multiplication modulo p and q (`multiply`): fixed loops over
+//       `width` limbs, the final "subtract the modulus if needed" a mask-select
+//       on the borrow.
+//     - the two exponentiations `c^dp mod p`, `c^dq mod q`: every exponent bit
+//       costs one squaring and one multiplication whether the bit is set or
+//       not, and the product is kept or dropped by mask. The bit count is the
+//       width of the modulus, a public number.
+//     - the derivation of `dp = d mod (p-1)` and `dq = d mod (q-1)` and the
+//       reductions of the message and of `m2` modulo p: bit-serial, one
+//       shift-and-conditionally-subtract per bit of the dividend.
+//     - the setup of each Montgomery context from a SECRET prime (`R mod p`,
+//       `R^2 mod p`, `-p^-1 mod 2^24`): repeated doubling with a masked
+//       subtraction and Newton's iteration with fixed rounds. This is the
+//       reason this module does not use `bignum.m31`, whose `make_modulus`
+//       branches on the modulus and is for public moduli only.
+//     - the CRT recombination `m = m2 + h*q`: schoolbook multiplication with
+//       fixed loop bounds.
+//
+//   NOT constant time, deliberately, because the value is public by then:
+//     - the PKCS#1 encoding of the digest (a public message);
+//     - the final check that the signature verifies under the public key.
+//
+//   One language fact this file is written around (as `ecdsasign.m31`): `>>` on
+//   a negative value branches on its sign, so nothing here shifts a value that
+//   can be negative; every limb sum is of non-negative terms below 2^50, so
+//   the overflow checks the language adds never fire for any input.
+//
+// --- faults ------------------------------------------------------------------------
+//
+// A CRT signature computed with a corrupted half (a bit flip in `c^dp mod p`)
+// gives away a prime factor to anyone who sees it (Boneh-DeMillo-Lipton). So
+// the signature is verified with the public key before it is returned, and a
+// failing one is `Error.Fault` and not an output.
+//
+// --- what is not done ------------------------------------------------------------------
+//
+// No blinding: the message being signed is not attacker-chosen in SSH (it is
+// the session hash and the user name, which the server influences only
+// through the session hash), and the arithmetic above is the defence in
+// depth. No memory zeroisation: the runtime cannot do it (`sshkey.m31`'s
+// note). Keys under 2048 or over 4096 bits are refused, as in `rsa.m31`.
+
+import crypto.bignum;
+import crypto.rsa;
+import crypto.sha256;
+
+const int LIMB_BITS = 24;
+const int LIMB_MASK = 0xFFFFFF;
+const int LIMB_RADIX = 0x1000000;
+const str SHA256_DIGEST_INFO = "3031300d060960864801650304020105000420";
+const str SHA512_DIGEST_INFO = "3051300d060960864801650304020305000440";
+
+pub enum Error {
+    /// The hash is not SHA-256 or SHA-512, or the digest is the wrong size.
+    BadDigest;
+    /// The modulus is too small to hold the encoding.
+    TooSmall;
+    /// The signature did not verify under the public key: the key is
+    /// inconsistent or a fault corrupted the computation. Nothing is output.
+    Fault;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case BadDigest: {
+            return "the digest is not a SHA-256 or SHA-512 digest";
+        }
+        case TooSmall: {
+            return "the RSA modulus is too small for this digest";
+        }
+        case Fault: {
+            return "the RSA signature failed its self-check; the key may be corrupt";
+        }
+    }
+}
+
+// --- limb arithmetic, fixed width ---------------------------------------------------
+
+// A modulus (a prime, here) and what Montgomery multiplication needs of it,
+// all derived without branching on its value.
+type Context {
+    int width;
+    Array<int> modulus;
+    int negative_inverse;
+    /// R mod modulus, R = 2^(24 * width): the Montgomery form of 1.
+    Array<int> one;
+    /// R^2 mod modulus.
+    Array<int> radix_squared;
+}
+
+// CIOS Montgomery multiplication: `left * right * R^-1 mod modulus` for inputs
+// below the modulus.
+Array<int> Context.multiply(Array<int> left, Array<int> right) {
+    Array<int> work = [0; width + 2];
+    for (int row in 0 .. width) {
+        int left_limb = left[row];
+        int carry = 0;
+        for (int column in 0 .. width) {
+            int sum = work[column] + left_limb * right[column] + carry;
+            work[column] = sum & LIMB_MASK;
+            carry = sum >> LIMB_BITS;
+        }
+        int top = work[width] + carry;
+        work[width] = top & LIMB_MASK;
+        work[width + 1] = top >> LIMB_BITS;
+        int factor = work[0] * negative_inverse & LIMB_MASK;
+        carry = (work[0] + factor * modulus[0]) >> LIMB_BITS;
+        for (int column in 1 .. width) {
+            int sum = work[column] + factor * modulus[column] + carry;
+            work[column - 1] = sum & LIMB_MASK;
+            carry = sum >> LIMB_BITS;
+        }
+        int next_top = work[width] + carry;
+        work[width - 1] = next_top & LIMB_MASK;
+        work[width] = work[width + 1] + (next_top >> LIMB_BITS);
+    }
+    Array<int> out = work.slice(0, width);
+    Difference reduced = subtract_with_borrow(out, modulus, width);
+    return select(work[width] | (1 - reduced.borrow), reduced.limbs, out, width);
+}
+
+// `base^exponent` for `base` in Montgomery form, over every bit of the
+// `exponent_width`-limb exponent, high to low; a squaring and a
+// multiplication per bit, the product kept by mask.
+Array<int> Context.power(Array<int> base, Array<int> exponent, int exponent_width) {
+    Array<int> result = clone(one);
+    int position = exponent_width * LIMB_BITS - 1;
+    while (position >= 0) {
+        result = multiply(result, result);
+        Array<int> product = multiply(result, base);
+        int bit = exponent[position / LIMB_BITS] >> (position % LIMB_BITS) & 1;
+        result = select(bit, product, result, width);
+        position = position - 1;
+    }
+    return result;
+}
+
+type Difference {
+    Array<int> limbs;
+    int borrow;
+}
+
+// `left - right` over `width` limbs and whether it borrowed out of the top.
+Difference subtract_with_borrow(Array<int> left, Array<int> right, int width) {
+    Array<int> out = [0; width];
+    int borrow = 0;
+    for (int index in 0 .. width) {
+        // biased by 2^24 so the value is never negative before the shift
+        int total = left[index] + LIMB_RADIX - right[index] - borrow;
+        out[index] = total & LIMB_MASK;
+        borrow = 1 - (total >> LIMB_BITS);
+    }
+    return Difference(out, borrow);
+}
+
+// `left` where `condition` is 1, `right` where it is 0.
+Array<int> select(int condition, Array<int> left, Array<int> right, int width) {
+    int mask = 0 - condition;
+    int inverse_mask = mask ^ -1;
+    Array<int> out = [0; width];
+    for (int index in 0 .. width) {
+        out[index] = left[index] & mask | right[index] & inverse_mask;
+    }
+    return out;
+}
+
+// `2 * value + bit` modulo `modulus`, for `value` below `modulus` and `bit`
+// 0 or 1: shift left one bit with the bit shifted in, subtract the modulus
+// once if that is needed (the result is below `2 * modulus`).
+Array<int> shift_in(Array<int> value, int bit, Array<int> modulus, int width) {
+    Array<int> doubled = [0; width];
+    int carry = bit;
+    for (int index in 0 .. width) {
+        int total = value[index] * 2 + carry;
+        doubled[index] = total & LIMB_MASK;
+        carry = total >> LIMB_BITS;
+    }
+    Difference reduced = subtract_with_borrow(doubled, modulus, width);
+    return select(carry | (1 - reduced.borrow), reduced.limbs, doubled, width);
+}
+
+// `value mod modulus` for a value of `value_width` limbs, bit by bit from the
+// top. `modulus` has `width` limbs.
+Array<int> reduce(Array<int> value, int value_width, Array<int> modulus, int width) {
+    Array<int> remainder = [0; width];
+    int position = value_width * LIMB_BITS - 1;
+    while (position >= 0) {
+        int bit = value[position / LIMB_BITS] >> (position % LIMB_BITS) & 1;
+        remainder = shift_in(remainder, bit, modulus, width);
+        position = position - 1;
+    }
+    return remainder;
+}
+
+// `-value^-1 mod 2^24` for an odd limb, Newton's iteration with fixed rounds.
+int negative_inverse_of(int low_limb) {
+    int inverse = low_limb;
+    for (int round in 0 .. 5) {
+        int product = low_limb * inverse & LIMB_MASK;
+        int correction = 2 - product & LIMB_MASK;
+        inverse = inverse * correction & LIMB_MASK;
+    }
+    return LIMB_RADIX - inverse & LIMB_MASK;
+}
+
+Context make_context(Array<int> modulus, int width) {
+    // 1, doubled 24*width times, is R mod modulus; doubled 24*width more,
+    // R^2 mod modulus. Each doubling is `shift_in` with a zero bit.
+    Array<int> value = [0; width];
+    value[0] = 1;
+    for (int step in 0 .. width * LIMB_BITS) {
+        value = shift_in(value, 0, modulus, width);
+    }
+    Array<int> one = clone(value);
+    for (int step in 0 .. width * LIMB_BITS) {
+        value = shift_in(value, 0, modulus, width);
+    }
+    return Context(width, modulus, negative_inverse_of(modulus[0]), one, value);
+}
+
+// `(left - right) mod modulus` for both below the modulus.
+Array<int> subtract_mod(Array<int> left, Array<int> right, Array<int> modulus, int width) {
+    Difference difference = subtract_with_borrow(left, right, width);
+    int mask = 0 - difference.borrow;
+    Array<int> out = [0; width];
+    int carry = 0;
+    for (int index in 0 .. width) {
+        int total = difference.limbs[index] + (modulus[index] & mask) + carry;
+        out[index] = total & LIMB_MASK;
+        carry = total >> LIMB_BITS;
+    }
+    return out;
+}
+
+// The full product, `left_width + right_width` limbs.
+Array<int> multiply_full(Array<int> left, int left_width, Array<int> right, int right_width) {
+    Array<int> out = [0; left_width + right_width];
+    for (int row in 0 .. left_width) {
+        int carry = 0;
+        for (int column in 0 .. right_width) {
+            int total = out[row + column] + left[row] * right[column] + carry;
+            out[row + column] = total & LIMB_MASK;
+            carry = total >> LIMB_BITS;
+        }
+        out[row + right_width] = carry;
+    }
+    return out;
+}
+
+// `left + right` over `width` limbs, wrapping (the caller knows it fits).
+Array<int> add_wrapping(Array<int> left, Array<int> right, int width) {
+    Array<int> out = [0; width];
+    int carry = 0;
+    for (int index in 0 .. width) {
+        int total = left[index] + right[index] + carry;
+        out[index] = total & LIMB_MASK;
+        carry = total >> LIMB_BITS;
+    }
+    return out;
+}
+
+// `value - 1` over `width` limbs, for an odd value (so it only clears bit 0).
+Array<int> minus_one_of_odd(Array<int> value, int width) {
+    Array<int> out = clone(value);
+    out[0] = out[0] ^ 1;
+    return out;
+}
+
+// `value` padded or kept to `width` limbs (value_width <= width).
+Array<int> widen(Array<int> value, int value_width, int width) {
+    Array<int> out = [0; width];
+    for (int index in 0 .. value_width) {
+        out[index] = value[index];
+    }
+    return out;
+}
+
+// --- the key -------------------------------------------------------------------------
+
+/// A private key in CRT form. The factors, the CRT coefficient and the
+/// exponent are private fields; the type has no `to_str`.
+pub type SigningKey {
+    /// The modulus's length in octets.
+    pub int modulus_size;
+    rsa.PublicKey public_key;
+    int width_n;
+    int width_half;
+    Array<int> prime_p;
+    Array<int> prime_q;
+    Array<int> exponent;
+    Array<int> coefficient;
+    Array<int> private_exponent;
+}
+
+/// RSASSA-PKCS1-v1_5 signature over `digest` (SHA-256 or SHA-512 only).
+pub Result<bytes, Error> SigningKey.sign_pkcs1_v15(rsa.Hash hash, bytes digest) {
+    bytes message = [];
+    match (encode(hash, digest, modulus_size)) {
+        case Some(bytes encoded): {
+            message = encoded;
+        }
+        case None: {
+            if (modulus_size < 128) {
+                return Result<bytes, Error>.Err(Error.TooSmall);
+            }
+            return Result<bytes, Error>.Err(Error.BadDigest);
+        }
+    }
+    Array<int> message_value = bignum.from_bytes(message, width_n);
+    Context context_p = make_context(prime_p, width_half);
+    Context context_q = make_context(prime_q, width_half);
+    // dp = d mod (p - 1), dq = d mod (q - 1)
+    Array<int> exponent_p = reduce(private_exponent, width_n, minus_one_of_odd(prime_p, width_half), width_half);
+    Array<int> exponent_q = reduce(private_exponent, width_n, minus_one_of_odd(prime_q, width_half), width_half);
+    // half_p = message_value^dp mod p, half_q = message_value^dq mod q
+    Array<int> c_p = reduce(message_value, width_n, prime_p, width_half);
+    Array<int> c_q = reduce(message_value, width_n, prime_q, width_half);
+    Array<int> half_p = context_p.multiply(context_p.power(context_p.multiply(c_p, context_p.radix_squared), exponent_p, width_half), bignum.from_small(width_half, 1));
+    Array<int> half_q = context_q.multiply(context_q.power(context_q.multiply(c_q, context_q.radix_squared), exponent_q, width_half), bignum.from_small(width_half, 1));
+    // factor = qinv * (half_p - half_q) mod p, then m = half_q + factor * q
+    Array<int> half_q_mod_p = reduce(half_q, width_half, prime_p, width_half);
+    Array<int> difference = subtract_mod(half_p, half_q_mod_p, prime_p, width_half);
+    Array<int> coefficient_mont = context_p.multiply(coefficient, context_p.radix_squared);
+    Array<int> factor = context_p.multiply(difference, coefficient_mont);
+    Array<int> h_times_q = multiply_full(factor, width_half, prime_q, width_half);
+    Array<int> m2_wide = widen(half_q, width_half, width_half * 2);
+    Array<int> result_wide = add_wrapping(h_times_q, m2_wide, width_half * 2);
+    bytes signature = bignum.to_bytes(result_wide, modulus_size);
+    if (!rsa.is_valid_pkcs1_v15_signature(public_key, hash, digest, signature)) {
+        return Result<bytes, Error>.Err(Error.Fault);
+    }
+    return Result<bytes, Error>.Ok(signature);
+}
+
+// Strips leading zero octets (a DER/mpint sign byte).
+bytes strip(bytes raw) {
+    int start = 0;
+    while (start < raw.size() - 1 && raw[start] == 0) {
+        start = start + 1;
+    }
+    return raw.substr(start, raw.size());
+}
+
+/// The key with public modulus and exponent, private exponent, `iqmp`
+/// (`q^-1 mod p`), and the primes `p` and `q`, all big-endian (leading zeros allowed), or
+/// `None` if the sizes are wrong or the parts are not a consistent RSA key:
+/// the modulus must be 2048 to 4096 bits, `p` and `q` odd and of half the
+/// modulus's length, `p * q == n`, `iqmp * q == 1 mod p`, and the key must
+/// sign and verify. (`None` is never more specific, and says nothing about
+/// the values.)
+pub Option<SigningKey> parse_private(bytes modulus_in, bytes exponent_in, bytes private_in, bytes iqmp, bytes prime_p_in, bytes prime_q_in) {
+    bytes n_bytes = strip(modulus_in);
+    bytes p_bytes = strip(prime_p_in);
+    bytes q_bytes = strip(prime_q_in);
+    bytes d_bytes = strip(private_in);
+    bytes iqmp_bytes = strip(iqmp);
+    match (rsa.parse_public_key(n_bytes, strip(exponent_in))) {
+        case None: {
+            return Option<SigningKey>.None;
+        }
+        case Some(rsa.PublicKey public_key): {
+            int modulus_size = public_key.modulus_size;
+            int half = (modulus_size + 1) / 2;
+            if (p_bytes.size() > half || q_bytes.size() > half || p_bytes.size() < half - 1 || q_bytes.size() < half - 1) {
+                return Option<SigningKey>.None;
+            }
+            if (d_bytes.size() > modulus_size || iqmp_bytes.size() > half) {
+                return Option<SigningKey>.None;
+            }
+            if ((p_bytes[p_bytes.size() - 1] & 1) == 0 || (q_bytes[q_bytes.size() - 1] & 1) == 0) {
+                return Option<SigningKey>.None;
+            }
+            int width_n = bignum.limbs_for_bytes(modulus_size);
+            int width_half = bignum.limbs_for_bytes(half);
+            Array<int> prime_p = bignum.from_bytes(p_bytes, width_half);
+            Array<int> prime_q = bignum.from_bytes(q_bytes, width_half);
+            Array<int> product = multiply_full(prime_p, width_half, prime_q, width_half);
+            Array<int> modulus = bignum.from_bytes(n_bytes, width_n);
+            if (width_half * 2 < width_n || !is_product_equal(product, width_half * 2, modulus, width_n)) {
+                return Option<SigningKey>.None;
+            }
+            Array<int> coefficient = bignum.from_bytes(iqmp_bytes, width_half);
+            Array<int> private_exponent = bignum.from_bytes(d_bytes, width_n);
+            SigningKey key = SigningKey(modulus_size, public_key, width_n, width_half, prime_p, prime_q, bignum.from_bytes(strip(exponent_in), 2), coefficient, private_exponent);
+            // The key must work: sign a fixed digest and verify it.
+            bytes probe = sha256.sum("rsasign self-check".to_bytes());
+            match (key.sign_pkcs1_v15(rsa.Hash.Sha256, probe)) {
+                case Ok(_): {
+                    return Option<SigningKey>.Some(key);
+                }
+                case Err(_): {
+                    return Option<SigningKey>.None;
+                }
+            }
+        }
+    }
+}
+
+// Whether the `product_width`-limb `product` equals the `modulus_width`-limb
+// `modulus` (the product may be wider, with zero high limbs).
+bool is_product_equal(Array<int> product, int product_width, Array<int> modulus, int modulus_width) {
+    for (int index in 0 .. product_width) {
+        int want = 0;
+        if (index < modulus_width) {
+            want = modulus[index];
+        }
+        if (product[index] != want) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// EMSA-PKCS1-v1_5: 0x00 0x01 0xFF.. 0x00 DigestInfo digest, `size` octets.
+Option<bytes> encode(rsa.Hash hash, bytes digest, int size) {
+    bytes prefix = [];
+    match (hash) {
+        case Sha256: {
+            if (digest.size() != 32) {
+                return Option<bytes>.None;
+            }
+            prefix = hex_bytes(SHA256_DIGEST_INFO);
+        }
+        case Sha512: {
+            if (digest.size() != 64) {
+                return Option<bytes>.None;
+            }
+            prefix = hex_bytes(SHA512_DIGEST_INFO);
+        }
+        case Sha384: {
+            return Option<bytes>.None;
+        }
+    }
+    int trailer = prefix.size() + digest.size();
+    if (size < trailer + 11) {
+        return Option<bytes>.None;
+    }
+    bytes out = [];
+    out.push(0);
+    out.push(1);
+    for (int index in 0 .. size - trailer - 3) {
+        out.push(255);
+    }
+    out.push(0);
+    out.extend(prefix);
+    out.extend(digest);
+    return Option<bytes>.Some(out);
+}
+
+bytes hex_bytes(str text) {
+    bytes out = [];
+    int index = 0;
+    while (index < text.size()) {
+        out.push(nibble(text.byte_at(index)) * 16 + nibble(text.byte_at(index + 1)));
+        index = index + 2;
+    }
+    return out;
+}
+
+int nibble(int character) {
+    if (character >= 97) {
+        return character - 87;
+    }
+    return character - 48;
+}

@@ -1,0 +1,63 @@
+// `lib/crypto/rsasign.m31`, driven by `oracle_rsasign.py` (which generates
+// RSA keys with `cryptography`, feeds them here on stdin and compares the
+// signatures with OpenSSL's, which for PKCS#1 v1.5 must be byte-identical).
+//
+//   sign HASH N E D IQMP P Q DIGEST     -> signature HEX | refused
+// All big-endian hex; HASH is sha256 or sha512.
+import io;
+import encoding.hexcodec;
+import crypto.rsa;
+import crypto.rsasign;
+
+bytes unhex(str text) {
+    match (hexcodec.decode(text)) {
+        case Ok(bytes value): {
+            return value;
+        }
+        case Err(_): {
+            trap("bad hex in vector");
+        }
+    }
+}
+
+str input = "";
+match (io.stdin().read_all()) {
+    case Ok(bytes data): {
+        match (data.utf8()) {
+            case Some(str text): {
+                input = text;
+            }
+            case None: {
+                trap("input is not text");
+            }
+        }
+    }
+    case Err(_): {
+        trap("cannot read stdin");
+    }
+}
+for (str line in input.split("\n")) {
+    if (line.trim() == "") {
+        continue;
+    }
+    List<str> fields = line.trim().split(" ");
+    rsa.Hash hash = rsa.Hash.Sha256;
+    if (fields[1] == "sha512") {
+        hash = rsa.Hash.Sha512;
+    }
+    match (rsasign.parse_private(unhex(fields[2]), unhex(fields[3]), unhex(fields[4]), unhex(fields[5]), unhex(fields[6]), unhex(fields[7]))) {
+        case None: {
+            print("refused key");
+        }
+        case Some(rsasign.SigningKey key): {
+            match (key.sign_pkcs1_v15(hash, unhex(fields[8]))) {
+                case Ok(bytes signature): {
+                    print("signature " + hexcodec.encode(signature));
+                }
+                case Err(rsasign.Error error): {
+                    print("refused " + error.to_str());
+                }
+            }
+        }
+    }
+}

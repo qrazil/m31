@@ -906,7 +906,9 @@ Option<bytes> mpint_fixed(bytes content, int width) {
 /// that its shape is valid for the type: ed25519 (32 octets), ecdsa-sha2-
 /// nistp256 (curve name `nistp256` and a 65-octet uncompressed point that is
 /// on the curve), ssh-rsa (an odd modulus of 2048 to 4096 bits and a usable
-/// exponent). Anything else is `UnsupportedHostKeyType`.
+/// exponent). A type this client does not implement, or an RSA key outside
+/// 2048-4096 bits, is `UnsupportedHostKeyType` (well formed, but not usable);
+/// a malformed key of a known type is `BadKeyExchange`.
 pub Result<HostKey, Error> parse_host_key(bytes blob) {
     Field name = parse_string(blob, 0)?;
     str algorithm = "";
@@ -921,7 +923,7 @@ pub Result<HostKey, Error> parse_host_key(bytes blob) {
     if (algorithm == HOST_KEY_ALGO) {
         Field key = parse_string(blob, name.next)?;
         if (key.value.size() != 32 || key.next != blob.size()) {
-            return Result<HostKey, Error>.Err(Error.UnsupportedHostKeyType);
+            return Result<HostKey, Error>.Err(Error.BadKeyExchange);
         }
         return Result<HostKey, Error>.Ok(HostKey(algorithm, blob, key.value));
     }
@@ -929,7 +931,7 @@ pub Result<HostKey, Error> parse_host_key(bytes blob) {
         Field curve = parse_string(blob, name.next)?;
         Field point = parse_string(blob, curve.next)?;
         if (curve.value != "nistp256".to_bytes() || point.next != blob.size()) {
-            return Result<HostKey, Error>.Err(Error.UnsupportedHostKeyType);
+            return Result<HostKey, Error>.Err(Error.BadKeyExchange);
         }
         match (ecdsa.parse_public_key(ecdsa.p256(), point.value)) {
             case Some(_): {
@@ -944,7 +946,7 @@ pub Result<HostKey, Error> parse_host_key(bytes blob) {
         Field exponent = parse_string(blob, name.next)?;
         Field modulus = parse_string(blob, exponent.next)?;
         if (modulus.next != blob.size()) {
-            return Result<HostKey, Error>.Err(Error.UnsupportedHostKeyType);
+            return Result<HostKey, Error>.Err(Error.BadKeyExchange);
         }
         match (rsa.parse_public_key(modulus.value, exponent.value)) {
             case Some(_): {

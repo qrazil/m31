@@ -58,6 +58,15 @@ int error_code(sshkey.Error error) {
         case BadPadding: {
             return 8;
         }
+        case WrongPassphrase: {
+            return 9;
+        }
+        case UnsupportedCipher: {
+            return 10;
+        }
+        case UnsupportedKdf: {
+            return 11;
+        }
     }
 }
 
@@ -82,6 +91,9 @@ const int ERROR_KEY_COUNT = 5;
 const int ERROR_CHECK = 6;
 const int ERROR_KEY = 7;
 const int ERROR_PADDING = 8;
+const int ERROR_WRONG_PASSPHRASE = 9;
+const int ERROR_CIPHER = 10;
+const int ERROR_KDF = 11;
 
 // Every field of an `openssh-key-v1` file, so a fixture can change exactly
 // one of them.
@@ -274,10 +286,19 @@ enc.check2 = 99;
 checks = check(checks, refusal(spec_text(enc)) == ERROR_ENCRYPTED, "an encrypted key is Error.Encrypted");
 Spec enc_kdf = valid_spec();
 enc_kdf.kdf = "bcrypt";
-checks = check(checks, refusal(spec_text(enc_kdf)) == ERROR_ENCRYPTED, "a kdf other than none is Error.Encrypted");
+checks = check(checks, refusal(spec_text(enc_kdf)) == ERROR_KEY, "a kdf with no cipher is BadKey");
 Spec enc_cipher = valid_spec();
 enc_cipher.cipher = "aes128-cbc";
-checks = check(checks, refusal(spec_text(enc_cipher)) == ERROR_ENCRYPTED, "a cipher other than none is Error.Encrypted");
+checks = check(checks, refusal(spec_text(enc_cipher)) == ERROR_CIPHER, "a cipher this client has not implemented is UnsupportedCipher");
+Spec enc_kdf_name = valid_spec();
+enc_kdf_name.cipher = "aes256-ctr";
+enc_kdf_name.kdf = "scrypt";
+checks = check(checks, refusal(spec_text(enc_kdf_name)) == ERROR_KDF, "a kdf other than bcrypt is UnsupportedKdf");
+Spec enc_rounds = valid_spec();
+enc_rounds.cipher = "aes256-ctr";
+enc_rounds.kdf = "bcrypt";
+enc_rounds.kdf_options = [0, 0, 0, 16, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 0, 0, 0xFF, 0xFF];
+checks = check(checks, refusal(spec_text(enc_rounds)) == ERROR_KDF, "a bcrypt cost over 1024 rounds is refused, not run");
 // Truncated -- a cut inside the private section, and every proper prefix.
 bytes full = build_blob(good);
 checks = check(checks, refusal(armor(full.substr(0, 30))) == ERROR_TRUNCATED, "a file cut inside the header is Truncated");
@@ -294,11 +315,11 @@ while (cut < full.size()) {
 checks = check(checks, true, "no proper prefix of the key file parses");
 // UnsupportedKeyType
 Spec rsa_outer = valid_spec();
-rsa_outer.outer_type = "ssh-rsa";
-checks = check(checks, refusal(spec_text(rsa_outer)) == ERROR_KEY_TYPE, "an outer key type other than ed25519 is UnsupportedKeyType");
+rsa_outer.outer_type = "ssh-dss";
+checks = check(checks, refusal(spec_text(rsa_outer)) == ERROR_KEY_TYPE, "an outer key type this client does not implement is UnsupportedKeyType");
 Spec rsa_inner = valid_spec();
-rsa_inner.inner_type = "ssh-rsa";
-checks = check(checks, refusal(spec_text(rsa_inner)) == ERROR_KEY_TYPE, "an inner key type other than ed25519 is UnsupportedKeyType");
+rsa_inner.inner_type = "ssh-dss";
+checks = check(checks, refusal(spec_text(rsa_inner)) == ERROR_KEY, "an inner key type that is not the outer one is BadKey");
 // UnsupportedKeyCount
 Spec two = valid_spec();
 two.count = 2;

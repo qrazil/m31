@@ -240,6 +240,15 @@ str why(sshclient.Error e) {
                 case BadPadding: {
                     return "key-padding";
                 }
+                case WrongPassphrase: {
+                    return "key-wrong-passphrase";
+                }
+                case UnsupportedCipher: {
+                    return "key-cipher";
+                }
+                case UnsupportedKdf: {
+                    return "key-kdf";
+                }
             }
         }
         case KnownHosts(sshhosts.Error h): {

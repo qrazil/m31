@@ -1,0 +1,84 @@
+// `lib/ssh/sshkey.m31` on real files from `ssh-keygen`: every key type, every
+// supported file cipher, with and without a passphrase.
+//
+//   t_ssh_keyfiles PASSPHRASE KEYFILE...
+//
+// For each file prints `PATH ALGORITHM PUBLIC-BLOB-BASE64 COMMENT` and, per
+// signature algorithm the key offers, `sig ALGORITHM HEX` over the fixed
+// message below; then, for an encrypted file, whether the wrong passphrase
+// is refused as WrongPassphrase and no passphrase as Encrypted.
+// `oracle_sshkeyfiles.py` checks the lines against `ssh-keygen -y` and
+// verifies every signature with OpenSSL.
+import io;
+import os;
+import encoding.hexcodec;
+import ssh.sshkey;
+
+str describe(sshkey.Error error) {
+    return error.to_str();
+}
+
+List<str> arguments = os.arguments();
+bytes passphrase = arguments[1].to_bytes();
+bytes message = "m31ssh keyfile test message".to_bytes();
+int index = 2;
+while (index < arguments.size()) {
+    str path = arguments[index];
+    match (io.read(path)) {
+        case Err(_): {
+            print(path + " ERROR unreadable");
+        }
+        case Ok(str text): {
+            match (sshkey.inspect(text)) {
+                case Err(sshkey.Error error): {
+                    print(path + " ERROR " + describe(error));
+                }
+                case Ok(sshkey.Info info): {
+                    if (info.is_encrypted) {
+                        match (sshkey.parse(text)) {
+                            case Ok(_): {
+                                print(path + " ERROR encrypted key parsed without a passphrase");
+                            }
+                            case Err(sshkey.Error error): {
+                                if (error.to_str() != sshkey.Error.Encrypted.to_str()) {
+                                    print(path + " ERROR wrong error without passphrase: " + describe(error));
+                                }
+                            }
+                        }
+                        match (sshkey.parse_with_passphrase(text, "definitely not it".to_bytes())) {
+                            case Ok(_): {
+                                print(path + " ERROR wrong passphrase accepted");
+                            }
+                            case Err(sshkey.Error error): {
+                                if (error.to_str() != sshkey.Error.WrongPassphrase.to_str()) {
+                                    print(path + " ERROR wrong passphrase gave: " + describe(error));
+                                } else {
+                                    print(path + " wrong-passphrase-refused");
+                                }
+                            }
+                        }
+                    }
+                    match (sshkey.parse_with_passphrase(text, passphrase)) {
+                        case Err(sshkey.Error error): {
+                            print(path + " ERROR " + describe(error));
+                        }
+                        case Ok(sshkey.PrivateKey key): {
+                            print(path + " key " + key.algorithm + " " + hexcodec.encode(key.public_blob()) + " " + key.comment);
+                            for (str algorithm in key.signature_algorithms()) {
+                                match (key.signature_blob_for(algorithm, message)) {
+                                    case Ok(bytes blob): {
+                                        print(path + " sig " + algorithm + " " + hexcodec.encode(blob));
+                                    }
+                                    case Err(str reason): {
+                                        print(path + " ERROR sign " + algorithm + ": " + reason);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    index = index + 1;
+}

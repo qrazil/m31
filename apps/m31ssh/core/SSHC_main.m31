@@ -229,10 +229,174 @@ str display_name(str host, int port) {
 
 type Candidate {
     bytes blob;
-    /// "" for a key file loaded here; else the agent socket to sign through.
+    /// "" for a key file; else the agent socket to sign through.
     str agent_path;
+    /// The key, once loaded: zero or one.
     List<sshkey.PrivateKey> key;
     str label;
+    /// The file, and whether it needs a passphrase (asked for only when this
+    /// candidate is reached and no agent key already covered it).
+    str file;
+    bool is_encrypted;
+}
+
+// The key type's userauth signature algorithms, best first, from a blob.
+List<str> algorithms_of(bytes blob) {
+    match (ssh.parse_string(blob, 0)) {
+        case Ok(ssh.Field field): {
+            match (field.value.utf8()) {
+                case Some(str name): {
+                    if (name == "ssh-rsa") {
+                        return ["rsa-sha2-512", "rsa-sha2-256"];
+                    }
+                    return [name];
+                }
+                case None: {
+                    return [];
+                }
+            }
+        }
+        case Err(_): {
+            return [];
+        }
+    }
+}
+
+// A passphrase read from the terminal with echo off, or None when there is
+// no terminal, the person gave up (Ctrl-C, Ctrl-D on an empty line), or the
+// terminal could not be put in raw mode. Never printed, never logged; the
+// bytes go only to `sshkey`.
+Option<bytes> read_passphrase(str prompt) {
+    if (!term.is_terminal(0)) {
+        return Option<bytes>.None;
+    }
+    match (term.raw(in_fd: 0, out_fd: 2)) {
+        case Err(_): {
+            return Option<bytes>.None;
+        }
+        case Ok(term.Session raw): {
+            Result<int, io.Error> shown = io.stderr().write(prompt.to_bytes());
+            bytes typed = [];
+            bool is_aborted = false;
+            bool is_done = false;
+            io.File input = io.stdin();
+            while (!is_done) {
+                match (input.read(1)) {
+                    case Ok(bytes got): {
+                        if (got.size() == 0) {
+                            is_aborted = typed.size() == 0;
+                            is_done = true;
+                        } else if (got[0] == 13 || got[0] == 10) {
+                            is_done = true;
+                        } else if (got[0] == 3) {
+                            is_aborted = true;
+                            is_done = true;
+                        } else if (got[0] == 4 && typed.size() == 0) {
+                            is_aborted = true;
+                            is_done = true;
+                        } else if (got[0] == 127 || got[0] == 8) {
+                            // erase one UTF-8 character
+                            while (typed.size() > 0 && (typed[typed.size() - 1] & 0xC0) == 0x80) {
+                                typed.pop();
+                            }
+                            if (typed.size() > 0) {
+                                typed.pop();
+                            }
+                        } else if (got[0] == 21) {
+                            typed.clear();
+                        } else if (got[0] >= 32) {
+                            typed.push(got[0]);
+                        }
+                    }
+                    case Err(_): {
+                        is_aborted = true;
+                        is_done = true;
+                    }
+                }
+            }
+            Result<bool, term.Error> restored = raw.restore();
+            Result<int, io.Error> newline = io.stderr().write("\n".to_bytes());
+            if (is_aborted) {
+                return Option<bytes>.None;
+            }
+            return Option<bytes>.Some(typed);
+        }
+    }
+}
+
+// The key of an encrypted candidate, asking for the passphrase up to three
+// times; None when it cannot be had.
+Option<sshkey.PrivateKey> unlock(Candidate candidate) {
+    int attempts = 0;
+    while (attempts < 3) {
+        match (read_passphrase("Enter passphrase for key '" + candidate.file + "': ")) {
+            case None: {
+                warn("no passphrase for " + candidate.file + " (no terminal to ask on, or cancelled); skipping this key");
+                return Option<sshkey.PrivateKey>.None;
+            }
+            case Some(bytes passphrase): {
+                match (sshkey.load_with_passphrase(candidate.file, passphrase)) {
+                    case Ok(sshkey.PrivateKey key): {
+                        return Option<sshkey.PrivateKey>.Some(key);
+                    }
+                    case Err(sshkey.Error error): {
+                        match (error) {
+                            case WrongPassphrase: {
+                                io.eprint("Permission denied, please try again.");
+                            }
+                            case Io: {
+                                warn(candidate.file + ": " + error.to_str());
+                                return Option<sshkey.PrivateKey>.None;
+                            }
+                            case NotOpenSshKey: {
+                                warn(candidate.file + ": " + error.to_str());
+                                return Option<sshkey.PrivateKey>.None;
+                            }
+                            case Encrypted: {
+                                warn(candidate.file + ": " + error.to_str());
+                                return Option<sshkey.PrivateKey>.None;
+                            }
+                            case Truncated: {
+                                warn(candidate.file + ": " + error.to_str());
+                                return Option<sshkey.PrivateKey>.None;
+                            }
+                            case UnsupportedKeyType: {
+                                warn(candidate.file + ": " + error.to_str());
+                                return Option<sshkey.PrivateKey>.None;
+                            }
+                            case UnsupportedKeyCount: {
+                                warn(candidate.file + ": " + error.to_str());
+                                return Option<sshkey.PrivateKey>.None;
+                            }
+                            case BadCheck: {
+                                warn(candidate.file + ": " + error.to_str());
+                                return Option<sshkey.PrivateKey>.None;
+                            }
+                            case BadKey: {
+                                warn(candidate.file + ": " + error.to_str());
+                                return Option<sshkey.PrivateKey>.None;
+                            }
+                            case BadPadding: {
+                                warn(candidate.file + ": " + error.to_str());
+                                return Option<sshkey.PrivateKey>.None;
+                            }
+                            case UnsupportedCipher: {
+                                warn(candidate.file + ": " + error.to_str());
+                                return Option<sshkey.PrivateKey>.None;
+                            }
+                            case UnsupportedKdf: {
+                                warn(candidate.file + ": " + error.to_str());
+                                return Option<sshkey.PrivateKey>.None;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        attempts = attempts + 1;
+    }
+    warn(candidate.file + ": too many incorrect passphrases; skipping this key");
+    return Option<sshkey.PrivateKey>.None;
 }
 
 bool has_blob(List<Candidate> list, bytes blob) {
@@ -252,6 +416,8 @@ List<Candidate> gather(sshconfig.Settings settings, str home, bool is_quiet) {
         is_default = true;
         if (home != "") {
             files.push(home + "/.ssh/id_ed25519");
+            files.push(home + "/.ssh/id_ecdsa");
+            files.push(home + "/.ssh/id_rsa");
         }
     }
     List<Candidate> from_files = [];
@@ -272,12 +438,30 @@ List<Candidate> gather(sshconfig.Settings settings, str home, bool is_quiet) {
             case Err(_): {
             }
         }
-        match (sshkey.load(file)) {
-            case Ok(sshkey.PrivateKey key): {
-                from_files.push(Candidate(key.public_blob(), "", [key], file));
-            }
-            case Err(sshkey.Error error): {
+        match (io.read(file)) {
+            case Err(io.Error error): {
                 warn("Warning: " + file + ": " + error.to_str());
+            }
+            case Ok(str text): {
+                match (sshkey.inspect(text)) {
+                    case Err(sshkey.Error error): {
+                        warn("Warning: " + file + ": " + error.to_str());
+                    }
+                    case Ok(sshkey.Info info): {
+                        if (info.is_encrypted) {
+                            from_files.push(Candidate(info.blob, "", [], file, file, true));
+                        } else {
+                            match (sshkey.parse(text)) {
+                                case Ok(sshkey.PrivateKey key): {
+                                    from_files.push(Candidate(info.blob, "", [key], file, file, false));
+                                }
+                                case Err(sshkey.Error error): {
+                                    warn("Warning: " + file + ": " + error.to_str());
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -292,7 +476,7 @@ List<Candidate> gather(sshconfig.Settings settings, str home, bool is_quiet) {
                                 for (sshagent.Identity identity in keys) {
                                     bool is_listed = has_blob(from_files, identity.blob);
                                     if (is_agent_allowed || is_listed) {
-                                        out.push(Candidate(identity.blob, socket, [], "agent: " + identity.comment));
+                                        out.push(Candidate(identity.blob, socket, [], "agent: " + identity.comment, "", false));
                                     }
                                 }
                             }
@@ -535,37 +719,53 @@ int run_session(ssh.Transport transport, sshconfig.Settings settings, SSHC_cli.C
     for (Candidate candidate in candidates) {
         sshauth.Signer signer = sshagent.AgentSigner(candidate.agent_path, candidate.blob);
         if (candidate.agent_path == "") {
-            signer = sshauth.KeySigner(candidate.key[0]);
-        }
-        match (sshauth.try_key(transport, user, candidate.blob, signer)) {
-            case Ok(str text): {
-                banner = text;
-                is_authenticated = true;
+            if (candidate.is_encrypted) {
+                match (unlock(candidate)) {
+                    case Some(sshkey.PrivateKey unlocked): {
+                        signer = sshauth.KeySigner(unlocked);
+                    }
+                    case None: {
+                        continue;
+                    }
+                }
+            } else {
+                signer = sshauth.KeySigner(candidate.key[0]);
             }
-            case Err(sshauth.Error error): {
-                match (error) {
-                    case KeyRejected: {
-                    }
-                    case AuthFailed: {
-                    }
-                    case SignerFailed: {
-                        warn("signing with " + candidate.label + " failed");
-                    }
-                    case Transport(ssh.Error inner): {
-                        warn("connection lost during authentication: " + inner.to_str());
-                        return EXIT_ERROR;
-                    }
-                    case Truncated: {
-                        warn("authentication failed: the server sent a malformed message");
-                        return EXIT_ERROR;
-                    }
-                    case UnexpectedMessage: {
-                        warn("authentication failed: the server sent an unexpected message");
-                        return EXIT_ERROR;
-                    }
-                    case BadMessage: {
-                        warn("authentication failed: the server sent a malformed message");
-                        return EXIT_ERROR;
+        }
+        for (str algorithm in algorithms_of(candidate.blob)) {
+            if (is_authenticated) {
+                break;
+            }
+            match (sshauth.try_key(transport, user, algorithm, candidate.blob, signer)) {
+                case Ok(str text): {
+                    banner = text;
+                    is_authenticated = true;
+                }
+                case Err(sshauth.Error error): {
+                    match (error) {
+                        case KeyRejected: {
+                        }
+                        case AuthFailed: {
+                        }
+                        case SignerFailed: {
+                            warn("signing with " + candidate.label + " failed");
+                        }
+                        case Transport(ssh.Error inner): {
+                            warn("connection lost during authentication: " + inner.to_str());
+                            return EXIT_ERROR;
+                        }
+                        case Truncated: {
+                            warn("authentication failed: the server sent a malformed message");
+                            return EXIT_ERROR;
+                        }
+                        case UnexpectedMessage: {
+                            warn("authentication failed: the server sent an unexpected message");
+                            return EXIT_ERROR;
+                        }
+                        case BadMessage: {
+                            warn("authentication failed: the server sent a malformed message");
+                            return EXIT_ERROR;
+                        }
                     }
                 }
             }
