@@ -1,0 +1,331 @@
+// A reader for the useful core of an OpenSSH client configuration file
+// (`ssh_config(5)`), as `m31ssh` needs it. Pure: it takes the file's text and
+// answers what applies to one host name; it opens nothing and expands no
+// file names that it was not given a home directory for.
+//
+// API
+// ---
+//   sshconfig.resolve(text, host, local_user, home) -> Settings
+//   sshconfig.is_pattern_matching(pattern, name)        -> bool   `*` and `?`
+//
+// What is understood: `Host` blocks (space-separated patterns with `*`/`?`,
+// `!`-negation; a block applies when some pattern matches and no negated one
+// does), lines before the first `Host` (they apply to every host, which is
+// also how `-o` options are given: prepend them to the file's text), and
+//
+//   HostName, User, Port, IdentityFile (all of them, in order),
+//   IdentitiesOnly, StrictHostKeyChecking, UserKnownHostsFile,
+//   ServerAliveInterval, ServerAliveCountMax, ConnectTimeout, ProxyJump,
+//   LocalForward, RemoteForward, RequestTTY, ControlPath (parsed, ignored).
+//
+// **The first value obtained for an option wins** (OpenSSH's rule, which is
+// why command-line options go first), except `IdentityFile`, `LocalForward`
+// and `RemoteForward`, which accumulate. `Key value` and `Key=value` are both
+// accepted, keys are case-insensitive, `"quoted values"` keep their spaces,
+// and `#` starts a comment. `%h` (the host as typed, or HostName for
+// UserKnownHostsFile/IdentityFile), `%u` (local user), `%r` (remote user),
+// `%d` (home directory) and `%%` expand in HostName, IdentityFile and
+// UserKnownHostsFile; a leading `~` is the home directory.
+//
+// **What is not understood is said, not guessed**: `Match`, `Include` and any
+// option not listed are collected in `Settings.ignored` (as the line's
+// keyword), and the lines of a `Match` block are not applied -- a security
+// setting inside one is therefore not silently half-applied. A malformed
+// value for a known option (`Port banana`) is `Settings.errors`, never a
+// default.
+
+pub type Settings {
+    /// HostName if given, else the name that was asked about.
+    pub str host_name;
+    pub str user;
+    /// 0 when no Port was given (the caller defaults to 22).
+    pub int port;
+    pub List<str> identity_files;
+    pub bool is_identities_only;
+    /// "" when not given, else the value as written, lower-cased.
+    pub str strict_host_key_checking;
+    /// "" when not given.
+    pub str known_hosts_file;
+    /// -1 when not given.
+    pub int server_alive_interval;
+    pub int server_alive_count_max;
+    pub int connect_timeout;
+    pub str proxy_jump;
+    pub List<str> local_forwards;
+    pub List<str> remote_forwards;
+    pub str request_tty;
+    pub List<str> ignored;
+    pub List<str> errors;
+}
+
+/// Whether `name` matches `pattern`, where `*` is any run (including none)
+/// and `?` is one byte. Everything else matches itself exactly.
+pub bool is_pattern_matching(str pattern, str name) {
+    int pattern_at = 0;
+    int name_at = 0;
+    int star = -1;
+    int resume = 0;
+    while (name_at < name.size()) {
+        if (pattern_at < pattern.size() && pattern.byte_at(pattern_at) == 42) {
+            star = pattern_at;
+            resume = name_at;
+            pattern_at = pattern_at + 1;
+        } else if (pattern_at < pattern.size() && (pattern.byte_at(pattern_at) == 63 || pattern.byte_at(pattern_at) == name.byte_at(name_at))) {
+            pattern_at = pattern_at + 1;
+            name_at = name_at + 1;
+        } else if (star >= 0) {
+            pattern_at = star + 1;
+            resume = resume + 1;
+            name_at = resume;
+        } else {
+            return false;
+        }
+    }
+    while (pattern_at < pattern.size() && pattern.byte_at(pattern_at) == 42) {
+        pattern_at = pattern_at + 1;
+    }
+    return pattern_at == pattern.size();
+}
+
+// Whether a `Host` line's patterns select `host`.
+bool is_host_line_matching(List<str> patterns, str host) {
+    bool is_matched = false;
+    for (str pattern in patterns) {
+        if (pattern.starts_with("!")) {
+            if (is_pattern_matching(pattern.substr(1, pattern.size()), host)) {
+                return false;
+            }
+        } else if (is_pattern_matching(pattern, host)) {
+            is_matched = true;
+        }
+    }
+    return is_matched;
+}
+
+// Splits one line into its keyword and argument words, honouring quotes and
+// `#` comments. Returns an empty list for a blank or comment line.
+List<str> words_of(str line) {
+    List<str> words = [];
+    str current = "";
+    bool is_open = false;
+    bool is_quoted = false;
+    int index = 0;
+    while (index < line.size()) {
+        int byte = line.byte_at(index);
+        if (is_quoted) {
+            if (byte == 34) {
+                is_quoted = false;
+            } else {
+                current = current + line.substr(index, index + 1);
+            }
+        } else if (byte == 34) {
+            is_quoted = true;
+            is_open = true;
+        } else if (byte == 35 && !is_open) {
+            break;
+        } else if (byte == 32 || byte == 9 || byte == 13) {
+            if (is_open) {
+                words.push(current);
+                current = "";
+                is_open = false;
+            }
+        } else if (byte == 61 && words.size() == 0 && is_open) {
+            // `Key=value`: the first `=` ends the keyword.
+            words.push(current);
+            current = "";
+            is_open = false;
+        } else if (byte == 61 && words.size() == 0 && !is_open) {
+            // `Key = value`: a lone `=` after the keyword is a separator.
+        } else {
+            current = current + line.substr(index, index + 1);
+            is_open = true;
+        }
+        index = index + 1;
+    }
+    if (is_open) {
+        words.push(current);
+    }
+    // `Key = value` leaves a bare "=" word in front of the value.
+    if (words.size() >= 2 && words[1] == "=") {
+        words.remove_at(1);
+    }
+    return words;
+}
+
+str expand(str value, str host, str local_user, str remote_user, str home) {
+    str out = "";
+    int index = 0;
+    if (value == "~") {
+        return home;
+    }
+    if (value.starts_with("~/")) {
+        out = home;
+        index = 1;
+    }
+    while (index < value.size()) {
+        int byte = value.byte_at(index);
+        if (byte == 37 && index + 1 < value.size()) {
+            int next = value.byte_at(index + 1);
+            if (next == 104) {
+                out = out + host;
+            } else if (next == 117) {
+                out = out + local_user;
+            } else if (next == 114) {
+                out = out + remote_user;
+            } else if (next == 100) {
+                out = out + home;
+            } else if (next == 37) {
+                out = out + "%";
+            } else {
+                out = out + value.substr(index, index + 2);
+            }
+            index = index + 2;
+        } else {
+            out = out + value.substr(index, index + 1);
+            index = index + 1;
+        }
+    }
+    return out;
+}
+
+bool can_parse_yes_no(str value, List<bool> out) {
+    str lower = value.to_lower();
+    if (lower == "yes" || lower == "true") {
+        out.push(true);
+        return true;
+    }
+    if (lower == "no" || lower == "false") {
+        out.push(false);
+        return true;
+    }
+    return false;
+}
+
+/// What applies to `host` given the configuration `config_text` (command-line
+/// `-o` lines first, then the file).
+pub Settings resolve(str config_text, str host, str local_user, str home) {
+    Settings settings = Settings(host, "", 0, [], false, "", "", -1, -1, -1, "", [], [], "", [], []);
+    bool has_host_name = false;
+    bool has_user = false;
+    bool has_identities_only = false;
+    bool is_applicable = true;
+    // The raw (unexpanded) values; expanded at the end, when HostName and
+    // User are final.
+    str raw_known_hosts = "";
+    List<str> raw_identities = [];
+    int line_number = 0;
+    for (str line in config_text.split("\n")) {
+        line_number = line_number + 1;
+        List<str> words = words_of(line);
+        if (words.size() == 0) {
+            continue;
+        }
+        str key = words[0].to_lower();
+        if (key == "host") {
+            is_applicable = is_host_line_matching(words.slice(1, words.size()), host);
+            continue;
+        }
+        if (key == "match") {
+            is_applicable = false;
+            settings.ignored.push("match");
+            continue;
+        }
+        if (!is_applicable) {
+            continue;
+        }
+        if (words.size() < 2) {
+            settings.errors.push("line " + line_number.to_str() + ": " + words[0] + " needs a value");
+            continue;
+        }
+        str value = words[1];
+        if (key == "hostname") {
+            if (!has_host_name) {
+                has_host_name = true;
+                settings.host_name = value;
+            }
+        } else if (key == "user") {
+            if (!has_user) {
+                has_user = true;
+                settings.user = value;
+            }
+        } else if (key == "port") {
+            Option<int> number = value.parse_int();
+            match (number) {
+                case Some(int port): {
+                    if (port < 1 || port > 65535) {
+                        settings.errors.push("line " + line_number.to_str() + ": Port out of range");
+                    } else if (settings.port == 0) {
+                        settings.port = port;
+                    }
+                }
+                case None: {
+                    settings.errors.push("line " + line_number.to_str() + ": Port is not a number");
+                }
+            }
+        } else if (key == "identityfile") {
+            raw_identities.push(value);
+        } else if (key == "identitiesonly") {
+            List<bool> parsed = [];
+            if (!can_parse_yes_no(value, parsed)) {
+                settings.errors.push("line " + line_number.to_str() + ": IdentitiesOnly must be yes or no");
+            } else if (!has_identities_only) {
+                has_identities_only = true;
+                settings.is_identities_only = parsed[0];
+            }
+        } else if (key == "stricthostkeychecking") {
+            str lower = value.to_lower();
+            if (lower == "yes" || lower == "no" || lower == "ask" || lower == "accept-new" || lower == "off") {
+                if (settings.strict_host_key_checking == "") {
+                    settings.strict_host_key_checking = lower;
+                }
+            } else {
+                settings.errors.push("line " + line_number.to_str() + ": StrictHostKeyChecking must be yes, no, ask or accept-new");
+            }
+        } else if (key == "userknownhostsfile") {
+            if (raw_known_hosts == "") {
+                raw_known_hosts = value;
+            }
+        } else if (key == "serveraliveinterval" || key == "serveralivecountmax" || key == "connecttimeout") {
+            Option<int> number = value.parse_int();
+            match (number) {
+                case Some(int amount): {
+                    if (amount < 0) {
+                        settings.errors.push("line " + line_number.to_str() + ": " + words[0] + " is negative");
+                    } else if (key == "serveraliveinterval" && settings.server_alive_interval < 0) {
+                        settings.server_alive_interval = amount;
+                    } else if (key == "serveralivecountmax" && settings.server_alive_count_max < 0) {
+                        settings.server_alive_count_max = amount;
+                    } else if (key == "connecttimeout" && settings.connect_timeout < 0) {
+                        settings.connect_timeout = amount;
+                    }
+                }
+                case None: {
+                    settings.errors.push("line " + line_number.to_str() + ": " + words[0] + " is not a number");
+                }
+            }
+        } else if (key == "proxyjump") {
+            if (settings.proxy_jump == "") {
+                settings.proxy_jump = value;
+            }
+        } else if (key == "localforward") {
+            settings.local_forwards.push(words.slice(1, words.size()).join(" "));
+        } else if (key == "remoteforward") {
+            settings.remote_forwards.push(words.slice(1, words.size()).join(" "));
+        } else if (key == "requesttty") {
+            if (settings.request_tty == "") {
+                settings.request_tty = value.to_lower();
+            }
+        } else {
+            settings.ignored.push(key);
+        }
+    }
+    str user_text = settings.user;
+    settings.host_name = expand(settings.host_name, host, local_user, user_text, home);
+    for (str raw in raw_identities) {
+        settings.identity_files.push(expand(raw, settings.host_name, local_user, user_text, home));
+    }
+    if (raw_known_hosts != "") {
+        settings.known_hosts_file = expand(raw_known_hosts, settings.host_name, local_user, user_text, home);
+    }
+    return settings;
+}

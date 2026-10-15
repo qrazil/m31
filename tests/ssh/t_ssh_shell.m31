@@ -1,0 +1,114 @@
+// `lib/ssh/sshshell.m31`'s pure parts (the `~.` filter, the terminal-modes
+// string) and the new channel message layouts in `lib/ssh/sshexec.m31`
+// (pty-req, shell, window-change, keepalive), against hand-derived RFC 4254
+// bytes. A `trap` means a check failed.
+import ssh.sshshell;
+import ssh.sshexec;
+
+int check(int passed_count, bool is_ok, str label) {
+    if (!is_ok) {
+        trap("check failed: " + label);
+    }
+    return passed_count + 1;
+}
+
+bytes octets(str text) {
+    return text.to_bytes();
+}
+
+int checks = 0;
+bytes empty = [];
+// --- escape filter ---------------------------------------------------------
+sshshell.EscapeFilter filter = sshshell.EscapeFilter(126);
+checks = check(checks, filter.feed(octets("ls\r")) == octets("ls\r") && !filter.is_disconnect_requested, "ordinary input passes through");
+checks = check(checks, filter.feed(octets("~.")) == empty && filter.is_disconnect_requested, "~. after a CR disconnects, nothing forwarded");
+filter = sshshell.EscapeFilter(126);
+checks = check(checks, filter.feed(octets("~.")) == empty && filter.is_disconnect_requested, "the start of the session counts as a line start");
+filter = sshshell.EscapeFilter(126);
+checks = check(checks, filter.feed(octets("a~.")) == octets("a~.") && !filter.is_disconnect_requested, "~. mid-line is data");
+filter = sshshell.EscapeFilter(126);
+checks = check(checks, filter.feed(octets("x\n~")) == octets("x\n") && !filter.is_disconnect_requested, "a lone ~ position line start is held back");
+checks = check(checks, filter.feed(octets(".")) == empty && filter.is_disconnect_requested, "...and completed by a . in a later read");
+filter = sshshell.EscapeFilter(126);
+checks = check(checks, filter.feed(octets("~~")) == octets("~") && !filter.is_disconnect_requested, "~~ sends one ~");
+checks = check(checks, filter.feed(octets("~.")) == octets("~."), "after ~~ we are mid-line: ~. is data");
+filter = sshshell.EscapeFilter(126);
+checks = check(checks, filter.feed(octets("~x")) == octets("~x") && !filter.is_disconnect_requested, "~ then another letter forwards both");
+checks = check(checks, filter.feed(octets("\r~\r")) == octets("\r~\r"), "~ then CR forwards both and stays position line start");
+checks = check(checks, filter.feed(octets("~?")) == empty && filter.is_help_requested, "~? asks for help and is swallowed");
+filter = sshshell.EscapeFilter(126);
+bytes out = [];
+for (int byte in octets("ab\r~.zzz")) {
+    out.extend(filter.feed([byte]));
+}
+checks = check(checks, out == octets("ab\r") && filter.is_disconnect_requested, "byte-position-a-time input behaves the same");
+filter = sshshell.EscapeFilter(-1);
+checks = check(checks, filter.feed(octets("\r~.")) == octets("\r~.") && !filter.is_disconnect_requested, "escape disabled (-e none)");
+filter = sshshell.EscapeFilter(35);
+checks = check(checks, filter.feed(octets("#.")) == empty && filter.is_disconnect_requested, "another escape character (#)");
+// --- terminal modes ----------------------------------------------------------
+bytes modes = sshshell.default_modes();
+checks = check(checks, modes.size() % 5 == 1 && modes[modes.size() - 1] == 0, "modes: opcode/u32 pairs ending in TTY_OP_END");
+bool has_echo = false;
+bool has_isig = false;
+int position = 0;
+while (position + 5 <= modes.size()) {
+    if (modes[position] == 53 && modes[position + 4] == 1) {
+        has_echo = true;
+    }
+    if (modes[position] == 50 && modes[position + 4] == 1) {
+        has_isig = true;
+    }
+    position = position + 5;
+}
+checks = check(checks, has_echo && has_isig, "modes: ECHO and ISIG are on");
+// --- message layouts (RFC 4254) ---------------------------------------------------
+bytes pty = sshexec.build_pty_request(7, "xterm", 100, 40, [0]);
+bytes want = [98];
+want.extend(u32(7));
+want.extend(u32(7));
+want.extend(octets("pty-req"));
+want.push(1);
+want.extend(u32(5));
+want.extend(octets("xterm"));
+want.extend(u32(100));
+want.extend(u32(40));
+want.extend(u32(0));
+want.extend(u32(0));
+want.extend(u32(1));
+want.push(0);
+checks = check(checks, pty == want, "pty-req layout");
+bytes shell = sshexec.build_shell(3);
+bytes want_shell = [98];
+want_shell.extend(u32(3));
+want_shell.extend(u32(5));
+want_shell.extend(octets("shell"));
+want_shell.push(1);
+checks = check(checks, shell == want_shell, "shell layout");
+bytes window_change = sshexec.build_window_change(9, 132, 50);
+bytes want_wc = [98];
+want_wc.extend(u32(9));
+want_wc.extend(u32(13));
+want_wc.extend(octets("window-change"));
+want_wc.push(0);
+want_wc.extend(u32(132));
+want_wc.extend(u32(50));
+want_wc.extend(u32(0));
+want_wc.extend(u32(0));
+checks = check(checks, window_change == want_wc, "window-change layout");
+bytes keepalive = sshexec.build_keepalive();
+bytes want_ka = [80];
+want_ka.extend(u32(21));
+want_ka.extend(octets("keepalive@openssh.com"));
+want_ka.push(1);
+checks = check(checks, keepalive == want_ka, "keepalive layout");
+print(checks.to_str() + " checks, 0 failures");
+
+bytes u32(int value) {
+    bytes out = [];
+    out.push(value >> 24 & 0xFF);
+    out.push(value >> 16 & 0xFF);
+    out.push(value >> 8 & 0xFF);
+    out.push(value & 0xFF);
+    return out;
+}

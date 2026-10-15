@@ -1,0 +1,432 @@
+// The interactive half of an SSH session: moving bytes between the local
+// terminal (or pipes) and an open `sshexec.Channel` until the remote side
+// ends, with window-size changes, `~.`, keepalives and terminal restoration.
+//
+// API
+// ---
+//   sshshell.run(transport, channel, options)   -> Result<Ending, str>
+//   sshshell.default_modes()                    -> bytes   (pty-req modes)
+//   sshshell.EscapeFilter(escape)               pure `~.` state machine
+//
+// --- how it waits -------------------------------------------------------------
+//
+// One thread, one loop, and `poll(2)` over the socket and the keyboard
+// (`__poll`: a real poll on the OS thread, which is exactly what a program
+// with nothing else to run wants). Each turn: (1) take everything the
+// network already has, at most `DRAIN_PACKETS` packets, writing received data
+// to the terminal after every packet so memory stays bounded by one packet
+// plus the window; (2) send held-back keyboard input if the server's window
+// has opened; (3) poll for the socket, the keyboard (not while input is held
+// back for lack of window: that is the backpressure) and the next tick;
+// (4) read the keyboard; (5) clock-driven work -- window-size changes and
+// keepalives. A server flooding output cannot starve the keyboard (Ctrl-C,
+// `~.` still get through), and a command that is not reading its stdin
+// cannot stall the output.
+//
+// --- what is not here -------------------------------------------------------
+//
+// There is no SIGWINCH handler in the language (docs/sys-layer.md §2): a
+// resize is noticed by polling the terminal's size on each tick, so it
+// reaches the server within ~100 ms, not instantly. A signal that kills the
+// process outright (SIGKILL, SIGHUP) cannot restore the terminal; every
+// other way out -- return, `?`, trap, exit -- does (`term.raw`).
+
+import io;
+import term;
+import timer;
+import ssh;
+import ssh.sshexec;
+
+prim int __read(int file_descriptor, bytes buffer, int off, int byte_count);
+prim int __poll(List<int> fds, List<int> events, List<int> revents, int timeout_ms);
+
+const int POLL_IN = 1;
+const int DRAIN_PACKETS = 32;
+const int TICK_MS = 100;
+const int READ_CHUNK = 8192;
+const int OUTPUT_CHUNK = 32768;
+
+/// How a session ended.
+pub enum Ending {
+    /// The remote command exited with this status.
+    Exited(int);
+    /// The remote command was killed by this signal (name, no `SIG`).
+    Signalled(str);
+    /// The server closed the channel without saying how the command ended.
+    NoStatus;
+    /// The person typed the escape character and `.`.
+    Escaped;
+    /// No answer to `alive_count_max` keepalives in a row.
+    ServerSilent;
+    /// Local standard output went away (a closed pipe).
+    OutputClosed;
+}
+
+/// What `run` needs to know.
+pub type Options {
+    /// Descriptor of the local input (0).
+    pub int input_fd;
+    /// Descriptor of the local output (1); also where the size is read.
+    pub int output_fd;
+    /// Put the local terminal in raw mode (a pty session on a terminal).
+    pub bool is_raw;
+    /// A pty is allocated remotely: poll the size and send changes.
+    pub bool has_pty;
+    /// Send nothing from the keyboard (`-n`): EOF immediately.
+    pub bool is_input_null;
+    /// The escape character's byte value (126, `~`), or -1 for none.
+    pub int escape;
+    /// ServerAliveInterval in seconds, 0 for off; and ServerAliveCountMax.
+    pub int alive_interval;
+    pub int alive_count_max;
+}
+
+// --- the escape filter (pure) --------------------------------------------
+
+/// The `~.` recogniser. Feed it keyboard bytes in order; it returns what to
+/// forward and whether the person asked to disconnect. An escape is only
+/// recognised at the start of a line (the start of the session counts, and
+/// so does the byte after a CR or LF); `~~` sends one `~`; `~?` is swallowed
+/// and sets `is_help_requested`; `~` followed by anything else is forwarded
+/// unchanged, both bytes.
+pub type EscapeFilter {
+    pub int escape;
+    bool is_line_start = true;
+    bool has_pending_escape = false;
+    pub bool is_disconnect_requested = false;
+    pub bool is_help_requested = false;
+}
+
+pub bytes EscapeFilter.feed(bytes data) {
+    bytes out = [];
+    if (escape < 0) {
+        return data;
+    }
+    for (int byte in data) {
+        if (is_disconnect_requested) {
+            break;
+        }
+        if (has_pending_escape) {
+            has_pending_escape = false;
+            if (byte == 46) {
+                is_disconnect_requested = true;
+            } else if (byte == escape) {
+                out.push(escape);
+                is_line_start = false;
+            } else if (byte == 63) {
+                is_help_requested = true;
+                is_line_start = true;
+            } else {
+                out.push(escape);
+                out.push(byte);
+                is_line_start = byte == 13 || byte == 10;
+            }
+        } else if (byte == escape && is_line_start) {
+            has_pending_escape = true;
+        } else {
+            out.push(byte);
+            is_line_start = byte == 13 || byte == 10;
+        }
+    }
+    return out;
+}
+
+// --- terminal modes ---------------------------------------------------------
+
+void mode(bytes out, int opcode, int value) {
+    out.push(opcode);
+    out.push(value >> 24 & 0xFF);
+    out.push(value >> 16 & 0xFF);
+    out.push(value >> 8 & 0xFF);
+    out.push(value & 0xFF);
+}
+
+/// The RFC 4254 §8 terminal-modes string this client sends with `pty-req`: the
+/// usual interactive set (signals, canonical input, echo, CR to NL, NL to
+/// CRNL on output, UTF-8 input) and 38400 baud. The remote tty is a normal
+/// cooked terminal; the *local* one is raw, so Ctrl-C reaches the remote
+/// line discipline as a byte and interrupts the remote command, as with
+/// OpenSSH.
+pub bytes default_modes() {
+    bytes out = [];
+    mode(out, 1, 3);
+    mode(out, 2, 28);
+    mode(out, 3, 127);
+    mode(out, 4, 21);
+    mode(out, 5, 4);
+    mode(out, 10, 26);
+    mode(out, 36, 1);
+    mode(out, 38, 1);
+    mode(out, 42, 1);
+    mode(out, 50, 1);
+    mode(out, 51, 1);
+    mode(out, 53, 1);
+    mode(out, 54, 1);
+    mode(out, 55, 1);
+    mode(out, 59, 1);
+    mode(out, 60, 1);
+    mode(out, 61, 1);
+    mode(out, 70, 1);
+    mode(out, 72, 1);
+    mode(out, 128, 38400);
+    mode(out, 129, 38400);
+    out.push(0);
+    return out;
+}
+
+pub Result<Ending, str> run(ssh.Transport transport, sshexec.Channel channel, Options options) {
+    if (options.is_raw) {
+        match (term.raw(in_fd: options.input_fd, out_fd: options.output_fd)) {
+            case Ok(term.Session raw): {
+                Result<Ending, str> result = run_loop(transport, channel, options);
+                Result<bool, term.Error> restored = raw.restore();
+                return result;
+            }
+            case Err(term.Error error): {
+                return Result<Ending, str>.Err("cannot put the terminal in raw mode: " + error.to_str());
+            }
+        }
+    }
+    return run_loop(transport, channel, options);
+}
+
+// Writes whatever the channel has buffered to local stdout/stderr. `false`
+// means local output is gone.
+bool has_flushed_output(sshexec.Channel channel, int output_fd) {
+    while (channel.has_pending()) {
+        bytes out = channel.take_output(OUTPUT_CHUNK);
+        if (out.size() > 0) {
+            if (!has_written_all(output_fd, out)) {
+                return false;
+            }
+        }
+        bytes error_bytes = channel.take_error(OUTPUT_CHUNK);
+        if (error_bytes.size() > 0) {
+            if (!has_written_all(2, error_bytes)) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool has_written_all(int descriptor, bytes data) {
+    io.File file = io.stdout();
+    if (descriptor == 2) {
+        file = io.stderr();
+    }
+    match (file.write(data)) {
+        case Ok(_): {
+            return true;
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+Ending ending_of(sshexec.Channel channel) {
+    match (channel.exit()) {
+        case Status(int code): {
+            return Ending.Exited(code);
+        }
+        case Signal(str name): {
+            return Ending.Signalled(name);
+        }
+        case Unknown: {
+            return Ending.NoStatus;
+        }
+    }
+}
+
+Result<Ending, str> fail(sshexec.Error error) {
+    return Result<Ending, str>.Err(error.to_str());
+}
+
+str help_text(int escape) {
+    return "\r\nSupported escape sequences:\r\n  ~.  terminate connection\r\n  ~~  send the escape character by typing it twice\r\n  ~?  this message\r\n(Escape sequences are only recognised after a newline.)\r\n";
+}
+
+Result<Ending, str> run_loop(ssh.Transport transport, sshexec.Channel channel, Options options) {
+    EscapeFilter filter = EscapeFilter(options.escape);
+    int columns = 0;
+    int rows = 0;
+    if (options.has_pty) {
+        match (term.size(descriptor: options.output_fd)) {
+            case Ok(term.Size size): {
+                columns = size.columns;
+                rows = size.rows;
+            }
+            case Err(_): {
+            }
+        }
+    }
+    int socket_fd = transport.descriptor();
+    int last_heard_ns = timer.monotonic_ns();
+    int unanswered = 0;
+    bool is_stdin_open = !options.is_input_null;
+    bool is_eof_pending = options.is_input_null;
+    bytes pending = [];
+    int tick_ms = 1000;
+    if (options.has_pty || options.alive_interval > 0) {
+        tick_ms = TICK_MS;
+    }
+    while (!channel.is_closed()) {
+        // 1. The network: everything already here, a bounded number of
+        //    packets at a time so the keyboard is never starved.
+        int packets = 0;
+        bool is_more = false;
+        while (packets < DRAIN_PACKETS && !channel.is_closed()) {
+            match (transport.wait(0)) {
+                case Ok(bool is_ready): {
+                    if (!is_ready) {
+                        break;
+                    }
+                }
+                case Err(ssh.Error error): {
+                    return Result<Ending, str>.Err(error.to_str());
+                }
+            }
+            match (channel.pump_one()) {
+                case Ok: {
+                }
+                case Err(sshexec.Error error): {
+                    return fail(error);
+                }
+            }
+            packets = packets + 1;
+            last_heard_ns = timer.monotonic_ns();
+            unanswered = 0;
+            if (!has_flushed_output(channel, options.output_fd)) {
+                return Result<Ending, str>.Ok(Ending.OutputClosed);
+            }
+        }
+        if (packets == DRAIN_PACKETS) {
+            is_more = true;
+        }
+        if (channel.is_closed()) {
+            break;
+        }
+        // 2. Keyboard input that was held back for lack of window goes out
+        //    now if the window has opened, and the EOF follows it.
+        if (pending.size() > 0) {
+            match (channel.write_available(pending)) {
+                case Ok(int sent): {
+                    pending.drop_front(sent);
+                }
+                case Err(sshexec.Error error): {
+                    if (!channel.is_closed()) {
+                        return fail(error);
+                    }
+                }
+            }
+        }
+        if (pending.size() == 0 && is_eof_pending && !channel.is_closed()) {
+            is_eof_pending = false;
+            match (channel.close_write()) {
+                case Ok: {
+                }
+                case Err(sshexec.Error error): {
+                    if (!channel.is_closed()) {
+                        return fail(error);
+                    }
+                }
+            }
+        }
+        // 3. Wait for the socket or the keyboard (or the next tick).
+        List<int> fds = [socket_fd];
+        List<int> events = [POLL_IN];
+        bool is_watching_input = is_stdin_open && pending.size() == 0 && !is_eof_pending;
+        if (is_watching_input) {
+            fds.push(options.input_fd);
+            events.push(POLL_IN);
+        }
+        List<int> revents = [];
+        int wait_ms = tick_ms;
+        if (is_more) {
+            wait_ms = 0;
+        }
+        int ready = __poll(fds, events, revents, wait_ms);
+        if (ready < 0 && ready != -4) {
+            return Result<Ending, str>.Err("waiting for input failed");
+        }
+        // 4. The keyboard.
+        if (ready > 0 && is_watching_input && revents.size() == 2 && revents[1] != 0) {
+            bytes buffer = [0; READ_CHUNK];
+            int got = __read(options.input_fd, buffer, 0, READ_CHUNK);
+            if (got < 0 && got != -4 && got != -11) {
+                got = 0;
+            }
+            if (got == 0) {
+                is_stdin_open = false;
+                is_eof_pending = true;
+            } else if (got > 0) {
+                bytes data = buffer.substr(0, got);
+                if (options.has_pty && options.escape >= 0) {
+                    data = filter.feed(data);
+                    if (filter.is_help_requested) {
+                        filter.is_help_requested = false;
+                        if (!has_written_all(options.output_fd, help_text(options.escape).to_bytes())) {
+                            return Result<Ending, str>.Ok(Ending.OutputClosed);
+                        }
+                    }
+                    if (filter.is_disconnect_requested) {
+                        return Result<Ending, str>.Ok(Ending.Escaped);
+                    }
+                }
+                pending.extend(data);
+                match (channel.write_available(pending)) {
+                    case Ok(int sent): {
+                        pending.drop_front(sent);
+                    }
+                    case Err(sshexec.Error error): {
+                        if (!channel.is_closed()) {
+                            return fail(error);
+                        }
+                    }
+                }
+            }
+        }
+        // 5. Clock-driven work: the window size and keepalives.
+        if (options.has_pty) {
+            match (term.size(descriptor: options.output_fd)) {
+                case Ok(term.Size size): {
+                    if (size.rows > 0 && size.columns > 0 && (size.columns != columns || size.rows != rows)) {
+                        columns = size.columns;
+                        rows = size.rows;
+                        match (channel.window_change(columns, rows)) {
+                            case Ok: {
+                            }
+                            case Err(sshexec.Error error): {
+                                return fail(error);
+                            }
+                        }
+                    }
+                }
+                case Err(_): {
+                }
+            }
+        }
+        if (options.alive_interval > 0) {
+            int idle_ms = (timer.monotonic_ns() - last_heard_ns) / 1000000;
+            if (idle_ms >= options.alive_interval * 1000) {
+                if (unanswered >= options.alive_count_max) {
+                    return Result<Ending, str>.Ok(Ending.ServerSilent);
+                }
+                match (channel.send_keepalive()) {
+                    case Ok: {
+                    }
+                    case Err(sshexec.Error error): {
+                        return fail(error);
+                    }
+                }
+                unanswered = unanswered + 1;
+                last_heard_ns = timer.monotonic_ns();
+            }
+        }
+    }
+    if (!has_flushed_output(channel, options.output_fd)) {
+        return Result<Ending, str>.Ok(Ending.OutputClosed);
+    }
+    return Result<Ending, str>.Ok(ending_of(channel));
+}

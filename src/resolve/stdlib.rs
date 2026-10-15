@@ -80,6 +80,9 @@ const MODULES: &[(&str, &str)] = &[
     ("ssh.sshauth", include_str!("../../lib/ssh/sshauth.m31")),
     ("ssh.sshexec", include_str!("../../lib/ssh/sshexec.m31")),
     ("ssh.sshclient", include_str!("../../lib/ssh/sshclient.m31")),
+    ("ssh.sshshell", include_str!("../../lib/ssh/sshshell.m31")),
+    ("ssh.sshagent", include_str!("../../lib/ssh/sshagent.m31")),
+    ("ssh.sshconfig", include_str!("../../lib/ssh/sshconfig.m31")),
     (
         "crypto.consttime",
         include_str!("../../lib/crypto/consttime.m31"),

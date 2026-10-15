@@ -318,6 +318,9 @@ str why(sshclient.Error e) {
                 case AuthFailed: {
                     return "auth-failed";
                 }
+                case SignerFailed: {
+                    return "auth-signer";
+                }
                 case Transport(ssh.Error t): {
                     return "auth-transport";
                 }

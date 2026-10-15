@@ -56,6 +56,9 @@ str outcome_of_exec(sshclient.Session session, str command) {
                         case ExecRefused: {
                             return "read-failed: " + error.to_str();
                         }
+                        case PtyRefused: {
+                            return "read-failed: " + error.to_str();
+                        }
                         case DataTooLarge: {
                             return "read-failed: " + error.to_str();
                         }

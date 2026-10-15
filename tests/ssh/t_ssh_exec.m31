@@ -48,6 +48,9 @@ int error_code(sshexec.Error error) {
         case DataTooLarge: {
             return 7;
         }
+        case PtyRefused: {
+            return 10;
+        }
         case Closed: {
             return 8;
         }

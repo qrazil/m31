@@ -964,8 +964,49 @@ pub Result<void, Error> Transport.set_read_timeout(int timeout_ms) {
     }
 }
 
-/// Closes the underlying connection. No courteous `SSH_MSG_DISCONNECT`
-/// first in v0 -- see this module's header.
+/// Whether a `recv` would find bytes without waiting: true when part of a
+/// packet is already buffered or the socket is readable (which includes the
+/// peer having closed); false when `timeout_ms` ran out first. A negative
+/// timeout waits for ever. A true answer can still be followed by a `recv`
+/// that waits for the rest of a packet, bounded by the read timeout.
+pub Result<bool, Error> Transport.wait(int timeout_ms) {
+    match (connection.wait(timeout_ms)) {
+        case Ok(bool is_ready): {
+            return Result<bool, Error>.Ok(is_ready);
+        }
+        case Err(_): {
+            return Result<bool, Error>.Err(Error.Io);
+        }
+    }
+}
+
+/// The socket's descriptor, so that another green thread can park on it
+/// (see `net.Conn.fileno`). Borrowed, never closed through this number.
+pub int Transport.descriptor() {
+    return connection.fileno();
+}
+
+/// Sends `SSH_MSG_DISCONNECT` (RFC 4253 §11.1, "by application") and closes.
+/// Best effort: a send that fails still closes.
+pub Result<bool, Error> Transport.disconnect() {
+    bytes out = [];
+    out.push(SSH_MESSAGE_DISCONNECT);
+    push_u32(out, 11);
+    push_string(out, "disconnected by user".to_bytes());
+    push_string(out, "".to_bytes());
+    Result<void, Error> ignored = send_ciphered_payload(connection, out, c2s_k1, c2s_k2, send_seq, rng);
+    match (connection.close()) {
+        case Ok(bool is_closed): {
+            return Result<bool, Error>.Ok(is_closed);
+        }
+        case Err(_): {
+            return Result<bool, Error>.Err(Error.Io);
+        }
+    }
+}
+
+/// Closes the underlying connection without a `SSH_MSG_DISCONNECT`
+/// (`disconnect` sends one).
 pub Result<bool, Error> Transport.close() {
     match (connection.close()) {
         case Ok(bool is_closed): {
@@ -1128,6 +1169,38 @@ pub Result<Transport, Error> connect_any(str host, int port, List<bytes> host_ke
             return Result<Transport, Error>.Err(Error.Io);
         }
     }
+}
+
+/// What decides, mid-handshake, whether the server's host key is trusted:
+/// `accept` is called once, after the key's signature over the exchange hash
+/// has verified (so `key` really belongs to whoever answered) and before any
+/// key is derived or any credential offered. `false` ends the handshake with
+/// `Error.HostKeyMismatch`. It may ask a person; it must not record anything
+/// it was not told to.
+pub interface HostKeyCheck {
+    bool is_acceptable(HostKey key);
+}
+
+/// The handshake over a connection the caller already made (so it can tell a
+/// refused connection from an unreachable one), with the host-key decision
+/// handed to `check` instead of a fixed list. One connection, one key
+/// exchange: nothing is asked of the server twice.
+pub Result<Transport, Error> connect_over(net.Conn connection, HostKeyCheck check, int timeout_ms = 0) {
+    if (timeout_ms > 0) {
+        match (connection.set_read_timeout(timeout_ms)) {
+            case Ok(bool is_set): {
+            }
+            case Err(_): {
+                return Result<Transport, Error>.Err(Error.Io);
+            }
+        }
+    }
+    random.System rng = random.system();
+    Exchange exchange = exchange_keys(connection, rng)?;
+    if (!check.is_acceptable(exchange.host_key)) {
+        return Result<Transport, Error>.Err(Error.HostKeyMismatch);
+    }
+    return finish_handshake(connection, exchange, rng);
 }
 
 /// The host key the server at `host`:`port` presents, for a caller that

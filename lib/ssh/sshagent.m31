@@ -1,0 +1,351 @@
+// An ssh-agent client (draft-miller-ssh-agent): list the Ed25519 identities
+// an agent holds and have it sign, so a private key never has to be read by
+// this process.
+//
+// API
+// ---
+//   sshagent.connect(path)            -> Result<Agent, Error>
+//   sshagent.from_environment()       -> Result<Agent, Error>   $SSH_AUTH_SOCK
+//   agent.identities()                -> Result<List<Identity>, Error>
+//   sshagent.AgentSigner(path, blob)  an sshauth.Signer over a fresh connection
+//   agent.sign(blob, data)            -> Result<bytes, Error>   signature blob
+//   sshagent.build_identities_request() / parse_identities(payload)
+//   sshagent.build_sign_request(blob, data) / parse_sign_response(payload)
+//
+// Only `ssh-ed25519` identities are kept (that is the one key type this
+// client authenticates with); others the agent holds are skipped. A
+// signature the agent returns is **verified against the public key before it
+// is used**, so a confused agent cannot make this client send garbage and a
+// wrong one is reported as `BadSignature`, not as a server refusal.
+//
+// The agent is trusted with signing and nothing else: no message is sent
+// that is not REQUEST_IDENTITIES or SIGN_REQUEST (flags 0), no key is ever
+// added, removed or locked here, and a reply longer than 262144 bytes is
+// refused rather than buffered. Every read of the agent is bounded by a
+// 10-second wait: a hung agent is `Error.TimedOut`, not a hung client.
+//
+// The socket is a plain blocking AF_UNIX stream used through the runtime's
+// own primitives (`lib/net.m31` is TCP only); one request is in flight at a
+// time.
+
+import os;
+import crypto.ed25519;
+import ssh;
+import ssh.sshauth;
+
+prim int __socket(int domain, int kind, int protocol);
+prim int __connect_path(int file_descriptor, str path);
+prim int __read(int file_descriptor, bytes buffer, int off, int byte_count);
+prim int __write(int file_descriptor, bytes buffer, int off, int byte_count);
+prim int __close(int file_descriptor);
+prim int __wait_io_timeout(int file_descriptor, int events, int timeout_ms);
+prim int __ignore_sigpipe();
+
+const int AF_UNIX = 1;
+const int SOCK_STREAM = 1;
+const int IO_READABLE = 1;
+const int MAX_REPLY = 262144;
+const int WAIT_MS = 10000;
+const int AGENT_FAILURE = 5;
+const int AGENT_REQUEST_IDENTITIES = 11;
+const int AGENT_IDENTITIES_ANSWER = 12;
+const int AGENT_SIGN_REQUEST = 13;
+const int AGENT_SIGN_RESPONSE = 14;
+const str KEY_TYPE = "ssh-ed25519";
+
+pub enum Error {
+    /// `SSH_AUTH_SOCK` is not set.
+    NoAgent;
+    /// The socket could not be reached.
+    Connect;
+    /// The connection to the agent failed or closed part way.
+    Io;
+    /// The agent did not answer within ten seconds.
+    TimedOut;
+    /// The agent answered with something that is not valid for the request.
+    BadReply;
+    /// The agent refused (SSH_AGENT_FAILURE), e.g. a key it does not hold.
+    Refused;
+    /// The signature the agent returned does not verify under the key.
+    BadSignature;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case NoAgent: {
+            return "SSH_AUTH_SOCK is not set";
+        }
+        case Connect: {
+            return "could not connect to the ssh-agent socket";
+        }
+        case Io: {
+            return "the ssh-agent connection failed";
+        }
+        case TimedOut: {
+            return "the ssh-agent did not answer";
+        }
+        case BadReply: {
+            return "the ssh-agent sent a malformed reply";
+        }
+        case Refused: {
+            return "the ssh-agent refused the request";
+        }
+        case BadSignature: {
+            return "the ssh-agent returned a signature that does not verify";
+        }
+    }
+}
+
+/// One identity an agent holds.
+pub type Identity {
+    /// The public key blob (`string "ssh-ed25519", string key`).
+    pub bytes blob;
+    /// The agent's comment for it.
+    pub str comment;
+}
+
+void push_u32(bytes out, int value) {
+    out.push(value >> 24 & 0xFF);
+    out.push(value >> 16 & 0xFF);
+    out.push(value >> 8 & 0xFF);
+    out.push(value & 0xFF);
+}
+
+// --- pure message builders and parsers ---------------------------------------
+
+pub bytes build_identities_request() {
+    return [AGENT_REQUEST_IDENTITIES];
+}
+
+pub bytes build_sign_request(bytes blob, bytes data) {
+    bytes out = [];
+    out.push(AGENT_SIGN_REQUEST);
+    ssh.push_string(out, blob);
+    ssh.push_string(out, data);
+    push_u32(out, 0);
+    return out;
+}
+
+Result<ssh.Field, Error> field_at(bytes buffer, int offset) {
+    match (ssh.parse_string(buffer, offset)) {
+        case Ok(ssh.Field field): {
+            return Result<ssh.Field, Error>.Ok(field);
+        }
+        case Err(_): {
+            return Result<ssh.Field, Error>.Err(Error.BadReply);
+        }
+    }
+}
+
+// The key type named by a public key blob, or "" if the blob is not a
+// well-formed `string type, ...`.
+str blob_type(bytes blob) {
+    match (ssh.parse_string(blob, 0)) {
+        case Ok(ssh.Field field): {
+            match (field.value.utf8()) {
+                case Some(str name): {
+                    return name;
+                }
+                case None: {
+                    return "";
+                }
+            }
+        }
+        case Err(_): {
+            return "";
+        }
+    }
+}
+
+/// An `IDENTITIES_ANSWER`, keeping only Ed25519 identities.
+pub Result<List<Identity>, Error> parse_identities(bytes payload) {
+    if (payload.size() < 5 || payload[0] != AGENT_IDENTITIES_ANSWER) {
+        return Result<List<Identity>, Error>.Err(Error.BadReply);
+    }
+    int count = (payload[1] << 24) | (payload[2] << 16) | (payload[3] << 8) | payload[4];
+    // Each entry is at least two length prefixes.
+    if (count > (payload.size() - 5) / 8) {
+        return Result<List<Identity>, Error>.Err(Error.BadReply);
+    }
+    List<Identity> out = [];
+    int offset = 5;
+    int index = 0;
+    while (index < count) {
+        ssh.Field blob = field_at(payload, offset)?;
+        ssh.Field comment = field_at(payload, blob.next)?;
+        offset = comment.next;
+        if (blob_type(blob.value) == KEY_TYPE) {
+            str text = "";
+            match (comment.value.utf8()) {
+                case Some(str value): {
+                    text = value;
+                }
+                case None: {
+                }
+            }
+            out.push(Identity(blob.value, text));
+        }
+        index = index + 1;
+    }
+    return Result<List<Identity>, Error>.Ok(out);
+}
+
+/// A `SIGN_RESPONSE`'s signature blob (`string "ssh-ed25519", string sig`),
+/// checked for shape; the 64 raw octets are returned.
+pub Result<bytes, Error> parse_sign_response(bytes payload) {
+    if (payload.size() >= 1 && payload[0] == AGENT_FAILURE) {
+        return Result<bytes, Error>.Err(Error.Refused);
+    }
+    if (payload.size() < 1 || payload[0] != AGENT_SIGN_RESPONSE) {
+        return Result<bytes, Error>.Err(Error.BadReply);
+    }
+    ssh.Field outer = field_at(payload, 1)?;
+    ssh.Field kind = field_at(outer.value, 0)?;
+    ssh.Field raw = field_at(outer.value, kind.next)?;
+    if (kind.value != KEY_TYPE.to_bytes() || raw.value.size() != 64 || raw.next != outer.value.size()) {
+        return Result<bytes, Error>.Err(Error.BadReply);
+    }
+    return Result<bytes, Error>.Ok(raw.value);
+}
+
+// --- the connection ----------------------------------------------------------
+
+pub type Agent {
+    int descriptor;
+    bool is_live = true;
+}
+
+void Agent.drop() {
+    if (is_live) {
+        is_live = false;
+        int ignored = __close(descriptor);
+    }
+}
+
+Result<void, Error> Agent.write_all(bytes data) {
+    int sent = 0;
+    while (sent < data.size()) {
+        int written = __write(descriptor, data, sent, data.size() - sent);
+        if (written == -4) {
+            continue;
+        }
+        if (written <= 0) {
+            return Result<void, Error>.Err(Error.Io);
+        }
+        sent = sent + written;
+    }
+    return Result<void, Error>.Ok;
+}
+
+Result<bytes, Error> Agent.read_exact(int count) {
+    bytes out = [];
+    while (out.size() < count) {
+        int ready = __wait_io_timeout(descriptor, IO_READABLE, WAIT_MS);
+        if (ready < 0) {
+            return Result<bytes, Error>.Err(Error.Io);
+        }
+        if (ready == 1) {
+            return Result<bytes, Error>.Err(Error.TimedOut);
+        }
+        bytes chunk = [0; count - out.size()];
+        int got = __read(descriptor, chunk, 0, chunk.size());
+        if (got == -4) {
+            continue;
+        }
+        if (got <= 0) {
+            return Result<bytes, Error>.Err(Error.Io);
+        }
+        out.extend(chunk.substr(0, got));
+    }
+    return Result<bytes, Error>.Ok(out);
+}
+
+Result<bytes, Error> Agent.call(bytes request) {
+    bytes framed = [];
+    push_u32(framed, request.size());
+    framed.extend(request);
+    write_all(framed)?;
+    bytes header = read_exact(4)?;
+    int length = (header[0] << 24) | (header[1] << 16) | (header[2] << 8) | header[3];
+    if (length < 1 || length > MAX_REPLY) {
+        return Result<bytes, Error>.Err(Error.BadReply);
+    }
+    return read_exact(length);
+}
+
+/// The Ed25519 identities the agent holds.
+pub Result<List<Identity>, Error> Agent.identities() {
+    bytes reply = call(build_identities_request())?;
+    return parse_identities(reply);
+}
+
+/// Has the agent sign `data` with the key whose blob is `blob`; the answer
+/// is the signature blob ready for USERAUTH_REQUEST, verified under the key.
+pub Result<bytes, Error> Agent.sign(bytes blob, bytes data) {
+    bytes reply = call(build_sign_request(blob, data))?;
+    bytes raw = parse_sign_response(reply)?;
+    ssh.Field kind = field_at(blob, 0)?;
+    ssh.Field key = field_at(blob, kind.next)?;
+    if (key.value.size() != 32 || !ed25519.is_valid_signature(key.value, data, raw)) {
+        return Result<bytes, Error>.Err(Error.BadSignature);
+    }
+    bytes out = [];
+    ssh.push_string(out, KEY_TYPE.to_bytes());
+    ssh.push_string(out, raw);
+    return Result<bytes, Error>.Ok(out);
+}
+
+/// Connects to the agent listening at `path`.
+pub Result<Agent, Error> connect(str path) {
+    int ignored = __ignore_sigpipe();
+    int descriptor = __socket(AF_UNIX, SOCK_STREAM, 0);
+    if (descriptor < 0) {
+        return Result<Agent, Error>.Err(Error.Connect);
+    }
+    if (__connect_path(descriptor, path) < 0) {
+        int closed = __close(descriptor);
+        return Result<Agent, Error>.Err(Error.Connect);
+    }
+    return Result<Agent, Error>.Ok(Agent(descriptor));
+}
+
+/// The agent named by `$SSH_AUTH_SOCK`.
+pub Result<Agent, Error> from_environment() {
+    match (os.env("SSH_AUTH_SOCK")) {
+        case Some(str path): {
+            if (path == "") {
+                return Result<Agent, Error>.Err(Error.NoAgent);
+            }
+            return connect(path);
+        }
+        case None: {
+            return Result<Agent, Error>.Err(Error.NoAgent);
+        }
+    }
+}
+
+/// An `sshauth.Signer` for one identity: each signature opens a fresh
+/// connection to the agent at `path` (an `Agent` owns a descriptor and a
+/// signer is a plain value), asks, and hangs up.
+pub type AgentSigner {
+    pub str path;
+    pub bytes blob;
+}
+
+pub Result<bytes, str> AgentSigner.sign_blob(bytes message) {
+    match (connect(path)) {
+        case Ok(Agent agent): {
+            match (agent.sign(blob, message)) {
+                case Ok(bytes signature): {
+                    return Result<bytes, str>.Ok(signature);
+                }
+                case Err(Error error): {
+                    return Result<bytes, str>.Err(error.to_str());
+                }
+            }
+        }
+        case Err(Error error): {
+            return Result<bytes, str>.Err(error.to_str());
+        }
+    }
+}

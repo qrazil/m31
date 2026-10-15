@@ -77,6 +77,8 @@ pub enum Error {
     /// The server refused the `exec` request (command not allowed, forced
     /// command, no shell).
     ExecRefused;
+    /// The server refused to allocate a pseudo-terminal.
+    PtyRefused;
     /// The server sent one packet bigger than the maximum we advertised.
     DataTooLarge;
     /// The channel cannot take this operation: stdin was already closed, or
@@ -108,6 +110,9 @@ pub str Error.to_str() {
         }
         case ExecRefused: {
             return "the server refused the exec request";
+        }
+        case PtyRefused: {
+            return "the server refused to allocate a terminal";
         }
         case DataTooLarge: {
             return "the server sent a packet larger than the advertised maximum";
@@ -148,6 +153,7 @@ pub str Exit.to_str() {
 }
 
 pub const int SSH_MESSAGE_GLOBAL_REQUEST = 80;
+pub const int SSH_MESSAGE_REQUEST_SUCCESS = 81;
 pub const int SSH_MESSAGE_REQUEST_FAILURE = 82;
 pub const int SSH_MESSAGE_CHANNEL_OPEN = 90;
 pub const int SSH_MESSAGE_CHANNEL_OPEN_CONFIRMATION = 91;
@@ -203,6 +209,58 @@ pub bytes build_exec(int remote_id, str command) {
     ssh.push_string(out, "exec".to_bytes());
     out.push(1);
     ssh.push_string(out, command.to_bytes());
+    return out;
+}
+
+/// `CHANNEL_REQUEST "pty-req"` with `want_reply` set (RFC 4254 §6.2).
+/// `modes` is the already-encoded terminal-modes string (RFC 4254 §8:
+/// opcode/uint32 pairs ending in TTY_OP_END); pixel sizes are sent as 0.
+pub bytes build_pty_request(int remote_id, str term, int columns, int rows, bytes modes) {
+    bytes out = [];
+    out.push(SSH_MESSAGE_CHANNEL_REQUEST);
+    push_u32(out, remote_id);
+    ssh.push_string(out, "pty-req".to_bytes());
+    out.push(1);
+    ssh.push_string(out, term.to_bytes());
+    push_u32(out, columns);
+    push_u32(out, rows);
+    push_u32(out, 0);
+    push_u32(out, 0);
+    ssh.push_string(out, modes);
+    return out;
+}
+
+/// `CHANNEL_REQUEST "shell"` with `want_reply` set (RFC 4254 §6.5).
+pub bytes build_shell(int remote_id) {
+    bytes out = [];
+    out.push(SSH_MESSAGE_CHANNEL_REQUEST);
+    push_u32(out, remote_id);
+    ssh.push_string(out, "shell".to_bytes());
+    out.push(1);
+    return out;
+}
+
+/// `CHANNEL_REQUEST "window-change"` (RFC 4254 §6.7); no reply is wanted.
+pub bytes build_window_change(int remote_id, int columns, int rows) {
+    bytes out = [];
+    out.push(SSH_MESSAGE_CHANNEL_REQUEST);
+    push_u32(out, remote_id);
+    ssh.push_string(out, "window-change".to_bytes());
+    out.push(0);
+    push_u32(out, columns);
+    push_u32(out, rows);
+    push_u32(out, 0);
+    push_u32(out, 0);
+    return out;
+}
+
+/// `GLOBAL_REQUEST "keepalive@openssh.com"` with `want_reply` set: any
+/// answer, success or failure, proves the peer is alive.
+pub bytes build_keepalive() {
+    bytes out = [];
+    out.push(SSH_MESSAGE_GLOBAL_REQUEST);
+    ssh.push_string(out, "keepalive@openssh.com".to_bytes());
+    out.push(1);
     return out;
 }
 
@@ -386,6 +444,11 @@ pub type Channel {
     bool has_sent_eof;
     bool has_sent_close;
     Exit status;
+    /// Answers to our keepalive global requests that arrived and were not
+    /// yet collected with `take_keepalive_replies`.
+    int keepalive_replies = 0;
+    /// Whether the server granted a pty (`open_session` with `want_pty`).
+    bool has_pty = false;
 }
 
 // Handles one message that arrived on the channel, updating buffers, windows
@@ -449,6 +512,10 @@ Result<void, Error> Channel.dispatch(bytes payload) {
         }
     } else if (kind == SSH_MESSAGE_GLOBAL_REQUEST) {
         answer_global(link, payload)?;
+    } else if (kind == SSH_MESSAGE_REQUEST_SUCCESS || kind == SSH_MESSAGE_REQUEST_FAILURE) {
+        // The answer to a keepalive (this client sends no other global
+        // request). An unsolicited one is harmless and counted the same.
+        keepalive_replies = keepalive_replies + 1;
     } else {
         return Result<void, Error>.Err(Error.UnexpectedMessage);
     }
@@ -508,6 +575,34 @@ pub Result<int, Error> Channel.write(bytes data) {
             remote_window = remote_window - chunk;
             sent = sent + chunk;
         }
+    }
+    return Result<int, Error>.Ok(sent);
+}
+
+/// Sends as much of `data` as the server's window allows *right now*, never
+/// waiting, and returns how many bytes went (0 when the window is empty).
+/// What an event loop uses so a command that is not reading its stdin cannot
+/// stall the loop: keep the rest and try again after the next
+/// `WINDOW_ADJUST`.
+pub Result<int, Error> Channel.write_available(bytes data) {
+    if (has_sent_eof || has_sent_close || has_received_close) {
+        return Result<int, Error>.Err(Error.Closed);
+    }
+    int sent = 0;
+    while (sent < data.size() && remote_window > 0) {
+        int chunk = data.size() - sent;
+        if (chunk > remote_window) {
+            chunk = remote_window;
+        }
+        if (chunk > remote_max_packet) {
+            chunk = remote_max_packet;
+        }
+        if (chunk > SEND_CHUNK) {
+            chunk = SEND_CHUNK;
+        }
+        send_on(link, build_data(remote_id, data.substr(sent, sent + chunk)))?;
+        remote_window = remote_window - chunk;
+        sent = sent + chunk;
     }
     return Result<int, Error>.Ok(sent);
 }
@@ -604,6 +699,61 @@ pub Result<void, Error> Channel.close() {
     return Result<void, Error>.Ok;
 }
 
+/// Reads and handles exactly one message from the server (waiting for it).
+/// What an event loop calls when the transport has bytes: afterwards
+/// `take_output`/`take_error`/`is_eof`/`is_closed` say what changed.
+pub Result<void, Error> Channel.pump_one() {
+    return pump();
+}
+
+/// Up to `max` buffered stdout bytes, at once: empty when none are waiting
+/// (which is not the end -- `is_eof` says that).
+pub bytes Channel.take_output(int max) {
+    return take_front(output_buffer, max);
+}
+
+/// As `take_output`, for stderr (a pty session has none; the server merges).
+pub bytes Channel.take_error(int max) {
+    return take_front(error_buffer, max);
+}
+
+/// Whether any received data is waiting to be taken.
+pub bool Channel.has_pending() {
+    return output_buffer.size() > 0 || error_buffer.size() > 0;
+}
+
+/// Whether the server has sent EOF (or closed): no more data will arrive.
+pub bool Channel.is_eof() {
+    return has_received_eof;
+}
+
+/// Whether the server has closed the channel (our `CLOSE` is already sent).
+pub bool Channel.is_closed() {
+    return has_received_close;
+}
+
+/// Tells the server the terminal is now `columns` by `rows` cells.
+pub Result<void, Error> Channel.window_change(int columns, int rows) {
+    if (has_sent_close || has_received_close) {
+        return Result<void, Error>.Err(Error.Closed);
+    }
+    send_on(link, build_window_change(remote_id, columns, rows))?;
+    return Result<void, Error>.Ok;
+}
+
+/// Sends a keepalive global request (see `build_keepalive`).
+pub Result<void, Error> Channel.send_keepalive() {
+    send_on(link, build_keepalive())?;
+    return Result<void, Error>.Ok;
+}
+
+/// How many keepalive answers arrived since the last call; resets to 0.
+pub int Channel.take_keepalive_replies() {
+    int count = keepalive_replies;
+    keepalive_replies = 0;
+    return count;
+}
+
 Result<void, Error> send_on(ssh.Link link, bytes payload) {
     match (link.send(payload)) {
         case Ok(_): {
@@ -631,6 +781,43 @@ Result<bytes, Error> recv_on(ssh.Link link) {
 /// `ssh host command`; quote accordingly). `Ok` once the server has accepted
 /// the `exec`.
 pub Result<Channel, Error> exec(ssh.Link link, str command) {
+    Channel channel = open_channel(link)?;
+    send_on(link, build_exec(channel.remote_id, command))?;
+    await_reply(channel, Error.ExecRefused)?;
+    return Result<Channel, Error>.Ok(channel);
+}
+
+/// Opens a session channel with a pseudo-terminal (`pty-req` carrying `term`,
+/// the size and `modes`) and starts `command` on it, or the user's login
+/// shell when `command` is empty. Everything the remote program writes
+/// arrives on stdout (a tty merges the streams). `Err(PtyRefused)` when the
+/// server will not allocate a terminal.
+pub Result<Channel, Error> open_pty(ssh.Link link, str term, int columns, int rows, bytes modes, str command) {
+    Channel channel = open_channel(link)?;
+    send_on(link, build_pty_request(channel.remote_id, term, columns, rows, modes))?;
+    await_reply(channel, Error.PtyRefused)?;
+    channel.has_pty = true;
+    if (command == "") {
+        send_on(link, build_shell(channel.remote_id))?;
+    } else {
+        send_on(link, build_exec(channel.remote_id, command))?;
+    }
+    await_reply(channel, Error.ExecRefused)?;
+    return Result<Channel, Error>.Ok(channel);
+}
+
+/// Opens a session channel and starts the user's login shell on it with no
+/// pseudo-terminal (`ssh host` with stdin not a terminal): the shell reads
+/// commands from the channel's stdin.
+pub Result<Channel, Error> shell(ssh.Link link) {
+    Channel channel = open_channel(link)?;
+    send_on(link, build_shell(channel.remote_id))?;
+    await_reply(channel, Error.ExecRefused)?;
+    return Result<Channel, Error>.Ok(channel);
+}
+
+// CHANNEL_OPEN and its confirmation.
+Result<Channel, Error> open_channel(ssh.Link link) {
     send_on(link, build_open(LOCAL_ID, LOCAL_WINDOW, LOCAL_MAX_PACKET))?;
     Confirmation conf = Confirmation(0, 0, 1);
     bool is_opened = false;
@@ -652,26 +839,28 @@ pub Result<Channel, Error> exec(ssh.Link link, str command) {
             return Result<Channel, Error>.Err(Error.UnexpectedMessage);
         }
     }
-    Channel channel = Channel(link, conf.remote_id, conf.window, conf.max_packet, LOCAL_WINDOW, [], [], false, false, false, false, Exit.Unknown);
-    send_on(link, build_exec(conf.remote_id, command))?;
-    bool is_answered = false;
-    while (!is_answered) {
-        bytes reply = recv_on(link)?;
+    return Result<Channel, Error>.Ok(Channel(link, conf.remote_id, conf.window, conf.max_packet, LOCAL_WINDOW, [], [], false, false, false, false, Exit.Unknown));
+}
+
+// Waits for the SUCCESS/FAILURE to the request just sent, handling anything
+// else (data, window adjusts) as the channel would.
+Result<void, Error> await_reply(Channel channel, Error refused) {
+    while (true) {
+        bytes reply = recv_on(channel.link)?;
         if (reply.size() == 0) {
-            return Result<Channel, Error>.Err(Error.Truncated);
+            return Result<void, Error>.Err(Error.Truncated);
         }
         int kind = reply[0];
         if (kind == SSH_MESSAGE_CHANNEL_SUCCESS) {
             expect_channel(reply, SSH_MESSAGE_CHANNEL_SUCCESS)?;
-            is_answered = true;
+            return Result<void, Error>.Ok;
         } else if (kind == SSH_MESSAGE_CHANNEL_FAILURE) {
             expect_channel(reply, SSH_MESSAGE_CHANNEL_FAILURE)?;
-            return Result<Channel, Error>.Err(Error.ExecRefused);
+            return Result<void, Error>.Err(refused);
         } else {
             channel.dispatch(reply)?;
         }
     }
-    return Result<Channel, Error>.Ok(channel);
 }
 
 // Answers a GLOBAL_REQUEST: REQUEST_FAILURE if it wants a reply (this client
