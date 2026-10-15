@@ -600,10 +600,12 @@ def start_server(extra, hostkeys):
         f.write(extra + "\n")
     pr = subprocess.Popen([SSHD, "-f", cfgpath, "-D", "-e"], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
     procs.append(pr)
+    pr.log = []
     up = threading.Event()
 
     def watch():
         for line in pr.stderr:
+            pr.log.append(line.decode(errors="replace"))
             if b"listening on" in line:
                 up.set()
 
@@ -776,6 +778,101 @@ def _():
     code = p.finish()
     ok("Ctrl-C at the passphrase prompt skips the key (255) and restores the terminal", code == 255 and p.echo_on(), code)
     p.close()
+
+# --- ProxyJump -----------------------------------------------------------------------------------------
+@scenario("proxyjump")
+def _():
+    jump_a, port_a = start_server("LogLevel DEBUG1", [HOSTKEY])
+    jump_b, port_b = start_server("LogLevel DEBUG1", [ECKEY])
+    target, port_t = start_server("", [RSAKEY])
+    kh = os.path.join(W, "kh_jump")
+    accept = ["-o", "UserKnownHostsFile=" + kh, "-o", "StrictHostKeyChecking=accept-new", "-i", real]
+    cfgpath = os.path.join(HOME, ".ssh", "config")
+    # command-line options are the target's only (as OpenSSH's -J): the jump
+    # hosts are configured through the file
+    with open(cfgpath, "w") as f:
+        f.write("""Host *
+  IdentityFile %s
+  UserKnownHostsFile %s
+  StrictHostKeyChecking accept-new
+""" % (real, kh))
+    code, out, err = run(["-J", "127.0.0.1:%d" % port_a, "-p", str(port_t)] + accept + ["127.0.0.1", "echo", "via-one-jump"])
+    ok("ProxyJump: one hop, command output", code == 0 and out == "via-one-jump\n", (code, err))
+    time_log = "".join(jump_a.log)
+    ok("ProxyJump: the jump host really carried it (direct-tcpip to the target)",
+       "direct-tcpip" in time_log and str(port_t) in time_log, time_log[-300:])
+    khtext = open(kh).read()
+    ok("ProxyJump: each hop's own host key was recorded (jump ed25519 and target rsa)",
+       khtext.count("[127.0.0.1]:%d " % port_a) == 1 and khtext.count("[127.0.0.1]:%d " % port_t) == 1
+       and "ssh-ed25519" in khtext and "ssh-rsa" in khtext, khtext)
+    code, out, err = run(["-J", "127.0.0.1:%d,127.0.0.1:%d" % (port_a, port_b), "-p", str(port_t)] + accept + ["127.0.0.1", "echo", "via-two"])
+    ok("ProxyJump: two hops in a chain", code == 0 and out == "via-two\n", (code, err))
+    data = os.urandom(1500000)
+    p = run(["-J", "127.0.0.1:%d" % port_a, "-p", str(port_t)] + accept + ["127.0.0.1", "cat"], input=data, binary=True, timeout=300)
+    ok("ProxyJump: 1.5 MB round trip through the jump is intact", p.returncode == 0 and p.stdout == data, (p.returncode, p.stderr[-200:]))
+    # the jump host's key is wrong: refused there, and named
+    bad = os.path.join(W, "kh_jump_bad")
+    other = open(OTHERKEY + ".pub").read().split()
+    with open(bad, "w") as f:
+        f.write("[127.0.0.1]:%d %s %s\n" % (port_a, other[0], other[1]))
+    with open(cfgpath, "w") as f:
+        f.write("Host *\n  IdentityFile %s\n  UserKnownHostsFile %s\n  StrictHostKeyChecking accept-new\n" % (real, bad))
+    code, out, err = run(["-J", "127.0.0.1:%d" % port_a, "-p", str(port_t), "127.0.0.1", "echo", "x"])
+    with open(cfgpath, "w") as f:
+        f.write("Host *\n  IdentityFile %s\n  UserKnownHostsFile %s\n  StrictHostKeyChecking accept-new\n" % (real, kh))
+    ok("ProxyJump: a changed JUMP host key is refused, naming the jump host", code == 255 and "CHANGED" in err and str(port_a) in err, (code, err))
+    # the jump works but cannot reach the target
+    dead = free_port()
+    code, out, err = run(["-J", "127.0.0.1:%d" % port_a, "-p", str(dead)] + accept + ["127.0.0.1", "echo", "x"])
+    ok("ProxyJump: jump host cannot reach the target: one clear line, 255",
+       code == 255 and "jump host" in err and len(err.strip().splitlines()) == 1, (code, err))
+    # an unreachable jump host
+    code, out, err = run(["-J", "127.0.0.1:%d" % dead, "-p", str(port_t)] + accept + ["127.0.0.1", "echo", "x"])
+    ok("ProxyJump: unreachable jump host: could not connect, 255", code == 255 and "could not connect" in err, (code, err))
+    # ProxyJump from the config file, with the jump host's own User/Port/IdentityFile
+    with open(cfgpath, "w") as f:
+        f.write("""Host jumper
+  HostName 127.0.0.1
+  Port %d
+  User %s
+Host inner
+  HostName 127.0.0.1
+  Port %d
+  ProxyJump jumper
+Host *
+  IdentityFile %s
+  UserKnownHostsFile %s
+  StrictHostKeyChecking accept-new
+""" % (port_a, USER, port_t, real, kh))
+    code, out, err = run(["inner", "echo", "via-config"])
+    ok("ProxyJump from ~/.ssh/config (alias jump host, per-host settings)", code == 0 and out == "via-config\n", (code, err))
+
+    @scenario("proxyjump-pty")
+    def _():
+        p = Pty(["-J", "127.0.0.1:%d" % port_a, "-p", str(port_t)] + accept + ["127.0.0.1"], rows=24, cols=80)
+        shell_ready(p)
+        p.send("stty size\n")
+        p.expect(r"24 80")
+        p.resize(33, 101)
+        seen = False
+        for _ in range(100):
+            p.send("stty size\n")
+            try:
+                p.expect(r"33 101", timeout=2)
+                seen = True
+                break
+            except TimeoutError:
+                continue
+        ok("ProxyJump: interactive shell, resize propagates through the jump", seen)
+        p.send("seq 1 50000; echo END$((1+1))\n")
+        p.expect(r"END2", timeout=60)
+        p.send(b"\x04")
+        ok("ProxyJump: interactive session ends cleanly (Ctrl-D)", p.finish() == 0)
+        p.close()
+
+    os.unlink(cfgpath)
+    for pr in (jump_a, jump_b, target):
+        pr.kill()
 
 # --- tidy up ----------------------------------------------------------------------------------------
 for pr in procs:

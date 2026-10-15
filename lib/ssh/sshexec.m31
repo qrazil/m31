@@ -816,9 +816,39 @@ pub Result<Channel, Error> shell(ssh.Link link) {
     return Result<Channel, Error>.Ok(channel);
 }
 
+/// `CHANNEL_OPEN "direct-tcpip"` (RFC 4254 §7.2): ask the server to connect
+/// to `host`:`port` and carry the bytes. `originator` is the address this
+/// request claims to come from (informational).
+pub bytes build_open_direct_tcpip(int local_id, int window, int max_packet, str host, int port, str originator, int originator_port) {
+    bytes out = [];
+    out.push(SSH_MESSAGE_CHANNEL_OPEN);
+    ssh.push_string(out, "direct-tcpip".to_bytes());
+    push_u32(out, local_id);
+    push_u32(out, window);
+    push_u32(out, max_packet);
+    ssh.push_string(out, host.to_bytes());
+    push_u32(out, port);
+    ssh.push_string(out, originator.to_bytes());
+    push_u32(out, originator_port);
+    return out;
+}
+
+/// Opens a `direct-tcpip` channel to `host`:`port` through the server: the
+/// channel then carries the raw bytes of that TCP connection both ways
+/// (`write`, `read`, `close_write`, `close`), which is what `ProxyJump` runs
+/// a whole SSH connection over. One channel at a time per link, like every
+/// channel here (`sshmux.m31` is the multi-channel layer).
+pub Result<Channel, Error> direct_tcpip(ssh.Link link, str host, int port) {
+    return open_with(link, build_open_direct_tcpip(LOCAL_ID, LOCAL_WINDOW, LOCAL_MAX_PACKET, host, port, "127.0.0.1", 0));
+}
+
 // CHANNEL_OPEN and its confirmation.
 Result<Channel, Error> open_channel(ssh.Link link) {
-    send_on(link, build_open(LOCAL_ID, LOCAL_WINDOW, LOCAL_MAX_PACKET))?;
+    return open_with(link, build_open(LOCAL_ID, LOCAL_WINDOW, LOCAL_MAX_PACKET));
+}
+
+Result<Channel, Error> open_with(ssh.Link link, bytes open_message) {
+    send_on(link, open_message)?;
     Confirmation conf = Confirmation(0, 0, 1);
     bool is_opened = false;
     while (!is_opened) {
