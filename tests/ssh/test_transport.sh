@@ -38,6 +38,7 @@ pass=0
 fail=0
 server_pid=""
 trunc_pid=""
+loworder_pid=""
 
 note() { printf '\033[32mok\033[0m   %s\n' "$1"; pass=$((pass + 1)); }
 bad()  { printf '\033[31mFAIL\033[0m %s\n' "$1"; shift; printf '%s\n' "$@" | sed 's/^/     /'; fail=$((fail + 1)); }
@@ -47,6 +48,8 @@ cleanup() {
     [ -n "$server_pid" ] && wait "$server_pid" 2>/dev/null
     [ -n "$trunc_pid" ] && kill "$trunc_pid" >/dev/null 2>&1
     [ -n "$trunc_pid" ] && wait "$trunc_pid" 2>/dev/null
+    [ -n "$loworder_pid" ] && kill "$loworder_pid" >/dev/null 2>&1
+    [ -n "$loworder_pid" ] && wait "$loworder_pid" 2>/dev/null
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -133,6 +136,62 @@ s.close()
 " &
 trunc_pid=$!
 
+# A scripted server that completes the key exchange up to its reply and
+# sends the all-zero (order 1) curve25519 value: a client must refuse it as
+# BadKeyExchange before it looks at the (garbage) signature.
+LOWORDER_PORT=$((PORT + 2))
+python3 -I - "$LOWORDER_PORT" "$WORK/host_key.pub" <<'PY' &
+import base64, os, socket, struct, sys
+port, pubpath = int(sys.argv[1]), sys.argv[2]
+blob = base64.b64decode(open(pubpath).read().split()[1])
+def s(b):
+    return struct.pack(">I", len(b)) + b
+def packet(payload):
+    pad = 8 - (5 + len(payload)) % 8
+    if pad < 4:
+        pad += 8
+    body = bytes([pad]) + payload + b"\0" * pad
+    return struct.pack(">I", len(body)) + body
+def recv_exact(c, n):
+    out = b""
+    while len(out) < n:
+        d = c.recv(n - len(out))
+        if not d:
+            raise EOFError
+        out += d
+    return out
+def recv_packet(c):
+    n = struct.unpack(">I", recv_exact(c, 4))[0]
+    return recv_exact(c, n)
+lst = lambda *names: s(",".join(names).encode())
+kexinit = (bytes([20]) + os.urandom(16) + lst("curve25519-sha256") + lst("ssh-ed25519")
+           + lst("chacha20-poly1305@openssh.com") * 2 + lst("hmac-sha2-256") * 2
+           + lst("none") * 2 + lst() * 2 + b"\0" + b"\0\0\0\0")
+srv = socket.socket()
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", port))
+srv.listen(5)
+for _ in range(3):
+    c, _ = srv.accept()
+    try:
+        c.sendall(b"SSH-2.0-stub\r\n" + packet(kexinit))
+        got = b""
+        while not got.endswith(b"\n"):
+            got += c.recv(1)
+        recv_packet(c)          # client KEXINIT
+        recv_packet(c)          # KEX_ECDH_INIT
+        c.sendall(packet(bytes([31]) + s(blob) + s(b"\0" * 32) + s(s(b"ssh-ed25519") + s(b"\0" * 64))))
+        c.settimeout(3)
+        try:
+            c.recv(1)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    c.close()
+PY
+loworder_pid=$!
+
 up=0
 tries=0
 while [ "$tries" -lt 100 ]; do
@@ -177,6 +236,7 @@ bytes good_key = hex_decode("$HOST_KEY_HEX");
 bytes wrong_key = hex_decode("$OTHER_KEY_HEX");
 int port = $PORT;
 int trunc_port = $TRUNC_PORT;
+int loworder_port = $LOWORDER_PORT;
 
 match (ssh.connect("127.0.0.1", port, good_key)) {
     case Ok(ssh.Transport t): {
@@ -224,6 +284,15 @@ match (ssh.connect("127.0.0.1", port, wrong_key)) {
     }
 }
 
+match (ssh.connect("127.0.0.1", loworder_port, good_key)) {
+    case Ok(ssh.Transport t): {
+        trap("handshake with an all-zero curve25519 value unexpectedly succeeded");
+    }
+    case Err(ssh.Error e): {
+        print("low-order key exchange value rejected: " + e.to_str());
+    }
+}
+
 match (ssh.connect("127.0.0.1", trunc_port, good_key)) {
     case Ok(ssh.Transport t): {
         trap("handshake against a connection closed with no banner unexpectedly succeeded");
@@ -247,7 +316,7 @@ else
     # "empty at the end" contract), not an `io.Error` -- so this surfaces as
     # `Error.BadVersion` (no valid version line ever arrived), not
     # `Error.Io`. Either is the point: a definite, named failure, not a hang.
-    if [ $rc -eq 0 ] && [[ "$out" == *"handshake ok"* ]] && [[ "$out" == *"service-accept ok"* ]] && [[ "$out" == *"wrong-host-key rejected: the server's host key does not match the expected one"* ]] && [[ "$out" == *"truncated connection rejected: the peer's SSH version line is missing or malformed"* ]]; then
+    if [ $rc -eq 0 ] && [[ "$out" == *"handshake ok"* ]] && [[ "$out" == *"service-accept ok"* ]] && [[ "$out" == *"wrong-host-key rejected: the server's host key does not match the expected one"* ]] && [[ "$out" == *"low-order key exchange value rejected: the server's key-exchange value or host key is not valid"* ]] && [[ "$out" == *"truncated connection rejected: the peer's SSH version line is missing or malformed"* ]]; then
         note "live handshake against a real sshd: $out"
     else
         bad "live handshake against a real sshd" "exit=$rc" "$out"

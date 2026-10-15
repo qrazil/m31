@@ -1539,11 +1539,27 @@ Result<Exchange, Error> exchange_keys(Wire connection, random.System rng, Offer 
         // directly, confirmed with `tests/ssh/test_transport.sh`'s live
         // fixture. This is the actual, shipped OpenSSH behavior.
         shared = x25519.x25519(secret, reply.q_s);
+        // RFC 7748 §6.1 / RFC 8731: a peer value of small order makes the
+        // output all zero; OpenSSH refuses it and so do we.
+        if (is_all_zero_octets(shared)) {
+            return Result<Exchange, Error>.Err(Error.BadKeyExchange);
+        }
     }
     bytes k_mpint = encode_mpint(shared);
     bytes exchange_digest = exchange_hash(version_pair.v_c, version_pair.v_s, i_c, i_s, reply.k_s, q_c, reply.q_s, k_mpint);
     verify_host_signature(host_key, suite.host_key, exchange_digest, reply.signature)?;
     return Result<Exchange, Error>.Ok(Exchange(host_key, k_mpint, exchange_digest, suite));
+}
+
+// Whether every octet is zero. The value is a key-exchange output that is
+// about to be rejected or used; a plain scan is fine, but the whole buffer is
+// always read.
+bool is_all_zero_octets(bytes value) {
+    int accumulated = 0;
+    for (int index in 0 .. value.size()) {
+        accumulated = accumulated | value[index];
+    }
+    return accumulated == 0;
 }
 
 // Key sizes of the ciphers this client has: (key octets, iv octets).
