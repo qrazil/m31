@@ -19,7 +19,8 @@ cd "$(dirname "$0")/.."
 apk add --no-cache bash coreutils diffutils findutils grep sed gawk perl \
     python3 go git tar gzip file binutils \
     gcc clang musl-dev linux-headers compiler-rt \
-    rust cargo clippy rustfmt >/dev/null
+    rust cargo rust-clippy rustfmt >/dev/null
+git config --global --add safe.directory "*"
 
 arch=$(uname -m)
 case "$arch" in arm64) arch=aarch64 ;; esac
