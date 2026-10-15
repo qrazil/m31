@@ -544,6 +544,11 @@ Result<void, Error> Channel.take_window(int byte_count) {
     if (byte_count > LOCAL_MAX_PACKET) {
         return Result<void, Error>.Err(Error.DataTooLarge);
     }
+    if (byte_count > local_window) {
+        // More than the credit we granted: a peer ignoring the window would
+        // otherwise grow the buffers without bound.
+        return Result<void, Error>.Err(Error.DataTooLarge);
+    }
     local_window = local_window - byte_count;
     return Result<void, Error>.Ok;
 }
