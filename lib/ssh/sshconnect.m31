@@ -391,7 +391,12 @@ Option<sshkey.PrivateKey> unlock(Candidate candidate) {
                 return Option<sshkey.PrivateKey>.None;
             }
             case Some(bytes passphrase): {
-                match (sshkey.load_with_passphrase(candidate.file, passphrase)) {
+                Result<sshkey.PrivateKey, sshkey.Error> loaded = sshkey.load_with_passphrase(candidate.file, passphrase);
+                // best effort: the typed bytes do not linger in this buffer
+                for (int index in 0 .. passphrase.size()) {
+                    passphrase[index] = 0;
+                }
+                match (loaded) {
                     case Ok(sshkey.PrivateKey key): {
                         return Option<sshkey.PrivateKey>.Some(key);
                     }
@@ -781,12 +786,18 @@ Result<ssh.Transport, str> open_hop(ssh.Wire wire, Hop hop, str home, bool is_qu
 // own `known_hosts` entry and every hop authenticates for itself.
 Result<ssh.Transport, str> establish(List<Hop> hops, str home, bool is_quiet, bool is_interactive) {
     Hop first = hops[0];
-    match (net.connect(first.host_name, first.port)) {
+    int connect_ms = 0;
+    if (first.settings.connect_timeout > 0) {
+        connect_ms = first.settings.connect_timeout * 1000;
+    }
+    // The connection never sits in a reactor wait: this program has one
+    // thread of control and every wait for the network is a poll(2).
+    match (net.connect_polled(first.host_name, first.port, timeout_ms: connect_ms)) {
         case Err(net.Error error): {
             return Result<ssh.Transport, str>.Err("could not connect to " + display_name(first.host_name, first.port) + ": " + error.to_str());
         }
         case Ok(net.Conn connection): {
-            ssh.Wire wire = connection;
+            ssh.Wire wire = ssh.PollWire(connection);
             int index = 0;
             while (true) {
                 bool is_target = index == hops.size() - 1;

@@ -258,6 +258,15 @@ The language has no signal handlers and no multi-descriptor wait except
 (`lib/ssh/sshjump.m31`), whose `wait` is exact: it never reports readable
 for a jump-host message that carries no inner bytes.
 
+* the SSH socket is an `ssh.PollWire`: every wait for it is a `poll(2)` on
+  the program's own thread (`net.connect_polled` for the connect), never a
+  park on the reactor, because this program has one thread of control and
+  nothing else to schedule;
+* it reads **one packet per readiness** (`Transport.recv_once`): OpenSSH
+  sends `SSH_MSG_IGNORE` chaff, and a `recv` that swallowed one and then
+  waited for the next real packet would stall the keyboard on an idle
+  connection (a bug found by a stress test, now a regression test: see the
+  `-N` check in `test_m31ssh.sh`);
 * it drains at most 32 packets per turn so the keyboard is never starved
   (Ctrl-C works against `yes`);
 * received data is written to the terminal after every packet, so memory is

@@ -305,11 +305,20 @@ Result<Ending, str> run_loop(ssh.Transport transport, List<sshexec.Channel> sess
                     return Result<Ending, str>.Err(error.to_str());
                 }
             }
-            match (transport.recv()) {
+            match (transport.recv_once()) {
                 case Err(ssh.Error error): {
                     return Result<Ending, str>.Err(error.to_str());
                 }
                 case Ok(bytes payload): {
+                    // An empty payload is a housekeeping packet (IGNORE...):
+                    // it was readable, it is consumed, and it counts as the
+                    // server being alive; there is nothing to route.
+                    if (payload.size() == 0) {
+                        packets = packets + 1;
+                        last_heard_ns = timer.monotonic_ns();
+                        unanswered = 0;
+                        continue;
+                    }
                     match (mux.route(payload)) {
                         case Err(str reason): {
                             return Result<Ending, str>.Err(reason);

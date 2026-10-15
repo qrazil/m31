@@ -567,6 +567,10 @@ Result<bytes, Error> decrypt(Layout layout, bytes passphrase) {
     bytes material = bcryptpbkdf.derive(passphrase, layout.salt, layout.rounds, key_size + iv_size);
     bytes key = material.substr(0, key_size);
     bytes initial_vector = material.substr(key_size, key_size + iv_size);
+    // the KDF output is copied into `key` and the IV; clear the original
+    for (int index in 0 .. material.size()) {
+        material[index] = 0;
+    }
     if (cipher == "aes256-ctr" || cipher == "aes128-ctr") {
         return Result<bytes, Error>.Ok(ctr_crypt(key, initial_vector, layout.private_section));
     }

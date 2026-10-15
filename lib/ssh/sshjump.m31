@@ -52,14 +52,25 @@ Result<void, io.Error> ChannelWire.pump_until_data(bool is_blocking) {
                 }
             }
         }
-        match (channel.pump_one()) {
-            case Ok: {
-            }
-            case Err(sshexec.Error error): {
-                if (is_timed_out(error)) {
+        // One packet, never more: an IGNORE from the jump host is consumed
+        // and the loop re-checks, instead of waiting for the next packet.
+        match (jump.recv_once()) {
+            case Err(ssh.Error error): {
+                if (error.to_str() == ssh.Error.TimedOut.to_str()) {
                     return Result<void, io.Error>.Err(io.Error.Other(11));
                 }
                 return Result<void, io.Error>.Err(io.Error.Other(5));
+            }
+            case Ok(bytes payload): {
+                if (payload.size() > 0) {
+                    match (channel.dispatch_message(payload)) {
+                        case Ok: {
+                        }
+                        case Err(sshexec.Error error): {
+                            return Result<void, io.Error>.Err(io.Error.Other(5));
+                        }
+                    }
+                }
             }
         }
     }
@@ -163,8 +174,4 @@ pub Result<ChannelWire, str> open(ssh.Transport jump, str host, int port) {
             return Result<ChannelWire, str>.Err(error.to_str());
         }
     }
-}
-
-bool is_timed_out(sshexec.Error error) {
-    return error.to_str() == sshexec.Error.Transport(ssh.Error.TimedOut).to_str();
 }

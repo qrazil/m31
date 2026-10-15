@@ -48,7 +48,7 @@ change landed on master.
   manual window credit and server-open parsing; `sshauth` takes the
   signature algorithm per request (`Signer`, `start`, `try_key`);
   `sshhosts` keeps every key type (`blobs_for`, `algorithms_for`);
-  `net.Conn.fileno`, `net.Listener.fileno`.
+  `net.Conn.fileno`, `net.Listener.fileno`, `net.connect_polled` (connect with `poll(2)` and a timeout), `ssh.PollWire` and `Transport.recv_once`.
 - `tests/ssh`: `test_m31ssh.sh` (150 pty-driven checks against disposable
   `sshd`s, including a corrupting proxy), `test_m31sftp.sh` (56), and oracles `oracle_sshcipher.py`, `oracle_sshkeyfiles.py`,
   `oracle_rsasign.py`, the bcrypt_pbkdf vector, plus unit tests for config,
