@@ -330,6 +330,41 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------
+  # Alpine / musl: every gate in an alpine container, then the compiler
+  # (static) + runtime SDK as m31-linux-<arch>-musl.tar.gz. Same layout as the
+  # glibc tarballs. Body: scripts/ci-alpine.sh.
+  # ---------------------------------------------------------------------
+  alpine:
+    name: Alpine gates + build — ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Gates on musl
+        run: docker run --rm -v "$PWD:/w" -w /w alpine:3.22 sh scripts/ci-alpine.sh gates
+
+      - name: Build the musl release tarball
+        run: |
+          docker run --rm -e GITHUB_SHA -e GITHUB_REF_NAME -v "$PWD:/w" -w /w \
+            alpine:3.22 sh scripts/ci-alpine.sh bundle
+          sudo chown -R "$USER" dist target *.tar.gz 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: m31-linux-${{ matrix.arch }}-musl
+          path: m31-linux-${{ matrix.arch }}-musl.tar.gz
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------
   # Attach every platform's tarball to the GitHub Release for this tag.
   # ---------------------------------------------------------------------
   release:
@@ -339,6 +374,7 @@ jobs:
       - build-linux-x86_64
       - build-linux-aarch64
       - build-macos
+      - alpine
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

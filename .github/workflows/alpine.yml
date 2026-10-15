@@ -1,0 +1,33 @@
+name: Alpine (musl)
+
+# Every gate on Alpine Linux / musl libc, x86-64 and aarch64 (native runners).
+# The body is scripts/ci-alpine.sh, run in a plain `docker run` rather than a
+# job container: JS actions (checkout) need glibc node on the host, and this
+# way the container is only the thing under test. release.yml reuses the same
+# script for the musl release assets.
+
+on:
+  push:
+    branches: [master, 'feat/**']
+  pull_request:
+    branches: [master]
+  workflow_dispatch: {}
+
+jobs:
+  gates:
+    name: Gates — Alpine ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run every gate in alpine:3.22
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w alpine:3.22 sh scripts/ci-alpine.sh gates

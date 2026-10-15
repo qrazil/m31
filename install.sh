@@ -3,13 +3,16 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/qrazil/m31/master/install.sh | sh
 #
-# Picks the asset for this OS and CPU (Linux x86-64 / aarch64, macOS arm64),
+# Picks the asset for this OS and CPU (Linux x86-64 / aarch64, macOS arm64;
+# on a musl system -- Alpine -- the -musl Linux asset, falling back to the
+# glibc one for a release that predates it),
 # unpacks it under $PREFIX/opt/m31/<version> and links the programs into
 # $PREFIX/bin. PREFIX defaults to ~/.local. Re-running upgrades; old versions
 # stay in opt/ until you delete them.
 #
 #   VERSION=v1.2.3   install that release instead of the newest
 #   PREFIX=/usr/local  install elsewhere (needs write access)
+#   LIBC=musl|gnu    force the C library flavour instead of detecting it
 #   sh install.sh --uninstall   remove the links and this program's opt/ dir
 set -eu
 
@@ -54,13 +57,35 @@ if [ -z "${VERSION:-}" ]; then
     [ -n "$VERSION" ] || die "could not find a release of $REPO"
 fi
 
+# C library flavour on Linux: musl (Alpine) gets its own asset, whose compiler
+# is a static binary. Detected from /etc/alpine-release or ldd's banner
+# (musl's ldd prints "musl libc" on stderr, exit status 1).
+libc=${LIBC:-}
+if [ -z "$libc" ] && [ "$os" = linux ]; then
+    libc=gnu
+    if [ -e /etc/alpine-release ] ||
+        { ldd --version 2>&1 || true; } | grep -qi musl; then
+        libc=musl
+    fi
+fi
+base="https://github.com/qrazil/$REPO/releases/download/$VERSION"
 file="$ASSET-$os-$arch.tar.gz"
-url="https://github.com/qrazil/$REPO/releases/download/$VERSION/$file"
+if [ "$libc" = musl ] && [ "$os" = linux ]; then
+    file="$ASSET-$os-$arch-musl.tar.gz"
+    # Releases before the musl assets existed: the glibc tarball's compiler
+    # does not run on musl, but its SDK does not care, so say so and carry on
+    # only if the download exists.
+    if ! curl -fsSLI "$base/$file" >/dev/null 2>&1; then
+        say "no musl asset in $VERSION; using the glibc one"
+        file="$ASSET-$os-$arch.tar.gz"
+    fi
+fi
+url="$base/$file"
 dest="$OPT/$VERSION"
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/$REPO-install.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
-say "$REPO $VERSION ($os $arch)"
+say "$REPO $VERSION ($os $arch${libc:+ $libc})"
 curl -fsSL "$url" -o "$tmp/$file" || die "download failed: $url"
 mkdir -p "$tmp/x" "$BIN" "$OPT"
 tar -xzf "$tmp/$file" -C "$tmp/x" || die "could not unpack $file"

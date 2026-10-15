@@ -12,7 +12,7 @@ rename it again; it rewrites `config.sh` and moves the corpus files with it.
 curl -fsSL https://raw.githubusercontent.com/qrazil/m31/master/install.sh | sh
 ```
 
-Picks the release for your OS and CPU, unpacks it under `~/.local/opt/m31/<version>` and links the programs into `~/.local/bin`. `VERSION=v1.2.3` pins a release, `PREFIX=...` moves the install, `sh install.sh --uninstall` removes it.
+Picks the release for your OS and CPU, unpacks it under `~/.local/opt/m31/<version>` and links the programs into `~/.local/bin`. `VERSION=v1.2.3` pins a release, `PREFIX=...` moves the install, `sh install.sh --uninstall` removes it. On Alpine (musl) it picks the `-musl` release, whose compiler is a static binary; install `gcc musl-dev linux-headers` to build programs. `LIBC=gnu|musl` overrides the detection.
 
 ## Status
 

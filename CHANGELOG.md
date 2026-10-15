@@ -3,6 +3,19 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
+## 0.4.6 (2026-10-15)
+
+### Added
+
+- Alpine Linux / musl libc, x86-64 and aarch64: every gate runs on Alpine in
+  CI (`.github/workflows/alpine.yml`, `scripts/ci-alpine.sh`), and a release
+  carries `m31-linux-x86_64-musl.tar.gz` and `m31-linux-aarch64-musl.tar.gz`
+  next to the glibc ones, same layout. The compiler in them is a static
+  executable (it runs on glibc systems too); programs are built by the
+  system `cc`, so Alpine needs `gcc musl-dev linux-headers`. `install.sh`
+  picks the musl asset on a musl system and falls back to the glibc asset
+  for a release that has none.
+
 ## 0.4.5 (2026-10-13)
 
 ### Fixed
