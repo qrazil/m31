@@ -361,6 +361,18 @@ static uint32_t wake_variance_sweep(uint32_t n_carriers, int n_trials, int attem
         bool idle_ok;
         WAIT_UNTIL(all_carriers_idle(s, n_carriers), 2000, &idle_ok);
         CHECK(idle_ok, "[wake-variance] every carrier reaches idle before the trial's arrival");
+        /* A carrier's idle flag starts true, before its OS thread has even
+         * run, so "all idle" is also true while the last-created thread is
+         * still starting up. That thread then finds the item at the top of
+         * its loop before the notified (asleep) carrier is scheduled, and it
+         * wins every trial: seen on musl (Alpine), where thread start-up is
+         * slower than glibc's, as 30/30 trials won by the last carrier.
+         * Give every thread time to reach its wait first; this is what the
+         * trial always meant by "idle". */
+        {
+            struct timespec settle = { 0, 15 * 1000 * 1000 };
+            nanosleep(&settle, NULL);
+        }
 
         _Atomic uint32_t winner = UINT32_MAX;
         _Atomic bool done = false;

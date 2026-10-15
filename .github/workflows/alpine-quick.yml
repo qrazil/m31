@@ -1,0 +1,15 @@
+name: Alpine quick
+on:
+  push:
+    branches: ['feat/musl-quick']
+  workflow_dispatch: {}
+jobs:
+  sched:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker run --rm -v "$PWD:/w" -w /w alpine:3.22 sh scripts/ci-alpine.sh sched

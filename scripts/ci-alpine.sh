@@ -29,6 +29,11 @@ case "${1:-}" in
 gates)
     exec bash ./gates.sh
     ;;
+sched)
+    # Quick iteration on the one runtime suite that has been musl-sensitive.
+    cargo build
+    exec bash runtime/tests/scheduler_test.sh
+    ;;
 bundle)
     . ./config.sh
     RUSTFLAGS="-C target-feature=+crt-static" cargo build --release
