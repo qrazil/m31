@@ -38,6 +38,8 @@ run() {
             echo "$out" | sed 's/^/    /' | tail -60
         else
             echo "$out" | sed 's/^/    /' | head -25
+            # A long gate's failure is rarely in its first 25 lines.
+            echo "$out" | sed -n '26,$p' | grep -E 'FAIL|rror|mismatch|differ' | sed 's/^/    /' | head -25
         fi
         fail=$((fail + 1))
     fi
