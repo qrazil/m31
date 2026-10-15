@@ -1,0 +1,10 @@
+// m31scp -- copy files over SFTP. UNAUDITED: see docs/m31ssh.md.
+//
+//   m31scp [-P port] [-i identity] [-o option=value] [-F config] [-J jump]
+//          [-r] [-p] [-q] source ... target
+//
+// This file is only the entry point; everything is in `core/`.
+import os;
+import core.SCP_main;
+
+os.exit(SCP_main.start(os.arguments()));

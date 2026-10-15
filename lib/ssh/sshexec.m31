@@ -230,6 +230,17 @@ pub bytes build_pty_request(int remote_id, str term, int columns, int rows, byte
     return out;
 }
 
+/// `CHANNEL_REQUEST "subsystem"` with `want_reply` set (RFC 4254 §6.5).
+pub bytes build_subsystem(int remote_id, str name) {
+    bytes out = [];
+    out.push(SSH_MESSAGE_CHANNEL_REQUEST);
+    push_u32(out, remote_id);
+    ssh.push_string(out, "subsystem".to_bytes());
+    out.push(1);
+    ssh.push_string(out, name.to_bytes());
+    return out;
+}
+
 /// `CHANNEL_REQUEST "shell"` with `want_reply` set (RFC 4254 §6.5).
 pub bytes build_shell(int remote_id) {
     bytes out = [];
@@ -963,6 +974,15 @@ pub Result<Channel, Error> open_pty(ssh.Link link, str term, int columns, int ro
     } else {
         send_on(link, build_exec(channel.remote_id, command))?;
     }
+    await_reply(channel, Error.ExecRefused)?;
+    return Result<Channel, Error>.Ok(channel);
+}
+
+/// Opens a session channel and starts the subsystem `name` on it (`sftp`):
+/// the channel then carries that protocol's bytes both ways.
+pub Result<Channel, Error> subsystem(ssh.Link link, str name) {
+    Channel channel = open_channel(link)?;
+    send_on(link, build_subsystem(channel.remote_id, name))?;
     await_reply(channel, Error.ExecRefused)?;
     return Result<Channel, Error>.Ok(channel);
 }

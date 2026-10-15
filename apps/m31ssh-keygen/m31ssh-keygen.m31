@@ -1,0 +1,13 @@
+// m31ssh-keygen -- generate and inspect SSH keys. UNAUDITED: see
+// docs/m31ssh.md.
+//
+//   m31ssh-keygen [-t ed25519] [-f file] [-N passphrase] [-C comment] [-a rounds] [-q]
+//   m31ssh-keygen -y [-f file] [-P passphrase]      print the public key
+//   m31ssh-keygen -l [-f file]                      print the fingerprint
+//   m31ssh-keygen -R host [-f known_hosts]          remove a host's keys
+//
+// This file is only the entry point; everything is in `core/`.
+import os;
+import core.KEYGEN_main;
+
+os.exit(KEYGEN_main.start(os.arguments()));

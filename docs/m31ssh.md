@@ -134,6 +134,51 @@ The listener binds loopback unless a bind address is given (`*` for all).
 When the session channel ends the client exits and its tunnels with it
 (OpenSSH waits for them).
 
+## The other programs
+
+`m31scp`, `m31sftp` and `m31ssh-keygen` are built like `m31ssh`
+(`bash apps/build.sh NAME`), share its connection logic
+(`lib/ssh/sshconnect.m31`: configuration, host keys, identities, jump hosts,
+so they trust the same hosts the same way) and are **unaudited** too.
+
+```
+m31scp [-P port] [-i identity] [-o opt=val] [-F config] [-J jump] [-r] [-p] [-q]
+       source ... target                    # one side [user@]host:path
+m31sftp [-P port] [-i identity] [-o opt=val] [-F config] [-J jump] [-b file] [-q]
+        [user@]host[:directory]
+m31ssh-keygen [-t ed25519] [-f file] [-N passphrase] [-C comment] [-a rounds] [-q]
+m31ssh-keygen -y [-f file] [-P passphrase]      # public key from a private key
+m31ssh-keygen -l [-f file]                      # SHA-256 fingerprint
+m31ssh-keygen -R host [-f known_hosts]          # remove a host (keeps .old)
+```
+
+* **SFTP version 3** (`lib/ssh/sshsftp.m31`): `stat lstat list mkdir rmdir
+  remove rename realpath chmod`, whole-file `get` and `put` pipelined 16
+  requests deep with 32 KiB per request, recursive trees, and a progress
+  meter on a terminal. A server's directory entry names are treated as
+  hostile: an empty name, `.`, `..` or a name with `/` or NUL is refused, so
+  a server cannot write outside the directory the user named. A short read is
+  re-requested; any mismatched id, over-long reply or implausible count is an
+  error, never a trap.
+* **m31scp** speaks SFTP (as OpenSSH's own `scp` has since 9.0), so it does
+  not need a shell or a remote `scp`; remote-to-remote copies are not
+  supported, `-r` is needed for a directory, several sources need a
+  directory target. Exit 0, 1 (transfer or usage), 255 (connection).
+  Downloaded files get the remote's permission bits (before the umask);
+  `-p` sets the remote modification time after an upload (the language
+  has no way to set one locally, so downloads keep their own time).
+* **m31sftp** reads `ls [-l] cd lcd pwd lpwd get [-r] put [-r] mkdir rmdir
+  rm rename stat chmod help quit` from the terminal (with a prompt), a pipe,
+  or `-b file`; in batch mode the first failure ends it with 1.
+* **m31ssh-keygen** generates Ed25519 keys (the file is `openssh-key-v1`,
+  optionally `aes256-ctr` + bcrypt with a fresh salt, `-a` rounds, default 16),
+  mode 0600 beside a 0644 `.pub`; it never overwrites. `-y` and `-l` work on
+  ed25519, ECDSA and RSA keys and on public-key and known_hosts files; `-R`
+  removes plain, `[host]:port` and hashed entries and keeps the old file as
+  `.old`. A passphrase given with `-N`/`-P` is visible in the process list:
+  prefer the prompt. RSA and ECDSA keys cannot be generated (no key
+  generation for them: it needs prime generation, which is not here).
+
 ## Threat model
 
 What this client tries to give you, assuming a network attacker who can read,
@@ -243,7 +288,13 @@ and half-closed connections. `bash tests/ssh/test.sh` adds the oracles:
 corruption refused), `oracle_sshkeyfiles.py` (every key type, plain and in
 four encrypted formats, against `ssh-keygen -y` and OpenSSL),
 `oracle_rsasign.py` (signatures byte-identical to OpenSSL's) and the
-bcrypt_pbkdf published vector. A Python pty driver runs
+bcrypt_pbkdf published vector. `bash tests/ssh/test_m31sftp.sh` runs 56
+checks for `m31scp`, `m31sftp` and `m31ssh-keygen` against a disposable
+`sshd` with its internal SFTP server: 20 MB and empty files, trees with
+modes, the error paths, a progress meter on a pty, interoperation in both
+directions with OpenSSH's own `scp`, keys written by `m31ssh-keygen` read
+by `ssh-keygen -y`/`-l` and used to log in with both clients, and `-R`
+checked with `ssh-keygen -F`. A Python pty driver runs
 interactive sessions: command output and exit status, `stty size` before and
 after a resize, 200000 lines on a pty, Ctrl-D, `~.`, `~.` mid-line, Ctrl-C
 passthrough, terminal restoration (termios read back), host key mismatch
@@ -263,5 +314,5 @@ whose existing oracles (OpenSSH `sshd`, `ssh-keygen`, `cryptography`,
   keepalives): done.
 * **B** (RSA and ECDSA keys, encrypted keys, ProxyJump, `-L`/`-R`/`-N`,
   more ciphers / key exchanges): done, with the limits above.
-* **C** (`m31scp`, an sftp v3 subset, `m31ssh-keygen`): see the end of
-  this file when it lands.
+* **C** (`m31scp`, an sftp v3 subset, `m31ssh-keygen`): done, see "The other
+  programs".

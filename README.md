@@ -34,7 +34,7 @@ it cannot rot.
 - 130 unit tests
 - 0 dependencies, 0 `unsafe`, clippy clean at `-D warnings`
 
-Beyond the core language: a standard library (`lib/`, 61 modules in folders) covering
+Beyond the core language: a standard library (`lib/`, 71 modules in folders) covering
 collections, JSON, CSV, HTML, a full HTTP/1.1 client and server
 (`lib/net/http.m31`), filesystem and OS access, and a constant-time crypto stack
 (X25519, Ed25519, SHA-256/512, ChaCha20-Poly1305). On top of that, an `ssh`
@@ -60,7 +60,11 @@ hard refusal that names the fingerprint and never rewrites the file); reads
 the useful core of `~/.ssh/config`; goes through jump hosts; forwards ports
 (`-L`, `-R`, `-N`); and exits with the remote status (255 on its own errors).
 
-**It is unaudited.** It is written from scratch in m31 and tested against
+`m31scp`, `m31sftp` and `m31ssh-keygen` (SFTP file copy, an SFTP client and
+Ed25519 key generation) live beside it in `apps/`, built the same way
+(`bash apps/build.sh m31scp`).
+
+**All of it is unaudited.** It is written from scratch in m31 and tested against
 OpenSSH, not reviewed by anyone who audits cryptographic software. Use OpenSSH
 where that matters. The threat model, what is and is not implemented, and the
 tests are in [`docs/m31ssh.md`](docs/m31ssh.md).
@@ -435,7 +439,7 @@ runtime/
   ctx_switch_x86_64.S  the x86-64 context switch itself
   scheduler.h/.c       the M:N scheduler — not yet wired to spawn/Chan
   reactor.h/.c         epoll reactor, park/unpark, blocking-FFI handoff
-lib/                   the standard library, written in the language itself (61 modules)
+lib/                   the standard library, written in the language itself (71 modules)
   os.m31 fs.m31 io.m31 net.m31 term.m31 ...       the everyday modules, at the top
   crypto/                                         sha256 sha512 x25519 ed25519 aes ... (17)
   encoding/                                       base64 csv der hexcodec html json

@@ -1,0 +1,420 @@
+// m31scp: `scp`'s command line over the SFTP subsystem (as OpenSSH's own
+// `scp` has done since 9.0), one of the two ends remote. UNAUDITED.
+//
+// Rules, as scp's:
+//   * a name is remote when it has the form `[user@]host:path` (or
+//     `[v6]:path`) with no `/` before the first `:`; anything else is local
+//     (write `./a:b` for a local file whose name has a colon);
+//   * several sources need a directory target;
+//   * a directory source needs -r;
+//   * remote-to-remote copies are not supported (copy through here with two
+//     commands).
+//
+// Names a server returns while a directory is walked are treated as hostile:
+// an empty name, `.`, `..` or one containing `/` or NUL is refused, so a
+// server cannot write outside the directory the user named.
+//
+// Exit status: 0; 1 for a failed transfer or bad usage; 255 when the
+// connection or authentication failed.
+
+import io;
+import os;
+import fs;
+import term;
+import timer;
+import ssh;
+import ssh.sshconnect;
+import ssh.sshsftp;
+
+const int EXIT_USAGE = 1;
+const int EXIT_CONNECTION = 255;
+const int READ_TIMEOUT_MS = 60000;
+pub const str VERSION = "0.1.0";
+
+/// Where a command-line name points.
+type Location {
+    bool is_remote;
+    str user;
+    str host;
+    str path;
+}
+
+str usage() {
+    return "usage: m31scp [-P port] [-i identity] [-o option=value] [-F config] [-J jump]\n" + "              [-r] [-p] [-q] source ... target\n" + "\n" + "m31scp copies over SFTP and is UNAUDITED: do not rely on it where an\n" + "audited client (OpenSSH) is required. See docs/m31ssh.md.\n" + "  -P port  -i key  -o opt=val  -F file  -J jump   as m31ssh\n" + "  -r       copy directories recursively\n" + "  -p       preserve permissions and modification times\n" + "  -q       no progress meter\n" + "  -V       print the version\n" + "exit status: 0 ok, 1 transfer error, 255 connection error\n";
+}
+
+void warn(str message) {
+    io.eprint("m31scp: " + message);
+}
+
+Location location_of(str text) {
+    // `[v6]:path`
+    if (text.starts_with("[") && text.contains("]:")) {
+        int bracket = 0;
+        match (text.index_of("]:")) {
+            case Some(int found): {
+                bracket = found;
+            }
+            case None: {
+            }
+        }
+        str host = text.substr(1, bracket);
+        return Location(true, "", host, text.substr(bracket + 2, text.size()));
+    }
+    int colon = -1;
+    int index = 0;
+    while (index < text.size() && colon < 0) {
+        int code = text.byte_at(index);
+        if (code == 47) {
+            break;
+        }
+        if (code == 58) {
+            colon = index;
+        }
+        index = index + 1;
+    }
+    if (colon <= 0) {
+        return Location(false, "", "", text);
+    }
+    str host_part = text.substr(0, colon);
+    str user = "";
+    int at_sign = -1;
+    index = 0;
+    while (index < host_part.size()) {
+        if (host_part.byte_at(index) == 64) {
+            at_sign = index;
+        }
+        index = index + 1;
+    }
+    if (at_sign >= 0) {
+        user = host_part.substr(0, at_sign);
+        host_part = host_part.substr(at_sign + 1, host_part.size());
+    }
+    if (host_part == "") {
+        return Location(false, "", "", text);
+    }
+    str path = text.substr(colon + 1, text.size());
+    if (path == "") {
+        path = ".";
+    }
+    return Location(true, user, host_part, path);
+}
+
+// --- the progress meter -----------------------------------------------------------
+
+type Meter {
+    str label;
+    bool is_enabled;
+    int started_ns;
+    int last_ns;
+    int finished_bytes;
+}
+
+pub void Meter.begin(str name) {
+    label = name;
+    started_ns = timer.monotonic_ns();
+    last_ns = 0;
+}
+
+pub void Meter.end() {
+    finish();
+}
+
+pub void Meter.note(str message) {
+    io.eprint("m31scp: " + message);
+}
+
+pub void Meter.update(int done, int total) {
+    if (!is_enabled) {
+        return;
+    }
+    int now = timer.monotonic_ns();
+    finished_bytes = done;
+    if (now - last_ns < 100000000 && !(total > 0 && done >= total)) {
+        return;
+    }
+    last_ns = now;
+    int seconds_ms = (now - started_ns) / 1000000;
+    if (seconds_ms < 1) {
+        seconds_ms = 1;
+    }
+    int rate = done * 1000 / seconds_ms;
+    str percent = "";
+    if (total > 0) {
+        percent = (done * 100 / total).to_str() + "% ";
+    }
+    str eta = "";
+    if (total > 0 && rate > 0 && done < total) {
+        int left = (total - done) / rate;
+        eta = " " + (left / 60).to_str() + ":" + two_digits(left % 60) + " ETA";
+    }
+    str line = "\r" + label + "  " + percent + human(done) + "  " + human(rate) + "/s" + eta + "      ";
+    Result<int, io.Error> shown = io.stderr().write(line.to_bytes());
+}
+
+pub void Meter.finish() {
+    if (is_enabled) {
+        Result<int, io.Error> shown = io.stderr().write("\n".to_bytes());
+    }
+}
+
+str two_digits(int value) {
+    if (value < 10) {
+        return "0" + value.to_str();
+    }
+    return value.to_str();
+}
+
+str human(int bytes_count) {
+    if (bytes_count < 1024) {
+        return bytes_count.to_str() + "B";
+    }
+    if (bytes_count < 1048576) {
+        return (bytes_count / 1024).to_str() + "KB";
+    }
+    if (bytes_count < 1073741824) {
+        return (bytes_count / 1048576).to_str() + "MB";
+    }
+    return (bytes_count / 1073741824).to_str() + "GB";
+}
+
+Meter new_meter(str label, bool is_enabled) {
+    int now = timer.monotonic_ns();
+    return Meter(label, is_enabled, now, 0, 0);
+}
+
+// --- transfers ---------------------------------------------------------------------
+
+type Options {
+    bool is_recursive;
+    bool is_preserving;
+    bool is_quiet;
+}
+
+pub int start(List<str> argv) {
+    List<str> arguments = [];
+    if (argv.size() > 1) {
+        arguments = argv.slice(1, argv.size());
+    }
+    int port = 0;
+    List<str> identities = [];
+    List<str> settings = [];
+    str config_file = "";
+    str jump = "";
+    Options options = Options(false, false, false);
+    List<str> names = [];
+    int index = 0;
+    while (index < arguments.size()) {
+        str word = arguments[index];
+        if (word == "--") {
+            index = index + 1;
+            while (index < arguments.size()) {
+                names.push(arguments[index]);
+                index = index + 1;
+            }
+            break;
+        }
+        if (word == "-V" || word == "--version") {
+            print("m31scp " + VERSION + " (UNAUDITED)");
+            return 0;
+        }
+        if (word == "-h" || word == "--help") {
+            print(usage());
+            return 0;
+        }
+        if (word.size() >= 2 && word.starts_with("-") && word != "-") {
+            int letter = word.byte_at(1);
+            if (letter == 80 || letter == 105 || letter == 111 || letter == 70 || letter == 74) {
+                str value = "";
+                if (word.size() > 2) {
+                    value = word.substr(2, word.size());
+                } else {
+                    index = index + 1;
+                    if (index >= arguments.size()) {
+                        warn("option " + word + " requires an argument");
+                        return EXIT_USAGE;
+                    }
+                    value = arguments[index];
+                }
+                if (letter == 80) {
+                    Option<int> parsed = value.parse_int();
+                    match (parsed) {
+                        case Some(int number): {
+                            if (number < 1 || number > 65535) {
+                                warn("bad port '" + value + "'");
+                                return EXIT_USAGE;
+                            }
+                            port = number;
+                        }
+                        case None: {
+                            warn("bad port '" + value + "'");
+                            return EXIT_USAGE;
+                        }
+                    }
+                } else if (letter == 105) {
+                    identities.push(value);
+                } else if (letter == 111) {
+                    settings.push(value);
+                } else if (letter == 70) {
+                    config_file = value;
+                } else {
+                    jump = value;
+                }
+            } else {
+                int flag_at = 1;
+                while (flag_at < word.size()) {
+                    int flag = word.byte_at(flag_at);
+                    if (flag == 114) {
+                        options.is_recursive = true;
+                    } else if (flag == 112) {
+                        options.is_preserving = true;
+                    } else if (flag == 113) {
+                        options.is_quiet = true;
+                    } else if (flag == 67 || flag == 118 || flag == 52 || flag == 54 || flag == 66) {
+                        // compression, verbose, address family, batch: accepted
+                    } else {
+                        warn("unknown option -" + word.substr(flag_at, flag_at + 1));
+                        return EXIT_USAGE;
+                    }
+                    flag_at = flag_at + 1;
+                }
+            }
+        } else {
+            names.push(word);
+        }
+        index = index + 1;
+    }
+    if (names.size() < 2) {
+        io.eprint(usage());
+        return EXIT_USAGE;
+    }
+    str target_name = names[names.size() - 1];
+    List<str> source_names = names.slice(0, names.size() - 1);
+    Location target = location_of(target_name);
+    // The direction: every source remote is a download.
+    bool is_download = is_all_remote(source_names);
+    if (is_download && target.is_remote) {
+        warn("remote-to-remote copies are not supported");
+        return EXIT_USAGE;
+    }
+    if (!is_download) {
+        for (str name in source_names) {
+            if (location_of(name).is_remote) {
+                warn("remote-to-remote and mixed copies are not supported");
+                return EXIT_USAGE;
+            }
+        }
+        if (!target.is_remote) {
+            warn("one of the source and the target must be remote ([user@]host:path)");
+            return EXIT_USAGE;
+        }
+    }
+    Location remote_end = target;
+    if (is_download) {
+        remote_end = location_of(source_names[0]);
+        for (str name in source_names) {
+            Location other = location_of(name);
+            if (other.host != remote_end.host || other.user != remote_end.user) {
+                warn("sources on different hosts are not supported");
+                return EXIT_USAGE;
+            }
+        }
+    }
+    sshconnect.Params parameters = sshconnect.Params(remote_end.host, port, remote_end.user, identities, settings, config_file, jump, options.is_quiet, term.is_terminal(0));
+    match (sshconnect.connect(parameters)) {
+        case Err(str reason): {
+            warn(reason);
+            return EXIT_CONNECTION;
+        }
+        case Ok(sshconnect.Connection connection): {
+            match (connection.transport.set_read_timeout(READ_TIMEOUT_MS)) {
+                case Ok: {
+                }
+                case Err(_): {
+                }
+            }
+            match (sshsftp.open(connection.transport)) {
+                case Err(str reason): {
+                    warn(reason);
+                    return EXIT_CONNECTION;
+                }
+                case Ok(sshsftp.Session session): {
+                    int code = 0;
+                    if (is_download) {
+                        code = run_download(session, source_names, target_name, options);
+                    } else {
+                        code = run_upload(session, source_names, target.path, options);
+                    }
+                    session.finish();
+                    Result<bool, ssh.Error> closed = connection.transport.disconnect();
+                    return code;
+                }
+            }
+        }
+    }
+}
+
+bool is_all_remote(List<str> names) {
+    for (str name in names) {
+        if (!location_of(name).is_remote) {
+            return false;
+        }
+    }
+    return names.size() > 0;
+}
+
+int run_download(sshsftp.Session session, List<str> sources, str target, Options options) {
+    bool is_directory_target = fs.is_directory(target);
+    if (sources.size() > 1 && !is_directory_target) {
+        warn("target " + target + " is not a directory");
+        return EXIT_USAGE;
+    }
+    int code = 0;
+    for (str source in sources) {
+        str remote = location_of(source).path;
+        str destination = target;
+        if (is_directory_target) {
+            destination = sshsftp.join_path(target, sshsftp.basename_of(remote));
+        }
+        match (session.get_tree(remote, destination, options.is_recursive, new_meter("", !options.is_quiet && term.is_terminal(2)))) {
+            case Ok: {
+            }
+            case Err(str reason): {
+                warn(reason);
+                code = EXIT_USAGE;
+            }
+        }
+    }
+    return code;
+}
+
+int run_upload(sshsftp.Session session, List<str> sources, str target, Options options) {
+    bool is_directory_target = false;
+    match (session.stat(target)) {
+        case Ok(sshsftp.Attrs attrs): {
+            is_directory_target = attrs.is_directory();
+        }
+        case Err(_): {
+        }
+    }
+    if (sources.size() > 1 && !is_directory_target) {
+        warn("target " + target + " is not a directory");
+        return EXIT_USAGE;
+    }
+    int code = 0;
+    for (str source in sources) {
+        str destination = target;
+        if (is_directory_target) {
+            destination = sshsftp.join_path(target, sshsftp.basename_of(source));
+        }
+        match (session.put_tree(source, destination, options.is_recursive, options.is_preserving, new_meter("", !options.is_quiet && term.is_terminal(2)))) {
+            case Ok: {
+            }
+            case Err(str reason): {
+                warn(reason);
+                code = EXIT_USAGE;
+            }
+        }
+    }
+    return code;
+}
