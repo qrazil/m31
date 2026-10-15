@@ -89,6 +89,24 @@ int parse_refusal(str text) {
 // The keys `text` trusts for `host:port`, as one hex string of each key's
 // first byte joined with commas ("" for a refusal); `code` receives -1 for a
 // hit, or the refusal's code.
+bytes ed25519_blob(bytes raw) {
+    bytes out = [];
+    ssh.push_string(out, "ssh-ed25519".to_bytes());
+    ssh.push_string(out, raw);
+    return out;
+}
+
+bool is_parsing(str text) {
+    match (sshhosts.parse(text)) {
+        case Ok(_): {
+            return true;
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
 sshhosts.KnownHosts must_parse(str text) {
     match (sshhosts.parse(text)) {
         case Ok(sshhosts.KnownHosts known_hosts): {
@@ -145,12 +163,14 @@ checks = check(checks, answer(rules_hosts, "", 22) == "!3", "an empty host is un
 
 // --- 2. markers and skipped lines -------------------------------------------
 
-sshhosts.KnownHosts marks = must_parse("@revoked bad.example " + ed25519_line(second_key) + "\n" + "bad.example " + ed25519_line(first_key) + "\n" + "bad.example " + ed25519_line(second_key) + "\n" + "onlyrevoked.example " + ed25519_line(second_key) + "\n" + "@revoked onlyrevoked.example " + ed25519_line(second_key) + "\n" + "@cert-authority *.ca.example " + ed25519_line(third_key) + "\n" + "rsa.example ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC\n" + "ecdsa.example ecdsa-sha2-nistp256 notbase64!!\n");
+sshhosts.KnownHosts marks = must_parse("@revoked bad.example " + ed25519_line(second_key) + "\n" + "bad.example " + ed25519_line(first_key) + "\n" + "bad.example " + ed25519_line(second_key) + "\n" + "onlyrevoked.example " + ed25519_line(second_key) + "\n" + "@revoked onlyrevoked.example " + ed25519_line(second_key) + "\n" + "@cert-authority *.ca.example " + ed25519_line(third_key) + "\n" + "dsa.example ssh-dss AAAAB3NzaC1kc3M\n" + "sk.example sk-ssh-ed25519@openssh.com notbase64!!\n");
 checks = check(checks, answer(marks, "bad.example", 22) == "10", "a @revoked key is removed from the answer");
 checks = check(checks, answer(marks, "onlyrevoked.example", 22) == "!4", "a host with only revoked keys is Revoked");
 checks = check(checks, answer(marks, "x.ca.example", 22) == "!3", "a @cert-authority line grants nothing");
-checks = check(checks, answer(marks, "rsa.example", 22) == "!3", "a non-ed25519 line is skipped");
-checks = check(checks, answer(marks, "ecdsa.example", 22) == "!3", "a non-ed25519 line is skipped even if its key is junk");
+checks = check(checks, answer(marks, "dsa.example", 22) == "!3", "a line of a type this client does not implement is skipped");
+checks = check(checks, answer(marks, "sk.example", 22) == "!3", "...even if its key is junk");
+checks = check(checks, !is_parsing("rsa.example ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC\n"), "a mangled ssh-rsa line is an error, not a silent skip");
+checks = check(checks, !is_parsing("ecdsa.example ecdsa-sha2-nistp256 notbase64!!\n"), "a mangled ecdsa line is an error, not a silent skip");
 
 // --- 3. one fixture per Error variant ---------------------------------------
 
@@ -235,8 +255,8 @@ checks = check(checks, answer(written, "EXAMPLE.com", 2222) == "10", "a written 
 checks = check(checks, answer(written, "hashed.example", 2200) == "10", "a written hashed line is found again");
 checks = check(checks, answer(written, "hashed.example", 22) == "!3", "a written hashed line does not match another port");
 sshhosts.KnownHosts revoking = must_parse("@revoked revoked.example " + ed25519_line(first_key) + "\n" + "@revoked *.wild.example " + ed25519_line(second_key) + "\n" + "plain.example " + ed25519_line(third_key) + "\n");
-ssh.HostKey hk2 = ssh.HostKey("ssh-ed25519", [], second_key);
-ssh.HostKey hk3 = ssh.HostKey("ssh-ed25519", [], third_key);
+ssh.HostKey hk2 = ssh.HostKey("ssh-ed25519", ed25519_blob(second_key), second_key);
+ssh.HostKey hk3 = ssh.HostKey("ssh-ed25519", ed25519_blob(third_key), third_key);
 checks = check(checks, answer(revoking, "revoked.example", 22) == "!3", "a lone @revoked line leaves the host unknown to keys_for");
 checks = check(checks, revoking.is_revoked("revoked.example", 22, host_key), "is_revoked: the revoked key for that host");
 checks = check(checks, !revoking.is_revoked("revoked.example", 22, hk2), "is_revoked: not another key for that host");

@@ -98,8 +98,12 @@ import crypto.chacha20poly1305;
 import crypto.consttime;
 import crypto.x25519;
 import crypto.ed25519;
+import crypto.ecdsa;
+import crypto.rsa;
+import crypto.sha512;
 import random;
 import encoding.base64;
+import ssh.sshcipher;
 
 /// Why a handshake, or a later `send`/`recv`, could not be completed.
 /// Payload-free (`docs/errors-decision.md` §4): nothing here needs more
@@ -142,6 +146,9 @@ pub enum Error {
     /// own error already said which; there is nothing more specific to add
     /// here.
     Io;
+    /// The server's key-exchange value or host key was not a valid point or
+    /// key (off the curve, a modulus under 2048 bits, ...).
+    BadKeyExchange;
     /// A read waited as long as the read timeout allows (`connect_any`'s
     /// `timeout_ms`, `Transport.set_read_timeout`). **The transport cannot be
     /// used afterwards**: the timeout may have fallen part way through a
@@ -168,13 +175,13 @@ pub str Error.to_str() {
             return "an unexpected message type arrived at this point";
         }
         case NoCommonKex: {
-            return "the server does not offer curve25519-sha256";
+            return "the server offers none of the key exchanges this client accepts (curve25519-sha256, ecdh-sha2-nistp256)";
         }
         case NoCommonHostKey: {
-            return "the server does not offer ssh-ed25519";
+            return "the server offers none of the host key algorithms this client accepts (ssh-ed25519, ecdsa-sha2-nistp256, rsa-sha2-512, rsa-sha2-256)";
         }
         case NoCommonCipher: {
-            return "the server does not offer chacha20-poly1305@openssh.com";
+            return "the server offers none of the ciphers this client accepts (chacha20-poly1305, aes-gcm, aes-ctr with hmac-sha2-256)";
         }
         case UnsupportedHostKeyType: {
             return "a host-key or signature blob named an unsupported algorithm";
@@ -191,10 +198,19 @@ pub str Error.to_str() {
         case Io: {
             return "the underlying connection failed";
         }
+        case BadKeyExchange: {
+            return "the server's key-exchange value or host key is not valid";
+        }
         case TimedOut: {
             return "a read timed out waiting for the peer";
         }
     }
+}
+
+/// Whether this is `UnsupportedHostKeyType`: a key or signature that is
+/// well formed but of a kind (or strength) this client does not use.
+pub bool Error.is_unsupported_key() {
+    return to_str() == Error.UnsupportedHostKeyType.to_str();
 }
 
 // --- message type numbers (RFC 4253) -----------------------------------------
@@ -360,10 +376,24 @@ Error failure_of(io.Error cause) {
     }
 }
 
+/// What the transport needs of the byte stream under it. A `net.Conn` is
+/// one; `sshjump.ChannelWire` (a TCP connection tunnelled through another
+/// SSH session, for `ProxyJump`) is the other. Nothing here is specific to a
+/// socket except `fileno`, which an event loop may poll on.
+pub interface Wire {
+    Result<bytes, io.Error> read(int byte_count);
+    Result<bytes, io.Error> read_until(bytes delimiter, int limit);
+    Result<int, io.Error> write(bytes data);
+    Result<bool, io.Error> close();
+    Result<bool, net.Error> set_read_timeout(int timeout_ms);
+    Result<bool, net.Error> wait(int timeout_ms);
+    int fileno();
+}
+
 // Reads exactly `byte_count` bytes from `connection`, looping over `net.Conn.read`'s own
 // "1..n bytes, no exact-read primitive" contract. A 0-length read before `byte_count`
 // bytes have arrived means the peer is gone.
-Result<bytes, Error> read_exact(net.Conn connection, int byte_count) {
+Result<bytes, Error> read_exact(Wire connection, int byte_count) {
     bytes out = [];
     while (out.size() < byte_count) {
         match (connection.read(byte_count - out.size())) {
@@ -394,7 +424,7 @@ type VersionPair {
     bytes v_s;
 }
 
-Result<VersionPair, Error> exchange_version(net.Conn connection) {
+Result<VersionPair, Error> exchange_version(Wire connection) {
     bytes v_c = CLIENT_VERSION_STR.to_bytes();
     bytes line = clone(v_c);
     line.push(13);
@@ -531,7 +561,7 @@ pub Result<RawPacket, Error> parse_plain_packet(bytes buffer, int offset) {
 // is known as soon as the first four bytes arrive, and this reuses
 // `parse_plain_packet` on the assembled buffer rather than duplicating its
 // padding-bounds logic.
-Result<bytes, Error> recv_plain_payload(net.Conn connection) {
+Result<bytes, Error> recv_plain_payload(Wire connection) {
     bytes length_bytes = read_exact(connection, 4)?;
     int packet_length = be32(length_bytes, 0);
     if (packet_length < 1 || packet_length > 35000) {
@@ -544,7 +574,7 @@ Result<bytes, Error> recv_plain_payload(net.Conn connection) {
     return Result<bytes, Error>.Ok(raw_packet.payload);
 }
 
-Result<void, Error> send_plain_payload(net.Conn connection, bytes payload, random.System rng) {
+Result<void, Error> send_plain_payload(Wire connection, bytes payload, random.System rng) {
     bytes pkt = encode_plain_packet(payload, rng);
     match (connection.write(pkt)) {
         case Ok(_): {
@@ -556,11 +586,11 @@ Result<void, Error> send_plain_payload(net.Conn connection, bytes payload, rando
     }
 }
 
-// --- Part 3: KEXINIT (RFC 4253 §7.1) -----------------------------------------
+// --- Part 3: KEXINIT and algorithm negotiation (RFC 4253 §7.1) ---------------
 
 /// One `KEXINIT` message, parsed or about to be built. `raw` is the exact
 /// payload bytes this was parsed from (or, for this client's own, that
-/// `build_client_kexinit` produced) -- needed verbatim, unmodified, as `I_C`
+/// `build_kexinit` produced) -- needed verbatim, unmodified, as `I_C`
 /// or `I_S` in the exchange hash (Part 4).
 pub type KexInit {
     pub bytes cookie;
@@ -578,21 +608,86 @@ pub type KexInit {
     pub bytes raw;
 }
 
-/// This client's own `KEXINIT`: always exactly the one suite
-/// (`docs/ssh-decision.md` §2), empty MAC lists (`chacha20-poly1305@
-/// openssh.com` supplies its own authentication -- confirmed against the
-/// live fixture, not assumed), `"none"` compression, no languages.
-pub bytes build_client_kexinit(random.System rng) {
+/// What this client is willing to speak, each list in order of preference
+/// (RFC 4253 §7.1: the algorithm used is the first one on the *client's*
+/// list that the server also lists). **Nothing weaker than what is listed
+/// here is ever used**: there is no `none` cipher, no SHA-1, no CBC, no
+/// `diffie-hellman-group1`, no `ssh-rsa` signatures over SHA-1, no
+/// compression. `kex-strict-c-v00@openssh.com` is a marker, not a key
+/// exchange: it asks a server that understands it to apply "strict kex"
+/// (see `exchange_keys`).
+pub type Offer {
+    pub List<str> kex;
+    pub List<str> host_keys;
+    pub List<str> ciphers;
+    pub List<str> macs;
+}
+
+const str KEX_ECDH_P256 = "ecdh-sha2-nistp256";
+const str KEX_C25519_ALIAS = "curve25519-sha256@libssh.org";
+const str KEX_STRICT_CLIENT = "kex-strict-c-v00@openssh.com";
+const str KEX_STRICT_SERVER = "kex-strict-s-v00@openssh.com";
+const str HOST_KEY_ECDSA_P256 = "ecdsa-sha2-nistp256";
+const str HOST_KEY_RSA = "ssh-rsa";
+const str SIG_RSA_SHA512 = "rsa-sha2-512";
+const str SIG_RSA_SHA256 = "rsa-sha2-256";
+const str CIPHER_GCM256 = "aes256-gcm@openssh.com";
+const str CIPHER_GCM128 = "aes128-gcm@openssh.com";
+const str CIPHER_CTR256 = "aes256-ctr";
+const str CIPHER_CTR128 = "aes128-ctr";
+const str MAC_ETM = "hmac-sha2-256-etm@openssh.com";
+const str MAC_PLAIN = "hmac-sha2-256";
+
+/// The full offer, strongest first.
+pub Offer default_offer() {
+    return Offer([KEX_ALGO, KEX_C25519_ALIAS, KEX_ECDH_P256, KEX_STRICT_CLIENT], [HOST_KEY_ALGO, HOST_KEY_ECDSA_P256, SIG_RSA_SHA512, SIG_RSA_SHA256], [CIPHER_ALGO, CIPHER_GCM256, CIPHER_GCM128, CIPHER_CTR256, CIPHER_CTR128], [MAC_ETM, MAC_PLAIN]);
+}
+
+/// The default offer with `host_key_algorithms` first, in that order, then
+/// the rest of the defaults not already named: how a client that holds a
+/// `known_hosts` entry of one type asks the server for that type (a server
+/// presents the first of the client's list it has; OpenSSH does the same).
+/// Names that are not host-key algorithms this client implements are
+/// ignored, so a file's `ssh-dss` line cannot widen the offer.
+pub Offer offer_preferring(List<str> host_key_algorithms) {
+    Offer offer = default_offer();
+    List<str> ordered = [];
+    for (str given in host_key_algorithms) {
+        // A key *type* from a known_hosts line; RSA's signature algorithms
+        // are the SHA-2 ones (never `ssh-rsa`, which is SHA-1).
+        List<str> names = [given];
+        if (given == HOST_KEY_RSA) {
+            names = [SIG_RSA_SHA512, SIG_RSA_SHA256];
+        }
+        for (str name in names) {
+            if (offer.host_keys.contains(name) && !ordered.contains(name)) {
+                ordered.push(name);
+            }
+        }
+    }
+    for (str name in offer.host_keys) {
+        if (!ordered.contains(name)) {
+            ordered.push(name);
+        }
+    }
+    offer.host_keys = ordered;
+    return offer;
+}
+
+/// This client's `KEXINIT` for `offer`: empty MAC lists when no CTR cipher
+/// is offered (the AEAD ciphers authenticate themselves), `"none"`
+/// compression, no languages.
+pub bytes build_kexinit(random.System rng, Offer offer) {
     List<str> empty = [];
     bytes out = [];
     out.push(SSH_MESSAGE_KEXINIT);
     out.extend(rng.octets(16));
-    out.extend(encode_name_list([KEX_ALGO]));
-    out.extend(encode_name_list([HOST_KEY_ALGO]));
-    out.extend(encode_name_list([CIPHER_ALGO]));
-    out.extend(encode_name_list([CIPHER_ALGO]));
-    out.extend(encode_name_list(empty));
-    out.extend(encode_name_list(empty));
+    out.extend(encode_name_list(offer.kex));
+    out.extend(encode_name_list(offer.host_keys));
+    out.extend(encode_name_list(offer.ciphers));
+    out.extend(encode_name_list(offer.ciphers));
+    out.extend(encode_name_list(offer.macs));
+    out.extend(encode_name_list(offer.macs));
     out.extend(encode_name_list(["none"]));
     out.extend(encode_name_list(["none"]));
     out.extend(encode_name_list(empty));
@@ -600,6 +695,11 @@ pub bytes build_client_kexinit(random.System rng) {
     out.push(0);
     push_u32(out, 0);
     return out;
+}
+
+/// `build_kexinit` with `default_offer()`.
+pub bytes build_client_kexinit(random.System rng) {
+    return build_kexinit(rng, default_offer());
 }
 
 pub Result<KexInit, Error> parse_kexinit(bytes payload) {
@@ -628,19 +728,74 @@ pub Result<KexInit, Error> parse_kexinit(bytes payload) {
     return Result<KexInit, Error>.Ok(KexInit(cookie, kex.names, host_key.names, enc_c2s.names, enc_s2c.names, mac_c2s.names, mac_s2c.names, comp_c2s.names, comp_s2c.names, lang_c2s.names, lang_s2c.names, has_following_packet, payload));
 }
 
-/// Three independently-testable, named refusals -- never a partial
-/// negotiation. `Ok` means every one of this client's three proposals was
-/// present in the server's own lists.
+/// What was agreed.
+pub type Suite {
+    pub str kex;
+    pub str host_key;
+    pub str cipher_client_to_server;
+    pub str cipher_server_to_client;
+    pub str mac_client_to_server;
+    pub str mac_server_to_client;
+    /// The server also speaks strict kex (RFC-less, OpenSSH 9.6's Terrapin
+    /// fix): sequence numbers restart at 0 after NEWKEYS.
+    pub bool is_strict;
+}
+
+// The first of `ours` that `theirs` also lists, or "".
+str first_common(List<str> ours, List<str> theirs, List<str> excluded) {
+    for (str name in ours) {
+        if (theirs.contains(name) && !excluded.contains(name)) {
+            return name;
+        }
+    }
+    return "";
+}
+
+bool is_aead(str cipher) {
+    return cipher == CIPHER_ALGO || cipher == CIPHER_GCM256 || cipher == CIPHER_GCM128;
+}
+
+/// RFC 4253 §7.1 negotiation of `offer` against the server's `KEXINIT`.
+/// The three refusals are separate and named; a partial agreement is never
+/// returned. `kex-strict-*` markers are never chosen as an algorithm.
+pub Result<Suite, Error> negotiate(Offer offer, KexInit server) {
+    List<str> markers = [KEX_STRICT_CLIENT, KEX_STRICT_SERVER];
+    str kex = first_common(offer.kex, server.kex_algorithms, markers);
+    if (kex == "") {
+        return Result<Suite, Error>.Err(Error.NoCommonKex);
+    }
+    List<str> none = [];
+    str host_key = first_common(offer.host_keys, server.server_host_key_algorithms, none);
+    if (host_key == "") {
+        return Result<Suite, Error>.Err(Error.NoCommonHostKey);
+    }
+    str cipher_c2s = first_common(offer.ciphers, server.encryption_algorithms_client_to_server, none);
+    str cipher_s2c = first_common(offer.ciphers, server.encryption_algorithms_server_to_client, none);
+    if (cipher_c2s == "" || cipher_s2c == "") {
+        return Result<Suite, Error>.Err(Error.NoCommonCipher);
+    }
+    str mac_c2s = "";
+    str mac_s2c = "";
+    if (!is_aead(cipher_c2s)) {
+        mac_c2s = first_common(offer.macs, server.mac_algorithms_client_to_server, none);
+        if (mac_c2s == "") {
+            return Result<Suite, Error>.Err(Error.NoCommonCipher);
+        }
+    }
+    if (!is_aead(cipher_s2c)) {
+        mac_s2c = first_common(offer.macs, server.mac_algorithms_server_to_client, none);
+        if (mac_s2c == "") {
+            return Result<Suite, Error>.Err(Error.NoCommonCipher);
+        }
+    }
+    bool is_strict = offer.kex.contains(KEX_STRICT_CLIENT) && server.kex_algorithms.contains(KEX_STRICT_SERVER);
+    return Result<Suite, Error>.Ok(Suite(kex, host_key, cipher_c2s, cipher_s2c, mac_c2s, mac_s2c, is_strict));
+}
+
+/// `negotiate` against `default_offer()`, as a yes/no: `Ok` means a
+/// connection with this server can proceed.
 pub Result<void, Error> check_server_kexinit(KexInit server) {
-    if (!server.kex_algorithms.contains(KEX_ALGO)) {
-        return Result<void, Error>.Err(Error.NoCommonKex);
-    }
-    if (!server.server_host_key_algorithms.contains(HOST_KEY_ALGO)) {
-        return Result<void, Error>.Err(Error.NoCommonHostKey);
-    }
-    if (!server.encryption_algorithms_client_to_server.contains(CIPHER_ALGO) || !server.encryption_algorithms_server_to_client.contains(CIPHER_ALGO)) {
-        return Result<void, Error>.Err(Error.NoCommonCipher);
-    }
+    negotiate(default_offer(), server)?;
     return Result<void, Error>.Ok;
 }
 
@@ -701,8 +856,9 @@ pub Result<bytes, Error> parse_signature_blob(bytes blob) {
     return parse_blob(blob);
 }
 
-/// `H`, RFC 5656 §4: `SHA256(string V_C || string V_S || string I_C ||
-/// string I_S || string K_S || string Q_C || string Q_S || mpint K)`.
+/// `H`, RFC 5656 §4: `HASH(string V_C || string V_S || string I_C ||
+/// string I_S || string K_S || string Q_C || string Q_S || mpint K)`, with
+/// SHA-256 (what both `curve25519-sha256` and `ecdh-sha2-nistp256` use).
 /// `k_mpint` is already the full, length-prefixed encoding `encode_mpint`
 /// produces, so it is appended verbatim rather than wrapped again.
 pub bytes exchange_hash(bytes v_c, bytes v_s, bytes i_c, bytes i_s, bytes k_s, bytes q_c, bytes q_s, bytes k_mpint) {
@@ -718,159 +874,271 @@ pub bytes exchange_hash(bytes v_c, bytes v_s, bytes i_c, bytes i_s, bytes k_s, b
     return sha256.sum(hash_input);
 }
 
-// --- Part 5: key derivation (RFC 4253 §7.2, specialised per --------------
-// PROTOCOL.chacha20poly1305) --------------------------------------------------
+// --- host keys of every type this client accepts -------------------------------
 
-/// 64 bytes of key material for one direction's `letter` (`'C'` for
-/// client-to-server, `'D'` for server-to-client -- the only two this cipher
-/// ever asks for; it has neither a separate IV nor a separate integrity
-/// key, so the other four RFC 4253 §7.2 letters are never derived at all).
-/// `K1 = SHA256(K || H || letter || session_id)`, `K2 = SHA256(K || H ||
-/// K1)`, result `K1 || K2` -- the standard extend-on-demand rule, run once,
-/// since one hash's worth (32 bytes) is not enough for this cipher's
-/// required 512 bits per direction.
-pub bytes derive64(bytes k_mpint, bytes exchange_digest, int letter, bytes session_id) {
+// The octets of an SSH `mpint` content (its leading zero removed), as a
+// fixed-width big-endian value; `None` if it does not fit or is negative.
+Option<bytes> mpint_fixed(bytes content, int width) {
+    if (content.size() == 0) {
+        return Option<bytes>.None;
+    }
+    if ((content[0] & 0x80) != 0) {
+        return Option<bytes>.None;
+    }
+    int start = 0;
+    while (start < content.size() && content[start] == 0) {
+        start = start + 1;
+    }
+    int significant = content.size() - start;
+    if (significant > width) {
+        return Option<bytes>.None;
+    }
+    bytes out = [0; width];
+    int index = 0;
+    while (index < significant) {
+        out[width - significant + index] = content[start + index];
+        index = index + 1;
+    }
+    return Option<bytes>.Some(out);
+}
+
+/// Parses a host-key blob of any accepted type into a `HostKey`, checking
+/// that its shape is valid for the type: ed25519 (32 octets), ecdsa-sha2-
+/// nistp256 (curve name `nistp256` and a 65-octet uncompressed point that is
+/// on the curve), ssh-rsa (an odd modulus of 2048 to 4096 bits and a usable
+/// exponent). Anything else is `UnsupportedHostKeyType`.
+pub Result<HostKey, Error> parse_host_key(bytes blob) {
+    Field name = parse_string(blob, 0)?;
+    str algorithm = "";
+    match (name.value.utf8()) {
+        case Some(str text): {
+            algorithm = text;
+        }
+        case None: {
+            return Result<HostKey, Error>.Err(Error.UnsupportedHostKeyType);
+        }
+    }
+    if (algorithm == HOST_KEY_ALGO) {
+        Field key = parse_string(blob, name.next)?;
+        if (key.value.size() != 32 || key.next != blob.size()) {
+            return Result<HostKey, Error>.Err(Error.UnsupportedHostKeyType);
+        }
+        return Result<HostKey, Error>.Ok(HostKey(algorithm, blob, key.value));
+    }
+    if (algorithm == HOST_KEY_ECDSA_P256) {
+        Field curve = parse_string(blob, name.next)?;
+        Field point = parse_string(blob, curve.next)?;
+        if (curve.value != "nistp256".to_bytes() || point.next != blob.size()) {
+            return Result<HostKey, Error>.Err(Error.UnsupportedHostKeyType);
+        }
+        match (ecdsa.parse_public_key(ecdsa.p256(), point.value)) {
+            case Some(_): {
+                return Result<HostKey, Error>.Ok(HostKey(algorithm, blob, point.value));
+            }
+            case None: {
+                return Result<HostKey, Error>.Err(Error.BadKeyExchange);
+            }
+        }
+    }
+    if (algorithm == HOST_KEY_RSA) {
+        Field exponent = parse_string(blob, name.next)?;
+        Field modulus = parse_string(blob, exponent.next)?;
+        if (modulus.next != blob.size()) {
+            return Result<HostKey, Error>.Err(Error.UnsupportedHostKeyType);
+        }
+        match (rsa.parse_public_key(modulus.value, exponent.value)) {
+            case Some(_): {
+                bytes none = [];
+                return Result<HostKey, Error>.Ok(HostKey(algorithm, blob, none));
+            }
+            case None: {
+                return Result<HostKey, Error>.Err(Error.UnsupportedHostKeyType);
+            }
+        }
+    }
+    return Result<HostKey, Error>.Err(Error.UnsupportedHostKeyType);
+}
+
+// Verifies the server's signature `signature` (a `string alg, string data`
+// blob) over `message` with `key`; `algorithm` is the host-key algorithm
+// that was negotiated, which the signature's own name must equal (for RSA
+// the key type is `ssh-rsa` and the signature name `rsa-sha2-256/512`).
+Result<void, Error> verify_host_signature(HostKey key, str algorithm, bytes message, bytes signature) {
+    Field name = parse_string(signature, 0)?;
+    Field data = parse_string(signature, name.next)?;
+    if (data.next != signature.size()) {
+        return Result<void, Error>.Err(Error.Truncated);
+    }
+    match (name.value.utf8()) {
+        case Some(str text): {
+            if (text != algorithm) {
+                return Result<void, Error>.Err(Error.UnsupportedHostKeyType);
+            }
+        }
+        case None: {
+            return Result<void, Error>.Err(Error.UnsupportedHostKeyType);
+        }
+    }
+    if (key.algorithm == HOST_KEY_ALGO) {
+        if (algorithm != HOST_KEY_ALGO) {
+            return Result<void, Error>.Err(Error.UnsupportedHostKeyType);
+        }
+        if (data.value.size() != 64 || !ed25519.is_valid_signature(key.key, message, data.value)) {
+            return Result<void, Error>.Err(Error.BadSignature);
+        }
+        return Result<void, Error>.Ok;
+    }
+    if (key.algorithm == HOST_KEY_ECDSA_P256) {
+        if (algorithm != HOST_KEY_ECDSA_P256) {
+            return Result<void, Error>.Err(Error.UnsupportedHostKeyType);
+        }
+        Field r_field = parse_string(data.value, 0)?;
+        Field s_field = parse_string(data.value, r_field.next)?;
+        if (s_field.next != data.value.size()) {
+            return Result<void, Error>.Err(Error.BadSignature);
+        }
+        bytes raw = [];
+        match (mpint_fixed(r_field.value, 32)) {
+            case Some(bytes r_value): {
+                raw.extend(r_value);
+            }
+            case None: {
+                return Result<void, Error>.Err(Error.BadSignature);
+            }
+        }
+        match (mpint_fixed(s_field.value, 32)) {
+            case Some(bytes s_value): {
+                raw.extend(s_value);
+            }
+            case None: {
+                return Result<void, Error>.Err(Error.BadSignature);
+            }
+        }
+        match (ecdsa.parse_public_key(ecdsa.p256(), key.key)) {
+            case Some(ecdsa.PublicKey point): {
+                if (!ecdsa.is_valid_raw_signature(ecdsa.p256(), point, sha256.sum(message), raw)) {
+                    return Result<void, Error>.Err(Error.BadSignature);
+                }
+                return Result<void, Error>.Ok;
+            }
+            case None: {
+                return Result<void, Error>.Err(Error.BadKeyExchange);
+            }
+        }
+    }
+    if (key.algorithm == HOST_KEY_RSA) {
+        rsa.Hash hash = rsa.Hash.Sha256;
+        bytes digest = [];
+        if (algorithm == SIG_RSA_SHA256) {
+            digest = sha256.sum(message);
+        } else if (algorithm == SIG_RSA_SHA512) {
+            hash = rsa.Hash.Sha512;
+            digest = sha512.sum(message);
+        } else {
+            return Result<void, Error>.Err(Error.UnsupportedHostKeyType);
+        }
+        Field exponent = parse_string(key.blob, 0)?;
+        Field e_field = parse_string(key.blob, exponent.next)?;
+        Field n_field = parse_string(key.blob, e_field.next)?;
+        match (rsa.parse_public_key(n_field.value, e_field.value)) {
+            case Some(rsa.PublicKey public_key): {
+                if (!rsa.is_valid_pkcs1_v15_signature(public_key, hash, digest, data.value)) {
+                    return Result<void, Error>.Err(Error.BadSignature);
+                }
+                return Result<void, Error>.Ok;
+            }
+            case None: {
+                return Result<void, Error>.Err(Error.UnsupportedHostKeyType);
+            }
+        }
+    }
+    return Result<void, Error>.Err(Error.UnsupportedHostKeyType);
+}
+
+// --- Part 5: key derivation (RFC 4253 §7.2) -------------------------------------
+
+/// `size` octets of key material for `letter` (A..F): `K1 = HASH(K || H ||
+/// letter || session_id)`, `K(n+1) = HASH(K || H || K1 || ... || Kn)`, as
+/// many blocks as `size` needs, truncated. `HASH` is SHA-256 here.
+pub bytes derive(bytes k_mpint, bytes exchange_digest, int letter, bytes session_id, int size) {
     bytes buf1 = clone(k_mpint);
     buf1.extend(exchange_digest);
     buf1.push(letter);
     buf1.extend(session_id);
-    bytes first_hash = sha256.sum(buf1);
-    bytes buf2 = clone(k_mpint);
-    buf2.extend(exchange_digest);
-    buf2.extend(first_hash);
-    bytes second_hash = sha256.sum(buf2);
-    bytes out = clone(first_hash);
-    out.extend(second_hash);
-    return out;
-}
-
-// --- Part 6: binary packet protocol, chacha20-poly1305@openssh.com ----------
-// framing (post-NEWKEYS) -------------------------------------------------------
-
-// The packet sequence number, zero-extended to 8 bytes big-endian --
-// `PROTOCOL.chacha20poly1305`'s own "encoded as an uint64 under the SSH
-// wire encoding rules" for a value that, in this library (no rekeying,
-// RFC 4253 §9), never exceeds 32 bits in practice.
-bytes seq_to_bytes(int seq) {
-    bytes out = [];
-    push_u32(out, 0);
-    push_u32(out, seq);
-    return out;
-}
-
-// `data` XORed with the `openssh_block` keystream for `key`/`seq8`, block
-// counter starting at `block_counter_start` -- the same chunking
-// `chacha20poly1305.encrypt` already does for the IETF layout, just calling
-// `openssh_block` instead; this does not reimplement anything
-// security-critical (the permutation itself), only the XOR loop around it.
-bytes keystream_xor(bytes key, int block_counter_start, bytes seq8, bytes data) {
-    bytes out = [];
-    int data_length = data.size();
-    int block_start = 0;
-    int ctr = block_counter_start;
-    while (block_start < data_length) {
-        bytes keystream = chacha20poly1305.openssh_block(key, ctr, seq8);
-        int end = block_start + 64;
-        if (end > data_length) {
-            end = data_length;
-        }
-        int byte_index = block_start;
-        while (byte_index < end) {
-            out.push(data[byte_index] ^ keystream[byte_index - block_start]);
-            byte_index = byte_index + 1;
-        }
-        block_start = end;
-        ctr = ctr + 1;
+    bytes material = sha256.sum(buf1);
+    while (material.size() < size) {
+        bytes next_input = clone(k_mpint);
+        next_input.extend(exchange_digest);
+        next_input.extend(material);
+        material.extend(sha256.sum(next_input));
     }
-    return out;
+    return material.substr(0, size);
 }
 
-/// One ciphered packet, `PROTOCOL.chacha20poly1305`'s construction exactly:
-/// the 4-byte length encrypted with `length_key` (block counter 0), the
-/// padding-length/payload/padding encrypted with `payload_key` (block counter 1),
-/// and a Poly1305 tag over both ciphertexts using the one-time key
-/// `openssh_block(k2, 0, seq8)`. `seq` is this direction's running sequence
-/// number -- never reset at the `NEWKEYS` boundary (this module's header).
+/// 64 bytes of key material for one direction's `letter`: `derive` with
+/// `size` 64, what `chacha20-poly1305@openssh.com` takes per direction.
+pub bytes derive64(bytes k_mpint, bytes exchange_digest, int letter, bytes session_id) {
+    return derive(k_mpint, exchange_digest, letter, session_id, 64);
+}
+
+// --- Part 6: the packet ciphers (see lib/ssh/sshcipher.m31) ----------------------
+
+/// One ciphered packet of `chacha20-poly1305@openssh.com`, kept for its
+/// tests: `PROTOCOL.chacha20poly1305`'s construction exactly. `seq` is this
+/// direction's running sequence number.
 pub bytes encrypt_packet(bytes payload, bytes length_key, bytes payload_key, int seq, random.System rng) {
-    int pad_length = compute_padding_length_ciphered(payload.size());
-    bytes rest_pt = [];
-    rest_pt.push(pad_length);
-    rest_pt.extend(payload);
-    rest_pt.extend(rng.octets(pad_length));
-    bytes seq8 = seq_to_bytes(seq);
-    bytes length_pt = [];
-    push_u32(length_pt, rest_pt.size());
-    bytes length_ks = chacha20poly1305.openssh_block(length_key, 0, seq8);
-    bytes length_ct = [];
-    int length_index = 0;
-    while (length_index < 4) {
-        length_ct.push(length_pt[length_index] ^ length_ks[length_index]);
-        length_index = length_index + 1;
-    }
-    bytes rest_ct = keystream_xor(payload_key, 1, seq8, rest_pt);
-    bytes otk = chacha20poly1305.openssh_block(payload_key, 0, seq8).substr(0, 32);
-    bytes mac_input = clone(length_ct);
-    mac_input.extend(rest_ct);
-    bytes tag = chacha20poly1305.mac(otk, mac_input);
-    bytes out = clone(length_ct);
-    out.extend(rest_ct);
-    out.extend(tag);
-    return out;
+    bytes material = clone(payload_key);
+    material.extend(length_key);
+    return sshcipher.new_chacha(material).seal(payload, seq, rng);
 }
 
 /// The reverse of `encrypt_packet`, given the three wire components already
-/// read (`length_ct`, `rest_ct`, `tag`) -- **verifies the tag before
-/// decrypting anything**, per `PROTOCOL.chacha20poly1305`'s own stated
-/// reason: decrypting the length early, before the MAC is checked, would
-/// make it an oracle for the payload cipher.
+/// read -- **verifies the tag before decrypting anything**.
 pub Result<bytes, Error> decrypt_packet(bytes length_ct, bytes rest_ct, bytes tag, bytes length_key, bytes payload_key, int seq) {
-    bytes seq8 = seq_to_bytes(seq);
-    bytes otk = chacha20poly1305.openssh_block(payload_key, 0, seq8).substr(0, 32);
-    bytes mac_input = clone(length_ct);
-    mac_input.extend(rest_ct);
-    bytes want = chacha20poly1305.mac(otk, mac_input);
-    if (!consttime.is_equal(want, tag)) {
-        return Result<bytes, Error>.Err(Error.MacMismatch);
-    }
-    bytes rest_pt = keystream_xor(payload_key, 1, seq8, rest_ct);
-    int pad_length = rest_pt[0];
-    if (pad_length < MIN_PADDING || pad_length > rest_pt.size() - 1) {
-        return Result<bytes, Error>.Err(Error.BadPacketLength);
-    }
-    bytes payload = rest_pt.substr(1, rest_pt.size() - pad_length);
-    return Result<bytes, Error>.Ok(payload);
+    bytes material = clone(payload_key);
+    material.extend(length_key);
+    bytes rest = clone(rest_ct);
+    rest.extend(tag);
+    return cipher_result(sshcipher.new_chacha(material).open(length_ct, rest, seq));
 }
 
-// The length field alone, decrypted -- **not yet trusted for anything but
-// how many more bytes to read**, per `PROTOCOL.chacha20poly1305`'s own
-// reasoning (quoted on `decrypt_packet`); `recv_ciphered_payload` bounds it
-// against a sane ceiling before reading, and `decrypt_packet` re-derives
-// and checks the MAC before any of `rest_ct` is trusted either.
-int decrypt_length(bytes length_ct, bytes length_key, int seq) {
-    bytes seq8 = seq_to_bytes(seq);
-    bytes length_ks = chacha20poly1305.openssh_block(length_key, 0, seq8);
-    bytes length_pt = [];
-    int byte_index = 0;
-    while (byte_index < 4) {
-        length_pt.push(length_ct[byte_index] ^ length_ks[byte_index]);
-        byte_index = byte_index + 1;
+Result<bytes, Error> cipher_result(Result<bytes, sshcipher.Error> result) {
+    match (result) {
+        case Ok(bytes payload): {
+            return Result<bytes, Error>.Ok(payload);
+        }
+        case Err(sshcipher.Error error): {
+            match (error) {
+                case BadPacketLength: {
+                    return Result<bytes, Error>.Err(Error.BadPacketLength);
+                }
+                case MacMismatch: {
+                    return Result<bytes, Error>.Err(Error.MacMismatch);
+                }
+            }
+        }
     }
-    return be32(length_pt, 0);
 }
 
-Result<bytes, Error> recv_ciphered_payload(net.Conn connection, bytes length_key, bytes payload_key, int seq) {
-    bytes length_ct = read_exact(connection, 4)?;
-    int rest_length = decrypt_length(length_ct, length_key, seq);
-    if (rest_length < 1 || rest_length > 35000) {
-        return Result<bytes, Error>.Err(Error.BadPacketLength);
+// One packet off the wire through `cipher`: the header, the length check,
+// the rest, then open (which authenticates before it trusts anything).
+Result<bytes, Error> recv_ciphered_payload(Wire connection, sshcipher.Cipher cipher, int seq) {
+    bytes header = read_exact(connection, cipher.header_size())?;
+    int remaining = 0;
+    match (cipher.remaining(header, seq)) {
+        case Ok(int count): {
+            remaining = count;
+        }
+        case Err(_): {
+            return Result<bytes, Error>.Err(Error.BadPacketLength);
+        }
     }
-    bytes rest_ct = read_exact(connection, rest_length)?;
-    bytes tag = read_exact(connection, 16)?;
-    return decrypt_packet(length_ct, rest_ct, tag, length_key, payload_key, seq);
+    bytes rest = read_exact(connection, remaining)?;
+    return cipher_result(cipher.open(header, rest, seq));
 }
 
-Result<void, Error> send_ciphered_payload(net.Conn connection, bytes payload, bytes length_key, bytes payload_key, int seq, random.System rng) {
-    bytes pkt = encrypt_packet(payload, length_key, payload_key, seq, rng);
+Result<void, Error> send_ciphered_payload(Wire connection, bytes payload, sshcipher.Cipher cipher, int seq, random.System rng) {
+    bytes pkt = cipher.seal(payload, seq, rng);
     match (connection.write(pkt)) {
         case Ok(_): {
             return Result<void, Error>.Ok;
@@ -893,44 +1161,47 @@ pub interface Link {
 }
 
 /// A live, key-exchanged SSH connection: `send`/`recv` carry application
-/// payloads (Phase 3/4's job to interpret), already encrypted/authenticated
-/// in both directions. Every field is private -- the only way to build one
-/// is `ssh.connect`.
+/// payloads, already encrypted/authenticated in both directions. Every
+/// field is private -- the only way to build one is `ssh.connect`.
 pub type Transport {
-    net.Conn connection;
+    Wire connection;
     int send_seq;
     int recv_seq;
-    bytes c2s_k1;
-    bytes c2s_k2;
-    bytes s2c_k1;
-    bytes s2c_k2;
+    sshcipher.Cipher send_cipher;
+    sshcipher.Cipher recv_cipher;
     bytes sid;
     random.System rng;
+    Suite negotiated;
 }
 
 /// This connection's one (and only -- no rekeying) exchange hash `H`,
-/// needed verbatim by Phase 3's publickey-auth signature (RFC 4252 §7).
+/// needed verbatim by the publickey-auth signature (RFC 4252 §7).
 pub bytes Transport.session_id() {
     return sid;
 }
 
-/// Encrypts, pads and MACs `payload` as one packet and writes it. Mirrors
-/// `net.Conn.write`'s own "all of it, or an error" contract.
+/// What was negotiated, for a caller that wants to show it.
+pub Suite Transport.suite() {
+    return negotiated;
+}
+
+/// Encrypts, pads and authenticates `payload` as one packet and writes it.
+/// Mirrors `net.Conn.write`'s own "all of it, or an error" contract.
 pub Result<int, Error> Transport.send(bytes payload) {
-    send_ciphered_payload(connection, payload, c2s_k1, c2s_k2, send_seq, rng)?;
+    send_ciphered_payload(connection, payload, send_cipher, send_seq, rng)?;
     send_seq = send_seq + 1;
     return Result<int, Error>.Ok(payload.size());
 }
 
-/// Reads, MAC-checks and decrypts packets until one carries an
+/// Reads, authenticates and decrypts packets until one carries an
 /// application-layer payload: `SSH_MSG_IGNORE`/`DEBUG`/`UNIMPLEMENTED` are
 /// transport-layer housekeeping RFC 4253 says any implementation must
 /// tolerate silently at any time, so this layer absorbs them rather than
-/// handing them to Phase 3/4, which should only ever see its own messages.
-/// `SSH_MSG_DISCONNECT` becomes `Err(Error.Disconnected)`.
+/// handing them to the layers above. `SSH_MSG_DISCONNECT` becomes
+/// `Err(Error.Disconnected)`.
 pub Result<bytes, Error> Transport.recv() {
     while (true) {
-        bytes payload = recv_ciphered_payload(connection, s2c_k1, s2c_k2, recv_seq)?;
+        bytes payload = recv_ciphered_payload(connection, recv_cipher, recv_seq)?;
         recv_seq = recv_seq + 1;
         if (payload.size() == 0) {
             return Result<bytes, Error>.Err(Error.Truncated);
@@ -980,8 +1251,9 @@ pub Result<bool, Error> Transport.wait(int timeout_ms) {
     }
 }
 
-/// The socket's descriptor, so that another green thread can park on it
-/// (see `net.Conn.fileno`). Borrowed, never closed through this number.
+/// The descriptor an event loop can `poll` for this connection's input. For a
+/// tunnelled connection it is the outermost socket's: readable there means
+/// "something may be waiting", and `wait(0)` is the exact answer.
 pub int Transport.descriptor() {
     return connection.fileno();
 }
@@ -994,7 +1266,7 @@ pub Result<bool, Error> Transport.disconnect() {
     push_u32(out, 11);
     push_string(out, "disconnected by user".to_bytes());
     push_string(out, "".to_bytes());
-    Result<void, Error> ignored = send_ciphered_payload(connection, out, c2s_k1, c2s_k2, send_seq, rng);
+    Result<void, Error> ignored = send_ciphered_payload(connection, out, send_cipher, send_seq, rng);
     match (connection.close()) {
         case Ok(bool is_closed): {
             return Result<bool, Error>.Ok(is_closed);
@@ -1020,13 +1292,13 @@ pub Result<bool, Error> Transport.close() {
 
 /// A host key as a server presented it. Public, so nothing here is secret.
 pub type HostKey {
-    /// The key type, always `ssh-ed25519` (the one this client negotiates).
+    /// The key type: `ssh-ed25519`, `ecdsa-sha2-nistp256` or `ssh-rsa`.
     pub str algorithm;
-    /// The wire blob (`string "ssh-ed25519", string key`): what a
-    /// `known_hosts` line's base64 column encodes and what OpenSSH hashes
-    /// into a fingerprint.
+    /// The wire blob (`string type, ...`): what a `known_hosts` line's
+    /// base64 column encodes and what OpenSSH hashes into a fingerprint.
     pub bytes blob;
-    /// The raw 32-octet Ed25519 public key.
+    /// ed25519: the raw 32-octet key. ecdsa: the 65-octet point. rsa: empty
+    /// (use `blob`).
     pub bytes key;
 }
 
@@ -1061,61 +1333,119 @@ bool is_key_listed(bytes host_key, List<bytes> allowed) {
 // Everything the first half of a handshake leaves behind: the key exchange
 // is done and the server has proved, by signing the exchange hash, that it
 // holds the private half of `host_key` -- but no key has been trusted and no
-// `NEWKEYS` sent. Two packets each way have gone by, so both sequence
-// numbers stand at 2.
+// `NEWKEYS` sent.
 type Exchange {
     HostKey host_key;
     bytes k_mpint;
     bytes exchange_digest;
+    Suite suite;
 }
 
 // Version exchange, KEXINIT both ways, the ECDH exchange and the check of the
 // host key's signature -- the part of a handshake that is the same whether or
 // not the key is one the caller trusts.
-Result<Exchange, Error> exchange_keys(net.Conn connection, random.System rng) {
+//
+// Strict kex (OpenSSH 9.6, the Terrapin fix): if both sides advertise it, the
+// handshake must be exactly KEXINIT, the exchange and NEWKEYS with nothing
+// in between (this function reads only those messages and treats any other
+// -- including IGNORE and DEBUG -- as `UnexpectedMessage`), and the sequence
+// numbers restart at 0 after NEWKEYS (`finish_handshake`). Without the peer's
+// marker the old behaviour is kept so older servers still work.
+Result<Exchange, Error> exchange_keys(Wire connection, random.System rng, Offer offer) {
     VersionPair version_pair = exchange_version(connection)?;
-    bytes i_c = build_client_kexinit(rng);
+    bytes i_c = build_kexinit(rng, offer);
     send_plain_payload(connection, i_c, rng)?;
     bytes i_s = recv_plain_payload(connection)?;
     KexInit server_kex = parse_kexinit(i_s)?;
-    check_server_kexinit(server_kex)?;
-    bytes secret = rng.octets(32);
-    bytes q_c = x25519.base_point(secret);
+    Suite suite = negotiate(offer, server_kex)?;
+    bytes q_c = [];
+    bytes secret = [];
+    ecdsa.Curve curve = ecdsa.p256();
+    if (suite.kex == KEX_ECDH_P256) {
+        secret = rng.octets(32);
+        while (!ecdsa.is_secret_scalar(curve, secret)) {
+            secret = rng.octets(32);
+        }
+        q_c = ecdsa.ephemeral_public(curve, secret);
+    } else {
+        secret = rng.octets(32);
+        q_c = x25519.base_point(secret);
+    }
     send_plain_payload(connection, build_kex_ecdh_init(q_c), rng)?;
     bytes reply_payload = recv_plain_payload(connection)?;
     KexEcdhReply reply = parse_kex_ecdh_reply(reply_payload)?;
-    bytes raw_key = parse_host_key_blob(reply.k_s)?;
-    // RFC 8731 §3.1's text says this gets reversed (little-endian, RFC
-    // 7748's own output, into big-endian before mpint-wrapping) -- but a
-    // real `sshd` rejects the host key signature when that reversal is
-    // applied, and accepts it when `x25519`'s raw output is mpint-encoded
-    // directly, confirmed with `tests/ssh/test_transport.sh`'s live fixture.
-    // This is the actual, shipped OpenSSH behavior, not this module's own
-    // reading of the RFC text -- see this module's header.
-    bytes shared = x25519.x25519(secret, reply.q_s);
+    HostKey host_key = parse_host_key(reply.k_s)?;
+    bytes shared = [];
+    if (suite.kex == KEX_ECDH_P256) {
+        match (ecdsa.parse_public_key(curve, reply.q_s)) {
+            case Some(ecdsa.PublicKey peer): {
+                shared = ecdsa.shared_secret(curve, peer, secret);
+            }
+            case None: {
+                return Result<Exchange, Error>.Err(Error.BadKeyExchange);
+            }
+        }
+    } else {
+        if (reply.q_s.size() != 32) {
+            return Result<Exchange, Error>.Err(Error.BadKeyExchange);
+        }
+        // RFC 8731 §3.1's text says this gets reversed (little-endian, RFC
+        // 7748's own output, into big-endian before mpint-wrapping) -- but a
+        // real `sshd` rejects the host key signature when that reversal is
+        // applied, and accepts it when `x25519`'s raw output is mpint-encoded
+        // directly, confirmed with `tests/ssh/test_transport.sh`'s live
+        // fixture. This is the actual, shipped OpenSSH behavior.
+        shared = x25519.x25519(secret, reply.q_s);
+    }
     bytes k_mpint = encode_mpint(shared);
     bytes exchange_digest = exchange_hash(version_pair.v_c, version_pair.v_s, i_c, i_s, reply.k_s, q_c, reply.q_s, k_mpint);
-    bytes sig = parse_signature_blob(reply.signature)?;
-    if (!ed25519.is_valid_signature(raw_key, exchange_digest, sig)) {
-        return Result<Exchange, Error>.Err(Error.BadSignature);
+    verify_host_signature(host_key, suite.host_key, exchange_digest, reply.signature)?;
+    return Result<Exchange, Error>.Ok(Exchange(host_key, k_mpint, exchange_digest, suite));
+}
+
+// Key sizes of the ciphers this client has: (key octets, iv octets).
+int cipher_key_size(str name) {
+    if (name == CIPHER_ALGO) {
+        return 64;
     }
-    return Result<Exchange, Error>.Ok(Exchange(HostKey(HOST_KEY_ALGO, reply.k_s, raw_key), k_mpint, exchange_digest));
+    if (name == CIPHER_GCM256 || name == CIPHER_CTR256) {
+        return 32;
+    }
+    return 16;
+}
+
+int cipher_iv_size(str name) {
+    if (name == CIPHER_ALGO) {
+        return 0;
+    }
+    if (name == CIPHER_GCM256 || name == CIPHER_GCM128) {
+        return 12;
+    }
+    return 16;
+}
+
+// One direction's cipher from the exchange: letters as RFC 4253 §7.2
+// (IV A/B, key C/D, integrity E/F for client-to-server/server-to-client).
+sshcipher.Cipher make_cipher(Exchange exchange, str name, str mac, int iv_letter, int key_letter, int mac_letter) {
+    bytes key = derive(exchange.k_mpint, exchange.exchange_digest, key_letter, exchange.exchange_digest, cipher_key_size(name));
+    if (name == CIPHER_ALGO) {
+        return sshcipher.new_chacha(key);
+    }
+    bytes initial_vector = derive(exchange.k_mpint, exchange.exchange_digest, iv_letter, exchange.exchange_digest, cipher_iv_size(name));
+    if (name == CIPHER_GCM256 || name == CIPHER_GCM128) {
+        return sshcipher.new_aes_gcm(key, initial_vector);
+    }
+    bytes mac_key = derive(exchange.k_mpint, exchange.exchange_digest, mac_letter, exchange.exchange_digest, 32);
+    return sshcipher.new_aes_ctr(key, initial_vector, mac_key, mac == MAC_ETM);
 }
 
 // The rest of the handshake, given an exchange whose host key the caller has
-// accepted: key derivation, then NEWKEYS both ways. Sequence numbers are
-// tracked from each side's very first packet (its own KEXINIT) and never
-// reset at the NEWKEYS boundary -- see this module's header and Part 6's own
-// note.
-Result<Transport, Error> finish_handshake(net.Conn connection, Exchange exchange, random.System rng) {
+// accepted: key derivation, then NEWKEYS both ways.
+Result<Transport, Error> finish_handshake(Wire connection, Exchange exchange, random.System rng) {
     int send_seq = 2;
     int recv_seq = 2;
-    bytes c2s_material = derive64(exchange.k_mpint, exchange.exchange_digest, 'C', exchange.exchange_digest);
-    bytes s2c_material = derive64(exchange.k_mpint, exchange.exchange_digest, 'D', exchange.exchange_digest);
-    bytes c2s_k2 = c2s_material.substr(0, 32);
-    bytes c2s_k1 = c2s_material.substr(32, 64);
-    bytes s2c_k2 = s2c_material.substr(0, 32);
-    bytes s2c_k1 = s2c_material.substr(32, 64);
+    sshcipher.Cipher send_cipher = make_cipher(exchange, exchange.suite.cipher_client_to_server, exchange.suite.mac_client_to_server, 'A', 'C', 'E');
+    sshcipher.Cipher recv_cipher = make_cipher(exchange, exchange.suite.cipher_server_to_client, exchange.suite.mac_server_to_client, 'B', 'D', 'F');
     send_plain_payload(connection, [SSH_MESSAGE_NEWKEYS], rng)?;
     send_seq = send_seq + 1;
     bytes their_newkeys = recv_plain_payload(connection)?;
@@ -1123,19 +1453,57 @@ Result<Transport, Error> finish_handshake(net.Conn connection, Exchange exchange
     if (their_newkeys.size() != 1 || their_newkeys[0] != SSH_MESSAGE_NEWKEYS) {
         return Result<Transport, Error>.Err(Error.UnexpectedMessage);
     }
-    return Result<Transport, Error>.Ok(Transport(connection, send_seq, recv_seq, c2s_k1, c2s_k2, s2c_k1, s2c_k2, exchange.exchange_digest, rng));
+    if (exchange.suite.is_strict) {
+        send_seq = 0;
+        recv_seq = 0;
+    }
+    return Result<Transport, Error>.Ok(Transport(connection, send_seq, recv_seq, send_cipher, recv_cipher, exchange.exchange_digest, rng, exchange.suite));
 }
 
-// The whole handshake, given an already-connected socket. The signature is
-// checked before the key is compared with the expected ones, so a
-// `HostKeyMismatch` always names a key the server really holds.
-Result<Transport, Error> do_handshake(net.Conn connection, List<bytes> expected_host_keys) {
+/// What decides, mid-handshake, whether the server's host key is trusted:
+/// `is_acceptable` is called once, after the key's signature over the
+/// exchange hash has verified (so `key` really belongs to whoever answered)
+/// and before any key is derived or any credential offered. `false` ends the
+/// handshake with `Error.HostKeyMismatch`. It may ask a person; it must not
+/// record anything it was not told to.
+pub interface HostKeyCheck {
+    bool is_acceptable(HostKey key);
+}
+
+/// The handshake over a connection the caller already made (so it can tell a
+/// refused connection from an unreachable one), with the host-key decision
+/// handed to `check` instead of a fixed list and the algorithms `offer`.
+/// One connection, one key exchange: nothing is asked of the server twice.
+pub Result<Transport, Error> connect_with_offer(Wire connection, HostKeyCheck check, Offer offer, int timeout_ms = 0) {
+    if (timeout_ms > 0) {
+        match (connection.set_read_timeout(timeout_ms)) {
+            case Ok(bool is_set): {
+            }
+            case Err(_): {
+                return Result<Transport, Error>.Err(Error.Io);
+            }
+        }
+    }
     random.System rng = random.system();
-    Exchange exchange = exchange_keys(connection, rng)?;
-    if (!is_key_listed(exchange.host_key.key, expected_host_keys)) {
+    Exchange exchange = exchange_keys(connection, rng, offer)?;
+    if (!check.is_acceptable(exchange.host_key)) {
         return Result<Transport, Error>.Err(Error.HostKeyMismatch);
     }
     return finish_handshake(connection, exchange, rng);
+}
+
+/// `connect_with_offer` with `default_offer()`.
+pub Result<Transport, Error> connect_over(Wire connection, HostKeyCheck check, int timeout_ms = 0) {
+    return connect_with_offer(connection, check, default_offer(), timeout_ms: timeout_ms);
+}
+
+// A fixed list of acceptable raw ed25519 keys, as `connect_any` takes.
+type ListedKeys {
+    List<bytes> keys;
+}
+
+bool ListedKeys.is_acceptable(HostKey key) {
+    return key.algorithm == HOST_KEY_ALGO && is_key_listed(key.key, keys);
 }
 
 /// Connects to `host`:`port`, runs the whole handshake, and refuses unless
@@ -1150,20 +1518,13 @@ pub Result<Transport, Error> connect(str host, int port, bytes expected_host_key
 /// As `connect`, but any one of `host_keys` is acceptable -- a host that
 /// has rotated keys, or a `known_hosts` file listing several. An empty list
 /// refuses every server (`Error.HostKeyMismatch`): there is no trust on
-/// first use.
+/// first use. Only `ssh-ed25519` host keys are asked for.
 pub Result<Transport, Error> connect_any(str host, int port, List<bytes> host_keys, int timeout_ms = 0) {
     match (net.connect(host, port)) {
         case Ok(net.Conn connection): {
-            if (timeout_ms > 0) {
-                match (connection.set_read_timeout(timeout_ms)) {
-                    case Ok(bool is_set): {
-                    }
-                    case Err(_): {
-                        return Result<Transport, Error>.Err(Error.Io);
-                    }
-                }
-            }
-            return do_handshake(connection, host_keys);
+            Offer offer = offer_preferring([HOST_KEY_ALGO]);
+            offer.host_keys = [HOST_KEY_ALGO];
+            return connect_with_offer(connection, ListedKeys(host_keys), offer, timeout_ms: timeout_ms);
         }
         case Err(_): {
             return Result<Transport, Error>.Err(Error.Io);
@@ -1171,36 +1532,13 @@ pub Result<Transport, Error> connect_any(str host, int port, List<bytes> host_ke
     }
 }
 
-/// What decides, mid-handshake, whether the server's host key is trusted:
-/// `accept` is called once, after the key's signature over the exchange hash
-/// has verified (so `key` really belongs to whoever answered) and before any
-/// key is derived or any credential offered. `false` ends the handshake with
-/// `Error.HostKeyMismatch`. It may ask a person; it must not record anything
-/// it was not told to.
-pub interface HostKeyCheck {
-    bool is_acceptable(HostKey key);
+// Accepts any key: only for `presented_host_key`, which trusts nothing.
+type AnyKey {
+    int unused;
 }
 
-/// The handshake over a connection the caller already made (so it can tell a
-/// refused connection from an unreachable one), with the host-key decision
-/// handed to `check` instead of a fixed list. One connection, one key
-/// exchange: nothing is asked of the server twice.
-pub Result<Transport, Error> connect_over(net.Conn connection, HostKeyCheck check, int timeout_ms = 0) {
-    if (timeout_ms > 0) {
-        match (connection.set_read_timeout(timeout_ms)) {
-            case Ok(bool is_set): {
-            }
-            case Err(_): {
-                return Result<Transport, Error>.Err(Error.Io);
-            }
-        }
-    }
-    random.System rng = random.system();
-    Exchange exchange = exchange_keys(connection, rng)?;
-    if (!check.is_acceptable(exchange.host_key)) {
-        return Result<Transport, Error>.Err(Error.HostKeyMismatch);
-    }
-    return finish_handshake(connection, exchange, rng);
+bool AnyKey.is_acceptable(HostKey key) {
+    return true;
 }
 
 /// The host key the server at `host`:`port` presents, for a caller that
@@ -1208,17 +1546,16 @@ pub Result<Transport, Error> connect_over(net.Conn connection, HostKeyCheck chec
 /// `sshhosts.add`). Runs the key exchange as `connect_any` does, including
 /// the check of the server's signature -- so the key really belongs to
 /// whoever answered -- and then hangs up: nothing is trusted, no
-/// credentials are offered, and no session exists afterwards. A server that
-/// speaks something other than the one suite this client does
-/// (`NoCommonHostKey`, ...) is an error, not a key.
+/// credentials are offered, and no session exists afterwards.
 ///
 /// This is a second connection. That is safe: it decides only what to
 /// *show*; the key the person approves is then enforced by an ordinary
-/// `connect_any`, which refuses any other.
+/// `connect_any`, which refuses any other. (`connect_over` with a
+/// `HostKeyCheck` decides on the one connection and is what `m31ssh` uses.)
 pub Result<HostKey, Error> presented_host_key(str host, int port) {
     match (net.connect(host, port)) {
         case Ok(net.Conn connection): {
-            Result<Exchange, Error> got = exchange_keys(connection, random.system());
+            Result<Exchange, Error> got = exchange_keys(connection, random.system(), default_offer());
             match (connection.close()) {
                 case Ok(bool done): {
                 }

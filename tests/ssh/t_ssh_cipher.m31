@@ -1,0 +1,136 @@
+// `lib/ssh/sshcipher.m31` driven by `oracle_sshcipher.py`, which feeds it
+// lines on standard input and checks the answers with OpenSSL (the
+// `cryptography` package) and its own independent packet code.
+//
+//   open KIND KEYHEX IVHEX MACHEX SEQ WIRE...   -> payload HEX... | error NAME
+//   seal KIND KEYHEX IVHEX MACHEX SEQ PAYLOAD... -> wire HEX...
+//
+// KIND is chacha, gcm, ctr or ctretm. Several WIRE or PAYLOAD fields are
+// consecutive packets through one cipher object (SEQ, SEQ+1, ...), so the
+// keystream and the invocation counter are checked across packets.
+import io;
+import os;
+import random;
+import encoding.hexcodec;
+import ssh.sshcipher;
+
+bytes unhex(str text) {
+    if (text == "-") {
+        bytes none = [];
+        return none;
+    }
+    match (hexcodec.decode(text)) {
+        case Ok(bytes value): {
+            return value;
+        }
+        case Err(_): {
+            trap("bad hex in vector: " + text);
+        }
+    }
+}
+
+sshcipher.Cipher make(str kind, bytes key, bytes initial_vector, bytes mac) {
+    if (kind == "chacha") {
+        return sshcipher.new_chacha(key);
+    }
+    if (kind == "gcm") {
+        return sshcipher.new_aes_gcm(key, initial_vector);
+    }
+    return sshcipher.new_aes_ctr(key, initial_vector, mac, kind == "ctretm");
+}
+
+str run_open(List<str> fields) {
+    sshcipher.Cipher cipher = make(fields[1], unhex(fields[2]), unhex(fields[3]), unhex(fields[4]));
+    Option<int> first = fields[5].parse_int();
+    int seq = 0;
+    match (first) {
+        case Some(int value): {
+            seq = value;
+        }
+        case None: {
+            trap("bad seq");
+        }
+    }
+    List<str> out = [];
+    int index = 6;
+    while (index < fields.size()) {
+        bytes wire = unhex(fields[index]);
+        int head = cipher.header_size();
+        if (wire.size() < head) {
+            return "error short";
+        }
+        match (cipher.remaining(wire.substr(0, head), seq)) {
+            case Ok(int rest_size): {
+                if (rest_size != wire.size() - head) {
+                    return "error framing";
+                }
+                match (cipher.open(wire.substr(0, head), wire.substr(head, wire.size()), seq)) {
+                    case Ok(bytes payload): {
+                        out.push(hexcodec.encode(payload));
+                    }
+                    case Err(sshcipher.Error error): {
+                        return "error " + error.to_str();
+                    }
+                }
+            }
+            case Err(sshcipher.Error error): {
+                return "error " + error.to_str();
+            }
+        }
+        seq = seq + 1;
+        index = index + 1;
+    }
+    return "payload " + out.join(" ");
+}
+
+str run_seal(List<str> fields) {
+    sshcipher.Cipher cipher = make(fields[1], unhex(fields[2]), unhex(fields[3]), unhex(fields[4]));
+    int seq = 0;
+    match (fields[5].parse_int()) {
+        case Some(int value): {
+            seq = value;
+        }
+        case None: {
+            trap("bad seq");
+        }
+    }
+    random.System rng = random.system();
+    List<str> out = [];
+    int index = 6;
+    while (index < fields.size()) {
+        out.push(hexcodec.encode(cipher.seal(unhex(fields[index]), seq, rng)));
+        seq = seq + 1;
+        index = index + 1;
+    }
+    return "wire " + out.join(" ");
+}
+
+str input = "";
+match (io.stdin().read_all()) {
+    case Ok(bytes data): {
+        match (data.utf8()) {
+            case Some(str text): {
+                input = text;
+            }
+            case None: {
+                trap("input is not text");
+            }
+        }
+    }
+    case Err(_): {
+        trap("cannot read stdin");
+    }
+}
+for (str line in input.split("\n")) {
+    if (line.trim() == "") {
+        continue;
+    }
+    List<str> fields = line.trim().split(" ");
+    if (fields[0] == "open") {
+        print(run_open(fields));
+    } else if (fields[0] == "seal") {
+        print(run_seal(fields));
+    } else {
+        trap("unknown vector line");
+    }
+}

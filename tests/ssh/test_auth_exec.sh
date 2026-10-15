@@ -275,6 +275,9 @@ str why(sshclient.Error e) {
                 case TimedOut: {
                     return "connect-timed-out";
                 }
+                case BadKeyExchange: {
+                    return "connect-bad-kex";
+                }
                 case Truncated: {
                     return "connect-truncated";
                 }
