@@ -61,6 +61,8 @@ pub enum Error {
     /// The server answered the signed request with `USERAUTH_FAILURE`, or
     /// asked for a further method this client does not have.
     AuthFailed;
+    /// The signer (an ssh-agent) could not produce a signature.
+    SignerFailed;
 }
 
 pub str Error.to_str() {
@@ -82,6 +84,9 @@ pub str Error.to_str() {
         }
         case AuthFailed: {
             return "the server refused the signed authentication request";
+        }
+        case SignerFailed: {
+            return "the signing agent could not sign";
         }
     }
 }
@@ -258,6 +263,22 @@ Result<bytes, Error> recv_message(ssh.Link link) {
     }
 }
 
+/// Something that can sign the authentication data for one public key: a
+/// loaded `sshkey.PrivateKey` (through `KeySigner`), or an ssh-agent
+/// (`sshagent.AgentSigner`). `Err` carries a short reason with no secret in it.
+pub interface Signer {
+    Result<bytes, str> sign_blob(bytes message);
+}
+
+/// An in-process key as a `Signer`.
+pub type KeySigner {
+    pub sshkey.PrivateKey key;
+}
+
+pub Result<bytes, str> KeySigner.sign_blob(bytes message) {
+    return Result<bytes, str>.Ok(key.signature_blob(message));
+}
+
 /// Authenticates as `user` with `key` over `link`. `Ok` is the server's
 /// banner text, possibly empty.
 pub Result<str, Error> authenticate(ssh.Link link, str user, sshkey.PrivateKey key) {
@@ -269,9 +290,23 @@ pub Result<str, Error> authenticate(ssh.Link link, str user, sshkey.PrivateKey k
 /// the signer's own public blob; the two differ only in a test that proves a
 /// signature by the wrong key is refused.
 pub Result<str, Error> authenticate_as(ssh.Link link, str user, bytes public_blob, sshkey.PrivateKey signer) {
+    start(link)?;
+    return try_key(link, user, public_blob, KeySigner(signer));
+}
+
+/// Asks for the `ssh-userauth` service. Call once, before any `try_key`.
+pub Result<void, Error> start(ssh.Link link) {
     send_message(link, build_service_request())?;
     bytes accept = recv_message(link)?;
     parse_service_accept(accept)?;
+    return Result<void, Error>.Ok;
+}
+
+/// Tries one identity: probe, then sign and send. `Ok(banner)` is success;
+/// `Err(KeyRejected)` means the server does not accept this key and the
+/// caller may `try_key` another over the same link (nothing was signed);
+/// `Err(AuthFailed)` means the server refused the signature.
+pub Result<str, Error> try_key(ssh.Link link, str user, bytes public_blob, Signer signer) {
     send_message(link, build_query(user, public_blob))?;
     str banner = "";
     int seen = 0;
@@ -299,7 +334,15 @@ pub Result<str, Error> authenticate_as(ssh.Link link, str user, bytes public_blo
         }
     }
     bytes signed_data = signature_data(link.session_id(), user, public_blob);
-    bytes signature = signer.signature_blob(signed_data);
+    bytes signature = [];
+    match (signer.sign_blob(signed_data)) {
+        case Ok(bytes blob): {
+            signature = blob;
+        }
+        case Err(str reason): {
+            return Result<str, Error>.Err(Error.SignerFailed);
+        }
+    }
     send_message(link, build_signed_request(user, public_blob, signature))?;
     while (true) {
         bytes reply = recv_message(link)?;

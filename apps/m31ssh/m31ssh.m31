@@ -1,0 +1,9 @@
+// m31ssh -- an SSH client written in m31. UNAUDITED: see docs/m31ssh.md.
+//
+//   m31ssh [-p port] [-i identity] [-l user] [-o option=value] [user@]host [command]
+//
+// This file is only the entry point; everything is in `core/`.
+import os;
+import core.SSHC_main;
+
+os.exit(SSHC_main.start(os.arguments()));

@@ -3,6 +3,36 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
+## 0.5.0 (2026-10-15)
+
+### Added
+
+- **`m31ssh`** (`apps/m31ssh`), an interactive SSH client, **unaudited**
+  (`docs/m31ssh.md`): shell over a pty with raw mode and the current size,
+  resize forwarded within ~100 ms, `~.` / `~~` / `~?`, command execution with
+  the remote exit status (255 on its own errors), large transfers both ways
+  with real channel flow control, `-p -i -l -o -F -t -tt -T -n -e -q`,
+  Ed25519 key files and `ssh-agent` signing, strict `known_hosts` with a
+  trust-on-first-use prompt (`StrictHostKeyChecking` yes/ask/accept-new/no;
+  a changed key is a refusal that names the fingerprint and never rewrites the
+  file), `~/.ssh/config` (`Host` patterns, `HostName`, `User`, `Port`,
+  `IdentityFile`, `IdentitiesOnly`, `StrictHostKeyChecking`,
+  `UserKnownHostsFile`, `ServerAliveInterval`/`CountMax`, `ConnectTimeout`),
+  keepalives and read timeouts.
+- `lib/ssh/sshagent.m31` (ssh-agent client; signatures are verified before
+  use), `lib/ssh/sshconfig.m31` (ssh_config reader, pure) and
+  `lib/ssh/sshshell.m31` (the interactive loop and the `~.` filter).
+- `sshexec`: `open_pty`, `shell`, `Channel.window_change`, `pump_one`,
+  `take_output`/`take_error`, `write_available` (a send that never waits),
+  keepalive requests and their replies. `sshauth`: `Signer`, `start` and
+  `try_key` (several identities over one connection). `ssh`:
+  `connect_over` with a `HostKeyCheck` callback (one connection, the decision
+  made mid-handshake), `Transport.wait`, `descriptor`, `disconnect`.
+  `net.Conn.fileno`.
+- `tests/ssh/test_m31ssh.sh`: 66 checks against a disposable `sshd`, driven
+  over a pty, with a private `ssh-agent`, a silent peer, a frozen server and
+  nine hostile servers.
+
 ## 0.4.6 (2026-10-15)
 
 ### Added

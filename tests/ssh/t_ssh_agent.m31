@@ -1,0 +1,180 @@
+// `lib/ssh/sshagent.m31`'s message builders and parsers, including every
+// proper prefix of a valid answer and hostile counts and lengths: none may
+// trap, and none may be accepted. The live agent is `test_m31ssh.sh`'s job.
+import ssh;
+import ssh.sshagent;
+
+int check(int passed_count, bool is_ok, str label) {
+    if (!is_ok) {
+        trap("check failed: " + label);
+    }
+    return passed_count + 1;
+}
+
+bytes octets(str text) {
+    return text.to_bytes();
+}
+
+bytes ed_blob(int fill) {
+    bytes out = [];
+    ssh.push_string(out, octets("ssh-ed25519"));
+    ssh.push_string(out, [fill; 32]);
+    return out;
+}
+
+bytes rsa_blob() {
+    bytes out = [];
+    ssh.push_string(out, octets("ssh-rsa"));
+    ssh.push_string(out, [1; 3]);
+    ssh.push_string(out, [2; 3]);
+    return out;
+}
+
+void push_u32(bytes out, int value) {
+    out.push(value >> 24 & 0xFF);
+    out.push(value >> 16 & 0xFF);
+    out.push(value >> 8 & 0xFF);
+    out.push(value & 0xFF);
+}
+
+int checks = 0;
+bytes eleven = [11];
+checks = check(checks, sshagent.build_identities_request() == eleven, "REQUEST_IDENTITIES is 11");
+bytes sign = sshagent.build_sign_request(ed_blob(1), [9, 9, 9]);
+checks = check(checks, sign[0] == 13 && sign.size() == 1 + 4 + 51 + 4 + 3 + 4, "SIGN_REQUEST layout");
+checks = check(checks, sign[sign.size() - 1] == 0 && sign[sign.size() - 4] == 0, "SIGN_REQUEST flags are 0");
+bytes answer = [12];
+push_u32(answer, 3);
+ssh.push_string(answer, ed_blob(1));
+ssh.push_string(answer, octets("first"));
+ssh.push_string(answer, rsa_blob());
+ssh.push_string(answer, octets("an rsa key"));
+ssh.push_string(answer, ed_blob(2));
+ssh.push_string(answer, octets("second"));
+match (sshagent.parse_identities(answer)) {
+    case Ok(List<sshagent.Identity> keys): {
+        checks = check(checks, keys.size() == 2, "non-ed25519 identities are skipped");
+        checks = check(checks, keys[0].comment == "first" && keys[1].comment == "second" && keys[1].blob == ed_blob(2), "identities and comments in order");
+    }
+    case Err(sshagent.Error error): {
+        trap("parse_identities: " + error.to_str());
+    }
+}
+// every proper prefix of a valid answer is refused, never a trap
+int refused = 0;
+int cut = 0;
+while (cut < answer.size()) {
+    match (sshagent.parse_identities(answer.substr(0, cut))) {
+        case Ok(List<sshagent.Identity> keys): {
+        }
+        case Err(sshagent.Error error): {
+            refused = refused + 1;
+        }
+    }
+    cut = cut + 1;
+}
+checks = check(checks, refused == answer.size(), "every proper prefix of an IDENTITIES_ANSWER is refused");
+bytes huge = [12];
+push_u32(huge, 4000000000);
+checks = check(checks, !is_ok_ids(sshagent.parse_identities(huge)), "an absurd identity count is refused");
+checks = check(checks, !is_ok_ids(sshagent.parse_identities([5])), "FAILURE is not an answer");
+checks = check(checks, !is_ok_ids(sshagent.parse_identities([])), "empty is not an answer");
+bytes good_sig = [14];
+bytes inner = [];
+ssh.push_string(inner, octets("ssh-ed25519"));
+ssh.push_string(inner, [7; 64]);
+ssh.push_string(good_sig, inner);
+match (sshagent.parse_sign_response(good_sig)) {
+    case Ok(bytes raw): {
+        bytes sevens = [7; 64];
+        checks = check(checks, raw == sevens, "SIGN_RESPONSE yields the 64 raw octets");
+    }
+    case Err(sshagent.Error error): {
+        trap("parse_sign_response: " + error.to_str());
+    }
+}
+int sig_refused = 0;
+cut = 0;
+while (cut < good_sig.size()) {
+    match (sshagent.parse_sign_response(good_sig.substr(0, cut))) {
+        case Ok(bytes raw): {
+        }
+        case Err(sshagent.Error error): {
+            sig_refused = sig_refused + 1;
+        }
+    }
+    cut = cut + 1;
+}
+checks = check(checks, sig_refused == good_sig.size(), "every proper prefix of a SIGN_RESPONSE is refused");
+bytes wrong_alg = [14];
+bytes inner2 = [];
+ssh.push_string(inner2, octets("ssh-rsa"));
+ssh.push_string(inner2, [7; 64]);
+ssh.push_string(wrong_alg, inner2);
+checks = check(checks, !is_ok_bytes(sshagent.parse_sign_response(wrong_alg)), "a signature in another algorithm is refused");
+bytes short_sig = [14];
+bytes inner3 = [];
+ssh.push_string(inner3, octets("ssh-ed25519"));
+ssh.push_string(inner3, [7; 63]);
+ssh.push_string(short_sig, inner3);
+checks = check(checks, !is_ok_bytes(sshagent.parse_sign_response(short_sig)), "a 63-octet signature is refused");
+bytes trailing = [14];
+bytes inner4 = [];
+ssh.push_string(inner4, octets("ssh-ed25519"));
+ssh.push_string(inner4, [7; 64]);
+inner4.push(0);
+ssh.push_string(trailing, inner4);
+checks = check(checks, !is_ok_bytes(sshagent.parse_sign_response(trailing)), "trailing bytes inside the signature blob are refused");
+match (sshagent.parse_sign_response([5])) {
+    case Ok(bytes raw): {
+        trap("FAILURE accepted");
+    }
+    case Err(sshagent.Error error): {
+        match (error) {
+            case Refused: {
+                checks = check(checks, true, "SSH_AGENT_FAILURE is Refused");
+            }
+            case NoAgent: {
+                trap("wrong error");
+            }
+            case Connect: {
+                trap("wrong error");
+            }
+            case Io: {
+                trap("wrong error");
+            }
+            case TimedOut: {
+                trap("wrong error");
+            }
+            case BadReply: {
+                trap("wrong error");
+            }
+            case BadSignature: {
+                trap("wrong error");
+            }
+        }
+    }
+}
+print(checks.to_str() + " checks, 0 failures");
+
+bool is_ok_ids(Result<List<sshagent.Identity>, sshagent.Error> result) {
+    match (result) {
+        case Ok(List<sshagent.Identity> keys): {
+            return true;
+        }
+        case Err(sshagent.Error error): {
+            return false;
+        }
+    }
+}
+
+bool is_ok_bytes(Result<bytes, sshagent.Error> result) {
+    match (result) {
+        case Ok(bytes raw): {
+            return true;
+        }
+        case Err(sshagent.Error error): {
+            return false;
+        }
+    }
+}

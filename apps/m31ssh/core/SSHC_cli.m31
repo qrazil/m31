@@ -1,0 +1,184 @@
+// Command-line parsing for m31ssh. Pure: takes the argument list (without the
+// program name) and answers a `Cli` or a one-line complaint.
+
+pub const str VERSION = "0.1.0";
+
+/// The parsed command line.
+pub type Cli {
+    pub int port;
+    pub str user;
+    pub List<str> identities;
+    pub List<str> options;
+    pub str config_file;
+    pub str host;
+    pub str command;
+    /// 0 automatic, 1 `-t` (when stdin is a terminal), 2 `-tt` (always),
+    /// -1 `-T` (never).
+    pub int tty_mode;
+    pub bool is_no_command;
+    pub bool is_quiet;
+    pub bool is_stdin_null;
+    /// The escape character's byte, or -1 for `-e none`.
+    pub int escape;
+    pub str jump;
+    pub List<str> local_forwards;
+    pub List<str> remote_forwards;
+    pub bool is_help;
+    pub bool is_version;
+}
+
+pub str usage() {
+    return "usage: m31ssh [-46nqTtN] [-e escape|none] [-F config] [-i identity] [-J jump] [-l user]\n" + "              [-L spec] [-o option=value] [-p port] [-R spec] [user@]host [command ...]\n" + "\n" + "m31ssh is an SSH client written in m31. It is UNAUDITED: do not rely on it\n" + "where an audited client (OpenSSH) is required. Ed25519 keys only; see\n" + "docs/m31ssh.md for the threat model and known limits.\n" + "\n" + "  -p port       port to connect to (default 22)\n" + "  -i identity   private key file (repeatable; default ~/.ssh/id_ed25519)\n" + "  -l user       login name\n" + "  -o opt=val    ssh_config option (first value wins; see docs)\n" + "  -F file       configuration file (default ~/.ssh/config)\n" + "  -t / -tt / -T request a terminal / force one / never\n" + "  -n            read nothing from standard input\n" + "  -e c|none     escape character (default ~; `~.` disconnects)\n" + "  -q            quiet: no host-key notices\n" + "  -V            print the version\n" + "exit status is the remote command's, or 255 for an ssh error.\n";
+}
+
+// The value of an option that takes one: attached (`-p22`) or the next word.
+// `Err` names the problem.
+Result<str, str> value_of(List<str> arguments, int index, str word) {
+    if (word.size() > 2) {
+        return Result<str, str>.Ok(word.substr(2, word.size()));
+    }
+    if (index + 1 >= arguments.size()) {
+        return Result<str, str>.Err("option " + word + " requires an argument");
+    }
+    return Result<str, str>.Ok(arguments[index + 1]);
+}
+
+pub Result<Cli, str> parse(List<str> arguments) {
+    Cli cli = Cli(0, "", [], [], "", "", "", 0, false, false, false, 126, "", [], [], false, false);
+    List<str> rest = [];
+    int index = 0;
+    bool is_ending = false;
+    while (index < arguments.size()) {
+        str word = arguments[index];
+        if (is_ending || !word.starts_with("-") || word == "-") {
+            rest.push(word);
+            // after the host, everything is the command, options included
+            if (cli.host == "") {
+                cli.host = word;
+                index = index + 1;
+                while (index < arguments.size()) {
+                    rest.push(arguments[index]);
+                    index = index + 1;
+                }
+                break;
+            }
+            index = index + 1;
+            continue;
+        }
+        if (word == "--") {
+            is_ending = true;
+            index = index + 1;
+            continue;
+        }
+        if (word == "--help" || word == "-h" || word == "-?") {
+            cli.is_help = true;
+            return Result<Cli, str>.Ok(cli);
+        }
+        if (word == "--version" || word == "-V") {
+            cli.is_version = true;
+            return Result<Cli, str>.Ok(cli);
+        }
+        int letter = word.byte_at(1);
+        int advance = 1;
+        if (letter == 112 || letter == 105 || letter == 108 || letter == 111 || letter == 70 || letter == 101 || letter == 74 || letter == 76 || letter == 82) {
+            // p i l o F e J L R take a value
+            str value = value_of(arguments, index, word)?;
+            if (word.size() == 2) {
+                advance = 2;
+            }
+            if (letter == 112) {
+                Option<int> port = value.parse_int();
+                match (port) {
+                    case Some(int number): {
+                        if (number < 1 || number > 65535) {
+                            return Result<Cli, str>.Err("bad port '" + value + "'");
+                        }
+                        cli.port = number;
+                    }
+                    case None: {
+                        return Result<Cli, str>.Err("bad port '" + value + "'");
+                    }
+                }
+            } else if (letter == 105) {
+                cli.identities.push(value);
+            } else if (letter == 108) {
+                cli.user = value;
+            } else if (letter == 111) {
+                if (value.contains("\n") || value.contains("\r")) {
+                    return Result<Cli, str>.Err("bad -o option");
+                }
+                cli.options.push(value);
+            } else if (letter == 70) {
+                cli.config_file = value;
+            } else if (letter == 101) {
+                if (value == "none") {
+                    cli.escape = -1;
+                } else if (value.size() == 1) {
+                    cli.escape = value.byte_at(0);
+                } else {
+                    return Result<Cli, str>.Err("bad escape character '" + value + "'");
+                }
+            } else if (letter == 74) {
+                cli.jump = value;
+            } else if (letter == 76) {
+                cli.local_forwards.push(value);
+            } else if (letter == 82) {
+                cli.remote_forwards.push(value);
+            }
+        } else {
+            // a run of flags: -tt, -qn, -NT ...
+            int offset = 1;
+            while (offset < word.size()) {
+                int flag = word.byte_at(offset);
+                if (flag == 116) {
+                    if (cli.tty_mode >= 1) {
+                        cli.tty_mode = 2;
+                    } else {
+                        cli.tty_mode = 1;
+                    }
+                } else if (flag == 84) {
+                    cli.tty_mode = -1;
+                } else if (flag == 78) {
+                    cli.is_no_command = true;
+                } else if (flag == 113) {
+                    cli.is_quiet = true;
+                } else if (flag == 110) {
+                    cli.is_stdin_null = true;
+                } else if (flag == 52 || flag == 54 || flag == 118 || flag == 97 || flag == 120 || flag == 120 || flag == 67 || flag == 107 || flag == 88 || flag == 89) {
+                    // accepted and ignored: address family, verbosity,
+                    // agent/X11 forwarding switches, compression
+                } else {
+                    return Result<Cli, str>.Err("unknown option -" + word.substr(offset, offset + 1));
+                }
+                offset = offset + 1;
+            }
+        }
+        index = index + advance;
+    }
+    if (cli.host == "") {
+        return Result<Cli, str>.Err("no host given");
+    }
+    str host = cli.host;
+    int at_sign = -1;
+    int position = 0;
+    while (position < host.size()) {
+        if (host.byte_at(position) == 64) {
+            at_sign = position;
+        }
+        position = position + 1;
+    }
+    if (at_sign >= 0) {
+        if (cli.user == "") {
+            cli.user = host.substr(0, at_sign);
+        }
+        cli.host = host.substr(at_sign + 1, host.size());
+    }
+    if (cli.host == "" || cli.host.starts_with("-")) {
+        return Result<Cli, str>.Err("bad host name");
+    }
+    // everything after the host (rest[0] is the host itself)
+    if (rest.size() > 1) {
+        cli.command = rest.slice(1, rest.size()).join(" ");
+    }
+    return Result<Cli, str>.Ok(cli);
+}

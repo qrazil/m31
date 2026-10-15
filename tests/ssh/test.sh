@@ -55,7 +55,8 @@ build() {
 
 if out=$(
     for f in tests/ssh/*.m31 lib/crypto/sha256.m31 lib/crypto/chacha20poly1305.m31 lib/ssh.m31 \
-             lib/ssh/sshkey.m31 lib/ssh/sshhosts.m31 lib/ssh/sshauth.m31 lib/ssh/sshexec.m31 lib/ssh/sshclient.m31; do
+             lib/ssh/sshkey.m31 lib/ssh/sshhosts.m31 lib/ssh/sshauth.m31 lib/ssh/sshexec.m31 lib/ssh/sshclient.m31 \
+             lib/ssh/sshagent.m31 lib/ssh/sshconfig.m31 lib/ssh/sshshell.m31; do
         "$LANGC" fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then
@@ -237,7 +238,7 @@ fi
 # window and packet limits over multi-megabyte transfers. The live half is
 # test_auth_exec.sh.
 
-for t in t_ssh_auth t_ssh_exec; do
+for t in t_ssh_auth t_ssh_exec t_ssh_config t_ssh_shell t_ssh_agent; do
     if build "$t"; then
         out=$("$WORK/$t" 2>"$WORK/$t.err")
         rc=$?

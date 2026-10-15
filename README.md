@@ -44,6 +44,26 @@ client in `lib/ssh/`, and four applications that now live in their own repos:
 [term-markdown](https://github.com/qrazil/term-markdown) (markdown renderer) and
 [httpserver](https://github.com/qrazil/httpserver).
 
+## m31ssh: an SSH client (unaudited)
+
+`apps/m31ssh` is an interactive SSH client built on `lib/ssh/`:
+
+```
+bash apps/m31ssh/build.sh                     # -> ./m31ssh
+m31ssh [-p port] [-i identity] [-l user] [-o option=value] [user@]host [command]
+```
+
+It opens a shell on a pty (raw mode, window size, resize, `~.`) or runs a
+command; authenticates with Ed25519 keys or `ssh-agent`; checks
+`~/.ssh/known_hosts` strictly (a changed key is a hard refusal that names the
+fingerprint and never rewrites the file); reads the useful core of
+`~/.ssh/config`; and exits with the remote status (255 on its own errors).
+
+**It is unaudited.** It is written from scratch in m31 and tested against
+OpenSSH, not reviewed by anyone who audits cryptographic software. Use OpenSSH
+where that matters. The threat model, what is and is not implemented, and the
+tests are in [`docs/m31ssh.md`](docs/m31ssh.md).
+
 ## What the language does today
 
 ```c

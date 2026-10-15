@@ -1,0 +1,59 @@
+// `lib/ssh/sshconfig.m31`: Host patterns, first-value-wins, accumulation,
+// quoting, `%` expansion and the things that must be reported rather than
+// guessed. Pure; a `trap` means a check failed.
+import ssh.sshconfig;
+
+int check(int passed_count, bool is_ok, str label) {
+    if (!is_ok) {
+        trap("check failed: " + label);
+    }
+    return passed_count + 1;
+}
+
+int checks = 0;
+checks = check(checks, sshconfig.is_pattern_matching("*", "anything"), "* matches anything");
+checks = check(checks, sshconfig.is_pattern_matching("*", ""), "* matches empty");
+checks = check(checks, sshconfig.is_pattern_matching("a?c", "abc"), "? matches one byte");
+checks = check(checks, !sshconfig.is_pattern_matching("a?c", "ac"), "? needs one byte");
+checks = check(checks, sshconfig.is_pattern_matching("*.example.com", "web.example.com"), "suffix glob");
+checks = check(checks, !sshconfig.is_pattern_matching("*.example.com", "example.com"), "suffix glob needs the dot");
+checks = check(checks, sshconfig.is_pattern_matching("web*db", "web-prod-db"), "middle star");
+checks = check(checks, sshconfig.is_pattern_matching("a*b*c", "aXXbYYc"), "two stars");
+checks = check(checks, !sshconfig.is_pattern_matching("a*b*c", "aXXbYY"), "two stars must end right");
+checks = check(checks, sshconfig.is_pattern_matching("**", "x"), "double star");
+checks = check(checks, !sshconfig.is_pattern_matching("abc", "abcd"), "exact is exact");
+checks = check(checks, !sshconfig.is_pattern_matching("", "x"), "empty pattern matches only empty");
+str config = "# comment\nStrictHostKeyChecking=accept-new\n\nHost web* !webx\n  HostName %h.example.com\n  User bob\n  Port 2222\n  IdentityFile ~/.ssh/id_%r\n  IdentityFile \"/path with space/key\"\nHost *\n  User alice\n  Port 22\n  ServerAliveInterval 15\n  ServerAliveCountMax 4\n  IdentitiesOnly yes\n  UserKnownHostsFile %d/kh_%u\n  ProxyJump jump.example.com\n  Compression yes # trailing comment\nMatch host foo\n  Port 9\n  StrictHostKeyChecking no\n";
+sshconfig.Settings first = sshconfig.resolve(config, "web1", "me", "/home/me");
+checks = check(checks, first.host_name == "web1.example.com", "HostName with %h");
+checks = check(checks, first.user == "bob", "first User wins");
+checks = check(checks, first.port == 2222, "first Port wins");
+checks = check(checks, first.identity_files.size() == 2 && first.identity_files[0] == "/home/me/.ssh/id_bob", "IdentityFile ~ and %r");
+checks = check(checks, first.identity_files[1] == "/path with space/key", "quoted IdentityFile keeps spaces");
+checks = check(checks, first.strict_host_key_checking == "accept-new", "options before any Host apply to all (Key=value)");
+checks = check(checks, first.server_alive_interval == 15 && first.server_alive_count_max == 4, "ServerAlive*");
+checks = check(checks, first.is_identities_only, "IdentitiesOnly yes");
+checks = check(checks, first.known_hosts_file == "/home/me/kh_me", "%d and %u");
+checks = check(checks, first.proxy_jump == "jump.example.com", "ProxyJump parsed");
+checks = check(checks, first.errors.size() == 0, "no errors");
+checks = check(checks, first.ignored.size() == 2 && first.ignored[0] == "compression" && first.ignored[1] == "match", "unknown options and Match are reported");
+sshconfig.Settings negated = sshconfig.resolve(config, "webx", "me", "/home/me");
+checks = check(checks, negated.user == "alice" && negated.port == 22 && negated.host_name == "webx", "a negated pattern excludes the block");
+sshconfig.Settings matched = sshconfig.resolve(config, "foo", "me", "/home/me");
+checks = check(checks, matched.port == 22 && matched.strict_host_key_checking == "accept-new", "Match block lines are not applied");
+sshconfig.Settings none = sshconfig.resolve("", "h", "me", "/home/me");
+checks = check(checks, none.host_name == "h" && none.user == "" && none.port == 0 && none.server_alive_interval == -1 && none.identity_files.size() == 0, "empty config: defaults are 'unset'");
+sshconfig.Settings bad = sshconfig.resolve("Port banana\nServerAliveInterval -3\nStrictHostKeyChecking maybe\nIdentitiesOnly perhaps\nUser\nPort 70000\n", "h", "me", "/h");
+checks = check(checks, bad.errors.size() == 6, "every malformed value is an error, none becomes a default");
+checks = check(checks, bad.port == 0, "a bad Port is not applied");
+sshconfig.Settings spaced = sshconfig.resolve("Host a\n  Port = 2200\n  User=zed\nHOST b\n  port 1\n", "a", "me", "/h");
+checks = check(checks, spaced.port == 2200 && spaced.user == "zed", "`Key = value`, `Key=value` and case-insensitive keywords");
+sshconfig.Settings other = sshconfig.resolve("Host a b c\n  Port 7\n", "c", "me", "/h");
+checks = check(checks, other.port == 7, "several patterns on one Host line");
+sshconfig.Settings order = sshconfig.resolve("User first\nHost *\n  User second\n", "h", "me", "/h");
+checks = check(checks, order.user == "first", "command-line style lines placed first win");
+sshconfig.Settings crlf = sshconfig.resolve("Host h\r\n  Port 99\r\n", "h", "me", "/h");
+checks = check(checks, crlf.port == 99, "CRLF line endings");
+sshconfig.Settings forwards = sshconfig.resolve("LocalForward 8080 localhost:80\nRemoteForward 9000 localhost:22\nLocalForward 1 h:2\n", "h", "me", "/h");
+checks = check(checks, forwards.local_forwards.size() == 2 && forwards.remote_forwards.size() == 1 && forwards.local_forwards[0] == "8080 localhost:80", "forwards accumulate");
+print(checks.to_str() + " checks, 0 failures");

@@ -1023,6 +1023,14 @@ pub Addr Conn.peer() {
     return remote;
 }
 
+/// The operating-system descriptor, for a caller that must wait on this
+/// connection from another green thread (a prim `__wait_io_timeout` declared
+/// in that caller's own module). It is borrowed: nothing here is closed or
+/// moved by it, and the number is meaningless once the `Conn` is closed.
+pub int Conn.fileno() {
+    return descriptor;
+}
+
 /// Send the peer an end of file while this side goes on reading: the
 /// half-close a client uses to say "that is the whole request" without
 /// losing the answer to it.

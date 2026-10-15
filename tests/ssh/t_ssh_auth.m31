@@ -38,6 +38,9 @@ int error_code(sshauth.Error error) {
         case AuthFailed: {
             return 5;
         }
+        case SignerFailed: {
+            return 6;
+        }
     }
 }
 
