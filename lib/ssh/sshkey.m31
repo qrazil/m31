@@ -73,6 +73,7 @@ import crypto.aesgcm;
 import crypto.chacha20poly1305;
 import crypto.consttime;
 import crypto.bcryptpbkdf;
+import random;
 import ssh;
 
 /// Why a key file could not be turned into a `PrivateKey`. Payload-free
@@ -611,6 +612,87 @@ Result<bytes, Error> decrypt(Layout layout, bytes passphrase) {
 }
 
 // --- the private section ------------------------------------------------------------
+
+// `data` with the 1, 2, 3, ... padding to a multiple of `block`.
+bytes padded_section(bytes section, int block) {
+    bytes out = clone(section);
+    int value = 1;
+    while (out.size() % block != 0) {
+        out.push(value);
+        value = value + 1;
+    }
+    return out;
+}
+
+/// An `openssh-key-v1` file's text for the ed25519 key with `seed`
+/// (`ssh-keygen -t ed25519`'s format). With a non-empty `passphrase` the
+/// private section is encrypted with `aes256-ctr` and a bcrypt key derived
+/// with a fresh 16-octet salt and `rounds` iterations (1 to 1024); an empty
+/// one writes `none`/`none`. The result is what `parse_with_passphrase`
+/// reads back and what OpenSSH's own tools accept.
+pub Result<str, Error> encode_ed25519(bytes seed, str comment, bytes passphrase, int rounds) {
+    if (seed.size() != SEED_SIZE || rounds < 1 || rounds > MAX_ROUNDS) {
+        return Result<str, Error>.Err(Error.BadKey);
+    }
+    bytes public_key = ed25519.public_key(seed);
+    bytes public_section = [];
+    ssh.push_string(public_section, KEY_ED25519.to_bytes());
+    ssh.push_string(public_section, public_key);
+    random.System rng = random.system();
+    bytes check = rng.octets(4);
+    bytes section = clone(check);
+    section.extend(check);
+    ssh.push_string(section, KEY_ED25519.to_bytes());
+    ssh.push_string(section, public_key);
+    bytes pair = clone(seed);
+    pair.extend(public_key);
+    ssh.push_string(section, pair);
+    ssh.push_string(section, comment.to_bytes());
+    str cipher = "none";
+    str kdf = "none";
+    bytes kdf_options = [];
+    int block = 8;
+    bytes body = [];
+    if (passphrase.size() > 0) {
+        cipher = "aes256-ctr";
+        kdf = "bcrypt";
+        block = 16;
+        bytes salt = rng.octets(16);
+        ssh.push_string(kdf_options, salt);
+        kdf_options.push(rounds >> 24 & 0xFF);
+        kdf_options.push(rounds >> 16 & 0xFF);
+        kdf_options.push(rounds >> 8 & 0xFF);
+        kdf_options.push(rounds & 0xFF);
+        bytes material = bcryptpbkdf.derive(passphrase, salt, rounds, 48);
+        body = ctr_crypt(material.substr(0, 32), material.substr(32, 48), padded_section(section, block));
+    } else {
+        body = padded_section(section, block);
+    }
+    bytes file = MAGIC.to_bytes();
+    file.push(0);
+    ssh.push_string(file, cipher.to_bytes());
+    ssh.push_string(file, kdf.to_bytes());
+    ssh.push_string(file, kdf_options);
+    file.push(0);
+    file.push(0);
+    file.push(0);
+    file.push(1);
+    ssh.push_string(file, public_section);
+    ssh.push_string(file, body);
+    str encoded = base64.encode(file);
+    List<str> lines = [BEGIN_LINE];
+    int block_at = 0;
+    while (block_at < encoded.size()) {
+        int end = block_at + 70;
+        if (end > encoded.size()) {
+            end = encoded.size();
+        }
+        lines.push(encoded.substr(block_at, end));
+        block_at = end;
+    }
+    lines.push(END_LINE);
+    return Result<str, Error>.Ok(lines.join("\n") + "\n");
+}
 
 // The big-endian octets of an mpint field's content: leading zero removed.
 bytes unsigned_of(bytes content) {

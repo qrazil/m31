@@ -1,0 +1,932 @@
+// An SFTP client, protocol version 3 (draft-ietf-secsh-filexfer-02, what
+// OpenSSH's `sftp-server` speaks), over a `subsystem` channel.
+//
+// API
+// ---
+//   sshsftp.open(link)               -> Result<Session, str>
+//   s.realpath(path)                 -> Result<str, str>
+//   s.stat(path) / s.lstat(path)     -> Result<Attrs, str>
+//   s.list(path)                     -> Result<List<Entry>, str>     "." and ".." dropped
+//   s.mkdir(path, mode) / s.rmdir(path) / s.remove(path)
+//   s.rename(from, to)
+//   s.set_permissions(path, mode) / s.set_times(path, atime, mtime)
+//   s.download(remote, local, progress)  -> Result<int, str>   bytes
+//   s.upload(local, remote, mode, progress) -> Result<int, str>
+//   s.close()
+//
+// Errors are one line: `remote: <server's words> (status N): <path>` for a
+// server refusal, or what the channel said for a transport failure.
+//
+// --- transfers -------------------------------------------------------------
+//
+// Reads and writes are pipelined: up to 16 requests of 32 KiB are in flight,
+// responses matched by id, so a 20 MB file crosses at the link's speed and not
+// at one round trip per 32 KiB. A short read (the server returned fewer
+// bytes than asked, which a server may) is re-requested for the gap; a file
+// is complete on the server's EOF; an upload is complete when every WRITE
+// has been answered `OK` and the handle's CLOSE too.
+//
+// A `Progress` is told after each chunk (`done` of `total`, total 0 when
+// unknown); it is how the program draws its meter and nothing here prints.
+//
+// --- hostile server ---------------------------------------------------------
+//
+// Every length is bounded before it is used: a packet over 1 MiB is refused
+// before it is read, a name list over 65536 entries or a string past its
+// packet is `Err`, a response with the wrong id or type for the request is
+// `Err`, a READ answer longer than was asked is `Err`. Nothing is written
+// to a local path the caller did not name: names the *server* returns
+// (`list`) are returned as text for the caller to treat as untrusted (a
+// recursive download must check each against `/` and `..`; `download`
+// itself takes the local path from the caller).
+
+import io;
+import fs;
+import ssh;
+import ssh.sshexec;
+
+const int FXP_INIT = 1;
+const int FXP_VERSION = 2;
+const int FXP_OPEN = 3;
+const int FXP_CLOSE = 4;
+const int FXP_READ = 5;
+const int FXP_WRITE = 6;
+const int FXP_LSTAT = 7;
+const int FXP_SETSTAT = 9;
+const int FXP_OPENDIR = 11;
+const int FXP_READDIR = 12;
+const int FXP_REMOVE = 13;
+const int FXP_MKDIR = 14;
+const int FXP_RMDIR = 15;
+const int FXP_REALPATH = 16;
+const int FXP_STAT = 17;
+const int FXP_RENAME = 18;
+const int FXP_STATUS = 101;
+const int FXP_HANDLE = 102;
+const int FXP_DATA = 103;
+const int FXP_NAME = 104;
+const int FXP_ATTRS = 105;
+const int FX_OK = 0;
+const int FX_EOF = 1;
+const int FLAG_SIZE = 1;
+const int FLAG_UIDGID = 2;
+const int FLAG_PERMISSIONS = 4;
+const int FLAG_ACMODTIME = 8;
+const int FLAG_EXTENDED = 0x80000000;
+const int OPEN_READ = 1;
+const int OPEN_WRITE = 2;
+const int OPEN_CREATE = 8;
+const int OPEN_TRUNCATE = 16;
+const int MAX_PACKET = 1048576;
+const int MAX_NAMES = 65536;
+const int CHUNK = 32768;
+const int PIPELINE = 16;
+const int TYPE_MASK = 0o170000;
+const int TYPE_DIRECTORY = 0o040000;
+const int TYPE_FILE = 0o100000;
+const int TYPE_LINK = 0o120000;
+
+/// File attributes (SFTP v3 `ATTRS`); a field is meaningful only when its
+/// `has_` flag is true.
+pub type Attrs {
+    pub bool has_size;
+    pub int size;
+    pub bool has_permissions;
+    pub int permissions;
+    pub bool has_times;
+    pub int access_time;
+    pub int modify_time;
+    pub int uid;
+    pub int gid;
+}
+
+pub bool Attrs.is_directory() {
+    return has_permissions && permissions & TYPE_MASK == TYPE_DIRECTORY;
+}
+
+pub bool Attrs.is_file() {
+    return has_permissions && permissions & TYPE_MASK == TYPE_FILE;
+}
+
+pub bool Attrs.is_link() {
+    return has_permissions && permissions & TYPE_MASK == TYPE_LINK;
+}
+
+/// A directory entry: the name, the server's `ls -l`-style line, attributes.
+pub type Entry {
+    pub str name;
+    pub str long_name;
+    pub Attrs attrs;
+}
+
+/// What a transfer reports to: `begin`/`end` bracket one file, `update` is
+/// told after each chunk (`total` is 0 when unknown), `note` carries a
+/// warning (a name skipped). It is how a program draws its meter; nothing
+/// in this module prints.
+pub interface Reporter {
+    void begin(str name);
+    void update(int done, int total);
+    void end();
+    void note(str message);
+}
+
+// --- wire helpers (pure) -----------------------------------------------------
+
+void push_u32(bytes out, int value) {
+    out.push(value >> 24 & 0xFF);
+    out.push(value >> 16 & 0xFF);
+    out.push(value >> 8 & 0xFF);
+    out.push(value & 0xFF);
+}
+
+void push_u64(bytes out, int value) {
+    push_u32(out, value >> 32 & 0xFFFFFFFF);
+    push_u32(out, value & 0xFFFFFFFF);
+}
+
+void push_text(bytes out, str text) {
+    ssh.push_string(out, text.to_bytes());
+}
+
+/// An `ATTRS` structure for a SETSTAT/MKDIR/OPEN: only the fields flagged.
+pub bytes encode_attrs(Attrs attrs) {
+    int flags = 0;
+    if (attrs.has_size) {
+        flags = flags | FLAG_SIZE;
+    }
+    if (attrs.has_permissions) {
+        flags = flags | FLAG_PERMISSIONS;
+    }
+    if (attrs.has_times) {
+        flags = flags | FLAG_ACMODTIME;
+    }
+    bytes out = [];
+    push_u32(out, flags);
+    if (attrs.has_size) {
+        push_u64(out, attrs.size);
+    }
+    if (attrs.has_permissions) {
+        push_u32(out, attrs.permissions);
+    }
+    if (attrs.has_times) {
+        push_u32(out, attrs.access_time);
+        push_u32(out, attrs.modify_time);
+    }
+    return out;
+}
+
+Attrs no_attrs() {
+    return Attrs(false, 0, false, 0, false, 0, 0, 0, 0);
+}
+
+int be32(bytes buffer, int offset) {
+    return buffer[offset] << 24 | buffer[offset + 1] << 16 | buffer[offset + 2] << 8 | buffer[offset + 3];
+}
+
+/// A parsed value and the offset after it.
+pub type AttrsAt {
+    pub Attrs attrs;
+    pub int next;
+}
+
+/// Parses an `ATTRS` at `offset`; `Err` for any field that runs past the
+/// buffer or an absurd extended-pair count.
+pub Result<AttrsAt, str> parse_attrs(bytes buffer, int offset) {
+    if (offset < 0 || offset + 4 > buffer.size()) {
+        return Result<AttrsAt, str>.Err("truncated attributes");
+    }
+    int flags = be32(buffer, offset);
+    int cursor = offset + 4;
+    Attrs attrs = no_attrs();
+    if (flags & FLAG_SIZE != 0) {
+        if (cursor + 8 > buffer.size()) {
+            return Result<AttrsAt, str>.Err("truncated attributes");
+        }
+        int high = be32(buffer, cursor);
+        if (high >= 0x80000000) {
+            return Result<AttrsAt, str>.Err("file size out of range");
+        }
+        attrs.has_size = true;
+        attrs.size = high << 32 | be32(buffer, cursor + 4);
+        cursor = cursor + 8;
+    }
+    if (flags & FLAG_UIDGID != 0) {
+        if (cursor + 8 > buffer.size()) {
+            return Result<AttrsAt, str>.Err("truncated attributes");
+        }
+        attrs.uid = be32(buffer, cursor);
+        attrs.gid = be32(buffer, cursor + 4);
+        cursor = cursor + 8;
+    }
+    if (flags & FLAG_PERMISSIONS != 0) {
+        if (cursor + 4 > buffer.size()) {
+            return Result<AttrsAt, str>.Err("truncated attributes");
+        }
+        attrs.has_permissions = true;
+        attrs.permissions = be32(buffer, cursor);
+        cursor = cursor + 4;
+    }
+    if (flags & FLAG_ACMODTIME != 0) {
+        if (cursor + 8 > buffer.size()) {
+            return Result<AttrsAt, str>.Err("truncated attributes");
+        }
+        attrs.has_times = true;
+        attrs.access_time = be32(buffer, cursor);
+        attrs.modify_time = be32(buffer, cursor + 4);
+        cursor = cursor + 8;
+    }
+    if (flags & FLAG_EXTENDED != 0) {
+        if (cursor + 4 > buffer.size()) {
+            return Result<AttrsAt, str>.Err("truncated attributes");
+        }
+        int pairs = be32(buffer, cursor);
+        cursor = cursor + 4;
+        if (pairs > MAX_NAMES) {
+            return Result<AttrsAt, str>.Err("too many extended attributes");
+        }
+        for (int pair in 0 .. pairs) {
+            match (ssh.parse_string(buffer, cursor)) {
+                case Ok(ssh.Field name): {
+                    match (ssh.parse_string(buffer, name.next)) {
+                        case Ok(ssh.Field value): {
+                            cursor = value.next;
+                        }
+                        case Err(_): {
+                            return Result<AttrsAt, str>.Err("truncated attributes");
+                        }
+                    }
+                }
+                case Err(_): {
+                    return Result<AttrsAt, str>.Err("truncated attributes");
+                }
+            }
+        }
+    }
+    return Result<AttrsAt, str>.Ok(AttrsAt(attrs, cursor));
+}
+
+/// A `NAME` response body after the id: its entries.
+pub Result<List<Entry>, str> parse_names(bytes payload, int offset) {
+    if (offset + 4 > payload.size()) {
+        return Result<List<Entry>, str>.Err("truncated name list");
+    }
+    int count = be32(payload, offset);
+    if (count > MAX_NAMES || count > (payload.size() - offset) / 12) {
+        return Result<List<Entry>, str>.Err("implausible name count");
+    }
+    List<Entry> out = [];
+    int cursor = offset + 4;
+    for (int index in 0 .. count) {
+        ssh.Field name = field(payload, cursor)?;
+        ssh.Field long_name = field(payload, name.next)?;
+        AttrsAt parsed = parse_attrs(payload, long_name.next)?;
+        out.push(Entry(text_of(name.value), text_of(long_name.value), parsed.attrs));
+        cursor = parsed.next;
+    }
+    return Result<List<Entry>, str>.Ok(out);
+}
+
+Result<ssh.Field, str> field(bytes buffer, int offset) {
+    match (ssh.parse_string(buffer, offset)) {
+        case Ok(ssh.Field value): {
+            return Result<ssh.Field, str>.Ok(value);
+        }
+        case Err(_): {
+            return Result<ssh.Field, str>.Err("a string runs past its packet");
+        }
+    }
+}
+
+str text_of(bytes raw) {
+    match (raw.utf8()) {
+        case Some(str text): {
+            return text;
+        }
+        case None: {
+            // names are bytes on the wire; show what can be shown
+            str out = "";
+            for (int byte in raw) {
+                if (byte >= 32 && byte < 127) {
+                    out = out + str.from_chars([byte]);
+                } else {
+                    out = out + "?";
+                }
+            }
+            return out;
+        }
+    }
+}
+
+// --- the session ------------------------------------------------------------------
+
+pub type Session {
+    sshexec.Channel channel;
+    int next_id = 1;
+    bytes pending = [];
+}
+
+// One packet out: u32 length, then the body (type byte first).
+Result<void, str> Session.transmit(bytes body) {
+    bytes framed = [];
+    push_u32(framed, body.size());
+    framed.extend(body);
+    match (channel.write(framed)) {
+        case Ok(_): {
+            return Result<void, str>.Ok;
+        }
+        case Err(sshexec.Error error): {
+            return Result<void, str>.Err("connection lost: " + error.to_str());
+        }
+    }
+}
+
+// Exactly `count` bytes from the channel.
+Result<bytes, str> Session.take(int count) {
+    while (pending.size() < count) {
+        match (channel.read(MAX_PACKET)) {
+            case Ok(bytes got): {
+                if (got.size() == 0) {
+                    return Result<bytes, str>.Err("the server closed the sftp channel");
+                }
+                pending.extend(got);
+            }
+            case Err(sshexec.Error error): {
+                return Result<bytes, str>.Err("connection lost: " + error.to_str());
+            }
+        }
+    }
+    bytes out = pending.substr(0, count);
+    pending.drop_front(count);
+    return Result<bytes, str>.Ok(out);
+}
+
+// One packet in: its body (type byte first).
+Result<bytes, str> Session.receive() {
+    bytes header = take(4)?;
+    int length = be32(header, 0);
+    if (length < 1 || length > MAX_PACKET) {
+        return Result<bytes, str>.Err("the server sent an sftp packet of " + length.to_str() + " bytes");
+    }
+    return take(length);
+}
+
+// Sends a request whose body (after the type and id) is `payload` and
+// returns the response body, checking it answers this request.
+Result<bytes, str> Session.call(int packet_type, bytes payload) {
+    int id = next_id;
+    next_id = next_id + 1;
+    bytes body = [packet_type];
+    push_u32(body, id);
+    body.extend(payload);
+    transmit(body)?;
+    bytes reply = receive()?;
+    if (reply.size() < 5 || be32(reply, 1) != id) {
+        return Result<bytes, str>.Err("the server's answer does not match the request");
+    }
+    return Result<bytes, str>.Ok(reply);
+}
+
+Result<void, str> Session.expect_ok(bytes reply, str path) {
+    if (reply[0] != FXP_STATUS) {
+        return Result<void, str>.Err("unexpected sftp response type " + reply[0].to_str());
+    }
+    str text = status_text(reply, path);
+    if (text != "") {
+        return Result<void, str>.Err(text);
+    }
+    return Result<void, str>.Ok;
+}
+
+/// The server's canonical form of `path` (resolves `.` and `..`).
+pub Result<str, str> Session.realpath(str path) {
+    bytes reply = call(FXP_REALPATH, path_payload(path))?;
+    if (reply[0] == FXP_STATUS) {
+        return Result<str, str>.Err(status_text(reply, path));
+    }
+    if (reply[0] != FXP_NAME) {
+        return Result<str, str>.Err("unexpected sftp response type " + reply[0].to_str());
+    }
+    List<Entry> names = parse_names(reply, 5)?;
+    if (names.size() < 1) {
+        return Result<str, str>.Err("the server returned no path");
+    }
+    return Result<str, str>.Ok(names[0].name);
+}
+
+Result<Attrs, str> Session.attributes(int packet_type, str path) {
+    bytes reply = call(packet_type, path_payload(path))?;
+    if (reply[0] == FXP_STATUS) {
+        return Result<Attrs, str>.Err(status_text(reply, path));
+    }
+    if (reply[0] != FXP_ATTRS) {
+        return Result<Attrs, str>.Err("unexpected sftp response type " + reply[0].to_str());
+    }
+    AttrsAt parsed = parse_attrs(reply, 5)?;
+    return Result<Attrs, str>.Ok(parsed.attrs);
+}
+
+pub Result<Attrs, str> Session.stat(str path) {
+    return attributes(FXP_STAT, path);
+}
+
+pub Result<Attrs, str> Session.lstat(str path) {
+    return attributes(FXP_LSTAT, path);
+}
+
+// A handle (opaque bytes) from an OPEN/OPENDIR.
+Result<bytes, str> Session.handle_of(int packet_type, bytes payload, str path) {
+    bytes reply = call(packet_type, payload)?;
+    if (reply[0] == FXP_STATUS) {
+        return Result<bytes, str>.Err(status_text(reply, path));
+    }
+    if (reply[0] != FXP_HANDLE) {
+        return Result<bytes, str>.Err("unexpected sftp response type " + reply[0].to_str());
+    }
+    ssh.Field handle = field(reply, 5)?;
+    if (handle.value.size() == 0 || handle.value.size() > 256) {
+        return Result<bytes, str>.Err("the server returned an implausible handle");
+    }
+    return Result<bytes, str>.Ok(handle.value);
+}
+
+Result<void, str> Session.close_handle(bytes handle) {
+    bytes payload = [];
+    ssh.push_string(payload, handle);
+    bytes reply = call(FXP_CLOSE, payload)?;
+    return expect_ok(reply, "");
+}
+
+/// The entries of a directory, `.` and `..` dropped, in the server's order.
+pub Result<List<Entry>, str> Session.list(str path) {
+    bytes handle = handle_of(FXP_OPENDIR, path_payload(path), path)?;
+    List<Entry> out = [];
+    bool is_done = false;
+    while (!is_done) {
+        bytes payload = [];
+        ssh.push_string(payload, handle);
+        bytes reply = call(FXP_READDIR, payload)?;
+        if (reply[0] == FXP_STATUS) {
+            if (reply.size() >= 9 && be32(reply, 5) == FX_EOF) {
+                is_done = true;
+            } else {
+                Result<void, str> closed = close_handle(handle);
+                return Result<List<Entry>, str>.Err(status_text(reply, path));
+            }
+        } else if (reply[0] == FXP_NAME) {
+            List<Entry> names = parse_names(reply, 5)?;
+            for (Entry entry in names) {
+                if (entry.name != "." && entry.name != "..") {
+                    out.push(entry);
+                }
+            }
+            if (out.size() > 4 * MAX_NAMES) {
+                return Result<List<Entry>, str>.Err("directory listing is implausibly large");
+            }
+        } else {
+            return Result<List<Entry>, str>.Err("unexpected sftp response type " + reply[0].to_str());
+        }
+    }
+    close_handle(handle)?;
+    return Result<List<Entry>, str>.Ok(out);
+}
+
+/// Creates a directory with permissions `mode`.
+pub Result<void, str> Session.mkdir(str path, int mode) {
+    bytes payload = path_payload(path);
+    Attrs attrs = no_attrs();
+    attrs.has_permissions = true;
+    attrs.permissions = mode;
+    payload.extend(encode_attrs(attrs));
+    bytes reply = call(FXP_MKDIR, payload)?;
+    return expect_ok(reply, path);
+}
+
+pub Result<void, str> Session.rmdir(str path) {
+    bytes reply = call(FXP_RMDIR, path_payload(path))?;
+    return expect_ok(reply, path);
+}
+
+pub Result<void, str> Session.remove(str path) {
+    bytes reply = call(FXP_REMOVE, path_payload(path))?;
+    return expect_ok(reply, path);
+}
+
+pub Result<void, str> Session.rename(str from, str to_path) {
+    bytes payload = path_payload(from);
+    push_text(payload, to_path);
+    bytes reply = call(FXP_RENAME, payload)?;
+    return expect_ok(reply, from);
+}
+
+pub Result<void, str> Session.set_permissions(str path, int mode) {
+    bytes payload = path_payload(path);
+    Attrs attrs = no_attrs();
+    attrs.has_permissions = true;
+    attrs.permissions = mode;
+    payload.extend(encode_attrs(attrs));
+    bytes reply = call(FXP_SETSTAT, payload)?;
+    return expect_ok(reply, path);
+}
+
+pub Result<void, str> Session.set_times(str path, int access_time, int modify_time) {
+    bytes payload = path_payload(path);
+    Attrs attrs = no_attrs();
+    attrs.has_times = true;
+    attrs.access_time = access_time;
+    attrs.modify_time = modify_time;
+    payload.extend(encode_attrs(attrs));
+    bytes reply = call(FXP_SETSTAT, payload)?;
+    return expect_ok(reply, path);
+}
+
+/// Copies the remote file `remote` to the local path `local` (created or
+/// truncated, with permissions `mode` before the process umask). Returns the
+/// byte count.
+pub Result<int, str> Session.download(str remote, str local, int mode, Reporter progress) {
+    int total = 0;
+    match (stat(remote)) {
+        case Ok(Attrs attrs): {
+            if (attrs.is_directory()) {
+                return Result<int, str>.Err("remote: " + remote + " is a directory");
+            }
+            if (attrs.has_size) {
+                total = attrs.size;
+            }
+        }
+        case Err(_): {
+        }
+    }
+    bytes handle = [];
+    bytes open_payload = path_payload(remote);
+    push_u32(open_payload, OPEN_READ);
+    open_payload.extend(encode_attrs(no_attrs()));
+    handle = handle_of(FXP_OPEN, open_payload, remote)?;
+    match (io.open(local, mode: io.Mode.Write, perm: mode)) {
+        case Err(io.Error error): {
+            Result<void, str> closed = close_handle(handle);
+            return Result<int, str>.Err("local: cannot write " + local + ": " + error.to_str());
+        }
+        case Ok(io.File file): {
+            int issued = 0;
+            int written = 0;
+            bool is_eof = false;
+            List<Pending> queue = [];
+            List<Pending> gaps = [];
+            while (queue.size() > 0 || !is_eof) {
+                while (queue.size() < PIPELINE && !is_eof) {
+                    int offset = issued;
+                    int length = CHUNK;
+                    if (gaps.size() > 0) {
+                        offset = gaps[0].offset;
+                        length = gaps[0].length;
+                        gaps.remove_at(0);
+                    } else {
+                        issued = issued + CHUNK;
+                    }
+                    int id = next_id;
+                    next_id = next_id + 1;
+                    bytes body = [FXP_READ];
+                    push_u32(body, id);
+                    ssh.push_string(body, handle);
+                    push_u64(body, offset);
+                    push_u32(body, length);
+                    transmit(body)?;
+                    queue.push(Pending(id, offset, length));
+                }
+                if (queue.size() == 0) {
+                    break;
+                }
+                bytes reply = receive()?;
+                Pending current = queue[0];
+                queue.remove_at(0);
+                if (reply.size() < 5 || be32(reply, 1) != current.id) {
+                    return Result<int, str>.Err("the server's answer does not match the request");
+                }
+                if (reply[0] == FXP_STATUS) {
+                    if (reply.size() >= 9 && be32(reply, 5) == FX_EOF) {
+                        is_eof = true;
+                    } else {
+                        Result<void, str> closed = close_handle(handle);
+                        return Result<int, str>.Err(status_text(reply, remote));
+                    }
+                } else if (reply[0] == FXP_DATA) {
+                    ssh.Field data = field(reply, 5)?;
+                    if (data.value.size() > current.length) {
+                        return Result<int, str>.Err("the server returned more data than was asked for");
+                    }
+                    if (data.value.size() > 0) {
+                        match (file.seek(current.offset)) {
+                            case Ok(_): {
+                            }
+                            case Err(io.Error error): {
+                                return Result<int, str>.Err("local: " + error.to_str());
+                            }
+                        }
+                        match (file.write(data.value)) {
+                            case Ok(_): {
+                            }
+                            case Err(io.Error error): {
+                                return Result<int, str>.Err("local: cannot write " + local + ": " + error.to_str());
+                            }
+                        }
+                        written = written + data.value.size();
+                        progress.update(written, total);
+                    }
+                    if (data.value.size() < current.length && !is_eof) {
+                        // a short read: ask again for the rest of the range
+                        gaps.push(Pending(0, current.offset + data.value.size(), current.length - data.value.size()));
+                        if (data.value.size() == 0) {
+                            return Result<int, str>.Err("the server returned an empty read before the end of the file");
+                        }
+                    }
+                } else {
+                    return Result<int, str>.Err("unexpected sftp response type " + reply[0].to_str());
+                }
+            }
+            Result<bool, io.Error> finished = file.close();
+            close_handle(handle)?;
+            return Result<int, str>.Ok(written);
+        }
+    }
+}
+
+/// Copies the local file `local` to `remote` (created or truncated, with
+/// permissions `mode`). Returns the byte count.
+pub Result<int, str> Session.upload(str local, str remote, int mode, Reporter progress) {
+    match (io.open(local, mode: io.Mode.Read)) {
+        case Err(io.Error error): {
+            return Result<int, str>.Err("local: cannot read " + local + ": " + error.to_str());
+        }
+        case Ok(io.File file): {
+            int total = 0;
+            match (file.seek_from_end(0)) {
+                case Ok(int size): {
+                    total = size;
+                }
+                case Err(_): {
+                }
+            }
+            Result<int, io.Error> rewound = file.seek(0);
+            bytes open_payload = path_payload(remote);
+            push_u32(open_payload, OPEN_WRITE | OPEN_CREATE | OPEN_TRUNCATE);
+            Attrs attrs = no_attrs();
+            attrs.has_permissions = true;
+            attrs.permissions = mode;
+            open_payload.extend(encode_attrs(attrs));
+            bytes handle = handle_of(FXP_OPEN, open_payload, remote)?;
+            int offset = 0;
+            List<int> queue = [];
+            bool is_end = false;
+            while (!is_end || queue.size() > 0) {
+                while (queue.size() < PIPELINE && !is_end) {
+                    match (file.read(CHUNK)) {
+                        case Err(io.Error error): {
+                            Result<void, str> closed = close_handle(handle);
+                            return Result<int, str>.Err("local: cannot read " + local + ": " + error.to_str());
+                        }
+                        case Ok(bytes data): {
+                            if (data.size() == 0) {
+                                is_end = true;
+                            } else {
+                                int id = next_id;
+                                next_id = next_id + 1;
+                                bytes body = [FXP_WRITE];
+                                push_u32(body, id);
+                                ssh.push_string(body, handle);
+                                push_u64(body, offset);
+                                ssh.push_string(body, data);
+                                transmit(body)?;
+                                queue.push(id);
+                                offset = offset + data.size();
+                            }
+                        }
+                    }
+                }
+                if (queue.size() > 0) {
+                    bytes reply = receive()?;
+                    int want = queue[0];
+                    queue.remove_at(0);
+                    if (reply.size() < 5 || be32(reply, 1) != want) {
+                        return Result<int, str>.Err("the server's answer does not match the request");
+                    }
+                    expect_ok(reply, remote)?;
+                    progress.update(offset, total);
+                }
+            }
+            close_handle(handle)?;
+            Result<bool, io.Error> finished = file.close();
+            return Result<int, str>.Ok(offset);
+        }
+    }
+}
+
+/// Closes the channel. The session cannot be used afterwards.
+pub void Session.finish() {
+    Result<void, sshexec.Error> closed = channel.close();
+}
+
+/// Copies `remote` (a file, or with `is_recursive` a directory tree) to
+/// `local`. A directory's entries are named by the server and each name is
+/// checked (`is_safe_name`) before it is used; one that fails is reported
+/// through `note` and skipped.
+pub Result<void, str> Session.get_tree(str remote, str local, bool is_recursive, Reporter reporter) {
+    Attrs attrs = stat(remote)?;
+    if (attrs.is_directory()) {
+        if (!is_recursive) {
+            return Result<void, str>.Err(remote + ": not a regular file (use -r)");
+        }
+        if (!fs.is_directory(local)) {
+            match (fs.mkdir(local)) {
+                case Ok(_): {
+                }
+                case Err(io.Error error): {
+                    return Result<void, str>.Err("local: cannot create " + local + ": " + error.to_str());
+                }
+            }
+        }
+        List<Entry> entries = list(remote)?;
+        for (Entry entry in entries) {
+            if (!is_safe_name(entry.name)) {
+                reporter.note("refusing a name from the server that is not a plain file name");
+                continue;
+            }
+            get_tree(join_path(remote, entry.name), join_path(local, entry.name), is_recursive, reporter)?;
+        }
+        return Result<void, str>.Ok;
+    }
+    int mode = 0o644;
+    if (attrs.has_permissions) {
+        mode = attrs.permissions & 0o777;
+    }
+    reporter.begin(basename_of(remote));
+    download(remote, local, mode, reporter)?;
+    reporter.end();
+    return Result<void, str>.Ok;
+}
+
+/// Copies `local` (a file, or with `is_recursive` a directory tree) to
+/// `remote`. With `is_preserving` the modification time is set afterwards.
+pub Result<void, str> Session.put_tree(str local, str remote, bool is_recursive, bool is_preserving, Reporter reporter) {
+    if (fs.is_directory(local)) {
+        if (!is_recursive) {
+            return Result<void, str>.Err(local + ": not a regular file (use -r)");
+        }
+        match (stat(remote)) {
+            case Ok(Attrs existing): {
+                if (!existing.is_directory()) {
+                    return Result<void, str>.Err("remote: " + remote + " exists and is not a directory");
+                }
+            }
+            case Err(_): {
+                mkdir(remote, local_permissions(local) & 0o777)?;
+            }
+        }
+        match (fs.listdir(local)) {
+            case Ok(List<str> names): {
+                for (str name in names) {
+                    put_tree(join_path(local, name), join_path(remote, name), is_recursive, is_preserving, reporter)?;
+                }
+            }
+            case Err(io.Error error): {
+                return Result<void, str>.Err("local: cannot read " + local + ": " + error.to_str());
+            }
+        }
+        return Result<void, str>.Ok;
+    }
+    reporter.begin(basename_of(local));
+    upload(local, remote, local_permissions(local) & 0o777, reporter)?;
+    reporter.end();
+    if (is_preserving) {
+        match (fs.stat(local)) {
+            case Ok(fs.Stat info): {
+                int seconds = info.mtime_ns / 1000000000;
+                set_times(remote, seconds, seconds)?;
+            }
+            case Err(_): {
+            }
+        }
+    }
+    return Result<void, str>.Ok;
+}
+
+/// Starts the `sftp` subsystem on `link` and negotiates version 3.
+pub Result<Session, str> open(ssh.Link link) {
+    match (sshexec.subsystem(link, "sftp")) {
+        case Err(sshexec.Error error): {
+            return Result<Session, str>.Err("could not start the sftp subsystem: " + error.to_str());
+        }
+        case Ok(sshexec.Channel channel): {
+            Session session = Session(channel);
+            bytes init = [FXP_INIT];
+            push_u32(init, 3);
+            session.transmit(init)?;
+            bytes reply = session.receive()?;
+            if (reply.size() < 5 || reply[0] != FXP_VERSION) {
+                return Result<Session, str>.Err("the server did not answer the sftp handshake");
+            }
+            int version = be32(reply, 1);
+            if (version < 3) {
+                return Result<Session, str>.Err("the server speaks sftp version " + version.to_str() + "; version 3 is needed");
+            }
+            return Result<Session, str>.Ok(session);
+        }
+    }
+}
+
+// What a STATUS says as one line, or "" for OK.
+str status_text(bytes body, str path) {
+    if (body.size() < 9) {
+        return "malformed status from the server";
+    }
+    int code = be32(body, 5);
+    if (code == FX_OK) {
+        return "";
+    }
+    str message = "";
+    match (ssh.parse_string(body, 9)) {
+        case Ok(ssh.Field field_value): {
+            message = text_of(field_value.value);
+        }
+        case Err(_): {
+        }
+    }
+    if (message == "") {
+        message = "failure";
+    }
+    str suffix = "";
+    if (path != "") {
+        suffix = ": " + path;
+    }
+    return "remote: " + message + " (status " + code.to_str() + ")" + suffix;
+}
+
+bytes path_payload(str path) {
+    bytes out = [];
+    push_text(out, path);
+    return out;
+}
+
+// --- transfers ------------------------------------------------------------------
+
+// A READ in flight: its id and the byte range it asked for.
+type Pending {
+    int id;
+    int offset;
+    int length;
+}
+
+// --- whole files and trees ----------------------------------------------------------
+
+/// Whether a name a server returned can be one path component: not empty,
+/// `.`, `..`, and without `/` or NUL. A recursive download refuses the rest,
+/// so a server cannot place files outside the directory the user named.
+pub bool is_safe_name(str name) {
+    if (name == "" || name == "." || name == "..") {
+        return false;
+    }
+    for (int code in name.chars()) {
+        if (code == 47 || code == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The last component of a path, ignoring trailing slashes.
+pub str basename_of(str path) {
+    str trimmed = path;
+    while (trimmed.size() > 1 && trimmed.ends_with("/")) {
+        trimmed = trimmed.substr(0, trimmed.size() - 1);
+    }
+    int cut = -1;
+    int index = 0;
+    while (index < trimmed.size()) {
+        if (trimmed.byte_at(index) == 47) {
+            cut = index;
+        }
+        index = index + 1;
+    }
+    if (cut < 0) {
+        return trimmed;
+    }
+    return trimmed.substr(cut + 1, trimmed.size());
+}
+
+/// `directory` and `name` joined with exactly one `/`.
+pub str join_path(str directory, str name) {
+    if (directory.ends_with("/")) {
+        return directory + name;
+    }
+    return directory + "/" + name;
+}
+
+int local_permissions(str path) {
+    match (fs.stat(path)) {
+        case Ok(fs.Stat info): {
+            return info.perm();
+        }
+        case Err(_): {
+            return 0o644;
+        }
+    }
+}

@@ -34,8 +34,13 @@ change landed on master.
   `rsa-sha2-512/256`; strict kex (Terrapin). `ssh.Wire` under the
   transport, `ssh.connect_with_offer`/`connect_over` with a `HostKeyCheck`
   callback (one connection, the decision made mid-handshake).
+- **`m31scp`, `m31sftp`, `m31ssh-keygen`** (`apps/`): SFTP v3 file copy
+  (pipelined, recursive, progress meter), an interactive/batch SFTP client,
+  and Ed25519 key generation (plain or bcrypt/aes256-ctr), `-y`, `-l`,
+  `-R`; all **unaudited**. `lib/ssh/sshsftp.m31` and `lib/ssh/sshconnect.m31`
+  (the connection logic shared by all four programs).
 - New modules: `lib/ssh/sshcipher.m31`, `sshagent.m31`, `sshconfig.m31`,
-  `sshshell.m31`, `sshjump.m31`, `sshforward.m31`; `lib/crypto/rsasign.m31`
+  `sshshell.m31`, `sshjump.m31`, `sshforward.m31`, `sshconnect.m31`, `sshsftp.m31`; `lib/crypto/rsasign.m31`
   (RSASSA-PKCS1-v1_5 signing, CRT, constant-time in the source, self-checked)
   and `lib/crypto/bcryptpbkdf.m31`. `sshkey` reads ECDSA/RSA keys and
   encrypted files (`parse_with_passphrase`, `inspect`); `sshexec` has
@@ -44,8 +49,8 @@ change landed on master.
   signature algorithm per request (`Signer`, `start`, `try_key`);
   `sshhosts` keeps every key type (`blobs_for`, `algorithms_for`);
   `net.Conn.fileno`, `net.Listener.fileno`.
-- `tests/ssh`: `test_m31ssh.sh` (136 pty-driven checks against disposable
-  `sshd`s), and oracles `oracle_sshcipher.py`, `oracle_sshkeyfiles.py`,
+- `tests/ssh`: `test_m31ssh.sh` (150 pty-driven checks against disposable
+  `sshd`s, including a corrupting proxy), `test_m31sftp.sh` (56), and oracles `oracle_sshcipher.py`, `oracle_sshkeyfiles.py`,
   `oracle_rsasign.py`, the bcrypt_pbkdf vector, plus unit tests for config,
   escape filter, message layouts, negotiation, host-key blobs, agent
   parsers and forwarding routes.

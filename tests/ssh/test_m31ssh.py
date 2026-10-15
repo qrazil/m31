@@ -1039,7 +1039,8 @@ def _():
     procs.append(p)
     c = connect_when_ready(lport3)
     c.close()
-    ok("-N -L: forwards with no remote command", roundtrip(lport3, b"no-session") == b"no-session")
+    got_n = roundtrip(lport3, b"no-session")
+    ok("-N -L: forwards with no remote command", got_n == b"no-session", (got_n, p.poll()))
     ok("-N: still running", p.poll() is None)
     p.terminate()
     p.wait(30)
@@ -1065,6 +1066,83 @@ def _():
         code, out, err = run(base("-i", real, "-L", bad, "true"))
         ok("-L %r is refused with one line" % bad, code == 255 and len(err.strip().splitlines()) <= 2, (code, err))
     echo.sock.close()
+
+# --- a real server behind a corrupting proxy -----------------------------------------------------------
+def proxy_case(label, mode, offset):
+    """Relays m31ssh <-> sshd but, after `offset` bytes of the server's
+    stream, flips a bit (mode "flip") or hangs up (mode "cut")."""
+    ls = socket.socket()
+    ls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    ls.bind(("127.0.0.1", 0))
+    ls.listen(1)
+    pport = ls.getsockname()[1]
+    done = threading.Event()
+
+    def run_proxy():
+        try:
+            c, _ = ls.accept()
+            up = socket.create_connection(("127.0.0.1", PORT), timeout=10)
+            sent = [0]
+
+            def c2s():
+                try:
+                    while True:
+                        d = c.recv(65536)
+                        if not d:
+                            break
+                        up.sendall(d)
+                except OSError:
+                    pass
+                try:
+                    up.shutdown(socket.SHUT_WR)
+                except OSError:
+                    pass
+
+            threading.Thread(target=c2s, daemon=True).start()
+            try:
+                while True:
+                    d = up.recv(65536)
+                    if not d:
+                        break
+                    start = sent[0]
+                    sent[0] += len(d)
+                    if start <= offset < sent[0]:
+                        i = offset - start
+                        if mode == "cut":
+                            c.sendall(d[:i])
+                            break
+                        d = d[:i] + bytes([d[i] ^ 0x40]) + d[i + 1:]
+                    c.sendall(d)
+            except OSError:
+                pass
+            c.close()
+            up.close()
+        finally:
+            done.set()
+
+    threading.Thread(target=run_proxy, daemon=True).start()
+    try:
+        p = subprocess.run([BIN, "-p", str(pport), "-o", "UserKnownHostsFile=" + KH, "-i", real, "-o", "StrictHostKeyChecking=no", "127.0.0.1", "echo", "should-not-run-to-completion-with-bad-bytes"],
+                           env=ENV, capture_output=True, timeout=60)
+        code, out, err = p.returncode, p.stdout, p.stderr
+    except subprocess.TimeoutExpired:
+        code, out, err = "hang", b"", b""
+    ls.close()
+    # A flip inside bytes the client never authenticates (padding is covered;
+    # the very last bytes may be after the command's output) can still end
+    # cleanly: what must never happen is a crash, a hang, or a corrupted
+    # *success* (the command's exit 0 with output that is not exactly ours).
+    good = code == 0 and out == b"should-not-run-to-completion-with-bad-bytes\n"
+    bad_but_clean = code == 255 and len(err.strip().splitlines()) <= 2
+    ok("corrupting proxy (%s at server byte %d): clean 255 or an untouched success" % (mode, offset),
+       good or bad_but_clean, (code, out[:60], err[-200:]))
+
+
+trust_host()
+for off in (5, 40, 300, 1200, 1500, 1700, 2000, 2400, 3000, 3600):
+    proxy_case("flip", "flip", off)
+for off in (10, 700, 1900, 2600):
+    proxy_case("cut", "cut", off)
 
 # --- tidy up ----------------------------------------------------------------------------------------
 for pr in procs:

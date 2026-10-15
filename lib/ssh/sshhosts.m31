@@ -469,6 +469,46 @@ str directory_of(str path) {
     return path.substr(0, cut);
 }
 
+/// What `remove` did to a file's text.
+pub type Removal {
+    pub str text;
+    pub int removed;
+}
+
+/// `known_hosts` text with every entry for `host`:`port` removed (what
+/// `ssh-keygen -R` does): a line whose host-pattern list names it, plain,
+/// `[host]:port` or hashed, goes whole; a line that does not match, a
+/// comment and a blank line are kept byte for byte. Wildcard patterns are
+/// matched as OpenSSH matches them, so `-R host` removes a `*.example.com`
+/// entry too -- nothing is removed that `keys_for` would not have used.
+pub Removal remove(str text, str host, int port) {
+    str id = host_id(host, port);
+    List<str> kept = [];
+    int removed = 0;
+    for (str raw in text.split("\n")) {
+        str line = raw.trim();
+        if (line.size() == 0 || line.starts_with("#")) {
+            kept.push(raw);
+            continue;
+        }
+        List<str> fields = fields_of(line);
+        int offset = 0;
+        if (fields[0].starts_with("@")) {
+            offset = 1;
+        }
+        if (fields.size() < offset + 3) {
+            kept.push(raw);
+            continue;
+        }
+        if (is_entry_match(fields[offset].split(","), id)) {
+            removed = removed + 1;
+        } else {
+            kept.push(raw);
+        }
+    }
+    return Removal(kept.join("\n"), removed);
+}
+
 /// Appends `key` as the key for `host:port` to the `known_hosts` file at
 /// `path`: plain, or with `is_hashed` in OpenSSH's `HashKnownHosts` form. The
 /// file (and its directory, with the process umask's permissions) is created

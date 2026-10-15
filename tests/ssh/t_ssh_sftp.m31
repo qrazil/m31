@@ -1,0 +1,148 @@
+// `lib/ssh/sshsftp.m31`'s pure parts: attributes and name lists (round
+// trips, every proper prefix refused, absurd counts refused), and the
+// predicates that keep a hostile server's names from leaving the directory
+// the user named. The live behaviour is `test_m31sftp.sh`'s.
+import ssh;
+import ssh.sshsftp;
+
+int check(int passed_count, bool is_ok, str label) {
+    if (!is_ok) {
+        trap("check failed: " + label);
+    }
+    return passed_count + 1;
+}
+
+void put_u32(bytes out, int value) {
+    out.push(value >> 24 & 0xFF);
+    out.push(value >> 16 & 0xFF);
+    out.push(value >> 8 & 0xFF);
+    out.push(value & 0xFF);
+}
+
+bool is_parsed(Result<sshsftp.AttrsAt, str> result) {
+    match (result) {
+        case Ok(_): {
+            return true;
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+bool is_names_parsed(Result<List<sshsftp.Entry>, str> result) {
+    match (result) {
+        case Ok(_): {
+            return true;
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+int checks = 0;
+// --- names a server may not use ------------------------------------------------------
+checks = check(checks, sshsftp.is_safe_name("report.txt"), "an ordinary name is safe");
+checks = check(checks, sshsftp.is_safe_name(".hidden"), "a dotfile is safe");
+checks = check(checks, sshsftp.is_safe_name("a b"), "spaces are safe");
+checks = check(checks, !sshsftp.is_safe_name(""), "empty is not");
+checks = check(checks, !sshsftp.is_safe_name("."), "dot is not");
+checks = check(checks, !sshsftp.is_safe_name(".."), "dot-dot is not");
+checks = check(checks, !sshsftp.is_safe_name("../x"), "a parent traversal is not");
+checks = check(checks, !sshsftp.is_safe_name("a/b"), "a slash is not");
+checks = check(checks, !sshsftp.is_safe_name("/etc/passwd"), "an absolute path is not");
+checks = check(checks, sshsftp.is_safe_name("..."), "three dots are a name");
+// --- paths ------------------------------------------------------------------------------
+checks = check(checks, sshsftp.basename_of("/a/b/c.txt") == "c.txt", "basename");
+checks = check(checks, sshsftp.basename_of("/a/b/") == "b", "basename ignores trailing slashes");
+checks = check(checks, sshsftp.basename_of("file") == "file", "basename of a bare name");
+checks = check(checks, sshsftp.join_path("/a", "b") == "/a/b", "join");
+checks = check(checks, sshsftp.join_path("/a/", "b") == "/a/b", "join does not double the slash");
+// --- attributes -------------------------------------------------------------------------
+sshsftp.Attrs attrs = sshsftp.Attrs(true, 123456789012, true, 0o100644, true, 1700000000, 1700000100, 0, 0);
+bytes encoded = sshsftp.encode_attrs(attrs);
+match (sshsftp.parse_attrs(encoded, 0)) {
+    case Ok(sshsftp.AttrsAt parsed): {
+        checks = check(checks, parsed.attrs.has_size && parsed.attrs.size == 123456789012, "size round trip (64 bit)");
+        checks = check(checks, parsed.attrs.permissions == 0o100644 && parsed.attrs.is_file() && !parsed.attrs.is_directory(), "permissions round trip");
+        checks = check(checks, parsed.attrs.access_time == 1700000000 && parsed.attrs.modify_time == 1700000100, "times round trip");
+        checks = check(checks, parsed.next == encoded.size(), "all bytes consumed");
+    }
+    case Err(str reason): {
+        trap("attrs: " + reason);
+    }
+}
+int refused = 0;
+int cut = 0;
+while (cut < encoded.size()) {
+    if (!is_parsed(sshsftp.parse_attrs(encoded.substr(0, cut), 0))) {
+        refused = refused + 1;
+    }
+    cut = cut + 1;
+}
+checks = check(checks, refused == encoded.size(), "every proper prefix of an ATTRS is refused");
+// uid/gid and extended pairs are skipped correctly
+bytes rich = [];
+put_u32(rich, 1 | 2 | 4 | 0x80000000);
+put_u32(rich, 0);
+put_u32(rich, 99);
+put_u32(rich, 1000);
+put_u32(rich, 1000);
+put_u32(rich, 0o040755);
+put_u32(rich, 2);
+ssh.push_string(rich, "name@x".to_bytes());
+ssh.push_string(rich, "value".to_bytes());
+ssh.push_string(rich, "n2".to_bytes());
+ssh.push_string(rich, "v2".to_bytes());
+match (sshsftp.parse_attrs(rich, 0)) {
+    case Ok(sshsftp.AttrsAt parsed): {
+        checks = check(checks, parsed.attrs.size == 99 && parsed.attrs.is_directory() && parsed.next == rich.size(), "uid/gid and extended attributes are skipped");
+    }
+    case Err(str reason): {
+        trap("rich attrs: " + reason);
+    }
+}
+bytes huge_pairs = [];
+put_u32(huge_pairs, 0x80000000);
+put_u32(huge_pairs, 4000000000);
+checks = check(checks, !is_parsed(sshsftp.parse_attrs(huge_pairs, 0)), "an absurd extended-pair count is refused");
+bytes huge_size = [];
+put_u32(huge_size, 1);
+put_u32(huge_size, 0xFFFFFFFF);
+put_u32(huge_size, 0xFFFFFFFF);
+checks = check(checks, !is_parsed(sshsftp.parse_attrs(huge_size, 0)), "a size over 2^63 is refused");
+// --- name lists ----------------------------------------------------------------------------
+bytes names = [];
+put_u32(names, 2);
+ssh.push_string(names, "alpha".to_bytes());
+ssh.push_string(names, "-rw-r--r-- 1 u g 5 Jan 1 alpha".to_bytes());
+names.extend(encoded);
+ssh.push_string(names, "dir".to_bytes());
+ssh.push_string(names, "drwxr-xr-x 2 u g 4096 Jan 1 dir".to_bytes());
+put_u32(names, 0);
+match (sshsftp.parse_names(names, 0)) {
+    case Ok(List<sshsftp.Entry> entries): {
+        checks = check(checks, entries.size() == 2 && entries[0].name == "alpha" && entries[1].name == "dir", "a NAME body parses");
+        checks = check(checks, entries[0].attrs.size == 123456789012 && !entries[1].attrs.has_size, "attributes stay with their entry");
+    }
+    case Err(str reason): {
+        trap("names: " + reason);
+    }
+}
+refused = 0;
+cut = 0;
+while (cut < names.size()) {
+    if (!is_names_parsed(sshsftp.parse_names(names.substr(0, cut), 0))) {
+        refused = refused + 1;
+    }
+    cut = cut + 1;
+}
+checks = check(checks, refused == names.size(), "every proper prefix of a NAME body is refused");
+bytes many = [];
+put_u32(many, 4000000000);
+checks = check(checks, !is_names_parsed(sshsftp.parse_names(many, 0)), "an absurd name count is refused before anything is allocated");
+bytes liar = [];
+put_u32(liar, 60000);
+checks = check(checks, !is_names_parsed(sshsftp.parse_names(liar, 0)), "a count the packet cannot hold is refused");
+print(checks.to_str() + " checks, 0 failures");

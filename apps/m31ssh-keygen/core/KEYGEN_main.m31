@@ -1,0 +1,576 @@
+// m31ssh-keygen: the four jobs of `ssh-keygen` a client user needs.
+//
+//   generate   an Ed25519 key in `openssh-key-v1` format, optionally
+//              passphrase-protected (aes256-ctr, bcrypt, -a rounds), written
+//              with mode 0600 (and its `.pub`, 0644); an existing file is
+//              never overwritten;
+//   -y         the public key line of a private key (decrypting it with the
+//              passphrase, asked for with echo off, or -P);
+//   -l         the SHA-256 fingerprint of a private key file, a `.pub` file
+//              or the first key in a known_hosts file;
+//   -R host    removes a host's entries from known_hosts, keeping the old file
+//              as `known_hosts.old` (as ssh-keygen does).
+//
+// A passphrase given with -N or -P is visible to other users in the process
+// list while the command runs: prefer the prompt. UNAUDITED.
+//
+// Exit status: 0, or 1 with one line on standard error.
+
+import io;
+import os;
+import fs;
+import term;
+import random;
+import encoding.base64;
+import crypto.ed25519;
+import crypto.sha256;
+import ssh;
+import ssh.sshkey;
+import ssh.sshhosts;
+import ssh.sshconnect;
+
+pub const str VERSION = "0.1.0";
+
+str usage() {
+    return "usage: m31ssh-keygen [-t ed25519] [-f file] [-N passphrase] [-C comment] [-a rounds] [-q]\n" + "       m31ssh-keygen -y [-f file] [-P passphrase]\n" + "       m31ssh-keygen -l [-f file]\n" + "       m31ssh-keygen -R host [-f known_hosts]\n" + "\n" + "m31ssh-keygen is UNAUDITED. It generates Ed25519 keys only; see docs/m31ssh.md.\n";
+}
+
+void fail_line(str message) {
+    io.eprint("m31ssh-keygen: " + message);
+}
+
+// A passphrase from the terminal with echo off.
+Option<bytes> prompt(str text) {
+    if (!term.is_terminal(0)) {
+        return Option<bytes>.None;
+    }
+    match (term.raw(in_fd: 0, out_fd: 2)) {
+        case Err(_): {
+            return Option<bytes>.None;
+        }
+        case Ok(term.Session raw): {
+            Result<int, io.Error> shown = io.stderr().write(text.to_bytes());
+            bytes typed = [];
+            bool is_done = false;
+            bool is_aborted = false;
+            io.File input = io.stdin();
+            while (!is_done) {
+                match (input.read(1)) {
+                    case Ok(bytes got): {
+                        if (got.size() == 0 || got[0] == 3 || got[0] == 4) {
+                            is_aborted = true;
+                            is_done = true;
+                        } else if (got[0] == 13 || got[0] == 10) {
+                            is_done = true;
+                        } else if (got[0] == 127 || got[0] == 8) {
+                            while (typed.size() > 0 && (typed[typed.size() - 1] & 0xC0) == 0x80) {
+                                typed.pop();
+                            }
+                            if (typed.size() > 0) {
+                                typed.pop();
+                            }
+                        } else if (got[0] >= 32) {
+                            typed.push(got[0]);
+                        }
+                    }
+                    case Err(_): {
+                        is_aborted = true;
+                        is_done = true;
+                    }
+                }
+            }
+            Result<bool, term.Error> restored = raw.restore();
+            Result<int, io.Error> newline = io.stderr().write("\n".to_bytes());
+            if (is_aborted) {
+                return Option<bytes>.None;
+            }
+            return Option<bytes>.Some(typed);
+        }
+    }
+}
+
+str default_key_path() {
+    str home = sshconnect.home_directory();
+    if (home == "") {
+        return "";
+    }
+    return home + "/.ssh/id_ed25519";
+}
+
+// The "ssh-ed25519 BASE64" part and comment of a public key text.
+str fingerprint_of_blob(bytes blob) {
+    str encoded = base64.encode(sha256.sum(blob));
+    while (encoded.ends_with("=")) {
+        encoded = encoded.substr(0, encoded.size() - 1);
+    }
+    return "SHA256:" + encoded;
+}
+
+str type_label(str algorithm) {
+    if (algorithm == "ssh-ed25519") {
+        return "ED25519";
+    }
+    if (algorithm == "ecdsa-sha2-nistp256") {
+        return "ECDSA";
+    }
+    if (algorithm == "ssh-rsa") {
+        return "RSA";
+    }
+    return algorithm;
+}
+
+// Number of bits OpenSSH reports for a key blob.
+int bits_of(str algorithm, bytes blob) {
+    if (algorithm == "ssh-ed25519") {
+        return 256;
+    }
+    if (algorithm == "ecdsa-sha2-nistp256") {
+        return 256;
+    }
+    if (algorithm == "ssh-rsa") {
+        match (ssh.parse_string(blob, 0)) {
+            case Ok(ssh.Field name): {
+                match (ssh.parse_string(blob, name.next)) {
+                    case Ok(ssh.Field exponent): {
+                        match (ssh.parse_string(blob, exponent.next)) {
+                            case Ok(ssh.Field modulus): {
+                                bytes value = modulus.value;
+                                int first = 0;
+                                while (first < value.size() && value[first] == 0) {
+                                    first = first + 1;
+                                }
+                                if (first >= value.size()) {
+                                    return 0;
+                                }
+                                int top = value[first];
+                                int bits = (value.size() - first - 1) * 8;
+                                while (top > 0) {
+                                    bits = bits + 1;
+                                    top = top >> 1;
+                                }
+                                return bits;
+                            }
+                            case Err(_): {
+                                return 0;
+                            }
+                        }
+                    }
+                    case Err(_): {
+                        return 0;
+                    }
+                }
+            }
+            case Err(_): {
+                return 0;
+            }
+        }
+    }
+    return 0;
+}
+
+// Reads a key file into text.
+Result<str, str> read_text(str path) {
+    match (io.read(path)) {
+        case Ok(str text): {
+            return Result<str, str>.Ok(text);
+        }
+        case Err(io.Error error): {
+            return Result<str, str>.Err(path + ": " + error.to_str());
+        }
+    }
+}
+
+// The private key cut_at `path`, asking for a passphrase when it needs one.
+Result<sshkey.PrivateKey, str> load_private(str path, str passphrase_option) {
+    str text = read_text(path)?;
+    match (sshkey.inspect(text)) {
+        case Err(sshkey.Error error): {
+            return Result<sshkey.PrivateKey, str>.Err(path + ": " + error.to_str());
+        }
+        case Ok(sshkey.Info info): {
+            bytes passphrase = [];
+            if (info.is_encrypted) {
+                if (passphrase_option != "") {
+                    passphrase = passphrase_option.to_bytes();
+                } else {
+                    match (prompt("Enter passphrase for " + path + ": ")) {
+                        case Some(bytes typed): {
+                            passphrase = typed;
+                        }
+                        case None: {
+                            return Result<sshkey.PrivateKey, str>.Err(path + ": the key is passphrase-protected and no passphrase was given (-P)");
+                        }
+                    }
+                }
+            }
+            match (sshkey.parse_with_passphrase(text, passphrase)) {
+                case Ok(sshkey.PrivateKey key): {
+                    return Result<sshkey.PrivateKey, str>.Ok(key);
+                }
+                case Err(sshkey.Error error): {
+                    return Result<sshkey.PrivateKey, str>.Err(path + ": " + error.to_str());
+                }
+            }
+        }
+    }
+}
+
+pub int start(List<str> argv) {
+    List<str> arguments = [];
+    if (argv.size() > 1) {
+        arguments = argv.slice(1, argv.size());
+    }
+    str mode = "generate";
+    str key_type = "ed25519";
+    str file = "";
+    str new_passphrase = "";
+    bool has_new_passphrase = false;
+    str old_passphrase = "";
+    str comment = "";
+    bool has_comment = false;
+    int rounds = 16;
+    bool is_quiet = false;
+    str host = "";
+    int index = 0;
+    while (index < arguments.size()) {
+        str word = arguments[index];
+        if (word == "-V" || word == "--version") {
+            print("m31ssh-keygen " + VERSION + " (UNAUDITED)");
+            return 0;
+        }
+        if (word == "-h" || word == "--help") {
+            print(usage());
+            return 0;
+        }
+        if (word == "-y") {
+            mode = "public";
+        } else if (word == "-l") {
+            mode = "fingerprint";
+        } else if (word == "-q") {
+            is_quiet = true;
+        } else if (word == "-t" || word == "-f" || word == "-N" || word == "-P" || word == "-C" || word == "-a" || word == "-R") {
+            index = index + 1;
+            if (index >= arguments.size()) {
+                fail_line("option " + word + " requires an argument");
+                return 1;
+            }
+            str value = arguments[index];
+            if (word == "-t") {
+                key_type = value;
+            } else if (word == "-f") {
+                file = value;
+            } else if (word == "-N") {
+                new_passphrase = value;
+                has_new_passphrase = true;
+            } else if (word == "-P") {
+                old_passphrase = value;
+            } else if (word == "-C") {
+                comment = value;
+                has_comment = true;
+            } else if (word == "-a") {
+                Option<int> parsed = value.parse_int();
+                match (parsed) {
+                    case Some(int number): {
+                        if (number < 1 || number > 1024) {
+                            fail_line("-a rounds must be 1 to 1024");
+                            return 1;
+                        }
+                        rounds = number;
+                    }
+                    case None: {
+                        fail_line("-a needs a number");
+                        return 1;
+                    }
+                }
+            } else {
+                mode = "remove";
+                host = value;
+            }
+        } else {
+            fail_line("unknown option " + word);
+            io.eprint(usage());
+            return 1;
+        }
+        index = index + 1;
+    }
+    if (mode == "remove") {
+        return run_remove(host, file);
+    }
+    if (mode == "public") {
+        if (file == "") {
+            file = default_key_path();
+        }
+        match (load_private(file, old_passphrase)) {
+            case Err(str reason): {
+                fail_line(reason);
+                return 1;
+            }
+            case Ok(sshkey.PrivateKey key): {
+                str line = key.algorithm + " " + base64.encode(key.public_blob());
+                if (key.comment != "") {
+                    line = line + " " + key.comment;
+                }
+                print(line);
+                return 0;
+            }
+        }
+    }
+    if (mode == "fingerprint") {
+        if (file == "") {
+            file = default_key_path();
+        }
+        return run_fingerprint(file);
+    }
+    return run_generate(key_type, file, new_passphrase, has_new_passphrase, comment, has_comment, rounds, is_quiet);
+}
+
+int run_fingerprint(str file) {
+    str text = "";
+    match (read_text(file)) {
+        case Ok(str loaded): {
+            text = loaded;
+        }
+        case Err(str reason): {
+            fail_line(reason);
+            return 1;
+        }
+    }
+    // a private key file
+    match (sshkey.inspect(text)) {
+        case Ok(sshkey.Info info): {
+            print(bits_of(info.algorithm, info.blob).to_str() + " " + fingerprint_of_blob(info.blob) + " " + file + " (" + type_label(info.algorithm) + ")");
+            return 0;
+        }
+        case Err(_): {
+        }
+    }
+    // a public key file / known_hosts: the first `type base64 [comment]`
+    for (str raw in text.split("\n")) {
+        str line = raw.trim();
+        if (line == "" || line.starts_with("#")) {
+            continue;
+        }
+        List<str> fields = [];
+        for (str piece in line.split(" ")) {
+            if (piece != "") {
+                fields.push(piece);
+            }
+        }
+        // `type base64 ...` (a .pub file) or `hosts type base64 ...` (known_hosts)
+        int cut_at = 0;
+        if (fields.size() >= 3 && !fields[0].starts_with("ssh-") && !fields[0].starts_with("ecdsa-")) {
+            cut_at = 1;
+        }
+        if (fields.size() >= cut_at + 2) {
+            match (base64.decode(fields[cut_at + 1])) {
+                case Ok(bytes blob): {
+                    match (ssh.parse_host_key(blob)) {
+                        case Ok(ssh.HostKey key): {
+                            str comment_text = "";
+                            if (fields.size() > cut_at + 2) {
+                                comment_text = fields.slice(cut_at + 2, fields.size()).join(" ");
+                            }
+                            str shown = comment_text;
+                            if (shown == "") {
+                                shown = "no comment";
+                            }
+                            print(bits_of(key.algorithm, blob).to_str() + " " + fingerprint_of_blob(blob) + " " + shown + " (" + type_label(key.algorithm) + ")");
+                            return 0;
+                        }
+                        case Err(_): {
+                        }
+                    }
+                }
+                case Err(_): {
+                }
+            }
+        }
+    }
+    fail_line(file + ": not a key file");
+    return 1;
+}
+
+int run_remove(str host, str file) {
+    str path = file;
+    if (path == "") {
+        str home = sshconnect.home_directory();
+        if (home == "") {
+            fail_line("HOME is not set; name the file with -f");
+            return 1;
+        }
+        path = home + "/.ssh/known_hosts";
+    }
+    str name = host;
+    int port = 22;
+    if (host.starts_with("[") && host.contains("]:")) {
+        int bracket = 0;
+        match (host.index_of("]:")) {
+            case Some(int found): {
+                bracket = found;
+            }
+            case None: {
+            }
+        }
+        name = host.substr(1, bracket);
+        Option<int> parsed = host.substr(bracket + 2, host.size()).parse_int();
+        match (parsed) {
+            case Some(int number): {
+                port = number;
+            }
+            case None: {
+                fail_line("bad port in " + host);
+                return 1;
+            }
+        }
+    }
+    str text = "";
+    match (read_text(path)) {
+        case Ok(str loaded): {
+            text = loaded;
+        }
+        case Err(str reason): {
+            fail_line(reason);
+            return 1;
+        }
+    }
+    sshhosts.Removal result = sshhosts.remove(text, name, port);
+    if (result.removed == 0) {
+        print("Host " + host + " not found in " + path);
+        return 0;
+    }
+    match (io.write(path + ".old", text)) {
+        case Ok(_): {
+        }
+        case Err(io.Error error): {
+            fail_line("cannot write " + path + ".old: " + error.to_str());
+            return 1;
+        }
+    }
+    match (io.write(path, result.text)) {
+        case Ok(_): {
+        }
+        case Err(io.Error error): {
+            fail_line("cannot write " + path + ": " + error.to_str());
+            return 1;
+        }
+    }
+    print("# Host " + host + " found: " + result.removed.to_str() + " key(s) removed");
+    print(path + " updated.");
+    print("Original contents retained as " + path + ".old");
+    return 0;
+}
+
+int run_generate(str key_type, str file, str passphrase_text, bool has_passphrase, str comment, bool has_comment, int rounds, bool is_quiet) {
+    if (key_type != "ed25519") {
+        fail_line("only ed25519 keys can be generated (-t ed25519)");
+        return 1;
+    }
+    str path = file;
+    if (path == "") {
+        path = default_key_path();
+        if (path == "") {
+            fail_line("HOME is not set; name the file with -f");
+            return 1;
+        }
+    }
+    if (fs.is_present(path) || fs.is_present(path + ".pub")) {
+        fail_line(path + " already exists; refusing to overwrite it (remove it first)");
+        return 1;
+    }
+    bytes passphrase = passphrase_text.to_bytes();
+    if (!has_passphrase) {
+        match (prompt("Enter passphrase (empty for no passphrase): ")) {
+            case Some(bytes first): {
+                if (first.size() > 0) {
+                    match (prompt("Enter same passphrase again: ")) {
+                        case Some(bytes second): {
+                            if (second != first) {
+                                fail_line("passphrases do not match");
+                                return 1;
+                            }
+                            passphrase = first;
+                        }
+                        case None: {
+                            fail_line("cancelled");
+                            return 1;
+                        }
+                    }
+                }
+            }
+            case None: {
+                if (term.is_terminal(0)) {
+                    fail_line("cancelled");
+                    return 1;
+                }
+                // no terminal and no -N: an unprotected key, as `-N ""` says
+                // explicitly; refuse to guess
+                fail_line("no passphrase given and no terminal to ask on: pass -N \"\" for an unprotected key");
+                return 1;
+            }
+        }
+    }
+    if (passphrase.size() > 0 && passphrase.size() < 5) {
+        fail_line("passphrase too short: have 5 characters cut_at least, or use none");
+        return 1;
+    }
+    str text_comment = comment;
+    if (!has_comment) {
+        str user = sshconnect.local_user();
+        text_comment = user + "@m31ssh";
+    }
+    bytes seed = random.system().octets(32);
+    match (sshkey.encode_ed25519(seed, text_comment, passphrase, rounds)) {
+        case Err(sshkey.Error error): {
+            fail_line(error.to_str());
+            return 1;
+        }
+        case Ok(str file_text): {
+            match (io.open(path, mode: io.Mode.Write, perm: 0o600)) {
+                case Err(io.Error error): {
+                    fail_line("cannot write " + path + ": " + error.to_str());
+                    return 1;
+                }
+                case Ok(io.File out): {
+                    match (out.write(file_text.to_bytes())) {
+                        case Ok(_): {
+                        }
+                        case Err(io.Error error): {
+                            fail_line("cannot write " + path + ": " + error.to_str());
+                            return 1;
+                        }
+                    }
+                    Result<bool, io.Error> finished = out.close();
+                }
+            }
+            bytes blob = [];
+            ssh.push_string(blob, "ssh-ed25519".to_bytes());
+            ssh.push_string(blob, ed25519.public_key(seed));
+            str public_line = "ssh-ed25519 " + base64.encode(blob) + " " + text_comment + "\n";
+            match (io.open(path + ".pub", mode: io.Mode.Write, perm: 0o644)) {
+                case Err(io.Error error): {
+                    fail_line("cannot write " + path + ".pub: " + error.to_str());
+                    return 1;
+                }
+                case Ok(io.File out): {
+                    match (out.write(public_line.to_bytes())) {
+                        case Ok(_): {
+                        }
+                        case Err(io.Error error): {
+                            fail_line("cannot write " + path + ".pub: " + error.to_str());
+                            return 1;
+                        }
+                    }
+                    Result<bool, io.Error> finished = out.close();
+                }
+            }
+            if (!is_quiet) {
+                print("Generating public/private ed25519 key pair.");
+                print("Your identification has been saved in " + path);
+                print("Your public key has been saved in " + path + ".pub");
+                print("The key fingerprint is:");
+                print(fingerprint_of_blob(blob) + " " + text_comment);
+            }
+            return 0;
+        }
+    }
+}

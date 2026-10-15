@@ -1,0 +1,584 @@
+// m31sftp: the commands `ls cd lcd pwd lpwd get put mkdir rmdir rm rename
+// stat chmod help quit`, read from the terminal (with a prompt), from a pipe,
+// or from `-b file`. In batch mode (not a terminal, or -b) the first failing
+// command ends the session with status 1, as `sftp -b` does; at a terminal
+// a failure is reported and the prompt returns.
+//
+// The remote directory is tracked here (`cd` resolves it with the server's
+// REALPATH and checks it is a directory); so is the local one (`lcd`: the
+// language has no chdir, so relative local paths are resolved against the
+// directory this program tracks). UNAUDITED.
+//
+// Exit status: 0; 1 for a failed command in batch mode or bad usage; 255
+// when the connection or authentication failed.
+
+import io;
+import os;
+import fs;
+import ssh;
+import term;
+import timer;
+import ssh.sshconnect;
+import ssh.sshsftp;
+
+const int EXIT_USAGE = 1;
+const int EXIT_CONNECTION = 255;
+const int READ_TIMEOUT_MS = 60000;
+pub const str VERSION = "0.1.0";
+
+str usage() {
+    return "usage: m31sftp [-P port] [-i identity] [-o option=value] [-F config] [-J jump]\n" + "               [-b batchfile] [-q] [user@]host[:directory]\n" + "\n" + "m31sftp is UNAUDITED: do not rely on it where an audited client\n" + "(OpenSSH) is required. See docs/m31ssh.md.\n" + "commands: ls [-l] [path]  cd path  lcd path  pwd  lpwd  get [-r] remote [local]\n" + "          put [-r] local [remote]  mkdir path  rmdir path  rm path\n" + "          rename old new  stat path  chmod mode path  help  quit\n";
+}
+
+void warn(str message) {
+    io.eprint("m31sftp: " + message);
+}
+
+type Meter {
+    bool is_enabled;
+    str label;
+    int started_ns;
+    int last_ns;
+}
+
+pub void Meter.begin(str name) {
+    label = name;
+    started_ns = timer.monotonic_ns();
+    last_ns = 0;
+}
+
+pub void Meter.update(int done, int total) {
+    if (!is_enabled) {
+        return;
+    }
+    int now = timer.monotonic_ns();
+    if (now - last_ns < 100000000 && !(total > 0 && done >= total)) {
+        return;
+    }
+    last_ns = now;
+    str percent = "";
+    if (total > 0) {
+        percent = (done * 100 / total).to_str() + "% ";
+    }
+    str line = "\r" + label + "  " + percent + (done / 1024).to_str() + "KB      ";
+    Result<int, io.Error> shown = io.stderr().write(line.to_bytes());
+}
+
+pub void Meter.end() {
+    if (is_enabled) {
+        Result<int, io.Error> shown = io.stderr().write("\n".to_bytes());
+    }
+}
+
+pub void Meter.note(str message) {
+    io.eprint("m31sftp: " + message);
+}
+
+// The state of a session.
+type State {
+    sshsftp.Session session;
+    str remote_directory;
+    str local_directory;
+    bool is_quiet;
+}
+
+str resolve_remote(State state, str path) {
+    if (path.starts_with("/")) {
+        return path;
+    }
+    return sshsftp.join_path(state.remote_directory, path);
+}
+
+str resolve_local(State state, str path) {
+    if (path.starts_with("/")) {
+        return path;
+    }
+    if (state.local_directory == ".") {
+        return path;
+    }
+    return sshsftp.join_path(state.local_directory, path);
+}
+
+// Whitespace-separated words with simple "double quotes".
+List<str> words_of(str line) {
+    List<str> words = [];
+    str current = "";
+    bool is_open = false;
+    bool is_quoted = false;
+    for (int code in line.chars()) {
+        if (is_quoted) {
+            if (code == 34) {
+                is_quoted = false;
+            } else {
+                current = current + str.from_chars([code]);
+            }
+        } else if (code == 34) {
+            is_quoted = true;
+            is_open = true;
+        } else if (code == 32 || code == 9) {
+            if (is_open) {
+                words.push(current);
+                current = "";
+                is_open = false;
+            }
+        } else {
+            current = current + str.from_chars([code]);
+            is_open = true;
+        }
+    }
+    if (is_open) {
+        words.push(current);
+    }
+    return words;
+}
+
+// Runs one command; `Ok(true)` asks to quit.
+Result<bool, str> run_command(State state, List<str> words) {
+    str command = words[0];
+    List<str> rest = words.slice(1, words.size());
+    bool is_flag_r = false;
+    bool is_flag_l = false;
+    List<str> arguments_list = [];
+    for (str word in rest) {
+        if (word == "-r" || word == "-R") {
+            is_flag_r = true;
+        } else if (word == "-l") {
+            is_flag_l = true;
+        } else {
+            arguments_list.push(word);
+        }
+    }
+    sshsftp.Session session = state.session;
+    if (command == "quit" || command == "bye" || command == "exit") {
+        return Result<bool, str>.Ok(true);
+    }
+    if (command == "help" || command == "?") {
+        print(usage());
+        return Result<bool, str>.Ok(false);
+    }
+    if (command == "pwd") {
+        print("Remote working directory: " + state.remote_directory);
+        return Result<bool, str>.Ok(false);
+    }
+    if (command == "lpwd") {
+        str here = state.local_directory;
+        if (here == ".") {
+            match (fs.realpath(".")) {
+                case Ok(str absolute): {
+                    here = absolute;
+                }
+                case Err(_): {
+                }
+            }
+        }
+        print("Local working directory: " + here);
+        return Result<bool, str>.Ok(false);
+    }
+    if (command == "cd") {
+        if (arguments_list.size() != 1) {
+            return Result<bool, str>.Err("usage: cd path");
+        }
+        str target = session.realpath(resolve_remote(state, arguments_list[0]))?;
+        sshsftp.Attrs attrs = session.stat(target)?;
+        if (!attrs.is_directory()) {
+            return Result<bool, str>.Err("remote: " + target + ": not a directory");
+        }
+        state.remote_directory = target;
+        return Result<bool, str>.Ok(false);
+    }
+    if (command == "lcd") {
+        if (arguments_list.size() != 1) {
+            return Result<bool, str>.Err("usage: lcd path");
+        }
+        str target = resolve_local(state, arguments_list[0]);
+        if (!fs.is_directory(target)) {
+            return Result<bool, str>.Err("local: " + target + ": not a directory");
+        }
+        state.local_directory = target;
+        return Result<bool, str>.Ok(false);
+    }
+    if (command == "ls" || command == "dir") {
+        str path = state.remote_directory;
+        if (arguments_list.size() > 0) {
+            path = resolve_remote(state, arguments_list[0]);
+        }
+        sshsftp.Attrs attrs = session.stat(path)?;
+        if (!attrs.is_directory()) {
+            print(path);
+            return Result<bool, str>.Ok(false);
+        }
+        List<sshsftp.Entry> entries = session.list(path)?;
+        List<str> names = [];
+        for (sshsftp.Entry entry in entries) {
+            if (is_flag_l) {
+                names.push(sshconnect.sanitize(entry.long_name));
+            } else {
+                names.push(sshconnect.sanitize(entry.name));
+            }
+        }
+        names.sort();
+        for (str name in names) {
+            print(name);
+        }
+        return Result<bool, str>.Ok(false);
+    }
+    if (command == "stat" || command == "lstat") {
+        if (arguments_list.size() != 1) {
+            return Result<bool, str>.Err("usage: stat path");
+        }
+        str path = resolve_remote(state, arguments_list[0]);
+        sshsftp.Attrs attrs = session.stat(path)?;
+        str kind = "file";
+        if (attrs.is_directory()) {
+            kind = "directory";
+        } else if (attrs.is_link()) {
+            kind = "link";
+        }
+        str line = path + ": " + kind;
+        if (attrs.has_size) {
+            line = line + " size=" + attrs.size.to_str();
+        }
+        if (attrs.has_permissions) {
+            line = line + " mode=" + octal(attrs.permissions & 0o7777);
+        }
+        if (attrs.has_times) {
+            line = line + " mtime=" + attrs.modify_time.to_str();
+        }
+        print(line);
+        return Result<bool, str>.Ok(false);
+    }
+    if (command == "mkdir") {
+        if (arguments_list.size() != 1) {
+            return Result<bool, str>.Err("usage: mkdir path");
+        }
+        session.mkdir(resolve_remote(state, arguments_list[0]), 0o755)?;
+        return Result<bool, str>.Ok(false);
+    }
+    if (command == "rmdir") {
+        if (arguments_list.size() != 1) {
+            return Result<bool, str>.Err("usage: rmdir path");
+        }
+        session.rmdir(resolve_remote(state, arguments_list[0]))?;
+        return Result<bool, str>.Ok(false);
+    }
+    if (command == "rm") {
+        if (arguments_list.size() != 1) {
+            return Result<bool, str>.Err("usage: rm path");
+        }
+        session.remove(resolve_remote(state, arguments_list[0]))?;
+        return Result<bool, str>.Ok(false);
+    }
+    if (command == "rename" || command == "mv") {
+        if (arguments_list.size() != 2) {
+            return Result<bool, str>.Err("usage: rename old new");
+        }
+        session.rename(resolve_remote(state, arguments_list[0]), resolve_remote(state, arguments_list[1]))?;
+        return Result<bool, str>.Ok(false);
+    }
+    if (command == "chmod") {
+        if (arguments_list.size() != 2) {
+            return Result<bool, str>.Err("usage: chmod octal-mode path");
+        }
+        int mode = parse_octal(arguments_list[0]);
+        if (mode < 0) {
+            return Result<bool, str>.Err("chmod: the mode must be octal, like 644");
+        }
+        session.set_permissions(resolve_remote(state, arguments_list[1]), mode)?;
+        return Result<bool, str>.Ok(false);
+    }
+    if (command == "get") {
+        if (arguments_list.size() < 1 || arguments_list.size() > 2) {
+            return Result<bool, str>.Err("usage: get [-r] remote [local]");
+        }
+        str remote = resolve_remote(state, arguments_list[0]);
+        str local = resolve_local(state, sshsftp.basename_of(remote));
+        if (arguments_list.size() == 2) {
+            local = resolve_local(state, arguments_list[1]);
+        }
+        Meter meter = Meter(!state.is_quiet && term.is_terminal(2), "", 0, 0);
+        session.get_tree(remote, local, is_flag_r, meter)?;
+        return Result<bool, str>.Ok(false);
+    }
+    if (command == "put") {
+        if (arguments_list.size() < 1 || arguments_list.size() > 2) {
+            return Result<bool, str>.Err("usage: put [-r] local [remote]");
+        }
+        str local = resolve_local(state, arguments_list[0]);
+        str remote = resolve_remote(state, sshsftp.basename_of(arguments_list[0]));
+        if (arguments_list.size() == 2) {
+            remote = resolve_remote(state, arguments_list[1]);
+        }
+        Meter meter = Meter(!state.is_quiet && term.is_terminal(2), "", 0, 0);
+        session.put_tree(local, remote, is_flag_r, false, meter)?;
+        return Result<bool, str>.Ok(false);
+    }
+    return Result<bool, str>.Err("unknown command '" + command + "' (try help)");
+}
+
+int parse_octal(str text) {
+    if (text.size() == 0 || text.size() > 5) {
+        return -1;
+    }
+    int value = 0;
+    for (int code in text.chars()) {
+        if (code < 48 || code > 55) {
+            return -1;
+        }
+        value = value * 8 + (code - 48);
+    }
+    return value;
+}
+
+str octal(int value) {
+    if (value == 0) {
+        return "0";
+    }
+    str out = "";
+    int rest = value;
+    while (rest > 0) {
+        out = (rest % 8).to_str() + out;
+        rest = rest / 8;
+    }
+    return out;
+}
+
+pub int start(List<str> argv) {
+    List<str> arguments = [];
+    if (argv.size() > 1) {
+        arguments = argv.slice(1, argv.size());
+    }
+    int port = 0;
+    List<str> identities = [];
+    List<str> settings = [];
+    str config_file = "";
+    str jump = "";
+    str batch_file = "";
+    bool is_quiet = false;
+    str destination = "";
+    int index = 0;
+    while (index < arguments.size()) {
+        str word = arguments[index];
+        if (word == "-V" || word == "--version") {
+            print("m31sftp " + VERSION + " (UNAUDITED)");
+            return 0;
+        }
+        if (word == "-h" || word == "--help") {
+            print(usage());
+            return 0;
+        }
+        if (word.size() >= 2 && word.starts_with("-")) {
+            int letter = word.byte_at(1);
+            if (letter == 80 || letter == 105 || letter == 111 || letter == 70 || letter == 74 || letter == 98) {
+                str value = "";
+                if (word.size() > 2) {
+                    value = word.substr(2, word.size());
+                } else {
+                    index = index + 1;
+                    if (index >= arguments.size()) {
+                        warn("option " + word + " requires an argument");
+                        return EXIT_USAGE;
+                    }
+                    value = arguments[index];
+                }
+                if (letter == 80) {
+                    Option<int> parsed = value.parse_int();
+                    match (parsed) {
+                        case Some(int number): {
+                            if (number < 1 || number > 65535) {
+                                warn("bad port '" + value + "'");
+                                return EXIT_USAGE;
+                            }
+                            port = number;
+                        }
+                        case None: {
+                            warn("bad port '" + value + "'");
+                            return EXIT_USAGE;
+                        }
+                    }
+                } else if (letter == 105) {
+                    identities.push(value);
+                } else if (letter == 111) {
+                    settings.push(value);
+                } else if (letter == 70) {
+                    config_file = value;
+                } else if (letter == 98) {
+                    batch_file = value;
+                } else {
+                    jump = value;
+                }
+            } else if (word == "-q") {
+                is_quiet = true;
+            } else if (word == "-C" || word == "-v" || word == "-4" || word == "-6") {
+                // accepted
+            } else {
+                warn("unknown option " + word);
+                return EXIT_USAGE;
+            }
+        } else if (destination == "") {
+            destination = word;
+        } else {
+            warn("unexpected argument " + word);
+            return EXIT_USAGE;
+        }
+        index = index + 1;
+    }
+    if (destination == "") {
+        io.eprint(usage());
+        return EXIT_USAGE;
+    }
+    str user = "";
+    str host = destination;
+    str initial = "";
+    int colon = -1;
+    int at_index = 0;
+    while (at_index < host.size()) {
+        if (host.byte_at(at_index) == 58 && colon < 0) {
+            colon = at_index;
+        }
+        at_index = at_index + 1;
+    }
+    if (colon > 0) {
+        initial = host.substr(colon + 1, host.size());
+        host = host.substr(0, colon);
+    }
+    int at_sign = -1;
+    at_index = 0;
+    while (at_index < host.size()) {
+        if (host.byte_at(at_index) == 64) {
+            at_sign = at_index;
+        }
+        at_index = at_index + 1;
+    }
+    if (at_sign >= 0) {
+        user = host.substr(0, at_sign);
+        host = host.substr(at_sign + 1, host.size());
+    }
+    bool is_tty = term.is_terminal(0);
+    sshconnect.Params parameters = sshconnect.Params(host, port, user, identities, settings, config_file, jump, is_quiet, is_tty);
+    match (sshconnect.connect(parameters)) {
+        case Err(str reason): {
+            warn(reason);
+            return EXIT_CONNECTION;
+        }
+        case Ok(sshconnect.Connection connection): {
+            match (connection.transport.set_read_timeout(READ_TIMEOUT_MS)) {
+                case Ok: {
+                }
+                case Err(_): {
+                }
+            }
+            match (sshsftp.open(connection.transport)) {
+                case Err(str reason): {
+                    warn(reason);
+                    return EXIT_CONNECTION;
+                }
+                case Ok(sshsftp.Session session): {
+                    int code = run_session(session, initial, batch_file, is_tty, is_quiet);
+                    session.finish();
+                    Result<bool, ssh.Error> closed = connection.transport.disconnect();
+                    return code;
+                }
+            }
+        }
+    }
+}
+
+int run_session(sshsftp.Session session, str initial, str batch_file, bool is_tty, bool is_quiet) {
+    State state = State(session, ".", ".", is_quiet);
+    match (session.realpath(".")) {
+        case Ok(str home): {
+            state.remote_directory = home;
+        }
+        case Err(str reason): {
+            warn(reason);
+            return EXIT_CONNECTION;
+        }
+    }
+    if (initial != "") {
+        match (run_command(state, ["cd", initial])) {
+            case Ok(_): {
+            }
+            case Err(str reason): {
+                warn(reason);
+                return EXIT_USAGE;
+            }
+        }
+    }
+    // The script: -b file, or standard input.
+    str script = "";
+    bool is_interactive = is_tty && batch_file == "";
+    if (batch_file != "" && batch_file != "-") {
+        match (io.read(batch_file)) {
+            case Ok(str text): {
+                script = text;
+            }
+            case Err(io.Error error): {
+                warn("cannot read " + batch_file + ": " + error.to_str());
+                return EXIT_USAGE;
+            }
+        }
+    }
+    io.File input = io.stdin();
+    List<str> lines = [];
+    if (script != "") {
+        lines = script.split("\n");
+    }
+    int next_line = 0;
+    while (true) {
+        str line = "";
+        if (batch_file != "" && batch_file != "-") {
+            if (next_line >= lines.size()) {
+                break;
+            }
+            line = lines[next_line];
+            next_line = next_line + 1;
+        } else {
+            if (is_interactive) {
+                Result<int, io.Error> prompted = io.stdout().write("sftp> ".to_bytes());
+            }
+            match (input.read_until("\n".to_bytes(), 65536)) {
+                case Ok(bytes raw): {
+                    if (raw.size() == 0) {
+                        break;
+                    }
+                    match (raw.utf8()) {
+                        case Some(str text): {
+                            line = text;
+                        }
+                        case None: {
+                            warn("input is not text");
+                            continue;
+                        }
+                    }
+                }
+                case Err(_): {
+                    break;
+                }
+            }
+        }
+        line = line.trim();
+        if (line == "" || line.starts_with("#")) {
+            continue;
+        }
+        if (!is_interactive) {
+            // echo the command, as sftp does in batch mode
+            if (!is_quiet) {
+                print("sftp> " + line);
+            }
+        }
+        match (run_command(state, words_of(line))) {
+            case Ok(bool is_quit): {
+                if (is_quit) {
+                    break;
+                }
+            }
+            case Err(str reason): {
+                warn(reason);
+                if (!is_interactive) {
+                    return EXIT_USAGE;
+                }
+            }
+        }
+    }
+    return 0;
+}

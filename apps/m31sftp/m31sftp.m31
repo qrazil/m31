@@ -1,0 +1,10 @@
+// m31sftp -- an interactive SFTP client. UNAUDITED: see docs/m31ssh.md.
+//
+//   m31sftp [-P port] [-i identity] [-o option=value] [-F config] [-J jump]
+//           [-b batchfile] [-q] [user@]host[:directory]
+//
+// This file is only the entry point; everything is in `core/`.
+import os;
+import core.SFTP_main;
+
+os.exit(SFTP_main.start(os.arguments()));
