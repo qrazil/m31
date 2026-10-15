@@ -56,7 +56,7 @@ build() {
 if out=$(
     for f in tests/ssh/*.m31 lib/crypto/sha256.m31 lib/crypto/chacha20poly1305.m31 lib/ssh.m31 \
              lib/ssh/sshkey.m31 lib/ssh/sshhosts.m31 lib/ssh/sshauth.m31 lib/ssh/sshexec.m31 lib/ssh/sshclient.m31 \
-             lib/ssh/sshagent.m31 lib/ssh/sshconfig.m31 lib/ssh/sshshell.m31 lib/ssh/sshcipher.m31; do
+             lib/ssh/sshagent.m31 lib/ssh/sshconfig.m31 lib/ssh/sshshell.m31 lib/ssh/sshcipher.m31 lib/crypto/rsasign.m31 lib/crypto/bcryptpbkdf.m31; do
         "$LANGC" fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then
@@ -265,6 +265,50 @@ elif build t_ssh_cipher; then
         note "sshcipher: $out against OpenSSL (chacha20-poly1305, aes-gcm, aes-ctr + hmac-sha2-256 and -etm)"
     else
         bad "sshcipher" "$out"
+    fi
+fi
+
+# --- key files of every type, encrypted and not, against ssh-keygen and OpenSSL ----
+#
+# ed25519, ECDSA P-256 and RSA keys written by `ssh-keygen` (plain, and with
+# aes256-ctr, aes128-ctr, aes256-gcm@openssh.com and chacha20-poly1305@openssh.com,
+# a non-ASCII passphrase longer than 72 bytes, several bcrypt costs): each is
+# read by `sshkey`, its public key compared with `ssh-keygen -y`, and every
+# signature checked by OpenSSL.
+
+if ! command -v ssh-keygen >/dev/null || ! python3 -c 'import cryptography' 2>/dev/null; then
+    bad "sshkey files" "ssh-keygen and the 'cryptography' package are both needed"
+elif build t_ssh_keyfiles; then
+    mkdir -p "$WORK/keyfiles"
+    out=$(python3 tests/ssh/oracle_sshkeyfiles.py "$WORK/t_ssh_keyfiles" "$WORK/keyfiles" 2>&1)
+    if [[ "$out" == *" checks, 0 failures" ]]; then
+        note "sshkey files: $out (ed25519/ecdsa/rsa; plain and encrypted with four ciphers, bcrypt_pbkdf)"
+    else
+        bad "sshkey files" "$out"
+    fi
+fi
+
+# --- RSA signing against OpenSSL -------------------------------------------------
+
+if ! python3 -c 'import cryptography' 2>/dev/null; then
+    bad "rsasign" "the 'cryptography' package is not importable -- pip install cryptography"
+elif build t_rsasign; then
+    out=$(python3 tests/ssh/oracle_rsasign.py "$WORK/t_rsasign" 2>&1)
+    if [[ "$out" == *" checks, 0 failures" ]]; then
+        note "rsasign: $out (RSASSA-PKCS1-v1_5 signatures byte-identical to OpenSSL for 2048/3072/4096-bit keys, SHA-256 and SHA-512, e=65537 and e=3; inconsistent keys refused)"
+    else
+        bad "rsasign" "$out"
+    fi
+fi
+
+# --- bcrypt_pbkdf: the OpenBSD vector ----------------------------------------------
+
+if build t_bcrypt_pbkdf; then
+    out=$("$WORK/t_bcrypt_pbkdf" 2>"$WORK/bcrypt.err")
+    if [ "$out" = "5bbf0cc293587f1c3635555c27796598d47e579071bf427e9d8fbe842aba34d9" ]; then
+        note "bcrypt_pbkdf: matches OpenBSD's published vector (password/salt/4 rounds/32 octets)"
+    else
+        bad "bcrypt_pbkdf" "got: $out" "$(head -3 "$WORK/bcrypt.err")"
     fi
 fi
 

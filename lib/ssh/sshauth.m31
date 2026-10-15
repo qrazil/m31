@@ -7,7 +7,7 @@
 //   sshauth.authenticate_as(link, user, public_blob, signer) -> Result<str, Error>
 //
 // `link` is anything satisfying `ssh.Link` -- in practice an `ssh.Transport`.
-// `key` is an `sshkey.PrivateKey`. `Ok` carries the text of any
+// `key` is an `sshkey.PrivateKey` (any type: ed25519, ECDSA P-256, RSA). `Ok` carries the text of any
 // `SSH_MSG_USERAUTH_BANNER` the server sent along the way ("" if none): a
 // pre-login notice is the server's to show, and this library does not print.
 // The server is trusted only as far as the host-key check the transport
@@ -32,7 +32,10 @@
 // user || string "ssh-connection" || string "publickey" || boolean TRUE ||
 // string "ssh-ed25519" || string public_key_blob`, so it cannot be replayed
 // on another connection (the session id is this connection's exchange hash)
-// or for another user.
+// or for another user. For ECDSA the algorithm name is the key type; for RSA
+// the key type is `ssh-rsa` and the algorithm the SHA-2 signature name
+// (`rsa-sha2-512`, then `rsa-sha2-256`): never `ssh-rsa`, whose signature is
+// SHA-1. `try_key` takes the algorithm to name.
 //
 // A server that wants more than one method (`partial success`) cannot be
 // satisfied by a publickey-only client: that too is `Error.AuthFailed`.
@@ -116,7 +119,7 @@ pub bytes build_service_request() {
 
 // The body every `publickey` request shares, up to and including the key
 // blob (RFC 4252 §7), with `has_signature` as the boolean.
-bytes request_prefix(str user, bool has_signature, bytes public_blob) {
+bytes request_prefix(str user, bool has_signature, str algorithm, bytes public_blob) {
     bytes out = [];
     out.push(SSH_MESSAGE_USERAUTH_REQUEST);
     ssh.push_string(out, user.to_bytes());
@@ -127,29 +130,45 @@ bytes request_prefix(str user, bool has_signature, bytes public_blob) {
     } else {
         out.push(0);
     }
-    ssh.push_string(out, KEY_ALGO.to_bytes());
+    ssh.push_string(out, algorithm.to_bytes());
     ssh.push_string(out, public_blob);
     return out;
 }
 
 /// The unsigned probe: "would you accept this key for this user?"
+/// (`ssh-ed25519`.)
 pub bytes build_query(str user, bytes public_blob) {
-    return request_prefix(user, false, public_blob);
+    return build_query_for(user, KEY_ALGO, public_blob);
+}
+
+/// The probe for any signature `algorithm` (the name that goes in the
+/// request: `ssh-ed25519`, `ecdsa-sha2-nistp256`, `rsa-sha2-512`, ...).
+pub bytes build_query_for(str user, str algorithm, bytes public_blob) {
+    return request_prefix(user, false, algorithm, public_blob);
 }
 
 /// What the signature covers (RFC 4252 §7): the session id as a `string`,
 /// then the signed request's body without the signature itself.
+/// (`ssh-ed25519`.)
 pub bytes signature_data(bytes session_id, str user, bytes public_blob) {
+    return signature_data_for(session_id, user, KEY_ALGO, public_blob);
+}
+
+pub bytes signature_data_for(bytes session_id, str user, str algorithm, bytes public_blob) {
     bytes out = [];
     ssh.push_string(out, session_id);
-    out.extend(request_prefix(user, true, public_blob));
+    out.extend(request_prefix(user, true, algorithm, public_blob));
     return out;
 }
 
 /// The signed request: the same fields as the probe with the boolean set,
-/// followed by the signature blob as one more `string`.
+/// followed by the signature blob as one more `string`. (`ssh-ed25519`.)
 pub bytes build_signed_request(str user, bytes public_blob, bytes signature_blob) {
-    bytes out = request_prefix(user, true, public_blob);
+    return build_signed_request_for(user, KEY_ALGO, public_blob, signature_blob);
+}
+
+pub bytes build_signed_request_for(str user, str algorithm, bytes public_blob, bytes signature_blob) {
+    bytes out = request_prefix(user, true, algorithm, public_blob);
     ssh.push_string(out, signature_blob);
     return out;
 }
@@ -194,12 +213,16 @@ pub Result<str, Error> parse_banner(bytes payload) {
 /// `USERAUTH_PK_OK`: it must echo the algorithm and key blob that were
 /// offered, byte for byte.
 pub Result<bool, Error> parse_pk_ok(bytes payload, bytes public_blob) {
+    return parse_pk_ok_for(payload, KEY_ALGO, public_blob);
+}
+
+pub Result<bool, Error> parse_pk_ok_for(bytes payload, str algorithm, bytes public_blob) {
     if (payload.size() < 1 || payload[0] != SSH_MESSAGE_USERAUTH_PK_OK) {
         return Result<bool, Error>.Err(Error.UnexpectedMessage);
     }
     ssh.Field algo = string_at(payload, 1)?;
     ssh.Field blob = string_at(payload, algo.next)?;
-    if (algo.value != KEY_ALGO.to_bytes() || blob.value != public_blob) {
+    if (algo.value != algorithm.to_bytes() || blob.value != public_blob) {
         return Result<bool, Error>.Err(Error.BadMessage);
     }
     return Result<bool, Error>.Ok(true);
@@ -267,7 +290,7 @@ Result<bytes, Error> recv_message(ssh.Link link) {
 /// loaded `sshkey.PrivateKey` (through `KeySigner`), or an ssh-agent
 /// (`sshagent.AgentSigner`). `Err` carries a short reason with no secret in it.
 pub interface Signer {
-    Result<bytes, str> sign_blob(bytes message);
+    Result<bytes, str> sign_blob(bytes message, str algorithm);
 }
 
 /// An in-process key as a `Signer`.
@@ -275,14 +298,15 @@ pub type KeySigner {
     pub sshkey.PrivateKey key;
 }
 
-pub Result<bytes, str> KeySigner.sign_blob(bytes message) {
-    return Result<bytes, str>.Ok(key.signature_blob(message));
+pub Result<bytes, str> KeySigner.sign_blob(bytes message, str algorithm) {
+    return key.signature_blob_for(algorithm, message);
 }
 
 /// Authenticates as `user` with `key` over `link`. `Ok` is the server's
 /// banner text, possibly empty.
 pub Result<str, Error> authenticate(ssh.Link link, str user, sshkey.PrivateKey key) {
-    return authenticate_as(link, user, key.public_blob(), key);
+    start(link)?;
+    return try_key(link, user, key.signature_algorithms()[0], key.public_blob(), KeySigner(key));
 }
 
 /// As `authenticate`, but the key blob announced (and echoed back in the
@@ -291,7 +315,7 @@ pub Result<str, Error> authenticate(ssh.Link link, str user, sshkey.PrivateKey k
 /// signature by the wrong key is refused.
 pub Result<str, Error> authenticate_as(ssh.Link link, str user, bytes public_blob, sshkey.PrivateKey signer) {
     start(link)?;
-    return try_key(link, user, public_blob, KeySigner(signer));
+    return try_key(link, user, KEY_ALGO, public_blob, KeySigner(signer));
 }
 
 /// Asks for the `ssh-userauth` service. Call once, before any `try_key`.
@@ -306,8 +330,8 @@ pub Result<void, Error> start(ssh.Link link) {
 /// `Err(KeyRejected)` means the server does not accept this key and the
 /// caller may `try_key` another over the same link (nothing was signed);
 /// `Err(AuthFailed)` means the server refused the signature.
-pub Result<str, Error> try_key(ssh.Link link, str user, bytes public_blob, Signer signer) {
-    send_message(link, build_query(user, public_blob))?;
+pub Result<str, Error> try_key(ssh.Link link, str user, str algorithm, bytes public_blob, Signer signer) {
+    send_message(link, build_query_for(user, algorithm, public_blob))?;
     str banner = "";
     int seen = 0;
     bool is_probed = false;
@@ -324,7 +348,7 @@ pub Result<str, Error> try_key(ssh.Link link, str user, bytes public_blob, Signe
             }
             banner = banner + parse_banner(reply)?;
         } else if (kind == SSH_MESSAGE_USERAUTH_PK_OK) {
-            parse_pk_ok(reply, public_blob)?;
+            parse_pk_ok_for(reply, algorithm, public_blob)?;
             is_probed = true;
         } else if (kind == SSH_MESSAGE_USERAUTH_FAILURE) {
             parse_failure(reply)?;
@@ -333,9 +357,9 @@ pub Result<str, Error> try_key(ssh.Link link, str user, bytes public_blob, Signe
             return Result<str, Error>.Err(Error.UnexpectedMessage);
         }
     }
-    bytes signed_data = signature_data(link.session_id(), user, public_blob);
+    bytes signed_data = signature_data_for(link.session_id(), user, algorithm, public_blob);
     bytes signature = [];
-    match (signer.sign_blob(signed_data)) {
+    match (signer.sign_blob(signed_data, algorithm)) {
         case Ok(bytes blob): {
             signature = blob;
         }
@@ -343,7 +367,7 @@ pub Result<str, Error> try_key(ssh.Link link, str user, bytes public_blob, Signe
             return Result<str, Error>.Err(Error.SignerFailed);
         }
     }
-    send_message(link, build_signed_request(user, public_blob, signature))?;
+    send_message(link, build_signed_request_for(user, algorithm, public_blob, signature))?;
     while (true) {
         bytes reply = recv_message(link)?;
         if (reply.size() == 0) {

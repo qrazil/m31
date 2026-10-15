@@ -4,7 +4,7 @@ Synchronisation is always on observable output (a pty read that matches a
 pattern, a process exit, a socket accept) with a generous timeout that only
 bounds a failure -- never a sleep standing in for a condition.
 """
-import errno, fcntl, hashlib, os, pty, re, select, shutil, signal, socket
+import atexit, errno, fcntl, hashlib, os, pty, re, select, shutil, signal, socket
 import struct, subprocess, sys, tempfile, termios, threading, time
 
 BIN = sys.argv[1]
@@ -17,6 +17,24 @@ USER = subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.stri
 
 procs = []
 passed = failed = 0
+
+
+def _cleanup():
+    """Every process the test started dies and the temp dir goes, whatever
+    path out of the script was taken (an exception, a signal, normal end)."""
+    for pr in procs:
+        try:
+            if pr.poll() is None:
+                pr.kill()
+            pr.wait(5)
+        except Exception:
+            pass
+    shutil.rmtree(W, ignore_errors=True)
+
+
+atexit.register(_cleanup)
+for _sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+    signal.signal(_sig, lambda n, f: sys.exit(1))
 
 
 def ok(name, cond, detail=""):
@@ -671,6 +689,93 @@ def _():
        c == 255 and "CHANGED" in e and open(kh).read().count("\n") == 1, (c, e))
     pr.kill()
     pr2.kill()
+
+# --- other key types, encrypted keys, agent with every type -------------------------------------------
+def gen(name, args, passphrase="", comment="k"):
+    path = os.path.join(W, name)
+    subprocess.run(["ssh-keygen", "-q", "-f", path, "-C", comment, "-N", passphrase] + args, check=True)
+    os.chmod(path, 0o600)
+    return path
+
+
+K_EC = gen("user_ecdsa", ["-t", "ecdsa", "-b", "256"])
+K_RSA = gen("user_rsa", ["-t", "rsa", "-b", "2048"])
+K_ED_ENC = gen("user_ed_enc", ["-t", "ed25519", "-a", "4"], passphrase="s3cret pass")
+K_RSA_ENC = gen("user_rsa_enc", ["-t", "rsa", "-b", "2048", "-a", "4"], passphrase="s3cret pass")
+with open(os.path.join(W, "authorized_keys"), "a") as f:
+    for k in (K_EC, K_RSA, K_ED_ENC, K_RSA_ENC):
+        f.write(open(k + ".pub").read())
+
+for label, key in (("ECDSA P-256", K_EC), ("RSA (rsa-sha2-512)", K_RSA)):
+    code, out, err = run(base("-i", key, "echo", "typed"))
+    ok("user key %s authenticates" % label, code == 0 and out == "typed\n", (code, err))
+
+# the server accepts only rsa-sha2-256: the client's rsa-sha2-512 probe is
+# refused and it falls back to the other SHA-2 name, never to ssh-rsa/SHA-1
+pr, port = start_server("PubkeyAcceptedAlgorithms rsa-sha2-256", [HOSTKEY])
+code, out, err = run(["-p", str(port), "-o", "UserKnownHostsFile=" + os.path.join(W, "kh_alg"), "-o", "StrictHostKeyChecking=accept-new", "-i", K_RSA, "127.0.0.1", "echo", "256"])
+ok("RSA key: falls back from rsa-sha2-512 to rsa-sha2-256", code == 0 and out == "256\n", (code, err))
+pr.kill()
+pr, port = start_server("PubkeyAcceptedAlgorithms ssh-rsa", [HOSTKEY])
+code, out, err = run(["-p", str(port), "-o", "UserKnownHostsFile=" + os.path.join(W, "kh_alg2"), "-o", "StrictHostKeyChecking=accept-new", "-i", K_RSA, "127.0.0.1", "echo", "sha1"])
+ok("a server that takes only ssh-rsa (SHA-1) signatures is refused, not downgraded to", code == 255 and "Permission denied" in err, (code, err))
+pr.kill()
+
+# agent holding ecdsa and rsa keys
+subprocess.run(["ssh-add", "-q", K_EC, K_RSA], env={**os.environ, **AENV}, check=True)
+os.unlink(real) if False else None
+for key, label in ((K_EC, "ECDSA"), (K_RSA, "RSA")):
+    # a client with only that key in the agent (remove the others first)
+    pass
+code, out, err = run(base("echo", "agent-types"), env=AENV)
+ok("agent with ed25519, ECDSA and RSA keys authenticates", code == 0 and out == "agent-types\n", (code, err))
+# an agent holding ONLY the ECDSA key, then ONLY the RSA key
+for key, label in ((K_EC, "ECDSA"), (K_RSA, "RSA")):
+    only = subprocess.Popen(["ssh-agent", "-D", "-a", os.path.join(W, "agent_%s.sock" % label)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    procs.append(only)
+    only.stdout.readline()
+    env = {"SSH_AUTH_SOCK": os.path.join(W, "agent_%s.sock" % label)}
+    subprocess.run(["ssh-add", "-q", key], env={**os.environ, **env}, check=True)
+    code, out, err = run(base("echo", "via-" + label), env=env)
+    ok("agent holding only an %s key signs (verified before use)" % label, code == 0 and out == "via-" + label + "\n", (code, err))
+    only.kill()
+
+# encrypted keys
+SECRET = "s3cret pass"
+code, out, err = run(base("-i", K_ED_ENC, "echo", "x"))
+ok("encrypted key without a terminal: skipped with a clear message, 255",
+   code == 255 and "no passphrase" in err and SECRET not in err, (code, err))
+
+@scenario("passphrase-prompt")
+def _():
+    p = Pty(base("-i", K_ED_ENC, "echo", "unlocked"))
+    t = p.expect(r"Enter passphrase for key '[^']*': ")
+    p.send("wrong one\n")
+    p.expect(r"Permission denied, please try again\.")
+    p.expect(r"Enter passphrase for key")
+    p.send(SECRET + "\n")
+    p.expect(r"unlocked")
+    code = p.finish()
+    ok("encrypted ed25519 key: wrong passphrase retried, right one unlocks, exit 0", code == 0, code)
+    echoed = p.total.decode(errors="replace")
+    ok("the passphrase is never echoed or printed (neither the wrong nor the right one)",
+       SECRET not in echoed and "wrong one" not in echoed, echoed[-200:])
+    p.close()
+
+@scenario("passphrase-rsa-cancel")
+def _():
+    p = Pty(base("-i", K_RSA_ENC, "echo", "rsa-unlocked"))
+    p.expect(r"Enter passphrase for key")
+    p.send(SECRET + "\n")
+    p.expect(r"rsa-unlocked")
+    ok("encrypted RSA key unlocks and authenticates", p.finish() == 0)
+    p.close()
+    p = Pty(base("-i", K_RSA_ENC, "echo", "never"))
+    p.expect(r"Enter passphrase for key")
+    p.send(b"\x03")
+    code = p.finish()
+    ok("Ctrl-C at the passphrase prompt skips the key (255) and restores the terminal", code == 255 and p.echo_on(), code)
+    p.close()
 
 # --- tidy up ----------------------------------------------------------------------------------------
 for pr in procs:

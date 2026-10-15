@@ -1,0 +1,7 @@
+// bcrypt_pbkdf's published OpenBSD test vector (regress/lib/libutil/
+// bcrypt_pbkdf): password "password", salt "salt", 4 rounds, 32 octets. The
+// files `ssh-keygen` writes are the wider oracle (t_ssh_keyfiles).
+import encoding.hexcodec;
+import crypto.bcryptpbkdf;
+
+print(hexcodec.encode(bcryptpbkdf.derive("password".to_bytes(), "salt".to_bytes(), 4, 32)));

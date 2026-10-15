@@ -1,54 +1,78 @@
-// SSH Phase 3 (`docs/ssh-decision.md`), the key half: an `ssh-ed25519`
-// private key read from an OpenSSH `openssh-key-v1` file
-// (`-----BEGIN OPENSSH PRIVATE KEY-----`, the format `ssh-keygen -t ed25519`
-// writes), and the signing `lib/ssh/sshauth.m31` needs for RFC 4252 §7.
+// SSH Phase 3 (`docs/ssh-decision.md`), the key half: a private key read
+// from an OpenSSH `openssh-key-v1` file (`-----BEGIN OPENSSH PRIVATE KEY-----`,
+// the format `ssh-keygen` writes), and the signing `lib/ssh/sshauth.m31`
+// needs for RFC 4252 §7.
 //
 // API
 // ---
-//   sshkey.parse(text)   -> Result<PrivateKey, Error>   the whole file's text
-//   sshkey.load(path)    -> Result<PrivateKey, Error>   read it, then parse
-//   k.public_key()       -> bytes   the 32 raw public-key octets
-//   k.public_blob()      -> bytes   `string "ssh-ed25519" || string <32>`,
-//                                   RFC 8709 §4 -- what goes on the wire
-//   k.sign(msg)          -> bytes   the 64-octet Ed25519 signature
-//   k.signature_blob(msg)-> bytes   `string "ssh-ed25519" || string <64>`
+//   sshkey.parse(text)                      -> Result<PrivateKey, Error>
+//   sshkey.parse_with_passphrase(text, pw)  -> Result<PrivateKey, Error>
+//   sshkey.load(path)                       -> Result<PrivateKey, Error>
+//   sshkey.load_with_passphrase(path, pw)   -> Result<PrivateKey, Error>
+//   sshkey.inspect(text)                    -> Result<Info, Error>   no secret needed
+//   k.algorithm            "ssh-ed25519" | "ecdsa-sha2-nistp256" | "ssh-rsa"
+//   k.public_blob()        -> bytes   the wire public key blob
+//   k.public_key()         -> bytes   ed25519: 32 octets; ecdsa: 65-octet point; rsa: empty
+//   k.signature_algorithms() -> List<str>   what userauth may name, best first
+//   k.signature_blob(msg)  -> bytes   signature blob in the default algorithm
+//   k.signature_blob_for(algorithm, msg) -> Result<bytes, str>
+//   k.sign(msg)            -> bytes   ed25519 only: the 64-octet signature
 //
 // --- the file format (PROTOCOL.key in the OpenSSH source) --------------------
 //
 //   "openssh-key-v1\0"
-//   string ciphername      "none" for an unencrypted key
-//   string kdfname         "none" for an unencrypted key
-//   string kdfoptions      empty for an unencrypted key
+//   string ciphername      "none", or aes256-ctr, aes128-ctr, aes256-gcm@openssh.com,
+//                          chacha20-poly1305@openssh.com
+//   string kdfname         "none", or "bcrypt"
+//   string kdfoptions      empty, or string salt || uint32 rounds
 //   uint32 number-of-keys  exactly 1 is all `ssh-keygen` ever writes
-//   string public key      `string "ssh-ed25519" || string <32>`
-//   string private section (cleartext when unencrypted):
-//       uint32 check1, uint32 check2   equal, or the section was corrupted
-//       string "ssh-ed25519"
-//       string <32 public octets>
-//       string <64 octets: the 32-octet seed, then the public key again>
-//       string comment
-//       padding bytes 1, 2, 3, ... up to a multiple of 8 in total
+//   string public key      the wire blob
+//   string private section (encrypted with the cipher when there is one):
+//       uint32 check1, uint32 check2   equal, or the section was corrupted /
+//                                      the passphrase was wrong
+//       the key's fields (see `parse_private_section`), then string comment,
+//       padding bytes 1, 2, 3, ... to a multiple of the cipher's block size
+//   [authentication tag, for the AEAD ciphers, after the section]
 //
-// --- unencrypted keys only ---------------------------------------------------
+// --- encrypted keys ------------------------------------------------------------
 //
-// A passphrase-protected key (`ciphername` other than `none`) is refused
-// with `Error.Encrypted` before any of its private section is looked at:
-// decrypting one needs bcrypt-pbkdf plus AES, neither of which is in scope
-// (`docs/ssh-decision.md` §1: publickey only, for machine access). A key for
-// a git server's machine account is expected to be a dedicated, unencrypted
-// one; `ssh-keygen -p -N "" -f <copy of the key>` strips a passphrase from a
-// copy.
+// `bcrypt_pbkdf` (`lib/crypto/bcryptpbkdf.m31`, OpenBSD's, checked against its
+// published vector and `ssh-keygen`'s own files) turns the passphrase and the
+// file's salt into the cipher's key and IV. A wrong passphrase is
+// `Error.WrongPassphrase` (the AEAD tag, or the two check words, did not
+// match: the two cases cannot be told apart and are not meant to be). Refused,
+// each by name: ciphers this client has not implemented (`aes*-cbc`, 3des-cbc,
+// aes192 -- there is no AES decryption or 192-bit key schedule in the library),
+// any KDF but bcrypt, and more than 1024 rounds (a file chooses its own cost,
+// and a hostile one must not be able to make this spin for an hour).
+//
+// The passphrase is a `bytes` argument; no function here prints, logs or
+// stores it, and no `Error` carries any of it. It is NOT wiped from memory
+// afterwards: the runtime cannot do that (the same limit as every secret in
+// this library).
 //
 // --- key material never leaves this module ------------------------------------
 //
-// `PrivateKey`'s seed is a private field, `PrivateKey` has no `to_str`
+// `PrivateKey`'s secrets are private fields, `PrivateKey` has no `to_str`
 // (so `print(key)` is a compile error, not a leak), and no `Error` variant
 // carries any bytes of the file: a malformed key says *what* was malformed,
-// never *what it contained*.
+// never *what it contained*. ECDSA signing is `ecdsasign.m31`'s constant-time
+// one; RSA signing is `rsasign.m31`'s (key consistency is checked at load).
 
 import io;
 import encoding.base64;
 import crypto.ed25519;
+import crypto.ecdsa;
+import crypto.ecdsasign;
+import crypto.rsa;
+import crypto.rsasign;
+import crypto.sha256;
+import crypto.sha512;
+import crypto.aes;
+import crypto.aesgcm;
+import crypto.chacha20poly1305;
+import crypto.consttime;
+import crypto.bcryptpbkdf;
 import ssh;
 
 /// Why a key file could not be turned into a `PrivateKey`. Payload-free
@@ -61,13 +85,12 @@ pub enum Error {
     /// magic string is wrong. (A PEM `RSA PRIVATE KEY` or PKCS#8 file lands
     /// here too -- only OpenSSH's own format is read.)
     NotOpenSshKey;
-    /// The key is passphrase-protected; this library reads unencrypted keys
-    /// only.
+    /// The key is passphrase-protected and no passphrase was given.
     Encrypted;
     /// A length-prefixed field named more bytes than the file held, or the
     /// file ended early.
     Truncated;
-    /// The file holds a key, but not an `ssh-ed25519` one.
+    /// The file holds a key of a type this client does not implement.
     UnsupportedKeyType;
     /// The file holds a number of keys other than exactly one.
     UnsupportedKeyCount;
@@ -77,11 +100,18 @@ pub enum Error {
     BadCheck;
     /// The key's fields are not self-consistent: a wrong length, the public
     /// section disagreeing with the private one, or a public key that is not
-    /// the one the seed generates.
+    /// the one the secret generates.
     BadKey;
     /// The padding after the comment is not 1, 2, 3, ... or the private
-    /// section is not a whole number of 8-byte blocks.
+    /// section is not a whole number of cipher blocks.
     BadPadding;
+    /// The passphrase did not decrypt the key.
+    WrongPassphrase;
+    /// The key is encrypted with a cipher this client has not implemented.
+    UnsupportedCipher;
+    /// The key's KDF is not bcrypt, or its options are malformed or ask for
+    /// an unreasonable cost.
+    UnsupportedKdf;
 }
 
 pub str Error.to_str() {
@@ -93,13 +123,13 @@ pub str Error.to_str() {
             return "not an OpenSSH private key (openssh-key-v1) file";
         }
         case Encrypted: {
-            return "the private key is passphrase-protected; only unencrypted keys are supported (ssh-keygen -p -N \"\" -f <copy of the key> removes the passphrase)";
+            return "the private key is passphrase-protected";
         }
         case Truncated: {
             return "the private key file is truncated";
         }
         case UnsupportedKeyType: {
-            return "the private key is not an ssh-ed25519 key";
+            return "the private key is not an ssh-ed25519, ecdsa-sha2-nistp256 or ssh-rsa key";
         }
         case UnsupportedKeyCount: {
             return "the private key file does not hold exactly one key";
@@ -113,55 +143,137 @@ pub str Error.to_str() {
         case BadPadding: {
             return "the private key's padding is malformed";
         }
+        case WrongPassphrase: {
+            return "incorrect passphrase (or the key file is corrupt)";
+        }
+        case UnsupportedCipher: {
+            return "the private key is encrypted with a cipher this client does not implement (aes256-ctr, aes128-ctr, aes256-gcm and chacha20-poly1305 are supported)";
+        }
+        case UnsupportedKdf: {
+            return "the private key's key derivation is not bcrypt, or its parameters are unreasonable";
+        }
     }
 }
 
 const str BEGIN_LINE = "-----BEGIN OPENSSH PRIVATE KEY-----";
 const str END_LINE = "-----END OPENSSH PRIVATE KEY-----";
-const str KEY_TYPE = "ssh-ed25519";
+const str KEY_ED25519 = "ssh-ed25519";
+const str KEY_ECDSA = "ecdsa-sha2-nistp256";
+const str KEY_RSA = "ssh-rsa";
 /// "openssh-key-v1"; the file's magic is this followed by a NUL.
 const str MAGIC = "openssh-key-v1";
 const int SEED_SIZE = 32;
 const int PUBLIC_SIZE = 32;
-/// The private section is padded to the cipher's block size; for the `none`
-/// cipher that is 8.
-const int PAD_BLOCK = 8;
+const int MAX_ROUNDS = 1024;
+const int MAX_SALT = 1024;
 
-/// An `ssh-ed25519` private key. The seed is private to this module and the
-/// type has no `to_str`.
+/// A private key. The secrets are private to this module and the type has no
+/// `to_str`.
 pub type PrivateKey {
-    bytes seed;
+    /// `ssh-ed25519`, `ecdsa-sha2-nistp256` or `ssh-rsa`.
+    pub str algorithm;
+    // ed25519: the 32-octet seed; ecdsa: the 32-octet scalar; rsa: empty.
+    bytes secret;
+    // ed25519: 32 octets; ecdsa: the 65-octet point; rsa: empty.
     bytes public;
+    bytes blob;
+    List<rsasign.SigningKey> rsa_key;
     pub str comment;
 }
 
-/// The 32 raw public-key octets.
+/// The public key as it goes on the wire (RFC 4253 §6.6): for ed25519
+/// `string "ssh-ed25519", string <32>` (RFC 8709 §4).
+pub bytes PrivateKey.public_blob() {
+    return clone(blob);
+}
+
+/// ed25519: the 32 raw octets; ecdsa: the 65-octet point; rsa: empty (use
+/// `public_blob`).
 pub bytes PrivateKey.public_key() {
     return clone(public);
 }
 
-/// The public key as RFC 8709 §4 puts it on the wire: `string
-/// "ssh-ed25519"`, then `string <32 octets>`.
-pub bytes PrivateKey.public_blob() {
-    return ed25519_blob(public);
+/// The signature algorithms this key can be used with in userauth (RFC 8332
+/// for RSA: SHA-2 only, never `ssh-rsa`'s SHA-1), best first.
+pub List<str> PrivateKey.signature_algorithms() {
+    if (algorithm == KEY_RSA) {
+        return ["rsa-sha2-512", "rsa-sha2-256"];
+    }
+    return [algorithm];
 }
 
-/// The 64-octet Ed25519 signature of `message`.
+/// The 64-octet Ed25519 signature of `message`. Traps for other key types
+/// (use `signature_blob_for`).
 pub bytes PrivateKey.sign(bytes message) {
-    return ed25519.sign(seed, message);
+    if (algorithm != KEY_ED25519) {
+        trap("sshkey: sign() is for ed25519 keys; use signature_blob_for");
+    }
+    return ed25519.sign(secret, message);
 }
 
-/// `sign(msg)` as RFC 8709 §6 puts a signature on the wire: `string
-/// "ssh-ed25519"`, then `string <64 octets>`.
+/// `signature_blob_for` with the key's first (best) algorithm; traps on the
+/// (impossible for a loaded key) failure.
 pub bytes PrivateKey.signature_blob(bytes message) {
-    return ed25519_blob(ed25519.sign(seed, message));
+    match (signature_blob_for(signature_algorithms()[0], message)) {
+        case Ok(bytes blob_out): {
+            return blob_out;
+        }
+        case Err(str reason): {
+            trap("sshkey: signing failed: " + reason);
+        }
+    }
 }
 
-bytes ed25519_blob(bytes raw) {
+/// `string algorithm, string signature` for `message` (RFC 4253 §6.6): the
+/// ed25519 signature, the ECDSA `mpint r, mpint s` of SHA-256(message), or
+/// the RSASSA-PKCS1-v1_5 signature with SHA-256 or SHA-512 for
+/// `rsa-sha2-256` / `rsa-sha2-512`. `Err` carries a short reason (no secret
+/// in it) when the algorithm is not one this key can use.
+pub Result<bytes, str> PrivateKey.signature_blob_for(str signature_algorithm, bytes message) {
+    bytes inner = [];
+    if (algorithm == KEY_ED25519 && signature_algorithm == KEY_ED25519) {
+        inner = ed25519.sign(secret, message);
+    } else if (algorithm == KEY_ECDSA && signature_algorithm == KEY_ECDSA) {
+        match (ecdsasign.sign_raw(secret, sha256.sum(message))) {
+            case Ok(bytes raw): {
+                bytes pair = [];
+                pair.extend(ssh.encode_mpint(raw.substr(0, 32)));
+                pair.extend(ssh.encode_mpint(raw.substr(32, 64)));
+                inner = pair;
+            }
+            case Err(_): {
+                return Result<bytes, str>.Err("ECDSA signing failed");
+            }
+        }
+    } else if (algorithm == KEY_RSA && (signature_algorithm == "rsa-sha2-256" || signature_algorithm == "rsa-sha2-512")) {
+        rsa.Hash hash = rsa.Hash.Sha256;
+        bytes digest = sha256.sum(message);
+        if (signature_algorithm == "rsa-sha2-512") {
+            hash = rsa.Hash.Sha512;
+            digest = sha512.sum(message);
+        }
+        match (rsa_key[0].sign_pkcs1_v15(hash, digest)) {
+            case Ok(bytes signature): {
+                inner = signature;
+            }
+            case Err(rsasign.Error error): {
+                return Result<bytes, str>.Err(error.to_str());
+            }
+        }
+    } else {
+        return Result<bytes, str>.Err("this key cannot sign with " + signature_algorithm);
+    }
     bytes out = [];
-    ssh.push_string(out, KEY_TYPE.to_bytes());
-    ssh.push_string(out, raw);
-    return out;
+    ssh.push_string(out, signature_algorithm.to_bytes());
+    ssh.push_string(out, inner);
+    return Result<bytes, str>.Ok(out);
+}
+
+/// What a file says about its key without decrypting anything.
+pub type Info {
+    pub str algorithm;
+    pub bytes blob;
+    pub bool is_encrypted;
 }
 
 // A `string` at `offset`, with `ssh.Error.Truncated` from the shared parser
@@ -225,20 +337,160 @@ Result<str, Error> unarmor(str text) {
     return Result<str, Error>.Ok(body.join(""));
 }
 
-/// Parses the text of an OpenSSH private key file. Refuses a passphrase-
-/// protected key with `Error.Encrypted`, before reading its private section.
-pub Result<PrivateKey, Error> parse(str text) {
+Result<bytes, Error> decode_file(str text) {
     str body = unarmor(text)?;
-    bytes raw = [];
     match (base64.decode(body)) {
         case Ok(bytes decoded): {
-            raw = decoded;
+            return Result<bytes, Error>.Ok(decoded);
         }
         case Err(_): {
-            return Result<PrivateKey, Error>.Err(Error.NotOpenSshKey);
+            return Result<bytes, Error>.Err(Error.NotOpenSshKey);
         }
     }
-    return parse_binary(raw);
+}
+
+// The header of the decoded file, split into the pieces both the decrypting
+// and the plain path need.
+type Layout {
+    str cipher;
+    bytes salt;
+    int rounds;
+    bytes public_blob;
+    bytes private_section;
+    bytes tag;
+}
+
+int auth_length_of(str cipher) {
+    if (cipher == "aes256-gcm@openssh.com" || cipher == "chacha20-poly1305@openssh.com") {
+        return 16;
+    }
+    return 0;
+}
+
+int block_size_of(str cipher) {
+    if (cipher == "none" || cipher == "chacha20-poly1305@openssh.com") {
+        return 8;
+    }
+    return 16;
+}
+
+bool is_supported_cipher(str cipher) {
+    return cipher == "aes256-ctr" || cipher == "aes128-ctr" || cipher == "aes256-gcm@openssh.com" || cipher == "chacha20-poly1305@openssh.com";
+}
+
+// The decoded file: magic, the cipher/kdf header, the public key, then the
+// private section (and the tag after it).
+Result<Layout, Error> layout_of(bytes raw) {
+    bytes magic = MAGIC.to_bytes();
+    magic.push(0);
+    if (raw.size() < magic.size() || raw.substr(0, magic.size()) != magic) {
+        return Result<Layout, Error>.Err(Error.NotOpenSshKey);
+    }
+    ssh.Field cipher_field = string_at(raw, magic.size())?;
+    ssh.Field kdf_field = string_at(raw, cipher_field.next)?;
+    ssh.Field options_field = string_at(raw, kdf_field.next)?;
+    str cipher = "";
+    match (cipher_field.value.utf8()) {
+        case Some(str text): {
+            cipher = text;
+        }
+        case None: {
+            return Result<Layout, Error>.Err(Error.UnsupportedCipher);
+        }
+    }
+    bytes salt = [];
+    int rounds = 0;
+    if (cipher == "none") {
+        if (kdf_field.value != "none".to_bytes() || options_field.value.size() != 0) {
+            return Result<Layout, Error>.Err(Error.BadKey);
+        }
+    } else {
+        if (!is_supported_cipher(cipher)) {
+            return Result<Layout, Error>.Err(Error.UnsupportedCipher);
+        }
+        if (kdf_field.value != "bcrypt".to_bytes()) {
+            return Result<Layout, Error>.Err(Error.UnsupportedKdf);
+        }
+        ssh.Field salt_field = string_at(options_field.value, 0)?;
+        if (salt_field.next + 4 != options_field.value.size() || salt_field.value.size() < 1 || salt_field.value.size() > MAX_SALT) {
+            return Result<Layout, Error>.Err(Error.UnsupportedKdf);
+        }
+        rounds = be32(options_field.value, salt_field.next);
+        if (rounds < 1 || rounds > MAX_ROUNDS) {
+            return Result<Layout, Error>.Err(Error.UnsupportedKdf);
+        }
+        salt = salt_field.value;
+    }
+    if (options_field.next + 4 > raw.size()) {
+        return Result<Layout, Error>.Err(Error.Truncated);
+    }
+    int count = be32(raw, options_field.next);
+    if (count != 1) {
+        return Result<Layout, Error>.Err(Error.UnsupportedKeyCount);
+    }
+    ssh.Field pub_section = string_at(raw, options_field.next + 4)?;
+    ssh.Field priv_section = string_at(raw, pub_section.next)?;
+    int tag_size = auth_length_of(cipher);
+    if (priv_section.next + tag_size != raw.size()) {
+        // Trailing bytes after the one private section (and its tag).
+        if (priv_section.next + tag_size > raw.size()) {
+            return Result<Layout, Error>.Err(Error.Truncated);
+        }
+        return Result<Layout, Error>.Err(Error.BadKey);
+    }
+    bytes tag = raw.substr(priv_section.next, raw.size());
+    return Result<Layout, Error>.Ok(Layout(cipher, salt, rounds, pub_section.value, priv_section.value, tag));
+}
+
+// The validated public key from the file's cleartext public section: its
+// `ssh.HostKey` (which checks the shape of each type).
+Result<ssh.HostKey, Error> outer_public(bytes blob) {
+    match (ssh.parse_host_key(blob)) {
+        case Ok(ssh.HostKey key): {
+            return Result<ssh.HostKey, Error>.Ok(key);
+        }
+        case Err(ssh.Error error): {
+            if (error.is_unsupported_key()) {
+                return Result<ssh.HostKey, Error>.Err(Error.UnsupportedKeyType);
+            }
+            return Result<ssh.HostKey, Error>.Err(Error.BadKey);
+        }
+    }
+}
+
+/// What `text` says about its key, without a passphrase: the key type, the
+/// public blob (to find the key in an agent or a `.pub` file) and whether a
+/// passphrase will be needed.
+pub Result<Info, Error> inspect(str text) {
+    bytes raw = decode_file(text)?;
+    Layout layout = layout_of(raw)?;
+    ssh.HostKey key = outer_public(layout.public_blob)?;
+    return Result<Info, Error>.Ok(Info(key.algorithm, layout.public_blob, layout.cipher != "none"));
+}
+
+/// Parses the text of an OpenSSH private key file. A passphrase-protected key
+/// is `Error.Encrypted`, before any of its private section is looked at.
+pub Result<PrivateKey, Error> parse(str text) {
+    bytes raw = decode_file(text)?;
+    Layout layout = layout_of(raw)?;
+    if (layout.cipher != "none") {
+        return Result<PrivateKey, Error>.Err(Error.Encrypted);
+    }
+    ssh.HostKey outer = outer_public(layout.public_blob)?;
+    return parse_private_section(layout.private_section, outer, layout.cipher);
+}
+
+/// As `parse`, decrypting with `passphrase` when the key needs one (an
+/// unencrypted key ignores it).
+pub Result<PrivateKey, Error> parse_with_passphrase(str text, bytes passphrase) {
+    bytes raw = decode_file(text)?;
+    Layout layout = layout_of(raw)?;
+    ssh.HostKey outer = outer_public(layout.public_blob)?;
+    if (layout.cipher == "none") {
+        return parse_private_section(layout.private_section, outer, layout.cipher);
+    }
+    bytes plain = decrypt(layout, passphrase)?;
+    return parse_private_section(plain, outer, layout.cipher);
 }
 
 /// Reads the file at `path` and parses it.
@@ -253,72 +505,206 @@ pub Result<PrivateKey, Error> load(str path) {
     }
 }
 
-// The decoded file: magic, the cipher/kdf header, the public key, then the
-// private section.
-Result<PrivateKey, Error> parse_binary(bytes raw) {
-    bytes magic = MAGIC.to_bytes();
-    magic.push(0);
-    if (raw.size() < magic.size() || raw.substr(0, magic.size()) != magic) {
-        return Result<PrivateKey, Error>.Err(Error.NotOpenSshKey);
+/// Reads the file at `path` and parses it with `passphrase`.
+pub Result<PrivateKey, Error> load_with_passphrase(str path, bytes passphrase) {
+    match (io.read(path)) {
+        case Ok(str text): {
+            return parse_with_passphrase(text, passphrase);
+        }
+        case Err(_): {
+            return Result<PrivateKey, Error>.Err(Error.Io);
+        }
     }
-    int cipher_offset = magic.size();
-    ssh.Field cipher = string_at(raw, cipher_offset)?;
-    ssh.Field kdf = string_at(raw, cipher.next)?;
-    ssh.Field kdf_options = string_at(raw, kdf.next)?;
-    if (cipher.value != "none".to_bytes() || kdf.value != "none".to_bytes()) {
-        return Result<PrivateKey, Error>.Err(Error.Encrypted);
-    }
-    if (kdf_options.value.size() != 0) {
-        return Result<PrivateKey, Error>.Err(Error.BadKey);
-    }
-    if (kdf_options.next + 4 > raw.size()) {
-        return Result<PrivateKey, Error>.Err(Error.Truncated);
-    }
-    int count = be32(raw, kdf_options.next);
-    if (count != 1) {
-        return Result<PrivateKey, Error>.Err(Error.UnsupportedKeyCount);
-    }
-    ssh.Field pub_section = string_at(raw, kdf_options.next + 4)?;
-    ssh.Field priv_section = string_at(raw, pub_section.next)?;
-    if (priv_section.next != raw.size()) {
-        // Trailing bytes after the one private section.
-        return Result<PrivateKey, Error>.Err(Error.BadKey);
-    }
-    bytes outer_pub = outer_public(pub_section.value)?;
-    return parse_private_section(priv_section.value, outer_pub);
 }
 
-// The 32 octets out of the file's cleartext public-key section.
-Result<bytes, Error> outer_public(bytes blob) {
-    int after_type = expect_string(blob, 0, KEY_TYPE, Error.UnsupportedKeyType)?;
-    ssh.Field key = string_at(blob, after_type)?;
-    if (key.value.size() != PUBLIC_SIZE || key.next != blob.size()) {
-        return Result<bytes, Error>.Err(Error.BadKey);
+// --- decryption -------------------------------------------------------------------
+
+// `data` through AES-CTR with `key` and the 16-octet counter block `start`.
+bytes ctr_crypt(bytes key, bytes start, bytes data) {
+    aes.Cipher schedule = aes.cipher(key);
+    bytes counter = clone(start);
+    bytes out = [];
+    int taken = 0;
+    while (taken < data.size()) {
+        bytes stream = schedule.encrypt_block(counter);
+        int index = 0;
+        while (index < 16 && taken < data.size()) {
+            out.push(data[taken] ^ stream[index]);
+            index = index + 1;
+            taken = taken + 1;
+        }
+        int position = 15;
+        while (position >= 0) {
+            if (counter[position] == 255) {
+                counter[position] = 0;
+                position = position - 1;
+            } else {
+                counter[position] = counter[position] + 1;
+                position = -1;
+            }
+        }
     }
-    return Result<bytes, Error>.Ok(key.value);
+    return out;
 }
 
-Result<PrivateKey, Error> parse_private_section(bytes sec, bytes outer_pub) {
+Result<bytes, Error> decrypt(Layout layout, bytes passphrase) {
+    str cipher = layout.cipher;
+    int key_size = 32;
+    int iv_size = 16;
+    if (cipher == "aes128-ctr") {
+        key_size = 16;
+    } else if (cipher == "aes256-gcm@openssh.com") {
+        iv_size = 12;
+    } else if (cipher == "chacha20-poly1305@openssh.com") {
+        key_size = 64;
+        iv_size = 0;
+    }
+    int block = block_size_of(cipher);
+    if (layout.private_section.size() % block != 0 || layout.private_section.size() == 0) {
+        return Result<bytes, Error>.Err(Error.BadPadding);
+    }
+    bytes material = bcryptpbkdf.derive(passphrase, layout.salt, layout.rounds, key_size + iv_size);
+    bytes key = material.substr(0, key_size);
+    bytes initial_vector = material.substr(key_size, key_size + iv_size);
+    if (cipher == "aes256-ctr" || cipher == "aes128-ctr") {
+        return Result<bytes, Error>.Ok(ctr_crypt(key, initial_vector, layout.private_section));
+    }
+    if (cipher == "aes256-gcm@openssh.com") {
+        bytes sealed = clone(layout.private_section);
+        sealed.extend(layout.tag);
+        bytes no_aad = [];
+        match (aesgcm.open(key, initial_vector, sealed, no_aad)) {
+            case Ok(bytes plain): {
+                return Result<bytes, Error>.Ok(plain);
+            }
+            case Err(_): {
+                return Result<bytes, Error>.Err(Error.WrongPassphrase);
+            }
+        }
+    }
+    // chacha20-poly1305@openssh.com with sequence number 0 and no AAD: the
+    // Poly1305 key is block 0 of K_2's stream, the payload block 1 on.
+    bytes payload_key = key.substr(0, 32);
+    bytes seq8 = [0; 8];
+    bytes otk = chacha20poly1305.openssh_block(payload_key, 0, seq8).substr(0, 32);
+    if (!consttime.is_equal(chacha20poly1305.mac(otk, layout.private_section), layout.tag)) {
+        return Result<bytes, Error>.Err(Error.WrongPassphrase);
+    }
+    bytes plain = [];
+    int block_start = 0;
+    int counter = 1;
+    while (block_start < layout.private_section.size()) {
+        bytes stream = chacha20poly1305.openssh_block(payload_key, counter, seq8);
+        int end = block_start + 64;
+        if (end > layout.private_section.size()) {
+            end = layout.private_section.size();
+        }
+        int index = block_start;
+        while (index < end) {
+            plain.push(layout.private_section[index] ^ stream[index - block_start]);
+            index = index + 1;
+        }
+        block_start = end;
+        counter = counter + 1;
+    }
+    return Result<bytes, Error>.Ok(plain);
+}
+
+// --- the private section ------------------------------------------------------------
+
+// The big-endian octets of an mpint field's content: leading zero removed.
+bytes unsigned_of(bytes content) {
+    int start = 0;
+    while (start < content.size() - 1 && content[start] == 0) {
+        start = start + 1;
+    }
+    return content.substr(start, content.size());
+}
+
+Result<PrivateKey, Error> parse_private_section(bytes sec, ssh.HostKey outer, str cipher) {
+    int block = block_size_of(cipher);
     if (sec.size() < 8) {
         return Result<PrivateKey, Error>.Err(Error.Truncated);
     }
-    if (sec.size() % PAD_BLOCK != 0) {
+    if (sec.size() % block != 0) {
         return Result<PrivateKey, Error>.Err(Error.BadPadding);
     }
     if (be32(sec, 0) != be32(sec, 4)) {
+        if (cipher != "none") {
+            return Result<PrivateKey, Error>.Err(Error.WrongPassphrase);
+        }
         return Result<PrivateKey, Error>.Err(Error.BadCheck);
     }
-    int after_type = expect_string(sec, 8, KEY_TYPE, Error.UnsupportedKeyType)?;
-    ssh.Field inner_pub = string_at(sec, after_type)?;
-    ssh.Field secret = string_at(sec, inner_pub.next)?;
-    ssh.Field comment_field = string_at(sec, secret.next)?;
-    if (inner_pub.value.size() != PUBLIC_SIZE || secret.value.size() != SEED_SIZE + PUBLIC_SIZE) {
-        return Result<PrivateKey, Error>.Err(Error.BadKey);
+    int after_type = expect_string(sec, 8, outer.algorithm, Error.BadKey)?;
+    bytes secret = [];
+    bytes public = [];
+    List<rsasign.SigningKey> rsa_key = [];
+    int offset = after_type;
+    if (outer.algorithm == KEY_ED25519) {
+        ssh.Field inner_pub = string_at(sec, offset)?;
+        ssh.Field pair = string_at(sec, inner_pub.next)?;
+        if (inner_pub.value.size() != PUBLIC_SIZE || pair.value.size() != SEED_SIZE + PUBLIC_SIZE) {
+            return Result<PrivateKey, Error>.Err(Error.BadKey);
+        }
+        secret = pair.value.substr(0, SEED_SIZE);
+        if (pair.value.substr(SEED_SIZE, SEED_SIZE + PUBLIC_SIZE) != inner_pub.value || inner_pub.value != outer.key) {
+            return Result<PrivateKey, Error>.Err(Error.BadKey);
+        }
+        if (ed25519.public_key(secret) != inner_pub.value) {
+            return Result<PrivateKey, Error>.Err(Error.BadKey);
+        }
+        public = inner_pub.value;
+        offset = pair.next;
+    } else if (outer.algorithm == KEY_ECDSA) {
+        ssh.Field curve = string_at(sec, offset)?;
+        ssh.Field point = string_at(sec, curve.next)?;
+        ssh.Field scalar = string_at(sec, point.next)?;
+        if (curve.value != "nistp256".to_bytes() || point.value != outer.key) {
+            return Result<PrivateKey, Error>.Err(Error.BadKey);
+        }
+        bytes scalar_bytes = unsigned_of(scalar.value);
+        if (scalar_bytes.size() > 32) {
+            return Result<PrivateKey, Error>.Err(Error.BadKey);
+        }
+        bytes padded = [0; 32 - scalar_bytes.size()];
+        padded.extend(scalar_bytes);
+        match (ecdsasign.public_key(padded)) {
+            case Ok(bytes derived): {
+                if (derived != point.value) {
+                    return Result<PrivateKey, Error>.Err(Error.BadKey);
+                }
+            }
+            case Err(_): {
+                return Result<PrivateKey, Error>.Err(Error.BadKey);
+            }
+        }
+        secret = padded;
+        public = point.value;
+        offset = scalar.next;
+    } else {
+        ssh.Field n_field = string_at(sec, offset)?;
+        ssh.Field e_field = string_at(sec, n_field.next)?;
+        ssh.Field d_field = string_at(sec, e_field.next)?;
+        ssh.Field iqmp_field = string_at(sec, d_field.next)?;
+        ssh.Field p_field = string_at(sec, iqmp_field.next)?;
+        ssh.Field q_field = string_at(sec, p_field.next)?;
+        // the cleartext public blob is `string type, mpint e, mpint n`
+        ssh.Field outer_e = string_at(outer.blob, "ssh-rsa".size() + 4)?;
+        ssh.Field outer_n = string_at(outer.blob, outer_e.next)?;
+        if (unsigned_of(n_field.value) != unsigned_of(outer_n.value) || unsigned_of(e_field.value) != unsigned_of(outer_e.value)) {
+            return Result<PrivateKey, Error>.Err(Error.BadKey);
+        }
+        match (rsasign.parse_private(n_field.value, e_field.value, d_field.value, iqmp_field.value, p_field.value, q_field.value)) {
+            case Some(rsasign.SigningKey signing): {
+                rsa_key.push(signing);
+            }
+            case None: {
+                return Result<PrivateKey, Error>.Err(Error.BadKey);
+            }
+        }
+        offset = q_field.next;
     }
-    bytes seed = secret.value.substr(0, SEED_SIZE);
-    if (secret.value.substr(SEED_SIZE, SEED_SIZE + PUBLIC_SIZE) != inner_pub.value || inner_pub.value != outer_pub) {
-        return Result<PrivateKey, Error>.Err(Error.BadKey);
-    }
+    ssh.Field comment_field = string_at(sec, offset)?;
     // The padding: 1, 2, 3, ... to the end of the section.
     int want = 1;
     int padding_offset = comment_field.next;
@@ -329,11 +715,8 @@ Result<PrivateKey, Error> parse_private_section(bytes sec, bytes outer_pub) {
         want = want + 1;
         padding_offset = padding_offset + 1;
     }
-    if (want - 1 >= PAD_BLOCK) {
+    if (want - 1 >= block) {
         return Result<PrivateKey, Error>.Err(Error.BadPadding);
-    }
-    if (ed25519.public_key(seed) != inner_pub.value) {
-        return Result<PrivateKey, Error>.Err(Error.BadKey);
     }
     str comment = "";
     match (comment_field.value.utf8()) {
@@ -344,5 +727,5 @@ Result<PrivateKey, Error> parse_private_section(bytes sec, bytes outer_pub) {
             comment = "";
         }
     }
-    return Result<PrivateKey, Error>.Ok(PrivateKey(seed, inner_pub.value, comment));
+    return Result<PrivateKey, Error>.Ok(PrivateKey(outer.algorithm, secret, public, outer.blob, rsa_key, comment));
 }

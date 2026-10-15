@@ -106,6 +106,8 @@ const MODULES: &[(&str, &str)] = &[
     ),
     ("pki.x509", include_str!("../../lib/pki/x509.m31")),
     ("pki.x509chain", include_str!("../../lib/pki/x509chain.m31")),
+    ("crypto.bcryptpbkdf", include_str!("../../lib/crypto/bcryptpbkdf.m31")),
+    ("crypto.rsasign", include_str!("../../lib/crypto/rsasign.m31")),
     ("crypto.rsa", include_str!("../../lib/crypto/rsa.m31")),
     (
         "tls.tls13schedule",

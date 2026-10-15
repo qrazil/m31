@@ -12,11 +12,14 @@
 //   sshagent.build_identities_request() / parse_identities(payload)
 //   sshagent.build_sign_request(blob, data) / parse_sign_response(payload)
 //
-// Only `ssh-ed25519` identities are kept (that is the one key type this
-// client authenticates with); others the agent holds are skipped. A
-// signature the agent returns is **verified against the public key before it
-// is used**, so a confused agent cannot make this client send garbage and a
-// wrong one is reported as `BadSignature`, not as a server refusal.
+// Identities of the key types this client can use (`ssh-ed25519`,
+// `ecdsa-sha2-nistp256`, `ssh-rsa`) are kept; others the agent holds are
+// skipped. A signature the agent returns is **verified against the public
+// key before it is used** (a new check on every type), so a confused agent
+// cannot make this client send garbage and a wrong one is reported as
+// `BadSignature`, not as a server refusal. For RSA the request carries the
+// SHA-2 flag (2 for `rsa-sha2-256`, 4 for `rsa-sha2-512`); `ssh-rsa`
+// (SHA-1) signatures are never requested and never accepted.
 //
 // The agent is trusted with signing and nothing else: no message is sent
 // that is not REQUEST_IDENTITIES or SIGN_REQUEST (flags 0), no key is ever
@@ -30,6 +33,10 @@
 
 import os;
 import crypto.ed25519;
+import crypto.ecdsa;
+import crypto.rsa;
+import crypto.sha256;
+import crypto.sha512;
 import ssh;
 import ssh.sshauth;
 
@@ -118,11 +125,16 @@ pub bytes build_identities_request() {
 }
 
 pub bytes build_sign_request(bytes blob, bytes data) {
+    return build_sign_request_flags(blob, data, 0);
+}
+
+/// `SIGN_REQUEST` with the RFC 8332 flags (2: rsa-sha2-256, 4: rsa-sha2-512).
+pub bytes build_sign_request_flags(bytes blob, bytes data, int flags) {
     bytes out = [];
     out.push(AGENT_SIGN_REQUEST);
     ssh.push_string(out, blob);
     ssh.push_string(out, data);
-    push_u32(out, 0);
+    push_u32(out, flags);
     return out;
 }
 
@@ -157,7 +169,11 @@ str blob_type(bytes blob) {
     }
 }
 
-/// An `IDENTITIES_ANSWER`, keeping only Ed25519 identities.
+bool is_usable_type(str name) {
+    return name == KEY_TYPE || name == "ecdsa-sha2-nistp256" || name == "ssh-rsa";
+}
+
+/// An `IDENTITIES_ANSWER`, keeping only identities of a usable key type.
 pub Result<List<Identity>, Error> parse_identities(bytes payload) {
     if (payload.size() < 5 || payload[0] != AGENT_IDENTITIES_ANSWER) {
         return Result<List<Identity>, Error>.Err(Error.BadReply);
@@ -174,7 +190,7 @@ pub Result<List<Identity>, Error> parse_identities(bytes payload) {
         ssh.Field blob = field_at(payload, offset)?;
         ssh.Field comment = field_at(payload, blob.next)?;
         offset = comment.next;
-        if (blob_type(blob.value) == KEY_TYPE) {
+        if (is_usable_type(blob_type(blob.value))) {
             str text = "";
             match (comment.value.utf8()) {
                 case Some(str value): {
@@ -190,22 +206,47 @@ pub Result<List<Identity>, Error> parse_identities(bytes payload) {
     return Result<List<Identity>, Error>.Ok(out);
 }
 
-/// A `SIGN_RESPONSE`'s signature blob (`string "ssh-ed25519", string sig`),
-/// checked for shape; the 64 raw octets are returned.
-pub Result<bytes, Error> parse_sign_response(bytes payload) {
+/// A `SIGN_RESPONSE`'s signature blob (`string algorithm, string data`),
+/// checked for shape: the algorithm name and the data are returned.
+pub type AgentSignature {
+    pub str algorithm;
+    pub bytes data;
+}
+
+pub Result<AgentSignature, Error> parse_sign_response_full(bytes payload) {
     if (payload.size() >= 1 && payload[0] == AGENT_FAILURE) {
-        return Result<bytes, Error>.Err(Error.Refused);
+        return Result<AgentSignature, Error>.Err(Error.Refused);
     }
     if (payload.size() < 1 || payload[0] != AGENT_SIGN_RESPONSE) {
-        return Result<bytes, Error>.Err(Error.BadReply);
+        return Result<AgentSignature, Error>.Err(Error.BadReply);
     }
     ssh.Field outer = field_at(payload, 1)?;
+    if (outer.next != payload.size()) {
+        return Result<AgentSignature, Error>.Err(Error.BadReply);
+    }
     ssh.Field kind = field_at(outer.value, 0)?;
     ssh.Field raw = field_at(outer.value, kind.next)?;
-    if (kind.value != KEY_TYPE.to_bytes() || raw.value.size() != 64 || raw.next != outer.value.size()) {
+    if (raw.next != outer.value.size()) {
+        return Result<AgentSignature, Error>.Err(Error.BadReply);
+    }
+    match (kind.value.utf8()) {
+        case Some(str name): {
+            return Result<AgentSignature, Error>.Ok(AgentSignature(name, raw.value));
+        }
+        case None: {
+            return Result<AgentSignature, Error>.Err(Error.BadReply);
+        }
+    }
+}
+
+/// An ed25519 `SIGN_RESPONSE`'s 64 raw octets (kept for its callers and
+/// tests; `Agent.sign` accepts every key type).
+pub Result<bytes, Error> parse_sign_response(bytes payload) {
+    AgentSignature signature = parse_sign_response_full(payload)?;
+    if (signature.algorithm != KEY_TYPE || signature.data.size() != 64) {
         return Result<bytes, Error>.Err(Error.BadReply);
     }
-    return Result<bytes, Error>.Ok(raw.value);
+    return Result<bytes, Error>.Ok(signature.data);
 }
 
 // --- the connection ----------------------------------------------------------
@@ -279,20 +320,78 @@ pub Result<List<Identity>, Error> Agent.identities() {
     return parse_identities(reply);
 }
 
-/// Has the agent sign `data` with the key whose blob is `blob`; the answer
-/// is the signature blob ready for USERAUTH_REQUEST, verified under the key.
-pub Result<bytes, Error> Agent.sign(bytes blob, bytes data) {
-    bytes reply = call(build_sign_request(blob, data))?;
-    bytes raw = parse_sign_response(reply)?;
-    ssh.Field kind = field_at(blob, 0)?;
-    ssh.Field key = field_at(blob, kind.next)?;
-    if (key.value.size() != 32 || !ed25519.is_valid_signature(key.value, data, raw)) {
-        return Result<bytes, Error>.Err(Error.BadSignature);
+/// Has the agent sign `data` with the key whose blob is `blob`, using the
+/// signature `algorithm` (`ssh-ed25519`, `ecdsa-sha2-nistp256`,
+/// `rsa-sha2-256`, `rsa-sha2-512`); the answer is the signature blob ready
+/// for USERAUTH_REQUEST, **verified under the key** before it is returned.
+pub Result<bytes, Error> Agent.sign_for(bytes blob, bytes data, str algorithm) {
+    int flags = 0;
+    if (algorithm == "rsa-sha2-256") {
+        flags = 2;
+    } else if (algorithm == "rsa-sha2-512") {
+        flags = 4;
+    }
+    bytes reply = call(build_sign_request_flags(blob, data, flags))?;
+    AgentSignature signature = parse_sign_response_full(reply)?;
+    if (signature.algorithm != algorithm) {
+        return Result<bytes, Error>.Err(Error.BadReply);
+    }
+    match (ssh.parse_host_key(blob)) {
+        case Ok(ssh.HostKey key): {
+            if (key.algorithm == KEY_TYPE) {
+                if (algorithm != KEY_TYPE || signature.data.size() != 64 || !ed25519.is_valid_signature(key.key, data, signature.data)) {
+                    return Result<bytes, Error>.Err(Error.BadSignature);
+                }
+            } else if (key.algorithm == "ecdsa-sha2-nistp256") {
+                bytes raw = ecdsa_raw(signature.data);
+                match (ecdsa.parse_public_key(ecdsa.p256(), key.key)) {
+                    case Some(ecdsa.PublicKey point): {
+                        if (algorithm != key.algorithm || raw.size() != 64 || !ecdsa.is_valid_raw_signature(ecdsa.p256(), point, sha256.sum(data), raw)) {
+                            return Result<bytes, Error>.Err(Error.BadSignature);
+                        }
+                    }
+                    case None: {
+                        return Result<bytes, Error>.Err(Error.BadSignature);
+                    }
+                }
+            } else {
+                // ssh-rsa: modulus and exponent out of the blob.
+                ssh.Field type_field = field_at(blob, 0)?;
+                ssh.Field e_field = field_at(blob, type_field.next)?;
+                ssh.Field n_field = field_at(blob, e_field.next)?;
+                rsa.Hash hash = rsa.Hash.Sha256;
+                bytes digest = sha256.sum(data);
+                if (algorithm == "rsa-sha2-512") {
+                    hash = rsa.Hash.Sha512;
+                    digest = sha512.sum(data);
+                } else if (algorithm != "rsa-sha2-256") {
+                    return Result<bytes, Error>.Err(Error.BadSignature);
+                }
+                match (rsa.parse_public_key(n_field.value, e_field.value)) {
+                    case Some(rsa.PublicKey public_key): {
+                        if (!rsa.is_valid_pkcs1_v15_signature(public_key, hash, digest, signature.data)) {
+                            return Result<bytes, Error>.Err(Error.BadSignature);
+                        }
+                    }
+                    case None: {
+                        return Result<bytes, Error>.Err(Error.BadSignature);
+                    }
+                }
+            }
+        }
+        case Err(_): {
+            return Result<bytes, Error>.Err(Error.BadSignature);
+        }
     }
     bytes out = [];
-    ssh.push_string(out, KEY_TYPE.to_bytes());
-    ssh.push_string(out, raw);
+    ssh.push_string(out, algorithm.to_bytes());
+    ssh.push_string(out, signature.data);
     return Result<bytes, Error>.Ok(out);
+}
+
+/// `sign_for` with `ssh-ed25519`.
+pub Result<bytes, Error> Agent.sign(bytes blob, bytes data) {
+    return sign_for(blob, data, KEY_TYPE);
 }
 
 /// Connects to the agent listening at `path`.
@@ -324,6 +423,50 @@ pub Result<Agent, Error> from_environment() {
     }
 }
 
+// The ECDSA signature data (`mpint r, mpint s`) as raw 64 octets, or empty.
+bytes ecdsa_raw(bytes data) {
+    bytes none = [];
+    match (ssh.parse_string(data, 0)) {
+        case Ok(ssh.Field r_field): {
+            match (ssh.parse_string(data, r_field.next)) {
+                case Ok(ssh.Field s_field): {
+                    if (s_field.next != data.size() || r_field.value.size() == 0 || s_field.value.size() == 0) {
+                        return none;
+                    }
+                    if ((r_field.value[0] & 0x80) != 0 || (s_field.value[0] & 0x80) != 0) {
+                        return none;
+                    }
+                    bytes r_value = strip_zeros(r_field.value);
+                    bytes s_value = strip_zeros(s_field.value);
+                    if (r_value.size() > 32 || s_value.size() > 32) {
+                        return none;
+                    }
+                    bytes raw = [0; 32 - r_value.size()];
+                    raw.extend(r_value);
+                    bytes pad_s = [0; 32 - s_value.size()];
+                    raw.extend(pad_s);
+                    raw.extend(s_value);
+                    return raw;
+                }
+                case Err(_): {
+                    return none;
+                }
+            }
+        }
+        case Err(_): {
+            return none;
+        }
+    }
+}
+
+bytes strip_zeros(bytes value) {
+    int start = 0;
+    while (start < value.size() - 1 && value[start] == 0) {
+        start = start + 1;
+    }
+    return value.substr(start, value.size());
+}
+
 /// An `sshauth.Signer` for one identity: each signature opens a fresh
 /// connection to the agent at `path` (an `Agent` owns a descriptor and a
 /// signer is a plain value), asks, and hangs up.
@@ -332,10 +475,10 @@ pub type AgentSigner {
     pub bytes blob;
 }
 
-pub Result<bytes, str> AgentSigner.sign_blob(bytes message) {
+pub Result<bytes, str> AgentSigner.sign_blob(bytes message, str algorithm) {
     match (connect(path)) {
         case Ok(Agent agent): {
-            match (agent.sign(blob, message)) {
+            match (agent.sign_for(blob, message, algorithm)) {
                 case Ok(bytes signature): {
                     return Result<bytes, str>.Ok(signature);
                 }
