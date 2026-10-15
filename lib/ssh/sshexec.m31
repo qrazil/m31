@@ -449,6 +449,10 @@ pub type Channel {
     int keepalive_replies = 0;
     /// Whether the server granted a pty (`open_session` with `want_pty`).
     bool has_pty = false;
+    /// Window credit is returned when the caller has *consumed* data
+    /// (`acknowledge`), not on receipt: what a multiplexer needs so a slow
+    /// local socket pushes back on the server.
+    bool is_manual_window = false;
 }
 
 // Handles one message that arrived on the channel, updating buffers, windows
@@ -535,6 +539,9 @@ Result<void, Error> Channel.take_window(int byte_count) {
 
 // Tops the window we granted back up once it is down to half.
 Result<void, Error> Channel.replenish() {
+    if (is_manual_window) {
+        return Result<void, Error>.Ok;
+    }
     if (local_window <= LOCAL_WINDOW / 2 && !has_sent_close) {
         int add = LOCAL_WINDOW - local_window;
         send_on(link, build_window_adjust(remote_id, add))?;
@@ -699,6 +706,56 @@ pub Result<void, Error> Channel.close() {
     return Result<void, Error>.Ok;
 }
 
+/// Handles one message addressed to this channel (recipient field 0, as a
+/// multiplexer rewrites it): data and flow control are buffered or
+/// accounted, EOF and CLOSE recorded, and CLOSE answered.
+pub Result<void, Error> Channel.dispatch_message(bytes payload) {
+    return dispatch(payload);
+}
+
+/// Grants the peer window credit for what has been taken out of the buffers:
+/// call it after `take_output`/`take_error` on a manual-window channel. The
+/// credit outstanding plus what is buffered never exceeds the 2 MiB window,
+/// so a consumer that stops taking data stops the sender.
+pub Result<void, Error> Channel.acknowledge() {
+    if (has_sent_close || has_received_close) {
+        return Result<void, Error>.Ok;
+    }
+    int allowed = LOCAL_WINDOW - output_buffer.size() - error_buffer.size();
+    int add = allowed - local_window;
+    if (add >= 65536) {
+        send_on(link, build_window_adjust(remote_id, add))?;
+        local_window = local_window + add;
+    }
+    return Result<void, Error>.Ok;
+}
+
+/// Sends CLOSE without waiting for the peer's (a multiplexer's `close`).
+/// Idempotent.
+pub Result<void, Error> Channel.begin_close() {
+    if (!has_sent_close) {
+        send_on(link, build_simple(SSH_MESSAGE_CHANNEL_CLOSE, remote_id))?;
+        has_sent_close = true;
+    }
+    return Result<void, Error>.Ok;
+}
+
+/// Whether this side has sent EOF.
+pub bool Channel.is_eof_sent() {
+    return has_sent_eof;
+}
+
+/// Whether this side has sent CLOSE.
+pub bool Channel.is_close_sent() {
+    return has_sent_close;
+}
+
+/// The peer's remaining window, in bytes: how much `write_available` can
+/// send right now.
+pub int Channel.send_window() {
+    return remote_window;
+}
+
 /// Reads and handles exactly one message from the server (waiting for it).
 /// What an event loop calls when the transport has bytes: afterwards
 /// `take_output`/`take_error`/`is_eof`/`is_closed` say what changed.
@@ -752,6 +809,110 @@ pub int Channel.take_keepalive_replies() {
     int count = keepalive_replies;
     keepalive_replies = 0;
     return count;
+}
+
+/// A channel the server confirmed (or one this side confirmed to a
+/// server-opened request), for a multiplexer: `remote_id`, `window` and
+/// `max_packet` are the peer's. Window credit is manual (see `acknowledge`).
+pub Channel new_channel(ssh.Link link, int remote_id, int window, int max_packet) {
+    Channel channel = Channel(link, remote_id, window, max_packet, LOCAL_WINDOW, [], [], false, false, false, false, Exit.Unknown);
+    channel.is_manual_window = true;
+    return channel;
+}
+
+/// `CHANNEL_OPEN_CONFIRMATION` for a server-opened channel (RFC 4254 §5.1).
+pub bytes build_open_confirmation(int recipient, int local_id, int window, int max_packet) {
+    bytes out = [];
+    out.push(SSH_MESSAGE_CHANNEL_OPEN_CONFIRMATION);
+    push_u32(out, recipient);
+    push_u32(out, local_id);
+    push_u32(out, window);
+    push_u32(out, max_packet);
+    return out;
+}
+
+/// `CHANNEL_OPEN_FAILURE` (RFC 4254 §5.1); `reason` 2 is "connect failed".
+pub bytes build_open_failure(int recipient, int reason, str text) {
+    bytes out = [];
+    out.push(SSH_MESSAGE_CHANNEL_OPEN_FAILURE);
+    push_u32(out, recipient);
+    push_u32(out, reason);
+    ssh.push_string(out, text.to_bytes());
+    ssh.push_string(out, "".to_bytes());
+    return out;
+}
+
+/// `GLOBAL_REQUEST "tcpip-forward"` with `want_reply` set (RFC 4254 §7.1).
+pub bytes build_tcpip_forward(str bind_address, int bind_port) {
+    bytes out = [];
+    out.push(SSH_MESSAGE_GLOBAL_REQUEST);
+    ssh.push_string(out, "tcpip-forward".to_bytes());
+    out.push(1);
+    ssh.push_string(out, bind_address.to_bytes());
+    push_u32(out, bind_port);
+    return out;
+}
+
+/// A server-initiated `CHANNEL_OPEN` (RFC 4254 §5.1, §7.2) parsed far enough
+/// to act on: for `forwarded-tcpip` the address and port the connection came
+/// in on.
+pub type ServerOpen {
+    pub str kind;
+    pub int sender;
+    pub int window;
+    pub int max_packet;
+    pub str address;
+    pub int port;
+    pub str originator;
+    pub int originator_port;
+}
+
+pub Result<ServerOpen, Error> parse_server_open(bytes payload) {
+    if (payload.size() < 1 || payload[0] != SSH_MESSAGE_CHANNEL_OPEN) {
+        return Result<ServerOpen, Error>.Err(Error.UnexpectedMessage);
+    }
+    ssh.Field kind_field = string_at(payload, 1)?;
+    str kind = "";
+    match (kind_field.value.utf8()) {
+        case Some(str text): {
+            kind = text;
+        }
+        case None: {
+            return Result<ServerOpen, Error>.Err(Error.BadMessage);
+        }
+    }
+    int sender = u32_at(payload, kind_field.next)?;
+    int window = u32_at(payload, kind_field.next + 4)?;
+    int max_packet = u32_at(payload, kind_field.next + 8)?;
+    if (max_packet == 0) {
+        return Result<ServerOpen, Error>.Err(Error.BadMessage);
+    }
+    if (kind != "forwarded-tcpip") {
+        return Result<ServerOpen, Error>.Ok(ServerOpen(kind, sender, window, max_packet, "", 0, "", 0));
+    }
+    ssh.Field address_field = string_at(payload, kind_field.next + 12)?;
+    int port = u32_at(payload, address_field.next)?;
+    ssh.Field originator_field = string_at(payload, address_field.next + 4)?;
+    int originator_port = u32_at(payload, originator_field.next)?;
+    str address = "";
+    match (address_field.value.utf8()) {
+        case Some(str text): {
+            address = text;
+        }
+        case None: {
+            return Result<ServerOpen, Error>.Err(Error.BadMessage);
+        }
+    }
+    str originator = "";
+    match (originator_field.value.utf8()) {
+        case Some(str text): {
+            originator = text;
+        }
+        case None: {
+            originator = "";
+        }
+    }
+    return Result<ServerOpen, Error>.Ok(ServerOpen(kind, sender, window, max_packet, address, port, originator, originator_port));
 }
 
 Result<void, Error> send_on(ssh.Link link, bytes payload) {

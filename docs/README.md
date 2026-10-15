@@ -37,7 +37,8 @@ the CHANGELOG cite them by name.
 | `const-decision.md` | `const` |
 | `text-decision.md` | Text |
 | `regex-decision.md` | Regex |
-| `ssh-decision.md` | The SSH client |
+| `ssh-decision.md` | The SSH client library |
+| `m31ssh.md` | The `m31ssh` program: use, threat model, limits, tests (unaudited) |
 | `proc-decision.md` | Child processes: pipes, run, start |
 | `apps-repo-split-decision.md` | Per-app repository split |
 

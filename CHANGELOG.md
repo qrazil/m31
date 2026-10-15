@@ -7,31 +7,60 @@ change landed on master.
 
 ### Added
 
-- **`m31ssh`** (`apps/m31ssh`), an interactive SSH client, **unaudited**
-  (`docs/m31ssh.md`): shell over a pty with raw mode and the current size,
-  resize forwarded within ~100 ms, `~.` / `~~` / `~?`, command execution with
-  the remote exit status (255 on its own errors), large transfers both ways
-  with real channel flow control, `-p -i -l -o -F -t -tt -T -n -e -q`,
-  Ed25519 key files and `ssh-agent` signing, strict `known_hosts` with a
-  trust-on-first-use prompt (`StrictHostKeyChecking` yes/ask/accept-new/no;
-  a changed key is a refusal that names the fingerprint and never rewrites the
-  file), `~/.ssh/config` (`Host` patterns, `HostName`, `User`, `Port`,
-  `IdentityFile`, `IdentitiesOnly`, `StrictHostKeyChecking`,
-  `UserKnownHostsFile`, `ServerAliveInterval`/`CountMax`, `ConnectTimeout`),
-  keepalives and read timeouts.
-- `lib/ssh/sshagent.m31` (ssh-agent client; signatures are verified before
-  use), `lib/ssh/sshconfig.m31` (ssh_config reader, pure) and
-  `lib/ssh/sshshell.m31` (the interactive loop and the `~.` filter).
-- `sshexec`: `open_pty`, `shell`, `Channel.window_change`, `pump_one`,
-  `take_output`/`take_error`, `write_available` (a send that never waits),
-  keepalive requests and their replies. `sshauth`: `Signer`, `start` and
-  `try_key` (several identities over one connection). `ssh`:
-  `connect_over` with a `HostKeyCheck` callback (one connection, the decision
-  made mid-handshake), `Transport.wait`, `descriptor`, `disconnect`.
-  `net.Conn.fileno`.
-- `tests/ssh/test_m31ssh.sh`: 66 checks against a disposable `sshd`, driven
-  over a pty, with a private `ssh-agent`, a silent peer, a frozen server and
-  nine hostile servers.
+- **`m31ssh`** (`apps/m31ssh`), an SSH client, **unaudited**
+  (`docs/m31ssh.md`):
+  - shell over a pty with raw mode and the current size, resize forwarded
+    within ~100 ms, `~.` / `~~` / `~?`, command execution with the remote
+    exit status (255 on its own errors), large transfers both ways with real
+    channel flow control, `-p -i -l -o -F -t -tt -T -n -e -q -J -L -R -N`;
+  - Ed25519, ECDSA P-256 and RSA keys, plain or encrypted (bcrypt, four
+    ciphers; passphrase prompt with echo off), `ssh-agent` signing for every
+    type (signatures verified before use);
+  - strict `known_hosts` with a trust-on-first-use prompt
+    (`StrictHostKeyChecking` yes/ask/accept-new/no; a changed key is a
+    refusal that names the fingerprint and never rewrites the file; the
+    client asks for the host-key type the file has);
+  - `~/.ssh/config` (`Host` patterns, `HostName`, `User`, `Port`,
+    `IdentityFile`, `IdentitiesOnly`, `StrictHostKeyChecking`,
+    `UserKnownHostsFile`, `ServerAliveInterval`/`CountMax`,
+    `ConnectTimeout`, `ProxyJump`, `LocalForward`, `RemoteForward`,
+    `RequestTTY`), keepalives and read timeouts;
+  - `ProxyJump` chains, `-L`/`-R`/`-N` with end-to-end flow control.
+- Transport: negotiation from an `Offer` (client preference order; nothing
+  weaker than what is offered is ever used): `chacha20-poly1305@openssh.com`,
+  `aes{256,128}-gcm@openssh.com`, `aes{256,128}-ctr` with
+  `hmac-sha2-256(-etm@openssh.com)`; `curve25519-sha256`,
+  `ecdh-sha2-nistp256`; host keys `ssh-ed25519`, `ecdsa-sha2-nistp256`,
+  `rsa-sha2-512/256`; strict kex (Terrapin). `ssh.Wire` under the
+  transport, `ssh.connect_with_offer`/`connect_over` with a `HostKeyCheck`
+  callback (one connection, the decision made mid-handshake).
+- New modules: `lib/ssh/sshcipher.m31`, `sshagent.m31`, `sshconfig.m31`,
+  `sshshell.m31`, `sshjump.m31`, `sshforward.m31`; `lib/crypto/rsasign.m31`
+  (RSASSA-PKCS1-v1_5 signing, CRT, constant-time in the source, self-checked)
+  and `lib/crypto/bcryptpbkdf.m31`. `sshkey` reads ECDSA/RSA keys and
+  encrypted files (`parse_with_passphrase`, `inspect`); `sshexec` has
+  `open_pty`, `shell`, `direct_tcpip`, `window_change`, `write_available`,
+  manual window credit and server-open parsing; `sshauth` takes the
+  signature algorithm per request (`Signer`, `start`, `try_key`);
+  `sshhosts` keeps every key type (`blobs_for`, `algorithms_for`);
+  `net.Conn.fileno`, `net.Listener.fileno`.
+- `tests/ssh`: `test_m31ssh.sh` (136 pty-driven checks against disposable
+  `sshd`s), and oracles `oracle_sshcipher.py`, `oracle_sshkeyfiles.py`,
+  `oracle_rsasign.py`, the bcrypt_pbkdf vector, plus unit tests for config,
+  escape filter, message layouts, negotiation, host-key blobs, agent
+  parsers and forwarding routes.
+
+### Changed
+
+- `ssh.KexInit`'s own proposal is no longer a single suite (the library's
+  v0 rule, `docs/ssh-decision.md`): see "Transport" above. `connect_any`
+  and `presented_host_key` still work as before for ed25519 host keys.
+- `known_hosts` lines of `ecdsa-sha2-nistp256` and `ssh-rsa` are parsed and
+  validated (a malformed one is an error, never a silent skip); other key
+  types are still skipped.
+- `sshauth.Signer.sign_blob` takes the algorithm; `sshkey.Error` has
+  `WrongPassphrase`, `UnsupportedCipher`, `UnsupportedKdf`; `ssh.Error` has
+  `BadKeyExchange`; `sshexec.Error` has `PtyRefused`.
 
 ## 0.4.6 (2026-10-15)
 

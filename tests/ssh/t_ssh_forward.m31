@@ -1,0 +1,220 @@
+// `lib/ssh/sshforward.m31`: forwarding-spec parsing and the routing of
+// server messages, against a scripted link that only records what is sent
+// (the live behaviour is `test_m31ssh.sh`'s forwarding section).
+//
+// Hostile input: every proper prefix of a server CHANNEL_OPEN, and
+// messages for channels that do not exist, must be refused or ignored
+// without a trap and without opening anything.
+import ssh;
+import ssh.sshexec;
+import ssh.sshforward;
+
+int check(int passed_count, bool is_ok, str label) {
+    if (!is_ok) {
+        trap("check failed: " + label);
+    }
+    return passed_count + 1;
+}
+
+type Recorder {
+    List<bytes> sent;
+}
+
+pub Result<int, ssh.Error> Recorder.send(bytes payload) {
+    sent.push(clone(payload));
+    return Result<int, ssh.Error>.Ok(payload.size());
+}
+
+pub Result<bytes, ssh.Error> Recorder.recv() {
+    return Result<bytes, ssh.Error>.Err(ssh.Error.Io);
+}
+
+pub bytes Recorder.session_id() {
+    bytes none = [];
+    return none;
+}
+
+void put_u32(bytes out, int value) {
+    out.push(value >> 24 & 0xFF);
+    out.push(value >> 16 & 0xFF);
+    out.push(value >> 8 & 0xFF);
+    out.push(value & 0xFF);
+}
+
+bytes server_open(str kind, int sender, str address, int port) {
+    bytes out = [90];
+    ssh.push_string(out, kind.to_bytes());
+    put_u32(out, sender);
+    put_u32(out, 2097152);
+    put_u32(out, 32768);
+    if (kind == "forwarded-tcpip") {
+        ssh.push_string(out, address.to_bytes());
+        put_u32(out, port);
+        ssh.push_string(out, "10.0.0.9".to_bytes());
+        put_u32(out, 5555);
+    }
+    return out;
+}
+
+bool is_ok_rule(Result<sshforward.Rule, str> result) {
+    match (result) {
+        case Ok(_): {
+            return true;
+        }
+        case Err(_): {
+            return false;
+        }
+    }
+}
+
+sshforward.Rule rule_of(str spec, bool is_remote) {
+    match (sshforward.parse_rule(spec, is_remote)) {
+        case Ok(sshforward.Rule rule): {
+            return rule;
+        }
+        case Err(str reason): {
+            trap("spec " + spec + ": " + reason);
+        }
+    }
+}
+
+int checks = 0;
+// --- specs --------------------------------------------------------------------------------
+sshforward.Rule three = rule_of("8080:example.com:80", false);
+checks = check(checks, three.bind_host == "" && three.bind_port == 8080 && three.target_host == "example.com" && three.target_port == 80, "port:host:hostport");
+sshforward.Rule four = rule_of("127.0.0.1:8080:db:5432", false);
+checks = check(checks, four.bind_host == "127.0.0.1" && four.bind_port == 8080 && four.target_host == "db" && four.target_port == 5432, "bind:port:host:hostport");
+sshforward.Rule bracketed = rule_of("9000:[::1]:22", true);
+checks = check(checks, bracketed.target_host == "::1" && bracketed.target_port == 22 && bracketed.bind_port == 9000 && bracketed.is_remote, "a bracketed IPv6 destination");
+sshforward.Rule dynamic = rule_of("0:localhost:22", true);
+checks = check(checks, dynamic.bind_port == 0, "-R may ask for port 0");
+checks = check(checks, !is_ok_rule(sshforward.parse_rule("0:localhost:22", false)), "-L needs a listening port");
+checks = check(checks, !is_ok_rule(sshforward.parse_rule("", false)), "empty spec");
+checks = check(checks, !is_ok_rule(sshforward.parse_rule("80", false)), "one field");
+checks = check(checks, !is_ok_rule(sshforward.parse_rule("a:b:c", false)), "non-numeric port");
+checks = check(checks, !is_ok_rule(sshforward.parse_rule("80:host:70000", false)), "port out of range");
+checks = check(checks, !is_ok_rule(sshforward.parse_rule("80::22", false)), "empty host");
+checks = check(checks, !is_ok_rule(sshforward.parse_rule("1:2:3:4:5", false)), "too many fields");
+// --- routing -----------------------------------------------------------------------------------
+Recorder wire = Recorder([]);
+sshforward.Mux mux = sshforward.new_mux(wire, true);
+bytes unknown_channel = [94];
+put_u32(unknown_channel, 7);
+ssh.push_string(unknown_channel, "late data".to_bytes());
+match (mux.route(unknown_channel)) {
+    case Ok(bool taken): {
+        checks = check(checks, !taken, "data for an unknown channel is not taken (the session layer will refuse it)");
+    }
+    case Err(_): {
+        trap("route failed on an unknown channel");
+    }
+}
+bytes session_data = [94];
+put_u32(session_data, 0);
+ssh.push_string(session_data, "to the session".to_bytes());
+match (mux.route(session_data)) {
+    case Ok(bool taken): {
+        checks = check(checks, !taken, "channel 0 is the session's");
+    }
+    case Err(_): {
+        trap("route failed on channel 0");
+    }
+}
+match (mux.route([82])) {
+    case Ok(bool taken): {
+        checks = check(checks, !taken, "a global-request reply with none outstanding is not ours");
+    }
+    case Err(_): {
+        trap("route failed on a stray reply");
+    }
+}
+// a global request wanting a reply gets a failure
+bytes global = [80];
+ssh.push_string(global, "hostkeys-00@openssh.com".to_bytes());
+global.push(1);
+match (mux.route(global)) {
+    case Ok(bool taken): {
+        checks = check(checks, taken && wire.sent.size() == 1 && wire.sent[0].size() == 1 && wire.sent[0][0] == 82, "a global request that wants an answer gets REQUEST_FAILURE");
+    }
+    case Err(_): {
+        trap("route failed on a global request");
+    }
+}
+// one that does not gets nothing
+bytes quiet = [80];
+ssh.push_string(quiet, "x".to_bytes());
+quiet.push(0);
+match (mux.route(quiet)) {
+    case Ok(bool taken): {
+        checks = check(checks, taken && wire.sent.size() == 1, "a global request that wants no answer gets none");
+    }
+    case Err(_): {
+        trap("route failed");
+    }
+}
+// a channel type nobody asked for
+match (mux.route(server_open("x11", 4, "", 0))) {
+    case Ok(bool taken): {
+        checks = check(checks, taken && wire.sent.size() == 2 && wire.sent[1][0] == 92, "an unknown channel type is refused with OPEN_FAILURE");
+    }
+    case Err(_): {
+        trap("route failed on x11");
+    }
+}
+// a forwarded-tcpip nobody requested
+match (mux.route(server_open("forwarded-tcpip", 5, "localhost", 4444))) {
+    case Ok(bool taken): {
+        checks = check(checks, taken && wire.sent.size() == 3 && wire.sent[2][0] == 92, "a forwarded connection for a port we did not ask for is refused");
+    }
+    case Err(_): {
+        trap("route failed on forwarded-tcpip");
+    }
+}
+checks = check(checks, mux.tunnel_count() == 0, "nothing was opened");
+// keepalive replies are consumed in order
+match (mux.send_keepalive()) {
+    case Ok: {
+    }
+    case Err(_): {
+        trap("send_keepalive");
+    }
+}
+checks = check(checks, wire.sent.size() == 4 && wire.sent[3][0] == 80, "a keepalive is a global request");
+match (mux.route([82])) {
+    case Ok(bool taken): {
+        checks = check(checks, taken, "its reply is consumed");
+    }
+    case Err(_): {
+        trap("route failed on the keepalive reply");
+    }
+}
+// every proper prefix of a server open, and of a confirmation: no trap
+bytes full_open = server_open("forwarded-tcpip", 9, "localhost", 4444);
+int cut = 0;
+int survived = 0;
+while (cut < full_open.size()) {
+    match (mux.route(full_open.substr(0, cut))) {
+        case Ok(_): {
+            survived = survived + 1;
+        }
+        case Err(_): {
+            survived = survived + 1;
+        }
+    }
+    cut = cut + 1;
+}
+checks = check(checks, survived == full_open.size(), "every prefix of a server CHANNEL_OPEN is handled without a trap");
+bytes confirmation = [91];
+put_u32(confirmation, 12);
+put_u32(confirmation, 3);
+put_u32(confirmation, 100);
+put_u32(confirmation, 100);
+match (mux.route(confirmation)) {
+    case Ok(bool taken): {
+        checks = check(checks, !taken, "a confirmation for a channel we never opened is not taken");
+    }
+    case Err(_): {
+        trap("route failed on a stray confirmation");
+    }
+}
+print(checks.to_str() + " checks, 0 failures");

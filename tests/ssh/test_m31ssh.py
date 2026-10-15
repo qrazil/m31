@@ -874,6 +874,198 @@ Host *
     for pr in (jump_a, jump_b, target):
         pr.kill()
 
+# --- port forwarding ---------------------------------------------------------------------------------
+class Echo:
+    """A TCP echo server on 127.0.0.1 (the destination of every forward)."""
+
+    def __init__(self):
+        self.sock = socket.socket()
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(32)
+        self.port = self.sock.getsockname()[1]
+        self.conns = 0
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def serve(self):
+        while True:
+            try:
+                c, _ = self.sock.accept()
+            except OSError:
+                return
+            self.conns += 1
+            threading.Thread(target=self.handle, args=(c,), daemon=True).start()
+
+    def handle(self, c):
+        try:
+            while True:
+                d = c.recv(65536)
+                if not d:
+                    break
+                c.sendall(d)
+        except OSError:
+            pass
+        try:
+            c.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+        c.close()
+
+
+def roundtrip(port, data, timeout=120):
+    """Sends `data` to 127.0.0.1:port while reading the echo concurrently."""
+    c = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+    got = bytearray()
+
+    def reader():
+        try:
+            while True:
+                d = c.recv(65536)
+                if not d:
+                    break
+                got.extend(d)
+        except OSError:
+            pass
+
+    t = threading.Thread(target=reader)
+    t.start()
+    c.sendall(data)
+    c.shutdown(socket.SHUT_WR)
+    t.join(timeout)
+    c.close()
+    return bytes(got)
+
+
+def connect_when_ready(port, timeout=20):
+    """Waits for a listener by trying to connect (the forward has no other
+    observable 'ready'); returns the connected socket."""
+    end = time.monotonic() + timeout
+    while True:
+        try:
+            return socket.create_connection(("127.0.0.1", port), timeout=5)
+        except OSError:
+            if time.monotonic() > end:
+                raise
+            select.select([], [], [], 0.05)
+
+
+@scenario("forwarding")
+def _():
+    echo = Echo()
+    keep = base("-i", real)
+    # -L with a long-running command: READY is printed after the listener is bound
+    lport = free_port()
+    p = subprocess.Popen([BIN] + keep[:-1] + ["-L", "%d:127.0.0.1:%d" % (lport, echo.port), "127.0.0.1", "echo READY; cat"],
+                         env=ENV, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    procs.append(p)
+    ready = p.stdout.readline()
+    ok("-L: listener is up once the session runs", ready == b"READY\n", ready)
+    blob = os.urandom(3000000)
+    ok("-L: 3 MB through the tunnel and back is intact", roundtrip(lport, blob) == blob)
+    results = [None] * 6
+    datas = [os.urandom(200000 + i) for i in range(6)]
+
+    def worker(i):
+        results[i] = roundtrip(lport, datas[i])
+
+    ts = [threading.Thread(target=worker, args=(i,)) for i in range(6)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join(120)
+    ok("-L: six concurrent connections, each intact", results == datas)
+    c = socket.create_connection(("127.0.0.1", lport), timeout=30)
+    c.sendall(b"half")
+    c.shutdown(socket.SHUT_WR)
+    got = b""
+    while True:
+        d = c.recv(100)
+        if not d:
+            break
+        got += d
+    c.close()
+    ok("-L: half-close: the far side's EOF reaches the local peer after the echo", got == b"half", got)
+    p.stdin.close()
+    ok("-L: the session ends (stdin EOF) and the client exits 0", p.wait(30) == 0)
+
+    # -L to a closed port: accepted locally, then closed; the client says why
+    dead = free_port()
+    lport2 = free_port()
+    p = subprocess.Popen([BIN] + keep[:-1] + ["-L", "%d:127.0.0.1:%d" % (lport2, dead), "127.0.0.1", "echo READY; cat"],
+                         env=ENV, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    procs.append(p)
+    p.stdout.readline()
+    c = socket.create_connection(("127.0.0.1", lport2), timeout=30)
+    d = c.recv(10)
+    c.close()
+    ok("-L: a destination that refuses closes the local connection", d == b"")
+    p.stdin.close()
+    err = p.stderr.read()
+    p.wait(30)
+    ok("-L: ...and a notice says the open failed", b"open failed" in err, err)
+
+    # -R
+    rport = free_port()
+    p = subprocess.Popen([BIN] + keep[:-1] + ["-R", "%d:127.0.0.1:%d" % (rport, echo.port), "127.0.0.1", "echo READY; cat"],
+                         env=ENV, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    procs.append(p)
+    p.stdout.readline()
+    c = connect_when_ready(rport)
+    c.close()
+    blob = os.urandom(2000000)
+    ok("-R: 2 MB through the server's listener to our echo and back is intact", roundtrip(rport, blob) == blob)
+    ok("-R: the destination saw the connections", echo.conns >= 1)
+    p.stdin.close()
+    ok("-R: the session ends and the client exits 0", p.wait(30) == 0)
+
+    # -R 0: the server picks the port and says so
+    p = subprocess.Popen([BIN] + keep[:-1] + ["-R", "0:127.0.0.1:%d" % echo.port, "127.0.0.1", "echo READY; cat"],
+                         env=ENV, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    procs.append(p)
+    p.stdout.readline()
+    line = p.stderr.readline().decode()
+    m = re.search(r"Allocated port (\d+)", line)
+    ok("-R 0: the allocated port is reported", m is not None, line)
+    if m:
+        got = roundtrip(int(m.group(1)), b"dynamic")
+        ok("-R 0: and works", got == b"dynamic", got)
+    p.stdin.close()
+    p.wait(30)
+
+    # -N with a forward: no session, stays until killed
+    lport3 = free_port()
+    p = subprocess.Popen([BIN] + keep[:-1] + ["-N", "-L", "%d:127.0.0.1:%d" % (lport3, echo.port), "127.0.0.1"],
+                         env=ENV, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    procs.append(p)
+    c = connect_when_ready(lport3)
+    c.close()
+    ok("-N -L: forwards with no remote command", roundtrip(lport3, b"no-session") == b"no-session")
+    ok("-N: still running", p.poll() is None)
+    p.terminate()
+    p.wait(30)
+    ok("-N: terminated by SIGTERM", p.returncode is not None)
+    code, out, err = run(base("-i", real, "-N", "echo"))
+    ok("-N without any forward is an error", code == 255, (code, err))
+
+    # config file LocalForward
+    lport4 = free_port()
+    cfgpath = os.path.join(HOME, ".ssh", "config")
+    with open(cfgpath, "w") as f:
+        f.write("Host *\n  LocalForward %d 127.0.0.1:%d\n" % (lport4, echo.port))
+    p = subprocess.Popen([BIN] + keep[:-1] + ["127.0.0.1", "echo READY; cat"], env=ENV, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    procs.append(p)
+    p.stdout.readline()
+    ok("LocalForward in ~/.ssh/config", roundtrip(lport4, b"from-config") == b"from-config")
+    p.stdin.close()
+    p.wait(30)
+    os.unlink(cfgpath)
+
+    # parse errors
+    for bad in ("nonsense", "1:2", "x:127.0.0.1:80", "8080:127.0.0.1:99999"):
+        code, out, err = run(base("-i", real, "-L", bad, "true"))
+        ok("-L %r is refused with one line" % bad, code == 255 and len(err.strip().splitlines()) <= 2, (code, err))
+    echo.sock.close()
+
 # --- tidy up ----------------------------------------------------------------------------------------
 for pr in procs:
     try:

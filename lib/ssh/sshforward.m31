@@ -1,0 +1,702 @@
+// Port forwarding over an SSH connection (RFC 4254 §7): `-L` (a local
+// listener whose connections go out through the server to a destination it
+// can reach) and `-R` (a listener on the server whose connections come back
+// to a destination this side can reach), as many channels at once.
+//
+// API
+// ---
+//   Mux mux = sshforward.new_mux(link, is_quiet);
+//   mux.listen_local(rule)         -> Result<void, str>   -L: bind now
+//   mux.request_remote(rule)       -> Result<void, str>   -R: ask the server
+//   mux.route(payload)             -> Result<bool, str>   a server message; true = consumed
+//   mux.pump_local()               -> Result<bool, str>   move bytes between sockets and
+//                                                         channels; true = progress was made
+//   mux.collect(fds, events)       append what to poll
+//   mux.service(revents, offset)   -> Result<void, str>   after the poll: accept, write
+//   mux.send_keepalive()           -> Result<void, str>
+//   mux.take_notices()             -> List<str>           lines to show on stderr
+//
+// The owner is an event loop (`sshshell.m31`): it reads server messages
+// itself, offers each to `route` first (channel 0 is its own session), and
+// otherwise treats the connection like the single-channel case. Everything
+// is one thread; nothing here ever waits on a socket:
+//
+//   * the data direction local -> server reads only while the server's
+//     window for that channel is open, and only what the window holds, so a
+//     slow server pushes back on the local program;
+//   * server -> local data is held per channel until the local socket is
+//     writable (the loop polls for it), and the channel's window credit is
+//     returned only as that data is consumed (`Channel.acknowledge`), so a
+//     slow local program pushes back on the server: at most 2 MiB is ever
+//     held per tunnel;
+//   * EOF in each direction is carried across (`shutdown` / CHANNEL_EOF),
+//     and a tunnel is closed when both are done, when the server closes it,
+//     or when the local socket fails;
+//   * no more than 64 tunnels exist at once; a connection beyond that is
+//     closed at once, which bounds descriptors and memory against a local
+//     flood or a hostile server.
+//
+// A forward that cannot be set up is a notice, not a fatal error (OpenSSH's
+// default, `ExitOnForwardFailure no`): the session goes on without it.
+// Global-request replies are matched to requests in order, which the
+// protocol guarantees, so this layer owns every global request it makes
+// (`tcpip-forward`, `keepalive@openssh.com`).
+//
+// Not here: `-D` (SOCKS), `-W`, UNIX-socket forwarding, `GatewayPorts`
+// beyond what an explicit bind address does, cancelling a forward.
+
+import io;
+import net;
+import ssh;
+import ssh.sshexec;
+
+const int POLL_IN = 1;
+const int POLL_OUT = 4;
+const int MAX_TUNNELS = 64;
+const int READ_CHUNK = 32768;
+const int KEEPALIVE_MARK = -1;
+
+/// One forwarding rule. For `-L`: listen on `bind_host:bind_port` here and
+/// connect through the server to `target_host:target_port`. For `-R`: ask the
+/// server to listen on `bind_host:bind_port` (empty host: loopback) and
+/// connect each connection here to `target_host:target_port`.
+pub type Rule {
+    pub bool is_remote;
+    pub str bind_host;
+    pub int bind_port;
+    pub str target_host;
+    pub int target_port;
+    /// -R: the port the server really bound (differs from `bind_port` when
+    /// that was 0); filled in from its reply.
+    pub int bound_port;
+}
+
+type Tunnel {
+    int local_id;
+    List<net.Conn> socket;
+    List<sshexec.Channel> channel;
+    bool is_pending;
+    bytes to_socket;
+    bool is_local_eof;
+    bool is_shutdown;
+    str label;
+}
+
+pub type Mux {
+    ssh.Link link;
+    bool is_quiet;
+    List<Rule> rules;
+    List<net.Listener> listeners;
+    /// For each listener, the index of its rule.
+    List<int> listener_rules;
+    List<Tunnel> tunnels;
+    List<int> pending_global;
+    List<str> notices;
+    int next_id = 1;
+}
+
+void Mux.notice(str text) {
+    if (!is_quiet) {
+        notices.push(text);
+    }
+}
+
+/// Lines the owner should show (and drop): channel open failures, refused
+/// remote forwards, allocated ports.
+pub List<str> Mux.take_notices() {
+    List<str> out = clone(notices);
+    notices.clear();
+    return out;
+}
+
+/// `-L`: bind the listener now.
+pub Result<void, str> Mux.listen_local(Rule rule) {
+    match (net.listen(listen_address(rule.bind_host), rule.bind_port)) {
+        case Ok(net.Listener listener): {
+            listeners.push(listener);
+            listener_rules.push(rules.size());
+            rules.push(rule);
+            return Result<void, str>.Ok;
+        }
+        case Err(net.Error error): {
+            return Result<void, str>.Err("cannot listen on " + listen_address(rule.bind_host) + ":" + rule.bind_port.to_str() + ": " + error.to_str());
+        }
+    }
+}
+
+/// `-R`: ask the server to listen. Its answer arrives through `route`.
+pub Result<void, str> Mux.request_remote(Rule rule) {
+    str address = rule.bind_host;
+    if (address == "") {
+        address = "localhost";
+    }
+    match (link.send(sshexec.build_tcpip_forward(address, rule.bind_port))) {
+        case Ok(_): {
+            pending_global.push(rules.size());
+            rules.push(rule);
+            return Result<void, str>.Ok;
+        }
+        case Err(ssh.Error error): {
+            return Result<void, str>.Err(error.to_str());
+        }
+    }
+}
+
+/// A `keepalive@openssh.com` request; its reply is consumed by `route`.
+pub Result<void, str> Mux.send_keepalive() {
+    match (link.send(sshexec.build_keepalive())) {
+        case Ok(_): {
+            pending_global.push(KEEPALIVE_MARK);
+            return Result<void, str>.Ok;
+        }
+        case Err(ssh.Error error): {
+            return Result<void, str>.Err(error.to_str());
+        }
+    }
+}
+
+int Mux.find(int local_id) {
+    int index = 0;
+    while (index < tunnels.size()) {
+        if (tunnels[index].local_id == local_id) {
+            return index;
+        }
+        index = index + 1;
+    }
+    return -1;
+}
+
+Result<void, str> Mux.transmit(bytes payload) {
+    match (link.send(payload)) {
+        case Ok(_): {
+            return Result<void, str>.Ok;
+        }
+        case Err(ssh.Error error): {
+            return Result<void, str>.Err(error.to_str());
+        }
+    }
+}
+
+/// Offers one server message to this layer: channel numbers other than 0
+/// (the session's) and server-opened channels are handled here and the
+/// answer is `true`; anything else is `false` and the owner handles it.
+pub Result<bool, str> Mux.route(bytes payload) {
+    if (payload.size() < 1) {
+        return Result<bool, str>.Ok(false);
+    }
+    int kind = payload[0];
+    if (kind == sshexec.SSH_MESSAGE_REQUEST_SUCCESS || kind == sshexec.SSH_MESSAGE_REQUEST_FAILURE) {
+        if (pending_global.size() == 0) {
+            return Result<bool, str>.Ok(false);
+        }
+        int mark = pending_global[0];
+        pending_global.remove_at(0);
+        if (mark == KEEPALIVE_MARK) {
+            return Result<bool, str>.Ok(true);
+        }
+        Rule rule = rules[mark];
+        if (kind == sshexec.SSH_MESSAGE_REQUEST_FAILURE) {
+            notice("Warning: remote port forwarding failed for listen port " + rule.bind_port.to_str());
+            rules[mark].bound_port = -1;
+        } else {
+            int port = rule.bind_port;
+            if (rule.bind_port == 0 && payload.size() >= 5) {
+                port = be32(payload, 1);
+                notice("Allocated port " + port.to_str() + " for remote forward to " + rule.target_host + ":" + rule.target_port.to_str());
+            }
+            rules[mark].bound_port = port;
+        }
+        return Result<bool, str>.Ok(true);
+    }
+    if (kind == sshexec.SSH_MESSAGE_GLOBAL_REQUEST) {
+        // Requests from the server (OpenSSH sends `hostkeys-00@openssh.com`
+        // after login): this client implements none, so a request that
+        // wants an answer gets a failure, and any other is ignored.
+        match (ssh.parse_string(payload, 1)) {
+            case Ok(ssh.Field name): {
+                if (name.next < payload.size() && payload[name.next] != 0) {
+                    transmit([sshexec.SSH_MESSAGE_REQUEST_FAILURE])?;
+                }
+            }
+            case Err(_): {
+                return Result<bool, str>.Err("the server sent a malformed global request");
+            }
+        }
+        return Result<bool, str>.Ok(true);
+    }
+    if (kind == sshexec.SSH_MESSAGE_CHANNEL_OPEN) {
+        accept_open(payload)?;
+        return Result<bool, str>.Ok(true);
+    }
+    if (kind < sshexec.SSH_MESSAGE_CHANNEL_OPEN_CONFIRMATION || kind > sshexec.SSH_MESSAGE_CHANNEL_FAILURE || payload.size() < 5) {
+        return Result<bool, str>.Ok(false);
+    }
+    int recipient = be32(payload, 1);
+    if (recipient == 0) {
+        return Result<bool, str>.Ok(false);
+    }
+    int index = find(recipient);
+    if (index < 0) {
+        return Result<bool, str>.Ok(false);
+    }
+    bytes addressed = readdressed(payload);
+    if (kind == sshexec.SSH_MESSAGE_CHANNEL_OPEN_CONFIRMATION) {
+        match (sshexec.parse_confirmation(addressed)) {
+            case Ok(sshexec.Confirmation confirmation): {
+                if (tunnels[index].is_pending) {
+                    tunnels[index].channel.push(sshexec.new_channel(link, confirmation.remote_id, confirmation.window, confirmation.max_packet));
+                    tunnels[index].is_pending = false;
+                }
+            }
+            case Err(sshexec.Error error): {
+                return Result<bool, str>.Err(error.to_str());
+            }
+        }
+        return Result<bool, str>.Ok(true);
+    }
+    if (kind == sshexec.SSH_MESSAGE_CHANNEL_OPEN_FAILURE) {
+        match (sshexec.parse_open_failure(addressed)) {
+            case Ok(int reason): {
+                notice("channel " + recipient.to_str() + ": open failed (reason " + reason.to_str() + ") for " + tunnels[index].label);
+            }
+            case Err(sshexec.Error error): {
+                return Result<bool, str>.Err(error.to_str());
+            }
+        }
+        drop_tunnel(index);
+        return Result<bool, str>.Ok(true);
+    }
+    if (tunnels[index].channel.size() == 0) {
+        // data or a request for a channel that is not open yet
+        return Result<bool, str>.Err("the server sent channel data before confirming the channel");
+    }
+    match (tunnels[index].channel[0].dispatch_message(addressed)) {
+        case Ok: {
+        }
+        case Err(sshexec.Error error): {
+            return Result<bool, str>.Err(error.to_str());
+        }
+    }
+    return Result<bool, str>.Ok(true);
+}
+
+// A server-opened channel: `forwarded-tcpip` for one of our -R rules.
+Result<void, str> Mux.accept_open(bytes payload) {
+    sshexec.ServerOpen open = ssh_parse(payload)?;
+    if (open.kind != "forwarded-tcpip") {
+        transmit(sshexec.build_open_failure(open.sender, 3, "unknown channel type"))?;
+        return Result<void, str>.Ok;
+    }
+    int match_index = -1;
+    int index = 0;
+    while (index < rules.size()) {
+        if (rules[index].is_remote && rules[index].bound_port == open.port) {
+            match_index = index;
+        }
+        index = index + 1;
+    }
+    if (match_index < 0 || tunnels.size() >= MAX_TUNNELS) {
+        transmit(sshexec.build_open_failure(open.sender, 1, "administratively prohibited"))?;
+        return Result<void, str>.Ok;
+    }
+    Rule rule = rules[match_index];
+    match (net.connect(rule.target_host, rule.target_port)) {
+        case Err(net.Error error): {
+            notice("connect_to " + rule.target_host + " port " + rule.target_port.to_str() + ": failed (" + error.to_str() + ")");
+            transmit(sshexec.build_open_failure(open.sender, 2, "connect failed"))?;
+        }
+        case Ok(net.Conn connection): {
+            int local_id = next_id;
+            next_id = next_id + 1;
+            transmit(sshexec.build_open_confirmation(open.sender, local_id, sshexec.LOCAL_WINDOW, sshexec.LOCAL_MAX_PACKET))?;
+            Tunnel tunnel = Tunnel(local_id, [], [], false, [], false, false, "forwarded-tcpip " + open.address + ":" + open.port.to_str());
+            tunnel.socket.push(connection);
+            tunnel.channel.push(sshexec.new_channel(link, open.sender, open.window, open.max_packet));
+            tunnels.push(tunnel);
+        }
+    }
+    return Result<void, str>.Ok;
+}
+
+void Mux.drop_tunnel(int index) {
+    // closing the socket is the Conn's destructor: removing the last
+    // reference does it
+    tunnels.remove_at(index);
+}
+
+/// Appends what this layer needs polled: each listener readable, and each
+/// tunnel's socket for input while its channel can take data and for output
+/// while there is data to write.
+pub void Mux.collect(List<int> fds, List<int> events) {
+    for (net.Listener listener in listeners) {
+        fds.push(listener.fileno());
+        events.push(POLL_IN);
+    }
+    for (Tunnel tunnel in tunnels) {
+        int wanted = wanted_events(tunnel);
+        if (wanted == 0) {
+            continue;
+        }
+        fds.push(tunnel.socket[0].fileno());
+        events.push(wanted);
+    }
+}
+
+/// After a poll over `collect`'s entries (which began at `offset` in
+/// `revents`): accept new local connections and write pending data to the
+/// sockets that became writable.
+pub Result<void, str> Mux.service(List<int> revents, int offset) {
+    int position = offset;
+    int listener_index = 0;
+    while (listener_index < listeners.size()) {
+        if (revents[position] & POLL_IN != 0) {
+            accept_local(listener_index)?;
+        }
+        position = position + 1;
+        listener_index = listener_index + 1;
+    }
+    // Tunnels may have been added by accepts above (they were not part of
+    // this poll); only the ones polled are indexed by `position`.
+    int tunnel_index = 0;
+    int polled = revents.size();
+    while (tunnel_index < tunnels.size() && position < polled) {
+        Tunnel tunnel = tunnels[tunnel_index];
+        if (wanted_events(tunnel) == 0) {
+            tunnel_index = tunnel_index + 1;
+            continue;
+        }
+        int flags = revents[position];
+        position = position + 1;
+        if (flags & POLL_OUT != 0 && tunnel.to_socket.size() > 0) {
+            match (tunnel.socket[0].write_some(tunnel.to_socket)) {
+                case Ok(int written): {
+                    tunnels[tunnel_index].to_socket.drop_front(written);
+                }
+                case Err(_): {
+                    fail_tunnel(tunnel_index)?;
+                    continue;
+                }
+            }
+        }
+        tunnel_index = tunnel_index + 1;
+    }
+    return Result<void, str>.Ok;
+}
+
+// A local socket failed or was reset: say CLOSE and forget the socket.
+Result<void, str> Mux.fail_tunnel(int index) {
+    if (tunnels[index].channel.size() > 0) {
+        match (tunnels[index].channel[0].begin_close()) {
+            case Ok: {
+            }
+            case Err(sshexec.Error error): {
+                return Result<void, str>.Err(error.to_str());
+            }
+        }
+    }
+    drop_tunnel(index);
+    return Result<void, str>.Ok;
+}
+
+Result<void, str> Mux.accept_local(int listener_index) {
+    match (listeners[listener_index].accept()) {
+        case Err(net.Error error): {
+            if (!error.is_transient()) {
+                return Result<void, str>.Err("accept failed: " + error.to_str());
+            }
+            return Result<void, str>.Ok;
+        }
+        case Ok(net.Conn connection): {
+            if (tunnels.size() >= MAX_TUNNELS) {
+                notice("too many forwarded connections; refusing one");
+                return Result<void, str>.Ok;
+            }
+            Rule rule = rules[listener_rules[listener_index]];
+            int local_id = next_id;
+            next_id = next_id + 1;
+            net.Addr peer = connection.peer();
+            bytes open = sshexec.build_open_direct_tcpip(local_id, sshexec.LOCAL_WINDOW, sshexec.LOCAL_MAX_PACKET, rule.target_host, rule.target_port, peer.ip_address().to_str(), peer.port());
+            transmit(open)?;
+            Tunnel tunnel = Tunnel(local_id, [], [], true, [], false, false, "direct-tcpip to " + rule.target_host + ":" + rule.target_port.to_str());
+            tunnel.socket.push(connection);
+            tunnels.push(tunnel);
+            return Result<void, str>.Ok;
+        }
+    }
+}
+
+/// Moves bytes between the sockets and their channels as far as windows and
+/// buffers allow, carries EOFs across and retires finished tunnels.
+/// `true` when something moved (call again before sleeping).
+pub Result<bool, str> Mux.pump_local() {
+    bool is_progress = false;
+    int index = 0;
+    while (index < tunnels.size()) {
+        if (tunnels[index].is_pending || tunnels[index].channel.size() == 0) {
+            index = index + 1;
+            continue;
+        }
+        // 1. server -> socket buffer, returning window credit as it is taken
+        if (tunnels[index].channel[0].has_pending()) {
+            bytes taken = tunnels[index].channel[0].take_output(READ_CHUNK * 4);
+            tunnels[index].channel[0].take_error(READ_CHUNK);
+            if (taken.size() > 0) {
+                tunnels[index].to_socket.extend(taken);
+                is_progress = true;
+            }
+            match (tunnels[index].channel[0].acknowledge()) {
+                case Ok: {
+                }
+                case Err(sshexec.Error error): {
+                    return Result<bool, str>.Err(error.to_str());
+                }
+            }
+        }
+        // 2. socket -> server, only as much as the server's window holds
+        bool is_blocked = false;
+        while (!tunnels[index].is_local_eof && !is_blocked && !tunnels[index].channel[0].is_closed() && !tunnels[index].channel[0].is_eof_sent()) {
+            int room = tunnels[index].channel[0].send_window();
+            if (room <= 0) {
+                is_blocked = true;
+            } else {
+                bool is_ready = false;
+                match (tunnels[index].socket[0].wait(0)) {
+                    case Ok(bool answer): {
+                        is_ready = answer;
+                    }
+                    case Err(_): {
+                        is_ready = false;
+                    }
+                }
+                if (!is_ready) {
+                    is_blocked = true;
+                } else {
+                    int want = room;
+                    if (want > READ_CHUNK) {
+                        want = READ_CHUNK;
+                    }
+                    match (tunnels[index].socket[0].read(want)) {
+                        case Ok(bytes data): {
+                            if (data.size() == 0) {
+                                tunnels[index].is_local_eof = true;
+                                match (tunnels[index].channel[0].close_write()) {
+                                    case Ok: {
+                                    }
+                                    case Err(sshexec.Error error): {
+                                        return Result<bool, str>.Err(error.to_str());
+                                    }
+                                }
+                                is_progress = true;
+                            } else {
+                                match (tunnels[index].channel[0].write_available(data)) {
+                                    case Ok(int sent): {
+                                        // `want` never exceeds the window, so all went
+                                        is_progress = true;
+                                    }
+                                    case Err(sshexec.Error error): {
+                                        return Result<bool, str>.Err(error.to_str());
+                                    }
+                                }
+                            }
+                        }
+                        case Err(_): {
+                            tunnels[index].is_local_eof = true;
+                            is_progress = true;
+                            is_blocked = true;
+                            match (tunnels[index].channel[0].begin_close()) {
+                                case Ok: {
+                                }
+                                case Err(sshexec.Error error): {
+                                    return Result<bool, str>.Err(error.to_str());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // 3. the server's EOF becomes our socket's shutdown, once drained
+        if (tunnels[index].channel[0].is_eof() && tunnels[index].to_socket.size() == 0 && !tunnels[index].is_shutdown && !tunnels[index].channel[0].has_pending()) {
+            tunnels[index].is_shutdown = true;
+            Result<bool, net.Error> ignored = tunnels[index].socket[0].shutdown_write();
+            is_progress = true;
+        }
+        // 4. both directions finished: close; the server's CLOSE retires it
+        if (tunnels[index].is_shutdown && tunnels[index].is_local_eof && !tunnels[index].channel[0].is_close_sent()) {
+            match (tunnels[index].channel[0].begin_close()) {
+                case Ok: {
+                }
+                case Err(sshexec.Error error): {
+                    return Result<bool, str>.Err(error.to_str());
+                }
+            }
+            is_progress = true;
+        }
+        // The server's CLOSE retires the tunnel -- but only once what it sent
+        // before closing has reached the local socket: data and EOF are
+        // buffered here until the local program has taken them.
+        if (tunnels[index].channel[0].is_closed() && tunnels[index].to_socket.size() == 0 && !tunnels[index].channel[0].has_pending()) {
+            if (!tunnels[index].is_shutdown) {
+                Result<bool, net.Error> ignored = tunnels[index].socket[0].shutdown_write();
+            }
+            drop_tunnel(index);
+            is_progress = true;
+        } else {
+            index = index + 1;
+        }
+    }
+    return Result<bool, str>.Ok(is_progress);
+}
+
+/// How many tunnels are open or opening (for the caller's idle decisions
+/// and for tests).
+pub int Mux.tunnel_count() {
+    return tunnels.size();
+}
+
+/// Whether any -R rule is still waiting for the server's answer.
+pub bool Mux.is_waiting() {
+    return pending_global.size() > 0;
+}
+
+// What to poll a tunnel's socket for: input only while the channel is open
+// and can take data (otherwise a readable socket would spin the loop),
+// output while there is data to write. 0 means leave it out of the poll
+// (`collect` and `service` both skip it, so their positions agree).
+int wanted_events(Tunnel tunnel) {
+    if (tunnel.socket.size() == 0) {
+        return 0;
+    }
+    int wanted = 0;
+    if (tunnel.channel.size() > 0 && !tunnel.is_local_eof) {
+        sshexec.Channel channel = tunnel.channel[0];
+        if (!channel.is_closed() && !channel.is_eof_sent() && channel.send_window() > 0) {
+            wanted = POLL_IN;
+        }
+    }
+    if (tunnel.to_socket.size() > 0) {
+        wanted = wanted | POLL_OUT;
+    }
+    return wanted;
+}
+
+pub Mux new_mux(ssh.Link link, bool is_quiet) {
+    return Mux(link, is_quiet, [], [], [], [], [], []);
+}
+
+/// Parses `[bind_address:]port:host:hostport` (the shape of `-L` and `-R`
+/// arguments; `host` may be a bracketed IPv6 literal). `Err` names what is
+/// wrong.
+pub Result<Rule, str> parse_rule(str spec, bool is_remote) {
+    List<str> parts = [];
+    str rest = spec;
+    // split on ':' outside [...]
+    str current = "";
+    bool is_inside = false;
+    for (int code in rest.chars()) {
+        if (code == 91) {
+            is_inside = true;
+        } else if (code == 93) {
+            is_inside = false;
+        }
+        if (code == 58 && !is_inside) {
+            parts.push(current);
+            current = "";
+        } else {
+            current = current + str.from_chars([code]);
+        }
+    }
+    parts.push(current);
+    str bind_host = "";
+    str bind_text = "";
+    str target_host = "";
+    str target_text = "";
+    if (parts.size() == 3) {
+        bind_text = parts[0];
+        target_host = parts[1];
+        target_text = parts[2];
+    } else if (parts.size() == 4) {
+        bind_host = parts[0];
+        bind_text = parts[1];
+        target_host = parts[2];
+        target_text = parts[3];
+    } else {
+        return Result<Rule, str>.Err("bad forwarding specification '" + spec + "' (want [bind_address:]port:host:hostport)");
+    }
+    target_host = strip_brackets(target_host);
+    bind_host = strip_brackets(bind_host);
+    int bind_port = 0;
+    int target_port = 0;
+    match (bind_text.parse_int()) {
+        case Some(int value): {
+            bind_port = value;
+        }
+        case None: {
+            return Result<Rule, str>.Err("bad port in forwarding specification '" + spec + "'");
+        }
+    }
+    match (target_text.parse_int()) {
+        case Some(int value): {
+            target_port = value;
+        }
+        case None: {
+            return Result<Rule, str>.Err("bad port in forwarding specification '" + spec + "'");
+        }
+    }
+    if (bind_port < 0 || bind_port > 65535 || target_port < 1 || target_port > 65535 || target_host == "") {
+        return Result<Rule, str>.Err("port out of range in forwarding specification '" + spec + "'");
+    }
+    if (!is_remote && bind_port == 0) {
+        return Result<Rule, str>.Err("a local forward needs a listening port (got 0) in '" + spec + "'");
+    }
+    return Result<Rule, str>.Ok(Rule(is_remote, bind_host, bind_port, target_host, target_port, 0));
+}
+
+str strip_brackets(str host) {
+    if (host.starts_with("[") && host.ends_with("]") && host.size() >= 2) {
+        return host.substr(1, host.size() - 1);
+    }
+    return host;
+}
+
+// The address a local listener binds for a given bind_address: loopback for
+// none or `localhost` (OpenSSH's GatewayPorts=no), all interfaces for `*`.
+str listen_address(str bind_host) {
+    if (bind_host == "" || bind_host == "localhost") {
+        return "127.0.0.1";
+    }
+    if (bind_host == "*") {
+        return "0.0.0.0";
+    }
+    return bind_host;
+}
+
+// --- server messages ----------------------------------------------------------------
+
+int be32(bytes buffer, int offset) {
+    return buffer[offset] << 24 | buffer[offset + 1] << 16 | buffer[offset + 2] << 8 | buffer[offset + 3];
+}
+
+// A copy of `payload` addressed to channel 0, which is what a `Channel`
+// believes it is.
+bytes readdressed(bytes payload) {
+    bytes out = clone(payload);
+    out[1] = 0;
+    out[2] = 0;
+    out[3] = 0;
+    out[4] = 0;
+    return out;
+}
+
+Result<sshexec.ServerOpen, str> ssh_parse(bytes payload) {
+    match (sshexec.parse_server_open(payload)) {
+        case Ok(sshexec.ServerOpen open): {
+            return Result<sshexec.ServerOpen, str>.Ok(open);
+        }
+        case Err(sshexec.Error error): {
+            return Result<sshexec.ServerOpen, str>.Err(error.to_str());
+        }
+    }
+}
+
+// --- local sockets ---------------------------------------------------------------------
