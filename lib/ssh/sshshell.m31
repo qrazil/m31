@@ -36,6 +36,7 @@ import term;
 import timer;
 import ssh;
 import ssh.sshexec;
+import ssh.sshforward;
 
 prim int __read(int file_descriptor, bytes buffer, int off, int byte_count);
 prim int __poll(List<int> fds, List<int> events, List<int> revents, int timeout_ms);
@@ -174,11 +175,14 @@ pub bytes default_modes() {
     return out;
 }
 
-pub Result<Ending, str> run(ssh.Transport transport, sshexec.Channel channel, Options options) {
+/// Runs the session until it ends. `session` holds the interactive channel
+/// (shell or command), or nothing for a connection that only carries
+/// forwards (`-N`); `mux` is the forwarding layer, possibly with no rules.
+pub Result<Ending, str> run(ssh.Transport transport, List<sshexec.Channel> session, Options options, sshforward.Mux mux) {
     if (options.is_raw) {
         match (term.raw(in_fd: options.input_fd, out_fd: options.output_fd)) {
             case Ok(term.Session raw): {
-                Result<Ending, str> result = run_loop(transport, channel, options);
+                Result<Ending, str> result = run_loop(transport, session, options, mux);
                 Result<bool, term.Error> restored = raw.restore();
                 return result;
             }
@@ -187,7 +191,7 @@ pub Result<Ending, str> run(ssh.Transport transport, sshexec.Channel channel, Op
             }
         }
     }
-    return run_loop(transport, channel, options);
+    return run_loop(transport, session, options, mux);
 }
 
 // Writes whatever the channel has buffered to local stdout/stderr. `false`
@@ -247,11 +251,23 @@ str help_text(int escape) {
     return "\r\nSupported escape sequences:\r\n  ~.  terminate connection\r\n  ~~  send the escape character by typing it twice\r\n  ~?  this message\r\n(Escape sequences are only recognised after a newline.)\r\n";
 }
 
-Result<Ending, str> run_loop(ssh.Transport transport, sshexec.Channel channel, Options options) {
+// Shows the forwarding layer's notices on standard error.
+void show_notices(sshforward.Mux mux, bool is_raw) {
+    for (str line in mux.take_notices()) {
+        str ending = "\n";
+        if (is_raw) {
+            ending = "\r\n";
+        }
+        Result<int, io.Error> shown = io.stderr().write((line + ending).to_bytes());
+    }
+}
+
+Result<Ending, str> run_loop(ssh.Transport transport, List<sshexec.Channel> session, Options options, sshforward.Mux mux) {
+    bool has_session = session.size() > 0;
     EscapeFilter filter = EscapeFilter(options.escape);
     int columns = 0;
     int rows = 0;
-    if (options.has_pty) {
+    if (options.has_pty && has_session) {
         match (term.size(descriptor: options.output_fd)) {
             case Ok(term.Size size): {
                 columns = size.columns;
@@ -264,19 +280,21 @@ Result<Ending, str> run_loop(ssh.Transport transport, sshexec.Channel channel, O
     int socket_fd = transport.descriptor();
     int last_heard_ns = timer.monotonic_ns();
     int unanswered = 0;
-    bool is_stdin_open = !options.is_input_null;
-    bool is_eof_pending = options.is_input_null;
+    bool is_stdin_open = has_session && !options.is_input_null;
+    bool is_eof_pending = has_session && options.is_input_null;
     bytes pending = [];
     int tick_ms = 1000;
     if (options.has_pty || options.alive_interval > 0) {
         tick_ms = TICK_MS;
     }
-    while (!channel.is_closed()) {
+    while (!has_session || !session[0].is_closed()) {
         // 1. The network: everything already here, a bounded number of
-        //    packets at a time so the keyboard is never starved.
+        //    packets at a time so the keyboard is never starved. Each
+        //    message goes to the forwarding layer first, which takes
+        //    everything not addressed to the session.
         int packets = 0;
         bool is_more = false;
-        while (packets < DRAIN_PACKETS && !channel.is_closed()) {
+        while (packets < DRAIN_PACKETS && (!has_session || !session[0].is_closed())) {
             match (transport.wait(0)) {
                 case Ok(bool is_ready): {
                     if (!is_ready) {
@@ -287,53 +305,84 @@ Result<Ending, str> run_loop(ssh.Transport transport, sshexec.Channel channel, O
                     return Result<Ending, str>.Err(error.to_str());
                 }
             }
-            match (channel.pump_one()) {
-                case Ok: {
+            match (transport.recv()) {
+                case Err(ssh.Error error): {
+                    return Result<Ending, str>.Err(error.to_str());
                 }
-                case Err(sshexec.Error error): {
-                    return fail(error);
+                case Ok(bytes payload): {
+                    match (mux.route(payload)) {
+                        case Err(str reason): {
+                            return Result<Ending, str>.Err(reason);
+                        }
+                        case Ok(bool is_taken): {
+                            if (!is_taken) {
+                                if (!has_session) {
+                                    return Result<Ending, str>.Err("the server sent an unexpected message");
+                                }
+                                match (session[0].dispatch_message(payload)) {
+                                    case Ok: {
+                                    }
+                                    case Err(sshexec.Error error): {
+                                        return fail(error);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
             packets = packets + 1;
             last_heard_ns = timer.monotonic_ns();
             unanswered = 0;
-            if (!has_flushed_output(channel, options.output_fd)) {
+            if (has_session && !has_flushed_output(session[0], options.output_fd)) {
                 return Result<Ending, str>.Ok(Ending.OutputClosed);
             }
         }
         if (packets == DRAIN_PACKETS) {
             is_more = true;
         }
-        if (channel.is_closed()) {
+        show_notices(mux, options.is_raw);
+        if (has_session && session[0].is_closed()) {
             break;
+        }
+        // 1b. Forwarded connections: bytes between sockets and channels.
+        bool is_moved = false;
+        match (mux.pump_local()) {
+            case Ok(bool progress): {
+                is_moved = progress;
+            }
+            case Err(str reason): {
+                return Result<Ending, str>.Err(reason);
+            }
         }
         // 2. Keyboard input that was held back for lack of window goes out
         //    now if the window has opened, and the EOF follows it.
-        if (pending.size() > 0) {
-            match (channel.write_available(pending)) {
+        if (has_session && pending.size() > 0) {
+            match (session[0].write_available(pending)) {
                 case Ok(int sent): {
                     pending.drop_front(sent);
                 }
                 case Err(sshexec.Error error): {
-                    if (!channel.is_closed()) {
+                    if (!session[0].is_closed()) {
                         return fail(error);
                     }
                 }
             }
         }
-        if (pending.size() == 0 && is_eof_pending && !channel.is_closed()) {
+        if (has_session && pending.size() == 0 && is_eof_pending && !session[0].is_closed()) {
             is_eof_pending = false;
-            match (channel.close_write()) {
+            match (session[0].close_write()) {
                 case Ok: {
                 }
                 case Err(sshexec.Error error): {
-                    if (!channel.is_closed()) {
+                    if (!session[0].is_closed()) {
                         return fail(error);
                     }
                 }
             }
         }
-        // 3. Wait for the socket or the keyboard (or the next tick).
+        // 3. Wait for the socket, the keyboard, a forwarded socket (or the
+        //    next tick).
         List<int> fds = [socket_fd];
         List<int> events = [POLL_IN];
         bool is_watching_input = is_stdin_open && pending.size() == 0 && !is_eof_pending;
@@ -341,17 +390,28 @@ Result<Ending, str> run_loop(ssh.Transport transport, sshexec.Channel channel, O
             fds.push(options.input_fd);
             events.push(POLL_IN);
         }
+        int mux_offset = fds.size();
+        mux.collect(fds, events);
         List<int> revents = [];
         int wait_ms = tick_ms;
-        if (is_more) {
+        if (is_more || is_moved) {
             wait_ms = 0;
         }
         int ready = __poll(fds, events, revents, wait_ms);
         if (ready < 0 && ready != -4) {
             return Result<Ending, str>.Err("waiting for input failed");
         }
+        if (ready > 0) {
+            match (mux.service(revents, mux_offset)) {
+                case Ok: {
+                }
+                case Err(str reason): {
+                    return Result<Ending, str>.Err(reason);
+                }
+            }
+        }
         // 4. The keyboard.
-        if (ready > 0 && is_watching_input && revents.size() == 2 && revents[1] != 0) {
+        if (ready > 0 && is_watching_input && revents.size() >= 2 && revents[1] != 0) {
             bytes buffer = [0; READ_CHUNK];
             int got = __read(options.input_fd, buffer, 0, READ_CHUNK);
             if (got < 0 && got != -4 && got != -11) {
@@ -375,12 +435,12 @@ Result<Ending, str> run_loop(ssh.Transport transport, sshexec.Channel channel, O
                     }
                 }
                 pending.extend(data);
-                match (channel.write_available(pending)) {
+                match (session[0].write_available(pending)) {
                     case Ok(int sent): {
                         pending.drop_front(sent);
                     }
                     case Err(sshexec.Error error): {
-                        if (!channel.is_closed()) {
+                        if (!session[0].is_closed()) {
                             return fail(error);
                         }
                     }
@@ -388,13 +448,13 @@ Result<Ending, str> run_loop(ssh.Transport transport, sshexec.Channel channel, O
             }
         }
         // 5. Clock-driven work: the window size and keepalives.
-        if (options.has_pty) {
+        if (options.has_pty && has_session) {
             match (term.size(descriptor: options.output_fd)) {
                 case Ok(term.Size size): {
                     if (size.rows > 0 && size.columns > 0 && (size.columns != columns || size.rows != rows)) {
                         columns = size.columns;
                         rows = size.rows;
-                        match (channel.window_change(columns, rows)) {
+                        match (session[0].window_change(columns, rows)) {
                             case Ok: {
                             }
                             case Err(sshexec.Error error): {
@@ -413,11 +473,11 @@ Result<Ending, str> run_loop(ssh.Transport transport, sshexec.Channel channel, O
                 if (unanswered >= options.alive_count_max) {
                     return Result<Ending, str>.Ok(Ending.ServerSilent);
                 }
-                match (channel.send_keepalive()) {
+                match (mux.send_keepalive()) {
                     case Ok: {
                     }
-                    case Err(sshexec.Error error): {
-                        return fail(error);
+                    case Err(str reason): {
+                        return Result<Ending, str>.Err(reason);
                     }
                 }
                 unanswered = unanswered + 1;
@@ -425,8 +485,11 @@ Result<Ending, str> run_loop(ssh.Transport transport, sshexec.Channel channel, O
             }
         }
     }
-    if (!has_flushed_output(channel, options.output_fd)) {
-        return Result<Ending, str>.Ok(Ending.OutputClosed);
+    if (has_session) {
+        if (!has_flushed_output(session[0], options.output_fd)) {
+            return Result<Ending, str>.Ok(Ending.OutputClosed);
+        }
+        return Result<Ending, str>.Ok(ending_of(session[0]));
     }
-    return Result<Ending, str>.Ok(ending_of(channel));
+    return Result<Ending, str>.Ok(Ending.NoStatus);
 }

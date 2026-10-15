@@ -15,6 +15,7 @@ import ssh.sshagent;
 import ssh.sshconfig;
 import ssh.sshshell;
 import ssh.sshjump;
+import ssh.sshforward;
 import core.SSHC_cli;
 
 const int EXIT_ERROR = 255;
@@ -875,10 +876,6 @@ pub int start(List<str> argv) {
         warn("configuration error: " + settings.errors[0]);
         return EXIT_ERROR;
     }
-    if (cli.local_forwards.size() > 0 || cli.remote_forwards.size() > 0 || cli.is_no_command) {
-        warn("port forwarding (-L, -R, -N) is not supported yet");
-        return EXIT_ERROR;
-    }
     str user = settings.user;
     if (user == "") {
         user = login;
@@ -984,74 +981,146 @@ int run_session(ssh.Transport transport, sshconfig.Settings settings, SSHC_cli.C
         case None: {
         }
     }
-    Result<sshexec.Channel, sshexec.Error> opened = Result<sshexec.Channel, sshexec.Error>.Err(sshexec.Error.Closed);
-    if (is_pty) {
-        opened = sshexec.open_pty(transport, term_name, columns, rows, sshshell.default_modes(), cli.command);
-    } else if (cli.command == "") {
-        opened = sshexec.shell(transport);
-    } else {
-        opened = sshexec.exec(transport, cli.command);
+    // Forwards: command line first, then the configuration's.
+    sshforward.Mux mux = sshforward.new_mux(transport, cli.is_quiet);
+    int working = 0;
+    List<str> local_specs = clone(cli.local_forwards);
+    for (str text in settings.local_forwards) {
+        local_specs.push(forward_text(text));
     }
-    match (opened) {
-        case Ok(sshexec.Channel channel): {
-            sshshell.Options options = sshshell.Options(0, 1, is_pty && is_stdin_tty, is_pty, cli.is_stdin_null, -1, 0, 3);
-            if (is_pty && is_stdin_tty) {
-                options.escape = cli.escape;
+    List<str> remote_specs = clone(cli.remote_forwards);
+    for (str text in settings.remote_forwards) {
+        remote_specs.push(forward_text(text));
+    }
+    for (str spec in local_specs) {
+        match (sshforward.parse_rule(spec, false)) {
+            case Err(str reason): {
+                warn(reason);
+                return EXIT_ERROR;
             }
-            if (settings.server_alive_interval > 0) {
-                options.alive_interval = settings.server_alive_interval;
-            }
-            if (settings.server_alive_count_max >= 0) {
-                options.alive_count_max = settings.server_alive_count_max;
-            }
-            Result<sshshell.Ending, str> result = sshshell.run(transport, channel, options);
-            Result<bool, ssh.Error> closed = transport.disconnect();
-            match (result) {
-                case Ok(sshshell.Ending ending): {
-                    match (ending) {
-                        case Exited(int code): {
-                            return code;
-                        }
-                        case Signalled(str name): {
-                            if (!cli.is_quiet) {
-                                warn("Killed by signal " + name + ".");
-                            }
-                            int number = signal_number(name);
-                            if (number == 0) {
-                                return EXIT_ERROR;
-                            }
-                            return 128 + number;
-                        }
-                        case NoStatus: {
-                            if (!cli.is_quiet) {
-                                warn("Connection to " + host_name + " closed by remote host.");
-                            }
-                            return EXIT_ERROR;
-                        }
-                        case Escaped: {
-                            if (!cli.is_quiet) {
-                                io.eprint("Connection to " + host_name + " closed.");
-                            }
-                            return EXIT_ERROR;
-                        }
-                        case ServerSilent: {
-                            warn("Timeout, server " + host_name + " not responding.");
-                            return EXIT_ERROR;
-                        }
-                        case OutputClosed: {
-                            return EXIT_ERROR;
-                        }
+            case Ok(sshforward.Rule rule): {
+                match (mux.listen_local(rule)) {
+                    case Ok: {
+                        working = working + 1;
+                    }
+                    case Err(str reason): {
+                        warn("Warning: " + reason);
                     }
                 }
-                case Err(str message): {
-                    warn("connection to " + host_name + " lost: " + message);
+            }
+        }
+    }
+    if (cli.is_no_command && working == 0) {
+        warn("-N given but no forwarding could be set up");
+        return EXIT_ERROR;
+    }
+    List<sshexec.Channel> session = [];
+    if (!cli.is_no_command) {
+        Result<sshexec.Channel, sshexec.Error> opened = Result<sshexec.Channel, sshexec.Error>.Err(sshexec.Error.Closed);
+        if (is_pty) {
+            opened = sshexec.open_pty(transport, term_name, columns, rows, sshshell.default_modes(), cli.command);
+        } else if (cli.command == "") {
+            opened = sshexec.shell(transport);
+        } else {
+            opened = sshexec.exec(transport, cli.command);
+        }
+        match (opened) {
+            case Ok(sshexec.Channel channel): {
+                session.push(channel);
+            }
+            case Err(sshexec.Error error): {
+                warn("could not start the session: " + error.to_str());
+                return EXIT_ERROR;
+            }
+        }
+    }
+    // Remote forwards are requested once the session channel is open: the
+    // server's answers are then routed by the forwarding layer in the loop,
+    // not mistaken for replies to the channel requests above.
+    for (str spec in remote_specs) {
+        match (sshforward.parse_rule(spec, true)) {
+            case Err(str reason): {
+                warn(reason);
+                return EXIT_ERROR;
+            }
+            case Ok(sshforward.Rule rule): {
+                match (mux.request_remote(rule)) {
+                    case Ok: {
+                        working = working + 1;
+                    }
+                    case Err(str reason): {
+                        warn("Warning: " + reason);
+                    }
+                }
+            }
+        }
+    }
+    sshshell.Options options = sshshell.Options(0, 1, is_pty && is_stdin_tty && session.size() > 0, is_pty && session.size() > 0, cli.is_stdin_null, -1, 0, 3);
+    if (is_pty && is_stdin_tty) {
+        options.escape = cli.escape;
+    }
+    if (settings.server_alive_interval > 0) {
+        options.alive_interval = settings.server_alive_interval;
+    }
+    if (settings.server_alive_count_max >= 0) {
+        options.alive_count_max = settings.server_alive_count_max;
+    }
+    Result<sshshell.Ending, str> result = sshshell.run(transport, session, options, mux);
+    Result<bool, ssh.Error> closed = transport.disconnect();
+    match (result) {
+        case Ok(sshshell.Ending ending): {
+            match (ending) {
+                case Exited(int code): {
+                    return code;
+                }
+                case Signalled(str name): {
+                    if (!cli.is_quiet) {
+                        warn("Killed by signal " + name + ".");
+                    }
+                    int number = signal_number(name);
+                    if (number == 0) {
+                        return EXIT_ERROR;
+                    }
+                    return 128 + number;
+                }
+                case NoStatus: {
+                    if (!cli.is_quiet) {
+                        warn("Connection to " + host_name + " closed by remote host.");
+                    }
+                    return EXIT_ERROR;
+                }
+                case Escaped: {
+                    if (!cli.is_quiet) {
+                        io.eprint("Connection to " + host_name + " closed.");
+                    }
+                    return EXIT_ERROR;
+                }
+                case ServerSilent: {
+                    warn("Timeout, server " + host_name + " not responding.");
+                    return EXIT_ERROR;
+                }
+                case OutputClosed: {
                     return EXIT_ERROR;
                 }
             }
         }
-        case Err(sshexec.Error error): {
-            warn("could not start the session: " + error.to_str());
+        case Err(str message): {
+            warn("connection to " + host_name + " lost: " + message);
             return EXIT_ERROR;
         }
     }
+}
+
+// A configuration `LocalForward`/`RemoteForward` value is `[bind:]port
+// host:hostport` with a space after the first part; the command line's is
+// all colons.
+str forward_text(str value) {
+    int index = 0;
+    while (index < value.size()) {
+        if (value.byte_at(index) == 32) {
+            return value.substr(0, index) + ":" + value.substr(index + 1, value.size()).trim();
+        }
+        index = index + 1;
+    }
+    return value;
 }

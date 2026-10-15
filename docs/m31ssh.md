@@ -14,6 +14,7 @@ the library is `docs/ssh-decision.md`; this file is about the program.
 
 ```
 m31ssh [-p port] [-i identity] [-l user] [-o option=value] [-F config]
+       [-J jump[,jump...]] [-L spec] [-R spec] [-N]
        [-t|-tt|-T] [-n] [-e char|none] [-q] [user@]host [command ...]
 ```
 
@@ -22,6 +23,10 @@ m31ssh [-p port] [-i identity] [-l user] [-o option=value] [-F config]
 | no command, stdin is a terminal | a login shell on a pty; the local terminal goes raw |
 | no command, stdin is not a terminal | a shell with no pty reading commands from stdin |
 | a command | `exec`; a pty only with `-t`/`-tt` (or `RequestTTY`) |
+| `-J a,b` / `ProxyJump` | the connection to the destination is made through `a` and `b` (see below) |
+| `-L [bind:]port:host:hostport` | listen locally; connections go out through the server to `host:hostport` |
+| `-R [bind:]port:host:hostport` | the server listens; connections come back to `host:hostport` from here (`port` 0: the server chooses and the client prints it) |
+| `-N` | no remote command: the connection only carries forwards, until killed or dropped |
 | exit status | the remote command's; `128+n` for death by signal; **255** for an ssh error |
 | `~.` | at the start of a line: disconnect (exit 255). `~~` sends one `~`; `~?` lists them. `-e none` turns the escape off |
 | Ctrl-C, Ctrl-D, Ctrl-Z | bytes, as in OpenSSH: they reach the *remote* terminal |
@@ -33,8 +38,7 @@ Options come from, in this order, the command line, then `~/.ssh/config` (or
 (accumulates; `~`, `%h %u %r %d %%` expand), `IdentitiesOnly`,
 `StrictHostKeyChecking` (`yes`, `ask`, `accept-new`, `no`), `UserKnownHostsFile`,
 `ServerAliveInterval`, `ServerAliveCountMax`, `ConnectTimeout`, `RequestTTY`,
-and `ProxyJump`/`LocalForward`/`RemoteForward` which are parsed and then
-refused with a clear message until they are implemented. `Match`, `Include`
+`ProxyJump`, `LocalForward` and `RemoteForward`. `Match`, `Include`
 and any other keyword are reported-and-ignored, and the lines of a `Match`
 block are *not* applied (so a security setting inside one is not half
 applied). A malformed value is an error, never a default.
@@ -63,11 +67,72 @@ deliberately does not.)
 
 Candidates are offered in this order: keys held by the ssh-agent
 (`SSH_AUTH_SOCK`), then key files (`-i`, `IdentityFile`, default
-`~/.ssh/id_ed25519`). A key present in both is signed through the agent.
-`IdentitiesOnly yes` restricts the agent to keys that also have a listed key
-file. A key file readable by group or others is refused with a warning (like
-OpenSSH's "UNPROTECTED PRIVATE KEY FILE"). Each rejected key moves on to the
-next; none left is `Permission denied (publickey).`, exit 255.
+`~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa`). A key present in both is signed
+through the agent. `IdentitiesOnly yes` restricts the agent to keys that also
+have a listed key file. A key file readable by group or others is refused
+with a warning (like OpenSSH's "UNPROTECTED PRIVATE KEY FILE"). Each rejected
+key moves on to the next; none left is `Permission denied (publickey).`,
+exit 255.
+
+Key types: **ssh-ed25519**, **ecdsa-sha2-nistp256** and **ssh-rsa** (2048 to
+4096 bits; signed with `rsa-sha2-512`, then `rsa-sha2-256`: never SHA-1). A
+passphrase-protected key (`openssh-key-v1` with `aes256-ctr`, `aes128-ctr`,
+`aes256-gcm@openssh.com` or `chacha20-poly1305@openssh.com`, bcrypt KDF) is
+decrypted only when its turn comes and no agent key already covers it: the
+prompt is `Enter passphrase for key 'file': ` on the terminal with echo off,
+three tries, Ctrl-C skips the key, and with no terminal the key is skipped
+with a message (use the agent). The passphrase is never printed, logged,
+placed in an error, or taken from the environment or the command line. It
+is not wiped from memory afterwards (the runtime cannot), and a cost over
+1024 bcrypt rounds in a file is refused rather than run.
+
+### Algorithms
+
+Offered, strongest first (and **nothing else is ever accepted**: no SHA-1
+anything, no CBC, no `none`, no compression, no `diffie-hellman-*`):
+
+| | |
+|---|---|
+| key exchange | `curve25519-sha256` (and its `@libssh.org` name), `ecdh-sha2-nistp256`; `kex-strict-c-v00@openssh.com` marker |
+| host key | `ssh-ed25519`, `ecdsa-sha2-nistp256`, `rsa-sha2-512`, `rsa-sha2-256` (2048-4096 bit keys) |
+| cipher | `chacha20-poly1305@openssh.com`, `aes256-gcm@openssh.com`, `aes128-gcm@openssh.com`, `aes256-ctr`, `aes128-ctr` |
+| MAC (CTR only) | `hmac-sha2-256-etm@openssh.com`, `hmac-sha2-256` |
+
+The client's order decides (RFC 4253 §7.1), with one adaptation: host-key
+algorithms the host already has in `known_hosts` go first, so a server with
+several keys presents the one the file can vouch for. If the server shares
+none of a category the error says which category and the connection ends.
+**Strict kex** (OpenSSH 9.6, the Terrapin fix) is used whenever the server
+advertises it: nothing but KEXINIT, the exchange and NEWKEYS is accepted
+during the key exchange, and sequence numbers restart at 0 after NEWKEYS.
+
+### ProxyJump
+
+`-J [user@]host[:port][,...]` or `ProxyJump` opens a `direct-tcpip` channel
+on an authenticated connection to the jump host and runs the next hop's
+whole SSH connection over it. Every hop is checked against **its own**
+`known_hosts` entry and authenticates for itself; the jump host sees only
+the inner session's ciphertext. As `ssh(1)` says for `-J`, command-line
+options (`-o`, `-i`, `-p`, `-l`) apply to the destination only; a jump host
+is configured through `~/.ssh/config` (`Host` blocks with its own `User`,
+`Port`, `IdentityFile`, `UserKnownHostsFile`, ...).
+
+### Forwarding
+
+`-L`, `-R` and `LocalForward`/`RemoteForward`, any number, any mix with a
+session. One thread polls the SSH socket, the keyboard, every listener and
+every forwarded socket (docs below, "How it works"). Flow control is end to
+end: a slow local program stops the server (window credit is returned only
+as data is consumed; at most 2 MiB is held per tunnel) and a slow server
+stops the local program (a socket is read only as far as the server's
+window allows). EOF is carried both ways (half-close works), and a server
+CLOSE retires a tunnel only after what it sent has reached the local
+socket. More than 64 simultaneous tunnels are refused (descriptor and
+memory bound). A forward that cannot be set up is a warning, not a failure
+(OpenSSH's `ExitOnForwardFailure no`); `-N` with none working is an error.
+The listener binds loopback unless a bind address is given (`*` for all).
+When the session channel ends the client exits and its tunnels with it
+(OpenSSH waits for them).
 
 ## Threat model
 
@@ -114,9 +179,26 @@ What it does **not** defend against, and where the limits are:
 * **No rekeying.** A session that transfers more than the cipher's safe
   volume (OpenSSH rekeys at 1 GB / 1 hour) would need it; this client does
   not rekey and a server that demands it ends the session with an error.
-* **A single algorithm suite**: servers that do not offer
-  `curve25519-sha256` + `ssh-ed25519` + `chacha20-poly1305@openssh.com`
-  cannot be reached yet (see the roadmap below).
+* **Algorithm reach.** Servers that offer none of the suites above cannot be
+  reached: old servers that only have `diffie-hellman-group*`, `ssh-rsa`
+  host keys signed with SHA-1, CBC ciphers or 1024-bit RSA host keys are
+  refused on purpose, and so are ECDSA P-384/P-521 and `ssh-dss`. There is no
+  certificate support (`*-cert-v01@openssh.com`, `@cert-authority` lines are
+  skipped) and no FIDO (`sk-*`) keys.
+* **Key files**: `aes*-cbc`, `3des-cbc` and `aes192-ctr` key encryption is
+  refused by name (the library has no AES decryption direction or 192-bit
+  key schedule); re-encrypt such a key with `ssh-keygen -p -Z aes256-ctr`.
+* **The AES implementation is slow** (about 1 MiB/s: it is the table-free,
+  constant-time-in-the-source one). ChaCha20-Poly1305 is first in the offer
+  for that reason; against an AES-only server expect megabytes per second,
+  not tens.
+* **bcrypt/Blowfish is not constant time** (S-box lookups by
+  password-derived data, as in every bcrypt); RSA signing, ECDSA signing,
+  AES, ChaCha20 and X25519 are written to be, at the source level only.
+* **No ssh-agent forwarding, X11, `-D` (SOCKS), `-W`, UNIX-socket
+  forwarding, multiplexing, `Match`, `Include`, `Compression`, GSSAPI,
+  password or keyboard-interactive authentication.**
+* **Resize latency** is up to ~100 ms (a poll, not a signal).
 * **Terminal escape injection** from the *remote program's* output is the
   terminal's business, as with any ssh; only the server banner and error
   strings are sanitised here.
@@ -125,7 +207,11 @@ What it does **not** defend against, and where the limits are:
 
 The language has no signal handlers and no multi-descriptor wait except
 `poll`, so the interactive loop (`lib/ssh/sshshell.m31`) is one thread around
-`poll(2)` on the socket and the keyboard with a 100 ms tick:
+`poll(2)` on the SSH socket, the keyboard and every forwarded socket
+(`lib/ssh/sshforward.m31`), with a 100 ms tick. Transport layers are
+`ssh.Wire`s, so a `ProxyJump` hop is a channel on the previous connection
+(`lib/ssh/sshjump.m31`), whose `wait` is exact: it never reports readable
+for a jump-host message that carries no inner bytes.
 
 * it drains at most 32 packets per turn so the keyboard is never starved
   (Ctrl-C works against `yes`);
@@ -144,10 +230,20 @@ The language has no signal handlers and no multi-descriptor wait except
 
 ## Tests
 
-`bash tests/ssh/test_m31ssh.sh` builds the program and runs 66 checks against
-a disposable OpenSSH `sshd` (temp host key, temp user keys, a temp `HOME`,
-an ephemeral `127.0.0.1` port, a private `ssh-agent`); nothing touches the
-real `~/.ssh` and every process is killed on exit. A Python pty driver runs
+`bash tests/ssh/test_m31ssh.sh` builds the program and runs 136 checks against
+disposable OpenSSH `sshd`s (temp host keys of three types, temp user keys of
+three types, a temp `HOME`, ephemeral `127.0.0.1` ports, private
+`ssh-agent`s); nothing touches the real `~/.ssh` and every process is killed
+on exit, including on an exception or a signal. It also runs a cipher /
+key-exchange / host-key matrix against restricted servers, three downgrade
+refusals, encrypted keys through a pty prompt, ProxyJump chains (with a
+resize through a jump), and `-L`/`-R`/`-N` with multi-megabyte, concurrent
+and half-closed connections. `bash tests/ssh/test.sh` adds the oracles:
+`oracle_sshcipher.py` (677 packet vectors against OpenSSL, every single-byte
+corruption refused), `oracle_sshkeyfiles.py` (every key type, plain and in
+four encrypted formats, against `ssh-keygen -y` and OpenSSL),
+`oracle_rsasign.py` (signatures byte-identical to OpenSSL's) and the
+bcrypt_pbkdf published vector. A Python pty driver runs
 interactive sessions: command output and exit status, `stty size` before and
 after a resize, 200000 lines on a pty, Ctrl-D, `~.`, `~.` mid-line, Ctrl-C
 passthrough, terminal restoration (termios read back), host key mismatch
@@ -161,8 +257,11 @@ tests (`t_ssh_config`, `t_ssh_shell`, `t_ssh_agent`) run by `tests/ssh/test.sh`,
 whose existing oracles (OpenSSH `sshd`, `ssh-keygen`, `cryptography`,
 `hashlib`) cover the library underneath.
 
-## Roadmap
+## Status by phase
 
-Phase A (this file) is done. Phase B (RSA and ECDSA keys, encrypted keys,
-`-J`, `-L`/`-R`/`-N`, more algorithms) and Phase C (`m31scp`, sftp subset,
-`m31ssh-keygen`) are tracked at the end of this file as they land.
+* **A** (shell, exec, pty, resize, `~.`, agent, `known_hosts`, config,
+  keepalives): done.
+* **B** (RSA and ECDSA keys, encrypted keys, ProxyJump, `-L`/`-R`/`-N`,
+  more ciphers / key exchanges): done, with the limits above.
+* **C** (`m31scp`, an sftp v3 subset, `m31ssh-keygen`): see the end of
+  this file when it lands.

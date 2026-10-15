@@ -1270,6 +1270,13 @@ pub type Listener {
     bool is_live = true;
 }
 
+/// The operating-system descriptor, for a loop that `poll`s several
+/// descriptors (`__poll` declared in that caller's own module): readable
+/// means `accept` will not wait. Borrowed: nothing is closed or moved by it.
+pub int Listener.fileno() {
+    return descriptor;
+}
+
 /// The next connection, waiting for one if none is ready.
 ///
 /// **A failed accept is an `Err`, never a trap**, and some failures are the

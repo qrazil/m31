@@ -36,6 +36,18 @@ cryptographic transport is a vulnerability, not a wrong diff, and that
 changes how this has to be built, tested, and reviewed compared to
 everything else in this codebase so far.
 
+> **Update (m31ssh, 0.5.0).** The single-suite rule of §2 below was the right
+> v0 scope and has been widened on purpose for `m31ssh` (`docs/m31ssh.md`):
+> the transport now negotiates from an `Offer` of strong algorithms only (no
+> SHA-1, CBC, `none` or compression; never a fallback to anything not
+> offered), the host key may be ed25519, ECDSA P-256 or RSA (SHA-2), user
+> keys likewise (RSA and ECDSA signing are `lib/crypto/rsasign.m31` and
+> `ecdsasign.m31`, constant-time in the source), private keys may be
+> encrypted (`bcrypt_pbkdf`), the layers can run over a channel of another
+> connection (`ssh.Wire`, ProxyJump), and several channels can be open at
+> once (`sshforward.m31`). §1's "client only, publickey only" still holds.
+> The reasons §2 gives for ed25519/chacha first are why they are still first.
+
 **This is a library first.** It lands in `lib/`, gets validated entirely on
 its own — against a real OpenSSH server, in disposable fixtures, the same
 discipline as everything else — and is not wired into `apps/git` until that

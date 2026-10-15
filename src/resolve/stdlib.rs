@@ -81,6 +81,7 @@ const MODULES: &[(&str, &str)] = &[
     ("ssh.sshexec", include_str!("../../lib/ssh/sshexec.m31")),
     ("ssh.sshclient", include_str!("../../lib/ssh/sshclient.m31")),
     ("ssh.sshcipher", include_str!("../../lib/ssh/sshcipher.m31")),
+    ("ssh.sshforward", include_str!("../../lib/ssh/sshforward.m31")),
     ("ssh.sshjump", include_str!("../../lib/ssh/sshjump.m31")),
     ("ssh.sshshell", include_str!("../../lib/ssh/sshshell.m31")),
     ("ssh.sshagent", include_str!("../../lib/ssh/sshagent.m31")),
