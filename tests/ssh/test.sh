@@ -56,7 +56,7 @@ build() {
 if out=$(
     for f in tests/ssh/*.m31 lib/crypto/sha256.m31 lib/crypto/chacha20poly1305.m31 lib/ssh.m31 \
              lib/ssh/sshkey.m31 lib/ssh/sshhosts.m31 lib/ssh/sshauth.m31 lib/ssh/sshexec.m31 lib/ssh/sshclient.m31 \
-             lib/ssh/sshagent.m31 lib/ssh/sshconfig.m31 lib/ssh/sshshell.m31; do
+             lib/ssh/sshagent.m31 lib/ssh/sshconfig.m31 lib/ssh/sshshell.m31 lib/ssh/sshcipher.m31; do
         "$LANGC" fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then
@@ -238,7 +238,7 @@ fi
 # window and packet limits over multi-megabyte transfers. The live half is
 # test_auth_exec.sh.
 
-for t in t_ssh_auth t_ssh_exec t_ssh_config t_ssh_shell t_ssh_agent; do
+for t in t_ssh_auth t_ssh_exec t_ssh_config t_ssh_shell t_ssh_agent t_ssh_negotiate; do
     if build "$t"; then
         out=$("$WORK/$t" 2>"$WORK/$t.err")
         rc=$?
@@ -249,6 +249,24 @@ for t in t_ssh_auth t_ssh_exec t_ssh_config t_ssh_shell t_ssh_agent; do
         fi
     fi
 done
+
+# --- the packet ciphers against OpenSSL ---------------------------------------
+#
+# `oracle_sshcipher.py` builds packets with its own implementation of the SSH
+# binary packet protocol on `cryptography` (AES-CTR, AES-GCM, ChaCha20,
+# Poly1305, HMAC), has `t_ssh_cipher` open them, has it seal packets and opens
+# those independently, and flips every byte of a packet to see it refused.
+
+if ! python3 -c 'import cryptography' 2>/dev/null; then
+    bad "sshcipher" "the 'cryptography' package is not importable -- pip install cryptography"
+elif build t_ssh_cipher; then
+    out=$(python3 tests/ssh/oracle_sshcipher.py "$WORK/t_ssh_cipher" 2>&1)
+    if [[ "$out" == *" checks, 0 failures" ]]; then
+        note "sshcipher: $out against OpenSSL (chacha20-poly1305, aes-gcm, aes-ctr + hmac-sha2-256 and -etm)"
+    else
+        bad "sshcipher" "$out"
+    fi
+fi
 
 echo
 if [ $fail -eq 0 ]; then

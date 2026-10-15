@@ -104,7 +104,7 @@ bool HostCheck.is_confirmed(ssh.HostKey key) {
     int attempts = 0;
     while (attempts < 5) {
         io.eprint("The authenticity of host '" + display_name(host, port) + "' can't be established.");
-        io.eprint("ED25519 key fingerprint is " + key.fingerprint() + ".");
+        io.eprint(key_label(key) + " key fingerprint is " + key.fingerprint() + ".");
         Result<int, io.Error> prompted = io.stderr().write("Are you sure you want to continue connecting (yes/no)? ".to_bytes());
         match (io.stdin().read_until("\n".to_bytes(), 256)) {
             case Ok(bytes line): {
@@ -140,14 +140,14 @@ pub bool HostCheck.is_acceptable(ssh.HostKey key) {
         failure = "the host key " + key.fingerprint() + " for " + display_name(host, port) + " is marked revoked in " + path;
         return false;
     }
-    match (hosts.keys_for(host, port)) {
+    match (hosts.blobs_for(host, port)) {
         case Ok(List<bytes> trusted): {
             for (bytes known in trusted) {
-                if (known == key.key) {
+                if (known == key.blob) {
                     return true;
                 }
             }
-            failure = "REMOTE HOST IDENTIFICATION HAS CHANGED for " + display_name(host, port) + ": the server presented ED25519 key " + key.fingerprint() + ", which is not the one in " + path + ". Refusing to connect (nothing was modified; if the change is expected, remove the old entry yourself)";
+            failure = "REMOTE HOST IDENTIFICATION HAS CHANGED for " + display_name(host, port) + ": the server presented " + key_label(key) + " key " + key.fingerprint() + ", which is not any of the keys in " + path + " for this host. Refusing to connect (nothing was modified; if the change is expected, remove the old entry yourself)";
             return false;
         }
         case Err(sshhosts.Error error): {
@@ -195,7 +195,7 @@ pub bool HostCheck.is_acceptable(ssh.HostKey key) {
     match (sshhosts.add(path, host, port, key, false)) {
         case Ok(_): {
             if (!is_quiet) {
-                warn("Warning: permanently added '" + display_name(host, port) + "' (ED25519) to the list of known hosts.");
+                warn("Warning: permanently added '" + display_name(host, port) + "' (" + key_label(key) + ") to the list of known hosts.");
             }
         }
         case Err(sshhosts.Error error): {
@@ -203,6 +203,19 @@ pub bool HostCheck.is_acceptable(ssh.HostKey key) {
         }
     }
     return true;
+}
+
+str key_label(ssh.HostKey key) {
+    if (key.algorithm == "ssh-ed25519") {
+        return "ED25519";
+    }
+    if (key.algorithm == "ecdsa-sha2-nistp256") {
+        return "ECDSA";
+    }
+    if (key.algorithm == "ssh-rsa") {
+        return "RSA";
+    }
+    return key.algorithm;
 }
 
 str display_name(str host, int port) {
@@ -485,7 +498,8 @@ pub int start(List<str> argv) {
     }
     match (net.connect(host_name, port)) {
         case Ok(net.Conn connection): {
-            match (ssh.connect_over(connection, check, timeout_ms: handshake_ms)) {
+            ssh.Offer offer = ssh.offer_preferring(check.hosts.algorithms_for(host_name, port));
+            match (ssh.connect_with_offer(connection, check, offer, timeout_ms: handshake_ms)) {
                 case Ok(ssh.Transport transport): {
                     return run_session(transport, settings, cli, candidates, user, host_name, is_stdin_tty);
                 }

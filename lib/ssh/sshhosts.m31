@@ -119,7 +119,11 @@ const int SHA1_BLOCK = 64;
 
 type Entry {
     List<str> patterns;
+    /// The raw 32 octets for an ssh-ed25519 entry, empty for other types.
     bytes key;
+    /// The whole key blob (what is compared with the server's), and its type.
+    bytes blob;
+    str algorithm;
     bool is_revoked;
 }
 
@@ -131,8 +135,34 @@ pub type KnownHosts {
 /// The 32-octet `ssh-ed25519` keys this file trusts for `host` on `port`,
 /// minus any `@revoked` ones. `Err(UnknownHost)` if there are none because
 /// the host is not listed, `Err(Revoked)` if there are none because every
-/// listed key is revoked.
+/// listed key is revoked. (`blobs_for` answers for every key type.)
 pub Result<List<bytes>, Error> KnownHosts.keys_for(str host, int port) {
+    return select(host, port, false);
+}
+
+/// The key blobs (`string type, ...`, what `ssh.HostKey.blob` holds) of every
+/// type this file trusts for `host` on `port`, minus revoked ones; same
+/// errors as `keys_for`. A server's key is trusted iff its blob is in here.
+pub Result<List<bytes>, Error> KnownHosts.blobs_for(str host, int port) {
+    return select(host, port, true);
+}
+
+/// The host-key algorithm names (`ssh-ed25519`, `ecdsa-sha2-nistp256`,
+/// `ssh-rsa`) this file has an unrevoked entry for, for `host` on `port`,
+/// in file order without repeats: what a client puts first in its offer so
+/// the server presents a key the file can vouch for.
+pub List<str> KnownHosts.algorithms_for(str host, int port) {
+    str id = host_id(host, port);
+    List<str> names = [];
+    for (Entry entry in entries) {
+        if (!entry.is_revoked && is_entry_match(entry.patterns, id) && !names.contains(entry.algorithm)) {
+            names.push(entry.algorithm);
+        }
+    }
+    return names;
+}
+
+Result<List<bytes>, Error> KnownHosts.select(str host, int port, bool is_blob) {
     str id = host_id(host, port);
     List<bytes> keys = [];
     List<bytes> revoked_keys = [];
@@ -140,10 +170,17 @@ pub Result<List<bytes>, Error> KnownHosts.keys_for(str host, int port) {
         if (!is_entry_match(entry.patterns, id)) {
             continue;
         }
+        if (!is_blob && entry.algorithm != KEY_TYPE) {
+            continue;
+        }
+        bytes value = entry.key;
+        if (is_blob) {
+            value = entry.blob;
+        }
         if (entry.is_revoked) {
-            revoked_keys.push(entry.key);
+            revoked_keys.push(value);
         } else {
-            keys.push(entry.key);
+            keys.push(value);
         }
     }
     List<bytes> usable = [];
@@ -173,7 +210,7 @@ pub Result<List<bytes>, Error> KnownHosts.keys_for(str host, int port) {
 pub bool KnownHosts.is_revoked(str host, int port, ssh.HostKey key) {
     str id = host_id(host, port);
     for (Entry entry in entries) {
-        if (entry.is_revoked && entry.key == key.key && is_entry_match(entry.patterns, id)) {
+        if (entry.is_revoked && entry.blob == key.blob && is_entry_match(entry.patterns, id)) {
             return true;
         }
     }
@@ -352,32 +389,41 @@ pub Result<KnownHosts, Error> parse(str text) {
                 return Result<KnownHosts, Error>.Err(Error.MalformedLine);
             }
         }
-        if (is_authority || fields[field_offset + 1] != KEY_TYPE) {
+        str type_name = fields[field_offset + 1];
+        if (is_authority || !is_supported_type(type_name)) {
             continue;
         }
-        bytes key = decode_key(fields[field_offset + 2])?;
-        entries.push(Entry(patterns, key, is_revoked));
+        bytes blob = decode_blob(fields[field_offset + 2])?;
+        match (ssh.parse_host_key(blob)) {
+            case Ok(ssh.HostKey parsed): {
+                if (parsed.algorithm != type_name) {
+                    return Result<KnownHosts, Error>.Err(Error.BadKey);
+                }
+                entries.push(Entry(patterns, parsed.key, blob, type_name, is_revoked));
+            }
+            case Err(ssh.Error error): {
+                // A well-formed key this client cannot use (an RSA modulus
+                // under 2048 bits, another curve) is skipped, like a key
+                // type it does not implement; a malformed ssh-ed25519 line
+                // and every other failure is an error, never a skip.
+                if (!error.is_unsupported_key() || type_name == KEY_TYPE) {
+                    return Result<KnownHosts, Error>.Err(Error.BadKey);
+                }
+            }
+        }
     }
     return Result<KnownHosts, Error>.Ok(KnownHosts(entries));
 }
 
-// The 32 raw octets from an `ssh-ed25519` line's base64 blob.
-Result<bytes, Error> decode_key(str b64) {
-    bytes blob = [];
+bool is_supported_type(str name) {
+    return name == KEY_TYPE || name == "ecdsa-sha2-nistp256" || name == "ssh-rsa";
+}
+
+// The key blob from a line's base64 column.
+Result<bytes, Error> decode_blob(str b64) {
     match (base64.decode(b64)) {
         case Ok(bytes decoded_blob): {
-            blob = decoded_blob;
-        }
-        case Err(_): {
-            return Result<bytes, Error>.Err(Error.BadKey);
-        }
-    }
-    match (ssh.parse_host_key_blob(blob)) {
-        case Ok(bytes key): {
-            if (key.size() != 32) {
-                return Result<bytes, Error>.Err(Error.BadKey);
-            }
-            return Result<bytes, Error>.Ok(key);
+            return Result<bytes, Error>.Ok(decoded_blob);
         }
         case Err(_): {
             return Result<bytes, Error>.Err(Error.BadKey);

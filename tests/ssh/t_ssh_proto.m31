@@ -68,6 +68,9 @@ int error_code(ssh.Error error) {
         case TimedOut: {
             return 13;
         }
+        case BadKeyExchange: {
+            return 14;
+        }
     }
 }
 
@@ -183,11 +186,14 @@ match (ssh.parse_plain_packet([0, 0, 0, 5, 10, 1, 2, 3, 4], 0)) {
 bytes kex = ssh.build_client_kexinit(rng);
 match (ssh.parse_kexinit(kex)) {
     case Ok(ssh.KexInit kex_init): {
-        checks = check(checks, kex_init.kex_algorithms.size() == 1 && kex_init.kex_algorithms[0] == "curve25519-sha256", "kexinit kex_algorithms");
-        checks = check(checks, kex_init.server_host_key_algorithms.size() == 1 && kex_init.server_host_key_algorithms[0] == "ssh-ed25519", "kexinit host key algorithms");
-        checks = check(checks, kex_init.encryption_algorithms_client_to_server[0] == "chacha20-poly1305@openssh.com", "kexinit cipher c2s");
+        checks = check(checks, kex_init.kex_algorithms[0] == "curve25519-sha256", "kexinit kex_algorithms: curve25519 first");
+        checks = check(checks, kex_init.kex_algorithms.contains("kex-strict-c-v00@openssh.com"), "kexinit advertises strict kex");
+        checks = check(checks, !kex_init.kex_algorithms.contains("diffie-hellman-group1-sha1") && !kex_init.kex_algorithms.contains("diffie-hellman-group14-sha1"), "kexinit offers no SHA-1 key exchange");
+        checks = check(checks, kex_init.server_host_key_algorithms.join(",") == "ssh-ed25519,ecdsa-sha2-nistp256,rsa-sha2-512,rsa-sha2-256", "kexinit host key algorithms, strongest first, no ssh-rsa/SHA-1");
+        checks = check(checks, kex_init.encryption_algorithms_client_to_server[0] == "chacha20-poly1305@openssh.com", "kexinit cipher c2s: chacha first");
         checks = check(checks, kex_init.encryption_algorithms_server_to_client[0] == "chacha20-poly1305@openssh.com", "kexinit cipher s2c");
-        checks = check(checks, kex_init.mac_algorithms_client_to_server.size() == 0, "kexinit mac lists are empty");
+        checks = check(checks, !kex_init.encryption_algorithms_client_to_server.contains("none") && !kex_init.encryption_algorithms_client_to_server.contains("aes128-cbc") && !kex_init.encryption_algorithms_client_to_server.contains("3des-cbc"), "kexinit offers no none/CBC cipher");
+        checks = check(checks, kex_init.mac_algorithms_client_to_server.join(",") == "hmac-sha2-256-etm@openssh.com,hmac-sha2-256", "kexinit macs: only SHA-2");
         checks = check(checks, kex_init.compression_algorithms_client_to_server[0] == "none", "kexinit compression is none");
         checks = check(checks, !kex_init.is_first_kex_packet_following, "kexinit first_kex_packet_follows is false");
         match (ssh.check_server_kexinit(kex_init)) {

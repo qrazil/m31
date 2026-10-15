@@ -568,6 +568,110 @@ hostile("KEXINIT with absurd name-list length",
 hostile("immediate close after version", lambda c: c.sendall(b"SSH-2.0-evil\r\n"))
 hostile("immediate close", lambda c: None)
 
+# --- algorithms: every cipher, kex and host-key type against a restricted sshd ------------------------
+def start_server(extra, hostkeys):
+    """A second disposable sshd restricted by `extra` config lines."""
+    port = free_port()
+    cfgpath = os.path.join(W, "sshd_config_%d" % port)
+    with open(cfgpath, "w") as f:
+        f.write("Port %d\nListenAddress 127.0.0.1\nPidFile %s/sshd_%d.pid\nAuthorizedKeysFile %s/authorized_keys\n"
+                "StrictModes no\nUsePAM no\nPubkeyAuthentication yes\nPasswordAuthentication no\n"
+                "KbdInteractiveAuthentication no\n" % (port, W, port, W))
+        for hk in hostkeys:
+            f.write("HostKey %s\n" % hk)
+        f.write(extra + "\n")
+    pr = subprocess.Popen([SSHD, "-f", cfgpath, "-D", "-e"], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
+    procs.append(pr)
+    up = threading.Event()
+
+    def watch():
+        for line in pr.stderr:
+            if b"listening on" in line:
+                up.set()
+
+    threading.Thread(target=watch, daemon=True).start()
+    if not up.wait(20):
+        raise RuntimeError("sshd did not start: " + extra)
+    return pr, port
+
+
+ECKEY = os.path.join(W, "host_ecdsa")
+RSAKEY = os.path.join(W, "host_rsa")
+subprocess.run(["ssh-keygen", "-q", "-t", "ecdsa", "-b", "256", "-N", "", "-f", ECKEY], check=True)
+subprocess.run(["ssh-keygen", "-q", "-t", "rsa", "-b", "2048", "-N", "", "-f", RSAKEY], check=True)
+for k in (ECKEY, RSAKEY):
+    os.chmod(k, 0o600)
+payload = os.urandom(300000)
+
+
+def algo_case(label, extra, hostkeys, expect_ok=True, expect_err=None):
+    try:
+        pr, port = start_server(extra, hostkeys)
+    except Exception as e:
+        ok(label + " (server)", False, repr(e))
+        return
+    kh = os.path.join(W, "kh_%d" % port)
+    args = ["-p", str(port), "-o", "UserKnownHostsFile=" + kh, "-o", "StrictHostKeyChecking=accept-new", "-i", real, "127.0.0.1"]
+    p = run(args + ["cat"], input=payload, binary=True, timeout=180)
+    if expect_ok:
+        ok(label + ": connects and moves 300 kB both ways intact",
+           p.returncode == 0 and p.stdout == payload, (p.returncode, p.stderr[-300:]))
+        # and again, strictly, now that the key is recorded
+        c2, o2, e2 = run(["-p", str(port), "-o", "UserKnownHostsFile=" + kh, "-o", "StrictHostKeyChecking=yes",
+                          "-i", real, "127.0.0.1", "echo", "again"])
+        ok(label + ": recorded key passes strict checking", c2 == 0 and o2 == "again\n", (c2, e2))
+    else:
+        ok(label + ": refused with a clear one-line error",
+           p.returncode == 255 and expect_err in p.stderr.decode(errors="replace")
+           and len(p.stderr.decode().strip().splitlines()) == 1, (p.returncode, p.stderr))
+    pr.kill()
+    pr.wait()
+
+
+HK_ED = [HOSTKEY]
+algo_case("chacha20-poly1305", "Ciphers chacha20-poly1305@openssh.com", HK_ED)
+algo_case("aes256-gcm", "Ciphers aes256-gcm@openssh.com", HK_ED)
+algo_case("aes128-gcm", "Ciphers aes128-gcm@openssh.com", HK_ED)
+algo_case("aes256-ctr + hmac-sha2-256-etm", "Ciphers aes256-ctr\nMACs hmac-sha2-256-etm@openssh.com", HK_ED)
+algo_case("aes128-ctr + hmac-sha2-256 (MAC-then-encrypt)", "Ciphers aes128-ctr\nMACs hmac-sha2-256", HK_ED)
+algo_case("kex ecdh-sha2-nistp256", "KexAlgorithms ecdh-sha2-nistp256", HK_ED)
+algo_case("kex curve25519-sha256@libssh.org", "KexAlgorithms curve25519-sha256@libssh.org", HK_ED)
+algo_case("host key ecdsa-sha2-nistp256", "HostKeyAlgorithms ecdsa-sha2-nistp256", [ECKEY])
+algo_case("host key rsa-sha2-256", "HostKeyAlgorithms rsa-sha2-256", [RSAKEY])
+algo_case("host key rsa-sha2-512", "HostKeyAlgorithms rsa-sha2-512", [RSAKEY])
+algo_case("DOWNGRADE: only ssh-rsa (SHA-1) host key", "HostKeyAlgorithms ssh-rsa\nPubkeyAcceptedAlgorithms +ssh-rsa", [RSAKEY],
+          expect_ok=False, expect_err="host key algorithms")
+algo_case("DOWNGRADE: only aes128-cbc", "Ciphers aes128-cbc\nMACs hmac-sha2-256", HK_ED,
+          expect_ok=False, expect_err="ciphers")
+algo_case("DOWNGRADE: only diffie-hellman-group14-sha1", "KexAlgorithms diffie-hellman-group14-sha1", HK_ED,
+          expect_ok=False, expect_err="key exchange")
+
+@scenario("known-hosts-type-preference")
+def _():
+    pr, port = start_server("", [HOSTKEY, ECKEY, RSAKEY])
+    # the file holds only the server's ECDSA key: the client must ask for it
+    kh = os.path.join(W, "kh_pref")
+    pub = open(ECKEY + ".pub").read().split()
+    with open(kh, "w") as f:
+        f.write("[127.0.0.1]:%d %s %s\n" % (port, pub[0], pub[1]))
+    c, o, e = run(["-p", str(port), "-o", "UserKnownHostsFile=" + kh, "-o", "StrictHostKeyChecking=yes", "-i", real, "127.0.0.1", "echo", "ecdsa-pref"])
+    ok("known_hosts holding only an ECDSA key: client asks for ECDSA and matches", c == 0 and o == "ecdsa-pref\n", (c, e))
+    pub = open(RSAKEY + ".pub").read().split()
+    with open(kh, "w") as f:
+        f.write("[127.0.0.1]:%d %s %s\n" % (port, pub[0], pub[1]))
+    c, o, e = run(["-p", str(port), "-o", "UserKnownHostsFile=" + kh, "-o", "StrictHostKeyChecking=yes", "-i", real, "127.0.0.1", "echo", "rsa-pref"])
+    ok("known_hosts holding only an RSA key: client asks for RSA and matches", c == 0 and o == "rsa-pref\n", (c, e))
+    # another server key type than the file's: refused as changed, never TOFU
+    ed = open(HOSTKEY + ".pub").read().split()
+    pr2, port2 = start_server("", [HOSTKEY])
+    with open(kh, "w") as f:
+        f.write("[127.0.0.1]:%d %s %s\n" % (port2, pub[0], pub[1]))
+    c, o, e = run(["-p", str(port2), "-o", "UserKnownHostsFile=" + kh, "-o", "StrictHostKeyChecking=accept-new", "-i", real, "127.0.0.1", "echo", "x"])
+    ok("file knows only an RSA key but the server presents ed25519: refused as changed, even with accept-new",
+       c == 255 and "CHANGED" in e and open(kh).read().count("\n") == 1, (c, e))
+    pr.kill()
+    pr2.kill()
+
 # --- tidy up ----------------------------------------------------------------------------------------
 for pr in procs:
     try:

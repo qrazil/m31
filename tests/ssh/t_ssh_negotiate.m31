@@ -1,0 +1,206 @@
+// `lib/ssh.m31`'s algorithm negotiation (`negotiate`, `offer_preferring`)
+// and host-key parsing for every accepted type (`parse_host_key`), pure:
+//   * the client's preference order wins, not the server's;
+//   * AEAD ciphers need no MAC, CTR ciphers do;
+//   * strict kex is on only when both sides say so;
+//   * nothing outside the offer is ever chosen (no downgrade);
+//   * host-key blobs from ssh-keygen parse and fingerprint as ssh-keygen
+//     says; off-curve points, a 1024-bit RSA modulus, an unknown curve,
+//     trailing bytes and every proper prefix are refused without a trap.
+import random;
+import encoding.base64;
+import ssh;
+
+int check(int passed_count, bool is_ok, str label) {
+    if (!is_ok) {
+        trap("check failed: " + label);
+    }
+    return passed_count + 1;
+}
+
+bytes server_kexinit(List<str> kex, List<str> host_keys, List<str> ciphers, List<str> macs) {
+    List<str> empty = [];
+    bytes out = [];
+    out.push(20);
+    bytes cookie = [0; 16];
+    out.extend(cookie);
+    out.extend(ssh.encode_name_list(kex));
+    out.extend(ssh.encode_name_list(host_keys));
+    out.extend(ssh.encode_name_list(ciphers));
+    out.extend(ssh.encode_name_list(ciphers));
+    out.extend(ssh.encode_name_list(macs));
+    out.extend(ssh.encode_name_list(macs));
+    out.extend(ssh.encode_name_list(["none"]));
+    out.extend(ssh.encode_name_list(["none"]));
+    out.extend(ssh.encode_name_list(empty));
+    out.extend(ssh.encode_name_list(empty));
+    out.push(0);
+    bytes reserved = [0; 4];
+    out.extend(reserved);
+    return out;
+}
+
+ssh.KexInit parsed(bytes payload) {
+    match (ssh.parse_kexinit(payload)) {
+        case Ok(ssh.KexInit init): {
+            return init;
+        }
+        case Err(ssh.Error error): {
+            trap("kexinit: " + error.to_str());
+        }
+    }
+}
+
+// "" when negotiation succeeds, else the error's text.
+str refusal(Result<ssh.Suite, ssh.Error> result) {
+    match (result) {
+        case Ok(_): {
+            return "";
+        }
+        case Err(ssh.Error error): {
+            return error.to_str();
+        }
+    }
+}
+
+ssh.Suite suite_of(Result<ssh.Suite, ssh.Error> result) {
+    match (result) {
+        case Ok(ssh.Suite suite): {
+            return suite;
+        }
+        case Err(ssh.Error error): {
+            trap("negotiation failed: " + error.to_str());
+        }
+    }
+}
+
+bytes blob_of(str b64) {
+    match (base64.decode(b64)) {
+        case Ok(bytes blob): {
+            return blob;
+        }
+        case Err(_): {
+            trap("bad base64 in fixture");
+        }
+    }
+}
+
+// ssh.Error as text, "" for Ok.
+str host_key_refusal(bytes blob) {
+    match (ssh.parse_host_key(blob)) {
+        case Ok(_): {
+            return "";
+        }
+        case Err(ssh.Error error): {
+            return error.to_str();
+        }
+    }
+}
+
+int checks = 0;
+ssh.Offer offer = ssh.default_offer();
+List<str> everything = ["curve25519-sha256", "ecdh-sha2-nistp256", "diffie-hellman-group14-sha1", "kex-strict-s-v00@openssh.com"];
+// the client's order wins
+ssh.KexInit reversed = parsed(server_kexinit(["ecdh-sha2-nistp256", "curve25519-sha256"], ["rsa-sha2-256", "ecdsa-sha2-nistp256", "ssh-ed25519"], ["aes128-ctr", "aes256-gcm@openssh.com", "chacha20-poly1305@openssh.com"], ["hmac-sha2-256", "hmac-sha2-256-etm@openssh.com"]));
+ssh.Suite chosen_first = suite_of(ssh.negotiate(offer, reversed));
+checks = check(checks, chosen_first.kex == "curve25519-sha256", "kex: the client's preference, not the server's order");
+checks = check(checks, chosen_first.host_key == "ssh-ed25519", "host key: client's preference");
+checks = check(checks, chosen_first.cipher_client_to_server == "chacha20-poly1305@openssh.com" && chosen_first.cipher_server_to_client == "chacha20-poly1305@openssh.com", "cipher: chacha first");
+checks = check(checks, chosen_first.mac_client_to_server == "" && chosen_first.mac_server_to_client == "", "AEAD cipher: no MAC chosen");
+checks = check(checks, !chosen_first.is_strict, "no strict kex without the server's marker");
+// AES-CTR needs a MAC, and takes the client's preferred one
+ssh.KexInit ctr_only = parsed(server_kexinit(["curve25519-sha256", "kex-strict-s-v00@openssh.com"], ["ssh-ed25519"], ["aes128-ctr"], ["hmac-sha2-256", "hmac-sha2-256-etm@openssh.com"]));
+ssh.Suite chosen_second = suite_of(ssh.negotiate(offer, ctr_only));
+checks = check(checks, chosen_second.cipher_client_to_server == "aes128-ctr" && chosen_second.mac_client_to_server == "hmac-sha2-256-etm@openssh.com", "CTR: the client prefers etm");
+checks = check(checks, chosen_second.is_strict, "strict kex when both sides advertise it");
+ssh.KexInit ctr_no_mac = parsed(server_kexinit(["curve25519-sha256"], ["ssh-ed25519"], ["aes128-ctr"], ["hmac-sha1", "hmac-md5"]));
+checks = check(checks, refusal(ssh.negotiate(offer, ctr_no_mac)) != "", "CTR with only SHA-1/MD5 MACs is refused");
+// the marker alone is never an algorithm
+ssh.KexInit marker_only = parsed(server_kexinit(["kex-strict-s-v00@openssh.com"], ["ssh-ed25519"], ["chacha20-poly1305@openssh.com"], ["hmac-sha2-256"]));
+checks = check(checks, refusal(ssh.negotiate(offer, marker_only)) != "", "a server offering only the strict marker has no key exchange");
+// no downgrade
+ssh.KexInit weak_kex = parsed(server_kexinit(["diffie-hellman-group14-sha1", "diffie-hellman-group1-sha1"], ["ssh-ed25519"], ["chacha20-poly1305@openssh.com"], ["hmac-sha2-256"]));
+checks = check(checks, refusal(ssh.negotiate(offer, weak_kex)) == ssh.Error.NoCommonKex.to_str(), "SHA-1 key exchanges are never used");
+ssh.KexInit weak_host = parsed(server_kexinit(["curve25519-sha256"], ["ssh-rsa", "ssh-dss"], ["chacha20-poly1305@openssh.com"], ["hmac-sha2-256"]));
+checks = check(checks, refusal(ssh.negotiate(offer, weak_host)) == ssh.Error.NoCommonHostKey.to_str(), "ssh-rsa (SHA-1) and ssh-dss host keys are never used");
+ssh.KexInit weak_cipher = parsed(server_kexinit(["curve25519-sha256"], ["ssh-ed25519"], ["aes128-cbc", "3des-cbc", "none"], ["hmac-sha2-256", "none"]));
+checks = check(checks, refusal(ssh.negotiate(offer, weak_cipher)) == ssh.Error.NoCommonCipher.to_str(), "CBC and none ciphers are never used");
+ssh.KexInit nothing = parsed(server_kexinit([], [], [], []));
+checks = check(checks, refusal(ssh.negotiate(offer, nothing)) == ssh.Error.NoCommonKex.to_str(), "empty server lists negotiate nothing");
+// offer ordering by known_hosts types
+ssh.Offer pref = ssh.offer_preferring(["ssh-rsa", "ssh-dss", "ecdsa-sha2-nistp256"]);
+checks = check(checks, pref.host_keys.join(",") == "rsa-sha2-512,rsa-sha2-256,ecdsa-sha2-nistp256,ssh-ed25519", "known types first (RSA as its SHA-2 signatures), ssh-dss ignored, the rest after");
+checks = check(checks, !pref.host_keys.contains("ssh-dss") && !pref.host_keys.contains("ssh-rsa"), "the offer cannot be widened by a file");
+checks = check(checks, pref.ciphers.join(",") == offer.ciphers.join(","), "ciphers unaffected");
+// the client's actual KEXINIT carries the strict marker
+random.System rng = random.system();
+ssh.KexInit mine = parsed(ssh.build_kexinit(rng, offer));
+checks = check(checks, mine.kex_algorithms.contains("kex-strict-c-v00@openssh.com"), "KEXINIT advertises kex-strict-c");
+// --- host key blobs ------------------------------------------------------------------
+str ec_b64 = "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBK8Co9u2cQWlYMM/UOMGVMmL3mHKniPXE0RE+63cKqP+/uJaH9LH+ZO+7hiqsE/4PflKHItcSFMnvypGDo8ed7Q=";
+str rsa_b64 = "AAAAB3NzaC1yc2EAAAADAQABAAABAQCj3Inti2kS3oZKd/Uq22CJMJY3D7hJvvaUlbdKTSa2DdhP7+7bM5dulPiGes8BTgclWtM7gEUCEPAUAaR++VKymGWdTXEy6mtWCREaohYz39fjKdjBum5gZP+o2cm2ylOR6r/5OXy/UKY9zP3/u0yfm+gskAuRzxeIZo9NWtSNv05pMF9V1sreUvjnZqKf4v23YeJq2kAETdbuQ3wLGZ47vE7kWIDbZCud9xefxrMaPCwdIMzlllv96fTWLURk1w/jhSt+Ivhm6t7E6/Poa9xYuknW8qfaHvtDdUnIswoXvZ898jXluDxVsaOvWWwhlXcPDzBgcL9hFmgz3p3pQhLD";
+bytes ec_blob = blob_of(ec_b64);
+bytes rsa_blob = blob_of(rsa_b64);
+match (ssh.parse_host_key(ec_blob)) {
+    case Ok(ssh.HostKey key): {
+        checks = check(checks, key.algorithm == "ecdsa-sha2-nistp256" && key.key.size() == 65 && key.key[0] == 4, "ecdsa blob parses to its 65-octet point");
+        checks = check(checks, key.fingerprint() == "SHA256:zb1WCZODlQkcgGP56de/BEecYLtgpeZIVnzfgHK2n6g", "ecdsa fingerprint equals ssh-keygen -l");
+        checks = check(checks, key.blob_base64() == ec_b64, "blob round trip");
+    }
+    case Err(ssh.Error error): {
+        trap("ecdsa blob: " + error.to_str());
+    }
+}
+match (ssh.parse_host_key(rsa_blob)) {
+    case Ok(ssh.HostKey key): {
+        checks = check(checks, key.algorithm == "ssh-rsa", "rsa blob parses");
+        checks = check(checks, key.fingerprint() == "SHA256:DMXhqRF3e8CVrDkX73YqR4G93zCLpE4EynfUJDRmduY", "rsa fingerprint equals ssh-keygen -l");
+    }
+    case Err(ssh.Error error): {
+        trap("rsa blob: " + error.to_str());
+    }
+}
+// off the curve: flip a bit in Y
+bytes off_curve = clone(ec_blob);
+off_curve[off_curve.size() - 1] = off_curve[off_curve.size() - 1] ^ 1;
+checks = check(checks, host_key_refusal(off_curve) == ssh.Error.BadKeyExchange.to_str(), "an ecdsa point off the curve is refused");
+// the curve name
+bytes wrong_curve = clone(ec_blob);
+wrong_curve[19 + 7] = 0x41;
+checks = check(checks, host_key_refusal(wrong_curve) != "", "a different curve name is refused");
+// trailing byte
+bytes trailing = clone(ec_blob);
+trailing.push(0);
+checks = check(checks, host_key_refusal(trailing) != "", "trailing bytes after an ecdsa key are refused");
+bytes trailing_rsa = clone(rsa_blob);
+trailing_rsa.push(0);
+checks = check(checks, host_key_refusal(trailing_rsa) != "", "trailing bytes after an rsa key are refused");
+// a 1024-bit RSA key
+bytes small = blob_of("AAAAB3NzaC1yc2EAAAADAQABAAAAgQDcmDkWPlpLr6TMmJTtz+pG+v0us7si+/lvXYJhTJS1V5lPVqIj2K5CMsogbtBkP+Q8MOC5");
+checks = check(checks, host_key_refusal(small) != "", "a truncated or 1024-bit rsa blob is refused");
+// unknown types
+bytes unknown = [];
+ssh.push_string(unknown, "ssh-dss".to_bytes());
+bytes twenty = [1; 20];
+ssh.push_string(unknown, twenty);
+checks = check(checks, host_key_refusal(unknown) == ssh.Error.UnsupportedHostKeyType.to_str(), "ssh-dss is unsupported");
+// every proper prefix of both blobs is refused (and nothing traps)
+int refused = 0;
+int cut = 0;
+while (cut < ec_blob.size()) {
+    if (host_key_refusal(ec_blob.substr(0, cut)) != "") {
+        refused = refused + 1;
+    }
+    cut = cut + 1;
+}
+checks = check(checks, refused == ec_blob.size(), "every proper prefix of an ecdsa blob is refused");
+refused = 0;
+cut = 0;
+while (cut < rsa_blob.size()) {
+    if (host_key_refusal(rsa_blob.substr(0, cut)) != "") {
+        refused = refused + 1;
+    }
+    cut = cut + 1;
+}
+checks = check(checks, refused == rsa_blob.size(), "every proper prefix of an rsa blob is refused");
+print(checks.to_str() + " checks, 0 failures");

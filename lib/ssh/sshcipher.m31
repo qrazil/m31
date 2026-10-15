@@ -1,0 +1,380 @@
+// The SSH binary packet protocol's ciphers (RFC 4253 §6, RFC 5647,
+// PROTOCOL.chacha20poly1305): turning a payload into the bytes that go on
+// the wire and back, for each cipher this client negotiates.
+//
+//   chacha20-poly1305@openssh.com                      (AEAD, own length cipher)
+//   aes256-gcm@openssh.com, aes128-gcm@openssh.com     (AEAD, RFC 5647)
+//   aes256-ctr, aes128-ctr  with  hmac-sha2-256-etm@openssh.com
+//                           or    hmac-sha2-256         (RFC 4344 + RFC 6668)
+//
+// API
+// ---
+//   Cipher c = sshcipher.new_chacha(material64);
+//   Cipher c = sshcipher.new_aes_gcm(key, iv12);
+//   Cipher c = sshcipher.new_aes_ctr(key, iv16, mac_key, is_etm);
+//   c.header_size()                       -> int    bytes to read to learn the length
+//   c.remaining(header, seq)              -> Result<int, Error>    bytes still to read
+//   c.open(header, rest, seq)             -> Result<bytes, Error>  the payload
+//   c.seal(payload, seq, rng)             -> bytes                 the wire packet
+//
+// The receive side is two steps because the length arrives first: read
+// `header_size()` bytes, ask `remaining`, read that many, `open`. A `Cipher`
+// is **stateful** (the AES-CTR keystream and the GCM invocation counter move
+// on): one object per direction, used in packet order, and never after an
+// error -- a failed packet ends the connection.
+//
+// Authentication before use, in every mode where the format allows it: the
+// ChaCha20-Poly1305, GCM and encrypt-then-MAC tags are verified (with
+// `consttime.is_equal`) **before** any decryption of the payload; the length
+// is only trusted for how many bytes to read, and is bounded first. The one
+// exception is the plain (MAC-then-encrypt) `hmac-sha2-256` mode, where the
+// format forces decrypting the first block to learn the length -- the
+// payload is still not looked at until the MAC over the whole packet has
+// verified, and the length is bounded before the rest is read.
+
+import random;
+import crypto.chacha20poly1305;
+import crypto.consttime;
+import crypto.hmac;
+import crypto.aes;
+import crypto.aesgcm;
+
+pub enum Error {
+    /// A length field is not self-consistent or exceeds the 35000-byte bound.
+    BadPacketLength;
+    /// The authentication tag or MAC did not verify.
+    MacMismatch;
+}
+
+pub str Error.to_str() {
+    match (this) {
+        case BadPacketLength: {
+            return "a packet's length or padding is not self-consistent";
+        }
+        case MacMismatch: {
+            return "a packet's authentication tag did not match";
+        }
+    }
+}
+
+/// The largest `packet_length` accepted (RFC 4253 §6.1's minimum every
+/// implementation must handle; OpenSSH sends less).
+pub const int MAX_PACKET = 35000;
+const int MIN_PADDING = 4;
+const int KIND_CHACHA = 0;
+const int KIND_GCM = 1;
+const int KIND_CTR = 2;
+const int KIND_CTR_ETM = 3;
+const int TAG_SIZE = 16;
+const int MAC_SIZE = 32;
+
+pub type Cipher {
+    int kind;
+    /// chacha: 64 octets, K_2 (payload) then K_1 (length); gcm/ctr: the AES key.
+    bytes key;
+    /// gcm: 12 octets, 4 fixed then the 64-bit invocation counter; ctr: the
+    /// 16-octet counter block.
+    bytes counter;
+    bytes mac_key;
+    aes.Cipher aes_schedule;
+    /// CTR keystream not yet used (a block's tail).
+    bytes keystream;
+    /// plain CTR: the first block, already decrypted by `remaining`.
+    bytes first_plain;
+}
+
+// `data` XORed with the AES-CTR keystream, advancing the counter block.
+bytes Cipher.ctr_xor(bytes data) {
+    bytes out = [];
+    int taken = 0;
+    while (taken < data.size()) {
+        if (keystream.size() == 0) {
+            keystream = aes_schedule.encrypt_block(counter);
+            increment(counter, 16);
+        }
+        out.push(data[taken] ^ keystream[0]);
+        keystream.drop_front(1);
+        taken = taken + 1;
+    }
+    return out;
+}
+
+/// How many octets must be read before `remaining` can say how many more.
+pub int Cipher.header_size() {
+    if (kind == KIND_CTR) {
+        return 16;
+    }
+    return 4;
+}
+
+/// How many octets follow `header` on the wire (everything including the
+/// tag or MAC), after bounding the length it announces.
+pub Result<int, Error> Cipher.remaining(bytes header, int seq) {
+    if (kind == KIND_CHACHA) {
+        bytes seq8 = seq_bytes8(seq);
+        bytes stream = chacha20poly1305.openssh_block(sub_key(key, 32, 64), 0, seq8);
+        bytes plain = [];
+        int index = 0;
+        while (index < 4) {
+            plain.push(header[index] ^ stream[index]);
+            index = index + 1;
+        }
+        int length = be32(plain, 0);
+        if (length < 1 || length > MAX_PACKET) {
+            return Result<int, Error>.Err(Error.BadPacketLength);
+        }
+        return Result<int, Error>.Ok(length + TAG_SIZE);
+    }
+    if (kind == KIND_GCM || kind == KIND_CTR_ETM) {
+        int length = be32(header, 0);
+        if (length < 16 || length > MAX_PACKET || length % 16 != 0) {
+            return Result<int, Error>.Err(Error.BadPacketLength);
+        }
+        if (kind == KIND_GCM) {
+            return Result<int, Error>.Ok(length + TAG_SIZE);
+        }
+        return Result<int, Error>.Ok(length + MAC_SIZE);
+    }
+    // plain CTR: decrypt the first block to read the length.
+    first_plain = ctr_xor(header);
+    int length = be32(first_plain, 0);
+    if (length < 12 || length > MAX_PACKET || (length + 4) % 16 != 0) {
+        return Result<int, Error>.Err(Error.BadPacketLength);
+    }
+    return Result<int, Error>.Ok(length + 4 - 16 + MAC_SIZE);
+}
+
+/// Verifies and decrypts one packet: `header` (`header_size()` octets) then
+/// `rest` (`remaining(...)` octets). Returns the payload.
+pub Result<bytes, Error> Cipher.open(bytes header, bytes rest, int seq) {
+    if (kind == KIND_CHACHA) {
+        bytes payload_key = sub_key(key, 0, 32);
+        bytes seq8 = seq_bytes8(seq);
+        int body_size = rest.size() - TAG_SIZE;
+        bytes body_ct = rest.substr(0, body_size);
+        bytes tag = rest.substr(body_size, rest.size());
+        bytes otk = chacha20poly1305.openssh_block(payload_key, 0, seq8).substr(0, 32);
+        bytes mac_input = clone(header);
+        mac_input.extend(body_ct);
+        if (!consttime.is_equal(chacha20poly1305.mac(otk, mac_input), tag)) {
+            return Result<bytes, Error>.Err(Error.MacMismatch);
+        }
+        return strip_padding(chacha_xor(payload_key, 1, seq8, body_ct));
+    }
+    if (kind == KIND_GCM) {
+        Result<bytes, aesgcm.Error> opened = aesgcm.open(key, counter, rest, header);
+        increment(counter, 8);
+        match (opened) {
+            case Ok(bytes body): {
+                return strip_padding(body);
+            }
+            case Err(aesgcm.Error error): {
+                return Result<bytes, Error>.Err(Error.MacMismatch);
+            }
+        }
+    }
+    if (kind == KIND_CTR_ETM) {
+        int body_size = rest.size() - MAC_SIZE;
+        bytes body_ct = rest.substr(0, body_size);
+        bytes tag = rest.substr(body_size, rest.size());
+        bytes mac_input = seq_bytes4(seq);
+        mac_input.extend(header);
+        mac_input.extend(body_ct);
+        if (!consttime.is_equal(hmac.sha256_mac(mac_key, mac_input), tag)) {
+            return Result<bytes, Error>.Err(Error.MacMismatch);
+        }
+        return strip_padding(ctr_xor(body_ct));
+    }
+    // plain CTR: MAC over seq || the whole plaintext packet.
+    int body_size = rest.size() - MAC_SIZE;
+    bytes tail_ct = rest.substr(0, body_size);
+    bytes tag = rest.substr(body_size, rest.size());
+    bytes plain = clone(first_plain);
+    plain.extend(ctr_xor(tail_ct));
+    bytes mac_input = seq_bytes4(seq);
+    mac_input.extend(plain);
+    if (!consttime.is_equal(hmac.sha256_mac(mac_key, mac_input), tag)) {
+        return Result<bytes, Error>.Err(Error.MacMismatch);
+    }
+    return strip_padding(plain.substr(4, plain.size()));
+}
+
+/// One packet for the wire: padding (from `rng`), length, encryption and
+/// tag or MAC, as the cipher dictates.
+pub bytes Cipher.seal(bytes payload, int seq, random.System rng) {
+    if (kind == KIND_CHACHA) {
+        bytes payload_key = sub_key(key, 0, 32);
+        bytes length_key = sub_key(key, 32, 64);
+        int pad_length = padding_for(1 + payload.size(), 8);
+        bytes body = [];
+        body.push(pad_length);
+        body.extend(payload);
+        body.extend(rng.octets(pad_length));
+        bytes seq8 = seq_bytes8(seq);
+        bytes length_plain = [];
+        push_u32(length_plain, body.size());
+        bytes length_stream = chacha20poly1305.openssh_block(length_key, 0, seq8);
+        bytes out = [];
+        int index = 0;
+        while (index < 4) {
+            out.push(length_plain[index] ^ length_stream[index]);
+            index = index + 1;
+        }
+        bytes body_ct = chacha_xor(payload_key, 1, seq8, body);
+        bytes otk = chacha20poly1305.openssh_block(payload_key, 0, seq8).substr(0, 32);
+        bytes mac_input = clone(out);
+        mac_input.extend(body_ct);
+        out.extend(body_ct);
+        out.extend(chacha20poly1305.mac(otk, mac_input));
+        return out;
+    }
+    if (kind == KIND_GCM || kind == KIND_CTR_ETM) {
+        int pad_length = padding_for(1 + payload.size(), 16);
+        bytes body = [];
+        body.push(pad_length);
+        body.extend(payload);
+        body.extend(rng.octets(pad_length));
+        bytes header = [];
+        push_u32(header, body.size());
+        bytes out = clone(header);
+        if (kind == KIND_GCM) {
+            out.extend(aesgcm.seal(key, counter, body, header));
+            increment(counter, 8);
+            return out;
+        }
+        bytes body_ct = ctr_xor(body);
+        bytes mac_input = seq_bytes4(seq);
+        mac_input.extend(header);
+        mac_input.extend(body_ct);
+        out.extend(body_ct);
+        out.extend(hmac.sha256_mac(mac_key, mac_input));
+        return out;
+    }
+    // plain CTR: the length is inside the encrypted, block-aligned region.
+    int pad_length = padding_for(5 + payload.size(), 16);
+    bytes packet = [];
+    push_u32(packet, 1 + payload.size() + pad_length);
+    packet.push(pad_length);
+    packet.extend(payload);
+    packet.extend(rng.octets(pad_length));
+    bytes mac_input = seq_bytes4(seq);
+    mac_input.extend(packet);
+    bytes out = ctr_xor(packet);
+    out.extend(hmac.sha256_mac(mac_key, mac_input));
+    return out;
+}
+
+pub Cipher new_chacha(bytes material) {
+    if (material.size() != 64) {
+        trap("sshcipher.new_chacha: 64 octets of key material");
+    }
+    return Cipher(KIND_CHACHA, material, [], [], aes.cipher([0; 16]), [], []);
+}
+
+pub Cipher new_aes_gcm(bytes key, bytes initial_vector) {
+    if (initial_vector.size() != 12 || (key.size() != 16 && key.size() != 32)) {
+        trap("sshcipher.new_aes_gcm: bad key or initial_vector length");
+    }
+    return Cipher(KIND_GCM, key, clone(initial_vector), [], aes.cipher([0; 16]), [], []);
+}
+
+pub Cipher new_aes_ctr(bytes key, bytes initial_vector, bytes mac_key, bool is_etm) {
+    if (initial_vector.size() != 16 || (key.size() != 16 && key.size() != 32) || mac_key.size() != MAC_SIZE) {
+        trap("sshcipher.new_aes_ctr: bad key, initial_vector or mac key length");
+    }
+    int kind = KIND_CTR;
+    if (is_etm) {
+        kind = KIND_CTR_ETM;
+    }
+    return Cipher(kind, key, clone(initial_vector), mac_key, aes.cipher(key), [], []);
+}
+
+// --- small helpers -----------------------------------------------------------
+
+int be32(bytes buffer, int offset) {
+    return buffer[offset] << 24 | buffer[offset + 1] << 16 | buffer[offset + 2] << 8 | buffer[offset + 3];
+}
+
+void push_u32(bytes out, int value) {
+    out.push(value >> 24 & 0xFF);
+    out.push(value >> 16 & 0xFF);
+    out.push(value >> 8 & 0xFF);
+    out.push(value & 0xFF);
+}
+
+bytes seq_bytes8(int seq) {
+    bytes out = [];
+    push_u32(out, 0);
+    push_u32(out, seq);
+    return out;
+}
+
+bytes seq_bytes4(int seq) {
+    bytes out = [];
+    push_u32(out, seq & 0xFFFFFFFF);
+    return out;
+}
+
+// counter += 1 over the last `width` octets, big-endian, wrapping.
+void increment(bytes counter, int width) {
+    int index = counter.size() - 1;
+    int stop = counter.size() - width;
+    while (index >= stop) {
+        if (counter[index] == 255) {
+            counter[index] = 0;
+            index = index - 1;
+        } else {
+            counter[index] = counter[index] + 1;
+            return;
+        }
+    }
+}
+
+// --- ChaCha20-Poly1305 (PROTOCOL.chacha20poly1305) ------------------------------
+
+bytes chacha_xor(bytes chacha_key, int block_counter_start, bytes seq8, bytes data) {
+    bytes out = [];
+    int block_start = 0;
+    int block_counter = block_counter_start;
+    while (block_start < data.size()) {
+        bytes stream = chacha20poly1305.openssh_block(chacha_key, block_counter, seq8);
+        int end = block_start + 64;
+        if (end > data.size()) {
+            end = data.size();
+        }
+        int index = block_start;
+        while (index < end) {
+            out.push(data[index] ^ stream[index - block_start]);
+            index = index + 1;
+        }
+        block_start = end;
+        block_counter = block_counter + 1;
+    }
+    return out;
+}
+
+int padding_for(int covered, int block) {
+    int pad = block - covered % block;
+    if (pad < MIN_PADDING) {
+        pad = pad + block;
+    }
+    return pad;
+}
+
+// --- the public interface ------------------------------------------------------
+
+bytes sub_key(bytes material, int begin, int finish) {
+    return material.substr(begin, finish);
+}
+
+// padding_length || payload || padding -> the payload.
+Result<bytes, Error> strip_padding(bytes body) {
+    if (body.size() < 1) {
+        return Result<bytes, Error>.Err(Error.BadPacketLength);
+    }
+    int pad_length = body[0];
+    if (pad_length < MIN_PADDING || pad_length > body.size() - 1) {
+        return Result<bytes, Error>.Err(Error.BadPacketLength);
+    }
+    return Result<bytes, Error>.Ok(body.substr(1, body.size() - pad_length));
+}
