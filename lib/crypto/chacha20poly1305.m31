@@ -87,19 +87,37 @@
 
 import crypto.consttime;
 
+// --- speed notes (docs/CRYPTO-PERF.md) ----------------------------------------
+//
+// The emitted C pays for three things per operation: a call to the noinline
+// `rt_stack_check` at every function entry, a bounds check on every element
+// access, and an overflow check on every `+`, `-` and `*`. So the hot paths
+// here are shaped for the C compiler rather than for the RFC's pseudocode:
+//
+//   - the ChaCha20 permutation is ONE function holding all sixteen words in
+//     locals (no per-quarter-round call, no `Array` traffic inside the rounds);
+//   - words are masked to 32 bits at the top of every double round, which is
+//     what lets the C compiler see that `x >> 16` needs no sign fill and that
+//     `a + b` cannot overflow, so the checks fold away;
+//   - the keystream is XORed straight into a pre-sized output buffer, one
+//     whole 64-octet block at a time, not pushed octet by octet through a
+//     temporary `bytes`;
+//   - Poly1305 runs over the caller's buffer in place (no padded copy of
+//     AAD || ciphertext || lengths), keeping its five limbs in locals across
+//     all blocks of a segment.
+//
+// The Poly1305 limb products use `wrapping_mul`/`wrapping_add`: the bound in
+// the Poly1305 section below shows they never reach 2^63, so the values are
+// identical and the per-operation overflow checks (about 40% of the time) go.
+//
+// None of this adds a secret-dependent branch or index: every loop bound is a
+// public length, there is no table, and the only operations on key-derived
+// words are `+`, `^`, shifts, `&`, `|` and `*`, as before.
+
 // --- ChaCha20 ---------------------------------------------------------------
 
 // "expand 32-byte k", as four little-endian 32-bit words -- RFC 8439 §2.3.
 const Array<int> CHACHA_CONST = [0x6170_7865, 0x3320_646E, 0x7962_2D32, 0x6B20_6574];
-
-// One byte, from wherever `>>` leaves it. `& 0xFF` is exact regardless of
-// this language's arithmetic (sign-extending) `>>` (reference §6.1): for
-// every shift used in this file the byte read out sits below the bits sign
-// extension can touch, so the low 8 bits of the shifted value are always the
-// original bits at that position.
-int byte_at(int x, int shift) {
-    return x >> shift & 0xFF;
-}
 
 // Four octets of `data` starting at `offset`, little-endian -- the order every
 // ChaCha20 and Poly1305 word in this file is read in. Never masked with
@@ -110,64 +128,167 @@ int word_le(bytes data, int offset) {
     return data[offset] | (data[offset + 1] << 8) | (data[offset + 2] << 16) | (data[offset + 3] << 24);
 }
 
-// A 32-bit word appended little-endian.
-void push_word_le(bytes out, int word) {
-    out.push(word & 0xFF);
-    out.push(byte_at(word, 8));
-    out.push(byte_at(word, 16));
-    out.push(byte_at(word, 24));
-}
-
-// `x` rotated left by `bit_count` bits, as a 32-bit word. The mask is only needed on
-// the left-shifted half -- `x >> (32 - n)` is already below 2^32 because `x`
-// is -- but it is applied to the whole OR anyway, the way `apps/git/sha1.m31`
-// masks its rotate, so every rotate in this file has the same shape.
-int rotl32(int x, int bit_count) {
-    return (x << bit_count | x >> (32 - bit_count)) & 0xFFFF_FFFF;
-}
-
-// One quarter round, RFC 8439 §2.1, done in place on the sixteen words of
-// `state`. `Array<int>` is a reference type (reference §3.9), so the four
-// indices this touches are visible to the caller without `state` being returned.
-void quarter_round(Array<int> state, int index_a, int index_b, int index_c, int index_d) {  // RFC 8439 §2.1: d
-    state[index_a] = state[index_a] + state[index_b] & 0xFFFF_FFFF;
-    state[index_d] = rotl32(state[index_d] ^ state[index_a], 16);
-    state[index_c] = state[index_c] + state[index_d] & 0xFFFF_FFFF;
-    state[index_b] = rotl32(state[index_b] ^ state[index_c], 12);
-    state[index_a] = state[index_a] + state[index_b] & 0xFFFF_FFFF;
-    state[index_d] = rotl32(state[index_d] ^ state[index_a], 8);
-    state[index_c] = state[index_c] + state[index_d] & 0xFFFF_FFFF;
-    state[index_b] = rotl32(state[index_b] ^ state[index_c], 7);
-}
-
 // The twenty-round permutation and the final "add the original input words"
-// step, RFC 8439 §2.3, shared by both word layouts below: everything that
-// does not depend on how words 12-15 were assigned. `state`'s first twelve
-// words (the constant and the key) must already be set by the caller.
-bytes chacha20_core(Array<int> state) {
-    // The starting state, kept aside to add back in once the rounds are
-    // done (RFC 8439 §2.3's "adding the original input words") rather than
-    // reconstructed, per §3's implementation advice.
-    Array<int> orig = clone(state);
+// step, RFC 8439 §2.3, shared by both word layouts: `state` holds the sixteen
+// input words (each below 2^32); the sixteen output words go to `out`.
+// All sixteen words live in locals; each of the ten loop iterations is one
+// double round (four column quarter rounds, then four diagonal ones), written
+// out flat so there is no call and no array access between the loads and the
+// stores. RFC 8439 §2.1's quarter round, with a, b, c, d the four indices.
+void chacha20_rounds(Array<int> state, Array<int> out) {
+    int x0 = state[0];
+    int x1 = state[1];
+    int x2 = state[2];
+    int x3 = state[3];
+    int x4 = state[4];
+    int x5 = state[5];
+    int x6 = state[6];
+    int x7 = state[7];
+    int x8 = state[8];
+    int x9 = state[9];
+    int x10 = state[10];
+    int x11 = state[11];
+    int x12 = state[12];
+    int x13 = state[13];
+    int x14 = state[14];
+    int x15 = state[15];
     for (int round in 0 .. 10) {
-        // The four "column" quarter rounds, then the four "diagonal" ones --
-        // together, one full double-round of the twenty this function runs.
-        quarter_round(state, 0, 4, 8, 12);
-        quarter_round(state, 1, 5, 9, 13);
-        quarter_round(state, 2, 6, 10, 14);
-        quarter_round(state, 3, 7, 11, 15);
-        quarter_round(state, 0, 5, 10, 15);
-        quarter_round(state, 1, 6, 11, 12);
-        quarter_round(state, 2, 7, 8, 13);
-        quarter_round(state, 3, 4, 9, 14);
+        // The words are below 2^32 here (the loop-carried values were masked
+        // at the end of the last iteration; the first iteration's come from
+        // 32-bit words). Saying so again costs one AND each and is what lets
+        // the C compiler drop the sign fill from every `>>` below.
+        x0 = x0 & 0xFFFF_FFFF;
+        x1 = x1 & 0xFFFF_FFFF;
+        x2 = x2 & 0xFFFF_FFFF;
+        x3 = x3 & 0xFFFF_FFFF;
+        x4 = x4 & 0xFFFF_FFFF;
+        x5 = x5 & 0xFFFF_FFFF;
+        x6 = x6 & 0xFFFF_FFFF;
+        x7 = x7 & 0xFFFF_FFFF;
+        x8 = x8 & 0xFFFF_FFFF;
+        x9 = x9 & 0xFFFF_FFFF;
+        x10 = x10 & 0xFFFF_FFFF;
+        x11 = x11 & 0xFFFF_FFFF;
+        x12 = x12 & 0xFFFF_FFFF;
+        x13 = x13 & 0xFFFF_FFFF;
+        x14 = x14 & 0xFFFF_FFFF;
+        x15 = x15 & 0xFFFF_FFFF;
+        x0 = x0 + x4 & 0xFFFF_FFFF;
+        x12 = x12 ^ x0;
+        x12 = (x12 << 16 | x12 >> 16) & 0xFFFF_FFFF;
+        x8 = x8 + x12 & 0xFFFF_FFFF;
+        x4 = x4 ^ x8;
+        x4 = (x4 << 12 | x4 >> 20) & 0xFFFF_FFFF;
+        x0 = x0 + x4 & 0xFFFF_FFFF;
+        x12 = x12 ^ x0;
+        x12 = (x12 << 8 | x12 >> 24) & 0xFFFF_FFFF;
+        x8 = x8 + x12 & 0xFFFF_FFFF;
+        x4 = x4 ^ x8;
+        x4 = (x4 << 7 | x4 >> 25) & 0xFFFF_FFFF;
+        x1 = x1 + x5 & 0xFFFF_FFFF;
+        x13 = x13 ^ x1;
+        x13 = (x13 << 16 | x13 >> 16) & 0xFFFF_FFFF;
+        x9 = x9 + x13 & 0xFFFF_FFFF;
+        x5 = x5 ^ x9;
+        x5 = (x5 << 12 | x5 >> 20) & 0xFFFF_FFFF;
+        x1 = x1 + x5 & 0xFFFF_FFFF;
+        x13 = x13 ^ x1;
+        x13 = (x13 << 8 | x13 >> 24) & 0xFFFF_FFFF;
+        x9 = x9 + x13 & 0xFFFF_FFFF;
+        x5 = x5 ^ x9;
+        x5 = (x5 << 7 | x5 >> 25) & 0xFFFF_FFFF;
+        x2 = x2 + x6 & 0xFFFF_FFFF;
+        x14 = x14 ^ x2;
+        x14 = (x14 << 16 | x14 >> 16) & 0xFFFF_FFFF;
+        x10 = x10 + x14 & 0xFFFF_FFFF;
+        x6 = x6 ^ x10;
+        x6 = (x6 << 12 | x6 >> 20) & 0xFFFF_FFFF;
+        x2 = x2 + x6 & 0xFFFF_FFFF;
+        x14 = x14 ^ x2;
+        x14 = (x14 << 8 | x14 >> 24) & 0xFFFF_FFFF;
+        x10 = x10 + x14 & 0xFFFF_FFFF;
+        x6 = x6 ^ x10;
+        x6 = (x6 << 7 | x6 >> 25) & 0xFFFF_FFFF;
+        x3 = x3 + x7 & 0xFFFF_FFFF;
+        x15 = x15 ^ x3;
+        x15 = (x15 << 16 | x15 >> 16) & 0xFFFF_FFFF;
+        x11 = x11 + x15 & 0xFFFF_FFFF;
+        x7 = x7 ^ x11;
+        x7 = (x7 << 12 | x7 >> 20) & 0xFFFF_FFFF;
+        x3 = x3 + x7 & 0xFFFF_FFFF;
+        x15 = x15 ^ x3;
+        x15 = (x15 << 8 | x15 >> 24) & 0xFFFF_FFFF;
+        x11 = x11 + x15 & 0xFFFF_FFFF;
+        x7 = x7 ^ x11;
+        x7 = (x7 << 7 | x7 >> 25) & 0xFFFF_FFFF;
+        x0 = x0 + x5 & 0xFFFF_FFFF;
+        x15 = x15 ^ x0;
+        x15 = (x15 << 16 | x15 >> 16) & 0xFFFF_FFFF;
+        x10 = x10 + x15 & 0xFFFF_FFFF;
+        x5 = x5 ^ x10;
+        x5 = (x5 << 12 | x5 >> 20) & 0xFFFF_FFFF;
+        x0 = x0 + x5 & 0xFFFF_FFFF;
+        x15 = x15 ^ x0;
+        x15 = (x15 << 8 | x15 >> 24) & 0xFFFF_FFFF;
+        x10 = x10 + x15 & 0xFFFF_FFFF;
+        x5 = x5 ^ x10;
+        x5 = (x5 << 7 | x5 >> 25) & 0xFFFF_FFFF;
+        x1 = x1 + x6 & 0xFFFF_FFFF;
+        x12 = x12 ^ x1;
+        x12 = (x12 << 16 | x12 >> 16) & 0xFFFF_FFFF;
+        x11 = x11 + x12 & 0xFFFF_FFFF;
+        x6 = x6 ^ x11;
+        x6 = (x6 << 12 | x6 >> 20) & 0xFFFF_FFFF;
+        x1 = x1 + x6 & 0xFFFF_FFFF;
+        x12 = x12 ^ x1;
+        x12 = (x12 << 8 | x12 >> 24) & 0xFFFF_FFFF;
+        x11 = x11 + x12 & 0xFFFF_FFFF;
+        x6 = x6 ^ x11;
+        x6 = (x6 << 7 | x6 >> 25) & 0xFFFF_FFFF;
+        x2 = x2 + x7 & 0xFFFF_FFFF;
+        x13 = x13 ^ x2;
+        x13 = (x13 << 16 | x13 >> 16) & 0xFFFF_FFFF;
+        x8 = x8 + x13 & 0xFFFF_FFFF;
+        x7 = x7 ^ x8;
+        x7 = (x7 << 12 | x7 >> 20) & 0xFFFF_FFFF;
+        x2 = x2 + x7 & 0xFFFF_FFFF;
+        x13 = x13 ^ x2;
+        x13 = (x13 << 8 | x13 >> 24) & 0xFFFF_FFFF;
+        x8 = x8 + x13 & 0xFFFF_FFFF;
+        x7 = x7 ^ x8;
+        x7 = (x7 << 7 | x7 >> 25) & 0xFFFF_FFFF;
+        x3 = x3 + x4 & 0xFFFF_FFFF;
+        x14 = x14 ^ x3;
+        x14 = (x14 << 16 | x14 >> 16) & 0xFFFF_FFFF;
+        x9 = x9 + x14 & 0xFFFF_FFFF;
+        x4 = x4 ^ x9;
+        x4 = (x4 << 12 | x4 >> 20) & 0xFFFF_FFFF;
+        x3 = x3 + x4 & 0xFFFF_FFFF;
+        x14 = x14 ^ x3;
+        x14 = (x14 << 8 | x14 >> 24) & 0xFFFF_FFFF;
+        x9 = x9 + x14 & 0xFFFF_FFFF;
+        x4 = x4 ^ x9;
+        x4 = (x4 << 7 | x4 >> 25) & 0xFFFF_FFFF;
     }
-    bytes out = [];
-    for (int i in 0 .. 16) {
-        push_word_le(out, state[i] + orig[i] & 0xFFFF_FFFF);
-    }
-    return out;
+    out[0] = x0 + state[0] & 0xFFFF_FFFF;
+    out[1] = x1 + state[1] & 0xFFFF_FFFF;
+    out[2] = x2 + state[2] & 0xFFFF_FFFF;
+    out[3] = x3 + state[3] & 0xFFFF_FFFF;
+    out[4] = x4 + state[4] & 0xFFFF_FFFF;
+    out[5] = x5 + state[5] & 0xFFFF_FFFF;
+    out[6] = x6 + state[6] & 0xFFFF_FFFF;
+    out[7] = x7 + state[7] & 0xFFFF_FFFF;
+    out[8] = x8 + state[8] & 0xFFFF_FFFF;
+    out[9] = x9 + state[9] & 0xFFFF_FFFF;
+    out[10] = x10 + state[10] & 0xFFFF_FFFF;
+    out[11] = x11 + state[11] & 0xFFFF_FFFF;
+    out[12] = x12 + state[12] & 0xFFFF_FFFF;
+    out[13] = x13 + state[13] & 0xFFFF_FFFF;
+    out[14] = x14 + state[14] & 0xFFFF_FFFF;
+    out[15] = x15 + state[15] & 0xFFFF_FFFF;
 }
 
+// `state`'s first twelve words (the constant and the key) set from `key`.
 Array<int> chacha20_init(bytes key, bytes nonce, int nonce_length) {
     if (key.size() != 32) {
         trap("chacha20: key must be 32 bytes");
@@ -186,6 +307,88 @@ Array<int> chacha20_init(bytes key, bytes nonce, int nonce_length) {
     return state;
 }
 
+// The IETF layout's state for `key` and the 12-octet `nonce`; word 12 (the
+// counter) is the caller's.
+Array<int> ietf_state(bytes key, bytes nonce) {
+    Array<int> state = chacha20_init(key, nonce, 12);
+    state[13] = word_le(nonce, 0);
+    state[14] = word_le(nonce, 4);
+    state[15] = word_le(nonce, 8);
+    return state;
+}
+
+// The original layout's state for `key` and the 8-octet `nonce`; words 12 and
+// 13 (the 64-bit counter) are the caller's.
+Array<int> openssh_state(bytes key, bytes nonce) {
+    Array<int> state = chacha20_init(key, nonce, 8);
+    state[14] = word_le(nonce, 0);
+    state[15] = word_le(nonce, 4);
+    return state;
+}
+
+// One 64-octet keystream block as bytes, for the state's current words 12-15.
+bytes block_bytes(Array<int> state) {
+    Array<int> words = [0; 16];
+    chacha20_rounds(state, words);
+    bytes out = [0; 64];
+    for (int i in 0 .. 16) {
+        int word = words[i];
+        out[4 * i] = word & 0xFF;
+        out[4 * i + 1] = word >> 8 & 0xFF;
+        out[4 * i + 2] = word >> 16 & 0xFF;
+        out[4 * i + 3] = word >> 24 & 0xFF;
+    }
+    return out;
+}
+
+// `data[0 .. count)` XORed with the keystream of `state`, starting at block
+// `counter`, into `out[0 .. count)` (`out` is at least `count` long and may be
+// `data` itself). `wide` is 1 for the original layout, whose 64-bit counter
+// spans words 12-13, and 0 for the IETF one, whose word 13 is nonce. Whole
+// blocks are XORed word by word; only the last partial block goes octet by
+// octet.
+void chacha20_xor(Array<int> state, int counter, int wide, bytes data, int count, bytes out) {
+    Array<int> stream = [0; 16];
+    int position = 0;
+    int block_index = counter;
+    while (position + 64 <= count) {
+        state[12] = block_index & 0xFFFF_FFFF;
+        if (wide == 1) {
+            state[13] = block_index >> 32 & 0xFFFF_FFFF;
+        }
+        chacha20_rounds(state, stream);
+        for (int i in 0 .. 16) {
+            int word = stream[i] & 0xFFFF_FFFF;
+            int at = position + 4 * i;
+            out[at] = data[at] ^ (word & 0xFF);
+            out[at + 1] = data[at + 1] ^ (word >> 8 & 0xFF);
+            out[at + 2] = data[at + 2] ^ (word >> 16 & 0xFF);
+            out[at + 3] = data[at + 3] ^ (word >> 24 & 0xFF);
+        }
+        position = position + 64;
+        block_index = block_index + 1;
+    }
+    if (position < count) {
+        state[12] = block_index & 0xFFFF_FFFF;
+        if (wide == 1) {
+            state[13] = block_index >> 32 & 0xFFFF_FFFF;
+        }
+        chacha20_rounds(state, stream);
+        int offset = 0;
+        while (position < count) {
+            int word = stream[offset >> 2] & 0xFFFF_FFFF;
+            out[position] = data[position] ^ (word >> ((offset & 3) * 8) & 0xFF);
+            position = position + 1;
+            offset = offset + 1;
+        }
+    }
+}
+
+// How many blocks `byte_count` octets take.
+int blocks_for(int byte_count) {
+    return (byte_count + 63) / 64;
+}
+
 /// The ChaCha20 block function, RFC 8439 §2.3: one 64-octet keystream block
 /// for `key` (32 octets), `counter` (0 to 2^32-1) and `nonce` (12 octets).
 /// `key` or `nonce` at any other length, or `counter` outside its range, is a
@@ -197,12 +400,9 @@ pub bytes block(bytes key, int counter, bytes nonce) {
     if (counter < 0 || counter > 0xFFFF_FFFF) {
         trap("chacha20: counter must fit in 32 bits");
     }
-    Array<int> state = chacha20_init(key, nonce, 12);
+    Array<int> state = ietf_state(key, nonce);
     state[12] = counter;
-    state[13] = word_le(nonce, 0);
-    state[14] = word_le(nonce, 4);
-    state[15] = word_le(nonce, 8);
-    return chacha20_core(state);
+    return block_bytes(state);
 }
 
 /// The ChaCha20 block function, original (pre-IETF) layout: one 64-octet
@@ -217,237 +417,273 @@ pub bytes openssh_block(bytes key, int counter, bytes nonce) {
     if (counter < 0) {
         trap("chacha20: counter must not be negative");
     }
-    Array<int> state = chacha20_init(key, nonce, 8);
+    Array<int> state = openssh_state(key, nonce);
     state[12] = counter & 0xFFFF_FFFF;
     state[13] = counter >> 32 & 0xFFFF_FFFF;
-    state[14] = word_le(nonce, 0);
-    state[15] = word_le(nonce, 4);
-    return chacha20_core(state);
+    return block_bytes(state);
 }
 
 /// ChaCha20 encryption, RFC 8439 §2.4: `data` XORed with the keystream that
 /// `key`, `nonce` and the block counter starting at `counter` produce.
 /// Symmetric -- the same call decrypts, since XOR is its own inverse and the
-/// keystream does not depend on `data`.
+/// keystream does not depend on `data`. Traps like `block` if the counter
+/// would pass 2^32 - 1.
 pub bytes encrypt(bytes key, int counter, bytes nonce, bytes data) {
-    bytes out = [];
-    int data_length = data.size();
-    int block_start = 0;
-    int ctr = counter;
-    while (block_start < data_length) {
-        bytes keystream = block(key, ctr, nonce);
-        int end = block_start + 64;
-        if (end > data_length) {
-            end = data_length;
-        }
-        int byte_position = block_start;
-        while (byte_position < end) {
-            out.push(data[byte_position] ^ keystream[byte_position - block_start]);
-            byte_position = byte_position + 1;
-        }
-        block_start = end;
-        ctr = ctr + 1;
+    if (counter < 0 || counter + blocks_for(data.size()) - 1 > 0xFFFF_FFFF) {
+        trap("chacha20: counter must fit in 32 bits");
     }
+    Array<int> state = ietf_state(key, nonce);
+    bytes out = [0; data.size()];
+    chacha20_xor(state, counter, 0, data, data.size(), out);
+    return out;
+}
+
+/// The same XOR in the original layout (`openssh_block`'s): `data` with the
+/// keystream for `key`, the 8-octet `nonce` and the 64-bit block counter
+/// starting at `counter`. What `chacha20-poly1305@openssh.com` encrypts a
+/// packet body (counter 1) with, without a call per 64 octets.
+pub bytes openssh_encrypt(bytes key, int counter, bytes nonce, bytes data) {
+    if (counter < 0) {
+        trap("chacha20: counter must not be negative");
+    }
+    Array<int> state = openssh_state(key, nonce);
+    bytes out = [0; data.size()];
+    chacha20_xor(state, counter, 1, data, data.size(), out);
     return out;
 }
 
 // --- Poly1305 ----------------------------------------------------------------
 
-// One 16-octet block of the message, folded into the accumulator `accumulator` and
-// reduced back into five 26-bit limbs. `hibit` is `1 << 24` for a full
-// 16-octet block (the implicit 2^128 that RFC 8439 §2.5.1's pseudocode adds
-// before every block) and `0` for the last, short block -- there the
-// trailing `0x01` the caller has already written into `message_block` stands for it
-// instead, because a block shorter than 17 octets has room for that byte and
-// a full one does not. `accumulator`, like `Array<int>` above, is mutated in place.
-void poly1305_block(Array<int> accumulator, int multiplier_0, int multiplier_1, int multiplier_2, int multiplier_3, int multiplier_4, int scaled_1, int scaled_2, int scaled_3, int scaled_4, bytes message_block, int offset, int hibit) {  // RFC 8439 §2.5: r
-    int accumulator_0 = accumulator[0];
-    int accumulator_1 = accumulator[1];
-    int accumulator_2 = accumulator[2];
-    int accumulator_3 = accumulator[3];
-    int accumulator_4 = accumulator[4];
-    int word_0 = word_le(message_block, offset);
-    int word_1 = word_le(message_block, offset + 4);
-    int word_2 = word_le(message_block, offset + 8);
-    int word_3 = word_le(message_block, offset + 12);
-    // The 16-octet block, read as five overlapping 26-bit windows of the
-    // 128-bit little-endian number it is -- the same overlap `r`'s clamp
-    // below reads through, just without a mask on `word_0`/`word_3`'s own extremes.
-    accumulator_0 = accumulator_0 + (word_0 & 0x03FF_FFFF);
-    accumulator_1 = accumulator_1 + ((word_0 >> 26 | word_1 << 6) & 0x03FF_FFFF);
-    accumulator_2 = accumulator_2 + ((word_1 >> 20 | word_2 << 12) & 0x03FF_FFFF);
-    accumulator_3 = accumulator_3 + ((word_2 >> 14 | word_3 << 18) & 0x03FF_FFFF);
-    accumulator_4 = accumulator_4 + (word_3 >> 8 | hibit);
-    // h *= r, mod 2^130 - 5, done a limb at a time: d[i] collects every
-    // partial product that lands in limb i once the polynomial is expanded,
-    // with the wraparound from limb 5 and up folded back in early by using
-    // s[k] = r[k] * 5 in place of r[k] -- valid because 2^130 = 5 (mod p).
-    int product_0 = accumulator_0 * multiplier_0 + accumulator_1 * scaled_4 + accumulator_2 * scaled_3 + accumulator_3 * scaled_2 + accumulator_4 * scaled_1;
-    int product_1 = accumulator_0 * multiplier_1 + accumulator_1 * multiplier_0 + accumulator_2 * scaled_4 + accumulator_3 * scaled_3 + accumulator_4 * scaled_2;
-    int product_2 = accumulator_0 * multiplier_2 + accumulator_1 * multiplier_1 + accumulator_2 * multiplier_0 + accumulator_3 * scaled_4 + accumulator_4 * scaled_3;
-    int product_3 = accumulator_0 * multiplier_3 + accumulator_1 * multiplier_2 + accumulator_2 * multiplier_1 + accumulator_3 * multiplier_0 + accumulator_4 * scaled_4;
-    int product_4 = accumulator_0 * multiplier_4 + accumulator_1 * multiplier_3 + accumulator_2 * multiplier_2 + accumulator_3 * multiplier_1 + accumulator_4 * multiplier_0;
-    // Carry radix-2^26, left to right, folding the final carry back into
-    // limb 0 multiplied by 5 (again, 2^130 = 5 mod p) rather than reducing
-    // all the way -- `accumulator` is left slightly above its five 26-bit limbs when
-    // that carry itself overflows a limb, which `poly1305_finish` accounts
-    // for with its own full carry before serialising.
-    int carry = product_0 >> 26;
-    accumulator_0 = product_0 & 0x03FF_FFFF;
-    product_1 = product_1 + carry;
-    carry = product_1 >> 26;
-    accumulator_1 = product_1 & 0x03FF_FFFF;
-    product_2 = product_2 + carry;
-    carry = product_2 >> 26;
-    accumulator_2 = product_2 & 0x03FF_FFFF;
-    product_3 = product_3 + carry;
-    carry = product_3 >> 26;
-    accumulator_3 = product_3 & 0x03FF_FFFF;
-    product_4 = product_4 + carry;
-    carry = product_4 >> 26;
-    accumulator_4 = product_4 & 0x03FF_FFFF;
-    accumulator_0 = accumulator_0 + carry * 5;
-    carry = accumulator_0 >> 26;
-    accumulator_0 = accumulator_0 & 0x03FF_FFFF;
-    accumulator_1 = accumulator_1 + carry;
-    accumulator[0] = accumulator_0;
-    accumulator[1] = accumulator_1;
-    accumulator[2] = accumulator_2;
-    accumulator[3] = accumulator_3;
-    accumulator[4] = accumulator_4;
+// The accumulator and key, as one array so a segment's blocks can run in one
+// call with everything in locals. Layout: 0-4 the accumulator `h` (five
+// 26-bit limbs), 5-9 the clamped `r` (five limbs), 10-13 `5 * r[1..4]`, 14-17
+// the pad `s` (four 32-bit words).
+//
+// Radix 2^26, not a bignum library -- andrew moon's poly1305-donna 32-bit
+// construction (§2.5's accumulator as five 26-bit limbs rather than one
+// 130-bit number): fixed, input-independent work and no allocation, which is
+// what RFC 8439 §3 asks for. Every product below is a limb below 2^28 times
+// one below 2^29, summed five at a time: under 2^60, far from the 2^63
+// overflow trap even for adversarial input (tests/ssh/t_chacha20poly1305.m31
+// checks RFC 8439 Appendix A.3's eleven vectors built to stress the reduction).
+
+// The state for the one-time key whose eight little-endian words are `k0` to
+// `k7`: `r` in the first four, clamped and split into limbs in one step (each
+// limb a shifted, masked read of the 128-bit number; the mask is also RFC 8439
+// §2.5.1's clamp for the bits it keeps), `s` in the last four.
+Array<int> poly_start(int k0, int k1, int k2, int k3, int k4, int k5, int k6, int k7) {
+    Array<int> p = [0; 18];
+    int r1 = (k0 >> 26 | k1 << 6) & 0x03FF_FF03;
+    int r2 = (k1 >> 20 | k2 << 12) & 0x03FF_C0FF;
+    int r3 = (k2 >> 14 | k3 << 18) & 0x03F0_3FFF;
+    int r4 = k3 >> 8 & 0x000F_FFFF;
+    p[5] = k0 & 0x03FF_FFFF;
+    p[6] = r1;
+    p[7] = r2;
+    p[8] = r3;
+    p[9] = r4;
+    p[10] = r1 * 5;
+    p[11] = r2 * 5;
+    p[12] = r3 * 5;
+    p[13] = r4 * 5;
+    p[14] = k4;
+    p[15] = k5;
+    p[16] = k6;
+    p[17] = k7;
+    return p;
+}
+
+// `block_count` whole 16-octet blocks of `data` from `start`, folded into the
+// accumulator in `p` and reduced back into (nearly) five 26-bit limbs. `hibit`
+// is `1 << 24` for a full block (the implicit 2^128 that RFC 8439 §2.5.1's
+// pseudocode adds before every block) and `0` for the last, short block of a
+// bare `mac`, where the trailing `0x01` the caller already wrote stands for
+// it. The accumulator is left slightly above five 26-bit limbs when the final
+// carry itself overflows a limb, which `poly_finish`'s own full carry accounts for.
+void poly_blocks(Array<int> p, bytes data, int start, int block_count, int hibit) {
+    int h0 = p[0];
+    int h1 = p[1];
+    int h2 = p[2];
+    int h3 = p[3];
+    int h4 = p[4];
+    int r0 = p[5];
+    int r1 = p[6];
+    int r2 = p[7];
+    int r3 = p[8];
+    int r4 = p[9];
+    int s1 = p[10];
+    int s2 = p[11];
+    int s3 = p[12];
+    int s4 = p[13];
+    int offset = start;
+    for (int index in 0 .. block_count) {
+        int word_0 = data[offset] | (data[offset + 1] << 8) | (data[offset + 2] << 16) | (data[offset + 3] << 24);
+        int word_1 = data[offset + 4] | (data[offset + 5] << 8) | (data[offset + 6] << 16) | (data[offset + 7] << 24);
+        int word_2 = data[offset + 8] | (data[offset + 9] << 8) | (data[offset + 10] << 16) | (data[offset + 11] << 24);
+        int word_3 = data[offset + 12] | (data[offset + 13] << 8) | (data[offset + 14] << 16) | (data[offset + 15] << 24);
+        // The block as five overlapping 26-bit windows of the 128-bit
+        // little-endian number it is.
+        h0 = h0 + (word_0 & 0x03FF_FFFF);
+        h1 = h1 + ((word_0 >> 26 | word_1 << 6) & 0x03FF_FFFF);
+        h2 = h2 + ((word_1 >> 20 | word_2 << 12) & 0x03FF_FFFF);
+        h3 = h3 + ((word_2 >> 14 | word_3 << 18) & 0x03FF_FFFF);
+        h4 = h4 + (word_3 >> 8 | hibit);
+        // h *= r, mod 2^130 - 5, a limb at a time: d[i] collects every
+        // partial product that lands in limb i, the wraparound from limb 5 and
+        // up folded back in by using s[k] = 5 * r[k] (2^130 = 5 mod p).
+        int d0 = h0.wrapping_mul(r0).wrapping_add(h1.wrapping_mul(s4)).wrapping_add(h2.wrapping_mul(s3)).wrapping_add(h3.wrapping_mul(s2)).wrapping_add(h4.wrapping_mul(s1));
+        int d1 = h0.wrapping_mul(r1).wrapping_add(h1.wrapping_mul(r0)).wrapping_add(h2.wrapping_mul(s4)).wrapping_add(h3.wrapping_mul(s3)).wrapping_add(h4.wrapping_mul(s2));
+        int d2 = h0.wrapping_mul(r2).wrapping_add(h1.wrapping_mul(r1)).wrapping_add(h2.wrapping_mul(r0)).wrapping_add(h3.wrapping_mul(s4)).wrapping_add(h4.wrapping_mul(s3));
+        int d3 = h0.wrapping_mul(r3).wrapping_add(h1.wrapping_mul(r2)).wrapping_add(h2.wrapping_mul(r1)).wrapping_add(h3.wrapping_mul(r0)).wrapping_add(h4.wrapping_mul(s4));
+        int d4 = h0.wrapping_mul(r4).wrapping_add(h1.wrapping_mul(r3)).wrapping_add(h2.wrapping_mul(r2)).wrapping_add(h3.wrapping_mul(r1)).wrapping_add(h4.wrapping_mul(r0));
+        // Carry radix-2^26, left to right, the last carry folded back into
+        // limb 0 times 5 (again 2^130 = 5 mod p).
+        int carry = d0 >> 26;
+        h0 = d0 & 0x03FF_FFFF;
+        d1 = d1 + carry;
+        carry = d1 >> 26;
+        h1 = d1 & 0x03FF_FFFF;
+        d2 = d2 + carry;
+        carry = d2 >> 26;
+        h2 = d2 & 0x03FF_FFFF;
+        d3 = d3 + carry;
+        carry = d3 >> 26;
+        h3 = d3 & 0x03FF_FFFF;
+        d4 = d4 + carry;
+        carry = d4 >> 26;
+        h4 = d4 & 0x03FF_FFFF;
+        h0 = h0 + carry * 5;
+        carry = h0 >> 26;
+        h0 = h0 & 0x03FF_FFFF;
+        h1 = h1 + carry;
+        offset = offset + 16;
+    }
+    p[0] = h0;
+    p[1] = h1;
+    p[2] = h2;
+    p[3] = h3;
+    p[4] = h4;
+}
+
+// `data[start .. end)` folded in: whole blocks straight from `data`, a last
+// partial block copied into a zeroed 16-octet buffer. `terminated` is 1 for a
+// bare `mac` (RFC 8439 §2.5.1: a `0x01` octet after the message, no implicit
+// high bit) and 0 for the AEAD's segments (§2.8: zero padding to 16, then
+// every block, the padded one included, carries the high bit).
+void poly_feed(Array<int> p, bytes data, int start, int end, int terminated) {
+    int whole = (end - start) / 16;
+    poly_blocks(p, data, start, whole, 1 << 24);
+    int taken = start + whole * 16;
+    if (taken < end) {
+        bytes last = [0; 16];
+        for (int i in 0 .. end - taken) {
+            last[i] = data[taken + i];
+        }
+        if (terminated == 1) {
+            last[end - taken] = 1;
+            poly_blocks(p, last, 0, 1, 0);
+        } else {
+            poly_blocks(p, last, 0, 1, 1 << 24);
+        }
+    }
+}
+
+// The 16-octet tag: the full carry `poly_blocks` leaves undone, the final
+// reduction mod 2^130 - 5, then (h + s) mod 2^128.
+bytes poly_finish(Array<int> p) {
+    int h0 = p[0];
+    int h1 = p[1];
+    int h2 = p[2];
+    int h3 = p[3];
+    int h4 = p[4];
+    int carry = h1 >> 26;
+    h1 = h1 & 0x03FF_FFFF;
+    h2 = h2 + carry;
+    carry = h2 >> 26;
+    h2 = h2 & 0x03FF_FFFF;
+    h3 = h3 + carry;
+    carry = h3 >> 26;
+    h3 = h3 & 0x03FF_FFFF;
+    h4 = h4 + carry;
+    carry = h4 >> 26;
+    h4 = h4 & 0x03FF_FFFF;
+    h0 = h0 + carry * 5;
+    carry = h0 >> 26;
+    h0 = h0 & 0x03FF_FFFF;
+    h1 = h1 + carry;
+    // `h` is below 2*p but may still be at or past p (RFC 8439's own "P" =
+    // 2^130-5): compute h - p alongside h, and keep whichever of the two is
+    // actually less than p. `g4`'s top bit (bit 31 of its 32-bit range) is 1
+    // exactly when `h - p` borrowed, i.e. exactly when h was already below p.
+    int g0 = h0 + 5;  // RFC 8439 §2.5.1: h - P
+    carry = g0 >> 26;
+    g0 = g0 & 0x03FF_FFFF;
+    int g1 = h1 + carry;  // RFC 8439 §2.5.1: h - P
+    carry = g1 >> 26;
+    g1 = g1 & 0x03FF_FFFF;
+    int g2 = h2 + carry;  // RFC 8439 §2.5.1: h - P
+    carry = g2 >> 26;
+    g2 = g2 & 0x03FF_FFFF;
+    int g3 = h3 + carry;  // RFC 8439 §2.5.1: h - P
+    carry = g3 >> 26;
+    g3 = g3 & 0x03FF_FFFF;
+    int g4 = h4 + carry - (1 << 26) & 0xFFFF_FFFF;  // RFC 8439 §2.5.1: h - P
+    // `bit - 1` is all-zero bits when `bit` is 1 and all-one bits when `bit`
+    // is 0 (two's complement -1), which turns the single bit into the two
+    // masks below -- an arithmetic recreation of the branch so both paths
+    // take the same time regardless of which one the result needs.
+    int mask = (g4 >> 31 & 1) - 1 & 0xFFFF_FFFF;
+    int notmask = ~mask & 0xFFFF_FFFF;
+    h0 = h0 & notmask | g0 & mask;
+    h1 = h1 & notmask | g1 & mask;
+    h2 = h2 & notmask | g2 & mask;
+    h3 = h3 & notmask | g3 & mask;
+    h4 = h4 & notmask | g4 & mask;
+    // Five 26-bit limbs back to four 32-bit words, then tag = (h + s) mod
+    // 2^128: a 128-bit little-endian add, each carry taken from the previous
+    // word's overflow past 32 bits.
+    int tag_0 = (h0 | h1 << 26) & 0xFFFF_FFFF;
+    int tag_1 = (h1 >> 6 | h2 << 20) & 0xFFFF_FFFF;
+    int tag_2 = (h2 >> 12 | h3 << 14) & 0xFFFF_FFFF;
+    int tag_3 = (h3 >> 18 | h4 << 8) & 0xFFFF_FFFF;
+    int word_sum = tag_0 + p[14];
+    tag_0 = word_sum & 0xFFFF_FFFF;
+    word_sum = tag_1 + p[15] + (word_sum >> 32);
+    tag_1 = word_sum & 0xFFFF_FFFF;
+    word_sum = tag_2 + p[16] + (word_sum >> 32);
+    tag_2 = word_sum & 0xFFFF_FFFF;
+    word_sum = tag_3 + p[17] + (word_sum >> 32);
+    tag_3 = word_sum & 0xFFFF_FFFF;
+    bytes out = [0; 16];
+    for (int i in 0 .. 4) {
+        int word = tag_0;
+        if (i == 1) {
+            word = tag_1;
+        } else if (i == 2) {
+            word = tag_2;
+        } else if (i == 3) {
+            word = tag_3;
+        }
+        out[4 * i] = word & 0xFF;
+        out[4 * i + 1] = word >> 8 & 0xFF;
+        out[4 * i + 2] = word >> 16 & 0xFF;
+        out[4 * i + 3] = word >> 24 & 0xFF;
+    }
+    return out;
 }
 
 /// The Poly1305 tag, RFC 8439 §2.5: 16 octets, for a 32-octet one-time `key`
 /// (`r` in its first 16 octets, `s` in its last, clamped and applied exactly
-/// as §2.5.1 specifies) and an arbitrary-length `message`.
+/// as §2.5.1 specifies) and an arbitrary-length `message`. An **empty**
+/// message gets no block at all -- RFC 8439 §2.5.1's loop runs `ceil(0 / 16)`
+/// times, so the tag is `s` alone.
 pub bytes mac(bytes key, bytes message) {
     if (key.size() != 32) {
         trap("poly1305: key must be 32 bytes");
     }
-    // `r`, clamped (RFC 8439 §2.5.1) and split into five 26-bit limbs in one
-    // step: each limb is an overlapping 32-bit read of the 16-octet `r`,
-    // shifted down and masked, and the mask already carries the clamp's
-    // "top four bits clear" / "bottom two bits clear" requirement for the
-    // bits it keeps -- verified equal to clamp-then-split over 2000 random
-    // keys while this was developed (see the report).
-    int multiplier_0 = word_le(key, 0) & 0x03FF_FFFF;  // RFC 8439 §2.5: r
-    int multiplier_1 = word_le(key, 3) >> 2 & 0x03FF_FF03;  // RFC 8439 §2.5: r
-    int multiplier_2 = word_le(key, 6) >> 4 & 0x03FF_C0FF;  // RFC 8439 §2.5: r
-    int multiplier_3 = word_le(key, 9) >> 6 & 0x03F0_3FFF;  // RFC 8439 §2.5: r
-    int multiplier_4 = word_le(key, 12) >> 8 & 0x000F_FFFF;  // RFC 8439 §2.5: r
-    int scaled_1 = multiplier_1 * 5;
-    int scaled_2 = multiplier_2 * 5;
-    int scaled_3 = multiplier_3 * 5;
-    int scaled_4 = multiplier_4 * 5;
-    int pad0 = word_le(key, 16);
-    int pad1 = word_le(key, 20);
-    int pad2 = word_le(key, 24);
-    int pad3 = word_le(key, 28);
-    Array<int> accumulator = [0, 0, 0, 0, 0];  // RFC 8439 §2.5: h
-    int message_length = message.size();
-    int offset = 0;
-    while (message_length - offset >= 16) {
-        poly1305_block(accumulator, multiplier_0, multiplier_1, multiplier_2, multiplier_3, multiplier_4, scaled_1, scaled_2, scaled_3, scaled_4, message, offset, 1 << 24);
-        offset = offset + 16;
-    }
-    if (offset < message_length) {
-        // The final, short block: the real octets, a `0x01` marking where
-        // they end, then zeros out to 16 -- RFC 8439 §2.5.1's "add one bit
-        // beyond the number of octets", spelled as a byte because it always
-        // lands inside this block (it is at most 16 octets, with room for
-        // one more). `hibit` is 0 here; see `poly1305_block`'s note.
-        //
-        // An **empty** message gets no block at all, full stop -- not even
-        // this one: RFC 8439 §2.5.1's loop runs `ceil(0 / 16)` times, which
-        // is zero, so the tag is `s` alone. `i < n` already says exactly
-        // that (`0 < 0` is false) and needs no `|| n == 0` beside it; an
-        // earlier draft had one, on the mistaken worry that an empty message
-        // needed *some* block to fold `s` in -- it does not, `s` is added
-        // once at the end regardless -- and it was caught by this file's own
-        // length sweep, in the very first case, disagreeing with both the
-        // bignum reference and `cryptography`'s Poly1305 on `mac(key, "")`.
-        bytes last = message.substr(offset, message_length);
-        last.push(1);
-        while (last.size() < 16) {
-            last.push(0);
-        }
-        poly1305_block(accumulator, multiplier_0, multiplier_1, multiplier_2, multiplier_3, multiplier_4, scaled_1, scaled_2, scaled_3, scaled_4, last, 0, 0);
-    }
-    int accumulator_0 = accumulator[0];
-    int accumulator_1 = accumulator[1];
-    int accumulator_2 = accumulator[2];
-    int accumulator_3 = accumulator[3];
-    int accumulator_4 = accumulator[4];
-    // The full carry `poly1305_block` leaves undone, so every limb is
-    // exactly 26 bits before the final reduction below reasons about them.
-    int carry = accumulator_1 >> 26;
-    accumulator_1 = accumulator_1 & 0x03FF_FFFF;
-    accumulator_2 = accumulator_2 + carry;
-    carry = accumulator_2 >> 26;
-    accumulator_2 = accumulator_2 & 0x03FF_FFFF;
-    accumulator_3 = accumulator_3 + carry;
-    carry = accumulator_3 >> 26;
-    accumulator_3 = accumulator_3 & 0x03FF_FFFF;
-    accumulator_4 = accumulator_4 + carry;
-    carry = accumulator_4 >> 26;
-    accumulator_4 = accumulator_4 & 0x03FF_FFFF;
-    accumulator_0 = accumulator_0 + carry * 5;
-    carry = accumulator_0 >> 26;
-    accumulator_0 = accumulator_0 & 0x03FF_FFFF;
-    accumulator_1 = accumulator_1 + carry;
-    // `accumulator` is below 2*p but may still be at or past p (RFC 8439's own
-    // "P" = 2^130-5): compute h - p alongside h, and keep whichever of the
-    // two is actually less than p. `difference_4`'s top bit (bit 31 of its 32-bit
-    // range) is 1 exactly when `h - p` borrowed, i.e. exactly when h was
-    // already below p, which is when `accumulator` (not `g`) is the answer.
-    int difference_0 = accumulator_0 + 5;  // RFC 8439 §2.5.1: h - P
-    carry = difference_0 >> 26;
-    difference_0 = difference_0 & 0x03FF_FFFF;
-    int difference_1 = accumulator_1 + carry;  // RFC 8439 §2.5.1: h - P
-    carry = difference_1 >> 26;
-    difference_1 = difference_1 & 0x03FF_FFFF;
-    int difference_2 = accumulator_2 + carry;  // RFC 8439 §2.5.1: h - P
-    carry = difference_2 >> 26;
-    difference_2 = difference_2 & 0x03FF_FFFF;
-    int difference_3 = accumulator_3 + carry;  // RFC 8439 §2.5.1: h - P
-    carry = difference_3 >> 26;
-    difference_3 = difference_3 & 0x03FF_FFFF;
-    int difference_4 = accumulator_4 + carry - (1 << 26) & 0xFFFF_FFFF;  // RFC 8439 §2.5.1: h - P
-    // `bit - 1` is all-zero bits when `bit` is 1 and all-one bits when `bit`
-    // is 0 (two's complement -1), which turns the single bit into the two
-    // masks below need -- an arithmetic recreation of the branch so the two
-    // 26-bit-limb paths take the same time regardless of which one the
-    // result needs, matching the constant-time discipline this module's
-    // header describes.
-    int mask = (difference_4 >> 31 & 1) - 1 & 0xFFFF_FFFF;
-    int notmask = ~mask & 0xFFFF_FFFF;
-    accumulator_0 = accumulator_0 & notmask | difference_0 & mask;
-    accumulator_1 = accumulator_1 & notmask | difference_1 & mask;
-    accumulator_2 = accumulator_2 & notmask | difference_2 & mask;
-    accumulator_3 = accumulator_3 & notmask | difference_3 & mask;
-    accumulator_4 = accumulator_4 & notmask | difference_4 & mask;
-    // Five 26-bit limbs back to four 32-bit words.
-    int tag_word_0 = (accumulator_0 | accumulator_1 << 26) & 0xFFFF_FFFF;
-    int tag_word_1 = (accumulator_1 >> 6 | accumulator_2 << 20) & 0xFFFF_FFFF;
-    int tag_word_2 = (accumulator_2 >> 12 | accumulator_3 << 14) & 0xFFFF_FFFF;
-    int tag_word_3 = (accumulator_3 >> 18 | accumulator_4 << 8) & 0xFFFF_FFFF;
-    // Finally, tag = (h + s) mod 2^128 -- a 128-bit little-endian add, one
-    // word at a time, each carry taken from the previous word's overflow
-    // past 32 bits rather than masked away.
-    int word_sum = tag_word_0 + pad0;
-    tag_word_0 = word_sum & 0xFFFF_FFFF;
-    word_sum = tag_word_1 + pad1 + (word_sum >> 32);
-    tag_word_1 = word_sum & 0xFFFF_FFFF;
-    word_sum = tag_word_2 + pad2 + (word_sum >> 32);
-    tag_word_2 = word_sum & 0xFFFF_FFFF;
-    word_sum = tag_word_3 + pad3 + (word_sum >> 32);
-    tag_word_3 = word_sum & 0xFFFF_FFFF;
-    bytes out = [];
-    push_word_le(out, tag_word_0);
-    push_word_le(out, tag_word_1);
-    push_word_le(out, tag_word_2);
-    push_word_le(out, tag_word_3);
-    return out;
+    Array<int> p = poly_start(word_le(key, 0), word_le(key, 4), word_le(key, 8), word_le(key, 12), word_le(key, 16), word_le(key, 20), word_le(key, 24), word_le(key, 28));
+    poly_feed(p, message, 0, message.size(), 1);
+    return poly_finish(p);
 }
 
 // --- the AEAD construction ---------------------------------------------------
@@ -480,41 +716,25 @@ pub str Error.to_str() {
     }
 }
 
-// Zero octets appended until `out`'s length is a multiple of 16 -- RFC 8439
-// §2.8.1's `pad16`, done in place rather than returned since every caller
-// immediately extends with the padding it computes.
-void pad16(bytes out) {
-    while (out.size() % 16 != 0) {
-        out.push(0);
+// The Poly1305 state for the AEAD over `aad` and `ciphertext[0 .. ciphertext_length)`:
+// one-time key from block 0 of `state`, then RFC 8439 §2.8's `mac_data` fed
+// segment by segment (`aad`, padded to 16; the ciphertext, padded to 16; the
+// two lengths, 8 octets each) instead of being copied into one buffer first.
+Array<int> aead_state(Array<int> state, bytes aad, bytes ciphertext, int ciphertext_length) {
+    Array<int> words = [0; 16];
+    state[12] = 0;
+    chacha20_rounds(state, words);
+    Array<int> p = poly_start(words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7]);
+    poly_feed(p, aad, 0, aad.size(), 0);
+    poly_feed(p, ciphertext, 0, ciphertext_length, 0);
+    bytes lengths = [0; 16];
+    int aad_length = aad.size();
+    for (int i in 0 .. 8) {
+        lengths[i] = aad_length >> (8 * i) & 0xFF;
+        lengths[8 + i] = ciphertext_length >> (8 * i) & 0xFF;
     }
-}
-
-// `length`, as an 8-octet little-endian length field -- RFC 8439 §2.8's
-// "num_to_8_le_bytes". `length` is always a `size()`, so never negative and never
-// close to where a logical-shift distinction from this language's
-// arithmetic `>>` (reference §6.1) could matter, for the reason
-// `byte_at` documents above.
-void push_length(bytes out, int length) {
-    int shift = 0;
-    while (shift < 64) {
-        out.push(byte_at(length, shift));
-        shift = shift + 8;
-    }
-}
-
-// The buffer Poly1305 authenticates -- RFC 8439 §2.8's `mac_data`: `aad`,
-// padded to 16; `ciphertext`, padded to 16; then both lengths, 8 octets each.
-// Shared between `seal` and `open` because it is defined once, over the
-// ciphertext, on both sides of the RFC's own description of decryption.
-bytes aead_buffer(bytes aad, bytes ciphertext) {
-    bytes buffer = [];
-    buffer.extend(aad);
-    pad16(buffer);
-    buffer.extend(ciphertext);
-    pad16(buffer);
-    push_length(buffer, aad.size());
-    push_length(buffer, ciphertext.size());
-    return buffer;
+    poly_blocks(p, lengths, 0, 1, 1 << 24);
+    return p;
 }
 
 /// Encrypt and authenticate: RFC 8439 §2.8, `AEAD_CHACHA20_POLY1305`'s
@@ -523,17 +743,23 @@ bytes aead_buffer(bytes aad, bytes ciphertext) {
 /// any length otherwise. The result is `plaintext`'s length plus 16 --
 /// ciphertext, then the tag.
 pub bytes seal(bytes key, bytes nonce, bytes plaintext, bytes aad) {
-    bytes otk = key_gen(key, nonce);
-    bytes ciphertext = encrypt(key, 1, nonce, plaintext);
-    bytes tag = mac(otk, aead_buffer(aad, ciphertext));
-    bytes out = [];
-    out.extend(ciphertext);
-    out.extend(tag);
+    int length = plaintext.size();
+    if (blocks_for(length) > 0xFFFF_FFFF - 1) {
+        trap("chacha20: counter must fit in 32 bits");
+    }
+    Array<int> state = ietf_state(key, nonce);
+    bytes out = [0; length + 16];
+    chacha20_xor(state, 1, 0, plaintext, length, out);
+    Array<int> p = aead_state(state, aad, out, length);
+    bytes tag = poly_finish(p);
+    for (int i in 0 .. 16) {
+        out[length + i] = tag[i];
+    }
     return out;
 }
 
-/// Verify and decrypt: RFC 8439 §2.8's other direction. `Err(Error.Short)`
-/// if `sealed` is not even long enough to hold a tag; `Err(Error.Tag)` if the
+/// Verify and decrypt: RFC 8439 §2.8's other direction. `Err(Error.Short)` if
+/// `sealed` is not even long enough to hold a tag; `Err(Error.Tag)` if the
 /// tag does not match -- in which case nothing about `sealed` should be
 /// trusted, `aad` included, and this returns before decrypting anything.
 /// `key` and `nonce` follow `seal`'s rule about length.
@@ -541,13 +767,14 @@ pub Result<bytes, Error> open(bytes key, bytes nonce, bytes sealed, bytes aad) {
     if (sealed.size() < 16) {
         return Result<bytes, Error>.Err(Error.Short);
     }
-    int ciphertext_length = sealed.size() - 16;
-    bytes ciphertext = sealed.substr(0, ciphertext_length);
-    bytes tag = sealed.substr(ciphertext_length, sealed.size());
-    bytes otk = key_gen(key, nonce);
-    bytes want = mac(otk, aead_buffer(aad, ciphertext));
-    if (!consttime.is_equal(want, tag)) {
+    int length = sealed.size() - 16;
+    Array<int> state = ietf_state(key, nonce);
+    Array<int> p = aead_state(state, aad, sealed, length);
+    bytes want = poly_finish(p);
+    if (!consttime.is_equal(want, sealed.substr(length, sealed.size()))) {
         return Result<bytes, Error>.Err(Error.Tag);
     }
-    return Result<bytes, Error>.Ok(encrypt(key, 1, nonce, ciphertext));
+    bytes out = [0; length];
+    chacha20_xor(state, 1, 0, sealed, length, out);
+    return Result<bytes, Error>.Ok(out);
 }
