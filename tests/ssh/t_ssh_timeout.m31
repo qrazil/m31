@@ -14,6 +14,10 @@ import os;
 //   exec-after       connect without a timeout, then
 //                    Session.set_read_timeout(800), `sleep 8`:
 //                    "read-timed-out"
+//   exec-trickle     connect(timeout_ms: 800), `seq 1 200000` through a proxy that
+//                    passes the handshake and then trickles a byte every
+//                    250 ms: no single wait ever times out, the packet as a
+//                    whole must: "read-timed-out"
 //   exec-fast        connect(timeout_ms: 800), `echo hi`: "hi" and exit 0,
 //                    which a timeout that fired early would not give
 //   exec-slow-ok     connect(timeout_ms: 2000), `sleep 1; echo done`: "done"
@@ -113,7 +117,7 @@ str hosts = argv[5];
 int timeout = 0;
 if (mode == "connect-silent") {
     timeout = 600;
-} else if (mode == "exec-stall" || mode == "exec-fast") {
+} else if (mode == "exec-stall" || mode == "exec-fast" || mode == "exec-trickle") {
     timeout = 800;
 } else if (mode == "exec-slow-ok") {
     timeout = 2000;
@@ -130,7 +134,9 @@ match (sshclient.connect("127.0.0.1", port, user, key, hosts, timeout_ms: timeou
             }
         }
         str command = "echo hi";
-        if (mode == "exec-stall" || mode == "exec-after") {
+        if (mode == "exec-trickle") {
+            command = "seq 1 200000";
+        } else if (mode == "exec-stall" || mode == "exec-after") {
             command = "sleep 8";
         } else if (mode == "exec-slow-ok") {
             command = "sleep 1; echo done";

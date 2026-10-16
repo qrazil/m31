@@ -101,6 +101,7 @@ import crypto.ecdsa;
 import crypto.rsa;
 import crypto.sha512;
 import random;
+import timer;
 import encoding.base64;
 import ssh.sshcipher;
 
@@ -537,7 +538,11 @@ pub int PollWire.fileno() {
 // Reads exactly `byte_count` bytes from `connection`, looping over `net.Conn.read`'s own
 // "1..n bytes, no exact-read primitive" contract. A 0-length read before `byte_count`
 // bytes have arrived means the peer is gone.
-Result<bytes, Error> read_exact(Wire connection, int byte_count) {
+//
+// With `deadline_ns` above 0 (a `timer.monotonic_ns` time) the whole read has
+// until then, not each chunk: a peer that sends one byte just inside every
+// per-read timeout cannot hold the reader for ever.
+Result<bytes, Error> read_exact(Wire connection, int byte_count, int deadline_ns = 0) {
     bytes out = [];
     while (out.size() < byte_count) {
         match (connection.read(byte_count - out.size())) {
@@ -546,6 +551,9 @@ Result<bytes, Error> read_exact(Wire connection, int byte_count) {
                     return Result<bytes, Error>.Err(Error.Io);
                 }
                 out.extend(chunk);
+                if (deadline_ns > 0 && out.size() < byte_count && timer.monotonic_ns() > deadline_ns) {
+                    return Result<bytes, Error>.Err(Error.TimedOut);
+                }
             }
             case Err(io.Error cause): {
                 return Result<bytes, Error>.Err(failure_of(cause));
@@ -1271,8 +1279,12 @@ Result<bytes, Error> cipher_result(Result<bytes, sshcipher.Error> result) {
 
 // One packet off the wire through `cipher`: the header, the length check,
 // the rest, then open (which authenticates before it trusts anything).
-Result<bytes, Error> recv_ciphered_payload(Wire connection, sshcipher.Cipher cipher, int seq) {
+Result<bytes, Error> recv_ciphered_payload(Wire connection, sshcipher.Cipher cipher, int seq, int budget_ms = 0) {
     bytes header = read_exact(connection, cipher.header_size())?;
+    int deadline_ns = 0;
+    if (budget_ms > 0) {
+        deadline_ns = timer.monotonic_ns() + budget_ms * 1000000;
+    }
     int remaining = 0;
     match (cipher.remaining(header, seq)) {
         case Ok(int count): {
@@ -1282,7 +1294,7 @@ Result<bytes, Error> recv_ciphered_payload(Wire connection, sshcipher.Cipher cip
             return Result<bytes, Error>.Err(Error.BadPacketLength);
         }
     }
-    bytes rest = read_exact(connection, remaining)?;
+    bytes rest = read_exact(connection, remaining, deadline_ns: deadline_ns)?;
     return cipher_result(cipher.open(header, rest, seq));
 }
 
@@ -1334,6 +1346,8 @@ pub type Transport {
     int rekey_limit;
     List<bytes> queued;
     bool is_rekeying;
+    // The read timeout also bounds the body of one packet in total.
+    int read_budget_ms;
 }
 
 /// This connection's first exchange hash `H`, the session identifier for
@@ -1382,7 +1396,7 @@ pub Result<bytes, Error> Transport.recv_once() {
         queued.remove_at(0);
         return Result<bytes, Error>.Ok(first);
     }
-    bytes payload = recv_ciphered_payload(connection, recv_cipher, recv_seq)?;
+    bytes payload = recv_ciphered_payload(connection, recv_cipher, recv_seq, budget_ms: read_budget_ms)?;
     recv_seq = recv_seq + 1;
     traffic = traffic + payload.size();
     if (payload.size() == 0) {
@@ -1418,7 +1432,7 @@ Result<void, Error> Transport.emit(bytes payload) {
 // skipped, DISCONNECT ends it, anything else is returned.
 Result<bytes, Error> Transport.recv_for_rekey() {
     while (true) {
-        bytes payload = recv_ciphered_payload(connection, recv_cipher, recv_seq)?;
+        bytes payload = recv_ciphered_payload(connection, recv_cipher, recv_seq, budget_ms: read_budget_ms)?;
         recv_seq = recv_seq + 1;
         if (payload.size() == 0) {
             return Result<bytes, Error>.Err(Error.Truncated);
@@ -1525,6 +1539,7 @@ pub Result<bytes, Error> Transport.recv() {
 ///
 /// A negative `timeout_ms` traps, as `net.Conn.set_read_timeout` does.
 pub Result<void, Error> Transport.set_read_timeout(int timeout_ms) {
+    read_budget_ms = timeout_ms;
     match (connection.set_read_timeout(timeout_ms)) {
         case Ok(bool is_set): {
             return Result<void, Error>.Ok;
@@ -1804,7 +1819,7 @@ Result<Transport, Error> finish_handshake(Wire connection, Exchange exchange, ra
         send_seq = 0;
         recv_seq = 0;
     }
-    return Result<Transport, Error>.Ok(Transport(connection, send_seq, recv_seq, send_cipher, recv_cipher, exchange.exchange_digest, rng, exchange.suite, exchange.versions, exchange.offer, exchange.host_key.blob, 0, DEFAULT_REKEY_LIMIT, [], false));
+    return Result<Transport, Error>.Ok(Transport(connection, send_seq, recv_seq, send_cipher, recv_cipher, exchange.exchange_digest, rng, exchange.suite, exchange.versions, exchange.offer, exchange.host_key.blob, 0, DEFAULT_REKEY_LIMIT, [], false, 0));
 }
 
 /// What decides, mid-handshake, whether the server's host key is trusted:
@@ -1836,7 +1851,9 @@ pub Result<Transport, Error> connect_with_offer(Wire connection, HostKeyCheck ch
     if (!check.is_acceptable(exchange.host_key)) {
         return Result<Transport, Error>.Err(Error.HostKeyMismatch);
     }
-    return finish_handshake(connection, exchange, rng);
+    Transport transport = finish_handshake(connection, exchange, rng)?;
+    transport.read_budget_ms = timeout_ms;
+    return Result<Transport, Error>.Ok(transport);
 }
 
 /// `connect_with_offer` with `default_offer()`.

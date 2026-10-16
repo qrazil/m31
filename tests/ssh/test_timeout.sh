@@ -32,6 +32,7 @@ fail=0
 cleanup() {
     [ -n "$server_pid" ] && kill "$server_pid" >/dev/null 2>&1
     [ -n "$silent_pid" ] && kill "$silent_pid" >/dev/null 2>&1
+    [ -n "$trickle_pid" ] && kill "$trickle_pid" >/dev/null 2>&1
     wait 2>/dev/null
     rm -rf "$WORK"
 }
@@ -51,6 +52,8 @@ cp "$WORK/user_key.pub" "$WORK/authorized_keys"
 USER_NAME=$(id -un)
 PORT=$((20000 + (RANDOM % 20000)))
 SILENT=$((PORT + 1))
+TRICKLE=$((PORT + 2))
+trickle_pid=""
 printf '[127.0.0.1]:%s %s %s\n' "$PORT" $(cut -d' ' -f1,2 "$WORK/host_key.pub") >"$WORK/kh"
 # Any file will do for the silent peer: the key is loaded first, the
 # known_hosts file is read, and then nothing ever answers the handshake.
@@ -87,7 +90,51 @@ while True:
 PY
 silent_pid=$!
 
-for p in "$PORT" "$SILENT"; do
+printf '[127.0.0.1]:%s %s %s\n' "$TRICKLE" $(cut -d' ' -f1,2 "$WORK/host_key.pub") >>"$WORK/kh"
+# A proxy to the real sshd that relays freely until 6000 bytes have come back
+# (the handshake and authentication), then passes one byte every 250 ms.
+python3 -I - "$TRICKLE" "$PORT" <<'PY' &
+import socket, sys, threading, time
+listen_port, target = int(sys.argv[1]), int(sys.argv[2])
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", listen_port))
+s.listen(8)
+def serve(c):
+    t = socket.create_connection(("127.0.0.1", target))
+    def up():
+        try:
+            while True:
+                d = c.recv(65536)
+                if not d:
+                    break
+                t.sendall(d)
+        except OSError:
+            pass
+    threading.Thread(target=up, daemon=True).start()
+    seen = 0
+    try:
+        while True:
+            d = t.recv(65536)
+            if not d:
+                break
+            for i in range(len(d)):
+                if seen >= 6000:
+                    time.sleep(0.25)
+                c.sendall(d[i:i + 1] if seen >= 6000 else d[i:])
+                if seen < 6000:
+                    seen += len(d)
+                    break
+                seen += 1
+    except OSError:
+        pass
+while True:
+    c, _ = s.accept()
+    threading.Thread(target=serve, args=(c,), daemon=True).start()
+PY
+trickle_pid=$!
+
+for p in "$PORT" "$SILENT" "$TRICKLE"; do
     up=0
     for _ in $(seq 1 100); do
         if (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
@@ -133,6 +180,7 @@ check() { # label, mode, port, expected word, min ms, max ms
 check "silent peer, handshake timeout 600 ms"    connect-silent "$SILENT" connect-timed-out 500 4000
 check "sleep 8 on sshd, connect timeout 800 ms"  exec-stall    "$PORT"   read-timed-out    700 5000
 check "sleep 8 on sshd, set_read_timeout 800 ms" exec-after    "$PORT"   read-timed-out    700 5000
+check "trickled packet, one byte per 250 ms, timeout 800 ms" exec-trickle "$TRICKLE" read-timed-out 700 6000
 check "echo hi, timeout armed"                   exec-fast     "$PORT"   hi                0   3000
 check "sleep 1; echo done, timeout 2000 ms"      exec-slow-ok  "$PORT"   done              900 5000
 
