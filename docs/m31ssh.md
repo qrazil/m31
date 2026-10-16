@@ -43,8 +43,13 @@ place (relative to `~/.ssh`, `~` and globs, lexical order, nested up to 16
 deep, a missing file is skipped). `Match` understands `all`, `host`,
 `originalhost`, `user` and `localuser` (comma-separated patterns, `!`
 negates); a `Match` with any other criterion (`exec`, `canonical`, ...) is
-reported and its lines are *not* applied (so a security setting inside one is
-not half applied). Any other keyword is reported-and-ignored. A malformed value is an error, never a default.
+refused (an error: a security setting inside the block must not be silently
+dropped), as is `RevokedHostKeys`. Any other keyword is ignored with one
+`Warning:` line (`-q` silences it). A malformed value is an error, never a
+default. `RekeyLimit` (bytes, K/M/G) and `HashKnownHosts` are understood. A
+user, host or identity name containing a control character, a space or (for
+the host) a leading `-` is refused, and `-o Host=`/`Match=`/`Include=` are
+not accepted.
 
 ### Host keys
 
@@ -198,9 +203,9 @@ modify, drop and inject packets and who runs a hostile server:
    `curve25519-sha256` + `chacha20-poly1305@openssh.com`. The Poly1305 tag is
    verified (constant-time compare) **before** the payload is decrypted or
    interpreted, and before the length is trusted beyond a bound.
-3. **No downgrade**: exactly one key exchange, one host key algorithm and one
-   cipher are offered; a server that does not offer them gets a clear error,
-   never a weaker fallback. There is no compression, no `none` cipher.
+3. **No downgrade**: only the strong algorithms listed under "Algorithms" are
+   offered; a server that shares none gets a clear error, never a weaker
+   fallback. There is no compression, no `none` cipher.
 4. **Malicious server input does not crash or hang the client**: every length
    field is bounds-checked, packets are capped (35000 bytes), banners and
    names are sanitised before printing, the agent's replies are capped and
@@ -253,6 +258,21 @@ What it does **not** defend against, and where the limits are:
   forwarding, multiplexing, `Compression`, GSSAPI,
   password or keyboard-interactive authentication.**
 * **Resize latency** is up to ~100 ms (a poll, not a signal).
+* **Signals and core files.** The language has no signal handlers, so a
+  `SIGTERM`/`SIGHUP` leaves a raw terminal (or a prompt with echo off) as it
+  was; and it has no `setrlimit`, so a crash (`trap`) can leave a core file
+  that contains key or session material: run key-holding programs with
+  `ulimit -c 0`.
+* **Stalls.** The read timeout bounds each wait and the body of each packet
+  in total; while a packet *header* is arriving the keyboard is not polled,
+  so a server that dribbles a header byte by byte can delay `~.`. A tunnel
+  over `ProxyCommand` drains the child's standard error only when the
+  connection is read or written.
+* **Files.** `~/.ssh` is created with the umask's mode (the language cannot
+  `chmod` or pass a mode to `mkdir`: create it `0700` yourself), `known_hosts`
+  is appended to or rewritten without a lock (the rewrite is atomic), and a
+  key is created with a check, not an exclusive open, so a race between the
+  check and the open is possible.
 * **Terminal escape injection** from the *remote program's* output is the
   terminal's business, as with any ssh; only the server banner and error
   strings are sanitised here.
