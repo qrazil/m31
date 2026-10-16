@@ -535,6 +535,33 @@ ok("Match host + user applies its block", code == 0 and out == "matched\n", (cod
 code, out, err = run(["-l", "someone-else", "matchbox", "echo", "x"])
 ok("Match user that does not hold: block not applied (cannot even connect)", code == 255, (code, err))
 
+common_cfg = f"""Host box2
+  HostName 127.0.0.1
+  Port {PORT}
+  User {USER}
+  IdentityFile {real}
+  UserKnownHostsFile {KH}
+"""
+for line, label in [("RevokedHostKeys /nonexistent\n", "RevokedHostKeys"), ("Match exec true\n  StrictHostKeyChecking no\n", "Match with an unsupported criterion")]:
+    with open(cfg, "w") as f:
+        f.write(line + common_cfg)
+    code, out, err = run(["box2", "echo", "x"])
+    ok("config uses %s: refused, not silently ignored" % label, code == 255 and "cannot ignore safely" in err and out == "", (code, err))
+with open(cfg, "w") as f:
+    f.write("Compression yes\nForwardAgent yes\n" + common_cfg)
+code, out, err = run(["box2", "echo", "fine"])
+ok("an unsupported but harmless option is a warning, the connection works", code == 0 and out == "fine\n" and "'compression' is not supported" in err, (code, out, err))
+code, out, err = run(["-q", "box2", "echo", "fine"])
+ok("-q silences that warning", code == 0 and "not supported" not in err, (code, err))
+before_kh = open(KH).read()
+code, out, err = run(["-l", USER + "\nStrictHostKeyChecking no", "box2", "true"])
+ok("a newline in -l cannot inject a directive", code == 255 and "bad user" in err, (code, err))
+code, out, err = run(["-o", "Host=zzz", "box2", "true"])
+ok("-o Host=... is refused like -o Host ...", code == 255 and "not supported" in err, (code, err))
+code, out, err = run(["-i", real + '"\nStrictHostKeyChecking no', "box2", "true"])
+ok("a quote/newline in -i is refused", code == 255 and "bad identity" in err, (code, err))
+ok("known_hosts untouched by those", open(KH).read() == before_kh)
+
 # agent
 agent = subprocess.Popen(["ssh-agent", "-D", "-a", os.path.join(W, "agent.sock")],
                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)

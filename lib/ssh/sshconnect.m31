@@ -651,10 +651,14 @@ Result<Hop, str> hop_of(str spec, str base_config, str login, str home) {
     if (text == "" || text.starts_with("-")) {
         return Result<Hop, str>.Err("bad jump host '" + spec + "'");
     }
+    if (!is_plain_word(text) || !is_plain_word(user)) {
+        return Result<Hop, str>.Err("bad jump host '" + spec + "'");
+    }
     sshconfig.Settings settings = sshconfig.resolve(base_config, text, login, home);
     if (settings.errors.size() > 0) {
         return Result<Hop, str>.Err("configuration error: " + settings.errors[0]);
     }
+    check_ignored(settings, text, false)?;
     if (user == "") {
         user = settings.user;
     }
@@ -879,6 +883,51 @@ Result<ssh.Transport, str> establish(List<Hop> hops, str home, bool is_quiet, bo
     }
 }
 
+// Whether `text` is a single word with no control character or space in it:
+// what a user name or host name must be to be put into generated
+// configuration text without becoming a second directive.
+bool is_plain_word(str text) {
+    for (int code in text.chars()) {
+        if (code <= 32 || code == 127 || (code >= 128 && code < 160)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Keywords whose being ignored would silently weaken the connection: a
+// `RevokedHostKeys` file not consulted lets a revoked key be trusted again,
+// and a `Match` with a criterion this client cannot evaluate (`exec`,
+// `canonical`, ...) hides the settings of its block, which may be security
+// settings. A file that uses one is refused until the line is removed.
+// Everything else that is not understood (Ciphers, HostKeyAlgorithms,
+// ForwardAgent, Compression, ...) is a warning: this client's fixed offer is
+// all strong and it never forwards an agent, so ignoring those cannot widen
+// what it trusts.
+bool is_unsafe_to_ignore(str keyword) {
+    List<str> unsafe = ["revokedhostkeys"];
+    return unsafe.contains(keyword) || keyword.starts_with("match ");
+}
+
+// What to do about the lines of `settings` that were understood by nobody:
+// `Err` for any that cannot safely be ignored, a `Warning:` line for the rest.
+Result<void, str> check_ignored(sshconfig.Settings settings, str name, bool is_quiet) {
+    List<str> seen = [];
+    for (str keyword in settings.ignored) {
+        if (seen.contains(keyword)) {
+            continue;
+        }
+        seen.push(keyword);
+        if (is_unsafe_to_ignore(keyword)) {
+            return Result<void, str>.Err("configuration for " + name + " uses '" + keyword + "', which this client does not support and cannot ignore safely; remove it from the configuration");
+        }
+        if (!is_quiet) {
+            warn("configuration option '" + keyword + "' is not supported and is ignored (" + name + ")");
+        }
+    }
+    return Result<void, str>.Ok;
+}
+
 /// Resolves the configuration for `parameters.host`, connects through any jump
 /// hosts, checks every host key, and authenticates. `Err` is one line.
 pub Result<Connection, str> connect(Params parameters) {
@@ -887,7 +936,13 @@ pub Result<Connection, str> connect(Params parameters) {
     str options_text = "";
     for (str option in parameters.options) {
         str lower = option.to_lower();
-        if (lower.starts_with("host ") || lower.starts_with("match ") || lower.starts_with("include ") || option.contains("\n") || option.contains("\r")) {
+        str key_end = lower;
+        int cut = 0;
+        while (cut < lower.size() && lower.byte_at(cut) != 32 && lower.byte_at(cut) != 61 && lower.byte_at(cut) != 9) {
+            cut = cut + 1;
+        }
+        key_end = lower.substr(0, cut);
+        if (key_end == "host" || key_end == "match" || key_end == "include" || option.contains("\n") || option.contains("\r")) {
             return Result<Connection, str>.Err("-o " + option + " is not supported");
         }
         options_text = options_text + option + "\n";
@@ -913,14 +968,24 @@ pub Result<Connection, str> connect(Params parameters) {
     if (parameters.user != "") {
         target_config = target_config + "User " + parameters.user + "\n";
     }
+    if (!is_plain_word(parameters.host) || parameters.host.starts_with("-")) {
+        return Result<Connection, str>.Err("bad host name");
+    }
+    if (!is_plain_word(parameters.user)) {
+        return Result<Connection, str>.Err("bad user name");
+    }
     str identity_lines = "";
     for (str identity in parameters.identities) {
+        if (identity.contains("\"") || identity.contains("\n") || identity.contains("\r")) {
+            return Result<Connection, str>.Err("bad identity file name");
+        }
         identity_lines = identity_lines + "IdentityFile \"" + identity + "\"\n";
     }
     sshconfig.Settings settings = sshconfig.resolve(target_config + options_text + identity_lines + file_text, parameters.host, login, home);
     if (settings.errors.size() > 0) {
         return Result<Connection, str>.Err("configuration error: " + settings.errors[0]);
     }
+    check_ignored(settings, parameters.host, parameters.is_quiet)?;
     str user = settings.user;
     if (user == "") {
         user = login;
