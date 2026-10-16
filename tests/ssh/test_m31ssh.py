@@ -271,6 +271,11 @@ ok("large output: 1.5M lines (about 10 MB) from the server", code == 0 and out =
 p = run(base("wc", "-c"), input=b"x" * 3000000, binary=True, timeout=120)
 ok("large input: 3 MB to `wc -c`", p.stdout.decode().strip() == "3000000", p.stdout)
 
+# the client's own rekey limit: 6 MB up and down through `cat`, keys changed every ~100 KB
+p = run(base("-o", "RekeyLimit=100K", "cat"), input=data, binary=True, timeout=120)
+ok("RekeyLimit=100K (client-initiated rekeys): 6 MB through `cat` is intact both ways",
+   p.returncode == 0 and hashlib.sha256(p.stdout).digest() == hashlib.sha256(data).digest(), (p.returncode, len(p.stdout), p.stderr[-200:]))
+
 # ProxyCommand: the transport is a child process (a TCP relay in python3)
 RELAY = os.path.join(W, "relay.py")
 with open(RELAY, "w") as f:

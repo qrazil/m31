@@ -67,11 +67,8 @@
 //
 // --- what is NOT here (`docs/ssh-decision.md` §1, §3) ------------------------
 //
-//   - Rekeying that the CLIENT starts (RFC 4253 §9). A server's rekey, which
-//     is what OpenSSH does (after `RekeyLimit` bytes, 1 GB by default for
-//     these ciphers, or an hour), is answered inside `recv_once`; this
-//     client never asks for one itself, since a send-only caller cannot read
-//     the server's `KEXINIT` without blocking.
+//   - Time-based rekeying (the client rekeys by traffic volume only; a
+//     server's rekey, whatever its reason, is answered).
 //   - Algorithm fallback of any kind. See above.
 //   - Compression (always negotiates "none").
 //   - Authentication (`ssh-userauth`, RFC 4252) and the connection protocol
@@ -1326,6 +1323,14 @@ pub type Transport {
     VersionPair versions;
     Offer offer;
     bytes host_key_blob;
+    // Payload bytes sent and received since the last key exchange, the
+    // limit at which this client starts the next one (0: never), the
+    // application packets that arrived while a rekey it started was waiting
+    // for the server's KEXINIT, and whether one is under way.
+    int traffic;
+    int rekey_limit;
+    List<bytes> queued;
+    bool is_rekeying;
 }
 
 /// This connection's first exchange hash `H`, the session identifier for
@@ -1343,9 +1348,20 @@ pub Suite Transport.suite() {
 /// Encrypts, pads and authenticates `payload` as one packet and writes it.
 /// Mirrors `net.Conn.write`'s own "all of it, or an error" contract.
 pub Result<int, Error> Transport.send(bytes payload) {
+    if (!is_rekeying && rekey_limit > 0 && traffic >= rekey_limit) {
+        start_rekey()?;
+    }
     send_ciphered_payload(connection, payload, send_cipher, send_seq, rng)?;
     send_seq = send_seq + 1;
+    traffic = traffic + payload.size();
     return Result<int, Error>.Ok(payload.size());
+}
+
+/// Changes how much traffic passes before this client starts a rekey
+/// (`RekeyLimit`); 0 never starts one (the server still may). A small limit
+/// is for tests.
+pub void Transport.set_rekey_limit(int limit_bytes) {
+    rekey_limit = limit_bytes;
 }
 
 /// Reads, authenticates and decrypts **one** packet. An application message
@@ -1358,8 +1374,14 @@ pub Result<int, Error> Transport.send(bytes payload) {
 /// there: unlike `recv` it never reads *another* packet after swallowing a
 /// housekeeping one, which would block for ever on an idle connection.
 pub Result<bytes, Error> Transport.recv_once() {
+    if (queued.size() > 0) {
+        bytes first = queued[0];
+        queued.remove_at(0);
+        return Result<bytes, Error>.Ok(first);
+    }
     bytes payload = recv_ciphered_payload(connection, recv_cipher, recv_seq)?;
     recv_seq = recv_seq + 1;
+    traffic = traffic + payload.size();
     if (payload.size() == 0) {
         return Result<bytes, Error>.Err(Error.Truncated);
     }
@@ -1416,11 +1438,35 @@ Result<bytes, Error> Transport.recv_for_rekey() {
 // applies: sequence numbers restart at 0 after each NEWKEYS. Nothing but kex
 // messages can arrive from the server until its NEWKEYS (RFC 4253 §7.1).
 Result<void, Error> Transport.rekey(bytes i_s) {
+    is_rekeying = true;
+    bytes i_c = build_kexinit(rng, offer);
+    emit(i_c)?;
+    return finish_rekey(i_c, i_s);
+}
+
+// Our own re-exchange, at the traffic limit: KEXINIT first, then the
+// server's packets until its KEXINIT arrives (application packets that were
+// already on their way are kept for `recv_once`, in order), then the same
+// exchange as when the server asks.
+Result<void, Error> Transport.start_rekey() {
+    is_rekeying = true;
+    bytes i_c = build_kexinit(rng, offer);
+    emit(i_c)?;
+    while (true) {
+        bytes payload = recv_for_rekey()?;
+        if (payload[0] == SSH_MESSAGE_KEXINIT) {
+            return finish_rekey(i_c, payload);
+        }
+        if (payload[0] != SSH_MESSAGE_UNIMPLEMENTED) {
+            queued.push(payload);
+        }
+    }
+}
+
+Result<void, Error> Transport.finish_rekey(bytes i_c, bytes i_s) {
     KexInit server_kex = parse_kexinit(i_s)?;
     Suite fresh = negotiate(offer, server_kex)?;
     fresh.is_strict = negotiated.is_strict;
-    bytes i_c = build_kexinit(rng, offer);
-    emit(i_c)?;
     EcdhState state = ecdh_begin(fresh, rng);
     emit(build_kex_ecdh_init(state.q_c))?;
     bytes reply_payload = recv_for_rekey()?;
@@ -1449,6 +1495,8 @@ Result<void, Error> Transport.rekey(bytes i_s) {
         recv_seq = 0;
     }
     negotiated = fresh;
+    traffic = 0;
+    is_rekeying = false;
     return Result<void, Error>.Ok;
 }
 
@@ -1490,6 +1538,9 @@ pub Result<void, Error> Transport.set_read_timeout(int timeout_ms) {
 /// timeout waits for ever. A true answer can still be followed by a `recv`
 /// that waits for the rest of a packet, bounded by the read timeout.
 pub Result<bool, Error> Transport.wait(int timeout_ms) {
+    if (queued.size() > 0) {
+        return Result<bool, Error>.Ok(true);
+    }
     match (connection.wait(timeout_ms)) {
         case Ok(bool is_ready): {
             return Result<bool, Error>.Ok(is_ready);
@@ -1538,6 +1589,11 @@ pub Result<bool, Error> Transport.close() {
         }
     }
 }
+
+/// How much traffic (both directions, payload bytes) this client lets pass
+/// before it starts a rekey itself: 1 GiB, OpenSSH's default for these
+/// ciphers. The server's own limit starts one earlier if it is lower.
+const int DEFAULT_REKEY_LIMIT = 1073741824;
 
 /// A host key as a server presented it. Public, so nothing here is secret.
 pub type HostKey {
@@ -1745,7 +1801,7 @@ Result<Transport, Error> finish_handshake(Wire connection, Exchange exchange, ra
         send_seq = 0;
         recv_seq = 0;
     }
-    return Result<Transport, Error>.Ok(Transport(connection, send_seq, recv_seq, send_cipher, recv_cipher, exchange.exchange_digest, rng, exchange.suite, exchange.versions, exchange.offer, exchange.host_key.blob));
+    return Result<Transport, Error>.Ok(Transport(connection, send_seq, recv_seq, send_cipher, recv_cipher, exchange.exchange_digest, rng, exchange.suite, exchange.versions, exchange.offer, exchange.host_key.blob, 0, DEFAULT_REKEY_LIMIT, [], false));
 }
 
 /// What decides, mid-handshake, whether the server's host key is trusted:

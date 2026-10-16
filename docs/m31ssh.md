@@ -227,13 +227,12 @@ What it does **not** defend against, and where the limits are:
 * **Denial of service**: a server can hold a connection open; keepalives and
   `ConnectTimeout` are the only bound (no connect timeout for the TCP
   connect itself beyond the OS's).
-* **Rekeying is answered, never started.** When the server asks for new keys
-  (OpenSSH does after `RekeyLimit` bytes, 1 GB for the default ciphers, or an
-  hour) the client answers inside the transport: a fresh key exchange against
-  the *same* host key (a different key mid-session ends it), new keys under
-  the original session id, strict kex honoured. The client never initiates
-  one; a client-side limit would need the server's `KEXINIT` read while
-  sending, which a send-only caller cannot do without blocking.
+* **Rekeying** works both ways. A server's `KEXINIT` is answered inside the
+  transport (fresh exchange against the *same* host key: a different key
+  mid-session ends it; new keys under the original session id; strict kex
+  honoured). The client starts one itself after 1 GiB of traffic
+  (`RekeyLimit`, bytes with K/M/G; the time part is ignored), keeping any
+  application packets that arrive before the server's `KEXINIT`.
 * **Algorithm reach.** Servers that offer none of the suites above cannot be
   reached: old servers that only have `diffie-hellman-group*`, `ssh-rsa`
   host keys signed with SHA-1, CBC ciphers or 1024-bit RSA host keys are

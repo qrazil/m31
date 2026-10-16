@@ -133,10 +133,12 @@ expect_has "unreachable port: one-line error" "could not connect" "$(run "$CFG_A
 # --- rekeying: the server decides (RekeyLimit), the client must follow ----------
 # A server that rekeys every 100 KB while 2 MB of output flows: the data must
 # arrive intact and the log must show keys really were exchanged again.
-rekey_case() { # label, Ciphers, MACs
+rekey_case() { # label, Ciphers, MACs, [client RekeyLimit: the server then keeps its default]
     local rport=$((PORT + 1)) rpid="" up=0
     sed -e "s/^Port .*/Port $rport/" -e "s/^PidFile .*/PidFile ${WORK//\//\\/}\/sshd_r.pid/" "$WORK/sshd_config" >"$WORK/sshd_rekey"
-    printf 'RekeyLimit 100K\nLogLevel DEBUG2\nCiphers %s\nMACs %s\n' "$2" "$3" >>"$WORK/sshd_rekey"
+    local server_limit="RekeyLimit 100K"
+    [ -n "${4:-}" ] && server_limit="RekeyLimit default"
+    printf '%s\nLogLevel DEBUG2\nCiphers %s\nMACs %s\n' "$server_limit" "$2" "$3" >>"$WORK/sshd_rekey"
     "$SSHD_BIN" -f "$WORK/sshd_rekey" -D -e >"$WORK/sshd_rekey.log" 2>&1 &
     rpid=$!
     for _ in $(seq 1 100); do
@@ -150,6 +152,7 @@ rekey_case() { # label, Ciphers, MACs
     fi
     printf '[127.0.0.1]:%s %s\n' "$rport" "$HOSTKEY_LINE" >"$WORK/kh_rekey"
     local cfg="Host rk\n  HostName 127.0.0.1\n  Port $rport\n  User $USER_NAME\n  IdentityFile $WORK/user_key\n  UserKnownHostsFile $WORK/kh_rekey\n"
+    [ -n "${4:-}" ] && cfg="$cfg  RekeyLimit $4\n"
     local want got
     want="$(seq 1 300000)
 exit status 0"
@@ -163,6 +166,9 @@ exit status 0"
 rekey_case "chacha20-poly1305" "chacha20-poly1305@openssh.com" "hmac-sha2-256-etm@openssh.com"
 rekey_case "aes256-gcm" "aes256-gcm@openssh.com" "hmac-sha2-256-etm@openssh.com"
 rekey_case "aes128-ctr + hmac-sha2-256-etm" "aes128-ctr" "hmac-sha2-256-etm@openssh.com"
+# the client's own limit (RekeyLimit in its config), the server's left at default
+rekey_case "client-initiated, chacha20-poly1305" "chacha20-poly1305@openssh.com" "hmac-sha2-256-etm@openssh.com" 100K
+rekey_case "client-initiated, aes256-gcm" "aes256-gcm@openssh.com" "hmac-sha2-256-etm@openssh.com" 100K
 
 echo
 if [ $fail -eq 0 ]; then

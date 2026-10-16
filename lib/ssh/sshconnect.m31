@@ -1014,5 +1014,8 @@ pub Result<Connection, str> connect(Params parameters) {
     }
     hops.push(Hop(parameters.host, settings.host_name, port, user, settings));
     ssh.Transport transport = establish(hops, home, parameters.is_quiet, parameters.is_interactive)?;
+    if (settings.rekey_limit >= 0) {
+        transport.set_rekey_limit(settings.rekey_limit);
+    }
     return Result<Connection, str>.Ok(Connection(transport, settings, settings.host_name, port, user));
 }
