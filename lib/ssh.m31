@@ -967,6 +967,9 @@ Result<KexEcdhReply, Error> parse_kex_ecdh_reply(bytes payload) {
     Field k_s = parse_string(payload, 1)?;
     Field q_s = parse_string(payload, k_s.next)?;
     Field sig = parse_string(payload, q_s.next)?;
+    if (sig.next != payload.size()) {
+        return Result<KexEcdhReply, Error>.Err(Error.BadKeyExchange);
+    }
     return Result<KexEcdhReply, Error>.Ok(KexEcdhReply(k_s.value, q_s.value, sig.value));
 }
 

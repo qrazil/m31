@@ -316,7 +316,7 @@ pub bytes sign(bytes seed, bytes message) {
 /// Verify `sig` (64 octets) over `message` under the 32-octet public key `pub`,
 /// RFC 8032 §5.1.7. Rejects a malformed length, a non-canonical `S`
 /// (`S >= L`), an `R` or a public key that does not decompress to a point
-/// on the curve, and a signature that does not satisfy `[S]B = R + [k]A`.
+/// on the curve, a public key of small order, and a signature that does not satisfy `[S]B = R + [k]A`.
 pub bool is_valid_signature(bytes pub_key, bytes message, bytes sig) {
     if (sig.size() != 64 || pub_key.size() != 32) {
         return false;
@@ -332,6 +332,16 @@ pub bool is_valid_signature(bytes pub_key, bytes message, bytes sig) {
             return false;
         }
         case Some(Point big_a): {
+            // A public key of small order (the identity and the seven other
+            // points of order dividing 8) makes `[k]A` vanish or collapse, so
+            // a signature could be made without the secret: refuse such a
+            // key, as libsodium does. [8]A is the identity exactly then.
+            Point doubled = point_add(big_a, big_a);
+            Point quadrupled = point_add(doubled, doubled);
+            Point eightfold = point_add(quadrupled, quadrupled);
+            if (is_point_equal(eightfold, identity())) {
+                return false;
+            }
             match (decompress(r_enc)) {
                 case None: {
                     return false;

@@ -741,6 +741,13 @@ pub void Session.finish() {
 /// checked (`is_safe_name`) before it is used; one that fails is reported
 /// through `note` and skipped.
 pub Result<void, str> Session.get_tree(str remote, str local, bool is_recursive, Reporter reporter) {
+    return get_tree_at(remote, local, is_recursive, reporter, 0);
+}
+
+Result<void, str> Session.get_tree_at(str remote, str local, bool is_recursive, Reporter reporter, int depth) {
+    if (depth > MAX_TREE_DEPTH) {
+        return Result<void, str>.Err("remote: " + remote + ": directories nested more than " + MAX_TREE_DEPTH.to_str() + " deep; giving up");
+    }
     Attrs attrs = stat(remote)?;
     if (attrs.is_directory()) {
         if (!is_recursive) {
@@ -761,7 +768,7 @@ pub Result<void, str> Session.get_tree(str remote, str local, bool is_recursive,
                 reporter.note("refusing a name from the server that is not a plain file name");
                 continue;
             }
-            get_tree(join_path(remote, entry.name), join_path(local, entry.name), is_recursive, reporter)?;
+            get_tree_at(join_path(remote, entry.name), join_path(local, entry.name), is_recursive, reporter, depth + 1)?;
         }
         return Result<void, str>.Ok;
     }
@@ -778,6 +785,19 @@ pub Result<void, str> Session.get_tree(str remote, str local, bool is_recursive,
 /// Copies `local` (a file, or with `is_recursive` a directory tree) to
 /// `remote`. With `is_preserving` the modification time is set afterwards.
 pub Result<void, str> Session.put_tree(str local, str remote, bool is_recursive, bool is_preserving, Reporter reporter) {
+    return put_tree_at(local, remote, is_recursive, is_preserving, reporter, 0);
+}
+
+Result<void, str> Session.put_tree_at(str local, str remote, bool is_recursive, bool is_preserving, Reporter reporter, int depth) {
+    if (depth > MAX_TREE_DEPTH) {
+        return Result<void, str>.Err("local: " + local + ": directories nested more than " + MAX_TREE_DEPTH.to_str() + " deep; giving up");
+    }
+    if (depth > 0 && fs.is_link(local) && fs.is_directory(local)) {
+        // A symlink to a directory inside a tree is not followed: it could
+        // point back up and loop, or out of the tree.
+        reporter.note("skipping symbolic link to a directory: " + local);
+        return Result<void, str>.Ok;
+    }
     if (fs.is_directory(local)) {
         if (!is_recursive) {
             return Result<void, str>.Err(local + ": not a regular file (use -r)");
@@ -795,7 +815,7 @@ pub Result<void, str> Session.put_tree(str local, str remote, bool is_recursive,
         match (fs.listdir(local)) {
             case Ok(List<str> names): {
                 for (str name in names) {
-                    put_tree(join_path(local, name), join_path(remote, name), is_recursive, is_preserving, reporter)?;
+                    put_tree_at(join_path(local, name), join_path(remote, name), is_recursive, is_preserving, reporter, depth + 1)?;
                 }
             }
             case Err(io.Error error): {
@@ -819,6 +839,10 @@ pub Result<void, str> Session.put_tree(str local, str remote, bool is_recursive,
     }
     return Result<void, str>.Ok;
 }
+
+/// How deep a recursive copy goes before it is refused as a loop or a
+/// hostile tree (a server can answer every listing with another directory).
+const int MAX_TREE_DEPTH = 64;
 
 /// Starts the `sftp` subsystem on `link` and negotiates version 3.
 pub Result<Session, str> open(ssh.Link link) {

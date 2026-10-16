@@ -106,7 +106,6 @@ const str KEY_ALGO = "ssh-ed25519";
 /// More banners than this in one authentication is a server playing games,
 /// not a notice.
 const int MAX_BANNERS = 32;
-
 /// The pre-authentication text kept, in bytes: the rest is dropped (OpenSSH
 /// shows a few KB at most), so a hostile server cannot make the client spend
 /// time or memory on it.

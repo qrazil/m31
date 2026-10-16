@@ -470,5 +470,24 @@ os.symlink(os.path.join(W, "nowhere_target"), dangling)
 code, out, err = run(KEYGEN, ["-q", "-f", dangling, "-N", ""])
 ok("keygen: a dangling symlink at the key path is refused, nothing created", code == 1 and not os.path.exists(os.path.join(W, "nowhere_target")), (code, err))
 
+# -r bounds: a server that nests directories for ever, and a symlink loop on put -r
+opts = start_fake("loop")
+loop_dl = os.path.join(W, "loop_dl")
+code, out, err = run(SCP, opts + ["-r", REMOTE + "/d", loop_dl])
+depth = 0
+walk = loop_dl
+while os.path.isdir(os.path.join(walk, "d")):
+    walk = os.path.join(walk, "d")
+    depth += 1
+ok("scp -r: endlessly nested remote directories stop at the depth bound", code != 0 and "nested" in err and depth <= 66, (code, err, depth))
+tree_src = os.path.join(W, "loop_src")
+os.makedirs(os.path.join(tree_src, "sub"))
+open(os.path.join(tree_src, "sub", "f"), "w").write("x")
+os.symlink(tree_src, os.path.join(tree_src, "sub", "back"))
+tree_dst = os.path.join(W, "loop_dst")
+code, out, err = run(SCP, COMMON + ["-q", "-r", tree_src, REMOTE + tree_dst])
+ok("scp -r upload: a symlink to a directory is skipped, not followed (no loop)",
+   code == 0 and os.path.isfile(os.path.join(tree_dst, "sub", "f")) and not os.path.exists(os.path.join(tree_dst, "sub", "back")), (code, err))
+
 print("%d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)

@@ -270,6 +270,17 @@ pub Result<bytes, str> PrivateKey.signature_blob_for(str signature_algorithm, by
     return Result<bytes, str>.Ok(out);
 }
 
+/// This key written again as an `openssh-key-v1` file, with `comment` and
+/// `passphrase` (empty: none) -- what `ssh-keygen -p` does. Only ed25519 keys
+/// can be written (`UnsupportedKeyType` for the others: the library cannot
+/// serialise ECDSA or RSA private keys).
+pub Result<str, Error> PrivateKey.encode(str comment_text, bytes passphrase, int rounds) {
+    if (algorithm != KEY_ED25519) {
+        return Result<str, Error>.Err(Error.UnsupportedKeyType);
+    }
+    return encode_ed25519(secret, comment_text, passphrase, rounds);
+}
+
 /// What a file says about its key without decrypting anything.
 pub type Info {
     pub str algorithm;
@@ -626,17 +637,6 @@ bytes padded_section(bytes section, int block) {
         value = value + 1;
     }
     return out;
-}
-
-/// This key written again as an `openssh-key-v1` file, with `comment` and
-/// `passphrase` (empty: none) -- what `ssh-keygen -p` does. Only ed25519 keys
-/// can be written (`UnsupportedKeyType` for the others: the library cannot
-/// serialise ECDSA or RSA private keys).
-pub Result<str, Error> PrivateKey.encode(str comment_text, bytes passphrase, int rounds) {
-    if (algorithm != KEY_ED25519) {
-        return Result<str, Error>.Err(Error.UnsupportedKeyType);
-    }
-    return encode_ed25519(secret, comment_text, passphrase, rounds);
 }
 
 /// An `openssh-key-v1` file's text for the ed25519 key with `seed`
