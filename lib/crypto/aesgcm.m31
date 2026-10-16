@@ -52,6 +52,13 @@
 import crypto.aes;
 import crypto.consttime;
 
+// The hardware GHASH kernel (docs/CRYPTO-ACCEL.md): a `prim` into
+// runtime/crypto_glue.c, run only when the CPU has PCLMULQDQ (or ARMv8 PMULL)
+// and `M31_CRYPTO_ACCEL` has not switched it off; `aes.m31` documents the same
+// switch for the block cipher.
+prim int __crypto_features();
+prim int __crypto_ghash(bytes h, bytes acc, bytes data, int off, int count);
+
 /// Why `open` refused.
 pub enum Error {
     /// `sealed` is shorter than the 16-octet tag, so there is nothing to
@@ -204,10 +211,32 @@ void ghash_feed(Array<int> acc, Array<int> h, bytes data, int start, int end) {
     }
 }
 
+// `data[start .. end)` folded into the kernel's accumulator `acc`, zero-padded
+// to a whole block at the end (§6.4). `h` is H in GCM byte order.
+void ghash_feed_hardware(bytes h, bytes acc, bytes data, int start, int end) {
+    int whole = (end - start) / 16;
+    if (whole > 0 && __crypto_ghash(h, acc, data, start, whole) != 0) {
+        trap("aesgcm: ghash kernel refused after being offered");
+    }
+    int taken = start + whole * 16;
+    if (taken < end) {
+        bytes last = [0; 16];
+        for (int i in 0 .. end - taken) {
+            last[i] = data[taken + i];
+        }
+        if (__crypto_ghash(h, acc, last, 0, 1) != 0) {
+            trap("aesgcm: ghash kernel refused after being offered");
+        }
+    }
+}
+
 // The 16-octet tag for `aad` and `ciphertext[0 .. length)`: GHASH over the
 // padded AAD, the padded ciphertext and the length block, XOR E(K, J0) with
 // J0 = nonce || 1 (§7.1, 96-bit IV).
 bytes compute_tag(aes.Cipher cipher, bytes nonce, bytes aad, bytes ciphertext, int length) {
+    if ((__crypto_features() & 1) != 0) {
+        return compute_tag_hardware(cipher, nonce, aad, ciphertext, length);
+    }
     Array<int> h = hash_key(cipher);
     Array<int> acc = [0; 4];
     ghash_feed(acc, h, aad, 0, aad.size());
@@ -235,11 +264,45 @@ bytes compute_tag(aes.Cipher cipher, bytes nonce, bytes aad, bytes ciphertext, i
     return tag;
 }
 
+// `compute_tag` with the kernel doing GHASH: the same message, in GCM byte order.
+bytes compute_tag_hardware(aes.Cipher cipher, bytes nonce, bytes aad, bytes ciphertext, int length) {
+    bytes h = cipher.encrypt_block([0; 16]);
+    bytes acc = [0; 16];
+    ghash_feed_hardware(h, acc, aad, 0, aad.size());
+    ghash_feed_hardware(h, acc, ciphertext, 0, length);
+    bytes lengths = [0; 16];
+    int aad_bits = aad.size() * 8;
+    int text_bits = length * 8;
+    for (int i in 0 .. 8) {
+        lengths[i] = aad_bits >> (56 - 8 * i) & 0xFF;
+        lengths[8 + i] = text_bits >> (56 - 8 * i) & 0xFF;
+    }
+    ghash_feed_hardware(h, acc, lengths, 0, 16);
+    bytes counter_one = clone(nonce);
+    bytes one = [0, 0, 0, 1];
+    counter_one.extend(one);
+    bytes mask = cipher.encrypt_block(counter_one);
+    bytes tag = [0; 16];
+    for (int i in 0 .. 16) {
+        tag[i] = acc[i] ^ mask[i];
+    }
+    return tag;
+}
+
 // CTR mode from block counter 2 on (counter 1 is the tag mask), SP 800-38D
 // §6.5: `data[0 .. length)` XOR the keystream into `out[0 .. length)`.
 // Symmetric. The counter blocks of one chunk (at most 256 blocks) are built
 // together and encrypted in one bitsliced call.
 void ctr_xor(aes.Cipher cipher, bytes nonce, bytes data, int length, bytes out) {
+    // The kernel's counter is the whole 16-octet block counted over all 128
+    // bits; with at most MAX_MESSAGE (2^24) octets after counter 2 the low 32
+    // bits cannot wrap, so that is the same stream.
+    bytes counter_two = clone(nonce);
+    bytes two = [0, 0, 0, 2];
+    counter_two.extend(two);
+    if (cipher.ctr_xor(counter_two, data, length, out)) {
+        return;
+    }
     int position = 0;
     int counter = 2;
     int first = (length + 15) / 16 * 16;

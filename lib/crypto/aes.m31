@@ -51,8 +51,18 @@
 // process's memory. It is still far from AES-NI (see docs/CRYPTO-ACCEL.md):
 // a few tens of MiB/s against several GiB/s.
 
+// The hardware kernels (docs/CRYPTO-ACCEL.md): `prim`s into runtime/crypto_glue.c.
+// A kernel runs only if the CPU has AES-NI and PCLMULQDQ (or ARMv8 AES and PMULL)
+// and `M31_CRYPTO_ACCEL` has not switched it off (`__crypto_features` bit 1);
+// otherwise the bitsliced m31 code below does the work, with the same bytes out.
+prim int __crypto_features();
+prim int __crypto_aes_ecb(bytes schedule, int rounds, bytes data, bytes out, int off, int count);
+prim int __crypto_aes_ctr(bytes schedule, int rounds, bytes counter, bytes data, bytes out, int off, int count);
+
 /// A key schedule, ready to encrypt blocks. Built by `cipher`.
 pub type Cipher {
+    /// The standard expanded key, `rounds + 1` round keys of 16 octets, for the kernels.
+    bytes schedule;
     /// Eight planes per round key, `(rounds + 1)` round keys: each round key's
     /// 16 octets broadcast to the four block slots of the bitsliced layout.
     Array<int> round_keys;
@@ -78,6 +88,9 @@ pub bytes Cipher.encrypt_blocks(bytes blocks) {
         trap("aes: input must be a whole number of 16-octet blocks");
     }
     bytes out = [0; size];
+    if (size > 0 && (__crypto_features() & 1) != 0 && __crypto_aes_ecb(schedule, rounds, blocks, out, 0, size / 16) == 0) {
+        return out;
+    }
     Array<int> planes = [0; 8];
     Array<int> words = [0; 8];
     int position = 0;
@@ -109,6 +122,40 @@ pub bytes Cipher.encrypt_blocks(bytes blocks) {
         position = position + batch;
     }
     return out;
+}
+
+/// CTR mode through the hardware kernel, if there is one: `out[0 .. count)`
+/// becomes `data[0 .. count)` XOR the keystream of the 128-bit big-endian
+/// counter block `counter` (16 octets), which is advanced in place by one per
+/// block used (a partial last block counts as one). Returns `false` and does
+/// nothing when this CPU has no kernel, so the caller runs its own loop.
+/// `out` may be `data` itself. The increment is over all 128 bits, so a
+/// caller whose counter is only the low 32 bits (GCM) must not wrap it.
+pub bool Cipher.ctr_xor(bytes counter, bytes data, int count, bytes out) {
+    if (count <= 0 || (__crypto_features() & 1) == 0 || counter.size() != 16) {
+        return false;
+    }
+    int whole = count / 16;
+    if (whole > 0 && __crypto_aes_ctr(schedule, rounds, counter, data, out, 0, whole) != 0) {
+        return false;
+    }
+    int rest = count - whole * 16;
+    if (rest > 0) {
+        bytes stream = encrypt_block(counter);
+        for (int i in 0 .. rest) {
+            out[whole * 16 + i] = data[whole * 16 + i] ^ stream[i];
+        }
+        int index = 15;
+        while (index >= 0) {
+            counter[index] = (counter[index] + 1) & 0xFF;
+            if (counter[index] != 0) {
+                index = 0 - 1;
+            } else {
+                index = index - 1;
+            }
+        }
+    }
+    return true;
 }
 
 // An 8x8 bit transpose inside each 64-bit word: bit 8 * m + b swaps with bit
@@ -378,7 +425,13 @@ pub Cipher cipher(bytes key) {
             round_keys[8 * round + k] = plane | (plane << 16) | (plane << 32) | (plane << 48);
         }
     }
-    return Cipher(round_keys, rounds);
+    bytes schedule = [0; 16 * (rounds + 1)];
+    for (int index in 0 .. 4 * (rounds + 1)) {
+        for (int j in 0 .. 4) {
+            schedule[4 * index + j] = words[index] >> (8 * j) & 0xFF;
+        }
+    }
+    return Cipher(schedule, round_keys, rounds);
 }
 
 // All rounds on one batch of four blocks, in planes. Everything lives in
