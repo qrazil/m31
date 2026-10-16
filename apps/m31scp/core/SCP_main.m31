@@ -44,7 +44,7 @@ str usage() {
 }
 
 void warn(str message) {
-    io.eprint("m31scp: " + message);
+    io.eprint("m31scp: " + sshconnect.sanitize(message));
 }
 
 Location location_of(str text) {
@@ -111,7 +111,7 @@ type Meter {
 }
 
 pub void Meter.begin(str name) {
-    label = name;
+    label = sshconnect.sanitize(name);
     started_ns = timer.monotonic_ns();
     last_ns = 0;
 }
@@ -121,7 +121,7 @@ pub void Meter.end() {
 }
 
 pub void Meter.note(str message) {
-    io.eprint("m31scp: " + message);
+    io.eprint("m31scp: " + sshconnect.sanitize(message));
 }
 
 pub void Meter.update(int done, int total) {

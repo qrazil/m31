@@ -250,11 +250,13 @@ int run_session(ssh.Transport transport, sshconfig.Settings settings, SSHC_cli.C
         case Ok(sshshell.Ending ending): {
             match (ending) {
                 case Exited(int code): {
-                    return code;
+                    // The server's number is a u32; an exit status is eight
+                    // bits (OpenSSH masks the same way). os.exit traps above 255.
+                    return code & 0xFF;
                 }
                 case Signalled(str name): {
                     if (!cli.is_quiet) {
-                        warn("Killed by signal " + name + ".");
+                        warn("Killed by signal " + sshconnect.sanitize(name) + ".");
                     }
                     int number = signal_number(name);
                     if (number == 0) {

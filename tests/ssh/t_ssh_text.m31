@@ -1,0 +1,29 @@
+// `ssh.sanitize_text`: controls and invisible characters are dropped, the
+// rest kept, in time linear in the length. Pure; a `trap` is a failure.
+import ssh;
+import timer;
+
+int check(int passed_count, bool is_ok, str label) {
+    if (!is_ok) {
+        trap("check failed: " + label);
+    }
+    return passed_count + 1;
+}
+
+int checks = 0;
+checks = check(checks, ssh.sanitize_text("plain text\tand\nlines") == "plain text\tand\nlines", "plain text, tab and newline survive");
+checks = check(checks, ssh.sanitize_text("a\u{1b}]0;title\u{7}b\u{1b}[2Jc") == "a]0;titleb[2Jc", "ESC and BEL are dropped");
+checks = check(checks, ssh.sanitize_text("x\u{7f}y\u{9b}z") == "xyz", "DEL and C1 controls are dropped");
+checks = check(checks, ssh.sanitize_text("a\u{202e}b\u{200b}c\u{feff}d\u{2066}e") == "abcde", "bidi, zero-width and BOM are dropped");
+checks = check(checks, ssh.sanitize_text("héllo wörld ✓") == "héllo wörld ✓", "ordinary non-ASCII survives");
+str big = "";
+int block = 0;
+while (block < 400000) {
+    big = big + "0123456789abcdefghijklmnopqrstuvwxyz\u{1b}[0m\n";
+    block = block + 40;
+}
+int started = timer.monotonic_ns();
+str cleaned = ssh.sanitize_text(big);
+int elapsed_ms = (timer.monotonic_ns() - started) / 1000000;
+checks = check(checks, cleaned.size() < big.size() && elapsed_ms < 2000, "400 KB is cleaned in linear time (took " + elapsed_ms.to_str() + " ms)");
+print(checks.to_str() + " checks, 0 failures");

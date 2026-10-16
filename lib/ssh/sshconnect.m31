@@ -82,13 +82,7 @@ pub type Connection {
 /// newline and tab) are dropped, so a banner or a name cannot move the
 /// cursor, retitle the window or inject escape sequences.
 pub str sanitize(str text) {
-    str out = "";
-    for (int code in text.chars()) {
-        if (code == 10 || code == 9 || (code >= 32 && code != 127 && !(code >= 128 && code < 160))) {
-            out = out + str.from_chars([code]);
-        }
-    }
-    return out;
+    return ssh.sanitize_text(text);
 }
 
 /// $HOME, or "".

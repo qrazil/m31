@@ -238,7 +238,7 @@ fi
 # window and packet limits over multi-megabyte transfers. The live half is
 # test_auth_exec.sh.
 
-for t in t_ssh_auth t_ssh_exec t_ssh_config t_ssh_shell t_ssh_agent t_ssh_negotiate t_ssh_forward t_ssh_sftp; do
+for t in t_ssh_auth t_ssh_exec t_ssh_config t_ssh_shell t_ssh_agent t_ssh_negotiate t_ssh_forward t_ssh_sftp t_ssh_text; do
     if build "$t"; then
         out=$("$WORK/$t" 2>"$WORK/$t.err")
         rc=$?

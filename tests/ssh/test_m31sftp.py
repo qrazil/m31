@@ -322,6 +322,16 @@ code, out, err = run(SCP, opts + ["-q", REMOTE + "/f", short_out])
 ok("scp: a server capping READ at 4096 bytes still gives the exact file",
    code == 0 and os.path.exists(short_out) and open(short_out, "rb").read() == FAKE_DATA, (code, err, os.path.getsize(short_out) if os.path.exists(short_out) else None))
 
+# --- terminal escapes from a hostile server never reach the terminal (audit M2) ------------------
+opts = start_fake("esc")
+code, out, err = run(SFTP, opts + ["-b", "/dev/stdin", USER + "@127.0.0.1"], input=b"pwd\nrm /x\nls /dir\n")
+ok("sftp: server-chosen pwd, status text and listing carry no escape sequences",
+   "\x1b" not in out and "\x1b" not in err and "\x07" not in out + err and "PWNED-TITLE" in out + err, (out, err))
+tmp_dl = os.path.join(W, "esc_dl")
+code, out, err = run(SCP, opts + ["-r", REMOTE + "/dir", tmp_dl])
+ok("scp -r: an entry named with an escape sequence is refused, nothing escapes",
+   "\x1b" not in out and "\x1b" not in err and not any("\x1b" in n for n in (os.listdir(tmp_dl) if os.path.isdir(tmp_dl) else [])), (code, out, err))
+
 # --- m31ssh-keygen -------------------------------------------------------------------------------
 gen = os.path.join(W, "gen_plain")
 code, out, err = run(KEYGEN, ["-q", "-t", "ed25519", "-f", gen, "-N", "", "-C", "plain key"])

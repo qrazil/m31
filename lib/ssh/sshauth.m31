@@ -107,6 +107,11 @@ const str KEY_ALGO = "ssh-ed25519";
 /// not a notice.
 const int MAX_BANNERS = 32;
 
+/// The pre-authentication text kept, in bytes: the rest is dropped (OpenSSH
+/// shows a few KB at most), so a hostile server cannot make the client spend
+/// time or memory on it.
+const int MAX_BANNER_BYTES = 16384;
+
 // --- Part 0: message builders (pure) ----------------------------------------
 
 /// `SSH_MSG_SERVICE_REQUEST "ssh-userauth"` (RFC 4253 §10).
@@ -346,7 +351,10 @@ pub Result<str, Error> try_key(ssh.Link link, str user, str algorithm, bytes pub
             if (seen > MAX_BANNERS) {
                 return Result<str, Error>.Err(Error.UnexpectedMessage);
             }
-            banner = banner + parse_banner(reply)?;
+            str more = parse_banner(reply)?;
+            if (banner.size() < MAX_BANNER_BYTES) {
+                banner = banner + more;
+            }
         } else if (kind == SSH_MESSAGE_USERAUTH_PK_OK) {
             parse_pk_ok_for(reply, algorithm, public_blob)?;
             is_probed = true;
@@ -379,7 +387,10 @@ pub Result<str, Error> try_key(ssh.Link link, str user, str algorithm, bytes pub
             if (seen > MAX_BANNERS) {
                 return Result<str, Error>.Err(Error.UnexpectedMessage);
             }
-            banner = banner + parse_banner(reply)?;
+            str more = parse_banner(reply)?;
+            if (banner.size() < MAX_BANNER_BYTES) {
+                banner = banner + more;
+            }
         } else if (kind == SSH_MESSAGE_USERAUTH_SUCCESS) {
             return Result<str, Error>.Ok(banner);
         } else if (kind == SSH_MESSAGE_USERAUTH_FAILURE) {

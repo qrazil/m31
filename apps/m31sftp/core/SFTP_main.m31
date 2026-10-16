@@ -31,7 +31,7 @@ str usage() {
 }
 
 void warn(str message) {
-    io.eprint("m31sftp: " + message);
+    io.eprint("m31sftp: " + sshconnect.sanitize(message));
 }
 
 type Meter {
@@ -42,7 +42,7 @@ type Meter {
 }
 
 pub void Meter.begin(str name) {
-    label = name;
+    label = sshconnect.sanitize(name);
     started_ns = timer.monotonic_ns();
     last_ns = 0;
 }
@@ -71,7 +71,7 @@ pub void Meter.end() {
 }
 
 pub void Meter.note(str message) {
-    io.eprint("m31sftp: " + message);
+    io.eprint("m31sftp: " + sshconnect.sanitize(message));
 }
 
 // The state of a session.
@@ -157,7 +157,7 @@ Result<bool, str> run_command(State state, List<str> words) {
         return Result<bool, str>.Ok(false);
     }
     if (command == "pwd") {
-        print("Remote working directory: " + state.remote_directory);
+        print("Remote working directory: " + sshconnect.sanitize(state.remote_directory));
         return Result<bool, str>.Ok(false);
     }
     if (command == "lpwd") {
@@ -204,7 +204,7 @@ Result<bool, str> run_command(State state, List<str> words) {
         }
         sshsftp.Attrs attrs = session.stat(path)?;
         if (!attrs.is_directory()) {
-            print(path);
+            print(sshconnect.sanitize(path));
             return Result<bool, str>.Ok(false);
         }
         List<sshsftp.Entry> entries = session.list(path)?;
@@ -244,7 +244,7 @@ Result<bool, str> run_command(State state, List<str> words) {
         if (attrs.has_times) {
             line = line + " mtime=" + attrs.modify_time.to_str();
         }
-        print(line);
+        print(sshconnect.sanitize(line));
         return Result<bool, str>.Ok(false);
     }
     if (command == "mkdir") {

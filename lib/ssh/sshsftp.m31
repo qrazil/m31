@@ -304,15 +304,15 @@ str text_of(bytes raw) {
         }
         case None: {
             // names are bytes on the wire; show what can be shown
-            str out = "";
+            List<int> shown = [];
             for (int byte in raw) {
                 if (byte >= 32 && byte < 127) {
-                    out = out + str.from_chars([byte]);
+                    shown.push(byte);
                 } else {
-                    out = out + "?";
+                    shown.push(63);
                 }
             }
-            return out;
+            return str.from_chars(shown);
         }
     }
 }
@@ -856,7 +856,7 @@ str status_text(bytes body, str path) {
     str message = "";
     match (ssh.parse_string(body, 9)) {
         case Ok(ssh.Field field_value): {
-            message = text_of(field_value.value);
+            message = ssh.sanitize_text(text_of(field_value.value));
         }
         case Err(_): {
         }
@@ -896,7 +896,9 @@ pub bool is_safe_name(str name) {
         return false;
     }
     for (int code in name.chars()) {
-        if (code == 47 || code == 0) {
+        // `/` and NUL would leave the directory; control characters would
+        // reach the terminal in a progress line or a listing.
+        if (code == 47 || code < 32 || code == 127 || (code >= 128 && code < 160)) {
             return false;
         }
     }

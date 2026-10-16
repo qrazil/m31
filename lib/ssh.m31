@@ -378,6 +378,26 @@ Error failure_of(io.Error cause) {
     }
 }
 
+/// Server-supplied text made safe to print: C0 and C1 control characters
+/// (except newline and tab), DEL, and the invisible or direction-changing
+/// characters (zero-width, bidi overrides and isolates, the BOM) are dropped,
+/// so a banner, a name or a message cannot move the cursor, retitle the
+/// window, inject escape sequences or reorder what the reader sees. Linear
+/// in the length of `text`.
+pub str sanitize_text(str text) {
+    List<int> kept = [];
+    for (int code in text.chars()) {
+        if (code == 10 || code == 9) {
+            kept.push(code);
+        } else if (code < 32 || code == 127 || (code >= 128 && code < 160)) {
+        } else if ((code >= 0x200B && code <= 0x200F) || (code >= 0x202A && code <= 0x202E) || (code >= 0x2066 && code <= 0x2069) || code == 0xFEFF) {
+        } else {
+            kept.push(code);
+        }
+    }
+    return str.from_chars(kept);
+}
+
 /// What the transport needs of the byte stream under it. A `net.Conn` is
 /// one; `sshjump.ChannelWire` (a TCP connection tunnelled through another
 /// SSH session, for `ProxyJump`) is the other. Nothing here is specific to a
