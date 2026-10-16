@@ -138,6 +138,45 @@ str read_text(str path) {
     }
 }
 
+// `Include` lines expanded in place, as OpenSSH does for a user's file: a
+// relative path is relative to `~/.ssh`, `~` and globs work, the matches go
+// in lexical order, a file that does not exist is skipped, and the depth is
+// bounded (16, as in OpenSSH) so a file that includes itself ends. The text
+// is spliced where the line was, so an included file's `Host` and `Match`
+// lines open blocks exactly as if written there.
+str expand_includes(str text, str home, int depth) {
+    if (depth > 16) {
+        return text;
+    }
+    str out = "";
+    for (str line in text.split("\n")) {
+        List<str> words = line.trim().split(" ");
+        if (words.size() >= 2 && words[0].to_lower() == "include") {
+            for (str raw in words.slice(1, words.size())) {
+                str pattern = raw;
+                if (pattern.size() >= 2 && pattern.starts_with("\"") && pattern.ends_with("\"")) {
+                    pattern = pattern.substr(1, pattern.size() - 1);
+                }
+                if (pattern == "~") {
+                    pattern = home;
+                } else if (pattern.starts_with("~/")) {
+                    pattern = home + pattern.substr(1, pattern.size());
+                } else if (!pattern.starts_with("/")) {
+                    pattern = home + "/.ssh/" + pattern;
+                }
+                for (str path in fs.glob(pattern)) {
+                    if (fs.is_file(path)) {
+                        out = out + expand_includes(read_text(path), home, depth + 1) + "\n";
+                    }
+                }
+            }
+        } else {
+            out = out + line + "\n";
+        }
+    }
+    return out;
+}
+
 // --- host key policy ------------------------------------------------------------
 
 /// The decision about a server's host key, as the transport asks for it. It
@@ -851,6 +890,7 @@ pub Result<Connection, str> connect(Params parameters) {
     // OpenSSH's rule (ssh(1), -J): "configuration directives supplied on the
     // command line generally apply to the destination host and not any
     // specified jump hosts", so a jump host sees the configuration file only.
+    file_text = expand_includes(file_text, home, 0);
     str base_config = file_text;
     str target_config = "";
     if (parameters.port > 0) {

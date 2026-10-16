@@ -38,10 +38,13 @@ Options come from, in this order, the command line, then `~/.ssh/config` (or
 (accumulates; `~`, `%h %u %r %d %%` expand), `IdentitiesOnly`,
 `StrictHostKeyChecking` (`yes`, `ask`, `accept-new`, `no`), `UserKnownHostsFile`,
 `ServerAliveInterval`, `ServerAliveCountMax`, `ConnectTimeout`, `RequestTTY`,
-`ProxyJump`, `LocalForward` and `RemoteForward`. `Match`, `Include`
-and any other keyword are reported-and-ignored, and the lines of a `Match`
-block are *not* applied (so a security setting inside one is not half
-applied). A malformed value is an error, never a default.
+`ProxyJump`, `LocalForward` and `RemoteForward`. `Include` is expanded in
+place (relative to `~/.ssh`, `~` and globs, lexical order, nested up to 16
+deep, a missing file is skipped). `Match` understands `all`, `host`,
+`originalhost`, `user` and `localuser` (comma-separated patterns, `!`
+negates); a `Match` with any other criterion (`exec`, `canonical`, ...) is
+reported and its lines are *not* applied (so a security setting inside one is
+not half applied). Any other keyword is reported-and-ignored. A malformed value is an error, never a default.
 
 ### Host keys
 
@@ -241,7 +244,7 @@ What it does **not** defend against, and where the limits are:
   password-derived data, as in every bcrypt); RSA signing, ECDSA signing,
   AES, ChaCha20 and X25519 are written to be, at the source level only.
 * **No ssh-agent forwarding, X11, `-D` (SOCKS), `-W`, UNIX-socket
-  forwarding, multiplexing, `Match`, `Include`, `Compression`, GSSAPI,
+  forwarding, multiplexing, `Compression`, GSSAPI,
   password or keyboard-interactive authentication.**
 * **Resize latency** is up to ~100 ms (a poll, not a signal).
 * **Terminal escape injection** from the *remote program's* output is the

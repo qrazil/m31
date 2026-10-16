@@ -27,10 +27,15 @@
 // `%d` (home directory) and `%%` expand in HostName, IdentityFile and
 // UserKnownHostsFile; a leading `~` is the home directory.
 //
-// **What is not understood is said, not guessed**: `Match`, `Include` and any
-// option not listed are collected in `Settings.ignored` (as the line's
-// keyword), and the lines of a `Match` block are not applied -- a security
-// setting inside one is therefore not silently half-applied. A malformed
+// `Match` understands `all`, `host`, `originalhost`, `user` and `localuser`
+// (pattern lists, `!` negates); `Include` is expanded by the caller before
+// the text gets here (`sshconnect`).
+//
+// **What is not understood is said, not guessed**: any option not listed is
+// collected in `Settings.ignored` (as the line's keyword), and a `Match`
+// with a criterion that is not understood (`exec`, `canonical`, ...) is
+// reported as `match <criterion>` and its lines are not applied -- a
+// security setting inside one is therefore not silently half-applied. A malformed
 // value for a known option (`Port banana`) is `Settings.errors`, never a
 // default.
 
@@ -201,6 +206,50 @@ bool can_parse_yes_no(str value, List<bool> out) {
     return false;
 }
 
+// Whether a comma-separated pattern list (with `!` negation, as on a `Host`
+// line) selects `name`.
+bool is_list_matching(str list, str name) {
+    return is_host_line_matching(list.split(","), name);
+}
+
+// A `Match` line: every criterion must hold. Understood: `all`, `host`,
+// `originalhost`, `user` (the remote user known so far) and `localuser`,
+// the last four each with a comma-separated pattern list. Anything else
+// (`exec`, `canonical`, `final`, `localnetwork`, `tagged`, ...) makes the
+// block not apply and is recorded in `ignored` as `match <criterion>`.
+bool is_match_line_matching(List<str> criteria, str original_host, str current_host, str current_user, str local_user, List<str> ignored) {
+    if (criteria.size() == 0) {
+        ignored.push("match");
+        return false;
+    }
+    bool is_matched = true;
+    int index = 0;
+    while (index < criteria.size()) {
+        str criterion = criteria[index].to_lower();
+        if (criterion == "all") {
+            index = index + 1;
+            continue;
+        }
+        if ((criterion != "host" && criterion != "originalhost" && criterion != "user" && criterion != "localuser") || index + 1 >= criteria.size()) {
+            ignored.push("match " + criterion);
+            return false;
+        }
+        str subject = current_host;
+        if (criterion == "originalhost") {
+            subject = original_host;
+        } else if (criterion == "user") {
+            subject = current_user;
+        } else if (criterion == "localuser") {
+            subject = local_user;
+        }
+        if (!is_list_matching(criteria[index + 1], subject)) {
+            is_matched = false;
+        }
+        index = index + 2;
+    }
+    return is_matched;
+}
+
 /// What applies to `host` given the configuration `config_text` (command-line
 /// `-o` lines first, then the file).
 pub Settings resolve(str config_text, str host, str local_user, str home) {
@@ -226,8 +275,15 @@ pub Settings resolve(str config_text, str host, str local_user, str home) {
             continue;
         }
         if (key == "match") {
-            is_applicable = false;
-            settings.ignored.push("match");
+            str current_user = local_user;
+            if (has_user) {
+                current_user = settings.user;
+            }
+            str current_host = host;
+            if (has_host_name) {
+                current_host = settings.host_name;
+            }
+            is_applicable = is_match_line_matching(words.slice(1, words.size()), host, current_host, current_user, local_user, settings.ignored);
             continue;
         }
         if (!is_applicable) {

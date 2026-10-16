@@ -462,6 +462,36 @@ ok("command-line -o and -l take precedence over the file", code == 0 and out == 
 code, out, err = run(["-F", "/nonexistent/config", "box", "true"])
 ok("missing -F file is an error", code == 255, (code, err))
 
+# Include (relative to ~/.ssh, glob, nested) and Match (host / user / all)
+os.makedirs(os.path.join(HOME, ".ssh", "conf.d"), exist_ok=True)
+with open(os.path.join(HOME, ".ssh", "conf.d", "10-box.conf"), "w") as f:
+    f.write(f"""Host viainc
+  HostName 127.0.0.1
+  Port {PORT}
+  User {USER}
+  Include nested.inc
+""")
+with open(os.path.join(HOME, ".ssh", "nested.inc"), "w") as f:
+    f.write(f"  IdentityFile {real}\n  UserKnownHostsFile {KH}\n  StrictHostKeyChecking yes\n")
+with open(os.path.join(HOME, ".ssh", "loop.inc"), "w") as f:
+    f.write("Include loop.inc\n")
+with open(cfg, "w") as f:
+    f.write("Include conf.d/*.conf\nInclude does-not-exist-*\nInclude loop.inc\n")
+code, out, err = run(["viainc", "echo", "included"])
+ok("Include: glob, nested include, relative to ~/.ssh, missing and self-including files tolerated", code == 0 and out == "included\n", (code, err))
+with open(cfg, "w") as f:
+    f.write(f"""Match host matchbox user {USER}
+  HostName 127.0.0.1
+  Port {PORT}
+  IdentityFile {real}
+  UserKnownHostsFile {KH}
+  StrictHostKeyChecking yes
+""")
+code, out, err = run(["-l", USER, "matchbox", "echo", "matched"])
+ok("Match host + user applies its block", code == 0 and out == "matched\n", (code, err))
+code, out, err = run(["-l", "someone-else", "matchbox", "echo", "x"])
+ok("Match user that does not hold: block not applied (cannot even connect)", code == 255, (code, err))
+
 # agent
 agent = subprocess.Popen(["ssh-agent", "-D", "-a", os.path.join(W, "agent.sock")],
                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
