@@ -17,7 +17,7 @@ trap 'rm -rf "$WORK"' EXIT
 
 python3 tests/cryptodiff/oracle.py cases >"$WORK/cases" || { echo "FAIL oracle cases"; exit 1; }
 python3 tests/cryptodiff/oracle.py want <"$WORK/cases" >"$WORK/want" || { echo "FAIL oracle (pip install cryptography)"; exit 1; }
-./target/debug/m31c --emit-c tests/cryptodiff/t_diff.m31 -o "$WORK/t.c" || { echo "FAIL compile"; exit 1; }
+./target/debug/m31c -emit-c tests/cryptodiff/t_diff.m31 --out "$WORK/t.c" || { echo "FAIL compile"; exit 1; }
 cc -O2 -Wall -Wextra -I runtime -pthread -o "$WORK/t" "$WORK/t.c" \
     runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" 2>"$WORK/cc.err" || { echo "FAIL cc"; head "$WORK/cc.err"; exit 1; }
 ${M31_RUN_PREFIX:-} "$WORK/t" <"$WORK/cases" >"$WORK/got" 2>"$WORK/err"
