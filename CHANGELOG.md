@@ -3,6 +3,36 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
+## 0.5.1 (2026-10-16)
+
+### Security (fixes from the independent audit of 0.5.0)
+
+- sftp download no longer writes a corrupt file and exits 0 when a server
+  returns short reads: gaps are re-read after EOF and a size mismatch fails.
+- A server-supplied exit status can no longer abort the client (masked to
+  8 bits). Server text is sanitised at every print site; banners are capped
+  at 16 KiB and processed in linear time.
+- Unsupported or security-relevant `ssh_config` options are reported; `Match`
+  criteria and `RevokedHostKeys` that cannot be honoured are refused.
+- `m31ssh-keygen -R` keeps `@revoked` and `@cert-authority` lines; known_hosts
+  rewrites are atomic; entries of unsupported key types make a host
+  unverifiable instead of unknown.
+- Rekeying (server- and client-initiated), trailing bytes in the KEX reply
+  refused, small-order Ed25519 keys rejected, control characters in user,
+  host and key arguments refused, `-r` depth bound, a body-wide read timeout.
+
+### Added
+
+- `~/.ssh/config`: `Include`, `Match`, `HashKnownHosts`, `RekeyLimit`,
+  `ProxyCommand`; `m31ssh-keygen -F -H -p`.
+- Library: `sshclient.connect_configured` (config, agent, default keys,
+  known_hosts policy) for programs that run `git-upload-pack` over ssh.
+
+### Known limits
+
+- No setrlimit, signal handlers, chmod/umask, flock or O_EXCL in the language:
+  see `docs/m31ssh.md`.
+
 ## 0.5.0 (2026-10-15)
 
 ### Added
