@@ -572,8 +572,11 @@ pub Result<int, str> Session.download(str remote, str local, int mode, Reporter 
             bool is_eof = false;
             List<Pending> queue = [];
             List<Pending> gaps = [];
-            while (queue.size() > 0 || !is_eof) {
-                while (queue.size() < PIPELINE && !is_eof) {
+            // Done when the server has said end-of-file, nothing is in flight
+            // and no range that came back short is still owed: a gap is
+            // re-requested even after another request has seen the end.
+            while (queue.size() > 0 || gaps.size() > 0 || !is_eof) {
+                while (queue.size() < PIPELINE && (gaps.size() > 0 || !is_eof)) {
                     int offset = issued;
                     int length = CHUNK;
                     if (gaps.size() > 0) {
@@ -632,7 +635,7 @@ pub Result<int, str> Session.download(str remote, str local, int mode, Reporter 
                         written = written + data.value.size();
                         progress.update(written, total);
                     }
-                    if (data.value.size() < current.length && !is_eof) {
+                    if (data.value.size() < current.length) {
                         // a short read: ask again for the rest of the range
                         gaps.push(Pending(0, current.offset + data.value.size(), current.length - data.value.size()));
                         if (data.value.size() == 0) {
@@ -645,6 +648,14 @@ pub Result<int, str> Session.download(str remote, str local, int mode, Reporter 
             }
             Result<bool, io.Error> finished = file.close();
             close_handle(handle)?;
+            if (total > 0 && written != total) {
+                // Every byte below the end of the file was asked for; getting
+                // a different count than the server's own size means the file
+                // changed under us or the server misbehaved. Never report
+                // success for a file that is not the one that was asked for.
+                Result<bool, io.Error> removed = fs.remove(local);
+                return Result<int, str>.Err("remote: " + remote + ": received " + written.to_str() + " bytes but the server's size is " + total.to_str() + "; the partial file was removed");
+            }
             return Result<int, str>.Ok(written);
         }
     }

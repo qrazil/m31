@@ -93,6 +93,38 @@ STAGE = os.path.join(W, "stage")
 os.makedirs(STAGE)
 
 
+FAKE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_sftp_server.py")
+
+
+def start_fake(scenario):
+    """A second sshd whose sftp subsystem is fake_sftp_server.py SCENARIO;
+    returns the COMMON-style option list for it."""
+    port = free_port()
+    cfg = os.path.join(W, "sshd_fake_%s" % scenario)
+    with open(cfg, "w") as f:
+        f.write(f"""Port {port}
+ListenAddress 127.0.0.1
+HostKey {HOSTKEY}
+PidFile {W}/sshd_fake_{scenario}.pid
+AuthorizedKeysFile {W}/authorized_keys
+StrictModes no
+UsePAM no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+Subsystem sftp python3 -I {FAKE} {scenario}
+""")
+    d = subprocess.Popen([SSHD, "-f", cfg, "-D", "-e"], stderr=subprocess.PIPE, stdout=subprocess.DEVNULL)
+    procs.append(d)
+    ready = threading.Event()
+    threading.Thread(target=lambda: [ready.set() for l in d.stderr if b"listening on" in l] and None, daemon=True).start()
+    if not ready.wait(20):
+        raise RuntimeError("fake sshd did not start")
+    fake_kh = os.path.join(W, "kh_fake_%s" % scenario)
+    with open(fake_kh, "w") as f:
+        f.write("[127.0.0.1]:%d %s\n" % (port, " ".join(open(HOSTKEY + ".pub").read().split()[:2])))
+    return ["-P", str(port), "-o", "UserKnownHostsFile=" + fake_kh, "-i", USERKEY]
+
+
 def run(binary, args, input=None, timeout=300):
     p = subprocess.run([binary] + args, input=input, capture_output=True, env=ENV, timeout=timeout)
     return p.returncode, p.stdout.decode(errors="replace"), p.stderr.decode(errors="replace")
@@ -281,6 +313,14 @@ batch = os.path.join(W, "batch.txt")
 open(batch, "w").write("mkdir bfile_dir\nput " + os.path.join(local_dir, "to_send.txt") + " bfile_dir/x\nquit\n")
 code, out, err = run(SFTP, COMMON + ["-q", "-b", batch, "%s@127.0.0.1:%s" % (USER, sd)])
 ok("sftp -b: a batch file", code == 0 and os.path.exists(os.path.join(sd, "bfile_dir", "x")), (code, err))
+
+# --- a server that returns short reads (H1 of the audit): never a silently wrong file ----------
+FAKE_DATA = bytes((i * 7) & 255 for i in range(100000))
+opts = start_fake("shortread")
+short_out = os.path.join(W, "short_out")
+code, out, err = run(SCP, opts + ["-q", REMOTE + "/f", short_out])
+ok("scp: a server capping READ at 4096 bytes still gives the exact file",
+   code == 0 and os.path.exists(short_out) and open(short_out, "rb").read() == FAKE_DATA, (code, err, os.path.getsize(short_out) if os.path.exists(short_out) else None))
 
 # --- m31ssh-keygen -------------------------------------------------------------------------------
 gen = os.path.join(W, "gen_plain")
