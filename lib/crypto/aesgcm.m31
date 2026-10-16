@@ -26,20 +26,28 @@
 //
 // --- Side channels ----------------------------------------------------------
 //
-// The block cipher is `lib/crypto/aes.m31`'s table-free one; its header documents
-// what that does and does not guarantee. GHASH is the other secret-dependent
-// part, and the usual fast implementations (Shoup's 4-bit or 8-bit tables of
-// multiples of H) index a table by data, which is what a cache-timing
-// attacker reads. This one is the bit-serial algorithm of SP 800-38D §6.3
-// with every conditional written as an arithmetic mask (`bit * 0xFFFF_FFFF`):
-// 128 fixed rounds per block, no table, no branch, no index that depends on H
-// or on the data. The same source-level-only caveat as `lib/crypto/aes.m31`
-// applies, and so does its cost: it is slow.
+// The block cipher is `lib/crypto/aes.m31`'s table-free bitsliced one; its
+// header documents what that does and does not guarantee. GHASH is the other
+// secret-dependent part, and the usual fast implementations (Shoup's 4-bit or
+// 8-bit tables of multiples of H) index a table by data, which is what a
+// cache-timing attacker reads. This one is a carry-less multiply built from
+// ordinary integer multiplications with "holes" (Thomas Pornin's BearSSL
+// `ghash_ctmul`): each 32-bit operand is split into four masks that select
+// every fourth bit, so the sums of partial products never carry into the bit
+// being kept, and the XOR of four such products is the carry-less product.
+// Karatsuba over 32-bit limbs makes a 128x128 multiply nine of those. No
+// table, no branch, no index that depends on H or on the data: the only
+// operations are `&`, `^`, shifts and `wrapping_mul`. The same source-level-only
+// caveat as `lib/crypto/aes.m31` applies (integer multiplication is
+// constant-time on the CPUs this runs on, but that too is not verified here).
 //
-// GHASH values are four 32-bit limbs, most significant first, so the first
-// octet of a block is the top of limb 0 and "bit 0" of the GCM spec is the
-// top bit of limb 0. Limbs are kept non-negative and below 2^32, the way
-// `lib/crypto/chacha20poly1305.m31` keeps its words.
+// GHASH values are four 32-bit limbs in *natural* bit order: the 128 bits of a
+// block are reversed, so GCM's "bit 0" (the top bit of the first octet) is bit
+// 0 of limb 0 and a field element is an ordinary polynomial in x with
+// coefficient i at bit i. The GCM field is then the product of two such
+// polynomials reduced by x^128 = x^7 + x^2 + x + 1, a few shifts. Limbs are
+// kept non-negative and below 2^32, the way `lib/crypto/chacha20poly1305.m31`
+// keeps its words.
 
 import crypto.aes;
 import crypto.consttime;
@@ -72,127 +80,200 @@ pub const int NONCE_SIZE = 12;
 /// The most plaintext one `seal` or `open` takes.
 pub const int MAX_MESSAGE = 16777216;
 
-// Four octets of `data` at `offset`, big-endian.
-int word_be(bytes data, int offset) {
-    return (data[offset] << 24) | (data[offset + 1] << 16) | (data[offset + 2] << 8) | data[offset + 3];
+// The 32 bits of `word` in reverse order.
+int reverse_bits(int word) {
+    int x = word;
+    x = (x >> 1 & 0x5555_5555) | (x & 0x5555_5555) << 1;
+    x = (x >> 2 & 0x3333_3333) | (x & 0x3333_3333) << 2;
+    x = (x >> 4 & 0x0F0F_0F0F) | (x & 0x0F0F_0F0F) << 4;
+    x = (x >> 8 & 0x00FF_00FF) | (x & 0x00FF_00FF) << 8;
+    return (x >> 16 | x << 16) & 0xFFFF_FFFF;
 }
 
-// A 32-bit word appended big-endian.
-void push_word_be(bytes out, int value) {
-    out.push(value >> 24 & 0xFF);
-    out.push(value >> 16 & 0xFF);
-    out.push(value >> 8 & 0xFF);
-    out.push(value & 0xFF);
+// The carry-less 32x32 -> 64 product of `x` and `y` (both below 2^32).
+int clmul32(int x, int y) {
+    int x0 = x & 0x1111_1111;
+    int x1 = x & 0x2222_2222;
+    int x2 = x & 0x4444_4444;
+    int x3 = x & 0x8888_8888;
+    int y0 = y & 0x1111_1111;
+    int y1 = y & 0x2222_2222;
+    int y2 = y & 0x4444_4444;
+    int y3 = y & 0x8888_8888;
+    int z0 = x0.wrapping_mul(y0) ^ x1.wrapping_mul(y3) ^ x2.wrapping_mul(y2) ^ x3.wrapping_mul(y1);
+    int z1 = x0.wrapping_mul(y1) ^ x1.wrapping_mul(y0) ^ x2.wrapping_mul(y3) ^ x3.wrapping_mul(y2);
+    int z2 = x0.wrapping_mul(y2) ^ x1.wrapping_mul(y1) ^ x2.wrapping_mul(y0) ^ x3.wrapping_mul(y3);
+    int z3 = x0.wrapping_mul(y3) ^ x1.wrapping_mul(y2) ^ x2.wrapping_mul(y1) ^ x3.wrapping_mul(y0);
+    return (z0 & 0x1111_1111_1111_1111) | (z1 & 0x2222_2222_2222_2222) | (z2 & 0x4444_4444_4444_4444) | (z3 & 0x8888_8888_8888_8888);
 }
 
-// The 16 octets of `data` from `offset` as four limbs, zero-padded on the right
-// past the end of `data` (SP 800-38D's zero padding of the last block).
-Array<int> block_limbs(bytes data, int offset) {
-    bytes padded = [];
-    for (int index in 0 .. 16) {
-        if (offset + index < data.size()) {
-            padded.push(data[offset + index]);
-        } else {
-            padded.push(0);
-        }
-    }
-    return [word_be(padded, 0), word_be(padded, 4), word_be(padded, 8), word_be(padded, 12)];
+// `h` is 6 ints: the four limbs of H and, after them, `h0 ^ h2` and `h1 ^ h3`
+// (the Karatsuba middle operands, computed once per key). `acc` (four limbs)
+// becomes `acc * H` in the GCM field.
+void gf_multiply(Array<int> acc, Array<int> h) {
+    int a0 = acc[0];
+    int a1 = acc[1];
+    int a2 = acc[2];
+    int a3 = acc[3];
+    // Low halves (limbs 0,1), high halves (limbs 2,3) and their sum, each a
+    // 64x64 product by Karatsuba over 32-bit limbs.
+    int l0 = clmul32(a0, h[0]);
+    int l2 = clmul32(a1, h[1]);
+    int l1 = clmul32(a0 ^ a1, h[0] ^ h[1]) ^ l0 ^ l2;
+    int u0 = clmul32(a2, h[2]);
+    int u2 = clmul32(a3, h[3]);
+    int u1 = clmul32(a2 ^ a3, h[2] ^ h[3]) ^ u0 ^ u2;
+    int m0 = clmul32(a0 ^ a2, h[4]);
+    int m2 = clmul32(a1 ^ a3, h[5]);
+    int m1 = clmul32((a0 ^ a2) ^ (a1 ^ a3), h[4] ^ h[5]) ^ m0 ^ m2;
+    // Z0 = low * low, Z2 = high * high, Z1 = (low ^ high) * (low ^ high) ^ Z0 ^ Z2,
+    // each as four 32-bit limbs.
+    int z0_0 = l0 & 0xFFFF_FFFF;
+    int z0_1 = (l0 >> 32 & 0xFFFF_FFFF) ^ (l1 & 0xFFFF_FFFF);
+    int z0_2 = (l1 >> 32 & 0xFFFF_FFFF) ^ (l2 & 0xFFFF_FFFF);
+    int z0_3 = l2 >> 32 & 0xFFFF_FFFF;
+    int z2_0 = u0 & 0xFFFF_FFFF;
+    int z2_1 = (u0 >> 32 & 0xFFFF_FFFF) ^ (u1 & 0xFFFF_FFFF);
+    int z2_2 = (u1 >> 32 & 0xFFFF_FFFF) ^ (u2 & 0xFFFF_FFFF);
+    int z2_3 = u2 >> 32 & 0xFFFF_FFFF;
+    int y0 = m0 & 0xFFFF_FFFF;
+    int y1 = (m0 >> 32 & 0xFFFF_FFFF) ^ (m1 & 0xFFFF_FFFF);
+    int y2 = (m1 >> 32 & 0xFFFF_FFFF) ^ (m2 & 0xFFFF_FFFF);
+    int y3 = m2 >> 32 & 0xFFFF_FFFF;
+    int z1_0 = y0 ^ z0_0 ^ z2_0;
+    int z1_1 = y1 ^ z0_1 ^ z2_1;
+    int z1_2 = y2 ^ z0_2 ^ z2_2;
+    int z1_3 = y3 ^ z0_3 ^ z2_3;
+    // The 256-bit product as eight limbs.
+    int p0 = z0_0;
+    int p1 = z0_1;
+    int p2 = z0_2 ^ z1_0;
+    int p3 = z0_3 ^ z1_1;
+    int p4 = z1_2 ^ z2_0;
+    int p5 = z1_3 ^ z2_1;
+    int p6 = z2_2;
+    int p7 = z2_3;
+    // Reduce by x^128 = x^7 + x^2 + x + 1, high limb first: limb i + 4's
+    // bits land at limb i (shifted by 0, 1, 2, 7) and what the shifts push
+    // out of the top lands at limb i + 1.
+    p4 = p4 ^ (p7 >> 31) ^ (p7 >> 30) ^ (p7 >> 25);
+    p3 = p3 ^ ((p7 ^ p7 << 1 ^ p7 << 2 ^ p7 << 7) & 0xFFFF_FFFF) ^ (p6 >> 31) ^ (p6 >> 30) ^ (p6 >> 25);
+    p2 = p2 ^ ((p6 ^ p6 << 1 ^ p6 << 2 ^ p6 << 7) & 0xFFFF_FFFF) ^ (p5 >> 31) ^ (p5 >> 30) ^ (p5 >> 25);
+    p1 = p1 ^ ((p5 ^ p5 << 1 ^ p5 << 2 ^ p5 << 7) & 0xFFFF_FFFF) ^ (p4 >> 31) ^ (p4 >> 30) ^ (p4 >> 25);
+    p0 = p0 ^ ((p4 ^ p4 << 1 ^ p4 << 2 ^ p4 << 7) & 0xFFFF_FFFF);
+    acc[0] = p0 & 0xFFFF_FFFF;
+    acc[1] = p1 & 0xFFFF_FFFF;
+    acc[2] = p2 & 0xFFFF_FFFF;
+    acc[3] = p3 & 0xFFFF_FFFF;
 }
 
-// The GF(2^128) product `x * h` of SP 800-38D §6.3 (Algorithm 1), in 128
-// fixed steps. `x_limbs` and `h_limbs` are four limbs each.
-Array<int> multiply_blocks(Array<int> x_limbs, Array<int> h_limbs) {
-    int product_limb_0 = 0;  // SP 800-38D: Z
-    int product_limb_1 = 0;  // SP 800-38D: Z
-    int product_limb_2 = 0;  // SP 800-38D: Z
-    int product_limb_3 = 0;  // SP 800-38D: Z
-    int multiple_limb_0 = h_limbs[0];  // SP 800-38D: V
-    int multiple_limb_1 = h_limbs[1];  // SP 800-38D: V
-    int multiple_limb_2 = h_limbs[2];  // SP 800-38D: V
-    int multiple_limb_3 = h_limbs[3];  // SP 800-38D: V
-    for (int position in 0 .. 128) {
-        int bit = x_limbs[position / 32] >> (31 - position % 32) & 1;
-        int take = bit * 0xFFFF_FFFF;
-        product_limb_0 = product_limb_0 ^ (multiple_limb_0 & take);
-        product_limb_1 = product_limb_1 ^ (multiple_limb_1 & take);
-        product_limb_2 = product_limb_2 ^ (multiple_limb_2 & take);
-        product_limb_3 = product_limb_3 ^ (multiple_limb_3 & take);
-        int reduce = (multiple_limb_3 & 1) * 0xFFFF_FFFF;
-        multiple_limb_3 = multiple_limb_3 >> 1 | ((multiple_limb_2 & 1) << 31);
-        multiple_limb_2 = multiple_limb_2 >> 1 | ((multiple_limb_1 & 1) << 31);
-        multiple_limb_1 = multiple_limb_1 >> 1 | ((multiple_limb_0 & 1) << 31);
-        multiple_limb_0 = multiple_limb_0 >> 1 ^ (0xE100_0000 & reduce);
-    }
-    return [product_limb_0, product_limb_1, product_limb_2, product_limb_3];
-}
-
-// GHASH_H over `aad`, `ciphertext` and the length block (§6.4), as four
-// limbs.
-Array<int> ghash(Array<int> h_limbs, bytes aad, bytes ciphertext) {
-    Array<int> acc = [0, 0, 0, 0];
-    for (int part in 0 .. 2) {
-        bytes data = aad;
-        if (part == 1) {
-            data = ciphertext;
-        }
-        int offset = 0;
-        while (offset < data.size()) {
-            Array<int> block = block_limbs(data, offset);
-            acc = multiply_blocks([acc[0] ^ block[0], acc[1] ^ block[1], acc[2] ^ block[2], acc[3] ^ block[3]], h_limbs);
-            offset = offset + 16;
-        }
-    }
-    int aad_bits = aad.size() * 8;
-    int text_bits = ciphertext.size() * 8;
-    Array<int> lengths = [aad_bits >> 32 & 0xFFFF_FFFF, aad_bits & 0xFFFF_FFFF, text_bits >> 32 & 0xFFFF_FFFF, text_bits & 0xFFFF_FFFF];
-    return multiply_blocks([acc[0] ^ lengths[0], acc[1] ^ lengths[1], acc[2] ^ lengths[2], acc[3] ^ lengths[3]], h_limbs);
-}
-
-// `nonce || counter` as a 16-octet block, the counter big-endian.
-bytes counter_block(bytes nonce, int counter) {
-    bytes block = clone(nonce);
-    push_word_be(block, counter);
-    return block;
-}
-
-// CTR mode from block counter 2 on (counter 1 is the tag mask), RFC/SP
-// 800-38D §6.5. Symmetric: the same call encrypts and decrypts.
-bytes ctr_xor(aes.Cipher cipher, bytes nonce, bytes data) {
-    bytes out = [];
-    int offset = 0;
-    int counter = 2;
-    while (offset < data.size()) {
-        bytes stream = cipher.encrypt_block(counter_block(nonce, counter));
-        int end = offset + 16;
-        if (end > data.size()) {
-            end = data.size();
-        }
-        for (int index in offset .. end) {
-            out.push(data[index] ^ stream[index - offset]);
-        }
-        offset = end;
-        counter = counter + 1;
-    }
-    return out;
-}
-
-// The tag: E(K, J0) XOR GHASH, with J0 = nonce || 1 (§7.1, 96-bit IV).
-bytes compute_tag(aes.Cipher cipher, bytes nonce, bytes aad, bytes ciphertext) {
-    Array<int> h_limbs = [0, 0, 0, 0];
+// `h`'s six ints for a key: GHASH's H (the AES encryption of the zero block)
+// as four natural-order limbs, then `h0 ^ h2` and `h1 ^ h3`.
+Array<int> hash_key(aes.Cipher cipher) {
     bytes h_block = cipher.encrypt_block([0; 16]);
-    for (int index in 0 .. 4) {
-        h_limbs[index] = word_be(h_block, 4 * index);
+    Array<int> h = [0; 6];
+    for (int i in 0 .. 4) {
+        h[i] = reverse_bits((h_block[4 * i] << 24) | (h_block[4 * i + 1] << 16) | (h_block[4 * i + 2] << 8) | h_block[4 * i + 3]);
     }
-    Array<int> hash = ghash(h_limbs, aad, ciphertext);
-    bytes mask = cipher.encrypt_block(counter_block(nonce, 1));
-    bytes tag = [];
-    for (int index in 0 .. 4) {
-        push_word_be(tag, hash[index]);
+    h[4] = h[0] ^ h[2];
+    h[5] = h[1] ^ h[3];
+    return h;
+}
+
+// `data[start .. end)` folded into the GHASH accumulator `acc`, zero-padded to
+// a whole block at the end (§6.4).
+void ghash_feed(Array<int> acc, Array<int> h, bytes data, int start, int end) {
+    int position = start;
+    while (position + 16 <= end) {
+        for (int i in 0 .. 4) {
+            int at = position + 4 * i;
+            acc[i] = acc[i] ^ reverse_bits((data[at] << 24) | (data[at + 1] << 16) | (data[at + 2] << 8) | data[at + 3]);
+        }
+        gf_multiply(acc, h);
+        position = position + 16;
     }
-    for (int index in 0 .. 16) {
-        tag[index] = tag[index] ^ mask[index];
+    if (position < end) {
+        bytes last = [0; 16];
+        for (int i in 0 .. end - position) {
+            last[i] = data[position + i];
+        }
+        for (int i in 0 .. 4) {
+            acc[i] = acc[i] ^ reverse_bits((last[4 * i] << 24) | (last[4 * i + 1] << 16) | (last[4 * i + 2] << 8) | last[4 * i + 3]);
+        }
+        gf_multiply(acc, h);
+    }
+}
+
+// The 16-octet tag for `aad` and `ciphertext[0 .. length)`: GHASH over the
+// padded AAD, the padded ciphertext and the length block, XOR E(K, J0) with
+// J0 = nonce || 1 (§7.1, 96-bit IV).
+bytes compute_tag(aes.Cipher cipher, bytes nonce, bytes aad, bytes ciphertext, int length) {
+    Array<int> h = hash_key(cipher);
+    Array<int> acc = [0; 4];
+    ghash_feed(acc, h, aad, 0, aad.size());
+    ghash_feed(acc, h, ciphertext, 0, length);
+    bytes lengths = [0; 16];
+    int aad_bits = aad.size() * 8;
+    int text_bits = length * 8;
+    for (int i in 0 .. 8) {
+        lengths[i] = aad_bits >> (56 - 8 * i) & 0xFF;
+        lengths[8 + i] = text_bits >> (56 - 8 * i) & 0xFF;
+    }
+    ghash_feed(acc, h, lengths, 0, 16);
+    bytes counter_one = clone(nonce);
+    bytes one = [0, 0, 0, 1];
+    counter_one.extend(one);
+    bytes mask = cipher.encrypt_block(counter_one);
+    bytes tag = [0; 16];
+    for (int i in 0 .. 4) {
+        int word = reverse_bits(acc[i]);
+        tag[4 * i] = (word >> 24 & 0xFF) ^ mask[4 * i];
+        tag[4 * i + 1] = (word >> 16 & 0xFF) ^ mask[4 * i + 1];
+        tag[4 * i + 2] = (word >> 8 & 0xFF) ^ mask[4 * i + 2];
+        tag[4 * i + 3] = (word & 0xFF) ^ mask[4 * i + 3];
     }
     return tag;
+}
+
+// CTR mode from block counter 2 on (counter 1 is the tag mask), SP 800-38D
+// §6.5: `data[0 .. length)` XOR the keystream into `out[0 .. length)`.
+// Symmetric. The counter blocks of one chunk (at most 256 blocks) are built
+// together and encrypted in one bitsliced call.
+void ctr_xor(aes.Cipher cipher, bytes nonce, bytes data, int length, bytes out) {
+    int position = 0;
+    int counter = 2;
+    int first = (length + 15) / 16 * 16;
+    if (first > 4096) {
+        first = 4096;
+    }
+    bytes counters = [0; first];
+    while (position < length) {
+        int chunk = length - position;
+        if (chunk > 4096) {
+            chunk = 4096;
+        }
+        int blocks = (chunk + 15) / 16;
+        if (blocks * 16 < counters.size()) {
+            counters.truncate(blocks * 16);
+        }
+        for (int block in 0 .. blocks) {
+            int at = 16 * block;
+            for (int i in 0 .. 12) {
+                counters[at + i] = nonce[i];
+            }
+            int value = counter + block;
+            counters[at + 12] = value >> 24 & 0xFF;
+            counters[at + 13] = value >> 16 & 0xFF;
+            counters[at + 14] = value >> 8 & 0xFF;
+            counters[at + 15] = value & 0xFF;
+        }
+        bytes stream = cipher.encrypt_blocks(counters);
+        for (int i in 0 .. chunk) {
+            out[position + i] = data[position + i] ^ stream[i];
+        }
+        position = position + chunk;
+        counter = counter + blocks;
+    }
 }
 
 void check_arguments(bytes key, bytes nonce, int message_size) {
@@ -214,10 +295,14 @@ void check_arguments(bytes key, bytes nonce, int message_size) {
 pub bytes seal(bytes key, bytes nonce, bytes plaintext, bytes aad) {
     check_arguments(key, nonce, plaintext.size());
     aes.Cipher cipher = aes.cipher(key);
-    bytes ciphertext = ctr_xor(cipher, nonce, plaintext);
-    bytes tag = compute_tag(cipher, nonce, aad, ciphertext);
-    ciphertext.extend(tag);
-    return ciphertext;
+    int length = plaintext.size();
+    bytes out = [0; length + 16];
+    ctr_xor(cipher, nonce, plaintext, length, out);
+    bytes tag = compute_tag(cipher, nonce, aad, out, length);
+    for (int i in 0 .. 16) {
+        out[length + i] = tag[i];
+    }
+    return out;
 }
 
 /// Verify and decrypt: SP 800-38D §7.2. `Err(Short)` if `sealed` cannot
@@ -234,12 +319,12 @@ pub Result<bytes, Error> open(bytes key, bytes nonce, bytes sealed, bytes aad) {
     if (text_size > MAX_MESSAGE) {
         trap("aesgcm: message too long");
     }
-    bytes ciphertext = sealed.substr(0, text_size);
-    bytes tag = sealed.substr(text_size, sealed.size());
     aes.Cipher cipher = aes.cipher(key);
-    bytes want = compute_tag(cipher, nonce, aad, ciphertext);
-    if (!consttime.is_equal(want, tag)) {
+    bytes want = compute_tag(cipher, nonce, aad, sealed, text_size);
+    if (!consttime.is_equal(want, sealed.substr(text_size, sealed.size()))) {
         return Result<bytes, Error>.Err(Error.Tag);
     }
-    return Result<bytes, Error>.Ok(ctr_xor(cipher, nonce, ciphertext));
+    bytes out = [0; text_size];
+    ctr_xor(cipher, nonce, sealed, text_size, out);
+    return Result<bytes, Error>.Ok(out);
 }

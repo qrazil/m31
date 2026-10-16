@@ -133,9 +133,9 @@ void Hasher.block(bytes data, int offset) {
     // four earlier ones through the two sigma functions -- a rotate-xor-rotate
     // for the high bits, a shift for the low ones.
     for (int i in 16 .. 64) {
-        int x15 = schedule[i - 15];
+        int x15 = schedule[i - 15] & 0xFFFF_FFFF;
         int sigma_low_0 = (((x15 >> 7) | (x15 << 25)) & 0xFFFF_FFFF) ^ (((x15 >> 18) | (x15 << 14)) & 0xFFFF_FFFF) ^ (x15 >> 3);  // FIPS 180-4: sigma0
-        int word_two_back = schedule[i - 2];
+        int word_two_back = schedule[i - 2] & 0xFFFF_FFFF;
         int sigma_low_1 = (((word_two_back >> 17) | (word_two_back << 15)) & 0xFFFF_FFFF) ^ (((word_two_back >> 19) | (word_two_back << 13)) & 0xFFFF_FFFF) ^ (word_two_back >> 10);  // FIPS 180-4: sigma1
         schedule[i] = schedule[i - 16] + sigma_low_0 + schedule[i - 7] + sigma_low_1 & 0xFFFF_FFFF;
     }
@@ -151,9 +151,14 @@ void Hasher.block(bytes data, int offset) {
     // written the way the standard writes it -- see `apps/git/sha1.m31`'s
     // note on why, which applies here too.
     for (int i in 0 .. 64) {
+        // Re-masked so the C compiler can see both are below 2^32: that is
+        // what lets it fold the sign fill out of every `>>` below and drop
+        // the overflow checks on the additions (docs/CRYPTO-PERF.md).
+        state_a = state_a & 0xFFFF_FFFF;
+        state_e = state_e & 0xFFFF_FFFF;
         int bs1 = (((state_e >> 6) | (state_e << 26)) & 0xFFFF_FFFF) ^ (((state_e >> 11) | (state_e << 21)) & 0xFFFF_FFFF) ^ (((state_e >> 25) | (state_e << 7)) & 0xFFFF_FFFF);
         int choice = state_g ^ (state_e & (state_f ^ state_g));  // FIPS 180-4: Ch
-        int temp1 = state_h + bs1 + choice + ROUND_CONSTANTS[i] + schedule[i] & 0xFFFF_FFFF;
+        int temp1 = (state_h & 0xFFFF_FFFF) + bs1 + choice + ROUND_CONSTANTS[i] + (schedule[i] & 0xFFFF_FFFF) & 0xFFFF_FFFF;
         int bs0 = (((state_a >> 2) | (state_a << 30)) & 0xFFFF_FFFF) ^ (((state_a >> 13) | (state_a << 19)) & 0xFFFF_FFFF) ^ (((state_a >> 22) | (state_a << 10)) & 0xFFFF_FFFF);
         int maj = (state_a & state_b) | (state_c & (state_a | state_b));
         int temp2 = bs0 + maj & 0xFFFF_FFFF;
