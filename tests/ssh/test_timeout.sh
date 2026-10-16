@@ -100,13 +100,22 @@ for p in "$PORT" "$SILENT"; do
     [ "$up" = 1 ] || { bad "nothing listening on $p" "$(cat "$WORK/sshd.log")"; exit 1; }
 done
 
-# run MODE PORT -> prints "<word> <elapsed ms>"
+# run MODE PORT -> prints "<word> <elapsed ms>". Timed by python3 (already a
+# prerequisite): no `date +%s%N` and no GNU `timeout`, which macOS lacks.
 run() {
-    local mode=$1 port=$2 t0 t1 out
-    t0=$(date +%s%N)
-    out=$(timeout 60 "$WORK/t" "$mode" "$port" "$USER_NAME" "$WORK/user_key" "$WORK/kh" 2>"$WORK/err")
-    t1=$(date +%s%N)
-    printf '%s %s' "$out" $(((t1 - t0) / 1000000))
+    python3 - "$WORK/t" "$1" "$2" "$USER_NAME" "$WORK/user_key" "$WORK/kh" "$WORK/err" <<'PY'
+import subprocess, sys, time
+exe, mode, port, user, key, kh, errpath = sys.argv[1:8]
+t0 = time.monotonic()
+with open(errpath, "wb") as err:
+    try:
+        r = subprocess.run([exe, mode, port, user, key, kh], stdout=subprocess.PIPE, stderr=err, timeout=60)
+        out = r.stdout.decode(errors="replace").rstrip("\n")
+    except subprocess.TimeoutExpired:
+        out = "watchdog-timeout"
+ms = int((time.monotonic() - t0) * 1000)
+sys.stdout.write("%s %d" % (out, ms))
+PY
 }
 
 check() { # label, mode, port, expected word, min ms, max ms

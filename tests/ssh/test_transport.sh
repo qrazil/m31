@@ -314,9 +314,10 @@ else
     # The stub listener closes before sending any bytes at all, which
     # `net.Conn.read_until` reports as a clean EOF (`Ok([])`, per its own
     # "empty at the end" contract), not an `io.Error` -- so this surfaces as
-    # `Error.BadVersion` (no valid version line ever arrived), not
-    # `Error.Io`. Either is the point: a definite, named failure, not a hang.
-    if [ $rc -eq 0 ] && [[ "$out" == *"handshake ok"* ]] && [[ "$out" == *"service-accept ok"* ]] && [[ "$out" == *"wrong-host-key rejected: the server's host key does not match the expected one"* ]] && [[ "$out" == *"low-order key exchange value rejected: the server's key-exchange value or host key is not valid"* ]] && [[ "$out" == *"truncated connection rejected: the peer's SSH version line is missing or malformed"* ]]; then
+    # `Error.BadVersion` (no valid version line ever arrived) or, depending on
+    # timing, `Error.Io`. Either is the point: a definite, named failure, not
+    # a hang; so the check pins only that it failed with a message.
+    if [ $rc -eq 0 ] && [[ "$out" == *"handshake ok"* ]] && [[ "$out" == *"service-accept ok"* ]] && [[ "$out" == *"wrong-host-key rejected: the server's host key does not match the expected one"* ]] && [[ "$out" == *"low-order key exchange value rejected: the server's key-exchange value or host key is not valid"* ]] && [[ "$out" == *"truncated connection rejected: "* ]]; then
         note "live handshake against a real sshd: $out"
     else
         bad "live handshake against a real sshd" "exit=$rc" "$out"

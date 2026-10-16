@@ -14,7 +14,7 @@
 # `ssh-keygen -F` and by the real `ssh` with StrictHostKeyChecking=yes, and a
 # second sshd with a different host key stands in for "the key changed".
 #
-# Needs `sshd`, `ssh-keygen`, `sha256sum` and `seq`. The fixture is first
+# Needs `sshd`, `ssh-keygen`, `sha256sum` (or `shasum`) and `seq`. The fixture is first
 # checked with the real `ssh` client (when installed), so a failure of the m31
 # client cannot be blamed on a broken fixture. `sshd` runs with `-D` (see
 # `test_transport.sh`) and is pinned to this client's one suite.
@@ -22,7 +22,17 @@ set -uo pipefail
 cd "$(dirname "$0")/../.."
 . ./runtime/arch.sh
 
-for tool in sshd ssh-keygen sha256sum seq; do
+# A SHA-256 of standard input, as "<hex>  -": coreutils' sha256sum, or
+# `shasum -a 256` (macOS, which has no sha256sum). Both print the same format.
+if command -v sha256sum >/dev/null; then
+    SHA_CMD="sha256sum"
+elif command -v shasum >/dev/null; then
+    SHA_CMD="shasum -a 256"
+else
+    echo "sha256sum or shasum not found on PATH -- skipping"; exit 0
+fi
+
+for tool in sshd ssh-keygen seq; do
     command -v "$tool" >/dev/null || { echo "$tool not found on PATH -- skipping"; exit 0; }
 done
 SSHD_BIN=$(command -v sshd)
@@ -167,7 +177,7 @@ fi
 
 # --- the m31 program ---------------------------------------------------------------
 
-SEQ_SHA=$(seq 1 1200000 | sha256sum | cut -d' ' -f1)
+SEQ_SHA=$(seq 1 1200000 | $SHA_CMD | cut -d' ' -f1)
 
 cat >"$WORK/t_live.m31" <<EOF
 import ssh;
@@ -616,19 +626,19 @@ checks = check(checks, finish(r1) == 0, "read 8 MB: exit status 0");
 
 sshexec.Channel r2 = start(s, "seq 1 1200000");
 bytes seq_out = slurp(r2);
-checks = check(checks, sha256.hex(seq_out) == SEQ_SHA, "read seq 1 1200000: digest matches sha256sum");
+checks = check(checks, sha256.hex(seq_out) == SEQ_SHA, "read seq 1 1200000: digest matches the system's sha256");
 checks = check(checks, finish(r2) == 0, "read seq: exit status 0");
 
 bytes big = pattern(EIGHT_MB);
 
-sshexec.Channel w1 = start(s, "wc -c");
+sshexec.Channel w1 = start(s, "wc -c | tr -d ' '");
 put(w1, big);
 eof(w1);
 bytes wc_out = slurp(w1);
 checks = check(checks, wc_out == "8388608\n".to_bytes(), "write 8 MB to wc -c: counted exactly");
 checks = check(checks, finish(w1) == 0, "write 8 MB: exit status 0");
 
-sshexec.Channel w2 = start(s, "sha256sum");
+sshexec.Channel w2 = start(s, "$SHA_CMD");
 put(w2, big);
 eof(w2);
 bytes sum_out = slurp(w2);
@@ -690,8 +700,15 @@ elif ! cc -O2 -Wall -Wextra -I runtime -pthread -o "$WORK/t_live" "$WORK/t_live.
         runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" 2>"$WORK/t_live.cc"; then
     bad "cc t_live" "$(head -20 "$WORK/t_live.cc")"
 else
-    timeout 300 "$WORK/t_live" >"$WORK/t_live.out" 2>"$WORK/t_live.err"
+    # A watchdog instead of GNU `timeout` (not on macOS): kills by pid.
+    "$WORK/t_live" >"$WORK/t_live.out" 2>"$WORK/t_live.err" &
+    live_pid=$!
+    (sleep 300; kill "$live_pid" 2>/dev/null) &
+    watchdog_pid=$!
+    wait "$live_pid"
     rc=$?
+    kill "$watchdog_pid" 2>/dev/null
+    wait "$watchdog_pid" 2>/dev/null
     if [ $rc -eq 0 ] && tail -1 "$WORK/t_live.out" | grep -q ' checks, 0 failures$'; then
         note "live client against a real sshd: $(tail -1 "$WORK/t_live.out")"
     else
