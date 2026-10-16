@@ -398,8 +398,18 @@ def _():
     p.send("sleep 300\n")
     p.send(b"\x03")
     p.expect(r"\^C")
-    p.send("echo AFTER$((2+3))\n")
-    p.expect(r"AFTER5")
+    # The remote tty drops input typed while the interrupted command is being
+    # reaped, so a line sent at once can lose its first bytes: send a
+    # throwaway newline first, and retry the check until the shell answers.
+    p.send("\n")
+    for attempt in range(5):
+        p.send("echo AFTER$((2+3))\n")
+        try:
+            p.expect(r"AFTER5", timeout=5)
+            break
+        except TimeoutError:
+            if attempt == 4:
+                raise
     ok("Ctrl-C reaches the remote command, not the client", p.proc.poll() is None)
     p.send("exit\n")
     p.finish()
@@ -438,6 +448,16 @@ f = subprocess.run(["ssh-keygen", "-F", "[127.0.0.1]:%d" % PORT, "-f", hashed_kh
 ok("HashKnownHosts: OpenSSH's ssh-keygen -F finds the host in it", f.returncode == 0, (f.stdout, f.stderr))
 code, out, err = run(["-p", str(PORT), "-o", "UserKnownHostsFile=" + hashed_kh, "-o", "StrictHostKeyChecking=yes", "127.0.0.1", "echo", "again"])
 ok("HashKnownHosts: the hashed entry is then trusted", code == 0 and out == "again\n", (code, err))
+
+p384 = os.path.join(W, "p384_key")
+subprocess.run(["ssh-keygen", "-q", "-t", "ecdsa", "-b", "384", "-N", "", "-f", p384], check=True)
+unver_kh = os.path.join(W, "unverifiable_known_hosts")
+with open(unver_kh, "w") as f:
+    f.write("[127.0.0.1]:%d %s\n" % (PORT, " ".join(open(p384 + ".pub").read().split()[:2])))
+unver_before = open(unver_kh).read()
+code, out, err = run(["-p", str(PORT), "-o", "UserKnownHostsFile=" + unver_kh, "-o", "StrictHostKeyChecking=accept-new", "127.0.0.1", "echo", "x"])
+ok("a host known only by a key type we cannot verify is not treated as new (accept-new refuses)",
+   code == 255 and "cannot verify" in err and out == "" and open(unver_kh).read() == unver_before, (code, err))
 
 @scenario("tofu-accept")
 def _():

@@ -281,6 +281,9 @@ str why(sshclient.Error e) {
                 case BadKey: {
                     return "hosts-badkey";
                 }
+                case Unverifiable: {
+                    return "hosts-unverifiable";
+                }
             }
         }
         case Connect(ssh.Error c): {

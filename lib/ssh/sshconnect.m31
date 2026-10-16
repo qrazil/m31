@@ -265,6 +265,10 @@ pub bool HostCheck.is_acceptable(ssh.HostKey key) {
                     failure = "cannot write " + path;
                     return false;
                 }
+                case Unverifiable: {
+                    failure = display_name(host, port) + " is listed in " + path + " only with a key type this client cannot verify (certificate authority, another curve, a short RSA key); refusing to trust a new key for it. Connect with OpenSSH, or remove that entry";
+                    return false;
+                }
             }
         }
     }

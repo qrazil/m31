@@ -87,6 +87,11 @@ pub enum Error {
     Revoked;
     /// `add` could not create the file's directory or append to the file.
     Write;
+    /// The file lists this host, but only with keys this client cannot
+    /// check (another curve, `sk-*`, `ssh-dss`, a short RSA key, a
+    /// certificate authority): the host is known, so it must not be treated
+    /// as new and have another key recorded for it.
+    Unverifiable;
 }
 
 pub str Error.to_str() {
@@ -109,6 +114,9 @@ pub str Error.to_str() {
         case Write: {
             return "the known_hosts file could not be written";
         }
+        case Unverifiable: {
+            return "the host is listed in known_hosts only with key types this client cannot verify";
+        }
     }
 }
 
@@ -130,6 +138,20 @@ type Entry {
 /// The ed25519 entries of one `known_hosts` file, in file order.
 pub type KnownHosts {
     List<Entry> entries;
+    /// The host patterns of entries that were skipped as unusable (see
+    /// `Error.Unverifiable`), `@cert-authority` lines included.
+    List<List<str>> unusable;
+}
+
+/// Whether some entry that this client cannot use names `host` on `port`.
+pub bool KnownHosts.has_unusable(str host, int port) {
+    str id = host_id(host, port);
+    for (List<str> patterns in unusable) {
+        if (is_entry_match(patterns, id)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /// The 32-octet `ssh-ed25519` keys this file trusts for `host` on `port`,
@@ -198,6 +220,9 @@ Result<List<bytes>, Error> KnownHosts.select(str host, int port, bool is_blob) {
     if (usable.size() == 0) {
         if (keys.size() > 0) {
             return Result<List<bytes>, Error>.Err(Error.Revoked);
+        }
+        if (has_unusable(host, port)) {
+            return Result<List<bytes>, Error>.Err(Error.Unverifiable);
         }
         return Result<List<bytes>, Error>.Err(Error.UnknownHost);
     }
@@ -358,6 +383,7 @@ List<str> fields_of(str line) {
 /// what is an error.
 pub Result<KnownHosts, Error> parse(str text) {
     List<Entry> entries = [];
+    List<List<str>> unusable = [];
     for (str raw in text.split("\n")) {
         str line = raw.trim();
         if (line.size() == 0 || line.starts_with("#")) {
@@ -391,6 +417,9 @@ pub Result<KnownHosts, Error> parse(str text) {
         }
         str type_name = fields[field_offset + 1];
         if (is_authority || !is_supported_type(type_name)) {
+            if (!is_revoked) {
+                unusable.push(patterns);
+            }
             continue;
         }
         bytes blob = decode_blob(fields[field_offset + 2])?;
@@ -409,10 +438,13 @@ pub Result<KnownHosts, Error> parse(str text) {
                 if (!error.is_unsupported_key() || type_name == KEY_TYPE) {
                     return Result<KnownHosts, Error>.Err(Error.BadKey);
                 }
+                if (!is_revoked) {
+                    unusable.push(patterns);
+                }
             }
         }
     }
-    return Result<KnownHosts, Error>.Ok(KnownHosts(entries));
+    return Result<KnownHosts, Error>.Ok(KnownHosts(entries, unusable));
 }
 
 bool is_supported_type(str name) {
