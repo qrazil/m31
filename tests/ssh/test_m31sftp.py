@@ -127,7 +127,8 @@ Subsystem sftp python3 -I {FAKE} {scenario}
 
 def run(binary, args, input=None, timeout=300):
     p = subprocess.run([binary] + args, input=input, capture_output=True, env=ENV, timeout=timeout)
-    return p.returncode, p.stdout.decode(errors="replace"), p.stderr.decode(errors="replace")
+    err = "".join(l for l in p.stderr.decode(errors="replace").splitlines(True) if "warning: OpenSSH-style options" not in l and "warning: OpenSSH-style" not in l)
+    return p.returncode, p.stdout.decode(errors="replace"), err
 
 
 def sha(path):

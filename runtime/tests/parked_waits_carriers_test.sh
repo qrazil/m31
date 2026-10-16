@@ -27,7 +27,7 @@ fail=0
 
 for prog in stdlib-timer stdlib-net-timeout-park; do
     dir=corpus/modules/$prog
-    if ! "$LANGC" --emit-c "$dir/main.m31" -o "$WORK/$prog.c" 2>"$WORK/$prog.err"; then
+    if ! "$LANGC" -emit-c "$dir/main.m31" --out "$WORK/$prog.c" 2>"$WORK/$prog.err"; then
         echo "FAILED: compile $prog: $(grep -v '^warning' "$WORK/$prog.err" | head -5)"
         fail=1
         continue

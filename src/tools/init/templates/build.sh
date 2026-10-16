@@ -40,7 +40,7 @@ fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-"$LANGC" --emit-c @@IDENT@@.m31 -o "$tmp/out.c"
+"$LANGC" -emit-c @@IDENT@@.m31 --out "$tmp/out.c"
 # RT_REACTOR_C and RT_CTX_ASM (from runtime/arch.sh) are relative to M31_ROOT.
 "$CC" -O2 -pthread -I "$M31_ROOT/runtime" -o "$out" "$tmp/out.c" \
     "$M31_ROOT/runtime/rt.c" "$M31_ROOT/runtime/scheduler.c" \

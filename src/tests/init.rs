@@ -110,7 +110,7 @@ fn written_project_is_formatted_and_lint_clean() {
             let again = crate::reformat(&f.text, module).expect("expected it to parse");
             assert_eq!(again, f.text, "{} is not fmt-stable", f.path);
         }
-        let rc = lint::main(&[dir.to_string_lossy().to_string()]);
+        let rc = lint::run_paths(&[dir.to_string_lossy().to_string()]);
         assert_eq!(
             format!("{rc:?}"),
             format!("{:?}", ExitCode::SUCCESS),

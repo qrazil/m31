@@ -75,7 +75,7 @@ fail=0
 build() {
     local src=$1 label=$2
     local c="$WORK/$label.c" bin="$WORK/$label.bin" err="$WORK/$label.cc"
-    if ! "$LANGC" --emit-c "$src" -o "$c" 2>"$WORK/$label.diag"; then
+    if ! "$LANGC" -emit-c "$src" --out "$c" 2>"$WORK/$label.diag"; then
         echo "FAILED: $label: compile: $(head -3 "$WORK/$label.diag")"
         return 1
     fi

@@ -225,9 +225,9 @@ run "formatter preserves meaning" bash -c '
         # silently succeed against the original fixture while the second,
         # scratch-only compile depended on the copy of it actually working,
         # which is exactly where a macOS-only `cp -r` difference surfaced.
-        if ./target/debug/'"$LANG_BIN"' --emit-c "$w/$b" -o "$w/a.c" 2>/dev/null; then
-            ./target/debug/'"$LANG_BIN"' fmt "$w/$b" 2>/dev/null
-            if ! ./target/debug/'"$LANG_BIN"' --emit-c "$w/$b" -o "$w/b.c" 2>"$w/b.diag"; then
+        if ./target/debug/'"$LANG_BIN"' -emit-c "$w/$b" --out "$w/a.c" 2>/dev/null; then
+            ./target/debug/'"$LANG_BIN"' -fmt "$w/$b" 2>/dev/null
+            if ! ./target/debug/'"$LANG_BIN"' -emit-c "$w/$b" --out "$w/b.c" 2>"$w/b.diag"; then
                 # Surfaced rather than discarded: a remote import (deps.rs)
                 # re-resolves on this second compile, over the same scratch
                 # copy the first compile already cloned into -- if that ever
@@ -312,7 +312,7 @@ run "formatter preserves meaning" bash -c '
 # include_str!. Checking it is formatted is also a round-trip test, because
 # the checked-in file IS the canonical output: anything the formatter drops
 # or reorders in it shows up here as a diff.
-run "stdlib source is formatted" ./target/debug/"$LANG_BIN" fmt --check -r lib
+run "stdlib source is formatted" ./target/debug/"$LANG_BIN" -fmt --check --recursive lib
 
 # The naming rules (docs/naming-decision.md) are enforced, not advised: a
 # name of three characters or more, snake_case, no abbreviations from the
@@ -321,7 +321,7 @@ run "stdlib source is formatted" ./target/debug/"$LANG_BIN" fmt --check -r lib
 # Every source tree that ships or documents the language must be clean.
 # corpus/ is exempt on purpose: its programs are compiler test inputs, many
 # of them written to be wrong.
-run "naming lint" ./target/debug/"$LANG_BIN" lint lib tests examples runtime bench
+run "naming lint" ./target/debug/"$LANG_BIN" -lint lib tests examples runtime bench
 
 # `fmt -r <dir>` is how each repository checks its own tree: every source file
 # under the directory, nested ones included, and never the derived or foreign
@@ -338,7 +338,7 @@ run "recursive formatter" bash -c '
         echo "$mess" > "$w/$f.'"$LANG_EXT"'"
     done
     bin=./target/debug/'"$LANG_BIN"'
-    if out=$($bin fmt --check -r "$w" 2>&1); then
+    if out=$($bin -fmt --check --recursive "$w" 2>&1); then
         echo "--check -r passed on an unformatted tree"; exit 1
     fi
     for f in a/top a/b/deep; do
@@ -348,8 +348,8 @@ run "recursive formatter" bash -c '
     if echo "$out" | grep -qE "theirs|built|hook"; then
         echo "--check -r looked inside a skipped directory: $out"; exit 1
     fi
-    $bin fmt -r "$w" || { echo "fmt -r failed"; exit 1; }
-    $bin fmt --check -r "$w" || { echo "tree is not formatted after fmt -r"; exit 1; }
+    $bin -fmt --recursive "$w" || { echo "fmt --recursive failed"; exit 1; }
+    $bin -fmt --check --recursive "$w" || { echo "tree is not formatted after fmt --recursive"; exit 1; }
     for f in .m31-deps/dep/theirs target/built .git/hook; do
         [ "$(cat "$w/$f.'"$LANG_EXT"'")" = "$mess" ] \
             || { echo "fmt -r rewrote $f"; exit 1; }
@@ -361,9 +361,9 @@ run "formatter is idempotent" bash -c '
         [ -e "$f" ] || continue
         w=$(mktemp -d)
         cp "$f" "$w/t.'"$LANG_EXT"'"
-        if ./target/debug/'"$LANG_BIN"' fmt "$w/t.'"$LANG_EXT"'" 2>/dev/null; then
+        if ./target/debug/'"$LANG_BIN"' -fmt "$w/t.'"$LANG_EXT"'" 2>/dev/null; then
             cp "$w/t.'"$LANG_EXT"'" "$w/once.'"$LANG_EXT"'"
-            ./target/debug/'"$LANG_BIN"' fmt "$w/t.'"$LANG_EXT"'" 2>/dev/null
+            ./target/debug/'"$LANG_BIN"' -fmt "$w/t.'"$LANG_EXT"'" 2>/dev/null
             if ! diff -q "$w/once.'"$LANG_EXT"'" "$w/t.'"$LANG_EXT"'" >/dev/null 2>&1; then
                 echo "formatting twice differs from once: $f"
                 bad=1
@@ -386,14 +386,14 @@ run "formatter fixtures" bash -c '
         w=$(mktemp -d)
         cp "$f" "$w/t.'"$LANG_EXT"'"
         cp "$want" "$w/w.'"$LANG_EXT"'"
-        if ! ./target/debug/'"$LANG_BIN"' fmt "$w/t.'"$LANG_EXT"'"; then
+        if ! ./target/debug/'"$LANG_BIN"' -fmt "$w/t.'"$LANG_EXT"'"; then
             bad=1
         elif ! diff -q "$want" "$w/t.'"$LANG_EXT"'" >/dev/null; then
             echo "formatted layout differs from $want:"
             diff "$want" "$w/t.'"$LANG_EXT"'" | head -10
             bad=1
         fi
-        ./target/debug/'"$LANG_BIN"' fmt --check "$w/w.'"$LANG_EXT"'" || bad=1
+        ./target/debug/'"$LANG_BIN"' -fmt --check "$w/w.'"$LANG_EXT"'" || bad=1
         rm -rf "$w"
     done
     exit $bad'
@@ -411,9 +411,9 @@ run "emission is reproducible" bash -c '
     for f in corpus/*/*.'"$LANG_EXT"' corpus/modules/*/*.'"$LANG_EXT"' examples/*.'"$LANG_EXT"'; do
         [ -e "$f" ] || continue
         w=$(mktemp -d)
-        ./target/debug/'"$LANG_BIN"' --emit-c "$f" -o "$w/1.c" 2>/dev/null || { rm -rf "$w"; continue; }
+        ./target/debug/'"$LANG_BIN"' -emit-c "$f" --out "$w/1.c" 2>/dev/null || { rm -rf "$w"; continue; }
         for _ in 1 2 3 4 5; do
-            ./target/debug/'"$LANG_BIN"' --emit-c "$f" -o "$w/n.c" 2>/dev/null
+            ./target/debug/'"$LANG_BIN"' -emit-c "$f" --out "$w/n.c" 2>/dev/null
             if ! diff -q "$w/1.c" "$w/n.c" >/dev/null 2>&1; then
                 echo "emitted C differs between runs of the compiler: $f"
                 diff "$w/1.c" "$w/n.c" | head -6

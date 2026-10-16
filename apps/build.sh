@@ -18,7 +18,7 @@ out=$name
 [ "${2:-}" = "-o" ] && out=${3:?-o needs a name}
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-"$root/target/debug/$LANG_BIN" --emit-c "$here/$name/$name.m31" -o "$tmp/out.c"
+"$root/target/debug/$LANG_BIN" -emit-c "$here/$name/$name.m31" --out "$tmp/out.c"
 "${CC:-cc}" -O2 -w -pthread -I "$root/runtime" -o "$out" "$tmp/out.c" \
     "$root/runtime/rt.c" "$root/runtime/scheduler.c" "$root/$RT_REACTOR_C" "$root/$RT_CTX_ASM"
 echo "$out"

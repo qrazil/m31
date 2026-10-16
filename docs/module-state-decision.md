@@ -82,7 +82,7 @@ exponent range (i7-8750H, release compiler, best of 5):
 
 | | before | after | |
 |---|---|---|---|
-| `m31c --emit-c` | 10.0 ms | 11.5 ms | +1.5 ms: 1368 constant elements to evaluate (one loaded-machine run; ~7 ms on a quiet one) |
+| `m31c -emit-c` | 10.0 ms | 11.5 ms | +1.5 ms: 1368 constant elements to evaluate (one loaded-machine run; ~7 ms on a quiet one) |
 | emitted C | 175,230 bytes, 7,113 lines | 162,442 bytes, 5,682 lines | −7% bytes (this includes the per-type copy functions `const` snapshots added) |
 | `gcc -O2 -c` of it | 0.320 s | 0.290 s | −10% |
 | `clang -O2 -c` of it | 0.264 s | 0.237 s | −10% |

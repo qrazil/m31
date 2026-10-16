@@ -52,7 +52,7 @@ skip() { printf 'skip %s\n' "$1"; }
 
 build() {
     local name=$1
-    if ! "$LANGC" --emit-c "tests/tls/$name.m31" -o "$WORK/$name.c" 2>"$WORK/$name.diag"; then
+    if ! "$LANGC" -emit-c "tests/tls/$name.m31" --out "$WORK/$name.c" 2>"$WORK/$name.diag"; then
         bad "compile $name" "$(head -5 "$WORK/$name.diag")"
         return 1
     fi
@@ -93,12 +93,12 @@ fi
 
 if out=$(
     for f in lib/tls/tlsserver.m31 lib/pki/signingkey.m31 lib/crypto/ecdsasign.m31 tests/tls/t_tlsserver_*.m31 tests/tls/example_https_static.m31; do
-        "$LANGC" fmt --check "$f" || echo "$f"
+        "$LANGC" -fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then
     note "source is formatted"
 else
-    bad "source is not formatted (run: m31c fmt <file>)" "$out"
+    bad "source is not formatted (run: m31c -fmt <file>)" "$out"
 fi
 
 for program in t_tlsserver_serve t_tlsserver_client t_tlsserver_config t_tlsserver_sign t_tlsserver_ed25519 example_https_static; do

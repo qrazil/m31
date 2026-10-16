@@ -47,7 +47,7 @@ skip() { printf 'skip %s\n' "$1"; }
 
 build() {
     local name=$1
-    if ! "$LANGC" --emit-c "tests/tls/$name.m31" -o "$WORK/$name.c" 2>"$WORK/$name.diag"; then
+    if ! "$LANGC" -emit-c "tests/tls/$name.m31" --out "$WORK/$name.c" 2>"$WORK/$name.diag"; then
         bad "compile $name" "$(head -5 "$WORK/$name.diag")"
         return 1
     fi
@@ -78,12 +78,12 @@ matches() { perl -0777 -e 'local $/; my $text = <STDIN>; exit($text =~ /$ARGV[0]
 
 if out=$(
     for f in lib/tls.m31 tests/tls/t_tls_*.m31; do
-        "$LANGC" fmt --check "$f" || echo "$f"
+        "$LANGC" -fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then
     note "source is formatted"
 else
-    bad "source is not formatted (run: m31c fmt <file>)" "$out"
+    bad "source is not formatted (run: m31c -fmt <file>)" "$out"
 fi
 
 build t_tls_client || { echo; printf '\033[31m%d of %d tls checks FAILED\033[0m\n' "$fail" "$((pass + fail))"; exit 1; }

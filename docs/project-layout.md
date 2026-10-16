@@ -1,6 +1,6 @@
 # Project layout
 
-`m31c init` writes this layout; every app repo under github.com/qrazil follows
+`m31c -init` writes this layout; every app repo under github.com/qrazil follows
 it. Directories are for finding files: the module name does not change when a
 file moves, so a reorganisation costs only the `import` lines.
 
@@ -20,7 +20,7 @@ my-app/
   .github/workflows/release.yml   on `v*` tags, after the same tests pass
 ```
 
-A library (`m31c init --lib`) has no entry point, no `scripts/build.sh`, and a
+A library (`m31c -init --lib`) has no entry point, no `scripts/build.sh`, and a
 release workflow that only tests and publishes the source.
 
 ## Rules that make it work
@@ -30,10 +30,10 @@ release workflow that only tests and publishes the source.
 - **Module names are globally unique and carry the project prefix**:
   `MA_core`, never `core`. Folders are never part of the name, so
   `import core.MA_core;` and `MA_core.greeting(..)` stay valid wherever the
-  file sits. `m31c lint` checks the prefix; entry points and files under
+  file sits. `m31c -lint` checks the prefix; entry points and files under
   `tests/`, `scripts/`, `docs/` and `corpus/` are exempt.
-- **`tests/test.sh` is the one entry point.** It runs `m31c fmt --check -r`,
-  `m31c lint`, then builds and runs every `tests/t_*.m31`; a test prints
+- **`tests/test.sh` is the one entry point.** It runs `m31c -fmt --check -r`,
+  `m31c -lint`, then builds and runs every `tests/t_*.m31`; a test prints
   `N passed, M failed` last. CI calls it and nothing else, so a failure
   reproduces with one command: `M31_ROOT=<checkout or release> LANGC=<m31c>
   bash tests/test.sh`.
@@ -58,7 +58,7 @@ what moved. Bug fixes and additions are patch bumps. Pinning consumers
 ## Starting one
 
 ```
-m31c init [--lib] [--name NAME] [--prefix PREFIX] [dir]
+m31c -init [--lib] [--name NAME] [--prefix PREFIX] [dir]
 ```
 
 `NAME` defaults to the directory's name and must be lowercase words joined by

@@ -16,7 +16,7 @@ out=$(basename "$src" ".$LANG_EXT")
 CC=${CC:-cc}
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 
-"./target/debug/$LANG_BIN" --emit-c "$src" -o "$tmp/out.c"
+"./target/debug/$LANG_BIN" -emit-c "$src" --out "$tmp/out.c"
 # `spawn` and `Chan` are always green threads now (docs/concurrency-decision.md),
 # so every program links the Phase 1-3 runtime unconditionally: the scheduler,
 # the epoll reactor, and the context switch they are both built on

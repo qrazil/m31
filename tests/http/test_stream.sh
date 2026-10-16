@@ -21,8 +21,8 @@ LANGC=./target/debug/m31c
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-"$LANGC" fmt --check tests/http/t_stream_client.m31 || { echo "FAILED: fmt"; exit 1; }
-"$LANGC" --emit-c tests/http/t_stream_client.m31 -o "$WORK/c.c" || exit 1
+"$LANGC" -fmt --check tests/http/t_stream_client.m31 || { echo "FAILED: fmt"; exit 1; }
+"$LANGC" -emit-c tests/http/t_stream_client.m31 --out "$WORK/c.c" || exit 1
 cc -O2 -I runtime -pthread -o "$WORK/client" "$WORK/c.c" \
     runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" || exit 1
 

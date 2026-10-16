@@ -12,6 +12,7 @@
 // Exit status: 0; 1 for a failed command in batch mode or bad usage; 255
 // when the connection or authentication failed.
 
+import args;
 import io;
 import os;
 import fs;
@@ -27,7 +28,27 @@ const int READ_TIMEOUT_MS = 60000;
 pub const str VERSION = "0.1.0";
 
 str usage() {
-    return "usage: m31sftp [-P port] [-i identity] [-o option=value] [-F config] [-J jump]\n" + "               [-b batchfile] [-q] [user@]host[:directory]\n" + "\n" + "m31sftp is UNAUDITED: do not rely on it where an audited client\n" + "(OpenSSH) is required. See docs/m31ssh.md.\n" + "commands: ls [-l] [path]  cd path  lcd path  pwd  lpwd  get [-r] remote [local]\n" + "          put [-r] local [remote]  mkdir path  rmdir path  rm path\n" + "          rename old new  stat path  chmod mode path  help  quit\n";
+    return grammar().help() + "\n";
+}
+
+/// The grammar (`lib/args`, Oro's: docs/cli-conventions.md). The OpenSSH
+/// letters (`-P -i -o -F -J -b -q`) still work for one release, read by
+/// `start_legacy`. The interactive commands (`get -r`, `ls -l`) are typed at the
+/// prompt, not on the command line, and are sftp's own language.
+args.Parser grammar() {
+    args.Parser table = args.Parser("m31sftp", summary: "m31sftp is UNAUDITED: do not rely on it where an audited client\n(OpenSSH) is required. See docs/m31ssh.md.");
+    table.version = VERSION + " (UNAUDITED)";
+    table.positional("destination", placeholder: "HOST", help: "[user@]host[:directory]");
+    table.integer("port", short: "p", placeholder: "PORT", min: "1", max: "65535", help: "port to connect to (default 22)");
+    table.value("config", short: "c", placeholder: "FILE", help: "configuration file (default ~/.ssh/config)");
+    table.value("jump", short: "j", placeholder: "HOST[,HOST...]", help: "connect through these jump hosts");
+    table.value("batch-file", short: "b", placeholder: "FILE", help: "read commands from FILE instead of the terminal");
+    table.flag("quiet", short: "q", help: "no progress meter");
+    table.values("identity", short: "i", placeholder: "FILE", help: "private key files (default ~/.ssh/id_ed25519)");
+    table.values("option", short: "o", placeholder: "OPT=VALUE", help: "ssh_config settings (as m31ssh)");
+    table.completions();
+    table.epilog = "interactive commands (sftp's own language, unchanged):\n  ls [-l] [path]  cd path  lcd path  pwd  lpwd  get [-r] remote [local]\n  put [-r] local [remote]  mkdir path  rmdir path  rm path\n  rename old new  stat path  chmod mode path  help  quit\n\nOptions that take lists (--identity --option) take every operand up to the next dash:\nwrite the host first.\nexit status: 0 ok, 1 usage or transfer error, 255 connection error";
+    return table;
 }
 
 void warn(str message) {
@@ -153,7 +174,7 @@ Result<bool, str> run_command(State state, List<str> words) {
         return Result<bool, str>.Ok(true);
     }
     if (command == "help" || command == "?") {
-        print(usage());
+        print(grammar().help());
         return Result<bool, str>.Ok(false);
     }
     if (command == "pwd") {
@@ -342,7 +363,54 @@ str octal(int value) {
     return out;
 }
 
+/// The entry point: the Oro grammar, or the OpenSSH one (deprecated).
 pub int start(List<str> argv) {
+    List<str> arguments = [];
+    if (argv.size() > 1) {
+        arguments = argv.slice(1, argv.size());
+    }
+    if (args.is_old_style(arguments)) {
+        io.eprint("m31sftp: warning: OpenSSH-style options (-P, -b, -o, ...) are deprecated and go away next release: use --port, --batch-file, --option, ... (m31sftp --help)");
+        return start_legacy(argv);
+    }
+    args.Parser table = grammar();
+    match (table.parse(arguments)) {
+        case Err(args.UsageError error): {
+            warn(error.to_str());
+            io.eprint("try 'm31sftp --help'");
+            return EXIT_USAGE;
+        }
+        case Ok(args.Parsed given): {
+            match (given.help()) {
+                case Some(str text): {
+                    print(text);
+                    return 0;
+                }
+                case None: {
+                }
+            }
+            match (given.version()) {
+                case Some(str text): {
+                    print(text);
+                    return 0;
+                }
+                case None: {
+                }
+            }
+            match (given.completions()) {
+                case Some(str script): {
+                    print(script);
+                    return 0;
+                }
+                case None: {
+                }
+            }
+            return connect_and_run(given.integer("port").or(0), given.values("identity"), given.values("option"), given.value("config").or(""), given.value("jump").or(""), given.value("batch-file").or(""), given.is_flag_set("quiet"), given.positional("destination"));
+        }
+    }
+}
+
+int start_legacy(List<str> argv) {
     List<str> arguments = [];
     if (argv.size() > 1) {
         arguments = argv.slice(1, argv.size());
@@ -422,6 +490,11 @@ pub int start(List<str> argv) {
         }
         index = index + 1;
     }
+    return connect_and_run(port, identities, settings, config_file, jump, batch_file, is_quiet, destination);
+}
+
+// Everything after the command line is understood.
+int connect_and_run(int port, List<str> identities, List<str> settings, str config_file, str jump, str batch_file, bool is_quiet, str destination) {
     if (destination == "") {
         io.eprint(usage());
         return EXIT_USAGE;

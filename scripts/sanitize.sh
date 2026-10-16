@@ -52,7 +52,7 @@ done
 
 for src in "${programs[@]}"; do
     stem=${src%.$LANG_EXT}
-    if ! "$LANGC" --emit-c "$src" -o "$WORK/p.c" 2>/dev/null; then
+    if ! "$LANGC" -emit-c "$src" --out "$WORK/p.c" 2>/dev/null; then
         echo "does not compile: $src"
         bad=1
         continue

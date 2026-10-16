@@ -303,7 +303,7 @@ match (ssh.connect("127.0.0.1", trunc_port, good_key)) {
 }
 EOF
 
-if ! "$LANGC" --emit-c "$WORK/t_transport.m31" -o "$WORK/t_transport.c" 2>"$WORK/t_transport.diag"; then
+if ! "$LANGC" -emit-c "$WORK/t_transport.m31" --out "$WORK/t_transport.c" 2>"$WORK/t_transport.diag"; then
     bad "compile t_transport" "$(cat "$WORK/t_transport.diag")"
 elif ! cc -O0 -Wall -Wextra -I runtime -pthread -o "$WORK/t_transport" "$WORK/t_transport.c" \
         runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" 2>"$WORK/t_transport.cc"; then

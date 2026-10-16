@@ -326,7 +326,7 @@ and `is_immortal_variant` requires `!is_value`, so the two are disjoint by
 construction, matching that a computed-tag variant obviously cannot be
 interned — its value varies by construction.
 
-**Measured**, compiling a program against the real stdlib (`--emit-c`, then
+**Measured**, compiling a program against the real stdlib (`-emit-c`, then
 `sizeof` under gcc, `-O2`, x86-64 System V):
 
     io.Error                 16 bytes -> 8 bytes

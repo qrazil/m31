@@ -57,7 +57,7 @@ bundle)
     # (build.sh hardcodes target/debug/$LANG_BIN, so drive cc directly.)
     t=$(mktemp -d)
     printf 'print("musl ok");\n' >"$t/hello.$LANG_EXT"
-    "$OUT/$LANG_BIN" --emit-c "$t/hello.$LANG_EXT" -o "$t/hello.c"
+    "$OUT/$LANG_BIN" -emit-c "$t/hello.$LANG_EXT" --out "$t/hello.c"
     . "$OUT/runtime/arch.sh"
     (cd "$OUT" && cc -O2 -pthread -I runtime -o "$t/hello" "$t/hello.c" \
         runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM")

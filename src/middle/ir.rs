@@ -723,7 +723,7 @@ impl Module {
     }
 }
 
-// ---- textual form, for --emit-ir and for debugging -----------------------
+// ---- textual form, for -emit-ir and for debugging -----------------------
 
 impl fmt::Display for Module {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

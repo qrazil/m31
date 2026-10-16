@@ -700,7 +700,7 @@ match (s.close()) {
 print(checks.to_str() + " checks, 0 failures");
 EOF
 
-if ! "$LANGC" --emit-c "$WORK/t_live.m31" -o "$WORK/t_live.c" 2>"$WORK/t_live.diag"; then
+if ! "$LANGC" -emit-c "$WORK/t_live.m31" --out "$WORK/t_live.c" 2>"$WORK/t_live.diag"; then
     bad "compile t_live" "$(head -20 "$WORK/t_live.diag")"
 elif ! cc -O2 -Wall -Wextra -I runtime -pthread -o "$WORK/t_live" "$WORK/t_live.c" \
         runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" 2>"$WORK/t_live.cc"; then

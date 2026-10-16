@@ -9,7 +9,7 @@ rule costs, and the order to pay it in. It was written before any rename;
 enforces it). The sections before §9 are the decision as it stood then, and
 the counts in §2 and §7 are the pre-rename counts.
 
-Numbers below come from `m31c lint`, which walks the parsed AST, and from
+Numbers below come from `m31c -lint`, which walks the parsed AST, and from
 one regex survey (§2) taken before the lint existed. Where they disagree the
 lint is right: the regex survey cannot see lambda parameters, fields or
 function names. Everything quoted from other languages' guidance is from
@@ -356,13 +356,13 @@ const int LF = 10;             // → LINE_FEED   (CR → CARRIAGE_RETURN, SP �
 
 ---
 
-## 6. Enforcement: `m31c lint`
+## 6. Enforcement: `m31c -lint`
 
 ```
-m31c lint [--allow NAME[,NAME..]] [--strict] [--summary] <file|dir>...
+m31c -lint [--allow NAME[,NAME..]] [--strict] [--summary] <file|dir>...
 ```
 
-Parse-only (the same path as `m31c fmt`), so it runs on code that does not
+Parse-only (the same path as `m31c -fmt`), so it runs on code that does not
 typecheck and on a repo whose imports are not on disk — which is how the four
 extracted repos were measured. Directories are walked for `*.m31`, sorted.
 
@@ -393,7 +393,7 @@ lines of tree walk and CLI, plus 90 of unit tests, and no new dependency.
 
 ### Violation counts
 
-`m31c lint` default mode, files that parse. Module-name findings are
+`m31c -lint` default mode, files that parse. Module-name findings are
 excluded from `corpus/` (506: the test programs are named `001-hello.m31` and
 are never imported; the lint would flag the dash). 44 files in `corpus/` do not
 parse — they are the negative tests.
@@ -459,12 +459,12 @@ the same letter in two functions counts once per line:
    message quoting `e`) and by tool where it does not. Its `.err` and `.out`
    files compare byte-for-byte, so a renamed parameter that appears in a
    diagnostic changes the expected file in the same commit.
-7. **Wire `m31c lint` into `gates.sh`**, with an empty `--allow`, the day the
+7. **Wire `m31c -lint` into `gates.sh`**, with an empty `--allow`, the day the
    last repo is clean. Wiring it earlier makes every gate run fail.
 
 ### How, safely
 
-- **One file per commit, formatter-clean**: `m31c fmt --check` on the file
+- **One file per commit, formatter-clean**: `m31c -fmt --check` on the file
   before the commit. A rename can change line width, and `fmt` reflows.
 - **Tests green per commit.** The corpus is the oracle; a pure rename must
   change no `.out`, and any that changes is a name that leaked into
@@ -540,7 +540,7 @@ the same letter in two functions counts once per line:
     boolean prefixes `can_`, `should_`, `did_`, `was_`, `needs_` and `will_`
     are also accepted (`can_wrap`, `should_redraw`, `needs_flush`) — added to
     this item with the lint rule below, because `is_`/`has_` alone forces
-    `is_should_redraw`. `m31c lint` enforces it syntactically: a local,
+    `is_should_redraw`. `m31c -lint` enforces it syntactically: a local,
     parameter, lambda parameter or field whose declared type is exactly
     `bool`, and a function or method that returns `bool`, is reported as a
     "boolean name" (suggestion `is_<name>`) unless it starts with one of the
@@ -567,7 +567,7 @@ renamed to the end of its scope, every use was found by the same scope rules
 comments and doc comments that quote a name in backticks follow it.
 
 - **Scope.** `lib/`, `apps/`, `examples/`, `runtime/`, `bench/` and
-  `crypto25519_test/` pass `m31c lint` with no `--allow`: 2495 findings
+  `crypto25519_test/` pass `m31c -lint` with no `--allow`: 2495 findings
   before (1955 in `lib/`), 0 after. `corpus/` is exempt, as §6 says, and was
   only touched where a public name it uses changed.
 - **Local names** (parameters, locals, loop and `case` bindings): about 2150
@@ -595,7 +595,7 @@ comments and doc comments that quote a name in backticks follow it.
 - **Trap messages.** A message that names an API (`os.arguments(): argument
   1 is not valid UTF-8; read os.arguments_bytes() instead`) names the new
   spelling, and `corpus/traps/850-args-not-utf8.trap` says the same.
-- **Enforcement.** `gates.sh` runs `m31c lint lib apps examples runtime
+- **Enforcement.** `gates.sh` runs `m31c -lint lib apps examples runtime
   bench crypto25519_test` right after the stdlib formatting gate.
 
 `m31c` keeps two names it calls by string, `__floatfmt` and `__text`; they are

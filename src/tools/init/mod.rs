@@ -9,19 +9,49 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use crate::resolve::stdlib;
+use crate::tools::cli;
 
-pub const USAGE: &str = "usage: m31c init [--lib] [--name NAME] [--prefix PREFIX] [dir]";
+static INIT_OPERANDS: [cli::Operand; 1] = [cli::Operand {
+    name: "dir",
+    need: cli::Need::Optional,
+    help: "where to create it (default .)",
+}];
 
-const HELP: &str = "Creates a new project in `dir` (default: the current directory).
+pub static SPEC: cli::Spec = cli::Spec {
+    prog: "m31c -init",
+    summary: "create a new project in `dir` (default: the current directory)",
+    opts: &[
+        cli::Opt {
+            long: "lib",
+            short: Some('l'),
+            kind: cli::Kind::Flag,
+            placeholder: "",
+            help: "a library: no entry point, no binary build or release assets",
+        },
+        cli::Opt {
+            long: "name",
+            short: Some('n'),
+            kind: cli::Kind::Value,
+            placeholder: "NAME",
+            help: "the project name: lowercase words joined by hyphens (default: the directory's name)",
+        },
+        cli::Opt {
+            long: "prefix",
+            short: Some('p'),
+            kind: cli::Kind::Value,
+            placeholder: "PREFIX",
+            help: "the module prefix, as in TUI_text: capital letters and digits (default: the name upcased, or the initials of a hyphenated name)",
+        },
+    ],
+    operands: &INIT_OPERANDS,
+    commands: &[],
+    version: None,
+    completions: false,
+    epilog: HELP,
+};
 
-  --lib            a library: no entry point, no binary build or release assets
-  --name NAME      the project name; lowercase words joined by hyphens
-                   (default: the directory's name)
-  --prefix PREFIX  the module prefix, as in TUI_text; capital letters and digits
-                   (default: the name upcased, or the initials of a hyphenated name)
-
-Nothing is overwritten: if any file it would write already exists, it writes
-nothing and lists them.";
+const HELP: &str = "Nothing is overwritten: if any file it would write already exists, it writes
+nothing and lists them. Exit 0 created, 1 could not (files exist, io), 2 usage.";
 
 pub struct Opts {
     pub name: String,
@@ -196,49 +226,15 @@ pub fn plan(o: &Opts) -> Result<Vec<File>, String> {
 }
 
 fn bad_usage(msg: &str) -> ExitCode {
-    eprintln!("{msg}");
-    eprintln!("{USAGE}");
-    ExitCode::from(2)
+    cli::fail(&SPEC, msg)
 }
 
-/// The `init` subcommand. Exit 0 created, 1 could not (files exist, io), 2 bad usage.
-pub fn main(args: &[String]) -> ExitCode {
-    let mut lib = false;
-    let mut name: Option<String> = None;
-    let mut prefix: Option<String> = None;
-    let mut dir: Option<String> = None;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--lib" => lib = true,
-            "--name" | "--prefix" => {
-                let flag = args[i].as_str();
-                i += 1;
-                let Some(value) = args.get(i) else {
-                    return bad_usage(&format!("{flag} needs a value"));
-                };
-                if flag == "--name" {
-                    name = Some(value.clone());
-                } else {
-                    prefix = Some(value.clone());
-                }
-            }
-            "--help" => {
-                println!("{USAGE}\n\n{HELP}");
-                return ExitCode::SUCCESS;
-            }
-            other if other.starts_with('-') => {
-                return bad_usage(&format!("unknown option `{other}`"));
-            }
-            other => {
-                if dir.is_some() {
-                    return bad_usage("more than one directory");
-                }
-                dir = Some(other.to_string());
-            }
-        }
-        i += 1;
-    }
+/// The `-init` command. Exit 0 created, 1 could not (files exist, io), 2 bad usage.
+pub fn run(parsed: &cli::Parsed) -> ExitCode {
+    let lib = parsed.flag("lib");
+    let name = parsed.value("name").map(String::from);
+    let prefix = parsed.value("prefix").map(String::from);
+    let dir = parsed.operands.first().cloned();
 
     let dir = PathBuf::from(dir.unwrap_or_else(|| ".".into()));
     let name = match name {

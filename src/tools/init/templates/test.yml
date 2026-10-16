@@ -3,7 +3,7 @@ name: Test
 # Builds and tests this repo against a pinned release of github.com/qrazil/m31,
 # on Linux x86-64, Linux aarch64 and macOS arm64. The release tarball carries
 # the compiler and the runtime sources together (config.sh + runtime/), and is
-# extracted under $RUNNER_TEMP so `m31c fmt --check -r .` never scans it.
+# extracted under $RUNNER_TEMP so `m31c -fmt --check --recursive .` never scans it.
 #
 # Bump M31_REF, or the commit on a dependency line of `deps`, by hand when this
 # repo should pick up a newer release.

@@ -35,6 +35,31 @@
 //   r.commands()       -> List<args.Parsed>, the commands typed, in order
 //   c.word()           -> str              which command, "" at the top
 //
+// --- what this port adds to Oro's `args` ----------------------------------------
+//
+// All of it additive; none of it changes a form or a message of the grammar.
+//
+//   p.version = "1.2.3"       `--version` is answered like `--help`: anywhere,
+//                             before validation (`r.version()`); `version` is a
+//                             reserved option name, as `help` is
+//   p.epilog = "..."          text printed after the options table
+//   p.completions()           adds `--completions SHELL` (bash, zsh, fish),
+//                             answered before validation (`r.completions()`);
+//                             `p.completion(shell)` is the same, as a Result
+//   p.integer(..., min:, max:) a range: `'--port' needs a whole number from 1
+//                             to 65535, and got '70000'`
+//   p.parse_or_exit(argv, status) parse, then do what every program does the
+//                             same way: print --help/--version/--completions
+//                             and exit 0, or print the usage error and exit
+//                             `status`; `p.fail(message, status)` is the same
+//                             for a mistake only the program can see
+//   args.migrate(prog, argv, pairs)  old spellings of a released program,
+//                             rewritten with a one-line warning, for one release
+//
+// A mistyped option or command also names the closest one by EDIT DISTANCE
+// (swapped neighbours count as one) when no unique prefix matches; it is only
+// ever a suggestion, never accepted.
+//
 // `os.arguments()` is not read here: a parser is handed the tokens, without the
 // program's own name, which is what makes one testable from a corpus program
 // that has no command line of its own.
@@ -121,6 +146,8 @@
 // A `Parser`'s declarations and everything in a `Parsed` are private fields,
 // so the only way to change a parser is a declaring method that checks what
 // it is given, and the only way to make a `Parsed` is `parse`.
+import io;
+import os;
 import text;
 
 /// A bad command line, and only that. Print it, print `p.usage()`, and exit
@@ -152,7 +179,13 @@ pub str UsageError.to_str() {
 pub type Parser {
     pub str prog;
     pub str summary = "";
+    /// Set it and `--version` is recognised like `--help`: anywhere on the
+    /// line, before any validation, answering `prog VERSION`.
+    pub str version = "";
+    /// Printed after the options table: exit status, environment, examples.
+    pub str epilog = "";
     bool is_command = false;
+    bool has_completions = false;
     // `shorts` maps a letter to an option's long name; `cmd_shorts` maps a
     // letter to a command word.
     List<Opt> opts = [];
@@ -184,11 +217,17 @@ pub void Parser.values(str name, str short = "", str help = "", str placeholder 
 
 /// One value, which must be a whole number. `default` is written as it would
 /// be typed: `default: "80"`.
-pub void Parser.integer(str name, str short = "", str help = "", str placeholder = "", str default = "") {
+pub void Parser.integer(str name, str short = "", str help = "", str placeholder = "", str default = "", str min = "", str max = "") {
     if (default != "" && default.parse_int().is_none()) {
         trap("integer(): --" + name + " default: '" + default + "' is not a whole number");
     }
+    if ((min != "" && min.parse_int().is_none()) || (max != "" && max.parse_int().is_none())) {
+        trap("integer(): --" + name + " min:/max: are written as the numbers they are, e.g. min: \"1\"");
+    }
     declare(this, name, short, help, placeholder, default, "integer");
+    Opt added = opts[opts.size() - 1];
+    added.min = min;
+    added.max = max;
 }
 
 /// One value, which must be a number; a whole number is accepted and
@@ -227,6 +266,17 @@ pub Parser Parser.command(str word, str about, str short = "") {
     return add_command(this, word, about, short);
 }
 
+/// Adds `--completions SHELL` (bash, zsh or fish): a value option like any
+/// other, answered like `--help`. The script is generated from this parser's
+/// own table; read it with `r.completions()`.
+pub void Parser.completions() {
+    if (is_command) {
+        trap("completions(): declare it on the program's parser, not on a command");
+    }
+    declare(this, "completions", "", "print a shell completion script (bash, zsh or fish) and exit", "SHELL", "", "value");
+    has_completions = true;
+}
+
 // --- the generated text --------------------------------------------------------
 /// The one `usage:` line. `[options]` stands in for the table rather than
 /// spelling every option out.
@@ -248,6 +298,68 @@ pub Result<Parsed, UsageError> Parser.parse(List<str> argv) {
     return parse_line(this, argv);
 }
 
+// --- the convenience around parse ---------------------------------------------------
+/// `parse`, plus what every program writes the same way: `--help`,
+/// `--version` and `--completions` print to standard output and exit 0; a
+/// usage error prints `prog: message`, the usage line and a pointer to
+/// `--help` to standard error and exits `status`. This is OUTSIDE the
+/// module's core contract (which prints nothing and never exits); a program
+/// that wants another stream, prefix or status calls `parse`.
+pub Parsed Parser.parse_or_exit(List<str> argv, int status = 2) {
+    match (parse(argv)) {
+        case Err(UsageError error): {
+            io.eprint(prog + ": " + error.message);
+            io.eprint(usage_line(this));
+            io.eprint("try '" + prog + " --help' for more information");
+            os.exit(status);
+        }
+        case Ok(Parsed parsed): {
+            match (parsed.help()) {
+                case Some(str help_message): {
+                    print(help_message);
+                    os.exit(0);
+                }
+                case None: {
+                }
+            }
+            match (parsed.version()) {
+                case Some(str version_line): {
+                    print(version_line);
+                    os.exit(0);
+                }
+                case None: {
+                }
+            }
+            match (parsed.completions()) {
+                case Some(str generated): {
+                    print(generated);
+                    os.exit(0);
+                }
+                case None: {
+                }
+            }
+            return parsed;
+        }
+    }
+    // Unreachable: the error arm exits. Here because `os.exit` does not end a
+    // block the way `return` does.
+    return Parsed(this, "", {}, {}, {}, [], []);
+}
+
+/// Report a mistake of the command line that only the program can see
+/// (`--index needs --root`) the way the parser reports its own, and exit.
+pub void Parser.fail(str message, int status = 2) {
+    io.eprint(prog + ": " + message);
+    io.eprint(usage_line(this));
+    io.eprint("try '" + prog + " --help' for more information");
+    os.exit(status);
+}
+
+/// A shell completion script, `bash`, `zsh` or `fish`, from this parser's table.
+pub Result<str, str> Parser.completion(str shell) {
+    return completion_text(this, shell);
+}
+
 /// What `parse` answers, and what each command on the line answers. Built
 /// only by `parse`.
 pub type Parsed {
@@ -258,6 +370,8 @@ pub type Parsed {
     Map<str, bool> marks;
     List<str> asked;
     List<Parsed> cmds;
+    str version_line = "";
+    str script = "";
 }
 
 // --- reading a result --------------------------------------------------------
@@ -342,6 +456,23 @@ pub Option<str> Parsed.help() {
     return Option<str>.Some(asked[0]);
 }
 
+/// `prog 1.2.3` when `--version` was asked (the parser's `version:` field is
+/// set), or None. Like the help it wins before validation.
+pub Option<str> Parsed.version() {
+    if (version_line == "") {
+        return Option<str>.None;
+    }
+    return Option<str>.Some(version_line);
+}
+
+/// The completion script `--completions SHELL` asked for, or None.
+pub Option<str> Parsed.completions() {
+    if (script == "") {
+        return Option<str>.None;
+    }
+    return Option<str>.Some(script);
+}
+
 /// The commands on the line, in the order typed, each its own result. A
 /// parser that declares no commands traps rather than answering an empty
 /// list that could be mistaken for "none given".
@@ -367,6 +498,8 @@ type Opt {
     str placeholder;
     str default;
     str kind;
+    str min = "";
+    str max = "";
 }
 
 // One declared positional. `kind` is "positional", "optional" or "tail".
@@ -395,6 +528,9 @@ void declare(Parser parser, str name, str short, str help, str placeholder, str 
     }
     if (name == "help") {
         trap(kind + "(): --help is always there and cannot be declared");
+    }
+    if (name == "version") {
+        trap(kind + "(): --version is reserved: set `version:` on the parser and it is there, like --help");
     }
     if (name.chars().size() == 1) {
         trap(kind + "(): '" + name + "' is a short spelling -- declare the long name and pass short: \"" + name + "\"");
@@ -487,6 +623,17 @@ Parser add_command(Parser parser, str word, str about, str short) {
     return sub;
 }
 
+// `from 1 to 65535`, `of at least 1`, `of at most 9`.
+str range_words(Opt opt) {
+    if (opt.min != "" && opt.max != "") {
+        return "from " + opt.min + " to " + opt.max;
+    }
+    if (opt.min != "") {
+        return "of at least " + opt.min;
+    }
+    return "of at most " + opt.max;
+}
+
 // --- the text ------------------------------------------------------------------
 str usage_line(Parser parser) {
     List<str> parts = ["usage: " + parser.prog];
@@ -507,6 +654,9 @@ str usage_line(Parser parser) {
 // line up with each other and not just with themselves.
 str help_text(Parser parser) {
     int width = columns(help_column());
+    if (parser.version != "") {
+        width = wider(width, "     --version");
+    }
     for (str word in parser.words) {
         width = wider(width, cmd_column(word, parser.cmd_shorts));
     }
@@ -538,6 +688,9 @@ str help_text(Parser parser) {
     lines.push("");
     lines.push("options:");
     lines.push(row(help_column(), width, "show this help"));
+    if (parser.version != "") {
+        lines.push(row("     --version", width, "print the version and exit"));
+    }
     for (Opt option in parser.opts) {
         // A flag has no default and a greedy option's absence is an empty
         // list by definition, so neither prints one.
@@ -546,6 +699,10 @@ str help_text(Parser parser) {
             shown_default = "";
         }
         lines.push(row(opt_column(option), width, described(option.help, shown_default)));
+    }
+    if (parser.epilog != "") {
+        lines.push("");
+        lines.push(parser.epilog);
     }
     return lines.join("\n");
 }
@@ -648,6 +805,41 @@ Result<Parsed, UsageError> parse_line(Parser parser, List<str> argv) {
     for (Clause clause in clauses) {
         if (clause.tokens.contains("--help")) {
             return Result<Parsed, UsageError>.Ok(Parsed(parser, "", {}, {}, {}, [help_text(clause.parser)], []));
+        }
+    }
+    // `--version` and `--completions SHELL` are answers like `--help`: they
+    // win before any validation, so they work on a line that is otherwise
+    // missing its operands.
+    for (Clause clause in clauses) {
+        if (parser.version != "" && clause.tokens.contains("--version")) {
+            Parsed answered = Parsed(parser, "", {}, {}, {}, [], []);
+            answered.version_line = parser.prog + " " + parser.version;
+            return Result<Parsed, UsageError>.Ok(answered);
+        }
+    }
+    if (parser.has_completions) {
+        for (int at_token in 0 .. clauses[0].tokens.size()) {
+            str token = clauses[0].tokens[at_token];
+            str shell = "";
+            if (token == "--completions" && at_token + 1 < clauses[0].tokens.size()) {
+                shell = clauses[0].tokens[at_token + 1];
+            } else if (token.starts_with("--completions=")) {
+                shell = token.substr(14, token.size());
+            } else if (token == "--completions") {
+                return refuse("'--completions' needs a value and is the last argument");
+            }
+            if (shell != "") {
+                match (completion_text(parser, shell)) {
+                    case Ok(str generated): {
+                        Parsed answered = Parsed(parser, "", {}, {}, {}, [], []);
+                        answered.script = generated;
+                        return Result<Parsed, UsageError>.Ok(answered);
+                    }
+                    case Err(str reason): {
+                        return refuse("'--completions' needs bash, zsh or fish, and got '" + shell + "'");
+                    }
+                }
+            }
         }
     }
     List<Parsed> commands = [];
@@ -835,6 +1027,14 @@ Result<Parsed, UsageError> parse_clause(Parser parser, List<str> tokens, str wor
         if (opt.kind == "integer" && raw.parse_int().is_none()) {
             return refuse("'" + spelled + "' needs a whole number, and got '" + raw + "'");
         }
+        if (opt.kind == "integer" && (opt.min != "" || opt.max != "")) {
+            int whole = raw.parse_int().or(0);
+            bool is_low = opt.min != "" && whole < opt.min.parse_int().or(0);
+            bool is_high = opt.max != "" && whole > opt.max.parse_int().or(0);
+            if (is_low || is_high) {
+                return refuse("'" + spelled + "' needs a whole number " + range_words(opt) + ", and got '" + raw + "'");
+            }
+        }
         if (opt.kind == "number" && raw.parse_float().is_none()) {
             return refuse("'" + spelled + "' needs a number, and got '" + raw + "'");
         }
@@ -943,6 +1143,9 @@ str cluster_refusal(str token, str name) {
 // `help` is in the pool because it is an option like any other here.
 str unknown_option(str spelled, Parser parser) {
     List<str> names = ["help"];
+    if (parser.version != "") {
+        names.push("version");
+    }
     for (Opt option in parser.opts) {
         names.push(option.name);
     }
@@ -975,7 +1178,67 @@ Option<str> nearest(str given, List<str> names) {
     if (hits.size() == 1) {
         return Option<str>.Some(hits[0]);
     }
+    if (hits.size() > 1) {
+        return Option<str>.None;
+    }
+    // No prefix or separator match: a typo. The closest by edit distance, if
+    // it is close enough to be one. Still only a suggestion, never accepted.
+    int limit = 1;
+    int size = given.chars().size();
+    if (size > 4) {
+        limit = 2;
+    }
+    if (size > 8) {
+        limit = 3;
+    }
+    int best = limit + 1;
+    str chosen = "";
+    for (str name in names) {
+        int far = distance(given, name);
+        if (far < best) {
+            best = far;
+            chosen = name;
+        }
+    }
+    if (best <= limit) {
+        return Option<str>.Some(chosen);
+    }
     return Option<str>.None;
+}
+
+// Edit distance in code points: insert, delete, replace, or swap two
+// neighbours (the commonest typo: `--prot`).
+int distance(str first, str second) {
+    List<int> left = first.chars();
+    List<int> right = second.chars();
+    List<List<int>> grid = [];
+    for (int i in 0 .. left.size() + 1) {
+        List<int> costs = [i];
+        for (int j in 1 .. right.size() + 1) {
+            if (i == 0) {
+                costs.push(j);
+            } else {
+                int cost = 1;
+                if (left[i - 1] == right[j - 1]) {
+                    cost = 0;
+                }
+                int best = smallest(smallest(grid[i - 1][j] + 1, costs[j - 1] + 1), grid[i - 1][j - 1] + cost);
+                if (i > 1 && j > 1 && left[i - 1] == right[j - 2] && left[i - 2] == right[j - 1]) {
+                    best = smallest(best, grid[i - 2][j - 2] + 1);
+                }
+                costs.push(best);
+            }
+        }
+        grid.push(costs);
+    }
+    return grid[left.size()][right.size()];
+}
+
+int smallest(int first, int second) {
+    if (first < second) {
+        return first;
+    }
+    return second;
 }
 
 // A name with its separators taken out, for comparison only.
@@ -1073,4 +1336,282 @@ Result<str, UsageError> refuse_word(str message) {
 
 Result<bool, UsageError> refuse_bind(str message) {
     return Result<bool, UsageError>.Err(UsageError(message));
+}
+
+/// Old spellings of a released program, accepted for one release: every token
+/// of `argv` that is `old` (or `old=value`) is replaced by `new`, with one line
+/// on standard error. `pairs` is `[old, new, old, new, ...]`. An old spelling
+/// ending in `+` also matches with its value attached (`-p+` matches `-p22`,
+/// which becomes `--port 22`). A rewrite is the only thing this does: the
+/// grammar itself never accepts a second spelling.
+pub List<str> migrate(str prog, List<str> argv, List<str> pairs) {
+    List<str> out = [];
+    for (str token in argv) {
+        bool is_done = false;
+        int index = 0;
+        while (index + 1 < pairs.size() && !is_done) {
+            str old = pairs[index];
+            str replacement = pairs[index + 1];
+            index = index + 2;
+            bool is_attached = old.ends_with("+");
+            if (is_attached) {
+                old = old.substr(0, old.size() - 1);
+            }
+            if (token == old) {
+                io.eprint(prog + ": warning: '" + old + "' is deprecated, use '" + replacement + "'");
+                out.push(replacement);
+                is_done = true;
+            } else if (token.starts_with(old + "=") && old.starts_with("--")) {
+                io.eprint(prog + ": warning: '" + old + "' is deprecated, use '" + replacement + "'");
+                out.push(replacement);
+                out.push(token.substr(old.size() + 1, token.size()));
+                is_done = true;
+            } else if (is_attached && token.starts_with(old) && token.size() > old.size() && !token.starts_with(old + "-")) {
+                io.eprint(prog + ": warning: '" + old + "' is deprecated, use '" + replacement + "'");
+                out.push(replacement);
+                out.push(token.substr(old.size(), token.size()));
+                is_done = true;
+            }
+        }
+        if (!is_done) {
+            out.push(token);
+        }
+    }
+    return out;
+}
+
+/// Is this line in the OpenSSH/POSIX style an old program used to read: any
+/// single-dash word that is not a number (`-p`, `-tt`) or a bare `--`? Under
+/// this grammar a single dash is a command, so a program with no commands can
+/// tell, and read such a line with its old parser for one release.
+pub bool is_old_style(List<str> argv) {
+    for (str word in argv) {
+        if (word == "--") {
+            return true;
+        }
+        if (word.starts_with("-") && !word.starts_with("--") && word.size() > 1) {
+            int second = word.byte_at(1);
+            if (second < 48 || second > 57) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// --- shell completion ------------------------------------------------------------------
+Result<str, str> completion_text(Parser parser, str shell) {
+    if (shell == "bash") {
+        return Result<str, str>.Ok(completion_bash(parser));
+    }
+    if (shell == "zsh") {
+        return Result<str, str>.Ok(completion_zsh(parser));
+    }
+    if (shell == "fish") {
+        return Result<str, str>.Ok(completion_fish(parser));
+    }
+    return Result<str, str>.Err("unknown shell");
+}
+
+// What a shell completes for one parser: every option (`--out`, `--o`, `--help`)
+// and, for a parser with commands, every command (`-serve`, `-s`).
+List<str> completion_words(Parser parser, bool is_root) {
+    List<str> shown = [];
+    for (int i in 0 .. parser.words.size()) {
+        shown.push("-" + parser.words[i]);
+        for (str letter in parser.cmd_shorts.keys()) {
+            if (parser.cmd_shorts.get(letter).or("") == parser.words[i]) {
+                shown.push("-" + letter);
+            }
+        }
+    }
+    for (Opt option in parser.opts) {
+        shown.push("--" + option.name);
+        if (option.short != "") {
+            shown.push("--" + option.short);
+        }
+    }
+    shown.push("--help");
+    if (is_root && parser.version != "") {
+        shown.push("--version");
+    }
+    return shown;
+}
+
+str completion_ident(str prog) {
+    return text.replace(prog, "-", "_");
+}
+
+bool is_path_option(Opt option) {
+    str shown = option.placeholder;
+    if (shown == "") {
+        shown = option.name.to_upper();
+    }
+    return shown.ends_with("FILE") || shown.ends_with("PATH") || shown.ends_with("DIR");
+}
+
+str completion_bash(Parser parser) {
+    str function_name = "_" + completion_ident(parser.prog) + "_complete";
+    List<str> lines = ["# bash completion for " + parser.prog + " (generated by `" + parser.prog + " --completions bash`)"];
+    lines.push(function_name + "() {");
+    lines.push("    local cur prev word command");
+    lines.push("    cur=\"${COMP_WORDS[COMP_CWORD]}\"");
+    lines.push("    prev=\"${COMP_WORDS[COMP_CWORD-1]}\"");
+    lines.push("    command=\"\"");
+    if (parser.words.size() > 0) {
+        lines.push("    for word in \"${COMP_WORDS[@]:1:COMP_CWORD-1}\"; do");
+        lines.push("        case \"$word\" in");
+        for (int i in 0 .. parser.words.size()) {
+            str alternatives = "-" + parser.words[i];
+            for (str letter in parser.cmd_shorts.keys()) {
+                if (parser.cmd_shorts.get(letter).or("") == parser.words[i]) {
+                    alternatives = alternatives + "|-" + letter;
+                }
+            }
+            lines.push("            " + alternatives + ") command=" + parser.words[i] + " ;;");
+        }
+        lines.push("        esac");
+        lines.push("    done");
+    }
+    lines.push("    case \"$command:$prev\" in");
+    for (Opt option in parser.opts) {
+        if (option.kind != "flag" && is_path_option(option)) {
+            lines.push("        :--" + option.name + ") COMPREPLY=($(compgen -f -- \"$cur\")); return ;;");
+        } else if (option.kind != "flag") {
+            lines.push("        :--" + option.name + ") return ;;");
+        }
+    }
+    for (int i in 0 .. parser.words.size()) {
+        for (Opt option in parser.cmds[i].opts) {
+            if (option.kind != "flag" && is_path_option(option)) {
+                lines.push("        " + parser.words[i] + ":--" + option.name + ") COMPREPLY=($(compgen -f -- \"$cur\")); return ;;");
+            } else if (option.kind != "flag") {
+                lines.push("        " + parser.words[i] + ":--" + option.name + ") return ;;");
+            }
+        }
+    }
+    lines.push("    esac");
+    lines.push("    if [[ \"$cur\" == -* ]]; then");
+    lines.push("        case \"$command\" in");
+    for (int i in 0 .. parser.words.size()) {
+        List<str> offered = completion_words(parser.cmds[i], false);
+        for (str word in completion_words(parser, true)) {
+            if (word.starts_with("-") && !word.starts_with("--") && !offered.contains(word)) {
+                offered.push(word);
+            }
+        }
+        lines.push("            " + parser.words[i] + ") COMPREPLY=($(compgen -W \"" + offered.join(" ") + "\" -- \"$cur\")) ;;");
+    }
+    lines.push("            *) COMPREPLY=($(compgen -W \"" + completion_words(parser, true).join(" ") + "\" -- \"$cur\")) ;;");
+    lines.push("        esac");
+    lines.push("    else");
+    lines.push("        COMPREPLY=($(compgen -f -- \"$cur\"))");
+    lines.push("    fi");
+    lines.push("}");
+    lines.push("complete -o filenames -F " + function_name + " " + parser.prog);
+    return lines.join("\n");
+}
+
+str zsh_text(str raw) {
+    return text.replace(text.replace(raw, "'", "'\\''"), ":", "\\:");
+}
+
+// zsh: one `_describe` list per parser, offered when the word starts with a dash.
+str completion_zsh(Parser parser) {
+    str function_name = "_" + completion_ident(parser.prog);
+    List<str> lines = ["#compdef " + parser.prog];
+    lines.push("# zsh completion for " + parser.prog + " (generated by `" + parser.prog + " --completions zsh`)");
+    lines.push(function_name + "() {");
+    lines.push("    local -a choices");
+    lines.push("    local word command=\"\"");
+    for (int i in 0 .. parser.words.size()) {
+        lines.push("    for word in ${words[2,CURRENT-1]}; do [[ $word == -" + parser.words[i] + " ]] && command=" + parser.words[i] + "; done");
+    }
+    lines.push("    if [[ $PREFIX == -* ]]; then");
+    lines.push("        case $command in");
+    for (int i in 0 .. parser.words.size()) {
+        lines.push("            " + parser.words[i] + ") choices=(" + zsh_choices(parser.cmds[i], parser, false) + ") ;;");
+    }
+    lines.push("            *) choices=(" + zsh_choices(parser, parser, true) + ") ;;");
+    lines.push("        esac");
+    lines.push("        _describe 'option' choices");
+    lines.push("    else");
+    lines.push("        _files");
+    lines.push("    fi");
+    lines.push("}");
+    lines.push("compdef " + function_name + " " + parser.prog);
+    return lines.join("\n");
+}
+
+// `'-serve:run the server' '--out:where to write'` for one parser; the root's
+// commands are offered everywhere, since several commands share a line.
+str zsh_choices(Parser here, Parser root, bool is_root) {
+    List<str> items = [];
+    for (int i in 0 .. root.words.size()) {
+        items.push("'-" + root.words[i] + ":" + zsh_text(root.cmds[i].summary) + "'");
+    }
+    for (Opt option in here.opts) {
+        items.push("'--" + option.name + ":" + zsh_text(option.help) + "'");
+        if (option.short != "") {
+            items.push("'--" + option.short + ":" + zsh_text(option.help) + "'");
+        }
+    }
+    items.push("'--help:show this help'");
+    if (is_root && root.version != "") {
+        items.push("'--version:print the version and exit'");
+    }
+    return items.join(" ");
+}
+
+str fish_text(str raw) {
+    return text.replace(text.replace(raw, "\\", "\\\\"), "'", "\\'");
+}
+
+// fish: a single-dash word is an old-style option (`-o`), which is what a
+// command is here; `-l` is a double-dash one.
+str completion_fish(Parser parser) {
+    List<str> lines = ["# fish completion for " + parser.prog + " (generated by `" + parser.prog + " --completions fish`)"];
+    str base = "complete -c " + parser.prog;
+    for (int i in 0 .. parser.words.size()) {
+        lines.push(base + " -o " + parser.words[i] + " -d '" + fish_text(parser.cmds[i].summary) + "'");
+        for (str letter in parser.cmd_shorts.keys()) {
+            if (parser.cmd_shorts.get(letter).or("") == parser.words[i]) {
+                lines.push(base + " -o " + letter + " -d '" + fish_text(parser.cmds[i].summary) + "'");
+            }
+        }
+    }
+    for (Opt option in parser.opts) {
+        lines.push(fish_option(base, "", option));
+    }
+    lines.push(base + " -l help -d 'show this help'");
+    if (parser.version != "") {
+        lines.push(base + " -l version -d 'print the version and exit'");
+    }
+    for (int i in 0 .. parser.words.size()) {
+        str condition = " -n '__fish_seen_argument -o " + parser.words[i] + "'";
+        for (Opt option in parser.cmds[i].opts) {
+            lines.push(fish_option(base, condition, option));
+        }
+    }
+    return lines.join("\n");
+}
+
+str fish_option(str base, str condition, Opt option) {
+    str line = base + condition + " -l " + option.name;
+    if (option.kind != "flag") {
+        if (is_path_option(option)) {
+            line = line + " -r -F";
+        } else {
+            line = line + " -x";
+        }
+    }
+    str out = line + " -d '" + fish_text(option.help) + "'";
+    if (option.short != "") {
+        str second = base + condition + " -l " + option.short;
+        if (option.kind != "flag") {
+            second = second + " -x";
+        }
+        out = out + "\n" + second + " -d '" + fish_text(option.help) + "'";
+    }
+    return out;
 }

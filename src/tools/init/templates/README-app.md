@@ -5,7 +5,12 @@ What it is, in a sentence. Written in [m31](https://github.com/qrazil/m31).
 ```
 @@NAME@@            prints "hello, world"
 @@NAME@@ you        prints "hello, you"
+@@NAME@@ --help     the usage, generated; --version; --completions bash|zsh|fish
 ```
+
+The command line is [m31's `lib/args`](https://github.com/qrazil/m31/blob/master/docs/cli-conventions.md)
+(Oro's grammar: `-word` is a command, `--word` an option, `--help` is the only help; a mistyped option names
+the closest one, exit 2 on a usage error).
 
 ## Build
 
@@ -22,7 +27,7 @@ M31_ROOT=/path/to/m31 LANGC=/path/to/m31c bash scripts/build.sh      # -> ./@@NA
 M31_ROOT=/path/to/m31 LANGC=/path/to/m31c bash tests/test.sh
 ```
 
-Checks formatting (`m31c fmt --check -r .`), the naming lint (`m31c lint .`),
+Checks formatting (`m31c -fmt --check --recursive .`), the naming lint (`m31c -lint .`),
 the unit tests in `tests/t_*.m31` and the built program. CI runs the same on
 Linux x86-64, Linux aarch64 and macOS arm64.
 

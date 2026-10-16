@@ -40,8 +40,8 @@ trap cleanup EXIT
 note() { printf '\033[32mok\033[0m   %s\n' "$1"; pass=$((pass + 1)); }
 bad()  { printf '\033[31mFAIL\033[0m %s\n' "$1"; shift; printf '%s\n' "$@" | sed 's/^/     /'; fail=$((fail + 1)); }
 
-"$LANGC" fmt --check tests/ssh/t_ssh_timeout.m31 || { echo "FAILED: fmt"; exit 1; }
-"$LANGC" --emit-c tests/ssh/t_ssh_timeout.m31 -o "$WORK/t.c" || exit 1
+"$LANGC" -fmt --check tests/ssh/t_ssh_timeout.m31 || { echo "FAILED: fmt"; exit 1; }
+"$LANGC" -emit-c tests/ssh/t_ssh_timeout.m31 --out "$WORK/t.c" || exit 1
 cc -O2 -I runtime -pthread -o "$WORK/t" "$WORK/t.c" \
     runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" || exit 1
 

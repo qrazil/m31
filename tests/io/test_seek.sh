@@ -19,8 +19,8 @@ LANGC=./target/debug/m31c
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-"$LANGC" fmt --check tests/io/t_seek.m31 || { echo "FAILED: fmt"; exit 1; }
-"$LANGC" --emit-c tests/io/t_seek.m31 -o "$WORK/s.c" || exit 1
+"$LANGC" -fmt --check tests/io/t_seek.m31 || { echo "FAILED: fmt"; exit 1; }
+"$LANGC" -emit-c tests/io/t_seek.m31 --out "$WORK/s.c" || exit 1
 cc -O2 -I runtime -pthread -o "$WORK/s" "$WORK/s.c" \
     runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" || exit 1
 

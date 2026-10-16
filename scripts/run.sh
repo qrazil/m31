@@ -91,7 +91,7 @@ run_one() {
     fi
   fi
 
-  if ! "$LANGC" --emit-c "$src" -o "$WORK/$base.c" 2>"$WORK/$base.diag"; then
+  if ! "$LANGC" -emit-c "$src" --out "$WORK/$base.c" 2>"$WORK/$base.diag"; then
     fail_test "$label" "compile failed: $(head -1 "$WORK/$base.diag")"
     return
   fi
@@ -253,7 +253,7 @@ for src in corpus/traps/*."$LANG_EXT"; do
   base=$(basename "$src" ".$LANG_EXT")
   want=$(cat "${src%.$LANG_EXT}.trap")
 
-  if ! "$LANGC" --emit-c "$src" -o "$WORK/$base.c" 2>"$WORK/$base.diag"; then
+  if ! "$LANGC" -emit-c "$src" --out "$WORK/$base.c" 2>"$WORK/$base.diag"; then
     fail_test "$label" "compile failed: $(head -1 "$WORK/$base.diag")"
     continue
   fi
@@ -302,7 +302,7 @@ done
 for src in corpus/errors/*."$LANG_EXT"; do
   [ -e "$src" ] || continue
   label="errors/$(basename "$src")"
-  if "$LANGC" --emit-c "$src" -o /dev/null 2>"$WORK/e.diag"; then
+  if "$LANGC" -emit-c "$src" --out /dev/null 2>"$WORK/e.diag"; then
     fail_test "$label" "compiled, but must be rejected"
   elif ! diff -q "${src%.$LANG_EXT}.err" "$WORK/e.diag" >/dev/null 2>&1; then
     fail_test "$label" "wrong diagnostic"
@@ -329,7 +329,7 @@ for dir in corpus/modules/*/; do
   fi
   if [ -e "$dir/main.err" ]; then
     label="modules/$case_name"
-    if "$LANGC" --emit-c "$src" -o /dev/null 2>"$WORK/m.diag"; then
+    if "$LANGC" -emit-c "$src" --out /dev/null 2>"$WORK/m.diag"; then
       fail_test "$label" "compiled, but must be rejected"
     else
       # Diagnostics name the file they came from, and that path depends on

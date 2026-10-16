@@ -144,7 +144,7 @@ jobs:
           Built from commit: ${GITHUB_SHA}
           Tag: ${GITHUB_REF_NAME}
 
-          $LANG_BIN                        the compiler (./$LANG_BIN --emit-c foo.$LANG_EXT -o foo.c)
+          $LANG_BIN                        the compiler (./$LANG_BIN -emit-c foo.$LANG_EXT --out foo.c)
           ssh-sha256-selftest          tests/ssh: SHA-256 self-check (Phase 1 crypto primitives only --
           ssh-chacha20poly1305-selftest  (crypto primitive self-checks)
           m31ssh, m31scp, m31sftp, m31ssh-keygen   SSH client, copy, sftp and key tool (unaudited, docs/m31ssh.md)
@@ -228,7 +228,7 @@ jobs:
           Built from commit: ${GITHUB_SHA}
           Tag: ${GITHUB_REF_NAME}
 
-          $LANG_BIN                        the compiler (./$LANG_BIN --emit-c foo.$LANG_EXT -o foo.c)
+          $LANG_BIN                        the compiler (./$LANG_BIN -emit-c foo.$LANG_EXT --out foo.c)
           ssh-sha256-selftest          tests/ssh: SHA-256 self-check (Phase 1 crypto primitives only --
           ssh-chacha20poly1305-selftest  (crypto primitive self-checks)
           m31ssh, m31scp, m31sftp, m31ssh-keygen   SSH client, copy, sftp and key tool (unaudited, docs/m31ssh.md)
@@ -322,7 +322,7 @@ jobs:
           Built from commit: ${GITHUB_SHA}
           Tag: ${GITHUB_REF_NAME}
 
-          $LANG_BIN                        the compiler (./$LANG_BIN --emit-c foo.$LANG_EXT -o foo.c)
+          $LANG_BIN                        the compiler (./$LANG_BIN -emit-c foo.$LANG_EXT --out foo.c)
           ssh-sha256-selftest          tests/ssh: SHA-256 self-check (Phase 1 crypto primitives only --
           ssh-chacha20poly1305-selftest  (crypto primitive self-checks)
           m31ssh, m31scp, m31sftp, m31ssh-keygen   SSH client, copy, sftp and key tool (unaudited, docs/m31ssh.md)

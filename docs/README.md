@@ -38,6 +38,8 @@ the CHANGELOG cite them by name.
 | `text-decision.md` | Text |
 | `regex-decision.md` | Regex |
 | `ssh-decision.md` | The SSH client library |
+| `cli-conventions.md` | The command-line grammar and vocabulary of every program, and its exemptions |
+| `CLI-INVENTORY.md` | The audit of every m31 app's command line (2026-10-15) |
 | `m31ssh.md` | The `m31ssh` program: use, threat model, limits, tests (unaudited) |
 | `proc-decision.md` | Child processes: pipes, run, start |
 | `apps-repo-split-decision.md` | Per-app repository split |

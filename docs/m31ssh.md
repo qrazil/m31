@@ -13,22 +13,35 @@ the library is `docs/ssh-decision.md`; this file is about the program.
 ## Use
 
 ```
-m31ssh [-p port] [-i identity] [-l user] [-o option=value] [-F config]
-       [-J jump[,jump...]] [-L spec] [-R spec] [-N]
-       [-t|-tt|-T] [-n] [-e char|none] [-q] [user@]host [command ...]
+m31ssh [user@]host [command ...] [--port N] [--user NAME] [--config FILE]
+       [--jump HOSTS] [--escape CHAR|none] [--tty | --tty-force | --tty-never]
+       [--forward-only] [--stdin-null] [--quiet]
+       [--identity FILE...] [--option OPT=VALUE...]
+       [--local-forward SPEC...] [--remote-forward SPEC...]
 ```
+
+The grammar is `lib/args`, Oro's (`docs/cli-conventions.md`): `--port 22`,
+`--port=22`, `--p 22`; a word that starts with a dash is never data, so the remote
+command is **one operand**, `m31ssh host "ls -l"`. Options: `--port`, `--user`,
+`--config`, `--jump`, `--escape`, `--tty`, `--tty-force`, `--tty-never`,
+`--forward-only` (was `-N`), `--stdin-null` (was `-n`), `--quiet`, and the list
+options `--identity`, `--option`, `--local-forward`, `--remote-forward`, which
+take every operand up to the next dash (write the host first, or put them last).
+`--help`, `--version` and `--completions bash|zsh|fish` are generated. The
+OpenSSH spellings (`-p 22`, `-tt`, `-L`, `host ls -l`) still work for one
+release behind a warning and are then deleted.
 
 | | |
 |---|---|
 | no command, stdin is a terminal | a login shell on a pty; the local terminal goes raw |
 | no command, stdin is not a terminal | a shell with no pty reading commands from stdin |
-| a command | `exec`; a pty only with `-t`/`-tt` (or `RequestTTY`) |
-| `-J a,b` / `ProxyJump` | the connection to the destination is made through `a` and `b` (see below) |
-| `-L [bind:]port:host:hostport` | listen locally; connections go out through the server to `host:hostport` |
-| `-R [bind:]port:host:hostport` | the server listens; connections come back to `host:hostport` from here (`port` 0: the server chooses and the client prints it) |
-| `-N` | no remote command: the connection only carries forwards, until killed or dropped |
+| a command | `exec`; a pty only with `--tty`/`--tty-force` (or `RequestTTY`) |
+| `--jump a,b` / `ProxyJump` | the connection to the destination is made through `a` and `b` (see below) |
+| `--local-forward [bind:]port:host:hostport` | listen locally; connections go out through the server to `host:hostport` |
+| `--remote-forward [bind:]port:host:hostport` | the server listens; connections come back to `host:hostport` from here (`port` 0: the server chooses and the client prints it) |
+| `--forward-only` | no remote command: the connection only carries forwards, until killed or dropped |
 | exit status | the remote command's; `128+n` for death by signal; **255** for an ssh error |
-| `~.` | at the start of a line: disconnect (exit 255). `~~` sends one `~`; `~?` lists them. `-e none` turns the escape off |
+| `~.` | at the start of a line: disconnect (exit 255). `~~` sends one `~`; `~?` lists them. `--escape none` turns the escape off |
 | Ctrl-C, Ctrl-D, Ctrl-Z | bytes, as in OpenSSH: they reach the *remote* terminal |
 | resize | the new size is sent within ~100 ms (see "known limits") |
 
@@ -150,18 +163,25 @@ When the session channel ends the client exits and its tunnels with it
 so they trust the same hosts the same way) and are **unaudited** too.
 
 ```
-m31scp [-P port] [-i identity] [-o opt=val] [-F config] [-J jump] [-r] [-p] [-q]
-       source ... target                    # one side [user@]host:path
-m31sftp [-P port] [-i identity] [-o opt=val] [-F config] [-J jump] [-b file] [-q]
-        [user@]host[:directory]
-m31ssh-keygen [-t ed25519] [-f file] [-N passphrase] [-C comment] [-a rounds] [-q]
-m31ssh-keygen -y [-f file] [-P passphrase]      # public key from a private key
-m31ssh-keygen -l [-f file]                      # SHA-256 fingerprint
-m31ssh-keygen -R host [-f known_hosts]          # remove a host (keeps .old)
-m31ssh-keygen -F host [-f known_hosts]          # find a host (same output as ssh-keygen -F)
-m31ssh-keygen -H [-f known_hosts]               # hash every plain host name (keeps .old)
-m31ssh-keygen -p [-f file] [-P old] [-N new] [-C comment] [-a rounds]  # Ed25519 only
+m31scp SOURCE... TARGET [--port N] [--recursive] [--preserve] [--quiet]
+       [--config FILE] [--jump HOSTS] [--identity FILE...] [--option OPT=VALUE...]
+                                            # one side [user@]host:path
+m31sftp [user@]host[:directory] [--port N] [--batch-file FILE] [--quiet] [...as scp]
+m31ssh-keygen -generate [--file F] [--type ed25519] [--new-passphrase P]
+                        [--comment C] [--rounds N] [--quiet]
+m31ssh-keygen -public [--file F] [--passphrase P]   # public key from a private key
+m31ssh-keygen -fingerprint [--file F]               # SHA-256 fingerprint
+m31ssh-keygen -remove HOST [--file known_hosts]     # remove a host (keeps .old)
+m31ssh-keygen -find HOST [--file known_hosts]       # find a host (same output as ssh-keygen -F)
+m31ssh-keygen -hash [--file known_hosts]            # hash every plain host name (keeps .old)
+m31ssh-keygen -passphrase [--file F] [--old-passphrase P] [--new-passphrase N]
+                          [--comment C] [--rounds N]   # Ed25519 only
 ```
+
+All four take `--help`, `--version` and `--completions SHELL`; commands of
+`m31ssh-keygen` may share a line (`-generate --file a -fingerprint --file a`).
+The OpenSSH letters (`-P -r -p -q -b`, `ssh-keygen -t -f -N -y -l -R`) still work for
+one release, read by the old parser behind a warning.
 
 * **SFTP version 3** (`lib/ssh/sshsftp.m31`): `stat lstat list mkdir rmdir
   remove rename realpath chmod`, whole-file `get` and `put` pipelined 16
@@ -176,7 +196,7 @@ m31ssh-keygen -p [-f file] [-P old] [-N new] [-C comment] [-a rounds]  # Ed25519
   supported, `-r` is needed for a directory, several sources need a
   directory target. Exit 0, 1 (transfer or usage), 255 (connection).
   Downloaded files get the remote's permission bits (before the umask);
-  `-p` sets the remote modification time after an upload (the language
+  `--preserve` sets the remote modification time after an upload (the language
   has no way to set one locally, so downloads keep their own time).
 * **m31sftp** reads `ls [-l] cd lcd pwd lpwd get [-r] put [-r] mkdir rmdir
   rm rename stat chmod help quit` from the terminal (with a prompt), a pipe,

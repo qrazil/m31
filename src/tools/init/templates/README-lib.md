@@ -23,7 +23,7 @@ release).
 M31_ROOT=/path/to/m31 LANGC=/path/to/m31c bash tests/test.sh
 ```
 
-Checks formatting (`m31c fmt --check -r .`), the naming lint (`m31c lint .`) and
+Checks formatting (`m31c -fmt --check --recursive .`), the naming lint (`m31c -lint .`) and
 the unit tests in `tests/t_*.m31`. CI runs the same on Linux x86-64,
 Linux aarch64 and macOS arm64.
 

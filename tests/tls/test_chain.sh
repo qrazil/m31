@@ -54,7 +54,7 @@ skip() { printf 'skip %s\n' "$1"; }
 
 build() {
     local name=$1
-    if ! "$LANGC" --emit-c "tests/tls/$name.m31" -o "$WORK/$name.c" 2>"$WORK/$name.diag"; then
+    if ! "$LANGC" -emit-c "tests/tls/$name.m31" --out "$WORK/$name.c" 2>"$WORK/$name.diag"; then
         bad "compile $name" "$(head -5 "$WORK/$name.diag")"
         return 1
     fi
@@ -92,12 +92,12 @@ await_line() {
 
 if out=$(
     for f in lib/tls.m31 lib/pki/x509chain.m31 tests/tls/t_chain_*.m31; do
-        "$LANGC" fmt --check "$f" || echo "$f"
+        "$LANGC" -fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then
     note "source is formatted"
 else
-    bad "source is not formatted (run: m31c fmt <file>)" "$out"
+    bad "source is not formatted (run: m31c -fmt <file>)" "$out"
 fi
 
 build t_chain_verify && build t_chain_client && build t_chain_roots || finish

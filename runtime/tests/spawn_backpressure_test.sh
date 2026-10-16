@@ -76,7 +76,7 @@ EXPECTED=44850 # sum(0..299) -- see main.m31's own comment
 SRC=runtime/tests/spawn_backpressure_demo/main.m31
 C="$WORK/sb.c"
 
-if ! "$LANGC" --emit-c "$SRC" -o "$C" 2>"$WORK/compile.err"; then
+if ! "$LANGC" -emit-c "$SRC" --out "$C" 2>"$WORK/compile.err"; then
     echo "FAILED: compile: $(head -5 "$WORK/compile.err")"
     exit 1
 fi

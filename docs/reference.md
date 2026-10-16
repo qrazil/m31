@@ -332,7 +332,7 @@ Every git dependency of the whole graph is pinned in the top project's
 read. A name wanted by several dependencies must mean one source (a diamond is
 resolved once); two different sources, or a dependency cycle, are errors that
 name the chains. A directory and a
-dependency with the same name under one root are an error. `m31c fmt [--check]
+dependency with the same name under one root are an error. `m31c -fmt [--check]
 -r <dir>` formats or checks every `.m31` file under a directory, skipping
 `.m31-deps`, `.git` and `target`.
 

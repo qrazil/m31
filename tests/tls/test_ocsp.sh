@@ -51,7 +51,7 @@ skip() { printf 'skip %s\n' "$1"; }
 
 build() {
     local name=$1
-    if ! "$LANGC" --emit-c "tests/tls/$name.m31" -o "$WORK/$name.c" 2>"$WORK/$name.diag"; then
+    if ! "$LANGC" -emit-c "tests/tls/$name.m31" --out "$WORK/$name.c" 2>"$WORK/$name.diag"; then
         bad "compile $name" "$(head -5 "$WORK/$name.diag")"
         return 1
     fi
@@ -82,12 +82,12 @@ matches() { perl -0777 -e 'local $/; my $text = <STDIN>; exit($text =~ /$ARGV[0]
 if out=$(
     for f in lib/pki/ocsp.m31 lib/crypto/sha1digest.m31 lib/tls.m31 lib/pki/x509.m31 lib/pki/x509chain.m31 lib/net/http.m31 \
              tests/tls/t_ocsp_check.m31 tests/tls/t_ocsp_client.m31 tests/tls/t_chain_client.m31; do
-        "$LANGC" fmt --check "$f" || echo "$f"
+        "$LANGC" -fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then
     note "ocsp_source_is_formatted"
 else
-    bad "ocsp_source_is_not_formatted (run: m31c fmt <file>)" "$out"
+    bad "ocsp_source_is_not_formatted (run: m31c -fmt <file>)" "$out"
 fi
 
 if ! python3 -c 'import cryptography' 2>/dev/null; then

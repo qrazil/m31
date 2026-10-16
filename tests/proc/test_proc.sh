@@ -33,8 +33,8 @@ LANGC=./target/debug/$LANG_BIN
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-"$LANGC" fmt --check tests/proc/t_proc.m31 || { echo "FAILED: fmt"; exit 1; }
-"$LANGC" --emit-c tests/proc/t_proc.m31 -o "$WORK/t.c" 2>/dev/null || { echo "FAILED: compile"; exit 1; }
+"$LANGC" -fmt --check tests/proc/t_proc.m31 || { echo "FAILED: fmt"; exit 1; }
+"$LANGC" -emit-c tests/proc/t_proc.m31 --out "$WORK/t.c" 2>/dev/null || { echo "FAILED: compile"; exit 1; }
 
 backends=("libc:")
 if [ "$(uname -s)" = Linux ]; then

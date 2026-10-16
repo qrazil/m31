@@ -33,7 +33,7 @@ bad()  { printf '\033[31mFAIL\033[0m %s\n' "$1"; shift; printf '%s\n' "$@" | sed
 
 build() {
     local name=$1
-    if ! "$LANGC" --emit-c "tests/ssh/$name.m31" -o "$WORK/$name.c" 2>"$WORK/$name.diag"; then
+    if ! "$LANGC" -emit-c "tests/ssh/$name.m31" --out "$WORK/$name.c" 2>"$WORK/$name.diag"; then
         bad "compile $name" "$(head -5 "$WORK/$name.diag")"
         return 1
     fi
@@ -57,12 +57,12 @@ if out=$(
     for f in tests/ssh/*.m31 lib/crypto/sha256.m31 lib/crypto/chacha20poly1305.m31 lib/ssh.m31 \
              lib/ssh/sshkey.m31 lib/ssh/sshhosts.m31 lib/ssh/sshauth.m31 lib/ssh/sshexec.m31 lib/ssh/sshclient.m31 \
              lib/ssh/sshagent.m31 lib/ssh/sshconfig.m31 lib/ssh/sshshell.m31 lib/ssh/sshcipher.m31 lib/crypto/rsasign.m31 lib/crypto/bcryptpbkdf.m31 lib/ssh/sshjump.m31 lib/ssh/sshforward.m31 lib/ssh/sshconnect.m31 lib/ssh/sshsftp.m31; do
-        "$LANGC" fmt --check "$f" || echo "$f"
+        "$LANGC" -fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then
     note "source is formatted"
 else
-    bad "source is not formatted (run: m31c fmt <file>)" "$out"
+    bad "source is not formatted (run: m31c -fmt <file>)" "$out"
 fi
 
 # --- SHA-256 --------------------------------------------------------------------

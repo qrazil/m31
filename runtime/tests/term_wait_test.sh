@@ -23,7 +23,7 @@ fi
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-if ! "$LANGC" --emit-c runtime/tests/term_wait_test/main.m31 -o "$WORK/t.c" 2>"$WORK/t.err"; then
+if ! "$LANGC" -emit-c runtime/tests/term_wait_test/main.m31 --out "$WORK/t.c" 2>"$WORK/t.err"; then
     echo "FAILED: compile: $(grep -v '^warning' "$WORK/t.err" | head -5)"
     exit 1
 fi

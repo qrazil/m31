@@ -1,9 +1,16 @@
 //! m31c -- the compiler driver.
 //!
-//! Usage:
-//!     m31c --emit-c  <source> -o <out.c>
-//!     m31c --emit-ir <source> [-o <out.ir>]
-//!     m31c init [--lib] [--name N] [--prefix P] [dir]
+//! Usage (the grammar is Oro's `args`, docs/cli-conventions.md; `m31c --help`
+//! is generated from the tables below):
+//!     m31c -emit-c  <source> [--out <out.c>]
+//!     m31c -emit-ir <source> [--out <out.ir>]
+//!     m31c -fmt [--check] [--recursive] <file|dir>...
+//!     m31c -lint <file|dir>... [--allow NAME...] [--strict] [--summary]
+//!     m31c -init [--lib] [--name N] [--prefix P] [dir]
+//!
+//! Commands may share a line and run in the order typed. The pre-0.6 spellings
+//! (`--emit-c`, `fmt`, `-o`, `-r`, ...) still work for one release: each prints
+//! one deprecation line on stderr.
 //!
 //! One error, one line, on stderr, exit 1. The corpus compares diagnostics
 //! byte-for-byte, so this is observable surface (src/front/diag.rs).
@@ -18,7 +25,8 @@ use back::emit_c;
 use front::{ast, diag, lexer, parser};
 use middle::{lower, mono};
 use resolve::{modules, stdlib};
-use tools::{fmt, init, lint};
+use tools::cli::{Command, Kind, Need, Operand, Opt, Spec};
+use tools::{cli, fmt, init, lint};
 
 #[cfg(test)]
 mod tests;
@@ -26,104 +34,172 @@ mod tests;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-fn usage() -> ExitCode {
-    eprintln!("usage: m31c --emit-c|--emit-ir|fmt <source> [-o <output>]");
-    eprintln!("       m31c fmt --check <source>   exit 1 if it is not formatted");
-    eprintln!("       m31c fmt [--check] -r <dir> every .m31 file under <dir>");
-    eprintln!("       {}", lint::USAGE);
-    eprintln!("       {}", init::USAGE);
-    ExitCode::from(2)
-}
+const OUT: Opt = Opt {
+    long: "out",
+    short: Some('o'),
+    kind: Kind::Value,
+    placeholder: "PATH",
+    help: "write here instead of standard output",
+};
+
+static SOURCE_OPERAND: [Operand; 1] = [Operand {
+    name: "source",
+    need: Need::Required,
+    help: "the .m31 file to compile",
+}];
+
+static EMIT_C: Spec = Spec {
+    prog: "m31c -emit-c",
+    summary: "compile to C",
+    opts: &[OUT],
+    operands: &SOURCE_OPERAND,
+    commands: &[],
+    version: None,
+    completions: false,
+    epilog: "",
+};
+
+static EMIT_IR: Spec = Spec {
+    prog: "m31c -emit-ir",
+    summary: "compile to the IR text",
+    opts: &[OUT],
+    operands: &SOURCE_OPERAND,
+    commands: &[],
+    version: None,
+    completions: false,
+    epilog: "",
+};
+
+static FMT_OPERANDS: [Operand; 2] = [
+    Operand {
+        name: "path",
+        need: Need::Required,
+        help: "a source file, or with --recursive a directory",
+    },
+    Operand {
+        name: "more",
+        need: Need::Tail,
+        help: "",
+    },
+];
+
+static FMT: Spec = Spec {
+    prog: "m31c -fmt",
+    summary: "format m31 source in place",
+    opts: &[
+        Opt {
+            long: "check",
+            short: Some('c'),
+            kind: Kind::Flag,
+            placeholder: "",
+            help: "report unformatted files instead of rewriting them (exit 1)",
+        },
+        Opt {
+            long: "recursive",
+            short: Some('r'),
+            kind: Kind::Flag,
+            placeholder: "",
+            help: "format every .m31 file under each directory",
+        },
+    ],
+    operands: &FMT_OPERANDS,
+    commands: &[],
+    version: None,
+    completions: false,
+    epilog: "",
+};
+
+static ROOT: Spec = Spec {
+    prog: "m31c",
+    summary: "the m31 compiler",
+    opts: &[],
+    operands: &[],
+    commands: &[
+        Command {
+            word: "emit-c",
+            short: None,
+            spec: &EMIT_C,
+        },
+        Command {
+            word: "emit-ir",
+            short: None,
+            spec: &EMIT_IR,
+        },
+        Command {
+            word: "fmt",
+            short: None,
+            spec: &FMT,
+        },
+        Command {
+            word: "lint",
+            short: None,
+            spec: &lint::SPEC,
+        },
+        Command {
+            word: "init",
+            short: None,
+            spec: &init::SPEC,
+        },
+    ],
+    version: Some(env!("CARGO_PKG_VERSION")),
+    completions: true,
+    epilog: "Commands share a line and run in the order typed: m31c -fmt --check lib -lint lib.\nOne error, one line, on stderr; exit 0 ok, 1 failure, 2 usage error.\nThe old spellings (--emit-c, fmt, -o, -r, ...) still work for one release and warn.",
+};
+
+/// The pre-0.6 spellings, accepted for one release (docs/cli-conventions.md).
+const OLD_FIRST_WORDS: &[&str] = &["fmt", "lint", "init"];
+const OLD_SPELLINGS: &[(&str, &str)] = &[
+    ("--emit-c", "-emit-c"),
+    ("--emit-ir", "-emit-ir"),
+    ("-o", "--out"),
+    ("-r", "--recursive"),
+];
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-
-    if args.first().map(String::as_str) == Some("lint") {
-        return lint::main(&args[1..]);
-    }
-    if args.first().map(String::as_str) == Some("init") {
-        return init::main(&args[1..]);
-    }
-
-    let mut mode: Option<&str> = None;
-    let mut check = false;
-    let mut recursive = false;
-    let mut input: Option<String> = None;
-    let mut output: Option<String> = None;
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "fmt" => mode = Some("fmt"),
-            "--check" => check = true,
-            "-r" | "--recursive" => recursive = true,
-            "--emit-c" => mode = Some("c"),
-            "--emit-ir" => mode = Some("ir"),
-            "-o" => {
-                i += 1;
-                match args.get(i) {
-                    Some(p) => output = Some(p.clone()),
-                    None => return usage(),
-                }
-            }
-            "--help" => {
-                println!("usage: m31c --emit-c|--emit-ir|fmt <source> [-o <output>]");
-                println!("       m31c fmt --check <source>");
-                println!("       m31c fmt [--check] -r <dir>");
-                println!("       {}", lint::USAGE);
-                println!("       {}", init::USAGE);
-                return ExitCode::SUCCESS;
-            }
-            other if other.starts_with('-') => {
-                eprintln!("unknown option `{other}`");
-                return ExitCode::from(2);
-            }
-            other => {
-                if input.is_some() {
-                    eprintln!("more than one input file");
-                    return ExitCode::from(2);
-                }
-                input = Some(other.to_string());
-            }
-        }
-        i += 1;
-    }
-
-    let (Some(mode), Some(path)) = (mode, input) else {
-        return usage();
-    };
-
-    if mode == "fmt" {
-        let files = if recursive {
-            match source_files(Path::new(&path)) {
-                Ok(f) => f,
-                Err(e) => {
-                    eprintln!("cannot read {path}: {e}");
-                    return ExitCode::FAILURE;
-                }
-            }
-        } else {
-            vec![PathBuf::from(&path)]
-        };
-        // Every file is attempted, so one run reports everything wrong rather
-        // than the first thing.
-        let mut ok = true;
-        for f in &files {
-            ok &= format_file(&f.to_string_lossy(), check);
-        }
-        return if ok {
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let args = cli::migrate("m31c", &raw, OLD_SPELLINGS, OLD_FIRST_WORDS);
+    match cli::parse(&ROOT, &args) {
+        Err(message) => cli::fail(&ROOT, &message),
+        Ok(cli::Line::Help(text)) => {
+            println!("{text}");
             ExitCode::SUCCESS
-        } else {
-            ExitCode::FAILURE
-        };
+        }
+        Ok(cli::Line::Version(text)) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Ok(cli::Line::Script(text)) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Ok(cli::Line::Run(commands)) => {
+            let mut status = ExitCode::SUCCESS;
+            let mut failed = false;
+            for (word, parsed) in &commands {
+                let code = match word.as_str() {
+                    "emit-c" => emit_main("c", &parsed.operands[0], parsed.value("out")),
+                    "emit-ir" => emit_main("ir", &parsed.operands[0], parsed.value("out")),
+                    "fmt" => fmt_main(parsed),
+                    "lint" => lint::run(parsed),
+                    _ => init::run(parsed),
+                };
+                if !failed && code != ExitCode::SUCCESS {
+                    status = code;
+                    failed = true;
+                }
+            }
+            status
+        }
     }
+}
 
-    if let Err(e) = std::fs::read_to_string(&path) {
+/// `-emit-c` and `-emit-ir`: compile `path`, to `out` or standard output.
+fn emit_main(mode: &str, path: &str, output: Option<&str>) -> ExitCode {
+    if let Err(e) = std::fs::read_to_string(path) {
         eprintln!("cannot read {path}: {e}");
         return ExitCode::FAILURE;
     }
-
-    let out = match compile(&path, mode) {
+    let out = match compile(path, mode) {
         Ok(s) => s,
         Err(modules::Located { path: p, diag }) => {
             // The diagnostic has to name the file it came from: with several
@@ -133,10 +209,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-
     match output {
         Some(o) => {
-            if let Err(e) = std::fs::write(&o, out) {
+            if let Err(e) = std::fs::write(o, out) {
                 eprintln!("cannot write {o}: {e}");
                 return ExitCode::FAILURE;
             }
@@ -144,6 +219,37 @@ fn main() -> ExitCode {
         None => print!("{out}"),
     }
     ExitCode::SUCCESS
+}
+
+/// `-fmt [--check] [--recursive] <file|dir>...`.
+fn fmt_main(parsed: &cli::Parsed) -> ExitCode {
+    let check = parsed.flag("check");
+    let recursive = parsed.flag("recursive");
+    let mut files = Vec::new();
+    for path in &parsed.operands {
+        if recursive {
+            match source_files(Path::new(path)) {
+                Ok(found) => files.extend(found),
+                Err(e) => {
+                    eprintln!("cannot read {path}: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        } else {
+            files.push(PathBuf::from(path));
+        }
+    }
+    // Every file is attempted, so one run reports everything wrong rather
+    // than the first thing.
+    let mut ok = true;
+    for f in &files {
+        ok &= format_file(&f.to_string_lossy(), check);
+    }
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 /// Format one file in place, or with `check` only report whether it already is

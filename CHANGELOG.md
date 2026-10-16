@@ -3,6 +3,52 @@
 Versions follow the git tags of this repository. The dates are the day the
 change landed on master.
 
+## 0.6.0 (unreleased)
+
+### Changed -- one command-line grammar for everything
+
+Every m31 program now speaks **Oro's `args` grammar**, exactly (oro's
+`docs/reference.md`, "`args` -- written in Oro"; `docs/cli-conventions.md`):
+one dash is a command (`-serve`, short `-s`), two dashes are an option
+(`--out PATH`, `--out=PATH`, short `--o`), anything else is data; several
+commands per line; `--help` is the only help (`-h`, `help`, `--h`, a lone `--`
+are refused with a message that says what to write); no clustering, no
+`--no-x`, no abbreviations (suggested, never accepted).
+
+- **`m31c`** is `m31c -emit-c SRC --out OUT`, `-emit-ir`, `-fmt [--check]
+  [--recursive] PATH...`, `-lint PATH... [--allow NAME...]`, `-init [DIR]
+  [--lib] [--name N] [--prefix P]`, `--version`, `--completions SHELL`; commands
+  may share a line (`m31c -fmt --check lib -lint lib`). **The old spellings
+  (`--emit-c`, `--emit-ir`, `fmt`, `lint`, `init` as the first word, `-o`, `-r`) still
+  work for this one release and print one deprecation line on stderr each;
+  pinned older scripts and CI keep working. They are deleted next release.**
+  `--allow` is greedy now: give the paths first.
+- **`m31ssh`, `m31scp`, `m31sftp`, `m31ssh-keygen`** drop OpenSSH's letters for
+  clean names: `--port`, `--identity`, `--option`, `--config`, `--jump`,
+  `--user`, `--local-forward`, `--remote-forward`, `--tty`, `--tty-force`,
+  `--tty-never`, `--forward-only`, `--stdin-null`, `--recursive`, `--preserve`,
+  `--batch-file`, `--quiet`; `m31ssh-keygen` is four commands, `-generate`,
+  `-public`, `-fingerprint`, `-remove HOST`. The remote command of `m31ssh` is
+  one operand (`m31ssh host "ls -l"`). **The OpenSSH spellings (`-p 22`, `-tt`,
+  `ssh host ls -l`, `ssh-keygen -y -f k`) work for this one release, behind one
+  warning, and are then deleted.**
+- `install.sh`: `--release TAG`, `--prefix DIR`, `--libc LIBC`, `-uninstall`,
+  `--help`, `--version` (the `VERSION`, `PREFIX`, `LIBC` variables still work;
+  `--uninstall` still works and warns).
+- `m31c -init` scaffolds an app on `lib/args` (`--help`, `--version`,
+  `--completions`) and tests it.
+
+### Added
+
+- `lib/args.m31` gains, additively (no form or message of Oro's grammar
+  changes): `p.version` (`--version`, answered like `--help`), `p.completions()`
+  (`--completions bash|zsh|fish`, generated from the table), `integer(min:, max:)`,
+  closest-name suggestions by edit distance, `p.epilog`, `p.parse_or_exit`,
+  `p.fail`, `args.migrate` and `args.is_old_style` (old spellings of a released
+  program for one release).
+- `src/tools/cli.rs`: the same grammar for `m31c`, std only.
+- `docs/cli-conventions.md` (the spec, citing Oro's reference) and
+  `docs/CLI-INVENTORY.md` (the audit of every m31 app's command line).
 ## 0.5.1 (2026-10-16)
 
 ### Security (fixes from the independent audit of 0.5.0)

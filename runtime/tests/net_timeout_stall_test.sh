@@ -37,7 +37,7 @@ TIMEOUT_MS=400
 SLACK_MS=150
 
 SRC=runtime/tests/net_timeout_stall_demo/main.m31
-if ! "$LANGC" --emit-c "$SRC" -o "$WORK/stall.c" 2>"$WORK/compile.err"; then
+if ! "$LANGC" -emit-c "$SRC" --out "$WORK/stall.c" 2>"$WORK/compile.err"; then
     echo "FAILED: compile: $(grep -v '^warning' "$WORK/compile.err" | head -5)"
     exit 1
 fi

@@ -2,7 +2,7 @@
 
 Status: **decided and implemented** (`src/resolve/modules.rs`, `src/resolve/deps.rs`,
 `src/main.rs`). The `deps` project file has a required `name`/`version`
-header, a dependency can be a `path` used in place, and `m31c fmt -r`
+header, a dependency can be a `path` used in place, and `m31c -fmt -r`
 formats a tree. Wrapped identity (namespacing) is **decided against,
 permanently** (section 3, "What globally unique becomes"). Written in the same discipline as
 `docs/modules-decision.md` and `docs/remote-imports-decision.md`: this
@@ -54,7 +54,7 @@ build script grows a flag that must match the test scripts and CI.
 Rejected. Looks natural, but identity is the basename, so the same file
 reached from two directories has two different spellings, and moving a
 file changes every import *in it*. Relative imports also make
-`m31c fmt` and moves harder to reason about.
+`m31c -fmt` and moves harder to reason about.
 
 **C. A package/manifest system (name, version, `[modules]` table).**
 Rejected for now. `deps` + `deps.lock` already is the manifest, and a
@@ -192,7 +192,7 @@ resolve against `tui`'s root. No `TUI_ROOT`, no copy lists, and
 line from `deps.lock`, the existing update mechanism).
 
 **Tool changes (all done in the prototype unless noted).**
-- `m31c fmt` prints `import a.b.c;` back verbatim (`Import::dotted`).
+- `m31c -fmt` prints `import a.b.c;` back verbatim (`Import::dotted`).
 - `gates.sh` "formatter preserves meaning" staged only `*.m31` of a case
   directory flat; for `corpus/modules/*` it now copies the case
   directory recursively (minus `.m31-deps`). The idempotence glob also
@@ -202,11 +202,11 @@ line from `deps.lock`, the existing update mechanism).
   the new cases are just directories.
 - Parser: duplicate-name and self-import messages mention the dotted
   path.
-- `m31c fmt -r <dir>` and `m31c fmt --check -r <dir>` walk every `.m31`
+- `m31c -fmt --recursive <dir>` and `m31c -fmt --check --recursive <dir>` walk every `.m31`
   file under a directory (sorted; `.m31-deps`, `.git` and `target` skipped,
   symlinks not followed), report every file that is wrong rather than the
   first, and `-r` without `--check` rewrites only the files that change. A
-  repository's CI check is `m31c fmt --check -r .`. Gated by "recursive
+  repository's CI check is `m31c -fmt --check --recursive .`. Gated by "recursive
   formatter" in `gates.sh`, and the stdlib check is now `fmt --check -r lib`.
 
 ## 4. The standard layout
@@ -354,7 +354,7 @@ All closed.
 4. **Directory name grammar.** Directory names used in an import must be
    identifiers (`[A-Za-z_][A-Za-z0-9_]*`); documented in `reference.md`.
 5. **Transitive deps.** Done in 0.4.2, see the section below.
-6. **`m31c fmt --check -r`.** Done (section 5).
+6. **`m31c -fmt --check -r`.** Done (section 5).
 
 ## Transitive dependencies (0.4.2)
 

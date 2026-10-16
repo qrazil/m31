@@ -1,0 +1,115 @@
+import args;
+
+// What the m31 port adds to Oro's args, and only that: --version, --completions,
+// integer ranges, edit-distance suggestions, migrate. The grammar itself is
+// pinned by ../stdlib-args.
+
+void show(str label, Result<args.Parsed, args.UsageError> r) {
+    match (r) {
+        case Err(args.UsageError error): {
+            print(label + " -> error: " + error.to_str());
+        }
+        case Ok(args.Parsed parsed): {
+            print(label + " -> ok");
+        }
+    }
+}
+
+args.Parser build() {
+    args.Parser p = args.Parser("tool", summary: "do a thing");
+    p.version = "1.2.3";
+    p.epilog = "exit status: 0 ok, 1 failure, 2 usage";
+    p.value("out", short: "o", placeholder: "PATH", help: "where to write");
+    p.integer("port", short: "p", min: "1", max: "65535", help: "the port");
+    p.integer("jobs", min: "1", help: "how many");
+    p.flag("quiet", short: "q");
+    p.completions();
+    args.Parser serve = p.command("serve", "run the server", short: "s");
+    serve.value("host", help: "bind here");
+    serve.flag("verbose");
+    p.command("init", "create the files");
+    return p;
+}
+
+args.Parser p = build();
+print(p.help());
+print("---- version");
+match (p.parse(["--version"])) {
+    case Ok(args.Parsed r): {
+        print(r.version().or("none"));
+    }
+    case Err(args.UsageError e): {
+        print(e.to_str());
+    }
+}
+match (p.parse(["-serve", "--version"])) {
+    case Ok(args.Parsed r): {
+        print(r.version().or("none"));
+    }
+    case Err(args.UsageError e): {
+        print(e.to_str());
+    }
+}
+args.Parser plain = args.Parser("plain");
+match (plain.parse(["--version"])) {
+    case Ok(args.Parsed r): {
+        print("unset: " + r.version().or("none"));
+    }
+    case Err(args.UsageError e): {
+        print(e.to_str());
+    }
+}
+print("---- ranges");
+show("in range", p.parse(["--port", "80", "-init"]));
+show("too high", p.parse(["--port", "70000", "-init"]));
+show("too low", p.parse(["--port=0", "-init"]));
+show("only a minimum", p.parse(["--jobs", "0", "-init"]));
+show("not a number", p.parse(["--port", "x", "-init"]));
+print("---- suggestions by edit distance");
+show("swapped", p.parse(["--prot", "80", "-init"]));
+show("one letter off", p.parse(["--quite", "-init"]));
+show("a prefix", p.parse(["--qui", "-init"]));
+show("far off", p.parse(["--frobnicate", "-init"]));
+show("a command", p.parse(["-sreve"]));
+show("a command, far", p.parse(["-zzzzz"]));
+print("---- completions");
+match (p.parse(["--completions", "bash"])) {
+    case Ok(args.Parsed r): {
+        print(r.completions().or("none"));
+    }
+    case Err(args.UsageError e): {
+        print(e.to_str());
+    }
+}
+match (p.parse(["--completions=fish"])) {
+    case Ok(args.Parsed r): {
+        print(r.completions().or("none"));
+    }
+    case Err(args.UsageError e): {
+        print(e.to_str());
+    }
+}
+match (p.parse(["--completions", "zsh"])) {
+    case Ok(args.Parsed r): {
+        print(r.completions().or("none"));
+    }
+    case Err(args.UsageError e): {
+        print(e.to_str());
+    }
+}
+show("a shell it does not know", p.parse(["--completions", "csh"]));
+show("no shell", p.parse(["--completions"]));
+match (p.completion("bash")) {
+    case Ok(str script): {
+        print(script.size() > 100);
+    }
+    case Err(str why): {
+        print(why);
+    }
+}
+print("---- migrate");
+List<str> pairs = ["-o", "--out", "-p+", "--port", "--output", "--out"];
+List<List<str>> lines = [["-o", "x.txt"], ["-p22", "-q"], ["--output=x", "--q"], ["--out", "keep"], ["-pq"]];
+for (List<str> line in lines) {
+    print(args.migrate("tool", line, pairs).join(" "));
+}

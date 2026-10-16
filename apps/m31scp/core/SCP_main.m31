@@ -17,6 +17,7 @@
 // Exit status: 0; 1 for a failed transfer or bad usage; 255 when the
 // connection or authentication failed.
 
+import args;
 import io;
 import os;
 import fs;
@@ -40,7 +41,27 @@ type Location {
 }
 
 str usage() {
-    return "usage: m31scp [-P port] [-i identity] [-o option=value] [-F config] [-J jump]\n" + "              [-r] [-p] [-q] source ... target\n" + "\n" + "m31scp copies over SFTP and is UNAUDITED: do not rely on it where an\n" + "audited client (OpenSSH) is required. See docs/m31ssh.md.\n" + "  -P port  -i key  -o opt=val  -F file  -J jump   as m31ssh\n" + "  -r       copy directories recursively\n" + "  -p       preserve permissions and modification times\n" + "  -q       no progress meter\n" + "  -V       print the version\n" + "exit status: 0 ok, 1 transfer error, 255 connection error\n";
+    return grammar().help() + "\n";
+}
+
+/// The grammar (`lib/args`, Oro's: docs/cli-conventions.md). The OpenSSH
+/// letters (`-P -i -o -F -J -r -p -q`) still work for one release, read by
+/// `start_legacy`; a line that uses one prints a deprecation warning.
+args.Parser grammar() {
+    args.Parser table = args.Parser("m31scp", summary: "m31scp copies over SFTP and is UNAUDITED: do not rely on it where an\naudited client (OpenSSH) is required. See docs/m31ssh.md.");
+    table.version = VERSION + " (UNAUDITED)";
+    table.tail("paths", placeholder: "PATH", help: "local paths or [user@]host:path; the last one is the target");
+    table.integer("port", short: "p", placeholder: "PORT", min: "1", max: "65535", help: "port to connect to (default 22)");
+    table.value("config", short: "c", placeholder: "FILE", help: "configuration file (default ~/.ssh/config)");
+    table.value("jump", short: "j", placeholder: "HOST[,HOST...]", help: "connect through these jump hosts");
+    table.flag("recursive", short: "r", help: "copy directories recursively");
+    table.flag("preserve", help: "preserve permissions and modification times");
+    table.flag("quiet", short: "q", help: "no progress meter");
+    table.values("identity", short: "i", placeholder: "FILE", help: "private key files (default ~/.ssh/id_ed25519)");
+    table.values("option", short: "o", placeholder: "OPT=VALUE", help: "ssh_config settings (as m31ssh)");
+    table.completions();
+    table.epilog = "Options that take lists (--identity --option) take every operand up to the next dash:\ngive the paths first.\nexit status: 0 ok, 1 transfer or usage error, 255 connection error";
+    return table;
 }
 
 void warn(str message) {
@@ -191,7 +212,55 @@ type Options {
     bool is_quiet;
 }
 
+/// The entry point: the Oro grammar, or the OpenSSH one (deprecated).
 pub int start(List<str> argv) {
+    List<str> arguments = [];
+    if (argv.size() > 1) {
+        arguments = argv.slice(1, argv.size());
+    }
+    if (args.is_old_style(arguments)) {
+        io.eprint("m31scp: warning: OpenSSH-style options (-P, -r, -o, ...) are deprecated and go away next release: use --port, --recursive, --option, ... (m31scp --help)");
+        return start_legacy(argv);
+    }
+    args.Parser table = grammar();
+    match (table.parse(arguments)) {
+        case Err(args.UsageError error): {
+            warn(error.to_str());
+            io.eprint("try 'm31scp --help'");
+            return EXIT_USAGE;
+        }
+        case Ok(args.Parsed given): {
+            match (given.help()) {
+                case Some(str text): {
+                    print(text);
+                    return 0;
+                }
+                case None: {
+                }
+            }
+            match (given.version()) {
+                case Some(str text): {
+                    print(text);
+                    return 0;
+                }
+                case None: {
+                }
+            }
+            match (given.completions()) {
+                case Some(str script): {
+                    print(script);
+                    return 0;
+                }
+                case None: {
+                }
+            }
+            Options options = Options(given.is_flag_set("recursive"), given.is_flag_set("preserve"), given.is_flag_set("quiet"));
+            return transfer(given.integer("port").or(0), given.values("identity"), given.values("option"), given.value("config").or(""), given.value("jump").or(""), options, given.tail("paths"));
+        }
+    }
+}
+
+int start_legacy(List<str> argv) {
     List<str> arguments = [];
     if (argv.size() > 1) {
         arguments = argv.slice(1, argv.size());
@@ -284,6 +353,11 @@ pub int start(List<str> argv) {
         }
         index = index + 1;
     }
+    return transfer(port, identities, settings, config_file, jump, options, names);
+}
+
+// Everything after the command line is understood.
+int transfer(int port, List<str> identities, List<str> settings, str config_file, str jump, Options options, List<str> names) {
     if (names.size() < 2) {
         io.eprint(usage());
         return EXIT_USAGE;

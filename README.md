@@ -12,7 +12,7 @@ rename it again; it rewrites `config.sh` and moves the corpus files with it.
 curl -fsSL https://raw.githubusercontent.com/qrazil/m31/master/install.sh | sh
 ```
 
-Picks the release for your OS and CPU, unpacks it under `~/.local/opt/m31/<version>` and links the programs into `~/.local/bin`. `VERSION=v1.2.3` pins a release, `PREFIX=...` moves the install, `sh install.sh --uninstall` removes it. On Alpine (musl) it picks the `-musl` release, whose compiler is a static binary; install `gcc musl-dev linux-headers` to build programs. `LIBC=gnu|musl` overrides the detection.
+Picks the release for your OS and CPU, unpacks it under `~/.local/opt/m31/<version>` and links the programs into `~/.local/bin`. `--release v1.2.3` (or `VERSION=v1.2.3`) pins a release, `--prefix DIR` (or `PREFIX=...`) moves the install, `--libc gnu|musl` (or `LIBC=`) overrides detection, `--uninstall` removes it, `--help` lists them; piped from curl, pass them after `-s --`: `curl -fsSL <url> | sh -s -- --prefix /usr/local`. A mistyped option is an error naming the closest one (exit 2). On Alpine (musl) it picks the `-musl` release, whose compiler is a static binary; install `gcc musl-dev linux-headers` to build programs. `LIBC=gnu|musl` overrides the detection.
 
 ## Status
 
@@ -21,8 +21,9 @@ which gcc and clang both build clean at `-O0` and `-O2`.
 
 ```
 ./build.sh examples/tour.m31 && ./tour    compile and run a program
-./target/debug/m31c fmt <file>           format in place
-./target/debug/m31c fmt --check <file>   exit 1 if it is not formatted
+./target/debug/m31c -fmt <file>          format in place
+./target/debug/m31c -fmt --check <file>  exit 1 if it is not formatted
+./target/debug/m31c --help               every command and option, generated (Oro's grammar: docs/cli-conventions.md)
 ./gates.sh                                every gate
 ./run.sh                                  the corpus alone
 ```
@@ -339,7 +340,7 @@ under real concurrent load, and load-bearing -- see Concurrency above.
 ## Starting a project
 
 ```
-m31c init [--lib] [--name NAME] [--prefix PREFIX] [dir]
+m31c -init [--lib] [--name NAME] [--prefix PREFIX] [dir]
 ```
 
 writes the standard layout (`deps`, an entry point, `core/`, `tests/test.sh`,
@@ -417,7 +418,7 @@ match the compiler.
 ```
 config.sh              name, binary, extension — the only place they appear
 build.sh               compile a source file to an executable
-gates.sh               every gate, run after every commit (includes `m31c lint`)
+gates.sh               every gate, run after every commit (includes `m31c -lint`)
 scripts/               rename.sh (renames the language and moves the corpus with it),
                        run.sh (the differential corpus runner), sanitize.sh, bench.sh
 src/                   the compiler, one folder per pipeline stage
@@ -473,7 +474,7 @@ examples/enums.m31     enums and match, including Option, Result and JSON
    braces. The angle brackets on generics are Java's `List<String>`, not
    Rust's.
 2. **The IR** — internal, sixteen instructions, SSA with block parameters.
-   `--emit-ir` prints it; nothing else exposes it.
+   `-emit-ir` prints it; nothing else exposes it.
 3. **The backend** — emits C and hands it to `cc`. `build.sh` does this in a
    temp directory and deletes it. **You never see or keep the C.** It is
    replaceable — Cranelift is the planned second backend — which is exactly
@@ -481,7 +482,7 @@ examples/enums.m31     enums and match, including Option, Result and JSON
 
 ## The formatter
 
-`m31c fmt` has **one canonical layout and no options**. That is the other
+`m31c -fmt` has **one canonical layout and no options**. That is the other
 half of the braces decision: the case for braces over significant indentation
 was that a formatter gives you one correct layout without putting whitespace
 in the grammar, so the language owes you the formatter.

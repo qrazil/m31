@@ -1,5 +1,15 @@
 // Command-line parsing for m31ssh. Pure: takes the argument list (without the
 // program name) and answers a `Cli` or a one-line complaint.
+//
+// The grammar is `lib/args` (Oro's: docs/cli-conventions.md): a dash is a command
+// and there are none here, `--port 22`, `--port=22`, `--p 22`. Because a word
+// that starts with a dash is never data, the remote command is written as one
+// operand: `m31ssh host "ls -l"`. The OpenSSH spellings (`-p 22`, `-tt`, `-L`,
+// `ssh host ls -l`) still work for one release: a line that uses one prints a
+// deprecation warning and is read by the old parser (`parse_legacy`, below),
+// which is deleted next release.
+import args;
+import io;
 
 pub const str VERSION = "0.1.0";
 
@@ -25,11 +35,143 @@ pub type Cli {
     pub List<str> remote_forwards;
     pub bool is_help;
     pub bool is_version;
+    /// A completion script `--completions SHELL` asked for, or "".
+    pub str script = "";
+}
+
+/// The grammar, as a parser.
+pub args.Parser grammar() {
+    args.Parser table = args.Parser("m31ssh", summary: "m31ssh is an SSH client written in m31. It is UNAUDITED: do not rely on it\nwhere an audited client (OpenSSH) is required. Ed25519 keys only; see\ndocs/m31ssh.md for the threat model and known limits.");
+    table.version = VERSION + " (UNAUDITED)";
+    table.positional("host", placeholder: "[USER@]HOST", help: "where to connect");
+    table.tail("command", placeholder: "COMMAND", help: "what to run there; one operand if it has dashes in it: \"ls -l\"");
+    table.integer("port", short: "p", placeholder: "PORT", min: "1", max: "65535", help: "port to connect to (default 22)");
+    table.value("user", short: "u", placeholder: "USER", help: "login name");
+    table.value("config", short: "c", placeholder: "FILE", help: "configuration file (default ~/.ssh/config)");
+    table.value("jump", short: "j", placeholder: "HOST[,HOST...]", help: "connect through these jump hosts");
+    table.value("escape", short: "e", placeholder: "CHAR|none", help: "escape character (default ~; `~.` disconnects)");
+    table.flag("tty", short: "t", help: "request a terminal when standard input is one");
+    table.flag("tty-force", help: "always request a terminal");
+    table.flag("tty-never", help: "never request a terminal");
+    table.flag("forward-only", help: "run no remote command: the connection only carries forwards");
+    table.flag("stdin-null", help: "read nothing from standard input");
+    table.flag("quiet", short: "q", help: "no host-key notices");
+    table.values("identity", short: "i", placeholder: "FILE", help: "private key files (default ~/.ssh/id_ed25519)");
+    table.values("option", short: "o", placeholder: "OPT=VALUE", help: "ssh_config settings (the first value wins; see docs/m31ssh.md)");
+    table.values("local-forward", short: "L", placeholder: "SPEC", help: "forward a local port: [bind:]port:host:hostport");
+    table.values("remote-forward", short: "R", placeholder: "SPEC", help: "forward a remote port: [bind:]port:host:hostport");
+    table.completions();
+    table.epilog = "Options that take lists (--identity --option --local-forward --remote-forward) take every\noperand up to the next dash: write the host first, or put them last.\nexit status is the remote command's, or 255 for an ssh error.";
+    return table;
 }
 
 pub str usage() {
-    return "usage: m31ssh [-46nqTtN] [-e escape|none] [-F config] [-i identity] [-J jump] [-l user]\n" + "              [-L spec] [-o option=value] [-p port] [-R spec] [user@]host [command ...]\n" + "\n" + "m31ssh is an SSH client written in m31. It is UNAUDITED: do not rely on it\n" + "where an audited client (OpenSSH) is required. Ed25519 keys only; see\n" + "docs/m31ssh.md for the threat model and known limits.\n" + "\n" + "  -p port       port to connect to (default 22)\n" + "  -i identity   private key file (repeatable; default ~/.ssh/id_ed25519)\n" + "  -l user       login name\n" + "  -o opt=val    ssh_config option (first value wins; see docs)\n" + "  -F file       configuration file (default ~/.ssh/config)\n" + "  -t / -tt / -T request a terminal / force one / never\n" + "  -n            read nothing from standard input\n" + "  -e c|none     escape character (default ~; `~.` disconnects)\n" + "  -q            quiet: no host-key notices\n" + "  -V            print the version\n" + "exit status is the remote command's, or 255 for an ssh error.\n";
+    return grammar().help() + "\n";
 }
+
+pub Result<Cli, str> parse(List<str> arguments) {
+    if (args.is_old_style(arguments)) {
+        io.eprint("m31ssh: warning: OpenSSH-style options (-p, -tt, -L, ...) are deprecated and go away next release: use --port, --tty-force, --local-forward, ... (m31ssh --help)");
+        return parse_legacy(arguments);
+    }
+    args.Parser table = grammar();
+    match (table.parse(arguments)) {
+        case Err(args.UsageError error): {
+            return Result<Cli, str>.Err(error.to_str());
+        }
+        case Ok(args.Parsed given): {
+            return fill(given);
+        }
+    }
+}
+
+// The `Cli` a successful parse stands for.
+Result<Cli, str> fill(args.Parsed given) {
+    Cli result = Cli(0, "", [], [], "", "", "", 0, false, false, false, 126, "", [], [], false, false);
+    match (given.help()) {
+        case Some(str text): {
+            result.is_help = true;
+            return Result<Cli, str>.Ok(result);
+        }
+        case None: {
+        }
+    }
+    match (given.version()) {
+        case Some(str text): {
+            result.is_version = true;
+            return Result<Cli, str>.Ok(result);
+        }
+        case None: {
+        }
+    }
+    match (given.completions()) {
+        case Some(str script): {
+            result.script = script;
+            return Result<Cli, str>.Ok(result);
+        }
+        case None: {
+        }
+    }
+    result.port = given.integer("port").or(0);
+    result.user = given.value("user").or("");
+    result.identities = given.values("identity");
+    for (str setting in given.values("option")) {
+        if (setting.contains("\n") || setting.contains("\r")) {
+            return Result<Cli, str>.Err("'--option' needs a setting without a line break");
+        }
+        result.options.push(setting);
+    }
+    result.config_file = given.value("config").or("");
+    result.jump = given.value("jump").or("");
+    result.local_forwards = given.values("local-forward");
+    result.remote_forwards = given.values("remote-forward");
+    match (given.value("escape")) {
+        case Some(str escape): {
+            if (escape == "none") {
+                result.escape = -1;
+            } else if (escape.size() == 1) {
+                result.escape = escape.byte_at(0);
+            } else {
+                return Result<Cli, str>.Err("'--escape' needs one character or none, and got '" + escape + "'");
+            }
+        }
+        case None: {
+        }
+    }
+    if (given.is_flag_set("tty-never")) {
+        result.tty_mode = -1;
+    } else if (given.is_flag_set("tty-force")) {
+        result.tty_mode = 2;
+    } else if (given.is_flag_set("tty")) {
+        result.tty_mode = 1;
+    }
+    result.is_no_command = given.is_flag_set("forward-only");
+    result.is_stdin_null = given.is_flag_set("stdin-null");
+    result.is_quiet = given.is_flag_set("quiet");
+    str host = given.positional("host");
+    result.command = given.tail("command").join(" ");
+    int at_sign = -1;
+    int position = 0;
+    while (position < host.size()) {
+        if (host.byte_at(position) == 64) {
+            at_sign = position;
+        }
+        position = position + 1;
+    }
+    if (at_sign >= 0) {
+        if (result.user == "") {
+            result.user = host.substr(0, at_sign);
+        }
+        host = host.substr(at_sign + 1, host.size());
+    }
+    if (host == "" || host.starts_with("-")) {
+        return Result<Cli, str>.Err("bad host name");
+    }
+    result.host = host;
+    return Result<Cli, str>.Ok(result);
+}
+
+// --- the OpenSSH spelling, for one more release ----------------------------------------
 
 // The value of an option that takes one: attached (`-p22`) or the next word.
 // `Err` names the problem.
@@ -43,7 +185,7 @@ Result<str, str> value_of(List<str> arguments, int index, str word) {
     return Result<str, str>.Ok(arguments[index + 1]);
 }
 
-pub Result<Cli, str> parse(List<str> arguments) {
+Result<Cli, str> parse_legacy(List<str> arguments) {
     Cli cli = Cli(0, "", [], [], "", "", "", 0, false, false, false, 126, "", [], [], false, false);
     List<str> rest = [];
     int index = 0;

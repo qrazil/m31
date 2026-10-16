@@ -84,11 +84,15 @@ pub int start(List<str> argv) {
         }
     }
     if (cli.is_help) {
-        print(SSHC_cli.usage());
+        print(SSHC_cli.grammar().help());
         return 0;
     }
     if (cli.is_version) {
         print("m31ssh " + SSHC_cli.VERSION + " (UNAUDITED)");
+        return 0;
+    }
+    if (cli.script != "") {
+        print(cli.script);
         return 0;
     }
     bool is_stdin_tty = term.is_terminal(0);

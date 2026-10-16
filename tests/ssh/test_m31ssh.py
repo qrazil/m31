@@ -120,6 +120,13 @@ def trust_host():
         f.write("[127.0.0.1]:%d %s" % (PORT, " ".join(open(HOSTKEY + ".pub").read().split()[:2])) + "\n")
 
 
+def without_deprecation(text):
+    """These tests drive the programs with the OpenSSH spelling, which still
+    works for one release and says so on stderr; the grammar proper is tested
+    in test_cli.sh. Drop that one line so the checks see the program's own."""
+    return "".join(l for l in text.splitlines(True) if "warning: OpenSSH-style options" not in l)
+
+
 def run(args, input=None, env=None, timeout=60, binary=False):
     e = dict(ENV)
     if env:
@@ -127,7 +134,7 @@ def run(args, input=None, env=None, timeout=60, binary=False):
     p = subprocess.run([BIN] + args, input=input, capture_output=True, env=e, timeout=timeout)
     if binary:
         return p
-    return p.returncode, p.stdout.decode(errors="replace"), p.stderr.decode(errors="replace")
+    return p.returncode, p.stdout.decode(errors="replace"), without_deprecation(p.stderr.decode(errors="replace"))
 
 
 def base(*args):

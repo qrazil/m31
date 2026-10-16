@@ -1,13 +1,19 @@
 // @@NAME@@ -- the program's entry point.
 //
 //   @@NAME@@ [who]
+//
+// The command line is `lib/args` (Oro's grammar, m31's docs/cli-conventions.md):
+// `--help` and `--version` are there already, a mistyped option names the
+// closest one, and `@@NAME@@ --completions bash|zsh|fish` prints a completion
+// script.
 
+import args;
 import core.@@PREFIX@@_core;
 import os;
 
-List<str> argv = os.arguments();
-str who = "world";
-if (argv.size() > 1) {
-    who = argv[1];
-}
-print(@@PREFIX@@_core.greeting(who));
+args.Parser table = args.Parser("@@NAME@@", summary: "greet someone");
+table.version = "@@VERSION@@";
+table.optional("who", "world", placeholder: "NAME", help: "who to greet");
+table.completions();
+args.Parsed given = table.parse_or_exit(os.arguments().slice(1, os.arguments().size()));
+print(@@PREFIX@@_core.greeting(given.optional("who")));

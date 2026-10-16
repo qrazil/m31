@@ -62,7 +62,7 @@ finish() {
 
 build() {
     local name=$1
-    if ! "$LANGC" --emit-c "tests/tls/$name.m31" -o "$WORK/$name.c" 2>"$WORK/$name.diag"; then
+    if ! "$LANGC" -emit-c "tests/tls/$name.m31" --out "$WORK/$name.c" 2>"$WORK/$name.diag"; then
         bad "compile $name" "$(grep -v '^warning' "$WORK/$name.diag" | head -5)"
         return 1
     fi
@@ -97,12 +97,12 @@ fi
 
 if out=$(
     for f in lib/net/http.m31 tests/tls/t_https_client.m31; do
-        "$LANGC" fmt --check "$f" || echo "$f"
+        "$LANGC" -fmt --check "$f" || echo "$f"
     done 2>&1
 ) && [ -z "$out" ]; then
     note "source is formatted"
 else
-    bad "source is not formatted (run: m31c fmt <file>)" "$out"
+    bad "source is not formatted (run: m31c -fmt <file>)" "$out"
 fi
 
 build t_https_client || finish

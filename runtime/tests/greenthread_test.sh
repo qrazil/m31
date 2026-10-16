@@ -139,7 +139,7 @@ fi
 LANGC="./target/debug/$LANG_BIN"
 if [ -x "$LANGC" ]; then
     printf 'int f() { return 1; }\n' >"$WORK/probe_fn.$LANG_EXT"
-    if "$LANGC" --emit-c "$WORK/probe_fn.$LANG_EXT" -o "$WORK/probe_fn.c" 2>"$WORK/m31c.err"; then
+    if "$LANGC" -emit-c "$WORK/probe_fn.$LANG_EXT" --out "$WORK/probe_fn.c" 2>"$WORK/m31c.err"; then
         if grep -qF 'rt_stack_check();' \
                 "$WORK/probe_fn.c"; then
             note "emit_c.rs probe text" "ok (exact text found in emitted C)"
@@ -166,7 +166,7 @@ if [ -x "$LANGC" ]; then
         fi
     else
         note "emit_c.rs probe text" FAILED
-        echo "    m31c --emit-c failed: $(head -1 "$WORK/m31c.err")"
+        echo "    m31c -emit-c failed: $(head -1 "$WORK/m31c.err")"
         fail=1
     fi
 else

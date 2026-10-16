@@ -13,6 +13,22 @@ if bash scripts/build.sh -o "$BIN" >"$WORK/build.log" 2>&1; then
     else
         bad "program: greets its argument" "$("$BIN" you 2>&1)"
     fi
+    if [[ "$("$BIN" --help 2>&1)" == "usage: @@NAME@@ "* ]]; then
+        note "program: --help"
+    else
+        bad "program: --help" "$("$BIN" --help 2>&1)"
+    fi
+    if [ "$("$BIN" --version 2>&1)" = "@@NAME@@ @@VERSION@@" ]; then
+        note "program: --version"
+    else
+        bad "program: --version" "$("$BIN" --version 2>&1)"
+    fi
+    "$BIN" --nope >/dev/null 2>&1
+    if [ "$?" = 2 ]; then
+        note "program: an unknown option is a usage error (exit 2)"
+    else
+        bad "program: unknown option exit status"
+    fi
 else
     bad "build @@NAME@@" "$(tail -n 8 "$WORK/build.log")"
 fi

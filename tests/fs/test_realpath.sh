@@ -17,8 +17,8 @@ LANGC=./target/debug/$LANG_BIN
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-"$LANGC" fmt --check tests/fs/t_realpath.m31 || { echo "FAILED: fmt"; exit 1; }
-"$LANGC" --emit-c tests/fs/t_realpath.m31 -o "$WORK/t.c" 2>/dev/null || { echo "FAILED: compile"; exit 1; }
+"$LANGC" -fmt --check tests/fs/t_realpath.m31 || { echo "FAILED: fmt"; exit 1; }
+"$LANGC" -emit-c tests/fs/t_realpath.m31 --out "$WORK/t.c" 2>/dev/null || { echo "FAILED: compile"; exit 1; }
 
 backends=("")
 if [ "$(uname -s)" = Linux ]; then

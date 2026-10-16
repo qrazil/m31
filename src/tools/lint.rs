@@ -21,6 +21,7 @@
 
 use crate::front::ast::{bare, Args, Expr, Func, MatchArm, Param, Program, Stmt, Ty};
 use crate::front::diag::Span;
+use crate::tools::cli;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -762,10 +763,53 @@ pub fn tally(findings: &[Finding]) -> BTreeMap<Kind, usize> {
     m
 }
 
-pub const USAGE: &str =
-    "usage: m31c lint [--allow NAME[,NAME..]] [--strict] [--summary] <file|dir>...";
+static LINT_OPERANDS: [cli::Operand; 2] = [
+    cli::Operand {
+        name: "path",
+        need: cli::Need::Required,
+        help: "a source file, or a directory searched for .m31 files",
+    },
+    cli::Operand {
+        name: "more",
+        need: cli::Need::Tail,
+        help: "",
+    },
+];
 
-/// Printed after `USAGE` by `lint --help`.
+pub static SPEC: cli::Spec = cli::Spec {
+    prog: "m31c -lint",
+    summary: "check names and style in m31 source (exit 0 clean, 1 findings, 2 usage)",
+    opts: &[
+        cli::Opt {
+            long: "allow",
+            short: None,
+            kind: cli::Kind::Values,
+            placeholder: "NAME",
+            help: "do not report these names; greedy, so give the paths first",
+        },
+        cli::Opt {
+            long: "strict",
+            short: None,
+            kind: cli::Kind::Flag,
+            placeholder: "",
+            help: "also report the softer findings",
+        },
+        cli::Opt {
+            long: "summary",
+            short: None,
+            kind: cli::Kind::Flag,
+            placeholder: "",
+            help: "print a count per kind and the most common names",
+        },
+    ],
+    operands: &LINT_OPERANDS,
+    commands: &[],
+    version: None,
+    completions: false,
+    epilog: HELP,
+};
+
+/// Printed after the options by `lint --help`.
 const HELP: &str = "module names (finding kind \"module name\", reported on line 1):
   lib/ (stdlib)     lowercase, one word: io, net, sha256
   any other module  PREFIX_name: TUI_text, GIT_refs, MD_blocks
@@ -789,44 +833,27 @@ twelve most common names";
 
 /// The `lint` subcommand. Exit 0 clean, 1 findings or a file that does not
 /// parse, 2 bad usage.
-pub fn main(args: &[String]) -> std::process::ExitCode {
-    use std::process::ExitCode;
+pub fn run(parsed: &cli::Parsed) -> std::process::ExitCode {
     let mut opts = Opts::default();
-    let mut summary = false;
-    let mut inputs: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--allow" => {
-                i += 1;
-                let Some(list) = args.get(i) else {
-                    eprintln!("{USAGE}");
-                    return ExitCode::from(2);
-                };
-                opts.allow
-                    .extend(list.split(',').filter(|s| !s.is_empty()).map(String::from));
-            }
-            "--strict" => opts.strict = true,
-            "--summary" => summary = true,
-            "--help" => {
-                println!("{USAGE}\n{HELP}");
-                return ExitCode::SUCCESS;
-            }
-            other if other.starts_with('-') => {
-                eprintln!("unknown option `{other}`");
-                return ExitCode::from(2);
-            }
-            other => inputs.push(other.to_string()),
-        }
-        i += 1;
+    for list in parsed.values("allow") {
+        opts.allow
+            .extend(list.split(',').filter(|s| !s.is_empty()).map(String::from));
     }
-    if inputs.is_empty() {
-        eprintln!("{USAGE}");
-        return ExitCode::from(2);
-    }
+    opts.strict = parsed.flag("strict");
+    let summary = parsed.flag("summary");
+    check(opts, summary, &parsed.operands)
+}
 
+/// Lint these paths with default options (what a test wants).
+#[cfg(test)]
+pub fn run_paths(paths: &[String]) -> std::process::ExitCode {
+    check(Opts::default(), false, paths)
+}
+
+fn check(opts: Opts, summary: bool, inputs: &[String]) -> std::process::ExitCode {
+    use std::process::ExitCode;
     let mut files = Vec::new();
-    for input in &inputs {
+    for input in inputs {
         if let Err(e) = collect(std::path::Path::new(input), &mut files) {
             eprintln!("cannot read {input}: {e}");
             return ExitCode::from(2);

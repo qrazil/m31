@@ -21,6 +21,7 @@
 //
 // Exit status: 0, or 1 with one line on standard error.
 
+import args;
 import io;
 import os;
 import fs;
@@ -37,7 +38,44 @@ import ssh.sshconnect;
 pub const str VERSION = "0.1.0";
 
 str usage() {
-    return "usage: m31ssh-keygen [-t ed25519] [-f file] [-N passphrase] [-C comment] [-a rounds] [-q]\n" + "       m31ssh-keygen -y [-f file] [-P passphrase]\n" + "       m31ssh-keygen -l [-f file]\n" + "       m31ssh-keygen -R host [-f known_hosts]\n" + "       m31ssh-keygen -F host [-f known_hosts]\n" + "       m31ssh-keygen -H [-f known_hosts]\n" + "       m31ssh-keygen -p [-f file] [-P old] [-N new] [-C comment] [-a rounds]\n" + "\n" + "m31ssh-keygen is UNAUDITED. It generates Ed25519 keys only; see docs/m31ssh.md.\n";
+    return grammar().help() + "\n";
+}
+
+/// The grammar (`lib/args`, Oro's: docs/cli-conventions.md): seven commands, each
+/// with its own options. The OpenSSH letters (`-t -f -N -P -C -a -q -y -l -R -F -H -p`)
+/// and a bare `m31ssh-keygen` still work for one release, read by `start_legacy`.
+args.Parser grammar() {
+    args.Parser table = args.Parser("m31ssh-keygen", summary: "m31ssh-keygen is UNAUDITED. It generates Ed25519 keys only; see docs/m31ssh.md.");
+    table.version = VERSION + " (UNAUDITED)";
+    args.Parser generate = table.command("generate", "make a new key pair; the file is never overwritten");
+    generate.value("type", short: "t", placeholder: "TYPE", default: "ed25519", help: "key type (only ed25519)");
+    generate.value("file", short: "f", placeholder: "FILE", help: "the key file (default ~/.ssh/id_ed25519; FILE.pub beside it)");
+    generate.value("new-passphrase", short: "n", placeholder: "TEXT", help: "protect the key with this passphrase (visible in the process list: prefer the prompt)");
+    generate.value("comment", short: "c", placeholder: "TEXT", help: "comment stored in the key");
+    generate.integer("rounds", short: "r", placeholder: "N", default: "16", min: "1", max: "1024", help: "key derivation rounds for a passphrase-protected key");
+    generate.flag("quiet", short: "q", help: "no progress or fingerprint output");
+    args.Parser public_key = table.command("public", "print the public key line of a private key");
+    public_key.value("file", short: "f", placeholder: "FILE", help: "the private key file (default ~/.ssh/id_ed25519)");
+    public_key.value("passphrase", placeholder: "TEXT", help: "the key's passphrase (visible in the process list: prefer the prompt)");
+    args.Parser fingerprint = table.command("fingerprint", "print the SHA-256 fingerprint of a key, .pub or known_hosts file");
+    fingerprint.value("file", short: "f", placeholder: "FILE", help: "the file (default ~/.ssh/id_ed25519)");
+    args.Parser remove = table.command("remove", "remove a host's entries from known_hosts (keeps known_hosts.old)");
+    remove.positional("host", placeholder: "HOST", help: "the host, or [host]:port");
+    remove.value("file", short: "f", placeholder: "KNOWN_HOSTS", help: "the known_hosts file (default ~/.ssh/known_hosts)");
+    args.Parser find = table.command("find", "print a host's known_hosts entries (as ssh-keygen -F)");
+    find.positional("host", placeholder: "HOST", help: "the host, or [host]:port");
+    find.value("file", short: "f", placeholder: "KNOWN_HOSTS", help: "the known_hosts file (default ~/.ssh/known_hosts)");
+    args.Parser hash = table.command("hash", "hash every plain host name in known_hosts (keeps known_hosts.old)");
+    hash.value("file", short: "f", placeholder: "KNOWN_HOSTS", help: "the known_hosts file (default ~/.ssh/known_hosts)");
+    args.Parser change = table.command("passphrase", "change or remove an Ed25519 key's passphrase, or its comment");
+    change.value("file", short: "f", placeholder: "FILE", help: "the private key file (default ~/.ssh/id_ed25519)");
+    change.value("old-passphrase", placeholder: "TEXT", help: "the current passphrase (visible in the process list: prefer the prompt)");
+    change.value("new-passphrase", short: "n", placeholder: "TEXT", help: "the new passphrase; empty removes it");
+    change.value("comment", short: "c", placeholder: "TEXT", help: "a new comment");
+    change.integer("rounds", short: "r", placeholder: "N", default: "16", min: "1", max: "1024", help: "key derivation rounds for the new passphrase");
+    table.completions();
+    table.epilog = "Commands may share a line and run in order: -generate --file a -fingerprint --file a\nexit status: 0, or 1 with one line on standard error.";
+    return table;
 }
 
 void fail_line(str message) {
@@ -233,7 +271,95 @@ str host_argument(List<str> arguments) {
     return found;
 }
 
+// An OpenSSH-style line: a short single-dash word (`-f`, `-qy`) that is not a
+// command. A longer one is a mistyped command (`-genrate`) and gets the
+// parser's "did you mean".
+bool is_old_spelling(List<str> arguments) {
+    for (str word in arguments) {
+        if (word == "--") {
+            return true;
+        }
+        if (word.starts_with("-") && !word.starts_with("--") && word.size() >= 2 && word.size() <= 3) {
+            int second = word.byte_at(1);
+            if (second < 48 || second > 57) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// The entry point: the Oro grammar, or the OpenSSH one (deprecated).
 pub int start(List<str> argv) {
+    List<str> arguments = [];
+    if (argv.size() > 1) {
+        arguments = argv.slice(1, argv.size());
+    }
+    if (arguments.size() == 0 || is_old_spelling(arguments)) {
+        io.eprint("m31ssh-keygen: warning: OpenSSH-style options (-t, -f, -y, -l, -R, ...) and a bare m31ssh-keygen are deprecated and go away next release: use the commands -generate, -public, -fingerprint, -remove, -find, -hash, -passphrase (m31ssh-keygen --help)");
+        return start_legacy(argv);
+    }
+    args.Parser table = grammar();
+    match (table.parse(arguments)) {
+        case Err(args.UsageError error): {
+            fail_line(error.to_str());
+            io.eprint("try 'm31ssh-keygen --help'");
+            return 1;
+        }
+        case Ok(args.Parsed given): {
+            match (given.help()) {
+                case Some(str text): {
+                    print(text);
+                    return 0;
+                }
+                case None: {
+                }
+            }
+            match (given.version()) {
+                case Some(str text): {
+                    print(text);
+                    return 0;
+                }
+                case None: {
+                }
+            }
+            match (given.completions()) {
+                case Some(str script): {
+                    print(script);
+                    return 0;
+                }
+                case None: {
+                }
+            }
+            int status = 0;
+            for (args.Parsed one in given.commands()) {
+                int code = 0;
+                str word = one.word();
+                if (word == "generate") {
+                    code = run_keygen("generate", one.value("type").or("ed25519"), one.value("file").or(""), one.value("new-passphrase").or(""), one.is_given("new-passphrase"), "", one.value("comment").or(""), one.is_given("comment"), one.integer("rounds").or(16), one.is_flag_set("quiet"), "");
+                } else if (word == "public") {
+                    code = run_keygen("public", "ed25519", one.value("file").or(""), "", false, one.value("passphrase").or(""), "", false, 16, false, "");
+                } else if (word == "fingerprint") {
+                    code = run_keygen("fingerprint", "ed25519", one.value("file").or(""), "", false, "", "", false, 16, false, "");
+                } else if (word == "remove") {
+                    code = run_keygen("remove", "ed25519", one.value("file").or(""), "", false, "", "", false, 16, false, one.positional("host"));
+                } else if (word == "find") {
+                    code = run_keygen("find", "ed25519", one.value("file").or(""), "", false, "", "", false, 16, false, one.positional("host"));
+                } else if (word == "hash") {
+                    code = run_keygen("hash", "ed25519", one.value("file").or(""), "", false, "", "", false, 16, false, "");
+                } else {
+                    code = run_keygen("passphrase", "ed25519", one.value("file").or(""), one.value("new-passphrase").or(""), one.is_given("new-passphrase"), one.value("old-passphrase").or(""), one.value("comment").or(""), one.is_given("comment"), one.integer("rounds").or(16), false, "");
+                }
+                if (code != 0 && status == 0) {
+                    status = code;
+                }
+            }
+            return status;
+        }
+    }
+}
+
+int start_legacy(List<str> argv) {
     List<str> arguments = [];
     if (argv.size() > 1) {
         arguments = argv.slice(1, argv.size());
@@ -319,6 +445,11 @@ pub int start(List<str> argv) {
         }
         index = index + 1;
     }
+    return run_keygen(mode, key_type, file, new_passphrase, has_new_passphrase, old_passphrase, comment, has_comment, rounds, is_quiet, host);
+}
+
+// One job, whichever grammar asked for it.
+int run_keygen(str mode, str key_type, str file, str new_passphrase, bool has_new_passphrase, str old_passphrase, str comment, bool has_comment, int rounds, bool is_quiet, str host) {
     if (mode == "remove") {
         return run_remove(host, file);
     }
@@ -461,7 +592,7 @@ Result<str, str> known_hosts_path(str file) {
     }
     str home = sshconnect.home_directory();
     if (home == "") {
-        return Result<str, str>.Err("HOME is not set; name the file with -f");
+        return Result<str, str>.Err("HOME is not set; name the file with --file");
     }
     return Result<str, str>.Ok(home + "/.ssh/known_hosts");
 }
@@ -598,7 +729,7 @@ int run_hash(str file) {
 
 int run_change_passphrase(str path, str old_passphrase, str new_text, bool has_new, str comment, bool has_comment, int rounds) {
     if (path == "") {
-        fail_line("HOME is not set; name the file with -f");
+        fail_line("HOME is not set; name the file with --file");
         return 1;
     }
     match (load_private(path, old_passphrase)) {
@@ -688,7 +819,7 @@ int run_remove(str host, str file) {
     if (path == "") {
         str home = sshconnect.home_directory();
         if (home == "") {
-            fail_line("HOME is not set; name the file with -f");
+            fail_line("HOME is not set; name the file with --file");
             return 1;
         }
         path = home + "/.ssh/known_hosts";
@@ -762,7 +893,7 @@ int run_generate(str key_type, str file, str passphrase_text, bool has_passphras
     if (path == "") {
         path = default_key_path();
         if (path == "") {
-            fail_line("HOME is not set; name the file with -f");
+            fail_line("HOME is not set; name the file with --file");
             return 1;
         }
     }
@@ -801,7 +932,7 @@ int run_generate(str key_type, str file, str passphrase_text, bool has_passphras
                 }
                 // no terminal and no -N: an unprotected key, as `-N ""` says
                 // explicitly; refuse to guess
-                fail_line("no passphrase given and no terminal to ask on: pass -N \"\" for an unprotected key");
+                fail_line("no passphrase given and no terminal to ask on: pass --new-passphrase= for an unprotected key");
                 return 1;
             }
         }

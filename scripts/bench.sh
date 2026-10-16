@@ -43,7 +43,7 @@ for dir in bench/*/; do
     name=$(basename "$dir")
     [ -e "$dir/$name.$LANG_EXT" ] || continue
 
-    "$LANGC" --emit-c "$dir/$name.$LANG_EXT" -o "$WORK/$name.c" || continue
+    "$LANGC" -emit-c "$dir/$name.$LANG_EXT" --out "$WORK/$name.c" || continue
     gcc -O2 -ffp-contract=off -I runtime "$WORK/$name.c" \
         runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" \
         -lpthread -o "$WORK/$name.ours" || continue

@@ -25,8 +25,8 @@ LANGC=./target/debug/m31c
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
-"$LANGC" fmt --check -r apps/m31ssh || { echo "FAILED: fmt"; exit 1; }
-"$LANGC" --emit-c apps/m31ssh/m31ssh.m31 -o "$WORK/m31ssh.c" 2>"$WORK/diag" || { cat "$WORK/diag"; exit 1; }
+"$LANGC" -fmt --check --recursive apps/m31ssh || { echo "FAILED: fmt"; exit 1; }
+"$LANGC" -emit-c apps/m31ssh/m31ssh.m31 --out "$WORK/m31ssh.c" 2>"$WORK/diag" || { cat "$WORK/diag"; exit 1; }
 cc -O2 -w -I runtime -pthread -o "$WORK/m31ssh" "$WORK/m31ssh.c" \
     runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" || exit 1
 
