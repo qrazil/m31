@@ -83,16 +83,28 @@ pub type Cipher {
     bytes first_plain;
 }
 
-// `data` XORed with the AES-CTR keystream, advancing the counter block.
+// `data` XORed with the AES-CTR keystream, advancing the counter block. The
+// leftover keystream of a partly used block goes first, whole blocks then go
+// through `aes.Cipher.ctr_xor_at` (a hardware kernel where the CPU has one),
+// and only a final partial block is done octet by octet.
 bytes Cipher.ctr_xor(bytes data) {
-    bytes out = [];
+    bytes out = [0; data.size()];
     int taken = 0;
+    while (taken < data.size() && keystream.size() > 0) {
+        out[taken] = data[taken] ^ keystream[0];
+        keystream.drop_front(1);
+        taken = taken + 1;
+    }
+    int whole = (data.size() - taken) / 16 * 16;
+    if (whole > 0 && aes_schedule.ctr_xor_at(counter, data, taken, whole, out)) {
+        taken = taken + whole;
+    }
     while (taken < data.size()) {
         if (keystream.size() == 0) {
             keystream = aes_schedule.encrypt_block(counter);
             increment(counter, 16);
         }
-        out.push(data[taken] ^ keystream[0]);
+        out[taken] = data[taken] ^ keystream[0];
         keystream.drop_front(1);
         taken = taken + 1;
     }
@@ -333,24 +345,7 @@ void increment(bytes counter, int width) {
 // --- ChaCha20-Poly1305 (PROTOCOL.chacha20poly1305) ------------------------------
 
 bytes chacha_xor(bytes chacha_key, int block_counter_start, bytes seq8, bytes data) {
-    bytes out = [];
-    int block_start = 0;
-    int block_counter = block_counter_start;
-    while (block_start < data.size()) {
-        bytes stream = chacha20poly1305.openssh_block(chacha_key, block_counter, seq8);
-        int end = block_start + 64;
-        if (end > data.size()) {
-            end = data.size();
-        }
-        int index = block_start;
-        while (index < end) {
-            out.push(data[index] ^ stream[index - block_start]);
-            index = index + 1;
-        }
-        block_start = end;
-        block_counter = block_counter + 1;
-    }
-    return out;
+    return chacha20poly1305.openssh_encrypt(chacha_key, block_counter_start, seq8, data);
 }
 
 int padding_for(int covered, int block) {

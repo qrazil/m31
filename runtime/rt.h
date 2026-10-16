@@ -598,6 +598,9 @@ int64_t rt_crypto_poly1305_finish(Obj *st, Obj *pad, Obj *out);
 int64_t rt_crypto_sha256(Obj *state, Obj *data, int64_t off, int64_t n);
 int64_t rt_crypto_sha512(Obj *state, Obj *data, int64_t off, int64_t n);
 int64_t rt_crypto_sha1(Obj *state, Obj *data, int64_t off, int64_t n);
+int64_t rt_crypto_fe_mul(Obj *out, Obj *f, Obj *g);
+int64_t rt_crypto_fe_add(Obj *out, Obj *f, Obj *g);
+int64_t rt_crypto_fe_sub(Obj *out, Obj *f, Obj *g);
 
 void    rt_list_push(Obj *o, int64_t v);
 Obj    *rt_seq_clone(Obj *o);         /* shallow copy of an array or list */

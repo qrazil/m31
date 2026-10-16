@@ -24,7 +24,7 @@ EDGE = [0, 1, 2, 15, 16, 17, 31, 32, 33, 55, 56, 57, 63, 64, 65, 111, 112, 113, 
 def cases():
     out, seed = [], 100
     for n in EDGE:
-        for op in ("sha1", "sha256", "sha384", "sha512", "poly", "chacha", "hkdf256_"):
+        for op in ("sha1", "sha256", "sha384", "sha512", "sha1x", "sha256x", "sha512x", "poly", "chacha", "hkdf256_"):
             seed += 1
             if op == "hkdf256_":
                 if n <= 255 * 32:
@@ -61,8 +61,8 @@ def want(lines):
             continue
         op, a, b, seed = f[0], int(f[1]), int(f[2]), int(f[3])
         key, nonce = gen(32, seed + 1), gen(12, seed + 2)
-        if op in ("sha1", "sha256", "sha384", "sha512"):
-            r = hashlib.new(op, gen(a, seed)).hexdigest()
+        if op in ("sha1", "sha256", "sha384", "sha512", "sha1x", "sha256x", "sha512x"):
+            r = hashlib.new(op.rstrip("x"), gen(a, seed)).hexdigest()
         elif op == "hmac256":
             r = hmac.new(gen(a, seed + 3), gen(b, seed), "sha256").hexdigest()
         elif op == "hkdf256":

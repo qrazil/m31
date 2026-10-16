@@ -45,6 +45,21 @@ pub bytes x25519(bytes scalar, bytes u_coordinate) {  // RFC 7748: u
     // object, the first swap would corrupt `input_x` through it.
     Array<int> point_x = clone(input_x);  // RFC 7748: x_3
     Array<int> point_z = field25519.one();  // RFC 7748: z_3
+    // Scratch elements for one ladder step, allocated once: the `*_into`
+    // forms write into an array the caller owns (the output may be one of the
+    // inputs), so the 255 steps allocate nothing -- the allocations were most
+    // of a field operation's cost once the multiply itself was assembly.
+    Array<int> accumulator_sum = field25519.zero();  // RFC 7748: A
+    Array<int> aaa = field25519.zero();
+    Array<int> accumulator_difference = field25519.zero();  // RFC 7748: B
+    Array<int> bbb = field25519.zero();
+    Array<int> squares_difference = field25519.zero();  // RFC 7748: E
+    Array<int> point_sum = field25519.zero();  // RFC 7748: C
+    Array<int> point_difference = field25519.zero();  // RFC 7748: D
+    Array<int> cross_first = field25519.zero();  // RFC 7748: DA
+    Array<int> cross_second = field25519.zero();  // RFC 7748: CB
+    Array<int> scratch = field25519.zero();
+    Array<int> a24 = field25519.small(A24);
     int swap = 0;
     int bit_position = 254;  // RFC 7748: t
     while (bit_position >= 0) {
@@ -55,22 +70,24 @@ pub bytes x25519(bytes scalar, bytes u_coordinate) {  // RFC 7748: u
         swap = scalar_bit;
         // RFC 7748 §5's ladder step, unchanged from the RFC's own naming so
         // it can be checked against the text line by line.
-        Array<int> accumulator_sum = field25519.add(accumulator_x, accumulator_z);  // RFC 7748: A
-        Array<int> aaa = field25519.square(accumulator_sum);
-        Array<int> accumulator_difference = field25519.sub(accumulator_x, accumulator_z);  // RFC 7748: B
-        Array<int> bbb = field25519.square(accumulator_difference);
-        Array<int> squares_difference = field25519.sub(aaa, bbb);  // RFC 7748: E
-        Array<int> point_sum = field25519.add(point_x, point_z);  // RFC 7748: C
-        Array<int> point_difference = field25519.sub(point_x, point_z);  // RFC 7748: D
-        Array<int> cross_first = field25519.mul(point_difference, accumulator_sum);  // RFC 7748: DA
-        Array<int> cross_second = field25519.mul(point_sum, accumulator_difference);  // RFC 7748: CB
-        Array<int> daplus = field25519.add(cross_first, cross_second);
-        Array<int> daminus = field25519.sub(cross_first, cross_second);
-        point_x = field25519.square(daplus);
-        point_z = field25519.mul(input_x, field25519.square(daminus));
-        accumulator_x = field25519.mul(aaa, bbb);
-        Array<int> a24e = field25519.mul(field25519.small(A24), squares_difference);
-        accumulator_z = field25519.mul(squares_difference, field25519.add(aaa, a24e));
+        field25519.add_into(accumulator_sum, accumulator_x, accumulator_z);
+        field25519.square_into(aaa, accumulator_sum);
+        field25519.sub_into(accumulator_difference, accumulator_x, accumulator_z);
+        field25519.square_into(bbb, accumulator_difference);
+        field25519.sub_into(squares_difference, aaa, bbb);
+        field25519.add_into(point_sum, point_x, point_z);
+        field25519.sub_into(point_difference, point_x, point_z);
+        field25519.mul_into(cross_first, point_difference, accumulator_sum);
+        field25519.mul_into(cross_second, point_sum, accumulator_difference);
+        field25519.add_into(scratch, cross_first, cross_second);
+        field25519.square_into(point_x, scratch);
+        field25519.sub_into(scratch, cross_first, cross_second);
+        field25519.square_into(scratch, scratch);
+        field25519.mul_into(point_z, input_x, scratch);
+        field25519.mul_into(accumulator_x, aaa, bbb);
+        field25519.mul_into(scratch, a24, squares_difference);
+        field25519.add_into(scratch, aaa, scratch);
+        field25519.mul_into(accumulator_z, squares_difference, scratch);
         bit_position = bit_position - 1;
     }
     field25519.cswap(swap, accumulator_x, point_x);

@@ -1180,6 +1180,530 @@ CRYPTO_FUNC(rt_k_sha1)
 9:  ret
 CRYPTO_END(rt_k_sha1)
 
+
+/* ------------------------------------------------------------------------
+ * GF(2^255 - 19) in ten signed limbs (radix 2^25.5): lib/crypto/field25519.m31's
+ * multiply, add and subtract, instruction for instruction (ref10's fe_mul and
+ * carry chain), so the kernel and the m31 fallback produce identical limbs.
+ * Elements are `Array<int>` data: ten little-endian int64 limbs. imulq keeps
+ * only the low 64 bits, which is exact because the bounds in field25519.m31
+ * keep every column under 2^62. Straight-line, no branch, no table.
+ * ------------------------------------------------------------------------ */
+
+/* The carry chain over h0..h9 (r8-r15, rbx, rbp), then the ten stores to rdi. */
+.macro FE_CARRY_STORE
+    leaq 33554432(%r8), %rcx
+    sarq $26, %rcx
+    addq %rcx, %r9
+    shlq $26, %rcx
+    subq %rcx, %r8
+    leaq 33554432(%r12), %rcx
+    sarq $26, %rcx
+    addq %rcx, %r13
+    shlq $26, %rcx
+    subq %rcx, %r12
+    leaq 16777216(%r9), %rcx
+    sarq $25, %rcx
+    addq %rcx, %r10
+    shlq $25, %rcx
+    subq %rcx, %r9
+    leaq 16777216(%r13), %rcx
+    sarq $25, %rcx
+    addq %rcx, %r14
+    shlq $25, %rcx
+    subq %rcx, %r13
+    leaq 33554432(%r10), %rcx
+    sarq $26, %rcx
+    addq %rcx, %r11
+    shlq $26, %rcx
+    subq %rcx, %r10
+    leaq 33554432(%r14), %rcx
+    sarq $26, %rcx
+    addq %rcx, %r15
+    shlq $26, %rcx
+    subq %rcx, %r14
+    leaq 16777216(%r11), %rcx
+    sarq $25, %rcx
+    addq %rcx, %r12
+    shlq $25, %rcx
+    subq %rcx, %r11
+    leaq 16777216(%r15), %rcx
+    sarq $25, %rcx
+    addq %rcx, %rbx
+    shlq $25, %rcx
+    subq %rcx, %r15
+    leaq 33554432(%r12), %rcx
+    sarq $26, %rcx
+    addq %rcx, %r13
+    shlq $26, %rcx
+    subq %rcx, %r12
+    leaq 33554432(%rbx), %rcx
+    sarq $26, %rcx
+    addq %rcx, %rbp
+    shlq $26, %rcx
+    subq %rcx, %rbx
+    leaq 16777216(%rbp), %rcx
+    sarq $25, %rcx
+    leaq (%rcx,%rcx,8), %rax
+    leaq (%rcx,%rax,2), %rax
+    addq %rax, %r8
+    shlq $25, %rcx
+    subq %rcx, %rbp
+    leaq 33554432(%r8), %rcx
+    sarq $26, %rcx
+    addq %rcx, %r9
+    shlq $26, %rcx
+    subq %rcx, %r8
+    movq %r8, 0(%rdi)
+    movq %r9, 8(%rdi)
+    movq %r10, 16(%rdi)
+    movq %r11, 24(%rdi)
+    movq %r12, 32(%rdi)
+    movq %r13, 40(%rdi)
+    movq %r14, 48(%rdi)
+    movq %r15, 56(%rdi)
+    movq %rbx, 64(%rdi)
+    movq %rbp, 72(%rdi)
+.endm
+
+/* void rt_k_fe_mul(int64_t *out, const int64_t *f, const int64_t *g)
+ *   rdi out, rsi f, rdx g (out may alias either). */
+CRYPTO_FUNC(rt_k_fe_mul)
+    pushq %rbx
+    pushq %rbp
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    subq $120, %rsp
+    movq 8(%rdx), %rax
+    leaq (%rax,%rax,8), %rcx
+    leaq (%rax,%rcx,2), %rcx
+    movq %rcx, 0(%rsp)
+    movq 16(%rdx), %rax
+    leaq (%rax,%rax,8), %rcx
+    leaq (%rax,%rcx,2), %rcx
+    movq %rcx, 8(%rsp)
+    movq 24(%rdx), %rax
+    leaq (%rax,%rax,8), %rcx
+    leaq (%rax,%rcx,2), %rcx
+    movq %rcx, 16(%rsp)
+    movq 32(%rdx), %rax
+    leaq (%rax,%rax,8), %rcx
+    leaq (%rax,%rcx,2), %rcx
+    movq %rcx, 24(%rsp)
+    movq 40(%rdx), %rax
+    leaq (%rax,%rax,8), %rcx
+    leaq (%rax,%rcx,2), %rcx
+    movq %rcx, 32(%rsp)
+    movq 48(%rdx), %rax
+    leaq (%rax,%rax,8), %rcx
+    leaq (%rax,%rcx,2), %rcx
+    movq %rcx, 40(%rsp)
+    movq 56(%rdx), %rax
+    leaq (%rax,%rax,8), %rcx
+    leaq (%rax,%rcx,2), %rcx
+    movq %rcx, 48(%rsp)
+    movq 64(%rdx), %rax
+    leaq (%rax,%rax,8), %rcx
+    leaq (%rax,%rcx,2), %rcx
+    movq %rcx, 56(%rsp)
+    movq 72(%rdx), %rax
+    leaq (%rax,%rax,8), %rcx
+    leaq (%rax,%rcx,2), %rcx
+    movq %rcx, 64(%rsp)
+    movq 8(%rsi), %rax
+    addq %rax, %rax
+    movq %rax, 72(%rsp)
+    movq 24(%rsi), %rax
+    addq %rax, %rax
+    movq %rax, 80(%rsp)
+    movq 40(%rsi), %rax
+    addq %rax, %rax
+    movq %rax, 88(%rsp)
+    movq 56(%rsi), %rax
+    addq %rax, %rax
+    movq %rax, 96(%rsp)
+    movq 72(%rsi), %rax
+    addq %rax, %rax
+    movq %rax, 104(%rsp)
+    movq 0(%rsi), %r8
+    imulq 0(%rdx), %r8
+    movq 72(%rsp), %rax
+    imulq 64(%rsp), %rax
+    addq %rax, %r8
+    movq 16(%rsi), %rax
+    imulq 56(%rsp), %rax
+    addq %rax, %r8
+    movq 80(%rsp), %rax
+    imulq 48(%rsp), %rax
+    addq %rax, %r8
+    movq 32(%rsi), %rax
+    imulq 40(%rsp), %rax
+    addq %rax, %r8
+    movq 88(%rsp), %rax
+    imulq 32(%rsp), %rax
+    addq %rax, %r8
+    movq 48(%rsi), %rax
+    imulq 24(%rsp), %rax
+    addq %rax, %r8
+    movq 96(%rsp), %rax
+    imulq 16(%rsp), %rax
+    addq %rax, %r8
+    movq 64(%rsi), %rax
+    imulq 8(%rsp), %rax
+    addq %rax, %r8
+    movq 104(%rsp), %rax
+    imulq 0(%rsp), %rax
+    addq %rax, %r8
+    movq 0(%rsi), %r9
+    imulq 8(%rdx), %r9
+    movq 8(%rsi), %rax
+    imulq 0(%rdx), %rax
+    addq %rax, %r9
+    movq 16(%rsi), %rax
+    imulq 64(%rsp), %rax
+    addq %rax, %r9
+    movq 24(%rsi), %rax
+    imulq 56(%rsp), %rax
+    addq %rax, %r9
+    movq 32(%rsi), %rax
+    imulq 48(%rsp), %rax
+    addq %rax, %r9
+    movq 40(%rsi), %rax
+    imulq 40(%rsp), %rax
+    addq %rax, %r9
+    movq 48(%rsi), %rax
+    imulq 32(%rsp), %rax
+    addq %rax, %r9
+    movq 56(%rsi), %rax
+    imulq 24(%rsp), %rax
+    addq %rax, %r9
+    movq 64(%rsi), %rax
+    imulq 16(%rsp), %rax
+    addq %rax, %r9
+    movq 72(%rsi), %rax
+    imulq 8(%rsp), %rax
+    addq %rax, %r9
+    movq 0(%rsi), %r10
+    imulq 16(%rdx), %r10
+    movq 72(%rsp), %rax
+    imulq 8(%rdx), %rax
+    addq %rax, %r10
+    movq 16(%rsi), %rax
+    imulq 0(%rdx), %rax
+    addq %rax, %r10
+    movq 80(%rsp), %rax
+    imulq 64(%rsp), %rax
+    addq %rax, %r10
+    movq 32(%rsi), %rax
+    imulq 56(%rsp), %rax
+    addq %rax, %r10
+    movq 88(%rsp), %rax
+    imulq 48(%rsp), %rax
+    addq %rax, %r10
+    movq 48(%rsi), %rax
+    imulq 40(%rsp), %rax
+    addq %rax, %r10
+    movq 96(%rsp), %rax
+    imulq 32(%rsp), %rax
+    addq %rax, %r10
+    movq 64(%rsi), %rax
+    imulq 24(%rsp), %rax
+    addq %rax, %r10
+    movq 104(%rsp), %rax
+    imulq 16(%rsp), %rax
+    addq %rax, %r10
+    movq 0(%rsi), %r11
+    imulq 24(%rdx), %r11
+    movq 8(%rsi), %rax
+    imulq 16(%rdx), %rax
+    addq %rax, %r11
+    movq 16(%rsi), %rax
+    imulq 8(%rdx), %rax
+    addq %rax, %r11
+    movq 24(%rsi), %rax
+    imulq 0(%rdx), %rax
+    addq %rax, %r11
+    movq 32(%rsi), %rax
+    imulq 64(%rsp), %rax
+    addq %rax, %r11
+    movq 40(%rsi), %rax
+    imulq 56(%rsp), %rax
+    addq %rax, %r11
+    movq 48(%rsi), %rax
+    imulq 48(%rsp), %rax
+    addq %rax, %r11
+    movq 56(%rsi), %rax
+    imulq 40(%rsp), %rax
+    addq %rax, %r11
+    movq 64(%rsi), %rax
+    imulq 32(%rsp), %rax
+    addq %rax, %r11
+    movq 72(%rsi), %rax
+    imulq 24(%rsp), %rax
+    addq %rax, %r11
+    movq 0(%rsi), %r12
+    imulq 32(%rdx), %r12
+    movq 72(%rsp), %rax
+    imulq 24(%rdx), %rax
+    addq %rax, %r12
+    movq 16(%rsi), %rax
+    imulq 16(%rdx), %rax
+    addq %rax, %r12
+    movq 80(%rsp), %rax
+    imulq 8(%rdx), %rax
+    addq %rax, %r12
+    movq 32(%rsi), %rax
+    imulq 0(%rdx), %rax
+    addq %rax, %r12
+    movq 88(%rsp), %rax
+    imulq 64(%rsp), %rax
+    addq %rax, %r12
+    movq 48(%rsi), %rax
+    imulq 56(%rsp), %rax
+    addq %rax, %r12
+    movq 96(%rsp), %rax
+    imulq 48(%rsp), %rax
+    addq %rax, %r12
+    movq 64(%rsi), %rax
+    imulq 40(%rsp), %rax
+    addq %rax, %r12
+    movq 104(%rsp), %rax
+    imulq 32(%rsp), %rax
+    addq %rax, %r12
+    movq 0(%rsi), %r13
+    imulq 40(%rdx), %r13
+    movq 8(%rsi), %rax
+    imulq 32(%rdx), %rax
+    addq %rax, %r13
+    movq 16(%rsi), %rax
+    imulq 24(%rdx), %rax
+    addq %rax, %r13
+    movq 24(%rsi), %rax
+    imulq 16(%rdx), %rax
+    addq %rax, %r13
+    movq 32(%rsi), %rax
+    imulq 8(%rdx), %rax
+    addq %rax, %r13
+    movq 40(%rsi), %rax
+    imulq 0(%rdx), %rax
+    addq %rax, %r13
+    movq 48(%rsi), %rax
+    imulq 64(%rsp), %rax
+    addq %rax, %r13
+    movq 56(%rsi), %rax
+    imulq 56(%rsp), %rax
+    addq %rax, %r13
+    movq 64(%rsi), %rax
+    imulq 48(%rsp), %rax
+    addq %rax, %r13
+    movq 72(%rsi), %rax
+    imulq 40(%rsp), %rax
+    addq %rax, %r13
+    movq 0(%rsi), %r14
+    imulq 48(%rdx), %r14
+    movq 72(%rsp), %rax
+    imulq 40(%rdx), %rax
+    addq %rax, %r14
+    movq 16(%rsi), %rax
+    imulq 32(%rdx), %rax
+    addq %rax, %r14
+    movq 80(%rsp), %rax
+    imulq 24(%rdx), %rax
+    addq %rax, %r14
+    movq 32(%rsi), %rax
+    imulq 16(%rdx), %rax
+    addq %rax, %r14
+    movq 88(%rsp), %rax
+    imulq 8(%rdx), %rax
+    addq %rax, %r14
+    movq 48(%rsi), %rax
+    imulq 0(%rdx), %rax
+    addq %rax, %r14
+    movq 96(%rsp), %rax
+    imulq 64(%rsp), %rax
+    addq %rax, %r14
+    movq 64(%rsi), %rax
+    imulq 56(%rsp), %rax
+    addq %rax, %r14
+    movq 104(%rsp), %rax
+    imulq 48(%rsp), %rax
+    addq %rax, %r14
+    movq 0(%rsi), %r15
+    imulq 56(%rdx), %r15
+    movq 8(%rsi), %rax
+    imulq 48(%rdx), %rax
+    addq %rax, %r15
+    movq 16(%rsi), %rax
+    imulq 40(%rdx), %rax
+    addq %rax, %r15
+    movq 24(%rsi), %rax
+    imulq 32(%rdx), %rax
+    addq %rax, %r15
+    movq 32(%rsi), %rax
+    imulq 24(%rdx), %rax
+    addq %rax, %r15
+    movq 40(%rsi), %rax
+    imulq 16(%rdx), %rax
+    addq %rax, %r15
+    movq 48(%rsi), %rax
+    imulq 8(%rdx), %rax
+    addq %rax, %r15
+    movq 56(%rsi), %rax
+    imulq 0(%rdx), %rax
+    addq %rax, %r15
+    movq 64(%rsi), %rax
+    imulq 64(%rsp), %rax
+    addq %rax, %r15
+    movq 72(%rsi), %rax
+    imulq 56(%rsp), %rax
+    addq %rax, %r15
+    movq 0(%rsi), %rbx
+    imulq 64(%rdx), %rbx
+    movq 72(%rsp), %rax
+    imulq 56(%rdx), %rax
+    addq %rax, %rbx
+    movq 16(%rsi), %rax
+    imulq 48(%rdx), %rax
+    addq %rax, %rbx
+    movq 80(%rsp), %rax
+    imulq 40(%rdx), %rax
+    addq %rax, %rbx
+    movq 32(%rsi), %rax
+    imulq 32(%rdx), %rax
+    addq %rax, %rbx
+    movq 88(%rsp), %rax
+    imulq 24(%rdx), %rax
+    addq %rax, %rbx
+    movq 48(%rsi), %rax
+    imulq 16(%rdx), %rax
+    addq %rax, %rbx
+    movq 96(%rsp), %rax
+    imulq 8(%rdx), %rax
+    addq %rax, %rbx
+    movq 64(%rsi), %rax
+    imulq 0(%rdx), %rax
+    addq %rax, %rbx
+    movq 104(%rsp), %rax
+    imulq 64(%rsp), %rax
+    addq %rax, %rbx
+    movq 0(%rsi), %rbp
+    imulq 72(%rdx), %rbp
+    movq 8(%rsi), %rax
+    imulq 64(%rdx), %rax
+    addq %rax, %rbp
+    movq 16(%rsi), %rax
+    imulq 56(%rdx), %rax
+    addq %rax, %rbp
+    movq 24(%rsi), %rax
+    imulq 48(%rdx), %rax
+    addq %rax, %rbp
+    movq 32(%rsi), %rax
+    imulq 40(%rdx), %rax
+    addq %rax, %rbp
+    movq 40(%rsi), %rax
+    imulq 32(%rdx), %rax
+    addq %rax, %rbp
+    movq 48(%rsi), %rax
+    imulq 24(%rdx), %rax
+    addq %rax, %rbp
+    movq 56(%rsi), %rax
+    imulq 16(%rdx), %rax
+    addq %rax, %rbp
+    movq 64(%rsi), %rax
+    imulq 8(%rdx), %rax
+    addq %rax, %rbp
+    movq 72(%rsi), %rax
+    imulq 0(%rdx), %rax
+    addq %rax, %rbp
+    FE_CARRY_STORE
+    addq $120, %rsp
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %rbp
+    popq %rbx
+    ret
+CRYPTO_END(rt_k_fe_mul)
+
+/* void rt_k_fe_add(int64_t *out, const int64_t *f, const int64_t *g)
+ * void rt_k_fe_sub(int64_t *out, const int64_t *f, const int64_t *g) */
+CRYPTO_FUNC(rt_k_fe_add)
+    pushq %rbx
+    pushq %rbp
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    movq 0(%rsi), %r8
+    addq 0(%rdx), %r8
+    movq 8(%rsi), %r9
+    addq 8(%rdx), %r9
+    movq 16(%rsi), %r10
+    addq 16(%rdx), %r10
+    movq 24(%rsi), %r11
+    addq 24(%rdx), %r11
+    movq 32(%rsi), %r12
+    addq 32(%rdx), %r12
+    movq 40(%rsi), %r13
+    addq 40(%rdx), %r13
+    movq 48(%rsi), %r14
+    addq 48(%rdx), %r14
+    movq 56(%rsi), %r15
+    addq 56(%rdx), %r15
+    movq 64(%rsi), %rbx
+    addq 64(%rdx), %rbx
+    movq 72(%rsi), %rbp
+    addq 72(%rdx), %rbp
+    FE_CARRY_STORE
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %rbp
+    popq %rbx
+    ret
+CRYPTO_END(rt_k_fe_add)
+
+CRYPTO_FUNC(rt_k_fe_sub)
+    pushq %rbx
+    pushq %rbp
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    movq 0(%rsi), %r8
+    subq 0(%rdx), %r8
+    movq 8(%rsi), %r9
+    subq 8(%rdx), %r9
+    movq 16(%rsi), %r10
+    subq 16(%rdx), %r10
+    movq 24(%rsi), %r11
+    subq 24(%rdx), %r11
+    movq 32(%rsi), %r12
+    subq 32(%rdx), %r12
+    movq 40(%rsi), %r13
+    subq 40(%rdx), %r13
+    movq 48(%rsi), %r14
+    subq 48(%rdx), %r14
+    movq 56(%rsi), %r15
+    subq 56(%rdx), %r15
+    movq 64(%rsi), %rbx
+    subq 64(%rdx), %rbx
+    movq 72(%rsi), %rbp
+    subq 72(%rdx), %rbp
+    FE_CARRY_STORE
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %rbp
+    popq %rbx
+    ret
+CRYPTO_END(rt_k_fe_sub)
+
 #if !defined(__APPLE__)
     .section .note.GNU-stack,"",@progbits
 #endif

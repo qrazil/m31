@@ -132,18 +132,24 @@ pub bytes Cipher.encrypt_blocks(bytes blocks) {
 /// `out` may be `data` itself. The increment is over all 128 bits, so a
 /// caller whose counter is only the low 32 bits (GCM) must not wrap it.
 pub bool Cipher.ctr_xor(bytes counter, bytes data, int count, bytes out) {
+    return ctr_xor_at(counter, data, 0, count, out);
+}
+
+/// `ctr_xor` for `data[off .. off + count)` into `out[off .. off + count)`:
+/// the same range of both, so a caller can work through a buffer in pieces.
+pub bool Cipher.ctr_xor_at(bytes counter, bytes data, int off, int count, bytes out) {
     if (count <= 0 || (__crypto_features() & 1) == 0 || counter.size() != 16) {
         return false;
     }
     int whole = count / 16;
-    if (whole > 0 && __crypto_aes_ctr(schedule, rounds, counter, data, out, 0, whole) != 0) {
+    if (whole > 0 && __crypto_aes_ctr(schedule, rounds, counter, data, out, off, whole) != 0) {
         return false;
     }
     int rest = count - whole * 16;
     if (rest > 0) {
         bytes stream = encrypt_block(counter);
         for (int i in 0 .. rest) {
-            out[whole * 16 + i] = data[whole * 16 + i] ^ stream[i];
+            out[off + whole * 16 + i] = data[off + whole * 16 + i] ^ stream[i];
         }
         int index = 15;
         while (index >= 0) {

@@ -136,6 +136,58 @@ def cases():
     return out
 
 
+P25519 = 2**255 - 19
+E10 = [0, 26, 51, 77, 102, 128, 153, 179, 204, 230]
+
+
+def fe_value(limbs):
+    return sum(l << E10[i] for i, l in enumerate(limbs))
+
+
+def fe_carry(h):
+    h = list(h)
+    for i, w, nxt in ((0, 26, 1), (4, 26, 5), (1, 25, 2), (5, 25, 6), (2, 26, 3), (6, 26, 7), (3, 25, 4), (7, 25, 8),
+                      (4, 26, 5), (8, 26, 9), (9, 25, 0), (0, 26, 1)):
+        c = (h[i] + (1 << (w - 1))) >> w
+        h[nxt] += c * (19 if nxt == 0 else 1)
+        h[i] -= c << w
+    return h
+
+
+def fe_mul_ref(f, g):
+    h = [0] * 10
+    for i in range(10):
+        for j in range(10):
+            k, coef = i + j, 1
+            if i % 2 and j % 2:
+                coef *= 2
+            if k >= 10:
+                k -= 10
+                coef *= 19
+            h[k] += coef * f[i] * g[j]
+    return fe_carry(h)
+
+
+def fe_limbs():
+    """Random carried-range limbs: even limbs up to 2^26, odd up to 2^25 in magnitude."""
+    return [rnd.randint(-(1 << (26 - i % 2)), 1 << (26 - i % 2)) for i in range(10)]
+
+
+def fe_cases():
+    out = []
+    for _ in range(300):
+        f, g = fe_limbs(), fe_limbs()
+        for name, exp_val, exp in (("fe_mul", f and fe_value(f) * fe_value(g), fe_mul_ref(f, g)),
+                                   ("fe_add", fe_value(f) + fe_value(g), fe_carry([a + b for a, b in zip(f, g)])),
+                                   ("fe_sub", fe_value(f) - fe_value(g), fe_carry([a - b for a, b in zip(f, g)]))):
+            assert (fe_value(exp) - exp_val) % P25519 == 0, name       # the reference itself is right
+            assert all(abs(x) <= 1 << 26 for x in exp), name
+            out.append((name, dict(f=f, g=g), exp))
+    for f in ([1 << 26] * 10, [-(1 << 26)] * 10, [0] * 10):             # the extremes
+        out.append(("fe_mul", dict(f=f, g=f), fe_mul_ref(f, f)))
+    return out
+
+
 def digest_of(name, state):
     if name == "sha1":
         return b"".join(struct.pack(">I", w) for w in struct.unpack("<5I", state))
@@ -195,6 +247,20 @@ def run_x86(only=None):
             if got != exp:
                 failures += 1
                 print("FAIL", name, len(a.get("data", b"")))
+        for name, a, exp in fe_cases():
+            if only and "fe" not in only:
+                continue
+            arr = lambda v: (ctypes.c_int64 * 10)(*v)
+            o, f, g = arr([0] * 10), arr(a["f"]), arr(a["g"])
+            getattr(L, "rt_k_" + name)(o, f, g)
+            if list(o) != exp:
+                failures += 1
+                print("FAIL", name)
+            # aliasing: out == f
+            getattr(L, "rt_k_" + name)(f, f, g)
+            if list(f) != exp:
+                failures += 1
+                print("FAIL (alias)", name)
         print("x86_64 native kernels: %s" % ("OK" if not failures else "%d FAILED" % failures))
         return failures
     finally:
@@ -255,6 +321,9 @@ extern void rt_k_poly1305_finish(const u8 *st, const u8 *pad, u8 *out);
 extern void rt_k_sha256(u8 *state, const u8 *data, u64 n);
 extern void rt_k_sha512(u8 *state, const u8 *data, u64 n);
 extern void rt_k_sha1(u8 *state, const u8 *data, u64 n);
+extern void rt_k_fe_mul(long *out, const long *f, const long *g);
+extern void rt_k_fe_add(long *out, const long *f, const long *g);
+extern void rt_k_fe_sub(long *out, const long *f, const long *g);
 void *memcpy(void *d, const void *s, u64 n) { u8 *a = d; const u8 *b = s; while (n--) *a++ = *b++; return d; }
 void *memset(void *d, int c, u64 n) { u8 *a = d; while (n--) *a++ = (u8)c; return d; }
 static int same(const u8 *a, const u8 *b, u64 n) { while (n--) if (*a++ != *b++) return 0; return 1; }
@@ -334,6 +403,10 @@ def run_aarch64():
                            "for (int w = 0; w < %d; w++) for (int j = 0; j < %d; j++) d[w * %d + j] = tmp40[w * %d + %d - 1 - j];" % (words[1], 4 if words[0] == "u32" else 8, 4 if words[0] == "u32" else 8, 4 if words[0] == "u32" else 8, 4 if words[0] == "u32" else 8),
                            g("exp"), len(exp), nm))
             calls.append("    " + body)
+        for i, (name, a, exp) in enumerate(fe_cases()):
+            lit = lambda v: "{" + ",".join("%dL" % x for x in v) + "}"
+            src.append("static const long fe%d_f[10] = %s, fe%d_g[10] = %s, fe%d_e[10] = %s;" % (i, lit(a["f"]), i, lit(a["g"]), i, lit(exp)))
+            calls.append("    { long o[10], h[10]; for (int k = 0; k < 10; k++) h[k] = fe%d_f[k]; rt_k_%s(o, fe%d_f, fe%d_g); rt_k_%s(h, h, fe%d_g); int ok = 1; for (int k = 0; k < 10; k++) ok &= o[k] == fe%d_e[k] && h[k] == fe%d_e[k]; CHECK(ok, \"%s#%d\"); }" % (i, name, i, i, name, i, i, i, name, i))
         # tmp40 is only 40 octets; the SHA states are up to 64
         csrc = "\n".join(src).replace("tmp16[16], tmp40[40]", "tmp16[16], tmp40[64]") + "\nint cmain(void) {\n" + "\n".join(calls) + \
             '\n    say(failed ? "aarch64 kernels: FAILED (" : "aarch64 kernels: OK ("); say_num(total); say(" checks)\\n");\n    return failed ? 1 : 0;\n}\n'
@@ -356,7 +429,7 @@ def run_aarch64():
 if __name__ == "__main__":
     arch = sys.argv[1] if len(sys.argv) > 1 else "x86_64"
     if arch == "x86_64":
-        rc = run_x86({"aes_ecb", "aes_ctr", "ghash", "chacha20", "poly1305"}) + run_x86_hashes()
+        rc = run_x86({"aes_ecb", "aes_ctr", "ghash", "chacha20", "poly1305", "fe"}) + run_x86_hashes()
     else:
         rc = run_aarch64()
     sys.exit(1 if rc else 0)

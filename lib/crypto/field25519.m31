@@ -54,6 +54,16 @@
 // under its own control -- never write a branch, a comparison or an index
 // that depends on a field element -- and no more than that.
 
+// The hardware field kernels (docs/CRYPTO-ACCEL.md): `prim`s into runtime/crypto_glue.c,
+// assembly that does `mul`, `add` and `sub` below instruction for instruction
+// (ref10's multiply and carry chain), so the limbs that come back are identical
+// to the m31 code's. They answer -1, and the m31 code runs, if
+// `M31_CRYPTO_ACCEL` has switched them off. Straight-line, no table, no
+// branch: the constant-time argument above carries over unchanged.
+prim int __crypto_fe_mul(Array<int> out, Array<int> left, Array<int> right);
+prim int __crypto_fe_add(Array<int> out, Array<int> left, Array<int> right);
+prim int __crypto_fe_sub(Array<int> out, Array<int> left, Array<int> right);
+
 // --- construction and encoding ----------------------------------------------
 
 /// The additive identity.
@@ -228,7 +238,10 @@ pub bytes to_bytes(Array<int> element) {
 // --- the four operations -----------------------------------------------------
 
 /// `left + right`, carried.
-pub Array<int> add(Array<int> left, Array<int> right) {
+pub void add_into(Array<int> out, Array<int> left, Array<int> right) {
+    if (__crypto_fe_add(out, left, right) == 0) {
+        return;
+    }
     int h0 = left[0] + right[0];
     int h1 = left[1] + right[1];
     int h2 = left[2] + right[2];
@@ -275,7 +288,6 @@ pub Array<int> add(Array<int> left, Array<int> right) {
     int c11 = (h0 + 33554432) >> 26;
     h1 = h1 + c11;
     h0 = h0 - (c11 << 26);
-    Array<int> out = [0; 10];
     out[0] = h0;
     out[1] = h1;
     out[2] = h2;
@@ -286,11 +298,19 @@ pub Array<int> add(Array<int> left, Array<int> right) {
     out[7] = h7;
     out[8] = h8;
     out[9] = h9;
+}
+
+pub Array<int> add(Array<int> left, Array<int> right) {
+    Array<int> out = [0; 10];
+    add_into(out, left, right);
     return out;
 }
 
 /// `left - right`, carried.
-pub Array<int> sub(Array<int> left, Array<int> right) {
+pub void sub_into(Array<int> out, Array<int> left, Array<int> right) {
+    if (__crypto_fe_sub(out, left, right) == 0) {
+        return;
+    }
     int h0 = left[0] - right[0];
     int h1 = left[1] - right[1];
     int h2 = left[2] - right[2];
@@ -337,7 +357,6 @@ pub Array<int> sub(Array<int> left, Array<int> right) {
     int c11 = (h0 + 33554432) >> 26;
     h1 = h1 + c11;
     h0 = h0 - (c11 << 26);
-    Array<int> out = [0; 10];
     out[0] = h0;
     out[1] = h1;
     out[2] = h2;
@@ -348,6 +367,11 @@ pub Array<int> sub(Array<int> left, Array<int> right) {
     out[7] = h7;
     out[8] = h8;
     out[9] = h9;
+}
+
+pub Array<int> sub(Array<int> left, Array<int> right) {
+    Array<int> out = [0; 10];
+    sub_into(out, left, right);
     return out;
 }
 
@@ -362,7 +386,10 @@ pub Array<int> neg(Array<int> element) {
 /// at most 2^26 in magnitude, so `19 * g` is under 2^31, `2 * f` under 2^27, a
 /// product under 2^58, and a column of ten under 2^62 -- the overflow
 /// check cannot fire on any legal input.
-pub Array<int> mul(Array<int> left, Array<int> right) {
+pub void mul_into(Array<int> out, Array<int> left, Array<int> right) {
+    if (__crypto_fe_mul(out, left, right) == 0) {
+        return;
+    }
     int f0 = left[0];
     int f1 = left[1];
     int f2 = left[2];
@@ -443,7 +470,6 @@ pub Array<int> mul(Array<int> left, Array<int> right) {
     int c11 = (h0 + 33554432) >> 26;
     h1 = h1 + c11;
     h0 = h0 - (c11 << 26);
-    Array<int> out = [0; 10];
     out[0] = h0;
     out[1] = h1;
     out[2] = h2;
@@ -454,11 +480,21 @@ pub Array<int> mul(Array<int> left, Array<int> right) {
     out[7] = h7;
     out[8] = h8;
     out[9] = h9;
+}
+
+pub Array<int> mul(Array<int> left, Array<int> right) {
+    Array<int> out = [0; 10];
+    mul_into(out, left, right);
     return out;
 }
 
 pub Array<int> square(Array<int> element) {
     return mul(element, element);
+}
+
+/// `out = element * element`, in place: `out` may be `element`.
+pub void square_into(Array<int> out, Array<int> element) {
+    mul_into(out, element, element);
 }
 
 /// `2*a*a` -- the extended-coordinates addition law wants this exact shape
@@ -489,6 +525,16 @@ pub Array<int> cselect(int cond, Array<int> when_one, Array<int> when_zero) {
         out[i] = when_one[i] & mask | when_zero[i] & notmask;
     }
     return out;
+}
+
+/// `cselect` into an array the caller owns: `out` becomes `when_one` or
+/// `when_zero`; `out` may be either. Same masking argument as `cselect`.
+pub void cselect_into(int cond, Array<int> out, Array<int> when_one, Array<int> when_zero) {
+    int mask = 0 - cond;
+    int notmask = mask ^ -1;
+    for (int i in 0 .. 10) {
+        out[i] = when_one[i] & mask | when_zero[i] & notmask;
+    }
 }
 
 /// Swap `first` and `second` in place when `cond` is 1, leave them alone when it is

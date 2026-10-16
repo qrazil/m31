@@ -1005,6 +1005,520 @@ CRYPTO_FUNC(rt_k_sha512)
 9:  ret
 CRYPTO_END(rt_k_sha512)
 
+
+/* ------------------------------------------------------------------------
+ * GF(2^255 - 19) in ten signed limbs (radix 2^25.5): lib/crypto/field25519.m31's
+ * multiply, add and subtract, instruction for instruction (ref10's fe_mul and
+ * carry chain), so the kernel and the m31 fallback produce identical limbs.
+ * Elements are `Array<int>` data: ten little-endian int64 limbs. `mul` keeps
+ * only the low 64 bits, which is exact because the bounds in field25519.m31
+ * keep every column under 2^62. Straight-line, no branch, no table.
+ * ------------------------------------------------------------------------ */
+
+/* The carry chain over h0..h9 (x3-x12; x13, x14 scratch, x15 = 2^25, x16 = 2^24,
+ * x17 = 19), then
+ * the ten stores to x0. */
+.macro FE_CARRY_STORE
+    mov x15, #0x2000000
+    mov x16, #0x1000000
+    add x13, x3, x15
+    asr x13, x13, #26
+    add x4, x4, x13
+    lsl x14, x13, #26
+    sub x3, x3, x14
+    add x13, x7, x15
+    asr x13, x13, #26
+    add x8, x8, x13
+    lsl x14, x13, #26
+    sub x7, x7, x14
+    add x13, x4, x16
+    asr x13, x13, #25
+    add x5, x5, x13
+    lsl x14, x13, #25
+    sub x4, x4, x14
+    add x13, x8, x16
+    asr x13, x13, #25
+    add x9, x9, x13
+    lsl x14, x13, #25
+    sub x8, x8, x14
+    add x13, x5, x15
+    asr x13, x13, #26
+    add x6, x6, x13
+    lsl x14, x13, #26
+    sub x5, x5, x14
+    add x13, x9, x15
+    asr x13, x13, #26
+    add x10, x10, x13
+    lsl x14, x13, #26
+    sub x9, x9, x14
+    add x13, x6, x16
+    asr x13, x13, #25
+    add x7, x7, x13
+    lsl x14, x13, #25
+    sub x6, x6, x14
+    add x13, x10, x16
+    asr x13, x13, #25
+    add x11, x11, x13
+    lsl x14, x13, #25
+    sub x10, x10, x14
+    add x13, x7, x15
+    asr x13, x13, #26
+    add x8, x8, x13
+    lsl x14, x13, #26
+    sub x7, x7, x14
+    add x13, x11, x15
+    asr x13, x13, #26
+    add x12, x12, x13
+    lsl x14, x13, #26
+    sub x11, x11, x14
+    add x13, x12, x16
+    asr x13, x13, #25
+    madd x3, x13, x17, x3
+    lsl x14, x13, #25
+    sub x12, x12, x14
+    add x13, x3, x15
+    asr x13, x13, #26
+    add x4, x4, x13
+    lsl x14, x13, #26
+    sub x3, x3, x14
+    str x3, [x0, #0]
+    str x4, [x0, #8]
+    str x5, [x0, #16]
+    str x6, [x0, #24]
+    str x7, [x0, #32]
+    str x8, [x0, #40]
+    str x9, [x0, #48]
+    str x10, [x0, #56]
+    str x11, [x0, #64]
+    str x12, [x0, #72]
+.endm
+
+/* void rt_k_fe_mul(int64_t *out, const int64_t *f, const int64_t *g)
+ *   x0 out, x1 f, x2 g (out may alias either). */
+CRYPTO_FUNC(rt_k_fe_mul)
+    sub sp, sp, #128
+    mov x17, #19
+    ldr x13, [x2, #8]
+    mul x13, x13, x17
+    str x13, [sp, #0]
+    ldr x13, [x2, #16]
+    mul x13, x13, x17
+    str x13, [sp, #8]
+    ldr x13, [x2, #24]
+    mul x13, x13, x17
+    str x13, [sp, #16]
+    ldr x13, [x2, #32]
+    mul x13, x13, x17
+    str x13, [sp, #24]
+    ldr x13, [x2, #40]
+    mul x13, x13, x17
+    str x13, [sp, #32]
+    ldr x13, [x2, #48]
+    mul x13, x13, x17
+    str x13, [sp, #40]
+    ldr x13, [x2, #56]
+    mul x13, x13, x17
+    str x13, [sp, #48]
+    ldr x13, [x2, #64]
+    mul x13, x13, x17
+    str x13, [sp, #56]
+    ldr x13, [x2, #72]
+    mul x13, x13, x17
+    str x13, [sp, #64]
+    ldr x13, [x1, #8]
+    lsl x13, x13, #1
+    str x13, [sp, #72]
+    ldr x13, [x1, #24]
+    lsl x13, x13, #1
+    str x13, [sp, #80]
+    ldr x13, [x1, #40]
+    lsl x13, x13, #1
+    str x13, [sp, #88]
+    ldr x13, [x1, #56]
+    lsl x13, x13, #1
+    str x13, [sp, #96]
+    ldr x13, [x1, #72]
+    lsl x13, x13, #1
+    str x13, [sp, #104]
+    ldr x13, [x1, #0]
+    ldr x14, [x2, #0]
+    mul x3, x13, x14
+    ldr x13, [sp, #72]
+    ldr x14, [sp, #64]
+    madd x3, x13, x14, x3
+    ldr x13, [x1, #16]
+    ldr x14, [sp, #56]
+    madd x3, x13, x14, x3
+    ldr x13, [sp, #80]
+    ldr x14, [sp, #48]
+    madd x3, x13, x14, x3
+    ldr x13, [x1, #32]
+    ldr x14, [sp, #40]
+    madd x3, x13, x14, x3
+    ldr x13, [sp, #88]
+    ldr x14, [sp, #32]
+    madd x3, x13, x14, x3
+    ldr x13, [x1, #48]
+    ldr x14, [sp, #24]
+    madd x3, x13, x14, x3
+    ldr x13, [sp, #96]
+    ldr x14, [sp, #16]
+    madd x3, x13, x14, x3
+    ldr x13, [x1, #64]
+    ldr x14, [sp, #8]
+    madd x3, x13, x14, x3
+    ldr x13, [sp, #104]
+    ldr x14, [sp, #0]
+    madd x3, x13, x14, x3
+    ldr x13, [x1, #0]
+    ldr x14, [x2, #8]
+    mul x4, x13, x14
+    ldr x13, [x1, #8]
+    ldr x14, [x2, #0]
+    madd x4, x13, x14, x4
+    ldr x13, [x1, #16]
+    ldr x14, [sp, #64]
+    madd x4, x13, x14, x4
+    ldr x13, [x1, #24]
+    ldr x14, [sp, #56]
+    madd x4, x13, x14, x4
+    ldr x13, [x1, #32]
+    ldr x14, [sp, #48]
+    madd x4, x13, x14, x4
+    ldr x13, [x1, #40]
+    ldr x14, [sp, #40]
+    madd x4, x13, x14, x4
+    ldr x13, [x1, #48]
+    ldr x14, [sp, #32]
+    madd x4, x13, x14, x4
+    ldr x13, [x1, #56]
+    ldr x14, [sp, #24]
+    madd x4, x13, x14, x4
+    ldr x13, [x1, #64]
+    ldr x14, [sp, #16]
+    madd x4, x13, x14, x4
+    ldr x13, [x1, #72]
+    ldr x14, [sp, #8]
+    madd x4, x13, x14, x4
+    ldr x13, [x1, #0]
+    ldr x14, [x2, #16]
+    mul x5, x13, x14
+    ldr x13, [sp, #72]
+    ldr x14, [x2, #8]
+    madd x5, x13, x14, x5
+    ldr x13, [x1, #16]
+    ldr x14, [x2, #0]
+    madd x5, x13, x14, x5
+    ldr x13, [sp, #80]
+    ldr x14, [sp, #64]
+    madd x5, x13, x14, x5
+    ldr x13, [x1, #32]
+    ldr x14, [sp, #56]
+    madd x5, x13, x14, x5
+    ldr x13, [sp, #88]
+    ldr x14, [sp, #48]
+    madd x5, x13, x14, x5
+    ldr x13, [x1, #48]
+    ldr x14, [sp, #40]
+    madd x5, x13, x14, x5
+    ldr x13, [sp, #96]
+    ldr x14, [sp, #32]
+    madd x5, x13, x14, x5
+    ldr x13, [x1, #64]
+    ldr x14, [sp, #24]
+    madd x5, x13, x14, x5
+    ldr x13, [sp, #104]
+    ldr x14, [sp, #16]
+    madd x5, x13, x14, x5
+    ldr x13, [x1, #0]
+    ldr x14, [x2, #24]
+    mul x6, x13, x14
+    ldr x13, [x1, #8]
+    ldr x14, [x2, #16]
+    madd x6, x13, x14, x6
+    ldr x13, [x1, #16]
+    ldr x14, [x2, #8]
+    madd x6, x13, x14, x6
+    ldr x13, [x1, #24]
+    ldr x14, [x2, #0]
+    madd x6, x13, x14, x6
+    ldr x13, [x1, #32]
+    ldr x14, [sp, #64]
+    madd x6, x13, x14, x6
+    ldr x13, [x1, #40]
+    ldr x14, [sp, #56]
+    madd x6, x13, x14, x6
+    ldr x13, [x1, #48]
+    ldr x14, [sp, #48]
+    madd x6, x13, x14, x6
+    ldr x13, [x1, #56]
+    ldr x14, [sp, #40]
+    madd x6, x13, x14, x6
+    ldr x13, [x1, #64]
+    ldr x14, [sp, #32]
+    madd x6, x13, x14, x6
+    ldr x13, [x1, #72]
+    ldr x14, [sp, #24]
+    madd x6, x13, x14, x6
+    ldr x13, [x1, #0]
+    ldr x14, [x2, #32]
+    mul x7, x13, x14
+    ldr x13, [sp, #72]
+    ldr x14, [x2, #24]
+    madd x7, x13, x14, x7
+    ldr x13, [x1, #16]
+    ldr x14, [x2, #16]
+    madd x7, x13, x14, x7
+    ldr x13, [sp, #80]
+    ldr x14, [x2, #8]
+    madd x7, x13, x14, x7
+    ldr x13, [x1, #32]
+    ldr x14, [x2, #0]
+    madd x7, x13, x14, x7
+    ldr x13, [sp, #88]
+    ldr x14, [sp, #64]
+    madd x7, x13, x14, x7
+    ldr x13, [x1, #48]
+    ldr x14, [sp, #56]
+    madd x7, x13, x14, x7
+    ldr x13, [sp, #96]
+    ldr x14, [sp, #48]
+    madd x7, x13, x14, x7
+    ldr x13, [x1, #64]
+    ldr x14, [sp, #40]
+    madd x7, x13, x14, x7
+    ldr x13, [sp, #104]
+    ldr x14, [sp, #32]
+    madd x7, x13, x14, x7
+    ldr x13, [x1, #0]
+    ldr x14, [x2, #40]
+    mul x8, x13, x14
+    ldr x13, [x1, #8]
+    ldr x14, [x2, #32]
+    madd x8, x13, x14, x8
+    ldr x13, [x1, #16]
+    ldr x14, [x2, #24]
+    madd x8, x13, x14, x8
+    ldr x13, [x1, #24]
+    ldr x14, [x2, #16]
+    madd x8, x13, x14, x8
+    ldr x13, [x1, #32]
+    ldr x14, [x2, #8]
+    madd x8, x13, x14, x8
+    ldr x13, [x1, #40]
+    ldr x14, [x2, #0]
+    madd x8, x13, x14, x8
+    ldr x13, [x1, #48]
+    ldr x14, [sp, #64]
+    madd x8, x13, x14, x8
+    ldr x13, [x1, #56]
+    ldr x14, [sp, #56]
+    madd x8, x13, x14, x8
+    ldr x13, [x1, #64]
+    ldr x14, [sp, #48]
+    madd x8, x13, x14, x8
+    ldr x13, [x1, #72]
+    ldr x14, [sp, #40]
+    madd x8, x13, x14, x8
+    ldr x13, [x1, #0]
+    ldr x14, [x2, #48]
+    mul x9, x13, x14
+    ldr x13, [sp, #72]
+    ldr x14, [x2, #40]
+    madd x9, x13, x14, x9
+    ldr x13, [x1, #16]
+    ldr x14, [x2, #32]
+    madd x9, x13, x14, x9
+    ldr x13, [sp, #80]
+    ldr x14, [x2, #24]
+    madd x9, x13, x14, x9
+    ldr x13, [x1, #32]
+    ldr x14, [x2, #16]
+    madd x9, x13, x14, x9
+    ldr x13, [sp, #88]
+    ldr x14, [x2, #8]
+    madd x9, x13, x14, x9
+    ldr x13, [x1, #48]
+    ldr x14, [x2, #0]
+    madd x9, x13, x14, x9
+    ldr x13, [sp, #96]
+    ldr x14, [sp, #64]
+    madd x9, x13, x14, x9
+    ldr x13, [x1, #64]
+    ldr x14, [sp, #56]
+    madd x9, x13, x14, x9
+    ldr x13, [sp, #104]
+    ldr x14, [sp, #48]
+    madd x9, x13, x14, x9
+    ldr x13, [x1, #0]
+    ldr x14, [x2, #56]
+    mul x10, x13, x14
+    ldr x13, [x1, #8]
+    ldr x14, [x2, #48]
+    madd x10, x13, x14, x10
+    ldr x13, [x1, #16]
+    ldr x14, [x2, #40]
+    madd x10, x13, x14, x10
+    ldr x13, [x1, #24]
+    ldr x14, [x2, #32]
+    madd x10, x13, x14, x10
+    ldr x13, [x1, #32]
+    ldr x14, [x2, #24]
+    madd x10, x13, x14, x10
+    ldr x13, [x1, #40]
+    ldr x14, [x2, #16]
+    madd x10, x13, x14, x10
+    ldr x13, [x1, #48]
+    ldr x14, [x2, #8]
+    madd x10, x13, x14, x10
+    ldr x13, [x1, #56]
+    ldr x14, [x2, #0]
+    madd x10, x13, x14, x10
+    ldr x13, [x1, #64]
+    ldr x14, [sp, #64]
+    madd x10, x13, x14, x10
+    ldr x13, [x1, #72]
+    ldr x14, [sp, #56]
+    madd x10, x13, x14, x10
+    ldr x13, [x1, #0]
+    ldr x14, [x2, #64]
+    mul x11, x13, x14
+    ldr x13, [sp, #72]
+    ldr x14, [x2, #56]
+    madd x11, x13, x14, x11
+    ldr x13, [x1, #16]
+    ldr x14, [x2, #48]
+    madd x11, x13, x14, x11
+    ldr x13, [sp, #80]
+    ldr x14, [x2, #40]
+    madd x11, x13, x14, x11
+    ldr x13, [x1, #32]
+    ldr x14, [x2, #32]
+    madd x11, x13, x14, x11
+    ldr x13, [sp, #88]
+    ldr x14, [x2, #24]
+    madd x11, x13, x14, x11
+    ldr x13, [x1, #48]
+    ldr x14, [x2, #16]
+    madd x11, x13, x14, x11
+    ldr x13, [sp, #96]
+    ldr x14, [x2, #8]
+    madd x11, x13, x14, x11
+    ldr x13, [x1, #64]
+    ldr x14, [x2, #0]
+    madd x11, x13, x14, x11
+    ldr x13, [sp, #104]
+    ldr x14, [sp, #64]
+    madd x11, x13, x14, x11
+    ldr x13, [x1, #0]
+    ldr x14, [x2, #72]
+    mul x12, x13, x14
+    ldr x13, [x1, #8]
+    ldr x14, [x2, #64]
+    madd x12, x13, x14, x12
+    ldr x13, [x1, #16]
+    ldr x14, [x2, #56]
+    madd x12, x13, x14, x12
+    ldr x13, [x1, #24]
+    ldr x14, [x2, #48]
+    madd x12, x13, x14, x12
+    ldr x13, [x1, #32]
+    ldr x14, [x2, #40]
+    madd x12, x13, x14, x12
+    ldr x13, [x1, #40]
+    ldr x14, [x2, #32]
+    madd x12, x13, x14, x12
+    ldr x13, [x1, #48]
+    ldr x14, [x2, #24]
+    madd x12, x13, x14, x12
+    ldr x13, [x1, #56]
+    ldr x14, [x2, #16]
+    madd x12, x13, x14, x12
+    ldr x13, [x1, #64]
+    ldr x14, [x2, #8]
+    madd x12, x13, x14, x12
+    ldr x13, [x1, #72]
+    ldr x14, [x2, #0]
+    madd x12, x13, x14, x12
+    FE_CARRY_STORE
+    add sp, sp, #128
+    ret
+CRYPTO_END(rt_k_fe_mul)
+
+/* void rt_k_fe_add(int64_t *out, const int64_t *f, const int64_t *g)
+ * void rt_k_fe_sub(int64_t *out, const int64_t *f, const int64_t *g) */
+CRYPTO_FUNC(rt_k_fe_add)
+    mov x17, #19
+    ldr x13, [x1, #0]
+    ldr x14, [x2, #0]
+    add x3, x13, x14
+    ldr x13, [x1, #8]
+    ldr x14, [x2, #8]
+    add x4, x13, x14
+    ldr x13, [x1, #16]
+    ldr x14, [x2, #16]
+    add x5, x13, x14
+    ldr x13, [x1, #24]
+    ldr x14, [x2, #24]
+    add x6, x13, x14
+    ldr x13, [x1, #32]
+    ldr x14, [x2, #32]
+    add x7, x13, x14
+    ldr x13, [x1, #40]
+    ldr x14, [x2, #40]
+    add x8, x13, x14
+    ldr x13, [x1, #48]
+    ldr x14, [x2, #48]
+    add x9, x13, x14
+    ldr x13, [x1, #56]
+    ldr x14, [x2, #56]
+    add x10, x13, x14
+    ldr x13, [x1, #64]
+    ldr x14, [x2, #64]
+    add x11, x13, x14
+    ldr x13, [x1, #72]
+    ldr x14, [x2, #72]
+    add x12, x13, x14
+    FE_CARRY_STORE
+    ret
+CRYPTO_END(rt_k_fe_add)
+
+CRYPTO_FUNC(rt_k_fe_sub)
+    mov x17, #19
+    ldr x13, [x1, #0]
+    ldr x14, [x2, #0]
+    sub x3, x13, x14
+    ldr x13, [x1, #8]
+    ldr x14, [x2, #8]
+    sub x4, x13, x14
+    ldr x13, [x1, #16]
+    ldr x14, [x2, #16]
+    sub x5, x13, x14
+    ldr x13, [x1, #24]
+    ldr x14, [x2, #24]
+    sub x6, x13, x14
+    ldr x13, [x1, #32]
+    ldr x14, [x2, #32]
+    sub x7, x13, x14
+    ldr x13, [x1, #40]
+    ldr x14, [x2, #40]
+    sub x8, x13, x14
+    ldr x13, [x1, #48]
+    ldr x14, [x2, #48]
+    sub x9, x13, x14
+    ldr x13, [x1, #56]
+    ldr x14, [x2, #56]
+    sub x10, x13, x14
+    ldr x13, [x1, #64]
+    ldr x14, [x2, #64]
+    sub x11, x13, x14
+    ldr x13, [x1, #72]
+    ldr x14, [x2, #72]
+    sub x12, x13, x14
+    FE_CARRY_STORE
+    ret
+CRYPTO_END(rt_k_fe_sub)
+
 #if !defined(__APPLE__)
     .section .note.GNU-stack,"",%progbits
 #endif

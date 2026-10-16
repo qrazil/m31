@@ -101,38 +101,49 @@ def openssl_speed(args, mask=False, seconds=1):
 
 
 def openssl_bulk(alg_args, size, mask):
-    """MiB/s of an `openssl speed -evp` line at one size."""
-    out = openssl_speed(["-bytes", str(size)] + alg_args, mask)
-    for line in out.splitlines():
-        m = re.match(r"^\S+.*?\s([0-9.]+)k\s*$", line)
-        if m and "bytes" not in line and not line.startswith("The"):
-            return float(m.group(1)) * 1000 / 1048576
-    return None
+    """MiB/s of an `openssl speed -evp` line at one size: the best of three
+    runs, because the host is shared and only the fastest run is the CPU's."""
+    best = None
+    for _ in range(3):
+        out = openssl_speed(["-bytes", str(size)] + alg_args, mask)
+        for line in out.splitlines():
+            m = re.match(r"^\S+.*?\s([0-9.]+)k\s*$", line)
+            if m and "bytes" not in line and not line.startswith("The"):
+                v = float(m.group(1)) * 1000 / 1048576
+                best = v if best is None else max(best, v)
+    return best
 
 
 def openssl_hmac(size, mask):
-    out = openssl_speed(["-bytes", str(size), "-hmac", "sha256"], mask)
-    for line in out.splitlines():
-        m = re.match(r"^hmac.*?\s([0-9.]+)k\s*$", line)
-        if m:
-            return float(m.group(1)) * 1000 / 1048576
-    return None
+    best = None
+    for _ in range(3):
+        out = openssl_speed(["-bytes", str(size), "-hmac", "sha256"], mask)
+        for line in out.splitlines():
+            m = re.match(r"^hmac.*?\s([0-9.]+)k\s*$", line)
+            if m:
+                v = float(m.group(1)) * 1000 / 1048576
+                best = v if best is None else max(best, v)
+    return best
 
 
 def openssl_asym(mask=False):
-    """ops/s for the asymmetric rows: {name: ops_per_s}."""
+    """ops/s for the asymmetric rows: {name: ops_per_s}; best of three runs."""
     res = {}
-    out = openssl_speed(["rsa2048", "ecdsap256", "ed25519", "x25519"], mask, seconds=2)
-    for line in out.splitlines():
-        f = line.split()
-        if line.startswith("rsa 2048"):
-            res["rsa2048-sign"], res["rsa2048-verify"] = float(f[-2]), float(f[-1])
-        elif "256 bits ecdsa" in line:
-            res["ecdsa-p256-sign"], res["ecdsa-p256-verify"] = float(f[-2]), float(f[-1])
-        elif "Ed25519" in line:
-            res["ed25519-sign"], res["ed25519-verify"] = float(f[-2]), float(f[-1])
-        elif "X25519" in line:
-            res["x25519"] = float(f[-1])
+    for _ in range(3):
+        out = openssl_speed(["rsa2048", "ecdsap256", "ed25519", "ecdhx25519"], mask, seconds=1)
+        for line in out.splitlines():
+            f = line.split()
+            got = {}
+            if line.startswith("rsa ") and "2048" in f[1]:
+                got = {"rsa2048-sign": float(f[-4]), "rsa2048-verify": float(f[-3])}
+            elif "nistp256" in line and "ecdsa" in line:
+                got = {"ecdsa-p256-sign": float(f[-2]), "ecdsa-p256-verify": float(f[-1])}
+            elif "Ed25519" in line:
+                got = {"ed25519-sign": float(f[-2]), "ed25519-verify": float(f[-1])}
+            elif "X25519" in line:
+                got = {"x25519": float(f[-1])}
+            for k, v in got.items():
+                res[k] = max(res.get(k, 0), v)
     return res
 
 

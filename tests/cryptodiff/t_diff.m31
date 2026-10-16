@@ -5,6 +5,9 @@
 // (OpenSSL) and PyNaCl, so nothing here is checked against itself.
 //
 //   sha1|sha256|sha384|sha512 N _ S   digest of N bytes
+//   sha1x|sha256x|sha512x N _ S       the same through Hasher.update in odd-sized pieces
+//                                     (3, 61, 7, 130, then the rest), so the block
+//                                     routine is entered at unaligned offsets
 //   hmac256 K M S                     HMAC-SHA256, key of K bytes, message of M
 //   hkdf256 N L S                     extract(salt 16, ikm N) then expand(info 7, L)
 //   chacha N C S                      ChaCha20 (RFC 8439), N bytes, block counter C
@@ -67,6 +70,48 @@ str run_case(str op, int a, int b, int seed) {
     }
     if (op == "sha512") {
         return sha512.hex(gen(a, seed));
+    }
+    if (op == "sha1x" || op == "sha256x" || op == "sha512x") {
+        bytes data = gen(a, seed);
+        List<int> pieces = [3, 61, 7, 130];
+        int at = 0;
+        if (op == "sha1x") {
+            sha1digest.Hasher hasher = sha1digest.Hasher();
+            for (int piece in pieces) {
+                int end = at + piece;
+                if (end > data.size()) {
+                    end = data.size();
+                }
+                hasher.update(data.substr(at, end));
+                at = end;
+            }
+            hasher.update(data.substr(at, data.size()));
+            return hasher.digest().hex();
+        }
+        if (op == "sha256x") {
+            sha256.Hasher hasher = sha256.Hasher();
+            for (int piece in pieces) {
+                int end = at + piece;
+                if (end > data.size()) {
+                    end = data.size();
+                }
+                hasher.update(data.substr(at, end));
+                at = end;
+            }
+            hasher.update(data.substr(at, data.size()));
+            return hasher.digest().hex();
+        }
+        sha512.Hasher hasher = sha512.Hasher();
+        for (int piece in pieces) {
+            int end = at + piece;
+            if (end > data.size()) {
+                end = data.size();
+            }
+            hasher.update(data.substr(at, end));
+            at = end;
+        }
+        hasher.update(data.substr(at, data.size()));
+        return hasher.digest().hex();
     }
     if (op == "hmac256") {
         return hmac.sha256_hex(gen(a, seed + 3), gen(b, seed));
