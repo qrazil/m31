@@ -6,6 +6,8 @@
 // ---
 //   sshclient.connect(host, port, user, key_path, known_hosts_path)
 //                                  -> Result<Session, Error>
+//   sshclient.connect_configured(host, port, user, ...)
+//                                  -> Result<Session, Error>   like `ssh` would
 //   session.exec(command)          -> Result<sshexec.Channel, Error>
 //   session.banner()               -> str      the server's pre-login notice
 //   session.close()                -> Result<bool, Error>
@@ -24,6 +26,17 @@
 // for what to show and `sshhosts.add` to record a yes -- see `lib/sshhosts.m31`;
 // a `Connect(HostKeyMismatch)` has no such path.
 //
+// `connect_configured` is the other entry point, for a caller that wants
+// "connect the way `ssh user@host` would": the same resolution as `m31ssh`
+// (`~/.ssh/config` with `Host`/`Match`/`Include`, `HostName`, `Port`, `User`,
+// `IdentityFile`, `IdentitiesOnly`, `ProxyJump`, `UserKnownHostsFile`,
+// `StrictHostKeyChecking`, `ConnectTimeout`), the identities of `ssh-agent`
+// (`SSH_AUTH_SOCK`) and the default key files, passphrase-protected keys,
+// and the same host-key policy (`lib/ssh/sshconnect.m31`). Nothing is asked
+// of a person unless `is_interactive` is true: an unknown host is then
+// refused under the default `ask`, and a key that needs a passphrase is
+// skipped in favour of the agent.
+//
 // `Error` says which stage failed and carries that stage's own error.
 
 import ssh;
@@ -31,6 +44,7 @@ import ssh.sshkey;
 import ssh.sshhosts;
 import ssh.sshauth;
 import ssh.sshexec;
+import ssh.sshconnect;
 
 pub enum Error {
     /// The key file could not be used.
@@ -43,6 +57,10 @@ pub enum Error {
     Auth(sshauth.Error);
     /// Opening the channel or running the command failed.
     Exec(sshexec.Error);
+    /// `connect_configured` could not connect: one line, as `m31ssh` would
+    /// print it (configuration error, unreachable host, host key refused,
+    /// `Permission denied (publickey).`, ...).
+    Configured(str);
 }
 
 pub str Error.to_str() {
@@ -61,6 +79,9 @@ pub str Error.to_str() {
         }
         case Exec(sshexec.Error error): {
             return "ssh exec: " + error.to_str();
+        }
+        case Configured(str message): {
+            return "ssh: " + message;
         }
     }
 }
@@ -170,6 +191,44 @@ Result<Session, Error> open_session(str host, int port, str user, sshkey.Private
         }
         case Err(ssh.Error error): {
             return Result<Session, Error>.Err(Error.Connect(error));
+        }
+    }
+}
+
+/// Connects to `host` the way `ssh [-p port] [-l user] [-o option]... host`
+/// would, and returns the session ready for `exec`.
+///
+/// * `port` 0 and `user` "" leave both to the configuration (then 22 and the
+///   local user), as `git`'s `ssh://[user@]host[:port]/` URL does;
+/// * `identities` are `-i` files; `options` are `-o` lines (`Key=value`);
+///   `config_file` "" is `~/.ssh/config`;
+/// * `is_interactive` allows asking the person on the terminal (an unknown
+///   host's fingerprint, a key passphrase); leave it false for a daemon or a
+///   program whose standard input is not a person;
+/// * `timeout_ms` above 0 bounds every later read, as in `connect`
+///   (`ConnectTimeout` from the configuration bounds only the TCP connect).
+///
+/// Failures are `Error.Configured(line)`; `Warning:` lines go to standard
+/// error exactly as with `m31ssh`.
+pub Result<Session, Error> connect_configured(str host, int port, str user, List<str> identities = [], List<str> options = [], str config_file = "", bool is_interactive = false, int timeout_ms = 0) {
+    sshconnect.Params parameters = sshconnect.Params(host, port, user, identities, options, config_file, "", false, is_interactive);
+    match (sshconnect.connect(parameters)) {
+        case Ok(sshconnect.Connection connection): {
+            ssh.Transport transport = connection.transport;
+            Session session = Session(transport, "");
+            if (timeout_ms > 0) {
+                match (session.set_read_timeout(timeout_ms)) {
+                    case Ok: {
+                    }
+                    case Err(Error error): {
+                        return Result<Session, Error>.Err(error);
+                    }
+                }
+            }
+            return Result<Session, Error>.Ok(session);
+        }
+        case Err(str message): {
+            return Result<Session, Error>.Err(Error.Configured(message));
         }
     }
 }

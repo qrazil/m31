@@ -360,6 +360,9 @@ str why(sshclient.Error e) {
         case Exec(sshexec.Error x): {
             return "exec: " + x.to_str();
         }
+        case Configured(str message): {
+            return "configured: " + message;
+        }
     }
 }
 

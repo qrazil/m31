@@ -1,0 +1,59 @@
+import ssh;
+import ssh.sshclient;
+import ssh.sshexec;
+import os;
+
+// The program half of tests/ssh/test_client_api.sh: `connect_configured`
+// with everything from the environment (HOME, SSH_AUTH_SOCK) and
+// ~/.ssh/config. Arguments: host, port (0: configuration's), user ("-": the
+// configuration's), then the remote command, or "-" to only connect.
+// Prints "connected", the command's output and "exit N", or "failed: ...".
+
+List<str> argv = os.arguments();
+str host = argv[1];
+int port = argv[2].parse_int().or(0);
+str user = argv[3];
+if (user == "-") {
+    user = "";
+}
+str command = argv[4];
+match (sshclient.connect_configured(host, port, user)) {
+    case Ok(sshclient.Session session): {
+        if (command == "-") {
+            print("connected");
+        } else {
+            match (session.exec(command)) {
+                case Ok(sshexec.Channel channel): {
+                    match (channel.read_all()) {
+                        case Ok(bytes data): {
+                            print(data.utf8().or("?").trim());
+                        }
+                        case Err(sshexec.Error error): {
+                            print("failed: read: " + error.to_str());
+                        }
+                    }
+                    match (channel.wait()) {
+                        case Ok(sshexec.Exit status): {
+                            print(status.to_str());
+                        }
+                        case Err(sshexec.Error error): {
+                            print("failed: wait: " + error.to_str());
+                        }
+                    }
+                }
+                case Err(sshclient.Error error): {
+                    print("failed: " + error.to_str());
+                }
+            }
+        }
+        match (session.close()) {
+            case Ok(bool done): {
+            }
+            case Err(sshclient.Error error): {
+            }
+        }
+    }
+    case Err(sshclient.Error error): {
+        print("failed: " + error.to_str());
+    }
+}

@@ -98,6 +98,9 @@ str connect_failure(sshclient.Error error) {
         case Exec(_): {
             return "connect-failed: " + error.to_str();
         }
+        case Configured(_): {
+            return "connect-failed: " + error.to_str();
+        }
     }
 }
 
