@@ -67,9 +67,11 @@
 //
 // --- what is NOT here (`docs/ssh-decision.md` §1, §3) ------------------------
 //
-//   - Rekeying (RFC 4253 §9). A connection that runs long enough to need one
-//     fails instead -- not reachable from this client's own call shape
-//     (`send`/`recv`, one at a time) without one of them blocking forever.
+//   - Rekeying that the CLIENT starts (RFC 4253 §9). A server's rekey, which
+//     is what OpenSSH does (after `RekeyLimit` bytes, 1 GB by default for
+//     these ciphers, or an hour), is answered inside `recv_once`; this
+//     client never asks for one itself, since a send-only caller cannot read
+//     the server's `KEXINIT` without blocking.
 //   - Algorithm fallback of any kind. See above.
 //   - Compression (always negotiates "none").
 //   - Authentication (`ssh-userauth`, RFC 4252) and the connection protocol
@@ -1299,10 +1301,16 @@ pub type Transport {
     bytes sid;
     random.System rng;
     Suite negotiated;
+    // What a rekey (server-initiated, RFC 4253 §9) needs again: the version
+    // strings and the offer, and the host key's blob, which must not change.
+    VersionPair versions;
+    Offer offer;
+    bytes host_key_blob;
 }
 
-/// This connection's one (and only -- no rekeying) exchange hash `H`,
-/// needed verbatim by the publickey-auth signature (RFC 4252 §7).
+/// This connection's first exchange hash `H`, the session identifier for
+/// its whole life (a rekey does not change it), needed verbatim by the
+/// publickey-auth signature (RFC 4252 §7).
 pub bytes Transport.session_id() {
     return sid;
 }
@@ -1343,7 +1351,85 @@ pub Result<bytes, Error> Transport.recv_once() {
         bytes none = [];
         return Result<bytes, Error>.Ok(none);
     }
+    if (message_type == SSH_MESSAGE_KEXINIT) {
+        // The server wants new keys (OpenSSH after 1 GB or an hour, or
+        // whatever `RekeyLimit` says). Done here, invisibly to the layers
+        // above: they see only the housekeeping-sized empty answer.
+        rekey(payload)?;
+        bytes none = [];
+        return Result<bytes, Error>.Ok(none);
+    }
     return Result<bytes, Error>.Ok(payload);
+}
+
+// One packet of a rekey, under the keys in force.
+Result<void, Error> Transport.emit(bytes payload) {
+    send_ciphered_payload(connection, payload, send_cipher, send_seq, rng)?;
+    send_seq = send_seq + 1;
+    return Result<void, Error>.Ok;
+}
+
+// The next packet of a rekey in progress: housekeeping (IGNORE, DEBUG) is
+// skipped, DISCONNECT ends it, anything else is returned.
+Result<bytes, Error> Transport.recv_for_rekey() {
+    while (true) {
+        bytes payload = recv_ciphered_payload(connection, recv_cipher, recv_seq)?;
+        recv_seq = recv_seq + 1;
+        if (payload.size() == 0) {
+            return Result<bytes, Error>.Err(Error.Truncated);
+        }
+        int message_type = payload[0];
+        if (message_type == SSH_MESSAGE_DISCONNECT) {
+            return Result<bytes, Error>.Err(Error.Disconnected);
+        }
+        if (message_type != SSH_MESSAGE_IGNORE && message_type != SSH_MESSAGE_DEBUG) {
+            return Result<bytes, Error>.Ok(payload);
+        }
+    }
+}
+
+// A key re-exchange answering the server's `KEXINIT` (`i_s`, already read):
+// our own `KEXINIT`, the ECDH exchange, the signature checked against the
+// SAME host key as the first exchange (a server whose key changes mid-session
+// is refused, `HostKeyMismatch`), NEWKEYS both ways and fresh keys derived
+// with the original session identifier. Strict kex, if it was agreed, still
+// applies: sequence numbers restart at 0 after each NEWKEYS. Nothing but kex
+// messages can arrive from the server until its NEWKEYS (RFC 4253 §7.1).
+Result<void, Error> Transport.rekey(bytes i_s) {
+    KexInit server_kex = parse_kexinit(i_s)?;
+    Suite fresh = negotiate(offer, server_kex)?;
+    fresh.is_strict = negotiated.is_strict;
+    bytes i_c = build_kexinit(rng, offer);
+    emit(i_c)?;
+    EcdhState state = ecdh_begin(fresh, rng);
+    emit(build_kex_ecdh_init(state.q_c))?;
+    bytes reply_payload = recv_for_rekey()?;
+    KexEcdhReply reply = parse_kex_ecdh_reply(reply_payload)?;
+    if (reply.k_s != host_key_blob) {
+        return Result<void, Error>.Err(Error.HostKeyMismatch);
+    }
+    HostKey host_key = parse_host_key(reply.k_s)?;
+    bytes k_mpint = ecdh_finish(fresh, state, reply.q_s)?;
+    bytes digest = exchange_hash(versions.v_c, versions.v_s, i_c, i_s, reply.k_s, state.q_c, reply.q_s, k_mpint);
+    verify_host_signature(host_key, fresh.host_key, digest, reply.signature)?;
+    Exchange exchange = Exchange(host_key, k_mpint, digest, fresh, versions, offer);
+    sshcipher.Cipher next_send = make_cipher(exchange, sid, fresh.cipher_client_to_server, fresh.mac_client_to_server, 'A', 'C', 'E');
+    sshcipher.Cipher next_recv = make_cipher(exchange, sid, fresh.cipher_server_to_client, fresh.mac_server_to_client, 'B', 'D', 'F');
+    emit([SSH_MESSAGE_NEWKEYS])?;
+    send_cipher = next_send;
+    if (fresh.is_strict) {
+        send_seq = 0;
+    }
+    bytes their_newkeys = recv_for_rekey()?;
+    if (their_newkeys.size() != 1 || their_newkeys[0] != SSH_MESSAGE_NEWKEYS) {
+        return Result<void, Error>.Err(Error.UnexpectedMessage);
+    }
+    recv_cipher = next_recv;
+    if (fresh.is_strict) {
+        recv_seq = 0;
+    }
+    negotiated = fresh;
+    return Result<void, Error>.Ok;
 }
 
 /// Reads, authenticates and decrypts packets until one carries an
@@ -1482,6 +1568,67 @@ type Exchange {
     bytes k_mpint;
     bytes exchange_digest;
     Suite suite;
+    VersionPair versions;
+    Offer offer;
+}
+
+// The client half of an ECDH exchange: the curve, the ephemeral secret and
+// the public value `Q_C` to send.
+type EcdhState {
+    ecdsa.Curve curve;
+    bytes secret;
+    bytes q_c;
+}
+
+EcdhState ecdh_begin(Suite suite, random.System rng) {
+    ecdsa.Curve curve = ecdsa.p256();
+    bytes secret = [];
+    bytes q_c = [];
+    if (suite.kex == KEX_ECDH_P256) {
+        secret = rng.octets(32);
+        while (!ecdsa.is_secret_scalar(curve, secret)) {
+            secret = rng.octets(32);
+        }
+        q_c = ecdsa.ephemeral_public(curve, secret);
+    } else {
+        secret = rng.octets(32);
+        q_c = x25519.base_point(secret);
+    }
+    return EcdhState(curve, secret, q_c);
+}
+
+// The shared secret `K` as an mpint, from the server's public value `q_s`,
+// or `BadKeyExchange` for a value that is not valid (off the curve, the
+// wrong size, or of small order).
+Result<bytes, Error> ecdh_finish(Suite suite, EcdhState state, bytes q_s) {
+    bytes shared = [];
+    if (suite.kex == KEX_ECDH_P256) {
+        match (ecdsa.parse_public_key(state.curve, q_s)) {
+            case Some(ecdsa.PublicKey peer): {
+                shared = ecdsa.shared_secret(state.curve, peer, state.secret);
+            }
+            case None: {
+                return Result<bytes, Error>.Err(Error.BadKeyExchange);
+            }
+        }
+    } else {
+        if (q_s.size() != 32) {
+            return Result<bytes, Error>.Err(Error.BadKeyExchange);
+        }
+        // RFC 8731 §3.1's text says this gets reversed (little-endian, RFC
+        // 7748's own output, into big-endian before mpint-wrapping) -- but a
+        // real `sshd` rejects the host key signature when that reversal is
+        // applied, and accepts it when `x25519`'s raw output is mpint-encoded
+        // directly, confirmed with `tests/ssh/test_transport.sh`'s live
+        // fixture. This is the actual, shipped OpenSSH behavior.
+        shared = x25519.x25519(state.secret, q_s);
+        // RFC 7748 §6.1 / RFC 8731: a peer value of small order makes the
+        // output all zero; OpenSSH refuses it and so do we.
+        if (is_all_zero_octets(shared)) {
+            return Result<bytes, Error>.Err(Error.BadKeyExchange);
+        }
+    }
+    return Result<bytes, Error>.Ok(encode_mpint(shared));
 }
 
 // Version exchange, KEXINIT both ways, the ECDH exchange and the check of the
@@ -1501,54 +1648,16 @@ Result<Exchange, Error> exchange_keys(Wire connection, random.System rng, Offer 
     bytes i_s = recv_plain_payload(connection)?;
     KexInit server_kex = parse_kexinit(i_s)?;
     Suite suite = negotiate(offer, server_kex)?;
-    bytes q_c = [];
-    bytes secret = [];
-    ecdsa.Curve curve = ecdsa.p256();
-    if (suite.kex == KEX_ECDH_P256) {
-        secret = rng.octets(32);
-        while (!ecdsa.is_secret_scalar(curve, secret)) {
-            secret = rng.octets(32);
-        }
-        q_c = ecdsa.ephemeral_public(curve, secret);
-    } else {
-        secret = rng.octets(32);
-        q_c = x25519.base_point(secret);
-    }
+    EcdhState state = ecdh_begin(suite, rng);
+    bytes q_c = state.q_c;
     send_plain_payload(connection, build_kex_ecdh_init(q_c), rng)?;
     bytes reply_payload = recv_plain_payload(connection)?;
     KexEcdhReply reply = parse_kex_ecdh_reply(reply_payload)?;
     HostKey host_key = parse_host_key(reply.k_s)?;
-    bytes shared = [];
-    if (suite.kex == KEX_ECDH_P256) {
-        match (ecdsa.parse_public_key(curve, reply.q_s)) {
-            case Some(ecdsa.PublicKey peer): {
-                shared = ecdsa.shared_secret(curve, peer, secret);
-            }
-            case None: {
-                return Result<Exchange, Error>.Err(Error.BadKeyExchange);
-            }
-        }
-    } else {
-        if (reply.q_s.size() != 32) {
-            return Result<Exchange, Error>.Err(Error.BadKeyExchange);
-        }
-        // RFC 8731 §3.1's text says this gets reversed (little-endian, RFC
-        // 7748's own output, into big-endian before mpint-wrapping) -- but a
-        // real `sshd` rejects the host key signature when that reversal is
-        // applied, and accepts it when `x25519`'s raw output is mpint-encoded
-        // directly, confirmed with `tests/ssh/test_transport.sh`'s live
-        // fixture. This is the actual, shipped OpenSSH behavior.
-        shared = x25519.x25519(secret, reply.q_s);
-        // RFC 7748 §6.1 / RFC 8731: a peer value of small order makes the
-        // output all zero; OpenSSH refuses it and so do we.
-        if (is_all_zero_octets(shared)) {
-            return Result<Exchange, Error>.Err(Error.BadKeyExchange);
-        }
-    }
-    bytes k_mpint = encode_mpint(shared);
+    bytes k_mpint = ecdh_finish(suite, state, reply.q_s)?;
     bytes exchange_digest = exchange_hash(version_pair.v_c, version_pair.v_s, i_c, i_s, reply.k_s, q_c, reply.q_s, k_mpint);
     verify_host_signature(host_key, suite.host_key, exchange_digest, reply.signature)?;
-    return Result<Exchange, Error>.Ok(Exchange(host_key, k_mpint, exchange_digest, suite));
+    return Result<Exchange, Error>.Ok(Exchange(host_key, k_mpint, exchange_digest, suite, version_pair, offer));
 }
 
 // Whether every octet is zero. The value is a key-exchange output that is
@@ -1585,16 +1694,16 @@ int cipher_iv_size(str name) {
 
 // One direction's cipher from the exchange: letters as RFC 4253 §7.2
 // (IV A/B, key C/D, integrity E/F for client-to-server/server-to-client).
-sshcipher.Cipher make_cipher(Exchange exchange, str name, str mac, int iv_letter, int key_letter, int mac_letter) {
-    bytes key = derive(exchange.k_mpint, exchange.exchange_digest, key_letter, exchange.exchange_digest, cipher_key_size(name));
+sshcipher.Cipher make_cipher(Exchange exchange, bytes session_id, str name, str mac, int iv_letter, int key_letter, int mac_letter) {
+    bytes key = derive(exchange.k_mpint, exchange.exchange_digest, key_letter, session_id, cipher_key_size(name));
     if (name == CIPHER_ALGO) {
         return sshcipher.new_chacha(key);
     }
-    bytes initial_vector = derive(exchange.k_mpint, exchange.exchange_digest, iv_letter, exchange.exchange_digest, cipher_iv_size(name));
+    bytes initial_vector = derive(exchange.k_mpint, exchange.exchange_digest, iv_letter, session_id, cipher_iv_size(name));
     if (name == CIPHER_GCM256 || name == CIPHER_GCM128) {
         return sshcipher.new_aes_gcm(key, initial_vector);
     }
-    bytes mac_key = derive(exchange.k_mpint, exchange.exchange_digest, mac_letter, exchange.exchange_digest, 32);
+    bytes mac_key = derive(exchange.k_mpint, exchange.exchange_digest, mac_letter, session_id, 32);
     return sshcipher.new_aes_ctr(key, initial_vector, mac_key, mac == MAC_ETM);
 }
 
@@ -1603,8 +1712,8 @@ sshcipher.Cipher make_cipher(Exchange exchange, str name, str mac, int iv_letter
 Result<Transport, Error> finish_handshake(Wire connection, Exchange exchange, random.System rng) {
     int send_seq = 2;
     int recv_seq = 2;
-    sshcipher.Cipher send_cipher = make_cipher(exchange, exchange.suite.cipher_client_to_server, exchange.suite.mac_client_to_server, 'A', 'C', 'E');
-    sshcipher.Cipher recv_cipher = make_cipher(exchange, exchange.suite.cipher_server_to_client, exchange.suite.mac_server_to_client, 'B', 'D', 'F');
+    sshcipher.Cipher send_cipher = make_cipher(exchange, exchange.exchange_digest, exchange.suite.cipher_client_to_server, exchange.suite.mac_client_to_server, 'A', 'C', 'E');
+    sshcipher.Cipher recv_cipher = make_cipher(exchange, exchange.exchange_digest, exchange.suite.cipher_server_to_client, exchange.suite.mac_server_to_client, 'B', 'D', 'F');
     send_plain_payload(connection, [SSH_MESSAGE_NEWKEYS], rng)?;
     send_seq = send_seq + 1;
     bytes their_newkeys = recv_plain_payload(connection)?;
@@ -1616,7 +1725,7 @@ Result<Transport, Error> finish_handshake(Wire connection, Exchange exchange, ra
         send_seq = 0;
         recv_seq = 0;
     }
-    return Result<Transport, Error>.Ok(Transport(connection, send_seq, recv_seq, send_cipher, recv_cipher, exchange.exchange_digest, rng, exchange.suite));
+    return Result<Transport, Error>.Ok(Transport(connection, send_seq, recv_seq, send_cipher, recv_cipher, exchange.exchange_digest, rng, exchange.suite, exchange.versions, exchange.offer, exchange.host_key.blob));
 }
 
 /// What decides, mid-handshake, whether the server's host key is trusted:

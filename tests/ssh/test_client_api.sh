@@ -130,6 +130,40 @@ expect_has "passphrase-protected key, not interactive, no agent: skipped, denied
     "$(run "$CFG_LOCKED" none locked 0 - 'echo hi')"
 expect_has "unreachable port: one-line error" "could not connect" "$(run "$CFG_ALIAS" none 127.0.0.1 1 - 'true')"
 
+# --- rekeying: the server decides (RekeyLimit), the client must follow ----------
+# A server that rekeys every 100 KB while 2 MB of output flows: the data must
+# arrive intact and the log must show keys really were exchanged again.
+rekey_case() { # label, Ciphers, MACs
+    local rport=$((PORT + 1)) rpid="" up=0
+    sed -e "s/^Port .*/Port $rport/" -e "s/^PidFile .*/PidFile ${WORK//\//\\/}\/sshd_r.pid/" "$WORK/sshd_config" >"$WORK/sshd_rekey"
+    printf 'RekeyLimit 100K\nLogLevel DEBUG2\nCiphers %s\nMACs %s\n' "$2" "$3" >>"$WORK/sshd_rekey"
+    "$SSHD_BIN" -f "$WORK/sshd_rekey" -D -e >"$WORK/sshd_rekey.log" 2>&1 &
+    rpid=$!
+    for _ in $(seq 1 100); do
+        if (exec 3<>"/dev/tcp/127.0.0.1/$rport") 2>/dev/null; then exec 3>&-; up=1; break; fi
+        sleep 0.05
+    done
+    if [ "$up" != 1 ]; then
+        bad "$1: sshd did not start" "$(tail -3 "$WORK/sshd_rekey.log")"
+        kill "$rpid" 2>/dev/null; wait "$rpid" 2>/dev/null
+        return
+    fi
+    printf '[127.0.0.1]:%s %s\n' "$rport" "$HOSTKEY_LINE" >"$WORK/kh_rekey"
+    local cfg="Host rk\n  HostName 127.0.0.1\n  Port $rport\n  User $USER_NAME\n  IdentityFile $WORK/user_key\n  UserKnownHostsFile $WORK/kh_rekey\n"
+    local want got
+    want="$(seq 1 300000)
+exit status 0"
+    got=$(run "$cfg" none rk 0 - 'seq 1 300000')
+    kill "$rpid" 2>/dev/null; wait "$rpid" 2>/dev/null
+    local count
+    count=$(grep -c "rekey out after\|kex_input_kexinit\|SSH2_MSG_KEXINIT sent" "$WORK/sshd_rekey.log")
+    if [ "$got" = "$want" ]; then note "$1: 2 MB survives rekeying"; else bad "$1: data lost or session ended" "got $(printf '%s' "$got" | wc -c) bytes: $(printf '%s' "$got" | tail -c 80)" "$(grep -i 'rekey\|error\|kex' "$WORK/sshd_rekey.log" | tail -4)"; fi
+    if [ "$count" -ge 5 ]; then note "$1: server rekeyed $count times (log)"; else bad "$1: server did not rekey enough" "kex log lines: $count"; fi
+}
+rekey_case "chacha20-poly1305" "chacha20-poly1305@openssh.com" "hmac-sha2-256-etm@openssh.com"
+rekey_case "aes256-gcm" "aes256-gcm@openssh.com" "hmac-sha2-256-etm@openssh.com"
+rekey_case "aes128-ctr + hmac-sha2-256-etm" "aes128-ctr" "hmac-sha2-256-etm@openssh.com"
+
 echo
 if [ $fail -eq 0 ]; then
     printf '\033[32mall %d tests/ssh/test_client_api.sh checks passed\033[0m\n' "$pass"
