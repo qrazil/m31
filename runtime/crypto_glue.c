@@ -75,10 +75,10 @@ static int crypto_sysctl(const char *name) {
     return sysctlbyname(name, &v, &n, NULL, 0) == 0 && v == 1;
 }
 static int64_t crypto_detect(void) {
-    int64_t f = CRYPTO_CHACHA | CRYPTO_POLY; /* NEON and the integer unit: every arm64 */
+    /* NEON and the integer unit (ChaCha20, Poly1305, scalar SHA-512): every arm64. */
+    int64_t f = CRYPTO_CHACHA | CRYPTO_POLY | CRYPTO_SHA512;
     if (crypto_sysctl("hw.optional.arm.FEAT_AES") && crypto_sysctl("hw.optional.arm.FEAT_PMULL")) f |= CRYPTO_AES;
     if (crypto_sysctl("hw.optional.arm.FEAT_SHA256")) f |= CRYPTO_SHA256;
-    if (crypto_sysctl("hw.optional.arm.FEAT_SHA512")) f |= CRYPTO_SHA512;
     if (crypto_sysctl("hw.optional.arm.FEAT_SHA1")) f |= CRYPTO_SHA1;
     return f;
 }
@@ -89,14 +89,12 @@ static int64_t crypto_detect(void) {
 #define HWCAP_PMULL (1UL << 4)
 #define HWCAP_SHA1 (1UL << 5)
 #define HWCAP_SHA2 (1UL << 6)
-#define HWCAP_SHA512 (1UL << 21)
 #endif
 static int64_t crypto_detect(void) {
     unsigned long hw = getauxval(AT_HWCAP);
-    int64_t f = CRYPTO_CHACHA | CRYPTO_POLY;
+    int64_t f = CRYPTO_CHACHA | CRYPTO_POLY | CRYPTO_SHA512; /* NEON and the integer unit */
     if ((hw & HWCAP_AES) && (hw & HWCAP_PMULL)) f |= CRYPTO_AES;
     if (hw & HWCAP_SHA2) f |= CRYPTO_SHA256;
-    if (hw & HWCAP_SHA512) f |= CRYPTO_SHA512;
     if (hw & HWCAP_SHA1) f |= CRYPTO_SHA1;
     return f;
 }
