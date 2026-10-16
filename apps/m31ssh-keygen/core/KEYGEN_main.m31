@@ -466,6 +466,44 @@ Result<str, str> known_hosts_path(str file) {
     return Result<str, str>.Ok(home + "/.ssh/known_hosts");
 }
 
+// `text` written to `path` through a temporary file beside it and a rename,
+// keeping the original's permission bits, so an interrupted write never
+// leaves a truncated known_hosts behind.
+Result<bool, str> write_atomically(str path, str text) {
+    int permissions = 0o644;
+    match (fs.stat(path)) {
+        case Ok(fs.Stat info): {
+            permissions = info.perm() & 0o777;
+        }
+        case Err(_): {
+        }
+    }
+    str temporary = path + ".m31new";
+    match (io.open(temporary, mode: io.Mode.Write, perm: permissions)) {
+        case Err(io.Error error): {
+            return Result<bool, str>.Err("cannot write " + temporary + ": " + error.to_str());
+        }
+        case Ok(io.File out): {
+            match (out.write(text.to_bytes())) {
+                case Ok(_): {
+                }
+                case Err(io.Error error): {
+                    return Result<bool, str>.Err("cannot write " + temporary + ": " + error.to_str());
+                }
+            }
+            Result<bool, io.Error> finished = out.close();
+        }
+    }
+    match (fs.rename(temporary, path)) {
+        case Ok(_): {
+            return Result<bool, str>.Ok(true);
+        }
+        case Err(io.Error error): {
+            return Result<bool, str>.Err("cannot replace " + path + ": " + error.to_str());
+        }
+    }
+}
+
 int run_find(str host, str file) {
     str path = "";
     str name = "";
@@ -545,11 +583,11 @@ int run_hash(str file) {
             return 1;
         }
     }
-    match (io.write(path, result.text)) {
+    match (write_atomically(path, result.text)) {
         case Ok(_): {
         }
-        case Err(io.Error error): {
-            fail_line("cannot write " + path + ": " + error.to_str());
+        case Err(str reason): {
+            fail_line(reason);
             return 1;
         }
     }
@@ -701,11 +739,11 @@ int run_remove(str host, str file) {
             return 1;
         }
     }
-    match (io.write(path, result.text)) {
+    match (write_atomically(path, result.text)) {
         case Ok(_): {
         }
-        case Err(io.Error error): {
-            fail_line("cannot write " + path + ": " + error.to_str());
+        case Err(str reason): {
+            fail_line(reason);
             return 1;
         }
     }
@@ -728,7 +766,11 @@ int run_generate(str key_type, str file, str passphrase_text, bool has_passphras
             return 1;
         }
     }
-    if (fs.is_present(path) || fs.is_present(path + ".pub")) {
+    // A symlink at either name, dangling or not, is refused: creating the
+    // file would follow it to somewhere the user did not name. (The language
+    // has no exclusive create, so a race between this check and the open
+    // remains; see docs/m31ssh.md.)
+    if (fs.is_present(path) || fs.is_present(path + ".pub") || fs.is_link(path) || fs.is_link(path + ".pub")) {
         fail_line(path + " already exists; refusing to overwrite it (remove it first)");
         return 1;
     }

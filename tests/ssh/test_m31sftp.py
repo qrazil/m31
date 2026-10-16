@@ -456,5 +456,19 @@ keygen(rsa_p, ["-t", "rsa", "-b", "2048"])
 code, out, err = run(KEYGEN, ["-p", "-f", rsa_p, "-N", "abcdefg"])
 ok("keygen -p on an RSA key: refused clearly, file untouched", code == 1 and "Ed25519" in err, (code, err))
 
+# -R keeps @revoked / @cert-authority lines and leaves no temporary file; keygen will not follow a symlink
+kh6 = os.path.join(W, "kh_marked")
+with open(kh6, "w") as f:
+    f.write("@revoked gone2.example %s\ngone2.example %s\n@cert-authority gone2.example %s\n" % ((" ".join(k_ed),) * 3))
+code, out, err = run(KEYGEN, ["-R", "gone2.example", "-f", kh6])
+left = open(kh6).read().splitlines()
+ok("keygen -R: @revoked and @cert-authority lines survive, the plain one goes",
+   code == 0 and len(left) == 2 and left[0].startswith("@revoked") and left[1].startswith("@cert-authority"), (code, left))
+ok("keygen -R: no temporary file is left behind", not os.path.exists(kh6 + ".m31new"))
+dangling = os.path.join(W, "dangling_key")
+os.symlink(os.path.join(W, "nowhere_target"), dangling)
+code, out, err = run(KEYGEN, ["-q", "-f", dangling, "-N", ""])
+ok("keygen: a dangling symlink at the key path is refused, nothing created", code == 1 and not os.path.exists(os.path.join(W, "nowhere_target")), (code, err))
+
 print("%d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)

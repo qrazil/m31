@@ -526,7 +526,11 @@ pub Removal remove(str text, str host, int port) {
         List<str> fields = fields_of(line);
         int offset = 0;
         if (fields[0].starts_with("@")) {
-            offset = 1;
+            // `@revoked` and `@cert-authority` lines are never removed, as with
+            // ssh-keygen -R: dropping a revocation would let the key be
+            // trusted again.
+            kept.push(raw);
+            continue;
         }
         if (fields.size() < offset + 3) {
             kept.push(raw);
