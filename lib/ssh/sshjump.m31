@@ -1,3 +1,7 @@
+// Byte streams under an SSH connection that are not a TCP socket: through
+// another SSH server (`ProxyJump`), below, and a child process
+// (`ProxyCommand`, at the end).
+//
 // A byte stream through another SSH server: the transport under a
 // `ProxyJump` / `-J` hop. A `direct-tcpip` channel on an authenticated
 // connection to the jump host (`sshexec.direct_tcpip`) carries the raw bytes
@@ -25,7 +29,9 @@
 // that is not coming.
 
 import io;
+import os;
 import net;
+import proc;
 import ssh;
 import ssh.sshexec;
 
@@ -172,6 +178,213 @@ pub Result<ChannelWire, str> open(ssh.Transport jump, str host, int port) {
         }
         case Err(sshexec.Error error): {
             return Result<ChannelWire, str>.Err(error.to_str());
+        }
+    }
+}
+
+// --- ProxyCommand ---------------------------------------------------------------
+//
+// `ProxyCommand`: the transport under an SSH connection is a child process's
+// standard input and output instead of a TCP socket, as with
+// `ProxyCommand nc %h %p` or `ProxyCommand cloudflared access ssh --hostname %h`.
+//
+// API
+// ---
+//   sshjump.expand(command, host, port, user)  -> str          %h %p %r %%
+//   sshjump.start_command(command, host, port, user)   -> Result<ProcWire, str>
+//
+// The command runs as `sh -c command` (the way OpenSSH runs it), with the
+// connection's bytes on its standard input (ours to it) and standard output
+// (its to us). Its standard error is passed on to ours, as OpenSSH leaves it
+// attached to the terminal: it is drained whenever the connection is read or
+// waited on, and at the end. A `ProcWire` is an `ssh.Wire`; closing it closes
+// the child's pipes, ends the child (SIGTERM) and reaps it. A child that
+// exits is end-of-file to the reader, which the transport reports as the
+// connection closing.
+//
+// What it is not: a way to run a command with a shell injection through the
+// host name. `%h` and `%r` come from the user's own command line and
+// configuration, exactly as in OpenSSH, which does not quote them either;
+// write `ProxyCommand nc %h %p` with the same care as in OpenSSH.
+
+prim int __poll(List<int> fds, List<int> events, List<int> revents, int timeout_ms);
+
+const int POLL_IN = 1;
+const int CHUNK = 4096;
+
+/// `%h` the host, `%p` the port, `%r` the remote user and `%%` a percent sign
+/// replaced in `command`; any other `%x` stays as written.
+pub str expand(str command, str host, int port, str user) {
+    str out = "";
+    int index = 0;
+    while (index < command.size()) {
+        int byte = command.byte_at(index);
+        if (byte == 37 && index + 1 < command.size()) {
+            int next = command.byte_at(index + 1);
+            if (next == 104) {
+                out = out + host;
+            } else if (next == 112) {
+                out = out + port.to_str();
+            } else if (next == 114) {
+                out = out + user;
+            } else if (next == 37) {
+                out = out + "%";
+            } else {
+                out = out + command.substr(index, index + 2);
+            }
+            index = index + 2;
+        } else {
+            out = out + command.substr(index, index + 1);
+            index = index + 1;
+        }
+    }
+    return out;
+}
+
+/// A child process as an SSH byte stream.
+pub type ProcWire {
+    proc.Proc child;
+    int timeout_ms = 0;
+    bool is_closed = false;
+}
+
+// Standard error of the child that is already there, to ours.
+void ProcWire.drain_errors() {
+    while (true) {
+        List<int> fds = [child.stderr.fileno()];
+        if (fds[0] < 0) {
+            return;
+        }
+        List<int> events = [POLL_IN];
+        List<int> revents = [];
+        int ready = __poll(fds, events, revents, 0);
+        if (ready <= 0) {
+            return;
+        }
+        match (child.stderr.read(CHUNK)) {
+            case Ok(bytes got): {
+                if (got.size() == 0) {
+                    return;
+                }
+                Result<int, io.Error> shown = io.stderr().write(got);
+            }
+            case Err(_): {
+                return;
+            }
+        }
+    }
+}
+
+// Waits until standard output has bytes (or has ended), draining standard
+// error meanwhile. `wait_ms` negative waits for ever. True when readable.
+bool ProcWire.is_ready(int wait_ms) {
+    int waited = 0;
+    while (true) {
+        if (child.stdout.has_buffered()) {
+            return true;
+        }
+        int step = 50;
+        if (wait_ms >= 0 && wait_ms - waited < step) {
+            step = wait_ms - waited;
+        }
+        List<int> fds = [child.stdout.fileno(), child.stderr.fileno()];
+        List<int> events = [POLL_IN, POLL_IN];
+        List<int> revents = [];
+        if (fds[1] < 0) {
+            fds = [fds[0]];
+            events = [POLL_IN];
+        }
+        int ready = __poll(fds, events, revents, step);
+        if (ready > 0) {
+            if (revents.size() > 0 && revents[0] != 0) {
+                drain_errors();
+                return true;
+            }
+            drain_errors();
+        }
+        if (ready == 0 || ready == -4) {
+            waited = waited + step;
+        }
+        if (wait_ms >= 0 && waited >= wait_ms) {
+            return false;
+        }
+    }
+}
+
+pub Result<bytes, io.Error> ProcWire.read(int byte_count) {
+    int limit = -1;
+    if (timeout_ms > 0) {
+        limit = timeout_ms;
+    }
+    if (!is_ready(limit)) {
+        return Result<bytes, io.Error>.Err(io.Error.Other(11));
+    }
+    return child.stdout.read(byte_count);
+}
+
+pub Result<bytes, io.Error> ProcWire.read_until(bytes delimiter, int limit) {
+    bytes out = [];
+    while (out.size() < limit) {
+        bytes one = read(1)?;
+        if (one.size() == 0) {
+            return Result<bytes, io.Error>.Ok(out);
+        }
+        out.extend(one);
+        if (out.ends_with(delimiter)) {
+            return Result<bytes, io.Error>.Ok(out);
+        }
+    }
+    return Result<bytes, io.Error>.Ok(out);
+}
+
+pub Result<int, io.Error> ProcWire.write(bytes data) {
+    drain_errors();
+    return child.stdin.write(data);
+}
+
+/// Closes the child's pipes, ends it and reaps it. Idempotent.
+pub Result<bool, io.Error> ProcWire.close() {
+    if (is_closed) {
+        return Result<bool, io.Error>.Ok(true);
+    }
+    is_closed = true;
+    drain_errors();
+    Result<bool, io.Error> input_closed = child.stdin.close();
+    Result<bool, io.Error> output_closed = child.stdout.close();
+    Result<bool, io.Error> errors_closed = child.stderr.close();
+    Result<bool, proc.Error> signalled = child.kill(proc.SIGTERM);
+    Result<os.ExitStatus, proc.Error> reaped = child.wait();
+    return Result<bool, io.Error>.Ok(true);
+}
+
+pub Result<bool, net.Error> ProcWire.set_read_timeout(int timeout_milliseconds) {
+    if (timeout_milliseconds < 0) {
+        trap("ProcWire.set_read_timeout: a negative timeout");
+    }
+    timeout_ms = timeout_milliseconds;
+    return Result<bool, net.Error>.Ok(true);
+}
+
+/// Whether a read would find bytes (or the end) within `timeout_milliseconds`
+/// (negative: for ever).
+pub Result<bool, net.Error> ProcWire.wait(int timeout_milliseconds) {
+    return Result<bool, net.Error>.Ok(is_ready(timeout_milliseconds));
+}
+
+/// The descriptor of the child's standard output, which an event loop polls.
+pub int ProcWire.fileno() {
+    return child.stdout.fileno();
+}
+
+/// Runs the expanded `command` under `sh -c` and returns it as a `Wire`.
+pub Result<ProcWire, str> start_command(str command, str host, int port, str user) {
+    str text = expand(command, host, port, user);
+    match (proc.start(["sh", "-c", text])) {
+        case Ok(proc.Proc child): {
+            return Result<ProcWire, str>.Ok(ProcWire(child));
+        }
+        case Err(proc.Error error): {
+            return Result<ProcWire, str>.Err("could not run ProxyCommand: " + error.to_str());
         }
     }
 }

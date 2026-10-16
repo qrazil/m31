@@ -270,6 +270,40 @@ want = "".join("%d\n" % i for i in range(1, 1500001))
 ok("large output: 1.5M lines (about 10 MB) from the server", code == 0 and out == want, (code, len(out)))
 p = run(base("wc", "-c"), input=b"x" * 3000000, binary=True, timeout=120)
 ok("large input: 3 MB to `wc -c`", p.stdout.decode().strip() == "3000000", p.stdout)
+
+# ProxyCommand: the transport is a child process (a TCP relay in python3)
+RELAY = os.path.join(W, "relay.py")
+with open(RELAY, "w") as f:
+    f.write("""import socket, sys, threading, os
+s = socket.create_connection((sys.argv[1], int(sys.argv[2])))
+sys.stderr.write("relay-start %s\\n" % sys.argv[2]); sys.stderr.flush()
+def up():
+    while True:
+        d = os.read(0, 65536)
+        if not d:
+            break
+        s.sendall(d)
+    s.shutdown(socket.SHUT_WR)
+threading.Thread(target=up, daemon=True).start()
+while True:
+    d = s.recv(65536)
+    if not d:
+        break
+    os.write(1, d)
+""")
+PROXY = "python3 -I %s %%h %%p" % RELAY
+code, out, err = run(base("-o", "ProxyCommand=" + PROXY, "echo", "viaproxy"))
+ok("ProxyCommand: exec through a child process, its stderr is passed on", code == 0 and out == "viaproxy\n" and "relay-start %d" % PORT in err, (code, out, err))
+code, out, err = run(base("-o", "ProxyCommand=" + PROXY, "sh", "-c", "'exit 7'"))
+ok("ProxyCommand: remote exit status still propagates", code == 7, (code, err))
+p = run(base("-o", "ProxyCommand=" + PROXY, "cat"), input=data, binary=True, timeout=120)
+ok("ProxyCommand: 6 MB through `cat` is intact", p.returncode == 0 and hashlib.sha256(p.stdout).digest() == hashlib.sha256(data).digest(), (p.returncode, len(p.stdout)))
+code, out, err = run(base("-o", "ProxyCommand=echo %h %p %r %% >&2; exec " + PROXY, "true"))
+ok("ProxyCommand: %h %p %r %% are expanded", code == 0 and "127.0.0.1 %d %s %%" % (PORT, USER) in err, (code, err))
+code, out, err = run(base("-o", "ProxyCommand=false", "true"))
+ok("ProxyCommand that exits at once: one clear error, 255", code == 255 and err.strip() != "", (code, err))
+code, out, err = run(base("-o", "ProxyCommand=none", "echo", "direct"))
+ok("ProxyCommand none: a direct connection", code == 0 and out == "direct\n", (code, err))
 code, out, err = run(base("cat"), input=b"piped\n")
 ok("stdin EOF reaches the remote command", code == 0 and out == "piped\n", (code, out, err))
 code, out, err = run(base("-n", "cat"))

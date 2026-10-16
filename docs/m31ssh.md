@@ -38,7 +38,7 @@ Options come from, in this order, the command line, then `~/.ssh/config` (or
 (accumulates; `~`, `%h %u %r %d %%` expand), `IdentitiesOnly`,
 `HashKnownHosts`, `StrictHostKeyChecking` (`yes`, `ask`, `accept-new`, `no`), `UserKnownHostsFile`,
 `ServerAliveInterval`, `ServerAliveCountMax`, `ConnectTimeout`, `RequestTTY`,
-`ProxyJump`, `LocalForward` and `RemoteForward`. `Include` is expanded in
+`ProxyJump`, `ProxyCommand` (`sh -c`, `%h %p %r %%`; the child's stderr is passed on; applies to the first hop), `LocalForward` and `RemoteForward`. `Include` is expanded in
 place (relative to `~/.ssh`, `~` and globs, lexical order, nested up to 16
 deep, a missing file is skipped). `Match` understands `all`, `host`,
 `originalhost`, `user` and `localuser` (comma-separated patterns, `!`

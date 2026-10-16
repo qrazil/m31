@@ -16,7 +16,8 @@
 //   HostName, User, Port, IdentityFile (all of them, in order),
 //   IdentitiesOnly, HashKnownHosts, StrictHostKeyChecking, UserKnownHostsFile,
 //   ServerAliveInterval, ServerAliveCountMax, ConnectTimeout, ProxyJump,
-//   LocalForward, RemoteForward, RequestTTY, ControlPath (parsed, ignored).
+//   LocalForward, RemoteForward, RequestTTY, ProxyCommand (the rest of the
+//   line, as written; `none` clears it), ControlPath (parsed, ignored).
 //
 // **The first value obtained for an option wins** (OpenSSH's rule, which is
 // why command-line options go first), except `IdentityFile`, `LocalForward`
@@ -56,6 +57,8 @@ pub type Settings {
     pub int server_alive_count_max;
     pub int connect_timeout;
     pub str proxy_jump;
+    /// ProxyCommand as written (the rest of the line), "" when not given or `none`.
+    pub str proxy_command;
     pub List<str> local_forwards;
     pub List<str> remote_forwards;
     pub str request_tty;
@@ -159,6 +162,20 @@ List<str> words_of(str line) {
     return words;
 }
 
+// What follows the keyword on a line, as written (quotes and all): the value
+// of options such as `ProxyCommand` whose argument is a whole command.
+str rest_of_line(str line) {
+    str text = line.trim();
+    int index = 0;
+    while (index < text.size() && text.byte_at(index) != 32 && text.byte_at(index) != 9 && text.byte_at(index) != 61) {
+        index = index + 1;
+    }
+    while (index < text.size() && (text.byte_at(index) == 32 || text.byte_at(index) == 9 || text.byte_at(index) == 61)) {
+        index = index + 1;
+    }
+    return text.substr(index, text.size());
+}
+
 str expand(str value, str host, str local_user, str remote_user, str home) {
     str out = "";
     int index = 0;
@@ -255,11 +272,12 @@ bool is_match_line_matching(List<str> criteria, str original_host, str current_h
 /// What applies to `host` given the configuration `config_text` (command-line
 /// `-o` lines first, then the file).
 pub Settings resolve(str config_text, str host, str local_user, str home) {
-    Settings settings = Settings(host, "", 0, [], false, "", "", -1, -1, -1, "", [], [], "", false, [], []);
+    Settings settings = Settings(host, "", 0, [], false, "", "", -1, -1, -1, "", "", [], [], "", false, [], []);
     bool has_host_name = false;
     bool has_user = false;
     bool has_identities_only = false;
     bool has_hash_known_hosts = false;
+    bool has_proxy_command = false;
     bool is_applicable = true;
     // The raw (unexpanded) values; expanded at the end, when HostName and
     // User are final.
@@ -373,6 +391,14 @@ pub Settings resolve(str config_text, str host, str local_user, str home) {
         } else if (key == "proxyjump") {
             if (settings.proxy_jump == "") {
                 settings.proxy_jump = value;
+            }
+        } else if (key == "proxycommand") {
+            if (!has_proxy_command) {
+                has_proxy_command = true;
+                str command = rest_of_line(line);
+                if (command.to_lower() != "none") {
+                    settings.proxy_command = command;
+                }
             }
         } else if (key == "localforward") {
             settings.local_forwards.push(words.slice(1, words.size()).join(" "));

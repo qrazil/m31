@@ -19,6 +19,7 @@
 //   pipe.read(n), .read_all(), .read_until(delim, limit)          the stream protocol
 //   pipe.write(b), .write_some(b), .close()
 //   pipe.set_deadline_ns(t)    reads and writes give up at monotonic time t
+//   pipe.fileno(), pipe.has_buffered()   to poll it alongside other descriptors
 //
 //   proc.Error                 enum: why a process could not be run or went wrong
 //   e.to_str(), proc.from_errno(n), proc.error_of(io_error)
@@ -283,6 +284,22 @@ pub type Pipe {
     int end = 0;
     // Monotonic nanoseconds after which a wait gives up; 0 waits for ever.
     int deadline_ns = 0;
+}
+
+/// The descriptor under this pipe (-1 once closed), for a caller that
+/// `poll`s several descriptors itself. Do not read or write it directly: the
+/// pipe keeps a buffer, see `has_buffered`.
+pub int Pipe.fileno() {
+    if (!is_live) {
+        return -1;
+    }
+    return descriptor;
+}
+
+/// Whether bytes have arrived and not been handed out yet: a poll on
+/// `fileno` does not see them, so a poller asks this first.
+pub bool Pipe.has_buffered() {
+    return is_live && position < end;
 }
 
 /// Give up on waiting for this pipe at monotonic time `when_ns`

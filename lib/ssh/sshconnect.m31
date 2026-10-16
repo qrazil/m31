@@ -822,11 +822,20 @@ Result<ssh.Transport, str> open_hop(ssh.Wire wire, Hop hop, str home, bool is_qu
     }
 }
 
-// Walks `hops`: TCP to the first, then each next hop over a direct-tcpip
-// channel on the previous one. Every hop's host key is checked against its
-// own `known_hosts` entry and every hop authenticates for itself.
-Result<ssh.Transport, str> establish(List<Hop> hops, str home, bool is_quiet, bool is_interactive) {
-    Hop first = hops[0];
+// The first hop's byte stream: a TCP connection, or the standard input and
+// output of its `ProxyCommand`.
+Result<ssh.Wire, str> first_wire(Hop first) {
+    if (first.settings.proxy_command != "") {
+        match (sshjump.start_command(first.settings.proxy_command, first.host_name, first.port, first.user)) {
+            case Err(str reason): {
+                return Result<ssh.Wire, str>.Err(reason);
+            }
+            case Ok(sshjump.ProcWire through_command): {
+                ssh.Wire wire = through_command;
+                return Result<ssh.Wire, str>.Ok(wire);
+            }
+        }
+    }
     int connect_ms = 0;
     if (first.settings.connect_timeout > 0) {
         connect_ms = first.settings.connect_timeout * 1000;
@@ -835,35 +844,44 @@ Result<ssh.Transport, str> establish(List<Hop> hops, str home, bool is_quiet, bo
     // thread of control and every wait for the network is a poll(2).
     match (net.connect_polled(first.host_name, first.port, timeout_ms: connect_ms)) {
         case Err(net.Error error): {
-            return Result<ssh.Transport, str>.Err("could not connect to " + display_name(first.host_name, first.port) + ": " + error.to_str());
+            return Result<ssh.Wire, str>.Err("could not connect to " + display_name(first.host_name, first.port) + ": " + error.to_str());
         }
         case Ok(net.Conn connection): {
             ssh.Wire wire = ssh.PollWire(connection);
-            int index = 0;
-            while (true) {
-                bool is_target = index == hops.size() - 1;
-                match (open_hop(wire, hops[index], home, is_quiet, is_interactive, is_target)) {
+            return Result<ssh.Wire, str>.Ok(wire);
+        }
+    }
+}
+
+// Walks `hops`: the first over TCP (or its ProxyCommand), then each next hop
+// over a direct-tcpip channel on the previous one. Every hop's host key is
+// checked against its own `known_hosts` entry and every hop authenticates
+// for itself.
+Result<ssh.Transport, str> establish(List<Hop> hops, str home, bool is_quiet, bool is_interactive) {
+    ssh.Wire wire = first_wire(hops[0])?;
+    int index = 0;
+    while (true) {
+        bool is_target = index == hops.size() - 1;
+        match (open_hop(wire, hops[index], home, is_quiet, is_interactive, is_target)) {
+            case Err(str reason): {
+                return Result<ssh.Transport, str>.Err(reason);
+            }
+            case Ok(ssh.Transport transport): {
+                if (is_target) {
+                    return Result<ssh.Transport, str>.Ok(transport);
+                }
+                Hop next = hops[index + 1];
+                match (sshjump.open(transport, next.host_name, next.port)) {
                     case Err(str reason): {
-                        return Result<ssh.Transport, str>.Err(reason);
+                        return Result<ssh.Transport, str>.Err("jump host " + hops[index].alias + " could not reach " + display_name(next.host_name, next.port) + ": " + reason);
                     }
-                    case Ok(ssh.Transport transport): {
-                        if (is_target) {
-                            return Result<ssh.Transport, str>.Ok(transport);
-                        }
-                        Hop next = hops[index + 1];
-                        match (sshjump.open(transport, next.host_name, next.port)) {
-                            case Err(str reason): {
-                                return Result<ssh.Transport, str>.Err("jump host " + hops[index].alias + " could not reach " + display_name(next.host_name, next.port) + ": " + reason);
-                            }
-                            case Ok(sshjump.ChannelWire through): {
-                                wire = through;
-                            }
-                        }
+                    case Ok(sshjump.ChannelWire through): {
+                        wire = through;
                     }
                 }
-                index = index + 1;
             }
         }
+        index = index + 1;
     }
 }
 
