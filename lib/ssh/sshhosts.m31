@@ -509,6 +509,80 @@ pub Removal remove(str text, str host, int port) {
     return Removal(kept.join("\n"), removed);
 }
 
+/// The 1-based line numbers of the entries that name `host`:`port` (what
+/// `ssh-keygen -F` finds): plain, `[host]:port`, hashed or a wildcard pattern.
+pub List<int> matching_lines(str text, str host, int port) {
+    str id = host_id(host, port);
+    List<int> found = [];
+    int number = 0;
+    for (str raw in text.split("\n")) {
+        number = number + 1;
+        str line = raw.trim();
+        if (line.size() == 0 || line.starts_with("#")) {
+            continue;
+        }
+        List<str> fields = fields_of(line);
+        int offset = 0;
+        if (fields[0].starts_with("@")) {
+            offset = 1;
+        }
+        if (fields.size() < offset + 3) {
+            continue;
+        }
+        if (is_entry_match(fields[offset].split(","), id)) {
+            found.push(number);
+        }
+    }
+    return found;
+}
+
+/// `known_hosts` text with every plain entry rewritten in the hashed form
+/// (`ssh-keygen -H`): `removed` is how many lines were hashed. A line that
+/// is already hashed, names a wildcard or negated pattern, or is malformed
+/// is kept byte for byte; a line naming several hosts becomes one hashed
+/// line per host; markers (`@revoked`, `@cert-authority`) are kept.
+pub Removal hash_entries(str text) {
+    List<str> out = [];
+    int hashed = 0;
+    random.System rng = random.system();
+    for (str raw in text.split("\n")) {
+        str line = raw.trim();
+        if (line.size() == 0 || line.starts_with("#")) {
+            out.push(raw);
+            continue;
+        }
+        List<str> fields = fields_of(line);
+        int offset = 0;
+        str marker = "";
+        if (fields[0].starts_with("@")) {
+            offset = 1;
+            marker = fields[0] + " ";
+        }
+        if (fields.size() < offset + 3 || fields[offset].starts_with("|")) {
+            out.push(raw);
+            continue;
+        }
+        bool is_plain = true;
+        for (str name in fields[offset].split(",")) {
+            if (name.contains("*") || name.contains("?") || name.contains("!")) {
+                is_plain = false;
+            }
+        }
+        if (!is_plain) {
+            out.push(raw);
+            continue;
+        }
+        str rest = fields.slice(offset + 1, fields.size()).join(" ");
+        for (str name in fields[offset].split(",")) {
+            bytes salt = rng.octets(20);
+            bytes mac = hmac_sha1(salt, name.to_bytes());
+            out.push(marker + HASH_PREFIX + base64.encode(salt) + "|" + base64.encode(mac) + " " + rest);
+            hashed = hashed + 1;
+        }
+    }
+    return Removal(out.join("\n"), hashed);
+}
+
 /// Appends `key` as the key for `host:port` to the `known_hosts` file at
 /// `path`: plain, or with `is_hashed` in OpenSSH's `HashKnownHosts` form. The
 /// file (and its directory, with the process umask's permissions) is created

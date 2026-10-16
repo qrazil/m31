@@ -9,7 +9,12 @@
 //   -l         the SHA-256 fingerprint of a private key file, a `.pub` file
 //              or the first key in a known_hosts file;
 //   -R host    removes a host's entries from known_hosts, keeping the old file
-//              as `known_hosts.old` (as ssh-keygen does).
+//              as `known_hosts.old` (as ssh-keygen does);
+//   -F host    finds a host's entries in known_hosts (exit 1 when there are none);
+//   -H         rewrites known_hosts with every plain host name hashed
+//              (`|1|salt|hash`), keeping the old file as `known_hosts.old`;
+//   -p         changes the passphrase (and with -C the comment) of an Ed25519
+//              private key file in place.
 //
 // A passphrase given with -N or -P is visible to other users in the process
 // list while the command runs: prefer the prompt. UNAUDITED.
@@ -32,7 +37,7 @@ import ssh.sshconnect;
 pub const str VERSION = "0.1.0";
 
 str usage() {
-    return "usage: m31ssh-keygen [-t ed25519] [-f file] [-N passphrase] [-C comment] [-a rounds] [-q]\n" + "       m31ssh-keygen -y [-f file] [-P passphrase]\n" + "       m31ssh-keygen -l [-f file]\n" + "       m31ssh-keygen -R host [-f known_hosts]\n" + "\n" + "m31ssh-keygen is UNAUDITED. It generates Ed25519 keys only; see docs/m31ssh.md.\n";
+    return "usage: m31ssh-keygen [-t ed25519] [-f file] [-N passphrase] [-C comment] [-a rounds] [-q]\n" + "       m31ssh-keygen -y [-f file] [-P passphrase]\n" + "       m31ssh-keygen -l [-f file]\n" + "       m31ssh-keygen -R host [-f known_hosts]\n" + "       m31ssh-keygen -F host [-f known_hosts]\n" + "       m31ssh-keygen -H [-f known_hosts]\n" + "       m31ssh-keygen -p [-f file] [-P old] [-N new] [-C comment] [-a rounds]\n" + "\n" + "m31ssh-keygen is UNAUDITED. It generates Ed25519 keys only; see docs/m31ssh.md.\n";
 }
 
 void fail_line(str message) {
@@ -215,6 +220,19 @@ Result<sshkey.PrivateKey, str> load_private(str path, str passphrase_option) {
     }
 }
 
+// The word after the last -R or -F, or "".
+str host_argument(List<str> arguments) {
+    str found = "";
+    int at = 0;
+    while (at + 1 < arguments.size()) {
+        if (arguments[at] == "-R" || arguments[at] == "-F") {
+            found = arguments[at + 1];
+        }
+        at = at + 1;
+    }
+    return found;
+}
+
 pub int start(List<str> argv) {
     List<str> arguments = [];
     if (argv.size() > 1) {
@@ -230,8 +248,11 @@ pub int start(List<str> argv) {
     bool has_comment = false;
     int rounds = 16;
     bool is_quiet = false;
-    str host = "";
     int index = 0;
+    // The host of -R / -F is picked out before the loop below: assigned
+    // inside it, the value was lost at the end of the iteration (compiler
+    // bug, see the report); this spelling does not trip it.
+    str host = host_argument(arguments);
     while (index < arguments.size()) {
         str word = arguments[index];
         if (word == "-V" || word == "--version") {
@@ -246,9 +267,13 @@ pub int start(List<str> argv) {
             mode = "public";
         } else if (word == "-l") {
             mode = "fingerprint";
+        } else if (word == "-H") {
+            mode = "hash";
+        } else if (word == "-p") {
+            mode = "passphrase";
         } else if (word == "-q") {
             is_quiet = true;
-        } else if (word == "-t" || word == "-f" || word == "-N" || word == "-P" || word == "-C" || word == "-a" || word == "-R") {
+        } else if (word == "-t" || word == "-f" || word == "-N" || word == "-P" || word == "-C" || word == "-a" || word == "-R" || word == "-F") {
             index = index + 1;
             if (index >= arguments.size()) {
                 fail_line("option " + word + " requires an argument");
@@ -282,9 +307,10 @@ pub int start(List<str> argv) {
                         return 1;
                     }
                 }
+            } else if (word == "-F") {
+                mode = "find";
             } else {
                 mode = "remove";
-                host = value;
             }
         } else {
             fail_line("unknown option " + word);
@@ -295,6 +321,18 @@ pub int start(List<str> argv) {
     }
     if (mode == "remove") {
         return run_remove(host, file);
+    }
+    if (mode == "find") {
+        return run_find(host, file);
+    }
+    if (mode == "hash") {
+        return run_hash(file);
+    }
+    if (mode == "passphrase") {
+        if (file == "") {
+            file = default_key_path();
+        }
+        return run_change_passphrase(file, old_passphrase, new_passphrase, has_new_passphrase, comment, has_comment, rounds);
     }
     if (mode == "public") {
         if (file == "") {
@@ -388,6 +426,223 @@ int run_fingerprint(str file) {
     }
     fail_line(file + ": not a key file");
     return 1;
+}
+
+// "host" or "[host]:port" as ssh-keygen takes it, and the known_hosts file
+// to look in (-f, else ~/.ssh/known_hosts).
+Result<str, str> host_and_port(str target, List<int> port_out) {
+    port_out.push(22);
+    if (target.starts_with("[") && target.contains("]:")) {
+        int bracket = 0;
+        match (target.index_of("]:")) {
+            case Some(int found): {
+                bracket = found;
+            }
+            case None: {
+            }
+        }
+        Option<int> parsed = target.substr(bracket + 2, target.size()).parse_int();
+        match (parsed) {
+            case Some(int number): {
+                port_out[0] = number;
+            }
+            case None: {
+                return Result<str, str>.Err("bad port in " + target);
+            }
+        }
+        return Result<str, str>.Ok(target.substr(1, bracket));
+    }
+    return Result<str, str>.Ok(target);
+}
+
+Result<str, str> known_hosts_path(str file) {
+    if (file != "") {
+        return Result<str, str>.Ok(file);
+    }
+    str home = sshconnect.home_directory();
+    if (home == "") {
+        return Result<str, str>.Err("HOME is not set; name the file with -f");
+    }
+    return Result<str, str>.Ok(home + "/.ssh/known_hosts");
+}
+
+int run_find(str host, str file) {
+    str path = "";
+    str name = "";
+    List<int> port = [];
+    match (known_hosts_path(file)) {
+        case Ok(str chosen): {
+            path = chosen;
+        }
+        case Err(str reason): {
+            fail_line(reason);
+            return 1;
+        }
+    }
+    match (host_and_port(host, port)) {
+        case Ok(str parsed): {
+            name = parsed;
+        }
+        case Err(str reason): {
+            fail_line(reason);
+            return 1;
+        }
+    }
+    str text = "";
+    match (read_text(path)) {
+        case Ok(str loaded): {
+            text = loaded;
+        }
+        case Err(str reason): {
+            fail_line(reason);
+            return 1;
+        }
+    }
+    List<str> lines = text.split("\n");
+    List<int> found = sshhosts.matching_lines(text, name, port[0]);
+    for (int number in found) {
+        // OpenSSH writes a space after the number; so does this, byte for byte.
+        print("# Host " + host + " found: line " + number.to_str() + " ");
+        print(lines[number - 1].trim());
+    }
+    if (found.size() == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+int run_hash(str file) {
+    str path = "";
+    match (known_hosts_path(file)) {
+        case Ok(str chosen): {
+            path = chosen;
+        }
+        case Err(str reason): {
+            fail_line(reason);
+            return 1;
+        }
+    }
+    str text = "";
+    match (read_text(path)) {
+        case Ok(str loaded): {
+            text = loaded;
+        }
+        case Err(str reason): {
+            fail_line(reason);
+            return 1;
+        }
+    }
+    sshhosts.Removal result = sshhosts.hash_entries(text);
+    if (result.removed == 0) {
+        print(path + " has no plain host names to hash");
+        return 0;
+    }
+    match (io.write(path + ".old", text)) {
+        case Ok(_): {
+        }
+        case Err(io.Error error): {
+            fail_line("cannot write " + path + ".old: " + error.to_str());
+            return 1;
+        }
+    }
+    match (io.write(path, result.text)) {
+        case Ok(_): {
+        }
+        case Err(io.Error error): {
+            fail_line("cannot write " + path + ": " + error.to_str());
+            return 1;
+        }
+    }
+    print(path + " updated.");
+    print("Original contents retained as " + path + ".old");
+    return 0;
+}
+
+int run_change_passphrase(str path, str old_passphrase, str new_text, bool has_new, str comment, bool has_comment, int rounds) {
+    if (path == "") {
+        fail_line("HOME is not set; name the file with -f");
+        return 1;
+    }
+    match (load_private(path, old_passphrase)) {
+        case Err(str reason): {
+            fail_line(reason);
+            return 1;
+        }
+        case Ok(sshkey.PrivateKey key): {
+            bytes passphrase = new_text.to_bytes();
+            if (!has_new) {
+                match (prompt("Enter new passphrase (empty for no passphrase): ")) {
+                    case Some(bytes first): {
+                        if (first.size() > 0) {
+                            match (prompt("Enter same passphrase again: ")) {
+                                case Some(bytes second): {
+                                    if (second != first) {
+                                        fail_line("passphrases do not match");
+                                        return 1;
+                                    }
+                                    passphrase = first;
+                                }
+                                case None: {
+                                    fail_line("cancelled");
+                                    return 1;
+                                }
+                            }
+                        }
+                    }
+                    case None: {
+                        fail_line("no new passphrase given (-N) and no terminal to ask on");
+                        return 1;
+                    }
+                }
+            }
+            if (passphrase.size() > 0 && passphrase.size() < 5) {
+                fail_line("passphrase too short: have 5 characters at least, or use none");
+                return 1;
+            }
+            str text_comment = key.comment;
+            if (has_comment) {
+                text_comment = comment;
+            }
+            match (key.encode(text_comment, passphrase, rounds)) {
+                case Err(sshkey.Error error): {
+                    fail_line(path + ": " + error.to_str() + " (only Ed25519 keys can be rewritten)");
+                    return 1;
+                }
+                case Ok(str file_text): {
+                    // Written beside the key and renamed over it, so a failure
+                    // never leaves a half-written private key.
+                    str temporary = path + ".m31new";
+                    match (io.open(temporary, mode: io.Mode.Write, perm: 0o600)) {
+                        case Err(io.Error error): {
+                            fail_line("cannot write " + temporary + ": " + error.to_str());
+                            return 1;
+                        }
+                        case Ok(io.File out): {
+                            match (out.write(file_text.to_bytes())) {
+                                case Ok(_): {
+                                }
+                                case Err(io.Error error): {
+                                    fail_line("cannot write " + temporary + ": " + error.to_str());
+                                    return 1;
+                                }
+                            }
+                            Result<bool, io.Error> finished = out.close();
+                        }
+                    }
+                    match (fs.rename(temporary, path)) {
+                        case Ok(_): {
+                        }
+                        case Err(io.Error error): {
+                            fail_line("cannot replace " + path + ": " + error.to_str());
+                            return 1;
+                        }
+                    }
+                    print("Your identification has been saved with the new passphrase.");
+                    return 0;
+                }
+            }
+        }
+    }
 }
 
 int run_remove(str host, str file) {

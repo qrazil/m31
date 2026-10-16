@@ -396,6 +396,15 @@ ok("recorded line has the right key", open(new_kh).read().split()[2] == open(HOS
 code, out, err = run(["-p", str(PORT), "-o", "UserKnownHostsFile=" + new_kh, "-o", "StrictHostKeyChecking=yes", "127.0.0.1", "echo", "again"])
 ok("a recorded host then passes strict checking", code == 0 and out == "again\n", (code, err))
 
+hashed_kh = os.path.join(W, "hashed_known_hosts")
+code, out, err = run(["-p", str(PORT), "-o", "UserKnownHostsFile=" + hashed_kh, "-o", "StrictHostKeyChecking=accept-new", "-o", "HashKnownHosts=yes", "127.0.0.1", "echo", "h"])
+text = open(hashed_kh).read() if os.path.exists(hashed_kh) else ""
+ok("HashKnownHosts=yes: the recorded name is hashed", code == 0 and text.startswith("|1|") and "127.0.0.1" not in text, (code, err, text))
+f = subprocess.run(["ssh-keygen", "-F", "[127.0.0.1]:%d" % PORT, "-f", hashed_kh], capture_output=True, text=True)
+ok("HashKnownHosts: OpenSSH's ssh-keygen -F finds the host in it", f.returncode == 0, (f.stdout, f.stderr))
+code, out, err = run(["-p", str(PORT), "-o", "UserKnownHostsFile=" + hashed_kh, "-o", "StrictHostKeyChecking=yes", "127.0.0.1", "echo", "again"])
+ok("HashKnownHosts: the hashed entry is then trusted", code == 0 and out == "again\n", (code, err))
+
 @scenario("tofu-accept")
 def _():
     kh = os.path.join(W, "tofu_accept")

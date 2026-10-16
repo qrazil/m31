@@ -71,4 +71,6 @@ sshconfig.Settings m5 = sshconfig.resolve("Host h\n  HostName real.example\nMatc
 checks = check(checks, m5.port == 4444, "Match host sees HostName once it is set");
 sshconfig.Settings m6 = sshconfig.resolve("Match canonical\n  Port 1\nMatch host\n  Port 2\n", "h", "me", "/h");
 checks = check(checks, m6.port == 0 && m6.ignored.size() == 2 && m6.ignored[0] == "match canonical" && m6.ignored[1] == "match host", "unsupported or incomplete Match: reported, not applied");
+sshconfig.Settings hashed = sshconfig.resolve("HashKnownHosts yes\nHashKnownHosts no\n", "h", "me", "/h");
+checks = check(checks, hashed.is_hash_known_hosts && hashed.errors.size() == 0, "HashKnownHosts: first value wins");
 print(checks.to_str() + " checks, 0 failures");

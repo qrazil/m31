@@ -190,6 +190,8 @@ type HostCheck {
     str policy;
     bool is_interactive;
     bool is_quiet;
+    /// HashKnownHosts: record a new host hashed.
+    bool is_hashed;
     sshhosts.KnownHosts hosts;
     /// Why the key was refused ("" while it has not been).
     str failure = "";
@@ -287,7 +289,7 @@ pub bool HostCheck.is_acceptable(ssh.HostKey key) {
             return false;
         }
     }
-    match (sshhosts.add(path, host, port, key, false)) {
+    match (sshhosts.add(path, host, port, key, is_hashed)) {
         case Ok(_): {
             if (!is_quiet) {
                 warn("permanently added '" + display_name(host, port) + "' (" + key_label(key) + ") to the list of known hosts.");
@@ -703,7 +705,7 @@ Result<HostCheck, str> check_for(Hop hop, str home, bool is_quiet, bool is_inter
     }
     match (sshhosts.parse(known_text)) {
         case Ok(sshhosts.KnownHosts loaded): {
-            return Result<HostCheck, str>.Ok(HostCheck(hop.host_name, hop.port, known_hosts_path, policy, is_interactive, is_quiet, loaded));
+            return Result<HostCheck, str>.Ok(HostCheck(hop.host_name, hop.port, known_hosts_path, policy, is_interactive, is_quiet, hop.settings.is_hash_known_hosts, loaded));
         }
         case Err(sshhosts.Error error): {
             return Result<HostCheck, str>.Err(known_hosts_path + ": " + error.to_str() + "; refusing to continue");

@@ -14,7 +14,7 @@
 // also how `-o` options are given: prepend them to the file's text), and
 //
 //   HostName, User, Port, IdentityFile (all of them, in order),
-//   IdentitiesOnly, StrictHostKeyChecking, UserKnownHostsFile,
+//   IdentitiesOnly, HashKnownHosts, StrictHostKeyChecking, UserKnownHostsFile,
 //   ServerAliveInterval, ServerAliveCountMax, ConnectTimeout, ProxyJump,
 //   LocalForward, RemoteForward, RequestTTY, ControlPath (parsed, ignored).
 //
@@ -59,6 +59,8 @@ pub type Settings {
     pub List<str> local_forwards;
     pub List<str> remote_forwards;
     pub str request_tty;
+    /// HashKnownHosts: a host recorded by the client is written hashed.
+    pub bool is_hash_known_hosts;
     pub List<str> ignored;
     pub List<str> errors;
 }
@@ -253,10 +255,11 @@ bool is_match_line_matching(List<str> criteria, str original_host, str current_h
 /// What applies to `host` given the configuration `config_text` (command-line
 /// `-o` lines first, then the file).
 pub Settings resolve(str config_text, str host, str local_user, str home) {
-    Settings settings = Settings(host, "", 0, [], false, "", "", -1, -1, -1, "", [], [], "", [], []);
+    Settings settings = Settings(host, "", 0, [], false, "", "", -1, -1, -1, "", [], [], "", false, [], []);
     bool has_host_name = false;
     bool has_user = false;
     bool has_identities_only = false;
+    bool has_hash_known_hosts = false;
     bool is_applicable = true;
     // The raw (unexpanded) values; expanded at the end, when HostName and
     // User are final.
@@ -327,6 +330,14 @@ pub Settings resolve(str config_text, str host, str local_user, str home) {
             } else if (!has_identities_only) {
                 has_identities_only = true;
                 settings.is_identities_only = parsed[0];
+            }
+        } else if (key == "hashknownhosts") {
+            List<bool> parsed = [];
+            if (!can_parse_yes_no(value, parsed)) {
+                settings.errors.push("line " + line_number.to_str() + ": HashKnownHosts must be yes or no");
+            } else if (!has_hash_known_hosts) {
+                has_hash_known_hosts = true;
+                settings.is_hash_known_hosts = parsed[0];
             }
         } else if (key == "stricthostkeychecking") {
             str lower = value.to_lower();

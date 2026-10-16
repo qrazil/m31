@@ -36,7 +36,7 @@ Options come from, in this order, the command line, then `~/.ssh/config` (or
 `-F`); **the first value obtained wins**. Understood keywords: `Host`
 (patterns with `*`, `?`, `!`), `HostName`, `User`, `Port`, `IdentityFile`
 (accumulates; `~`, `%h %u %r %d %%` expand), `IdentitiesOnly`,
-`StrictHostKeyChecking` (`yes`, `ask`, `accept-new`, `no`), `UserKnownHostsFile`,
+`HashKnownHosts`, `StrictHostKeyChecking` (`yes`, `ask`, `accept-new`, `no`), `UserKnownHostsFile`,
 `ServerAliveInterval`, `ServerAliveCountMax`, `ConnectTimeout`, `RequestTTY`,
 `ProxyJump`, `LocalForward` and `RemoteForward`. `Include` is expanded in
 place (relative to `~/.ssh`, `~` and globs, lexical order, nested up to 16
@@ -153,6 +153,9 @@ m31ssh-keygen [-t ed25519] [-f file] [-N passphrase] [-C comment] [-a rounds] [-
 m31ssh-keygen -y [-f file] [-P passphrase]      # public key from a private key
 m31ssh-keygen -l [-f file]                      # SHA-256 fingerprint
 m31ssh-keygen -R host [-f known_hosts]          # remove a host (keeps .old)
+m31ssh-keygen -F host [-f known_hosts]          # find a host (same output as ssh-keygen -F)
+m31ssh-keygen -H [-f known_hosts]               # hash every plain host name (keeps .old)
+m31ssh-keygen -p [-f file] [-P old] [-N new] [-C comment] [-a rounds]  # Ed25519 only
 ```
 
 * **SFTP version 3** (`lib/ssh/sshsftp.m31`): `stat lstat list mkdir rmdir
@@ -179,7 +182,7 @@ m31ssh-keygen -R host [-f known_hosts]          # remove a host (keeps .old)
   ed25519, ECDSA and RSA keys and on public-key and known_hosts files; `-R`
   removes plain, `[host]:port` and hashed entries and keeps the old file as
   `.old`. A passphrase given with `-N`/`-P` is visible in the process list:
-  prefer the prompt. RSA and ECDSA keys cannot be generated (no key
+  prefer the prompt. `-p` rewrites an Ed25519 key only (the library cannot serialise RSA or ECDSA private keys). RSA and ECDSA keys cannot be generated (no key
   generation for them: it needs prime generation, which is not here).
 
 ## Threat model

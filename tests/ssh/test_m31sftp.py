@@ -365,5 +365,46 @@ f1 = subprocess.run(["ssh-keygen", "-F", "hashme.example", "-f", kh3], capture_o
 f2 = subprocess.run(["ssh-keygen", "-F", "stay.example", "-f", kh3], capture_output=True, text=True)
 ok("keygen -R: a hashed entry is found and removed (checked with ssh-keygen -F)", code == 0 and f1.returncode != 0 and f2.returncode == 0, (code, out, f1.stdout, f2.stdout))
 
+# -F, -H (against ssh-keygen as the oracle), -p
+kh4 = os.path.join(W, "kh_find")
+with open(kh4, "w") as f:
+    f.write("# c\nfind.example,10.1.1.1 %s\n[find.example]:2200 %s\n*.wild.example %s\nother.example %s\n" % ((" ".join(k_ed),) * 4))
+for target in ["find.example", "[find.example]:2200", "10.1.1.1", "x.wild.example", "nothere.example"]:
+    mine = run(KEYGEN, ["-F", target, "-f", kh4])
+    ref = subprocess.run(["ssh-keygen", "-F", target, "-f", kh4], capture_output=True, text=True)
+    ok("keygen -F %s: same output and exit status as ssh-keygen -F" % target,
+       mine[0] == ref.returncode and mine[1] == ref.stdout, (mine, ref.stdout))
+kh5 = os.path.join(W, "kh_hash_all")
+with open(kh5, "w") as f:
+    f.write("# c\nhash.example,10.2.2.2 %s\n[hash.example]:2200 %s\n*.wild.example %s\n" % ((" ".join(k_ed),) * 3))
+before = open(kh5).read()
+code, out, err = run(KEYGEN, ["-H", "-f", kh5])
+after = open(kh5).read()
+ok("keygen -H: the old file is kept as .old", code == 0 and open(kh5 + ".old").read() == before, (code, err))
+ok("keygen -H: names are gone, the wildcard and the comment stay",
+   "hash.example" not in after and "10.2.2.2" not in after and "*.wild.example" in after and "# c" in after and after.count("|1|") == 3, after)
+for target in ["hash.example", "[hash.example]:2200", "10.2.2.2"]:
+    ref = subprocess.run(["ssh-keygen", "-F", target, "-f", kh5], capture_output=True, text=True)
+    mine = run(KEYGEN, ["-F", target, "-f", kh5])
+    ok("keygen -H: ssh-keygen -F finds %s in the hashed file, and so does -F" % target,
+       ref.returncode == 0 and mine[0] == 0 and mine[1] == ref.stdout, (ref.stdout, mine))
+gen_p = os.path.join(W, "pw_key")
+run(KEYGEN, ["-q", "-f", gen_p, "-N", "", "-C", "pw comment"])
+pub_before = subprocess.run(["ssh-keygen", "-y", "-f", gen_p], capture_output=True, text=True).stdout
+code, out, err = run(KEYGEN, ["-p", "-f", gen_p, "-N", "new pass phrase", "-a", "4"])
+ok("keygen -p: sets a passphrase", code == 0, (code, err))
+y = subprocess.run(["ssh-keygen", "-y", "-P", "new pass phrase", "-f", gen_p], capture_output=True, text=True)
+ok("keygen -p: OpenSSH decrypts the result and the public key is unchanged", y.returncode == 0 and y.stdout.split()[:2] == pub_before.split()[:2], (y.stdout, y.stderr))
+ok("keygen -p: the comment is kept and the mode is 0600", y.stdout.split()[2:] == ["pw", "comment"] and (os.stat(gen_p).st_mode & 0o777) == 0o600, (y.stdout, oct(os.stat(gen_p).st_mode)))
+code, out, err = run(KEYGEN, ["-p", "-f", gen_p, "-P", "wrong", "-N", ""])
+ok("keygen -p: a wrong old passphrase changes nothing", code == 1 and subprocess.run(["ssh-keygen", "-y", "-P", "new pass phrase", "-f", gen_p], capture_output=True).returncode == 0, (code, err))
+code, out, err = run(KEYGEN, ["-p", "-f", gen_p, "-P", "new pass phrase", "-N", "", "-C", "renamed"])
+y = subprocess.run(["ssh-keygen", "-y", "-P", "", "-f", gen_p], capture_output=True, text=True)
+ok("keygen -p: removes the passphrase and changes the comment", code == 0 and y.returncode == 0 and y.stdout.split()[2:] == ["renamed"], (code, y.stdout, y.stderr))
+rsa_p = os.path.join(W, "rsa_p")
+keygen(rsa_p, ["-t", "rsa", "-b", "2048"])
+code, out, err = run(KEYGEN, ["-p", "-f", rsa_p, "-N", "abcdefg"])
+ok("keygen -p on an RSA key: refused clearly, file untouched", code == 1 and "Ed25519" in err, (code, err))
+
 print("%d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)

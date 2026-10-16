@@ -628,6 +628,17 @@ bytes padded_section(bytes section, int block) {
     return out;
 }
 
+/// This key written again as an `openssh-key-v1` file, with `comment` and
+/// `passphrase` (empty: none) -- what `ssh-keygen -p` does. Only ed25519 keys
+/// can be written (`UnsupportedKeyType` for the others: the library cannot
+/// serialise ECDSA or RSA private keys).
+pub Result<str, Error> PrivateKey.encode(str comment_text, bytes passphrase, int rounds) {
+    if (algorithm != KEY_ED25519) {
+        return Result<str, Error>.Err(Error.UnsupportedKeyType);
+    }
+    return encode_ed25519(secret, comment_text, passphrase, rounds);
+}
+
 /// An `openssh-key-v1` file's text for the ed25519 key with `seed`
 /// (`ssh-keygen -t ed25519`'s format). With a non-empty `passphrase` the
 /// private section is encrypted with `aes256-ctr` and a bcrypt key derived
