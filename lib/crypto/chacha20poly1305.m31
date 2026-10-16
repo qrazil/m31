@@ -87,6 +87,16 @@
 
 import crypto.consttime;
 
+// The hardware kernels (docs/CRYPTO-ACCEL.md): `prim`s into runtime/crypto_glue.c.
+// A kernel runs only if the CPU has the instructions and `M31_CRYPTO_ACCEL` has
+// not switched it off (`__crypto_features` says which bits are set: 4 ChaCha20,
+// 8 Poly1305); otherwise the m31 code below does the work. Both give the same
+// bytes -- tests/cryptodiff runs the suite with and without.
+prim int __crypto_features();
+prim int __crypto_chacha20(bytes key, bytes iv, bytes data, bytes out, int off, int len);
+prim int __crypto_poly1305_blocks(bytes state, bytes data, int off, int count, int hibit);
+prim int __crypto_poly1305_finish(bytes state, bytes pad, bytes out);
+
 // --- speed notes (docs/CRYPTO-PERF.md) ----------------------------------------
 //
 // The emitted C pays for three things per operation: a call to the noinline
@@ -348,6 +358,31 @@ bytes block_bytes(Array<int> state) {
 // blocks are XORed word by word; only the last partial block goes octet by
 // octet.
 void chacha20_xor(Array<int> state, int counter, int wide, bytes data, int count, bytes out) {
+    // The kernel counts word 12 only, so a 64-bit counter that would carry into
+    // word 13 inside this call takes the portable path.
+    if (count > 0 && (__crypto_features() & 4) != 0 && (wide == 0 || (counter & 0xFFFF_FFFF) + blocks_for(count) <= 0x1_0000_0000)) {
+        bytes key = [0; 32];
+        bytes iv = [0; 16];
+        for (int i in 0 .. 8) {
+            int word = state[4 + i];
+            for (int j in 0 .. 4) {
+                key[4 * i + j] = word >> (8 * j) & 0xFF;
+            }
+        }
+        int counter_high = state[13];
+        if (wide == 1) {
+            counter_high = counter >> 32 & 0xFFFF_FFFF;
+        }
+        for (int j in 0 .. 4) {
+            iv[j] = counter >> (8 * j) & 0xFF;
+            iv[4 + j] = counter_high >> (8 * j) & 0xFF;
+            iv[8 + j] = state[14] >> (8 * j) & 0xFF;
+            iv[12 + j] = state[15] >> (8 * j) & 0xFF;
+        }
+        if (__crypto_chacha20(key, iv, data, out, 0, count) == 0) {
+            return;
+        }
+    }
     Array<int> stream = [0; 16];
     int position = 0;
     int block_index = counter;
@@ -471,7 +506,7 @@ pub bytes openssh_encrypt(bytes key, int counter, bytes nonce, bytes data) {
 // `k7`: `r` in the first four, clamped and split into limbs in one step (each
 // limb a shifted, masked read of the 128-bit number; the mask is also RFC 8439
 // §2.5.1's clamp for the bits it keeps), `s` in the last four.
-Array<int> poly_start(int k0, int k1, int k2, int k3, int k4, int k5, int k6, int k7) {
+Array<int> poly_limbs(int k0, int k1, int k2, int k3, int k4, int k5, int k6, int k7) {
     Array<int> p = [0; 18];
     int r1 = (k0 >> 26 | k1 << 6) & 0x03FF_FF03;
     int r2 = (k1 >> 20 | k2 << 12) & 0x03FF_C0FF;
@@ -493,6 +528,39 @@ Array<int> poly_start(int k0, int k1, int k2, int k3, int k4, int k5, int k6, in
     return p;
 }
 
+// A running Poly1305: the five-limb state above for the portable code, or the
+// kernel's 40-octet state (h as three 64-bit words, r as two) and the 16-octet
+// pad when a kernel will do the blocks. `hardware` says which.
+type Poly {
+    Array<int> limbs;
+    bytes packed;
+    bytes pad;
+    bool hardware;
+}
+
+// Eight bytes of `value`, little-endian, into `out` at `at`.
+void put64(bytes out, int at, int value) {
+    for (int j in 0 .. 8) {
+        out[at + j] = value >> (8 * j) & 0xFF;
+    }
+}
+
+// The `Poly` for the one-time key whose eight little-endian words are `k0` to `k7`.
+Poly poly_start(int k0, int k1, int k2, int k3, int k4, int k5, int k6, int k7) {
+    if ((__crypto_features() & 8) != 0) {
+        // r clamped (RFC 8439 §2.5.1) as two 64-bit words: the same masks as the
+        // limb version, applied to the 32-bit words.
+        bytes packed = [0; 40];
+        put64(packed, 24, (k0 & 0x0FFF_FFFF) | ((k1 & 0x0FFF_FFFC) << 32));
+        put64(packed, 32, (k2 & 0x0FFF_FFFC) | ((k3 & 0x0FFF_FFFC) << 32));
+        bytes pad = [0; 16];
+        put64(pad, 0, k4 | (k5 << 32));
+        put64(pad, 8, k6 | (k7 << 32));
+        return Poly([0; 1], packed, pad, true);
+    }
+    return Poly(poly_limbs(k0, k1, k2, k3, k4, k5, k6, k7), [0; 1], [0; 1], false);
+}
+
 // `block_count` whole 16-octet blocks of `data` from `start`, folded into the
 // accumulator in `p` and reduced back into (nearly) five 26-bit limbs. `hibit`
 // is `1 << 24` for a full block (the implicit 2^128 that RFC 8439 §2.5.1's
@@ -500,7 +568,7 @@ Array<int> poly_start(int k0, int k1, int k2, int k3, int k4, int k5, int k6, in
 // bare `mac`, where the trailing `0x01` the caller already wrote stands for
 // it. The accumulator is left slightly above five 26-bit limbs when the final
 // carry itself overflows a limb, which `poly_finish`'s own full carry accounts for.
-void poly_blocks(Array<int> p, bytes data, int start, int block_count, int hibit) {
+void poly_blocks_limbs(Array<int> p, bytes data, int start, int block_count, int hibit) {
     int h0 = p[0];
     int h1 = p[1];
     int h2 = p[2];
@@ -565,12 +633,29 @@ void poly_blocks(Array<int> p, bytes data, int start, int block_count, int hibit
     p[4] = h4;
 }
 
+// `block_count` whole blocks, by the kernel or by `poly_blocks_limbs`.
+void poly_blocks(Poly poly, bytes data, int start, int block_count, int hibit) {
+    if (poly.hardware) {
+        if (block_count > 0) {
+            int high = 0;
+            if (hibit != 0) {
+                high = 1;
+            }
+            if (__crypto_poly1305_blocks(poly.packed, data, start, block_count, high) != 0) {
+                trap("poly1305: kernel refused after being offered");
+            }
+        }
+    } else {
+        poly_blocks_limbs(poly.limbs, data, start, block_count, hibit);
+    }
+}
+
 // `data[start .. end)` folded in: whole blocks straight from `data`, a last
 // partial block copied into a zeroed 16-octet buffer. `terminated` is 1 for a
 // bare `mac` (RFC 8439 §2.5.1: a `0x01` octet after the message, no implicit
 // high bit) and 0 for the AEAD's segments (§2.8: zero padding to 16, then
 // every block, the padded one included, carries the high bit).
-void poly_feed(Array<int> p, bytes data, int start, int end, int terminated) {
+void poly_feed(Poly p, bytes data, int start, int end, int terminated) {
     int whole = (end - start) / 16;
     poly_blocks(p, data, start, whole, 1 << 24);
     int taken = start + whole * 16;
@@ -590,7 +675,15 @@ void poly_feed(Array<int> p, bytes data, int start, int end, int terminated) {
 
 // The 16-octet tag: the full carry `poly_blocks` leaves undone, the final
 // reduction mod 2^130 - 5, then (h + s) mod 2^128.
-bytes poly_finish(Array<int> p) {
+bytes poly_finish(Poly poly) {
+    if (poly.hardware) {
+        bytes tag = [0; 16];
+        if (__crypto_poly1305_finish(poly.packed, poly.pad, tag) != 0) {
+            trap("poly1305: kernel refused after being offered");
+        }
+        return tag;
+    }
+    Array<int> p = poly.limbs;
     int h0 = p[0];
     int h1 = p[1];
     int h2 = p[2];
@@ -681,7 +774,7 @@ pub bytes mac(bytes key, bytes message) {
     if (key.size() != 32) {
         trap("poly1305: key must be 32 bytes");
     }
-    Array<int> p = poly_start(word_le(key, 0), word_le(key, 4), word_le(key, 8), word_le(key, 12), word_le(key, 16), word_le(key, 20), word_le(key, 24), word_le(key, 28));
+    Poly p = poly_start(word_le(key, 0), word_le(key, 4), word_le(key, 8), word_le(key, 12), word_le(key, 16), word_le(key, 20), word_le(key, 24), word_le(key, 28));
     poly_feed(p, message, 0, message.size(), 1);
     return poly_finish(p);
 }
@@ -720,11 +813,11 @@ pub str Error.to_str() {
 // one-time key from block 0 of `state`, then RFC 8439 §2.8's `mac_data` fed
 // segment by segment (`aad`, padded to 16; the ciphertext, padded to 16; the
 // two lengths, 8 octets each) instead of being copied into one buffer first.
-Array<int> aead_state(Array<int> state, bytes aad, bytes ciphertext, int ciphertext_length) {
+Poly aead_state(Array<int> state, bytes aad, bytes ciphertext, int ciphertext_length) {
     Array<int> words = [0; 16];
     state[12] = 0;
     chacha20_rounds(state, words);
-    Array<int> p = poly_start(words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7]);
+    Poly p = poly_start(words[0], words[1], words[2], words[3], words[4], words[5], words[6], words[7]);
     poly_feed(p, aad, 0, aad.size(), 0);
     poly_feed(p, ciphertext, 0, ciphertext_length, 0);
     bytes lengths = [0; 16];
@@ -750,7 +843,7 @@ pub bytes seal(bytes key, bytes nonce, bytes plaintext, bytes aad) {
     Array<int> state = ietf_state(key, nonce);
     bytes out = [0; length + 16];
     chacha20_xor(state, 1, 0, plaintext, length, out);
-    Array<int> p = aead_state(state, aad, out, length);
+    Poly p = aead_state(state, aad, out, length);
     bytes tag = poly_finish(p);
     for (int i in 0 .. 16) {
         out[length + i] = tag[i];
@@ -769,7 +862,7 @@ pub Result<bytes, Error> open(bytes key, bytes nonce, bytes sealed, bytes aad) {
     }
     int length = sealed.size() - 16;
     Array<int> state = ietf_state(key, nonce);
-    Array<int> p = aead_state(state, aad, sealed, length);
+    Poly p = aead_state(state, aad, sealed, length);
     bytes want = poly_finish(p);
     if (!consttime.is_equal(want, sealed.substr(length, sealed.size()))) {
         return Result<bytes, Error>.Err(Error.Tag);

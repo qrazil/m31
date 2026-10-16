@@ -586,6 +586,19 @@ static inline void rt_index_set_at(Obj *o, int64_t ptr, int64_t len, int64_t i, 
     ((int64_t *)(intptr_t)ptr)[i] = v;
 }
 
+/* The hardware crypto kernels' `prim`s (runtime/crypto_glue.c). Each returns
+ * 0 when it ran and -1 when this CPU has no kernel for it. */
+int64_t rt_crypto_features(void);
+int64_t rt_crypto_aes_ecb(Obj *rk, int64_t rounds, Obj *in, Obj *out, int64_t off, int64_t n);
+int64_t rt_crypto_aes_ctr(Obj *rk, int64_t rounds, Obj *ctr, Obj *in, Obj *out, int64_t off, int64_t n);
+int64_t rt_crypto_ghash(Obj *h, Obj *acc, Obj *data, int64_t off, int64_t n);
+int64_t rt_crypto_chacha20(Obj *key, Obj *iv, Obj *in, Obj *out, int64_t off, int64_t len);
+int64_t rt_crypto_poly1305_blocks(Obj *st, Obj *data, int64_t off, int64_t n, int64_t hibit);
+int64_t rt_crypto_poly1305_finish(Obj *st, Obj *pad, Obj *out);
+int64_t rt_crypto_sha256(Obj *state, Obj *data, int64_t off, int64_t n);
+int64_t rt_crypto_sha512(Obj *state, Obj *data, int64_t off, int64_t n);
+int64_t rt_crypto_sha1(Obj *state, Obj *data, int64_t off, int64_t n);
+
 void    rt_list_push(Obj *o, int64_t v);
 Obj    *rt_seq_clone(Obj *o);         /* shallow copy of an array or list */
 Obj    *rt_seq_slice(Obj *o, int64_t from, int64_t to);  /* the same, of a range */

@@ -2991,6 +2991,10 @@ static void range_ok(int64_t size, int64_t off, int64_t n, const char *who) {
     if (off < 0 || n < 0 || off > size || n > size - off) rt_trap(who);
 }
 
+/* The hardware crypto kernels' C side: feature detection and argument
+ * unpacking (runtime/crypto_glue.c). Needs range_ok, above. */
+#include "crypto_glue.c"
+
 int64_t rt_open(Obj *path, int64_t flags, int64_t mode) {
     if (!path_ok(path)) return -SYS_EINVAL;
     return sys_open(((Str *)path)->data, flags, mode);

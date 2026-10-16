@@ -5,7 +5,10 @@
 # 0, 1 and every side of the 16/64/128-byte block boundaries; AEAD cases also
 # round-trip and reject a flipped tag in-process.
 #
-#   bash tests/cryptodiff/test.sh
+#   bash tests/cryptodiff/test.sh                       # accelerated kernels where the CPU has them
+#   M31_CRYPTO_ACCEL=off bash tests/cryptodiff/test.sh  # the portable m31 code only
+#   M31_RUN_PREFIX='qemu-x86_64-static -cpu max -L /' bash tests/cryptodiff/test.sh
+#                                                       # run under an emulated CPU with SHA-NI etc.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 . ./runtime/arch.sh
@@ -17,7 +20,7 @@ python3 tests/cryptodiff/oracle.py want <"$WORK/cases" >"$WORK/want" || { echo "
 ./target/debug/m31c --emit-c tests/cryptodiff/t_diff.m31 -o "$WORK/t.c" || { echo "FAIL compile"; exit 1; }
 cc -O2 -Wall -Wextra -I runtime -pthread -o "$WORK/t" "$WORK/t.c" \
     runtime/rt.c runtime/scheduler.c "$RT_REACTOR_C" "$RT_CTX_ASM" 2>"$WORK/cc.err" || { echo "FAIL cc"; head "$WORK/cc.err"; exit 1; }
-"$WORK/t" <"$WORK/cases" >"$WORK/got" 2>"$WORK/err"
+${M31_RUN_PREFIX:-} "$WORK/t" <"$WORK/cases" >"$WORK/got" 2>"$WORK/err"
 rc=$?
 if [ $rc -ne 0 ]; then
     echo "FAIL t_diff exited $rc"; tail -3 "$WORK/err"; exit 1
