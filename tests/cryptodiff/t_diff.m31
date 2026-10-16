@@ -1,0 +1,146 @@
+// Differential driver for the speed-sensitive primitives: reads one case per
+// line from stdin, `OP SIZE_A SIZE_B SEED`, builds the inputs from a
+// deterministic generator (the same one oracle.py has), and prints the
+// result as hex. `test.sh` compares every line with hashlib, `cryptography`
+// (OpenSSL) and PyNaCl, so nothing here is checked against itself.
+//
+//   sha1|sha256|sha384|sha512 N _ S   digest of N bytes
+//   hmac256 K M S                     HMAC-SHA256, key of K bytes, message of M
+//   hkdf256 N L S                     extract(salt 16, ikm N) then expand(info 7, L)
+//   chacha N C S                      ChaCha20 (RFC 8439), N bytes, block counter C
+//   poly N _ S                        Poly1305 tag over N bytes
+//   ccp N A S                         ChaCha20-Poly1305 seal; open must round trip
+//   gcm N A S                         AES-256-GCM seal (A = aad size), open must round trip
+//   gcm128 N A S                      the same with a 16-byte key
+//   aesblock _ _ S                    one AES-256 block
+//   aesblock128 _ _ S                 one AES-128 block
+import io;
+import crypto.sha1digest;
+import crypto.sha256;
+import crypto.sha512;
+import crypto.hmac;
+import crypto.hkdf;
+import crypto.chacha20poly1305;
+import crypto.aes;
+import crypto.aesgcm;
+
+// 64-bit LCG, the low byte of the high half of each step.
+bytes gen(int count, int seed) {
+    bytes out = [];
+    int state = seed;
+    for (int i in 0 .. count) {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        out.push(state >> 33 & 0xFF);
+    }
+    return out;
+}
+
+str read_input() {
+    match (io.stdin().read_all()) {
+        case Ok(bytes data): {
+            match (data.utf8()) {
+                case Some(str text): {
+                    return text;
+                }
+                case None: {
+                    trap("input is not text");
+                }
+            }
+        }
+        case Err(_): {
+            trap("cannot read stdin");
+        }
+    }
+}
+
+str run_case(str op, int a, int b, int seed) {
+    bytes key = gen(32, seed + 1);
+    bytes nonce = gen(12, seed + 2);
+    if (op == "sha1") {
+        return sha1digest.hex(gen(a, seed));
+    }
+    if (op == "sha256") {
+        return sha256.hex(gen(a, seed));
+    }
+    if (op == "sha384") {
+        return sha512.hex384(gen(a, seed));
+    }
+    if (op == "sha512") {
+        return sha512.hex(gen(a, seed));
+    }
+    if (op == "hmac256") {
+        return hmac.sha256_hex(gen(a, seed + 3), gen(b, seed));
+    }
+    if (op == "hkdf256") {
+        bytes prk = hkdf.sha256_extract(gen(16, seed + 4), gen(a, seed));
+        return hkdf.sha256_expand(prk, gen(7, seed + 5), b).hex();
+    }
+    if (op == "chacha") {
+        return chacha20poly1305.encrypt(key, b, nonce, gen(a, seed)).hex();
+    }
+    if (op == "poly") {
+        return chacha20poly1305.mac(key, gen(a, seed)).hex();
+    }
+    if (op == "ccp") {
+        bytes plain = gen(a, seed);
+        bytes aad = gen(b, seed + 6);
+        bytes sealed = chacha20poly1305.seal(key, nonce, plain, aad);
+        match (chacha20poly1305.open(key, nonce, sealed, aad)) {
+            case Ok(bytes opened): {
+                if (opened != plain) {
+                    trap("ccp round trip differs");
+                }
+            }
+            case Err(_): {
+                trap("ccp open failed");
+            }
+        }
+        if (sealed.size() > 0) {
+            bytes bad = clone(sealed);
+            bad[bad.size() - 1] = bad[bad.size() - 1] ^ 1;
+            if (chacha20poly1305.open(key, nonce, bad, aad).is_ok()) {
+                trap("ccp accepted a forged tag");
+            }
+        }
+        return sealed.hex();
+    }
+    if (op == "gcm" || op == "gcm128") {
+        bytes gkey = key;
+        if (op == "gcm128") {
+            gkey = key.substr(0, 16);
+        }
+        bytes plain = gen(a, seed);
+        bytes aad = gen(b, seed + 6);
+        bytes sealed = aesgcm.seal(gkey, nonce, plain, aad);
+        match (aesgcm.open(gkey, nonce, sealed, aad)) {
+            case Ok(bytes opened): {
+                if (opened != plain) {
+                    trap("gcm round trip differs");
+                }
+            }
+            case Err(_): {
+                trap("gcm open failed");
+            }
+        }
+        bytes bad = clone(sealed);
+        bad[bad.size() - 1] = bad[bad.size() - 1] ^ 1;
+        if (aesgcm.open(gkey, nonce, bad, aad).is_ok()) {
+            trap("gcm accepted a forged tag");
+        }
+        return sealed.hex();
+    }
+    if (op == "aesblock") {
+        return aes.cipher(key).encrypt_block(gen(16, seed)).hex();
+    }
+    if (op == "aesblock128") {
+        return aes.cipher(key.substr(0, 16)).encrypt_block(gen(16, seed)).hex();
+    }
+    trap("unknown op " + op);
+}
+
+for (str line in read_input().split("\n")) {
+    if (line.trim() != "") {
+        List<str> field = line.split(" ");
+        print(run_case(field[0], field[1].parse_int().or(0), field[2].parse_int().or(0), field[3].parse_int().or(0)));
+    }
+}

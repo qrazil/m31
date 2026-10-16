@@ -1,0 +1,287 @@
+// One micro-benchmark per run: `bench OP SIZE ITERS [HEX...]`.
+// Prints `RESULT OP SIZE ITERS TOTAL_NS` on stdout. `run.py` drives it.
+// Inputs are deterministic filler bytes; only timing matters here, the
+// correctness checks live in tests/crypto25519 and tests/ssh.
+import os;
+import timer;
+import encoding.hexcodec;
+import crypto.sha1digest;
+import crypto.sha256;
+import crypto.sha512;
+import crypto.hmac;
+import crypto.hkdf;
+import crypto.chacha20poly1305;
+import crypto.aes;
+import crypto.aesgcm;
+import crypto.x25519;
+import crypto.ed25519;
+import crypto.ecdsa;
+import crypto.ecdsasign;
+import crypto.rsa;
+import crypto.rsasign;
+import crypto.bcryptpbkdf;
+
+bytes filler(int count, int salt) {
+    bytes out = [];
+    for (int i in 0 .. count) {
+        out.push(i * 7 + salt & 0xFF);
+    }
+    return out;
+}
+
+bytes unhex(str text) {
+    match (hexcodec.decode(text)) {
+        case Ok(bytes value): {
+            return value;
+        }
+        case Err(_): {
+            trap("bad hex");
+        }
+    }
+}
+
+List<str> args = os.arguments();
+str op = args[1];
+int size = args[2].parse_int().or(0);
+int iters = args[3].parse_int().or(1);
+bytes data = filler(size, 13);
+bytes key = filler(32, 1);
+bytes key16 = filler(16, 1);
+bytes nonce = filler(12, 5);
+bytes aad = filler(16, 9);
+bytes ed_msg = filler(32, 3);
+int sunk = 0;
+
+void emit(str op_name, int size, int count, int elapsed, int sunk) {
+    print("RESULT " + op_name + " " + size.to_str() + " " + count.to_str() + " " + elapsed.to_str() + " " + sunk.to_str());
+}
+
+int t0 = 0;
+if (op == "sha1") {
+    t0 = timer.monotonic_ns();
+    for (int i in 0 .. iters) {
+        sunk = sunk + sha1digest.sum(data)[0];
+    }
+    emit(op, size, iters, timer.monotonic_ns() - t0, sunk);
+} else if (op == "sha256") {
+    t0 = timer.monotonic_ns();
+    for (int i in 0 .. iters) {
+        sunk = sunk + sha256.sum(data)[0];
+    }
+    emit(op, size, iters, timer.monotonic_ns() - t0, sunk);
+} else if (op == "sha512") {
+    t0 = timer.monotonic_ns();
+    for (int i in 0 .. iters) {
+        sunk = sunk + sha512.sum(data)[0];
+    }
+    emit(op, size, iters, timer.monotonic_ns() - t0, sunk);
+} else if (op == "hmac-sha256") {
+    t0 = timer.monotonic_ns();
+    for (int i in 0 .. iters) {
+        sunk = sunk + hmac.sha256_mac(key, data)[0];
+    }
+    emit(op, size, iters, timer.monotonic_ns() - t0, sunk);
+} else if (op == "hkdf") {
+    // extract + expand to 64 bytes: the TLS/SSH-sized unit of work
+    t0 = timer.monotonic_ns();
+    for (int i in 0 .. iters) {
+        bytes prk = hkdf.sha256_extract(key, data);
+        sunk = sunk + hkdf.sha256_expand(prk, aad, 64)[0];
+    }
+    emit(op, size, iters, timer.monotonic_ns() - t0, sunk);
+} else if (op == "chacha20") {
+    t0 = timer.monotonic_ns();
+    for (int i in 0 .. iters) {
+        sunk = sunk + chacha20poly1305.encrypt(key, 1, nonce, data)[0];
+    }
+    emit(op, size, iters, timer.monotonic_ns() - t0, sunk);
+} else if (op == "poly1305") {
+    t0 = timer.monotonic_ns();
+    for (int i in 0 .. iters) {
+        sunk = sunk + chacha20poly1305.mac(key, data)[0];
+    }
+    emit(op, size, iters, timer.monotonic_ns() - t0, sunk);
+} else if (op == "chacha20-poly1305-seal") {
+    t0 = timer.monotonic_ns();
+    for (int i in 0 .. iters) {
+        sunk = sunk + chacha20poly1305.seal(key, nonce, data, aad)[0];
+    }
+    emit(op, size, iters, timer.monotonic_ns() - t0, sunk);
+} else if (op == "chacha20-poly1305-open") {
+    bytes sealed = chacha20poly1305.seal(key, nonce, data, aad);
+    t0 = timer.monotonic_ns();
+    for (int i in 0 .. iters) {
+        match (chacha20poly1305.open(key, nonce, sealed, aad)) {
+            case Ok(bytes plain): {
+                sunk = sunk + plain.size();
+            }
+            case Err(_): {
+                trap("open failed");
+            }
+        }
+    }
+    emit(op, size, iters, timer.monotonic_ns() - t0, sunk);
+} else if (op == "aes-ecb-block") {
+    bytes block = filler(16, 2);
+    aes.Cipher cipher = aes.cipher(key);
+    t0 = timer.monotonic_ns();
+    for (int i in 0 .. iters) {
+        sunk = sunk + cipher.encrypt_block(block)[0];
+    }
+    emit(op, size, iters, timer.monotonic_ns() - t0, sunk);
+} else if (op == "aes-gcm-seal") {
+    t0 = timer.monotonic_ns();
+    for (int i in 0 .. iters) {
+        sunk = sunk + aesgcm.seal(key, nonce, data, aad)[0];
+    }
+    emit(op, size, iters, timer.monotonic_ns() - t0, sunk);
+} else if (op == "aes-gcm-open") {
+    bytes sealed = aesgcm.seal(key, nonce, data, aad);
+    t0 = timer.monotonic_ns();
+    for (int i in 0 .. iters) {
+        match (aesgcm.open(key, nonce, sealed, aad)) {
+            case Ok(bytes plain): {
+                sunk = sunk + plain.size();
+            }
+            case Err(_): {
+                trap("open failed");
+            }
+        }
+    }
+    emit(op, size, iters, timer.monotonic_ns() - t0, sunk);
+} else if (op == "x25519") {
+    t0 = timer.monotonic_ns();
+    for (int i in 0 .. iters) {
+        sunk = sunk + x25519.base_point(key)[0];
+    }
+    emit(op, size, iters, timer.monotonic_ns() - t0, sunk);
+} else if (op == "ed25519-keygen") {
+    t0 = timer.monotonic_ns();
+    for (int i in 0 .. iters) {
+        sunk = sunk + ed25519.public_key(key)[0];
+    }
+    emit(op, size, iters, timer.monotonic_ns() - t0, sunk);
+} else if (op == "ed25519-sign") {
+    t0 = timer.monotonic_ns();
+    for (int i in 0 .. iters) {
+        sunk = sunk + ed25519.sign(key, ed_msg)[0];
+    }
+    emit(op, size, iters, timer.monotonic_ns() - t0, sunk);
+} else if (op == "ed25519-verify") {
+    bytes pub_key = ed25519.public_key(key);
+    bytes sig = ed25519.sign(key, ed_msg);
+    t0 = timer.monotonic_ns();
+    for (int i in 0 .. iters) {
+        if (!ed25519.is_valid_signature(pub_key, ed_msg, sig)) {
+            trap("verify failed");
+        }
+    }
+    emit(op, size, iters, timer.monotonic_ns() - t0, sunk);
+} else if (op == "ecdsa-p256-sign" || op == "ecdsa-p256-verify") {
+    bytes secret = unhex(args[4]);
+    bytes digest = sha256.sum(ed_msg);
+    bytes pub_point = [];
+    match (ecdsasign.public_key(secret)) {
+        case Ok(bytes value): {
+            pub_point = value;
+        }
+        case Err(_): {
+            trap("bad secret");
+        }
+    }
+    bytes der = [];
+    match (ecdsasign.sign(secret, digest)) {
+        case Ok(bytes value): {
+            der = value;
+        }
+        case Err(_): {
+            trap("sign failed");
+        }
+    }
+    ecdsa.Curve curve = ecdsa.p256();
+    match (ecdsa.parse_public_key(curve, pub_point)) {
+        case None: {
+            trap("bad public point");
+        }
+        case Some(ecdsa.PublicKey pub_key): {
+            if (op == "ecdsa-p256-sign") {
+                t0 = timer.monotonic_ns();
+                for (int i in 0 .. iters) {
+                    match (ecdsasign.sign(secret, digest)) {
+                        case Ok(bytes value): {
+                            sunk = sunk + value[0];
+                        }
+                        case Err(_): {
+                            trap("sign failed");
+                        }
+                    }
+                }
+                emit(op, size, iters, timer.monotonic_ns() - t0, sunk);
+            } else {
+                t0 = timer.monotonic_ns();
+                for (int i in 0 .. iters) {
+                    if (!ecdsa.is_valid_der_signature(curve, pub_key, digest, der)) {
+                        trap("verify failed");
+                    }
+                }
+                emit(op, size, iters, timer.monotonic_ns() - t0, sunk);
+            }
+        }
+    }
+} else if (op == "rsa2048-sign" || op == "rsa2048-verify") {
+    bytes digest = sha256.sum(ed_msg);
+    match (rsasign.parse_private(unhex(args[4]), unhex(args[5]), unhex(args[6]), unhex(args[7]), unhex(args[8]), unhex(args[9]))) {
+        case None: {
+            trap("bad rsa key");
+        }
+        case Some(rsasign.SigningKey signing): {
+            bytes signature = [];
+            match (signing.sign_pkcs1_v15(rsa.Hash.Sha256, digest)) {
+                case Ok(bytes value): {
+                    signature = value;
+                }
+                case Err(_): {
+                    trap("rsa sign failed");
+                }
+            }
+            if (op == "rsa2048-sign") {
+                t0 = timer.monotonic_ns();
+                for (int i in 0 .. iters) {
+                    match (signing.sign_pkcs1_v15(rsa.Hash.Sha256, digest)) {
+                        case Ok(bytes value): {
+                            sunk = sunk + value[0];
+                        }
+                        case Err(_): {
+                            trap("rsa sign failed");
+                        }
+                    }
+                }
+                emit(op, size, iters, timer.monotonic_ns() - t0, sunk);
+            } else {
+                match (rsa.parse_public_key(unhex(args[4]), unhex(args[5]))) {
+                    case None: {
+                        trap("bad rsa public key");
+                    }
+                    case Some(rsa.PublicKey pub_key): {
+                        t0 = timer.monotonic_ns();
+                        for (int i in 0 .. iters) {
+                            if (!rsa.is_valid_pkcs1_v15_signature(pub_key, rsa.Hash.Sha256, digest, signature)) {
+                                trap("rsa verify failed");
+                            }
+                        }
+                        emit(op, size, iters, timer.monotonic_ns() - t0, sunk);
+                    }
+                }
+            }
+        }
+    }
+} else if (op == "bcrypt-pbkdf") {
+    // `size` is the rounds count; each iteration derives 48 bytes (aes256-ctr key+iv)
+    t0 = timer.monotonic_ns();
+    for (int i in 0 .. iters) {
+        sunk = sunk + bcryptpbkdf.derive(key, key16, size, 48)[0];
+    }
+    emit(op, size, iters, timer.monotonic_ns() - t0, sunk);
+} else {
+    trap("unknown op " + op);
+}
