@@ -1,7 +1,5 @@
 // Arithmetic in GF(2^255 - 19), the base field Curve25519 (RFC 7748) and
-// edwards25519 (RFC 8032) both share. Written from scratch for this
-// language, and shared by `x25519` and `y25519` -- er, `ed25519` -- the way
-// the one field belongs to both curves that use it.
+// edwards25519 (RFC 8032) both share. Shared by `x25519` and `ed25519`.
 //
 // This module is the SECURITY-CRITICAL core of both: every operation here
 // runs on secret data at some point (an X25519 ladder step, an Ed25519
@@ -9,239 +7,454 @@
 // something being constant-time says so, in a comment, at the line that
 // relies on it. Read that before changing anything below.
 //
-// --- representation: 16 limbs, radix 2^16 -----------------------------------
+// --- representation: 10 limbs, radix 2^25.5 -----------------------------------
 //
-// A field element is an `Array<int> of 16, value = sum(limb[i] * 2^(16*i))`.
-// 16*16 = 256 bits of capacity for a 255-bit prime -- deliberately uniform
-// (unlike the mixed 25.5-bit-per-limb layout some other Curve25519 code
-// uses), because a uniform radix needs no per-limb weight correction in the
-// multiply, which is one whole source of off-by-one bugs this does not have
-// to get right. It also means a 32-byte encoding is exactly two bytes per
-// limb, with no leftover bits to special-case.
+// A field element is an `Array<int>` of 10 signed limbs, value = sum of
+// `limb[i] * 2^e(i)` with e(i) = ceil(25.5 * i) (weights 2^0, 2^26, 2^51,
+// 2^77, 2^102, 2^128, 2^153, 2^179, 2^204, 2^230): even limbs carry 26 bits,
+// odd limbs 25. This is the layout of Bernstein et al.'s `ref10` and of
+// `curve25519-donna`'s 32-bit code: a product of two limbs is under 2^53 and
+// a whole column of ten of them, with the wrap-around factor 19 folded in,
+// stays under 2^61 -- inside `int`'s 2^63 trap threshold, so the
+// multiplication needs no 128-bit arithmetic. (An earlier version of this file
+// used 16 limbs of 16 bits: 256 partial products per multiplication instead of
+// 100, three allocating carry passes, and about 15 times the running time --
+// docs/CRYPTO-PERF.md.)
 //
-// Every function here returns a FULLY NORMALIZED element: every limb in
-// [0, 65535]. Nothing is ever left "lazily reduced" between calls, which
-// costs some carry passes but means every function's precondition on its
-// arguments is the same as its postcondition on its result -- one invariant,
-// checked nowhere because it is always true.
+// Every function returns a CARRIED element: limbs balanced around zero, each
+// within about 2^25 (even) or 2^24 (odd) in magnitude. `add` and `sub` carry
+// too, so there is one invariant -- every input and every output is carried --
+// and the bound on `mul`'s partial products below always holds.
 //
 // --- constant time: what this file promises, and how ------------------------
 //
-// The two operations a secret value ever goes through are the four basic
-// operations (+ - * squaring) and the carry chain that normalizes them. All
-// four of those must take the same time and touch the same memory whatever
-// the secret bits are. Concretely:
-//
 //   - No comparison, `if`, `while` condition or array index in this file
-//     ever depends on a field element's value. Every loop bound below is a
-//     fixed count (16, 31, 254, ...) known at compile time; every `Array`
-//     index is a loop counter, never a value read out of a limb.
+//     ever depends on a field element's value. Every loop bound is a fixed
+//     count; every `Array` index is a loop counter or a constant.
 //
-//   - **`>>` is NOT safe on a value that might be negative, and this is the
-//     one non-obvious fact this whole file is built around.** The runtime's
-//     `>>` (runtime/rt.h, `rt_ishr`) is
+//   - Carries are `(limb + half) >> width`: an ARITHMETIC right shift of a
+//     value that really can be negative. The runtime's `>>` (runtime/rt.h,
+//     `rt_ishr`) does the sign extension with arithmetic on the sign bit, not
+//     a branch (an earlier version of the runtime branched on the sign, which
+//     is why this module used to add a public bias before every shift; it no
+//     longer needs to). The shift counts are public constants.
 //
-//         a < 0 ? ~(~a >> n) : a >> n
+//   - `+ - *` on `int` trap on overflow (reference §6.1) via a branch on the
+//     CPU's overflow flag. That branch's OUTCOME never depends on secret
+//     data, because every bound in this file keeps every intermediate value
+//     far below 2^63 -- the check always takes the same "did not overflow"
+//     path, so it carries no information about which secret input it was.
 //
-//     which branches on the SIGN of `a`. That branch is invisible from
-//     inside this language -- `>>` looks like one operation -- but the
-//     emitted C is a real `a < 0 ? ... : ...`, and at -O0 (which this
-//     project's own gates require every emitted program to build clean
-//     under) that is an actual conditional branch, not a predication that
-//     disappears. If `a` is a field-element limb derived from a secret
-//     scalar, the branch taken depends on the secret. This file therefore
-//     NEVER calls `>>` on a value that is not first proven, by construction,
-//     to be non-negative -- see `carry_pass` and `sub_p_borrow` below, which
-//     add a fixed public bias before every `>>` for exactly this reason.
-//     Everywhere else, `>>` here is a public, compile-time-constant shift of
-//     16 -- the exact same operation, just proven safe first.
-//
-//   - `+ - *` on `int` trap on overflow (reference §6.1) via a
-//     branch on the CPU's overflow flag (runtime/rt.h, `rt_iadd` etc.). That
-//     branch's OUTCOME never depends on secret data here, because every
-//     bound in this file (see the size comments on `mul_raw`) keeps every
-//     intermediate value far below 2^63 -- the overflow check always takes
-//     the same "did not overflow" path, for every legal input, so it carries
-//     no information about which secret input it was. This is unlike the
-//     `>>` case above: there, the two branch outcomes are both reachable by
-//     design (a limb really can be negative or not); here, only one ever is.
-//
-//   - `& | ^ ~` never trap and compile to a plain, unconditional C operator
-//     (`rt_iand` etc., `static inline`, no branch of any kind) -- these are
-//     the operations `cselect` below is built from, and they are the only
-//     genuinely branch-free primitive this language offers.
+//   - `& | ^ ~` never trap and compile to plain unconditional operators --
+//     the operations `cselect` and `cswap` are built from.
 //
 // What this file does NOT independently verify: that gcc/clang, across every
-// version and -O level, actually emit branch-free machine code for the
-// overflow-checked add/sub/mul (`__builtin_*_overflow`) and for the masked
-// `cselect` pattern, rather than something that LOOKS branch-free in C but a
-// specific compiler turns back into a branch or a secret-dependent memory
-// access. That is a real, known-hard problem for constant-time C in general
-// (see the "report" this module ships with) and this file does the one thing
+// version and -O level, emit branch-free machine code for the overflow-checked
+// arithmetic and the masked `cselect` pattern. This file does the one thing
 // under its own control -- never write a branch, a comparison or an index
-// that a compiler would have to remove -- and no more than that.
+// that depends on a field element -- and no more than that.
 
 // --- construction and encoding ----------------------------------------------
 
 /// The additive identity.
 pub Array<int> zero() {
-    return [0; 16];
+    return [0; 10];
 }
 
 /// The multiplicative identity.
 pub Array<int> one() {
-    Array<int> out = [0; 16];
+    Array<int> out = [0; 10];
     out[0] = 1;
     return out;
 }
 
 /// The element `number` names, for the handful of small constants the curves need
 /// (486662's Montgomery `(A-2)/4`, the `2*d` of the twisted Edwards curve, ...).
-/// `number` must fit in 32 bits, which is every constant this module is ever
+/// `number` must be below 2^26, which is every constant this module is ever
 /// asked to build.
 pub Array<int> small(int number) {
-    Array<int> out = [0; 16];
-    out[0] = number & 0xFFFF;
-    out[1] = number >> 16 & 0xFFFF;
+    Array<int> out = [0; 10];
+    out[0] = number;
     return out;
 }
 
 /// The field element 32 little-endian octets encode, taken as a raw 256-bit
-/// load -- exactly two octets per limb, with NO masking of any bit.
+/// load with NO masking of any bit (the result is carried, so a value at or
+/// above p is accepted and simply represents itself mod p).
 ///
 /// Both RFC 7748 (the u-coordinate's top bit) and RFC 8032 (the sign bit
 /// riding on the y-coordinate's encoding) reserve the top bit of the last
 /// octet for something that is not field data; masking it off is the
-/// caller's job, on the raw bytes, before this function ever sees them --
-/// this function only knows how to load 256 bits into 16 limbs.
+/// caller's job, on the raw bytes, before this function ever sees them.
 pub Array<int> from_bytes(bytes encoded) {
-    Array<int> out = [0; 16];
-    for (int limb_index in 0 .. 16) {
-        out[limb_index] = encoded[2 * limb_index] | encoded[2 * limb_index + 1] << 8;
-    }
+    int h0 = (encoded[0] | (encoded[1] << 8) | (encoded[2] << 16) | (encoded[3] << 24) | (encoded[4] << 32)) >> 0 & 0x3ffffff;
+    int h1 = (encoded[3] | (encoded[4] << 8) | (encoded[5] << 16) | (encoded[6] << 24) | (encoded[7] << 32)) >> 2 & 0x1ffffff;
+    int h2 = (encoded[6] | (encoded[7] << 8) | (encoded[8] << 16) | (encoded[9] << 24) | (encoded[10] << 32)) >> 3 & 0x3ffffff;
+    int h3 = (encoded[9] | (encoded[10] << 8) | (encoded[11] << 16) | (encoded[12] << 24) | (encoded[13] << 32)) >> 5 & 0x1ffffff;
+    int h4 = (encoded[12] | (encoded[13] << 8) | (encoded[14] << 16) | (encoded[15] << 24) | (encoded[16] << 32)) >> 6 & 0x3ffffff;
+    int h5 = (encoded[16] | (encoded[17] << 8) | (encoded[18] << 16) | (encoded[19] << 24) | (encoded[20] << 32)) >> 0 & 0x1ffffff;
+    int h6 = (encoded[19] | (encoded[20] << 8) | (encoded[21] << 16) | (encoded[22] << 24) | (encoded[23] << 32)) >> 1 & 0x3ffffff;
+    int h7 = (encoded[22] | (encoded[23] << 8) | (encoded[24] << 16) | (encoded[25] << 24) | (encoded[26] << 32)) >> 3 & 0x1ffffff;
+    int h8 = (encoded[25] | (encoded[26] << 8) | (encoded[27] << 16) | (encoded[28] << 24) | (encoded[29] << 32)) >> 4 & 0x3ffffff;
+    int h9 = (encoded[28] | (encoded[29] << 8) | (encoded[30] << 16) | (encoded[31] << 24)) >> 6 & 0x3ffffff;
+    int c0 = (h0 + 33554432) >> 26;
+    h1 = h1 + c0;
+    h0 = h0 - (c0 << 26);
+    int c1 = (h4 + 33554432) >> 26;
+    h5 = h5 + c1;
+    h4 = h4 - (c1 << 26);
+    int c2 = (h1 + 16777216) >> 25;
+    h2 = h2 + c2;
+    h1 = h1 - (c2 << 25);
+    int c3 = (h5 + 16777216) >> 25;
+    h6 = h6 + c3;
+    h5 = h5 - (c3 << 25);
+    int c4 = (h2 + 33554432) >> 26;
+    h3 = h3 + c4;
+    h2 = h2 - (c4 << 26);
+    int c5 = (h6 + 33554432) >> 26;
+    h7 = h7 + c5;
+    h6 = h6 - (c5 << 26);
+    int c6 = (h3 + 16777216) >> 25;
+    h4 = h4 + c6;
+    h3 = h3 - (c6 << 25);
+    int c7 = (h7 + 16777216) >> 25;
+    h8 = h8 + c7;
+    h7 = h7 - (c7 << 25);
+    int c8 = (h4 + 33554432) >> 26;
+    h5 = h5 + c8;
+    h4 = h4 - (c8 << 26);
+    int c9 = (h8 + 33554432) >> 26;
+    h9 = h9 + c9;
+    h8 = h8 - (c9 << 26);
+    int c10 = (h9 + 16777216) >> 25;
+    h0 = h0 + 19 * c10;
+    h9 = h9 - (c10 << 25);
+    int c11 = (h0 + 33554432) >> 26;
+    h1 = h1 + c11;
+    h0 = h0 - (c11 << 26);
+    Array<int> out = [0; 10];
+    out[0] = h0;
+    out[1] = h1;
+    out[2] = h2;
+    out[3] = h3;
+    out[4] = h4;
+    out[5] = h5;
+    out[6] = h6;
+    out[7] = h7;
+    out[8] = h8;
+    out[9] = h9;
     return out;
 }
 
 /// `element`, canonically reduced to `[0, p)` and packed as 32 little-endian
-/// octets -- the encoding RFC 7748 and RFC 8032 both specify.
+/// octets -- the encoding RFC 7748 and RFC 8032 both specify. (ref10's
+/// `fe_tobytes`: find the quotient q in {0, 1} of the value by p with a chain
+/// of carries, add 19 * q, carry again and drop bit 255.)
 ///
 /// This runs on secret data (an X25519 shared secret, an Ed25519 nonce
-/// point) and its constant-time argument is `reduce_canonical`'s.
+/// point); its constant-time argument is the header's.
 pub bytes to_bytes(Array<int> element) {
-    Array<int> canonical = reduce_canonical(element);
+    int h0 = element[0];
+    int h1 = element[1];
+    int h2 = element[2];
+    int h3 = element[3];
+    int h4 = element[4];
+    int h5 = element[5];
+    int h6 = element[6];
+    int h7 = element[7];
+    int h8 = element[8];
+    int h9 = element[9];
+    int q = (19 * h9 + (1 << 24)) >> 25;
+    q = (h0 + q) >> 26;
+    q = (h1 + q) >> 25;
+    q = (h2 + q) >> 26;
+    q = (h3 + q) >> 25;
+    q = (h4 + q) >> 26;
+    q = (h5 + q) >> 25;
+    q = (h6 + q) >> 26;
+    q = (h7 + q) >> 25;
+    q = (h8 + q) >> 26;
+    q = (h9 + q) >> 25;
+    h0 = h0 + 19 * q;
+    int k0 = h0 >> 26;
+    h1 = h1 + k0;
+    h0 = h0 - (k0 << 26);
+    int k1 = h1 >> 25;
+    h2 = h2 + k1;
+    h1 = h1 - (k1 << 25);
+    int k2 = h2 >> 26;
+    h3 = h3 + k2;
+    h2 = h2 - (k2 << 26);
+    int k3 = h3 >> 25;
+    h4 = h4 + k3;
+    h3 = h3 - (k3 << 25);
+    int k4 = h4 >> 26;
+    h5 = h5 + k4;
+    h4 = h4 - (k4 << 26);
+    int k5 = h5 >> 25;
+    h6 = h6 + k5;
+    h5 = h5 - (k5 << 25);
+    int k6 = h6 >> 26;
+    h7 = h7 + k6;
+    h6 = h6 - (k6 << 26);
+    int k7 = h7 >> 25;
+    h8 = h8 + k7;
+    h7 = h7 - (k7 << 25);
+    int k8 = h8 >> 26;
+    h9 = h9 + k8;
+    h8 = h8 - (k8 << 26);
+    int k9 = h9 >> 25;
+    h9 = h9 - (k9 << 25);
+    Array<int> limbs = [h0, h1, h2, h3, h4, h5, h6, h7, h8, h9];
     bytes out = [0; 32];
-    for (int limb_index in 0 .. 16) {
-        out[2 * limb_index] = canonical[limb_index] & 0xFF;
-        out[2 * limb_index + 1] = canonical[limb_index] >> 8 & 0xFF;
-    }
-    return out;
-}
-
-// --- the carry chain: the one place every operation below bottoms out at ----
-
-// 2^256 = 2 * 2^255 = 2*(p + 19) = 2p + 38, so a carry OUT of limb 15
-// (weight 2^240, the top limb) by an amount `c` represents `c * 2^256`,
-// which is `c * 38 (mod p)`, folded back into limb 0.
-const int WRAP = 38;
-// A public bias, and its exact quotient by 2^16 -- both compile-time
-// constants, never secret. `BIAS` only has to exceed the largest magnitude
-// any limb this file ever builds could go negative by; measured, that is
-// under 2^17 (an elementwise subtraction of two normalized limbs). `BIAS` is
-// four billion, an enormous margin over that, chosen as a round power of two
-// so `BIAS_HI` is exact. Adding it to an already-huge NON-negative value (as
-// `mul_raw`'s output can be, up to roughly 2^42) changes nothing but the sign
-// safety margin -- it is still added unconditionally, every time, which is
-// the point: this file does not ask which case it is in.
-const int BIAS = 1 << 32;
-const int BIAS_HI = BIAS >> 16;
-
-// One left-to-right ripple carry over 16 limbs, folding a carry out of the
-// top back in at 38x. Every input limb may be any `int` at all -- negative,
-// or far above 2^16 -- and every output limb is in [0, 65535].
-//
-// CONSTANT TIME: `biased` is `fe[i] + BIAS`, which is positive for every
-// value this file ever calls it with (see `BIAS` above), so the `>>` below
-// always takes the branch for a non-negative operand, regardless of whether
-// `fe[i]` itself was negative, zero, or large -- the two cases this function
-// exists to handle are indistinguishable to the CPU that runs it.
-Array<int> carry_pass(Array<int> element) {
-    Array<int> out = clone(element);
-    for (int i in 0 .. 16) {
-        int biased = out[i] + BIAS;
-        int quotient = biased >> 16;
-        out[i] = biased - (quotient << 16);
-        int carry = quotient - BIAS_HI;
-        if (i < 15) {
-            out[i + 1] = out[i + 1] + carry;
-        } else {
-            out[0] = out[0] + WRAP * carry;
+    int accumulator = 0;
+    int bit_count = 0;
+    int position = 0;
+    for (int i in 0 .. 10) {
+        accumulator = accumulator | (limbs[i] << bit_count);
+        bit_count = bit_count + 26 - i % 2;
+        while (bit_count >= 8) {
+            out[position] = accumulator & 0xFF;
+            accumulator = accumulator >> 8;
+            bit_count = bit_count - 8;
+            position = position + 1;
         }
     }
+    out[31] = accumulator & 0xFF;
     return out;
-}
-
-// Three ripple-carry passes, always enough to bring every limb into
-// [0, 65535] from anything this module produces (verified by differential
-// testing against Python's arbitrary-precision arithmetic -- see the test
-// harness) -- the value it represents may still be a small multiple of `p`,
-// not yet the canonical representative; only `reduce_canonical` produces
-// that.
-Array<int> normalize(Array<int> element) {
-    Array<int> first_pass = carry_pass(element);
-    Array<int> second_pass = carry_pass(first_pass);
-    return carry_pass(second_pass);
 }
 
 // --- the four operations -----------------------------------------------------
 
+/// `left + right`, carried.
 pub Array<int> add(Array<int> left, Array<int> right) {
-    Array<int> out = [0; 16];
-    for (int i in 0 .. 16) {
-        out[i] = left[i] + right[i];
-    }
-    return normalize(out);
+    int h0 = left[0] + right[0];
+    int h1 = left[1] + right[1];
+    int h2 = left[2] + right[2];
+    int h3 = left[3] + right[3];
+    int h4 = left[4] + right[4];
+    int h5 = left[5] + right[5];
+    int h6 = left[6] + right[6];
+    int h7 = left[7] + right[7];
+    int h8 = left[8] + right[8];
+    int h9 = left[9] + right[9];
+    int c0 = (h0 + 33554432) >> 26;
+    h1 = h1 + c0;
+    h0 = h0 - (c0 << 26);
+    int c1 = (h4 + 33554432) >> 26;
+    h5 = h5 + c1;
+    h4 = h4 - (c1 << 26);
+    int c2 = (h1 + 16777216) >> 25;
+    h2 = h2 + c2;
+    h1 = h1 - (c2 << 25);
+    int c3 = (h5 + 16777216) >> 25;
+    h6 = h6 + c3;
+    h5 = h5 - (c3 << 25);
+    int c4 = (h2 + 33554432) >> 26;
+    h3 = h3 + c4;
+    h2 = h2 - (c4 << 26);
+    int c5 = (h6 + 33554432) >> 26;
+    h7 = h7 + c5;
+    h6 = h6 - (c5 << 26);
+    int c6 = (h3 + 16777216) >> 25;
+    h4 = h4 + c6;
+    h3 = h3 - (c6 << 25);
+    int c7 = (h7 + 16777216) >> 25;
+    h8 = h8 + c7;
+    h7 = h7 - (c7 << 25);
+    int c8 = (h4 + 33554432) >> 26;
+    h5 = h5 + c8;
+    h4 = h4 - (c8 << 26);
+    int c9 = (h8 + 33554432) >> 26;
+    h9 = h9 + c9;
+    h8 = h8 - (c9 << 26);
+    int c10 = (h9 + 16777216) >> 25;
+    h0 = h0 + 19 * c10;
+    h9 = h9 - (c10 << 25);
+    int c11 = (h0 + 33554432) >> 26;
+    h1 = h1 + c11;
+    h0 = h0 - (c11 << 26);
+    Array<int> out = [0; 10];
+    out[0] = h0;
+    out[1] = h1;
+    out[2] = h2;
+    out[3] = h3;
+    out[4] = h4;
+    out[5] = h5;
+    out[6] = h6;
+    out[7] = h7;
+    out[8] = h8;
+    out[9] = h9;
+    return out;
 }
 
+/// `left - right`, carried.
 pub Array<int> sub(Array<int> left, Array<int> right) {
-    Array<int> out = [0; 16];
-    for (int i in 0 .. 16) {
-        out[i] = left[i] - right[i];
-    }
-    return normalize(out);
+    int h0 = left[0] - right[0];
+    int h1 = left[1] - right[1];
+    int h2 = left[2] - right[2];
+    int h3 = left[3] - right[3];
+    int h4 = left[4] - right[4];
+    int h5 = left[5] - right[5];
+    int h6 = left[6] - right[6];
+    int h7 = left[7] - right[7];
+    int h8 = left[8] - right[8];
+    int h9 = left[9] - right[9];
+    int c0 = (h0 + 33554432) >> 26;
+    h1 = h1 + c0;
+    h0 = h0 - (c0 << 26);
+    int c1 = (h4 + 33554432) >> 26;
+    h5 = h5 + c1;
+    h4 = h4 - (c1 << 26);
+    int c2 = (h1 + 16777216) >> 25;
+    h2 = h2 + c2;
+    h1 = h1 - (c2 << 25);
+    int c3 = (h5 + 16777216) >> 25;
+    h6 = h6 + c3;
+    h5 = h5 - (c3 << 25);
+    int c4 = (h2 + 33554432) >> 26;
+    h3 = h3 + c4;
+    h2 = h2 - (c4 << 26);
+    int c5 = (h6 + 33554432) >> 26;
+    h7 = h7 + c5;
+    h6 = h6 - (c5 << 26);
+    int c6 = (h3 + 16777216) >> 25;
+    h4 = h4 + c6;
+    h3 = h3 - (c6 << 25);
+    int c7 = (h7 + 16777216) >> 25;
+    h8 = h8 + c7;
+    h7 = h7 - (c7 << 25);
+    int c8 = (h4 + 33554432) >> 26;
+    h5 = h5 + c8;
+    h4 = h4 - (c8 << 26);
+    int c9 = (h8 + 33554432) >> 26;
+    h9 = h9 + c9;
+    h8 = h8 - (c9 << 26);
+    int c10 = (h9 + 16777216) >> 25;
+    h0 = h0 + 19 * c10;
+    h9 = h9 - (c10 << 25);
+    int c11 = (h0 + 33554432) >> 26;
+    h1 = h1 + c11;
+    h0 = h0 - (c11 << 26);
+    Array<int> out = [0; 10];
+    out[0] = h0;
+    out[1] = h1;
+    out[2] = h2;
+    out[3] = h3;
+    out[4] = h4;
+    out[5] = h5;
+    out[6] = h6;
+    out[7] = h7;
+    out[8] = h8;
+    out[9] = h9;
+    return out;
 }
 
 pub Array<int> neg(Array<int> element) {
     return sub(zero(), element);
 }
 
-// The schoolbook convolution of two normalized elements (every input limb in
-// [0, 65535]), folded once at 38x, NOT yet carry-propagated.
-//
-// Size bound, checked by the differential tests and relied on by the
-// "overflow trap never fires on legal input" argument in the header: a term
-// `a[i]*b[j]` is at most (2^16-1)^2 < 2^32; up to 16 such terms land in one
-// `t[k]` before folding, so `t[k] < 2^36` going into the fold; the fold adds
-// `38 * t[k]` (< 2^42) into a `t[k-16]` that already held < 2^36, so every
-// entry handed to `normalize` is a non-negative value under 2^43 -- fifteen
-// bits of headroom below `int`'s trap threshold before it is even carried.
-Array<int> mul_raw(Array<int> left, Array<int> right) {
-    Array<int> product = [0; 31];
-    for (int i in 0 .. 16) {
-        int left_limb = left[i];
-        for (int j in 0 .. 16) {
-            product[i + j] = product[i + j] + left_limb * right[j];
-        }
-    }
-    int fold_index = 30;
-    while (fold_index > 15) {
-        product[fold_index - 16] = product[fold_index - 16] + WRAP * product[fold_index];
-        fold_index = fold_index - 1;
-    }
-    return product.slice(0, 16);
-}
-
+/// `left * right`, carried. Ten limbs by ten: each product `f_i * g_j` lands in
+/// limb `(i + j) % 10`, doubled when both `i` and `j` are odd (two half-bit
+/// radix steps make a whole bit: 2^e(i) * 2^e(j) = 2 * 2^e(i + j) there) and
+/// times 19 when `i + j >= 10` (2^255 = 19 mod p). Bound: carried inputs are
+/// at most 2^26 in magnitude, so `19 * g` is under 2^31, `2 * f` under 2^27, a
+/// product under 2^58, and a column of ten under 2^62 -- the overflow
+/// check cannot fire on any legal input.
 pub Array<int> mul(Array<int> left, Array<int> right) {
-    return normalize(mul_raw(left, right));
+    int f0 = left[0];
+    int f1 = left[1];
+    int f2 = left[2];
+    int f3 = left[3];
+    int f4 = left[4];
+    int f5 = left[5];
+    int f6 = left[6];
+    int f7 = left[7];
+    int f8 = left[8];
+    int f9 = left[9];
+    int g0 = right[0];
+    int g1 = right[1];
+    int g2 = right[2];
+    int g3 = right[3];
+    int g4 = right[4];
+    int g5 = right[5];
+    int g6 = right[6];
+    int g7 = right[7];
+    int g8 = right[8];
+    int g9 = right[9];
+    int f1_2 = 2 * f1;
+    int f3_2 = 2 * f3;
+    int f5_2 = 2 * f5;
+    int f7_2 = 2 * f7;
+    int f9_2 = 2 * f9;
+    int g1_19 = 19 * g1;
+    int g2_19 = 19 * g2;
+    int g3_19 = 19 * g3;
+    int g4_19 = 19 * g4;
+    int g5_19 = 19 * g5;
+    int g6_19 = 19 * g6;
+    int g7_19 = 19 * g7;
+    int g8_19 = 19 * g8;
+    int g9_19 = 19 * g9;
+    int h0 = f0 * g0 + f1_2 * g9_19 + f2 * g8_19 + f3_2 * g7_19 + f4 * g6_19 + f5_2 * g5_19 + f6 * g4_19 + f7_2 * g3_19 + f8 * g2_19 + f9_2 * g1_19;
+    int h1 = f0 * g1 + f1 * g0 + f2 * g9_19 + f3 * g8_19 + f4 * g7_19 + f5 * g6_19 + f6 * g5_19 + f7 * g4_19 + f8 * g3_19 + f9 * g2_19;
+    int h2 = f0 * g2 + f1_2 * g1 + f2 * g0 + f3_2 * g9_19 + f4 * g8_19 + f5_2 * g7_19 + f6 * g6_19 + f7_2 * g5_19 + f8 * g4_19 + f9_2 * g3_19;
+    int h3 = f0 * g3 + f1 * g2 + f2 * g1 + f3 * g0 + f4 * g9_19 + f5 * g8_19 + f6 * g7_19 + f7 * g6_19 + f8 * g5_19 + f9 * g4_19;
+    int h4 = f0 * g4 + f1_2 * g3 + f2 * g2 + f3_2 * g1 + f4 * g0 + f5_2 * g9_19 + f6 * g8_19 + f7_2 * g7_19 + f8 * g6_19 + f9_2 * g5_19;
+    int h5 = f0 * g5 + f1 * g4 + f2 * g3 + f3 * g2 + f4 * g1 + f5 * g0 + f6 * g9_19 + f7 * g8_19 + f8 * g7_19 + f9 * g6_19;
+    int h6 = f0 * g6 + f1_2 * g5 + f2 * g4 + f3_2 * g3 + f4 * g2 + f5_2 * g1 + f6 * g0 + f7_2 * g9_19 + f8 * g8_19 + f9_2 * g7_19;
+    int h7 = f0 * g7 + f1 * g6 + f2 * g5 + f3 * g4 + f4 * g3 + f5 * g2 + f6 * g1 + f7 * g0 + f8 * g9_19 + f9 * g8_19;
+    int h8 = f0 * g8 + f1_2 * g7 + f2 * g6 + f3_2 * g5 + f4 * g4 + f5_2 * g3 + f6 * g2 + f7_2 * g1 + f8 * g0 + f9_2 * g9_19;
+    int h9 = f0 * g9 + f1 * g8 + f2 * g7 + f3 * g6 + f4 * g5 + f5 * g4 + f6 * g3 + f7 * g2 + f8 * g1 + f9 * g0;
+    int c0 = (h0 + 33554432) >> 26;
+    h1 = h1 + c0;
+    h0 = h0 - (c0 << 26);
+    int c1 = (h4 + 33554432) >> 26;
+    h5 = h5 + c1;
+    h4 = h4 - (c1 << 26);
+    int c2 = (h1 + 16777216) >> 25;
+    h2 = h2 + c2;
+    h1 = h1 - (c2 << 25);
+    int c3 = (h5 + 16777216) >> 25;
+    h6 = h6 + c3;
+    h5 = h5 - (c3 << 25);
+    int c4 = (h2 + 33554432) >> 26;
+    h3 = h3 + c4;
+    h2 = h2 - (c4 << 26);
+    int c5 = (h6 + 33554432) >> 26;
+    h7 = h7 + c5;
+    h6 = h6 - (c5 << 26);
+    int c6 = (h3 + 16777216) >> 25;
+    h4 = h4 + c6;
+    h3 = h3 - (c6 << 25);
+    int c7 = (h7 + 16777216) >> 25;
+    h8 = h8 + c7;
+    h7 = h7 - (c7 << 25);
+    int c8 = (h4 + 33554432) >> 26;
+    h5 = h5 + c8;
+    h4 = h4 - (c8 << 26);
+    int c9 = (h8 + 33554432) >> 26;
+    h9 = h9 + c9;
+    h8 = h8 - (c9 << 26);
+    int c10 = (h9 + 16777216) >> 25;
+    h0 = h0 + 19 * c10;
+    h9 = h9 - (c10 << 25);
+    int c11 = (h0 + 33554432) >> 26;
+    h1 = h1 + c11;
+    h0 = h0 - (c11 << 26);
+    Array<int> out = [0; 10];
+    out[0] = h0;
+    out[1] = h1;
+    out[2] = h2;
+    out[3] = h3;
+    out[4] = h4;
+    out[5] = h5;
+    out[6] = h6;
+    out[7] = h7;
+    out[8] = h8;
+    out[9] = h9;
+    return out;
 }
 
 pub Array<int> square(Array<int> element) {
@@ -259,23 +472,20 @@ pub Array<int> sq2(Array<int> element) {
 // --- constant-time selection -------------------------------------------------
 
 /// `when_one` if `cond` is 1, `when_zero` if `cond` is 0 -- with no branch, for any two
-/// normalized elements. `cond` must be exactly 0 or 1; anything else is a
-/// bug in the caller (not checked, the way an out-of-range index is not
-/// re-checked by every caller of `Array` indexing).
+/// elements. `cond` must be exactly 0 or 1; anything else is a bug in the
+/// caller (not checked, the way an out-of-range index is not re-checked by
+/// every caller of `Array` indexing).
 ///
 /// CONSTANT TIME: `mask` is `0 - cond`, which is 0 or -1 (all 64 bits set,
 /// two's complement) -- `-` never traps here because 0-0 and 0-1 both fit
-/// trivially, so the overflow check inside `-` always takes its "no
-/// overflow" path regardless of which of the two secret values `cond` is.
-/// `&`, `|` and `^` (inside `~`, `wrapping_` needed nowhere) are the
-/// runtime's plain, unconditional bitwise operators (see the header): the
-/// whole selection is arithmetic on 64-bit patterns, never a read of `cond`
-/// by anything that could branch on it.
+/// trivially. `&`, `|` and `^` are the runtime's plain, unconditional bitwise
+/// operators: the whole selection is arithmetic on 64-bit patterns, never a
+/// read of `cond` by anything that could branch on it.
 pub Array<int> cselect(int cond, Array<int> when_one, Array<int> when_zero) {
     int mask = 0 - cond;
     int notmask = mask ^ -1;
-    Array<int> out = [0; 16];
-    for (int i in 0 .. 16) {
+    Array<int> out = [0; 10];
+    for (int i in 0 .. 10) {
         out[i] = when_one[i] & mask | when_zero[i] & notmask;
     }
     return out;
@@ -289,7 +499,7 @@ pub Array<int> cselect(int cond, Array<int> when_one, Array<int> when_zero) {
 pub void cswap(int cond, Array<int> first, Array<int> second) {
     int mask = 0 - cond;
     int notmask = mask ^ -1;
-    for (int i in 0 .. 16) {
+    for (int i in 0 .. 10) {
         int first_limb = first[i];
         int second_limb = second[i];
         first[i] = first_limb & notmask | second_limb & mask;
@@ -297,117 +507,56 @@ pub void cswap(int cond, Array<int> first, Array<int> second) {
     }
 }
 
-// --- canonical reduction: exactly two conditional subtractions --------------
-
-const Array<int> P_LIMBS = [
-    0xFFED, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF,
-    0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x7FFF
-];
-
-// A public bias for the borrow chain, sized the same way as `BIAS` above:
-// comfortably larger than the at-most-~2^17 magnitude a borrowing
-// subtraction of two normalized, canonical-range limbs can ever produce.
-const int SBIAS = 1 << 20;
-const int SBIAS_HI = SBIAS >> 16;
-
-// A pair with no other reason to be public: `v - p`'s 16-limb difference and
-// the borrow out of the top limb.
-type Borrowed {
-    Array<int> diff;
-    int borrow;
-}
-
-/// `v - p`, elementwise, with an explicit borrow chain -- NOT folded at 38x,
-/// because the question this answers is "was `element` below `p`", which the fold
-/// would hide. Returns the 16-limb difference and the final borrow: 1 means
-/// `v < p` (the difference is garbage, `v - p + 2^256`, and must be
-/// discarded); 0 means `v >= p` (the difference is the true `v - p`).
-///
-/// CONSTANT TIME: same technique as `carry_pass`. `difference` ranges over roughly
-/// [-65536, 65535] (two canonical-range limbs and a 0/1 borrow-in), so
-/// `dd + SBIAS` is always positive, and the `>>` below never branches on the
-/// secret sign of `difference` itself.
-Borrowed sub_p_borrow(Array<int> element) {
-    Array<int> out = [0; 16];
-    int borrow = 0;
-    for (int i in 0 .. 16) {
-        int difference = element[i] - P_LIMBS[i] - borrow;
-        int biased = difference + SBIAS;
-        int quotient = biased >> 16;
-        out[i] = biased - (quotient << 16);
-        borrow = SBIAS_HI - quotient;
-    }
-    return Borrowed(out, borrow);
-}
-
-// `element` is always the output of `normalize`, so every limb is in [0, 65535]
-// and the value it represents is under 2^256. Since 2*p = 2^256 - 38, that
-// value minus 2*p is at most (2^256-1) - (2^256-38) = 37 -- strictly less
-// than `p` -- so subtracting `p` twice, each time only if the subtraction
-// does not borrow, always lands in [0, p). No more, and no fewer, than two
-// subtractions are ever needed, so this is two fixed steps, not a loop
-// whose length could depend on the secret value.
-Array<int> reduce_canonical(Array<int> element) {
-    Array<int> reduced = element;
-    for (int step in 0 .. 2) {
-        Borrowed subtraction = sub_p_borrow(reduced);
-        reduced = cselect(1 - subtraction.borrow, subtraction.diff, reduced);
-    }
-    return reduced;
-}
-
-// --- inversion and the square-root helper: fixed exponents, by squaring ----
+// --- inversion and the square-root helper: fixed exponents ------------------
 //
-// Both exponents below are FIXED public constants (they name the field, not
-// any input), so unlike everything above, there would be nothing wrong with
-// a variable-length addition chain here -- the reason this uses a plain
-// square-and-multiply over every bit instead of a shorter, hand-picked chain
-// (as e.g. ref10's fe_invert.c does) is simply that a 255-bit loop with two
-// documented skipped positions is far easier to independently verify against
-// the exponent's own binary expansion than an addition chain is to check by
-// eye, and inversion is not called often enough for the difference to matter.
-//
-// `p - 2 = 2^255 - 21`. For any n-bit X, `(2^n - 1) - X == (2^n - 1) XOR X`
-// (subtracting X from all-ones borrows nowhere), so with X = 20 = 0b10100:
-// the 255-bit binary expansion of `p - 2` is 255 ones with bits 2 and 4
-// cleared. Square-and-multiply from the top bit (254, folded into the
-// initial value) down to bit 0 is 254 squarings, multiplying by the base at
-// every bit except 2 and 4.
+// Both exponents are FIXED public constants (they name the field, not any
+// input), so these are the classic ref10 addition chains: 254 squarings and 11
+// multiplications for `p - 2`, 251 squarings and 2 multiplications for
+// `(p - 5) / 8`. The chain is the same for every input.
 
-/// `a^(p-2) = a^-1` for any nonzero `element` (undefined, like any inverse, at
-/// zero -- callers that can see zero must decide what that means to them).
-pub Array<int> invert(Array<int> element) {
+// `element` squared `count` times (`count` is a public constant at every call).
+Array<int> square_times(Array<int> element, int count) {
     Array<int> power = element;
-    int bit = 253;
-    while (bit >= 0) {
+    for (int step in 0 .. count) {
         power = square(power);
-        if (bit != 2 && bit != 4) {
-            power = mul(power, element);
-        }
-        bit = bit - 1;
     }
     return power;
 }
 
-// `(p - 5) / 8 = 2^252 - 3`. With X = 2 = 0b10: the 252-bit expansion of
-// `(p-5)/8` is 252 ones with bit 1 cleared. 251 squarings below the initial
-// (implicit) top bit, multiplying at every bit except 1.
+// `element^(2^250 - 1)`, the stretch the two exponents below share, and
+// `element^11` on the side, in `Array<Array<int>>`'s two slots.
+Array<Array<int>> power_chain(Array<int> element) {
+    Array<int> z2 = square(element);
+    Array<int> z8 = square_times(z2, 2);
+    Array<int> z9 = mul(z8, element);
+    Array<int> z11 = mul(z9, z2);
+    Array<int> z22 = square(z11);
+    Array<int> z_5_0 = mul(z22, z9);
+    Array<int> z_10_0 = mul(square_times(z_5_0, 5), z_5_0);
+    Array<int> z_20_0 = mul(square_times(z_10_0, 10), z_10_0);
+    Array<int> z_40_0 = mul(square_times(z_20_0, 20), z_20_0);
+    Array<int> z_50_0 = mul(square_times(z_40_0, 10), z_10_0);
+    Array<int> z_100_0 = mul(square_times(z_50_0, 50), z_50_0);
+    Array<int> z_200_0 = mul(square_times(z_100_0, 100), z_100_0);
+    Array<int> z_250_0 = mul(square_times(z_200_0, 50), z_50_0);
+    Array<Array<int>> out = [z_250_0, z11];
+    return out;
+}
+
+/// `a^(p-2) = a^-1` for any nonzero `element` (undefined, like any inverse, at
+/// zero -- callers that can see zero must decide what that means to them).
+pub Array<int> invert(Array<int> element) {
+    Array<Array<int>> chain = power_chain(element);
+    return mul(square_times(chain[0], 5), chain[1]);
+}
 
 /// `a^((p-5)/8)` -- the candidate exponent RFC 8032 §5.1.3 uses to compute a
 /// square root mod p (since p = 5 mod 8): the caller still has to check the
 /// candidate and correct it by `sqrt(-1)` if needed, exactly as the RFC
 /// describes. Not a square root on its own.
 pub Array<int> pow_p_minus_5_over_8(Array<int> element) {
-    Array<int> power = element;
-    int bit = 250;
-    while (bit >= 0) {
-        power = square(power);
-        if (bit != 1) {
-            power = mul(power, element);
-        }
-        bit = bit - 1;
-    }
-    return power;
+    Array<Array<int>> chain = power_chain(element);
+    return mul(square_times(chain[0], 2), element);
 }
 
 // --- equality and parity -----------------------------------------------------
