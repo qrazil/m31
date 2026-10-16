@@ -7,6 +7,13 @@ SSHD = sys.argv[2]
 SCP = os.path.join(BINDIR, "m31scp")
 SFTP = os.path.join(BINDIR, "m31sftp")
 KEYGEN = os.path.join(BINDIR, "m31ssh-keygen")
+
+# The programs speak Oro's grammar (docs/cli-conventions.md); these tests are
+# written in OpenSSH's spelling and translated at the one place a program starts.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cli_spelling  # noqa: E402
+
+cli_spelling.install({SCP: cli_spelling.scp, SFTP: cli_spelling.sftp, KEYGEN: cli_spelling.keygen})
 SSH = os.path.join(BINDIR, "m31ssh")
 W = tempfile.mkdtemp(prefix="m31sftp-test-")
 HOME = os.path.join(W, "home")

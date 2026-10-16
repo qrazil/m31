@@ -103,8 +103,12 @@ a shell it does not know -> error: '--completions' needs bash, zsh or fish, and 
 no shell -> error: '--completions' needs a value and is the last argument
 true
 ---- migrate
+tool: warning: '-o' is deprecated, use '--out'
 --out x.txt
+tool: warning: '-p' is deprecated, use '--port'
 --port 22 -q
+tool: warning: '--output' is deprecated, use '--out'
 --out x --q
 --out keep
+tool: warning: '-p' is deprecated, use '--port'
 --port q

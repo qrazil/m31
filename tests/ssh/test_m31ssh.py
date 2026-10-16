@@ -8,6 +8,13 @@ import atexit, errno, fcntl, hashlib, os, pty, re, select, shutil, signal, socke
 import struct, subprocess, sys, tempfile, termios, threading, time
 
 BIN = sys.argv[1]
+
+# The programs speak Oro's grammar (docs/cli-conventions.md); these tests are
+# written in OpenSSH's spelling and translated at the one place a program starts.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cli_spelling  # noqa: E402
+
+cli_spelling.install({BIN: cli_spelling.ssh})
 SSHD = sys.argv[2]
 W = tempfile.mkdtemp(prefix="m31ssh-test-")
 HOME = os.path.join(W, "home")
